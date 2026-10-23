@@ -11,6 +11,26 @@
 //! When idle there is ZERO overhead: the SIGPROF handler exists only while a
 //! [`pprof::ProfilerGuard`] is alive (i.e. only during an active capture).
 
+// The panic set at deny outside test code (ADR-0051 §3).
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::string_slice,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
+
+mod fold;
+
 use std::time::Duration;
 
 /// Sample the current process for `seconds` at `freq` Hz and return a flamegraph
@@ -30,8 +50,17 @@ pub fn capture_svg(seconds: u64, freq: i32) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("profiler start failed (already running?): {e}"))?;
     std::thread::sleep(Duration::from_secs(seconds));
     let report = guard.report().build().map_err(|e| format!("report build failed: {e}"))?;
+    let lines: Vec<String> =
+        report.data.iter().map(|(frames, count)| fold::folded_line(frames, *count)).collect();
     let mut svg = Vec::new();
-    report.flamegraph(&mut svg).map_err(|e| format!("flamegraph render failed: {e}"))?;
+    if !lines.is_empty() {
+        inferno::flamegraph::from_lines(
+            &mut inferno::flamegraph::Options::default(),
+            lines.iter().map(String::as_str),
+            &mut svg,
+        )
+        .map_err(|e| format!("flamegraph render failed: {e}"))?;
+    }
     Ok(svg)
 }
 

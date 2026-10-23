@@ -3,6 +3,9 @@ use std::time::Duration;
 use crate::actor::*;
 use crate::{Harness, ANSWER_SDP, OFFER_SDP};
 
+/// The caller's first CSeq: its INVITE's.
+const C: u32 = crate::Party::Caller.first_cseq();
+
 /// A static-credential [`ChallengeResponder`] (the deferred seam's simplest
 /// implementation — real digest would hash the challenge). Returns a fixed
 /// credential for any challenge; records what it was asked so the auth-path
@@ -61,7 +64,7 @@ async fn actor_caller_retries_through_a_401_challenge() {
         use sip_message::header::HeaderName;
         let bob = bob_srv;
         let mut c = bob.try_receive("INVITE").await.unwrap();
-        assert_eq!(c.request().cseq().seq(), 1, "the first INVITE is CSeq 1");
+        assert_eq!(c.request().cseq().seq(), C, "the first INVITE is the caller's first CSeq");
         assert!(
             c.request().raw(HeaderName::Authorization).next().is_none(),
             "the first INVITE carries no credential",
@@ -73,10 +76,14 @@ async fn actor_caller_retries_through_a_401_challenge() {
             .unwrap();
         // The reactor auto-ACKs the 401 (§17.1.1.3) before the resend.
         let ack = bob.try_receive("ACK").await.unwrap();
-        assert_eq!(ack.request().cseq().seq(), 1, "the non-2xx ACK reuses the INVITE CSeq");
+        assert_eq!(ack.request().cseq().seq(), C, "the non-2xx ACK reuses the INVITE CSeq");
         // The authenticated resend: bumped CSeq + the responder's credential.
         let mut admit = bob.try_receive("INVITE").await.unwrap();
-        assert_eq!(admit.request().cseq().seq(), 2, "the retried INVITE bumps the CSeq (§22.2)");
+        assert_eq!(
+            admit.request().cseq().seq(),
+            C + 1,
+            "the retried INVITE bumps the CSeq (§22.2)"
+        );
         assert!(
             admit
                 .request()
@@ -206,7 +213,7 @@ async fn actor_caller_without_responder_classifies_401_unchanged() {
     let verdict =
         run_call_with(call, ObservedState::new(), &ctx, Duration::from_secs(5), None).await;
     match verdict {
-        CallVerdict::Failed(StepError::WrongStatus { who, expected, got, .. }) => {
+        CallVerdict::Failed(_, StepError::WrongStatus { who, expected, got, .. }) => {
             assert_eq!((who.as_str(), expected, got), ("alice", 180, 401));
         }
         other => panic!("expected WrongStatus{{who:alice, 180/401}}, got {other:?}"),

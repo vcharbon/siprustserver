@@ -2,9 +2,7 @@
  * The `run` command: point the driver at a campaign document and a run
  * directory, and the exit code is the verdict.
  *
- * The CLI is `effect/unstable/cli` — Effect v4's own home for what used to be
- * `@effect/cli`, the same move that put the platform services in core. There is
- * no 4.x `@effect/cli` to depend on.
+ * The CLI is `effect/unstable/cli`, Effect v4's own command-line module.
  *
  * The command carries no lane knowledge and no routing knowledge: a deployment
  * composes {@link LanePresets} and {@link RoutingCompiler} around it. That is

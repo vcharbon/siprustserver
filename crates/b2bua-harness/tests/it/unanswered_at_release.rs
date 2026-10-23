@@ -1,6 +1,6 @@
 //! A request whose handler ran and died before answering it: the call is
-//! torn down around it (ADR-0020), and once the call is released nothing
-//! will answer the request. A non-INVITE's server transaction is forgotten at
+//! torn down on the wire around it (ADR-0020, a BYE to each confirmed leg),
+//! and once the call is released nothing will answer the request. A non-INVITE's server transaction is forgotten at
 //! the release, so the peer's retransmission (RFC 3261 §17.1.2.2) reaches the
 //! router afresh and draws 481, instead of being absorbed until the peer's
 //! Timer F. A re-INVITE's 100 Trying stopped the peer's retransmissions, so
@@ -57,9 +57,9 @@ fn panic_on_info_rules() -> Vec<RuleDefinition> {
     )]
 }
 
-/// alice's INFO kills its handler; the reaper tears the call down and it is
-/// released with the INFO unanswered. alice's Timer E copy draws 481; both
-/// sides then close the dialog the B2BUA no longer holds.
+/// alice's INFO kills its handler; the reaper's BYEs end both dialogs and
+/// the call is released with the INFO unanswered. alice's Timer E copy then
+/// draws 481.
 #[tokio::test(start_paused = true)]
 async fn an_info_whose_handler_died_draws_481_on_its_retransmission_once_the_call_is_released() {
     let s = B2buaScene::with_b2bua("b2bua-info-unanswered-at-release", |bob_port| {
@@ -76,7 +76,6 @@ async fn an_info_whose_handler_died_draws_481_on_its_retransmission_once_the_cal
     call.expect(200).await;
     let mut dialog = call.ack().await;
     s.bob.receive("ACK").await;
-    let mut b_dialog = uas.dialog();
 
     let (mut info, info_req) = dialog
         .send_request(InDialogMethod::Info)
@@ -84,8 +83,10 @@ async fn an_info_whose_handler_died_draws_481_on_its_retransmission_once_the_cal
         .await
         .expect("the INFO leaves");
 
-    // The reaper's fatal-error verdict forces the call terminal; it sends
-    // no BYE (ADR-0020).
+    let mut a_bye = s.alice.try_receive("BYE").await.expect("the reaper sends alice a BYE");
+    let mut b_bye = s.bob.try_receive("BYE").await.expect("the reaper sends bob a BYE");
+    a_bye.respond(200, "OK").await;
+    b_bye.respond(200, "OK").await;
     settle_until(|| s.b2bua.is_reaped()).await;
     assert_eq!(s.b2bua.metrics().handler_panics_total(), 1);
     assert_eq!(s.b2bua.txn_metrics().released_unanswered_forgotten(), 1);
@@ -96,22 +97,15 @@ async fn an_info_whose_handler_died_draws_481_on_its_retransmission_once_the_cal
     info.try_expect(481)
         .await
         .expect("the retransmitted INFO reaches the orphan path, not a transaction absorbing it");
-
-    // Both sides close their dialogs; the B2BUA no longer holds them.
-    let mut a_bye = dialog.bye().await;
-    a_bye.expect(481).await;
-    let mut b_bye = b_dialog.bye().await;
-    b_bye.expect(481).await;
-    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }
 
 /// alice's re-INVITE kills its handler after the layer's 100 Trying stopped
-/// her retransmissions; the reaper tears the call down and it is released
-/// with the re-INVITE unanswered. The release answers it 481 through its
-/// server transaction: alice's ACK is absorbed there and the 481's Timer G
-/// copies stop. Both sides then close the dialog the B2BUA no longer holds.
+/// her retransmissions; the reaper's BYEs end both dialogs and the call is
+/// released with the re-INVITE unanswered. The release answers it 481
+/// through its server transaction: alice's ACK is absorbed there and the
+/// 481's Timer G copies stop.
 #[tokio::test(start_paused = true)]
 async fn a_reinvite_whose_handler_died_is_answered_481_when_the_call_is_released() {
     let s = B2buaScene::with_b2bua("b2bua-reinvite-unanswered-at-release", |bob_port| {
@@ -128,9 +122,13 @@ async fn a_reinvite_whose_handler_died_is_answered_481_when_the_call_is_released
     call.expect(200).await;
     let mut dialog = call.ack().await;
     s.bob.receive("ACK").await;
-    let mut b_dialog = uas.dialog();
 
     let mut reinvite = dialog.reinvite(Some(OFFER_SDP)).await;
+    reinvite.expect(100).await;
+    let mut a_bye = s.alice.try_receive("BYE").await.expect("the reaper sends alice a BYE");
+    let mut b_bye = s.bob.try_receive("BYE").await.expect("the reaper sends bob a BYE");
+    a_bye.respond(200, "OK").await;
+    b_bye.respond(200, "OK").await;
     settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
         .await;
     assert_eq!(s.b2bua.metrics().handler_panics_total(), 1);
@@ -151,13 +149,6 @@ async fn a_reinvite_whose_handler_died_is_answered_481_when_the_call_is_released
         }
     }
     assert_eq!(repeats, 0, "alice's ACK is absorbed by the 481's transaction");
-
-    let mut a_bye = dialog.bye().await;
-    a_bye.expect(481).await;
-    let mut b_bye = b_dialog.bye().await;
-    b_bye.expect(481).await;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }

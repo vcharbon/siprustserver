@@ -13,13 +13,14 @@
 use crate::common;
 use std::sync::Arc;
 
+use call::{TxnKind, TxnTimeoutKind};
 use common::*;
 use sip_message::generators::{
     generate_cancel, generate_response, GenerateResponseOpts, InviteClientTransactionHandle,
 };
 use sip_message::{SipMessage, SipRequest};
 use sip_txn::timers::{T4, TIMER_B, TIMER_D};
-use sip_txn::{IdGen, TimeoutKind, TransactionConfig, TransactionEvent, TxnKind};
+use sip_txn::{IdGen, TransactionConfig, TransactionEvent};
 
 const BOUND_MS: u64 = 40_000;
 /// The callee's Timer G repeats its 487 at 0.5, 1.5, 3.5, 7.5 s, then every
@@ -37,7 +38,7 @@ async fn stack() -> Stack {
             udp_queue_max: 64,
             id_gen: Arc::new(IdGen::seeded(0xC0FFEE)),
             invite_initial_timeout_ms: BOUND_MS,
-            ..Default::default()
+            ..common::config()
         },
     )
     .await
@@ -45,10 +46,10 @@ async fn stack() -> Stack {
 
 async fn inject_answer(stack: &Stack, req: &SipRequest, status: u16, reason: &str) {
     let opts = GenerateResponseOpts { to_tag: Some(CALLEE_TAG.to_string()), ..Default::default() };
-    stack.inject(generate_response(req, status, reason, &opts).image()).await;
+    stack.inject(generate_response(req, status, reason, &opts).unwrap().image()).await;
 }
 
-fn timeouts(events: &[TransactionEvent]) -> Vec<TimeoutKind> {
+fn timeouts(events: &[TransactionEvent]) -> Vec<TxnTimeoutKind> {
     events
         .iter()
         .filter_map(|e| match e {
@@ -80,6 +81,7 @@ fn handed_up_487s(events: &[TransactionEvent]) -> Vec<bool> {
 
 fn cancel_of(invite: &SipRequest) -> SipRequest {
     generate_cancel(&InviteClientTransactionHandle { original_invite: invite.clone() }, &[])
+        .unwrap()
 }
 
 /// The callee answers 200 to the CANCEL; its 487 and every Timer G copy but
@@ -122,7 +124,7 @@ async fn a_ringing_invite_holds_64_t1_from_a_cancel_sent_late_in_its_give_up_hol
     stack.txn.send_request(invite.clone(), addr(PEER), TxnKind::Invite).await.unwrap();
     inject_answer(&stack, &invite, 180, "Ringing").await;
     elapse_ms(BOUND_MS + 100).await;
-    assert_eq!(timeouts(&stack.drain_events()), vec![TimeoutKind::Transaction]);
+    assert_eq!(timeouts(&stack.drain_events()), vec![TxnTimeoutKind::Transaction]);
 
     elapse_ms(TIMER_B - 1_100).await;
     let cancel = cancel_of(&invite);
@@ -142,7 +144,7 @@ async fn an_unanswered_invite_holds_64_t1_from_a_cancel_a_late_provisional_relea
     let invite = outbound_request("INVITE", "z9hG4bK-late-cancel-silent");
     stack.txn.send_request(invite.clone(), addr(PEER), TxnKind::Invite).await.unwrap();
     elapse_ms(TIMER_B + 100).await;
-    assert_eq!(timeouts(&stack.drain_events()), vec![TimeoutKind::Response]);
+    assert_eq!(timeouts(&stack.drain_events()), vec![TxnTimeoutKind::Response]);
 
     let cancel = cancel_of(&invite);
     stack.txn.send_request(cancel.clone(), addr(PEER), TxnKind::Invite).await.unwrap();

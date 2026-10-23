@@ -8,20 +8,20 @@ use crate::common;
 use common::*;
 use std::sync::Arc;
 
+use call::TxnKind;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::{serialize, CustomParser, SipMessage, SipParser, SipRequest, SipResponse};
-use sip_txn::{
-    IdGen, InviteRefusals, TransactionConfig, TransactionEvent, TxnKind, TxnSeed, Verdict,
-};
+use sip_txn::{IdGen, InviteRefusals, TransactionConfig, TransactionEvent, TxnSeed, Verdict};
 
 /// A stateless refusal under a request-derived To-tag.
-fn refuse_503(req: &SipRequest) -> SipResponse {
+fn refuse_503(req: &SipRequest) -> Result<SipResponse, sip_message::generators::GenerateError> {
     generate_response(
         req,
         503,
         "Service Unavailable",
         &GenerateResponseOpts {
-            to_tag: Some(format!("refused-{}", req.call_id().as_str())),
+            // A tag is a token (RFC 3261 §25.1): the Call-ID's `@` stays out.
+            to_tag: Some(format!("refused-{}", req.call_id().as_str().replace('@', "."))),
             ..Default::default()
         },
     )
@@ -35,7 +35,7 @@ async fn sharing(refusals: &InviteRefusals) -> Stack {
         TransactionConfig {
             id_gen: Arc::new(IdGen::seeded(0xC0FFEE)),
             invite_refusals: Some(refusals.clone()),
-            ..Default::default()
+            ..common::config()
         },
     )
     .await
@@ -75,12 +75,12 @@ async fn a_copy_of_an_invite_refused_ahead_draws_that_refusal() {
     elapse_ms(50).await;
     let wire: Vec<Vec<u8>> =
         stack.drain_peer().into_iter().map(|m| serialize(&m)).collect::<Vec<_>>();
-    let expected = serialize(&SipMessage::Response(refusals.answer(&invite())));
+    let expected = serialize(&SipMessage::Response(refusals.answer(&invite()).unwrap()));
     assert_eq!(wire, [expected], "the same 503, and nothing else");
     assert_eq!(stack.txn.metrics().active_transactions(), 0);
     assert_eq!(delivered_invites(&stack.drain_events()), 0);
 
-    let ack = inbound_request("ACK", "z9hG4bK-shared", "shared@unit", Some("refused-shared@unit"));
+    let ack = inbound_request("ACK", "z9hG4bK-shared", "shared@unit", Some("refused-shared.unit"));
     stack.inject(&ack).await;
     elapse_ms(50).await;
     assert!(stack.drain_events().is_empty(), "the ACK to the refusal ends in the layer");
@@ -107,7 +107,8 @@ async fn an_admitted_invite_is_held_while_its_transaction_lives() {
         486,
         "Busy Here",
         &GenerateResponseOpts { to_tag: Some("uas-busy".into()), ..Default::default() },
-    );
+    )
+    .unwrap();
     stack.txn.send_response(busy, addr(PEER)).await.unwrap();
     elapse_ms(50).await;
     assert_eq!(count_responses(&stack.drain_peer(), 486), 1);
@@ -128,13 +129,9 @@ async fn a_seeded_server_invite_is_held() {
         .seed(
             "call-1",
             vec![TxnSeed::ServerInvite {
-                branch: "z9hG4bK-shared".into(),
-                sent_by: peer_sent_by(),
-                call_id: "shared@unit".into(),
-                from_tag: "caller-tag".into(),
+                request: invite(),
                 to_tag: Some("uas-early".into()),
                 leg_id: Some("a".into()),
-                original_request: Some(invite()),
             }],
         )
         .await
@@ -156,13 +153,9 @@ async fn a_seed_clears_a_refusal_of_its_invite() {
         .seed(
             "call-1",
             vec![TxnSeed::ServerInvite {
-                branch: "z9hG4bK-shared".into(),
-                sent_by: peer_sent_by(),
-                call_id: "shared@unit".into(),
-                from_tag: "caller-tag".into(),
+                request: invite(),
                 to_tag: Some("uas-early".into()),
                 leg_id: Some("a".into()),
-                original_request: Some(invite()),
             }],
         )
         .await

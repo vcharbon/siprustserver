@@ -31,7 +31,7 @@ use e2e_model::model::{load_test_case, CheckSet, Input, TestCase};
 use e2e_model::{BindingResolver, CheckVerdict, ResolvedBinding};
 use scenario_harness::realcall::CoreIdentity;
 use scenario_harness::{AnchorTag, WaiverScope};
-use sip_net::RecordedSipEntry;
+use sip_net_testkit::RecordedSipEntry;
 
 /// The recognized per-call dwell overrides carried in a resolved Input's
 /// `extras`. `None` = keep the run's global default for that knob. Values may

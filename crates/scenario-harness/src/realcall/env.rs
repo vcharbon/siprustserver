@@ -1,6 +1,6 @@
 //! Per-call context shared by the load driver and the in-process functional
 //! leak gate: the bound agents + correlation/routing config a scenario operates
-//! on ([`CallEnv`]), and the timing/checkpoint recorder ([`CallCtx`]).
+//! on ([`CallEnv`]); its recorder is [`CallCtx`](super::CallCtx).
 //!
 //! This is SUT-agnostic: a scenario built against [`CallEnv`] runs identically
 //! whether the agents were bound by the load `AgentBinder` (mux network, real
@@ -11,14 +11,12 @@
 //! carries the stamp like any other INVITE content).
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use sip_message::header::{HeaderValue, ReferTo, Uri};
 use sip_message::sip_str::SipStr;
 
-use crate::anchors::{AnchorKeys, AnchorTag};
 use crate::egress::{ApiCall, CalleeTarget, EgressPolicy};
 use crate::realcall::auth::ChallengeResponder;
 use crate::{Agent, Invite};
@@ -108,6 +106,12 @@ pub struct CallEnv<'a> {
     /// Emergency call: stamps `Resource-Priority: esnet.0` on the INVITE so the
     /// SUT's panic-ELU and CPS bucket rungs admit it.
     pub emergency: bool,
+    /// The final the run declares its system under test refuses a call with
+    /// under overload (e.g. `Some(503)`, RFC 3261 §21.5.4). When set, that final
+    /// to a non-emergency call's establishing INVITE is an accepted ending
+    /// ([`Branch::refused_overload`](crate::actor::Branch::refused_overload));
+    /// `None` (the default) accepts no refusal the scenario does not declare.
+    pub overload_reject: Option<u16>,
     /// The per-call **core identity** (the resolved binding's From/To/R-URI
     /// overrides — the e2e Test case's `core` on the load surface). Defaults
     /// keep the agent-derived identities; see [`Self::outgoing_invite`] for
@@ -186,6 +190,7 @@ impl<'a> CallEnv<'a> {
             },
             token,
             emergency: false,
+            overload_reject: None,
             core: CoreIdentity::default(),
             egress: EgressPolicy::Transparent,
             // Auth is deferred: no responder → no §22.2 retry (a 401/407 is a
@@ -285,14 +290,14 @@ impl<'a> CallEnv<'a> {
     }
 
     /// [`Self::invite_plan`] with a per-route NO-ANSWER ring timer: on a
-    /// pinned layout the `routes` failover plan arms `no_answer_timeout_sec` on
+    /// pinned layout the `routes` failover plan arms `no_answer_ms` on
     /// every hop, so the SUT reroutes on ring-timeout as well as on reject
     /// (`EgressPolicy::rewrite_with_no_answer`). Other layouts ignore the knob.
-    pub fn invite_plan_no_answer(&self, callees: &[&str], no_answer_sec: i64) -> InvitePlan {
-        self.invite_plan_with(callees, Some(no_answer_sec))
+    pub fn invite_plan_no_answer(&self, callees: &[&str], no_answer_ms: i64) -> InvitePlan {
+        self.invite_plan_with(callees, Some(no_answer_ms))
     }
 
-    fn invite_plan_with(&self, callees: &[&str], no_answer_sec: Option<i64>) -> InvitePlan {
+    fn invite_plan_with(&self, callees: &[&str], no_answer_ms: Option<i64>) -> InvitePlan {
         // (3) the per-call identity — the correlation stamp + emergency marker.
         // A To-user stamp supersedes the authored core `to` (`apply_identity`
         // applies AFTER `apply_core` on the builder; eager form: override here).
@@ -317,7 +322,7 @@ impl<'a> CallEnv<'a> {
             to,
             ruri: self.core.ruri.clone(),
             headers,
-            rewrite: self.egress.rewrite_with_no_answer(&targets, no_answer_sec),
+            rewrite: self.egress.rewrite_with_no_answer(&targets, no_answer_ms),
         }
     }
 
@@ -420,162 +425,5 @@ impl InvitePlan {
             inv = inv.with_header(name, value);
         }
         self.rewrite.clone().apply(inv)
-    }
-}
-
-/// Per-call timing recorder. Holds the call's start instant, the named
-/// **checkpoints** ("keywords") a scenario marks at points whose latency we want
-/// to track (e.g. `time_to_200`), and the **phase markers** a scenario stamps as
-/// it advances (connected, re-invited, transferred, post-PRACK, …) so a NOK
-/// sample can say WHICH phase was live and the chaos correlation can be
-/// phase-aware. `Mutex` (not `RefCell`) so it is `Sync` — the `async-trait`
-/// scenario future borrows `&CallCtx` across awaits.
-pub struct CallCtx {
-    t0: Instant,
-    checkpoints: Mutex<Vec<(&'static str, Duration)>>,
-    phases: Mutex<Vec<(&'static str, Instant)>>,
-    /// Whether the caller received the `18x` ringing provisional before the answer.
-    /// `None` until the call reaches the ring→answer step; `Some(true)` if the 18x
-    /// arrived, `Some(false)` if it was legitimately lost (a NON-PRACK provisional
-    /// is best-effort, not a call failure — the driver aggregates the rate into a
-    /// cross-call gate instead of failing the individual call).
-    ringing: Mutex<Option<bool>>,
-    /// Message-anchor collection — the load surface's analogue of
-    /// [`Harness::tag_anchor`](crate::Harness::tag_anchor) (ADR-0019). OFF by
-    /// default: [`anchor`](Self::anchor) is then a single relaxed atomic load
-    /// (~free on the unsampled load majority and in the functional leak gate).
-    /// The load driver enables it on a SAMPLED (recording) call so the e2e
-    /// check engine can resolve `<agent>.<anchor>` over the recorded trace.
-    collect_anchors: AtomicBool,
-    anchors: Mutex<Vec<AnchorTag>>,
-    /// Free-form per-call diagnostic notes for the SAMPLE DETAIL channel only —
-    /// e.g. the settle barrier's still-open obligation names. NEVER keyed (the
-    /// case discriminator stays `who@phase`); the driver appends them to a NOK
-    /// sample's failure detail so the rendered page explains WHY.
-    notes: Mutex<Vec<String>>,
-}
-
-impl CallCtx {
-    pub fn new() -> Self {
-        Self {
-            t0: Instant::now(),
-            checkpoints: Mutex::new(Vec::new()),
-            phases: Mutex::new(Vec::new()),
-            ringing: Mutex::new(None),
-            collect_anchors: AtomicBool::new(false),
-            anchors: Mutex::new(Vec::new()),
-            notes: Mutex::new(Vec::new()),
-        }
-    }
-
-    /// Turn message-anchor collection ON for this call (see the field docs).
-    /// The load driver calls this exactly when the call is sampled (recording),
-    /// so anchors always have a recorded trace to resolve against.
-    pub fn enable_anchor_collection(&self) {
-        self.collect_anchors.store(true, Ordering::Relaxed);
-    }
-
-    /// Label a message `agent` just RECEIVED with a canonical anchor name
-    /// (ADR-0019) — the load-surface analogue of `Harness::tag_anchor` /
-    /// e2e-core's `InfraRuntime::anchor`. A no-op (one relaxed atomic load,
-    /// `keys` never converted) unless anchor collection was enabled. `name` is
-    /// `'static` to keep the vocabulary fixed, like phases/checkpoints.
-    pub fn anchor(&self, agent: &Agent, name: &'static str, keys: impl Into<AnchorKeys>) {
-        self.push_anchor(agent, name, keys, false);
-    }
-
-    /// Label a message `agent` just SENT — for a request whose only receiver is
-    /// the external SUT (the REFER anchor). See [`AnchorTag::sent`].
-    pub fn anchor_sent(&self, agent: &Agent, name: &'static str, keys: impl Into<AnchorKeys>) {
-        self.push_anchor(agent, name, keys, true);
-    }
-
-    fn push_anchor(
-        &self,
-        agent: &Agent,
-        name: &'static str,
-        keys: impl Into<AnchorKeys>,
-        sent: bool,
-    ) {
-        if !self.collect_anchors.load(Ordering::Relaxed) {
-            return;
-        }
-        self.anchors.lock().unwrap().push(AnchorTag {
-            agent: agent.name().to_string(),
-            anchor: name.to_string(),
-            agent_addr: agent.addr(),
-            keys: keys.into(),
-            sent,
-        });
-    }
-
-    /// Drain the collected `(agent, anchor)` labels, in tag order (empty unless
-    /// [`enable_anchor_collection`](Self::enable_anchor_collection) was called).
-    pub fn take_anchors(&self) -> Vec<AnchorTag> {
-        std::mem::take(&mut *self.anchors.lock().unwrap())
-    }
-
-    pub fn checkpoint(&self, name: &'static str) {
-        self.checkpoints.lock().unwrap().push((name, self.t0.elapsed()));
-    }
-
-    /// The instant the call started (its first INVITE) — the lower bound of the
-    /// lifetime window the chaos correlation classifies against.
-    pub fn start_instant(&self) -> Instant {
-        self.t0
-    }
-
-    /// Mark that the call reached a named lifecycle phase (e.g. `"connected"`,
-    /// `"reinvited"`, `"transferred"`, `"pracked"`), stamping the instant. Cheap
-    /// and unconditional; the driver folds these into the NOK sample banner and
-    /// uses them for phase-aware chaos correlation. `name` is `'static` to keep
-    /// cardinality bounded (a fixed phase vocabulary, like checkpoints).
-    pub fn phase(&self, name: &'static str) {
-        self.phases.lock().unwrap().push((name, Instant::now()));
-    }
-
-    /// The recorded phase markers `(name, instant)`, in order reached.
-    pub fn phases(&self) -> Vec<(&'static str, Instant)> {
-        self.phases.lock().unwrap().clone()
-    }
-
-    /// Record whether this call's caller saw its `18x` ringing provisional
-    /// (`true`) or it was lost (`false`) — a non-PRACK provisional is best-effort,
-    /// so a miss is EXPECTED, not a failure. The driver folds this into the
-    /// cross-call `loadgen_ringing_{expected,received}_total` gate (>99%).
-    pub fn mark_ringing(&self, received: bool) {
-        *self.ringing.lock().unwrap() = Some(received);
-    }
-
-    /// The recorded ringing outcome: `None` if the call never reached the answer
-    /// step, else `Some(received)`.
-    pub fn ringing(&self) -> Option<bool> {
-        *self.ringing.lock().unwrap()
-    }
-
-    pub fn elapsed(&self) -> Duration {
-        self.t0.elapsed()
-    }
-
-    pub fn take_checkpoints(&self) -> Vec<(&'static str, Duration)> {
-        std::mem::take(&mut self.checkpoints.lock().unwrap())
-    }
-
-    /// Attach a free-form diagnostic note for the sample DETAIL channel (see
-    /// the field docs — never a report key; the settle verdict's open-obligation
-    /// names ride this).
-    pub fn note(&self, text: impl Into<String>) {
-        self.notes.lock().unwrap().push(text.into());
-    }
-
-    /// The attached diagnostic notes, in attach order.
-    pub fn notes(&self) -> Vec<String> {
-        self.notes.lock().unwrap().clone()
-    }
-}
-
-impl Default for CallCtx {
-    fn default() -> Self {
-        Self::new()
     }
 }

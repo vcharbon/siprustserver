@@ -11,12 +11,14 @@
   "types": "./src/index.ts",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "schemas": "tsx bin/schemas.ts"
   },
   "dependencies": {
     "effect": "4.0.0-rc.111"
   },
   "devDependencies": {
+    "@effect/platform-node": "4.0.0-rc.111",
     "@types/node": "24.10.1",
     "tsx": "4.20.6",
     "typescript": "5.9.3",

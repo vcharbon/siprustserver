@@ -8,7 +8,6 @@
  * (`Rules.headersNamedBy`); this adapter only passes it on.
  */
 import { Flows } from "@sip/contracts"
-import type * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
@@ -59,8 +58,5 @@ export const layer = Layer.effect(
     return Service.of({ flows, schema, rfcCensus })
   })
 )
-
-/** The binary this service will run, for a caller that wants to say so out loud. */
-export const binary: Config.Config<string> = SIPFLOW
 
 export * as SipflowCli from "./sipflow-cli.js"

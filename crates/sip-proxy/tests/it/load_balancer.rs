@@ -1,8 +1,8 @@
 //! Ports of the pure-logic `tests/sip-front-proxy/load-balancer/*` suite:
-//! cookie encode/decode round-trip, HMAC tampering, the dead/not-ready/draining
-//! routing matrix, the fresh-pod guard, unresolvable-id fallback, resharding
-//! stickiness, and initial-health gating. No proxy SUT — these exercise the
-//! `LoadBalancerStrategy` directly.
+//! cookie encode/decode round-trip, HMAC tampering, the liveness routing
+//! matrix and the acceptance of new calls (ADR-0050), unresolvable-id
+//! fallback, resharding stickiness, and initial-health gating. No proxy SUT —
+//! these exercise the `LoadBalancerStrategy` directly.
 
 use std::sync::Arc;
 
@@ -13,10 +13,10 @@ use sip_proxy::addr::ProxyAddr;
 use sip_proxy::load_observer::{EluBand, LoadObserverConfig, OverloadPayload, WorkerLoadObserver};
 use sip_proxy::observability::ProxyMetrics;
 use sip_proxy::registry::simulated::SimulatedWorkerRegistry;
-use sip_proxy::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
+use sip_proxy::registry::{Acceptance, WorkerEntry, WorkerHealth, WorkerRegistry};
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
-use sip_proxy::strategies::{LoadBalancerConfig, LoadBalancerStrategy};
-use sip_proxy::strategy::{DecodeResult, Promotion, RoutingStrategy, SelectError, SelectOpts};
+use sip_proxy::strategies::LoadBalancerStrategy;
+use sip_proxy::strategy::{DecodeResult, RoutingStrategy, SelectError, SelectOpts};
 
 const W1: &str = "b2b-1";
 const W2: &str = "b2b-2";
@@ -49,9 +49,11 @@ fn request_with_rph(
         Some(v) => format!("Resource-Priority: {v}\r\n"),
         None => String::new(),
     };
+    // A branch is a token (RFC 3261 §25.1): the Call-ID's `@` stays out of it.
+    let branch = call_id.replace('@', ".");
     let raw = format!(
         "{method} sip:bob@10.0.0.3:5070 SIP/2.0\r\n\
-Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-{call_id}\r\n\
+Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-{branch}\r\n\
 From: <sip:alice@a>;tag=fromtag\r\n\
 To: {to}\r\n\
 Call-ID: {call_id}\r\n\
@@ -73,14 +75,7 @@ fn strategy(reg: SimulatedWorkerRegistry, clock: Clock) -> LoadBalancerStrategy 
         Arc::new(StaticHmacKeyProvider::new(HmacKey::new("k1", vec![7u8; 32]), None).unwrap());
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
     let metrics = Arc::new(ProxyMetrics::new());
-    LoadBalancerStrategy::new(
-        Arc::new(reg),
-        hmac,
-        observer,
-        metrics,
-        clock,
-        LoadBalancerConfig::default(),
-    )
+    LoadBalancerStrategy::new(Arc::new(reg), hmac, observer, metrics, clock)
 }
 
 fn strategy_with_observer(
@@ -91,14 +86,7 @@ fn strategy_with_observer(
     let hmac =
         Arc::new(StaticHmacKeyProvider::new(HmacKey::new("k1", vec![7u8; 32]), None).unwrap());
     let metrics = Arc::new(ProxyMetrics::new());
-    LoadBalancerStrategy::new(
-        Arc::new(reg),
-        hmac,
-        observer,
-        metrics,
-        clock,
-        LoadBalancerConfig::default(),
-    )
+    LoadBalancerStrategy::new(Arc::new(reg), hmac, observer, metrics, clock)
 }
 
 fn two_worker_registry(clock: Clock) -> SimulatedWorkerRegistry {
@@ -217,19 +205,47 @@ async fn cookie_route_fallback_when_primary_dead() {
     assert!(matches!(s.decode_stickiness(&params, &ack).await, DecodeResult::ForwardBackup { .. }));
 }
 
+/// A primary refusing new calls keeps every in-dialog request: acceptance is
+/// never read by the decode (ADR-0050 §4).
 #[tokio::test]
-async fn decode_forward_not_ready_promotes_to_backup() {
+async fn an_in_dialog_request_goes_to_a_refusing_primary() {
     let clock = Clock::test_at(0);
     let reg = two_worker_registry(clock.clone());
     let s = strategy(reg.clone(), clock);
-    let invite = request("INVITE", "call-nr@h", None);
-    let primary = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
-    let params = s.encode_stickiness(&primary, &invite).unwrap();
-    let primary_id = params.get("w_pri").unwrap().clone();
+    let params = s.encode_stickiness(&addr(A1), &request("INVITE", "call-rf@h", None)).unwrap();
+    reg.set_acceptance(W1, Acceptance::Refuse);
+    reg.set_acceptance(W2, Acceptance::Refuse);
+    for method in ["BYE", "INVITE", "ACK", "CANCEL"] {
+        let req = request(method, "call-rf@h", Some("bobtag"));
+        let decoded = s.decode_stickiness(&params, &req).await;
+        assert_eq!(decoded, DecodeResult::Forward { target: addr(A1), is_emergency: false });
+    }
+}
 
-    reg.set_health(&primary_id, WorkerHealth::NotReady);
-    let bye = request("BYE", "call-nr@h", Some("bobtag"));
-    assert!(matches!(s.decode_stickiness(&params, &bye).await, DecodeResult::ForwardBackup { .. }));
+/// A primary not alive passes the request to the backup only while the
+/// backup is alive; with neither alive the request is unroutable, never
+/// placed afresh (ADR-0050 §4, §5).
+#[tokio::test]
+async fn an_in_dialog_request_takes_an_alive_backup_and_nothing_else() {
+    let clock = Clock::test_at(0);
+    let reg = two_worker_registry(clock.clone());
+    let s = strategy(reg.clone(), clock);
+    let params = s.encode_stickiness(&addr(A1), &request("INVITE", "call-nb@h", None)).unwrap();
+    let bye = request("BYE", "call-nb@h", Some("bobtag"));
+    let backup = DecodeResult::ForwardBackup { target: addr(A2), is_emergency: false };
+    for primary in [WorkerHealth::Dead, WorkerHealth::Unknown] {
+        reg.set_health(W1, primary);
+        reg.set_health(W2, WorkerHealth::Alive);
+        assert_eq!(s.decode_stickiness(&params, &bye).await, backup, "{primary:?} primary");
+        for not_alive in [WorkerHealth::Dead, WorkerHealth::Unknown] {
+            reg.set_health(W2, not_alive);
+            assert_eq!(
+                s.decode_stickiness(&params, &bye).await,
+                DecodeResult::Unroutable,
+                "{primary:?} primary, {not_alive:?} backup"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -248,124 +264,54 @@ async fn unresolvable_primary_falls_back_to_backup() {
     assert!(matches!(s.decode_stickiness(&params, &bye).await, DecodeResult::ForwardBackup { .. }));
 }
 
+/// A primary read alive is served from that read on, however recently it
+/// joined: the registry holds no join instant (ADR-0050 §8).
 #[tokio::test]
-async fn draining_grace_keeps_primary_then_falls_back() {
+async fn a_primary_read_alive_is_served_at_once_after_it_joined() {
     let clock = Clock::test_at(0);
-    let reg = two_worker_registry(clock.clone());
-    let s = strategy(reg.clone(), clock.clone());
-    let invite = request("INVITE", "call-dr@h", None);
-    let primary = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
-    let params = s.encode_stickiness(&primary, &invite).unwrap();
-    let primary_id = params.get("w_pri").unwrap().clone();
-
-    // Drain the primary at t=0 (draining_since stamped 0). Within the 5 s grace,
-    // an in-dialog re-INVITE stays on the primary.
-    reg.set_health(&primary_id, WorkerHealth::Draining);
-    let reinvite = request("INVITE", "call-dr@h", Some("bobtag"));
-    assert!(matches!(s.decode_stickiness(&params, &reinvite).await, DecodeResult::Forward { .. }));
+    let reg =
+        SimulatedWorkerRegistry::with_clock(vec![WorkerEntry::alive(W2, addr(A2))], clock.clone());
+    let s = strategy(reg.clone(), clock);
+    reg.add(WorkerEntry { health: WorkerHealth::Unknown, ..WorkerEntry::alive(W1, addr(A1)) });
+    let params = s.encode_stickiness(&addr(A1), &request("INVITE", "call-jn@h", None)).unwrap();
+    let bye = request("BYE", "call-jn@h", Some("bobtag"));
+    let backup = DecodeResult::ForwardBackup { target: addr(A2), is_emergency: false };
+    assert_eq!(s.decode_stickiness(&params, &bye).await, backup, "unknown: the backup");
+    reg.set_health(W1, WorkerHealth::Alive);
+    let primary = DecodeResult::Forward { target: addr(A1), is_emergency: false };
+    assert_eq!(s.decode_stickiness(&params, &bye).await, primary, "alive: the primary");
 }
 
-#[tokio::test(start_paused = true)]
-async fn draining_post_grace_falls_back_to_backup() {
-    let clock = Clock::test_at(0);
-    let reg = two_worker_registry(clock.clone());
-    let s = strategy(reg.clone(), clock.clone());
-    let invite = request("INVITE", "call-dg@h", None);
-    let primary = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
-    let params = s.encode_stickiness(&primary, &invite).unwrap();
-    let primary_id = params.get("w_pri").unwrap().clone();
-    reg.set_health(&primary_id, WorkerHealth::Draining);
-
-    // Past the 5 s grace window: in-dialog request promotes to the backup.
-    tokio::time::advance(std::time::Duration::from_millis(5_001)).await;
-    let reinvite = request("INVITE", "call-dg@h", Some("bobtag"));
-    assert!(matches!(
-        s.decode_stickiness(&params, &reinvite).await,
-        DecodeResult::ForwardBackup { .. }
-    ));
-}
-
-#[tokio::test(start_paused = true)]
-async fn fresh_pod_guard_promotes_then_relaxes() {
-    let clock = Clock::test_at(0);
-    // Primary is freshly-spawned (first_seen_at_ms = 0); backup is not.
-    let reg = SimulatedWorkerRegistry::with_clock(
-        vec![
-            WorkerEntry { first_seen_at_ms: Some(0), ..WorkerEntry::alive(W1, addr(A1)) },
-            WorkerEntry::alive(W2, addr(A2)),
-        ],
-        clock.clone(),
-    );
-    let s = strategy(reg.clone(), clock.clone());
-    let invite = request("INVITE", "call-fp@h", None);
-    // Force the cookie to name W1 primary by encoding for W1's address.
-    let params = s.encode_stickiness(&addr(A1), &invite).unwrap();
-    assert_eq!(params.get("w_pri").unwrap(), W1);
-
-    // Inside the 20 s guard, an in-dialog BYE to a fresh primary promotes to backup.
-    let bye = request("BYE", "call-fp@h", Some("bobtag"));
-    assert!(matches!(s.decode_stickiness(&params, &bye).await, DecodeResult::ForwardBackup { .. }));
-
-    // Past the guard, it forwards to the (now-trusted) primary.
-    tokio::time::advance(std::time::Duration::from_millis(20_001)).await;
-    match s.decode_stickiness(&params, &bye).await {
-        DecodeResult::Forward { target, .. } => assert_eq!(target, addr(A1)),
-        other => panic!("expected Forward to primary post-guard, got {other:?}"),
-    }
-}
-
-// A request sent to the backup past a primary that is up names the reason:
-// the fresh pod's guard, or the not-ready primary.
+/// The cookie's backup is chosen among the alive workers accepting new
+/// calls; when none but the primary accepts, among every alive one, so a
+/// cluster refusing everywhere still replicates (ADR-0050 §7).
 #[tokio::test]
-async fn a_promotion_past_an_up_primary_names_its_reason() {
+async fn the_backup_is_chosen_among_accepting_workers_else_among_alive_ones() {
+    const W3: &str = "b2b-3";
+    let a3 = ("10.0.0.4", 5070);
     let clock = Clock::test_at(0);
     let reg = SimulatedWorkerRegistry::with_clock(
         vec![
-            WorkerEntry { first_seen_at_ms: Some(0), ..WorkerEntry::alive(W1, addr(A1)) },
+            WorkerEntry::alive(W1, addr(A1)),
             WorkerEntry::alive(W2, addr(A2)),
+            WorkerEntry::alive(W3, addr(a3)),
         ],
         clock.clone(),
     );
     let s = strategy(reg.clone(), clock);
-    let params = s.encode_stickiness(&addr(A1), &request("INVITE", "call-pm@h", None)).unwrap();
-    let bye = request("BYE", "call-pm@h", Some("bobtag"));
-    let promoted = |reason| DecodeResult::ForwardBackup {
-        target: addr(A2),
-        is_emergency: false,
-        promotion: Some(reason),
-    };
-
-    assert_eq!(s.decode_stickiness(&params, &bye).await, promoted(Promotion::FreshPod));
-    reg.set_health(W1, WorkerHealth::NotReady);
-    assert_eq!(s.decode_stickiness(&params, &bye).await, promoted(Promotion::NotReady));
-    reg.set_health(W1, WorkerHealth::Dead);
-    let dead = s.decode_stickiness(&params, &bye).await;
-    assert!(matches!(dead, DecodeResult::ForwardBackup { promotion: None, .. }), "{dead:?}");
-}
-
-// A fresh primary whose cookie names no usable backup still serves the
-// request, flagged as fresh while the guard lasts and no longer once it
-// has run out.
-#[tokio::test(start_paused = true)]
-async fn a_fresh_primary_without_a_backup_is_flagged() {
-    let clock = Clock::test_at(0);
-    let reg = SimulatedWorkerRegistry::with_clock(
-        vec![WorkerEntry { first_seen_at_ms: Some(0), ..WorkerEntry::alive(W1, addr(A1)) }],
-        clock.clone(),
-    );
-    let s = strategy(reg, clock);
-    let params = s.encode_stickiness(&addr(A1), &request("INVITE", "call-fw@h", None)).unwrap();
-    assert!(params.get("w_bak").is_none_or(|b| b.is_empty()), "one worker: no backup");
-    let bye = request("BYE", "call-fw@h", Some("bobtag"));
-    let forward = |fresh_primary| DecodeResult::Forward {
-        target: addr(A1),
-        is_emergency: false,
-        fresh_primary,
-    };
-
-    assert_eq!(s.decode_stickiness(&params, &bye).await, forward(true));
-    tokio::time::advance(std::time::Duration::from_millis(20_001)).await;
-    assert_eq!(s.decode_stickiness(&params, &bye).await, forward(false));
+    reg.set_acceptance(W2, Acceptance::Refuse);
+    for n in 0..16 {
+        let invite = request("INVITE", &format!("call-bk-{n}@h"), None);
+        let params = s.encode_stickiness(&addr(A1), &invite).unwrap();
+        assert_eq!(params.get("w_bak").unwrap(), W3, "call {n}: the accepting worker");
+    }
+    reg.set_acceptance(W3, Acceptance::Refuse);
+    reg.set_health(W2, WorkerHealth::Dead);
+    for n in 0..16 {
+        let invite = request("INVITE", &format!("call-bk-{n}@h"), None);
+        let params = s.encode_stickiness(&addr(A1), &invite).unwrap();
+        assert_eq!(params.get("w_bak").unwrap(), W3, "call {n}: the alive refusing worker");
+    }
 }
 
 #[tokio::test]
@@ -384,6 +330,36 @@ async fn initial_health_unknown_workers_are_not_selectable() {
     // After it goes alive, it is selectable.
     reg.set_health(W1, WorkerHealth::Alive);
     assert_eq!(s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap(), addr(A1));
+}
+
+/// No alive worker accepts: a new dialog goes to an alive refusing one,
+/// which answers it itself (ADR-0050 §6); a dead worker takes nothing.
+#[tokio::test]
+async fn a_new_dialog_falls_back_to_a_refusing_worker_when_none_accepts() {
+    let clock = Clock::test_at(0);
+    let reg = two_worker_registry(clock.clone());
+    reg.set_health(W1, WorkerHealth::Dead);
+    reg.set_acceptance(W2, Acceptance::Refuse);
+    let s = strategy(reg, clock);
+    for n in 0..8 {
+        let invite = request("INVITE", &format!("call-rf-fallback-{n}@h"), None);
+        let selected = s.select_for_new_dialog(&invite, SelectOpts::default()).await;
+        assert_eq!(selected.ok(), Some(addr(A2)), "call {n}: the refusing worker takes it");
+    }
+}
+
+/// While one alive worker accepts, no new dialog goes to a refusing one.
+#[tokio::test]
+async fn a_new_dialog_skips_a_refusing_worker_while_one_accepts() {
+    let clock = Clock::test_at(0);
+    let reg = two_worker_registry(clock.clone());
+    reg.set_acceptance(W2, Acceptance::Refuse);
+    let s = strategy(reg, clock);
+    for n in 0..32 {
+        let invite = request("INVITE", &format!("call-rf-skip-{n}@h"), None);
+        let selected = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
+        assert_eq!(selected, addr(A1), "call {n} goes to the accepting worker");
+    }
 }
 
 #[tokio::test]
@@ -412,7 +388,7 @@ async fn above_critical_band_filtered_for_non_emergency_only() {
     );
     // (b) the explicit `emergency_override` opts shortcut (used by the dispatcher-marked
     //     in-dialog path) bypasses the filter on a non-RPH INVITE.
-    let emergency = SelectOpts { emergency_override: true };
+    let emergency = SelectOpts { emergency_override: true, ..SelectOpts::default() };
     assert_eq!(s.select_for_new_dialog(&invite, emergency).await.unwrap(), addr(A1));
 }
 
@@ -459,8 +435,26 @@ async fn rate_cap_exhausted_when_winners_bucket_is_empty() {
 
     // Emergency new dialog also bypasses the bucket.
     let emergency = request("INVITE", "call-rc-em@h", None);
-    let opts = SelectOpts { emergency_override: true };
+    let opts = SelectOpts { emergency_override: true, ..SelectOpts::default() };
     assert_eq!(s.select_for_new_dialog(&emergency, opts).await.unwrap(), addr(A1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_dialog_admitted_as_new_meets_the_empty_bucket() {
+    // A request naming a dialog no verified cookie backs (`admit_as_new`) is a
+    // new call: the bucket that an in-dialog request bypasses refuses it.
+    let clock = Clock::test_at(0);
+    let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
+    let reg =
+        SimulatedWorkerRegistry::with_clock(vec![WorkerEntry::alive(W1, addr(A1))], clock.clone());
+    observer.apply_payload(W1, &OverloadPayload { elu: 0.1, gc: 0.0, adm: 0.0 }, clock.now_ms());
+    while observer.try_consume_for(W1, clock.now_ms()).is_ok() {}
+    let s = strategy_with_observer(reg, clock, observer);
+
+    let reinvite = request("INVITE", "call-unbacked@h", Some("forged"));
+    let opts = SelectOpts { admit_as_new: true, ..SelectOpts::default() };
+    let refused = s.select_for_new_dialog(&reinvite, opts).await;
+    assert!(matches!(refused, Err(SelectError::RateCapExhausted { .. })), "{refused:?}");
 }
 
 #[tokio::test]

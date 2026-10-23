@@ -92,8 +92,7 @@ impl RetainedEmission {
         class: Class,
         repeated: Repeated,
     ) -> (Self, Duration) {
-        let (ladder, first) = Ladder::armed(Schedule::rfc(class))
-            .expect("an RFC class owes its first re-send unconditionally");
+        let (ladder, first) = Ladder::armed_rfc(class);
         let emission = RetainedEmission {
             datagram,
             dest_host: dest.0,

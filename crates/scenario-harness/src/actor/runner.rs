@@ -1,8 +1,8 @@
 //! The live per-endpoint state ([`ActorState`]) and the reactor loop
 //! ([`run_actor`]) — the `select!` that races inbound reactions, the goal
-//! cursor, the timed answer, the reject-hop-ACK watch, and the glare retries
-//! on ONE task. What each arm DOES lives in its own module: reactions in
-//! [`super::react`]/[`super::response`], goal steps in [`super::drive`].
+//! cursor, the timed answer, the PRACK give-up, the reject-hop-ACK watch and
+//! the glare retries on ONE task. What each arm DOES lives in its own module:
+//! reactions in [`super::react`]/[`super::response`], goal steps in [`super::drive`].
 //!
 //! The actor owns **no retransmit timers** — it answers idempotently and keeps
 //! its inbox open; the transport (`loadgen::mux::CallTxns`) or the SUT owns
@@ -19,10 +19,12 @@ use tokio::time::Instant;
 
 use sip_message::{CseqDeviation, DelayedAutomatic};
 
-use super::answer::fire_timed_answer;
+use super::answer::{fire_timed_answer, ForkAnswer};
 use super::delta::AcceptedDeltaPolicy;
 use super::drive::drive_goal;
+use super::ending::Expect;
 use super::endpoint::{ActorSpec, Automatics, CtxFeed, Disposition, MediaState};
+use super::give_up;
 use super::goals::{GoalCursor, GoalStep, RequestKind};
 use super::ledger::ObligationKey;
 use super::observe::ReceptionObserver;
@@ -34,7 +36,7 @@ use super::script::{goal_arm_enabled, requeue_parked};
 use super::shared_endpoint::{EndpointHandle, Inbox};
 use super::state::{Observation, ObservedState};
 use crate::realcall::{CallCtx, CallScope, ChallengeResponder};
-use crate::{Agent, ClientInvite, Dialog, ServerTxn, StepError};
+use crate::{shared_cseq_applier, Agent, ClientInvite, Dialog, ServerTxn, StepError};
 
 /// One inbound request parked on a [`Disposition::Scripted`] actor, awaiting
 /// the reception goal that consumes it (or a requeue-on-advance auto-react).
@@ -42,16 +44,6 @@ pub(super) struct ParkedRequest {
     pub(super) txn: ServerTxn,
     /// Whether this is the dialog-creating INVITE (no To-tag).
     pub(super) initial: bool,
-}
-
-/// The forking-UAS answer plan carried from the 18x emission to the moment the
-/// INVITE is answered (the timed-answer arm, or the winner fork's PRACK): the
-/// `200` goes out under `winner_tag` (adopted as the transaction's dialog tag),
-/// then optionally a LATE `200` under `loser_late_200`.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct ForkAnswer {
-    pub(super) winner_tag: &'static str,
-    pub(super) loser_late_200: Option<&'static str>,
 }
 
 /// A ring/answer scheduled for `at` — held as its own interruptible arm so a
@@ -114,6 +106,17 @@ pub(super) struct DialogTable {
     pub(super) won_invite: Option<ClientInvite>,
 }
 
+/// An actor's fatal failure: its role, the goal it failed at as `(kind,
+/// index)` — the pending one, or the INVITE goal a final to the establishing
+/// INVITE answers; `None` once its goals are exhausted — and the cause. The controller adds
+/// the barrier pending at that moment ([`FailedAt`](super::FailedAt)).
+#[derive(Debug)]
+pub struct ActorFailure {
+    pub who: &'static str,
+    pub goal: Option<(&'static str, u16)>,
+    pub cause: StepError,
+}
+
 /// The live per-endpoint state driven by [`run_actor`].
 pub struct ActorState<'c> {
     pub(super) role: &'static str,
@@ -144,6 +147,16 @@ pub struct ActorState<'c> {
     /// (180 sent, no final EVER originated by this leg): released only by an
     /// inbound CANCEL — the SUT's no-answer timer firing — which 487s it.
     pub(super) held_silent: Option<ServerTxn>,
+    /// A [`Disposition::Held`] callee's initial INVITE server transaction,
+    /// rung, used for early-dialog requests and answered by its goals.
+    pub(super) held: Option<ServerTxn>,
+    /// The To-tags of reliable provisionals no PRACK has acknowledged yet,
+    /// each with when it was first sent (RFC 3262 §3, [`super::give_up`]).
+    pub(super) unpracked: HashMap<String, Instant>,
+    /// The early dialogs this callee sent requests on, by local tag: the
+    /// dialog its 2xx confirms continues that dialog's CSeq (RFC 3261
+    /// §12.2.1.1).
+    pub(super) early_dialogs: HashMap<String, Dialog>,
     /// `(fork To-tag, RSeq)` pairs of reliable provisionals this caller has
     /// already PRACKed — so a retransmitted 183 is not double-PRACKed, while
     /// a FORKED reliable 183 (distinct tag, same RSeq space per §12.1.2 — each
@@ -154,11 +167,6 @@ pub struct ActorState<'c> {
     /// PRACK arm answers the INVITE only on the WINNER fork's PRACK (a losing
     /// fork's PRACK is 200'd but does not release the 200-to-INVITE).
     pub(super) fork_answer: Option<ForkAnswer>,
-    /// The LOSING fork tags this forking callee emitted a late `200` under — an
-    /// inbound BYE addressed to one of these tears down only that early fork,
-    /// NOT this leg (the winning dialog lives on; the BYE is 200'd and its CSeq
-    /// folded into the dialog stream, but no `LegTerminated` is recorded).
-    pub(super) fork_loser_tags: HashSet<String>,
     /// CSeq numbers of in-dialog re-INVITEs THIS caller has ORIGINATED whose
     /// `reneg` sub-flow has not yet been advanced (the `reinvite` body's
     /// delayed-offer re-INVITE). A set keyed by CSeq — NOT a one-shot bool — so
@@ -287,6 +295,16 @@ pub struct ActorState<'c> {
     /// tag) — the [`DialogSnapshot::early_dialog_count`] source. Read only
     /// while an initial-INVITE target is still pending.
     pub(super) early_provisionals: HashSet<String>,
+    /// The endings the call accepts, for the caller's actor only
+    /// ([`Expect::NONE`] for every other): an accepted non-2xx final on the
+    /// establishing INVITE ends this actor's call cleanly.
+    pub(super) accepts: Expect,
+    /// The goal that sent the establishing INVITE, as `(kind, index)` — the
+    /// step a final to that INVITE answers.
+    pub(super) invite_goal: Option<(&'static str, u16)>,
+    /// The goal a failure is attributed to when it is not the pending one (a
+    /// final to the establishing INVITE fails [`Self::invite_goal`]).
+    pub(super) failed_goal: Option<(&'static str, u16)>,
     /// Where this actor's inbound comes from: its own UA (the unshared default)
     /// or the shared endpoint's pump. Taken by [`run_actor`] at entry.
     inbox: Option<Inbox>,
@@ -333,9 +351,11 @@ impl<'c> ActorState<'c> {
             answered_reinvites: HashSet::new(),
             pending_prack_answer: None,
             held_silent: None,
+            held: None,
+            unpracked: HashMap::new(),
+            early_dialogs: HashMap::new(),
             pracked_rseqs: HashSet::new(),
             fork_answer: None,
-            fork_loser_tags: HashSet::new(),
             sent_reinvites: HashSet::new(),
             sent_reinvite_txns: HashMap::new(),
             reinvite_retry: None,
@@ -359,10 +379,7 @@ impl<'c> ActorState<'c> {
             consumed_requests: HashMap::new(),
             reinvite_ack_bodies: HashMap::new(),
             automatics,
-            cseq_dev: spec
-                .cseq
-                .filter(|p| !p.is_identity())
-                .map(|p| Arc::new(Mutex::new(CseqDeviation::new(p)))),
+            cseq_dev: spec.cseq.filter(|p| !p.is_identity()).map(shared_cseq_applier),
             delayed: spec.delayed,
             originated_invites: 0,
             reinvite_ordinals: HashMap::new(),
@@ -371,9 +388,18 @@ impl<'c> ActorState<'c> {
             delta_policy,
             reception_observer,
             early_provisionals: HashSet::new(),
+            accepts: Expect::NONE,
+            invite_goal: None,
+            failed_goal: None,
             inbox: None,
             endpoint: None,
         }
+    }
+
+    /// Let this (caller) actor end its call cleanly on a final `accepts` covers.
+    pub(super) fn accepting(mut self, accepts: Expect) -> Self {
+        self.accepts = accepts;
+        self
     }
 
     /// Seat this actor at a SHARED endpoint: inbound arrives through the
@@ -409,8 +435,21 @@ impl<'c> ActorState<'c> {
 /// Drive ONE endpoint: interleave reacting with goal progress via `select!`, so
 /// a goal parked on a barrier NEVER blocks the reactor (the structural fix for
 /// the cascade). Resolves `Ok(())` when the call is fully torn down and this
-/// endpoint's goals are exhausted, or `Err` on a fatal step.
-pub async fn run_actor(mut st: ActorState<'_>) -> Result<(), StepError> {
+/// endpoint's goals are exhausted, or `Err` on a fatal step, naming the goal
+/// pending when it failed.
+pub async fn run_actor(mut st: ActorState<'_>) -> Result<(), ActorFailure> {
+    match react_until_done(&mut st).await {
+        Ok(()) => Ok(()),
+        Err(cause) => {
+            let goal = st.failed_goal.or_else(|| st.goals.pending());
+            Err(ActorFailure { who: st.role, goal, cause })
+        }
+    }
+}
+
+/// [`run_actor`]'s loop over a borrowed state, so the state is still readable
+/// when the loop fails.
+async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), StepError> {
     // Clone the Arc-backed handles the reactor arm needs, so the goal / timed
     // arms can borrow disjoint fields of `st` in the same `select!`.
     let agent = st.agent.clone();
@@ -420,10 +459,11 @@ pub async fn run_actor(mut st: ActorState<'_>) -> Result<(), StepError> {
     // endpoint — the seat its pump delivers to. Same vocabulary either way.
     let mut inbox = st.inbox.take().unwrap_or_else(|| Inbox::Own(agent.clone()));
     loop {
+        let give_up_at = give_up::due(st);
         tokio::select! {
             inbound = inbox.recv() => {
                 match inbound {
-                    Ok(m) => default_react(&mut st, m).await?,
+                    Ok(m) => default_react(st, m).await?,
                     // A reactor recv deadline is NOT fatal — loop again (a
                     // long_call / options_hold / the 32 s settle silence must
                     // not kill the actor). Only a closed queue is fatal.
@@ -438,16 +478,39 @@ pub async fn run_actor(mut st: ActorState<'_>) -> Result<(), StepError> {
             // (a wait inside the body would starve the reactor: the documented
             // inline-pull hazard). Every consumable appears via this actor's
             // own loop body, so the gate is re-evaluated on each iteration.
-            ready = st.goals.next_ready(&obs, step_timeout), if st.goals.has_pending() && goal_arm_enabled(&st) => {
-                let step = ready?;
-                drive_goal(&mut st, step).await?;
+            ready = st.goals.next_ready(&obs, step_timeout), if st.goals.has_pending() && goal_arm_enabled(st) => {
+                if let Some(step) = ready? {
+                    if matches!(step, GoalStep::Invite { .. } | GoalStep::InviteTemplate { .. }) {
+                        st.invite_goal = st.goals.pending();
+                    }
+                    // A final already delivered is handled before the CANCEL (RFC 3261 §9.1).
+                    if matches!(step, GoalStep::Cancel { .. }) {
+                        while st.dialogs.pending_invite.is_some() {
+                            let Some(m) = inbox.try_take().await else { break };
+                            default_react(st, m).await?;
+                        }
+                    }
+                    drive_goal(st, step).await?;
+                }
                 st.goals.advance();
                 // Requeue on advance: auto-react any parked request no
                 // remaining goal can consume, so it never starves.
-                requeue_parked(&mut st).await?;
+                requeue_parked(st).await?;
             }
+            // The answer is due: first react to whatever landed with it, so a
+            // CANCEL that arrived at the same instant 487s the INVITE and the
+            // dropped answer never sends a 2xx after it (RFC 3261 §9.2).
             _ = wait_timed_answer(&st.pending_answer), if st.pending_answer.is_some() => {
-                fire_timed_answer(&mut st).await?;
+                tokio::task::yield_now().await;
+                while st.pending_answer.is_some() {
+                    let Some(m) = inbox.try_take().await else { break };
+                    default_react(st, m).await?;
+                }
+                fire_timed_answer(st).await?;
+            }
+            // A reliable provisional went 64·T1 without its PRACK.
+            _ = give_up::sleep(give_up_at), if give_up_at.is_some() => {
+                give_up::fire(st, &mut inbox).await?;
             }
             // Our non-2xx final's hop-ACK was sighted (the receive core claims
             // it below `recv_any`, so it never surfaces as an inbound) — close
@@ -464,19 +527,19 @@ pub async fn run_actor(mut st: ActorState<'_>) -> Result<(), StepError> {
             // 200'd and the round completes.
             _ = wait_reinvite_retry(&st.reinvite_retry), if st.reinvite_retry.is_some() => {
                 st.reinvite_retry = None;
-                originate_reinvite(&mut st).await?;
+                originate_reinvite(st).await?;
             }
             // The S6 UPDATE-collision retry deadline (C4/S6): re-originate the
             // UPDATE now the peer's colliding offer has cleared.
             _ = wait_update_retry(&st.update_retry), if st.update_retry.is_some() => {
                 st.update_retry = None;
-                originate_update(&mut st).await?;
+                originate_update(st).await?;
             }
             // A held ACK-to-2xx (a declared delayed automatic) coming due: send
             // it and complete the bookkeeping the hold deferred — the eventual
             // send is THIS arm's obligation, so no call finishes un-ACKed.
-            _ = super::response::wait_held_ack(&st.held_acks), if !st.held_acks.is_empty() => {
-                super::response::fire_due_held_ack(&mut st).await;
+            _ = super::held_acks::wait_held_ack(&st.held_acks), if !st.held_acks.is_empty() => {
+                super::held_acks::fire_due_held_ack(st).await?;
             }
         }
         // `ledger_closed` keeps a leg with an outstanding acknowledgement (its

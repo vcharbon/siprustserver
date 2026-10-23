@@ -6,14 +6,22 @@
 //! [`MsgpackCodec`] only for flush/replication. Routing uses the in-memory
 //! `sip_index`; the store's `get_index` is the fallback.
 
+mod adoption;
 mod call_store;
 mod faults;
+mod flush_body;
 mod memory;
 mod poison;
+mod reconcile;
+mod replica_index;
+mod resident;
+mod scan;
+mod setup_cancel;
 #[cfg(test)]
 mod setup_cancel_tests;
 #[cfg(test)]
 mod spiral_index_tests;
+mod takeover;
 mod terminate_writer;
 #[cfg(test)]
 mod unwired_tests;
@@ -23,11 +31,13 @@ pub use call_store::{
 };
 pub use faults::{FaultInjectingCallStore, StoreFaultPoint, StoreFaults};
 pub use memory::InMemoryCallStore;
-pub(crate) use poison::locked;
-pub use poison::poisoned_lock_recoveries;
+pub(crate) use poison::*;
+pub use poison::{LOCKS, LOCK_RECOVERIES};
+pub use reconcile::Reconciled;
+pub use takeover::TakeoverProbe;
 pub use terminate_writer::BufferedTerminateWriter;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use call::{
@@ -87,7 +97,7 @@ struct Inner {
     /// replica + reverse-flushed deltas remain). No wall-clock, no watermark
     /// handshake. Local-only; never serialized/replicated. Cleared on
     /// drop_local/remove.
-    takeover: HashSet<String>,
+    takeover: takeover::TakeoverMarks,
     /// **Last-touched stamps** (ADR-0020 X4) — the call reaper's only liveness
     /// input: epoch-ms of the last dispatched event that reached the handler
     /// (`router::process` touches), stamped at every entry
@@ -285,17 +295,25 @@ impl CallState {
         self.repl.as_ref().map(|r| &r.writer)
     }
 
-    /// Insert a freshly-created call + index it. Returns its `callRef`.
+    /// The call map's lock ([`poison::CALL_STORE`]).
+    fn locked(&self) -> std::sync::MutexGuard<'_, Inner> {
+        poison::locked(&self.inner, poison::CALL_STORE)
+    }
+
+    /// Insert a freshly-created call + index it. Returns its `callRef`. The
+    /// index, the stamp and the uncounted tally are written before the call
+    /// itself, so a panic between them leaves only entries the sweep drops.
     pub fn create(&self, call: Call) -> String {
         let call_ref = call.call_ref.clone();
         let now_ms = self.clock.now_ms();
-        let mut inner = self.inner.lock().unwrap();
-        Self::reindex(&mut inner, &call);
         let is = call.limiter.runs_uncounted();
-        let was = inner.calls.insert(call_ref.clone(), Box::new(call));
-        inner.restate_uncounted(was.is_some_and(|c| c.limiter.runs_uncounted()), is);
+        let mut inner = self.locked();
+        let was = inner.calls.get(&call_ref).is_some_and(|c| c.limiter.runs_uncounted());
+        Self::reindex(&mut inner, &call);
         inner.touched.insert(call_ref.clone(), now_ms);
+        inner.restate_uncounted(was, is);
         self.publish_uncounted(&inner);
+        inner.calls.insert(call_ref.clone(), Box::new(call));
         call_ref
     }
 
@@ -305,7 +323,7 @@ impl CallState {
     /// freezes — exactly the staleness signal). Monotonic-max, no-op for a
     /// non-resident call (membership mirrors the live map).
     pub fn touch(&self, call_ref: &str, now_ms: i64) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.locked();
         if !inner.calls.contains_key(call_ref) {
             return;
         }
@@ -317,12 +335,12 @@ impl CallState {
     /// reaper verdict confirm input (ADR-0020 X5): a verdict whose observed
     /// watermark no longer matches is stale and must be discarded.
     pub fn last_touched(&self, call_ref: &str) -> Option<i64> {
-        self.inner.lock().unwrap().touched.get(call_ref).copied()
+        self.locked().touched.get(call_ref).copied()
     }
 
     /// Cheap residency check (no `Call` clone) — sweep-side strike pruning.
     pub fn contains(&self, call_ref: &str) -> bool {
-        self.inner.lock().unwrap().calls.contains_key(call_ref)
+        self.locked().calls.contains_key(call_ref)
     }
 
     /// Sweep input (ADR-0020 X3/X4): every live call whose last-touched stamp is
@@ -333,12 +351,12 @@ impl CallState {
     /// (they live in the replica store, not in `calls`). One pass under the
     /// inner lock.
     pub fn stale_candidates(&self, now_ms: i64, idle_max_ms: i64) -> Vec<(String, i64)> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.locked();
         inner
             .touched
             .iter()
             .filter(|(call_ref, stamp)| {
-                now_ms - **stamp > idle_max_ms && !inner.takeover.contains(*call_ref)
+                now_ms - **stamp > idle_max_ms && !inner.takeover.contains(call_ref)
             })
             .map(|(call_ref, stamp)| (call_ref.clone(), *stamp))
             .collect()
@@ -346,20 +364,20 @@ impl CallState {
 
     /// Snapshot a call (clone) from memory, if present.
     pub fn peek(&self, call_ref: &str) -> Option<Call> {
-        self.inner.lock().unwrap().calls.get(call_ref).map(|c| (**c).clone())
+        self.locked().calls.get(call_ref).map(|c| (**c).clone())
     }
 
     /// Whether the resident call `call_ref` is the incarnation `incarnation`
     /// (`Call::incarnation`), read without cloning it; `None` when no call is
     /// resident.
     pub fn is_incarnation(&self, call_ref: &str, incarnation: &str) -> Option<bool> {
-        self.inner.lock().unwrap().calls.get(call_ref).map(|c| c.incarnation() == incarnation)
+        self.locked().calls.get(call_ref).map(|c| c.incarnation() == incarnation)
     }
 
     /// The lifecycle state of the resident call `call_ref`, read without
     /// cloning it.
     pub fn model_state(&self, call_ref: &str) -> Option<CallModelState> {
-        self.inner.lock().unwrap().calls.get(call_ref).map(|c| c.state)
+        self.locked().calls.get(call_ref).map(|c| c.state)
     }
 
     /// The `bak:{primary}` body of `call_ref` — the acting-backup takeover
@@ -403,29 +421,36 @@ impl CallState {
     /// this node by an authoritative teardown, and any later event re-enters via
     /// a fresh hydrate.
     ///
-    /// A bump counts a write that changes the call; a quiet turn (a rung of this
-    /// node's own ladder, a re-ACK — [`crate::effects::QuietTurn`]) goes through
-    /// [`update_quiet`](Self::update_quiet) and moves no axis.
+    /// A bump counts a write this node made that changes the call; a quiet turn
+    /// ([`crate::effects::QuietTurn`]) and a fold of the other owner's body go
+    /// through [`update_quiet`](Self::update_quiet) and move no axis.
+    ///
+    /// The primary's write is its own body at its own `gen`, which therefore
+    /// no longer names a version adopted without its body
+    /// ([`CallTopology::gen_adopted`](call::CallTopology::gen_adopted)).
     pub fn update(&self, mut call: Call) {
         if let Some(t) = call.topology.as_mut() {
             match role_of(&self.self_ordinal, &call.call_ref) {
-                PartitionRole::Primary => t.gen += 1,
+                PartitionRole::Primary => {
+                    t.gen += 1;
+                    t.gen_adopted = false;
+                }
                 PartitionRole::Backup => t.bak_gen += 1,
             }
         }
         self.replace(call);
     }
 
-    /// Replace the in-memory call for a quiet turn: the same replace-only rule
-    /// as [`update`](Self::update) with no counter moved — the `(p,b)` the
-    /// resident copy carries is the last write's, and so is what the next
-    /// flush publishes.
+    /// Replace the in-memory call for a quiet turn or a fold: the same
+    /// replace-only rule as [`update`](Self::update) with no counter moved —
+    /// the `(p,b)` the resident copy carries is the last write's, either
+    /// owner's, and so is what the next flush publishes.
     pub fn update_quiet(&self, call: Call) {
         self.replace(call);
     }
 
     fn replace(&self, call: Call) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.locked();
         if !inner.calls.contains_key(&call.call_ref) {
             return;
         }
@@ -445,27 +470,6 @@ impl CallState {
         self.metrics.limiter().set_uncounted_calls(inner.uncounted);
     }
 
-    /// Raise the resident copy's `(p,b)` to at least `(gen, bak_gen)` and return
-    /// it, or `None` when nothing changed (not resident, not replicable, or
-    /// already at or past both counters).
-    ///
-    /// **Not a mutation.** Adopting a version another owner published is a read
-    /// this node records, so it carries none of [`update`](Self::update)'s
-    /// authoritative bump: bumping our own axis for it would make two live
-    /// owners raise each other in turn, one flush per round, and the two views
-    /// would never come level (ADR-0031 D3).
-    pub fn adopt_version(&self, call_ref: &str, gen: i64, bak_gen: i64) -> Option<Call> {
-        let mut inner = self.inner.lock().unwrap();
-        let call = inner.calls.get_mut(call_ref)?;
-        let t = call.topology.as_mut()?;
-        if t.gen >= gen && t.bak_gen >= bak_gen {
-            return None;
-        }
-        t.gen = t.gen.max(gen);
-        t.bak_gen = t.bak_gen.max(bak_gen);
-        Some((**call).clone())
-    }
-
     /// The backup peer for a call from its `CallTopology.bak`, or `None` when no
     /// replicating store is wired / the call has no topology / `bak` is empty.
     /// This is the resolver the write-side policy ([`ReplicationPlan`]) needs:
@@ -474,7 +478,7 @@ impl CallState {
     /// so the b2bua never recomputes HRW — it just echoes `w_bak`.
     fn backup_of(&self, call_ref: &str) -> Option<String> {
         self.repl_store()?;
-        let inner = self.inner.lock().unwrap();
+        let inner = self.locked();
         inner
             .calls
             .get(call_ref)
@@ -516,19 +520,22 @@ impl CallState {
         // topology lookup `backup_of` needs the call still present).
         let target = self.repl.as_ref().map(|r| (self.store_target(call_ref), &r.writer));
 
-        let mut inner = self.inner.lock().unwrap();
+        // The call map first, the stamp last: a panic between them leaves only
+        // derived entries the sweep reconciles.
+        let mut inner = self.locked();
+        let removed = inner.calls.remove(call_ref);
+        inner.takeover.remove(call_ref);
         let keys = inner.indexed.remove(call_ref).unwrap_or_default();
         inner.unindex(call_ref, &keys);
         let mut answered = false;
         let mut incarnation = None;
-        if let Some(was) = inner.calls.remove(call_ref) {
+        if let Some(was) = removed {
             inner.restate_uncounted(was.limiter.runs_uncounted(), false);
             self.publish_uncounted(&inner);
             answered = call::helpers::caller_answered(&was);
             incarnation = Some(was.incarnation().to_string());
         }
         inner.locks.remove(call_ref);
-        inner.takeover.remove(call_ref);
         inner.touched.remove(call_ref);
         inner.shrink_idle();
         drop(inner);
@@ -553,7 +560,7 @@ impl CallState {
     /// with timer / txn / dispatch teardown (it owns those). Returns `true` if a
     /// live copy was actually dropped (so the caller meters the self-release once).
     pub fn drop_local(&self, call_ref: &str) -> bool {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.locked();
         let was = inner.calls.remove(call_ref);
         let present = was.is_some();
         if let Some(was) = was {
@@ -590,96 +597,9 @@ impl CallState {
     ///
     /// [`process`]: crate::router
     pub fn discard_orphan(&self, call_ref: &str) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.locked();
         inner.locks.remove(call_ref);
         inner.shrink_idle();
-    }
-
-    /// Mark `call_ref` as a live acting-backup **takeover copy** (ADR-0011 X11 /
-    /// ADR-0014). Called by the router's `materialise` on a fresh takeover. The router
-    /// later reads it via [`is_takeover`](Self::is_takeover) to drive self-release
-    /// once the served transaction(s) finish. Idempotent per call_ref.
-    pub fn mark_takeover(&self, call_ref: &str) {
-        self.inner.lock().unwrap().takeover.insert(call_ref.to_string());
-    }
-
-    /// Is `call_ref` a live acting-backup **takeover copy** (ADR-0014)? The router
-    /// reads it after serving an event for the call: when true and the served
-    /// transaction(s) have all cleared, it self-releases the live copy via
-    /// [`drop_local`](Self::drop_local).
-    pub fn is_takeover(&self, call_ref: &str) -> bool {
-        self.inner.lock().unwrap().takeover.contains(call_ref)
-    }
-
-    /// Mark the initial INVITE of `call_ref` carrying CSeq `cseq` as
-    /// CANCEL-finalized (the txn layer answered 200 + 487 and emitted
-    /// `Cancelled`). Called by the router run loop at `Cancelled` ingress —
-    /// BEFORE the event queues behind the initial-INVITE turn on the per-call
-    /// FIFO — so that turn can see the caller is gone while the call model
-    /// still reads `Active`. Idempotent.
-    pub fn mark_setup_cancelled(&self, call_ref: &str, cseq: u32) {
-        let mut inner = self.inner.lock().unwrap();
-        match inner.setup_cancelled.get_mut(call_ref) {
-            Some(marks) if marks.contains(&cseq) => {}
-            Some(marks) => marks.push(cseq),
-            None => {
-                inner.setup_cancelled.insert(call_ref.to_string(), vec![cseq]);
-            }
-        }
-    }
-
-    /// Has the initial INVITE of `call_ref` carrying CSeq `cseq` been
-    /// CANCELed (see [`mark_setup_cancelled`](Self::mark_setup_cancelled))?
-    /// Read twice by that INVITE's turn, the caller already holding its 487:
-    /// before the decision, a setup cancelled while the turn waited is born
-    /// and asks no decision; at the decision-application seam, a route/reject
-    /// landing on a call cancelled during the round trip is dropped.
-    pub fn is_setup_cancelled(&self, call_ref: &str, cseq: u32) -> bool {
-        self.inner.lock().unwrap().setup_cancelled.get(call_ref).is_some_and(|m| m.contains(&cseq))
-    }
-
-    /// Clear the setup-CANCEL mark of `call_ref`'s INVITE carrying CSeq
-    /// `cseq`: its turn ended with no call of its own.
-    pub fn clear_setup_cancelled(&self, call_ref: &str, cseq: u32) {
-        self.retain_setup_cancelled(call_ref, |marked| marked != cseq);
-    }
-
-    /// Keep, of `call_ref`'s setup-CANCEL marks, those whose CSeq `waiting`
-    /// says an INVITE still waits for its turn under: the router's release of
-    /// a call clears the rest.
-    pub fn retain_setup_cancelled(&self, call_ref: &str, waiting: impl Fn(u32) -> bool) {
-        let mut inner = self.inner.lock().unwrap();
-        let Some(marks) = inner.setup_cancelled.get_mut(call_ref) else { return };
-        marks.retain(|cseq| waiting(*cseq));
-        if marks.is_empty() {
-            inner.setup_cancelled.remove(call_ref);
-        }
-    }
-
-    /// **Active-reclaim bulk read-path** (ADR-0011 X11): scan this node's own
-    /// `pri:{self}` partition from the replicating store and decode every
-    /// reclaimable call. The router materialises each into the live map +
-    /// re-arms its timers when it goes Ready (the bulk reclaim sweep that makes a
-    /// rebooted primary actually re-*serve*, not just re-*store*). Empty when no
-    /// replicating store is wired.
-    /// Each entry pairs the decoded call with its persisted receive-time
-    /// clock-skew offset (`0` when the record carries none) —
-    /// the router re-anchors the call's absolute timer deadlines by this offset
-    /// before re-arming them (clock-skew hardening).
-    pub async fn reclaim_scan(&self) -> Vec<(Call, i64)> {
-        let Some(repl) = self.repl_store() else {
-            return Vec::new();
-        };
-        let bodies =
-            repl.scan_calls(PartitionRole::Primary, &self.self_ordinal).await.unwrap_or_default();
-        bodies
-            .iter()
-            .filter_map(|b| self.codec.decode(b).ok())
-            .map(|c| {
-                let skew = repl.skew_offset_ms(&c.call_ref).unwrap_or(0);
-                (c, skew)
-            })
-            .collect()
     }
 
     /// **Active-reclaim reactive read-path** (ADR-0011 X11): decode a single
@@ -704,7 +624,7 @@ impl CallState {
     /// Decode a replica body this node did not store (a reverse flush the
     /// `(p,b)` gate refused), so the router can read the call it carries.
     pub fn decode_body(&self, body: &[u8]) -> Option<Call> {
-        self.codec.decode(body).ok()
+        crate::repl::decode_peer_body(&self.codec, &self.metrics, body)
     }
 
     /// Like [`peek_reclaimable`](Self::peek_reclaimable) but it reads an expired
@@ -782,7 +702,9 @@ impl CallState {
     /// inserted — the router then re-arms its timers exactly once. Idempotent: a
     /// call already live (re-served, or never lost) is left untouched.
     ///
-    /// A traced call opens this node's own root span here, after the residency
+    /// Every caller holds the call's per-call lock ([`lock`](Self::lock)), so no
+    /// other insert of it runs between the residency check and the insert. A
+    /// traced call opens this node's own root span here, after the residency
     /// check, so a span is opened only for a call this node goes on to serve
     /// (ADR-0026 §5). The idle clock starts at the insert, never at `created_at`
     /// (ADR-0020 X4): a hours-old failed-over or reclaimed long-hold call is
@@ -803,18 +725,22 @@ impl CallState {
         let backup = call.topology.as_ref().map(|t| t.bak.clone()).filter(|b| !b.is_empty());
         let call_ref = call.call_ref.clone();
         let now_ms = self.clock.now_ms();
+        if self.contains(&call_ref) {
+            return false;
+        }
+        // Outside the store lock: the trace registry takes its own.
+        crate::trace::adopt_replicated(&mut call, now_ms);
+        call.limiter.enter_epoch();
         {
-            let mut inner = self.inner.lock().unwrap();
-            if inner.calls.contains_key(&call.call_ref) {
+            let mut inner = self.locked();
+            if inner.calls.contains_key(&call_ref) {
                 return false;
             }
-            crate::trace::adopt_replicated(&mut call, now_ms);
-            call.limiter.enter_epoch();
             Self::reindex(&mut inner, &call);
-            inner.touched.insert(call.call_ref.clone(), now_ms);
+            inner.touched.insert(call_ref.clone(), now_ms);
             inner.restate_uncounted(false, call.limiter.runs_uncounted());
             self.publish_uncounted(&inner);
-            inner.calls.insert(call.call_ref.clone(), Box::new(call));
+            inner.calls.insert(call_ref.clone(), Box::new(call));
         }
         if origin == MaterialiseOrigin::Reclaim {
             if let (Some(repl), Some(backup)) = (self.repl_store(), backup) {
@@ -845,50 +771,31 @@ impl CallState {
     /// replicas keep the long backstop (refreshed every keepalive), so a held call's
     /// replica never expires mid-call.
     pub fn flush_with_ttl(&self, call: &Call, ttl_ms: i64) {
+        self.submit_flush(call, ttl_ms, false);
+    }
+
+    /// The write behind [`flush`](Self::flush): `adopted` marks a version this
+    /// node adopted without its body ([`PutOpts::adopted`]).
+    fn submit_flush(&self, call: &Call, ttl_ms: i64, adopted: bool) {
         let Some(writer) = self.repl.as_ref().map(|r| &r.writer) else {
             return;
         };
         let indexes = call_index_keys(call);
-        // The authoritative `(p,b)` lives on the in-memory call (bumped by
+        // The authoritative topology lives on the in-memory call (bumped by
         // `update`); the passed `call` may be a pre-bump clone, so prefer the
         // stored topology.
-        let (call_gen, call_bgen) = self
-            .inner
-            .lock()
-            .unwrap()
-            .calls
-            .get(&call.call_ref)
-            .and_then(|c| c.topology.as_ref())
-            .or(call.topology.as_ref())
-            .map(|t| (t.gen, t.bak_gen))
-            .unwrap_or((0, 0));
-        // Embed the authoritative `(p,b)` in the BODY too, not just the frame meta.
-        // `call` is the pre-`update` clone (its `topology` counters are one bump
-        // stale), so a node that hydrates from this body would branch at the stale
-        // `(p,b)` — invisible while a backup only ever takes over a CRASHED primary
-        // (its meta is gone on reboot), but it desynced a reverse-flush against an
-        // ALIVE primary (the misroute): the backup branched one `p` behind, so the
-        // Reverse `(p,b)` apply rule rejected its flush and the live primary never
-        // reconciled (FixCallTerminateOnBackup C2/C3/C11). Keep the body's embedded
-        // version vector consistent with its `(p,b)`.
-        let body = match call.topology.as_ref() {
-            // Already consistent (the common path — `call` IS the authoritative
-            // copy, e.g. a fresh flush) → encode it directly, no clone.
-            Some(t) if t.gen == call_gen && t.bak_gen == call_bgen => self.codec.encode(call),
-            // A pre-`update` clone whose counters are one bump stale → patch the
-            // embedded `(p,b)` to the authoritative value before encoding.
-            Some(_) => {
-                let mut consistent = call.clone();
-                if let Some(t) = consistent.topology.as_mut() {
-                    t.gen = call_gen;
-                    t.bak_gen = call_bgen;
-                }
-                self.codec.encode(&consistent)
-            }
-            None => self.codec.encode(call),
+        let stored = {
+            let inner = self.locked();
+            inner.calls.get(&call.call_ref).and_then(|c| c.topology.clone())
+        }
+        .or_else(|| call.topology.clone());
+        let (call_gen, call_bgen) = stored.as_ref().map(|t| (t.gen, t.bak_gen)).unwrap_or((0, 0));
+        let Some(body) = flush_body::encode(&self.codec, &self.metrics, call, &stored) else {
+            return;
         };
         let (role, primary, mut opts) = self.store_target(&call.call_ref);
         opts.incarnation = Some(call.incarnation().to_string());
+        opts.adopted = adopted;
         // Observability: a propagating flush is one whose call carries a backup
         // peer (topology.bak from the proxy cookie). Rising on the PRIMARY proves
         // the b2bua is attempting replication — distinguishing a cookie/topology
@@ -915,7 +822,7 @@ impl CallState {
     /// namespace that matched.
     pub fn resolve_from_sip_key_sync(&self, lookup: IndexLookup<'_>) -> Option<IndexHit> {
         let mut key = lookup.key_buffer();
-        let inner = self.inner.lock().unwrap();
+        let inner = self.locked();
         for probe in lookup.probes() {
             match *probe {
                 Probe::Resolve(kind) => {
@@ -935,75 +842,10 @@ impl CallState {
         None
     }
 
-    /// **Acting-backup dialog resolution.** The call of an in-dialog request or
-    /// a CANCEL that states no `callRef` of ours, and the namespace that
-    /// matched, read from the replicating store's SIP index (the puller's
-    /// `put_call` writes `idx:<key>` → callRef) in the [`IndexLookup::probes`]
-    /// order the live index uses. A request routed per RFC 3261 §12.2.1.1
-    /// carries our Contact, `callRef` included, as its Request-URI, and a
-    /// strict router's §16.4 rewrite restores it; only an element that
-    /// rewrites the Request-URI leaves the call to be found by dialog identity.
-    /// The router awaits this read when the live index
-    /// ([`resolve_from_sip_key_sync`](Self::resolve_from_sip_key_sync)) misses,
-    /// as it does on a backup that never served the call. `Ok(None)` with no
-    /// replicating store or no replica; `Err` when a read failed, so the store
-    /// cannot say whether the dialog exists.
-    pub async fn resolve_from_replica_index(
-        &self,
-        lookup: IndexLookup<'_>,
-    ) -> Result<Option<IndexHit>, StoreError> {
-        let Some(repl) = self.repl_store() else { return Ok(None) };
-        let mut key = lookup.key_buffer();
-        let mut hit = None;
-        for probe in lookup.probes() {
-            match *probe {
-                Probe::Resolve(kind) => {
-                    lookup.write_key(kind, &mut key);
-                    hit = repl.get_index(&key).await?.map(|call_ref| IndexHit { call_ref, kind });
-                    if hit.is_some() {
-                        break;
-                    }
-                }
-                Probe::Refuse(kind) => {
-                    lookup.write_key(kind, &mut key);
-                    if repl.get_index(&key).await?.is_some() {
-                        break;
-                    }
-                }
-            }
-        }
-        if let Some(hit) = &hit {
-            self.metrics.bump_repl_takeover_resolved();
-            self.note_takeover(&hit.call_ref, "resolved");
-        }
-        Ok(hit)
-    }
-
-    /// Fold one takeover event for `call_ref` into its dead primary's episode
-    /// (ADR-0026 aggregation): the counter names what happened, the peer the
-    /// `call_ref` encodes keys the episode.
-    pub(crate) fn note_takeover(&self, call_ref: &str, counter: &'static str) {
-        self.note_takeover_count(call_ref, counter, 1);
-    }
-
-    /// [`note_takeover`](Self::note_takeover) for a counter that moves by `n`
-    /// at once — the transactions one materialisation seeded.
-    pub(crate) fn note_takeover_count(&self, call_ref: &str, counter: &'static str, n: u64) {
-        let (_, primary) = partition_of(&self.self_ordinal, call_ref);
-        self.takeover_log.record(&primary, counter, n);
-    }
-
-    /// Fold an acting-backup **self-release** into the dead peer's takeover
-    /// episode — the shedding that ends a takeover is part of the same story,
-    /// so it never gets its own line.
-    pub fn note_takeover_self_release(&self, call_ref: &str) {
-        self.note_takeover(call_ref, "self_released");
-    }
-
     /// Acquire the per-callRef serialization lock (held across a handler run).
     pub async fn lock(&self, call_ref: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let lock = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.locked();
             inner
                 .locks
                 .entry(call_ref.to_string())
@@ -1014,14 +856,7 @@ impl CallState {
     }
 
     pub fn active_count(&self) -> usize {
-        self.inner.lock().unwrap().calls.len()
-    }
-
-    /// Every callRef this node holds live. The core's teardown reads it to
-    /// release the per-call runtime state that is NOT in the store — the root
-    /// spans (ADR-0026) — and tests read it as ground truth.
-    pub fn live_call_refs(&self) -> Vec<String> {
-        self.inner.lock().unwrap().calls.keys().cloned().collect()
+        self.locked().calls.len()
     }
 
     /// The number of live per-call serialization locks. Should track
@@ -1029,21 +864,21 @@ impl CallState {
     /// orphan-reject path that forgot to [`discard_orphan`](Self::discard_orphan)
     /// (the `b2bua_store_locks` − `b2bua_store_calls` gap). Test/observability.
     pub fn lock_count(&self) -> usize {
-        self.inner.lock().unwrap().locks.len()
+        self.locked().locks.len()
     }
 
     /// The number of last-touched ledger entries. Mirrors `calls` by
     /// construction; a residue after teardown is a stamp leak (the harness
     /// `assert_fully_reaped` 4th invariant — ADR-0020).
     pub fn touched_count(&self) -> usize {
-        self.inner.lock().unwrap().touched.len()
+        self.locked().touched.len()
     }
 
     /// The number of live setup-CANCEL marks. Cleared by every release of the
     /// call that no waiting INVITE outlives; a residue after teardown is a
     /// mark leak (the harness `assert_fully_reaped` 5th invariant).
     pub fn setup_cancelled_count(&self) -> usize {
-        self.inner.lock().unwrap().setup_cancelled.values().map(Vec::len).sum()
+        self.locked().setup_cancelled.values().map(Vec::len).sum()
     }
 
     /// Push the store's map lengths into the memory-attribution gauges (one
@@ -1054,7 +889,7 @@ impl CallState {
     /// while it stays flat names the leaking map. Sampled periodically by the
     /// runner — not on the hot path.
     pub fn sample_store_gauges(&self) {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.locked();
         self.metrics.set_store_gauges(
             inner.calls.len() as u64,
             inner.sip_index.len() as u64,
@@ -1092,15 +927,15 @@ impl CallState {
             }
             cdr += call.cdr_events.len() as u64;
             timers += call.timers.len() as u64;
-            tagmap += call.tag_map.len() as u64;
+            tagmap += call.a_leg.dialogs.iter().map(|d| d.fronts.len() as u64).sum::<u64>();
             blegs += call.b_legs.len() as u64;
             let mut call_pend = 0u64;
             for leg in std::iter::once(&call.a_leg).chain(call.b_legs.iter()) {
                 dialogs += leg.dialogs.len() as u64;
-                call_pend += call::helpers::retired_count(leg) as u64;
+                call_pend += call::helpers::retired_relay_count(leg) as u64;
                 for d in &leg.dialogs {
-                    rset += d.sip.route_set.len() as u64;
-                    call_pend += d.ext.inbound_pending_requests.len() as u64;
+                    rset += d.route_set.len() as u64;
+                    call_pend += d.inbound_pending_requests.len() as u64;
                 }
             }
             pend += call_pend;

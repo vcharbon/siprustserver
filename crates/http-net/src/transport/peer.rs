@@ -18,6 +18,6 @@ pub(crate) async fn scope<F: Future>(peer: SocketAddr, answer: F) -> F::Output {
 }
 
 /// The remote address of the request being answered, when the transport knows it.
-pub(crate) fn current() -> Option<SocketAddr> {
+pub fn current() -> Option<SocketAddr> {
     PEER.try_with(|peer| *peer).ok()
 }

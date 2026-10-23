@@ -14,7 +14,9 @@ name = "b2bua-runner"
 path = "src/main.rs"
 
 [dependencies]
-b2bua = { path = "../b2bua" }
+# The scripted decision engine every call routes through (no decision backend):
+# this lab worker is no production binary.
+b2bua = { path = "../b2bua", features = ["testkit"] }
 # The shared env -> bind -> deps -> spawn -> drain runner plumbing (this binary
 # is its first consumer; downstream integrator runner binaries are the others).
 b2bua-runner-kit = { path = "../b2bua-runner-kit" }
@@ -27,8 +29,9 @@ probe-http = { path = "../probe-http" }
 announcement = { path = "../announcement" }
 call = { path = "../call" }
 tokio = { workspace = true }
-# Lifecycle logging (ADR-0026). The subscriber itself is installed by the kit's
-# `bind`; this binary only emits.
+# Lifecycle logging (ADR-0026): the binary installs the process subscriber
+# first, so a refused boot is logged.
+observe = { path = "../observe" }
 tracing = { workspace = true }
 
 # jemalloc global allocator (see the #[global_allocator] note in src/main.rs):

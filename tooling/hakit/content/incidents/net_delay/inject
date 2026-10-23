@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# netem delay on the target pods' eth0 (egress), applied in the pod netns from
+# its node. A host-network pod's netns is its node's: refused unless
+# allow_host_network. Facts as pod_freeze's.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=timed.sh
+source "$HAKIT_LIB/timed.sh"
+hk_pick_targets
+hk_refuse_host_network "$HAKIT_PARAM_ALLOW_HOST_NETWORK"
+hk_timed_inject netem pf_delay "$HAKIT_PARAM_DELAY_MS"

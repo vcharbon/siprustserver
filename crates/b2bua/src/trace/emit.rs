@@ -11,16 +11,12 @@
 
 use std::net::SocketAddr;
 
-use call::{Call, CallModelState};
+use call::{Call, TimerEntry, TimerKey};
 use observe::TraceEvent;
 
 use super::registry::{traces, RoundTripSide};
 
-/// Whether this call is traced. The ONE guard every emission site uses.
-#[inline]
-pub fn sampled(call: &Call) -> bool {
-    call.sampled == Some(true)
-}
+pub use crate::turn_notes::sampled;
 
 /// A SIP message received for the call, with its raw wire bytes.
 pub fn sip_in(call: &Call, at_ms: i64, src: SocketAddr, wire: &[u8]) {
@@ -48,44 +44,9 @@ pub fn sip_out_note(call: &Call, at_ms: i64, detail: &str) {
     record(call, "sip.out", at_ms, detail, b"");
 }
 
-/// The rule that handled an event.
-pub fn rule_fired(call: &Call, at_ms: i64, rule_id: &str) {
-    if !sampled(call) {
-        return;
-    }
-    record(call, "rule.fired", at_ms, rule_id, b"");
-}
-
-/// A rule that observed the event without claiming it: its call-ext writes
-/// landed and the chain went on.
-pub fn rule_observed(call: &Call, at_ms: i64, rule_id: &str) {
-    if !sampled(call) {
-        return;
-    }
-    record(call, "rule.observed", at_ms, rule_id, b"");
-}
-
-/// A state-machine cursor move a rule caused (ADR-0016 X1).
-pub fn rule_transition(
-    call: &Call,
-    at_ms: i64,
-    rule_id: &str,
-    machine: &str,
-    from: &str,
-    to: &str,
-) {
-    if !sampled(call) {
-        return;
-    }
-    record(call, "rule.transition", at_ms, &format!("{rule_id} {machine}: {from} -> {to}"), b"");
-}
-
-/// The call's own lifecycle transition (Active → Terminating → Terminated).
-pub fn context_transition(call: &Call, at_ms: i64, from: CallModelState, to: CallModelState) {
-    if !sampled(call) {
-        return;
-    }
-    record(call, "call.transition", at_ms, &format!("{from:?} -> {to:?}"), b"");
+/// One fact a turn's notes carried (ADR-0052 §4), on its call's trace.
+pub fn turn_fact(call_ref: &str, fact: &crate::turn_notes::TraceFact) {
+    traces().record(call_ref, TraceEvent::new(fact.kind, fact.at_ms, &fact.detail));
 }
 
 /// A limiter admit / refresh / release outcome.
@@ -94,6 +55,23 @@ pub fn limiter(call: &Call, at_ms: i64, action: &'static str, detail: &str) {
         return;
     }
     record(call, "limiter", at_ms, &format!("{action}: {detail}"), b"");
+}
+
+/// A timer armed: its key, the generation it was armed under, its deadline.
+pub fn timer_arm(call: &Call, at_ms: i64, entry: &TimerEntry) {
+    if !sampled(call) {
+        return;
+    }
+    let detail = format!("{:?} gen {} at {}", entry.key, entry.generation, entry.fire_at);
+    record(call, "timer.arm", at_ms, &detail, b"");
+}
+
+/// A timer disarmed before its fire.
+pub fn timer_cancel(call: &Call, at_ms: i64, key: &TimerKey) {
+    if !sampled(call) {
+        return;
+    }
+    record(call, "timer.cancel", at_ms, &format!("{key:?}"), b"");
 }
 
 /// One outbound HTTP round trip as a child span carrying both bodies.

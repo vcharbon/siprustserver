@@ -19,7 +19,7 @@ use media::sdp::{parse_sdp, OfferAnswerEngine};
 use media::{CommitReason, NetAddr, OpenOptions, PlayScript, PCMA};
 use media_harness::{classify, reference_clip, ClassifyOptions, ClipName};
 use scenario_harness::Harness;
-use sip_net::SimulatedSignalingNetwork;
+use sip_net_testkit::SimulatedSignalingNetwork;
 
 const ALICE_RTP: u16 = 10000;
 const BOB_RTP: u16 = 20000;

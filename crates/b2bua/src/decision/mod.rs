@@ -1,22 +1,17 @@
-//! The call-decision adapter seam — port of `CallDecisionEngine`. The B2BUA
-//! core depends only on this trait; the production HTTP adapter and the
-//! deterministic [`ScriptedDecisionEngine`] both implement it. `apply_route` /
-//! `handle_initial_invite` (the response→call-state translation) live in
-//! [`apply_route`] / [`crate::initial_invite`].
+//! The call-decision adapter seam — port of `CallDecisionEngine`. The router
+//! depends only on this trait; the production HTTP adapter and the
+//! deterministic `ScriptedDecisionEngine` (feature `testkit`) both implement
+//! it. The decision DTOs and folds are the core's, re-exported here; the
+//! consults that await an engine live in [`apply_route`] and
+//! [`crate::initial_consult`].
 
-pub(crate) mod apply_reject;
 pub mod apply_route;
-mod schemas;
+mod limiter_failover;
+#[cfg(any(test, feature = "testkit"))]
 pub mod test_adapter;
 
-pub use b2bua_sdk::header_update::{header_lines, payload_lines, HeaderUpdate, SipHeaderUpdates};
-pub use schemas::{
-    default_platform_features, read_stated_port, BodyUpdate, CallFailureRequest,
-    CallFailureResponse, CallReferRequest, CallReferResponse, CallReleaseRequest,
-    CallReleaseResponse, CallSnapshot, CallTreatment, FailureInfo, FeatureActivations, LegSnapshot,
-    NewCallRequest, NewCallResponse, RedirectContact, RedirectDecision, RejectDecision,
-    RouteDecision, SipDestination,
-};
+pub use b2bua_core::decision::*;
+#[cfg(any(test, feature = "testkit"))]
 pub use test_adapter::{default_call_refer, ReferOutcome, ReleaseOutcome, ScriptedDecisionEngine};
 
 use async_trait::async_trait;
@@ -52,20 +47,6 @@ pub trait CallDecisionEngine: Send + Sync {
     ) -> Result<CallReleaseResponse, CallDecisionError> {
         Ok(CallReleaseResponse::Release { label: None, service_ext: Default::default() })
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum CallDecisionError {
-    #[error("decision backend unavailable: {0}")]
-    Unavailable(String),
-    /// The engine read no decision and refuses the call with a final it
-    /// states. The initial and failover paths answer it exactly as a reject
-    /// decision (same code, reason policy and headers) and mark no decision:
-    /// the final is the stack's own. Any other consult treats it as
-    /// [`CallDecisionError::Unavailable`], and [`DeadlineDecisionEngine`]
-    /// counts it in the backend's unavailability episode.
-    #[error("decision refused with {code}")]
-    Refused { code: u16, reason: Option<String>, update_headers: Option<SipHeaderUpdates> },
 }
 
 /// Hard per-round-trip deadline on the decision backend (ADR-0022). The core
@@ -131,7 +112,7 @@ impl DeadlineDecisionEngine {
         }
         std::sync::Arc::new(Self {
             inner,
-            deadline: std::time::Duration::from_millis(timeout_ms as u64),
+            deadline: std::time::Duration::from_millis(u64::try_from(timeout_ms).unwrap_or(0)),
             breaches: crate::lifecycle::backend_waves("decision-engine"),
         })
     }

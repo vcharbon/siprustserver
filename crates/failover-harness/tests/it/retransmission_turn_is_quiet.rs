@@ -43,7 +43,7 @@ use failover_harness::{
     ProxySut, ReplicatedB2buaSut, WorkerHealth,
 };
 use repl_net::frame::{Frame, Op};
-use repl_net::transport::Direction;
+use repl_net_testkit::Direction;
 use scenario_harness::Agent;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::types::SipResponse;
@@ -180,7 +180,8 @@ async fn service_peers(alice: &Agent, bob: &Agent, hop: SocketAddr) {
         match msg {
             SipMessage::Response(r) if r.status() == 200 => {}
             SipMessage::Request(req) if req.method() == Method::Options => {
-                let ok = generate_response(&req, 200, "OK", &GenerateResponseOpts::default());
+                let ok = generate_response(&req, 200, "OK", &GenerateResponseOpts::default())
+                    .expect("a 200");
                 alice.try_send_datagram(&serialize(&SipMessage::Response(ok)), hop).await.unwrap();
             }
             SipMessage::Response(r) => panic!("alice read an unexpected {} response", r.status()),

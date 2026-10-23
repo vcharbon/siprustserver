@@ -12,11 +12,12 @@ use super::answer::{
     respond_200_sdp,
 };
 use super::endpoint::{Disposition, SUBFLOW_REALIGN};
+use super::facts::record_request;
 use super::ledger::{ObligationKey, ObligationKind};
 use super::response::react_response;
 use super::runner::{ActorState, ParkedRequest};
 use super::script::{scripted_wants_cancel, scripted_wants_in_dialog};
-use super::state::{Observation, SubflowState};
+use super::state::{LegPhase, Observation, SubflowState};
 use crate::{Inbound, ServerTxn, StepError};
 
 /// The CANCEL automatic's 487 half (RFC 3261 §9.2), shared by the live CANCEL
@@ -42,6 +43,7 @@ pub(super) async fn cancel_pending_initial(
         .map(|ta| ta.uas)
         .or_else(|| st.pending_prack_answer.take())
         .or_else(|| st.held_silent.take())
+        .or_else(|| st.held.take())
         // A script-BOUND initial INVITE (claimed by `ExpectRequest{Initial}`,
         // provisionals already sent on the bound txn) with no scripted CANCEL
         // claim: the automatic mirrors the parked path so the peer never
@@ -80,6 +82,10 @@ pub(super) async fn cancel_pending_initial(
         }
         st.obs.record(Observation::LegTerminated { leg: st.role }, now);
         st.scope.mark_terminated();
+        // A held INVITE's goals act on the dialog the CANCEL just prevented.
+        if matches!(st.disposition, Disposition::Held) {
+            st.goals.abandon();
+        }
     }
     Ok(())
 }
@@ -102,6 +108,41 @@ async fn react_request(st: &mut ActorState<'_>, uas: ServerTxn) -> Result<(), St
 
     if is_initial_invite {
         return apply_disposition(st, uas).await;
+    }
+
+    // The UA's dialog table judged the request when it was sighted (RFC 3261
+    // §12.2.2): one on no dialog or an ended one draws 481, one whose CSeq
+    // goes backwards 500, whatever a script expects; a CSeq skip is taken.
+    // The verdict stays recorded, so it still fails the run unless opted in.
+    if method != "ACK" {
+        if let Some((code, reason)) =
+            st.agent.dialog_verdict(uas.request()).and_then(|v| v.kind.refusal())
+        {
+            let mut uas = uas;
+            uas.respond(code, reason).try_send().await?;
+            let (call_id, cseq) = (uas.request().call_id().to_string(), uas.request().cseq().seq());
+            st.obs.record(
+                Observation::RefusedInDialog { leg: st.role, call_id, cseq },
+                Instant::now(),
+            );
+            st.obs.record(
+                Observation::ServicedStray {
+                    leg: st.role,
+                    method,
+                    action: if code == 481 {
+                        "refused 481 by the dialog table"
+                    } else {
+                        "refused 500 by the dialog table"
+                    },
+                },
+                Instant::now(),
+            );
+            return Ok(());
+        }
+    }
+
+    if method != "ACK" && method != "CANCEL" {
+        record_request(st, uas.request());
     }
 
     // Scripted CANCEL park-or-react (ADR-0024): the CANCEL hop's `200` stays
@@ -189,9 +230,8 @@ pub(super) async fn react_in_dialog_request(
             // (a reject-final's hop-ACK that surfaced unclaimed, or a recovered
             // answer-ACK landing after the leg was BYE-terminated) — closing a
             // never-opened key is a harmless no-op.
-            let already_terminated = st
-                .obs
-                .with_snapshot(|s| s.leg(st.role).phase() == super::state::LegPhase::Terminated);
+            let already_terminated =
+                st.obs.with_snapshot(|s| s.leg(st.role).phase() == LegPhase::Terminated);
             if already_terminated {
                 st.obs.record(
                     Observation::ResponseObserved {
@@ -233,14 +273,17 @@ pub(super) async fn react_in_dialog_request(
                 st.feed.on_ack_rx.stamp(st.ctx);
             }
         }
-        // A BYE tears this leg down — UNLESS it is addressed to a LOSING fork's
-        // tag (C1/E3: the caller ACK+BYEs a losing fork's late 200, §13.2.2.4):
-        // that BYE ends only the abandoned early fork, the winning dialog lives
-        // on, so it is 200'd (and its CSeq folded into the dialog stream) but
-        // the leg is NOT terminated.
+        // A BYE tears this leg down — UNLESS it names a dialog other than the
+        // leg's confirmed one (C1/E3: the caller ACK+BYEs a losing fork's late
+        // 200, §13.2.2.4): that BYE ends only the losing fork's dialog, the
+        // winning dialog lives on, so it is 200'd (and its CSeq folded into the
+        // dialog stream) but the leg is NOT terminated.
         "BYE" => {
-            let is_fork_teardown =
-                uas.request().to().tag().is_some_and(|t| st.fork_loser_tags.contains(t));
+            let is_fork_teardown = st
+                .dialogs
+                .confirmed
+                .as_ref()
+                .is_some_and(|d| uas.request().to().tag().is_some_and(|t| t != d.local_tag()));
             st.ctx.anchor(&st.agent, "bye", uas.request());
             uas.respond(200, "OK").try_send().await?;
             st.obs.record(
@@ -390,9 +433,18 @@ pub(super) async fn react_in_dialog_request(
         // FORKING callee (C1/E3) answers only on the WINNER fork's PRACK — a
         // losing fork's PRACK (identified by its To-tag) is 200'd and absorbed.
         "PRACK" => {
+            // After this leg's own final (or its BYE) the early dialog the
+            // PRACK names is gone: 481 (RFC 3261 §12.2.2, RFC 3262 §3).
+            if st.obs.with_snapshot(|s| s.leg(st.role).phase() == LegPhase::Terminated) {
+                uas.respond(481, "Call/Transaction Does Not Exist").try_send().await?;
+                return Ok(());
+            }
             st.ctx.anchor(&st.agent, "prack", uas.request());
             let prack_tag = uas.request().to().tag().map(str::to_owned);
             uas.respond(200, "OK").try_send().await?;
+            if let Some(tag) = &prack_tag {
+                st.unpracked.remove(tag);
+            }
             st.obs.record(
                 Observation::InDialogRequest {
                     leg: st.role,
@@ -410,9 +462,10 @@ pub(super) async fn react_in_dialog_request(
                 maybe_answer_held_invite(st).await?;
                 return Ok(());
             }
-            let releases_answer = match (&st.fork_answer, prack_tag.as_deref()) {
-                // Forking: only the winner fork's PRACK releases the 200.
-                (Some(f), Some(tag)) => tag == f.winner_tag,
+            let releases_answer = match (&mut st.fork_answer, prack_tag.as_deref()) {
+                // Forking: the winner fork's PRACK (or, for an unrung winner,
+                // the last fork's PRACK) releases the 200.
+                (Some(f), Some(tag)) => f.releases_on_prack(tag),
                 (Some(_), None) => false,
                 // Non-forking reliable answer: any PRACK releases (as before).
                 (None, _) => true,

@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Delay the file operations under volume_path of the target pods by delay_ms
+# (percent of them): a Chaos Mesh IOChaos latency on a mounted volume. Facts:
+# the injected instant and pods.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=chaos-mesh.sh
+source "$HAKIT_LIB/chaos-mesh.sh"
+at="$(jq -cn --arg mode "$(hk_cm_mode)" --argjson sel "$(hk_cm_selector "$HAKIT_TARGET_SELECTOR")" \
+  --arg vol "$HAKIT_PARAM_VOLUME_PATH" --arg delay "${HAKIT_PARAM_DELAY_MS}ms" --argjson pct "$HAKIT_PARAM_PERCENT" \
+  --arg c "$HAKIT_PARAM_CONTAINER" \
+  '{apiVersion: "chaos-mesh.org/v1alpha1", kind: "IOChaos",
+    spec: ({action: "latency", mode: $mode, selector: $sel, volumePath: $vol, path: ($vol + "/**"),
+            delay: $delay, percent: $pct}
+           + (if $c == "" then {} else {containerNames: [$c]} end))}' \
+  | hk_cm_apply iochaos "$HAKIT_PARAM_INJECT_WAIT_S")"
+jq -cn --argjson at "$at" --argjson pods "$(hk_cm_pods iochaos)" '{injected_at_ms: $at, pods: $pods}'

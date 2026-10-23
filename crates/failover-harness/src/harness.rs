@@ -35,29 +35,35 @@ use b2bua::decision::{CallDecisionEngine, ScriptedDecisionEngine};
 use b2bua::drain::{DrainBounds, DrainExit, DrainOutcome};
 use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::metrics::B2buaMetrics;
-use b2bua::repl::{Changelog, ReplicatingCallStore};
+use b2bua::repl::ReplicatingCallStore;
 use b2bua::rules::ServiceDef;
 use b2bua::store::{CallStore, PartitionRole, PutOpts};
 use b2bua::{B2buaCore, ReplicationSetup};
 use b2bua_harness::{spawn_proxy_core, B2buaSpawnParams};
-use call::{CallBodyCodec, MsgpackCodec, TimerEntry, TimerType};
-
+use call::{CallBodyCodec, MsgpackCodec, TimerKey, TimerType};
 use ha_harness::{Marker, ReplReport};
-use repl_net::transport::{
-    Fault, RecordingReplicationNetwork, ReplicationNetwork, SimulatedReplicationNetwork,
-};
+use observe::NodeScope;
+use repl_net::transport::ReplicationNetwork;
+use repl_net_testkit::{RecordingReplicationNetwork, SimulatedReplicationNetwork};
 use scenario_harness::{Agent, Harness};
 use sip_clock::Clock;
 use sip_proxy::health::{HealthProbe, HealthProbeConfig};
-use sip_proxy::registry::simulated::SimulatedWorkerRegistry;
-use sip_proxy::registry::{WorkerHealth, WorkerRegistry};
-use sip_proxy::{ProxyAddr, ProxyMetrics};
+use sip_proxy::registry::WorkerRegistry;
 use sip_txn::IdGen;
-use tokio::task::JoinHandle;
 use topology::{Peer, SimulatedMembership};
 
-use crate::rfc_acceptance::{lane_details, Finding, RfcAcceptance};
+use crate::rfc_acceptance::RfcAcceptance;
 use crate::views::{Belief, Incarnation, ViewLedger};
+
+mod acceptance;
+mod membership;
+mod proxy_sut;
+mod release_all;
+mod repl_faults;
+mod repl_wiring;
+mod rfc_audit;
+pub use proxy_sut::ProxySut;
+use repl_wiring::ReplWiring;
 
 /// Changelog TTLs `(tombstone, dead_peer)`: long enough that a backed-up call
 /// survives the whole scenario, short enough that dead-peer auto-clean is
@@ -67,63 +73,6 @@ const DEFAULT_TTLS: (i64, i64) = (60_000, 600_000);
 // ===========================================================================
 // ReplicatedB2buaSut — a replicating B2BUA worker on the failover fabric
 // ===========================================================================
-
-/// The per-node repl wiring kept so a crashed node can be rebuilt in place
-/// (same ordinal, same repl listen addr, fresh empty store, higher gen).
-struct ReplWiring {
-    /// Shared (recording) replication fabric every node listens/connects on.
-    network: Arc<dyn ReplicationNetwork>,
-    /// The cluster's LIVE `ordinal → repl addr` map, shared by every node: the
-    /// resolver reads it per connect attempt (ADR-0012 D3), so re-pointing an
-    /// ordinal at a replacement's listen address reaches the running peers.
-    addr_map: Arc<Mutex<HashMap<String, SocketAddr>>>,
-    /// The peers this node pulls from (its membership snapshot).
-    peers: Vec<Peer>,
-    /// This node's repl listen address (stable across reboots).
-    listen_addr: SocketAddr,
-    ttls: (i64, i64),
-}
-
-impl ReplWiring {
-    /// Build the `ReplicationSetup` for a (re)spawn at incarnation `gen` over a
-    /// fresh empty [`ReplicatingCallStore`]. Also returns the concrete
-    /// [`SimulatedMembership`] handle so a scenario can drive membership deltas
-    /// (e.g. remove a killed peer, the way k8s drops a dead pod's endpoint — the
-    /// signal the survivor's supervisor turns into an eager takeover).
-    fn setup(
-        &self,
-        gen: u64,
-        clock: &Clock,
-    ) -> (ReplicationSetup, Arc<ReplicatingCallStore>, Arc<SimulatedMembership>) {
-        let changelog = Changelog::new(gen, clock.clone()).with_ttls(self.ttls.0, self.ttls.1);
-        let store = Arc::new(ReplicatingCallStore::with_changelog(changelog, clock.clone()));
-        let sim_membership =
-            Arc::new(SimulatedMembership::with_clock(self.peers.clone(), clock.clone()));
-        let membership: Arc<dyn topology::Membership> = sim_membership.clone();
-        let addr_map = self.addr_map.clone();
-        // The resolver is now async (ADR-0012 D3); wrap the cluster's live
-        // ordinal→addr map in the sync-closure adapter. It is READ per connect
-        // attempt, so a peer that moved (a replacement on a fresh listen addr)
-        // is reached on the next reconnect without respawning anything.
-        let addr_resolver: b2bua::repl::AddrResolver =
-            Arc::new(b2bua::repl::FnPeerResolver(move |peer: &Peer| {
-                *addr_map
-                    .lock()
-                    .unwrap()
-                    .get(&peer.ordinal)
-                    .unwrap_or_else(|| panic!("no repl addr for peer {}", peer.ordinal))
-            }));
-        let setup = ReplicationSetup {
-            network: self.network.clone(),
-            membership,
-            store: store.clone(),
-            listen_addr: self.listen_addr,
-            addr_resolver,
-            incarnation_gen: gen,
-        };
-        (setup, store, sim_membership)
-    }
-}
 
 /// A running replicating B2BUA worker bound on the failover harness's SIP fabric
 /// and replicating over the shared repl fabric. Knows how to crash itself (abort
@@ -433,6 +382,11 @@ impl ReplicatedB2buaSut {
         self.core.as_ref().and_then(|c| c.live_call(call_ref))
     }
 
+    /// Post an in-flight `event` to this node's router; nothing while crashed.
+    pub fn post_event(&self, event: b2bua::CallEvent) {
+        let _ = self.core.as_ref().map(|core| core.post_event(event));
+    }
+
     /// HARNESS SURGERY (see `B2buaCore::drop_live_copy`): drop the live
     /// in-memory copy of `call_ref` with NO store mutation — the deterministic
     /// recreation of the rebooted-primary "imported into `pri:{self}` but not
@@ -465,12 +419,7 @@ impl ReplicatedB2buaSut {
         let codec = MsgpackCodec::new();
         let mut call = codec.decode(&body).expect("replica body decodes");
         let leg = call.b_legs.first().expect("replicated call has a b-leg").leg_id.clone();
-        call.timers.push(TimerEntry {
-            id: format!("{:?}:{leg}", TimerType::NoAnswer),
-            timer_type: TimerType::NoAnswer,
-            fire_at: fire_at_ms,
-            leg_id: Some(leg.clone()),
-        });
+        call::helpers::arm_timer(&mut call, TimerKey::leg(TimerType::NoAnswer, &leg), fire_at_ms);
         let (p, b) =
             self.store.current_cv(role, primary, call_ref).expect("replica version vector present");
         self.store
@@ -478,7 +427,7 @@ impl ReplicatedB2buaSut {
                 role,
                 primary,
                 call_ref,
-                codec.encode(&call),
+                codec.encode(&call).expect("replica body encodes"),
                 &[],
                 600_000,
                 p,
@@ -677,10 +626,10 @@ impl ReplicatedB2buaSut {
 
     /// Drive a `MemberDelta::Removed` for `ordinal` into THIS node's membership —
     /// the simulation of k8s dropping a killed pod's endpoint from the survivor's
-    /// view. The node's supervisor reconciles it to a Park. Under reactive-only
-    /// takeover (ADR-0014) this drives no takeover: the survivor takes a dialog
-    /// over only when the proxy reroutes its in-dialog traffic. It keeps the
-    /// survivor's membership view honest across a kill.
+    /// view. The node's supervisor reconciles it to a Park, and the node takes
+    /// over the departed peer's calls with an INVITE in flight (ADR-0047); a
+    /// quiet dialog is taken over only when the proxy reroutes its traffic.
+    /// A kill the peers are not told of (ADR-0031 cases 3a, 4) skips this.
     pub fn simulate_peer_removed(&self, ordinal: &str) {
         self.membership.remove(ordinal);
     }
@@ -737,7 +686,7 @@ impl ReplicatedB2buaSut {
         let new_addr = self.reboot_sip_addr();
         self.sip_addr = new_addr;
         self.sip_bind = new_addr.to_string();
-        let (setup, store, membership) = self.wiring.setup(self.gen, &self.clock);
+        let (setup, store, membership) = self.wiring.setup(self.gen, &self.clock).await;
         self.store = store;
         self.membership = membership;
         let core = self.spawn_core(Some(setup)).await;
@@ -813,9 +762,12 @@ impl ReplicatedB2buaSut {
             wire_faults: None,
             capacity: Some(b2bua::capacity::CapacityGate::new(Arc::new(self.system.probe()))),
             deferred_ceilings: None,
+            // Each incarnation names itself by its ledger key in the failure
+            // dump's log lines and per-call trace facts.
+            node: Some(self.incarnation_key()),
         };
         b2bua_harness::spawn_b2bua_core(endpoint, params, |config| {
-            // EXACT production (kind) timers — `deploy/k8s/manifests/20-worker.yaml`.
+            // EXACT production (kind) timers — `deploy/helm/siprust/values-kind.yaml`.
             // The keepalive cells must be representative: a long quiescent call is
             // flushed (and its backup TTL refreshed) only by its in-dialog OPTIONS,
             // so the dead-peer/limiter-refresh/backup-TTL cadence only matches
@@ -838,111 +790,6 @@ impl ReplicatedB2buaSut {
 }
 
 // ===========================================================================
-// Proxy SUT — a real LoadBalancer over a SimulatedWorkerRegistry
-// ===========================================================================
-
-/// A running load-balancing proxy SUT + its driver-side registry handle, so the
-/// scenario can flip a worker's health (dead on crash, alive+ready on recovery).
-pub struct ProxySut {
-    addr: SocketAddr,
-    /// Dual-face mode: the external (caller-plane) face's address. `None` for
-    /// the classic single-face proxy.
-    ext_addr: Option<SocketAddr>,
-    registry: SimulatedWorkerRegistry,
-    metrics: Arc<ProxyMetrics>,
-    task: JoinHandle<()>,
-    /// The real OPTIONS health-probe loop (ADR-0012). `Some` when the proxy was
-    /// stood up via [`FailoverHarness::spawn_proxy_with_health_probe`]: health is
-    /// then driven by actual probe replies (200→Alive, 503 not-ready→NotReady)
-    /// instead of `set_health`, so a rebooted worker's Unknown→NotReady→Alive
-    /// lifecycle — the state the response-path reverse-failover branches on — is
-    /// exercised for real. Aborted on drop.
-    probe_task: Option<JoinHandle<()>>,
-}
-
-impl ProxySut {
-    /// The proxy's listen address (alice/bob send through it). In dual-face
-    /// mode this is the INTERNAL face (the workers' outbound proxy target).
-    pub fn addr(&self) -> SocketAddr {
-        self.addr
-    }
-
-    /// Dual-face mode: the EXTERNAL face's address — what callers dial
-    /// `through(..)`. Panics on a single-face proxy (a test asking for the
-    /// external face of a single-face proxy is a topology bug).
-    pub fn ext_addr(&self) -> SocketAddr {
-        self.ext_addr.expect("ext_addr on a single-face proxy — spawn with spawn_proxy_dual")
-    }
-
-    /// The proxy's metrics.
-    pub fn metrics(&self) -> &Arc<ProxyMetrics> {
-        &self.metrics
-    }
-
-    /// Mark a worker's health (e.g. `Dead` on crash, `Alive` on recovery).
-    pub fn set_health(&self, ordinal: &str, health: WorkerHealth) {
-        self.registry.set_health(ordinal, health);
-    }
-
-    /// Re-learn a worker's address — the proxy's k8s-EndpointSlice path. On reboot
-    /// a pod returns at a NEW IP, and in-dialog routing only follows it once the
-    /// registry resolves the worker ordinal (carried in the signed Record-Route
-    /// cookie) to the new address. Without this, a cookie-routed in-dialog request
-    /// — e.g. the 200 coming back for the rebooted worker's own keepalive OPTIONS —
-    /// would target the dead address and be lost.
-    pub fn set_address(&self, ordinal: &str, addr: SocketAddr) {
-        self.registry.set_address(ordinal, ProxyAddr::new(addr.ip().to_string(), addr.port()));
-    }
-
-    /// Drop `ordinal` from the proxy's MEMBERSHIP — the endpoint is gone from
-    /// its view entirely (not a health annotation: the ordinal no longer
-    /// resolves, so nothing routes to it and no cookie can name it). The
-    /// worker's process is untouched.
-    pub fn remove_worker(&self, ordinal: &str) {
-        self.registry.remove(ordinal);
-    }
-
-    /// Publish `ordinal` at `addr` in the proxy's membership, health `Unknown`
-    /// — a freshly observed endpoint the probe has not judged yet. Use
-    /// [`set_health`](Self::set_health) to state a judged health.
-    pub fn add_worker(&self, ordinal: &str, addr: SocketAddr) {
-        self.registry.add(sip_proxy::registry::WorkerEntry {
-            id: ordinal.to_string(),
-            address: ProxyAddr::new(addr.ip().to_string(), addr.port()),
-            health: WorkerHealth::Unknown,
-            draining_since: None,
-            first_seen_at_ms: None,
-        });
-    }
-
-    /// The health the proxy holds for the worker bound at `addr`, an address
-    /// that left the set included (`Dead` for Timer H after a departure; `None`
-    /// once its window closed or for an address the pool never served).
-    pub fn health_at(&self, addr: SocketAddr) -> Option<WorkerHealth> {
-        self.registry
-            .lookup_by_address(&ProxyAddr::new(addr.ip().to_string(), addr.port()))
-            .map(|w| w.health)
-    }
-
-    /// The proxy's CURRENT health view of a worker (as the registry holds it).
-    /// When a health probe is running this reflects real probe replies; callers
-    /// poll it to wait for a rebooted worker to be re-confirmed `Alive` by the
-    /// probe (rather than asserting it via `set_health`).
-    pub fn health(&self, ordinal: &str) -> Option<WorkerHealth> {
-        self.registry.resolve(ordinal).map(|w| w.health)
-    }
-}
-
-impl Drop for ProxySut {
-    fn drop(&mut self) {
-        self.task.abort();
-        if let Some(p) = self.probe_task.take() {
-            p.abort();
-        }
-    }
-}
-
-// ===========================================================================
 // FailoverHarness — the orchestrator
 // ===========================================================================
 
@@ -961,6 +808,9 @@ pub struct FailoverHarness {
     /// `write_unified_report`) disarms it so we never double-write. A `Cell` (not
     /// atomic) is enough — the whole harness lives on one current-thread test task.
     report_on_drop: std::cell::Cell<bool>,
+    /// Where this run starts in the process's record of model-invariant
+    /// violations: its Drop judges only the ones its own workers met.
+    since: b2bua_harness::model_gate::Mark,
     /// Recording decorator over the repl sim fabric (the repl capture sink).
     repl_recording: RecordingReplicationNetwork,
     /// The underlying repl sim fabric — fault controls go here directly.
@@ -1109,16 +959,19 @@ impl FailoverHarness {
     /// repl listen addr is assigned by declaration order and is stable across
     /// reboots).
     pub fn new(name: &str, worker_ordinals: &[&str]) -> Self {
+        // Every call's rule trace reaches a failing cell's dump.
+        b2bua_harness::failure_view::trace_every_call();
         let clock = Clock::test_at(0);
         // SIP plane: a recording harness with 1 ms transit (0 is coerced anyway).
         let sip_cut: Arc<Mutex<std::collections::BTreeSet<SocketAddr>>> =
             Arc::new(Mutex::new(std::collections::BTreeSet::new()));
         let cut = sip_cut.clone();
-        let fault: sip_net::SendFault = Arc::new(move |src: SocketAddr, dst: SocketAddr| {
-            let cut = cut.lock().unwrap();
-            (cut.contains(&src) || cut.contains(&dst))
-                .then(|| format!("{src} is cut off the signalling fabric"))
-        });
+        let fault: sip_net_testkit::SendFault =
+            Arc::new(move |src: SocketAddr, dst: SocketAddr| {
+                let cut = cut.lock().unwrap();
+                (cut.contains(&src) || cut.contains(&dst))
+                    .then(|| format!("{src} is cut off the signalling fabric"))
+            });
         let harness = Harness::with_transit_delay_and_send_fault(name, 1, Some(fault)).describe(
             "S10b goal-2 simulated failover: alice → proxy → 2 replicating b2buas \
              over the SIM SIP + SIM repl fabrics under one fake clock.",
@@ -1138,7 +991,7 @@ impl FailoverHarness {
         // marker appended just before the bootstrap pull it triggers sorts first
         // even though both land on the same paused-clock millisecond.
         let event_seq = harness.recording().recorder().sequencer();
-        let capture_seq: repl_net::transport::CaptureSeq = {
+        let capture_seq: repl_net_testkit::CaptureSeq = {
             let s = event_seq.clone();
             Arc::new(move || s.next())
         };
@@ -1166,6 +1019,7 @@ impl FailoverHarness {
             clock: clock.clone(),
             name: name.to_string(),
             report_on_drop: std::cell::Cell::new(true),
+            since: b2bua_harness::model_gate::Mark::now(),
             repl_recording,
             repl_sim,
             repl_resolver: Arc::new(Mutex::new(repl_addrs.clone())),
@@ -1265,7 +1119,7 @@ impl FailoverHarness {
     /// The one deviation this exists for is [`RULE_CSEQ_IN_DIALOG_ORDER`] across a
     /// takeover window: ADR-0014's accepted keepalive-vs-backup-transaction
     /// overlap. Two owners of one leg (a proxy-Dead-but-alive primary and/or a
-    /// stale-hydrated backup) each mint `dialog.sip.local_cseq + 1`; `(p,b)` rejects
+    /// stale-hydrated backup) each mint `dialog.our_cseq + 1`; `(p,b)` rejects
     /// the loser, but its mutation already reached the wire. The reused number rides
     /// a FRESH `branch`, so a compliant UAS does not fold it away as a
     /// retransmission: it sees a new server transaction whose sequence number did
@@ -1373,20 +1227,19 @@ impl FailoverHarness {
     }
 
     /// Stand up the real load-balancing proxy SUT at `addr` over a
-    /// [`SimulatedWorkerRegistry`] holding both workers (alive). HRW selection
-    /// keys off Call-ID + the alive set; the scenario marks a worker dead/alive
-    /// via [`ProxySut::set_health`].
+    /// [`SimulatedWorkerRegistry`](sip_proxy::registry::simulated::SimulatedWorkerRegistry)
+    /// holding both workers (alive). HRW selection keys off Call-ID + the alive
+    /// set; the scenario marks a worker dead/alive via [`ProxySut::set_health`].
     pub async fn spawn_proxy(&self, addr: &str, workers: &[(&str, SocketAddr)]) -> ProxySut {
         self.spawn_proxy_inner(addr, workers, None).await
     }
 
     /// Like [`spawn_proxy`](Self::spawn_proxy) but with the REAL OPTIONS health
-    /// probe running on `probe_addr` (ADR-0012). Health is then driven by actual
-    /// probe replies from the workers — `200`→`Alive`, `503` with Reason
-    /// `not-ready`→`NotReady` — NOT by `set_health`. This makes the harness
-    /// faithful to the production active/passive LB proxy: a freshly-rebooted
-    /// worker is observed `Unknown`→`NotReady`→`Alive` as its replication drains,
-    /// so the reclaimed call's first keepalive-200 round-trips while the worker is
+    /// probe running on `probe_addr` (ADR-0012): health and acceptance follow
+    /// the workers' probe replies (ADR-0050 §3), not `set_health`, as on the
+    /// production LB proxy. A freshly-rebooted worker stays `Unknown` while it
+    /// answers `503` and reads `Alive` once its replication drained, so the
+    /// reclaimed call's first keepalive-200 round-trips while the worker is
     /// genuinely non-`Alive` — exercising the response-path reverse-failover guard
     /// (`core/response.rs`) the code ties to the long-call-on-reboot teardown.
     pub async fn spawn_proxy_with_health_probe(
@@ -1412,7 +1265,8 @@ impl FailoverHarness {
         // the SAME load observer the strategy reads (fed by the probe's
         // `X-Overload` payloads below — failover-only).
         let (ep, sock) = self.harness.bind_sut("proxy", addr).await;
-        let parts = spawn_proxy_core(ep, sock, workers, self.clock.clone());
+        let node = NodeScope::named("proxy");
+        let parts = node.enter(|| spawn_proxy_core(ep, sock, workers, self.clock.clone()));
         let b2bua_harness::ProxyCoreParts { addr: sock, registry, metrics, observer, task } = parts;
 
         // Optional REAL health probe: its own bound endpoint on the fabric, the
@@ -1441,7 +1295,7 @@ impl FailoverHarness {
                 Arc::new(IdGen::seeded(0x9809BE)),
                 HealthProbeConfig { interval_ms: 10_000, timeout_ms: 1_500, threshold: 2 },
             );
-            Some(tokio::spawn(probe.run()))
+            Some(tokio::spawn(node.scope(probe.run())))
         } else {
             None
         };
@@ -1449,7 +1303,7 @@ impl FailoverHarness {
         // The registry is the `proxy` observer's source — the ledger samples it
         // for presence ⊕ health after every advance chunk.
         self.views.attach_proxy(registry.clone());
-        ProxySut { addr: sock, ext_addr: None, registry, metrics, task, probe_task }
+        ProxySut { addr: sock, ext_addr: None, registry, metrics, task, probe_task, node }
     }
 
     /// Stand up a **dual-face** load-balancing proxy SUT: the internal face at
@@ -1492,17 +1346,28 @@ impl FailoverHarness {
             int_cidrs: sip_proxy::FaceCidrs::parse(int_cidrs)
                 .unwrap_or_else(|e| panic!("bad dual-face int CIDRs {int_cidrs:?}: {e}")),
         };
-        let parts = b2bua_harness::spawn_proxy_core_with(
-            int_ep,
-            int_sock,
-            Some(external),
-            workers,
-            self.clock.clone(),
-            id_seed,
-        );
+        let node = NodeScope::named(name);
+        let parts = node.enter(|| {
+            b2bua_harness::spawn_proxy_core_with(
+                int_ep,
+                int_sock,
+                Some(external),
+                workers,
+                self.clock.clone(),
+                id_seed,
+            )
+        });
         let b2bua_harness::ProxyCoreParts { addr: sock, registry, metrics, observer: _, task } =
             parts;
-        ProxySut { addr: sock, ext_addr: Some(ext_sock), registry, metrics, task, probe_task: None }
+        ProxySut {
+            addr: sock,
+            ext_addr: Some(ext_sock),
+            registry,
+            metrics,
+            task,
+            probe_task: None,
+            node,
+        }
     }
 
     /// The recorded SIP wire entries so far (every send paired with its
@@ -1510,8 +1375,8 @@ impl FailoverHarness {
     /// the dual-face tests assert per-face source-address discipline on it
     /// (every datagram a caller receives originates from the external face's
     /// bind, every worker-bound one from the internal face's).
-    pub fn sip_entries(&self) -> Vec<sip_net::RecordedSipEntry> {
-        sip_net::to_sip_entries(&self.harness.recording().channel().snapshot())
+    pub fn sip_entries(&self) -> Vec<sip_net_testkit::RecordedSipEntry> {
+        sip_net_testkit::to_sip_entries(&self.harness.recording().channel().snapshot())
     }
 
     /// Bind a replicating B2BUA worker `ordinal` (declared in [`new`](Self::new))
@@ -1679,7 +1544,7 @@ impl FailoverHarness {
             alive: Arc::new(AtomicBool::new(true)),
             system: b2bua::capacity::simulated().1,
         };
-        let (setup, store, membership) = sut.wiring.setup(gen, &node_clock);
+        let (setup, store, membership) = sut.wiring.setup(gen, &node_clock).await;
         sut.store = store;
         sut.membership = membership;
         let core = sut.spawn_core(Some(setup)).await;
@@ -1708,43 +1573,6 @@ impl FailoverHarness {
         });
     }
 
-    /// The replication listen address of `ordinal`'s current incarnation — the
-    /// one the cluster's resolver hands out, so a fault names the node that is
-    /// serving now, a replacement included.
-    fn repl_listen(&self, ordinal: &str) -> SocketAddr {
-        self.repl_resolver.lock().unwrap().get(ordinal).copied().unwrap_or_else(|| {
-            panic!("{ordinal} has no replication listen address in the cluster's resolver")
-        })
-    }
-
-    /// Partition two workers on the repl fabric, both directions and for every
-    /// stream between them — the ones their pullers already opened, and any they
-    /// try to open while the cut lasts. The fabric attributes each stream to
-    /// the node that opened it (at `connect`, through the node's own handle)
-    /// and holds delivery on the owner pair; a connect across the cut is
-    /// refused, so a reconnect from a fresh ephemeral local does not slip
-    /// through and the puller never reads the peer as reached. A held
-    /// direction buffers in order and flushes on [`heal`](Self::heal). Names
-    /// each ordinal's current incarnation. Marker.
-    pub fn partition(&mut self, a: &str, b: &str) {
-        let (aa, ba) = (self.repl_listen(a), self.repl_listen(b));
-        self.repl_sim.apply_fault(Fault::Partition { a: aa, b: ba });
-        self.mark(a, Some(b), "partition", "");
-    }
-
-    /// Delay delivery by `ms` on every replication stream from `from` to `to`,
-    /// present and future, in that direction — the frames `from`'s listener
-    /// serves down the streams `to`'s pullers opened, and the ones `from`'s own
-    /// pullers send up to `to`. A flush `from` writes lands on `to` no earlier
-    /// than `ms` after it left; a stream `to` reopens later inherits the delay.
-    /// Names each ordinal's current incarnation; lifted by
-    /// [`heal`](Self::heal). Marker.
-    pub fn delay(&mut self, from: &str, to: &str, ms: u64) {
-        let (src, dst) = (self.repl_listen(from), self.repl_listen(to));
-        self.repl_sim.apply_fault(Fault::Delay { src, dst, ms });
-        self.mark(from, Some(to), "delay", &format!("{ms}ms on {src} → {dst}"));
-    }
-
     /// **Cut `addr` off the signalling fabric, both directions** — the node is
     /// unreachable on the SIP plane while its process keeps running, keeps its
     /// calls and keeps firing their timers. Every datagram it sends and every
@@ -1760,164 +1588,6 @@ impl FailoverHarness {
     pub fn restore_signalling(&mut self, ordinal: &str, addr: SocketAddr) {
         self.sip_cut.lock().unwrap().remove(&addr);
         self.mark(ordinal, None, "sip-heal", &format!("{addr} reachable again"));
-    }
-
-    /// Heal the repl fabric between two workers: unblock `connect`, lift every
-    /// directed fault between them ([`delay`](Self::delay) included) and
-    /// release every held stream, which flushes what buffered while the cut
-    /// lasted, in order. Names each ordinal's current incarnation. Marker.
-    pub fn heal(&mut self, a: &str, b: &str) {
-        let (aa, ba) = (self.repl_listen(a), self.repl_listen(b));
-        self.repl_sim.apply_fault(Fault::Heal { a: aa, b: ba });
-        self.mark(a, Some(b), "heal", "");
-    }
-
-    // -- membership primitives (the orchestrator's hand) ---------------------
-
-    /// **Withdraw `ordinal`'s endpoint** — the orchestrator takes the worker out
-    /// of the cluster's view WITHOUT touching its process: the proxy's registry
-    /// drops the ordinal (nothing routes to it, no cookie resolves it) and every
-    /// other live worker's membership drops the peer (its supervisor parks the
-    /// flows), and so does the worker's own — it observes its withdrawal and
-    /// latches Draining (ADR-0031 D6). The process stays bound and keeps serving
-    /// whatever still reaches it — the zombie shape. Records the orchestrator's,
-    /// the proxy's and every peer's belief at this instant; the sampler then
-    /// records what each component actually did with it.
-    pub fn withdraw(&mut self, ordinal: &str) {
-        self.mark(ordinal, None, "withdraw", "endpoint withdrawn; process still running");
-        self.views.record("orchestrator", ordinal, Belief::Withdrawn, "withdraw");
-        if let Some(registry) = self.views.proxy_registry() {
-            registry.remove(ordinal);
-            self.views.record("proxy", ordinal, Belief::Absent, "withdraw");
-        }
-        for (observer, membership) in self.views.live_peers_of(ordinal) {
-            membership.remove(ordinal);
-            self.views.record(&observer, ordinal, Belief::Absent, "withdraw");
-        }
-        for (_, membership) in self.views.live_incarnations_of(ordinal) {
-            membership.remove(ordinal);
-        }
-    }
-
-    /// **Withdraw `ordinal` from routing, keep it a replication peer** — the
-    /// graceful shape (ADR-0031 case 1): the orchestrator has begun to remove the
-    /// worker, so its endpoint reads `ready=false, terminating=true` but STAYS in
-    /// the slice until the pod is gone. The proxy departs the ordinal (out of the
-    /// projection, address tombstoned; no cookie resolves it) while every other
-    /// live worker keeps pulling it on presence alone (D1). The process is
-    /// untouched and keeps serving whatever still reaches it. Records the
-    /// orchestrator's, the proxy's and every peer's belief at this instant.
-    pub fn withdraw_routing(&mut self, ordinal: &str) {
-        self.mark(
-            ordinal,
-            None,
-            "withdraw_routing",
-            "endpoint not ready + terminating, still in the slice; process still running",
-        );
-        self.views.record("orchestrator", ordinal, Belief::Withdrawn, "withdraw_routing");
-        self.set_member_ready(ordinal, false, true, "withdraw_routing");
-    }
-
-    /// **Flap `ordinal` not ready at the same address** — the restarted-in-place
-    /// shape (ADR-0031 case 4): a readiness probe fails, the endpoint reads
-    /// `ready=false, terminating=false` and stays in the slice. The proxy departs
-    /// the ordinal and tombstones its address; every other live worker keeps
-    /// pulling it (D1). The process is untouched.
-    pub fn flap_not_ready(&mut self, ordinal: &str) {
-        self.mark(
-            ordinal,
-            None,
-            "flap_not_ready",
-            "endpoint not ready, same address, in the slice",
-        );
-        self.views.record("orchestrator", ordinal, Belief::Withdrawn, "flap_not_ready");
-        self.set_member_ready(ordinal, false, false, "flap_not_ready");
-    }
-
-    /// **Flap `ordinal` ready again** — the counterpart of
-    /// [`flap_not_ready`](Self::flap_not_ready): the endpoint reads `ready=true`
-    /// at the same address. The proxy publishes it as a fresh `Unknown` endpoint
-    /// (nothing has probed it yet); every other live worker's link is a plain
-    /// active peer again, with no puller respawn (ADR-0031 D1).
-    pub fn flap_ready(&mut self, ordinal: &str) {
-        self.mark(ordinal, None, "flap_ready", "endpoint ready again at the same address");
-        self.views.record("orchestrator", ordinal, Belief::Admitted, "flap_ready");
-        self.set_member_ready(ordinal, true, false, "flap_ready");
-    }
-
-    /// Drive one endpoint-condition change into the proxy's registry and every
-    /// live peer's membership, recording what each observer is expected to hold:
-    /// the proxy departs a not-ready member and publishes a ready one `Unknown`;
-    /// a peer keeps a not-ready member and treats a ready one as plain active.
-    fn set_member_ready(&mut self, ordinal: &str, ready: bool, terminating: bool, signal: &str) {
-        if let Some(registry) = self.views.proxy_registry() {
-            registry.set_ready(ordinal, ready);
-            let belief =
-                if ready { Belief::Registered(WorkerHealth::Unknown) } else { Belief::Absent };
-            self.views.record("proxy", ordinal, belief, signal);
-        }
-        let belief = if ready { Belief::PeerActive } else { Belief::PeerKept };
-        for (observer, membership) in self.views.live_peers_of(ordinal) {
-            membership.set_conditions(ordinal, ready, terminating);
-            self.views.record(&observer, ordinal, belief, signal);
-        }
-        // The informer shows a worker its own endpoint too: a condition flip
-        // reaches the member itself, which is how it observes its own
-        // withdrawal (ADR-0031 D6).
-        for (_, membership) in self.views.live_incarnations_of(ordinal) {
-            membership.set_conditions(ordinal, ready, terminating);
-        }
-    }
-
-    /// **Depart `ordinal`: its endpoint leaves the slice** — the pod is gone
-    /// (ADR-0031 case 1, the instant after the drain). The proxy drops the
-    /// ordinal (it was already unroutable under
-    /// [`withdraw_routing`](Self::withdraw_routing)) and every other live
-    /// worker's membership drops the peer, so its supervisor parks the flows.
-    /// The process, if still running, is untouched: pair with `crash` to model
-    /// the exit.
-    pub fn depart(&mut self, ordinal: &str) {
-        self.mark(ordinal, None, "depart", "endpoint gone from the slice");
-        self.views.record("orchestrator", ordinal, Belief::Departed, "depart");
-        if let Some(registry) = self.views.proxy_registry() {
-            registry.remove(ordinal);
-            self.views.record("proxy", ordinal, Belief::Absent, "depart");
-        }
-        for (observer, membership) in self.views.live_peers_of(ordinal) {
-            membership.remove(ordinal);
-            self.views.record(&observer, ordinal, Belief::PeerParked, "depart");
-        }
-    }
-
-    /// **Re-admit `ordinal` at `addr`** — the counterpart of
-    /// [`withdraw`](Self::withdraw): the proxy publishes the endpoint again at
-    /// `addr` with health `Unknown` (nothing has probed it yet) and every other
-    /// live worker's membership re-adds the peer.
-    pub fn readmit(&mut self, ordinal: &str, addr: SocketAddr) {
-        self.mark(ordinal, None, "readmit", &format!("endpoint published at {addr}"));
-        self.views.record("orchestrator", ordinal, Belief::Admitted, "readmit");
-        if let Some(registry) = self.views.proxy_registry() {
-            registry.add(sip_proxy::registry::WorkerEntry {
-                id: ordinal.to_string(),
-                address: ProxyAddr::new(addr.ip().to_string(), addr.port()),
-                health: WorkerHealth::Unknown,
-                draining_since: None,
-                first_seen_at_ms: None,
-            });
-            self.views.record(
-                "proxy",
-                ordinal,
-                Belief::Registered(WorkerHealth::Unknown),
-                "readmit",
-            );
-        }
-        for (observer, membership) in self.views.live_peers_of(ordinal) {
-            membership.add(Peer::new(ordinal, ordinal));
-            self.views.record(&observer, ordinal, Belief::PeerActive, "readmit");
-        }
-        for (_, membership) in self.views.live_incarnations_of(ordinal) {
-            membership.add(Peer::new(ordinal, ordinal));
-        }
     }
 
     /// **Start a replacement incarnation of `ordinal` ALONGSIDE the running
@@ -2106,8 +1776,8 @@ impl FailoverHarness {
     /// Like [`settle_terminal`](Self::settle_terminal) but pumps past the deferral's
     /// replica TTL (`reboot_budget`, 600 s) so the Model-Y backup auto-cleanup reap
     /// has fired: a never-reclaimed deferred terminal has its limiter hold released
-    /// and its body evicted only once that TTL expires. The StayDead cells need this
-    /// because NOTHING drains until then. Coarse 30 s steps (the reap cadence is
+    /// and its body evicted only once that TTL expires. A cell whose backup defers
+    /// to a primary that never returns needs this because NOTHING drains until then. Coarse 30 s steps (the reap cadence is
     /// 30 s) to `reboot_budget` + margin; stops as soon as `drained` holds.
     pub async fn settle_lossy_cleanup(&self, mut drained: impl AsyncFnMut() -> bool) -> bool {
         let step = Duration::from_secs(30);
@@ -2160,128 +1830,7 @@ impl FailoverHarness {
     }
 
     // -- report ------------------------------------------------------------
-
-    /// Run the built-in RFC 3261 signaling audit (CSeq in-dialog ordering, …)
-    /// over the recorded SIP trace and panic on any violation — the SIP-plane
-    /// analogue of the universal teardown sweep's "all clean" check, applied to
-    /// EVERY cell once the scenario has fully run. Reads the recording channel
-    /// directly (no layer-close structural checks, no consume), so it can run
-    /// mid-life on the long-lived multi-SUT harness. Catches a takeover that
-    /// probes a dialog with a stale CSeq — a regression a real UAC rejects as
-    /// `unexpected_msg` but a test UA answers silently.
-    /// Run the FULL RFC audit suite — the per-bind **peer** rules (Via echo /
-    /// response↔transaction correlation, tags, CANCEL/RAck correlation, …) on
-    /// top of the cross-message rules — over the recorded trace and panic on
-    /// any non-advisory finding, honouring
-    /// [`allow_rfc_violation`](Self::allow_rfc_violation) waivers.
-    ///
-    /// The Drop-time gate deliberately runs only the endpoint-scoped
-    /// cross-message rules (a transparent failover splits one dialog's CSeq
-    /// stream across worker binds, so per-bind peer rules would report phantom
-    /// findings on the internal nodes). A NON-failover via-LB test — where no
-    /// call ever changes workers — can and should opt into the full per-bind
-    /// suite, which is exactly what gates the downstream e2e runs:
-    /// it is the only lane that judges the **relay (proxy) bind's** own client
-    /// transactions (e.g. `response-echoes-request-via` §8.1.3/§17.1.3 response matching).
-    pub fn assert_full_rfc_clean(&self, cell: &str) {
-        let events = self.harness.recording().channel().snapshot();
-        // `offending` is a 1-based index into the AUDIT-visible wire entries — the
-        // same view `evaluate_rfc_findings` hands the rules — so a window must be
-        // resolved against `audit_wire_entries`, never the raw snapshot (whose
-        // extra ReEmit / invisible-disposition rows shift every later index).
-        let entries = sip_net::audit_wire_entries(&events);
-        let findings: Vec<sip_net::RfcFinding> = sip_net::evaluate_rfc_findings(&events)
-            .into_iter()
-            .filter(|f| !f.advisory && !self.rfc_acceptance.waived(&f.rule))
-            .filter(|f| !self.rfc_acceptance.accepts(&f.rule, f.offending, &entries))
-            .collect();
-        assert!(
-            findings.is_empty(),
-            "[{cell}] full-suite RFC audit violation(s) on the recorded trace:\n{}",
-            findings
-                .iter()
-                .map(|f| format!("  • [{}] {}: {}", f.lane, f.rule, f.detail))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
-    }
-
-    pub fn assert_sip_rfc_clean(&self, cell: &str) {
-        let findings = self.rfc_audit_findings();
-        assert!(
-            findings.is_empty(),
-            "[{cell}] SIP RFC audit violation(s) on the recorded trace \
-             (a real UA would have rejected these):\n{}",
-            findings
-                .iter()
-                .map(|(lane, detail)| format!("  • [{lane}] {detail}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
-    }
-
-    /// The RFC 3261 cross-message audit findings that GATE — everything the
-    /// recorded trace violated except what an acceptance window covers (the
-    /// `(lane, detail)` pairs `assert_sip_rfc_clean` panics on). Reads the
-    /// recording channel snapshot NON-consuming, so it is safe to call mid-run AND
-    /// from `Drop`. Empty ⇒ clean. Shared by the explicit `assert_sip_rfc_clean`
-    /// and the automatic Drop-time enforcement so the SAME rule set runs on every
-    /// FailoverHarness-based test with no per-test opt-in.
-    fn rfc_audit_findings(&self) -> Vec<(String, String)> {
-        lane_details(self.partition_rfc_findings().0)
-    }
-
-    /// Split the endpoint-scoped cross-message audit into `(gating, accepted)` —
-    /// see [`RfcAcceptance::partition`].
-    #[allow(clippy::type_complexity)]
-    fn partition_rfc_findings(&self) -> (Vec<Finding>, Vec<Finding>) {
-        self.rfc_acceptance.partition(&self.audited_events())
-    }
-
-    /// The findings an acceptance window covered this run — the deviations the
-    /// scenario declared accepted via
-    /// [`accept_rfc_deviations_from_now`](Self::accept_rfc_deviations_from_now).
-    /// They do not gate, but they are recorded (advisory anomalies in the unified
-    /// report) so an accepted trade-off stays visible, and a test can assert on
-    /// them to prove its window matched something.
-    pub fn accepted_rfc_deviations(&self) -> Vec<(String, String)> {
-        lane_details(self.partition_rfc_findings().1)
-    }
-
-    /// The recorded SIP events the audit judges — the endpoint-scoped view.
-    fn audited_events(&self) -> Vec<layer_harness::Stamped<sip_net::SignalingNetworkEvent>> {
-        // RFC 3261 conformance is only observable from OUTSIDE the proxy/LB — at
-        // the real UAs (alice/bob). A *transparent* failover legitimately splits
-        // ONE logical dialog across several cluster workers: alice's in-dialog
-        // CSeq stream 1→2→3 can land 1 on the primary, 2 on the backup (takeover),
-        // 3 on the reclaimed primary. Auditing per **worker** bind then reports a
-        // phantom "CSeq 3 skips ahead of CSeq 1" on the worker that happened to
-        // serve 1 and 3 — even though alice SENT 1,2,3 contiguously and bob
-        // RECEIVED 1,2,3 contiguously on its leg. No real UA ever sees that gap.
-        //
-        // So scope the audit to the dialog as observed at the endpoints, not at
-        // the internal cluster nodes: drop the worker binds. Equivalent to
-        // regrouping per dialog independent of which worker handled each request —
-        // the surviving streams (alice, bob, and the proxy, which forwards EVERY
-        // request and so sees the whole 1,2,3 sequence) are each CSeq-monotonic.
-        // The endpoint/proxy binds still catch a genuine same-leg CSeq collision
-        // (e.g. a keepalive OPTIONS and a later BYE reusing one CSeq toward bob).
-        let incarnation_binds = self.views.all_sip_addrs();
-        let worker_binds: std::collections::HashSet<String> = self
-            .all_worker_sip_addrs
-            .iter()
-            .chain(self.relay_sip_addrs.iter())
-            .chain(incarnation_binds.iter())
-            .map(|a| a.to_string())
-            .collect();
-        let snapshot = self.harness.recording().channel().snapshot();
-        snapshot
-            .into_iter()
-            .filter(|s| {
-                !worker_binds.contains(s.event.bind_key()) && sip_net::audit_visible_event(&s.event)
-            })
-            .collect()
-    }
+    // The RFC audit gates live in `rfc_audit`.
 
     /// Record a rebooted worker's NEW SIP address into the RFC-audit exclusion
     /// set — the PRE-reboot incarnation's bind must stay excluded too, else the
@@ -2340,7 +1889,7 @@ impl FailoverHarness {
     /// long-lived multi-SUT harness without finishing the SIP harness.
     pub fn unified_doc(&self, title: &str, passed: bool) -> seq_report::SeqDoc {
         let recording = self.harness.recording();
-        let entries = sip_net::to_sip_entries(&recording.channel().snapshot());
+        let entries = sip_net_testkit::to_sip_entries(&recording.channel().snapshot());
         let scenario = recording.recorder().snapshot();
         let repl = self.repl_report();
         let mut doc = crate::combine::combine_doc(
@@ -2546,6 +2095,9 @@ impl Drop for FailoverHarness {
             }));
         }
 
+        // A turn of any worker that broke a model invariant fails the test.
+        b2bua_harness::model_gate::gate_on_drop(self.since);
+
         // If the harness was consumed there is nothing to audit — skip (mirrors
         // the write-on-Drop guard).
         if self.harness.inner.lock().map(|g| g.is_none()).unwrap_or(true) {
@@ -2556,6 +2108,11 @@ impl Drop for FailoverHarness {
         // Never double-panic while already unwinding.
         if std::thread::panicking() {
             return;
+        }
+        // A request a simulated UA's dialog table refused fails the test too.
+        let dialog = self.harness.inner.lock().ok().and_then(|g| g.as_ref()?.dialog_gate_failure());
+        if let Some(why) = dialog {
+            panic!("{why}");
         }
         let findings = self.rfc_audit_findings();
         if !findings.is_empty() {
@@ -2637,7 +2194,7 @@ impl HarnessHandle {
     /// caller can read its append-only signaling channel + recorder snapshot
     /// (for the RFC audit AND the unified report) without taking or consuming
     /// the harness.
-    fn recording(&self) -> sip_net::RecordingSignalingNetwork {
+    fn recording(&self) -> sip_net_testkit::RecordingSignalingNetwork {
         let g = self.inner.lock().unwrap();
         g.as_ref().expect("harness taken (already finished?)").recording()
     }

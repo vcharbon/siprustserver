@@ -34,7 +34,8 @@ async fn absorb_establishing_provisional(
     status: u16,
     now: Instant,
 ) -> Result<(), StepError> {
-    // A 100 Trying is transaction plumbing, not an early dialog.
+    st.scope.set_early(inv.cancel_handle()); // any provisional lets teardown CANCEL (§9.1)
+                                             // A 100 Trying is transaction plumbing, not an early dialog.
     if status <= 100 {
         return Ok(());
     }
@@ -78,9 +79,12 @@ async fn absorb_establishing_provisional(
 
 /// A non-2xx final on the caller's establishing INVITE. Returns `true` when a
 /// §22.2 authenticated resend consumed the challenge (caller re-parks the
-/// INVITE); otherwise records the terminal and — unless the next pending goal
-/// is a RECEPTION goal, which then owns the verdict — surfaces the incidental
-/// establishment failure as the linear `WrongStatus{expected: <180|183>}`,
+/// INVITE); otherwise records the terminal. A final the call accepts
+/// ([`ActorState::accepts`](super::runner::ActorState)) ends the call: it is
+/// recorded as the accepted ending and — unless the next pending goal is a
+/// RECEPTION goal, which then owns the final — the remaining goals are
+/// dropped. Any other final, with a non-reception goal pending, surfaces as
+/// the incidental establishment failure `WrongStatus{expected: <180|183>}`,
 /// never a 32 s barrier timeout.
 async fn absorb_establishing_failure(
     st: &mut ActorState<'_>,
@@ -98,9 +102,8 @@ async fn absorb_establishing_failure(
         if let Some(responder) = st.challenge_responder.clone() {
             if inv.ack_and_resend_with_auth(resp, responder.as_ref()).await? {
                 st.auth_retries_left -= 1;
-                // Re-point the scope's early CANCEL handle at the retried
-                // transaction (its branch/CSeq changed).
-                st.scope.set_early(inv.cancel_handle());
+                // The retried transaction has drawn no provisional yet.
+                st.scope.clear_early();
                 return Ok(true);
             }
             // Responder DECLINED — surface the challenge as a plain deviation
@@ -113,7 +116,16 @@ async fn absorb_establishing_failure(
     );
     st.obs.record(Observation::LegTerminated { leg: st.role }, now);
     st.scope.mark_terminated();
-    if st.goals.has_pending() && !st.goals.next_step().is_some_and(GoalStep::is_reception) {
+    let reception_pending = st.goals.next_step().is_some_and(GoalStep::is_reception);
+    if st.accepts.accepts_final(status) {
+        st.obs.record(Observation::AcceptedEnding, now);
+        if !reception_pending {
+            st.goals.abandon();
+        }
+        return Ok(false);
+    }
+    if st.goals.has_pending() && !reception_pending {
+        st.failed_goal = st.invite_goal;
         return Err(StepError::WrongStatus {
             who: st.role.to_string(),
             expected: st.expected_provisional,
@@ -204,7 +216,7 @@ pub(super) async fn react_response(
                     // ACK the 2xx then register the confirmed dialog with NO await in
                     // between, so a mid-window cancellation can never leave a
                     // confirmed-but-unregistered dialog (the drop-safety rule).
-                    let mut dialog = inv.ack().await;
+                    let (mut dialog, ack_sent) = inv.ack_reporting(None, &[]).await;
                     // Dialog-formation point: attach this leg's shared CSeq counter
                     // BEFORE the scope-refresh clone, so both share ONE step counter
                     // (ADR-0024 §6 — the teardown BYE never re-consumes an op).
@@ -215,6 +227,7 @@ pub(super) async fn react_response(
                     // RETAIN the establishing INVITE (C1/E3): a LOSING fork's late
                     // 2xx (§13.2.2.4) is ACK+BYE'd on a fork dialog derived from it.
                     st.dialogs.won_invite = Some(inv);
+                    ack_sent?;
                 }
                 InviteResponseFate::Failed { status } => {
                     if absorb_establishing_failure(st, &mut inv, &resp, status, now).await? {
@@ -290,7 +303,7 @@ pub(super) async fn react_response(
                     let mut fork = inv.fork_dialog(&resp);
                     // Our INVITE carried the offer, so the fork's 200 carried
                     // its answer — the ACK is bodyless (§13.2.2.4).
-                    fork.ack_for(resp.cseq().seq(), None).await;
+                    fork.try_ack_for(resp.cseq().seq(), None).await?;
                     let _bye = fork.send_request(InDialogMethod::Bye).try_send().await?;
                     st.obs.record(
                         Observation::RequestSent {
@@ -334,7 +347,7 @@ pub(super) async fn react_response(
                 }
             }
             if let Some(dialog) = st.dialogs.confirmed.as_mut() {
-                dialog.ack_for(cseq, sdp.as_deref()).await;
+                dialog.try_ack_for(cseq, sdp.as_deref()).await?;
             }
             complete_originated_reinvite(st, cseq, now);
             return Ok(());
@@ -424,7 +437,14 @@ pub(super) async fn react_response(
                     // re-INVITE (C6/S6), so a glare barrier can gate on
                     // `reneg_count` regardless of the offer's method.
                     st.obs.record(
-                        Observation::RenegCompleted { leg: st.role, cseq: resp.cseq().seq() },
+                        Observation::RenegCompleted {
+                            leg: st.role,
+                            dialog: (
+                                resp.from().tag().unwrap_or_default().to_string(),
+                                resp.to().tag().unwrap_or_default().to_string(),
+                            ),
+                            cseq: resp.cseq().seq(),
+                        },
                         now,
                     );
                     st.feed.on_update_ok.stamp(st.ctx);
@@ -440,7 +460,7 @@ pub(super) async fn react_response(
 /// the `ReInvite` obligation, the `reneg` sub-flow, the completed-cycle count
 /// (an N-cycle script's per-cycle barrier, C6) and the declared feed. ONCE per
 /// CSeq (the `sent_reinvites` guard), so a re-emitted 2xx cannot double-count.
-fn complete_originated_reinvite(st: &mut ActorState<'_>, cseq: u32, now: Instant) {
+pub(super) fn complete_originated_reinvite(st: &mut ActorState<'_>, cseq: u32, now: Instant) {
     if st.sent_reinvites.remove(&cseq) {
         st.sent_reinvite_txns.remove(&cseq);
         st.reinvite_ordinals.remove(&cseq);
@@ -450,46 +470,15 @@ fn complete_originated_reinvite(st: &mut ActorState<'_>, cseq: u32, now: Instant
             Observation::Subflow { leg: st.role, name: SUBFLOW_RENEG, to: SubflowState::Confirmed },
             now,
         );
-        st.obs.record(Observation::RenegCompleted { leg: st.role, cseq }, now);
+        let dialog = st
+            .dialogs
+            .confirmed
+            .as_ref()
+            .map(|d| (d.local_tag().to_string(), d.remote_tag().to_string()))
+            .unwrap_or_default();
+        st.obs.record(Observation::RenegCompleted { leg: st.role, dialog, cseq }, now);
         st.feed.on_reinvite_ok.stamp(st.ctx);
     }
-}
-
-/// Park until the earliest held ACK is due (or forever if none) — the delayed
-/// automatic's own reactor arm.
-pub(super) async fn wait_held_ack(held: &[HeldAck]) {
-    match held.iter().map(|h| h.at).min() {
-        Some(at) => tokio::time::sleep_until(at).await,
-        None => std::future::pending().await,
-    }
-}
-
-/// Fire the earliest held ACK: send it on the confirmed dialog (idempotent,
-/// re-derivable — §13.2.2.4) and complete the bookkeeping the hold deferred.
-pub(super) async fn fire_due_held_ack(st: &mut ActorState<'_>) {
-    let Some(pos) = st.held_acks.iter().enumerate().min_by_key(|(_, h)| h.at).map(|(i, _)| i)
-    else {
-        return;
-    };
-    let held = st.held_acks.swap_remove(pos);
-    send_held_ack(st, held).await;
-}
-
-/// Flush every held ACK NOW, out of schedule: a leg about to originate its
-/// teardown BYE must not leave a 2xx un-ACKed behind it (RFC 3261 §15 — the
-/// renegotiation completes before the dialog ends).
-pub(super) async fn flush_held_acks(st: &mut ActorState<'_>) {
-    while let Some(held) = st.held_acks.pop() {
-        send_held_ack(st, held).await;
-    }
-}
-
-/// Send one held ACK and close its deferred bookkeeping.
-async fn send_held_ack(st: &mut ActorState<'_>, held: HeldAck) {
-    if let Some(dialog) = st.dialogs.confirmed.as_mut() {
-        dialog.ack_for(held.cseq, held.sdp.as_deref()).await;
-    }
-    complete_originated_reinvite(st, held.cseq, Instant::now());
 }
 
 /// Whether a message carries a session description: a non-empty body typed

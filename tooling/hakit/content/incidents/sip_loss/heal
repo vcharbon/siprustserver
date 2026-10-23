@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Remove the netem qdisc and prove it gone.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=timed.sh
+source "$HAKIT_LIB/timed.sh"
+hk_timed_heal netem pf_undelay

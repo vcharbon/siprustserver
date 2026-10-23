@@ -6,7 +6,9 @@
 //! refresh leaving within a 100 ms tick. Past the
 //! lease the set would have lapsed UNLESS the refresh extended it. We cross
 //! the lease, sweep, then prove a second call is still refused — which can
-//! only happen if the refresh kept the call counted.
+//! only happen if the refresh kept the call counted. A 1 s lease under the
+//! default worker pace holds the same way: the worker fits its refresh period
+//! and tick to the lease it learns.
 
 use call::LimiterEntry;
 use std::net::SocketAddr;
@@ -19,7 +21,8 @@ use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
 use b2bua_harness::{settle_until, B2buaSut};
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpServerHandle, HttpTransport};
+use http_net_testkit::SimulatedHttpNetwork;
 use scenario_harness::Harness;
 use sip_clock::Clock;
 
@@ -82,6 +85,60 @@ async fn refresh_keeps_a_long_call_counted_across_its_lease() {
 
     // The call is still counted → a second call is refused. (Without the
     // refresh the set would have lapsed at 2 s and this would admit.)
+    let mut call2 = carol.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    assert_eq!(call2.expect(486).await.status(), 486, "the refresh kept the call counted");
+
+    let mut bye = dialog1.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_one_second_lease_keeps_a_long_call_counted_under_the_default_pace() {
+    let h = Harness::with_transit_delay("limiter-refresh-short-lease", 1);
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let carol = h.agent("carol", "127.0.0.1:5061").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let http = SimulatedHttpNetwork::new();
+    let store = Arc::new(CallStore::new(LimiterConfig { lease_sec: 1 }, Clock::test_at(0)));
+    let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
+    let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
+
+    let limiter: Arc<dyn CallLimiter> =
+        Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr(), Duration::from_millis(150)));
+    let decision: Arc<dyn CallDecisionEngine> = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_req| {
+                let mut r = route_to("127.0.0.1", 5070);
+                r.call_limiter = vec![LimiterEntry { id: "trunk-A".into(), limit: 1 }];
+                NewCallResponse::Route(r)
+            })
+            .build(),
+    );
+
+    // The default pace: a 40 s period, a 1 s tick.
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter)
+        .limiter_store(store.clone())
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call1 = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    bob.receive("INVITE").await.respond(200, "OK").with_sdp(ANSWER).await;
+    call1.expect(200).await;
+    let mut dialog1 = call1.ack().await;
+    bob.receive("ACK").await;
+    assert_eq!(store.stats().current_total, 1);
+
+    h.advance(Duration::from_millis(3500)).await;
+    assert_eq!(store.sweep_now(), 0, "the refreshed set never lapsed");
+    assert_eq!(store.stats().lease_expired_calls, 0);
+    assert_eq!(store.stats().reregistered_calls, 0, "no refresh found the set lapsed");
+
     let mut call2 = carol.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     assert_eq!(call2.expect(486).await.status(), 486, "the refresh kept the call counted");
 

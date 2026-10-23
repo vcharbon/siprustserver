@@ -1,0 +1,78 @@
+global:
+  scrape_interval: {{ .Values.vmagent.scrapeInterval }}
+  external_labels:
+    cluster: {{ required "clusterName is required: the `cluster` label of every series" .Values.clusterName }}
+
+scrape_configs:
+  # Pods annotated prometheus.io/scrape: "true", on the annotated port only.
+  - job_name: 'kubernetes-pods'
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: true
+      # The pod role makes one target per declared container port; keep the
+      # one the annotation names (RE2 has no backreference: keepequal).
+      - source_labels: [__meta_kubernetes_pod_container_port_number]
+        target_label: __tmp_pod_port
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: keepequal
+        target_label: __tmp_pod_port
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_pod_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_node_name]
+        target_label: node
+      - source_labels: [__meta_kubernetes_pod_container_name]
+        target_label: container
+
+  # The kubelet of every node, through the API server proxy.
+  - job_name: 'kubernetes-kubelet'
+    scheme: https
+    tls_config: { insecure_skip_verify: true }
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    kubernetes_sd_configs: [{ role: node }]
+    relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+      - target_label: __address__
+        replacement: kubernetes.default.svc:443
+      - source_labels: [__meta_kubernetes_node_name]
+        regex: (.+)
+        target_label: __metrics_path__
+        replacement: /api/v1/nodes/$1/proxy/metrics
+
+  # cAdvisor: per-container CPU, memory and IO.
+  - job_name: 'kubernetes-cadvisor'
+    scheme: https
+    tls_config: { insecure_skip_verify: true }
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    kubernetes_sd_configs: [{ role: node }]
+    relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+      - target_label: __address__
+        replacement: kubernetes.default.svc:443
+      - source_labels: [__meta_kubernetes_node_name]
+        regex: (.+)
+        target_label: __metrics_path__
+        replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor
+
+  - job_name: 'vmagent'
+    static_configs: [{ targets: ['127.0.0.1:8429'] }]
+{{- with .Values.vmagent.extraScrapeConfigs }}
+{{ toYaml . | indent 2 }}
+{{- end }}

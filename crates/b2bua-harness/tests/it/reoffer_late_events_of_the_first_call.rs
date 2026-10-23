@@ -16,7 +16,7 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
 use b2bua::CallEvent;
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
-use call::{CdrEventType, TimerType};
+use call::{CdrEventType, TimerKey, TimerType};
 use scenario_harness::callflow::{ANSWER_SDP, OFFER_SDP};
 use scenario_harness::{ClientInvite, ServerTxn, WaiverScope};
 use sip_message::generators::InDialogMethod;
@@ -44,7 +44,7 @@ async fn scene(name: &str, no_answer: Option<Duration>) -> B2buaScene {
             ScriptedDecisionEngine::builder()
                 .fallback(move |_| {
                     let mut r = route_to("127.0.0.1", bob_port);
-                    r.no_answer_timeout_sec = no_answer.map(|d| d.as_secs() as i64);
+                    r.no_answer_ms = no_answer.map(|d| d.as_millis() as i64);
                     NewCallResponse::Route(r)
                 })
                 .build(),
@@ -247,9 +247,9 @@ async fn a_ring_deadline_fire_of_the_first_call_queued_past_its_release_does_not
     let (reoffer, uas) = reoffer_rings(&s, start).await;
 
     s.b2bua.post_event(CallEvent::Timer {
-        timer_type: TimerType::NoAnswer,
+        key: TimerKey::leg(TimerType::NoAnswer, "b-1"),
+        generation: 1,
         call_ref: call_ref(),
-        leg_id: Some("b-1".into()),
         incarnation: Some(first.incarnation),
     });
     s.h.advance(Duration::from_secs(1)).await;

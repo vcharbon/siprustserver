@@ -15,14 +15,16 @@
 //! 1. **init** seeds the cursor at `OfferingMrf` and launches an unadopted
 //!    `media` leg toward the MRF (in parallel with setup).
 //! 2. **@OfferingMrf**, on the media leg's `200 OK`: brokers the MRF's SDP onto
-//!    the caller as an unreliable `183` (early media), opens the MSCML control
-//!    channel with an INFO `<play>`, and advances to `Announcing`.
+//!    the caller as an unreliable `183` (early media) on an early dialog of its
+//!    own, opens the MSCML control channel with an INFO `<play>`, and advances
+//!    to `Announcing`.
 //! 3. **@Announcing**, on the MRF's INFO MSCML `<response>` success: BYEs the
 //!    media leg, dials the real destination (an adopted leg), and **deactivates**
 //!    the machine (ADR-0016 X9 — the terminal `[*]`). The destination is now a
 //!    normal adopted leg, so the framework's core `confirm-dialog` rule answers
-//!    the caller with its SDP and bridges the two — no announcement rule needed,
-//!    and no dead cursor lingers on the bridged call.
+//!    the caller with its SDP, under a tag of its own whose dialog the 2xx
+//!    confirms (the early media's ends with it), and bridges the two — no
+//!    announcement rule needed, and no dead cursor lingers on the bridged call.
 //! 4. **@Announcing**, on a `<response>` **failure** (max-duration abort, no-answer,
 //!    a final-announcement reject): a reject-teardown — send the caller its 4xx on
 //!    the early dialog and terminate. The caller never got a 2xx, so this leans on
@@ -35,7 +37,8 @@
 //! (the one-hop service→global command, `BeginTermination`).
 
 use b2bua_sdk::rules::{
-    Body, Effect, Match, Method, RuleAction, RuleCall, RuleContext, RuleHandleResult, Terminal,
+    AttemptCause, AttemptOpening, Body, Effect, Match, Method, RouteAnswer, RuleAction, RuleCall,
+    RuleContext, RuleHandleResult, Terminal,
 };
 use b2bua_sdk::{define_service, sm_rule};
 use call::{CdrEventType, Direction, LegState, TerminationCause};
@@ -72,7 +75,7 @@ fn media_leg_id(call: &RuleCall) -> Option<String> {
     call.b_legs()
         .iter()
         .find(|l| {
-            call::helpers::leg_kind(l) == call::LegKind::Media && l.state != LegState::Terminated
+            call::helpers::leg_kind(l) == call::LegKind::Media && l.state() != LegState::Terminated
         })
         .map(|l| l.leg_id.clone())
 }
@@ -141,12 +144,13 @@ fn on_mscml_done(ctx: &RuleContext) -> Option<RuleHandleResult> {
             new_ruri: Some(format!("sip:{}:{}", data.dest_host, data.dest_port)),
             new_from: None,
             new_to: None,
-            no_answer_timeout_sec: None,
             callback_context: None,
             body_override: None,
             header_updates: vec![],
             header_adds: vec![],
             kind: None,
+            // The route's own destination, its dial deferred to this service.
+            attempt: Some(AttemptOpening::new(AttemptCause::Route, RouteAnswer::default())),
         },
         // The announcement is done: hand off to the destination leg + core bridge
         // and **deactivate** the machine (ADR-0016 X9) rather than lingering at a
@@ -175,12 +179,11 @@ fn mscml_reject_status(code: u16) -> (u16, &'static str) {
 ///
 /// This path is the whole point of announce-then-reject. The parked media leg is
 /// an **unadopted** `Media` leg, so core `confirm-dialog` does NOT mark the a-leg
-/// `Confirmed` off its 200 — the a-leg is still `Early`. `BeginTermination` sees
-/// the 4xx among the turn's effects and resolves the a-leg
-/// (`ByeDisposition::None` + `Terminated`) — no BYE toward the caller, and no
-/// spurious ADR-0022 503 on a later turn (e.g. a crossing BYE from the media
-/// leg). No un-confirm repair (a wire-silent `TerminateLeg{Rejected}` on the
-/// a-leg) is needed — the generic layer keeps the a-side honest.
+/// `Confirmed` off its 200 — the a-leg is still `Early`. The 4xx this rule
+/// answers her with is her INVITE's final, so her leg reads `Terminated` — no
+/// BYE toward the caller, and no spurious ADR-0022 503 on a later turn (e.g. a
+/// crossing BYE from the media leg). No un-confirm repair is needed — the
+/// generic layer keeps the a-side honest.
 fn on_mscml_failed(ctx: &RuleContext) -> Option<RuleHandleResult> {
     media_leg_id(&ctx.call)?; // fire only while a parked media leg exists
     let req = ctx.request()?;
@@ -224,14 +227,12 @@ fn on_media_failure(ctx: &RuleContext) -> Option<RuleHandleResult> {
         },
         // Record the media leg's final on the leg BEFORE begin-termination (the
         // `route-failure` idiom): its INVITE transaction already received a final
-        // response, so it is resolved — NOT still ringing. Without this,
-        // begin-termination sees a `Trying` leg with no bye disposition and
-        // spuriously CANCELs a completed transaction, marking it `Cancelling` and
-        // (per `leg_is_resolved`) holding the call open for a 487 that will never
-        // come.
+        // response, so it reads `Terminated` — NOT still ringing, which
+        // begin-termination would CANCEL, holding the call open for a 487 that
+        // will never come.
         RuleAction::TerminateLeg {
             leg_id: media.clone(),
-            bye_disposition: Some(call::ByeDisposition::Rejected),
+            end: b2bua_sdk::model::LegEnd::InviteRejected,
         },
         // The caller's INVITE is still unanswered (early media only) — answer it
         // with the MRF's failure before tearing the call down (begin-termination
@@ -268,12 +269,12 @@ define_service! {
                     new_ruri: Some(format!("sip:mrf@{}:{}", data.mrf_host, data.mrf_port)),
                     new_from: None,
                     new_to: None,
-                    no_answer_timeout_sec: None,
                     callback_context: None,
                     body_override: None,
                     header_updates: vec![],
                     header_adds: vec![],
                     kind: Some(call::LegKind::Media),
+                    attempt: None,
                 },
             ]),
         )

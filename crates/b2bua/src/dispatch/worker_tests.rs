@@ -449,3 +449,18 @@ async fn behind_a_release_with_no_new_call_waiting_an_event_is_discarded() {
     assert_eq!(metrics.creations_total(), 1);
     assert_eq!(metrics.removals_total(), 1);
 }
+
+/// A halted dispatcher (the node crashed) aborts the body in flight and runs
+/// nothing queued behind it.
+#[tokio::test]
+async fn a_halt_aborts_the_body_in_flight_and_runs_nothing_after() {
+    let d = Dispatcher::new(1, 8, 1024, B2buaMetrics::new());
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let gate = park(&d, "c").await;
+    let _ = d.offer("c", record(&order, "queued"), DispatchClass::Cancelled);
+    d.halt();
+    // A body that would have ended on its own changes nothing.
+    gate.notify_one();
+    settle().await;
+    assert!(order.lock().unwrap().is_empty(), "nothing runs after the halt");
+}

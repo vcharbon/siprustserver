@@ -2,31 +2,23 @@
 //! **injectable value** (not a trait) — `IdGen::seeded(seed)` for
 //! deterministic tests, `IdGen::from_entropy()` in production.
 //!
-//! Every identifier is HMAC-SHA256 over a counter under a secret key, so an
-//! off-path host cannot guess the branch a response is matched by: the output
-//! reveals neither the key nor the next value, and two keys give unrelated
-//! streams. Why the response's source is not checked: ADR-0007.
+//! Every identifier is the key's counter stream of [`sip_ids::IdKey`]
+//! (HMAC-SHA256 over a counter under a secret key), so an off-path host
+//! cannot guess the branch a response is matched by. Why the response's
+//! source is not checked: ADR-0007.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
-
-/// Branch identifiers MUST start with this magic cookie (RFC 3261 §8.1.1.7).
-const MAGIC_COOKIE: &str = "z9hG4bK";
+use sip_ids::{render, IdKey, TurnIds};
 
 /// A keyed identifier generator. Cheap to share behind an `Arc`; the counter
-/// advances atomically so concurrent callers never draw the same value.
+/// advances atomically so concurrent callers never draw the same value, and
+/// the turn counter hands each turn its own number under the same key.
+#[derive(Debug)]
 pub struct IdGen {
-    /// The PRF, keyed once; each draw clones it.
-    prf: Hmac<Sha256>,
+    key: IdKey,
     counter: AtomicU64,
-}
-
-impl std::fmt::Debug for IdGen {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IdGen").finish_non_exhaustive()
-    }
+    turns: AtomicU64,
 }
 
 impl IdGen {
@@ -34,34 +26,35 @@ impl IdGen {
     /// by tests that assert on generated identifiers. Not for production: a
     /// 64-bit seed is a guessable key.
     pub fn seeded(seed: u64) -> Self {
-        Self::keyed(&seed.to_le_bytes())
+        Self::keyed(IdKey::new(&seed.to_le_bytes()))
     }
 
     /// Production generator, keyed with 256 bits from the OS RNG, so every
     /// process — two pods behind one load-balancer address included — draws
-    /// its own unpredictable stream.
-    ///
-    /// # Panics
-    ///
-    /// When the OS RNG is unavailable: identifiers would be guessable.
-    pub fn from_entropy() -> Self {
+    /// its own unpredictable stream. [`EntropyUnavailable`] when the OS RNG
+    /// does not answer: identifiers would be guessable.
+    pub fn from_entropy() -> Result<Self, EntropyUnavailable> {
         let mut key = [0u8; 32];
-        getrandom::fill(&mut key).expect("the OS RNG keys the SIP identifier generator");
-        Self::keyed(&key)
+        getrandom::fill(&mut key).map_err(EntropyUnavailable)?;
+        Ok(Self::keyed(IdKey::new(&key)))
     }
 
-    fn keyed(key: &[u8]) -> Self {
-        let prf = Hmac::<Sha256>::new_from_slice(key).expect("HMAC takes a key of any length");
-        Self { prf, counter: AtomicU64::new(0) }
+    fn keyed(key: IdKey) -> Self {
+        Self { key, counter: AtomicU64::new(0), turns: AtomicU64::new(0) }
     }
 
-    /// The next PRF output: HMAC(key, counter), its first 8 bytes.
+    /// The draws of the next turn under this generator's key: a number no
+    /// other turn of the process holds, so no two turns, and no turn and the
+    /// counter stream, draw the same identifier. A number per call would not
+    /// do: a call reclaimed or materialised again under the same key restarts
+    /// it.
+    pub fn turn(&self) -> TurnIds {
+        TurnIds::new(&self.key, self.turns.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// The next draw of the key's counter stream.
     fn next_u64(&self) -> u64 {
-        let n = self.counter.fetch_add(1, Ordering::Relaxed);
-        let mut mac = self.prf.clone();
-        mac.update(&n.to_le_bytes());
-        let out = mac.finalize().into_bytes();
-        u64::from_le_bytes(out[..8].try_into().expect("a SHA-256 output holds 8 bytes"))
+        self.key.counter_draw(self.counter.fetch_add(1, Ordering::Relaxed))
     }
 
     /// A uniform 64-bit draw, for a value picked at random (a `Retry-After`).
@@ -71,44 +64,38 @@ impl IdGen {
 
     /// RFC 3261 From/To tag — 8 base-36 chars.
     pub fn new_tag(&self) -> String {
-        to_base36(self.next_u64(), 8)
+        render::tag(self.next_u64())
     }
 
     /// RFC 3261 Via branch with the mandatory magic cookie:
     /// `z9hG4bK` + 16 hex chars.
     pub fn new_branch(&self) -> String {
-        format!("{MAGIC_COOKIE}{:016x}", self.next_u64())
+        render::branch(self.next_u64())
     }
 
-    /// The initial value of a 32-bit signed sequence counter, picked at random
-    /// from `1..=10^8` so a peer cannot guess where a sequence resumes. The
-    /// ceiling RFC 3261 §8.1.1.5 (CSeq) and RFC 3262 §7.1 (RSeq) share is
-    /// `2^31 - 1`; starting two decimal orders of magnitude below it leaves
-    /// every increment a long call can make inside the range.
+    /// The initial value of a 32-bit signed sequence counter
+    /// ([`render::sequence_number`]).
     pub fn new_sequence_number(&self) -> u32 {
-        (self.next_u64() % 100_000_000) as u32 + 1
+        render::sequence_number(self.next_u64())
     }
 }
 
-impl Default for IdGen {
-    fn default() -> Self {
-        Self::from_entropy()
+/// The OS RNG did not answer, so no generator was keyed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntropyUnavailable(getrandom::Error);
+
+impl std::fmt::Display for EntropyUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the OS RNG is unavailable to key the SIP identifier generator: {}", self.0)
     }
 }
 
-fn to_base36(mut v: u64, len: usize) -> String {
-    const ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
-    let mut buf = [b'0'; 16];
-    for slot in buf.iter_mut().rev() {
-        *slot = ALPHABET[(v % 36) as usize];
-        v /= 36;
-    }
-    String::from_utf8_lossy(&buf[buf.len() - len..]).into_owned()
-}
+impl std::error::Error for EntropyUnavailable {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sip_ids::MAGIC_COOKIE;
 
     #[test]
     fn branch_has_magic_cookie_and_is_unique() {
@@ -188,7 +175,7 @@ mod tests {
     fn entropy_keys_are_neither_shared_nor_zero() {
         let zero = IdGen::seeded(0);
         let (zero_branch, zero_tag) = (zero.new_branch(), zero.new_tag());
-        let (a, b) = (IdGen::from_entropy(), IdGen::from_entropy());
+        let (a, b) = (IdGen::from_entropy().unwrap(), IdGen::from_entropy().unwrap());
         let (a_branch, a_tag) = (a.new_branch(), a.new_tag());
         let (b_branch, b_tag) = (b.new_branch(), b.new_tag());
         assert_ne!(a_branch, b_branch);
@@ -199,10 +186,31 @@ mod tests {
         }
     }
 
+    /// The stream is the one the HMAC derivation pins: a seeded generator's
+    /// first branch is HMAC-SHA256(seed, 0)'s first 8 bytes.
+    #[test]
+    fn the_counter_stream_is_the_keys() {
+        let key = IdKey::new(&7u64.to_le_bytes());
+        let g = IdGen::seeded(7);
+        assert_eq!(g.new_branch(), render::branch(key.counter_draw(0)));
+        assert_eq!(g.new_tag(), render::tag(key.counter_draw(1)));
+    }
+
     #[test]
     fn tag_is_eight_base36_chars() {
         let t = IdGen::seeded(1).new_tag();
         assert_eq!(t.len(), 8);
         assert!(t.bytes().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    /// Each turn of a process draws under its own number, so two turns never
+    /// mint the same identifier, and neither repeats the counter stream's.
+    #[test]
+    fn two_turns_draw_apart_from_each_other_and_the_counter() {
+        let g = IdGen::seeded(1);
+        let (mut first, mut second) = (g.turn(), g.turn());
+        assert_eq!((first.turn_seq(), second.turn_seq()), (0, 1));
+        let tags = [first.new_tag(), second.new_tag(), g.new_tag()];
+        assert!(tags[0] != tags[1] && tags[1] != tags[2] && tags[0] != tags[2], "{tags:?}");
     }
 }

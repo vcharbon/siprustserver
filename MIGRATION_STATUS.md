@@ -27,7 +27,7 @@ each maps to a workspace **crate**. Status legend:
 | **HA replication engine** (store/changelog/server/puller/supervisor) | `crates/b2bua` (`repl/`) *(slices S4–S8)* | `src/call/replication/**` | ✅ `ReplicatingCallStore` + per-peer compacted `Changelog` (lazy TTL, dead-peer auto-clean) + `ReplServer` serve-loop + `Puller` FSM (Replog tail + Bootstrap rehydrate + hard timer) + `ReplicationSupervisor` (topology-driven, retained-W per ordinal, sticky current/bootstrap flags) + `Readiness` + write-side policy (`flush_replicated`/`replication_target`, forward/reverse takeover). 58 tests green ([ADR-0011](docs/adr/0011-ha-replication-peer-to-peer.md)) |
 | **HA cluster harness** (goal-1 pure-framework test harness) | `crates/ha-harness` *(slice S9)* | `tests/failover/**` chaos steps (`kill`/`partition`/`expectReplicatedTo`) | ✅ N in-process repl-subsystem nodes under a paused clock (no SIP/router/rules) — `HaCluster`/`HaNode` driving put/delete/crash/reboot/partition/heal/cut/delay/stall/drop-on-overflow + convergence asserts + a **focused recording-first** replication-exchange report (text sequence diagram + mermaid; the SIP renderers are too `RecordedSipEntry`-coupled to reuse). 8 goal-1 scenarios + a fixed-seed eventual-convergence property test (5 seeds); 14 tests green. No b2bua pub-widening needed. ([ADR-0011 X10](docs/adr/0011-ha-replication-peer-to-peer.md), recording-first per [ADR-0006](docs/adr/0006-scenario-harness-recording-first.md)) |
 | **HA simulated failover** (goal-2) | `crates/b2bua-harness` *(slice S10)* | `tests/failover/**` (sim) | ✅ proxy + ≥2 `B2buaCore` SUTs over the SIP sim fabric **and** the repl sim fabric, fake clock: crash→failover→reboot→reclaim canonical + 4-case matrix + combined SIP+replication report. Replication is opt-in via `B2buaDeps.replication: Option<ReplicationSetup>` (`None` = legacy). Green. ([ADR-0011 X10](docs/adr/0011-ha-replication-peer-to-peer.md)) |
-| **HA real chaos** (goal-3) | `crates/topology` (`k8s`, feat `kube`) + `crates/b2bua-runner` + `deploy/k8s` *(slice S11)* | k8s EndpointSlice + real TCP + kind | ✅ `K8sMembership` EndpointSlice informer (`reconcile_to_desired` pure delta-translation, unit-tested; `peers_from_slices` ready-endpoint→`Peer`) — the k8s watcher written **once** (X7). `b2bua-runner` wires `RealReplicationNetwork` + membership (static `B2BUA_PEERS` / k8s) from env, **boot-wallclock incarnation gen**, **port-agnostic `peer.host:REPL_PORT`** addressing, SIGTERM→`begin_draining()`, `/ready` probe reflecting `is_ready()`. Repl-aware manifests (repl port, EndpointSlice RBAC, headless svc, `/ready` readinessProbe, drain grace) + vendored kind `cluster.yaml`/sipp scenarios + `deploy/k8s/chaos.sh` (build→kind→deploy→hold-failover under pod-kill→assert call survival). Chaos suite is a shell script (not a `cargo test`) so the workspace stays fast; run explicitly on kind. ([ADR-0011](docs/adr/0011-ha-replication-peer-to-peer.md)) |
+| **HA real chaos** (goal-3) | `crates/topology` (`k8s`, feat `kube`) + `crates/b2bua-runner` + `deploy/helm/siprust` *(slice S11)* | k8s EndpointSlice + real TCP + kind | ✅ `K8sMembership` EndpointSlice informer (`reconcile_to_desired` pure delta-translation, unit-tested; `peers_from_slices` ready-endpoint→`Peer`) — the k8s watcher written **once** (X7). `b2bua-runner` wires `RealReplicationNetwork` + membership (static `B2BUA_PEERS` / k8s) from env, **boot-wallclock incarnation gen**, **port-agnostic `peer.host:REPL_PORT`** addressing, SIGTERM→`begin_draining()`, `/ready` probe reflecting `is_ready()`. Repl-aware SUT chart (repl port, EndpointSlice RBAC, headless svc, `/ready` readinessProbe, drain grace) + vendored kind `cluster.yaml`; SIPp scenarios in `tooling/hakit/content/scenarios`. Faults on kind run through the HA tooling (`tooling/hakit`, [ADR-0049](docs/adr/0049-the-ha-tooling-is-a-pluggable-base.md)), not a `cargo test`, so the workspace stays fast. ([ADR-0011](docs/adr/0011-ha-replication-peer-to-peer.md)) |
 
 ---
 
@@ -102,19 +102,19 @@ I/O, no clock. UDP/transport/transaction deferred to slice 2.
 | `parsers/custom/compact-forms.ts` | `parser/custom/compact_forms.rs` | ✅ ported |
 | `parsers/custom/headers.ts` | `parser/custom/headers.rs` | ✅ ported |
 | `parsers/custom/structured-headers.ts` | `parser/custom/structured_headers.rs` | ✅ ported |
-| `parsers/extract-fields.ts` (ADR-0007 gates) | `parser/custom/extract_fields.rs` | ✅ ported (wire+hydrate; finalize/hydrate wrappers fold into `CustomParser`) |
-| `parsers/custom/lazy-parsers.ts` | `parser/custom/optional_headers.rs` | ✅ ported as **eager + non-fatal** (`OptionalHeaders`) + `SipMessage::validate_strict()` ([ADR-0003 amendment](docs/adr/0003-typed-header-model.md)) |
+| `parsers/extract-fields.ts` (wire-grammar gates) | `parser/custom/extract_fields.rs` | ✅ ported (wire+hydrate; finalize/hydrate wrappers fold into `CustomParser`) |
+| `parsers/custom/lazy-parsers.ts` | `parser/custom/optional_headers.rs` | ✅ ported as **eager + non-fatal** (`OptionalHeaders`) ([ADR-0003 amendment](docs/adr/0003-typed-header-model.md)); the strict pass is folded into the parse (ADR-0053) |
 | `parsers/custom/index.ts` | `parser/custom/mod.rs` (`CustomParser`) | ✅ ported (full parse pipeline) |
-| `parsers/native-adapter.ts` (role) | `parser/rvoip.rs` (`RvoipParser`, feature-gated) | ✅ ported — wraps `rvoip-sip-core` 0.1.26 behind `rvoip-oracle`; thin accept/reject parity shell (matrix never reads its fields) |
+| `parsers/native-adapter.ts` (role) | `parser/rvoip.rs` (feature-gated) | ✅ ported — reads `rvoip-sip-core` 0.4 behind `rvoip-oracle` into the fields the differential test (`tests/it/rvoip_parity.rs`, `just parity-oracle`) compares |
 | `Serializer.ts` | `serializer.rs` | ✅ ported (`serialize`/`sip_summary`/`message_summary`, Content-Length safety net) |
 | `SdpUtils.ts` + `SdpAnswerFromOffer.ts` | `sdp.rs` | ✅ ported (codec-profile extract, held-SDP, answer-from-offer, strict `validate_sdp_body`) |
 | `generators.ts` | `generators.rs` | ✅ ported (all 8 generators; `StackDialog`/`InviteClientTransactionHandle` are minimal local input shapes pending slice-2 `Dialog`/`TransactionLayer`) |
-| `SipFragUtils.ts`, `MessageHelpers.ts` | `sipfrag.rs`, `message_helpers.rs` | ✅ ported — sipfrag whole; MessageHelpers **pure half** (header accessors + structured readers) **plus all four Tier-1 overload-brake byte helpers** — `bufferHasEmergencyMarker` (migration/03), then **migration/10** added the other three: `isInviteRequestBuffer` (`is_invite_request_buffer`), `buildStatelessReject503Buffer` (`build_stateless_reject_503_buffer` — distinct from the parsed Tier-3 `b2bua::router::build_stateless_overload_503`: byte-slices verbatim, adds no To-tag), and `jitteredRetryAfter` (`jittered_retry_after`, with the `Math.random()` source recast as an **injected `roll` closure** so the pure crate stays RNG-free). The Tier-1 `preIngress` *consumer* (the `UdpTransport.layer` glue) is still deferred to slice 2 with `AppConfig`/`MetricsRegistry`; the helper-level tests pin the three named `UdpTransport-brake.test.ts` cases. **migration/21** added the fifth byte helper `bufferHasToTag` (`buffer_has_to_tag` — the initial-INVITE vs in-dialog `To`-tag discriminator); only the seeded-RNG identifier generators now remain deferred to slice 2 (see un-ported list). **AMENDED 2026-08-01 (tracker #4):** the byte-templating design is scrapped. `buildStatelessReject503Buffer` / `buffer_has_to_tag` / `bufferHasEmergencyMarker` are **deleted**; the Tier-1 brake now parses the datagram with the pipeline's own parser and both tiers emit ONE To-tagged reject (`b2bua::overload::build_reject_new_call_503`), with `jitteredRetryAfter` relocated beside it as overload policy. `is_invite_request_buffer` survives as the brake's and loadgen mux demux's byte-level INVITE fast path. Source: sipjsserver @ `fffc4ac6`. |
+| `SipFragUtils.ts`, `MessageHelpers.ts` | `sipfrag.rs`, `message_helpers.rs` | ✅ ported — sipfrag whole; MessageHelpers **pure half** (header accessors + structured readers) **plus all four Tier-1 overload-brake byte helpers** — `bufferHasEmergencyMarker` (migration/03), then **migration/10** added the other three: `isInviteRequestBuffer` (`is_invite_request_buffer`), `buildStatelessReject503Buffer` (`build_stateless_reject_503_buffer` — distinct from the parsed Tier-3 `b2bua::router::build_stateless_overload_503`: byte-slices verbatim, adds no To-tag), and `jitteredRetryAfter` (`jittered_retry_after`, with the `Math.random()` source recast as an **injected `roll` closure** so the pure crate stays RNG-free). The Tier-1 `preIngress` *consumer* (the `UdpTransport.layer` glue) is still deferred to slice 2 with `AppConfig`/`MetricsRegistry`; the helper-level tests pin the three named `UdpTransport-brake.test.ts` cases. **migration/21** added the fifth byte helper `bufferHasToTag` (`buffer_has_to_tag` — the initial-INVITE vs in-dialog `To`-tag discriminator); only the seeded-RNG identifier generators now remain deferred to slice 2 (see un-ported list). **AMENDED 2026-08-01 (tracker #4):** the byte-templating design is scrapped. `buildStatelessReject503Buffer` / `buffer_has_to_tag` / `bufferHasEmergencyMarker` are **deleted**; the Tier-1 brake now parses the datagram with the pipeline's own parser and both tiers emit ONE To-tagged reject (`b2bua::overload::build_reject_new_call_503`), with `jitteredRetryAfter` relocated beside it as overload policy. `is_invite_request_buffer` survives in the tooling-only `preparse` module (the `sip-message/sniff` feature) as the loadgen mux demux's byte-level INVITE test; the brake reads the parsed message. Source: sipjsserver @ `fffc4ac6`. |
 
 ### Tests to port
 | Source test | Rust home | Status |
 |---|---|---|
-| `parser-compliance.test.ts` (matrix, `custom` column) | `tests/compliance_matrix.rs` | ✅ 63 fixtures (RFC4475 valid/invalid, CVE, param-gaps, RFC5118 IPv6, strict-valid); byte-exact fixtures dumped from TS; invalid corpus now uses full `parse + validate_strict` (only the 2 TS-lenient start-line cases remain lenient) |
+| `parser-compliance.test.ts` (matrix, `custom` column) | `tests/compliance_matrix.rs` | ✅ 63 fixtures (RFC4475 valid/invalid, CVE, param-gaps, RFC5118 IPv6, strict-valid); byte-exact fixtures dumped from TS; every corpus uses the one `parse` (only the trailing-spaces start-line and the malformed-Date cases remain lenient) |
 | `Parser.test.ts` (RFC 4475 field extraction asserts) | `tests/parser.rs` | ✅ 11 (field-content + eager-leniency split) |
 | `parser-extraction.test.ts` | `tests/parser_extraction.rs` | ✅ 17 (jssip cross-parser block dropped — no jssip) |
 | `parser-response-totag.test.ts` | `tests/parser_response_totag.rs` | ✅ 3 |
@@ -132,17 +132,17 @@ I/O, no clock. UDP/transport/transaction deferred to slice 2.
 | (no TS counterpart — `bufferHasToTag` byte scan) | `src/message_helpers.rs::buffer_has_to_tag_tests` | ✅ 14 (migration/21; no dedicated TS unit test exists — pins the byte-level `To`-tag contract directly: tag present/absent, line-start anchoring, case-sensitive `To`/compact `t`, first-To-line decides, header-terminator + unterminated-buffer stops, bounds-checked lookahead) |
 | ABNF fuzz suite (`scripts/abnf-fuzz`) | `tests/abnf_fuzz.rs` + `xtask abnf-regen` | 🟡 driver + classifier ported & `xtask` regen implemented; **corpus generation pending `abnfgen`** (not installed). Test skips-with-log until the corpus is generated |
 | Parser micro-benchmark (`bench/sip-parser-bench.ts`) | `benches/sip_parser.rs` | ✅ measuring (INVITE ~5.3µs, 200 OK ~4.9µs) |
-| (smoke) walking-skeleton parse + refined views + 5 ADR-0007 rejections | `tests/parser_smoke.rs` | ✅ 9 passing |
+| (smoke) walking-skeleton parse + refined views + 5 wire-grammar rejections | `tests/parser_smoke.rs` | ✅ 9 passing |
 
 ### Un-ported with justification
 - `parsers/jssip-adapter.ts` (`jssipParser`) — JsSIP JS-library adapter; no
-  Rust equivalent. Its role in the compliance matrix is taken by the
-  `rvoip` oracle.
+  Rust equivalent. Its role as a second parser is taken by the `rvoip`
+  oracle.
 - `parsers/sip-parser-adapter.ts` (`sipParserNpm`) — the `sip` npm package
   adapter; same reasoning.
 - (none for the parser layer — `lazy-parsers.ts` is now ported as
-  `optional_headers.rs`; the previously-noted 3.1.2.12/.13/.15 gap is closed by
-  `validate_strict()`.)
+  `optional_headers.rs`; the previously-noted 3.1.2.13/.15 gap is closed by
+  the parse itself, ADR-0053, and a malformed Date (3.1.2.12) never refuses.)
 - `MessageHelpers-random.test.ts` (seeded-RNG identifier generators) — the
   `newTag`/`newBranch`/`newCallId`/`currentRng` helpers read a fiber-local
   Effect `Random` reference. That RNG seam belongs to the **network slice**
@@ -174,8 +174,8 @@ I/O, no clock. UDP/transport/transaction deferred to slice 2.
 - The `parser-extraction.test.ts` "custom vs JsSIP" cross-parser equivalence
   block and the `jssip`/`native` oracle columns in `parser-*.test.ts` — there
   is no JsSIP in the Rust stack ([ADR-0001](docs/adr/0001-port-custom-parser-rvoip-as-parity-oracle.md));
-  the `rvoip` oracle (compliance matrix, `--features rvoip-oracle`) is the
-  surviving second column.
+  the `rvoip` oracle (its differential test, `just parity-oracle`) is the
+  surviving second parser.
 - Memoization assertions in `lazy-headers.test.ts` / `header-registry-extension.test.ts`
   ("parse called once", "same Result reference") — not applicable to the eager
   model (the value is parsed once at parse time and stored; `typed::<H>()` is a
@@ -230,9 +230,9 @@ scope (later slices).
 | Area | Rust home | Status |
 |---|---|---|
 | Recorder / channels / severity / lane conflict | `layer-harness/tests/it/recorder.rs` | ✅ 5 |
-| Simulated routing, already-bound, undeliverable, send-fault, tail-drop, pre-ingress, unbind-on-drop | `sip-net/tests/it/simulated.rs` | ✅ 7 |
+| Simulated routing, already-bound, undeliverable, send-fault, tail-drop, pre-ingress, unbind-on-drop | `sip-net-testkit/tests/it/simulated.rs` | ✅ 7 |
 | Real loopback send/recv, pre-ingress reply round-trip, no-transit invariants | `sip-net/tests/it/real_loopback.rs` | ✅ 3 |
-| Recording capture, paranoid defects, queue-leak (advisory), undeliverable (deferred-fail), peer-rule fail, real-run silencing | `sip-net/tests/it/contracts.rs` | ✅ 7 |
+| Recording capture, paranoid defects, queue-leak (advisory), undeliverable (deferred-fail), peer-rule fail, real-run silencing | `sip-net-testkit/tests/it/contracts.rs` | ✅ 7 |
 
 ### Un-ported with justification
 - **`UdpTransport.ts`** — the **Tier-1 overload brake `preIngress` policy is now
@@ -926,7 +926,7 @@ no 1:1 TS scenario (the TS enforces the same limits in `SipRouter.ts` /
 | Limit / race | Behaviour exercised | Rust home | Status |
 |---|---|---|---|
 | No-answer / ring forever | a-leg `SetupTimeout` (150 s; >180 s unreachable — sip-txn `INVITE_INITIAL_TIMEOUT` backstop is 158 s) → 408 + CANCEL b-leg + limiter release | `b2bua-harness/tests/setup_timeout.rs` | ✅ 2 |
-| Max call duration (never hung up) | established call → `GlobalDuration` (`features.platform.max_duration_sec`) → BYE both legs + `max_duration` CDR + limiter release | `limit_cases.rs::max_duration_byes_both_legs_*` | ✅ 1 |
+| Max call duration (never hung up) | established call → `GlobalDuration` (`features.platform.max_duration_ms`) → BYE both legs + `max_duration` CDR + limiter release | `limit_cases.rs::max_duration_byes_both_legs_*` | ✅ 1 |
 | Max-duration mid-re-INVITE | cap fires while a re-INVITE is pending → teardown abandons the re-INVITE + limiter release | `limit_cases.rs::max_duration_fires_mid_reinvite_*` | ✅ 1 |
 | Provisional storm before connect | >200 `18x` to the initial INVITE → `MAX_MESSAGES_PER_CALL` cap → 503 to caller + CANCEL b-leg + limiter release | `limit_cases.rs::provisional_storm_*` | ✅ 1 |
 | Reliable-provisional / PRACK-loop storm | >200 events from a `183(100rel)`/PRACK/`200(PRACK)` loop → cap trips with an in-flight PRACK txn open → 503 to a-leg + CANCEL b-leg, PRACK abandoned with no leak, RFC gate clean + limiter release | `limit_cases.rs::prack_loop_storm_*` | ✅ 1 |

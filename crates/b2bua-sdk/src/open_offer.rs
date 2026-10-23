@@ -4,10 +4,10 @@
 //! on a dialog. Only a reliable provisional carrying a description answers an
 //! INVITE offer before the final (§5.1); an unreliable one answers nothing.
 
-use call::{Call, Dialog, Leg, LegState, PendingRequest};
+use call::{Call, Dialog, DialogId, Ladder, Leg, LegState, PendingRequest, Shown};
 use sip_message::header::{HeaderValue, MediaType};
 use sip_message::sip_str::SipStr;
-use sip_message::{HeaderName, SipMessage, SipParser, SipRequest};
+use sip_message::{HeaderName, SipMessage, SipParser};
 
 /// The owner of the INVITE offer open on the sender's dialog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,14 +19,18 @@ pub enum OpenOffer {
     Stack,
 }
 
-/// The INVITE offer open when `source_leg_id`'s peer sends `req`, if any:
-/// its relayed re-INVITE, the call's initial INVITE (the caller) or the INVITE
-/// this stack dialled it with (a callee). An offerless INVITE whose offer this
-/// stack showed in a reliable provisional is open until the PRACK.
-pub fn open_offer(call: &Call, source_leg_id: &str, req: &SipRequest) -> Option<OpenOffer> {
-    let shown = req.to().tag().unwrap_or_default();
-    let tags = call::helpers::RequestTags::new(req.to().tag(), req.from().tag());
-    let peer = call::helpers::relay_peer_dialog(call, source_leg_id, tags);
+/// The INVITE offer open when `source_leg_id`'s peer sends a request on its
+/// dialog `source`, if any: its relayed re-INVITE, the call's initial INVITE
+/// (the caller) or the INVITE this stack dialled it with (a callee). An
+/// offerless INVITE whose offer this stack showed in a reliable provisional is
+/// open until the PRACK.
+pub fn open_offer(
+    call: &Call,
+    source_leg_id: &str,
+    source: Option<&DialogId>,
+) -> Option<OpenOffer> {
+    let shown = source.map_or("", |id| id.our_tag.as_str());
+    let peer = call::helpers::relay_peer_dialog(call, source_leg_id, source);
     if let Some(p) = peer.and_then(|(_, d)| pending_invite(d)) {
         return relayed(call, shown, p);
     }
@@ -34,12 +38,12 @@ pub fn open_offer(call: &Call, source_leg_id: &str, req: &SipRequest) -> Option<
         return initial(call, shown, peer);
     }
     let leg = call.b_legs.iter().find(|l| l.leg_id == source_leg_id)?;
-    dialled(call, leg, req.from().tag().unwrap_or_default())
+    dialled(call, leg, source.map_or("", |id| id.peer_tag.as_str()))
 }
 
 /// The re-INVITE relayed onto `dialog` still awaiting its final.
 fn pending_invite(dialog: &Dialog) -> Option<&PendingRequest> {
-    dialog.ext.inbound_pending_requests.iter().find(|p| p.method.eq_ignore_ascii_case("INVITE"))
+    dialog.inbound_pending_requests.iter().find(|p| p.method.eq_ignore_ascii_case("INVITE"))
 }
 
 /// A relayed re-INVITE: its offer is the sender's until answered, this stack's
@@ -58,7 +62,7 @@ fn relayed(call: &Call, shown: &str, p: &PendingRequest) -> Option<OpenOffer> {
 /// but not by the peer dialog the request would be relayed onto (a reroute's
 /// new leg), this stack's offer to that peer is the open one.
 fn initial(call: &Call, shown: &str, peer: Option<(&Leg, &Dialog)>) -> Option<OpenOffer> {
-    if !matches!(call.a_leg.state, LegState::Trying | LegState::Early) {
+    if !matches!(call.a_leg.state(), LegState::Trying | LegState::Early) {
         return None;
     }
     let invite = &call.a_leg_invite;
@@ -70,18 +74,18 @@ fn initial(call: &Call, shown: &str, peer: Option<(&Leg, &Dialog)>) -> Option<Op
         return Some(OpenOffer::Sender);
     }
     let (leg, dialog) = peer?;
-    let pending = matches!(leg.state, LegState::Trying | LegState::Early);
-    (pending && !responder_answered(call, &leg.leg_id, &dialog.sip.remote_tag, None))
+    let pending = matches!(leg.state(), LegState::Trying | LegState::Early);
+    (pending && !responder_answered(call, &leg.leg_id, &dialog.peer_tag, None))
         .then_some(OpenOffer::Stack)
 }
 
 /// A callee before its final: the offer this stack dialled it with stays open
 /// on its face until a reliable provisional of its own carries the answer.
 fn dialled(call: &Call, leg: &Leg, callee_tag: &str) -> Option<OpenOffer> {
-    if !matches!(leg.state, LegState::Trying | LegState::Early) {
+    if !matches!(leg.state(), LegState::Trying | LegState::Early) {
         return None;
     }
-    let bytes = &leg.pending_invite_txn.as_ref()?.original_invite;
+    let bytes = &leg.outbound_invite.as_ref()?.txn.as_ref()?.original_invite;
     let SipMessage::Request(invite) =
         sip_message::CustomParser::new().parse(bytes.as_slice()).ok()?
     else {
@@ -95,27 +99,33 @@ fn dialled(call: &Call, leg: &Leg, callee_tag: &str) -> Option<OpenOffer> {
 /// A reliable provisional shown in the `shown` dialog for the INVITE of CSeq
 /// `cseq` carried a description: the answer to that INVITE's offer.
 fn shown_answer(call: &Call, shown: &str, cseq: i64) -> bool {
-    call.reliable_provisionals.iter().any(|r| r.a_tag == shown && r.a_cseq == cseq && r.carried_sdp)
+    shown_on(call, shown, cseq).any(|s| s.carried_sdp)
 }
 
 /// A reliable provisional shown in the `shown` dialog for the offerless INVITE
 /// of CSeq `cseq` carried a description, the offer, and is not yet PRACKed.
 fn shown_unpracked_offer(call: &Call, shown: &str, cseq: i64) -> bool {
-    call.reliable_provisionals
+    shown_on(call, shown, cseq).any(|s| s.carried_sdp && s.ladder != Ladder::Acknowledged)
+}
+
+/// The reliable provisionals shown in the `shown` dialog for the INVITE of
+/// CSeq `cseq` on that face.
+fn shown_on<'a>(call: &'a Call, shown: &'a str, cseq: i64) -> impl Iterator<Item = &'a Shown> {
+    call.provisionals
         .iter()
-        .any(|r| r.a_tag == shown && r.a_cseq == cseq && r.carried_sdp && !r.acknowledged)
+        .filter_map(|p| p.shown.as_ref())
+        .filter(move |s| s.tag == shown && s.invite_cseq.as_i64() == cseq)
 }
 
 /// The responder on `leg_id`'s dialog `tag` sent a reliable provisional with a
 /// description, to the INVITE of CSeq `cseq` where given.
 fn responder_answered(call: &Call, leg_id: &str, tag: &str, cseq: Option<i64>) -> bool {
-    let of = |c: i64| cseq.is_none_or(|want| want == c);
-    call.reliable_provisionals
-        .iter()
-        .any(|r| r.b_leg_id == leg_id && r.b_tag == tag && of(r.b_cseq) && r.responder_sdp)
-        || call.pracked_provisionals.iter().any(|p| {
-            p.leg_id == leg_id && p.remote_tag == tag && of(p.invite_cseq) && p.responder_sdp
-        })
+    call.provisionals.iter().any(|p| {
+        p.id.leg == leg_id
+            && p.id.responder_tag == tag
+            && cseq.is_none_or(|want| want == p.id.invite_cseq.as_i64())
+            && p.responder_sdp
+    })
 }
 
 /// The caller's INVITE carried a session description (RFC 5621 §3.1).

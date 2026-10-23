@@ -1,6 +1,6 @@
 //! What ONE message must state on its own — the obligations an endpoint
 //! discharges by writing the message correctly, with no other message involved.
-//! ELEVEN of them, every one charging the endpoint that EMITTED the message:
+//! TWELVE of them, every one charging the endpoint that EMITTED the message:
 //!
 //!   - [`BranchPrefix`] (§8.1.1.7) — a request's top Via states a `branch`
 //!     beginning with the magic cookie `z9hG4bK`.
@@ -13,6 +13,7 @@
 //!     target later in-dialog requests go to.
 //!   - [`NoContactOnBye`] (§15.1) — a BYE states none: it ends the dialog.
 //!   - [`ToTagPresence`] (§8.2.6.2) — a response above 100 carries a To-tag.
+//!   - [`FromTagPresence`] (§8.1.1.3) — a request carries a From-tag.
 //!   - [`NoRecordRouteFromUa`] (§16.6) — a UA inserts no Record-Route.
 //!   - [`CancelCseqMethod`] (§9.1) — a CANCEL's CSeq method token is `CANCEL`.
 //!   - [`No100relRequireOnNonInvite`] (RFC 3262 §4) — only an INVITE may
@@ -40,7 +41,47 @@ use sip_message::sniff;
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, Msg, WireView};
 
+use super::charge::charge;
 use super::Obligation;
+
+crate::registry::rules! {
+    /// RFC 3261 §8.1.1.7: a request's top Via carries a `branch` beginning with the magic cookie
+    /// `z9hG4bK`. Charges the sender that minted it.
+    BranchPrefix = "branch-prefix";
+    /// RFC 3261 §8.1.1.6: a request carries a Max-Forwards in `0..=255`, and no higher than the
+    /// recommended initial 70 — above it the count was minted, not decremented. Charges the sender.
+    MaxForwards = "max-forwards";
+    /// RFC 3261 §20.14: a message's Content-Length equals the byte count of the body it carried.
+    /// Charges the sender that wrote both.
+    ContentLength = "content-length";
+    /// RFC 3261 §7.4.1: a message carrying a body names its format in Content-Type. Charges the
+    /// sender.
+    ContentType = "content-type";
+    /// RFC 3261 §8.1.1.8: a dialog-establishing request (INVITE, SUBSCRIBE) carries a Contact — the
+    /// dialog's remote target. Charges the sender.
+    ContactPresence = "contact-presence";
+    /// RFC 3261 §15.1: a BYE carries no Contact — it ends the dialog, so target-refresh means
+    /// nothing on it. Charges the sender.
+    NoContactOnBye = "no-contact-on-bye";
+    /// RFC 3261 §8.2.6.2: a UAS adds a To-tag to every response above 100, so the peer can
+    /// dialog-match it. Charges the responding UAS.
+    ToTagPresence = "to-tag-presence";
+    /// RFC 3261 §8.1.1.3: a UAC adds a From-tag to every request it sends, its half of the dialog
+    /// identifier. Charges the sender.
+    FromTagPresence = "from-tag-presence";
+    /// RFC 3261 §16.6: Record-Route is a PROXY mechanism, so a UA (a B2BUA included) inserts none.
+    /// Charges the endpoint that inserted it.
+    NoRecordRouteFromUa = "no-record-route-from-ua";
+    /// RFC 3262 §4: `Require: 100rel` rides an INVITE and nothing else — the reliable-provisional
+    /// contract is the INVITE transaction's. Charges the sender that stamped it.
+    No100relRequireOnNonInvite = "no-100rel-require-on-non-invite";
+    /// RFC 3262 §3: a 100 (Trying) carries no reliability marker, and a reliable 1xx carries an
+    /// `RSeq` in `1..=2^31-1`. Charges the responding UAS, which writes both rows.
+    Reliable1xxHeaders = "reliable-1xx-headers";
+    /// RFC 3261 §9.1: a CANCEL's CSeq method token is `CANCEL`, whatever request it cancels.
+    /// Charges the sender.
+    CancelCseqMethod = "cancel-cseq-method";
+}
 
 /// The RFC 3261 §8.1.1.7 magic cookie every `branch` begins with.
 const MAGIC_COOKIE: &str = "z9hG4bK";
@@ -51,19 +92,6 @@ fn on_label(msg: &Msg) -> String {
     match &msg.kind {
         Kind::Request { method } => method.clone(),
         Kind::Response { status } => status.to_string(),
-    }
-}
-
-/// A finding on `msg` for `rule`, charging the endpoint that emitted it.
-fn charge(rule: RuleId, msg: &Msg, mi: usize, decision: Decision) -> Finding {
-    Finding {
-        rule,
-        emitter: msg.src.clone(),
-        taker: msg.dst.clone(),
-        cseq: msg.cseq,
-        relayed: false,
-        anchor: mi,
-        decision,
     }
 }
 
@@ -78,10 +106,6 @@ fn charge(rule: RuleId, msg: &Msg, mi: usize, decision: Decision) -> Finding {
 pub struct BranchPrefix;
 
 impl Obligation for BranchPrefix {
-    fn id(&self) -> RuleId {
-        RuleId::BranchPrefix
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -133,10 +157,6 @@ impl Obligation for BranchPrefix {
 pub struct MaxForwards;
 
 impl Obligation for MaxForwards {
-    fn id(&self) -> RuleId {
-        RuleId::MaxForwards
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -195,10 +215,6 @@ impl Obligation for MaxForwards {
 pub struct ContentLength;
 
 impl Obligation for ContentLength {
-    fn id(&self) -> RuleId {
-        RuleId::ContentLength
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -252,10 +268,6 @@ impl Obligation for ContentLength {
 pub struct ContentType;
 
 impl Obligation for ContentType {
-    fn id(&self) -> RuleId {
-        RuleId::ContentType
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -293,10 +305,6 @@ impl Obligation for ContentType {
 pub struct ContactPresence;
 
 impl Obligation for ContactPresence {
-    fn id(&self) -> RuleId {
-        RuleId::ContactPresence
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -332,10 +340,6 @@ impl Obligation for ContactPresence {
 pub struct NoContactOnBye;
 
 impl Obligation for NoContactOnBye {
-    fn id(&self) -> RuleId {
-        RuleId::NoContactOnBye
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -379,10 +383,6 @@ impl Obligation for NoContactOnBye {
 pub struct ToTagPresence;
 
 impl Obligation for ToTagPresence {
-    fn id(&self) -> RuleId {
-        RuleId::ToTagPresence
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -411,6 +411,43 @@ impl Obligation for ToTagPresence {
     }
 }
 
+/// **§8.1.1.3 — a UAC tags the From of every request.** The From-tag is the
+/// UAC's half of the §12 dialog identifier; a request without one, or with an
+/// empty one, names no dialog the peer can match, inside a dialog or out. A
+/// CANCEL and an ACK copy the From of the request they follow, tag included.
+///
+/// The occasion is one fresh request the endpoint sent, read off the raw From
+/// row. A vantage with no header block opens no occasion.
+///
+/// Charges the sender, which mints the tag.
+pub struct FromTagPresence;
+
+impl Obligation for FromTagPresence {
+    fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
+        let mut out = Vec::new();
+        for (mi, msg) in wire.msgs.iter().enumerate() {
+            if msg.repeat {
+                continue;
+            }
+            let Kind::Request { method } = &msg.kind else { continue };
+            let Some(head) = msg.head.as_deref() else { continue };
+            let decision = if sniff::from_tag(head).is_empty() {
+                Decision::Violated(Evidence::RequiredHeaderAbsent {
+                    absent_msg: mi,
+                    absent_hop: msg.hop,
+                    absent_ts_us: msg.at_us,
+                    on: method.clone(),
+                    header: "From;tag".to_string(),
+                })
+            } else {
+                Decision::Compliant
+            };
+            out.push(charge(RuleId::FromTagPresence, msg, mi, decision));
+        }
+        out
+    }
+}
+
 /// **§16.6 — Record-Route is a proxy mechanism.** A UA does not stay in the
 /// route set: inserting Record-Route puts it into every later in-dialog request
 /// the peer builds, under a URI only that UA understands. A B2BUA is a UA, and
@@ -418,16 +455,11 @@ impl Obligation for ToTagPresence {
 /// URI.
 ///
 /// The occasion is one fresh request the endpoint sent. Only a row carrying a
-/// B2BUA leg marker (`callRef=` / `leg=`) is judged — a genuine proxy's own
-/// Record-Route is its right, and consumer policy narrows the rule to lanes that
-/// declared themselves proxies. Charges the endpoint that inserted the row.
+/// B2BUA leg marker (`callRef=` / `leg=`) is judged. Charges the endpoint that
+/// inserted the row.
 pub struct NoRecordRouteFromUa;
 
 impl Obligation for NoRecordRouteFromUa {
-    fn id(&self) -> RuleId {
-        RuleId::NoRecordRouteFromUa
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -471,10 +503,6 @@ impl Obligation for NoRecordRouteFromUa {
 pub struct CancelCseqMethod;
 
 impl Obligation for CancelCseqMethod {
-    fn id(&self) -> RuleId {
-        RuleId::CancelCseqMethod
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -512,10 +540,6 @@ impl Obligation for CancelCseqMethod {
 pub struct No100relRequireOnNonInvite;
 
 impl Obligation for No100relRequireOnNonInvite {
-    fn id(&self) -> RuleId {
-        RuleId::No100relRequireOnNonInvite
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -562,10 +586,6 @@ const RSEQ_MAX: u64 = 2_147_483_647;
 pub struct Reliable1xxHeaders;
 
 impl Obligation for Reliable1xxHeaders {
-    fn id(&self) -> RuleId {
-        RuleId::Reliable1xxHeaders
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -633,529 +653,4 @@ impl Obligation for Reliable1xxHeaders {
 }
 
 #[cfg(test)]
-mod tests {
-    //! The family's OWN semantics: which message is an occasion, what the bytes
-    //! settle, and what a vantage carrying less than the datagram can say.
-
-    use std::collections::BTreeMap;
-
-    use crate::verdict::{Decision, Evidence, Finding};
-    use crate::wire::{Kind, Msg, Observation, WireView};
-
-    use super::super::Obligation;
-    use super::*;
-
-    const UA: &str = "127.0.0.1:5060";
-    const PEER: &str = "127.0.0.1:5070";
-
-    /// A request the UA SENT, with `extra` header rows and `body` bytes; the
-    /// Content-Length row is written by the caller through `extra`.
-    fn request(method: &str, extra: &str, body: &[u8]) -> Msg {
-        let mut text = format!(
-            "{method} sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
-             Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-1\r\n\
-             From: <sip:alice@h>;tag=at\r\n\
-             To: <sip:bob@h>\r\n\
-             Call-ID: c1\r\n\
-             CSeq: 1 {method}\r\n"
-        );
-        if !extra.is_empty() {
-            text.push_str(extra);
-            text.push_str("\r\n");
-        }
-        text.push_str("\r\n");
-        let mut head = text.into_bytes();
-        head.extend_from_slice(body);
-        Msg {
-            at_us: 1_000,
-            src: UA.to_string(),
-            dst: PEER.to_string(),
-            hop: 0,
-            repeat: false,
-            kind: Kind::Request { method: method.to_string() },
-            call_id: "c1".to_string(),
-            cseq: 1,
-            cseq_method: method.to_string(),
-            via_branch: Some("z9hG4bK-1".to_string()),
-            from_tag: Some("at".to_string()),
-            to_tag: None,
-            head: Some(head),
-            body: Some(body.to_vec()),
-        }
-    }
-
-    /// A response the UA SENT, `to_tag` omitted where `None`.
-    fn response(status: u16, to_tag: Option<&str>) -> Msg {
-        let to = match to_tag {
-            Some(t) => format!("<sip:bob@h>;tag={t}"),
-            None => "<sip:bob@h>".to_string(),
-        };
-        let head = format!(
-            "SIP/2.0 {status} Ringing\r\n\
-             Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-1\r\n\
-             From: <sip:alice@h>;tag=at\r\n\
-             To: {to}\r\n\
-             Call-ID: c1\r\n\
-             CSeq: 1 INVITE\r\n\
-             Content-Length: 0\r\n\r\n"
-        );
-        let mut m = request("INVITE", "Content-Length: 0", b"");
-        m.kind = Kind::Response { status };
-        m.to_tag = to_tag.map(str::to_string);
-        m.head = Some(head.into_bytes());
-        m.body = Some(Vec::new());
-        m
-    }
-
-    fn obs(msgs: &[Msg]) -> Observation {
-        let mut endpoint_last_us: BTreeMap<String, u64> = BTreeMap::new();
-        let mut last_us = 0;
-        for m in msgs {
-            last_us = last_us.max(m.at_us);
-            for ep in [&m.src, &m.dst] {
-                let at = endpoint_last_us.entry(ep.clone()).or_default();
-                *at = (*at).max(m.at_us);
-            }
-        }
-        Observation { last_us, endpoint_last_us, closed: true }
-    }
-
-    fn run(rule: &dyn Obligation, msgs: &[Msg]) -> Vec<Finding> {
-        rule.eval(&WireView { msgs, obs: &obs(msgs) })
-    }
-
-    /// The only occasion of the whole family is a message the endpoint EMITTED
-    /// fresh: a retransmission is the same act again.
-    #[test]
-    fn a_retransmission_opens_no_occasion() {
-        let mut again = request("INVITE", "Content-Length: 0", b"");
-        again.repeat = true;
-        assert!(run(&BranchPrefix, &[again]).is_empty());
-    }
-
-    // ── branch-prefix ───────────────────────────────────────────────────────
-
-    #[test]
-    fn a_cookie_prefixed_branch_is_compliant() {
-        let f = run(&BranchPrefix, &[request("INVITE", "Content-Length: 0", b"")]);
-        assert_eq!(f.len(), 1, "{f:?}");
-        assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
-        assert_eq!(f[0].emitter, UA, "the sender is charged");
-    }
-
-    #[test]
-    fn a_legacy_branch_is_violated() {
-        let mut m = request("INVITE", "Content-Length: 0", b"");
-        m.head = Some(
-            String::from_utf8(m.head.take().unwrap())
-                .unwrap()
-                .replace("z9hG4bK-1", "legacy-2543")
-                .into_bytes(),
-        );
-        let f = run(&BranchPrefix, &[m]);
-        let Decision::Violated(Evidence::HeaderValueRejected { value, expected, .. }) =
-            &f[0].decision
-        else {
-            panic!("branch evidence: {:?}", f[0].decision)
-        };
-        assert_eq!(value, "legacy-2543");
-        assert!(expected.contains("z9hG4bK"), "{expected}");
-    }
-
-    #[test]
-    fn a_branchless_request_is_violated_as_an_absence() {
-        let mut m = request("INVITE", "Content-Length: 0", b"");
-        m.head = Some(
-            String::from_utf8(m.head.take().unwrap())
-                .unwrap()
-                .replace(";branch=z9hG4bK-1", "")
-                .into_bytes(),
-        );
-        let f = run(&BranchPrefix, &[m]);
-        assert!(
-            matches!(
-                &f[0].decision,
-                Decision::Violated(Evidence::RequiredHeaderAbsent { header, .. })
-                    if header == "Via;branch"
-            ),
-            "{:?}",
-            f[0].decision
-        );
-    }
-
-    /// A vantage with no bytes cannot say what the request stated: the occasion
-    /// stands, UNDECIDED.
-    #[test]
-    fn a_request_without_header_bytes_is_undecidable() {
-        let mut m = request("INVITE", "Content-Length: 0", b"");
-        m.head = None;
-        let f = run(&BranchPrefix, &[m]);
-        assert_eq!(f.len(), 1, "{f:?}");
-        assert!(!f[0].decided(), "{:?}", f[0].decision);
-    }
-
-    // ── max-forwards ────────────────────────────────────────────────────────
-
-    #[test]
-    fn max_forwards_at_seventy_is_compliant() {
-        let f =
-            run(&MaxForwards, &[request("INVITE", "Max-Forwards: 70\r\nContent-Length: 0", b"")]);
-        assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
-    }
-
-    #[test]
-    fn a_request_without_max_forwards_is_violated() {
-        let f = run(&MaxForwards, &[request("INVITE", "Content-Length: 0", b"")]);
-        assert!(
-            matches!(
-                &f[0].decision,
-                Decision::Violated(Evidence::RequiredHeaderAbsent { header, .. })
-                    if header == "Max-Forwards"
-            ),
-            "{:?}",
-            f[0].decision
-        );
-    }
-
-    /// Above 70 the count was minted, not decremented.
-    #[test]
-    fn max_forwards_above_seventy_is_violated() {
-        let f =
-            run(&MaxForwards, &[request("INVITE", "Max-Forwards: 200\r\nContent-Length: 0", b"")]);
-        let Decision::Violated(Evidence::HeaderValueRejected { value, expected, .. }) =
-            &f[0].decision
-        else {
-            panic!("max-forwards evidence: {:?}", f[0].decision)
-        };
-        assert_eq!((value.as_str(), expected.as_str()), ("200", "at most 70"));
-    }
-
-    #[test]
-    fn an_unreadable_max_forwards_is_violated() {
-        let f =
-            run(&MaxForwards, &[request("INVITE", "Max-Forwards: many\r\nContent-Length: 0", b"")]);
-        let Decision::Violated(Evidence::HeaderValueRejected { value, expected, .. }) =
-            &f[0].decision
-        else {
-            panic!("max-forwards evidence: {:?}", f[0].decision)
-        };
-        assert_eq!(value, "many");
-        assert!(expected.contains("0..=255"), "{expected}");
-    }
-
-    // ── content-length ──────────────────────────────────────────────────────
-
-    #[test]
-    fn a_matching_content_length_is_compliant() {
-        let f = run(&ContentLength, &[request("INVITE", "Content-Length: 5", b"v=0\r\n")]);
-        assert_eq!(f.len(), 1, "{f:?}");
-        assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
-    }
-
-    #[test]
-    fn a_length_above_the_bytes_is_violated() {
-        let f = run(&ContentLength, &[request("INVITE", "Content-Length: 99", b"v=0\r\n")]);
-        let Decision::Violated(Evidence::HeaderValueRejected { value, expected, .. }) =
-            &f[0].decision
-        else {
-            panic!("content-length evidence: {:?}", f[0].decision)
-        };
-        assert_eq!((value.as_str(), expected.as_str()), ("99", "5"));
-    }
-
-    /// The count is RAW BYTES: a non-UTF-8 body measured as decoded text would
-    /// inflate every byte into a replacement character and flag a faithful
-    /// message.
-    #[test]
-    fn a_binary_body_is_counted_in_bytes() {
-        let body: [u8; 8] = [0xFF, 0xFE, 0x00, 0x80, 0xC0, 0x01, 0x02, 0x03];
-        let f = run(&ContentLength, &[request("INFO", "Content-Length: 8", &body)]);
-        assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
-
-        let f = run(&ContentLength, &[request("INFO", "Content-Length: 5", &body)]);
-        let Decision::Violated(Evidence::HeaderValueRejected { expected, .. }) = &f[0].decision
-        else {
-            panic!("content-length evidence: {:?}", f[0].decision)
-        };
-        assert_eq!(expected, "8", "the raw byte count, not the decoded one");
-    }
-
-    /// A message declaring no length claims nothing to check.
-    #[test]
-    fn a_message_declaring_no_length_is_no_occasion() {
-        assert!(run(&ContentLength, &[request("INVITE", "Subject: x", b"")]).is_empty());
-    }
-
-    /// A vantage that kept the head and the body apart already cut the body to
-    /// the declared length, so it can only agree with itself.
-    #[test]
-    fn a_split_head_and_body_vantage_is_undecidable() {
-        let mut m = request("INVITE", "Content-Length: 5", b"");
-        m.body = Some(b"v=0\r\n".to_vec());
-        let f = run(&ContentLength, &[m]);
-        assert_eq!(f.len(), 1, "{f:?}");
-        assert!(!f[0].decided(), "{:?}", f[0].decision);
-    }
-
-    // ── content-type ────────────────────────────────────────────────────────
-
-    #[test]
-    fn a_body_with_content_type_is_compliant() {
-        let f = run(
-            &ContentType,
-            &[request("INVITE", "Content-Type: application/sdp\r\nContent-Length: 5", b"v=0\r\n")],
-        );
-        assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
-    }
-
-    #[test]
-    fn a_body_without_content_type_is_violated() {
-        let f = run(&ContentType, &[request("INVITE", "Content-Length: 5", b"v=0\r\n")]);
-        assert!(
-            matches!(
-                &f[0].decision,
-                Decision::Violated(Evidence::RequiredHeaderAbsent { header, .. })
-                    if header == "Content-Type"
-            ),
-            "{:?}",
-            f[0].decision
-        );
-    }
-
-    /// A message carrying no body owes no Content-Type — no obligation arises.
-    #[test]
-    fn a_bodiless_message_is_no_occasion() {
-        assert!(run(&ContentType, &[request("INVITE", "Content-Length: 0", b"")]).is_empty());
-    }
-
-    // ── contact-presence / no-contact-on-bye ────────────────────────────────
-
-    #[test]
-    fn an_invite_with_contact_is_compliant_and_one_without_is_violated() {
-        let with = request("INVITE", "Contact: <sip:a@h>\r\nContent-Length: 0", b"");
-        assert!(matches!(run(&ContactPresence, &[with])[0].decision, Decision::Compliant));
-        let f = run(&ContactPresence, &[request("INVITE", "Content-Length: 0", b"")]);
-        assert!(
-            matches!(
-                &f[0].decision,
-                Decision::Violated(Evidence::RequiredHeaderAbsent { header, .. })
-                    if header == "Contact"
-            ),
-            "{:?}",
-            f[0].decision
-        );
-    }
-
-    /// Only a dialog-ESTABLISHING method owes a Contact.
-    #[test]
-    fn a_bye_is_no_contact_presence_occasion() {
-        assert!(run(&ContactPresence, &[request("BYE", "Content-Length: 0", b"")]).is_empty());
-    }
-
-    #[test]
-    fn a_bye_carrying_contact_is_violated() {
-        let f =
-            run(&NoContactOnBye, &[request("BYE", "Contact: <sip:a@h>\r\nContent-Length: 0", b"")]);
-        let Decision::Violated(Evidence::ForbiddenHeaderPresent { header, value, .. }) =
-            &f[0].decision
-        else {
-            panic!("bye-contact evidence: {:?}", f[0].decision)
-        };
-        assert_eq!((header.as_str(), value.as_str()), ("Contact", "<sip:a@h>"));
-        let clean = run(&NoContactOnBye, &[request("BYE", "Content-Length: 0", b"")]);
-        assert!(matches!(clean[0].decision, Decision::Compliant), "{:?}", clean[0].decision);
-    }
-
-    // ── to-tag-presence ─────────────────────────────────────────────────────
-
-    #[test]
-    fn a_tagged_response_above_100_is_compliant() {
-        let f = run(&ToTagPresence, &[response(180, Some("bt"))]);
-        assert_eq!(f.len(), 1, "{f:?}");
-        assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
-    }
-
-    #[test]
-    fn an_untagged_response_above_100_is_violated() {
-        let f = run(&ToTagPresence, &[response(180, None)]);
-        assert!(
-            matches!(
-                &f[0].decision,
-                Decision::Violated(Evidence::RequiredHeaderAbsent { header, on, .. })
-                    if header == "To;tag" && on == "180"
-            ),
-            "{:?}",
-            f[0].decision
-        );
-    }
-
-    /// `100 Trying` names no dialog, so it owes no tag — and a request is no
-    /// occasion at all.
-    #[test]
-    fn a_100_and_a_request_are_no_occasion() {
-        assert!(run(&ToTagPresence, &[response(100, None)]).is_empty());
-        assert!(run(&ToTagPresence, &[request("INVITE", "Content-Length: 0", b"")]).is_empty());
-    }
-
-    // ── no-record-route-from-ua ─────────────────────────────────────────────
-
-    #[test]
-    fn a_marked_record_route_is_violated() {
-        let f = run(
-            &NoRecordRouteFromUa,
-            &[request("INVITE", "Record-Route: <sip:b2b@h;callRef=7>\r\nContent-Length: 0", b"")],
-        );
-        let Decision::Violated(Evidence::ForbiddenHeaderPresent { header, value, .. }) =
-            &f[0].decision
-        else {
-            panic!("record-route evidence: {:?}", f[0].decision)
-        };
-        assert_eq!(header, "Record-Route");
-        assert!(value.contains("callRef=7"), "{value}");
-    }
-
-    /// A proxy's own Record-Route carries no B2BUA leg marker and is its right.
-    #[test]
-    fn an_unmarked_record_route_is_compliant() {
-        let f = run(
-            &NoRecordRouteFromUa,
-            &[request("INVITE", "Record-Route: <sip:p@h;lr>\r\nContent-Length: 0", b"")],
-        );
-        assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
-    }
-
-    // ── cancel-cseq-method ──────────────────────────────────────────────────
-
-    /// A CANCEL whose CSeq token names the cancelled method, built past field
-    /// extraction — the only way the state is reachable at all.
-    #[test]
-    fn a_cancel_whose_cseq_names_another_method_is_violated() {
-        let mut m = request("CANCEL", "Content-Length: 0", b"");
-        m.cseq_method = "INVITE".to_string();
-        let f = run(&CancelCseqMethod, &[m]);
-        let Decision::Violated(Evidence::HeaderValueRejected { header, value, expected, .. }) =
-            &f[0].decision
-        else {
-            panic!("cancel-cseq evidence: {:?}", f[0].decision)
-        };
-        assert_eq!(
-            (header.as_str(), value.as_str(), expected.as_str()),
-            ("CSeq;method", "INVITE", "CANCEL")
-        );
-    }
-
-    /// Both tokens are wire-model facts, so a byte-less vantage still decides.
-    #[test]
-    fn a_well_formed_cancel_is_compliant_even_without_bytes() {
-        let mut m = request("CANCEL", "Content-Length: 0", b"");
-        m.head = None;
-        let f = run(&CancelCseqMethod, &[m]);
-        assert_eq!(f.len(), 1, "{f:?}");
-        assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
-        assert!(run(&CancelCseqMethod, &[request("BYE", "Content-Length: 0", b"")]).is_empty());
-    }
-
-    // ── no-100rel-require-on-non-invite ─────────────────────────────────────
-
-    #[test]
-    fn a_non_invite_requiring_100rel_is_violated_and_an_invite_is_no_occasion() {
-        let f = run(
-            &No100relRequireOnNonInvite,
-            &[request("BYE", "Require: 100rel\r\nContent-Length: 0", b"")],
-        );
-        let Decision::Violated(Evidence::ForbiddenHeaderPresent { on, header, value, .. }) =
-            &f[0].decision
-        else {
-            panic!("100rel evidence: {:?}", f[0].decision)
-        };
-        assert_eq!((on.as_str(), header.as_str(), value.as_str()), ("BYE", "Require", "100rel"));
-
-        let invite = request("INVITE", "Require: 100rel\r\nContent-Length: 0", b"");
-        assert!(run(&No100relRequireOnNonInvite, &[invite]).is_empty());
-        let plain = run(&No100relRequireOnNonInvite, &[request("BYE", "Content-Length: 0", b"")]);
-        assert!(matches!(plain[0].decision, Decision::Compliant), "{:?}", plain[0].decision);
-    }
-
-    /// `Proxy-Require` states a hop-by-hop demand §4 does not name.
-    #[test]
-    fn a_proxy_require_100rel_is_not_this_rules_offence() {
-        let f = run(
-            &No100relRequireOnNonInvite,
-            &[request("BYE", "Proxy-Require: 100rel\r\nContent-Length: 0", b"")],
-        );
-        assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
-    }
-
-    // ── reliable-1xx-headers ────────────────────────────────────────────────
-
-    /// A 1xx the UAS sent, with `extra` rows spelled by the caller.
-    fn provisional(status: u16, extra: &str) -> Msg {
-        let head = format!(
-            "SIP/2.0 {status} X\r\n\
-             Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-1\r\n\
-             From: <sip:alice@h>;tag=at\r\n\
-             To: <sip:bob@h>;tag=bt\r\n\
-             Call-ID: c1\r\n\
-             CSeq: 1 INVITE\r\n\
-             {extra}\
-             Content-Length: 0\r\n\r\n"
-        );
-        let mut m = response(status, Some("bt"));
-        m.head = Some(head.into_bytes());
-        m
-    }
-
-    #[test]
-    fn a_plain_100_and_a_reliable_183_with_a_good_rseq_are_compliant() {
-        for m in [provisional(100, ""), provisional(183, "Require: 100rel\r\nRSeq: 1\r\n")] {
-            let f = run(&Reliable1xxHeaders, &[m]);
-            assert_eq!(f.len(), 1, "{f:?}");
-            assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
-        }
-    }
-
-    /// A 100 made reliable by BOTH markers is ONE finding naming both.
-    #[test]
-    fn a_reliable_100_is_one_finding_naming_every_marker() {
-        let f = run(&Reliable1xxHeaders, &[provisional(100, "RSeq: 1\r\nRequire: 100rel\r\n")]);
-        assert_eq!(f.len(), 1, "one act, one finding: {f:?}");
-        let Decision::Violated(Evidence::Reliable1xx { status, carried, .. }) = &f[0].decision
-        else {
-            panic!("reliable-1xx evidence: {:?}", f[0].decision)
-        };
-        assert_eq!(*status, 100);
-        assert_eq!(carried.as_slice(), ["RSeq: 1", "Require: 100rel"]);
-    }
-
-    #[test]
-    fn a_reliable_provisional_without_an_rseq_is_violated() {
-        let f = run(&Reliable1xxHeaders, &[provisional(183, "Require: 100rel\r\n")]);
-        let Decision::Violated(Evidence::Reliable1xx { carried, admits, .. }) = &f[0].decision
-        else {
-            panic!("reliable-1xx evidence: {:?}", f[0].decision)
-        };
-        assert_eq!(carried.as_slice(), ["Require: 100rel"]);
-        assert!(admits.contains("RSeq"), "{admits}");
-    }
-
-    /// Zero, and a row no reader accepts, are both out of the `1..=2^31-1`
-    /// space — presence and readability asked separately.
-    #[test]
-    fn an_out_of_range_or_unreadable_rseq_is_violated() {
-        for extra in ["Require: 100rel\r\nRSeq: 0\r\n", "Require: 100rel\r\nRSeq: many\r\n"] {
-            let f = run(&Reliable1xxHeaders, &[provisional(183, extra)]);
-            let Decision::Violated(Evidence::Reliable1xx { admits, .. }) = &f[0].decision else {
-                panic!("reliable-1xx evidence: {:?}", f[0].decision)
-            };
-            assert!(admits.contains("2^31-1"), "{admits}");
-        }
-    }
-
-    /// An UNreliable 18x owes no RSeq, and a final is no occasion at all.
-    #[test]
-    fn a_plain_180_is_compliant_and_a_final_is_no_occasion() {
-        let f = run(&Reliable1xxHeaders, &[provisional(180, "")]);
-        assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
-        assert!(run(&Reliable1xxHeaders, &[response(200, Some("bt"))]).is_empty());
-    }
-}
+mod tests;

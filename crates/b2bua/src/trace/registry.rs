@@ -1,8 +1,12 @@
 //! The process's live root spans and the gate that opens them (ADR-0026).
 //!
-//! ONE root span per call per process, so the registry is process-scoped by
-//! definition: `traces()` hands out the singleton, and a runner installs a
-//! configured one at startup before any call arrives.
+//! ONE root span per call per node, and one admission gate per process, so the
+//! registry is process-scoped by definition: `traces()` hands out the
+//! singleton, and a runner installs a configured one at startup before any call
+//! arrives. Spans are keyed by the node the caller serves
+//! ([`observe::with_node`]): a process serving several nodes keeps each node's
+//! root apart, so a takeover copy served beside its nominal records onto its
+//! own span.
 //!
 //! The registry holds the spans OUT of the serialized `Call` — a span is a
 //! runtime object, not replicated state. What the `Call` carries is the
@@ -10,9 +14,13 @@
 //! what a takeover backup needs to open its own linked root.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
-use observe::{CallIdentity, CallSpan, SampleAdmission, TraceEvent};
+use load_shed::{at_ms, TokenBucket};
+use observe::{CallIdentity, CallSpan, RateDraw, SampleAdmission, TraceEvent};
+
+use crate::poison::{locked, read, write, TRACE_PROCESS, TRACE_SPANS};
 
 /// The correlation triple stamped on a `Call` when a trace activates.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,7 +35,38 @@ pub struct TraceIds {
 pub struct CallTraces {
     admission: Arc<SampleAdmission>,
     honors_header: bool,
-    spans: Mutex<HashMap<String, CallSpan>>,
+    spans: Mutex<LiveSpans>,
+}
+
+/// Live root spans per serving node, then per call. Every access reads the
+/// node the caller serves.
+#[derive(Default)]
+struct LiveSpans(HashMap<String, HashMap<String, CallSpan>>);
+
+impl LiveSpans {
+    fn get(&self, call_ref: &str) -> Option<&CallSpan> {
+        observe::with_node(|node| self.0.get(node)?.get(call_ref))
+    }
+
+    fn insert(&mut self, call_ref: &str, span: CallSpan) {
+        self.0.entry(observe::node()).or_default().insert(call_ref.to_string(), span);
+    }
+
+    /// Drop the call's span; a node left with none is forgotten.
+    fn remove(&mut self, call_ref: &str) {
+        observe::with_node(|node| {
+            if let Some(calls) = self.0.get_mut(node) {
+                calls.remove(call_ref);
+                if calls.is_empty() {
+                    self.0.remove(node);
+                }
+            }
+        });
+    }
+
+    fn len(&self) -> usize {
+        self.0.values().map(HashMap::len).sum()
+    }
 }
 
 impl CallTraces {
@@ -40,7 +79,7 @@ impl CallTraces {
 
     /// A fully-specified gate (tests, and any runner that configures its own).
     pub fn new(admission: Arc<SampleAdmission>, honors_header: bool) -> Self {
-        Self { admission, honors_header, spans: Mutex::new(HashMap::new()) }
+        Self { admission, honors_header, spans: Mutex::new(LiveSpans::default()) }
     }
 
     /// Whether this process reads `X-Trace-Sample` at all. When false the header
@@ -55,9 +94,9 @@ impl CallTraces {
         self.admission.exporter_configured()
     }
 
-    /// Root spans currently open.
+    /// Root spans currently open, across every node.
     pub fn active(&self) -> usize {
-        self.spans.lock().expect("trace registry mutex").len()
+        locked(&self.spans, TRACE_SPANS).len()
     }
 
     /// Run the admission chain and, on success, open the call's root span.
@@ -102,7 +141,7 @@ impl CallTraces {
     /// Record one fact on a call's root span. No-op when the call has no span
     /// (it was never sampled, or its span is already closed).
     pub fn record(&self, call_ref: &str, event: TraceEvent<'_>) {
-        if let Some(span) = self.spans.lock().expect("trace registry mutex").get(call_ref) {
+        if let Some(span) = locked(&self.spans, TRACE_SPANS).get(call_ref) {
             span.record(event);
         }
     }
@@ -117,7 +156,7 @@ impl CallTraces {
         request: RoundTripSide<'_>,
         response: RoundTripSide<'_>,
     ) {
-        let spans = self.spans.lock().expect("trace registry mutex");
+        let spans = locked(&self.spans, TRACE_SPANS);
         let Some(root) = spans.get(call_ref) else {
             return;
         };
@@ -134,11 +173,11 @@ impl CallTraces {
     /// Close a call's root span, returning its active-trace slot to the gate.
     /// Idempotent — every teardown path may call it.
     pub fn close(&self, call_ref: &str) {
-        self.spans.lock().expect("trace registry mutex").remove(call_ref);
+        locked(&self.spans, TRACE_SPANS).remove(call_ref);
     }
 
     fn existing(&self, call_ref: &str) -> Option<TraceIds> {
-        self.spans.lock().expect("trace registry mutex").get(call_ref).map(|s| TraceIds {
+        locked(&self.spans, TRACE_SPANS).get(call_ref).map(|s| TraceIds {
             trace_id: s.trace_id().to_string(),
             root_span_id: s.span_id().to_string(),
         })
@@ -149,7 +188,7 @@ impl CallTraces {
             trace_id: span.trace_id().to_string(),
             root_span_id: span.span_id().to_string(),
         };
-        self.spans.lock().expect("trace registry mutex").insert(call_ref.to_string(), span);
+        locked(&self.spans, TRACE_SPANS).insert(call_ref, span);
         ids
     }
 }
@@ -170,8 +209,8 @@ pub struct RoundTripSide<'a> {
 pub fn call_identity(call: &call::Call) -> CallIdentity<'_> {
     CallIdentity {
         call_id: &call.a_leg.call_id,
-        from_tag: &call.a_leg.from_tag,
-        to_tag: call.a_leg.dialogs.first().map(|d| d.sip.local_tag.as_str()).unwrap_or(""),
+        from_tag: &call.a_leg_invite.from_tag,
+        to_tag: call.a_leg.own_tag.as_deref().unwrap_or(""),
     }
 }
 
@@ -217,6 +256,9 @@ pub fn adopt_into(traces: &CallTraces, call: &mut call::Call, now_ms: i64) {
 
 static PROCESS_TRACES: OnceLock<RwLock<Arc<CallTraces>>> = OnceLock::new();
 
+/// Whether anything installed the process's registry.
+static INSTALLED: AtomicBool = AtomicBool::new(false);
+
 fn cell() -> &'static RwLock<Arc<CallTraces>> {
     PROCESS_TRACES.get_or_init(|| RwLock::new(Arc::new(CallTraces::from_env(0))))
 }
@@ -224,15 +266,41 @@ fn cell() -> &'static RwLock<Arc<CallTraces>> {
 /// The process's trace registry. Inert (no exporter → no draw, no span) unless
 /// the process was started with an OTLP endpoint.
 pub fn traces() -> Arc<CallTraces> {
-    cell().read().expect("process trace registry lock").clone()
+    read(cell(), TRACE_PROCESS).clone()
 }
 
 /// Replace the process's trace registry. A runner calls this once at startup,
 /// before any call arrives; a test that drives the machinery installs its own
-/// gate. Process-wide by construction — there is one root span per call per
+/// gate. Process-wide by construction — there is one admission gate per
 /// process, so there is one registry.
 pub fn install_process_traces(registry: Arc<CallTraces>) {
-    *cell().write().expect("process trace registry lock") = registry;
+    *write(cell(), TRACE_PROCESS) = registry;
+    INSTALLED.store(true, Ordering::SeqCst);
+}
+
+/// [`install_process_traces`] unless a registry was installed already, so a
+/// default never displaces one a runner or a test chose. Returns whether it
+/// installed.
+pub fn install_process_traces_unless_installed(registry: Arc<CallTraces>) -> bool {
+    let mut slot = write(cell(), TRACE_PROCESS);
+    if INSTALLED.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    *slot = registry;
+    true
+}
+
+impl CallTraces {
+    /// A gate that traces every call up to `max_active` at once, with no
+    /// activation rate limit and no header: a test harness, whose failure
+    /// output reads each call's story.
+    pub fn sample_every_call(max_active: usize) -> Arc<Self> {
+        let unlimited = TokenBucket::full(1e12, 1e12, at_ms(0));
+        Arc::new(Self::new(
+            SampleAdmission::new(true, 1.0, max_active, RateDraw::seeded(1), unlimited),
+            false,
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -306,6 +374,34 @@ mod tests {
         assert_ne!(backup_ids.root_span_id, nominal_ids.root_span_id);
     }
 
+    #[test]
+    fn two_nodes_in_one_process_each_serve_a_call_under_their_own_root() {
+        let (_guard, log) = observe_testkit::test_buffer();
+        let traces = gate(true, 1.0, 100);
+        let (n1, n2) = ("n1#g1", "n2#g1");
+        let on = |node: &str, f: &dyn Fn()| observe::NodeScope::named(node).enter(f);
+        let nominal = observe::NodeScope::named(n1)
+            .enter(|| traces.activate("r", id(), None, 0))
+            .expect("admitted");
+        let copy = observe::NodeScope::named(n2)
+            .enter(|| {
+                traces.activate_linked("r", id(), &nominal.trace_id, Some(&nominal.root_span_id), 0)
+            })
+            .expect("admitted");
+        assert_ne!(copy.root_span_id, nominal.root_span_id, "the copy opens its own root");
+        assert_eq!(traces.active(), 2);
+
+        on(n2, &|| traces.record("r", TraceEvent::new("sip.in", 1, "bob")));
+        let facts = log.matching("kind=sip.in");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].node.as_deref(), Some(n2), "the fact lands on its node's root");
+
+        on(n2, &|| traces.close("r"));
+        assert_eq!(traces.active(), 1, "closing one node's root leaves the other's open");
+        on(n1, &|| traces.close("r"));
+        assert_eq!(traces.active(), 0);
+    }
+
     /// A minimal replicated call carrying the correlation triple a takeover
     /// hydration reads.
     fn replicated_call(trace_id: &str, root_span_id: &str, sampled: Option<bool>) -> call::Call {
@@ -328,7 +424,7 @@ mod tests {
             &invite,
             std::net::SocketAddr::from(([10, 0, 0, 9], 5060)),
             &crate::config::B2buaConfig::default(),
-            &sip_txn::IdGen::seeded(1),
+            &mut sip_ids::TurnIds::fixed(1),
             0,
         );
         c.trace_id = Some(trace_id.to_string());
@@ -390,7 +486,7 @@ mod tests {
 
     #[test]
     fn recording_on_an_unsampled_call_is_a_no_op() {
-        let (_guard, log) = observe::test_buffer();
+        let (_guard, log) = observe_testkit::test_buffer();
         let traces = gate(true, 1.0, 100);
         traces.record("never-activated", TraceEvent::new("sip.in", 0, "alice"));
         assert!(log.lines().is_empty());

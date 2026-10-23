@@ -171,6 +171,47 @@ async fn admits_until_the_cps_bucket_is_drained_then_refuses_bucket_empty() {
     assert_eq!(refused.not_before_sec, 60);
 }
 
+/// A bucket size of 0 turns the CPS gate off: every normal call passes the
+/// bucket rung, spends nothing, and the level reads 0.
+#[tokio::test(start_paused = true)]
+async fn a_zero_bucket_size_admits_every_call() {
+    let (sig, _ctl) = admission_sig(0, 0, 1.0);
+    for _ in 0..1_000 {
+        assert_eq!(admit(&sig, false), Ok(()));
+    }
+    assert_eq!(sig.metrics().token_bucket_level, 0.0);
+    assert_eq!(sig.metrics().non_emergency_admitted_total, 0, "the caller counts adm");
+    let text = sig.prometheus_text();
+    assert!(
+        text.contains("b2bua_overload_cps_gate_enabled 0"),
+        "a level of 0 is not empty:\n{text}"
+    );
+    let (on, _ctl) = admission_sig(1, 1, 1.0);
+    assert!(on.prometheus_text().contains("b2bua_overload_cps_gate_enabled 1"));
+}
+
+/// Reading the metrics never changes what the bucket admits: a signal read
+/// between every admission decision admits at exactly the instants its unread
+/// twin does.
+#[tokio::test(start_paused = true)]
+async fn reading_the_metrics_never_changes_what_the_bucket_admits() {
+    for rate in [1, 10, 100] {
+        let (read, _a) = admission_sig(1, rate, 1.0);
+        let (unread, _b) = admission_sig(1, rate, 1.0);
+        for step in 0..30 {
+            for _ in 0..10 {
+                tokio::time::advance(Duration::from_micros(100_000 / u64::from(rate))).await;
+                read.metrics();
+            }
+            assert_eq!(
+                admit(&read, false).is_ok(),
+                admit(&unread, false).is_ok(),
+                "rate {rate}/s, step {step}"
+            );
+        }
+    }
+}
+
 /// The bucket refills over time at `rate_per_sec` (lazy refill on the next
 /// peek). Drained at capacity 1 / rate 1/s, a call one second later is
 /// admitted again — driven by `tokio::time::advance`, no real sleep.
@@ -265,10 +306,12 @@ async fn panic_elu_never_sheds_an_emergency_call() {
 }
 
 /// `configure_admission` is what makes the operator's `B2buaConfig` knobs take
-/// effect: a capacity-0 bucket refuses the very first normal INVITE.
+/// effect: a capacity-1 bucket, not the seed's 1000, refuses the second
+/// normal INVITE.
 #[tokio::test(start_paused = true)]
 async fn configure_admission_applies_the_config_capacity() {
-    let (sig, _ctl) = admission_sig(0, 0, 1.0);
+    let (sig, _ctl) = admission_sig(1, 0, 1.0);
+    assert_eq!(admit(&sig, false), Ok(()));
     assert_eq!(reason(admit(&sig, false)), Some(Refusal::BucketEmpty));
 }
 

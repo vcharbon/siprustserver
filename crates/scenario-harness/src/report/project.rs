@@ -14,27 +14,21 @@
 
 use layer_harness::{Lane as RecLane, NetworkTag, RecordedScenario};
 use seq_report::{Anomaly, Lane, LaneKind, RowKind, SeqDoc, SeqRow};
-use sip_net::RecordedSipEntry;
+use sip_net_testkit::RecordedSipEntry;
 
 use super::wire::{facets, wire_text};
 
-/// Wall-clock + chaos-marker overlay for a rendered callflow.
+/// The wall-clock overlay of a rendered callflow.
 ///
 /// Empty ([`TimelineOverlay::default`]) on the paused-clock harness path (the
-/// recording's `at_ms` is virtual time there, and there are no externally-flagged
-/// faults). The load driver supplies a populated overlay: its recording rides
-/// `Clock::system()` so `at_ms` is real wall-clock epoch ms (`wall_clock = true`
-/// → the doc renders absolute UTC), and `markers` are the injected-fault instants
-/// flagged via `POST /chaos` (rendered as `Lifecycle` bands so a NOK flow shows
-/// exactly when the kill landed relative to its frames).
+/// recording's `at_ms` is virtual time there). The load driver's recording
+/// rides `Clock::system()`, so its `at_ms` is real wall-clock epoch ms
+/// (`wall_clock = true` → the doc renders absolute UTC).
 #[derive(Default, Clone)]
 pub struct TimelineOverlay {
     /// `true` when `RecordedSipEntry::sent_ms` is real wall-clock epoch ms, so
     /// the rendered doc carries an absolute-UTC reference next to each `T+…`.
     pub wall_clock: bool,
-    /// Injected-fault markers as `(wall_clock_epoch_ms, label)`. Filtered to the
-    /// call's timeline window and emitted as `RowKind::Lifecycle` bands.
-    pub markers: Vec<(i64, String)>,
 }
 
 /// Build a single-plane (SIP) [`SeqDoc`] from a run's recording.
@@ -64,10 +58,8 @@ pub fn sip_doc(
     )
 }
 
-/// [`sip_doc`] plus a wall-clock/chaos [`TimelineOverlay`] — the load-driver entry
-/// point. Adds an absolute-UTC reference (when `overlay.wall_clock`) and renders
-/// each in-window chaos marker as a `Lifecycle` band positioned at the kill
-/// instant on the call's own timeline.
+/// [`sip_doc`] plus a wall-clock [`TimelineOverlay`] — the load-driver entry
+/// point. Adds an absolute-UTC reference when `overlay.wall_clock`.
 pub fn sip_doc_with_overlay(
     scenario_name: &str,
     description: Option<&str>,
@@ -79,43 +71,8 @@ pub fn sip_doc_with_overlay(
 ) -> SeqDoc {
     let lanes = project_lanes(&scenario.lanes, entries);
     let base = entries.iter().map(|e| e.sent_ms as i64).min().unwrap_or(0);
-    let mut rows: Vec<SeqRow> = entries.iter().map(|e| project_entry(e, base)).collect();
+    let rows: Vec<SeqRow> = entries.iter().map(|e| project_entry(e, base)).collect();
 
-    // Overlay the injected-fault markers as Lifecycle bands. Only those within
-    // the call's timeline (± a small margin so a kill just before setup or just
-    // after the last frame still shows) are rendered, so an unrelated kill from
-    // another call's window doesn't clutter this flow. A marker is positioned by
-    // borrowing the `seq` of the last frame at/▸before it (so the shared
-    // `(seq, at_ms)` sort drops the band exactly between the surrounding frames).
-    if !overlay.markers.is_empty() && !entries.is_empty() {
-        const MARGIN_MS: i64 = 2_000;
-        let last =
-            entries.iter().map(|e| e.received_ms.unwrap_or(e.sent_ms) as i64).max().unwrap_or(base);
-        let (lo, hi) = (base - MARGIN_MS, last + MARGIN_MS);
-        for (wall_ms, label) in &overlay.markers {
-            let at = *wall_ms;
-            if at < lo || at > hi {
-                continue;
-            }
-            // seq of the last frame at/before the marker (0 if it precedes all).
-            let seq = entries
-                .iter()
-                .filter(|e| (e.sent_ms as i64) <= at)
-                .map(|e| e.seq)
-                .max()
-                .unwrap_or(0);
-            rows.push(SeqRow {
-                at_ms: at,
-                seq,
-                from: String::new(),
-                to: None,
-                label: label.clone(),
-                detail: None,
-                conn: None,
-                kind: RowKind::Lifecycle,
-            });
-        }
-    }
     let anomalies: Vec<Anomaly> = scenario
         .anomalies
         .iter()
@@ -295,7 +252,7 @@ fn project_lanes(rec_lanes: &[RecLane], entries: &[RecordedSipEntry]) -> Vec<Lan
 /// correlated to the call but had no live logical endpoint to land on.
 fn entry_lane_ids(e: &RecordedSipEntry) -> (String, String) {
     let from = e.from_lane.clone().unwrap_or_else(|| e.from.to_string());
-    let to = if e.recv_note == Some(sip_net::RecvNote::Unrouted) {
+    let to = if e.recv_note == Some(sip_net_testkit::RecvNote::Unrouted) {
         format!("{}#noendpoint", e.to)
     } else {
         e.to_lane.clone().unwrap_or_else(|| e.to.to_string())
@@ -410,7 +367,7 @@ mod tests {
         routed.from_lane = Some("10.0.0.1:5060".into());
         routed.to_lane = Some("10.0.0.2:5070#callee".into());
         let mut unrouted = entry("10.0.0.1:5060", "10.0.0.2:5070", raw, 20, 2);
-        unrouted.recv_note = Some(sip_net::RecvNote::Unrouted);
+        unrouted.recv_note = Some(sip_net_testkit::RecvNote::Unrouted);
 
         let doc = sip_doc("lanes", None, &[routed, unrouted], &scenario, true, &[]);
 
@@ -430,49 +387,6 @@ mod tests {
         assert_eq!(doc.rows[1].to.as_deref(), Some("10.0.0.2:5070#noendpoint"));
         assert!(doc.rows[1].label.contains("no endpoint to route to"));
         assert_eq!(doc.rows[0].conn.as_deref(), Some("cid-1@h"));
-    }
-
-    #[test]
-    fn overlay_renders_in_window_marker_as_lifecycle_band_with_wall_epoch() {
-        // Two frames at wall-clock ms t0 and t0+10s.
-        let t0 = 1_782_802_100_000i64;
-        let entries = vec![
-            entry("10.0.0.1:5060", "10.0.0.2:5060", "INVITE sip:bob@x SIP/2.0\r\n", t0 as u64, 1),
-            entry(
-                "10.0.0.1:5060",
-                "10.0.0.2:5060",
-                "BYE sip:bob@x SIP/2.0\r\n",
-                (t0 + 10_000) as u64,
-                9,
-            ),
-        ];
-        // One kill inside the call window (t0 + 4s), one far outside (t0 + 60s).
-        let overlay = TimelineOverlay {
-            wall_clock: true,
-            markers: vec![
-                (t0 + 4_000, "chaos kill_worker(b2bua-worker-0)".to_string()),
-                (t0 + 60_000, "chaos kill_worker(other-window)".to_string()),
-            ],
-        };
-        let doc =
-            sip_doc_with_overlay("reinvite", None, &entries, &scenario(), false, &[], &overlay);
-
-        // Wall-clock anchor set → renders absolute UTC.
-        assert_eq!(doc.epoch_base_ms, Some(t0));
-        // Exactly one Lifecycle band — the in-window kill; the far one is dropped.
-        let bands: Vec<&SeqRow> =
-            doc.rows.iter().filter(|r| r.kind == RowKind::Lifecycle).collect();
-        assert_eq!(bands.len(), 1, "only the in-window marker becomes a band");
-        assert_eq!(bands[0].at_ms, t0 + 4_000);
-        assert!(bands[0].label.contains("kill_worker(b2bua-worker-0)"));
-        // Positioned after the INVITE (seq 1) and before the BYE (seq 9) so the
-        // shared (seq, at_ms) sort drops it between them.
-        assert_eq!(bands[0].seq, 1, "borrows the preceding frame's seq");
-
-        // The rendered HTML carries both the absolute anchor and the band label.
-        let html = seq_report::render_html(&doc);
-        assert!(html.contains("Timeline t0"));
-        assert!(html.contains("kill_worker(b2bua-worker-0)"));
     }
 
     #[test]

@@ -4,7 +4,6 @@
 //! protocol-level redelivery the layer already consumed — plus the ADR-0014
 //! `CallQuiesced` end-of-turn ordering (`flush_pending_quiesce`).
 
-use std::collections::HashMap;
 use std::sync::atomic::Ordering::Relaxed;
 
 use sip_message::SipMessage;
@@ -41,7 +40,7 @@ impl Owner {
     /// INVITE). A full queue DEFERS it onto the retry deque instead of dropping it,
     /// so the consumer sees it once capacity returns — unless it is a request
     /// whose server transaction leaves the map unanswered first
-    /// ([`drop_deferred_requests_of`](Self::drop_deferred_requests_of)).
+    /// ([`drop_deferred_request_of`](Self::drop_deferred_request_of)).
     pub(super) fn emit_critical(&mut self, event: TransactionEvent) {
         self.offer(event, true);
     }
@@ -62,7 +61,7 @@ impl Owner {
                     self.defer(ev);
                 } else {
                     // Ordinary event: drop-newest, counted.
-                    self.metrics.event_queue_drops[class.index()].fetch_add(1, Relaxed);
+                    self.metrics.event_queue_drops.add(class.index());
                 }
                 critical
             }
@@ -79,14 +78,14 @@ impl Owner {
     /// Queue a critical event onto the retry deque, counted as a deferral.
     fn defer(&mut self, event: TransactionEvent) {
         let class = EventQueueClass::of(&event);
-        self.metrics.event_queue_deferrals[class.index()].fetch_add(1, Relaxed);
+        self.metrics.event_queue_deferrals.add(class.index());
         self.deferred_events.push_back(event);
         self.arm_event_retry();
     }
 
     fn arm_event_retry(&mut self) {
         if !self.event_retry_armed {
-            self.timers.insert(Timer::EventRetry, ms(EVENT_RETRY_MS));
+            self.arm(Timer::EventRetry, ms(EVENT_RETRY_MS));
             self.event_retry_armed = true;
         }
     }
@@ -115,21 +114,21 @@ impl Owner {
         }
     }
 
-    /// Remove the deferred requests that `swept` — server transactions
-    /// leaving the map unanswered — admitted: a request whose transaction is
-    /// gone would reach the consumer with no transaction left to carry its
-    /// answer, long after its sender gave up.
+    /// Remove the deferred request `swept` — a server transaction leaving
+    /// the map unanswered — admitted: a request whose transaction is gone
+    /// would reach the consumer with no transaction left to carry its answer,
+    /// long after its sender gave up. A request matches on the full
+    /// transaction key (RFC 3261 §17.2.3), so another sender's transaction on
+    /// the same branch keeps its deferred request.
     /// Deferred responses, `Timeout`s, `Cancelled`s and `CallQuiesced`s stay:
     /// each is the consumer's only notice of an outcome, whatever became of the
     /// transaction behind it.
-    pub(super) fn drop_deferred_requests_of(&mut self, swept: &[SweptServer]) {
-        if swept.is_empty() || self.deferred_events.is_empty() {
+    pub(super) fn drop_deferred_request_of(&mut self, swept: &SweptServer) {
+        if self.deferred_events.is_empty() {
             return;
         }
-        let by_branch: HashMap<&str, &SweptServer> =
-            swept.iter().map(|s| (s.key.branch(), s)).collect();
         let before = self.deferred_events.len();
-        self.deferred_events.retain(|ev| !admitted_by_any(ev, &by_branch));
+        self.deferred_events.retain(|ev| !swept.admitted(ev));
         let removed = before - self.deferred_events.len();
         self.metrics.deferred_swept.fetch_add(removed as u64, Relaxed);
         // An armed retry stays in the wheel and finds nothing to flush.
@@ -172,13 +171,14 @@ pub(super) struct SweptServer {
     pub(super) from_tag: String,
 }
 
-/// Whether `event` is the request one of the swept transactions admitted.
-fn admitted_by_any(event: &TransactionEvent, by_branch: &HashMap<&str, &SweptServer>) -> bool {
-    let TransactionEvent::Message { message, .. } = event else { return false };
-    let SipMessage::Request(req) = message.as_ref() else { return false };
-    let Some(id) = ServerTxnId::of_request(req) else { return false };
-    let Some(swept) = by_branch.get(id.branch()) else { return false };
-    id == swept.key.id()
-        && req.call_id().as_str() == swept.call_id
-        && req.from().tag().unwrap_or_default() == swept.from_tag
+impl SweptServer {
+    /// Whether `event` is the request this transaction admitted.
+    fn admitted(&self, event: &TransactionEvent) -> bool {
+        let TransactionEvent::Message { message, .. } = event else { return false };
+        let SipMessage::Request(req) = message.as_ref() else { return false };
+        let Some(id) = ServerTxnId::of_request(req) else { return false };
+        id == self.key.id()
+            && req.call_id().as_str() == self.call_id
+            && req.from().tag().unwrap_or_default() == self.from_tag
+    }
 }

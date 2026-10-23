@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Delete every reset rule and prove none is left.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=timed.sh
+source "$HAKIT_LIB/timed.sh"
+hk_timed_heal reject pf_unreject

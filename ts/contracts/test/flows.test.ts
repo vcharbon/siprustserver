@@ -34,7 +34,7 @@ describe("a whole capture document", () => {
     expect(doc.groups.length).toBe(2)
   })
 
-  it("carries the schema-4 legacy fields as explicit nulls, never as absences", () => {
+  it("carries the nullable core fields as explicit nulls, never as absences", () => {
     for (const leg of doc.legs) {
       expect(leg.invite === null || typeof leg.invite === "object").toBe(true)
       expect(leg.final_status === null || typeof leg.final_status === "number").toBe(true)
@@ -138,7 +138,7 @@ describe("the three payload arms", () => {
     expect(() => decodeFlowsSync(wrap(base))).toThrow()
   })
 
-  it("defaults the identities block a schema-4 document never wrote", () => {
+  it("defaults the identities block a document leaves out", () => {
     const decoded = decodeFlowsSync(wrap({ ...base, raw: "X" }))
     expect(decoded.legs[0].msgs[0].identities).toEqual({
       from: { uri: "", user: null, digits: null },
@@ -175,7 +175,7 @@ describe("every evidence kind", () => {
     ).toThrow()
   })
 
-  it("defaults a group's t0_us, which a schema-4 document never wrote", () => {
+  it("defaults a group's t0_us where a document leaves it out", () => {
     const decoded = decodeFlowsSync(wrap({ ...base, raw: "X" }, [{ legs: [0], evidence: [] }]))
     expect(decoded.groups[0].t0_us).toBe(0)
   })
@@ -222,7 +222,7 @@ describe("flow stats", () => {
 })
 
 describe("a leniently decoded document", () => {
-  it("carries an unknown field through rather than refusing it", () => {
+  it("accepts a document carrying an unknown field rather than refusing it", () => {
     const grown: Record<string, unknown> = { ...(wrap({ ...base, raw: "X" }) as object) }
     grown.future_field = 1
     const decoded: { legs: ReadonlyArray<{ msgs: ReadonlyArray<Msg> }> } = decodeFlowsSync(grown)

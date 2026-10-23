@@ -1,5 +1,13 @@
 # Implementation plan — per-endpoint actor harness (v2, post-review)
 
+> **Superseded verdict contract.** The `Expect` variants (`HappyBye`,
+> `Reject`, `AbandonedEarly`, `TransferDeclined`, `EitherOf`), `into_result`
+> and the "voluntarily-failing" shapes below are the plan this harness was
+> built from. A scenario now declares its accepted endings
+> (`scenario_harness::actor::{Expect, Branch}`) and the runner returns a
+> `ScenarioVerdict`: the reject, abandon and declined-transfer shapes succeed on
+> their own branch, and a failure is keyed by its `FailedAt` step.
+
 Companion to the design proposal (artifact 538df671). Concrete build sequence:
 modules, real signatures, edit points, test strategy, green-tree checkpoints.
 

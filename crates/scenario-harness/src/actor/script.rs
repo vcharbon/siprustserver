@@ -16,16 +16,18 @@ use super::goals::{BodyExpect, EarlyId, GoalStep, RequestKind};
 use super::ledger::{ObligationKey, ObligationKind};
 use super::observe::{observe_reception, ReceivedMessage};
 use super::react::{cancel_pending_initial, react_in_dialog_request};
-use super::runner::{ActorState, ParkedRequest};
-use super::select::{body_facts, select_parked};
+use super::runner::ActorState;
+use super::select::{body_facts, parked_matches, select_parked};
 use super::state::{Observation, ResponseFact, SubflowState};
-use crate::StepError;
-use sip_message::{EmitOpts, MatchOpts, MessageTemplate, SipMessage, SipRequest};
+use crate::{EmitOpts, MatchOpts, MessageTemplate, StepError};
+use sip_message::{SipMessage, SipRequest};
 
 /// Whether the goal arm may fire the NEXT pending goal: a reception (or
 /// binding-consuming) goal additionally requires its consumable — a new
 /// response fact, a matching parked request, or a bound/parked transaction
 /// (a tombstoned binding enables the arm so it FAILS fast, never by timeout).
+/// A held callee's ring, answer and early request wait for its held INVITE
+/// and the PRACKs RFC 3262 requires first (`super::held`).
 pub(super) fn goal_arm_enabled(st: &ActorState<'_>) -> bool {
     match st.goals.next_step() {
         Some(GoalStep::ExpectRequest { kind, .. }) => {
@@ -42,6 +44,12 @@ pub(super) fn goal_arm_enabled(st: &ActorState<'_>) -> bool {
             let pin = cseq_method.as_deref();
             st.obs.with_snapshot(|s| s.leg_response_ready(st.role, st.resp_seen, need_final, pin))
         }
+        Some(GoalStep::Ring { .. }) => super::held::ring_ready(st),
+        Some(GoalStep::Answer { winner }) => super::held::answer_ready(st, *winner),
+        Some(GoalStep::Reject { .. }) => super::held::reject_ready(st),
+        Some(GoalStep::EarlyRequest { fork, .. }) if st.dialogs.pending_invite.is_none() => {
+            super::held::early_request_ready(st, *fork)
+        }
         Some(
             GoalStep::ObserveFinal { cseq_method, .. } | GoalStep::ExpectFinal { cseq_method, .. },
         ) => {
@@ -49,15 +57,6 @@ pub(super) fn goal_arm_enabled(st: &ActorState<'_>) -> bool {
             st.obs.with_snapshot(|s| s.leg_response_ready(st.role, st.resp_seen, true, pin))
         }
         _ => true,
-    }
-}
-
-/// Whether a parked request satisfies an `ExpectRequest`'s kind.
-pub(super) fn parked_matches(p: &ParkedRequest, kind: &RequestKind) -> bool {
-    match kind {
-        RequestKind::Initial => p.initial,
-        RequestKind::InDialog(m) => !p.initial && p.txn.request().method().as_str() == m.as_str(),
-        RequestKind::Cancel => !p.initial && p.txn.request().method().as_str() == "CANCEL",
     }
 }
 

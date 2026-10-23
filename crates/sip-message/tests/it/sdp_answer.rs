@@ -560,3 +560,30 @@ fn a_reoffer_with_every_stream_rejected_is_answered() {
     .expect("answered, not refused");
     assert_eq!(stream_of(&text(Some(both.to_reofferer))), "m=audio 0 RTP/AVP 8\r\n");
 }
+
+/// A static offered format pairs with the first own format of the same payload
+/// format, a dynamic one binding it included: the own description's first such
+/// format is the one whose lines the answer carries.
+#[test]
+fn a_static_format_pairs_with_the_first_own_format_naming_it() {
+    let offer = "v=0\r\no=alice 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n";
+    let own = |formats: &str| {
+        format!("v=0\r\no=bob 2 2 IN IP4 198.51.100.1\r\ns=-\r\nc=IN IP4 198.51.100.1\r\nt=0 0\r\nm=audio 5000 RTP/AVP {formats}\r\na=rtpmap:96 PCMU/8000\r\n")
+    };
+    let answer = |formats: &str| {
+        text(answer_from_own(
+            offer.as_bytes(),
+            own(formats).as_bytes(),
+            FormatPreference::Offerer,
+            None,
+        ))
+    };
+    let dynamic_first = answer("96 0");
+    assert!(
+        dynamic_first.contains("m=audio 5000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n"),
+        "{dynamic_first}"
+    );
+    let static_first = answer("0 96");
+    assert!(static_first.contains("m=audio 5000 RTP/AVP 0\r\n"), "{static_first}");
+    assert!(!static_first.contains("a=rtpmap"), "{static_first}");
+}

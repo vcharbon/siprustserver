@@ -113,7 +113,9 @@ pub struct DefectMarker {
     pub step: String,
 }
 
-/// Generator diagnostics and detection evidence that drives nothing.
+/// Generator diagnostics and detection evidence that drives nothing, save the
+/// `census-uncovered` flag, which a run's RFC audit reads as the document's
+/// word that it states none of its scripted parties' violations (§11.1).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Annotations {

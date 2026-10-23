@@ -5,6 +5,7 @@
 import type { Census } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
 import { capturedWith } from "../src/captured.js"
+import { indexHits } from "../src/census-index.js"
 import { caseCallIds, correlate } from "../src/cut.js"
 import { synthesize } from "../src/flowsteps.js"
 import { build } from "../src/topology.js"
@@ -56,7 +57,7 @@ const captured = (
   const sut = sutSet()
   const layout = build(flows, vantages, sut, plan(), derivesOnePrefix)
   const flow = synthesize(flows, layout, plan())
-  const stated = capturedWith(hits, covered)({
+  const stated = capturedWith(indexHits(hits), covered)({
     layout,
     capture: CAPTURE,
     callIds: caseCallIds(flows, sut, [0, 1], correlate(flows, derivesOnePrefix)),
@@ -124,6 +125,9 @@ describe("captured violations (§11.1)", () => {
     const uncovered = captured([], new Set(["another.pcap"]))
     expect(uncovered.out).toEqual([])
     expect(uncovered.flags.map((f) => f.kind)).toEqual(["census-uncovered"])
+    // A scripted party's finding there is unjudged, never gated on.
+    expect(uncovered.flags[0]!.detail).toContain("unjudged, information only")
+    expect(uncovered.flags[0]!.detail).not.toContain("gates")
     expect(captured([], new Set([CAPTURE])).flags).toEqual([])
     expect(captured([]).flags).toEqual([])
   })

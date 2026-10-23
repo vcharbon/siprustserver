@@ -5,7 +5,7 @@
 //! what arms GlobalDuration + Keepalive. So a call stuck mid-setup — the b-leg
 //! INVITE rings forever / its 200 is lost / the UAS drops the INVITE under load
 //! — has NEITHER timer. Its only other reaper is the NoAnswer ring timer, but
-//! that is armed only when the route supplies `no_answer_timeout_sec`, and a
+//! that is armed only when the route supplies `no_answer_ms`, and a
 //! route (here `route_all_to`) may supply `None`. Such a call would reach
 //! `Active` with an empty `call.timers`, no timer would ever fire, and it would
 //! leak forever.
@@ -42,14 +42,14 @@ async fn setup_stalled_call_is_reaped_by_global_duration() {
     let h = Harness::new("b2bua-setup-stall-reap");
     let alice = h.agent("alice", "127.0.0.1:5069").await;
     let bob = h.agent("bob", "127.0.0.1:5079").await;
-    // Route every call to bob with NO `no_answer_timeout_sec` but a short
-    // `max_duration_sec`: the only reaper for a never-
+    // Route every call to bob with NO `no_answer_ms` but a short
+    // `max_duration_ms`: the only reaper for a never-
     // answered call is the GlobalDuration backstop.
     let decision = Arc::new(
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut route = route_to("127.0.0.1", 5079);
-                route.features.platform.max_duration_sec = MAX_DURATION_SEC;
+                route.features.platform.max_duration_ms = MAX_DURATION_SEC * 1000;
                 NewCallResponse::Route(route)
             })
             .build(),

@@ -71,7 +71,7 @@ const BAK: PartitionRole = PartitionRole::Backup;
 
 /// The deployed ring deadline: armed at route time, far enough out that the
 /// replacement bootstraps and reclaims long before it fires.
-const NO_ANSWER_SEC: i64 = 30;
+pub(crate) const NO_ANSWER_SEC: i64 = 30;
 
 /// The orchestrator's timeline, relative to the withdrawal (ms). Each is a
 /// target: an advance lands on the next 100 ms pump boundary at or after it, and
@@ -88,21 +88,22 @@ const GRACE: Duration = Duration::from_secs(5);
 
 /// The drain's bounds: the same 5 s ceiling, with the caught-up exit's 1 s floor
 /// (ADR-0031 D2) — a request routed before the withdrawal is still served.
-const BOUNDS: failover_harness::DrainBounds = failover_harness::DrainBounds {
+pub(crate) const BOUNDS: failover_harness::DrainBounds = failover_harness::DrainBounds {
     grace: GRACE,
     floor: Duration::from_millis(1000),
     release_flush: Duration::from_secs(3),
+    cdr_flush: Duration::ZERO,
 };
 
 /// The deployed shape: a failover-capable route (callback context) arming the
 /// per-b-leg `NoAnswer`, whose `no_answer_timeout` failure consult answers with
 /// a `480` reject.
-fn no_answer_decision() -> Arc<dyn CallDecisionEngine> {
+pub(crate) fn no_answer_decision() -> Arc<dyn CallDecisionEngine> {
     Arc::new(
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.no_answer_timeout_sec = Some(NO_ANSWER_SEC);
+                r.no_answer_ms = Some(NO_ANSWER_SEC * 1000);
                 r.callback_context = Some("withdrawn-window-ctx".into());
                 NewCallResponse::Route(r)
             })
@@ -182,10 +183,10 @@ async fn find_backed_up_ref(backup: &ReplicatedB2buaSut, primary: &str) -> Strin
 async fn ring_deadline(backup: &ReplicatedB2buaSut, primary: &str, call_ref: &str) -> i64 {
     let body = backup.get(BAK, primary, call_ref).await.expect("replica body present");
     let call: call::Call = MsgpackCodec::new().decode(&body).expect("replica body decodes");
-    assert_ne!(call.a_leg.state, LegState::Confirmed, "the survivor holds the ringing a-leg");
+    assert_ne!(call.a_leg.state(), LegState::Confirmed, "the survivor holds the ringing a-leg");
     call.timers
         .iter()
-        .find(|t| t.timer_type == TimerType::NoAnswer)
+        .find(|t| *t.timer_type() == TimerType::NoAnswer)
         .map(|t| t.fire_at)
         .expect("the replica carries the route-time NoAnswer")
 }
@@ -201,7 +202,11 @@ async fn advance_to(fh: &FailoverHarness, t0: i64, offset_ms: i64) {
 
 /// Every recorded datagram whose start-line begins with `prefix` and whose CSeq
 /// names `method`, as `(from, to, delivered)` in wire order.
-fn hops(fh: &FailoverHarness, prefix: &str, method: &str) -> Vec<(SocketAddr, SocketAddr, bool)> {
+pub(crate) fn hops(
+    fh: &FailoverHarness,
+    prefix: &str,
+    method: &str,
+) -> Vec<(SocketAddr, SocketAddr, bool)> {
     fh.sip_entries()
         .into_iter()
         .filter(|e| {
@@ -374,7 +379,7 @@ async fn settle_released(
     assert_call_fully_released(nodes, call_ref).await;
 }
 
-fn report_dir(stem: &str) -> PathBuf {
+pub(crate) fn report_dir(stem: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/seq-reports").join(stem)
 }
 

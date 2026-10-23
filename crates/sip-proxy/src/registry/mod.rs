@@ -20,20 +20,26 @@ pub mod tombstone;
 /// the registry impls reject empty/malformed ids at build time).
 pub type WorkerId = String;
 
-/// Health classification for a worker (D5 draining model).
+/// Whether a worker serves its dialogs, as the proxy reads it (ADR-0050 §3).
 ///
-/// `Unknown` (cold start, not yet probed) is **distinct from `Dead`** (confirmed
-/// gone) — routing filters treat both as not-routable for new dialogs, but the
-/// split lets future `Dead → Alive` recovery hysteresis avoid penalizing
-/// cold-start workers. `NotReady` is a worker whose process is up but whose boot
-/// replication drain is unfinished (answered OPTIONS `503 + not-ready`).
+/// `Unknown` is a worker no probe has answered `200` since it joined, since
+/// the proxy started, or since its incarnation changed; `Alive` one that
+/// answered; `Dead` one that missed its probes or whose address departed.
+/// Only an `Alive` worker is routed to, for a new dialog and an in-dialog
+/// request alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerHealth {
     Unknown,
     Alive,
-    NotReady,
-    Draining,
     Dead,
+}
+
+/// Whether a worker takes a new call, as its last OPTIONS answer stated
+/// (ADR-0050 §3). In-dialog routing never reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Acceptance {
+    Accept,
+    Refuse,
 }
 
 /// A registered worker.
@@ -42,23 +48,23 @@ pub struct WorkerEntry {
     pub id: WorkerId,
     pub address: ProxyAddr,
     pub health: WorkerHealth,
-    /// Epoch ms when the worker first entered `Draining` (drives the LB's
-    /// in-dialog grace window). `None` for non-draining.
-    pub draining_since: Option<u64>,
-    /// Epoch ms of the worker's "fresh pod" window start (drives the LB's
-    /// fresh-pod guard). `None` → no guard.
-    pub first_seen_at_ms: Option<u64>,
+    pub acceptance: Acceptance,
 }
 
 impl WorkerEntry {
+    /// An `Alive` worker accepting new calls.
     pub fn alive(id: impl Into<WorkerId>, address: ProxyAddr) -> Self {
-        Self {
-            id: id.into(),
-            address,
-            health: WorkerHealth::Alive,
-            draining_since: None,
-            first_seen_at_ms: None,
-        }
+        Self { id: id.into(), address, health: WorkerHealth::Alive, acceptance: Acceptance::Accept }
+    }
+
+    /// Whether requests may be routed to it: it answered its probe.
+    pub fn is_alive(&self) -> bool {
+        self.health == WorkerHealth::Alive
+    }
+
+    /// Whether it is alive and accepts new calls.
+    pub fn accepts_new_calls(&self) -> bool {
+        self.is_alive() && self.acceptance == Acceptance::Accept
     }
 }
 
@@ -76,4 +82,12 @@ pub trait WorkerRegistry: Send + Sync {
     /// Reverse-lookup the worker bound at `addr` (`None` for any non-worker
     /// source — Alice, Bob, an external SBC).
     fn lookup_by_address(&self, addr: &ProxyAddr) -> Option<WorkerEntry>;
+    /// A response for the worker bound at `addr` was seen: if that address
+    /// left the set and its departed window is open, the window is re-armed to
+    /// Timer H from now (ADR-0031 D4).
+    fn rearm_departed(&self, addr: &ProxyAddr);
+    /// Whether the worker set is its source's first authoritative listing or
+    /// a later one: a fixed pool is at once, a discovered one once its watch
+    /// has listed the workers (`topology::Membership::synced`).
+    fn synced(&self) -> bool;
 }

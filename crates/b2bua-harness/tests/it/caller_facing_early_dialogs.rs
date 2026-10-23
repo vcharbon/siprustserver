@@ -106,7 +106,7 @@ async fn a_forked_callee_request_rides_its_own_caller_facing_dialog() {
     on_tag2.push(cseq_of(&at_alice));
     at_alice.respond(200, "OK").with_sdp(ALICE_REANSWER).await;
     reinvite.expect(200).await;
-    fork2.ack_for(3, None).await;
+    fork2.ack(None).await;
     alice.receive("ACK").await;
 
     let mut bye = fork2.bye().await;
@@ -125,11 +125,11 @@ async fn a_forked_callee_request_rides_its_own_caller_facing_dialog() {
     let _ = h.finish().await;
 }
 
-/// A strict caller numbers each early dialog from her INVITE: three UPDATEs on
-/// fork 1's dialog (2, 3, 4), then one on fork 2's (2) — in order on fork 2's
-/// own dialog, so relayed. Fork 2 answers; her reuse of 1 there is below the
-/// 2 that dialog took, so it is out of order (§12.2.2): 500, not relayed. Her
-/// BYE (3) continues fork 2's dialog and is in order.
+/// A strict caller numbers each early dialog from her INVITE (n): three
+/// UPDATEs on fork 1's dialog (n+1, n+2, n+3), then one on fork 2's (n+1) — in
+/// order on fork 2's own dialog, so relayed. Fork 2 answers; her reuse of n
+/// there is below the n+1 that dialog took, so it is out of order (§12.2.2):
+/// 500, not relayed. Her BYE (n+2) continues fork 2's dialog and is in order.
 #[tokio::test(start_paused = true)]
 async fn the_caller_is_measured_per_caller_facing_dialog() {
     let h = Harness::with_transit_delay("b2bua-caller-measured-per-early-dialog", 1);
@@ -152,11 +152,12 @@ async fn the_caller_is_measured_per_caller_facing_dialog() {
     uas.respond(180, "Ringing").with_to_tag("bobfork2").await;
     let a_tag2 = call.expect(180).await.to().tag().expect("fork 2's a-facing tag").to_string();
 
+    let n = call.invite_cseq();
     for (a_tag, b_tag, cseq) in [
-        (&a_tag1, "bobfork1", 2),
-        (&a_tag1, "bobfork1", 3),
-        (&a_tag1, "bobfork1", 4),
-        (&a_tag2, "bobfork2", 2),
+        (&a_tag1, "bobfork1", n + 1),
+        (&a_tag1, "bobfork1", n + 2),
+        (&a_tag1, "bobfork1", n + 3),
+        (&a_tag2, "bobfork2", n + 1),
     ] {
         let mut update = call.send_request(InDialogMethod::Update).with_to_tag(a_tag).send().await;
         let mut at_bob = bob.receive("UPDATE").await;
@@ -172,11 +173,11 @@ async fn the_caller_is_measured_per_caller_facing_dialog() {
     assert_eq!(ok.to().tag(), Some(a_tag2.as_str()), "fork 2 answers");
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
-    assert_eq!(dialog.local_cseq(), 2, "fork 2's dialog spent 1 and 2");
+    assert_eq!(dialog.local_cseq(), n + 1, "fork 2's dialog spent n and n+1");
 
-    dialog.set_local_cseq(0);
+    dialog.set_local_cseq(n - 1);
     let mut stale = dialog.request(InDialogMethod::Info, None).await;
-    dialog.set_local_cseq(2);
+    dialog.set_local_cseq(n + 1);
     stale.expect(500).await;
     h.advance(Duration::from_millis(500)).await;
     assert!(
@@ -261,6 +262,71 @@ async fn an_out_of_order_caller_request_is_answered_500() {
     let _ = h.finish().await;
 }
 
+/// The 180's early dialog keeps its record beside the one a service's 183
+/// opens: the answer confirms it with the n+1 and n+2 the caller spent there
+/// (n her INVITE's), so her reuse of n+1 after the answer is out of order
+/// (RFC 3261 §12.2.2) — 500, not relayed — and her BYE (n+3) continues it.
+#[tokio::test(start_paused = true)]
+async fn the_shown_early_dialog_keeps_its_sequence_beside_a_service_tag() {
+    let h = Harness::with_transit_delay("b2bua-shown-tag-beside-service-tag", 1);
+    let alice = h.agent("alice", "127.0.0.1:7393").await;
+    let bob = h.agent("bob", "127.0.0.1:7394").await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 7394)
+        .services(vec![restamp::service_def()])
+        .start(&h, "b2bua", "127.0.0.1:7395")
+        .await;
+    h.waive(
+        WaiverScope::rule(
+            "cseq-in-dialog-order",
+            "alice reuses a spent CSeq after the answer: the out-of-order request under test (RFC 3261 §12.2.2)",
+        )
+        .on_party("alice"),
+    );
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    let ringing_tag = call.expect(180).await.to().tag().expect("the 180's tag").to_string();
+    uas.respond(183, "Session Progress").await;
+    let shown = call.expect(183).await;
+    assert_eq!(shown.to().tag(), Some(restamp::TAG), "the service's own early dialog");
+
+    for _ in 0..2 {
+        let mut update =
+            call.send_request(InDialogMethod::Update).with_to_tag(&ringing_tag).send().await;
+        bob.receive("UPDATE").await.respond(200, "OK").await;
+        update.expect(200).await;
+    }
+
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    let ok = call.expect(200).await;
+    assert_eq!(ok.to().tag(), Some(ringing_tag.as_str()), "the callee's dialog answers");
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let n = call.invite_cseq();
+    assert_eq!(dialog.local_cseq(), n + 2, "the 180's dialog spent n+1 and n+2");
+
+    dialog.set_local_cseq(n);
+    let mut stale = dialog.request(InDialogMethod::Info, None).await;
+    dialog.set_local_cseq(n + 2);
+    stale.expect(500).await;
+    h.advance(Duration::from_millis(500)).await;
+    assert!(
+        bob.try_receive_tolerating("INFO", &[]).await.is_none(),
+        "an out-of-order request is not relayed"
+    );
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    alice.drain().await;
+    bob.drain().await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
 /// The service that shows the caller a second early dialog of its own: the
 /// callee's 183 is answered toward her as a 183 under a To-tag the service
 /// states, and is not relayed.
@@ -313,12 +379,13 @@ mod restamp {
     }
 }
 
-/// A request the caller sends in an early dialog whose tag names no
-/// caller-facing record moves no other dialog's sequence: she spends 2 and 3
-/// on the callee's dialog (the 180's tag), then her own 2 on the dialog a
-/// service's 183 showed her under its own tag — in order there, so relayed.
+/// A service's 183 under a tag of its own, beside the callee's 180 the caller
+/// already holds, opens a caller-facing early dialog of its own (RFC 3261
+/// §12.1.2): she spends n+1 and n+2 on the callee's dialog (the 180's tag, n
+/// her INVITE's), then her own n+1 on the service's — in order there, so
+/// relayed.
 #[tokio::test(start_paused = true)]
-async fn a_request_on_an_unrecorded_caller_facing_tag_moves_no_other_sequence() {
+async fn a_service_tag_beside_a_shown_one_moves_no_other_sequence() {
     let h = Harness::with_transit_delay("b2bua-unrecorded-caller-facing-tag", 1);
     let alice = h.agent("alice", "127.0.0.1:7336").await;
     let bob = h.agent("bob", "127.0.0.1:7337").await;
@@ -335,7 +402,10 @@ async fn a_request_on_an_unrecorded_caller_facing_tag_moves_no_other_sequence() 
     let shown = call.expect(183).await;
     assert_eq!(shown.to().tag(), Some(restamp::TAG), "the service's own early dialog");
 
-    for (tag, cseq) in [(ringing_tag.as_str(), 2), (ringing_tag.as_str(), 3), (restamp::TAG, 2)] {
+    let n = call.invite_cseq();
+    for (tag, cseq) in
+        [(ringing_tag.as_str(), n + 1), (ringing_tag.as_str(), n + 2), (restamp::TAG, n + 1)]
+    {
         let mut update = call.send_request(InDialogMethod::Update).with_to_tag(tag).send().await;
         let mut at_bob = bob.receive("UPDATE").await;
         at_bob.respond(200, "OK").await;
@@ -352,6 +422,127 @@ async fn a_request_on_an_unrecorded_caller_facing_tag_moves_no_other_sequence() 
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    alice.drain().await;
+    bob.drain().await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+/// The service that shows the caller the stack's own early tag first: the
+/// callee's 180 is answered toward her as a 180 under the B2BUA's own To-tag,
+/// the callee's 183 as a 183 under a To-tag the service states; neither is
+/// relayed.
+pub(crate) mod own_then_stated {
+    use b2bua::rules::{
+        Effect, Match, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult,
+        ServiceSeed, Terminal,
+    };
+    use b2bua::{define_service, sm_rule};
+    use call::{Direction, LegState};
+
+    pub const TAG: &str = "service-stated";
+
+    define_service! {
+        id: "own-then-stated",
+        machine: OWN_THEN_STATED,
+        states: OtsState { Waiting, Shown },
+        init: |_call: &RuleCall| Some(ServiceSeed::new(OtsState::Waiting.label())),
+        rules: [ own_180(), stated_183() ],
+    }
+
+    fn own_180() -> RuleDefinition {
+        sm_rule! {
+            id: "own-180",
+            machine: OWN_THEN_STATED,
+            active: [ OtsState::Waiting ],
+            transitions: [ OtsState::Waiting => OtsState::Shown ],
+            effects: [
+                Effect::Provisional { status: 180, label: "180 under the stack's own To-tag" },
+            ],
+            matcher: Match::response()
+                .method("INVITE")
+                .status_code(180)
+                .direction(Direction::FromB)
+                .leg_states(&[LegState::Trying, LegState::Early]),
+            handle: |ctx: &RuleContext| {
+                Some(RuleHandleResult::new(vec![
+                    RuleAction::SendProvisionalToLeg {
+                        leg_id: ctx.call.a_leg().leg_id.clone(),
+                        status: 180,
+                        reason: "Ringing".into(),
+                        body: None,
+                        to_tag: None,
+                        p_early_media: None,
+                    },
+                    RuleAction::SetState { machine: OWN_THEN_STATED, to: OtsState::Shown.label() },
+                ]))
+            },
+        }
+    }
+
+    fn stated_183() -> RuleDefinition {
+        sm_rule! {
+            id: "stated-183",
+            machine: OWN_THEN_STATED,
+            active: [ OtsState::Shown ],
+            transitions: [ OtsState::Shown => Terminal ],
+            effects: [
+                Effect::Provisional { status: 183, label: "183 under the service's stated To-tag" },
+            ],
+            matcher: Match::response()
+                .method("INVITE")
+                .status_code(183)
+                .direction(Direction::FromB)
+                .leg_states(&[LegState::Trying, LegState::Early]),
+            handle: |ctx: &RuleContext| {
+                Some(RuleHandleResult::new(vec![
+                    RuleAction::SendProvisionalToLeg {
+                        leg_id: ctx.call.a_leg().leg_id.clone(),
+                        status: 183,
+                        reason: "Session Progress".into(),
+                        body: None,
+                        to_tag: Some(TAG.into()),
+                        p_early_media: None,
+                    },
+                    RuleAction::ClearState { machine: OWN_THEN_STATED },
+                ]))
+            },
+        }
+    }
+}
+
+/// A caller may BYE any early dialog she holds (RFC 3261 §15). The stack's own
+/// 180 shows her its tag; a later 183 under a tag the service states opens an
+/// early dialog of its own beside it (§12.1.2), so her BYE on the first still
+/// names a dialog: 200, her INVITE 487, the ringing callee CANCELled.
+#[tokio::test(start_paused = true)]
+async fn a_bye_on_the_stacks_own_early_tag_outlives_a_stated_one() {
+    let h = Harness::with_transit_delay("b2bua-own-early-tag-then-stated-tag", 1);
+    let alice = h.agent_auto("alice").await;
+    let bob = h.agent_auto("bob").await;
+    let b2bua = B2buaSut::route_all_to(&bob.addr().ip().to_string(), bob.addr().port())
+        .services(vec![own_then_stated::service_def()])
+        .start(&h, "b2bua", &h.next_addr().to_string())
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    let own = call.expect(180).await.to().tag().expect("the stack's own tag").to_string();
+    uas.respond(183, "Session Progress").await;
+    let stated = call.expect(183).await;
+    assert_eq!(stated.to().tag(), Some(own_then_stated::TAG), "the service's stated tag");
+    assert_ne!(own, own_then_stated::TAG, "two early dialogs");
+
+    let mut bye = call.send_request(InDialogMethod::Bye).with_to_tag(&own).send().await;
+    bye.expect(200).await;
+    call.expect(487).await;
+    bob.receive("CANCEL").await.respond(200, "OK").await;
+    uas.respond(487, "Request Terminated").await;
+    bob.receive("ACK").await;
+
+    h.advance(Duration::from_secs(1)).await;
     settle_until(|| b2bua.is_reaped()).await;
     alice.drain().await;
     bob.drain().await;

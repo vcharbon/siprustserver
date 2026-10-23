@@ -17,7 +17,8 @@ use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
 use b2bua_harness::{B2buaScene, B2buaSut, BOB_PORT};
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpServerHandle, HttpTransport};
+use http_net_testkit::SimulatedHttpNetwork;
 use sip_clock::Clock;
 use sip_message::header::HeaderName;
 
@@ -45,7 +46,7 @@ fn reroute_plan(carol_no_answer_sec: i64, on_exhausted: serde_json::Value) -> St
             {"destination": {"host": "127.0.0.1", "port": BOB_PORT}},
             {
                 "destination": {"host": "127.0.0.1", "port": CAROL_PORT},
-                "no_answer_timeout_sec": carol_no_answer_sec,
+                "no_answer_ms": carol_no_answer_sec * 1000,
             },
         ],
         "on_exhausted": on_exhausted,
@@ -570,7 +571,7 @@ async fn a_capacity_refusal_carries_none_of_the_failed_peers_headers() {
 async fn the_setup_deadline_final_speaks_only_for_itself() {
     let s = B2buaScene::with_b2bua("failure-hdr-setup-deadline", |_bob_port| {
         B2buaSut::builder(Arc::new(ScriptedDecisionEngine::numbering_plan()))
-            .tune(|c| c.setup_timeout_sec = 10)
+            .tune(|c| c.setup_timeout_ms = 10_000)
     })
     .await;
     let carol = s.h.agent("carol", &format!("127.0.0.1:{CAROL_PORT}")).await;

@@ -9,7 +9,7 @@
 //! peer → us:  PullRequest{ partition, since }          # ONCE, opens one flow
 //! us → peer:  [bootstrap store-scan if since==(0,0)]    # snapshot, stamped at W=head
 //!             Data…(entries > W, batched) ; Noop(head)  # poll-drain, catch-up Noop
-//!             …sleep ~100ms; drain again; Noop only on the catch-up edge + 20s idle…
+//!             …sleep ~100ms; drain again; Noop only on the catch-up edge + idle interval…
 //! peer → us:  Position{ at }                            # what the peer has applied
 //! ```
 //!
@@ -24,8 +24,14 @@
 //! The server is a `sleep`-poll loop (ADR-0014): every ~100ms it drains up to
 //! [`BATCH`] entries above its cursor. While a full batch comes back it loops
 //! immediately (fill the TCP buffer); below a batch it sleeps. A **`Noop`** is
-//! sent only on the **catch-up edge** (just finished draining a backlog) and on
-//! a ~20s **idle floor** — the *first* one tells the puller it is current.
+//! sent only on the **catch-up edge** (just finished draining a backlog) and
+//! every [`ServeConfig::noop_interval`] after the last one — the *first* one
+//! tells the puller it is current, the later ones tell it the stream is alive.
+//!
+//! ## A peer that stops reading (ADR-0045)
+//! Every send is bounded by [`ServeConfig::send_stall`]: a send still blocked
+//! then (the peer's window full, nothing read) drops the stream, which ends the
+//! serve task and releases the changelog its guard pinned.
 //!
 //! ## Flow → keyspace
 //! `partition` fixes the body keyspace (no per-callRef `partition_of`):
@@ -41,7 +47,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use repl_net::frame::{Frame, Partition, Watermark};
-use repl_net::transport::{ReplicationConnection, ReplicationListener};
+use repl_net::transport::{AcceptError, ReplicationConnection, ReplicationListener, SendError};
 
 use super::changelog::{BodySource, Changelog};
 use crate::abort_on_drop::AbortOnDrop;
@@ -58,8 +64,43 @@ const BATCH: usize = 500;
 /// Poll cadence between drains when not back-to-back streaming (tunable lower).
 const POLL: Duration = Duration::from_millis(100);
 
-/// Idle poll cycles between keepalive `Noop`s once fully caught up (≈20s @ 100ms).
-const IDLE_NOOP_CYCLES: u32 = 200;
+/// The pause after a failed accept before the next one.
+const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
+
+/// The link bounds of the serve loop (ADR-0045).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ServeConfig {
+    /// The longest a caught-up stream goes without a `Noop`.
+    pub noop_interval: Duration,
+    /// A send blocked this long drops the stream.
+    pub send_stall: Duration,
+}
+
+impl Default for ServeConfig {
+    fn default() -> Self {
+        Self { noop_interval: Duration::from_secs(5), send_stall: Duration::from_secs(15) }
+    }
+}
+
+impl ServeConfig {
+    /// How long a puller's position claim vouches for its flow: two `Noop`
+    /// intervals, each `Noop` drawing a fresh claim (ADR-0031 D2).
+    pub fn claim_ttl(&self) -> Duration {
+        self.noop_interval * 2
+    }
+}
+
+/// Why a send did not complete.
+#[derive(Debug)]
+enum Unsent {
+    /// The stream closed.
+    Closed,
+    /// The send stayed blocked past [`ServeConfig::send_stall`].
+    Stalled,
+    /// The transport refused the frame, or a frame of the batch, unsent: it
+    /// does not encode or passes the frame cap. The stream stays usable.
+    Refused(String),
+}
 
 /// Serves a node's changelog to pulling peers over a [`ReplicationListener`].
 ///
@@ -76,6 +117,7 @@ pub struct ReplServer {
     /// `None` for the sim/unit-test constructors (which assert on the store
     /// directly); the live `B2buaCore` wires it via [`with_metrics`](Self::with_metrics).
     metrics: Option<crate::metrics::B2buaMetrics>,
+    config: ServeConfig,
 }
 
 impl ReplServer {
@@ -88,7 +130,22 @@ impl ReplServer {
         changelog: Changelog,
         source: Arc<dyn BodySource>,
     ) -> Self {
-        Self { self_ordinal: self_ordinal.into(), changelog, source, metrics: None }
+        Self {
+            self_ordinal: self_ordinal.into(),
+            changelog,
+            source,
+            metrics: None,
+            config: ServeConfig::default(),
+        }
+        .with_config(ServeConfig::default())
+    }
+
+    /// Serve under `config`'s link bounds; the changelog's claims last
+    /// [`ServeConfig::claim_ttl`].
+    pub fn with_config(mut self, config: ServeConfig) -> Self {
+        self.changelog.set_claim_ttl(config.claim_ttl());
+        self.config = config;
+        self
     }
 
     /// Attach the metrics handle so the serve loop records `repl_noops_sent`
@@ -99,7 +156,10 @@ impl ReplServer {
     }
 
     /// Accept connections forever, serving each on a per-connection task. Returns
-    /// when the listener is closed (`accept` → `None`). Spawn this on a task.
+    /// only when the listener is closed ([`AcceptError::Closed`]). A failed
+    /// accept (descriptors exhausted, a handshake aborted) never stops it: a
+    /// warning once per run of failures, a pause of 100 ms, and
+    /// accepting goes on. Spawn this on a task.
     ///
     /// The serve tasks are owned by a [`JoinSet`](tokio::task::JoinSet), NOT
     /// detached. This is load-bearing for crash semantics: when the worker is
@@ -108,16 +168,35 @@ impl ReplServer {
     /// to the rebooted node.
     pub async fn run(self, listener: Box<dyn ReplicationListener>) {
         let mut serves = tokio::task::JoinSet::new();
+        let mut failing = false;
         loop {
             tokio::select! {
                 accepted = listener.accept() => match accepted {
-                    Some(conn) => {
+                    Ok(conn) => {
+                        if std::mem::take(&mut failing) {
+                            tracing::info!(
+                                node = observe::node(),
+                                local = %listener.local_addr(),
+                                "replication listener accepting again"
+                            );
+                        }
                         let server = self.clone();
-                        serves.spawn(async move {
+                        serves.spawn(observe::keep_node(async move {
                             server.serve_connection(conn).await;
-                        });
+                        }));
                     }
-                    None => break, // listener closed — stop accepting.
+                    Err(AcceptError::Closed) => break,
+                    Err(AcceptError::Io(error)) => {
+                        if !std::mem::replace(&mut failing, true) {
+                            tracing::warn!(
+                                node = observe::node(),
+                                local = %listener.local_addr(),
+                                %error,
+                                "replication accept failed; accepting again after a pause"
+                            );
+                        }
+                        tokio::time::sleep(ACCEPT_PAUSE).await;
+                    }
                 },
                 Some(_) = serves.join_next() => {}
             }
@@ -158,7 +237,7 @@ impl ReplServer {
         let _guard = self.changelog.serving(caller, partition);
         // The peer's back-channel: positions in, and a close that ends us.
         let (closed_tx, mut closed) = tokio::sync::watch::channel(false);
-        let _recv = AbortOnDrop(tokio::spawn({
+        let _recv = AbortOnDrop(observe::spawn_keeping_node({
             let conn = conn.clone();
             let changelog = self.changelog.clone();
             let peer = caller.to_string();
@@ -181,11 +260,8 @@ impl ReplServer {
 
         // A warm puller that fell below the compacted tail must re-bootstrap.
         if self.changelog.needs_reset(caller, partition, since) {
-            let _ = conn
-                .send(Frame::ResetToBootstrap {
-                    reason: "since fell below the compacted tail".into(),
-                })
-                .await;
+            let reason = "since fell below the compacted tail".into();
+            let _ = self.send(conn, Frame::ResetToBootstrap { reason }, caller, flow).await;
             return;
         }
 
@@ -193,16 +269,16 @@ impl ReplServer {
         // then resumes from W (warm), so the scan and the tail never double-deliver.
         let mut w = since;
         if since == Watermark::new(0, 0) {
-            match self.serve_bootstrap(conn, caller, partition, role, &primary).await {
+            match self.serve_bootstrap(conn, caller, partition, role, &primary, flow).await {
                 Ok(scan_head) => w = scan_head,
-                Err(()) => return, // socket dropped mid-scan.
+                Err(_) => return, // socket dropped or stalled mid-scan.
             }
         }
 
         // ---- poll-tail ----
         let mut ever_caught_up = false;
         let mut streamed_full_batch = false;
-        let mut idle_cycles = 0u32;
+        let mut next_noop = sip_clock::deadline::from_now(self.config.noop_interval);
         loop {
             let frames = self
                 .changelog
@@ -210,14 +286,15 @@ impl ReplServer {
                 .await;
             let n = frames.len();
             for frame in frames {
-                if let Frame::Data { at, .. } = &frame {
-                    let at = *at;
-                    if conn.send(frame).await.is_err() {
-                        return;
-                    }
-                    w = at; // advance past what we just sent.
-                } else if conn.send(frame).await.is_err() {
+                let at = match &frame {
+                    Frame::Data { at, .. } => Some(*at),
+                    _ => None,
+                };
+                if self.send_or_skip(conn, frame, caller, flow).await.is_err() {
                     return;
+                }
+                if let Some(at) = at {
+                    w = at; // advance past what we just sent.
                 }
             }
             if n == BATCH {
@@ -238,10 +315,11 @@ impl ReplServer {
             // held the dead call until its body-TTL backstop.
             //
             // Noop on the catch-up edge (first-ever, or after draining a real
-            // backlog) and on the idle floor; a trickle needs none (its Data
-            // frames already carried `at`).
-            if !ever_caught_up || streamed_full_batch {
-                if conn.send(Frame::Noop { at: w }).await.is_err() {
+            // backlog) and every `noop_interval` after the last one, so the
+            // puller's idle bound never fires on a live stream.
+            let edge = !ever_caught_up || streamed_full_batch;
+            if edge || tokio::time::Instant::now() >= next_noop {
+                if self.send(conn, Frame::Noop { at: w }, caller, flow).await.is_err() {
                     return;
                 }
                 if let Some(m) = &self.metrics {
@@ -249,18 +327,7 @@ impl ReplServer {
                 }
                 ever_caught_up = true;
                 streamed_full_batch = false;
-                idle_cycles = 0;
-            } else {
-                idle_cycles += 1;
-                if idle_cycles >= IDLE_NOOP_CYCLES {
-                    if conn.send(Frame::Noop { at: w }).await.is_err() {
-                        return;
-                    }
-                    if let Some(m) = &self.metrics {
-                        m.record_repl_noop_sent(flow, caller);
-                    }
-                    idle_cycles = 0;
-                }
+                next_noop = sip_clock::deadline::from_now(self.config.noop_interval);
             }
             // `sleep` is cancel-safe, so the peer's close can race it here.
             tokio::select! {
@@ -275,8 +342,9 @@ impl ReplServer {
     /// `Data{ op: Put, partition, at: W }` in [`BOOTSTRAP_CHUNK`] batches (one
     /// `send_batch` per chunk — never holding a lock across the socket), and
     /// returns `W` so the tail resumes warm. A key whose body vanished between
-    /// the snapshot and the read is skipped (the call ended). `Err(())` if the
-    /// socket dropped mid-pass.
+    /// the snapshot and the read is skipped (the call ended), and so is a body
+    /// the transport refuses ([`Self::send_or_skip`]). `Err` if the socket
+    /// dropped or a send stalled mid-pass.
     async fn serve_bootstrap(
         &self,
         conn: &dyn ReplicationConnection,
@@ -284,7 +352,8 @@ impl ReplServer {
         partition: Partition,
         role: PartitionRole,
         primary: &str,
-    ) -> Result<Watermark, ()> {
+        flow: &'static str,
+    ) -> Result<Watermark, Unsent> {
         // W = head at scan-START (ADR-0014 §8) — read BEFORE the key snapshot.
         // The writer order is body/meta-insert → changelog bump, so a call that
         // lands after this read necessarily bumps a counter > W and the tail
@@ -302,32 +371,123 @@ impl ReplServer {
         };
 
         for group in keys.chunks(BOOTSTRAP_CHUNK) {
-            let mut frames = Vec::with_capacity(group.len());
-            for key in group {
-                // Send-time origin stamp for skew re-anchoring on the receiver
-                // (mirrors `drain_since`); one clock reading per bootstrap frame.
-                let origin_now_ms = self.changelog.now_ms();
-                match self.source.read_entry(role, primary, key).await {
-                    Some((body, meta)) => frames.push(Frame::Data {
-                        at: w,
-                        op: repl_net::frame::Op::Put,
-                        partition,
-                        call_ref: key.clone(),
-                        call_gen: meta.call_gen,
-                        call_bgen: meta.call_bgen,
-                        body_ttl_ms: meta.body_ttl_ms,
-                        origin_now_ms,
-                        indexes: meta.indexes,
-                        body: Some(body),
-                        answered: false,
-                        incarnation: meta.incarnation,
-                    }),
-                    _ => continue,
+            let frames = self.bootstrap_frames(group, w, partition, role, primary).await;
+            match self.bounded(conn.send_batch(frames), caller, flow).await {
+                // A refused frame refuses its whole batch unsent: the chunk is
+                // read again and sent frame by frame, the refused one skipped.
+                Err(Unsent::Refused(_)) => {
+                    for frame in self.bootstrap_frames(group, w, partition, role, primary).await {
+                        self.send_or_skip(conn, frame, caller, flow).await?;
+                    }
                 }
+                sent => sent?,
             }
-            conn.send_batch(frames).await.map_err(|_| ())?;
         }
         Ok(w)
+    }
+
+    /// The bootstrap frames of the keys `group`, each a `Put` at `w`; a key
+    /// whose body vanished is left out.
+    async fn bootstrap_frames(
+        &self,
+        group: &[String],
+        w: Watermark,
+        partition: Partition,
+        role: PartitionRole,
+        primary: &str,
+    ) -> Vec<Frame> {
+        let mut frames = Vec::with_capacity(group.len());
+        for key in group {
+            // Send-time origin stamp for skew re-anchoring on the receiver
+            // (mirrors `drain_since`); one clock reading per bootstrap frame.
+            let origin_now_ms = self.changelog.now_ms();
+            match self.source.read_entry(role, primary, key).await {
+                Some((body, meta)) => frames.push(Frame::Data {
+                    at: w,
+                    op: repl_net::frame::Op::Put,
+                    partition,
+                    call_ref: key.clone(),
+                    call_gen: meta.call_gen,
+                    call_bgen: meta.call_bgen,
+                    body_ttl_ms: meta.body_ttl_ms,
+                    origin_now_ms,
+                    indexes: meta.indexes,
+                    body: Some(body),
+                    answered: false,
+                    incarnation: meta.incarnation,
+                }),
+                _ => continue,
+            }
+        }
+        frames
+    }
+
+    /// Send `frame`; one the transport refuses is logged, counted and skipped,
+    /// so the stream goes on past it.
+    async fn send_or_skip(
+        &self,
+        conn: &dyn ReplicationConnection,
+        frame: Frame,
+        caller: &str,
+        flow: &'static str,
+    ) -> Result<(), Unsent> {
+        let call_ref = match &frame {
+            Frame::Data { call_ref, .. } => call_ref.clone(),
+            _ => String::new(),
+        };
+        match self.send(conn, frame, caller, flow).await {
+            Err(Unsent::Refused(why)) => {
+                if let Some(m) = &self.metrics {
+                    m.bump_repl_frame_refused();
+                }
+                tracing::error!(
+                    node = observe::node(),
+                    peer = %caller,
+                    flow,
+                    call_ref,
+                    why,
+                    "replication frame refused unsent; the stream goes on past it"
+                );
+                Ok(())
+            }
+            sent => sent,
+        }
+    }
+
+    /// Send `frame`, bounded by [`ServeConfig::send_stall`].
+    async fn send(
+        &self,
+        conn: &dyn ReplicationConnection,
+        frame: Frame,
+        caller: &str,
+        flow: &'static str,
+    ) -> Result<(), Unsent> {
+        self.bounded(conn.send(frame), caller, flow).await
+    }
+
+    /// Await a send for at most [`ServeConfig::send_stall`]. A send still
+    /// blocked then is a peer that stopped reading: the caller drops the stream.
+    async fn bounded(
+        &self,
+        send: impl std::future::Future<Output = Result<(), repl_net::transport::SendError>>,
+        caller: &str,
+        flow: &'static str,
+    ) -> Result<(), Unsent> {
+        match tokio::time::timeout(self.config.send_stall, send).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(SendError::Unencodable(why))) => Err(Unsent::Refused(why)),
+            Ok(Err(_)) => Err(Unsent::Closed),
+            Err(_) => {
+                tracing::info!(
+                    node = observe::node(),
+                    peer = %caller,
+                    flow,
+                    stall_ms = sip_clock::wall::millis_u64(self.config.send_stall),
+                    "replication stream dropped: the peer stopped reading"
+                );
+                Err(Unsent::Stalled)
+            }
+        }
     }
 
     /// Test accessor: this node's ordinal.

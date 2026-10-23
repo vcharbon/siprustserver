@@ -53,7 +53,7 @@ fn no_answer_decision() -> Arc<dyn CallDecisionEngine> {
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.no_answer_timeout_sec = Some(NO_ANSWER_SEC);
+                r.no_answer_ms = Some(NO_ANSWER_SEC * 1000);
                 NewCallResponse::Route(r)
             })
             .build(),
@@ -85,7 +85,7 @@ async fn replica_carries_no_answer(
         return false;
     };
     let call = MsgpackCodec::new().decode(&body).expect("replica body decodes");
-    call.timers.iter().any(|t| t.timer_type == TimerType::NoAnswer)
+    call.timers.iter().any(|t| *t.timer_type() == TimerType::NoAnswer)
 }
 
 /// Answer any pending keepalive OPTIONS on either peer (the reclaim sweep

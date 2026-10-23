@@ -3,13 +3,12 @@
 //!
 //! The proxy samples independently of the workers — no span context arrives on
 //! the wire and none leaves on it — so the decision is made here, once, from the
-//! datagram itself.
+//! INVITE itself.
 
 use std::net::SocketAddr;
 
 use observe::CallIdentity;
-use sip_message::sniff;
-use sip_message::trace_sample::TraceSample;
+use sip_message::trace_sample::{trace_sample, TraceSample};
 use sip_message::SipRequest;
 
 use crate::addr::ProxyAddr;
@@ -39,7 +38,7 @@ impl ProxyCore {
             // routes, and it never mints one.
             to_tag: "",
         };
-        let rate = intake_rate(&self.traces, req.image());
+        let rate = intake_rate(&self.traces, req);
         if self.traces.activate(call_id, id, req.cseq().seq(), rate, at_ms) != Activation::Opened {
             return;
         }
@@ -59,7 +58,7 @@ impl ProxyCore {
         emit::forwarded(
             &self.traces,
             call_id,
-            self.now_ms() as i64,
+            self.trace_ms(),
             emit::RouteFacts {
                 decision,
                 target,
@@ -76,13 +75,13 @@ impl ProxyCore {
 /// process both honors the header and exports at all, else `None` (the
 /// configured rate). With the deployment gate shut the header is not looked up
 /// at all — a serving edge cannot be steered into tracing by a caller, and a
-/// process with no collector does not scan a datagram no rate can change the
+/// process with no collector does not look up a header no rate can change the
 /// fate of.
-fn intake_rate(traces: &ProxyTraces, raw: &[u8]) -> Option<f64> {
+fn intake_rate(traces: &ProxyTraces, req: &SipRequest) -> Option<f64> {
     if !traces.honors_header() || !traces.exporter_configured() {
         return None;
     }
-    match sniff::trace_sample_rate(raw) {
+    match trace_sample(req) {
         TraceSample::Rate(rate) => Some(rate),
         TraceSample::Malformed => {
             observe::counters::bump(&observe::counters::TRACE_HEADER_MALFORMED);
@@ -109,18 +108,23 @@ mod tests {
         )
     }
 
-    fn invite(rate_header: Option<&str>) -> Vec<u8> {
+    fn invite(rate_header: Option<&str>) -> SipRequest {
+        use sip_message::{CustomParser, SipMessage, SipParser};
         let header = rate_header.map(|v| format!("X-Trace-Sample: {v}\r\n")).unwrap_or_default();
-        format!(
+        let raw = format!(
             "INVITE sip:bob@10.0.0.2:5070 SIP/2.0\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-trace\r\n\
+             Max-Forwards: 70\r\n\
              From: <sip:alice@example.com>;tag=a1\r\n\
              To: <sip:bob@example.com>\r\n\
              {header}Call-ID: trace@10.0.0.1\r\n\
              CSeq: 1 INVITE\r\n\
              Content-Length: 0\r\n\r\n"
-        )
-        .into_bytes()
+        );
+        match CustomParser::new().parse(raw.as_bytes()) {
+            Ok(SipMessage::Request(req)) => req,
+            other => panic!("the fixture INVITE parses: {other:?}"),
+        }
     }
 
     #[test]
@@ -142,7 +146,7 @@ mod tests {
     }
 
     #[test]
-    fn an_inert_process_never_scans_the_datagram() {
+    fn an_inert_process_never_reads_the_rate() {
         assert_eq!(
             intake_rate(&gate(false, true), &invite(Some("1"))),
             None,

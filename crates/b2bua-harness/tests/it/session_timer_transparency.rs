@@ -330,7 +330,7 @@ async fn a_transfer_target_carries_neither_the_session_timer_nor_stale_clock_sta
     let h = Harness::new("session-timer-transfer-target");
     let alice = h.agent("alice", "127.0.0.1:5902").await;
     let bob = h.agent("bob", "127.0.0.1:5912").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5912)
         .start(&h, "b2bua", "127.0.0.1:5922")
         .await;
@@ -723,11 +723,11 @@ async fn a_call_withhold_of_100rel_leaves_a_relayed_refresh_whole() {
 async fn a_refresh_toward_a_transfer_target_carries_no_session_timer() {
     const CHARLIE_PORT: u16 = 5667;
     const CHARLIE_ANSWER: &str = "v=0\r\no=charlie 9 9 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
-    const ALICE_REALIGN: &str = "v=0\r\no=alice 1 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
+    const ALICE_REALIGN: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
     let h = Harness::new("session-timer-transfer-refresh");
     let alice = h.agent("alice", "127.0.0.1:5903").await;
     let bob = h.agent("bob", "127.0.0.1:5913").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5913)
         .start(&h, "b2bua", "127.0.0.1:5923")
         .await;
@@ -753,7 +753,7 @@ async fn a_refresh_toward_a_transfer_target_carries_no_session_timer() {
         .await;
     bob.receive("NOTIFY").await.respond(200, "OK").await;
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_ANSWER).await;
     charlie.receive("ACK").await;
     bob.receive("NOTIFY").await.respond(200, "OK").await;
     charlie.receive("INVITE").await.respond(200, "OK").with_sdp(CHARLIE_ANSWER).await;
@@ -766,9 +766,9 @@ async fn a_refresh_toward_a_transfer_target_carries_no_session_timer() {
         refresh = refresh.with_header(name, value);
     }
     let mut refresh = refresh.send().await;
-    let charlie_refresh = charlie.receive("INVITE").await;
+    let mut charlie_refresh = charlie.receive("INVITE").await;
     assert_takes_no_part(charlie_refresh.request(), "the refresh toward the transfer target");
-    answer_refresh(charlie_refresh).await;
+    charlie_refresh.respond(200, "OK").with_sdp(CHARLIE_ANSWER).await;
     refresh.expect(200).await;
     alice_dialog.ack(None).await;
     charlie.receive("ACK").await;

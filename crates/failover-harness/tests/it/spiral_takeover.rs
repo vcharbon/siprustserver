@@ -16,8 +16,9 @@
 //! Each cell runs through a third party that Record-Routes and one that does
 //! not (§16.6 step 4); the front proxy Record-Routes both of its passes either
 //! way, so in-dialog requests reach the survivor by its cookies.
-//! The killed worker reboots and reclaims, as the sole CDR authority of both
-//! calls (ADR-0020 X3): each call then has exactly one CDR in the cluster.
+//! The killed worker departed, so the survivor discharges each call it ends
+//! (ADR-0047 D8); the worker then reboots, and each call has exactly one CDR in
+//! the cluster.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -226,7 +227,7 @@ impl Spiral {
         self.fh.advance(Duration::from_millis(300)).await;
     }
 
-    /// The killed worker reboots and reclaims; both calls end with one CDR
+    /// The killed worker reboots; both calls end with one CDR
     /// each and no trace anywhere; the trace passes the RFC audit. Returns
     /// the two calls' CDRs.
     async fn reboot_and_finish(mut self, calls: &[String]) -> Vec<CdrRecord> {

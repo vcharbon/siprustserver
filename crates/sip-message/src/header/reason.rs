@@ -1,5 +1,6 @@
 //! [`Reason`] (RFC 3326): the protocol and cause a `BYE` or `CANCEL` states.
 
+use crate::parser::custom::structured_headers::top_level_comma_entries;
 use crate::sip_str::SipStr;
 
 use super::aliases::Reason;
@@ -50,6 +51,22 @@ pub fn q850_cause_alone(reasons: &[Reason]) -> Option<String> {
     let first = reasons.first().filter(|r| r.is(Q850))?;
     let digits = first.cause_digits()?;
     Some(format!("{Q850};cause={digits}"))
+}
+
+/// The cause key of a message's `Reason` header `lines` (in wire order):
+/// its first value alone, restated `<protocol>;cause=<n>` with the protocol
+/// token lowercased and the cause as a number (`q.850;cause=34`,
+/// `sip;cause=503`). `None` when that first value does not read, states no
+/// decimal cause, or names a protocol outside `[a-z0-9.+-]+` (a token's other
+/// characters have no place in a key): a later value never stands in for it.
+pub fn cause_key(lines: impl IntoIterator<Item = SipStr>) -> Option<String> {
+    let line = lines.into_iter().next()?;
+    let first = top_level_comma_entries(line.as_str()).next()?;
+    let reason = Reason::parse(&line.reslice(first)).ok()?;
+    let protocol = reason.protocol().to_ascii_lowercase();
+    let keyable = !protocol.is_empty()
+        && protocol.bytes().all(|b| b.is_ascii_alphanumeric() || b"+-.".contains(&b));
+    keyable.then(|| reason.cause().map(|cause| format!("{protocol};cause={cause}")))?
 }
 
 #[cfg(test)]
@@ -118,6 +135,36 @@ mod tests {
         let causeless = readable_reasons([SipStr::owned("Q.850;text=\"x\"")]);
         assert_eq!(q850_cause_alone(&causeless), None, "the leading Q.850 value states none");
         assert_eq!(q850_cause_alone(&[]), None);
+    }
+
+    /// The first value keys the cause, leading zeros dropped; a first value
+    /// with no decimal cause keys nothing, whatever follows.
+    #[test]
+    fn the_first_value_keys_the_cause() {
+        let key = |lines: &[&str]| cause_key(lines.iter().map(|l| SipStr::owned(l)));
+        assert_eq!(
+            key(&["SIP;cause=503;text=\"x\"", "Q.850;cause=34"]).as_deref(),
+            Some("sip;cause=503")
+        );
+        assert_eq!(key(&["Q.850 ;cause=034;text=\"y\""]).as_deref(), Some("q.850;cause=34"));
+        assert_eq!(key(&["Q.850;cause=17, SIP;cause=486"]).as_deref(), Some("q.850;cause=17"));
+        assert_eq!(key(&["SIP;text=\"z\"", "Q.850;cause=16"]), None, "no cause in the first value");
+        assert_eq!(key(&[";cause=1", "Q.850;cause=16"]), None, "a first value that does not read");
+        assert_eq!(key(&[]), None);
+    }
+
+    /// A protocol token holding a character the key's grammar has no place
+    /// for (`!`, `%`, `*`, `_`, `` ` ``, `'`, `~` are token characters) keys
+    /// nothing.
+    #[test]
+    fn a_protocol_outside_the_key_grammar_keys_nothing() {
+        for raw in ["X_Proto;cause=1", "Q*850;cause=2", "a~b;cause=3"] {
+            assert_eq!(cause_key([SipStr::owned(raw)]), None, "{raw}");
+        }
+        assert_eq!(
+            cause_key([SipStr::owned("X-Proto+1.0;cause=9")]).as_deref(),
+            Some("x-proto+1.0;cause=9")
+        );
     }
 
     /// A line that does not parse is skipped; the other lines, and every value

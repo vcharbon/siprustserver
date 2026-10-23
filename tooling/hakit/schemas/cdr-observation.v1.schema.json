@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cdr-observation.v1.schema.json",
+  "$comment": "minor 0",
+  "title": "cdr-observation.v1",
+  "description": "One CDR the CDR consumer received, reduced to what the `cdr_mismatch` join compares. The run directory holds them as JSON lines in `cdrs.jsonl`. Times are Unix epoch milliseconds. ADR-0049.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "call_id", "start_ms", "answer_ms", "end_ms", "duration_ms", "duration_unit_ms", "disposition"],
+  "properties": {
+    "schema": { "const": "cdr-observation.v1" },
+    "call_id": {
+      "description": "The Call-ID of the caller's INVITE as the system under test received it: the join key with the call-outcome record.",
+      "type": "string",
+      "minLength": 1
+    },
+    "start_ms": { "type": "number" },
+    "answer_ms": {
+      "description": "Null when the CDR records no answer.",
+      "type": ["number", "null"]
+    },
+    "end_ms": { "type": "number" },
+    "duration_ms": {
+      "description": "The answered duration the CDR states, converted to milliseconds; 0 for a call never answered.",
+      "type": "number",
+      "minimum": 0
+    },
+    "duration_unit_ms": {
+      "description": "The resolution of the CDR's own duration field (1000 for whole seconds). The join allows 1 s plus this unit.",
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "disposition": {
+      "description": "`answered` or `not_answered`, as the CDR states it.",
+      "enum": ["answered", "not_answered"]
+    },
+    "final_code": {
+      "description": "The final the caller received, when the CDR states it.",
+      "type": ["integer", "null"],
+      "minimum": 200,
+      "maximum": 699
+    }
+  }
+}

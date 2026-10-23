@@ -4,7 +4,10 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Standalone runnable SIP front proxy: binds a real UDP endpoint (non-recording RealSignalingNetwork), load-balances new dialogs across a static worker pool with HMAC-signed Record-Route stickiness, runs OPTIONS health probing, and serves Prometheus /metrics. For containerized localhost/k8s load tests (UAC -> proxy -> B2BUA workers -> UAS)."
+description = "Standalone runnable SIP front proxy: binds a real UDP endpoint (non-recording RealSignalingNetwork), load-balances new dialogs across the worker pool (EndpointSlice discovery or a fixed list) with HMAC-signed Record-Route stickiness, runs OPTIONS health probing, and serves Prometheus /metrics. For containerized localhost/k8s load tests (UAC -> proxy -> B2BUA workers -> UAS)."
+
+[package.metadata.purity]
+tier = "shell"
 
 [lints]
 workspace = true
@@ -19,6 +22,7 @@ path = "src/main.rs"
 [dependencies]
 sip-proxy = { path = "../sip-proxy" }
 metric-catalogue = { path = "../metric-catalogue" }
+metric-values = { path = "../metric-values" }
 # The allocator families of the /metrics catalogue (the reads are the
 # target-gated half below).
 jemalloc-stats = { path = "../jemalloc-stats" }
@@ -26,18 +30,15 @@ jemalloc-stats = { path = "../jemalloc-stats" }
 # /debug/flamegraph pprof route — one module shared with the b2bua worker.
 probe-http = { path = "../probe-http" }
 sip-net = { path = "../sip-net" }
-# ONLY for sip_message::sniff::is_sheddable_new_invite — the intake-shed
-# pre-ingress hook calls the classifier; no SIP scanning lives in this crate.
-sip-message = { path = "../sip-message" }
 sip-txn = { path = "../sip-txn" }
 sip-clock = { path = "../sip-clock" }
 # Cluster membership: the shared topology crate with the kube EndpointSlice
 # informer (ADR-0012 D4) so the proxy discovers workers from k8s — the SAME watch
-# the b2bua replication engine uses (ADR-0011 X7). Static PROXY_WORKERS remains a
-# dev/local fallback.
+# the b2bua replication engine uses (ADR-0011 X7). A set PROXY_WORKERS list
+# replaces discovery (ADR-0046).
 topology = { path = "../topology", features = ["kube"] }
 # Default in-cluster kube client for K8sMembership.
-kube = { version = "1", default-features = false, features = ["client", "rustls-tls"] }
+kube = { version = "4.2.0", default-features = false, features = ["client", "rustls-tls"] }
 # rustls 0.23 ships no compile-time default CryptoProvider unless a provider
 # feature is enabled; install one before the first TLS handshake (mirrors the
 # b2bua-runner) or the kube client panics.
@@ -46,6 +47,21 @@ tokio = { workspace = true }
 # Process subscriber + lifecycle logging (ADR-0026).
 observe = { path = "../observe", features = ["otlp"] }
 tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+sip-net-testkit = { path = "../sip-net-testkit" }
+# The restart delay a restarted sweep waits out.
+task-restart = { path = "../task-restart" }
+# A stand-in API server for the discovery test: kube::Client over a tower
+# service answering the EndpointSlice list and holding the watch open.
+tower = { version = "0.5", features = ["util"] }
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+bytes = { workspace = true }
+futures = "0.3"
+serde_json = { workspace = true }
 
 # jemalloc global allocator + its stats probe (see the #[global_allocator] note
 # in src/main.rs). The front proxy is single-task but still churns SIP buffers

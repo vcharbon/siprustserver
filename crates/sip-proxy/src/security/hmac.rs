@@ -13,8 +13,9 @@
 //!   enforces the length so no caller can accidentally accept a 1-byte prefix
 //!   (a ≤256-guess forgery).
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
+use sip_message::char_class::{is_paramchar, is_run_of};
 use subtle::ConstantTimeEq;
 
 /// RFC 2104 §3: keys shorter than the hash output should be avoided.
@@ -59,15 +60,40 @@ pub trait HmacKeyProvider: Send + Sync {
     fn verify_truncated(&self, input: &[u8], kid: &str, mac_prefix: &[u8]) -> bool;
 }
 
-fn mac_for(key: &HmacKey, input: &[u8]) -> [u8; 32] {
-    let mut mac = HmacSha256::new_from_slice(&key.bytes).expect("HMAC accepts any key length");
-    mac.update(input);
-    mac.finalize().into_bytes().into()
+/// A key ready to MAC with: its `kid` and the HMAC state keyed once, at
+/// construction.
+struct Keyed {
+    id: String,
+    prf: HmacSha256,
+}
+
+impl Keyed {
+    /// `key`, validated and keyed; `label` names it in the error.
+    fn of(key: &HmacKey, label: &str) -> Result<Self, HmacKeyProviderConfigError> {
+        validate_key(key, label)?;
+        let prf = HmacSha256::new_from_slice(&key.bytes)
+            .map_err(|e| HmacKeyProviderConfigError(format!("{label} key: {e}")))?;
+        Ok(Self { id: key.id.clone(), prf })
+    }
+
+    fn mac(&self, input: &[u8]) -> [u8; 32] {
+        let mut mac = self.prf.clone();
+        mac.update(input);
+        mac.finalize().into_bytes().into()
+    }
 }
 
 fn validate_key(key: &HmacKey, label: &str) -> Result<(), HmacKeyProviderConfigError> {
     if key.id.is_empty() {
         return Err(HmacKeyProviderConfigError(format!("{label} key id must be non-empty")));
+    }
+    // The key id rides the Record-Route cookie as a URI parameter value
+    // (`pvalue = 1*paramchar`, RFC 3261 §25.1), written unescaped.
+    if !is_run_of(&key.id, is_paramchar, false) {
+        return Err(HmacKeyProviderConfigError(format!(
+            "{label} key id {:?} must be URI-parameter characters (RFC 3261 §25.1 paramchar)",
+            key.id
+        )));
     }
     if key.bytes.len() < MIN_KEY_BYTES {
         return Err(HmacKeyProviderConfigError(format!(
@@ -81,8 +107,8 @@ fn validate_key(key: &HmacKey, label: &str) -> Result<(), HmacKeyProviderConfigE
 /// The static provider: an active key + an optional previous key accepted by
 /// verify only (rotation overlap).
 pub struct StaticHmacKeyProvider {
-    current: HmacKey,
-    previous: Option<HmacKey>,
+    current: Keyed,
+    previous: Option<Keyed>,
 }
 
 impl StaticHmacKeyProvider {
@@ -92,20 +118,18 @@ impl StaticHmacKeyProvider {
         current: HmacKey,
         previous: Option<HmacKey>,
     ) -> Result<Self, HmacKeyProviderConfigError> {
-        validate_key(&current, "current")?;
-        if let Some(prev) = &previous {
-            validate_key(prev, "previous")?;
-            if prev.id == current.id {
-                return Err(HmacKeyProviderConfigError(format!(
-                    "previous key id must differ from current key id (both are \"{}\")",
-                    current.id
-                )));
-            }
+        let current = Keyed::of(&current, "current")?;
+        let previous = previous.map(|prev| Keyed::of(&prev, "previous")).transpose()?;
+        if previous.as_ref().is_some_and(|prev| prev.id == current.id) {
+            return Err(HmacKeyProviderConfigError(format!(
+                "previous key id must differ from current key id (both are \"{}\")",
+                current.id
+            )));
         }
         Ok(Self { current, previous })
     }
 
-    fn lookup_key(&self, kid: &str) -> Option<&HmacKey> {
+    fn lookup_key(&self, kid: &str) -> Option<&Keyed> {
         if kid == self.current.id {
             Some(&self.current)
         } else {
@@ -116,7 +140,7 @@ impl StaticHmacKeyProvider {
 
 impl HmacKeyProvider for StaticHmacKeyProvider {
     fn sign(&self, input: &[u8]) -> HmacSignResult {
-        HmacSignResult { kid: self.current.id.clone(), mac: mac_for(&self.current, input) }
+        HmacSignResult { kid: self.current.id.clone(), mac: self.current.mac(input) }
     }
 
     fn verify_truncated(&self, input: &[u8], kid: &str, mac_prefix: &[u8]) -> bool {
@@ -129,7 +153,7 @@ impl HmacKeyProvider for StaticHmacKeyProvider {
         if mac_prefix.len() != TRUNCATED_MAC_BYTES {
             return false;
         }
-        let full = mac_for(key, input);
+        let full = key.mac(input);
         full[..TRUNCATED_MAC_BYTES].ct_eq(mac_prefix).into()
     }
 }
@@ -140,6 +164,21 @@ mod tests {
 
     fn provider() -> StaticHmacKeyProvider {
         StaticHmacKeyProvider::new(HmacKey::new("k1", vec![7u8; 32]), None).unwrap()
+    }
+
+    /// A key id the Record-Route cookie could not carry as a URI parameter
+    /// value is refused at load, the previous key's too.
+    #[test]
+    fn rejects_a_key_id_no_uri_parameter_carries() {
+        for kid in ["k@1", "k 1", "k\"1", "k%1", "k;1", "k=1", "k?1", "kë"] {
+            let key = HmacKey::new(kid, vec![0u8; 32]);
+            assert!(StaticHmacKeyProvider::new(key.clone(), None).is_err(), "{kid:?}");
+            let current = HmacKey::new("k1", vec![0u8; 32]);
+            assert!(StaticHmacKeyProvider::new(current, Some(key)).is_err(), "previous {kid:?}");
+        }
+        assert!(
+            StaticHmacKeyProvider::new(HmacKey::new("k-1_2.v[3]:$", vec![0u8; 32]), None).is_ok()
+        );
     }
 
     #[test]

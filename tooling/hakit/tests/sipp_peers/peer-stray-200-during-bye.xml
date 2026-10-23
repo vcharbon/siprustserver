@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<!-- Answers; on the caller's BYE sends a 100, then a 200 for a request the caller never sent (CSeq 7 OPTIONS): expects no ACK for it, then answers the BYE. -->
+<scenario name="peer-stray-200-during-bye">
+  <recv request="INVITE" crlf="true" rrs="true">
+    <action>
+      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" assign_to="from_hdr"/>
+      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" assign_to="to_raw"/>
+    </action>
+  </recv>
+  <send retrans="500">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:];tag=[pid]P[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=callee 1 1 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+  <recv request="ACK" crlf="true"/>
+  <recv request="BYE" crlf="true" timeout="10000">
+    <action>
+      <ereg regexp=".*" search_in="hdr" header="Via:" start_line="true" assign_to="b_via"/>
+      <ereg regexp=".*" search_in="hdr" header="CSeq:" start_line="true" assign_to="b_cseq"/>
+    </action>
+  </recv>
+  <send>
+    <![CDATA[
+      SIP/2.0 100 Trying
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+    ]]>
+  </send>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      Via:[$b_via]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      CSeq: 7 OPTIONS
+      Content-Length: 0
+    ]]>
+  </send>
+  <recv request="ACK" crlf="true" timeout="800" ontimeout="no_ack" next="acked"/>
+  <label id="no_ack"/>
+  <send next="done">
+    <![CDATA[
+      SIP/2.0 200 OK
+      Via:[$b_via]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      CSeq:[$b_cseq]
+      Content-Length: 0
+    ]]>
+  </send>
+  <label id="acked"/>
+  <nop>
+    <action>
+      <assign assign_to="bad" value="1"/>
+      <test variable="bad" compare="equal" value="0" check_it="true"/>
+    </action>
+  </nop>
+  <label id="done"/>
+  <pause milliseconds="300"/>
+  <Reference variables="from_hdr,to_raw"/>
+</scenario>

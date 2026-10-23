@@ -77,12 +77,28 @@ export interface CutCall {
   /** The correlated Call-ID family, in leg order. */
   readonly callIds: ReadonlyArray<string>
   /**
-   * Which ingress dialog of its family this case is, where the family held
-   * several and the cut split it. ABSENT for a family that yielded one call, so
-   * an identity a consumer derives from the family does not move for a cut that
-   * did not split — the family's Call-IDs alone no longer name a case.
+   * Which ingress dialog of its family this case is, by arrival, where the
+   * family held several and the cut split it. ABSENT for a family that yielded
+   * one call, so an identity a consumer derives from the family does not move
+   * for a cut that did not split — the family's Call-IDs alone no longer name a
+   * case. A rank: a dialog the capture gains before it shifts it.
    */
   readonly ingressOrdinal?: number
+  /** Where this call of a split family entered the SUT; absent where `ingressOrdinal` is. */
+  readonly ingress?: Ingress
+  /** How many calls the split family holds; absent where `ingressOrdinal` is. */
+  readonly ingresses?: number
+}
+
+/**
+ * Where one call of a split family entered the SUT: its dialog-creating
+ * INVITE's capture time and sockets — what tells the family's calls apart
+ * whatever else the capture holds.
+ */
+export interface Ingress {
+  readonly at_us: number
+  readonly src: string
+  readonly dst: string
 }
 
 export interface CutResult {
@@ -202,6 +218,9 @@ interface Anchor {
   /** The SUT-side socket of the boundary hop — the INSTANCE this dialog is at. */
   readonly sutSocket: string
   readonly at_us: number
+  /** The INVITE's own sockets. */
+  readonly src: string
+  readonly dst: string
 }
 
 /** Where a leg's boundary hops carry a dialog-creating INVITE, and which way. */
@@ -220,7 +239,9 @@ const anchorsOf = (
       hop: m.hop,
       inbound: sut.has(m.dst),
       sutSocket: sutSocketOf(leg, m.hop, sut),
-      at_us: m.ts_us
+      at_us: m.ts_us,
+      src: m.src,
+      dst: m.dst
     })
   }
   return [...out.values()].sort((a, b) => a.at_us - b.at_us)
@@ -305,7 +326,37 @@ export const vantageIsInbound = (
   flows: Flows.FlowsDoc,
   sut: SutSet,
   v: CutVantage
-): boolean => anchorsOf(flows, v.leg, sut).some((a) => a.hop === v.hop && a.inbound)
+): boolean => {
+  vantageLeg(flows, v)
+  return anchorsOf(flows, v.leg, sut).some((a) => a.hop === v.hop && a.inbound)
+}
+
+/**
+ * Whether the dialog anchored at this vantage is one the SUT DIALLED: its
+ * dialog-creating INVITE left the SUT. A vantage with no anchor at its hop is
+ * neither this nor {@link vantageIsInbound}.
+ */
+export const vantageIsOutbound = (
+  flows: Flows.FlowsDoc,
+  sut: SutSet,
+  v: CutVantage
+): boolean => {
+  vantageLeg(flows, v)
+  return anchorsOf(flows, v.leg, sut).some((a) => a.hop === v.hop && !a.inbound)
+}
+
+/**
+ * The captured leg a vantage names. A vantage is cut from the same flows
+ * document every rule reads, so one naming no leg of it is the caller's defect,
+ * never a case to generate or to clear: it throws.
+ */
+export const vantageLeg = (flows: Flows.FlowsDoc, v: CutVantage): Flows.Leg => {
+  const leg = flows.legs[v.leg]
+  if (leg === undefined) {
+    throw new Error(`vantage leg ${v.leg} hop ${v.hop} names no leg of the flows document`)
+  }
+  return leg
+}
 
 /** Every message index of a leg that belongs to the vantage anchored at `hop`. */
 export const vantageMsgIdxs = (
@@ -386,6 +437,7 @@ const MISSING_UPSTREAM_RULE: CaptureRule = {
   id: MISSING_UPSTREAM_LEG,
   subject: "source",
   disposition: "unreachable",
+  why: "no captured leg carries the call into the system under test, so no caller can be scripted",
   refuses: (input) => {
     const anchors = familyAnchors(input)
     if (anchors.length === 0 || anchors.some((a) => a.inbound)) return undefined
@@ -419,6 +471,7 @@ const HAIRPIN_RULE: CaptureRule = {
   id: HAIRPIN_LOOPBACK,
   subject: "source",
   disposition: "unreachable",
+  why: "a dialog the system under test dialled comes back to it at the same hop, and one actor plays one transit only",
   refuses: (input) => {
     const hairpins = input.legs.flatMap((leg) =>
       hairpinHops(input.flows, leg, input.sut).map((hop) => ({ leg, hop }))
@@ -457,6 +510,7 @@ const NO_DIALOG_RULE: CaptureRule = {
   id: NO_DIALOG_AT_BOUNDARY,
   subject: "source",
   disposition: "not-proposed",
+  why: "no dialog-creating INVITE crosses the boundary of the system under test, so no call is proposed",
   refuses: (input) => {
     if (familyAnchors(input).length > 0) return undefined
     if (!input.legs.some((i) => input.flows.legs[i]!.msgs.some(Flows.isInvite))) return undefined
@@ -473,11 +527,9 @@ const NO_DIALOG_RULE: CaptureRule = {
 /**
  * The CAPTURE-tier rules the cut decides on its own account, in ON-DISK order.
  *
- * The cut EVALUATES them at the branches that also decide the id: a refusal
- * standing in for a proposed case takes a `-cutN` slot from the case namespace
- * and a not-proposed family takes a deterministic id off its legs, and only the
- * cut knows which. The predicates themselves read nothing but their input, so a
- * falsifier can re-run either one on the family alone.
+ * The cut EVALUATES them at the branches that also decide whether a family is
+ * a case, a refusal or not proposed; the predicates themselves read nothing but
+ * their input, so a falsifier can re-run either one on the family alone.
  */
 export const CUT_RULES: ReadonlyArray<CaptureRule> = [
   MISSING_UPSTREAM_RULE,
@@ -487,9 +539,29 @@ export const CUT_RULES: ReadonlyArray<CaptureRule> = [
 
 checkRefusalRoster(CUT_RULES, { where: "@sip/pipeline cut rules", deploymentFree: true })
 
+/** What the cut knows of one call when it names it: the call itself, never its position. */
+export interface CallIdentity {
+  /** The family's Call-IDs at the SUT's boundary, in leg order. */
+  readonly callIds: ReadonlyArray<string>
+  /** Which ingress dialog of a split family the call is, by arrival; absent for a family that stayed whole. */
+  readonly ingressOrdinal?: number
+  /** Where the call of a split family entered the SUT; absent for a family that stayed whole. */
+  readonly ingress?: Ingress
+  /** How many calls the split family holds; absent for a family that stayed whole. */
+  readonly ingresses?: number
+  /** The family's boundary legs, ascending. */
+  readonly legs: ReadonlyArray<number>
+}
+
 /**
- * The cut of one capture. `inheritId` is offered the selected leg set and may
- * name the case, so an unchanged cut keeps the id the corpus already knows.
+ * The deployment's name for a call of the capture: a function of the call's
+ * identity alone, so a document listing its families in another order, or a
+ * cut that gained or lost a family elsewhere, names every other call the same.
+ */
+export type CaseNamer = (call: CallIdentity) => string
+
+/**
+ * The cut of one capture, every call and every refusal named by `name`.
  *
  * ONE CASE PER INGRESS DIALOG. A family holding several dialog-creating INVITEs
  * that ARRIVED at the SUT holds several calls: the SUT answered each and dialled
@@ -502,7 +574,7 @@ export const cutCalls = (
   sut: SutSet,
   capture: string,
   derives: CallIdDerivation,
-  inheritId?: (legs: ReadonlyArray<number>) => string | undefined
+  name: CaseNamer
 ): CutResult => {
   const calls: Array<CutCall> = []
   const refused: Array<Refusal> = []
@@ -510,42 +582,28 @@ export const cutCalls = (
   let notCalls = 0
   if (sut.size === 0) return { calls, refused, notCalls, notes }
 
-  let minted = 0
   for (const family of correlate(flows, derives).families) {
     const selected = family.filter((i) => boundaryHops(flows.legs[i]!, sut).length > 0)
     if (selected.length === 0) continue
     const anchors = selected.flatMap((i) => anchorsOf(flows, i, sut))
     const callIds = selected.map((i) => flows.legs[i]!.call_id)
+    const whole = { callIds, legs: selected }
     if (anchors.length === 0) {
-      // NOT a case id: no case was proposed, so this must not consume a `-cutN`
-      // slot — that counter is the case namespace and shifting it would renumber
-      // every case cut after this family. Deterministic off the legs instead, so
-      // a re-cut names the same family the same way.
-      const site = { caseId: `${capture}-legs${selected.join("+")}`, capture }
-      const finding = NO_DIALOG_RULE.refuses({ flows, sut, legs: selected, callIds, ...site })
+      // Named only where the rule records it: a keepalive family is counted, not named.
+      const finding = NO_DIALOG_RULE.refuses({ flows, sut, legs: selected, callIds, caseId: "", capture })
       if (finding === undefined) notCalls += 1
-      else refused.push(refusalOf(NO_DIALOG_RULE, site, finding))
+      else refused.push(refusalOf(NO_DIALOG_RULE, { caseId: name(whole), capture }, finding))
       continue
     }
-    // The rule's own predicate first, and the site only inside the branch: a
-    // selection id is CLAIMED when it is read, so naming a family the rule does
-    // not refuse would spend the name the case itself is about to inherit. The
-    // slot is spent because a case WAS proposable here and this refusal stands
-    // in for it — the ids of every family cut after this one stay put.
     if (selected.some((i) => hairpinHops(flows, i, sut).length > 0)) {
-      minted += 1
-      const site = { caseId: inheritId?.(selected) ?? `${capture}-cut${minted}`, capture }
+      const site = { caseId: name(whole), capture }
       const finding = HAIRPIN_RULE.refuses({ flows, sut, legs: selected, callIds, ...site })
       if (finding !== undefined) refused.push(refusalOf(HAIRPIN_RULE, site, finding))
       continue
     }
     const inbound = [...anchors.filter((a) => a.inbound)].sort((x, y) => x.at_us - y.at_us)
     if (inbound.length === 0) {
-      // The slot is spent because a case WAS proposed here and this refusal
-      // stands in for it: the branch is the rule's own predicate, so the rule
-      // always fires and the id is never minted for nothing.
-      minted += 1
-      const site = { caseId: inheritId?.(selected) ?? `${capture}-cut${minted}`, capture }
+      const site = { caseId: name(whole), capture }
       const finding = MISSING_UPSTREAM_RULE.refuses({ flows, sut, legs: selected, callIds, ...site })
       if (finding !== undefined) refused.push(refusalOf(MISSING_UPSTREAM_RULE, site, finding))
       continue
@@ -560,12 +618,16 @@ export const cutCalls = (
     }
     inbound.forEach((uac, ordinal) => {
       const uas = outbound.filter((o) => ingressOf(inbound, o) === uac)
-      minted += 1
+      const split = inbound.length === 1
+        ? {}
+        : {
+          ingressOrdinal: ordinal,
+          ingress: { at_us: uac.at_us, src: uac.src, dst: uac.dst },
+          ingresses: inbound.length
+        }
       calls.push({
-        ...(inbound.length === 1 ? {} : { ingressOrdinal: ordinal }),
-        // A split family mints its own ids: the corpus knows one case per leg
-        // set, so an inherited id can name only a family that stayed whole.
-        id: (inbound.length === 1 ? inheritId?.(selected) : undefined) ?? `${capture}-cut${minted}`,
+        ...split,
+        id: name({ ...whole, ...split }),
         uac: { leg: uac.leg, hop: uac.hop },
         uas: uas.map((a) => ({ leg: a.leg, hop: a.hop })),
         legs: selected,

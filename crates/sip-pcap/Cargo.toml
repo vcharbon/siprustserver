@@ -10,7 +10,7 @@ description = "Offline capture → SIP callflow triage tooling (never in a runne
 workspace = true
 
 [dependencies]
-sip-message = { path = "../sip-message" }
+sip-message = { path = "../sip-message", features = ["sniff"] }
 rfc-rules = { path = "../rfc-rules" }
 clap = { version = "4", features = ["derive"] }
 serde = { workspace = true }

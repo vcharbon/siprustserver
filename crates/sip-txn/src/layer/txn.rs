@@ -9,7 +9,7 @@ use bytes::Bytes;
 use sip_message::{Method, SipRequest};
 use tokio_util::time::delay_queue::Key;
 
-use crate::event::{TimeoutKind, TxnKind};
+use call::{TxnKind, TxnTimeoutKind};
 use sip_retransmit::Ladder;
 
 use super::key::{ServerTxnId, ServerTxnKey};
@@ -22,9 +22,10 @@ pub(super) enum TxnRole {
 }
 
 /// Transaction lifecycle. There is no `Terminated` state: the hold that
-/// follows a final (Timer D/H/J, or Timer I after the ACK) ends by deleting
-/// the transaction from the map ([`Lifetime`]). A resident txn that has sent or received
-/// its final is `Completed` or `Confirmed`; either refuses a second final.
+/// follows a final (Timer D/H/J/L/M, or Timer I after the ACK) ends by
+/// deleting the transaction from the map ([`Lifetime`]). A resident txn that
+/// has sent or received its final is `Completed`, `Confirmed` or `Accepted`;
+/// each refuses a second final.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TxnState {
     Trying,
@@ -35,9 +36,15 @@ pub(super) enum TxnState {
     /// held for Timer I, absorbing ACK retransmissions and any further final
     /// the TU offers on the branch. Nothing retransmits or times out here.
     Confirmed,
-    /// Orphaned INVITE client txn whose 2xx the layer ACKed itself (RFC 6026
-    /// §7.2): held for Timer M, re-passing that ACK to every repeat of the 2xx
-    /// (RFC 3261 §13.2.2.4). Nothing retransmits or times out here.
+    /// RFC 6026 Accepted, after a 2xx; nothing retransmits or times out here.
+    /// An INVITE server txn that sent a 2xx (§7.1, §8.7): held for Timer L,
+    /// passing every ACK up and handing no copy of its INVITE up; this stack
+    /// answers each copy with that 2xx where §8.7 sends nothing (`replay_cached`).
+    /// An INVITE client txn that took a 2xx (§7.2): held for Timer M from
+    /// that 2xx, absorbing every 1xx and non-2xx (§8.4). While its call holds
+    /// it, every later 2xx reaches the TU, which owns each ACK (RFC 3261
+    /// §13.2.2.4); once orphaned, the layer sends each dialog's ACK itself
+    /// (`layer::orphan`).
     Accepted,
 }
 
@@ -102,13 +109,15 @@ pub(super) enum Timer {
     ServerRetransmit(ServerTxnKey),
     /// Timer B (INVITE) / Timer F (non-INVITE) — client transaction timeout.
     ClientTimeout(String),
+    /// The TU's first-response deadline on an initial INVITE (ADR-0044): fired
+    /// with the branch still unanswered, it reports the hop dead; the
+    /// transaction runs on to Timer B. Its key is never stored — the fire
+    /// reads the transaction's state and is a no-op on anything else.
+    FirstResponse(String),
     /// The transaction's end of life, due at its [`Lifetime`] deadline — the
     /// backstop of an active one, the end of a hold otherwise. Every resident
     /// transaction has exactly one; firing removes the transaction.
     Cleanup(TxnId),
-    /// Held-CANCEL grace expiry (ADR-0028): the branch's first provisional never
-    /// arrived inside the grace window, so the held CANCEL is sent regardless.
-    CancelGrace(String),
     /// Timer E for the on-wire CANCEL (RFC 3261 §17.1.2.2 — a CANCEL is a
     /// non-INVITE request, but it reuses its INVITE's branch and builds no txn
     /// of its own, so its retransmit ladder rides the INVITE client txn as the
@@ -126,16 +135,10 @@ pub(super) enum Timer {
 /// Wire status of the CANCEL datagram parked on its INVITE client txn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CancelWire {
-    /// Never sent — waiting on the branch's first provisional or the grace
-    /// expiry (RFC 3261 §9.1, bounded per ADR-0028).
+    /// Never sent — waiting on the branch's first provisional (RFC 3261
+    /// §9.1).
     Held,
-    /// On the wire pre-1xx (grace/evict/timeout flush); ONE re-send on the
-    /// branch's late first provisional is still owed — a UAS that 481'd the
-    /// pre-1xx copy has built its server txn by then. Not "never sent": a
-    /// dying txn does not count it dropped.
-    SentPre1xx,
-    /// On the wire with nothing further owed on a provisional; only the
-    /// [`Timer::CancelRetransmit`] ladder re-sends it.
+    /// On the wire; only the [`Timer::CancelRetransmit`] ladder re-sends it.
     Sent,
 }
 
@@ -157,6 +160,25 @@ impl HeldCancel {
     }
 }
 
+/// The most dialogs, and reliably offered To-tags, an INVITE client txn
+/// remembers: one per fork (RFC 6026 §7.2), bounded against a peer that
+/// invents To-tags.
+pub(super) const MAX_DIALOGS: usize = 16;
+
+/// A dialog of an INVITE client txn, by its To-tag (one per fork, RFC 3261
+/// §12.1.2): the highest CSeq this layer sent on it, so a BYE it sends there
+/// numbers above it (§12.2.1.1); whether a BYE already left on it; and the
+/// ACK of its 2xx once one left, with where it went — the TU's, seen leaving
+/// through the layer, or the one the layer built for an orphan (§13.2.2.4).
+/// A dialog whose ACK left was held by the TU, or already released by the
+/// layer; one a BYE left on is ended.
+pub(super) struct InviteDialog {
+    pub(super) to_tag: Option<String>,
+    pub(super) cseq: u32,
+    pub(super) byed: bool,
+    pub(super) ack: Option<(Bytes, SocketAddr)>,
+}
+
 /// What distinguishes one fresh transaction from another: its identity, its
 /// attribution and the state it is born in. Everything else on a
 /// [`Transaction`] — cached responses, timer keys, the held CANCEL, the ladder
@@ -165,6 +187,8 @@ pub(super) struct NewTransaction {
     pub(super) id: TxnId,
     pub(super) kind: TxnKind,
     pub(super) method: Method,
+    /// The CSeq number of the request this transaction is for.
+    pub(super) cseq: u32,
     pub(super) call_id: String,
     pub(super) from_tag: String,
     pub(super) original_request: Option<SipRequest>,
@@ -184,9 +208,10 @@ impl Transaction {
             id: head.id,
             kind: head.kind,
             method: head.method,
+            cseq: head.cseq,
             call_id: head.call_id,
             from_tag: head.from_tag,
-            original_request: head.original_request,
+            original_request: head.original_request.map(Box::new),
             last_response: None,
             last_response_status: None,
             call_ref: head.call_ref,
@@ -201,11 +226,14 @@ impl Transaction {
             timeout_key: None,
             cleanup_key: None,
             held_cancel: None,
-            cancel_grace_key: None,
             cancel_retransmit_key: None,
             retransmit_buf: None,
+            seed_resend: None,
             ladder: None,
-            timeout_kind: TimeoutKind::Response,
+            timeout_kind: TxnTimeoutKind::Response,
+            dead_hop_reported: false,
+            dialogs: Vec::new(),
+            reliable_offers: Vec::new(),
             lifetime,
             orphaned: false,
             held: false,
@@ -224,12 +252,21 @@ impl Transaction {
         self.id.as_ref().role()
     }
 
-    /// A server transaction's identity; `None` for a client one.
-    pub(super) fn server_id(&self) -> Option<ServerTxnId<'_>> {
-        match &self.id {
-            TxnId::Server(key) => Some(key.id()),
-            TxnId::Client(_) => None,
+    /// This INVITE's dialog under `to_tag`, recorded now when new; `None`
+    /// for a new one past [`MAX_DIALOGS`].
+    pub(super) fn dialog(&mut self, to_tag: Option<&str>) -> Option<&mut InviteDialog> {
+        if let Some(at) = self.dialogs.iter().position(|d| d.to_tag.as_deref() == to_tag) {
+            return self.dialogs.get_mut(at);
         }
+        if self.dialogs.len() >= MAX_DIALOGS {
+            return None;
+        }
+        let to_tag = to_tag.map(str::to_string);
+        // One slot at a time: most INVITEs open one dialog, and a held txn's
+        // spare capacity is memory held 64·T1.
+        self.dialogs.reserve_exact(1);
+        self.dialogs.push(InviteDialog { to_tag, cseq: 0, byed: false, ack: None });
+        self.dialogs.last_mut()
     }
 
     /// A server transaction's key, owned; `None` for a client one.
@@ -257,9 +294,15 @@ pub(super) struct Transaction {
     /// of every message on it, and the `method` a rung of its ladder is
     /// counted under.
     pub(super) method: Method,
+    /// The CSeq number of the request this transaction is for: the ACK of each
+    /// 2xx to an INVITE repeats it (RFC 3261 §13.2.2.4), a timeout names it.
+    pub(super) cseq: u32,
     pub(super) call_id: String,
     pub(super) from_tag: String,
-    pub(super) original_request: Option<SipRequest>,
+    /// The INVITE an INVITE transaction is for; an Accepted client one keeps
+    /// its image instead ([`retransmit_buf`](Self::retransmit_buf)). Boxed: a
+    /// parsed request is most of a record's size, and a non-INVITE has none.
+    pub(super) original_request: Option<Box<SipRequest>>,
     /// The datagram replayed on a request retransmit. Refcounted, so caching a
     /// freshly built message keeps its rendered image instead of copying it, and
     /// a replay costs a refcount bump rather than a memcpy of the whole message.
@@ -290,37 +333,47 @@ pub(super) struct Transaction {
     pub(super) timeout_key: Option<Key>,
     /// The [`Timer::Cleanup`] at the [`lifetime`](Self::lifetime) deadline.
     pub(super) cleanup_key: Option<Key>,
-    /// A CANCEL datagram held back because this INVITE client txn has received
-    /// no response yet (RFC 3261 §9.1 — the CANCEL waits for the first
-    /// provisional). Flushed on the first 1xx, or sent regardless when the
-    /// grace window expires (ADR-0028: the wait is a courtesy, never a veto —
-    /// every emitted CANCEL reaches the wire). Cleared without sending only
-    /// when the txn takes a final first (the UAS already answered — §9.2).
-    /// Only ever set on a `Client`/`Invite` txn in `Trying`.
+    /// The CANCEL datagram parked on this INVITE client txn: held while the
+    /// branch has drawn no response (RFC 3261 §9.1 — the CANCEL waits for the
+    /// first provisional, however late) and flushed on the first 1xx, or on
+    /// the wire riding its Timer-E ladder. A held one is cleared unsent when
+    /// the txn takes a final first (§9.2) or dies.
     pub(super) held_cancel: Option<HeldCancel>,
-    /// The [`Timer::CancelGrace`] wheel entry for a held CANCEL — cancelled in
-    /// lockstep whenever the hold resolves (flush/drop/txn death), nulled at
-    /// fire (the CLAUDE.md stale-`Key` discipline).
-    pub(super) cancel_grace_key: Option<Key>,
     /// The [`Timer::CancelRetransmit`] wheel entry for an on-wire CANCEL —
     /// cancelled in lockstep with the sub-state's resolution (a CANCEL
     /// response, the INVITE's final, txn death), nulled at fire.
     pub(super) cancel_retransmit_key: Option<Key>,
     // Retransmit progression.
     /// The request datagram Timer A/E re-sends — refcounted for the same reason
-    /// as [`last_response`](Self::last_response). In `Accepted` it is the ACK
-    /// re-passed to every repeat of the 2xx.
+    /// as [`last_response`](Self::last_response). On an Accepted INVITE client
+    /// txn, the INVITE's image, which stands in for `original_request`.
     pub(super) retransmit_buf: Option<Bytes>,
+    /// On a client INVITE seeded `Trying` (ADR-0014): its INVITE, re-sent once
+    /// when a CANCEL is first held on it (ADR-0043), taken at that send.
+    pub(super) seed_resend: Option<Bytes>,
     /// The Timer A/E ladder for [`retransmit_buf`](Self::retransmit_buf).
     /// `None` until this txn starts retransmitting, and on a server txn until
     /// its non-2xx final arms Timer G.
     pub(super) ladder: Option<Ladder>,
-    /// Which [`TimeoutKind`] `fire_timeout` emits for this txn's give-up timer —
+    /// Which [`TxnTimeoutKind`] `fire_timeout` emits for this txn's give-up timer —
     /// stored explicitly wherever the timer is armed (`Response` for Timer B/F,
     /// `Transaction` once the first provisional swaps in the long out-of-dialog
     /// INVITE bound) so the discrimination never compares the armed window
     /// against a magic duration.
-    pub(super) timeout_kind: TimeoutKind,
+    pub(super) timeout_kind: TxnTimeoutKind,
+    /// The TU was told at its first-response deadline that this initial
+    /// INVITE's hop is dead (ADR-0044): no later timeout of the transaction is
+    /// reported again.
+    pub(super) dead_hop_reported: bool,
+    /// On an INVITE client txn: the dialogs it opened that a request this
+    /// layer sent (a PRACK, an UPDATE, a BYE) or a 2xx named, at most
+    /// [`MAX_DIALOGS`]; a 2xx under another To-tag is a forked dialog of its
+    /// own (RFC 6026 §7.2).
+    pub(super) dialogs: Vec<InviteDialog>,
+    /// On an INVITE client txn that carried no offer: the To-tags of the
+    /// reliable provisionals that carried one, at most [`MAX_DIALOGS`]. Their
+    /// PRACK answered it (RFC 3262 §5), so their 2xx's ACK owes no answer.
+    pub(super) reliable_offers: Vec<String>,
     /// When this transaction leaves the map, written only by
     /// `layer::lifetime`. An INVITE client txn that gave up is held
     /// [`Hold::GaveUp`](super::lifetime::Hold::GaveUp) in Trying/Proceeding:
@@ -329,10 +382,10 @@ pub(super) struct Transaction {
     /// provisional stays held.
     pub(super) lifetime: Lifetime,
     /// The call this transaction served has been released while it was still
-    /// open (`cancel_txns_for_call`). The layer then closes the transaction's
-    /// own obligations — the hop ACK of a non-2xx and Timer D, the bare ACK of a
-    /// 2xx and Timer M, the held CANCEL, Timer B — and surfaces nothing to the
-    /// consumer, which holds no state for it any more.
+    /// open or Accepted (`cancel_txns_for_call`). The layer then closes the
+    /// transaction's own obligations — the hop ACK of a non-2xx and Timer D,
+    /// the ACK of each 2xx and Timer M, the held CANCEL, Timer B — and
+    /// surfaces nothing to the consumer, which holds no state for it any more.
     pub(super) orphaned: bool,
     /// A server INVITE transaction — an admitted initial INVITE or a seed —
     /// whose identity the node's shared refusals hold while it lives, so no

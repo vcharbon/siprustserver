@@ -128,9 +128,14 @@ fn invite_field(
 /// The user a URI names — the dialed number, host-, scheme- and
 /// param-insensitive, so grouping by callee is not defeated by a rewritten
 /// host or a `tel:`⇄`sip:` swap. A URI naming no user yields its host, which
-/// is the whole value for input no reader accepts.
+/// is the whole value for input no reader accepts; one of a scheme read
+/// opaque (`urn:`, `http:` …) yields its whole text.
 fn uri_user(uri: &Uri) -> String {
-    uri.user_identity().unwrap_or_else(|| uri.host().to_string())
+    match (uri.user_identity(), uri.opaque_part()) {
+        (Some(user), _) => user,
+        (None, Some(_)) => uri.text().into_owned(),
+        (None, None) => uri.host().to_string(),
+    }
 }
 
 fn evidence_kind(e: &MatchEvidence) -> &'static str {
@@ -139,5 +144,21 @@ fn evidence_kind(e: &MatchEvidence) -> &'static str {
         MatchEvidence::SharedHeaderParam { .. } => "shared_header_param",
         MatchEvidence::DerivedCallId { .. } => "derived_call_id",
         MatchEvidence::IdentityAdjacency { .. } => "identity_adjacency",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sip_message::header::Uri;
+    use sip_message::SipStr;
+
+    use super::uri_user;
+
+    #[test]
+    fn a_uri_groups_by_its_user_its_host_or_its_whole_text() {
+        let user = |text: &str| uri_user(&Uri::parse(&SipStr::owned(text)).expect("a URI"));
+        assert_eq!(user("sip:+15550100@example.com"), "+15550100");
+        assert_eq!(user("sip:example.com"), "example.com");
+        assert_eq!(user("urn:service:sos"), "urn:service:sos");
     }
 }

@@ -77,7 +77,8 @@ the **non-fatal** axis, not the **lazy** axis, and is satisfied by storing a
   `OptionalHeaders { p_asserted_identity: Result<Vec<NameAddr>, _>, … }`.
   `parse()` stays tolerant — a malformed one is captured as `Err`, the message
   still parses.
-- `SipMessage::validate_strict()` is the port of `runAllStrictLazyParsers`: it
+- (Superseded by ADR-0053: the strict pass is folded into the parse and
+  removed.) `SipMessage::validate_strict()` is the port of `runAllStrictLazyParsers`: it
   re-validates Date/From/To/Contact grammar + every optional header and returns
   the first violation. Security-sensitive callers (and the compliance matrix's
   invalid corpus) opt into it; production stays tolerant. Note it intentionally
@@ -85,6 +86,10 @@ the **non-fatal** axis, not the **lazy** axis, and is satisfied by storing a
   applied to the invalid/canonical corpora, not the full valid torture set.
 - Extension headers stay on-demand via `TypedHeader` (the core can't eagerly
   parse types it doesn't know); non-fatal by returning `Result`.
+- A built-in header no element acts on is no `OptionalHeaders` field either:
+  the RFC 6442 location headers (Geolocation, Geolocation-Error,
+  Geolocation-Routing) are read on access, `msg.header::<H>()` /
+  `msg.list::<H>()`.
 
 Net: immutable, `Send + Sync` messages; no `OnceCell`; same tolerance; the
 strict surface the tests need. If profiling later shows a *specific* present-

@@ -120,7 +120,7 @@ async fn post_rate_retargets_the_running_server() {
     let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(|| "render-body\n".to_string());
     let srv_rate = rate.clone();
     tokio::spawn(async move {
-        let _ = serve_metrics_on(listener, render, None, Some(srv_rate)).await;
+        let _ = serve_metrics_on(listener, render, Some(srv_rate)).await;
     });
 
     // Retry-connect + one HTTP round-trip helper.
@@ -164,4 +164,31 @@ async fn post_rate_retargets_the_running_server() {
     assert!(missing.contains("400 Bad Request"), "a missing cps should 400: {missing}");
     // The rate is unchanged by the rejected requests (still paused from cps=0).
     assert!(rate.is_paused(), "a rejected /rate must not move the target");
+}
+
+/// `POST /drain` against the running metrics server closes the run window:
+/// the live handle drains, a governor on it admits no further call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "slow lane: loadgen"]
+async fn post_drain_closes_the_window_of_the_running_server() {
+    use loadgen::serve_metrics_on;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let rate = RateHandle::new(10.0);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bind = listener.local_addr().unwrap();
+    let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(|| "render-body\n".to_string());
+    let srv_rate = rate.clone();
+    tokio::spawn(async move {
+        let _ = serve_metrics_on(listener, render, Some(srv_rate)).await;
+    });
+    let mut stream = tokio::net::TcpStream::connect(bind).await.unwrap();
+    stream.write_all(b"POST /drain HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();
+    let mut buf = Vec::new();
+    let _ = stream.read_to_end(&mut buf).await;
+    let got = String::from_utf8_lossy(&buf);
+    assert!(got.contains("200 OK") && got.contains("draining"), "POST /drain: {got}");
+    assert!(rate.is_draining(), "the live handle drains");
+    let mut g = Governor::new(rate, Duration::from_secs(3600));
+    assert!(g.next_slot().await.is_none(), "no call is admitted once drained");
 }

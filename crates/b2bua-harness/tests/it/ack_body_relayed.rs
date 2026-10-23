@@ -137,7 +137,11 @@ async fn a_reinvite_ack_body_reaches_the_callee_verbatim() {
     assert_eq!(body, REOFFER.as_bytes(), "the callee's ACK carries the caller's bytes");
     assert_eq!(ct.as_deref(), Some("application/sdp"));
     assert_eq!(cl.as_deref(), Some(REOFFER.len().to_string().as_str()));
-    assert_eq!(ack.request().cseq().seq(), reinvite_cseq, "on the re-INVITE's CSeq");
+    assert_eq!(
+        ack.request().cseq().seq(),
+        bob_reinv.request().cseq().seq(),
+        "on the CSeq of the re-INVITE the callee took"
+    );
 
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;

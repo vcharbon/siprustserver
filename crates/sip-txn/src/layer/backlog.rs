@@ -12,6 +12,8 @@ use std::sync::atomic::Ordering::Relaxed;
 use sip_message::SipRequest;
 use sip_net::UdpEndpoint;
 
+use crate::invite_class::InviteClass;
+
 use super::owner::Owner;
 use super::refusals::Admission;
 
@@ -49,36 +51,6 @@ impl DeferredBound {
     }
 }
 
-/// The class an INVITE is judged in: the `class` of the refusal counter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum InviteClass {
-    /// A new initial INVITE.
-    Normal,
-    /// A new initial INVITE carrying an emergency priority (RFC 4412).
-    Emergency,
-    /// An INVITE carrying a To-tag.
-    InDialog,
-}
-
-impl InviteClass {
-    /// Every class, in exposition order.
-    pub const ALL: [InviteClass; 3] = [Self::Normal, Self::Emergency, Self::InDialog];
-
-    /// Stable metric label (`class="..."`).
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Normal => "normal",
-            Self::Emergency => "emergency",
-            Self::InDialog => "in_dialog",
-        }
-    }
-
-    /// The class's position in [`ALL`](Self::ALL).
-    pub const fn index(self) -> usize {
-        self as usize
-    }
-}
-
 /// Whether the new INVITE judged now is admitted: no transaction is opened
 /// for one that is not.
 pub(super) enum NewInvite {
@@ -113,12 +85,14 @@ impl Owner {
             }
             Admission::Refuse => {
                 if let Some(class) = class {
-                    self.metrics.deferred_refused[class.index()].fetch_add(1, Relaxed);
+                    self.metrics.deferred_refused.add(class.index());
                 }
             }
         }
-        let refusal = refusals.answer(req);
-        self.send_buffer(endpoint, refusal.image(), src).await;
+        match refusals.answer(req) {
+            Ok(refusal) => self.send_buffer(endpoint, refusal.image(), src).await,
+            Err(e) => tracing::warn!(error = %e, "INVITE refusal not sent: its lines make none"),
+        }
         NewInvite::Refused
     }
 

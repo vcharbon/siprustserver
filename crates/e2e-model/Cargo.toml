@@ -20,7 +20,7 @@ scenario-harness = { path = "../scenario-harness" }
 callshapes = { path = "../callshapes" }
 sip-message = { path = "../sip-message" }
 # `RecordedSipEntry` only (the evaluator resolves anchors over the recording).
-sip-net = { path = "../sip-net" }
+sip-net-testkit = { path = "../sip-net-testkit" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { workspace = true }

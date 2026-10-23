@@ -155,6 +155,11 @@ kills it, and a kill drops every call it serves.
 
 ## Consequences
 
+- An ingress queue slot holds the parsed message when its receive path parsed
+  it (every front-proxy datagram; a worker datagram the engaged brake judged;
+  ADR-0051 §5): a few KiB for ordinary traffic, and under about 200 KiB for a
+  64 KiB datagram, since the parser refuses a header block past 100 lines.
+  `base` in item 7 counts `queue_max` such slots per socket.
 - A call whose replica was left out has no backup until its next write lands;
   a primary failure in that window loses it. The shed is counted
   (`b2bua_repl_backup_shed_total`), never silent, and a drain in that window
@@ -180,6 +185,7 @@ kills it, and a kill drops every call it serves.
   the startup line and `jemalloc_footprint_hazards` name; the ceilings assume
   none.
 - A transaction ceiling also counts the transactions of rejected and finished
-  INVITEs that linger for their timers, and of client INVITEs that gave up
-  (held 64·T1 past their `Timeout`, ADR-0028), so it is sized from the
+  INVITEs that linger for their timers, of answered client INVITEs (held
+  Accepted 64·T1 past their 2xx, ADR-0034), and of client INVITEs that gave up
+  (held 64·T1 past their `Timeout`, ADR-0043), so it is sized from the
   offered rate, not from live calls alone.

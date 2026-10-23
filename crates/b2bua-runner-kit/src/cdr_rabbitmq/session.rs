@@ -8,27 +8,42 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use amqp_connect::{connect_stream, open_over, Connected};
 use b2bua::metrics::B2buaMetrics;
 use lapin::{
     options::{BasicPublishOptions, ConfirmSelectOptions},
     uri::AMQPUri,
-    BasicProperties, Channel, Connection, ConnectionProperties,
+    BasicProperties, Channel, Connection,
 };
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, watch, Semaphore};
+use tokio::task::JoinHandle;
 use tokio::time::{timeout_at, Instant};
 
 use super::confirms::{track_confirms, Pending};
-use super::connector::connect_socket;
 use super::declaration::declaration;
+use super::resolver::BrokerResolver;
 use super::settings::RabbitMqCdrSettings;
 use super::socket_kill::{KillOnDrop, SocketKill};
+
+/// The confirm window's permits: `window`, at most the settings' ceiling
+/// (far below the semaphore's).
+fn window_permits(window: usize) -> Semaphore {
+    let bounded = window.min(usize::try_from(super::MAX_WINDOW).unwrap_or(usize::MAX));
+    #[expect(clippy::disallowed_methods, reason = "held within MAX_WINDOW")]
+    let permits = Semaphore::new(bounded);
+    permits
+}
 
 /// Why a session could not be opened.
 #[derive(Debug)]
 pub(super) enum OpenError {
     /// The URL is not an AMQP URI.
     Uri(String),
-    /// Connect, handshake, channel, `confirm.select` or declare failed.
+    /// The broker host did not resolve before the connect deadline.
+    Resolve(std::io::Error),
+    /// The TCP connect or the TLS handshake failed or missed the deadline.
+    Connect(std::io::Error),
+    /// The AMQP handshake, channel, `confirm.select` or declare failed.
     Amqp(lapin::Error),
 }
 
@@ -36,6 +51,8 @@ impl std::fmt::Display for OpenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OpenError::Uri(e) => write!(f, "not an AMQP URI: {e}"),
+            OpenError::Resolve(e) => write!(f, "broker host unresolved: {e}"),
+            OpenError::Connect(e) => write!(f, "broker connect failed: {e}"),
             OpenError::Amqp(e) => write!(f, "{e}"),
         }
     }
@@ -90,55 +107,80 @@ pub(super) struct Session {
     _connection: Connection,
     confirm_timeout: Duration,
     /// Unbounded, yet never holds more than the window: each entry owns a slot.
-    pending: mpsc::UnboundedSender<Pending>,
+    /// `None` once the session is closing.
+    pending: Option<mpsc::UnboundedSender<Pending>>,
+    /// The confirm tracker, awaited by [`Session::close`].
+    tracker: Option<JoinHandle<()>>,
     health: Arc<Health>,
 }
 
 impl Session {
-    /// Connects, opens a channel, selects publisher confirms and declares the
-    /// queue, then spawns the confirm tracker recording into `metrics`. Not
-    /// bounded here: the caller bounds it, and dropping this future (or a
-    /// failure half-way) shuts down whatever socket it connected.
-    // `HandshakeResult` is the AMQP client's connector contract.
-    #[allow(clippy::result_large_err)]
+    /// Resolves the broker through `resolver`, connects, opens a channel,
+    /// selects publisher confirms and declares the queue, then spawns the
+    /// confirm tracker recording into `metrics`, bounded by the writer's close
+    /// deadline `close_by`. Resolution, the TCP connect and the TLS handshake
+    /// run on this task and stop at `deadline`; the caller bounds the rest by
+    /// it, and dropping this future (or a failure half-way) shuts down
+    /// whatever socket it connected. The client is handed the connected stream
+    /// with auto-recovery off: a connection lost is this session's end, and
+    /// the writer opens the next one.
     pub(super) async fn open(
         settings: &RabbitMqCdrSettings,
+        resolver: &mut BrokerResolver,
+        deadline: Instant,
         metrics: &B2buaMetrics,
+        close_by: watch::Receiver<Option<Instant>>,
     ) -> Result<Self, OpenError> {
         let uri: AMQPUri = settings.url.parse().map_err(OpenError::Uri)?;
+        let addrs = resolver
+            .resolve(&uri.authority.host, uri.authority.port, deadline)
+            .await
+            .map_err(OpenError::Resolve)?;
+        let Connected { stream, socket: descriptor } =
+            connect_stream(&uri, &addrs, deadline).await.map_err(OpenError::Connect)?;
         let socket = Arc::new(SocketKill::default());
+        socket.arm(descriptor);
         let guard = KillOnDrop::new(socket.clone());
-        let connect = {
-            let socket = socket.clone();
-            let deadline = std::time::Instant::now() + settings.bounds.connect_timeout;
-            Box::new(move |uri: &AMQPUri| connect_socket(uri, deadline, &socket))
-        };
-        let props = ConnectionProperties::default()
-            .with_executor(tokio_executor_trait::Tokio::current())
-            .with_reactor(tokio_reactor_trait::Tokio);
-        let connection = Connection::connector(uri, connect, props).await?;
+        let connection = open_over(uri, stream).await?;
         let channel = connection.create_channel().await?;
         channel.confirm_select(ConfirmSelectOptions::default()).await?;
         let (options, args) = declaration(settings.declare);
-        channel.queue_declare(&settings.queue, options, args).await?;
+        channel.queue_declare(settings.queue.as_str().into(), options, args).await?;
         guard.disarm();
 
         let health = Arc::new(Health {
             ended_at: OnceLock::new(),
             delivered: AtomicBool::new(false),
             nack_logged: AtomicBool::new(false),
-            window: Arc::new(Semaphore::new(settings.bounds.window)),
+            window: Arc::new(window_permits(settings.bounds.window)),
             socket,
         });
         let (pending, rx) = mpsc::unbounded_channel();
-        tokio::spawn(track_confirms(rx, health.clone(), metrics.clone()));
+        let tracker = tokio::spawn(track_confirms(rx, health.clone(), close_by, metrics.clone()));
         Ok(Self {
             channel,
             _connection: connection,
             confirm_timeout: settings.bounds.confirm_timeout,
-            pending,
+            pending: Some(pending),
+            tracker: Some(tracker),
             health,
         })
+    }
+
+    /// Publishes no more and waits for the confirm tracker to resolve every
+    /// publish of this session, which it does by the writer's close deadline,
+    /// then ends the session.
+    pub(super) async fn close(mut self) {
+        self.pending = None;
+        if let Some(tracker) = self.tracker.take() {
+            let _ = tracker.await;
+        }
+    }
+
+    /// Ends the session and hands back its confirm tracker, which resolves
+    /// the publishes still outstanding without waiting.
+    pub(super) fn into_tracker(mut self) -> Option<JoinHandle<()>> {
+        self.tracker.take()
     }
 
     /// When the session ended, `None` while it lives; an ended session never
@@ -175,8 +217,8 @@ impl Session {
             return Err(PublishRefused::Ended);
         }
         let publish = self.channel.basic_publish(
-            "",
-            queue,
+            "".into(),
+            queue.into(),
             BasicPublishOptions { mandatory: true, immediate: false },
             payload,
             BasicProperties::default().with_delivery_mode(2),
@@ -194,7 +236,10 @@ impl Session {
         };
         let pending =
             Pending { confirm, deadline: Instant::now() + self.confirm_timeout, _slot: slot };
-        if self.pending.send(pending).is_err() {
+        let Some(tracker) = &self.pending else {
+            return Err(PublishRefused::Ended);
+        };
+        if tracker.send(pending).is_err() {
             self.health.end("the confirm tracker is gone");
             return Err(PublishRefused::Ended);
         }

@@ -1,11 +1,11 @@
 # 0015 — Failure-domain-aware placement & backup selection: zone-pinned workers, single-picker distinct-zone backup, unified exclusion key
 
 > **⚠️ NOT YET IMPLEMENTED — TODO / target design (as of 2026-06-13).**
-> This ADR is the intended cross-rack / multi-zone evolution. The live
-> `deploy/k8s/` manifests do **not** implement any of it: they still run the
+> This ADR is the intended cross-rack / multi-zone evolution. The SUT chart
+> (`deploy/helm/siprust`) does **not** implement any of it: it still runs the
 > ADR-0012 D7 design (multicast VRRP, `tier=edge` proxy nodes,
 > `kubernetes.io/hostname` anti-affinity, a single worker StatefulSet — no zone
-> labels, no `unicast_peer`, no failure-domain key). **Until the manifests are
+> labels, no `unicast_peer`, no failure-domain key). **Until the chart is
 > migrated, ADR-0012 D7 is the source of truth for what actually runs.** Treat
 > every decision below as planned, not live.
 
@@ -166,13 +166,13 @@ request; the 1.5× is the sustained-outage figure.)
 - No change to HRW, callRef routing, repl addressing, or the single-picker
   invariant.
 
-**Manifests:**
-- `20-worker.yaml` → three zone-pinned StatefulSets sharing one headless Service,
-  each with hard `nodeAffinity` to its zone; soft spread removed.
+**Chart (`deploy/helm/siprust`):**
+- `templates/worker.yaml` → three zone-pinned StatefulSets sharing one headless
+  Service, each with hard `nodeAffinity` to its zone; soft spread removed.
 - New `PodDisruptionBudget` (`maxUnavailable: 1`, selector `app=b2bua-worker`).
-- `30-proxy.yaml`: anti-affinity `topologyKey` → failure-domain key; `nodeSelector`
-  → 2 worker-zone nodes (no dedicated `tier=edge`); keepalived.conf → unicast
-  `unicast_peer`.
+- `templates/proxy.yaml`: anti-affinity `topologyKey` → failure-domain key;
+  `nodeSelector` → 2 worker-zone nodes (no dedicated `tier=edge`); the keepalived
+  config (`templates/proxy-keepalived.yaml`) → unicast `unicast_peer`.
 - `cluster.yaml` (kind): 6 app nodes labelled into 3 zones (2 each) with real
   `topology.kubernetes.io/zone` labels — exercises the **same** `endpoint.zone`
   path as prod; proxies co-locate on 2 of them; unicast peer IPs configured.
@@ -207,4 +207,4 @@ request; the 1.5× is the sustained-outage figure.)
   ADR-0014 (reactive-only takeover — D4 composition).
 - `CONTEXT.md`: **Failure domain**, **Distinct-zone backup**.
 - `crates/topology/src/{lib,k8s}.rs`, `crates/sip-proxy/src/strategies/load_balancer.rs`,
-  `crates/b2bua/src/store/mod.rs`, `deploy/k8s/{cluster.yaml,manifests/}`.
+  `crates/b2bua/src/store/mod.rs`, `deploy/k8s/cluster.yaml`, `deploy/helm/siprust/`.

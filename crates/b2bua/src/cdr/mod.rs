@@ -15,6 +15,7 @@ pub use memory::InMemoryCdrWriter;
 
 use async_trait::async_trait;
 use serde::Serialize;
+use tokio::time::Instant;
 
 use call::{Call, CdrEvent, DecisionMark, LegDisposition, LegState, Termination};
 
@@ -82,8 +83,8 @@ pub fn build_record(call: &Call, terminated_at: i64) -> CdrRecord {
         clock_skew_clamped,
         a_leg: CdrLeg {
             call_id: call.a_leg.call_id.clone(),
-            from_tag: call.a_leg.from_tag.clone(),
-            state: call.a_leg.state,
+            from_tag: call.a_leg_invite.from_tag.clone(),
+            state: call.a_leg.state(),
         },
         b_legs: call
             .b_legs
@@ -91,8 +92,8 @@ pub fn build_record(call: &Call, terminated_at: i64) -> CdrRecord {
             .map(|l| CdrBLeg {
                 leg_id: l.leg_id.clone(),
                 call_id: l.call_id.clone(),
-                state: l.state,
-                disposition: l.disposition,
+                state: l.state(),
+                disposition: l.disposition(),
             })
             .collect(),
         events: call.cdr_events.clone(),
@@ -107,6 +108,19 @@ pub fn build_record(call: &Call, terminated_at: i64) -> CdrRecord {
 pub trait CdrWriter: Send + Sync {
     async fn write(&self, call: &Call, terminated_at: i64);
     async fn read_all(&self) -> Vec<CdrRecord>;
+    /// The exit barrier: deliver the records this sink holds and take no more.
+    /// When it returns, every record whose `write` returned before the close
+    /// began is delivered or counted in `cdr_dropped_total`, and every later
+    /// one is counted there too; it never waits past `deadline`, and a later
+    /// close's deadline does not move the first one's. A sink that writes
+    /// inline holds nothing to close.
+    async fn close(&self, deadline: Instant);
+
+    /// The task this sink delivers through, when it has one: the worker ends
+    /// when that task ends.
+    fn task(&self) -> Option<tokio::task::AbortHandle> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -137,7 +151,7 @@ mod tests {
             &req,
             SocketAddr::from(([10, 0, 0, 9], 5060)),
             &cfg,
-            &sip_txn::IdGen::seeded(1),
+            &mut sip_ids::TurnIds::fixed(1),
             created_at,
         )
     }

@@ -137,7 +137,8 @@ async fn a_cancelled_in_dialog_invite_is_answered_and_remembered_under_its_own_t
         481,
         "Call/Transaction Does Not Exist",
         &sip_message::generators::GenerateResponseOpts::default(),
-    );
+    )
+    .unwrap();
     stack.txn.send_response(refused, addr(PEER)).await.unwrap();
     elapse_ms(20).await;
     let out = stack.drain_peer();

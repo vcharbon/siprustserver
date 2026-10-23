@@ -12,7 +12,7 @@
 
 use std::net::SocketAddr;
 
-use metric_catalogue::OpenRows;
+use metric_values::OpenRows;
 
 use crate::metrics::catalogue;
 

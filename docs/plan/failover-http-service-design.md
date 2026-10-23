@@ -58,7 +58,7 @@ know the decision is *terminate*. The async hop makes this natural.
 ### Router (`router.rs`)
 Spawn `decision.call_failure(parse_call_failure_request(request))`; on
 `Ok(Failover(route))` emit outcome `failover` with payload
-`{destination, new_ruri, update_headers, no_answer_timeout_sec, callback_context, failed_leg_id}`;
+`{destination, new_ruri, update_headers, no_answer_ms, callback_context, failed_leg_id}`;
 on `Ok(Terminate)`/`Err` emit outcome `terminate` with payload
 `{status, reason, failed_leg_id}` (status/reason echoed from the request for the
 response path; absent for the no-answer path).

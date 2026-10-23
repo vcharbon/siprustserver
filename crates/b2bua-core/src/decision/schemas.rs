@@ -1,0 +1,474 @@
+//! Request/response shapes for the call-decision adapter — port of
+//! `src/decision/schemas/*`. `FeatureActivations` is reused from `call` (it is
+//! the canonical feature shape; the data model already carries it on `Call`).
+//!
+//! [`NewCallRequest`] round-trips serde — it is what the future HTTP adapter
+//! POSTs and what the scripted test adapter inspects. The response types are
+//! constructed in-process (by the scripted adapter / a future JSON decoder) and
+//! serialize one way only: a traced call records the treatment it got as the
+//! JSON body of its decision round trip (ADR-0026).
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+pub use call::features::FeatureActivations;
+
+use b2bua_sdk::header_update::SipHeaderUpdates;
+
+/// The decision request sent on a new INVITE (the call context the backend
+/// keys decisions off — R-URI, From/To, all non-structural `X-*` headers, body).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NewCallRequest {
+    pub call_id: String,
+    pub ruri: String,
+    pub from: String,
+    pub to: String,
+    pub via: Vec<String>,
+    /// Every `Contact` line, in wire order. A `Contact` is repeatable
+    /// (RFC 3261 §20.10) and diversion/redirect flows can carry several — keep
+    /// each instance rather than collapsing to the last.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub contact: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub content_type: Option<String>,
+    /// Every header not sent as a top-level field (this is where `X-*` land), as
+    /// `(name, value)` lines in wire order, one entry per line, duplicates kept, the
+    /// name under its wire spelling. Order is the message's own: RFC 3261 §7.3.1
+    /// makes a header name case-insensitive and several lines of one name one
+    /// ordered set, so two spellings of one name (`History-Info`, `Diversion`,
+    /// `P-Asserted-Identity` hop chains split across elements) interleave exactly as
+    /// received. Read by name with [`NewCallRequest::sip_header`] and
+    /// [`NewCallRequest::sip_header_values`], which fold case.
+    #[serde(default)]
+    pub sip_headers: Vec<(String, String)>,
+    /// The INVITE's body, byte for byte (a binary part stays binary).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sip_body: Option<Vec<u8>>,
+}
+
+impl NewCallRequest {
+    /// First value of a repeatable header, name compared case-insensitively, for
+    /// the common case where a consumer wants a single value (e.g. `X-Api-Call`).
+    /// Returns `None` if the header is absent.
+    pub fn sip_header(&self, name: &str) -> Option<&str> {
+        first_header_value(&self.sip_headers, name)
+    }
+
+    /// Every line of `name` in wire order, name compared case-insensitively.
+    pub fn sip_header_values<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        header_values(&self.sip_headers, name)
+    }
+}
+
+/// The first value of `name` in `lines`, name compared case-insensitively.
+pub fn first_header_value<'a>(lines: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    lines.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+}
+
+/// Every value of `name` in `lines`, name compared case-insensitively, in order.
+pub fn header_values<'a, 'n: 'a>(
+    lines: &'a [(String, String)],
+    name: &'n str,
+) -> impl Iterator<Item = &'a str> + 'a {
+    lines.iter().filter(move |(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+}
+
+/// A downstream SIP peer.
+#[derive(Debug, Clone, Serialize)]
+pub struct SipDestination {
+    pub host: String,
+    pub port: Option<u16>,
+    pub transport: Option<String>,
+}
+
+impl SipDestination {
+    /// The port a peer reaches when the decision names none (RFC 3261 §19.1.2).
+    pub const DEFAULT_PORT: u16 = 5060;
+
+    pub fn new(host: impl Into<String>, port: u16) -> Self {
+        Self { host: host.into(), port: Some(port), transport: None }
+    }
+    pub fn port(&self) -> u16 {
+        self.port.unwrap_or(Self::DEFAULT_PORT)
+    }
+}
+
+/// The port a decision payload states, or `None` when it states one that is no
+/// port. The one place the two kinds of "missing" are told apart
+///:
+///
+///   - **absent / `null`** — RFC 3261 §19.1.2 says an unstated port means 5060.
+///     That default is what the protocol *means*, so it is correct and stays
+///     (same rule as [`SipDestination::port`]).
+///   - **stated but unreadable** (out of range, zero, not a number) — no
+///     default is right. Collapsing it onto 5060 dials the default port of a
+///     host the decision never named, which is a live address that can very
+///     plausibly answer; the caller then reaches a destination nobody chose.
+///     The reader refuses, and the seam above turns that into a call outcome.
+pub fn read_stated_port(stated: Option<&serde_json::Value>) -> Option<u16> {
+    match stated {
+        None | Some(serde_json::Value::Null) => Some(SipDestination::DEFAULT_PORT),
+        Some(v) => v.as_u64().and_then(|p| u16::try_from(p).ok()).filter(|p| *p != 0),
+    }
+}
+
+/// Body directive on a route: leave the inbound body, drop it, substitute a
+/// new one (the source's `update_body` absent/null/value), or send the inbound
+/// session description beside the stated parts, which replace every other part
+/// the inbound body frames (RFC 5621 §3).
+#[derive(Debug, Clone, Default, Serialize)]
+pub enum BodyUpdate {
+    #[default]
+    Keep,
+    Drop,
+    Replace(String),
+    AttachParts(Vec<sip_message::MultipartPart>),
+}
+
+/// A "route" decision — bridge the call to `destination`. Its ring deadline
+/// is read through [`RouteDecision::no_answer`].
+#[derive(Debug, Clone, Serialize)]
+pub struct RouteDecision {
+    pub destination: SipDestination,
+    pub new_ruri: Option<String>,
+    /// Rewrite the outbound b-leg **From URI** (the "from number"). The B2BUA
+    /// always owns the From *tag* (ADR-0017 header-ownership matrix) — only the
+    /// URI is HTTP-settable. `None` keeps the relayed a-leg From URI.
+    pub new_from: Option<String>,
+    /// Rewrite the outbound b-leg **To URI** (the "to number"). The To tag stays
+    /// B2BUA-owned. `None` keeps the relayed a-leg To URI.
+    pub new_to: Option<String>,
+    pub update_headers: Option<SipHeaderUpdates>,
+    pub update_body: BodyUpdate,
+    pub no_answer_ms: Option<i64>,
+    pub call_limiter: Vec<call::LimiterEntry>,
+    pub callback_context: Option<String>,
+    pub features: FeatureActivations,
+    pub service_ext: BTreeMap<String, serde_json::Value>,
+    /// Internal release events the backend wants consulted on (`call_release`)
+    /// instead of handled locally — the route's subscription list. Recorded
+    /// on the call at route-apply time (initial route: `apply_route`; async
+    /// failover/reroute route: the `SetSubscriptions` fold), so it survives
+    /// replication/takeover like `features`. Empty = no subscriptions = local
+    /// handling.
+    pub subscriptions: Vec<call::ReleaseEventKind>,
+    /// **Engine force-enable** for per-call tracing (ADR-0026): `true` asks
+    /// for the call's trace, `false` leaves it to the sampler. Honoring it
+    /// still runs the full admission chain (bucket + active cap) and is
+    /// monotonic: it can only turn a call's trace ON.
+    pub trace: bool,
+    /// An opaque string the decision layer may attach to the decision,
+    /// recorded on the call's decision log and read by nothing here.
+    pub label: Option<String>,
+}
+
+impl RouteDecision {
+    /// The ring deadline the route states for the leg it dials.
+    pub fn no_answer(&self) -> call::Deadline {
+        super::no_answer_deadline(self.no_answer_ms, Some(&self.features))
+    }
+}
+
+/// A "reject" decision — answer the INVITE with a failure response the decision
+/// layer authors (code + reason-phrase + extra headers, e.g. `Reason:`). It
+/// seeds `service_ext` exactly as a route does: the slices a rejected call's
+/// record carries.
+#[derive(Debug, Clone, Serialize)]
+pub struct RejectDecision {
+    pub reject_code: u16,
+    pub reject_reason: Option<String>,
+    pub update_headers: Option<SipHeaderUpdates>,
+    pub service_ext: BTreeMap<String, serde_json::Value>,
+    /// See [`RouteDecision::label`].
+    pub label: Option<String>,
+}
+
+/// One redirect target in a [`RedirectDecision`]'s Contact list. `q` is the
+/// advisory caller-side preference (RFC 3261 §20.10); rendered verbatim in list
+/// order (the platform does not reorder — ADR-0017 X5).
+#[derive(Debug, Clone, Serialize)]
+pub struct RedirectContact {
+    pub uri: String,
+    pub q: Option<f32>,
+}
+
+/// A "redirect" decision — answer the caller with a 3xx (default 302) carrying an
+/// ordered Contact list. Contact is the one header the decision layer owns *only*
+/// on a redirect (ADR-0017 header-ownership matrix).
+#[derive(Debug, Clone, Serialize)]
+pub struct RedirectDecision {
+    /// A 3xx (RFC 3261 §21.3, an unknown 3xx included, §8.1.3.2); any other
+    /// code is refused. Defaults to 302 when built via helpers.
+    pub code: u16,
+    pub reason: Option<String>,
+    pub contacts: Vec<RedirectContact>,
+    pub update_headers: Option<SipHeaderUpdates>,
+    /// Seeded exactly as a route's `service_ext`: the slices a redirected
+    /// call's record carries.
+    pub service_ext: BTreeMap<String, serde_json::Value>,
+    /// See [`RouteDecision::label`].
+    pub label: Option<String>,
+}
+
+/// The single **call treatment** the decision layer returns — at *every* hop
+/// (new-call and failover) it draws from the same closed set (ADR-0017 X1):
+///   - `Route`    — bridge to a destination, with identity/header rewrites;
+///   - `Redirect` — emit a 3xx to the caller with a Contact list;
+///   - `Reject`   — author a final failure response (code/reason/headers);
+///   - `Relay`    — pass the last attempted b-leg's failure response verbatim
+///     (only meaningful on the failover path; with no captured failure it falls
+///     back to 480, ADR-0017 X5).
+#[derive(Debug, Clone, Serialize)]
+#[allow(clippy::large_enum_variant)] // Route is the hot path; boxing adds an alloc per call.
+pub enum CallTreatment {
+    Route(RouteDecision),
+    Redirect(RedirectDecision),
+    Reject(RejectDecision),
+    Relay {
+        /// See [`RouteDecision::label`].
+        label: Option<String>,
+    },
+}
+
+/// Response to a new INVITE. An alias for [`CallTreatment`] — `new_call` returns
+/// `Route | Redirect | Reject` (`Relay` is failover-only and treated as an error
+/// if returned here).
+pub type NewCallResponse = CallTreatment;
+
+/// Response to a b-leg failure. An alias for [`CallTreatment`] — any of the four
+/// variants is valid on the failover path.
+pub type CallFailureResponse = CallTreatment;
+
+/// What failed on a b-leg, for the failover decision. Carries the
+/// **event-scoped** facts only — everything the emitting site alone knows.
+/// Call-scoped context rides the [`CallSnapshot`] the framework attaches.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct FailureInfo {
+    pub origin: String,
+    pub status_code: Option<u16>,
+    pub limiter_id: Option<String>,
+    /// The leg whose failure triggered this decision (`None` for pre-leg
+    /// origins such as a limiter reject).
+    pub failed_leg_id: Option<String>,
+    /// Which deadline of a timeout origin fired. For `transaction_timeout`, the
+    /// client-transaction timeout — `"response"` (nothing at all answered the
+    /// INVITE, not even a `100`: the hop is dead) or `"transaction"` (it
+    /// answered a provisional, then went silent past the INVITE bound). For
+    /// `no_answer_timeout`, a service's own no-answer-class deadline may name
+    /// itself here (e.g. `"provisional"`: none above 100 arrived in time); the
+    /// core treats it as any no-answer. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_kind: Option<String>,
+    /// The failed final response's non-structural headers, verbatim and in
+    /// wire order (duplicates preserved) — where `Reason:`/`Warning:`/`X-*`
+    /// land. Empty for internal origins (timeouts, limiter).
+    pub sip_headers: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CallFailureRequest {
+    pub callback_context: Option<String>,
+    pub failure: FailureInfo,
+    /// Call-scoped context, attached by the framework at dispatch time.
+    pub snapshot: CallSnapshot,
+}
+
+// ── Call-context snapshot (attached to every decision-point request) ────────
+
+/// Read-only per-leg view inside a [`CallSnapshot`].
+#[derive(Debug, Clone, Serialize)]
+pub struct LegSnapshot {
+    pub leg_id: String,
+    pub state: call::LegState,
+    pub disposition: call::LegDisposition,
+    /// How the leg was (or is being) torn down; `None` while it is live.
+    pub bye_disposition: Option<call::ByeDisposition>,
+    /// The B2BUA's local address on this leg, display name included.
+    pub local_uri: Option<String>,
+    /// The remote party's address on this leg, display name included.
+    pub remote_uri: Option<String>,
+    /// Request-URI of the outbound INVITE (post-rewrite).
+    pub invite_request_uri: Option<String>,
+    /// Per-service opaque leg ext slices (ADR-0016).
+    pub ext: Option<call::ExtMap>,
+}
+
+/// Read-only snapshot of the **observed call context**, built by the framework
+/// from the authoritative `Call` at dispatch time and attached to every
+/// decision-point request that has a call behind it ([`CallFailureRequest`],
+/// [`CallReferRequest`]). One generic carrier instead of one upstream field per
+/// downstream need: a decision backend derives what it wants (an "18x seen"
+/// flag is "any `Provisional` event ≥ 180 on the failed leg", ringing duration
+/// is two timestamps, REFER authorization can read per-service state) without
+/// the platform learning any of those semantics. Cost: one clone per
+/// failure/refer callback — never per SIP message.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CallSnapshot {
+    /// A-leg Call-ID (correlation handle for the decision backend).
+    pub call_id: String,
+    pub callback_context: Option<String>,
+    /// Every leg, a-leg first, in attempt order.
+    pub legs: Vec<LegSnapshot>,
+    /// The full observed CDR trail (invite/provisional/answer/reject/timeout…).
+    pub cdr_events: Vec<call::CdrEvent>,
+    /// Per-service opaque call ext slices (`Call.ext`, ADR-0016). Core-reserved
+    /// keys are not service slices and never ship.
+    pub service_ext: call::ExtMap,
+    /// Per-service state-machine cursors (machine id → state label).
+    pub sm_cursors: BTreeMap<String, String>,
+    /// What the routing decision activated.
+    pub features: Option<FeatureActivations>,
+    /// The ids of the limiter set the call holds.
+    pub limiter_ids: Vec<String>,
+}
+
+impl CallSnapshot {
+    /// Snapshot `call` for a decision request. Framework-only: rules never
+    /// build one (they pass event-scoped facts; the router attaches this).
+    pub fn of(call: &call::Call) -> Self {
+        let legs = std::iter::once(&call.a_leg)
+            .chain(call.b_legs.iter())
+            .map(|l| LegSnapshot {
+                leg_id: l.leg_id.clone(),
+                state: l.state(),
+                disposition: l.disposition(),
+                bye_disposition: l.end(),
+                local_uri: l.local_uri.clone(),
+                remote_uri: l.remote_uri.clone(),
+                invite_request_uri: l.invite_request_uri.clone(),
+                ext: l.ext.clone(),
+            })
+            .collect();
+        CallSnapshot {
+            call_id: call.a_leg.call_id.clone(),
+            callback_context: call.callback_context.clone(),
+            legs,
+            cdr_events: call.cdr_events.clone(),
+            service_ext: call
+                .ext
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(k, _)| !crate::rules::relay::is_core_reserved_ext(k))
+                .collect(),
+            sm_cursors: call
+                .sm_cursors
+                .iter()
+                .map(|(m, s)| (m.as_str().to_string(), s.as_str().to_string()))
+                .collect(),
+            features: call.features.clone(),
+            limiter_ids: call.limiter.held_ids(),
+        }
+    }
+}
+
+/// The release-event consult sent when a **subscribed** internal release
+/// event fires (the decision API's `/call/release`).
+/// Built by the `max-duration` rule's `ReleaseAsyncHttp` seed; the framework
+/// attaches the snapshot at dispatch, exactly like [`CallFailureRequest`].
+#[derive(Debug, Clone)]
+pub struct CallReleaseRequest {
+    pub callback_context: Option<String>,
+    /// Which subscribed internal event fired.
+    pub event: call::ReleaseEventKind,
+    /// Call-scoped context, attached by the framework at dispatch time.
+    pub snapshot: CallSnapshot,
+}
+
+/// The release decision: proceed with the local teardown, or convert the
+/// release into an **established-call reroute** (replace the connected b-leg
+/// with a new destination — announcement / autocutoff treatment). The `Route`
+/// here is the same [`RouteDecision`] shape as every other decision point
+/// (ADR-0017 one-treatment-vocabulary; output parity
+/// applies: `call_limiter` admission, `features`, `service_ext`,
+/// `subscriptions` are all honored on the reroute).
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // mirror of CallTreatment's choice
+pub enum CallReleaseResponse {
+    /// Tear the call down locally, exactly as an unsubscribed event would.
+    Release {
+        /// See [`RouteDecision::label`].
+        label: Option<String>,
+        /// Service slices merged into the call before the teardown, exactly
+        /// as a route's `service_ext` (a core-reserved key is skipped).
+        service_ext: BTreeMap<String, serde_json::Value>,
+    },
+    /// Reroute the established call to `RouteDecision::destination`.
+    Route(RouteDecision),
+}
+
+/// The REFER authorization request POSTed to `/call/refer` (port of TS
+/// `CallReferRequest`, requests.ts:57-64). Built by `transfer-intercept-refer`.
+#[derive(Debug, Clone, Default)]
+pub struct CallReferRequest {
+    /// A-leg Call-ID.
+    pub call_id: String,
+    /// `Call-ID;to-tag=…;from-tag=…` from the referrer (B) leg's perspective.
+    pub dialog_id: String,
+    pub callback_context: Option<String>,
+    pub refer_to: String,
+    pub referred_by: Option<String>,
+    /// Non-structural REFER headers forwarded verbatim (incl. `X-Api-Call`), as
+    /// `(name, value)` lines in wire order, duplicates kept. Read by name with
+    /// [`CallReferRequest::sip_header`], which folds case.
+    pub sip_headers: Vec<(String, String)>,
+    /// Call-scoped context, attached by the framework at dispatch time.
+    pub snapshot: CallSnapshot,
+}
+
+impl CallReferRequest {
+    /// First value of `name`, compared case-insensitively.
+    pub fn sip_header(&self, name: &str) -> Option<&str> {
+        first_header_value(&self.sip_headers, name)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum CallReferResponse {
+    Allow {
+        destination: SipDestination,
+        /// Rewritten Refer-To URI (`new_refer_to`).
+        new_refer_to: Option<String>,
+        /// Header set/remove directives applied to the C INVITE.
+        update_headers: Option<SipHeaderUpdates>,
+        /// No-answer timeout for the C leg (ms).
+        no_answer_ms: Option<i64>,
+        /// Callback context propagated onto the transfer slice.
+        callback_context: Option<String>,
+        /// See [`RouteDecision::label`].
+        label: Option<String>,
+    },
+    Reject {
+        code: u16,
+        reason: Option<String>,
+        /// See [`RouteDecision::label`].
+        label: Option<String>,
+    },
+}
+
+/// Mandatory platform features every successful route must carry (the source
+/// 500s if `features` is absent). A sane default for the scripted adapter.
+pub fn default_platform_features() -> FeatureActivations {
+    use call::features::{KeepaliveActivation, PlatformActivations};
+    FeatureActivations {
+        platform: PlatformActivations {
+            max_duration_ms: 3_600_000,
+            max_duration_anchor: Default::default(),
+            keepalive: KeepaliveActivation { interval_sec: 30, max_missed: 2 },
+        },
+        refer: None,
+        relay_first_18x_to_180: None,
+        no_answer_ms: None,
+        advertise_capabilities: None,
+        charging_vector: None,
+        withhold_option_tags: None,
+        stated_headers: None,
+        uncharged_media_legs: false,
+        withhold_on_relayed_provisionals: None,
+    }
+}
+
+#[cfg(test)]
+#[path = "schemas_tests.rs"]
+mod tests;

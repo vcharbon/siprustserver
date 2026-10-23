@@ -2,14 +2,22 @@
 //! the `sip-txn` non-INVITE client transaction (port of `health/HealthProbe.ts`,
 //! re-based from a hand-rolled fan-out onto the transaction layer).
 //!
-//! Per tick (every `interval_ms`): reap probes past their `timeout_ms` reply
+//! The first tick fires as soon as the registry holds its first listing, and
+//! its round latches the proxy's [`FirstView`] (ADR-0050 §11). Per tick (every
+//! `interval_ms`): reap probes past their `timeout_ms` reply
 //! window (each reap = one miss; `threshold` consecutive misses → `Dead`),
 //! prune per-worker state for departed/recreated workers, then fan one OPTIONS
 //! client transaction out to every registered worker. Replies arrive as
-//! transaction events and correlate by Via branch; a 200 → `Alive`, a
-//! `503 + Reason: …not-ready…` → `NotReady`, any other 503 → `Draining`. Each
-//! reply's `X-Overload` payload feeds the [`WorkerLoadObserver`]. Health is
-//! written through the [`WorkerRegistryControl`] seam.
+//! transaction events and correlate by Via branch, and are read on the two
+//! axes of ADR-0050 §3 ([`read_answer`]): a `200` makes the worker `Alive`
+//! and sets its acceptance from `X-Readiness` (absent reads `accept`); a
+//! `503` sets acceptance to `refuse` and leaves health as it was; any other
+//! final makes it `Alive` and keeps acceptance. An answer naming another
+//! `X-Incarnation` than the last one read is a new process at the same
+//! address: the worker is reset to `Unknown` and its miss count and overload
+//! band cleared before the answer applies. Each reply's `X-Overload` payload
+//! feeds the [`WorkerLoadObserver`]. Health and acceptance are written through
+//! the [`WorkerRegistryControl`] seam.
 //!
 //! Why the transaction layer: a fan-out of ONE datagram per worker per tick
 //! turns a single lost packet into a full miss, and two losses in ~2.5 s
@@ -55,6 +63,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use call::TxnKind;
 use sip_clock::Clock;
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
@@ -62,18 +71,23 @@ use sip_message::generators::{
 use sip_message::header::{self, ParamValue, Uri, Via};
 use sip_message::parser::custom::CustomParser;
 use sip_message::types::SipResponse;
+use sip_message::worker_report::{self, NewCalls, Readiness};
 use sip_message::{SipMessage, SipRequest, SipStr};
 use sip_net::UdpEndpoint;
 use sip_txn::{
-    IdGen, TransactionConfig, TransactionEvent, TransactionLayer, TransactionLayerClosed, TxnKind,
+    IdGen, TransactionConfig, TransactionEvent, TransactionLayer, TransactionLayerClosed,
 };
 use tokio::sync::mpsc;
 
+use super::first_view::{FirstRound, FirstView};
 use crate::addr::ProxyAddr;
 use crate::load_observer::{parse_x_overload_header, WorkerLoadObserver, X_OVERLOAD};
 use crate::observability::ProxyMetrics;
 use crate::registry::control::WorkerRegistryControl;
-use crate::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
+use crate::registry::{Acceptance, WorkerEntry, WorkerHealth, WorkerRegistry};
+
+/// How often a probe waiting for the registry's first listing looks again.
+const LISTING_POLL: Duration = Duration::from_millis(20);
 
 /// Probe cadence (source defaults: 1 s interval, 1.5 s reply window, 2 misses
 /// → dead). `interval_ms` is the tick period; `timeout_ms` is each probe's own
@@ -110,6 +124,32 @@ struct ProbeState {
     /// Last address each worker was seen at — detects a host move (recreated
     /// pod) so its miss count and overload band reset.
     last_addr: HashMap<String, ProxyAddr>,
+    /// The `X-Incarnation` each worker last answered with — detects a restart
+    /// at the same address.
+    incarnation: HashMap<String, u64>,
+}
+
+/// What one OPTIONS answer says about a worker (ADR-0050 §3): the health it
+/// sets, `None` to leave it, and the acceptance it sets, `None` to keep it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnswerReading {
+    pub health: Option<WorkerHealth>,
+    pub acceptance: Option<Acceptance>,
+}
+
+/// Read one OPTIONS answer: its status and its `X-Readiness`, if any.
+pub fn read_answer(status: u16, readiness: Option<&Readiness>) -> AnswerReading {
+    match status {
+        200 => AnswerReading {
+            health: Some(WorkerHealth::Alive),
+            acceptance: Some(match readiness.map(|r| r.new) {
+                Some(NewCalls::Refuse) => Acceptance::Refuse,
+                Some(NewCalls::Accept) | None => Acceptance::Accept,
+            }),
+        },
+        503 => AnswerReading { health: None, acceptance: Some(Acceptance::Refuse) },
+        _ => AnswerReading { health: Some(WorkerHealth::Alive), acceptance: None },
+    }
 }
 
 /// The per-probe `call_ref` stamped as the Via `cr=` custom param — the
@@ -138,6 +178,8 @@ pub struct HealthProbe {
     /// [`with_metrics`](Self::with_metrics) so the existing constructors and the
     /// failover harness stay untouched.
     metrics: Option<Arc<ProxyMetrics>>,
+    /// Latched once the first round over the first listing has completed.
+    first_view: Arc<FirstView>,
 }
 
 impl HealthProbe {
@@ -157,7 +199,7 @@ impl HealthProbe {
         let (txn, events) = TransactionLayer::spawn(
             endpoint,
             Arc::new(CustomParser::default()),
-            TransactionConfig { id_gen: id_gen.clone(), ..Default::default() },
+            TransactionConfig::new(id_gen.clone()),
         );
         Self {
             txn,
@@ -171,7 +213,16 @@ impl HealthProbe {
             id_gen,
             config,
             metrics: None,
+            first_view: FirstView::pending(),
         }
+    }
+
+    /// The proxy's first worker view, which this probe latches; the routing
+    /// core and the readiness routes read the same one. Without it the probe
+    /// latches a view of its own nobody reads.
+    pub fn with_first_view(mut self, view: Arc<FirstView>) -> Self {
+        self.first_view = view;
+        self
     }
 
     /// Attach a `/metrics` sink so probe misses (worker OPTIONS timeouts) record
@@ -183,27 +234,48 @@ impl HealthProbe {
     }
 
     fn now_ms(&self) -> u64 {
-        self.clock.now_ms().max(0) as u64
+        u64::try_from(self.clock.now_ms()).unwrap_or(0)
     }
 
     /// Run the probe loop forever (spawn it; abort to stop). Returns when the
     /// transaction layer closes (endpoint gone).
+    ///
+    /// The first round leaves as soon as the registry holds its first
+    /// listing, then one every `interval_ms`. The first view is latched once
+    /// every probe of the first round has left the in-flight set or the
+    /// round's reply window (`timeout_ms`) has run out, after the answers'
+    /// health is written.
     pub async fn run(mut self) {
         let mut state = ProbeState::default();
-        // First tick AFTER one full interval (interval_at, not interval — the
-        // latter fires immediately): probing at t=0 catches workers mid-boot,
-        // and their boot-time 503 would demote a pre-seeded Alive pool before
-        // any traffic flowed.
-        let period = Duration::from_millis(self.config.interval_ms);
-        let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        while !self.registry.synced() {
+            tokio::time::sleep(LISTING_POLL).await;
+        }
+        if self.tick(&mut state).await.is_err() {
+            return;
+        }
+        let mut first_round = Some(FirstRound::of(state.pending.keys().cloned()));
+        let round_window = tokio::time::sleep(Duration::from_millis(self.config.timeout_ms));
+        tokio::pin!(round_window);
+        // A round at most every millisecond: a zero interval rounds that often.
+        let period = Duration::from_millis(self.config.interval_ms.max(1));
+        #[expect(clippy::disallowed_methods, reason = "the period is at least 1 ms")]
+        let mut tick = tokio::time::interval_at(sip_clock::deadline::from_now(period), period);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
+            if first_round.as_ref().is_some_and(|r| r.settled(|b| state.pending.contains_key(b))) {
+                self.first_view.latch();
+                first_round = None;
+            }
             tokio::select! {
                 _ = tick.tick() => {
                     if self.tick(&mut state).await.is_err() {
                         return;
                     }
+                }
+                _ = &mut round_window, if first_round.is_some() => {
+                    self.first_view.latch();
+                    first_round = None;
                 }
                 ev = self.events.recv() => match ev {
                     None => return, // transaction layer gone (endpoint closed)
@@ -215,7 +287,7 @@ impl HealthProbe {
                     // Timer F (32 s) backstop — the reap normally cancelled the
                     // transaction long before; count it only if still pending.
                     Some(TransactionEvent::Timeout { branch, .. }) => {
-                        if let Some(p) = state.pending.remove(&branch[..]) {
+                        if let Some(p) = state.pending.remove(branch.as_str()) {
                             self.count_miss(p, &mut state.misses);
                         }
                     }
@@ -238,7 +310,7 @@ impl HealthProbe {
             .map(|(b, _)| b.clone())
             .collect();
         for branch in expired {
-            let p = state.pending.remove(&branch[..]).expect("collected above");
+            let Some(p) = state.pending.remove(branch.as_str()) else { continue };
             self.txn.cancel_txns_for_call(&probe_call_ref(&branch)).await?;
             self.count_miss(p, &mut state.misses);
         }
@@ -251,6 +323,7 @@ impl HealthProbe {
         for w in &snapshot {
             if state.last_addr.get(&w.id).is_some_and(|prev| prev != &w.address) {
                 state.misses.remove(&w.id);
+                state.incarnation.remove(&w.id);
                 self.observer.reset(&w.id);
             }
             state.last_addr.insert(w.id.clone(), w.address.clone());
@@ -258,13 +331,14 @@ impl HealthProbe {
         let live = |id: &str| snapshot.iter().any(|w| w.id == id);
         state.last_addr.retain(|id, _| live(id));
         state.misses.retain(|id, _| live(id));
+        state.incarnation.retain(|id, _| live(id));
         self.observer.retain(live);
 
         // ── Fan out one OPTIONS client transaction per worker ────────────
         for w in &snapshot {
             let Some(dst) = w.address.to_socket_addr() else { continue };
             let branch = self.id_gen.new_branch();
-            let req = self.build_options(w, &branch, now);
+            let Some(req) = self.build_options(w, &branch, now) else { continue };
             let handle = self.txn.send_request(req, dst, TxnKind::NonInvite).await?;
             state.pending.insert(
                 handle.branch().to_string(),
@@ -279,8 +353,11 @@ impl HealthProbe {
     }
 
     async fn handle_reply(&self, resp: SipResponse, state: &mut ProbeState) {
+        if resp.status() < 200 {
+            return;
+        }
         let Some(branch) = resp.via().first().branch().map(str::to_owned) else { return };
-        let Some(p) = state.pending.remove(&branch[..]) else { return };
+        let Some(p) = state.pending.remove(branch.as_str()) else { return };
 
         // A reply proves liveness — retire any other in-flight probes to the
         // same worker so their later reap can't count a spurious miss against
@@ -303,21 +380,31 @@ impl HealthProbe {
             return;
         }
 
+        // A new process at the same address is judged from scratch: nothing
+        // routes on the health the previous one earned (ADR-0050 §8).
+        let mut restarted = false;
+        if let Some(gen) = worker_report::incarnation(&resp) {
+            let previous = state.incarnation.insert(p.worker_id.clone(), gen);
+            if previous.is_some_and(|prev| prev != gen) {
+                tracing::info!(
+                    node = observe::node(),
+                    worker = %p.worker_id,
+                    from = previous,
+                    to = gen,
+                    "worker incarnation changed"
+                );
+                self.observer.reset(&p.worker_id);
+                restarted = true;
+            }
+        }
         state.misses.insert(p.worker_id.clone(), 0);
 
-        let reason = resp.raw(sip_message::HeaderName::Reason).next();
-        let health = match resp.status() {
-            200 => WorkerHealth::Alive,
-            503 => classify_503(reason),
-            _ => WorkerHealth::Alive,
-        };
-        self.control.set_health(&p.worker_id, health);
-
-        // Feed the AIMD observer with the self-reported overload payload. The
-        // observer is decoupled from the clock (it takes `now_ms` explicitly),
-        // so hand it the same monotonic-anchored epoch-ms the probe timestamps
-        // with — under a paused runtime this advances in lockstep with
-        // `tokio::time` (CLAUDE.md).
+        // The load payload lands before the view it comes with is published,
+        // so no sweep reads a worker alive on an old payload. The observer is
+        // decoupled from the clock (it takes `now_ms` explicitly), so hand it
+        // the same monotonic-anchored epoch-ms the probe timestamps with —
+        // under a paused runtime this advances in lockstep with `tokio::time`
+        // (CLAUDE.md).
         if let Some(payload) = parse_x_overload_header(resp.raw(X_OVERLOAD).next()) {
             self.observer.apply_payload(&p.worker_id, &payload, self.clock.now_ms());
         } else {
@@ -325,6 +412,13 @@ impl HealthProbe {
             // just the diagnostic counter.
             self.observer.note_payload_missing(&p.worker_id, self.clock.now_ms());
         }
+
+        // Health and acceptance published in one write: a restart answered
+        // 200 reads Alive at once, never Unknown in between.
+        let readiness = worker_report::readiness(&resp);
+        let reading = read_answer(resp.status(), readiness.as_ref());
+        let health = reading.health.or(restarted.then_some(WorkerHealth::Unknown));
+        self.control.set_view(&p.worker_id, health, reading.acceptance);
     }
 
     /// Count one missed reply window. Only a worker still registered at the
@@ -353,7 +447,8 @@ impl HealthProbe {
         }
     }
 
-    fn build_options(&self, w: &WorkerEntry, branch: &str, now_ms: u64) -> SipRequest {
+    /// The OPTIONS probing `w`; `None` where its address does not make one.
+    fn build_options(&self, w: &WorkerEntry, branch: &str, now_ms: u64) -> Option<SipRequest> {
         generate_out_of_dialog_request(
             OutOfDialogMethod::Options,
             &GenerateOutOfDialogRequestOpts {
@@ -390,33 +485,12 @@ impl HealthProbe {
                 ..Default::default()
             },
         )
-    }
-}
-
-fn classify_503(reason: Option<&str>) -> WorkerHealth {
-    match reason {
-        Some(r) if r.to_ascii_lowercase().contains("not-ready") => WorkerHealth::NotReady,
-        _ => WorkerHealth::Draining,
+        .inspect_err(|e| {
+            tracing::warn!(worker = %w.id, error = %e, "health probe not sent: its address makes no OPTIONS");
+        })
+        .ok()
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn classify_503_distinguishes_not_ready() {
-        assert_eq!(
-            classify_503(Some("SIP;cause=503;text=\"not-ready (boot drain)\"")),
-            WorkerHealth::NotReady
-        );
-        assert_eq!(classify_503(Some("SIP;cause=503;text=\"draining\"")), WorkerHealth::Draining);
-        assert_eq!(classify_503(None), WorkerHealth::Draining);
-    }
-
-    #[test]
-    fn probe_call_ref_is_branch_scoped() {
-        assert_eq!(probe_call_ref("z9hG4bK-1"), "probe:z9hG4bK-1");
-        assert_ne!(probe_call_ref("a"), probe_call_ref("b"));
-    }
-}
+mod tests;

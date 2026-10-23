@@ -15,6 +15,7 @@ use crate::draft::{HeaderList, RequestDraft, ResponseDraft};
 use crate::error::SipParseError;
 use crate::header::{self, HeaderName, HeaderValue, Uri};
 use crate::method::Method;
+use crate::parser::custom::request_uri::request_uri_refusal;
 use crate::sip_str::SipStr;
 use crate::types::{
     ContactSet, MessageCore, NonEmpty, OptionalHeaders, SipHeader, SipMessage, SipRequest,
@@ -46,6 +47,19 @@ fn values_of<H: HeaderValue>(headers: &[SipHeader]) -> Result<Vec<H>, SipParseEr
         values.extend(H::parse_line(&header.value)?);
     }
     Ok(values)
+}
+
+/// The recorded routes, top first. A route whose URI fails the Request-URI
+/// checks is no hop any request can be addressed to (RFC 3261 §12.2.1.1), so
+/// it refuses the whole set rather than become a dialog's route.
+fn recorded_routes(
+    headers: &[SipHeader],
+) -> Result<HeaderList<header::RecordRouteEntry>, SipParseError> {
+    let set = values_of::<header::RecordRouteEntry>(headers)?;
+    for entry in &set {
+        request_uri_refusal(entry.uri())?;
+    }
+    Ok(HeaderList::new(set))
 }
 
 fn header_of<H: HeaderValue>(headers: &[SipHeader]) -> Option<Result<H, SipParseError>> {
@@ -117,7 +131,7 @@ macro_rules! core_read_surface {
             /// §3.1); `None` where it carries none.
             pub fn sdp(&self) -> Option<&[u8]> {
                 let ct = self.header::<header::MediaType>()?.ok()?;
-                crate::multipart::sdp_range(&ct, self.body()).map(|r| &self.body()[r])
+                crate::multipart::sdp_range(&ct, self.body()).and_then(|r| self.body().get(r))
             }
 
             /// The datagram this message is — received or rendered at freeze.
@@ -158,18 +172,14 @@ macro_rules! core_read_surface {
                 Ok(HeaderList::new(self.list::<header::RouteEntry>()?))
             }
 
-            /// The Record-Route set as recorded, top first. The route set a
-            /// dialog applies is this list [`reversed`](HeaderList::reversed)
-            /// (RFC 3261 §12.1.1).
+            /// The Record-Route set as recorded, top first, refused where a
+            /// route is no request's target. The route set a dialog applies
+            /// is this list [`reversed`](HeaderList::reversed) (RFC 3261
+            /// §12.1.1).
             pub fn record_route_set(
                 &self,
             ) -> Result<HeaderList<header::RecordRouteEntry>, SipParseError> {
-                Ok(HeaderList::new(self.list::<header::RecordRouteEntry>()?))
-            }
-
-            /// Strict header-content validation — the opt-in re-parse pass.
-            pub fn validate_strict(&self) -> Result<(), SipParseError> {
-                crate::parser::custom::optional_headers::run_all_strict(self.headers())
+                recorded_routes(self.headers())
             }
         }
     };
@@ -305,7 +315,7 @@ impl SipMessage {
     }
 
     pub fn record_route_set(&self) -> Result<HeaderList<header::RecordRouteEntry>, SipParseError> {
-        Ok(HeaderList::new(self.list::<header::RecordRouteEntry>()?))
+        recorded_routes(self.headers())
     }
 }
 

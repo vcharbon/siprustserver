@@ -13,8 +13,10 @@
  * A cell that never produced a result is not silently red. It leaves an
  * `error.txt` beside where its bundle would have been, and the summary carries
  * the same line, so a reader never has to guess whether a cell failed or never
- * ran. A cell whose document declares its lane BLOCKED is not red either: it
- * leaves a `skipped.json` and never reaches the interpreter.
+ * ran. A cell that ran its interpreter and did not pass keeps what the
+ * interpreter wrote on stderr in `stderr.txt`, whatever the verdict says. A
+ * cell whose document declares its lane BLOCKED is not red either: it leaves
+ * a `skipped.json` and never reaches the interpreter.
  *
  * A cell is INTERRUPTIBLE: an interruption reaches the interpreter's process
  * (SIGTERM, then SIGKILL after the toolchain's grace), and the cell leaves
@@ -39,6 +41,7 @@ import {
   CONFRONTATION_FILE,
   ERROR_FILE,
   RESULT_FILE,
+  STDERR_FILE,
   RFC_FILE,
   RULE_HITS_FILE,
   RUN_CONFIG_FILE,
@@ -131,6 +134,10 @@ export const runCell = Effect.fn("Driver.runCell")(function* (
     yield* fs.makeDirectory(absolute, { recursive: true })
     yield* fs.writeFileString(path.join(absolute, ERROR_FILE), `${outcome.detail}\n`)
   }
+  if (!outcome.passed && outcome.stderr !== undefined && outcome.stderr !== "") {
+    yield* fs.makeDirectory(absolute, { recursive: true })
+    yield* fs.writeFileString(path.join(absolute, STDERR_FILE), outcome.stderr)
+  }
   if (outcome.skipped !== undefined) {
     yield* fs.makeDirectory(absolute, { recursive: true })
     yield* fs.writeFileString(
@@ -145,7 +152,8 @@ export const runCell = Effect.fn("Driver.runCell")(function* (
       passed: outcome.passed,
       dir,
       ...(outcome.crashed ? { error: firstLine(outcome.detail) } : {}),
-      ...(outcome.skipped === undefined ? {} : { skipped: outcome.skipped })
+      ...(outcome.skipped === undefined ? {} : { skipped: outcome.skipped }),
+      ...(outcome.sourceFault === undefined ? {} : { sourceFault: outcome.sourceFault })
     },
     detail: outcome.detail
   } satisfies CellRun
@@ -167,12 +175,16 @@ interface CellOutcome {
   readonly detail: string
   /** Whether the cell never reached a result at all. */
   readonly crashed: boolean
+  /** What the interpreter wrote on stderr, where the cell ran one; kept beside a cell that did not pass. */
+  readonly stderr?: string
   /**
    * The lane verdict that kept the cell from running; absent where it ran. A
    * skipped cell is the third outcome: `passed` is false because nothing passed,
    * and no campaign fails because of it.
    */
   readonly skipped?: Tokens.LaneVerdict
+  /** The cell's RFC audit holds a source fault: information beside `passed`, which it never decides. */
+  readonly sourceFault?: true
 }
 
 /**
@@ -240,7 +252,8 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
       detail:
         `replay exited ${report.exitCode} (${report.outcome._tag}) and left no bundle:\n` +
         report.stderr,
-      crashed: true
+      crashed: true,
+      stderr: report.stderr
     } satisfies CellOutcome
   }
 
@@ -250,14 +263,16 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
   )
   // The lane's post-run RFC audit is the one instrument that sees a SUT
   // violation the scripted peers answer without complaint: a gating finding
-  // fails the cell exactly as a failed verdict does. A bundle without the file
-  // was not audited, and says nothing.
+  // fails the cell exactly as a failed verdict does. A scripted party's
+  // findings are information, a source fault included: the cell is judged on
+  // the SUT alone, and the source fault is named beside that verdict. A bundle
+  // without the file was not audited, and says nothing.
   const rfcPath = path.join(absolute, RFC_FILE)
-  const rfcGating = (yield* fs.exists(rfcPath))
-    ? Bundle.rfcGating(
-      yield* Bundle.decodeRunRfcAudit(JSON.parse(yield* fs.readFileString(rfcPath)) as unknown)
-    )
-    : []
+  const audit = (yield* fs.exists(rfcPath))
+    ? yield* Bundle.decodeRunRfcAudit(JSON.parse(yield* fs.readFileString(rfcPath)) as unknown)
+    : undefined
+  const rfcGating = audit === undefined ? [] : Bundle.rfcGating(audit)
+  const source = audit === undefined ? [] : Bundle.rfcSourceFaults(audit)
   // A run whose body panicked never passes, and no restatement makes it pass:
   // whatever verdict it left was written before the unwind, so it cannot
   // answer for what came after.
@@ -280,21 +295,32 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
   if (final.hits !== undefined) {
     yield* fs.writeFileString(path.join(absolute, RULE_HITS_FILE), CellHits.emitHits(final.hits))
   }
+  const sutPassed = !panicked && final.passed
+  const sourceSaid = `(see ${RFC_FILE}):\n` +
+    source.map((f) => `  ${f.rule} [${f.lane}] by ${f.actor ?? "a scripted party"}: ${f.detail}`).join("\n")
+  const sutSaid = panicked
+    ? `replay exited ${report.exitCode} (panicked):\n${report.stderr}`
+    : final.passed === gated
+      ? gated === structural
+        ? rfcGating.length > 0
+          ? `the RFC audit failed the cell (see ${RFC_FILE}):\n` +
+            rfcGating.map((f) => `  ${f.rule} [${f.lane}]: ${f.detail}`).join("\n")
+          : report.stderr
+        : `classification failed the cell: ${classification.unlisted} unlisted, ` +
+          `${classification.unknown} unknown (see ${CONFRONTATION_FILE})`
+      : `${verdict.status} restated as ${final.passed ? "passed" : "failed"}: ` +
+        `${final.reason ?? "no reason stated"}`
   return {
-    passed: !panicked && final.passed,
-    detail: panicked
-      ? `replay exited ${report.exitCode} (panicked):\n${report.stderr}`
-      : final.passed === gated
-        ? gated === structural
-          ? rfcGating.length === 0
-            ? report.stderr
-            : `the RFC audit failed the cell (see ${RFC_FILE}):\n` +
-              rfcGating.map((f) => `  ${f.rule} [${f.lane}]: ${f.detail}`).join("\n")
-          : `classification failed the cell: ${classification.unlisted} unlisted, ` +
-            `${classification.unknown} unknown (see ${CONFRONTATION_FILE})`
-        : `${verdict.status} restated as ${final.passed ? "passed" : "failed"}: ` +
-          `${final.reason ?? "no reason stated"}`,
-    crashed: false
+    passed: sutPassed,
+    detail: source.length === 0
+      ? sutSaid
+      : sutPassed
+      ? `a source fault stands as information: the replayed party repeats a captured message where, in this ` +
+        `run, the RFC no longer allows it, and the document does not state it ${sourceSaid}`
+      : `${sutSaid}\nbeside it, a source fault ${sourceSaid}`,
+    crashed: false,
+    stderr: report.stderr,
+    ...(source.length > 0 ? { sourceFault: true as const } : {})
   } satisfies CellOutcome
 })
 

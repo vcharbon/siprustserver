@@ -1,0 +1,300 @@
+//! The initial-INVITE turn: the store-fault probe, the identity guard, then
+//! the new call built and ruled.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use call::{Call, TerminationCause};
+use sip_ids::TurnIds;
+use sip_message::SipRequest;
+
+use super::admit::UnbornCall;
+use super::responses::{build_merged_482, build_retry_later_500, build_unborn_500};
+use super::RouterCtx;
+use crate::admission::{class_of, Class};
+use crate::effects::{HandlerEffects, HandlerResult};
+use crate::initial_consult::{cancelled_setup, handle_initial_invite};
+use crate::initial_invite::build_initial_call;
+use crate::new_calls::Refusal;
+use crate::repl::ReadinessState;
+use crate::rules::lifecycle_delivery::{close_turn, TurnStart};
+use crate::rules::ActionExecutor;
+use crate::store::StoreFaultPoint;
+use crate::turn_scope::TurnScope;
+
+/// Outcome of the initial-INVITE turn.
+pub(super) enum Turn {
+    /// Answered on a call still here, which keeps its per-call ephemera.
+    Consumed,
+    /// A final went on the wire and no call is here; the caller tears down
+    /// the per-call ephemera this dispatch created (`ReleaseKind::Orphan`).
+    Shed,
+    /// Admitted (or created-then-rejected): the handler result to interpret.
+    Result(Box<HandlerResult>),
+}
+
+/// The initial-INVITE turn: the admission ladder's router rungs admitted it
+/// at ingress (`super::admit`, ADR-0037); here the store-fault probe, the
+/// identity guard, then build + rule the new call. A setup its caller
+/// CANCELed before this turn ran is born and ruled by no one: no decision, no
+/// limiter admit. The probe's 500, the identity guard's 500, the cancelled
+/// setup, the cordon's 503 or the accept counts the INVITE's outcome once
+/// ([`crate::new_calls`]); a copy is answered 482 and refused as a copy.
+/// Every identifier the turn mints is drawn from `turn`.
+pub(super) async fn initial_invite_turn(
+    ctx: &Arc<RouterCtx>,
+    call_ref: &str,
+    req: &sip_message::SipRequest,
+    src: SocketAddr,
+    now_ms: i64,
+    unborn: Option<UnbornCall>,
+    turn: &mut TurnScope,
+) -> Turn {
+    // ── Live-path store-fault probe (ADR-0023): initial INVITE ──────────────
+    // The dialog-existence lookup (the `peek` identity guard below) is the
+    // store read this INVITE depends on; a faulted store cannot answer "does
+    // this dialog already exist", so the probe fires BEFORE the peek (its
+    // answer is untrustworthy under a fault). Fail CLOSED: a final **500
+    // Server Internal Error** through the INVITE server txn — superseding the
+    // auto-100, composing with the ADR-0022 no-100-then-silence guarantee —
+    // and NO call state is born.
+    let class = class_of(req);
+    let cseq = req.cseq().seq();
+    // A turn with no admission hold is a copy, offered unjudged: never a new
+    // call (`super::admit`).
+    let copy = unborn.is_none();
+    if ctx.store_faults.check(StoreFaultPoint::LiveInitialInvite).is_err() {
+        let resp = build_unborn_500(&mut turn.ids, req, &ctx.config.minted_final_advertisement);
+        if let Ok(resp) = resp {
+            let _ = ctx.txn.send_response(resp, src).await;
+        }
+        ctx.metrics.bump_store_fault_rejected();
+        if copy {
+            ctx.metrics.new_calls().refuse_copy();
+        } else {
+            ctx.metrics.new_calls().reject(Refusal::StoreFault, class);
+        }
+        // A call resident on the identity (this INVITE a copy of it, or a new
+        // request on it) owns the queue and keeps it.
+        if ctx.state.peek(call_ref).is_none() {
+            return Turn::Shed;
+        }
+        if !copy {
+            ctx.state.clear_setup_cancelled(call_ref, cseq);
+        }
+        return Turn::Consumed;
+    }
+
+    // A copy is a request merged with the INVITE it copies (RFC 3261
+    // §8.2.2.2): answered 482, it creates no call, as no call is born past
+    // the admission ladder.
+    let resident = ctx.state.peek(call_ref).is_some();
+    if copy {
+        let merged = build_merged_482(&mut turn.ids, req, &ctx.config.minted_final_advertisement);
+        if let Ok(merged) = merged {
+            let _ = ctx.txn.send_response(merged, src).await;
+        }
+        ctx.metrics.new_calls().refuse_copy();
+        return if resident { Turn::Consumed } else { Turn::Shed };
+    }
+    // A new request on the identity of a call still here: one call per
+    // identity, so the caller is told to retry once it is gone (§14.2).
+    if resident {
+        let retry_after = super::owed::OwedAnswer::of(ctx).jittered_retry_after_in(&mut turn.ids);
+        let resp = build_retry_later_500(req, Some(turn.ids.new_tag()), retry_after);
+        if let Ok(resp) = resp {
+            let _ = ctx.txn.send_response(resp, src).await;
+        }
+        ctx.metrics.new_calls().reject(Refusal::IdentityInUse, class);
+        // Its mark, unread, is its own: a copy's would be the live call's.
+        ctx.state.clear_setup_cancelled(call_ref, cseq);
+        return Turn::Consumed;
+    }
+
+    let mut call = build_initial_call(req, src, &ctx.config, &mut turn.ids, now_ms);
+    // A call is born only with a record that rebuilds its caller's INVITE
+    // (ADR-0052 §11): an INVITE whose record does not is refused from the
+    // INVITE itself.
+    let Ok(caller) = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite) else {
+        let resp = build_unborn_500(&mut turn.ids, req, &ctx.config.minted_final_advertisement);
+        if let Ok(resp) = resp {
+            let _ = ctx.txn.send_response(resp, src).await;
+        }
+        ctx.metrics.new_calls().reject(Refusal::Unrecoverable, class);
+        ctx.state.clear_setup_cancelled(call_ref, cseq);
+        return Turn::Shed;
+    };
+
+    // The caller CANCELed while this turn waited (marked at ingress): the
+    // transaction layer already answered 487. The call is born so the queued
+    // `Cancelled` turn ends it with its Cancel CDR; it is neither accepted nor
+    // treated (`adm`). A cordoned node refuses the call before its decision;
+    // the call is born only to write its record (ADR-0050 §9).
+    let cancelled = ctx.state.is_setup_cancelled(call_ref, cseq);
+    let cordoned = !cancelled && ctx.readiness.state() == ReadinessState::Cordoned;
+    if cancelled {
+        ctx.metrics.new_calls().cancel(class);
+    } else if cordoned {
+        ctx.metrics.new_calls().reject(Refusal::Cordoned, class);
+    } else {
+        ctx.metrics.new_calls().accept(class);
+        // The `adm` published on X-Overload counts non-emergency calls only:
+        // the LB's AIMD caps non-emergency traffic alone.
+        if class != Class::Emergency {
+            ctx.overload.increment_non_emergency_admitted();
+        }
+    }
+
+    if let Some(ring) = crate::message_ring::Ring::of(&ctx.config) {
+        let a_leg = call.a_leg.leg_id.clone();
+        call = ring.invite_received(call, &a_leg, req, now_ms);
+    }
+    ctx.state.create(call.clone());
+    // The caller may already hold this node's 100 and send nothing more, so
+    // the backup holds the call from its birth, not from its decision
+    // (ADR-0047); this turn's own write supersedes this one.
+    if call.topology.as_ref().is_some_and(|t| !t.bak.is_empty()) {
+        ctx.state.flush(&call);
+    }
+    // Born: the call counts as live from here.
+    drop(unborn);
+    // RFC 3261 §8.1.1.3: a dialog-forming INVITE MUST carry a From tag. The
+    // caller's From tag IS the a-leg dialog's remote tag, so admitting a
+    // tag-less INVITE would seed an un-probeable a-leg dialog (its in-dialog
+    // keepalive OPTIONS could never be built — see `send_request_to_leg`),
+    // producing the "OPTIONS to called, not calling" asymmetry that also
+    // round-trips through HA hydration. Reject malformed at ingest instead.
+    // Created-then-rejected mirrors the decision-reject path so the Terminated
+    // invariant reaps the call + propagates the delete.
+    let mut handled = if cancelled {
+        cancelled_setup(call.clone(), &caller, req.image(), now_ms)
+    } else if cordoned {
+        refused_unavailable(ctx, call.clone(), &caller, now_ms, &mut turn.ids)
+    } else if call.a_leg_invite.from_tag.is_empty() {
+        crate::initial_invite::reject_call(
+            call.clone(),
+            &caller,
+            400,
+            Some("Bad Request - missing From tag".into()),
+            None,
+            &[],
+            &ctx.config.minted_final_advertisement,
+            &mut turn.ids,
+            now_ms,
+            TerminationCause::Admission,
+        )
+    } else {
+        // `req.image()` is the datagram this INVITE arrived as — the only place
+        // it exists (the call carries a header snapshot, not bytes), and what a
+        // trace activation backfills its `sip.in` from.
+        handle_initial_invite(
+            call.clone(),
+            &caller,
+            ctx.decision.as_ref(),
+            &ctx.limiter,
+            &ctx.config,
+            turn,
+            &ctx.services,
+            req.image(),
+            &ctx.clock,
+            now_ms,
+        )
+        .await
+    };
+    // ── Decision-application drop guard ───────────────────────────────
+    // The caller CANCELed while this turn was parked on its decision
+    // round trip: the txn layer already finalized the a-leg INVITE (200 + 487 —
+    // the transaction's ONE final, RFC 3261 §17.2.1) and the `Cancelled` event
+    // is queued right behind this turn. Whatever this turn resolved — route,
+    // reject (decision-authored OR the malformed-INVITE 400 above), redirect,
+    // relay, error — is moot: drop the result whole. No b-leg launch, no
+    // authored final; the queued `handle-cancel` turn owns the termination (its
+    // Cancel CDR is what keeps the ADR-0022 X2 synthesis silent). The mark
+    // write (ingress run loop) and this read are not ordered by the per-call
+    // lock, so a marking that lands after this check reverts to the pre-drop
+    // path for that scheduler sliver — the b-leg is launched then CANCELed
+    // (§9.1-held until a provisional), indistinguishable from the unavoidable
+    // wire race.
+    if !cancelled && ctx.state.is_setup_cancelled(call_ref, cseq) {
+        ctx.metrics.bump_decision_dropped_cancelled();
+        tracing::debug!(
+            %call_ref,
+            "decision result dropped: caller CANCELed during the decision round trip"
+        );
+        handled = dropped_on_setup_cancel(&call, handled);
+    } else if !cancelled && ctx.readiness.left_the_slice() {
+        // This node's endpoint left the slice while the decision was in
+        // flight, so the decision is not applied: the callee is never dialled
+        // for a call its backups took over (ADR-0047). The caller is refused
+        // here whether or not a backup answered it too.
+        let ids = &mut turn.ids;
+        handled = refused_after_leaving_the_slice(ctx, &call, &caller, handled, now_ms, ids);
+    }
+    let enforced = crate::rules::invariants::enforce(
+        &ctx.obligations,
+        &call,
+        crate::rules::invariants::finalize(handled),
+        now_ms,
+        crate::rules::invariants::UnansweredCaller::Answer(&ctx.config.minted_final_advertisement),
+        &mut turn.notes,
+    );
+    let mut exec = ActionExecutor { config: &ctx.config, turn, now_ms };
+    Turn::Result(Box::new(close_turn(&ctx.rules, &TurnStart::unborn(), enforced, &mut exec)))
+}
+
+/// [`refused_unavailable`] from the pre-handler call ([`discarded_turn`]), so
+/// the termination releases what the route admitted.
+fn refused_after_leaving_the_slice(
+    ctx: &RouterCtx,
+    pre: &Call,
+    caller: &SipRequest,
+    handled: HandlerResult,
+    now_ms: i64,
+    ids: &mut TurnIds,
+) -> HandlerResult {
+    refused_unavailable(ctx, discarded_turn(pre, handled), caller, now_ms, ids)
+}
+
+/// `call`, whose caller's INVITE is `caller`, refused 503 with no
+/// Retry-After, as for an unavailable decision (ADR-0022 X3): the record of a
+/// call no decision reached.
+fn refused_unavailable(
+    ctx: &RouterCtx,
+    call: Call,
+    caller: &SipRequest,
+    now_ms: i64,
+    ids: &mut TurnIds,
+) -> HandlerResult {
+    crate::initial_invite::reject_call(
+        call,
+        caller,
+        503,
+        Some("Service Unavailable".into()),
+        None,
+        &[],
+        &ctx.config.minted_final_advertisement,
+        ids,
+        now_ms,
+        TerminationCause::Admission,
+    )
+}
+
+/// The drop-guard result: the pre-handler call — no b-leg, no wire effects.
+fn dropped_on_setup_cancel(pre: &Call, handled: HandlerResult) -> HandlerResult {
+    HandlerResult { call: discarded_turn(pre, handled), effects: HandlerEffects::new() }
+}
+
+/// The pre-handler call carrying ONLY what a discarded turn already committed
+/// *outside* the call. The limiter state `apply_route` admitted rides over so
+/// the termination's standard obligation discharge still releases the call
+/// (the admit↔release pairing survives the drop), and the trace stamp rides over
+/// so a sampled call's later turns (the CANCEL, the 487, the termination that
+/// closes its registry entry) still emit into its trace.
+fn discarded_turn(pre: &Call, handled: HandlerResult) -> Call {
+    let mut call = pre.clone();
+    call.limiter = handled.call.limiter;
+    call.trace_id = handled.call.trace_id;
+    call.root_span_id = handled.call.root_span_id;
+    call.sampled = handled.call.sampled;
+    call
+}

@@ -16,10 +16,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use call::{
-    Call, CallBodyCodec, CallLimiterState, CallModelState, LegDisposition, LegState, LimiterEntry,
-    MsgpackCodec,
+    Call, CallBodyCodec, CallLimiterState, CallModelState, LegState, LimiterEntry, MsgpackCodec,
 };
-use repl_net::transport::SimulatedReplicationNetwork;
+use repl_net_testkit::SimulatedReplicationNetwork;
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
@@ -62,14 +61,14 @@ fn invite(cid: &str) -> SipRequest {
 /// one limiter entry under it. `Terminated` is a call ended unanswered.
 fn nth(cid: &str, n: u32, state: CallModelState) -> Call {
     let config = B2buaConfig { self_ordinal: "A".into(), ..Default::default() };
-    let mut call = build_initial_call(&invite(cid), src(), &config, &sip_txn::IdGen::seeded(1), 0);
+    let mut call =
+        build_initial_call(&invite(cid), src(), &config, &mut sip_ids::TurnIds::fixed(1), 0);
     let key = format!("{}#n{n}", call.call_ref);
     call.limiter =
         CallLimiterState::admitted(key, 1, vec![LimiterEntry { id: "x".into(), limit: 10 }]);
     call.state = state;
     if state != CallModelState::Active {
-        call.a_leg.state = LegState::Terminated;
-        call.a_leg.disposition = LegDisposition::Pending;
+        call::testkit::stage_leg(&mut call.a_leg, LegState::Terminated);
         call.a_leg.invite_final_sent = Some(401);
     }
     call
@@ -86,7 +85,7 @@ fn named(call: &Call, opts: PutOpts) -> PutOpts {
 
 /// The primary's own write of `call` at `(p, 0)`, flushed toward B.
 async fn primary_put(a: &ReplicatingCallStore, call: &Call, p: i64) {
-    let body = MsgpackCodec::new().encode(call);
+    let body = MsgpackCodec::new().encode(call).unwrap();
     a.put_call(PRI, "A", &call.call_ref, body, &[], 600_000, p, 0, &named(call, fwd("B")))
         .await
         .unwrap();
@@ -100,7 +99,7 @@ async fn primary_delete(a: &ReplicatingCallStore, call: &Call) {
 /// B's own write of `call` at `(p, b)`: what its takeover copy flushes back
 /// toward the primary (`b > 0`).
 async fn takeover_write(b: &ReplicatingCallStore, call: &Call, p: i64, bgen: i64) {
-    let body = MsgpackCodec::new().encode(call);
+    let body = MsgpackCodec::new().encode(call).unwrap();
     b.put_call(BAK, "A", &call.call_ref, body, &[], 30_000, p, bgen, &named(call, rev("A")))
         .await
         .unwrap();
@@ -108,7 +107,7 @@ async fn takeover_write(b: &ReplicatingCallStore, call: &Call, p: i64, bgen: i64
 
 /// B's copy of a call A replicated: what B's Backup flow applies.
 async fn replicated(b: &ReplicatingCallStore, call: &Call, p: i64) {
-    let body = MsgpackCodec::new().encode(call);
+    let body = MsgpackCodec::new().encode(call).unwrap();
     let opts = named(call, PutOpts { origin_now_ms: Some(0), ..PutOpts::default() });
     b.put_call(BAK, "A", &call.call_ref, body, &[], 600_000, p, 0, &opts).await.unwrap();
 }

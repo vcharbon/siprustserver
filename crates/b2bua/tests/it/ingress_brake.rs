@@ -24,7 +24,8 @@ use std::time::Duration;
 use b2bua::admission::{Class, Refusals};
 use b2bua::ingress_brake::{build_ingress_brake_hook, IngressBrakeConfig, IngressBrakeCounters};
 use sip_net::types::BindUdpOpts;
-use sip_net::{SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint};
+use sip_net::{SignalingNetwork, UdpEndpoint};
+use sip_net_testkit::SimulatedSignalingNetwork;
 use sip_txn::IdGen;
 
 const TRANSIT_MS: u64 = 15;
@@ -147,7 +148,7 @@ async fn settle(net: &SimulatedSignalingNetwork) {
 fn drain(ep: &dyn UdpEndpoint) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     while let Some(pkt) = ep.try_recv() {
-        out.push(pkt.raw);
+        out.push(pkt.raw.to_vec());
     }
     out
 }

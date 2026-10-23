@@ -6,13 +6,16 @@
 //! fractional rate survives and the whole handle is `Clone` + `Send + Sync` with
 //! no lock. `0` is a distinguished value: it **pauses** new-call admission (the
 //! governor parks until the rate is raised) while in-flight calls run untouched.
+//! A **drain** ([`RateHandle::drain`], `POST /drain` or `SIGUSR1`) closes the
+//! run window for good: the governor admits no further call, the driver waits
+//! for the calls in flight to end, and the run finishes as at its duration.
 //!
 //! The governor's re-anchoring (a rate change resets the fixed grid so a cut fires
 //! no catch-up burst and a raise takes effect within one slot) lives in
 //! [`crate::driver::Driver::run`], which owns the scheduling loop; this type is
 //! just the shared cell + the `cps ⇄ millicps` conversion and clamping.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,12 +28,17 @@ use tokio::time::Instant;
 pub struct RateHandle {
     /// The target rate in **milli-cps** (`cps × 1000`), rounded. `0` = paused.
     millicps: Arc<AtomicU64>,
+    /// Set once by [`Self::drain`]; never cleared.
+    draining: Arc<AtomicBool>,
 }
 
 impl RateHandle {
     /// A handle initialized to `cps` (clamped to `>= 0`; NaN → 0).
     pub fn new(cps: f64) -> Self {
-        let h = RateHandle { millicps: Arc::new(AtomicU64::new(0)) };
+        let h = RateHandle {
+            millicps: Arc::new(AtomicU64::new(0)),
+            draining: Arc::new(AtomicBool::new(false)),
+        };
         h.set(cps);
         h
     }
@@ -48,6 +56,17 @@ impl RateHandle {
     /// Whether new-call admission is currently paused (`cps == 0`).
     pub fn is_paused(&self) -> bool {
         self.millicps.load(Ordering::Relaxed) == 0
+    }
+
+    /// Close the run window: the governor admits no further call, whatever the
+    /// rate. Idempotent.
+    pub fn drain(&self) {
+        self.draining.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether [`Self::drain`] was called.
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::Relaxed)
     }
 
     /// Re-target the rate. A negative or NaN value is clamped to `0` (pause).
@@ -125,7 +144,7 @@ impl Governor {
     /// run window has closed. Re-anchors on a rate change and parks while paused.
     pub async fn next_slot(&mut self) -> Option<()> {
         loop {
-            if Instant::now() >= self.deadline {
+            if self.closed() {
                 return None;
             }
 
@@ -155,7 +174,7 @@ impl Governor {
             if wake > now {
                 tokio::time::sleep_until(wake).await;
             }
-            if Instant::now() >= self.deadline {
+            if self.closed() {
                 return None;
             }
 
@@ -175,6 +194,11 @@ impl Governor {
             self.n += 1;
             return Some(());
         }
+    }
+
+    /// The run window is over: its duration elapsed, or the run drains.
+    fn closed(&self) -> bool {
+        Instant::now() >= self.deadline || self.rate.is_draining()
     }
 
     /// Open a fresh rate epoch anchored at `now` with the given milli-cps.
@@ -221,6 +245,32 @@ mod tests {
         assert!(h.is_paused());
         assert_eq!(h.set(f64::NAN), 0.0);
         assert_eq!(h.set(f64::INFINITY), 0.0, "an infinite rate clamps to paused, not a wrap");
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[ignore = "slow lane: loadgen"]
+    async fn a_drain_closes_the_window_before_its_duration() {
+        let h = RateHandle::new(10.0);
+        let mut g = Governor::new(h.clone(), Duration::from_secs(3600));
+        assert!(g.next_slot().await.is_some());
+        assert!(g.next_slot().await.is_some());
+        h.clone().drain();
+        assert!(h.is_draining());
+        assert!(g.next_slot().await.is_none(), "no call is admitted once draining");
+        assert!(g.next_slot().await.is_none(), "the window stays closed");
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[ignore = "slow lane: loadgen"]
+    async fn a_drain_ends_a_paused_window() {
+        let h = RateHandle::new(0.0);
+        let mut g = Governor::new(h.clone(), Duration::from_secs(3600));
+        let drainer = h.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            drainer.drain();
+        });
+        assert!(g.next_slot().await.is_none(), "a paused run drains too");
     }
 
     #[test]

@@ -141,16 +141,14 @@ mod tests {
         .is_err());
     }
 
-    /// The validator's tokens, one per line, pinned in a fixture the
-    /// TypeScript mirror reads (`RFC_RULES`), so the two never drift.
+    /// Every file outside Rust that restates the rule list is the registry's
+    /// output: one failure names each stale copy and the command that
+    /// rewrites them all.
     #[test]
-    fn the_rule_tokens_fixture_is_the_validators_vocabulary() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/rfc-rule-tokens.txt");
-        let expected: String = RfcRule::ALL.iter().map(|r| format!("{}\n", r.token())).collect();
-        if std::env::var_os("UPDATE_GOLDENS").is_some() {
-            std::fs::write(&path, &expected).unwrap();
+    fn every_rule_list_copy_is_current() {
+        let root = crate::rule_copies::repo_root();
+        if let Some(report) = crate::rule_copies::stale_report(&root).unwrap() {
+            panic!("{report}");
         }
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected, "UPDATE_GOLDENS=1 to accept");
     }
 }

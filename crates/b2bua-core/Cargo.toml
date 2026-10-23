@@ -1,0 +1,45 @@
+[package]
+name = "b2bua-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The B2BUA's decision core (ADR-0052): the rule engine and its action vocabulary, the per-turn framework, the invariants and obligations, the relay construction, the decision DTOs and folds, and the effect vocabulary. A turn is a function of its inputs; the shell (`b2bua`) owns every effect."
+
+[package.metadata.purity]
+tier = "pure"
+
+[lints]
+workspace = true
+
+[features]
+# Test support: the test caller a shell's tests build their calls from
+# (`test_call`). No production binary turns it on (ADR-0051 §1).
+testkit = ["sip-ids/testkit"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# Warnings a rule meets mid-turn (ADR-0052 §10).
+tracing = { workspace = true }
+b2bua-sdk = { path = "../b2bua-sdk" }
+call = { path = "../call" }
+sip-message = { path = "../sip-message" }
+# The per-turn identifier source (ADR-0052 §3).
+sip-ids = { path = "../sip-ids" }
+# The class a retained emission's ladder paces by (ADR-0032 X3).
+sip-retransmit = { path = "../sip-retransmit" }
+# The rule engine's lookups (ADR-0051: no iteration in hash-seed order).
+lookup-map = { path = "../lookup-map" }
+
+[dev-dependencies]
+# Tests that stage a call's derived state (`call::testkit`).
+call = { path = "../call", features = ["testkit"] }
+# The fixed-key turns the rule-engine `ActionExecutor` draws from in tests.
+sip-ids = { path = "../sip-ids", features = ["testkit"] }
+# ADR-0020 X7 refactor gate: the obligation extraction must be effect-multiset
+# equivalent to the pre-extraction `enforce` over arbitrary snapshots.
+proptest = { workspace = true }
+# The property lane's SIP text mutations and runner (ADR-0051 §8).
+wire-mutations = { path = "../wire-mutations" }

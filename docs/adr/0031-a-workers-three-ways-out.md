@@ -1,6 +1,8 @@
 # 0031 — A worker's ways out: graceful, abrupt, vanished, restarted in place — one membership rule for a member still in the slice, one guard for the forward flush
 
-**Status:** accepted (2026-09-13)
+**Status:** accepted (2026-09-13). Amended (2026-10-12): the case table, leaving the slice takes over
+the worker's calls with an INVITE in flight (ADR-0047). Amended (2026-10-16): D4, the proxy's
+`Draining` grace is removed; Draining reports `new=refuse` on an OPTIONS `200` (ADR-0050).
 
 **Source:** this codebase. Triggered by the failover-harness scenario
 `crates/failover-harness/tests/it/withdrawn_primary_answers_in_its_window.rs` and its views
@@ -19,10 +21,16 @@ EndpointSlice API (`ready`, `serving`, `terminating`; the last two GA since Kube
 
 | | how the pod goes | what the slice shows | how long the process still runs | who replaces it |
 |---|---|---|---|---|
-| **1. Graceful** (rolling update, node drain, scale-down; the frequent case) | `delete` under the pod's `terminationGracePeriodSeconds` (30 s); SIGTERM at +0 | `ready=false, terminating=true` at +0 and the endpoint **stays in the slice** until the pod is gone; `serving` flips false a few seconds later, because the worker's own `/ready` answers 503 once it latches `Draining` | until it exits on its own (drain, ≤ `B2BUA_DRAIN_GRACE_MS` = 5 s, then the limiter release flush, ≤ 3 s) or SIGKILL at the grace | the same ordinal, **after** the old pod is gone (a StatefulSet never runs two pods of one ordinal) |
+| **1. Graceful** (rolling update, node drain, scale-down; the frequent case) | `delete` under the pod's `terminationGracePeriodSeconds` (30 s); SIGTERM at +0 | `ready=false, terminating=true` at +0 and the endpoint **stays in the slice** until the pod is gone; `serving` flips false a few seconds later, because the worker's own `/ready` answers 503 once it latches `Draining` | until it exits on its own (drain, ≤ `B2BUA_DRAIN_GRACE_MS` = 5 s, then the limiter release flush, ≤ 3 s, then the CDR sink's close, ≤ `B2BUA_DRAIN_CDR_FLUSH_MS` = 3 s) or SIGKILL at the grace | the same ordinal, **after** the old pod is gone (a StatefulSet never runs two pods of one ordinal) |
 | **2. Abrupt** (`delete --force --grace-period=0`) | the API object is removed at +0; kubelet still sends SIGTERM and SIGKILLs 2 s later | the endpoint **leaves the slice** at +0 (one `terminating=true` event may precede the removal) | 2 s | the same ordinal at a **new address** from +0.4 s, overlapping the old process |
 | **3. Vanished** (node crash, network partition) | 3a, the first ~40 s: nothing, the pod object is untouched. 3b: the node controller marks the node NotReady, its pods `Ready=False`; taint eviction (~5 min) stamps a deletion timestamp; with the kubelet unreachable the pod can stay `Terminating` indefinitely | 3a: **unchanged**, `ready=true`. 3b: `ready=false, serving=false`, then `terminating=true`, still in the slice | unknown: dead, or alive behind a partition and still firing its timers | nobody for minutes; on a heal, the **same process** is back |
 | **4. Restarted in place** (OOM-kill, kubelet restart, a readiness flap under load) | the pod object stays; the container restarts, or only the probe fails | `ready=false, serving=false, terminating=false`, still in the slice, **same address** | 0 (container restart) or the whole time (readiness flap: the process is alive and serving) | the same container, same address, seconds later |
+
+Leaving the slice is also when a worker's backups take over its calls with an INVITE
+in flight (ADR-0047): at the end of case 1, the pod gone after its drain; at +0 in
+case 2, overlapping the process's last 2 s; and in case 3b when the pod on an
+unreachable node is force-deleted, while its process may still live behind the
+partition. Case 3a and case 4 never leave the slice, and their calls stay reactive.
 
 What each element believed about the leaving worker, per case, from the harness's views
 ledger and the kind cluster's logs:
@@ -100,15 +108,16 @@ served; (iii) for **every live call** this worker serves, the Backup flow from t
 call names as its backup (`topology.bak`) is connected and has **applied** this worker's
 changelog head. "Applied" is reported by the puller in a new position frame (the drain's
 own signal, never a takeover or readiness gate — the role ADR-0014 §12 retired `Ack`
-from). A call whose backup flow is absent or behind keeps the
+from); the puller answers every idle `Noop` with one, so a report older than two `Noop`
+intervals is unknown, never current. A call whose backup flow is absent or behind keeps the
 drain waiting; the grace (5 s) stays the ceiling and live calls clearing stays an exit. The
 exit reason is counted (`quiescent`, `caught_up`, `grace_peers_behind`): the last one is
 "a flush window was lost" and must be visible. A worker that is not withdrawn (direct-bound,
 static membership, or SIGTERM before the slice moved) keeps quiescence-or-grace: takeover is
 reactive, so a proxied worker's calls are served on the next in-dialog request, but a
 direct-bound worker's would be abandoned. Exiting on `caught_up` with live calls is a
-*replicated crash*, deliberately: ringing calls wait for the caller's next request or its
-own timers, as after any crash. Before any exit the worker flushes its queued limiter
+*replicated crash*, deliberately: once the endpoint leaves the slice its backups take
+over the calls with an INVITE in flight (ADR-0047), the quiet ones on their next request. Before any exit the worker flushes its queued limiter
 releases within `B2BUA_DRAIN_RELEASE_FLUSH_MS` (3 s, ADR-0040 decision 9); an exit is
 taken only with the queue empty, and a quiescent or caught-up one only if it still holds
 once the flush is done, since the worker serves its calls meanwhile; the drain never
@@ -141,31 +150,54 @@ after the miss threshold) both land on the same `Dead` health, and the request a
 paths already take the backup on it. The response path takes the backup for
 **INVITE responses only**: a non-INVITE response answers a client transaction
 only its sender holds (RFC 3261 §17.1.2), so it follows the Via to its sender
-whatever that sender's health. The tombstone is **re-armed by every response the
-proxy sees from that address**, so it lives Timer H past the last sign of life, whatever
+whatever that sender's health. A dialog-creating request a leaving worker sends after
+its address is tombstoned is Record-Routed with the cookie it would have carried a moment
+earlier: `w_pri` the ordinal the tombstone names, `w_bak` the rendezvous winner among the
+other `Alive` workers (`strategies/load_balancer.rs`). The proxy also puts that cookie on
+the Via it pushes on a worker's INVITE (`core/request/via_cookie.rs`); the INVITE's
+CANCEL and non-2xx ACK carry the INVITE's Via, cookie included, from its memo, and a
+retransmission repeats its first copy's cookie on the Record-Route and the Via. So the
+cookie, not the tombstone's window, carries the dialog: an INVITE response whose
+sender's address names neither of the cookie's workers — nobody, past the window, or a
+worker that took the address since — goes to the cookie's worker at the address it
+holds now, else to `w_bak`, else nowhere; a response to the cookie's backup, a
+takeover copy's, follows the Via to it; a stranger's request carries no such Via and
+its response follows the Via. Its in-dialog requests resolve by ordinal for the
+dialog's life; an address neither live nor tombstoned gets no cookie
+(`core/departed_originator_tests.rs`; `core/response/via_cookie_tests.rs`;
+`outbound_invite_after_the_departure.rs`).
+The tombstone is **re-armed by every response the
+proxy sees for that address** (its next Via's sent-by names it, whatever the method),
+so it lives Timer H past the last sign of life, whatever
 the drain grace is set to; a fixed TTL from departure would expire under a live elder
-whose grace was raised. The proxy's `Draining` grace (in-dialog traffic sticks to a draining
+whose grace was raised. A worker rejoining at the address clears the tombstone; a
+non-worker reusing it stays tombstoned while responses for it keep coming. The proxy's `Draining` grace (in-dialog traffic sticks to a draining
 primary for 5 s) is recorded as effectively unreachable under Kubernetes: a probe tick can
 stamp it inside the withdrawal window, but the ordinal leaves the projection first in
 practice. It stays for a static worker pool.
 
-**D5 — The leaving worker keeps serving what still reaches it, and never stands down on
-its own.** No "stop authoring on SIGTERM": a proxied worker receives nothing after
+**D5 — The leaving worker keeps serving what still reaches it, and stands down only
+through the drain.** No "stop authoring on SIGTERM": a proxied worker receives nothing after
 withdrawal, a direct-bound one must finish what it holds. What protects the caller from a
 second, *different* final is the fold: the primary pulls the survivor's reverse flush and
 inherits its obligations (D3 keeps the fold's inputs honest). A duplicate 2xx it re-emits
 from the survivor's retained datagram is tag-identical and merely harmless. Convergence is
 by folding, never by a primary going passive; the acting-backup self-release stays scoped
 to takeover copies (ADR-0014). The SIGTERM-versus-informer race (tens of milliseconds
-either way) is benign because of D1: an INVITE served in it is replicated.
+either way) is benign because of D1: an INVITE served in it is replicated. A withdrawal
+the worker observes with no SIGTERM following (D6: the endpoint gone without a kill, or a
+pod stuck `Terminating` behind a dead kubelet) runs the same D2 drain, and the process
+exits; the orchestrator restarts the ordinal. A worker never stays `Draining` while it runs.
 
 **D6 — A worker observes its own endpoint.** The worker already runs the informer; one
 predicate on its own `targetRef.name` tells it it is withdrawn (`terminating` and not
-`ready`, or absent — a not-ready endpoint that is not terminating is a readiness flap).
+`ready`, or absent — a not-ready endpoint that is not terminating is a readiness flap),
+once it has seen its own endpoint `ready`: a pod not ready yet is not withdrawn.
 On that signal it latches `Draining` even if SIGTERM is late (a preStop hook, a stuck
 kubelet), and it is the precondition D2 needs to know that nothing new will arrive. A
 worker on a static membership never observes itself and keeps today's behaviour. This
-does not make the worker stand down (D5); it makes it know what the proxy knows.
+does not make the worker stop serving (D5); it makes it know what the proxy knows, and
+drain then exit as on SIGTERM.
 
 ## The cases after this decision
 
@@ -277,7 +309,7 @@ incarnation once it listens again (the same reconnect as today's reboot).
 | D2 caught-up drain exit | active | never holds: SIGKILL ends the drain | no drain | no drain |
 | D3 forward-flush guard | active on the last flushes | active for the park latency | **active on the heal** | inert |
 | D4 tombstone / probe `Dead` | tombstone, re-armed on sight | tombstone | probe, then tombstone in 3b | tombstone |
-| D5 keep serving, never stand down | drain finishes what reaches it | 2 s into a void | timers only | unchanged |
+| D5 keep serving, stand down only by the drain | drain finishes what reaches it | 2 s into a void | timers only | unchanged |
 | D6 self-observation | active | active (the endpoint is absent) | 3b only | inert (a flap is no withdrawal) |
 
 D3 is the one rule every case shares, and it is a refusal, not a new flow. D2 is the one
@@ -322,8 +354,66 @@ not progress — and is refused in both directions. "Answered" is read from the 
 a-leg's initial INVITE server transaction took (`call::helpers::caller_answered`), which is
 durable: it stays true once the leg is `Terminated`, where `LegState::Confirmed` does not.
 
+**A re-INVITE round is a third chain, one per dialog.** A round is the INVITE client
+transaction one dialog relays toward its peer (`call::helpers::round`), ordered on its
+dialog by the CSeq it went out with (`InviteTxnHandle::cseq`): *open* while its relay
+awaits a final, then *answered* (a 2xx taken, the originator's ACK awaited) and *ACKed*, or
+ended by a non-2xx; it never goes back. Its final reaches the node holding the client
+transaction, so a round's end the other copy saw is progress a record holding the round
+unfinished cannot make itself. A body stands further along a round the live copy holds open
+when its same dialog no longer holds the relay at the round's CSeq and holds the same
+transaction (it took the 2xx), a later one (a next round began), or none and a sequence at
+or past the round's (a non-2xx ended it, which leaves no transaction); further along an
+answered round when it no longer awaits that 2xx's ACK and either its ACK left or a later
+transaction stands on the dialog. **A round's opening is progress too**: the copy that
+relayed the request holds the client transaction, and only it sees the final. A body opened
+a round the live copy never reached when its dialog holds an INVITE client transaction and
+the live copy's same dialog holds neither that transaction nor a later one, nor — holding
+none — a sequence at or past its CSeq; whatever stage the body holds it at. Round presence
+is read from the transactions, never from a dialog's sequence alone, which both copies raise
+(below). Rounds are read dialog by dialog: a round a body stands ahead on is progress
+whatever the live copy holds on another dialog, and the fold takes that dialog's round alone,
+the live copy's rounds on other dialogs staying. A step on the answer or ending axis folds
+whole whatever round the live copy holds: a call not yet answered holds no re-INVITE round,
+and only the node holding a round's client transaction sees its final, so an ending folded
+into the primary's record gives every re-INVITE this node relayed and holds open one final for
+its originator: one the ending body holds CANCELled was answered by the other copy's
+teardown, and this node relinquishes its server transaction with nothing sent; any other
+it answers as its own teardown does — a 487 to its originator, a CANCEL to its target (RFC
+3261 §15.1.2) — and the call is discharged (`ending_crossing_a_round.rs`). The fold and the
+order the gates read (`lifecycle_behind`, the round ranked after the answer and the ending)
+read the same rule (`call/tests/it/lifecycle.rs`:
+`an_ending_is_progress_whatever_round_the_record_holds`,
+`a_round_ended_in_the_other_copy_advances_the_record_holding_it_open`,
+`an_acked_round_advances_the_record_awaiting_its_ack`,
+`a_round_the_other_copy_opened_advances_a_record_that_never_reached_it`,
+`a_sequence_raised_past_a_round_does_not_reach_it`,
+`crossed_rounds_fold_each_on_its_own_dialog`,
+`rounds_opened_on_both_dialogs_crossed_are_each_progress_on_its_dialog`;
+`crossed_reinvite_round.rs`: the refused, the next-round and the answered-then-next-round
+cells; `round_the_primary_never_read.rs`, the round crossing the primary's own round).
+
+**A round's end folds alone, and so does its opening.** The answer and the ending start or
+end the call, and a body further along on either folds whole. A body whose only progress is
+a round's end or opening folds only that round's facts into the live copy
+(`call::helpers::merge_rounds`): on the round's dialog
+its INVITE relays, its INVITE client transaction, the ACK state of that transaction's 2xx,
+the offer it owes an answer to and the higher of the two sequences; on the originator's
+dialog the 2xx it awaits an ACK for, that 2xx's ladder timers and the higher remote
+sequence; and the session state of both legs when the body opened at least as many
+offer/answer exchanges on each of them, so an exchange count is never lowered nor a
+description sent replaced by an earlier one (RFC 3264 §8). On this path what the live copy
+relayed on its own since the other owner branched, and the sequence it advanced, stay
+(RFC 3261 §12.2.1.1; `crossed_reinvite_round.rs`, the two answered cells;
+`call/tests/it/round.rs`). An answered round folded into the record has its Accepted
+server INVITE seeded there; an open one keeps its transactions at the node that relayed
+it (ADR-0014, "a fold into the call's record seeds the answered INVITEs it brings";
+`retained_2xx_folded_into_the_record.rs`).
+
 **A fold adopts both counters, and so does a refusal.** A fold takes `max(p)` and `max(b)`
-of the two views before the store bumps this node's own. A *refusal* takes only the axis the
+of the two views and is not a write of this node: neither axis moves and nothing flushes,
+and the store keeps the version this node last flushed (ADR-0014, "a fold is not an
+increment", for what the live copy holds on each path). A *refusal* takes only the axis the
 other owner bumps — `b` at a primary, `p` at a backup — and takes it **without** the
 authoritative bump an ordinary mutation makes: adopting a version another owner published is
 a read this node records, and bumping our own axis for it would make two live owners raise
@@ -333,12 +423,51 @@ self-releases, and this node's next flush then names a version its peer has long
 past. Without any of this the split never closes: the refused owner keeps flushing behind the
 Element's `b` and every later flush is refused in its turn.
 
+**No fold or refusal lowers a dialog sequence.** Every request either owner relays or takes
+moves a dialog's own or remote sequence, and the peer saw it. Every fold and every refusal,
+at either node, takes the higher of both views' sequences on each dialog both hold
+(`call::helpers::raise_sequences`), so this node's next request continues past every one the
+other owner sent (RFC 3261 §12.2.1.1). Round presence never reads that sequence (above).
+A fold brings facts into the primary's record and seeds no transaction there.
+
+**An adopted counter is not the body it counts.** A backup's `p` may name a primary version
+whose body it does not hold: it took that `p` from the primary's write it refused, or from a
+fold of only the primary's rounds (`adopt_counters`). The body records it
+(`CallTopology::gen_adopted`): set when a backup's `p` moves past the body's content, cleared
+by the primary's own write and by every fold at the primary, whose body is the primary's.
+One such mark means exactly "this body's `p` is not the version of the primary's body it
+holds"; it orders nothing and counts nothing. The Reverse vector's verdict (`p` unchanged,
+`b` advanced) folds a body whole only when it is unmarked and not behind the live copy
+(`lifecycle_behind`); a marked body folds only through its progress — an answer or an
+ending whole, a round's alone — so the vector clause never drops or brings back a write of
+the primary's: a relay it holds or closed, an UPDATE it saw answered, a sequence it advanced
+(`router/reclaim/tests.rs`:
+`the_vector_clause_never_folds_a_body_whose_p_was_adopted`,
+`a_refusal_raises_the_dialog_sequence_and_nothing_else`,
+`a_round_fold_raises_the_records_sequence_on_every_dialog`,
+`a_refusal_raises_the_sequence_past_a_round_it_never_reaches`;
+`adopted_counter_reverse_fold.rs`, `split_dialog_sequence.rs`,
+`round_the_primary_never_read.rs`, the round served whole at the copy).
+
 **A split is a disagreement about the call, not a lag in the counters.** Two live owners of
 one call run a flush apart for as long as both serve it, so `b_stored > b_in` alone cannot
 tell an authority that is merely behind from one that is somewhere else. The body tells
 them apart: while the vector is split (`b_stored > 0`), a forward `Put` whose body stands
-BEHIND the Element on either lifecycle axis is a **branch** of the call and is refused. So
-the `Put` rule is "refuse a branch, and refuse a `b'` behind the Element's `b`".
+BEHIND the Element is a **branch** of the call and is refused. Behind is read answer first
+(ADR-0047 D7): an unanswered teardown never ends an answered call, so an answered body is
+never behind an unanswered one, and between bodies alike on the answer the one less far
+toward its end is behind. So the `Put` rule is "refuse a branch, and refuse a `b'` behind
+the Element's `b`". One frame the stored vector dominates still applies: at the Element's
+own `(p,b)`, over an Element an acting backup authored whose body is behind the frame's —
+the authority refused that body, adopted its `b`, and republished its own call at that
+version (ADR-0047 D7) — and over an Element whose `p` the acting backup adopted without the
+authority's body, a frame not behind it: the authority's call at that version is its body,
+the Element's only names it. So the Element a returning primary reboots from holds the
+primary's record, not the copy's body lacking the primary's writes (`repl/puller/tests.rs`,
+`the_authoritys_call_replaces_an_element_whose_p_was_adopted`;
+`adopted_counter_reverse_fold.rs`, the UPDATE answered past the primary's reboot). The
+Reverse gate refuses such a body likewise, so the primary's store keeps its own call and the
+body rides up to the fold (`a_reverse_flush_on_an_adopted_p_never_replaces_our_call`).
 
 **The `Delete` guard keys on the answer.** The one fact worth refusing delete-wins for is an
 answer the authority never had: a forward `Delete` is refused exactly when the Element is

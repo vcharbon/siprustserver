@@ -37,8 +37,8 @@ use sip_retransmit::{Class, Ladder, Schedule};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
-const REOFFER: &str = "v=0\r\no=bob 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
-const REANSWER: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
+const REOFFER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
+const REANSWER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
 
 /// The harness-pinned ACK-timeout (set via `tune` below). RFC's 64·T1 is 32 s;
 /// the harness uses a compact window so the paused-clock advances stay cheap.
@@ -130,7 +130,7 @@ async fn unacked_2xx_is_retransmitted_then_byes_both_legs() {
         1,
         "one give-up: alice's ACK never came"
     );
-    assert_eq!(b2bua.metrics().repeat_give_ups_total("prack-of"), 0);
+    assert_eq!(b2bua.metrics().repeat_give_ups_total("await-prack"), 0);
 
     let _report = h.finish().await;
 }
@@ -302,7 +302,7 @@ mod parking {
         Match, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, ServiceSeed,
     };
     use b2bua::{define_service, sm_rule};
-    use call::{CdrEventType, Obligation, TimerType};
+    use call::{CdrEventType, Obligation, TimerKey, TimerType};
 
     define_service! {
         id: "parking",
@@ -313,10 +313,11 @@ mod parking {
     }
 
     fn is_2xx_give_up(ctx: &RuleContext) -> bool {
-        matches!(
-            ctx.timer_type(),
-            Some(TimerType::RepeatGiveUp { obligation: Obligation::AckOf2xx { .. } })
-        )
+        ctx.timer_type() == Some(&TimerType::RepeatGiveUp)
+            && matches!(
+                ctx.timer_key().and_then(TimerKey::obligation_of),
+                Some(Obligation::AckOf2xx { .. })
+            )
     }
 
     fn park_the_give_up() -> RuleDefinition {

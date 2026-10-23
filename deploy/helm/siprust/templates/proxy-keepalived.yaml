@@ -1,0 +1,12 @@
+{{- if .Values.proxy.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sip-front-proxy-keepalived
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "sip-front-proxy") | nindent 4 }}
+data:
+  keepalived.conf: |
+    {{- tpl (.Files.Get "files/keepalived.conf") . | nindent 4 }}
+{{- end }}

@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "The one home for SIP retransmission pacing (ADR-0032): the RFC 3261 §17 timer constants and the schedule every ladder rides — transaction (Timer A/E/G, the CANCEL sub-ladder) and dialog-level (§13.3.1.4, RFC 3262 §3) alike. Pure: no clock, no timers, no I/O."
 
+[package.metadata.purity]
+tier = "pure"
+
 [lints]
 workspace = true
 

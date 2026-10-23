@@ -1,0 +1,256 @@
+# Values of the siprust chart: the SIP front proxy, the B2BUA worker pool, the
+# call limiter, the CDR broker and the CDR consumer.
+#
+# Every object keeps a fixed name (b2bua-worker, sip-front-proxy, call-limiter,
+# rabbitmq, cdr-consumer, masq-exempt) and its `app` label, which the tooling
+# selects pods by: one release per namespace. A downstream chart that depends
+# on this one replaces a runner through `image` + `command`, adds env through
+# `env` (by name) and `extraEnv`, and adds sidecars through `extraContainers` /
+# `extraVolumes` / `extraVolumeMounts`. Env values are strings, rendered
+# through `tpl` (a value may name `{{ .Release.Namespace }}`). A null in
+# user-supplied values (-f, --set) removes a default env; Helm keeps a default
+# a parent chart's own values.yaml sets to null, so a parent overrides it.
+#
+# The defaults here leave every runner knob at the runner's own default and
+# schedule on any node; the kind lab's settings are values-kind.yaml.
+
+# Read by a parent chart's `condition: siprust.enabled` only.
+enabled: true
+
+# Default image of every runner (worker, proxy, call limiter, CDR consumer);
+# a component's own `image` overrides it key by key.
+image:
+  repository: siprustserver
+  tag: dev
+  pullPolicy: IfNotPresent
+
+# Alpine with keepalived, iproute2 and iptables: the proxy's VRRP sidecar, its
+# vip-loopback init container and the masq-exempt DaemonSet.
+keepalivedImage:
+  repository: siprustserver-keepalived
+  tag: dev
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# The two SIP planes. The proxy owns both VIPs through one keepalived VRRP
+# instance (ADR-0012 D7) and is the only component on both planes; workers
+# reach the world through the internal VIP only. Required when the proxy is
+# enabled.
+network:
+  # Internal VIP (worker-facing) and the node interface it lives on.
+  proxyVip: ""
+  internalInterface: ""
+  # External VIP (caller-facing) and the node interface it lives on.
+  externalVip: ""
+  externalInterface: ""
+  # The external plane's subnet (masq-exempt only).
+  externalSubnet: ""
+  # UDP port both VIPs listen on.
+  sipPort: 5060
+  # The proxy's egress face-picker: a destination in these comma-separated
+  # CIDRs leaves on the internal face, any other on the external face.
+  internalCidrs: ""
+
+# Per-call tracing (ADR-0026).
+tracing:
+  # OTLP/HTTP base the runners export spans to (they append /v1/traces).
+  # Empty exports nothing and leaves the sampling machinery inert.
+  otlpEndpoint: ""
+  # Honour an `X-Trace-Sample` header: a lab setting, since the header is
+  # untrusted on a serving edge.
+  traceHeader: false
+
+worker:
+  # Off leaves a chart of backends only (the RBAC the proxy shares stays).
+  enabled: true
+  replicas: 2
+  image: {}
+  command: ["/usr/local/bin/b2bua-runner"]
+  args: []
+  # B2BUA_DEST: the callee of the scripted decision backend, an IP literal
+  # (workers never resolve an external name). Empty leaves the runner default.
+  dest: ""
+  # With the proxy enabled, every b-leg request goes through the proxy's
+  # internal VIP (B2BUA_OUTBOUND_PROXY, ADR-0048) and the worker refuses to
+  # boot without it (B2BUA_REQUIRE_OUTBOUND_PROXY).
+  outboundProxy: true
+  # HA call replication (ADR-0011): the changelog on `port`, peers from the
+  # EndpointSlices of the headless b2bua-worker Service.
+  replication:
+    enabled: false
+    port: 9092
+  # Env by name over the env the chart derives (pod identity, listen and
+  # advertise, metrics, outbound proxy, replication, limiter URL, CDR sink,
+  # tracing): a name here overrides a derived one.
+  env: {}
+  # EnvVar entries appended after `env` (valueFrom and the like).
+  extraEnv: []
+  # Container ports added to the worker container.
+  extraPorts: []
+  extraVolumeMounts: []
+  extraVolumes: []
+  # Sidecar containers of the worker pod.
+  extraContainers: []
+  extraInitContainers: []
+  # Over the chart's prometheus.io annotations, key by key.
+  podAnnotations: {}
+  podLabels: {}
+  podSecurityContext: {}
+  # Namespaced sysctls of the pod (spec.securityContext.sysctls).
+  sysctls: []
+  priorityClassName: ""
+  terminationGracePeriodSeconds: 30
+  resources:
+    requests: { cpu: "250m", memory: "128Mi" }
+    limits: { memory: "2Gi" }
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # A primary and its backup on different nodes when the nodes allow it.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector: { matchLabels: { app: b2bua-worker } }
+
+proxy:
+  enabled: true
+  replicas: 2
+  image: {}
+  command: ["/usr/local/bin/sip-proxy-runner"]
+  args: []
+  # PROXY_RECV_SHARDS: SO_REUSEPORT recv sockets, one serial core task each.
+  # Null keeps the runner default.
+  recvShards: null
+  # The self-gate's CPS token bucket: refill per second and capacity. Null
+  # keeps the runner default.
+  selfGate:
+    cpsRate: null
+    cpsSize: null
+  # The stickiness-cookie signing key both proxies share (ADR-0046), keys
+  # `kid` and `key`. Empty `existingSecret`: the chart keeps one Secret
+  # (sip-front-proxy-hmac) whose key is drawn on the first install and read
+  # back by every upgrade; changing it 403s the in-dialog requests of calls in
+  # progress. `kid` applies to that first draw only.
+  hmac:
+    existingSecret: ""
+    kid: k1
+  # Per-neighbour bound of the unresolved ARP queue in the proxy node's
+  # network namespace (ADR-0033), set by the vip-loopback init container.
+  unresQlenBytes: 16384
+  keepalived:
+    # VRRP virtual router id of the VIP pair.
+    virtualRouterId: 51
+    # More addresses the VRRP pair floats with the two VIPs, each
+    # `{address, interface}` (e.g. a media relay's public address). Each goes
+    # on lo like the VIPs and, with masq-exempt on, out of the masquerade.
+    extraVirtualIps: []
+    # More health checks, each `{name, script}` and optional `interval`,
+    # `timeout`, `fall`, `rise`, `weight` (default 1, 1, 3, 2, -50); every one
+    # weighs on the same priority as the proxy's /vrrp check.
+    extraTrackScripts: []
+    resources: {}
+  env: {}
+  extraEnv: []
+  extraPorts: []
+  extraVolumeMounts: []
+  extraVolumes: []
+  # Sidecar containers of the proxy pod, on the node's network (hostNetwork):
+  # the place of a component on the external plane, such as a media relay.
+  extraContainers: []
+  extraInitContainers: []
+  podAnnotations: {}
+  podLabels: {}
+  podSecurityContext: {}
+  sysctls: []
+  priorityClassName: ""
+  terminationGracePeriodSeconds: 30
+  resources:
+    requests: { cpu: "500m", memory: "64Mi" }
+    limits: { memory: "512Mi" }
+  nodeSelector: {}
+  tolerations: []
+
+callLimiter:
+  enabled: true
+  image: {}
+  command: ["/usr/local/bin/call-limiter-runner"]
+  args: []
+  # LIMITER_LEASE_SECONDS, the lease every admit and refresh answer states
+  # (ADR-0040). Null keeps the runner default.
+  leaseSeconds: null
+  env: {}
+  extraEnv: []
+  extraVolumeMounts: []
+  extraVolumes: []
+  extraContainers: []
+  podAnnotations: {}
+  podLabels: {}
+  securityContext: {}
+  # The runner exits on SIGTERM; the grace only bounds a process that does not.
+  terminationGracePeriodSeconds: 2
+  resources:
+    requests: { cpu: "100m", memory: "32Mi" }
+    limits: { memory: "256Mi" }
+  nodeSelector: {}
+  tolerations: []
+
+# The CDR transport: one record per terminated call, worker -> RabbitMQ ->
+# consumer.
+cdr:
+  enabled: true
+  queue: cdr
+  # x-max-length (drop-head) of the queue. Producer and consumer declare the
+  # queue with the same arguments, so the chart states it for both.
+  maxLength: 100000
+  rabbitmq:
+    image:
+      repository: rabbitmq
+      tag: 3.13-management
+      pullPolicy: IfNotPresent
+    user: guest
+    password: guest
+    podAnnotations: {}
+    # The store lives on a memory-backed emptyDir counted in the memory limit.
+    storeSizeLimit: 512Mi
+    resources:
+      requests: { cpu: "200m", memory: "256Mi" }
+      limits: { memory: "1Gi" }
+    nodeSelector: {}
+    tolerations: []
+  consumer:
+    enabled: true
+    image: {}
+    command: ["/usr/local/bin/cdr-consumer-runner"]
+    args: []
+    # `json` sums the workers' JSON records; `opaque` counts deliveries of any
+    # format.
+    payload: json
+    # `http://host:port` of the VictoriaLogs the consumer ships one
+    # cdr-observation.v1 line per CDR to (the HA tooling's CDR join); empty
+    # ships none.
+    observationUrl: ""
+    env: {}
+    extraEnv: []
+    extraVolumeMounts: []
+    extraVolumes: []
+    extraContainers: []
+    podAnnotations: {}
+    podLabels: {}
+    resources:
+      requests: { cpu: "50m", memory: "32Mi" }
+      limits: { memory: "128Mi" }
+    nodeSelector: {}
+    tolerations: []
+
+# kindnetd's KIND-MASQ-AGENT chain masquerades everything outside the pod
+# CIDR; this DaemonSet keeps the VIPs and the external subnet out of it and
+# drops a packet for the internal VIP arriving on the external interface
+# (ADR-0048). kind clusters only.
+masqExempt:
+  enabled: false
+  periodSeconds: 15
+  resources:
+    requests: { cpu: "10m", memory: "8Mi" }
+    limits: { memory: "32Mi" }

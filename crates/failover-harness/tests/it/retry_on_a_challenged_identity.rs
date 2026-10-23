@@ -8,12 +8,12 @@
 //!
 //! ```text
 //!   INVITE → 18x… → 401 → ACK     the challenged call ends on its primary
-//!   INVITE (CSeq 2) → 200 → ACK   the retry, same Call-ID / From tag
+//!   INVITE (CSeq +1) → 200 → ACK  the retry, same Call-ID / From tag
 //!                                 its body is stored and replicated
 //!   primary crashes               the proxy routes in-dialog traffic to the backup
 //!   alice re-INVITE → 200 → ACK   served by the backup's takeover copy
-//!   alice BYE                     served by the backup, deferred terminal
-//!   primary reboots               reclaims the deferred terminal: one CDR per call
+//!   alice BYE                     served by the backup, which discharges it
+//!   primary reboots               nothing left to reclaim: one CDR per call
 //! ```
 //!
 //! Timing is the axis ([`Retry`]): the retry either reaches the primary after
@@ -30,7 +30,8 @@ use failover_harness::{
     ProxySut, ReplicatedB2buaSut, WorkerHealth,
 };
 use repl_net::frame::{Frame, Op};
-use repl_net::transport::Direction;
+use repl_net_testkit::Direction;
+use scenario_harness::Party;
 use sip_message::generators::InDialogMethod;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -147,7 +148,7 @@ async fn a_retry_on_a_challenged_identity(name: &str, retry: Retry) {
     let mut retry_call = alice
         .invite(&bob)
         .identity(CALL_ID, FROM_TAG)
-        .cseq(2)
+        .cseq(Party::Caller.first_cseq() + 1)
         .with_sdp(OFFER)
         .through(proxy.addr())
         .send()
@@ -197,12 +198,12 @@ async fn a_retry_on_a_challenged_identity(name: &str, retry: Retry) {
     let mut reinv = dialog.request(InDialogMethod::Invite, None).await;
     bob.receive("INVITE").await.respond(200, "OK").with_sdp(ANSWER).await;
     reinv.expect(200).await;
-    dialog.ack(Some(ANSWER)).await;
+    dialog.ack(Some(OFFER)).await;
     bob.receive("ACK").await;
     let taken = backup.live_call(&call_ref).expect("the backup serves the taken-over retry");
     assert_eq!(taken.incarnation(), served.incarnation(), "the takeover copy is the retry");
 
-    // ── the call ends on the backup; the rebooted primary discharges it ─────
+    // ── the call ends on the backup, which discharges it; the primary reboots ──
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     fh.advance(Duration::from_secs(60)).await;
     reboot_and_reclaim(&mut fh, primary, backup, &primary_ord, &proxy).await;

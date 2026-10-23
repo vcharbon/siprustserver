@@ -55,7 +55,7 @@ async fn refer_allow_happy() {
     let h = Harness::with_transit_delay("refer-allow-happy", 1);
     let alice = h.agent("alice", "127.0.0.1:5901").await;
     let bob = h.agent("bob", "127.0.0.1:5911").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5911)
         .start(&h, "b2bua", "127.0.0.1:5921")
         .await;
@@ -88,11 +88,6 @@ async fn refer_allow_happy() {
     // Charlie receives the C INVITE (held SDP), rings.
     let mut charlie_uas = charlie.receive("INVITE").await;
     charlie_uas.respond(180, "Ringing").await;
-
-    // NOTIFY 180 active.
-    let mut n180 = bob.receive("NOTIFY").await;
-    assert_notify(&n180, "active", "SIP/2.0 180 Ringing");
-    n180.respond(200, "OK").await;
 
     // Charlie answers 200; B2BUA ACKs (it is C's UAC).
     charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
@@ -150,7 +145,7 @@ async fn refer_allow_c486() {
     let h = Harness::with_transit_delay("refer-allow-c-rejects-486", 1);
     let alice = h.agent("alice", "127.0.0.1:5902").await;
     let bob = h.agent("bob", "127.0.0.1:5912").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5912)
         .start(&h, "b2bua", "127.0.0.1:5922")
         .await;
@@ -196,14 +191,16 @@ async fn refer_allow_c486() {
     let _ = h.finish().await;
 }
 
-// ── 5. Multiple 18x dedup: 180 → 183 → 180 → exactly 3 NOTIFYs ────────────
+// ── 5. C's provisionals draw no NOTIFY: 180 → 183 → 180 → 180 → 200 ───────
+// The subscription carries the immediate NOTIFY and the final one alone (RFC
+// 3515 §3.10), numbered one after the other.
 
 #[tokio::test]
 async fn refer_allow_c_multiple_18x() {
     let h = Harness::with_transit_delay("refer-allow-c-multiple-18x", 1);
     let alice = h.agent("alice", "127.0.0.1:5905").await;
     let bob = h.agent("bob", "127.0.0.1:5915").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5915)
         .start(&h, "b2bua", "127.0.0.1:5925")
         .await;
@@ -231,37 +228,17 @@ async fn refer_allow_c_multiple_18x() {
     n100.respond(200, "OK").await;
 
     let mut charlie_uas = charlie.receive("INVITE").await;
-
-    // 180 #1 → NOTIFY 180.
     charlie_uas.respond(180, "Ringing").await;
-    let mut n180a = bob.receive("NOTIFY").await;
-    assert_notify(&n180a, "active", "SIP/2.0 180");
-    n180a.respond(200, "OK").await;
-
-    // 183 #1 → NOTIFY 183 (183 clears the 180 dedup).
     charlie_uas.respond(183, "Session Progress").await;
-    let mut n183 = bob.receive("NOTIFY").await;
-    assert_notify(&n183, "active", "SIP/2.0 183");
-    n183.respond(200, "OK").await;
-
-    // 180 #2 → NOTIFY 180 again (dedup is against the last status only).
     charlie_uas.respond(180, "Ringing").await;
-    let mut n180b = bob.receive("NOTIFY").await;
-    assert_notify(&n180b, "active", "SIP/2.0 180");
-    n180b.respond(200, "OK").await;
-
-    // Identical 180 once more — deduped, no NOTIFY.
     charlie_uas.respond(180, "Ringing").await;
-
-    // Finalise with 200 → terminated NOTIFY. The deduped 180 retransmits race
-    // the 200's NOTIFY; tolerate the extra 180 NOTIFY.
     charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
     charlie.receive("ACK").await;
 
-    // The deduped trailing 180 emits no NOTIFY, so the next NOTIFY is the
-    // terminated 200 sipfrag.
+    // The next NOTIFY is the final one, right after the immediate one.
     let mut nterm = bob.receive("NOTIFY").await;
     assert_notify(&nterm, "terminated", "SIP/2.0 200");
+    assert_eq!(nterm.request().cseq().seq(), n100.request().cseq().seq() + 1);
     nterm.respond(200, "OK").await;
 
     // The c-realign re-INVITE toward C — receive (don't reply).
@@ -286,7 +263,7 @@ async fn refer_allow_c_no_answer() {
     let h = Harness::new("refer-allow-c-no-answer");
     let alice = h.agent("alice", "127.0.0.1:5904").await;
     let bob = h.agent("bob", "127.0.0.1:5914").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5914)
         .start(&h, "b2bua", "127.0.0.1:5924")
         .await;
@@ -305,7 +282,7 @@ async fn refer_allow_c_no_answer() {
     let mut refer = bob_dialog
         .send_request(InDialogMethod::Refer)
         .with_header("Refer-To", &refer_to_charlie())
-        .with_header("X-Api-Call", &x_api_allow_c(r#","no_answer_timeout_sec":5"#))
+        .with_header("X-Api-Call", &x_api_allow_c(r#","no_answer_ms":5000"#))
         .send()
         .await;
     refer.expect(202).await;
@@ -317,10 +294,6 @@ async fn refer_allow_c_no_answer() {
     // Charlie rings but never answers.
     let mut charlie_uas = charlie.receive("INVITE").await;
     charlie_uas.respond(180, "Ringing").await;
-
-    let mut n180 = bob.receive("NOTIFY").await;
-    assert_notify(&n180, "active", "SIP/2.0 180 Ringing");
-    n180.respond(200, "OK").await;
 
     // Advance past the 5s no-answer timer → NOTIFY 408 terminated. The advance
     // crosses the deadline, so the 408 NOTIFY's 200 round-trip races the txn
@@ -355,7 +328,7 @@ async fn refer_allow_c603() {
     let h = Harness::with_transit_delay("refer-allow-c-rejects-603", 1);
     let alice = h.agent("alice", "127.0.0.1:5903").await;
     let bob = h.agent("bob", "127.0.0.1:5913").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5913)
         .start(&h, "b2bua", "127.0.0.1:5923")
         .await;

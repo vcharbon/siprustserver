@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Delete the target pods with a grace period (SIGTERM first): a graceful
+# restart. Facts as pod_kill's.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+hk_pick_targets
+hk_delete_targets "$HAKIT_PARAM_GRACE_S"

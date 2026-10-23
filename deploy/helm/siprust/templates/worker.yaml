@@ -1,0 +1,142 @@
+{{- /*
+B2BUA worker pool. A StatefulSet: each worker's ordinal is its pod name, used
+as B2BUA_ORDINAL (encoded into the callRef the proxy routes by) and equal to
+the membership ordinal the EndpointSlice informer reads from targetRef.name,
+so callRef ownership, the proxy's cookie and replication membership agree by
+construction. Readiness is /ready: 503 while re-hydrating or draining, so a
+NotReady worker leaves the EndpointSlice the proxy and its peers watch.
+Liveness is /healthz: 503 while a loop has been on one piece of work past
+B2BUA_LOOP_STALL_MS.
+*/ -}}
+{{- if .Values.worker.enabled }}
+{{- $w := .Values.worker }}
+{{- $env := dict
+  "B2BUA_LISTEN" "0.0.0.0:5060"
+  "B2BUA_ADVERTISE" "$(POD_IP)"
+  "B2BUA_ORDINAL" "$(POD_NAME)"
+  "B2BUA_METRICS" "0.0.0.0:9091"
+  "B2BUA_REPL" (ternary "1" "0" $w.replication.enabled)
+  "B2BUA_REPL_LISTEN" (printf "0.0.0.0:%d" (int $w.replication.port))
+  "B2BUA_REPL_PORT" (toString (int $w.replication.port))
+  "B2BUA_REPL_SERVICE" "b2bua-worker"
+  "OTEL_EXPORTER_OTLP_ENDPOINT" .Values.tracing.otlpEndpoint
+  "SIP_TRACE_HEADER" (include "siprust.traceHeader" .)
+}}
+{{- with $w.dest }}
+{{- $_ := set $env "B2BUA_DEST" . }}
+{{- end }}
+{{- if and .Values.proxy.enabled $w.outboundProxy }}
+{{- $_ := set $env "B2BUA_OUTBOUND_PROXY" (printf "%s:%d" (include "siprust.net" (dict "root" $ "key" "proxyVip")) (int .Values.network.sipPort)) }}
+{{- $_ := set $env "B2BUA_REQUIRE_OUTBOUND_PROXY" "1" }}
+{{- end }}
+{{- if .Values.callLimiter.enabled }}
+{{- $_ := set $env "LIMITER_URL" (printf "%s:8080" (include "siprust.svcHost" (list $ "call-limiter"))) }}
+{{- end }}
+{{- if .Values.cdr.enabled }}
+{{- $_ := set $env "B2BUA_CDR_RABBITMQ_URL" (include "siprust.amqpUrl" .) }}
+{{- $_ := set $env "B2BUA_CDR_RABBITMQ_QUEUE" .Values.cdr.queue }}
+{{- $_ := set $env "B2BUA_CDR_RABBITMQ_MAX_LEN" (toString (int .Values.cdr.maxLength)) }}
+{{- end }}
+{{- include "siprust.overlayEnv" (dict "into" $env "from" $w.env) }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: b2bua-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "b2bua-worker") | nindent 4 }}
+spec:
+  serviceName: b2bua-worker
+  replicas: {{ int $w.replicas }}
+  selector:
+    matchLabels: { app: b2bua-worker }
+  template:
+    metadata:
+      labels:
+        {{- include "siprust.podLabels" (dict "app" "b2bua-worker" "extra" $w.podLabels) | nindent 8 }}
+      annotations:
+        {{- include "siprust.podAnnotations" (dict "base" (dict "prometheus.io/scrape" "true" "prometheus.io/port" "9091") "extra" $w.podAnnotations) | nindent 8 }}
+    spec:
+      serviceAccountName: b2bua-worker
+      {{- with include "siprust.pullSecrets" . | trim }}{{ . | nindent 6 }}{{- end }}
+      {{- with include "siprust.scheduling" $w | trim }}{{ . | nindent 6 }}{{- end }}
+      {{- with include "siprust.podSecurity" $w | trim }}{{ . | nindent 6 }}{{- end }}
+      terminationGracePeriodSeconds: {{ int $w.terminationGracePeriodSeconds }}
+      {{- with $w.extraInitContainers }}
+      initContainers:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: b2bua-worker
+          {{- include "siprust.image" (dict "root" $ "image" $w.image) | nindent 10 }}
+          command: {{ toJson $w.command }}
+          {{- with $w.args }}
+          args: {{ toJson . }}
+          {{- end }}
+          env:
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            # The routable address peers reach the worker on; the bind address
+            # 0.0.0.0 is not routable.
+            - name: POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            {{- with include "siprust.envMap" (dict "root" $ "env" $env) | trim }}{{ . | nindent 12 }}{{- end }}
+            {{- with $w.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - { name: sip, containerPort: 5060, protocol: UDP }
+            - { name: metrics, containerPort: 9091, protocol: TCP }
+            - { name: repl, containerPort: {{ int $w.replication.port }}, protocol: TCP }
+            {{- with $w.extraPorts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /ready, port: 9091 }
+            initialDelaySeconds: 1
+            periodSeconds: 2
+            failureThreshold: 2
+          # Three misses 10 s apart restart the container; the 5 s timeout
+          # holds on a CPU-starved node.
+          livenessProbe:
+            httpGet: { path: /healthz, port: 9091 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml $w.resources | nindent 12 }}
+          {{- with $w.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- with $w.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $w.extraVolumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+{{- /*
+Headless Service: stable per-pod DNS, and the Service whose EndpointSlices the
+membership informer (replication and the proxy's worker discovery) watches. A
+NotReady or draining worker drops out of the slice.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: b2bua-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "b2bua-worker") | nindent 4 }}
+spec:
+  clusterIP: None
+  selector: { app: b2bua-worker }
+  ports:
+    - { name: sip, port: 5060, targetPort: 5060, protocol: UDP }
+    - { name: metrics, port: 9091, targetPort: 9091, protocol: TCP }
+    - { name: repl, port: {{ int $w.replication.port }}, targetPort: {{ int $w.replication.port }}, protocol: TCP }
+{{- end }}

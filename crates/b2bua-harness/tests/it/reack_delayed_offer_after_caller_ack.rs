@@ -39,8 +39,9 @@ async fn a_delayed_offer_2xx_repeated_after_the_relayed_ack_re_sends_that_ack() 
 
     // ── alice INVITEs bodyless: the offer is bob's to make ────────────────────
     let mut call = alice.invite(&bob).through(b2bua.addr).send().await;
-    let invite_cseq = call.invite_cseq();
     let mut uas = bob.receive("INVITE").await;
+    // The ACKs toward the callee carry the CSeq of the INVITE it took.
+    let invite_cseq = uas.request().cseq().seq();
     assert!(
         uas.request().body().is_empty(),
         "the offerless INVITE reached bob with a substituted body"
@@ -89,8 +90,8 @@ async fn a_delayed_offer_2xx_repeated_after_the_relayed_ack_re_sends_that_ack() 
     );
 }
 
-const REOFFER: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
-const REANSWER: &str = "v=0\r\no=bob 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
+const REOFFER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
+const REANSWER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
 
 const REINVITE_ALICE_ADDR: &str = "127.0.0.1:5994";
 const REINVITE_BOB_ADDR: &str = "127.0.0.1:5995";
@@ -120,6 +121,7 @@ async fn a_reinvite_2xx_copy_re_sends_its_own_bare_ack_not_the_initial_answer() 
     let mut reinv = dialog.reinvite(Some(REOFFER)).await;
     let reinvite_cseq = dialog.local_cseq();
     let mut bob_reinv = bob.receive("INVITE").await;
+    let relayed_cseq = bob_reinv.request().cseq().seq();
     bob_reinv.respond(200, "OK").with_sdp(REANSWER).await;
     reinv.expect(200).await;
     dialog.ack_for(reinvite_cseq, None).await;
@@ -139,7 +141,7 @@ async fn a_reinvite_2xx_copy_re_sends_its_own_bare_ack_not_the_initial_answer() 
 
     let report = h.finish().await;
 
-    let reinvite_acks = acks_to(&report, b2bua.addr, REINVITE_BOB_ADDR, reinvite_cseq);
+    let reinvite_acks = acks_to(&report, b2bua.addr, REINVITE_BOB_ADDR, relayed_cseq);
     assert_eq!(reinvite_acks.len(), 2, "one ACK per re-INVITE 2xx received (§13.2.2.4)");
     assert_eq!(
         String::from_utf8_lossy(&reinvite_acks[1]),

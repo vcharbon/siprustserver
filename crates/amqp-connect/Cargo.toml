@@ -1,0 +1,22 @@
+[package]
+name = "amqp-connect"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Opening an AMQP 0-9-1 connection on the running tokio runtime: the TCP connect and the TLS handshake run on the caller's task under its deadline, and the client's IO loop is handed the ready stream, so it never connects itself."
+
+[package.metadata.purity]
+tier = "shell"
+
+[lints]
+workspace = true
+
+[dependencies]
+lapin = { workspace = true }
+async-rs = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+# The ClientHello the TLS tests read back (SNI), no certificate involved.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

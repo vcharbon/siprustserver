@@ -4,13 +4,21 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Call limiter keyed by the call: the keyed store (per-call multiset + lease, net-of-own-set atomic replace, idempotent release, lease expiry), the wire DTOs of the HTTP API, the HttpService server handler, and its metrics. No b2bua dependency — the client lives in b2bua. Backs a dedicated stateless service shared cluster-wide."
+description = "Call limiter keyed by the call: the keyed store (per-call multiset + lease, net-of-own-set atomic replace, idempotent release, lease expiry), the HttpService server handler, and its metrics; the wire DTOs of the HTTP API live in call-limiter-wire. No b2bua dependency — the client lives in b2bua. Backs a dedicated stateless service shared cluster-wide."
+
+[package.metadata.purity]
+tier = "shell"
 
 [lints]
 workspace = true
 
 [dependencies]
+# The HTTP API's DTOs and lease bounds the server answers with.
+call-limiter-wire = { path = "../call-limiter-wire" }
 metric-catalogue = { path = "../metric-catalogue" }
+# The process counters (`/metrics` appends them) — default features, so no
+# OpenTelemetry tree here.
+observe = { path = "../observe", default-features = false }
 http-net = { path = "../http-net" }
 sip-clock = { path = "../sip-clock" }
 serde = { workspace = true }
@@ -20,3 +28,5 @@ async-trait = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
+# The server's tests serve it on the simulated HTTP fabric.
+http-net-testkit = { path = "../http-net-testkit" }

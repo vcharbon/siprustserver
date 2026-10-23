@@ -11,5 +11,13 @@ description = "Counting #[global_allocator] wrapper for allocation-budget tests:
 # `forbid(unsafe_code)` lint (which cannot be locally overridden). It pins
 # `deny` instead — every other crate's guarantee still holds here — and the one
 # impl block carries a narrow `#[allow(unsafe_code)]` with a SAFETY comment.
+# The clippy table restates the workspace's exactly (scripts/purity.py checks
+# it).
 [lints.rust]
 unsafe_code = "deny"
+
+[lints.clippy]
+too_many_lines = "warn"
+disallowed_macros = "allow"
+disallowed_methods = "allow"
+disallowed_types = "allow"

@@ -24,8 +24,8 @@ impl SystemProbe for ProcSelfProbe {
 
 /// The `VmRSS:  <n> kB` line of a `/proc/<pid>/status` text, in bytes.
 fn parse_vm_rss(status: &str) -> Option<u64> {
-    let line = status.lines().find(|l| l.starts_with("VmRSS:"))?;
-    let mut fields = line["VmRSS:".len()..].split_whitespace();
+    let rest = status.lines().find_map(|l| l.strip_prefix("VmRSS:"))?;
+    let mut fields = rest.split_whitespace();
     let value: u64 = fields.next()?.parse().ok()?;
     match fields.next() {
         Some("kB") => value.checked_mul(1024),

@@ -1,6 +1,7 @@
 # 0012 — HA addressing & membership reconcile: self-healing topology, DNS-by-pod-name, one watcher for both consumers
 
-**Status:** accepted (2026-06-02)
+**Status:** accepted (2026-06-02). Amended (2026-10-16): D4, an address change resets health to
+`Unknown` and re-arms no guard; the fresh-pod guard and drain grace are removed (ADR-0050).
 
 **Source:** this codebase (no sipjsserver counterpart — the source mediated
 membership through Redis/`PeerEnumerator`, which the Rust port dropped in
@@ -215,8 +216,8 @@ worker.
 
 > **This is the live, deployed design.** ADR-0015 D5 proposes a cross-rack
 > evolution (unicast VRRP, failure-domain anti-affinity key, worker-zone proxy
-> placement) but is **not yet implemented** — the manifests still run the
-> multicast / `tier=edge` / `hostname`-key design described here.
+> placement) but is **not yet implemented** — the SUT chart (`deploy/helm/siprust`)
+> still runs the multicast / `tier=edge` / `hostname`-key design described here.
 
 The end-state architecture is **fully resilient**: no component is a single point
 of failure. Worker HA is peer-to-peer replication (ADR-0011); this decision closes
@@ -227,10 +228,12 @@ scope for this thin runner" stance (a deliberate temporary choice).
 anti-affined proxy replicas on the two `tier=edge` nodes, fronted by a **keepalived
 VRRP virtual IP** (`172.20.255.250`, static in the kind `172.20.0.0/16` node
 subnet). Active/passive: the VRRP master owns the VIP and serves all traffic; the
-backup is warm. On master loss the backup claims the VIP in <2 s (3 × 0.5 s
-advert, `nopreempt` so the survivor keeps it). `hostNetwork: true` +
-`shareProcessNamespace` lets the keepalived sidecar answer ARP on the node; an init
-container pins the VIP on `lo` and sets strict-ARP so both pods can `bind(VIP:5060)`
+backup is warm. On master loss the backup claims the VIP: at once when the
+master's keepalived stops, within the 3.6 s master-down timer (3 × 1 s advert
+plus skew) when it goes silent. The survivor keeps it (ADR-0046 for the
+priorities and the health check). `hostNetwork: true` lets the keepalived
+sidecar answer ARP on the node and read the proxy's `/healthz` over the host
+network; an init container pins the VIP on `lo` and sets strict-ARP so both pods can `bind(VIP:5060)`
 and only the ARP owner answers.
 
 **Why this needs no proxy code change (the load-bearing fact).** The proxy already
@@ -252,22 +255,23 @@ correlation, ADR-0009 X1) **coherent** — an active/active pair behind a Cluste
 would split it and fail to ACK non-2xx finals (e.g. the limiter's 486s), so the VIP
 is the correct full-resilience design, not just the simplest.
 
-The `chaos.sh kill_proxy` event now kills **only the VIP master** (detected by
-which pod carries the VIP on `eth0`) and asserts the normal 90 % success bar —
-failover, not a tolerated outage.
+The HA tooling's `kill_proxy` incident crashes **only the VIP holder** (the pod
+carrying the VIP on an interface other than `lo`); its window's budget states
+what the failover may cost — failover, not a tolerated outage.
 
 ## Consequences
 
 - **Deploy simplification.** The `run.sh` block that `kubectl get pods … podIP`
   → bakes `PROXY_WORKERS` is **deleted**; the `chaos.sh` re-`deploy` step whose
   only purpose was refreshing stale worker IPs after a kill is **deleted**. The
-  proxy gains an RBAC manifest (ServiceAccount/Role/RoleBinding for the
-  EndpointSlice watch, mirroring `15-worker-rbac.yaml`). The pod-name-as-id
-  invariant (the big run.sh warning) is unchanged and still required.
+  proxy gains its RBAC (ServiceAccount/Role/RoleBinding for the EndpointSlice
+  watch, `templates/proxy-rbac.yaml`, mirroring the worker's). The
+  pod-name-as-id invariant (a worker's StatefulSet pod name is its ordinal,
+  `templates/worker.yaml`) is unchanged and still required.
 - **New dependency for the proxy:** an in-cluster kube client + EndpointSlice
-  watch RBAC. Falls back (liveness over completeness, ADR-0011 X5) to the static
-  `PROXY_WORKERS` list when no kube client is available (dev/local, and the sim
-  test tiers), exactly as the b2bua runner falls back to `B2BUA_PEERS`.
+  watch RBAC. A fixed `PROXY_WORKERS` list replaces discovery only when set; a
+  kube client that fails to build is built again in the background and the
+  proxy stays NotReady meanwhile (ADR-0046).
 - **CoreDNS enters the repl reconnect path** (D3) — bounded by backoff; negative
   caching can slow a just-ready peer's first reconnect by up to the SOA negative
   TTL, which is acceptable because D1/D2 already converge via the informer.
@@ -296,6 +300,6 @@ failover, not a tolerated outage.
   both proxy and b2bua).
 - `crates/b2bua/src/repl/{supervisor,puller}.rs`, `crates/topology/src/{lib,k8s}.rs`,
   `crates/sip-proxy/src/registry/`, `crates/{b2bua-runner,sip-proxy-runner}/src/main.rs`,
-  `deploy/k8s/{run.sh,chaos.sh,manifests/}`.
+  `deploy/helm/siprust/`.
 - Incident handoff: `/tmp/handoff-repl-reconnect-bug.md`;
   run `deploy/k8s/results/endurance-20260602-085331/`.

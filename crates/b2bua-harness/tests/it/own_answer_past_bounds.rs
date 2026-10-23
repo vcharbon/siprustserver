@@ -20,9 +20,8 @@ use b2bua::decision::{
 use b2bua::AdaptationHttpPort;
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use call::ReleaseEventKind;
-use http_net::{
-    HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport, SimulatedHttpNetwork,
-};
+use http_net::{HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport};
+use http_net_testkit::SimulatedHttpNetwork;
 use scenario_harness::callflow::OFFER_SDP;
 use sip_message::generators::InDialogMethod;
 
@@ -68,7 +67,7 @@ impl CallDecisionEngine for SlowConsults {
             return std::future::pending().await;
         }
         let mut route = route_to("127.0.0.1", self.bob_port);
-        route.features.platform.max_duration_sec = MAX_DURATION.as_secs() as i64;
+        route.features.platform.max_duration_ms = MAX_DURATION.as_millis() as i64;
         route.callback_context = Some("ctx-release".into());
         route.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
         Ok(NewCallResponse::Route(route))
@@ -117,7 +116,7 @@ mod slowprobe {
         TimerDelay,
     };
     use b2bua::{define_service, sm_rule, CallEvent};
-    use call::TimerType;
+    use call::{TimerKey, TimerType};
 
     /// When the request leaves, from the call's setup.
     pub const KICK_AFTER: Duration = Duration::from_secs(59);
@@ -133,11 +132,10 @@ mod slowprobe {
         states: SpState { Working, Awaiting, Done },
         init: |_call: &RuleCall| {
             Some(ServiceSeed::new(SpState::Working.label()).with_actions(vec![
-                RuleAction::ScheduleTimer {
-                    timer_type: TimerType::service(SLOWPROBE, "kick"),
-                    delay: TimerDelay::secs(KICK_AFTER.as_secs() as i64),
-                    leg_id: None,
-                },
+                RuleAction::arm(
+                    TimerKey::call(TimerType::service(SLOWPROBE, "kick")),
+                    TimerDelay::secs(KICK_AFTER.as_secs() as i64),
+                ),
             ]))
         },
         rules: [ kick(), result() ],
@@ -203,7 +201,7 @@ mod ticker {
         TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
-    use call::TimerType;
+    use call::{TimerKey, TimerType};
 
     /// When both timers come due, from the call's setup.
     pub const DUE_AFTER: Duration = Duration::from_secs(1);
@@ -218,8 +216,8 @@ mod ticker {
         init: |_call: &RuleCall| {
             let due = TimerDelay::secs(DUE_AFTER.as_secs() as i64);
             Some(ServiceSeed::new(TkState::Ticking.label()).with_actions(vec![
-                RuleAction::ScheduleTimer { timer_type: TICK_A, delay: due, leg_id: None },
-                RuleAction::ScheduleTimer { timer_type: TICK_B, delay: due, leg_id: None },
+                RuleAction::arm(TimerKey::call(TICK_A), due),
+                RuleAction::arm(TimerKey::call(TICK_B), due),
             ]))
         },
         rules: [ tick_a(), tick_b() ],
@@ -267,11 +265,11 @@ async fn answers_landing_on_a_full_queue_still_reach_the_call() {
     let s = B2buaScene::with_b2bua("b2bua-own-answer-queue-full", |bob_port| {
         B2buaSut::builder(Arc::new(SlowConsults::to(bob_port)))
             .services(vec![slowprobe::service_def()])
-            .adaptation_http(AdaptationHttpPort {
-                transport: Arc::new(http.clone()) as Arc<dyn HttpTransport>,
-                base: http_addr(),
-                default_timeout: Duration::from_secs(5),
-            })
+            .adaptation_http(AdaptationHttpPort::addressed(
+                Arc::new(http.clone()) as Arc<dyn HttpTransport>,
+                http_addr(),
+                Duration::from_secs(5),
+            ))
             .tune(|c| {
                 c.event_dispatch_concurrency = 1;
                 c.per_call_queue_depth = 1;

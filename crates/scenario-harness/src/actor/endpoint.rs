@@ -7,7 +7,7 @@
 //! # Downstream-contract feeding is DECLARATIVE ([`CtxFeed`])
 //!
 //! Phases / checkpoints / the 18x ringing gate key the load report's case
-//! buckets and the chaos classifier's phase-transition proximity (see
+//! buckets (see
 //! `docs/todos/actor-harness-p1-contract-table.md`), and each call body stamps
 //! a DIFFERENT trail (the refer body stamps only `referred`/`transferred` and
 //! never feeds `mark_ringing`; basic stamps `connected`/`bye_200` and does).
@@ -88,11 +88,14 @@ pub enum Disposition {
     /// the `200` waits for the WINNER fork's PRACK (`ring` is unused).
     /// `loser_late_200: Some(tag)` additionally emits a LATE `200` under that
     /// losing tag right after the winner's — the §13.2.2.4 loser the caller
-    /// must ACK then BYE. `winner` (and the late-200 loser, distinct from the
-    /// winner) must be members of `tags` — enforced at INVITE time.
+    /// must ACK then BYE. A [`ForkWinner::Tag`] winner (and the late-200 loser,
+    /// distinct from the winner) must be members of `tags` — enforced at INVITE
+    /// time. A [`ForkWinner::Unrung`] winner answers under a fresh To-tag after
+    /// every declared fork rang; reliable, its `200` waits for every fork's
+    /// PRACK.
     ForkingRing {
         tags: &'static [&'static str],
-        winner: &'static str,
+        winner: ForkWinner,
         ring: Duration,
         reliable: bool,
         loser_late_200: Option<&'static str>,
@@ -103,6 +106,24 @@ pub enum Disposition {
     /// as a serviced stray) — peers stay RFC-compliant when the SUT relays
     /// traffic the script never modeled.
     Scripted,
+    /// Holds the initial INVITE with no automatic response: the actor's goals
+    /// ring it ([`GoalStep::Ring`](super::GoalStep::Ring)), may send requests
+    /// on its early dialogs ([`GoalStep::EarlyRequest`](super::GoalStep::EarlyRequest)),
+    /// and answer it ([`GoalStep::Answer`](super::GoalStep::Answer)) or reject
+    /// it ([`GoalStep::Reject`](super::GoalStep::Reject)). A CANCEL
+    /// 487s the held INVITE and drops the remaining goals: no dialog is left
+    /// for them to act on.
+    Held,
+}
+
+/// The fork a [`Disposition::ForkingRing`] callee answers `200` under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkWinner {
+    /// The declared fork tag that rang (one of `tags`).
+    Tag(&'static str),
+    /// A fork that sent no provisional: its `200` carries a fresh To-tag no
+    /// 18x announced (RFC 3261 §12.1.2, §13.2.2.4).
+    Unrung,
 }
 
 /// Per-plan (lane-chosen) stack automatics for scripted endpoints. When set, an
@@ -138,7 +159,9 @@ impl MediaState {
     }
 
     /// Both sides: `offer` rides an originated INVITE, `answer` every answer we
-    /// send (a caller that also answers realign re-INVITEs — the refer alice).
+    /// send. Where both ride one dialog, `answer` continues the session `offer`
+    /// opened — same `o=` identity, the next `sess-version` (RFC 3264 §8); a
+    /// caller answering on its own dialog uses [`Self::offer`] alone.
     pub fn full(offer: &'static str, answer: &'static str) -> Self {
         Self { offer: Some(offer), answer: Some(answer) }
     }
@@ -158,6 +181,13 @@ impl MediaState {
     /// The SDP to offer on an originated INVITE.
     pub(super) fn offer_sdp(&self) -> Option<&'static str> {
         self.offer
+    }
+
+    /// The SDP this endpoint offers on a renegotiation: its own session
+    /// description, the offer an offerer made or the answer an answerer gave,
+    /// so the session's origin stays one across the call (RFC 3264 §8).
+    pub(super) fn reoffer_sdp(&self) -> Option<&'static str> {
+        self.offer.or(self.answer)
     }
 }
 

@@ -10,22 +10,25 @@
 //! | `LIMITER_REFRESH_BATCH_MAX` | most keys one refresh request carries | 1000 |
 //! | `LIMITER_RELEASE_TIMEOUT_MS` | the budget of one release request | 2000 |
 //! | `LIMITER_RELEASE_QUEUE_CAP` | most releases the queue holds | 100000 |
-//! | `LIMITER_BREAKER_FAILURES` | consecutive failed admits that open the breaker | 3 |
-//! | `LIMITER_BREAKER_PROBE_MS` | how often an open breaker probes the limiter | 1000 |
+//! | `LIMITER_*` of [`BackendConfig`] (breaker, lookup, transport) | the limiter client's tuning | the backend defaults, `LIMITER_MAX_IN_FLIGHT` 64, `LIMITER_HEALTH_PATH` `/v1/health`, `LIMITER_BREAKER_PROBE_TIMEOUT_MS` the admit budget |
 //!
 //! The lease is the limiter's own: its answers state it, and the worker
 //! gives up a queued release or a refresh due by the lease it last learnt
 //! (the limiter's default, 120 s, before any answer).
 //!
 //! Unset or blank takes the default; a value that is not a positive integer
-//! refuses boot. A `LIMITER_URL` that is not `host:port` over plain HTTP (an
+//! refuses boot, and so does `LIMITER_BREAKER_FAILURES`, which names no knob.
+//! A `LIMITER_URL` that is not `host:port` over plain HTTP (an
 //! other scheme, no port, a path) refuses boot; a well-formed name that does
-//! not resolve at boot starts the breaker open (ADR-0040 decision 10).
+//! not resolve at boot starts the breaker open (ADR-0040 decision 10). The
+//! breaker and the client follow ADR-0043.
+
+use http_net::BackendConfig;
 
 use crate::stated;
 
 /// The limiter client's settings, as the env states them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LimiterEnv {
     pub timeout_ms: u64,
     pub refresh_timeout_ms: u64,
@@ -34,41 +37,15 @@ pub(crate) struct LimiterEnv {
     pub refresh_batch_max: usize,
     pub release_timeout_ms: u64,
     pub queue_cap: usize,
-    pub breaker_failures: u32,
-    pub breaker_probe_ms: u64,
+    pub backend: BackendConfig,
 }
 
 /// The limiter's `host:port` `LIMITER_URL` states: `None` when unset or
-/// blank, an `Err` naming it when malformed.
+/// blank, an `Err` naming it when malformed ([`crate::backend_url`]).
 pub(crate) fn limiter_url_from_lookup(
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<Option<String>, String> {
-    let Some(url) = stated(lookup("LIMITER_URL")) else {
-        return Ok(None);
-    };
-    let refuse = |why: &str| format!("LIMITER_URL={url:?}: {why}");
-    let rest = match url.split_once("://") {
-        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("http") => rest,
-        Some((scheme, _)) => return Err(refuse(&format!("scheme {scheme} is not http"))),
-        None => url.as_str(),
-    };
-    let hostport = rest.strip_suffix('/').unwrap_or(rest);
-    if hostport.contains(['/', '?', '#', '@']) {
-        return Err(refuse("only host:port, no path, query or credentials"));
-    }
-    let Some((host, port)) = hostport.rsplit_once(':') else {
-        return Err(refuse("no port"));
-    };
-    if host.is_empty() {
-        return Err(refuse("no host"));
-    }
-    if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
-        return Err(refuse("an IPv6 host is written in brackets: [addr]:port"));
-    }
-    match port.parse::<u16>() {
-        Ok(0) | Err(_) => Err(refuse("the port is not in 1..=65535")),
-        Ok(_) => Ok(Some(hostport.to_string())),
-    }
+    crate::backend_url::backend_url_from_lookup("LIMITER_URL", lookup)
 }
 
 /// The settings `lookup` states. A value that is not a positive integer is
@@ -90,27 +67,38 @@ pub(crate) fn limiter_from_lookup(
         let n = positive(key, default)?;
         i64::try_from(n).map_err(|_| format!("{key}={n}: too large"))
     };
+    let count = |n: u64| usize::try_from(n).map_err(|_| format!("{n}: past this platform"));
+    if let Some(v) = stated(lookup("LIMITER_BREAKER_FAILURES")) {
+        return Err(format!(
+            "LIMITER_BREAKER_FAILURES={v:?} is not a knob: the breaker opens on \
+             LIMITER_BREAKER_REQUESTS in LIMITER_BREAKER_WINDOW_MS (ADR-0043)"
+        ));
+    }
+    let timeout_ms = positive("LIMITER_TIMEOUT_MS", 150)?;
+    let defaults = BackendConfig::new(
+        b2bua::limiter::http::MAX_IN_FLIGHT,
+        std::time::Duration::from_millis(timeout_ms),
+        b2bua::limiter::http::HEALTH_PATH,
+    );
     Ok(LimiterEnv {
-        timeout_ms: positive("LIMITER_TIMEOUT_MS", 150)?,
+        timeout_ms,
         refresh_timeout_ms: positive("LIMITER_REFRESH_TIMEOUT_MS", 2_000)?,
         refresh_sec: seconds("LIMITER_REFRESH_SECONDS", 40)?,
         refresh_batch_ms: positive("LIMITER_REFRESH_BATCH_MS", 1_000)?,
-        refresh_batch_max: positive("LIMITER_REFRESH_BATCH_MAX", 1_000)? as usize,
+        refresh_batch_max: count(positive("LIMITER_REFRESH_BATCH_MAX", 1_000)?)?,
         release_timeout_ms: positive("LIMITER_RELEASE_TIMEOUT_MS", 2_000)?,
-        queue_cap: positive("LIMITER_RELEASE_QUEUE_CAP", 100_000)? as usize,
-        breaker_failures: {
-            let n = positive("LIMITER_BREAKER_FAILURES", 3)?;
-            u32::try_from(n).map_err(|_| format!("LIMITER_BREAKER_FAILURES={n}: too large"))?
-        },
-        breaker_probe_ms: positive("LIMITER_BREAKER_PROBE_MS", 1_000)?,
+        queue_cap: count(positive("LIMITER_RELEASE_QUEUE_CAP", 100_000)?)?,
+        backend: BackendConfig::from_lookup("LIMITER", &defaults, &lookup)?,
     })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
-    const KEYS: [&str; 9] = [
+    const KEYS: [&str; 13] = [
         "LIMITER_TIMEOUT_MS",
         "LIMITER_REFRESH_TIMEOUT_MS",
         "LIMITER_REFRESH_SECONDS",
@@ -118,8 +106,12 @@ mod tests {
         "LIMITER_REFRESH_BATCH_MAX",
         "LIMITER_RELEASE_TIMEOUT_MS",
         "LIMITER_RELEASE_QUEUE_CAP",
-        "LIMITER_BREAKER_FAILURES",
+        "LIMITER_BREAKER_REQUESTS",
+        "LIMITER_BREAKER_WINDOW_MS",
         "LIMITER_BREAKER_PROBE_MS",
+        "LIMITER_CONNECT_TIMEOUT_MS",
+        "LIMITER_MAX_IN_FLIGHT",
+        "LIMITER_ROTATION_MS",
     ];
 
     fn from(pairs: &[(&str, &str)]) -> Result<LimiterEnv, String> {
@@ -141,8 +133,7 @@ mod tests {
                 refresh_batch_max: 1_000,
                 release_timeout_ms: 2_000,
                 queue_cap: 100_000,
-                breaker_failures: 3,
-                breaker_probe_ms: 1_000,
+                backend: BackendConfig::new(64, Duration::from_millis(150), "/v1/health"),
             }
         );
     }
@@ -157,8 +148,11 @@ mod tests {
             ("LIMITER_REFRESH_BATCH_MAX", "50"),
             ("LIMITER_RELEASE_TIMEOUT_MS", "500"),
             ("LIMITER_RELEASE_QUEUE_CAP", "10"),
-            ("LIMITER_BREAKER_FAILURES", "5"),
+            ("LIMITER_BREAKER_REQUESTS", "5"),
+            ("LIMITER_BREAKER_WINDOW_MS", "3000"),
             ("LIMITER_BREAKER_PROBE_MS", "250"),
+            ("LIMITER_MAX_IN_FLIGHT", "16"),
+            ("LIMITER_ROTATION_MS", "30000"),
         ])
         .unwrap();
         assert_eq!(
@@ -171,16 +165,16 @@ mod tests {
                 refresh_batch_max: 50,
                 release_timeout_ms: 500,
                 queue_cap: 10,
-                breaker_failures: 5,
-                breaker_probe_ms: 250,
+                backend: {
+                    let mut b = BackendConfig::new(16, Duration::from_millis(100), "/v1/health");
+                    b.breaker.min_sent = 5;
+                    b.breaker.window = Duration::from_secs(3);
+                    b.breaker.probe_period = Duration::from_millis(250);
+                    b.client.rotation = Duration::from_secs(30);
+                    b
+                },
             }
         );
-    }
-
-    #[test]
-    fn a_failure_count_past_u32_refuses_boot() {
-        let e = from(&[("LIMITER_BREAKER_FAILURES", "4294967296")]).expect_err("too large");
-        assert!(e.contains("LIMITER_BREAKER_FAILURES"), "{e}");
     }
 
     fn url(value: &str) -> Result<Option<String>, String> {
@@ -226,6 +220,12 @@ mod tests {
             let e = url(value).expect_err(value);
             assert!(e.contains("LIMITER_URL"), "{e}");
         }
+    }
+
+    #[test]
+    fn the_consecutive_failures_knob_refuses_boot() {
+        let e = from(&[("LIMITER_BREAKER_FAILURES", "3")]).expect_err("not a knob");
+        assert!(e.contains("LIMITER_BREAKER_REQUESTS"), "{e}");
     }
 
     #[test]

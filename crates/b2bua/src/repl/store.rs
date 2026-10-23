@@ -35,7 +35,9 @@ use super::resurrection::{Burial, ResurrectionTombstones};
 use super::shed_marks::ShedMarks;
 use crate::store::{
     locked, CallStore, InMemoryCallStore, PartitionRole, PropagateDirection, PutOpts, StoreError,
+    DISPLACED_BODIES, REPLICA_METADATA, RESURRECTION_TOMBSTONES, SHED_MARKS,
 };
+use admission::Write;
 
 /// Backstop body-TTL (ms) applied to a replicated call stored with a non-positive
 /// `ttl_ms`. It bounds a ghost — a replica whose `delete` was missed during a
@@ -73,9 +75,7 @@ struct CallMeta {
     /// reached. A later failover/reclaim re-anchors the call's ABSOLUTE
     /// `TimerEntry.fire_at` deadlines (minted on the ORIGIN node's clock) by
     /// adding this offset, bounding restore skew to ~replication latency. The
-    /// offset includes one transit latency — acceptable at in-cluster ms scale.
-    // FIXME(repl): a local write re-mints the deadlines in this node's frame, so the
-    // carried offset re-anchors them wrongly on a later takeover; it should carry "none".
+    /// offset includes one transit latency.
     skew_offset_ms: Option<i64>,
     /// Whether a forward flush has ever shown this Element an ANSWERED call —
     /// the authority's own view of it, taken or refused. Set by the forward
@@ -146,8 +146,8 @@ impl ReplicatingCallStore {
     /// resurrection-guard prune gap.
     pub fn map_lens(&self) -> (usize, usize, usize, usize) {
         let (bodies, indexes) = self.inner.lens();
-        let meta = locked(&self.meta, "replica metadata").len();
-        let tomb = locked(&self.tombstones, "resurrection tombstones").len();
+        let meta = locked(&self.meta, REPLICA_METADATA).len();
+        let tomb = locked(&self.tombstones, RESURRECTION_TOMBSTONES).len();
         (bodies, indexes, meta, tomb)
     }
 
@@ -190,7 +190,7 @@ impl ReplicatingCallStore {
         if self.is_expired(call_ref) {
             return None;
         }
-        locked(&self.meta, "replica metadata")
+        locked(&self.meta, REPLICA_METADATA)
             .get(call_ref)
             .map(|m| (m.meta.call_gen, m.meta.call_bgen))
     }
@@ -201,7 +201,7 @@ impl ReplicatingCallStore {
     /// failover/reclaim hydration reads this to re-anchor the call's absolute
     /// timer deadlines before re-arming them. Pure read (one brief lock).
     pub fn skew_offset_ms(&self, call_ref: &str) -> Option<i64> {
-        locked(&self.meta, "replica metadata").get(call_ref).and_then(|m| m.skew_offset_ms)
+        locked(&self.meta, REPLICA_METADATA).get(call_ref).and_then(|m| m.skew_offset_ms)
     }
 
     /// Snapshot the LIVE callRef KEYS stored in `(role, primary)` under a BRIEF
@@ -213,7 +213,7 @@ impl ReplicatingCallStore {
     /// `None` anyway). Pure read; no body touched.
     pub fn scan_call_refs(&self, role: PartitionRole, primary: &str) -> Vec<String> {
         let now = self.clock.now_ms();
-        let meta = locked(&self.meta, "replica metadata");
+        let meta = locked(&self.meta, REPLICA_METADATA);
         meta.iter()
             .filter(|(_, m)| m.role == role && m.primary == primary)
             .filter(|(_, m)| !matches!(m.expiry_at_ms, Some(e) if now >= e))
@@ -246,7 +246,7 @@ impl ReplicatingCallStore {
     /// it re-serves the call, closing that un-backed-up window. No-op if we hold
     /// no meta entry for the ref yet. Pure metadata; no body / changelog touched.
     pub fn reestablish_backup(&self, call_ref: &str, backup: &str) {
-        if let Some(m) = locked(&self.meta, "replica metadata").get_mut(call_ref) {
+        if let Some(m) = locked(&self.meta, REPLICA_METADATA).get_mut(call_ref) {
             m.backup = Some(backup.to_string());
         }
     }
@@ -261,7 +261,7 @@ impl ReplicatingCallStore {
     /// One brief lock; no body touched. Includes expired-but-not-yet-reaped
     /// entries — the reaper, not the gauge, prunes.
     pub fn meta_counts(&self) -> (u64, u64) {
-        let total = locked(&self.meta, "replica metadata").len() as u64;
+        let total = locked(&self.meta, REPLICA_METADATA).len() as u64;
         (total, self.backup_held())
     }
 
@@ -285,7 +285,7 @@ impl ReplicatingCallStore {
         ttl_ms: i64,
     ) {
         let expiry = self.expiry_for(self.clock.now_ms(), ttl_ms);
-        locked(&self.shed, "shed marks").mark(call_ref, primary, gen, floor, expiry);
+        locked(&self.shed, SHED_MARKS).mark(call_ref, primary, gen, floor, expiry);
     }
 
     /// The highest position `primary`'s flow may report while it streams
@@ -293,14 +293,14 @@ impl ReplicatingCallStore {
     /// when it has none. Marks an older incarnation sent are dropped first: a
     /// rebooted primary serves none of their calls.
     pub fn shed_floor(&self, primary: &str, gen: u64) -> Option<Watermark> {
-        let mut shed = locked(&self.shed, "shed marks");
+        let mut shed = locked(&self.shed, SHED_MARKS);
         shed.drop_older(primary, gen);
         shed.floor(primary)
     }
 
     /// Drop every shed mark of `primary`.
     pub fn clear_shed_of(&self, primary: &str) {
-        locked(&self.shed, "shed marks").clear_primary(primary);
+        locked(&self.shed, SHED_MARKS).clear_primary(primary);
     }
 
     /// Whether a `Put` of `incarnation` of `call_ref` would resurrect a call
@@ -308,7 +308,7 @@ impl ReplicatingCallStore {
     /// [`put_call`](CallStore::put_call) would ignore it.
     pub fn buries(&self, call_ref: &str, incarnation: Option<&str>) -> bool {
         let now = self.clock.now_ms();
-        locked(&self.tombstones, "resurrection tombstones")
+        locked(&self.tombstones, RESURRECTION_TOMBSTONES)
             .burial(call_ref, incarnation, now)
             .is_some()
     }
@@ -320,7 +320,7 @@ impl ReplicatingCallStore {
     /// it settles an expired one. Calls written again after the take are
     /// handed again.
     pub fn take_displaced(&self) -> Vec<Arc<[u8]>> {
-        locked(&self.displaced, "displaced bodies").drain().map(|(_, body)| body).collect()
+        locked(&self.displaced, DISPLACED_BODIES).drain().map(|(_, body)| body).collect()
     }
 
     /// The call incarnation of the body stored for a callRef, or `None` when
@@ -329,14 +329,12 @@ impl ReplicatingCallStore {
         if self.is_expired(call_ref) {
             return None;
         }
-        locked(&self.meta, "replica metadata")
-            .get(call_ref)
-            .and_then(|m| m.meta.incarnation.clone())
+        locked(&self.meta, REPLICA_METADATA).get(call_ref).and_then(|m| m.meta.incarnation.clone())
     }
 
     /// Standing shed marks, all primaries.
     pub fn shed_count(&self) -> usize {
-        locked(&self.shed, "shed marks").len()
+        locked(&self.shed, SHED_MARKS).len()
     }
 
     /// Account one `meta` entry leaving role `old` for role `new` (`None` =
@@ -366,7 +364,7 @@ impl ReplicatingCallStore {
     /// once the authority has published it, it has it. No-op for a ref we hold no
     /// meta for.
     pub fn note_authority_answer(&self, call_ref: &str) {
-        if let Some(m) = locked(&self.meta, "replica metadata").get_mut(call_ref) {
+        if let Some(m) = locked(&self.meta, REPLICA_METADATA).get_mut(call_ref) {
             m.authority_answered = true;
         }
     }
@@ -379,20 +377,20 @@ impl ReplicatingCallStore {
     ///
     /// [`note_authority_answer`]: Self::note_authority_answer
     pub fn authority_answered(&self, call_ref: &str) -> bool {
-        locked(&self.meta, "replica metadata").get(call_ref).is_some_and(|m| m.authority_answered)
+        locked(&self.meta, REPLICA_METADATA).get(call_ref).is_some_and(|m| m.authority_answered)
     }
 
     /// Is this call's body past its TTL? An expired body reads as absent until
     /// [`reap`](Self::reap) evicts it. Pure read.
     fn is_expired(&self, call_ref: &str) -> bool {
         let now = self.clock.now_ms();
-        let meta = locked(&self.meta, "replica metadata");
+        let meta = locked(&self.meta, REPLICA_METADATA);
         matches!(meta.get(call_ref), Some(m) if matches!(m.expiry_at_ms, Some(e) if now >= e))
     }
 
     /// The refs whose body is expired at `now_ms`.
     fn expired_snapshot(&self, now_ms: i64) -> Vec<String> {
-        locked(&self.meta, "replica metadata")
+        locked(&self.meta, REPLICA_METADATA)
             .iter()
             .filter(|(_, m)| matches!(m.expiry_at_ms, Some(e) if now_ms >= e))
             .map(|(k, _)| k.clone())
@@ -408,7 +406,7 @@ impl ReplicatingCallStore {
     fn evict_snapshot(&self, expired: Vec<String>, now_ms: i64) -> Vec<Arc<[u8]>> {
         let mut evicted = Vec::with_capacity(expired.len());
         for call_ref in &expired {
-            let mut meta = locked(&self.meta, "replica metadata");
+            let mut meta = locked(&self.meta, REPLICA_METADATA);
             let still_expired = meta
                 .get(call_ref)
                 .is_some_and(|m| matches!(m.expiry_at_ms, Some(e) if now_ms >= e));
@@ -435,96 +433,11 @@ impl ReplicatingCallStore {
     /// after advancing the clock.
     #[must_use = "an evicted body may owe a release the caller must settle"]
     pub async fn reap(&self, now_ms: i64) -> Vec<Arc<[u8]>> {
-        locked(&self.tombstones, "resurrection tombstones").prune(now_ms);
-        locked(&self.shed, "shed marks").reap(now_ms);
+        locked(&self.tombstones, RESURRECTION_TOMBSTONES).prune(now_ms);
+        locked(&self.shed, SHED_MARKS).reap(now_ms);
         self.changelog.reap(now_ms);
         let expired = self.expired_snapshot(now_ms);
         self.evict_snapshot(expired, now_ms)
-    }
-}
-
-/// What a write is, for the incarnation rule of [`ReplicatingCallStore::admits`].
-#[derive(Clone, Copy)]
-struct Write {
-    role: PartitionRole,
-    direction: Option<PropagateDirection>,
-    now: i64,
-}
-
-impl ReplicatingCallStore {
-    /// The incarnation rule of a write of `incarnation` of `call_ref`, under
-    /// the metadata lock (ADR-0014, "`(p,b)` orders one call incarnation").
-    /// `false` leaves the store as it is:
-    ///
-    /// - a buried call stays buried (the resurrection guard); a write of a call
-    ///   another one replaced re-stamps its burial, and a backup keeps it for
-    ///   the replica reap;
-    /// - an acting backup's write (`Reverse`) never replaces another call: the
-    ///   authority replaced the call it serves, so the call is buried as
-    ///   replaced and its body kept for the reap.
-    ///
-    /// `true` stores the write. When it replaces another call, that call's
-    /// record, body and index keys go first and the call is buried as
-    /// replaced; a backup keeps its body for the reap when the body is a
-    /// version a backup authored (`b > 0`).
-    // FIXME(repl): the tombstone refuses a deferred terminal for a ref this node
-    // already discharged, losing the record; yield to a terminal it never saw.
-    fn admits(
-        &self,
-        meta: &mut HashMap<String, CallMeta>,
-        call_ref: &str,
-        incarnation: Option<&str>,
-        body: &Arc<[u8]>,
-        write: Write,
-    ) -> bool {
-        let mut tombstones = locked(&self.tombstones, "resurrection tombstones");
-        let keep_for_reap = |incarnation: Option<&str>, body: &Arc<[u8]>| {
-            if let Some(id) = incarnation {
-                locked(&self.displaced, "displaced bodies").insert(id.to_string(), body.clone());
-            }
-        };
-        match tombstones.burial(call_ref, incarnation, write.now) {
-            Some(Burial::Deleted) => return false,
-            Some(Burial::Replaced) => {
-                // A copy still writing the replaced call keeps it buried for as
-                // long as it writes, not just the window after the replacement.
-                if let Some(id) = incarnation {
-                    tombstones.bury(call_ref, Some(id.to_string()), Burial::Replaced, write.now);
-                }
-                if write.role == PartitionRole::Backup {
-                    keep_for_reap(incarnation, body);
-                }
-                return false;
-            }
-            None => {}
-        }
-        let held = meta.get(call_ref).and_then(|m| m.meta.incarnation.clone());
-        if !is_another_call(held.as_deref(), incarnation) {
-            return true;
-        }
-        if write.direction == Some(PropagateDirection::Reverse) {
-            let owned = incarnation.map(str::to_string);
-            tombstones.bury(call_ref, owned, Burial::Replaced, write.now);
-            if write.role == PartitionRole::Backup {
-                keep_for_reap(incarnation, body);
-            }
-            return false;
-        }
-        if let Some(gone) = meta.remove(call_ref) {
-            self.account_role(Some(gone.role), None);
-            let removed =
-                self.inner.remove_body(gone.role, &gone.primary, call_ref, &gone.meta.indexes);
-            tombstones.bury(call_ref, gone.meta.incarnation.clone(), Burial::Replaced, write.now);
-            // Only a version a backup authored (`b > 0`) can be a terminal it
-            // deferred; the authority settles its own (`b == 0`).
-            let backup_authored = gone.meta.call_bgen > 0;
-            if let (PartitionRole::Backup, true, Some(removed)) =
-                (gone.role, backup_authored, removed)
-            {
-                keep_for_reap(gone.meta.incarnation.as_deref(), &removed);
-            }
-        }
-        true
     }
 }
 
@@ -587,13 +500,15 @@ impl CallStore for ReplicatingCallStore {
         // may change, and rebuilding the entry from this write alone would
         // silently clear each of them.
         {
-            let mut meta = locked(&self.meta, "replica metadata");
+            let mut meta = locked(&self.meta, REPLICA_METADATA);
             // An unnamed write is one of the held call: it takes its name.
             ref_meta.incarnation = ref_meta
                 .incarnation
                 .take()
                 .or_else(|| meta.get(call_ref).and_then(|m| m.meta.incarnation.clone()));
-            let write = Write { role, direction: opts.direction, now };
+            let version = (call_gen, call_bgen);
+            let write =
+                Write { role, direction: opts.direction, now, version, adopted: opts.adopted };
             if !self.admits(&mut meta, call_ref, ref_meta.incarnation.as_deref(), &body, write) {
                 return Ok(());
             }
@@ -632,7 +547,7 @@ impl CallStore for ReplicatingCallStore {
             }
         }
 
-        locked(&self.shed, "shed marks").clear(call_ref);
+        locked(&self.shed, SHED_MARKS).clear(call_ref);
 
         // HA path only: non-blocking changelog bump for the pulling peer.
         if let Some(peer) = &opts.peer {
@@ -653,9 +568,9 @@ impl CallStore for ReplicatingCallStore {
     ) -> Result<(), StoreError> {
         let deleted_at = self.clock.now_ms();
         let incarnation = {
-            let mut meta = locked(&self.meta, "replica metadata");
+            let mut meta = locked(&self.meta, REPLICA_METADATA);
             let held = meta.get(call_ref).and_then(|m| m.meta.incarnation.as_deref());
-            let mut tombstones = locked(&self.tombstones, "resurrection tombstones");
+            let mut tombstones = locked(&self.tombstones, RESURRECTION_TOMBSTONES);
             // A delete of another call than the held one ends that call alone:
             // the held call stays, and nothing propagates over its entry.
             if meta.contains_key(call_ref) && is_another_call(held, opts.incarnation.as_deref()) {
@@ -675,7 +590,7 @@ impl CallStore for ReplicatingCallStore {
             tombstones.bury(call_ref, incarnation.clone(), Burial::Deleted, deleted_at);
             incarnation
         };
-        locked(&self.shed, "shed marks").clear(call_ref);
+        locked(&self.shed, SHED_MARKS).clear(call_ref);
 
         if let Some(peer) = &opts.peer {
             let partition = Self::partition_for(opts.direction);
@@ -713,7 +628,7 @@ impl BodySource for ReplicatingCallStore {
     }
 
     fn read_meta(&self, call_ref: &str) -> Option<RefMeta> {
-        locked(&self.meta, "replica metadata").get(call_ref).map(|m| m.meta.clone())
+        locked(&self.meta, REPLICA_METADATA).get(call_ref).map(|m| m.meta.clone())
     }
 
     /// Body and metadata under the metadata lock, the lock every write holds,
@@ -725,7 +640,7 @@ impl BodySource for ReplicatingCallStore {
         call_ref: &str,
     ) -> Option<(Arc<[u8]>, RefMeta)> {
         let now = self.clock.now_ms();
-        let meta = locked(&self.meta, "replica metadata");
+        let meta = locked(&self.meta, REPLICA_METADATA);
         let m = meta.get(call_ref)?;
         if matches!(m.expiry_at_ms, Some(e) if now >= e) {
             return None;
@@ -742,7 +657,7 @@ impl BodySource for ReplicatingCallStore {
     /// yet-reaped refs are filtered out (the body would read `None` anyway).
     fn scan_refs_backed_by(&self, primary: &str, backup: &str) -> Vec<String> {
         let now = self.clock.now_ms();
-        let meta = locked(&self.meta, "replica metadata");
+        let meta = locked(&self.meta, REPLICA_METADATA);
         meta.iter()
             .filter(|(_, m)| m.role == PartitionRole::Primary && m.primary == primary)
             .filter(|(_, m)| m.backup.as_deref() == Some(backup))
@@ -752,132 +667,6 @@ impl BodySource for ReplicatingCallStore {
     }
 }
 
+mod admission;
 #[cfg(test)]
-mod backup_count_tests {
-    //! Pins `backup_held` to a scan of the meta map through every writer that
-    //! adds, re-roles or removes an entry.
-
-    use super::*;
-
-    fn scanned(store: &ReplicatingCallStore) -> u64 {
-        let meta = store.meta.lock().unwrap();
-        meta.values().filter(|m| m.role == PartitionRole::Backup).count() as u64
-    }
-
-    async fn put(store: &ReplicatingCallStore, role: PartitionRole, call_ref: &str, ttl_ms: i64) {
-        store
-            .put_call(role, "w0", call_ref, b"b".to_vec(), &[], ttl_ms, 1, 0, &PutOpts::default())
-            .await
-            .unwrap();
-    }
-
-    /// A refresh that lands between the reap's snapshot and its eviction (a
-    /// healed peer's flush while the sweep runs) keeps its fresh body and
-    /// meta, and the reap hands nothing back for it.
-    #[tokio::test(start_paused = true)]
-    async fn a_refresh_landing_after_the_reap_snapshot_survives_the_reap() {
-        let clock = Clock::test_at(0);
-        let store = ReplicatingCallStore::new(1, clock.clone());
-        store
-            .put_call(
-                PartitionRole::Backup,
-                "w0",
-                "w0|r|t",
-                b"old".to_vec(),
-                &[],
-                1_000,
-                1,
-                0,
-                &PutOpts::default(),
-            )
-            .await
-            .unwrap();
-        tokio::time::advance(std::time::Duration::from_millis(2_000)).await;
-
-        let expired = store.expired_snapshot(clock.now_ms());
-        assert_eq!(expired.len(), 1, "the old body is expired");
-        store
-            .put_call(
-                PartitionRole::Backup,
-                "w0",
-                "w0|r|t",
-                b"new".to_vec(),
-                &[],
-                60_000,
-                2,
-                0,
-                &PutOpts::default(),
-            )
-            .await
-            .unwrap();
-        let evicted = store.evict_snapshot(expired, clock.now_ms());
-
-        assert!(evicted.is_empty(), "nothing is handed back for a refreshed ref");
-        let body = store.get_call(PartitionRole::Backup, "w0", "w0|r|t").await.unwrap();
-        assert_eq!(body.as_deref(), Some(&b"new"[..]), "the fresh body survives");
-        assert_eq!(
-            store.current_cv(PartitionRole::Backup, "w0", "w0|r|t"),
-            Some((2, 0)),
-            "and its meta"
-        );
-        assert_eq!(store.backup_held(), 1);
-    }
-
-    /// A panic under the metadata lock never takes the store down with it:
-    /// every later reader and the reap go on with the data as it stands.
-    #[tokio::test(start_paused = true)]
-    async fn a_poisoned_metadata_lock_still_reads_and_reaps() {
-        let clock = Clock::test_at(0);
-        let store = ReplicatingCallStore::new(1, clock.clone());
-        put(&store, PartitionRole::Backup, "w0|p|t", 1_000).await;
-        let poisoner = store.clone();
-        let _ = std::thread::spawn(move || {
-            let _held = poisoner.meta.lock();
-            panic!("poison the metadata lock");
-        })
-        .join();
-        assert!(store.meta.is_poisoned());
-
-        tokio::time::advance(std::time::Duration::from_millis(2_000)).await;
-        assert!(store.get_call(PartitionRole::Backup, "w0", "w0|p|t").await.unwrap().is_none());
-        assert_eq!(store.reap(clock.now_ms()).await.len(), 1, "the reap still evicts");
-        assert_eq!(store.backup_held(), 0);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn the_backup_count_matches_a_scan_through_every_writer() {
-        let clock = Clock::test_at(0);
-        let store = ReplicatingCallStore::new(1, clock.clone()).with_default_ttl_ms(0);
-        let check = |want: u64| {
-            assert_eq!(store.backup_held(), want);
-            assert_eq!(store.backup_held(), scanned(&store));
-        };
-
-        put(&store, PartitionRole::Backup, "w0|a|t", 0).await;
-        put(&store, PartitionRole::Backup, "w0|b|t", 0).await;
-        put(&store, PartitionRole::Primary, "w1|c|t", 0).await;
-        check(2);
-
-        put(&store, PartitionRole::Backup, "w0|a|t", 0).await;
-        check(2);
-        put(&store, PartitionRole::Primary, "w0|a|t", 0).await;
-        check(1);
-        put(&store, PartitionRole::Backup, "w0|a|t", 0).await;
-        check(2);
-
-        store
-            .delete_call(PartitionRole::Backup, "w0", "w0|b|t", &[], false, &PutOpts::default())
-            .await
-            .unwrap();
-        check(1);
-
-        put(&store, PartitionRole::Backup, "w0|d|t", 1_000).await;
-        put(&store, PartitionRole::Backup, "w0|e|t", 1_000).await;
-        check(3);
-        tokio::time::advance(std::time::Duration::from_millis(2_000)).await;
-        assert!(store.get_call(PartitionRole::Backup, "w0", "w0|d|t").await.unwrap().is_none());
-        check(3);
-        assert_eq!(store.reap(clock.now_ms()).await.len(), 2, "the reap evicts both");
-        check(1);
-    }
-}
+mod backup_count_tests;

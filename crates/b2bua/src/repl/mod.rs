@@ -16,12 +16,17 @@
 //!   impl no-ops (`peer`/`direction`/`call_gen`/`ttl`), and **atomically bumps
 //!   the changelog** on every mutation.
 
+mod backend_gate;
 mod changelog;
+mod departed;
 mod incarnation;
+mod peer_body;
+mod peer_resolver;
 mod puller;
 mod readiness;
 mod replication;
 mod resurrection;
+mod router_sink;
 mod self_endpoint;
 mod server;
 mod shed_marks;
@@ -31,13 +36,19 @@ mod supervisor;
 pub use changelog::{
     BodySource, Changelog, RefMeta, DEFAULT_DEAD_PEER_TTL_MS, DEFAULT_TOMBSTONE_TTL_MS,
 };
+pub use departed::{departed_probe, DepartedProbe};
+pub(crate) use peer_body::decode_peer_body;
+pub use peer_resolver::{AddrResolver, FnPeerResolver, PeerResolver};
 pub use puller::{Puller, PullerConfig, PullerStatus};
-pub use readiness::{Readiness, ReadinessSource, ReadinessState};
+pub use readiness::{
+    CordonRefused, OptionsReport, Readiness, ReadinessSource, ReadinessState, Refusal,
+};
 pub use replication::{flush_replicated, replication_target, ReplicationPlan};
+pub use router_sink::RouterSink;
 pub use self_endpoint::{SelfEndpoint, WithdrawalCondition};
-pub use server::ReplServer;
+pub use server::{ReplServer, ServeConfig};
 pub use store::ReplicatingCallStore;
-pub use supervisor::{AddrResolver, FnPeerResolver, PeerLink, PeerResolver, ReplicationSupervisor};
+pub use supervisor::{PeerLink, ReplicationSupervisor};
 
 #[cfg(test)]
 mod tests;
@@ -46,7 +57,22 @@ mod tests;
 mod test_support;
 
 #[cfg(test)]
+mod departed_tests;
+
+#[cfg(test)]
+mod departure_signal_tests;
+
+#[cfg(test)]
 mod idle_wait_tests;
+
+#[cfg(test)]
+mod heal_reach_tests;
+
+#[cfg(test)]
+mod link_liveness_tests;
+
+#[cfg(test)]
+mod membership_sync_tests;
 
 #[cfg(test)]
 mod s5_tests;
@@ -71,6 +97,15 @@ mod s12_tests;
 
 #[cfg(test)]
 mod s13_tests;
+
+#[cfg(test)]
+mod frame_cap_tests;
+
+#[cfg(test)]
+mod puller_restart_tests;
+
+#[cfg(test)]
+mod reconcile_restart_tests;
 
 #[cfg(test)]
 mod real_transport_tests;

@@ -18,11 +18,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use sip_clock::Clock;
+use sip_message::Bytes;
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 
+use crate::arrival::Arrival;
 use crate::fragmentation::pin_fragmentation;
 use crate::net::{Counters, SignalingNetwork, UdpEndpoint};
+use crate::pre_ingress;
 use crate::queue::PacketQueue;
 use crate::socket_stats::{rx_dropped, socket_buffers};
 use crate::types::{
@@ -147,10 +150,34 @@ impl SignalingNetwork for RealSignalingNetwork {
 /// inequality is the only thing standing between the kernel's reassembled
 /// datagram and a torn SIP message (ADR-0027).
 const RECV_BUF_LEN: usize = 65_536;
+#[expect(clippy::disallowed_macros, reason = "checked at compile time")]
 const _: () = assert!(RECV_BUF_LEN > crate::types::MAX_UDP_PAYLOAD);
 
+/// The wait after a receive error that is not about one datagram, so a lasting
+/// failure (memory exhausted) does not spin the pump. The kernel buffers what
+/// arrives meanwhile.
+const RECV_PAUSE: Duration = Duration::from_millis(10);
+
+/// The pause before the next receive after `error`: none for an error that
+/// one datagram or a signal caused (an ICMP refusal or unreachable, which the
+/// kernel reports on a connected socket only; an interrupted call),
+/// [`RECV_PAUSE`] for any other.
+fn recv_pause(error: &std::io::Error) -> Option<Duration> {
+    use std::io::ErrorKind::{
+        ConnectionRefused, ConnectionReset, HostUnreachable, Interrupted, NetworkUnreachable,
+    };
+    match error.kind() {
+        ConnectionRefused | ConnectionReset | HostUnreachable | NetworkUnreachable
+        | Interrupted => None,
+        _ => Some(RECV_PAUSE),
+    }
+}
+
 /// The receive pump. Mirrors the source's `socket.on("message", ...)` handler:
-/// depth-aware pre-ingress dispatch, tail-drop on a full queue.
+/// depth-aware pre-ingress dispatch, tail-drop on a full queue. An accepted
+/// datagram is queued with the parse its hook made, if any. A receive
+/// error never ends it: each is counted ([`UdpEndpointCounters::recv_errors`])
+/// and the pump reads on, after [`recv_pause`].
 async fn recv_loop(
     socket: Arc<UdpSocket>,
     queue: Arc<PacketQueue>,
@@ -158,18 +185,29 @@ async fn recv_loop(
     pre_ingress: Option<PreIngressHook>,
     clock: Clock,
 ) {
+    // However the pump ends — an abort, a panic — the queue closes, so the
+    // endpoint's `recv()` resolves to None and the owner task can wind down. Without it the layer goes permanently DEAF — sends
+    // still work, nothing is ever received, no panic/metric/readiness change —
+    // because the endpoint is owned by the very owner task blocked on
+    // `recv()`, so its `Drop` (the other `close` site) can never run until
+    // that `recv()` returns.
+    let _closes = queue.close_on_drop();
     let mut buf = vec![0u8; RECV_BUF_LEN];
-    // A `recv_from` error is treated as terminal (socket closed) and ends the
-    // pump. The source logged and continued on transient errors; for our
-    // test/loopback usage surfacing an error here is effectively terminal.
-    while let Ok((n, src)) = socket.recv_from(&mut buf).await {
-        let raw = buf[..n].to_vec();
-        let depth = queue.depth();
-        let action = match &pre_ingress {
-            Some(hook) => hook(&raw, src, depth),
-            None => PreIngressAction::Accept,
+    loop {
+        let (n, src) = match socket.recv_from(&mut buf).await {
+            Ok(received) => received,
+            Err(error) => {
+                counters.recv_errors.fetch_add(1, Ordering::Relaxed);
+                if let Some(pause) = recv_pause(&error) {
+                    tokio::time::sleep(pause).await;
+                }
+                continue;
+            }
         };
-        match action {
+        // `recv_from` reports at most the buffer's length.
+        let mut arrival = Arrival::new(Bytes::copy_from_slice(buf.get(..n).unwrap_or(&buf)));
+        let depth = queue.depth();
+        match pre_ingress::judge(pre_ingress.as_ref(), &mut arrival, src, depth, &counters) {
             PreIngressAction::Drop => {
                 counters.pre_ingress_dropped.fetch_add(1, Ordering::Relaxed);
             }
@@ -184,8 +222,8 @@ async fn recv_loop(
                 }
             }
             PreIngressAction::Accept => {
-                let pkt = UdpPacket { raw, src, arrival_ms: clock.now_ms().max(0) as u64 };
-                if queue.offer(pkt) {
+                let arrival_ms = u64::try_from(clock.now_ms()).unwrap_or(0);
+                if queue.offer(arrival.into_packet(src, arrival_ms)) {
                     counters.enqueued.fetch_add(1, Ordering::Relaxed);
                 } else {
                     counters.tail_dropped.fetch_add(1, Ordering::Relaxed);
@@ -193,13 +231,6 @@ async fn recv_loop(
             }
         }
     }
-    // The pump is terminating (recv_from error). CLOSE the queue so the
-    // endpoint's `recv()` resolves to None and the owner task can wind down.
-    // Without this the layer goes permanently DEAF — sends still work, nothing is
-    // ever received, no panic/metric/readiness change — because the endpoint is
-    // owned by the very owner task blocked on `recv()`, so its `Drop` (the only
-    // other `close` site) can never run until that `recv()` returns.
-    queue.close();
 }
 
 /// The one send path of a real socket: one non-blocking `sendto` on the fd,
@@ -284,3 +315,6 @@ impl Drop for RealEndpoint {
         self.queue.close();
     }
 }
+
+#[cfg(test)]
+mod tests;

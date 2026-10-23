@@ -1,20 +1,13 @@
 //! Injectable WIRE-fault seam: a control handle a test flips so the B2BUA emits
 //! one named RFC deviation on purpose. It exists so the post-run RFC audit can
 //! be proven to REACH its gate — a zero-finding run proves only that zero
-//! findings pass. Default = no faults, a no-op atomic read on the guarded path.
+//! findings pass. Default = no faults. A turn reads the handle once, as it
+//! starts, into a [`WireFaultSet`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-/// A switchable wire fault, one per guarded emission site.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WireFaultPoint {
-    /// The in-dialog keepalive OPTIONS reuses the dialog's current local CSeq
-    /// instead of advancing it (RFC 3261 §12.2.1.1) — the defect
-    /// `cseq-in-dialog-order` names, invisible to a UA that answers what it is
-    /// handed.
-    KeepaliveCseqReuse,
-}
+pub use crate::wire_fault_set::{WireFaultPoint, WireFaultSet};
 
 #[derive(Default)]
 struct Inner {
@@ -52,6 +45,12 @@ impl WireFaults {
     pub fn is_armed(&self, point: WireFaultPoint) -> bool {
         self.cell(point).load(Ordering::Relaxed)
     }
+
+    /// The faults armed now, as a turn starting now reads them.
+    pub fn snapshot(&self) -> WireFaultSet {
+        let point = WireFaultPoint::KeepaliveCseqReuse;
+        WireFaultSet::none().with(point, self.is_armed(point))
+    }
 }
 
 #[cfg(test)]
@@ -67,5 +66,15 @@ mod tests {
         assert!(twin.is_armed(WireFaultPoint::KeepaliveCseqReuse));
         twin.disarm(WireFaultPoint::KeepaliveCseqReuse);
         assert!(!faults.is_armed(WireFaultPoint::KeepaliveCseqReuse));
+    }
+
+    #[test]
+    fn a_snapshot_holds_what_was_armed_when_it_was_taken() {
+        let faults = WireFaults::none();
+        faults.arm(WireFaultPoint::KeepaliveCseqReuse);
+        let taken = faults.snapshot();
+        faults.disarm(WireFaultPoint::KeepaliveCseqReuse);
+        assert!(taken.is_armed(WireFaultPoint::KeepaliveCseqReuse));
+        assert!(!faults.snapshot().is_armed(WireFaultPoint::KeepaliveCseqReuse));
     }
 }

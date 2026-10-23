@@ -52,10 +52,10 @@ before coding.
 | `topology` crate | New `Peer.failure_domain` field; `peers_from_slices` reads `zone`/`node_name`. Consumed by both proxy and b2bua. | **Low** — additive field; existing tests pass an explicit domain or `None`. |
 | `sip-proxy` | `WorkerEntry.failure_domain`; `encode_stickiness` gains a foreign-domain filter + degraded fallback + metric. **Changes which worker becomes `w_bak`** for new dialogs. | **Medium** — alters backup placement; cookie *format* unchanged (still `w_pri`/`w_bak` ids), so in-flight dialogs are unaffected. |
 | `b2bua` | Periodic self-scan emitting the degraded metric. No selection change. | **Low** — read-only observability. |
-| Manifests | `20-worker.yaml` split into 3 zoned StatefulSets; new PDB; proxy anti-affinity key + unicast keepalived + nodeSelector; `cluster.yaml` 6 zoned nodes. | **High (operational)** — deployment topology change; needs a fresh `run.sh up`. No data migration (early project). |
+| Chart | the worker StatefulSet split into 3 zoned StatefulSets; new PDB; proxy anti-affinity key + unicast keepalived + nodeSelector; `cluster.yaml` 6 zoned nodes. | **High (operational)** — deployment topology change; needs a fresh `deploy/helm/kind-lab.sh up`. No data migration (early project). |
 | Wire / storage | **None.** Cookie fields, callRef, replication frames, `topology.bak` semantics all unchanged. | — |
 
-**Rollback:** revert the manifest split (back to one StatefulSet, hostname proxy
+**Rollback:** revert the chart split (back to one StatefulSet, hostname proxy
 anti-affinity, multicast) and the `encode_stickiness` filter; the `Peer`/
 `WorkerEntry` field is harmless if left (defaults to `None` → filter is a no-op,
 i.e. the single-zone behaviour). No persisted state to undo.
@@ -102,8 +102,9 @@ readiness-gated) by design.
     `sip_proxy_degraded_backup_total{reason="no_foreign_domain"}` counter.
   - if the primary's domain is `None` (degenerate cluster), behave as today
     (no filter) — never *worse* than current.
-- **Impact:** changes `w_bak` for *new* dialogs only. `decode_stickiness`,
-  ACK/CANCEL exemption, fresh-pod guard, drain grace all unchanged.
+- **Impact:** changes `w_bak` for *new* dialogs only. `decode_stickiness` (the
+  liveness routing of ADR-0050 §4) unchanged; the domain filter applies within
+  §7's accepting-first choice.
 - **Tests:** unit — primary in z1 with alive z2/z3 ⇒ `w_bak` is z2 or z3, never
   z1; only-z1-alive ⇒ same-zone `w_bak` + counter bumped; `None`-domain ⇒
   identical to the pre-change golden.
@@ -118,25 +119,25 @@ readiness-gated) by design.
 - **Impact:** read-only. **Tests:** inject a same-domain `topology.bak` →
   gauge = 1.
 
-### Slice 4 — manifests: zoned StatefulSets + PDB + proxy
+### Slice 4 — chart: zoned StatefulSets + PDB + proxy
 
-- `deploy/k8s/manifests/20-worker.yaml` → **three** StatefulSets
+- `deploy/helm/siprust/templates/worker.yaml` → **three** StatefulSets
   `b2bua-worker-z{1,2,3}`, each:
   - `nodeAffinity: requiredDuringScheduling` on
     `topology.kubernetes.io/zone In [zN]`.
   - same `serviceName: b2bua-worker`, label `app=b2bua-worker`, identical env
     except none zone-specific (zone comes from the node, read via EndpointSlice).
   - keep the headless Service as-is (selects all three).
-- New `deploy/k8s/manifests/22-worker-pdb.yaml`:
+- New `deploy/helm/siprust/templates/worker-pdb.yaml`:
   `PodDisruptionBudget{ selector app=b2bua-worker, maxUnavailable: 1 }`.
   **Single, global — not per-zone** (per-zone reintroduces acute pair loss, D4).
-- `deploy/k8s/manifests/30-proxy.yaml`:
+- `deploy/helm/siprust/templates/proxy.yaml` and `files/keepalived.conf`:
   - `podAntiAffinity.topologyKey` → `topology.kubernetes.io/zone`.
   - `nodeSelector` → land on 2 worker-zone nodes (drop dedicated `tier=edge`).
   - keepalived ConfigMap → **unicast**: `unicast_src_ip` = own node IP,
     `unicast_peer` = the other proxy's node IP (inject via env/downward API, or a
     small init that resolves the peer from the proxy EndpointSlice).
-- **Impact:** operational — requires `run.sh up` on the new `cluster.yaml`.
+- **Impact:** operational — requires `deploy/helm/kind-lab.sh up` on the new `cluster.yaml`.
 - `FAILURE_DOMAIN_KEY` env wired into both proxy and worker runners (default
   `topology.kubernetes.io/zone`).
 
@@ -172,26 +173,26 @@ stays a config knob for degenerate clusters.
 
 > **Host memory caveat.** 6 app + control-plane ≈ 7 kind nodes is still heavier
 > than the single-zone cluster — see the OOM notes in
-> `deploy/k8s/cap-kind-memory.sh`. Run `cap-kind-memory.sh` first. A smaller
+> `deploy/k8s/cap-kind-memory.sh` (`kind-lab.sh up` runs it). A smaller
 > "mechanism-only" variant
 > (3 zones × 1 node = 3 app nodes) can validate distinct-zone selection +
 > zone-kill without the 2-per-zone density.
 
 ### Validation on kind
 
-1. `deploy/k8s/run.sh up` on the new cluster.yaml; confirm 3 zoned StatefulSets
+1. `deploy/helm/kind-lab.sh up` and `deploy` on the new cluster.yaml; confirm 3 zoned StatefulSets
    Ready and `kubectl get pods -o wide` shows 2 workers per zone.
 2. **Selection:** place calls; inspect the stickiness cookie / proxy metrics —
    `w_bak` is always in a different zone than `w_pri`;
    `sip_proxy_degraded_backup_total` stays 0.
-3. **Zone kill (D2/D3):** `chaos.sh` kills both workers in z1; assert distinct-zone
+3. **Zone kill (D2/D3):** an HA tooling incident kills both workers in z1; assert distinct-zone
    calls survive (transparent failover), z1 workers reboot **into z1** (pinned),
    reclaim, handback; degraded counter stays 0.
 4. **Serial upgrade (D4):** trigger a rolling restart; assert the PDB serialises it
    (one worker NotReady at a time) and no call is lost.
 5. **Cross-zone VIP (D5):** kill the VIP-master proxy; assert the standby (in the
-   other zone) claims the VIP via **unicast** adverts within <2s and the 90%
-   success bar holds.
+   other zone) claims the VIP via **unicast** adverts within <2s and the
+   `kill_proxy` window stays within its budget.
 
 ---
 

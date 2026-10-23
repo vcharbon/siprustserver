@@ -3,8 +3,9 @@
 //! destination (consumed by later CANCEL / ACK-for-2xx call sites).
 
 use crate::common;
+use call::TxnKind;
 use common::*;
-use sip_txn::{ClientTransactionHandle, TxnKind};
+use sip_txn::ClientTransactionHandle;
 
 #[tokio::test(start_paused = true)]
 async fn send_request_invite_returns_invite_handle() {

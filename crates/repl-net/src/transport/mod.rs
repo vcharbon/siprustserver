@@ -10,34 +10,30 @@
 //! ## The codec plays through every path
 //! `send` always [`encode_frame`](crate::encode_frame)s to bytes and moves the
 //! bytes; `recv` always [`decode_frame`](crate::decode_frame)s back. Even the
-//! in-process [`SimulatedReplicationNetwork`] never passes a `Frame` by
-//! reference — it moves an encoded `Vec<u8>` through its channels — so the wire
-//! codec is exercised in **every** test path (Decision X2), and the recording
-//! layer can decode + display each replication message.
+//! in-process simulated network never passes a `Frame` by reference — it moves
+//! an encoded `Vec<u8>` through its channels — so the wire codec is exercised
+//! in **every** test path (Decision X2), and the recording layer can decode +
+//! display each replication message.
 //!
-//! ## Three impls
-//! - [`SimulatedReplicationNetwork`] — in-process ordered delivery, the
-//!   workhorse for the fake-clock tests (goals 1–2). Mandatory, not a
-//!   convenience: real `TcpStream` readiness does **not** obey
-//!   `tokio::time::pause`, so the paused-clock scenarios *cannot* use real TCP.
-//! - [`RealReplicationNetwork`] — tokio TCP + 4-byte length prefix; goal-3
-//!   only, and its tests run on a **real** (non-paused) runtime.
-//! - [`RecordingReplicationNetwork`] — a decorator that tees every decoded
-//!   frame into a capture sink for the report.
+//! ## The production impl
+//! [`RealReplicationNetwork`] — tokio TCP + 4-byte length prefix; its tests run
+//! on a **real** (non-paused) runtime. The in-process simulated network (the
+//! workhorse of the fake-clock tests: real `TcpStream` readiness does **not**
+//! obey `tokio::time::pause`) and the recording decorator implement the same
+//! seam in `repl-net-testkit`.
 
 mod real;
-mod recording;
-mod simulated;
+mod socket_settings;
 
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
 
+use crate::framing::{frame_with_len_prefix, MAX_FRAME_LEN};
 use crate::Frame;
 
 pub use real::RealReplicationNetwork;
-pub use recording::{CaptureSeq, CapturedFrame, Direction, RecordingReplicationNetwork};
-pub use simulated::{Fault, NodeReplicationNetwork, SimulatedReplicationNetwork};
+pub use socket_settings::SocketSettings;
 
 /// Failure opening an outbound connection.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -71,6 +67,18 @@ pub enum ListenError {
     Io(String),
 }
 
+/// Failure accepting an inbound connection.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum AcceptError {
+    /// The listener is closed: it accepts nothing more.
+    #[error("listener closed")]
+    Closed,
+    /// One accept failed (descriptors exhausted, a handshake aborted, …). The
+    /// listener stays open: the caller accepts again.
+    #[error("accept io error: {0}")]
+    Io(String),
+}
+
 /// Failure sending a frame on a connection.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum SendError {
@@ -81,6 +89,28 @@ pub enum SendError {
     /// Underlying I/O failure (real transport only).
     #[error("send io error: {0}")]
     Io(String),
+    /// The frame, or a frame of a batch, does not encode or exceeds the frame
+    /// cap ([`crate::framing::MAX_FRAME_LEN`]): nothing of the frame or of the
+    /// batch was sent, and the connection stays usable.
+    #[error("frame not sent: {0}")]
+    Unencodable(String),
+}
+
+/// `frame` encoded, within the frame cap; one that does not encode or passes
+/// [`MAX_FRAME_LEN`] is [`SendError::Unencodable`].
+pub fn payload(frame: &Frame) -> Result<Vec<u8>, SendError> {
+    let payload = crate::encode_frame(frame).map_err(|e| SendError::Unencodable(e.to_string()))?;
+    if u32::try_from(payload.len()).map_or(true, |len| len > MAX_FRAME_LEN) {
+        let len = payload.len();
+        return Err(SendError::Unencodable(format!("{len} bytes past the {MAX_FRAME_LEN} cap")));
+    }
+    Ok(payload)
+}
+
+/// `frame` encoded and length-prefixed, as a connection writes it; one that
+/// does not encode or frame is [`SendError::Unencodable`].
+pub fn wire_bytes(frame: &Frame) -> Result<Vec<u8>, SendError> {
+    frame_with_len_prefix(&payload(frame)?).map_err(|e| SendError::Unencodable(e.to_string()))
 }
 
 /// A connection-oriented, reliable, ordered, framed replication network.
@@ -106,9 +136,11 @@ pub trait ReplicationNetwork: Send + Sync {
 /// The accepting side of a bound listener.
 #[async_trait]
 pub trait ReplicationListener: Send + Sync {
-    /// Await the next inbound connection (the server end). `None` once the
-    /// listener is closed and drained.
-    async fn accept(&self) -> Option<Box<dyn ReplicationConnection>>;
+    /// Await the next inbound connection (the server end).
+    /// `Err(AcceptError::Closed)` once the listener is closed and drained;
+    /// `Err(AcceptError::Io)` for one failed accept, after which the listener
+    /// still accepts.
+    async fn accept(&self) -> Result<Box<dyn ReplicationConnection>, AcceptError>;
 
     /// The bound local address.
     fn local_addr(&self) -> SocketAddr;
@@ -135,8 +167,13 @@ pub trait ReplicationConnection: Send + Sync {
     /// loops [`send`](Self::send) (correct, unoptimised); the real TCP transport
     /// overrides it to coalesce. Used by the bulk bootstrap scan, where
     /// hundreds–thousands of small bodies stream back-to-back and a per-frame
-    /// flush collapses throughput on any non-loopback link.
+    /// flush collapses throughput on any non-loopback link. A batch holding a
+    /// frame that does not encode is [`SendError::Unencodable`] and nothing of
+    /// it is sent: the default checks every frame before the first send.
     async fn send_batch(&self, frames: Vec<Frame>) -> Result<(), SendError> {
+        for frame in &frames {
+            wire_bytes(frame)?;
+        }
         for frame in frames {
             self.send(frame).await?;
         }

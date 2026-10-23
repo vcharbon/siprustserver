@@ -7,15 +7,16 @@
 //! never blocks the reactor from answering inbound traffic (the structural fix
 //! for the cascade).
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::Instant;
 
 use sip_message::generators::InDialogMethod;
-use sip_message::{EmitOpts, MessageTemplate};
+use sip_template::{EmitOpts, MessageTemplate};
 
-use super::state::{await_pred, LegPhase, ObservedState, StateInner};
+pub use super::barrier::Barrier;
+use super::endpoint::ForkWinner;
+use super::state::{await_pred, ObservedState};
 use crate::realcall::InvitePlan;
 use crate::StepError;
 
@@ -93,70 +94,6 @@ pub enum FinalAssert {
     NonError,
 }
 
-/// A barrier guard over the observed multi-endpoint state.
-#[derive(Clone)]
-pub enum Barrier {
-    /// Fire immediately (no guard).
-    None,
-    /// Fire once every named leg is at least `Confirmed` — the `established`
-    /// guard (bob's REFER / alice's BYE wait on it).
-    AllConfirmed(&'static [&'static str]),
-    /// Fire once a named predicate over the observed state holds — the open
-    /// form (the refer `merged` conjunction is `Pred`). The name is the bounded
-    /// label a guard-timeout `StepError::who` carries (never free-form).
-    Pred { name: &'static str, pred: Arc<dyn Fn(&StateInner) -> bool + Send + Sync> },
-}
-
-impl Barrier {
-    /// A [`Barrier::Pred`] from a name + predicate (the ergonomic constructor).
-    pub fn pred(
-        name: &'static str,
-        pred: impl Fn(&StateInner) -> bool + Send + Sync + 'static,
-    ) -> Self {
-        Barrier::Pred { name, pred: Arc::new(pred) }
-    }
-
-    /// A barrier that holds once `leg` has received an inbound in-dialog request
-    /// of `method` (the RFC name, e.g. `"INFO"`) — the observed-fact gate that
-    /// orders an origination AFTER a specific inbound request (an MRF's
-    /// `INFO(EOF)` following the worker's `INFO(play)`), replacing a timed
-    /// post-confirm dwell. `name` is the bounded barrier label a guard-timeout
-    /// [`StepError::who`](crate::StepError) carries (never free-form).
-    pub fn received(name: &'static str, leg: &'static str, method: &'static str) -> Self {
-        Barrier::pred(name, move |s| s.leg_received_method(leg, method))
-    }
-
-    /// Whether the guard holds against a state snapshot.
-    pub fn holds(&self, s: &StateInner) -> bool {
-        match self {
-            Barrier::None => true,
-            Barrier::AllConfirmed(roles) => {
-                roles.iter().all(|r| s.leg_at_least(r, LegPhase::Confirmed))
-            }
-            Barrier::Pred { pred, .. } => pred(s),
-        }
-    }
-
-    /// A bounded label for the barrier-timeout `StepError::who` (never free-form).
-    pub fn name(&self) -> &'static str {
-        match self {
-            Barrier::None => "none",
-            Barrier::AllConfirmed(_) => "established",
-            Barrier::Pred { name, .. } => name,
-        }
-    }
-}
-
-impl std::fmt::Debug for Barrier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Barrier::None => f.write_str("Barrier::None"),
-            Barrier::AllConfirmed(roles) => write!(f, "Barrier::AllConfirmed({roles:?})"),
-            Barrier::Pred { name, .. } => write!(f, "Barrier::Pred({name:?})"),
-        }
-    }
-}
-
 /// One deliberate action an endpoint drives. `Clone` (not `Copy` — the REFER
 /// goal carries owned env-derived strings) so the reactor's `select!` arm can
 /// lift it out of the cursor without a borrow escaping the future.
@@ -187,6 +124,30 @@ pub enum GoalStep {
     /// (`ReliableAnswerEarlyUpdate`) answers it 200 and only THEN sends the final
     /// 200 INVITE. Opens an `Update` obligation on the early dialog's CSeq.
     UpdateEarly,
+    /// Send `method` on an EARLY dialog, before the INVITE's final: a caller on
+    /// its pending INVITE's early dialog, a [`Disposition::Held`](super::Disposition::Held) callee on the
+    /// early dialog of `fork` (`None`: its own tag) once that dialog's
+    /// reliable provisional is PRACKed. An UPDATE carries this endpoint's
+    /// session description as an offer (RFC 3311 §5.1). Opens the method's
+    /// obligation, which its 2xx closes.
+    EarlyRequest { method: InDialogMethod, fork: Option<&'static str> },
+    /// Send the provisionals of a [`Disposition::Held`](super::Disposition::Held) callee's INVITE: one
+    /// per tag in `forks` (distinct early dialogs on the one transaction, RFC
+    /// 3261 §12.1.2), or one under the transaction's own tag when `forks` is
+    /// empty. `reliable` makes each a `183` with `Require: 100rel`, an `RSeq`
+    /// and the answer SDP (RFC 3262), else a plain `180`.
+    Ring { forks: &'static [&'static str], reliable: bool },
+    /// Answer a [`Disposition::Held`](super::Disposition::Held) callee's INVITE `200` + SDP under
+    /// `winner` (`None`: the transaction's own tag). The goal waits until the
+    /// answering early dialog's reliable provisional is PRACKed, and every
+    /// fork's for an unrung winner (RFC 3262 §3).
+    Answer { winner: Option<ForkWinner> },
+    /// Reject a [`Disposition::Held`](super::Disposition::Held) callee's INVITE
+    /// with the non-2xx final `status`. RFC 3262 §3 allows a non-2xx final
+    /// before the PRACK; the goal is stricter and waits until every reliable
+    /// provisional the INVITE drew is PRACKed, so no PRACK crosses the final.
+    /// The final then awaits its hop-ACK (RFC 3261 §17.2.1).
+    Reject { status: u16 },
     /// Send ONE in-dialog OPTIONS keepalive ping on the confirmed dialog and
     /// read its 200 inline — the `long_call` single ping. The first ping stamps
     /// the `keepalive_ack` feed.
@@ -314,6 +275,37 @@ pub enum GoalStep {
 }
 
 impl GoalStep {
+    /// The step's bounded kind name — the `<kind>` of a failed-step key
+    /// ([`FailedAt`](super::FailedAt)).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            GoalStep::Invite { .. } => "invite",
+            GoalStep::Refer { .. } => "refer",
+            GoalStep::Reinvite => "reinvite",
+            GoalStep::Update => "update",
+            GoalStep::UpdateEarly => "update_early",
+            GoalStep::EarlyRequest { .. } => "early_request",
+            GoalStep::Ring { .. } => "ring",
+            GoalStep::Answer { .. } => "answer",
+            GoalStep::Reject { .. } => "reject",
+            GoalStep::Options => "options",
+            GoalStep::EveryOptions { .. } => "every_options",
+            GoalStep::Cancel { .. } => "cancel",
+            GoalStep::InDialog { .. } => "in_dialog",
+            GoalStep::Bye => "bye",
+            GoalStep::ByeIfConfirmed => "bye_if_confirmed",
+            GoalStep::ByeWith { .. } => "bye_with",
+            GoalStep::InviteTemplate { .. } => "invite_template",
+            GoalStep::RequestTemplate { .. } => "request_template",
+            GoalStep::RespondTemplate { .. } => "respond_template",
+            GoalStep::Respond { .. } => "respond",
+            GoalStep::ExpectResponse { .. } => "expect_response",
+            GoalStep::ExpectRequest { .. } => "expect_request",
+            GoalStep::ObserveFinal { .. } => "observe_final",
+            GoalStep::ExpectFinal { .. } => "expect_final",
+        }
+    }
+
     /// Whether this is a reception goal (an observation over the shared state).
     /// While the next pending goal is one, the reactor's incidental-failure
     /// shed is suppressed — the goal owns the final's verdict.
@@ -340,11 +332,21 @@ pub struct Goal {
     /// A per-goal override of the standard bounded guard wait — a
     /// capture-declared tighter bound. `None` uses the actor's step timeout.
     pub deadline: Option<Duration>,
+    /// The goal is not owed once this holds before its guard does: the call
+    /// took a branch where the step has no place (a transfer refused, so the
+    /// target's leg never opens).
+    pub unless: Option<Barrier>,
 }
 
 impl Goal {
     pub fn new(guard: Barrier, step: GoalStep) -> Self {
-        Self { guard, delay: Duration::ZERO, step, deadline: None }
+        Self { guard, delay: Duration::ZERO, step, deadline: None, unless: None }
+    }
+
+    /// Drop this goal when `branch` holds before its guard does.
+    pub fn unless(mut self, branch: Barrier) -> Self {
+        self.unless = Some(branch);
+        self
     }
 
     /// Dwell this long AFTER the guard holds, before driving the step (e.g. the
@@ -404,6 +406,21 @@ impl GoalCursor {
         self.cursor
     }
 
+    /// The pending goal as `(kind, index)` — the goal a failure of this actor
+    /// is attributed to. `None` once every goal has fired.
+    pub(super) fn pending(&self) -> Option<(&'static str, u16)> {
+        let step = self.next_step()?;
+        Some((step.kind(), u16::try_from(self.cursor).unwrap_or(u16::MAX)))
+    }
+
+    /// Drop every un-fired goal: the actor's call ended on an accepted final
+    /// before they could fire, so none of them is owed.
+    pub(super) fn abandon(&mut self) {
+        self.cursor = self.goals.len();
+        self.ready_at = None;
+        self.deadline_at = None;
+    }
+
     /// The steps of every un-fired goal, in order — the park-or-react match set.
     pub(super) fn remaining_steps(&self) -> impl Iterator<Item = &GoalStep> {
         self.goals[self.cursor.min(self.goals.len())..].iter().map(|g| &g.step)
@@ -411,29 +428,36 @@ impl GoalCursor {
 
     /// Resolve once the next pending goal's guard holds (immediately for
     /// [`Barrier::None`]) and its post-guard dwell has elapsed, returning the
-    /// step to drive — the guard wait is bounded by `timeout` so a genuinely
-    /// stuck guard fails the actor rather than hanging. Parks forever if the
-    /// cursor is exhausted (the reactor gates this arm on
-    /// [`has_pending`](Self::has_pending), so the park is never actually polled).
+    /// step to drive, or `None` when its [`unless`](Goal::unless) branch held
+    /// first (the goal is not owed: the caller advances past it) — the guard
+    /// wait is bounded by `timeout` so a genuinely stuck guard fails the actor
+    /// rather than hanging. Parks forever if the cursor is exhausted (the
+    /// reactor gates this arm on [`has_pending`](Self::has_pending), so the
+    /// park is never actually polled).
     pub async fn next_ready(
         &mut self,
         obs: &ObservedState,
         timeout: Duration,
-    ) -> Result<GoalStep, StepError> {
+    ) -> Result<Option<GoalStep>, StepError> {
         let Some(goal) = self.goals.get(self.cursor) else {
             return std::future::pending().await;
         };
         // Lift the guard/delay out so the dwell anchor below can borrow `self`
         // mutably (the guard is Arc-backed, the clone is cheap).
         let (guard, delay, bound) = (goal.guard.clone(), goal.delay, goal.deadline);
+        let unless = goal.unless.clone();
         let deadline =
             *self.deadline_at.get_or_insert_with(|| Instant::now() + bound.unwrap_or(timeout));
-        await_pred(obs, guard.name(), |s| guard.holds(s), deadline).await?;
+        let skipped = |s: &super::state::StateInner| unless.as_ref().is_some_and(|b| b.holds(s));
+        await_pred(obs, guard.name(), |s| guard.holds(s) || skipped(s), deadline).await?;
+        if !obs.with_snapshot(|s| guard.holds(s)) {
+            return Ok(None);
+        }
         if !delay.is_zero() {
             let at = *self.ready_at.get_or_insert(Instant::now() + delay);
             tokio::time::sleep_until(at).await;
         }
-        Ok(self.goals[self.cursor].step.clone())
+        Ok(Some(self.goals[self.cursor].step.clone()))
     }
 
     /// Advance past the goal that just fired (resets the dwell and deadline

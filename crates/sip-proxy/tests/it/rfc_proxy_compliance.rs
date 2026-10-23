@@ -16,7 +16,7 @@ use crate::common;
 use std::time::Duration;
 
 use common::{forward_all, spawn_proxy};
-use scenario_harness::Harness;
+use scenario_harness::{Harness, WaiverScope};
 use sip_message::header::{MaxForwards, Unsupported, Via};
 use sip_message::parser::custom::CustomParser;
 use sip_message::HeaderName;
@@ -127,7 +127,13 @@ Content-Length: 0\r\n\r\n";
 #[tokio::test]
 async fn relayed_response_has_proxy_top_via_removed() {
     let h = Harness::with_transit_delay("rfc-via-pop", 0);
-    h.allow_violation("mid-dialog-tags", "raw-injected response; proxy is the SUT, not a real UA");
+    h.waive(
+        WaiverScope::rule(
+            "mid-dialog-tags",
+            "the test injects the deviant tags; the proxy relays them as RFC 3261 §16.7 requires",
+        )
+        .on_party("proxy"),
+    );
     let (strategy, registry) = forward_all("127.0.0.1:5070".parse().unwrap());
     let proxy = spawn_proxy(&h, "127.0.0.1:5080", strategy, registry).await;
     let (alice, _alice_addr) = h.bind_sut("alice", "127.0.0.1:5060").await;

@@ -10,5 +10,5 @@ description = "The one home for RFC-violation knowledge: obligation rules decide
 workspace = true
 
 [dependencies]
-sip-message = { path = "../sip-message" }
+sip-message = { path = "../sip-message", features = ["sniff"] }
 serde = { workspace = true }

@@ -9,18 +9,19 @@
 //! budget expired states what was still open when it did.
 //!
 //! The scripted legs' own transactions are the interpreter's half of "every
-//! scripted dialog is terminal": a non-2xx INVITE final a leg sent holds a
-//! server transaction in Completed until the ACK it is owed or Timer H (RFC
-//! 3261 §17.2.1), and the run is not settled while one is ([`floor`]).
+//! scripted dialog is terminal" ([`floor`]): a non-2xx INVITE final a leg sent
+//! holds a server transaction in Completed until the ACK it is owed or Timer H
+//! (RFC 3261 §17.2.1), and an INVITE a leg sent holds a client transaction
+//! until its final (§17.1.1.2) — the run is not settled while either is open.
 
 use std::collections::BTreeMap;
 
 use pivot_schema::bundle::Failure;
 use pivot_schema::postcondition::{CdrExpectation, Postconditions};
-use sip_retransmit::timers::TIMER_H;
+use sip_retransmit::timers::{TIMER_B, TIMER_H};
 
 use crate::checks::{self, Observables};
-use crate::close::{self, UnackedFinal};
+use crate::close::{self, PendingInvite, UnackedFinal};
 use crate::recording::Recording;
 use crate::resolve::Resolver;
 use crate::scope::Finding;
@@ -105,29 +106,55 @@ impl std::fmt::Display for AwaitedAck {
     }
 }
 
-/// The settle floor the scripted legs' own server transactions hold (RFC 3261
-/// §17.1.1.3, §17.2.1). `held` are inside Timer H (64·T1 from the final's
-/// first emission) and keep the run open; `expired` are past it, the
-/// transaction gone and the ACK never come — the system's failure, holding
-/// nothing further.
+/// An INVITE a scripted leg sent that no final has answered: the leg, and the
+/// client transaction as its ladder states it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwaitedFinal {
+    pub leg: String,
+    pub invite: PendingInvite,
+}
+
+impl std::fmt::Display for AwaitedFinal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "leg {}: INVITE CSeq {} awaits its final", self.leg, self.invite.cseq)
+    }
+}
+
+/// The settle floor the scripted legs' own INVITE transactions hold (RFC 3261
+/// §17.1.1, §17.2.1). `held` (inside Timer H from the final's first emission)
+/// and `awaiting` (Proceeding, or Calling inside Timer B from the INVITE's)
+/// keep the run open. `expired` and `unanswered` are past those timers, the
+/// transaction gone — the system's failure, holding nothing further.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Floor {
     pub held: Vec<AwaitedAck>,
     pub expired: Vec<AwaitedAck>,
+    pub awaiting: Vec<AwaitedFinal>,
+    pub unanswered: Vec<AwaitedFinal>,
 }
 
 impl Floor {
+    /// Whether the floor keeps the run open.
+    pub fn holds(&self) -> bool {
+        !self.held.is_empty() || !self.awaiting.is_empty()
+    }
+
     /// What the floor holds open, in the settle's own words.
     pub fn reasons(&self) -> Vec<String> {
-        self.held.iter().map(ToString::to_string).collect()
+        let acks = self.held.iter().map(ToString::to_string);
+        acks.chain(self.awaiting.iter().map(ToString::to_string)).collect()
     }
 }
 
 /// The floor at `now_us`, read off every leg the run recorded — the same
-/// ladder the generic close reads, so the emission and its ACK are matched
-/// where they were recorded, whoever composed the final.
+/// ladder the generic close reads, so an emission and what answers it are
+/// matched where they were recorded, whoever composed them.
+///
+/// Timer B bounds only an INVITE in Calling (§17.1.1.2): once a provisional
+/// has arrived, nothing but its final or the settle budget ends the wait.
 pub fn floor(recording: &Recording, now_us: u64) -> Floor {
     let timer_h_us = TIMER_H * 1000;
+    let timer_b_us = TIMER_B * 1000;
     let mut floor = Floor::default();
     for (leg, messages) in recording.legs() {
         for owed in close::unacked_finals(&messages) {
@@ -137,6 +164,16 @@ pub fn floor(recording: &Recording, now_us: u64) -> Floor {
                 floor.held.push(awaited);
             } else {
                 floor.expired.push(awaited);
+            }
+        }
+        for invite in close::pending_invites(&messages) {
+            let calling_past_b =
+                !invite.proceeding && now_us.saturating_sub(invite.sent_at_us) >= timer_b_us;
+            let awaited = AwaitedFinal { leg: leg.clone(), invite };
+            if calling_past_b {
+                floor.unanswered.push(awaited);
+            } else {
+                floor.awaiting.push(awaited);
             }
         }
     }
@@ -224,198 +261,4 @@ pub fn evaluate(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::state::RunState;
-    use pivot_schema::bundle::{Dir, IdentityBindings};
-    use pivot_schema::scoping::CheckClass;
-
-    struct FakeSut {
-        active: usize,
-        cdrs: Vec<BTreeMap<String, String>>,
-        metrics: BTreeMap<String, String>,
-    }
-
-    impl Sut for FakeSut {
-        fn active_calls(&self) -> usize {
-            self.active
-        }
-        fn cdr_records(&self) -> Vec<BTreeMap<String, String>> {
-            self.cdrs.clone()
-        }
-        fn observe(&self, name: &str) -> Result<Option<String>, String> {
-            if name.starts_with("sip_") {
-                Ok(self.metrics.get(name).cloned())
-            } else {
-                Err(format!("{name:?} is not a metric this system publishes"))
-            }
-        }
-    }
-
-    fn record(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
-    }
-
-    fn post(text: &str) -> Postconditions {
-        serde_json::from_str(text).unwrap()
-    }
-
-    #[test]
-    fn settling_waits_on_the_flow_the_call_count_and_the_cdr_count() {
-        let expectation = post(r#"{"cdr":{"count":1}}"#);
-        let mut sut = FakeSut { active: 1, cdrs: vec![], metrics: BTreeMap::new() };
-        assert!(!is_settled(true, &sut, Some(&expectation)));
-        assert!(!is_settled(false, &sut, Some(&expectation)));
-        sut.active = 0;
-        assert!(!is_settled(true, &sut, Some(&expectation)), "the CDR has not been written");
-        let reasons = open_reasons(false, &sut, Some(&expectation));
-        assert_eq!(reasons, ["the flow has not completed", "0 of 1 CDR(s) written"]);
-        sut.cdrs.push(record(&[("disposition", "ANSWERED")]));
-        assert!(is_settled(true, &sut, Some(&expectation)));
-        assert!(open_reasons(true, &sut, Some(&expectation)).is_empty());
-    }
-
-    /// The floor holds a non-2xx INVITE final a leg sent until its ACK or Timer
-    /// H (RFC 3261 §17.2.1); past Timer H the final is expired, not held, and
-    /// the reasons name only what is held.
-    #[test]
-    fn the_floor_holds_an_unacked_final_inside_timer_h_and_expires_it_past() {
-        const INVITE: &str = "INVITE sip:b@127.0.0.1:5080 SIP/2.0\r\n\
-            Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-2\r\n\
-            From: <sip:a@example.test>;tag=a1\r\n\
-            To: <sip:b@example.test>;tag=b1\r\n\
-            Call-ID: call-a\r\n\
-            CSeq: 2 INVITE\r\n\
-            Content-Length: 0\r\n\r\n";
-        const TERMINATED: &str = "SIP/2.0 487 Request Terminated\r\n\
-            Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-2\r\n\
-            From: <sip:a@example.test>;tag=a1\r\n\
-            To: <sip:b@example.test>;tag=b1\r\n\
-            Call-ID: call-a\r\n\
-            CSeq: 2 INVITE\r\n\
-            Content-Length: 0\r\n\r\n";
-        const ACK: &str = "ACK sip:b@127.0.0.1:5080 SIP/2.0\r\n\
-            Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-2\r\n\
-            From: <sip:a@example.test>;tag=a1\r\n\
-            To: <sip:b@example.test>;tag=b1\r\n\
-            Call-ID: call-a\r\n\
-            CSeq: 2 ACK\r\n\
-            Content-Length: 0\r\n\r\n";
-        let recording = Recording::new();
-        recording.declare("B");
-        recording.push("B", Dir::In, 1_000_000, INVITE, None, None);
-        recording.push("B", Dir::Out, 1_400_000, TERMINATED, None, None);
-        let awaited = AwaitedAck {
-            leg: "B".into(),
-            owed: UnackedFinal { cseq: 2, status: 487, sent_at_us: 1_400_000 },
-        };
-
-        let held = floor(&recording, 1_400_000 + TIMER_H * 1000 - 1);
-        assert_eq!(held, Floor { held: vec![awaited.clone()], expired: vec![] });
-        assert_eq!(held.reasons(), ["leg B: 487 to INVITE CSeq 2 awaits its ACK"]);
-        let expired = floor(&recording, 1_400_000 + TIMER_H * 1000);
-        assert_eq!(expired, Floor { held: vec![], expired: vec![awaited] });
-        assert!(expired.reasons().is_empty(), "an expired transaction holds nothing open");
-
-        recording.push("B", Dir::In, 1_600_000, ACK, None, None);
-        assert_eq!(floor(&recording, 1_600_000), Floor::default(), "the ACK ended it");
-    }
-
-    #[test]
-    fn a_reasoned_cdr_absence_waits_for_nothing_and_asserts_nothing() {
-        let expectation = post(r#"{"cdr":{"absent":"capture-carries-no-cdr"}}"#);
-        let sut = FakeSut { active: 0, cdrs: vec![], metrics: BTreeMap::new() };
-        assert!(is_settled(true, &sut, Some(&expectation)));
-        let state = RunState::new();
-        let bindings = IdentityBindings::new();
-        assert!(evaluate(&sut, Some(&expectation), &Resolver::new(&state, &bindings)).is_empty());
-    }
-
-    #[test]
-    fn the_cdr_count_is_exact_at_evaluation_even_though_settling_waits_for_at_least() {
-        let expectation = post(r#"{"cdr":{"count":1}}"#);
-        let sut = FakeSut {
-            active: 0,
-            cdrs: vec![record(&[("disposition", "ANSWERED")]), record(&[("disposition", "BUSY")])],
-            metrics: BTreeMap::new(),
-        };
-        let state = RunState::new();
-        let bindings = IdentityBindings::new();
-        let failures = evaluate(&sut, Some(&expectation), &Resolver::new(&state, &bindings));
-        assert_eq!(failures[0].class, None, "a record COUNT is not a vocabulary");
-        let Failure::CdrMismatch { expected, observed } = &failures[0].failure else {
-            panic!("a CDR mismatch: {failures:?}")
-        };
-        assert_eq!(expected, "1 record(s)");
-        assert!(observed.starts_with("2 record(s):"), "{observed}");
-        assert!(observed.contains("disposition=\"ANSWERED\""), "{observed}");
-    }
-
-    #[test]
-    fn a_cdr_check_asserts_over_the_record_set_and_says_so_when_none_matches() {
-        let expectation = post(
-            r#"{"cdr":{"count":2,"checks":[{"field":"disposition","op":"regex","value":"^(ANSWERED|CANCELLED)$"}]}}"#,
-        );
-        let state = RunState::new();
-        let bindings = IdentityBindings::new();
-        let resolver = Resolver::new(&state, &bindings);
-        let matching = FakeSut {
-            active: 0,
-            cdrs: vec![record(&[("disposition", "ANSWERED")]), record(&[("disposition", "BUSY")])],
-            metrics: BTreeMap::new(),
-        };
-        assert!(evaluate(&matching, Some(&expectation), &resolver).is_empty());
-        let none = FakeSut {
-            active: 0,
-            cdrs: vec![record(&[("disposition", "BUSY")]), record(&[("disposition", "BUSY")])],
-            metrics: BTreeMap::new(),
-        };
-        let failures = evaluate(&none, Some(&expectation), &resolver);
-        assert_eq!(failures.len(), 1, "{failures:?}");
-        // The failure carries what was actually billed, not only how many.
-        let Failure::CdrMismatch { observed, .. } = &failures[0].failure else {
-            panic!("a CDR mismatch")
-        };
-        assert!(observed.contains("disposition=\"BUSY\""), "{observed}");
-    }
-
-    #[test]
-    fn a_postcondition_finding_carries_the_class_of_the_check_that_found_it() {
-        let expectation = post(
-            r#"{"cdr":{"count":1,"checks":[
-                {"field":"events","op":"regex","value":"InviteReceived","class":"cdr-vocabulary"},
-                {"field":"disposition","op":"eq","value":"ANSWERED"}]},
-               "checks":[{"field":"sip_orphans","op":"eq","value":"0","class":"cdr-vocabulary"}]}"#,
-        );
-        let sut = FakeSut {
-            active: 0,
-            cdrs: vec![record(&[("events", "invite_received"), ("disposition", "CANCELLED")])],
-            metrics: BTreeMap::from([("sip_orphans".to_string(), "3".to_string())]),
-        };
-        let state = RunState::new();
-        let bindings = IdentityBindings::new();
-        let findings = evaluate(&sut, Some(&expectation), &Resolver::new(&state, &bindings));
-        // Every check is EVALUATED; the class only says what the finding costs.
-        let classes: Vec<Option<CheckClass>> = findings.iter().map(|f| f.class).collect();
-        assert_eq!(
-            classes,
-            [Some(CheckClass::CdrVocabulary), None, Some(CheckClass::CdrVocabulary)],
-            "{findings:#?}"
-        );
-    }
-
-    #[test]
-    fn a_metric_the_system_does_not_publish_fails_rather_than_reading_as_zero() {
-        let expectation = post(
-            r#"{"cdr":{"absent":"n/a"},"checks":[{"field":"widgets_total","op":"eq","value":"0"}]}"#,
-        );
-        let sut = FakeSut { active: 0, cdrs: vec![], metrics: BTreeMap::new() };
-        let state = RunState::new();
-        let bindings = IdentityBindings::new();
-        let failures = evaluate(&sut, Some(&expectation), &Resolver::new(&state, &bindings));
-        assert_eq!(failures.len(), 1, "{failures:?}");
-        assert!(
-            matches!(&failures[0].failure, Failure::CheckFailed { observed, .. } if observed.starts_with("unreadable"))
-        );
-    }
-}
+mod tests;

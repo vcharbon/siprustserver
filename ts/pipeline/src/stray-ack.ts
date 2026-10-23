@@ -10,11 +10,24 @@
  * So each final, its retransmissions read as the final they repeat, keeps the
  * ACKs of ONE branch per hop (the final's own, else the first ACK's), and the
  * ACKs on other branches, with their repeats, are dropped.
+ *
+ * The reading is the whole document's and every case cut from it asks for it,
+ * so it is computed once per document.
  */
 import { Flows } from "@sip/contracts"
 
+const droppedOf = new WeakMap<Flows.FlowsDoc, ReadonlySet<string>>()
+
 /** The `<leg>:<msg>` coordinates of every dropped ACK. */
 export const offTransactionAcks = (flows: Flows.FlowsDoc): ReadonlySet<string> => {
+  const known = droppedOf.get(flows)
+  if (known !== undefined) return known
+  const dropped = readDropped(flows)
+  droppedOf.set(flows, dropped)
+  return dropped
+}
+
+const readDropped = (flows: Flows.FlowsDoc): ReadonlySet<string> => {
   const dropped = new Set<string>()
   flows.legs.forEach((leg, legIdx) => {
     const byFinal = new Map<number, Array<number>>()

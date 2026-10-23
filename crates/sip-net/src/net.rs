@@ -35,12 +35,27 @@ pub trait UdpEndpoint: Send + Sync {
     /// endpoint's queue is closed and drained.
     async fn recv(&self) -> Option<UdpPacket>;
 
+    /// The packets queued and not yet read, oldest first, left queued: what a
+    /// test fabric inspects at the end of a run without reading it. Empty
+    /// where the transport cannot tell (a kernel socket).
+    fn peek_queued(&self) -> Vec<UdpPacket> {
+        Vec::new()
+    }
+
     /// Non-blocking inbound poll (the TS `poll`).
     fn try_recv(&self) -> Option<UdpPacket>;
 
     /// The bound local address (single source of truth for Via/Contact
     /// stamping in later layers).
     fn local_addr(&self) -> SocketAddr;
+
+    /// The local address a datagram to `dst` leaves from: the bound address
+    /// for an endpoint over one socket; an endpoint that picks a socket per
+    /// destination answers per `dst`.
+    fn egress_local_addr(&self, dst: SocketAddr) -> SocketAddr {
+        let _ = dst;
+        self.local_addr()
+    }
 
     /// Current inbound-queue depth.
     fn queue_depth(&self) -> usize;
@@ -100,6 +115,9 @@ impl UdpEndpoint for std::sync::Arc<dyn UdpEndpoint> {
     fn try_recv(&self) -> Option<UdpPacket> {
         (**self).try_recv()
     }
+    fn peek_queued(&self) -> Vec<UdpPacket> {
+        (**self).peek_queued()
+    }
     fn local_addr(&self) -> SocketAddr {
         (**self).local_addr()
     }
@@ -153,7 +171,7 @@ pub trait SignalingNetwork: Send + Sync {
     async fn await_in_flight(&self, timeout: Duration);
 }
 
-/// Shared per-endpoint counters (the four `UdpEndpointCounters` fields as live
+/// Shared per-endpoint counters (the `UdpEndpointCounters` fields as live
 /// atomics). Both the real recv task and the simulated `deliver` path bump
 /// these; `snapshot` produces the public [`UdpEndpointCounters`].
 #[derive(Debug, Default)]
@@ -163,7 +181,9 @@ pub struct Counters {
     pub pre_ingress_dropped: AtomicU64,
     pub pre_ingress_replies: AtomicU64,
     pub pre_ingress_reply_failures: AtomicU64,
+    pub pre_ingress_panics: AtomicU64,
     pub send_would_block: AtomicU64,
+    pub recv_errors: AtomicU64,
 }
 
 impl Counters {
@@ -174,7 +194,9 @@ impl Counters {
             pre_ingress_dropped: self.pre_ingress_dropped.load(Ordering::Relaxed),
             pre_ingress_replies: self.pre_ingress_replies.load(Ordering::Relaxed),
             pre_ingress_reply_failures: self.pre_ingress_reply_failures.load(Ordering::Relaxed),
+            pre_ingress_panics: self.pre_ingress_panics.load(Ordering::Relaxed),
             send_would_block: self.send_would_block.load(Ordering::Relaxed),
+            recv_errors: self.recv_errors.load(Ordering::Relaxed),
             kernel_rx_dropped: 0,
         }
     }

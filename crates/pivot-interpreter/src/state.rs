@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 
 use sip_message::HeaderProjection;
 
+use crate::mscml::MscmlRequests;
+
 /// One leg's dialog state, as the run has learned it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LegState {
@@ -26,6 +28,10 @@ pub struct LegState {
     pub cseq_remote: Option<u32>,
     /// The last RSeq seen on a reliable provisional of this leg.
     pub rseq: Option<u32>,
+    /// The MSCML requests the leg has received and not yet answered, whose ids
+    /// the responses it sends echo, oldest first per type (RFC 5022 §6,
+    /// §10.2).
+    pub mscml: MscmlRequests,
 }
 
 /// One EARLY dialog's state, as the `${early:…}` namespace publishes it

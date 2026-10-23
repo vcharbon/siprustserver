@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::binder::RouteBinder;
 use crate::plan::{
-    ByeFeed, DwellKnob, Establishment, Script, ShapePlan, Stage, Teardown, Transfer,
+    ByeFeed, DwellKnob, Establishment, ForkWinner, Script, ShapePlan, Stage, Teardown, Transfer,
 };
 use crate::EgressBinder;
 
@@ -89,7 +89,31 @@ pub fn forked(binder: Arc<dyn RouteBinder>) -> ShapePlan {
         binder,
         establish: Establishment::Forked {
             tags: &["fk1", "fk2", "fk3"],
-            winner: "fk2",
+            winner: ForkWinner::Tag("fk2"),
+            reliable: false,
+            loser_late_200: None,
+        },
+        stages: vec![],
+        teardown: Teardown::CallerBye {
+            after: DwellKnob::TalkTime,
+            feed: ByeFeed::CheckpointAndPhase,
+        },
+        ringing_gate: true,
+        stamp_connected: true,
+    }
+}
+
+/// `forked_unrung` — forking where the answering fork sent no provisional
+/// (RFC 3261 §12.1.2, §13.2.2.4): bob rings under three distinct tags, then
+/// answers 200 under a fresh tag none of the 18x carried; talk, BYE. Only
+/// valid under the SUT's transparent CORE relay, like [`forked`].
+pub fn forked_unrung(binder: Arc<dyn RouteBinder>) -> ShapePlan {
+    ShapePlan {
+        id: "forked_unrung",
+        binder,
+        establish: Establishment::Forked {
+            tags: &["fk1", "fk2", "fk3"],
+            winner: ForkWinner::Unrung,
             reliable: false,
             loser_late_200: None,
         },
@@ -123,7 +147,7 @@ pub fn forked_loser_late_200(binder: Arc<dyn RouteBinder>) -> ShapePlan {
         binder,
         establish: Establishment::Forked {
             tags: &["fk1", "fk2", "fk3"],
-            winner: "fk2",
+            winner: ForkWinner::Tag("fk2"),
             reliable: false,
             loser_late_200: Some("fk3"),
         },
@@ -146,7 +170,7 @@ pub fn forked_reliable(binder: Arc<dyn RouteBinder>) -> ShapePlan {
         binder,
         establish: Establishment::Forked {
             tags: &["fk1", "fk2", "fk3"],
-            winner: "fk2",
+            winner: ForkWinner::Tag("fk2"),
             reliable: true,
             loser_late_200: None,
         },
@@ -213,11 +237,9 @@ pub fn rerouting_prack(binder: Arc<dyn RouteBinder>) -> ShapePlan {
     }
 }
 
-/// The SUT no-answer ring timer (seconds) the shipped no-answer shapes arm —
-/// the smallest value the seconds-granularity `no_answer_timeout_sec` knob
-/// admits above 1 s of ring headroom; free on the paused-clock lane, ~2 s of
-/// per-call dwell on a real clock.
-pub const NOANSWER_RING_SEC: u32 = 2;
+/// The SUT no-answer ring timer (milliseconds) the shipped no-answer shapes
+/// arm: free on the paused-clock lane, ~2 s of per-call dwell on a real clock.
+pub const NOANSWER_RING_MS: u32 = 2_000;
 
 /// `rerouting_noanswer` — bob rings then NEVER answers; the
 /// SUT's own no-answer timer (armed per-route by the plan) fires, CANCELs bob
@@ -227,7 +249,7 @@ pub fn rerouting_noanswer(binder: Arc<dyn RouteBinder>) -> ShapePlan {
         id: "rerouting_noanswer",
         binder,
         establish: Establishment::RerouteOnNoAnswer {
-            no_answer_sec: NOANSWER_RING_SEC,
+            no_answer_ms: NOANSWER_RING_MS,
             winner_reliable: false,
         },
         stages: vec![],
@@ -335,8 +357,8 @@ pub fn abandon_ringing(binder: Arc<dyn RouteBinder>) -> ShapePlan {
 /// `cancel_answer_crossing` — the caller CANCELs while the callee answers (C2/E5,
 /// RFC 3261 §9.2): a branch-aware race whose terminal is EITHER a confirmed +
 /// torn-down call (the 200 crossed the CANCEL) OR the abandoned terminal (the
-/// CANCEL won). Terminal-style; the load lane accepts whichever legal branch
-/// occurred ([`Expect::EitherOf`](scenario_harness::actor::Expect::EitherOf)).
+/// CANCEL won). Terminal-style; both are accepted endings, and the verdict names
+/// whichever occurred (`answered_despite_cancel` / `abandoned`).
 pub fn cancel_answer_crossing(binder: Arc<dyn RouteBinder>) -> ShapePlan {
     ShapePlan {
         id: "cancel_answer_crossing",

@@ -27,7 +27,7 @@ use b2bua_harness::{invite_final_statuses, settle_until, stated, stated_by_respo
 use call::{CdrEventType, TerminationCause};
 use scenario_harness::{Agent, Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
-use sip_net::RecordedSipEntry;
+use sip_net_testkit::RecordedSipEntry;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -198,18 +198,10 @@ async fn caller_bye_crossing_the_callees_answer_confirms_and_releases_the_callee
 
 /// The callee BYEs the early dialog it opened — forbidden to it (RFC 3261
 /// §15, last paragraph) but survived here — and the caller's own BYE crosses
-/// the final that release draws. Every transaction gets exactly one final, no
-/// second INVITE final goes out, and the teardown already under way is not
-/// restarted.
-///
-/// The callee's release answers the caller's INVITE in the same turn, so the
-/// caller's BYE always lands on a leg that already carries its final: the
-/// "terminating, INVITE still unanswered" shape is not reachable this way.
-///
-/// Ordering this test depends on: bob's BYE is sent first and the simulated
-/// network delivers same-instant datagrams in order, so his BYE is processed
-/// before alice's and the 503 precedes her BYE. Were alice's BYE processed
-/// first, the caller's early-dialog BYE would answer the INVITE 487 instead.
+/// the final that release draws. The release answers the caller at once and
+/// CANCELs the INVITE still ringing at the callee (§9.1), whose 487 the
+/// record alone waits for. Every transaction gets exactly one final, and the
+/// teardown under way is not restarted.
 #[tokio::test(start_paused = true)]
 async fn callee_early_bye_then_caller_bye_leaves_every_transaction_one_final() {
     let h = Harness::with_transit_delay("b2bua-early-dialog-bye-callee-first", 100);
@@ -240,10 +232,14 @@ async fn callee_early_bye_then_caller_bye_leaves_every_transaction_one_final() {
     let mut a_bye = call.send_request(InDialogMethod::Bye).send().await;
     b_bye.expect(200).await;
 
-    // The callee's release answers the INVITE; alice's BYE, arriving after
-    // that final, names a dialog the final ended.
+    // The callee's release answers the INVITE at once; alice's BYE, arriving
+    // after that final, names a dialog the final ended. Bob's INVITE, still
+    // ringing, is CANCELled and holds only the record (§9.1).
     call.expect(503).await; // auto-ACKed (§17.1.1.3)
     a_bye.expect(481).await;
+    bob.receive("CANCEL").await.respond(200, "OK").await;
+    b_inv.respond(487, "Request Terminated").await;
+    bob.receive("ACK").await;
 
     h.advance(Duration::from_secs(2)).await;
     reaped(&b2bua).await;
@@ -465,4 +461,60 @@ async fn only_the_callers_early_bye_reason_rides_the_cancel_minted_for_the_calle
     assert_eq!(t.by_leg.as_deref(), Some("a"));
 
     let _report = h.finish().await;
+}
+
+/// The callee BYEs its early dialog (§15 forbids it; the deviation under
+/// test) before the caller PRACKed its reliable 180. The teardown CANCELs
+/// the INVITE (§9.1) and sends nothing more in the dialog that BYE ended
+/// (§15.1.2): no PRACK rides it.
+#[tokio::test(start_paused = true)]
+async fn no_prack_rides_an_early_dialog_its_callee_byed() {
+    let h = Harness::with_transit_delay("early-bye-100rel", 1);
+    h.allow_violation(
+        "no-bye-outside-or-early-dialog",
+        "the callee's BYE on its early dialog is the deviation under test (RFC 3261 §15)",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5164").await;
+    let bob = h.agent("bob", "127.0.0.1:5174").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5174).start(&h, "b2bua", "127.0.0.1:5184").await;
+
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut b_inv = bob.receive("INVITE").await;
+    b_inv
+        .respond(180, "Ringing")
+        .with_header("Require", "100rel")
+        .with_header("RSeq", "4711")
+        .with_to_tag("fork1")
+        .await;
+    let ringing = call.expect(180).await;
+    b_inv.adopt_to_tag("fork1");
+    let mut fork1 = b_inv.dialog();
+    fork1.send_request(InDialogMethod::Bye).send().await.expect(200).await;
+    call.expect(503).await; // the caller is answered at once
+                            // Her late PRACK is answered here: the stack holds the 180 acknowledged.
+    let mut late = call.try_prack(&ringing).await.expect("alice PRACKs the reliable 180");
+    late.expect(200).await;
+
+    h.advance(Duration::from_millis(50)).await;
+    let after_bye: Vec<String> =
+        start_lines(&bob).into_iter().skip_while(|l| !l.starts_with("SIP/2.0 200")).collect();
+    assert!(
+        !after_bye.iter().any(|l| l.starts_with("PRACK")),
+        "no PRACK on the early dialog the callee's BYE ended: {after_bye:?}"
+    );
+    let mut cxl = bob.receive_tolerating("CANCEL", &["PRACK"]).await;
+    cxl.respond(200, "OK").await;
+    b_inv.respond(487, "Request Terminated").await;
+    bob.receive("ACK").await;
+    alice.drain().await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
 }

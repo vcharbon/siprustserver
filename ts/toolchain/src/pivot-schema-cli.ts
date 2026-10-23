@@ -9,7 +9,6 @@
  * its one expected non-zero.
  */
 import { Lint } from "@sip/contracts"
-import type * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
@@ -68,8 +67,5 @@ export const layer = Layer.effect(
     return Service.of({ schema, fmtCheck, lint })
   })
 )
-
-/** The binary this service will run, for a caller that wants to say so out loud. */
-export const binary: Config.Config<string> = PIVOT_SCHEMA
 
 export * as PivotSchemaCli from "./pivot-schema-cli.js"

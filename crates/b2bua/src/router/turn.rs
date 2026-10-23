@@ -31,6 +31,31 @@ impl Runnable for Turn {
         let unpolled = UnpolledForget::arm(&self.ctx.txn, &self.event, self.class);
         Box::pin(async move {
             unpolled.disarm();
+            match (&self.event, self.res.call_ref.as_deref()) {
+                (CallEvent::CallQuiesced { call_ref }, _) => {
+                    super::quiesced::self_release_turn(&self.ctx, call_ref).await;
+                    return;
+                }
+                (CallEvent::InternalEvent { call_ref, topic, outcome, payload, body, .. }, _)
+                    if topic == super::stand_down::TOPIC =>
+                {
+                    let ctx = &self.ctx;
+                    super::stand_down::stand_down_turn(ctx, call_ref, outcome, payload, body).await;
+                    return;
+                }
+                (CallEvent::InternalEvent { call_ref, topic, payload, .. }, _)
+                    if topic == super::dropped_on_delete::TOPIC =>
+                {
+                    super::dropped_on_delete::drop_turn(&self.ctx, call_ref, payload).await;
+                    return;
+                }
+                (CallEvent::Timer { .. }, Some(call_ref))
+                    if super::quiesced::shed_if_quiesced(&self.ctx, call_ref).await =>
+                {
+                    return;
+                }
+                _ => {}
+            }
             process(&self.ctx, self.event, self.res, self.unborn).await;
         })
     }
@@ -83,7 +108,8 @@ mod tests {
 
     use sip_message::parser::custom::CustomParser;
     use sip_message::SipParser;
-    use sip_net::{BindUdpOpts, SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint};
+    use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
+    use sip_net_testkit::SimulatedSignalingNetwork;
 
     use super::*;
     use crate::router::resolve::resolve;
@@ -209,13 +235,14 @@ mod tests {
             &net,
             "w0",
             |c| {
-                c.cps_bucket_size = 0;
+                c.cps_bucket_size = 1;
                 c.cps_bucket_rate = 0;
                 c.overload_panic_elu_threshold = 1.1;
             },
             Vec::new(),
         )
         .await;
+        node.core.overload().spend_token();
         let peer = net.bind_udp(BindUdpOpts::new(PEER.parse().unwrap(), 64)).await.unwrap();
         let ctx = node.core.router_ctx().clone();
         let raw = new_invite();

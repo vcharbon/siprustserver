@@ -6,7 +6,12 @@ license.workspace = true
 publish.workspace = true
 description = "Declared Prometheus metric families: one catalogue entry per family (name, kind, label sets, presence, help), the renderer that writes a family's text exposition from its entry and a value per series, and the check that a scraped text holds a family exactly as declared. No SIP, no I/O."
 
+[package.metadata.purity]
+tier = "pure"
+
 [lints]
 workspace = true
 
 [dependencies]
+# Hash lookups with no iteration in hash-seed order (ADR-0051 §1).
+lookup-map = { path = "../lookup-map" }

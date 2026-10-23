@@ -31,7 +31,7 @@ async fn reinvite_glare_491_both_ways_then_retry_resolves() {
                 role: "alice",
                 agent: alice.clone(),
                 // Alice answers bob's realign re-INVITE with SDP (full media).
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 disposition: Disposition::Caller,
                 goals: vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
@@ -50,7 +50,7 @@ async fn reinvite_glare_491_both_ways_then_retry_resolves() {
                 role: "bob",
                 agent: bob.clone(),
                 disposition: Disposition::RingThenAnswer { ring: Duration::from_millis(100) },
-                media: MediaState::full(ANSWER_SDP, ANSWER_SDP),
+                media: MediaState::answer(ANSWER_SDP),
                 // Bob ALSO re-INVITEs on the same gate — the glare.
                 goals: vec![Goal::new(both_confirmed.clone(), GoalStep::Reinvite)],
                 invite_targets: vec![],
@@ -110,7 +110,7 @@ async fn update_vs_reinvite_collision_491_then_retry_resolves() {
             ActorSpec {
                 role: "alice",
                 agent: alice.clone(),
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 disposition: Disposition::Caller,
                 goals: vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
@@ -129,7 +129,7 @@ async fn update_vs_reinvite_collision_491_then_retry_resolves() {
                 role: "bob",
                 agent: bob.clone(),
                 disposition: Disposition::RingThenAnswer { ring: Duration::from_millis(100) },
-                media: MediaState::full(ANSWER_SDP, ANSWER_SDP),
+                media: MediaState::answer(ANSWER_SDP),
                 // Bob collides with an UPDATE on the same gate.
                 goals: vec![Goal::new(both_confirmed.clone(), GoalStep::Update)],
                 invite_targets: vec![],
@@ -194,7 +194,7 @@ async fn early_update_on_the_reliable_early_dialog() {
             ActorSpec {
                 role: "alice",
                 agent: alice.clone(),
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 disposition: Disposition::Caller,
                 goals: vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: Some(plan) }),
@@ -322,6 +322,163 @@ async fn actor_originates_in_dialog_info() {
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
     assert!(verdict.is_ok(), "the INFO call must settle OK, got {verdict:?}");
+
+    h.finish().await;
+}
+
+/// A goal whose `unless` branch holds before its guard is not owed: the actor
+/// moves past it instead of failing on its guard's timeout.
+#[tokio::test(start_paused = true)]
+async fn a_goal_whose_unless_branch_holds_is_not_owed() {
+    use sip_message::generators::InDialogMethod;
+
+    let h = Harness::new("actor-goal-unless").describe(
+        "goal unless: alice's INFO waits on a MESSAGE bob never receives, unless the \
+         call is established, which it is: the INFO is not owed and alice hangs up",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let call = CallPlan {
+        actors: vec![
+            ActorSpec {
+                role: "alice",
+                agent: alice.clone(),
+                disposition: Disposition::Caller,
+                media: MediaState::offer(OFFER_SDP),
+                goals: vec![
+                    Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                    // Owed only on a branch this call does not take.
+                    Goal::new(
+                        Barrier::received("never", "bob", "MESSAGE"),
+                        GoalStep::InDialog {
+                            method: InDialogMethod::Info,
+                            content_type: None,
+                            body: None,
+                            headers: vec![],
+                        },
+                    )
+                    .unless(Barrier::AllConfirmed(&["alice", "bob"])),
+                    Goal::new(Barrier::AllConfirmed(&["alice", "bob"]), GoalStep::Bye),
+                ],
+                invite_targets: vec![("bob", bob.clone())],
+                via: None,
+                feed: CtxFeed::default(),
+
+                cseq: None,
+                delayed: vec![],
+                claim: None,
+            },
+            ActorSpec {
+                role: "bob",
+                agent: bob.clone(),
+                disposition: Disposition::RingThenAnswer { ring: Duration::from_millis(200) },
+                media: MediaState::answer(ANSWER_SDP),
+                goals: vec![],
+                invite_targets: vec![],
+                via: None,
+                feed: CtxFeed::default(),
+
+                cseq: None,
+                delayed: vec![],
+                claim: None,
+            },
+        ],
+        plan: vec![phase("established", |s| {
+            s.leg_at_least("alice", LegPhase::Confirmed)
+                && s.leg_at_least("bob", LegPhase::Confirmed)
+        })],
+        settle: SettleBarrier::default_ceiling(),
+        automatics: Automatics::default(),
+        delta_policy: None,
+        reception_observer: None,
+    };
+
+    let verdict = run_call(call, Duration::from_secs(5)).await;
+    assert!(verdict.is_ok(), "the goal not owed must not hold the call, got {verdict:?}");
+
+    h.finish().await;
+}
+
+/// A barrier reads what an in-dialog request said: bob's leg folds the INFO's
+/// body ([`RequestFact`]), and alice hangs up once that payload, not only the
+/// method, was received.
+#[tokio::test(start_paused = true)]
+async fn a_barrier_reads_what_an_in_dialog_request_said() {
+    use sip_message::generators::InDialogMethod;
+
+    let h = Harness::new("actor-in-dialog-request-fact").describe(
+        "request facts: bob's leg folds what alice's in-dialog INFO said (its body); \
+         alice's BYE is gated on that payload, not only on the method",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let call = CallPlan {
+        actors: vec![
+            ActorSpec {
+                role: "alice",
+                agent: alice.clone(),
+                disposition: Disposition::Caller,
+                media: MediaState::offer(OFFER_SDP),
+                goals: vec![
+                    Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                    // Send the INFO once the call is up.
+                    Goal::new(
+                        Barrier::AllConfirmed(&["alice", "bob"]),
+                        GoalStep::InDialog {
+                            method: InDialogMethod::Info,
+                            content_type: Some("application/x-info-test".to_string()),
+                            body: Some(b"<info>eof</info>".to_vec()),
+                            headers: vec![("X-Info-Kind".to_string(), "eof".to_string())],
+                        },
+                    ),
+                    // Hang up only once bob has OBSERVABLY received the INFO —
+                    // the ordering barrier, no timed dwell.
+                    Goal::new(
+                        Barrier::pred("eof_seen", |s| {
+                            s.leg_received_where("bob", |f| {
+                                f.method == "INFO" && f.body == b"<info>eof</info>"
+                            })
+                        }),
+                        GoalStep::Bye,
+                    ),
+                ],
+                invite_targets: vec![("bob", bob.clone())],
+                via: None,
+                feed: CtxFeed::default(),
+
+                cseq: None,
+                delayed: vec![],
+                claim: None,
+            },
+            ActorSpec {
+                role: "bob",
+                agent: bob.clone(),
+                disposition: Disposition::RingThenAnswer { ring: Duration::from_millis(200) },
+                media: MediaState::answer(ANSWER_SDP),
+                goals: vec![],
+                invite_targets: vec![],
+                via: None,
+                feed: CtxFeed::default(),
+
+                cseq: None,
+                delayed: vec![],
+                claim: None,
+            },
+        ],
+        plan: vec![phase("established", |s| {
+            s.leg_at_least("alice", LegPhase::Confirmed)
+                && s.leg_at_least("bob", LegPhase::Confirmed)
+        })],
+        settle: SettleBarrier::default_ceiling(),
+        automatics: Automatics::default(),
+        delta_policy: None,
+        reception_observer: None,
+    };
+
+    let verdict = run_call(call, Duration::from_secs(5)).await;
+    assert!(verdict.is_ok(), "the BYE gated on the INFO's payload must run, got {verdict:?}");
 
     h.finish().await;
 }

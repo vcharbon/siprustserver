@@ -243,7 +243,9 @@ async fn relayed_200_to_update_states_the_stack_contact() {
     let mut dialog = s.establish().await;
 
     let mut update = dialog.request(InDialogMethod::Update, Some(REOFFER)).await;
-    s.bob.receive("UPDATE").await.respond(200, "OK").with_sdp(ANSWER).await;
+    // Bob's answer revises the session his establishing 200 described (RFC 3264 §8).
+    let reanswer = ANSWER.replace("o=bob 1 1", "o=bob 1 2");
+    s.bob.receive("UPDATE").await.respond(200, "OK").with_sdp(&reanswer).await;
     let answered = update.expect(200).await;
     assert_stack_contact(&answered, "a", s.b2bua.addr);
 

@@ -22,7 +22,8 @@ impl ProxyCore {
     /// (RFC 3261 §12.2), so re-inserting RR is inert bloat and never alters
     /// the established route set. Returns the draft and the stickiness cookie
     /// the inserted RR carries (`None` when nothing was inserted or the
-    /// strategy has no per-dialog stickiness).
+    /// strategy has no per-dialog stickiness). `repeated` is the cookie the
+    /// first copy of a retransmitted request carried: it is used again.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn insert_double_record_route(
         &self,
@@ -33,6 +34,7 @@ impl ProxyCore {
         target: &ProxyAddr,
         is_worker_outbound: bool,
         via_worker_addr: &Option<ProxyAddr>,
+        repeated: Option<&RouteParams>,
     ) -> (RequestDraft, Option<RouteParams>) {
         let method = req.method().as_str();
         let is_initial_dialog_req = req.to().tag().map(str::is_empty).unwrap_or(true);
@@ -67,7 +69,8 @@ impl ProxyCore {
         } else {
             target.clone()
         };
-        let stickiness = self.strategy.encode_stickiness(&cookie_addr, msg);
+        let stickiness =
+            repeated.cloned().or_else(|| self.strategy.encode_stickiness(&cookie_addr, msg));
         // Dual-face (§16.6/§16.7 multi-homed): stamp each half of the
         // double-RR with the advertise of the face facing the party that
         // will USE it —

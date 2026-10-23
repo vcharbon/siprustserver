@@ -25,6 +25,15 @@ use crate::wire::WireView;
 use super::branch::{BranchKey, BranchReading};
 use super::Obligation;
 
+crate::registry::rules! {
+    /// RFC 3261 §10.2: a UA changes an address-of-record's Contact only once its previous REGISTER
+    /// for that record has been answered. Charges the REGISTER's sender.
+    SerialRegister = "serial-register";
+    /// RFC 3261 §10.2: a REGISTER carries no Route header — registration forms no route set.
+    /// Charges the REGISTER's sender.
+    RegisterNoRouteSet = "register-no-route-set";
+}
+
 /// **RFC 3261 §10.2 — a REGISTER carries no Route header.** Registration
 /// creates no dialog and so has no route set to reproduce; a Route row on one
 /// asks an outbound proxy to forward a binding request along a path the
@@ -35,10 +44,6 @@ use super::Obligation;
 pub struct RegisterNoRouteSet;
 
 impl Obligation for RegisterNoRouteSet {
-    fn id(&self) -> RuleId {
-        RuleId::RegisterNoRouteSet
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -98,10 +103,6 @@ impl Obligation for RegisterNoRouteSet {
 pub struct SerialRegister;
 
 impl Obligation for SerialRegister {
-    fn id(&self) -> RuleId {
-        RuleId::SerialRegister
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = BranchReading::of(wire.msgs);
         // (sender, AOR) → the REGISTER still outstanding for that binding.

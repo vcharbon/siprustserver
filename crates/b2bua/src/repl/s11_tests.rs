@@ -7,7 +7,7 @@
 //! 2. **local-only self-release** — `drop_local` sheds the live copy WITHOUT
 //!    propagating a delete: the backup `Element` survives (the call lives on at
 //!    its reclaiming primary) and the takeover flag clears;
-//! 3. **narrow read-paths** — `reclaim_scan` (bulk) + `peek_reclaimable`
+//! 3. **narrow read-paths** — `scan_partition` (bulk) + `peek_reclaimable`
 //!    (reactive straggler) decode this node's `pri:` partition, `peek_replica`
 //!    the `bak:` takeover source, and `materialize_if_absent` inserts
 //!    idempotently. The decision over what they return (the `Terminated`
@@ -110,7 +110,7 @@ fn call_state_metered(
 
 /// Seed a call body into `(role, primary)` of the replicating store.
 async fn put(store: &ReplicatingCallStore, role: PartitionRole, primary: &str, call: &Call) {
-    let body = MsgpackCodec::new().encode(call);
+    let body = MsgpackCodec::new().encode(call).unwrap();
     let gen = call.topology.as_ref().map(|t| t.gen).unwrap_or(1);
     store
         .put_call(role, primary, &call.call_ref, body, &[], 60_000, gen, 0, &PutOpts::default())
@@ -130,7 +130,7 @@ async fn mark_takeover_flags_the_copy_for_self_release() {
         &invite("w0", "w1", "cid-a"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let r0 = c0.call_ref.clone();
@@ -156,7 +156,7 @@ async fn a_takeover_copy_running_on_an_unheld_set_counts_as_uncounted() {
         &invite("w0", "w1", "cid-runs-on"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let entry = |id: &str| call::LimiterEntry { id: id.into(), limit: 1 };
@@ -192,7 +192,7 @@ async fn drop_local_sheds_live_copy_but_keeps_backup_element() {
         &invite("w0", "w1", "cid-h"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let r = call.call_ref.clone();
@@ -235,7 +235,7 @@ async fn put_with_origin(
     call: &Call,
     origin_now_ms: i64,
 ) {
-    let body = MsgpackCodec::new().encode(call);
+    let body = MsgpackCodec::new().encode(call).unwrap();
     let gen = call.topology.as_ref().map(|t| t.gen).unwrap_or(1);
     store
         .put_call(
@@ -265,7 +265,7 @@ async fn skew_offset_is_computed_persisted_and_reaches_hydration() {
         &invite("w0", "w1", "cid-skew"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let r = call.call_ref.clone();
@@ -278,11 +278,11 @@ async fn skew_offset_is_computed_persisted_and_reaches_hydration() {
         "skew_offset = receiver_now(100_000) − origin(70_000)",
     );
 
-    // Reaches hydration: reclaim_scan pairs each call with its offset.
-    let scanned = state.reclaim_scan().await;
+    // Reaches hydration: scan_partition pairs each call with its offset.
+    let scanned = state.scan_partition(PRI, "w0", &|| {}).await;
     assert_eq!(scanned.len(), 1);
     assert_eq!(scanned[0].0.call_ref, r);
-    assert_eq!(scanned[0].1, 30_000, "reclaim_scan surfaces the skew offset to the router");
+    assert_eq!(scanned[0].1, 30_000, "scan_partition surfaces the skew offset to the router");
 
     // And the on-demand reclaim read-path surfaces it too.
     let (peeked, skew) = state.peek_reclaimable(&r).await.expect("reclaimable");
@@ -296,7 +296,7 @@ async fn skew_offset_is_computed_persisted_and_reaches_hydration() {
         &invite("w0", "w1", "cid-skew-b"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let rb = call_b.call_ref.clone();
@@ -310,7 +310,7 @@ async fn skew_offset_is_computed_persisted_and_reaches_hydration() {
         &invite("w0", "w1", "cid-local"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     put(&repl_local, PRI, "w0", &call_l).await;
@@ -340,7 +340,7 @@ async fn peek_replica_reads_the_backup_body_without_deciding_or_inserting() {
         &invite("w0", "w1", "cid-ended"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     ended.state = CallModelState::Terminated;
@@ -364,7 +364,7 @@ async fn peek_replica_reads_the_backup_body_without_deciding_or_inserting() {
         &invite("w1", "w0", "cid-own"),
         src(),
         &config_for("w1"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     assert_eq!(state.peek_replica(&own.call_ref).await.err(), Some(ReplicaMiss::WrongRole));
@@ -384,14 +384,14 @@ async fn reclaim_scan_materialises_pri_partition_idempotently() {
         &invite("w0", "w1", "cid-r"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let r = call.call_ref.clone();
     put(&repl, PRI, "w0", &call).await;
 
     // Bulk sweep sees it.
-    let scanned = state.reclaim_scan().await;
+    let scanned = state.scan_partition(PRI, "w0", &|| {}).await;
     assert_eq!(scanned.len(), 1);
     assert_eq!(scanned[0].0.call_ref, r);
 
@@ -455,7 +455,7 @@ async fn reboot_primary_481s_bye_for_unmaterialised_pri_call() {
         &invite("w0", "w1", "cid-long"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let r = call.call_ref.clone();
@@ -479,7 +479,8 @@ async fn reboot_primary_481s_bye_for_unmaterialised_pri_call() {
         481,
         "Call/Transaction Does Not Exist",
         &GenerateResponseOpts::default(),
-    );
+    )
+    .expect("a 481");
     eprintln!(
         "\n──── actual message the UAC receives for its end-of-hold BYE ────\n\
          SIP/2.0 {} {}\n  CSeq: {} {}\n  Call-ID: {}\n\
@@ -522,7 +523,7 @@ async fn reboot_primary_481s_bye_when_pri_body_was_never_pulled() {
         &invite("w0", "w1", "cid-long2"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let r = call.call_ref.clone();
@@ -571,7 +572,7 @@ async fn reclaimed_call_is_visible_to_backup_bootstrap() {
         &invite("w0", "w1", "cid-bak"),
         src(),
         &config_for("w0"),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     let r = call.call_ref.clone();
@@ -592,7 +593,7 @@ async fn reclaimed_call_is_visible_to_backup_bootstrap() {
     // Materialise the reclaimed call into the live serving map (what `reclaim_all`
     // / the reactive `ReclaimCall` do on reboot) — this must re-establish the
     // denormalised backup from `topology.bak`.
-    let scanned = state.reclaim_scan().await;
+    let scanned = state.scan_partition(PRI, "w0", &|| {}).await;
     assert_eq!(scanned.len(), 1);
     assert!(
         state.materialize_if_absent(scanned[0].0.clone(), MaterialiseOrigin::Reclaim),
@@ -611,7 +612,7 @@ async fn reclaimed_call_is_visible_to_backup_bootstrap() {
 // ---------------------------------------------------------------------------
 // (5) CONCURRENCY (unit, no SIP): a bulk reclaim runs WHILE create/update/delete
 // churn hammers the SAME `CallState` on a multi-thread runtime. This drives the
-// state-level mutations the router makes — reclaim's `reclaim_scan → lock →
+// state-level mutations the router makes — reclaim's `scan_partition → lock →
 // materialize_if_absent` (the core of `reclaim_into_live`) racing live
 // `create`/`update`/`remove`, each under the per-call `lock` the dispatcher
 // serialises on in production — under TRUE parallelism. It is the unit-level
@@ -629,14 +630,14 @@ async fn churn_during_reclaim_keeps_state_consistent() {
     let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
     let state = call_state("w0", repl.clone());
 
-    // Seed N reclaim targets into pri:w0 (the partition `reclaim_scan` reads).
+    // Seed N reclaim targets into pri:w0 (the partition `scan_partition` reads).
     let mut targets = Vec::with_capacity(TARGETS);
     for i in 0..TARGETS {
         let call = build_initial_call(
             &invite("w0", "w1", &format!("rec-{i}")),
             src(),
             &config_for("w0"),
-            &sip_txn::IdGen::seeded(1),
+            &mut sip_ids::TurnIds::fixed(1),
             0,
         );
         put(&repl, PRI, "w0", &call).await;
@@ -649,7 +650,7 @@ async fn churn_during_reclaim_keeps_state_consistent() {
     let reclaim = {
         let state = state.clone();
         tokio::spawn(async move {
-            for (call, _skew) in state.reclaim_scan().await {
+            for (call, _skew) in state.scan_partition(PRI, "w0", &|| {}).await {
                 let cr = call.call_ref.clone();
                 let _g = state.lock(&cr).await;
                 state.materialize_if_absent(call, MaterialiseOrigin::Reclaim);
@@ -668,7 +669,7 @@ async fn churn_during_reclaim_keeps_state_consistent() {
                     &invite("w0", "w1", &format!("churn-{w}-{j}")),
                     src(),
                     &config_for("w0"),
-                    &sip_txn::IdGen::seeded(1),
+                    &mut sip_ids::TurnIds::fixed(1),
                     0,
                 );
                 let cr = call.call_ref.clone();
@@ -713,4 +714,30 @@ async fn churn_during_reclaim_keeps_state_consistent() {
         state.active_count(),
         "no per-call lock leak after concurrent churn + reclaim",
     );
+}
+
+/// A scan beats its caller once per body read, so a caller's loop pulse shows
+/// a scan of a large partition making progress (a paused clock cannot time
+/// the decode, so the beat is pinned by count).
+#[tokio::test]
+async fn a_scan_beats_once_per_body_read() {
+    let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
+    let state = call_state("w0", repl.clone());
+    for i in 0..5 {
+        let call = build_initial_call(
+            &invite("w0", "w1", &format!("beat-{i}")),
+            src(),
+            &config_for("w0"),
+            &mut sip_ids::TurnIds::fixed(1),
+            0,
+        );
+        put(&repl, PRI, "w0", &call).await;
+    }
+    let beats = std::sync::atomic::AtomicUsize::new(0);
+    let beat = || {
+        beats.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    };
+    let scanned = state.scan_partition(PRI, "w0", &beat).await;
+    assert_eq!(scanned.len(), 5);
+    assert_eq!(beats.load(std::sync::atomic::Ordering::SeqCst), 5);
 }

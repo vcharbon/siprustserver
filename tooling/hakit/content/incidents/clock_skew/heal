@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Delete the event's TimeChaos; Chaos Mesh restores the clocks before the
+# resource is gone. Idempotent. Facts: the recovered instant.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=chaos-mesh.sh
+source "$HAKIT_LIB/chaos-mesh.sh"
+at="$(hk_cm_delete timechaos 90)"
+jq -cn --argjson at "$at" '{recovered_at_ms: $at}'

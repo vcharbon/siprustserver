@@ -2,14 +2,18 @@
  * The CASE-DOCUMENT tier: a refusal decided on the assembled flow, and the
  * pipeline's own roster of them.
  *
- * {@link DocumentInput} holds the step list and nothing else — no flows
- * document, no SUT set, no vantages. Step ids, `op`, `auto` and `observed` exist
- * nowhere earlier, and everything earlier has already had its say, so a rule
- * here reads the document it will refuse and no other evidence.
+ * {@link DocumentInput} holds the step list and the calls and nothing else — no
+ * flows document, no SUT set, no vantages. Step ids, `op`, `auto` and
+ * `observed` exist nowhere earlier, and everything earlier has already had its
+ * say, so a rule here reads the document it will refuse and no other evidence.
  *
- * The four rules below are the PIPELINE's own correctness contract, not a
- * deployment's reading: a document that ACKs a final it never captured, or
- * answers a request it never captured, is unrunnable against ANY conformant SUT.
+ * The rules below are the PIPELINE's own correctness contract, not a
+ * deployment's reading: a document that ACKs a final it never captured,
+ * answers a request it never captured, PRACKs a reliable provisional it never
+ * captured (`./unanswered-prack.ts`), or states a call that dials nobody for no
+ * stated reason (`./undialled.ts`) is unrunnable against ANY conformant SUT.
+ * A rule whose disposition is `unrunnable` also keeps its document out of a
+ * quarantine (`./caseset.ts`).
  * A deployment adds its own through {@link Policy.CasePolicy.refuseOnDocument},
  * and those run after these.
  *
@@ -20,8 +24,10 @@
  * A hole the DECLARATION lane already names is not one of them ({@link
  * undeclared}).
  */
-import type { Flow, MustFail } from "@sip/contracts"
+import type { Call, Flow, MustFail } from "@sip/contracts"
 import { checkRefusalRoster } from "./refusal-roster.js"
+import { PRACK_UNANSWERABLE_RULE } from "./unanswered-prack.js"
+import { DIAL_NOT_CAPTURED_RULE } from "./undialled.js"
 import type { Finding, RuleIdentity } from "./refusal-rule.js"
 import {
   ACK_NOT_CAPTURED,
@@ -44,6 +50,8 @@ export interface DocumentInput {
   readonly caseId: string
   /** The pivot's assembled steps, as the document states them. */
   readonly flow: ReadonlyArray<Flow.FlowNode>
+  /** The pivot's calls, each with the attempts, refusal or abandon it states. */
+  readonly calls: ReadonlyArray<Call.Call>
   /**
    * The divergences the document already OWES (`must_fail`), each at the step
    * that predicts it. Empty on a positive case.
@@ -89,6 +97,7 @@ export const DOCUMENT_RULES: ReadonlyArray<DocumentRule> = [
     id: FINAL_NOT_CAPTURED,
     subject: "source",
     disposition: "refuses",
+    why: "an ACK is scripted for an INVITE transaction whose final the capture does not hold (RFC 3261 §17.1.1.3)",
     refuses: (input) =>
       found(unfinalledAcks(input.flow), (c) => unfinalledLine(input.capture, input.caseId, c))
   },
@@ -96,6 +105,7 @@ export const DOCUMENT_RULES: ReadonlyArray<DocumentRule> = [
     id: ACK_NOT_CAPTURED,
     subject: "source",
     disposition: "refuses",
+    why: "a 2xx the system under test took is scripted with no captured ACK, which it owes end to end (RFC 3261 §13.2.2.4)",
     refuses: (input) =>
       found(undeclared(unackedFinals(input.flow), input.declared, "unexpected-ack"), (c) =>
         unackedLine(input.capture, input.caseId, c))
@@ -104,6 +114,7 @@ export const DOCUMENT_RULES: ReadonlyArray<DocumentRule> = [
     id: ACTOR_ACK_NOT_CAPTURED,
     subject: "source",
     disposition: "refuses",
+    why: "a 2xx the actor took is scripted with no captured ACK, which the stack relays end to end (RFC 3261 §13.2.2.4)",
     refuses: (input) =>
       found(
         undeclared(unackedTakenFinals(input.flow), input.declared, "unexpected-ack"),
@@ -114,9 +125,12 @@ export const DOCUMENT_RULES: ReadonlyArray<DocumentRule> = [
     id: REQUEST_NOT_CAPTURED,
     subject: "source",
     disposition: "refuses",
+    why: "a response is scripted to a request the capture does not hold, so no party can be sent it",
     refuses: (input) =>
       found(orphanResponses(input.flow), (c) => orphanLine(input.capture, input.caseId, c))
-  }
+  },
+  PRACK_UNANSWERABLE_RULE,
+  DIAL_NOT_CAPTURED_RULE
 ]
 
 checkRefusalRoster(DOCUMENT_RULES, {

@@ -5,11 +5,12 @@
 //!
 //! - a `/call/failure` consult: its answer's deadline. The copy reads the
 //!   answer as lost at the deadline — not when it was served again — and
-//!   relays the callee's final to the caller, as for an unanswered consult;
+//!   answers the caller the stack's own `503`, as for an unanswered consult;
 //! - a release event's consult (the subscribed maximum duration): the
-//!   duration timer stays in the call's replicated timer list, so the copy
-//!   fires it again and re-sends the consult; the call ends within that
-//!   consult's own decision deadline (here unanswered: the local teardown);
+//!   duration timer is re-armed as the consult's answer deadline in the
+//!   call's replicated timer list, so the copy fires it again at that
+//!   deadline and re-sends the consult; the call ends within that consult's
+//!   own decision deadline (here unanswered: the local teardown);
 //! - a REFER's authorization: its subscription's expiry, a timer of the
 //!   call's own; the referrer is told the transfer failed.
 //!
@@ -23,7 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use b2bua::answer_deadline::{failure_budget, MARGIN};
+use b2bua::answer_deadline::{failure_budget, release_budget, MARGIN};
 use b2bua::decision::test_adapter::route_to_processing_refer;
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
@@ -38,7 +39,8 @@ use failover_harness::{
     assert_call_fully_over, cookie_field, total_cdrs_for, FailoverHarness, ProxySut,
     ReplicatedB2buaSut, WorkerHealth, LEASE_OUTLIVING_THE_REPLICA_TTL,
 };
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpServerHandle, HttpTransport};
+use http_net_testkit::SimulatedHttpNetwork;
 use scenario_harness::{Agent, Dialog};
 use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
@@ -85,7 +87,7 @@ impl CallDecisionEngine for Unanswering {
         r.new_ruri = None;
         r.call_limiter = vec![LimiterEntry { id: "trunk".into(), limit: 10 }];
         r.callback_context = Some("ctx".into());
-        r.features.platform.max_duration_sec = self.max_duration_sec;
+        r.features.platform.max_duration_ms = self.max_duration_sec * 1000;
         r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
         Ok(NewCallResponse::Route(r))
     }
@@ -323,8 +325,8 @@ async fn fully_over(c: &mut Cluster, call_ref: &str) -> TerminationCause {
 // ── /call/failure: the answer's deadline ────────────────────────────────────
 
 /// Bob rings then refuses alice's call; the `/call/failure` consult is lost
-/// with the primary; the copy relays bob's 486 to alice at the consult's
-/// deadline, not at the call's setup deadline. On the takeover path alice's
+/// with the primary; the copy answers alice the stack's own 503 at the
+/// consult's deadline, not at the call's setup deadline. On the takeover path alice's
 /// UPDATE on the early dialog makes the backup take the call over; the
 /// pending failover answers it 491 (RFC 5407 §3.1).
 async fn failure_cell(name: &str, recovery: Recovery) {
@@ -351,22 +353,22 @@ async fn failure_cell(name: &str, recovery: Recovery) {
     assert!(c.fh.now_ms() < deadline.0, "the call is served again before its deadline");
     // Quiet up to a second before the deadline: nothing answers alice sooner.
     c.fh.advance(Duration::from_millis((deadline.0 - c.fh.now_ms() - 1_000) as u64)).await;
-    invite.expect(486).await;
+    invite.expect(503).await;
     assert_in(&c, deadline, "the caller was answered");
     assert_eq!(c.asked.load(Ordering::SeqCst), 1, "the lost consult is not re-sent");
     if let Recovery::Takeover = recovery {
         copy_lets_go_then_reboot(&mut c, &primary, &call_ref).await;
     }
-    assert_eq!(fully_over(&mut c, &call_ref).await, TerminationCause::RemoteFinal);
+    assert_eq!(fully_over(&mut c, &call_ref).await, TerminationCause::Admission);
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_failure_consult_lost_with_its_node_relays_the_final_at_its_deadline() {
+async fn a_failure_consult_lost_with_its_node_answers_503_at_its_deadline() {
     failure_cell("consult-answer-deadline-failure", Recovery::Reclaim).await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_failure_consult_lost_with_its_node_relays_the_final_on_the_takeover_copy() {
+async fn a_failure_consult_lost_with_its_node_answers_503_on_the_takeover_copy() {
     failure_cell("consult-answer-deadline-failure-takeover", Recovery::Takeover).await;
 }
 
@@ -387,25 +389,35 @@ async fn take_over(c: &mut Cluster, call: &mut Established) {
 }
 
 /// The subscribed maximum duration fires and its release consult is lost
-/// with the primary. The copy that serves the call fires the duration timer
-/// again and re-sends the consult (the decision layer sees the release event
+/// with the primary. The copy that serves the call reads the release event
+/// again at the consult's answer deadline — at once when it is served past
+/// it — and re-sends the consult (the decision layer sees the release event
 /// twice); unanswered within its decision deadline, it ends the call locally.
 async fn release_cell(name: &str, recovery: Recovery) {
     let mut c = cluster(name, SHORT_DURATION_SEC).await;
     let mut call = establish(&mut c).await;
-    consults_sent(&mut c, 1).await;
+    let asked_at = consults_sent(&mut c, 1).await;
     let primary = call.primary.clone();
     crash(&mut c, &primary).await;
     match recovery {
         Recovery::Reclaim => reboot_and_reclaim(&mut c, &primary).await,
         Recovery::Takeover => take_over(&mut c, &mut call).await,
     }
-    // The copy re-sent the consult when it was materialised, at the latest now.
     let served_at = c.fh.now_ms();
+    let budget = release_budget(CONSULT_BUDGET, ADMIT_BUDGET).expect("a bounded consult");
+    let deadline = asked_at + (budget + MARGIN).as_millis() as i64;
+    let resent_at = consults_sent(&mut c, 2).await;
+    assert!(
+        resent_at <= served_at.max(deadline) + STEP.as_millis() as i64,
+        "the copy re-sent the release consult at its answer deadline, or as it was served past it"
+    );
+    if served_at < deadline {
+        assert!(resent_at >= deadline, "served before the deadline, the copy waited for it");
+    }
     c.alice.receive_absorbing("BYE", &["INFO"]).await.respond(200, "OK").await;
     c.bob.receive_absorbing("BYE", &["INFO"]).await.respond(200, "OK").await;
-    assert_eq!(c.asked.load(Ordering::SeqCst), 2, "the copy re-sent the release consult");
-    let ended_by = served_at + (CONSULT_BUDGET + STEP).as_millis() as i64;
+    assert_eq!(c.asked.load(Ordering::SeqCst), 2, "the copy re-sent the release consult once");
+    let ended_by = resent_at + (CONSULT_BUDGET + STEP).as_millis() as i64;
     assert!(c.fh.now_ms() <= ended_by, "the call ended within the re-sent consult's deadline");
     if let Recovery::Takeover = recovery {
         copy_lets_go_then_reboot(&mut c, &primary, &call.call_ref).await;

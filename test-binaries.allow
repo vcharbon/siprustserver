@@ -3,7 +3,6 @@
 # `<path> <reason>`, checked by scripts/check-test-layout.sh in `just test`.
 crates/b2bua/tests/hydration_trace_adoption.rs installs the process trace registry
 crates/b2bua/tests/trace_alloc_budget.rs installs the global allocation counter
-crates/b2bua/tests/trace_observed_transition.rs installs the process trace registry
 crates/b2bua-harness/tests/per_call_trace.rs installs the process trace registry
 crates/b2bua-harness/tests/trace_enforced_transition.rs installs the process trace registry
 crates/b2bua-harness/tests/trace_failover_force_enable.rs installs the process trace registry
@@ -12,7 +11,9 @@ crates/b2bua-harness/tests/trace_wire_fidelity.rs installs the process trace reg
 crates/b2bua-runner-kit/tests/cdr_rabbitmq_io_threads.rs counts every thread of the process
 crates/failover-harness/tests/takeover_linked_span.rs installs the process trace registry
 crates/jemalloc-stats/tests/footprint.rs installs jemalloc as the global allocator
+crates/loadgen/tests/alloc_per_call.rs installs the global allocation counter
 crates/media/tests/rtp_media_live.rs real UDP paced by the wall clock, frame count wants an idle process
+crates/observe/tests/panic_hook.rs installs the process panic hook
 crates/scenario-harness/tests/artifact_on_drop.rs sets and removes a process environment variable
 crates/sip-message/tests/alloc_budget.rs installs the global allocation counter
 crates/sip-proxy/tests/trace_alloc_budget.rs installs the global allocation counter

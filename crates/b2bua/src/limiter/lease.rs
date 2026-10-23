@@ -9,15 +9,20 @@
 //! Before any answer the lease is `DEFAULT_LEASE`, the limiter's own
 //! default. A learnt lease is clamped to `MAX_LEASE`.
 //!
-//! A counted call refreshes every `refresh_period`:
-//! the configured period, or a third of the lease when that is shorter, so two
-//! refreshes may be missed before a set lapses. A refresh leaves up to one
-//! tick after it falls due, so the configured period plus a tick must stay
-//! below the lease. The first lease stated, and each change after it, is
-//! checked: one the configured period plus a tick reaches is warned about and
-//! counted (`b2bua_limiter_lease_too_short_total`), and one that shortens the
-//! period is counted (`b2bua_limiter_refresh_period_clamped_total`). A lease
-//! stated again changes nothing.
+//! A counted call refreshes every `refresh_period`: the configured period, or
+//! a third of the lease when that is shorter. A refresh leaves up to one
+//! `refresh_tick` after it falls due: the configured tick, or a sixth of the
+//! lease when that is shorter. Two refreshes with one missed between them
+//! then leave at most five sixths of the lease apart, so one refresh may be
+//! missed before a set lapses, whatever the lease, as long as the limiter
+//! answers inside the sixth left. A call arms its refresh under the period of
+//! the moment; a lease learnt shorter reaches a call's armed refresh on the
+//! call's next turn. The first lease stated, and each
+//! change after it, is checked: one the configured period plus a tick reaches
+//! is warned about and counted (`b2bua_limiter_lease_too_short_total`), and
+//! one that shortens the period is counted
+//! (`b2bua_limiter_refresh_period_clamped_total`). A lease stated again
+//! changes nothing.
 //!
 //! [`LimiterReports`]: crate::limiter::LimiterReports
 
@@ -31,13 +36,19 @@ use crate::config::B2buaConfig;
 use crate::metrics::B2buaMetrics;
 
 /// The lease before any limiter answer: the limiter's default.
-const DEFAULT_LEASE: Duration = Duration::from_secs(call_limiter::DEFAULT_LEASE_SEC as u64);
+const DEFAULT_LEASE: Duration = Duration::from_secs(call_limiter_wire::DEFAULT_LEASE_SEC as u64);
 
 /// The longest lease the worker honours: the limiter's own bound.
-const MAX_LEASE: Duration = Duration::from_secs(call_limiter::MAX_LEASE_SEC as u64);
+const MAX_LEASE: Duration = Duration::from_secs(call_limiter_wire::MAX_LEASE_SEC as u64);
 
 /// How many refresh periods fit in the lease at the least.
 const PERIODS_PER_LEASE: u32 = 3;
+
+/// How many refresh ticks fit in the lease at the least.
+const TICKS_PER_LEASE: u32 = 2 * PERIODS_PER_LEASE;
+
+/// The shortest refresh tick.
+const MIN_TICK: Duration = Duration::from_millis(1);
 
 /// The worker's refresh pace, checked against every learnt lease.
 #[derive(Clone, Copy, Debug)]
@@ -64,7 +75,9 @@ impl LimiterLease {
     /// and refresh tick.
     pub(crate) fn from_config(config: &B2buaConfig, metrics: B2buaMetrics) -> Arc<Self> {
         let pace = RefreshPace {
-            period: Duration::from_secs(config.limiter_refresh_sec.max(1) as u64),
+            period: Duration::from_secs(
+                u64::try_from(config.limiter_refresh_sec.max(1)).unwrap_or(1),
+            ),
             tick: Duration::from_millis(config.limiter_refresh_batch_ms),
         };
         Self::build(DEFAULT_LEASE, Some(pace), metrics)
@@ -104,6 +117,12 @@ impl LimiterLease {
         refresh_period(self.pace, self.current())
     }
 
+    /// How long the refresh batch collects under the current lease: the
+    /// `configured` tick, or a sixth of the lease when shorter.
+    pub(crate) fn refresh_tick(&self, configured: Duration) -> Duration {
+        refresh_tick(configured, self.current())
+    }
+
     /// The limiter stated `lease`: it becomes the current lease (clamped to
     /// [`MAX_LEASE`]). The first lease stated and each change are checked.
     pub(crate) fn learn(&self, lease: Duration) {
@@ -136,18 +155,21 @@ impl LimiterLease {
         };
         let lease_ms = millis(lease);
         let period_ms = millis(refresh_period(Some(pace), lease));
+        let tick_ms = millis(refresh_tick(pace.tick, lease));
         if pace.period + pace.tick >= lease {
             self.metrics.limiter().count_lease_too_short();
             tracing::warn!(
                 lease_ms,
                 configured_refresh_ms = millis(pace.period),
-                tick_ms = millis(pace.tick),
+                configured_tick_ms = millis(pace.tick),
                 refresh_ms = period_ms,
+                tick_ms,
                 "the limiter's lease is not longer than the configured refresh period plus a \
-                 refresh tick; counted calls refresh every third of the lease instead"
+                 refresh tick; counted calls refresh at most every third of the lease, sent \
+                 within a sixth of it"
             );
         } else {
-            tracing::info!(lease_ms, refresh_ms = period_ms, "limiter lease learnt");
+            tracing::info!(lease_ms, refresh_ms = period_ms, tick_ms, "limiter lease learnt");
         }
         if lease / PERIODS_PER_LEASE < pace.period {
             self.metrics.limiter().count_refresh_period_clamped();
@@ -159,6 +181,11 @@ impl LimiterLease {
 fn refresh_period(pace: Option<RefreshPace>, lease: Duration) -> Duration {
     let third = lease / PERIODS_PER_LEASE;
     pace.map_or(third, |pace| pace.period.min(third))
+}
+
+/// The refresh tick under `lease`, `configured` when it fits.
+fn refresh_tick(configured: Duration, lease: Duration) -> Duration {
+    configured.min(lease / TICKS_PER_LEASE).max(MIN_TICK)
 }
 
 fn millis(d: Duration) -> u64 {
@@ -215,6 +242,18 @@ mod tests {
         l.learn(Duration::from_secs(30));
         assert_eq!(metrics.limiter().lease_too_short_total(), 3, "back to short counts again");
         assert_eq!(metrics.limiter().refresh_period(), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn the_tick_is_at_most_a_sixth_of_the_lease() {
+        let l = lease(&B2buaMetrics::new());
+        let tick = Duration::from_secs(1);
+        assert_eq!(l.refresh_tick(tick), tick, "1 s under 120 s");
+        l.learn(Duration::from_secs(1));
+        assert_eq!(l.refresh_period(), Duration::from_secs(1) / 3);
+        assert_eq!(l.refresh_tick(tick), Duration::from_secs(1) / 6);
+        let worst = 2 * l.refresh_period() + l.refresh_tick(tick);
+        assert!(worst < l.current(), "one refresh may be missed: {worst:?}");
     }
 
     #[test]

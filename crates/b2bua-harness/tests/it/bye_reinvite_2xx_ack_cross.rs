@@ -33,8 +33,8 @@ use scenario_harness::{Harness, RunReport, WaiverScope};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
-const REOFFER: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
-const REANSWER: &str = "v=0\r\no=bob 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
+const REOFFER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
+const REANSWER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
 
 /// Every ACK the SUT put on `callee`'s socket, in wire order.
 fn acks_to(report: &RunReport, sut: SocketAddr, callee: SocketAddr) -> Vec<Vec<u8>> {
@@ -407,6 +407,7 @@ async fn a_repeated_reinvite_2xx_across_the_bye_draws_one_ack_per_copy() {
     let mut reinv = alice_dialog.reinvite(Some(REOFFER)).await;
     let reinvite_cseq = alice_dialog.local_cseq();
     let mut bob_reinv = bob.receive("INVITE").await;
+    let relayed_cseq = bob_reinv.request().cseq().seq();
     bob_reinv.respond(200, "OK").with_sdp(REANSWER).await;
     reinv.expect(200).await;
     alice_dialog.ack_for(reinvite_cseq, None).await;
@@ -432,7 +433,7 @@ async fn a_repeated_reinvite_2xx_across_the_bye_draws_one_ack_per_copy() {
     // copy would never quiesce bob's re-INVITE server txn.
     let reinvite_acks: Vec<Vec<u8>> = acks_to(&report, b2bua.addr, bob_addr)
         .into_iter()
-        .filter(|raw| sip_message::sniff::cseq_number(raw) == Some(reinvite_cseq))
+        .filter(|raw| sip_message::sniff::cseq_number(raw) == Some(relayed_cseq))
         .collect();
     assert_eq!(reinvite_acks.len(), 2, "one ACK per re-INVITE 2xx received (§13.2.2.4)");
     assert_eq!(

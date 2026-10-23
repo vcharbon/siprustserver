@@ -1,0 +1,85 @@
+schema: profile.v1
+name: incident-tour
+description: >-
+  Every base incident fired once under a modest basic load, with the targets
+  of this repository's lab: the worker kills, the proxy kill and plane cut,
+  the call limiter and the broker hung, slowed, refused, cut and restarted,
+  the infrastructure node stopped, the replication link partitioned, the SIP
+  plane made lossy, a store stalled, a clock shifted, a spike, the overload
+  of CPU scarcity plus a spike, orphaned dialogs, a pod force-deleted while
+  its process runs on, and an in-dialog request flood. Each window carries the
+  budget of what its fault may cost.
+duration_s: 2960
+drain_s: 130
+settle_s: 15
+setup_slow_ms: 1000
+catalogs: [x-api-call]
+preflight:
+  min_free_memory_gib: 4
+  min_free_disk_gib: 10
+streams:
+  - name: basic
+    driver: sipp
+    shape: basic
+    scenario: uac-basic-hold.xml
+    cps: 10
+    setup_deadline_s: 10
+    ring_s: 5
+    hold_s: 20
+  - name: burst
+    driver: sipp
+    start: incident
+    shape: basic
+    scenario: uac-basic-hold.xml
+    cps: 50
+    setup_deadline_s: 10
+    ring_s: 5
+    hold_s: 2
+  - name: orphaned
+    driver: sipp
+    start: incident
+    shape: basic
+    scenario: uac-basic-hold.xml
+    cps: 10
+    setup_deadline_s: 10
+    ring_s: 5
+    hold_s: 60
+  - name: flooding
+    driver: sipp
+    start: incident
+    shape: basic
+    scenario: uac-basic-hold.xml
+    cps: 5
+    setup_deadline_s: 10
+    ring_s: 5
+    hold_s: 1
+    params: { abuse: options_flood, flood_count: 30, flood_gap_ms: 1000 }
+schedule:
+  at:
+    - { at_s: 30, incident: kill_worker, budget: worker-kill }
+    - { at_s: 110, incident: kill_worker_graceful, budget: worker-drain }
+    - { at_s: 220, incident: kill_worker_held, duration_s: 60, budget: worker-kill }
+    - { at_s: 360, incident: kill_proxy, budget: proxy-failover }
+    - { at_s: 440, incident: pod_kill, budget: dependency-fault }
+    - { at_s: 520, incident: pod_restart, budget: dependency-fault }
+    - { at_s: 630, incident: pod_freeze, duration_s: 15, budget: dependency-fault }
+    - { at_s: 725, incident: net_delay, duration_s: 30, budget: dependency-fault }
+    - { at_s: 835, incident: net_loss, duration_s: 30, budget: dependency-fault }
+    - { at_s: 945, incident: tcp_reset, duration_s: 30, budget: dependency-fault }
+    - at_s: 1055
+      incident: pod_freeze
+      target: { selector: app=rabbitmq }
+      duration_s: 30
+      budget: dependency-fault
+    - { at_s: 1165, incident: cpu_starve, duration_s: 60, budget: cpu-overload }
+    - { at_s: 1305, incident: node_stop, duration_s: 60, expected_s: 240, budget: dependency-fault }
+    - { at_s: 1565, incident: partition, duration_s: 30, budget: dependency-fault }
+    - { at_s: 1675, incident: sip_loss, duration_s: 30, budget: lossy-plane }
+    - { at_s: 1785, incident: io_stall, duration_s: 30, budget: dependency-fault }
+    - { at_s: 1895, incident: clock_skew, duration_s: 30, budget: dependency-fault }
+    - { at_s: 2005, incident: cut_external_plane, duration_s: 30, budget: proxy-failover }
+    - { at_s: 2115, incident: spike, stream: burst, budget: spike }
+    - { at_s: 2315, incidents: [cpu_starve, spike], stream: burst, duration_s: 30, expected_s: 180, budget: cpu-overload }
+    - { at_s: 2515, incident: force_delete, budget: worker-kill }
+    - { at_s: 2600, incident: orphan, stream: orphaned, budget: dependency-fault }
+    - { at_s: 2720, incident: abuse, stream: flooding, budget: abuse }

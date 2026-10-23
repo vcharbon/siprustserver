@@ -268,9 +268,9 @@ async fn a_decision_485_after_a_peer_485_carries_none_of_its_alternates() {
 }
 
 /// A failover redirect stating a non-3xx code is not a redirect: it is
-/// refused with the plain server error, which speaks only for itself. It
-/// carries neither the redirect's target nor its `update_headers`, and nothing
-/// of Bob's refusal: no Contact, `Warning` or `Retry-After`.
+/// refused with the plain server error, which keeps the decision's
+/// `update_headers` but not its target, and nothing of Bob's refusal: no
+/// Contact, `Warning` or `Retry-After`.
 #[tokio::test(start_paused = true)]
 async fn a_failover_redirect_that_is_not_a_3xx_is_refused() {
     let CallTreatment::Redirect(mut refused_redirect) = redirect(485, "sip:x@10.0.0.11") else {
@@ -287,12 +287,15 @@ async fn a_failover_redirect_that_is_not_a_3xx_is_refused() {
     )
     .await;
     assert!(contact_uris(&refused).is_empty(), "{:?}", contact_uris(&refused));
-    for name in ["Warning", "Retry-After", "X-Decision"] {
+    for name in ["Warning", "Retry-After"] {
         assert!(
             refused.raw(sip_message::header::HeaderName::from(name)).next().is_none(),
             "no {name} on the refused redirect's 500"
         );
     }
+    let decision: Vec<&str> =
+        refused.raw(sip_message::header::HeaderName::from("X-Decision")).collect();
+    assert_eq!(decision, ["redirect"], "the decision's header rides the 500");
 }
 
 /// A new-call redirect stating a non-3xx code is refused the same way.

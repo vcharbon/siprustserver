@@ -19,6 +19,9 @@ use sip_message::SipRequest;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+/// The transfer target's answer to its INVITE: its own session, which its
+/// later answers on that dialog continue (RFC 3264 §8).
+const CHARLIE_FIRST_ANSWER: &str = "v=0\r\no=charlie 9 8 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const CHARLIE_ANSWER: &str = "v=0\r\no=charlie 9 9 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const ALICE_REANSWER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 
@@ -63,7 +66,7 @@ async fn transfer_stating(
     let h = Harness::new(name);
     let alice = h.agent("alice", &format!("127.0.0.1:{alice_port}")).await;
     let bob = h.agent("bob", &format!("127.0.0.1:{bob_port}")).await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{charlie_port}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{charlie_port}")).await.transfer_target();
     let engine = ScriptedDecisionEngine::builder()
         .fallback(move |_req| {
             let mut route = route_to_processing_refer("127.0.0.1", bob_port);
@@ -105,7 +108,7 @@ async fn transfer_stating(
 
     let mut charlie_uas = charlie.receive("INVITE").await;
     let charlie_invite = vectors(charlie_uas.request());
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
     bob.receive("NOTIFY").await.respond(200, "OK").await;
 
@@ -279,7 +282,7 @@ async fn a_resync_toward_the_originator_carries_its_own_vector() {
         [ORIGINATOR_OWN],
         "the resync carries the originator's own"
     );
-    resync.respond(200, "OK").with_sdp(EARLY).await;
+    resync.respond(200, "OK").with_sdp(OFFER).await;
     alice.receive("ACK").await;
     hangup(&mut dialog, &bob).await;
     settle_until(|| b2bua.is_reaped()).await;

@@ -9,8 +9,8 @@
 //!   bob BYE ──▶ rewriter (Request-URI replaced) ──▶ LB ──▶ backup
 //! ```
 //!
-//! The primary reboots within its budget and reclaims the deferred terminal,
-//! so the call ends with its one CDR.
+//! The primary departed, so the backup discharges the call it ends; the
+//! primary reboots within its budget, and the call ends with its one CDR.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -120,7 +120,7 @@ async fn a_callee_bye_without_our_request_uri_reaches_the_backup_on_the_outgoing
     rewriter.forward_response(addr(BOB)).await;
     bye.expect(200).await;
 
-    // The primary returns within its budget and discharges the deferral.
+    // The primary returns within its budget.
     fh.advance(Duration::from_secs(60)).await;
     {
         let (primary, backup) = pair(&mut w_b1, &mut w_b2, &primary_ord);

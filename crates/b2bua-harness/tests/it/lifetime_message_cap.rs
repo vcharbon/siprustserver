@@ -11,6 +11,7 @@ use std::time::Duration;
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use call::helpers::TERMINATING_TIMEOUT_MS;
 use scenario_harness::callflow::{ANSWER_SDP, OFFER_SDP};
+use scenario_harness::dialogs::DIALOG_ENDED;
 use scenario_harness::WaiverScope;
 use sip_message::SipMessage;
 
@@ -171,6 +172,15 @@ async fn a_bye_to_a_capped_call_is_answered_where_it_is_refused() {
         })
     })
     .await;
+    s.h.waive(
+        WaiverScope::rule(
+            DIALOG_ENDED,
+            "a capped call answers the BYE where it is refused, so the call never learns it; the \
+             queued INFO and the cap's teardown reach bob's ended dialog, and his 481 ends them \
+             (an overload extreme case, accepted)",
+        )
+        .on_party("bob"),
+    );
     let carol = s.h.agent("carol", "127.0.0.1:5062").await;
     let mut call = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
     let mut uas = s.bob.receive("INVITE").await;

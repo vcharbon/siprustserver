@@ -3,9 +3,12 @@
 //!
 //! Raw entries are memcpy'd from whatever image they point into; typed entries
 //! render straight into the same buffer. Nothing is re-parsed and no value gets
-//! its own `String`.
+//! its own `String`. Each line is checked as it is written: a header name off
+//! `token`, or a CR or LF inside the start line or a header value, is the
+//! render's refusal (ADR-0053).
 
-use crate::header::Wire;
+use crate::header::{HeaderName, Wire};
+use crate::write_check::{self, Position, WriteRefusal};
 
 use super::entry::Entry;
 use super::start::{Span, StartKind, StartSpans};
@@ -18,6 +21,9 @@ pub(crate) struct Rendered {
     pub headers: Vec<(Span, Span)>,
     /// Where the body begins — the end of the header block's blank line.
     pub body_at: usize,
+    /// The first line the render could not write whole; a message carrying
+    /// one never freezes.
+    pub refusal: Option<WriteRefusal>,
 }
 
 /// Render `line`, `entries` and `body` into one buffer, recording spans as it
@@ -26,14 +32,19 @@ pub(crate) fn render<S: StartKind>(line: &S::Line, entries: &[Entry], body: &[u8
     write::<S>(line, entries, body, true)
 }
 
-/// The datagram alone. A relay forwards bytes and reads no field of what it
-/// forwarded, so it records no spans either.
+/// The datagram alone, or the first line it could not write whole. A relay
+/// forwards bytes and reads no field of what it forwarded, so it records no
+/// spans either.
 pub(crate) fn render_bytes<S: StartKind>(
     line: &S::Line,
     entries: &[Entry],
     body: &[u8],
-) -> Vec<u8> {
-    write::<S>(line, entries, body, false).bytes
+) -> Result<Vec<u8>, WriteRefusal> {
+    let rendered = write::<S>(line, entries, body, false);
+    match rendered.refusal {
+        Some(refusal) => Err(refusal),
+        None => Ok(rendered.bytes),
+    }
 }
 
 fn write<S: StartKind>(line: &S::Line, entries: &[Entry], body: &[u8], record: bool) -> Rendered {
@@ -43,6 +54,8 @@ fn write<S: StartKind>(line: &S::Line, entries: &[Entry], body: &[u8], record: b
     let mut out = Wire::with_capacity(capacity);
 
     let start = S::render_start(line, &mut out);
+    let mut refusal = write_check::line_break(out.as_bytes())
+        .map(|reason| WriteRefusal { position: Position::StartLine, reason });
     out.str("\r\n");
 
     let mut headers = if record { Vec::with_capacity(entries.len()) } else { Vec::new() };
@@ -56,6 +69,10 @@ fn write<S: StartKind>(line: &S::Line, entries: &[Entry], body: &[u8], record: b
         if record {
             headers.push((name, (value_at, out.len() - value_at)));
         }
+        if refusal.is_none() {
+            refusal =
+                line_refusal(entry.name(), out.as_bytes().get(value_at..).unwrap_or_default());
+        }
         out.str("\r\n");
     }
 
@@ -64,5 +81,19 @@ fn write<S: StartKind>(line: &S::Line, entries: &[Entry], body: &[u8], record: b
     let mut bytes = out.into_bytes();
     bytes.extend_from_slice(body);
 
-    Rendered { bytes, start, headers, body_at }
+    Rendered { bytes, start, headers, body_at, refusal }
+}
+
+/// Why the line `name: value` cannot be written whole: an extension name off
+/// `token`, or a CR or LF in the value. A known name is a constant `token`.
+fn line_refusal(name: &HeaderName, value: &[u8]) -> Option<WriteRefusal> {
+    if let HeaderName::Other(text) = name {
+        if let Err(refusal) = write_check::header_name(text.as_str()) {
+            return Some(refusal);
+        }
+    }
+    write_check::line_break(value).map(|reason| WriteRefusal {
+        position: Position::HeaderValue,
+        reason: format!("{}: {reason}", name.as_wire_str()),
+    })
 }

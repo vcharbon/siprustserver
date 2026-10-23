@@ -10,20 +10,22 @@ description = "Test-only harness for multi-node HA failover: composes the proxy 
 workspace = true
 
 [dependencies]
-b2bua = { path = "../b2bua" }
+b2bua = { path = "../b2bua", features = ["testkit"] }
 # The simulated load sampler each worker's overload signal reads.
 load-shed = { path = "../load-shed" }
 # Shared b2bua/proxy spawn primitives live in b2bua-harness; failover-harness reuses them.
 b2bua-harness = { path = "../b2bua-harness" }
 call = { path = "../call" }
-sip-message = { path = "../sip-message" }
+sip-message = { path = "../sip-message", features = ["sniff"] }
 sip-net = { path = "../sip-net" }
+sip-net-testkit = { path = "../sip-net-testkit" }
 sip-txn = { path = "../sip-txn" }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
 scenario-harness = { path = "../scenario-harness" }
 layer-harness = { path = "../layer-harness" }
 sip-proxy = { path = "../sip-proxy" }
 repl-net = { path = "../repl-net" }
+repl-net-testkit = { path = "../repl-net-testkit" }
 topology = { path = "../topology" }
 ha-harness = { path = "../ha-harness" }
 seq-report = { path = "../seq-report" }
@@ -35,15 +37,17 @@ seq-report = { path = "../seq-report" }
 # b2bua-harness module.
 call-limiter = { path = "../call-limiter" }
 http-net = { path = "../http-net" }
+http-net-testkit = { path = "../http-net-testkit" }
 tokio = { workspace = true }
+# The node each SUT serves (`NodeScope`); the trace-plane tests also install
+# their own sampling gate and read the captured subscriber buffer (ADR-0026).
+observe = { path = "../observe" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+observe-testkit = { path = "../observe-testkit" }
 # A test service states the body of a request it originates.
 b2bua-sdk = { path = "../b2bua-sdk" }
 # A test wraps the limiter client (the `CallLimiter` trait is async-trait).
 async-trait = { workspace = true }
-# The trace-plane tests install their own sampling gate and read the captured
-# subscriber buffer (ADR-0026).
-observe = { path = "../observe" }
 serde_json = { workspace = true }

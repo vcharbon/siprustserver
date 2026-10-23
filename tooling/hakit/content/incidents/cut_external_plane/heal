@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Reconnect the cut node to the callers' network at its own address, and
+# prove it connected there, again a second later. Idempotent: a node already
+# connected is left alone. With equal VRRP priorities the addresses stay with
+# the peer.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+cut="$(hk_state cut)"
+[ -n "$cut" ] || { echo '{}'; exit 0; }
+read -r node ip <<<"$cut"
+address() { docker inspect -f "{{with index .NetworkSettings.Networks \"$HAKIT_PARAM_NETWORK\"}}{{.IPAddress}}{{end}}" "$node"; }
+now="$(address)"
+if [ -z "$now" ]; then
+  docker network connect --ip "$ip" "$HAKIT_PARAM_NETWORK" "$node" >&2
+  now="$(address)"
+fi
+[ "$now" = "$ip" ] || hk_die "$node is on $HAKIT_PARAM_NETWORK as '${now}', not $ip"
+at="$(hk_now_ms)"
+sleep "${HK_RECHECK_S:-1}"
+now="$(address)"
+[ "$now" = "$ip" ] || hk_die "$node is on $HAKIT_PARAM_NETWORK as '${now}' a second after its reconnection"
+jq -cn --arg node "$node" --arg ip "$ip" --argjson at "$at" '{node: $node, address: $ip, reconnected_at_ms: $at}'

@@ -1,0 +1,81 @@
+schema: profile.v1
+name: call-families
+description: >-
+  Every call family of the base UAC at 2 to 4 calls a second, side by side, with a
+  worker crash every 150 s: the plain hold and its emergency variant, the
+  limited call, the caller's re-INVITEs, a long call the far end may end, the
+  callee's re-INVITEs (the lab's base UAS sends them 60 s and 120 s in and
+  hangs up at 180 s), the ghost and the two floods. The ghost is released by
+  the system under test's keepalive, so its 600 s bound sits above the lab's
+  keepalive interval plus its answer grace (300 s + 120 s).
+duration_s: 900
+drain_s: 700
+settle_s: 40
+setup_slow_ms: 1000
+catalogs: [x-api-call]
+preflight:
+  min_free_memory_gib: 4
+  min_free_disk_gib: 10
+streams:
+  - { name: basic, driver: sipp, shape: basic, scenario: uac-basic-hold.xml, cps: 4, setup_deadline_s: 32, ring_s: 2, hold_s: 20 }
+  - { name: emergency, driver: sipp, shape: basic_em, scenario: uac-basic-hold.xml, cps: 2, setup_deadline_s: 32, ring_s: 2, hold_s: 20 }
+  - { name: limited, driver: sipp, shape: limited, scenario: uac-basic-hold.xml, cps: 2, setup_deadline_s: 32, ring_s: 2, hold_s: 30 }
+  - name: reinvite
+    driver: sipp
+    shape: basic
+    scenario: uac-basic-hold.xml
+    cps: 2
+    setup_deadline_s: 32
+    ring_s: 2
+    hold_s: 30
+    params: { reinvites: 2 }
+  - name: long
+    driver: sipp
+    shape: basic
+    scenario: uac-basic-hold.xml
+    cps: 2
+    setup_deadline_s: 32
+    ring_s: 2
+    hold_s: 120
+    params: { far_end_bye: release }
+  - name: callee_reinvite
+    driver: sipp
+    shape: callee_reinvite
+    scenario: uac-basic-hold.xml
+    cps: 2
+    setup_deadline_s: 32
+    ring_s: 2
+    hold_s: 240
+    params: { far_end_bye: release }
+  - name: options_flood
+    driver: sipp
+    shape: basic
+    scenario: uac-basic-hold.xml
+    cps: 2
+    setup_deadline_s: 32
+    ring_s: 2
+    hold_s: 1
+    params: { abuse: options_flood, flood_count: 20, flood_gap_ms: 1000 }
+  - name: reinvite_flood
+    driver: sipp
+    shape: basic
+    scenario: uac-basic-hold.xml
+    cps: 2
+    setup_deadline_s: 32
+    ring_s: 2
+    hold_s: 1
+    params: { abuse: reinvite_flood, flood_count: 10, flood_gap_ms: 1000 }
+  - name: ghost
+    driver: sipp
+    shape: basic
+    scenario: uac-basic-hold.xml
+    cps: 2
+    setup_deadline_s: 32
+    ring_s: 2
+    hold_s: 600
+    params: { abuse: ghost }
+schedule:
+  first_at_s: 120
+  interval_s: 150
+  cycle:
+    - { incident: kill_worker, budget: worker-kill }

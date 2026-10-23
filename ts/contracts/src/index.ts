@@ -1,10 +1,14 @@
 /**
- * **@sip/contracts** — the TypeScript mirrors of the Rust-owned wire formats.
+ * **@sip/contracts** — the TypeScript mirrors of the Rust-owned wire formats,
+ * and the report formats the tooling publishes over them.
  *
- * Rust is the source of truth. Every schema here mirrors a serde struct in this
- * repository and carries no logic beyond decoding, encoding and canonical
- * formatting; a contract question is answered by the Rust file the module doc
- * names, never by this package.
+ * Rust is the source of truth for the mirrors. Every schema mirroring a format
+ * mirrors a serde struct in this repository and carries no logic beyond
+ * decoding, encoding, canonical formatting and pure readings of the format (a
+ * call key's Call-ID, a document's step order, a cell's main error); a contract
+ * question is answered by the Rust file the module doc names, never by this
+ * package. The report formats (`CompareReport`, `RunReport`) are owned here and published
+ * as JSON Schema with a `schema_version`.
  *
  * The mirrors ship as namespaces because the formats deliberately reuse names —
  * a pivot `Identity` is a registry entry, a flows `Identity` is a parsed URI —
@@ -12,14 +16,17 @@
  */
 export * as AllowedErrors from "./allowed-errors.js"
 export * as Body from "./body.js"
+export * as Batch from "./batch.js"
 export * as Bundle from "./bundle/index.js"
 export * as Call from "./call.js"
+export * as CallKey from "./call-key.js"
 export * as Campaign from "./campaign.js"
 export * as Canonical from "./canonical.js"
 export * as Case from "./case.js"
 export * as CellHits from "./cell-hits.js"
 export * as Census from "./census.js"
 export * as Check from "./check.js"
+export * as CompareReport from "./compare-report.js"
 export * as Confrontation from "./confrontation.js"
 export * as Deviation from "./deviation.js"
 export * as Differential from "./differential.js"
@@ -29,14 +36,17 @@ export * as Flows from "./flows.js"
 export * as Identity from "./identity.js"
 export * as Lint from "./lint.js"
 export * as LoadRun from "./loadrun.js"
+export * as MainError from "./main-error.js"
 export * as Msg from "./msg.js"
 export * as MustFail from "./must-fail.js"
 export * as Pivot from "./pivot.js"
 export * as Placement from "./placement.js"
 export * as Postcondition from "./postcondition.js"
+export * as RunReport from "./run-report.js"
 export * as Rules from "./rules.js"
 export * as Schedules from "./schedules.js"
 export * as Seq from "./seq.js"
+export * as StepOrder from "./step-order.js"
 export { STRICT } from "./strict.js"
 export * as Tokens from "./tokens.js"
 export * as Violation from "./violation.js"

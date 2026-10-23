@@ -79,7 +79,7 @@ fn initial_invite_is_not_in_dialog() {
     assert!(InDialogRequest::new(&req).is_err()); // no To-tag yet
 }
 
-// --- ADR-0007 strict-grammar rejections ---
+// --- strict wire-grammar rejections ---
 
 #[test]
 fn rejects_top_via_missing_magic_cookie() {
@@ -155,9 +155,9 @@ Content-Length: 0\r\n\r\n";
 }
 
 #[test]
-fn malformed_optional_header_is_non_fatal_but_caught_by_validate_strict() {
+fn malformed_optional_header_is_non_fatal() {
     // Diversion URI `sip:@host` is malformed, but the message still parses
-    // (pass-through tolerance); validate_strict() surfaces it.
+    // (pass-through tolerance); the error is the Diversion's own.
     let raw = b"INVITE sip:bob@example.com SIP/2.0\r\n\
 Via: SIP/2.0/UDP host.example.com;branch=z9hG4bK1\r\n\
 From: <sip:alice@example.com>;tag=1\r\n\
@@ -169,7 +169,6 @@ Content-Length: 0\r\n\r\n";
     let msg = parse(raw).expect("message still parses (non-fatal optional header)");
     let SipMessage::Request(ref req) = msg else { unreachable!() };
     assert!(req.optional().diversion.is_err(), "malformed Diversion captured as Err");
-    assert!(msg.validate_strict().is_err(), "validate_strict surfaces it");
 }
 
 #[test]

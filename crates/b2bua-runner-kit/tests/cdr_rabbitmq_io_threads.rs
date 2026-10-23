@@ -1,8 +1,9 @@
 // Own binary (ADR-0030 X2): counts every thread of the process (`/proc/self/task`).
 //! Every connection the RabbitMQ CDR sink abandons ends its client IO thread
-//! and its tasks: a broker that stalls the handshake or never confirms leaves
-//! no thread, task or socket behind, however many times the sink reconnects. One test per
-//! binary, so no other test's connections are counted.
+//! and its tasks: a broker that refuses the connect, never answers it, stalls
+//! the handshake or never confirms leaves no thread, task or socket behind,
+//! however many times the sink reconnects. One test per binary, so no other
+//! test's connections are counted.
 
 #[path = "it/support/mod.rs"]
 mod support;
@@ -44,7 +45,7 @@ fn a_call() -> Call {
         &req,
         SocketAddr::from(([10, 0, 0, 9], 5060)),
         &cfg,
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         1_000,
     )
 }
@@ -90,12 +91,7 @@ async fn io_loop_threads_reach(want: usize) -> usize {
     n
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "slow lane: real clock >= 1 s"]
-async fn abandoned_connections_leave_no_io_thread_nor_task_behind() {
-    let broker = FakeBroker::start(Reply::Silent).await;
-    // The broker's accept loop is the only task before the sink runs.
-    let baseline = alive_tasks();
+fn writer_to(addr: SocketAddr, metrics: &B2buaMetrics) -> RabbitMqCdrWriter {
     let bounds = CdrDeliveryBounds {
         window: 8,
         connect_timeout: 150 * MS,
@@ -105,15 +101,68 @@ async fn abandoned_connections_leave_no_io_thread_nor_task_behind() {
         backoff_max: 20 * MS,
     };
     let settings = RabbitMqCdrSettings {
-        url: format!("amqp://guest:guest@{}/%2f", broker.addr),
+        url: format!("amqp://guest:guest@{addr}/%2f"),
         queue: "cdr".into(),
         declare: CdrQueueDeclare::Own { max_len: 0 },
         bounds,
     };
+    RabbitMqCdrWriter::new(settings, Arc::new(Fixed), metrics.clone())
+}
+
+/// A listening address that refuses every connect.
+fn refusing() -> SocketAddr {
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = closed.local_addr().expect("addr");
+    drop(closed);
+    addr
+}
+
+/// A listener whose zero backlog one connection fills: the kernel drops every
+/// further SYN, so a connect to it hangs until its own deadline.
+fn black_holed() -> (socket2::Socket, std::net::TcpStream, SocketAddr) {
+    use socket2::{Domain, Socket, Type};
+    let listener = Socket::new(Domain::IPV4, Type::STREAM, None).expect("socket");
+    listener.bind(&SocketAddr::from(([127, 0, 0, 1], 0)).into()).expect("bind");
+    listener.listen(0).expect("listen");
+    let addr = listener.local_addr().expect("addr").as_socket().expect("inet");
+    let filler = std::net::TcpStream::connect(addr).expect("the one queued connection");
+    let blocked = std::net::TcpStream::connect_timeout(&addr, 200 * MS);
+    assert!(blocked.is_err(), "the full backlog must drop a further SYN");
+    (listener, filler, addr)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "slow lane: real clock >= 1 s"]
+async fn abandoned_connections_leave_no_io_thread_nor_task_behind() {
+    let broker = FakeBroker::start(Reply::Silent).await;
+    // The broker's accept loop is the only task before the sink runs.
+    let baseline = alive_tasks();
     let metrics = B2buaMetrics::new();
-    let w = RabbitMqCdrWriter::new(settings, Arc::new(Fixed), metrics.clone());
     let call = a_call();
     assert_eq!(io_loop_threads(), 0);
+
+    // Refused: each connect fails at once.
+    let refused = writer_to(refusing(), &metrics);
+    for _ in 0..6 {
+        refused.write(&call, 2_000).await;
+        tokio::time::sleep(30 * MS).await;
+    }
+    drop(refused);
+    assert_eq!(io_loop_threads_reach(0).await, 0, "a refused connect leaves no IO thread");
+    assert_eq!(alive_tasks_reach(baseline).await, baseline, "a refused connect leaves no task");
+
+    // Black-holed: each connect ends at the connect bound.
+    let (_listener, _filler, hole) = black_holed();
+    let unanswered = writer_to(hole, &metrics);
+    for _ in 0..4 {
+        unanswered.write(&call, 2_000).await;
+        tokio::time::sleep(30 * MS).await;
+    }
+    drop(unanswered);
+    assert_eq!(io_loop_threads_reach(0).await, 0, "a black-holed connect leaves no IO thread");
+    assert_eq!(alive_tasks_reach(baseline).await, baseline, "a black-holed connect leaves no task");
+
+    let w = writer_to(broker.addr, &metrics);
 
     // Never confirmed: each connection ends at the confirm bound.
     for _ in 0..6 {
@@ -132,5 +181,5 @@ async fn abandoned_connections_leave_no_io_thread_nor_task_behind() {
     assert_eq!(io_loop_threads_reach(0).await, 0, "every abandoned connection's thread ended");
     assert_eq!(alive_tasks_reach(baseline).await, baseline, "no session leaves a task behind");
     assert_eq!(metrics.cdr_written_total(), 0);
-    assert_eq!(metrics.cdr_dropped_total(), 12);
+    assert_eq!(metrics.cdr_dropped_total(), 22);
 }

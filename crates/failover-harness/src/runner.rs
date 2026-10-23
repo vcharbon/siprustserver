@@ -24,7 +24,7 @@ use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
 use call::LimiterEntry;
 use call_limiter::{CallStore, LimiterMetrics, LimiterServer};
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpServerHandle, HttpTransport};
 use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
 use sip_message::SipMessage;
@@ -64,7 +64,7 @@ fn limited_decision() -> Arc<dyn CallDecisionEngine> {
     )
 }
 
-fn limiter_client(http: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
+fn limiter_client(http: &http_net_testkit::SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
     Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr(), Duration::from_millis(150)))
 }
 
@@ -95,6 +95,7 @@ pub fn generic_method(seed: u64) -> InDialogMethod {
 /// teardown sweep. Panics on any protocol surprise (a failed `expect`/`receive`).
 pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) {
     let mut obs = Observation::new();
+    let shell_since = b2bua::metrics::shell::shell_faults();
     let name = cell.name();
     let mut fh = FailoverHarness::new(&name, &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
@@ -106,7 +107,7 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
 
     // Shared limiter server on its own simulated HTTP fabric (survives crashes),
     // its lease outliving the replica TTL so the sweep proves the reap's release.
-    let http = SimulatedHttpNetwork::new();
+    let http = http_net_testkit::SimulatedHttpNetwork::new();
     let store = Arc::new(CallStore::new(crate::LEASE_OUTLIVING_THE_REPLICA_TTL, Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
@@ -306,21 +307,11 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
     // served transaction's terminal state — Timer H/J absorb the final ACK /
     // retransmits (~32 s) — so the settle budget must outlast it (instant under the
     // paused clock). Wait for both the limiter to drain AND both nodes to go clean.
-    //
-    // StayDead variant (Model Y, ADR-0020 X3): the backup deferred the terminal and
-    // the primary never reclaims, so NOTHING drains until the deferral's replica TTL
-    // (`reboot_budget`, 600 s) expires and the periodic reap does the lossy cleanup
-    // (limiter released, memory freed, NO CDR). So this run needs a settle budget
-    // past `reboot_budget`; every other run drains in the fast ~50 s window.
-    let stay_dead_variant = inject && cell.recovery == Recovery::StayDead;
-    let (step, max_iters) = if stay_dead_variant {
-        (Duration::from_secs(30), 24) // 24 × 30 s = 720 s > reboot_budget + margin
-    } else {
-        (Duration::from_millis(200), 250) // 250 × 200 ms = 50 s
-    };
+    // A StayDead variant drains in the same window: the primary departed, so the
+    // backup discharges the call it ends (ADR-0047 D8).
     let mut limiter_total = store.stats().current_total;
-    for _ in 0..max_iters {
-        fh.advance(step).await;
+    for _ in 0..250 {
+        fh.advance(Duration::from_millis(200)).await;
         limiter_total = store.stats().current_total;
         let nodes_clean = primary.active_calls() == 0
             && primary.lock_count() == 0
@@ -333,16 +324,12 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
 
     let sweep = TeardownSweep {
         nodes: vec![
-            node_end_state(primary, &primary_ord, &primary_ord),
-            node_end_state(backup, &primary_ord, &bak_ord),
+            NodeEndState::of(primary, &primary_ord, &primary_ord),
+            NodeEndState::of(backup, &primary_ord, &bak_ord),
         ],
         cdr_count: primary.cdr_records().len() + backup.cdr_records().len(),
         limiter_total,
-        // A StayDead failover loses the CDR (accepted double-failure): the backup
-        // never discharges and the dead primary never reclaims, so this run must end
-        // with ZERO CDRs. Every other run (incl. the StayDead BASELINE, which has no
-        // injected fault) ends normally with exactly one.
-        expect_cdr: !stay_dead_variant,
+        shell_faults: b2bua::metrics::shell::shell_faults().saturating_sub(shell_since),
     };
     obs.disposition = disposition_of(primary, backup);
 
@@ -376,11 +363,10 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
 /// then the pod terminates. In both the proxy then routes the dialog to the
 /// backup AND the dead pod's endpoint is dropped from the survivor's membership
 /// (`simulate_peer_removed`) — the COMPLETE k8s death signal (a real kill removes
-/// the StatefulSet endpoint). Under reactive-only takeover (ADR-0014) the survivor
-/// takes the dialog over when the proxy reroutes its in-dialog traffic
-/// (`router::materialise`); the membership delta drives no takeover, it only
-/// keeps the survivor's view honest. The reboot re-adds the endpoint
-/// ([`reboot_and_reclaim`]).
+/// the StatefulSet endpoint). The survivor takes over at once a call with an
+/// INVITE in flight (ADR-0047), and a quiet dialog when the proxy reroutes its
+/// in-dialog traffic (ADR-0014, `router::materialise`). The reboot re-adds the
+/// endpoint ([`reboot_and_reclaim`]).
 async fn inject_failover(
     fh: &mut FailoverHarness,
     primary: &mut ReplicatedB2buaSut,
@@ -410,13 +396,13 @@ async fn inject_failover(
             fh.mark(primary_ord, None, "crash", "kill (abrupt)");
             primary.crash();
             proxy.set_health(primary_ord, WorkerHealth::Dead);
-            // k8s drops the dead pod's endpoint → survivor eager-takes-over.
+            // k8s drops the dead pod's endpoint: the survivor's departure sweep runs.
             backup.simulate_peer_removed(primary_ord);
             fh.advance(Duration::from_millis(300)).await;
         }
         Fault::Drain => {
             fh.mark(primary_ord, None, "failover", "drain begin");
-            proxy.set_health(primary_ord, WorkerHealth::Draining);
+            proxy.set_acceptance(primary_ord, crate::Acceptance::Refuse);
             fh.advance(Duration::from_secs(6)).await;
             // "stop b2b" — the pod terminates after its grace window.
             fh.mark(primary_ord, None, "crash", "drain → terminate");
@@ -442,15 +428,15 @@ async fn reboot_and_reclaim(
     // SIP address (new pod IP). `reboot` hard-asserts the node is pristine.
     fh.mark(primary_ord, None, "reboot", "restart empty, higher gen, new pod IP");
     let new_addr = primary.reboot().await;
-    // The proxy re-learns the rebooted pod's NEW address (the k8s-EndpointSlice
-    // path) so cookie-routed in-dialog traffic follows it; record it for the
-    // report + the CSeq-audit exclusion. NOTE: we do NOT `set_health(Alive)` — the
-    // REAL health probe drives it. The rebooted worker answers 503 not-ready while
-    // its replication drains, so the proxy observes Unknown→NotReady→Alive exactly
-    // as in production. This is what makes the reclaimed call's keepalive-200
-    // round-trip while the worker is non-Alive (the response-path guard under test).
+    // The proxy re-learns the rebooted pod's NEW address, a fresh `Unknown`
+    // endpoint as in production (ADR-0012 D4), so cookie-routed in-dialog
+    // traffic follows it once the REAL health probe reads it Alive: the worker
+    // answers 503 while its replication drains, so the reclaimed call's
+    // keepalive-200 round-trips while it is non-Alive (the response-path guard
+    // under test).
     fh.note_worker_rebound(primary_ord, new_addr);
     proxy.set_address(primary_ord, new_addr);
+    proxy.set_health(primary_ord, WorkerHealth::Unknown);
     // k8s re-publishes the restarted pod's endpoint (a StatefulSet restart is
     // observed as Removed-then-Added) → the survivor re-spawns its puller to the
     // peer (fresh forward replication). Pairs with the `simulate_peer_removed` the
@@ -508,12 +494,12 @@ async fn drive_generic(
             }
         }
         Party::Callee => {
-            let sdp = needs_answer.then_some(OFFER);
+            let sdp = needs_answer.then_some(ANSWER);
             let mut tx = bob_dialog.request(method, sdp).await;
             let mut peer = alice.receive(m).await;
             obs.req(Who::Alice, peer.request());
             if needs_answer {
-                peer.respond(200, "OK").with_sdp(ANSWER).await;
+                peer.respond(200, "OK").with_sdp(OFFER).await;
             } else {
                 peer.respond(200, "OK").await;
             }
@@ -612,18 +598,6 @@ fn method_name(m: InDialogMethod) -> &'static str {
         InDialogMethod::Message => "MESSAGE",
         InDialogMethod::Prack => "PRACK",
         InDialogMethod::Refer => "REFER",
-    }
-}
-
-fn node_end_state(node: &ReplicatedB2buaSut, primary_ord: &str, ordinal: &str) -> NodeEndState {
-    let alive = node.is_ready() || node.active_calls() > 0 || node.lock_count() > 0;
-    NodeEndState {
-        ordinal: ordinal.to_string(),
-        alive,
-        active_calls: node.active_calls(),
-        lock_count: node.lock_count(),
-        residual_pri: node.scan_primary(primary_ord),
-        residual_bak: node.scan_backed_up(primary_ord),
     }
 }
 

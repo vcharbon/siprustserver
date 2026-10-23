@@ -1,28 +1,23 @@
 #!/usr/bin/env bash
-# Observability install script for sipjsserver.
+# The host observability stack (VictoriaMetrics, VictoriaLogs, VictoriaTraces,
+# Grafana): docker compose on stack/. The in-cluster collectors are the
+# siprust-observability helm release (deploy/helm), not this script's.
 #
 # Modes:
-#   --bootstrap : bring up host stack + apply kind-addons. NOT idempotent.
-#                 Re-runs may fail loudly on existing objects; rerun
-#                 --down first if you want a clean slate.
-#   --apply     : reload dashboards + scrape config in the live stack
-#                 + reapply kind-addons. IDEMPOTENT — safe to rerun any
-#                 number of times while iterating on dashboard JSON or
-#                 scrape rules.
-#   --down      : tear down host stack + delete the observability ns
-#                 in kind.
+#   --bootstrap : data dirs, the sipext network, `compose up --build`, then
+#                 wait for every endpoint. The `kind` docker network must
+#                 exist (kind-lab.sh up creates it).
+#   --apply     : reload VictoriaMetrics' scrape config. IDEMPOTENT.
+#   --down      : tear the host stack down (its data stays).
 #   --status    : probe each endpoint and report what's up.
 #
-# Required tools: docker, kubectl. kind cluster must exist for the
-# addons step; if not, --bootstrap/--apply skip kind-addons and warn.
+# Required tools: docker (uv when HAKIT_PATH names a product's content).
 
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STACK_DIR="$HERE/stack"
-ADDONS_DIR="$HERE/kind-addons"
-KIND_NET="${KIND_NET:-kind}"
-NAMESPACE="${OBS_NAMESPACE:-observability}"
+HAKIT_DIR="$(cd "$HERE/../../tooling/hakit" && pwd)"
 
 # Shared local-vs-non-local proxy split (the SINGLE source of truth). Sourcing it
 # gives us `local_curl` (a curl that ALWAYS bypasses the proxy for 127.0.0.1 health
@@ -55,22 +50,10 @@ require() {
   command -v "$1" >/dev/null 2>&1 || { c_red "missing required tool: $1"; exit 1; }
 }
 
-kind_net_gateway_ip() {
-  # IPv4 gateway of the kind docker network — used as the address the
-  # in-cluster vmagent/fluent-bit reach the host stack on.
-  docker network inspect "$KIND_NET" \
-    --format '{{range .IPAM.Config}}{{if (.Gateway | printf "%s" | len) }}{{if not (eq (slice .Gateway 0 4) "fc00")}}{{.Gateway}}{{end}}{{end}}{{end}}' 2>/dev/null \
-    | head -1
-}
-
-kind_cluster_present() {
-  docker network ls --format '{{.Name}}' | grep -qx "$KIND_NET"
-}
-
 # The compose file attaches victoriametrics to the external `sipext` bridge so
 # it can scrape the load-generator containers (sipp UAC exporters :9035 /
 # loadgen :9300) that live there — an external network that does not exist
-# would abort compose up. Normally run.sh sipext_up creates it; this guard
+# would abort compose up. Normally kind-lab.sh up creates it; this guard
 # covers a standalone --bootstrap before any cluster `up`, using the SAME
 # parameters (no-NAT, pinned subnet) from deploy/k8s/lib/net-env.sh when the
 # sibling checkout layout is present, else the identical hardcoded defaults.
@@ -92,27 +75,19 @@ ensure_sipext_net() {
   fi
 }
 
-kubectl_kind_present() {
-  command -v kubectl >/dev/null 2>&1 && kubectl get nodes >/dev/null 2>&1
-}
-
-# Render the {vmagent,fluent-bit}.yaml manifests with the host IP
-# substituted for __HOST_IP__, then apply.
-apply_addons() {
-  if ! kubectl_kind_present; then
-    c_yellow "[skip] kubectl/kind cluster not available — kind-addons not applied"
-    return 0
+# docker compose on the stack. Grafana serves the dashboards/ directory of
+# every HA tooling search-path entry in place (ADR-0049 §7.5): the base content
+# is in the compose file; when HAKIT_PATH names more entries, `hakit dashboards`
+# validates the path and writes the override mounting theirs (gitignored data/).
+stack_compose() {
+  local files=(-f "$STACK_DIR/docker-compose.yml")
+  if [[ -n "${HAKIT_PATH:-}" ]]; then
+    require uv
+    local override="$STACK_DIR/data/hakit-dashboards.compose.yml"
+    uv run --quiet --project "$HAKIT_DIR" --locked hakit dashboards --compose-override "$override" >/dev/null
+    files+=(-f "$override")
   fi
-  local host_ip
-  host_ip="$(kind_net_gateway_ip)"
-  if [[ -z "$host_ip" ]]; then
-    c_red "could not determine kind network gateway IPv4. Is the 'kind' docker network present?"
-    return 1
-  fi
-  c_cyan "applying kind-addons (host IP from cluster's POV: $host_ip)"
-  for f in "$ADDONS_DIR"/*.yaml; do
-    sed "s|__HOST_IP__|$host_ip|g" "$f" | kubectl apply -f -
-  done
+  (cd "$STACK_DIR" && docker compose "${files[@]}" "$@")
 }
 
 # Mode: --bootstrap. May fail loudly; that's OK.
@@ -132,7 +107,7 @@ cmd_bootstrap() {
   # plugin in at build time, honouring the proxy build-args exported above). Without
   # it, compose would skip the build whenever the tag already exists and the plugin
   # layer would silently go missing.
-  (cd "$STACK_DIR" && docker compose up -d --build)
+  stack_compose up -d --build
   c_cyan "==> waiting for stack health..."
   # Local health checks MUST bypass the proxy: these are 127.0.0.1 services, but a
   # proxified shell would otherwise route them through squid (issue1) and report
@@ -168,7 +143,6 @@ cmd_bootstrap() {
     c_yellow "hint: check 'docker compose logs grafana' (a crash-loop here usually means a build/plugin or port issue)."
     exit 1
   fi
-  apply_addons
   c_green "bootstrap done. Grafana: http://127.0.0.1:3333"
 }
 
@@ -179,21 +153,17 @@ cmd_apply() {
   local_curl -fsS -X POST http://127.0.0.1:8428/-/reload \
     && c_green "VM reloaded" \
     || c_yellow "VM reload returned non-2xx (file watcher may handle it anyway)"
-  # Grafana auto-watches /var/lib/grafana/dashboards every 10s — files
-  # are bind-mounted from the repo so edits land without intervention.
-  c_cyan "==> Grafana dashboards: bind-mounted, auto-reload (≤10s)"
-  apply_addons
+  # The search path's dashboards/ directories are mounted in place and
+  # rescanned every 10 s: an edit lands without intervention. A new search-path
+  # entry is a new mount, made by --bootstrap.
+  c_cyan "==> Grafana dashboards: mounted in place, auto-reload (≤10s)"
   c_green "apply done"
 }
 
 cmd_down() {
   require docker
   c_cyan "==> docker compose down"
-  (cd "$STACK_DIR" && docker compose down)
-  if kubectl_kind_present; then
-    c_cyan "==> deleting kind namespace $NAMESPACE"
-    kubectl delete namespace "$NAMESPACE" --ignore-not-found --wait=false
-  fi
+  stack_compose down
   c_green "down done"
 }
 
@@ -252,10 +222,7 @@ cmd_status() {
     fi
   fi
 
-  if kubectl_kind_present; then
-    echo
-    c_cyan "kind cluster — observability namespace:"
-    kubectl -n "$NAMESPACE" get pods 2>/dev/null || c_yellow "namespace $NAMESPACE not found yet"
+  if local_curl -fsS -m 2 http://127.0.0.1:8428/health >/dev/null 2>&1; then
     echo
     c_cyan "VictoriaMetrics targets (top 20):"
     local_curl -fsS http://127.0.0.1:8428/api/v1/targets 2>/dev/null \
@@ -275,10 +242,10 @@ usage() {
   cat <<EOF
 Usage: $0 [--bootstrap|--apply|--down|--status]
 
-  --bootstrap         first install (may fail on rerun, run --down first)
-  --apply             idempotent reload of dashboards / scrape / addons
-  --down              tear down everything
-  --status [-v]       probe endpoints and dump kind-addons pod state;
+  --bootstrap         bring the host stack up (needs the kind network)
+  --apply             idempotent reload of the scrape config
+  --down              tear the host stack down (its data stays)
+  --status [-v]       probe endpoints and list the scrape targets;
                       add --verbose / -v for container state + Grafana proxy-var
                       self-check + local-vs-proxied curl diagnostics
 EOF

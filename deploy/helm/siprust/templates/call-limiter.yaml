@@ -1,0 +1,93 @@
+{{- if .Values.callLimiter.enabled }}
+{{- /*
+The call limiter: one in-memory admission set per call, shared cluster-wide.
+One replica, Recreate: never two authoritative sets at once on a rollout. A
+delete or an eviction starts the replacement at once, so the terminating pod
+stops serving on SIGTERM and the grace stays short. A restart empties
+the store and the counted calls re-register on their next refresh (ADR-0040);
+workers fail open meanwhile, so it is a single point of failure of the limiter
+function only. Inert until a decision returns `call_limiter` entries.
+*/}}
+{{- $l := .Values.callLimiter }}
+{{- $env := dict "LIMITER_LISTEN" "0.0.0.0:8080" }}
+{{- if not (kindIs "invalid" $l.leaseSeconds) }}
+{{- $_ := set $env "LIMITER_LEASE_SECONDS" (toString (int $l.leaseSeconds)) }}
+{{- end }}
+{{- include "siprust.overlayEnv" (dict "into" $env "from" $l.env) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: call-limiter
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "call-limiter") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: call-limiter }
+  strategy: { type: Recreate }
+  template:
+    metadata:
+      labels:
+        {{- include "siprust.podLabels" (dict "app" "call-limiter" "extra" $l.podLabels) | nindent 8 }}
+      annotations:
+        {{- include "siprust.podAnnotations" (dict "base" (dict "prometheus.io/scrape" "true" "prometheus.io/port" "8080" "prometheus.io/path" "/metrics") "extra" $l.podAnnotations) | nindent 8 }}
+    spec:
+      {{- with include "siprust.pullSecrets" . | trim }}{{ . | nindent 6 }}{{- end }}
+      {{- with include "siprust.scheduling" $l | trim }}{{ . | nindent 6 }}{{- end }}
+      terminationGracePeriodSeconds: {{ int $l.terminationGracePeriodSeconds }}
+      containers:
+        - name: call-limiter
+          {{- include "siprust.image" (dict "root" $ "image" $l.image) | nindent 10 }}
+          command: {{ toJson $l.command }}
+          {{- with $l.args }}
+          args: {{ toJson . }}
+          {{- end }}
+          {{- with $l.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            {{- with include "siprust.envMap" (dict "root" $ "env" $env) | trim }}{{ . | nindent 12 }}{{- end }}
+            {{- with $l.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - { name: http, containerPort: 8080, protocol: TCP }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 1
+            periodSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            {{- toYaml $l.resources | nindent 12 }}
+          {{- with $l.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- with $l.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $l.extraVolumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+# A stable ClusterIP: a worker's startup resolution stays valid across limiter
+# restarts.
+apiVersion: v1
+kind: Service
+metadata:
+  name: call-limiter
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "call-limiter") | nindent 4 }}
+spec:
+  selector: { app: call-limiter }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080, protocol: TCP }
+{{- end }}

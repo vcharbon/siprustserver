@@ -26,6 +26,18 @@ pub const SEND_WOULD_BLOCK: Family = Family::counter(
     "Outbound datagrams dropped because the socket's send buffer was full (a blocking send would have parked the transaction owner; ADR-0033).",
 );
 
+pub const PRE_INGRESS_PANICS: Family = Family::counter(
+    "b2bua_udp_pre_ingress_panics_total",
+    Labels::None,
+    "Inbound datagrams whose pre-ingress hook (the ingress brake) panicked on the receive pump; each was accepted and is a hook defect, expected 0.",
+);
+
+pub const RECV_ERRORS: Family = Family::counter(
+    "b2bua_udp_recv_errors_total",
+    Labels::None,
+    "Receives that failed on the signalling socket (memory or buffers exhausted); the receive pump reads on after each, expected 0 outside an incident.",
+);
+
 pub const KERNEL_RX_DROPPED: Family = Family::counter(
     "b2bua_udp_kernel_rx_dropped_total",
     Labels::None,

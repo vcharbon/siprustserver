@@ -67,14 +67,14 @@ pub struct ApiCallRoute {
     pub destination: ApiCallDestination,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_ruri: Option<String>,
-    /// Per-route no-answer ring timer (seconds) the SUT arms on the b-leg it
+    /// Per-route no-answer ring timer (ms) the SUT arms on the b-leg it
     /// dials for this route — the NO-ANSWER failover trigger:
     /// when the callee rings but never answers, the timer fires and the SUT
     /// walks to the next route exactly as it would on a reject final. `None`
     /// (the default, serialized as an absent field) arms nothing —
     /// only a reject can advance the plan.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub no_answer_timeout_sec: Option<i64>,
+    pub no_answer_ms: Option<i64>,
 }
 
 /// The proprietary `X-Api-Call` JSON payload — the platform's test control
@@ -116,18 +116,18 @@ impl ApiCall {
     }
 
     /// [`ApiCall::routes`] with a per-route no-answer ring timer: every
-    /// route arms `no_answer_timeout_sec` on its b-leg, so a ring-forever hop
+    /// route arms `no_answer_ms` on its b-leg, so a ring-forever hop
     /// advances the plan exactly like a reject final. Uniform across routes —
     /// an answering hop cancels its timer at confirm, so the winner is
     /// unaffected.
-    pub fn routes_with_no_answer(candidates: &[CalleeTarget], no_answer_sec: Option<i64>) -> Self {
+    pub fn routes_with_no_answer(candidates: &[CalleeTarget], no_answer_ms: Option<i64>) -> Self {
         ApiCall {
             routes: candidates
                 .iter()
                 .map(|c| ApiCallRoute {
                     destination: ApiCallDestination::of(c.addr),
                     new_ruri: Some(c.uri.clone()),
-                    no_answer_timeout_sec: no_answer_sec,
+                    no_answer_ms,
                 })
                 .collect(),
             ..Default::default()
@@ -209,14 +209,14 @@ impl EgressPolicy {
     }
 
     /// [`Self::rewrite_for`] with a per-route no-answer ring timer: on the
-    /// pinned layout the `routes` failover plan arms `no_answer_timeout_sec` on
+    /// pinned layout the `routes` failover plan arms `no_answer_ms` on
     /// every hop, so the SUT reroutes on ring-timeout as well as on reject. The
     /// other policies ignore the knob (a transparent layout's SUT owns its own
     /// failover + timers; a pure register proxy has no failover at all).
     pub fn rewrite_with_no_answer(
         &self,
         candidates: &[CalleeTarget],
-        no_answer_sec: Option<i64>,
+        no_answer_ms: Option<i64>,
     ) -> EgressRewrite {
         match self {
             EgressPolicy::Transparent => EgressRewrite::default(),
@@ -227,7 +227,7 @@ impl EgressPolicy {
                 let api = match candidates {
                     [] => return EgressRewrite::default(),
                     [one] => ApiCall::pin(one.addr.ip().to_string(), one.addr.port()),
-                    many => ApiCall::routes_with_no_answer(many, no_answer_sec),
+                    many => ApiCall::routes_with_no_answer(many, no_answer_ms),
                 };
                 EgressRewrite {
                     ruri: None,
@@ -336,17 +336,17 @@ mod tests {
     #[test]
     fn routes_plan_arms_a_per_route_no_answer_timer_only_when_asked() {
         // The no-answer knob rides every route entry; the knob-less plan
-        // stays byte-identical (no `no_answer_timeout_sec` key at all).
+        // stays byte-identical (no `no_answer_ms` key at all).
         let candidates = [target("bob", "127.0.0.1:5070"), target("bob2", "127.0.0.1:5071")];
-        let rw = EgressPolicy::ApiCallPin.rewrite_with_no_answer(&candidates, Some(2));
+        let rw = EgressPolicy::ApiCallPin.rewrite_with_no_answer(&candidates, Some(2_000));
         let v: serde_json::Value = serde_json::from_str(&rw.headers[0].1).unwrap();
         let routes = v["routes"].as_array().unwrap();
-        assert_eq!(routes[0]["no_answer_timeout_sec"], 2);
-        assert_eq!(routes[1]["no_answer_timeout_sec"], 2);
+        assert_eq!(routes[0]["no_answer_ms"], 2_000);
+        assert_eq!(routes[1]["no_answer_ms"], 2_000);
 
         let plain = EgressPolicy::ApiCallPin.rewrite_for(&candidates);
         assert!(
-            !plain.headers[0].1.contains("no_answer_timeout_sec"),
+            !plain.headers[0].1.contains("no_answer_ms"),
             "the knob-less plan must stay byte-identical: {}",
             plain.headers[0].1
         );

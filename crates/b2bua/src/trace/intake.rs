@@ -136,9 +136,8 @@ fn header_rate(a_invite: &SipRequest) -> Option<f64> {
 /// the auto-100 sip-txn sent for it (ADR-0022) — whose bytes this layer never
 /// held, so it is recorded as a note rather than a wire body.
 fn backfill(call: &Call, invite_wire: &[u8]) {
-    let src: SocketAddr = format!("{}:{}", call.a_leg.source.address, call.a_leg.source.port)
-        .parse()
-        .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
+    let src = sip_net::ip_socket_addr(&call.a_leg.source.address, call.a_leg.source.port)
+        .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
     emit::sip_in(call, call.created_at, src, invite_wire);
     emit::sip_out_note(call, call.created_at, "100 Trying (transaction layer)");
 }

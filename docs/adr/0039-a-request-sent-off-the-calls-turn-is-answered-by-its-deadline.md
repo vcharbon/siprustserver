@@ -1,6 +1,8 @@
 # A request sent off the call's turn is answered by its deadline
 
-**Status:** accepted (2026-10-01)
+**Status:** accepted (2026-10-01); **superseded in part by
+[ADR-0043](0043-outbound-backend-client-policy.md)** (the fold of an unanswered
+`/call/failure` consult is the stack's own bare `503`)
 
 ## Context
 
@@ -81,14 +83,24 @@ second request while the first is awaited merges their deadlines.
   primary acts on the real one. The deadline still fires wherever the call is
   served: firing only on the sending node would leave the takeover case
   stranded.
-- The core's two other consults need no deadline; something already in the
-  call's replicated timer list bounds each:
-  - a release event's consult (`ReleaseAsyncHttp`, the subscribed maximum
-    duration): the rule sending it leaves the fired `GlobalDuration` in the
-    ledger, so the copy that serves the call fires it again and re-sends the
-    consult, which ends within its own decision deadline (unanswered: the
-    local teardown). The consult is at least once: after a node loss the
-    decision layer may see the same release event twice;
+- A release event's consult (`ReleaseAsyncHttp`, the subscribed maximum
+  duration) has a deadline of its own (`ReleaseAnswer`), named by the change
+  its turn reserved: the decision deadline plus the admit budget of the route
+  it may answer, plus the margin. Its fold names it and, like a failure fold,
+  reaches the rules only while the deadline is in the ledger: a second answer
+  of the consult reaches none. The deadline's expiry is the release event
+  again, wherever the call is then served — the primary that sent the consult
+  as much as a copy — so the consult is re-sent, and ends within its own
+  decision deadline (unanswered: the local teardown). The consult is at least
+  once: after a node loss, or an answer past its deadline, the decision layer
+  may see the same release event twice; one answer applies — a fold no
+  consult awaits writes no decision mark and moves no route onto the call,
+  its admit report applied as an admit. With the decision deadline off
+  (`call_control_timeout_ms` 0) the consult has no deadline and is never
+  re-sent: a takeover while it is in flight leaves the call without its
+  cap.
+- The core's REFER authorization needs no deadline; something already in the
+  call's replicated timer list bounds it:
   - a REFER's authorization (`ReferAsyncHttp`): its subscription's expiry
     (`ReferSubscriptionExpiry`) ends the wait and tells the referrer the
     transfer failed (NOTIFY `terminated`, 500).
@@ -111,4 +123,10 @@ second request while the first is awaited merges their deadlines.
   `failover-harness/tests/it/consult_answer_deadline.rs` (a node crashing with
   each core consult in flight: a `/call/failure` consult's final relayed at
   its deadline on reclaim and takeover; the release consult re-sent by the
-  copy; the REFER's authorization ended at the subscription's expiry).
+  copy at its answer deadline; the REFER's authorization ended at the
+  subscription's expiry),
+  `b2bua-harness/tests/it/release_consult_answer.rs` (a reroute whose admit
+  runs long answers by the consult's deadline; the deadline's expiry
+  re-sends the consult on the node serving the call; a release fold whose
+  consult is no longer awaited reaches no rule and moves nothing of the
+  call).

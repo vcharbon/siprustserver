@@ -52,11 +52,7 @@ pub async fn assert_cell_transparent(cell: Cell) {
     base_sweep.assert_clean(&format!("{name}/baseline"));
     let (variant, var_sweep) = run_cell(cell, true).await;
     var_sweep.assert_clean(&format!("{name}/variant"));
-    // A StayDead failover is SIP-transparent but loses the CDR (Model Y, ADR-0020
-    // X3), so the variant's disposition (`no-cdr`) differs from the baseline's
-    // (`terminated`) by design — compare it only when the primary recovers.
-    let compare_disposition = cell.recovery != Recovery::StayDead;
-    oracle::assert_transparent(&name, &baseline, &variant, compare_disposition);
+    oracle::assert_transparent(&name, &baseline, &variant);
 }
 
 /// **High-level cluster invariant**: across `nodes`, **exactly one** serves
@@ -132,8 +128,9 @@ pub async fn assert_call_fully_over(
 }
 
 /// **The StayDead post-condition** (ADR-0020 X3, Model Y): a call whose terminal was
-/// served on the backup while the primary CRASHED and NEVER returned (past the
-/// replica TTL). The primary is the sole CDR authority, so when it never reclaims
+/// served on the backup while the primary CRASHED with its endpoint still in the
+/// backup's membership, and NEVER returned (past the replica TTL). The primary is
+/// the CDR authority of a call it has not departed from, so when it never reclaims
 /// the deferral the CDR is **lost** — the accepted double-failure (primary down AND
 /// never returns). But the periodic backup reap must still:
 ///
@@ -228,4 +225,4 @@ pub use b2bua::store::PartitionRole;
 /// [`ReplicatedB2buaSut::flow_caught_up`] names it. Distinct from
 /// [`PartitionRole`], which names a body's keyspace in the store.
 pub use repl_net::frame::Partition;
-pub use sip_proxy::registry::WorkerHealth;
+pub use sip_proxy::registry::{Acceptance, WorkerHealth};

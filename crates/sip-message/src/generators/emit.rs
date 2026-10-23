@@ -3,6 +3,7 @@
 
 use bytes::Bytes;
 
+use super::error::GenerateError;
 use crate::draft::{Draft, RequestDraft, ResponseDraft, StartKind};
 use crate::header::{ContentLength, HeaderName, MaxForwards, MediaType, Uri};
 use crate::sip_str::SipStr;
@@ -16,15 +17,16 @@ pub(super) const DEFAULT_MAX_FORWARDS: u32 = MaxForwards::DEFAULT.value();
 /// The media type a body carries when the caller names none.
 const DEFAULT_CONTENT_TYPE: &str = "application/sdp";
 
-/// A recipe supplies every mandatory header, so a freeze failure is a stack
-/// bug — surfaced as a panic at construction time rather than threading a
-/// `Result` through every generator.
-pub(super) fn request(draft: RequestDraft) -> SipRequest {
-    draft.freeze().unwrap_or_else(|e| panic!("generators built a malformed request: {e}"))
+/// The request a recipe built. A recipe supplies every mandatory header, but a
+/// line it echoes or the caller states may not read as its header, and then
+/// the recipe builds nothing.
+pub(super) fn request(draft: RequestDraft) -> Result<SipRequest, GenerateError> {
+    Ok(draft.freeze()?)
 }
 
-pub(super) fn response(draft: ResponseDraft) -> SipResponse {
-    draft.freeze().unwrap_or_else(|e| panic!("generators built a malformed response: {e}"))
+/// The response a recipe built, as [`request`].
+pub(super) fn response(draft: ResponseDraft) -> Result<SipResponse, GenerateError> {
+    Ok(draft.freeze()?)
 }
 
 /// The Request-URI a caller named as text. A value that does not read as a URI
@@ -85,5 +87,6 @@ pub(super) fn framed<S: StartKind>(
             .unwrap_or_else(|| MediaType::new(SipStr::from_static(DEFAULT_CONTENT_TYPE)));
         draft = draft.push(media);
     }
-    draft.push(ContentLength::new(body.len() as u32)).with_body(body)
+    // A body past `u32` is refused at the freeze, which restates the length.
+    draft.push(ContentLength::new(u32::try_from(body.len()).unwrap_or(u32::MAX))).with_body(body)
 }

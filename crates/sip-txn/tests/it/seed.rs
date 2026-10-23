@@ -1,17 +1,19 @@
 //! `TransactionLayer::seed` / `reoffer` (ADR-0014 materialisation): the
-//! INVITE transactions a call taken over from a peer names are rebuilt here as
-//! `Proceeding` and then behave as if this layer had seen the first copy — the
+//! INVITE transactions a call taken over from a peer names are rebuilt here —
+//! a client INVITE `Proceeding` when the record holds a provisional for it,
+//! `Trying` otherwise — and then behave as if this layer had seen the first copy — the
 //! client seed ACKs and Timer-D-holds a non-2xx final, the server seed ladders
 //! its final on Timer G and answers a CANCEL 200 + 487 — and the datagram that
 //! arrived before them is re-offered against them.
 
 use crate::common;
+use call::TxnTimeoutKind;
 use common::*;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
 use sip_retransmit::Class;
 use sip_txn::timers::TIMER_I;
-use sip_txn::{Reoffer, TimeoutKind, TransactionEvent, TxnSeed};
+use sip_txn::{Reoffer, TransactionEvent, TxnSeed};
 
 const TRANSIT: u64 = 5;
 const CALL_REF: &str = "w0|seeded-call@10.0.0.9|atag";
@@ -64,22 +66,38 @@ fn client_seed(branch: &str, call_id: &str) -> TxnSeed {
     TxnSeed::ClientInvite {
         invite: invite_with_cr_lg(CALL_REF, call_id, branch, "b-1"),
         dest: addr(PEER),
+        provisional: true,
+        cancel: None,
+    }
+}
+
+/// A client INVITE seed whose record holds no provisional: a CANCEL on it
+/// waits for one (RFC 3261 §9.1).
+fn unanswered_client_seed(branch: &str, call_id: &str) -> TxnSeed {
+    TxnSeed::ClientInvite {
+        invite: invite_with_cr_lg(CALL_REF, call_id, branch, "b-1"),
+        dest: addr(PEER),
+        provisional: false,
+        cancel: None,
     }
 }
 
 /// A server INVITE seed for the a-leg INVITE the peer admitted on `branch` and
 /// already answered provisionally under `SEED_TO_TAG`, carrying the rebuilt
-/// request when `with_request`.
-fn server_seed(branch: &str, call_id: &str, with_request: bool) -> TxnSeed {
+/// request.
+fn server_seed(branch: &str, call_id: &str) -> TxnSeed {
     TxnSeed::ServerInvite {
-        branch: branch.to_string(),
-        sent_by: peer_sent_by(),
-        call_id: call_id.to_string(),
-        from_tag: "caller-tag".to_string(),
+        request: request_bytes(&inbound_request("INVITE", branch, call_id, None)),
         to_tag: Some(SEED_TO_TAG.to_string()),
         leg_id: Some("a".to_string()),
-        original_request: with_request
-            .then(|| request_bytes(&inbound_request("INVITE", branch, call_id, None))),
+    }
+}
+
+/// An Accepted seed for the INVITE the peer answered 2xx on `branch`.
+fn accepted_seed(branch: &str, call_id: &str) -> TxnSeed {
+    TxnSeed::ServerAccepted {
+        response: parse_response(&response_bytes(200, "OK", "INVITE", branch, call_id, true)),
+        leg_id: Some("a".to_string()),
     }
 }
 
@@ -160,7 +178,7 @@ async fn a_seeded_client_invite_gives_up_on_the_invite_bound() {
             Some("b-1".to_string()),
             Some(INCARNATION_MARK.to_string()),
             Some("INVITE".to_string()),
-            TimeoutKind::Transaction
+            TxnTimeoutKind::Transaction
         )),
         "the bound fires as the configured INVITE bound, for the seed's call, incarnation and leg"
     );
@@ -177,10 +195,7 @@ async fn a_seeded_server_invite_ladders_a_final_on_timer_g_until_the_ack() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
     let branch = "z9hG4bK-seed-s";
     let call_id = "seed-s";
-    assert_eq!(
-        stack.txn.seed(CALL_REF, vec![server_seed(branch, call_id, false)]).await.unwrap(),
-        1
-    );
+    assert_eq!(stack.txn.seed(CALL_REF, vec![server_seed(branch, call_id)]).await.unwrap(), 1);
     assert_eq!(stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(), 1);
 
     let resp = parse_response(&response_bytes(486, "Busy Here", "INVITE", branch, call_id, true));
@@ -214,16 +229,15 @@ async fn a_seeded_server_invite_ladders_a_final_on_timer_g_until_the_ack() {
     let _ = stack.drain_events();
 }
 
-/// A seeded server INVITE carrying its request answers a CANCEL 200 + 487 under
-/// the To-tag the seed names — the one the peer's early dialog already holds —
-/// and emits `Cancelled`, as for any INVITE this layer admitted; one seeded
-/// without the request cannot compose the 487 and hands the CANCEL up instead.
+/// A seeded server INVITE answers a CANCEL 200 + 487 under the To-tag the seed
+/// names — the one the peer's early dialog already holds — and emits
+/// `Cancelled`, as for any INVITE this layer admitted.
 #[tokio::test(start_paused = true)]
-async fn a_seeded_server_invite_with_its_request_answers_a_cancel() {
+async fn a_seeded_server_invite_answers_a_cancel() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
     let branch = "z9hG4bK-seed-cxl";
     let call_id = "seed-cxl";
-    stack.txn.seed(CALL_REF, vec![server_seed(branch, call_id, true)]).await.unwrap();
+    stack.txn.seed(CALL_REF, vec![server_seed(branch, call_id)]).await.unwrap();
 
     stack.inject(&inbound_request("CANCEL", branch, call_id, None)).await;
     elapse_ms(60).await;
@@ -246,16 +260,116 @@ async fn a_seeded_server_invite_with_its_request_answers_a_cancel() {
     assert_eq!(active(&stack), 1, "Confirmed on the ACK until Timer I");
     elapse_ms(TIMER_I + 100).await;
     assert_eq!(active(&stack), 0);
+}
 
-    // Without the request: the CANCEL is unanswerable here and is the TU's.
-    let bare = "z9hG4bK-seed-bare";
-    stack.txn.seed(CALL_REF, vec![server_seed(bare, "seed-bare", false)]).await.unwrap();
-    stack.inject(&inbound_request("CANCEL", bare, "seed-bare", None)).await;
+/// A seeded in-dialog re-INVITE still unanswered when its call is released is
+/// answered through the transaction, under the dialog's To-tag, to the top
+/// Via's response target: the record holds no source address for it.
+#[tokio::test(start_paused = true)]
+async fn a_seeded_reinvite_is_answered_at_its_calls_release() {
+    let stack = Stack::build(TRANSIT, 64, 64).await;
+    let (branch, call_id) = ("z9hG4bK-seed-release", "seed-release");
+    let seed = TxnSeed::ServerInvite {
+        request: request_bytes(&inbound_request("INVITE", branch, call_id, Some("dlg-tag"))),
+        to_tag: None,
+        leg_id: Some("a".to_string()),
+    };
+    stack.txn.seed(CALL_REF, vec![seed]).await.unwrap();
+
+    let answered = stack
+        .txn
+        .answer_unanswered_invites_of_call(CALL_REF, 487, "Request Terminated")
+        .await
+        .unwrap();
+    assert_eq!(answered, 1, "the seed is answered");
     elapse_ms(60).await;
-    assert!(stack.drain_peer().is_empty(), "no 200, no 487 without the request");
-    let events = stack.drain_events();
-    assert!(!cancelled(&events));
-    assert_eq!(messages(&events), vec![(false, 0, false)], "the CANCEL is handed up");
+    let out = stack.drain_peer();
+    assert_eq!(count_responses(&out, 487), 1, "its final reaches the top Via's sent-by");
+    assert_eq!(to_tag_of(&out, 487).as_deref(), Some("dlg-tag"), "under the dialog's To-tag");
+}
+
+// ── The Accepted seed ───────────────────────────────────────────────────────
+
+/// A 2xx seeded Accepted (RFC 6026 §7.1) answers each copy of its INVITE with
+/// that 2xx — no 100, nothing handed up, nothing opened beside it — counts for
+/// its call until an ACK on its branch, which passes up, and leaves at Timer L
+/// measured from the seed.
+#[tokio::test(start_paused = true)]
+async fn an_accepted_seed_answers_copies_of_its_invite_with_its_2xx() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let (branch, call_id) = ("z9hG4bK-seed-accepted", "seed-accepted");
+    let seeded = stack.txn.seed(CALL_REF, vec![accepted_seed(branch, call_id)]).await.unwrap();
+    assert_eq!(seeded, 1);
+    assert_eq!(stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(), 1);
+    elapse_ms(3_000).await;
+    assert!(stack.drain_peer().is_empty(), "a seed re-sends nothing on its own");
+
+    let copy = inbound_request("INVITE", branch, call_id, Some("peer-tag"));
+    stack.inject(&copy).await;
+    elapse_ms(60).await;
+    let out = stack.drain_peer();
+    assert_eq!(count_responses(&out, 200), 1, "the copy draws the seeded 2xx");
+    assert_eq!(count_responses(&out, 100), 0, "and no 100");
+    assert!(stack.drain_events().is_empty(), "the copy is not handed up");
+    assert_eq!(active(&stack), 1, "nothing opens beside the seed");
+
+    stack.inject(&inbound_request("ACK", branch, call_id, Some("peer-tag"))).await;
+    elapse_ms(60).await;
+    assert_eq!(messages(&stack.drain_events()), vec![(false, 0, false)], "the ACK passes up");
+    assert_eq!(
+        stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(),
+        0,
+        "an ACKed Accepted seed no longer counts for its call"
+    );
+
+    // 3 120 ms have passed since the seed.
+    elapse_ms(sip_txn::timers::TIMER_L - 3_300).await;
+    assert_eq!(active(&stack), 1, "held inside Timer L");
+    elapse_ms(400).await;
+    assert_eq!(active(&stack), 0, "Timer L from the seed ends it");
+}
+
+/// The INVITE copy that triggered the materialisation opened a transaction
+/// with no final on the Accepted seed's identity: it takes the seed's 2xx and
+/// sends it once to the copy's source, and the re-offer of that copy is then
+/// absorbed with nothing more sent. An occupant that has sent its final keeps
+/// it, and the seed is skipped.
+#[tokio::test(start_paused = true)]
+async fn an_occupant_with_no_final_takes_the_accepted_seeds_2xx() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let (branch, call_id) = ("z9hG4bK-seed-adopted", "seed-adopted");
+    let raw = inbound_request("INVITE", branch, call_id, Some("peer-tag"));
+    stack.inject(&raw).await;
+    elapse_ms(60).await;
+    assert_eq!(count_responses(&stack.drain_peer(), 100), 1, "the copy opened a transaction");
+    let _ = stack.drain_events();
+
+    let seeded = stack.txn.seed(CALL_REF, vec![accepted_seed(branch, call_id)]).await.unwrap();
+    assert_eq!(seeded, 1, "the occupant took the seed");
+    elapse_ms(60).await;
+    assert_eq!(count_responses(&stack.drain_peer(), 200), 1, "the 2xx answers the copy once");
+    let copy = CustomParser::new().parse(&raw).expect("parse");
+    assert_eq!(stack.txn.reoffer(copy, addr(PEER)).await.unwrap(), Reoffer::Matched);
+    elapse_ms(60).await;
+    assert!(stack.drain_peer().is_empty(), "the re-offered copy draws nothing more");
+    stack.inject(&raw).await;
+    elapse_ms(60).await;
+    assert_eq!(count_responses(&stack.drain_peer(), 200), 1, "a copy from the wire draws it");
+    assert_eq!(active(&stack), 1);
+
+    // An occupant answered on its own keeps its final.
+    let (other, other_id) = ("z9hG4bK-seed-answered", "seed-answered");
+    stack.inject(&inbound_request("INVITE", other, other_id, Some("peer-tag"))).await;
+    elapse_ms(60).await;
+    let reject = parse_response(&response_bytes(486, "Busy Here", "INVITE", other, other_id, true));
+    stack.txn.send_response(reject, addr(PEER)).await.unwrap();
+    elapse_ms(60).await;
+    let _ = stack.drain_peer();
+    let seeded = stack.txn.seed(CALL_REF, vec![accepted_seed(other, other_id)]).await.unwrap();
+    assert_eq!(seeded, 0, "a final already sent outranks the seed");
+    assert_eq!(stack.txn.metrics().txn_seed_skipped(), 1);
+    elapse_ms(60).await;
+    assert_eq!(count_responses(&stack.drain_peer(), 200), 0, "no 2xx after the 486");
 }
 
 // ── Occupancy and the unseen branch ─────────────────────────────────────────
@@ -276,7 +390,7 @@ async fn a_seed_on_an_occupied_branch_is_skipped_and_counted() {
         .txn
         .seed(
             CALL_REF,
-            vec![server_seed(branch, "occupied", true), client_seed("z9hG4bK-free", "occupied")],
+            vec![server_seed(branch, "occupied"), client_seed("z9hG4bK-free", "occupied")],
         )
         .await
         .unwrap();
@@ -389,7 +503,7 @@ async fn a_reoffered_cancel_is_answered_by_the_seed_it_arrived_before() {
     elapse_ms(60).await;
     assert!(stack.drain_peer().is_empty() && stack.drain_events().is_empty());
 
-    stack.txn.seed(CALL_REF, vec![server_seed(branch, call_id, true)]).await.unwrap();
+    stack.txn.seed(CALL_REF, vec![server_seed(branch, call_id)]).await.unwrap();
     assert_eq!(stack.txn.reoffer(cancel, addr(PEER)).await.unwrap(), Reoffer::Matched);
     elapse_ms(60).await;
     let out = stack.drain_peer();
@@ -398,11 +512,11 @@ async fn a_reoffered_cancel_is_answered_by_the_seed_it_arrived_before() {
     assert!(cancelled(&stack.drain_events()));
 }
 
-/// A request re-offered on a branch a server transaction already holds is the
-/// retransmission it is: the cached response is replayed and it is `Matched`;
-/// a bare seed holding no response yet composes the 100 Trying it owes the
-/// retransmission (§17.2.1) and caches it for the next; on a branch nothing
-/// holds it is `Unmatched` and no transaction is built.
+/// A request re-offered on a branch a server transaction holds is the datagram
+/// that transaction already answered on arrival, not a retransmission from the
+/// wire (RFC 3261 §17.2.1): it is `Matched` and absorbed with nothing sent, on
+/// the transaction it opened and on a seed alike. On a branch nothing holds it
+/// is `Unmatched` and no transaction is built.
 #[tokio::test(start_paused = true)]
 async fn a_reoffered_request_is_absorbed_by_the_transaction_on_its_branch() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
@@ -416,35 +530,27 @@ async fn a_reoffered_request_is_absorbed_by_the_transaction_on_its_branch() {
 
     assert_eq!(stack.txn.reoffer(invite, addr(PEER)).await.unwrap(), Reoffer::Matched);
     elapse_ms(60).await;
-    assert_eq!(
-        count_responses(&stack.drain_peer(), 100),
-        1,
-        "the cached 100 is replayed (§17.2.1)"
-    );
-    assert!(stack.drain_events().is_empty(), "a retransmission surfaces nothing");
+    assert!(stack.drain_peer().is_empty(), "one received datagram draws one 100 (§17.2.1)");
+    assert!(stack.drain_events().is_empty(), "the re-offered datagram surfaces nothing");
     assert_eq!(active(&stack), 1);
 
-    // A bare seed (a relayed re-INVITE rebuilt without its request) has no
-    // response cached: the retransmission draws a 100 composed now, the next
-    // one the cached copy, and neither surfaces.
-    let bare = "z9hG4bK-reoffer-bare";
-    let bare_raw = inbound_request("INVITE", bare, "reoffer-bare", Some("peer-tag"));
-    stack.txn.seed(CALL_REF, vec![server_seed(bare, "reoffer-bare", false)]).await.unwrap();
-    let retransmission = CustomParser::new().parse(&bare_raw).expect("parse");
-    assert_eq!(stack.txn.reoffer(retransmission, addr(PEER)).await.unwrap(), Reoffer::Matched);
+    // A seed (a relayed re-INVITE rebuilt from its record): the re-offer is
+    // absorbed silently too; the next copy from the wire is the
+    // retransmission that draws the 100 the seed owes it.
+    let bare = "z9hG4bK-reoffer-seed";
+    let bare_raw = inbound_request("INVITE", bare, "reoffer-seed", Some("peer-tag"));
+    stack.txn.seed(CALL_REF, vec![server_seed(bare, "reoffer-seed")]).await.unwrap();
+    let copy = CustomParser::new().parse(&bare_raw).expect("parse");
+    assert_eq!(stack.txn.reoffer(copy, addr(PEER)).await.unwrap(), Reoffer::Matched);
     elapse_ms(60).await;
-    assert_eq!(
-        count_responses(&stack.drain_peer(), 100),
-        1,
-        "a Proceeding seed owes the retransmission a provisional (§17.2.1)"
-    );
+    assert!(stack.drain_peer().is_empty(), "a re-offer is no retransmission");
     assert!(stack.drain_events().is_empty());
     stack.inject(&bare_raw).await;
     elapse_ms(60).await;
     assert_eq!(
         count_responses(&stack.drain_peer(), 100),
         1,
-        "every later retransmission draws the cached 100"
+        "a Proceeding seed owes a retransmission from the wire a provisional (§17.2.1)"
     );
     assert!(stack.drain_events().is_empty());
     assert_eq!(active(&stack), 2);
@@ -479,9 +585,8 @@ async fn a_seeded_100_echoes_the_retransmissions_timestamp() {
             .collect()
     };
 
-    stack.txn.seed(CALL_REF, vec![server_seed(branch, "seed-stamp", false)]).await.unwrap();
-    let retransmission = CustomParser::new().parse(raw.as_bytes()).expect("parse");
-    assert_eq!(stack.txn.reoffer(retransmission, addr(PEER)).await.unwrap(), Reoffer::Matched);
+    stack.txn.seed(CALL_REF, vec![server_seed(branch, "seed-stamp")]).await.unwrap();
+    stack.inject(raw.as_bytes()).await;
     elapse_ms(60).await;
     assert_eq!(stamps(stack.drain_peer()), ["812.5"], "the composed 100 echoes the Timestamp");
 
@@ -489,4 +594,122 @@ async fn a_seeded_100_echoes_the_retransmissions_timestamp() {
     elapse_ms(60).await;
     assert_eq!(stamps(stack.drain_peer()), ["812.5"], "the cached 100 still echoes it");
     assert!(stack.drain_events().is_empty(), "a retransmission surfaces nothing");
+}
+
+/// A client INVITE seeded with no provisional on record holds the TU's CANCEL
+/// until the branch's first provisional (RFC 3261 §9.1), then sends it.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_on_a_seed_with_no_provisional_waits_for_one() {
+    let stack = Stack::build(TRANSIT, 64, 64).await;
+    let branch = "z9hG4bK-seed-unanswered";
+    let call_id = "seed-unanswered";
+    stack.txn.seed(CALL_REF, vec![unanswered_client_seed(branch, call_id)]).await.unwrap();
+    let cancel = parse_request(&format!(
+        "CANCEL sip:bob@192.0.2.20:5060 SIP/2.0\n\
+         Via: SIP/2.0/UDP 127.0.0.1:15071;branch={branch};cr={CALL_REF};lg=b-1\n\
+         Max-Forwards: 70\n\
+         From: <sip:b2bua@127.0.0.1:15071>;tag=b2bua-b-1\n\
+         To: <sip:bob@192.0.2.20:5060>\n\
+         Call-ID: {call_id}\n\
+         CSeq: 1 CANCEL\n\
+         Content-Length: 0\n\n"
+    ));
+    stack.txn.send_request(cancel, addr(PEER), call::TxnKind::Invite).await.unwrap();
+    elapse_ms(5_000).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 0, "no CANCEL before a 1xx");
+
+    stack.inject(&response_bytes(180, "Ringing", "INVITE", branch, call_id, true)).await;
+    elapse_ms(20).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 1, "the 1xx releases it");
+    stack.inject(&response_bytes(487, "Request Terminated", "INVITE", branch, call_id, true)).await;
+    elapse_ms(20).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);
+}
+
+/// A CANCEL the record says was sent rides its seed: on a seed with no
+/// provisional on record it is held until the branch's first provisional
+/// (RFC 3261 §9.1), then sent.
+#[tokio::test(start_paused = true)]
+async fn a_seeded_cancel_with_no_provisional_on_record_waits_for_one() {
+    let stack = Stack::build(TRANSIT, 64, 64).await;
+    let branch = "z9hG4bK-seed-cancel-held";
+    let call_id = "seed-cancel-held";
+    let seed = TxnSeed::ClientInvite {
+        invite: invite_with_cr_lg(CALL_REF, call_id, branch, "b-1"),
+        dest: addr(PEER),
+        provisional: false,
+        cancel: Some(Box::new(seed_cancel(branch, call_id))),
+    };
+    stack.txn.seed(CALL_REF, vec![seed]).await.unwrap();
+    elapse_ms(5_000).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 0, "no CANCEL before a 1xx");
+
+    stack.inject(&response_bytes(180, "Ringing", "INVITE", branch, call_id, true)).await;
+    elapse_ms(20).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 1, "the 1xx releases it");
+    stack.inject(&response_bytes(487, "Request Terminated", "INVITE", branch, call_id, true)).await;
+    elapse_ms(20).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);
+}
+
+/// A client INVITE seeded with no provisional on record re-sends its INVITE
+/// once when a CANCEL is held on it — the CANCEL the seed carries, or one the
+/// TU sends later — so the callee resends its latest provisional (RFC 3261
+/// §17.2.1) and the CANCEL goes out on it. Nothing else is re-sent, and a seed
+/// no CANCEL waits on re-sends nothing.
+#[tokio::test(start_paused = true)]
+async fn a_held_cancel_on_a_seed_re_sends_its_invite_once() {
+    let stack = Stack::build(TRANSIT, 64, 64).await;
+    let (carried, later) = ("z9hG4bK-seed-carried", "z9hG4bK-seed-later");
+    let seed = TxnSeed::ClientInvite {
+        invite: invite_with_cr_lg(CALL_REF, "seed-carried", carried, "b-1"),
+        dest: addr(PEER),
+        provisional: false,
+        cancel: Some(Box::new(seed_cancel(carried, "seed-carried"))),
+    };
+    let seeds = vec![
+        seed,
+        unanswered_client_seed(later, "seed-later"),
+        client_seed("z9hG4bK-seed-rang", "seed-rang"),
+    ];
+    stack.txn.seed(CALL_REF, seeds).await.unwrap();
+    elapse_ms(20).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "INVITE"), 1, "the carried CANCEL's INVITE");
+
+    stack
+        .txn
+        .send_request(seed_cancel(later, "seed-later"), addr(PEER), call::TxnKind::Invite)
+        .await
+        .unwrap();
+    elapse_ms(20).await;
+    let sent = stack.drain_peer();
+    assert_eq!(count_requests(&sent, "INVITE"), 1, "the later CANCEL's INVITE");
+    assert_eq!(count_requests(&sent, "CANCEL"), 0, "both CANCELs wait for a 1xx");
+
+    for (branch, call_id) in [(carried, "seed-carried"), (later, "seed-later")] {
+        stack.inject(&response_bytes(100, "Trying", "INVITE", branch, call_id, false)).await;
+        elapse_ms(20).await;
+        assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 1, "the resent 100 releases it");
+        stack
+            .inject(&response_bytes(487, "Request Terminated", "INVITE", branch, call_id, true))
+            .await;
+        elapse_ms(20).await;
+        assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);
+    }
+    elapse_ms(40_000).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "INVITE"), 0, "never re-sent again");
+}
+
+/// The CANCEL of the INVITE [`invite_with_cr_lg`] builds on `branch`.
+fn seed_cancel(branch: &str, call_id: &str) -> SipRequest {
+    parse_request(&format!(
+        "CANCEL sip:bob@192.0.2.20:5060 SIP/2.0\n\
+         Via: SIP/2.0/UDP 127.0.0.1:15071;branch={branch};cr={CALL_REF};lg=b-1\n\
+         Max-Forwards: 70\n\
+         From: <sip:b2bua@127.0.0.1:15071>;tag=b2bua-b-1\n\
+         To: <sip:bob@192.0.2.20:5060>\n\
+         Call-ID: {call_id}\n\
+         CSeq: 1 CANCEL\n\
+         Content-Length: 0\n\n"
+    ))
 }

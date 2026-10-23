@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "SIP transaction layer (RFC 3261 §17 client/server FSMs + retransmission timers). Shared by proxy and B2BUA; per-call FIFO dispatch is a B2BUA-only concern and lives there."
 
+[package.metadata.purity]
+tier = "shell"
+
 [lints]
 workspace = true
 
@@ -17,12 +20,20 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 sip-retransmit = { path = "../sip-retransmit" }
 sip-message = { path = "../sip-message" }
+# The token bucket capping the 400s to refused requests.
+load-shed = { path = "../load-shed" }
+# The transaction kinds and timeouts its events name, shared with the TU.
+call = { path = "../call" }
 metric-catalogue = { path = "../metric-catalogue" }
+metric-values = { path = "../metric-values" }
 sip-net = { path = "../sip-net" }
+# Every timer arms and every deadline is computed within range (ADR-0051 §2).
+sip-clock = { path = "../sip-clock" }
+# The refusals memo recovers from poison, counted per named lock (ADR-0051 §7).
+lock-poison = { path = "../lock-poison" }
 tracing.workspace = true
 # Identifiers are HMAC-SHA256 over a counter, keyed from the OS RNG (`rng.rs`).
-hmac.workspace = true
-sha2.workspace = true
+sip-ids = { path = "../sip-ids" }
 getrandom.workspace = true
 
 [dev-dependencies]
@@ -30,6 +41,12 @@ getrandom.workspace = true
 # see docs/testing/test-clock.md. Features are additive over the workspace
 # `full`.
 tokio = { workspace = true, features = ["test-util"] }
+# A test endpoint double implements the `UdpEndpoint` async trait.
+async-trait = { workspace = true }
+sip-net-testkit = { path = "../sip-net-testkit" }
+# The no-panic property lane: its runner and the shared structured mutations.
+proptest.workspace = true
+wire-mutations = { path = "../wire-mutations" }
 
 [features]
 # Harness seams on the layer's counters, for a post-call gate proven to fire.

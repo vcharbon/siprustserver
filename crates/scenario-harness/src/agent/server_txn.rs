@@ -3,20 +3,23 @@
 //! Record-Route echo folding, §17.1.1.3 ACK-obligation arming).
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 
 use sip_message::generators::{
-    generate_response, GenerateResponseOpts, StackDialog, B2BUA_ALLOW, B2BUA_SUPPORTED,
+    generate_response, GenerateResponseOpts, StackDialog, B2BUA_ACCEPT, B2BUA_ALLOW,
+    B2BUA_SUPPORTED,
 };
 use sip_message::header::{self, HeaderName, HeaderValue, MediaType};
-use sip_message::{
-    apply_name_forms, apply_remote_target_emits, emitted_wire, EmitOpts, MatchOpts,
-    MessageTemplate, Mismatch, SipHeader, SipMessage, SipRequest,
-};
+use sip_message::{SipHeader, SipMessage, SipRequest};
+use sip_template::{apply_name_forms, apply_remote_target_emits, emitted_wire, Mismatch};
+
+use crate::{EmitOpts, MatchOpts, MessageTemplate};
 
 use super::addressing::{next_hop, top_via_addr, top_via_branch};
+use super::client_txn::request_label;
 use super::dialog::Dialog;
 use super::rr_fold::{fold_record_routes, RecordRouteFold};
-use super::step::{unwrap_step, StepError};
+use super::step::{unwrap_step, unwrap_step_at, StepError};
 use super::ua::media_type;
 use super::Agent;
 
@@ -31,17 +34,25 @@ pub struct ServerTxn {
     /// UAS drives several early dialogs (a simulated downstream fork), each an
     /// id mapped to a distinct To-tag (RFC 3261 §12.1.2).
     early_tags: HashMap<String, String>,
-    /// Early-dialog ids that have emitted at least one provisional. A winner may
-    /// only be one the caller actually saw an early dialog for; guards `win`.
+    /// Early-dialog ids that have emitted at least one provisional. A winner
+    /// declared by [`win`](Self::win) is one the caller saw an early dialog for.
     emitted_early: HashSet<String>,
-    /// The declared winning early-dialog id, once `win` is called. A second,
-    /// different winner or a forked 2xx with none declared is a silent misuse
-    /// the wire audit cannot catch (both are wire-legal) — the surface rejects it.
-    winner: Option<String>,
+    /// The declared winner, once [`win`](Self::win) or
+    /// [`answer_unrung`](Self::answer_unrung) is called. A second, different
+    /// winner or a forked 2xx with none declared is a silent misuse the wire
+    /// audit cannot catch (both are wire-legal) — the surface rejects it.
+    winner: Option<Winner>,
     /// This transaction's final response status, once one is sent. A new 1xx or a
     /// different final after it is rejected here; a same-status retransmission
     /// (RFC 3261 §13.3.1.4) is allowed through.
     final_status: Option<u16>,
+    /// The To-tag [`adopt_to_tag`](Self::adopt_to_tag) pinned or the 2xx
+    /// carried, whichever came last: the dialog [`dialog`](Self::dialog)
+    /// names (RFC 3261 §12.1.1).
+    dialog_tag: Option<String>,
+    /// The To-tag of the first tagged provisional: the early dialog
+    /// [`dialog`](Self::dialog) names when nothing else does.
+    provisional_tag: Option<String>,
 }
 
 impl ServerTxn {
@@ -65,6 +76,8 @@ impl ServerTxn {
             emitted_early: HashSet::new(),
             winner: None,
             final_status: None,
+            dialog_tag: None,
+            provisional_tag: None,
         }
     }
 
@@ -137,8 +150,10 @@ impl ServerTxn {
     /// `unacked-invite-non-2xx-final` wire rule settles the obligation at
     /// `finish()` — reach for this when the test asserts the ACK at a specific
     /// point in the flow.
-    pub async fn expect_ack(&self) {
-        unwrap_step(self.try_expect_ack().await)
+    #[track_caller]
+    pub fn expect_ack(&self) -> impl Future<Output = ()> + '_ {
+        let site = self.agent.step("expect_ack");
+        async move { unwrap_step_at(self.try_expect_ack().await, site) }
     }
 
     /// Fallible core of [`expect_ack`](Self::expect_ack).
@@ -156,7 +171,16 @@ impl ServerTxn {
             // Pull; the receive core sights (and thereby fulfils) a matching
             // ACK. Anything else arriving while the test explicitly awaits the
             // ACK is a deviation, exactly as `receive("ACK")` would treat it.
-            match self.agent.try_recv().await? {
+            let next = self.agent.try_recv().await.map_err(|e| {
+                e.awaiting(|| {
+                    let status = self.final_status.map(|s| format!(" {s}")).unwrap_or_default();
+                    format!(
+                        "the ACK of its{status} final to {}",
+                        request_label(None, &self.request)
+                    )
+                })
+            });
+            match next? {
                 SipMessage::Request(r) if r.method().as_str() == "ACK" => {
                     if self.agent.ack_obligation_claims(&r) {
                         continue; // ours (loop returns Ok) or another txn's obligation
@@ -195,6 +219,7 @@ impl ServerTxn {
     /// before responding the winning 2xx.
     pub fn adopt_to_tag(&mut self, tag: &str) {
         self.to_tag = Some(tag.to_string());
+        self.dialog_tag = Some(tag.to_string());
     }
 
     /// Open (or return) the early dialog `early_id` on THIS INVITE server
@@ -251,28 +276,61 @@ impl ServerTxn {
     pub fn win(&mut self, early_id: &str) {
         assert!(
             self.emitted_early.contains(early_id),
-            "win({early_id:?}): no provisional was emitted on that early dialog — known early dialogs: {:?}",
+            "win({early_id:?}): no provisional was emitted on that early dialog (known early dialogs: {:?}) — {DECLARE_WINNER}",
             self.emitted_early
         );
-        if let Some(w) = &self.winner {
-            assert!(
-                w == early_id,
-                "win({early_id:?}): early dialog {w:?} already won this transaction — a transaction has one winner"
-            );
-        }
-        self.winner = Some(early_id.to_string());
+        self.declare_winner(Winner::Early(early_id.to_string()));
         let tag = self.early_tag(early_id);
         self.adopt_to_tag(&tag);
     }
 
-    /// Form the UAS-side confirmed [`Dialog`] for this transaction, so this UA
-    /// can originate in-dialog requests (e.g. the callee sends the BYE). Call
-    /// after responding 2xx (so the To-tag is minted). The remote target is the
-    /// caller's Contact; the route set is the request's Record-Route in order
-    /// (§12.1.1), so in-dialog requests route back through any proxy.
+    /// Declare the WINNER a fork that sent no provisional: mint a fresh To-tag,
+    /// distinct from every early dialog's, as the sticky dialog tag, so the 2xx
+    /// carries it and [`dialog`](Self::dialog) is keyed under it (RFC 3261
+    /// §12.1.2, §13.2.2.4: a 2xx may create a dialog no 1xx announced). The
+    /// rung early dialogs settle by the stack's automatics. Returns the tag.
+    /// Call before responding the 2xx; a repeat call returns the same tag.
+    pub fn answer_unrung(&mut self) -> String {
+        if self.winner == Some(Winner::Unrung) {
+            return self.to_tag.clone().expect("an unrung winner holds its minted tag");
+        }
+        self.declare_winner(Winner::Unrung);
+        let tag = self.agent.tag();
+        self.adopt_to_tag(&tag);
+        tag
+    }
+
+    fn declare_winner(&mut self, winner: Winner) {
+        if let Some(w) = &self.winner {
+            assert!(
+                *w == winner,
+                "{winner:?}: {w:?} already won this transaction — a transaction has one winner"
+            );
+        }
+        self.winner = Some(winner);
+    }
+
+    /// The UAS-side [`Dialog`] of this transaction (RFC 3261 §12.1.1): its
+    /// local tag the response that created it carried (the request's own
+    /// when it names one), the caller's Contact as target, the Record-Route
+    /// as route set, its sequence from [`Party::first_cseq`](super::Party::first_cseq).
+    /// Panics before any response created a dialog.
     pub fn dialog(&self) -> Dialog {
         let req = &self.request;
-        let local_tag = self.to_tag.clone().unwrap_or_default();
+        let local_tag = req
+            .to()
+            .tag()
+            .map(str::to_owned)
+            .or_else(|| self.dialog_tag.clone())
+            .or_else(|| self.to_tag.clone())
+            .or_else(|| self.provisional_tag.clone())
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}: dialog() on {} before a response created a dialog (RFC 3261 §12.1.1)",
+                    self.agent.name,
+                    request_label(None, req)
+                )
+            });
         let remote_target = req
             .header::<header::Contact>()
             .and_then(Result::ok)
@@ -293,13 +351,27 @@ impl ServerTxn {
             local_uri: req.to().uri().to_string(),
             remote_uri: req.from().uri().to_string(),
             remote_target,
-            local_cseq: 0, // UAS originates its own CSeq space; first request → 1
+            local_cseq: self.agent.answers_as.first_cseq() - 1,
             route_set: self.route_set.clone(),
         };
         let fallback = next_hop(&dialog, top_via_addr(req).unwrap_or(self.agent.addr));
         Dialog::new(self.agent.clone(), fallback, dialog)
     }
 }
+
+/// The fork a forked INVITE server transaction answers with its 2xx.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Winner {
+    /// An early dialog that emitted a provisional, by its id.
+    Early(String),
+    /// A fork that sent no provisional: its 2xx carries a fresh To-tag
+    /// (RFC 3261 §12.1.2, §13.2.2.4).
+    Unrung,
+}
+
+/// The panic text of a 2xx or `win` that names no declared winner.
+const DECLARE_WINNER: &str =
+    "declare the winner with win(id) for a rung early dialog or answer_unrung() for a fork that sent no provisional";
 
 /// Builder for a UAS response (lets an SDP answer and custom headers be
 /// attached fluently).
@@ -412,7 +484,7 @@ impl<'a> Respond<'a> {
                 !((200..300).contains(&self.status)
                     && !txn.early_tags.is_empty()
                     && txn.winner.is_none()),
-                "{} early dialog(s) open — declare the winner with win(id) before the 2xx",
+                "{} early dialog(s) open and no winner declared before the 2xx — {DECLARE_WINNER}",
                 txn.early_tags.len()
             );
             if self.status >= 200 {
@@ -429,28 +501,33 @@ impl<'a> Respond<'a> {
             }
             txn.to_tag.clone()
         };
+        if txn.request.to().tag().is_none() {
+            match self.status {
+                101..=199 if txn.provisional_tag.is_none() => txn.provisional_tag = to_tag.clone(),
+                200..=299 => txn.dialog_tag = to_tag.clone(),
+                _ => {}
+            }
+        }
         // Contact is required on 2xx and useful on 18x to establish the early
         // dialog's remote target; omit on plain 100.
         let contact = if self.status >= 180 { Some(txn.agent.contact()) } else { None };
-        // A conformant UAS lists its methods/extensions on a 2xx INVITE
-        // (RFC 3261 §13.2.1 SHOULD Allow, §20.37 Supported) so the peer can
-        // negotiate re-INVITE/UPDATE/PRACK. The test UA answers anything, so
-        // add them (unless the fixture already supplied one) — the UA stays
-        // RFC-compliant, matching the live SIPp endpoints.
+        // A conformant UAS lists its methods/extensions on a 2xx INVITE (RFC 3261
+        // §13.2.1 SHOULD Allow, §20.37 Supported) and its capabilities on a 2xx
+        // OPTIONS (§11.2). The test UA answers anything, so it adds each one the
+        // fixture did not supply — a frozen compact `k:` counts as Supported
+        // (§7.3.3) — matching the live SIPp endpoints.
         let mut extra_headers = self.extra_headers.clone();
-        if (200..300).contains(&self.status) && txn.request.cseq().method().as_str() == "INVITE" {
-            // Compact-aware probes: a frozen `k:` (compact Supported) must
-            // suppress the stack default, else the replayed 2xx advertises
-            // 100rel/timer the capture never did (RFC 3261 §7.3.3).
-            let has_allow = extra_headers.iter().any(|h| HeaderName::Allow.matches(&h.name));
-            let has_supported =
-                extra_headers.iter().any(|h| HeaderName::Supported.matches(&h.name));
-            if !has_allow {
-                extra_headers.push(SipHeader { name: "Allow".into(), value: B2BUA_ALLOW.into() });
-            }
-            if !has_supported {
+        let method = txn.request.cseq().method().as_str();
+        let advertises =
+            (200..300).contains(&self.status) && matches!(method, "INVITE" | "OPTIONS");
+        for (name, value, on) in [
+            (HeaderName::Allow, B2BUA_ALLOW, advertises),
+            (HeaderName::Supported, B2BUA_SUPPORTED, advertises),
+            (HeaderName::Accept, B2BUA_ACCEPT, advertises && method == "OPTIONS"),
+        ] {
+            if on && !extra_headers.iter().any(|h| name.matches(&h.name)) {
                 extra_headers
-                    .push(SipHeader { name: "Supported".into(), value: B2BUA_SUPPORTED.into() });
+                    .push(SipHeader { name: name.as_wire_str().into(), value: value.into() });
             }
         }
         let opts = GenerateResponseOpts {
@@ -467,7 +544,7 @@ impl<'a> Respond<'a> {
             extra_headers,
             incoming_source: None,
         };
-        let mut resp = generate_response(&txn.request, self.status, &self.reason, &opts);
+        let mut resp = generate_response(&txn.request, self.status, &self.reason, &opts).unwrap();
         if self.suppress_default_ct {
             resp = resp
                 .thaw()
@@ -496,7 +573,7 @@ impl<'a> Respond<'a> {
         // the proxy's, so the response correctly traverses it back.
         let dst = top_via_addr(&txn.request).unwrap_or(txn.agent.addr);
         let msg = SipMessage::Response(resp);
-        txn.agent.try_send_wire(&emitted_wire(&msg, &headers), dst).await?;
+        txn.agent.try_send_emitted(&msg, &emitted_wire(&msg, &headers), dst).await?;
         // §17.1.1.3 UAS obligation: a non-2xx final to an INVITE (initial or
         // re-INVITE) arms the txn-owned ACK wait — the arriving hop ACK is the
         // transaction layer's to claim, in whatever order it lands relative to

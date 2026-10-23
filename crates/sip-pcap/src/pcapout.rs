@@ -13,12 +13,14 @@
 //! the model, and the model is what is written.
 //!
 //! The datagrams the reader set aside (the SIP-looking ones the parser
-//! rejected) are written the same way, as captured
-//! ([`datagrams_to_pcap`]): a capture of what the model could not hold.
+//! rejected, and copies of the accepted ones with a failed header reading)
+//! are written the same way, as captured ([`set_aside_to_pcap`]): a capture
+//! of what the model could not hold, or could not hold whole.
 
 use std::net::{IpAddr, SocketAddr};
 
 use crate::doc::FlowsDoc;
+use crate::flow::FlowStats;
 use crate::Datagram;
 
 /// Ethernet II link type, the one every record is written under.
@@ -41,6 +43,16 @@ pub fn doc_to_pcap(doc: &FlowsDoc) -> Result<Vec<u8>, String> {
         }
     }
     encode(records)
+}
+
+/// The datagrams ingest set aside ([`FlowStats::set_aside_at`]: the ones the
+/// parser refused and the accepted ones with a failed header reading), as
+/// captured and in capture-time order, as one capture.
+pub fn set_aside_to_pcap(stats: &FlowStats, datagrams: &[Datagram]) -> Result<Vec<u8>, String> {
+    let mut set_aside: Vec<&Datagram> =
+        stats.set_aside_at().filter_map(|i| datagrams.get(i)).collect();
+    set_aside.sort_by_key(|d| d.ts_us);
+    datagrams_to_pcap(set_aside)
 }
 
 /// Encode captured datagrams as they are, their own sockets, timestamps and
@@ -212,6 +224,44 @@ mod tests {
             (back[0].ts_us, back[0].src.to_string(), back[0].payload.clone()),
             (2_000, "10.0.0.1:5060".to_string(), garbage)
         );
+    }
+
+    /// An accepted message whose Refer-To the grammar refuses (a bare
+    /// addr-spec with `?headers`, RFC 3261 §20) stays in the model, is counted
+    /// `header_failed` with its header and reason, and is copied into the
+    /// set-aside capture beside the refused datagram, in capture order.
+    #[test]
+    fn a_message_with_a_failed_header_reading_is_kept_counted_and_copied() {
+        let refer = b"REFER sip:bob@10.0.0.2 SIP/2.0\r\n\
+            Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-r1\r\nMax-Forwards: 70\r\n\
+            From: <sip:alice@10.0.0.1>;tag=a1\r\nTo: <sip:bob@10.0.0.2>;tag=b1\r\n\
+            Call-ID: refer-1@10.0.0.1\r\nCSeq: 2 REFER\r\nContact: <sip:alice@10.0.0.1>\r\n\
+            Refer-To: sip:carol@192.0.2.9:5060?User-to-User=0430%3Bencoding%3Dhex\r\n\
+            Content-Length: 0\r\n\r\n"
+            .to_vec();
+        let mut refused = dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060");
+        refused.payload = b"INVITE sip:x SIP/2.0\r\nGarbage\r\n\r\n".to_vec();
+        let mut kept = dg(2_000, "10.0.0.1:5060", "10.0.0.2:5060");
+        kept.payload = refer.clone();
+        let datagrams = vec![kept, refused];
+        let flows = build_flows(&datagrams, &FlowConfig::default());
+        assert_eq!((flows.stats.sip_messages, flows.stats.parse_failed), (1, 1));
+        assert_eq!((flows.stats.header_failed, flows.stats.header_failed_at.clone()), (1, vec![0]));
+        let failure = &flows.stats.header_failures[0];
+        assert_eq!((failure.call_id.as_str(), failure.msg), ("refer-1@10.0.0.1", 0));
+        assert_eq!(failure.header, "Refer-To");
+        assert!(failure.reason.contains("bare addr-spec"), "{}", failure.reason);
+        assert_eq!(flows.legs[0].msgs.len(), 1, "the message stays in the model");
+
+        let doc = flows_to_doc(&flows, &DecodeStats::default(), &EnrichOptions::default())
+            .expect("emits");
+        assert_eq!(doc.flow_stats.header_failed, 1);
+        assert_eq!(doc.flow_stats.header_failures[0].header, "Refer-To");
+
+        let (back, _) = read_back(&set_aside_to_pcap(&flows.stats, &datagrams).expect("encodes"));
+        let ts: Vec<u64> = back.iter().map(|d| d.ts_us).collect();
+        assert_eq!(ts, vec![1_000, 2_000], "the refused and the copied one, in capture order");
+        assert_eq!(back[1].payload, refer);
     }
 
     #[test]

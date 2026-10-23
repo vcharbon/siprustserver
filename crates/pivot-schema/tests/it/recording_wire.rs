@@ -258,8 +258,10 @@ fn a_layout_that_contradicts_itself_or_its_bytes_is_refused() {
 }
 
 /// A recording never refuses its own line: whatever line terminator the head
-/// used — CRLF, LF, a bare CR — the arm, the layout and the decode check read
-/// the head's end by the one rule the parser reads it by.
+/// used — CRLF, LF, a bare CR — the arm and the decode check read the head's
+/// end by the one rule the parser's header-block split reads it by. The
+/// layout is the parser's, written for the CRLF head alone: the parser refuses
+/// a head holding a bare CR or LF.
 #[test]
 fn a_head_ended_by_any_terminator_records_and_reads_back_alike() {
     use pivot_schema::bundle::Dir;
@@ -271,7 +273,8 @@ fn a_head_ended_by_any_terminator_records_and_reads_back_alike() {
         .into_bytes();
         wire.extend_from_slice(blob);
         let message = RecordedMessage::new(1, Dir::In, 0, None, wire.clone());
-        assert_eq!(message.body.as_ref().map(|b| b.len), Some(6), "{terminator:?}: the layout");
+        let layout = (terminator == "\r\n\r\n").then_some(6);
+        assert_eq!(message.body.as_ref().map(|b| b.len), layout, "{terminator:?}: the layout");
         assert!(
             matches!(message.payload(), sip_message::payload::Payload::HeadBody { .. }),
             "{terminator:?}: the arm splits at the head's end"

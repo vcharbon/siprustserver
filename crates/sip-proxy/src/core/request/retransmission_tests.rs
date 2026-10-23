@@ -14,13 +14,14 @@ use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 use sip_net::types::BindUdpOpts;
-use sip_net::{SignalingNetwork, SimulatedSignalingNetwork};
+use sip_net::SignalingNetwork;
+use sip_net_testkit::SimulatedSignalingNetwork;
 
 use crate::addr::ProxyAddr;
 use crate::core::{ProxyCore, ProxyCoreBuilder};
 use crate::observability::metrics::RoutingDecisionKind;
 use crate::registry::static_reg::StaticWorkerRegistry;
-use crate::registry::WorkerRegistry;
+use crate::registry::{WorkerEntry, WorkerRegistry};
 use crate::self_gate::{AdmitDecision, ProxySelfGate};
 use crate::strategy::{DecodeResult, RouteParams, RoutingStrategy, SelectError, SelectOpts};
 use crate::ProxyMetrics;
@@ -112,8 +113,13 @@ async fn fixture(targets: &[ProxyAddr]) -> Fixture {
     let strategy = QueueStrategy::of(targets);
     let gate = Arc::new(AdmitOnceGate::default());
     let metrics = Arc::new(ProxyMetrics::new());
-    let reg: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
-    let core = ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy.clone(), reg)
+    // W1 is a registry worker: its own b-leg CANCEL is worker-outbound by its Via.
+    let reg: Arc<dyn WorkerRegistry> =
+        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
+            "w1",
+            ProxyAddr::new(W1, 5060),
+        )]));
+    let core = ProxyCoreBuilder::for_test(ProxyAddr::new(PROXY_VIP, 5060), strategy.clone(), reg)
         .clock(Clock::test_at(0))
         .metrics(metrics.clone())
         .self_gate(gate.clone())
@@ -175,14 +181,13 @@ Content-Length: 0\r\n\r\n"
     ))
 }
 
-/// A worker's own b-leg CANCEL: it rides the proxy's `;outbound` self-Route,
-/// the direction marker the proxy stamped on the worker-facing half of its
-/// double Record-Route.
+/// A worker's own b-leg CANCEL: it carries its INVITE's Route (§9.1), the
+/// plain `;lr` preload to the proxy, and its worker Via.
 fn worker_cancel(call_id: &str, from_tag: &str, cseq: u32, branch: &str) -> SipMessage {
     parse_req(&format!(
         "CANCEL sip:bob@10.0.0.50:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP {W1}:5060;branch={branch};rport\r\n\
-Route: <sip:{PROXY_VIP}:5060;lr;outbound>\r\n\
+Route: <sip:{PROXY_VIP}:5060;lr>\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:alice@{W1}>;tag={from_tag}\r\n\
 To: <sip:bob@10.0.0.50>\r\n\
@@ -220,8 +225,8 @@ async fn retransmitted_invite_repeats_the_original_selection() {
     let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;
     let req = invite("split-1@test", "tag-a", 1, "z9hG4bKr1");
 
-    let first = f.core.route_request(&req, src()).await;
-    let retx = f.core.route_request(&req, src()).await;
+    let first = f.core.route_request_from(&req, src()).await;
+    let retx = f.core.route_request_from(&req, src()).await;
 
     assert_eq!(first.target, Some(ProxyAddr::new(W1, 5060)));
     assert_eq!(
@@ -243,8 +248,8 @@ async fn retransmitted_invite_is_not_regated_or_recounted() {
     let f = fixture(&[ProxyAddr::new(W1, 5060)]).await;
     let req = invite("regate-1@test", "tag-a", 1, "z9hG4bKr2");
 
-    let first = f.core.route_request(&req, src()).await;
-    let retx = f.core.route_request(&req, src()).await;
+    let first = f.core.route_request_from(&req, src()).await;
+    let retx = f.core.route_request_from(&req, src()).await;
 
     assert_eq!(first.decision, RoutingDecisionKind::SelectNew);
     assert_ne!(retx.decision, RoutingDecisionKind::Reject, "gate must not 503 a retransmission");
@@ -261,12 +266,12 @@ async fn retransmitted_invite_is_not_regated_or_recounted() {
 async fn cancel_after_a_minute_of_ringing_still_follows_the_invite() {
     let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;
     let inv = invite("longring-1@test", "tag-a", 7, "z9hG4bKr3");
-    f.core.route_request(&inv, src()).await;
+    f.core.route_request_from(&inv, src()).await;
 
     tokio::time::advance(Duration::from_secs(60)).await;
 
     let cxl = cancel("longring-1@test", "tag-a", 7, "z9hG4bKr3");
-    let outcome = f.core.route_request(&cxl, src()).await;
+    let outcome = f.core.route_request_from(&cxl, src()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::Cancel);
     assert_eq!(
         outcome.target,
@@ -284,7 +289,7 @@ async fn cancel_after_a_minute_of_ringing_still_follows_the_invite() {
 async fn a_worker_cancel_without_its_invite_goes_to_the_request_uri() {
     let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;
     let cxl = worker_cancel("lost-invite-1@test", "tag-w", 3, "z9hG4bKw1c");
-    let outcome = f.core.route_request(&cxl, format!("{W1}:5060").parse().unwrap()).await;
+    let outcome = f.core.route_request_from(&cxl, format!("{W1}:5060").parse().unwrap()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::Cancel);
     assert_eq!(
         outcome.target,
@@ -299,15 +304,15 @@ async fn a_worker_cancel_without_its_invite_goes_to_the_request_uri() {
 #[tokio::test(start_paused = true)]
 async fn each_cancel_lookup_counts_its_outcome() {
     let f = fixture(&[ProxyAddr::new(W1, 5060)]).await;
-    f.core.route_request(&invite("lookup-1@test", "tag-a", 1, "z9hG4bKl1"), src()).await;
+    f.core.route_request_from(&invite("lookup-1@test", "tag-a", 1, "z9hG4bKl1"), src()).await;
     // The CANCEL and its retransmission each look the INVITE up.
     let cxl = cancel("lookup-1@test", "tag-a", 1, "z9hG4bKl1");
     for _ in 0..2 {
-        let out = f.core.route_request(&cxl, src()).await;
+        let out = f.core.route_request_from(&cxl, src()).await;
         assert_eq!(out.target, Some(ProxyAddr::new(W1, 5060)));
     }
     let lost = worker_cancel("lookup-2@test", "tag-w", 1, "z9hG4bKl2c");
-    f.core.route_request(&lost, format!("{W1}:5060").parse().unwrap()).await;
+    f.core.route_request_from(&lost, format!("{W1}:5060").parse().unwrap()).await;
 
     let txt = f.metrics.prometheus_text();
     assert!(txt.contains("\nsip_proxy_cancel_lookups_total{outcome=\"hit\"} 2\n"), "{txt}");
@@ -321,7 +326,7 @@ async fn each_cancel_lookup_counts_its_outcome() {
 async fn late_non_2xx_final_ack_still_follows_the_invite() {
     let f = fixture(&[ProxyAddr::new(W1, 5060)]).await;
     let inv = invite("latefinal-1@test", "tag-a", 9, "z9hG4bKr4");
-    f.core.route_request(&inv, src()).await;
+    f.core.route_request_from(&inv, src()).await;
 
     tokio::time::advance(Duration::from_secs(60)).await;
 
@@ -338,9 +343,10 @@ Content-Length: 0\r\n\r\n"
     let SipMessage::Response(resp) = CustomParser::default().parse(raw.as_bytes()).unwrap() else {
         panic!("expected response")
     };
-    f.core.handle_response(resp, format!("{W1}:5060").parse().unwrap()).await;
+    f.core.handle_response_from(resp, format!("{W1}:5060").parse().unwrap()).await;
 
-    let out = f.core.route_request(&ack("latefinal-1@test", "tag-a", 9, "z9hG4bKr4"), src()).await;
+    let out =
+        f.core.route_request_from(&ack("latefinal-1@test", "tag-a", 9, "z9hG4bKr4"), src()).await;
     assert_eq!(out.decision, RoutingDecisionKind::AckHop);
     assert_eq!(
         out.target,
@@ -359,15 +365,15 @@ async fn same_callid_same_cseq_different_from_tags_do_not_collide() {
     let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;
     let dir_a = invite("glare-1@test", "tag-a", 5, "z9hG4bKglare");
     let dir_b = invite("glare-1@test", "tag-b", 5, "z9hG4bKglare");
-    f.core.route_request(&dir_a, src()).await;
+    f.core.route_request_from(&dir_a, src()).await;
     f.gate.admit_next();
-    let fwd_b = f.core.route_request(&dir_b, src()).await;
+    let fwd_b = f.core.route_request_from(&dir_b, src()).await;
     assert_eq!(fwd_b.target, Some(ProxyAddr::new(W2, 5060)), "B's INVITE is a forward of its own");
 
     let cxl_a = cancel("glare-1@test", "tag-a", 5, "z9hG4bKglare");
     let cxl_b = cancel("glare-1@test", "tag-b", 5, "z9hG4bKglare");
-    let out_a = f.core.route_request(&cxl_a, src()).await;
-    let out_b = f.core.route_request(&cxl_b, src()).await;
+    let out_a = f.core.route_request_from(&cxl_a, src()).await;
+    let out_b = f.core.route_request_from(&cxl_b, src()).await;
 
     assert_eq!(
         out_a.target,
@@ -392,24 +398,24 @@ async fn one_branch_token_from_two_sent_bys_is_two_transactions() {
 
     let out = f
         .core
-        .route_request(&invite_from(a, "twin-1@test", "tag-a", 1, "z9hG4bKtwin"), from(a))
+        .route_request_from(&invite_from(a, "twin-1@test", "tag-a", 1, "z9hG4bKtwin"), from(a))
         .await;
     assert_eq!(out.target, Some(ProxyAddr::new(W1, 5060)));
     f.gate.admit_next();
     let out = f
         .core
-        .route_request(&invite_from(b, "twin-1@test", "tag-a", 1, "z9hG4bKtwin"), from(b))
+        .route_request_from(&invite_from(b, "twin-1@test", "tag-a", 1, "z9hG4bKtwin"), from(b))
         .await;
     assert_eq!(out.target, Some(ProxyAddr::new(W2, 5060)), "another sender: no retransmission");
 
     let out = f
         .core
-        .route_request(&cancel_from(a, "twin-1@test", "tag-a", 1, "z9hG4bKtwin"), from(a))
+        .route_request_from(&cancel_from(a, "twin-1@test", "tag-a", 1, "z9hG4bKtwin"), from(a))
         .await;
     assert_eq!(out.target, Some(ProxyAddr::new(W1, 5060)), "a's CANCEL follows a's INVITE");
     let out = f
         .core
-        .route_request(&cancel_from(b, "twin-1@test", "tag-a", 1, "z9hG4bKtwin"), from(b))
+        .route_request_from(&cancel_from(b, "twin-1@test", "tag-a", 1, "z9hG4bKtwin"), from(b))
         .await;
     assert_eq!(out.target, Some(ProxyAddr::new(W2, 5060)), "b's CANCEL follows b's INVITE");
 }
@@ -421,9 +427,10 @@ async fn one_branch_token_from_two_sent_bys_is_two_transactions() {
 #[tokio::test(start_paused = true)]
 async fn an_external_cancel_matching_no_invite_takes_new_dialog_selection() {
     let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;
-    f.core.route_request(&invite("miss-1@test", "tag-a", 1, "z9hG4bKb1"), src()).await;
+    f.core.route_request_from(&invite("miss-1@test", "tag-a", 1, "z9hG4bKb1"), src()).await;
 
-    let out = f.core.route_request(&cancel("miss-1@test", "tag-a", 1, "z9hG4bKb1x"), src()).await;
+    let out =
+        f.core.route_request_from(&cancel("miss-1@test", "tag-a", 1, "z9hG4bKb1x"), src()).await;
     assert_eq!(out.decision, RoutingDecisionKind::Cancel);
     assert_eq!(out.target, Some(ProxyAddr::new(W2, 5060)), "the next selection, not the INVITE's");
     assert_eq!(f.strategy.calls.load(Ordering::SeqCst), 2, "the CANCEL ran the selection");

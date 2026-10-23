@@ -12,15 +12,15 @@
 //! recording layer's `close()` never runs here, so the report's `audit` is
 //! `Ok(())` and the layer-close structural anomalies are absent. Best-effort
 //! and panic-safe: every failure is swallowed after an stderr note (a Drop
-//! must never double-panic). The compact stderr trace stays with
-//! [`super::run_guards::PanicDump`], which drops first.
+//! must never double-panic). The compact stderr dump stays with
+//! [`super::failure_dump::FailureDump`], which drops first.
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use layer_harness::{Channel, Recorder};
-use sip_net::SignalingNetworkEvent;
+use sip_net_testkit::SignalingNetworkEvent;
 
 use crate::anchors::AnchorTag;
 use crate::run::{ExpectOutcome, RunReport};

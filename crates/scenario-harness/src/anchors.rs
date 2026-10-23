@@ -6,7 +6,7 @@
 //! parsed message — but the recording is the source of truth, so a tag stores
 //! the message's **identity keys** (Call-ID, CSeq, kind, top Via branch) plus
 //! the receiving agent's address, and resolution re-finds the matching
-//! [`sip_net::RecordedSipEntry`] post-call. Retransmitted copies share the same
+//! [`sip_net_testkit::RecordedSipEntry`] post-call. Retransmitted copies share the same
 //! keys and identical bytes, so "first delivered match" is well-defined.
 //!
 //! A tag may also label a message the agent **sent** ([`AnchorTag::sent`]) —

@@ -49,17 +49,13 @@ pub fn parse_worker_list(
         if part.is_empty() {
             return Err(err(format!("empty entry in {source}")));
         }
-        let at = part.find('@');
-        match at {
-            // `at <= 0` (no `@`, or leading `@`) or trailing `@` are invalid.
-            Some(0) | None => {
+        match part.split_once('@') {
+            // No `@`, a leading `@` or a trailing `@` is invalid.
+            None | Some(("", _)) | Some((_, "")) => {
                 return Err(err(format!("entry \"{part}\" must be of the form id@host:port")))
             }
-            Some(at) if at == part.len() - 1 => {
-                return Err(err(format!("entry \"{part}\" must be of the form id@host:port")))
-            }
-            Some(at) => {
-                let id = part[..at].trim();
+            Some((id, host_port)) => {
+                let id = id.trim();
                 if id.is_empty() {
                     return Err(err(format!("empty worker id in entry \"{part}\"")));
                 }
@@ -67,7 +63,7 @@ pub fn parse_worker_list(
                     return Err(err(format!("duplicate worker id \"{id}\"")));
                 }
                 let addr =
-                    ProxyAddr::parse(&part[at + 1..]).filter(|a| a.port >= 1).ok_or_else(|| {
+                    ProxyAddr::parse(host_port).filter(|a| a.port >= 1).ok_or_else(|| {
                         err(format!(
                             "entry \"{part}\" has malformed host:port (port must be 1..65535)"
                         ))
@@ -118,25 +114,18 @@ impl StaticWorkerRegistry {
     }
 
     /// Build directly from entries with an injected clock — paused-clock tests
-    /// MUST use this (`Clock::test_at(..)`): the `WorkerSet`'s clock stamps
-    /// `draining_since` / drain-window reads, and a hard-coded system clock
-    /// breaks those under `tokio::time::advance`. The `id@host` becomes the
-    /// topology membership; the `:port` + health become annotation presets so
-    /// the one-shot recompose materialises them.
+    /// use this (`Clock::test_at(..)`): the `WorkerSet`'s clock stamps the
+    /// departed-address windows, and a hard-coded system clock breaks those
+    /// under `tokio::time::advance`. The `id@host` becomes the topology
+    /// membership; the `:port`, health and acceptance become annotation presets
+    /// so the one-shot recompose materialises them.
     pub fn from_entries_with_clock(entries: Vec<WorkerEntry>, clock: Clock) -> Self {
         let membership = StaticMembership::from_peers(
             entries.iter().map(|e| Peer::new(e.id.clone(), e.address.host.clone())).collect(),
         );
         let set = Arc::new(WorkerSet::new(Arc::new(membership), DEFAULT_PORT, clock));
         for e in &entries {
-            set.preset(
-                &e.id,
-                e.address.host.clone(),
-                e.address.port,
-                e.health,
-                e.draining_since,
-                e.first_seen_at_ms,
-            );
+            set.preset(&e.id, e.address.host.clone(), e.address.port, e.health, e.acceptance);
         }
         set.recompose();
         Self { set }
@@ -144,9 +133,9 @@ impl StaticWorkerRegistry {
 
     /// A health-write [`WorkerRegistryControl`] over this pool. The OPTIONS
     /// [`HealthProbe`](crate::health::HealthProbe) writes through it so an
-    /// unanswered worker is demoted (`Dead`/`NotReady`/`Draining`) and in-dialog
-    /// requests fail over to the backup — the *identity* stays fixed, the *health*
-    /// tracks live reachability.
+    /// unanswered worker is demoted `Dead` and in-dialog requests fail over to
+    /// the backup — the *identity* stays fixed, the *health* tracks live
+    /// reachability.
     pub fn control(&self) -> Arc<dyn WorkerRegistryControl> {
         Arc::new(WorkerSetControl::new(self.set.clone()))
     }
@@ -167,6 +156,12 @@ impl WorkerRegistry for StaticWorkerRegistry {
     }
     fn lookup_by_address(&self, addr: &ProxyAddr) -> Option<WorkerEntry> {
         self.set.lookup_by_address(addr)
+    }
+    fn rearm_departed(&self, addr: &ProxyAddr) {
+        self.set.rearm_departed(addr)
+    }
+    fn synced(&self) -> bool {
+        self.set.synced()
     }
 }
 

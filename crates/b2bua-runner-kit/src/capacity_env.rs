@@ -51,12 +51,11 @@ pub(crate) fn capacity_from_lookup(
 /// `1536Mi` → 1536·2²⁰. Plain integers are bytes.
 fn parse_bytes(v: &str) -> Result<u64, String> {
     let v = v.trim();
-    let (digits, shift) = match v {
-        _ if v.ends_with("Ki") => (&v[..v.len() - 2], 10),
-        _ if v.ends_with("Mi") => (&v[..v.len() - 2], 20),
-        _ if v.ends_with("Gi") => (&v[..v.len() - 2], 30),
-        _ => (v, 0),
-    };
+    let suffixed = |suffix: &str, shift: u32| v.strip_suffix(suffix).map(|d| (d, shift));
+    let (digits, shift) = suffixed("Ki", 10)
+        .or_else(|| suffixed("Mi", 20))
+        .or_else(|| suffixed("Gi", 30))
+        .unwrap_or((v, 0));
     let n: u64 = digits.trim().parse().map_err(|e| format!("{e}"))?;
     n.checked_mul(1u64 << shift).ok_or_else(|| "overflows u64".to_string())
 }

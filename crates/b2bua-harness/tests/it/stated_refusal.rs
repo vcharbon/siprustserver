@@ -37,6 +37,8 @@ enum Answer {
     Reject,
     /// The adapter's stated refusal.
     Refused,
+    /// The adapter's stated refusal under the code it states.
+    RefusedWith(u16),
 }
 
 fn stated_headers() -> Option<SipHeaderUpdates> {
@@ -77,6 +79,7 @@ impl CallDecisionEngine for Engine {
         match self.initial {
             Some(Answer::Reject) => Ok(NewCallResponse::Reject(reject(500, self.reason))),
             Some(Answer::Refused) => Err(refused(500, self.reason)),
+            Some(Answer::RefusedWith(code)) => Err(refused(code, self.reason)),
             None => {
                 let mut r = route_to("127.0.0.1", 5070);
                 r.callback_context = Some("ctx".into());
@@ -95,6 +98,7 @@ impl CallDecisionEngine for Engine {
         match self.failure {
             Answer::Reject => Ok(CallTreatment::Reject(reject(503, self.reason))),
             Answer::Refused => Err(refused(503, self.reason)),
+            Answer::RefusedWith(code) => Err(refused(code, self.reason)),
         }
     }
     async fn call_refer(
@@ -202,12 +206,13 @@ async fn a_refused_initial_invite_is_answered_as_a_reject_and_marks_nothing() {
 }
 
 /// A routed call whose callee rings, then answers 486, and whose failure
-/// consult answers `failure`: the final goes out on the early dialog the
-/// relayed 180 opened.
+/// consult answers `failure`: the `status` final goes out on the early dialog
+/// the relayed 180 opened.
 async fn failover(
     name: &str,
     failure: Answer,
     reason: Option<&'static str>,
+    status: u16,
 ) -> ((u16, String, Vec<String>), Call) {
     let h = Harness::new(name);
     let alice = h.agent("alice", ALICE).await;
@@ -219,7 +224,7 @@ async fn failover(
     let ringing = call.expect(180).await;
     uas.respond(486, "Busy Here").await;
     carol.receive("ACK").await;
-    let fin = call.expect(503).await;
+    let fin = call.expect(status).await;
     assert_eq!(
         fin.to().tag(),
         ringing.to().tag(),
@@ -233,8 +238,10 @@ async fn failover(
 
 #[tokio::test(start_paused = true)]
 async fn a_refused_failure_consult_is_answered_as_a_reject_and_marks_nothing() {
-    let (decided, by_decision) = failover("refusal-failover-decided", Answer::Reject, None).await;
-    let (refused, by_stack) = failover("refusal-failover-refused", Answer::Refused, None).await;
+    let (decided, by_decision) =
+        failover("refusal-failover-decided", Answer::Reject, None, 503).await;
+    let (refused, by_stack) =
+        failover("refusal-failover-refused", Answer::Refused, None, 503).await;
 
     assert_eq!(
         decided,
@@ -261,14 +268,15 @@ async fn a_refused_failure_consult_is_answered_as_a_reject_and_marks_nothing() {
     assert_eq!(cause(&by_stack), TerminationCause::Admission, "the stack's own refusal");
 }
 
-/// A route the limiter refuses, whose failover consult answers `failure`.
-async fn limiter(name: &str, failure: Answer) -> ((u16, String, Vec<String>), Call) {
+/// A route the limiter refuses, whose failover consult answers `failure`
+/// with the caller's `status` final.
+async fn limiter(name: &str, failure: Answer, status: u16) -> ((u16, String, Vec<String>), Call) {
     let h = Harness::new(name);
     let alice = h.agent("alice", ALICE).await;
     let carol = h.agent("carol", CAROL).await;
     let sut = Sut::spawn(&h, Engine { initial: None, capped: true, failure, reason: None }).await;
     let mut call = alice.invite(&carol).with_sdp(OFFER).through(sut.addr).send().await;
-    let seen = final_of(&call.expect(503).await);
+    let seen = final_of(&call.expect(status).await);
     assert_eq!(carol.drain().await, 0, "the refused route dialed nothing");
     let done = sut.assert_reaped().await;
     let _report = h.finish().await;
@@ -277,8 +285,8 @@ async fn limiter(name: &str, failure: Answer) -> ((u16, String, Vec<String>), Ca
 
 #[tokio::test(start_paused = true)]
 async fn a_refused_limiter_failover_is_answered_as_a_reject_and_marks_nothing() {
-    let (decided, by_decision) = limiter("refusal-limiter-decided", Answer::Reject).await;
-    let (refused, by_stack) = limiter("refusal-limiter-refused", Answer::Refused).await;
+    let (decided, by_decision) = limiter("refusal-limiter-decided", Answer::Reject, 503).await;
+    let (refused, by_stack) = limiter("refusal-limiter-refused", Answer::Refused, 503).await;
 
     assert_eq!(decided, (503, "Service Unavailable".into(), vec!["stated".into()]));
     assert_eq!(refused, decided, "the refusal is answered as the decision reject");
@@ -301,8 +309,28 @@ async fn a_refusal_stating_its_reason_wears_it() {
     assert_eq!(refused, (500, "Not Implemented Here".into(), vec!["stated".into()]));
     assert_eq!(refused, decided);
 
-    let (decided, _) = failover("refusal-reason-failover-decided", Answer::Reject, STATED).await;
-    let (refused, _) = failover("refusal-reason-failover-refused", Answer::Refused, STATED).await;
+    let (decided, _) =
+        failover("refusal-reason-failover-decided", Answer::Reject, STATED, 503).await;
+    let (refused, _) =
+        failover("refusal-reason-failover-refused", Answer::Refused, STATED, 503).await;
     assert_eq!(refused, (503, "Not Implemented Here".into(), vec!["stated".into()]));
     assert_eq!(refused, decided);
+}
+
+/// A refusal stating a code that is no non-2xx final refuses nothing: the
+/// caller is answered the plain server error, which keeps the refusal's
+/// headers, on the initial path, the limiter failover and the async failover
+/// alike, as a decision reject stating that code is.
+#[tokio::test(start_paused = true)]
+async fn a_refusal_stating_no_failure_final_draws_the_plain_server_error() {
+    let plain = (500, "Server Internal Error".to_string(), vec!["stated".to_string()]);
+    for code in [180, 200] {
+        let refusal = Answer::RefusedWith(code);
+        let (initial, _) = initial(&format!("refusal-{code}-initial"), refusal, None).await;
+        assert_eq!(initial, plain, "the initial refusal stating {code}");
+        let (capped, _) = limiter(&format!("refusal-{code}-limiter"), refusal, 500).await;
+        assert_eq!(capped, plain, "the limiter failover's refusal stating {code}");
+        let (failed, _) = failover(&format!("refusal-{code}-failover"), refusal, None, 500).await;
+        assert_eq!(failed, plain, "the failure consult's refusal stating {code}");
+    }
 }

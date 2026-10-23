@@ -8,13 +8,14 @@ use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
 };
 use sip_message::header::{HeaderName, MediaType};
-use sip_message::{
+use sip_message::{SipHeader, SipMessage, SipResponse};
+use sip_template::{
     apply_name_forms, apply_remote_target_emits, emitted_wire, EmitOpts, MessageTemplate,
-    SipHeader, SipMessage, SipResponse,
 };
 
-use super::client_txn::recv_response_raw;
+use super::client_txn::{recv_response_raw, request_label};
 use super::dialog::InDialogTxn;
+use super::party::Party;
 use super::step::{unwrap_step, StepError};
 use super::ua::{from_of, media_type, to_of, uri_of};
 use super::Agent;
@@ -159,13 +160,13 @@ impl<'a> OutOfDialogRequest<'a> {
         });
         let opts = GenerateOutOfDialogRequestOpts {
             request_uri: Some(uri_of(&request_uri)),
-            call_id: format!("{}-{}@{}", caller.name, caller.ids.next(), caller.addr.ip()),
+            call_id: caller.ids.call_id(&caller.name, caller.addr.ip()),
             from: Some(from_of(
                 &self.from_uri.unwrap_or_else(|| caller.uri.clone()),
                 &caller.tag(),
             )),
             to: Some(to_of(&self.to_uri.unwrap_or_else(|| peer.uri.clone()))),
-            cseq: 1,
+            cseq: Party::Caller.first_cseq(),
             via: Some(caller.via()),
             contact: Some(caller.contact()),
             max_forwards: Some(70),
@@ -173,7 +174,8 @@ impl<'a> OutOfDialogRequest<'a> {
             content_type: self.content_type,
             extra_headers: self.extra_headers,
         };
-        let mut req = generate_out_of_dialog_request(self.method, &opts);
+        let mut req =
+            generate_out_of_dialog_request(self.method, &opts).expect("an out-of-dialog request");
         if self.suppress_default_ct {
             req = req
                 .thaw()
@@ -188,13 +190,15 @@ impl<'a> OutOfDialogRequest<'a> {
             &apply_name_forms(msg.headers(), &self.name_forms),
             &self.remote_emits,
         );
-        caller.try_send_wire(&emitted_wire(&msg, &headers), wire_dst).await?;
+        caller.try_send_emitted(&msg, &emitted_wire(&msg, &headers), wire_dst).await?;
+        let label = request_label(None, &req);
         Ok(InDialogTxn::new(
             caller.clone(),
             // An out-of-dialog INVITE's non-2xx final takes a txn-layer ACK
             // (§17.1.1.3) — retain the request so the txn can build it.
             matches!(self.method, OutOfDialogMethod::Invite).then_some(req),
             wire_dst,
+            label,
         ))
     }
 
@@ -225,13 +229,13 @@ impl<'a> OutOfDialogRequest<'a> {
         });
         let mut opts = GenerateOutOfDialogRequestOpts {
             request_uri: Some(uri_of(&request_uri)),
-            call_id: format!("{}-{}@{}", caller.name, caller.ids.next(), caller.addr.ip()),
+            call_id: caller.ids.call_id(&caller.name, caller.addr.ip()),
             from: Some(from_of(
                 &self.from_uri.clone().unwrap_or_else(|| caller.uri.clone()),
                 &caller.tag(),
             )),
             to: Some(to_of(&self.to_uri.clone().unwrap_or_else(|| peer.uri.clone()))),
-            cseq: 1,
+            cseq: Party::Caller.first_cseq(),
             via: Some(caller.via()),
             contact: Some(caller.contact()),
             max_forwards: Some(70),
@@ -244,7 +248,8 @@ impl<'a> OutOfDialogRequest<'a> {
         // At most ONE authenticated resend.
         let mut auth_retries_left: u8 = if responder.is_some() { 1 } else { 0 };
         loop {
-            let mut req = generate_out_of_dialog_request(method, &opts);
+            let mut req =
+                generate_out_of_dialog_request(method, &opts).expect("an out-of-dialog request");
             if self.suppress_default_ct {
                 req = req
                     .thaw()
@@ -257,7 +262,7 @@ impl<'a> OutOfDialogRequest<'a> {
                 &apply_name_forms(msg.headers(), &self.name_forms),
                 &self.remote_emits,
             );
-            caller.try_send_wire(&emitted_wire(&msg, &headers), wire_dst).await?;
+            caller.try_send_emitted(&msg, &emitted_wire(&msg, &headers), wire_dst).await?;
             // Raw-receive so a 401/407 keeps its challenge header (a real digest
             // responder reads `nonce`/`realm` off it); a matching final returns
             // straight away, an unsolicited 100 is absorbed.

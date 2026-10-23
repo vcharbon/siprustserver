@@ -9,7 +9,9 @@
 use std::sync::Arc;
 
 use load_shed::retry_after;
-use sip_message::generators::{generate_response, CapabilitySet, GenerateResponseOpts};
+use sip_message::generators::{
+    generate_response, CapabilitySet, GenerateError, GenerateResponseOpts,
+};
 use sip_message::types::SipHeader;
 use sip_message::{SipRequest, SipResponse};
 use sip_txn::{IdGen, InviteRefusals, StatelessTagger};
@@ -37,7 +39,7 @@ struct Render {
 impl Render {
     /// The 503 refusing `req`, its `Retry-After` jittered over the larger of
     /// the configured base and `not_before_sec`, floored once.
-    fn answer(&self, req: &SipRequest, not_before_sec: u32) -> SipResponse {
+    fn answer(&self, req: &SipRequest, not_before_sec: u32) -> Result<SipResponse, GenerateError> {
         let (to_tag, roll) = self.tagger.for_request(req);
         let base = self.retry_after_base_sec.max(not_before_sec);
         let retry_after_sec = retry_after::jittered(base, self.retry_after_jitter_sec, || roll);
@@ -105,8 +107,9 @@ impl Refusals {
         );
     }
 
-    /// The answer to `req`, refused by a rung for `refused`.
-    pub fn answer(&self, req: &SipRequest, refused: Refused) -> SipResponse {
+    /// The answer to `req`, refused by a rung for `refused`; none where `req`
+    /// states lines no response can echo.
+    pub fn answer(&self, req: &SipRequest, refused: Refused) -> Result<SipResponse, GenerateError> {
         self.render.answer(req, refused.not_before_sec)
     }
 }
@@ -135,7 +138,8 @@ Content-Length: 0\r\n\r\n"
         }
     }
 
-    fn wire(resp: SipResponse) -> String {
+    fn wire(resp: Result<SipResponse, GenerateError>) -> String {
+        let resp = resp.expect("a refusal");
         String::from_utf8(serialize(&SipMessage::Response(resp))).expect("utf-8")
     }
 

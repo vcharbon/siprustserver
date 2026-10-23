@@ -1,0 +1,231 @@
+//! **TEST-ONLY.** The RFC 3261 / 3262 / 3264 audit over the recorded signaling
+//! layer.
+//!
+//! It runs at layer close (when wired into
+//! [`ScopedAuditOptions`](crate::ScopedAuditOptions)) or directly over a channel
+//! snapshot via [`rfc_cross_message_rules`], and flags on-wire protocol
+//! invariants that a real UAC/UAS enforces but the test UAs (which answer
+//! whatever they are handed, regardless of CSeq / tags / Route) do not — so the
+//! recording itself, not the per-step `expect`, is where those invariants are
+//! checked. Wiring the full set into the default options gives every harness run
+//! the same "post-run all clean" RFC check the live SIPp endpoints apply in
+//! endurance.
+//!
+//! **Every rule body lives once in `rfc-rules`**; [`wire_adapter`] is the only
+//! thing here that runs one, surfacing it under this layer's vantage and
+//! advisory policy. Cross-message and per-message rules alike: a per-message
+//! rule's occasion is one message at one vantage, so its vantage policy is the
+//! plain reading of the two the adapter already has — charged at the emitter for
+//! what a sender MINTS, at the taker for what the recording checks about a
+//! lane's peer. A sender that is no recorded bind is still charged for what it
+//! mints, reported on the lane that took it, and every detail names its sender.
+//!
+//! [`msg_reads`] holds the per-message accessors the adapter builds a
+//! `rfc_rules::Msg` from; [`relay_lanes`] classifies which lanes forward rather
+//! than author, the one policy input the adapter needs beyond the rule bodies.
+//!
+//! SDP grammar is NOT here: a description is read as a document by
+//! [`sip_message::sdp_doc`], the one home for it.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
+
+use layer_harness::Stamped;
+use sip_message::parser::custom::CustomParser;
+use sip_message::SipParserLimits;
+
+use crate::contracts::{CrossMessageAuditRule, SignalingNetworkEvent};
+use crate::types::{all_ua_roles, UaRole};
+
+/// The **lenient** parser the audit layer uses (port of the TS
+/// `createCustomParser({ wireGrammar: false })`). The default [`CustomParser`]
+/// runs the strict wire-grammar gates (`wire_grammar = true`), which *reject*
+/// a malformed-but-on-the-wire message (e.g. a `Via` branch lacking the magic
+/// cookie) before a rule could ever see it — so the grammar rules would silently
+/// never fire. Auditing the recorded bytes requires parsing them leniently, the
+/// same way a permissive peer on the wire would, so the rule (not the parser)
+/// is what flags the violation.
+pub(crate) fn lenient_parser() -> CustomParser {
+    CustomParser::with_limits(SipParserLimits { wire_grammar: false, ..Default::default() })
+}
+
+// Shared helpers.
+pub mod msg_reads;
+pub mod relay_lanes;
+
+// The rfc-rules live adapter: merged rule bodies surfaced as cross-message
+// findings.
+pub mod wire_adapter;
+
+// The per-rule population an audit pass notes.
+mod occasions;
+
+// The parties the recording holds a lane for.
+mod recorded;
+
+/// The full default set of **cross-message** RFC rules every test harness
+/// installs by default. One pass over the whole recorded channel at layer
+/// close; each finding carries its originating bind so subject dispatch and the
+/// hard gate can filter it.
+pub fn rfc_cross_message_rules() -> Vec<Arc<dyn CrossMessageAuditRule>> {
+    wire_adapter::cross_rules()
+}
+
+/// [`rfc_cross_message_rules`] over a view a consumer took the binds of
+/// `scoped_out` out of: they are recorded parties, so what they sent is never
+/// judged at the lane that took it.
+pub fn rfc_cross_message_rules_scoped(
+    scoped_out: HashSet<String>,
+) -> Vec<Arc<dyn CrossMessageAuditRule>> {
+    wire_adapter::cross_rules_scoped(scoped_out)
+}
+
+// ---------------------------------------------------------------------------
+// Shared role-aware evaluator
+// ---------------------------------------------------------------------------
+
+/// One RFC-suite finding over a recorded trace, post subject dispatch: the rule
+/// only fired against a bind whose declared roles intersect the rule's
+/// `subject()`. `advisory` mirrors the rule's `force_advisory()` — an advisory
+/// finding is surfaced (reports, the e2e findings table) but never gates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RfcFinding {
+    /// The rule id (e.g. `proxy-100-within-grace`).
+    pub rule: String,
+    /// The bind (lane) the finding is attributed to.
+    pub lane: String,
+    /// Human-readable explanation.
+    pub detail: String,
+    /// `true` ⇒ informational only; `false` ⇒ a gating violation.
+    pub advisory: bool,
+    /// The 1-based wire-entry index of the OFFENDING message (into
+    /// [`audit_wire_entries`]) when the rule can pinpoint it — the structural
+    /// reference a scoped waiver attributes on (emitter = that entry's sender,
+    /// position = the index). `None` ⇒ the rule does not (yet) populate it; such
+    /// a finding is unattributable to a party/position and stays gated.
+    pub offending: Option<usize>,
+    /// The bind the rule holds RESPONSIBLE: the one that emitted the offending
+    /// message, or owed the one never emitted. `lane` is where the finding is
+    /// REPORTED, which for a taker-vantage rule is the other party. `None` ⇒
+    /// the rule names no culprit.
+    pub charged: Option<String>,
+}
+
+/// The recorded wire entries THE AUDIT SEES — `to_sip_entries` over the
+/// audit-visible events, the SAME view [`evaluate_rfc_findings`] hands the rules,
+/// so a finding's [`RfcFinding::offending`] index lines up with this list.
+/// Consumers scoping waivers on a message position index into it.
+pub fn audit_wire_entries(
+    events: &[Stamped<SignalingNetworkEvent>],
+) -> Vec<crate::report::RecordedSipEntry> {
+    let visible: Vec<Stamped<SignalingNetworkEvent>> = events
+        .iter()
+        .filter(|s| crate::contracts::audit_visible_event(&s.event))
+        .cloned()
+        .collect();
+    crate::report::to_sip_entries(&visible)
+}
+
+/// The declared roles of every bind in a recorded trace, reconstructed from the
+/// `BindAcquire` summaries (a bind that declared none defaults to all roles).
+/// This is what lets a consumer apply subject dispatch with no harness-private
+/// state — the trace itself carries the role tags.
+pub fn bind_roles_of(
+    events: &[Stamped<SignalingNetworkEvent>],
+) -> HashMap<String, HashSet<UaRole>> {
+    let mut roles = HashMap::new();
+    for s in events {
+        if let SignalingNetworkEvent::BindAcquire { bind_key, summary } = &s.event {
+            roles.insert(bind_key.clone(), summary.roles.clone());
+        }
+    }
+    roles
+}
+
+/// Run the FULL default RFC suite over a recorded trace, applying **subject
+/// dispatch** per finding: a finding is kept only when its rule's `subject()`
+/// intersects the declared roles of the party it charges — the binds naming
+/// that party, by key or by address; every role for a party no bind declared
+/// (default = all roles, so this only narrows when roles were declared at
+/// `bind_udp`). A finding that charges no party is dispatched on its lane. This is THE single evaluator — the harness hard gate panics on
+/// the non-advisory subset, and the report projection lists the whole set with
+/// its `advisory` tags — so the gate and the report can never disagree on
+/// which endpoint a rule applies to.
+pub fn evaluate_rfc_findings(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<RfcFinding> {
+    evaluate_rfc_audit(events).findings
+}
+
+/// The RFC suite over one recorded trace: its findings and, per rule token,
+/// the population the trace gave the rule.
+#[derive(Debug, Clone, Default)]
+pub struct RfcAudit {
+    /// The findings, as [`evaluate_rfc_findings`] returns them.
+    pub findings: Vec<RfcFinding>,
+    /// Per rule token, the occasions met at the vantages the suite surfaces
+    /// findings at, on binds the rule's subject covers: how often the trace
+    /// exercised the rule, violated or not.
+    pub population: BTreeMap<&'static str, rfc_rules::Population>,
+}
+
+/// [`evaluate_rfc_findings`] with the rule population of the same pass.
+pub fn evaluate_rfc_audit(events: &[Stamped<SignalingNetworkEvent>]) -> RfcAudit {
+    // Audit view: consumption markers and modeled-loss /
+    // infra-absorbed arrivals are projection-only — filtered here so EVERY
+    // caller (harness hard gate, e2e collector, report projection) hands the
+    // rules the same view of the wire.
+    let events: Vec<Stamped<SignalingNetworkEvent>> = events
+        .iter()
+        .filter(|s| crate::contracts::audit_visible_event(&s.event))
+        .cloned()
+        .collect();
+    let events = events.as_slice();
+    let roles = bind_roles_of(events);
+    let roles_of = |party: &str| -> HashSet<UaRole> {
+        if let Some(declared) = roles.get(party) {
+            return declared.clone();
+        }
+        let addr = crate::report::lane_addr(party);
+        let named: Vec<&HashSet<UaRole>> = roles
+            .iter()
+            .filter(|(bind, _)| addr.is_some() && crate::report::lane_addr(bind) == addr)
+            .map(|(_, declared)| declared)
+            .collect();
+        if named.is_empty() {
+            all_ua_roles()
+        } else {
+            named.into_iter().flatten().copied().collect()
+        }
+    };
+    let subject_hits = |subject: &HashSet<UaRole>, party: &str| {
+        let r = roles_of(party);
+        subject.iter().any(|s| r.contains(s))
+    };
+
+    let mut findings = Vec::new();
+    let mut population: BTreeMap<&'static str, rfc_rules::Population> = BTreeMap::new();
+
+    // Cross-message rules — one pass over the whole channel each.
+    for rule in rfc_cross_message_rules() {
+        let subject = rule.subject();
+        let (positioned, tally) = occasions::tallied(|| rule.check_positioned(events));
+        for ((token, bind), noted) in tally {
+            if subject_hits(&subject, &bind) {
+                population.entry(token).or_default().add(noted);
+            }
+        }
+        for (bind, detail, offending, charged) in positioned {
+            if subject_hits(&subject, charged.as_deref().unwrap_or(&bind)) {
+                findings.push(RfcFinding {
+                    rule: rule.name().to_string(),
+                    lane: bind,
+                    detail,
+                    advisory: rule.force_advisory(),
+                    offending,
+                    charged,
+                });
+            }
+        }
+    }
+
+    RfcAudit { findings, population }
+}

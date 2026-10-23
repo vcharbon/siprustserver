@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<!-- Rings, then sends an INFO in the early dialog: expects it answered 501 (the caller serves no INFO) and the INVITE CANCELed (200, 487, ACK). -->
+<scenario name="peer-request-before-answer">
+  <recv request="INVITE" crlf="true" rrs="true">
+    <action>
+      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" assign_to="from_hdr"/>
+      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" assign_to="to_raw"/>
+      <ereg regexp=".*" search_in="hdr" header="Via:" start_line="true" assign_to="inv_via"/>
+      <ereg regexp="&lt;([^&gt;]+)&gt;" search_in="hdr" header="Contact:" assign_to="ct_all,caller_contact"/>
+    </action>
+  </recv>
+  <send>
+    <![CDATA[
+      SIP/2.0 180 Ringing
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:];tag=[pid]P[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+  </send>
+  <send>
+    <![CDATA[
+      INFO [$caller_contact] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-early-[call_number]
+      From: [$to_raw];tag=[pid]P[call_number]
+      To: [$from_hdr]
+      Call-ID: [call_id]
+      CSeq: 10 INFO
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+  <recv response="501" timeout="5000"/>
+  <recv request="CANCEL" crlf="true" timeout="5000"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:];tag=[pid]P[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+  </send>
+  <send>
+    <![CDATA[
+      SIP/2.0 487 Request Terminated
+      Via:[$inv_via]
+      From:[$from_hdr]
+      To:[$to_raw];tag=[pid]P[call_number]
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Content-Length: 0
+    ]]>
+  </send>
+  <recv request="ACK" crlf="true" timeout="5000"/>
+  <Reference variables="from_hdr,to_raw,ct_all"/>
+</scenario>

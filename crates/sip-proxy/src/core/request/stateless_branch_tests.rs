@@ -13,7 +13,8 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::parser::SipParserLimits;
 use sip_message::{SipMessage, SipParser};
 use sip_net::types::BindUdpOpts;
-use sip_net::{SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint};
+use sip_net::{SignalingNetwork, UdpEndpoint};
+use sip_net_testkit::SimulatedSignalingNetwork;
 
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::{invite_txn_key, INVITE_ENTRY_TTL_MS};
@@ -70,7 +71,7 @@ impl Fabric {
             )]));
         let strategy: Arc<dyn RoutingStrategy> =
             Arc::new(ForwardAllStrategy::new(ProxyAddr::new(WORKER, 5060)));
-        ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
+        ProxyCoreBuilder::for_test(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
             .clock(Clock::test_at(0))
             .build(ep)
     }
@@ -162,11 +163,13 @@ async fn cancel_at_a_second_proxy_instance_carries_the_invites_branch() {
     let first = f.proxy(NODE_A).await;
     let second = f.proxy(NODE_B).await;
 
-    first.route_request(&invite("split-cancel@test", "tag-a", 1, "z9hG4bKup1"), worker_src()).await;
+    first
+        .route_request_from(&invite("split-cancel@test", "tag-a", 1, "z9hG4bKup1"), worker_src())
+        .await;
     let invite_via = f.pushed_via().await;
 
     let out = second
-        .route_request(&cancel("split-cancel@test", "tag-a", 1, "z9hG4bKup1"), worker_src())
+        .route_request_from(&cancel("split-cancel@test", "tag-a", 1, "z9hG4bKup1"), worker_src())
         .await;
     let cancel_via = f.pushed_via().await;
 
@@ -190,7 +193,7 @@ async fn cancel_after_the_invite_memo_expired_carries_the_same_branch() {
     let core = f.proxy(NODE_A).await;
 
     let inv = invite("expired-memo@test", "tag-a", 4, "z9hG4bKup2");
-    core.route_request(&inv, worker_src()).await;
+    core.route_request_from(&inv, worker_src()).await;
     let invite_via = f.pushed_via().await;
 
     let key = invite_txn_key(inv.top_via(), "expired-memo@test", Some("tag-a"), 4);
@@ -202,7 +205,7 @@ async fn cancel_after_the_invite_memo_expired_carries_the_same_branch() {
     );
 
     let out = core
-        .route_request(&cancel("expired-memo@test", "tag-a", 4, "z9hG4bKup2"), worker_src())
+        .route_request_from(&cancel("expired-memo@test", "tag-a", 4, "z9hG4bKup2"), worker_src())
         .await;
     let cancel_via = f.pushed_via().await;
 
@@ -228,9 +231,9 @@ async fn retransmission_through_a_second_proxy_carries_the_same_branch() {
     let second = f.proxy(NODE_B).await;
     let req = invite("split-rtx@test", "tag-a", 2, "z9hG4bKup3");
 
-    first.route_request(&req, worker_src()).await;
+    first.route_request_from(&req, worker_src()).await;
     let original = f.pushed_via().await;
-    second.route_request(&req, worker_src()).await;
+    second.route_request_from(&req, worker_src()).await;
     let repeat = f.pushed_via().await;
 
     assert_eq!(
@@ -248,9 +251,11 @@ async fn one_received_branch_token_on_two_call_ids_maps_to_two_branches() {
     let f = fabric().await;
     let core = f.proxy(NODE_A).await;
 
-    core.route_request(&invite("collide-a@test", "tag-a", 1, "z9hG4bKdup"), worker_src()).await;
+    core.route_request_from(&invite("collide-a@test", "tag-a", 1, "z9hG4bKdup"), worker_src())
+        .await;
     let first = f.pushed_branch().await;
-    core.route_request(&invite("collide-b@test", "tag-a", 1, "z9hG4bKdup"), worker_src()).await;
+    core.route_request_from(&invite("collide-b@test", "tag-a", 1, "z9hG4bKdup"), worker_src())
+        .await;
     let second = f.pushed_branch().await;
 
     assert_ne!(first, second, "two transactions must not merge onto one downstream branch");
@@ -263,7 +268,7 @@ async fn the_pushed_branch_carries_the_magic_cookie_and_is_opaque_hex() {
     let f = fabric().await;
     let core = f.proxy(NODE_A).await;
 
-    core.route_request(&invite("shape-1@test", "tag-a", 1, "z9hG4bKup4"), worker_src()).await;
+    core.route_request_from(&invite("shape-1@test", "tag-a", 1, "z9hG4bKup4"), worker_src()).await;
     let branch = f.pushed_branch().await;
 
     let token = branch.strip_prefix(BRANCH_MAGIC_COOKIE).expect("§8.1.1.7 magic cookie");
@@ -281,11 +286,11 @@ async fn a_branchless_received_via_maps_by_the_alternate_input_set() {
     let f = fabric().await;
     let core = f.proxy(NODE_A).await;
 
-    core.route_request(&branchless_options("legacy-1@test", 3), worker_src()).await;
+    core.route_request_from(&branchless_options("legacy-1@test", 3), worker_src()).await;
     let original = f.pushed_branch().await;
-    core.route_request(&branchless_options("legacy-1@test", 3), worker_src()).await;
+    core.route_request_from(&branchless_options("legacy-1@test", 3), worker_src()).await;
     let repeat = f.pushed_branch().await;
-    core.route_request(&branchless_options("legacy-1@test", 4), worker_src()).await;
+    core.route_request_from(&branchless_options("legacy-1@test", 4), worker_src()).await;
     let other_cseq = f.pushed_branch().await;
 
     assert_eq!(repeat, original, "§16.11: a retransmission maps to the first copy's branch");
@@ -336,14 +341,14 @@ async fn one_branch_token_from_two_senders_leaves_on_two_branches() {
     let (a, b) = ("10.0.1.1", "10.0.1.2");
     let from = |host: &str| format!("{host}:5060").parse().unwrap();
 
-    core.route_request(&external("INVITE", a, "z9hG4bKtwin"), from(a)).await;
+    core.route_request_from(&external("INVITE", a, "z9hG4bKtwin"), from(a)).await;
     let invite_a = pushed().await;
-    core.route_request(&external("INVITE", b, "z9hG4bKtwin"), from(b)).await;
+    core.route_request_from(&external("INVITE", b, "z9hG4bKtwin"), from(b)).await;
     let invite_b = pushed().await;
     assert_ne!(invite_a, invite_b, "two senders' transactions leave on two branches");
 
-    core.route_request(&external("CANCEL", b, "z9hG4bKtwin"), from(b)).await;
+    core.route_request_from(&external("CANCEL", b, "z9hG4bKtwin"), from(b)).await;
     assert_eq!(pushed().await, invite_b, "b's CANCEL rides b's INVITE's branch");
-    core.route_request(&external("CANCEL", a, "z9hG4bKtwin"), from(a)).await;
+    core.route_request_from(&external("CANCEL", a, "z9hG4bKtwin"), from(a)).await;
     assert_eq!(pushed().await, invite_a, "a's CANCEL rides a's INVITE's branch");
 }

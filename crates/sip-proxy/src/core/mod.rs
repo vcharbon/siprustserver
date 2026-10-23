@@ -4,19 +4,25 @@
 //! It binds one UDP endpoint, runs a recv loop, parses each datagram, and
 //! dispatches to [`request`](self) / [`response`](self) handling. It owns the
 //! routing-policy seam ([`RoutingStrategy`]), the worker registry, the
-//! `(Call-ID|CSeq#)` LRU, an [`IdGen`] for the To-tags of the finals it
-//! generates itself, a [`Clock`], metrics, a logger, and the self-gate
-//! (ELU/CPS admission). A hop thaws the received
+//! `(Call-ID|CSeq#)` LRU, the [`Refusals`] that answer the requests it refuses
+//! itself, a [`Clock`], metrics, a logger, and the self-gate (intake-age/CPS
+//! admission). A hop thaws the received
 //! message into a draft, touches only the routing headers, and freezes it to
 //! the wire bytes it forwards — every untouched line is memcpy'd, never
-//! re-parsed (ADR-0025).
+//! re-parsed (ADR-0025). Its defaults live in [`ProxyCoreBuilder`].
 
+mod builder;
+#[cfg(test)]
+mod departed_originator_tests;
 #[cfg(test)]
 mod dual_face_tests;
+mod face_pick;
+#[cfg(test)]
+mod first_view_tests;
+#[cfg(test)]
+mod liveness_routing_tests;
 mod request;
 mod response;
-#[cfg(test)]
-mod stickiness_metric_tests;
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -25,20 +31,24 @@ use std::time::Duration;
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
-use sip_net::UdpEndpoint;
-use sip_txn::IdGen;
+use sip_net::{parse_datagram, ParserPanicked, UdpEndpoint, UdpPacket};
 
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::CancelBranchLru;
 use crate::face::FaceCidrs;
+use crate::health::FirstView;
 use crate::liveness::ShardPulse;
 use crate::observability::metrics::Face;
 use crate::observability::{ProxyMetrics, UdpShardStats};
+use crate::parse_refusals::ParseRefusals;
+use crate::refusals::Refusals;
 use crate::registry::WorkerRegistry;
-use crate::resolver::{HostResolver, NamedForwarder, ResolverConfig, SystemResolver};
-use crate::self_gate::{AlwaysAdmitGate, IntakeAgeRecorder, ProxySelfGate};
+use crate::resolver::{HostResolver, NamedForwarder, ResolverConfig};
+use crate::self_gate::{IntakeAgeRecorder, ProxySelfGate};
 use crate::strategy::RoutingStrategy;
 use crate::trace::ProxyTraces;
+pub use builder::ProxyCoreBuilder;
+use face_pick::FacePickSendEndpoint;
 
 /// The per-peer bucket a failed send belongs in: an oversize datagram accuses
 /// the message, everything else the peer or the socket.
@@ -62,7 +72,7 @@ fn is_dialog_creating(method: &str) -> bool {
 /// UDP socket bound on the caller plane, its own advertise, and the internal
 /// CIDR classifier that picks the egress face per destination IP. Handed to
 /// [`ProxyCoreBuilder::external_face`]; when absent the core is the classic
-/// single-face proxy (behaviour byte-identical to before dual-face existed).
+/// single-face proxy.
 pub struct ExternalFaceParts {
     /// The external-plane socket (bound on the external VIP).
     pub endpoint: Box<dyn UdpEndpoint>,
@@ -93,7 +103,10 @@ pub(crate) struct ProxyCoreParts {
     pub strategy: Arc<dyn RoutingStrategy>,
     pub registry: Arc<dyn WorkerRegistry>,
     pub cancel_lru: Arc<CancelBranchLru>,
-    pub id_gen: Arc<IdGen>,
+    /// The answers to requests the proxy refuses itself, shared by every shard.
+    pub refusals: Arc<Refusals>,
+    /// The answers to datagrams the parser refused, shared by every shard.
+    pub parse_refusals: Arc<ParseRefusals>,
     pub clock: Clock,
     pub metrics: Arc<ProxyMetrics>,
     pub self_gate: Arc<dyn ProxySelfGate>,
@@ -115,6 +128,8 @@ pub(crate) struct ProxyCoreParts {
     pub traces: Arc<ProxyTraces>,
     /// Liveness stamps, one cell per shard; this core owns cell `shard`.
     pub pulse: Arc<ShardPulse>,
+    /// The proxy's first worker view, shared with its probe.
+    pub first_view: Arc<FirstView>,
 }
 
 /// The stateless proxy.
@@ -128,7 +143,8 @@ pub struct ProxyCore {
     strategy: Arc<dyn RoutingStrategy>,
     registry: Arc<dyn WorkerRegistry>,
     cancel_lru: Arc<CancelBranchLru>,
-    id_gen: Arc<IdGen>,
+    refusals: Arc<Refusals>,
+    parse_refusals: Arc<ParseRefusals>,
     clock: Clock,
     metrics: Arc<ProxyMetrics>,
     self_gate: Arc<dyn ProxySelfGate>,
@@ -139,6 +155,7 @@ pub struct ProxyCore {
     shard: usize,
     pub(super) traces: Arc<ProxyTraces>,
     pulse: Arc<ShardPulse>,
+    first_view: Arc<FirstView>,
 }
 
 impl ProxyCore {
@@ -175,7 +192,8 @@ impl ProxyCore {
             strategy: parts.strategy,
             registry: parts.registry,
             cancel_lru: parts.cancel_lru,
-            id_gen: parts.id_gen,
+            refusals: parts.refusals,
+            parse_refusals: parts.parse_refusals,
             clock: parts.clock,
             metrics: parts.metrics,
             self_gate: parts.self_gate,
@@ -185,6 +203,7 @@ impl ProxyCore {
             shard: parts.shard,
             pulse: parts.pulse,
             traces: parts.traces,
+            first_view: parts.first_view,
         }
     }
 
@@ -205,8 +224,8 @@ impl ProxyCore {
 
     // ── Dual-face plumbing ──────────────────────────────────────────────────
     // Single-face mode (external = None): every helper below degenerates to
-    // the pre-dual-face behaviour — internal endpoint, internal advertise,
-    // `is_self_addr` == "matches the one advertise". Zero behavioural delta.
+    // internal endpoint, internal advertise, `is_self_addr` == "matches the
+    // one advertise".
 
     /// Is `ip` on the internal plane? Single-face: everything is internal.
     fn ip_is_internal(&self, ip: IpAddr) -> bool {
@@ -283,7 +302,12 @@ impl ProxyCore {
     }
 
     fn now_ms(&self) -> u64 {
-        self.clock.now_ms().max(0) as u64
+        u64::try_from(self.clock.now_ms()).unwrap_or(0)
+    }
+
+    /// [`now_ms`](Self::now_ms), signed as the per-call traces stamp it.
+    fn trace_ms(&self) -> i64 {
+        self.clock.now_ms().max(0)
     }
 
     /// Send raw bytes to a [`ProxyAddr`] target. An IP-literal host (the fast
@@ -343,7 +367,10 @@ impl ProxyCore {
     }
 
     /// The recv loop. Runs until the endpoint's queue is closed (the endpoint
-    /// is dropped). Parse failures are dropped silently (RFC 3261 §16.3).
+    /// is dropped). A datagram is parsed once: the loop takes the parse its
+    /// receive path made and parses only a datagram that came without one. A
+    /// refused one is answered or dropped (ADR-0054); one the parser panics
+    /// on is dropped and counted, and the loop goes on.
     pub async fn run(self) {
         // The shared `(Call-ID|CSeq#)` LRU sweeper — spawned exactly once per
         // LRU however many recv-shard cores share it (see
@@ -355,26 +382,31 @@ impl ProxyCore {
         // slot, so N shards never stomp one gauge; the metrics render the
         // cross-shard aggregate. The AbortOnDrop guard aborts it even when the
         // whole recv-loop TASK is aborted (a supervisor/harness abort drops
-        // this future mid-`recv`): without it the stats task kept a strong
+        // this future mid-`recv`): without it the stats task would keep a strong
         // endpoint `Arc` alive forever, so the socket (and on the simulated
-        // fabric the bind address itself) leaked past the core's death — which
-        // broke rebinding the same VIP for a takeover proxy.
+        // fabric the bind address itself) would leak past the core's death and
+        // block rebinding the same VIP for a takeover proxy.
         let stats = {
             let metrics = self.metrics.clone();
             let endpoint = self.endpoint.clone();
             let ext_endpoint = self.external.as_ref().map(|e| e.endpoint.clone());
             let shard = self.shard;
-            tokio::spawn(async move {
-                let mut tick = tokio::time::interval(Duration::from_millis(
-                    crate::cancel_lru::DEFAULT_SWEEP_INTERVAL_MS,
-                ));
-                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    tick.tick().await;
-                    metrics.set_udp_endpoint_stats(
-                        shard,
-                        UdpShardStats::of_faces(&*endpoint, ext_endpoint.as_deref()),
-                    );
+            crate::supervise::spawn(crate::supervise::SHARD_STATS, move || {
+                let (metrics, endpoint) = (metrics.clone(), endpoint.clone());
+                let ext_endpoint = ext_endpoint.clone();
+                async move {
+                    #[expect(clippy::disallowed_methods, reason = "the sweep interval is not zero")]
+                    let mut tick = tokio::time::interval(Duration::from_millis(
+                        crate::cancel_lru::DEFAULT_SWEEP_INTERVAL_MS,
+                    ));
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        tick.tick().await;
+                        metrics.set_udp_endpoint_stats(
+                            shard,
+                            UdpShardStats::of_faces(&*endpoint, ext_endpoint.as_deref()),
+                        );
+                    }
                 }
             })
         };
@@ -382,10 +414,10 @@ impl ProxyCore {
 
         loop {
             // Dual-face: serve BOTH sockets from the one core (one process,
-            // one state — cancel_lru / stickiness / registry shared across
-            // faces by construction). Either socket closing ends the core: the
-            // faces are one identity and must live and die together (the
-            // runner supervises the core task and exits for restart).
+            // one state shared across faces). Either socket closing ends the
+            // core: the faces are one identity and live and die together (the
+            // runner supervises the core task and exits for restart). The face
+            // a datagram arrived on is its trust (ADR-0048).
             let (pkt, face) = match &self.external {
                 Some(ext) => tokio::select! {
                     p = self.endpoint.recv() => (p, Face::Internal),
@@ -403,17 +435,29 @@ impl ProxyCore {
             // on one timeline and carries no wall-vs-monotonic drift.
             self.intake_age.record(now_ms.saturating_sub(pkt.arrival_ms));
             self.metrics.record_face_ingress(face);
-            let src = pkt.src;
-            // Hand the receive buffer to the parser instead of lending it: the
-            // message's `raw`/`body` then share it and no packet byte is copied.
-            let Ok(msg) = self.parser.parse_shared(bytes::Bytes::from(pkt.raw)) else {
-                // Malformed datagram — drop silently.
-                self.pulse.waiting(self.shard);
-                continue;
+            let UdpPacket { raw, src, parsed, .. } = pkt;
+            // The receive path's parse, else one made here; either way the
+            // message's `raw`/`body` share the receive buffer.
+            let parsed = match parsed {
+                Some(parsed) => *parsed,
+                None => parse_datagram(raw, |b| self.parser.parse_shared(b)),
+            };
+            let msg = match parsed {
+                Ok(Ok(msg)) => msg,
+                Ok(Err(error)) => {
+                    self.refuse_unparsed(&error, src).await;
+                    self.pulse.waiting(self.shard);
+                    continue;
+                }
+                Err(ParserPanicked) => {
+                    self.metrics.record_parse_panic();
+                    self.pulse.waiting(self.shard);
+                    continue;
+                }
             };
             match msg {
-                SipMessage::Request(_) => self.handle_request(msg, src).await,
-                SipMessage::Response(resp) => self.handle_response(resp, src).await,
+                SipMessage::Request(_) => self.handle_request(msg, src, face).await,
+                SipMessage::Response(resp) => self.handle_response(resp, src, face).await,
             }
             self.pulse.waiting(self.shard);
         }
@@ -430,435 +474,5 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// A send-only `UdpEndpoint` that picks the internal/external socket per
-/// destination IP — the face picker as a seam, for consumers that hold "an
-/// endpoint" and send to already-resolved addresses (the [`NamedForwarder`]).
-/// Never used for recv (the core recv-selects the real sockets).
-struct FacePickSendEndpoint {
-    internal: Arc<dyn UdpEndpoint>,
-    external: Arc<dyn UdpEndpoint>,
-    int_cidrs: FaceCidrs,
-}
-
-#[async_trait::async_trait]
-impl UdpEndpoint for FacePickSendEndpoint {
-    async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), sip_net::SendError> {
-        if self.int_cidrs.contains_ip(dst.ip()) {
-            self.internal.send_to(buf, dst).await
-        } else {
-            self.external.send_to(buf, dst).await
-        }
-    }
-    async fn recv(&self) -> Option<sip_net::UdpPacket> {
-        std::future::pending().await
-    }
-    fn try_recv(&self) -> Option<sip_net::UdpPacket> {
-        None
-    }
-    fn local_addr(&self) -> SocketAddr {
-        self.internal.local_addr()
-    }
-    fn queue_depth(&self) -> usize {
-        0
-    }
-    fn queue_max(&self) -> usize {
-        0
-    }
-    fn counters(&self) -> sip_net::UdpEndpointCounters {
-        sip_net::UdpEndpointCounters::default()
-    }
-}
-
-/// Convenience builder for the common all-defaults wiring (AlwaysAdmitGate +
-/// fresh metrics + entropy IdGen + system clock).
-pub struct ProxyCoreBuilder {
-    advertised: ProxyAddr,
-    external: Option<ExternalFaceParts>,
-    strategy: Arc<dyn RoutingStrategy>,
-    registry: Arc<dyn WorkerRegistry>,
-    cancel_lru: Option<Arc<CancelBranchLru>>,
-    id_gen: Option<Arc<IdGen>>,
-    clock: Option<Clock>,
-    metrics: Option<Arc<ProxyMetrics>>,
-    self_gate: Option<Arc<dyn ProxySelfGate>>,
-    intake_age: Option<IntakeAgeRecorder>,
-    resolver: Option<Arc<dyn HostResolver>>,
-    resolver_cfg: Option<ResolverConfig>,
-    shard: usize,
-    traces: Option<Arc<ProxyTraces>>,
-    pulse: Option<Arc<ShardPulse>>,
-}
-
-impl ProxyCoreBuilder {
-    pub fn new(
-        advertised: ProxyAddr,
-        strategy: Arc<dyn RoutingStrategy>,
-        registry: Arc<dyn WorkerRegistry>,
-    ) -> Self {
-        Self {
-            advertised,
-            external: None,
-            strategy,
-            registry,
-            cancel_lru: None,
-            id_gen: None,
-            clock: None,
-            metrics: None,
-            self_gate: None,
-            intake_age: None,
-            resolver: None,
-            resolver_cfg: None,
-            shard: 0,
-            traces: None,
-            pulse: None,
-        }
-    }
-
-    pub fn clock(mut self, clock: Clock) -> Self {
-        self.clock = Some(clock);
-        self
-    }
-    /// Enable **dual-face mode**: a second socket on the external (caller)
-    /// plane with its own advertise, and the internal CIDR list that picks the
-    /// egress face per destination IP. Absent → single-face, byte-identical to
-    /// the pre-dual-face proxy.
-    pub fn external_face(mut self, parts: ExternalFaceParts) -> Self {
-        self.external = Some(parts);
-        self
-    }
-    pub fn id_gen(mut self, id_gen: Arc<IdGen>) -> Self {
-        self.id_gen = Some(id_gen);
-        self
-    }
-    pub fn metrics(mut self, metrics: Arc<ProxyMetrics>) -> Self {
-        self.metrics = Some(metrics);
-        self
-    }
-    pub fn self_gate(mut self, gate: Arc<dyn ProxySelfGate>) -> Self {
-        self.self_gate = Some(gate);
-        self
-    }
-    /// The shared max-dequeue-age recorder feeding the self-gate's ELU arm.
-    /// Pass ONE clone to every recv-shard core so the window max spans the
-    /// whole intake; defaults to a private (unread) recorder.
-    pub fn intake_age(mut self, recorder: IntakeAgeRecorder) -> Self {
-        self.intake_age = Some(recorder);
-        self
-    }
-    pub fn cancel_lru(mut self, lru: Arc<CancelBranchLru>) -> Self {
-        self.cancel_lru = Some(lru);
-        self
-    }
-    pub fn resolver(mut self, resolver: Arc<dyn HostResolver>) -> Self {
-        self.resolver = Some(resolver);
-        self
-    }
-    /// Cache TTLs / caps for the named-target resolver (defaults:
-    /// [`ResolverConfig::default`] — positive 60 s, negative 5 s). The runner
-    /// env-exposes the TTLs as `PROXY_RESOLVER_POSITIVE_TTL_MS` /
-    /// `PROXY_RESOLVER_NEGATIVE_TTL_MS`.
-    pub fn resolver_config(mut self, cfg: ResolverConfig) -> Self {
-        self.resolver_cfg = Some(cfg);
-        self
-    }
-    /// Recv-shard index (the endpoint-stats slot). Defaults to 0; the sharded
-    /// runner numbers its cores 0..N.
-    pub fn shard(mut self, shard: usize) -> Self {
-        self.shard = shard;
-        self
-    }
-    /// The per-call trace registry (ADR-0026). Pass ONE clone to every recv
-    /// shard so the active-trace cap bounds the process; the default is an
-    /// environment-read registry, inert without an OTLP endpoint.
-    pub fn traces(mut self, traces: Arc<ProxyTraces>) -> Self {
-        self.traces = Some(traces);
-        self
-    }
-    /// The liveness stamps ([`ShardPulse`]) — ONE across every recv shard,
-    /// sized to the shard count, read by the runner's readiness gate. The
-    /// default is a private one nobody reads.
-    pub fn pulse(mut self, pulse: Arc<ShardPulse>) -> Self {
-        self.pulse = Some(pulse);
-        self
-    }
-
-    /// Finish into a [`ProxyCore`] bound on `endpoint`.
-    pub fn build(self, endpoint: Box<dyn UdpEndpoint>) -> ProxyCore {
-        let clock = self.clock.unwrap_or_else(Clock::system);
-        let traces = self.traces.unwrap_or_else(|| Arc::new(ProxyTraces::from_env(clock.now_ms())));
-        ProxyCore::new(ProxyCoreParts {
-            endpoint,
-            advertised: self.advertised,
-            external: self.external,
-            strategy: self.strategy,
-            registry: self.registry,
-            cancel_lru: self
-                .cancel_lru
-                .unwrap_or_else(|| Arc::new(CancelBranchLru::with_clock(clock.clone()))),
-            id_gen: self.id_gen.unwrap_or_else(|| Arc::new(IdGen::from_entropy())),
-            clock,
-            metrics: self.metrics.unwrap_or_else(|| Arc::new(ProxyMetrics::new())),
-            self_gate: self.self_gate.unwrap_or_else(|| Arc::new(AlwaysAdmitGate)),
-            intake_age: self.intake_age.unwrap_or_default(),
-            resolver: self.resolver.unwrap_or_else(|| Arc::new(SystemResolver)),
-            resolver_cfg: self.resolver_cfg.unwrap_or_default(),
-            shard: self.shard,
-            traces,
-            pulse: self.pulse.unwrap_or_else(|| Arc::new(ShardPulse::new(self.shard + 1))),
-        })
-    }
-}
-
 #[cfg(test)]
-mod sweeper_tests {
-    use super::*;
-    use std::net::{Ipv4Addr, SocketAddrV4};
-    use std::sync::Mutex;
-
-    use async_trait::async_trait;
-    use sip_net::{SendError, UdpEndpointCounters, UdpPacket};
-
-    use crate::cancel_lru::{CancelEntry, RTX_ENTRY_TTL_MS};
-    use crate::registry::static_reg::StaticWorkerRegistry;
-    use crate::ForwardAllStrategy;
-
-    /// A `UdpEndpoint` whose `recv` never resolves: the proxy's recv loop parks,
-    /// so the background sweeper is the only task making progress.
-    struct PendingEndpoint;
-
-    #[async_trait]
-    impl UdpEndpoint for PendingEndpoint {
-        async fn send_to(&self, _buf: &[u8], _dst: SocketAddr) -> Result<(), SendError> {
-            Ok(())
-        }
-        async fn recv(&self) -> Option<UdpPacket> {
-            std::future::pending::<Option<UdpPacket>>().await
-        }
-        fn try_recv(&self) -> Option<UdpPacket> {
-            None
-        }
-        fn local_addr(&self) -> SocketAddr {
-            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 5060))
-        }
-        fn queue_depth(&self) -> usize {
-            0
-        }
-        fn queue_max(&self) -> usize {
-            0
-        }
-        fn counters(&self) -> UdpEndpointCounters {
-            UdpEndpointCounters::default()
-        }
-    }
-
-    /// A running core's background sweeper physically reclaims an
-    /// expired pending-INVITE entry and re-publishes the gauge to match. Without
-    /// the sweeper the entry would linger for the life of the process (an
-    /// answered call never re-`lookup`s its key, so lazy eviction never fires)
-    /// and `sip_proxy_pending_invite_lru_size` would climb without bound.
-    #[tokio::test(start_paused = true)]
-    async fn run_sweeps_expired_pending_invite_entries() {
-        // (Cadence ≤ shortest TTL is a compile-time invariant in cancel_lru.rs.)
-        let clock = Clock::test_at(0);
-        let lru = Arc::new(CancelBranchLru::with_clock(clock.clone()));
-        let metrics = Arc::new(ProxyMetrics::new());
-
-        // Remember one entry at the SHORT (rtx) TTL and publish the gauge, as
-        // the request path does on every forward.
-        lru.remember(
-            "call-leaky-memo",
-            CancelEntry {
-                target: ProxyAddr::new("10.0.0.2", 5070),
-                branch: "z9hG4bK-x".into(),
-                stickiness: None,
-            },
-            RTX_ENTRY_TTL_MS,
-        );
-        metrics.set_pending_invite_lru_size(lru.size() as u64);
-        assert_eq!(metrics.pending_invite_lru_size(), 1);
-
-        let strategy: Arc<dyn RoutingStrategy> =
-            Arc::new(ForwardAllStrategy::new(ProxyAddr::new("10.0.0.2", 5070)));
-        let registry: Arc<dyn WorkerRegistry> =
-            Arc::new(StaticWorkerRegistry::from_entries(vec![]));
-        let core = ProxyCoreBuilder::new(ProxyAddr::new("127.0.0.1", 5060), strategy, registry)
-            .clock(clock)
-            .cancel_lru(lru.clone())
-            .metrics(metrics.clone())
-            .build(Box::new(PendingEndpoint));
-        let task = tokio::spawn(core.run());
-
-        // Advance past the 32 s TTL so a sweep tick lands after the entry expires;
-        // the map must drain and the gauge follow it down.
-        for _ in 0..50 {
-            tokio::time::advance(Duration::from_secs(1)).await;
-            tokio::task::yield_now().await;
-            if lru.size() == 0 {
-                break;
-            }
-        }
-
-        assert_eq!(lru.size(), 0, "sweeper must physically reclaim the expired entry");
-        assert_eq!(
-            metrics.pending_invite_lru_size(),
-            0,
-            "gauge must follow the reclaimed map down"
-        );
-
-        task.abort();
-    }
-
-    /// A `UdpEndpoint` that yields its queued packets once, then closes
-    /// (`recv` → `None`), so `run()` dequeues them and exits.
-    struct DrainOnceEndpoint(Mutex<Vec<UdpPacket>>);
-
-    #[async_trait]
-    impl UdpEndpoint for DrainOnceEndpoint {
-        async fn send_to(&self, _buf: &[u8], _dst: SocketAddr) -> Result<(), SendError> {
-            Ok(())
-        }
-        async fn recv(&self) -> Option<UdpPacket> {
-            let mut q = self.0.lock().unwrap();
-            if q.is_empty() {
-                None
-            } else {
-                Some(q.remove(0))
-            }
-        }
-        fn try_recv(&self) -> Option<UdpPacket> {
-            None
-        }
-        fn local_addr(&self) -> SocketAddr {
-            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 5060))
-        }
-        fn queue_depth(&self) -> usize {
-            0
-        }
-        fn queue_max(&self) -> usize {
-            0
-        }
-        fn counters(&self) -> UdpEndpointCounters {
-            UdpEndpointCounters::default()
-        }
-    }
-
-    /// The recv loop records every dequeued packet's age (`now_ms −
-    /// arrival_ms`) into the shared [`IntakeAgeRecorder`] — the max wins, and a
-    /// malformed (dropped-silently) datagram still counts: the signal measures
-    /// intake queueing, not parse outcomes. `Clock::test_at(0)` rides the
-    /// paused tokio timeline, so the advance below IS the packets' age.
-    #[tokio::test(start_paused = true)]
-    async fn run_records_packet_age_at_dequeue() {
-        let clock = Clock::test_at(0);
-        // Move the paused clock to now_ms = 700 in 100 ms chunks (no pending
-        // timers exist yet — nothing can fire mid-advance).
-        for _ in 0..7 {
-            tokio::time::advance(Duration::from_millis(100)).await;
-        }
-        // Two packets queued in the past: ages at dequeue 500 ms and 200 ms.
-        // Raw bytes are deliberately unparseable — no SIP flow is involved.
-        let ep = DrainOnceEndpoint(Mutex::new(vec![
-            UdpPacket {
-                raw: b"not-sip".to_vec(),
-                src: "127.0.0.1:9999".parse().unwrap(),
-                arrival_ms: 200,
-            },
-            UdpPacket {
-                raw: b"not-sip".to_vec(),
-                src: "127.0.0.1:9999".parse().unwrap(),
-                arrival_ms: 500,
-            },
-        ]));
-        let recorder = IntakeAgeRecorder::default();
-
-        let strategy: Arc<dyn RoutingStrategy> =
-            Arc::new(ForwardAllStrategy::new(ProxyAddr::new("10.0.0.2", 5070)));
-        let registry: Arc<dyn WorkerRegistry> =
-            Arc::new(StaticWorkerRegistry::from_entries(vec![]));
-        let core = ProxyCoreBuilder::new(ProxyAddr::new("127.0.0.1", 5060), strategy, registry)
-            .clock(clock)
-            .intake_age(recorder.clone())
-            .build(Box::new(ep));
-
-        // Drain both packets; the endpoint then closes and run() returns.
-        core.run().await;
-
-        assert_eq!(recorder.drain_max(), 500, "the window max is the OLDEST packet's dequeue age");
-        assert_eq!(recorder.drain_max(), 0, "drained — no new traffic reads 0");
-    }
-
-    /// The arrival stamp and the dequeue reading are ONE timeline. A `Clock`
-    /// anchored far from raw wall time — the wall-vs-monotonic divergence a
-    /// long-lived host accumulates — must not surface as intake age, or an
-    /// idle proxy reads critically overloaded and sheds every new call.
-    #[tokio::test(start_paused = true)]
-    async fn intake_age_is_immune_to_wall_versus_monotonic_divergence() {
-        use sip_net::types::BindUdpOpts;
-        use sip_net::{SignalingNetwork, SimulatedSignalingNetwork};
-
-        use crate::self_gate::AGE_CRITICAL_MS;
-
-        // 20× the age at which the ELU arm reads fully saturated.
-        let clock = Clock::test_at(sip_clock::raw_system_wall_ms() + 20 * AGE_CRITICAL_MS as i64);
-
-        // The arrival stamp comes from a REAL bind told that clock — the seam
-        // the runner wires; the bytes are deliberately unparseable (the age is
-        // recorded before the parse).
-        let net = SimulatedSignalingNetwork::new(1);
-        let uas: SocketAddr = "127.0.0.1:5061".parse().unwrap();
-        let uac = net
-            .bind_udp(
-                BindUdpOpts::new("127.0.0.1:5062".parse().unwrap(), 8).with_clock(clock.clone()),
-            )
-            .await
-            .unwrap();
-        let ingress =
-            net.bind_udp(BindUdpOpts::new(uas, 8).with_clock(clock.clone())).await.unwrap();
-        uac.send_to(b"not-sip", uas).await.unwrap();
-        let pkt = ingress.recv().await.expect("the fabric delivers one datagram");
-
-        let recorder = IntakeAgeRecorder::default();
-        let strategy: Arc<dyn RoutingStrategy> =
-            Arc::new(ForwardAllStrategy::new(ProxyAddr::new("10.0.0.2", 5070)));
-        let registry: Arc<dyn WorkerRegistry> =
-            Arc::new(StaticWorkerRegistry::from_entries(vec![]));
-        ProxyCoreBuilder::new(ProxyAddr::new("127.0.0.1", 5060), strategy, registry)
-            .clock(clock)
-            .intake_age(recorder.clone())
-            .build(Box::new(DrainOnceEndpoint(Mutex::new(vec![pkt]))))
-            .run()
-            .await;
-
-        let age = recorder.drain_max();
-        assert!(
-            age < AGE_CRITICAL_MS,
-            "an unqueued packet must age well under {AGE_CRITICAL_MS} ms whatever the wall/monotonic divergence, got {age} ms",
-        );
-    }
-
-    /// Per-peer metric classification: a destination that resolves to a known
-    /// worker is INTERNAL (pinned); an unknown address (a UAC/UAS) is EXTERNAL
-    /// (under the cap). Drives `sip_proxy_peer_failures_total{scope}`.
-    #[test]
-    fn classify_peer_internal_iff_known_worker() {
-        use crate::observability::peer_failures::PeerScope;
-        use crate::registry::WorkerEntry;
-
-        let worker = ProxyAddr::new("10.0.0.2", 5070);
-        let registry: Arc<dyn WorkerRegistry> =
-            Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
-                "w0",
-                worker.clone(),
-            )]));
-        let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(worker.clone()));
-        let core = ProxyCoreBuilder::new(ProxyAddr::new("127.0.0.1", 5060), strategy, registry)
-            .build(Box::new(PendingEndpoint));
-
-        assert_eq!(core.classify_peer(&worker), PeerScope::Internal, "a known worker is internal");
-        assert_eq!(
-            core.classify_peer(&ProxyAddr::new("203.0.113.9", 5060)),
-            PeerScope::External,
-            "an off-cluster address is external",
-        );
-    }
-}
+mod sweeper_tests;

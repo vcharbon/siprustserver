@@ -3,7 +3,7 @@
 //! the session description riding that PRACK still crosses.
 //!
 //! `crates/call/src/model/record.rs` states that contract on
-//! `reliable_provisionals`; `crates/call/tests/it/codec_roundtrip.rs` proves the
+//! `provisionals`; `crates/call/tests/it/codec_roundtrip.rs` proves the
 //! bytes survive `MsgpackCodec`. Neither proves a survivor node answering a
 //! real PRACK on the wire, which is what these cells do.
 //!
@@ -22,13 +22,16 @@
 //! The negative half is its sibling: a post-takeover PRACK naming a number this
 //! stack never showed must still draw 481 — hydrated books refuse as well as
 //! they admit.
+//!
+//! Every kill here is unannounced to the peers (ADR-0031 cases 3a and 4): no
+//! departure sweep runs, so the message each cell is about takes the call over.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering, Ordering::SeqCst};
 use std::sync::Arc;
 use std::time::Duration;
 
-use call::{CallBodyCodec, MsgpackCodec, ReliableProvisional, Repeat};
+use call::{CallBodyCodec, Ladder, MsgpackCodec, Provisional, Repeat};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
     ProxySut, ReplicatedB2buaSut, WorkerHealth,
@@ -37,7 +40,7 @@ use sip_message::generators::InDialogMethod;
 use sip_message::header::{RAck, RSeq};
 use sip_message::types::SipResponse;
 use sip_message::Method;
-use sip_net::PreIngressAction;
+use sip_net::{Arrival, PreIngressAction};
 
 /// Bob's offer, carried on the reliable 183 (delayed-offer INVITE).
 const OFFER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -58,17 +61,17 @@ fn rseq_of(resp: &SipResponse) -> u32 {
     resp.header::<RSeq>().expect("an RSeq").expect("readable RSeq").value()
 }
 
-/// The replicated `ReliableProvisional` entries the backup holds for `call_ref`.
+/// The replicated `Provisional` records the backup holds for `call_ref`.
 async fn replicated_provisionals(
     backup: &ReplicatedB2buaSut,
     primary: &str,
     call_ref: &str,
-) -> Vec<ReliableProvisional> {
+) -> Vec<Provisional> {
     let body = backup
         .get(PartitionRole::Backup, primary, call_ref)
         .await
         .expect("the backup holds a replica body for the early call");
-    MsgpackCodec::new().decode(&body).expect("replica body decodes").reliable_provisionals
+    MsgpackCodec::new().decode(&body).expect("replica body decodes").provisionals
 }
 
 /// Reboot the crashed primary EMPTY at a higher gen + new pod IP, re-learn its
@@ -154,19 +157,16 @@ async fn prack_after_takeover_translates_the_rack_and_relays_the_answer() {
         "the backup must hold the reliable provisional's mapping at the moment of \
          the kill; got {entries:?}",
     );
-    let entry = &entries[0];
-    assert_eq!(entry.a_tag, a_tag, "the replicated entry names the dialog the number was shown in");
-    assert_eq!(entry.a_rseq, a_rseq as i64, "the replicated entry carries the a-facing RSeq");
-    assert_eq!(entry.b_rseq, BOB_RSEQ as i64, "the replicated entry carries bob's own RSeq");
-    assert_eq!(
-        entry.a_cseq, a_cseq as i64,
-        "the replicated entry carries the a-facing INVITE CSeq the RAck names",
-    );
+    let shown = entries[0].shown.as_ref().expect("the replicated entry was shown to alice");
+    assert_eq!(shown.tag, a_tag, "the replicated entry names the dialog the number was shown in");
+    assert_eq!(shown.rseq.0, a_rseq, "the replicated entry carries the a-facing RSeq");
+    assert_eq!(entries[0].id.rseq.0, BOB_RSEQ, "the replicated entry carries bob's own RSeq");
+    assert_eq!(shown.invite_cseq.0, a_cseq, "the replicated entry carries the RAck's INVITE CSeq");
     // The write the backup holds is the provisional's own — its ladder armed
     // at the first rung — whatever rungs the primary has walked since: a rung
     // repeats retained bytes and changes no replicated fact (ADR-0014), so it
     // is not a write. A body carrying rung 2 here is a rung that wrote.
-    let emission = entry.emission.as_ref().expect("the replicated entry retains the provisional");
+    let Ladder::Repeating(emission) = &shown.ladder else { panic!("the entry retains it") };
     assert_eq!(emission.repeat().ladder(), "reliable-provisional", "paced by the §3 ladder");
     let armed_rung = match emission.repeat() {
         Repeat::Paced { rung, .. } => rung,
@@ -182,7 +182,6 @@ async fn prack_after_takeover_translates_the_rack_and_relays_the_answer() {
     fh.mark(&pri_ord, None, "crash", "primary down mid-early-dialog");
     primary.crash();
     proxy.set_health(&pri_ord, WorkerHealth::Dead);
-    survivor.simulate_peer_removed(&pri_ord);
     fh.advance(Duration::from_millis(300)).await;
     let hydrated_before = survivor.metrics().repl_takeover_hydrated_total();
 
@@ -316,7 +315,6 @@ async fn prack_naming_an_unshown_rseq_after_takeover_draws_481() {
 
     primary.crash();
     proxy.set_health(&pri_ord, WorkerHealth::Dead);
-    survivor.simulate_peer_removed(&pri_ord);
     fh.advance(Duration::from_millis(300)).await;
 
     // The §3 ladder repeats the still-un-PRACKed provisional at T1 (500 ms), so
@@ -459,7 +457,6 @@ async fn non_2xx_b_leg_final_after_a_takeover_reaches_the_caller_and_acks_the_ca
 
     primary.crash();
     proxy.set_health(&pri_ord, WorkerHealth::Dead);
-    survivor.simulate_peer_removed(&pri_ord);
     fh.advance(Duration::from_millis(300)).await;
 
     let rung = call.expect(183).await;
@@ -557,9 +554,8 @@ async fn the_callers_ack_for_a_post_takeover_reject_reaches_the_survivor_that_se
         .agent_with_pre_ingress(
             "alice",
             ALICE,
-            Arc::new(move |bytes: &[u8], _src, _depth| {
-                if bytes.starts_with(b"SIP/2.0 486") && counter.fetch_add(1, Ordering::SeqCst) == 0
-                {
+            Arc::new(move |a: &mut Arrival, _src, _depth| {
+                if a.raw().starts_with(b"SIP/2.0 486") && counter.fetch_add(1, SeqCst) == 0 {
                     return PreIngressAction::Drop;
                 }
                 PreIngressAction::Accept
@@ -605,7 +601,6 @@ async fn the_callers_ack_for_a_post_takeover_reject_reaches_the_survivor_that_se
 
     primary.crash();
     proxy.set_health(&pri_ord, WorkerHealth::Dead);
-    survivor.simulate_peer_removed(&pri_ord);
     fh.advance(Duration::from_millis(300)).await;
 
     let rung = call.expect(183).await;
@@ -750,8 +745,8 @@ async fn a_lost_takeover_ack_is_resent_when_the_callee_retransmits_its_final() {
         .agent_with_pre_ingress(
             "bob",
             BOB,
-            Arc::new(move |bytes: &[u8], _src, _depth| {
-                if bytes.starts_with(b"ACK ") && counter.fetch_add(1, Ordering::SeqCst) == 0 {
+            Arc::new(move |a: &mut Arrival, _src, _depth| {
+                if a.raw().starts_with(b"ACK ") && counter.fetch_add(1, SeqCst) == 0 {
                     return PreIngressAction::Drop;
                 }
                 PreIngressAction::Accept
@@ -796,7 +791,6 @@ async fn a_lost_takeover_ack_is_resent_when_the_callee_retransmits_its_final() {
 
     primary.crash();
     proxy.set_health(&pri_ord, WorkerHealth::Dead);
-    survivor.simulate_peer_removed(&pri_ord);
     fh.advance(Duration::from_millis(300)).await;
 
     let rung = call.expect(183).await;

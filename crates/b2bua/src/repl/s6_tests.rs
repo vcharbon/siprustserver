@@ -9,7 +9,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use repl_net::frame::Watermark;
-use repl_net::transport::{Fault, ReplicationNetwork, SimulatedReplicationNetwork};
+use repl_net::transport::ReplicationNetwork;
+use repl_net_testkit::{Fault, SimulatedReplicationNetwork};
 use sip_clock::Clock;
 use topology::{Peer, SimulatedMembership};
 
@@ -257,7 +258,7 @@ async fn hard_timer_stalled_bootstrap_completes_best_effort() {
     // bootstrap recv loop must trip the hard timer.
     let stall_listener = net.listen(b_addr).await.unwrap();
     tokio::spawn(async move {
-        while let Some(conn) = stall_listener.accept().await {
+        while let Ok(conn) = stall_listener.accept().await {
             tokio::spawn(async move {
                 // Drain inbound forever; never send anything back.
                 while conn.recv().await.is_some() {}

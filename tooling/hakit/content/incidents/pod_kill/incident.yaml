@@ -1,0 +1,19 @@
+schema: incident.v1
+name: pod_kill
+description: >-
+  Crash one pod (pick one) or every pod (pick all) of any selector: every
+  container process is killed with SIGKILL from its node and proven dead; the
+  kubelet restarts it in place. The probe waits until it is Ready again and
+  proves no overlap between the crashed incarnation and its successor.
+kind: fault
+target:
+  selector: app=call-limiter
+  pick: one
+duration_s: 0
+expected_s: 60
+timeouts:
+  inject_s: 30
+  heal_s: 10
+  probe_s: 180
+  probe_interval_s: 2
+requires: [kind, docker]

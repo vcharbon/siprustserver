@@ -14,7 +14,7 @@
 //! queue.
 
 use std::collections::VecDeque;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use tokio::sync::Notify;
 
@@ -49,6 +49,14 @@ impl PacketQueue {
         self.cap
     }
 
+    /// The queue state, recovered from a poisoned lock: every critical
+    /// section leaves `Inner` whole, and [`close`](Self::close) runs from a
+    /// `Drop`, where a panic aborts.
+    #[expect(clippy::disallowed_methods, reason = "the queue's poison-recovering lock helper")]
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Install the delivery tap. First installer wins (the recording decorator
     /// installs exactly one, right after bind).
     pub fn install_tap(&self, tap: RecvTap) {
@@ -72,7 +80,7 @@ impl PacketQueue {
     pub fn offer(&self, pkt: UdpPacket) -> bool {
         let tap = self.tap.get();
         let disp = {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = self.lock();
             if g.closed {
                 RecvDisposition::InboxClosed
             } else if g.buf.len() >= self.cap {
@@ -101,7 +109,7 @@ impl PacketQueue {
             // offered between the check and the await is not lost.
             let notified = self.notify.notified();
             {
-                let mut g = self.inner.lock().unwrap();
+                let mut g = self.lock();
                 if let Some(pkt) = g.buf.pop_front() {
                     return Some(pkt);
                 }
@@ -115,19 +123,40 @@ impl PacketQueue {
 
     /// Non-blocking dequeue (the TS `poll` → `UdpPacket | null`).
     pub fn poll(&self) -> Option<UdpPacket> {
-        self.inner.lock().unwrap().buf.pop_front()
+        self.lock().buf.pop_front()
+    }
+
+    /// The queued packets, oldest first, left queued.
+    pub fn peek_all(&self) -> Vec<UdpPacket> {
+        self.lock().buf.iter().cloned().collect()
     }
 
     /// Current queued count (the TS `sizeUnsafe`). Drives the audit's
     /// queue-leak check and the pre-ingress depth argument.
     pub fn depth(&self) -> usize {
-        self.inner.lock().unwrap().buf.len()
+        self.lock().buf.len()
+    }
+
+    /// A guard that closes the queue when dropped: held by a pump, it closes
+    /// the queue on any exit — return, abort or panic — so the consumer's
+    /// `take` never waits on a pump that is gone.
+    pub fn close_on_drop(self: &Arc<Self>) -> CloseOnDrop {
+        CloseOnDrop(self.clone())
     }
 
     /// Close the queue: no further offers succeed, pending/future `take`s
     /// return `None` once drained.
     pub fn close(&self) {
-        self.inner.lock().unwrap().closed = true;
+        self.lock().closed = true;
         self.notify.notify_waiters();
+    }
+}
+
+/// Closes its queue when dropped ([`PacketQueue::close_on_drop`]).
+pub struct CloseOnDrop(Arc<PacketQueue>);
+
+impl Drop for CloseOnDrop {
+    fn drop(&mut self) {
+        self.0.close();
     }
 }

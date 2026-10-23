@@ -1,42 +1,45 @@
 //! sip-net — the SIP signaling network layer.
 //!
-//! The DI seam is the [`SignalingNetwork`] trait ([`net`]). Implementations:
-//!   - [`RealSignalingNetwork`] — `tokio::net::UdpSocket`-backed ([`real`]).
-//!   - [`SimulatedSignalingNetwork`] — in-memory routing fabric ([`simulated`]).
-//!
-//! Recording + auditing is a **decorator** ([`contracts`]) that wraps either
-//! impl with the typed `layer-harness` `Recorder` channel and the RFC audit
-//! over the recording ([`rfc_audit`], whose rule bodies live once in
-//! `rfc-rules`), plus the caller-side precondition decorator
-//! [`ParanoidSignalingNetwork`]. See the `effect-layer-test` SKILL for the
-//! wrapper philosophy.
+//! The DI seam is the [`SignalingNetwork`] trait ([`net`]); its production
+//! implementation is [`RealSignalingNetwork`], `tokio::net::UdpSocket`-backed
+//! ([`real`]). The simulated fabric, the recording and audit decorators and the
+//! wire-trace projection implement the same seam in `sip-net-testkit`. A
+//! datagram's parse made on the receive path ([`Arrival`]) travels with it
+//! through the queue, so it is parsed once.
 
-pub mod contracts;
+// The panic set at deny outside test code (ADR-0051 §3).
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::string_slice,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
+
+pub mod arrival;
 pub mod fragmentation;
-pub mod loss;
 pub mod net;
+pub mod parse_guard;
+pub mod pre_ingress;
 pub mod queue;
 pub mod real;
-pub mod repeat;
-pub mod report;
-pub mod rfc_audit;
-pub mod simulated;
 pub mod socket_stats;
 pub mod types;
 
-pub use contracts::{
-    audit_visible_event, with_all_contracts, CrossMessageAuditRule, ParanoidSignalingNetwork,
-    PeerAuditRule, RecordingSignalingNetwork, ScopedAuditOptions, SendOutcome,
-    SignalingAuditViolation, SignalingNetworkEvent, WireStamp, WrappedNetwork, SIGNALING_TAG,
-};
-pub use loss::RandomLoss;
+pub use arrival::Arrival;
 pub use net::{SignalingNetwork, UdpEndpoint};
+pub use parse_guard::{parse_datagram, ParseOutcome, ParserPanicked};
 pub use real::RealSignalingNetwork;
-pub use report::{to_sip_entries, wire_positions_by_stamp, RecordedSipEntry, RecvNote};
-pub use rfc_audit::{
-    audit_wire_entries, bind_roles_of, evaluate_rfc_findings, rfc_cross_message_rules, RfcFinding,
-};
-pub use simulated::{SendFault, SimulatedSignalingNetwork};
+pub use sip_message::ip_literal::{ip_host, ip_socket_addr};
 pub use types::{
     all_ua_roles, BindError, BindErrorReason, BindSummary, BindUdpOpts, PreIngressAction,
     PreIngressHook, ReEmitKind, RecvDisposition, RecvTap, SendError, SendErrorKind, SendTap,

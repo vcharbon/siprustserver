@@ -13,7 +13,7 @@ fn cancel_crossing_plan(
     ring: Duration,
     cancel_after: Duration,
 ) -> CallPlan {
-    let ringing = |s: &StateInner| s.leg_at_least("alice", LegPhase::Early);
+    let ringing = |s: &StateInner| s.leg("alice").rang();
     CallPlan {
         actors: vec![
             ActorSpec {
@@ -48,7 +48,7 @@ fn cancel_crossing_plan(
                 // dialog or no-ops on the cancelled one. Alice keeps only
                 // [Invite, Cancel] so a 487 never trips her incidental-
                 // failure WrongStatus path (it stays a clean terminal that
-                // the EitherOf oracle maps).
+                // the race's accepted endings read).
                 goals: vec![Goal::new(
                     Barrier::pred("bob_resolved", |s| s.leg_at_least("bob", LegPhase::Confirmed)),
                     GoalStep::ByeIfConfirmed,
@@ -73,7 +73,7 @@ fn cancel_crossing_plan(
 /// C2/E5 branch — CANCEL WINS: alice CANCELs well before bob's answer timer
 /// fires (cancel_after < ring − 2·transit), so bob 487s the held INVITE. The
 /// call reaches a clean terminal (both legs terminated, alice ACKs the 487)
-/// and the EitherOf oracle maps it to the abandoned `Timeout`.
+/// and its accepted endings read it as `abandoned`.
 #[tokio::test(start_paused = true)]
 async fn cancel_answer_crossing_cancel_wins() {
     let h = Harness::new("actor-cancel-wins").describe(
@@ -88,8 +88,8 @@ async fn cancel_answer_crossing_cancel_wins() {
         cancel_crossing_plan(&alice, &bob, Duration::from_millis(20), Duration::from_millis(2));
     let verdict = run_call(call, Duration::from_secs(5)).await;
     assert!(verdict.is_ok(), "the CANCEL-wins call must reach a clean terminal, got {verdict:?}");
-    // The observed 487 → the abandoned branch: pinned in the oracle unit
-    // test `either_of_oracle_maps_each_branch`.
+    // The observed 487 → the `abandoned` branch: pinned by
+    // `either_branch_of_the_race_is_its_accepted_ending`.
     h.finish().await;
 }
 
@@ -116,6 +116,54 @@ async fn cancel_answer_crossing_answer_wins() {
     h.finish().await;
 }
 
+/// A CANCEL delivered to the callee in the same instant its answer timer fires
+/// (a 5 ms hop, the CANCEL sent one ring less the 180's round trip after the
+/// 180 lands, so one ring after the INVITE reached the callee): the callee
+/// reacts to the CANCEL first, 200s it and 487s the INVITE, and never sends a
+/// 2xx for the cancelled INVITE (RFC 3261 §9.2). Repeated, because task order
+/// within one instant must not decide it. This pins the in-process ordering
+/// only: over a real network a CANCEL not yet received when the timer fires
+/// makes a genuine crossing, which the caller's `answered_despite_cancel`
+/// branch handles.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_landing_with_the_answer_timer_is_processed_first() {
+    for i in 0..16 {
+        let h = Harness::with_transit_delay(format!("actor-cancel-with-timer-{i}"), 5);
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+        let ring = Duration::from_millis(20);
+        let obs = ObservedState::new();
+        let ctx = crate::realcall::CallCtx::new();
+        let call = cancel_crossing_plan(&alice, &bob, ring, ring - Duration::from_millis(10));
+        let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+        assert!(verdict.is_ok(), "run {i}: {verdict:?}");
+        assert!(
+            obs.with_snapshot(|s| s.leg_ref("alice").is_some_and(|l| l.saw_final(487))),
+            "run {i}: the CANCEL must win over the answer timer"
+        );
+        h.finish().await;
+    }
+}
+
+/// The same race on a multi-threaded runtime and the real clock, where the
+/// schedule varies from run to run: whichever side wins, the call settles,
+/// and the callee never answers 2xx after a CANCEL it received (the RFC audit
+/// at `finish` gates on it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "slow lane: real clock >= 1 s"]
+async fn a_cancel_racing_the_answer_timer_across_threads_stays_rfc_clean() {
+    for i in 0..6 {
+        let h = Harness::with_transit_delay(format!("actor-cancel-timer-mt-{i}"), 2);
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+        let ring = Duration::from_millis(10);
+        let call = cancel_crossing_plan(&alice, &bob, ring, ring - Duration::from_millis(10));
+        let verdict = run_call(call, Duration::from_secs(5)).await;
+        assert!(verdict.is_ok(), "run {i}: {verdict:?}");
+        h.finish().await;
+    }
+}
+
 /// No-answer machinery: a `RingThenSilent` callee emits its 180 then holds the
 /// INVITE server txn with NO answer ever scheduled — the peer's CANCEL (in
 /// production, the SUT's no-answer timer firing) releases the held txn as a
@@ -132,7 +180,7 @@ async fn ring_then_silent_487s_on_cancel_and_settles() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
 
-    let ringing = |s: &StateInner| s.leg_at_least("alice", LegPhase::Early);
+    let ringing = |s: &StateInner| s.leg("alice").rang();
     let call = CallPlan {
         actors: vec![
             ActorSpec {
@@ -188,38 +236,87 @@ async fn ring_then_silent_487s_on_cancel_and_settles() {
     h.finish().await;
 }
 
-/// The `into_result` branch oracle maps each observed race outcome to its
-/// bounded downstream class: a caller that saw the 487 → the abandoned
-/// `Timeout` (the `timeout` load class); a caller that confirmed (no non-2xx
-/// final) → `Ok`.
-#[tokio::test]
-async fn either_of_oracle_maps_each_branch() {
-    use crate::actor::ExpectBranch;
-    let branches: &[ExpectBranch] =
-        &[ExpectBranch::Answered, ExpectBranch::Cancelled { code: 487 }];
-
-    // Cancel-wins: alice saw a 487 final.
+/// The caller's leg after a crossing attempt, from its response log in
+/// arrival order (`(status, CSeq method)`) and its establishing final, if any.
+fn caller_saw(responses: &[(u16, &str)], final_status: Option<u16>) -> ObservedState {
     let obs = ObservedState::new();
     let now = tokio::time::Instant::now();
     obs.record(Observation::LegEarly { leg: "alice" }, now);
-    obs.record(
-        Observation::LegFinal { leg: "alice", status: 487, reason: "Request Terminated".into() },
-        now,
-    );
-    obs.record(Observation::LegTerminated { leg: "alice" }, now);
-    match into_result(Expect::EitherOf(branches), CallVerdict::Ok, &obs, "alice") {
-        Err(StepError::Timeout { who }) => {
-            assert_eq!(who, "alice-abandoned-after-ringing")
-        }
-        other => panic!("cancel-wins must map to the abandoned Timeout, got {other:?}"),
+    for &(status, method) in responses {
+        let fact = ResponseFact {
+            status,
+            reason: String::new(),
+            cseq_method: method.into(),
+            body_len: 0,
+            body_is_sdp: false,
+            early_tag: None,
+            typed: None,
+        };
+        obs.record(Observation::LegResponse { leg: "alice", fact }, now);
     }
-
-    // Answer-wins: alice confirmed, no non-2xx final.
-    let obs = ObservedState::new();
-    obs.record(Observation::LegConfirmed { leg: "alice" }, now);
+    if let Some(status) = final_status {
+        obs.record(Observation::LegFinal { leg: "alice", status, reason: String::new() }, now);
+    }
     obs.record(Observation::LegTerminated { leg: "alice" }, now);
-    assert!(
-        into_result(Expect::EitherOf(branches), CallVerdict::Ok, &obs, "alice").is_ok(),
-        "answer-wins (no 487) must map to Ok",
-    );
+    obs
+}
+
+/// The race's accepted endings read the observed outcome: a caller that saw
+/// the 487 ended `abandoned`; a caller whose INVITE drew its 2xx before her
+/// CANCEL drew its 200 (a true crossing) ended `answered_despite_cancel`.
+#[tokio::test]
+async fn either_branch_of_the_race_is_its_accepted_ending() {
+    let expect = Expect::of(&[Branch::ANSWERED_DESPITE_CANCEL, Branch::ABANDONED]);
+    let won = caller_saw(&[(180, "INVITE"), (200, "CANCEL"), (487, "INVITE")], Some(487));
+    let v = verdict(expect, CallVerdict::Ok, &won, "alice");
+    assert_eq!(v.branch(), Some("abandoned"), "cancel-wins, got {v:?}");
+    let crossed = caller_saw(&[(180, "INVITE"), (200, "INVITE"), (200, "CANCEL")], None);
+    let v = verdict(expect, CallVerdict::Ok, &crossed, "alice");
+    assert_eq!(v.branch(), Some("answered_despite_cancel"), "answer-wins, got {v:?}");
+}
+
+/// A true crossing whose CANCEL was lost and retransmitted after the server
+/// had already answered the INVITE and deleted its transaction: the retransmit
+/// draws a 481 (RFC 3261 §9.2), and the call is still the crossing.
+#[tokio::test]
+async fn a_crossing_whose_cancel_draws_481_is_answered_despite_cancel() {
+    let expect = Expect::of(&[Branch::ANSWERED_DESPITE_CANCEL, Branch::ABANDONED]);
+    let crossed = caller_saw(&[(180, "INVITE"), (200, "INVITE"), (481, "CANCEL")], None);
+    crossed.record(Observation::CancelSent { leg: "alice" }, tokio::time::Instant::now());
+    let v = verdict(expect, CallVerdict::Ok, &crossed, "alice");
+    assert_eq!(v.branch(), Some("answered_despite_cancel"), "got {v:?}");
+}
+
+/// The 2xx reached the caller before her CANCEL left: she sent none, was
+/// answered, and hung up. That is the `answered_before_cancel` ending; the
+/// same log with a CANCEL sent and never answered is no accepted ending.
+#[tokio::test]
+async fn an_answer_before_the_cancel_left_is_answered_before_cancel() {
+    let expect = Expect::of(&[
+        Branch::ANSWERED_DESPITE_CANCEL,
+        Branch::ANSWERED_BEFORE_CANCEL,
+        Branch::ABANDONED,
+    ]);
+    let answered = caller_saw(&[(180, "INVITE"), (200, "INVITE")], None);
+    let v = verdict(expect, CallVerdict::Ok, &answered, "alice");
+    assert_eq!(v.branch(), Some("answered_before_cancel"), "got {v:?}");
+    let sent = caller_saw(&[(180, "INVITE"), (200, "INVITE")], None);
+    sent.record(Observation::CancelSent { leg: "alice" }, tokio::time::Instant::now());
+    let v = verdict(expect, CallVerdict::Ok, &sent, "alice");
+    assert!(!v.is_success(), "a CANCEL that drew no final, got {v:?}");
+}
+
+/// A server that ignores the CANCEL is no crossing: the caller's CANCEL drew
+/// no final at all, or drew its 200 and the INVITE still drew a 2xx after it
+/// (RFC 3261 §9.2). Neither is an accepted ending.
+#[tokio::test]
+async fn a_server_ignoring_the_cancel_is_no_accepted_ending() {
+    let expect = Expect::of(&[Branch::ANSWERED_DESPITE_CANCEL, Branch::ABANDONED]);
+    let dropped = caller_saw(&[(180, "INVITE"), (200, "INVITE")], None);
+    dropped.record(Observation::CancelSent { leg: "alice" }, tokio::time::Instant::now());
+    let v = verdict(expect, CallVerdict::Ok, &dropped, "alice");
+    assert!(!v.is_success(), "a CANCEL that drew no final, got {v:?}");
+    let ignored = caller_saw(&[(180, "INVITE"), (200, "CANCEL"), (200, "INVITE")], None);
+    let v = verdict(expect, CallVerdict::Ok, &ignored, "alice");
+    assert!(!v.is_success(), "a 2xx after the CANCEL's 200, got {v:?}");
 }

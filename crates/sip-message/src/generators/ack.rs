@@ -1,8 +1,10 @@
 //! ACK generation: for a 2xx (its own transaction, routed like an in-dialog
 //! request — RFC 3261 §13.2.2.4) and for a non-2xx final (inside the INVITE
-//! client transaction — §17.1.1.3).
+//! client transaction — §17.1.1.3), from the INVITE or, for an in-dialog
+//! INVITE no longer at hand, from the dialog.
 
 use super::emit;
+use super::error::GenerateError;
 use super::in_dialog::{route_for_in_dialog, with_dialog_identity, with_routes};
 use super::spec::{InviteClientTransactionHandle, StackDialog};
 use crate::draft::RequestDraft;
@@ -31,21 +33,21 @@ pub struct GenerateAckFor2xxOpts {
 
 /// Build an ACK for a 2xx response. The CSeq number comes from the INVITE
 /// (RFC 3261 §13.2.2.4), not from `dialog.local_cseq`; the dialog route set
-/// is honoured like any in-dialog request. Panics when neither `invite_txn`
-/// nor `opts.cseq` is provided.
+/// is honoured like any in-dialog request. Neither `invite_txn` nor
+/// `opts.cseq` given is a [`GenerateError::Missing`].
 pub fn generate_ack_for_2xx(
     invite_txn: Option<&InviteClientTransactionHandle>,
     dialog: &StackDialog,
     opts: &GenerateAckFor2xxOpts,
-) -> SipRequest {
+) -> Result<SipRequest, GenerateError> {
     let invite_cseq = opts
         .cseq
         .or_else(|| invite_txn.map(|t| t.original_invite.cseq().seq()))
-        .expect("generate_ack_for_2xx: either invite_txn or opts.cseq must be provided");
+        .ok_or(GenerateError::Missing("the INVITE transaction or a CSeq"))?;
     let remote_target =
         opts.request_uri.clone().unwrap_or_else(|| emit::uri(&dialog.remote_target));
     let (uri, routes) = route_for_in_dialog(remote_target, &dialog.route_set);
-    let hop = opts.via.clone().expect("via required");
+    let hop = opts.via.clone().ok_or(GenerateError::Missing("via"))?;
 
     let draft = RequestDraft::new(Method::Ack, uri).push(hop).push(MaxForwards::DEFAULT);
     let draft = with_dialog_identity(draft, dialog).push(CSeq::new(invite_cseq, Method::Ack));
@@ -67,11 +69,11 @@ pub fn generate_ack_for_non_2xx(
     original_invite: &SipRequest,
     final_response: &SipResponse,
     extra_headers: &[SipHeader],
-) -> SipRequest {
+) -> Result<SipRequest, GenerateError> {
     let via = original_invite
         .raw_text(HeaderName::Via)
         .next()
-        .expect("generate_ack_for_non_2xx: INVITE missing Via");
+        .ok_or(GenerateError::Missing("the INVITE's Via"))?;
     let echoed = |name: HeaderName| final_response.raw_text(name).next().unwrap_or(SipStr::EMPTY);
 
     let mut draft = RequestDraft::new(Method::Ack, original_invite.request_uri().clone())
@@ -88,7 +90,29 @@ pub fn generate_ack_for_non_2xx(
     emit::request(emit::extra_headers(draft, extra_headers).push(ContentLength::new(0)))
 }
 
-/// Build the bare ACK for a 2xx from the INVITE transaction alone — no dialog
+/// Build the ACK for a non-2xx final to an INVITE this side sent in `dialog`
+/// when the INVITE itself is not at hand (RFC 3261 §17.1.1.3). The INVITE went
+/// where the dialog's remote target and route set sent it (§12.2.1.1), so its
+/// Request-URI and Route are read from there; the response's topmost Via is the
+/// INVITE's own, branch included; From, To and Call-ID echo the response; the
+/// CSeq is the response's number with method ACK. No body.
+pub fn generate_ack_for_non_2xx_in_dialog(
+    dialog: &StackDialog,
+    final_response: &SipResponse,
+) -> Result<SipRequest, GenerateError> {
+    let (uri, routes) = route_for_in_dialog(emit::uri(&dialog.remote_target), &dialog.route_set);
+    let echoed = |name: HeaderName| final_response.raw_text(name).next().unwrap_or(SipStr::EMPTY);
+    let draft = RequestDraft::new(Method::Ack, uri)
+        .push(final_response.top_via().clone())
+        .push(MaxForwards::DEFAULT)
+        .push_raw(HeaderName::From, echoed(HeaderName::From))
+        .push_raw(HeaderName::To, echoed(HeaderName::To))
+        .push_raw(HeaderName::CallId, echoed(HeaderName::CallId))
+        .push(CSeq::new(final_response.cseq().seq(), Method::Ack));
+    emit::request(with_routes(draft, &routes).push(ContentLength::new(0)))
+}
+
+/// Build the ACK for a 2xx from the INVITE transaction alone — no dialog
 /// record (RFC 3261 §13.2.2.4 for a UAC core that no longer holds one). Its
 /// own transaction: the INVITE's top Via on the fresh `branch`. From and
 /// Call-ID echo the INVITE, To echoes the 2xx (its tag), CSeq is the INVITE's
@@ -98,13 +122,15 @@ pub fn generate_ack_for_non_2xx(
 /// refreshes the target with a Contact and the set is loose (or empty), in
 /// which case the Contact is the Request-URI; a dialog-creating 2xx supplies
 /// the route set (its Record-Route reversed, §12.1.2) and the target (its
-/// Contact). No body: the round this ACK closes has no session left to
-/// describe (RFC 3264 §4 answers ride only where a session survives).
+/// Contact). `answer`, the session description answering an offer the 2xx
+/// carried (RFC 3264 §4), is the body as `application/sdp`; without one the
+/// ACK carries none.
 pub fn generate_ack_for_2xx_from_invite(
     original_invite: &SipRequest,
     final_response: &SipResponse,
     branch: &str,
-) -> SipRequest {
+    answer: Option<Vec<u8>>,
+) -> Result<SipRequest, GenerateError> {
     let contact = final_response.contacts().as_slice().first().map(|c| c.uri().clone());
     let invite_routes: Vec<String> =
         original_invite.raw_text(HeaderName::Route).map(|r| r.to_string()).collect();
@@ -143,5 +169,5 @@ pub fn generate_ack_for_2xx_from_invite(
         .push(CSeq::new(original_invite.cseq().seq(), Method::Ack));
     draft = with_routes(draft, &routes);
 
-    emit::request(draft.push(ContentLength::new(0)))
+    emit::request(emit::framed(draft, answer.unwrap_or_default(), None))
 }

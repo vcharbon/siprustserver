@@ -17,7 +17,7 @@ parsers never reject a grammar-valid input and never silently misparse one.
 
 Each rejection is classified as in the source driver:
 - **accepted** — grammar-valid input the parser accepted.
-- **policy** — rejection matching a documented ADR-0007 semantic rule
+- **policy** — rejection matching a documented semantic rule (`POLICY_PATTERNS`)
   (port out of range, leading-zero octet, missing Via magic cookie, …).
   Expected; the grammar is intentionally looser than the parser here.
 - **buggy** — a rejection matching no known policy. A non-zero count is a

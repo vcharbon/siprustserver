@@ -12,16 +12,13 @@ A failover/kill failure is **not** automatically a SUT bug.
 
 - **Protected:** ringing and established calls. A **confirmed call dropping**
   is always a genuine bug.
-- **Accepted collateral:** a call whose dialog state changed **within the
-  acceptance window (default 200 ms, `LOADGEN_CHAOS_PHASE_TOL_MS`) of a kill**
-  may take a small impact — the forked-b-leg confirm race (a call confirming
-  AT the kill).
-- Any failure whose state change was **outside** the window is genuine.
+- **Accepted collateral:** a call whose dialog state changed **at a kill** may
+  take a small impact — the forked-b-leg confirm race (a call confirming AT
+  the kill).
 
-The loadgen is chaos-aware and auto-buckets accepted collateral (`POST /chaos`
-+ per-call phase markers) as `chaos="near"` vs genuine `chaos="clear"`.
-**Triage `chaos="clear"`.** See
-[crates/loadgen/README.md](../../crates/loadgen/README.md).
+The HA tooling attributes every impact to the incident window it fell in and
+judges it against that window's budget (`tooling/hakit`, ADR-0049 §3.5): what
+a kill may cost is the budget, an impact outside every window is a finding.
 
 ## Known non-SUT artifact: host clock skew (endurance on a VM host)
 
@@ -48,7 +45,7 @@ Two halves, do not conflate them:
 - **The infra advice still stands** — the SUT bounds the residual, it does not
   license drift. Keep the host awake for whole endurance runs; use slewing
   chrony, not stepping timesyncd. `deploy/k8s/lib/host-checks.sh::check_clock`
-  warns; `run.sh up` resyncs once before pods anchor.
+  warns; `deploy/helm/kind-lab.sh up` resyncs once before pods anchor.
 
 The paused-clock harness closes the skew fidelity gap with
 `with_worker_clock_offset` (deterministic inter-node skew;
@@ -90,8 +87,9 @@ endurance twin) but still cannot reproduce a host clock stepping *mid-run*.
   model, accepted trade-offs, consequences for tests, skew amendment
 - [ADR-0022](../adr/0022-initial-invite-final-response-guarantee.md) — the
   final-response guarantee and its HA split (X5)
-- [crates/loadgen/README.md](../../crates/loadgen/README.md) — chaos
-  correlation, report buckets
+- [crates/loadgen/README.md](../../crates/loadgen/README.md) — report buckets
+- [ADR-0049](../adr/0049-the-ha-tooling-is-a-pluggable-base.md) §3.5 — incident
+  windows and the budgets an impact is judged against
 - `deploy/k8s/lib/host-checks.sh` — `check_clock` and other pre-run checks
 - `crates/failover-harness/tests/it/failover.rs` — e.g.
   `reboot_reclaim_exactly_one_owner…`, `skew_ahead_backup_no_immediate_options_at_takeover`

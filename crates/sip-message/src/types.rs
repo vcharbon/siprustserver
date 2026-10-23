@@ -100,8 +100,9 @@ impl ContactSet {
 
 /// Optional structured headers, parsed **eagerly + non-fatally** (ADR-0003):
 /// each is a `Result` so a malformed optional header does NOT reject the
-/// message, but the error is captured and surfaced on access — and by
-/// [`SipMessage::validate_strict`].
+/// message, but the error is captured and surfaced on access. A header no
+/// element acts on, such as the RFC 6442 location family, is no field here: a
+/// reader asks for it through the typed read surface (`msg.header::<H>()`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionalHeaders {
     pub p_asserted_identity: Result<Vec<header::NameAddr>, crate::error::SipParseError>,
@@ -109,9 +110,6 @@ pub struct OptionalHeaders {
     pub diversion: Result<Vec<header::NameAddr>, crate::error::SipParseError>,
     pub history_info: Result<Vec<header::NameAddr>, crate::error::SipParseError>,
     pub remote_party_id: Result<Vec<header::NameAddr>, crate::error::SipParseError>,
-    pub geolocation: Result<Vec<header::NameAddr>, crate::error::SipParseError>,
-    pub geolocation_error: Result<Vec<header::NameAddr>, crate::error::SipParseError>,
-    pub geolocation_routing: Result<Option<bool>, crate::error::SipParseError>,
     pub rack: Result<Option<header::RAck>, crate::error::SipParseError>,
     pub refer_to: Result<Option<header::ReferTo>, crate::error::SipParseError>,
 }
@@ -254,14 +252,6 @@ impl SipMessage {
     pub fn optional(&self) -> &OptionalHeaders {
         &self.core().optional
     }
-
-    /// Strict header-content validation. `parse()` is tolerant (a malformed
-    /// optional header does not reject the message); this opt-in pass
-    /// re-validates Date/From/To/Contact grammar and every optional structured
-    /// header, returning the first violation.
-    pub fn validate_strict(&self) -> Result<(), crate::error::SipParseError> {
-        crate::parser::custom::optional_headers::run_all_strict(self.headers())
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -275,30 +265,32 @@ pub struct NotInDialog;
 /// A request the router has confirmed in-dialog: both From-tag and To-tag are
 /// present. `from_tag()` / `to_tag()` are infallible `&str`.
 #[derive(Debug, Clone, Copy)]
-pub struct InDialogRequest<'a>(&'a SipRequest);
+pub struct InDialogRequest<'a> {
+    request: &'a SipRequest,
+    from_tag: &'a str,
+    to_tag: &'a str,
+}
 
 impl<'a> InDialogRequest<'a> {
     /// The single validation choke point — the only constructor.
     pub fn new(r: &'a SipRequest) -> Result<Self, NotInDialog> {
-        if r.from().tag().is_some() && r.to().tag().is_some() {
-            Ok(Self(r))
-        } else {
-            Err(NotInDialog)
+        match (r.from().tag(), r.to().tag()) {
+            (Some(from_tag), Some(to_tag)) => Ok(Self { request: r, from_tag, to_tag }),
+            _ => Err(NotInDialog),
         }
     }
-    /// Sound by construction — `new` checked presence.
     pub fn from_tag(&self) -> &str {
-        self.0.from().tag().expect("InDialogRequest invariant: From-tag present")
+        self.from_tag
     }
     pub fn to_tag(&self) -> &str {
-        self.0.to().tag().expect("InDialogRequest invariant: To-tag present")
+        self.to_tag
     }
 }
 
 impl<'a> Deref for InDialogRequest<'a> {
     type Target = SipRequest;
     fn deref(&self) -> &SipRequest {
-        self.0
+        self.request
     }
 }
 
@@ -328,24 +320,24 @@ impl<'a> Deref for InviteRequest<'a> {
 /// A response with a guaranteed To-tag (every non-`100` response). `to_tag()`
 /// is infallible.
 #[derive(Debug, Clone, Copy)]
-pub struct SipResponseTagged<'a>(&'a SipResponse);
+pub struct SipResponseTagged<'a> {
+    response: &'a SipResponse,
+    to_tag: &'a str,
+}
 
 impl<'a> SipResponseTagged<'a> {
     pub fn new(r: &'a SipResponse) -> Result<Self, NotInDialog> {
-        if r.to().tag().is_some() {
-            Ok(Self(r))
-        } else {
-            Err(NotInDialog)
-        }
+        let to_tag = r.to().tag().ok_or(NotInDialog)?;
+        Ok(Self { response: r, to_tag })
     }
     pub fn to_tag(&self) -> &str {
-        self.0.to().tag().expect("SipResponseTagged invariant: To-tag present")
+        self.to_tag
     }
 }
 
 impl<'a> Deref for SipResponseTagged<'a> {
     type Target = SipResponse;
     fn deref(&self) -> &SipResponse {
-        self.0
+        self.response
     }
 }

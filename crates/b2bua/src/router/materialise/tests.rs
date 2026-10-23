@@ -3,7 +3,7 @@
 //! simulated fabric) so the post-materialise list runs for real. Each test
 //! holds the per-call lock across the call, as every caller does.
 
-use call::{Call, CallBodyCodec, CallModelState, MsgpackCodec, TimerEntry, TimerType};
+use call::{Call, CallBodyCodec, CallModelState, MsgpackCodec, TimerEntry, TimerKey, TimerType};
 use sip_clock::Clock;
 
 use super::{materialise, Materialised, Origin, Reason};
@@ -20,25 +20,29 @@ const BAK: PartitionRole = PartitionRole::Backup;
 /// keepalive so the timer re-arm does real work without firing.
 fn call_in(pri: &str, bak: &str, cid: &str, state: CallModelState, clock: &Clock) -> Call {
     let config = B2buaConfig { self_ordinal: pri.into(), ..Default::default() };
-    let mut call =
-        build_initial_call(&invite(pri, bak, cid), src(), &config, &sip_txn::IdGen::seeded(1), 0);
+    let mut call = build_initial_call(
+        &invite(pri, bak, cid),
+        src(),
+        &config,
+        &mut sip_ids::TurnIds::fixed(1),
+        0,
+    );
     call.state = state;
     if state != CallModelState::Active {
         // A synthetic terminal states its cause as every live path does.
         call = call::helpers::record_termination(call, 0, call::TerminationCause::Supervisor, None);
     }
     call.timers.push(TimerEntry {
-        id: format!("keepalive-{cid}"),
-        timer_type: TimerType::Keepalive,
+        key: TimerKey::call(TimerType::Keepalive),
+        generation: 1,
         fire_at: clock.now_ms() + 300_000,
-        leg_id: None,
     });
     call
 }
 
 /// Seed `call` into `(role, primary)` of the replicating store.
 async fn put(store: &ReplicatingCallStore, role: PartitionRole, primary: &str, call: &Call) {
-    let body = MsgpackCodec::new().encode(call);
+    let body = MsgpackCodec::new().encode(call).unwrap();
     let gen = call.topology.as_ref().map(|t| t.gen).unwrap_or(1);
     store
         .put_call(role, primary, &call.call_ref, body, &[], 60_000, gen, 0, &PutOpts::default())
@@ -49,7 +53,7 @@ async fn put(store: &ReplicatingCallStore, role: PartitionRole, primary: &str, c
 /// The `Served` call of a disposition, or the disposition it was instead.
 fn served(d: Materialised) -> Call {
     match d {
-        Materialised::Served(c) => c,
+        Materialised::Served { call, .. } => call,
         other => panic!("expected Served, got {other:?}"),
     }
 }
@@ -64,7 +68,7 @@ fn resident(d: Materialised) -> Call {
 
 /// The value `e`'s `totals` field carries for `counter` (`0` when absent): the
 /// field is the `name=n` run a `Tally` renders.
-fn tallied(e: &observe::CapturedEvent, counter: &str) -> u64 {
+fn tallied(e: &observe_testkit::CapturedEvent, counter: &str) -> u64 {
     e.fields
         .iter()
         .find(|(n, _)| n == "totals")
@@ -76,7 +80,10 @@ fn tallied(e: &observe::CapturedEvent, counter: &str) -> u64 {
 }
 
 /// The rising edge of the one takeover episode the log carries, keyed by `peer`.
-fn takeover_rising(log: &observe::TestLogHandle, peer: &str) -> observe::CapturedEvent {
+fn takeover_rising(
+    log: &observe_testkit::TestLogHandle,
+    peer: &str,
+) -> observe_testkit::CapturedEvent {
     let events = log.matching("acting-backup takeover");
     let rising: Vec<_> = events
         .iter()
@@ -101,7 +108,7 @@ fn takeover_rising(log: &observe::TestLogHandle, peer: &str) -> observe::Capture
 /// nothing.
 #[tokio::test(start_paused = true)]
 async fn takeover_serves_a_backup_replica_once_then_finds_it_resident() {
-    let (_capture, log) = observe::test_buffer();
+    let (_capture, log) = observe_testkit::test_buffer();
     let n = node("w1").await;
     let ctx = n.core.router_ctx();
     let call = call_in("w0", "w1", "cid-served", CallModelState::Active, &n.clock);
@@ -131,7 +138,7 @@ async fn takeover_serves_a_backup_replica_once_then_finds_it_resident() {
 /// one still owes the teardown's end and is served (D1).
 #[tokio::test(start_paused = true)]
 async fn takeover_refuses_a_terminated_replica_and_serves_a_terminating_one() {
-    let (_capture, log) = observe::test_buffer();
+    let (_capture, log) = observe_testkit::test_buffer();
     let n = node("w1").await;
     let ctx = n.core.router_ctx();
     let ended = call_in("w0", "w1", "cid-ended", CallModelState::Terminated, &n.clock);
@@ -215,7 +222,7 @@ async fn takeover_misses_are_typed() {
 /// straggler line written — with no takeover mark, and found resident next.
 #[tokio::test(start_paused = true)]
 async fn reclaim_serves_an_own_replica_once_then_finds_it_resident() {
-    let (_capture, log) = observe::test_buffer();
+    let (_capture, log) = observe_testkit::test_buffer();
     let n = node("w1").await;
     let ctx = n.core.router_ctx();
     let call = call_in("w1", "w0", "cid-reclaim", CallModelState::Active, &n.clock);
@@ -273,6 +280,41 @@ async fn reclaim_discharges_a_terminal_body_instead_of_serving_it() {
     sip_clock::testkit::settle().await;
     assert!(ctx.state.peek(&r_dying).is_none(), "the forced-terminal body is not live");
     assert_eq!(n.cdr.snapshot().len(), 2, "a Terminating deferral is completed and billed");
+    assert_eq!(ctx.state.active_count(), 0);
+}
+
+/// A body whose record does not rebuild its caller's INVITE is unrecoverable
+/// (ADR-0052 §11), as a takeover copy and as a reclaim: discharged — one CDR,
+/// counted, nothing re-armed — and never served.
+#[tokio::test(start_paused = true)]
+async fn a_body_whose_caller_invite_does_not_rebuild_is_discharged_not_served() {
+    let n = node("w1").await;
+    let ctx = n.core.router_ctx();
+    let unrebuildable = |mut call: Call| {
+        call.a_leg_invite.headers.clear();
+        call
+    };
+    let theirs = unrebuildable(call_in("w0", "w1", "cid-taken", CallModelState::Active, &n.clock));
+    let ours =
+        unrebuildable(call_in("w1", "w0", "cid-reclaimed", CallModelState::Active, &n.clock));
+    put(&n.store, BAK, "w0", &theirs).await;
+    put(&n.store, PRI, "w1", &ours).await;
+
+    for (call, origin) in [(&theirs, Origin::Takeover), (&ours, Origin::Reclaim(None))] {
+        let _guard = ctx.state.lock(&call.call_ref).await;
+        let disposition = materialise(ctx, &call.call_ref, origin).await;
+        assert!(
+            matches!(disposition, Materialised::Refused(Reason::Unrecoverable)),
+            "{origin:?}: {disposition:?}"
+        );
+        sip_clock::testkit::settle().await;
+        assert!(ctx.state.peek(&call.call_ref).is_none(), "{origin:?}: the body is not live");
+    }
+    assert_eq!(n.cdr.snapshot().len(), 2, "each discharged call writes its CDR");
+    assert_eq!(n.metrics.unrecoverable_calls_total(), 2);
+    assert_eq!(n.metrics.repl_takeover_hydrated_total(), 0, "no copy is served");
+    assert_eq!(n.metrics.repl_reclaimed_total(), 0, "no call is re-served");
+    assert_eq!(n.metrics.timer_queue_len(), 0, "nothing is re-armed");
     assert_eq!(ctx.state.active_count(), 0);
 }
 

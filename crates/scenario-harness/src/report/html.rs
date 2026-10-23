@@ -6,10 +6,10 @@
 //! harness uses for its three-plane view.
 //! This file is purely the recording→`SeqDoc` adaptor for HTML output.
 
-use http_net::RecordedHttpEntry;
+use http_net_testkit::RecordedHttpEntry;
 use layer_harness::RecordedScenario;
 use seq_report::Anomaly;
-use sip_net::RecordedSipEntry;
+use sip_net_testkit::RecordedSipEntry;
 
 use super::project::sip_doc;
 

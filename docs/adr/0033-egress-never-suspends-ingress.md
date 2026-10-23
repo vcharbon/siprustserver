@@ -77,8 +77,8 @@ the one await with no timeout, no queue and no drop policy.
    from the reactor's readiness cache and reads "not writable" on a fresh
    socket until its first poll.
 2. **`SO_SNDBUF` is a stated bind option** (`BindUdpOpts::send_buffer_bytes`,
-   runner knobs `PROXY_UDP_SNDBUF` and `B2BUA_UDP_SNDBUF`). The manifests
-   request 4 MiB. The kernel clamps at `net.core.wmem_max`, which is a host
+   runner knobs `PROXY_UDP_SNDBUF` and `B2BUA_UDP_SNDBUF`). The SUT chart's
+   kind values request 4 MiB. The kernel clamps at `net.core.wmem_max`, which is a host
    sysctl (read-only in any other network namespace), so the host preflight
    requires it.
 3. **The neighbour unresolved queue is bounded** to 16 KiB per neighbour in
@@ -89,9 +89,25 @@ the one await with no timeout, no queue and no drop policy.
 4. **A recv shard states its liveness.** Each proxy shard stamps the instant
    it dequeued a packet and clears the stamp when it returns to waiting
    (`sip_proxy::liveness::ShardPulse`). A shard still on one packet past
-   `PROXY_SHARD_STALL_MS` (2 000) flips `/readyz` to NotReady and the gauge
-   `sip_proxy_recv_shards_stalled`. This is the only signal that tells a
-   parked shard from an idle one; the activity meters cannot.
+   `PROXY_SHARD_STALL_MS` (2 000) fails `/readyz` and `/healthz` (ADR-0046
+   D4) and raises the gauge `sip_proxy_recv_shards_stalled`. This is the only
+   signal that tells a parked shard from an idle one; the activity meters
+   cannot.
+   The b2bua worker's two loops, the transaction owner (recv, timer wheel,
+   sweep) and the router, state theirs the same way (`sip_txn::LoopPulse`,
+   `b2bua::loops`): one on a piece of work past `B2BUA_LOOP_STALL_MS` turns
+   `/ready` and `/healthz` to 503 and raises `b2bua_loop_stalled{loop}`, and
+   the worker's livenessProbe restarts it; a loop task that ends exits the
+   process non-zero after the limiter release flush. A router turn that needs
+   a call's lock waits out that call's turn, which holds it across its
+   decision round trip (`B2BUA_CALL_CONTROL_TIMEOUT_MS`), so the threshold
+   defaults to the larger of 10 s and that timeout plus 5 s, and boot refuses
+   one not above it by 2 s. A bulk reclaim beats the router's pulse per call.
+   Under the `cpu_starve` chaos the 0.3 CPU quota is shared by every runnable
+   thread: with N runtime threads busy, a turn reads stalled only when its own
+   work needs more than 3/N CPU-seconds. The pulse cannot see a loop that is
+   waiting yet never scheduled while input is queued for it: a starved
+   runtime reads as idle, and only the probe's own timeout catches it.
 5. **The invariant, stated:** an ingress loop awaits nothing whose completion
    a third party controls. The `RoutingStrategy` trait is `async` and its
    three call sites sit on the recv loop; a strategy that consults a network
@@ -109,10 +125,8 @@ the one await with no timeout, no queue and no drop policy.
 - `sip-net`'s slow lane reproduces the neighbour case in a network namespace
   (a veth pair with nobody at the far address): 62 of 64 sends refused in
   under 100 µs where the old path suspended 3 s.
-- Readiness does not by itself move traffic away from a stalled proxy in a
-  deployment whose data path is a VRRP VIP that tracks nothing of the proxy;
-  what should track the pulse (a keepalived `track_file`, an exit for
-  restart) is a deployment decision outside this ADR.
+- A stalled proxy fails `/healthz`, which the VRRP health check and the
+  livenessProbe read: the VIP moves and the proxy restarts (ADR-0046 D4).
 - The TCP peers (replication, the CDR broker) keep untimed writes on their
   own tasks; their blast radius is one task, not an ingress loop, and they
   are outside this ADR.

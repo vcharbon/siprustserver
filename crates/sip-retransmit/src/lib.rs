@@ -28,6 +28,24 @@
 //! the consumer that replicates a ladder's class beside its rung.
 
 #![forbid(unsafe_code)]
+// The panic set at deny outside test code (ADR-0051 §3).
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::iter_over_hash_type,
+        clippy::panic,
+        clippy::string_slice,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
 
 use std::time::Duration;
 
@@ -59,7 +77,7 @@ pub enum Class {
     /// caller-side clamp, so a ladder that changes pace mid-flight does so by
     /// [`Ladder::retarget`] and keeps its elapsed time honest.
     NonInviteProceeding,
-    /// A CANCEL parked on its INVITE's branch (ADR-0028 X4): a non-INVITE
+    /// A CANCEL parked on its INVITE's branch (ADR-0043 X4): a non-INVITE
     /// request, so §17.1.2.2's pacing, bounded at 64·T1 — and the ceiling gives
     /// up on the CANCEL alone, never on the INVITE it answers.
     CancelClient,
@@ -264,6 +282,13 @@ impl Ladder {
     pub fn armed(schedule: Schedule) -> Option<(Ladder, Duration)> {
         let first = schedule.interval(1)?;
         Some((Ladder { schedule, rung: 1, elapsed: first }, first))
+    }
+
+    /// Arm the first rung of the schedule an RFC prescribes for `class`: every
+    /// class has one, so the ladder is always armed.
+    pub fn armed_rfc(class: Class) -> (Ladder, Duration) {
+        let first = class.interval(1);
+        (Ladder { schedule: Schedule::rfc(class), rung: 1, elapsed: first }, first)
     }
 
     /// Rebuild a ladder standing on `rung`, deriving the elapsed time from the

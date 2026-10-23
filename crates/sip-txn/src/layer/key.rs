@@ -43,6 +43,12 @@ impl ServerTxnKey {
         Self { branch, sent_by, method: filed_method(method).clone() }
     }
 
+    /// The INVITE server transaction a request with top-Via `branch` and
+    /// `sent_by` opened.
+    pub fn invite(branch: String, sent_by: SentBy) -> Self {
+        Self::new(branch, sent_by, &Method::Invite)
+    }
+
     pub fn branch(&self) -> &str {
         &self.branch
     }
@@ -86,14 +92,6 @@ impl<'a> ServerTxnId<'a> {
     pub(super) fn cancelled_invite(via: &'a Via) -> Option<Self> {
         static INVITE: Method = Method::Invite;
         Self::new(via, &INVITE)
-    }
-
-    pub(super) fn branch(&self) -> &'a str {
-        self.branch
-    }
-
-    pub(super) fn sent_by(&self) -> SentByRef<'a> {
-        self.sent_by
     }
 
     pub(super) fn to_key(self) -> ServerTxnKey {

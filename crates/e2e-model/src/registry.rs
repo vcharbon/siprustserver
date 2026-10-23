@@ -34,6 +34,9 @@ use scenario_harness::actor::ActorScenario;
 
 use crate::shape::{Anchor, ShapeSpec};
 
+mod source;
+pub use source::{intern, intern_legs, intern_prefixes, ShapeSource};
+
 /// Per-run **scenario inputs** — SUT auth data (and any future non-topology
 /// per-run value) fed into load-body *construction*. Deliberately NOT part of
 /// the per-call `CallEnv`: the env carries the environment axis (agents,
@@ -71,7 +74,7 @@ pub type LoadFactory = Arc<dyn Fn(&ScenarioInputs) -> Scenario + Send + Sync>;
 /// there. Generalizes the closed `needs_bob2`/`needs_charlie` label list — an
 /// open-registry shape's legs arrive under dialled R-URI digits, never under
 /// the agent name, so label and prefix must be declared independently.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LegSpec {
     /// Agent name the load body binds/choreographs against (`"bob"`, `"mrf"`,
     /// …) — the label the driver's leg picker returns and the `CallEnv` callee
@@ -146,15 +149,13 @@ pub struct ShapeDescriptor {
     /// Load: this call is an emergency (`Resource-Priority: esnet.0`) — the SUT
     /// force-admits it under overload, so it must never be shed.
     pub emergency: bool,
-    /// Load: the reject status this shape expects as one of its outcomes; a
-    /// call ending on it classes `expected_reject`, not a failure. `None` =
-    /// every reject is a failure.
-    pub expected_reject: Option<u16>,
     /// Load: weight in the shipped DEFAULT mix (`None` = not in the default mix).
     pub default_weight: Option<f64>,
-    /// Load: weight in the shipped voluntarily-FAILING mix (the post-call
-    /// cleanup-coverage set); `None` = not a failure-mix shape.
-    pub failure_weight: Option<f64>,
+    /// Load: weight in the shipped ABNORMAL-END mix — the post-call cleanup
+    /// coverage set, one shape per teardown path a call takes when it does not
+    /// connect and hang up (each succeeds under its own accepted branch);
+    /// `None` = not in that mix.
+    pub abnormal_end_weight: Option<f64>,
     /// The optional load body factory (`None` = functional-only shape).
     pub load: Option<LoadFactory>,
 }
@@ -169,9 +170,8 @@ impl std::fmt::Debug for ShapeDescriptor {
             .field("needs_charlie", &self.needs_charlie)
             .field("needs_bob2", &self.needs_bob2)
             .field("emergency", &self.emergency)
-            .field("expected_reject", &self.expected_reject)
             .field("default_weight", &self.default_weight)
-            .field("failure_weight", &self.failure_weight)
+            .field("abnormal_end_weight", &self.abnormal_end_weight)
             .field("has_load_body", &self.load.is_some())
             .finish()
     }
@@ -190,9 +190,8 @@ impl ShapeDescriptor {
             needs_charlie: false,
             needs_bob2: false,
             emergency: false,
-            expected_reject: None,
             default_weight: None,
-            failure_weight: None,
+            abnormal_end_weight: None,
             load: None,
         }
     }
@@ -223,8 +222,7 @@ impl ShapeDescriptor {
     /// The effective callee-leg declaration the load driver binds and demuxes
     /// from: [`legs`](Self::legs) verbatim when declared, else the default
     /// `[bob(, bob2)(, charlie)]` expansion of the boolean sugar (role ==
-    /// single prefix == label), so every pre-existing shape is byte-identical
-    /// on the wire.
+    /// single prefix == label).
     pub fn callee_legs(&self) -> &'static [LegSpec] {
         if !self.legs.is_empty() {
             return self.legs;
@@ -247,20 +245,13 @@ impl ShapeDescriptor {
         self
     }
 
-    /// Declare `status` the reject this shape expects (see
-    /// [`expected_reject`](Self::expected_reject)).
-    pub fn expected_reject(mut self, status: u16) -> Self {
-        self.expected_reject = Some(status);
-        self
-    }
-
     pub fn default_weight(mut self, weight: f64) -> Self {
         self.default_weight = Some(weight);
         self
     }
 
-    pub fn failure_weight(mut self, weight: f64) -> Self {
-        self.failure_weight = Some(weight);
+    pub fn abnormal_end_weight(mut self, weight: f64) -> Self {
+        self.abnormal_end_weight = Some(weight);
         self
     }
 
@@ -322,11 +313,7 @@ impl ShapeRegistry {
     /// Register a shape. One id space: a duplicate id panics loudly at
     /// registration (a third-party shape may not shadow a shipped one).
     pub fn register(&mut self, shape: ShapeDescriptor) -> &mut Self {
-        let prev = self.shapes.insert(shape.id.to_string(), shape);
-        if let Some(prev) = prev {
-            panic!("duplicate shape id {:?} in the registry (one id space)", prev.id);
-        }
-        self
+        self.try_register(shape).unwrap_or_else(|e| panic!("{e}"))
     }
 
     pub fn get(&self, id: &str) -> Option<&ShapeDescriptor> {
@@ -355,10 +342,10 @@ impl ShapeRegistry {
         self.iter().filter(|d| d.default_weight.is_some()).collect()
     }
 
-    /// The voluntarily-FAILING load shapes (one per post-call-cleanup teardown
-    /// path), in id order.
-    pub fn failure_mix(&self) -> Vec<&ShapeDescriptor> {
-        self.iter().filter(|d| d.failure_weight.is_some()).collect()
+    /// The ABNORMAL-END load shapes (one per post-call-cleanup teardown path),
+    /// in id order.
+    pub fn abnormal_end_mix(&self) -> Vec<&ShapeDescriptor> {
+        self.iter().filter(|d| d.abnormal_end_weight.is_some()).collect()
     }
 }
 
@@ -368,7 +355,7 @@ impl ShapeRegistry {
 
 /// Authoring parameters for the `rerouting` shape — the typed `input.extras`
 /// the editor suggests. All optional (defaults reproduce the canonical 486
-/// flow), so a case that sets none behaves exactly as before. Declared here —
+/// flow). Declared here —
 /// next to the shape's descriptor — and consumed by the functional body in
 /// `e2e-core` via `Input::params`.
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
@@ -435,8 +422,8 @@ const TRANSFER_ANCHORS: &[Anchor] = &[
 
 /// Every shipped shape, declared once. Grouped by surface:
 ///
-///  - **load-only** — the fallible real-call scenarios (report/metrics ids
-///    unchanged: `basic_call`, `reinvite`, …);
+///  - **load-only** — the fallible real-call scenarios (`basic_call`,
+///    `reinvite`, …);
 ///  - **functional-only** — the anchored e2e shapes (`basic-call`, `rerouting`,
 ///    …), whose `!Send` bodies `e2e-core` attaches by id;
 ///  - **dual-body** — `rerouting_prack`: ONE descriptor, both bodies.
@@ -480,6 +467,11 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .anchors(PRACK_ANCHORS)
             .default_weight(0.5)
             .load_actor_with(|_| Arc::new(cs::forked_reliable(cs::default_binder()))),
+        // A forked establishment answered by a fork that never rang (a fresh
+        // To-tag on the 2xx, RFC 3261 §13.2.2.4). Id-addressable.
+        ShapeDescriptor::new("forked_unrung")
+            .anchors(LOAD_CALL_ANCHORS)
+            .load_actor_with(|_| Arc::new(cs::forked_unrung(cs::default_binder()))),
         // C2/E5: CANCEL×200 crossing — a branch-aware race (Ok OR abandoned
         // timeout, both legal). A light share of the mix.
         ShapeDescriptor::new("cancel_answer_crossing")
@@ -491,9 +483,8 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .anchors(PRACK_ANCHORS)
             .default_weight(0.5)
             .load_actor_with(|_| Arc::new(cs::prack_update_early(cs::default_binder()))),
-        // ACTOR-executed: per-endpoint reactive actors + the ack-gated settle barrier replace
-        // the one serialized coroutine. Same id, same anchors, same downstream
-        // contract (`docs/todos/actor-harness-p1-contract-table.md` §5.3).
+        // ACTOR-executed: per-endpoint reactive actors + the ack-gated settle barrier;
+        // same downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.3).
         ShapeDescriptor::new("refer")
             .anchors(LOAD_REFER_ANCHORS)
             .default_weight(1.0)
@@ -524,21 +515,21 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .anchors(LOAD_REINVITE_ANCHORS)
             .emergency()
             .load_actor_with(|_| Arc::new(cs::reinvite(cs::default_binder()))),
-        // ── Load: the voluntarily-failing cleanup-coverage set ───────────────
+        // ── Load: the abnormal-end cleanup-coverage set ──────────────────────
         // ACTOR-executed: same downstream contract
         // (table §5.8).
         ShapeDescriptor::new("invite_reject")
-            .failure_weight(1.0)
+            .abnormal_end_weight(1.0)
             .load_actor_with(|_| Arc::new(cs::invite_reject(cs::default_binder()))),
         // ACTOR-executed: same downstream contract
         // (table §5.9).
         ShapeDescriptor::new("abandon_ringing")
-            .failure_weight(1.0)
+            .abnormal_end_weight(1.0)
             .load_actor_with(|_| Arc::new(cs::abandon_ringing(cs::default_binder()))),
         // ACTOR-executed: per-endpoint reactors + the
         // ack-gated settle barrier; same downstream contract (table §5.10).
         ShapeDescriptor::new("refer_charlie_reject")
-            .failure_weight(1.0)
+            .abnormal_end_weight(1.0)
             .needs_charlie()
             .load_actor_with(|inputs| {
                 Arc::new(cs::refer_charlie_reject(cs::default_binder(), &inputs.refer_key))
@@ -581,141 +572,4 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    // A third-party registration test binds a plain LINEAR body — the last
-    // in-tree use of the linear `BasicCall` now the shipped shapes are actors.
-    use scenario_harness::actor::scenarios::BasicCall;
-
-    #[test]
-    fn defaults_register_one_id_space_with_both_surfaces() {
-        let reg = ShapeRegistry::with_defaults();
-        // Load ids unchanged (report/metrics compatibility).
-        for id in [
-            "basic_call",
-            "reinvite",
-            "refer",
-            "options_hold",
-            "long_call",
-            "prack_update",
-            "basic_call_em",
-            "reinvite_em",
-            "invite_reject",
-            "abandon_ringing",
-            "refer_charlie_reject",
-        ] {
-            let d = reg.get(id).unwrap_or_else(|| panic!("load shape {id:?} missing"));
-            assert!(d.load.is_some(), "{id} carries a load body");
-        }
-        // Functional ids unchanged; no load body.
-        for id in ["basic-call", "basic-call-media", "rerouting", "transfer-refer-media"] {
-            let d = reg.get(id).unwrap_or_else(|| panic!("functional shape {id:?} missing"));
-            assert!(d.load.is_none(), "{id} is functional-only");
-            assert!(!ShapeSpec::anchors(d).is_empty(), "{id} publishes anchors");
-        }
-        // The dual-body shape carries BOTH the anchor vocabulary and a load body.
-        let dual = reg.get("rerouting_prack").expect("dual-body shape registered");
-        assert!(dual.load.is_some() && !dual.anchors.is_empty());
-        assert!(dual.needs_bob2, "rerouting needs the second callee receiver");
-    }
-
-    #[test]
-    fn default_and_failure_mixes_preserve_canonical_weights_and_add_phase_c() {
-        let reg = ShapeRegistry::with_defaults();
-        let mix: std::collections::BTreeMap<&str, f64> =
-            reg.default_mix().iter().map(|d| (d.id, d.default_weight.unwrap())).collect();
-        // The canonical weights (report/metrics compat).
-        assert_eq!(mix.get("basic_call"), Some(&4.0));
-        assert_eq!(mix.get("reinvite"), Some(&2.0));
-        assert_eq!(mix.get("options_hold"), Some(&1.0));
-        assert_eq!(mix.get("refer"), Some(&1.0));
-        // The catalog shapes carry their catalog weights.
-        for (id, w) in [
-            ("crossing_bye", 1.0),
-            ("forked", 1.0),
-            ("forked_reliable", 0.5),
-            ("cancel_answer_crossing", 0.5),
-            ("prack_update_early", 0.5),
-            ("reinvite10", 0.5),
-        ] {
-            assert_eq!(mix.get(id), Some(&w), "{id} weight");
-        }
-        // The generated cross-product cells are id-addressable ONLY (no weight),
-        // so the default mix stays a representative sample (no bob2 in the mix).
-        assert!(
-            !mix.contains_key("reroute+reinvite"),
-            "generated cells are not in the default mix"
-        );
-        assert!(reg.get("reroute+reinvite").is_some(), "but they ARE registered by id");
-
-        let failures: Vec<&str> = reg.failure_mix().iter().map(|d| d.id).collect();
-        assert_eq!(failures, vec!["abandon_ringing", "invite_reject", "refer_charlie_reject"]);
-    }
-
-    #[test]
-    fn load_scenario_constructs_from_inputs() {
-        let reg = ShapeRegistry::with_defaults();
-        let inputs = ScenarioInputs { refer_key: "k-42".into() };
-        assert_eq!(reg.load_scenario("basic_call", &inputs).unwrap().id(), "basic_call");
-        assert_eq!(reg.load_scenario("refer", &inputs).unwrap().id(), "refer");
-        assert!(reg.load_scenario("basic-call", &inputs).is_none(), "functional-only: no body");
-        assert!(reg.load_scenario("nope", &inputs).is_none());
-    }
-
-    /// The boolean sugar expands to the default label list (role ==
-    /// single prefix == label, bob → bob2 → charlie bind order), so every
-    /// pre-legs shape drives the wire byte-identically.
-    #[test]
-    fn callee_legs_boolean_sugar_expands_to_the_historic_labels() {
-        let flat = |legs: &[LegSpec]| -> Vec<(&str, Vec<&str>)> {
-            legs.iter().map(|l| (l.role, l.ruri_prefixes.to_vec())).collect()
-        };
-        let with = |d: ShapeDescriptor| flat(d.callee_legs());
-
-        assert_eq!(with(ShapeDescriptor::new("s")), vec![("bob", vec!["bob"])]);
-        assert_eq!(
-            with(ShapeDescriptor::new("s").needs_bob2()),
-            vec![("bob", vec!["bob"]), ("bob2", vec!["bob2"])]
-        );
-        assert_eq!(
-            with(ShapeDescriptor::new("s").needs_charlie()),
-            vec![("bob", vec!["bob"]), ("charlie", vec!["charlie"])]
-        );
-        assert_eq!(
-            with(ShapeDescriptor::new("s").needs_bob2().needs_charlie()),
-            vec![("bob", vec!["bob"]), ("bob2", vec!["bob2"]), ("charlie", vec!["charlie"])]
-        );
-    }
-
-    /// An explicit `legs` declaration wins over the boolean sugar — the open
-    /// form a third-party shape uses: roles addressed on the wire by
-    /// dialled-digit prefixes, multiple prefixes per leg.
-    #[test]
-    fn explicit_legs_override_the_boolean_sugar() {
-        const OPEN_LEGS: &[LegSpec] = &[
-            LegSpec { role: "bob", ruri_prefixes: &["+1555", "9005"] },
-            LegSpec { role: "mrf", ruri_prefixes: &["9007"] },
-        ];
-        let d = ShapeDescriptor::new("open_mrf_rbt").legs(OPEN_LEGS).needs_charlie();
-        assert_eq!(d.callee_legs(), OPEN_LEGS, "declared legs win; the sugar is ignored");
-    }
-
-    #[test]
-    fn third_party_registration_is_open() {
-        let mut reg = ShapeRegistry::with_defaults();
-        reg.register(
-            ShapeDescriptor::new("vendor_flow")
-                .anchors(CALL_ANCHORS)
-                .load_shared(Arc::new(BasicCall)),
-        );
-        assert!(reg.get("vendor_flow").is_some());
-        assert!(reg.ids().contains(&"vendor_flow".to_string()));
-    }
-
-    #[test]
-    #[should_panic(expected = "duplicate shape id")]
-    fn duplicate_id_panics() {
-        let mut reg = ShapeRegistry::with_defaults();
-        reg.register(ShapeDescriptor::new("basic_call"));
-    }
-}
+mod tests;

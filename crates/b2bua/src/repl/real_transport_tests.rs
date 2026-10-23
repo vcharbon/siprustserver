@@ -25,12 +25,13 @@ use repl_net::transport::{
 use sip_clock::Clock;
 use tokio::sync::watch;
 
+use super::test_support::fwd;
 use super::{
     Changelog, FnPeerResolver, Puller, PullerConfig, ReplServer, ReplicatingCallStore,
-    ReplicationSupervisor,
+    ReplicationSupervisor, ServeConfig,
 };
 use crate::metrics::B2buaMetrics;
-use crate::store::{CallStore, PartitionRole, PropagateDirection, PutOpts};
+use crate::store::{CallStore, PartitionRole, PutOpts};
 use topology::{Peer, SimulatedMembership};
 
 // Extra wiring for the end-to-end MATERIALISATION gate: a full `B2buaCore`
@@ -39,7 +40,7 @@ use topology::{Peer, SimulatedMembership};
 // landed in the store"; this reaches "call live + routable + keepalive re-armed".
 use std::collections::HashMap;
 
-use call::{CallBodyCodec, MsgpackCodec, TimerEntry, TimerType};
+use call::{CallBodyCodec, MsgpackCodec, TimerKey, TimerType};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
 use sip_net::{BindUdpOpts, RealSignalingNetwork, SignalingNetwork};
@@ -62,22 +63,13 @@ fn loopback() -> SocketAddr {
 }
 
 fn fast_config() -> PullerConfig {
-    PullerConfig { backoff_init_ms: 20, backoff_max_ms: 200, bootstrap_hard_timeout_ms: 2_000 }
-}
-
-/// `Forward` flush opts: this node is the primary, `peer` backs it up.
-fn forward_to(peer: &str) -> PutOpts {
-    PutOpts {
-        peer: Some(peer.to_string()),
-        direction: Some(PropagateDirection::Forward),
-        ..PutOpts::default()
-    }
+    PullerConfig { backoff_init_ms: 20, backoff_max_ms: 200, ..PullerConfig::fast_test() }
 }
 
 // ── Materialisation-gate helpers ────────────────────────────────────────────
 // The stream gates seed garbage `0xAB` bodies — fine, because they only assert
 // the body LANDED. The materialisation gate must reclaim them into LIVE calls,
-// and `reclaim_scan` decodes every body and silently drops the undecodable ones
+// and `scan_partition` decodes every body and silently drops the undecodable ones
 // (`store/mod.rs`). So this gate seeds VALID `Call` encodings.
 
 fn src() -> SocketAddr {
@@ -119,17 +111,13 @@ fn reclaim_body(primary: &str, backup: &str, cid: &str, clock: &Clock) -> (Strin
         &invite(primary, backup, cid),
         src(),
         &config_for(primary),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
-    call.timers.push(TimerEntry {
-        id: format!("keepalive-{cid}"),
-        timer_type: TimerType::Keepalive,
-        // +5 min: restored into the DelayQueue but never fires during the test.
-        fire_at: clock.now_ms() + 300_000,
-        leg_id: None,
-    });
-    let body = MsgpackCodec::new().encode(&call);
+    // +5 min: restored into the DelayQueue but never fires during the test.
+    let fire_at = clock.now_ms() + 300_000;
+    call::helpers::arm_timer(&mut call, TimerKey::call(TimerType::Keepalive), fire_at);
+    let body = MsgpackCodec::new().encode(&call).unwrap();
     (call.call_ref.clone(), body)
 }
 
@@ -167,9 +155,11 @@ async fn spawn_reclaimer_core(
         network: Arc::new(repl_net.clone()),
         membership,
         store: store.clone(),
-        listen_addr: loopback(), // ephemeral — nobody pulls this node
+        listener: repl_net.listen(loopback()).await.unwrap(), // nobody pulls this node
         addr_resolver,
         incarnation_gen: 2,
+        puller: PullerConfig::default(),
+        serve: ServeConfig::default(),
     };
     let config = B2buaConfig {
         self_ordinal: self_ordinal.into(),
@@ -295,7 +285,7 @@ async fn tail_delivers_post_connect_mutation_over_real_tcp() {
         30_000,
         1,
         0,
-        &forward_to("w1"),
+        &fwd("w1"),
     )
     .await
     .unwrap();
@@ -340,19 +330,9 @@ async fn tail_streams_successive_updates_over_real_tcp() {
     let call_ref = "w0|call-updates|tag".to_string();
     for gen in 1..=4i64 {
         let body = format!("body-v{gen}");
-        w0.put_call(
-            PRI,
-            "w0",
-            &call_ref,
-            body.into_bytes(),
-            &[],
-            30_000,
-            gen,
-            0,
-            &forward_to("w1"),
-        )
-        .await
-        .unwrap();
+        w0.put_call(PRI, "w0", &call_ref, body.into_bytes(), &[], 30_000, gen, 0, &fwd("w1"))
+            .await
+            .unwrap();
     }
 
     eventually("backup reaches the latest gen", || {
@@ -493,7 +473,7 @@ async fn bidirectional_supervisor_replication_over_real_tcp() {
             30_000,
             1,
             0,
-            &forward_to(peer),
+            &fwd(peer),
         )
         .await
         .unwrap();
@@ -507,7 +487,7 @@ async fn bidirectional_supervisor_replication_over_real_tcp() {
             30_000,
             2,
             0,
-            &forward_to(peer),
+            &fwd(peer),
         )
         .await
         .unwrap();
@@ -687,7 +667,7 @@ async fn reclaim_materialises_into_live_map_under_serving_load() {
     let (w1, w1_store) = spawn_reclaimer_core("w1", "w0", w0_addr, &net, &clock).await;
 
     // Concurrent serving load: hammer w1's store with backup forward-flushes
-    // while it reclaims. These hit the SAME inner Mutex as `reclaim_scan` + the
+    // while it reclaims. These hit the SAME inner Mutex as `scan_partition` + the
     // bootstrap applies but land in `bak:w9` — NOT scanned by reclaim (which
     // scans `pri:w1`), so they pressure the lock without polluting the count.
     let stop = Arc::new(AtomicBool::new(false));
@@ -768,11 +748,10 @@ async fn reclaim_materialises_into_live_map_under_serving_load() {
 // `w_bak`, echoed onto `topology.bak`). If the changelog is bumped under one id
 // ("w1") but the puller connects as a DIFFERENT id ("b2bua-worker-1"), the
 // server finds no entries for that caller and silently delivers NOTHING — no
-// error, no close, just zero applies. This is what bit the live cluster:
-// `run.sh` keyed the proxy registry as `w${i}` while each worker's ordinal was
-// its pod name, so the keys never matched. This test pins that silent-failure
-// contract so the invariant ("changelog peer-key == puller caller") is explicit;
-// the deploy fix (pod-name proxy ids) keeps them equal by construction.
+// error, no close, just zero applies: a deploy whose proxy names a worker by
+// anything but its pod name never matches the ordinal. This test pins that
+// silent-failure contract so the invariant ("changelog peer-key == puller
+// caller") is explicit; pod-name proxy ids keep them equal by construction.
 #[tokio::test]
 async fn mismatched_ordinal_silently_delivers_nothing() {
     let clock = Clock::test_at(0);
@@ -797,7 +776,7 @@ async fn mismatched_ordinal_silently_delivers_nothing() {
 
     // Bump the changelog under the WRONG peer id ("w1" != the puller's caller).
     let call_ref = "w0|orphaned|tag".to_string();
-    w0.put_call(PRI, "w0", &call_ref, b"body".to_vec(), &[], 30_000, 1, 0, &forward_to("w1"))
+    w0.put_call(PRI, "w0", &call_ref, b"body".to_vec(), &[], 30_000, 1, 0, &fwd("w1"))
         .await
         .unwrap();
 
@@ -862,9 +841,8 @@ async fn measure_bootstrap(
             let mut j = 0u64;
             while !stop.load(Ordering::Relaxed) {
                 let cr = format!("w0|live-{w}-{j}|tag");
-                let _ = w0
-                    .put_call(PRI, "w0", &cr, live.clone(), &[], 300_000, 1, 0, &forward_to("w2"))
-                    .await;
+                let _ =
+                    w0.put_call(PRI, "w0", &cr, live.clone(), &[], 300_000, 1, 0, &fwd("w2")).await;
                 j += 1;
                 writes.fetch_add(1, Ordering::Relaxed);
                 if j.is_multiple_of(64) {
@@ -983,9 +961,9 @@ impl ReplicationNetwork for LatentNet {
 }
 #[async_trait::async_trait]
 impl repl_net::transport::ReplicationListener for LatentListener {
-    async fn accept(&self) -> Option<Box<dyn ReplicationConnection>> {
+    async fn accept(&self) -> Result<Box<dyn ReplicationConnection>, repl_net::AcceptError> {
         let inner = self.inner.accept().await?;
-        Some(Box::new(LatentConn { inner, send_cost: self.send_cost }))
+        Ok(Box::new(LatentConn { inner, send_cost: self.send_cost }))
     }
     fn local_addr(&self) -> SocketAddr {
         self.inner.local_addr()
@@ -1125,9 +1103,9 @@ impl ReplicationNetwork for CountingNet {
 }
 #[async_trait::async_trait]
 impl ReplicationListener for CountingListener {
-    async fn accept(&self) -> Option<Box<dyn ReplicationConnection>> {
+    async fn accept(&self) -> Result<Box<dyn ReplicationConnection>, repl_net::AcceptError> {
         let inner = self.inner.accept().await?;
-        Some(Box::new(CountingConn { inner, rounds: self.rounds.clone() }))
+        Ok(Box::new(CountingConn { inner, rounds: self.rounds.clone() }))
     }
     fn local_addr(&self) -> SocketAddr {
         self.inner.local_addr()

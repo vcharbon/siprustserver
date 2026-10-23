@@ -15,7 +15,8 @@
 
 use std::sync::OnceLock;
 
-use metric_catalogue::{label_values, Dim, Family, Labels, OpenRows};
+use metric_catalogue::{label_values, Dim, Family, Labels};
+use metric_values::OpenRows;
 
 /// The classified cause of a failed request. Everything the reqwest/hyper error
 /// chain can tell us apart, and nothing invented.
@@ -27,12 +28,21 @@ pub enum FailureCause {
     RequestTimeout,
     /// TLS handshake / certificate failure.
     Tls,
-    /// The peer reset an established connection.
+    /// The peer reset an established connection, or the write hit a broken
+    /// pipe.
     ConnReset,
+    /// The peer closed the connection before a complete response.
+    Eof,
     /// The peer refused the connection.
     Refused,
+    /// No route to the peer's host or network.
+    Unreachable,
     /// The name did not resolve.
     Dns,
+    /// The response body passed [`MAX_BODY_BYTES`], declared or streamed.
+    ///
+    /// [`MAX_BODY_BYTES`]: crate::MAX_BODY_BYTES
+    BodyTooLarge,
     /// Anything the chain does not identify.
     Other,
 }
@@ -45,25 +55,54 @@ impl FailureCause {
             FailureCause::RequestTimeout => "request_timeout",
             FailureCause::Tls => "tls",
             FailureCause::ConnReset => "conn_reset",
+            FailureCause::Eof => "eof",
             FailureCause::Refused => "refused",
+            FailureCause::Unreachable => "unreachable",
             FailureCause::Dns => "dns",
+            FailureCause::BodyTooLarge => "body_too_large",
             FailureCause::Other => "other",
         }
     }
 
     /// Every cause, in declaration order.
-    pub const ALL: [FailureCause; 7] = [
+    pub const ALL: [FailureCause; 10] = [
         FailureCause::ConnectTimeout,
         FailureCause::RequestTimeout,
         FailureCause::Tls,
         FailureCause::ConnReset,
+        FailureCause::Eof,
         FailureCause::Refused,
+        FailureCause::Unreachable,
         FailureCause::Dns,
+        FailureCause::BodyTooLarge,
         FailureCause::Other,
     ];
 }
 
-const CAUSE_VALUES: [&str; 7] = label_values!(FailureCause::ALL, FailureCause::label);
+impl FailureCause {
+    /// Whether a request that failed so may be sent once more: any
+    /// connection-level failure or a timeout, never a name that does not
+    /// resolve, a TLS failure, an oversized body or an unidentified one.
+    pub const fn is_retryable(self) -> bool {
+        matches!(
+            self,
+            FailureCause::ConnectTimeout
+                | FailureCause::RequestTimeout
+                | FailureCause::ConnReset
+                | FailureCause::Eof
+                | FailureCause::Refused
+                | FailureCause::Unreachable
+        )
+    }
+}
+
+impl std::fmt::Display for FailureCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+const CAUSE_VALUES: [&str; 10] = label_values!(FailureCause::ALL, FailureCause::label);
 
 /// Client HTTP failures by peer and cause; every peer observed gets its own
 /// series, under the cap.
@@ -89,8 +128,11 @@ metric_catalogue::assert_exposition_order!(
     RequestTimeout,
     Tls,
     ConnReset,
+    Eof,
     Refused,
+    Unreachable,
     Dns,
+    BodyTooLarge,
     Other,
 );
 

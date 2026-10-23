@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Delete one ready worker pod with a grace period: the worker drains (a
+# rolling restart). Facts as kill_worker's.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+hk_pick_targets
+hk_delete_targets "$HAKIT_PARAM_GRACE_S"

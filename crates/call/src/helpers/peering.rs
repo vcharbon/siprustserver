@@ -1,32 +1,23 @@
-//! Which leg talks to which: the tag-map dialog-identity index, the active
-//! peer pair (INAP-style split/merge), and transparent-relay peer resolution.
+//! Which leg talks to which: the caller-facing dialog that fronts a callee
+//! dialog, the active peer pair (INAP-style split/merge), and
+//! transparent-relay peer resolution.
 
-use crate::model::{ActivePeer, Call, Dialog, Leg, LegState, TagMapping};
+use crate::model::{ActivePeer, Call, Dialog, DialogId, Leg, LegState};
 
-use super::identity::{dialog_by_identity, RequestTags};
-use super::leg::{find_b_leg, is_adopted};
+use super::leg::{callee_dialog, caller_dialog, find_b_leg, is_adopted};
 
-// ── Tag mapping ─────────────────────────────────────────────────────────────
+// ── Caller-facing fronts ────────────────────────────────────────────────────
 
-/// Add a tag mapping keyed by `(bLegId, bTag)`. A duplicate key leaves the call
-/// unchanged (the tagMap is a dialog-identity index).
-pub fn add_tag_mapping(mut call: Call, mapping: TagMapping) -> Call {
-    let exists =
-        call.tag_map.iter().any(|m| m.b_leg_id == mapping.b_leg_id && m.b_tag == mapping.b_tag);
-    if !exists {
-        call.tag_map.push(mapping);
-    }
-    call
+/// The caller-facing dialog that fronts `b_leg_id`'s dialog with peer tag
+/// `b_tag` ([`Dialog::fronts`]), in any state.
+pub fn fronting_dialog<'a>(call: &'a Call, b_leg_id: &str, b_tag: &str) -> Option<&'a Dialog> {
+    call.a_leg.dialogs.fronting(b_leg_id, b_tag)
 }
 
-/// Look up a mapping by the B2BUA's a-facing tag.
-pub fn find_by_a_tag<'a>(call: &'a Call, a_tag: &str) -> Option<&'a TagMapping> {
-    call.tag_map.iter().find(|m| m.a_tag == a_tag)
-}
-
-/// Look up a mapping by the B-leg's real tag.
-pub fn find_by_b_tag<'a>(call: &'a Call, b_leg_id: &str, b_tag: &str) -> Option<&'a TagMapping> {
-    call.tag_map.iter().find(|m| m.b_leg_id == b_leg_id && m.b_tag == b_tag)
+/// Whether a provisional this stack sent the caller carried `a_tag`: the
+/// caller-facing dialog of that tag is marked shown ([`Dialog::shown`]).
+pub fn a_tag_shown(call: &Call, a_tag: &str) -> bool {
+    caller_dialog(call, a_tag).is_some_and(|d| d.shown)
 }
 
 // ── Active peer (INAP-style split/merge) ────────────────────────────────────
@@ -69,97 +60,149 @@ pub fn all_peered_legs(call: &Call) -> Vec<String> {
 
 // ── Transparent-relay peer resolution ───────────────────────────────────────
 
-/// Resolve the leg a transparent `RelayToPeer` from `source_leg_id` targets,
-/// plus the identity tag of the target dialog (forking: the callee early
-/// dialog toward a b-leg, the caller-facing dialog toward the a-leg). The ONE
-/// resolver both the executor's relay path and the rule-vocabulary readiness
-/// predicate ([`relay_peer_dialog_ready`]) share — keep them in lockstep by
-/// construction.
+/// Where a transparent relay of an in-dialog request from a leg goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RelayPeer {
+    /// The peer leg, and the dialog of it the request continues on; `None`
+    /// when no dialog of the peer leg can carry it now: the leg holds none
+    /// yet, several early dialogs and none named, or the caller-facing
+    /// dialog it would ride was never shown to the caller.
+    Leg { leg_id: String, dialog: Option<DialogId> },
+    /// No peer leg: a caller request while the call holds no b-leg.
+    NoLeg,
+    /// The source leg is a service's own (ADR-0014): no relay is made for it.
+    Unadopted,
+}
+
+/// Resolve the leg and dialog a transparent `RelayToPeer` from
+/// `source_leg_id`'s dialog `source` continues on. The ONE
+/// resolver the executor's relay path, its finals and the rule-vocabulary
+/// readiness predicate ([`relay_peer_dialog_ready`]) share.
 ///
 /// Order:
-///   1. the active pair (post-merge) — after a failover the tag map still
-///      carries a stale (same a-tag → failed b-leg) mapping, so the merge's
-///      `active_peer` (the live leg) must win;
-///   2. pre-merge a-leg in-dialog request (forking PRACK/UPDATE): the request's
-///      To-tag (the B2BUA's a-facing tag) resolves via the tag map to the right
-///      b-leg + callee fork tag;
-///   3. implicit b→a fallback, gated on leg adoption (ADR-0014): an unadopted
-///      leg (parked `media`, un-realigned `transfer-target`) is owned by its
-///      service rule and must never be mis-routed to A;
-///   4. fallback pairing: a-leg ↔ (first confirmed b-leg, else first b-leg).
+///   1. the active pair (post-merge): the merge names the live leg;
+///   2. a caller request: the callee dialog its caller-facing dialog fronts;
+///   3. an unadopted leg (parked `media`, un-realigned `transfer-target`) is
+///      its service's and relays nowhere;
+///   4. a caller request on a dialog that fronts nothing: the first confirmed
+///      adopted b-leg, else the first one not ended, on the dialog its
+///      requests ride (none: [`RelayPeer::NoLeg`]);
+///   5. a callee request: the a-leg.
 ///
-/// Toward the a-leg, the target dialog is the caller-facing one the tag map
-/// shows the source's fork under (its From-tag).
+/// Toward the a-leg the dialog is the live caller-facing one fronting the
+/// source's dialog when the caller was shown it, else the caller's confirmed
+/// dialog; toward a b-leg with no fork named, the dialog the leg's requests
+/// ride ([`crate::Dialogs::carrying`]).
 pub fn resolve_relay_peer(
     call: &Call,
     source_leg_id: &str,
-    tags: RequestTags<'_>,
-) -> (Option<String>, Option<String>) {
-    let a_face =
-        || tags.from.and_then(|t| find_by_b_tag(call, source_leg_id, t)).map(|m| m.a_tag.clone());
+    source: Option<&DialogId>,
+) -> RelayPeer {
     let a_leg_id = &call.a_leg.leg_id;
-    if let Some(p) = &call.active_peer {
-        if p.leg_a == source_leg_id {
-            let face = (&p.leg_b == a_leg_id).then(a_face).flatten();
-            return (Some(p.leg_b.clone()), face);
-        }
-        if p.leg_b == source_leg_id {
-            let face = (&p.leg_a == a_leg_id).then(a_face).flatten();
-            return (Some(p.leg_a.clone()), face);
-        }
+    let toward = |leg_id: &str| -> RelayPeer {
+        let dialog = if leg_id == a_leg_id {
+            toward_caller(call, source_leg_id, source)
+        } else {
+            find_b_leg(call, leg_id).and_then(|l| l.dialogs.carrying()).map(Dialog::id)
+        };
+        RelayPeer::Leg { leg_id: leg_id.to_string(), dialog }
+    };
+    if let Some(peer) = get_peer(call, source_leg_id) {
+        return toward(peer);
     }
     if source_leg_id == a_leg_id {
-        if let Some(tag) = tags.to {
-            if let Some(m) = find_by_a_tag(call, tag) {
-                return (Some(m.b_leg_id.clone()), Some(m.b_tag.clone()));
+        if let Some(face) =
+            source.and_then(|id| call.a_leg.dialogs.by_tags(&id.our_tag, &id.peer_tag))
+        {
+            if let Some((leg_id, fork)) = fronted_fork(call, face) {
+                return RelayPeer::Leg { leg_id, dialog: fork.map(Dialog::id) };
             }
         }
-    } else if let Some(leg) = find_b_leg(call, source_leg_id) {
-        if !is_adopted(leg) {
-            return (None, None);
+        let adopted = || call.b_legs.iter().filter(|l| is_adopted(l));
+        let peer = adopted()
+            .find(|l| l.state() == LegState::Confirmed)
+            .or_else(|| adopted().find(|l| l.state() != LegState::Terminated));
+        return match peer {
+            Some(l) => toward(&l.leg_id),
+            None => RelayPeer::NoLeg,
+        };
+    }
+    if find_b_leg(call, source_leg_id).is_some_and(|leg| !is_adopted(leg)) {
+        return RelayPeer::Unadopted;
+    }
+    toward(a_leg_id)
+}
+
+/// The caller-facing dialog a request from `source_leg_id`'s dialog `source`
+/// (its peer tag the callee's) is relayed on: the live one fronting it
+/// when the caller was shown it, else the caller's confirmed dialog. `None`
+/// while the caller holds no dialog that callee dialog was shown under.
+fn toward_caller(call: &Call, source_leg_id: &str, source: Option<&DialogId>) -> Option<DialogId> {
+    let face = source
+        .and_then(|id| fronting_dialog(call, source_leg_id, &id.peer_tag))
+        .filter(|d| d.is_live());
+    match face {
+        Some(d) => (d.shown || d.was_established()).then(|| d.id()),
+        None => call.a_leg.dialogs.confirmed().map(Dialog::id),
+    }
+}
+
+/// The callee leg and dialog the caller-facing dialog `face` relays: of the
+/// callee dialogs it fronts, the one a provisional last showed her under it
+/// whose dialog carries requests, else that last one (her view of the
+/// dialog, RFC 3261 §12.1.1). `None` when it fronts none.
+fn fronted_fork<'a>(call: &'a Call, face: &Dialog) -> Option<(String, Option<&'a Dialog>)> {
+    let fork = |f: &crate::model::PeerDialog| {
+        find_b_leg(call, &f.leg_id).and_then(|l| callee_dialog(l, &f.peer_tag))
+    };
+    let last = face.fronts.last()?;
+    face.fronts
+        .iter()
+        .rev()
+        .find_map(|f| fork(f).filter(|d| d.carries_requests()).map(|d| (f.leg_id.clone(), Some(d))))
+        .or_else(|| Some((last.leg_id.clone(), fork(last))))
+}
+
+/// Note that a provisional of the callee dialog `(b_leg_id, b_tag)` was just
+/// shown to the caller: it becomes the last its caller-facing dialog fronts.
+pub fn note_shown(call: &mut Call, b_leg_id: &str, b_tag: &str) {
+    for d in call.a_leg.dialogs.iter_mut() {
+        let at = d.fronts.iter().position(|f| f.leg_id == b_leg_id && f.peer_tag == b_tag);
+        if let Some(tail) = at.and_then(|at| d.fronts.get_mut(at..)).filter(|t| !t.is_empty()) {
+            tail.rotate_left(1);
         }
     }
-    if source_leg_id == a_leg_id {
-        let peer = call
-            .b_legs
-            .iter()
-            .find(|l| l.state == LegState::Confirmed)
-            .or_else(|| call.b_legs.first())
-            .map(|l| l.leg_id.clone());
-        return (peer, None);
-    }
-    (Some(a_leg_id.clone()), a_face())
 }
 
 /// Is the relay target of an in-dialog request from `source_leg_id` in a
 /// **relayable** state? `false` exactly when a `RelayToPeer` would go nowhere
-/// useful: no peer leg resolves, the peer leg is `Terminated` (a failed b-leg
-/// whose `/call/failure` reroute is still pending), or the target dialog
-/// carries no remote tag yet (a replacement leg still `Trying` — the relay
-/// machinery cannot mint a well-formed in-dialog request, so the relay path
-/// would silently drop it). An `Early` dialog WITH a remote tag is relayable —
-/// an early-dialog UPDATE is the RFC 3311 §5.1 normal case.
-pub fn relay_peer_dialog_ready(call: &Call, source_leg_id: &str, tags: RequestTags<'_>) -> bool {
-    relay_peer_dialog(call, source_leg_id, tags)
-        .is_some_and(|(leg, d)| leg.state != LegState::Terminated && !d.sip.remote_tag.is_empty())
+/// useful: no peer leg or dialog resolves, or the peer leg is `Terminated`
+/// (a failed b-leg whose `/call/failure` reroute is still pending). An
+/// `Early` dialog is relayable — an early-dialog UPDATE is the RFC 3311 §5.1
+/// normal case.
+pub fn relay_peer_dialog_ready(
+    call: &Call,
+    source_leg_id: &str,
+    source: Option<&DialogId>,
+) -> bool {
+    relay_peer_dialog(call, source_leg_id, source)
+        .is_some_and(|(leg, _)| leg.state() != LegState::Terminated)
 }
 
 /// The `(leg, dialog)` a relayed in-dialog request from `source_leg_id` would
-/// be regenerated on: [`resolve_relay_peer`]'s leg pick, then the relay path's
-/// dialog pick (the dialog its identity tag names, else the first). The
-/// single resolver behind both [`relay_peer_dialog_ready`] and the
-/// rule-vocabulary peer-dialog reads, so match and action never disagree.
+/// be regenerated on, by [`resolve_relay_peer`]. The single resolver behind
+/// both [`relay_peer_dialog_ready`] and the rule-vocabulary peer-dialog reads,
+/// so match and action never disagree.
 pub fn relay_peer_dialog<'a>(
     call: &'a Call,
     source_leg_id: &str,
-    tags: RequestTags<'_>,
+    source: Option<&DialogId>,
 ) -> Option<(&'a Leg, &'a Dialog)> {
-    let (peer, fork_tag) = resolve_relay_peer(call, source_leg_id, tags);
-    let peer_id = peer?;
-    let leg = if peer_id == call.a_leg.leg_id { &call.a_leg } else { find_b_leg(call, &peer_id)? };
-    let dialog = fork_tag
-        .as_deref()
-        .and_then(|tt| dialog_by_identity(leg, tt))
-        .or_else(|| leg.dialogs.first())?;
-    Some((leg, dialog))
+    let RelayPeer::Leg { leg_id, dialog: Some(id) } =
+        resolve_relay_peer(call, source_leg_id, source)
+    else {
+        return None;
+    };
+    let leg = if leg_id == call.a_leg.leg_id { &call.a_leg } else { find_b_leg(call, &leg_id)? };
+    Some((leg, leg.dialogs.by_tags(&id.our_tag, &id.peer_tag)?))
 }

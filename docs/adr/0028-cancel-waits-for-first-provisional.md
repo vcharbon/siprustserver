@@ -1,6 +1,6 @@
 # The b-leg CANCEL waits for the first provisional — bounded by a grace window, then goes regardless
 
-**Status:** accepted (2026-08-09, amended 2026-08-10: the hold is bounded by
+**Status:** superseded by ADR-0043 (2026-10-11). Accepted (2026-08-09, amended 2026-08-10: the hold is bounded by
 default — a grace expiry sends the CANCEL unconditionally; the literal §9.1
 wait remains available as a configuration; amended 2026-08-26: an on-wire
 CANCEL retransmits on a Timer-E ladder, X4)
@@ -151,4 +151,4 @@ ACK is exempt — a 2xx ACK is TU-owned and rides no timer (§13.2.2.4). Counter
 `sip-txn/tests/it/cancel_hold.rs`, `sip-txn/tests/it/cancel_retransmit.rs` (X4),
 `b2bua-harness/tests/cancel_before_provisional.rs`,
 `b2bua-harness/tests/no_answer_cancelled_call.rs`,
-`failover-harness/tests/it/silent_callee_no_answer_via_lb.rs` (via-LB shape, X2).
+`failover-harness/tests/it/abandoned_callee_via_lb.rs` (via-LB shape, X2).

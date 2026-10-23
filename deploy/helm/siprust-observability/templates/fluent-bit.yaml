@@ -1,0 +1,89 @@
+{{- if .Values.logShipping.enabled }}
+{{- $f := .Values.logShipping }}
+{{- $conf := tpl (.Files.Get "files/fluent-bit.conf") . }}
+{{- $parsers := .Files.Get "files/parsers.conf" }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluent-bit
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "obs.labels" (dict "root" $ "app" "fluent-bit") | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Namespace }}-fluent-bit
+  labels:
+    {{- include "obs.labels" (dict "root" $ "app" "fluent-bit") | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods, namespaces]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Namespace }}-fluent-bit
+  labels:
+    {{- include "obs.labels" (dict "root" $ "app" "fluent-bit") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Namespace }}-fluent-bit
+subjects:
+  - kind: ServiceAccount
+    name: fluent-bit
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "obs.labels" (dict "root" $ "app" "fluent-bit") | nindent 4 }}
+data:
+  fluent-bit.conf: |
+    {{- $conf | nindent 4 }}
+  parsers.conf: |
+    {{- $parsers | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "obs.labels" (dict "root" $ "app" "fluent-bit") | nindent 4 }}
+spec:
+  selector:
+    matchLabels: { app: fluent-bit }
+  template:
+    metadata:
+      labels: { app: fluent-bit }
+      # fluent-bit reads its config at start: a changed config rolls the pods.
+      annotations:
+        checksum/config: {{ print $conf $parsers | sha256sum }}
+    spec:
+      serviceAccountName: fluent-bit
+      {{- with include "obs.pullSecrets" . | trim }}{{ . | nindent 6 }}{{- end }}
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: fluent-bit
+          {{- include "obs.image" $f.image | nindent 10 }}
+          ports:
+            - { name: http, containerPort: 2020 }
+          resources:
+            {{- toYaml $f.resources | nindent 12 }}
+          volumeMounts:
+            - { name: varlog, mountPath: /var/log }
+            - { name: varlibdocker, mountPath: /var/lib/docker/containers, readOnly: true }
+            - { name: config, mountPath: /fluent-bit/etc/fluent-bit.conf, subPath: fluent-bit.conf }
+            - { name: config, mountPath: /fluent-bit/etc/parsers.conf, subPath: parsers.conf }
+      volumes:
+        - { name: varlog, hostPath: { path: /var/log } }
+        - { name: varlibdocker, hostPath: { path: /var/lib/docker/containers } }
+        - { name: config, configMap: { name: fluent-bit-config } }
+{{- end }}

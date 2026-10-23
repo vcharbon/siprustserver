@@ -393,7 +393,7 @@ impl Proxy {
                         &InviteClientTransactionHandle { original_invite: forwarded },
                         &[],
                     );
-                    self.send(cancel.image(), next_hop).await;
+                    self.send(cancel.expect("a CANCEL").image(), next_hop).await;
                 }
             }
             "INVITE" => {
@@ -426,7 +426,7 @@ impl Proxy {
                     invite.final_status = Some(resp.status());
                     let (ack, next_hop) =
                         (generate_ack_for_non_2xx(&invite.forwarded, &resp, &[]), invite.next_hop);
-                    self.send(ack.image(), next_hop).await;
+                    self.send(ack.expect("an ACK").image(), next_hop).await;
                     if repeat {
                         return;
                     }
@@ -514,7 +514,7 @@ impl Proxy {
         for (forwarded, next_hop) in pending {
             let cancel =
                 generate_cancel(&InviteClientTransactionHandle { original_invite: forwarded }, &[]);
-            self.send(cancel.image(), next_hop).await;
+            self.send(cancel.expect("a CANCEL").image(), next_hop).await;
         }
     }
 
@@ -528,7 +528,7 @@ impl Proxy {
             let ack = generate_ack_for_non_2xx(&branch.forwarded, &resp, &[]);
             let (repeat, next_hop) = (branch.final_status.is_some(), branch.next_hop);
             branch.final_status = Some(status);
-            self.send(ack.image(), next_hop).await;
+            self.send(ack.expect("an ACK").image(), next_hop).await;
             if repeat {
                 return;
             }
@@ -619,7 +619,8 @@ impl Proxy {
             status,
             reason,
             &GenerateResponseOpts { to_tag, ..Default::default() },
-        );
+        )
+        .expect("a response");
         let to = response_next_hop(&resp).expect("the top Via names an address");
         self.send(resp.image(), to).await;
         let txn = self.server.entry(key.clone()).or_default();

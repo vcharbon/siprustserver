@@ -1,0 +1,9 @@
+apiVersion: v2
+name: siprust-observability
+description: >-
+  In-cluster collectors (vmagent, kube-state-metrics, node-exporter, fluent-bit)
+  shipping a cluster's metrics and container logs to a VictoriaMetrics /
+  VictoriaLogs pair outside the cluster.
+type: application
+version: 0.1.0
+appVersion: "dev"

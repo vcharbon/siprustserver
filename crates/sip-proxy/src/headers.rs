@@ -1,11 +1,11 @@
 //! The proxy's Record-Route policy: the entries this proxy records on a dialog
-//! and the stickiness cookie read back off one.
+//! and the stickiness cookie read back off one, or off the proxy's own Via.
 //!
 //! Header *mechanics* — prepending a hop, popping an entry, stamping
 //! received/rport — are sip-message draft vocabulary (ADR-0025). What rides the
 //! proxy's OWN Record-Route is policy, and policy is what lives here.
 
-use sip_message::header::{ParamValue, RecordRouteEntry, Uri};
+use sip_message::header::{ParamValue, RecordRouteEntry, Uri, Via};
 
 use crate::addr::ProxyAddr;
 use crate::strategy::RouteParams;
@@ -37,7 +37,11 @@ fn entry<'a>(
 ) -> RecordRouteEntry {
     let mut uri = Uri::sip(advertised.host.clone()).with_port(advertised.port);
     for (name, value) in params {
-        uri = uri.with_param(name.as_str(), ParamValue::text(value.as_str()));
+        // `pvalue = 1*paramchar` (RFC 3261 §25.1): an empty value rides as a
+        // flag, which [`cookie_params`] reads back empty.
+        let value =
+            if value.is_empty() { ParamValue::Flag } else { ParamValue::text(value.as_str()) };
+        uri = uri.with_param(name.as_str(), value);
     }
     if let Some(flag) = flag {
         uri = uri.with_flag(flag);
@@ -56,6 +60,27 @@ pub fn cookie_params(uri: &Uri) -> RouteParams {
             (name.as_str().to_ascii_lowercase(), value.as_str().unwrap_or_default().to_string())
         })
         .collect()
+}
+
+/// The stickiness cookie carried on one of the proxy's own Vias, read as
+/// [`cookie_params`] reads a URI: the Via's other params (branch, rport,
+/// received) ride along, unread by a strategy that names its own fields.
+pub fn via_cookie_params(via: &Via) -> RouteParams {
+    via.params()
+        .iter()
+        .map(|(name, value)| {
+            (name.as_str().to_ascii_lowercase(), value.as_str().unwrap_or_default().to_string())
+        })
+        .collect()
+}
+
+/// `via` carrying `cookie`'s fields, if any, after its own params; a field
+/// named like a param `via` already carries is left out, never written over it.
+pub fn via_with_cookie(via: Via, cookie: Option<&RouteParams>) -> Via {
+    cookie.into_iter().flatten().fold(via, |via, (name, value)| match via.param(name) {
+        Some(_) => via,
+        None => via.with_param(name.as_str(), ParamValue::text(value.as_str())),
+    })
 }
 
 /// The transport destination a Route / Record-Route entry names. The port
@@ -110,6 +135,16 @@ mod tests {
         // the strategy names the fields it decodes.
         assert!(read_back.contains_key("lr"));
         assert_eq!(route_target(written.uri()), adv);
+    }
+
+    #[test]
+    fn a_cookie_field_never_replaces_a_param_the_via_carries() {
+        let via = Via::udp("10.0.0.1", 5060).with_branch("z9hG4bKours").requesting_rport();
+        let mut cookie = cookie();
+        cookie.insert("branch".to_string(), "z9hG4bKforced".to_string());
+        let stamped = via_with_cookie(via, Some(&cookie));
+        assert_eq!(stamped.branch(), Some("z9hG4bKours"));
+        assert_eq!(via_cookie_params(&stamped).get("w_pri").map(String::as_str), Some("b2b-1"));
     }
 
     #[test]

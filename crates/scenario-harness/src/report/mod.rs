@@ -1,6 +1,6 @@
 //! Report renderers — port of the `*-report` / `svg-sequence-diagram` family
 //! in `src/test-harness/framework`. Every renderer consumes the **recording**:
-//! the `RecordedSipEntry` trace projected by `sip_net::to_sip_entries` plus the
+//! the `RecordedSipEntry` trace projected by `sip_net_testkit::to_sip_entries` plus the
 //! `RecordedScenario` (lanes + anomalies) drained from the `layer-harness`
 //! `Recorder`. Nothing here reads interpreter state — the record is the source
 //! of truth, as the migration's recording-first design intends.
@@ -65,7 +65,7 @@ fn doc_anomalies(report: &RunReport) -> Vec<seq_report::Anomaly> {
 
 /// RFC status reaches the report: fold the report's full-suite finding set
 /// ([`RunReport::rfc_findings`] — the SHARED role-aware evaluator
-/// `sip_net::evaluate_rfc_findings`, run once per report) into the doc
+/// `sip_net_testkit::evaluate_rfc_findings`, run once per report) into the doc
 /// anomalies, each tagged with its rule name and its advisory/gating severity.
 /// The evaluator applies **subject dispatch** — a finding is kept only when
 /// the rule's `subject()` intersects the originating bind's declared roles —
@@ -82,7 +82,7 @@ fn cross_message_anomalies(report: &RunReport) -> Vec<seq_report::Anomaly> {
     // resolve it to that entry's global `seq` — the stable row identity the
     // rendered doc keys on (the doc's rows are a superset view over the same
     // recording, so seq equality is the join).
-    let wire = sip_net::audit_wire_entries(report.events());
+    let wire = sip_net_testkit::audit_wire_entries(report.events());
     report
         .rfc_findings()
         .iter()

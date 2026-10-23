@@ -9,12 +9,14 @@ use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, StackDialog,
 };
 use sip_message::header::{HeaderName, MediaType};
-use sip_message::{
-    apply_name_forms, apply_remote_target_emits, emitted_wire, DelayedAutomatic, EmitOpts,
-    MessageTemplate, SipHeader, SipMessage,
+use sip_message::{DelayedAutomatic, SipHeader, SipMessage};
+use sip_template::{
+    apply_name_forms, apply_remote_target_emits, emitted_wire, EmitOpts, MessageTemplate,
 };
 
 use super::client_invite::ClientInvite;
+use super::party::Party;
+use super::step::{unwrap_step, StepError};
 use super::ua::{from_of, media_type, to_of, uri_of};
 use super::Agent;
 
@@ -58,7 +60,8 @@ pub struct Invite<'a> {
     delayed_automatic: Option<DelayedAutomatic>,
     /// The `(Call-ID, From tag)` the dialog is created under; `None` mints both.
     identity: Option<(String, String)>,
-    /// The INVITE's CSeq number; `None` is 1. A retry of an earlier INVITE
+    /// The INVITE's CSeq number; `None` is the caller's first
+    /// ([`Party::first_cseq`]). A retry of an earlier INVITE
     /// under the same identity states the next one (RFC 3261 §8.1.3.5).
     cseq: Option<u32>,
 }
@@ -205,14 +208,22 @@ impl<'a> Invite<'a> {
     }
 
     /// Generate the INVITE (all headers filled in), send it, and return the
-    /// client transaction handle.
+    /// client transaction handle. Panics on a transport failure — use
+    /// [`try_send`](Self::try_send) where a refused send is an outcome.
     pub async fn send(self) -> ClientInvite {
+        unwrap_step(self.try_send().await)
+    }
+
+    /// Fallible [`send`](Self::send): a send the network refuses is
+    /// [`StepError::Transport`].
+    pub async fn try_send(self) -> Result<ClientInvite, StepError> {
         let caller = self.caller;
         let peer = self.peer;
         let wire_dst = self.wire_dst.unwrap_or(peer.addr);
-        let (call_id, from_tag) = self.identity.clone().unwrap_or_else(|| {
-            (format!("{}-{}@{}", caller.name, caller.ids.next(), caller.addr.ip()), caller.tag())
-        });
+        let (call_id, from_tag) = self
+            .identity
+            .clone()
+            .unwrap_or_else(|| (caller.ids.call_id(&caller.name, caller.addr.ip()), caller.tag()));
         // Default identities are the agent URIs / a peer-addressed R-URI; a Test
         // case may override any of From/To/R-URI from its input data.
         let request_uri = self.request_uri.clone().unwrap_or_else(|| {
@@ -226,7 +237,7 @@ impl<'a> Invite<'a> {
             call_id: call_id.clone(),
             from: Some(from_of(&from_uri, &from_tag)),
             to: Some(to_of(&to_uri)),
-            cseq: self.cseq.unwrap_or(1),
+            cseq: self.cseq.unwrap_or(Party::Caller.first_cseq()),
             via: Some(caller.via()),
             contact: Some(caller.contact()),
             max_forwards: Some(self.max_forwards.unwrap_or(70)),
@@ -240,7 +251,8 @@ impl<'a> Invite<'a> {
             content_type: self.content_type.clone(),
             extra_headers: self.extra_headers.clone(),
         };
-        let mut invite = generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts);
+        let mut invite = generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts)
+            .expect("the scenario's INVITE");
         if self.suppress_default_ct {
             invite = invite
                 .thaw()
@@ -257,7 +269,7 @@ impl<'a> Invite<'a> {
             &self.remote_emits,
         );
         let invite_wire = emitted_wire(&msg, &headers);
-        caller.send_wire(&invite_wire, wire_dst).await;
+        caller.try_send_emitted(&msg, &invite_wire, wire_dst).await?;
 
         let dialog = StackDialog {
             call_id,
@@ -266,10 +278,10 @@ impl<'a> Invite<'a> {
             local_uri: from_uri,
             remote_uri: to_uri,
             remote_target: request_uri,
-            local_cseq: self.cseq.unwrap_or(1),
+            local_cseq: self.cseq.unwrap_or(Party::Caller.first_cseq()),
             route_set: vec![],
         };
-        ClientInvite {
+        Ok(ClientInvite {
             agent: caller.clone(),
             fallback_addr: peer.addr,
             wire_dst,
@@ -278,6 +290,6 @@ impl<'a> Invite<'a> {
             dialog,
             fork_cseq: HashMap::new(),
             delayed_automatic: self.delayed_automatic,
-        }
+        })
     }
 }

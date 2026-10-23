@@ -8,15 +8,20 @@ use sip_message::method::Method;
 use sip_message::status::STACK_CODES;
 
 use super::metrics::{
-    CancelLookup, Direction, Face, HmacFailureReason, MessageResult, RoutingDecisionKind,
+    CancelLookup, Direction, Face, HmacFailureReason, MessageResult, NoTargetDrop,
+    RoutingDecisionKind, UntrustedClaim,
 };
 use super::peer_failures::{PeerFailureKind, PeerScope};
 use crate::resolver::{outcome, refresh_outcome};
 use crate::self_gate::ShedReason;
-use crate::strategy::Promotion;
+
+mod intake;
+mod parse;
+pub use intake::{INTAKE_SHED, INTAKE_UNANSWERABLE};
+pub use parse::{PARSE_ERRORS, PARSE_PANICS, PARSE_REFUSALS_ANSWERED, PARSE_REFUSALS_CAPPED};
 
 /// `direction:result`, every direction then every result.
-const MESSAGE_LABELS: [&str; 6] = [
+const MESSAGE_LABELS: [&str; Direction::ALL.len() * MessageResult::ALL.len()] = [
     "inbound:forwarded",
     "inbound:responded",
     "inbound:dropped",
@@ -26,22 +31,24 @@ const MESSAGE_LABELS: [&str; 6] = [
 ];
 
 /// `face:direction`, every face then every direction.
-const FACE_LABELS: [&str; 4] = ["int:inbound", "int:outbound", "ext:inbound", "ext:outbound"];
+const FACE_LABELS: [&str; Face::ALL.len() * Direction::ALL.len()] =
+    ["int:inbound", "int:outbound", "ext:inbound", "ext:outbound"];
 
 /// A request's method: every method modelled natively; an extension method
 /// gets its own series, under the family's cap.
 pub const METHOD: Dim = Dim::new("method", &Method::NATIVE_TOKENS);
 
+#[expect(clippy::indexing_slicing, reason = "a const: an index past its table fails the build")]
 const ANSWERED_METHOD_VALUES: [&str; 13] = {
     let mut out = [""; 13];
-    let mut i = 0;
+    let mut rest: &[&str] = &Method::NATIVE_TOKENS;
     let mut j = 0;
-    while i < Method::NATIVE_TOKENS.len() {
-        if !matches!(Method::NATIVE_TOKENS[i].as_bytes(), b"ACK") {
-            out[j] = Method::NATIVE_TOKENS[i];
+    while let [first, tail @ ..] = rest {
+        if !matches!(first.as_bytes(), b"ACK") {
+            out[j] = *first;
             j += 1;
         }
-        i += 1;
+        rest = tail;
     }
     out
 };
@@ -62,32 +69,42 @@ const HMAC_REASON_VALUES: [&str; 3] =
 /// Why an HMAC verify failed, indexed like [`HmacFailureReason::ALL`].
 pub const HMAC_REASON: Dim = Dim::new("reason", &HMAC_REASON_VALUES);
 
+const UNTRUSTED_CLAIM_VALUES: [&str; 5] =
+    label_values!(UntrustedClaim::ALL, UntrustedClaim::as_str);
+
 const CANCEL_LOOKUP_VALUES: [&str; 2] = label_values!(CancelLookup::ALL, CancelLookup::as_str);
 
-const PROMOTION_VALUES: [&str; 2] = label_values!(Promotion::ALL, Promotion::as_str);
+const NO_TARGET_DROP_VALUES: [&str; 3] = label_values!(NoTargetDrop::ALL, NoTargetDrop::as_str);
 
 /// Every locally decided reject: the routing path's own, the load
 /// balancer's selection failures, the self gate's.
-const REJECT_REASONS: [&str; 13] = [
+const REJECT_REASONS: [&str; 16] = [
     "drop_unforwardable",
+    "no_target_dropped",
     "non_request",
+    "ack_not_answered",
     "ack_max_forwards_exhausted",
     "too_many_hops",
     "ack_proxy_require_unsupported",
     "proxy_require_unsupported",
     "malformed_request_uri",
+    "unsupported_uri_scheme",
     "stickiness_decode_rejected",
     "no_target_selected",
     "no_target_available",
     "worker_rate_capped",
-    ShedReason::Elu.label(),
+    ShedReason::IntakeAge.label(),
     ShedReason::Cps.label(),
 ];
 
 const SHED_REASON_VALUES: [&str; 2] = label_values!(ShedReason::ALL, ShedReason::label);
 
 /// A worker's health state, in the order the registry counts them.
-pub const HEALTH_STATES: [&str; 5] = ["alive", "draining", "not-ready", "unknown", "dead"];
+pub const HEALTH_STATES: [&str; 3] = ["alive", "unknown", "dead"];
+
+/// An alive worker's acceptance of new calls, in the order the registry
+/// counts them.
+pub const ACCEPTANCE_STATES: [&str; 2] = ["accept", "refuse"];
 
 /// A peer: no value declared; each one observed gets its own series.
 pub const PEER: Dim = Dim::new("peer", &[]);
@@ -105,6 +122,13 @@ assert_exposition_order!(Direction: Inbound, Outbound);
 assert_exposition_order!(MessageResult: Forwarded, Responded, Dropped);
 assert_exposition_order!(Face: Internal, External);
 assert_exposition_order!(
+    UntrustedClaim: OutboundMarker,
+    WorkerVia,
+    WorkerSource,
+    ForeignRoute,
+    ResponseNotToWorker,
+);
+assert_exposition_order!(
     RoutingDecisionKind: SelectNew,
     DecodeForward,
     DecodeForwardBackup,
@@ -116,8 +140,8 @@ assert_exposition_order!(
 );
 assert_exposition_order!(HmacFailureReason: Missing, Decode, Mismatch);
 assert_exposition_order!(CancelLookup: Hit, Miss);
-assert_exposition_order!(Promotion: FreshPod, NotReady);
-assert_exposition_order!(ShedReason: Elu, Cps);
+assert_exposition_order!(NoTargetDrop: InDialog, Cancel, Initial);
+assert_exposition_order!(ShedReason: IntakeAge, Cps);
 assert_exposition_order!(PeerScope: Internal, External);
 assert_exposition_order!(
     PeerFailureKind: ResponseTimeout,
@@ -136,6 +160,12 @@ pub const FACE_MESSAGES: Family = Family::counter(
     "sip_proxy_face_messages_total",
     Labels::Product(&[Dim::new("label", &FACE_LABELS)]),
     "Datagrams by proxy face + direction (dual-face mode; single-face records int only).",
+);
+
+pub const EXTERNAL_UNTRUSTED: Family = Family::counter(
+    "sip_proxy_external_untrusted_total",
+    Labels::Product(&[Dim::new("kind", &UNTRUSTED_CLAIM_VALUES)]),
+    "Messages on the external face claiming the internal plane, by claim: an outbound marker, a worker Via or a worker source ignored, foreign Route entries removed (the request is routed as an inbound one), a response whose next Via is no worker dropped.",
 );
 
 pub const REQUESTS: Family = Family::counter(
@@ -182,16 +212,10 @@ pub const CANCEL_LOOKUPS: Family = Family::counter(
     "CANCEL messages, retransmissions included, by whether their INVITE's hop was remembered (hit: the CANCEL follows it; miss: routed on its own).",
 );
 
-pub const DECODE_FORWARD_PROMOTIONS: Family = Family::counter(
-    "sip_proxy_decode_forward_promotions_total",
-    Labels::Product(&[Dim::new("reason", &PROMOTION_VALUES)]),
-    "Requests routed by the stickiness cookie (in-dialog requests and a CANCEL following its INVITE's cookie, retransmissions included) sent to the cookie's backup although the primary is up: alive inside its fresh-pod guard window (fresh_pod) or not ready (not_ready). A dead, unknown, departed or draining-past-grace primary is not counted here (sip_routing_decision_total kind=decode_forward_backup counts every backup forward).",
-);
-
-pub const FRESH_POD_FORWARDS: Family = Family::counter(
-    "sip_proxy_fresh_pod_forwards_total",
-    Labels::None,
-    "Requests routed by the stickiness cookie (in-dialog requests and a CANCEL following its INVITE's cookie, retransmissions included) forwarded to a primary inside its fresh-pod guard window because the cookie names no usable backup.",
+pub const NO_TARGET_DROPPED: Family = Family::counter(
+    "sip_proxy_no_target_dropped_total",
+    Labels::Product(&[Dim::new("kind", &NO_TARGET_DROP_VALUES)]),
+    "Requests dropped unanswered because neither the primary nor the backup of the stickiness cookie placing them is alive: an in-dialog request (in_dialog), a CANCEL following its INVITE's cookie (cancel), a retransmitted out-of-dialog request following the cookie its first copy minted (initial); retransmissions included. The sender's retransmission meets the next worker view.",
 );
 
 pub const ROUTING_DURATION_SECONDS: Family =
@@ -227,6 +251,12 @@ pub const SEND_FAILURES: Family = Family::counter(
     "Outbound datagrams the endpoint failed to send.",
 );
 
+pub const POISONED_LOCK_RECOVERIES: Family = Family::counter(
+    "sip_proxy_poisoned_lock_recoveries_total",
+    Labels::Product(&[Dim::new("lock", &crate::poison::LOCKS)]),
+    "Proxy locks a panic poisoned, taken as they stood and cleared (process-wide), by lock; each one is a defect, expected 0.",
+);
+
 pub const UDP_QUEUE_DEPTH: Family = Family::gauge(
     "sip_proxy_udp_queue_depth",
     Labels::None,
@@ -251,12 +281,6 @@ pub const UDP_TAIL_DROPPED: Family = Family::counter(
     "Datagrams tail-dropped by the full inbound queue(s), summed over recv shards and both faces.",
 );
 
-pub const INTAKE_SHED: Family = Family::counter(
-    "sip_proxy_intake_shed_total",
-    Labels::None,
-    "New non-emergency INVITEs dropped by the depth-watermark pre-ingress shed (the selective last-line guard below the admission layer).",
-);
-
 pub const UDP_SEND_WOULD_BLOCK: Family = Family::counter(
     "sip_proxy_udp_send_would_block_total",
     Labels::None,
@@ -269,6 +293,18 @@ pub const UDP_KERNEL_RX_DROPPED: Family = Family::counter(
     "Inbound datagrams the kernel dropped on the signalling sockets before the proxy read them, mostly on a full receive buffer (SO_RCVBUF, PROXY_UDP_RCVBUF). Summed over recv shards and both faces.",
 );
 
+pub const UDP_PRE_INGRESS_PANICS: Family = Family::counter(
+    "sip_proxy_udp_pre_ingress_panics_total",
+    Labels::None,
+    "Inbound datagrams whose pre-ingress hook (the intake shed) panicked on the receive pump; each was accepted and is a hook defect, expected 0. Summed over recv shards and both faces.",
+);
+
+pub const UDP_RECV_ERRORS: Family = Family::counter(
+    "sip_proxy_udp_recv_errors_total",
+    Labels::None,
+    "Receives that failed on the signalling sockets (memory or buffers exhausted); the recv pump reads on after each, expected 0 outside an incident. Summed over recv shards and both faces.",
+);
+
 pub const RECV_SHARDS_STALLED: Family = Family::gauge(
     "sip_proxy_recv_shards_stalled",
     Labels::None,
@@ -279,6 +315,18 @@ pub const WORKER_POOL_EMPTY: Family = Family::gauge(
     "sip_proxy_worker_pool_empty",
     Labels::None,
     "1 iff no worker is Alive (routable) — the proxy can serve no new dialog.",
+);
+
+pub const DISCOVERY_NO_CLIENT: Family = Family::gauge(
+    "sip_proxy_discovery_no_client",
+    Labels::None,
+    "1 while worker discovery's kube client has failed to build and none is built, so nothing is discovered; 0 before the first attempt ends, once one is built, and with a fixed PROXY_WORKERS pool.",
+);
+
+pub const DISCOVERY_WATCH_BROKEN_SINCE: Family = Family::gauge(
+    "sip_proxy_discovery_watch_broken_since_seconds",
+    Labels::None,
+    "Unix time the worker EndpointSlice watch broke, 0 while it delivers (an event, or 90 s without an error) and with a fixed PROXY_WORKERS pool. The last listed pool stays meanwhile and the OPTIONS probe keeps its health current.",
 );
 
 pub const OVERLOAD_REJECTIONS: Family = Family::counter(
@@ -303,6 +351,12 @@ pub const WORKER_HEALTH: Family = Family::gauge(
     "sip_worker_health",
     Labels::Product(&[Dim::new("health", &HEALTH_STATES)]),
     "Worker count by health state.",
+);
+
+pub const WORKER_ACCEPTANCE: Family = Family::gauge(
+    "sip_worker_acceptance",
+    Labels::Product(&[Dim::new("acceptance", &ACCEPTANCE_STATES)]),
+    "Alive worker count by acceptance of new calls (the X-Readiness their OPTIONS answer states): accept, or refuse while they serve their dialogs.",
 );
 
 pub const PEER_FAILURES: Family = Family::counter(
@@ -383,6 +437,7 @@ pub const SELF_GATE_INTERNAL_BYPASSED: Family = Family::counter(
 pub const PROXY: &[Family] = &[
     MESSAGES,
     FACE_MESSAGES,
+    EXTERNAL_UNTRUSTED,
     REQUESTS,
     REQUESTS_OVERFLOW,
     RESPONSES,
@@ -392,8 +447,7 @@ pub const PROXY: &[Family] = &[
     REJECTS,
     HMAC_FAILURES,
     CANCEL_LOOKUPS,
-    DECODE_FORWARD_PROMOTIONS,
-    FRESH_POD_FORWARDS,
+    NO_TARGET_DROPPED,
     ROUTING_DURATION_SECONDS,
     RECORD_ROUTE_INSERTED,
     PENDING_INVITE_LRU_SIZE,
@@ -401,19 +455,30 @@ pub const PROXY: &[Family] = &[
     RESOLVER_REFRESH,
     RESOLVER_CACHE_SIZE,
     SEND_FAILURES,
+    PARSE_PANICS,
+    PARSE_ERRORS,
+    PARSE_REFUSALS_ANSWERED,
+    PARSE_REFUSALS_CAPPED,
+    POISONED_LOCK_RECOVERIES,
     UDP_QUEUE_DEPTH,
     UDP_QUEUE_MAX,
     UDP_ENQUEUED,
     UDP_TAIL_DROPPED,
-    INTAKE_SHED,
     UDP_SEND_WOULD_BLOCK,
     UDP_KERNEL_RX_DROPPED,
+    UDP_PRE_INGRESS_PANICS,
+    UDP_RECV_ERRORS,
+    INTAKE_SHED,
+    INTAKE_UNANSWERABLE,
     RECV_SHARDS_STALLED,
     WORKER_POOL_EMPTY,
+    DISCOVERY_NO_CLIENT,
+    DISCOVERY_WATCH_BROKEN_SINCE,
     OVERLOAD_REJECTIONS,
     WORKER_STALE_DECREASE,
     LB_EMERGENCY_BYPASSED,
     WORKER_HEALTH,
+    WORKER_ACCEPTANCE,
     PEER_FAILURES,
     PEER_FAILURES_OVERFLOW,
 ];

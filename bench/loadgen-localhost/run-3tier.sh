@@ -129,7 +129,7 @@ cpu_ticks() { awk '{print $14 + $15}' "/proc/$1/stat" 2>/dev/null || echo 0; }
 # Peak RSS (VmHWM) in kB.
 peak_rss_kb() { awk '/^VmHWM:/ {print $2}' "/proc/$1/status" 2>/dev/null || echo 0; }
 
-# Total completed calls across every (scenario, class, chaos) series.
+# Total completed calls across every (stream, shape, class) series.
 calls_total() {
   curl -s -m 5 "http://$LG_HTTP/metrics" \
     | awk '/^loadgen_calls_total\{/ {s += $NF} END {printf "%d", s+0}'
@@ -158,9 +158,11 @@ for run in $(seq 1 "$RUNS"); do
   # starts at 30 cps and climbs 2 cps per OPTIONS tick), so at their defaults a
   # single-worker 100 cps run measures the *admission controller* — a third of
   # the calls 503 before reaching the b2bua. This baseline measures the SIP
-  # datapath, so the gates are lifted, not exercised.
+  # datapath, so the gates are lifted, not exercised. The one proxy signs its
+  # own stickiness cookies: a per-run key, shared with nothing.
   PROXY_LISTEN=$PROXY_SIP PROXY_ADVERTISE=$PROXY_SIP \
   PROXY_WORKERS=w0@$B2BUA_SIP PROXY_METRICS=$PROXY_HTTP \
+  PROXY_HMAC_KEY="bench-$run-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')" \
   PROXY_SELF_GATE_CPS_RATE=1000 PROXY_SELF_GATE_CPS_SIZE=500 \
   LB_CAP_CEILING_CPS=2000 LB_AIMD_INCREASE_STEP_CPS=500 \
     scope_run "b3t-proxy-$run" 2G 400% "$RESULTS/r${run}_proxy.pid" \
@@ -279,13 +281,13 @@ done > "$RESULTS/flame-attribution.txt" 2>&1
   echo
   echo '## Result classes (whole run — the loadgen exit dump, after drain)'
   echo
-  echo '| run | scenario | class | count |'
+  echo '| run | shape | class | count |'
   echo '|---|---|---|---|'
   for run in $(seq 1 "$RUNS"); do
     awk -v run="$run" -F'[{}]' '/^loadgen_calls_total\{/ {
         split($2, kv, ","); sc = ""; cl = "";
         for (i in kv) { split(kv[i], p, "="); gsub(/"/, "", p[2]);
-                        if (p[1] == "scenario") sc = p[2]; if (p[1] == "class") cl = p[2] }
+                        if (p[1] == "shape") sc = p[2]; if (p[1] == "class") cl = p[2] }
         n = $3; gsub(/ /, "", n);
         if (n + 0 > 0) printf "| %s | %s | %s | %d |\n", run, sc, cl, n }' \
       "$RESULTS/r${run}_loadgen.log" 2>/dev/null
@@ -300,8 +302,8 @@ done > "$RESULTS/flame-attribution.txt" 2>&1
       /^loadgen_calls_total\{/         { tot += $NF; if ($0 ~ /class="ok"/) ok += $NF }
       /^loadgen_shed_total\{/          { shed += $NF }
       /^loadgen_mux_orphan_total\{/    { orph += $NF }
-      /^loadgen_mux_registry_size /    { reg = $NF }
-      /^loadgen_mux_inbox_drop_total / { drop = $NF }
+      /^loadgen_mux_registry_size\{/   { reg = $NF }
+      /^loadgen_mux_inbox_drop_total\{/ { drop = $NF }
       /^loadgen_ringing_expected_total/{ want = $NF }
       /^loadgen_ringing_received_total/{ got = $NF }
       END { printf "| %s | %d | %d | %.1f%% | %d | %d | %d | %d | %d/%d |\n",

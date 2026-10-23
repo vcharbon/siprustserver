@@ -38,34 +38,24 @@ impl Wire {
         }
     }
 
-    /// Append a decimal number without formatting machinery.
-    pub fn num(&mut self, mut n: u64) {
-        let mut digits = [0u8; 20];
-        let mut i = digits.len();
-        loop {
-            i -= 1;
-            digits[i] = b'0' + (n % 10) as u8;
-            n /= 10;
-            if n == 0 {
-                break;
-            }
-        }
-        self.buf.extend_from_slice(&digits[i..]);
+    /// Append a decimal number.
+    pub fn num(&mut self, n: u64) {
+        use std::io::Write as _;
+        // Writing into a `Vec` cannot fail.
+        let _ = write!(self.buf, "{n}");
     }
 
-    /// Append `s` as an RFC 3261 quoted-string: wrapped in `"`, with `\` and
-    /// `"` backslash-escaped so the value survives a re-parse unchanged.
+    /// Append `s` as an RFC 3261 quoted-string: wrapped in `"`, with `\`, `"`
+    /// and every control byte `qdtext` excludes backslash-escaped as a
+    /// `quoted-pair`, so the value survives a re-parse unchanged. A CR or LF
+    /// fits neither and is written as given: the freeze refuses the line.
     pub fn quoted(&mut self, s: &str) {
         self.buf.push(b'"');
-        for chunk in s.split_inclusive(['\\', '"']) {
-            match chunk.as_bytes().last() {
-                Some(b'\\') | Some(b'"') => {
-                    self.buf.extend_from_slice(&chunk.as_bytes()[..chunk.len() - 1]);
-                    self.buf.push(b'\\');
-                    self.buf.push(chunk.as_bytes()[chunk.len() - 1]);
-                }
-                _ => self.buf.extend_from_slice(chunk.as_bytes()),
+        for &b in s.as_bytes() {
+            if matches!(b, b'\\' | b'"' | 0x00..=0x08 | 0x0b | 0x0c | 0x0e..=0x1f | 0x7f) {
+                self.buf.push(b'\\');
             }
+            self.buf.push(b);
         }
         self.buf.push(b'"');
     }

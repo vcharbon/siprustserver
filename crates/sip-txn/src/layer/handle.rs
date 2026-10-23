@@ -1,7 +1,7 @@
 //! Public surface: [`TransactionLayer`] (the clone-cheap handle), its
-//! [`TransactionConfig`], and the [`Command`] funnel to the owner task. Every
-//! method round-trips over an mpsc + oneshot, so all mutations run on the
-//! single writer. The owner itself lives in `layer::owner`.
+//! [`TransactionConfig`], and the [`Command`] and [`Forget`] funnels to the
+//! owner task. Every mutation runs on the single writer: a command round-trips
+//! over an mpsc + oneshot, a forget is one-way. The owner itself lives in `layer::owner`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -11,96 +11,19 @@ use sip_message::{SipMessage, SipParser, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::event::{ClientTransactionHandle, TransactionEvent, TxnKind};
+use crate::event::{ClientTransactionHandle, TransactionEvent};
 use crate::metrics::{MetricsInner, TransactionMetrics};
-use crate::rng::IdGen;
+use crate::pulse::LoopPulse;
 use crate::seed::{Reoffer, TxnSeed};
+use call::TxnKind;
 
-use super::backlog::DeferredBound;
+pub use super::config::TransactionConfig;
 use super::key::ServerTxnKey;
-use super::owner::{run, Owner};
-use super::refusals::InviteRefusals;
+use super::owner::Owner;
+use super::run::run;
 
-/// Tunables for the transaction layer.
-pub struct TransactionConfig {
-    /// The network layer's recv-queue bound. The output event queue is sized
-    /// from it ([`event_capacity`](Self::event_capacity)).
-    pub udp_queue_max: usize,
-    /// Identifier seam (Via branch / To-tag generation).
-    pub id_gen: Arc<IdGen>,
-    /// The INVITE transaction bound once a provisional has arrived, ms — the
-    /// client txn's give-up timer for an INVITE in Proceeding (initial or
-    /// in-dialog; before any response it is on Timer B) AND the backstop of
-    /// every active INVITE transaction, either role, derive from this one
-    /// value, so both halves of a call admit the same ring window. Default
-    /// [`INVITE_INITIAL_TIMEOUT`](crate::timers::INVITE_INITIAL_TIMEOUT)
-    /// (158 s); the consumer validates its own range and MUST keep every
-    /// app-level setup deadline strictly below it, or the txn layer CANCELs
-    /// the callee before the app gives up.
-    pub invite_initial_timeout_ms: u64,
-    /// The bound on an initial INVITE's wait for a response of ANY kind, ms —
-    /// the client txn's give-up while an out-of-dialog INVITE (no To-tag) sits
-    /// in `Calling`, and the bound its Timer A ladder is armed under, so no
-    /// rung lands past the give-up. Default [`TIMER_B`](crate::timers::TIMER_B)
-    /// (32 s), the RFC 3261 §17.1.1.2 value; a deployment may tighten it
-    /// (telephony policy: a hop drawing nothing is dead, and rerouting must not
-    /// wait 64·T1), never widen it — the effective bound is
-    /// `min(this, invite_initial_timeout_ms)`, and the first provisional still
-    /// swaps in `invite_initial_timeout_ms`. An in-dialog INVITE and a
-    /// non-INVITE never read it: they keep Timer B / Timer F.
-    pub invite_first_response_timeout_ms: u64,
-    /// The held-CANCEL policy for a response-less INVITE client txn
-    /// (RFC 3261 §9.1 / ADR-0028). `Some(ms)` — the default,
-    /// [`CANCEL_HOLD_GRACE`](crate::timers::CANCEL_HOLD_GRACE) (1 s) — holds
-    /// the CANCEL for the branch's first provisional at most `ms`, then sends
-    /// it regardless: every emitted CANCEL reaches the wire; the grace is a
-    /// courtesy window, never a veto. `None` is the strict §9.1 wait: the
-    /// CANCEL is held until a provisional arrives and silently dropped if the
-    /// txn dies first — a callee that never sends one is never CANCELed
-    /// (ADR-0028 documents when that trade is acceptable).
-    pub cancel_hold_grace_ms: Option<u64>,
-    /// Whether a response the TU hands over under a To-tag other than the
-    /// bound one fails a debug build loudly (`debug_assert!`) besides being
-    /// re-rendered. The wire is corrected either way; `true` — the default —
-    /// makes the defect a test failure, and a test that exercises the
-    /// correction itself turns it off.
-    pub strict_to_tag: bool,
-    /// The ceilings on the deferred backlog past which an INVITE no
-    /// transaction holds is refused ([`DeferredBound`]), with
-    /// [`invite_refusals`](Self::invite_refusals)' answer, which it requires.
-    /// `None` — the default — sets none: the backlog then grows with the
-    /// INVITEs admitted while the consumer does not drain, until their
-    /// transactions' backstops remove them.
-    pub deferred_bound: Option<DeferredBound>,
-    /// The node's refusals of new INVITEs, shared with any stage ahead of this
-    /// layer that refuses one ([`InviteRefusals`]): a copy of an INVITE they
-    /// hold refused draws that refusal here, before any transaction exists,
-    /// and an initial INVITE this layer admits is held there while its
-    /// transaction lives. `None` — the default — shares nothing.
-    pub invite_refusals: Option<InviteRefusals>,
-}
-
-impl TransactionConfig {
-    /// The output event queue's bound: `max(64, udp_queue_max * 4)`.
-    pub fn event_capacity(&self) -> usize {
-        std::cmp::max(64, self.udp_queue_max * 4)
-    }
-}
-
-impl Default for TransactionConfig {
-    fn default() -> Self {
-        Self {
-            udp_queue_max: 256,
-            id_gen: Arc::new(IdGen::from_entropy()),
-            invite_initial_timeout_ms: crate::timers::INVITE_INITIAL_TIMEOUT,
-            invite_first_response_timeout_ms: crate::timers::TIMER_B,
-            cancel_hold_grace_ms: Some(crate::timers::CANCEL_HOLD_GRACE),
-            strict_to_tag: true,
-            deferred_bound: None,
-            invite_refusals: None,
-        }
-    }
-}
+/// The command funnel's bound.
+const COMMAND_CAPACITY: usize = 1024;
 
 pub(super) enum Command {
     SendRequest {
@@ -137,6 +60,23 @@ pub(super) enum Command {
         call_ref: String,
         reply: oneshot::Sender<()>,
     },
+    /// Delete every transaction of `call_ref` with nothing sent; replies with
+    /// how many.
+    RelinquishCall {
+        call_ref: String,
+        reply: oneshot::Sender<usize>,
+    },
+    /// Delete the Accepted client transactions of `call_ref`; replies how many.
+    RelinquishAccepted {
+        call_ref: String,
+        reply: oneshot::Sender<usize>,
+    },
+    /// Delete the server transaction `key` with nothing sent; replies whether
+    /// it was there.
+    RelinquishServer {
+        key: ServerTxnKey,
+        reply: oneshot::Sender<bool>,
+    },
     /// Count the transactions (any role/state) still attributed to `call_ref`.
     /// The B2BUA's acting-backup **self-release** (ADR-0014) polls this after
     /// serving a takeover event: when it reaches **0** the backup's served
@@ -145,19 +85,14 @@ pub(super) enum Command {
     /// or an INVITE's give-up plus its 64·T1 hold),
     /// so the acting-backup may shed its live takeover copy. Attribution — not
     /// `is_active()` — is deliberate: an INVITE server txn lingers in
-    /// `Completed` until its ACK, and shedding before the ACK would strand the
-    /// ACK relay. A txn that lives on past its obligation (a non-2xx INVITE
-    /// server txn in Confirmed for Timer I) is detached and no longer counted.
+    /// `Completed` or `Accepted` until its ACK, and shedding before the ACK
+    /// would strand the ACK relay. A txn that lives on past its obligation (an
+    /// INVITE server txn whose ACK it saw, in Confirmed for Timer I or
+    /// Accepted for Timer L; an INVITE client txn Accepted for Timer M once
+    /// its 2xx is handed up) is no longer counted.
     ActiveTxnCount {
         call_ref: String,
         reply: oneshot::Sender<usize>,
-    },
-    /// Forget the non-INVITE server transaction `key` names if it has sent
-    /// nothing yet (`Trying`) and holds the request's dialog identity; no reply.
-    ForgetUnanswered {
-        key: ServerTxnKey,
-        call_id: String,
-        from_tag: String,
     },
     /// Forget every non-INVITE server transaction of `call_ref` that has sent
     /// no final; replies with how many.
@@ -182,17 +117,31 @@ pub(super) enum Command {
     },
 }
 
+/// Forget the non-INVITE server transaction `key` names if it has sent nothing
+/// yet (`Trying`) and holds the request's dialog identity; no reply. It rides
+/// its own unbounded lane, which holds at most one per request the owner handed
+/// up, so a stalled owner lets it grow by nothing it did not already emit.
+pub(super) struct Forget {
+    pub(super) key: ServerTxnKey,
+    pub(super) call_id: String,
+    pub(super) from_tag: String,
+}
+
 /// Handle to the running transaction layer. Clone-cheap; every method funnels
 /// to the single owner task.
 #[derive(Clone)]
 pub struct TransactionLayer {
     cmd_tx: mpsc::Sender<Command>,
+    forget_tx: mpsc::UnboundedSender<Forget>,
     metrics: TransactionMetrics,
     /// Aborts the owner task (and so drops the SIP endpoint it owns). Used to
     /// simulate a hard crash: the owner otherwise lives until every `cmd_tx` clone
     /// drops, which a surviving per-call task would keep alive — so a "crashed"
     /// node would keep answering SIP. Cheap to clone.
     owner_abort: tokio::task::AbortHandle,
+    /// The owner loop's pulse: stamped from the instant a turn takes work
+    /// until it waits again.
+    owner_pulse: Arc<LoopPulse>,
 }
 
 impl TransactionLayer {
@@ -206,20 +155,39 @@ impl TransactionLayer {
         parser: Arc<dyn SipParser + Send + Sync>,
         config: TransactionConfig,
     ) -> (Self, mpsc::Receiver<TransactionEvent>) {
+        #[expect(clippy::disallowed_methods, reason = "event_capacity is within EVENT_CAPACITY")]
         let (events_tx, events_rx) = mpsc::channel::<TransactionEvent>(config.event_capacity());
-        let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(1024);
+        #[expect(clippy::disallowed_methods, reason = "COMMAND_CAPACITY is not zero")]
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(COMMAND_CAPACITY);
+        let (forget_tx, forget_rx) = mpsc::unbounded_channel::<Forget>();
 
         let metrics_inner = Arc::new(MetricsInner::new());
         let metrics = TransactionMetrics::new(metrics_inner.clone(), events_tx.clone());
 
         let owner = Owner::new(parser, events_tx, metrics_inner, config);
-        let owner_abort = tokio::spawn(run(owner, endpoint, cmd_rx)).abort_handle();
+        let owner_pulse = Arc::new(LoopPulse::new());
+        let owner_abort =
+            tokio::spawn(run(owner, endpoint, cmd_rx, forget_rx, owner_pulse.clone()))
+                .abort_handle();
 
-        (Self { cmd_tx, metrics, owner_abort }, events_rx)
+        (Self { cmd_tx, forget_tx, metrics, owner_abort, owner_pulse }, events_rx)
     }
 
     pub fn metrics(&self) -> &TransactionMetrics {
         &self.metrics
+    }
+
+    /// The owner loop's pulse: how long its current turn has run, `None`
+    /// while it waits for work.
+    pub fn owner_pulse(&self) -> &Arc<LoopPulse> {
+        &self.owner_pulse
+    }
+
+    /// The owner task, for a supervisor to see it end: every handle dropped,
+    /// the endpoint closed, aborted, or panicked. The layer answers nothing
+    /// after it. Holding it keeps neither the task nor the endpoint alive.
+    pub fn owner_task(&self) -> tokio::task::AbortHandle {
+        self.owner_abort.clone()
     }
 
     /// Abort the owner task — and so drop the SIP endpoint it owns, silencing the
@@ -244,8 +212,10 @@ impl TransactionLayer {
         rx.await.map_err(|_| TransactionLayerClosed)
     }
 
-    /// Send an outbound SIP request, allocating a client transaction and
-    /// returning its handle. `Err` if the owner task is gone (see `roundtrip`).
+    /// Send an outbound SIP request, allocating a client transaction (none
+    /// for a CANCEL or an ACK) and returning its handle. An ACK of a 2xx is
+    /// kept by its Accepted INVITE client transaction, which re-sends it to a
+    /// repeat once the call is released. `Err` if the owner task is gone.
     pub async fn send_request(
         &self,
         msg: SipRequest,
@@ -279,10 +249,11 @@ impl TransactionLayer {
     }
 
     /// Rebuild the in-flight INVITE transactions a call materialised from a
-    /// replica names (ADR-0014), each as a `Proceeding` transaction attributed
-    /// to `call_ref` — see [`TxnSeed`] for what each seed becomes. Returns how
-    /// many went in; a seed whose identity already holds a transaction of its
-    /// role is skipped and counted (`txn_seed_skipped`), never displaced.
+    /// replica names (ADR-0014), each attributed to `call_ref` — see
+    /// [`TxnSeed`] for what each seed becomes. Returns how many went in; a
+    /// seed whose identity already holds a transaction of its role is skipped
+    /// and counted (`txn_seed_skipped`), never displaced, save an occupant
+    /// with no final, which takes an Accepted seed's 2xx.
     pub async fn seed(
         &self,
         call_ref: &str,
@@ -293,11 +264,12 @@ impl TransactionLayer {
 
     /// Hand back a datagram this layer already emitted, to be processed
     /// against the transactions now in the map — the ones [`seed`](Self::seed)
-    /// just rebuilt. A response matching a client transaction, a CANCEL
-    /// matching an active INVITE server transaction and a request matching a
-    /// server transaction (RFC 3261 §17.2.3) run their first-arrival path and are
-    /// [`Reoffer::Matched`] (the consumer drops its copy: whatever that path
-    /// emits arrives as a fresh event); anything else is
+    /// just rebuilt. A response matching a client transaction and a CANCEL
+    /// matching an active INVITE server transaction run their first-arrival
+    /// path; a request matching a server transaction (RFC 3261 §17.2.3) is
+    /// absorbed with nothing sent, its arrival already answered (§17.2.1). All
+    /// three are [`Reoffer::Matched`] (the consumer drops its copy: whatever
+    /// that path emits arrives as a fresh event); anything else is
     /// [`Reoffer::Unmatched`], sent nowhere and emitted nowhere.
     pub async fn reoffer(
         &self,
@@ -307,12 +279,49 @@ impl TransactionLayer {
         self.roundtrip(|reply| Command::Reoffer { message: Box::new(message), src, reply }).await
     }
 
-    /// Cancel every client transaction whose `call_ref` matches — the
-    /// call-eviction teardown (so Timer B/F can't fire against a vanished
-    /// call). Idempotent.
+    /// Release every client transaction of `call_ref`, Accepted ones included:
+    /// each is orphaned and closes its own obligations, the ACK of each later
+    /// 2xx among them, surfacing nothing (ADR-0034). Idempotent.
     pub async fn cancel_txns_for_call(&self, call_ref: &str) -> Result<(), TransactionLayerClosed> {
         self.roundtrip(|reply| Command::CancelTxnsForCall { call_ref: call_ref.to_string(), reply })
             .await
+    }
+
+    /// Relinquish every transaction of `call_ref`, client and server, to the
+    /// node that serves the call now: each is deleted with its timers, nothing
+    /// sent and nothing owed, and no `CallQuiesced` follows. A message for one
+    /// of them arriving afterwards matches nothing here and is handed up as a
+    /// new arrival. Returns how many went. Idempotent.
+    pub async fn relinquish_call(&self, call_ref: &str) -> Result<usize, TransactionLayerClosed> {
+        self.roundtrip(|reply| Command::RelinquishCall { call_ref: call_ref.to_string(), reply })
+            .await
+    }
+
+    /// Delete the Accepted INVITE client transactions of `call_ref` with
+    /// nothing sent, ahead of a release that does not end the call: no later
+    /// 2xx draws this layer's ACK or BYE on a dialog the call keeps, and a
+    /// repeat is a new arrival. Returns how many went. Idempotent.
+    pub async fn relinquish_accepted_of_call(
+        &self,
+        call_ref: &str,
+    ) -> Result<usize, TransactionLayerClosed> {
+        self.roundtrip(|reply| Command::RelinquishAccepted {
+            call_ref: call_ref.to_string(),
+            reply,
+        })
+        .await
+    }
+
+    /// Relinquish the one server transaction `key` to the node that answered
+    /// its request: it is deleted with its timers, nothing sent and nothing
+    /// owed. A retransmission of its request arriving afterwards matches
+    /// nothing here and is handed up as a new arrival. Returns whether it was
+    /// there. Idempotent.
+    pub async fn relinquish_server(
+        &self,
+        key: ServerTxnKey,
+    ) -> Result<bool, TransactionLayerClosed> {
+        self.roundtrip(|reply| Command::RelinquishServer { key, reply }).await
     }
 
     /// How many transactions for `call_ref` are still resident in the map (any
@@ -333,17 +342,16 @@ impl TransactionLayer {
     /// Another request on the same branch — another sent-by or method — is
     /// another transaction and is never forgotten, and the request's `call_id`
     /// and `from_tag` must match the transaction's; a transaction that has
-    /// sent a response is kept. Never waits: a full command queue refuses the
-    /// request and counts it (`forget_refused`).
+    /// sent a response is kept. Never waits and is never refused: the owner
+    /// takes it ahead of its commands.
     pub fn forget_unanswered(&self, key: &ServerTxnKey, call_id: &str, from_tag: &str) {
-        let cmd = Command::ForgetUnanswered {
+        let forget = Forget {
             key: key.clone(),
             call_id: call_id.to_string(),
             from_tag: from_tag.to_string(),
         };
-        if let Err(mpsc::error::TrySendError::Full(_)) = self.cmd_tx.try_send(cmd) {
-            self.metrics.count_forget_refused();
-        }
+        // Closed only once the owner is gone, which forgets nothing anyway.
+        let _ = self.forget_tx.send(forget);
     }
 
     /// The consumer released `call_ref` for good: nothing will answer a request

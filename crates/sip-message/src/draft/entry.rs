@@ -11,6 +11,7 @@ use std::any::Any;
 use crate::error::SipParseError;
 use crate::header::{HeaderName, HeaderValue, Wire};
 use crate::sip_str::SipStr;
+use crate::write_check::{self, WriteRefusal};
 
 /// The type-erased half of an entry: a value that can render and clone itself
 /// without the draft knowing which header it is.
@@ -53,6 +54,14 @@ impl Entry {
     /// An entry holding wire bytes. The value is NOT parsed or validated.
     pub fn raw(name: HeaderName, value: impl Into<SipStr>) -> Self {
         Self { name, value: Value::Raw(value.into()) }
+    }
+
+    /// A raw entry for a line stated from outside the stack, refused unless
+    /// the name is a `token` and the value holds no CR, LF or NUL.
+    pub fn checked_raw(name: HeaderName, value: impl Into<SipStr>) -> Result<Self, WriteRefusal> {
+        let value = value.into();
+        write_check::header_line(name.as_wire_str(), value.as_str())?;
+        Ok(Self::raw(name, value))
     }
 
     /// An entry holding a typed value, named by that value's header.

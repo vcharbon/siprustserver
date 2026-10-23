@@ -1,10 +1,11 @@
 //! Simulated worker registry — drives worker membership + health from a test. It
 //! is both a [`WorkerRegistry`] (read seam) and a control handle
-//! (`add`/`remove`/`set_health`/`set_address`).
+//! (`add`/`remove`/`set_health`/`set_acceptance`/`set_address`).
 //!
 //! Like every registry it is a thin wrapper over the shared `WorkerSet`: the
 //! identity (ordinal + host) is a [`topology::SimulatedMembership`] sharing the
-//! injected [`Clock`]; the per-worker port + health are annotation presets. Each
+//! injected [`Clock`]; the per-worker port, health and acceptance are
+//! annotation presets. Each
 //! mutator drives the membership and/or the overlay, then **recomposes eagerly**,
 //! so the public seam stays synchronous (tests assert right after a mutation, no
 //! `.await`). Because the recompose reads the authoritative membership snapshot,
@@ -16,9 +17,10 @@ use sip_clock::Clock;
 use topology::{Peer, SimulatedMembership};
 
 use crate::addr::ProxyAddr;
+use crate::poison::{locked, SIMULATED_REGISTRY};
 
 use super::projection::WorkerSet;
-use super::{WorkerEntry, WorkerHealth, WorkerRegistry};
+use super::{Acceptance, WorkerEntry, WorkerHealth, WorkerRegistry};
 
 /// Fallback port for a worker with no per-worker `port_override`. Unused in
 /// practice — every simulated worker is added with an explicit port.
@@ -31,10 +33,6 @@ const DEFAULT_PORT: u16 = 5060;
 pub struct SimulatedWorkerRegistry {
     set: Arc<WorkerSet>,
     membership: SimulatedMembership,
-    clock: Clock,
-    /// When set, stamp `first_seen_at_ms` from the clock on every `add` whose
-    /// entry doesn't already carry one (the source's `autoStampFirstSeenAtMs`).
-    auto_first_seen: bool,
     /// Each worker's per-worker port, kept across a not-ready window so
     /// [`set_ready`](Self::set_ready) can re-seed it on the return.
     ports: Arc<std::sync::Mutex<std::collections::HashMap<String, u16>>>,
@@ -42,16 +40,16 @@ pub struct SimulatedWorkerRegistry {
 
 impl SimulatedWorkerRegistry {
     pub fn new(initial: Vec<WorkerEntry>) -> Self {
-        Self::build(initial, Clock::system(), false)
+        Self::build(initial, Clock::system())
     }
 
-    /// Build with an injected clock (tests use `Clock::test_at(..)` so
-    /// `draining_since` / `first_seen_at_ms` advance with `tokio::time`).
+    /// Build with an injected clock (tests use `Clock::test_at(..)` so the
+    /// departed-address windows advance with `tokio::time`).
     pub fn with_clock(initial: Vec<WorkerEntry>, clock: Clock) -> Self {
-        Self::build(initial, clock, false)
+        Self::build(initial, clock)
     }
 
-    fn build(initial: Vec<WorkerEntry>, clock: Clock, auto_first_seen: bool) -> Self {
+    fn build(initial: Vec<WorkerEntry>, clock: Clock) -> Self {
         let peers =
             initial.iter().map(|e| Peer::new(e.id.clone(), e.address.host.clone())).collect();
         let membership = SimulatedMembership::with_clock(peers, clock.clone());
@@ -59,51 +57,24 @@ impl SimulatedWorkerRegistry {
             Arc::new(WorkerSet::new(Arc::new(membership.clone()), DEFAULT_PORT, clock.clone()));
         let ports = initial.iter().map(|e| (e.id.clone(), e.address.port)).collect();
         for e in &initial {
-            set.preset(
-                &e.id,
-                e.address.host.clone(),
-                e.address.port,
-                e.health,
-                e.draining_since,
-                e.first_seen_at_ms,
-            );
+            set.preset(&e.id, e.address.host.clone(), e.address.port, e.health, e.acceptance);
         }
         set.recompose();
-        Self {
-            set,
-            membership,
-            clock,
-            auto_first_seen,
-            ports: Arc::new(std::sync::Mutex::new(ports)),
-        }
-    }
-
-    /// Stamp `first_seen_at_ms` from the clock on every `add` (fresh-pod guard).
-    pub fn auto_stamp_first_seen(mut self) -> Self {
-        self.auto_first_seen = true;
-        self
-    }
-
-    fn now_ms(&self) -> u64 {
-        self.clock.now_ms().max(0) as u64
+        Self { set, membership, ports: Arc::new(std::sync::Mutex::new(ports)) }
     }
 
     /// Add (or replace) a worker. Identity (ordinal + host) flows through the
-    /// topology membership; the proxy's port/health/timing are seeded as an
+    /// topology membership; the proxy's port/health/acceptance are seeded as an
     /// annotation preset, then the eager recompose materialises the entry.
-    pub fn add(&self, mut entry: WorkerEntry) {
-        if self.auto_first_seen && entry.first_seen_at_ms.is_none() {
-            entry.first_seen_at_ms = Some(self.now_ms());
-        }
+    pub fn add(&self, entry: WorkerEntry) {
         self.set.preset(
             &entry.id,
             entry.address.host.clone(),
             entry.address.port,
             entry.health,
-            entry.draining_since,
-            entry.first_seen_at_ms,
+            entry.acceptance,
         );
-        self.ports.lock().unwrap().insert(entry.id.clone(), entry.address.port);
+        locked(&self.ports, SIMULATED_REGISTRY).insert(entry.id.clone(), entry.address.port);
         self.membership.add(Peer::new(entry.id.clone(), entry.address.host.clone()));
         self.set.recompose();
     }
@@ -114,7 +85,7 @@ impl SimulatedWorkerRegistry {
         if self.set.resolve(id).is_none() {
             return;
         }
-        self.ports.lock().unwrap().remove(id);
+        locked(&self.ports, SIMULATED_REGISTRY).remove(id);
         self.membership.remove(id);
         self.set.recompose();
     }
@@ -131,14 +102,13 @@ impl SimulatedWorkerRegistry {
             // The per-worker port is a proxy annotation, dropped with the
             // departure; re-seed it so the returning endpoint keeps its bind.
             // Everything else is what a fresh join gets.
-            if let Some(port) = self.ports.lock().unwrap().get(id).copied() {
+            if let Some(port) = locked(&self.ports, SIMULATED_REGISTRY).get(id).copied() {
                 self.set.preset(
                     id,
                     cur.host.clone(),
                     port,
                     WorkerHealth::Unknown,
-                    None,
-                    Some(self.now_ms()),
+                    Acceptance::Accept,
                 );
             }
         }
@@ -146,11 +116,15 @@ impl SimulatedWorkerRegistry {
         self.set.recompose();
     }
 
-    /// Set a worker's health (no-op if unknown or unchanged). Entering `Draining`
-    /// stamps `draining_since` from the clock. Health is a proxy-layer concern
-    /// (annotation overlay), never membership.
+    /// Set a worker's health (no-op if unknown or unchanged). Health is a
+    /// proxy-layer concern (annotation overlay), never membership.
     pub fn set_health(&self, id: &str, health: WorkerHealth) {
         self.set.set_health(id, health);
+    }
+
+    /// Set a worker's acceptance of new calls (no-op if unknown or unchanged).
+    pub fn set_acceptance(&self, id: &str, acceptance: Acceptance) {
+        self.set.set_acceptance(id, acceptance);
     }
 
     /// Change a worker's address (no-op if unknown, unchanged, or not ready — it
@@ -164,21 +138,16 @@ impl SimulatedWorkerRegistry {
         if cur.address == address {
             return;
         }
-        self.ports.lock().unwrap().insert(id.to_string(), address.port);
+        locked(&self.ports, SIMULATED_REGISTRY).insert(id.to_string(), address.port);
         if cur.address.host != address.host {
             // Host change is membership identity. Re-seed the annotation at the new
-            // host (carrying the current health/timing + new port) so the recompose
-            // preserves it rather than resetting to a fresh endpoint.
-            self.set.preset(
-                id,
-                address.host.clone(),
-                address.port,
-                cur.health,
-                cur.draining_since,
-                cur.first_seen_at_ms,
-            );
+            // host (carrying the current health/acceptance + new port) so the
+            // recompose preserves it rather than resetting to a fresh endpoint.
+            self.set.preset(id, address.host.clone(), address.port, cur.health, cur.acceptance);
             self.membership.change_address(Peer::new(id.to_string(), address.host.clone()));
             self.set.recompose();
+            // The preset hid the move from the recompose: tombstone the old address.
+            self.set.depart(cur.address, id);
         } else {
             // Pure port change (same host): a proxy-only annotation.
             self.set.set_port_override(id, address.port);
@@ -209,30 +178,33 @@ impl WorkerRegistry for SimulatedWorkerRegistry {
     fn lookup_by_address(&self, addr: &ProxyAddr) -> Option<WorkerEntry> {
         self.set.lookup_by_address(addr)
     }
+    fn rearm_departed(&self, addr: &ProxyAddr) {
+        self.set.rearm_departed(addr)
+    }
+    fn synced(&self) -> bool {
+        self.set.synced()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Paused tokio time so the injected `Clock::test_at` has zero real elapsed
-    // between construction and the `now_ms()` stamp — the `draining_since` /
-    // `first_seen_at_ms` exact-equality assertions are then deterministic.
-    #[tokio::test(start_paused = true)]
-    async fn add_set_health_remove_update_state() {
+    #[test]
+    fn add_set_health_set_acceptance_remove_update_state() {
         let reg = SimulatedWorkerRegistry::with_clock(vec![], Clock::test_at(1_000));
         reg.add(WorkerEntry::alive("b2b-1", ProxyAddr::new("10.0.0.2", 5070)));
         assert_eq!(reg.resolve("b2b-1").unwrap().address, ProxyAddr::new("10.0.0.2", 5070));
         assert_eq!(reg.resolve("b2b-1").unwrap().health, WorkerHealth::Alive);
 
-        reg.set_health("b2b-1", WorkerHealth::Draining);
+        reg.set_acceptance("b2b-1", Acceptance::Refuse);
         let w = reg.resolve("b2b-1").unwrap();
-        assert_eq!(w.health, WorkerHealth::Draining);
-        assert_eq!(w.draining_since, Some(1_000), "draining_since stamped from the clock");
+        assert_eq!((w.health, w.acceptance), (WorkerHealth::Alive, Acceptance::Refuse));
+        assert!(w.is_alive() && !w.accepts_new_calls());
 
-        // Idempotent: setting the same health leaves draining_since stamp intact.
-        reg.set_health("b2b-1", WorkerHealth::Draining);
-        assert_eq!(reg.resolve("b2b-1").unwrap().draining_since, Some(1_000));
+        reg.set_health("b2b-1", WorkerHealth::Dead);
+        let w = reg.resolve("b2b-1").unwrap();
+        assert_eq!((w.health, w.acceptance), (WorkerHealth::Dead, Acceptance::Refuse));
 
         reg.remove("b2b-1");
         assert!(reg.snapshot().is_empty());
@@ -256,14 +228,6 @@ mod tests {
         reg.set_ready("ghost", false);
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn auto_first_seen_stamps_on_add() {
-        let reg =
-            SimulatedWorkerRegistry::with_clock(vec![], Clock::test_at(42)).auto_stamp_first_seen();
-        reg.add(WorkerEntry::alive("w", ProxyAddr::new("127.0.0.1", 5070)));
-        assert_eq!(reg.resolve("w").unwrap().first_seen_at_ms, Some(42));
-    }
-
     #[test]
     fn set_address_host_change_flows_through_topology() {
         let reg = SimulatedWorkerRegistry::with_clock(vec![], Clock::test_at(0));
@@ -273,6 +237,10 @@ mod tests {
         assert_eq!(reg.resolve("w").unwrap().address, ProxyAddr::new("10.0.0.9", 5070));
         assert_eq!(reg.resolve("w").unwrap().health, WorkerHealth::Alive);
         assert_eq!(reg.membership().resolve("w").unwrap().host, "10.0.0.9");
+        // The address the worker left answers as departed, as a host move
+        // through membership does (Timer H).
+        let left = reg.lookup_by_address(&ProxyAddr::new("10.0.0.1", 5070));
+        assert_eq!(left.map(|w| (w.id, w.health)), Some(("w".into(), WorkerHealth::Dead)));
     }
 
     #[test]

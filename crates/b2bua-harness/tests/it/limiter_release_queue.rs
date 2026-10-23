@@ -50,6 +50,7 @@ const DRAIN: DrainBounds = DrainBounds {
     grace: Duration::from_secs(5),
     floor: Duration::ZERO,
     release_flush: RELEASE_FLUSH,
+    cdr_flush: Duration::ZERO,
 };
 
 /// Which requests the limiter swallows: they arrive and are logged, and are

@@ -2,10 +2,10 @@
 //! copy of the call the releasing node holds.
 //!
 //! Two nodes can each release one call: the crashed primary before it died
-//! and the backup after the takeover (a fold's flush lost with the crash), or
-//! a rebooted primary's reclaim and the backup's reap of the same deferred
-//! terminal. The release is keyed by the call, so the second one frees
-//! nothing: a neighbour's hold on the same id is never taken.
+//! and the backup after the takeover (a fold's flush lost with the crash).
+//! The release is keyed by the call, so the second one frees nothing: a
+//! neighbour's hold on the same id is never taken. A deferred terminal of a
+//! primary that departs is released once, by the backup's departure sweep.
 //!
 //! A counted call whose set lapsed while its primary was down (the lease is
 //! shorter than a silent takeover window) is counted again by the first
@@ -38,7 +38,7 @@ use failover_harness::{
     assert_call_fully_over, assert_call_lost_no_cdr, cookie_field, FailoverHarness,
     ReplicatedB2buaSut, WorkerHealth, LEASE_OUTLIVING_THE_REPLICA_TTL, RULE_CSEQ_IN_DIALOG_ORDER,
 };
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpServerHandle, HttpTransport};
 use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
 
@@ -79,7 +79,7 @@ fn ha_harness(name: &str) -> FailoverHarness {
 /// instant on: while one leg has two potential owners, both can mint the same
 /// `local_cseq + 1`; the accepted outcome is one call dropping cleanly, which
 /// each case asserts through its limiter-drain checks.
-fn accept_takeover_cseq_overlap(fh: &mut FailoverHarness) {
+pub(crate) fn accept_takeover_cseq_overlap(fh: &mut FailoverHarness) {
     fh.accept_rfc_deviations_from_now(
         RULE_CSEQ_IN_DIALOG_ORDER,
         "ADR-0014 accepted trade-off: dual-owner in-dialog CSeq overlap in the \
@@ -87,27 +87,27 @@ fn accept_takeover_cseq_overlap(fh: &mut FailoverHarness) {
     );
 }
 
-fn limiter_client(http: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
+fn limiter_client(http: &http_net_testkit::SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
     Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr(), Duration::from_millis(150)))
 }
 
 /// The shared limiter on its own simulated HTTP fabric (it survives crashes),
 /// with one witness hold per id in [`IDS`].
-struct LimiterRig {
-    http: SimulatedHttpNetwork,
-    store: Arc<CallStore>,
+pub(crate) struct LimiterRig {
+    http: http_net_testkit::SimulatedHttpNetwork,
+    pub(crate) store: Arc<CallStore>,
     _server: Box<dyn HttpServerHandle>,
 }
 
 impl LimiterRig {
     /// The rig under a lease outliving the replica TTL: the release a cell
     /// names is what frees the call.
-    async fn serve() -> Self {
+    pub(crate) async fn serve() -> Self {
         Self::serve_with(LEASE_OUTLIVING_THE_REPLICA_TTL).await
     }
 
     async fn serve_with(cfg: LimiterConfig) -> Self {
-        let http = SimulatedHttpNetwork::new();
+        let http = http_net_testkit::SimulatedHttpNetwork::new();
         let store = Arc::new(CallStore::new(cfg, Clock::test_at(0)));
         for id in IDS {
             let witness = store.admit(
@@ -125,13 +125,13 @@ impl LimiterRig {
 
     /// The call's holds on every id of [`IDS`]: the store's count less the
     /// witness. Negative = a release matched no hold of the call.
-    fn holds(&self) -> [i64; 3] {
+    pub(crate) fn holds(&self) -> [i64; 3] {
         IDS.map(|id| self.store.held(id) - 1)
     }
 
     /// Release the witnesses, so the universal post-conditions read the store
     /// empty.
-    fn release_witnesses(&self) {
+    pub(crate) fn release_witnesses(&self) {
         for id in IDS {
             self.store.release(&[format!("witness-{id}")]);
         }
@@ -177,7 +177,7 @@ fn limiters(ids: &[&str]) -> Vec<LimiterEntry> {
 
 /// Two replicating workers behind the proxy, both on `decision` and the
 /// shared limiter, both ready.
-async fn spawn_workers(
+pub(crate) async fn spawn_workers(
     fh: &mut FailoverHarness,
     rig: &LimiterRig,
     decision: Arc<dyn CallDecisionEngine>,
@@ -225,7 +225,7 @@ fn release_reroute_decision(
             .fallback(move |_| {
                 let mut r = route_to("127.0.0.1", 5070);
                 r.new_ruri = None;
-                r.features.platform.max_duration_sec = 60;
+                r.features.platform.max_duration_ms = 60_000;
                 r.callback_context = Some("release-ctx".into());
                 r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
                 r.call_limiter = limiters(ids);
@@ -327,10 +327,10 @@ async fn a_late_landed_initial_admit_is_released_by_the_takeover_s_lossy_cleanup
         spawn_workers(&mut fh, &rig, limited_decision(&["x", "y"])).await;
 
     // ── the admit lands at 100 ms, its answer would come back at 200 ms ──
-    rig.http.apply_fault(http_net::Fault::Delay { dst: laddr(), ms: 100 });
+    rig.http.apply_fault(http_net_testkit::Fault::Delay { dst: laddr(), ms: 100 });
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
-    rig.http.apply_fault(http_net::Fault::Resume { dst: laddr() });
+    rig.http.apply_fault(http_net_testkit::Fault::Resume { dst: laddr() });
     let primary_ord = cookie_field(uas.request(), "w_pri").unwrap_or_default();
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
@@ -365,7 +365,7 @@ async fn a_late_landed_initial_admit_is_released_by_the_takeover_s_lossy_cleanup
 }
 
 /// The route toward bob holding `ids`.
-fn limited_decision(ids: &'static [&'static str]) -> Arc<dyn CallDecisionEngine> {
+pub(crate) fn limited_decision(ids: &'static [&'static str]) -> Arc<dyn CallDecisionEngine> {
     Arc::new(
         ScriptedDecisionEngine::builder()
             .fallback(move |_| {
@@ -378,16 +378,15 @@ fn limited_decision(ids: &'static [&'static str]) -> Arc<dyn CallDecisionEngine>
     )
 }
 
-/// A rebooting primary's reclaim and the backup's reap both release one
-/// deferred terminal. The call holds `[x, x, y]`; the primary crashes and the
-/// caller's BYE fails over to the backup, which defers the terminal to the
-/// crashed primary. The backup has been told the primary left the cluster, so
-/// it never pulls the reborn one. The primary reboots inside the replica TTL,
-/// reclaims the deferral and discharges it (one CDR, the call released); its
-/// delete never reaches the backup, whose reap releases the same call once
-/// the TTL lapses. The second release frees nothing: the witnesses are intact.
+/// A deferred terminal of a primary that departs is released once. The call
+/// holds `[x, x, y]`; the primary crashes in place, the caller's BYE fails over
+/// to the backup, which defers the terminal to it; then the primary's endpoint
+/// leaves the set, and the backup's departure sweep discharges the deferral:
+/// one CDR, one release. The primary reboots inside the replica TTL and finds
+/// nothing to reclaim, and nothing releases the call again past the TTL: the
+/// witnesses are intact.
 #[tokio::test(start_paused = true)]
-async fn a_reboot_reclaim_and_the_backup_reap_release_the_call_once() {
+async fn a_deferred_terminal_of_a_departing_primary_is_released_once() {
     let mut fh = ha_harness("limiter-release-by-call-reclaim-and-reap");
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -411,11 +410,10 @@ async fn a_reboot_reclaim_and_the_backup_reap_release_the_call_once() {
     let (primary, backup): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
         if primary_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
 
-    // ── the primary crashes for the backup's whole view of it ────────────
+    // ── the primary crashes in place ─────────────────────────────────────
     accept_takeover_cseq_overlap(&mut fh);
     primary.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
-    backup.simulate_peer_removed(&primary_ord);
     fh.advance(Duration::from_millis(300)).await;
 
     // ── the BYE fails over to the backup, which defers the terminal ──────
@@ -425,13 +423,21 @@ async fn a_reboot_reclaim_and_the_backup_reap_release_the_call_once() {
     fh.advance(Duration::from_secs(1)).await;
     assert!(backup.metrics().creations_total() > creations_before, "backup served the BYE");
     assert_eq!(rig.holds(), [2, 1, 0], "the backup defers the release to the primary");
+    let releases_deferred = rig.store.stats().releases_total;
 
-    // ── inside the TTL: the primary reboots and reclaims the deferral ────
+    // ── the primary departs: the backup's sweep discharges the deferral ──
+    backup.simulate_peer_removed(&primary_ord);
+    fh.advance(Duration::from_secs(1)).await;
+    assert_eq!(rig.holds(), [0, 0, 0], "the sweep released the deferred call");
+    assert_eq!(backup.cdr_records().len(), 1, "and wrote its CDR");
+    let releases_swept = rig.store.stats().releases_total;
+    assert_eq!(releases_swept, releases_deferred + 1, "with one release");
+
+    // ── inside the TTL: the primary reboots and finds nothing to reclaim ─
     let reboot_at = deferred_at + REBOOT_BUDGET.as_millis() as i64 - 40_000;
     while fh.now_ms() < reboot_at {
         fh.advance(Duration::from_secs(10)).await;
     }
-    assert_eq!(rig.holds(), [2, 1, 0], "still deferred right before the reboot");
     let new_addr = primary.reboot().await;
     for _ in 0..40 {
         fh.advance(Duration::from_millis(500)).await;
@@ -443,35 +449,17 @@ async fn a_reboot_reclaim_and_the_backup_reap_release_the_call_once() {
     proxy.set_address(&primary_ord, new_addr);
     fh.note_worker_rebound(&primary_ord, new_addr);
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
-    let discharged = fh
-        .settle_terminal(async || primary.cdr_records().len() == 1 && rig.holds() == [0, 0, 0])
-        .await;
-    assert!(
-        discharged,
-        "the reclaim discharged the deferral: one CDR, the call released; holds {:?}",
-        rig.holds()
-    );
-    assert!(
-        fh.now_ms() < deferred_at + REBOOT_BUDGET.as_millis() as i64,
-        "the reclaim ran inside the replica TTL",
-    );
+    backup.simulate_peer_added(&primary_ord);
 
-    // ── past the TTL: the backup's reap releases the same call again ─────
-    let releases_before = rig.store.stats().releases_total;
-    let reaped_at = deferred_at + REBOOT_BUDGET.as_millis() as i64 + 90_000;
-    while fh.now_ms() < reaped_at {
+    // ── past the TTL: nothing of the call is released again ──────────────
+    let past_ttl = deferred_at + REBOOT_BUDGET.as_millis() as i64 + 90_000;
+    while fh.now_ms() < past_ttl {
         fh.advance(Duration::from_secs(30)).await;
     }
-    assert_eq!(
-        rig.store.stats().releases_total,
-        releases_before + 1,
-        "the backup's reap sent its release of the call",
-    );
-    assert_eq!(
-        rig.holds(),
-        [0, 0, 0],
-        "the backup's reap released a call already released: the witnesses on x and y are intact",
-    );
+    assert!(primary.cdr_records().is_empty(), "the reborn primary reclaimed nothing");
+    assert_eq!(rig.store.stats().releases_total, releases_swept, "no second release");
+    assert_eq!(backup.metrics().repl_terminal_lost_total(), 0, "no ended call is lost");
+    assert_eq!(rig.holds(), [0, 0, 0], "the witnesses on x and y are intact");
     rig.release_witnesses();
     assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &rig.store).await;
 }
@@ -527,7 +515,7 @@ async fn a_call_whose_set_lapsed_while_its_primary_was_down_is_counted_again_on_
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     reinv.expect(200).await;
-    dialog.ack(Some(ANSWER)).await;
+    dialog.ack(Some(OFFER)).await;
     bob.receive("ACK").await;
     let counted_again = fh.settle_terminal(async || rig.holds() == [1, 1, 0]).await;
     assert!(
@@ -619,7 +607,7 @@ async fn the_reap_releases_a_terminal_deferred_after_the_backup_served_a_request
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     reinv.expect(200).await;
-    dialog.ack(Some(ANSWER)).await;
+    dialog.ack(Some(OFFER)).await;
     bob.receive("ACK").await;
     fh.advance(Duration::from_secs(1)).await;
     assert!(backup.metrics().creations_total() > creations_before, "backup served the re-INVITE");
@@ -696,7 +684,7 @@ async fn a_primary_back_inside_the_ttl_discharges_the_served_terminal_and_the_re
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     reinv.expect(200).await;
-    dialog.ack(Some(ANSWER)).await;
+    dialog.ack(Some(OFFER)).await;
     bob.receive("ACK").await;
     fh.advance(Duration::from_secs(1)).await;
     let deferred_at = fh.now_ms();
@@ -944,7 +932,7 @@ async fn a_release_queued_on_a_crashed_primary_is_freed_by_the_lease() {
     let call_ref = replicated_call_ref(&fh, backup_sut, &primary_ord).await;
 
     // ── the limiter stalls; the call ends on the primary ─────────────────
-    rig.http.apply_fault(http_net::Fault::Stall { dst: laddr() });
+    rig.http.apply_fault(http_net_testkit::Fault::Stall { dst: laddr() });
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     fh.advance(Duration::from_millis(500)).await;
     let (primary, backup): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
@@ -957,7 +945,7 @@ async fn a_release_queued_on_a_crashed_primary_is_freed_by_the_lease() {
     // ── the primary crashes with its release queue ───────────────────────
     primary.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
-    rig.http.apply_fault(http_net::Fault::Resume { dst: laddr() });
+    rig.http.apply_fault(http_net_testkit::Fault::Resume { dst: laddr() });
     for _ in 0..LEASE_SEC + 5 {
         fh.advance(Duration::from_secs(1)).await;
         rig.refresh_witnesses();

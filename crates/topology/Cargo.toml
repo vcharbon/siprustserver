@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Shared, port-agnostic cluster-membership seam of HA replication. A leaf crate consumed by BOTH the front proxy and the b2bua replication engine: a `Peer` is ordinal+host (no port — membership, not transport), `MembershipState` is the lock-free ArcSwap+broadcast backing, and `Membership` is the read seam. Health is deliberately NOT modelled here — it is a proxy-layer concern layered on top. Preserves ADR-0002 acyclicity: proxy/b2bua → topology, never the reverse."
 
+[package.metadata.purity]
+tier = "shell"
+
 [lints]
 workspace = true
 
@@ -23,15 +26,17 @@ sip-clock = { path = "../sip-clock" }
 # tiers never compile the kube client stack; only the b2bua-runner enables it.
 # `tracing` lets the informer log connect/watch errors without panicking the
 # runner. EndpointSlice lives in `k8s-openapi::discovery::v1`.
-kube = { version = "1", default-features = false, features = ["client", "runtime", "rustls-tls"], optional = true }
-k8s-openapi = { version = "0.25", default-features = false, features = ["latest"], optional = true }
+kube = { version = "4.2.0", default-features = false, features = ["client", "runtime", "rustls-tls"], optional = true }
+k8s-openapi = { version = "0.28.0", default-features = false, features = ["latest"], optional = true }
 futures = { version = "0.3", optional = true }
 tracing = { version = "0.1", optional = true }
+# The informer runs as the consumer's supervised task.
+task-restart = { path = "../task-restart", optional = true }
 
 [features]
 # Pull in the real Kubernetes EndpointSlice informer (K8sMembership). Default
 # builds stay kube-free; the runner opts in.
-kube = ["dep:kube", "dep:k8s-openapi", "dep:futures", "dep:tracing"]
+kube = ["dep:kube", "dep:k8s-openapi", "dep:futures", "dep:tracing", "dep:task-restart"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

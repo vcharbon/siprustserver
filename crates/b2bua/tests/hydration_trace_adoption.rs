@@ -52,7 +52,7 @@ fn invite(call_id: &str) -> SipRequest {
         content_type: None,
         extra_headers: vec![],
     };
-    generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts)
+    generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts).expect("an INVITE")
 }
 
 fn state(clock: Clock) -> CallState {
@@ -68,7 +68,7 @@ fn replicated(call_id: &str, sampled: Option<bool>) -> call::Call {
         &invite(call_id),
         src,
         &B2buaConfig::default(),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         0,
     );
     c.trace_id = Some(NOMINAL_TRACE.to_string());

@@ -64,6 +64,7 @@
 //!   the repeats an `expect` counts (§6.9).
 //! - `bundle` — WRITING the run bundle, on the way out of a run.
 //! - `render` — a `send` step's message, composed for the wire.
+//! - `mscml` — the MSCML request id a replayed response echoes (RFC 5022).
 //! - `stack` — the per-leg UA: tier-1 regeneration and the automatics.
 //! - `exec` — the run loop that drives a plan over the scenario harness.
 //!
@@ -84,6 +85,7 @@ pub(crate) mod exec;
 pub(crate) mod gate;
 pub(crate) mod instance;
 pub(crate) mod media;
+pub(crate) mod mscml;
 pub(crate) mod must_fail;
 pub mod plan;
 pub(crate) mod preserve;

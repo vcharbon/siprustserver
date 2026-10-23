@@ -18,7 +18,11 @@
  *    lane names is stated as a negative case rather than refused twice.
  *
  * Only a coordinate nothing anchors keeps the refusal, because a case that
- * cannot state its own divergence would replay one it never declared.
+ * cannot state its own divergence would replay one it never declared. A
+ * deferral is a claim about the case's document, so a case refused before
+ * assembly records none: no document was built to evaluate it against. One
+ * evaluated on the document and still standing is recorded beside the
+ * document's own refusals, all-that-apply.
  *
  * Deciding is separated from writing on purpose: a generator writes the cases
  * and a registry sync only READS what the generator would do with each hit, and
@@ -26,8 +30,10 @@
  *
  * QUARANTINE is the refusal lane's falsifier and nothing else: under it, a
  * refused case is assembled anyway and the document rides {@link
- * CaseOutcome.quarantined} so a caller can replay what the refusal deleted. It
- * never changes which cases are generated — `built` and `refused` answer
+ * CaseOutcome.quarantined} so a caller can replay what the refusal deleted,
+ * unless an `unrunnable` document rule says no run of it can end or an
+ * `untrusted` refusal says no run of it speaks to the call. It never
+ * changes which cases are generated — `built` and `refused` answer
  * identically with it on and off — because a falsifier that moved the corpus
  * would be measuring itself.
  */
@@ -39,7 +45,7 @@ import { caseCallIds } from "./cut.js"
 import type { PartsIndex } from "./parts.js"
 import type { Plan } from "./plan.js"
 import { withdrawnBy, type CasePolicy, type Refusal } from "./policy.js"
-import type { CaptureInput, CaptureRule } from "./capture-rules.js"
+import { CAPTURE_RULES, type CaptureInput, type CaptureRule } from "./capture-rules.js"
 import { CASE_RULES, type CaseRule, type RefusalInput } from "./case-rules.js"
 import { DOCUMENT_RULES, type DocumentInput, type DocumentRule } from "./document-rules.js"
 import { refusalOf, type RefusalSite } from "./refusal-rule.js"
@@ -114,19 +120,38 @@ const build = (
 
 /**
  * What a refused case carries under quarantine: the document the refusal
- * deleted, or the reason there is none. Nothing under quarantine off.
+ * deleted, or the reason there is none. A case an `untrusted` refusal drops
+ * has none — a run of a document the capture cannot be trusted to state
+ * replays no call the wire carried — and neither has a document an
+ * `unrunnable` rule fires on — no run of it can be driven to its end; either
+ * rule's own line says why. Nothing under quarantine off.
  */
 const quarantineOf = (
   input: CaseSetInput,
   index: CaptureIndex,
   spec: CaseSpec,
+  refused: ReadonlyArray<Refusal>,
   already?: Assembled
 ): Pick<CaseOutcome, "quarantined" | "quarantineError"> => {
   if (input.quarantine !== true) return {}
-  if (already !== undefined) return { quarantined: already }
-  const attempt = build(input, index, spec)
-  return "built" in attempt ? { quarantined: attempt.built } : { quarantineError: attempt.error }
+  const untrusted = refused.find((r) => r.disposition === "untrusted")
+  if (untrusted !== undefined) return { quarantineError: untrusted.line }
+  const attempt = already === undefined ? build(input, index, spec) : { built: already }
+  if (!("built" in attempt)) return { quarantineError: attempt.error }
+  const unrunnable = [...DOCUMENT_RULES, ...input.policy.refuseOnDocument]
+    .filter((rule) => rule.disposition === "unrunnable")
+  const why = onDocument(unrunnable, { caseId: spec.id, capture: input.capture }, documentInput(input, spec, attempt.built))[0]
+  return why === undefined ? { quarantined: attempt.built } : { quarantineError: why.line }
 }
+
+/** What the case-document tier reads off one assembled document. */
+const documentInput = (input: CaseSetInput, spec: CaseSpec, built: Assembled): DocumentInput => ({
+  capture: input.capture,
+  caseId: spec.id,
+  flow: built.pivot.flow,
+  calls: built.pivot.calls,
+  declared: built.pivot.must_fail ?? []
+})
 
 /**
  * Every rule of one roster that fires, recorded against the case being decided.
@@ -190,19 +215,21 @@ export const decideCases = (input: CaseSetInput): CaptureCases => {
     }
     const site = { caseId: spec.id, capture: input.capture }
     const refusals = [
-      ...atCapture(input.policy.refuseAtCapture, site, captured),
+      ...atCapture([...CAPTURE_RULES, ...input.policy.refuseAtCapture], site, captured),
       ...atCase([...CASE_RULES, ...input.policy.refuse], site, { ...captured, spec })
     ]
 
-    // A case refused on a rule no declaration can answer is never assembled, so
-    // its deferred refusals stand with it: there is no document to declare in.
+    // A case refused on a rule no declaration can answer is never assembled,
+    // so its deferrals, claims about a document, are not recorded.
     if (refusals.some((r) => r.disposition !== "defers")) {
-      outcomes.push({ spec, legs, callIds, refused: refusals, ...quarantineOf(input, index, spec) })
+      const refused = refusals.filter((r) => r.disposition !== "defers")
+      outcomes.push({ spec, legs, callIds, refused, ...quarantineOf(input, index, spec, refused) })
       continue
     }
     const attempt = build(input, index, spec)
     if ("error" in attempt) {
-      // No document, so nothing is declared and every deferred refusal stands.
+      // A case only deferrals refuse, with no document: nothing is declared,
+      // so every deferral stands.
       outcomes.push({
         spec,
         legs,
@@ -218,16 +245,11 @@ export const decideCases = (input: CaseSetInput): CaptureCases => {
     // ORDER is the on-disk order, and every rule that fires is recorded.
     const standing = [
       ...refusals.filter((r) => !withdrawnBy(r, built.coverage)),
-      ...onDocument([...DOCUMENT_RULES, ...input.policy.refuseOnDocument], site, {
-        capture: input.capture,
-        caseId: spec.id,
-        flow: built.pivot.flow,
-        declared: built.pivot.must_fail ?? []
-      })
+      ...onDocument([...DOCUMENT_RULES, ...input.policy.refuseOnDocument], site, documentInput(input, spec, built))
     ]
     outcomes.push(
       standing.length > 0
-        ? { spec, legs, callIds, refused: standing, ...quarantineOf(input, index, spec, built) }
+        ? { spec, legs, callIds, refused: standing, ...quarantineOf(input, index, spec, standing, built) }
         : { spec, legs, callIds, built, refused: [] }
     )
   }

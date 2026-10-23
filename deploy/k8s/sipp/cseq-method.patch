@@ -1,0 +1,13 @@
+--- a/src/call.cpp
++++ b/src/call.cpp
+@@ -4304,7 +4304,9 @@
+ void call::extract_cseq_method(char* method, const char* msg)
+ {
+     const char* cseq;
+-    if ((cseq = strstr (msg, "CSeq"))) {
++    /* RFC 3261 7.3.1: the CSeq header field starts a line, its name compares
++     * case-insensitively; "CSeq" elsewhere (a header value) is not it. */
++    if ((cseq = strcasestr (msg, "\nCSeq:"))) {
+         const char* value;
+         if ((value = strchr(cseq, ':'))) {
+             value++;

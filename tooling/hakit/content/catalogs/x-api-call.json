@@ -1,0 +1,91 @@
+{
+  "schema": "treatment-catalog.v1",
+  "name": "x-api-call",
+  "description": "The treatments the development decision backend offers, requested with the X-Api-Call header it reads (crates/b2bua/src/decision/test_adapter.rs).",
+  "placeholders": {
+    "callee_host": "the address of a callee the generator side offers",
+    "callee_port": "its SIP port"
+  },
+  "shapes": [
+    {
+      "shape": "basic",
+      "description": "Route the call to the callee, which rings, answers and holds until the caller hangs up.",
+      "request": {
+        "headers": [
+          {
+            "name": "X-Api-Call",
+            "value": "{\"destination\":{\"host\":\"${callee_host}\",\"port\":${callee_port}}}"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "ending": "answered"
+        }
+      ],
+      "load_safe": true
+    },
+    {
+      "shape": "basic_em",
+      "description": "The basic call marked as an emergency (Resource-Priority, RFC 4412): admission control lets it through ahead of other calls.",
+      "request": {
+        "headers": [
+          {
+            "name": "Resource-Priority",
+            "value": "esnet.0"
+          },
+          {
+            "name": "X-Api-Call",
+            "value": "{\"destination\":{\"host\":\"${callee_host}\",\"port\":${callee_port}}}"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "ending": "answered"
+        }
+      ],
+      "load_safe": true
+    },
+    {
+      "shape": "limited",
+      "description": "The basic call under a call limiter of 20 concurrent calls: a call over the cap is refused 486.",
+      "request": {
+        "headers": [
+          {
+            "name": "X-Api-Call",
+            "value": "{\"destination\":{\"host\":\"${callee_host}\",\"port\":${callee_port}},\"call_limiter\":[{\"id\":\"hakit-limited\",\"limit\":20}]}"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "ending": "answered"
+        },
+        {
+          "ending": "rejected",
+          "code": 486
+        }
+      ],
+      "load_safe": true
+    },
+    {
+      "shape": "callee_reinvite",
+      "description": "The basic call to a callee that re-INVITEs the caller twice then hangs up (the base UAS on an R-URI user starting with `reinvite`).",
+      "request": {
+        "headers": [
+          {
+            "name": "X-Api-Call",
+            "value": "{\"destination\":{\"host\":\"${callee_host}\",\"port\":${callee_port},\"user\":\"reinvite\"}}"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "ending": "answered"
+        }
+      ],
+      "load_safe": true
+    }
+  ]
+}

@@ -18,13 +18,19 @@ use crate::types::{MessageCore, SipMessage, SipRequest, SipResponse};
 
 pub(crate) mod compact_forms;
 pub mod contact_entries;
+mod dialog_contact;
+mod dialog_ids;
 pub mod extract_fields;
 pub mod header_index;
 pub mod headers;
 pub mod optional_headers;
+pub mod partial;
+pub(crate) mod request_uri;
+mod routes;
 pub mod scanner;
 pub mod start_line;
 pub mod structured_headers;
+mod top_via;
 
 use extract_fields::{extract_request_fields, extract_response_fields, ExtractMode, RequestEager};
 use header_index::HeaderIndex;
@@ -64,6 +70,23 @@ pub fn hydrate_request(
     Ok(SipRequest::new(start, MessageCore::new(headers, eager.common, optional, body, image)))
 }
 
+/// The header block of `raw`, refused when it holds more lines than
+/// [`SipParserLimits::max_header_lines`]: one scan of the head, before any
+/// header is decoded or read. The refusal carries no partial.
+fn bounded_header_block(
+    raw: &[u8],
+    limits: &SipParserLimits,
+) -> Result<scanner::HeaderBlock, SipParseError> {
+    let block = scanner::header_block(raw);
+    if block.lines > limits.max_header_lines {
+        return Err(SipParseError::new(format!(
+            "header block of {} lines exceeds limit {}",
+            block.lines, limits.max_header_lines
+        )));
+    }
+    Ok(block)
+}
+
 /// The production parser. Built with `SipParserLimits`.
 #[derive(Debug, Clone)]
 pub struct CustomParser {
@@ -73,6 +96,24 @@ pub struct CustomParser {
 impl CustomParser {
     pub fn new() -> Self {
         Self { limits: SipParserLimits::default() }
+    }
+
+    /// The start line and header block of `raw` read as a message's, its
+    /// header fields returned without the mandatory-field extraction a whole
+    /// message passes — the reading a message fragment (RFC 3420) takes.
+    pub fn parse_header_fields(&self, raw: &[u8]) -> Result<Vec<SipHeader>, SipParseError> {
+        let block = bounded_header_block(raw, &self.limits)?;
+        if let Some(bare) = block.bare_break {
+            return Err(bare.refusal());
+        }
+        let text = decode_image(head(raw, block.end)?);
+        let mut s = Scanner::new(text.as_str().as_bytes());
+        parse_start_line(&mut s, text.as_str(), &self.limits)?;
+        let parsed = headers::parse_headers(&mut s, &text, block.lines, &self.limits)?;
+        match parsed.refusal {
+            Some(refusal) => Err(refusal),
+            None => Ok(parsed.headers),
+        }
     }
 
     pub fn with_limits(limits: SipParserLimits) -> Self {
@@ -101,40 +142,25 @@ impl SipParser for CustomParser {
         // Split first, decode second: the body stays raw bytes (binary-safe,
         // and a slice of `raw` rather than a copy), and only the header block
         // becomes the text image every span points into.
-        let block = scanner::header_block(&raw);
+        // A limit is never answered: no partial.
+        let block = bounded_header_block(&raw, limits)?;
+        // A bare CR or LF leaves the line structure in doubt: never answered.
+        if let Some(bare) = block.bare_break {
+            return Err(bare.refusal());
+        }
         let body_at = block.end;
-        let text = decode_image(&raw[..body_at]);
+        let text = decode_image(head(&raw, body_at)?);
         let image = text.as_str();
 
         let mut s = Scanner::new(image.as_bytes());
+        // A refused start line or a limit is never answered: no partial.
         let start = parse_start_line(&mut s, image, limits)?;
-        let parsed = headers::parse_headers(&mut s, &text, block.lines, limits)?;
-        let headers_vec = parsed.headers;
-
-        // The body bound is the declared Content-Length; a datagram that
-        // declares none ends with its bytes (RFC 3261 §18.3), a stream that
-        // declares none is undelimited and refused (§20.14).
-        let available = raw.len() - body_at;
-        let body: Bytes = match parsed.content_length {
-            Some(0) => Bytes::new(),
-            Some(declared) => {
-                let content_length = declared as usize;
-                if available < content_length {
-                    return Err(SipParseError::new(format!(
-                        "Content-Length {content_length} exceeds remaining bytes {available}"
-                    )));
-                }
-                raw.slice(body_at..body_at + content_length)
-            }
-            None => match limits.framing {
-                Framing::Datagram => raw.slice(body_at..),
-                Framing::Stream => {
-                    return Err(SipParseError::new(
-                        "Content-Length is mandatory over a stream transport (RFC 3261 §20.14)",
-                    ))
-                }
-            },
-        };
+        let headers::ParsedHeaders {
+            headers: headers_vec,
+            content_length,
+            refusal,
+            echoed_line_refused,
+        } = headers::parse_headers(&mut s, &text, block.lines, limits)?;
 
         let mode = if limits.wire_grammar { ExtractMode::Wire } else { ExtractMode::Hydrate };
 
@@ -142,16 +168,61 @@ impl SipParser for CustomParser {
         // extraction and the optional-header parse.
         let idx = HeaderIndex::build(&headers_vec);
 
+        // Every refusal from here on carries the partial a 400 answers it
+        // with, when the request has one.
+        let refuse = |error: SipParseError| match &start {
+            StartLine::Request(rl) if !echoed_line_refused => SipParseError {
+                partial: scanner::span_text(image, &rl.method)
+                    .ok()
+                    .and_then(|method| partial::request_partial(method, &idx, limits, mode)),
+                ..error
+            },
+            _ => error,
+        };
+        if let Some(refusal) = refusal {
+            return Err(refuse(refusal));
+        }
+
+        // The body bound is the declared Content-Length; a datagram that
+        // declares none ends with its bytes (RFC 3261 §18.3), a stream that
+        // declares none is undelimited and refused (§20.14).
+        let body: Bytes = match content_length {
+            Some(0) => Bytes::new(),
+            Some(declared) => {
+                let available = raw.len().saturating_sub(body_at);
+                let bounded = usize::try_from(declared)
+                    .ok()
+                    .and_then(|len| body_at.checked_add(len))
+                    .filter(|&end| end <= raw.len());
+                let Some(end) = bounded else {
+                    return Err(refuse(SipParseError::new(format!(
+                        "Content-Length {declared} exceeds remaining bytes {available}"
+                    ))));
+                };
+                body_of(&raw, body_at..end).map_err(refuse)?
+            }
+            None => match limits.framing {
+                Framing::Datagram => body_of(&raw, body_at..raw.len()).map_err(refuse)?,
+                Framing::Stream => {
+                    return Err(refuse(SipParseError::new(
+                        "Content-Length is mandatory over a stream transport (RFC 3261 §20.14)",
+                    )))
+                }
+            },
+        };
+
         match start {
-            StartLine::Request(rl) => {
-                let method = start_line::canonical_method(image, rl.method);
+            StartLine::Request(ref rl) => {
+                // A method is case-sensitive (RFC 3261 §7.1): the token as written.
+                let method = scanner::span_text(image, &rl.method)?;
                 let uri = text.span(rl.uri.start, rl.uri.len());
                 let eager: RequestEager =
-                    extract_request_fields(&idx, &uri, limits, Some(&method), mode)?;
+                    extract_request_fields(&idx, &uri, limits, Some(method), mode)
+                        .map_err(refuse)?;
                 let optional = optional_headers::extract_optional_indexed(&idx);
                 Ok(SipMessage::Request(SipRequest::new(
                     RequestLine {
-                        method: crate::method::Method::from_wire(&method),
+                        method: crate::method::Method::from_wire(method),
                         uri: eager.request_uri,
                         version: text.span(rl.version.start, rl.version.len()),
                     },
@@ -172,6 +243,18 @@ impl SipParser for CustomParser {
             }
         }
     }
+}
+
+/// The body of `raw` at `range`, sharing its bytes.
+fn body_of(raw: &Bytes, range: std::ops::Range<usize>) -> Result<Bytes, SipParseError> {
+    crate::checked::slice(raw, range.clone())
+        .ok_or_else(|| SipParseError::new(format!("body {range:?} past the datagram")))
+}
+
+/// The header block of `raw`, the `end` [`scanner::header_block`] found.
+fn head(raw: &[u8], end: usize) -> Result<&[u8], SipParseError> {
+    raw.get(..end)
+        .ok_or_else(|| SipParseError::new(format!("header block end {end} past the datagram")))
 }
 
 /// The header block as one shared text image. Predominantly-ASCII input takes

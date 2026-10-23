@@ -5,47 +5,58 @@
 
 use std::net::SocketAddr;
 
-use sip_message::header::SentBy;
-use sip_message::SipRequest;
+use sip_message::{SipRequest, SipResponse};
 
 /// One INVITE transaction to rebuild, typed on the record's terms
-/// ([`TransactionLayer::seed`](crate::TransactionLayer::seed)). A seed goes
-/// straight to `Proceeding`: the first copy already left the wire from the
-/// node that held it, so nothing is re-sent.
+/// ([`TransactionLayer::seed`](crate::TransactionLayer::seed)). The first copy
+/// of its request, and of its final, already left the wire from the node that
+/// held it: a seed runs no retransmit ladder.
 #[derive(Debug, Clone)]
 pub enum TxnSeed {
     /// A client INVITE this side sent toward `dest`, still awaiting its final:
     /// keyed by the INVITE's top-Via branch and attributed from its Via `cr` /
     /// `lg` params. The INVITE bound is armed; no retransmit ladder runs.
-    ClientInvite { invite: SipRequest, dest: SocketAddr },
-    /// A server INVITE this side admitted and has not answered: keyed by the
-    /// top-Via `branch` and `sent_by` of the INVITE (RFC 3261 §17.2.3),
-    /// matched by a CANCEL on them and `call_id` + `from_tag`. `to_tag` is the
-    /// To-tag the node that held it already put on a provisional, so every
-    /// response this layer sends on the transaction carries the tag the peer's
-    /// early dialog holds (RFC 3261 §17.2.1); `None` when none went out yet.
-    /// With `original_request` present the layer answers a CANCEL 200 + 487 and
-    /// emits `Cancelled` as for any INVITE it admitted itself; without it the
-    /// seed absorbs the INVITE's retransmissions (each drawing a 100 Trying),
-    /// and a CANCEL naming it is handed up as a `Message` for the consumer to
-    /// answer 481 (§9.2).
-    ServerInvite {
-        branch: String,
-        sent_by: SentBy,
-        call_id: String,
-        from_tag: String,
-        to_tag: Option<String>,
-        leg_id: Option<String>,
-        original_request: Option<SipRequest>,
+    /// `provisional` says the record holds a provisional for it: the seed opens
+    /// `Proceeding`, else `Trying`, where a CANCEL waits for one (RFC 3261 §9.1)
+    /// and, held, has the INVITE re-sent once so the callee resends its latest
+    /// provisional (§17.2.1).
+    /// `cancel` is a CANCEL the record says this side sent for it while it had
+    /// drawn no provisional: held until its first one (§9.1).
+    ClientInvite {
+        invite: SipRequest,
+        dest: SocketAddr,
+        provisional: bool,
+        cancel: Option<Box<SipRequest>>,
     },
+    /// A server INVITE this side admitted and has not answered: `request`,
+    /// rebuilt from the record as far as a response to it reads it — Via
+    /// stack, From, To, Call-ID, CSeq. Keyed by its top-Via branch and sent-by
+    /// (RFC 3261 §17.2.3). `to_tag` is the To-tag the node that held it
+    /// already put on a provisional, so every response this layer sends on the
+    /// transaction carries the tag the peer's early dialog holds (RFC 3261
+    /// §17.2.1); `None` when none went out yet. It runs as an INVITE this
+    /// layer admitted itself: a retransmission draws its latest provisional, a
+    /// CANCEL 200 + 487 and `Cancelled`, a release its final.
+    ServerInvite { request: SipRequest, to_tag: Option<String>, leg_id: Option<String> },
+    /// A server INVITE this side answered 2xx and still awaits the ACK for:
+    /// `response`, the 2xx as it left, keyed by its top-Via branch and sent-by
+    /// (RFC 3261 §17.2.3). It runs in RFC 6026 Accepted for Timer L from the
+    /// seed, passing every ACK up, and answers each copy of the INVITE with
+    /// `response` — this stack's choice over §8.7's silent absorption: the
+    /// node holding the seed never sent the 2xx the copy may have missed. It
+    /// holds a takeover copy for Timer L unless an ACK on its own branch
+    /// detaches it: a 2xx's ACK takes a new branch. A transaction already on its key that has sent no final —
+    /// the one the INVITE's retransmission opened before the record was read —
+    /// takes `response` as its final and sends it once.
+    ServerAccepted { response: SipResponse, leg_id: Option<String> },
 }
 
 /// What [`TransactionLayer::reoffer`](crate::TransactionLayer::reoffer) made
 /// of a datagram.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reoffer {
-    /// A transaction in the map took it: the layer did what the first arrival
-    /// would have done and emitted whatever that emits.
+    /// A transaction in the map took it: a response or a CANCEL ran the path
+    /// its first arrival would have, a request was absorbed with nothing sent.
     Matched,
     /// No transaction took it; nothing was sent and nothing was emitted.
     Unmatched,

@@ -5,10 +5,10 @@
  * Two document-wide conventions carry over:
  *
  * - **Omission.** An optional value is omitted when absent, a collection when
- *   empty. `null` appears only where the schema-4 fields already used it
- *   (`invite`, `final_status`, `terminated_by`, `Party.tag`, `ViaJson.branch`,
+ *   empty. `null` appears only in the core fields that state it (`invite`,
+ *   `final_status`, `terminated_by`, `Party.tag`, `ViaJson.branch`,
  *   `Identity.user` / `.digits`, `DialogRef` tags) — those are {@link nullable}.
- * - **Enrichment is derived.** Every field beyond the schema-4 core is a pure
+ * - **Enrichment is derived.** Every field beyond that core is a pure
  *   function of the message bytes and of the document's own structure.
  *
  * This is the ONE contract decoded LENIENTLY: the Rust struct does not carry
@@ -344,6 +344,8 @@ export const FlowsDoc = Schema.Struct({
   schema: Schema.Int,
   /** The header allow-list `msgs[].headers` projects, canonical names in the order requested. */
   emit_headers: defaulted(Schema.Array(Schema.String), []),
+  /** The transformation a tool applied to the message bytes after they were read (`anonymised`, …); absent on a document as read. */
+  rewritten: Schema.optionalKey(Schema.String),
   decode_stats: DecodeStats,
   flow_stats: FlowStats,
   /** Index = the leg id `groups[].legs` and every evidence entry reference. */
@@ -470,6 +472,13 @@ export const isSuccessToInvite = (msg: Msg): boolean => {
   const status = inviteStatus(msg)
   return status !== undefined && status >= 200 && status < 300
 }
+
+/**
+ * An ANSWER to an INVITE a B2BUA relays: a `180`–`189` or a `2xx`. The one
+ * reading of the datagram; `Flow.isRelayedInviteAnswer` is the same claim on
+ * an assembled step.
+ */
+export const isRelayedInviteAnswer = (msg: Msg): boolean => isProvisionalToInvite(msg) || isSuccessToInvite(msg)
 
 /** An INVITE with no To-tag: the request that OPENS a dialog, never a re-INVITE. */
 export const opensDialog = (msg: Msg): boolean =>

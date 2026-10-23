@@ -4,6 +4,7 @@
 
 use super::capabilities::CapabilitySet;
 use super::emit;
+use super::error::GenerateError;
 use super::methods::InDialogMethod;
 use super::spec::StackDialog;
 use crate::draft::RequestDraft;
@@ -32,7 +33,7 @@ pub(super) fn route_for_in_dialog(remote_target: Uri, route_set: &[String]) -> (
     match RouteEntry::parse(&SipStr::owned(first)) {
         Ok(entry) if !entry.uri().is_loose_route() => {
             let request_uri = entry.uri().clone();
-            let mut routes: Vec<String> = route_set[1..].to_vec();
+            let mut routes: Vec<String> = route_set.iter().skip(1).cloned().collect();
             routes.push(format!("<{}>", remote_target.text()));
             (request_uri, routes)
         }
@@ -120,12 +121,15 @@ pub fn generate_in_dialog_request(
     method: InDialogMethod,
     dialog: &StackDialog,
     opts: &GenerateInDialogRequestOpts,
-) -> InDialogResult {
-    let next_cseq = opts.cseq.unwrap_or(dialog.local_cseq + 1);
+) -> Result<InDialogResult, GenerateError> {
+    let next_cseq = match opts.cseq {
+        Some(cseq) => cseq,
+        None => dialog.local_cseq.checked_add(1).ok_or(GenerateError::SequenceExhausted)?,
+    };
     let remote_target =
         opts.request_uri.clone().unwrap_or_else(|| emit::uri(&dialog.remote_target));
     let (uri, routes) = route_for_in_dialog(remote_target, &dialog.route_set);
-    let hop = opts.via.clone().expect("via required");
+    let hop = opts.via.clone().ok_or(GenerateError::Missing("via"))?;
     let verb = Method::from(method);
 
     let mut draft = RequestDraft::new(verb.clone(), uri)
@@ -136,7 +140,7 @@ pub fn generate_in_dialog_request(
     // Contact only where it refreshes the dialog target
     // (`contact_policy::request_states_contact`).
     if super::contact_policy::request_states_contact(&Method::from(method)) {
-        draft = draft.push(opts.contact.clone().expect("contact required"));
+        draft = draft.push(opts.contact.clone().ok_or(GenerateError::Missing("contact"))?);
     }
 
     draft = with_routes(draft, &routes);
@@ -169,7 +173,7 @@ pub fn generate_in_dialog_request(
     }
 
     draft = emit::extra_headers(draft, &opts.extra_headers);
-    let request = emit::request(emit::framed(draft, opts.body.clone(), opts.content_type.clone()));
+    let request = emit::request(emit::framed(draft, opts.body.clone(), opts.content_type.clone()))?;
     let next_dialog = StackDialog { local_cseq: next_cseq, ..dialog.clone() };
-    InDialogResult { request, dialog: next_dialog }
+    Ok(InDialogResult { request, dialog: next_dialog })
 }

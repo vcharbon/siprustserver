@@ -5,16 +5,25 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[package.metadata.purity]
+tier = "shell"
+
 [lints]
 workspace = true
 
 [dependencies]
 metric-catalogue = { path = "../metric-catalogue" }
+metric-values = { path = "../metric-values" }
 # Ingress hands the receive buffer to the parser as a refcounted `Bytes`, so
 # the parsed message shares it rather than copying the datagram.
 bytes.workspace = true
 sip-message = { path = "../sip-message" }
+# The transaction kind the health prober opens its client transactions as.
+call = { path = "../call" }
 sip-net = { path = "../sip-net" }
+# Every std lock recovers from poison, counted per named lock (ADR-0051 §7).
+lock-poison = { path = "../lock-poison" }
+task-restart = { path = "../task-restart" }
 sip-clock = { path = "../sip-clock" }
 sip-txn = { path = "../sip-txn" } # IdGen (To-tags), timer constants, and the health prober's client transactions
 # The token bucket, EWMA, load-sampler seam and Retry-After policy the self-gate
@@ -38,7 +47,12 @@ tracing = { workspace = true }
 observe = { path = "../observe", default-features = false }
 
 [dev-dependencies]
+observe-testkit = { path = "../observe-testkit" }
+sip-net-testkit = { path = "../sip-net-testkit" }
 scenario-harness = { path = "../scenario-harness" }
 layer-harness = { path = "../layer-harness" }
 # The per-packet trace-tier budget: an untraced proxy allocates nothing.
 alloc-counter = { path = "../alloc-counter" }
+# The no-panic property lane: its runner and the shared structured mutations.
+proptest.workspace = true
+wire-mutations = { path = "../wire-mutations" }

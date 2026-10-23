@@ -1,0 +1,9 @@
+# cargo-audit's configuration of this workspace (`scripts/audit.py`, `just audit`).
+# Every ignored advisory carries its reason: who links it and why it is acceptable.
+
+[advisories]
+ignore = [
+    # paste (unmaintained): a proc-macro of tikv-jemalloc-ctl 0.7 (jemalloc-stats), run at
+    # build time only, no code of it in a binary.
+    "RUSTSEC-2024-0436",
+]

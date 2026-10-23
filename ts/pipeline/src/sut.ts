@@ -10,13 +10,11 @@
  * could be ours at all.
  *
  * A stated set always wins over detection, and both are recorded so a reader can
- * see which decided. WHERE the statements live is the caller's: this module
- * takes a file path or an already-decoded document, never a repository layout.
+ * see which decided. WHERE the statements live, and how they are read, is the
+ * caller's: this module takes an already-decoded document, never a file.
  */
 import { Flows } from "@sip/contracts"
-import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
-import * as fs from "node:fs"
 import { ipOf, type SutProfile } from "./profile.js"
 
 /** The addresses that are the system under test; ports never distinguish. */
@@ -81,33 +79,6 @@ export const StatedSut = Schema.Struct({
   )
 })
 export interface StatedSut extends Schema.Schema.Type<typeof StatedSut> {}
-
-export class StatedSutLoadError extends Schema.TaggedError<StatedSutLoadError>()(
-  "Pipeline.StatedSutLoadError",
-  { file: Schema.String, reason: Schema.String }
-) {}
-
-const decode = Schema.decodeUnknownEffect(StatedSut, {
-  onExcessProperty: "error",
-  errors: "all"
-})
-
-/** Read a statements file. A checkout that keeps none states nothing. */
-export const loadStatedSut = Effect.fn("Pipeline.loadStatedSut")(function* (file: string) {
-  const exists = yield* Effect.sync(() => fs.existsSync(file))
-  if (!exists) return { captures: {} } as StatedSut
-  const text = yield* Effect.try({
-    try: () => fs.readFileSync(file, "utf8"),
-    catch: (cause) => new StatedSutLoadError({ file, reason: `unreadable: ${String(cause)}` })
-  })
-  const json = yield* Effect.try({
-    try: () => JSON.parse(text) as unknown,
-    catch: (cause) => new StatedSutLoadError({ file, reason: `not JSON: ${String(cause)}` })
-  })
-  return yield* decode(json).pipe(
-    Effect.mapError((issue) => new StatedSutLoadError({ file, reason: String(issue) }))
-  )
-})
 
 /** An INVITE that opens a dialog: no To tag, and not a repeat of one. */
 export const isDialogCreatingInvite = (m: Flows.Msg): boolean =>

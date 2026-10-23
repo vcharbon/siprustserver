@@ -2,21 +2,18 @@
 //! set + a proxy-only `WorkerAnnotations` overlay, composed into the
 //! [`WorkerEntry`] set the LB reads.
 //!
-//! This is "the rest" that every registry impl now shares. Before, each of the
-//! three registries (`static`, `simulated`, `membership`) carried its own
-//! `RegistryState` — a second container mirroring topology's `MembershipState`
-//! — plus a forked copy of topology's `reconcile_to_desired`. Once **health** (the
+//! This is "the rest" that every registry impl shares. Once **health** (the
 //! one genuinely proxy-only, OPTIONS-driven field) is lifted out of the worker
 //! set, the set *is* membership, and a `WorkerEntry` is a pure projection:
 //!
 //! ```text
-//!   WorkerEntry = membership.host  ⊕  annotation{ port, health, draining, first_seen }
+//!   WorkerEntry = membership.host  ⊕  annotation{ port, health, acceptance }
 //! ```
 //!
 //! - **Identity + host** live in `topology::Membership` — one container, one diff
 //!   (`reconcile_to_desired`), one self-heal loop (`spawn_membership_reconcile`),
 //!   shared with the b2bua replication supervisor.
-//! - **Port + health + LB-timing** live in `WorkerAnnotations`, keyed by ordinal.
+//! - **Port + health + acceptance** live in `WorkerAnnotations`, keyed by ordinal.
 //!   Port is here (not in membership) because topology is deliberately
 //!   port-agnostic — the port is a consumer concern. In production every worker
 //!   uses the cluster-wide `default_port`; `static`/`simulated` may set a
@@ -35,6 +32,7 @@
 //!   from the snapshot, never replays deltas).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -44,7 +42,7 @@ use topology::{Membership, Peer};
 use crate::addr::ProxyAddr;
 
 use super::tombstone::{Tombstones, DEPARTED_ADDRESS_TTL_MS};
-use super::{WorkerEntry, WorkerHealth, WorkerId};
+use super::{Acceptance, WorkerEntry, WorkerHealth, WorkerId};
 
 /// Per-ordinal proxy annotation — everything a [`WorkerEntry`] carries that
 /// membership does not. `host` is shadowed only to detect an address move (→ a
@@ -53,8 +51,7 @@ use super::{WorkerEntry, WorkerHealth, WorkerId};
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Annot {
     health: WorkerHealth,
-    draining_since: Option<u64>,
-    first_seen_at_ms: Option<u64>,
+    acceptance: Acceptance,
     host: String,
     /// Per-worker port. `None` → use the registry's `default_port` (the
     /// production/k8s case; every worker shares the cluster SIP port).
@@ -62,14 +59,12 @@ struct Annot {
 }
 
 impl Annot {
-    /// A brand-new annotation for a just-(re)joined endpoint: `Unknown` (not
-    /// routable until the OPTIONS probe confirms it), `first_seen` stamped so the
-    /// LB fresh-pod guard engages.
-    fn fresh(host: String, now_ms: u64) -> Self {
+    /// A brand-new annotation for a just-(re)joined endpoint: `Unknown`, not
+    /// routable until the OPTIONS probe reads it `Alive` (ADR-0050 §8).
+    fn fresh(host: String) -> Self {
         Self {
             health: WorkerHealth::Unknown,
-            draining_since: None,
-            first_seen_at_ms: Some(now_ms),
+            acceptance: Acceptance::Accept,
             host,
             port_override: None,
         }
@@ -111,12 +106,7 @@ impl WorkerAnnotations {
     ///
     /// Returns the `(ordinal, address)` pairs the overlay stopped serving — a
     /// departure or a host move — for the caller to tombstone.
-    fn sync_membership(
-        &self,
-        peers: &[Peer],
-        now_ms: u64,
-        default_port: u16,
-    ) -> Vec<(WorkerId, ProxyAddr)> {
+    fn sync_membership(&self, peers: &[Peer], default_port: u16) -> Vec<(WorkerId, ProxyAddr)> {
         let live: HashSet<&str> = peers.iter().map(|p| p.ordinal.as_str()).collect();
         let mut departed = Vec::new();
         // Membership deltas are rare state changes: each gets its own line. The
@@ -166,7 +156,7 @@ impl WorkerAnnotations {
                 match recs.get(&p.ordinal) {
                     Some(rec) if rec.host == p.host => {} // unchanged → preserve
                     _ => {
-                        recs.insert(p.ordinal.clone(), Annot::fresh(p.host.clone(), now_ms));
+                        recs.insert(p.ordinal.clone(), Annot::fresh(p.host.clone()));
                     }
                 }
             }
@@ -175,28 +165,34 @@ impl WorkerAnnotations {
     }
 
     /// Annotate health (the OPTIONS probe write / `WorkerRegistryControl`). No-op
-    /// if the worker is unknown or unchanged; entering `Draining` stamps
-    /// `draining_since`.
-    fn set_health(&self, id: &str, health: WorkerHealth, now_ms: u64) {
-        let previous = self.snapshot().get(id).map(|r| r.health);
-        if previous == Some(health) {
+    /// if the worker is unknown or unchanged.
+    /// Annotate health and acceptance of new calls in one write, `None`
+    /// leaving that one as it is. No-op if the worker is unknown or unchanged.
+    fn set_view(&self, id: &str, health: Option<WorkerHealth>, acceptance: Option<Acceptance>) {
+        let Some(previous) = self.snapshot().get(id).map(|r| (r.health, r.acceptance)) else {
+            return;
+        };
+        let next = (health.unwrap_or(previous.0), acceptance.unwrap_or(previous.1));
+        if next == previous {
             return;
         }
-        if let Some(previous) = previous {
+        if next.0 != previous.0 {
+            let (from, to) = (previous.0, next.0);
+            tracing::info!(node = observe::node(), worker = id, ?from, ?to, "worker health flip");
+        }
+        if next.1 != previous.1 {
+            let (from, to) = (previous.1, next.1);
             tracing::info!(
                 node = observe::node(),
                 worker = id,
-                from = ?previous,
-                to = ?health,
-                "worker health flip"
+                ?from,
+                ?to,
+                "worker acceptance flip"
             );
         }
         self.update(|recs| {
             if let Some(rec) = recs.get_mut(id) {
-                rec.health = health;
-                if health == WorkerHealth::Draining && rec.draining_since.is_none() {
-                    rec.draining_since = Some(now_ms);
-                }
+                (rec.health, rec.acceptance) = next;
             }
         });
     }
@@ -224,8 +220,7 @@ fn project(
                 id: p.ordinal.clone(),
                 address: ProxyAddr::new(p.host.clone(), port),
                 health: a.map(|a| a.health).unwrap_or(WorkerHealth::Unknown),
-                draining_since: a.and_then(|a| a.draining_since),
-                first_seen_at_ms: a.and_then(|a| a.first_seen_at_ms),
+                acceptance: a.map(|a| a.acceptance).unwrap_or(Acceptance::Accept),
             }
         })
         .collect()
@@ -241,6 +236,8 @@ pub(crate) struct WorkerSet {
     annotations: WorkerAnnotations,
     tombstones: Tombstones,
     projection: ArcSwap<Vec<WorkerEntry>>,
+    /// The projection was composed from an authoritative listing.
+    listed: AtomicBool,
     default_port: u16,
     clock: Clock,
 }
@@ -254,6 +251,7 @@ impl WorkerSet {
             annotations: WorkerAnnotations::default(),
             tombstones: Tombstones::default(),
             projection: ArcSwap::from_pointee(Vec::new()),
+            listed: AtomicBool::new(false),
             default_port,
             clock,
         };
@@ -262,7 +260,7 @@ impl WorkerSet {
     }
 
     fn now_ms(&self) -> u64 {
-        self.clock.now_ms().max(0) as u64
+        u64::try_from(self.clock.now_ms()).unwrap_or(0)
     }
 
     /// Recompute the projection from the **ready** members of the authoritative
@@ -274,7 +272,7 @@ impl WorkerSet {
     pub(crate) fn recompose(&self) {
         let peers: Vec<Peer> = self.membership.snapshot().into_iter().filter(|p| p.ready).collect();
         let now_ms = self.now_ms();
-        let departed = self.annotations.sync_membership(&peers, now_ms, self.default_port);
+        let departed = self.annotations.sync_membership(&peers, self.default_port);
         let annots = self.annotations.snapshot();
         let entries = project(&peers, &annots, self.default_port);
         for (id, address) in departed {
@@ -296,7 +294,24 @@ impl WorkerSet {
 
     /// Annotate a worker's health (the OPTIONS write seam) and recompose.
     pub(crate) fn set_health(&self, id: &str, health: WorkerHealth) {
-        self.annotations.set_health(id, health, self.now_ms());
+        self.set_view(id, Some(health), None);
+    }
+
+    /// Annotate a worker's acceptance of new calls (the OPTIONS write seam)
+    /// and recompose.
+    pub(crate) fn set_acceptance(&self, id: &str, acceptance: Acceptance) {
+        self.set_view(id, None, Some(acceptance));
+    }
+
+    /// Annotate a worker's health and acceptance at once (`None` keeps that
+    /// one) and recompose once: no read sees one without the other.
+    pub(crate) fn set_view(
+        &self,
+        id: &str,
+        health: Option<WorkerHealth>,
+        acceptance: Option<Acceptance>,
+    ) {
+        self.annotations.set_view(id, health, acceptance);
         self.recompose();
     }
 
@@ -312,29 +327,28 @@ impl WorkerSet {
     }
 
     /// Seed an explicit annotation for `id` *before* it is added to membership, so
-    /// the subsequent `recompose` preserves the intended port/health/timing instead
-    /// of seeding a fresh `Unknown`. For the `static`/`simulated` add paths.
+    /// the subsequent `recompose` preserves the intended port/health/acceptance
+    /// instead of seeding a fresh `Unknown`. For the `static`/`simulated` add paths.
     pub(crate) fn preset(
         &self,
         id: &str,
         host: String,
         port: u16,
         health: WorkerHealth,
-        draining_since: Option<u64>,
-        first_seen_at_ms: Option<u64>,
+        acceptance: Acceptance,
     ) {
         self.annotations.update(|recs| {
             recs.insert(
                 id.to_string(),
-                Annot {
-                    health,
-                    draining_since,
-                    first_seen_at_ms,
-                    host: host.clone(),
-                    port_override: Some(port),
-                },
+                Annot { health, acceptance, host: host.clone(), port_override: Some(port) },
             );
         });
+    }
+
+    /// Tombstone `address`, which worker `id` stopped serving outside a
+    /// membership recompose (a test double's host move), as a recompose does.
+    pub(crate) fn depart(&self, address: ProxyAddr, id: &str) {
+        self.tombstones.insert(address, id.to_string(), self.now_ms());
     }
 
     // ---- read seam (lock-free, hot path) ----
@@ -356,186 +370,30 @@ impl WorkerSet {
             .cloned()
             .or_else(|| self.tombstones.lookup(addr, self.now_ms()))
     }
+    /// A response for `addr` was seen: a departed address's open window is
+    /// re-armed to [`DEPARTED_ADDRESS_TTL_MS`] from now.
+    pub(crate) fn rearm_departed(&self, addr: &ProxyAddr) {
+        self.tombstones.rearm(addr, self.now_ms());
+    }
     pub(crate) fn membership(&self) -> &Arc<dyn Membership> {
         &self.membership
+    }
+    /// Whether the projection holds the membership's first authoritative
+    /// listing. The first time the membership reads synced, the projection is
+    /// recomposed from it before this answers `true`, so a snapshot read
+    /// after a `true` never predates the listing.
+    pub(crate) fn synced(&self) -> bool {
+        if self.listed.load(Ordering::Acquire) {
+            return true;
+        }
+        if !self.membership.synced() {
+            return false;
+        }
+        self.recompose();
+        self.listed.store(true, Ordering::Release);
+        true
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::*;
-    use topology::SimulatedMembership;
-
-    fn ws(initial: &[(&str, &str)], port: u16) -> (WorkerSet, SimulatedMembership) {
-        let sim = SimulatedMembership::with_clock(
-            initial.iter().map(|(o, h)| Peer::new(*o, *h)).collect(),
-            Clock::test_at(0),
-        );
-        let set = WorkerSet::new(Arc::new(sim.clone()), port, Clock::test_at(0));
-        (set, sim)
-    }
-
-    #[test]
-    fn new_workers_start_unknown_with_default_port() {
-        let (set, _sim) = ws(&[("w0", "10.0.0.1")], 5060);
-        let w0 = set.resolve("w0").unwrap();
-        assert_eq!(w0.health, WorkerHealth::Unknown);
-        assert_eq!(w0.address, ProxyAddr::new("10.0.0.1", 5060));
-    }
-
-    #[test]
-    fn health_write_composes_and_survives_membership_recompose() {
-        let (set, sim) = ws(&[("w0", "10.0.0.1")], 5060);
-        set.set_health("w0", WorkerHealth::Alive);
-        assert_eq!(set.resolve("w0").unwrap().health, WorkerHealth::Alive);
-        // A membership change (new peer) must not stomp w0's probe-written health.
-        sim.add(Peer::new("w1", "10.0.0.2"));
-        set.recompose();
-        assert_eq!(set.resolve("w0").unwrap().health, WorkerHealth::Alive);
-        assert_eq!(set.resolve("w1").unwrap().health, WorkerHealth::Unknown);
-    }
-
-    #[test]
-    fn address_move_resets_health() {
-        let (set, sim) = ws(&[("w0", "10.0.0.1")], 5060);
-        set.set_health("w0", WorkerHealth::Dead);
-        sim.change_address(Peer::new("w0", "10.0.0.2"));
-        set.recompose();
-        let w0 = set.resolve("w0").unwrap();
-        assert_eq!(w0.address, ProxyAddr::new("10.0.0.2", 5060));
-        assert_eq!(w0.health, WorkerHealth::Unknown, "a stale Dead must not survive a restart");
-    }
-
-    #[test]
-    fn departed_worker_pruned_on_recompose() {
-        let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2")], 5060);
-        sim.remove("w1");
-        set.recompose();
-        assert!(set.resolve("w1").is_none());
-        assert!(set.resolve("w0").is_some());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_departed_address_reads_dead_for_timer_h_then_nothing() {
-        let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2")], 5060);
-        set.set_health("w1", WorkerHealth::Alive);
-        let gone = ProxyAddr::new("10.0.0.2", 5060);
-        sim.remove("w1");
-        set.recompose();
-
-        let dead = set.lookup_by_address(&gone).expect("the departed address still resolves");
-        assert_eq!(dead.id, "w1");
-        assert_eq!(dead.health, WorkerHealth::Dead);
-        assert!(set.resolve("w1").is_none(), "the ordinal stays gone on the request path");
-
-        tokio::time::advance(Duration::from_millis(DEPARTED_ADDRESS_TTL_MS - 1)).await;
-        assert!(set.lookup_by_address(&gone).is_some(), "inside the window");
-        tokio::time::advance(Duration::from_millis(1)).await;
-        assert!(set.lookup_by_address(&gone).is_none(), "the window closed at Timer H");
-    }
-
-    #[test]
-    fn a_host_move_tombstones_the_old_address_and_leaves_the_new_one_unknown() {
-        let (set, sim) = ws(&[("w0", "10.0.0.1")], 5060);
-        set.set_health("w0", WorkerHealth::Alive);
-        sim.change_address(Peer::new("w0", "10.0.0.2"));
-        set.recompose();
-
-        let old = set
-            .lookup_by_address(&ProxyAddr::new("10.0.0.1", 5060))
-            .expect("the host it moved off is tombstoned");
-        assert_eq!((old.id.as_str(), old.health), ("w0", WorkerHealth::Dead));
-        let new = set.lookup_by_address(&ProxyAddr::new("10.0.0.2", 5060)).expect("the new host");
-        assert_eq!(new.health, WorkerHealth::Unknown, "the fresh endpoint awaits its probe");
-        assert_eq!(set.resolve("w0").unwrap().address, ProxyAddr::new("10.0.0.2", 5060));
-
-        // The tombstone is address-keyed, so the live ordinal's health writes
-        // never reach it.
-        set.set_health("w0", WorkerHealth::Alive);
-        assert_eq!(
-            set.lookup_by_address(&ProxyAddr::new("10.0.0.1", 5060)).unwrap().health,
-            WorkerHealth::Dead
-        );
-    }
-
-    #[test]
-    fn a_join_at_a_tombstoned_address_clears_it() {
-        let (set, sim) = ws(&[("w0", "10.0.0.1")], 5060);
-        let addr = ProxyAddr::new("10.0.0.1", 5060);
-        sim.remove("w0");
-        set.recompose();
-        assert_eq!(set.lookup_by_address(&addr).unwrap().health, WorkerHealth::Dead);
-
-        sim.add(Peer::new("w9", "10.0.0.1"));
-        set.recompose();
-        let joined = set.lookup_by_address(&addr).expect("the new tenant of the address");
-        assert_eq!((joined.id.as_str(), joined.health), ("w9", WorkerHealth::Unknown));
-    }
-
-    #[test]
-    fn a_member_no_longer_ready_departs_and_its_address_reads_dead() {
-        let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2")], 5060);
-        set.set_health("w1", WorkerHealth::Alive);
-        sim.set_conditions("w1", false, true);
-        set.recompose();
-
-        assert!(set.resolve("w1").is_none(), "a not-ready member is out of the projection");
-        assert_eq!(set.snapshot().len(), 1);
-        let gone = set
-            .lookup_by_address(&ProxyAddr::new("10.0.0.2", 5060))
-            .expect("the not-ready member's address is tombstoned");
-        assert_eq!((gone.id.as_str(), gone.health), ("w1", WorkerHealth::Dead));
-        assert!(sim.resolve("w1").is_some(), "membership still holds it — it is only unroutable");
-    }
-
-    #[test]
-    fn a_member_ready_again_joins_fresh_and_clears_its_tombstone() {
-        let (set, sim) = ws(&[("w0", "10.0.0.1")], 5060);
-        set.set_health("w0", WorkerHealth::Alive);
-        sim.set_conditions("w0", false, false);
-        set.recompose();
-        let addr = ProxyAddr::new("10.0.0.1", 5060);
-        assert_eq!(set.lookup_by_address(&addr).unwrap().health, WorkerHealth::Dead);
-
-        sim.set_conditions("w0", true, false);
-        set.recompose();
-        let back = set.resolve("w0").expect("routable again");
-        assert_eq!(back.health, WorkerHealth::Unknown, "a returning endpoint awaits its probe");
-        assert!(back.first_seen_at_ms.is_some(), "the fresh-pod guard engages on the join");
-        let live = set.lookup_by_address(&addr).unwrap();
-        assert_eq!((live.id.as_str(), live.health), ("w0", WorkerHealth::Unknown));
-    }
-
-    #[test]
-    fn a_terminating_flip_on_a_ready_member_changes_nothing() {
-        let (set, sim) = ws(&[("w0", "10.0.0.1")], 5060);
-        set.set_health("w0", WorkerHealth::Alive);
-        let before = set.resolve("w0").unwrap();
-        sim.set_conditions("w0", true, true);
-        set.recompose();
-        assert_eq!(set.resolve("w0").unwrap(), before, "health and first_seen kept");
-        assert_eq!(
-            set.lookup_by_address(&ProxyAddr::new("10.0.0.1", 5060)).unwrap().health,
-            WorkerHealth::Alive,
-            "no tombstone for an address still served"
-        );
-    }
-
-    #[test]
-    fn preset_port_override_survives_recompose() {
-        let (set, sim) = ws(&[], 5060);
-        set.preset("w0", "10.0.0.1".to_string(), 5070, WorkerHealth::Alive, None, Some(7));
-        sim.add(Peer::new("w0", "10.0.0.1"));
-        set.recompose();
-        let w0 = set.resolve("w0").unwrap();
-        assert_eq!(
-            w0.address,
-            ProxyAddr::new("10.0.0.1", 5070),
-            "per-worker port_override honoured"
-        );
-        assert_eq!(w0.health, WorkerHealth::Alive, "preset health honoured");
-        assert_eq!(w0.first_seen_at_ms, Some(7));
-    }
-}
+mod tests;

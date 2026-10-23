@@ -27,9 +27,8 @@ use async_trait::async_trait;
 use b2bua::decision::ScriptedDecisionEngine;
 use b2bua::AdaptationHttpPort;
 use b2bua_harness::{establish, hangup, settle_until, B2buaSut};
-use http_net::{
-    HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport, SimulatedHttpNetwork,
-};
+use http_net::{HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport};
+use http_net_testkit::{Behaviour, Fault, SimulatedHttpNetwork};
 use scenario_harness::Harness;
 
 // ── The binary payloads under test. Each contains bytes that are NOT valid
@@ -90,7 +89,7 @@ mod binprobe {
         TimerDelay,
     };
     use b2bua::{define_service, sm_rule, CallEvent};
-    use call::TimerType;
+    use call::{TimerKey, TimerType};
     use std::sync::Mutex;
 
     use super::{req_a, req_b, CORR_A, CORR_B, ENDPOINT};
@@ -108,11 +107,10 @@ mod binprobe {
         // seam the ringwatch/dualkeys service-timer tests use).
         init: |_call: &RuleCall| {
             Some(ServiceSeed::new(BpState::Working.label()).with_actions(vec![
-                RuleAction::ScheduleTimer {
-                    timer_type: TimerType::service(BINPROBE, "kick"),
-                    delay: TimerDelay::secs(1),
-                    leg_id: None,
-                },
+                RuleAction::arm(
+                    TimerKey::call(TimerType::service(BINPROBE, "kick")),
+                    TimerDelay::secs(1),
+                ),
             ]))
         },
         rules: [ kick(), result() ],
@@ -208,7 +206,7 @@ mod errprobe {
         TimerDelay,
     };
     use b2bua::{define_service, sm_rule, CallEvent};
-    use call::TimerType;
+    use call::{TimerKey, TimerType};
     use std::sync::Mutex;
 
     use super::ENDPOINT;
@@ -225,11 +223,10 @@ mod errprobe {
         states: EpState { Working, Awaiting },
         init: |_call: &RuleCall| {
             Some(ServiceSeed::new(EpState::Working.label()).with_actions(vec![
-                RuleAction::ScheduleTimer {
-                    timer_type: TimerType::service(ERRPROBE, "kick"),
-                    delay: TimerDelay::secs(1),
-                    leg_id: None,
-                },
+                RuleAction::arm(
+                    TimerKey::call(TimerType::service(ERRPROBE, "kick")),
+                    TimerDelay::secs(1),
+                ),
             ]))
         },
         rules: [ kick(), result() ],
@@ -295,19 +292,14 @@ fn assert_non_utf8(bytes: &[u8]) {
     );
 }
 
-/// The core binary-safety assertion: two concurrent in-flight requests round-trip
-/// their non-UTF-8 bodies byte-for-byte, keyed correctly by correlation id (no
-/// crossing), with the echoed status — and the server saw each request body
-/// binary-intact.
-#[tokio::test(start_paused = true)]
-async fn service_http_request_round_trips_a_binary_body_verbatim() {
-    // Guard: the payloads really are non-UTF-8 (a string transport would break).
-    for p in [req_a(), req_b(), resp_a(), resp_b()] {
-        assert_non_utf8(&p);
-    }
+/// One call whose binprobe fires its two requests at the backend after the
+/// fabric's `script` steps: each correlation re-enters with its own status and
+/// response bytes verbatim, the call ends reaped. What the backend received,
+/// by correlation.
+async fn binprobe_round_trip(name: &str, script: Vec<Behaviour>) -> Vec<(String, Vec<u8>)> {
     binprobe::RESULTS.lock().unwrap().clear();
 
-    let h = Harness::new("service-http-binary");
+    let h = Harness::new(name);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
 
@@ -317,15 +309,21 @@ async fn service_http_request_round_trips_a_binary_body_verbatim() {
     let received = Arc::new(Mutex::new(Vec::new()));
     let server = Arc::new(EchoServer { received: received.clone() });
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
+    if !script.is_empty() {
+        http.apply_fault(Fault::Script { dst: laddr(), steps: script });
+    }
 
     let decision = Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
+    // Two attempts of 1.5 s inside each request's 3 s: room for a retry.
+    let mut port = AdaptationHttpPort::addressed(
+        Arc::new(http.clone()) as Arc<dyn HttpTransport>,
+        laddr(),
+        Duration::from_secs(3),
+    );
+    port.attempt = Duration::from_millis(1_500);
     let b2bua = B2buaSut::builder(decision)
         .services(vec![binprobe::service_def()])
-        .adaptation_http(AdaptationHttpPort {
-            transport: Arc::new(http.clone()) as Arc<dyn HttpTransport>,
-            base: laddr(),
-            default_timeout: Duration::from_secs(3),
-        })
+        .adaptation_http(port)
         .tune(|c| c.keepalive_interval_sec = 3_600)
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
@@ -348,13 +346,6 @@ async fn service_http_request_round_trips_a_binary_body_verbatim() {
     assert_eq!(b.1, 201, "corr-b echoed status");
     assert_eq!(b.2, resp_b(), "corr-b response body verbatim (binary-safe)");
 
-    // The REQUEST body also arrived binary-intact at the backend, keyed right.
-    let recv = received.lock().unwrap().clone();
-    let ra = recv.iter().find(|(c, _)| c == CORR_A).expect("server saw corr-a");
-    let rb = recv.iter().find(|(c, _)| c == CORR_B).expect("server saw corr-b");
-    assert_eq!(ra.1, req_a(), "server received corr-a request body verbatim");
-    assert_eq!(rb.1, req_b(), "server received corr-b request body verbatim");
-
     // Past both answers' deadlines (ADR-0039): the answers closed them, so
     // nothing more re-enters.
     h.advance(Duration::from_secs(6)).await;
@@ -364,6 +355,39 @@ async fn service_http_request_round_trips_a_binary_body_verbatim() {
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
+    let received = received.lock().unwrap().clone();
+    received
+}
+
+/// The core binary-safety assertion: two concurrent in-flight requests round-trip
+/// their non-UTF-8 bodies byte-for-byte, keyed correctly by correlation id (no
+/// crossing), with the echoed status — and the server saw each request body
+/// binary-intact.
+#[tokio::test(start_paused = true)]
+async fn service_http_request_round_trips_a_binary_body_verbatim() {
+    // Guard: the payloads really are non-UTF-8 (a string transport would break).
+    for p in [req_a(), req_b(), resp_a(), resp_b()] {
+        assert_non_utf8(&p);
+    }
+    let recv = binprobe_round_trip("service-http-binary", Vec::new()).await;
+
+    // The REQUEST body also arrived binary-intact at the backend, keyed right.
+    let ra = recv.iter().find(|(c, _)| c == CORR_A).expect("server saw corr-a");
+    let rb = recv.iter().find(|(c, _)| c == CORR_B).expect("server saw corr-b");
+    assert_eq!(ra.1, req_a(), "server received corr-a request body verbatim");
+    assert_eq!(rb.1, req_b(), "server received corr-b request body verbatim");
+}
+
+/// A request whose connection is reset before any response is sent once more
+/// (ADR-0043): the first request's first attempt resets, its retry is
+/// answered, and the backend served each request once.
+#[tokio::test(start_paused = true)]
+async fn a_reset_service_request_is_retried_and_answered() {
+    let recv =
+        binprobe_round_trip("service-http-retry", vec![Behaviour::Reset { after_ms: 5 }]).await;
+    let mut served: Vec<&str> = recv.iter().map(|(c, _)| c.as_str()).collect();
+    served.sort_unstable();
+    assert_eq!(served, [CORR_A, CORR_B], "each request reached the backend once");
 }
 
 /// The error path: with NO `AdaptationHttpPort` injected, a `ServiceHttpRequest`

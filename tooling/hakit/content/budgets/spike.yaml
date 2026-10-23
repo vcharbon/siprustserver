@@ -1,0 +1,11 @@
+schema: budget.v1
+name: spike
+description: >-
+  A traffic spike (ADR-0049 §2.11): the system under test absorbs a burst of
+  new calls. No setup may fail and no ending may be unexpected on any stream,
+  the burst included; setups may be slower for about 5 s of offered rate, and
+  traffic is back within 60 s of the drain.
+setup_slow:
+  max_seconds: 5
+recovery:
+  max_s: 60

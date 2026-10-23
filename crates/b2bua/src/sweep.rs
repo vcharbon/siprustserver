@@ -53,14 +53,15 @@ impl Drop for AbortOnDrop {
 /// with the next step; the panicking step runs again one interval later,
 /// never sooner.
 pub(crate) async fn run(interval: Duration, steps: Vec<SweepStep>) {
-    let mut tick = tokio::time::interval(interval);
+    #[expect(clippy::disallowed_methods, reason = "the period is held above zero")]
+    let mut tick = tokio::time::interval(interval.max(Duration::from_millis(1)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tick.tick().await; // skip the immediate first tick
     loop {
         tick.tick().await;
         for step in &steps {
             let pass = step.pass.clone();
-            let mut running = AbortOnDrop(tokio::spawn(async move { pass().await }));
+            let mut running = AbortOnDrop(observe::spawn_keeping_node(async move { pass().await }));
             if let Err(e) = (&mut running.0).await {
                 if e.is_panic() {
                     (step.on_panic)();
@@ -117,7 +118,7 @@ mod tests {
             &invite("w0", "w1", "sweep"),
             src(),
             &config,
-            &sip_txn::IdGen::seeded(1),
+            &mut sip_ids::TurnIds::fixed(1),
             0,
         );
         terminal.state = CallModelState::Terminated;
@@ -132,7 +133,7 @@ mod tests {
                 PartitionRole::Backup,
                 "w0",
                 &call_ref,
-                MsgpackCodec::new().encode(&terminal),
+                MsgpackCodec::new().encode(&terminal).unwrap(),
                 &[],
                 500,
                 1,
@@ -250,7 +251,7 @@ mod tests {
             &invite("w0", "w1", cid),
             src(),
             &config,
-            &sip_txn::IdGen::seeded(1),
+            &mut sip_ids::TurnIds::fixed(1),
             0,
         );
         terminal.state = CallModelState::Terminated;
@@ -264,7 +265,7 @@ mod tests {
                 PartitionRole::Backup,
                 "w0",
                 &terminal.call_ref,
-                MsgpackCodec::new().encode(&terminal),
+                MsgpackCodec::new().encode(&terminal).unwrap(),
                 &[],
                 ttl_ms,
                 1,

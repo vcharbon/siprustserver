@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Load-shedding primitives shared by every process that refuses work under overload: a clock-free token bucket, an EWMA, the load-sampler read seam with its simulated control, and the Retry-After policy of a refusal. Pure: no clock, no I/O, no SIP."
 
+[package.metadata.purity]
+tier = "pure"
+
 [lints]
 workspace = true
 

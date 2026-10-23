@@ -21,7 +21,7 @@ use b2bua::decision::{CallFailureResponse, NewCallResponse, ScriptedDecisionEngi
 use b2bua_harness::{settle_until, stated, stated_by_response, B2buaSut};
 use scenario_harness::{Harness, ServerTxn, WaiverScope};
 use sip_message::generators::InDialogMethod;
-use sip_net::RecordedSipEntry;
+use sip_net_testkit::RecordedSipEntry;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -668,7 +668,7 @@ async fn a_losing_forks_delayed_offer_is_pracked_at_the_2xx_and_the_winners_ack_
 
     let mut reinv = dialog.send_request(InDialogMethod::Invite).send().await;
     let mut re_uas = bob.receive("INVITE").await;
-    re_uas.respond(200, "OK").with_sdp(BOB_OFFER).await;
+    re_uas.respond(200, "OK").with_sdp(FORK2_OFFER).await;
     let ok = reinv.expect(200).await;
     dialog.ack_for(ok.cseq().seq(), Some(ALICE_REANSWER)).await;
     let re_ack = bob.receive("ACK").await;

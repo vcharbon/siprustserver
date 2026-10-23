@@ -28,10 +28,8 @@ use failover_harness::{
     assert_call_fully_over, cookie_field, total_cdrs_for, FailoverHarness, ProxySut,
     ReplicatedB2buaSut, WorkerHealth, LEASE_OUTLIVING_THE_REPLICA_TTL,
 };
-use http_net::{
-    Fault, HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport,
-    SimulatedHttpNetwork,
-};
+use http_net::{HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport};
+use http_net_testkit::{Fault, SimulatedHttpNetwork};
 use scenario_harness::Agent;
 use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
@@ -221,11 +219,11 @@ async fn cluster(
 ) -> Cluster {
     let mut fh = FailoverHarness::new(name, &["b1", "b2"])
         .with_worker_services(awaiter_services)
-        .with_worker_adaptation_http(b2bua::AdaptationHttpPort {
-            transport: Arc::new(http.clone()),
-            base: service_addr(),
-            default_timeout: HTTP_BUDGET,
-        });
+        .with_worker_adaptation_http(b2bua::AdaptationHttpPort::addressed(
+            Arc::new(http.clone()),
+            service_addr(),
+            HTTP_BUDGET,
+        ));
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
     let proxy =

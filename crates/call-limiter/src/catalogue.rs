@@ -81,19 +81,22 @@ pub const ADMISSION_MAX: Family = Family::gauge(
 /// The `/metrics` catalogue of the limiter process.
 pub const CATALOGUE: Catalogue = Catalogue {
     binary: "call-limiter-runner",
-    sections: &[&[
-        ADMITS,
-        REFRESH_REQUESTS,
-        REFRESH_CALLS,
-        ADMIT_REREGISTERED_CALLS,
-        RELEASE_REQUESTS,
-        RELEASE_CALLS,
-        LEASE_EXPIRED_CALLS,
-        LEASE_EXPIRED_HOLDS,
-        CALLS,
-        HOLDS,
-        FENCES,
-        CHANGE_MARKERS,
-        ADMISSION_MAX,
-    ]],
+    sections: &[
+        &[
+            ADMITS,
+            REFRESH_REQUESTS,
+            REFRESH_CALLS,
+            ADMIT_REREGISTERED_CALLS,
+            RELEASE_REQUESTS,
+            RELEASE_CALLS,
+            LEASE_EXPIRED_CALLS,
+            LEASE_EXPIRED_HOLDS,
+            CALLS,
+            HOLDS,
+            FENCES,
+            CHANGE_MARKERS,
+            ADMISSION_MAX,
+        ],
+        observe::counters::FAMILIES,
+    ],
 };

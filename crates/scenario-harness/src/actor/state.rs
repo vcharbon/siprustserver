@@ -24,29 +24,7 @@ use tokio::time::Instant;
 use super::ledger::{ObligationKey, ObligationLedger};
 use crate::StepError;
 
-/// One observed inbound response on a leg — status, body presence, and the
-/// fork identity (`To`-tag) it carried. `typed` retains the full response while
-/// a matcher-carrying reception goal is pending on the leg, or a reception
-/// observer is installed, so a content matcher or an observing caller reads
-/// headers+body without a second receive.
-#[derive(Debug, Clone)]
-pub struct ResponseFact {
-    pub status: u16,
-    pub reason: String,
-    /// The CSeq method of the request this response answers — the transaction
-    /// it belongs to. A leg carries several concurrent transactions (the INVITE
-    /// plus every automatic: PRACK, UPDATE), so a response expectation that
-    /// names a method skips the ones that are another transaction's business.
-    pub cseq_method: String,
-    pub body_len: usize,
-    pub body_is_sdp: bool,
-    /// The `To`-tag — the early-dialog/fork identity a reception goal's
-    /// `early` binding matches (RFC 3261 §12.1.2).
-    pub early_tag: Option<String>,
-    /// Boxed: retained only for a pending matcher or an installed reception
-    /// observer, and kept off the `Observation` fold's common-variant size.
-    pub typed: Option<Box<sip_message::SipResponse>>,
-}
+pub use super::facts::{RequestFact, ResponseFact};
 
 /// One `ObserveFinal`/`ExpectFinal` outcome: the capture-declared expectation
 /// beside what actually arrived. Divergence is data, never a verdict.
@@ -153,8 +131,9 @@ pub struct LegObservation {
     phase: Option<LegPhase>,
     subflows: HashMap<&'static str, SubflowState>,
     /// Every non-2xx final observed on this leg's establishing INVITE, as
-    /// `(status, reason)` — a grow-only set (commutative fold), read by
-    /// `Expect::Reject`'s verdict mapping. Almost always 0 or 1 entries.
+    /// `(status, reason)` — a grow-only set (commutative fold), read by the
+    /// accepted-ending verdict ([`super::Ending`]). Almost always 0 or 1
+    /// entries.
     finals: std::collections::BTreeSet<(u16, String)>,
     /// The RFC method names of the inbound in-dialog requests this leg has
     /// received (`INFO`, `MESSAGE`, `NOTIFY`, …) — a grow-only set (commutative
@@ -162,13 +141,19 @@ pub struct LegObservation {
     /// origination can gate on an *observed* inbound request rather than a timed
     /// dwell (the MRF `INFO(EOF)` that must follow the worker's `INFO(play)`).
     received_methods: std::collections::BTreeSet<String>,
-    /// The CSeq numbers of caller-originated renegotiations (re-INVITEs) this
-    /// leg has COMPLETED (2xx received AND ACKed) — a grow-only set (commutative
+    /// The in-dialog requests received, a retransmission once (`(Call-ID, CSeq, method)`).
+    requests: std::collections::BTreeMap<(String, u32, String), RequestFact>,
+    /// The renegotiations (re-INVITEs, UPDATEs) this leg ORIGINATED and
+    /// COMPLETED, as `((local tag, remote tag), CSeq)` — a grow-only set (commutative
     /// fold) whose *cardinality* serializes an N-cycle re-INVITE script: cycle
     /// `i` (0-based) waits until `reneg_count() >= i`, so no two re-INVITEs are
-    /// ever in flight (which would glare into a 491). Distinct from the monotone
-    /// SUBFLOW_RENEG latch, which cannot count.
-    reneg_cseqs: std::collections::BTreeSet<u32>,
+    /// ever in flight (which would glare into a 491). The tags keep apart the
+    /// equal CSeqs of distinct dialogs (an early fork's and the confirmed
+    /// one's). Distinct from the monotone SUBFLOW_RENEG latch, which cannot
+    /// count.
+    reneg_cseqs: std::collections::BTreeSet<((String, String), u32)>,
+    /// Whether this leg sent a CANCEL for its establishing INVITE.
+    cancel_sent: bool,
     /// Every inbound response this leg's reactor observed, in arrival order — an
     /// append-only per-leg log with ONE writer (the leg's own reactor), so its
     /// order is deterministic; reception goals consume it through a per-actor
@@ -197,6 +182,30 @@ impl LegObservation {
         self.finals.iter().find(|(s, _)| *s == status).map(|(_, r)| r.clone())
     }
 
+    /// The lowest non-2xx final this leg's establishing INVITE drew, with its
+    /// reason phrase.
+    pub fn first_final(&self) -> Option<(u16, &str)> {
+        self.finals.iter().next().map(|(s, r)| (*s, r.as_str()))
+    }
+
+    /// Whether this leg sent a CANCEL for its establishing INVITE.
+    pub fn cancel_sent(&self) -> bool {
+        self.cancel_sent
+    }
+
+    /// Whether this leg received a provisional above 100 to an INVITE — the
+    /// callee is ringing (or playing early media). Unlike [`LegPhase::Early`],
+    /// which a caller reaches the moment she originates, it needs the response.
+    pub fn rang(&self) -> bool {
+        self.responses.iter().any(|f| (101..200).contains(&f.status) && f.cseq_method == "INVITE")
+    }
+
+    /// Whether this leg received a provisional carrying SDP — early media
+    /// (RFC 3261 §13.2.1, RFC 3262).
+    pub fn saw_early_media(&self) -> bool {
+        self.responses.iter().any(|f| (101..200).contains(&f.status) && f.body_is_sdp)
+    }
+
     /// Whether this leg has received an inbound in-dialog request of `method`
     /// (the RFC name, e.g. `"INFO"`) — the observed fact `Barrier::received`
     /// gates an origination on.
@@ -204,7 +213,7 @@ impl LegObservation {
         self.received_methods.contains(method)
     }
 
-    /// How many caller-originated renegotiation cycles (re-INVITEs) this leg has
+    /// How many renegotiations (re-INVITEs, UPDATEs) this leg originated and
     /// COMPLETED — the count an N-cycle re-INVITE script's per-cycle barrier
     /// compares against to serialize the chain.
     pub fn reneg_count(&self) -> u32 {
@@ -244,6 +253,9 @@ impl LegObservation {
 pub struct StateInner {
     legs: HashMap<&'static str, LegObservation>,
     ledger: ObligationLedger,
+    /// The caller's establishing INVITE ended on a final the call accepts
+    /// ([`Observation::AcceptedEnding`]): the remaining phase barriers are moot.
+    accepted_ending: bool,
     /// The replay record: observed-vs-expected finals + reactor-serviced strays
     /// (append-only, diagnostic — never gates the verdict).
     replay: Vec<ReplayEntry>,
@@ -251,12 +263,35 @@ pub struct StateInner {
 
 impl StateInner {
     fn new() -> Self {
-        Self { legs: HashMap::new(), ledger: ObligationLedger::default(), replay: Vec::new() }
+        Self {
+            legs: HashMap::new(),
+            ledger: ObligationLedger::default(),
+            accepted_ending: false,
+            replay: Vec::new(),
+        }
     }
 
     /// A leg's observation (an `Absent` default view if it has never been seen).
     pub fn leg(&self, role: &str) -> LegObservation {
         self.legs.get(role).cloned().unwrap_or_default()
+    }
+
+    /// A leg's observation by reference (`None` before the leg appears) — the
+    /// allocation-free read the call's verdict takes.
+    pub fn leg_ref(&self, role: &str) -> Option<&LegObservation> {
+        self.legs.get(role)
+    }
+
+    /// Whether `role` received a provisional above 100 to an INVITE
+    /// ([`LegObservation::rang`]); borrows, so a barrier poll clones nothing.
+    pub fn leg_rang(&self, role: &str) -> bool {
+        self.legs.get(role).is_some_and(LegObservation::rang)
+    }
+
+    /// Whether the caller's establishing INVITE ended on a final the call
+    /// accepts — every remaining phase barrier is then moot.
+    pub fn accepted_ending(&self) -> bool {
+        self.accepted_ending
     }
 
     /// Whether a leg has reached (at least) a given phase.
@@ -269,6 +304,12 @@ impl StateInner {
     /// gates on (borrows, so a poll never clones the leg's method set).
     pub fn leg_received_method(&self, role: &str, method: &str) -> bool {
         self.legs.get(role).is_some_and(|l| l.received_method(method))
+    }
+
+    /// Whether `role` received an in-dialog request `pred` holds for — a barrier
+    /// on what a request said, not only on its method (borrows).
+    pub fn leg_received_where(&self, role: &str, pred: impl Fn(&RequestFact) -> bool) -> bool {
+        self.legs.get(role).is_some_and(|l| l.requests.values().any(pred))
     }
 
     /// Whether EVERY leg that has appeared is `Terminated` — the `torn_down`
@@ -354,16 +395,26 @@ pub enum Observation {
     /// detector (any method) AND into the receiving leg's received-method set
     /// (so an origination can gate on "leg X received an inbound `<method>`").
     InDialogRequest { leg: &'static str, call_id: String, cseq: u32, method: String },
+    /// An in-dialog request the dialog table refused still arrived: its CSeq is no hole.
+    RefusedInDialog { leg: &'static str, call_id: String, cseq: u32 },
+    /// What an in-dialog request `leg` received said, once per `(call_id, cseq, method)`.
+    LegRequest { leg: &'static str, call_id: String, cseq: u32, fact: RequestFact },
     /// `leg`'s establishing INVITE drew a non-2xx final (the reject path) —
-    /// grow-only, read by the `Expect::Reject` verdict mapping.
+    /// grow-only, read by the accepted-ending verdict.
     LegFinal { leg: &'static str, status: u16, reason: String },
+    /// The caller's establishing INVITE drew a final its call accepts: the call
+    /// ended before its remaining phase barriers could hold.
+    AcceptedEnding,
+    /// `leg` sent a CANCEL for its establishing INVITE.
+    CancelSent { leg: &'static str },
     /// A named sub-flow advanced (re-INVITE realign / refer / early-PRACK tracking).
     Subflow { leg: &'static str, name: &'static str, to: SubflowState },
-    /// A caller-originated renegotiation (re-INVITE) this leg ORIGINATED
-    /// completed — its 2xx was received and ACKed. Folds into the leg's
-    /// grow-only completed-reneg set (keyed by CSeq, so a re-emitted 2xx cannot
-    /// double-count), whose cardinality serializes an N-cycle re-INVITE script.
-    RenegCompleted { leg: &'static str, cseq: u32 },
+    /// A renegotiation this leg ORIGINATED on `dialog` (its local and remote
+    /// tags) completed — a re-INVITE's 2xx received and ACKed, an UPDATE's
+    /// 2xx received. Folds into the leg's grow-only completed-reneg set (keyed
+    /// by dialog and CSeq, so a re-emitted 2xx cannot double-count), whose
+    /// cardinality serializes an N-cycle re-INVITE script.
+    RenegCompleted { leg: &'static str, dialog: (String, String), cseq: u32 },
     /// An inbound response observed on `leg` — appended to the leg's ordered
     /// response log (one writer: the leg's own reactor), which reception goals
     /// consume through a per-actor cursor.
@@ -422,12 +473,23 @@ impl StateInner {
                 self.ledger.record_in_dialog(call_id, leg, cseq);
                 self.leg_mut(leg).record_method(method);
             }
+            Observation::RefusedInDialog { leg, call_id, cseq } => {
+                self.ledger.record_in_dialog(call_id, leg, cseq)
+            }
+            Observation::LegRequest { leg, call_id, cseq, fact } => {
+                self.leg_mut(leg)
+                    .requests
+                    .entry((call_id, cseq, fact.method.clone()))
+                    .or_insert(fact);
+            }
             Observation::LegFinal { leg, status, reason } => {
                 self.leg_mut(leg).finals.insert((status, reason));
             }
+            Observation::AcceptedEnding => self.accepted_ending = true,
+            Observation::CancelSent { leg } => self.leg_mut(leg).cancel_sent = true,
             Observation::Subflow { leg, name, to } => self.leg_mut(leg).advance_subflow(name, to),
-            Observation::RenegCompleted { leg, cseq } => {
-                self.leg_mut(leg).reneg_cseqs.insert(cseq);
+            Observation::RenegCompleted { leg, dialog, cseq } => {
+                self.leg_mut(leg).reneg_cseqs.insert((dialog, cseq));
             }
             Observation::LegResponse { leg, fact } => {
                 self.leg_mut(leg).responses.push(fact);
@@ -595,7 +657,7 @@ where
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(StepError::Timeout { who: who.to_string() });
+            return Err(StepError::timeout(who, None, format!("the call state to reach {who}")));
         }
         tokio::select! {
             _ = &mut notified => {}

@@ -26,7 +26,6 @@
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -46,19 +45,18 @@ pub struct CheckNote {
 
 use layer_harness::{NetworkTag, Recorder, RunContext, TransportKind};
 use sip_clock::Clock;
-use sip_net::{
-    with_all_contracts, BindUdpOpts, ScopedAuditOptions, SignalingNetwork,
-    SimulatedSignalingNetwork,
-};
+use sip_net::{BindUdpOpts, SignalingNetwork};
+use sip_net_testkit::{with_all_contracts, ScopedAuditOptions, SimulatedSignalingNetwork};
 
 use crate::agent::{decide_rr_fold, Agent, Ids};
+use crate::dialogs::{DialogJudge, DialogJudging, DialogOptIns};
 
 /// The result of applying the structural waivers to a sampled call's audit
 /// (ADR-0024 §6): the surviving findings plus a per-waiver "did it filter
 /// anything" mask aligned to the input scopes — the load driver buckets the
 /// findings by rule id and folds `used` into the per-CAMPAIGN unused gate.
 pub struct WaiverOutcome {
-    pub findings: Vec<sip_net::RfcFinding>,
+    pub findings: Vec<sip_net_testkit::RfcFinding>,
     pub used: Vec<bool>,
 }
 
@@ -70,19 +68,20 @@ pub struct AgentBinder {
     /// when recording, else the raw network (zero overhead).
     network: Arc<dyn SignalingNetwork>,
     /// Present only when recording — the handle to snapshot the trace.
-    recording: Option<sip_net::RecordingSignalingNetwork>,
+    recording: Option<sip_net_testkit::RecordingSignalingNetwork>,
     /// Present only when recording — the lane registry + event channel owner.
     recorder: Option<Recorder>,
     ids: Arc<Ids>,
     recv_timeout: Duration,
+    /// The dialog judge of every agent bound, for the call's verdicts.
+    judges: std::sync::Mutex<Vec<Arc<DialogJudge>>>,
 }
 
 impl AgentBinder {
     /// Build a binder over a **real** UDP network — the load driver's production
     /// mode, driving an external SUT (the kind cluster VIP). `clock` is the
     /// process-wide shared clock (created ONCE at startup, not per call), so every
-    /// call's recording sits on one monotonic-anchored axis; passing it in also
-    /// keeps that axis in lockstep with the chaos-marker log. `record` selects
+    /// call's recording sits on one monotonic-anchored axis. `record` selects
     /// whether this call's trace is captured. `recv_timeout` is real latency, so
     /// set it wide.
     pub fn real(clock: Clock, recv_timeout: Duration, record: bool) -> Self {
@@ -98,8 +97,7 @@ impl AgentBinder {
     /// Build a binder over a caller-supplied network tagged `Live` — the load
     /// driver's mux mode (the network is a per-call `MuxNetwork`). `clock` is the
     /// shared process-wide clock (see [`real`](Self::real)); the driver passes the
-    /// same instance for every call so all timelines and the chaos markers share
-    /// one axis. `record` applies the existing recording layer on top.
+    /// same instance for every call so all timelines share one axis. `record` applies the existing recording layer on top.
     pub fn mux(
         network: Arc<dyn SignalingNetwork>,
         clock: Clock,
@@ -150,16 +148,23 @@ impl AgentBinder {
         recv_timeout: Duration,
         record: bool,
     ) -> Self {
-        let ids = Arc::new(Ids(AtomicU64::new(1)));
+        let ids = Arc::new(Ids::new());
         if !record {
-            return Self { network, recording: None, recorder: None, ids, recv_timeout };
+            return Self {
+                network,
+                recording: None,
+                recorder: None,
+                ids,
+                recv_timeout,
+                judges: Default::default(),
+            };
         }
         // Recording path: wrap the raw network in the recorder + the default RFC
         // 3261/3262/3264 wire-invariant suite, exactly as `Harness::build` does,
         // so a sampled call's trace can be projected and RFC-audited.
         let recorder = Recorder::with_clock(transport_kind, clock);
         let audit_opts = ScopedAuditOptions {
-            cross_message_rules: sip_net::rfc_cross_message_rules(),
+            cross_message_rules: sip_net_testkit::rfc_cross_message_rules(),
             ..Default::default()
         };
         let wrapped = with_all_contracts(
@@ -175,6 +180,7 @@ impl AgentBinder {
             recorder: Some(recorder),
             ids,
             recv_timeout,
+            judges: Default::default(),
         }
     }
 
@@ -184,7 +190,13 @@ impl AgentBinder {
     /// (RFC 3261 §17.2.3 / §8.1.1.4). See
     /// [`Harness::seed_ids`](crate::Harness::seed_ids).
     pub fn seed_ids(&self, seed: u64) {
-        self.ids.0.store(seed, Ordering::Relaxed);
+        self.ids.seed(seed);
+    }
+
+    /// Carry `nonce` (a run id: letters, digits and `.`, `_`, `+`, `-`) in
+    /// every Call-ID this binder's agents mint, so two runs never share one.
+    pub fn call_id_nonce(&self, nonce: &str) {
+        self.ids.set_nonce(nonce);
     }
 
     /// Whether this binder records (the call was sampled).
@@ -237,9 +249,16 @@ impl AgentBinder {
                 NetworkTag::Ext,
             );
         }
+        let dialogs = Arc::new(DialogJudge::new(
+            name.clone(),
+            DialogOptIns::default(),
+            DialogJudging::Harness,
+        ));
+        self.judges.lock().unwrap().push(dialogs.clone());
         Ok(Agent {
             uri: format!("sip:{name}@{}", addr.ip()),
             rr_fold: decide_rr_fold(&name),
+            dialogs,
             name,
             addr,
             ep: Arc::from(ep),
@@ -254,6 +273,8 @@ impl AgentBinder {
             txn: Arc::new(crate::absorption::Absorption::raw_wire()),
             two_xx_acks: Arc::default(),
             holdback: Arc::default(),
+            steps: Arc::default(),
+            answers_as: crate::Party::Callee,
         })
     }
 
@@ -268,11 +289,6 @@ impl AgentBinder {
     /// [`StepError`](crate::StepError)/outcome string); when present on a NOT-passed call it is
     /// surfaced in the rendered page so the sampled callflow explains WHY it
     /// failed, not merely that it did.
-    /// `chaos_markers` are injected-fault instants as `(wall_clock_epoch_ms,
-    /// label)` — the load driver passes the recent `POST /chaos` markers so a
-    /// sampled NOK flow renders each one (that falls in this call's window) as a
-    /// Lifecycle band, making it obvious whether the kill landed during the call.
-    /// Pass `&[]` when there is no chaos correlation.
     /// `checks` are the call's Test-case check verdicts (PASS and FAIL), each
     /// rendered as an entry in the page's anomaly list; pass `&[]` when the call
     /// carries no case checks.
@@ -282,17 +298,16 @@ impl AgentBinder {
         passed: bool,
         banner: Option<&str>,
         detail: Option<&str>,
-        chaos_markers: &[(i64, String)],
         checks: &[CheckNote],
     ) -> Option<String> {
-        let doc = self.seq_doc(title, passed, banner, detail, chaos_markers, checks)?;
+        let doc = self.seq_doc(title, passed, banner, detail, checks)?;
         Some(seq_report::render_html(&doc))
     }
 
     /// Render this call's recorded trace as an SVG sequence diagram (`None` if not
     /// sampled).
     pub fn render_svg(&self, title: &str, passed: bool) -> Option<String> {
-        let doc = self.seq_doc(title, passed, None, None, &[], &[])?;
+        let doc = self.seq_doc(title, passed, None, None, &[])?;
         Some(seq_report::render_svg(&doc))
     }
 
@@ -307,19 +322,21 @@ impl AgentBinder {
     /// `allowViolations` semantics). The returned [`WaiverOutcome::used`] mask (aligned
     /// to `waivers`) folds into the per-CAMPAIGN unused-waiver gate — NOT
     /// enforced per call (a divergent branch may legitimately never trip a rule).
+    ///
+    /// The dialog verdicts of the call's UAs ([`crate::dialogs`]) join the
+    /// findings whether or not the call recorded, each under its rule and its
+    /// UA's name, waived by a `dialog-…` scope on that UA.
     pub fn rfc_findings(&self, waivers: &[crate::WaiverScope]) -> WaiverOutcome {
+        use crate::agent::dialog_gate::{as_findings, surviving_verdicts};
         use crate::agent::waiver::{apply_waivers_findings, Attribution, WaiverState};
-        match &self.recording {
-            Some(rec) => {
-                let events = rec.channel().snapshot();
-                let states: Vec<WaiverState> =
-                    waivers.iter().cloned().map(WaiverState::new).collect();
-                let findings = apply_waivers_findings(&events, &states, &Attribution::SubLane);
-                let used = states.iter().map(|s| s.used.get()).collect();
-                WaiverOutcome { findings, used }
-            }
-            None => WaiverOutcome { findings: Vec::new(), used: vec![false; waivers.len()] },
+        let states: Vec<WaiverState> = waivers.iter().cloned().map(WaiverState::new).collect();
+        let mut findings = as_findings(surviving_verdicts(&self.judges.lock().unwrap(), &states).0);
+        if let Some(rec) = &self.recording {
+            let events = rec.channel().snapshot();
+            findings.extend(apply_waivers_findings(&events, &states, &Attribution::SubLane));
         }
+        let used = states.iter().map(|s| s.used.get()).collect();
+        WaiverOutcome { findings, used }
     }
 
     /// The NORMALIZED projection of this call's recorded trace (ADR-0024 §7) —
@@ -327,7 +344,7 @@ impl AgentBinder {
     /// plan's report is comparable byte-for-byte with the functional lane's
     /// ([`crate::report::project::normalized_sip_doc`]). `None` if not sampled.
     pub fn normalized_seq_doc(&self, title: &str, passed: bool) -> Option<seq_report::SeqDoc> {
-        let doc = self.seq_doc(title, passed, None, None, &[], &[])?;
+        let doc = self.seq_doc(title, passed, None, None, &[])?;
         Some(crate::report::project::normalize_doc(&doc))
     }
 
@@ -336,21 +353,26 @@ impl AgentBinder {
     /// half of what the e2e check engine evaluates over (the anchors half rides
     /// the per-call `CallCtx`).
     /// The FULL RFC-suite finding set over this call's recorded trace, advisory
-    /// tags included (`sip_net::evaluate_rfc_findings`), with the audit-view
+    /// tags included (`sip_net_testkit::evaluate_rfc_findings`), with the audit-view
     /// wire entries a finding's `offending` index lands in — what a bundle
     /// writes beside the gating subset [`rfc_findings`](Self::rfc_findings)
     /// returns. `None` when not recording: an absence the caller states, never
     /// an empty audit it reports.
-    pub fn rfc_audit(&self) -> Option<(Vec<sip_net::RfcFinding>, Vec<sip_net::RecordedSipEntry>)> {
+    pub fn rfc_audit(
+        &self,
+    ) -> Option<(Vec<sip_net_testkit::RfcFinding>, Vec<sip_net_testkit::RecordedSipEntry>)> {
         self.recording.as_ref().map(|rec| {
             let events = rec.channel().snapshot();
-            (sip_net::evaluate_rfc_findings(&events), sip_net::audit_wire_entries(&events))
+            (
+                sip_net_testkit::evaluate_rfc_findings(&events),
+                sip_net_testkit::audit_wire_entries(&events),
+            )
         })
     }
 
-    pub fn recorded_entries(&self) -> Vec<sip_net::RecordedSipEntry> {
+    pub fn recorded_entries(&self) -> Vec<sip_net_testkit::RecordedSipEntry> {
         match &self.recording {
-            Some(rec) => sip_net::to_sip_entries(&rec.channel().snapshot()),
+            Some(rec) => sip_net_testkit::to_sip_entries(&rec.channel().snapshot()),
             None => Vec::new(),
         }
     }
@@ -361,12 +383,11 @@ impl AgentBinder {
         passed: bool,
         banner: Option<&str>,
         detail: Option<&str>,
-        chaos_markers: &[(i64, String)],
         checks: &[CheckNote],
     ) -> Option<seq_report::SeqDoc> {
         let (recording, recorder) = (self.recording.as_ref()?, self.recorder.as_ref()?);
         let events = recording.channel().snapshot();
-        let entries = sip_net::to_sip_entries(&events);
+        let entries = sip_net_testkit::to_sip_entries(&events);
         let scenario = recorder.snapshot();
         // On a failure, surface the reason both as the doc description (the header
         // banner next to the FAIL status) and as an explicit anomaly in the list,
@@ -409,12 +430,8 @@ impl AgentBinder {
             });
         }
         // The load binder records on `Clock::system()`, so `sent_ms` is real
-        // wall-clock epoch ms → `wall_clock: true` renders absolute UTC and the
-        // chaos markers (also epoch ms) drop onto the timeline at the kill instant.
-        let overlay = crate::report::project::TimelineOverlay {
-            wall_clock: true,
-            markers: chaos_markers.to_vec(),
-        };
+        // wall-clock epoch ms → `wall_clock: true` renders absolute UTC.
+        let overlay = crate::report::project::TimelineOverlay { wall_clock: true };
         Some(crate::report::project::sip_doc_with_overlay(
             title,
             description.as_deref(),

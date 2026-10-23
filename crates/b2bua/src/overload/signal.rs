@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use load_shed::{Ewma, LoadSampler, TokenBucket};
 
 use super::sampler::LiveLoadSampler;
+use crate::poison::{locked, OVERLOAD_SIGNAL};
 
 /// Seed defaults, in lock-step with the `B2buaConfig` defaults (`b2bua-sdk`),
 /// so a signal built without config still gates with them;
@@ -29,18 +30,22 @@ pub struct OverloadMetrics {
     /// Monotonic count of non-emergency new-dialog INVITEs admitted by this
     /// worker — the `adm` published on X-Overload.
     pub non_emergency_admitted_total: u64,
-    /// Current CPS token-bucket level, in `[0, capacity]`.
+    /// Current CPS token-bucket level, in `[0, capacity]`; 0 with the gate
+    /// off.
     pub token_bucket_level: f64,
+    /// Whether the bucket rung gates new calls (`cps_bucket_size > 0`).
+    pub cps_gate_enabled: bool,
 }
 
 struct OverloadInner {
     sampler: Arc<dyn LoadSampler>,
     elu_ewma: Ewma,
     gc_fraction_ewma: Ewma,
-    /// The CPS token bucket. Seeded with the `B2buaConfig` defaults;
-    /// reconfigured to the operator's values by
+    /// The CPS token bucket, `None` when a bucket size of 0 turns the gate
+    /// off. Seeded with the `B2buaConfig` defaults; reconfigured to the
+    /// operator's values by
     /// [`configure_admission`](OverloadSignal::configure_admission) at ctx build.
-    bucket: TokenBucket,
+    bucket: Option<TokenBucket>,
     /// The origin of the bucket's timeline: it refills on `tokio::time`, so a
     /// paused-clock test drives it with `tokio::time::advance`.
     epoch: tokio::time::Instant,
@@ -84,11 +89,11 @@ impl OverloadSignal {
                 sampler,
                 elu_ewma: Ewma::new(0.2),
                 gc_fraction_ewma: Ewma::new(0.2),
-                bucket: TokenBucket::full(
+                bucket: Some(TokenBucket::full(
                     f64::from(DEFAULT_CPS_BUCKET_SIZE),
                     f64::from(DEFAULT_CPS_BUCKET_RATE),
                     std::time::Duration::ZERO,
-                ),
+                )),
                 epoch: tokio::time::Instant::now(),
                 panic_elu_threshold: DEFAULT_PANIC_ELU_THRESHOLD,
             })),
@@ -108,7 +113,7 @@ impl OverloadSignal {
     /// One sampler tick: read the sampler and feed both EWMAs. Called by the
     /// periodic task every [`SAMPLE_PERIOD`](OverloadSignal::SAMPLE_PERIOD).
     pub fn sample(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = locked(&self.inner, OVERLOAD_SIGNAL);
         let elu = inner.sampler.elu();
         let gc = inner.sampler.gc_fraction();
         inner.elu_ewma.observe(elu);
@@ -135,12 +140,14 @@ impl OverloadSignal {
     ///
     /// Replaces the bucket wholesale (resetting it to full at the configured
     /// capacity): it is a boot-time call before any admission decision, so there
-    /// is no in-flight token state to preserve.
+    /// is no in-flight token state to preserve. A size of 0 removes the bucket:
+    /// the gate is off.
     pub fn configure_admission(&self, cfg: &crate::config::B2buaConfig) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = locked(&self.inner, OVERLOAD_SIGNAL);
         let now = inner.now();
-        inner.bucket =
-            TokenBucket::full(f64::from(cfg.cps_bucket_size), f64::from(cfg.cps_bucket_rate), now);
+        inner.bucket = (cfg.cps_bucket_size > 0).then(|| {
+            TokenBucket::full(f64::from(cfg.cps_bucket_size), f64::from(cfg.cps_bucket_rate), now)
+        });
         inner.panic_elu_threshold = cfg.overload_panic_elu_threshold;
     }
 
@@ -149,25 +156,28 @@ impl OverloadSignal {
     /// primary loop; the backstop catches an absent, misconfigured or
     /// overloaded LB.
     pub fn panic_elu(&self) -> (f64, f64) {
-        let inner = self.inner.lock().unwrap();
+        let inner = locked(&self.inner, OVERLOAD_SIGNAL);
         (inner.elu_ewma.get(), inner.panic_elu_threshold)
     }
 
     /// The bucket rung's input: seconds until the bucket holds a token, 0
-    /// when it holds one now. Takes nothing.
+    /// when it holds one now or the gate is off. Takes nothing.
     pub fn token_wait_sec(&self) -> u32 {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = locked(&self.inner, OVERLOAD_SIGNAL);
         let now = inner.now();
-        inner.bucket.wait_sec(now)
+        inner.bucket.as_mut().map_or(0, |b| b.wait_sec(now))
     }
 
     /// Spend a token for an admitted new call, when one is there: an
     /// emergency call admitted past an empty bucket owes nothing, so it never
-    /// delays a later call (RFC 7339 §5.10.1 local preference).
+    /// delays a later call (RFC 7339 §5.10.1 local preference). With the gate
+    /// off there is nothing to spend.
     pub fn spend_token(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = locked(&self.inner, OVERLOAD_SIGNAL);
         let now = inner.now();
-        let _ = inner.bucket.try_take(now);
+        if let Some(bucket) = inner.bucket.as_mut() {
+            let _ = bucket.try_take(now);
+        }
     }
 
     /// Build the value of the `X-Overload` header for this worker's current
@@ -177,7 +187,7 @@ impl OverloadSignal {
     /// OPTIONS-reply hot path.
     pub fn x_overload_header_value(&self) -> String {
         let (elu, gc) = {
-            let inner = self.inner.lock().unwrap();
+            let inner = locked(&self.inner, OVERLOAD_SIGNAL);
             (inner.elu_ewma.get(), inner.gc_fraction_ewma.get())
         };
         let adm = self.non_emergency_admitted.load(Ordering::Relaxed);
@@ -187,21 +197,22 @@ impl OverloadSignal {
     }
 
     /// Snapshot of the published EWMAs, the `adm` counter and the bucket
-    /// level (for `/status`). Reading `token_bucket_level` refills the bucket
-    /// as a side effect (lazy refill), which is harmless — it is the same
-    /// refill the next peek would do.
+    /// level (for `/status`). The level is projected on a copy of the bucket:
+    /// a read credits nothing to the bucket itself, so how often it is read
+    /// never changes what it admits.
     pub fn metrics(&self) -> OverloadMetrics {
-        let (elu_ewma, gc_fraction_ewma, token_bucket_level) = {
-            let mut inner = self.inner.lock().unwrap();
+        let (elu_ewma, gc_fraction_ewma, token_bucket_level, cps_gate_enabled) = {
+            let inner = locked(&self.inner, OVERLOAD_SIGNAL);
             let now = inner.now();
-            let level = inner.bucket.level(now);
-            (inner.elu_ewma.get(), inner.gc_fraction_ewma.get(), level)
+            let level = inner.bucket.clone().map_or(0.0, |mut b| b.level(now));
+            (inner.elu_ewma.get(), inner.gc_fraction_ewma.get(), level, inner.bucket.is_some())
         };
         OverloadMetrics {
             elu_ewma,
             gc_fraction_ewma,
             non_emergency_admitted_total: self.non_emergency_admitted.load(Ordering::Relaxed),
             token_bucket_level,
+            cps_gate_enabled,
         }
     }
 }

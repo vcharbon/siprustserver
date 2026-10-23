@@ -30,6 +30,9 @@
 //!   sipflow /tmp/sipcap --call-id 7f3a... --sut 10.0.0.9 --rfc --rfc-rules all
 //!   sipflow /tmp/sipcap --sut auto --rfc --rfc-json review.json --rfc-doc review.flows.json
 //!   sipflow --to-pcap capture.anon.flows.json --out capture.anon.pcap
+//!   sipflow --list-rules
+//!   sipflow index capture.flows.json
+//!   sipflow get capture-dir/ --call-id 7f3a... --cseq 2 --method BYE --raw
 //!
 //! `--rfc` reviews the SELECTED calls: the same rules the census runs, on the
 //! document the selection would emit, with every hit placed on a side by
@@ -49,6 +52,18 @@ use sip_pcap::flow::{
 };
 use sip_pcap::query::{neighbours_of, select_groups, summary_row, Projection, Query};
 use sip_pcap::rfc::{Census, LocatedHit, SutSet};
+
+#[path = "sipflow/captures.rs"]
+mod captures;
+use captures::expand_inputs;
+#[path = "sipflow/census.rs"]
+mod census;
+#[path = "sipflow/get.rs"]
+mod get;
+#[path = "sipflow/reparse.rs"]
+mod reparse;
+#[path = "sipflow/walk.rs"]
+mod walk;
 
 /// Serialize an emitted document, exiting with the derivation error a
 /// document that cannot be re-derived must never be printed past.
@@ -196,6 +211,10 @@ struct Args {
     #[arg(long, default_value_t = false)]
     schema: bool,
 
+    /// Print every RFC rule token (`rfc_rules::RuleId`), one per line, and exit.
+    #[arg(long, default_value_t = false)]
+    list_rules: bool,
+
     /// Encode an ALREADY EMITTED flows document as a classic pcap (Ethernet /
     /// IP / UDP, the document's own sockets and timestamps) at `--out` — an
     /// anonymized document back into a capture every reader takes. Reads no
@@ -207,8 +226,8 @@ struct Args {
     #[arg(long)]
     out: Option<PathBuf>,
 
-    /// Also write every SIP-looking datagram the parser rejected (the
-    /// `parse-failed` count), exactly as captured, to this classic pcap.
+    /// Also write every datagram ingest set aside (`parse-failed`, and a copy
+    /// of each `header-failed` one), exactly as captured, to this classic pcap.
     #[arg(long = "parse-failed-pcap")]
     parse_failed_pcap: Option<PathBuf>,
 
@@ -227,6 +246,22 @@ struct Args {
     /// time.
     #[arg(long, default_value_t = 4)]
     rfc_census_jobs: usize,
+
+    /// Re-parse every message of ALREADY EMITTED flows documents — files, or
+    /// directories walked recursively for `*.flows.json` — and print one JSON
+    /// line per message the parser refuses and per failed non-fatal header of
+    /// an accepted one, with the totals on stderr. Reads no capture.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        conflicts_with_all = ["json", "query", "query_json", "list", "full", "enrich", "rfc_census"]
+    )]
+    reparse: Vec<PathBuf>,
+
+    /// Worker threads the re-parse sweep runs, each reading one document at a
+    /// time.
+    #[arg(long, default_value_t = 4)]
+    reparse_jobs: usize,
 
     /// Rule tokens (`rfc_rules::RuleId`) named beside the census vocabulary.
     /// The census runs every rule with a body already, so naming one changes
@@ -283,7 +318,14 @@ struct Args {
 }
 
 fn main() {
+    get::dispatch();
     let args = Args::parse();
+    if args.list_rules {
+        for rule in rfc_rules::RuleId::ALL {
+            println!("{}", rule.token());
+        }
+        return;
+    }
     if args.schema {
         let schema = schemars::schema_for!(sip_pcap::doc::FlowsDoc);
         println!("{}", serde_json::to_string_pretty(&schema).expect("schema serializes"));
@@ -316,8 +358,12 @@ fn main() {
         }
         return;
     }
+    if !args.reparse.is_empty() {
+        reparse::run(&args.reparse, args.reparse_jobs);
+        return;
+    }
     if !args.rfc_census.is_empty() {
-        run_rfc_census(&args.rfc_census, args.rfc_census_jobs, &args.rfc_census_with);
+        census::run(&args.rfc_census, args.rfc_census_jobs, &args.rfc_census_with);
         return;
     }
     let rfc_rules = args.rfc.then(|| match rule_set(&args.rfc_rules) {
@@ -329,7 +375,7 @@ fn main() {
     });
     if args.inputs.is_empty() {
         eprintln!(
-            "no capture given (see --help; --schema, --enrich and --rfc-census read no capture)"
+            "no capture given (see --help; --schema, --enrich, --reparse and --rfc-census read no capture)"
         );
         std::process::exit(2);
     }
@@ -399,8 +445,7 @@ fn main() {
     let sut = sut_of(&args, &flows);
 
     if let Some(path) = &args.parse_failed_pcap {
-        let failed = flows.stats.parse_failed_at.iter().map(|&i| &datagrams[i]);
-        if let Err(e) = sip_pcap::pcapout::datagrams_to_pcap(failed)
+        if let Err(e) = sip_pcap::pcapout::set_aside_to_pcap(&flows.stats, &datagrams)
             .and_then(|bytes| std::fs::write(path, bytes).map_err(|e| e.to_string()))
         {
             eprintln!("cannot write the rejected datagrams to {}: {e}", path.display());
@@ -420,11 +465,12 @@ fn main() {
         .collect();
 
     eprintln!(
-        "# files={} {stats}\n# sip-messages={} capture-dups={} parse-failed={} non-sip={} legs={} call-groups={} matched={}",
+        "# files={} {stats}\n# sip-messages={} capture-dups={} parse-failed={} header-failed={} non-sip={} legs={} call-groups={} matched={}",
         files.len(),
         flows.stats.sip_messages,
         flows.stats.capture_dups,
         flows.stats.parse_failed,
+        flows.stats.header_failed,
         flows.stats.non_sip,
         flows.legs.len(),
         flows.groups.len(),
@@ -518,13 +564,11 @@ fn rule_set(words: &[String]) -> Result<Vec<rfc_rules::RuleId>, String> {
     for word in words {
         match word.as_str() {
             "wire" => {}
-            "all" => out.extend(rfc_rules::all_rules().iter().map(|r| r.id())),
+            "all" => out.extend(rfc_rules::RuleId::ALL),
             token => {
-                let id = rfc_rules::all_rules()
-                    .iter()
-                    .map(|r| r.id())
-                    .find(|id| id.token() == token)
-                    .ok_or_else(|| format!("--rfc-rules: unknown rule {token:?}"))?;
+                let id = token
+                    .parse::<rfc_rules::RuleId>()
+                    .map_err(|_| format!("--rfc-rules: unknown rule {token:?}"))?;
                 out.push(id);
             }
         }
@@ -769,138 +813,6 @@ fn run_query(
     hits
 }
 
-/// Every flows document under `inputs`: a named file is taken as given, a
-/// directory is walked recursively for `*.flows.json`.
-///
-/// The recursion does NOT descend a symlinked directory, and the result is
-/// deduplicated by canonical path: a corpus that classifies its captures by
-/// symlinking them into bucket directories would otherwise present the same
-/// document several times and inflate every count the census reports. A path
-/// named DIRECTLY on the command line is still followed — that one is a
-/// deliberate choice.
-///
-/// Sorted, so the sweep's work order — and therefore its report — does not
-/// depend on the filesystem.
-fn expand_flows_documents(inputs: &[PathBuf]) -> Vec<PathBuf> {
-    fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
-        for entry in entries.filter_map(Result::ok) {
-            let Ok(kind) = entry.file_type() else { continue };
-            let path = entry.path();
-            if kind.is_dir() {
-                walk(&path, out);
-            } else if kind.is_file()
-                && path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.ends_with(".flows.json"))
-            {
-                out.push(path);
-            }
-        }
-    }
-    let mut files = Vec::new();
-    for input in inputs {
-        if input.is_dir() {
-            walk(input, &mut files);
-        } else {
-            files.push(input.clone());
-        }
-    }
-    files.sort();
-    let mut seen = std::collections::HashSet::new();
-    files.retain(|p| seen.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())));
-    files
-}
-
-/// Sweep the census over flows documents and print it.
-///
-/// Every document is either scanned or recorded as a read failure: a census
-/// that dropped a document it could not parse would understate its own counts.
-fn run_rfc_census(inputs: &[PathBuf], jobs: usize, candidates: &[rfc_rules::RuleId]) {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let files = expand_flows_documents(inputs);
-    if files.is_empty() {
-        eprintln!("no *.flows.json found under {inputs:?}");
-        std::process::exit(2);
-    }
-    let workers = jobs.clamp(1, files.len());
-    eprintln!("# rfc-census: {} document(s), {workers} worker(s)", files.len());
-
-    let next = AtomicUsize::new(0);
-    let done = AtomicUsize::new(0);
-    let census = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..workers)
-            .map(|_| {
-                let (next, done, files) = (&next, &done, &files);
-                scope.spawn(move || {
-                    let mut local = Census::with_candidates(candidates);
-                    while let Some(path) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
-                        let name = path.display().to_string();
-                        let capture = path
-                            .parent()
-                            .and_then(|p| p.file_name())
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        match std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(
-                            |t| serde_json::from_str::<FlowsDoc>(&t).map_err(|e| e.to_string()),
-                        ) {
-                            Ok(doc) => local.absorb(&name, &capture, &doc),
-                            Err(reason) => local.fail(&name, reason),
-                        }
-                        let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                        if n % 500 == 0 {
-                            eprintln!("# {n}/{} scanned", files.len());
-                        }
-                    }
-                    local
-                })
-            })
-            .collect();
-        let mut merged = Census::with_candidates(candidates);
-        for handle in handles {
-            merged.merge(handle.join().expect("a census worker panicked"));
-        }
-        merged
-    });
-    let mut census = census;
-    census.sort();
-
-    eprint!("{}", census.summary());
-    println!("{}", serde_json::to_string_pretty(&census).expect("census serializes"));
-}
-
-fn expand_inputs(inputs: &[PathBuf]) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    for p in inputs {
-        if p.is_dir() {
-            let mut in_dir: Vec<PathBuf> = std::fs::read_dir(p)
-                .map(|rd| {
-                    rd.filter_map(|e| e.ok().map(|e| e.path()))
-                        .filter(|p| {
-                            // Name-based, and deliberately loose: `.pcap`,
-                            // `.pcapng` and either gzipped. The container and
-                            // compression are re-detected from the bytes.
-                            p.file_name()
-                                .and_then(|n| n.to_str())
-                                .map(|n| n.contains(".pcap"))
-                                .unwrap_or(false)
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            // Ring files: oldest-first by mtime so fragment reassembly and
-            // ladders see time monotonically.
-            in_dir.sort_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
-            files.extend(in_dir);
-        } else {
-            files.push(p.clone());
-        }
-    }
-    files
-}
-
 fn group_matches(group: &CallGroup, legs: &[FlowLeg], args: &Args, sut: Option<&SutSet>) -> bool {
     let any_leg = |pred: &dyn Fn(&FlowLeg) -> bool| group.legs.iter().any(|&l| pred(&legs[l]));
 
@@ -1112,31 +1024,5 @@ fn print_ladder(n: usize, group: &CallGroup, legs: &[FlowLeg], full: bool) {
 }
 
 #[cfg(all(test, unix))]
-mod tests {
-    use super::expand_flows_documents;
-    use std::path::PathBuf;
-
-    /// A corpus that classifies captures by symlinking their directories into
-    /// buckets yields each document ONCE: the sweep walks the real tree and
-    /// declines to descend the aliases, so no count is doubled.
-    #[test]
-    fn a_symlinked_bucket_directory_does_not_present_a_document_twice() {
-        let root = std::env::temp_dir().join(format!("sipflow-walk-{}", std::process::id()));
-        let capture = root.join("capture_1");
-        let bucket = root.join("_diverge");
-        std::fs::create_dir_all(&capture).expect("capture dir");
-        std::fs::create_dir_all(&bucket).expect("bucket dir");
-        std::fs::write(capture.join("capture_1.anon.flows.json"), "{}").expect("document");
-        std::fs::write(capture.join("notes.txt"), "not a document").expect("decoy");
-        std::os::unix::fs::symlink(&capture, bucket.join("capture_1")).expect("bucket alias");
-
-        let found = expand_flows_documents(std::slice::from_ref(&root));
-        std::fs::remove_dir_all(&root).ok();
-
-        assert_eq!(
-            found,
-            vec![PathBuf::from(&capture).join("capture_1.anon.flows.json")],
-            "one document, reached by its real path"
-        );
-    }
-}
+#[path = "sipflow/tests.rs"]
+mod tests;

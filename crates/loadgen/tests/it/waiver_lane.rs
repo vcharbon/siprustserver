@@ -49,7 +49,7 @@ async fn record_reuse_call() -> AgentBinder {
     binder
 }
 
-fn has_rule(findings: &[sip_net::RfcFinding], rule: &str) -> bool {
+fn has_rule(findings: &[sip_net_testkit::RfcFinding], rule: &str) -> bool {
     findings.iter().any(|f| f.rule == rule)
 }
 
@@ -64,7 +64,7 @@ async fn rule_only_waiver_matches_the_historic_hashset_filter() {
     assert!(has_rule(&all, RULE), "the reuse fires the CSeq audit (sanity)");
 
     // A plain allow-list: drop every finding whose rule is in the allow set.
-    let old_filtered: Vec<sip_net::RfcFinding> =
+    let old_filtered: Vec<sip_net_testkit::RfcFinding> =
         all.iter().filter(|f| f.rule != RULE).cloned().collect();
 
     // A rule-only, conditional WaiverScope (the exact lowering

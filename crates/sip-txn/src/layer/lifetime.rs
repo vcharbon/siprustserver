@@ -1,17 +1,19 @@
 //! When a transaction leaves the map. Every resident transaction carries one
 //! [`Lifetime`] and one end-of-life deadline, armed as its single
 //! [`Timer::Cleanup`]; the functions here are the only writers of both. The
-//! retransmit ladders, Timer B/F and the CANCEL grace produce events, not
+//! retransmit ladders and Timer B/F produce events, not
 //! removal, and live in `layer::client` / `layer::server`.
 
 use std::time::Duration;
 
+use sip_clock::{deadline, delay_queue};
 use tokio::time::Instant;
 
-use crate::event::TxnKind;
 use crate::timers::{
-    ms, TIMER_B, TIMER_D, TIMER_H, TIMER_I, TIMER_J, TIMER_M, TXN_MAX_AGE, TXN_SWEEP_INTERVAL,
+    ms, TIMER_B, TIMER_D, TIMER_H, TIMER_I, TIMER_J, TIMER_L, TIMER_M, TXN_MAX_AGE,
+    TXN_SWEEP_INTERVAL,
 };
+use call::TxnKind;
 
 use super::events::SweptServer;
 use super::owner::Owner;
@@ -29,14 +31,15 @@ const SWEEP_SLACK: Duration = ms(TXN_SWEEP_INTERVAL);
 pub(super) enum Hold {
     /// Client INVITE after a non-2xx final (RFC 3261 §17.1.1.2).
     TimerD,
-    /// Server INVITE after its final: Timer H after a non-2xx (§17.2.1),
-    /// RFC 6026 §7.1 Timer L after a 2xx — both 64·T1.
+    /// Server INVITE after a non-2xx final (§17.2.1).
     TimerH,
+    /// Server INVITE Accepted after a 2xx (RFC 6026 §7.1).
+    TimerL,
     /// Server non-INVITE after its final (§17.2.2).
     TimerJ,
     /// Server INVITE whose non-2xx final is ACKed (§17.2.1).
     TimerI,
-    /// Orphaned client INVITE whose 2xx the layer ACKed (RFC 6026 §7.2).
+    /// Client INVITE Accepted after a 2xx (RFC 6026 §7.2).
     TimerM,
     /// Client INVITE that gave up: 64·T1 for the final its CANCEL provokes
     /// (§9.1), from the CANCEL's first send, else from the give-up.
@@ -48,6 +51,7 @@ impl Hold {
         ms(match self {
             Hold::TimerD => TIMER_D,
             Hold::TimerH => TIMER_H,
+            Hold::TimerL => TIMER_L,
             Hold::TimerJ => TIMER_J,
             Hold::TimerI => TIMER_I,
             Hold::TimerM => TIMER_M,
@@ -100,30 +104,42 @@ impl Lifetime {
 }
 
 impl Owner {
-    /// Put a fresh transaction in the map `Active`, arm its backstop and
-    /// return it. An INVITE (either role) gets the configured INVITE bound
-    /// plus the margin, a non-INVITE the margin alone, all measured from now —
-    /// for a seed, from the seed, never from the first copy's send on another
-    /// node. The backstop never precedes a client transaction's `Timeout`:
-    /// it lies `TXN_MAX_AGE` past the INVITE bound, and `TXN_MAX_AGE` exceeds
-    /// Timer F.
-    pub(super) fn open_txn(&mut self, head: NewTransaction) -> &mut Transaction {
+    /// Put a fresh transaction in the map `Active` and arm its backstop. An
+    /// INVITE (either role) gets the configured INVITE bound plus the margin,
+    /// a non-INVITE the margin alone, all measured from now — for a seed,
+    /// from the seed, never from the first copy's send on another node. The
+    /// backstop never precedes a client transaction's `Timeout`: it lies
+    /// `TXN_MAX_AGE` past the INVITE bound, and `TXN_MAX_AGE` exceeds Timer
+    /// F (for a bound within the clock's one-year ceiling less the margin).
+    pub(super) fn open_txn(&mut self, head: NewTransaction) {
+        self.open_txn_with(head, |_| {});
+    }
+
+    /// [`open_txn`](Self::open_txn), `finish` completing the transaction
+    /// before it goes into the map.
+    pub(super) fn open_txn_with(
+        &mut self,
+        head: NewTransaction,
+        finish: impl FnOnce(&mut Transaction),
+    ) {
         let budget = match head.kind {
-            TxnKind::Invite => self.invite_initial_timeout_ms + TXN_MAX_AGE,
+            TxnKind::Invite => self.invite_initial_timeout_ms.saturating_add(TXN_MAX_AGE),
             TxnKind::NonInvite => TXN_MAX_AGE,
         };
-        let id = head.id.clone();
-        let lifetime = Lifetime::Active { backstop: Instant::now() + ms(budget) };
-        self.set_txn(Transaction::new(head, lifetime));
-        self.arm_deadline(id.as_ref());
-        self.txn_mut(id.as_ref()).expect("just inserted")
+        let lifetime = Lifetime::Active { backstop: deadline::from_now(ms(budget)) };
+        let mut txn = Transaction::new(head, lifetime);
+        finish(&mut txn);
+        let cleanup = Timer::Cleanup(txn.id.clone());
+        txn.cleanup_key =
+            Some(delay_queue::insert_at(&mut self.timers, cleanup, txn.lifetime.deadline()));
+        self.set_txn(txn);
     }
 
     /// Hold the transaction `id` names for `why`, from now
     /// ([`Lifetime::held`]).
     pub(super) fn hold(&mut self, id: TxnRef<'_>, why: Hold) {
         let Some(txn) = self.txn_mut(id) else { return };
-        txn.lifetime = txn.lifetime.held(why, Instant::now() + why.duration());
+        txn.lifetime = txn.lifetime.held(why, deadline::from_now(why.duration()));
         self.arm_deadline(id);
     }
 
@@ -133,7 +149,7 @@ impl Owner {
         let Some(txn) = self.txn_mut(id) else { return };
         let (old, deadline) = (txn.cleanup_key.take(), txn.lifetime.deadline());
         self.cancel_timer(old);
-        let key = self.timers.insert_at(Timer::Cleanup(id.to_id()), deadline);
+        let key = delay_queue::insert_at(&mut self.timers, Timer::Cleanup(id.to_id()), deadline);
         if let Some(txn) = self.txn_mut(id) {
             txn.cleanup_key = Some(key);
         }
@@ -157,7 +173,7 @@ impl Owner {
             });
         self.delete_txn(id);
         if let Some(server) = unanswered {
-            self.drop_deferred_requests_of(&[server]);
+            self.drop_deferred_request_of(&server);
         }
     }
 
@@ -171,7 +187,7 @@ impl Owner {
             .clients
             .values()
             .chain(self.servers.values())
-            .filter(|t| t.lifetime.deadline() + SWEEP_SLACK <= now)
+            .filter(|t| deadline::after(t.lifetime.deadline(), SWEEP_SLACK) <= now)
             .map(|t| t.id.clone())
             .collect();
         for id in &overdue {

@@ -18,7 +18,19 @@ pub struct HostPort {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InviteTxnHandle {
     pub branch: String,
+    /// The CSeq the INVITE went out with: on a dialog, a transaction at a
+    /// higher number is a later one (RFC 3261 §12.2.1.1).
+    #[serde(default)]
+    pub cseq: i64,
     #[serde(with = "serde_bytes")]
     pub original_invite: Vec<u8>,
     pub destination: HostPort,
+}
+
+impl InviteTxnHandle {
+    /// The handle of the INVITE `original_invite`, sent at `cseq` on the
+    /// client transaction `branch` toward `destination`.
+    pub fn new(branch: &str, cseq: i64, original_invite: Vec<u8>, destination: HostPort) -> Self {
+        InviteTxnHandle { branch: branch.into(), cseq, original_invite, destination }
+    }
 }

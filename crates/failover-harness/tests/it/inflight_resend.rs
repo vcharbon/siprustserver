@@ -26,22 +26,23 @@
 //!
 //! The peer's re-send is the datagram it already put on the wire, byte for byte,
 //! addressed where it addressed the first copy — the first retransmission rung
-//! after the kill (Timer E for a non-INVITE; Timer A for the re-INVITE, whose
-//! client transaction is still `Calling` because the front proxy absorbs the
-//! worker's 100 Trying, RFC 3261 §16.7) driven by hand, since these UAs run no
-//! retransmit engine.
+//! after the kill, driven by hand: Timer E for a non-INVITE; Timer A for the
+//! re-INVITE, whose caller is off the signalling plane from its send to the kill,
+//! so the 100 and the T1 rung are lost and it stays `Calling` (RFC 3261 §17.1.1.2).
 //!
-//! What each cell pins: the survivor takes the call over on that re-send, and
-//! the cluster settles to exactly one CDR with no trace and clean memory on both
-//! nodes. The non-INVITE cells verify D7's "a relayed non-INVITE needs no server
-//! seed — the peer's re-emission covers it": nothing on the survivor rebuilds
-//! the server transaction the dead primary held, the re-send builds a fresh one,
-//! is answered, and the call continues (UPDATE, INFO) or ends (BYE). The two
-//! INVITE cells verify the seeds (D7, D9): the caller's CANCEL is answered from
-//! the a-leg INVITE transaction the survivor rebuilds from the record, and the
-//! caller's re-INVITE re-send is absorbed by the transaction the record names —
-//! one b-leg INVITE for the round, resolved on the seeded transaction's bound,
-//! the caller's own re-INVITE then drawing its final (RFC 3261 §15.1.2).
+//! The kill is never told to the peers (ADR-0031 cases 3a and 4), so no
+//! departure sweep runs. What each cell pins: the survivor takes the call over
+//! on that re-send, and the cluster settles to exactly one CDR with no trace
+//! and clean memory on both nodes. The non-INVITE cells verify D7's "a relayed
+//! non-INVITE needs no server seed — the peer's re-emission covers it": nothing
+//! on the survivor rebuilds the server transaction the dead primary held, the
+//! re-send builds a fresh one, is answered, and the call continues (UPDATE,
+//! INFO) or ends (BYE). The two INVITE cells verify the seeds (D7, D9): the
+//! caller's CANCEL is answered from the a-leg INVITE transaction the survivor
+//! rebuilds from the record, and the caller's re-INVITE re-send is absorbed by
+//! the transaction the record names — one b-leg INVITE for the round, whose
+//! seeded client transaction takes the callee's 200 the front proxy fails over
+//! to it (on the cookie of its own Via).
 //!
 //! The killed primary is the call's sole CDR authority (ADR-0020 X3), so every
 //! cell reboots it and lets its reclaim discharge the terminal the survivor
@@ -57,15 +58,15 @@ use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, ProxySut,
     ReplicatedB2buaSut, WorkerHealth, RULE_CSEQ_IN_DIALOG_ORDER,
 };
-use scenario_harness::agent::{Agent, Dialog, Inbound};
+use scenario_harness::agent::{Agent, Dialog};
 use sip_message::generators::InDialogMethod;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
-const REOFFER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10002 RTP/AVP 0\r\n";
-const REANSWER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20002 RTP/AVP 0\r\n";
+pub(crate) const REOFFER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10002 RTP/AVP 0\r\n";
+pub(crate) const REANSWER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20002 RTP/AVP 0\r\n";
 /// The INFO body the caller drives, and its media type — an arbitrary-MIME
 /// payload, so the cell proves the body crosses the takeover too.
 const INFO_CT: &str = "application/example-binary";
@@ -79,13 +80,11 @@ const B2: &str = "127.0.0.1:5092";
 
 /// The first retransmission rung (RFC 3261 §17.1.1.2 / §17.1.2.2). The kill and
 /// the re-send together consume it.
-const T1: Duration = Duration::from_millis(500);
-/// The pause held after the kill, before the peer's re-send. It is the window in
-/// which a shape-**A** cell's doomed callee answer reaches the proxy and is
-/// dropped there — its next Via names a dead node and an in-dialog response
-/// carries no Record-Route — so the re-send is provably the first datagram that
-/// can hydrate the call.
-const KILL_SETTLE: Duration = Duration::from_millis(300);
+pub(crate) const T1: Duration = Duration::from_millis(500);
+/// The pause held after the kill, before the peer's re-send. A shape-**A**
+/// callee holds its answer through it, so the re-send is provably the first
+/// datagram that can hydrate the call.
+pub(crate) const KILL_SETTLE: Duration = Duration::from_millis(300);
 /// How far the front proxy's health view lags a node's death. The doomed copy
 /// crosses the proxy inside it and lands on the dead node's socket, which is
 /// where a shape-**B** request is lost. `HEALTH_LAG + KILL_SETTLE == T1`, so the
@@ -93,22 +92,16 @@ const KILL_SETTLE: Duration = Duration::from_millis(300);
 const HEALTH_LAG: Duration = Duration::from_millis(200);
 /// The pause that lets a relayed round replicate before the kill, when the
 /// cell's contract is what the survivor rebuilds from the record.
-const REPLICATE: Duration = Duration::from_millis(500);
-
-/// The INVITE bound the workers run under (the cells tune none) — the give-up
-/// of a seeded client INVITE, measured from the seed.
-fn invite_bound() -> Duration {
-    Duration::from_secs(b2bua::B2buaConfig::default().invite_txn_timeout_sec as u64)
-}
+pub(crate) const REPLICATE: Duration = Duration::from_millis(500);
 
 /// Why `cseq-in-dialog-order` is accepted from the kill onward in every cell.
-const CSEQ_OVERLAP: &str =
-    "ADR-0014 accepted trade-off: with two potential owners of one leg in the \
-                            takeover window, the b-leg CSeq the dead primary minted may be minted \
-                            again by the survivor";
+const CSEQ_OVERLAP: &str = "ADR-0014 accepted trade-off: two potential owners of one leg in the \
+    takeover window, so the b-leg CSeq the dead primary minted may be minted again by the survivor";
 
 /// The proxy plus both workers, ready at steady state.
-async fn bring_up(fh: &mut FailoverHarness) -> (ProxySut, ReplicatedB2buaSut, ReplicatedB2buaSut) {
+pub(crate) async fn bring_up(
+    fh: &mut FailoverHarness,
+) -> (ProxySut, ReplicatedB2buaSut, ReplicatedB2buaSut) {
     let proxy =
         fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
     let w_b1 =
@@ -122,7 +115,7 @@ async fn bring_up(fh: &mut FailoverHarness) -> (ProxySut, ReplicatedB2buaSut, Re
 
 /// Establish alice ⇄ bob through the proxy; returns the confirmed dialog and the
 /// ordinal of the worker the proxy's stickiness cookie placed the call on.
-async fn establish(
+pub(crate) async fn establish(
     fh: &FailoverHarness,
     alice: &Agent,
     bob: &Agent,
@@ -143,7 +136,7 @@ async fn establish(
 /// The exact datagram `from` last put on the wire for `method`, with the
 /// destination it addressed — the peer's own copy, which it re-sends verbatim
 /// when nothing answers.
-fn last_request_sent(
+pub(crate) fn last_request_sent(
     fh: &FailoverHarness,
     from: SocketAddr,
     method: &Method,
@@ -175,10 +168,10 @@ fn crash_serving_node(
     hydrated_before
 }
 
-/// The shape-**A** kill: the callee holds the exchange open, so the cluster is
-/// told at once — the proxy stops routing to the dead node, the survivor drops
-/// it from membership.
-async fn kill_serving_node(
+/// The shape-**A** kill: the callee holds the exchange open, and the proxy's
+/// probe reads the node dead at once. The peers are not told (ADR-0031 cases 3a
+/// and 4), so no departure sweep runs: only a message takes a call over.
+pub(crate) async fn kill_serving_node(
     fh: &mut FailoverHarness,
     primary: &mut ReplicatedB2buaSut,
     survivor: &ReplicatedB2buaSut,
@@ -187,7 +180,6 @@ async fn kill_serving_node(
 ) -> u64 {
     let hydrated_before = crash_serving_node(fh, primary, survivor, pri_ord);
     proxy.set_health(pri_ord, WorkerHealth::Dead);
-    survivor.simulate_peer_removed(pri_ord);
     fh.advance(KILL_SETTLE).await;
     hydrated_before
 }
@@ -195,7 +187,7 @@ async fn kill_serving_node(
 /// The shape-**B** kill: the node dies with the peer's datagram still on the
 /// fabric. The proxy's health view lags, so it forwards the doomed copy onto the
 /// dead node's socket — that is where the request is lost — and only then stops
-/// routing there.
+/// routing there. The peers are not told, as in the shape-**A** kill.
 async fn kill_under_the_datagram(
     fh: &mut FailoverHarness,
     primary: &mut ReplicatedB2buaSut,
@@ -206,13 +198,12 @@ async fn kill_under_the_datagram(
     let hydrated_before = crash_serving_node(fh, primary, survivor, pri_ord);
     fh.advance(HEALTH_LAG).await;
     proxy.set_health(pri_ord, WorkerHealth::Dead);
-    survivor.simulate_peer_removed(pri_ord);
     fh.advance(KILL_SETTLE).await;
     hydrated_before
 }
 
 /// The node that did not serve the call, of the two.
-fn survivor_of<'a>(
+pub(crate) fn survivor_of<'a>(
     pri_ord: &str,
     w_b1: &'a ReplicatedB2buaSut,
     w_b2: &'a ReplicatedB2buaSut,
@@ -226,7 +217,7 @@ fn survivor_of<'a>(
 
 /// The node that serves the call and the node that does not, with the serving one
 /// mutable — the kill and the reboot act on it.
-fn split_mut<'a>(
+pub(crate) fn split_mut<'a>(
     pri_ord: &str,
     w_b1: &'a mut ReplicatedB2buaSut,
     w_b2: &'a mut ReplicatedB2buaSut,
@@ -242,7 +233,7 @@ fn split_mut<'a>(
 /// is replicated, the node the stickiness cookie picked serves it, and the other
 /// node is a synchronized backup (holds the replica, serves nothing). Returns the
 /// cluster's `call_ref`.
-async fn synchronized_call_ref(
+pub(crate) async fn synchronized_call_ref(
     pri_ord: &str,
     w_b1: &ReplicatedB2buaSut,
     w_b2: &ReplicatedB2buaSut,
@@ -277,18 +268,17 @@ fn responses_toward(fh: &FailoverHarness, to: SocketAddr, method: &Method) -> us
 /// call: the survivor serves nothing for it and its hydration count is where the
 /// kill left it. Asserted immediately before the re-send, so the takeover the
 /// cell then observes can only be the re-send's.
-fn assert_not_taken_over(survivor: &ReplicatedB2buaSut, hydrated_before: u64, call_ref: &str) {
+pub(crate) fn assert_not_taken_over(survivor: &ReplicatedB2buaSut, before: u64, call_ref: &str) {
     assert_eq!(
         survivor.metrics().repl_takeover_hydrated_total(),
-        hydrated_before,
+        before,
         "nothing has taken the call over on the survivor yet",
     );
     assert!(!survivor.serves(call_ref), "the survivor serves nothing for the call yet");
 }
 
-/// The peer's re-send is what took the call over, and it did so once — a second
-/// hydration would mean the copy was released and rebuilt inside the window.
-fn assert_taken_over_once(survivor: &ReplicatedB2buaSut, hydrated_before: u64) {
+/// The re-send took the call over, once: a second hydration is a copy rebuilt in the window.
+pub(crate) fn assert_taken_over_once(survivor: &ReplicatedB2buaSut, hydrated_before: u64) {
     assert_eq!(
         survivor.metrics().repl_takeover_hydrated_total(),
         hydrated_before + 1,
@@ -301,7 +291,7 @@ fn assert_taken_over_once(survivor: &ReplicatedB2buaSut, hydrated_before: u64) {
 /// renegotiation round, counted on the recorded wire by top-Via branch: a Timer
 /// A rung repeats the transaction it belongs to (RFC 3261 §17.1.1.2) and is not
 /// a second INVITE.
-fn round_invites_sent_to(fh: &FailoverHarness, to: SocketAddr, offer: &str) -> usize {
+pub(crate) fn round_invites_sent_to(fh: &FailoverHarness, to: SocketAddr, offer: &str) -> usize {
     let parser = CustomParser::new();
     fh.sip_entries()
         .into_iter()
@@ -319,9 +309,9 @@ fn round_invites_sent_to(fh: &FailoverHarness, to: SocketAddr, offer: &str) -> u
 }
 
 /// Reboot the crashed primary empty at a higher gen + new pod IP, re-learn its
-/// address, and let its go-active reclaim discharge the terminal the survivor
-/// deferred (ADR-0020 X3).
-async fn reboot_and_reclaim(
+/// address, and let its go-active reclaim run: it discharges a terminal the
+/// survivor deferred to it (ADR-0020 X3).
+pub(crate) async fn reboot_and_reclaim(
     fh: &mut FailoverHarness,
     primary: &mut ReplicatedB2buaSut,
     survivor: &ReplicatedB2buaSut,
@@ -346,7 +336,7 @@ async fn reboot_and_reclaim(
 
 /// The cluster post-condition every cell ends on: settled, exactly one CDR, no
 /// trace and clean per-call memory on both nodes.
-async fn settle_to_one_cdr(
+pub(crate) async fn settle_to_one_cdr(
     fh: &FailoverHarness,
     peers: &[&Agent],
     nodes: &[&ReplicatedB2buaSut; 2],
@@ -517,18 +507,15 @@ async fn a_bye_in_flight_at_the_kill_is_served_on_the_peers_resend() {
 /// node dies: the caller's own re-send takes the call over on the survivor and
 /// is absorbed as the retransmission it is — the round's relayed INVITE is
 /// seeded from the replicated snapshot, so exactly one b-leg INVITE exists for
-/// the round. The callee's final for that INVITE is addressed to the dead node
-/// and can never be redelivered, so the seeded client transaction resolves the
-/// round on its own bound, and the survivor then ends the dialog it got no
-/// answer on (RFC 3261 §12.2.1.2): the caller's pending re-INVITE draws its
-/// 487 (§15.1.2) and the callee's a CANCEL, both parties draw a BYE, and the
+/// the round. The callee's 200, sent afterwards to the dead node, carries no
+/// Record-Route: the front proxy fails it over on the cookie of its own Via,
+/// the seeded client transaction takes it, and the caller gets its 200; the
 /// call ends with one CDR and full release on both nodes.
 ///
-/// The round must be in the replica before the kill: a round the dead node
-/// never replicated is a state change inside the acceptance window, the
-/// accepted collateral (ADR-0014), not this cell's contract. So the kill lands
-/// after the relay has replicated, and the re-send is the caller's next rung —
-/// the first one after the kill.
+/// The round must be in the replica before the kill: a round the dead node never
+/// replicated is a state change inside the acceptance window, the accepted
+/// collateral (ADR-0014), not this cell's contract. So the kill lands after the
+/// relay has replicated, and the re-send is the caller's first rung after it.
 #[tokio::test(start_paused = true)]
 async fn a_reinvite_in_flight_at_the_kill_is_served_on_the_peers_resend() {
     let mut fh = FailoverHarness::new("inflight-resend-reinvite", &["b1", "b2"]);
@@ -540,18 +527,16 @@ async fn a_reinvite_in_flight_at_the_kill_is_served_on_the_peers_resend() {
     let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
 
     // ── The re-INVITE goes IN FLIGHT: relayed, replicated, nobody answered ──
-    let reinvite = dialog.send_request(InDialogMethod::Invite).with_sdp(REOFFER).send().await;
+    let mut reinvite = dialog.send_request(InDialogMethod::Invite).with_sdp(REOFFER).send().await;
+    fh.cut_signalling("alice", alice.addr());
     let mut first_at_bob = bob.receive("INVITE").await;
+    first_at_bob.respond(100, "Trying").await;
     fh.advance(REPLICATE).await;
 
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
     let hydrated_before = kill_serving_node(&mut fh, primary, survivor, &pri_ord, &proxy).await;
-    // The callee answers as a UAS must; the 2xx is undeliverable and its
-    // transaction died with the node that opened it. The dialog's own teardown
-    // below is what clears it (RFC 3261 §13.3.1.4).
-    first_at_bob.respond(200, "OK").with_sdp(REANSWER).await;
-    // Timer A's rungs fall at T1 and 3·T1 after the re-INVITE; the kill sits
-    // between them, so the next rung is the first re-send after it.
+    fh.restore_signalling("alice", alice.addr());
+    // The T1 rung fell inside the cut; the 3·T1 rung is the first after the kill.
     fh.advance(3 * T1 - REPLICATE - KILL_SETTLE).await;
     assert_not_taken_over(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before, &call_ref);
 
@@ -559,42 +544,23 @@ async fn a_reinvite_in_flight_at_the_kill_is_served_on_the_peers_resend() {
     let (wire, dst) = last_request_sent(&fh, alice.addr(), &Method::Invite);
     alice.try_send_datagram(&wire, dst).await.expect("the peer's re-send leaves");
     fh.advance(Duration::from_millis(200)).await;
-    assert_taken_over_once(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before);
+    let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
+    assert_taken_over_once(survivor, hydrated_before);
+    assert_eq!(invite_trying_sent(&fh, survivor.sip_addr(), proxy.addr()), 1, "one 100 (§17.2.1)");
     assert_eq!(
         round_invites_sent_to(&fh, bob.addr(), REOFFER),
         1,
         "exactly one b-leg INVITE exists for the renegotiation round",
     );
 
-    // ── The round resolves on the seeded transaction's bound ────────────────
-    // Nothing further reaches the survivor for the round, so its seeded client
-    // INVITE gives up on the configured INVITE bound, and the survivor ends the
-    // dialog it got no answer on (RFC 3261 §12.2.1.2). The caller's re-INVITE
-    // is still pending on the survivor: it draws its final first (§15.1.2),
-    // then the BYE.
-    fh.advance(invite_bound() + Duration::from_millis(500)).await;
-    let round_final = loop {
-        match alice.recv_any().await.expect("the caller draws a response to its re-INVITE") {
-            Inbound::Response(r) if r.status() < 200 => continue,
-            Inbound::Response(r) => break r,
-            Inbound::Request(txn) => panic!(
-                "the caller expected a final for its re-INVITE, got a {} request",
-                txn.request().method(),
-            ),
-        }
-    };
-    assert_eq!(
-        round_final.status(),
-        487,
-        "the pending re-INVITE ends with the dialog (RFC 3261 §15.1.2)"
-    );
-    reinvite.ack_non_2xx(&round_final).await.expect("the caller hop-ACKs the 487");
-    alice.receive("BYE").await.respond(200, "OK").await;
-    // The callee's side of the round is CANCELled (§9.2: a CANCEL of an INVITE
-    // it already answered draws 200 and changes nothing), then its dialog ends.
-    bob.receive("CANCEL").await.respond(200, "OK").await;
+    // ── The callee answers; its 200 fails over to the seeded transaction ────
+    first_at_bob.respond(200, "OK").with_sdp(REANSWER).await;
+    let answered = reinvite.expect(200).await;
+    dialog.ack_for(answered.cseq().seq(), None).await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
-    fh.advance(Duration::from_millis(500)).await;
+    bye.expect(200).await;
 
     fh.advance(Duration::from_secs(60)).await;
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
@@ -603,8 +569,7 @@ async fn a_reinvite_in_flight_at_the_kill_is_served_on_the_peers_resend() {
     drop(proxy);
 }
 
-/// The 100 Trying responses to an INVITE that `from` put on the wire toward
-/// `to`.
+/// The 100 Trying responses to an INVITE that `from` put on the wire toward `to`.
 fn invite_trying_sent(fh: &FailoverHarness, from: SocketAddr, to: SocketAddr) -> usize {
     let parser = CustomParser::new();
     fh.sip_entries()
@@ -622,9 +587,9 @@ fn invite_trying_sent(fh: &FailoverHarness, from: SocketAddr, to: SocketAddr) ->
 /// over: the survivor's server transaction for the round is the seed it built
 /// from the record — keyed by the branch and sent-by of the hop the re-INVITE
 /// arrived from (RFC 3261 §17.2.3) — so the retransmission is absorbed by that
-/// seed with one 100 Trying and opens nothing new. The round then resolves on
-/// the seeded client transaction's bound, as when the re-send itself takes
-/// the call over.
+/// seed with one 100 Trying and opens nothing new. The callee's 200 then
+/// completes the round on the seeded client transaction, as when the re-send
+/// itself takes the call over.
 #[tokio::test(start_paused = true)]
 async fn a_reinvite_retransmitted_after_another_takeover_is_absorbed_by_its_seed() {
     let mut fh = FailoverHarness::new("inflight-resend-reinvite-seed", &["b1", "b2"]);
@@ -636,13 +601,15 @@ async fn a_reinvite_retransmitted_after_another_takeover_is_absorbed_by_its_seed
     let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
 
     // ── The re-INVITE goes IN FLIGHT: relayed, replicated, nobody answered ──
-    let reinvite = dialog.send_request(InDialogMethod::Invite).with_sdp(REOFFER).send().await;
+    let mut reinvite = dialog.send_request(InDialogMethod::Invite).with_sdp(REOFFER).send().await;
+    fh.cut_signalling("alice", alice.addr());
     let mut first_at_bob = bob.receive("INVITE").await;
+    first_at_bob.respond(100, "Trying").await;
     fh.advance(REPLICATE).await;
 
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
     let hydrated_before = kill_serving_node(&mut fh, primary, survivor, &pri_ord, &proxy).await;
-    first_at_bob.respond(200, "OK").with_sdp(REANSWER).await;
+    fh.restore_signalling("alice", alice.addr());
     assert_not_taken_over(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before, &call_ref);
 
     // ── An INFO takes the call over first (§14.1 bars only a second INVITE) ─
@@ -673,24 +640,14 @@ async fn a_reinvite_retransmitted_after_another_takeover_is_absorbed_by_its_seed
         "exactly one b-leg INVITE exists for the renegotiation round",
     );
 
-    // ── The round resolves on the seeded client transaction's bound ─────────
-    fh.advance(invite_bound() + Duration::from_millis(500)).await;
-    let round_final = loop {
-        match alice.recv_any().await.expect("the caller draws a response to its re-INVITE") {
-            Inbound::Response(r) if r.status() < 200 => continue,
-            Inbound::Response(r) => break r,
-            Inbound::Request(txn) => panic!(
-                "the caller expected a final for its re-INVITE, got a {} request",
-                txn.request().method(),
-            ),
-        }
-    };
-    assert_eq!(round_final.status(), 487, "the pending re-INVITE ends with the dialog");
-    reinvite.ack_non_2xx(&round_final).await.expect("the caller hop-ACKs the 487");
-    alice.receive("BYE").await.respond(200, "OK").await;
-    bob.receive("CANCEL").await.respond(200, "OK").await;
+    // ── The callee answers; its 200 fails over to the seeded transaction ────
+    first_at_bob.respond(200, "OK").with_sdp(REANSWER).await;
+    let answered = reinvite.expect(200).await;
+    dialog.ack_for(answered.cseq().seq(), None).await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
-    fh.advance(Duration::from_millis(500)).await;
+    bye.expect(200).await;
 
     fh.advance(Duration::from_secs(60)).await;
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);

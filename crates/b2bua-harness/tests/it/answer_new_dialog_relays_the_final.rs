@@ -21,7 +21,7 @@ use sip_message::header::HeaderName;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const EARLY: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
-const ANSWER: &str = "v=0\r\no=bob 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20002 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+const ANSWER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20002 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 
 /// Longer than T1 (500 ms) and well inside the give-up deadline: exactly one
 /// §13.3.1.4 rung fires while the caller holds her ACK.
@@ -39,7 +39,7 @@ mod fork {
         RuleHandleResult, ServiceSeed, Terminal,
     };
     use b2bua::{define_service, sm_rule};
-    use call::{CdrEventType, Direction, LegDisposition, LegState, TimerType};
+    use call::{CdrEventType, Direction, LegState, TimerKey, TimerType};
     use sip_message::generators::SourceBody;
 
     define_service! {
@@ -60,7 +60,8 @@ mod fork {
             transitions: [ ForkState::Waiting => Terminal ],
             effects: [
                 Effect::Respond { status: 200, label: "200 under a fresh To-tag A2, delivering the callee final" },
-                Effect::GuardTimer { timer: TimerType::SetupTimeout, label: "disarm the ring and setup timers" },
+                Effect::GuardTimer { timer: TimerType::NoAnswer, scope: call::TimerScopeKind::Leg, label: "disarm the ring timer" },
+                Effect::GuardTimer { timer: TimerType::SetupTimeout, scope: call::TimerScopeKind::Call, label: "disarm the setup timer" },
                 Effect::LifecycleCommand { label: "bridge caller and callee" },
             ],
             matcher: Match::response()
@@ -73,11 +74,6 @@ mod fork {
                 let b = ctx.source_leg_id.to_string();
                 let a = ctx.call.a_leg().leg_id.clone();
                 Some(RuleHandleResult::new(vec![
-                    RuleAction::UpdateLegState {
-                        leg_id: b.clone(),
-                        state: LegState::Confirmed,
-                        disposition: Some(LegDisposition::Bridged),
-                    },
                     RuleAction::ConfirmDialog { leg_id: b.clone() },
                     RuleAction::AnswerALegNewDialog {
                         status: 200,
@@ -102,8 +98,8 @@ mod fork {
                         status_code: Some(200),
                         reason: None,
                     },
-                    RuleAction::CancelTimer { id: format!("NoAnswer:{b}") },
-                    RuleAction::CancelTimer { id: format!("{:?}", TimerType::SetupTimeout) },
+                    RuleAction::cancel(TimerKey::leg(TimerType::NoAnswer, &b)),
+                    RuleAction::cancel(TimerKey::call(TimerType::SetupTimeout)),
                     RuleAction::Merge { leg_a: a, leg_b: b },
                     RuleAction::ClearState { machine: FORK },
                 ]))

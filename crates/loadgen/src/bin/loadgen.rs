@@ -13,14 +13,10 @@
 //! See `crates/loadgen/README.md` for the quick start, how it relates to the
 //! existing test suites, and how to add scenarios.
 //!
-//! The whole application lives in [`loadgen::app`] behind an injectable
-//! [`ShapeRegistry`](loadgen::ShapeRegistry) — this bin is the thin caller
-//! passing the shipped defaults; a third-party load bin is the same one-liner
-//! with its own composed registry.
+//! The whole application lives in [`loadgen::app`] behind the
+//! [`Product`](loadgen::app::Product) seam: this bin is the shipped product,
+//! and another product's load bin is the same one line over its own product.
 
-use loadgen::app::Args;
-
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> std::io::Result<()> {
-    loadgen::app::run(Args::parse(), loadgen::ShapeRegistry::with_defaults()).await
+fn main() -> std::io::Result<()> {
+    loadgen::app::main(loadgen::app::Shipped)
 }

@@ -35,15 +35,18 @@ impl CapacityGate {
                     _ => bound.emergency,
                 }
             } else {
-                match BackupBound::ALL[series.index(&c::BACKUP_BOUND)] {
-                    BackupBound::Calls => limits.backup_calls,
-                    BackupBound::Rss => limits.backup_rss_bytes,
+                match BackupBound::ALL.get(series.index(&c::BACKUP_BOUND)) {
+                    Some(BackupBound::Calls) => limits.backup_calls,
+                    Some(BackupBound::Rss) => limits.backup_rss_bytes,
+                    None => None,
                 }
             };
             Reading(ceiling, "+Inf")
         });
         c::REPL_BACKUP_SHED.render(&mut s, |series| {
-            self.backup_shed_total(BackupBound::ALL[series.index(&c::BACKUP_BOUND)])
+            BackupBound::ALL
+                .get(series.index(&c::BACKUP_BOUND))
+                .map_or(0, |bound| self.backup_shed_total(*bound))
         });
         s
     }

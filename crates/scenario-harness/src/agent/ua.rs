@@ -4,6 +4,7 @@
 //! absorbing receive policies live in [`super::tolerant_recv`].
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,15 +18,17 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::{serialize, SipHeader, SipMessage, SipParser, SipRequest, SipResponse, SipStr};
 use sip_net::UdpEndpoint;
 
-use super::client_txn::expect_response;
+use super::client_txn::{expect_response, request_label};
 use super::dialog::InDialogTxn;
-use super::harness::Ids;
+use super::ids::Ids;
 use super::out_of_dialog::OutOfDialogRequest;
+use super::party::Party;
 use super::rr_fold::RecordRouteFold;
 use super::server_txn::ServerTxn;
-use super::step::{unwrap_step, StepError};
+use super::step::{unwrap_step, unwrap_step_at, StepCounter, StepError, StepSite};
 use super::Invite;
 use crate::absorption::{Absorption, Owner, TwoXxAcks, WireEntry};
+use crate::dialogs::{BackwardsCseq, DialogJudge, DialogJudging, DialogVerdict};
 
 /// The media type a scenario names as text. A value the reader rejects still
 /// reaches the wire as the test wrote it — a scenario states the bytes it means
@@ -71,8 +74,14 @@ pub enum Inbound {
     Response(SipResponse),
 }
 
-/// A stateful fake UA. Cheap to clone (shares the endpoint + id source); the
-/// dialog state lives on the per-transaction handles it returns, not here.
+/// A stateful fake UA. Cheap to clone (shares the endpoint, the id source, the
+/// transaction layer and the dialog table). The per-transaction handles it
+/// returns carry what a request is composed from; the UA's RFC 3261 §12 dialog
+/// table ([`DialogJudge`]) is fed by every message it sends and sights and
+/// judges every in-dialog request it receives: a scripted receive of a request
+/// on no dialog, an ended one, or out of CSeq order is a
+/// [`StepError::Dialog`], and [`Harness::finish`](super::Harness::finish)
+/// fails on any such verdict a `dialog-…` waiver on this UA does not opt out.
 #[derive(Clone)]
 pub struct Agent {
     // Fields are `pub(crate)` so the Send [`crate::loadbind::AgentBinder`] can
@@ -101,14 +110,101 @@ pub struct Agent {
     /// kept by the TU view, waiting for the body's next pull. Every receive
     /// path drains it first, so sighting early never reorders the stream.
     pub(crate) holdback: Arc<Mutex<VecDeque<Result<SipMessage, StepError>>>>,
+    /// This UA's dialog table and the verdicts it recorded. Shared across clones.
+    pub(crate) dialogs: Arc<DialogJudge>,
+    /// The ordinal source of the run's scripted waits, shared by every agent
+    /// of one harness.
+    pub(crate) steps: StepCounter,
+    /// The side this UA stands on when it answers an INVITE: its own CSeq
+    /// sequence in that dialog starts at [`Party::first_cseq`].
+    pub(crate) answers_as: Party,
+}
+
+/// An [`Agent`] that does not keep its socket bound: what a harness holds so
+/// that, at its end, it sights what is still queued on each UA it bound.
+pub(crate) struct WeakAgent {
+    name: String,
+    addr: SocketAddr,
+    uri: String,
+    ep: std::sync::Weak<dyn UdpEndpoint>,
+    ids: Arc<Ids>,
+    rr_fold: RecordRouteFold,
+    recv_timeout: Duration,
+    txn: Arc<Absorption>,
+    two_xx_acks: Arc<TwoXxAcks>,
+    holdback: Arc<Mutex<VecDeque<Result<SipMessage, StepError>>>>,
+    dialogs: Arc<DialogJudge>,
+    steps: StepCounter,
+    answers_as: Party,
+}
+
+impl WeakAgent {
+    /// The agent, while its socket is still bound by someone.
+    pub(crate) fn upgrade(&self) -> Option<Agent> {
+        Some(Agent {
+            name: self.name.clone(),
+            addr: self.addr,
+            uri: self.uri.clone(),
+            ep: self.ep.upgrade()?,
+            ids: self.ids.clone(),
+            rr_fold: self.rr_fold,
+            recv_timeout: self.recv_timeout,
+            txn: self.txn.clone(),
+            two_xx_acks: self.two_xx_acks.clone(),
+            holdback: self.holdback.clone(),
+            dialogs: self.dialogs.clone(),
+            steps: self.steps.clone(),
+            answers_as: self.answers_as,
+        })
+    }
 }
 
 impl Agent {
+    /// This agent without a hold on its socket.
+    pub(crate) fn downgrade(&self) -> WeakAgent {
+        WeakAgent {
+            name: self.name.clone(),
+            addr: self.addr,
+            uri: self.uri.clone(),
+            ep: Arc::downgrade(&self.ep),
+            ids: self.ids.clone(),
+            rr_fold: self.rr_fold,
+            recv_timeout: self.recv_timeout,
+            txn: self.txn.clone(),
+            two_xx_acks: self.two_xx_acks.clone(),
+            holdback: self.holdback.clone(),
+            dialogs: self.dialogs.clone(),
+            steps: self.steps.clone(),
+            answers_as: self.answers_as,
+        }
+    }
+
+    /// Let this UA's dialog table judge what is still queued on its socket,
+    /// left unread: what a run never pulled still meets the table, and the
+    /// ladder still shows it unconsumed.
+    pub(crate) fn judge_unread(&self) {
+        if !self.dialogs.is_on() {
+            return;
+        }
+        for pkt in self.ep.peek_queued() {
+            if let Ok(msg) = self.parse(&pkt.raw) {
+                self.dialogs.sight(&msg);
+            }
+        }
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
     pub fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// This UA as the target of a transfer: its sequence in a dialog it
+    /// answers starts at [`Party::TransferTarget`]'s first CSeq.
+    pub fn transfer_target(mut self) -> Self {
+        self.answers_as = Party::TransferTarget;
+        self
     }
 
     /// The identity of the UA STACK behind this handle: equal for clones of one
@@ -129,6 +225,54 @@ impl Agent {
     /// [`wire_view`](Self::wire_view), in the same order.
     pub fn tu_view(&self) -> Vec<WireEntry> {
         self.txn.tu_view()
+    }
+
+    /// The verdict this UA's dialog table passed on `request` when it was
+    /// sighted (RFC 3261 §12.2.2), whoever answers for it.
+    pub fn dialog_verdict(&self, request: &SipRequest) -> Option<DialogVerdict> {
+        self.dialogs.verdict_for(request)
+    }
+
+    /// A scripted receive's check of `request`: its dialog verdict as a
+    /// [`StepError::Dialog`], unless a `dialog-…` waiver on this UA opts it out.
+    pub(super) fn dialog_check(&self, request: &SipRequest) -> Result<(), StepError> {
+        match self.dialogs.failure_for(request) {
+            Some(verdict) => {
+                Err(StepError::Dialog { who: self.name.clone(), verdict: Box::new(verdict) })
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// A scripted expect's check of `response`: its dialog verdict as a
+    /// [`StepError::Dialog`], unless a `dialog-…` waiver on this UA opts it out.
+    pub(super) fn response_dialog_check(&self, response: &SipResponse) -> Result<(), StepError> {
+        match self.dialogs.response_failure_for(response) {
+            Some(verdict) => {
+                Err(StepError::Dialog { who: self.name.clone(), verdict: Box::new(verdict) })
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// The answer this UA owes `request` instead of a `200` when its dialog
+    /// table refuses it (RFC 3261 §12.2.2): `481` or `500`.
+    pub(super) fn dialog_refusal(&self, request: &SipRequest) -> Option<(u16, &'static str)> {
+        self.dialogs.verdict_for(request).and_then(|v| v.kind.refusal())
+    }
+
+    /// Hand this UA's dialog verdicts to a driver that is its stack (a
+    /// scenario interpreter): the driver reads each one through
+    /// [`dialog_verdict`](Self::dialog_verdict) and the harness gates none.
+    /// Affects every clone of this UA.
+    pub fn hand_dialogs_to_driver(&self, backwards: BackwardsCseq) {
+        self.dialogs.set_judging(DialogJudging::Driver(backwards));
+    }
+
+    /// This agent relays requests it is not a party to (a hand-built proxy or
+    /// registrar front): it keeps no dialog table. Affects every clone.
+    pub fn hold_no_dialogs(&self) {
+        self.dialogs.set_judging(DialogJudging::Off);
     }
 
     /// Stop absorbing duplicates: every repeat reaches this UA's pulls again.
@@ -186,6 +330,7 @@ impl Agent {
         // answers is retransmitted, the CORE owes the same ACK again. A hop ACK
         // to a non-2xx is cached too and never read — its final is absorbed as a
         // transaction-layer duplicate before the cache is ever consulted.
+        self.dialogs.note_sent(msg);
         if let SipMessage::Request(r) = msg {
             if r.method().as_str() == "ACK" {
                 if let Some(tag) = r.to().tag() {
@@ -199,7 +344,19 @@ impl Agent {
                 }
             }
         }
-        self.try_send_wire(&serialize(msg), dst).await
+        self.send_bytes(&serialize(msg), dst).await
+    }
+
+    /// Send `wire`, the emitted form of `msg` (its header names and layout as
+    /// the test wrote them), feeding `msg` to the dialog table.
+    pub(crate) async fn try_send_emitted(
+        &self,
+        msg: &SipMessage,
+        wire: &[u8],
+        dst: SocketAddr,
+    ) -> Result<(), StepError> {
+        self.dialogs.note_sent(msg);
+        self.send_bytes(wire, dst).await
     }
 
     /// **The datagram seam**, for a driver that owns its own dialog state and
@@ -224,6 +381,16 @@ impl Agent {
         wire: &[u8],
         dst: SocketAddr,
     ) -> Result<(), StepError> {
+        if self.dialogs.is_on() {
+            if let Ok(msg) = CustomParser::new().parse(wire) {
+                self.dialogs.note_sent(&msg);
+            }
+        }
+        self.send_bytes(wire, dst).await
+    }
+
+    /// One datagram out, nothing fed.
+    async fn send_bytes(&self, wire: &[u8], dst: SocketAddr) -> Result<(), StepError> {
         self.ep
             .send_to(wire, dst)
             .await
@@ -245,7 +412,13 @@ impl Agent {
                 return held;
             }
             let pkt = match tokio::time::timeout(self.recv_timeout, self.ep.recv()).await {
-                Err(_) => return Err(StepError::Timeout { who: self.name.clone() }),
+                Err(_) => {
+                    return Err(StepError::timeout(
+                        self.name.clone(),
+                        Some(self.recv_timeout),
+                        "a datagram",
+                    ))
+                }
                 Ok(None) => return Err(StepError::QueueClosed { who: self.name.clone() }),
                 Ok(Some(p)) => p,
             };
@@ -318,6 +491,9 @@ impl Agent {
         if sighting.owner == Owner::TxnDuplicate {
             return None;
         }
+        if sighting.owner == Owner::Tu && !sighting.repeat {
+            self.dialogs.sight(&msg);
+        }
         if sighting.repeat {
             if let SipMessage::Response(r) = &msg {
                 if let Some((ack, dst)) = self.two_xx_acks.owed_for(r) {
@@ -348,8 +524,11 @@ impl Agent {
     /// ACK-before-the-next-INVITE interleave needs no body-side boilerplate.
     pub async fn try_receive(&self, method: &str) -> Result<ServerTxn, StepError> {
         loop {
-            match self.try_recv().await? {
+            let next =
+                self.try_recv().await.map_err(|e| e.awaiting(|| self.awaited_request(method)));
+            match next? {
                 SipMessage::Request(r) => {
+                    self.dialog_check(&r)?;
                     if r.method() != method {
                         if self.ack_obligation_claims(&r) {
                             continue;
@@ -446,9 +625,27 @@ impl Agent {
 
     /// Receive the next request and assert its method. Returns a UAS-side
     /// transaction handle for sending responses. Panicking veneer over
-    /// [`try_receive`](Agent::try_receive).
-    pub async fn receive(&self, method: &str) -> ServerTxn {
-        unwrap_step(self.try_receive(method).await)
+    /// [`try_receive`](Agent::try_receive): the panic names the step and the
+    /// test line that called it.
+    #[track_caller]
+    pub fn receive<'a>(&'a self, method: &'a str) -> impl Future<Output = ServerTxn> + 'a {
+        let site = self.step("receive");
+        async move { unwrap_step_at(self.try_receive(method).await, site) }
+    }
+
+    /// The next scripted wait of this run, called from the caller's caller.
+    #[track_caller]
+    pub(super) fn step(&self, verb: &'static str) -> StepSite {
+        StepSite::next(&self.steps, verb)
+    }
+
+    /// What a receive of a `method` request waits for, with the dialogs this
+    /// UA holds: the tags the awaited request should carry.
+    pub(super) fn awaited_request(&self, method: &str) -> String {
+        match self.dialogs.live_dialogs() {
+            held if held.is_empty() => format!("a {method} request (holds no dialog)"),
+            held => format!("a {method} request in one of its dialogs: {}", held.join("; ")),
+        }
     }
 
     /// **Best-effort socket drain** — read (and discard) every datagram *currently
@@ -461,10 +658,15 @@ impl Agent {
     /// This models a real always-on UA: its kernel keeps reading the socket even
     /// after the application is done driving the call. Pair it with a clock pump
     /// (e.g. `FailoverHarness::linger_peers`) so in-flight datagrams first land in
-    /// the queue, then drain. Returns the number of datagrams drained.
+    /// the queue, then drain. Returns the number of datagrams drained. Each
+    /// meets this UA's dialog table, which records its verdict; the §17.2
+    /// view does not see it, so a later retransmission still surfaces.
     pub async fn drain(&self) -> usize {
         let mut n = 0;
-        while self.ep.try_recv().is_some() {
+        while let Some(pkt) = self.ep.try_recv() {
+            if let Ok(msg) = self.parse(&pkt.raw) {
+                self.dialogs.sight(&msg);
+            }
             n += 1;
         }
         n
@@ -544,13 +746,15 @@ impl Agent {
             extra_headers: vec![SipHeader { name: "Refer-To".into(), value: refer_to.into() }],
             ..Default::default()
         };
-        let res = generate_in_dialog_request(InDialogMethod::Refer, &view, &opts);
+        let res = generate_in_dialog_request(InDialogMethod::Refer, &view, &opts).expect("a REFER");
+        let label = request_label(None, &res.request);
         self.send(&SipMessage::Request(res.request), dst).await;
         InDialogTxn::new(
             self.clone(),
             // A REFER's finals take no ACK.
             None,
             dst,
+            label,
         )
     }
 
@@ -587,7 +791,7 @@ impl Agent {
                 value: ttl_sec.to_string().into(),
             }],
         };
-        let req = generate_out_of_dialog_request(OutOfDialogMethod::Register, &opts);
+        let req = generate_out_of_dialog_request(OutOfDialogMethod::Register, &opts).unwrap();
         self.send(&SipMessage::Request(req), registrar).await;
         let resp = expect_response(self, 200, None).await;
         // Echo back the Expires the registrar actually granted (RFC 3261 §10.3

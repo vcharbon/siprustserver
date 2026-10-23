@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 metric-catalogue = { path = "../metric-catalogue" }
+metric-values = { path = "../metric-values" }
 # The Send agent factory + fallible try_* choreography + best-effort teardown
 # helpers live here (the load-bearing reuse of the functional harness).
 scenario-harness = { path = "../scenario-harness" }
@@ -18,7 +19,7 @@ scenario-harness = { path = "../scenario-harness" }
 # `EndpointConfig` (`--endpoint-config`), whose optional `egress` field carries
 # the run's egress policy (the environment axis).
 e2e-model = { path = "../e2e-model" }
-sip-message = { path = "../sip-message" }
+sip-message = { path = "../sip-message", features = ["sniff"] }
 tokio = { workspace = true }
 # catch_unwind over a scenario future → a panic becomes a counted failure, never
 # aborts the worker.
@@ -35,16 +36,22 @@ regex = { workspace = true }
 serde_json = { workspace = true }
 # The mux is a SignalingNetwork; recording layers on top via AgentBinder.
 sip-net = { path = "../sip-net" }
+# The random-loss model, the RFC audit findings and the wire-trace entries a
+# case records.
+sip-net-testkit = { path = "../sip-net-testkit" }
 # `GET /debug/flamegraph` on the metrics socket — the load driver runs the shared
 # sip-message parse path at a saturated core, so it is the high-signal vantage
 # for parse/alloc CPU (the runner tiers serve the same route via probe-http).
 flamegraph-util = { path = "../flamegraph-util" }
 # One process-wide monotonic-anchored Clock (created once at startup) stamps every
-# call recording, chaos marker, and packet arrival — so loadgen never reads raw
+# call recording and packet arrival — so loadgen never reads raw
 # SystemTime on its own timeline (the marker and frame axes stay in lockstep).
 sip-clock = { path = "../sip-clock" }
 
 [dev-dependencies]
+# The counting global allocator of the allocations-per-call bench
+# (`tests/alloc_per_call.rs`, its own binary under ADR-0030 X2).
+alloc-counter = { path = "../alloc-counter" }
 # Fake-network smoke test: an in-process B2buaCore SUT on a shared simulated
 # network, driven by the load driver, asserting no call is leaked after teardown.
 b2bua-harness = { path = "../b2bua-harness" }

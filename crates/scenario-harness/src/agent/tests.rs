@@ -11,6 +11,9 @@ use sip_message::SipMessage;
 use super::{Harness, StepError};
 use crate::realcall::auth::{Challenge, ChallengeResponder};
 
+/// The caller's first CSeq: its INVITE's.
+const C: u32 = crate::Party::Caller.first_cseq();
+
 const OFFER: &str = "v=0\r\no=a 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 
 mod auth_seam {
@@ -63,7 +66,7 @@ mod auth_seam {
 
         // The server challenges with a 401 + WWW-Authenticate.
         let mut chal = server.try_receive("INVITE").await.unwrap();
-        assert_eq!(chal.request().cseq().seq(), 1, "first INVITE is CSeq 1");
+        assert_eq!(chal.request().cseq().seq(), C, "first INVITE is the caller's first CSeq");
         chal.respond(401, "Unauthorized")
             .with_header("WWW-Authenticate", "Digest realm=\"sip\", nonce=\"abc\"")
             .try_send()
@@ -87,11 +90,15 @@ mod auth_seam {
 
         // The server first sees the ACK for the 401 (RFC 3261 §17.1.1.3)…
         let ack = server.try_receive("ACK").await.unwrap();
-        assert_eq!(ack.request().cseq().seq(), 1, "the non-2xx ACK reuses the INVITE CSeq");
+        assert_eq!(ack.request().cseq().seq(), C, "the non-2xx ACK reuses the INVITE CSeq");
 
         // …then the resent, authenticated INVITE #2: CSeq bumped, Authorization added.
         let mut admit = server.try_receive("INVITE").await.unwrap();
-        assert_eq!(admit.request().cseq().seq(), 2, "the retried INVITE bumps the CSeq (§22.2)");
+        assert_eq!(
+            admit.request().cseq().seq(),
+            C + 1,
+            "the retried INVITE bumps the CSeq (§22.2)"
+        );
         assert!(
             admit
                 .request()
@@ -222,7 +229,7 @@ mod auth_seam {
             let server = server_rx;
             // First OPTIONS → 401.
             let mut c = server.try_receive("OPTIONS").await.unwrap();
-            assert_eq!(c.request().cseq().seq(), 1);
+            assert_eq!(c.request().cseq().seq(), C);
             assert!(c.request().raw(HeaderName::Authorization).next().is_none());
             c.respond(401, "Unauthorized")
                 .with_header("WWW-Authenticate", "Digest realm=\"sip\", nonce=\"n\"")
@@ -231,7 +238,7 @@ mod auth_seam {
                 .unwrap();
             // Credentialed resend → 200. CSeq bumped, Authorization present.
             let mut c2 = server.try_receive("OPTIONS").await.unwrap();
-            assert_eq!(c2.request().cseq().seq(), 2, "the authed resend bumps the CSeq");
+            assert_eq!(c2.request().cseq().seq(), C + 1, "the authed resend bumps the CSeq");
             assert!(
                 c2.request().raw(HeaderName::Authorization).next().is_some(),
                 "the resend carries the Authorization",

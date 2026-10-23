@@ -9,6 +9,7 @@ The last check runs a real SIPp with the lanes' rotation flags when `sipp` is on
 PATH, and is skipped otherwise.
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,19 @@ SIPP_DIR = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(SIPP_DIR, "exporter"))
 
 import error_follow  # noqa: E402
+
+# The HA tooling's base UAC, the scenario every SIPp stream of a run plays.
+UAC = os.path.join(SIPP_DIR, "..", "..", "..", "tooling", "hakit", "content", "scenarios",
+                   "uac-basic-hold.xml")
+KEY_DEFAULT = re.compile(r"^\s*hakit-key:\s*([a-z_][a-z0-9_]*)=(\S*)\s*$", re.MULTILINE)
+
+
+def uac_keys(**keys):
+    """The `-key` arguments of UAC: the defaults its header declares, then `keys`."""
+    with open(UAC, encoding="latin-1") as fh:
+        header = fh.read().split("<scenario", 1)[0]
+    merged = {**dict(KEY_DEFAULT.findall(header)), **keys}
+    return [a for k, v in sorted(merged.items()) for a in ("-key", k, v)]
 
 STAMP = "2026-01-01\t10:00:00.000000\t1767261600.000000: "
 
@@ -38,6 +52,11 @@ def abort_entry(call_id, expecting, received):
 def timeout_entry(call_id):
     return (f"{STAMP}Call-Id: {call_id}, receive timeout on message OPTIONS:12, "
             f"jumping to label 14\n")
+
+
+def error_entry(call_id):
+    """An entry that is an error: a send's retransmissions ran out."""
+    return f"{STAMP}Call-Id: {call_id}, timeout on max UDP retrans for message 9, jumping to label 20 \n"
 
 
 POST_ANSWER_480 = (("action", "aborted"), ("expecting", "OPTIONS"), ("received", "480"))
@@ -70,13 +89,13 @@ class Follow(unittest.TestCase):
     def test_an_abort_survives_two_rotations(self):
         self.append("The following events occurred:\n" + abort_entry("c1", "OPTIONS", "SIP/2.0 480 Temporarily Unavailable"))
         self.follower.poll()
-        self.append(timeout_entry("c2"))
+        self.append(error_entry("c2"))
         self.rotate(1)
         self.follower.poll()
-        self.append(timeout_entry("c3"))
+        self.append(error_entry("c3"))
         self.rotate(2)
         self.follower.poll()
-        self.append(timeout_entry("c4"))
+        self.append(error_entry("c4"))
         self.follower.poll()
         counts = self.follower.snapshot()
         self.assertEqual(counts.unexpected, {POST_ANSWER_480: 1})
@@ -114,17 +133,42 @@ class Follow(unittest.TestCase):
         self.assertEqual(self.follower.snapshot().unexpected, {POST_ANSWER_480: 1})
 
     def test_truncated_in_place_reads_from_the_start(self):
-        self.append(timeout_entry("c1") * 3)
+        self.append(error_entry("c1") * 3)
         self.follower.poll()
         open(self.path, "w").close()
-        self.append(timeout_entry("c2"))
+        self.append(error_entry("c2"))
         self.follower.poll()
         self.assertEqual(self.follower.snapshot().entries, 4)
+
+    def test_the_keep_file_holds_every_entry_but_the_scenarios_own_timer(self):
+        keep = os.path.join(self.dir, "errors.kept.log")
+        follower = error_follow.ErrorFollower(self.path, keep_path=keep)
+        retrans = f"{STAMP}Call-Id: c4, timeout on max UDP retrans for message 9, jumping to label 20 \n"
+        abort = abort_entry("c2", "OPTIONS", "SIP/2.0 480 Temporarily Unavailable")
+        self.append(timeout_entry("c1") + abort + timeout_entry("c3"))
+        follower.poll()
+        self.append(retrans[:30])
+        follower.poll()
+        self.append(retrans[30:] + timeout_entry("c5"))
+        follower.poll()
+        follower.close()
+        self.assertEqual((follower.snapshot().entries, follower.snapshot().timer_jumps), (2, 3))
+        with open(keep) as fh:
+            self.assertEqual(fh.read(), abort + retrans)
+
+    def test_a_scenarios_own_timer_is_counted_apart_from_the_errors(self):
+        """A recv timeout that jumps to its label is a scenario's tick, not an
+        error: entries counts the errors alone, timer_jumps the ticks."""
+        retrans = f"{STAMP}Call-Id: c4, timeout on max UDP retrans for message 9, jumping to label 20 \n"
+        self.append(timeout_entry("c1") * 3 + abort_entry("c2", "OPTIONS", "SIP/2.0 480 Temporarily Unavailable") + retrans)
+        self.follower.poll()
+        counts = self.follower.snapshot()
+        self.assertEqual((counts.entries, counts.timer_jumps), (2, 3))
 
     def test_a_missing_file_counts_nothing_until_it_appears(self):
         self.follower.poll()
         self.assertEqual(self.follower.snapshot().entries, 0)
-        self.append(timeout_entry("c1"))
+        self.append(error_entry("c1"))
         self.follower.poll()
         self.assertEqual(self.follower.snapshot().entries, 1)
 
@@ -138,7 +182,7 @@ class SippRingBuffer(unittest.TestCase):
         work = tempfile.mkdtemp(prefix="sipp-ring-")
         try:
             with open(os.path.join(work, "t.csv"), "w") as fh:
-                fh.write("SEQUENTIAL\n127.0.0.1\n")
+                fh.write("SEQUENTIAL\nring;X-Test: ring;;;\n")
             dead = socket_port()
             follower = error_follow.ErrorFollower(os.path.join(work, "errors.log"))
             stop = threading.Event()
@@ -153,10 +197,10 @@ class SippRingBuffer(unittest.TestCase):
             try:
                 subprocess.run(
                     ["sipp", f"127.0.0.1:{dead}",
-                     "-sf", os.path.join(SIPP_DIR, "scenarios", "uac-basic.xml"),
-                     "-inf", "t.csv", "-key", "xapi", "{}", "-s", "svc",
+                     "-sf", UAC, "-inf", "t.csv",
+                     *uac_keys(run="ring", stream="ring", shape="basic", setup_ms="100", hold_ms="100"),
                      "-i", "127.0.0.1", "-p", str(socket_port()), "-m", "40", "-r", "20",
-                     "-recv_timeout", "100", "-nostdin", "-trace_err",
+                     "-recv_timeout", "100", "-max_invite_retrans", "1", "-nostdin", "-trace_err",
                      "-error_file", os.path.join(work, "errors.log"),
                      "-ringbuffer_files", "1", "-ringbuffer_size", "1000"],
                     cwd=work, capture_output=True, timeout=60)
@@ -185,3 +229,26 @@ def socket_port():
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TrimmedErrorFileTest(unittest.TestCase):
+    """The error file of a SIPp run without rotation, bounded by stat_trim: the
+    follower keeps counting what SIPp appends after a trim."""
+
+    def test_the_follower_counts_through_a_trim(self):
+        import stat_trim
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "errors.log")
+            entry = error_entry("c1")
+            with open(path, "w") as fh:
+                fh.write("The following events occurred:\n")
+                fh.write(entry * (3 * 1024 * 1024 // len(entry)))
+            follower = error_follow.ErrorFollower(path)
+            follower.poll()
+            before = follower.snapshot().entries
+            stat_trim.trim(path, 256 * 1024)
+            self.assertLess(os.stat(path).st_blocks * 512, 1024 * 1024)
+            with open(path, "a") as fh:
+                fh.write(entry * 10)
+            follower.poll()
+            self.assertEqual(follower.snapshot().entries, before + 10)

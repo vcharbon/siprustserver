@@ -18,7 +18,7 @@ fn every_class_paces_and_bounds_as_its_rfc_states() {
         (Class::NonInviteClient, [500, 1000, 2000, 4000], 4000, 32_000),
         // §17.1.2.2 in Proceeding: flat T2 from the first fire after it.
         (Class::NonInviteProceeding, [4000, 4000, 4000, 4000], 4000, 32_000),
-        // ADR-0028 X4: a non-INVITE's pacing, its own 64·T1 ceiling.
+        // ADR-0043 X4: a non-INVITE's pacing, its own 64·T1 ceiling.
         (Class::CancelClient, [500, 1000, 2000, 4000], 4000, 32_000),
         // §17.2.1 Timer G: doubling, T2 ceiling, until the ACK or Timer H.
         (Class::InviteServerFinal, [500, 1000, 2000, 4000], 4000, 32_000),
@@ -35,6 +35,26 @@ fn every_class_paces_and_bounds_as_its_rfc_states() {
         }
         assert_eq!(s.interval(12), Some(m(*settled)), "{class:?} settled interval");
         assert_eq!(s.give_up_after(), m(*give_up), "{class:?} give-up");
+    }
+}
+
+/// Every RFC class arms its first rung, as the schedule it prescribes does.
+#[test]
+fn an_rfc_class_arms_as_its_schedule_does() {
+    for class in [
+        Class::InviteClient,
+        Class::NonInviteClient,
+        Class::NonInviteProceeding,
+        Class::CancelClient,
+        Class::InviteServerFinal,
+        Class::Final2xx,
+        Class::ReliableProvisional,
+    ] {
+        assert_eq!(
+            Some(Ladder::armed_rfc(class)),
+            Ladder::armed(Schedule::rfc(class)),
+            "{class:?}"
+        );
     }
 }
 

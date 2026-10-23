@@ -21,16 +21,22 @@ futures = "0.3"
 # same JSON instead of hand-formatting it.
 serde = { workspace = true }
 serde_json = { workspace = true }
-sip-message = { path = "../sip-message" }
+sip-message = { path = "../sip-message", features = ["sniff"] }
+sip-template = { path = "../sip-template" }
+# The §13.2.2.4 early-dialog window the dialog table shares with the audit.
+rfc-rules = { path = "../rfc-rules" }
 # The thread-scoped in-memory subscriber a run captures the SUT's lifecycle logs
 # and per-call trace into, dumped to stderr when a scenario panics (ADR-0026).
 # No `otlp` feature: a test never exports.
 observe = { path = "../observe" }
+observe-testkit = { path = "../observe-testkit" }
 sip-net = { path = "../sip-net" }
+sip-net-testkit = { path = "../sip-net-testkit" }
 layer-harness = { path = "../layer-harness" }
 seq-report = { path = "../seq-report" }
 # HTTP exchanges a run records on its `Recorder` join the ladder.
 http-net = { path = "../http-net" }
+http-net-testkit = { path = "../http-net-testkit" }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
 
 [dev-dependencies]

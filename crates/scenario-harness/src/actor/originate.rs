@@ -7,7 +7,7 @@
 use tokio::time::Instant;
 
 use sip_message::generators::InDialogMethod;
-use sip_message::{EmitOpts, MessageTemplate};
+use sip_template::{EmitOpts, MessageTemplate};
 
 use super::answer::discharge_on_teardown;
 use super::ledger::{ObligationKey, ObligationKind};
@@ -119,13 +119,12 @@ pub(super) async fn originate_initial_invite(
     if advertises_100rel {
         st.expected_provisional = 183;
     }
-    let call = builder.send().await;
+    let call = builder.try_send().await?;
     // Bind the new dialog to this actor at its shared endpoint, in the same poll
     // as the send — before the actor yields, so no response can precede it.
     if let Some(ep) = &st.endpoint {
         ep.own_dialog(call.call_id());
     }
-    st.scope.set_early(call.cancel_handle());
     st.dialogs.pending_invite = Some(call);
     // The caller APPEARS the moment she originates — so `all_terminated`
     // cannot fire (and the runner exit) before she has processed her own
@@ -161,7 +160,7 @@ pub(super) async fn send_request_template(
         // A held ACK is sent BEFORE our own BYE (§15 — the renegotiation
         // completes before the dialog ends), then the hangup subsumes this
         // leg's pending in-dialog acks exactly like the semantic `Bye` goal.
-        super::response::flush_held_acks(st).await;
+        super::held_acks::flush_held_acks(st).await?;
         discharge_on_teardown(st, now);
     }
     let (txn, req, dialog_clone) = if early {
@@ -215,6 +214,46 @@ pub(super) async fn send_request_template(
     Ok(())
 }
 
+/// Originate `method` on the caller's EARLY dialog — the still-pending
+/// INVITE's, addressed by the To-tag its provisional taught, so the request
+/// rides that early dialog's own CSeq sequence (RFC 3261 §12.2.1.1). An
+/// UPDATE carries this leg's offer and marks it outstanding (RFC 3311 §5.1).
+/// Opens the method's obligation, closed by its 2xx.
+pub(super) async fn originate_early(
+    st: &mut ActorState<'_>,
+    method: InDialogMethod,
+) -> Result<(), StepError> {
+    let now = Instant::now();
+    let offer = st.media.reoffer_sdp().unwrap_or(crate::OFFER_SDP);
+    let inv = st.dialogs.pending_invite.as_mut().ok_or_else(|| StepError::UnexpectedKind {
+        who: st.role.to_string(),
+        detail: format!("early {} with no pending early dialog", method.as_str()),
+    })?;
+    let tag = inv.early_remote_tag().to_string();
+    let mut req = inv.send_request(method);
+    if method == InDialogMethod::Update {
+        req = req.with_sdp(offer);
+    }
+    if !tag.is_empty() {
+        req = req.with_to_tag(&tag);
+    }
+    let (_txn, req) = req.try_send_with_request().await?;
+    let cseq = req.cseq().seq();
+    let kind =
+        ObligationKind::from_cseq_method(method.as_str()).unwrap_or(ObligationKind::InDialog);
+    if method == InDialogMethod::Update {
+        st.sent_updates.insert(cseq);
+    }
+    st.obs.record(
+        Observation::RequestSent {
+            key: ObligationKey::new(st.role, kind, cseq),
+            detail: format!("early {} awaiting 2xx", method.as_str()),
+        },
+        now,
+    );
+    Ok(())
+}
+
 /// Originate ONE delayed-offer (bodyless) re-INVITE on the confirmed dialog and
 /// register its bookkeeping: open the `ReInvite` obligation keyed on its CSeq,
 /// track the CSeq in `sent_reinvites` (the 2xx-ACK / completion path) and retain
@@ -229,7 +268,7 @@ pub(super) async fn originate_reinvite(st: &mut ActorState<'_>) -> Result<(), St
             who: st.role.to_string(),
             detail: "Reinvite with no confirmed dialog".to_string(),
         })?;
-        let txn = dialog.request(InDialogMethod::Invite, None).await;
+        let txn = dialog.try_request(InDialogMethod::Invite, None).await?;
         let cseq = dialog.local_cseq();
         (ObligationKey::new(st.role, ObligationKind::ReInvite, cseq), dialog.clone(), txn)
     };
@@ -260,7 +299,7 @@ pub(super) async fn wait_reinvite_retry(retry: &Option<Instant>) {
 /// Shared by [`GoalStep::Update`] and the S6 collision RETRY arm.
 pub(super) async fn originate_update(st: &mut ActorState<'_>) -> Result<(), StepError> {
     let now = Instant::now();
-    let offer = st.media.offer_sdp().unwrap_or(crate::OFFER_SDP);
+    let offer = st.media.reoffer_sdp().unwrap_or(crate::OFFER_SDP);
     let (key, dialog_clone) = {
         let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| StepError::UnexpectedKind {
             who: st.role.to_string(),
@@ -294,7 +333,7 @@ pub(super) async fn ping_options_once(st: &mut ActorState<'_>) -> Result<(), Ste
             who: st.role.to_string(),
             detail: "Options goal with no confirmed dialog".to_string(),
         })?;
-        let opt = dialog.request(InDialogMethod::Options, None).await;
+        let opt = dialog.try_request(InDialogMethod::Options, None).await?;
         (opt, dialog.clone())
     };
     st.scope.set_confirmed(dialog_clone); // refresh so a teardown BYE stays valid

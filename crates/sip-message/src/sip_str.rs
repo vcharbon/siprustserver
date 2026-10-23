@@ -47,15 +47,10 @@ impl SharedText {
     /// panic, keeping a malformed span a memory cost instead of a crash.
     pub fn span(&self, start: usize, len: usize) -> SipStr {
         let end = start.saturating_add(len);
-        let fits = u32::try_from(end).is_ok();
-        match (fits, self.0.get(start..end)) {
-            (true, Some(_)) => SipStr(Repr::Span {
-                buf: Arc::clone(&self.0),
-                start: start as u32,
-                len: len as u32,
-            }),
-            (_, Some(s)) => SipStr::owned(s),
-            (_, None) => SipStr::EMPTY,
+        match (Repr::span(&self.0, start, len), self.0.get(start..end)) {
+            (Some(span), _) => SipStr(span),
+            (None, Some(s)) => SipStr::owned(s),
+            (None, None) => SipStr::EMPTY,
         }
     }
 }
@@ -75,7 +70,52 @@ pub struct SipStr(Repr);
 #[derive(Clone)]
 enum Repr {
     Static(&'static str),
-    Span { buf: Arc<str>, start: u32, len: u32 },
+    /// `start..start + len` is a char-boundary range of `buf`, checked by
+    /// [`Repr::span`] where it is built; a span never changes. [`WHOLE`] as
+    /// `start` is all of `buf`: an owned value too long for a `u32` range.
+    Span {
+        buf: Arc<str>,
+        start: u32,
+        len: u32,
+    },
+}
+
+/// The `start` of a [`Repr::Span`] covering its whole buffer.
+const WHOLE: u32 = u32::MAX;
+
+impl Repr {
+    /// The `[start, start + len)` range of `buf` as a span, or `None` when it
+    /// is not a char-boundary range of `buf` or does not fit `u32`.
+    fn span(buf: &Arc<str>, start: usize, len: usize) -> Option<Repr> {
+        buf.get(start..start.checked_add(len)?)?;
+        let start = u32::try_from(start).ok().filter(|&s| s != WHOLE)?;
+        let len = u32::try_from(len).ok()?;
+        Some(Repr::Span { buf: Arc::clone(buf), start, len })
+    }
+
+    /// All of `buf`.
+    fn whole(buf: Arc<str>) -> Repr {
+        match Repr::span(&buf, 0, buf.len()) {
+            Some(span) => span,
+            None => Repr::Span { buf, start: WHOLE, len: 0 },
+        }
+    }
+
+    /// Where this span starts in its buffer.
+    fn offset(start: u32) -> usize {
+        if start == WHOLE {
+            0
+        } else {
+            start as usize
+        }
+    }
+}
+
+/// The text of a [`Repr::Span`]: a range its buffer holds on char boundaries,
+/// as every span is built, else the empty string.
+fn span_text(buf: &str, start: u32, len: u32) -> &str {
+    let start = start as usize;
+    buf.get(start..start.saturating_add(len as usize)).unwrap_or("")
 }
 
 impl SipStr {
@@ -90,43 +130,35 @@ impl SipStr {
     /// Copy `s` into its own allocation — for values that do not exist in any
     /// message image (generated headers, rewritten values).
     pub fn owned(s: &str) -> Self {
-        SipStr(Repr::Span { buf: Arc::from(s), start: 0, len: s.len() as u32 })
+        SipStr(Repr::whole(Arc::from(s)))
     }
 
     pub fn as_str(&self) -> &str {
         match &self.0 {
             Repr::Static(s) => s,
-            Repr::Span { buf, start, len } => {
-                let start = *start as usize;
-                &buf[start..start + *len as usize]
-            }
+            Repr::Span { buf, start: WHOLE, .. } => buf,
+            Repr::Span { buf, start, len } => span_text(buf, *start, *len),
         }
     }
 
     /// A sub-range of THIS field, still sharing the same image — for a
     /// scanner that narrows an already-shared value (trim, prefix strip).
     /// `start`/`len` are relative to this field; an out-of-range or
-    /// non-boundary range yields an owned copy.
+    /// non-boundary range yields the empty field.
     pub fn subspan(&self, start: usize, len: usize) -> SipStr {
+        let Some(sub) = self.as_str().get(start..start.saturating_add(len)) else {
+            return SipStr::EMPTY;
+        };
         match &self.0 {
             Repr::Static(s) => match s.get(start..start.saturating_add(len)) {
                 Some(sub) => SipStr(Repr::Static(sub)),
                 None => SipStr::EMPTY,
             },
-            Repr::Span { buf, start: base, len: base_len } => {
-                let base = *base as usize;
-                if start.saturating_add(len) > *base_len as usize {
-                    return SipStr::EMPTY;
-                }
-                let abs = base + start;
-                match buf.get(abs..abs + len) {
-                    Some(_) => SipStr(Repr::Span {
-                        buf: Arc::clone(buf),
-                        start: abs as u32,
-                        len: len as u32,
-                    }),
-                    None => SipStr::owned(&self.as_str()[start..start + len]),
-                }
+            // A range past `u32` is copied out instead of spanned.
+            Repr::Span { buf, start: base, .. } => {
+                let abs = Repr::offset(*base).checked_add(start);
+                let span = abs.and_then(|abs| Repr::span(buf, abs, len));
+                SipStr(span.unwrap_or_else(|| Repr::whole(Arc::from(sub))))
             }
         }
     }
@@ -342,6 +374,15 @@ mod tests {
         // 'é' occupies bytes 0..2; a span ending mid-char must not panic.
         let text = SharedText::new("é-tag");
         assert_eq!(text.span(0, 1).as_str(), "");
+    }
+
+    /// A sub-range ending inside a character is the empty field, owned or
+    /// literal alike.
+    #[test]
+    fn non_boundary_subspan_is_empty_not_a_panic() {
+        assert_eq!(SipStr::owned("é-tag").subspan(0, 1).as_str(), "");
+        assert_eq!(SipStr::from_static("é-tag").subspan(0, 1).as_str(), "");
+        assert_eq!(SharedText::new("xé-tag").span(1, 5).subspan(0, 1).as_str(), "");
     }
 
     #[test]

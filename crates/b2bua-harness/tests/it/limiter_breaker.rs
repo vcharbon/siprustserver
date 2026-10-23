@@ -1,12 +1,12 @@
 //! The limiter circuit breaker: no call pays the admit timeout of a limiter
 //! that keeps failing.
 //!
-//! Three consecutive admits that get no usable answer (a stalled limiter, a
-//! cut one) open the worker's breaker: from then on an admit sends no request
-//! and waits nothing, the call runs uncounted and owes no release, and the
-//! release queue sends nothing. A background probe asks the limiter's health
-//! answer every second; the first answer closes the breaker, the queue sends
-//! what waited, and the next call is counted again.
+//! Three requests inside 2 s that get no HTTP response at all (a stalled
+//! limiter, a cut one) open the limiter client's breaker: from then on an
+//! admit sends no request and waits nothing, the call runs uncounted and owes
+//! no release, and the release queue sends nothing. A background probe asks
+//! the limiter's health every second; the first response closes the breaker,
+//! the queue sends what waited, and the next call is counted again.
 //!
 //! Every call holds three limiters.
 
@@ -24,9 +24,9 @@ use b2bua::metrics::{LimiterFailure, LimiterOp, ReleaseGiveUp};
 use b2bua_harness::{settle_until, B2buaSut};
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{
-    BindError, Fault, HttpError, HttpRequest, HttpResponse, HttpServerHandle, HttpService,
-    HttpTransport, SimulatedHttpNetwork,
+    BindError, HttpError, HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport,
 };
+use http_net_testkit::{Fault, SimulatedHttpNetwork};
 use scenario_harness::{Agent, Dialog, Harness, SIMULATED_TRANSIT_DELAY_MS};
 use sip_clock::Clock;
 use tokio::time::Instant;
@@ -321,6 +321,58 @@ async fn a_cut_limiter_opens_the_breaker_until_a_probe_answers() {
         admitted,
         "the calls admitted while open release nothing"
     );
+    let _ = s.h.finish().await;
+}
+
+/// Cut limiter, one failed admit every 1.1 s: no 2 s window ever holds three
+/// requests, so the breaker stays closed and every call still sends its admit
+/// and fails open.
+#[tokio::test(start_paused = true)]
+async fn failures_spread_wider_than_the_window_leave_the_breaker_closed() {
+    let s = Scene::new("limiter-breaker-spread").await;
+    s.net.apply_fault(Fault::Cut { dst: laddr() });
+    let mut dialogs = Vec::new();
+    for _ in 0..3 {
+        dialogs.push(s.establish().await.0);
+        s.h.advance(Duration::from_millis(1_100)).await;
+    }
+    let metrics = s.b2bua.metrics();
+    assert!(!metrics.limiter().breaker_open(), "no 2 s window saw three failed requests");
+    dialogs.push(s.establish().await.0);
+    assert_eq!(s.sent_on("/v1/admit"), 4, "the fourth call still sends its admit");
+    assert_eq!(metrics.limiter().uncounted_calls(), 4, "every call failed open");
+
+    s.net.apply_fault(Fault::Resume { dst: laddr() });
+    for dialog in &mut dialogs {
+        s.hang_up(dialog).await;
+    }
+    s.assert_drained().await;
+    let _ = s.h.finish().await;
+}
+
+/// An admit answered just before the limiter is cut keeps the breaker closed
+/// through the three failed admits that follow within 2 s: a backend that
+/// answered inside the window is not silent.
+#[tokio::test(start_paused = true)]
+async fn an_answer_inside_the_window_keeps_the_breaker_closed() {
+    let s = Scene::new("limiter-breaker-answered").await;
+    let (counted, _) = s.establish().await;
+    assert_eq!(s.holds(), [1, 1, 1], "the first admit is answered");
+    s.net.apply_fault(Fault::Cut { dst: laddr() });
+    let mut dialogs = vec![counted];
+    for _ in 0..3 {
+        dialogs.push(s.establish().await.0);
+    }
+    let metrics = s.b2bua.metrics();
+    assert!(!metrics.limiter().breaker_open(), "an answer inside the last 2 s keeps it closed");
+    dialogs.push(s.establish().await.0);
+    assert_eq!(s.sent_on("/v1/admit"), 5, "the fifth call still sends its admit");
+
+    s.net.apply_fault(Fault::Resume { dst: laddr() });
+    for dialog in &mut dialogs {
+        s.hang_up(dialog).await;
+    }
+    s.assert_drained().await;
     let _ = s.h.finish().await;
 }
 

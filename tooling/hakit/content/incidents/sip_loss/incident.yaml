@@ -1,0 +1,39 @@
+schema: incident.v1
+name: sip_loss
+description: >-
+  Impair the SIP datagrams the target pods send (UDP from or to `port`) for
+  duration_s: loss_pct % lost, duplicate_pct % duplicated, delay_ms added. Other
+  traffic (replication, probes, metrics) is untouched. Retransmission across a
+  takeover meets a lossy plane here.
+  On a host-network pod the fault hits its whole node: such a target is
+  refused unless allow_host_network.
+kind: fault
+target:
+  selector: app=b2bua-worker
+  pick: one
+params:
+  allow_host_network:
+    type: boolean
+    default: false
+    description: Allow a host-network target, whose netns is its node's; the fault then hits every pod and the kubelet of that node.
+  port:
+    type: integer
+    default: 5060
+    description: The SIP port.
+  loss_pct:
+    type: number
+    default: 5
+    description: The share of SIP datagrams dropped, in percent.
+  duplicate_pct:
+    type: number
+    default: 5
+    description: The share of SIP datagrams sent twice, in percent.
+  delay_ms:
+    type: integer
+    default: 0
+    description: Delay added to every SIP datagram, in milliseconds.
+duration_s: 60
+timeouts:
+  inject_s: 60
+  heal_s: 60
+requires: [kind, docker]

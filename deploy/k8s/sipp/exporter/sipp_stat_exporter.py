@@ -28,30 +28,62 @@ Headline series (labelled by scenario/role/job from the env):
   sipp_up                       gauge   1 when the stat file is readable/fresh
   sipp_stat_file_allocated_bytes gauge  disk the stat file holds
   sipp_stat_trim_failed         gauge   1 while the trimmer's last attempt failed
-  sipp_error_entries_total      counter entries of the error file (error_follow.py)
+  sipp_error_entries_total      counter entries of the error file (error_follow.py),
+                                        a scenario's own recv timer jumps left out
+  sipp_recv_timer_jumps_total   counter recv timeouts that jumped to their label:
+                                        a scenario's ticks, not errors
   sipp_unexpected_msgs_total{action,expecting,received}
                                 counter unexpected-message entries: aborted or
                                         continued, the scenario step expected, the
                                         status code or method received
+  sipp_records_total{ending}    counter call-outcome records the UAC wrote (record_ship.py)
+  sipp_records_shipped_total    counter records posted to VictoriaLogs
+  sipp_records_ship_failures_total counter failed posts (the lines stay queued)
+  sipp_records_pending          gauge   records read and not yet posted
+  sipp_records_lost_total       counter records the copier dropped (record_copy.py):
+                                        its buffer was full or the disk write failed
+  sipp_records_buffered_bytes   gauge   bytes the copier holds on their way to disk
 
 Env:
   SIPP_STAT_FILE  (default /stats/stat.csv)
   SIPP_SCENARIO   (default unknown)   -> label scenario=
   SIPP_ROLE       (default uac)       -> label role=
   SIPP_JOB        (default "")        -> label sipp_job=   (omitted if empty)
+  SIPP_STREAM, SIPP_SHAPE (default "") -> labels stream=, shape= (omitted if empty)
+  SIPP_START      (default "")        -> label start= (`run` or `incident`: when
+                                         the stream starts; omitted if empty)
                                          (NOT `job`: that is reserved and gets
-                                         overwritten by the vmagent scrape job)
+                                         overwritten by the scrape job)
   EXPORTER_PORT   (default 9035)
   SIPP_STAT_KEEP_BYTES (default 16 MiB) -> tail kept on disk by the trimmer;
                                          0 disables it (the file needs write access)
   SIPP_ERROR_FILE (default /stats/errors.log) -> SIPp's -error_file, followed
                                          across rotations; empty disables it
+  SIPP_ERROR_KEEP_BYTES (default 0)   -> tail of the error file kept on disk by a
+                                         second trimmer, for a SIPp run without
+                                         -ringbuffer_* (whose rotation would also
+                                         rotate the record file); 0 disables it
+  SIPP_ERROR_KEPT_FILE (default "")   -> every error entry but a scenario's own
+                                         receive timer, appended whole; empty
+                                         disables it
+  SIPP_ERROR_KEPT_BYTES (default 0)   -> tail of that file kept on disk; 0 keeps all
+  SIPP_RECORD_FILE (default "")       -> the call-outcome record file shipped;
+                                         empty disables record shipping
+  SIPP_RECORD_FIFO (default "")       -> the UAC's -log_file, a FIFO the copier
+                                         carries into SIPP_RECORD_FILE; empty
+                                         when the UAC writes the record file itself
+  SIPP_RECORD_BUFFER_BYTES (default 100 MiB) -> the copier's buffer
+  SIPP_RECORD_STATUS (default "")     -> the copier's status file; empty writes none
+  SIPP_RECORD_URL (default "")        -> VictoriaLogs base URL the records go to
+  SIPP_RUN        (default "")        -> run id put on a record line that does not parse
 """
 import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import error_follow
+import record_copy
+import record_ship
 import stat_trim
 
 STAT_FILE = os.environ.get("SIPP_STAT_FILE", "/stats/stat.csv")
@@ -61,10 +93,24 @@ JOB = os.environ.get("SIPP_JOB", "")
 PORT = int(os.environ.get("EXPORTER_PORT", "9035"))
 KEEP_BYTES = int(os.environ.get("SIPP_STAT_KEEP_BYTES", str(16 * 1024 * 1024)))
 ERROR_FILE = os.environ.get("SIPP_ERROR_FILE", "/stats/errors.log")
+ERROR_KEEP_BYTES = int(os.environ.get("SIPP_ERROR_KEEP_BYTES", "0"))
+ERROR_KEPT_FILE = os.environ.get("SIPP_ERROR_KEPT_FILE", "")
+ERROR_KEPT_BYTES = int(os.environ.get("SIPP_ERROR_KEPT_BYTES", "0"))
+STREAM = os.environ.get("SIPP_STREAM", "")
+SHAPE = os.environ.get("SIPP_SHAPE", "")
+START = os.environ.get("SIPP_START", "")
+RECORD_FILE = os.environ.get("SIPP_RECORD_FILE", "")
+RECORD_URL = os.environ.get("SIPP_RECORD_URL", "")
+RECORD_FIFO = os.environ.get("SIPP_RECORD_FIFO", "")
+RECORD_BUFFER_BYTES = int(os.environ.get("SIPP_RECORD_BUFFER_BYTES", str(100 * 1024 * 1024)))
+RECORD_STATUS = os.environ.get("SIPP_RECORD_STATUS", "")
+RUN = os.environ.get("SIPP_RUN", "")
 
 # Set by main() when enabled; read by every scrape.
 TRIMMER = None
 FOLLOWER = None
+SHIPPER = None
+COPIER = None
 
 # Longest header line read; a stat row is about 0.5 KB, its header a few KB.
 HEADER_MAX = 64 * 1024
@@ -97,6 +143,12 @@ def base_labels():
     pairs = [("scenario", SCENARIO), ("role", ROLE)]
     if JOB:
         pairs.append(("sipp_job", JOB))
+    if STREAM:
+        pairs.append(("stream", STREAM))
+    if SHAPE:
+        pairs.append(("shape", SHAPE))
+    if START:
+        pairs.append(("start", START))
     return pairs
 
 
@@ -150,8 +202,18 @@ def read_last_row(path):
     return None, None
 
 
-def render(path=STAT_FILE, trimmer=None, follower=None):
+def render(path=STAT_FILE, trimmer=None, follower=None, shipper=None, copier=None):
     out = []
+    if copier is not None:
+        out.append(fmt("sipp_records_lost_total", copier.lost()))
+        out.append(fmt("sipp_records_buffered_bytes", copier.held()))
+    if shipper is not None:
+        counts = shipper.snapshot()
+        for ending, n in sorted(counts.by_ending.items()):
+            out.append(fmt("sipp_records_total", n, [("ending", ending)]))
+        out.append(fmt("sipp_records_shipped_total", counts.shipped))
+        out.append(fmt("sipp_records_ship_failures_total", counts.failed_posts))
+        out.append(fmt("sipp_records_pending", counts.pending))
     try:
         out.append(fmt("sipp_stat_file_allocated_bytes", os.stat(path).st_blocks * 512))
     except OSError:
@@ -161,6 +223,7 @@ def render(path=STAT_FILE, trimmer=None, follower=None):
     if follower is not None:
         counts = follower.snapshot()
         out.append(fmt("sipp_error_entries_total", counts.entries))
+        out.append(fmt("sipp_recv_timer_jumps_total", counts.timer_jumps))
         for labels, n in sorted(counts.unexpected.items()):
             out.append(fmt("sipp_unexpected_msgs_total", n, labels))
     header, row = read_last_row(path)
@@ -236,7 +299,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         try:
-            payload = render(STAT_FILE, TRIMMER, FOLLOWER).encode()
+            payload = render(STAT_FILE, TRIMMER, FOLLOWER, SHIPPER, COPIER).encode()
         except Exception as exc:  # never crash the scrape
             payload = (f"sipp_up 0\n# exporter error: {exc}\n").encode()
         self.send_response(200)
@@ -253,11 +316,19 @@ def main():
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"sipp_stat_exporter: serving :{PORT}/metrics from {STAT_FILE} "
           f"(scenario={SCENARIO} role={ROLE} job={JOB or '-'})", file=sys.stderr)
-    global TRIMMER, FOLLOWER
+    global TRIMMER, FOLLOWER, SHIPPER, COPIER
+    if RECORD_FIFO and RECORD_FILE:
+        COPIER = record_copy.start(RECORD_FIFO, RECORD_FILE, RECORD_STATUS or None, RECORD_BUFFER_BYTES)
     if KEEP_BYTES > 0:
         TRIMMER = stat_trim.Trimmer(STAT_FILE, KEEP_BYTES).start()
     if ERROR_FILE:
-        FOLLOWER = error_follow.start(ERROR_FILE)
+        FOLLOWER = error_follow.start(ERROR_FILE, keep_path=ERROR_KEPT_FILE or None)
+    if ERROR_FILE and ERROR_KEEP_BYTES > 0:
+        stat_trim.Trimmer(ERROR_FILE, ERROR_KEEP_BYTES).start()
+    if ERROR_FILE and ERROR_KEPT_FILE and ERROR_KEPT_BYTES > 0:
+        stat_trim.Trimmer(ERROR_KEPT_FILE, ERROR_KEPT_BYTES).start()
+    if RECORD_FILE and RECORD_URL:
+        SHIPPER = record_ship.start(RECORD_FILE, RECORD_URL, RUN, STREAM, SHAPE)
     srv.serve_forever()
 
 

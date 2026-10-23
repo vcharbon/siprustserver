@@ -6,8 +6,17 @@ license.workspace = true
 publish.workspace = true
 description = "B2BUA core: per-call FIFO dispatch (SipRouter/PerCallDispatcher) + rule engine + in-memory call store (over a replication-aware CallStore seam) + decision-engine adapter + buffered CDR. Rust port of sipjsserver src/sip/{SipRouter,PerCallDispatcher}.ts, src/call/CallState.ts, src/b2bua/rules/, src/decision/."
 
+[package.metadata.purity]
+tier = "shell"
+
 [lints]
 workspace = true
+
+[features]
+# Test support: the scripted decision engine (`decision::test_adapter`) the
+# harnesses and the reference runner route with. No production binary turns it
+# on (ADR-0051 §1).
+testkit = []
 
 [dependencies]
 tokio = { workspace = true }
@@ -23,10 +32,17 @@ tracing = { workspace = true }
 # Lifecycle aggregation helpers only (default features: no OTLP export tree).
 observe = { path = "../observe", default-features = false }
 b2bua-sdk = { path = "../b2bua-sdk" }
+# The decision core every turn runs (ADR-0052).
+b2bua-core = { path = "../b2bua-core" }
 call = { path = "../call" }
 sip-message = { path = "../sip-message" }
 sip-net = { path = "../sip-net" }
 sip-txn = { path = "../sip-txn" }
+# The per-turn identifier source (ADR-0052 §3).
+sip-ids = { path = "../sip-ids" }
+# The store's locks recover from poison, counted per named lock (ADR-0051 §7).
+lock-poison = { path = "../lock-poison" }
+task-restart = { path = "../task-restart" }
 # The class a retained emission's ladder paces by (ADR-0032 X3).
 sip-retransmit = { path = "../sip-retransmit" }
 sip-clock = { path = "../sip-clock" }
@@ -36,14 +52,16 @@ load-shed = { path = "../load-shed" }
 # Declared Prometheus families: the catalogue the worker renders its
 # admission and dispatch counts from (metrics/catalogue.rs).
 metric-catalogue = { path = "../metric-catalogue" }
+metric-values = { path = "../metric-values" }
 repl-net = { path = "../repl-net" }
 topology = { path = "../topology" }
 # Limiter client: the transport SEAM only (real impl injected by the runner; sim
-# in tests). Wire DTOs come from call-limiter. No `real` feature here.
+# in tests). Wire DTOs come from call-limiter-wire. No `real` feature here.
 http-net = { path = "../http-net" }
-call-limiter = { path = "../call-limiter" }
+call-limiter-wire = { path = "../call-limiter-wire" }
 
 [dev-dependencies]
+observe-testkit = { path = "../observe-testkit" }
 # Tests that set an exact call admission state (`CallLimiterState::from_parts`).
 call = { path = "../call", features = ["testkit"] }
 # Paused-clock lever for timer tests (tokio::time::pause/advance).
@@ -53,10 +71,15 @@ tokio = { workspace = true, features = ["test-util"] }
 alloc-counter = { path = "../alloc-counter" }
 # Integration tests bind a real LimiterServer on the simulated HTTP fabric.
 http-net = { path = "../http-net" }
+http-net-testkit = { path = "../http-net-testkit" }
 call-limiter = { path = "../call-limiter" }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
-# IdGen for the rule-engine `ActionExecutor` in state-machine tests.
-sip-txn = { path = "../sip-txn" }
+sip-net-testkit = { path = "../sip-net-testkit" }
+repl-net-testkit = { path = "../repl-net-testkit" }
+# The fixed-key turns the rule-engine `ActionExecutor` draws from in tests.
+sip-ids = { path = "../sip-ids", features = ["testkit"] }
+# The test caller the shell's tests build their calls from.
+b2bua-core = { path = "../b2bua-core", features = ["testkit"] }
 # ADR-0020 X7 refactor gate: the obligation extraction must be effect-multiset
 # equivalent to the pre-extraction `enforce` over arbitrary snapshots.
 proptest = { workspace = true }

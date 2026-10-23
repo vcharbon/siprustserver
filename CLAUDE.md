@@ -6,9 +6,11 @@ To show a html file or a URL to the user, `xdg-open ./path/to/file/index.html` /
 
 ## Coding rules
 
-Doc comments state present-tense contracts and invariants. History (dates, commit hashes, ticket IDs, "previously/replaces/no longer") lives in git and ADRs — a comment may cite ADR-00xx in one line, never retell it. If a comment needs more than ~5 lines to justify a behavior rather than describe it, either the behavior is wrong — write FIXME(scope): <one-line defect + one-line fix direction> — or the rationale is architectural and belongs in an ADR with a one-line pointer. By default however do not write FIXME, implement correct behavior unless specifically asked to delay specific corner cases.
+Doc comments state present-tense contracts and invariants. History (dates, commit hashes, ticket IDs, "previously/replaces/no longer") lives in git and ADRs — a comment may cite ADR-00xx in one line, never retell it. A comment that has to justify wrong behavior is never written: the defect is reported. If a comment needs more than ~5 lines to justify a behavior rather than describe it, the rationale is architectural and belongs in an ADR with a one-line pointer. Implement correct behavior unless specifically asked to delay specific corner cases.
 Each file must have it own concern. No not mix concerns.
 Never implement SIP header or message extraction in crates other than sip-message.
+A crate a production binary links declares its tier and never panics on input, a pure one does no effects ([ADR-0051](docs/adr/0051-production-crates-never-panic-on-input.md)): `just purity` and `just panic-sites` check it, and `panic-sites.allow` only goes down, except by sites a rule the change adds reveals.
+A branch that touches `Cargo.lock` or `.cargo/audit.toml` passes `just audit-gate`: no RustSec vulnerability outside the `[advisories] ignore` list of `.cargo/audit.toml`, whose every entry states who links the crate and why it is acceptable.
 Formatting is `cargo fmt` under the root `rustfmt.toml` (stable options only). Run `just fmt` before a commit; `.githooks/pre-commit` (installed by `just hooks`) refuses an unformatted stage — never hand-format around it; `.githooks/prepare-commit-msg` refuses an amend on `develop`, the integration branch (commit on a topic branch).
 
 
@@ -134,7 +136,9 @@ workspace links ~250 test binaries and the concurrent mold links at one job per
 core exhaust a 32 GB host (ADR-0029 X5). `--jobs N` overrides it per call:
 lower on a shared host, never higher for a whole-workspace run.
 
-Prerequisites: mold and gcc >= 12. Do not:
+Prerequisites: mold and gcc >= 12; for the dependency audit (`just audit`,
+`just audit-gate`), cargo-audit and cargo-edit (`cargo upgrade`), cargo-outdated
+optionally (on Arch: `pacman -S cargo-audit cargo-edit cargo-outdated`). Do not:
 
 - set `RUSTFLAGS` — it replaces `[build] rustflags` wholesale, silently
   dropping `tokio_unstable` *and* mold; anything that must set it re-states
@@ -170,9 +174,9 @@ long-lived test process (SUT, loadgen, e2e-web) then gets its own small scope.
 
 A failover/kill failure is NOT automatically a SUT bug. Protected: ringing and
 established calls — a confirmed call dropping is always genuine. Accepted
-collateral: a dialog whose state changed within the acceptance window (default
-200 ms) of a kill (the confirm-race); the loadgen auto-buckets `chaos="near"`
-vs `chaos="clear"` — triage `clear`. A takeover keepalive firing ~one interval
+collateral: a dialog whose state changed at a kill (the confirm-race); the HA
+tooling attributes each impact to its incident window and judges it against
+that window's budget (ADR-0049 §3.5). A takeover keepalive firing ~one interval
 early on an endurance run is a host clock-STEP artifact (fix is infra; the SUT
 re-anchors restored timers to bound the residual). Design invariants — never
 reintroduce: time-based settle/handback (reconciliation is `(p,b)`-causal
@@ -197,7 +201,8 @@ a child span with its request/response. **Every emission site sits behind
 allocates nothing; subscriber-side filtering is never the mechanism. Tracing is
 inert unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set; `X-Trace-Sample` is honored
 only under `SIP_TRACE_HEADER=1` (lab/endurance) and, like every SIP header, is
-extracted ONLY in `sip-message` / `sip_message::sniff`.
+extracted ONLY in `sip-message`, from the parsed message (`sip_message::sniff`
+is tooling, behind its feature).
 
 ## Initial-INVITE final-response guarantee — summary ([ADR-0022](docs/adr/0022-initial-invite-final-response-guarantee.md))
 

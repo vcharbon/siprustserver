@@ -15,8 +15,6 @@ pub enum TimeoutKind {
     /// A leg rang past its answer deadline (RFC 3261 §13.3.1.1: a UAS may
     /// be given a bounded time to answer), a re-INVITE included.
     NoAnswer,
-    /// A reliable provisional was never PRACKed (RFC 3262 §3).
-    Prack,
     /// A 2xx was never ACKed (RFC 3261 §13.3.1.4).
     Ack,
     /// A leg answered no liveness probe (RFC 3261 §11).
@@ -55,9 +53,11 @@ pub enum TerminationCause {
     Admission,
     /// The per-call message cap.
     MessageCap,
-    /// The supervisor ended it: a reaper strike, a forced terminal, an
-    /// operator.
+    /// The supervisor ended it: a reaper strike, a forced terminal.
     Supervisor,
+    /// An operator released every call of the worker (ADR-0050 §10): an
+    /// answered call ended with nothing sent, a call in setup aborted.
+    OperatorRelease,
 }
 
 /// Who ended the call and why. `at_ms` is the clock of the turn that began

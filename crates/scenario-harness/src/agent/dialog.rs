@@ -3,26 +3,29 @@
 //! [`InDialogTxn`] client transaction, and the CANCELlable [`ClientReinvite`].
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use sip_message::generators::{
-    generate_ack_for_2xx, generate_in_dialog_request, GenerateAckFor2xxOpts,
-    GenerateInDialogRequestOpts, InDialogMethod, StackDialog,
+    generate_in_dialog_request, GenerateInDialogRequestOpts, InDialogMethod, StackDialog,
 };
 use sip_message::header::{HeaderName, HeaderValue, MediaType, RAck};
-use sip_message::{
-    apply_name_forms, apply_remote_target_emits, emitted_wire, CseqDeviation, CseqPattern,
-    EmitOpts, MessageTemplate, SipHeader, SipMessage, SipRequest, SipResponse, SipStr,
-};
+use sip_message::{CseqDeviation, SipHeader, SipMessage, SipRequest, SipResponse, SipStr};
+use sip_template::{apply_name_forms, apply_remote_target_emits, emitted_wire};
+
+use crate::{shared_cseq_applier, CseqPattern, EmitOpts, MessageTemplate};
 
 use super::addressing::next_hop;
 use super::client_txn::{
-    try_expect_response, try_expect_response_tolerating, try_send_cancel, AckCtx,
+    awaited_response, request_label, try_expect_response, try_expect_response_tolerating,
+    try_send_cancel, AckCtx,
 };
-use super::step::{unwrap_step, StepError};
+use super::step::{unwrap_step, unwrap_step_at, StepError};
 use super::ua::media_type;
 use super::Agent;
+
+mod fallible;
 
 /// A confirmed dialog. In-dialog requests auto-increment CSeq and route to the
 /// remote target. `Clone` so the load driver can snapshot it into its teardown
@@ -86,7 +89,7 @@ impl Dialog {
     /// by [`assert_deviations_consumed`](Self::assert_deviations_consumed) and a
     /// Drop-time warning.
     pub fn set_cseq_pattern(&mut self, pattern: CseqPattern) {
-        self.cseq_dev = Some(Arc::new(Mutex::new(CseqDeviation::new(pattern))));
+        self.cseq_dev = Some(shared_cseq_applier(pattern));
     }
 
     /// Builder form of [`set_cseq_pattern`](Self::set_cseq_pattern).
@@ -158,7 +161,7 @@ impl Dialog {
 
     /// Send a BYE (CSeq auto-incremented). Returns its client transaction.
     pub async fn bye(&mut self) -> InDialogTxn {
-        self.request(InDialogMethod::Bye, None).await
+        unwrap_step(self.try_bye().await)
     }
 
     /// Best-effort BYE for the load driver's teardown: builds and sends the BYE
@@ -197,36 +200,13 @@ impl Dialog {
     /// ACK carries that is not a session description — an ISUP payload
     /// (RFC 3372/3204) or a `multipart/mixed` of both. `None` sends a bare ACK.
     pub async fn ack_for_with_body(&mut self, invite_cseq: u32, body: Option<(&str, Vec<u8>)>) {
-        self.ack_carrying(invite_cseq, body, &[]).await;
+        unwrap_step(self.try_ack_carrying(invite_cseq, body, &[]).await);
     }
 
     /// [`ack`](Dialog::ack) of a bodiless round with the acknowledging party's
     /// own header lines on the ACK.
     pub async fn ack_stating(&mut self, stated: &[(&str, &str)]) {
-        self.ack_carrying(self.dialog.local_cseq, None, stated).await;
-    }
-
-    async fn ack_carrying(
-        &mut self,
-        invite_cseq: u32,
-        body: Option<(&str, Vec<u8>)>,
-        stated: &[(&str, &str)],
-    ) {
-        let (content_type, bytes) = match body {
-            Some((ct, bytes)) => (Some(media_type(ct)), bytes),
-            None => (None, Vec::new()),
-        };
-        let opts = GenerateAckFor2xxOpts {
-            via: Some(self.agent.via()),
-            cseq: Some(invite_cseq),
-            body: bytes,
-            content_type,
-            extra_headers: super::client_txn::stated_lines(stated),
-            ..Default::default()
-        };
-        let ack = generate_ack_for_2xx(None, &self.dialog, &opts);
-        let dst = next_hop(&self.dialog, self.fallback_addr);
-        self.agent.send(&SipMessage::Request(ack), dst).await;
+        unwrap_step(self.try_ack_carrying(self.dialog.local_cseq, None, stated).await);
     }
 
     /// Send any in-dialog request (re-INVITE, INFO, …); attach an SDP body
@@ -234,11 +214,7 @@ impl Dialog {
     /// builder — same mechanics (CSeq bump, next-hop routing, §17.1.1.3
     /// (re-)INVITE retention on the returned transaction).
     pub async fn request(&mut self, method: InDialogMethod, sdp: Option<&str>) -> InDialogTxn {
-        let mut req = self.send_request(method);
-        if let Some(s) = sdp {
-            req = req.with_sdp(s);
-        }
-        req.send().await
+        unwrap_step(self.try_request(method, sdp).await)
     }
 
     /// Begin an in-dialog request with fine-grained control over RAck (RFC 3262
@@ -312,14 +288,19 @@ impl ClientReinvite {
     /// re-INVITE, or the 200 to a CANCEL — whichever arrives next). A non-2xx
     /// final to the re-INVITE is auto-ACKed on its branch (RFC 3261
     /// §17.1.1.3), like [`ClientInvite::expect`](super::ClientInvite::expect).
-    /// Panicking veneer over [`try_expect`](ClientReinvite::try_expect).
-    pub async fn expect(&mut self, status: u16) -> SipResponse {
-        unwrap_step(self.try_expect(status).await)
+    /// Panicking veneer over [`try_expect`](ClientReinvite::try_expect): the
+    /// panic names the step and the test line that called it.
+    #[track_caller]
+    pub fn expect(&mut self, status: u16) -> impl Future<Output = SipResponse> + '_ {
+        let site = self.agent.step("expect");
+        async move { unwrap_step_at(self.try_expect(status).await, site) }
     }
 
     /// Fallible [`expect`](ClientReinvite::expect).
     pub async fn try_expect(&mut self, status: u16) -> Result<SipResponse, StepError> {
-        try_expect_response(&self.agent, status, Some(&self.ack_ctx())).await
+        try_expect_response(&self.agent, status, Some(&self.ack_ctx()))
+            .await
+            .map_err(|e| e.awaiting(|| awaited_response(status, &self.original_invite)))
     }
 
     /// CANCEL this still-pending re-INVITE (RFC 3261 §9.1) — the in-dialog
@@ -341,6 +322,7 @@ impl ClientReinvite {
             // [`ClientReinvite::expect`]; the CANCEL's own finals take no ACK.
             None,
             self.wire_dst,
+            request_label(Some("CANCEL"), &self.original_invite),
         )
     }
 }
@@ -576,11 +558,11 @@ impl<'a> InDialogRequest<'a> {
             if let Some(dev) = &self.cseq_dev {
                 let mut dev = dev.lock().expect("cseq deviation lock");
                 if !dev.is_identity() {
-                    opts.cseq = Some(dev.next_cseq(self.dialog.local_cseq));
+                    opts.cseq = Some(dev.next_cseq(self.dialog.local_cseq).expect("CSeq in range"));
                 }
             }
         }
-        let mut res = generate_in_dialog_request(self.method, &view, &opts);
+        let mut res = generate_in_dialog_request(self.method, &view, &opts).expect("built");
         if self.suppress_default_ct {
             res.request = res
                 .request
@@ -605,7 +587,7 @@ impl<'a> InDialogRequest<'a> {
             &apply_name_forms(msg.headers(), &self.name_forms),
             &self.remote_emits,
         );
-        self.agent.try_send_wire(&emitted_wire(&msg, &headers), dst).await?;
+        self.agent.try_send_emitted(&msg, &emitted_wire(&msg, &headers), dst).await?;
         Ok((
             InDialogTxn::new(
                 self.agent.clone(),
@@ -613,6 +595,7 @@ impl<'a> InDialogRequest<'a> {
                 // (§17.1.1.3) — retain the request so the txn can build it.
                 matches!(self.method, InDialogMethod::Invite).then(|| request.clone()),
                 dst,
+                request_label(None, &request),
             ),
             request,
         ))
@@ -634,11 +617,19 @@ pub struct InDialogTxn {
     /// Where the request was sent (the next hop) — the non-2xx ACK is
     /// hop-by-hop and follows the SAME path.
     wire_dst: SocketAddr,
+    /// The request as a timed-out expect names it
+    /// ([`request_label`](super::client_txn::request_label)).
+    label: String,
 }
 
 impl InDialogTxn {
-    pub(super) fn new(agent: Agent, invite: Option<SipRequest>, wire_dst: SocketAddr) -> Self {
-        InDialogTxn { agent, invite, wire_dst }
+    pub(super) fn new(
+        agent: Agent,
+        invite: Option<SipRequest>,
+        wire_dst: SocketAddr,
+        label: String,
+    ) -> Self {
+        InDialogTxn { agent, invite, wire_dst, label }
     }
 
     /// The (re-)INVITE this transaction put on the wire — `None` for a
@@ -672,16 +663,26 @@ impl InDialogTxn {
     }
 
     /// Wait for and assert a response status. Panicking veneer over
-    /// [`try_expect`](InDialogTxn::try_expect).
-    pub async fn expect(&mut self, status: u16) -> SipResponse {
-        unwrap_step(self.try_expect(status).await)
+    /// [`try_expect`](InDialogTxn::try_expect): the panic names the step and
+    /// the test line that called it.
+    #[track_caller]
+    pub fn expect(&mut self, status: u16) -> impl Future<Output = SipResponse> + '_ {
+        let site = self.agent.step("expect");
+        async move { unwrap_step_at(self.try_expect(status).await, site) }
     }
 
     /// THE expect core for this transaction: a wrong status / timeout /
     /// unexpected request becomes a [`StepError`] (the functional lane panics
     /// on it via [`expect`](InDialogTxn::expect)).
     pub async fn try_expect(&mut self, status: u16) -> Result<SipResponse, StepError> {
-        try_expect_response(&self.agent, status, self.ack_ctx().as_ref()).await
+        try_expect_response(&self.agent, status, self.ack_ctx().as_ref())
+            .await
+            .map_err(|e| e.awaiting(|| self.awaited(status)))
+    }
+
+    /// What an expect of `status` on this transaction waits for.
+    fn awaited(&self, status: u16) -> String {
+        format!("a {status} to {}", self.label)
     }
 
     /// Fallible, tolerant [`try_expect`](InDialogTxn::try_expect): while waiting
@@ -695,7 +696,9 @@ impl InDialogTxn {
         status: u16,
         tolerate: &[&str],
     ) -> Result<SipResponse, StepError> {
-        try_expect_response_tolerating(&self.agent, status, tolerate, self.ack_ctx().as_ref()).await
+        try_expect_response_tolerating(&self.agent, status, tolerate, self.ack_ctx().as_ref())
+            .await
+            .map_err(|e| e.awaiting(|| self.awaited(status)))
     }
 
     /// Like [`expect`](InDialogTxn::expect), but first drains (and 200-OKs) any
@@ -704,7 +707,13 @@ impl InDialogTxn {
     /// retransmit can race the awaited response on the same socket; tolerate it
     /// rather than relax the assertion (CLAUDE.md retransmit hazard).
     /// Panicking veneer over [`try_expect_tolerating`](InDialogTxn::try_expect_tolerating).
-    pub async fn expect_tolerating(&mut self, status: u16, tolerate: &[&str]) -> SipResponse {
-        unwrap_step(self.try_expect_tolerating(status, tolerate).await)
+    #[track_caller]
+    pub fn expect_tolerating<'a>(
+        &'a mut self,
+        status: u16,
+        tolerate: &'a [&'a str],
+    ) -> impl Future<Output = SipResponse> + 'a {
+        let site = self.agent.step("expect_tolerating");
+        async move { unwrap_step_at(self.try_expect_tolerating(status, tolerate).await, site) }
     }
 }

@@ -11,4 +11,4 @@ pub mod load_balancer;
 pub mod rendezvous;
 
 pub use forward_all::ForwardAllStrategy;
-pub use load_balancer::{LoadBalancerConfig, LoadBalancerStrategy};
+pub use load_balancer::LoadBalancerStrategy;

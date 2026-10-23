@@ -1,24 +1,21 @@
-//! [`ProxySelfGate`] — proxy self-overload admission gate (port of
-//! `src/sip-front-proxy/ProxySelfGate.ts`).
+//! [`ProxySelfGate`] — proxy self-overload admission gate.
 //!
 //! The front proxy is a single task with its own event-loop budget. Under flood
 //! the proxy itself saturates before any worker sees the traffic. This gate
 //! sheds **external, new-dialog, non-emergency** INVITEs on two cheap binary
 //! checks:
 //!
-//!   - `proxy_elu > elu_critical` — hard rejection by intake pressure: the
-//!     "ELU" reading is packet age at dequeue, normalized by
-//!     [`IntakeAgeSampler`] (`proxy_overload_elu` keeps its wire name).
+//!   - smoothed intake age `> elu_critical` — hard rejection by intake
+//!     pressure (`proxy_overload_intake_age`): the reading is packet age at
+//!     dequeue, normalized by [`IntakeAgeSampler`]. The `elu_*` names of the
+//!     config, the EWMA and its gauge are the [`LoadSampler`] seam's.
 //!   - a per-class CPS token bucket — hard cap on the external new-dialog
 //!     non-emergency rate (`proxy_overload_cps`).
 //!
 //! Caller classification (emergency / in-dialog / worker-originated) happens in
 //! `crate::core::request` *before* this gate; internal traffic from workers
 //! always bypasses (rejecting a worker's B-leg INVITE causes re-routing churn
-//! rather than load shedding). The request path's branch + the
-//! [`note_bypass`](ProxySelfGate::note_bypass)
-//! counters are wired exactly as they were against the prior always-admit stub
-//! — only the decision is now real.
+//! rather than load shedding).
 //!
 //! Unlike the per-worker AIMD on the LB-side [`crate::load_observer`], this gate
 //! is binary: the proxy's ELU is its own, with no second party to converge with.
@@ -42,16 +39,17 @@ use std::time::Duration;
 
 use load_shed::{clamp01, Ewma, LoadSampler, TokenBucket};
 
+use crate::poison::{locked, SELF_GATE};
+
 // ---------------------------------------------------------------------------
-// Decision / bypass types (port of `AdmitDecision` + the caller-classified
-// bypass kinds)
+// Decision / bypass types
 // ---------------------------------------------------------------------------
 
 /// The outcome of an admission check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmitDecision {
     Admit,
-    /// Rejected for `reason`, which names the `Reason` phrase, with a
+    /// Rejected for `reason`, which names the reject in counters and traces, with a
     /// `Retry-After` hint the wire floors at 1 s.
     Reject {
         reason: ShedReason,
@@ -66,23 +64,24 @@ impl AdmitDecision {
     }
 }
 
-/// Why the gate rejected: its `Reason` phrase and the reject's metric label.
+/// Why the gate rejected: the reject's metric label and trace reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShedReason {
-    /// The ELU EWMA is past `elu_critical`.
-    Elu,
+    /// The smoothed intake reading (packet age at dequeue, normalized by
+    /// [`AGE_CRITICAL_MS`]) is past `elu_critical`.
+    IntakeAge,
     /// The CPS bucket is empty.
     Cps,
 }
 
 impl ShedReason {
     /// Every reason, in declaration order.
-    pub const ALL: [ShedReason; 2] = [ShedReason::Elu, ShedReason::Cps];
+    pub const ALL: [ShedReason; 2] = [ShedReason::IntakeAge, ShedReason::Cps];
 
-    /// The `Reason` phrase and metric label.
+    /// The metric label and trace reason.
     pub const fn label(self) -> &'static str {
         match self {
-            ShedReason::Elu => "proxy_overload_elu",
+            ShedReason::IntakeAge => "proxy_overload_intake_age",
             ShedReason::Cps => "proxy_overload_cps",
         }
     }
@@ -116,10 +115,10 @@ impl ProxySelfGate for AlwaysAdmitGate {
 }
 
 // ---------------------------------------------------------------------------
-// Config (port of `ProxySelfGateConfigData` + `defaultProxySelfGateConfig`)
+// Config
 // ---------------------------------------------------------------------------
 
-/// Tunables for [`EluCpsGate`] (port of TS `ProxySelfGateConfigData`).
+/// Tunables for [`EluCpsGate`].
 #[derive(Debug, Clone, Copy)]
 pub struct ProxySelfGateConfig {
     /// Above this ELU the gate rejects every external new-dialog INVITE.
@@ -131,13 +130,12 @@ pub struct ProxySelfGateConfig {
     /// EWMA α for the proxy's own ELU.
     pub elu_smoothing_alpha: f64,
     /// Sampler cadence — the period of the runner task that drives
-    /// [`EluCpsGate::sample`]. The TS default is 100 ms (`setInterval`).
+    /// [`EluCpsGate::sample`].
     pub sampler_interval: std::time::Duration,
 }
 
 impl Default for ProxySelfGateConfig {
-    /// Aggressive defaults, copied verbatim from `defaultProxySelfGateConfig`
-    /// (calibrated against a perf test). `cps_bucket_size = 50`,
+    /// Aggressive defaults (calibrated against a perf test). `cps_bucket_size = 50`,
     /// `cps_bucket_rate = 100`: at 200 CAPS the bucket drains in ~500 ms then
     /// admits at the refill rate; a sustained 50 CAPS non-emergency baseline
     /// passes cleanly. `elu_critical = 0.80` fires the gate the moment the
@@ -212,7 +210,7 @@ impl LoadSampler for IntakeAgeSampler {
 }
 
 // ---------------------------------------------------------------------------
-// EluCpsGate — the real proxy-self admission gate (port of `ProxySelfGate`)
+// EluCpsGate — the real proxy-self admission gate
 // ---------------------------------------------------------------------------
 
 /// The intake-shed episode log, keyed by rejection reason (ADR-0026): shedding
@@ -231,13 +229,12 @@ fn shed_waves() -> Arc<observe::WaveSet> {
     })
 }
 
-/// Snapshot of the gate's published state, for `/status` + Prometheus (port of
-/// the subset of `ProxySelfGateMetrics` this gate owns).
+/// Snapshot of the gate's published state, for `/status` + Prometheus.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProxySelfGateMetrics {
     /// EWMA-smoothed proxy ELU (`0..=1`) — crosses `elu_critical` → 503.
     pub elu_ewma: f64,
-    /// Most recent raw GC fraction (day-1 informational only).
+    /// Most recent raw GC fraction (informational only).
     pub gc_fraction: f64,
     /// Token-bucket fill level (tokens remaining, floored at 0).
     pub cps_bucket_level: f64,
@@ -245,8 +242,8 @@ pub struct ProxySelfGateMetrics {
     pub cps_bucket_max: f64,
     /// External new-dialog non-emergency INVITEs admitted by the gate.
     pub external_admitted_total: u64,
-    /// Rejections by ELU pressure (`proxy_overload_elu`).
-    pub rejected_elu_total: u64,
+    /// Rejections by intake age (`proxy_overload_intake_age`).
+    pub rejected_intake_age_total: u64,
     /// Rejections by the CPS bucket (`proxy_overload_cps`).
     pub rejected_cps_total: u64,
     /// Worker-originated INVITEs that bypassed the gate (`is_worker_outbound`).
@@ -273,7 +270,7 @@ impl GateInner {
     }
 }
 
-/// The real ELU/CPS proxy-self gate (port of TS `ProxySelfGate`). Clone-cheap
+/// The real ELU/CPS proxy-self gate. Clone-cheap
 /// (shares one `Arc`); construct one with [`EluCpsGate::new`]/[`EluCpsGate::intake`],
 /// hand it to `ProxyCoreBuilder::self_gate`, and drive [`sample`](EluCpsGate::sample)
 /// from a periodic task at [`ProxySelfGateConfig::sampler_interval`].
@@ -290,7 +287,7 @@ pub struct EluCpsGate {
     shed: Arc<observe::WaveSet>,
     // Lock-free counters — bumped off the EWMA lock on the admission/bypass paths.
     external_admitted: Arc<AtomicU64>,
-    rejected_elu: Arc<AtomicU64>,
+    rejected_intake_age: Arc<AtomicU64>,
     rejected_cps: Arc<AtomicU64>,
     internal_bypassed: Arc<AtomicU64>,
     emergency_bypassed: Arc<AtomicU64>,
@@ -299,7 +296,7 @@ pub struct EluCpsGate {
 impl EluCpsGate {
     /// Build over a [`LoadSampler`] with the given config. The EWMA starts at `0`
     /// (uninitialised), so the gate admits until the first [`sample`](EluCpsGate::sample)
-    /// fires — the TS cold-start contract — and the bucket starts full at
+    /// fires, and the bucket starts full at
     /// `cps_bucket_size`.
     pub fn new(sampler: Arc<dyn LoadSampler>, config: ProxySelfGateConfig) -> Self {
         Self {
@@ -318,7 +315,7 @@ impl EluCpsGate {
             sampler_interval: config.sampler_interval,
             shed: shed_waves(),
             external_admitted: Arc::new(AtomicU64::new(0)),
-            rejected_elu: Arc::new(AtomicU64::new(0)),
+            rejected_intake_age: Arc::new(AtomicU64::new(0)),
             rejected_cps: Arc::new(AtomicU64::new(0)),
             internal_bypassed: Arc::new(AtomicU64::new(0)),
             emergency_bypassed: Arc::new(AtomicU64::new(0)),
@@ -334,17 +331,16 @@ impl EluCpsGate {
     }
 
     /// The sampler cadence — the period a runner task should `tick` before each
-    /// [`sample`](EluCpsGate::sample) (the TS `setInterval(…, samplerIntervalMs)`).
+    /// [`sample`](EluCpsGate::sample).
     pub fn sampler_interval(&self) -> std::time::Duration {
         self.sampler_interval
     }
 
     /// One sampler tick: read the sampler and feed the ELU EWMA (and stash the raw
     /// GC fraction). Called by the periodic task every
-    /// [`sampler_interval`](EluCpsGate::sampler_interval). Port of the TS sampler
-    /// `setInterval` body.
+    /// [`sampler_interval`](EluCpsGate::sampler_interval).
     pub fn sample(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = locked(&self.inner, SELF_GATE);
         let elu = inner.sampler.elu();
         let gc = inner.sampler.gc_fraction();
         inner.elu_ewma.observe(elu);
@@ -353,17 +349,15 @@ impl EluCpsGate {
 
     /// Current EWMA-smoothed proxy ELU (`0..=1`) — exposed for tests/diagnostics.
     pub fn elu_ewma(&self) -> f64 {
-        self.inner.lock().unwrap().elu_ewma.get()
+        locked(&self.inner, SELF_GATE).elu_ewma.get()
     }
 
-    /// Snapshot of the gate's published state. Reading `cps_bucket_level` refills
-    /// the bucket as a side effect (lazy refill), which is harmless — it is the
-    /// same refill the next admission would do.
+    /// Snapshot of the gate's published state. A read changes nothing:
+    /// `cps_bucket_level` is the level projected to now.
     pub fn metrics(&self) -> ProxySelfGateMetrics {
         let (elu_ewma, gc_fraction, cps_bucket_level, cps_bucket_max) = {
-            let mut inner = self.inner.lock().unwrap();
-            let now = inner.now();
-            let level = inner.bucket.level(now);
+            let inner = locked(&self.inner, SELF_GATE);
+            let level = inner.bucket.projected_level(inner.now());
             (inner.elu_ewma.get(), inner.gc_fraction, level, inner.bucket.capacity())
         };
         ProxySelfGateMetrics {
@@ -372,7 +366,7 @@ impl EluCpsGate {
             cps_bucket_level,
             cps_bucket_max,
             external_admitted_total: self.external_admitted.load(Ordering::Relaxed),
-            rejected_elu_total: self.rejected_elu.load(Ordering::Relaxed),
+            rejected_intake_age_total: self.rejected_intake_age.load(Ordering::Relaxed),
             rejected_cps_total: self.rejected_cps.load(Ordering::Relaxed),
             internal_bypassed_total: self.internal_bypassed.load(Ordering::Relaxed),
             emergency_bypassed_total: self.emergency_bypassed.load(Ordering::Relaxed),
@@ -381,23 +375,23 @@ impl EluCpsGate {
 }
 
 impl ProxySelfGate for EluCpsGate {
-    /// Try to admit one external new-dialog non-emergency INVITE. Order is
-    /// faithful to TS `tryAdmitExternal`:
-    /// 1. **ELU** — `elu_ewma > elu_critical` → reject `proxy_overload_elu`,
-    ///    `Retry-After: 1` (the bucket is NOT touched).
+    /// Try to admit one external new-dialog non-emergency INVITE. Order:
+    /// 1. **Intake age** — `elu_ewma > elu_critical` → reject
+    ///    `proxy_overload_intake_age`, `Retry-After: 1` (the bucket is NOT
+    ///    touched).
     /// 2. **CPS bucket** — `try_take`; on empty → reject `proxy_overload_cps`
     ///    with the time-to-token of that same failed consume as `Retry-After`.
     /// 3. Otherwise **admit** (a token was consumed in step 2).
     fn try_admit_external(&self) -> AdmitDecision {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = locked(&self.inner, SELF_GATE);
 
-        // 1. Event-loop pressure — hard reject before spending a token.
+        // 1. Intake pressure — hard reject before spending a token.
         if inner.elu_ewma.get() > self.elu_critical {
             drop(inner);
-            self.rejected_elu.fetch_add(1, Ordering::Relaxed);
-            self.shed.record(ShedReason::Elu.label(), "shed", 1);
+            self.rejected_intake_age.fetch_add(1, Ordering::Relaxed);
+            self.shed.record(ShedReason::IntakeAge.label(), "shed", 1);
             return AdmitDecision::Reject {
-                reason: ShedReason::Elu,
+                reason: ShedReason::IntakeAge,
                 retry_after_sec: load_shed::retry_after::MIN_SEC,
             };
         }
@@ -432,275 +426,4 @@ impl ProxySelfGate for EluCpsGate {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use load_shed::{simulated, SimulatedLoadControl};
-
-    // Where the bucket's time-based refill is exercised the test is
-    // `start_paused` and drives `tokio::time::advance`, since the bucket rides
-    // `tokio::time::Instant` (behaviour rides `tokio::time` — no separate fake
-    // clock to keep in sync).
-
-    #[test]
-    fn stub_always_admits() {
-        let g = AlwaysAdmitGate;
-        assert!(g.try_admit_external().is_admit());
-        g.note_bypass(BypassKind::Emergency); // no-op, must not panic
-    }
-
-    /// Build a gate over a simulated sampler whose ELU the returned control sets.
-    fn gate(size: u32, rate: u32, elu_critical: f64) -> (EluCpsGate, SimulatedLoadControl) {
-        let (sampler, ctl) = simulated();
-        let g = EluCpsGate::new(
-            Arc::new(sampler),
-            ProxySelfGateConfig {
-                cps_bucket_size: size,
-                cps_bucket_rate: rate,
-                elu_critical,
-                ..Default::default()
-            },
-        );
-        (g, ctl)
-    }
-
-    /// The default config matches `defaultProxySelfGateConfig` exactly.
-    #[test]
-    fn defaults_match_the_ts_source() {
-        let c = ProxySelfGateConfig::default();
-        assert_eq!(c.elu_critical, 0.8);
-        assert_eq!(c.cps_bucket_size, 50);
-        assert_eq!(c.cps_bucket_rate, 100);
-        assert_eq!(c.elu_smoothing_alpha, 0.2);
-        assert_eq!(c.sampler_interval, Duration::from_millis(100));
-    }
-
-    /// Before any sample fires the EWMA is `0`, so the gate admits external
-    /// traffic up to the bucket capacity even with a high injected ELU (cold
-    /// start: the TS `initialized` flag keeps `eluEwma = 0`).
-    #[tokio::test(start_paused = true)]
-    async fn cold_start_admits_until_the_first_sample() {
-        let (g, ctl) = gate(2, 0, 0.8);
-        ctl.set_elu(1.0); // would shed, but no sample has fed the EWMA yet
-        assert!(g.try_admit_external().is_admit());
-        assert_eq!(g.elu_ewma(), 0.0, "EWMA stays 0 until the first sample()");
-    }
-
-    /// ELU above `elu_critical` (once sampled) sheds with `proxy_overload_elu` +
-    /// `Retry-After: 1`, and crucially does NOT spend a CPS token (step 1 is
-    /// before the bucket). Port of the `eluEwma > eluCritical` branch.
-    #[tokio::test(start_paused = true)]
-    async fn elu_above_critical_503s_without_spending_a_token() {
-        let (g, ctl) = gate(1, 0, 0.8);
-        ctl.set_elu(0.9);
-        g.sample(); // seat the EWMA at 0.9 (> 0.8)
-        assert_eq!(
-            g.try_admit_external(),
-            AdmitDecision::Reject { reason: ShedReason::Elu, retry_after_sec: 1 }
-        );
-        assert_eq!(g.metrics().rejected_elu_total, 1);
-        // The lone token was NOT consumed: once ELU recovers, the call admits.
-        ctl.set_elu(0.0);
-        g.sample();
-        g.sample(); // pull the EWMA back below 0.8
-        assert!(g.try_admit_external().is_admit(), "the ELU reject must not have spent the token");
-    }
-
-    /// At exactly `elu_critical` the gate still admits (`>` is strict, matching TS).
-    #[tokio::test(start_paused = true)]
-    async fn elu_exactly_at_critical_still_admits() {
-        let (g, ctl) = gate(10, 0, 0.8);
-        ctl.set_elu(0.8);
-        g.sample(); // EWMA seated exactly at the threshold
-        assert!(g.try_admit_external().is_admit(), "elu == critical is admit (strict >)");
-    }
-
-    /// With ELU calm, the gate admits until the CPS bucket drains, then sheds
-    /// with `proxy_overload_cps`. Port of the `!bucket.tryConsume()` branch.
-    #[tokio::test(start_paused = true)]
-    async fn admits_until_the_cps_bucket_drains_then_503s_cps() {
-        // Capacity 2, refill 0/s so the bucket can't top up between consumes.
-        let (g, _ctl) = gate(2, 0, 0.8);
-        assert!(g.try_admit_external().is_admit());
-        assert!(g.try_admit_external().is_admit());
-        let d = g.try_admit_external();
-        // rate 0 + empty → the TS 60 s Retry-After fallback.
-        assert_eq!(d, AdmitDecision::Reject { reason: ShedReason::Cps, retry_after_sec: 60 });
-        assert_eq!(g.metrics().rejected_cps_total, 1);
-        assert_eq!(g.metrics().external_admitted_total, 2);
-    }
-
-    /// The bucket refills over wall time at `rate_per_sec` (lazy refill on the
-    /// next consume), driven by `tokio::time::advance` — no real sleep.
-    #[tokio::test(start_paused = true)]
-    async fn the_cps_bucket_refills_over_time() {
-        let (g, _ctl) = gate(1, 1, 0.8);
-        assert!(g.try_admit_external().is_admit()); // drains the lone token
-        assert!(!g.try_admit_external().is_admit()); // empty immediately after
-        tokio::time::advance(Duration::from_secs(1)).await; // +1 token at 1/s
-        assert!(g.try_admit_external().is_admit(), "a refilled token should admit");
-    }
-
-    /// `note_bypass` advances the per-kind counters (emergency / internal); the
-    /// gate state (bucket, EWMA) is untouched by a bypass.
-    #[test]
-    fn note_bypass_counts_per_kind() {
-        let (g, _ctl) = gate(50, 100, 0.8);
-        g.note_bypass(BypassKind::Emergency);
-        g.note_bypass(BypassKind::Emergency);
-        g.note_bypass(BypassKind::Internal);
-        let m = g.metrics();
-        assert_eq!(m.emergency_bypassed_total, 2);
-        assert_eq!(m.internal_bypassed_total, 1);
-        // A bypass spends no token and admits nothing.
-        assert_eq!(m.external_admitted_total, 0);
-        assert_eq!(m.cps_bucket_level, 50.0);
-    }
-
-    /// The metrics snapshot mirrors config + live counters: capacity is the
-    /// configured constant, the level floors at 0, and admits/rejects tally.
-    #[tokio::test(start_paused = true)]
-    async fn metrics_snapshot_reflects_config_and_counters() {
-        let (g, _ctl) = gate(3, 0, 0.8);
-        assert_eq!(g.metrics().cps_bucket_max, 3.0);
-        assert_eq!(g.metrics().cps_bucket_level, 3.0);
-        for _ in 0..3 {
-            assert!(g.try_admit_external().is_admit());
-        }
-        assert!(!g.try_admit_external().is_admit()); // drains then sheds
-        let m = g.metrics();
-        assert_eq!(m.cps_bucket_level, 0.0, "a drained bucket reads as empty");
-        assert_eq!(m.external_admitted_total, 3);
-        assert_eq!(m.rejected_cps_total, 1);
-    }
-
-    /// The EWMA smooths toward a sustained reading across repeated ticks
-    /// (alpha 0.2): the first tick seats it, subsequent ticks pull it toward the
-    /// new value but never past it. Port of `eluEwma = α·raw + (1−α)·eluEwma`.
-    #[test]
-    fn ewma_smooths_across_repeated_samples() {
-        let (g, ctl) = gate(50, 100, 0.8);
-        ctl.set_elu(1.0);
-        g.sample(); // seats at 1.0
-        assert!((g.elu_ewma() - 1.0).abs() < 1e-9);
-        ctl.set_elu(0.0);
-        g.sample(); // 0.2*0 + 0.8*1.0 = 0.8
-        assert!((g.elu_ewma() - 0.8).abs() < 1e-9);
-        g.sample(); // 0.2*0 + 0.8*0.8 = 0.64
-        assert!((g.elu_ewma() - 0.64).abs() < 1e-9);
-    }
-
-    /// The intake sampler normalizes the window's max dequeue age against
-    /// `AGE_CRITICAL_MS` (max wins over later smaller ages; ≥ critical clamps
-    /// to 1.0) and reports a structurally-`0` GC fraction.
-    #[test]
-    fn intake_sampler_normalizes_max_age_against_critical() {
-        let rec = IntakeAgeRecorder::default();
-        let s = IntakeAgeSampler::new(rec.clone());
-        assert_eq!(s.elu(), 0.0, "no traffic reads idle");
-        assert_eq!(s.gc_fraction(), 0.0);
-        rec.record(250);
-        rec.record(100); // smaller later age must not shrink the window max
-        assert!((s.elu() - 0.5).abs() < 1e-9, "250ms / 500ms critical = 0.5");
-        rec.record(AGE_CRITICAL_MS * 4); // way past critical clamps to 1.0
-        assert_eq!(s.elu(), 1.0);
-    }
-
-    /// Each `elu()` read drains the recorder: a second read with no new traffic
-    /// reads `0` (the signal is per-window, not sticky).
-    #[test]
-    fn intake_sampler_read_drains_the_window() {
-        let rec = IntakeAgeRecorder::default();
-        let s = IntakeAgeSampler::new(rec.clone());
-        rec.record(AGE_CRITICAL_MS);
-        assert_eq!(s.elu(), 1.0);
-        assert_eq!(s.elu(), 0.0, "the read must have swapped the max to 0");
-        assert_eq!(rec.drain_max(), 0);
-    }
-
-    /// The production seam end-to-end: an `EluCpsGate::intake` gate over a
-    /// recorder the "dequeue path" feeds. Sustained critical ages sampled into
-    /// the EWMA flip the gate to `proxy_overload_elu`; once traffic drains
-    /// (empty windows read 0) the samples pull the EWMA back and it admits.
-    #[tokio::test(start_paused = true)]
-    async fn intake_gate_sheds_on_sustained_dequeue_age_then_recovers() {
-        let rec = IntakeAgeRecorder::default();
-        let g = EluCpsGate::intake(rec.clone(), ProxySelfGateConfig::default());
-        assert!(g.try_admit_external().is_admit(), "calm intake admits");
-
-        // Saturated intake: every sample window sees a ≥ critical dequeue age.
-        for _ in 0..10 {
-            rec.record(AGE_CRITICAL_MS);
-            g.sample();
-        }
-        assert!(
-            g.elu_ewma() > 0.8,
-            "sustained critical age must cross elu_critical, got {}",
-            g.elu_ewma()
-        );
-        let d = g.try_admit_external();
-        assert!(matches!(d, AdmitDecision::Reject { reason: ShedReason::Elu, .. }), "{d:?}");
-
-        // Intake drains: empty windows sample 0 and the EWMA recovers.
-        for _ in 0..10 {
-            g.sample();
-        }
-        assert!(g.try_admit_external().is_admit(), "a drained intake must admit again");
-    }
-
-    /// The end-to-end injected-ELU → running-sampler-task → shed loop: (like
-    /// the b2bua overload signal) this injects the `simulated()` sampler and
-    /// spawns the real 100 ms `sample()` task, then advances the paused clock
-    /// to drive the injected ELU through the task into the EWMA and observe the
-    /// gate flip to shedding. Pins the sampler-task seam the runner wires.
-    #[tokio::test(start_paused = true)]
-    async fn running_sampler_task_drives_the_gate_to_shed_on_injected_elu() {
-        let (sampler, ctl) = simulated();
-        let g = EluCpsGate::new(
-            Arc::new(sampler),
-            ProxySelfGateConfig {
-                cps_bucket_size: 50,
-                cps_bucket_rate: 100,
-                elu_critical: 0.8,
-                ..Default::default()
-            },
-        );
-        // The runner's sampler task, verbatim shape.
-        let task = {
-            let g = g.clone();
-            let period = g.sampler_interval();
-            tokio::spawn(async move {
-                let mut tick = tokio::time::interval(period);
-                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                tick.tick().await; // skip the immediate first tick
-                loop {
-                    tick.tick().await;
-                    g.sample();
-                }
-            })
-        };
-
-        // Calm to start: a fresh external INVITE is admitted.
-        assert!(g.try_admit_external().is_admit());
-
-        // Inject a pegged ELU and let several sampler ticks pull the EWMA above
-        // 0.8 (alpha 0.2 needs a few ticks from 0 to cross the threshold).
-        ctl.set_elu(1.0);
-        for _ in 0..20 {
-            tokio::time::advance(Duration::from_millis(100)).await;
-            tokio::task::yield_now().await; // let the spawned tick run its sample()
-        }
-        assert!(
-            g.elu_ewma() > 0.8,
-            "the running task must have driven the EWMA over critical, got {}",
-            g.elu_ewma()
-        );
-
-        let d = g.try_admit_external();
-        assert!(
-            matches!(d, AdmitDecision::Reject { reason: ShedReason::Elu, .. }),
-            "a pegged ELU must shed the next external INVITE: {d:?}"
-        );
-
-        task.abort();
-    }
-}
+mod tests;

@@ -34,7 +34,7 @@ fn sample_nothing_by_default() {
 #[tokio::test(start_paused = true)]
 async fn an_engine_force_enable_activates_and_backfills_the_call() {
     sample_nothing_by_default();
-    let (_log_guard, log) = observe::test_buffer();
+    let (_log_guard, log) = observe_testkit::test_buffer();
 
     let s = B2buaScene::with_b2bua("trace-force-enable", |bob_port| {
         let decision = Arc::new(

@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Start every stopped node first, then wait until the API server sees each
+# Ready, all within ready_timeout_s; a second later every node must still be
+# running. Idempotent: a running node is only waited on. Facts: per node
+# whether the API server had marked it NotReady (the proof the loss was seen)
+# and when it was Ready again.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+nodes="$(hk_state nodes)"
+declare -A not_ready=()
+while read -r n; do
+  [ -n "$n" ] || continue
+  ready="$(kubectl get node "$n" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')"
+  if [ "$ready" = True ]; then not_ready[$n]=false; else not_ready[$n]=true; fi
+  pf_node_start "$n" || hk_die "docker start $n failed"
+done <<<"$nodes"
+deadline=$(( $(date +%s) + HAKIT_PARAM_READY_TIMEOUT_S ))
+facts="{}"
+while read -r n; do
+  [ -n "$n" ] || continue
+  left=$(( deadline - $(date +%s) ))
+  [ "$left" -gt 0 ] || hk_die "$n is not Ready within ${HAKIT_PARAM_READY_TIMEOUT_S}s"
+  pf_node_wait_ready "$n" "$left" || hk_die "$n is not Ready within ${HAKIT_PARAM_READY_TIMEOUT_S}s"
+  facts="$(jq -c --arg n "$n" --argjson nr "${not_ready[$n]}" --argjson at "$(hk_now_ms)" \
+    '. + {($n): {not_ready_seen: $nr, ready_at_ms: $at}}' <<<"$facts")"
+done <<<"$nodes"
+sleep "${HK_RECHECK_S:-1}"
+while read -r n; do
+  [ -n "$n" ] || continue
+  running="$(docker inspect -f '{{.State.Running}}' "$n")"
+  [ "$running" = true ] || hk_die "$n is not running a second after its start"
+done <<<"$nodes"
+jq -cn --argjson f "$facts" '{nodes: $f}'

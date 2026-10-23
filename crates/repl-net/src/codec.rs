@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use rmp::decode::{self, NumValueReadError, ValueReadError};
-use rmp::encode;
+use rmp::encode::{self, ByteBuf};
 use rmp::Marker;
 
 use crate::frame::{tag, Frame, Op, Partition, UnknownDiscriminant, Watermark};
@@ -51,6 +51,14 @@ pub enum ReplCodecError {
         /// Which element held the bad bytes.
         at: &'static str,
     },
+    /// An element to encode is longer than msgpack's 32-bit length.
+    #[error("{at} of length {len} exceeds the 32-bit msgpack length")]
+    TooLong {
+        /// Which element was too long.
+        at: &'static str,
+        /// Its length, in bytes or items.
+        len: usize,
+    },
 }
 
 impl From<UnknownDiscriminant> for ReplCodecError {
@@ -63,85 +71,127 @@ impl From<UnknownDiscriminant> for ReplCodecError {
 
 /// Encode a single frame to a fresh `Vec<u8>` (one positional-msgpack array).
 ///
-/// Infallible: writing to a `Vec` cannot fail, and every value is in range for
-/// its marker. Deterministic: same frame → identical bytes.
-pub fn encode_frame(frame: &Frame) -> Vec<u8> {
-    let mut buf = Vec::new();
-    write_frame(&mut buf, frame);
-    buf
+/// Deterministic: same frame → identical bytes. A string, a body or an index
+/// list longer than msgpack's 32-bit length is [`ReplCodecError::TooLong`].
+pub fn encode_frame(frame: &Frame) -> Result<Vec<u8>, ReplCodecError> {
+    let mut enc = Encoder(ByteBuf::new());
+    enc.frame(frame)?;
+    Ok(enc.0.into_vec())
 }
 
-fn write_frame(buf: &mut Vec<u8>, frame: &Frame) {
-    match frame {
-        Frame::PullRequest { proto_ver, caller, partition, since } => {
-            encode::write_array_len(buf, 6).unwrap();
-            encode::write_uint(buf, tag::PULL_REQUEST).unwrap();
-            encode::write_uint(buf, *proto_ver as u64).unwrap();
-            encode::write_str(buf, caller).unwrap();
-            encode::write_uint(buf, partition.as_u8() as u64).unwrap();
-            encode::write_uint(buf, since.gen).unwrap();
-            encode::write_uint(buf, since.counter).unwrap();
-        }
-        Frame::Data {
-            at,
-            op,
-            partition,
-            call_ref,
-            call_gen,
-            call_bgen,
-            body_ttl_ms,
-            origin_now_ms,
-            indexes,
-            body,
-            answered,
-            incarnation,
-        } => {
-            encode::write_array_len(buf, 14).unwrap();
-            encode::write_uint(buf, tag::DATA).unwrap();
-            encode::write_uint(buf, at.gen).unwrap();
-            encode::write_uint(buf, at.counter).unwrap();
-            encode::write_uint(buf, op.as_u8() as u64).unwrap();
-            encode::write_uint(buf, partition.as_u8() as u64).unwrap();
-            encode::write_str(buf, call_ref).unwrap();
-            encode::write_sint(buf, *call_gen).unwrap();
-            encode::write_sint(buf, *call_bgen).unwrap();
-            encode::write_sint(buf, *body_ttl_ms).unwrap();
-            encode::write_sint(buf, *origin_now_ms).unwrap();
-            encode::write_array_len(buf, indexes.len() as u32).unwrap();
-            for idx in indexes {
-                encode::write_str(buf, idx).unwrap();
+/// The msgpack writes of one frame, over a buffer whose writes cannot fail;
+/// every length is checked against msgpack's 32-bit range before it is
+/// written.
+struct Encoder(ByteBuf);
+
+/// `n` as a msgpack length, refused past 32 bits.
+fn length(n: usize, at: &'static str) -> Result<u32, ReplCodecError> {
+    u32::try_from(n).map_err(|_| ReplCodecError::TooLong { at, len: n })
+}
+
+impl Encoder {
+    fn array(&mut self, len: usize, at: &'static str) -> Result<(), ReplCodecError> {
+        let Ok(_) = encode::write_array_len(&mut self.0, length(len, at)?);
+        Ok(())
+    }
+
+    fn uint(&mut self, v: u64) {
+        let Ok(_) = encode::write_uint(&mut self.0, v);
+    }
+
+    fn sint(&mut self, v: i64) {
+        let Ok(_) = encode::write_sint(&mut self.0, v);
+    }
+
+    fn str(&mut self, s: &str, at: &'static str) -> Result<(), ReplCodecError> {
+        length(s.len(), at)?;
+        let Ok(()) = encode::write_str(&mut self.0, s);
+        Ok(())
+    }
+
+    fn bin(&mut self, b: &[u8], at: &'static str) -> Result<(), ReplCodecError> {
+        length(b.len(), at)?;
+        let Ok(()) = encode::write_bin(&mut self.0, b);
+        Ok(())
+    }
+
+    fn nil(&mut self) {
+        let Ok(()) = encode::write_nil(&mut self.0);
+    }
+
+    fn bool(&mut self, v: bool) {
+        let Ok(()) = encode::write_bool(&mut self.0, v);
+    }
+
+    fn frame(&mut self, frame: &Frame) -> Result<(), ReplCodecError> {
+        match frame {
+            Frame::PullRequest { proto_ver, caller, partition, since } => {
+                self.array(6, "PullRequest")?;
+                self.uint(tag::PULL_REQUEST);
+                self.uint(u64::from(*proto_ver));
+                self.str(caller, "caller")?;
+                self.uint(u64::from(partition.as_u8()));
+                self.uint(since.gen);
+                self.uint(since.counter);
             }
-            match body {
-                Some(bytes) => {
-                    encode::write_bin(buf, bytes).unwrap();
+            Frame::Data {
+                at,
+                op,
+                partition,
+                call_ref,
+                call_gen,
+                call_bgen,
+                body_ttl_ms,
+                origin_now_ms,
+                indexes,
+                body,
+                answered,
+                incarnation,
+            } => {
+                self.array(14, "Data")?;
+                self.uint(tag::DATA);
+                self.uint(at.gen);
+                self.uint(at.counter);
+                self.uint(u64::from(op.as_u8()));
+                self.uint(u64::from(partition.as_u8()));
+                self.str(call_ref, "call_ref")?;
+                self.sint(*call_gen);
+                self.sint(*call_bgen);
+                self.sint(*body_ttl_ms);
+                self.sint(*origin_now_ms);
+                self.array(indexes.len(), "indexes")?;
+                for idx in indexes {
+                    self.str(idx, "indexes[]")?;
                 }
-                None => {
-                    encode::write_nil(buf).unwrap();
+                match body {
+                    Some(bytes) => self.bin(bytes, "body")?,
+                    None => self.nil(),
+                }
+                self.bool(*answered);
+                match incarnation {
+                    Some(id) => self.str(id, "incarnation")?,
+                    None => self.nil(),
                 }
             }
-            encode::write_bool(buf, *answered).unwrap();
-            match incarnation {
-                Some(id) => encode::write_str(buf, id).unwrap(),
-                None => encode::write_nil(buf).unwrap(),
+            Frame::Noop { at } => {
+                self.array(3, "Noop")?;
+                self.uint(tag::NOOP);
+                self.uint(at.gen);
+                self.uint(at.counter);
+            }
+            Frame::ResetToBootstrap { reason } => {
+                self.array(2, "ResetToBootstrap")?;
+                self.uint(tag::RESET_TO_BOOTSTRAP);
+                self.str(reason, "reason")?;
+            }
+            Frame::Position { at } => {
+                self.array(3, "Position")?;
+                self.uint(tag::POSITION);
+                self.uint(at.gen);
+                self.uint(at.counter);
             }
         }
-        Frame::Noop { at } => {
-            encode::write_array_len(buf, 3).unwrap();
-            encode::write_uint(buf, tag::NOOP).unwrap();
-            encode::write_uint(buf, at.gen).unwrap();
-            encode::write_uint(buf, at.counter).unwrap();
-        }
-        Frame::ResetToBootstrap { reason } => {
-            encode::write_array_len(buf, 2).unwrap();
-            encode::write_uint(buf, tag::RESET_TO_BOOTSTRAP).unwrap();
-            encode::write_str(buf, reason).unwrap();
-        }
-        Frame::Position { at } => {
-            encode::write_array_len(buf, 3).unwrap();
-            encode::write_uint(buf, tag::POSITION).unwrap();
-            encode::write_uint(buf, at.gen).unwrap();
-            encode::write_uint(buf, at.counter).unwrap();
-        }
+        Ok(())
     }
 }
 
@@ -335,15 +385,15 @@ fn read_opt_bin(rd: &mut &[u8], at: &'static str) -> Result<Option<Arc<[u8]>>, R
     match marker {
         Marker::Null => Ok(None),
         Marker::Bin8 => {
-            let n = read_one_byte(rd, at)? as usize;
-            Ok(Some(read_bin_body(rd, n, at)?))
+            let [n] = take_array(rd, at)?;
+            Ok(Some(read_bin_body(rd, usize::from(n), at)?))
         }
         Marker::Bin16 => {
-            let n = read_be_u16(rd, at)? as usize;
-            Ok(Some(read_bin_body(rd, n, at)?))
+            let n = u16::from_be_bytes(take_array(rd, at)?);
+            Ok(Some(read_bin_body(rd, usize::from(n), at)?))
         }
         Marker::Bin32 => {
-            let n = read_be_u32(rd, at)? as usize;
+            let n = u32::from_be_bytes(take_array(rd, at)?) as usize;
             Ok(Some(read_bin_body(rd, n, at)?))
         }
         other => Err(ReplCodecError::Type {
@@ -361,27 +411,24 @@ fn read_bin_body(rd: &mut &[u8], n: usize, at: &'static str) -> Result<Arc<[u8]>
 /// Split `n` bytes off the front of the cursor, advancing it. Errors (does not
 /// panic) if fewer than `n` remain.
 fn take<'a>(rd: &mut &'a [u8], n: usize, at: &'static str) -> Result<&'a [u8], ReplCodecError> {
-    if rd.len() < n {
+    let Some((head, tail)) = rd.split_at_checked(n) else {
         return Err(ReplCodecError::Truncated(format!(
             "at {at}: need {n} bytes, have {}",
             rd.len()
         )));
-    }
-    let (head, tail) = rd.split_at(n);
+    };
     *rd = tail;
     Ok(head)
 }
 
-fn read_one_byte(rd: &mut &[u8], at: &'static str) -> Result<u8, ReplCodecError> {
-    Ok(take(rd, 1, at)?[0])
-}
-
-fn read_be_u16(rd: &mut &[u8], at: &'static str) -> Result<u16, ReplCodecError> {
-    let b = take(rd, 2, at)?;
-    Ok(u16::from_be_bytes([b[0], b[1]]))
-}
-
-fn read_be_u32(rd: &mut &[u8], at: &'static str) -> Result<u32, ReplCodecError> {
-    let b = take(rd, 4, at)?;
-    Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+/// Split `N` bytes off the front of the cursor as an array.
+fn take_array<const N: usize>(rd: &mut &[u8], at: &'static str) -> Result<[u8; N], ReplCodecError> {
+    let Some((head, tail)) = rd.split_first_chunk::<N>() else {
+        return Err(ReplCodecError::Truncated(format!(
+            "at {at}: need {N} bytes, have {}",
+            rd.len()
+        )));
+    };
+    *rd = tail;
+    Ok(*head)
 }

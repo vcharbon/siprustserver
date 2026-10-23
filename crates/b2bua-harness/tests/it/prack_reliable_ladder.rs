@@ -4,7 +4,7 @@
 //! lives in `prack.rs`; forking lives in `prack_forking.rs`.
 //!
 //! §3 attaches the obligation to whoever assigns the sequence, and the number
-//! the caller sees is this stack's own (`assign_a_rseq`). So the ladder under
+//! the caller sees is this stack's own (`show_provisional`). So the ladder under
 //! the caller's copies is ours: it starts at T1 and doubles, it stops the
 //! moment her PRACK names the number, and it is bounded by 64·T1. What the
 //! callee does on its own leg pays for none of it — a callee that never repeats
@@ -26,7 +26,7 @@ use std::time::Duration;
 use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::{Harness, ServerTxn, WaiverScope};
 use sip_message::generators::InDialogMethod;
-use sip_net::RecordedSipEntry;
+use sip_net_testkit::RecordedSipEntry;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -48,8 +48,8 @@ const T1_MS: u64 = 500;
 /// then 2 s after the one before — 500 ms / 1.5 s / 3.5 s after the first.
 const LADDER_GAPS_MS: [u64; 3] = [T1_MS, 2 * T1_MS, 4 * T1_MS];
 
-/// RFC 3262 §3's give-up bound on an unacknowledged reliable provisional.
-const GIVE_UP_MS: u64 = 64 * T1_MS;
+/// RFC 3262 §3's bound on an unacknowledged reliable provisional's ladder.
+const BOUND_MS: u64 = 64 * T1_MS;
 
 /// The margin an advance takes past a deadline it must cross.
 const MARGIN_MS: u64 = 50;
@@ -224,11 +224,6 @@ async fn the_caller_facing_ladder_runs_on_our_own_clock() {
     assert_ladder(&seen, &LADDER_GAPS_MS);
     assert_one_number(&seen);
     assert_eq!(counted(), 3, "the PRACK stopped the ladder: nothing more was counted");
-    assert_eq!(
-        b2bua.metrics().repeat_give_ups_total("prack-of"),
-        0,
-        "a PRACKed ladder never gives up"
-    );
 }
 
 /// **The two halves compose.** The callee repeats its reliable provisional on
@@ -292,17 +287,16 @@ async fn the_callees_own_pacing_never_reaches_the_caller() {
     assert_one_number(&seen);
 }
 
-/// RFC 3262 §3 bounds the ladder at 64·T1 and then ANSWERS the silence: the
-/// retransmissions cease, and the caller who never PRACKed is rejected — §3's
-/// "SHOULD reject the original request with a 5xx". On a B2BUA that sentence is
-/// a call teardown, so the pending b-leg is CANCELled with her and the call
-/// reaps; the alternative, riding to the 150 s setup deadline, rings a real
-/// callee for two more minutes on behalf of a caller who is gone.
+/// RFC 3262 §3 bounds the ladder at 64·T1, and the reject answering the silence
+/// belongs to the UAS that issued the provisional: the callee, whose reliable
+/// 183 this stack relays and whose PRACK the caller owes end to end. The
+/// caller-facing ladder stops at its bound and rejects nothing; the callee's
+/// own 5xx, at its own bound, is the caller's final.
 #[tokio::test(start_paused = true)]
-async fn the_ladder_gives_up_at_64_t1() {
-    let h = Harness::with_transit_delay("b2bua-prack-ladder-giveup", 0);
+async fn the_ladder_stops_at_64_t1_and_the_callee_rejects() {
+    let h = Harness::with_transit_delay("b2bua-prack-ladder-bound", 0);
     // Alice deliberately never PRACKs — that withholding IS the fixture, and it
-    // is the only way to reach the give-up bound. Every other bind stays gated.
+    // is the only way to reach the bound. Every other bind stays gated.
     h.waive(
         WaiverScope::rule(
             "unacked-reliable-provisional",
@@ -316,6 +310,7 @@ async fn the_ladder_gives_up_at_64_t1() {
     let b2bua =
         B2buaSut::route_all_to("127.0.0.1", 5413).start(&h, "b2bua", "127.0.0.1:5423").await;
     let alice_addr: SocketAddr = "127.0.0.1:5403".parse().unwrap();
+    let bob_addr: SocketAddr = "127.0.0.1:5413".parse().unwrap();
 
     let mut call = alice
         .invite(&bob)
@@ -327,35 +322,22 @@ async fn the_ladder_gives_up_at_64_t1() {
     let mut uas = bob.receive("INVITE").await;
 
     reliable_183(&mut uas).await;
-    let p183 = call.expect(183).await;
-    let _ = p183;
+    call.expect(183).await;
 
-    // Every rung inside the bound has fired (the last falls at 63·T1). Drain
-    // them, so what alice reads next is the give-up's own answer and not a
-    // retransmission queued behind it.
-    h.advance(Duration::from_millis(GIVE_UP_MS - T1_MS + 2 * MARGIN_MS)).await;
+    // Past the bound: the last rung fell at 63·T1, and 64·T1 goes by with
+    // nothing more from this stack on either face.
+    h.advance(Duration::from_millis(BOUND_MS + 2 * MARGIN_MS)).await;
     alice.drain().await;
 
-    // §3's reject reaches the caller at 64·T1, and the b-leg is torn down with
-    // her — on a B2BUA the reject is a call teardown, not a timer's last line.
-    h.advance(Duration::from_millis(T1_MS + 2 * MARGIN_MS)).await;
-    call.expect(504).await;
-    // The provisional no one PRACKed end to end is acknowledged by this stack as
-    // it CANCELs the transaction (RFC 3262 §4).
+    // The callee's §3 reject of its own INVITE ends the setup; the PRACK this
+    // stack owes the callee leaves at that final (RFC 3262 §4).
+    uas.respond(500, "Server Internal Error").await;
+    bob.receive("ACK").await;
     bob.receive("PRACK").await.respond(200, "OK").await;
-    bob.receive("CANCEL").await.respond(200, "OK").await;
-    uas.respond(487, "Request Terminated").await;
+    call.expect(500).await;
 
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
-    // The give-up is counted once, under the obligation alice left
-    // undischarged; every rung before it was counted as it left.
-    assert_eq!(
-        b2bua.metrics().repeat_give_ups_total("prack-of"),
-        1,
-        "one give-up: her PRACK never came"
-    );
-    assert_eq!(b2bua.metrics().repeat_give_ups_total("ack-of-2xx"), 0);
     let report = h.finish().await;
     let entries = report.entries();
 
@@ -369,39 +351,34 @@ async fn the_ladder_gives_up_at_64_t1() {
     );
     assert_ladder(&seen[..1 + LADDER_GAPS_MS.len()], &LADDER_GAPS_MS);
     assert!(
-        seen.iter().all(|(ms, _)| ms - first <= GIVE_UP_MS),
-        "RFC 3262 §3: no rung falls beyond 64·T1 ({GIVE_UP_MS} ms) after the first emission — {seen:?}",
+        seen.iter().all(|(ms, _)| ms - first <= BOUND_MS),
+        "RFC 3262 §3: no rung falls beyond 64·T1 ({BOUND_MS} ms) after the first emission — {seen:?}",
     );
     assert_one_number(&seen);
-
-    // The deadline is the FIRST EMISSION's, not the last rung's: the reject
-    // lands one T1 after the ladder's final copy, exactly at the bound.
-    let rejected_at = copies_to(&entries, b2bua.addr, alice_addr, 504)
-        .first()
-        .expect("RFC 3262 §3: the unacknowledged provisional is rejected, not merely abandoned")
-        .0;
-    assert_eq!(
-        rejected_at - first,
-        GIVE_UP_MS,
-        "the 5xx lands at 64·T1 ({GIVE_UP_MS} ms) after the first emission, not {} ms",
-        rejected_at - first,
+    assert!(
+        copies_to(&entries, b2bua.addr, alice_addr, 504).is_empty(),
+        "the caller's final is the callee's reject, not one of this stack's",
+    );
+    assert!(
+        !entries
+            .iter()
+            .any(|e| e.from == b2bua.addr && e.to == bob_addr && e.raw.starts_with(b"CANCEL ")),
+        "the callee ends its own INVITE: nothing CANCELs it",
     );
 }
 
-/// The bound answers SILENCE, not slowness. A PRACK landing after the last rung
-/// but inside 64·T1 retires the number, and the give-up deadline is scrubbed
-/// with the ladder it belongs to — the call rings on and answers normally. This
-/// is the guard the reject needs: a deadline that fired on a call that had
-/// already been acknowledged would cut live calls short at 32 s, and ringing
-/// past that bound with a reliable provisional out is ordinary.
+/// The callee may hold its INVITE open past 64·T1 — §3's reject is a SHOULD of
+/// the UAS that issued the provisional — and a PRACK the caller sends then still
+/// acknowledges it end to end: relayed, answered by the callee, and the call is
+/// answered and ends normally.
 #[tokio::test(start_paused = true)]
-async fn a_prack_inside_the_bound_is_not_rejected() {
-    let h = Harness::with_transit_delay("b2bua-prack-ladder-late-prack", 0);
-    let alice = h.agent("alice", "127.0.0.1:5407").await;
-    let bob = h.agent("bob", "127.0.0.1:5417").await;
+async fn a_prack_past_the_bound_still_reaches_the_callee() {
+    let h = Harness::with_transit_delay("b2bua-prack-ladder-past-bound", 0);
+    let alice = h.agent("alice", "127.0.0.1:5408").await;
+    let bob = h.agent("bob", "127.0.0.1:5418").await;
     let b2bua =
-        B2buaSut::route_all_to("127.0.0.1", 5417).start(&h, "b2bua", "127.0.0.1:5427").await;
-    let alice_addr: SocketAddr = "127.0.0.1:5407".parse().unwrap();
+        B2buaSut::route_all_to("127.0.0.1", 5418).start(&h, "b2bua", "127.0.0.1:5428").await;
+    let alice_addr: SocketAddr = "127.0.0.1:5408".parse().unwrap();
 
     let mut call = alice
         .invite(&bob)
@@ -415,17 +392,12 @@ async fn a_prack_inside_the_bound_is_not_rejected() {
     reliable_183(&mut uas).await;
     let p183 = call.expect(183).await;
 
-    // Every rung inside the bound has fired (the last falls at 63·T1); alice
-    // answers on that last rung, with the deadline one T1 away.
-    h.advance(Duration::from_millis(GIVE_UP_MS - T1_MS + MARGIN_MS)).await;
+    // One T1 past the bound, the ladder long stopped, alice PRACKs.
+    h.advance(Duration::from_millis(BOUND_MS + T1_MS)).await;
     alice.drain().await;
-    let mut prack = call.try_prack(&p183).await.expect("alice PRACKs the last rung");
-    let mut bob_prack = bob.receive("PRACK").await;
-    bob_prack.respond(200, "OK").await;
+    let mut prack = call.try_prack(&p183).await.expect("alice PRACKs past the bound");
+    bob.receive("PRACK").await.respond(200, "OK").await;
     prack.expect(200).await;
-
-    // Well past the deadline the PRACK retired.
-    h.advance(Duration::from_millis(GIVE_UP_MS)).await;
 
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
@@ -438,15 +410,9 @@ async fn a_prack_inside_the_bound_is_not_rejected() {
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let report = h.finish().await;
-    let entries = report.entries();
-
     assert!(
-        copies_to(&entries, b2bua.addr, alice_addr, 504).is_empty(),
-        "a PRACKed provisional owes no §3 reject — the deadline dies with the ladder",
-    );
-    assert!(
-        !copies_to(&entries, b2bua.addr, alice_addr, 200).is_empty(),
-        "the call answers normally after a PRACK inside the bound",
+        copies_to(&report.entries(), b2bua.addr, alice_addr, 504).is_empty(),
+        "the bound rejects nothing: the callee still held its INVITE open",
     );
 }
 
@@ -672,7 +638,7 @@ async fn the_ladder_dies_with_the_fork_that_raised_it() {
 /// early dialog (§4, errata 4603/4604): two a-facing dialogs each carrying one
 /// outstanding provisional are legal, one dialog carrying two is the violation.
 /// In transparent mode the caller's dialog set mirrors the callee's, so the
-/// rerouted attempt mints its own a-facing tag — and `assign_a_rseq` seeds that
+/// rerouted attempt mints its own a-facing tag — and `show_provisional` seeds that
 /// dialog its own `RSeq` space, because §4 has a conformant caller drop
 /// everything after a gap.
 ///

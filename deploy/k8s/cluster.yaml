@@ -2,8 +2,8 @@
 #
 # Copied from sipjsserver/tests/k8s/cluster.yaml so the Rust runner depends on no
 # sibling checkout and the two topologies may diverge. Uses cluster name
-# `sip-e2e` (the WSL one-cluster switch — see README), so `run.sh up` tears down
-# any existing sip-e2e first, including sipjsserver's.
+# `sip-e2e`: one cluster of that name runs on a host at a time, and
+# `deploy/helm/kind-lab.sh up` refuses to replace an existing one.
 #
 # Tiers: edge = front proxy, app = b2bua workers (two app nodes so a primary and
 # its backup land on different nodes for real failover), infra = the call
@@ -55,7 +55,7 @@ nodes:
   # tier=infra: the shared dependencies of the call path (call limiter, CDR
   # broker + consumer), alone on their node so a node fault takes them out
   # without touching a worker or a generator. The taint keeps every other pod
-  # (cluster add-ons included) off it; the infra manifests tolerate it. The
+  # (cluster add-ons included) off it; the chart's kind values tolerate it. The
   # masq-exempt DaemonSet does not: no SIP flow starts or ends on this node.
   - role: worker
     labels:
@@ -70,8 +70,9 @@ nodes:
       - hostPath: /dev/null
         containerPath: /usr/lib/sysctl.d/10-coredump-debian.conf
         readOnly: true
-  # tier=load nodes REMOVED (sipext dual-plane layout): all load generators
-  # (loadgen, sipp UAC/UAS, dnsmasq) run as plain docker containers on the
-  # external `sipext` bridge, outside k8s, with their own --memory/--cpus caps
-  # (run.sh). The extraPortMappings hostPort-5060 DNAT is gone with them — the
-  # WSL host reaches the external VIP directly via the sipext bridge.
+  # No load tier (sipext dual-plane layout): the docker-placed load generators
+  # (loadgen, SIPp UAC/UAS) run as plain containers on the external `sipext`
+  # bridge, outside k8s, with their own --memory/--cpus caps; a pod-placed
+  # loadgen stream runs where its profile's node selector puts it. No
+  # extraPortMappings: the host
+  # reaches the external VIP directly through the sipext bridge.

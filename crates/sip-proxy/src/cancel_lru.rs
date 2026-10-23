@@ -35,6 +35,7 @@ use sip_txn::timers::{INVITE_INITIAL_TIMEOUT, TIMER_F, TIMER_H};
 
 use crate::addr::ProxyAddr;
 use crate::observability::ProxyMetrics;
+use crate::poison::{locked, INVITE_BRANCH_LRU};
 use crate::strategy::RouteParams;
 
 /// TTL for pending-INVITE entries (CANCEL forwarding + non-2xx ACK synthesis).
@@ -61,7 +62,9 @@ pub const RTX_ENTRY_TTL_MS: u64 = TIMER_F;
 /// working set.
 pub const DEFAULT_SWEEP_INTERVAL_MS: u64 = 16_000;
 
+#[expect(clippy::disallowed_macros, reason = "checked at compile time")]
 const _: () = assert!(DEFAULT_SWEEP_INTERVAL_MS <= RTX_ENTRY_TTL_MS);
+#[expect(clippy::disallowed_macros, reason = "checked at compile time")]
 const _: () = assert!(RTX_ENTRY_TTL_MS <= INVITE_ENTRY_TTL_MS);
 
 /// The key of the INVITE transaction `via` opened upstream (§17.2.3): its
@@ -140,17 +143,23 @@ pub fn ack_hop_key(via: &Via, call_id: &str, from_tag: Option<&str>, cseq_num: u
 /// died re-resolves through the same `decode_stickiness` ladder every in-dialog
 /// request takes, so it reaches the node holding the call's replica. `None`
 /// for a downstream target and for the retransmission memos.
+///
+/// `minted` is the cookie this proxy minted for the forwarded request's
+/// Record-Route, and `via_cookie` the cookie it put on its own Via
+/// (`core/request/via_cookie`): a retransmission repeats both, and the CANCEL
+/// and non-2xx ACK of an INVITE carry its `via_cookie`, whatever the worker
+/// set did since.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CancelEntry {
     pub target: ProxyAddr,
     pub branch: String,
     pub stickiness: Option<RouteParams>,
+    pub minted: Option<RouteParams>,
+    pub via_cookie: Option<RouteParams>,
 }
 
 struct StoredEntry {
-    target: ProxyAddr,
-    branch: String,
-    stickiness: Option<RouteParams>,
+    entry: CancelEntry,
     expires_at_ms: u64,
 }
 
@@ -183,28 +192,36 @@ impl CancelBranchLru {
     /// `sip_proxy_pending_invite_lru_size`) grows ≈ the cumulative-INVITE count
     /// for the life of the process. Sweeping every half-TTL physically reclaims
     /// expired slots and re-publishes the gauge, pinning the map at ~1× working
-    /// set. The task is detached (process-lifetime, like the LRU itself);
-    /// supervision exits the process if a core dies, so an orphaned sweeper
-    /// cannot outlive the data path in production.
+    /// set. The task is detached (process-lifetime, like the LRU itself) and
+    /// restarted when a sweep panics; supervision exits the process if a core
+    /// dies, so an orphaned sweeper cannot outlive the data path in production.
     pub fn ensure_sweeper(self: &Arc<Self>, metrics: Arc<ProxyMetrics>) {
         if self.sweeper_claimed.swap(true, Ordering::SeqCst) {
             return;
         }
         let lru = self.clone();
-        tokio::spawn(async move {
-            let mut tick =
-                tokio::time::interval(std::time::Duration::from_millis(DEFAULT_SWEEP_INTERVAL_MS));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tick.tick().await;
-                lru.sweep_expired();
-                metrics.set_pending_invite_lru_size(lru.size() as u64);
+        crate::supervise::spawn(crate::supervise::BRANCH_MEMO_SWEEP, move || {
+            let (lru, metrics) = (lru.clone(), metrics.clone());
+            async move {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "DEFAULT_SWEEP_INTERVAL_MS is not zero"
+                )]
+                let mut tick = tokio::time::interval(std::time::Duration::from_millis(
+                    DEFAULT_SWEEP_INTERVAL_MS,
+                ));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tick.tick().await;
+                    lru.sweep_expired();
+                    metrics.set_pending_invite_lru_size(lru.size() as u64);
+                }
             }
         });
     }
 
     fn now_ms(&self) -> u64 {
-        self.clock.now_ms().max(0) as u64
+        u64::try_from(self.clock.now_ms()).unwrap_or(0)
     }
 
     /// Remember the downstream target + outbound branch used on a forward.
@@ -212,46 +229,35 @@ impl CancelBranchLru {
     /// [`RTX_ENTRY_TTL_MS`] for retransmission target memos.
     pub fn remember(&self, key: &str, entry: CancelEntry, ttl_ms: u64) {
         let expires_at_ms = self.now_ms() + ttl_ms;
-        self.table.lock().unwrap().insert(
-            key.to_string(),
-            StoredEntry {
-                target: entry.target,
-                branch: entry.branch,
-                stickiness: entry.stickiness,
-                expires_at_ms,
-            },
-        );
+        locked(&self.table, INVITE_BRANCH_LRU)
+            .insert(key.to_string(), StoredEntry { entry, expires_at_ms });
     }
 
     /// Look up a remembered entry (for a CANCEL / ACK). Lazily evicts an expired
     /// entry and returns `None` for it.
     pub fn lookup(&self, key: &str) -> Option<CancelEntry> {
         let now = self.now_ms();
-        let mut table = self.table.lock().unwrap();
+        let mut table = locked(&self.table, INVITE_BRANCH_LRU);
         match table.get(key) {
             Some(e) if e.expires_at_ms <= now => {
                 table.remove(key);
                 None
             }
-            Some(e) => Some(CancelEntry {
-                target: e.target.clone(),
-                branch: e.branch.clone(),
-                stickiness: e.stickiness.clone(),
-            }),
+            Some(e) => Some(e.entry.clone()),
             None => None,
         }
     }
 
     /// Current map size — tests/metrics.
     pub fn size(&self) -> usize {
-        self.table.lock().unwrap().len()
+        locked(&self.table, INVITE_BRANCH_LRU).len()
     }
 
     /// Drop all expired entries; returns the count swept. The owner task calls
     /// this periodically.
     pub fn sweep_expired(&self) -> usize {
         let now = self.now_ms();
-        let mut table = self.table.lock().unwrap();
+        let mut table = locked(&self.table, INVITE_BRANCH_LRU);
         let before = table.len();
         table.retain(|_, e| e.expires_at_ms > now);
         before - table.len()
@@ -275,6 +281,8 @@ mod tests {
             target: ProxyAddr::new("10.0.0.2", 5070),
             branch: branch.to_string(),
             stickiness: None,
+            minted: None,
+            via_cookie: None,
         }
     }
 
@@ -284,6 +292,26 @@ mod tests {
 
     fn key(call_id: &str) -> String {
         invite_txn_key(&via("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK1"), call_id, Some("t"), 1)
+    }
+
+    /// A panic under the table's lock leaves the table serving: the next
+    /// caller takes it as it stands, and the recovery is counted.
+    #[test]
+    fn a_panic_under_the_table_lock_leaves_it_serving() {
+        let lru = Arc::new(CancelBranchLru::with_clock(Clock::test_at(0)));
+        lru.remember(&key("before"), entry("z9hG4bK-before"), 60_000);
+        let poisoner = lru.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = poisoner.table.lock();
+            panic!("a panic under the table lock");
+        })
+        .join();
+        let counted = || crate::poison::RECOVERIES.count(INVITE_BRANCH_LRU);
+        let recovered = counted();
+        assert_eq!(lru.size(), 1, "the table as it stood");
+        lru.remember(&key("after"), entry("z9hG4bK-after"), 60_000);
+        assert!(lru.lookup(&key("after")).is_some());
+        assert_eq!(counted() - recovered, 1, "the recovery is counted once, under its lock");
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! itself; a key whose release is queued is forgotten by the batch, and each
 //! refresh answer comes back to its call as a re-entrant event), and the
 //! admit path `Breaker(Bounded(client))`, or `Bounded(client)` for a client
-//! without a health answer ([`crate::limiter::bounded`],
+//! without a breaker ([`crate::limiter::bounded`],
 //! [`crate::limiter::breaker`]). The handle is a cheap clone; every call's
 //! admit, release and refresh, and every exit's last release send, go
 //! through it.
@@ -20,7 +20,7 @@ use tokio::task::JoinHandle;
 
 use crate::config::B2buaConfig;
 use crate::limiter::bounded::BoundedLimiter;
-use crate::limiter::breaker::{BreakerConfig, BreakerLimiter};
+use crate::limiter::breaker::BreakerLimiter;
 use crate::limiter::lease::LimiterLease;
 use crate::limiter::refresh_batch::{RefreshBatch, RefreshBatchConfig};
 use crate::limiter::release_queue::{ReleaseFlush, ReleaseQueue, ReleaseQueueConfig};
@@ -45,7 +45,7 @@ impl LimiterWorker {
     /// The worker side over `limiter` under `config`, its counts on
     /// `metrics`, each refresh answer posted on `reentry`; and the handles of
     /// the tasks it runs (the release queue's sender, the refresh batch's
-    /// sender, the breaker's probe when guarded). Dropping every clone of the
+    /// sender, the breaker policy's follower when guarded). Dropping every clone of the
     /// handle leaves them running: the caller owns the returned handles and
     /// aborts them with the node's other tasks.
     pub(crate) fn start(
@@ -61,7 +61,7 @@ impl LimiterWorker {
             ReleaseQueueConfig::from_config(config, lease.clone()),
             metrics.clone(),
         );
-        let mut tasks = vec![tokio::spawn(releases.clone().run())];
+        let mut tasks = vec![observe::spawn_keeping_node(releases.clone().run())];
         let refreshes = RefreshBatch::new(
             limiter.clone(),
             RefreshBatchConfig::from_config(config, lease.clone()),
@@ -73,16 +73,15 @@ impl LimiterWorker {
         let forget = refreshes.clone();
         let hooked = releases.on_push(move |key| forget.forget(key));
         debug_assert!(hooked, "one refresh batch per release queue");
-        tasks.push(tokio::spawn(refreshes.clone().run()));
+        tasks.push(observe::spawn_keeping_node(refreshes.clone().run()));
         let (admits, breaker) = BreakerLimiter::guard(
             BoundedLimiter::wrap(limiter, metrics.clone()),
-            BreakerConfig::from_config(config),
             releases.clone(),
             refreshes.clone(),
             metrics.clone(),
         );
         if let Some(breaker) = breaker {
-            tasks.push(tokio::spawn(breaker.run()));
+            tasks.push(observe::spawn_keeping_node(breaker.run()));
         }
         let worker = Self(Arc::new(Parts { admits, releases, refreshes, lease, metrics }));
         (worker, tasks)

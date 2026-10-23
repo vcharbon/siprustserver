@@ -344,7 +344,6 @@ fn conceals_identity(headers: &[SipHeader], scope: RelayScope<'_>) -> bool {
     scope.identity == IdentityPrivacy::Conceal && privacy_conceals_identity(headers)
 }
 
-/// True iff `name` is one of the [`ASSERTED_IDENTITY`] headers.
 fn asserts_identity(name: &str) -> bool {
     ASSERTED_IDENTITY.iter().any(|n| n.matches(name))
 }
@@ -483,7 +482,7 @@ pub fn generate_relayed_response(
     status: u16,
     reason: &str,
     opts: &GenerateRelayedResponseOpts,
-) -> SipResponse {
+) -> Result<SipResponse, super::GenerateError> {
     let mut draft = ResponseDraft::new(status, SipStr::owned(reason));
     for entry in opts.vias.iter().chain(&opts.record_routes) {
         draft = draft.push_entry(entry.clone());
@@ -502,20 +501,4 @@ pub fn generate_relayed_response(
 }
 
 #[cfg(test)]
-mod clock_stamp_tests {
-    use super::*;
-
-    /// [`states_send_time`] names the two clock stamps of RFC 3261 and nothing
-    /// else, in any casing.
-    #[test]
-    fn the_predicate_names_exactly_the_clock_stamps() {
-        for name in ["Date", "date", "Timestamp"] {
-            assert!(states_send_time(name), "{name} states send time");
-        }
-        for name in
-            ["Allow", "Supported", "X-Vendor-Term", "Content-Disposition", "Session-Expires"]
-        {
-            assert!(!states_send_time(name), "{name} does not state send time");
-        }
-    }
-}
+mod clock_stamp_tests;

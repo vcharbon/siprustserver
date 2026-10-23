@@ -6,7 +6,9 @@
 //! Timer H. An INVITE response arriving from such an address must be recognised
 //! as coming from a worker the pool does not route to, so the response path
 //! reverse-fails it to the cookie's backup instead of relaying it back to a node
-//! that has left. Tombstones are keyed by **address**, never by ordinal, so
+//! that has left. Every response for a tombstoned address re-arms its window,
+//! so it lasts Timer H past the last one, however long the worker drains.
+//! Tombstones are keyed by **address**, never by ordinal, so
 //! ordinal resolution is untouched: a departed ordinal still resolves to `None`,
 //! and a same-ordinal replacement at a new address resolves to its live entry.
 
@@ -17,7 +19,7 @@ use arc_swap::ArcSwap;
 
 use crate::addr::ProxyAddr;
 
-use super::{WorkerEntry, WorkerHealth, WorkerId};
+use super::{Acceptance, WorkerEntry, WorkerHealth, WorkerId};
 
 /// How long a departed address keeps answering `Dead`. Timer H = 64·T1 = 32 s,
 /// the longest an INVITE server transaction at that address can still produce a
@@ -58,6 +60,21 @@ impl Tombstones {
         });
     }
 
+    /// Re-arm `addr`'s open window to [`DEPARTED_ADDRESS_TTL_MS`] from `now_ms`:
+    /// a response for it was seen. No-op for an address with no open window,
+    /// so a response never revives a closed one.
+    pub(crate) fn rearm(&self, addr: &ProxyAddr, now_ms: u64) {
+        if !self.records.load().get(addr).is_some_and(|t| t.expires_at_ms > now_ms) {
+            return;
+        }
+        let expires_at_ms = now_ms.saturating_add(DEPARTED_ADDRESS_TTL_MS);
+        self.update(|recs| {
+            if let Some(t) = recs.get_mut(addr).filter(|t| t.expires_at_ms > now_ms) {
+                t.expires_at_ms = t.expires_at_ms.max(expires_at_ms);
+            }
+        });
+    }
+
     /// Forget `addr` — a worker joined there, so the live entry is the truth.
     /// No-op when the address carries no tombstone.
     pub(crate) fn clear(&self, addr: &ProxyAddr) {
@@ -91,8 +108,7 @@ impl Tombstones {
             id: t.id.clone(),
             address: addr.clone(),
             health: WorkerHealth::Dead,
-            draining_since: None,
-            first_seen_at_ms: None,
+            acceptance: Acceptance::Refuse,
         })
     }
 }
@@ -117,6 +133,19 @@ mod tests {
             tombs.lookup(&addr(), 1_000 + DEPARTED_ADDRESS_TTL_MS).is_none(),
             "the window closes at Timer H"
         );
+    }
+
+    #[test]
+    fn a_rearm_extends_an_open_window_and_never_revives_a_closed_one() {
+        let tombs = Tombstones::default();
+        tombs.insert(addr(), "w0".to_string(), 0);
+        tombs.rearm(&addr(), 20_000);
+        assert!(tombs.lookup(&addr(), 20_000 + DEPARTED_ADDRESS_TTL_MS - 1).is_some());
+        assert!(tombs.lookup(&addr(), 20_000 + DEPARTED_ADDRESS_TTL_MS).is_none());
+        tombs.rearm(&addr(), 20_000 + DEPARTED_ADDRESS_TTL_MS);
+        assert!(tombs.lookup(&addr(), 20_000 + DEPARTED_ADDRESS_TTL_MS).is_none());
+        tombs.rearm(&ProxyAddr::new("10.0.0.9", 5060), 0);
+        assert!(tombs.lookup(&ProxyAddr::new("10.0.0.9", 5060), 0).is_none());
     }
 
     #[test]

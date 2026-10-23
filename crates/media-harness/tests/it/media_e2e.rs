@@ -15,7 +15,7 @@ use media_harness::{
     ClassifyOptions, ClipName, NegotiateOptions,
 };
 use sip_clock::testkit::advance_settled;
-use sip_net::SimulatedSignalingNetwork;
+use sip_net_testkit::SimulatedSignalingNetwork;
 
 fn pcm(name: ClipName) -> PlayScript {
     PlayScript::Pcm(reference_clip(name))

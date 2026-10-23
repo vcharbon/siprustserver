@@ -9,6 +9,7 @@ import { assemble } from "../src/assemble.js"
 import type { CaseSpec } from "../src/case-spec.js"
 import { decideCases } from "../src/caseset.js"
 import type { CaseRule } from "../src/case-rules.js"
+import type { DocumentRule } from "../src/document-rules.js"
 import { neutralPolicy, policyWith, UNCLASSIFIED, type Refusal } from "../src/policy.js"
 import { abandonedFlows, cancelRaceFlows, derivesNothing, derivesOnePrefix, plan, refusedFlows, sutSet } from "./fixtures.js"
 
@@ -156,6 +157,7 @@ describe("deciding a whole capture", () => {
       id: r.reason,
       subject: r.reason.startsWith("sut-") ? "sut" : "scope",
       disposition: r.disposition,
+      why: `${r.reason} as the canned case states it`,
       refuses: () => ({
         line: r.line,
         ...(r.charged === undefined ? {} : { charged: r.charged })
@@ -277,6 +279,50 @@ describe("deciding a whole capture", () => {
     expect(out.outcomes[0]!.quarantined?.pivot).toEqual(built().pivot)
   })
 
+  it("quarantines no document an unrunnable rule fires on, and says why", () => {
+    const refusal: Refusal = {
+      caseId: SPEC.id,
+      capture: CAPTURE,
+      reason: "scope-mechanism-not-statable",
+      disposition: "refuses",
+      line: "refused: the mechanism is out of scope"
+    }
+    const unrunnable: DocumentRule = {
+      id: "scope-never-ends",
+      subject: "scope",
+      disposition: "unrunnable",
+      why: "no run of the document can end, as the test states it",
+      refuses: (input) => ({ line: `${input.caseId}: no run of it can end` })
+    }
+    const out = decideCases({
+      flows: cancelRaceFlows(),
+      capture: CAPTURE,
+      specs: [SPEC],
+      sut: sutSet(),
+      plan: plan(),
+      policy: policyWith({ derives: derivesOnePrefix, refuse: rulesOf([refusal]), refuseOnDocument: [unrunnable] }),
+      quarantine: true
+    })
+    expect(out.refused).toEqual([refusal])
+    expect(out.outcomes[0]!.quarantined).toBeUndefined()
+    expect(out.outcomes[0]!.quarantineError).toBe(`${SPEC.id}: no run of it can end`)
+  })
+
+  it("quarantines no document an untrusted refusal stands on, and says why", () => {
+    const refusal: Refusal = {
+      caseId: SPEC.id,
+      capture: CAPTURE,
+      reason: "scope-order-untrusted",
+      disposition: "untrusted",
+      line: "refused: the capture's order of the call cannot be trusted"
+    }
+    const out = decide([refusal], neutralPolicy.declare, true)
+    expect(out.refused).toEqual([refusal])
+    expect(out.outcomes[0]!.built).toBeUndefined()
+    expect(out.outcomes[0]!.quarantined).toBeUndefined()
+    expect(out.outcomes[0]!.quarantineError).toBe(refusal.line)
+  })
+
   it("quarantines nothing for a case nothing refused", () => {
     const out = decide([], neutralPolicy.declare, true)
     expect(out.outcomes[0]!.built).toBeDefined()
@@ -309,6 +355,82 @@ describe("deciding a whole capture", () => {
     )
     expect(out.refused).toHaveLength(1)
     expect(out.outcomes[0]!.built).toBeUndefined()
+  })
+
+  /** A deferral no declaration anchors: it stands wherever it is the only refusal. */
+  const unanchored = {
+    rule: "no-ack-to-dialog-creating-2xx",
+    callId: "1-caller-leg-call-id",
+    emitter: "10.0.0.1:5060",
+    leg: 1
+  }
+  const deferral: Refusal = {
+    caseId: SPEC.id,
+    capture: CAPTURE,
+    reason: "sut-violates:no-ack-to-dialog-creating-2xx",
+    line: "refused unless declared",
+    disposition: "defers",
+    charged: [unanchored]
+  }
+  const declaresNothing = () => ({
+    entries: [],
+    flags: [],
+    coverage: [{ ...unanchored, refusal: "no step carries that 2xx at this vantage" }]
+  })
+
+  it("records no deferred refusal beside a refusal no declaration can answer", () => {
+    const refusal: Refusal = {
+      caseId: SPEC.id,
+      capture: CAPTURE,
+      reason: "scope-mechanism-not-statable",
+      disposition: "refuses",
+      line: "refused: the mechanism is out of scope"
+    }
+    const out = decide([deferral, refusal], declaresNothing)
+    expect(out.outcomes[0]!.built).toBeUndefined()
+    expect(out.refused.map((r) => r.reason)).toEqual(["scope-mechanism-not-statable"])
+  })
+
+  it("records no deferred refusal beside an untrusted one, and quarantines nothing", () => {
+    const refusal: Refusal = {
+      caseId: SPEC.id,
+      capture: CAPTURE,
+      reason: "scope-order-untrusted",
+      disposition: "untrusted",
+      line: "refused: the capture's order of the call cannot be trusted"
+    }
+    const out = decide([deferral, refusal], declaresNothing, true)
+    expect(out.refused.map((r) => r.reason)).toEqual(["scope-order-untrusted"])
+    expect(out.outcomes[0]!.quarantined).toBeUndefined()
+    expect(out.outcomes[0]!.quarantineError).toBe(refusal.line)
+  })
+
+  it("keeps a deferral the document evaluated beside a refusal the document states", () => {
+    const partial: DocumentRule = {
+      id: "scope-partial-exchange",
+      subject: "scope",
+      disposition: "refuses",
+      why: "the vantage holds part of an exchange",
+      refuses: (input) => ({ line: `${input.caseId}: part of an exchange` })
+    }
+    const out = decideCases({
+      flows: cancelRaceFlows(),
+      capture: CAPTURE,
+      specs: [SPEC],
+      sut: sutSet(),
+      plan: plan(),
+      policy: policyWith({
+        derives: derivesOnePrefix,
+        refuse: rulesOf([deferral]),
+        declare: declaresNothing,
+        refuseOnDocument: [partial]
+      })
+    })
+    expect(out.outcomes[0]!.built).toBeUndefined()
+    expect(out.refused.map((r) => r.reason)).toEqual([
+      "sut-violates:no-ack-to-dialog-creating-2xx",
+      "scope-partial-exchange"
+    ])
   })
 })
 

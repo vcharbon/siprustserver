@@ -18,7 +18,7 @@ use b2bua::new_calls::Refusal;
 use b2bua::store::{StoreFaultPoint, StoreFaults};
 use b2bua_harness::{settle_until, stated_by_response, B2buaScene, B2buaSut};
 use scenario_harness::callflow::{ANSWER_SDP, OFFER_SDP};
-use scenario_harness::{ClientInvite, WaiverScope};
+use scenario_harness::{ClientInvite, Party, WaiverScope};
 use tokio::sync::watch;
 
 const CALL_ID: &str = "same-identity@127.0.0.1";
@@ -41,6 +41,7 @@ impl CdrWriter for GatedCdr {
     async fn read_all(&self) -> Vec<CdrRecord> {
         Vec::new()
     }
+    async fn close(&self, _deadline: tokio::time::Instant) {}
 }
 
 /// The scene of a callee challenging the first INVITE, the CDR writes gated
@@ -80,7 +81,7 @@ async fn send_the_retry(s: &B2buaScene) -> ClientInvite {
     s.alice
         .invite(&s.bob)
         .identity(CALL_ID, FROM_TAG)
-        .cseq(2)
+        .cseq(Party::Caller.first_cseq() + 1)
         .with_header(
             "Proxy-Authorization",
             "Digest username=\"alice\", realm=\"bob\", nonce=\"n1\", uri=\"sip:bob@127.0.0.1\", \
@@ -171,7 +172,7 @@ async fn a_new_request_on_a_live_calls_identity_is_answered_retry_later() {
         .alice
         .invite(&s.bob)
         .identity(CALL_ID, FROM_TAG)
-        .cseq(20)
+        .cseq(Party::Caller.first_cseq() + 19)
         .with_sdp(OFFER_SDP)
         .through(s.b2bua.addr)
         .send()

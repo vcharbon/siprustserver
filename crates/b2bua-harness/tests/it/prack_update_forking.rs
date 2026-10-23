@@ -34,7 +34,7 @@
 //! callflow by the harness RFC audit at `finish()`.
 
 use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::{Harness, RunReport};
+use scenario_harness::{Harness, Party, RunReport};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::{RAck, RSeq, Require};
 use sip_message::types::SipResponse;
@@ -56,6 +56,10 @@ const REANSWER_HELD: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP
 // Confirmed-dialog re-INVITE (resume: sendrecv) and its answer.
 const REINVITE_RESUME: &str = "v=0\r\no=alice 1 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
 const REINVITE_ANSWER: &str = "v=0\r\no=bob 1 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20002 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+/// The second hold on the confirmed dialog and its answer: each party's next
+/// version after the resume (RFC 3264 §8).
+const REOFFER_HOLD_AGAIN: &str = "v=0\r\no=alice 1 4 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendonly\r\n";
+const REANSWER_HELD_AGAIN: &str = "v=0\r\no=bob 1 4 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20002 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=recvonly\r\n";
 
 #[tokio::test]
 async fn prack_update_forking_answer_on_second_fork() {
@@ -66,7 +70,13 @@ async fn prack_update_forking_answer_on_second_fork() {
         B2buaSut::route_all_to("127.0.0.1", 5077).start(&h, "b2bua", "127.0.0.1:5087").await;
 
     // Alice INVITEs with the offer in the INVITE, advertising 100rel support.
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
     let mut uas = bob.receive("INVITE").await;
     assert!(!uas.request().body().is_empty(), "offer relayed to bob on the INVITE");
 
@@ -88,7 +98,7 @@ async fn prack_update_forking_answer_on_second_fork() {
     let mut prack1 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&fork1_atag)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&p1)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&p1), Party::Caller.first_cseq()))
         .send()
         .await;
     let mut prack1_at_bob = bob.receive("PRACK").await;
@@ -115,7 +125,7 @@ async fn prack_update_forking_answer_on_second_fork() {
     let mut prack2 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&fork2_atag)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&p2)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&p2), Party::Caller.first_cseq()))
         .send()
         .await;
     let mut prack2_at_bob = bob.receive("PRACK").await;
@@ -199,14 +209,14 @@ async fn prack_update_forking_answer_on_second_fork() {
     bob.receive("ACK").await;
 
     // In-dialog UPDATE on the confirmed dialog.
-    let mut cupdate = dialog.request(InDialogMethod::Update, Some(REOFFER_HOLD)).await;
+    let mut cupdate = dialog.request(InDialogMethod::Update, Some(REOFFER_HOLD_AGAIN)).await;
     let mut cupdate_at_bob = bob.receive("UPDATE").await;
     assert_eq!(
         cupdate_at_bob.request().to().tag(),
         Some("bobfork2"),
         "confirmed UPDATE stays on the fork2 dialog",
     );
-    cupdate_at_bob.respond(200, "OK").with_sdp(REANSWER_HELD).await;
+    cupdate_at_bob.respond(200, "OK").with_sdp(REANSWER_HELD_AGAIN).await;
     cupdate.expect(200).await;
 
     // In-dialog INFO.

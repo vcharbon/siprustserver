@@ -18,6 +18,9 @@ use scenario_harness::{EmitOpts, Harness, MatchOpts, MessageTemplate, Mismatch, 
 use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipHeader, SipMessage, SipParser};
 
+/// The caller's first CSeq: its INVITE's.
+const C: u32 = scenario_harness::Party::Caller.first_cseq();
+
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49180 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
 
@@ -101,7 +104,7 @@ async fn template_invite_regenerates_dialog_fields_and_freezes_headers() {
     assert!(req.from().tag().is_some(), "fresh From-tag present");
     assert_ne!(req.from().tag(), Some("CAP-FROM"), "From-tag regenerated");
     assert!(req.to().tag().is_none(), "an initial INVITE carries no To-tag");
-    assert_eq!(req.cseq().seq(), 1, "CSeq regenerated to the fresh dialog's 1");
+    assert_eq!(req.cseq().seq(), C, "CSeq regenerated to the fresh dialog's first");
     assert_eq!(req.cseq().method(), "INVITE");
     assert_eq!(
         values_of(req.headers(), "Max-Forwards"),
@@ -189,7 +192,7 @@ async fn template_in_dialog_update_reuses_dialog_identifiers() {
     assert_eq!(ureq.call_id(), invite_req.call_id(), "Call-ID reused from the dialog");
     assert_eq!(ureq.from().tag(), Some(&alice_from_tag[..]), "From-tag reused");
     assert_eq!(ureq.to().tag(), Some(&bob_to_tag[..]), "To-tag = the peer's dialog tag");
-    assert_eq!(ureq.cseq().seq(), 2, "CSeq advanced to 2");
+    assert_eq!(ureq.cseq().seq(), C + 1, "CSeq advanced by one");
     assert_eq!(ureq.cseq().method(), "UPDATE");
     // Frozen headers byte-preserved.
     assert_eq!(casing_of(ureq.headers(), "x-mixed-case"), "X-mIxEd-CaSe");
@@ -508,7 +511,7 @@ l: {}\r\n\r\n{}",
     // The receiving parser handled the compact names — regenerated fields valid.
     assert!(req.via().first().branch().unwrap().starts_with("z9hG4bK"));
     assert!(req.from().tag().is_some());
-    assert_eq!(req.cseq().seq(), 1, "CSeq regenerated");
+    assert_eq!(req.cseq().seq(), C, "CSeq regenerated");
     assert!(!req.call_id().as_str().is_empty());
     assert!(req.body().starts_with(b"v=0"), "SDP offer carried");
 

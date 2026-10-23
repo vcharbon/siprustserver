@@ -45,7 +45,8 @@ pub fn cap_str(value: &str) -> (Cow<'_, str>, bool) {
     while end > 0 && !value.is_char_boundary(end) {
         end -= 1;
     }
-    (Cow::Borrowed(&value[..end]), true)
+    // `end` is a char boundary inside `value`, so the head is always there.
+    (Cow::Borrowed(value.get(..end).unwrap_or_default()), true)
 }
 
 /// Cap a raw byte attribute (a wire message), returning the value and whether
@@ -58,10 +59,9 @@ pub fn cap_bytes(value: &[u8]) -> (&[u8], bool) {
 /// truncated. `limit` is a budget on the EMITTED attribute, which for an encoded
 /// attribute is smaller than the slice's own length.
 fn cap_bytes_to(value: &[u8], limit: usize) -> (&[u8], bool) {
-    if value.len() <= limit {
-        (value, false)
-    } else {
-        (&value[..limit], true)
+    match value.get(..limit) {
+        Some(head) if head.len() < value.len() => (head, true),
+        _ => (value, false),
     }
 }
 
@@ -107,12 +107,12 @@ pub fn shape_body(body: &[u8]) -> ShapedBody<'_> {
         }
         Err(err) => {
             let split_offset = err.valid_up_to();
-            // The prefix is valid by construction: `valid_up_to` is where the
-            // scan stopped.
-            let prefix = std::str::from_utf8(&body[..split_offset]).unwrap_or_default();
+            // `valid_up_to` is where the scan stopped, inside `body`, and the
+            // prefix before it is valid by construction.
+            let (head, rest) = body.split_at_checked(split_offset).unwrap_or((&[], body));
+            let prefix = std::str::from_utf8(head).unwrap_or_default();
             let (text, text_truncated) = cap_str(prefix);
-            let (tail, tail_truncated) =
-                cap_bytes_to(&body[split_offset..], BASE64_SOURCE_CAP_BYTES);
+            let (tail, tail_truncated) = cap_bytes_to(rest, BASE64_SOURCE_CAP_BYTES);
             ShapedBody {
                 text,
                 binary: Some(BinaryTail { base64: BASE64.encode(tail), split_offset }),

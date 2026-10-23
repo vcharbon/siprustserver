@@ -97,7 +97,7 @@ async fn two_shards_serve_many_flows_and_cross_shard_responses() {
         while let Some(pkt) = worker.recv().await {
             let Ok(SipMessage::Request(req)) = parser.parse(&pkt.raw) else { continue };
             let opts = GenerateResponseOpts { to_tag: Some("uas".into()), ..Default::default() };
-            let resp = generate_response(&req, 200, "OK", &opts);
+            let resp = generate_response(&req, 200, "OK", &opts).unwrap();
             let _ = worker.send_to(&serialize(&SipMessage::Response(resp)), pkt.src).await;
         }
     });
@@ -122,14 +122,17 @@ async fn two_shards_serve_many_flows_and_cross_shard_responses() {
     let lru = Arc::new(CancelBranchLru::with_clock(clock.clone()));
     let mut tasks = Vec::new();
     for (shard, ep) in [ep0, ep1].into_iter().enumerate() {
-        let core =
-            ProxyCoreBuilder::new(ProxyAddr::from(proxy_addr), strategy.clone(), registry.clone())
-                .clock(clock.clone())
-                .id_gen(Arc::new(IdGen::seeded(0xBEEF + shard as u64)))
-                .metrics(metrics.clone())
-                .cancel_lru(lru.clone())
-                .shard(shard)
-                .build(ep);
+        let core = ProxyCoreBuilder::new(
+            ProxyAddr::from(proxy_addr),
+            strategy.clone(),
+            registry.clone(),
+            Arc::new(IdGen::seeded(0xBEEF + shard as u64)),
+        )
+        .clock(clock.clone())
+        .metrics(metrics.clone())
+        .cancel_lru(lru.clone())
+        .shard(shard)
+        .build(ep);
         tasks.push(tokio::spawn(core.run()));
     }
 

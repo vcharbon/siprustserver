@@ -90,7 +90,7 @@ impl RunResult {
         cell: CellId,
         report: &RunReport,
         check_verdicts: Vec<CheckVerdict>,
-        rfc_gate: &[sip_net::RfcFinding],
+        rfc_gate: &[sip_net_testkit::RfcFinding],
     ) -> Self {
         let seq_doc = scenario_harness::report::seq_doc(report);
         let entries = report.entries();

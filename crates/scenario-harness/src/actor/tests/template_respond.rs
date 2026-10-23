@@ -1,4 +1,5 @@
-use sip_message::{MessageTemplate, Method, TemplateHeader};
+use sip_message::Method;
+use sip_template::{MessageTemplate, TemplateHeader};
 use std::time::Duration;
 
 use super::testkit::*;
@@ -29,7 +30,7 @@ async fn scripted_reinvite_answer_holds_settle_until_ack() {
                 role: "alice",
                 agent: alice.clone(),
                 disposition: Disposition::Caller,
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 goals: vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
                     Goal::new(Barrier::AllConfirmed(&["alice", "bob"]), GoalStep::Reinvite),
@@ -183,7 +184,7 @@ async fn scripted_bye_answer_tears_down_cleanly() {
 /// re-surfacing idempotence is pinned by the unit test below.)
 #[tokio::test(start_paused = true)]
 async fn ack_body_override_rides_the_reinvite_ack() {
-    const CUSTOM_ACK_SDP: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10002 RTP/AVP 0\r\n";
+    const CUSTOM_ACK_SDP: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10002 RTP/AVP 0\r\n";
 
     let h = Harness::new("actor-ack-body-override").describe(
         "ExpectResponse{ack_body} on a delayed-offer re-INVITE 2xx: the \
@@ -355,7 +356,7 @@ async fn per_goal_deadline_bounds_the_guard_wait() {
     let verdict = run_call(call, Duration::from_secs(32)).await;
     let elapsed = started.elapsed();
     match verdict {
-        CallVerdict::Failed(StepError::Timeout { who }) => assert_eq!(who, "never"),
+        CallVerdict::Failed(_, StepError::Timeout { who, .. }) => assert_eq!(who, "never"),
         other => panic!("expected the bounded guard Timeout, got {other:?}"),
     }
     assert!(
@@ -439,7 +440,7 @@ async fn content_matcher_fails_fast_on_changed_value() {
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
     match verdict {
-        CallVerdict::Failed(StepError::UnexpectedKind { who, detail }) => {
+        CallVerdict::Failed(_, StepError::UnexpectedKind { who, detail }) => {
             assert_eq!(who, "bob");
             assert!(
                 detail.contains("x-cap") && detail.contains("v2") && detail.contains("v1"),

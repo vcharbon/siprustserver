@@ -37,6 +37,7 @@ pub use queue::{CallQueue, Discard, Discarded, Limits, Offer, Outcome, PastBound
 pub use worker::{DispatchBody, FailureHook, HandlerFailure, InFlight, Runnable};
 
 use crate::metrics::{B2buaMetrics, RemovalClass};
+use crate::poison::{locked, DISPATCH_QUEUE, DISPATCH_SLOTS};
 use worker::{Permits, Slot, Slots, WorkerCtx};
 
 /// The dispatcher handle over items of type `T`. Clone-cheap.
@@ -117,12 +118,12 @@ impl<T: Runnable> PerCallDispatcher<T> {
     /// its worker when the call has none.
     pub fn offer(&self, call_ref: &str, item: T, class: DispatchClass) -> Offer<T> {
         let row = class.row();
-        let mut slots = self.slots.lock().unwrap();
+        let mut slots = locked(&self.slots, DISPATCH_SLOTS);
         let (slot, offer) = match slots.get(call_ref).cloned() {
             Some(slot) => {
                 // Offered under the map lock: the worker taking the queue's
                 // release decides under it whether the queue lives on.
-                let offer = slot.queue.lock().unwrap().offer(item, class, &self.metrics);
+                let offer = locked(&slot.queue, DISPATCH_QUEUE).offer(item, class, &self.metrics);
                 drop(slots);
                 (slot, offer)
             }
@@ -144,7 +145,11 @@ impl<T: Runnable> PerCallDispatcher<T> {
                 slots.insert(call_ref.to_string(), slot.clone());
                 drop(slots);
                 self.metrics.bump_creation();
-                tokio::spawn(worker::run(call_ref.to_string(), slot.clone(), self.worker_ctx()));
+                observe::spawn_keeping_node(worker::run(
+                    call_ref.to_string(),
+                    slot.clone(),
+                    self.worker_ctx(),
+                ));
                 (slot, offer)
             }
         };
@@ -168,7 +173,7 @@ impl<T: Runnable> PerCallDispatcher<T> {
     /// ahead of the offer, which stays the one place a queue opens.
     pub fn at_threshold(&self, call_ref: &str, class: DispatchClass) -> bool {
         let row = class.row();
-        let slots = self.slots.lock().unwrap();
+        let slots = locked(&self.slots, DISPATCH_SLOTS);
         row.room == Room::Bounded
             && !slots.contains_key(call_ref)
             && slots.len() >= row.opens_queue_below.of(self.cap, self.new_call_headroom)
@@ -182,9 +187,9 @@ impl<T: Runnable> PerCallDispatcher<T> {
     /// discarded behind it unless a new call waits there. No-op for a call
     /// with no queue.
     pub fn release(&self, call_ref: &str, class: RemovalClass) {
-        let slot = self.slots.lock().unwrap().get(call_ref).cloned();
+        let slot = locked(&self.slots, DISPATCH_SLOTS).get(call_ref).cloned();
         if let Some(slot) = slot {
-            slot.queue.lock().unwrap().release(class, &self.metrics);
+            locked(&slot.queue, DISPATCH_QUEUE).release(class, &self.metrics);
             slot.wake();
         }
     }
@@ -201,6 +206,17 @@ impl<T: Runnable> PerCallDispatcher<T> {
 }
 
 impl<T> PerCallDispatcher<T> {
+    /// Abort every in-flight handler body and tracked task, and run nothing
+    /// more; see [`InFlight::halt`].
+    pub fn halt(&self) {
+        self.in_flight.halt();
+    }
+
+    /// Track a task doing call work beside the queues; see [`InFlight::track`].
+    pub fn track(&self, handle: tokio::task::AbortHandle) {
+        self.in_flight.track(handle);
+    }
+
     /// Abort `call_ref`'s in-flight handler body; see [`InFlight::abort`].
     pub fn abort_in_flight(&self, call_ref: &str) -> bool {
         self.in_flight.abort(call_ref)
@@ -212,11 +228,11 @@ impl<T> PerCallDispatcher<T> {
     }
 
     pub fn has_queue(&self, call_ref: &str) -> bool {
-        self.slots.lock().unwrap().contains_key(call_ref)
+        locked(&self.slots, DISPATCH_SLOTS).contains_key(call_ref)
     }
 
     pub fn queue_count(&self) -> usize {
-        self.slots.lock().unwrap().len()
+        locked(&self.slots, DISPATCH_SLOTS).len()
     }
 }
 

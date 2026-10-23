@@ -15,6 +15,10 @@
 //!   bob ──200───▶            survivor ──▶ (nothing)  (a RESPONSE is dropped)
 //! ```
 //!
+//! The node crashes in place: its endpoint stays in the survivor's
+//! membership, so the survivor defers the call's end to the node's return
+//! (ADR-0020 X3), and the node discharges it on its reclaim.
+//!
 //! Both cells assert the same thing twice over: the survivor does not take the
 //! call over a second time (`repl_takeover_hydrated_total` does not move, and the
 //! takeover log carries one hydration for the whole run), it counts the refusal
@@ -136,12 +140,12 @@ async fn synchronized_call_ref(
     call_ref
 }
 
-/// Abort the node serving the call and tell the cluster, opening the RFC
-/// deviation window the takeover carries.
+/// Abort the node serving the call in place, its endpoint kept in the
+/// survivor's membership, opening the RFC deviation window the takeover
+/// carries.
 async fn kill_serving_node(
     fh: &mut FailoverHarness,
     primary: &mut ReplicatedB2buaSut,
-    survivor: &ReplicatedB2buaSut,
     pri_ord: &str,
     proxy: &ProxySut,
 ) {
@@ -149,7 +153,6 @@ async fn kill_serving_node(
     fh.mark(pri_ord, None, "crash", "serving node down on an established call");
     primary.crash();
     proxy.set_health(pri_ord, WorkerHealth::Dead);
-    survivor.simulate_peer_removed(pri_ord);
     fh.advance(Duration::from_millis(300)).await;
 }
 
@@ -208,18 +211,18 @@ async fn settle_to_one_cdr(
 /// The takeover events the log carries: a `rising` event opens an episode keyed
 /// by the dead peer, its 5 s `summary` events report the running totals, and a
 /// `falling` event closes it on the episode's totals.
-fn takeover_events(log: &observe::TestLogHandle) -> Vec<observe::CapturedEvent> {
+fn takeover_events(log: &observe_testkit::TestLogHandle) -> Vec<observe_testkit::CapturedEvent> {
     log.matching("acting-backup takeover")
 }
 
 /// The rendered value of `e`'s `name` field (empty when it carries none).
-fn field<'a>(e: &'a observe::CapturedEvent, name: &str) -> &'a str {
+fn field<'a>(e: &'a observe_testkit::CapturedEvent, name: &str) -> &'a str {
     e.fields.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str()).unwrap_or_default()
 }
 
 /// The value `e`'s `totals` field carries for `counter` (`0` when absent): the
 /// field is the `name=n` run a `Tally` renders.
-fn tallied(e: &observe::CapturedEvent, counter: &str) -> u64 {
+fn tallied(e: &observe_testkit::CapturedEvent, counter: &str) -> u64 {
     field(e, "totals")
         .split_whitespace()
         .find_map(|pair| pair.strip_prefix(counter)?.strip_prefix('=')?.parse().ok())
@@ -229,7 +232,7 @@ fn tallied(e: &observe::CapturedEvent, counter: &str) -> u64 {
 /// What the takeover log says `counter` did over the whole run: an episode
 /// carries its totals on its falling edge, so the run's total is the sum over
 /// closed episodes. Read it only behind [`assert_every_episode_closed`].
-fn logged_total(log: &observe::TestLogHandle, counter: &str) -> u64 {
+fn logged_total(log: &observe_testkit::TestLogHandle, counter: &str) -> u64 {
     takeover_events(log)
         .iter()
         .filter(|e| field(e, "edge") == "falling")
@@ -240,7 +243,7 @@ fn logged_total(log: &observe::TestLogHandle, counter: &str) -> u64 {
 /// Every takeover episode the run opened has also closed, so the falling edges
 /// carry the whole run's totals. A timing regression that leaves an episode open
 /// fails here, on the episode, rather than as a missing counter downstream.
-fn assert_every_episode_closed(log: &observe::TestLogHandle) {
+fn assert_every_episode_closed(log: &observe_testkit::TestLogHandle) {
     let events = takeover_events(log);
     let opened = events.iter().filter(|e| field(e, "edge") == "rising").count();
     let closed = events.iter().filter(|e| field(e, "edge") == "falling").count();
@@ -249,13 +252,13 @@ fn assert_every_episode_closed(log: &observe::TestLogHandle) {
 }
 
 /// The takeover events as log lines, for an assertion message.
-fn rendered(events: &[observe::CapturedEvent]) -> Vec<String> {
-    events.iter().map(observe::CapturedEvent::line).collect()
+fn rendered(events: &[observe_testkit::CapturedEvent]) -> Vec<String> {
+    events.iter().map(observe_testkit::CapturedEvent::line).collect()
 }
 
 /// The log plane says the same as the counters: the call was taken over ONCE,
 /// and the datagram that arrived after the release was refused, not served.
-fn assert_one_hydration_then_a_refusal(log: &observe::TestLogHandle) {
+fn assert_one_hydration_then_a_refusal(log: &observe_testkit::TestLogHandle) {
     assert_every_episode_closed(log);
     let lines = rendered(&takeover_events(log));
     assert_eq!(
@@ -303,7 +306,7 @@ fn datagrams_toward(fh: &FailoverHarness, to: SocketAddr) -> usize {
 /// call over a second time.
 #[tokio::test(start_paused = true)]
 async fn a_late_request_naming_a_released_takeover_copy_draws_481() {
-    let (_log_guard, log) = observe::test_buffer();
+    let (_log_guard, log) = observe_testkit::test_buffer();
     let mut fh = FailoverHarness::new("released-copy-late-request", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -314,8 +317,8 @@ async fn a_late_request_naming_a_released_takeover_copy_draws_481() {
 
     // ── The serving node dies; the caller hangs up onto the survivor ────────
     {
-        let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
-        kill_serving_node(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+        let (primary, _) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+        kill_serving_node(&mut fh, primary, &pri_ord, &proxy).await;
     }
     let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
     let hydrated_before = survivor.metrics().repl_takeover_hydrated_total();
@@ -371,7 +374,7 @@ async fn a_late_request_naming_a_released_takeover_copy_draws_481() {
 /// back to the callee and the ended call is not taken over again.
 #[tokio::test(start_paused = true)]
 async fn a_late_response_naming_a_released_takeover_copy_is_dropped() {
-    let (_log_guard, log) = observe::test_buffer();
+    let (_log_guard, log) = observe_testkit::test_buffer();
     let mut fh = FailoverHarness::new("released-copy-late-response", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -381,8 +384,8 @@ async fn a_late_response_naming_a_released_takeover_copy_is_dropped() {
     let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
 
     {
-        let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
-        kill_serving_node(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+        let (primary, _) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+        kill_serving_node(&mut fh, primary, &pri_ord, &proxy).await;
     }
     let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
     let hydrated_before = survivor.metrics().repl_takeover_hydrated_total();
@@ -461,10 +464,11 @@ fn panic_on_info_services() -> Vec<ServiceDef> {
 
 /// A **request whose handler died on the takeover copy**: the caller's INFO
 /// takes the call over on the survivor and its handler panics; the reaper
-/// forces the copy terminal and the survivor sheds it with the INFO still
-/// unanswered. The ended copy forgets that transaction, so the caller's
-/// retransmission is refused 481 like any request naming the released copy,
-/// instead of being absorbed until the caller's Timer F.
+/// tears the copy down on the wire — a BYE to each side — and the survivor
+/// sheds it with the INFO still unanswered. The ended copy forgets that
+/// transaction, so the caller's retransmission is refused 481 like any
+/// request naming the released copy, instead of being absorbed until the
+/// caller's Timer F.
 #[tokio::test(start_paused = true)]
 async fn an_info_whose_handler_died_on_the_takeover_copy_draws_481_on_its_retransmission() {
     let mut fh = FailoverHarness::new("released-copy-info-handler-died", &["b1", "b2"])
@@ -473,11 +477,11 @@ async fn an_info_whose_handler_died_on_the_takeover_copy_draws_481_on_its_retran
     let bob = fh.agent("bob", BOB).await;
     let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
 
-    let (mut dialog, mut bob_dialog, pri_ord) = establish(&fh, &alice, &bob, &proxy).await;
+    let (mut dialog, _bob_dialog, pri_ord) = establish(&fh, &alice, &bob, &proxy).await;
     let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
     {
-        let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
-        kill_serving_node(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+        let (primary, _) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+        kill_serving_node(&mut fh, primary, &pri_ord, &proxy).await;
     }
 
     // ── The caller's INFO takes the call over; its handler dies ─────────────
@@ -486,11 +490,12 @@ async fn an_info_whose_handler_died_on_the_takeover_copy_draws_481_on_its_retran
         .try_send_with_request()
         .await
         .expect("the INFO leaves");
-    fh.advance(Duration::from_millis(500)).await;
+    alice.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
+    bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
     let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
     assert!(
         fh.settle_terminal(async || !survivor.serves(&call_ref)).await,
-        "the reaper forces the copy terminal and the survivor sheds it",
+        "the reaper tears the copy down and the survivor sheds it",
     );
     assert_eq!(survivor.metrics().handler_panics_total(), 1);
 
@@ -500,12 +505,6 @@ async fn an_info_whose_handler_died_on_the_takeover_copy_draws_481_on_its_retran
     info.try_expect_tolerating(481, &["OPTIONS"])
         .await
         .expect("the retransmitted INFO is refused, not absorbed by a transaction");
-
-    // ── Both sides close the dialog the cluster no longer serves ────────────
-    let mut bye_a = dialog.bye().await;
-    bye_a.expect_tolerating(481, &["OPTIONS"]).await;
-    let mut bye_b = bob_dialog.bye().await;
-    bye_b.expect_tolerating(481, &["OPTIONS"]).await;
 
     // ── The primary returns and discharges the deferred terminal ────────────
     fh.advance(Duration::from_secs(60)).await;
@@ -541,10 +540,11 @@ fn panic_on_reinvite_services() -> Vec<ServiceDef> {
 
 /// A **re-INVITE whose handler died on the takeover copy**: the caller's
 /// re-INVITE takes the call over on the survivor, draws the layer's 100
-/// Trying, and its handler panics; the reaper forces the copy terminal and
-/// the survivor sheds it (`SelfRelease { ended: true }`). The 100 stopped the
-/// caller's retransmissions, so the shed answers the re-INVITE 481 through
-/// its transaction instead of leaving it to the caller's Timer B.
+/// Trying, and its handler panics; the reaper tears the copy down on the
+/// wire — a BYE to each side — and the survivor sheds it
+/// (`SelfRelease { ended: true }`). The 100 stopped the caller's
+/// retransmissions, so the shed answers the re-INVITE 481 through its
+/// transaction instead of leaving it to the caller's Timer B.
 #[tokio::test(start_paused = true)]
 async fn a_reinvite_whose_handler_died_on_the_takeover_copy_is_answered_481_at_its_release() {
     let mut fh = FailoverHarness::new("released-copy-reinvite-handler-died", &["b1", "b2"])
@@ -553,32 +553,28 @@ async fn a_reinvite_whose_handler_died_on_the_takeover_copy_is_answered_481_at_i
     let bob = fh.agent("bob", BOB).await;
     let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
 
-    let (mut dialog, mut bob_dialog, pri_ord) = establish(&fh, &alice, &bob, &proxy).await;
+    let (mut dialog, _bob_dialog, pri_ord) = establish(&fh, &alice, &bob, &proxy).await;
     let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
     {
-        let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
-        kill_serving_node(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+        let (primary, _) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+        kill_serving_node(&mut fh, primary, &pri_ord, &proxy).await;
     }
 
     // ── The caller's re-INVITE takes the call over; its handler dies ────────
     let mut reinvite = dialog.reinvite(Some(OFFER)).await;
-    fh.advance(Duration::from_millis(500)).await;
+    reinvite.expect(100).await;
+    alice.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
+    bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
     let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
     assert!(
         fh.settle_terminal(async || !survivor.serves(&call_ref)).await,
-        "the reaper forces the copy terminal and the survivor sheds it",
+        "the reaper tears the copy down and the survivor sheds it",
     );
     assert_eq!(survivor.metrics().handler_panics_total(), 1);
     reinvite
         .try_expect(481)
         .await
         .expect("the shed copy answers the re-INVITE its handler never answered");
-
-    // ── Both sides close the dialog the cluster no longer serves ────────────
-    let mut bye_a = dialog.bye().await;
-    bye_a.expect_tolerating(481, &["OPTIONS"]).await;
-    let mut bye_b = bob_dialog.bye().await;
-    bye_b.expect_tolerating(481, &["OPTIONS"]).await;
 
     // ── The primary returns and discharges the deferred terminal ────────────
     fh.advance(Duration::from_secs(60)).await;

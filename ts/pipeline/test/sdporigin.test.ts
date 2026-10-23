@@ -7,7 +7,7 @@
  * a version step of another size stay differences.
  */
 import { describe, expect, it } from "vitest"
-import { type Driven, identitiesIn, identityOf, originOf, parseOrigin, readOrigins, withOriginOf } from "../src/sdporigin.js"
+import { type Driven, identitiesIn, identityOf, notContinued, originOf, parseOrigin, readOrigins, withOriginOf } from "../src/sdporigin.js"
 
 const sdp = (origin: string, port = 6000): string =>
   `v=0\r\n${origin}\r\ns=-\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio ${port} RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n`
@@ -49,7 +49,7 @@ describe("parseOrigin", () => {
 
 /** The pairs in one order shared by both sides, each answered. */
 const read = (pairs: ReadonlyArray<readonly [string, string]>, driven: Driven = nothingDriven) =>
-  readOrigins(pairs.map(([captured, replayed], at) => ({ captured, replayed, capturedAt: at, replayedAt: at })), driven)
+  readOrigins(pairs.map(([captured, replayed], at) => ({ captured, replayed, capturedAt: at, replayedAt: at, leg: 0 })), driven)
 
 describe("readOrigins", () => {
   const S = (id: number, version: number, user = "-", address = "192.0.2.10") => sdp(o(id, version, user, address))
@@ -127,10 +127,52 @@ describe("readOrigins", () => {
     // The capture sends +1 to one leg (flow position 0) then +2 to the other
     // (1); the replay's wire has the second leg first, with +1 there.
     const got = readOrigins([
-      { captured: S(1000, 1000), replayed: S(7, 7), capturedAt: 0, replayedAt: 0 },
-      { captured: S(1000, 1001), replayed: S(7, 9), capturedAt: 1, replayedAt: 2 },
-      { captured: S(1000, 1002), replayed: S(7, 8), capturedAt: 2, replayedAt: 1 }
+      { captured: S(1000, 1000), replayed: S(7, 7), capturedAt: 0, replayedAt: 0, leg: 0 },
+      { captured: S(1000, 1001), replayed: S(7, 9), capturedAt: 1, replayedAt: 2, leg: 1 },
+      { captured: S(1000, 1002), replayed: S(7, 8), capturedAt: 2, replayedAt: 1, leg: 2 }
     ], nothingDriven)
     expect(got).toEqual([true, true, true])
+  })
+})
+
+describe("notContinued", () => {
+  const S = (id: number, version: number, user = "-", address = "192.0.2.10") => sdp(o(id, version, user, address))
+  /** The pairs on legs `legs` (leg 0 by default), one order shared by both sides. */
+  const read = (pairs: ReadonlyArray<readonly [string, string]>, legs: ReadonlyArray<number> = []) =>
+    notContinued(
+      pairs.map(([captured, replayed], at) => ({ captured, replayed, capturedAt: at, replayedAt: at, leg: legs[at] ?? 0 }))
+    )
+
+  it("marks a description the capture continues on its leg where the replay opens another session", () => {
+    expect(read([[S(1000, 1000), S(7, 7)], [S(1000, 1001), S(9, 9)]])).toEqual([false, true])
+    expect(read([[S(1000, 1000), S(7, 7)], [S(1000, 1001), S(9, 9, "-", "192.0.2.99")]])).toEqual([false, true])
+  })
+
+  it("marks a version the replay jumps, resets, or keeps over a changed description", () => {
+    expect(read([[S(1000, 1000), S(7, 7)], [S(1000, 1001), S(7, 9)]])).toEqual([false, true])
+    expect(read([[S(1000, 1000), S(7, 7)], [S(1000, 1001), S(7, 6)]])).toEqual([false, true])
+    const moved = sdp(o(7, 7), 6002)
+    expect(read([[S(1000, 1000), S(7, 7)], [S(1000, 1001), moved]])).toEqual([false, true])
+  })
+
+  it("marks nothing the replay does as RFC 3264 §8 allows, whatever step the capture took", () => {
+    expect(read([[S(1000, 1000), S(7, 7)], [S(1000, 1001), S(7, 8)]])).toEqual([false, false])
+    expect(read([[S(1000, 1000), S(7, 7)], [S(1000, 1000), S(7, 7)]])).toEqual([false, false])
+    // An unchanged description keeps its version: no break, though the capture stepped.
+    expect(read([[S(1000, 1000), S(7, 7)], [S(1000, 1001), S(7, 7)]])).toEqual([false, false])
+    // A +1 on an unchanged description is allowed too.
+    expect(read([[S(1000, 1000), S(7, 7)], [S(1000, 1000), S(7, 8)]])).toEqual([false, false])
+  })
+
+  it("marks nothing where the capture itself opens another session on the leg", () => {
+    expect(read([[S(1000, 1000), S(7, 7)], [S(2000, 2000), S(9, 9)]])).toEqual([false, false])
+  })
+
+  it("reads each leg on its own: a session the replay opens afresh on another leg is no break", () => {
+    expect(read([[S(1000, 1000), S(7, 7)], [S(1000, 1001), S(9, 9)]], [0, 1])).toEqual([false, false])
+  })
+
+  it("a description with no readable origin breaks nothing and continues nothing", () => {
+    expect(read([["v=0\r\n", S(7, 7)], [S(1000, 1001), S(9, 9)]])).toEqual([false, false])
   })
 })

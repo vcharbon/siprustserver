@@ -1,0 +1,81 @@
+{{- if and .Values.cdr.enabled .Values.cdr.consumer.enabled }}
+{{- /*
+The CDR consumer: drains the queue into Prometheus counters (cdr_consumed_total,
+cdr_call_duration_ms_total with the json payload), and with observationUrl
+ships one cdr-observation.v1 line per CDR to VictoriaLogs. One replica; its
+counters are per process, rate() covers a restart.
+*/}}
+{{- $c := .Values.cdr.consumer }}
+{{- $env := dict
+  "CDR_AMQP_URL" (include "siprust.amqpUrl" .)
+  "CDR_QUEUE" .Values.cdr.queue
+  "CDR_QUEUE_MAX_LEN" (toString (int .Values.cdr.maxLength))
+  "CDR_METRICS_LISTEN" "0.0.0.0:9093"
+  "CDR_PAYLOAD" $c.payload
+}}
+{{- with $c.observationUrl }}{{ $_ := set $env "CDR_OBSERVATION_URL" . }}{{- end }}
+{{- include "siprust.overlayEnv" (dict "into" $env "from" $c.env) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cdr-consumer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "cdr-consumer") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: cdr-consumer }
+  template:
+    metadata:
+      labels:
+        {{- include "siprust.podLabels" (dict "app" "cdr-consumer" "extra" $c.podLabels) | nindent 8 }}
+      annotations:
+        {{- include "siprust.podAnnotations" (dict "base" (dict "prometheus.io/scrape" "true" "prometheus.io/port" "9093" "prometheus.io/path" "/metrics") "extra" $c.podAnnotations) | nindent 8 }}
+    spec:
+      {{- with include "siprust.pullSecrets" . | trim }}{{ . | nindent 6 }}{{- end }}
+      {{- with include "siprust.scheduling" $c | trim }}{{ . | nindent 6 }}{{- end }}
+      containers:
+        - name: cdr-consumer
+          {{- include "siprust.image" (dict "root" $ "image" $c.image) | nindent 10 }}
+          command: {{ toJson $c.command }}
+          {{- with $c.args }}
+          args: {{ toJson . }}
+          {{- end }}
+          env:
+            {{- with include "siprust.envMap" (dict "root" $ "env" $env) | trim }}{{ . | nindent 12 }}{{- end }}
+            {{- with $c.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - { name: metrics, containerPort: 9093, protocol: TCP }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 9093 }
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+          {{- with $c.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- with $c.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $c.extraVolumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cdr-consumer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "cdr-consumer") | nindent 4 }}
+spec:
+  selector: { app: cdr-consumer }
+  ports:
+    - { name: metrics, port: 9093, targetPort: 9093, protocol: TCP }
+{{- end }}

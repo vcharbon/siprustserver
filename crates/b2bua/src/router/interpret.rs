@@ -3,49 +3,26 @@
 //! with terminal eviction last (ADR-0020 X2) and fire-and-forget callouts
 //! detached at the end.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
-use call::helpers::{seal_termination_seq, seal_turn};
-use call::{CallModelState, TimerType};
-use sip_message::Method;
-use sip_txn::TxnKind;
+use call::CallModelState;
+use call::TxnKind;
+use sip_message::{Method, SipRequest};
 
 use super::callouts;
 use super::release::{release_call, ReleaseKind};
 use super::RouterCtx;
 use crate::effects::{
     BufferedObservabilityEffect, CriticalStateEffect, FireAndForgetEffect, HandlerResult,
-    OutboundBody, OutboundTxnMode, QuietTurn, SoftBoundedEffect,
+    OutboundBody, OutboundTxnMode, SoftBoundedEffect,
 };
 
-/// The quiet class the turn is persisted under, or `None` for a write. An
-/// author's class is a candidate; the turn's effect set decides. A quiet turn
-/// is exactly: an `Active` call, one outbound effect and it the retained
-/// datagram's repeat, no soft, buffered or fire-and-forget effect, and no
-/// critical effect but the rung's own re-arm for [`QuietTurn::OwnRung`]. A
-/// rule that reaches the re-ACK beside anything else — a BYE, a CDR event, a
-/// timer — is a write, as is a re-ACK on a terminating call, whose flush the
-/// teardown needs.
-fn quiet_class(result: &HandlerResult) -> Option<QuietTurn> {
-    let kind = result.effects.quiet?;
-    let fx = &result.effects;
-    let one_repeat =
-        matches!(fx.outbound.as_slice(), [eff] if matches!(eff.body, OutboundBody::Datagram(_)));
-    let critical_is_own = match (kind, fx.critical.as_slice()) {
-        (QuietTurn::ReAck, []) => true,
-        (QuietTurn::OwnRung, [CriticalStateEffect::ScheduleTimer(entry)]) => {
-            matches!(entry.timer_type, TimerType::Rung { .. })
-        }
+/// Whether `call_ref`'s primary is another node that has departed.
+fn primary_departed(ctx: &RouterCtx, call_ref: &str) -> bool {
+    match (&ctx.departed, call::call_ref_primary(call_ref)) {
+        (Some(departed), Some(primary)) => primary != ctx.config.self_ordinal && departed(primary),
         _ => false,
-    };
-    let quiet = result.call.state == CallModelState::Active
-        && one_repeat
-        && critical_is_own
-        && fx.soft.is_empty()
-        && fx.buffered.is_empty()
-        && fx.fire_and_forget.is_empty();
-    quiet.then_some(kind)
+    }
 }
 
 /// The budgets this node answers the requests sent off a call's turn by: the
@@ -57,48 +34,50 @@ fn answer_budgets(ctx: &RouterCtx) -> crate::answer_deadline::AnswerBudgets {
         http: ctx.adaptation_http.as_ref().map_or(std::time::Duration::ZERO, |p| p.default_timeout),
         admit,
         failure: crate::answer_deadline::failure_budget_under(&ctx.config, admit),
+        release: crate::answer_deadline::release_budget_under(&ctx.config, admit),
     }
 }
 
 /// Interpret a handler result: persist → critical → outbound → soft → buffered.
+/// `turn` names what the turn handled, for a model-invariant violation, and
+/// `received` is the request it handled, when its event is one.
 pub(super) async fn process_result(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
     result: HandlerResult,
     now_ms: i64,
+    turn: &(dyn std::fmt::Display + Sync),
+    received: Option<&SipRequest>,
 ) {
-    // Every request sent off the call's turn has its answer's deadline on
-    // the record the turn lands (ADR-0039).
-    let result = crate::answer_deadline::arm(result, &answer_budgets(ctx), now_ms);
-    // A counted live call always has its refresh armed within one refresh
-    // period of the learnt lease, before the record lands: the one arming of
-    // the refresh, for the admitting turn, the refresh turn and every other.
-    let result = crate::limiter::call::arm_refresh(result, now_ms, ctx.limiter.refresh_period());
-    // Every message the turn sends takes the call's stated headers before the
-    // ring records it or the wire sees it.
-    let result = crate::rules::stated_headers::stamp_outbound(result);
-    // What the turn sends is on the record before the record lands, and a
-    // termination this turn began is cut after it: every ring entry with
-    // `seq <= termination.last_seq` was received or sent as part of
-    // beginning the termination, every later one came after (the peer's 200
-    // to the relayed BYE, the ACK to a 487). The turn is sealed with it, so
-    // the next turn's entries take the next number. With the ring off the
-    // cut stays `0`.
-    let result = match crate::message_ring::Ring::of(&ctx.config) {
-        Some(ring) => HandlerResult {
-            call: seal_turn(seal_termination_seq(ring.sent(
-                result.call,
-                &result.effects.outbound,
-                now_ms,
-            ))),
-            effects: result.effects,
-        },
-        None => result,
+    let landing = crate::landing::Landing {
+        config: &ctx.config,
+        budgets: answer_budgets(ctx),
+        refresh_period: ctx.limiter.refresh_period(),
     };
+    let result = crate::landing::land(result, &landing, now_ms);
+    // Stated text the turn's messages left out is a defect of the model that
+    // stated it, reported whichever node sends them.
+    for eff in &result.effects.buffered {
+        if let BufferedObservabilityEffect::StatedTextSkipped { detail } = eff {
+            crate::model_invariants::stated_text_skipped(&ctx.metrics, &result.call, detail);
+        }
+    }
+    // The record this turn lands states the model invariants, against the
+    // one the previous turn landed.
+    if ctx.config.model_invariants {
+        let before = ctx.state.peek(call_ref);
+        let turn_record = crate::model_invariants::Turn {
+            before: before.as_ref(),
+            after: &result.call,
+            received,
+            sent: &result.effects.outbound,
+        };
+        crate::model_invariants::check(&turn_record, turn, &ctx.metrics);
+    }
     // Persist first (state lands before effects run). A quiet turn replaces
     // the live copy without a bump and skips the flush gate below: the armed
     // rung advances, the backup keeps the last write that changed the call.
-    let quiet = quiet_class(&result);
+    let quiet = crate::rule_chain::quiet_turn::class(&result);
     match quiet {
         Some(kind) => {
             ctx.state.update_quiet(result.call.clone());
@@ -114,12 +93,16 @@ pub(super) async fn process_result(
     // **exactly once** — then self-releases its live copy. It writes **NO** CDR,
     // releases **NO** limiter hold, propagates **NO** delete here (that is the
     // primary's sole authority, so exactly-once holds by construction — no
-    // cross-node idempotency). If the primary never reconciles (crashed for
-    // good, never returning inside the replica TTL), the periodic reap evicts
-    // the retained body, releases its limiter key and counts the CDR LOST — the
-    // accepted double-failure. A primary-served (non-takeover) terminal falls
-    // through to the normal discharge below.
-    if result.call.state == CallModelState::Terminated && ctx.state.is_takeover(call_ref) {
+    // cross-node idempotency). If the primary departs before reconciling, the
+    // departure sweep discharges the retained body; if it neither returns nor
+    // departs, the periodic reap evicts it, releases its limiter key and counts
+    // the CDR LOST. A copy whose primary has already departed (ADR-0047 D8) has
+    // no primary to defer to: it discharges the call below, as does a
+    // primary-served terminal.
+    if result.call.state == CallModelState::Terminated
+        && ctx.state.is_takeover(call_ref)
+        && !primary_departed(ctx, call_ref)
+    {
         // Reverse-flush the Terminated body held with the normal replica TTL
         // (`reboot_budget`): a live primary reconciles + forward-deletes it within ~1
         // poll; a rebooting primary still has its full reclaim window to fold and
@@ -143,7 +126,7 @@ pub(super) async fn process_result(
     //
     // `Terminating` MUST flush too, not just `Active`: a teardown-in-progress
     // carries authoritative state the replica needs — the b-leg `ByeSent`
-    // disposition and its bumped `local_cseq`. Without it an acting-backup
+    // disposition and its bumped `our_cseq`. Without it an acting-backup
     // whose primary crashed never propagates that progress; a reclaim racing
     // the in-flight BYE then pulls a STALE `Active` snapshot, restarts
     // termination, and re-sends the BYE at the *reused* CSeq a real UAS drops
@@ -166,11 +149,17 @@ pub(super) async fn process_result(
     for eff in &result.effects.critical {
         match eff {
             CriticalStateEffect::ScheduleTimer(entry) => {
+                if crate::trace::sampled(&result.call) {
+                    crate::trace::emit::timer_arm(&result.call, now_ms, entry);
+                }
                 let incarnation = Some(result.call.incarnation().to_string());
                 ctx.timers.schedule(entry.clone(), call_ref.to_string(), incarnation).await;
             }
-            CriticalStateEffect::CancelTimer { id } => {
-                ctx.timers.cancel(call_ref.to_string(), id.clone()).await
+            CriticalStateEffect::CancelTimer { key } => {
+                if crate::trace::sampled(&result.call) {
+                    crate::trace::emit::timer_cancel(&result.call, now_ms, key);
+                }
+                ctx.timers.cancel(call_ref.to_string(), key.clone()).await
             }
             CriticalStateEffect::CancelAllTimers => {
                 ctx.timers.cancel_all(call_ref.to_string()).await
@@ -207,6 +196,8 @@ pub(super) async fn process_result(
             BufferedObservabilityEffect::TerminationUnrecorded => {
                 ctx.metrics.bump_termination_unrecorded()
             }
+            // Reported as the turn landed.
+            BufferedObservabilityEffect::StatedTextSkipped { .. } => {}
         }
     }
 
@@ -248,28 +239,24 @@ pub(super) async fn process_result(
                     },
                 );
             }
-            FireAndForgetEffect::FailureAsyncHttp {
-                call_ref,
-                request,
-                limiter_change,
-                deadline,
-            } => {
+            FireAndForgetEffect::FailureAsyncHttp { call_ref, request, limiter, deadline } => {
                 callouts::spawn_failure_callout(
                     ctx,
                     &result.call,
                     call_ref,
                     request,
-                    limiter_change,
+                    limiter,
                     deadline,
                 );
             }
-            FireAndForgetEffect::ReleaseAsyncHttp { call_ref, request, limiter_change } => {
+            FireAndForgetEffect::ReleaseAsyncHttp { call_ref, request, limiter, deadline } => {
                 callouts::spawn_release_callout(
                     ctx,
                     &result.call,
                     call_ref,
                     request,
-                    limiter_change,
+                    limiter,
+                    deadline,
                 );
             }
             FireAndForgetEffect::LimiterAdmit {
@@ -312,10 +299,9 @@ async fn emit_outbound(ctx: &Arc<RouterCtx>, call_ref: &str, result: &HandlerRes
     }
 
     for eff in &result.effects.outbound {
-        let dest: SocketAddr = match format!("{}:{}", eff.destination.0, eff.destination.1).parse()
-        {
-            Ok(d) => d,
-            Err(_) => continue,
+        let Some(dest) = sip_net::ip_socket_addr(&eff.destination.0, eff.destination.1) else {
+            super::unaddressable::fail_unaddressable(ctx, call_ref, result, eff);
+            continue;
         };
         // Meter outbound requests we originate/relay (the in-dialog keepalive
         // OPTIONS lands here) — pairs with inbound responses_total{OPTIONS,200} to
@@ -338,7 +324,7 @@ async fn emit_outbound(ctx: &Arc<RouterCtx>, call_ref: &str, result: &HandlerRes
         match (&eff.body, &eff.mode) {
             // A retained emission's repeat (RFC 3261 §13.3.1.4 / §13.2.2.4,
             // RFC 3262 §3): the bytes as they are, past every transaction — the
-            // server txn that sent the original is `Completed` and would drop a
+            // server txn that sent the original is `Accepted` and would drop a
             // second final; the ACK never had one. Counted as it leaves, under
             // the label captured when it was retained.
             (OutboundBody::Datagram(emission), _) => {
@@ -380,8 +366,10 @@ async fn emit_outbound(ctx: &Arc<RouterCtx>, call_ref: &str, result: &HandlerRes
                 // owns WHEN it may go on the wire (RFC 3261 §9.1: held until the
                 // branch's first provisional, dropped at Timer B) — so it goes
                 // through `send_request`, whose CANCEL path sends raw once the
-                // txn allows it. Other raw requests (ACK) bypass the txn map.
-                if req.method() == Method::Cancel {
+                // txn allows it. An ACK goes through it too, raw: the Accepted
+                // INVITE client txn of its 2xx keeps it, and replays it to a
+                // repeat of that 2xx once this call is released (RFC 6026 §7.2).
+                if matches!(req.method(), Method::Cancel | Method::Ack) {
                     let _ = ctx.txn.send_request(req.clone(), dest, TxnKind::Invite).await;
                 } else {
                     let _ = ctx.txn.send_raw(req.image().to_vec(), dest).await;

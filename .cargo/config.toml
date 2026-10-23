@@ -36,7 +36,7 @@
 #
 # GOTCHA: `[build] rustflags` here is IGNORED wholesale if a `RUSTFLAGS` env var
 # is set — it replaces this list, it does not append. Nothing in this repo sets
-# it (justfile, Dockerfile, and the worker manifests all use a bare
+# it (the justfile and the Dockerfile use a bare
 # `cargo build`/`cargo test`); anything that does must re-state ALL THREE flags.
 [build]
 jobs = 4

@@ -22,7 +22,8 @@ use sip_message::{SipMessage, SipRequest, SipResponse};
 use sip_txn::timers::{TIMER_D, TIMER_I, TIMER_M, TXN_MAX_AGE, TXN_SWEEP_INTERVAL};
 use std::sync::Arc;
 
-use sip_txn::{IdGen, TransactionConfig, TransactionEvent, TxnKind};
+use call::TxnKind;
+use sip_txn::{IdGen, TransactionConfig, TransactionEvent};
 
 const RING_MS: u64 = 60_000;
 /// A telephony ring (Timer C > 3 min), inside `TELEPHONY_BOUND_MS`.
@@ -50,6 +51,7 @@ fn answer(req: &SipRequest, status: u16, reason: &str) -> SipResponse {
             ..Default::default()
         },
     )
+    .unwrap()
 }
 
 async fn inject_answer(stack: &Stack, req: &SipRequest, status: u16, reason: &str) {
@@ -105,7 +107,7 @@ async fn telephony_stack() -> Stack {
             udp_queue_max: 64,
             id_gen: Arc::new(IdGen::seeded(0xC0FFEE)),
             invite_initial_timeout_ms: TELEPHONY_BOUND_MS,
-            ..Default::default()
+            ..common::config()
         },
     )
     .await
@@ -226,7 +228,8 @@ async fn an_orphaned_invite_re_acks_every_2xx_repeat_after_a_long_ring() {
     let _ = stack.drain_peer();
 
     let cancel =
-        generate_cancel(&InviteClientTransactionHandle { original_invite: invite.clone() }, &[]);
+        generate_cancel(&InviteClientTransactionHandle { original_invite: invite.clone() }, &[])
+            .unwrap();
     stack.txn.send_request(cancel.clone(), addr(PEER), TxnKind::Invite).await.unwrap();
     stack.txn.cancel_txns_for_call(call_ref).await.unwrap();
     inject_answer(&stack, &invite, 200, "OK").await;
@@ -234,8 +237,12 @@ async fn an_orphaned_invite_re_acks_every_2xx_repeat_after_a_long_ring() {
     // §9.2: the callee had already answered, so the CANCEL draws a 200 only.
     inject_answer(&stack, &cancel, 200, "OK").await;
     elapse_ms(20).await;
-    let first = ack_branches(&stack.drain_peer());
+    let out = stack.drain_peer();
+    let first = ack_branches(&out);
     assert_eq!(first.len(), 1, "the orphan ACKs the 2xx");
+    let bye = request_branch(&out, "BYE").expect("the unheld dialog is ended");
+    let call_id = invite.call_id().as_str().to_string();
+    stack.inject(&response_bytes(200, "OK", "BYE", &bye, &call_id, true)).await;
     assert_ne!(first[0], branch, "§17.1.1.3: the 2xx ACK is its own transaction");
 
     // The callee's 2xx repeats (§13.3.1.4: T1 doubling, capped at T2, until

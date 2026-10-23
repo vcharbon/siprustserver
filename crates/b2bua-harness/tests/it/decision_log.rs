@@ -26,27 +26,27 @@ use b2bua_harness::{settle_until, B2buaSut};
 use call::{Call, CdrEventType, DecisionKind, DecisionMark, MessageDirection, MessageEntry};
 use scenario_harness::Harness;
 
-const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
+pub(crate) const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 
-const ALICE: &str = "127.0.0.1:5060";
-const CAROL: &str = "127.0.0.1:5070";
-const BOB: &str = "127.0.0.1:5071";
+pub(crate) const ALICE: &str = "127.0.0.1:5060";
+pub(crate) const CAROL: &str = "127.0.0.1:5070";
+pub(crate) const BOB: &str = "127.0.0.1:5071";
 const B2BUA: &str = "127.0.0.1:5080";
 
 /// The SUT under `decision`, its ring on so every message's stamp is read,
 /// keeping every terminated `Call` whole.
-struct Sut {
-    addr: SocketAddr,
+pub(crate) struct Sut {
+    pub(crate) addr: SocketAddr,
     b2bua: B2buaSut,
 }
 
 impl Sut {
-    async fn spawn(h: &Harness, decision: Arc<dyn CallDecisionEngine>) -> Self {
+    pub(crate) async fn spawn(h: &Harness, decision: Arc<dyn CallDecisionEngine>) -> Self {
         Self::spawn_with(h, decision, None, Vec::new()).await
     }
 
-    async fn spawn_with(
+    pub(crate) async fn spawn_with(
         h: &Harness,
         decision: Arc<dyn CallDecisionEngine>,
         limiter: Option<Arc<dyn CallLimiter>>,
@@ -66,7 +66,7 @@ impl Sut {
 
     /// Every call created is reaped, every limiter hold released, and the
     /// one CDR is written.
-    async fn assert_reaped(&self) -> Call {
+    pub(crate) async fn assert_reaped(&self) -> Call {
         settle_until(|| self.b2bua.is_reaped() && self.b2bua.cdr_records().len() == 1).await;
         self.b2bua.assert_fully_reaped();
         let terminated = self.b2bua.terminated_calls();
@@ -76,17 +76,17 @@ impl Sut {
 }
 
 /// `(kind, leg, label)` of every mark, the shape the assertions read.
-fn marks(call: &Call) -> Vec<(DecisionKind, Option<&str>, Option<&str>)> {
+pub(crate) fn marks(call: &Call) -> Vec<(DecisionKind, Option<&str>, Option<&str>)> {
     call.decision_log.iter().map(|m| (m.kind, m.leg_id.as_deref(), m.label.as_deref())).collect()
 }
 
 /// `(direction, method, code, decision_ordinal)` of every ring entry.
-fn stamped(entries: &[MessageEntry]) -> Vec<(MessageDirection, &str, Option<u16>, u32)> {
+pub(crate) fn stamped(entries: &[MessageEntry]) -> Vec<(MessageDirection, &str, Option<u16>, u32)> {
     entries.iter().map(|e| (e.direction, e.method.as_str(), e.code, e.decision_ordinal)).collect()
 }
 
 /// `(type, leg, decision_ordinal)` of every CDR event.
-fn events(call: &Call) -> Vec<(CdrEventType, &str, u32)> {
+pub(crate) fn events(call: &Call) -> Vec<(CdrEventType, &str, u32)> {
     call.cdr_events.iter().map(|e| (e.event_type, e.leg_id.as_str(), e.decision_ordinal)).collect()
 }
 
@@ -403,7 +403,7 @@ async fn a_release_decision_merges_its_service_ext() {
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5071);
-                r.features.platform.max_duration_sec = 5;
+                r.features.platform.max_duration_ms = 5_000;
                 r.callback_context = Some("ctx".into());
                 r.subscriptions = vec![call::ReleaseEventKind::MaxCallDuration];
                 r.service_ext = svc_slice("t-route");
@@ -447,7 +447,7 @@ async fn a_release_decision_merges_its_service_ext() {
 /// its own `svc` slice.
 fn capped_route() -> NewCallResponse {
     let mut r = route_to("127.0.0.1", 5071);
-    r.features.platform.max_duration_sec = 5;
+    r.features.platform.max_duration_ms = 5_000;
     r.callback_context = Some("ctx".into());
     r.subscriptions = vec![call::ReleaseEventKind::MaxCallDuration];
     r.service_ext = svc_slice("t-route");
@@ -655,69 +655,6 @@ async fn a_limiter_refused_route_marks_nothing_and_the_reroute_marks_once() {
     let _report = h.finish().await;
 }
 
-/// A scripted engine whose failure consult never answers: the fold is the
-/// stack's own resolution.
-struct ErringFailover(ScriptedDecisionEngine);
-
-#[async_trait]
-impl CallDecisionEngine for ErringFailover {
-    async fn new_call(&self, req: NewCallRequest) -> Result<NewCallResponse, CallDecisionError> {
-        self.0.new_call(req).await
-    }
-    async fn call_failure(
-        &self,
-        _req: CallFailureRequest,
-    ) -> Result<CallFailureResponse, CallDecisionError> {
-        Err(CallDecisionError::Unavailable("down".into()))
-    }
-    async fn call_refer(
-        &self,
-        req: CallReferRequest,
-    ) -> Result<CallReferResponse, CallDecisionError> {
-        self.0.call_refer(req).await
-    }
-    async fn call_release(
-        &self,
-        req: CallReleaseRequest,
-    ) -> Result<CallReleaseResponse, CallDecisionError> {
-        self.0.call_release(req).await
-    }
-}
-
-/// An unanswered failure consult is no decision: the fold that relays the
-/// failure adds no mark, and everything it emits keeps the route's ordinal.
-#[tokio::test(start_paused = true)]
-async fn an_unanswered_failure_consult_marks_nothing() {
-    let h = Harness::new("decision-log-consult-error");
-    let alice = h.agent("alice", ALICE).await;
-    let carol = h.agent("carol", CAROL).await;
-    let decision = Arc::new(ErringFailover(
-        ScriptedDecisionEngine::builder()
-            .fallback(|_| {
-                let mut r = route_to("127.0.0.1", 5070);
-                r.callback_context = Some("ctx".into());
-                r.label = Some("first".into());
-                NewCallResponse::Route(r)
-            })
-            .build(),
-    ));
-    let sut = Sut::spawn(&h, decision).await;
-
-    let mut call = alice.invite(&carol).with_sdp(OFFER).through(sut.addr).send().await;
-    carol.receive("INVITE").await.respond(486, "Busy Here").await;
-    carol.receive("ACK").await;
-    call.expect(486).await;
-
-    let done = sut.assert_reaped().await;
-    assert_eq!(marks(&done), vec![(DecisionKind::Route, Some("a"), Some("first"))]);
-    let a = stamped(&done.a_leg.messages.entries);
-    assert_eq!(a[2], (Relayed, "INVITE", Some(486), 1), "the relayed failure: {a:?}");
-    assert!(a[2..].iter().all(|r| r.3 == 1), "{a:?}");
-    assert!(events(&done)[1..].iter().all(|e| e.2 == 1), "{:?}", events(&done));
-
-    let _report = h.finish().await;
-}
-
 // ── claimer: a service whose rule takes the failover fold before the core's,
 //    as a callflow service does. ─────────────────────────────────────────────
 mod claimer {
@@ -755,20 +692,18 @@ mod claimer {
                 let dest = payload.get("destination")?;
                 let host = dest.get("host")?.as_str()?.to_string();
                 let port = dest.get("port")?.as_u64()? as u16;
-                Some(RuleHandleResult::new(vec![
-                    RuleAction::CreateLeg {
-                        destination: (host, port),
-                        new_ruri: payload.get("new_ruri").and_then(|v| v.as_str()).map(str::to_string),
-                        new_from: None,
-                        new_to: None,
-                        no_answer_timeout_sec: None,
-                        callback_context: None,
-                        body_override: None,
-                        header_updates: Vec::new(),
-                        header_adds: vec![],
-                        kind: None,
-                    },
-                ]))
+                Some(RuleHandleResult::new(vec![RuleAction::CreateLeg {
+                    destination: (host, port),
+                    new_ruri: payload.get("new_ruri").and_then(|v| v.as_str()).map(str::to_string),
+                    new_from: None,
+                    new_to: None,
+                    callback_context: None,
+                    body_override: None,
+                    header_updates: Vec::new(),
+                    header_adds: vec![],
+                    kind: None,
+                    attempt: None,
+                }]))
             },
         }
     }

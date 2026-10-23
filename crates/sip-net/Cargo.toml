@@ -4,7 +4,10 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "SIP signaling network layer (UDP transport + SignalingNetwork) — Rust port of sipjsserver src/sip/{SignalingNetwork,UdpTransport} core. Real (tokio), simulated (in-memory fabric), and a recording/audit decorator."
+description = "SIP signaling network layer (UDP transport + SignalingNetwork) — Rust port of sipjsserver src/sip/{SignalingNetwork,UdpTransport} core: the seam and its real (tokio) implementation. The simulated fabric and the recording/audit decorators live in sip-net-testkit."
+
+[package.metadata.purity]
+tier = "shell"
 
 # The IPv4/IPv6 path-MTU-discovery mode (ADR-0027) has no safe wrapper: it is a
 # raw `setsockopt`/`getsockopt`, which the workspace's `forbid(unsafe_code)`
@@ -12,12 +15,15 @@ description = "SIP signaling network layer (UDP transport + SignalingNetwork) �
 # crate's guarantee still holds — and the two call sites in `fragmentation.rs`
 # each carry a narrow `#[allow(unsafe_code)]` with a SAFETY comment. Leaving
 # `[lints] workspace = true` out drops the workspace table entirely, so the
-# block below MIRRORS it — a lint added there must be added here too.
+# clippy table below restates it exactly (scripts/purity.py checks it).
 [lints.rust]
 unsafe_code = "deny"
 
 [lints.clippy]
 too_many_lines = "warn"
+disallowed_macros = "allow"
+disallowed_methods = "allow"
+disallowed_types = "allow"
 
 [dependencies]
 tokio = { workspace = true }
@@ -25,7 +31,7 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 socket2 = { workspace = true }
 libc = { workspace = true }
-layer-harness = { path = "../layer-harness" }
 sip-clock = { path = "../sip-clock" }
+# The IP-literal readers the socket addresses are built with (re-exported);
+# the loopback tests parse what they received.
 sip-message = { path = "../sip-message" }
-rfc-rules = { path = "../rfc-rules" }

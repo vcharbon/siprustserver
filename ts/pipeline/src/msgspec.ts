@@ -18,6 +18,7 @@ import { classKey, type Plan } from "./plan.js"
 import { peerSide, type ActorObs, type Layout } from "./topology.js"
 import {
   addrForm,
+  canonicalName,
   hasHeader,
   headersInOrder,
   identityNameAddr,
@@ -182,12 +183,13 @@ export const buildMsg = (
 
   const frozen: Array<Msg.Header> = []
   for (const h of headersInOrder(msg)) {
-    if (OMIT_HEADERS.some((o) => sameHeader(o, h.name))) continue
-    if (STACK_DERIVED_HEADERS.some((o) => sameHeader(o, h.name))) continue
-    if (!emits && STACK_OWNED_EXPECT_HEADERS.some((o) => sameHeader(o, h.name))) continue
-    if (!emits && SENDER_CLOCK_HEADERS.some((o) => sameHeader(o, h.name))) continue
-    if (!emits && !carriesBody(msg) && BODY_DESCRIPTOR_HEADERS.some((o) => sameHeader(o, h.name))) continue
-    const value = NUMBER_BEARING_HEADERS.some((n) => sameHeader(n, h.name))
+    const name = canonicalName(h.name)
+    if (CANONICAL.omit.has(name)) continue
+    if (CANONICAL.stackDerived.has(name)) continue
+    if (!emits && CANONICAL.stackOwnedExpect.has(name)) continue
+    if (!emits && CANONICAL.senderClock.has(name)) continue
+    if (!emits && !carriesBody(msg) && CANONICAL.bodyDescriptor.has(name)) continue
+    const value = CANONICAL.numberBearing.has(name)
       ? composeNumbers(layout, plan, h.value)
       : h.value
     frozen.push({ name: h.name, value })
@@ -251,6 +253,16 @@ const NUMBER_BEARING_HEADERS = [
   "Refer-To",
   "Referred-By"
 ]
+
+/** Each header list above by canonical name, so a header is canonicalised once and looked up. */
+const CANONICAL = {
+  omit: new Set(OMIT_HEADERS.map(canonicalName)),
+  stackDerived: new Set(STACK_DERIVED_HEADERS.map(canonicalName)),
+  stackOwnedExpect: new Set(STACK_OWNED_EXPECT_HEADERS.map(canonicalName)),
+  senderClock: new Set(SENDER_CLOCK_HEADERS.map(canonicalName)),
+  bodyDescriptor: new Set(BODY_DESCRIPTOR_HEADERS.map(canonicalName)),
+  numberBearing: new Set(NUMBER_BEARING_HEADERS.map(canonicalName))
+}
 
 /** The identity-registry name of a tier-2 position (§8.5's one encoding). */
 const identityOf = (pos: string): string | undefined => {

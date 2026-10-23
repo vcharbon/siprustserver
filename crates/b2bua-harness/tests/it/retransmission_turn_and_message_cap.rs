@@ -215,7 +215,7 @@ async fn a_reliable_provisional_rung_does_not_count_toward_the_message_cap() {
         RUNGS_PROVISIONAL,
         "every rung was persisted as a quiet turn",
     );
-    assert_eq!(b2bua.metrics().repeat_give_ups_total("prack-of"), 0, "no give-up");
+    assert_eq!(b2bua.metrics().repeat_give_ups_total("await-prack"), 0, "no give-up");
 
     let records = b2bua.cdr_records();
     assert_eq!(records.len(), 1, "one CDR");

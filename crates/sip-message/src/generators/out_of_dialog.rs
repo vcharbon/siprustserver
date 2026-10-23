@@ -2,6 +2,7 @@
 //! MESSAGE, REGISTER, SUBSCRIBE, PUBLISH (RFC 3261 §8.1.1).
 
 use super::emit;
+use super::error::GenerateError;
 use super::methods::OutOfDialogMethod;
 use crate::draft::RequestDraft;
 use crate::header::{self, CSeq, CallId, MaxForwards, MediaType, Uri, Via};
@@ -40,12 +41,12 @@ pub struct GenerateOutOfDialogRequestOpts {
 pub fn generate_out_of_dialog_request(
     method: OutOfDialogMethod,
     opts: &GenerateOutOfDialogRequestOpts,
-) -> SipRequest {
-    let uri = opts.request_uri.clone().expect("request_uri required");
-    let hop = opts.via.clone().expect("via required");
-    let contact = opts.contact.clone().expect("contact required");
-    let from = opts.from.clone().expect("from required");
-    let to = opts.to.clone().expect("to required");
+) -> Result<SipRequest, GenerateError> {
+    let uri = opts.request_uri.clone().ok_or(GenerateError::Missing("request_uri"))?;
+    let hop = opts.via.clone().ok_or(GenerateError::Missing("via"))?;
+    let contact = opts.contact.clone().ok_or(GenerateError::Missing("contact"))?;
+    let from = opts.from.clone().ok_or(GenerateError::Missing("from"))?;
+    let to = opts.to.clone().ok_or(GenerateError::Missing("to"))?;
     let verb = Method::from(method);
 
     let draft = RequestDraft::new(verb.clone(), uri)

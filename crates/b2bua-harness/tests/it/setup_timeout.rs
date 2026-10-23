@@ -27,7 +27,8 @@ use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
 use b2bua_harness::{settle_until, B2buaSut};
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpServerHandle, HttpTransport};
+use http_net_testkit::SimulatedHttpNetwork;
 use scenario_harness::Harness;
 use sip_clock::Clock;
 
@@ -37,7 +38,7 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 const LIMITER_ADDR: &str = "10.0.0.1:8080";
 
 /// The production default for the a-leg setup deadline (`B2buaConfig`
-/// `setup_timeout_sec`): strictly below the configured initial-INVITE bound
+/// `setup_timeout_ms`): strictly below the configured initial-INVITE bound
 /// (`invite_txn_timeout_sec`, default 158 s) so the rules path owns the
 /// teardown (clean 408 + CANCEL + obligations) while the txn timer stays the
 /// lower-layer backstop. The torn-down test rides the *default* deliberately:

@@ -32,7 +32,7 @@ mod ringwatch {
         ServiceSeed, Terminal, TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
-    use call::{CdrEventType, Direction, LegState, TimerType};
+    use call::{CdrEventType, Direction, TimerKey, TimerType};
 
     pub const DEADLINE_SEC: i64 = 5;
     const T18X: TimerType = TimerType::service(RINGWATCH, "deadline18x");
@@ -45,11 +45,10 @@ mod ringwatch {
         // delay from its routing decision).
         init: |_call: &RuleCall| {
             Some(ServiceSeed::new(RwState::Armed.label()).with_actions(vec![
-                RuleAction::ScheduleTimer {
-                    timer_type: TimerType::service(RINGWATCH, "deadline18x"),
-                    delay: TimerDelay::secs(DEADLINE_SEC),
-                    leg_id: None,
-                },
+                RuleAction::arm(
+                    TimerKey::call(TimerType::service(RINGWATCH, "deadline18x")),
+                    TimerDelay::secs(DEADLINE_SEC),
+                ),
             ]))
         },
         rules: [ disarm_on_18x(), reap_on_deadline() ],
@@ -66,7 +65,7 @@ mod ringwatch {
             transitions: [ RwState::Armed => RwState::Disarmed ],
             effects: [
                 Effect::Relay { label: "relay the 18x onward" },
-                Effect::GuardTimer { timer: T18X, label: "disarm deadline18x" },
+                Effect::GuardTimer { timer: T18X, scope: call::TimerScopeKind::Call, label: "disarm deadline18x" },
             ],
             matcher: Match::response().method("INVITE").status_class(1).direction(Direction::FromB),
             handle: |ctx: &RuleContext| {
@@ -74,12 +73,7 @@ mod ringwatch {
                 let status = ctx.response().map(|r| r.status() as i64);
                 Some(RuleHandleResult::new(vec![
                     // The symmetric disarm: id minted from the ONE recipe.
-                    RuleAction::cancel_timer(&T18X, None),
-                    RuleAction::UpdateLegState {
-                        leg_id: b.clone(),
-                        state: LegState::Early,
-                        disposition: None,
-                    },
+                    RuleAction::cancel(TimerKey::call(T18X)),
                     RuleAction::RelayToPeer { transform: Default::default() },
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Provisional,
@@ -143,25 +137,23 @@ mod dualkeys {
         ServiceSeed, Terminal, TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
-    use call::{CdrEventType, TimerType};
+    use call::{CdrEventType, TimerKey, TimerType};
 
     define_service! {
         id: "dualkeys",
         machine: DUALKEYS,
         states: DkState { Watching },
-        // Two distinct keys → two distinct timers (distinct persisted ids).
+        // Two distinct keys → two distinct timers.
         init: |_call: &RuleCall| {
             Some(ServiceSeed::new(DkState::Watching.label()).with_actions(vec![
-                RuleAction::ScheduleTimer {
-                    timer_type: TimerType::service(DUALKEYS, "fast"),
-                    delay: TimerDelay::secs(3),
-                    leg_id: None,
-                },
-                RuleAction::ScheduleTimer {
-                    timer_type: TimerType::service(DUALKEYS, "slow"),
-                    delay: TimerDelay::secs(6),
-                    leg_id: None,
-                },
+                RuleAction::arm(
+                    TimerKey::call(TimerType::service(DUALKEYS, "fast")),
+                    TimerDelay::secs(3),
+                ),
+                RuleAction::arm(
+                    TimerKey::call(TimerType::service(DUALKEYS, "slow")),
+                    TimerDelay::secs(6),
+                ),
             ]))
         },
         rules: [ on_any_key() ],
@@ -180,6 +172,7 @@ mod dualkeys {
             effects: [
                 Effect::GuardTimer {
                     timer: TimerType::service(DUALKEYS, "fast"),
+                    scope: call::TimerScopeKind::Call,
                     label: "re-arm fast",
                 },
                 Effect::LifecycleCommand { label: "terminate on slow" },
@@ -195,11 +188,10 @@ mod dualkeys {
                             status_code: None,
                             reason: Some("dual_fast".into()),
                         },
-                        RuleAction::ScheduleTimer {
-                            timer_type: TimerType::service(DUALKEYS, "fast"),
-                            delay: TimerDelay::secs(2),
-                            leg_id: None,
-                        },
+                        RuleAction::arm(
+                            TimerKey::call(TimerType::service(DUALKEYS, "fast")),
+                            TimerDelay::secs(2),
+                        ),
                     ])),
                     "slow" => Some(RuleHandleResult::new(vec![
                         RuleAction::AddCdrEvent {
@@ -224,7 +216,7 @@ mod dualkeys {
 
 /// Fire path: bob never sends a provisional → the service's own timer fires at
 /// its deadline, the exact-key rule catches it, the caller gets the 480 and the
-/// b-leg is CANCELled — a service watchdog with zero core involvement.
+/// silent b-leg is reaped — a service watchdog with zero core involvement.
 #[tokio::test(start_paused = true)]
 async fn service_timer_fires_and_owning_rule_reaps_the_silent_call() {
     let h = Harness::new("service-timer-fires");
@@ -249,19 +241,14 @@ async fn service_timer_fires_and_owning_rule_reaps_the_silent_call() {
     assert_eq!(final_resp.status(), 480, "service watchdog authored the caller's final");
 
     // Bob never sent ANY response, so the b-leg CANCEL is HELD (RFC 3261 §9.1)
-    // for the grace window and then sent regardless (ADR-0028) — bob, gone
-    // dark, receives exactly one grace-expiry CANCEL and answers nothing. The
-    // terminating backstop (armed at BeginTermination) reaps the silent leg —
-    // advance exactly past it, so a regression that falls back to the 150 s
-    // SetupTimeout fails here instead of passing under a longer pump.
+    // and never reaches him. The terminating backstop (armed at
+    // BeginTermination) reaps the silent leg — advance exactly past it, so a
+    // regression that falls back to the 150 s SetupTimeout fails here instead
+    // of passing under a longer pump.
     h.advance(Duration::from_millis(call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000)).await;
     assert!(
-        bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_some(),
-        "the grace expiry puts the b-leg CANCEL on the wire (ADR-0028)"
-    );
-    assert!(
         bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_none(),
-        "exactly one grace-expiry CANCEL — never a second"
+        "no CANCEL toward a branch that drew no provisional (§9.1)"
     );
 
     settle_until(|| b2bua.cdr_records().len() == 1).await;

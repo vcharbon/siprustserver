@@ -112,8 +112,8 @@ async fn a_2xx_repeated_before_the_callers_ack_draws_none_then_hers_relays() {
     );
 }
 
-const REOFFER: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
-const REANSWER: &str = "v=0\r\no=bob 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
+const REOFFER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
+const REANSWER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
 
 const BOB_REINVITE_ADDR: &str = "127.0.0.1:5077";
 
@@ -142,6 +142,7 @@ async fn a_reinvite_2xx_repeated_before_the_ack_draws_none_then_the_originators_
     let mut reinv = dialog.reinvite(Some(REOFFER)).await;
     let reinvite_cseq = dialog.local_cseq();
     let mut bob_reinv = bob.receive("INVITE").await;
+    let relayed_cseq = bob_reinv.request().cseq().seq();
     bob_reinv.respond(200, "OK").with_sdp(REANSWER).await;
     reinv.expect(200).await;
     bob_reinv.respond(200, "OK").with_sdp(REANSWER).await;
@@ -172,7 +173,7 @@ async fn a_reinvite_2xx_repeated_before_the_ack_draws_none_then_the_originators_
         .iter()
         .filter(|e| e.from == b2bua.addr && e.to == bob_addr && e.raw.starts_with(b"ACK "))
         .map(|e| e.raw.clone())
-        .filter(|raw| sip_message::sniff::cseq_number(raw) == Some(reinvite_cseq))
+        .filter(|raw| sip_message::sniff::cseq_number(raw) == Some(relayed_cseq))
         .collect();
     assert_eq!(reinvite_acks.len(), 2, "the originator's ACK, then that same ACK re-sent");
     assert_eq!(
@@ -197,8 +198,9 @@ async fn a_delayed_offer_2xx_repeated_before_the_ack_draws_none_then_the_answer_
 
     // ── alice INVITEs bodyless: the offer is bob's to make ────────────────────
     let mut call = alice.invite(&bob).through(b2bua.addr).send().await;
-    let invite_cseq = call.invite_cseq();
     let mut uas = bob.receive("INVITE").await;
+    // The ACKs toward the callee carry the CSeq of the INVITE it took.
+    let invite_cseq = uas.request().cseq().seq();
     assert!(
         uas.request().body().is_empty(),
         "the offerless INVITE reached bob with a substituted body",

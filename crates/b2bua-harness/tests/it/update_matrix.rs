@@ -18,7 +18,7 @@
 
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use call::features::RelayFirst18xStrategy;
-use scenario_harness::{Harness, WaiverScope};
+use scenario_harness::{Harness, Party, WaiverScope};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::{HeaderName, RSeq};
 use sip_message::types::SipResponse;
@@ -31,6 +31,10 @@ const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
 const REOFFER_HOLD: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendonly\r\n";
 const REANSWER_HELD: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=recvonly\r\n";
+/// Bob's own hold re-offer, then his session back to the plan `ANSWER` stated:
+/// each the next version of his session (RFC 3264 §8).
+const BOB_REOFFER_HOLD: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendonly\r\n";
+const BOB_ANSWER_V3: &str = "v=0\r\no=bob 1 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
 
 // ── Established dialog: UPDATE WITHOUT SDP (session refresh) ──────────────────
 
@@ -207,12 +211,12 @@ async fn early_not_pracked_update_offer_b_to_a_is_refused_491() {
 
     // bob's early dialog (local_tag = the auto-minted 180 To-tag).
     let mut bob_dialog = uas.dialog();
-    let mut update = bob_dialog.request(InDialogMethod::Update, Some(REOFFER_HOLD)).await;
+    let mut update = bob_dialog.request(InDialogMethod::Update, Some(BOB_REOFFER_HOLD)).await;
     let refused = update.expect(491).await;
     assert!(refused.raw(HeaderName::RetryAfter).next().is_none(), "a 491 with no Retry-After");
 
     // answer + teardown
-    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    uas.respond(200, "OK").with_sdp(BOB_ANSWER_V3).await;
     call.expect(200).await;
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
@@ -258,7 +262,7 @@ async fn early_pracked_update_no_sdp_a_to_b() {
     let mut prack = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&atag)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&p183)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&p183), Party::Caller.first_cseq()))
         .send()
         .await;
     bob.receive("PRACK").await.respond(200, "OK").await;
@@ -347,7 +351,13 @@ async fn early_update_forking_b_to_a_second_fork() {
     let b2bua =
         B2buaSut::route_all_to("127.0.0.1", 5076).start(&h, "b2bua", "127.0.0.1:5086").await;
 
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
     let mut uas = bob.receive("INVITE").await;
 
     // Fork 1: explicit tag (does NOT become the ServerTxn's sticky tag).
@@ -360,7 +370,7 @@ async fn early_update_forking_b_to_a_second_fork() {
     let mut prack = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&f2_atag)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&early)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&early), Party::Caller.first_cseq()))
         .send()
         .await;
     bob.receive("PRACK").await.respond(200, "OK").await;
@@ -368,7 +378,7 @@ async fn early_update_forking_b_to_a_second_fork() {
 
     // bob originates the UPDATE on fork 2's early dialog toward the caller.
     let mut fork2 = uas.dialog();
-    let mut update = fork2.request(InDialogMethod::Update, Some(REOFFER_HOLD)).await;
+    let mut update = fork2.request(InDialogMethod::Update, Some(BOB_REOFFER_HOLD)).await;
     let mut at_alice = alice.receive("UPDATE").await;
     assert!(
         String::from_utf8_lossy(at_alice.request().body()).contains("a=sendonly"),
@@ -378,7 +388,7 @@ async fn early_update_forking_b_to_a_second_fork() {
     update.expect(200).await;
 
     // Answer on fork 2 (its sticky tag) with the SDP answer, teardown.
-    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    uas.respond(200, "OK").with_sdp(BOB_ANSWER_V3).await;
     call.expect(200).await;
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
@@ -424,7 +434,7 @@ async fn prack_forking_sdp_and_bodyless_updates_worst_case() {
     let mut prack1 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&f1)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&p1)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&p1), Party::Caller.first_cseq()))
         .send()
         .await;
     bob.receive("PRACK").await.respond(200, "OK").await;
@@ -438,7 +448,7 @@ async fn prack_forking_sdp_and_bodyless_updates_worst_case() {
     let mut prack2 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&f2)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&p2)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&p2), Party::Caller.first_cseq()))
         .send()
         .await;
     let mut prack2_at_bob = bob.receive("PRACK").await;
@@ -475,7 +485,7 @@ async fn prack_forking_sdp_and_bodyless_updates_worst_case() {
     u1.expect(200).await;
 
     // ── Answer on fork 2 (the non-first fork that carried the SDP UPDATE) ──
-    uas.respond(200, "OK").with_to_tag("bf2").with_sdp(ANSWER).await;
+    uas.respond(200, "OK").with_to_tag("bf2").with_sdp(REANSWER_HELD).await;
     let ok = call.expect(200).await;
     assert_eq!(ok.to().tag(), Some(f2.as_str()), "confirmed dialog is the winning fork 2");
     let mut dialog = call.ack().await;

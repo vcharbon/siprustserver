@@ -52,8 +52,8 @@ Severity = operational risk if the behaviour is wrong.
 | INV-TXN-4 | 17.1.1.2 | Response stops Timer A | First response halts retransmit | med | ✅ | sip-txn `provisional_response_stops_retransmit` |
 | INV-TXN-5 | 17.1.1.2 | Non-2xx → Timer D absorb | Completed absorbs retransmitted final | med | ✅ | sip-txn `non_2xx_invite_final_absorbs_retransmits_for_timer_d` |
 | INV-100-1 | 17.2.1 | Slow first response on A-leg | Send 100 Trying locally (≤T1) | med | ✅ | sip-txn `absorbs_100_for_invite_cseq` |
-| INV-100-2 | 8.1.1.7 | B-leg 100 Trying | Absorbed, not mapped to A-leg | low | 🟡 | proxy `absorbs_downstream_100`; add B2BUA `bleg_100_not_forwarded` |
-| NIT-1 | 17.1.2.2 | B-leg BYE/OPTIONS no reply → Timer E | Non-INVITE retransmit to T2 | high | ✅ | sip-txn `non_invite_keeps_retransmitting_after_provisional` |
+| INV-100-2 | 8.1.1.7 | B-leg 100 Trying | Absorbed, not mapped to A-leg | low | 🟡 | sip-txn `absorbs_100_for_invite_cseq` (the b-leg client transaction takes it; the rules never see it); add B2BUA `bleg_100_not_forwarded` |
+| NIT-1 | 17.1.2.2 | B-leg BYE/OPTIONS no reply → Timer E | Non-INVITE retransmit to T2 | high | ✅ | sip-txn `non_invite_timer_e_resets_to_t2_on_a_proceeding_fire` |
 | NIT-2 | 17.1.2.2 | B-leg non-INVITE → Timer F | Give up request, still tear down | high | 🟡 | bye_no_200_reap covers wedged BYE; add `bleg_bye_timerF_timeout_still_tears_down` |
 | NIT-3 | 17.2.2 | A-leg BYE retransmit → Timer J | Absorb; one B-leg BYE only | high | ✅ | sip-txn `cancel_txns_for_call_spares_server_timer_j_absorption` |
 | RTX-4 | 17 | Terminal state releases all leg timers | CancelAll physically frees queue slots | high | ✅ | b2bua `cancel_physically_reclaims_the_queue_slot`, rules `invariants_append_cleanup_on_terminated` |
@@ -64,8 +64,8 @@ Severity = operational risk if the behaviour is wrong.
 | ID | § | Scenario | Expected B2BUA behaviour | Sev | Status | Where / suggested test |
 |----|---|----------|--------------------------|-----|--------|------------------------|
 | ACK-1 | 17.1.1.3 | B-leg non-2xx → ACK | B2BUA generates ACK, same branch (part of INVITE txn) | high | ✅ | sip-txn `client_auto_acks_non_2xx_final` |
-| ACK-2 | 13.2.2.4 | B-leg 2xx → ACK | New branch, separate txn, dialog target | high | 🟡 | sip-txn `ack_for_2xx_passes_through`, generators ACK-2xx; add B2BUA `bleg_2xx_ack_new_branch_separate_txn` |
-| ACK-3 | 13.3.1.4 | A-leg 2xx ACK arrives | Absorb, stop 2xx resend, not forwarded | high | ✅ | sip-txn `ack_for_2xx_passes_through` + `self_release_fires...` |
+| ACK-2 | 13.2.2.4 | B-leg 2xx → ACK | New branch, separate txn, dialog target | high | 🟡 | sip-txn `an_answered_invite_absorbs_a_late_copy_until_timer_l`, generators ACK-2xx; add B2BUA `bleg_2xx_ack_new_branch_separate_txn` |
+| ACK-3 | 13.3.1.4 | A-leg 2xx ACK arrives | Absorb, stop 2xx resend, not forwarded | high | ✅ | sip-txn `an_answered_invite_absorbs_a_late_copy_until_timer_l` + `self_release_fires...` |
 | ACK-4 | 13.3.1.4 | A-leg 2xx, ACK never arrives | Retransmit 2xx then BYE | high | ❌ | add `aleg_2xx_no_ack_retransmit_then_bye` |
 | ACK-5 | 13.2.2.4 | A-leg ACK carries SDP (delayed-offer answer) | Honour body, map to B-leg | med | ✅ | reinvite `alice_reinvite`, fake_prack `delayed_offer_fallback` |
 | ACK-6 | 17.1.1.2 | Retransmit non-2xx after ACK | Resend same ACK (Timer D) | med | ✅ | sip-txn `non_2xx_invite_final_absorbs_retransmits_for_timer_d` |
@@ -77,14 +77,14 @@ Severity = operational risk if the behaviour is wrong.
 |----|---|----------|--------------------------|-----|--------|------------------------|
 | CANCEL-1 | 9.1 | A-leg CANCEL while B-leg pending | 200 to CANCEL, 487 to A-INVITE, mint B-leg CANCEL | high | ✅ | sip-txn `cancel_sends_200_and_487_and_emits_cancelled` + cancel_during_slow_decision |
 | CANCEL-2 | 9.2 | A-leg CANCEL after B-leg 2xx | Too late: no B-CANCEL, BYE the new leg | high | ❌ | add `cancel_after_2xx_no_bleg_cancel_bye_instead` |
-| CANCEL-3 | 9.2 | CANCEL for unknown txn | 481, never forward | med | ✅ | sip-txn `unmatched_cancel_gets_481_and_emits_nothing` |
+| CANCEL-3 | 9.2 | CANCEL for unknown txn | 481, never forward | med | ✅ | sip-txn `unmatched_cancel_is_handed_up_unanswered`; b2bua-harness `message_ring::a_stray_cancel_and_its_481_are_recorded` |
 | CANCEL-4 | 9.1 | B-leg CANCEL before any 1xx | Defer CANCEL until provisional | high | ✅ | rfc-audit `cancel-after-1xx`; suppress_18x `failover_no_answer` |
 | CANCEL-5 | 9.2 | CANCEL matching by branch | Matches INVITE server txn by top-Via | high | ✅ | proxy `cancel_after_a_minute...follows_the_invite`, generators CANCEL Via verbatim |
 | CANCEL-6 | 9.1 | B-leg 2xx after B-leg CANCEL (glare) | 2xx wins: ACK then BYE, no leak | high | ❌ | add `bleg_cancel_glare_2xx_ack_then_bye` |
 | CANCEL-7 | 9.1/16.10 | CANCEL Route echoes INVITE | Same Route set + B-leg branch | med | ✅ | rfc-audit `cancel-route-echoes-invite` |
 | 487-1 | 9.1 | A-INVITE terminated after CANCEL | 487, server txn drives Timer G/H | high | ✅ | sip-txn `cancel_sends_200_and_487...` |
 | 487-3 | 9.1 | B-leg returns 487 | ACK it, map to A-leg | med | 🟡 | covered via failure relay; add explicit `bleg_487_acked_and_mapped` |
-| 487-4 | 17.2.1 | Late decision authors a second A-leg final after the 487 | Drop it: one final per server txn (only same-status retransmits) | high | ✅ | rfc-audit `singleFinalPerServerTxn`; b2bua `no_answer_cancelled_call`, `decision_lands_on_cancelled_call` |
+| 487-4 | 17.2.1 | Late decision authors a second A-leg final after the 487 | Drop it: one final per server txn (only same-status retransmits) | high | ✅ | rfc-audit `single-final-per-server-txn`; b2bua-harness `decision_lands_on_cancelled_call::route_decision_landing_after_the_callers_cancel_is_dropped`, `no_answer_cancelled_call::no_answer_deadline_on_a_caller_cancelled_call_is_inert` |
 
 ### re-INVITE / glare
 
@@ -104,10 +104,10 @@ Severity = operational risk if the behaviour is wrong.
 | BYE-2 | 15.1.2 | BYE unknown dialog | 481 | high | ✅ | orphan_reject_no_leak; rfc-audit `unknown-dialog-481` |
 | BYE-3 | 15 | BYE on early dialog | Use CANCEL not BYE | med | ✅ | rfc-audit `no-bye-outside-or-early-dialog` |
 | BYE-4 | 12.2 | Simultaneous double BYE | Idempotent teardown | high | 🟡 | reaper covers wedge; add `simultaneous_double_bye_idempotent` |
-| BYE-5 | 12.2 | In-dialog request per-leg routing | Uses leg's remote target + route set | high | ✅ | b2bua `confirm_dialog_captures_b_leg_route_set...`, relay tests |
+| BYE-5 | 12.2 | In-dialog request per-leg routing | Uses leg's remote target + route set | high | ✅ | b2bua-core `confirm_dialog_captures_b_leg_route_set...`, relay tests |
 | BYE-6 | 12.2.1.1 | Per-leg CSeq monotonic | Each leg own CSeq counter | med | ✅ | rfc-audit `cseq` rules, generators |
 | BYE-6a | 12.2.1.1 | Callee's requests on its early dialog, then after the 2xx (forked callee included) | Relayed contiguously: confirmation keeps the callee's own sequence, per fork | high | ✅ | b2bua-harness `peer_cseq_across_confirmation::callee_requests_after_the_answer_continue_its_early_sequence`, `the_callee_sequence_is_its_own_across_a_reinvite_answer`, `the_confirmed_fork_keeps_its_own_early_sequence`; the caller direction is guarded by `caller_requests_after_the_answer_continue_its_early_sequence` |
-| BYE-6b | 12.2.2 | In-dialog request with a CSeq below its dialog's last | 500, not relayed; measured per callee fork and per caller-facing early dialog | med | ✅ | b2bua-harness `peer_cseq_across_confirmation::*_out_of_order`, `*_measured_against_*`; `caller_facing_early_dialogs::the_caller_is_measured_per_caller_facing_dialog`, `an_out_of_order_caller_request_is_answered_500`, `a_request_on_an_unrecorded_caller_facing_tag_moves_no_other_sequence`; a confirmed callee leg's request from a fork the answer abandoned draws 481 (`a_losing_fork_request_after_the_answer_names_no_dialog`) |
+| BYE-6b | 12.2.2 | In-dialog request with a CSeq below its dialog's last | 500, not relayed; measured per callee fork and per caller-facing early dialog | med | ✅ | b2bua-harness `peer_cseq_across_confirmation::*_out_of_order`, `*_measured_against_*`; `caller_facing_early_dialogs::the_caller_is_measured_per_caller_facing_dialog`, `an_out_of_order_caller_request_is_answered_500`, `a_service_tag_beside_a_shown_one_moves_no_other_sequence`; a confirmed callee leg's request from a fork the answer abandoned draws 481 (`a_losing_fork_request_after_the_answer_names_no_dialog`) |
 | BYE-6c | 12.1.2, 12.2.1.1 | Forked callee's early requests toward the caller | Each rides its own fork's caller-facing dialog (tag and CSeq); the answered one keeps its sequence | high | ✅ | b2bua-harness `caller_facing_early_dialogs::a_forked_callee_request_rides_its_own_caller_facing_dialog`; the caller's late final in a retired dialog reaches its own fork (`a_late_answer_in_a_retired_dialog_reaches_its_own_originator`) |
 | BYE-7 | 15.1.1 | BYE mid B-leg re-INVITE | Abort in-flight re-INVITE, BYE | med | 🟡 | refer a-bye-during-realign analogue; add `bye_during_reinvite_aborts_reinvite` |
 | BYE-8 | 16.6, 20.11 | A/B BYE carries a body | The minted BYE carries the body verbatim with its Content-Type and descriptors (Content-Disposition, MIME-Version, Content-Transfer-Encoding); a minted CANCEL carries no body and no descriptor | med | ✅ | teardown_header_relay `a_releasing_*_body_rides_*`, `a_minted_cancel_carries_no_body_descriptor` |
@@ -123,19 +123,19 @@ Severity = operational risk if the behaviour is wrong.
 | VIA-1 | 8.1.1.7 | Own Via/branch per leg | Fresh z9hG4bK per outgoing request | high | ✅ | sip-txn `branch_has_magic_cookie_and_is_unique`, stack_identity |
 | VIA-3 | 8.1.1.5 | Max-Forwards reset to 70 | B2BUA originates, not decrements | med | 🟡 | proxy decrements; add B2BUA `bleg_maxforwards_reset_70` |
 | HDR-2 | 20.5 | **Contact rewritten to B2BUA per leg** | Far-end Contact never passed through | high | 🟡 | implicit (in-dialog returns to B2BUA works); add explicit `contact_rewritten_to_b2bua_per_leg` |
-| HDR-5 | 12.1.1 | Record-Route not cross-leg leaked | Each leg's RR is leg-local | high | ✅ | b2bua `confirm_dialog_*record_route*` |
-| HDR-7 | 8.1.1.8 | Contact on all dialog-forming msgs | INVITE/2xx carry B2BUA Contact | high | ✅ | rfc-audit `contactOnInvite`, proxy_b2bua |
+| HDR-5 | 12.1.1 | Record-Route not cross-leg leaked | Each leg's RR is leg-local | high | ✅ | b2bua-core `confirm_dialog_*record_route*` |
+| HDR-7 | 8.1.1.8 | Contact on all dialog-forming msgs | INVITE/2xx carry B2BUA Contact | high | ✅ | rfc-audit `contact-presence`, proxy_b2bua |
 
 ### Routing edge cases, redirects, header policy, auth
 
 | ID | § | Scenario | Expected B2BUA behaviour | Sev | Status | Where / suggested test |
 |----|---|----------|--------------------------|-----|--------|------------------------|
-| RR-1 | 12/16.6 | B2BUA does NOT Record-Route | It's a UA, not a proxy | high | ✅ | rfc-audit `recordRouteOnlyOnDialogCreating` (proxy RRs, B2BUA doesn't) |
+| RR-1 | 12/16.6 | B2BUA does NOT Record-Route | It's a UA, not a proxy | high | ✅ | rfc-audit `no-record-route-from-ua` (proxy RRs, B2BUA doesn't) |
 | RR-4 | 16.6 | Strict-route first-hop swap | Apply strict-route shuffle on send | med | ✅ | rfc-audit `strict-route-shuffle-on-send`/`strict-route-rewrite-handled`, generators |
 | RR-5 | 12.2.1.1/8.1.2 | Dialog behind a strict router (no `;lr`) | In-dialog requests sent to the strict route named in the Request-URI, target in the last Route | med | ✅ | b2bua-harness `in_dialog_request_uri_not_ours::strict_*`, rfc-audit `mid-dialog-wire-destination` |
 | RR-6 | 12.2.2 | In-dialog request whose Request-URI an element rewrote (no `callRef`/`leg`) | Call and source leg found by dialog identity (index namespace names the side) | med | ✅ | b2bua-harness `in_dialog_request_uri_not_ours::rewrite_*` |
 | LOOP-1 | 16.3 | B-leg target loops to B2BUA (self) | App-level loop guard (Via blind due to new Call-ID) | med | ❌ | add `b2bua_self_loop_detected` |
-| MERGE-1 | 8.2.2.2 | Forked dup A-INVITE | 482 Loop Detected on 2nd copy | med | ✅ | `retry_on_an_ending_identity::a_merged_copy_of_an_established_calls_invite_is_answered_482` (a new CSeq is a new request: `a_retry_inside_the_challenged_calls_last_turn_is_routed_as_a_new_call`) |
+| MERGE-1 | 8.2.2.2 | Forked dup A-INVITE | 482 Loop Detected on 2nd copy | med | ✅ | `retry_on_an_ending_identity::a_merged_copy_of_a_ringing_calls_invite_is_answered_482` (a new CSeq is a new request: `a_retry_inside_the_challenged_calls_last_turn_is_routed_as_a_new_call`) |
 | RDR-1 | 8.1.3.4 | B-leg returns 3xx | Follow redirect or map; don't leak B Contacts to A | high | 🟡 | numbering_plan B2BUA-emitted 302 only; add `bleg_3xx_followed_not_leaked_to_aleg` |
 | RDR-2 | 8.1.3.4 | 3xx loop | Bounded redirect recursion | med | ❌ | add `redirect_recursion_bounded` |
 | OOD-2 | 8.2.1 | Unknown method on a leg | 405 + Allow | med | ✅ | rfc-audit `unsupported-method-405-allow` |
@@ -170,12 +170,12 @@ Severity = operational risk if the behaviour is wrong.
 | REL-NEG-1 | 3262 §3 | `Require:100rel` on INVITE | Reliable 1xx or 420 | high | ✅ | rfc-audit `require-reliable-1xx-on-require` |
 | REL-NEG-3 | 3262 §4 | 100rel chosen on one leg only | Drive PRACK per leg, asymmetric ok | high | ✅ | fake_prack/suppress_18x (B2BUA PRACKs bob, downgrades A) |
 | REL-NEG-4 | 3262 §3 | 100 Trying must not be reliable | Never stamp 100rel on 100 | med | ✅ | rfc-audit `reliable-1xx-headers` |
-| RSEQ-MONO-1 | 3262 §3 | RSeq +1 per leg, own space | Per-leg RSeq increment | high | ✅ | rfc-audit `rseqMonotonic` |
+| RSEQ-MONO-1 | 3262 §3 | RSeq +1 per leg, own space | Per-leg RSeq increment | high | ✅ | rfc-audit `non-contiguous-rseq` |
 | RSEQ-MAP-1 | 3262 §3/4 | RSeq re-minted across legs | A-leg RSeq unrelated to B-leg | high | ❌ | add cross-leg `rseq_reminted_across_legs` (audit is per-slice blind) |
 | RACK-MAP-1 | 3262 §7.2 | RAck triple translated across legs | Per-leg (RSeq,CSeq,INVITE) | high | 🟡 | prack_forking rewrites RAck CSeq; add explicit cross-leg assert |
 | PRACK-RESP-1 | 3262 §3 | PRACK match→2xx, no match→481 | UAS semantics | high | ✅ | rfc-audit `prack-2xx-or-481` |
-| PRACK-SERIAL-1 | 3262 §3 | 2nd reliable 1xx before 1st PRACKed | Serialize on PRACK | high | ✅ | rfc-audit `serialReliable1xx` |
-| PRACK-RTX-1 | 3262 §4 | Dup reliable 1xx (same RSeq) | No duplicate PRACK | med | ✅ | rfc-audit `uacRseqStrictness` |
+| PRACK-SERIAL-1 | 3262 §3 | 2nd reliable 1xx before 1st PRACKed | Serialize on PRACK | high | ✅ | rfc-audit `no-overlapping-reliable-provisionals` |
+| PRACK-RTX-1 | 3262 §4 | Dup reliable 1xx (same RSeq) | No duplicate PRACK | med | ✅ | reliable_provisional_repeat_prack `a_repeat_of_a_stack_pracked_provisional_draws_no_second_prack`, `a_repeat_behind_the_18x_mask_draws_no_second_prack` |
 | PRACK-RTX-2 | 3262 §3 | Retransmitted PRACK after 2xx | Resend cached 2xx, no re-process | med | ❌ | add `prack_rtx_absorbed` |
 | PRACK-LATE-1 | 3262 §3 | PRACK after INVITE final | 2xx on a match, 481 without | med | ✅ | rfc-audit `prack-2xx-or-481` |
 | DELAY-2XX-1 | 3262 §3 | Un-PRACKed reliable 1xx with SDP | Delay 2xx until PRACK lands | high | ✅ | rfc-audit `delay-2xx-on-unacked-reliable-1xx-with-sdp` |
@@ -190,6 +190,10 @@ Severity = operational risk if the behaviour is wrong.
 | EARLY-MEDIA-1 | 3262 §5 | Reliable 183+SDP early media | Bridge to A-leg before 200 | high | ✅ | promote_pem suite, fake_prack |
 | EARLY-MEDIA-2 | 3264 §8 | Early→final SDP change | Re-anchor without dropping media | med | ✅ | promote_pem `resync_sdp_changed` |
 | EARLY-MEDIA-4 | 3262 §5 | 183-SDP is the answer (not offer) | PRACK carries no body | high | ✅ | rfc-audit `prack-answers-1xx-offer` |
+| EARLY-MEDIA-5 | 3261 §12.1.2, 3264 §8 | A media leg's early media, then the callee's answer | The media leg's early media rides a caller-facing early dialog of its own; the callee rings and answers under another tag, its 2xx confirming that dialog alone | high | ✅ | `announcement_happy_path`, media_leg_provisional suite |
+| EARLY-MEDIA-6 | 3264 §8 | A second author's description on one caller-facing early dialog | Restated as the next version of the session the dialog carries | med | ✅ | `another_authors_opening_description_continues_the_early_dialogs_session` |
+| SDP-VERSION-1 | 3264 §8 | Author spends a version on an offer the stack refuses or answers itself | What the far party receives continues what it last received: a repeat at the held version, a change at the next; an author's own skip is relayed as written | med | ✅ | `a_version_the_caller_never_received_is_not_skipped_over`, `a_skipped_version_on_a_confirmed_dialog_is_restated_above_the_held_one`, `an_authors_own_skip_leaves_as_written` |
+| SDP-VERSION-2 | 3264 §8 | Stack-composed answer (every stream rejected) on a dialog the stack opened | Continues the stack's session there, next version | med | ✅ | `the_rejecting_answer_continues_the_session_the_stack_stated` |
 
 ### UPDATE (RFC 3311) & glare
 
@@ -211,10 +215,10 @@ Severity = operational risk if the behaviour is wrong.
 | SDP-HOLD-3 | 3264 §8.4 | `c=0.0.0.0` non-zero port | Recognize hold, not reject | med | ✅ | rfc-audit `c0-port-non-zero`, media port-0 hold |
 | SDP-MLINE-COUNT-1 | 3264 §6 | Answer m-line count = offer | Preserve count, port-0 rejects | high | ✅ | rfc-audit `answer-m-line-count-matches-offer`, media |
 | SDP-MLINE-ORDER-1 | 3264 §8 | Re-offer m-line count monotonic | Don't drop slots | high | ✅ | rfc-audit `re-offer-m-line-count-monotonic` |
-| SDP-NOINTERSECT-1 | 3264 §6.1 | Empty codec intersection | Reject stream; all-reject → 488 | high | 🟡 | sdp_answer `no_common_codec_returns_offending_index` (unit); add call-level 488 |
+| SDP-NOINTERSECT-1 | 3264 §6.1 | Empty codec intersection | Reject stream; all-reject → 488 | high | 🟡 | media `empty_codec_intersection_is_rejected` (unit); add call-level 488 |
 | SDP-CANTBRIDGE-1 | 3264 §6 | Unbridgeable transport (e.g. SCTP) | Reject/488, never relay dead media | high | ❌ | add `unbridgeable_media_488` |
 | SDP-PT-STABLE-1 | 3264 §8.3.2 | Re-offer rebinds dynamic PT | PT→codec map stable for session | med | ✅ | rfc-audit `payload-type-mapping-stable` |
-| SDP-ORIGIN-1 | 3264 §8 | `o=` continuity per leg | Same username/sess-id, version+1 | med | ✅ (advisory) | rfc-audit `sdp-origin-continuity`, sdp_diff |
+| SDP-ORIGIN-1 | 3264 §8 | `o=` continuity per dialog (each forked dialog its own session; OPTIONS and failure-final bodies no step) | Same `o=` identity, version +1 (or unchanged when identical) | med | ✅ | rfc-audit `sdp-origin-continuity` (gating), sdp_diff |
 | SDP-PARSE-1 | 3264 §5 | Malformed SDP | 488, don't relay invalid | med | ✅ | rfc-audit `sdp-body-parseable`, parser torture |
 
 ---
@@ -240,7 +244,7 @@ Severity = operational risk if the behaviour is wrong.
 | REFER-NOTIFY-1 | 3515 §2.4.4 | Immediate NOTIFY after 202 | active;expires, sipfrag 100 Trying | high | ✅ | refer_allow, refer_reject |
 | REFER-NOTIFY-3 | 3515 §2.4.4 | C-leg 1xx → NOTIFY, dedupe repeats | active + 1xx sipfrag, dedupe | med | ✅ | refer_allow `c_multiple_18x` |
 | REFER-NOTIFY-4 | 3515 §2.4.7 | Transfer success | terminated;reason=noresource, 200 sipfrag | high | ✅ | refer_full_transfer |
-| REFER-NOTIFY-5 | 3515 §2.4.7 | Transfer target fails | terminated + real failure sipfrag | high | ✅ | refer_allow `c486`/`c603` |
+| REFER-NOTIFY-5 | 3515 §2.4.7 | Transfer target fails | terminated + real failure sipfrag | high | ✅ | refer_allow `refer_allow_c486`, `refer_allow_c603` |
 | REFER-NOTIFY-6 | 6665 §4.1.3 | Subscription expiry (HTTP hung) | terminated;reason=timeout | high | ✅ | refer_reject `refer_http_timeout` |
 | REFER-NOTIFY-7 | 6665 §4.1.3 | `expires` matches real timer | Advertised expires = actual lifetime | med | ❌ | hard-coded `active;expires=60`; add `notify_expires_matches_timer` |
 | REFER-NOTIFY-8 | 6665 §4.4.1 | NOTIFY 481/408 from referrer | Stop subscription, no NOTIFY into void | med | ❌ | add `notify_481_stops_subscription` |
@@ -256,7 +260,7 @@ Severity = operational risk if the behaviour is wrong.
 | REPLACES-2 | 3891 §3 | INVITE-with-Replaces targeting existing dialog | Match Call-ID+tags, replace; no match → 481 | high | ❌ | add `invite_replaces_match_and_no_match` |
 | REPLACES-3 | 3891 §3 | Replaces early-only on confirmed dialog | 486 Busy Here | med | ❌ | add `invite_replaces_early_only_confirmed_486` |
 | REPLACES-5 | 3891 §5 | Replaces unauthorized | 603 Declined | med | ❌ | add `invite_replaces_unauthorized_603` |
-| REFER-ID-1 | 3515 §2.4.6 | 2nd REFER while transfer active | 491 (serialize, by design) | med | ✅ | refer_gating second-refer, refer_reject `second_during_authorizing` |
+| REFER-ID-1 | 3515 §2.4.6 | 2nd REFER while transfer active | 491 (serialize, by design) | med | ✅ | refer_gating second-refer, refer_reject `refer_second_during_authorizing` |
 | REFER-SUB-1 | 4488 §3 | `Refer-Sub: false` | Honour (no NOTIFY) or echo in 202 | med | ❌ | add `refer_sub_false_no_notify` |
 | REFERRED-BY-1 | 3892 | Referred-By present | Forward onto C INVITE | med | 🟡 | captured in code; add `referred_by_propagated_to_c` |
 
@@ -265,7 +269,7 @@ Severity = operational risk if the behaviour is wrong.
 | ID | § | Scenario | Expected B2BUA behaviour | Sev | Status | Where / suggested test |
 |----|---|----------|--------------------------|-----|--------|------------------------|
 | REFER-TXN-1 | 3261 §14 | A re-INVITE during transfer phases | 491 in realigning, relay earlier | high | ✅ | refer_gating `a_reinvite_*` |
-| REFER-TXN-4 | 5589 | A BYE during a-realign | Begin-termination BYEs orphaned B+C | high | ✅ | refer_full_transfer `a_bye_during_a_realign` |
+| REFER-TXN-4 | 5589 | A BYE during a-realign | Begin-termination BYEs orphaned B+C | high | ✅ | refer_full_transfer `refer_allow_full_a_bye_during_a_realign` |
 | REFER-TXN-5 | 3515 | C answers but realign fails/timeout | Rollback BYE all 3 + CDR rollback | high | ✅ | refer_c_realign / refer_full_transfer reject+timeout |
 | REFER-TXN-6 | 6665 §4.1 | Overall watchdog fires | Cancel all transfer timers, terminate | high | ✅ | refer_timers `refer_overall_safety_fires` |
 | REASON-1 | 3326 §2 | A/C BYE/CANCEL carries Reason | Propagate across legs; a CANCEL restates a leading Q.850 value's cause alone where the deployment asks (`relayed_cancel_reason`); no Reason toward a media leg | med | ✅ | teardown_header_relay, early_dialog_bye, release_reason `a_relayed_cancel_*`, `a_relayed_cause_never_reaches_a_media_leg` |
@@ -325,7 +329,7 @@ Severity = operational risk if the behaviour is wrong.
 | IDENT-4 | 6442 §4 | Geolocation transparency | Forward unless Routing:no; keep cid: body | med | 🟡 | parsed (lazy_headers); add transparency behaviour test |
 | TORTURE-1 | 4475 §3.1.1 | Valid weird grammar | Parse, don't 400 | high | ✅ | parser, compliance_matrix rfc4475-valid |
 | TORTURE-2 | 4475 §3.1.2 | Malformed message | 400/drop, never panic | high | ✅ | parser, compliance_matrix rfc4475-invalid |
-| TORTURE-4 | 4475 | Oversized header/URI | Bounded, 400/513 | high | ✅ | ADR-0007 long-value rejections |
+| TORTURE-4 | 4475 | Oversized header/URI | Bounded, 400/513 | high | ✅ | the parser's header and URI length caps |
 | TORTURE-8 | 4475 | Bad in-dialog message on live call | Reject without tearing down healthy call | high | ❌ | add `torture_indialog_bad_msg_no_call_leak` |
 
 ---

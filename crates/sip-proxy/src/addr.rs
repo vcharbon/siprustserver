@@ -35,11 +35,10 @@ impl ProxyAddr {
         Some(Self { host: host.to_string(), port })
     }
 
-    /// Resolve to a real socket address for `send_to`. Accepts an IP-literal
-    /// host directly; a non-numeric host fails (the simulated fabric and the
-    /// tests address everything by IP literal, matching the source).
+    /// The socket address of an IP-literal host (IPv6 bracketed or not); `None`
+    /// for a name, which the named forwarder resolves.
     pub fn to_socket_addr(&self) -> Option<SocketAddr> {
-        format!("{}:{}", self.host, self.port).parse().ok()
+        sip_net::ip_socket_addr(&self.host, self.port)
     }
 }
 
@@ -77,6 +76,17 @@ mod tests {
     fn resolves_ip_literal_to_socket_addr() {
         let a = ProxyAddr::new("127.0.0.1", 5060);
         assert_eq!(a.to_socket_addr().unwrap(), "127.0.0.1:5060".parse().unwrap());
+    }
+
+    #[test]
+    fn an_ipv6_peer_resolves_back_to_its_socket_addr() {
+        let s: SocketAddr = "[2001:db8::7]:5060".parse().unwrap();
+        assert_eq!(ProxyAddr::from(s).to_socket_addr(), Some(s));
+    }
+
+    #[test]
+    fn a_name_is_left_to_the_named_forwarder() {
+        assert_eq!(ProxyAddr::new("callee.example.test", 5060).to_socket_addr(), None);
     }
 
     #[test]

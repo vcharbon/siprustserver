@@ -1,52 +1,40 @@
-//! B2BUA metrics — atomic counters/gauges (the source's `MetricsRegistry`
-//! surface reduced to the counters the ported paths move). Cheap to clone
-//! (one `Arc`); read with the `*_total` accessors.
+//! B2BUA metrics — atomic counters/gauges. Cheap to clone (one `Arc`); read
+//! with the `*_total` accessors.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use metric_catalogue::{FixedCounts, HistogramValue, OpenRows};
+use metric_catalogue::HistogramValue;
+use metric_values::{FixedCounts, OpenRows};
 
 use crate::dispatch::{Discard, PastBound};
 use crate::drain::DrainExit;
-use crate::ingress_brake::IngressBrakeCounters;
-use catalogue::worker::DRAIN_BUCKETS;
+use catalogue::worker::{DRAIN_BUCKETS, PAST_BOUND, REMOVAL_CLASS};
 
 pub mod catalogue;
+mod cells;
 mod limiter;
+mod operator;
+mod removal_class;
+mod retransmit_row;
+pub mod shell;
+mod turn_counts;
+mod udp_transport;
+mod wire_drops;
 
 pub use limiter::{
     AdmitSite, LimiterCounters, LimiterFailure, LimiterOp, LimiterTask, RefreshDiscard,
     RefreshGiveUp, ReleaseGiveUp,
 };
-
-/// A `b2bua_retransmits_total` row: method uppercased, the code's digits for
-/// a response.
-struct RetransmitRow {
-    ladder: String,
-    method: String,
-    code: Option<String>,
-}
-
-impl RetransmitRow {
-    fn as_refs(&self) -> Vec<&str> {
-        let mut row = vec![self.ladder.as_str(), self.method.as_str()];
-        row.extend(self.code.as_deref());
-        row
-    }
-}
-
-fn retransmit_row(ladder: &str, method: &str, code: Option<u16>) -> RetransmitRow {
-    RetransmitRow {
-        ladder: ladder.to_owned(),
-        method: method.to_ascii_uppercase(),
-        code: code.map(|c| c.to_string()),
-    }
-}
+pub use operator::OPERATOR_RELEASE_KINDS;
+pub use removal_class::RemovalClass;
+use retransmit_row::retransmit_row;
+pub use udp_transport::{LiveCounters, LiveGauge, UdpTransportMetrics};
 
 #[derive(Debug, Default)]
 struct Inner {
+    plain: catalogue::plain::PlainCounters,
     // The semi-open families (per-method traffic, repeats and give-ups,
     // unroutable messages, replication per stream, the cursor census), one
     // row per observed label set.
@@ -58,15 +46,13 @@ struct Inner {
     drain_exits: [AtomicU64; DrainExit::ALL.len()],
     // Time-in-drain: fixed-bucket cumulative counts (`le` in seconds), the sum in
     // milliseconds and the observation count.
-    drain_seconds_buckets: [AtomicU64; DRAIN_BUCKETS.len()],
+    drain_seconds_buckets: [AtomicU64; catalogue::worker::DRAIN_BUCKETS.len()],
     drain_seconds_sum_ms: AtomicU64,
     drain_seconds_count: AtomicU64,
+    // What every operator release-all reached, by kind (ADR-0050 §10).
+    operator_releases: operator::OperatorReleases,
     // The worker's view of its call limiter (ADR-0040).
     limiter: LimiterCounters,
-    // dispatcher
-    queue_drops: AtomicU64,
-    cap_drops: AtomicU64,
-    release_discards: AtomicU64,
     past_bound_depth: AtomicU64,
     past_bound_cap: AtomicU64,
     overflow_refused: AtomicU64,
@@ -75,82 +61,13 @@ struct Inner {
     invite_discard_answered_at_cap: AtomicU64,
     invite_discard_answered_released: AtomicU64,
     invite_discard_answered_capped: AtomicU64,
-    capped_refusals: AtomicU64,
-    capped_request_answered: AtomicU64,
     calls_near_lifetime_cap: std::sync::atomic::AtomicI64,
-    saturation: AtomicU64,
-    new_call_share_waits: AtomicU64,
-    // MAX_MESSAGES_PER_CALL cap-defense: calls torn down for crossing the
-    // per-call message cap (a runaway re-INVITE/OPTIONS storm or glare loop),
-    // so no call processes unbounded in-dialog events.
-    message_cap_terminated: AtomicU64,
-    // Calls that crossed their lifetime message cap (the work bound).
-    message_cap_lifetime_crossed: AtomicU64,
     creations: AtomicU64,
     removals: AtomicU64,
     removals_terminated: AtomicU64,
     removals_self_release: AtomicU64,
+    removals_stand_down: AtomicU64,
     removals_orphan: AtomicU64,
-    // router / handler
-    handler_timeouts: AtomicU64,
-    force_purge: AtomicU64,
-    fast_reject_terminating: AtomicU64,
-    // call reaper (ADR-0020). `handler_panics` counts dispatcher-observed body
-    // panics (pre-reaper these were swallowed — the zero-CDR leak class);
-    // `reaper_verdicts` counts injected synthetic events (stale + fatal +
-    // discharge); `reaper_discharged` is the ALARM — the rules path itself
-    // failed twice for a call; expected ~0 in any healthy run.
-    handler_panics: AtomicU64,
-    reaper_sweeps: AtomicU64,
-    reaper_sweep_panics: AtomicU64,
-    replica_reap_panics: AtomicU64,
-    reaper_verdicts: AtomicU64,
-    reaper_discharged: AtomicU64,
-    // cdr
-    cdr_written: AtomicU64,
-    cdr_dropped: AtomicU64,
-    // Decision-application drop guard: a `/call/new` decision result (route
-    // or reject) that landed on a call whose initial INVITE the caller already
-    // CANCELed — dropped whole: no b-leg launch, no second final on the a-leg's
-    // completed transaction. A non-zero rate measures the caller-gives-up-
-    // during-routing race, not a fault.
-    decision_dropped_cancelled: AtomicU64,
-    // Second-final refusal (RFC 3261 §17.2.1): a final the call layer authored
-    // toward the a-leg's initial INVITE while that transaction already carried
-    // one — refused at the a-leg response seam, never built. A rule made
-    // progress on a call already answered or going away; expected 0 in any
-    // healthy run.
-    second_final_refused: AtomicU64,
-    // Late-provisional refusal (RFC 3261 §13.3.1.1 / §17.2.1): a provisional
-    // the call layer authored toward the a-leg's initial INVITE while that
-    // transaction already sent its final — refused at the a-leg response
-    // seam, never built. A rule showed a ringing leg to an answered caller;
-    // expected 0 in any healthy run.
-    provisional_after_final_refused: AtomicU64,
-    // Calls reaching Terminated with no termination record (expected 0).
-    termination_unrecorded: AtomicU64,
-    // Going-away gate: an asynchronous trigger (timer fire, transaction
-    // timeout, internal-event fold) that landed on a Terminating/Terminated
-    // call and matched a rule that is not a teardown rule — absorbed before
-    // it ran. Measures the race between a call's own clocks and its teardown,
-    // not a fault; a rule named here on a live call would have made progress.
-    going_away_absorbed: AtomicU64,
-    // PRACKs answered 200 after their call's release (RFC 3262 §3).
-    late_prack_answered: AtomicU64,
-    // Another incarnation's event: a timer fire, transaction timeout,
-    // callout result or late message of an earlier call on the same
-    // callRef, dropped before the live call's rules read it. Measures the
-    // race between a call's end and a retry born on its callRef, not a fault.
-    other_incarnation_dropped: AtomicU64,
-    // Injectable store-fault seam (ADR-0023): `store_fault_rejected` = live
-    // lookups that failed CLOSED with a 500 final (initial-INVITE dialog-
-    // existence check or in-dialog request fetch); `store_fault_audit_skipped`
-    // = keepalive/audit cycles skipped FAIL-OPEN (call kept up, timer re-armed
-    // so liveness detection resumes next interval — a store fault alone never
-    // tears down an established call). Both stay 0 unless a `StoreFaults`
-    // handle is armed (tests) or a future fallible store is wired.
-    store_fault_rejected: AtomicU64,
-    store_fault_audit_skipped: AtomicU64,
     // timer service (gauges): physical DelayQueue size (live entries + not-yet-
     // expired tombstones from cancelled/rescheduled timers) vs. the live
     // schedulable timer count. `queue_len - live` is the lingering-tombstone
@@ -169,36 +86,6 @@ struct Inner {
     // replication-boundary re-anchor, not a clock rewrite (timestamps stay
     // monotonic).
     clock_wall_divergence_ms: AtomicU64,
-    // replication (peer-to-peer HA; separate namespace `b2bua_repl_*`). These
-    // localise an HA failure to a layer: `flush_propagated` rising on the PRIMARY
-    // proves it is attempting to replicate (the proxy cookie stamped
-    // `topology.bak`); the per-stream `applied` breakdown (below) proves the
-    // replica actually arrived; `takeover_resolved`/`hydrated` prove a failed-over
-    // in-dialog request found + loaded the replica on the backup. The TRUE resident
-    // backup count is the sampled `repl_meta_backup` gauge (not a counter-derived
-    // estimate).
-    repl_flush_propagated: AtomicU64,
-    repl_takeover_resolved: AtomicU64,
-    repl_takeover_hydrated: AtomicU64,
-    // Refusals of a `Terminated` replica; the rule is `router::materialise`.
-    repl_takeover_refused_terminated: AtomicU64,
-    // Reverse flushes a live primary refused to fold; the gate is `router::reclaim`.
-    repl_reverse_flush_refused: AtomicU64,
-    // Fail-back (ADR-0011 X11 / ADR-0014): `reclaimed` = calls a rebooted primary
-    // re-materialised into its live map (active reclaim); `self_release` = acting-
-    // backup takeover copies the backup *self-released* once the transaction(s) it
-    // served reached a terminal state (ADR-0014). After a kill_worker+reclaim,
-    // `self_release` ≈ takeover copies shed and the active/sipp gap reaps to ~0.
-    repl_reclaimed: AtomicU64,
-    repl_self_release: AtomicU64,
-    // Model Y (ADR-0020 X3): a backup-held deferred terminal whose primary never
-    // came back to reclaim it (crashed for good, past the replica TTL). The backup
-    // is NOT a discharge authority, so its periodic reap releases the call's limiter
-    // hold(s) + frees the replica memory but writes **no CDR** — the CDR accounting
-    // is the accepted loss of the double-failure (primary down AND never returns).
-    // This counter is that lost-CDR count: it should stay ~0 in a healthy cluster
-    // and only climbs when a primary is permanently lost mid-call.
-    repl_terminal_lost: AtomicU64,
     // Re-hydration diagnostics. How a rebooted primary's bootstrap passes
     // terminate: `seeded` = a pass reached the first catch-up `Noop` (the peer
     // streamed the full `bak:{me}` keyset); `stalled` = a pass hit the bootstrap
@@ -210,8 +97,6 @@ struct Inner {
     // peer-side stall), not just the materialisation — and a longer hard deadline
     // alone would not help. If `seeded` bumps and `repl_reclaimed_total` ≈ the
     // held count, re-hydration is whole.
-    repl_bootstrap_seeded: AtomicU64,
-    repl_bootstrap_stalled: AtomicU64,
     repl_bootstrap_last_applied: AtomicU64,
     // Reboot-reclaim completeness. Per the MOST RECENT bulk reclaim pass
     // (`router::reclaim_all`): `scanned` = bodies found in `pri:{self}` (the
@@ -250,7 +135,7 @@ struct Inner {
     // Inner CallStore map sizes (bodies/idx) — the idx map is insert-only on
     // put_call, so a call whose index keys change across re-flushes (or whose
     // delete passes the wrong keys) strands `idx:*` entries. store_idx_entries
-    // climbing while store_bodies is flat is THAT leak (the no-chaos RSS climb).
+    // climbing while store_bodies is flat is THAT leak.
     store_bodies: AtomicU64,
     store_idx_entries: AtomicU64,
     store_tombstones: AtomicU64,
@@ -299,6 +184,11 @@ struct Rows {
     // Dialog-level ladders that ran to their give-up, by the kind of
     // obligation left undischarged: the peer went deaf.
     repeat_give_ups: FixedCounts,
+    // Model invariants broken and defects met, by name (ADR-0052 §8).
+    model_defects: FixedCounts,
+    // Outbound messages left unsent: their next hop is not an IP literal
+    // (`router::unaddressable`), by kind.
+    outbound_unaddressable: FixedCounts,
     // Messages and events that resolved to no call (`router::unroutable`),
     // in three classes that never overlap: wire messages that drew no
     // answer (by kind), wire requests answered on no call's behalf (by
@@ -333,6 +223,8 @@ impl Default for Rows {
             responses: OpenRows::new(&w::RESPONSES),
             retransmits: OpenRows::new(&w::RETRANSMITS),
             repeat_give_ups: FixedCounts::new(&w::REPEAT_GIVE_UPS),
+            model_defects: FixedCounts::new(&w::MODEL_DEFECTS),
+            outbound_unaddressable: FixedCounts::new(&w::OUTBOUND_UNADDRESSABLE),
             unroutable_dropped: FixedCounts::new(&w::UNROUTABLE_DROPPED),
             unroutable_refused: OpenRows::new(&w::UNROUTABLE_REFUSED),
             unroutable_internal: OpenRows::new(&w::UNROUTABLE_INTERNAL),
@@ -362,34 +254,6 @@ impl Default for B2buaMetrics {
             inner: Arc::new(Inner::default()),
             per_peer: Arc::default(),
             new_calls: Default::default(),
-        }
-    }
-}
-
-/// Why a per-call dispatch queue was torn down: the release that poisoned it.
-/// Every removal has exactly one class; they partition `b2bua_call_removals_total`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RemovalClass {
-    /// A call that terminated: it owes its CDR.
-    Terminated,
-    /// A takeover copy shed by an acting backup (ADR-0014): the call lives on
-    /// at its primary, which owes the CDR.
-    SelfRelease,
-    /// A queue that never held a call: an initial INVITE shed statelessly
-    /// (overload, store fault) or an event naming no resident call. No CDR.
-    Orphan,
-}
-
-impl RemovalClass {
-    /// Every class, in declaration order.
-    pub const ALL: [RemovalClass; 3] =
-        [RemovalClass::Terminated, RemovalClass::SelfRelease, RemovalClass::Orphan];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            RemovalClass::Terminated => "terminated",
-            RemovalClass::SelfRelease => "self_release",
-            RemovalClass::Orphan => "orphan",
         }
     }
 }
@@ -449,15 +313,6 @@ impl B2buaMetrics {
         &self.new_calls
     }
 
-    counter!(bump_message_cap_terminated, message_cap_terminated_total, message_cap_terminated);
-    counter!(
-        bump_message_cap_lifetime_crossed,
-        message_cap_lifetime_crossed_total,
-        message_cap_lifetime_crossed
-    );
-    counter!(bump_capped_refusal, capped_refusals_total, capped_refusals);
-    counter!(bump_capped_request_answered, capped_request_answered_total, capped_request_answered);
-
     /// Move the gauge of live calls near their lifetime cap by `delta`.
     pub fn add_calls_near_lifetime_cap(&self, delta: i64) {
         self.inner.calls_near_lifetime_cap.fetch_add(delta, Ordering::Relaxed);
@@ -467,9 +322,6 @@ impl B2buaMetrics {
     pub fn calls_near_lifetime_cap(&self) -> i64 {
         self.inner.calls_near_lifetime_cap.load(Ordering::Relaxed)
     }
-    counter!(bump_queue_drop, queue_drops_total, queue_drops);
-    counter!(bump_cap_drop, cap_drops_total, cap_drops);
-    counter!(bump_release_discard, release_discards_total, release_discards);
     counter!(bump_overflow_refused, overflow_refused_total, overflow_refused);
 
     /// Move the gauge of items waiting in per-call overflows by `delta`.
@@ -481,8 +333,6 @@ impl B2buaMetrics {
     pub fn overflow_depth(&self) -> i64 {
         self.inner.overflow_depth.load(Ordering::Relaxed)
     }
-    counter!(bump_saturation, saturation_total, saturation);
-    counter!(bump_new_call_share_wait, new_call_share_waits_total, new_call_share_waits);
     counter!(bump_creation, creations_total, creations);
     counter!(bump_removal, removals_total, removals);
 
@@ -545,54 +395,19 @@ impl B2buaMetrics {
         match class {
             RemovalClass::Terminated => &self.inner.removals_terminated,
             RemovalClass::SelfRelease => &self.inner.removals_self_release,
+            RemovalClass::StandDown => &self.inner.removals_stand_down,
             RemovalClass::Orphan => &self.inner.removals_orphan,
         }
     }
-    counter!(bump_handler_timeout, handler_timeouts_total, handler_timeouts);
-    counter!(bump_force_purge, force_purge_total, force_purge);
-    counter!(bump_fast_reject_terminating, fast_reject_terminating_total, fast_reject_terminating);
-    counter!(bump_cdr_written, cdr_written_total, cdr_written);
-    counter!(bump_cdr_dropped, cdr_dropped_total, cdr_dropped);
     // Decision-application drop guard.
-    counter!(
-        bump_decision_dropped_cancelled,
-        decision_dropped_cancelled_total,
-        decision_dropped_cancelled
-    );
     // Second-final refusal (RFC 3261 §17.2.1) and the going-away gate.
-    counter!(bump_second_final_refused, second_final_refused_total, second_final_refused);
-    counter!(
-        bump_provisional_after_final_refused,
-        provisional_after_final_refused_total,
-        provisional_after_final_refused
-    );
-    counter!(bump_termination_unrecorded, termination_unrecorded_total, termination_unrecorded);
-    counter!(bump_going_away_absorbed, going_away_absorbed_total, going_away_absorbed);
-    counter!(bump_late_prack_answered, late_prack_answered_total, late_prack_answered);
-    counter!(
-        bump_other_incarnation_dropped,
-        other_incarnation_dropped_total,
-        other_incarnation_dropped
-    );
     // Injectable store-fault seam (ADR-0023).
-    counter!(bump_store_fault_rejected, store_fault_rejected_total, store_fault_rejected);
-    counter!(
-        bump_store_fault_audit_skipped,
-        store_fault_audit_skipped_total,
-        store_fault_audit_skipped
-    );
     // --- call reaper (ADR-0020) ---
-    counter!(bump_handler_panic, handler_panics_total, handler_panics);
-    counter!(bump_reaper_sweep, reaper_sweeps_total, reaper_sweeps);
-    counter!(bump_reaper_sweep_panic, reaper_sweep_panics_total, reaper_sweep_panics);
-    counter!(bump_replica_reap_panic, replica_reap_panics_total, replica_reap_panics);
-    counter!(bump_reaper_verdict, reaper_verdicts_total, reaper_verdicts);
-    counter!(bump_reaper_discharged, reaper_discharged_total, reaper_discharged);
 
     /// Count one catch-up/idle `Noop` SENT on a serve-side stream, for
     /// `b2bua_repl_noops_sent_total{flow,peer}` (ADR-0014). `flow` is the stream
     /// kind (`reclaim` = `Pri`, `backup` = `Bak`); `peer` is the pulling caller.
-    /// Climbs continuously on a healthy stream (the ~20s idle floor) — the
+    /// Climbs continuously on a healthy stream (the idle interval, ADR-0045) — the
     /// backup-holder's "I have sent you everything in this flow" liveness sign.
     pub fn record_repl_noop_sent(&self, flow: &str, peer: &str) {
         self.inner.rows.repl_noops_sent.add(&[flow, peer], 1);
@@ -605,15 +420,12 @@ impl B2buaMetrics {
     /// `b2bua_limiter_release_flush_seconds_total` (ADR-0040 decision 9).
     pub fn record_drain_exit(&self, outcome: &crate::drain::DrainOutcome) {
         let elapsed = outcome.elapsed;
-        self.inner.drain_exits[outcome.exit as usize].fetch_add(1, Ordering::Relaxed);
+        cells::add_at(&self.inner.drain_exits, outcome.exit as usize, 1);
         self.inner.limiter.count_release_flush(&outcome.release_flush);
         let secs = elapsed.as_secs_f64();
-        for (i, le) in DRAIN_BUCKETS.iter().enumerate() {
-            if secs <= *le {
-                self.inner.drain_seconds_buckets[i].fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        self.inner.drain_seconds_sum_ms.fetch_add(elapsed.as_millis() as u64, Ordering::Relaxed);
+        let buckets = DRAIN_BUCKETS.iter().zip(&self.inner.drain_seconds_buckets);
+        buckets.filter(|(le, _)| secs <= **le).for_each(|(_, n)| cells::add(n, 1));
+        cells::add(&self.inner.drain_seconds_sum_ms, sip_clock::wall::millis_u64(elapsed));
         self.inner.drain_seconds_count.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -622,7 +434,7 @@ impl B2buaMetrics {
         DrainExit::ALL
             .iter()
             .find(|e| e.label() == reason)
-            .map_or(0, |e| self.inner.drain_exits[*e as usize].load(Ordering::Relaxed))
+            .map_or(0, |e| cells::get_at(&self.inner.drain_exits, *e as usize))
     }
 
     /// Count one forward flush the Backup flow refused because it would regress
@@ -672,67 +484,6 @@ impl B2buaMetrics {
         self.inner.rows.retransmits.get(&retransmit_row(ladder, method, code).as_refs())
     }
 
-    /// Count one wire message naming no call that drew no answer, for
-    /// `b2bua_unroutable_dropped_total{kind}`: `kind` is `ACK` or a response's
-    /// status class (`1xx`…`6xx`).
-    pub fn record_unroutable_dropped(&self, kind: &str) {
-        self.inner.rows.unroutable_dropped.add(&[kind], 1);
-    }
-
-    /// Wire messages naming no call that drew no answer, every kind.
-    pub fn unroutable_dropped_total(&self) -> u64 {
-        self.inner.rows.unroutable_dropped.sum()
-    }
-
-    /// Wire messages naming no call that drew no answer, of one `kind`.
-    pub fn unroutable_dropped_of(&self, kind: &str) -> u64 {
-        self.inner.rows.unroutable_dropped.get(&[kind])
-    }
-
-    /// Count one wire request naming no call that this node answered `code`,
-    /// for `b2bua_unroutable_refused_total{method,code}`.
-    pub fn record_unroutable_refused(&self, method: &str, code: u16) {
-        self.inner.rows.unroutable_refused.add(&[method, &code.to_string()], 1);
-    }
-
-    /// Wire requests naming no call answered `code`, of one `method`.
-    pub fn unroutable_refused_of(&self, method: &str, code: u16) -> u64 {
-        self.inner.rows.unroutable_refused.get(&[method, &code.to_string()])
-    }
-
-    /// Wire requests naming no call that this node answered, every kind.
-    pub fn unroutable_refused_total(&self) -> u64 {
-        self.inner.rows.unroutable_refused.sum()
-    }
-
-    /// Count one of this node's own events that named no call, for
-    /// `b2bua_unroutable_internal_total{event,method}`; `method` is the timed-out
-    /// request's, empty for an event that carries none.
-    pub fn record_unroutable_internal(&self, event: &str, method: &str) {
-        self.inner.rows.unroutable_internal.add(&[event, method], 1);
-    }
-
-    /// This node's own events that named no call, of one `event` and `method`.
-    pub fn unroutable_internal_of(&self, event: &str, method: &str) -> u64 {
-        self.inner.rows.unroutable_internal.get(&[event, method])
-    }
-
-    /// This node's own events that named no call, every kind.
-    pub fn unroutable_internal_total(&self) -> u64 {
-        self.inner.rows.unroutable_internal.sum()
-    }
-
-    /// Count one dialog-level ladder that ran to its give-up, for
-    /// `b2bua_repeat_give_ups_total{obligation}`.
-    pub fn record_repeat_give_up(&self, obligation: &str) {
-        self.inner.rows.repeat_give_ups.add(&[obligation], 1);
-    }
-
-    /// The give-ups of one obligation kind.
-    pub fn repeat_give_ups_total(&self, obligation: &str) -> u64 {
-        self.inner.rows.repeat_give_ups.get(&[obligation])
-    }
-
     /// Record one per-peer failure of `kind` against `peer` in `scope`
     /// (`b2bua_peer_failures_total{peer,scope,kind}`; cardinality-bounded, see
     /// [`crate::peer_failures::PeerFailures`]).
@@ -746,7 +497,6 @@ impl B2buaMetrics {
     }
 
     // --- replication ---
-    counter!(bump_repl_flush_propagated, repl_flush_propagated_total, repl_flush_propagated);
 
     /// Count one quiet turn of `kind`, for `b2bua_repl_quiet_turns_total{kind}`.
     pub fn record_quiet_turn(&self, kind: &str) {
@@ -757,23 +507,6 @@ impl B2buaMetrics {
     pub fn repl_quiet_turns_total(&self, kind: &str) -> u64 {
         self.inner.rows.repl_quiet_turns.get(&[kind])
     }
-    counter!(bump_repl_takeover_resolved, repl_takeover_resolved_total, repl_takeover_resolved);
-    counter!(bump_repl_takeover_hydrated, repl_takeover_hydrated_total, repl_takeover_hydrated);
-    counter!(
-        bump_repl_reverse_flush_refused,
-        repl_reverse_flush_refused_total,
-        repl_reverse_flush_refused
-    );
-    counter!(
-        bump_repl_takeover_refused_terminated,
-        repl_takeover_refused_terminated_total,
-        repl_takeover_refused_terminated
-    );
-    counter!(bump_repl_reclaimed, repl_reclaimed_total, repl_reclaimed);
-    counter!(bump_repl_self_release, repl_self_release_total, repl_self_release);
-    counter!(bump_repl_terminal_lost, repl_terminal_lost_total, repl_terminal_lost);
-    counter!(bump_repl_bootstrap_seeded, repl_bootstrap_seeded_total, repl_bootstrap_seeded);
-    counter!(bump_repl_bootstrap_stalled, repl_bootstrap_stalled_total, repl_bootstrap_stalled);
 
     /// Record how many bodies the most recent bootstrap pass imported (gauge).
     pub fn set_repl_bootstrap_last_applied(&self, n: u64) {
@@ -820,7 +553,9 @@ impl B2buaMetrics {
         let rows = self.inner.rows.repl_applied.rows();
         let get = |op: &str| {
             rows.iter()
-                .filter(|(k, _)| k[0] == "backup" && k[2] == op)
+                .filter(|(k, _)| {
+                    k.first().is_some_and(|f| f == "backup") && k.get(2).is_some_and(|o| o == op)
+                })
                 .map(|(_, v)| *v)
                 .sum::<u64>()
         };
@@ -842,15 +577,14 @@ impl B2buaMetrics {
         self.inner.timer_live.load(Ordering::Relaxed)
     }
 
-    /// Publish the sampled clock-skew divergence (`raw_wall − now_ms`, signed ms)
-    /// for `clock_wall_divergence_ms`. Stored as the i64's bit pattern (no signed
-    /// atomic); [`clock_wall_divergence_ms`](Self::clock_wall_divergence_ms) reads
-    /// it back.
+    /// Publish the sampled clock-skew divergence (`raw_wall − now_ms`, signed ms),
+    /// stored as the i64's bit pattern (no signed atomic) for `clock_wall_divergence_ms`
+    /// and read back by [`clock_wall_divergence_ms`](Self::clock_wall_divergence_ms).
     pub fn set_clock_wall_divergence_ms(&self, divergence_ms: i64) {
-        self.inner.clock_wall_divergence_ms.store(divergence_ms as u64, Ordering::Relaxed);
+        self.inner.clock_wall_divergence_ms.store(divergence_ms.cast_unsigned(), Ordering::Relaxed);
     }
     pub fn clock_wall_divergence_ms(&self) -> i64 {
-        self.inner.clock_wall_divergence_ms.load(Ordering::Relaxed) as i64
+        self.inner.clock_wall_divergence_ms.load(Ordering::Relaxed).cast_signed()
     }
 
     /// Push the call-store map lengths (memory-attribution gauges). Sampled
@@ -963,78 +697,10 @@ impl B2buaMetrics {
         let removals = self.removals_total();
         let active = creations.saturating_sub(removals);
         let mut s = String::with_capacity(2048);
-        catalogue::worker::MESSAGE_CAP_LIFETIME_CROSSED
-            .render_value(&mut s, self.message_cap_lifetime_crossed_total());
-        catalogue::DISPATCH_CAPPED_REFUSALS.render_value(&mut s, self.capped_refusals_total());
-        catalogue::DISPATCH_CAPPED_REQUEST_ANSWERED
-            .render_value(&mut s, self.capped_request_answered_total());
-        catalogue::worker::MESSAGE_CAP_TERMINATED
-            .render_value(&mut s, self.message_cap_terminated_total());
-        catalogue::DISPATCH_QUEUE_DROPS.render_value(&mut s, self.queue_drops_total());
-        catalogue::DISPATCH_CAP_DROPS.render_value(&mut s, self.cap_drops_total());
-        catalogue::DISPATCH_RELEASE_DISCARDS.render_value(&mut s, self.release_discards_total());
-        catalogue::DISPATCH_SATURATION.render_value(&mut s, self.saturation_total());
-        catalogue::DISPATCH_NEW_CALL_SHARE_WAITS
-            .render_value(&mut s, self.new_call_share_waits_total());
+        catalogue::plain::render(self, &mut s);
         catalogue::worker::CALL_CREATIONS.render_value(&mut s, creations);
         catalogue::worker::CALL_REMOVALS.render_value(&mut s, removals);
-        catalogue::worker::HANDLER_TIMEOUTS.render_value(&mut s, self.handler_timeouts_total());
-        catalogue::worker::FORCE_PURGE.render_value(&mut s, self.force_purge_total());
-        catalogue::worker::FAST_REJECT_TERMINATING
-            .render_value(&mut s, self.fast_reject_terminating_total());
-        catalogue::worker::CDR_WRITTEN.render_value(&mut s, self.cdr_written_total());
-        catalogue::worker::CDR_DROPPED.render_value(&mut s, self.cdr_dropped_total());
-        // ── decision-application drop guard ──
-        catalogue::worker::DECISION_DROPPED_CANCELLED
-            .render_value(&mut s, self.decision_dropped_cancelled_total());
-        // ── a call already going away authors no further progress ──
-        catalogue::worker::TERMINATION_UNRECORDED
-            .render_value(&mut s, self.termination_unrecorded_total());
-        catalogue::worker::SECOND_FINAL_REFUSED
-            .render_value(&mut s, self.second_final_refused_total());
-        catalogue::worker::PROVISIONAL_AFTER_FINAL_REFUSED
-            .render_value(&mut s, self.provisional_after_final_refused_total());
-        catalogue::worker::GOING_AWAY_ABSORBED
-            .render_value(&mut s, self.going_away_absorbed_total());
-        catalogue::worker::LATE_PRACK_ANSWERED
-            .render_value(&mut s, self.late_prack_answered_total());
-        catalogue::worker::OTHER_INCARNATION_DROPPED
-            .render_value(&mut s, self.other_incarnation_dropped_total());
-        // ── injectable store-fault seam (ADR-0023) ──
-        catalogue::worker::STORE_FAULT_REJECTED
-            .render_value(&mut s, self.store_fault_rejected_total());
-        catalogue::worker::STORE_FAULT_AUDIT_SKIPPED
-            .render_value(&mut s, self.store_fault_audit_skipped_total());
-        // ── call reaper (ADR-0020) ──
-        catalogue::worker::HANDLER_PANICS.render_value(&mut s, self.handler_panics_total());
-        catalogue::worker::REAPER_SWEEPS.render_value(&mut s, self.reaper_sweeps_total());
-        catalogue::worker::REAPER_SWEEP_PANICS
-            .render_value(&mut s, self.reaper_sweep_panics_total());
-        catalogue::worker::REPLICA_REAP_PANICS
-            .render_value(&mut s, self.replica_reap_panics_total());
-        catalogue::worker::STORE_POISONED_LOCK_RECOVERIES
-            .render_value(&mut s, crate::store::poisoned_lock_recoveries());
-        catalogue::worker::REAPER_VERDICTS.render_value(&mut s, self.reaper_verdicts_total());
-        catalogue::worker::REAPER_DISCHARGED.render_value(&mut s, self.reaper_discharged_total());
-        // ── replication (peer-to-peer HA) — own namespace, distinct from the
-        // data-path counters above so an HA failure can be localised by layer. ──
-        catalogue::worker::REPL_FLUSH_PROPAGATED
-            .render_value(&mut s, self.repl_flush_propagated_total());
-        catalogue::worker::REPL_TAKEOVER_RESOLVED
-            .render_value(&mut s, self.repl_takeover_resolved_total());
-        catalogue::worker::REPL_TAKEOVER_HYDRATED
-            .render_value(&mut s, self.repl_takeover_hydrated_total());
-        catalogue::worker::REPL_REVERSE_FLUSH_REFUSED
-            .render_value(&mut s, self.repl_reverse_flush_refused_total());
-        catalogue::worker::REPL_TAKEOVER_REFUSED_TERMINATED
-            .render_value(&mut s, self.repl_takeover_refused_terminated_total());
-        catalogue::worker::REPL_RECLAIMED.render_value(&mut s, self.repl_reclaimed_total());
-        catalogue::worker::REPL_SELF_RELEASE.render_value(&mut s, self.repl_self_release_total());
-        catalogue::worker::REPL_TERMINAL_LOST.render_value(&mut s, self.repl_terminal_lost_total());
-        catalogue::worker::REPL_BOOTSTRAP_SEEDED
-            .render_value(&mut s, self.repl_bootstrap_seeded_total());
-        catalogue::worker::REPL_BOOTSTRAP_STALLED
-            .render_value(&mut s, self.repl_bootstrap_stalled_total());
+        shell::render(&mut s);
 
         // Per-method SIP traffic, the repeats and give-ups, replication per
         // stream, the drains.
@@ -1044,20 +710,21 @@ impl B2buaMetrics {
         rows.responses.render(&mut s);
         rows.requests_out.render(&mut s);
         rows.retransmits.render(&mut s);
+        rows.outbound_unaddressable.render(&mut s);
         rows.unroutable_dropped.render(&mut s);
         rows.unroutable_refused.render(&mut s);
         rows.unroutable_internal.render(&mut s);
         rows.repeat_give_ups.render(&mut s);
+        rows.model_defects.render(&mut s);
         rows.repl_quiet_turns.render(&mut s);
         rows.repl_applied.render(&mut s);
         rows.repl_noops_sent.render(&mut s);
         rows.repl_forward_flush_refused.render(&mut s);
         catalogue::worker::DRAIN_EXITS.render(&mut s, |series| {
-            let exit = DrainExit::ALL[series.index(&catalogue::worker::DRAIN_REASON)];
-            i.drain_exits[exit as usize].load(Ordering::Relaxed)
+            cells::get_at(&i.drain_exits, series.index(&catalogue::worker::DRAIN_REASON))
         });
         catalogue::worker::DRAIN_SECONDS.render_histogram(&mut s, |_| HistogramValue {
-            buckets: DRAIN_BUCKETS
+            buckets: catalogue::worker::DRAIN_BUCKETS
                 .iter()
                 .zip(&i.drain_seconds_buckets)
                 .map(|(le, n)| (*le, n.load(Ordering::Relaxed)))
@@ -1065,14 +732,13 @@ impl B2buaMetrics {
             sum: i.drain_seconds_sum_ms.load(Ordering::Relaxed) as f64 / 1_000.0,
             count: i.drain_seconds_count.load(Ordering::Relaxed),
         });
+        operator::render(self, &mut s);
         self.inner.limiter.render(&mut s);
-        catalogue::worker::CALL_REMOVALS_BY_CLASS.render(&mut s, |series| {
-            self.removals_of_total(
-                RemovalClass::ALL[series.index(&catalogue::worker::REMOVAL_CLASS)],
-            )
+        catalogue::worker::CALL_REMOVALS_BY_CLASS.render(&mut s, |r| {
+            cells::total(&RemovalClass::ALL, r.index(&REMOVAL_CLASS), |c| self.removals_of_total(c))
         });
         catalogue::worker::DISPATCH_PAST_BOUND.render(&mut s, |series| {
-            self.past_bound_of_total(PAST_BOUNDS[series.index(&catalogue::worker::PAST_BOUND)])
+            cells::total(&PAST_BOUNDS, series.index(&PAST_BOUND), |b| self.past_bound_of_total(b))
         });
         catalogue::worker::DISPATCH_OVERFLOW_REFUSED
             .render_value(&mut s, self.overflow_refused_total());
@@ -1080,7 +746,8 @@ impl B2buaMetrics {
         catalogue::worker::CALLS_NEAR_LIFETIME_CAP
             .render_value(&mut s, self.calls_near_lifetime_cap());
         catalogue::DISPATCH_INVITE_DISCARD_ANSWERED.render(&mut s, |site| {
-            self.invite_discard_answered_of_total(DISCARD_SITES[site.index(&catalogue::SITE)])
+            let at = site.index(&catalogue::SITE);
+            cells::total(&DISCARD_SITES, at, |d| self.invite_discard_answered_of_total(d))
         });
 
         // Gauges last.
@@ -1157,425 +824,5 @@ impl B2buaMetrics {
     }
 }
 
-// ---------------------------------------------------------------------------
-// UdpTransportMetrics — the `UdpTransport` facade's Prometheus-visible shape
-// ---------------------------------------------------------------------------
-
-/// A live-read source for an endpoint gauge (`queueDepth`, `dropsTailDrop`,
-/// `sendWouldBlock`, `kernelRxDropped`). `Arc<dyn Fn>` so the surface is decoupled from the
-/// concrete `UdpEndpoint` type (which is held as a `Box<dyn UdpEndpoint>` by the
-/// runner and is not `Clone`); the closure captures a clone of the shared
-/// counter/queue handle and reads it on demand. `Send + Sync` because the
-/// `/metrics` scrape may run on any task.
-pub type LiveGauge = Arc<dyn Fn() -> u64 + Send + Sync>;
-
-/// The `UdpTransport` facade's Prometheus-visible shape: a bag of **live
-/// getters**. Both the scrape endpoint and test reads want the *instantaneous*
-/// value, never a cached snapshot, so every facet reads through on each access:
-///
-///   - `queue_depth` / `drops_tail_drop` → injected [`LiveGauge`]s backed by the
-///     underlying [`UdpEndpoint`](sip_net::UdpEndpoint) (`endpoint.queueDepth()` /
-///     `endpoint.counters().tail_dropped`).
-///   - `queue_max` → the bind's configured bound (a constant, copied once).
-///   - `kernel_rx_dropped` → an injected [`LiveGauge`] over
-///     `endpoint.counters().kernel_rx_dropped`: datagrams the kernel dropped
-///     before the queue saw them, which no other facet counts.
-///   - `ingress_brake_emergency_bypassed` → the shared [`IngressBrakeCounters`] the
-///     `preIngress` hook mutates; its refusals are new-call counts
-///     ([`crate::new_calls`]).
-///
-/// Clone-cheap (all fields are `Arc`/`Copy`): the runner keeps one to render
-/// `/metrics` and may hand clones to other readers. The runner builds it from
-/// the bound endpoint + brake counters and concatenates
-/// [`Self::prometheus_text`] into the `/metrics` body.
-#[derive(Clone)]
-pub struct UdpTransportMetrics {
-    queue_depth: LiveGauge,
-    queue_max: usize,
-    drops_tail_drop: LiveGauge,
-    /// Outbound datagrams the socket refused because its send buffer was
-    /// full (ADR-0033): a live getter over the bound endpoint.
-    send_would_block: LiveGauge,
-    /// Datagrams the kernel dropped on the socket before the receive pump read
-    /// them (a full `SO_RCVBUF`): a live getter over the bound endpoint.
-    kernel_rx_dropped: LiveGauge,
-    brake: IngressBrakeCounters,
-}
-
-impl std::fmt::Debug for UdpTransportMetrics {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Closures aren't Debug — render the live values instead.
-        f.debug_struct("UdpTransportMetrics")
-            .field("queue_depth", &self.queue_depth())
-            .field("queue_max", &self.queue_max)
-            .field("drops_tail_drop", &self.drops_tail_drop())
-            .field("send_would_block", &self.send_would_block())
-            .field("kernel_rx_dropped", &self.kernel_rx_dropped())
-            .field("ingress_brake_emergency_bypassed", &self.ingress_brake_emergency_bypassed())
-            .finish()
-    }
-}
-
-impl UdpTransportMetrics {
-    /// Build the shape from its live sources — the registry-side of the TS
-    /// `UdpTransport.layer` (`const metrics: UdpTransportMetrics = { … }`).
-    ///
-    ///   - `queue_max`: the bind's configured queue bound (`config.udpQueueMax`).
-    ///   - `brake`: the [`IngressBrakeCounters`] the `preIngress` hook holds (so
-    ///     `ingress_brake_emergency_bypassed` reads live).
-    ///   - `queue_depth` / `drops_tail_drop`: live getters over the bound
-    ///     endpoint (typically `move || endpoint.queue_depth()` and
-    ///     `move || endpoint.counters().tail_dropped` with a shared handle).
-    ///   - `send_would_block` / `kernel_rx_dropped`: live getters over the same
-    ///     endpoint's `counters()`.
-    pub fn new(
-        queue_max: usize,
-        brake: IngressBrakeCounters,
-        queue_depth: LiveGauge,
-        drops_tail_drop: LiveGauge,
-        send_would_block: LiveGauge,
-        kernel_rx_dropped: LiveGauge,
-    ) -> Self {
-        Self { queue_depth, queue_max, drops_tail_drop, send_would_block, kernel_rx_dropped, brake }
-    }
-
-    /// Live inbound-queue depth (`endpoint.queueDepth()`).
-    pub fn queue_depth(&self) -> u64 {
-        (self.queue_depth)()
-    }
-    /// The configured inbound-queue bound (`config.udpQueueMax`).
-    pub fn queue_max(&self) -> usize {
-        self.queue_max
-    }
-    /// Datagrams the full inbound queue tail-dropped (`dropsTailDrop`, live ←
-    /// `endpoint.counters.tailDropped`).
-    pub fn drops_tail_drop(&self) -> u64 {
-        (self.drops_tail_drop)()
-    }
-    /// Outbound datagrams refused by a full send buffer (never a suspended
-    /// send — ADR-0033).
-    pub fn send_would_block(&self) -> u64 {
-        (self.send_would_block)()
-    }
-    /// Datagrams the kernel dropped before the receive pump read them.
-    pub fn kernel_rx_dropped(&self) -> u64 {
-        (self.kernel_rx_dropped)()
-    }
-    /// New emergency INVITEs that bypassed the ingress brake above the threshold.
-    pub fn ingress_brake_emergency_bypassed(&self) -> u64 {
-        self.brake.emergency_bypassed()
-    }
-    /// The brake's counters, for the new-call outcome count
-    /// ([`crate::new_calls::NewCallCounts::read`]).
-    pub fn brake(&self) -> &IngressBrakeCounters {
-        &self.brake
-    }
-
-    /// Render the shape as Prometheus text exposition for the `/metrics` body —
-    /// the registry-visible surface of the TS `registry.udp = metrics`
-    /// assignment. All series use the `b2bua_udp_*` namespace.
-    ///
-    /// Counters (monotonic): `ingress_brake_emergency_bypassed`, `tail_dropped`,
-    /// `send_would_block`, `kernel_rx_dropped`. Gauges (instantaneous):
-    /// `queue_depth`, `queue_max`. The brake's refusals are new-call counts
-    /// (`b2bua_new_calls_total`), rendered with the other admission sources.
-    pub fn prometheus_text(&self) -> String {
-        let mut s = String::with_capacity(1536);
-
-        // ── Ingress brake: emergency INVITEs let through above the threshold ──
-        catalogue::UDP_INGRESS_BRAKE_EMERGENCY_BYPASSED
-            .render_value(&mut s, self.ingress_brake_emergency_bypassed());
-
-        // ── Inbound queue state (port of UdpTransportMetrics.queueDepth /
-        //    queueMax / dropsTailDrop — live getters over the endpoint). A
-        //    tail-dropping queue otherwise shows 100% accepted, hiding a burst
-        //    collapse. ──
-        catalogue::udp::QUEUE_DEPTH.render_value(&mut s, self.queue_depth());
-        catalogue::udp::QUEUE_MAX.render_value(&mut s, self.queue_max() as u64);
-        catalogue::udp::TAIL_DROPPED.render_value(&mut s, self.drops_tail_drop());
-        catalogue::udp::SEND_WOULD_BLOCK.render_value(&mut s, self.send_would_block());
-        catalogue::udp::KERNEL_RX_DROPPED.render_value(&mut s, self.kernel_rx_dropped());
-        s
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn per_method_request_response_render() {
-        let m = B2buaMetrics::new();
-        m.record_request("invite");
-        m.record_request("BYE");
-        m.record_response("invite", 200);
-        m.record_response("BYE", 200);
-        let txt = m.prometheus_text();
-        assert!(txt.contains("b2bua_requests_total{method=\"INVITE\"} 1"));
-        assert!(txt.contains("b2bua_requests_total{method=\"BYE\"} 1"));
-        assert!(txt.contains("b2bua_responses_total{method=\"INVITE\",code=\"200\"} 1"));
-        assert!(txt.contains("b2bua_responses_total{method=\"BYE\",code=\"200\"} 1"));
-    }
-
-    #[test]
-    fn unroutable_series_are_published_at_zero_from_startup() {
-        let txt = B2buaMetrics::new().prometheus_text();
-        assert!(txt.contains("b2bua_unroutable_dropped_total{kind=\"ACK\"} 0"));
-        assert!(txt.contains("b2bua_unroutable_refused_total{method=\"BYE\",code=\"481\"} 0"));
-        assert!(
-            txt.contains("b2bua_unroutable_internal_total{event=\"timeout\",method=\"OPTIONS\"} 0")
-        );
-    }
-
-    #[test]
-    fn unroutable_classes_render_apart() {
-        let m = B2buaMetrics::new();
-        m.record_unroutable_dropped("ACK");
-        m.record_unroutable_dropped("2xx");
-        m.record_unroutable_refused("BYE", 481);
-        m.record_unroutable_internal("timeout", "OPTIONS");
-        assert_eq!(m.unroutable_dropped_total(), 2, "only wire messages left unanswered");
-        let txt = m.prometheus_text();
-        assert!(txt.contains("b2bua_unroutable_dropped_total{kind=\"ACK\"} 1"));
-        assert!(txt.contains("b2bua_unroutable_dropped_total{kind=\"2xx\"} 1"));
-        assert!(txt.contains("b2bua_unroutable_refused_total{method=\"BYE\",code=\"481\"} 1"));
-        assert!(
-            txt.contains("b2bua_unroutable_internal_total{event=\"timeout\",method=\"OPTIONS\"} 1")
-        );
-    }
-
-    #[test]
-    fn drain_exits_and_duration_render() {
-        use crate::drain::{DrainExit, DrainOutcome};
-        use crate::limiter::release_queue::ReleaseFlush;
-        let m = B2buaMetrics::new();
-        let flush =
-            ReleaseFlush { queued: 2, given_up: 0, elapsed: std::time::Duration::from_millis(300) };
-        m.record_drain_exit(&DrainOutcome {
-            exit: DrainExit::CaughtUp,
-            residual: 1,
-            elapsed: std::time::Duration::from_millis(1_200),
-            release_flush: flush,
-        });
-        m.record_drain_exit(&DrainOutcome {
-            exit: DrainExit::GracePeersBehind,
-            residual: 1,
-            elapsed: std::time::Duration::from_secs(5),
-            release_flush: ReleaseFlush::default(),
-        });
-        assert_eq!(
-            m.limiter()
-                .release_flushes_total(crate::limiter::release_queue::ReleaseFlushOutcome::Sent),
-            1
-        );
-        assert_eq!(
-            m.limiter()
-                .release_flushes_total(crate::limiter::release_queue::ReleaseFlushOutcome::Empty),
-            1
-        );
-        assert_eq!(m.drain_exits("caught_up"), 1);
-        assert_eq!(m.drain_exits("grace_peers_behind"), 1);
-        assert_eq!(m.drain_exits("quiescent"), 0);
-        let txt = m.prometheus_text();
-        assert!(txt.contains("b2bua_drain_exits_total{reason=\"caught_up\"} 1"));
-        assert!(txt.contains("b2bua_drain_exits_total{reason=\"grace_peers_behind\"} 1"));
-        // 1.2 s falls in every bucket from 2 up; 5 s in the 5 and 10 buckets.
-        assert!(txt.contains("b2bua_drain_seconds_bucket{le=\"1\"} 0"));
-        assert!(txt.contains("b2bua_drain_seconds_bucket{le=\"2\"} 1"));
-        assert!(txt.contains("b2bua_drain_seconds_bucket{le=\"5\"} 2"));
-        assert!(txt.contains("b2bua_drain_seconds_bucket{le=\"+Inf\"} 2"));
-        assert!(txt.contains("b2bua_drain_seconds_sum 6.2"));
-        assert!(txt.contains("b2bua_drain_seconds_count 2"));
-        assert!(txt.contains("b2bua_limiter_release_flushes_total{outcome=\"sent\"} 1"));
-        assert!(txt.contains("b2bua_limiter_release_flush_seconds_total 0.3"));
-    }
-
-    #[test]
-    fn retransmit_and_give_up_families_render() {
-        let m = B2buaMetrics::new();
-        m.record_retransmit("final-2xx", "invite", Some(200));
-        m.record_retransmit("final-2xx", "INVITE", Some(200));
-        m.record_retransmit("reliable-provisional", "INVITE", Some(183));
-        m.record_retransmit("trigger", "ACK", None);
-        m.record_repeat_give_up("ack-of-2xx");
-        m.record_quiet_turn("own-rung");
-        m.record_quiet_turn("own-rung");
-        assert_eq!(m.repl_quiet_turns_total("own-rung"), 2);
-        assert_eq!(m.repl_quiet_turns_total("re-ack"), 0);
-        assert_eq!(m.retransmits_total("final-2xx", "INVITE", Some(200)), 2);
-        assert_eq!(m.retransmits_total("trigger", "ACK", None), 1);
-        assert_eq!(
-            m.retransmits_total("trigger", "ACK", Some(200)),
-            0,
-            "a request row carries no code"
-        );
-        assert_eq!(m.repeat_give_ups_total("ack-of-2xx"), 1);
-        assert_eq!(m.repeat_give_ups_total("prack-of"), 0);
-        let txt = m.prometheus_text();
-        assert!(
-            txt.contains(
-                "b2bua_retransmits_total{ladder=\"final-2xx\",method=\"INVITE\",code=\"200\"} 2"
-            ),
-            "{txt}"
-        );
-        assert!(txt.contains("b2bua_retransmits_total{ladder=\"reliable-provisional\",method=\"INVITE\",code=\"183\"} 1"));
-        assert!(
-            txt.contains("b2bua_retransmits_total{ladder=\"trigger\",method=\"ACK\"} 1"),
-            "no code label on a request: {txt}"
-        );
-        assert!(txt.contains("b2bua_repeat_give_ups_total{obligation=\"ack-of-2xx\"} 1"));
-        assert!(txt.contains("b2bua_repl_quiet_turns_total{kind=\"own-rung\"} 2"), "{txt}");
-    }
-
-    #[test]
-    fn clock_wall_divergence_gauge_round_trips_signed_and_renders() {
-        let m = B2buaMetrics::new();
-        // Unset → 0 (flat gauge).
-        assert_eq!(m.clock_wall_divergence_ms(), 0);
-        assert!(m.prometheus_text().contains("b2bua_clock_wall_divergence_ms 0"));
-        // A forward host step (positive) round-trips.
-        m.set_clock_wall_divergence_ms(300_000);
-        assert_eq!(m.clock_wall_divergence_ms(), 300_000);
-        assert!(m.prometheus_text().contains("b2bua_clock_wall_divergence_ms 300000"));
-        // A backward step (negative) survives the u64-bit-pattern storage.
-        m.set_clock_wall_divergence_ms(-45_000);
-        assert_eq!(m.clock_wall_divergence_ms(), -45_000);
-        assert!(m.prometheus_text().contains("b2bua_clock_wall_divergence_ms -45000"));
-    }
-
-    #[test]
-    fn memory_attribution_gauges_render() {
-        let m = B2buaMetrics::new();
-        // Unset → render at 0 (a flat gauge, not a missing series).
-        let zero = m.prometheus_text();
-        assert!(zero.contains("b2bua_store_calls 0"));
-        assert!(zero.contains("b2bua_repl_meta_backup 0"));
-
-        m.set_store_gauges(7, 11, 7, 9, 3, 7);
-        m.set_repl_store_gauges(40, 22, 64, 4);
-        let txt = m.prometheus_text();
-        // A store_locks (9) > store_calls (7) gap is exactly the lock-leak signal.
-        assert!(txt.contains("b2bua_store_calls 7"));
-        assert!(txt.contains("b2bua_store_sip_index 11"));
-        assert!(txt.contains("b2bua_store_indexed 7"));
-        assert!(txt.contains("b2bua_store_locks 9"));
-        assert!(txt.contains("b2bua_store_takeover_at 3"));
-        assert!(txt.contains("b2bua_store_touched 7"));
-        assert!(txt.contains("b2bua_repl_meta_total 40"));
-        assert!(txt.contains("b2bua_repl_meta_backup 22"));
-        assert!(txt.contains("b2bua_repl_changelog_entries 64"));
-        assert!(txt.contains("b2bua_repl_changelog_peers 4"));
-        assert!(txt.contains("b2bua_withdrawn_running 0"));
-        m.set_withdrawn_running(true);
-        let txt = m.prometheus_text();
-        assert!(txt.contains("b2bua_withdrawn_running 1"));
-        assert!(txt.contains("# TYPE b2bua_withdrawn_running gauge"));
-        m.set_repl_peers_pulled_not_ready(1);
-        let txt = m.prometheus_text();
-        assert!(txt.contains("b2bua_repl_peers_pulled_not_ready 1"));
-        assert!(txt.contains("# TYPE b2bua_repl_peers_pulled_not_ready gauge"));
-        // Each gauge series must carry its TYPE line (Prometheus exposition).
-        assert!(txt.contains("# TYPE b2bua_store_calls gauge"));
-        assert!(txt.contains("# TYPE b2bua_repl_meta_backup gauge"));
-    }
-
-    #[test]
-    fn sm_cursor_census_renders_and_overwrites() {
-        let m = B2buaMetrics::new();
-        // Unset → the gauge family is declared but emits no series.
-        let zero = m.prometheus_text();
-        assert!(zero.contains("# TYPE b2bua_sm_cursors gauge"));
-        assert!(!zero.contains("b2bua_sm_cursors{"));
-
-        let mut census = BTreeMap::new();
-        census.insert(("global-call".to_string(), "Active".to_string()), 5);
-        census.insert(("transfer".to_string(), "CRinging".to_string()), 2);
-        m.set_sm_cursor_census(census);
-        let txt = m.prometheus_text();
-        assert!(txt.contains("b2bua_sm_cursors{machine=\"global-call\",state=\"Active\"} 5"));
-        assert!(txt.contains("b2bua_sm_cursors{machine=\"transfer\",state=\"CRinging\"} 2"));
-
-        // A fresh census OVERWRITES: a cursor that drained to zero disappears
-        // rather than sticking at its last value (gauge, not counter).
-        let mut next = BTreeMap::new();
-        next.insert(("global-call".to_string(), "Active".to_string()), 3);
-        m.set_sm_cursor_census(next);
-        let txt = m.prometheus_text();
-        assert!(txt.contains("b2bua_sm_cursors{machine=\"global-call\",state=\"Active\"} 3"));
-        assert!(!txt.contains("machine=\"transfer\""));
-    }
-
-    // -----------------------------------------------------------------------
-    // UdpTransportMetrics shape (port of `UdpTransport.ts` UdpTransportMetrics)
-    // -----------------------------------------------------------------------
-
-    /// A `UdpTransportMetrics` whose `queueDepth` / `dropsTailDrop` are backed by
-    /// caller-held atomics (standing in for a live `UdpEndpoint`), with the real
-    /// brake counters. Mirrors the TS shape's
-    /// live getters without standing up a fabric — the fabric-proxy facet is
-    /// covered end-to-end in `tests/it/udp_transport_metrics.rs`.
-    fn shape() -> (UdpTransportMetrics, IngressBrakeCounters, Arc<AtomicU64>, Arc<AtomicU64>) {
-        let brake = IngressBrakeCounters::new();
-        let depth = Arc::new(AtomicU64::new(0));
-        let tail = Arc::new(AtomicU64::new(0));
-        let d = depth.clone();
-        let t = tail.clone();
-        let m = UdpTransportMetrics::new(
-            5, // queue_max — the brake test's QUEUE_MAX
-            brake.clone(),
-            Arc::new(move || d.load(Ordering::Relaxed)),
-            Arc::new(move || t.load(Ordering::Relaxed)),
-            Arc::new(|| 0),
-            Arc::new(|| 7),
-        );
-        (m, brake, depth, tail)
-    }
-
-    /// Every facet is a LIVE getter: a value changed in the underlying source is
-    /// seen by the metrics shape on the next read, never a stale snapshot. This
-    /// is the TS `get queueDepth() { return endpoint.queueDepth() }` contract.
-    #[test]
-    fn udp_transport_metrics_facets_are_live() {
-        let (m, brake, depth, tail) = shape();
-        // All zero initially.
-        assert_eq!(m.queue_depth(), 0);
-        assert_eq!(m.queue_max(), 5);
-        assert_eq!(m.ingress_brake_emergency_bypassed(), 0);
-        assert_eq!(m.drops_tail_drop(), 0);
-
-        // Mutate the sources — the shape reflects them live.
-        depth.store(2, Ordering::Relaxed);
-        tail.store(7, Ordering::Relaxed);
-        brake.record_emergency_bypass();
-        brake.record_emergency_bypass();
-        brake.record_emergency_bypass();
-        assert_eq!(m.queue_depth(), 2);
-        assert_eq!(m.drops_tail_drop(), 7);
-        assert_eq!(m.ingress_brake_emergency_bypassed(), 3);
-    }
-
-    /// The render carries every field of the shape, with the right Prometheus
-    /// TYPE per field (counters for the monotonic sheds/tail-drops/buffered,
-    /// gauges for the instantaneous depth/max/peers).
-    #[test]
-    fn udp_transport_metrics_render() {
-        let (m, _brake, depth, tail) = shape();
-        depth.store(3, Ordering::Relaxed);
-        tail.store(11, Ordering::Relaxed);
-        let txt = m.prometheus_text();
-
-        // Emergency-bypass visibility series (renders even at 0).
-        assert!(txt.contains("b2bua_udp_ingress_brake_emergency_bypassed_total 0"));
-        assert!(txt.contains("# TYPE b2bua_udp_ingress_brake_emergency_bypassed_total counter"));
-        // Live queue facets.
-        assert!(txt.contains("b2bua_udp_queue_depth 3"));
-        assert!(txt.contains("b2bua_udp_queue_max 5"));
-        assert!(txt.contains("b2bua_udp_tail_dropped_total 11"));
-        assert!(txt.contains("b2bua_udp_kernel_rx_dropped_total 7"));
-        assert!(txt.contains("# TYPE b2bua_udp_kernel_rx_dropped_total counter"));
-        // Prometheus TYPE lines: gauges vs counters.
-        assert!(txt.contains("# TYPE b2bua_udp_queue_depth gauge"));
-        assert!(txt.contains("# TYPE b2bua_udp_queue_max gauge"));
-        assert!(txt.contains("# TYPE b2bua_udp_tail_dropped_total counter"));
-    }
-}
+mod tests;

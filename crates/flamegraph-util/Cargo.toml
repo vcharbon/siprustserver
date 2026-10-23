@@ -6,13 +6,20 @@ license.workspace = true
 publish = false
 description = "On-demand pprof-rs CPU flamegraph capture for the runner binaries (no perf, no privileges, no kernel PMU). Backs the /debug/flamegraph route on the b2bua-worker + front-proxy metrics servers so an endurance run can profile either tier live."
 
+[package.metadata.purity]
+tier = "shell"
+
 [lints]
 workspace = true
 
 [dependencies]
-# SIGPROF-sampling in-process profiler -> inferno flamegraph SVG. `backtrace`
-# unwinding (the default) needs neither frame pointers nor DWARF CFI beyond the
-# always-present `.eh_frame`, and symbolizes from the (un-stripped) release
-# symbol table — so it works in an unprivileged container on a kernel where
-# `perf`/PMU is unavailable. Only the `flamegraph` feature (pulls inferno).
-pprof = { version = "0.14", default-features = false, features = ["flamegraph"] }
+# SIGPROF-sampling in-process profiler. `backtrace` unwinding (the default)
+# needs neither frame pointers nor DWARF CFI beyond the always-present
+# `.eh_frame`, and symbolizes from the (un-stripped) release symbol table — so
+# it works in an unprivileged container on a kernel where `perf`/PMU is
+# unavailable. No features: the samples are folded here and rendered by the
+# inferno below, not by pprof's `flamegraph` feature, whose inferno 0.11 pins
+# a quick-xml with open advisories.
+pprof = { version = "0.15", default-features = false }
+# Folded stacks -> flamegraph SVG; no CLI, no thread pool, no name attributes.
+inferno = { version = "0.12.8", default-features = false }

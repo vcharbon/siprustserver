@@ -11,6 +11,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use super::cells::{add, add_at, get, get_at, row};
+
+use sip_clock::wall::millis_u64;
+
 use crate::limiter::release_queue::{ReleaseFlush, ReleaseFlushOutcome};
 use crate::limiter::RefreshOutcome;
 
@@ -28,7 +32,7 @@ impl LimiterOp {
     pub const ALL: [LimiterOp; 4] =
         [LimiterOp::Admit, LimiterOp::Refresh, LimiterOp::Release, LimiterOp::Health];
 
-    /// The metric label.
+    /// The `op` label value.
     pub const fn label(self) -> &'static str {
         match self {
             LimiterOp::Admit => "admit",
@@ -89,7 +93,7 @@ pub enum LimiterFailure {
 }
 
 impl LimiterFailure {
-    /// The metric label.
+    /// The `cause` label value.
     pub const fn label(self) -> &'static str {
         match self {
             LimiterFailure::Timeout => "timeout",
@@ -117,7 +121,7 @@ impl AdmitSite {
     /// Every site, in declaration order.
     pub const ALL: [AdmitSite; 3] = [AdmitSite::Initial, AdmitSite::Fold, AdmitSite::Service];
 
-    /// The metric label.
+    /// The `site` label value.
     pub const fn label(self) -> &'static str {
         match self {
             AdmitSite::Initial => "initial",
@@ -143,7 +147,7 @@ impl ReleaseGiveUp {
     pub const ALL: [ReleaseGiveUp; 3] =
         [ReleaseGiveUp::LeaseExpired, ReleaseGiveUp::Cap, ReleaseGiveUp::Shutdown];
 
-    /// The metric label.
+    /// The `reason` label value.
     pub const fn label(self) -> &'static str {
         match self {
             ReleaseGiveUp::LeaseExpired => "lease_expired",
@@ -169,7 +173,7 @@ impl RefreshGiveUp {
     pub const ALL: [RefreshGiveUp; 3] =
         [RefreshGiveUp::LeaseExpired, RefreshGiveUp::Cap, RefreshGiveUp::Released];
 
-    /// The metric label.
+    /// The `reason` label value.
     pub const fn label(self) -> &'static str {
         match self {
             RefreshGiveUp::LeaseExpired => "lease_expired",
@@ -194,7 +198,7 @@ impl RefreshDiscard {
     /// Every reason, in declaration order.
     pub const ALL: [RefreshDiscard; 2] = [RefreshDiscard::CallGone, RefreshDiscard::Stale];
 
-    /// The metric label.
+    /// The `reason` label value.
     pub const fn label(self) -> &'static str {
         match self {
             RefreshDiscard::CallGone => "call_gone",
@@ -208,20 +212,17 @@ impl RefreshDiscard {
 pub enum LimiterTask {
     ReleaseSender,
     RefreshSender,
-    BreakerProbe,
 }
 
 impl LimiterTask {
     /// Every task, in declaration order.
-    pub const ALL: [LimiterTask; 3] =
-        [LimiterTask::ReleaseSender, LimiterTask::RefreshSender, LimiterTask::BreakerProbe];
+    pub const ALL: [LimiterTask; 2] = [LimiterTask::ReleaseSender, LimiterTask::RefreshSender];
 
-    /// The metric label.
+    /// The `task` label value.
     pub const fn label(self) -> &'static str {
         match self {
             LimiterTask::ReleaseSender => "release_sender",
             LimiterTask::RefreshSender => "refresh_sender",
-            LimiterTask::BreakerProbe => "breaker_probe",
         }
     }
 }
@@ -263,14 +264,6 @@ pub struct LimiterCounters {
     refresh_period_clamped: AtomicU64,
 }
 
-fn add(a: &AtomicU64, n: u64) {
-    a.fetch_add(n, Ordering::Relaxed);
-}
-
-fn get(a: &AtomicU64) -> u64 {
-    a.load(Ordering::Relaxed)
-}
-
 fn outcome_slot(outcome: RefreshOutcome) -> usize {
     match outcome {
         RefreshOutcome::Extended => 0,
@@ -283,22 +276,22 @@ fn outcome_slot(outcome: RefreshOutcome) -> usize {
 impl LimiterCounters {
     /// One request of `op` left for the limiter.
     pub fn count_request(&self, op: LimiterOp) {
-        add(&self.requests[op as usize], 1);
+        add_at(&self.requests, op as usize, 1);
     }
 
     /// Requests of `op` that left for the limiter.
     pub fn requests_total(&self, op: LimiterOp) -> u64 {
-        get(&self.requests[op as usize])
+        get_at(&self.requests, op as usize)
     }
 
     /// One request of `op` got no usable answer for `cause`.
     pub fn count_failure(&self, op: LimiterOp, cause: LimiterFailure) {
-        add(&self.failures[op as usize][cause as usize], 1);
+        add_at(row(&self.failures, op as usize), cause as usize, 1);
     }
 
     /// Requests of `op` that got no usable answer for `cause`.
     pub fn failures_total(&self, op: LimiterOp, cause: LimiterFailure) -> u64 {
-        get(&self.failures[op as usize][cause as usize])
+        get_at(row(&self.failures, op as usize), cause as usize)
     }
 
     /// Requests of `op` that got no usable answer, every cause.
@@ -308,12 +301,12 @@ impl LimiterCounters {
 
     /// One admit at `site` refused because the limiter had released the key.
     pub fn count_admit_released(&self, site: AdmitSite) {
-        add(&self.admit_released[site as usize], 1);
+        add_at(&self.admit_released, site as usize, 1);
     }
 
     /// Admits at `site` refused on a release fence.
     pub fn admit_released_total(&self, site: AdmitSite) -> u64 {
-        get(&self.admit_released[site as usize])
+        get_at(&self.admit_released, site as usize)
     }
 
     /// Set the number of resident calls that run uncounted (gauge).
@@ -328,22 +321,22 @@ impl LimiterCounters {
 
     /// One call a refresh named was answered `outcome`.
     pub fn count_refresh_answer(&self, outcome: RefreshOutcome) {
-        add(&self.refresh_answers[outcome_slot(outcome)], 1);
+        add_at(&self.refresh_answers, outcome_slot(outcome), 1);
     }
 
     /// Calls refresh requests named that were answered `outcome`.
     pub fn refresh_answers_total(&self, outcome: RefreshOutcome) -> u64 {
-        get(&self.refresh_answers[outcome_slot(outcome)])
+        get_at(&self.refresh_answers, outcome_slot(outcome))
     }
 
     /// One refresh answer handed back to its call found nothing to apply to.
     pub fn count_refresh_discarded(&self, reason: RefreshDiscard) {
-        add(&self.refresh_discarded[reason as usize], 1);
+        add_at(&self.refresh_discarded, reason as usize, 1);
     }
 
     /// Refresh answers discarded for `reason`.
     pub fn refresh_discarded_total(&self, reason: RefreshDiscard) -> u64 {
-        get(&self.refresh_discarded[reason as usize])
+        get_at(&self.refresh_discarded, reason as usize)
     }
 
     /// One refresh request named `keys` keys.
@@ -368,12 +361,12 @@ impl LimiterCounters {
 
     /// One due refresh given up for `reason`.
     pub fn count_refresh_given_up(&self, reason: RefreshGiveUp) {
-        add(&self.refresh_given_up[reason as usize], 1);
+        add_at(&self.refresh_given_up, reason as usize, 1);
     }
 
     /// Due refreshes given up for `reason`.
     pub fn refresh_given_up_total(&self, reason: RefreshGiveUp) -> u64 {
-        get(&self.refresh_given_up[reason as usize])
+        get_at(&self.refresh_given_up, reason as usize)
     }
 
     /// Set the number of keys due in the refresh batch (gauge).
@@ -398,12 +391,12 @@ impl LimiterCounters {
 
     /// `n` queued releases given up for `reason`.
     pub fn count_release_given_up(&self, reason: ReleaseGiveUp, n: u64) {
-        add(&self.release_given_up[reason as usize], n);
+        add_at(&self.release_given_up, reason as usize, n);
     }
 
     /// Queued releases given up for `reason`.
     pub fn release_given_up_total(&self, reason: ReleaseGiveUp) -> u64 {
-        get(&self.release_given_up[reason as usize])
+        get_at(&self.release_given_up, reason as usize)
     }
 
     /// Set the number of releases waiting in the release queue (gauge).
@@ -418,13 +411,13 @@ impl LimiterCounters {
 
     /// One planned exit flushed the release queue.
     pub fn count_release_flush(&self, flush: &ReleaseFlush) {
-        add(&self.release_flushes[flush.outcome() as usize], 1);
-        add(&self.release_flush_ms, flush.elapsed.as_millis() as u64);
+        add_at(&self.release_flushes, flush.outcome() as usize, 1);
+        add(&self.release_flush_ms, millis_u64(flush.elapsed));
     }
 
     /// Release flushes that ended `outcome`.
     pub fn release_flushes_total(&self, outcome: ReleaseFlushOutcome) -> u64 {
-        get(&self.release_flushes[outcome as usize])
+        get_at(&self.release_flushes, outcome as usize)
     }
 
     /// Time the release flushes took.
@@ -434,19 +427,19 @@ impl LimiterCounters {
 
     /// One supervised `task` panicked and was restarted.
     pub fn count_task_restart(&self, task: LimiterTask) {
-        add(&self.task_restarts[task as usize], 1);
+        add_at(&self.task_restarts, task as usize, 1);
     }
 
     /// Restarts of `task`.
     pub fn task_restarts_total(&self, task: LimiterTask) -> u64 {
-        get(&self.task_restarts[task as usize])
+        get_at(&self.task_restarts, task as usize)
     }
 
     /// The breaker opened (`true`) or closed (`false`): the gauge and the
     /// transition.
     pub fn count_breaker_transition(&self, open: bool) {
         self.breaker_open.store(open as u64, Ordering::Relaxed);
-        add(&self.breaker_transitions[open as usize], 1);
+        add_at(&self.breaker_transitions, usize::from(open), 1);
     }
 
     /// Set the breaker's state (gauge) with no transition: its start.
@@ -454,19 +447,19 @@ impl LimiterCounters {
         self.breaker_open.store(open as u64, Ordering::Relaxed);
     }
 
-    /// Whether the breaker is open.
+    /// Whether the breaker gauge reads open.
     pub fn breaker_open(&self) -> bool {
         get(&self.breaker_open) == 1
     }
 
     /// Breaker transitions to open (`true`) or closed (`false`).
     pub fn breaker_transitions_total(&self, open: bool) -> u64 {
-        get(&self.breaker_transitions[open as usize])
+        get_at(&self.breaker_transitions, usize::from(open))
     }
 
     /// Set the lease as the worker last learnt it (gauge).
     pub fn set_lease(&self, lease: Duration) {
-        self.lease_ms.store(lease.as_millis() as u64, Ordering::Relaxed);
+        self.lease_ms.store(millis_u64(lease), Ordering::Relaxed);
     }
 
     /// The lease as the worker last learnt it.
@@ -486,7 +479,7 @@ impl LimiterCounters {
 
     /// Set the refresh period the learnt lease sets (gauge).
     pub fn set_refresh_period(&self, period: Duration) {
-        self.refresh_period_ms.store(period.as_millis() as u64, Ordering::Relaxed);
+        self.refresh_period_ms.store(millis_u64(period), Ordering::Relaxed);
     }
 
     /// The refresh period the learnt lease sets.
@@ -503,88 +496,9 @@ impl LimiterCounters {
     pub fn refresh_period_clamped_total(&self) -> u64 {
         get(&self.refresh_period_clamped)
     }
-
-    /// Append every series as Prometheus text.
-    pub fn render(&self, s: &mut String) {
-        use super::catalogue::limiter as c;
-        let secs = |d: Duration| d.as_millis() as f64 / 1000.0;
-        c::REQUESTS.render(s, |series| self.requests_total(LimiterOp::ALL[series.index(&c::OP)]));
-        c::FAILURES.render(s, |series| {
-            let op = LimiterOp::ALL[series.block()];
-            self.failures_total(op, op.causes()[series.at(1)])
-        });
-        c::ADMIT_RELEASED.render(s, |series| {
-            self.admit_released_total(AdmitSite::ALL[series.index(&c::ADMIT_SITE)])
-        });
-        c::UNCOUNTED_CALLS.render_value(s, self.uncounted_calls());
-        c::REFRESH_ANSWERS.render(s, |series| {
-            self.refresh_answers_total(REFRESH_OUTCOMES[series.index(&c::REFRESH_OUTCOME)])
-        });
-        c::REFRESH_ANSWERS_DISCARDED.render(s, |series| {
-            self.refresh_discarded_total(RefreshDiscard::ALL[series.index(&c::REFRESH_DISCARD)])
-        });
-        c::REFRESH_KEYS_SENT.render_value(s, self.refresh_keys_sent_total());
-        c::REFRESH_RETRIES.render_value(s, self.refresh_retries_total());
-        c::REFRESH_GIVEN_UP.render(s, |series| {
-            self.refresh_given_up_total(RefreshGiveUp::ALL[series.index(&c::REFRESH_GIVE_UP)])
-        });
-        c::REFRESH_DUE.render_value(s, self.refresh_due());
-        c::RELEASE_RETRIES.render_value(s, self.release_retries_total());
-        c::RELEASE_GIVEN_UP.render(s, |series| {
-            self.release_given_up_total(ReleaseGiveUp::ALL[series.index(&c::RELEASE_GIVE_UP)])
-        });
-        c::RELEASE_QUEUE_DEPTH.render_value(s, self.release_queue_depth());
-        c::RELEASE_FLUSHES.render(s, |series| {
-            self.release_flushes_total(ReleaseFlushOutcome::ALL[series.index(&c::RELEASE_FLUSH)])
-        });
-        c::RELEASE_FLUSH_SECONDS.render_value(s, secs(self.release_flush_time()));
-        c::TASK_RESTARTS
-            .render(s, |series| self.task_restarts_total(LimiterTask::ALL[series.index(&c::TASK)]));
-        c::BREAKER_OPEN.render_value(s, self.breaker_open() as u64);
-        c::BREAKER_TRANSITIONS
-            .render(s, |series| self.breaker_transitions_total(series.index(&c::BREAKER_TO) == 0));
-        c::LEASE_SECONDS.render_value(s, secs(self.lease()));
-        c::REFRESH_PERIOD_SECONDS.render_value(s, secs(self.refresh_period()));
-        c::LEASE_TOO_SHORT.render_value(s, self.lease_too_short_total());
-        c::REFRESH_PERIOD_CLAMPED.render_value(s, self.refresh_period_clamped_total());
-    }
 }
+
+mod render;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Every label value is rendered, zero included, and a count lands on
-    /// its own series only.
-    #[test]
-    fn every_series_is_rendered_with_its_closed_labels() {
-        let m = LimiterCounters::default();
-        m.count_failure(LimiterOp::Admit, LimiterFailure::BreakerOpen);
-        m.count_failure(LimiterOp::Health, LimiterFailure::BadAnswer);
-        m.count_refresh_answer(RefreshOutcome::Dropped);
-        m.count_release_given_up(ReleaseGiveUp::Shutdown, 3);
-        m.count_task_restart(LimiterTask::BreakerProbe);
-        m.set_uncounted_calls(2);
-        let mut s = String::new();
-        m.render(&mut s);
-        for line in [
-            "b2bua_limiter_failures_total{op=\"admit\",cause=\"breaker_open\"} 1",
-            "b2bua_limiter_failures_total{op=\"admit\",cause=\"timeout\"} 0",
-            "b2bua_limiter_failures_total{op=\"health\",cause=\"bad_answer\"} 1",
-            "b2bua_limiter_failures_total{op=\"release\",cause=\"status\"} 0",
-            "b2bua_limiter_requests_total{op=\"release\"} 0",
-            "b2bua_limiter_refresh_answers_total{outcome=\"dropped\"} 1",
-            "b2bua_limiter_refresh_answers_total{outcome=\"extended\"} 0",
-            "b2bua_limiter_release_given_up_total{reason=\"shutdown\"} 3",
-            "b2bua_limiter_task_restarts_total{task=\"breaker_probe\"} 1",
-            "b2bua_limiter_uncounted_calls 2",
-            "b2bua_limiter_release_flushes_total{outcome=\"given_up\"} 0",
-            "# TYPE b2bua_limiter_uncounted_calls gauge",
-        ] {
-            assert!(s.contains(&format!("{line}\n")), "{line} missing in\n{s}");
-        }
-        assert!(!s.contains("op=\"release\",cause=\"bad_answer\""), "a release body is never read");
-        assert!(!s.contains("op=\"refresh\",cause=\"breaker_open\""), "only an admit is not sent");
-        assert_eq!(m.failures_of(LimiterOp::Admit), 1);
-    }
-}
+mod tests;

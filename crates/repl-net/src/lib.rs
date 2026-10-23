@@ -4,8 +4,8 @@
 //! transport seam that the peer-to-peer replication engine (ADR-0011) speaks
 //! over. The wire layer is the replication analogue of `sip-message`:
 //! pure, synchronous, no transport. The transport seam
-//! ([`ReplicationNetwork`]: sim + real TCP +
-//! recording) is the analogue of `sip-net`'s `SignalingNetwork`, but for a
+//! ([`ReplicationNetwork`] and its real TCP implementation; the simulated
+//! network and the recording decorator live in `repl-net-testkit`) is the analogue of `sip-net`'s `SignalingNetwork`, but for a
 //! reliable, ordered, message-granular framed stream (Decision X2).
 //!
 //! ## What is here
@@ -35,6 +35,24 @@
 //! [`Watermark`] in Rust (e.g. `PullRequest`'s `since_gen` + `since_counter`);
 //! they always serialise back to two flat array elements.
 
+// The panic set at deny outside test code (ADR-0051 §3).
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::string_slice,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
+
 pub mod codec;
 pub mod frame;
 pub mod framing;
@@ -44,7 +62,6 @@ pub use codec::{decode_frame, encode_frame, ReplCodecError};
 pub use frame::{Frame, Op, Partition, UnknownDiscriminant, Watermark};
 pub use framing::{frame_with_len_prefix, try_read_framed, ReplFramingError, MAX_FRAME_LEN};
 pub use transport::{
-    CapturedFrame, ConnectError, Direction, Fault, ListenError, RealReplicationNetwork,
-    RecordingReplicationNetwork, ReplicationConnection, ReplicationListener, ReplicationNetwork,
-    SendError, SimulatedReplicationNetwork,
+    AcceptError, ConnectError, ListenError, RealReplicationNetwork, ReplicationConnection,
+    ReplicationListener, ReplicationNetwork, SendError, SocketSettings,
 };

@@ -216,7 +216,7 @@ returns terminate by default; failover path compiles and is unit-tested).
 - `CallDecisionEngine` trait: `new_call(NewCallRequest) -> Result<NewCallResponse,
   CallDecisionError>` (+ `call_failure`, `call_refer`). Serde schemas mirror
   `src/decision/schemas/*` (route carries `destination`, `new_ruri`,
-  `update_headers`, `update_body`, `no_answer_timeout_sec`, `call_limiter`,
+  `update_headers`, `update_body`, `no_answer_ms`, `call_limiter`,
   `callback_context`, `features`, `serviceExt`; reject carries `reject_code`/
   `reject_reason`/`update_headers`). `FeatureActivations` reuses `call::features`.
 - `ScriptedDecisionEngine` (test): inspects the `NewCallRequest` JSON — R-URI /

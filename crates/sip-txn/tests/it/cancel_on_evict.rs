@@ -5,10 +5,11 @@
 //! transaction past its window.
 
 use crate::common;
+use call::TxnKind;
 use common::*;
 use sip_message::{SipMessage, SipRequest};
 use sip_txn::timers::{TIMER_B, TIMER_D, TIMER_M};
-use sip_txn::{TransactionEvent, TxnKind};
+use sip_txn::TransactionEvent;
 
 /// The ACKs among `msgs`, in wire order.
 fn acks(msgs: Vec<SipMessage>) -> Vec<SipRequest> {
@@ -123,8 +124,9 @@ async fn t6_an_orphaned_invite_acks_its_non_2xx_and_is_purged_at_timer_d() {
 }
 
 /// A 2xx to an orphaned INVITE draws the bare ACK the vanished UAC core owed
-/// (§13.2.2.4), on a fresh branch, and Timer M (RFC 6026 §7.2) holds the
-/// orphan to re-pass that same ACK to each repeat of the 2xx.
+/// (§13.2.2.4), on a fresh branch, then the BYE of the dialog nothing holds
+/// (§15.1.1), and Timer M (RFC 6026 §7.2) holds the orphan to re-pass that
+/// same ACK to each repeat of the 2xx.
 #[tokio::test(start_paused = true)]
 async fn t7_an_orphaned_invite_acks_its_2xx_and_is_purged_at_timer_m() {
     let mut stack = Stack::build(5, 64, 64).await;
@@ -137,7 +139,15 @@ async fn t7_an_orphaned_invite_acks_its_2xx_and_is_purged_at_timer_m() {
 
     stack.inject(&response_bytes(200, "OK", "INVITE", branch, "callid-T7", true)).await;
     elapse_ms(20).await;
-    let first = acks(stack.drain_peer());
+    let out = stack.drain_peer();
+    let bye_branch = request_branch(&out, "BYE").expect("the BYE of the unheld dialog");
+    let bye = out.iter().find_map(|m| match m {
+        sip_message::SipMessage::Request(r) if r.method() == "BYE" => Some(r.cseq().seq()),
+        _ => None,
+    });
+    assert_eq!(bye, Some(2), "the dialog's next CSeq after the INVITE's");
+    stack.inject(&response_bytes(200, "OK", "BYE", &bye_branch, "callid-T7", true)).await;
+    let first = acks(out);
     assert_eq!(first.len(), 1, "the bare ACK");
     let ack_branch = first[0].top_via().branch().unwrap().to_string();
     assert_ne!(ack_branch, branch, "§17.1.1.3: the 2xx ACK is its own transaction");

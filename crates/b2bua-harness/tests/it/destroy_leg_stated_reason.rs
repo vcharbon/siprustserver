@@ -28,7 +28,7 @@ mod releaser {
         ServiceSeed, Terminal, TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
-    use call::{ByeDisposition, Direction, LegState, TimerType};
+    use call::{Direction, LegState, TimerKey, TimerType};
     use sip_message::Method;
 
     pub const FIRE_SEC: i64 = 5;
@@ -39,11 +39,10 @@ mod releaser {
         states: RlState { Armed },
         init: |_call: &RuleCall| {
             Some(ServiceSeed::new(RlState::Armed.label()).with_actions(vec![
-                RuleAction::ScheduleTimer {
-                    timer_type: TimerType::service(RELEASER, "release"),
-                    delay: TimerDelay::secs(FIRE_SEC),
-                    leg_id: None,
-                },
+                RuleAction::arm(
+                    TimerKey::call(TimerType::service(RELEASER, "release")),
+                    TimerDelay::secs(FIRE_SEC),
+                ),
             ]))
         },
         rules: [ release_on_fire(), end_callee_on_caller_bye() ],
@@ -75,7 +74,7 @@ mod releaser {
                     },
                     RuleAction::TerminateLeg {
                         leg_id: a.clone(),
-                        bye_disposition: Some(ByeDisposition::ByeReceived),
+                        end: b2bua_sdk::model::LegEnd::PeerByeAnswered,
                     },
                     RuleAction::DestroyLeg { leg_id: b, headers: vec![] },
                     RuleAction::BeginTermination {
@@ -107,7 +106,7 @@ mod releaser {
                     leg_id: b,
                     headers: vec![("Reason".to_string(), super::STATED.to_string())],
                 }];
-                if ctx.call.a_leg().state != LegState::Confirmed {
+                if ctx.call.a_leg().state() != LegState::Confirmed {
                     actions.push(RuleAction::RespondToALeg {
                         status: 480,
                         reason: "Temporarily Unavailable".into(),

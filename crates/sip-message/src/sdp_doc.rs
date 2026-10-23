@@ -1,7 +1,7 @@
 //! The SDP session description read as a DOCUMENT: the line walk, the
 //! session/media split, and the field extractions a consumer keys on.
 //!
-//! This is the only home for SDP document grammar, the way [`crate::sniff`] is
+//! This is the only home for SDP document grammar, the way `crate::sniff` is
 //! the only home for raw SIP header extraction — a rule or an audit reads facts
 //! off an [`SdpDoc`] and never walks `v=` / `o=` / `m=` / `a=` lines itself.
 //! Its sibling [`crate::sdp`] BUILDS descriptions for the B2BUA's transfer and
@@ -15,6 +15,8 @@
 //! [`crate::sdp::validate_sdp_body`]'s.
 //!
 //! Pure and deterministic: no clocks, no randomness, no I/O.
+
+use lookup_map::LookupSet;
 
 /// One `m=`-rooted media description with its trailing media-level lines. The
 /// m-line shape is `m=<type> <port> <transport> <fmt> ...`.
@@ -102,35 +104,38 @@ pub struct SdpOrigin {
 /// first byte that is not one. `None` where no digit follows the sign.
 fn leading_int(s: &str) -> Option<i64> {
     let s = s.trim_start();
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    let mut neg = false;
-    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
-        neg = bytes[i] == b'-';
-        i += 1;
-    }
-    let start = i;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        i += 1;
-    }
-    if i == start {
+    let (neg, unsigned) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    let digits = unsigned.get(..unsigned.bytes().take_while(u8::is_ascii_digit).count())?;
+    if digits.is_empty() {
         return None;
     }
-    let n: i64 = s[start..i].parse().ok()?;
+    let n: i64 = digits.parse().ok()?;
     Some(if neg { -n } else { n })
 }
 
 /// Case-insensitive prefix strip; `prefix` is lowercase ASCII.
 fn strip_prefix_ci<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
-    if value.len() < prefix.len() {
-        return None;
-    }
-    let (head, tail) = value.split_at(prefix.len());
+    let head = value.get(..prefix.len())?;
     if head.eq_ignore_ascii_case(prefix) {
-        Some(tail)
+        value.get(prefix.len()..)
     } else {
         None
     }
+}
+
+/// A description line split into its type letter and its value: `None` where
+/// the line is not `<letter>=<value>`.
+fn typed_line(line: &str) -> Option<(u8, &str)> {
+    let mut chars = line.char_indices();
+    let (_, key) = chars.next()?;
+    let (eq, '=') = chars.next()? else {
+        return None;
+    };
+    let key = u8::try_from(key).ok().filter(u8::is_ascii)?;
+    Some((key, line.get(eq + 1..)?))
 }
 
 /// A media block under construction, finalised into [`MediaLine`].
@@ -198,12 +203,9 @@ pub fn parse_sdp_body(body: &[u8]) -> Option<SdpDoc> {
     let mut media: Vec<MutableMedia> = Vec::new();
 
     for line in lines {
-        let bytes = line.as_bytes();
-        if bytes.len() < 2 || bytes[1] != b'=' {
+        let Some((key, value)) = typed_line(line) else {
             continue;
-        }
-        let key = bytes[0];
-        let value = &line[2..];
+        };
 
         if key == b'm' {
             media.push(new_media(value));
@@ -261,12 +263,7 @@ pub fn parse_sdp_body(body: &[u8]) -> Option<SdpDoc> {
 /// The tokens after `<type> <port> <transport>` on an `m=` line's value — the
 /// format / payload-type list. Empty where the line carries none.
 pub fn extract_format_list(m_line: &str) -> Vec<String> {
-    let tokens: Vec<&str> = m_line.split_whitespace().collect();
-    if tokens.len() > 3 {
-        tokens[3..].iter().map(|t| t.to_string()).collect()
-    } else {
-        Vec::new()
-    }
+    m_line.split_whitespace().skip(3).map(str::to_string).collect()
 }
 
 /// The block's direction attribute; absence is [`SdpDirection::SendRecv`]
@@ -292,19 +289,15 @@ pub fn direction_of(attr: &str) -> Option<SdpDirection> {
 /// occurrence of a payload type wins — a repeated binding states nothing new.
 pub fn extract_rtpmaps(media: &MediaLine) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen: LookupSet<&str> = LookupSet::new();
     for attr in &media.attributes {
         let Some(tail) = strip_prefix_ci(attr, "rtpmap:") else { continue };
-        let tail = tail.trim();
-        let Some(sp) = tail.find(' ') else { continue };
-        if sp == 0 {
-            continue;
-        }
-        let pt = tail[..sp].trim();
-        let enc = tail[sp + 1..].trim();
+        let Some((pt, enc)) = tail.trim().split_once(' ') else { continue };
+        let (pt, enc) = (pt.trim(), enc.trim());
         if pt.is_empty() || enc.is_empty() {
             continue;
         }
-        if !out.iter().any(|(p, _)| p == pt) {
+        if seen.insert(pt) {
             out.push((pt.to_string(), enc.to_string()));
         }
     }
@@ -316,11 +309,12 @@ pub fn extract_rtpmaps(media: &MediaLine) -> Vec<(String, String)> {
 /// of a format wins.
 pub fn extract_fmtps(media: &MediaLine) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen: LookupSet<&str> = LookupSet::new();
     for attr in &media.attributes {
         let Some(tail) = strip_prefix_ci(attr, "fmtp:") else { continue };
         let tail = tail.trim();
         let (format, params) = tail.split_once(' ').unwrap_or((tail, ""));
-        if !format.is_empty() && !out.iter().any(|(f, _)| f == format) {
+        if !format.is_empty() && seen.insert(format) {
             out.push((format.to_string(), params.trim().to_string()));
         }
     }
@@ -376,13 +370,14 @@ pub fn parse_origin(body: &[u8]) -> Option<SdpOrigin> {
         return None;
     }
     let lines: Vec<&str> = text.split('\n').map(|l| l.trim_end_matches('\r')).collect();
-    let o_idx = lines.iter().position(|l| l.starts_with("o="))?;
-    let o_line = lines[o_idx];
-    let parts: Vec<&str> = o_line[2..].split_whitespace().collect();
-    if parts.len() < 6 {
+    let (o_idx, o_line, o_value) =
+        lines.iter().enumerate().find_map(|(i, l)| Some((i, *l, l.strip_prefix("o=")?)))?;
+    let parts: Vec<&str> = o_value.split_whitespace().collect();
+    let [username, session_id, version, nettype, addrtype, unicast_address, ..] = parts.as_slice()
+    else {
         return None;
-    }
-    let session_version = parts[2].parse::<u64>().ok()?;
+    };
+    let session_version = version.parse::<u64>().ok()?;
     let others = lines
         .iter()
         .enumerate()
@@ -391,17 +386,18 @@ pub fn parse_origin(body: &[u8]) -> Option<SdpOrigin> {
         .collect::<Vec<_>>()
         .join("\n");
     Some(SdpOrigin {
-        username: parts[0].to_string(),
-        session_id: parts[1].to_string(),
+        username: username.to_string(),
+        session_id: session_id.to_string(),
         session_version,
-        nettype: parts[3].to_string(),
-        addrtype: parts[4].to_string(),
-        unicast_address: parts[5].to_string(),
+        nettype: nettype.to_string(),
+        addrtype: addrtype.to_string(),
+        unicast_address: unicast_address.to_string(),
         raw_origin_line: o_line.to_string(),
         body_excluding_origin: others,
     })
 }
 
+#[deny(clippy::arithmetic_side_effects)]
 impl SdpOrigin {
     /// The five-field identity `o=` states about the SESSION — everything but
     /// the version, which is the revision counter (RFC 4566 §5.2). Two
@@ -414,9 +410,10 @@ impl SdpOrigin {
             && self.unicast_address == other.unicast_address
     }
 
-    /// The `o=` line's value — everything after `o=`.
+    /// The `o=` line's value — everything after `o=`; the whole line where it
+    /// does not open with `o=`.
     pub fn value(&self) -> &str {
-        &self.raw_origin_line[2..]
+        self.raw_origin_line.strip_prefix("o=").unwrap_or(&self.raw_origin_line)
     }
 
     /// The `o=` line a re-offer of THIS session states (RFC 3264 §8): the five
@@ -450,7 +447,9 @@ pub(crate) struct Section<'a> {
 }
 
 impl<'a> Sections<'a> {
-    pub(crate) fn of(text: &'a str) -> Self {
+    /// `text` cut at its `m=` lines; `None` only where a cut would split a
+    /// character, which a cut at a line start never does.
+    pub(crate) fn of(text: &'a str) -> Option<Self> {
         let mut starts: Vec<usize> = Vec::new();
         let mut offset = 0usize;
         for line in text.split_inclusive('\n') {
@@ -460,14 +459,13 @@ impl<'a> Sections<'a> {
             offset += line.len();
         }
         let session_end = starts.first().copied().unwrap_or(text.len());
+        let ends = starts.iter().skip(1).copied().chain(std::iter::once(text.len()));
         let media = starts
             .iter()
-            .enumerate()
-            .map(|(k, &at)| Section {
-                text: &text[at..starts.get(k + 1).copied().unwrap_or(text.len())],
-            })
-            .collect();
-        Self { session: &text[..session_end], media }
+            .zip(ends)
+            .map(|(&at, end)| Some(Section { text: text.get(at..end)? }))
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self { session: text.get(..session_end)?, media })
     }
 }
 
@@ -480,172 +478,4 @@ impl Section<'_> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const AUDIO_OFFER: &[u8] = b"v=0\r\n\
-o=alice 2890844526 2890844526 IN IP4 10.0.0.1\r\n\
-s=-\r\n\
-c=IN IP4 10.0.0.1\r\n\
-t=0 0\r\n\
-m=audio 49170 RTP/AVP 0 8 96\r\n\
-a=rtpmap:0 PCMU/8000\r\n\
-a=rtpmap:96 opus/48000/2\r\n\
-a=ptime:20\r\n\
-a=sendrecv\r\n";
-
-    #[test]
-    fn single_audio_m_line_is_lifted() {
-        let doc = parse_sdp_body(AUDIO_OFFER).expect("sdp");
-        assert_eq!(doc.version.as_deref(), Some("0"));
-        assert_eq!(doc.origin.as_deref(), Some("alice 2890844526 2890844526 IN IP4 10.0.0.1"));
-        assert_eq!(doc.session_name.as_deref(), Some("-"));
-        assert_eq!(doc.t_line.as_deref(), Some("0 0"));
-        assert_eq!(doc.c_line.as_deref(), Some("IN IP4 10.0.0.1"));
-        assert_eq!(doc.media.len(), 1);
-
-        let m = &doc.media[0];
-        assert_eq!(m.r#type, "audio");
-        assert_eq!(m.port, Some(49170));
-        assert_eq!(m.transport, "RTP/AVP");
-        assert_eq!(m.formats, vec!["0", "8", "96"]);
-        assert_eq!(m.ptime, Some(20));
-        assert_eq!(
-            m.attributes,
-            vec!["rtpmap:0 PCMU/8000", "rtpmap:96 opus/48000/2", "ptime:20", "sendrecv"]
-        );
-        // No media-level c= — the session-level one stands for this stream.
-        assert_eq!(m.c_line, None);
-
-        assert_eq!(extract_direction(m), SdpDirection::SendRecv);
-        assert_eq!(
-            extract_rtpmaps(m),
-            vec![
-                ("0".to_string(), "PCMU/8000".to_string()),
-                ("96".to_string(), "opus/48000/2".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn two_m_line_offer_keeps_order_and_blocks() {
-        let body = b"v=0\r\n\
-o=bob 1 1 IN IP4 192.0.2.1\r\n\
-s=session\r\n\
-t=0 0\r\n\
-m=audio 5000 RTP/AVP 0\r\n\
-c=IN IP4 192.0.2.1\r\n\
-a=sendonly\r\n\
-m=video 5002 RTP/AVP 96\r\n\
-a=rtpmap:96 H264/90000\r\n\
-a=recvonly\r\n";
-        let doc = parse_sdp_body(body).expect("sdp");
-        assert_eq!(doc.c_line, None, "no session-level c=");
-        assert_eq!(doc.media.len(), 2);
-
-        let audio = &doc.media[0];
-        assert_eq!(audio.r#type, "audio");
-        assert_eq!(audio.port, Some(5000));
-        assert_eq!(audio.c_line.as_deref(), Some("IN IP4 192.0.2.1"));
-        assert_eq!(extract_direction(audio), SdpDirection::SendOnly);
-
-        let video = &doc.media[1];
-        assert_eq!(video.r#type, "video");
-        assert_eq!(video.port, Some(5002));
-        assert_eq!(video.formats, vec!["96"]);
-        assert_eq!(video.c_line, None);
-        assert_eq!(extract_direction(video), SdpDirection::RecvOnly);
-        assert_eq!(extract_rtpmaps(video), vec![("96".to_string(), "H264/90000".to_string())]);
-    }
-
-    #[test]
-    fn an_audio_rtpmap_reads_an_absent_channel_count_as_one() {
-        assert_eq!(canonical_rtpmap("audio", "PCMA/8000"), "PCMA/8000/1");
-        assert_eq!(canonical_rtpmap("AUDIO", "PCMA/8000"), "PCMA/8000/1");
-        assert_eq!(canonical_rtpmap("audio", "PCMA/8000/1"), "PCMA/8000/1");
-        assert_eq!(canonical_rtpmap("audio", "opus/48000/2"), "opus/48000/2");
-    }
-
-    #[test]
-    fn a_non_audio_rtpmap_and_an_unreadable_one_keep_what_was_written() {
-        assert_eq!(canonical_rtpmap("video", "H264/90000"), "H264/90000");
-        assert_eq!(canonical_rtpmap("application", "H224/4800"), "H224/4800");
-        assert_eq!(canonical_rtpmap("audio", "PCMA"), "PCMA");
-        assert_eq!(canonical_rtpmap("audio", "PCMA/"), "PCMA/");
-        assert_eq!(canonical_rtpmap("audio", "/8000"), "/8000");
-    }
-
-    #[test]
-    fn rejected_stream_has_port_zero() {
-        let body = b"v=0\r\n\
-o=- 0 0 IN IP4 127.0.0.1\r\n\
-s=-\r\n\
-t=0 0\r\n\
-m=audio 0 RTP/AVP 0\r\n\
-a=inactive\r\n";
-        let doc = parse_sdp_body(body).expect("sdp");
-        assert_eq!(doc.media.len(), 1);
-        assert_eq!(doc.media[0].port, Some(0), "rejected stream carries port 0");
-        assert_eq!(extract_direction(&doc.media[0]), SdpDirection::Inactive);
-    }
-
-    #[test]
-    fn non_sdp_body_yields_none() {
-        assert!(parse_sdp_body(b"").is_none());
-        assert!(parse_sdp_body(b"not sdp at all").is_none());
-        assert!(parse_sdp_body(b"o=- 0 0 IN IP4 127.0.0.1\r\n").is_none());
-    }
-
-    #[test]
-    fn unparseable_port_is_none_not_zero() {
-        let body = b"v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=audio xyz RTP/AVP 0\r\n";
-        let doc = parse_sdp_body(body).expect("sdp");
-        assert_eq!(doc.media[0].port, None, "no digits read as no port, never as zero");
-    }
-
-    #[test]
-    fn extract_format_list_drops_head_tokens() {
-        assert_eq!(extract_format_list("audio 49170 RTP/AVP 0 8 96"), vec!["0", "8", "96"]);
-        assert!(extract_format_list("audio 49170 RTP/AVP").is_empty());
-        assert!(extract_format_list("audio").is_empty());
-    }
-
-    #[test]
-    fn origin_lifts_its_six_fields_and_the_rest_of_the_body() {
-        let o = parse_origin(AUDIO_OFFER).expect("origin");
-        assert_eq!(o.username, "alice");
-        assert_eq!(o.session_id, "2890844526");
-        assert_eq!(o.session_version, 2890844526);
-        assert_eq!(o.nettype, "IN");
-        assert_eq!(o.addrtype, "IP4");
-        assert_eq!(o.unicast_address, "10.0.0.1");
-        assert!(!o.body_excluding_origin.contains("o="));
-        assert!(o.body_excluding_origin.contains("m=audio"));
-    }
-
-    #[test]
-    fn origin_rejects_what_is_not_a_v0_description() {
-        assert!(parse_origin(b"").is_none());
-        assert!(parse_origin(b"not sdp").is_none());
-        assert!(parse_origin(b"v=0\r\ns=-\r\n").is_none(), "no o= line");
-        assert!(parse_origin(b"v=0\r\no=alice 1 1 IN\r\n").is_none(), "fewer than six fields");
-        assert!(parse_origin(b"v=0\r\no=alice 1 x IN IP4 1.2.3.4\r\n").is_none(), "no version");
-    }
-
-    #[test]
-    fn same_session_is_the_five_fields_but_the_version() {
-        let a = parse_origin(b"v=0\r\no=alice 1 1 IN IP4 10.0.0.1\r\n").expect("a");
-        let bumped = parse_origin(b"v=0\r\no=alice 1 9 IN IP4 10.0.0.1\r\n").expect("b");
-        let moved = parse_origin(b"v=0\r\no=alice 1 1 IN IP4 10.0.0.2\r\n").expect("c");
-        assert!(a.identifies_same_session(&bumped), "only the version rose");
-        assert!(!a.identifies_same_session(&moved), "the address is part of the identity");
-    }
-
-    #[test]
-    fn the_next_version_never_wraps() {
-        let a = parse_origin(b"v=0\r\no=alice 1 7 IN IP4 10.0.0.1\r\n").expect("a");
-        assert_eq!(a.next_version_line().as_deref(), Some("o=alice 1 8 IN IP4 10.0.0.1"));
-        let top = format!("v=0\r\no=alice 1 {} IN IP4 10.0.0.1\r\n", u64::MAX);
-        assert_eq!(parse_origin(top.as_bytes()).expect("top").next_version_line(), None);
-    }
-}
+mod tests;

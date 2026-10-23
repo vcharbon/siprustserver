@@ -9,7 +9,7 @@
  * through step ids.
  */
 import * as Schema from "effect/Schema"
-import { Cause, NO_ANSWER_MS_BAND } from "./tokens.js"
+import { Cause } from "./tokens.js"
 
 /** The dialed target: a name in the registry, never the number itself. */
 export const Callee = Schema.Struct({
@@ -54,15 +54,6 @@ export const Attempt = Schema.Struct({
   no_answer_ms: Schema.optionalKey(Schema.Int)
 })
 export interface Attempt extends Schema.Schema.Type<typeof Attempt> {}
-
-/** Whether `no_answer_ms` is stated exactly where it may be, and inside the armable band. */
-export const noAnswerMsIsDeclarable = (attempt: Attempt): boolean => {
-  const isNoAnswer = attempt.cause === "no-answer"
-  const ms = attempt.no_answer_ms
-  if (isNoAnswer && ms !== undefined) return ms >= NO_ANSWER_MS_BAND.min && ms <= NO_ANSWER_MS_BAND.max
-  if (isNoAnswer || ms !== undefined) return false
-  return true
-}
 
 /**
  * The provisional-handling profile the CAPTURED system ran, in the decision API's

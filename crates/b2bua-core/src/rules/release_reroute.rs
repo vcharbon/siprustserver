@@ -1,0 +1,426 @@
+//! `release-reroute` — the subscribed release-event fold + the
+//! **established-call reroute** treatment.
+//!
+//! When a subscribed internal release event fires (max-call-duration first),
+//! the `max-duration` rule seeds a `ReleaseAsyncHttp`; the router consults
+//! `decision.call_release` (deadline-bounded) and folds the outcome back as a
+//! `call-release-result` internal event handled here:
+//!
+//!   - `release` → exactly today's local teardown (CDR `max_duration` +
+//!     `BeginTermination`) — also the fail-safe for engine error / timeout /
+//!     limiter reject on the reroute route.
+//!   - `reroute` → apply the `Route`-shaped decision to the CONNECTED call:
+//!     create the replacement b-leg (INVITE toward the new destination,
+//!     carrying A's INVITE-snapshot offer unless the route overrides the
+//!     body), on its 2xx ACK it and **re-INVITE the a-leg** with the new
+//!     leg's answer SDP (the bridge — same one-way-audio discipline as the
+//!     REFER machine's a-realign, `refer_transfer.rs`), and on A's 2xx
+//!     `Merge(a, new)` + **BYE the old b-leg**. The whole treatment is
+//!     bounded by one overall guard timer (`release_reroute_guard_sec`).
+//!
+//! **Failure policy (documented choice):** any failure of the treatment — the
+//! replacement leg rejects / never answers, A rejects the realign re-INVITE,
+//! or the guard expires — tears the WHOLE call down locally (reason
+//! `release-reroute-failed`/`-timeout`). The release event already declared
+//! the call over; the reroute was the alternative treatment, and when it
+//! fails the call must fall back to the release default rather than live past
+//! its cap (the alternative — keeping the original A↔B up — would let a
+//! misbehaving announcement target extend calls indefinitely). This is
+//! simpler than consulting `call_failure` per the setup-failover path and is
+//! the documented divergence.
+//!
+//! State rides the typed `Call.reroute` slice (mirrors `Call.transfer`):
+//! presence is the activation guard, so every rule here is inert on ordinary
+//! calls. These are CORE rules registered BEFORE the generic core set
+//! (`defaults::default_rules_with`), so within CORE they out-rank
+//! `confirm-dialog` / `route-failure` by order; the explicit `overrides`
+//! document the displacement. The replacement leg's provisionals are the
+//! core's (`relay-provisional`): A is answered, so it absorbs them. In-dialog INVITEs from
+//! either original party are 491'd while the reroute is in flight (RFC 5407
+//! §3.1 retry-later, the same treatment the transfer machine applies); a BYE
+//! from either party still rides `relay-bye` and ends the call.
+
+use call::{
+    CdrEventType, Direction, LegState, ReleaseEventKind, ReroutePhase, RerouteState,
+    TerminationCause, TimerKey, TimerType,
+};
+
+use b2bua_sdk::model::{
+    Body, LegEnd, Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay,
+    CORE_LAYER,
+};
+
+/// The duration cap the reroute's features arm at the replacement leg's
+/// answer: under the answer anchor (`MaxDurationAnchor`), where the fold did
+/// not arm it at route time.
+fn cap_at_answer(ctx: &RuleContext) -> Option<TimerDelay> {
+    let platform = &ctx.call.features()?.platform;
+    (!platform.arms_cap_at_creation(ctx.config.setup_timeout_ms))
+        .then(|| TimerDelay::millis(platform.max_duration_ms))
+}
+
+/// The reroute's overall guard.
+fn guard_timer() -> TimerKey {
+    TimerKey::call(TimerType::RerouteGuard)
+}
+
+fn ok(actions: Vec<RuleAction>) -> Option<RuleHandleResult> {
+    Some(RuleHandleResult::new(actions))
+}
+
+fn rule(
+    id: &'static str,
+    overrides: &'static [&'static str],
+    matcher: Match,
+    handle: fn(&RuleContext) -> Option<RuleHandleResult>,
+) -> RuleDefinition {
+    RuleDefinition::core(id, CORE_LAYER, overrides, matcher, handle)
+}
+
+/// The event's source leg is the reroute's replacement b-leg.
+fn is_new_leg(ctx: &RuleContext) -> bool {
+    ctx.call.reroute_state().map(|r| r.new_leg_id.as_str()) == Some(ctx.source_leg_id)
+}
+
+/// Local teardown with the reroute-failure reason: force the call down like
+/// the `release` outcome would, recording why. `BeginTermination` BYEs every
+/// confirmed leg (A + old B + a confirmed new leg) and CANCELs a still-ringing
+/// new leg; the `→ terminated` invariant settles obligations exactly once.
+/// The call ends under the decision layer's release: the reroute it asked
+/// for could not complete.
+fn fail_teardown(ctx: &RuleContext, reason: &'static str) -> Vec<RuleAction> {
+    vec![
+        RuleAction::cancel(guard_timer()),
+        RuleAction::AddCdrEvent {
+            event_type: CdrEventType::Bye,
+            leg_id: ctx.call.a_leg().leg_id.clone(),
+            status_code: None,
+            reason: Some("max_duration".into()),
+        },
+        RuleAction::SetReroute { state: None },
+        RuleAction::BeginTermination {
+            reason: Some(reason.into()),
+            cause: TerminationCause::DecisionRelease,
+            by_leg: None,
+        },
+    ]
+}
+
+/// What ended the call when a release consult folds `release`: the decision
+/// layer's release, or a route it answered that the limiter refused — the
+/// layer ended the call either way; an unanswered consult (engine error,
+/// deadline) ends it under the event that raised the consult, which the fold
+/// names.
+fn release_fold_cause(payload: &serde_json::Value) -> TerminationCause {
+    if !crate::decision_log::stack_authored(payload) {
+        return TerminationCause::DecisionRelease;
+    }
+    let event = payload
+        .get("event")
+        .and_then(|v| serde_json::from_value::<ReleaseEventKind>(v.clone()).ok())
+        .unwrap_or(ReleaseEventKind::MaxCallDuration);
+    match event {
+        ReleaseEventKind::MaxCallDuration => TerminationCause::MaxDuration,
+    }
+}
+
+/// The release/reroute rule set (CORE; registered before the generic core
+/// rules in `defaults::default_rules_with`).
+pub fn release_reroute_rules() -> Vec<RuleDefinition> {
+    vec![
+        // ── release consult folded: `release` (or fail-safe) → local teardown.
+        // Exactly the body the unsubscribed `max-duration` rule emits, so the
+        // wire behaviour with-and-without a subscription is identical when the
+        // backend says Release.
+        rule(
+            "release-result-release",
+            &[],
+            Match::internal_event().topic("call-release-result").outcome("release"),
+            |ctx| {
+                // Fold landed on a going-away call: the termination in
+                // progress owns the teardown — no duplicate CDR, no
+                // BeginTermination re-arm of the safety timer.
+                if super::defaults::fold_lands_on_going_away_call(ctx) {
+                    return ok(vec![]);
+                }
+                let payload = match ctx.event {
+                    b2bua_sdk::event::CallEvent::InternalEvent { payload, .. } => payload,
+                    _ => return None,
+                };
+                let cause = release_fold_cause(payload);
+                let mut actions = Vec::new();
+                // A release seeds its service slices exactly as a route does.
+                let service_ext = super::defaults::parse_service_ext(payload);
+                if !service_ext.is_empty() {
+                    actions.push(RuleAction::MergeCallExt { ext: service_ext });
+                }
+                actions.extend([
+                    RuleAction::AddCdrEvent {
+                        event_type: CdrEventType::Bye,
+                        leg_id: ctx.call.a_leg().leg_id.clone(),
+                        status_code: None,
+                        reason: Some("max_duration".into()),
+                    },
+                    RuleAction::BeginTermination {
+                        reason: Some("max-duration".into()),
+                        cause,
+                        by_leg: None,
+                    },
+                ]);
+                ok(actions)
+            },
+        ),
+        // ── release consult folded: `reroute` → replacement b-leg + slice.
+        // Output parity with the initial/failover route: the
+        // shared `route_fold_parity_actions` applies features (incl. the
+        // GlobalDuration re-arm — the rerouted call gets the route's fresh
+        // cap), service_ext, subscriptions, and the limiter holds (the
+        // reroute's admitted holds replace the call's); `CreateLeg` honors
+        // the identity/header/body rewrites.
+        rule(
+            "release-result-reroute",
+            &[],
+            Match::internal_event().topic("call-release-result").outcome("reroute"),
+            |ctx| {
+                // Fold landed on a going-away call: no replacement leg
+                // for a call whose parties already hung up (see
+                // `fold_lands_on_going_away_call`).
+                if super::defaults::fold_lands_on_going_away_call(ctx) {
+                    return ok(vec![]);
+                }
+                // A reroute already in progress answered the call's consult:
+                // this fold dials no second replacement.
+                if ctx.call.reroute_active() {
+                    return ok(vec![]);
+                }
+                let payload = match ctx.event {
+                    b2bua_sdk::event::CallEvent::InternalEvent { payload, .. } => payload,
+                    _ => return None,
+                };
+                let fold = super::defaults::parse_route_fold(payload)?;
+                // The slice's `new_leg_id` names the leg CreateLeg mints.
+                let new_leg_id = ctx.call.next_b_leg_id();
+                let old_leg_id = ctx.call.active_peer().map(|p| p.leg_b.clone());
+                // The cap that raised the consult has fired; the reroute's
+                // features re-arm it where their anchor says: here at
+                // creation, else at the replacement leg's answer.
+                let mut actions = super::defaults::route_fold_parity_actions(&fold, ctx);
+                let leg_body = fold.leg_body(ctx);
+                let attempt = fold.attempt(call::AttemptCause::Reroute, payload);
+                actions.push(RuleAction::CreateLeg {
+                    destination: fold.destination,
+                    new_ruri: fold.new_ruri,
+                    new_from: fold.new_from,
+                    new_to: fold.new_to,
+                    callback_context: fold.callback_context,
+                    body_override: leg_body,
+                    header_updates: fold.header_updates,
+                    header_adds: fold.header_adds,
+                    kind: None,
+                    attempt: Some(attempt),
+                });
+                actions.push(RuleAction::SetReroute {
+                    state: Some(RerouteState {
+                        phase: ReroutePhase::BLegDialing,
+                        new_leg_id,
+                        old_leg_id,
+                        started_at_ms: ctx.now_ms,
+                    }),
+                });
+                // One overall guard bounding the whole treatment (dial +
+                // realign + old-leg BYE) — a wedged reroute must never extend
+                // the call past its cap.
+                actions.push(RuleAction::arm(
+                    guard_timer(),
+                    TimerDelay::secs(ctx.config.release_reroute_guard_sec),
+                ));
+                ok(actions)
+            },
+        ),
+        // ── replacement leg answers → ACK it, bridge A onto its SDP.
+        // Displaces `confirm-dialog` (which would Merge + relay the 2xx to A's
+        // long-answered INVITE). The re-INVITE toward A carries the NEW leg's
+        // answer SDP — the same "offer the active answer" discipline as the
+        // REFER a-realign (refer_transfer.rs one-way-audio note).
+        rule(
+            "reroute-b-200",
+            &["confirm-dialog", "relay-reinvite-response"],
+            Match::response()
+                .method("INVITE")
+                .status_class(2)
+                .direction(Direction::FromB)
+                .leg_states(&[LegState::Trying, LegState::Early])
+                .filter(is_new_leg),
+            |ctx| {
+                let resp = ctx.response()?;
+                let st = ctx.call.reroute_state()?.clone();
+                let new_leg = st.new_leg_id.clone();
+                let mut new_state = st;
+                new_state.phase = ReroutePhase::ARealigning;
+                let cap = cap_at_answer(ctx)
+                    .map(|delay| RuleAction::arm(TimerKey::call(TimerType::GlobalDuration), delay));
+                ok(cap
+                    .into_iter()
+                    .chain([
+                        RuleAction::ConfirmDialog { leg_id: new_leg.clone() },
+                        RuleAction::AckLeg { leg_id: new_leg.clone(), body: None },
+                        RuleAction::cancel(TimerKey::leg(TimerType::NoAnswer, &new_leg)),
+                        RuleAction::SendReinvite {
+                            leg_id: "a".to_string(),
+                            body: Some(
+                                Body::from_leg(resp.body().to_vec(), new_leg.clone())
+                                    .described_by(resp.headers()),
+                            ),
+                            add_headers: vec![],
+                        },
+                        RuleAction::AddCdrEvent {
+                            event_type: CdrEventType::Answer,
+                            leg_id: new_leg,
+                            status_code: Some(200),
+                            reason: Some("release-reroute".into()),
+                        },
+                        RuleAction::SetReroute { state: Some(new_state) },
+                    ])
+                    .collect())
+            },
+        ),
+        // ── replacement leg fails (3xx–6xx) → the documented fail-teardown.
+        rule(
+            "reroute-b-fail",
+            &["route-failure"],
+            Match::response().method("INVITE").direction(Direction::FromB).filter(|ctx| {
+                ctx.response().map(|r| r.status() >= 300).unwrap_or(false) && is_new_leg(ctx)
+            }),
+            |ctx| {
+                let resp = ctx.response()?;
+                let new_leg = ctx.source_leg_id.to_string();
+                let mut actions = vec![
+                    RuleAction::AddCdrEvent {
+                        event_type: CdrEventType::Reject,
+                        leg_id: new_leg.clone(),
+                        status_code: Some(resp.status() as i64),
+                        reason: Some("release-reroute-failed".into()),
+                    },
+                    RuleAction::TerminateLeg {
+                        leg_id: new_leg.clone(),
+                        end: LegEnd::InviteRejected,
+                    },
+                ];
+                actions.extend(fail_teardown(ctx, "release-reroute-failed"));
+                ok(actions)
+            },
+        ),
+        // ── replacement leg rings unanswered (its route's NoAnswer fires) →
+        // the fail-teardown, displacing the CORE `no-answer` rule whose
+        // `/call/failure` consult belongs to the setup path.
+        rule(
+            "reroute-b-no-answer",
+            &["no-answer"],
+            Match::timer().timer_type(TimerType::NoAnswer).filter(|ctx| {
+                let timer_leg = ctx.timer_key().and_then(TimerKey::leg_id);
+                ctx.call.reroute_state().is_some_and(|r| Some(r.new_leg_id.as_str()) == timer_leg)
+            }),
+            |ctx| {
+                let st = ctx.call.reroute_state()?.clone();
+                let mut actions = vec![
+                    RuleAction::AddCdrEvent {
+                        event_type: CdrEventType::Timeout,
+                        leg_id: st.new_leg_id.clone(),
+                        status_code: None,
+                        reason: Some("release-reroute-failed".into()),
+                    },
+                    RuleAction::DestroyLeg { leg_id: st.new_leg_id.clone(), headers: vec![] },
+                ];
+                actions.extend(fail_teardown(ctx, "release-reroute-failed"));
+                ok(actions)
+            },
+        ),
+        // ── A answers the realign re-INVITE → bridge complete: ACK A,
+        // merge(a, new), BYE the old b-leg, clear the slice. The call
+        // continues A↔new under the route's re-armed cap; a later hangup
+        // rides the ordinary `relay-bye`.
+        rule(
+            "reroute-a-realign-200",
+            &[],
+            Match::response().method("INVITE").status_class(2).direction(Direction::FromA).filter(
+                |ctx| {
+                    ctx.source_leg_id == "a"
+                        && ctx.call.reroute_state().map(|r| r.phase)
+                            == Some(ReroutePhase::ARealigning)
+                },
+            ),
+            |ctx| {
+                let st = ctx.call.reroute_state()?.clone();
+                let mut actions = vec![
+                    RuleAction::AckLeg { leg_id: "a".to_string(), body: None },
+                    RuleAction::cancel(guard_timer()),
+                    RuleAction::Merge { leg_a: "a".to_string(), leg_b: st.new_leg_id.clone() },
+                ];
+                if let Some(old) = st.old_leg_id.clone() {
+                    // BYE the displaced b-leg (DestroyLeg: confirmed → BYE +
+                    // `bye_sent`; its 200 resolves via `resolve-bye-response`).
+                    actions.push(RuleAction::DestroyLeg { leg_id: old, headers: vec![] });
+                }
+                actions.push(RuleAction::AddCdrEvent {
+                    event_type: CdrEventType::Answer,
+                    leg_id: "a".to_string(),
+                    status_code: Some(200),
+                    reason: Some("release-reroute-completed".into()),
+                });
+                actions.push(RuleAction::SetReroute { state: None });
+                ok(actions)
+            },
+        ),
+        // ── A rejects the realign re-INVITE → the fail-teardown (the txn
+        // layer already ACKed the non-2xx final).
+        rule(
+            "reroute-a-realign-fail",
+            &[],
+            Match::response().method("INVITE").direction(Direction::FromA).filter(|ctx| {
+                ctx.response().map(|r| r.status() >= 300).unwrap_or(false)
+                    && ctx.source_leg_id == "a"
+                    && ctx.call.reroute_state().map(|r| r.phase) == Some(ReroutePhase::ARealigning)
+            }),
+            |ctx| {
+                let resp = ctx.response()?;
+                let mut actions = vec![RuleAction::AddCdrEvent {
+                    event_type: CdrEventType::Reject,
+                    leg_id: "a".to_string(),
+                    status_code: Some(resp.status() as i64),
+                    reason: Some("release-reroute-failed".into()),
+                }];
+                actions.extend(fail_teardown(ctx, "release-reroute-failed"));
+                ok(actions)
+            },
+        ),
+        // ── overall guard expired mid-treatment → the fail-teardown.
+        rule(
+            "reroute-guard-timeout",
+            &[],
+            Match::timer()
+                .timer_type(TimerType::RerouteGuard)
+                .filter(|ctx| ctx.call.reroute_active()),
+            |ctx| {
+                let mut actions = vec![RuleAction::AddCdrEvent {
+                    event_type: CdrEventType::Timeout,
+                    leg_id: ctx.call.a_leg().leg_id.clone(),
+                    status_code: None,
+                    reason: Some("release-reroute-timeout".into()),
+                }];
+                actions.extend(fail_teardown(ctx, "release-reroute-timeout"));
+                ok(actions)
+            },
+        ),
+        // ── glare: any in-dialog INVITE from either original party while the
+        // reroute is in flight → 491 Request Pending (RFC 5407 §3.1 — retry
+        // once the reroute settles), or the §14.2 refusal when the INVITE
+        // meets glare on the dialog. A BYE is deliberately NOT intercepted —
+        // it rides `relay-bye` and ends the whole call.
+        rule(
+            "reroute-glare-reinvite",
+            &["reinvite-glare", "relay-reinvite"],
+            Match::request().method("INVITE").filter(|ctx| ctx.call.reroute_active()),
+            |ctx| ok(vec![super::pending_refusal::refuse_pending(ctx)]),
+        ),
+    ]
+}

@@ -72,4 +72,10 @@ impl CdrWriter for TerminatedCallsWriter {
     async fn read_all(&self) -> Vec<CdrRecord> {
         self.records.read_all().await
     }
+
+    async fn close(&self, deadline: tokio::time::Instant) {
+        if let Some(tap) = &self.tap {
+            tap.close(deadline).await;
+        }
+    }
 }

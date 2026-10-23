@@ -32,7 +32,7 @@ mod wire_log;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use sip_net::repeat::{repeat_belongs_to_tu, RepeatTables};
+use sip_net_testkit::repeat::{repeat_belongs_to_tu, RepeatTables};
 
 use sip_message::{SipMessage, SipRequest};
 
@@ -94,7 +94,7 @@ pub struct Absorption {
     /// Whether sighted datagrams are logged. Off in the load lane, where the
     /// volume is unbounded and no consumer reads the views.
     logging: bool,
-    /// The shared §17.2 classification ([`sip_net::repeat`] — the same code
+    /// The shared §17.2 classification ([`sip_net_testkit::repeat`] — the same code
     /// the recording decorator stamps arrivals with at event production).
     tables: RepeatTables,
     /// Token source for [`RepeatTables::note`]; this seam never reads the

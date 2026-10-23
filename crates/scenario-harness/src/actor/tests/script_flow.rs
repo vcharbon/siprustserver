@@ -1,4 +1,5 @@
-use sip_message::{EmitOpts, MessageTemplate, Method, TemplateHeader};
+use sip_message::Method;
+use sip_template::{EmitOpts, MessageTemplate, TemplateHeader};
 use std::time::Duration;
 
 use super::testkit::*;
@@ -149,7 +150,7 @@ async fn expect_response_fails_fast_when_final_precedes_provisional() {
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
     match verdict {
-        CallVerdict::Failed(StepError::WrongStatus { who, expected, got, .. }) => {
+        CallVerdict::Failed(_, StepError::WrongStatus { who, expected, got, .. }) => {
             assert_eq!(
                 (who.as_str(), expected, got),
                 ("alice", 183, 486),
@@ -231,8 +232,8 @@ async fn forked_respond_template_early_ids_name_winner() {
 
 /// Scripted originator attribution: the caller is the actor whose FIRST
 /// goal originates the dialog (`InviteTemplate`), not `Disposition::Caller`
-/// and not the `"alice"` fallback — an `Expect::Reject` terminal carries
-/// that actor's role.
+/// and not the `"alice"` fallback — the accepted endings are read on that
+/// actor's leg, and an unaccepted final fails under its role.
 #[tokio::test]
 async fn scripted_originator_attribution_keys_on_first_goal() {
     let h = Harness::new("actor-scripted-attribution").describe(
@@ -269,17 +270,24 @@ async fn scripted_originator_attribution_keys_on_first_goal() {
     ];
     assert_eq!(originating_role(&actors), "carol");
 
-    // The Reject terminal is attributed to carol, never "alice".
+    // The 486 is read on carol's leg, never "alice"'s.
     let obs = ObservedState::new();
     obs.record(
         Observation::LegFinal { leg: "carol", status: 486, reason: "Busy Here".into() },
         tokio::time::Instant::now(),
     );
-    match into_result(Expect::Reject(486), CallVerdict::Ok, &obs, originating_role(&actors)) {
-        Err(StepError::WrongStatus { who, expected, got, .. }) => {
+    let caller = originating_role(&actors);
+    let accepted = verdict(Expect::one(Branch::rejected(486)), CallVerdict::Ok, &obs, caller);
+    assert_eq!(accepted.branch(), Some("rejected"), "got {accepted:?}");
+    match verdict(Expect::answered(), CallVerdict::Ok, &obs, caller) {
+        ScenarioVerdict::Failure {
+            at,
+            cause: StepError::WrongStatus { who, expected, got, .. },
+        } => {
+            assert_eq!(at, FailedAt { who: "carol", goal: None, barrier: FailedAt::ENDING });
             assert_eq!((who.as_str(), expected, got), ("carol", 200, 486));
         }
-        other => panic!("expected the Reject terminal under carol, got {other:?}"),
+        other => panic!("an unaccepted 486 must fail under carol, got {other:?}"),
     }
     h.finish().await;
 }
@@ -427,7 +435,7 @@ async fn content_matcher_holds_on_frozen_header() {
 
     let bad = run_initial_matcher_case("actor-content-matcher-holds-neg", "v2").await;
     match bad {
-        CallVerdict::Failed(StepError::UnexpectedKind { who, detail }) => {
+        CallVerdict::Failed(_, StepError::UnexpectedKind { who, detail }) => {
             assert_eq!(who, "bob");
             assert!(
                 detail.contains("x-cap") && detail.contains("v2") && detail.contains("v1"),

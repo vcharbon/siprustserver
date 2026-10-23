@@ -3,12 +3,12 @@
 //! Timer B timeout, CANCEL→200+487, ACK absorption, auto-ACK for non-2xx client
 //! finals, and cached-response retransmission.
 
-use crate::common;
-use common::*;
+use crate::common::{self, *};
+use call::TxnKind;
 use sip_message::SipMessage;
 use sip_retransmit::Class;
 use sip_txn::timers::{TIMER_B, TIMER_I};
-use sip_txn::{RetransmitRow, TransactionEvent, TxnKind};
+use sip_txn::{RetransmitRow, TransactionEvent};
 
 const TRANSIT: u64 = 5;
 
@@ -299,7 +299,7 @@ async fn timer_b_emits_timeout_event() {
     assert_eq!(destination, Some(addr(PEER)), "Timeout forwards the txn destination");
     assert_eq!(
         kind,
-        sip_txn::TimeoutKind::Response,
+        call::TxnTimeoutKind::Response,
         "an in-dialog re-INVITE Timer B is a Response timeout"
     );
     given_up_invite_is_forgotten(&stack).await;
@@ -353,7 +353,7 @@ async fn initial_invite_outlives_the_no_answer_window() {
     });
     assert_eq!(
         kind,
-        Some(sip_txn::TimeoutKind::Transaction),
+        Some(call::TxnTimeoutKind::Transaction),
         "the initial-INVITE backstop fires below the 3-minute mark and is a Transaction timeout"
     );
     given_up_invite_is_forgotten(&stack).await;
@@ -401,7 +401,7 @@ async fn a_reinvite_that_drew_a_provisional_outlives_timer_b() {
     });
     assert_eq!(
         kind,
-        Some(sip_txn::TimeoutKind::Transaction),
+        Some(call::TxnTimeoutKind::Transaction),
         "the INVITE backstop answers a silent renegotiation, not the peer-failure timer"
     );
     given_up_invite_is_forgotten(&stack).await;
@@ -439,7 +439,7 @@ async fn unanswered_initial_invite_times_out_on_timer_b() {
     });
     assert_eq!(
         kind,
-        Some(sip_txn::TimeoutKind::Response),
+        Some(call::TxnTimeoutKind::Response),
         "an INVITE nothing answered times out on Timer B, not the 158 s bound"
     );
     given_up_invite_is_forgotten(&stack).await;
@@ -459,7 +459,7 @@ async fn configured_invite_bound_moves_the_initial_invite_expiry() {
             udp_queue_max: 64,
             id_gen: std::sync::Arc::new(sip_txn::IdGen::seeded(0xC0FFEE)),
             invite_initial_timeout_ms: 300_000,
-            ..Default::default()
+            ..common::config()
         },
     )
     .await;
@@ -497,7 +497,7 @@ async fn configured_invite_bound_moves_the_initial_invite_expiry() {
     });
     assert_eq!(
         kind,
-        Some(sip_txn::TimeoutKind::Transaction),
+        Some(call::TxnTimeoutKind::Transaction),
         "the configured bound fires as a Transaction timeout"
     );
     given_up_invite_is_forgotten(&stack).await;
@@ -517,7 +517,7 @@ async fn configured_invite_bound_moves_the_initial_invite_expiry() {
     });
     assert_eq!(
         kind,
-        Some(sip_txn::TimeoutKind::Response),
+        Some(call::TxnTimeoutKind::Response),
         "an in-dialog re-INVITE still times out at Timer B with a Response timeout"
     );
     given_up_invite_is_forgotten(&stack).await;
@@ -528,25 +528,25 @@ fn first_response_bound_config(ms: u64) -> sip_txn::TransactionConfig {
         udp_queue_max: 64,
         id_gen: std::sync::Arc::new(sip_txn::IdGen::seeded(0xC0FFEE)),
         invite_first_response_timeout_ms: ms,
-        ..Default::default()
+        ..common::config()
     }
 }
 
-fn timeout_kind(events: Vec<TransactionEvent>) -> Option<sip_txn::TimeoutKind> {
+fn timeout_kind(events: Vec<TransactionEvent>) -> Option<call::TxnTimeoutKind> {
     events.into_iter().find_map(|e| match e {
         TransactionEvent::Timeout { kind, .. } => Some(kind),
         _ => None,
     })
 }
 
-/// The initial INVITE's first-response bound is a deployment tunable
+/// The initial INVITE's first-response deadline is the TU's
 /// (`TransactionConfig::invite_first_response_timeout_ms`, default Timer B):
-/// tightened to 5 s, an initial INVITE nothing answers gives up at 5 s with a
-/// `Response` timeout — the hop is dead — after exactly the three Timer A
-/// re-sends the bound buys (0.5 / 1.5 / 3.5 s): the ladder is armed under the
-/// same bound, so no rung lands past the give-up.
+/// tightened to 5 s, an initial INVITE nothing answers is reported to the TU
+/// at 5 s with a `Response` timeout — the hop is dead — while the transaction
+/// itself keeps RFC 3261 §17.1.1.2: Timer A re-sends to Timer B, and Timer B
+/// reports nothing a second time.
 #[tokio::test(start_paused = true)]
-async fn tightened_first_response_bound_fails_an_unanswered_initial_invite_early() {
+async fn the_first_response_deadline_tells_the_tu_while_timer_a_runs_to_timer_b() {
     let mut stack = Stack::build_with_config(TRANSIT, 64, first_response_bound_config(5_000)).await;
     stack
         .txn
@@ -554,45 +554,45 @@ async fn tightened_first_response_bound_fails_an_unanswered_initial_invite_early
         .await
         .unwrap();
 
-    // Still Calling at 4 s: the three rungs the bound buys have all fired.
     elapse_ms(4_000).await;
     assert!(
         !stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
-        "the 5 s bound has not elapsed yet"
+        "the 5 s deadline has not elapsed yet"
     );
-    assert_eq!(active(&stack), 1);
-    assert_eq!(
-        count_requests(&stack.drain_peer(), "INVITE"),
-        4,
-        "original send + rungs at 0.5 / 1.5 / 3.5 s"
-    );
+    assert_eq!(count_requests(&stack.drain_peer(), "INVITE"), 4, "original + 0.5 / 1.5 / 3.5 s");
 
-    // The bound fires; no fourth rung (7.5 s) was ever armed.
     elapse_ms(1_100).await;
     assert_eq!(
         timeout_kind(stack.drain_events()),
-        Some(sip_txn::TimeoutKind::Response),
-        "an INVITE nothing answered times out on the first-response bound as a dead hop"
+        Some(call::TxnTimeoutKind::Response),
+        "an INVITE nothing answered is reported at the first-response deadline as a dead hop"
+    );
+
+    // Timer A keeps its RFC ladder (7.5 / 15.5 / 31.5 s) up to Timer B.
+    elapse_ms(28_000).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "INVITE"), 3, "the rungs past the deadline");
+    assert!(
+        !stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        "Timer B reports nothing a second time"
     );
     given_up_invite_is_forgotten(&stack).await;
-    assert_eq!(count_requests(&stack.drain_peer(), "INVITE"), 0, "no rung past the give-up");
     assert_eq!(
         stack.txn.metrics().retransmit_rows(),
         vec![RetransmitRow {
             ladder: "invite-client",
             method: "INVITE".into(),
             code: None,
-            count: 3
+            count: 6
         }],
     );
 }
 
-/// The tightened first-response bound reads ONLY on an initial INVITE: under
+/// The first-response deadline reads ONLY on an initial INVITE: under
 /// the same 5 s config an in-dialog INVITE (To-tag present) keeps the 32 s
 /// Timer B and a non-INVITE keeps Timer F — a re-INVITE into a live call or a
 /// BYE is a different risk, and a transient blip must not tear a call down.
 #[tokio::test(start_paused = true)]
-async fn tightened_first_response_bound_leaves_in_dialog_and_non_invite_on_64_t1() {
+async fn the_first_response_deadline_leaves_in_dialog_and_non_invite_on_64_t1() {
     let mut stack = Stack::build_with_config(TRANSIT, 64, first_response_bound_config(5_000)).await;
     stack
         .txn
@@ -609,7 +609,7 @@ async fn tightened_first_response_bound_leaves_in_dialog_and_non_invite_on_64_t1
     elapse_ms(31_000).await;
     assert!(
         !stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
-        "neither an in-dialog INVITE nor a non-INVITE reads the first-response bound"
+        "neither an in-dialog INVITE nor a non-INVITE reads the first-response deadline"
     );
     assert_eq!(active(&stack), 2);
 
@@ -625,7 +625,7 @@ async fn tightened_first_response_bound_leaves_in_dialog_and_non_invite_on_64_t1
         .collect();
     assert_eq!(kinds.len(), 2, "one Timeout per transaction: {kinds:?}");
     assert!(
-        kinds.iter().all(|(_, k)| *k == sip_txn::TimeoutKind::Response),
+        kinds.iter().all(|(_, k)| *k == call::TxnTimeoutKind::Response),
         "Timer B / Timer F are Response timeouts: {kinds:?}"
     );
     assert_eq!(
@@ -671,7 +671,7 @@ async fn a_non_invite_timeout_names_its_method() {
     assert_eq!(active(&stack), 0);
 }
 
-/// A ringing callee is unaffected by the tightened first-response bound: the
+/// A ringing callee is unaffected by the first-response deadline: the
 /// FIRST provisional swaps in the long INVITE bound
 /// (`invite_initial_timeout_ms`, default 158 s), so an initial INVITE that
 /// drew a 100 / 180 at 2 s does not expire at 5 s and gives up only at the
@@ -704,7 +704,7 @@ async fn a_provisional_before_the_first_response_bound_swaps_in_the_long_bound()
     elapse_ms(5_000).await;
     assert!(
         !stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
-        "a ringing initial INVITE is not on the first-response bound"
+        "a ringing initial INVITE is not on the first-response deadline"
     );
     assert_eq!(active(&stack), 1, "still live, ringing");
     assert_eq!(
@@ -717,7 +717,7 @@ async fn a_provisional_before_the_first_response_bound_swaps_in_the_long_bound()
     elapse_ms(153_000).await;
     assert_eq!(
         timeout_kind(stack.drain_events()),
-        Some(sip_txn::TimeoutKind::Transaction),
+        Some(call::TxnTimeoutKind::Transaction),
         "the long INVITE bound answers a callee that rang and went silent"
     );
     given_up_invite_is_forgotten(&stack).await;
@@ -814,7 +814,7 @@ async fn invite_then_final(stack: &mut Stack, branch: &str, call_id: &str, statu
     stack.txn.send_response(resp, addr(PEER)).await.unwrap();
     elapse_ms(60).await;
     let _ = stack.drain_peer();
-    assert_eq!(active(stack), 1, "completed txn pinned for Timer H");
+    assert_eq!(active(stack), 1, "an answered txn is held (Timer H, or Timer L after a 2xx)");
 }
 
 /// RFC 3261 §17.2.1: the ACK for a non-2xx final moves the server txn to
@@ -847,22 +847,6 @@ async fn ack_for_non_2xx_is_absorbed() {
 
     elapse_ms(TIMER_I).await;
     assert_eq!(active(&stack), 0, "Timer I terminates the txn");
-}
-
-#[tokio::test(start_paused = true)]
-async fn ack_for_2xx_passes_through() {
-    let mut stack = Stack::build(TRANSIT, 64, 64).await;
-    let branch = "z9hG4bK-ack2";
-    invite_then_final(&mut stack, branch, "ack2-call", 200).await;
-
-    stack.inject(&inbound_request("ACK", branch, "ack2-call", Some("peer-tag"))).await;
-    elapse_ms(60).await;
-
-    assert_eq!(active(&stack), 0, "ACK for 2xx terminates the server txn");
-    assert!(
-        has_message_request(&stack.drain_events(), "ACK"),
-        "ACK for 2xx is delivered to the app"
-    );
 }
 
 /// A second final on an already-Completed server txn (a 200 racing the
@@ -1007,7 +991,7 @@ async fn server_invite_2xx_final_is_not_timer_g_retransmitted() {
     elapse_ms(8_000).await;
     assert_eq!(count_responses(&stack.drain_peer(), 200), 0, "no Timer-G resend for a 2xx");
     assert_eq!(stack.txn.metrics().server_final_retransmits(), 0, "counter untouched by 2xx");
-    assert_eq!(active(&stack), 1, "still held in Completed for Timer H / the 2xx ACK");
+    assert_eq!(active(&stack), 1, "still held in Accepted for Timer L");
 }
 
 // ── Auto-ACK for non-2xx (client INVITE) ────────────────────────────────────
@@ -1280,10 +1264,10 @@ async fn retransmitted_invite_replays_the_cached_100() {
 // ── #9: call_ref → txn-count index (acting-backup self-release gate) ─────────
 
 /// An inbound in-dialog request whose Request-URI carries the `callref` param the
-/// B2BUA's Contact stamps — the key the txn layer attributes the server txn to
-/// (ADR-0014 self-release counting). `extract_ruri_call_ref` percent-decodes it,
-/// so a plain value round-trips unchanged.
+/// B2BUA's Contact stamps, escaped as it writes it — the key the txn layer
+/// attributes the server txn to (ADR-0014 self-release counting).
 fn inbound_with_callref(method: &str, branch: &str, call_id: &str, call_ref: &str) -> Vec<u8> {
+    let call_ref = sip_message::param_codec::encode_param(call_ref);
     format!(
         "{method} sip:b2bua@127.0.0.1:5070;callref={call_ref} SIP/2.0\r\n\
          Via: SIP/2.0/UDP 10.0.0.1:5555;branch={branch}\r\n\
@@ -1428,171 +1412,4 @@ async fn late_100_does_not_reopen_a_completed_invite_txn() {
         )),
         "the retransmitted 486 is absorbed, not re-surfaced"
     );
-}
-
-// ── forget_unanswered: the consumer discarded a request before answering ─────
-
-/// A non-INVITE request the consumer discarded unanswered: forgetting its
-/// `Trying` transaction lets the next copy in (RFC 3261 §17.1.2.2), where the
-/// transaction would otherwise absorb it silently.
-#[tokio::test(start_paused = true)]
-async fn a_forgotten_trying_non_invite_admits_its_retransmission() {
-    let mut stack = Stack::build(TRANSIT, 64, 64).await;
-    let (branch, bye) = ("z9hG4bK-forget", inbound_request("BYE", "z9hG4bK-forget", "f@u", None));
-    stack.inject(&bye).await;
-    elapse_ms(60).await;
-    assert!(has_message_request(&stack.drain_events(), "BYE"));
-
-    // Another request's identity on the same branch forgets nothing.
-    let key = key_of(&bye);
-    stack.txn.forget_unanswered(&key, "other@u", "caller-tag");
-    stack.txn.forget_unanswered(&key, "f@u", "other-tag");
-    elapse_ms(10).await;
-    assert_eq!(active(&stack), 1, "a mismatching Call-ID or From-tag is not this transaction");
-    assert_eq!(stack.txn.metrics().unanswered_forgotten(), 0);
-
-    stack.txn.forget_unanswered(&key, "f@u", "caller-tag");
-    elapse_ms(10).await;
-    assert_eq!(active(&stack), 0);
-    assert_eq!(stack.txn.metrics().unanswered_forgotten(), 1);
-
-    stack.inject(&bye).await;
-    elapse_ms(60).await;
-    assert!(has_message_request(&stack.drain_events(), "BYE"), "the copy is admitted afresh");
-    let resp = parse_response(&response_bytes(200, "OK", "BYE", branch, "f@u", true));
-    stack.txn.send_response(resp, addr(PEER)).await.unwrap();
-    elapse_ms(33_000).await;
-    assert_eq!(count_responses(&stack.drain_peer(), 200), 1);
-    assert_eq!(active(&stack), 0);
-}
-
-/// Only an unanswered non-INVITE transaction is forgotten: one that has sent
-/// its final keeps replaying it (§17.2.2), and an INVITE transaction — whose
-/// 100 Trying stopped the caller's retransmissions — is never touched.
-#[tokio::test(start_paused = true)]
-async fn forget_unanswered_keeps_answered_and_invite_transactions() {
-    let mut stack = Stack::build(TRANSIT, 64, 64).await;
-    let answered = "z9hG4bK-answered";
-    stack.inject(&inbound_request("OPTIONS", answered, "a@u", None)).await;
-    stack.inject(&inbound_request("INVITE", "z9hG4bK-inv-kept", "i@u", None)).await;
-    elapse_ms(60).await;
-    let _ = stack.drain_events();
-    let resp = parse_response(&response_bytes(200, "OK", "OPTIONS", answered, "a@u", true));
-    stack.txn.send_response(resp, addr(PEER)).await.unwrap();
-    elapse_ms(60).await;
-    let _ = stack.drain_peer();
-
-    let key = |method, branch, call_id| key_of(&inbound_request(method, branch, call_id, None));
-    stack.txn.forget_unanswered(&key("OPTIONS", answered, "a@u"), "a@u", "caller-tag");
-    stack.txn.forget_unanswered(&key("INVITE", "z9hG4bK-inv-kept", "i@u"), "i@u", "caller-tag");
-    stack.txn.forget_unanswered(&key("OPTIONS", "z9hG4bK-unseen", "u@u"), "u@u", "caller-tag");
-    elapse_ms(10).await;
-    assert_eq!(active(&stack), 2, "neither transaction is forgotten");
-    assert_eq!(stack.txn.metrics().unanswered_forgotten(), 0);
-
-    stack.inject(&inbound_request("OPTIONS", answered, "a@u", None)).await;
-    elapse_ms(60).await;
-    assert_eq!(count_responses(&stack.drain_peer(), 200), 1, "the cached 200 is replayed");
-    assert!(stack.drain_events().is_empty());
-}
-
-// ── forget_unanswered_of_call: the consumer released the call ────────────────
-
-/// A request of a call, attributed to it by its Request-URI `callRef`.
-fn call_request(method: &str, branch: &str, call_ref: &str, to_tag: Option<&str>) -> Vec<u8> {
-    let to = match to_tag {
-        Some(t) => format!("<sip:b2bua@127.0.0.1:5070>;tag={t}"),
-        None => "<sip:b2bua@127.0.0.1:5070>".to_string(),
-    };
-    format!(
-        "{method} sip:b2bua@127.0.0.1:5070;callRef={call_ref} SIP/2.0\r\n\
-         Via: SIP/2.0/UDP 10.0.0.1:5555;branch={branch}\r\n\
-         Max-Forwards: 70\r\n\
-         From: <sip:caller@10.0.0.1:5555>;tag=caller-tag\r\n\
-         To: {to}\r\n\
-         Call-ID: {call_ref}@u\r\n\
-         CSeq: 1 {method}\r\n\
-         Contact: <sip:caller@10.0.0.1:5555>\r\n\
-         Content-Length: 0\r\n\r\n"
-    )
-    .into_bytes()
-}
-
-/// At its call's release, a non-INVITE server transaction of the call with no
-/// final is forgotten, so its next copy is admitted afresh; one that has
-/// answered keeps replaying its final, an INVITE transaction is kept, and
-/// another call's transactions are untouched.
-#[tokio::test(start_paused = true)]
-async fn a_released_calls_unanswered_non_invite_transactions_are_forgotten() {
-    let mut stack = Stack::build(TRANSIT, 64, 64).await;
-    let info = call_request("INFO", "z9hG4bK-info", "cr1", Some("callee-tag"));
-    let answered = "z9hG4bK-opts";
-    stack.inject(&info).await;
-    stack.inject(&call_request("OPTIONS", answered, "cr1", Some("callee-tag"))).await;
-    stack.inject(&call_request("INVITE", "z9hG4bK-reinv", "cr1", Some("callee-tag"))).await;
-    stack.inject(&call_request("INFO", "z9hG4bK-other", "cr2", Some("callee-tag"))).await;
-    elapse_ms(60).await;
-    let _ = stack.drain_events();
-    let resp = parse_response(&response_bytes(200, "OK", "OPTIONS", answered, "cr1@u", true));
-    stack.txn.send_response(resp, addr(PEER)).await.unwrap();
-    elapse_ms(60).await;
-    let _ = stack.drain_peer();
-    assert_eq!(active(&stack), 4);
-
-    assert_eq!(stack.txn.forget_unanswered_of_call("cr1").await.unwrap(), 1);
-    assert_eq!(active(&stack), 3, "only the unanswered INFO of cr1 is forgotten");
-    assert_eq!(stack.txn.metrics().released_unanswered_forgotten(), 1);
-
-    stack.inject(&info).await;
-    elapse_ms(60).await;
-    assert!(has_message_request(&stack.drain_events(), "INFO"), "the copy is admitted afresh");
-    stack.inject(&call_request("OPTIONS", answered, "cr1", Some("callee-tag"))).await;
-    elapse_ms(60).await;
-    assert_eq!(count_responses(&stack.drain_peer(), 200), 1, "the cached 200 is replayed");
-    assert!(stack.drain_events().is_empty());
-}
-
-// ── answer_unanswered_invites_of_call: the consumer released an ended call ──
-
-/// At its ended call's release, an INVITE server transaction of the call with
-/// no final is answered through the transaction, which then absorbs the ACK
-/// and stops its Timer G copies. An answered INVITE, a non-INVITE, another
-/// call's INVITE, and an out-of-dialog INVITE naming the call are untouched.
-#[tokio::test(start_paused = true)]
-async fn a_released_calls_unanswered_invites_are_answered_through_their_transactions() {
-    let mut stack = Stack::build(TRANSIT, 64, 64).await;
-    let open = "z9hG4bK-reinv-open";
-    let answered = "z9hG4bK-reinv-done";
-    stack.inject(&call_request("INVITE", open, "cr1", Some("callee-tag"))).await;
-    // `response_bytes` answers under the To-tag `peer-tag`.
-    stack.inject(&call_request("INVITE", answered, "cr1", Some("peer-tag"))).await;
-    stack.inject(&call_request("INFO", "z9hG4bK-info", "cr1", Some("callee-tag"))).await;
-    stack.inject(&call_request("INVITE", "z9hG4bK-other", "cr2", Some("callee-tag"))).await;
-    // An out-of-dialog INVITE naming the call in its Request-URI (a Replaces
-    // INVITE, RFC 3891) starts another call: it is not this call's to answer.
-    stack.inject(&call_request("INVITE", "z9hG4bK-replaces", "cr1", None)).await;
-    elapse_ms(60).await;
-    let _ = stack.drain_events();
-    let resp = parse_response(&response_bytes(200, "OK", "INVITE", answered, "cr1@u", true));
-    stack.txn.send_response(resp, addr(PEER)).await.unwrap();
-    elapse_ms(60).await;
-    let _ = stack.drain_peer();
-
-    let n = stack
-        .txn
-        .answer_unanswered_invites_of_call("cr1", 481, "Call/Transaction Does Not Exist")
-        .await
-        .unwrap();
-    assert_eq!(n, 1, "only the open in-dialog INVITE of cr1 is answered");
-    assert_eq!(stack.txn.metrics().released_unanswered_invites_answered(), 1);
-    elapse_ms(60).await;
-    let sent = stack.drain_peer();
-    assert_eq!(count_responses(&sent, 481), 1);
-    assert_eq!(sent.len(), 1, "nothing else leaves");
-
-    stack.inject(&call_request("ACK", open, "cr1", Some("callee-tag"))).await;
-    elapse_ms(60).await;
-    assert!(!has_message_request(&stack.drain_events(), "ACK"), "the ACK is absorbed");
-    elapse_ms(8_000).await;
-    assert_eq!(count_responses(&stack.drain_peer(), 481), 0, "the ACK stopped Timer G");
 }

@@ -9,7 +9,7 @@ use sip_message::SipMessage;
 
 use crate::doc::{
     AlignedProbeJson, CSeqJson, DecodeStatsJson, Evidence, FlowStatsJson, FlowsDoc, GroupJson,
-    HopJson, InviteJson, LegJson, MsgJson, Party, Payload, Summary,
+    HeaderFailureJson, HopJson, InviteJson, LegJson, MsgJson, Party, Payload, Summary,
 };
 use crate::enrich::{enrich, EnrichOptions};
 use crate::flow::{CallGroup, FlowLeg, FlowMsg, Flows, MatchEvidence};
@@ -52,6 +52,7 @@ pub fn flows_to_doc_selected(
     let mut doc = FlowsDoc {
         schema: EMIT_SCHEMA_VERSION,
         emit_headers: Vec::new(),
+        rewritten: None,
         decode_stats: DecodeStatsJson {
             records: decode.records,
             non_ip: decode.non_ip,
@@ -67,6 +68,18 @@ pub fn flows_to_doc_selected(
             sip_messages: flows.stats.sip_messages,
             capture_dups: flows.stats.capture_dups,
             parse_failed: flows.stats.parse_failed,
+            header_failed: flows.stats.header_failed,
+            header_failures: flows
+                .stats
+                .header_failures
+                .iter()
+                .map(|f| HeaderFailureJson {
+                    call_id: f.call_id.clone(),
+                    msg: f.msg,
+                    header: f.header.clone(),
+                    reason: f.reason.clone(),
+                })
+                .collect(),
             non_sip: flows.stats.non_sip,
             aligned_probes: flows
                 .stats

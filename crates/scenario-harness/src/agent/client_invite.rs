@@ -4,22 +4,22 @@
 //! it lives in [`super::invite`].
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
 
-use sip_message::generators::{
-    generate_ack_for_2xx, GenerateAckFor2xxOpts, InDialogMethod, InviteClientTransactionHandle,
-    StackDialog,
-};
+use sip_message::generators::{InDialogMethod, StackDialog};
 use sip_message::header::{self, CSeq, HeaderName, HeaderValue};
 use sip_message::sip_str::SipStr;
 use sip_message::{Automatic, DelayedAutomatic, SipMessage, SipRequest, SipResponse};
 
 use super::addressing::next_hop;
-use super::client_txn::{stated_lines, try_expect_response, try_send_cancel, AckCtx};
+use super::client_txn::{awaited_response, try_expect_response, try_send_cancel, AckCtx};
 use super::dialog::{Dialog, InDialogRequest, InDialogTxn};
-use super::step::{unwrap_step, StepError};
+use super::step::{unwrap_step, unwrap_step_at, StepError};
 use super::Agent;
 use crate::realcall::auth::{parse_challenge, ChallengeResponder};
+
+mod fallible;
 
 /// The first Contact URI on a response — the dialog remote target it teaches.
 fn first_contact_uri(resp: &SipResponse) -> Option<String> {
@@ -114,9 +114,12 @@ impl ClientInvite {
     /// the way a real txn layer does. A test whose *subject* is the
     /// ACK-retransmission dance hand-rolls raw sends instead.
     ///
-    /// Panicking veneer over [`try_expect`](ClientInvite::try_expect).
-    pub async fn expect(&mut self, status: u16) -> SipResponse {
-        unwrap_step(self.try_expect(status).await)
+    /// Panicking veneer over [`try_expect`](ClientInvite::try_expect): the
+    /// panic names the step and the test line that called it.
+    #[track_caller]
+    pub fn expect(&mut self, status: u16) -> impl Future<Output = SipResponse> + '_ {
+        let site = self.agent.step("expect");
+        async move { unwrap_step_at(self.try_expect(status).await, site) }
     }
 
     /// THE expect core for this INVITE transaction: a wrong status / timeout /
@@ -124,7 +127,9 @@ impl ClientInvite {
     /// on it via [`expect`](ClientInvite::expect)). On success it learns the
     /// dialog state (remote tag / target / route set).
     pub async fn try_expect(&mut self, status: u16) -> Result<SipResponse, StepError> {
-        let resp = try_expect_response(&self.agent, status, Some(&self.ack_ctx())).await?;
+        let resp = try_expect_response(&self.agent, status, Some(&self.ack_ctx()))
+            .await
+            .map_err(|e| e.awaiting(|| awaited_response(status, &self.original_invite)))?;
         self.learn_from_response(&resp);
         Ok(resp)
     }
@@ -168,7 +173,12 @@ impl ClientInvite {
     ) -> Result<(SipResponse, Vec<SipResponse>), StepError> {
         let mut provisionals = Vec::new();
         loop {
-            match self.agent.try_recv().await? {
+            let next = self
+                .agent
+                .try_recv()
+                .await
+                .map_err(|e| e.awaiting(|| awaited_response(status, &self.original_invite)));
+            match next? {
                 SipMessage::Response(r) if r.status() == 100 => continue,
                 SipMessage::Response(r) if r.status() < 200 => {
                     self.learn_from_response(&r);
@@ -445,16 +455,7 @@ impl ClientInvite {
     /// §2 scopes `Reason` to CANCEL and BYE, so a caller that gives up with a
     /// cause states it here.
     pub async fn cancel_stating(&self, stated: &[(&str, &str)]) -> InDialogTxn {
-        unwrap_step(
-            try_send_cancel(&self.agent, &self.original_invite, self.wire_dst, stated).await,
-        );
-        InDialogTxn::new(
-            self.agent.clone(),
-            // A CANCEL transaction's finals take no ACK; the INVITE's 487 is
-            // read — and auto-ACKed — via [`ClientInvite::expect`].
-            None,
-            self.wire_dst,
-        )
+        unwrap_step(self.try_cancel_stating(stated).await)
     }
 
     /// Begin an in-dialog request on the *early* dialog (before the final 2xx /
@@ -573,27 +574,7 @@ impl ClientInvite {
     /// [`ack_with`](Self::ack_with) and [`ack_stating`](Self::ack_stating) at
     /// once: the delayed-offer answer and the party's own lines on one ACK.
     pub async fn ack_with_stating(&mut self, sdp: Option<&str>, stated: &[(&str, &str)]) -> Dialog {
-        self.honour_delayed_automatic().await;
-        let handle =
-            InviteClientTransactionHandle { original_invite: self.original_invite.clone() };
-        let opts = GenerateAckFor2xxOpts {
-            via: Some(self.agent.via()),
-            body: sdp.map(str::as_bytes).map(<[u8]>::to_vec).unwrap_or_default(),
-            extra_headers: stated_lines(stated),
-            ..Default::default()
-        };
-        let ack = generate_ack_for_2xx(Some(&handle), &self.dialog, &opts);
-        let dst = next_hop(&self.dialog, self.fallback_addr);
-        self.agent.send(&SipMessage::Request(ack), dst).await;
-        // If this dialog confirmed to a fork that carried its own PRACK sequence,
-        // continue from THAT fork's CSeq so the post-confirm BYE/re-INVITE is
-        // contiguous within the winning dialog (RFC 3261 §12.2.1.1), not a reuse
-        // of a CSeq the fork already spent.
-        let mut confirmed = self.dialog.clone();
-        if let Some(&fork) = self.fork_cseq.get(&confirmed.remote_tag) {
-            confirmed.local_cseq = confirmed.local_cseq.max(fork);
-        }
-        Dialog::new(self.agent.clone(), dst, confirmed)
+        unwrap_step(self.try_ack_with_stating(sdp, stated).await)
     }
 }
 

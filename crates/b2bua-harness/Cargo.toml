@@ -10,10 +10,11 @@ description = "Test-only harness: binds a real `b2bua` B2buaCore as a System-Und
 workspace = true
 
 [dependencies]
-b2bua = { path = "../b2bua" }
+b2bua = { path = "../b2bua", features = ["testkit"] }
 call = { path = "../call" }
-sip-message = { path = "../sip-message" }
+sip-message = { path = "../sip-message", features = ["sniff"] }
 sip-net = { path = "../sip-net" }
+sip-net-testkit = { path = "../sip-net-testkit" }
 sip-txn = { path = "../sip-txn" }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
 scenario-harness = { path = "../scenario-harness" }
@@ -32,9 +33,23 @@ async-trait = { workspace = true }
 # The SUT's default call limiter (`src/limiter/mod.rs`): a real `CallStore` served
 # by a `LimiterServer` on the simulated HTTP fabric.
 http-net = { path = "../http-net" }
+http-net-testkit = { path = "../http-net-testkit" }
 call-limiter = { path = "../call-limiter" }
+# The node a spawned SUT serves rides its tasks (`observe::spawn_keeping_node`).
+observe = { path = "../observe", default-features = false }
 
 [dev-dependencies]
+# The no-panic property lane of the replicated call body: its runner and the
+# shared MessagePack mutations.
+proptest.workspace = true
+wire-mutations = { path = "../wire-mutations" }
+observe-testkit = { path = "../observe-testkit" }
+# The closed rule-token list the coverage doc's rows are checked against.
+rfc-rules = { path = "../rfc-rules" }
+# The call-shape catalog (forked establishments) driven through the SUT.
+callshapes = { path = "../callshapes" }
+# `catch_unwind` on a future: a cell's failure is collected, the next cell runs.
+futures = "0.3"
 # The rule vocabulary (`model::Body`) a test-authored rule builds its actions from.
 b2bua-sdk = { path = "../b2bua-sdk" }
 tokio = { workspace = true, features = ["test-util"] }
@@ -49,9 +64,6 @@ sip-retransmit = { path = "../sip-retransmit" }
 media = { path = "../media" }
 media-harness = { path = "../media-harness" }
 serde_json = { workspace = true }
-# The trace-machinery tests install their own admission gate and read the
-# thread-scoped capture buffer (ADR-0026); no OTel tree in tests.
-observe = { path = "../observe", default-features = false }
 # The out-of-tree `announcement` callflow service, injected
 # into the SUT via `B2buaSut::builder(..).services(..)` for the early-media e2e.
 announcement = { path = "../announcement" }

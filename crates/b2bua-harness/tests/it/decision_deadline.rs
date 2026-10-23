@@ -113,9 +113,13 @@ async fn hung_decision_is_rejected_503_at_the_default_deadline() {
     );
     assert!(b2bua.cdr_records().is_empty(), "no final produced before the deadline");
 
-    // Cross the 5 s mark: the deadline fires, the decision-error path answers.
+    // Cross the 5 s mark: the deadline fires, the decision-error path answers
+    // the stack's own bare 503 (ADR-0043): no Reason, no Retry-After.
     h.advance(Duration::from_millis(1_000)).await;
-    call.expect(503).await;
+    let resp = call.expect(503).await;
+    assert_eq!(resp.reason(), "Service Unavailable");
+    assert!(!resp.has(&sip_message::header::HeaderName::Reason), "no Reason");
+    assert!(!resp.has(&sip_message::header::HeaderName::RetryAfter), "no Retry-After");
 
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();

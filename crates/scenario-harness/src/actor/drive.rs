@@ -8,10 +8,11 @@ use sip_message::generators::InDialogMethod;
 
 use super::answer::discharge_on_teardown;
 use super::goals::{FinalAssert, GoalStep};
+use super::held::{answer_held, callee_early_request, reject_held, ring};
 use super::ledger::{ObligationKey, ObligationKind};
 use super::originate::{
-    originate_in_dialog, originate_initial_invite, originate_reinvite, originate_update,
-    ping_options_once, send_request_template,
+    originate_early, originate_in_dialog, originate_initial_invite, originate_reinvite,
+    originate_update, ping_options_once, send_request_template,
 };
 use super::runner::ActorState;
 use super::script::{consume_final_fact, drive_respond, expect_request, expect_response};
@@ -125,39 +126,23 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
             originate_update(st).await?;
         }
         // C5 (RFC 3311 §5.1): an EARLY UPDATE on the still-pending INVITE's
-        // EARLY dialog (its reliable provisional already PRACKed). Sent through
-        // the pending `ClientInvite` (which learned the early To-tag from the
-        // 183), so it addresses the early dialog and rides its CSeq. Opens an
-        // `Update` obligation + marks the offer outstanding (`sent_updates`);
-        // its 200 closes it and releases the callee's held INVITE 200.
+        // EARLY dialog (its reliable provisional already PRACKed); its 200
+        // releases the callee's held INVITE 200.
         GoalStep::UpdateEarly => {
-            let now = Instant::now();
-            let offer = st.media.offer_sdp().unwrap_or(crate::OFFER_SDP);
-            let (key, req) = {
-                let inv = st.dialogs.pending_invite.as_mut().ok_or_else(|| {
-                    StepError::UnexpectedKind {
-                        who: st.role.to_string(),
-                        detail: "UpdateEarly with no pending early dialog".to_string(),
-                    }
-                })?;
-                // Address the early dialog's learned To-tag so the UPDATE rides
-                // that early dialog's OWN CSeq sequence (the same the PRACK used,
-                // §12.2.1.1) — else it reuses the shared counter's value and
-                // collides with the PRACK's CSeq on a SUT-less peer.
-                let tag = inv.early_remote_tag().to_string();
-                let mut req_builder = inv.send_request(InDialogMethod::Update).with_sdp(offer);
-                if !tag.is_empty() {
-                    req_builder = req_builder.with_to_tag(&tag);
-                }
-                let (_txn, req) = req_builder.try_send_with_request().await?;
-                (ObligationKey::new(st.role, ObligationKind::Update, req.cseq().seq()), req)
-            };
-            st.sent_updates.insert(req.cseq().seq());
-            st.obs.record(
-                Observation::RequestSent { key, detail: "early update awaiting 200".to_string() },
-                now,
-            );
+            originate_early(st, InDialogMethod::Update).await?;
         }
+        // A request on an early dialog: the caller's pending INVITE's, or a
+        // held callee's own.
+        GoalStep::EarlyRequest { method, fork } => {
+            if st.dialogs.pending_invite.is_some() {
+                originate_early(st, method).await?;
+            } else {
+                callee_early_request(st, method, fork).await?;
+            }
+        }
+        GoalStep::Ring { forks, reliable } => ring(st, forks, reliable).await?,
+        GoalStep::Answer { winner } => answer_held(st, winner).await?,
+        GoalStep::Reject { status } => reject_held(st, status).await?,
         // One in-dialog OPTIONS keepalive ping, its 200 read inline (the reactor
         // has nothing else to do for this leg during the ping).
         GoalStep::Options => {
@@ -174,12 +159,24 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
         }
         // CANCEL the still-pending initial INVITE (RFC 3261 §9.1). KEEP the
         // pending INVITE so its `487` still routes to it (→ `Failed{487}` →
-        // LegTerminated); the peer's CANCEL→200+487 is handled reactively.
+        // LegTerminated); the peer's CANCEL→200+487 is handled reactively. The
+        // CANCEL's own transaction is an obligation its final closes, so the
+        // call settles only once the server answered it.
         GoalStep::Cancel { stated } => {
             if let Some(inv) = st.dialogs.pending_invite.as_ref() {
                 let stated: Vec<(&str, &str)> =
                     stated.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
-                let _cxl = inv.cancel_stating(&stated).await;
+                let cseq = inv.invite_cseq();
+                let _cxl = inv.try_cancel_stating(&stated).await?;
+                let now = Instant::now();
+                st.obs.record(Observation::CancelSent { leg: st.role }, now);
+                st.obs.record(
+                    Observation::RequestSent {
+                        key: ObligationKey::new(st.role, ObligationKind::Cancel, cseq),
+                        detail: "CANCEL awaiting its final".to_string(),
+                    },
+                    now,
+                );
             }
         }
         // A plain in-dialog request (INFO/MESSAGE) carrying an optional typed
@@ -199,7 +196,7 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
             // answered, a PRACK/UPDATE 200) BEFORE opening the BYE's own
             // obligation — the terminating dialog subsumes them, and the fresh
             // BYE obligation below is still held to the 200.
-            super::response::flush_held_acks(st).await;
+            super::held_acks::flush_held_acks(st).await?;
             discharge_on_teardown(st, now);
             let (key, dialog_clone) = {
                 let dialog =
@@ -209,7 +206,7 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
                     })?;
                 // Send the BYE; the reactor observes its 200 and closes the
                 // obligation (we do not block on the final here).
-                let _bye = dialog.bye().await;
+                let _bye = dialog.try_bye().await?;
                 let cseq = dialog.local_cseq();
                 (ObligationKey::new(st.role, ObligationKind::Bye, cseq), dialog.clone())
             };
@@ -225,11 +222,11 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
                 return Ok(());
             }
             let now = Instant::now();
-            super::response::flush_held_acks(st).await; // see GoalStep::Bye
+            super::held_acks::flush_held_acks(st).await?; // see GoalStep::Bye
             discharge_on_teardown(st, now);
             let (key, dialog_clone) = {
                 let dialog = st.dialogs.confirmed.as_mut().expect("checked Some above");
-                let _bye = dialog.bye().await;
+                let _bye = dialog.try_bye().await?;
                 let cseq = dialog.local_cseq();
                 (ObligationKey::new(st.role, ObligationKind::Bye, cseq), dialog.clone())
             };
@@ -238,7 +235,7 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
         }
         GoalStep::ByeWith { headers } => {
             let now = Instant::now();
-            super::response::flush_held_acks(st).await; // see GoalStep::Bye
+            super::held_acks::flush_held_acks(st).await?; // see GoalStep::Bye
             discharge_on_teardown(st, now); // see GoalStep::Bye — subsume pending in-dialog acks
             let (key, dialog_clone) = {
                 let dialog =

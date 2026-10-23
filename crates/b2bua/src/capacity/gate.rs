@@ -10,6 +10,7 @@ use sip_txn::InviteClass;
 
 use crate::config::CapacityConfig;
 use crate::new_calls::Refusal;
+use crate::poison::{locked, CAPACITY_LIMITS};
 
 use super::probe::{ProcSelfProbe, SystemProbe};
 
@@ -133,12 +134,12 @@ impl CapacityGate {
     /// Install the operator's ceilings. The level is recomputed at the next
     /// [`sample`](Self::sample).
     pub fn configure(&self, limits: &CapacityConfig) {
-        *self.inner.limits.lock().unwrap() = *limits;
+        *locked(&self.inner.limits, CAPACITY_LIMITS) = *limits;
     }
 
     /// The installed ceilings.
     pub fn limits(&self) -> CapacityConfig {
-        *self.inner.limits.lock().unwrap()
+        *locked(&self.inner.limits, CAPACITY_LIMITS)
     }
 
     /// Read the probe's RSS and recompute the level from `occupancy`.
@@ -193,15 +194,15 @@ impl CapacityGate {
         } else {
             None
         };
-        if let Some(b) = bound {
-            self.inner.backup_shed[b as usize].fetch_add(1, Ordering::Relaxed);
+        if let Some(shed) = bound.and_then(|b| self.inner.backup_shed.get(b as usize)) {
+            shed.fetch_add(1, Ordering::Relaxed);
         }
         bound
     }
 
     /// Backup replicas not stored because of `bound`.
     pub fn backup_shed_total(&self, bound: BackupBound) -> u64 {
-        self.inner.backup_shed[bound as usize].load(Ordering::Relaxed)
+        self.inner.backup_shed.get(bound as usize).map_or(0, |shed| shed.load(Ordering::Relaxed))
     }
 }
 

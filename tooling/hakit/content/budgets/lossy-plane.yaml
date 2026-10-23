@@ -1,0 +1,8 @@
+schema: budget.v1
+name: lossy-plane
+description: >-
+  SIP datagrams lost and duplicated on one hop: retransmission recovers every
+  call, so no setup may fail; setups that needed a retransmission are slow,
+  for about 5 s of offered rate.
+setup_slow:
+  max_seconds: 5

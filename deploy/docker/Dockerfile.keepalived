@@ -3,13 +3,14 @@
 # Built locally (not pulled) because the registry osixia/keepalived tar fails
 # `kind load` with a "content digest not found" import error; a fresh local build
 # produces clean OCI layers that load reliably. Alpine keepalived + iproute2 give
-# `keepalived` (/usr/sbin/keepalived) and `ip` for the VIP-on-lo notify scripts.
+# `keepalived` (/usr/sbin/keepalived) and `ip` for the VIP-on-lo notify scripts;
+# busybox `wget` is the HTTP client of the chk_proxy_health /vrrp check.
 #
 #   docker build -f deploy/docker/Dockerfile.keepalived -t siprustserver-keepalived:dev .
 FROM alpine:3.20
-# iptables: also reused by the masq-exempt DaemonSet (manifests/05-masq-exempt
-# .yaml) so ONE side-loaded image serves keepalived, the vip-smoke probe and the
-# KIND-MASQ-AGENT RETURN-rule asserter (deploy contract).
+# iptables: also reused by the chart's masq-exempt DaemonSet, so ONE side-loaded
+# image serves keepalived, the vip-smoke probe and the KIND-MASQ-AGENT
+# RETURN-rule asserter (deploy contract).
 RUN apk add --no-cache keepalived iproute2 iptables
 # keepalived → /usr/sbin/keepalived ; ip → /sbin/ip ; sh → busybox /bin/sh.
 ENTRYPOINT []

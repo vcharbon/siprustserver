@@ -21,7 +21,8 @@
 //! Module map: `payload` — the `X-Overload` value codec; `band` — ELU band
 //! classification with hysteresis; `config` — tunables + the band-config
 //! validator the runner preflight calls; `observer` — the per-worker AIMD
-//! state machine and its admit/sweep/snapshot API.
+//! state machine and its admit/sweep/snapshot API; `sweep` — one sweep tick
+//! over the workers the registry reads alive.
 //!
 //! ## Clock — explicit `now_ms`, NOT `tokio::time`
 //!
@@ -41,6 +42,7 @@ mod band;
 mod config;
 mod observer;
 mod payload;
+mod sweep;
 #[cfg(test)]
 mod tests;
 
@@ -50,3 +52,4 @@ pub use config::LoadObserverConfig;
 pub use observer::AimdSnapshot;
 pub use observer::{AimdAction, WorkerLoadObserver};
 pub use payload::{parse_x_overload_header, OverloadPayload, X_OVERLOAD};
+pub use sweep::sweep_alive;

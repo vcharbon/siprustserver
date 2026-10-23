@@ -37,7 +37,7 @@ async fn rejected_invite_needs_no_ack_boilerplate() {
     assert!(ack.delivered);
     assert_eq!(
         ack.recv_note,
-        Some(sip_net::RecvNote::Unconsumed),
+        Some(sip_net_testkit::RecvNote::Unconsumed),
         "nothing read it — the ladder says so"
     );
 }

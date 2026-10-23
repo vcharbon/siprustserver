@@ -25,23 +25,27 @@
 //!   to `deps.replication`;
 //! - [`RunnerBase::spawn`] / [`RunnerBase::spawn_probe_server`] /
 //!   [`RunnerBase::spawn_gauge_sampler`] / [`RunnerBase::run_until_shutdown`]
-//!   — core spawn, the `/metrics`+`/ready` probe, the memory-attribution
-//!   sampler, and SIGTERM-drain handling;
+//!   — core spawn, the `/metrics`+`/ready`+`/healthz` probe, the
+//!   memory-attribution sampler, and the stop handling (SIGTERM or the
+//!   worker's own withdrawal drains; a loop task ending exits non-zero);
 //! - the shared helpers ([`env_or`], [`env_flag`], [`resolve`],
 //!   [`split_host_port`], [`NullCdrWriter`]).
 //!
 //! The in-tree `b2bua-runner` is the first consumer, so the surface provably
 //! stays sufficient to build a full production worker. A minimal downstream
-//! runner is the staged skeleton:
+//! runner is the staged skeleton; it installs the process subscriber
+//! ([`observe::init_production`]) first, so a refused boot is logged:
 //!
 //! ```no_run
-//! # async fn run(my_engine: std::sync::Arc<dyn b2bua::decision::CallDecisionEngine>) {
-//! let base = b2bua_runner_kit::RunnerEnv::from_env().bind("my-runner").await;
+//! # async fn run(
+//! #     my_engine: std::sync::Arc<dyn b2bua::decision::CallDecisionEngine>,
+//! # ) -> Result<std::process::ExitCode, String> {
+//! let base = b2bua_runner_kit::RunnerEnv::from_env()?.bind("my-runner").await?;
 //! let deps = base.deps(my_engine, None).await; // swap any B2buaDeps field before spawn
 //! let core = base.spawn(deps, Vec::new()); // + your composed ServiceDefs
 //! let _probe = base.spawn_probe_server(&core, None, None).await;
 //! base.spawn_gauge_sampler(&core);
-//! base.run_until_shutdown(&core).await;
+//! Ok(base.run_until_shutdown(&core).await)
 //! # }
 //! ```
 //!
@@ -55,102 +59,83 @@
 //! its own [`CdrEncoder`] or pass any other [`CdrWriter`] to
 //! [`RunnerBase::deps`].
 
+// The panic set at deny outside test code (ADR-0051 §3).
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::string_slice,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
+
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
+use std::time::Duration;
 
-use async_trait::async_trait;
 use b2bua::admission::Refusals;
-use b2bua::cdr::{BufferedCdrWriter, CdrEncoder, CdrRecord, CdrWriter};
-use b2bua::config::{B2buaConfig, CapacityConfig, CdrConfig};
+use b2bua::cdr::{BufferedCdrWriter, CdrEncoder, CdrWriter};
+use b2bua::config::{B2buaConfig, CdrConfig};
 use b2bua::decision::CallDecisionEngine;
-use b2bua::destination_allowlist::{classify_admission, AdmissionVerdict};
 use b2bua::ingress_brake::{build_ingress_brake_hook, IngressBrakeConfig, IngressBrakeCounters};
 use b2bua::limiter::CallLimiter;
-use b2bua::metrics::{B2buaMetrics, UdpTransportMetrics};
-use b2bua::resolved_target::SystemResolver;
+use b2bua::metrics::{B2buaMetrics, LiveGauge, UdpTransportMetrics};
 use b2bua::rules::ServiceDef;
 use b2bua::store::InMemoryCallStore;
 use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
-use call::Call;
-use http_net::RealHttpNetwork;
+use http_net::{RealHttpNetwork, SystemResolver};
+use sip_clock::wall::millis_u64;
 use sip_clock::Clock;
-use sip_net::socket_stats::was_clamped;
 use sip_net::types::BindUdpOpts;
 use sip_net::{RealSignalingNetwork, SignalingNetwork, UdpEndpoint};
-use sip_txn::IdGen;
 
+pub mod backend_url;
 mod capacity_env;
 mod cdr_rabbitmq;
 mod drain_env;
+mod entropy;
 mod limiter_client;
 mod limiter_env;
+mod liveness_env;
+mod null_cdr;
+mod outbound_proxy_env;
+pub mod poison;
+mod probe;
 mod replication;
+mod runner_env;
+pub mod runtime;
+mod shutdown;
+mod socket_buffers;
+mod validate;
 mod worker_metrics;
 pub use cdr_rabbitmq::{
     rabbitmq_cdr_writer_from_lookup, rabbitmq_cdr_writer_from_lookup_with_encoder,
     CdrDeliveryBounds, CdrQueueDeclare, RabbitMqCdrSettings, RabbitMqCdrWriter,
     MAX_DRAINER_WAIT_MS, MAX_WAIT_MS, MAX_WINDOW,
 };
+pub use null_cdr::NullCdrWriter;
+pub use outbound_proxy_env::{parse_outbound_proxy, validate_outbound_proxy_requirement};
 pub use replication::{replication_setup_from_lookup, ReplicationSettings};
+pub use runner_env::RunnerEnv;
+use socket_buffers::log_socket_buffers;
+pub use validate::{validate_default_dest, validate_ingress_brake_pct};
 pub use worker_metrics::{txn_metrics_text, WorkerMetrics, CATALOGUE};
 
-/// A CDR sink that discards every record. The default sink when a runner wires
-/// no external CDR store — for load/endurance the process must not accumulate
-/// records in memory. Always wrapped by `BufferedCdrWriter` (see
-/// [`RunnerBase::deps`]) so the buffer/drainer machinery is still exercised.
-pub struct NullCdrWriter;
-
-#[async_trait]
-impl CdrWriter for NullCdrWriter {
-    async fn write(&self, _call: &Call, _terminated_at: i64) {}
-    async fn read_all(&self) -> Vec<CdrRecord> {
-        Vec::new()
-    }
-}
+/// How often the gauge sampler publishes.
+const GAUGE_PERIOD: Duration = Duration::from_secs(5);
 
 /// Env var with a default when unset.
 pub fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
-}
-
-/// The socket buffer size a `B2BUA_UDP_*BUF` knob requests, in bytes: 4 MiB
-/// when unset, `None` (the kernel default) when set blank.
-fn socket_buffer_knob(key: &str) -> Option<usize> {
-    stated(Some(env_or(key, "4194304"))).map(|s| s.parse().unwrap_or_else(|_| panic!("{key}")))
-}
-
-/// Log the buffer sizes the kernel granted the signalling socket, warning when
-/// it clamped a request ([`was_clamped`]).
-fn log_socket_buffers(
-    service: &str,
-    endpoint: &dyn UdpEndpoint,
-    recv_requested: Option<usize>,
-    send_requested: Option<usize>,
-) {
-    let Some(granted) = endpoint.socket_buffers() else { return };
-    tracing::info!(
-        service,
-        rcvbuf = granted.recv,
-        rcvbuf_requested = ?recv_requested,
-        sndbuf = granted.send,
-        sndbuf_requested = ?send_requested,
-        "signalling socket buffers"
-    );
-    for (knob, requested, effective, cap) in [
-        ("B2BUA_UDP_RCVBUF", recv_requested, granted.recv, "net.core.rmem_max"),
-        ("B2BUA_UDP_SNDBUF", send_requested, granted.send, "net.core.wmem_max"),
-    ] {
-        if let Some(requested) = requested.filter(|&r| was_clamped(r, effective)) {
-            tracing::warn!(
-                service,
-                knob,
-                requested,
-                effective,
-                "the kernel clamped the socket buffer: raise {cap}"
-            );
-        }
-    }
 }
 
 /// `value` trimmed, `None` when it is absent or blank: a knob set to nothing
@@ -170,17 +155,6 @@ pub fn env_stated(key: &str) -> Option<String> {
     stated(env::var(key).ok())
 }
 
-/// `B2BUA_CDR_MESSAGE_RING` (default `0`, off) and `B2BUA_CDR_CAPTURED_HEADERS`
-/// (comma-separated, default none) as `lookup` states them; a blank value is
-/// unset. An unparsable cap refuses the boot.
-fn cdr_ring_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> (usize, Vec<String>) {
-    let ring = stated(lookup("B2BUA_CDR_MESSAGE_RING"))
-        .map(|v| v.parse().expect("B2BUA_CDR_MESSAGE_RING"))
-        .unwrap_or(0);
-    let headers = stated_list(lookup("B2BUA_CDR_CAPTURED_HEADERS")).unwrap_or_default();
-    (ring, headers)
-}
-
 /// Truthy env flag: `1`/`true`/`yes`/`on` (case-insensitive) → true.
 pub fn env_flag(key: &str) -> bool {
     is_truthy(&env_or(key, "0"))
@@ -190,24 +164,13 @@ fn is_truthy(s: &str) -> bool {
     matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
 }
 
-/// An on/off knob as `value` states it: truthy or falsy (`0`/`false`/`no`/
-/// `off`), `default` when absent or blank. Any other value refuses the boot.
-fn switch(key: &str, value: Option<String>, default: bool) -> bool {
-    let Some(value) = stated(value) else { return default };
-    match value.to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => true,
-        "0" | "false" | "no" | "off" => false,
-        _ => panic!("{key} must be on or off, got {value:?}"),
-    }
-}
-
-/// Resolve a `host:port` string to a socket address, panicking with a clear
-/// boot-refusal message when it cannot be resolved.
-pub fn resolve(addr: &str) -> SocketAddr {
+/// Resolve a `host:port` string to a socket address; `Err` is the boot
+/// refusal of one that does not resolve.
+pub fn resolve(addr: &str) -> Result<SocketAddr, String> {
     addr.to_socket_addrs()
-        .unwrap_or_else(|e| panic!("cannot resolve {addr:?}: {e}"))
+        .map_err(|e| format!("cannot resolve {addr:?}: {e}"))?
         .next()
-        .unwrap_or_else(|| panic!("no address resolved from {addr:?}"))
+        .ok_or_else(|| format!("no address resolved from {addr:?}"))
 }
 
 /// Split a `host:port` into its parts WITHOUT DNS resolution (the host may be a
@@ -221,396 +184,33 @@ pub fn split_host_port(s: &str) -> (String, u16) {
     }
 }
 
-/// The ingress brake percentage must keep the brake meaningful: it fires at
-/// ingress depth >= queue_max × pct/100, so 0 would shed every packet and >100
-/// would never fire. Checked at [`RunnerEnv::bind`]; exported for runners that
-/// override the field and want the same boot refusal.
-pub fn validate_ingress_brake_pct(udp_ingress_brake_pct: u32) -> Result<(), String> {
-    if !(1..=100).contains(&udp_ingress_brake_pct) {
-        return Err(format!(
-            "B2BUA_UDP_INGRESS_BRAKE_PCT={udp_ingress_brake_pct} out of range 1..=100: the ingress \
-             brake fires at ingress depth >= queue_max × pct/100, so 0 would shed \
-             every packet and >100 would never fire. Use 1..=100 (100 = brake only \
-             when the queue is full)"
-        ));
-    }
-    Ok(())
-}
-
-/// Boot-time invariant for cluster-profile workers (pure, unit-testable):
-/// when `B2BUA_REQUIRE_OUTBOUND_PROXY` is set, `B2BUA_OUTBOUND_PROXY` MUST be
-/// configured — a worker without it dials b-leg R-URIs pod-direct, bypassing
-/// the front proxy and (in the dual-face network split) reaching for a plane
-/// it must not see. Checked at [`RunnerEnv::bind`]; exported for runners that
-/// assemble their own env.
-pub fn validate_outbound_proxy_requirement(
-    require_outbound_proxy: bool,
-    outbound_proxy_set: bool,
-) -> Result<(), String> {
-    if require_outbound_proxy && !outbound_proxy_set {
-        return Err("B2BUA_REQUIRE_OUTBOUND_PROXY is set but B2BUA_OUTBOUND_PROXY is unset: this \
-             profile REQUIRES every b-leg to traverse the front proxy (workers must never \
-             dial callees pod-direct — only the proxy bridges to the external plane). Set \
-             B2BUA_OUTBOUND_PROXY=host:port or unset B2BUA_REQUIRE_OUTBOUND_PROXY for \
-             local/dev"
-            .to_string());
-    }
-    Ok(())
-}
-
-/// Boot-time coherence check for runners with a **static default callee**: the
-/// b-leg admission gate (`apply_route`) classifies the callee's
-/// `destination.host`, so a default the worker's own destination allow-list
-/// rejects means EVERY default-routed call is 503'd before the b-leg and the
-/// worker can never serve one. Per-call destinations are runtime and not
-/// checkable here, but a self-rejecting default is an unambiguous
-/// misconfiguration to refuse boot on. Pure (no env / IO) so it is
-/// unit-testable.
-pub fn validate_default_dest(
-    dest_host: &str,
-    worker_allowed_target_suffixes: &[String],
-) -> Result<(), String> {
-    if classify_admission(dest_host, worker_allowed_target_suffixes) == AdmissionVerdict::Reject {
-        return Err(format!(
-            "B2BUA_DEST host {dest_host:?} is rejected by its own destination \
-             allow-list WORKER_ALLOWED_TARGET_SUFFIXES={worker_allowed_target_suffixes:?}: \
-             every default-routed call would be 503'd before the b-leg. Add a \
-             matching suffix (e.g. \".svc.cluster.local\"), use an IP literal, or \
-             set \"*\" to disable the gate"
-        ));
-    }
-    Ok(())
-}
-
-/// Every generic runner knob, parsed once from env by [`RunnerEnv::from_env`].
-/// All fields are pub: tweak any of them between `from_env()` and
-/// [`bind`](RunnerEnv::bind) to override a single knob without re-implementing
-/// the rest (a hardcoded listen port, a test-only drain grace, …).
-pub struct RunnerEnv {
-    /// `B2BUA_LISTEN` — SIP/signaling listen addr (default `0.0.0.0:5060`).
-    pub listen: String,
-    /// `B2BUA_ADVERTISE` — SIP `host[:port]` stamped on Via/Contact/b-leg
-    /// Call-ID. `None` → the bound IP, with an unspecified `0.0.0.0` coerced to
-    /// loopback so the literal is at least routable. In k8s inject the pod IP
-    /// via the downward API `status.podIP`, else peers route responses to
-    /// `0.0.0.0` (a storm).
-    pub advertise: Option<String>,
-    /// `B2BUA_OUTBOUND_PROXY` — front-proxy `host:port` every b-leg
-    /// (worker→callee) request is forced through (preloaded `Route ;lr;outbound`).
-    /// REQUIRED in the k8s cluster (pod IPs are not peer-routable); unset →
-    /// b-leg goes straight to the callee (local/dev only). A malformed value is
-    /// fatal at parse — a silent fallback to pod-direct would send b-leg traffic
-    /// to unroutable pod IPs.
-    pub outbound_proxy: Option<(String, u16)>,
-    /// `B2BUA_REQUIRE_OUTBOUND_PROXY` — set (to ANY non-empty value) to refuse
-    /// boot when `B2BUA_OUTBOUND_PROXY` is unset. In the cluster profile a
-    /// worker silently dialing R-URIs pod-direct violates the "only the proxy
-    /// sees the external world" invariant (the dual-face network split);
-    /// crashing at boot turns that misconfiguration into a loud
-    /// CrashLoopBackOff instead of a live plane leak.
-    pub require_outbound_proxy: bool,
-    /// `B2BUA_METRICS` — Prometheus HTTP listen addr (default `0.0.0.0:9091`).
-    pub metrics_addr: String,
-    /// `B2BUA_QUEUE` — inbound UDP queue depth, packets (default 8192).
-    pub queue_max: usize,
-    /// `B2BUA_UDP_SNDBUF` — `SO_SNDBUF` requested on the signalling socket,
-    /// bytes (default 4 MiB; empty = the kernel's `wmem_default`; clamped at
-    /// `wmem_max`). See ADR-0033.
-    pub udp_sndbuf: Option<usize>,
-    /// `B2BUA_UDP_RCVBUF` — `SO_RCVBUF` requested on the signalling socket,
-    /// bytes (default 4 MiB; empty = the kernel's `rmem_default`; clamped at
-    /// `rmem_max`). What overflows it is dropped by the kernel and exported as
-    /// `b2bua_udp_kernel_rx_dropped_total`.
-    pub udp_rcvbuf: Option<usize>,
-    /// `B2BUA_CDR_QUEUE` — buffered-CDR submit queue depth (default 1024).
-    pub cdr_queue: usize,
-    /// `B2BUA_ORDINAL` — worker ordinal stamped in callRef (default `w0`).
-    pub ordinal: String,
-    /// `B2BUA_CONCURRENCY` — handler concurrency ceiling (default 8192; a
-    /// back-pressure SAFETY limit, not a rate governor).
-    pub concurrency: usize,
-    /// `B2BUA_CALL_CAP` — max concurrent calls before drop (default 1_000_000).
-    pub call_cap: usize,
-    /// `B2BUA_NEW_CALL_PERMIT_SHARE_PCT` — share of the handler concurrency
-    /// normal initial-INVITE turns may hold, percent (default 50).
-    pub new_call_permit_share_percent: u8,
-    /// `B2BUA_NEW_CALL_QUEUE_HEADROOM_PCT` — share of the call cap kept back
-    /// from normal new INVITEs, percent (default 5).
-    pub new_call_queue_headroom_percent: u8,
-    /// `B2BUA_MAX_MESSAGES_PER_CALL` — loop/runaway cap-defense (default 200:
-    /// headroom for a multi-hour keepalive-held call).
-    pub max_messages_per_call: u64,
-    /// `B2BUA_MAX_MESSAGES_PER_CALL_LIFETIME` — the per-call work bound over
-    /// the call's life (default 100_000; 0 is refused).
-    pub max_messages_per_call_lifetime: u64,
-    /// `B2BUA_KEEPALIVE_SEC` — in-dialog OPTIONS keepalive interval (default
-    /// 300 s; a shorter poke breaks long-hold endurance traffic).
-    pub keepalive_sec: i64,
-    /// `B2BUA_KEEPALIVE_TIMEOUT_SEC` — grace waiting for the OPTIONS 200 before
-    /// declaring the leg dead and BYE-ing (default 32 s so a reclaimed dialog's
-    /// keepalive can round-trip across the post-reboot recovery window).
-    pub keepalive_timeout_sec: i64,
-    /// `B2BUA_REBOOT_BUDGET_SEC` — replicated-backup TTL / reboot budget
-    /// (default 600; `config.validate()` forces it to outlast the keepalive).
-    pub reboot_budget_sec: i64,
-    /// `B2BUA_SETUP_TIMEOUT_SEC` — a-leg total setup deadline, reroutes
-    /// included (default 150; must stay strictly below
-    /// `B2BUA_INVITE_TXN_TIMEOUT_SEC`, enforced at boot; <= 0 disables).
-    pub setup_timeout_sec: i64,
-    /// `B2BUA_INVITE_TXN_TIMEOUT_SEC` — the sip-txn out-of-dialog INVITE bound
-    /// for BOTH call halves (b-leg client give-up + a-leg pre-final backstop).
-    /// Default 158; supported range 33..=600 (telephony deployments raise it —
-    /// Timer C > 3 min, 180 s PSTN supervision). `validate()` refuses boot when
-    /// `B2BUA_SETUP_TIMEOUT_SEC` does not sit strictly below it.
-    pub invite_txn_timeout_sec: i64,
-    /// `B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC` — how long a b-leg initial
-    /// INVITE waits for a response of ANY kind before its transaction gives up
-    /// and the `call_failure` consult carries `timeout_kind: "response"`.
-    /// Default 32 (RFC 3261 Timer B); supported range 2..=32 — tightening it
-    /// is a deliberate §17.1.1.2 deviation (telephony policy: a hop drawing
-    /// nothing is dead, and the reroute must not wait 64·T1). In-dialog INVITE
-    /// and non-INVITE keep 64·T1; the first provisional swaps in
-    /// `B2BUA_INVITE_TXN_TIMEOUT_SEC`.
-    pub invite_first_response_timeout_sec: i64,
-    /// `B2BUA_CANCEL_STRICT_RFC_WAIT` — truthy (`1`/`true`/`yes`/`on`) selects
-    /// the literal RFC 3261 §9.1 CANCEL wait (a response-less b-leg is never
-    /// CANCELed); default is the ADR-0028 bounded hold — the CANCEL goes on
-    /// the wire at the grace expiry regardless.
-    pub cancel_strict_rfc_wait: bool,
-    /// `B2BUA_CALL_CONTROL_TIMEOUT_MS` — decision-backend deadline per
-    /// round-trip (default 5000; <= 0 disables — ADR-0022).
-    pub call_control_timeout_ms: i64,
-    /// `B2BUA_ACK_TIMEOUT_SEC` — un-ACKed 2xx give-up deadline (RFC 3261
-    /// §13.3.1.4, 64·T1 = 32 s; <= 0 tears nothing down — the ladder itself
-    /// always runs, ADR-0032 X5).
-    pub ack_timeout_sec: i64,
-    /// `B2BUA_CPS_BUCKET_SIZE` — CPS bucket rung capacity (default 1000).
-    pub cps_bucket_size: u32,
-    /// `B2BUA_CPS_BUCKET_RATE` — CPS bucket rung refill rate (default 500).
-    pub cps_bucket_rate: u32,
-    /// `B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD` — panic-ELU backstop (default 0.75).
-    pub overload_panic_elu_threshold: f64,
-    /// `B2BUA_RETRY_AFTER_BASE_SEC` — base Retry-After on overload 503s, floored
-    /// at 1 s (default 5).
-    pub retry_after_base_sec: u32,
-    /// `WORKER_ALLOWED_TARGET_SUFFIXES` — b-leg destination allow-list,
-    /// comma-separated (default `.svc.cluster.local`; `*` = allow all, the
-    /// rollback sentinel; non-IP non-matching hosts are 503'd pre-leg).
-    pub worker_allowed_target_suffixes: Vec<String>,
-    /// `B2BUA_UDP_INGRESS_BRAKE_PCT` — ingress brake threshold percentage
-    /// (default 70): at inbound-queue depth >= floor(queue_max × pct/100) a
-    /// new, non-emergency INVITE is shed with a STATELESS 503 before the parser
-    /// runs — the cheapest shed in the stack, ahead of the router's admission rungs.
-    pub udp_ingress_brake_pct: u32,
-    /// `B2BUA_RETRY_AFTER_JITTER_SEC` — every new-call 503's Retry-After is
-    /// uniform over `[max(base, 1), max(base, 1) + jitter]` (default 5).
-    pub retry_after_jitter_sec: u32,
-    /// `B2BUA_RELAY_HEADERS` — opt-in transparent header relay, comma-separated
-    /// names copied from the a-leg INVITE onto every originated b-leg INVITE
-    /// (default empty = no relay; structural headers never relayable).
-    pub relay_headers: Vec<String>,
-    /// `B2BUA_PRIVACY_SERVICE` — `on` (the default): this worker is the RFC
-    /// 3323 privacy service at the trust boundary; `off`: the next hop is.
-    pub privacy_service: bool,
-    /// `B2BUA_CDR_MESSAGE_RING` — the per-leg message-ring cap on the call
-    /// record (default 0 = off; blank = unset).
-    pub cdr_message_ring: usize,
-    /// `B2BUA_CDR_CAPTURED_HEADERS` — the header names every ring entry
-    /// captures the values of, comma-separated (default empty).
-    pub cdr_captured_headers: Vec<String>,
-    /// `LIMITER_URL` as the limiter's `host:port` (boot refuses a malformed
-    /// value); empty when unset → `NoopLimiter` (fail-open).
-    pub limiter_url: String,
-    /// `LIMITER_TIMEOUT_MS` — per-request fail-open budget (default 150).
-    pub limiter_timeout_ms: u64,
-    /// `LIMITER_REFRESH_SECONDS` — how often a counted call extends its lease;
-    /// with one refresh tick, below the lease the limiter's answers state
-    /// (default 40).
-    pub limiter_refresh_sec: i64,
-    /// `LIMITER_REFRESH_BATCH_MS` — the worker's refresh tick: a refresh due
-    /// leaves within it, with every other key due (default 1000).
-    pub limiter_refresh_batch_ms: u64,
-    /// `LIMITER_REFRESH_BATCH_MAX` — most keys one refresh request carries
-    /// (default 1000).
-    pub limiter_refresh_batch_max: usize,
-    /// `LIMITER_REFRESH_TIMEOUT_MS` — the refresh request budget (default 2000).
-    pub limiter_refresh_timeout_ms: u64,
-    /// `LIMITER_RELEASE_TIMEOUT_MS` — the release request budget (default 2000).
-    pub limiter_release_timeout_ms: u64,
-    /// `LIMITER_RELEASE_QUEUE_CAP` — most releases the worker's release queue
-    /// holds; the oldest is dropped past it (default 100000).
-    pub limiter_release_queue_cap: usize,
-    /// `LIMITER_BREAKER_FAILURES` — consecutive failed admits that open the
-    /// worker's limiter breaker (default 3).
-    pub limiter_breaker_failures: u32,
-    /// `LIMITER_BREAKER_PROBE_MS` — how often an open breaker probes the
-    /// limiter's health answer (default 1000).
-    pub limiter_breaker_probe_ms: u64,
-    /// The planned exit's bounds, the grammar in `drain_env`:
-    /// `B2BUA_DRAIN_GRACE_MS` (the wait for the live calls), `B2BUA_DRAIN_MIN_MS`
-    /// (the floor of a withdrawn worker's caught-up exit, ADR-0031 D2) and
-    /// `B2BUA_DRAIN_RELEASE_FLUSH_MS` (the wait for the queued limiter releases).
-    pub drain: b2bua::drain::DrainBounds,
-    /// The memory ceilings (ADR-0037), every one off unless stated; the
-    /// grammar is in `capacity_env`.
-    pub capacity: CapacityConfig,
-}
-
 impl RunnerEnv {
-    /// Parse the full generic env grammar. Panics (refuses boot) on an
-    /// unparseable value — a typo'd knob must never silently become a default.
-    pub fn from_env() -> Self {
-        let (cdr_message_ring, cdr_captured_headers) = cdr_ring_from_lookup(|k| env::var(k).ok());
-        let limiter = limiter_env::limiter_from_lookup(|k| env::var(k).ok())
-            .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
-        Self {
-            listen: env_or("B2BUA_LISTEN", "0.0.0.0:5060"),
-            advertise: env::var("B2BUA_ADVERTISE").ok(),
-            outbound_proxy: match env::var("B2BUA_OUTBOUND_PROXY") {
-                Ok(s) if !s.trim().is_empty() => {
-                    let s = s.trim();
-                    let (h, p) = s
-                        .rsplit_once(':')
-                        .and_then(|(h, p)| p.parse::<u16>().ok().map(|p| (h.to_string(), p)))
-                        .unwrap_or_else(|| {
-                            panic!("B2BUA_OUTBOUND_PROXY must be host:port, got {s:?}")
-                        });
-                    Some((h, p))
-                }
-                _ => None,
-            },
-            require_outbound_proxy: env::var("B2BUA_REQUIRE_OUTBOUND_PROXY")
-                .map(|v| !v.trim().is_empty())
-                .unwrap_or(false),
-            metrics_addr: env_or("B2BUA_METRICS", "0.0.0.0:9091"),
-            queue_max: env_or("B2BUA_QUEUE", "8192").parse().expect("B2BUA_QUEUE"),
-            udp_sndbuf: socket_buffer_knob("B2BUA_UDP_SNDBUF"),
-            udp_rcvbuf: socket_buffer_knob("B2BUA_UDP_RCVBUF"),
-            cdr_queue: env_or("B2BUA_CDR_QUEUE", "1024").parse().expect("B2BUA_CDR_QUEUE"),
-            ordinal: env_or("B2BUA_ORDINAL", "w0"),
-            // Dispatch throttle ceilings — deliberately high so they never cap
-            // throughput below the offered rate; `cap_drops`/`saturation`
-            // metrics flag if either is actually hit.
-            concurrency: env_or("B2BUA_CONCURRENCY", "8192").parse().expect("B2BUA_CONCURRENCY"),
-            call_cap: env_or("B2BUA_CALL_CAP", "1000000").parse().expect("B2BUA_CALL_CAP"),
-            new_call_permit_share_percent: env_or("B2BUA_NEW_CALL_PERMIT_SHARE_PCT", "50")
-                .parse()
-                .expect("B2BUA_NEW_CALL_PERMIT_SHARE_PCT"),
-            new_call_queue_headroom_percent: env_or("B2BUA_NEW_CALL_QUEUE_HEADROOM_PCT", "5")
-                .parse()
-                .expect("B2BUA_NEW_CALL_QUEUE_HEADROOM_PCT"),
-            max_messages_per_call: env_or("B2BUA_MAX_MESSAGES_PER_CALL", "200")
-                .parse()
-                .expect("B2BUA_MAX_MESSAGES_PER_CALL"),
-            max_messages_per_call_lifetime: env_or(
-                "B2BUA_MAX_MESSAGES_PER_CALL_LIFETIME",
-                "100000",
-            )
-            .parse()
-            .expect("B2BUA_MAX_MESSAGES_PER_CALL_LIFETIME"),
-            keepalive_sec: env_or("B2BUA_KEEPALIVE_SEC", "300")
-                .parse()
-                .expect("B2BUA_KEEPALIVE_SEC"),
-            keepalive_timeout_sec: env_or("B2BUA_KEEPALIVE_TIMEOUT_SEC", "32")
-                .parse()
-                .expect("B2BUA_KEEPALIVE_TIMEOUT_SEC"),
-            reboot_budget_sec: env_or("B2BUA_REBOOT_BUDGET_SEC", "600")
-                .parse()
-                .expect("B2BUA_REBOOT_BUDGET_SEC"),
-            setup_timeout_sec: env_or("B2BUA_SETUP_TIMEOUT_SEC", "150")
-                .parse()
-                .expect("B2BUA_SETUP_TIMEOUT_SEC"),
-            invite_txn_timeout_sec: env_or("B2BUA_INVITE_TXN_TIMEOUT_SEC", "158")
-                .parse()
-                .expect("B2BUA_INVITE_TXN_TIMEOUT_SEC"),
-            invite_first_response_timeout_sec: env_or(
-                "B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC",
-                "32",
-            )
-            .parse()
-            .expect("B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC"),
-            cancel_strict_rfc_wait: env_flag("B2BUA_CANCEL_STRICT_RFC_WAIT"),
-            call_control_timeout_ms: env_or("B2BUA_CALL_CONTROL_TIMEOUT_MS", "5000")
-                .parse()
-                .expect("B2BUA_CALL_CONTROL_TIMEOUT_MS"),
-            ack_timeout_sec: env_or("B2BUA_ACK_TIMEOUT_SEC", "32")
-                .parse()
-                .expect("B2BUA_ACK_TIMEOUT_SEC"),
-            cps_bucket_size: env_or("B2BUA_CPS_BUCKET_SIZE", "1000")
-                .parse()
-                .expect("B2BUA_CPS_BUCKET_SIZE"),
-            cps_bucket_rate: env_or("B2BUA_CPS_BUCKET_RATE", "500")
-                .parse()
-                .expect("B2BUA_CPS_BUCKET_RATE"),
-            overload_panic_elu_threshold: env_or("B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD", "0.75")
-                .parse()
-                .expect("B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD"),
-            retry_after_base_sec: env_or("B2BUA_RETRY_AFTER_BASE_SEC", "5")
-                .parse()
-                .expect("B2BUA_RETRY_AFTER_BASE_SEC"),
-            worker_allowed_target_suffixes: split_csv(&env_or(
-                "WORKER_ALLOWED_TARGET_SUFFIXES",
-                ".svc.cluster.local",
-            )),
-            udp_ingress_brake_pct: env_or("B2BUA_UDP_INGRESS_BRAKE_PCT", "70")
-                .parse()
-                .expect("B2BUA_UDP_INGRESS_BRAKE_PCT"),
-            retry_after_jitter_sec: env_or("B2BUA_RETRY_AFTER_JITTER_SEC", "5")
-                .parse()
-                .expect("B2BUA_RETRY_AFTER_JITTER_SEC"),
-            relay_headers: split_csv(&env_or("B2BUA_RELAY_HEADERS", "")),
-            privacy_service: switch(
-                "B2BUA_PRIVACY_SERVICE",
-                env::var("B2BUA_PRIVACY_SERVICE").ok(),
-                true,
-            ),
-            cdr_message_ring,
-            cdr_captured_headers,
-            limiter_url: limiter_env::limiter_url_from_lookup(|k| env::var(k).ok())
-                .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"))
-                .unwrap_or_default(),
-            limiter_timeout_ms: limiter.timeout_ms,
-            limiter_refresh_sec: limiter.refresh_sec,
-            limiter_refresh_batch_ms: limiter.refresh_batch_ms,
-            limiter_refresh_batch_max: limiter.refresh_batch_max,
-            limiter_refresh_timeout_ms: limiter.refresh_timeout_ms,
-            limiter_release_timeout_ms: limiter.release_timeout_ms,
-            limiter_release_queue_cap: limiter.queue_cap,
-            limiter_breaker_failures: limiter.breaker_failures,
-            limiter_breaker_probe_ms: limiter.breaker_probe_ms,
-            drain: drain_env::drain_from_lookup(|k| env::var(k).ok())
-                .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}")),
-            capacity: capacity_env::capacity_from_lookup(|k| env::var(k).ok())
-                .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}")),
-        }
-    }
-
     /// Bind the real UDP endpoint (ingress brake installed), coerce the
     /// advertise address, assemble + validate the [`B2buaConfig`], and mint the
-    /// process-wide metrics registry / system clock. Panics (refuses boot) on a
-    /// bind failure or an invalid config. `name` names the service in every log
-    /// line and in the OTLP resource.
+    /// process-wide metrics registry / system clock. `Err` is the boot refusal
+    /// of a bind failure, an invalid config, a pre-epoch wall clock or an OS
+    /// RNG that does not answer. `name` names the service in every log line.
     ///
-    /// Installs the process subscriber (ADR-0026) first, so every runner
-    /// composed from this kit logs and traces identically without wiring it.
-    pub async fn bind(self, name: &str) -> RunnerBase {
-        let observe = observe::init_production(name);
+    /// The runner installs the process subscriber (ADR-0026,
+    /// [`observe::init_production`]) before it, so the refusal is logged.
+    pub async fn bind(self, name: &str) -> Result<RunnerBase, String> {
+        let invalid = |e: String| format!("invalid B2BUA config: {e}");
         // The per-call trace gate, configured once from the environment before
         // any call arrives (ADR-0026): with no OTLP endpoint it is inert and no
         // call path pays more than one boolean check.
         b2bua::trace::install_process_traces(std::sync::Arc::new(
             b2bua::trace::CallTraces::from_env(0),
         ));
-        validate_ingress_brake_pct(self.udp_ingress_brake_pct)
-            .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
+        validate_ingress_brake_pct(self.udp_ingress_brake_pct).map_err(invalid)?;
         validate_outbound_proxy_requirement(
             self.require_outbound_proxy,
             self.outbound_proxy.is_some(),
         )
-        .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
+        .map_err(invalid)?;
+        let clock = Clock::checked_system().map_err(|e| e.to_string())?;
 
-        let listen_sa = resolve(&self.listen);
-        let metrics_sa = resolve(&self.metrics_addr);
+        let listen_sa = resolve(&self.listen)?;
+        let metrics_sa = resolve(&self.metrics_addr)?;
 
         // Ingress brake: the `preIngress` hook + its counters, installed
         // on the worker socket. Without it the brake (the cheapest stateless-503
@@ -622,14 +222,16 @@ impl RunnerEnv {
             queue_max: self.queue_max,
             threshold_pct: self.udp_ingress_brake_pct,
         };
+        // The worker's identifier generator, keyed from the OS RNG once: the
+        // core's, and the To-tag secret of its refusals.
+        let id_gen = Arc::new(entropy::keyed_id_gen()?);
         // The worker's one answer and memo for refused new INVITEs, shared by
-        // the brake and, through `deps`, the core's transaction layer. Its
-        // To-tag secret is drawn from entropy, apart from the core's generator.
+        // the brake and, through `deps`, the core's transaction layer.
         let refusals = Refusals::new(
             self.retry_after_base_sec,
             self.retry_after_jitter_sec,
             brake_config.memo_capacity(),
-            &IdGen::from_entropy(),
+            &id_gen,
         );
         let brake_hook =
             build_ingress_brake_hook(brake_config, brake_counters.clone(), refusals.clone());
@@ -650,26 +252,26 @@ impl RunnerEnv {
         let endpoint: Arc<dyn UdpEndpoint> = net
             .bind_udp(bind_opts)
             .await
-            .unwrap_or_else(|e| panic!("bind {listen_sa} failed: {e:?}"))
+            .map_err(|e| format!("bind {listen_sa} failed: {e:?}"))?
             .into();
         let local = endpoint.local_addr();
         log_socket_buffers(name, endpoint.as_ref(), self.udp_rcvbuf, self.udp_sndbuf);
 
         // The `UdpTransport` facade's Prometheus-visible shape: the brake
-        // counters + live queue depth / queue_max / tail-drop / refused sends
-        // proxied off the bound endpoint.
+        // counters + live readings of the bound endpoint.
         let udp_metrics = {
-            let ep_depth = endpoint.clone();
-            let ep_tail = endpoint.clone();
-            let ep_would_block = endpoint.clone();
-            let ep_kernel = endpoint.clone();
+            let live = |read: fn(&dyn UdpEndpoint) -> u64| -> LiveGauge {
+                let endpoint = endpoint.clone();
+                Arc::new(move || read(endpoint.as_ref()))
+            };
             UdpTransportMetrics::new(
                 self.queue_max,
                 brake_counters.clone(),
-                Arc::new(move || ep_depth.queue_depth() as u64),
-                Arc::new(move || ep_tail.counters().tail_dropped),
-                Arc::new(move || ep_would_block.counters().send_would_block),
-                Arc::new(move || ep_kernel.counters().kernel_rx_dropped),
+                live(|ep| ep.queue_depth() as u64),
+                {
+                    let endpoint = endpoint.clone();
+                    Arc::new(move || endpoint.counters())
+                },
             )
         };
         tracing::info!(
@@ -717,9 +319,9 @@ impl RunnerEnv {
         );
 
         match &self.outbound_proxy {
-            // Every b-leg request goes to the front proxy with a preloaded
-            // `Route: <sip:host:port;lr;outbound>` so the proxy classifies it
-            // worker-outbound and record-routes itself into the b-leg.
+            // Every b-leg request goes to the front proxy with a preloaded plain
+            // `;lr` Route; its internal face classifies it worker-outbound
+            // (ADR-0048) and it record-routes itself into the b-leg.
             Some((h, p)) => tracing::info!(
                 service = name,
                 proxy_host = %h,
@@ -751,12 +353,9 @@ impl RunnerEnv {
             limiter_refresh_batch_ms: self.limiter_refresh_batch_ms,
             limiter_refresh_batch_max: self.limiter_refresh_batch_max,
             limiter_release_queue_cap: self.limiter_release_queue_cap,
-            limiter_breaker_failures: self.limiter_breaker_failures,
-            limiter_breaker_probe_ms: self.limiter_breaker_probe_ms,
-            setup_timeout_sec: self.setup_timeout_sec,
+            setup_timeout_ms: self.setup_timeout_ms,
             invite_txn_timeout_sec: self.invite_txn_timeout_sec,
             invite_first_response_timeout_sec: self.invite_first_response_timeout_sec,
-            cancel_strict_rfc3261_wait: self.cancel_strict_rfc_wait,
             call_control_timeout_ms: self.call_control_timeout_ms,
             ack_timeout_sec: self.ack_timeout_sec,
             cps_bucket_size: self.cps_bucket_size,
@@ -779,30 +378,33 @@ impl RunnerEnv {
         // keepalive refresh gap) or call setup (an INVITE transaction bound
         // outside its supported range, an app setup deadline / reaper idle
         // window that does not sit strictly under that bound).
-        config.validate().unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
+        config.validate().map_err(|e| invalid(e.to_string()))?;
+        let call_control =
+            Duration::from_millis(u64::try_from(config.call_control_timeout_ms).unwrap_or(0));
+        liveness_env::check_loop_stall(self.loop_stall, call_control).map_err(invalid)?;
         tracing::info!(service = name, capacity = ?config.capacity, "capacity ceilings");
 
-        RunnerBase {
+        Ok(RunnerBase {
             name: name.to_string(),
             endpoint,
             local,
             config,
             udp_metrics,
+            id_gen,
             refusals,
             // The shared registry, built BEFORE any deps so components a runner
             // constructs pre-spawn (notably CDR writers) record into the SAME
             // registry the core exports at `/metrics`.
             metrics: B2buaMetrics::new(),
-            clock: Clock::system(),
+            clock,
             metrics_sa,
-            observe,
             env: self,
-        }
+        })
     }
 }
 
 /// Comma-separated env list: trimmed, empties dropped.
-fn split_csv(s: &str) -> Vec<String> {
+pub(crate) fn split_csv(s: &str) -> Vec<String> {
     s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()
 }
 
@@ -823,6 +425,9 @@ pub struct RunnerBase {
     pub config: B2buaConfig,
     /// The `UdpTransport` metrics facade over [`Self::endpoint`].
     pub udp_metrics: UdpTransportMetrics,
+    /// The worker's identifier generator, keyed from the OS RNG at bind;
+    /// [`deps`](Self::deps) hands it to the core.
+    pub id_gen: Arc<sip_txn::IdGen>,
     /// The worker's refusals of new INVITEs, held by the ingress brake on
     /// [`Self::endpoint`]; [`deps`](Self::deps) hands the core the same
     /// instance, so a runner swapping one swaps both.
@@ -833,9 +438,6 @@ pub struct RunnerBase {
     pub clock: Clock,
     /// Resolved probe/metrics HTTP listen address.
     pub metrics_sa: SocketAddr,
-    /// The installed process subscriber (ADR-0026). Held for the process
-    /// lifetime: dropping it drains the log writer and flushes pending spans.
-    pub observe: observe::ObserveGuard,
 }
 
 impl RunnerBase {
@@ -853,17 +455,20 @@ impl RunnerBase {
                 refresh_timeout_ms = self.env.limiter_refresh_timeout_ms,
                 release_timeout_ms = self.env.limiter_release_timeout_ms,
                 refresh_sec = self.env.limiter_refresh_sec,
-                breaker_failures = self.env.limiter_breaker_failures,
-                breaker_probe_ms = self.env.limiter_breaker_probe_ms,
+                breaker_requests = self.env.limiter_backend.breaker.min_sent,
+                breaker_window_ms = millis_u64(self.env.limiter_backend.breaker.window),
+                breaker_probe_ms = millis_u64(self.env.limiter_backend.breaker.probe_period),
+                max_in_flight = self.env.limiter_backend.client.max_in_flight,
                 "call-limiter client wired"
             );
         }
         let settings = limiter_client::LimiterClientSettings {
             hostport,
             timeout: std::time::Duration::from_millis(self.env.limiter_timeout_ms),
+            backend: self.env.limiter_backend.clone(),
             refresh_timeout: std::time::Duration::from_millis(self.env.limiter_refresh_timeout_ms),
             release_timeout: std::time::Duration::from_millis(self.env.limiter_release_timeout_ms),
-            boot_lookup: std::time::Duration::from_millis(self.env.limiter_breaker_probe_ms),
+            boot_lookup: self.env.limiter_backend.breaker.probe_period,
         };
         limiter_client::limiter_client(
             &settings,
@@ -876,11 +481,12 @@ impl RunnerBase {
     /// The RabbitMQ CDR sink the env selects ([`RabbitMqCdrSettings`]),
     /// publishing the default [`JsonRecordEncoder`](b2bua::cdr::JsonRecordEncoder)
     /// record and recording into [`Self::metrics`]; `None` when the URL is
-    /// unset. Panics (boot refusal) on a malformed `B2BUA_CDR_RABBITMQ_*` value.
-    pub fn rabbitmq_cdr_sink_from_env(&self) -> Option<Arc<dyn CdrWriter>> {
-        rabbitmq_cdr_writer_from_lookup(|k| env::var(k).ok(), &self.metrics)
-            .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"))
-            .map(|w| self.wired_cdr_sink(w))
+    /// unset. `Err` is the boot refusal of a malformed `B2BUA_CDR_RABBITMQ_*`
+    /// value.
+    pub fn rabbitmq_cdr_sink_from_env(&self) -> Result<Option<Arc<dyn CdrWriter>>, String> {
+        let writer = rabbitmq_cdr_writer_from_lookup(|k| env::var(k).ok(), &self.metrics)
+            .map_err(|e| format!("invalid B2BUA config: {e}"))?;
+        Ok(writer.map(|w| self.wired_cdr_sink(w)))
     }
 
     /// [`Self::rabbitmq_cdr_sink_from_env`] publishing the bytes `encoder`
@@ -888,10 +494,11 @@ impl RunnerBase {
     pub fn rabbitmq_cdr_sink_from_env_with_encoder(
         &self,
         encoder: Arc<dyn CdrEncoder>,
-    ) -> Option<Arc<dyn CdrWriter>> {
-        rabbitmq_cdr_writer_from_lookup_with_encoder(|k| env::var(k).ok(), encoder, &self.metrics)
-            .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"))
-            .map(|w| self.wired_cdr_sink(w))
+    ) -> Result<Option<Arc<dyn CdrWriter>>, String> {
+        let lookup = |k: &str| env::var(k).ok();
+        let writer = rabbitmq_cdr_writer_from_lookup_with_encoder(lookup, encoder, &self.metrics)
+            .map_err(|e| format!("invalid B2BUA config: {e}"))?;
+        Ok(writer.map(|w| self.wired_cdr_sink(w)))
     }
 
     fn wired_cdr_sink(&self, writer: RabbitMqCdrWriter) -> Arc<dyn CdrWriter> {
@@ -908,13 +515,13 @@ impl RunnerBase {
     }
 
     /// The peer-to-peer replication the env selects ([`ReplicationSettings`]),
-    /// its store on [`Self::clock`]; `None` when replication is off or has no
-    /// membership. Panics (boot refusal) on a malformed `B2BUA_REPL_LISTEN` or
-    /// `B2BUA_REPL_PORT`.
-    pub async fn replication_setup_from_env(&self) -> Option<ReplicationSetup> {
+    /// its store on [`Self::clock`]; `None` when replication is off. `Err` is
+    /// the boot refusal of a malformed replication variable or a replication
+    /// listener that cannot be bound.
+    pub async fn replication_setup_from_env(&self) -> Result<Option<ReplicationSetup>, String> {
         replication_setup_from_lookup(|k| env::var(k).ok(), self.clock.clone())
             .await
-            .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"))
+            .map_err(|e| format!("invalid B2BUA config: {e}"))
     }
 
     /// Production-shaped [`B2buaDeps`] defaults around the injected decision
@@ -940,7 +547,7 @@ impl RunnerBase {
             store_faults: Default::default(),
             wire_faults: Default::default(),
             clock: self.clock.clone(),
-            id_gen: Arc::new(IdGen::from_entropy()),
+            id_gen: self.id_gen.clone(),
             // The refusals the ingress brake holds (see [`RunnerBase::refusals`]).
             refusals: Some(self.refusals.clone()),
             deferred_ceilings: None,
@@ -966,308 +573,49 @@ impl RunnerBase {
         Arc::new(B2buaCore::spawn_with_services(Box::new(self.endpoint.clone()), deps, services))
     }
 
-    /// Readiness/metrics probe server (shared `probe-http`). The `/ready` state
-    /// is a single read of one source: `core.readiness_state()` already folds
-    /// in the Draining latch, so there is no second flag to drift from it. The
-    /// `/metrics` body concatenates the worker's metric sources per scrape
-    /// (core registry + txn backpressure + UDP transport + overload signal +
-    /// capacity gate + every new call's admission outcome, every rung
-    /// composed), then `extra_metrics` (e.g. allocator stats). Hold the returned server
-    /// for the process lifetime — its accept loop aborts on drop.
-    pub async fn spawn_probe_server(
-        &self,
-        core: &Arc<B2buaCore>,
-        extra_metrics: Option<probe_http::MetricsFn>,
-        heap: Option<probe_http::HeapDumpFn>,
-    ) -> Option<probe_http::ProbeServer> {
-        let core_ready = core.clone();
-        let worker = WorkerMetrics {
-            core: self.metrics.clone(),
-            txn: core.txn_metrics().clone(),
-            udp: self.udp_metrics.clone(),
-            overload: core.overload().clone(),
-            capacity: core.capacity().clone(),
-        };
-        let routes = probe_http::ProbeRoutes {
-            metrics: Arc::new(move || worker.body(extra_metrics.as_ref())),
-            ready: Arc::new(move || match core_ready.readiness_state() {
-                b2bua::repl::ReadinessState::Ready => probe_http::ProbeState::Ready,
-                b2bua::repl::ReadinessState::Draining => probe_http::ProbeState::Draining,
-                b2bua::repl::ReadinessState::NotReady => probe_http::ProbeState::NotReady,
-            }),
-            heap,
-        };
-        match probe_http::ProbeServer::start(self.metrics_sa, routes).await {
-            Ok(server) => {
-                tracing::info!(
-                    service = %self.name,
-                    addr = %server.addr(),
-                    "metrics server listening (/metrics, readiness /ready)"
-                );
-                Some(server)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    service = %self.name,
-                    addr = %self.metrics_sa,
-                    error = %e,
-                    "metrics server failed to bind"
-                );
-                None
-            }
-        }
-    }
-
     /// Memory-attribution sampler: push the store + replication map sizes into
     /// their gauges every 5 s so an RSS climb can be pinned to a specific map
     /// even when `active_calls` is flat. 5 s is well inside the scrape cadence;
     /// the sample is a couple of brief locks, off the call path. It evicts
     /// nothing: the core's paced replica reap is the one eviction site, since an
-    /// expired deferred terminal owes its limiter release on the way out.
+    /// expired deferred terminal owes its limiter release on the way out. Each
+    /// sample also logs a worker loop stalling past `loop_stall`, and turning
+    /// again, once per transition. A run that panics is restarted and counted
+    /// ([`b2bua::supervise`]).
     pub fn spawn_gauge_sampler(&self, core: &Arc<B2buaCore>) {
         let core = core.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
-            loop {
-                tick.tick().await;
-                core.sample_gauges();
-                if let Some(repl) = core.repl_store() {
-                    let (bodies, idx, _meta, tomb) = repl.map_lens();
-                    core.metrics().set_store_map_sizes(bodies as u64, idx as u64, tomb as u64);
+        let stall = self.env.loop_stall;
+        b2bua::supervise::spawn(b2bua::supervise::GAUGE_SAMPLER, move || {
+            let core = core.clone();
+            async move {
+                #[expect(clippy::disallowed_methods, reason = "GAUGE_PERIOD is not zero")]
+                let mut tick = tokio::time::interval(GAUGE_PERIOD);
+                let mut stalled_before = Vec::new();
+                loop {
+                    tick.tick().await;
+                    core.sample_gauges();
+                    if let Some(repl) = core.repl_store() {
+                        let (bodies, idx, _meta, tomb) = repl.map_lens();
+                        core.metrics().set_store_map_sizes(bodies as u64, idx as u64, tomb as u64);
+                    }
+                    let stalled = core.loops().stalled(stall);
+                    if stalled != stalled_before {
+                        if stalled.is_empty() {
+                            tracing::info!(loops = ?stalled_before, "worker loops turning again");
+                        } else {
+                            tracing::error!(
+                                loops = ?stalled,
+                                threshold_ms = millis_u64(stall),
+                                "worker loop stalled on one piece of work — /ready and /healthz 503"
+                            );
+                        }
+                        stalled_before = stalled;
+                    }
                 }
             }
         });
     }
-
-    /// Graceful shutdown: SIGTERM (k8s pod termination) latches Draining —
-    /// OPTIONS self-reports 503 and the readiness probe flips NotReady so the
-    /// proxy steers new calls away — then waits for the first of: the in-flight
-    /// calls finishing, a withdrawn worker's backups holding them past
-    /// `B2BUA_DRAIN_MIN_MS` (ADR-0031 D2), or `B2BUA_DRAIN_GRACE_MS`, the
-    /// queued limiter releases flushed before the exit within
-    /// `B2BUA_DRAIN_RELEASE_FLUSH_MS` (ADR-0040 decision 9). Ctrl-C
-    /// (interactive) latches Draining and waits for no call, only for the
-    /// release flush, which a second Ctrl-C cuts short. Returns when the
-    /// process should exit.
-    pub async fn run_until_shutdown(&self, core: &Arc<B2buaCore>) {
-        let name = &self.name;
-        let bounds = self.env.drain;
-        let drain_grace_ms = bounds.grace.as_millis() as u64;
-        let drain_min_ms = bounds.floor.as_millis() as u64;
-        let release_flush_ms = bounds.release_flush.as_millis() as u64;
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!(
-                    service = name,
-                    signal = "SIGINT",
-                    release_flush_ms,
-                    "shutting down"
-                );
-                // Draining first, so no new call is admitted while the queued
-                // releases leave; a second Ctrl-C gives them up at once.
-                core.begin_draining();
-                tokio::select! {
-                    _ = core.limiter().flush(bounds.release_flush) => {}
-                    _ = tokio::signal::ctrl_c() => {
-                        let given_up = core.limiter().give_up_all();
-                        tracing::warn!(
-                            service = name,
-                            given_up,
-                            "second SIGINT: release flush cut short"
-                        );
-                    }
-                }
-            }
-            _ = wait_sigterm(name) => {
-                tracing::info!(
-                    service = name,
-                    signal = "SIGTERM",
-                    drain_grace_ms,
-                    drain_min_ms,
-                    release_flush_ms,
-                    "begin draining"
-                );
-                // Latch Draining, then wait. A node with no calls exits at once;
-                // a withdrawn node whose backups hold its calls exits past the
-                // floor; anything else is bounded by the grace. The queued
-                // limiter releases are then flushed within their bound. The exit
-                // reason and the residual are logged, never silently cut.
-                let out = core.drain(bounds).await;
-                let reason = out.exit.label();
-                let residual = out.residual;
-                match out.exit {
-                    b2bua::drain::DrainExit::Quiescent | b2bua::drain::DrainExit::CaughtUp => {
-                        tracing::info!(service = name, reason, residual, "drained — exiting");
-                    }
-                    b2bua::drain::DrainExit::Grace
-                    | b2bua::drain::DrainExit::GracePeersBehind => {
-                        tracing::warn!(
-                            service = name,
-                            reason,
-                            residual,
-                            "drain grace elapsed with calls still active — exiting"
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Await a SIGTERM (k8s sends this on pod termination). On non-unix this future
-/// never resolves (only Ctrl-C drives shutdown there).
-#[cfg(unix)]
-async fn wait_sigterm(name: &str) {
-    use tokio::signal::unix::{signal, SignalKind};
-    match signal(SignalKind::terminate()) {
-        Ok(mut s) => {
-            s.recv().await;
-        }
-        Err(e) => {
-            tracing::warn!(service = name, error = %e, "cannot install SIGTERM handler");
-            std::future::pending::<()>().await;
-        }
-    }
-}
-
-#[cfg(not(unix))]
-async fn wait_sigterm(_name: &str) {
-    std::future::pending::<()>().await;
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn suffixes(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn ip_literal_dest_is_admissible_regardless_of_suffixes() {
-        // The default B2BUA_DEST (127.0.0.1) and any IP literal must boot even
-        // with an empty allow-list.
-        assert!(validate_default_dest("127.0.0.1", &suffixes(&[])).is_ok());
-    }
-
-    #[test]
-    fn dest_matching_a_configured_suffix_boots() {
-        assert!(validate_default_dest(
-            "sipp-uas.sip-test.svc.cluster.local",
-            &suffixes(&[".svc.cluster.local"])
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn dest_excluded_by_its_own_allow_list_refuses_boot() {
-        let e = validate_default_dest("bob", &suffixes(&[".svc.cluster.local"]))
-            .expect_err("a default callee its own allow-list rejects must fail boot");
-        assert!(e.contains("B2BUA_DEST"), "msg was: {e}");
-    }
-
-    #[test]
-    fn star_wildcard_admits_any_dest() {
-        assert!(validate_default_dest("bob", &suffixes(&["*"])).is_ok());
-    }
-
-    #[test]
-    fn ingress_brake_pct_out_of_range_refuses_boot() {
-        assert!(validate_ingress_brake_pct(0).is_err());
-        assert!(validate_ingress_brake_pct(101).is_err());
-        // boundaries are in range
-        assert!(validate_ingress_brake_pct(1).is_ok());
-        assert!(validate_ingress_brake_pct(100).is_ok());
-    }
-
-    fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let pairs: Vec<(String, String)> =
-            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        move |key| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
-    }
-
-    /// The privacy-service switch is on unless stated off; a value that is
-    /// neither on nor off refuses the boot rather than picking a side.
-    #[test]
-    fn the_privacy_service_switch_defaults_on_and_reads_off() {
-        let read = |v: Option<&str>| switch("B2BUA_PRIVACY_SERVICE", v.map(String::from), true);
-        assert!(read(None));
-        assert!(read(Some(" ")));
-        assert!(read(Some("on")));
-        assert!(!read(Some("off")));
-        assert!(!read(Some("0")));
-        assert!(!read(Some("FALSE")));
-        assert!(std::panic::catch_unwind(|| read(Some("of"))).is_err());
-    }
-
-    #[test]
-    fn a_blank_value_states_nothing() {
-        assert_eq!(stated(None), None);
-        assert_eq!(stated(Some(String::new())), None);
-        assert_eq!(stated(Some("  ".into())), None);
-        assert_eq!(stated(Some(" 8 ".into())), Some("8".into()));
-        assert_eq!(stated_list(Some(" , ".into())), None);
-        assert_eq!(stated_list(Some("Allow, ".into())), Some(vec!["Allow".to_string()]));
-    }
-
-    #[test]
-    fn the_ring_knobs_read_blank_as_unset() {
-        assert_eq!(cdr_ring_from_lookup(lookup(&[])), (0, vec![]));
-        assert_eq!(
-            cdr_ring_from_lookup(lookup(&[
-                ("B2BUA_CDR_MESSAGE_RING", ""),
-                ("B2BUA_CDR_CAPTURED_HEADERS", " , ")
-            ])),
-            (0, vec![])
-        );
-        assert_eq!(
-            cdr_ring_from_lookup(lookup(&[
-                ("B2BUA_CDR_MESSAGE_RING", " 16 "),
-                ("B2BUA_CDR_CAPTURED_HEADERS", "Allow, Accept")
-            ])),
-            (16, vec!["Allow".to_string(), "Accept".to_string()])
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "B2BUA_CDR_MESSAGE_RING")]
-    fn an_unparsable_ring_cap_refuses_the_boot() {
-        cdr_ring_from_lookup(lookup(&[("B2BUA_CDR_MESSAGE_RING", "lots")]));
-    }
-
-    #[test]
-    fn split_host_port_defaults_and_parses() {
-        assert_eq!(split_host_port("bob:5071"), ("bob".to_string(), 5071));
-        assert_eq!(split_host_port("bob"), ("bob".to_string(), 5060));
-        assert_eq!(split_host_port("bob:nope"), ("bob".to_string(), 5060));
-    }
-
-    #[test]
-    fn require_outbound_proxy_without_proxy_refuses_boot() {
-        let e = validate_outbound_proxy_requirement(true, false)
-            .expect_err("required-but-unset outbound proxy must fail boot");
-        assert!(e.contains("B2BUA_OUTBOUND_PROXY"), "msg was: {e}");
-        assert!(e.contains("B2BUA_REQUIRE_OUTBOUND_PROXY"), "msg names the guard: {e}");
-    }
-
-    #[test]
-    fn require_outbound_proxy_with_proxy_boots() {
-        assert!(validate_outbound_proxy_requirement(true, true).is_ok());
-    }
-
-    #[test]
-    fn outbound_proxy_optional_when_not_required() {
-        assert!(validate_outbound_proxy_requirement(false, false).is_ok());
-        assert!(validate_outbound_proxy_requirement(false, true).is_ok());
-    }
-
-    #[test]
-    fn truthy_flag_grammar() {
-        for t in ["1", "true", "YES", " on "] {
-            assert!(is_truthy(t), "{t:?} must be truthy");
-        }
-        for f in ["0", "", "off", "nope"] {
-            assert!(!is_truthy(f), "{f:?} must be falsy");
-        }
-    }
-}
+mod tests;

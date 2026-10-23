@@ -70,6 +70,40 @@ document, the `pivot-schema` structs and the generator. Every batch gets an
 entry here, and the entry is the index: what changed, and where the contract
 now reads.
 
+**2026-10-16 — the settle waits on the scripted legs' own INVITE client
+transactions, and a leg ACKs every non-2xx final it takes.** An INVITE a
+scripted leg sent holds a client transaction until its final (RFC 3261
+§17.1.1.2), so a run whose caller script ends at a provisional settled before
+the system's final reached it, and that final went un-ACKed. No document field
+changes; the verdict gains one failure.
+
+| change | where |
+|---|---|
+| the settle floor: an INVITE a scripted leg sent with no final keeps the run open — in Calling until Timer B from its first emission, in Proceeding until its final or the budget. A budget that runs out names it (`leg A: INVITE CSeq 1 awaits its final`) | §10, `pivot-interpreter` |
+| past Timer B in Calling the transaction timed out with no response at all: the run settles and states `invite-unanswered` (`leg`, `cseq`), a structural failure a declared divergence never carries | §10, `pivot-schema` verdict |
+| a final that arrives in the settle window after a completed flow stays `datagram-after-flow`, and the leg ACKs a non-2xx one on the INVITE's branch (§17.1.1.3) | §10, `pivot-interpreter` |
+| a non-2xx INVITE final a step takes is ACKed by the leg where the flow scripts no ACK `send` for it before the leg's next INVITE (§17.1.1.3) | §6.3, `pivot-interpreter` |
+
+**2026-10-14 — a scripted leg's dialog opens on a 2xx to a dialog-creating
+request alone, and a tolerated absence binds no transaction's turn.** The 200
+to a CANCEL and a non-2xx final open no dialog; a non-2xx final ends the early
+dialogs of its INVITE, which no INVITE rides again; only a target refresh moves
+the remote target; a request with no dialog to ride or no remote target fails
+its step by name (§6.1, §8). A pending `optional` answer standing in front of an
+answer to an open transaction no longer keeps it from arming (§6.7c). No
+document field changes.
+
+**2026-10-09 — a replayed MSCML response echoes its request's id.** RFC 5022
+§4.1 lets the client put an `id` on a request's command element, chosen live,
+and §10.2 has the `<response>` echo it. A media server does not queue, and
+every request it received draws its own response, the stopped one included
+(§6). So each leg queues, per command type, the MSCML requests it received
+and has not answered, oldest first, each with its id or none; a
+`<response request="T">` a send emits takes the id of the oldest unanswered T
+request, inserted, replacing a recorded one, or removing it, and answers that
+request. Render rewrites two contents, SDP and this id (§8.3, §14 item 3);
+`frozen` replays byte-exact but for it. No document field changes.
+
 **2026-10-05 — a From or To ref states the name-addr its number rode in.** A
 tier-2 ref on a From or To may carry `addr`: the captured value with its tag
 dropped (display name, URI and user parameters, header parameters), each role
@@ -423,7 +457,7 @@ reads the two forks' own tags and RSeqs.
 | change | where |
 |---|---|
 | `body.parts[]` gains `content-id`, the part's OWN `Content-ID` value (distinct from `cid-linked`, which is the LINK record), and `headers`, its remaining entity headers verbatim in wire order (RFC 2045 §3). Extraction reads both off the wire and the generator states them where the capture carried them | §8.3 |
-| a body is emitted as the document holds it — payloads, ids and entity headers byte-exact — and SDP, direct or as a part, is the ONE content the tool rewrites, because replay rebooks addresses and ports | §8.3 |
+| a body is emitted as the document holds it — payloads, ids and entity headers byte-exact — and the tool rewrites two contents, direct or as a part: SDP, because replay rebooks addresses and ports, and an MSCML `<response>`'s `id`, which echoes the live request's (RFC 5022 §10.2) | §8.3 |
 | a `cid-linked` part stating a `content-id` EMITS under it; one stating none is refused by name, so a document written before the id was stored fails loudly rather than emitting a stranded reference (RFC 5621 §3) | §8.3, §14 |
 
 The flows schema is NOT bumped: `msgs[].body.parts[].headers` is additive and
@@ -726,7 +760,7 @@ no decision at all, so a lane routes it and points the dial at nothing.
 | `joined_by` | no | what ADDED this leg to a running call: `{ kind: "refer" \| "mrf", step }`. Independent of `cause` |
 | `cause_evidence` | no | the captured signals that justify `cause` |
 | `join_evidence` | no | why the correlator put THIS attempt in that chain |
-| `no_answer_ms` | no | INVITE-to-SUT-CANCEL dwell, present exactly when `cause` is `no-answer` |
+| `no_answer_ms` | no | first-18x-to-SUT-CANCEL dwell on the attempt's leg, ms, present exactly when `cause` is `no-answer` |
 
 `position` is explicit so the list stays reorderable under the sorted-key
 formatter and so `(branch, position)` is a stable key.
@@ -789,7 +823,9 @@ precede the joined leg's own first message, because it is what added the leg.
 call-limiter test, a consultation placed beside the call it will transfer.
 
 `no_answer_ms` is declared only where the attempt RANG and nothing else explains
-the give-up. A caller that answered or hung up mid-attempt makes the SUT's
+the give-up. It runs from the first 180–189 the attempt's leg drew to the SUT's
+CANCEL of it, to the millisecond: a lane arms the ring deadline from that 18x
+the same way. A caller that answered or hung up mid-attempt makes the SUT's
 CANCEL a propagation rather than a timer, and the cause is refused. The value is
 refused outside 1 000 to 3 600 000 ms: below that a whole-second timer arms
 nothing, above it a "ring" is a mis-cut span. The refusals are as normative as
@@ -1101,16 +1137,19 @@ speaks to an ACK that never came. `pivot-schema lint` enforces the placement
 `in-dialog/confirm-duplicate`). The interpreter reads nothing from the marker at
 run time, exactly as it reads nothing from `in_dialog`: lint is the enforcement.
 
-**An `early` id names one fork, and two kinds of message may carry it.** A
-response `send` ANSWERS under it, minting the To-tag that fork rings on
-(RFC 3261 §12.1.1). A PRACK (RFC 3262 §7.2) or an UPDATE (RFC 3311 §5.1) RIDES
-it: both run inside a dialog that has not confirmed yet, and the id says which
-fork. Every other request waits for a confirmed dialog, so `early` on one says
-nothing and is refused. An UPDATE naming no fork on a leg whose dialog is
-unconfirmed rides that leg's ONE early dialog; a leg ringing several and an
-UPDATE naming none is a refusal, because which fork an UPDATE rides decides
-which endpoint receives it and §14 has the tool infer nothing.
-`${early:<id>.tag}` and `${early:<id>.rseq}` (§8.1) read the fork back.
+**An `early` id names one fork.** A response `send` ANSWERS under it, minting
+the To-tag that fork rings on (RFC 3261 §12.1.1). A request a leg sends before
+any 2xx opened its dialog RIDES an early dialog: a PRACK (RFC 3262 §7.2), an
+UPDATE (RFC 3311 §5.1), and a BYE (§15) or any other in-dialog request alike.
+It rides the fork `early` names, else the leg's ONE early dialog still ringing,
+else, where none rings, its ONE early dialog a non-2xx final ended (§12.3): a
+peer sending into a dialog already ended, which the far side answers 481
+(§12.2.2), composed on what that dialog held. An INVITE never rides an ended
+early dialog: after a non-2xx final it offers a new call, not a re-INVITE, and
+the step fails by name. A leg ringing several forks and a request naming none
+is a refusal, because which fork a request rides decides which endpoint
+receives it and §14 has the tool infer nothing. `${early:<id>.tag}` and
+`${early:<id>.rseq}` (§8.1) read the fork back.
 
 On an EXPECT, `early` GATES: the message satisfies the step only if its To-tag
 is the one the named fork rings on. A leg ringing two forks takes provisionals
@@ -1245,6 +1284,14 @@ the two paragraphs applies — never the body the ACK carries, and never whether
 it CONFIRMS the dialog. Both shapes are pinned in
 `crates/b2bua-harness/tests/it/repeated_2xx_before_caller_ack.rs` and
 `crates/b2bua-harness/tests/it/ack_body_relayed.rs`.
+
+**Owed where no step states it.** The ACK to a non-2xx final a step took is
+the client transaction's whatever the document states (§17.1.1.3), so a
+document with no ACK `send` for it on the leg — behind the step that took the
+final, before the leg's next INVITE — stopped where its capture did. The leg
+composes that ACK itself, as the auto ACK would, the instant the step takes the
+final; it belongs to no step. A document that states the ACK keeps it, and the
+leg sends no second one.
 
 An auto PRACK acknowledges the reliable provisionals outstanding on its leg
 OLDEST FIRST: N provisionals are acknowledged by N PRACKs, in arrival order.
@@ -1469,15 +1516,18 @@ document:
   names no transaction and waits its turn;
 - the leg's last `send` of that method before the expect has COMPLETED. Before
   that nothing has provoked the answer, and list order is all there is;
-- the expect is that transaction's FIRST pending answer. Within one transaction
-  list order binds — a provisional before its final, one final before the next
-  2xx a fork draws — so an answer standing behind an earlier pending answer of
-  the same transaction waits behind it;
+- the expect is that transaction's FIRST pending REQUIRED answer. Within one
+  transaction list order binds — a provisional before its final, one final
+  before the next 2xx a fork draws — so an answer standing behind an earlier
+  pending required answer of the same transaction waits behind it. A pending
+  `optional` answer in front binds nothing: it is a tolerated absence (§6.5),
+  and the candidate's arrival releases it;
 - no completed or retired expect has taken a FINAL of that transaction since
   the send: a final ends the transaction (§17.1), and a later answer of the
   same method is another transaction's, not yet opened;
-- nothing already armed on the leg answers the same METHOD, an older
-  transaction's included: two armed steps with one discriminator would take
+- no REQUIRED expect already armed on the leg answers the same METHOD, an
+  older transaction's included, and no armed `optional` one shares the
+  candidate's discriminator: two armed steps with one discriminator would take
   each other's datagram;
 - a message step only, walked to across message steps only: a block (`alt`,
   `unordered`) standing between the leg's first blocking item and the candidate
@@ -2000,6 +2050,18 @@ The tier model is UNCHANGED:
   positional ref states it only where its number composed.
 - **Tier 3, frozen**, stored verbatim: everything else, in wire order.
 
+**The dialog a scripted request rides is tier-1 state.** A leg's dialog opens
+on a 2xx to a dialog-creating request, sent or received (INVITE, SUBSCRIBE;
+RFC 3261 §12.1); no other final opens one. A provisional under a To-tag opens
+an early dialog, and a non-2xx final to its INVITE ends it (§12.3): it rings no
+more, and a request other than an INVITE the document still sends on it, a
+peer sending into a dialog already ended that the far side answers 481
+(§12.2.2), is composed on what it held (§6.1). The remote target is the Contact
+of a provisional that creates an early dialog, of a dialog-creating or target
+refresh request (INVITE, UPDATE, SUBSCRIBE, NOTIFY), or of a 2xx to one
+(§12.2.1.2); no other message moves it. A request with no dialog to ride, or
+riding one no Contact gave a remote target, fails its step by name.
+
 `RSeq` splits by direction: a **send** freezes the captured value (the scripted
 endpoint must put a concrete number on the wire for RAck translation), an
 **expect** states existence only via `headers-present` — the value is
@@ -2147,7 +2209,8 @@ own overlay.
 A single body on a SEND references a resource file, and the registry decides
 what rides beside the ref: `rewrite` tokens where the body is rewritten
 (`{ "ref": "resources/…", "rewrite": ["c=addr", "m=port"] }`), or `mode`
-(`frozen`) plus the captured `content-type` where it replays byte-exact. A
+(`frozen`) plus the captured `content-type` where it replays byte-exact — an
+MSCML `<response>` but for its `id`, which echoes the request it answers. A
 resource file holds BYTES; whether they are text is a fact of the bytes, never
 a declared mode, and no rule names a media type to say so (ADR-0035).
 
@@ -2292,9 +2355,30 @@ where it did not. A part that `cid-linked` names but that states no
 resolve against nothing (RFC 5621 §3).
 
 **A body is emitted as the document holds it.** Every part rides byte-exact —
-its payload, its `content-id`, its `headers`, in the order stated — and the ONE
-content the tool may rewrite is SDP, direct or as a part, because replay rebooks
-addresses and ports. Nothing else in a body is edited, ever.
+its payload, its `content-id`, its `headers`, in the order stated — and the tool
+rewrites two contents, direct or as a part: SDP, because replay rebooks
+addresses and ports, and an MSCML response's `id`, because the client chose it
+live. Nothing else in a body is edited, ever.
+
+**An MSCML response echoes the id of the request it answers** (RFC 5022 §4.1,
+§10.2). Every request a leg RECEIVES whose body (or a part of it) is
+`application/mediaservercontrol+xml` with a `<request>` under its
+`<MediaServerControl>` root is queued under the name of the command element
+inside `<request>` (`play`, `playcollect`, `stop` …) with the value of that
+element's `id`, or its absence — whether an expect matched the request, a
+background policy absorbed it, or it rode the initial INVITE that opened the
+leg. A media server does not queue requests: a new one stops the one in
+progress, and each still draws its own response (RFC 5022 §6). So a
+`<response request="T" …>` a send emits on that leg answers the OLDEST queued T
+request and takes its id: `id` inserted after the element name, a recorded `id`
+replaced in place, or a recorded `id` removed where that request carried none.
+The request is answered once per emission; a retransmission re-sends the same
+bytes. Two plays and their two responses — the first `reason="stopped"`, the
+second at its end — answer the first play then the second, and a `<stop>`'s
+own response answers the `<stop>`, never the play it stopped. A response of a
+type with no request left to answer, a `<notification>`, a `<request>` a
+replayed party sends and every other body ride as stored. Only the `id`
+attribute of the `<response>` element changes.
 
 **Both tokens read one source: the lane's own media booking** (`legs[].media.rtp`,
 §5). `c=addr` writes the lane's media address into every connection line;
@@ -2316,7 +2400,8 @@ carried ride through. A part is framed `Content-Type` first, then its
 `content-id`, then its stated `headers` in order.
 
 So the body on the wire is the captured body BYTE FOR BYTE once the regenerated
-boundary and SDP's rewritten lines are substituted back, and nothing else may
+boundary, SDP's rewritten lines and an MSCML response's echoed `id` are
+substituted back, and nothing else may
 differ — not a MIME parameter, not an entity header, not a delimiter's CRLF.
 That is asserted, on real traffic, by the multipart rung.
 
@@ -2327,7 +2412,7 @@ never changes how a part is handled:
 | part content-type | handling |
 |---|---|
 | `application/sdp` | rewrite `c=` and `m=` |
-| known non-SDP | freeze (`frozen`, text or bytes alike) |
+| known non-SDP | freeze (`frozen`, text or bytes alike; an MSCML `<response>` echoes its request's `id`) |
 | unrecognized | freeze AND flag when the payload carries number-like digits |
 
 The unrecognized arm is the point: a missing handler is a decision owed, not a
@@ -2530,8 +2615,7 @@ says. A window stated there is honoured and reported all the same, just rarely
 exercised; its consumer is the real-clock lane.
 
 **A dwell the LANE cannot arm is refused, not rounded.** Where the lane's own
-grain is coarser than the document's dwell — a route decision that speaks whole
-seconds against a `no_answer_ms` of 15 139 — the driver arms the nearest value it
+grain is coarser than the document's dwell, the driver arms the nearest value it
 can and the difference rides this same window. A difference the window does not
 cover refuses the run before it dials (§14): a ring half a second short of what
 the document measured proves a different thing than the document does.
@@ -2549,6 +2633,16 @@ from the final's first emission (§17.2.1), whichever comes first; that ACK is
 recorded as the transaction's own closer, never as a datagram after the flow.
 Past Timer H the transaction is gone and the missing ACK is the system's
 failure, `final-unacknowledged`: the run settles and states it.
+
+An INVITE a scripted leg sent keeps the run open until its final (§17.1.1.2):
+while it is in Calling (no provisional yet), until Timer B from its first
+emission; once a provisional has arrived (Proceeding), until the final or the
+settle budget, whose `settle-timed-out` then names it (`leg A: INVITE CSeq 1
+awaits its final`). Past Timer B in Calling the transaction timed out with no
+response at all, the system's failure `invite-unanswered`: the run settles and
+states it. A final arriving in the window after a completed flow is still the
+`datagram-after-flow` it is, and the leg ACKs a non-2xx one on the INVITE's
+branch (§17.1.1.3).
 
 **Failing to settle is always test failure. There is no soft mode.**
 
@@ -2702,12 +2796,19 @@ a capture.
 
 **A violation is charged to the party that commits it, and an entry is the
 statement that cancels it.** The run's RFC audit names every finding by the
-party it charges, the scripted peers included. A finding against a SCRIPTED PEER
-gates like any other unless the document states the same violation against that
-peer on the same transaction — an entry here, whose `step` lands on that
-transaction — and then it is CANCELLED: still written, beside the statement that
-cancels it, and no longer gating. Replaying a peer is no licence for it to break
-a rule the source never saw it break. A captured document's entries come from
+party it charges, the scripted peers included. The run tests the system under
+test, so a finding against a SCRIPTED PEER never gates as the SUT's. Where the
+document states the same violation against that peer on the same transaction —
+an entry here, whose `step` lands on that transaction — it is CANCELLED: still
+written, beside the statement that cancels it, as information. Where the
+document does not state it, it is a SOURCE FAULT (`source_fault` in
+`rfc.json`): the replayed party repeats a captured message where, in this run,
+the RFC no longer allows it, and the document never says so. It is never the
+SUT's defect: written as information, it fails no cell. The cell is judged on the SUT alone, and where it fails, its main error is
+the SUT's failure with the source fault named beside it. A captured document flagged
+`census-uncovered` never read its source's violations, so it can state none:
+there the peer's finding is `unjudged`, written with that reason, as
+information. A captured document's entries come from
 the census over the captured trace, so the cancellation is the source's own
 evidence; an authored document's are its author's statement, and so is a
 `suppress-auto` deviation withholding the message the finding misses. An entry
@@ -3101,7 +3202,8 @@ Its whole job:
    any run-config injected headers — the run's own, and on a call's DIAL that
    call's own directive (§4.3) — plus any accessor substitution: a `${num:…}`
    resolving through the identity binding the driver compiled (§4.3), never
-   through a number in the document. Nothing else. The interpreter never judges
+   through a number in the document, plus §8.3's two body rewrites: SDP's
+   lane-owned lines and an MSCML response's echoed `id`. Nothing else. The interpreter never judges
    one message a repeat of another, in either direction: it does not collapse,
    and it expands a count only for a class RFC 3261/3262 paces or one item 7
    draws.

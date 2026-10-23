@@ -1,6 +1,7 @@
-//! **The PRACK this stack owes when it CANCELs a relayed re-INVITE**, and what
-//! follows it. As the CANCEL goes out, this stack PRACKs the responder's
-//! reliable provisional itself (RFC 3262 §4), so:
+//! **The PRACK this stack owes when a relayed re-INVITE ends** — CANCELled,
+//! or rejected by its responder — and what follows it. As the CANCEL goes out
+//! or the final comes in, this stack PRACKs the responder's reliable
+//! provisional itself (RFC 3262 §4), so:
 //!
 //! - the originator's own PRACK arriving afterwards names a provisional already
 //!   acknowledged toward the responder: it is answered here with 200 (§3: a
@@ -18,6 +19,8 @@ use sip_message::generators::InDialogMethod;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
+/// Alice's second description (`REOFFER`) and bob's (`REANSWER`), each
+/// continuing its party's session whichever end offers (RFC 3264 §8).
 const REOFFER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
 const REANSWER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
 const ALLOW: &str = "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, INFO, PRACK";
@@ -25,9 +28,9 @@ const ALLOW: &str = "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, INFO, PRACK";
 /// The responder's own `RSeq`.
 const RSEQ: u32 = 4711;
 
-/// RFC 3261 T1, §3's 64·T1 give-up bound, and Timer F (64·T1 as well).
+/// RFC 3261 T1, §3's 64·T1 bound, and Timer F (64·T1 as well).
 const T1_MS: u64 = 500;
-const GIVE_UP_MS: u64 = 64 * T1_MS;
+const BOUND_MS: u64 = 64 * T1_MS;
 
 /// The caller's PRACK reaches this stack after her CANCEL did: the B2BUA
 /// PRACKed bob as it CANCELled, so hers is answered here and bob sees one
@@ -112,13 +115,13 @@ async fn a_callees_prack_after_his_reinvite_cancel_is_answered_here() {
     let mut bob_dialog = uas.dialog();
     let mut reinv = bob_dialog
         .send_request(InDialogMethod::Invite)
-        .with_sdp(REOFFER)
+        .with_sdp(REANSWER)
         .with_header("Allow", ALLOW)
         .with_header("Supported", "100rel")
         .send_cancellable()
         .await;
     let mut re_uas = alice.receive("INVITE").await;
-    re_uas.respond(183, "Session Progress").reliable(RSEQ).with_sdp(REANSWER).await;
+    re_uas.respond(183, "Session Progress").reliable(RSEQ).with_sdp(REOFFER).await;
     let p183 = reinv.expect(183).await;
     let shown = stated_rseq(&p183);
 
@@ -149,11 +152,12 @@ async fn a_callees_prack_after_his_reinvite_cancel_is_answered_here() {
     let _report = h.finish().await;
 }
 
-/// The caller lets the re-INVITE's ladder run out: §3's give-up rejects her
-/// re-INVITE 504 and PRACKs bob as it CANCELs him. Her PRACK arriving after
-/// that is answered here (a late PRACK still draws 2xx, §3) and bob sees one.
+/// The caller lets the re-INVITE's ladder run out and bob rejects his
+/// re-INVITE transaction at his own §3 bound; this stack PRACKs bob at that
+/// final. Her PRACK arriving after that is answered here (a late PRACK still
+/// draws 2xx, §3) and bob sees one.
 #[tokio::test(start_paused = true)]
-async fn a_prack_after_the_reinvite_give_up_is_answered_here() {
+async fn a_prack_after_the_callees_reinvite_reject_is_answered_here() {
     let h = Harness::with_transit_delay("b2bua-reinvite-giveup-late-prack", 0);
     let alice = h.agent("alice", "127.0.0.1:5247").await;
     let bob = h.agent("bob", "127.0.0.1:5248").await;
@@ -181,13 +185,11 @@ async fn a_prack_after_the_reinvite_give_up_is_answered_here() {
     let p183 = reinv.expect(183).await;
     let shown = stated_rseq(&p183);
 
-    h.advance(Duration::from_millis(GIVE_UP_MS - T1_MS + 100)).await;
+    h.advance(Duration::from_millis(BOUND_MS + 100)).await;
     alice.drain().await;
-    h.advance(Duration::from_millis(T1_MS + 100)).await;
-    reinv.expect(504).await;
+    re_uas.respond(500, "Server Internal Error").await;
     bob.receive("PRACK").await.respond(200, "OK").await;
-    bob.receive("CANCEL").await.respond(200, "OK").await;
-    re_uas.respond(487, "Request Terminated").await;
+    reinv.expect(500).await;
 
     let mut prack = alice_dialog
         .send_request(InDialogMethod::Prack)
@@ -257,7 +259,7 @@ async fn an_unanswered_prack_of_this_stacks_own_leaves_the_call_up() {
     reinv.expect(487).await;
 
     // ── past Timer F, the PRACK's retransmissions drained as they come ──
-    for _ in 0..(GIVE_UP_MS / T1_MS + 4) {
+    for _ in 0..(BOUND_MS / T1_MS + 4) {
         h.advance(Duration::from_millis(T1_MS)).await;
         assert!(
             bob.try_receive_tolerating("BYE", &["PRACK"]).await.is_none(),

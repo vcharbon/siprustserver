@@ -80,7 +80,22 @@ const BUDGETS: &[Budget] = &[
     Budget { case: "build/invite_sdp", allocs: 54, bytes: 8210 },
     Budget { case: "build/bye", allocs: 60, bytes: 5020 },
     Budget { case: "build/response_200", allocs: 38, bytes: 7520 },
+    Budget { case: "refuse/12000_headers", allocs: 1, bytes: 90 },
 ];
+
+/// A datagram-sized INVITE of 12 000 one-letter extension headers: legal
+/// grammar, past the header-line limit.
+fn crowded_invite() -> sip_message::Bytes {
+    let mut wire = String::from(
+        "INVITE sip:bob@example.com SIP/2.0\r\n\
+         Via: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-crowd\r\n",
+    );
+    for _ in 0..12_000 {
+        wire.push_str("X:a\r\n");
+    }
+    wire.push_str("\r\n");
+    sip_message::Bytes::from(wire)
+}
 
 fn budget(case: &str) -> &'static Budget {
     BUDGETS.iter().find(|b| b.case == case).expect("every measured case has a budget")
@@ -103,6 +118,7 @@ fn parse_build_and_hop_stay_within_the_allocation_budget() {
     let invite_opts = perf::invite_opts(&sdp);
     let bye_opts = perf::bye_opts();
     let response_opts = perf::response_opts();
+    let crowded = crowded_invite();
 
     let measured: Vec<(&str, AllocCost)> = vec![
         ("decode/invite", cost_per_op(|| parser.parse(perf::INVITE).unwrap())),
@@ -131,6 +147,7 @@ fn parse_build_and_hop_stay_within_the_allocation_budget() {
             "build/response_200",
             cost_per_op(|| generate_response(&parsed_invite, 200, "OK", &response_opts)),
         ),
+        ("refuse/12000_headers", cost_per_op(|| parser.parse_shared(crowded.clone()).unwrap_err())),
     ];
 
     println!("\nsip-message allocation budget ({ITERS} ops per case)");

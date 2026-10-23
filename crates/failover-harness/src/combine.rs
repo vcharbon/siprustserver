@@ -26,9 +26,9 @@ use std::net::SocketAddr;
 
 use ha_harness::{frame_summary, ReplReport};
 use layer_harness::{NetworkTag, RecordedScenario};
-use repl_net::transport::Direction;
+use repl_net_testkit::{CapturedFrame, Direction};
 use seq_report::{Anomaly, Lane, LaneKind, RowKind, SeqDoc, SeqRow, ViewChange};
-use sip_net::RecordedSipEntry;
+use sip_net_testkit::RecordedSipEntry;
 
 use scenario_harness::report::wire::{facets, wire_text};
 
@@ -264,12 +264,10 @@ pub fn combine_doc(
 /// (e.g. dropped pre-reboot, then re-sent and delivered). We walk `Received` in
 /// time order and claim, for each, the most-recent unconsumed matching `Sent` at
 /// or before it — so a later delivery can never "rescue" an earlier dropped send.
-fn delivered_sent(
-    frames: &[repl_net::transport::CapturedFrame],
-) -> std::collections::HashSet<usize> {
-    let sent: Vec<(usize, &repl_net::transport::CapturedFrame)> =
+fn delivered_sent(frames: &[CapturedFrame]) -> std::collections::HashSet<usize> {
+    let sent: Vec<(usize, &CapturedFrame)> =
         frames.iter().enumerate().filter(|(_, f)| f.dir == Direction::Sent).collect();
-    let mut received: Vec<&repl_net::transport::CapturedFrame> =
+    let mut received: Vec<&CapturedFrame> =
         frames.iter().filter(|f| f.dir == Direction::Received).collect();
     received.sort_by_key(|f| f.at_ms);
 
@@ -305,10 +303,7 @@ fn delivered_sent(
 /// sockets, and a node that crashes + reconnects gets a fresh one; rendering
 /// each `conn` in its own color makes a frame "lost to b2" legible as riding a
 /// DIFFERENT (defunct) socket than the live connection collapsed on that lane.
-fn conn_label(
-    f: &repl_net::transport::CapturedFrame,
-    repl_addr_col: &BTreeMap<SocketAddr, String>,
-) -> String {
+fn conn_label(f: &CapturedFrame, repl_addr_col: &BTreeMap<SocketAddr, String>) -> String {
     // The listen end is in `repl_addr_col`; the other end is the ephemeral one.
     let ephemeral = if repl_addr_col.contains_key(&f.from) { f.to } else { f.from };
     format!(":{}", ephemeral.port())
@@ -357,7 +352,7 @@ fn build_lanes(
 
     let mut lanes: Vec<Lane> = Vec::new();
     // The orchestrator gets a column only when it acted (withdraw / readmit /
-    // replacement) — a run it never touched renders exactly as before.
+    // replacement).
     if views.iter().any(|v| v.observer == ORCHESTRATOR) {
         lanes.push(Lane::new(ORCHESTRATOR, ORCHESTRATOR, LaneKind::Sut));
     }
@@ -384,7 +379,7 @@ fn build_lanes(
         lanes.push(Lane::new(addr.to_string(), label(name, &addr.to_string()), LaneKind::Ua));
     }
 
-    let _ = name_of; // reserved for richer worker captions; SIP addr suffices now
+    let _ = name_of;
     lanes
 }
 
@@ -427,76 +422,4 @@ fn marker_label(m: &ha_harness::Marker) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use repl_net::transport::CapturedFrame;
-    use repl_net::{Frame, Watermark};
-
-    fn addr(port: u16) -> SocketAddr {
-        format!("127.0.0.1:{port}").parse().unwrap()
-    }
-
-    /// Capture a frame `a → b` at `at_ms`. `dir` records on whichever endpoint
-    /// observed it: a `Sent` records on the sender (`from=a`), a `Received` on the
-    /// receiver — and because each side records its OWN local addr as `from`, a
-    /// receipt of `a → b` is captured with `from=b, to=a` (orientation swapped),
-    /// exactly as the real recorder does. The helper takes the LOGICAL direction
-    /// (`a` is always the sender) and swaps for `Received` so tests read naturally.
-    fn cap(at_ms: i64, a: u16, b: u16, dir: Direction, frame: Frame) -> CapturedFrame {
-        let (from, to) = match dir {
-            Direction::Sent => (addr(a), addr(b)),
-            Direction::Received => (addr(b), addr(a)),
-        };
-        CapturedFrame { at_ms, seq: 0, from, to, dir, frame }
-    }
-
-    fn noop() -> Frame {
-        Frame::Noop { at: Watermark::new(1, 2) }
-    }
-
-    #[test]
-    fn sent_with_a_received_twin_is_delivered_without_one_is_lost() {
-        // b1(9401) sends two identical Noops to b2(9402): the first is delivered
-        // (b2 recv'd it), the second is lost (b2 had crashed — no recv twin).
-        let frames = vec![
-            cap(100, 9401, 9402, Direction::Sent, noop()),
-            cap(101, 9401, 9402, Direction::Received, noop()), // twin of the first
-            cap(700, 9401, 9402, Direction::Sent, noop()),     // no twin → lost
-        ];
-        let delivered = delivered_sent(&frames);
-        assert!(delivered.contains(&0), "first send had a recv twin");
-        assert!(!delivered.contains(&2), "second send was lost (no recv twin)");
-    }
-
-    #[test]
-    fn a_later_redelivery_does_not_rescue_an_earlier_dropped_send() {
-        // The crux of the kill report: the SAME (b1→b2, frame) is sent at t=170
-        // (lost, peer dead) then re-sent at t=230 after reboot (delivered). The
-        // single receipt at t=231 must pair with the t=230 send — NOT retroactively
-        // mark the t=170 drop as delivered.
-        let frames = vec![
-            cap(170, 9401, 9402, Direction::Sent, noop()), // dropped (peer dead)
-            cap(230, 9401, 9402, Direction::Sent, noop()), // re-sent post-reboot
-            cap(231, 9401, 9402, Direction::Received, noop()), // pairs with t=230
-        ];
-        let delivered = delivered_sent(&frames);
-        assert!(!delivered.contains(&0), "the t=170 drop stays lost");
-        assert!(delivered.contains(&1), "the t=230 re-send was delivered");
-    }
-
-    #[test]
-    fn group_loss_count_equals_sent_minus_received() {
-        // Six identical Noops sent, four received → exactly two marked lost
-        // (which two among identical frames is immaterial; the COUNT is the claim).
-        let mut frames = Vec::new();
-        for i in 0..6 {
-            frames.push(cap(100 + i * 10, 9401, 9402, Direction::Sent, noop()));
-        }
-        for i in 0..4 {
-            frames.push(cap(105 + i * 10, 9401, 9402, Direction::Received, noop()));
-        }
-        let delivered = delivered_sent(&frames);
-        let lost = (0..6).filter(|i| !delivered.contains(i)).count();
-        assert_eq!(lost, 2, "6 sent − 4 received = 2 lost");
-    }
-}
+mod tests;

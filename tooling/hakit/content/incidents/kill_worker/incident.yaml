@@ -1,0 +1,30 @@
+schema: incident.v1
+name: kill_worker
+description: >-
+  Crash one ready worker: every container process of the pod is killed with
+  SIGKILL from its node and proven dead before injected; the kubelet restarts
+  it in place. The probe waits until it is Ready again, proves no overlap
+  between the crashed incarnation and its successor, and reads the restart
+  timings: each survivor's replication peer park, the restart and Ready
+  instants, each proxy's registry leave and join.
+kind: fault
+target:
+  selector: app=b2bua-worker
+  pick: one
+params:
+  proxy_selector:
+    type: string
+    default: app=sip-front-proxy
+    description: The front proxies whose registry join of the restarted worker is timed; empty skips them.
+  proxy_container:
+    type: string
+    default: sip-front-proxy
+    description: The proxy container whose log holds the registry lines.
+duration_s: 0
+expected_s: 60
+timeouts:
+  inject_s: 30
+  heal_s: 10
+  probe_s: 180
+  probe_interval_s: 2
+requires: [kind, docker]

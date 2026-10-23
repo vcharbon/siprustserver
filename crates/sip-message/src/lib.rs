@@ -2,14 +2,36 @@
 //! strict-validate plus read/rewrite helpers. No async, no I/O, no clock —
 //! a pure leaf crate.
 //!
-//! This is the ONLY crate that extracts SIP headers/messages. Lenient
-//! raw-datagram scanning: [`sniff`]; strict pre-parse classifiers:
-//! [`preparse`]; parsed-header access: the typed read surface on
-//! [`SipRequest`] / [`SipResponse`] ([`header`] values, [`HeaderName`]);
-//! construction: [`draft`] and [`generators`].
+//! This is the ONLY crate that extracts SIP headers/messages. Parsed-header
+//! access: the typed read surface on [`SipRequest`] / [`SipResponse`]
+//! ([`header`] values, [`HeaderName`]); construction: [`draft`] and
+//! [`generators`]. Tooling only, behind the `sniff` feature: lenient
+//! raw-datagram scanning (`sniff`), pre-parse classifiers (`preparse`) and
+//! the document form of a datagram (`payload`).
+
+// The panic set at deny outside test code (ADR-0051 §3).
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::iter_over_hash_type,
+        clippy::panic,
+        clippy::string_slice,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
 
 mod access;
 pub mod capture;
+pub mod char_class;
+mod checked;
 pub mod draft;
 pub mod error;
 pub mod header;
@@ -23,9 +45,13 @@ pub mod deviation;
 pub mod emergency;
 pub mod generators;
 pub mod hops;
+pub mod ip_literal;
+pub mod mscml;
 pub mod multipart;
 pub mod param_codec;
+#[cfg(feature = "sniff")]
 pub mod payload;
+#[cfg(feature = "sniff")]
 pub mod preparse;
 pub mod projection;
 pub mod remote_target;
@@ -35,16 +61,21 @@ pub mod sdp_diff;
 pub mod sdp_doc;
 pub mod sdp_form;
 pub mod sdp_session;
+pub mod sdp_text;
 pub mod serializer;
 pub mod sipfrag;
+pub mod site;
+#[cfg(feature = "sniff")]
 pub mod sniff;
-pub mod template;
-pub mod template_match;
 pub mod trace_sample;
+pub mod worker_report;
+pub mod write_check;
 
 /// The body and image type the public surface hands out and takes back.
 pub use bytes::Bytes;
-pub use deviation::{Automatic, CseqDeviation, CseqOp, CseqOpAt, CseqPattern, DelayedAutomatic};
+pub use deviation::{
+    Automatic, CseqDeviation, CseqOp, CseqOpAt, CseqPattern, DelayedAutomatic, DeviationError,
+};
 pub use error::SipParseError;
 /// Header identity and the one ownership table (ADR-0025).
 pub use header::{canonical_header_items, header_forms_equivalent, HeaderClass, HeaderName};
@@ -56,6 +87,7 @@ pub use multipart::{
 };
 /// RFC 3261 §7.3.3 compact-form expansion, probed one name at a time.
 pub use parser::custom::compact_forms::compact_form_canonical;
+pub use parser::custom::partial::RequestPartial;
 pub use parser::custom::{hydrate_request, CustomParser};
 pub use parser::{Framing, SipParser, SipParserLimits};
 pub use projection::HeaderProjection;
@@ -83,15 +115,11 @@ pub use sdp_form::canonical_form;
 /// it cuts a description at its `m=` lines byte for byte and reads every value
 /// through `sdp_doc`.
 pub use sdp_session::{
-    in_author_order, restate_session, restate_session_again, stamp_session, Restated, StatedSession,
+    in_author_order, restate_session, restate_session_again, stamp_session, under_origin, Restated,
+    StatedSession,
 };
 pub use serializer::{message_summary, serialize, sip_summary};
 pub use sip_str::{SharedText, SipStr};
-pub use template::{
-    apply_name_forms, apply_remote_target_emits, emitted_wire, EmitOpts, MessageTemplate,
-    TemplateHeader, TemplateStart,
-};
-pub use template_match::{MatchOpts, Mismatch};
 pub use types::{
     ContactSet, CoreHeaders, InDialogRequest, InviteRequest, MessageCore, NonEmpty, NotInDialog,
     OptionalHeaders, SipHeader, SipMessage, SipRequest, SipResponse, SipResponseTagged,

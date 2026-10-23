@@ -5,7 +5,9 @@
 //! Contract: each record handed to `write` counts once, in `cdr_written_total`
 //! when the broker acked it on a confirm-mode channel, else in
 //! `cdr_dropped_total`. Dropped means unconfirmed, not lost: a record whose ack
-//! never arrived may still reach the queue.
+//! never arrived may still reach the queue. `close` publishes nothing more and
+//! returns once every publish of every session is counted, by its deadline at
+//! the latest; a write still in flight then counts its own record.
 //!
 //! Bounds: the writer runs behind the kit's `BufferedCdrWriter` drainer (the
 //! grammar refuses `B2BUA_CDR_QUEUE=0` beside a URL); every broker wait is
@@ -14,8 +16,8 @@
 
 mod backoff;
 mod confirms;
-mod connector;
 mod declaration;
+mod resolver;
 mod session;
 mod settings;
 mod socket_kill;
@@ -26,10 +28,13 @@ use async_trait::async_trait;
 use b2bua::cdr::{CdrEncoder, CdrRecord, CdrWriter, JsonRecordEncoder};
 use b2bua::metrics::B2buaMetrics;
 use call::Call;
-use tokio::sync::Mutex;
-use tokio::time::{timeout, Instant};
+use sip_clock::wall::millis_u64;
+use tokio::sync::{watch, Mutex};
+use tokio::task::JoinHandle;
+use tokio::time::{timeout_at, Instant};
 
 use backoff::Backoff;
+use resolver::BrokerResolver;
 use session::Session;
 pub use settings::{
     CdrDeliveryBounds, CdrQueueDeclare, RabbitMqCdrSettings, MAX_DRAINER_WAIT_MS, MAX_WAIT_MS,
@@ -83,12 +88,19 @@ pub struct RabbitMqCdrWriter {
     link: Mutex<Link>,
     /// Shared b2bua registry `cdr_written_total` / `cdr_dropped_total` count in.
     metrics: B2buaMetrics,
+    /// The close deadline; `None` while the writer publishes. Every session's
+    /// confirm tracker waits no later than it.
+    close_by: watch::Sender<Option<Instant>>,
 }
 
 struct Link {
     /// `None` until the first connect, and after a session ended.
     session: Option<Session>,
+    /// The confirm trackers of ended sessions still resolving their
+    /// publishes, joined by `close`.
+    retired: Vec<JoinHandle<()>>,
     backoff: Backoff,
+    resolver: BrokerResolver,
 }
 
 impl RabbitMqCdrWriter {
@@ -97,8 +109,18 @@ impl RabbitMqCdrWriter {
         encoder: Arc<dyn CdrEncoder>,
         metrics: B2buaMetrics,
     ) -> Self {
-        let backoff = Backoff::new(settings.bounds.backoff_min, settings.bounds.backoff_max);
-        Self { settings, encoder, link: Mutex::new(Link { session: None, backoff }), metrics }
+        let bounds = &settings.bounds;
+        let backoff = Backoff::new(bounds.backoff_min, bounds.backoff_max);
+        // A parked answer lives through the longest gap between two attempts
+        // while records flow.
+        let resolver = BrokerResolver::new(bounds.connect_timeout + bounds.backoff_max);
+        Self {
+            settings,
+            encoder,
+            link: Mutex::new(Link { session: None, retired: Vec::new(), backoff, resolver }),
+            metrics,
+            close_by: watch::Sender::new(None),
+        }
     }
 
     /// The settings this writer publishes under.
@@ -124,35 +146,44 @@ impl RabbitMqCdrWriter {
     /// The live session, connecting one within the connect bound when there
     /// is none and the backoff allows; `None` when no session can publish now.
     async fn session<'a>(&self, link: &'a mut Link) -> Option<&'a Session> {
-        if let Some(ended_at) = link.session.as_ref().and_then(Session::ended_at) {
-            // The backoff counts from the end, not from this record.
-            if link.session.take().is_some_and(|s| s.delivered()) {
+        if let Some(ended) = link.session.take_if(|s| s.ended_at().is_some()) {
+            if ended.delivered() {
                 link.backoff.recovered();
-            } else {
+            } else if let Some(ended_at) = ended.ended_at() {
+                // The backoff counts from the end, not from this record.
                 link.backoff.failed(ended_at);
             }
+            link.retired.retain(|tracker| !tracker.is_finished());
+            link.retired.extend(ended.into_tracker());
         }
         if link.session.is_none() {
             if !link.backoff.ready(Instant::now()) {
                 return None;
             }
-            let opened = timeout(
-                self.settings.bounds.connect_timeout,
-                Session::open(&self.settings, &self.metrics),
+            let deadline = Instant::now() + self.settings.bounds.connect_timeout;
+            let opened = timeout_at(
+                deadline,
+                Session::open(
+                    &self.settings,
+                    &mut link.resolver,
+                    deadline,
+                    &self.metrics,
+                    self.close_by.subscribe(),
+                ),
             )
             .await;
             match opened {
                 Ok(Ok(session)) => link.session = Some(session),
                 Ok(Err(e)) => {
                     let wait = link.backoff.failed(Instant::now());
-                    tracing::warn!(error = %e, retry_in_ms = wait.as_millis() as u64, "CDR broker connect failed");
+                    tracing::warn!(error = %e, retry_in_ms = millis_u64(wait), "CDR broker connect failed");
                     return None;
                 }
                 Err(_) => {
                     let wait = link.backoff.failed(Instant::now());
                     tracing::warn!(
-                        timeout_ms = self.settings.bounds.connect_timeout.as_millis() as u64,
-                        retry_in_ms = wait.as_millis() as u64,
+                        timeout_ms = millis_u64(self.settings.bounds.connect_timeout),
+                        retry_in_ms = millis_u64(wait),
                         "CDR broker connect timed out"
                     );
                     return None;
@@ -170,6 +201,10 @@ impl CdrWriter for RabbitMqCdrWriter {
             return;
         };
         let mut link = self.link.lock().await;
+        if self.close_by.borrow().is_some() {
+            self.metrics.bump_cdr_dropped();
+            return;
+        }
         let Some(session) = self.session(&mut link).await else {
             self.metrics.bump_cdr_dropped();
             return;
@@ -184,6 +219,27 @@ impl CdrWriter for RabbitMqCdrWriter {
     async fn read_all(&self) -> Vec<CdrRecord> {
         // Not a test sink — records live in the broker, not in process memory.
         Vec::new()
+    }
+
+    /// A write still holding the link at `deadline` keeps its session: its
+    /// tracker counts that session's publishes by the deadline all the same.
+    async fn close(&self, deadline: Instant) {
+        self.close_by.send_if_modified(|by| {
+            let first = by.is_none();
+            if first {
+                *by = Some(deadline);
+            }
+            first
+        });
+        let Ok(mut link) = timeout_at(deadline, self.link.lock()).await else {
+            return;
+        };
+        if let Some(session) = link.session.take() {
+            session.close().await;
+        }
+        for tracker in std::mem::take(&mut link.retired) {
+            let _ = tracker.await;
+        }
     }
 }
 
@@ -225,7 +281,7 @@ mod tests {
             &req,
             SocketAddr::from(([10, 0, 0, 9], 5060)),
             &cfg,
-            &sip_txn::IdGen::seeded(1),
+            &mut sip_ids::TurnIds::fixed(1),
             1_000,
         )
     }

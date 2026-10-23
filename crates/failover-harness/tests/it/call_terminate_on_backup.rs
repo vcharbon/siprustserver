@@ -40,13 +40,13 @@ use failover_harness::{
     assert_call_fully_over, assert_call_lost_no_cdr, worker_ordinals, FailoverHarness, ProxySut,
     ReplicatedB2buaSut, WorkerHealth, LEASE_OUTLIVING_THE_REPLICA_TTL,
 };
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpServerHandle, HttpTransport};
 use scenario_harness::{Agent, Dialog};
 use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
 
-const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
-const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
+pub(crate) const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
+pub(crate) const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
 const PROXY: &str = "127.0.0.1:5080";
@@ -58,7 +58,7 @@ fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
 }
 
-fn limiter_client(http: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
+fn limiter_client(http: &http_net_testkit::SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
     Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr(), Duration::from_millis(150)))
 }
 
@@ -74,7 +74,7 @@ fn limited_decision_with_max_duration(max_duration_sec: i64) -> Arc<dyn CallDeci
             .fallback(move |_req| {
                 let mut r = route_to("127.0.0.1", 5070);
                 r.call_limiter = vec![LimiterEntry { id: "trunk-A".into(), limit: 8 }];
-                r.features.platform.max_duration_sec = max_duration_sec;
+                r.features.platform.max_duration_ms = max_duration_sec * 1000;
                 r.label = Some("trunk-route".into());
                 NewCallResponse::Route(r)
             })
@@ -90,30 +90,30 @@ fn limited_decision() -> Arc<dyn CallDecisionEngine> {
 /// safe-point (post-ACK, replicated primary → backup). No `Drop` impl, so a cell
 /// can destructure it to independent owned locals (the `(primary, backup)`
 /// split-borrow needs `w_b1`/`w_b2` as separate bindings).
-struct Established {
-    fh: FailoverHarness,
-    alice: Agent,
-    bob: Agent,
-    proxy: ProxySut,
-    store: Arc<CallStore>,
+pub(crate) struct Established {
+    pub(crate) fh: FailoverHarness,
+    pub(crate) alice: Agent,
+    pub(crate) bob: Agent,
+    pub(crate) proxy: ProxySut,
+    pub(crate) store: Arc<CallStore>,
     /// The limiter HTTP server handle — must outlive the cell (drop closes it).
-    lh: Box<dyn HttpServerHandle>,
-    w_b1: ReplicatedB2buaSut,
-    w_b2: ReplicatedB2buaSut,
-    primary_ord: String,
-    bak_ord: String,
-    call_ref: String,
+    pub(crate) lh: Box<dyn HttpServerHandle>,
+    pub(crate) w_b1: ReplicatedB2buaSut,
+    pub(crate) w_b2: ReplicatedB2buaSut,
+    pub(crate) primary_ord: String,
+    pub(crate) bak_ord: String,
+    pub(crate) call_ref: String,
     /// alice's confirmed dialog (caller-initiated in-dialog requests).
-    dialog: Dialog,
+    pub(crate) dialog: Dialog,
     /// bob's confirmed dialog (callee-initiated in-dialog requests).
-    bob_dialog: Dialog,
+    pub(crate) bob_dialog: Dialog,
 }
 
 /// Establish one limited call through the proxy to the `Established` state and
 /// replicate it primary → backup. Leaves both nodes alive, no fault injected; the
 /// cell injects its own. Discovers the cluster `call_ref` from the backup's
 /// replica partition so the per-call CDR / trace assertions can key on it.
-async fn establish(name: &str) -> Established {
+pub(crate) async fn establish(name: &str) -> Established {
     establish_with(name, limited_decision()).await
 }
 
@@ -125,7 +125,7 @@ async fn establish_with(name: &str, decision: Arc<dyn CallDecisionEngine>) -> Es
     let bob = fh.agent("bob", BOB).await;
 
     // Shared limiter server on its own simulated HTTP fabric (survives crashes).
-    let http = SimulatedHttpNetwork::new();
+    let http = http_net_testkit::SimulatedHttpNetwork::new();
     let store = Arc::new(CallStore::new(LEASE_OUTLIVING_THE_REPLICA_TTL, Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
@@ -220,7 +220,7 @@ async fn establish_with(name: &str, decision: Arc<dyn CallDecisionEngine>) -> Es
 /// suite's baseline for the reclaim-origination path.
 ///
 /// The two limiter-HA cases and the takeover-span cell make the same distinction.
-fn accept_takeover_cseq_overlap(fh: &mut FailoverHarness) {
+pub(crate) fn accept_takeover_cseq_overlap(fh: &mut FailoverHarness) {
     fh.accept_rfc_deviations_from_now(
         failover_harness::RULE_CSEQ_IN_DIALOG_ORDER,
         "ADR-0014 accepted trade-off: dual-owner in-dialog CSeq overlap in the \
@@ -231,7 +231,7 @@ fn accept_takeover_cseq_overlap(fh: &mut FailoverHarness) {
 /// Reboot the (crashed) primary EMPTY at a higher gen + new pod IP, re-learn its
 /// address, drive it ready, mark it Alive, and let the go-active reclaim run. The
 /// no-probe analogue of `runner::reboot_and_reclaim` (we set health directly).
-async fn reboot_and_reclaim(
+pub(crate) async fn reboot_and_reclaim(
     fh: &mut FailoverHarness,
     primary: &mut ReplicatedB2buaSut,
     backup: &ReplicatedB2buaSut,
@@ -257,7 +257,7 @@ async fn reboot_and_reclaim(
 
 /// Crash the primary and present the complete k8s death signal (dead in the proxy
 /// + endpoint removed from the survivor's membership).
-fn crash_primary(
+pub(crate) fn crash_primary(
     primary: &mut ReplicatedB2buaSut,
     backup: &ReplicatedB2buaSut,
     primary_ord: &str,
@@ -266,6 +266,15 @@ fn crash_primary(
     primary.crash();
     proxy.set_health(primary_ord, WorkerHealth::Dead);
     backup.simulate_peer_removed(primary_ord);
+}
+
+/// Crash the primary's process with its endpoint kept in the survivor's
+/// membership (a container restart in place): the backup has no departure to
+/// act on, so a call it ends waits for the primary to discharge it
+/// (ADR-0020 X3).
+fn crash_primary_in_place(primary: &mut ReplicatedB2buaSut, primary_ord: &str, proxy: &ProxySut) {
+    primary.crash();
+    proxy.set_health(primary_ord, WorkerHealth::Dead);
 }
 
 // =============================================================================
@@ -430,11 +439,8 @@ async fn c4_bye_on_backup__primary_crashed__stay_dead() {
     } = establish("cterm-c4-bye-backup-crashed-staydead").await;
 
     accept_takeover_cseq_overlap(&mut fh);
-    {
-        let (primary, backup): (&mut ReplicatedB2buaSut, &ReplicatedB2buaSut) =
-            if primary_ord == "b1" { (&mut w_b1, &w_b2) } else { (&mut w_b2, &w_b1) };
-        crash_primary(primary, backup, &primary_ord, &proxy);
-    }
+    let primary = if primary_ord == "b1" { &mut w_b1 } else { &mut w_b2 };
+    crash_primary_in_place(primary, &primary_ord, &proxy);
     fh.advance(Duration::from_millis(300)).await;
 
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
@@ -487,11 +493,8 @@ async fn c5_bye_on_backup__primary_crashed__peer_silent__stay_dead() {
     } = establish("cterm-c5-bye-backup-crashed-silent-staydead").await;
 
     accept_takeover_cseq_overlap(&mut fh);
-    {
-        let (primary, backup): (&mut ReplicatedB2buaSut, &ReplicatedB2buaSut) =
-            if primary_ord == "b1" { (&mut w_b1, &w_b2) } else { (&mut w_b2, &w_b1) };
-        crash_primary(primary, backup, &primary_ord, &proxy);
-    }
+    let primary = if primary_ord == "b1" { &mut w_b1 } else { &mut w_b2 };
+    crash_primary_in_place(primary, &primary_ord, &proxy);
     fh.advance(Duration::from_millis(300)).await;
 
     let _bye = dialog.bye().await;
@@ -543,11 +546,8 @@ async fn c6_bye_on_backup__primary_crashed__reboot_reclaim() {
     } = establish("cterm-c6-bye-backup-crashed-reboot").await;
 
     accept_takeover_cseq_overlap(&mut fh);
-    {
-        let (primary, backup): (&mut ReplicatedB2buaSut, &ReplicatedB2buaSut) =
-            if primary_ord == "b1" { (&mut w_b1, &w_b2) } else { (&mut w_b2, &w_b1) };
-        crash_primary(primary, backup, &primary_ord, &proxy);
-    }
+    let primary = if primary_ord == "b1" { &mut w_b1 } else { &mut w_b2 };
+    crash_primary_in_place(primary, &primary_ord, &proxy);
     fh.advance(Duration::from_millis(300)).await;
 
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
@@ -631,11 +631,8 @@ async fn c7_bye_on_backup__primary_crashed__peer_silent__reboot() {
     } = establish("cterm-c7-bye-backup-silent-reboot").await;
 
     accept_takeover_cseq_overlap(&mut fh);
-    {
-        let (primary, backup): (&mut ReplicatedB2buaSut, &ReplicatedB2buaSut) =
-            if primary_ord == "b1" { (&mut w_b1, &w_b2) } else { (&mut w_b2, &w_b1) };
-        crash_primary(primary, backup, &primary_ord, &proxy);
-    }
+    let primary = if primary_ord == "b1" { &mut w_b1 } else { &mut w_b2 };
+    crash_primary_in_place(primary, &primary_ord, &proxy);
     fh.advance(Duration::from_millis(300)).await;
 
     let _bye = dialog.bye().await;

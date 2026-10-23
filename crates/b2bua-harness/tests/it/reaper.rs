@@ -7,7 +7,8 @@
 //! no-resurrection rule is unit-pinned in `b2bua::reaper::tests`):
 //! - **stale Active call** (lost timers / dropped events) → swept + reaped;
 //! - **handler panic, strike 1** → `fatal-error` verdict through the normal
-//!   rules;
+//!   rules, the live legs torn down on the wire (BYE to a confirmed leg,
+//!   CANCEL to an early b-leg, the caller's owed final);
 //! - **handler panic, strike 2** (the rules path itself panics) → discharge
 //!   bypass, still exactly one CDR through the one enforce funnel;
 //! - **wedged handler holding the per-call lock** (a hung decision await) →
@@ -27,7 +28,7 @@ use b2bua::rules::{
     Match, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, ServiceDef, ServiceSeed,
     SERVICE_LAYER,
 };
-use b2bua_harness::{establish, settle_until, B2buaSut, OFFER_SDP};
+use b2bua_harness::{establish, settle_until, B2buaScene, B2buaSut, OFFER_SDP};
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
 
@@ -143,42 +144,220 @@ async fn stale_active_call_is_swept_and_reaped() {
 
     // The reap is wire-silent (the call was provably dead); the UAs simply
     // never hear a BYE — accepted, the CDR disposition names it.
+    assert!(alice.take_queued().await.is_none(), "the stale reap sends alice nothing");
+    assert!(bob.take_queued().await.is_none(), "the stale reap sends bob nothing");
     let _report = h.finish().await;
 }
 
-// ── 2. handler panic, strike 1 → fatal-error verdict via the rules ──────────
+// ── 2. handler panic, strike 1 → fatal-error verdict, torn down on the wire ─
 
-#[tokio::test]
-async fn handler_panic_strike1_reaps_via_rules() {
-    let h = Harness::with_transit_delay("reaper-panic-strike1", 0);
-    let alice = h.agent("alice", "127.0.0.1:5060").await;
-    let bob = h.agent("bob", "127.0.0.1:5070").await;
-    let decision = Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
-    let b2bua = B2buaSut::builder(decision)
-        .services(vec![panic_on_info_service()])
-        .start(&h, "b2bua", "127.0.0.1:5080")
-        .await;
+/// SERVICE_LAYER rule that panics on the callee's 183 — the strike-1 trigger
+/// while the b-leg is early.
+fn panic_on_183(_: &RuleContext) -> Option<RuleHandleResult> {
+    panic!("probe: handler panic on 183");
+}
+fn panic_on_183_rules() -> Vec<RuleDefinition> {
+    vec![RuleDefinition::core(
+        "probe-panic-on-183",
+        SERVICE_LAYER,
+        &[],
+        Match::response().method("INVITE").status_code(183),
+        panic_on_183,
+    )]
+}
+fn panic_on_183_service() -> ServiceDef {
+    ServiceDef { id: "probe-panic-183", init: no_init, rules: panic_on_183_rules }
+}
 
-    let mut dialog = establish(&alice, &bob, b2bua.addr).await;
+/// alice's INFO kills its handler on a confirmed call. Strike 1 tears the
+/// call down on the wire: a BYE to each leg, each answered 200, and one CDR
+/// naming the panic. A copy of the INFO while the BYEs are out is absorbed by
+/// its server transaction and never re-enters the rule; the copy after the
+/// release draws 481.
+#[tokio::test(start_paused = true)]
+async fn handler_panic_strike1_sends_bye_to_both_legs_of_a_confirmed_call() {
+    let s = B2buaScene::with_b2bua("reaper-panic-strike1-confirmed", |bob_port| {
+        B2buaSut::route_all_to("127.0.0.1", bob_port).services(vec![panic_on_info_service()])
+    })
+    .await;
+    let mut dialog = s.establish().await;
 
-    // The INFO trips the panicking probe rule: strike 1 → fatal-error → reaped
-    // with its CDR (ADR-0020), never leaked.
-    let _txn = dialog.request(InDialogMethod::Info, None).await;
+    let (mut info, info_req) = dialog
+        .send_request(InDialogMethod::Info)
+        .try_send_with_request()
+        .await
+        .expect("the INFO leaves");
 
-    settle_until(|| b2bua.cdr_records().len() == 1).await;
-    let cdrs = b2bua.cdr_records();
+    let mut a_bye = s.alice.try_receive("BYE").await.expect("strike 1 sends alice a BYE");
+    let mut b_bye = s.bob.try_receive("BYE").await.expect("strike 1 sends bob a BYE");
+    s.alice.try_send_datagram(info_req.image(), s.b2bua.addr).await.expect("the INFO leaves");
+    s.h.advance(Duration::from_millis(300)).await;
+    assert_eq!(s.b2bua.metrics().handler_panics_total(), 1, "the INFO's copy ran no handler");
+    a_bye.respond(200, "OK").await;
+    b_bye.respond(200, "OK").await;
+
+    settle_until(|| s.b2bua.is_reaped()).await;
+    let cdrs = s.b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "exactly one CDR despite the panic");
     assert!(
         reason_of(&cdrs[0]).iter().any(|r| r == "handler-panic"),
         "the CDR names the panic: {:?}",
         reason_of(&cdrs[0])
     );
-    settle_until(|| b2bua.is_reaped()).await;
-    b2bua.assert_fully_reaped();
-    assert_eq!(b2bua.metrics().handler_panics_total(), 1);
-    assert_eq!(b2bua.metrics().reaper_discharged_total(), 0, "strike 1 stays on the rules path");
+    assert_eq!(s.b2bua.metrics().reaper_discharged_total(), 0, "strike 1 stays on the rules path");
 
-    let _report = h.finish().await;
+    s.alice.try_send_datagram(info_req.image(), s.b2bua.addr).await.expect("the INFO leaves");
+    s.h.advance(Duration::from_millis(300)).await;
+    info.try_expect(481).await.expect("the released call answers the INFO's copy 481");
+    let _ = s.finish().await;
+}
+
+const REOFFER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
+const REANSWER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
+
+/// Set once the re-INVITE 2xx probe has panicked: the defect it stands for
+/// strikes one turn, not every copy of the 2xx.
+static REINVITE_2XX_PANICKED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// SERVICE_LAYER rule that panics on the callee's first 2xx to a re-INVITE
+/// (a CSeq past the initial INVITE's): the panicking turn consumed that 2xx.
+fn panic_on_reinvite_2xx(ctx: &RuleContext) -> Option<RuleHandleResult> {
+    use std::sync::atomic::Ordering;
+    if ctx.response().is_some_and(|r| r.cseq().seq() > 1)
+        && !REINVITE_2XX_PANICKED.swap(true, Ordering::SeqCst)
+    {
+        panic!("probe: handler panic on a re-INVITE's 2xx");
+    }
+    None
+}
+fn panic_on_reinvite_2xx_service() -> ServiceDef {
+    fn rules() -> Vec<RuleDefinition> {
+        vec![RuleDefinition::core(
+            "probe-panic-on-reinvite-2xx",
+            SERVICE_LAYER,
+            &[],
+            Match::response().method("INVITE").status_class(2),
+            panic_on_reinvite_2xx,
+        )]
+    }
+    ServiceDef { id: "probe-panic-reinvite-2xx", init: no_init, rules }
+}
+
+/// bob's 2xx to the re-INVITE alice made kills its handler before it is
+/// relayed, so the call never learns of it. Strike 1 tears the call down on
+/// the wire: the relayed re-INVITE is CANCELled (bob's transaction already
+/// has its final, so no CANCEL leaves), alice's re-INVITE is answered 487,
+/// and both legs are sent a BYE. bob's 2xx retransmission (RFC 3261
+/// §13.3.1.4) meets the CANCELled relay and is ACKed (§13.2.2.4), and one
+/// CDR names the panic.
+#[tokio::test(start_paused = true)]
+async fn handler_panic_strike1_on_a_reinvite_2xx_acks_its_retransmission() {
+    let s = B2buaScene::with_b2bua("reaper-panic-strike1-reinvite-2xx", |bob_port| {
+        B2buaSut::route_all_to("127.0.0.1", bob_port)
+            .services(vec![panic_on_reinvite_2xx_service()])
+    })
+    .await;
+    let mut dialog = s.establish().await;
+
+    let mut reinvite = dialog.reinvite(Some(REOFFER)).await;
+    let mut bob_reinvite = s.bob.receive("INVITE").await;
+    bob_reinvite.respond(200, "OK").with_sdp(REANSWER).await;
+
+    let mut b_bye = s.bob.try_receive("BYE").await.expect("strike 1 sends bob a BYE");
+    // bob's 2xx retransmission (RFC 3261 §13.3.1.4, at T1).
+    s.h.advance(Duration::from_millis(500)).await;
+    bob_reinvite.respond(200, "OK").with_sdp(REANSWER).await;
+    let ack = s.bob.try_receive("ACK").await.expect("bob's 2xx is ACKed");
+    assert_eq!(ack.request().cseq().seq(), bob_reinvite.request().cseq().seq());
+    b_bye.respond(200, "OK").await;
+    reinvite.try_expect(487).await.expect("alice's re-INVITE is answered 487");
+    s.alice.try_receive("BYE").await.expect("strike 1 sends alice a BYE").respond(200, "OK").await;
+
+    settle_until(|| s.b2bua.is_reaped()).await;
+    let cdrs = s.b2bua.cdr_records();
+    assert_eq!(cdrs.len(), 1, "exactly one CDR despite the panic");
+    assert!(
+        reason_of(&cdrs[0]).iter().any(|r| r == "handler-panic"),
+        "the CDR names the panic: {:?}",
+        reason_of(&cdrs[0])
+    );
+    assert_eq!(s.b2bua.metrics().handler_panics_total(), 1);
+    let _ = s.finish().await;
+}
+
+/// As above, but both legs answer their BYEs at once and the call is reaped
+/// before bob repeats his 2xx at T1. The relayed re-INVITE's transaction is
+/// held Accepted past its call (RFC 6026 §7.2), so the repeat is ACKed from
+/// that INVITE, through its route set (RFC 3261 §13.2.2.4), and draws no BYE:
+/// the call's teardown already ended the dialog.
+#[tokio::test(start_paused = true)]
+async fn handler_panic_strike1_on_a_reinvite_2xx_acks_its_retransmission_after_release() {
+    let s = B2buaScene::with_b2bua("reaper-panic-strike1-reinvite-2xx-released", |bob_port| {
+        B2buaSut::route_all_to("127.0.0.1", bob_port)
+            .services(vec![panic_on_reinvite_2xx_service()])
+    })
+    .await;
+    let mut dialog = s.establish().await;
+
+    let mut reinvite = dialog.reinvite(Some(REOFFER)).await;
+    let mut bob_reinvite = s.bob.receive("INVITE").await;
+    bob_reinvite.respond(200, "OK").with_sdp(REANSWER).await;
+
+    s.bob.try_receive("BYE").await.expect("strike 1 sends bob a BYE").respond(200, "OK").await;
+    reinvite.try_expect(487).await.expect("alice's re-INVITE is answered 487");
+    s.alice.try_receive("BYE").await.expect("strike 1 sends alice a BYE").respond(200, "OK").await;
+    settle_until(|| s.b2bua.is_reaped()).await;
+
+    // bob's 2xx retransmission (RFC 3261 §13.3.1.4, at T1), after the release.
+    s.h.advance(Duration::from_millis(300)).await;
+    bob_reinvite.respond(200, "OK").with_sdp(REANSWER).await;
+    let ack = s.bob.try_receive("ACK").await.expect("bob's 2xx is ACKed after the release");
+    assert_eq!(ack.request().cseq().seq(), bob_reinvite.request().cseq().seq());
+    assert_eq!(ack.request().to().tag(), bob_reinvite.request().to().tag());
+    for _ in 0..10 {
+        s.h.advance(Duration::from_millis(100)).await;
+    }
+    assert!(s.bob.take_queued().await.is_none(), "the re-INVITE's 2xx draws no BYE");
+
+    let cdrs = s.b2bua.cdr_records();
+    assert_eq!(cdrs.len(), 1, "exactly one CDR despite the panic");
+    assert_eq!(s.b2bua.metrics().handler_panics_total(), 1);
+    let _ = s.finish().await;
+}
+
+/// bob's 183 kills its handler while his INVITE rings. Strike 1 tears the
+/// call down on the wire: bob is CANCELled and his INVITE ends 487, alice is
+/// answered 503, and one CDR names the panic.
+#[tokio::test(start_paused = true)]
+async fn handler_panic_strike1_cancels_an_early_callee_and_answers_the_caller() {
+    let s = B2buaScene::with_b2bua("reaper-panic-strike1-early", |bob_port| {
+        B2buaSut::route_all_to("127.0.0.1", bob_port).services(vec![panic_on_183_service()])
+    })
+    .await;
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
+    let mut uas = s.bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(183, "Session Progress").await;
+
+    let mut cancel = s.bob.try_receive("CANCEL").await.expect("strike 1 CANCELs bob's INVITE");
+    cancel.respond(200, "OK").await;
+    uas.respond(487, "Request Terminated").await;
+    s.bob.receive("ACK").await;
+    call.try_expect_final(503).await.expect("alice is answered the teardown's 503");
+
+    settle_until(|| s.b2bua.is_reaped()).await;
+    let cdrs = s.b2bua.cdr_records();
+    assert_eq!(cdrs.len(), 1, "exactly one CDR despite the panic");
+    assert!(
+        reason_of(&cdrs[0]).iter().any(|r| r == "handler-panic"),
+        "the CDR names the panic: {:?}",
+        reason_of(&cdrs[0])
+    );
+    assert_eq!(s.b2bua.metrics().handler_panics_total(), 1);
+    assert_eq!(s.b2bua.metrics().reaper_discharged_total(), 0, "strike 1 stays on the rules path");
+    let _ = s.finish().await;
 }
 
 // ── 3. handler panic, strike 2 (rules path broken) → discharge ──────────────
@@ -251,10 +430,14 @@ async fn wedged_setup_is_aborted_and_reaped() {
 
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "exactly one CDR for the wedged call");
+    // The stale verdicts were queued behind the body, so the first of them
+    // reaps the call before the abort's own strike-1 verdict arrives: that one
+    // finds the call gone.
     let reasons = reason_of(&cdrs[0]);
+    assert!(reasons.iter().any(|r| r == "reaper-stale"), "the stale verdict reaps: {reasons:?}");
     assert!(
-        reasons.iter().any(|r| r == "reaper-stale" || r == "handler-panic"),
-        "the CDR names the forced reap: {reasons:?}"
+        !reasons.iter().any(|r| r == "handler-panic"),
+        "the abort's strike runs after the reap: {reasons:?}"
     );
     // ADR-0022: the reap is not silent toward the caller — the
     // `→ terminated` funnel answers the still-unanswered a-leg INVITE with a

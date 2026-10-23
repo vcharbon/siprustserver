@@ -7,7 +7,7 @@
 //! answered session's description state, and never nothing at call end.
 
 use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::{Harness, ServerTxn};
+use scenario_harness::{Harness, Party, ServerTxn};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::RSeq;
 
@@ -136,7 +136,7 @@ mod fresh_tag {
         RuleHandleResult, ServiceSeed, Terminal,
     };
     use b2bua::{define_service, sm_rule};
-    use call::{CdrEventType, Direction, LegDisposition, LegState, TimerType};
+    use call::{CdrEventType, Direction, LegState, TimerKey, TimerType};
     use sip_message::generators::SourceBody;
 
     define_service! {
@@ -155,7 +155,8 @@ mod fresh_tag {
             transitions: [ FreshState::Waiting => Terminal ],
             effects: [
                 Effect::Respond { status: 200, label: "200 under a fresh To-tag" },
-                Effect::GuardTimer { timer: TimerType::SetupTimeout, label: "disarm the setup timers" },
+                Effect::GuardTimer { timer: TimerType::NoAnswer, scope: call::TimerScopeKind::Leg, label: "disarm the ring timer" },
+                Effect::GuardTimer { timer: TimerType::SetupTimeout, scope: call::TimerScopeKind::Call, label: "disarm the setup timer" },
                 Effect::LifecycleCommand { label: "bridge caller and callee" },
             ],
             matcher: Match::response()
@@ -168,11 +169,6 @@ mod fresh_tag {
                 let b = ctx.source_leg_id.to_string();
                 let a = ctx.call.a_leg().leg_id.clone();
                 Some(RuleHandleResult::new(vec![
-                    RuleAction::UpdateLegState {
-                        leg_id: b.clone(),
-                        state: LegState::Confirmed,
-                        disposition: Some(LegDisposition::Bridged),
-                    },
                     RuleAction::ConfirmDialog { leg_id: b.clone() },
                     RuleAction::AnswerALegNewDialog {
                         status: 200,
@@ -197,8 +193,8 @@ mod fresh_tag {
                         status_code: Some(200),
                         reason: None,
                     },
-                    RuleAction::CancelTimer { id: format!("NoAnswer:{b}") },
-                    RuleAction::CancelTimer { id: format!("{:?}", TimerType::SetupTimeout) },
+                    RuleAction::cancel(TimerKey::leg(TimerType::NoAnswer, &b)),
+                    RuleAction::cancel(TimerKey::call(TimerType::SetupTimeout)),
                     RuleAction::Merge { leg_a: a, leg_b: b },
                     RuleAction::ClearState { machine: FRESH },
                 ]))
@@ -245,14 +241,22 @@ async fn fresh_tag_answer_leaves_the_early_info_its_final(
         .respond(status, if status == 200 { "OK" } else { "Call/Transaction Does Not Exist" })
         .await;
     let answered = info1.expect(status).await;
-    assert_eq!(answered.cseq().seq(), 1, "the callee's first INFO is the one answered");
+    assert_eq!(
+        answered.cseq().seq(),
+        Party::Callee.first_cseq(),
+        "the callee's first INFO is the one answered"
+    );
 
     let mut info2 = bob_dialog.request(InDialogMethod::Info, None).await;
     let mut at_alice2 = alice.receive("INFO").await;
     assert_eq!(at_alice2.request().from().tag(), Some(a2.as_str()), "relayed in A2");
     at_alice2.respond(200, "OK").await;
     let answered = info2.expect(200).await;
-    assert_eq!(answered.cseq().seq(), 2, "the callee's second INFO is the one answered");
+    assert_eq!(
+        answered.cseq().seq(),
+        Party::Callee.first_cseq() + 1,
+        "the callee's second INFO is the one answered"
+    );
 
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
@@ -290,7 +294,10 @@ const F1_REOFFER: &str = "v=0\r\no=bob 11 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 
 const F2_ANSWER: &str = "v=0\r\no=bob 22 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20002 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
 const F2_REANSWER: &str = "v=0\r\no=bob 22 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20022 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=recvonly\r\n";
 const ALICE_HOLD: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendonly\r\n";
-const ALICE_HELD: &str = "v=0\r\no=alice 1 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=recvonly\r\n";
+/// Alice's answer in the answered dialog: the next version of the session
+/// that dialog carries, which her hold in fork 2's dialog never stepped (RFC
+/// 3261 §12, RFC 3264 §8).
+const ALICE_HELD: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=recvonly\r\n";
 
 /// The `o=` session version of `body`.
 fn o_version(body: &[u8]) -> u64 {
@@ -332,7 +339,7 @@ async fn a_retired_relays_description_leaves_the_answered_session_alone() {
     let mut prack = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&a_tag2)
-        .with_rack(&format!("{rseq} 1 INVITE"))
+        .with_rack(&format!("{rseq} {} INVITE", Party::Caller.first_cseq()))
         .send()
         .await;
     bob.receive("PRACK").await.respond(200, "OK").await;
@@ -367,7 +374,7 @@ async fn a_retired_relays_description_leaves_the_answered_session_alone() {
     );
     at_alice.respond(200, "OK").with_sdp(ALICE_HELD).await;
     reinvite.expect(200).await;
-    fork1.ack_for(1, None).await;
+    fork1.ack(None).await;
     alice.receive("ACK").await;
 
     let mut bye = dialog.bye().await;

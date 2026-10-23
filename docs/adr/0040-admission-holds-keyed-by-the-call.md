@@ -1,6 +1,8 @@
 # Admission holds are keyed by the call
 
-**Status:** accepted (2026-09-27)
+**Status:** accepted (2026-09-27); **superseded in part by
+[ADR-0043](0043-outbound-backend-client-policy.md)** (the breaker's rule, probe
+and env keys are the limiter client's backend breaker)
 
 **Owner:** `crates/b2bua/src/limiter/` owns the admission set; its call side is `call::model::limiter`.
 
@@ -279,12 +281,14 @@ and a lost release could not be retried.
     none of its own. A worker whose breaker boots open learns it from the
     probe that closes it. The release queue and the refresh batch wake on
     each change, so an entry waiting, held or not, is given up at its
-    deadline under the lease of the moment (a refresh entry never before two
-    ticks, so it gets its round). A counted call refreshes every
+    deadline under the lease of the moment. A counted call refreshes every
     `LIMITER_REFRESH_SECONDS`, or every third of the lease when that is
-    shorter: each armed refresh is brought within one period on the call's
-    next turn, so a short lease never lets a set lapse between refreshes
-    (only a lease below one and a half ticks does). The first lease stated
+    shorter, and the refresh batch sends within `LIMITER_REFRESH_BATCH_MS`,
+    or within a sixth of the lease when that is shorter: each armed refresh
+    is brought within one period on the call's next turn, and two refreshes
+    with one missed between them leave at most five sixths of the lease
+    apart, so no lease the call's refresh is armed under lets its set lapse
+    while the limiter answers. The first lease stated
     and each change after it are checked: one the configured period plus a
     tick reaches is warned about and counted, and one that shortens the
     period is counted.
@@ -313,8 +317,8 @@ and a lost release could not be retried.
 
 ## Lease, refresh and the replica TTL
 
-The lease (120 s) is refreshed every 40 s: two refreshes may be missed. The
-replica TTL (`reboot_budget_sec`, 600 s) is longer than the lease, and a
+The lease (120 s) is refreshed every 40 s within a 1 s tick: one refresh may
+be missed. The replica TTL (`reboot_budget_sec`, 600 s) is longer than the lease, and a
 takeover is reactive (a call moves to its backup only when an in-dialog
 request reaches it). So a call whose primary crashed and that nobody has taken
 over stops refreshing and loses its set one lease after its last refresh, and
@@ -384,10 +388,11 @@ cells that prove re-registration run the deployed relation.
   on the workers, the refresh below the lease by more than one period (a
   third of the lease rules when shorter);
   `LIMITER_REFRESH_BATCH_MS` (1000, below the refresh period, the refresh
-  period plus a tick below the lease),
+  period plus a tick below the lease; a sixth of the lease rules when
+  shorter),
   `LIMITER_REFRESH_BATCH_MAX` (1000), `LIMITER_REFRESH_TIMEOUT_MS` (2000),
   `LIMITER_RELEASE_TIMEOUT_MS`, `LIMITER_RELEASE_QUEUE_CAP`,
-  `LIMITER_BREAKER_FAILURES` (3), `LIMITER_BREAKER_PROBE_MS` (1000) and the
+  the breaker's `LIMITER_BREAKER_*` knobs (ADR-0043) and the
   exit's release flush bound `B2BUA_DRAIN_RELEASE_FLUSH_MS` (3000) on the
   workers.
 - The breaker trades counts for latency: the calls a worker starts while its

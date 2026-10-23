@@ -6,33 +6,49 @@ license.workspace = true
 publish.workspace = true
 description = "Pure SIP message layer (parse / serialize / strict-validate) — Rust port of sipjsserver src/sip message core."
 
+[package.metadata.purity]
+tier = "pure"
+
 [lints]
 workspace = true
 
 [features]
 default = []
-# `rvoip-oracle` pulls in rvoip-sip-core as the parity-oracle second impl for
-# the compliance matrix. Off by default (production builds never link it);
-# enable in CI test runs: `cargo test -p sip-message --features rvoip-oracle`.
+# `rvoip-oracle` links rvoip-sip-core, the parity oracle (ADR-0001), for the
+# differential tests. No workspace build turns it on and production closures
+# refuse it (`purity.toml`); `just parity-oracle` builds and runs it.
 rvoip-oracle = ["dep:rvoip-sip-core"]
+# `sniff`, `preparse` and `payload`: the line-based raw readers and the
+# document form built on them, for tooling and tests. Production reads a
+# datagram only through the parser; production closures refuse this feature
+# (`purity.toml`).
+sniff = []
 
 [dependencies]
-rvoip-sip-core = { version = "0.1.26", optional = true }
+rvoip-sip-core = { version = "0.4", optional = true }
 thiserror.workspace = true
 serde = { workspace = true, features = ["derive"] }
 # The message's raw datagram + body are refcounted slices of ONE buffer, so a
 # parse (and a forwarding-hop clone) copies no packet bytes. See `sip_str`.
 bytes.workspace = true
 smallvec.workspace = true
+# Linear-time substring search for multipart delimiters, whatever the boundary.
+memchr.workspace = true
 # `payload`: the lossless JSON form of one datagram (three arms, standard
 # base64) and its body layout, with the schema every wire-carrying document
 # exports.
 base64.workspace = true
 schemars.workspace = true
+# Hash lookups with no iteration in hash-seed order (ADR-0051 §1).
+lookup-map = { path = "../lookup-map" }
 
 [dev-dependencies]
+# The tests read the `sniff` modules too.
+sip-message = { path = ".", features = ["sniff"] }
 bytes.workspace = true
 proptest.workspace = true
+# The no-panic lane's mutations and runner, shared with the other lanes.
+wire-mutations = { path = "../wire-mutations" }
 criterion.workspace = true
 serde_json.workspace = true
 # Counting #[global_allocator] behind `tests/alloc_budget.rs` — the deterministic

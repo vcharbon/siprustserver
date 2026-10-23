@@ -1,29 +1,42 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/lookup-map",
     "crates/sip-message",
+    "crates/sip-template",
+    "crates/wire-mutations",
     "crates/observe",
+    "crates/observe-testkit",
     "crates/alloc-counter",
     "crates/sip-clock",
+    "crates/lock-poison",
+    "crates/task-restart",
     "crates/sip-retransmit",
     "crates/load-shed",
     "crates/metric-catalogue",
+    "crates/metric-values",
     "crates/metric-contract",
     "crates/layer-harness",
     "crates/sip-net",
+    "crates/sip-net-testkit",
+    "crates/sip-ids",
     "crates/sip-txn",
     "crates/call",
     "crates/sip-proxy",
     "crates/topology",
     "crates/repl-net",
+    "crates/repl-net-testkit",
     "crates/http-net",
+    "crates/http-net-testkit",
     "crates/call-limiter",
+    "crates/call-limiter-wire",
     "crates/seq-report",
     "crates/scenario-harness",
     "crates/media",
     "crates/media-harness",
     "crates/b2bua-sdk",
     "crates/announcement",
+    "crates/b2bua-core",
     "crates/b2bua",
     "crates/b2bua-harness",
     "crates/ha-harness",
@@ -31,6 +44,7 @@ members = [
     "crates/flamegraph-util",
     "crates/probe-http",
     "crates/jemalloc-stats",
+    "crates/amqp-connect",
     "crates/b2bua-runner-kit",
     "crates/b2bua-runner",
     "crates/sip-proxy-runner",
@@ -52,8 +66,8 @@ members = [
 # One crate per migration layer (see MIGRATION_STATUS.md): `sip-message` is the
 # pure SIP message layer, `sip-net` the network layer. `layer-harness` is the
 # test-only contract+recording foundation
-# (Recorder / RunContext / severity / recording helpers) shared by sip-net and
-# every later layer's `contracts` module — it carries no production code and no
+# (Recorder / RunContext / severity / recording helpers) shared by the layers'
+# testkit crates and every harness — it carries no production code and no
 # domain types, so it does not contradict ADR-0002's "no premature shared
 # types crate" reasoning (that is about *production* cross-layer cycles). A
 # shared *production* foundation/types crate is still extracted only when the
@@ -78,17 +92,14 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
-# rvoip-sip-core is the dev-only parity oracle for the message layer.
-# Pinned via path against the vendored source when present; see
-# docs/adr/0001-port-custom-parser-rvoip-as-parity-oracle.md.
-# rvoip-sip-core = { path = "portsource/sipjsserver/repos/rvoip/crates/rvoip-sip-core" }
 thiserror = "2"
 # Ordered header/URI parameter lists (ADR-0025): the one- and two-parameter
 # case — the overwhelming majority on the wire — stays inline, so a parsed
 # name-addr allocates nothing for its parameters.
 smallvec = "1"
+memchr = "2"
 proptest = "1"
-criterion = "0.5"
+criterion = "0.8.2"
 # Network layer onward: all async I/O + logic-path time goes through tokio
 # (see docs/MIGRATION_STRATEGY.md, Effect→Rust construct map).
 tokio = { version = "1", features = ["full"] }
@@ -133,13 +144,13 @@ rmp = "0.8"
 # primitive here — it is the fast, well-distributed hash behind rendezvous
 # (HRW) worker selection (top 8 bytes as a u64). `arc-swap` backs the lock-free
 # worker-registry snapshot read on the routing hot path. See ADR-0009.
-hmac = "0.12"
-sha2 = "0.10"
-sha1 = "0.10"
+hmac = "0.13.0"
+sha2 = "0.11.1"
+sha1 = "0.11.0"
 # The key of `sip-txn`'s identifier PRF (Via branches, tags) comes from the OS
 # RNG, so an off-path host cannot guess the next branch.
-getrandom = "0.3"
-base64 = "0.22"
+getrandom = "0.4.3"
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 subtle = "2"
 # `flate2` (pure-Rust `miniz_oxide` backend, no C zlib) lets `sip-pcap` read
 # archived capture corpora — routinely shipped gzipped — without a decompress
@@ -159,13 +170,13 @@ libc = "0.2"
 # hand-rolled RFC 3550 encoder (the rtp.js role in the TS port). `rustfft` backs
 # the audio comparator's MFCC signature in the test-only `media-harness`. See
 # docs/plan/lexical-doodling-boot.md.
-rtp = "0.12"
-rtcp = "0.12"
+rtp = "0.17.2"
+rtcp = "0.17.2"
 rustfft = "6"
 # `bytes` is the buffer type `rtp`/`rtcp` marshal to / unmarshal from;
 # `webrtc-util` provides the Marshal/Unmarshal traits they implement.
 bytes = "1"
-webrtc-util = "0.10"
+webrtc-util = "0.17.2"
 # Observability (ADR-0026). `tracing` is the instrumentation facade every crate
 # may depend on; `tracing-subscriber` builds the process subscriber (registry +
 # compact fmt layer) and `tracing-opentelemetry`/`opentelemetry*` the OTLP span
@@ -176,10 +187,10 @@ webrtc-util = "0.10"
 # reactor, which an async client would panic on — hence no `rt-tokio` either.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "registry", "env-filter", "ansi"] }
-tracing-opentelemetry = { version = "0.33", default-features = false, features = ["tracing-log"] }
-opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
-opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
+tracing-opentelemetry = { version = "0.34.0", default-features = false, features = ["tracing-log"] }
+opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
 # THE HTTP client of the workspace — one major, linked once. Both consumers ride
 # this pin: `http-net`'s pooled async client (feature `real`) and the OTLP
 # exporter's blocking client above, whose own floor is 0.13. `default-features =
@@ -188,15 +199,17 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = ["
 # no h2, no system-proxy probing is compiled in.
 reqwest = { version = "0.13", default-features = false }
 # CDR-on-RabbitMQ sink (b2bua-runner-kit, composed by every runner) + the
-# dedicated CDR metrics consumer (cdr-consumer-runner). `lapin` is the async AMQP 0-9-1 client; it is runtime-
-# agnostic, so the two `*-trait` shims bind its executor/reactor to the same
-# tokio runtime everything else runs on (no second async runtime). Producer-side
+# dedicated CDR metrics consumer (cdr-consumer-runner). `lapin` is the async AMQP 0-9-1 client;
+# `async-rs` is the runtime seam it is built on, bound to the tokio runtime
+# everything else runs on (no second async runtime). TLS is rustls on `ring`,
+# the provider the kube client installs, with the system root store;
+# `rustls-native-certs` is load-bearing: it alone turns on the async TLS stream,
+# without which an `amqps` URI connects in plaintext. Producer-side
 # the existing `BufferedCdrWriter` bounded queue is preserved in front of the
 # sink (drop-on-overload), and the broker queue is additionally bounded with
 # `x-max-length` + drop-head overflow — the "max buffer" guarantee end to end.
-lapin = "2"
-tokio-executor-trait = "2"
-tokio-reactor-trait = "1"
+lapin = { version = "4.12.3", default-features = false, features = ["tokio", "rustls--ring", "rustls-native-certs"] }
+async-rs = { version = "0.8.13", default-features = false, features = ["tokio"] }
 
 # Keep line tables in release builds so on-demand pprof CPU flamegraphs (the
 # /debug/flamegraph route on the b2bua-worker + front-proxy metrics servers,
@@ -229,16 +242,24 @@ debug = false
 # `[lints] workspace = true`, turning a stray `unsafe` block into a hard compile
 # error rather than a silent perf shortcut nobody reviewed. `forbid` (stronger
 # than `deny`) cannot be locally re-enabled with `#[allow(unsafe_code)]`. The
-# ONE exception is `crates/jemalloc-stats`, whose two `mallctl` FFI calls are
-# irreducibly unsafe — it does NOT opt into this table and instead pins its own
-# `deny` + a narrow `#[allow(unsafe_code)]` on each documented call site. This
-# governs OUR source only; dependencies (tokio, jemalloc, …) use unsafe freely
-# and are unaffected. See ADR-discussion / jemalloc-stats/src/lib.rs SAFETY notes.
+# exceptions are the crates whose FFI or socket-option calls are irreducibly
+# unsafe (`jemalloc-stats`, `sip-net`, `alloc-counter`): they do NOT opt into
+# this table, pin their own `deny` + a narrow `#[allow(unsafe_code)]` on each
+# documented call site, and otherwise restate the workspace lint tables exactly
+# (scripts/purity.py checks it). This governs OUR source only; dependencies
+# (tokio, jemalloc, …) use unsafe freely and are unaffected.
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
 # Function-size ceiling (threshold in clippy.toml, 200 lines initially): a
 # function past it is presumed to be several concepts and wants extraction.
 # `warn` only — surfaced by `cargo clippy`, not a build gate yet.
+#
+# The disallowed lists of clippy.toml are the panic and purity rules of
+# ADR-0051; scripts/panic-sites.py runs them over the tiered crates, so every
+# other clippy run, test code included, holds them at `allow`.
 [workspace.lints.clippy]
 too_many_lines = "warn"
+disallowed_macros = "allow"
+disallowed_methods = "allow"
+disallowed_types = "allow"

@@ -55,6 +55,15 @@ export const derivesOnePrefix: CallIdDerivation = (base, derived) => derived ===
 /** The neutral reading, re-exported so a test can state which one it used. */
 export const derivesNothing = neverDerives
 
+/**
+ * A test's case namer: the call's own Call-IDs, and the ingress ordinal of a
+ * split family, so every id a test reads names the call it was cut from.
+ */
+export const nameByCallIds = (call: {
+  readonly callIds: ReadonlyArray<string>
+  readonly ingressOrdinal?: number
+}): string => `n:${call.callIds.join("+")}${call.ingressOrdinal === undefined ? "" : `#${call.ingressOrdinal}`}`
+
 const datagram = (start: string, headers: ReadonlyArray<string>): string =>
   [start, ...headers, "", ""].join(CRLF)
 

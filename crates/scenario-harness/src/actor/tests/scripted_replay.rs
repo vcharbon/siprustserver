@@ -1,4 +1,4 @@
-use sip_message::EmitOpts;
+use sip_template::EmitOpts;
 use std::time::Duration;
 
 use super::testkit::*;
@@ -227,7 +227,7 @@ async fn truncated_class_assert_fails_fast_on_wrong_class() {
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
     match verdict {
-        CallVerdict::Failed(StepError::WrongStatus { who, expected, got, .. }) => {
+        CallVerdict::Failed(_, StepError::WrongStatus { who, expected, got, .. }) => {
             assert_eq!(
                 (who.as_str(), expected, got),
                 ("alice", 200, 486),
@@ -332,7 +332,20 @@ async fn observe_final_pinned_to_invite_skips_prack_200() {
                 &alice,
                 ("bob", bob.clone()),
                 vec![
-                    Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                    Goal::new(
+                        Barrier::None,
+                        GoalStep::Invite {
+                            callee: "bob",
+                            plan: Some(crate::realcall::InvitePlan {
+                                via: bob.addr(),
+                                from: None,
+                                to: None,
+                                ruri: None,
+                                headers: vec![("Supported".into(), "100rel".into())],
+                                rewrite: Default::default(),
+                            }),
+                        },
+                    ),
                     Goal::new(
                         Barrier::pred("prack_200", prack_200),
                         GoalStep::Cancel { stated: Vec::new() },

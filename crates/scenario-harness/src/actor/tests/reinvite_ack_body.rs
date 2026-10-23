@@ -7,7 +7,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use sip_message::{EmitOpts, MessageTemplate, Method, TemplateHeader};
+use sip_message::Method;
+use sip_template::{EmitOpts, MessageTemplate, TemplateHeader};
 
 use super::testkit::*;
 use crate::actor::*;

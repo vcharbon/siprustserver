@@ -1,0 +1,72 @@
+# Tiers of the production closure (scripts/purity.py, `just purity`,
+# ADR-0051 §1). Each crate a production binary links declares
+# `[package.metadata.purity] tier = "pure" | "shell"` in its manifest.
+
+# The production binaries. Each is built by a cargo command of its own; its
+# closure is its `cargo tree -p <binary> -e normal,features`. A binary is
+# never removed while it ships.
+binaries = ["sip-proxy-runner", "call-limiter-runner"]
+
+# The images the binaries ship in: each binary is built there by a `cargo
+# build -p <binary>` of its own, the resolution the closure check holds.
+dockerfiles = ["deploy/docker/Dockerfile"]
+
+# Features no production binary may reach: test support, the schedules no
+# RFC prescribes (ADR-0032 X1), and the line-based raw readers beside the
+# parser (`sip-message/sniff`, tooling only). A bare name is that feature of
+# any crate.
+test-features = [
+  "testkit",
+  "test-util",
+  "sip-retransmit/authored",
+  "sip-message/rvoip-oracle",
+  "sip-message/sniff",
+]
+
+# Third-party crates a pure crate may reach through its normal dependencies
+# (proc-macro crates aside): no clock, randomness, filesystem, network,
+# environment, sleep or interior mutability of their own reaches the caller.
+# An entry no pure crate reaches is stale; an entry added is a reviewed change.
+pure-deps = [
+  "base64",
+  "block-buffer",
+  "bytes",
+  "cfg-if",
+  "cmov",
+  "const-oid",
+  # Caches the CPU's SHA extensions in a static; a digest does not depend on it.
+  "cpufeatures",
+  "crypto-common",
+  "ctutils",
+  "digest",
+  "dyn-clone",
+  "hmac",
+  "hybrid-array",
+  "itoa",
+  # `tracing`'s fallback to the `log` facade where the workspace turns it on:
+  # a log line cannot change an outcome.
+  "log",
+  "memchr",
+  "num-traits",
+  # `tracing`'s callsite cache; a turn's output does not depend on it
+  # (ADR-0052 §10).
+  "once_cell",
+  "pin-project-lite",
+  "ref-cast",
+  "rmp",
+  "rmp-serde",
+  "schemars",
+  "serde",
+  "serde_bytes",
+  "serde_core",
+  "serde_json",
+  "sha2",
+  "smallvec",
+  "thiserror",
+  # The decision core's warnings go to whatever subscriber the shell
+  # installed; none reaches the core's output (ADR-0052 §10).
+  "tracing",
+  "tracing-core",
+  "typenum",
+  "zmij",
+]

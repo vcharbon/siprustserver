@@ -84,6 +84,7 @@ known_header_names! {
     RAck => "RAck",
     Reason => "Reason",
     RecordRoute => "Record-Route",
+    ReferSub => "Refer-Sub",
     ReferTo => "Refer-To",
     ReferredBy => "Referred-By",
     RemotePartyId => "Remote-Party-ID",
@@ -121,7 +122,7 @@ impl HeaderName {
             .find(|candidate| {
                 let c = candidate.as_wire_str().as_bytes();
                 c.len() == wire.len()
-                    && c[0].to_ascii_lowercase() == first
+                    && c.first().map(u8::to_ascii_lowercase) == Some(first)
                     && c.eq_ignore_ascii_case(wire)
             })
             .cloned()

@@ -72,7 +72,9 @@ fn canonical_item(item: &str) -> String {
             }
         }
     }
-    String::from_utf8(out).expect("only ASCII layout bytes are dropped, so the sequences survive")
+    // Only ASCII layout bytes are dropped, so every sequence survives and the
+    // lossy decode copies the bytes as they are.
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 #[cfg(test)]

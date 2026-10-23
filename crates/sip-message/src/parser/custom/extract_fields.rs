@@ -1,5 +1,5 @@
-//! Mandatory-header extraction + the ADR-0007 strict-grammar gates
-//! (`Wire` vs `Hydrate` mode). Port of `src/sip/parsers/extract-fields.ts`.
+//! Mandatory-header extraction + the strict wire-grammar gates (`Wire` vs
+//! `Hydrate` mode; those beyond the RFC grammar are listed in ADR-0001). Port of `src/sip/parsers/extract-fields.ts`.
 //!
 //! Produces the typed [`CoreHeaders`] from the
 //! [`HeaderIndex`] of one dispatch pass — this module locates nothing itself,
@@ -8,24 +8,23 @@
 //! `Hydrate` runs only the baseline presence/range/tag checks for already-
 //! trusted internal construction.
 
-use super::contact_entries::{contact_entry_spans, read_contact_entry, ContactEntry};
-use super::header_index::HeaderIndex;
-use super::scanner::{is_token_char, strict_non_negative_decimal};
-use super::structured_headers::{
-    parse_cseq, parse_name_addr, parse_sip_uri_string, parse_via, top_level_comma_entries,
-    validate_strict_host, validate_strict_sip_uri,
+use super::contact_entries::{
+    contact_entry_spans, read_contact_entry, read_contact_entry_lenient, ContactEntry,
 };
+use super::dialog_contact::{can_establish_dialog, dialog_contact_refusal};
+use super::dialog_ids::{count_tag_params, is_call_id, read_address, tag_refusal};
+use super::header_index::HeaderIndex;
+use super::request_uri::read_request_uri;
+use super::routes::route_refusal;
+use super::structured_headers::{parse_cseq, parse_via, top_level_comma_entries};
+use super::top_via;
+use crate::char_class::is_token_char;
 use crate::error::SipParseError;
-use crate::header::{self, HostPort, NameAddr, Uri};
+use crate::header::{self, HeaderValue, HostPort, Uri};
 use crate::method::Method;
 use crate::parser::SipParserLimits;
 use crate::sip_str::SipStr;
 use crate::types::{ContactSet, CoreHeaders, NonEmpty};
-
-/// RFC 3261 §8.1.1.7 — top-Via branch MUST start with this magic cookie.
-const VIA_BRANCH_MAGIC_COOKIE: &str = "z9hG4bK";
-
-const INT_32_MAX: u64 = (1u64 << 31) - 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtractMode {
@@ -33,15 +32,17 @@ pub enum ExtractMode {
     Hydrate,
 }
 
-/// How a message's Contact set is read.
+/// How a message's Contact set and route sets are read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContactReading {
     /// The Contact names a dialog target or a binding (a request, a 1xx / 2xx):
-    /// a misplaced wildcard or an unreadable entry refuses the message.
+    /// a misplaced wildcard or an unreadable entry refuses the message, and so
+    /// does a Route or Record-Route that does not read.
     Strict,
-    /// The Contact names no dialog target (a final of 300 or more): a misplaced
-    /// wildcard or an unreadable entry is dropped and the message kept, so the
-    /// transaction it ends still completes.
+    /// The Contact names no dialog target (a final of 300 or more, §12.1.1): a
+    /// misplaced wildcard or an unreadable entry is dropped and the message
+    /// kept, so the transaction it ends still completes. Its route sets are
+    /// not read at parse.
     Lenient,
 }
 
@@ -53,245 +54,23 @@ pub struct RequestEager {
 }
 
 /// RFC 3261 / RFC 3986 §3.2.3: SIP ports are 1..=65535.
-fn is_valid_port(p: u64) -> bool {
+pub(super) fn is_valid_port(p: u64) -> bool {
     (1..=65535).contains(&p)
-}
-
-// ---------------------------------------------------------------------------
-// Internal → public field mapping
-// ---------------------------------------------------------------------------
-
-/// A scanned name-addr as the typed address value. A URI the strict reader
-/// rejects is kept whole (the parser's own gates decide admissibility), so no
-/// reader ever loses what the peer sent.
-fn to_name_addr(p: super::structured_headers::ParsedNameAddr) -> NameAddr {
-    NameAddr::from_parts(p.display_name, Uri::parse_or_verbatim(&p.uri), p.params)
-}
-
-fn to_contact(p: super::structured_headers::ParsedContact) -> header::Contact {
-    header::Contact::new(NameAddr::from_parts(
-        p.display_name,
-        Uri::parse_or_verbatim(&p.uri),
-        p.params,
-    ))
-}
-
-// ---------------------------------------------------------------------------
-// Byte-scan strict gates. All structural bytes tested below are ASCII, so a
-// UTF-8 lead/continuation byte can never alias one — byte scans visit exactly
-// the positions a `Vec<char>` walk would, without a per-call collect.
-// ---------------------------------------------------------------------------
-
-/// True iff the URI carries unescaped control bytes (0x00-0x1F except HTAB,
-/// or 0x7F).
-fn has_unescaped_ctl_bytes(uri: &str) -> bool {
-    uri.bytes().any(|b| b != 0x09 && (b < 0x20 || b == 0x7f))
-}
-
-/// True iff `uri` contains `[` without a matching `]`.
-fn has_unbalanced_square_brackets(uri: &str) -> bool {
-    let mut open: i32 = 0;
-    for c in uri.bytes() {
-        if c == b'[' {
-            open += 1;
-        } else if c == b']' {
-            if open == 0 {
-                return true;
-            }
-            open -= 1;
-        }
-    }
-    open != 0
-}
-
-/// True iff the host portion has 2+ colons outside `[...]` — IPv6 without the
-/// required bracket delimiters (RFC 5118 §4.2).
-fn has_unbracketed_ipv6(uri: &str) -> bool {
-    let s = uri.as_bytes();
-    let scheme_colon = match s.iter().position(|&c| c == b':') {
-        Some(i) => i,
-        None => return false,
-    };
-    let mut i = scheme_colon + 1;
-    if let Some(at) = s[i..].iter().position(|&c| c == b'@') {
-        i += at + 1;
-    }
-    let mut depth = 0i32;
-    let mut colons = 0i32;
-    while i < s.len() {
-        let c = s[i];
-        if c == b'[' {
-            depth += 1;
-        } else if c == b']' && depth > 0 {
-            depth -= 1;
-        } else if depth == 0 {
-            if c == b':' {
-                colons += 1;
-                if colons >= 2 {
-                    return true;
-                }
-            } else if c == b';' || c == b'?' || c == b'>' {
-                break;
-            }
-        }
-        i += 1;
-    }
-    false
-}
-
-/// True iff `uri` has port digits followed by an alphabetic byte at the
-/// host:port position (SIP-ALG confusion), context-aware about userinfo.
-fn has_uri_port_trailing_garbage(uri: &str) -> bool {
-    let s = uri.as_bytes();
-    let first = match s.iter().position(|&c| c == b'@') {
-        Some(a) => a,
-        None => match s.iter().position(|&c| c == b':') {
-            Some(c) => c,
-            None => return false,
-        },
-    };
-    let mut i = first + 1; // past `@` or scheme colon
-    if i < s.len() && s[i] == b'[' {
-        match s[i + 1..].iter().position(|&c| c == b']') {
-            None => return false,
-            Some(close) => i = i + 1 + close + 1,
-        }
-    } else {
-        while i < s.len() && s[i] != b':' && s[i] != b';' && s[i] != b'?' && s[i] != b'>' {
-            i += 1;
-        }
-    }
-    if i >= s.len() || s[i] != b':' {
-        return false;
-    }
-    i += 1;
-    let port_start = i;
-    while i < s.len() && s[i].is_ascii_digit() {
-        i += 1;
-    }
-    if i == port_start || i >= s.len() {
-        return false;
-    }
-    s[i].is_ascii_alphabetic()
-}
-
-/// True iff `via` carries a port followed by alphabetic trailing garbage,
-/// quote-aware.
-fn has_via_port_trailing_garbage(via: &str) -> bool {
-    let s = via.as_bytes();
-    if s.is_empty() {
-        return false;
-    }
-    let mut in_quote = false;
-    let mut i = 0usize;
-    while i + 1 < s.len() {
-        let c = s[i];
-        if in_quote {
-            if c == b'\\' {
-                i += 2;
-                continue;
-            }
-            if c == b'"' {
-                in_quote = false;
-            }
-            i += 1;
-            continue;
-        }
-        if c == b'"' {
-            in_quote = true;
-            i += 1;
-            continue;
-        }
-        if c != b':' {
-            i += 1;
-            continue;
-        }
-        let mut j = i + 1;
-        let port_start = j;
-        while j < s.len() && s[j].is_ascii_digit() {
-            j += 1;
-        }
-        if j == port_start || j >= s.len() {
-            i += 1;
-            continue;
-        }
-        if s[j].is_ascii_alphabetic() {
-            return true;
-        }
-        i += 1;
-    }
-    false
-}
-
-/// Count `;tag=` occurrences outside quoted-strings (RFC 3261 permits one).
-fn count_tag_params(value: &str) -> usize {
-    let s = value.as_bytes();
-    let mut count = 0usize;
-    let mut in_quote = false;
-    let mut i = 0usize;
-    while i < s.len() {
-        let c = s[i];
-        if in_quote {
-            if c == b'\\' {
-                i += 2;
-                continue;
-            }
-            if c == b'"' {
-                in_quote = false;
-            }
-            i += 1;
-            continue;
-        }
-        if c == b'"' {
-            in_quote = true;
-            i += 1;
-            continue;
-        }
-        if c != b';' {
-            i += 1;
-            continue;
-        }
-        let mut j = i + 1;
-        while j < s.len() && (s[j] == b' ' || s[j] == b'\t') {
-            j += 1;
-        }
-        if j + 3 > s.len() {
-            i += 1;
-            continue;
-        }
-        let t = s[j];
-        let a = s[j + 1];
-        let g = s[j + 2];
-        if (t != b't' && t != b'T') || (a != b'a' && a != b'A') || (g != b'g' && g != b'G') {
-            i += 1;
-            continue;
-        }
-        let mut k = j + 3;
-        while k < s.len() && (s[k] == b' ' || s[k] == b'\t') {
-            k += 1;
-        }
-        if k >= s.len() || s[k] != b'=' {
-            i += 1;
-            continue;
-        }
-        count += 1;
-        i += 1;
-    }
-    count
 }
 
 /// Confirm the Via sent-protocol grammar: three non-empty `1*tchar` tokens
 /// separated by `/` with LWS permitted around the `/`. `None` if valid.
 fn check_sent_protocol(via: &str) -> Option<String> {
     let s = via.as_bytes();
+    let at = |i: usize| s.get(i).copied();
     let skip_ws = |mut i: usize| {
-        while i < s.len() && (s[i] == b' ' || s[i] == b'\t') {
+        while matches!(at(i), Some(b' ' | b'\t')) {
             i += 1;
         }
         i
     };
     let read_token_run = |mut i: usize| {
-        while i < s.len() && is_token_char(s[i]) {
+        while at(i).is_some_and(is_token_char) {
             i += 1;
         }
         i
@@ -303,7 +82,7 @@ fn check_sent_protocol(via: &str) -> Option<String> {
         return Some("empty Via protocol-name".to_string());
     }
     i = skip_ws(i);
-    if i >= s.len() || s[i] != b'/' {
+    if at(i) != Some(b'/') {
         return Some("missing `/` after Via protocol-name".to_string());
     }
     i = skip_ws(i + 1);
@@ -313,7 +92,7 @@ fn check_sent_protocol(via: &str) -> Option<String> {
         return Some("empty Via protocol-version".to_string());
     }
     i = skip_ws(i);
-    if i >= s.len() || s[i] != b'/' {
+    if at(i) != Some(b'/') {
         return Some("missing `/` after Via protocol-version".to_string());
     }
     i = skip_ws(i + 1);
@@ -335,6 +114,33 @@ pub fn extract_common_fields(
     mode: ExtractMode,
     contact_reading: ContactReading,
 ) -> Result<CoreHeaders, SipParseError> {
+    let identity = extract_identity(idx, limits, mode)?;
+    let wire = mode == ExtractMode::Wire;
+    let contacts = read_contacts(idx, wire, contact_reading)?;
+    if wire && contact_reading == ContactReading::Strict {
+        route_refusal(idx)?;
+    }
+    let Identity { from, to, call_id, cseq, via } = identity;
+    Ok(CoreHeaders::new(from, to, call_id, cseq, via, contacts))
+}
+
+/// The fields every response to a message echoes (RFC 3261 §8.2.6.2), typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Identity {
+    pub from: header::From,
+    pub to: header::To,
+    pub call_id: header::CallId,
+    pub cseq: header::CSeq,
+    pub via: NonEmpty<header::Via>,
+}
+
+/// From, To, Call-ID, CSeq and every Via entry of `idx`, each held to the
+/// rules of `mode`.
+pub(super) fn extract_identity(
+    idx: &HeaderIndex,
+    limits: &SipParserLimits,
+    mode: ExtractMode,
+) -> Result<Identity, SipParseError> {
     let wire = mode == ExtractMode::Wire;
 
     // From/To/Call-ID/CSeq appear exactly once; only Via may repeat.
@@ -361,72 +167,49 @@ pub fn extract_common_fields(
 
     let from_val =
         idx.from.first.ok_or_else(|| SipParseError::new("Missing mandatory From header"))?;
-    let from_parsed = parse_name_addr(from_val);
-    if from_parsed.tag.as_deref() == Some("") {
+    let from = read_address(from_val, "From", wire)?;
+    if from.params().value("tag") == Some("") {
         return Err(SipParseError::new("Empty From tag parameter"));
     }
     if count_tag_params(from_val) > 1 {
         return Err(SipParseError::new("Duplicate From tag parameter"));
     }
-    if wire {
-        if let Some(reason) = validate_strict_sip_uri(&from_parsed.uri) {
-            return Err(SipParseError::new(format!(
-                "Strict From URI: {reason} (\"{}\")",
-                from_parsed.uri
-            )));
-        }
-    }
 
     let to_val = idx.to.first.ok_or_else(|| SipParseError::new("Missing mandatory To header"))?;
-    let to_parsed = parse_name_addr(to_val);
-    if to_parsed.tag.as_deref() == Some("") {
+    let to = read_address(to_val, "To", wire)?;
+    if to.params().value("tag") == Some("") {
         return Err(SipParseError::new("Empty To tag parameter"));
     }
     if count_tag_params(to_val) > 1 {
         return Err(SipParseError::new("Duplicate To tag parameter"));
     }
     if wire {
-        if let Some(reason) = validate_strict_sip_uri(&to_parsed.uri) {
-            return Err(SipParseError::new(format!(
-                "Strict To URI: {reason} (\"{}\")",
-                to_parsed.uri
-            )));
-        }
+        tag_refusal(&from, "From")?;
+        tag_refusal(&to, "To")?;
     }
 
     let call_id = match idx.call_id.first {
         Some(v) if !v.is_empty() => v.clone(),
         _ => return Err(SipParseError::new("Missing mandatory Call-ID header")),
     };
+    if wire && !is_call_id(&call_id) {
+        return Err(SipParseError::new(format!(
+            "Call-ID is not word [\"@\" word] (RFC 3261 §25.1): \"{call_id}\""
+        )));
+    }
 
     let cseq_val =
         idx.cseq.first.ok_or_else(|| SipParseError::new("Missing mandatory CSeq header"))?;
-    let cseq_parsed = parse_cseq(cseq_val);
-    if wire {
-        let cseq_raw = cseq_val.trim();
-        // First SP/HTAB is ASCII → a valid slice boundary.
-        let space_idx = cseq_raw.bytes().position(|c| c == b' ' || c == b'\t');
-        match space_idx {
-            None => {
-                return Err(SipParseError::new(format!(
-                    "CSeq missing method token: \"{cseq_val}\""
-                )));
-            }
-            Some(idx) => {
-                let cseq_digits = &cseq_raw[..idx];
-                if strict_non_negative_decimal(cseq_digits, INT_32_MAX).is_none() {
-                    return Err(SipParseError::new(format!(
-                        "CSeq seq malformed (paranoid digit check): \"{cseq_digits}\""
-                    )));
-                }
-                if cseq_raw[idx + 1..].trim().is_empty() {
-                    return Err(SipParseError::new(format!(
-                        "CSeq missing method token: \"{cseq_val}\""
-                    )));
-                }
-            }
-        }
-    }
+    let cseq = if wire {
+        header::CSeq::parse(cseq_val)?
+    } else {
+        // The lenient read saturates a sequence number past `u32`.
+        let lenient = parse_cseq(cseq_val);
+        header::CSeq::new(
+            u32::try_from(lenient.seq).unwrap_or(u32::MAX),
+            Method::from_wire(&lenient.method),
+        )
+    };
 
     // Via — at least one required; both comma-list and repeated-line encodings
     // fold into one ordered list. Each segment stays a span of its header
@@ -435,13 +218,8 @@ pub fn extract_common_fields(
         return Err(SipParseError::new("Missing mandatory Via header"));
     }
     let via_segments = || idx.via.iter().flat_map(|v| top_level_comma_entries(v.as_str()));
-    for segment in via_segments() {
-        if has_via_port_trailing_garbage(segment) {
-            return Err(SipParseError::new(format!(
-                "Trailing non-digit after Via port: \"{segment}\""
-            )));
-        }
-        if wire {
+    if wire {
+        for segment in via_segments() {
             if let Some(reason) = check_sent_protocol(segment) {
                 return Err(SipParseError::new(format!("{reason}: \"{segment}\"")));
             }
@@ -452,100 +230,57 @@ pub fn extract_common_fields(
         idx.via.iter().flat_map(|v| top_level_comma_entries(v.as_str()).map(move |s| (*v, s)))
     {
         let v = parse_via(&value.reslice(raw));
-        if let Some(p) = v.port {
-            if !is_valid_port(p) {
-                return Err(SipParseError::new(format!("Via port out of range: {p}")));
+        let top = vias.is_empty();
+        // A lenient reading holds a sent-by the reader refuses whole, as it
+        // holds a URI it refuses opaque.
+        let (host, port) = match &v.sent_by {
+            Ok((host, port)) => (Some(host.clone()), *port),
+            Err(reason) if wire => {
+                return Err(SipParseError::new(format!("Strict Via sent-by: {reason}: \"{raw}\"")));
             }
+            Err(_) => (None, None),
+        };
+        if let Some(p) = port.filter(|&p| top_via::port_out_of_range(p, top)) {
+            return Err(SipParseError::new(format!("Via port out of range: {p}")));
         }
         if v.branch.as_deref() == Some("") {
             return Err(SipParseError::new("Empty Via branch parameter"));
         }
         if wire {
-            // Top-Via magic cookie (RFC 3261 §8.1.1.7) — topmost Via only.
-            if vias.is_empty() {
-                match &v.branch {
-                    Some(b) if b.starts_with(VIA_BRANCH_MAGIC_COOKIE) => {}
-                    other => {
-                        let shown = match other {
-                            None => "<no branch>".to_string(),
-                            Some(b) => format!("\"{b}\""),
-                        };
-                        return Err(SipParseError::new(format!(
-                            "Top Via branch missing magic cookie \"{VIA_BRANCH_MAGIC_COOKIE}\": {shown}"
-                        )));
-                    }
-                }
+            if let Some(refusal) = top.then(|| top_via::cookie_refusal(&v)).flatten() {
+                return Err(refusal);
             }
-            if let Some(reason) = validate_strict_host(&v.host) {
+            if v.branch.as_ref().is_some_and(|b| !b.bytes().all(is_token_char)) {
                 return Err(SipParseError::new(format!(
-                    "Strict Via sent-by host: {reason} (\"{}\")",
-                    v.host
+                    "Via branch is not a token: \"{}\"",
+                    v.branch.as_deref().unwrap_or_default()
                 )));
             }
-            if let Some(colon_count) = sent_by_extra_colons(raw) {
-                return Err(SipParseError::new(format!(
-                    "Via sent-by has {colon_count} colons (must be ≤ 1): \"{raw}\""
-                )));
-            }
-            // The allowlist is documented case-insensitive; probe without minting
-            // an uppercased String per Via (set is ≤6 entries — linear is fine).
-            if !limits.allowed_transports.iter().any(|t| t.eq_ignore_ascii_case(&v.transport)) {
-                return Err(SipParseError::new(format!(
-                    "Via transport \"{}\" not in allowed set",
-                    v.transport
-                )));
+            if let Some(refusal) = top.then(|| top_via::transport_refusal(&v, limits)).flatten() {
+                return Err(refusal);
             }
         }
-        vias.push(header::Via::from_parts(
-            v.protocol,
-            v.version,
-            v.transport,
-            HostPort::new(v.host, v.port.map(|p| p as u16)),
-            v.params,
-        ));
+        let port = port
+            .map(u16::try_from)
+            .transpose()
+            .map_err(|_| SipParseError::new(format!("Via port out of range: {port:?}")))?;
+        let sent_by = match host {
+            Some(host) => HostPort::new(host, port),
+            None => HostPort::whole(v.sent_by_text),
+        };
+        vias.push(header::Via::from_parts(v.protocol, v.version, v.transport, sent_by, v.params));
     }
-
-    let contacts = read_contacts(idx, wire, contact_reading)?;
 
     let mut hops = vias.into_iter();
     let top = hops.next().ok_or_else(|| SipParseError::new("Missing mandatory Via header"))?;
 
-    Ok(CoreHeaders::new(
-        header::From::new(to_name_addr(from_parsed)),
-        header::To::new(to_name_addr(to_parsed)),
-        header::CallId::new(call_id),
-        header::CSeq::new(
-            cseq_parsed.seq.min(u32::MAX as u64) as u32,
-            Method::from_wire(&cseq_parsed.method),
-        ),
-        NonEmpty::from_parts(top, hops.collect()),
-        contacts,
-    ))
-}
-
-/// The sent-by colon count when a Via segment carries more than one colon
-/// outside `[...]` and before the first `;` — IPv6 without brackets, or a
-/// second port. `None` when the segment is well-formed.
-fn sent_by_extra_colons(raw: &str) -> Option<i32> {
-    let mut in_bracket = false;
-    let mut colon_count = 0i32;
-    for c in raw.bytes() {
-        if c == b'[' {
-            in_bracket = true;
-            continue;
-        }
-        if c == b']' {
-            in_bracket = false;
-            continue;
-        }
-        if c == b';' && !in_bracket {
-            break;
-        }
-        if !in_bracket && c == b':' {
-            colon_count += 1;
-        }
-    }
-    (colon_count > 1).then_some(colon_count)
+    Ok(Identity {
+        from: header::From::new(from),
+        to: header::To::new(to),
+        call_id: header::CallId::new(call_id),
+        cseq,
+        via: NonEmpty::from_parts(top, hops.collect()),
+    })
 }
 
 /// The message's Contact set, folded over comma-lists and repeated lines.
@@ -569,17 +304,14 @@ fn read_contacts(
     for span in spans() {
         match read_contact_entry(&span) {
             ContactEntry::Wildcard => {}
-            ContactEntry::Readable(contact) => contact_list.push(to_contact(contact)),
-            // The strict URI gate holds on wire bytes only.
-            ContactEntry::Unreadable { contact, .. } if !wire => {
-                contact_list.push(to_contact(contact));
+            ContactEntry::Readable(contact) => contact_list.push(*contact),
+            // The grammar holds on wire bytes only.
+            ContactEntry::Unreadable { .. } if !wire => {
+                contact_list.push(read_contact_entry_lenient(&span));
             }
             ContactEntry::Unreadable { .. } if !strict => {}
-            ContactEntry::Unreadable { contact, reason } => {
-                return Err(SipParseError::new(format!(
-                    "Strict Contact URI: {reason} (\"{}\")",
-                    contact.uri
-                )));
+            ContactEntry::Unreadable { reason } => {
+                return Err(SipParseError::new(format!("Strict Contact: {reason} (\"{span}\")")));
             }
         }
     }
@@ -607,6 +339,11 @@ pub fn extract_request_fields(
 
     // Contact cardinality on dialog-creating requests.
     if wire {
+        if let Some(method) = method.filter(|m| can_establish_dialog(m)) {
+            if let Some(refusal) = dialog_contact_refusal(common.contacts(), method) {
+                return Err(refusal);
+            }
+        }
         if let Some(method) = method {
             let dialog_creating = method.eq_ignore_ascii_case("INVITE")
                 || method.eq_ignore_ascii_case("SUBSCRIBE")
@@ -632,16 +369,18 @@ pub fn extract_request_fields(
         }
     }
 
-    // CSeq method must match the request method.
+    // CSeq method must match the request method: a known method in any case,
+    // an extension method in its own (RFC 3261 §7.1).
     if let Some(method) = method {
         if let Some(cseq_val) = idx.cseq.first {
             let trimmed = cseq_val.trim();
-            // First SP/HTAB is ASCII → a valid slice boundary.
-            let cseq_method = match trimmed.bytes().position(|c| c == b' ' || c == b'\t') {
-                Some(idx) => trimmed[idx + 1..].trim(),
+            let cseq_method = match trimmed.split_once([' ', '\t']) {
+                Some((_, method)) => method.trim(),
                 None => "",
             };
-            if !cseq_method.is_empty() && !cseq_method.eq_ignore_ascii_case(method) {
+            if !cseq_method.is_empty()
+                && Method::from_wire(cseq_method) != Method::from_wire(method)
+            {
                 return Err(SipParseError::new(format!(
                     "CSeq method \"{cseq_method}\" does not match request method \"{method}\""
                 )));
@@ -649,43 +388,10 @@ pub fn extract_request_fields(
         }
     }
 
-    // Strict Request-URI gates.
-    if wire {
-        if let Some(reason) = validate_strict_sip_uri(request_uri) {
-            return Err(SipParseError::new(format!(
-                "Strict Request-URI: {reason} (\"{request_uri}\")"
-            )));
-        }
-    }
-    if has_unescaped_ctl_bytes(request_uri) {
-        return Err(SipParseError::new(format!("Control byte in Request-URI: \"{request_uri}\"")));
-    }
-    if has_unbalanced_square_brackets(request_uri) {
-        return Err(SipParseError::new(format!(
-            "Unbalanced IPv6 brackets in Request-URI: \"{request_uri}\""
-        )));
-    }
-    if has_uri_port_trailing_garbage(request_uri) {
-        return Err(SipParseError::new(format!(
-            "Trailing non-digit after Request-URI port: \"{request_uri}\""
-        )));
-    }
-    if has_unbracketed_ipv6(request_uri) {
-        return Err(SipParseError::new(format!(
-            "Unbracketed IPv6 in Request-URI: \"{request_uri}\""
-        )));
-    }
-    let request_uri_parsed = parse_sip_uri_string(request_uri)
-        .ok_or_else(|| SipParseError::new(format!("Malformed Request-URI: \"{request_uri}\"")))?;
-    if request_uri_parsed.host.is_empty() {
-        return Err(SipParseError::new(format!("Empty host in Request-URI: \"{request_uri}\"")));
-    }
-    if let Some(p) = request_uri_parsed.port {
-        if !is_valid_port(p) {
-            return Err(SipParseError::new(format!("Request-URI port out of range: {p}")));
-        }
-    }
-    Ok(RequestEager { common, request_uri: Uri::parse_or_verbatim(request_uri) })
+    // The Request-URI is read in every mode: a URI that does not read is no
+    // request's target, whoever built the request.
+    let request_uri = read_request_uri(request_uri)?;
+    Ok(RequestEager { common, request_uri })
 }
 
 // ---------------------------------------------------------------------------
@@ -709,6 +415,12 @@ pub fn extract_response_fields(
     }
     if mode == ExtractMode::Wire {
         let cseq_method = common.cseq().method().as_str().to_string();
+        if reading == ContactReading::Strict && can_establish_dialog(&cseq_method) {
+            let what = format!("A {status} response to {cseq_method}");
+            if let Some(refusal) = dialog_contact_refusal(common.contacts(), &what) {
+                return Err(refusal);
+            }
+        }
         if reading == ContactReading::Strict
             && (cseq_method == "INVITE" || cseq_method == "SUBSCRIBE" || cseq_method == "REFER")
         {

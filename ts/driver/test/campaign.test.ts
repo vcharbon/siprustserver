@@ -5,12 +5,19 @@
 import { Campaign, CellHits, Confrontation, E2e } from "@sip/contracts"
 import { Reclassifier } from "@sip/pipeline"
 import * as Effect from "effect/Effect"
-import * as Layer from "effect/Layer"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { exitCodeOf, runCampaign, summarize, type CampaignRun } from "../src/campaign.js"
-import { CAMPAIGN_INDEX, CONFRONTATION_FILE, ERROR_FILE, RULE_HITS_FILE, SKIP_FILE, SPECS_DIR } from "../src/layout.js"
+import {
+  CAMPAIGN_INDEX,
+  CONFRONTATION_FILE,
+  ERROR_FILE,
+  RULE_HITS_FILE,
+  SKIP_FILE,
+  SPECS_DIR,
+  STDERR_FILE
+} from "../src/layout.js"
 import { LanePresets, LaneUnknown } from "../src/lanes.js"
 import { RoutingCompiler } from "../src/routing.js"
 import {
@@ -123,6 +130,23 @@ describe("a red cell", () => {
     expect(cell.passed).toBe(false)
     expect(cell.error).toBeUndefined()
     expect(exitCodeOf(run)).toBe(1)
+  })
+
+  it("keeps its interpreter's stderr, failing verdict or panic alike, and a green cell keeps none", async () => {
+    const cases = runDir("cases")
+    dirs.push(cases)
+    const run = await campaign([
+      replayCell({ case: caseNamed(cases, "fails.v3.json") }),
+      replayCell({ case: caseNamed(cases, "panics.v3.json") }),
+      replayCell()
+    ])
+    const [failed, panicked, green] = run.index.cells
+    expect(fs.readFileSync(path.join(run.dir, failed!.dir, STDERR_FILE), "utf8")).toBe("the run failed\n")
+    expect(fs.readFileSync(path.join(run.dir, panicked!.dir, STDERR_FILE), "utf8")).toBe("the run body panicked\n")
+    expect(green!.passed).toBe(true)
+    expect(fs.existsSync(path.join(run.dir, green!.dir, STDERR_FILE))).toBe(false)
+    // A red cell is not a crashed one: it leaves no error file.
+    expect(fs.existsSync(path.join(run.dir, failed!.dir, ERROR_FILE))).toBe(false)
   })
 
   it("IS crashed where the interpreter refused before writing anything", async () => {
@@ -314,6 +338,64 @@ describe("a cell that never produced a result", () => {
   })
 })
 
+describe("the post-run RFC audit", () => {
+  const audited = async (name: string) => {
+    const cases = runDir("cases")
+    dirs.push(cases)
+    const run = await campaign([replayCell({ case: caseNamed(cases, `${name}.v3.json`) })])
+    return { cell: run.index.cells[0]!, detail: run.cells[0]!.detail }
+  }
+
+  it("passes a cell whose only finding is a scripted party's the reference shows", async () => {
+    expect((await audited("rfc-party-shown")).cell.passed).toBe(true)
+  })
+
+  it("passes a cell whose only finding is a scripted party's the document could not judge", async () => {
+    expect((await audited("rfc-party-unjudged")).cell.passed).toBe(true)
+  })
+
+  it("passes a cell whose only finding is a scripted party's the reference does not show, marked as a source fault", async () => {
+    const { cell, detail } = await audited("rfc-source-fault")
+    expect(cell.passed).toBe(true)
+    expect(cell.sourceFault).toBe(true)
+    expect(detail).toContain("a source fault stands as information")
+    expect(detail).toContain("repeats a captured message where, in this run, the RFC no longer allows it")
+    expect(detail).toContain("no-200-after-cancel [127.0.0.1:5060] by uas1")
+    expect(detail).not.toContain("the RFC audit failed the cell")
+  })
+
+  it("never lets a source fault hide the SUT's own failure: the cell fails and the detail names both", async () => {
+    const { cell, detail } = await audited("rfc-source-fault-beside-a-failure")
+    expect(cell.passed).toBe(false)
+    expect(cell.sourceFault).toBe(true)
+    expect(detail).toContain("the run failed")
+    expect(detail).toContain("beside it, a source fault")
+    expect(detail).toContain("no-200-after-cancel [127.0.0.1:5060] by uas1")
+  })
+
+  it("judges the SUT's side alone: a bless of the SUT's side passes the cell over its source fault", async () => {
+    const cases = runDir("cases")
+    dirs.push(cases)
+    const run = await campaign([replayCell({ case: caseNamed(cases, "rfc-source-fault-beside-a-failure.v3.json") })], {
+      rig: {
+        reclassifier: Reclassifier.layerWith((outcome) =>
+          Effect.succeed({ passed: true, reason: `${outcome.lane}: every failure is a named difference` })
+        )
+      }
+    })
+    const cell = run.index.cells[0]!
+    expect(cell.passed).toBe(true)
+    expect(cell.sourceFault).toBe(true)
+  })
+
+  it("fails the SUT's own finding as the RFC audit's", async () => {
+    const { cell, detail } = await audited("rfc-sut-charged")
+    expect(cell.passed).toBe(false)
+    expect(detail).toContain("the RFC audit failed the cell")
+    expect(detail).toContain("cseq-in-dialog-order")
+  })
+})
+
 describe("the post-run escape hatch", () => {
   it("lets a deployment restate a cell, and the reason rides the run", async () => {
     const run = await campaign([replayCell()], {
@@ -351,13 +433,5 @@ describe("the post-run escape hatch", () => {
     })
     const written = fs.readFileSync(path.join(run.dir, run.index.cells[0]!.dir, RULE_HITS_FILE), "utf8")
     expect(CellHits.decodeHitsSync(JSON.parse(written) as unknown)).toEqual(hits)
-  })
-})
-
-/** The stub layer is a Layer, so it composes like any deployment's would. */
-describe("composition", () => {
-  it("is what a deployment substitutes, and nothing else", () => {
-    const composed = LanePresets.layerWith(() => Effect.succeed({ kind: "whatever" }))
-    expect(Layer.isLayer(composed)).toBe(true)
   })
 })

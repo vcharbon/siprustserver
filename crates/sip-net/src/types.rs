@@ -4,7 +4,7 @@
 //! Reshaping notes (the "closer to Rust methods" adaptation):
 //!   - `RemoteInfo { address, port }` → [`std::net::SocketAddr`] everywhere.
 //!   - `bindUdp` ip/port pair → a single `addr: SocketAddr` on [`BindUdpOpts`].
-//!   - `Buffer` → `Vec<u8>` (owned) / `&[u8]` (borrowed on `send`).
+//!   - `Buffer` → `Bytes` (received) / `&[u8]` (borrowed on `send`).
 //!   - `PreIngressHook` is an `Arc<dyn Fn ...>` so it is cheap to clone into
 //!     the simulated fabric's routing table and into recorded summaries.
 
@@ -13,17 +13,19 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use sip_clock::Clock;
+use sip_message::Bytes;
+
+use crate::arrival::Arrival;
+use crate::parse_guard::ParseOutcome;
 
 /// Theoretical max single-UDP-datagram payload (65535 − 20 IP − 8 UDP). The
 /// paranoid decorator rejects sends above this; SIP fragments far below it.
 pub const MAX_UDP_PAYLOAD: usize = 65507;
 
-/// One received datagram handed up from an endpoint's inbound queue. The TS
-/// `UdpPacket` carried an optional pre-parsed `SipMessage`; here parsing is
-/// the consumer's job (and the recording projector's), so the packet is raw.
+/// One received datagram handed up from an endpoint's inbound queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UdpPacket {
-    pub raw: Vec<u8>,
+    pub raw: Bytes,
     pub src: SocketAddr,
     /// Arrival timestamp (ms) on the binding endpoint's [`BindUdpOpts::clock`]
     /// timeline. Behavioural input — the proxy ages dequeued packets off it to
@@ -31,6 +33,17 @@ pub struct UdpPacket {
     /// same monotonic-anchored `Clock`: differencing it against a raw
     /// `SystemTime` reading folds unbounded wall-vs-monotonic drift into it.
     pub arrival_ms: u64,
+    /// The parse of `raw` a pre-ingress hook made on the receive path
+    /// ([`Arrival::parse`]). The consumer takes it and parses `raw` itself
+    /// only when it is `None`, so a datagram is parsed once.
+    pub parsed: Option<Box<ParseOutcome>>,
+}
+
+impl UdpPacket {
+    /// The datagram `raw` from `src` stamped `arrival_ms`, with no parse.
+    pub fn unparsed(raw: impl Into<Bytes>, src: SocketAddr, arrival_ms: u64) -> Self {
+        Self { raw: raw.into(), src, arrival_ms, parsed: None }
+    }
 }
 
 /// How an inbound datagram fared at the receiving endpoint's inbox, recorded on
@@ -125,11 +138,18 @@ pub struct UdpEndpointCounters {
     pub pre_ingress_replies: u64,
     /// Pre-ingress replies the socket refused to send (see [`SendErrorKind`]).
     pub pre_ingress_reply_failures: u64,
+    /// Datagrams whose pre-ingress hook panicked: each was accepted, and each
+    /// is a hook defect.
+    pub pre_ingress_panics: u64,
     /// Datagrams dropped because the socket could not take them without
     /// suspending the sender ([`SendErrorKind::WouldBlock`]): the send buffer
     /// was full. Non-zero means egress was throttled by the kernel; the
     /// datagrams are lost and SIP retransmission covers them.
     pub send_would_block: u64,
+    /// Receives that failed on the socket (memory or buffers exhausted; an
+    /// ICMP error on a connected socket). The receive pump reads on after each
+    /// one.
+    pub recv_errors: u64,
     /// Datagrams the kernel dropped before the receive pump read them, mostly
     /// on a full `SO_RCVBUF` (see [`crate::socket_stats::rx_dropped`]). Always 0
     /// for an endpoint with no kernel socket of its own.
@@ -172,10 +192,13 @@ pub enum PreIngressAction {
     Reply(Vec<u8>),
 }
 
-/// Arrival-time filter installed at `bind_udp`. Receives the raw bytes, the
-/// source address, and the current queue depth. `Arc<dyn Fn>` so it clones
-/// into the simulated routing table and recorded summaries.
-pub type PreIngressHook = Arc<dyn Fn(&[u8], SocketAddr, usize) -> PreIngressAction + Send + Sync>;
+/// Arrival-time filter installed at `bind_udp`. Receives the datagram (its
+/// bytes, and the parse it makes through [`Arrival::parse`], which the queued
+/// packet carries on), the source address, and the current queue depth.
+/// `Arc<dyn Fn>` so it clones into the simulated routing table and recorded
+/// summaries.
+pub type PreIngressHook =
+    Arc<dyn Fn(&mut Arrival, SocketAddr, usize) -> PreIngressAction + Send + Sync>;
 
 /// Options for `bind_udp` (port of `BindUdpOpts`).
 #[derive(Clone)]

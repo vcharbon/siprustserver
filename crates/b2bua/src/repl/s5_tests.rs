@@ -8,7 +8,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use repl_net::frame::{Frame, Partition, Watermark};
-use repl_net::transport::{Fault, ReplicationNetwork, SimulatedReplicationNetwork};
+use repl_net::transport::ReplicationNetwork;
+use repl_net_testkit::{Fault, SimulatedReplicationNetwork};
 use sip_clock::Clock;
 use topology::{Membership, Peer, SimulatedMembership};
 
@@ -586,7 +587,7 @@ async fn reset_to_bootstrap_rearms_the_hard_deadline() {
     let listener = net.listen(a_addr).await.unwrap();
     tokio::spawn(async move {
         let mut rounds: HashMap<String, u32> = HashMap::new();
-        while let Some(conn) = listener.accept().await {
+        while let Ok(conn) = listener.accept().await {
             let Some(Frame::PullRequest { caller, partition, .. }) = conn.recv().await else {
                 continue;
             };

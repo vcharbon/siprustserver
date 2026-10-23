@@ -4,6 +4,7 @@
 //! recording-wrapped simulated network. The deliberate violation exercised is a
 //! CSeq reuse (RFC 3261 §12.2.1.1), driven via the declared CSeq deviation.
 
+use scenario_harness::dialogs::DIALOG_CSEQ_SKIP;
 use scenario_harness::{Agent, CseqOp, CseqOpAt, CseqPattern, Harness, Proxy, WaiverScope};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::CSeq;
@@ -68,7 +69,7 @@ async fn scoped_waiver_passes() {
 
 /// The SAME violation with the waiver ABSENT fails at finish().
 #[tokio::test(start_paused = true)]
-#[should_panic(expected = "RFC audit violation")]
+#[should_panic(expected = "red because RFC audit rule")]
 async fn unwaived_violation_fails() {
     let h = Harness::new("waiver-absent")
         .describe("the same cseq reuse with no waiver must fail the gate");
@@ -94,7 +95,7 @@ async fn coarse_allow_violation_still_waives() {
 /// rule attributed to bob. alice AND bob each commit the reuse; only alice's is
 /// waived, so finish() fails on bob's.
 #[tokio::test(start_paused = true)]
-#[should_panic(expected = "RFC audit violation")]
+#[should_panic(expected = "red because RFC audit rule")]
 async fn peer_scoped_waiver_does_not_filter_other_party() {
     let h = Harness::new("waiver-side")
         .describe("alice-scoped waiver leaves bob's identical violation gated");
@@ -162,7 +163,7 @@ async fn message_position_scoping_covers_its_occurrence() {
 /// elsewhere: two calls each reuse, waive only the first's position → finish
 /// fails on the second.
 #[tokio::test(start_paused = true)]
-#[should_panic(expected = "RFC audit violation")]
+#[should_panic(expected = "red because RFC audit rule")]
 async fn message_position_scoping_does_not_cover_second() {
     let h = Harness::new("waiver-pos-scope")
         .describe("a one-position waiver leaves a second occurrence gated");
@@ -280,7 +281,7 @@ async fn relay_findings_attributed_to_their_true_emitters() {
 /// alice-emitted finding; the copy mid relayed (emitted by mid) still GATES — a
 /// peer waiver never un-audits the relayer/SUT.
 #[tokio::test(start_paused = true)]
-#[should_panic(expected = "RFC audit violation")]
+#[should_panic(expected = "red because RFC audit rule")]
 async fn relay_peer_waiver_leaves_relayed_copy_gated() {
     let h = Harness::new("waiver-relay-alice")
         .describe("alice-scoped waiver leaves the mid-relayed copy gated");
@@ -304,8 +305,9 @@ fn with_cseq_response(resp: SipResponse, seq: u32) -> SipResponse {
     resp.thaw().set(CSeq::new(seq, method)).freeze().expect("a CSeq edit keeps the response whole")
 }
 
-/// Relay lane, the relayer's own fault: alice numbers her INFOs 2 and 3, and
-/// mid forwards the second as CSeq 2 (mapping bob's answer back to 3), which
+/// Relay lane, the relayer's own fault: alice numbers her INFOs n+1 and n+2
+/// (n her INVITE's), and mid forwards the second as CSeq n+1 (mapping bob's
+/// answer back to n+2), which
 /// §16.6 forbids. Nothing shows that request reaching mid, so the reuse at bob
 /// is mid's as originator and gates the run, waiver on alice or not.
 #[tokio::test(start_paused = true)]
@@ -320,6 +322,12 @@ async fn a_relayer_rewriting_the_cseq_still_gates() {
         WaiverScope::rule(CSEQ_RULE, "alice's numbering is not under test")
             .on_party("alice")
             .conditional(),
+    );
+    // mid's rewrite leaves bob's remote CSeq a step behind alice's, so her BYE
+    // skips one at bob: the audit's charge to mid is what this test pins.
+    h.waive(
+        WaiverScope::rule(DIALOG_CSEQ_SKIP, "the rewrite under test skips bob's remote CSeq")
+            .on_party("bob"),
     );
     let (bob_addr, alice_addr) = (bob.addr(), alice.addr());
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(mid.addr()).send().await;
@@ -338,9 +346,10 @@ async fn a_relayer_rewriting_the_cseq_still_gates() {
     mid.forward_response(alice_addr).await;
     i2.expect(200).await;
     let mut i3 = dialog.send_request(InDialogMethod::Info).send().await;
-    mid.forward_request_altered(bob_addr, |req| with_cseq_request(req, 2)).await;
+    let n = call.invite_cseq();
+    mid.forward_request_altered(bob_addr, |req| with_cseq_request(req, n + 1)).await;
     bob.receive("INFO").await.respond(200, "OK").await;
-    mid.forward_response_altered(alice_addr, |resp| with_cseq_response(resp, 3)).await;
+    mid.forward_response_altered(alice_addr, |resp| with_cseq_response(resp, n + 2)).await;
     i3.expect(200).await;
 
     let mut bye = dialog.bye().await;
@@ -354,7 +363,7 @@ async fn a_relayer_rewriting_the_cseq_still_gates() {
 /// Relay lane, symmetric: a mid-scoped waiver leaves the alice-emitted finding
 /// gated.
 #[tokio::test(start_paused = true)]
-#[should_panic(expected = "RFC audit violation")]
+#[should_panic(expected = "red because RFC audit rule")]
 async fn relay_mid_waiver_leaves_alice_finding_gated() {
     let h = Harness::new("waiver-relay-mid")
         .describe("mid-scoped waiver leaves the alice-emitted finding gated");
@@ -369,7 +378,7 @@ async fn relay_mid_waiver_leaves_alice_finding_gated() {
 /// at_position pins the OFFENDER: waiving the compliant INVITE's wire position
 /// does NOT cover the INFO's reuse (which carries a different `offending` index).
 #[tokio::test(start_paused = true)]
-#[should_panic(expected = "RFC audit violation")]
+#[should_panic(expected = "red because RFC audit rule")]
 async fn position_waiver_pins_offender_not_a_compliant_neighbour() {
     let h = Harness::new("waiver-pos-offender")
         .describe("waiving the INVITE's position does not cover the reuse");
@@ -389,7 +398,7 @@ async fn position_waiver_pins_offender_not_a_compliant_neighbour() {
 /// Two reuses in ONE dialog: a position-scoped waiver covers exactly its
 /// offender; the second reuse still gates.
 #[tokio::test(start_paused = true)]
-#[should_panic(expected = "RFC audit violation")]
+#[should_panic(expected = "red because RFC audit rule")]
 async fn two_reuses_one_dialog_position_scopes_exactly_one() {
     let h = Harness::new("waiver-two-reuse")
         .describe("one position waiver covers one of two reuses in a dialog");
@@ -423,4 +432,46 @@ async fn two_reuses_one_dialog_position_scopes_exactly_one() {
     let first_reuse_pos = info_positions(&h)[1];
     h.waive(WaiverScope::rule(CSEQ_RULE, "only the first reuse").at_position(first_reuse_pos));
     h.finish().await;
+}
+
+/// An out-of-dialog OPTIONS the SUT sends bob without a Max-Forwards
+/// (RFC 3261 §8.1.1.6), answered 200.
+async fn sut_sends_options_without_max_forwards(h: &Harness) {
+    const OPTIONS: &str = "OPTIONS sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-sut-1\r\n\
+From: <sip:sut@127.0.0.1>;tag=s1\r\n\
+To: <sip:bob@127.0.0.1>\r\n\
+Call-ID: sut-options@127.0.0.1\r\n\
+CSeq: 1 OPTIONS\r\n\
+Content-Length: 0\r\n\r\n";
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let (sut, _) = h.bind_sut("sut", "127.0.0.1:5080").await;
+    sut.send_to(OPTIONS.as_bytes(), bob.addr()).await.unwrap();
+    bob.receive("OPTIONS").await.respond(200, "OK").await;
+    sut.recv().await.expect("the 200 reaches the SUT");
+}
+
+/// A party-less waiver covers simulated parties only: the SUT's finding
+/// stays gated.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "red because RFC audit rule max-forwards fired (charged to sut)")]
+async fn a_party_less_waiver_leaves_the_sut_finding_gated() {
+    let h = Harness::new("waiver-sut-coarse");
+    h.allow_violation("max-forwards", "covers simulated parties only");
+    sut_sends_options_without_max_forwards(&h).await;
+    h.finish().await;
+}
+
+/// A waiver naming the SUT lane covers its finding, and the report counts
+/// it per rule.
+#[tokio::test(start_paused = true)]
+async fn a_waiver_naming_the_sut_covers_it_and_is_counted() {
+    let h = Harness::new("waiver-sut-named");
+    h.waive(WaiverScope::rule("max-forwards", "an accepted SUT deviation").on_party("sut"));
+    sut_sends_options_without_max_forwards(&h).await;
+    let report = h.finish().await;
+    assert_eq!(
+        report.waived_sut_findings(),
+        &std::collections::BTreeMap::from([("max-forwards".to_string(), 1)]),
+    );
 }

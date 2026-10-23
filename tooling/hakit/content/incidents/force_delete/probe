@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Follows each elder container on its node by its id until it ended: its exit
+# (the runtime's finishedAt), or else the first time the runtime no longer
+# knew it; a state that cannot be read is not an end. Recovered when every
+# elder ended and the replacement is live. Exit 75 while not yet. Facts: per
+# elder its end and how it was seen, the successor container's start (the
+# runtime's startedAt), and their overlap.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=crash.sh
+source "$HAKIT_LIB/crash.sh"
+seen="$(hk_state elders)"
+[ -n "$seen" ] || seen='{}'
+crashed="$(cat "$HAKIT_EVENT_DIR/crashed")"
+running=0
+while read -r pod _ node cname cid _; do
+  key="$pod/$cname"
+  [ "$(jq -r --arg k "$key" '.[$k].end_ms // "none"' <<<"$seen")" = none ] || continue
+  state="$(hk_container_state "$node" "$cid")" || exit "$HK_NOT_YET"
+  case "$state" in
+    running) running=1 ;;
+    exited)
+      fin="$(docker exec "$node" crictl inspect --output go-template --template '{{.status.finishedAt}}' "$cid")" || exit "$HK_NOT_YET"
+      seen="$(jq -c --arg k "$key" --argjson e "$(hk_ms "$fin")" '.[$k] = {end_ms: $e, seen: "exited"}' <<<"$seen")" ;;
+    gone)
+      seen="$(jq -c --arg k "$key" --argjson e "$(hk_now_ms)" '.[$k] = {end_ms: $e, seen: "gone"}' <<<"$seen")" ;;
+  esac
+done <<<"$crashed"
+echo "$seen" > "$HAKIT_EVENT_DIR/elders"
+[ "$running" -eq 0 ] || exit "$HK_NOT_YET"
+replaced="$(hk_probe_replaced)"
+facts="[]"
+while read -r pod _ _ cname _ _; do
+  json="$(kubectl -n "$NS" get pod "$pod" --ignore-not-found -o json)" || exit "$HK_NOT_YET"
+  started=null
+  if [ -n "$json" ]; then
+    node="$(jq -r '.spec.nodeName' <<<"$json")"
+    cid="$(jq -r --arg c "$cname" '.status.containerStatuses[]? | select(.name == $c) | .containerID // empty' <<<"$json")"
+    if [ -n "$cid" ]; then
+      st="$(docker exec "$node" crictl inspect --output go-template --template '{{.status.startedAt}}' "${cid#*://}")" || exit "$HK_NOT_YET"
+      started="$(hk_ms "$st")"
+    fi
+  fi
+  facts="$(jq -c --arg k "$pod/$cname" --argjson s "$started" --argjson seen "$seen" \
+    '. + [{container: $k, elder_end_ms: $seen[$k].end_ms, elder_end_seen: $seen[$k].seen, successor_started_at_ms: $s,
+           overlap_ms: (if $s == null then null else ([$seen[$k].end_ms - $s, 0] | max) end)}]' <<<"$facts")"
+done <<<"$crashed"
+jq -cn --argjson r "$replaced" --argjson e "$facts" '$r + {elders: $e}'

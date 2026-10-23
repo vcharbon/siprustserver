@@ -53,7 +53,7 @@ pub(crate) fn stateless_branch(req: &SipRequest) -> String {
     let digest = hasher.finalize();
     let mut branch = String::with_capacity(BRANCH_MAGIC_COOKIE.len() + 16);
     branch.push_str(BRANCH_MAGIC_COOKIE);
-    for byte in &digest[..8] {
+    for byte in digest.iter().take(8) {
         let _ = write!(branch, "{byte:02x}");
     }
     branch

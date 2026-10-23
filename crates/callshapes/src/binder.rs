@@ -51,16 +51,16 @@ pub trait RouteBinder: Send + Sync {
     /// intent as the reject-triggered failover — a downstream platform whose
     /// SUT arms its own ring timer from the dialed plan (e.g. a dedicated
     /// reroute number) needs no override, so the default just delegates to
-    /// [`Self::invite_plan`] and IGNORES `no_answer_sec`. A binder whose SUT
+    /// [`Self::invite_plan`] and IGNORES `no_answer_ms`. A binder whose SUT
     /// timer is client-armed (the upstream [`EgressBinder`]) overrides this to
-    /// write the per-route `no_answer_timeout_sec` into its plan.
+    /// write the per-route `no_answer_ms` into its plan.
     fn invite_plan_no_answer(
         &self,
         env: &CallEnv<'_>,
         intent: RouteIntent<'_>,
-        no_answer_sec: i64,
+        no_answer_ms: i64,
     ) -> InvitePlan {
-        let _ = no_answer_sec;
+        let _ = no_answer_ms;
         self.invite_plan(env, intent)
     }
 
@@ -86,7 +86,7 @@ impl RouteBinder for EgressBinder {
     }
 
     /// Upstream, the SUT's no-answer ring timer is CLIENT-armed: the pinned
-    /// layout's `routes` plan carries `no_answer_timeout_sec` per hop
+    /// layout's `routes` plan carries `no_answer_ms` per hop
     /// (`CallEnv::invite_plan_no_answer` → `ApiCall::routes_with_no_answer`),
     /// which the decision engine folds into the route so `apply_route` arms
     /// `TimerType::NoAnswer` on the dialed b-leg.
@@ -94,8 +94,8 @@ impl RouteBinder for EgressBinder {
         &self,
         env: &CallEnv<'_>,
         intent: RouteIntent<'_>,
-        no_answer_sec: i64,
+        no_answer_ms: i64,
     ) -> InvitePlan {
-        env.invite_plan_no_answer(intent.targets(), no_answer_sec)
+        env.invite_plan_no_answer(intent.targets(), no_answer_ms)
     }
 }

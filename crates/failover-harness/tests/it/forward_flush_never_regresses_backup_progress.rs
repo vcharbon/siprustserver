@@ -38,10 +38,11 @@
 //! still SERVES its takeover copy, and with it healing once that copy has
 //! self-released and the Element is the call's last record.
 //!
-//! The heal here delivers the whole history the cut held back, in order — a real
-//! reconnect compacts the peer log to one entry per ref first, so the Delete
-//! cell's exposure is narrower in production than it is here: the survivor sees
-//! every intermediate version of the primary's teardown, not just its last.
+//! The cut outlasts the puller's idle bound (ADR-0045), so the heal lands
+//! through a reconnect, at the puller's next backoff step (within the 2 s
+//! default ceiling): the survivor pulls the primary again from its watermark
+//! and reads the compacted log, one entry per ref — the primary's last version
+//! of the teardown.
 //!
 //! Residual, measured rather than narrated (ADR-0031 D3): the partitioned primary
 //! tore down a call the survivor kept serving. The Put cell ends with the answered
@@ -67,7 +68,7 @@ use failover_harness::{
     RULE_CSEQ_IN_DIALOG_ORDER, RULE_NO_CANCEL_AFTER_FINAL,
 };
 use repl_net::frame::{Frame, Op};
-use repl_net::transport::Direction;
+use repl_net_testkit::Direction;
 use scenario_harness::{Agent, Inbound};
 use sip_message::generators::InDialogMethod;
 use sip_message::SipMessage;
@@ -112,7 +113,7 @@ fn no_answer_decision() -> Arc<dyn CallDecisionEngine> {
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.no_answer_timeout_sec = Some(NO_ANSWER_SEC);
+                r.no_answer_ms = Some(NO_ANSWER_SEC * 1000);
                 r.callback_context = Some("forward-flush-guard-ctx".into());
                 NewCallResponse::Route(r)
             })
@@ -197,17 +198,17 @@ async fn element_state(
 ) -> Option<(CallModelState, LegState)> {
     let body = backup.get(BAK, primary, call_ref).await?;
     let call: call::Call = MsgpackCodec::new().decode(&body).expect("Element body decodes");
-    Some((call.state, call.a_leg.state))
+    Some((call.state, call.a_leg.state()))
 }
 
 /// The absolute deadline of the replica's per-b-leg `NoAnswer` entry.
 async fn ring_deadline(backup: &ReplicatedB2buaSut, primary: &str, call_ref: &str) -> i64 {
     let body = backup.get(BAK, primary, call_ref).await.expect("replica body present");
     let call: call::Call = MsgpackCodec::new().decode(&body).expect("replica body decodes");
-    assert_ne!(call.a_leg.state, LegState::Confirmed, "the survivor holds the ringing a-leg");
+    assert_ne!(call.a_leg.state(), LegState::Confirmed, "the survivor holds the ringing a-leg");
     call.timers
         .iter()
-        .find(|t| t.timer_type == TimerType::NoAnswer)
+        .find(|t| *t.timer_type() == TimerType::NoAnswer)
         .map(|t| t.fire_at)
         .expect("the replica carries the route-time NoAnswer")
 }
@@ -431,6 +432,19 @@ enum HealAt {
     AfterShed,
 }
 
+/// The longest a heal takes to reach the survivor: the healed puller's next
+/// backoff step (the 2 s default ceiling) plus one connect bound (2 s).
+const HEAL_REACH: Duration = Duration::from_secs(4);
+
+/// Pump until the survivor counts a refused forward `op`, within
+/// [`HEAL_REACH`] of the heal.
+async fn refused_after_heal(fh: &FailoverHarness, survivor: &ReplicatedB2buaSut, op: &str) -> bool {
+    fh.pump_until(Duration::from_millis(200), HEAL_REACH, async || {
+        survivor.metrics().repl_forward_flush_refused(op) >= 1
+    })
+    .await
+}
+
 /// The CDRs `nodes` wrote for `call_ref`.
 fn cdrs_on(node: &ReplicatedB2buaSut, call_ref: &str) -> usize {
     node.cdr_records().into_iter().filter(|r| r.call_ref == call_ref).count()
@@ -557,13 +571,21 @@ async fn run(name: &str, title: &str, pending: Pending, heal_at: HealAt) {
         }
         let before = survivor.live_call(&call_ref).expect("the survivor serves the call");
         fh.heal(&pri_ord, &bak_ord);
-        fh.advance(Duration::from_secs(1)).await;
+        assert!(refused_after_heal(&fh, survivor, op).await, "the pending flush landed");
         let after = survivor.live_call(&call_ref).expect("the live call survived the flush");
         assert_eq!(after.state, CallModelState::Active, "the live copy is untouched");
-        assert_eq!(after.a_leg.state, LegState::Confirmed, "and still reads the caller answered");
+        assert_eq!(after.a_leg.state(), LegState::Confirmed, "and still reads the caller answered");
         assert_eq!(
-            after.timers.iter().map(|t| (t.timer_type.clone(), t.fire_at)).collect::<Vec<_>>(),
-            before.timers.iter().map(|t| (t.timer_type.clone(), t.fire_at)).collect::<Vec<_>>(),
+            after
+                .timers
+                .iter()
+                .map(|t| (t.key.clone(), t.generation, t.fire_at))
+                .collect::<Vec<_>>(),
+            before
+                .timers
+                .iter()
+                .map(|t| (t.key.clone(), t.generation, t.fire_at))
+                .collect::<Vec<_>>(),
             "a refused flush carries no progress: the ledger is not resynced",
         );
         assert!(

@@ -194,30 +194,162 @@ const isInviteSuccess = Flow.isSuccessToInvite
 
 const isAckArrival = (step: Flow.Step): boolean => step.op === "expect" && isAck(step)
 
+const isBye = (step: Flow.Step): boolean => Flow.isRequest(step, "BYE")
+
+/**
+ * The SUT's ACK give-up: how long it waits for the ingress party's ACK to a 2xx
+ * it relayed before composing its own and tearing the call down
+ * (`ack_timeout_sec`, default 32 s, the 64·T1 bound of the 2xx ladder of RFC
+ * 3261 §13.3.1.4).
+ */
+const ACK_GIVE_UP_US =
+  Schedules.SCHEDULES.classes.find((c) => c.class === "final-2xx")!.give_up_ms * 1000
+
+/**
+ * Where the INVITE transaction `leg` holds at `at` was opened by the actor and
+ * is still awaiting its final: the index of that `send` INVITE, else undefined.
+ */
+const pendingIngressInvite = (
+  steps: ReadonlyArray<Flow.Step>,
+  at: number,
+  leg: string
+): number | undefined => {
+  for (let i = at - 1; i >= 0; i -= 1) {
+    const s = steps[i]!
+    if (s.leg !== leg) continue
+    if (isInvite(s)) return s.op === "send" ? i : undefined
+    if (isInviteFinal(s)) return undefined
+  }
+  return undefined
+}
+
+/**
+ * Whether the SUT waits on an ingress party's ACK for the 2xx at `at`, answering
+ * its INVITE at `inviteAt`: the first 2xx since that INVITE, no CANCEL taken
+ * before it, relayed as a 2xx another leg expects to an INVITE its actor still
+ * had pending when the SUT's INVITE went out. Any other 2xx the SUT ACKs itself.
+ */
+const awaitsIngressAck = (
+  steps: ReadonlyArray<Flow.Step>,
+  inviteAt: number,
+  at: number,
+  leg: string
+): boolean => {
+  const before = steps.slice(inviteAt + 1, at).filter((s) => s.leg === leg)
+  const cancelled = before.some((s) => s.op === "expect" && Flow.isRequest(s, "CANCEL"))
+  if (cancelled || before.some(isInviteSuccess)) return false
+  return steps.some((s, j) => {
+    if (j <= at || s.leg === leg || s.op !== "expect" || !isInviteSuccess(s)) return false
+    const ingress = pendingIngressInvite(steps, inviteAt, s.leg)
+    return ingress !== undefined && pendingIngressInvite(steps, j, s.leg) === ingress
+  })
+}
+
+/**
+ * Whether an ACK the SUT can carry onto `leg` is sent on any other leg once the
+ * exchange opened at `inviteAt` is open. Measured from the INVITE and not from
+ * the 2xx: the answer the ACK carries reaches the SUT once, and every 2xx of
+ * that transaction after it — the original and each repeat — draws its own ACK.
+ */
+const forwarded = (
+  steps: ReadonlyArray<Flow.Step>,
+  inviteAt: number,
+  leg: string
+): boolean =>
+  steps.slice(inviteAt + 1).some((s) => s.leg !== leg && s.op === "send" && isAck(s))
+
+/** The index of the newest INVITE on `leg` before `at`, where the SUT sent it. */
+const sutInviteBefore = (
+  steps: ReadonlyArray<Flow.Step>,
+  at: number,
+  leg: string
+): number | undefined => {
+  for (let i = at - 1; i >= 0; i -= 1) {
+    const s = steps[i]!
+    if (s.leg === leg && isInvite(s)) return s.op === "expect" ? i : undefined
+  }
+  return undefined
+}
+
+/** The BYE with which a 2xx's answerer ends its dialog before any ACK reaches it. */
+export interface AnswererTeardown {
+  /** The answerer's BYE step. */
+  readonly step: string
+  /** How long after the 2xx the capture placed that BYE. */
+  readonly afterUs: number
+}
+
+/**
+ * The BYE with which the peer that sent the 2xx at `at` ends its dialog before
+ * the SUT puts any ACK on that leg, or undefined where an ACK lands first. All
+ * three hold: the SUT waits on an ingress party's ACK for that 2xx ({@link
+ * awaitsIngressAck}); no ACK it could relay is sent on another leg after the
+ * INVITE, before the BYE or after it (RFC 5407 §2 relays it in either case);
+ * and the first BYE after the 2xx is the answerer's own, on the 2xx's leg and
+ * dialog, within {@link ACK_GIVE_UP_US} of the 2xx (RFC 3261 §13.3.1.4,
+ * measured from the 2xx, never overstating a window that runs from its relay).
+ * A BYE stamped with an early dialog must name the 2xx's; an unstamped one
+ * rides the confirmed dialog, which is this 2xx's as the transaction's first.
+ * Any other BYE is the SUT's teardown, which ACKs this leg ahead of its own BYE.
+ * Undefined where either instant is unstated or `at` is no 2xx a peer sends to
+ * an INVITE the SUT sent.
+ */
+export const answererEndsDialogFirst = (
+  steps: ReadonlyArray<Flow.Step>,
+  at: number
+): AnswererTeardown | undefined => {
+  const final = steps[at]
+  if (final === undefined || final.op !== "send" || !isInviteSuccess(final)) return undefined
+  const inviteAt = sutInviteBefore(steps, at, final.leg)
+  if (inviteAt === undefined) return undefined
+  if (!awaitsIngressAck(steps, inviteAt, at, final.leg)) return undefined
+  if (forwarded(steps, inviteAt, final.leg)) return undefined
+  const bye = steps.slice(at + 1).find(isBye)
+  if (bye === undefined || bye.leg !== final.leg || bye.op !== "send") return undefined
+  if (bye.early !== undefined && bye.early !== final.early) return undefined
+  const sent = final.observed?.at_us
+  const ended = bye.observed?.at_us
+  if (sent === undefined || ended === undefined) return undefined
+  const afterUs = ended - sent
+  return afterUs < ACK_GIVE_UP_US ? { step: bye.id, afterUs } : undefined
+}
+
 /**
  * Every 2xx the flow answers a SUT INVITE with and never states the ACK for.
  * Empty for a document cut from a vantage that captured its whole call.
  *
- * A BYE anywhere around it changes nothing, and that is the whole point of the
- * rule: RFC 5407 §2 puts a UA that has sent OR received a BYE in the Mortal
- * state, where it "MUST NOT send any new requests within the dialog" — and
- * carves the ACK to a 2xx straight back out of that prohibition, because the
- * ACK belongs to the INVITE transaction and not to the dialog (RFC 3261 §6,
- * §17.1). Appendix D is explicit that invite-usage state is kept past the BYE
- * for this one purpose. So the ACK is owed unconditionally, the capture that
- * lacks it lost it, and a conformant SUT replaying the document sends it and is
- * charged an unexpected datagram.
+ * A BYE does not discharge it: RFC 5407 §2 puts a UA that has sent OR received a
+ * BYE in the Mortal state, where it "MUST NOT send any new requests within the
+ * dialog" — and carves the ACK to a 2xx straight back out of that prohibition,
+ * because the ACK belongs to the INVITE transaction and not to the dialog (RFC
+ * 3261 §6, §17.1). So the ACK is owed, the capture that lacks it lost it, and a
+ * conformant SUT replaying the document sends it and is charged an unexpected
+ * datagram.
  *
- * What makes the hole cost anything is that the RUN still puts an ACK there, and
- * whether it can turns on the offer model ({@link offeredIngress}). Where the
- * exchange was dialled WITH an offer the stack can compose that ACK alone, so
- * the §13.3.1.4 give-up puts one on the leg ahead of its BYE and the charge is
- * unconditional. Where it was dialled without one the ACK owes an answer only
- * the ingress leg's own ACK supplies, so it goes out exactly when that ACK
- * arrives — and where the document holds none after this 2xx, nothing lands,
- * the case replays as written, and the coverage is kept.
+ * What makes the hole cost anything is that the RUN still puts an ACK there. The
+ * SUT's ACK on this leg is the acknowledging party's own, relayed whenever it
+ * arrives (§13.2.2.4), or one the SUT composes: ahead of its own teardown BYE,
+ * or at the §13.3.1.4 give-up. Composing needs the offer model
+ * ({@link offeredIngress}): where the exchange was dialled WITH an offer the
+ * stack can compose that ACK alone and the charge stands. Where it was dialled
+ * without one the ACK owes an answer only the ingress leg's own ACK supplies, so
+ * it goes out exactly when that ACK arrives — and where the document holds none
+ * after this 2xx, nothing lands, the case replays as written, and the coverage
+ * is kept.
  *
- * TWO SHAPES ARE NOT THIS HOLE, and each is read off the document itself:
+ * Two shapes leave the run no ACK to put there, so neither is charged:
+ *
+ * - the peer that sent the 2xx ends the dialog first ({@link
+ *   answererEndsDialogFirst}): the dialog is gone before the give-up and before
+ *   any teardown of the SUT's own, and no ACK exists to relay;
+ * - the 2xx answers a re-INVITE still open when the SUT's own BYE reached the
+ *   leg: the release CANCELs that re-INVITE (§9.1) and the 487 it draws
+ *   completes the transaction before the 2xx the document scripts past the
+ *   release, so that 2xx meets no transaction the SUT ACKs. The answerer's own
+ *   BYE is not that release: a 2xx crossing the CANCEL it draws is one the SUT
+ *   ACKs (§9.1).
+ *
+ * TWO MORE SHAPES ARE NOT THIS HOLE, and each is read off the document itself:
  *
  * - an ACK the leg DOES capture settles its transaction for good, so every later
  *   repeat of that 2xx is one the answer crossed in flight (§13.3.1.4) — the ACK
@@ -243,22 +375,26 @@ export const unackedFinals = (
   >()
   /** Legs whose open INVITE transaction the flow states an ACK for. */
   const acked = new Set<string>()
+  /** Legs holding an INVITE transaction, either way, that no final has answered yet. */
+  const pending = new Set<string>()
+  /** Legs an earlier 2xx established a dialog on. */
+  const established = new Set<string>()
+  /** Legs the SUT's BYE reached while a re-INVITE on them was pending, until the next INVITE. */
+  const releasedPending = new Set<string>()
   const charged: Array<UnackedFinal> = []
-  /**
-   * Whether an ACK the SUT can carry onto this leg is sent anywhere else once
-   * the exchange is open. Measured from the INVITE and not from the 2xx: the
-   * answer the ACK carries reaches the SUT once, and every 2xx of that
-   * transaction after it — the original and each repeat — draws its own ACK.
-   */
-  const forwarded = (at: number, leg: string): boolean =>
-    steps.slice(at + 1).some((s) => s.leg !== leg && s.op === "send" && isAck(s))
   const supersede = (leg: string): void => {
-    const pending = owed.get(leg)
+    const unacked = owed.get(leg)
     owed.delete(leg)
-    if (pending !== undefined && pending.charge) charged.push(pending.final)
+    if (unacked !== undefined && unacked.charge) charged.push(unacked.final)
   }
   steps.forEach((step, at) => {
+    const reinvitePending = pending.has(step.leg) && established.has(step.leg)
+    if (isBye(step) && step.op === "expect" && reinvitePending) releasedPending.add(step.leg)
+    if (isInviteFinal(step)) pending.delete(step.leg)
+    if (isInviteSuccess(step)) established.add(step.leg)
     if (isInvite(step)) {
+      pending.add(step.leg)
+      releasedPending.delete(step.leg)
       supersede(step.leg)
       acked.delete(step.leg)
       if (step.op === "expect") opened.set(step.leg, { step, at })
@@ -266,9 +402,11 @@ export const unackedFinals = (
     } else if (step.op === "send" && isInviteSuccess(step)) {
       const invite = opened.get(step.leg)
       if (invite === undefined || acked.has(step.leg) || repeats(step)) return
+      if (releasedPending.has(step.leg)) return
+      if (answererEndsDialogFirst(steps, at) !== undefined) return
       owed.set(step.leg, {
         charge: offeredIngress(steps, invite.at, step.leg) ||
-          forwarded(invite.at, step.leg),
+          forwarded(steps, invite.at, step.leg),
         final: {
           final: step.id,
           invite: invite.step.id,

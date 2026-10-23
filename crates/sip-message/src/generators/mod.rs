@@ -4,7 +4,7 @@
 //! sentinels, no post-processing; Call-ID, branch, tag, local address and
 //! CSeq are arguments, never side effects. Reading *existing* messages does
 //! NOT live here — that is the typed read surface on the message itself;
-//! lenient raw scanning is [`crate::sniff`].
+//! lenient raw scanning is `crate::sniff`.
 //!
 //! Each generator is a recipe over a [`Draft`](crate::draft::Draft): it knows
 //! the dialog rules — CSeq stepping, route-set application, tag placement — and
@@ -24,17 +24,22 @@
 //!   - [`out_of_dialog`] — initial INVITE / one-shot requests (§8.1.1)
 //!   - [`in_dialog`] — in-dialog requests + route-set computation (§12.2.1.1)
 //!   - [`ack`] — ACK for 2xx (§13.2.2.4) and for non-2xx finals (§17.1.1.3)
+//!   - [`bye`] — BYE of a dialog a 2xx created that nothing above holds (§15.1.1)
 //!   - [`cancel`] — CANCEL of an outstanding INVITE (§9.1)
 //!   - [`response`] — UAS responses echoing the request (§8.2.6.2)
+//!   - [`invalid_request`] — the stateless 400 to a request the parser refused
 //!   - [`relay`] — B2BUA relay transparency + rebuilt responses (§16.6)
 
 mod emit;
+mod error;
 
 pub mod ack;
+pub mod bye;
 pub mod cancel;
 pub mod capabilities;
 pub mod contact_policy;
 pub mod in_dialog;
+pub mod invalid_request;
 pub mod methods;
 pub mod out_of_dialog;
 pub mod relay;
@@ -45,15 +50,20 @@ pub mod spec;
 
 pub use ack::{
     generate_ack_for_2xx, generate_ack_for_2xx_from_invite, generate_ack_for_non_2xx,
-    GenerateAckFor2xxOpts,
+    generate_ack_for_non_2xx_in_dialog, GenerateAckFor2xxOpts,
 };
+pub use bye::generate_bye_for_2xx_from_invite;
 pub use cancel::generate_cancel;
 pub use capabilities::{admitted_on, CapabilitySet, B2BUA_ACCEPT, B2BUA_ALLOW, B2BUA_SUPPORTED};
 pub use contact_policy::{
     request_states_contact, response_names_retry_targets, response_states_contact,
     response_states_own_contact, retain_retry_targets_for, retry_targets,
 };
+pub use error::GenerateError;
 pub use in_dialog::{generate_in_dialog_request, GenerateInDialogRequestOpts, InDialogResult};
+pub use invalid_request::{
+    generate_invalid_request, INVALID_REQUEST_REASON, INVALID_REQUEST_STATUS,
+};
 pub use methods::{InDialogMethod, OutOfDialogMethod};
 pub use out_of_dialog::{generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts};
 pub use relay::{

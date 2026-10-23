@@ -37,7 +37,7 @@ use failover_harness::{
 };
 use ha_harness::{frame_summary, ReplReport};
 use repl_net::frame::{Frame, Partition};
-use repl_net::transport::{CapturedFrame, Direction};
+use repl_net_testkit::{CapturedFrame, Direction};
 use scenario_harness::Agent;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -334,7 +334,7 @@ async fn partition_delivers_nothing_across_the_cut() {
     fh.advance(Duration::from_millis(500)).await;
     let call_ref = find_backed_up_ref(backup, &pri_ord).await;
     let ringing = replica(backup, &pri_ord, &call_ref).await;
-    assert_ne!(ringing.a_leg.state, LegState::Confirmed, "the backup holds the ringing a-leg");
+    assert_ne!(ringing.a_leg.state(), LegState::Confirmed, "the backup holds the ringing a-leg");
     let ringing_p = backup.call_gen(BAK, &pri_ord, &call_ref).expect("the replica has a (p,b)");
     let pri_listen = listen_of(&fh.repl_report(), &pri_ord);
 
@@ -347,7 +347,7 @@ async fn partition_delivers_nothing_across_the_cut() {
     bob.receive("ACK").await;
     fh.advance(Duration::from_secs(2)).await;
     let live = primary.live_call(&call_ref).expect("the primary serves the call");
-    assert_eq!(live.a_leg.state, LegState::Confirmed, "the primary answered the caller");
+    assert_eq!(live.a_leg.state(), LegState::Confirmed, "the primary answered the caller");
 
     // ── the fabric: the answer was flushed, nothing crossed ──────────────────
     let report = fh.repl_report();
@@ -367,8 +367,8 @@ async fn partition_delivers_nothing_across_the_cut() {
     );
     let held = replica(backup, &pri_ord, &call_ref).await;
     assert_eq!(
-        (held.state, held.a_leg.state),
-        (ringing.state, ringing.a_leg.state),
+        (held.state, held.a_leg.state()),
+        (ringing.state, ringing.a_leg.state()),
         "the backup replica is still the ringing body while the cut lasts",
     );
     assert_eq!(
@@ -394,7 +394,7 @@ async fn partition_delivers_nothing_across_the_cut() {
     }
     assert!(landed >= staged.len(), "every frame the cut held landed ({landed} frames)");
     let converged = replica(backup, &pri_ord, &call_ref).await;
-    assert_eq!(converged.a_leg.state, LegState::Confirmed, "the replica converged on the heal");
+    assert_eq!(converged.a_leg.state(), LegState::Confirmed, "the replica converged on the heal");
     assert!(
         backup.call_gen(BAK, &pri_ord, &call_ref).is_some_and(|p| p > ringing_p),
         "the replica carries the answered version",
@@ -427,7 +427,7 @@ async fn delay_lands_a_frame_no_earlier_than_the_delay() {
     fh.advance(Duration::from_millis(500)).await;
     let call_ref = find_backed_up_ref(backup, &pri_ord).await;
     let ringing = replica(backup, &pri_ord, &call_ref).await;
-    assert_ne!(ringing.a_leg.state, LegState::Confirmed, "the backup holds the ringing a-leg");
+    assert_ne!(ringing.a_leg.state(), LegState::Confirmed, "the backup holds the ringing a-leg");
     let pri_listen = listen_of(&fh.repl_report(), &pri_ord);
 
     // ── the delay, then the primary flushes: the callee answers ──────────────
@@ -471,8 +471,8 @@ async fn delay_lands_a_frame_no_earlier_than_the_delay() {
         );
         let held = replica(backup, &pri_ord, &call_ref).await;
         assert_eq!(
-            (held.state, held.a_leg.state),
-            (ringing.state, ringing.a_leg.state),
+            (held.state, held.a_leg.state()),
+            (ringing.state, ringing.a_leg.state()),
             "at {} ms (flush sent at {sent_at} ms, delay {DELAY_MS} ms) the replica is still \
              the ringing body",
             fh.now_ms(),
@@ -498,7 +498,7 @@ async fn delay_lands_a_frame_no_earlier_than_the_delay() {
     }
     assert!(checked >= 1, "at least one delayed frame landed ({checked} checked)");
     let converged = replica(backup, &pri_ord, &call_ref).await;
-    assert_eq!(converged.a_leg.state, LegState::Confirmed, "the delayed answer version landed");
+    assert_eq!(converged.a_leg.state(), LegState::Confirmed, "the delayed answer version landed");
 
     // ── the call ends end-to-end and the cluster releases it ─────────────────
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
@@ -598,12 +598,11 @@ async fn delay_reaches_a_stream_opened_after_the_fault() {
 }
 
 /// **A signalling cut delivers no datagram to or from the node.** The cut
-/// lands while the worker's b-leg INVITE is unanswered: the callee's 180 is
-/// forwarded by the proxy and refused at the cut address, the worker's own
-/// Timer A rungs leave and are refused at its address — every SIP entry
-/// touching the address since the cut is undelivered, the caller sees
-/// nothing, and the process is still up. Once restored, the worker's next
-/// rung crosses and the call completes on it.
+/// lands once the caller holds the worker's 100 and the b-leg INVITE is
+/// unanswered: the callee's 180 is refused at the cut address, the worker's
+/// Timer A rungs are refused at its address — every SIP entry touching the
+/// address since the cut is undelivered, the caller sees nothing more, and
+/// the process is still up. Restored, the next rung crosses and completes.
 ///
 /// The recording pairs a send with the earliest later arrival of the same
 /// bytes, so once a byte-identical rung crosses after the restore the refused
@@ -619,6 +618,7 @@ async fn cut_signalling_delivers_no_datagram_to_or_from_the_node() {
     // ── the b-leg INVITE reaches the callee; the worker is then cut ──────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
+    call.expect(100).await;
     let (pri_ord, _bak_ord) = worker_ordinals(uas.request());
     let (primary, backup) = if pri_ord == "b1" { (&w_b1, &w_b2) } else { (&w_b2, &w_b1) };
     let pri_sip = primary.sip_addr();
@@ -629,7 +629,7 @@ async fn cut_signalling_delivers_no_datagram_to_or_from_the_node() {
     // ── toward the cut node: the callee's 180; from it: its Timer A rungs ────
     uas.respond(180, "Ringing").await;
     fh.advance(Duration::from_secs(2)).await;
-    let touching: Vec<sip_net::RecordedSipEntry> = fh
+    let touching: Vec<sip_net_testkit::RecordedSipEntry> = fh
         .sip_entries()
         .into_iter()
         .filter(|e| e.seq > cut_seq && (e.from == pri_sip || e.to == pri_sip))
@@ -638,7 +638,7 @@ async fn cut_signalling_delivers_no_datagram_to_or_from_the_node() {
     let from = touching.iter().filter(|e| e.from == pri_sip).count();
     assert!(toward >= 1, "the proxy attempted a datagram toward the cut worker (the 180)");
     assert!(from >= 1, "the cut worker attempted a datagram of its own (an INVITE rung)");
-    let crossed: Vec<&sip_net::RecordedSipEntry> =
+    let crossed: Vec<&sip_net_testkit::RecordedSipEntry> =
         touching.iter().filter(|e| e.delivered).collect();
     assert!(
         crossed.is_empty(),
@@ -662,7 +662,7 @@ async fn cut_signalling_delivers_no_datagram_to_or_from_the_node() {
         })
         .await;
     assert!(crossed, "a datagram from {pri_sip} crosses once the cut is restored");
-    let inside: Vec<sip_net::RecordedSipEntry> = fh
+    let inside: Vec<sip_net_testkit::RecordedSipEntry> = fh
         .sip_entries()
         .into_iter()
         .filter(|e| e.from == pri_sip || e.to == pri_sip)
@@ -695,8 +695,8 @@ async fn cut_signalling_delivers_no_datagram_to_or_from_the_node() {
 /// **A crash stops every frame and datagram from the node.** After `crash()`
 /// no frame is sent from any address the node owned and no datagram leaves
 /// its SIP address; it serves nothing; the peer sees the node's stream close.
-/// The caller's BYE fails over to the survivor, the node reboots and reclaims
-/// the deferred terminal, and the call ends with one CDR.
+/// The caller's BYE fails over to the survivor, which discharges the call of
+/// the departed node; the node reboots, and the call ends with one CDR.
 #[tokio::test(start_paused = true)]
 async fn crash_stops_every_frame_and_datagram_from_the_node() {
     let name = "fault-crash-stops-everything";
@@ -747,7 +747,7 @@ async fn crash_stops_every_frame_and_datagram_from_the_node() {
         sent_by_dead.len(),
         sent_by_dead.first().map(|f| format!("{} → {}: {}", f.from, f.to, frame_summary(&f.frame))),
     );
-    let sip_from_dead: Vec<sip_net::RecordedSipEntry> =
+    let sip_from_dead: Vec<sip_net_testkit::RecordedSipEntry> =
         fh.sip_entries().into_iter().filter(|e| e.seq > crash_seq && e.from == pri_sip).collect();
     assert!(
         sip_from_dead.is_empty(),
@@ -762,7 +762,7 @@ async fn crash_stops_every_frame_and_datagram_from_the_node() {
         "the survivor saw the dead node's stream close",
     );
 
-    // ── reboot and reclaim: the deferred terminal is discharged once ─────────
+    // ── reboot: the ended call is discharged once ───────────────────────────
     fh.advance(Duration::from_secs(30)).await;
     reboot_and_ready(&mut fh, primary, survivor, &pri_ord, &proxy).await;
     let reboot_seq = last_marker_seq(&fh);

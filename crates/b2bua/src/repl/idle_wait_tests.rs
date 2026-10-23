@@ -14,7 +14,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use repl_net::frame::{Partition, Watermark};
-use repl_net::transport::{ReplicationNetwork, SimulatedReplicationNetwork};
+use repl_net::transport::ReplicationNetwork;
+use repl_net_testkit::SimulatedReplicationNetwork;
 use sip_clock::testkit::run_paused_within;
 use sip_clock::Clock;
 use tokio::sync::watch;
@@ -43,7 +44,7 @@ async fn silent_peer(net: &Arc<SimulatedReplicationNetwork>, at: SocketAddr) {
     let listener = net.listen(at).await.unwrap();
     tokio::spawn(async move {
         let mut held = Vec::new();
-        while let Some(conn) = listener.accept().await {
+        while let Ok(conn) = listener.accept().await {
             let _ = conn.recv().await;
             held.push(conn);
         }

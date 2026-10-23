@@ -17,12 +17,15 @@ use scenario_harness::{
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
+/// The caller's first CSeq: its INVITE's.
+const C: u32 = scenario_harness::Party::Caller.first_cseq();
+
 fn parse(raw: &[u8]) -> SipMessage {
     CustomParser::new().parse(raw).unwrap_or_else(|e| panic!("entry did not parse: {e}"))
 }
 
 /// The CSeq number of the first request of `method` on the recorded wire.
-fn req_cseq(entries: &[sip_net::RecordedSipEntry], method: &str) -> Option<u32> {
+fn req_cseq(entries: &[sip_net_testkit::RecordedSipEntry], method: &str) -> Option<u32> {
     entries.iter().find_map(|e| match parse(&e.raw) {
         SipMessage::Request(r) if r.method() == method => Some(r.cseq().seq()),
         _ => None,
@@ -30,7 +33,7 @@ fn req_cseq(entries: &[sip_net::RecordedSipEntry], method: &str) -> Option<u32> 
 }
 
 /// The `sent_ms` of the first request of `method`.
-fn req_sent_ms(entries: &[sip_net::RecordedSipEntry], method: &str) -> Option<u64> {
+fn req_sent_ms(entries: &[sip_net_testkit::RecordedSipEntry], method: &str) -> Option<u64> {
     entries.iter().find_map(|e| match parse(&e.raw) {
         SipMessage::Request(r) if r.method() == method => Some(e.sent_ms),
         _ => None,
@@ -39,7 +42,7 @@ fn req_sent_ms(entries: &[sip_net::RecordedSipEntry], method: &str) -> Option<u6
 
 /// The `sent_ms` of the first response of `status` whose CSeq echoes `cseq_method`.
 fn status_sent_ms(
-    entries: &[sip_net::RecordedSipEntry],
+    entries: &[sip_net_testkit::RecordedSipEntry],
     status: u16,
     cseq_method: &str,
 ) -> Option<u64> {
@@ -52,7 +55,7 @@ fn status_sent_ms(
 }
 
 /// Whether any recorded response carries `status`.
-fn has_status(entries: &[sip_net::RecordedSipEntry], status: u16) -> bool {
+fn has_status(entries: &[sip_net_testkit::RecordedSipEntry], status: u16) -> bool {
     entries.iter().any(|e| matches!(parse(&e.raw), SipMessage::Response(r) if r.status() == status))
 }
 
@@ -139,7 +142,7 @@ async fn cseq_pattern_via_actorspec_emits_declared_number() {
                     Goal::new(Barrier::None, GoalStep::Bye),
                 ],
             );
-            // step 0 (OPTIONS): natural → CSeq 2; step 1 (BYE): reuse → CSeq 2.
+            // step 0 (OPTIONS): natural → CSeq C+1; step 1 (BYE): reuse → CSeq C+1.
             a.cseq =
                 Some(CseqPattern { offset: 0, ops: vec![CseqOpAt { at: 1, op: CseqOp::Reuse }] });
             a
@@ -147,17 +150,21 @@ async fn cseq_pattern_via_actorspec_emits_declared_number() {
         answering("bob", &bob, Disposition::Answer, vec![]),
     ];
     let call =
-        ActorCall::new(actors, established(), SettleBarrier::default_ceiling(), Expect::HappyBye);
+        ActorCall::new(actors, established(), SettleBarrier::default_ceiling(), Expect::answered());
     let env = CallEnv::for_functional(&alice, &bob, None, bob.addr(), "X-Test", "tok-cseq");
     let ctx = CallCtx::new();
     let res = run_built_actor_call(call, &env, &ctx).await;
-    assert!(res.is_ok(), "the deviated call settled clean, got {res:?} notes={:?}", ctx.notes());
+    assert!(
+        res.is_success(),
+        "the deviated call settled clean, got {res:?} notes={:?}",
+        ctx.notes()
+    );
 
     let entries = h.wire_entries();
-    assert_eq!(req_cseq(&entries, "OPTIONS"), Some(2), "OPTIONS carries the natural CSeq 2");
+    assert_eq!(req_cseq(&entries, "OPTIONS"), Some(C + 1), "OPTIONS carries the natural CSeq C+1");
     assert_eq!(
         req_cseq(&entries, "BYE"),
-        Some(2),
+        Some(C + 1),
         "the teardown BYE reuses the OPTIONS's CSeq via the shared counter (declared reuse)",
     );
     h.finish().await;
@@ -192,11 +199,11 @@ async fn delayed_automatic_via_actorspec_holds_the_ack() {
         answering("bob", &bob, Disposition::Answer, vec![]),
     ];
     let call =
-        ActorCall::new(actors, established(), SettleBarrier::default_ceiling(), Expect::HappyBye);
+        ActorCall::new(actors, established(), SettleBarrier::default_ceiling(), Expect::answered());
     let env = CallEnv::for_functional(&alice, &bob, None, bob.addr(), "X-Test", "tok-delay");
     let ctx = CallCtx::new();
     let res = run_built_actor_call(call, &env, &ctx).await;
-    assert!(res.is_ok(), "the delayed-ACK call settled clean, got {res:?}");
+    assert!(res.is_success(), "the delayed-ACK call settled clean, got {res:?}");
 
     let entries = h.wire_entries();
     let ack = req_sent_ms(&entries, "ACK").expect("an ACK was recorded");
@@ -248,7 +255,7 @@ async fn scoped_delayed_automatic_holds_only_the_named_reinvite_ack() {
         a.delayed = vec![DelayedAutomatic::ack_after(1000).on_invite(1)];
         a
     }];
-    let call = ActorCall::new(actors, vec![], SettleBarrier::default_ceiling(), Expect::HappyBye);
+    let call = ActorCall::new(actors, vec![], SettleBarrier::default_ceiling(), Expect::answered());
     let env = CallEnv::for_functional(&alice, &bob, None, bob.addr(), "X-Test", "tok-scoped");
     let ctx = CallCtx::new();
 
@@ -273,7 +280,11 @@ async fn scoped_delayed_automatic_holds_only_the_named_reinvite_ack() {
         bob.receive("BYE").await.respond(200, "OK").await;
     };
     let (res, ()) = tokio::join!(run_built_actor_call(call, &env, &ctx), bob_side);
-    assert!(res.is_ok(), "the scoped-hold call settled clean, got {res:?} notes={:?}", ctx.notes());
+    assert!(
+        res.is_success(),
+        "the scoped-hold call settled clean, got {res:?} notes={:?}",
+        ctx.notes()
+    );
 
     let entries = h.wire_entries();
     // Per-transaction reads: the ACK reuses its INVITE's CSeq (§13.2.2.4).
@@ -303,20 +314,20 @@ async fn scoped_delayed_automatic_holds_only_the_named_reinvite_ack() {
             })
             .expect("a 200/INVITE for the transaction was recorded")
     };
-    let initial_acks = ack_ms(1);
+    let initial_acks = ack_ms(C);
     assert_eq!(initial_acks.len(), 1, "one ACK to the establishing INVITE");
     assert!(
-        initial_acks[0].saturating_sub(first_200_ms(1)) < 500,
+        initial_acks[0].saturating_sub(first_200_ms(C)) < 500,
         "the UNSCOPED ordinal-0 ACK fires promptly (scoping holds ONLY ordinal 1): gap {}ms",
-        initial_acks[0].saturating_sub(first_200_ms(1)),
+        initial_acks[0].saturating_sub(first_200_ms(C)),
     );
-    let reinvite_acks = ack_ms(2);
+    let reinvite_acks = ack_ms(C + 1);
     assert_eq!(
         reinvite_acks.len(),
         2,
         "exactly the held ACK + the ONE post-hold re-ACK (mid-hold retransmissions absorbed)",
     );
-    let held_gap = reinvite_acks[0].saturating_sub(first_200_ms(2));
+    let held_gap = reinvite_acks[0].saturating_sub(first_200_ms(C + 1));
     assert!(
         held_gap >= 1000,
         "the re-INVITE ACK was held the declared 1s despite mid-hold 200 retransmissions: gap {held_gap}ms",
@@ -400,7 +411,7 @@ async fn mid_hold_retransmissions_are_recorded_and_leave_the_response_log_alone(
         .collect();
     assert_eq!(
         retransmitted,
-        vec![(200, "INVITE".to_string(), 2), (200, "INVITE".to_string(), 2)],
+        vec![(200, "INVITE".to_string(), C + 1), (200, "INVITE".to_string(), C + 1)],
         "both mid-hold retransmissions of the re-INVITE 200 are recorded, in arrival order",
     );
     // The response log holds the establishing 200 and the re-INVITE's FIRST 200
@@ -451,14 +462,14 @@ async fn run_100_case(name: &'static str, on: bool) -> bool {
         ),
     ];
     let mut call =
-        ActorCall::new(actors, established(), SettleBarrier::default_ceiling(), Expect::HappyBye);
+        ActorCall::new(actors, established(), SettleBarrier::default_ceiling(), Expect::answered());
     if on {
         call = call.with_automatics(Automatics { answer_100_trying: true, ..Default::default() });
     }
     let env = CallEnv::for_functional(&alice, &bob, None, bob.addr(), "X-Test", "tok-100");
     let ctx = CallCtx::new();
     let res = run_built_actor_call(call, &env, &ctx).await;
-    assert!(res.is_ok(), "[{name}] the scripted call settled clean, got {res:?}");
+    assert!(res.is_success(), "[{name}] the scripted call settled clean, got {res:?}");
 
     let saw = has_status(&h.wire_entries(), 100);
     h.finish().await;

@@ -29,8 +29,8 @@
 //!                   In k8s inject the pod IP via downward API `status.podIP`,
 //!                   else peers route responses to 0.0.0.0 (a storm).
 //!   B2BUA_DEST      downstream UAS host:port          (default 127.0.0.1:5070)
-//!   B2BUA_OUTBOUND_PROXY  front-proxy host:port every b-leg (worker→callee)
-//!                   request is forced through (preloaded `Route ;lr;outbound`).
+//!   B2BUA_OUTBOUND_PROXY  front-proxy IP-literal ip:port every b-leg (worker→callee)
+//!                   request is forced through (a preloaded plain `;lr` Route).
 //!                   REQUIRED in the k8s cluster: a peer's internal pod IP is not
 //!                   routable peer-to-peer in a real deployment, so ALL outbound
 //!                   SIP must traverse the LB proxy — never go pod-direct. Unset →
@@ -51,15 +51,14 @@
 //!   B2BUA_NEW_CALL_QUEUE_HEADROOM_PCT share of B2BUA_CALL_CAP kept back from normal new INVITEs (default 5; 0..=99; emergency INVITEs and in-dialog requests reach the full cap)
 //!   B2BUA_KEEPALIVE_SEC in-dialog OPTIONS keepalive interval (default 300 = 5 min, min 120)
 //!   B2BUA_REBOOT_BUDGET_SEC replicated-backup TTL / reboot budget (default 600; min 60 and >= keepalive)
-//!   B2BUA_SETUP_TIMEOUT_SEC a-leg total setup deadline, reroutes included (default 150, strictly below B2BUA_INVITE_TXN_TIMEOUT_SEC; <= 0 disables)
+//!   B2BUA_SETUP_TIMEOUT_MS a-leg total setup deadline in ms, reroutes included (default 150000, strictly below B2BUA_INVITE_TXN_TIMEOUT_SEC; <= 0 disables)
 //!   B2BUA_INVITE_TXN_TIMEOUT_SEC out-of-dialog INVITE txn bound, both call halves (default 158; range 33..=600)
-//!   B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC b-leg initial INVITE give-up when NOTHING answers, not even a 100 (default 32 = RFC 3261 Timer B; range 2..=32 — tightening is a deliberate §17.1.1.2 deviation, telephony policy: 2 s buys 2 re-sends, 5 s 3, 10 s 4, 32 s 6; a provisional swaps in B2BUA_INVITE_TXN_TIMEOUT_SEC; in-dialog INVITE and non-INVITE keep 64·T1)
-//!   B2BUA_CANCEL_STRICT_RFC_WAIT truthy (1/true/yes/on) = literal RFC 3261 §9.1 CANCEL wait; default = ADR-0028 bounded hold (CANCEL always sent at grace expiry)
+//!   B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC the worker gives up on a b-leg hop when NOTHING answers its initial INVITE, not even a 100 (default 32 = RFC 3261 Timer B; range 2..=32; ADR-0044: the transaction keeps Timer A/B; in-dialog INVITE and non-INVITE never read it)
 //!   B2BUA_CALL_CONTROL_TIMEOUT_MS decision-backend deadline per round-trip (default 5000; <= 0 disables — ADR-0022)
 //!   WORKER_ALLOWED_TARGET_SUFFIXES b-leg destination allow-list, comma-separated (default .svc.cluster.local; `*` = allow all, rollback sentinel; non-IP non-matching hosts are 503'd pre-leg)
 //!   B2BUA_PRIVACY_SERVICE on (default) = this worker is the RFC 3323 privacy service and withholds the asserted identity a concealing Privacy names; off = the next hop is the trust boundary and the identity rides
 //!   B2BUA_RELAY_HEADERS opt-in transparent header relay, comma-separated names copied from the a-leg INVITE onto every originated b-leg INVITE (default empty = no relay; structural headers never relayable)
-//!   B2BUA_CDR_MESSAGE_RING per-leg message-ring cap on the call record: the last N distinct SIP messages a leg received or sent (default 0 = off)
+//!   B2BUA_CDR_MESSAGE_RING per-leg message-ring cap on the call record: a leg keeps its opening (the initial INVITE up to its first final, the 2xx ACK) and the last N distinct SIP messages after it (default 0 = off)
 //!   B2BUA_CDR_CAPTURED_HEADERS header names whose values every ring entry captures, comma-separated (default empty)
 //!
 //! ## Call limiter
@@ -71,10 +70,14 @@
 //!
 //! ## HA replication — opt-in via `B2BUA_REPL=1` (default off: unwired node)
 //!   B2BUA_REPL / _REPL_LISTEN / _REPL_PORT / B2BUA_PEERS / B2BUA_REPL_SERVICE /
-//!   B2BUA_NAMESPACE  the replication grammar (see `b2bua_runner_kit::ReplicationSettings`)
+//!   B2BUA_NAMESPACE / B2BUA_REPL_*_MS  the replication grammar and its link
+//!   bounds (see `b2bua_runner_kit::ReplicationSettings`, ADR-0045)
 //!
-//! SIGTERM latches the worker into `Draining` (OPTIONS 503 + readiness
-//! probe fails) so k8s steers new calls away while in-flight calls finish.
+//! SIGTERM, or the worker's own endpoint withdrawn with no SIGTERM, latches
+//! the worker into `Draining` (OPTIONS 503 + readiness probe fails) so k8s
+//! steers new calls away while in-flight calls finish, then exits 0. A
+//! transaction owner or router loop stalled past `B2BUA_LOOP_STALL_MS` fails
+//! `/ready` and `/healthz`; one whose task ended exits the process non-zero.
 
 // Use jemalloc instead of the glibc system allocator. Under the many tokio worker
 // threads, glibc malloc spawns up to 8×ncpu arenas and retains freed chunks (it
@@ -85,7 +88,7 @@
 // jemalloc's decay-based purging returns dirty/muzzy pages to the OS (tuned
 // aggressively via _RJEM_MALLOC_CONF on the worker container), bounding
 // steady-state RSS. No logical leak exists; this is purely allocator retention.
-// See deploy/k8s/manifests/20-worker.yaml.
+// See deploy/helm/siprust/values-kind.yaml (worker env).
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -113,8 +116,31 @@ fn stress_limiter_from_env() -> Option<LimiterEntry> {
     Some(LimiterEntry { id, limit })
 }
 
-#[tokio::main]
-async fn main() {
+fn main() -> std::process::ExitCode {
+    b2bua_runner_kit::runtime::block_on("b2bua-runner", serve())
+}
+
+/// The worker from boot to exit. The process subscriber comes first
+/// (ADR-0026), so a refused boot is logged once, while its writer runs.
+async fn serve() -> std::process::ExitCode {
+    let _observe = match observe::init_production("b2bua-runner") {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("b2bua-runner FATAL: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    match run().await {
+        Ok(exit) => exit,
+        Err(refusal) => {
+            tracing::error!(error = %refusal, "refusing to start");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// Boot and serve until shutdown; `Err` is a refused boot.
+async fn run() -> Result<std::process::ExitCode, String> {
     // Loud confirmation the jemalloc decay config (_RJEM_MALLOC_CONF) actually
     // parsed — a typo is silently ignored. Mirrored by the jemalloc_opt_*_decay_ms
     // gauges on /metrics.
@@ -123,24 +149,24 @@ async fn main() {
 
     // The b-leg callee (`B2BUA_DEST`) is passed to the decision engine as an
     // unresolved host:port: the core never resolves a destination name for
-    // sending. Behind an IP-literal `B2BUA_OUTBOUND_PROXY` the proxy resolves the
-    // Request-URI name; otherwise a name destination is dropped at send.
+    // sending. Behind the `B2BUA_OUTBOUND_PROXY` the proxy resolves the
+    // Request-URI name; without it the b-leg INVITE to a name fails at send.
     let dest = env_or("B2BUA_DEST", "127.0.0.1:5070");
     let (dest_host, dest_port) = split_host_port(&dest);
 
     // Generic runner plumbing (b2bua-runner-kit): env grammar → bind (ingress
     // brake installed) → advertise coercion → validated config + metrics/clock.
-    let base = RunnerEnv::from_env().bind("b2bua-runner").await;
+    let base = RunnerEnv::from_env()?.bind("b2bua-runner").await?;
 
     // Runner-only coherence (not visible to `B2buaConfig::validate`): the default
     // callee must be admissible under the worker's own allow-list — refuse to
     // boot with a clear message rather than silently 503 every call.
     validate_default_dest(&dest_host, &base.config.worker_allowed_target_suffixes)
-        .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
+        .map_err(|e| format!("invalid B2BUA config: {e}"))?;
 
     // CDR sink: RabbitMQ when `B2BUA_CDR_RABBITMQ_URL` is set, else the kit's
     // discarding default, either way behind the kit's bounded buffer.
-    let cdr_sink = base.rabbitmq_cdr_sink_from_env();
+    let cdr_sink = base.rabbitmq_cdr_sink_from_env()?;
 
     let mut deps = base
         .deps(
@@ -154,7 +180,7 @@ async fn main() {
         .await;
 
     // Replication (opt-in): `None` leaves the node unwired.
-    deps.replication = base.replication_setup_from_env().await;
+    deps.replication = base.replication_setup_from_env().await?;
 
     // No extra ServiceDefs: the in-tree services (transfer, relay-first-18x)
     // ride `default_rules()` at runtime; `compose_services()` (lib.rs) is the
@@ -190,5 +216,5 @@ async fn main() {
     let _probe = base.spawn_probe_server(&core, extra_metrics, heap).await;
 
     base.spawn_gauge_sampler(&core);
-    base.run_until_shutdown(&core).await;
+    Ok(base.run_until_shutdown(&core).await)
 }

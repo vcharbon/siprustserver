@@ -66,6 +66,14 @@ pub struct LoadProfile {
     #[serde(default)]
     pub robustness: Robustness,
 
+    /// The final the system under test refuses a call with under overload
+    /// (e.g. `503`). When set, that final to a non-emergency call's initial
+    /// INVITE before it connects is an accepted ending (`refused_overload`).
+    /// Unset (the default), it is a failure like any final the scenario does
+    /// not declare.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overload_reject: Option<u16>,
+
     /// The scenario MIX: which shapes run, their pick weights, and per-scenario
     /// attachments/overrides. Empty = the registry's shipped default mix.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -147,6 +155,7 @@ impl Default for LoadProfile {
             report_interval_secs: 0,
             recv_timeout_ms: default_recv_timeout_ms(),
             robustness: Robustness::default(),
+            overload_reject: None,
             mix: Vec::new(),
         }
     }

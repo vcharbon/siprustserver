@@ -9,9 +9,10 @@
 //! ACK is exempt: a 2xx ACK is TU-owned and rides no timer (§13.2.2.4).
 
 use crate::common;
+use call::TxnKind;
 use common::*;
 use sip_message::SipMessage;
-use sip_txn::{TimeoutKind, TransactionEvent, TxnKind};
+use sip_txn::TransactionEvent;
 
 /// The drained events contain the INVITE's final response of `status`.
 fn has_final(events: &[TransactionEvent], status: u16) -> bool {
@@ -205,101 +206,6 @@ async fn ladder_stops_when_the_invite_takes_its_final() {
         "the INVITE's final ends the CANCEL ladder"
     );
     assert_eq!(stack.txn.metrics().cancel_retransmits(), 1);
-}
-
-#[tokio::test(start_paused = true)]
-async fn grace_sent_cancel_rides_the_ladder_beside_timer_a() {
-    let mut stack = Stack::build(5, 64, 64).await;
-    let branch = "z9hG4bK-ladder-grace";
-
-    // Out-of-dialog INVITE toward a totally silent callee: Timer A keeps
-    // re-ringing while the CANCEL waits out its grace window, then both
-    // ladders run side by side on the one INVITE client txn.
-    stack
-        .txn
-        .send_request(outbound_request("INVITE", branch), addr(PEER), TxnKind::Invite)
-        .await
-        .unwrap();
-    stack
-        .txn
-        .send_request(outbound_request("CANCEL", branch), addr(PEER), TxnKind::Invite)
-        .await
-        .unwrap();
-    assert_eq!(stack.txn.metrics().cancels_held(), 1);
-
-    // 40 s covers both progressions in full:
-    // - INVITE (Timer A, doubling): initial + 6 retransmits (0.5, 1.5, 3.5,
-    //   7.5, 15.5, 31.5 s), then Timer B at 32 s;
-    // - CANCEL: grace copy at 1 s, then the Timer-E ladder (0.5, 1.5, 3.5,
-    //   7.5 s, then the T2 plateau) — 10 retransmits, the last at 32.5 s,
-    //   inside its own 64·T1 ceiling at 33 s: the INVITE's Timer B stops
-    //   Timer A only.
-    elapse_ms(40_000).await;
-    let msgs = stack.drain_peer();
-    assert_eq!(count_requests(&msgs, "INVITE"), 7, "Timer A undisturbed beside the ladder");
-    assert_eq!(count_requests(&msgs, "CANCEL"), 11, "grace copy + 10 ladder retransmits");
-    assert_eq!(stack.txn.metrics().cancel_retransmits(), 10);
-    assert_eq!(stack.txn.metrics().held_cancels_flushed_pre1xx(), 1);
-
-    // §17.1.1.2 scopes Timer B to Calling, and this branch never left it.
-    assert!(
-        stack.drain_events().iter().any(|e| matches!(
-            e,
-            TransactionEvent::Timeout { kind: TimeoutKind::Response, method: Some(m), .. } if m == "INVITE"
-        )),
-        "the unanswered INVITE times out on Timer B, not the long initial bound"
-    );
-    elapse_ms(25_000).await;
-    assert!(stack.drain_peer().is_empty(), "quiescent past both ceilings");
-    assert_eq!(stack.txn.metrics().active_transactions(), 0, "forgotten 64·T1 after Timer B");
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_first_provisional_reflushes_the_grace_sent_cancel() {
-    let stack = Stack::build(5, 64, 64).await;
-    let branch = "z9hG4bK-ladder-reflush";
-
-    stack
-        .txn
-        .send_request(outbound_request("INVITE", branch), addr(PEER), TxnKind::Invite)
-        .await
-        .unwrap();
-    stack
-        .txn
-        .send_request(outbound_request("CANCEL", branch), addr(PEER), TxnKind::Invite)
-        .await
-        .unwrap();
-
-    // Grace expiry puts one CANCEL on the wire pre-1xx, then the ladder runs.
-    elapse_ms(5_000).await;
-    let before = count_requests(&stack.drain_peer(), "CANCEL");
-    assert_eq!(stack.txn.metrics().held_cancels_flushed_pre1xx(), 1);
-
-    // The first provisional: the UAS has its server transaction by now, so the
-    // one owed pre-1xx copy is re-sent — and it is the SAME datagram, not a
-    // restart of the ladder.
-    stack
-        .inject(&response_bytes(180, "Ringing", "INVITE", branch, "handle-shape-test", true))
-        .await;
-    elapse_ms(20).await;
-    assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 1, "the one owed re-send");
-    assert_eq!(stack.txn.metrics().held_cancels_reflushed(), 1);
-    assert!(before > 1, "the ladder was running before the provisional");
-
-    // Complete the flow: the callee answers the CANCEL and rejects the INVITE.
-    stack.inject(&response_bytes(200, "OK", "CANCEL", branch, "handle-shape-test", true)).await;
-    stack
-        .inject(&response_bytes(
-            487,
-            "Request Terminated",
-            "INVITE",
-            branch,
-            "handle-shape-test",
-            true,
-        ))
-        .await;
-    elapse_ms(20).await;
-    assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);
 }
 
 #[tokio::test(start_paused = true)]

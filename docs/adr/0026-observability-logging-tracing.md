@@ -135,8 +135,8 @@ per-request authorization check: a serving edge simply cannot be steered into
 tracing by a caller. A malformed value is ignored in favour of the configured
 rate and counted (`trace_header_malformed_total`).
 
-Header extraction lives ONLY in `sip-message` (full-parse path) and
-`sip_message::sniff` (the proxy's raw INVITE path), per the repo-wide rule that
+Header extraction lives ONLY in `sip-message`, on the parsed INVITE (the proxy
+reads it off the message its receive path parsed), per the repo-wide rule that
 no other crate extracts SIP headers. The reader keeps "absent" and "present but
 unreadable" apart (`TraceSample::{Absent, Malformed, Rate}`) so a rig that
 mistyped its rate does not look like a call that asked for nothing.
@@ -201,12 +201,10 @@ served.
 Which composition a process belongs to is expressed entirely by the two env
 vars, so the same binary serves all of them:
 
-- **dev/lab and endurance** (`deploy/k8s/run.sh`, which endurance drives): both
-  the worker and the proxy manifests carry `OTEL_EXPORTER_OTLP_ENDPOINT` pointed
-  at the host stack's VictoriaTraces and `SIP_TRACE_HEADER=1`. The values are
-  stamped by `envsubst` at deploy time because the host's address from the
-  cluster's point of view is the kind bridge gateway, which is not a fixed
-  address on WSL2.
+- **dev/lab and endurance** (the SUT chart's kind values,
+  `deploy/helm/siprust/values-kind.yaml`): the worker and the proxy carry
+  `OTEL_EXPORTER_OTLP_ENDPOINT` pointed at the host stack's VictoriaTraces
+  through the kind bridge gateway, and `SIP_TRACE_HEADER=1`.
 - **production**: both empty. Empty is the meaningful value — not a missing
   key — so a composition never has to remember to delete a line to stay inert.
 

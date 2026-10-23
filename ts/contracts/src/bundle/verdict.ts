@@ -89,6 +89,11 @@ export const FinalUnacknowledged = failure("final-unacknowledged", {
   status: Schema.Int,
   cseq: Schema.Int
 })
+/** An INVITE a scripted leg sent drew no response at all inside Timer B (RFC 3261 §17.1.1.2). */
+export const InviteUnanswered = failure("invite-unanswered", {
+  leg: Schema.String,
+  cseq: Schema.Int
+})
 /** An inline or postcondition check did not hold. */
 export const CheckFailed = failure("check-failed", {
   site: Schema.String,
@@ -229,6 +234,7 @@ export const Failure = Schema.Union([
   UnexpectedDatagram,
   DatagramAfterFlow,
   FinalUnacknowledged,
+  InviteUnanswered,
   CheckFailed,
   AccessorUnresolved,
   SendFailed,

@@ -12,125 +12,16 @@
 //! thin real-socket lane); the paused-clock lane is where new shape coverage
 //! grows (phases B–D).
 
-use std::net::SocketAddr;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::time::Duration;
 
-use b2bua_harness::{settle_until, B2buaSut};
-use layer_harness::TransportKind;
+use b2bua_harness::settle_until;
 use loadgen::{
-    CallConfig, CallTuning, Correlation, Driver, DriverCfg, DropDir, EgressPolicy, EndpointSpec,
-    MixEntry, MuxCore, MuxTransport, Reporter, ReporterCfg, ResultClass, Role, ScenarioInputs,
-    ShapeRegistry, TargetedDrop,
+    CallTuning, Driver, DropDir, EgressPolicy, Reporter, ReporterCfg, ResultClass, TargetedDrop,
 };
-use scenario_harness::Harness;
-use sip_clock::Clock;
-use sip_net::{SignalingNetwork, SimulatedSignalingNetwork};
 
-/// Per-recv timeout. Virtual time: a doomed call idles this long on the
-/// paused timeline (cheap), a healthy call returns at its datagram. Wide
-/// enough to clear the full retransmit ladder (0.5+1+2+4 s, capped at T2)
-/// several times over.
-const RECV: Duration = Duration::from_secs(20);
-
-fn addr(p: u16) -> SocketAddr {
-    format!("127.0.0.1:{p}").parse().unwrap()
-}
-
-fn mix(id: &str, weight: f64) -> MixEntry {
-    MixEntry::by_id(&ShapeRegistry::with_defaults(), id, &ScenarioInputs::default(), weight)
-        .unwrap_or_else(|| panic!("unknown load shape {id:?}"))
-}
-
-/// Stand up the paused-clock rig: one simulated fabric carrying BOTH the
-/// in-process b2bua SUT (bound through the recording `Harness`, so `PanicDump`
-/// shows the SUT-side wire on failure) and the mux endpoints (bound raw via
-/// `bind_on`; the loadgen runs its own per-call recording/audit above the mux).
-async fn setup_fake(base: u16) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
-    setup_fake_shaped(base, B2buaSut::route_all_with_refer).await
-}
-
-/// [`setup_fake`] whose SUT honors the full inbound `X-Api-Call` control
-/// surface (destination pin + ADR-0017 `routes` failover plan) — the
-/// deployed-cluster engine shape the `api-call-pin` egress addresses. The
-/// paused-clock reroute tests run over this (the fake-net mirror of the
-/// smoke lane's `setup_api_call`).
-async fn setup_fake_api_call(base: u16) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
-    setup_fake_shaped(base, B2buaSut::route_api_call).await
-}
-
-async fn setup_fake_shaped(
-    base: u16,
-    make_sut: fn(&str, u16) -> b2bua_harness::B2buaSutBuilder,
-) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
-    let sim = Arc::new(SimulatedSignalingNetwork::new(1));
-    let clock = Clock::test_at(0);
-    let h = Harness::with_network_and_clock(
-        "loadgen-fake-net",
-        sim.clone() as Arc<dyn SignalingNetwork>,
-        clock.clone(),
-        TransportKind::Fake,
-        RECV,
-    );
-    h.disarm_cseq_gate(); // infra harness; loadgen runs its own per-call audit
-
-    let (uac, uas, refer) = (base, base + 1, base + 2);
-    let b2bua = make_sut("127.0.0.1", uas)
-        .tune(|c| c.relay_headers = vec!["X-Loadgen-Id".to_string()])
-        .start(&h, "b2bua", &format!("127.0.0.1:{}", base + 3))
-        .await;
-
-    let correlation = Correlation::header("X-Loadgen-Id");
-    let core = MuxCore::bind_on(
-        sim.as_ref(),
-        vec![
-            EndpointSpec { addr: addr(uac), role: Role::Caller },
-            EndpointSpec { addr: addr(uas), role: Role::Callee },
-            EndpointSpec { addr: addr(refer), role: Role::Callee },
-        ],
-        correlation.clone(),
-        256,
-        8,
-        RECV,
-        clock.clone(),
-    )
-    .await
-    .unwrap();
-
-    let transport = Arc::new(MuxTransport {
-        core: core.clone(),
-        uac_addr: addr(uac),
-        uas_addr: addr(uas),
-        refer_addr: addr(refer),
-        correlation,
-        recv_timeout: RECV,
-        clock,
-    });
-    (h, b2bua, core, transport)
-}
-
-fn cfg(via: SocketAddr, cps: f64, secs: u64, mif: usize, seed: u64) -> DriverCfg {
-    DriverCfg {
-        cps,
-        duration: Duration::from_secs(secs),
-        max_in_flight: mif,
-        seed,
-        call: CallConfig {
-            via,
-            egress: EgressPolicy::Transparent,
-            options_hold: Duration::from_millis(120),
-            options_cadence: Duration::from_millis(40),
-            ring_delay: Duration::from_millis(0),
-            talk_time: Duration::from_millis(0),
-            reinvite_gap: Duration::from_millis(0),
-            long_hold: Duration::from_millis(120),
-            teardown_quiesce: Duration::from_millis(200),
-        },
-        default_tuning: CallTuning::default(),
-        tuning: std::collections::HashMap::new(),
-    }
-}
+use crate::fake_rig::*;
 
 /// (a) The seam end-to-end, no loss: concurrent basic calls through the REAL
 /// driver `run_one` path over the fake net all complete OK under the strict
@@ -171,38 +62,166 @@ async fn loadgen_driver_basic_calls_on_fake_net() {
     b2bua.assert_fully_reaped();
 }
 
-/// A shape's expected reject end to end: every rejected call classes
-/// `expected_reject` after the sampled RFC audit (the caller ACKed the 486
-/// before the body ended, so the recorded flow is complete), and the round
-/// trips the mux measured reach `loadgen_rtt_seconds` once each call ends.
+/// A declared reject end to end: every `invite_reject` call ends on its
+/// `rejected` branch and classes `ok` after the sampled RFC audit (an accepted
+/// branch is still audited: the caller ACKed the 486 before the call settled,
+/// so the recorded flow is complete), and the round trips the mux measured
+/// reach `loadgen_rtt_seconds` once each call ends.
 #[tokio::test(start_paused = true)]
 #[ignore = "slow lane: loadgen"]
-async fn loadgen_fake_net_expected_reject_is_audited_clean() {
+async fn loadgen_fake_net_accepted_reject_is_audited_clean() {
     let (_h, b2bua, core, transport) = setup_fake(7300).await;
     let reporter =
         Arc::new(Reporter::new(ReporterCfg { sample_cap: 50, background_record_every: 1 }));
-    let mut entry = mix("invite_reject", 1.0);
-    entry.expected_reject = Some(486);
-    let driver =
-        Driver::new(cfg(b2bua.addr, 20.0, 1, 16, 0x486), vec![entry], reporter.clone(), transport);
+    let driver = Driver::new(
+        cfg(b2bua.addr, 20.0, 1, 16, 0x486),
+        vec![mix("invite_reject", 1.0)],
+        reporter.clone(),
+        transport,
+    );
     driver.run().await;
 
     let total = reporter.total_calls();
-    assert!(total >= 10, "governor under-delivered on virtual time: {total}");
-    let expected = reporter.count("invite_reject", &ResultClass::ExpectedReject);
-    assert_eq!(
-        expected,
-        total,
-        "every reject is the expected one:\n{}",
-        reporter.render_prometheus()
-    );
     let prom = reporter.render_prometheus();
+    assert!(total >= 10, "governor under-delivered on virtual time: {total}");
+    assert_eq!(reporter.count("invite_reject", &ResultClass::Ok), total, "{prom}");
+    let line =
+        format!("loadgen_branch_total{{stream=\"main\",shape=\"invite_reject\",branch=\"rejected\"}} {total}");
+    assert!(prom.lines().any(|l| l == line), "expected `{line}` in:\n{prom}");
     assert!(
         prom.contains(
-            "loadgen_rtt_seconds_count{scenario=\"invite_reject\",exchange=\"invite_100\"}"
+            "loadgen_rtt_seconds_count{stream=\"main\",shape=\"invite_reject\",exchange=\"invite_100\"}"
         ),
         "{prom}"
     );
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak");
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// The sum of `metric`'s samples under stream `main` and shape `<scenario>`
+/// in a Prometheus text dump.
+fn scenario_sum(prom: &str, metric: &str, scenario: &str) -> u64 {
+    let prefix = format!("{metric}{{stream=\"main\",shape=\"{scenario}\",");
+    prom.lines()
+        .filter(|l| l.starts_with(&prefix))
+        .filter_map(|l| l.rsplit(' ').next()?.parse::<u64>().ok())
+        .sum()
+}
+
+/// The cleanup-coverage mix ends each call on the ending its shape declares:
+/// the callee's 486, the caller's CANCEL after ringing, the transfer target's
+/// decline, and the answered call. Every one of them classes `ok`, and
+/// `loadgen_branch_total{stream,shape,branch}` counts each call under its
+/// scenario's accepted branch.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn loadgen_fake_net_abnormal_end_mix_classes_ok_by_branch() {
+    let (h, b2bua, core, transport) = setup_fake(7400).await;
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 1 }));
+    let shapes = ["invite_reject", "abandon_ringing", "refer_charlie_reject", "basic_call"];
+    let mut c = cfg(b2bua.addr, 20.0, 2, 16, 0xAB0E);
+    // A ring long enough that the caller's CANCEL always precedes the answer.
+    c.call.ring_delay = Duration::from_millis(500);
+    let driver =
+        Driver::new(c, shapes.iter().map(|s| mix(s, 1.0)).collect(), reporter.clone(), transport);
+    driver.run().await;
+
+    let total = reporter.total_calls();
+    let prom = reporter.render_prometheus();
+    assert!(total >= 20, "governor under-delivered on virtual time: {total}");
+    for s in shapes {
+        let ok = reporter.count(s, &ResultClass::Ok);
+        assert!(ok > 0, "no {s} call classed ok:\n{prom}");
+        assert_eq!(
+            scenario_sum(&prom, "loadgen_branch_total", s),
+            ok,
+            "loadgen_branch_total counts every ok {s} call under its branch:\n{prom}"
+        );
+    }
+    let ok: u64 = shapes.iter().map(|s| reporter.count(s, &ResultClass::Ok)).sum();
+    assert_eq!(ok, total, "every declared ending classes ok:\n{prom}");
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak");
+    h.advance(Duration::from_secs(40)).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// A CPS bucket of one token that never refills: spent, it refuses every new call.
+fn one_token(c: &mut b2bua_sdk::B2buaConfig) {
+    c.cps_bucket_size = 1;
+    c.cps_bucket_rate = 0;
+}
+
+/// A failed call is counted by the step it failed at. An SUT whose admission
+/// bucket is empty refuses every non-emergency INVITE with 503, which a run
+/// declaring no overload refusal counts as a failure of alice's INVITE (goal
+/// #0) while the controller waits on the `established` barrier, so
+/// `loadgen_failed_step_total` counts every call under
+/// `alice:invite#0@established`.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn loadgen_fake_net_counts_failures_by_failed_step() {
+    let (_h, b2bua, core, transport) = setup_fake_tuned(7410, one_token).await;
+    b2bua.overload().spend_token();
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 1 }));
+    let driver = Driver::new(
+        cfg(b2bua.addr, 20.0, 1, 16, 0x503),
+        vec![mix("basic_call", 1.0)],
+        reporter.clone(),
+        transport,
+    );
+    driver.run().await;
+
+    let total = reporter.total_calls();
+    let prom = reporter.render_prometheus();
+    assert!(total >= 10, "governor under-delivered on virtual time: {total}");
+    assert_eq!(
+        reporter.count("basic_call", &ResultClass::WrongStatus(503)),
+        total,
+        "every refused call is a status_503 failure:\n{prom}"
+    );
+    let line = format!(
+        "loadgen_failed_step_total{{stream=\"main\",shape=\"basic_call\",step=\"alice:invite#0@established\"}} {total}"
+    );
+    assert!(prom.lines().any(|l| l == line), "expected `{line}` in:\n{prom}");
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak");
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// The same refusals in a run that declares 503 as its SUT's overload refusal:
+/// a 503 to a non-emergency call before it connects is that call's
+/// `refused_overload` branch, so every call classes `ok` and the SUT still
+/// reaps each one.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn loadgen_fake_net_overload_refusal_is_ok_when_expected() {
+    let (_h, b2bua, core, transport) = setup_fake_tuned(7420, one_token).await;
+    b2bua.overload().spend_token();
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 1 }));
+    let mut c = cfg(b2bua.addr, 20.0, 1, 16, 0x503E);
+    c.overload_reject = Some(503);
+    let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
+    driver.run().await;
+
+    let total = reporter.total_calls();
+    let prom = reporter.render_prometheus();
+    assert!(total >= 10, "governor under-delivered on virtual time: {total}");
+    assert_eq!(reporter.count("basic_call", &ResultClass::Ok), total, "{prom}");
+    let line = format!(
+        "loadgen_branch_total{{stream=\"main\",shape=\"basic_call\",branch=\"refused_overload\"}} {total}"
+    );
+    assert!(prom.lines().any(|l| l == line), "expected `{line}` in:\n{prom}");
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak");
@@ -298,12 +317,15 @@ async fn loadgen_fake_net_crossing_bye() {
     b2bua.assert_fully_reaped();
 }
 
-/// C2/E5: CANCEL×200 crossing through the SUT — a branch-aware race. Each call
-/// terminates in one of the two RFC-legal outcomes: confirmed + torn down (the
-/// 200 crossed the CANCEL → `Ok`) or abandoned (the CANCEL won → `timeout`). The
-/// load lane ACCEPTS EITHER; the assertion is that classification stays BOUNDED
-/// (every call lands in {Ok, Timeout} — never a protocol-defect class), no
-/// audit false positive, and the SUT fully reaps.
+/// C2/E5: CANCEL×200 crossing through the SUT. Each call ends on one of its
+/// RFC-legal endings, all accepted and classed `ok`: `answered_despite_cancel`
+/// (the 200 left before the CANCEL arrived, §9.2: the caller ACKs and BYEs),
+/// `answered_before_cancel` (the 200 reached her before her CANCEL left) or
+/// `abandoned` (the CANCEL won, 487). On this paused fake net the timing is
+/// fixed: the caller CANCELs one ring after her 180, the callee answers one
+/// ring after sending it, so the 200 always leaves first and every call is the
+/// crossing. The other two branches through the SUT are pinned by
+/// `realcall_abandon_ringing_ending_follows_the_answer_timing` (b2bua-harness).
 #[tokio::test(start_paused = true)]
 #[ignore = "slow lane: loadgen"]
 async fn loadgen_fake_net_cancel_answer_crossing_accepts_either_branch() {
@@ -319,22 +341,13 @@ async fn loadgen_fake_net_cancel_answer_crossing_accepts_either_branch() {
     driver.run().await;
 
     let total = reporter.total_calls();
-    let ok = reporter.count("cancel_answer_crossing", &ResultClass::Ok);
-    let timeouts = reporter.count("cancel_answer_crossing", &ResultClass::Timeout);
+    let prom = reporter.render_prometheus();
     assert!(total >= 5, "governor under-delivered: {total}");
-    // Bounded classification: EVERY call is one of the two legal branches.
-    assert_eq!(
-        ok + timeouts,
-        total,
-        "a CANCEL×200 crossing landed outside {{Ok, Timeout}}:\n{}",
-        reporter.render_prometheus()
+    assert_eq!(reporter.count("cancel_answer_crossing", &ResultClass::Ok), total, "{prom}");
+    let crossed = format!(
+        "loadgen_branch_total{{stream=\"main\",shape=\"cancel_answer_crossing\",branch=\"answered_despite_cancel\"}} {total}"
     );
-    assert_eq!(
-        reporter.count("cancel_answer_crossing", &ResultClass::RfcAuditFail),
-        0,
-        "the crossing produced an RFC-audit finding:\n{}",
-        reporter.render_prometheus()
-    );
+    assert!(prom.lines().any(|l| l == crossed), "expected `{crossed}` in:\n{prom}");
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak");
@@ -647,6 +660,14 @@ async fn loadgen_fake_net_forked_reliable() {
     fork_e2e(7090, "forked_reliable", 0xF06A).await;
 }
 
+/// A forked call answered by a fork that never rang (a 2xx To-tag no 18x
+/// carried, RFC 3261 §13.2.2.4), relayed through the SUT.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn loadgen_fake_net_forked_unrung() {
+    fork_e2e(7160, "forked_unrung", 0xF07B).await;
+}
+
 /// C1/E3 loss resilience: the forked establishment (three distinct-tag 18x +
 /// the winner's 2xx, all relayed through the SUT) under ~8%/datagram loss +
 /// auto-retransmit. A dropped best-effort 18x just means the caller observes
@@ -814,7 +835,7 @@ async fn loadgen_fake_net_recovers_dropped_early_update() {
 
 /// NO-ANSWER-triggered failover end-to-end on the paused clock:
 ///
-///   INVITE(routes plan, per-route `no_answer_timeout_sec`) → bob 180 …
+///   INVITE(routes plan, per-route `no_answer_ms`) → bob 180 …
 ///   silence … → the SUT's OWN NoAnswer timer fires → CANCEL bob (487, the
 ///   leg settles via the hop-ACK) → /call/failure walks the plan → bob2
 ///   answers → talk → BYE.

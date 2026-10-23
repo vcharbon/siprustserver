@@ -1,0 +1,11 @@
+schema: budget.v1
+name: cpu-overload
+description: >-
+  A worker (or every worker) without the CPU its load needs, alone or with a
+  spike. Starvation is no loop and no flood, so no refusal is allowed
+  (ADR-0049 §2.11 keeps an overload 503 for those): every call still sets
+  up. Setups may be slow for the window's outage (inject to recovered) plus
+  about 10 s of offered rate while the starved worker catches up.
+setup_slow:
+  over_outage: true
+  max_seconds: 10

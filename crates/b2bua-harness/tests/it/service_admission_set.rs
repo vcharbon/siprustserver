@@ -47,7 +47,7 @@ mod admitset {
         TimerDelay,
     };
     use b2bua::{define_service, sm_rule, CallEvent};
-    use call::{LimiterEntry, TimerType};
+    use call::{LimiterEntry, TimerKey, TimerType};
 
     use super::{Read, READS};
 
@@ -61,11 +61,10 @@ mod admitset {
         states: AsState { Working, Awaiting },
         init: |_call: &RuleCall| {
             Some(ServiceSeed::new(AsState::Working.label()).with_actions(vec![
-                RuleAction::ScheduleTimer {
-                    timer_type: TimerType::service(ADMITSET, "kick"),
-                    delay: TimerDelay::secs(1),
-                    leg_id: None,
-                },
+                RuleAction::arm(
+                    TimerKey::call(TimerType::service(ADMITSET, "kick")),
+                    TimerDelay::secs(1),
+                ),
             ]))
         },
         rules: [ kick(), next(), result() ],
@@ -159,7 +158,7 @@ mod admitset {
             machine: ADMITSET,
             active: [ AsState::Awaiting ],
             transitions: [],
-            effects: [ b2bua::rules::Effect::GuardTimer { timer: NEXT, label: "the plan's next admit" } ],
+            effects: [ b2bua::rules::Effect::GuardTimer { timer: NEXT, scope: call::TimerScopeKind::Call, label: "the plan's next admit" } ],
             matcher: Match::internal_event().topic("limiter-admit-result"),
             handle: |ctx: &RuleContext| {
                 if let CallEvent::InternalEvent { outcome, payload, .. } = ctx.event {
@@ -169,11 +168,10 @@ mod admitset {
                     let read: Read = (corr, outcome.clone(), held, ctx.call_ref.to_string());
                     READS.lock().unwrap().entry(user(ctx)).or_default().push(read);
                     if next {
-                        return Some(RuleHandleResult::new(vec![RuleAction::ScheduleTimer {
-                            timer_type: NEXT,
-                            delay: TimerDelay::secs(2),
-                            leg_id: None,
-                        }]));
+                        return Some(RuleHandleResult::new(vec![RuleAction::arm(
+                            TimerKey::call(NEXT),
+                            TimerDelay::secs(2),
+                        )]));
                     }
                 }
                 Some(RuleHandleResult::new(vec![]))
@@ -559,7 +557,7 @@ async fn a_stalled_service_admit_counts_as_a_limiter_failure() {
     let limiter = b2bua_harness::WITNESS_LIMITER_ADDR.parse().unwrap();
     let before =
         s.b2bua.metrics().limiter().failures_total(LimiterOp::Admit, LimiterFailure::Timeout);
-    s.rig.http.apply_fault(http_net::Fault::Stall { dst: limiter });
+    s.rig.http.apply_fault(http_net_testkit::Fault::Stall { dst: limiter });
     for _ in 0..40 {
         if !reads("stalled").is_empty() {
             break;
@@ -572,6 +570,6 @@ async fn a_stalled_service_admit_counts_as_a_limiter_failure() {
         before + 1,
         "the client's timeout answered the admit, not the router's cap",
     );
-    s.rig.http.apply_fault(http_net::Fault::Resume { dst: limiter });
+    s.rig.http.apply_fault(http_net_testkit::Fault::Resume { dst: limiter });
     s.end(dialog).await;
 }

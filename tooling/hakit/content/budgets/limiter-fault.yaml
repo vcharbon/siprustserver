@@ -1,0 +1,12 @@
+schema: budget.v1
+name: limiter-fault
+description: >-
+  dependency-fault for an incident on the call limiter itself (killed,
+  restarted, frozen, its traffic delayed, lost or reset): no setup may fail;
+  setups may be slower for about 2 s of offered rate. A limiter callers cannot
+  reach is failed open (ADR-0040 §10), so a limited stream may hold every call
+  it offers, never fewer than its band.
+setup_slow:
+  max_seconds: 2
+limiter:
+  overshoot: offered

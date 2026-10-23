@@ -25,6 +25,9 @@ use sip_message::header::{Contact, Event, HeaderValue, ParamValue, SubscriptionS
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+/// The transfer target's answer to its INVITE: its own session, which its
+/// later answers on that dialog continue (RFC 3264 §8).
+const CHARLIE_FIRST_ANSWER: &str = "v=0\r\no=charlie 9 8 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 // C's active answer to the c-realign re-INVITE (sendrecv on C's real port). The
 // a-realign re-INVITE toward A must carry *this* body (the one-way-audio guard).
 const CHARLIE_ACTIVE_ANSWER: &str = "v=0\r\no=charlie 9 9 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
@@ -59,7 +62,7 @@ fn assert_notify(txn: &ServerTxn, state: &str, frag: &str) {
     assert!(body.contains(frag), "sipfrag body {body:?} should contain {frag:?}");
 }
 
-/// Assert a re-INVITE carries `body`, CSeq > 1, and a Contact carrying `leg=<leg>`.
+/// Assert a re-INVITE carries `body`, a To-tag, and a Contact carrying `leg=<leg>`.
 fn assert_reinvite(req: &sip_message::SipRequest, body: &str, leg: &str) {
     assert_eq!(req.method(), "INVITE", "expected re-INVITE");
     assert_eq!(
@@ -67,7 +70,10 @@ fn assert_reinvite(req: &sip_message::SipRequest, body: &str, leg: &str) {
         apart_from_origin(body),
         "re-INVITE body should equal expected SDP, under the dialog's own o="
     );
-    assert!(req.cseq().seq() > 1, "re-INVITE CSeq.seq {} should be > 1", req.cseq().seq());
+    assert!(
+        req.to().tag().is_some(),
+        "a re-INVITE names its dialog by the To-tag (RFC 3261 §14.1)"
+    );
     let contact = req.header::<Contact>().expect("a Contact").expect("readable Contact");
     assert_eq!(
         contact.uri().param("leg").and_then(ParamValue::as_str),
@@ -84,7 +90,7 @@ async fn refer_allow_full_happy() {
     let h = Harness::with_transit_delay("refer-allow-full-happy", 1);
     let alice = h.agent("alice", "127.0.0.1:5961").await;
     let bob = h.agent("bob", "127.0.0.1:5971").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5971)
         .start(&h, "b2bua", "127.0.0.1:5981")
         .await;
@@ -115,7 +121,7 @@ async fn refer_allow_full_happy() {
 
     // C answers initial INVITE 200; B2BUA ACKs.
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
 
     let mut nterm = bob.receive("NOTIFY").await;
@@ -159,7 +165,7 @@ async fn refer_allow_full_c_reliable_provisional_is_acknowledged_by_the_stack() 
     let h = Harness::with_transit_delay("refer-allow-full-c-reliable", 1);
     let alice = h.agent("alice", "127.0.0.1:5966").await;
     let bob = h.agent("bob", "127.0.0.1:5976").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5976)
         .start(&h, "b2bua", "127.0.0.1:5986")
         .await;
@@ -202,14 +208,10 @@ async fn refer_allow_full_c_reliable_provisional_is_acknowledged_by_the_stack() 
             .contains("100rel"),
         "the transfer target is offered 100rel",
     );
-    charlie_uas.respond(183, "Session Progress").reliable(1).with_sdp(ANSWER).await;
+    charlie_uas.respond(183, "Session Progress").reliable(1).with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("PRACK").await.respond(200, "OK").await;
 
-    let mut n183 = bob.receive("NOTIFY").await;
-    assert_notify(&n183, "active", "SIP/2.0 183");
-    n183.respond(200, "OK").await;
-
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
 
     let mut nterm = bob.receive("NOTIFY").await;
@@ -248,7 +250,7 @@ async fn refer_allow_full_a_reject_realign() {
     let h = Harness::with_transit_delay("refer-allow-full-a-reject-realign", 1);
     let alice = h.agent("alice", "127.0.0.1:5962").await;
     let bob = h.agent("bob", "127.0.0.1:5972").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5972)
         .start(&h, "b2bua", "127.0.0.1:5982")
         .await;
@@ -276,7 +278,7 @@ async fn refer_allow_full_a_reject_realign() {
     n100.respond(200, "OK").await;
 
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
 
     let mut nterm = bob.receive("NOTIFY").await;
@@ -313,7 +315,7 @@ async fn refer_allow_full_a_glare_reinvite() {
     let h = Harness::with_transit_delay("refer-allow-full-a-glare-reinvite", 1);
     let alice = h.agent("alice", "127.0.0.1:5963").await;
     let bob = h.agent("bob", "127.0.0.1:5973").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5973)
         .start(&h, "b2bua", "127.0.0.1:5983")
         .await;
@@ -341,7 +343,7 @@ async fn refer_allow_full_a_glare_reinvite() {
     n100.respond(200, "OK").await;
 
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
 
     let mut nterm = bob.receive("NOTIFY").await;
@@ -395,7 +397,7 @@ async fn refer_allow_full_a_bye_during_a_realign() {
     let h = Harness::with_transit_delay("refer-allow-full-a-bye-during-a-realign", 1);
     let alice = h.agent("alice", "127.0.0.1:5964").await;
     let bob = h.agent("bob", "127.0.0.1:5974").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5974)
         .start(&h, "b2bua", "127.0.0.1:5984")
         .await;
@@ -423,7 +425,7 @@ async fn refer_allow_full_a_bye_during_a_realign() {
     n100.respond(200, "OK").await;
 
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
 
     let mut nterm = bob.receive("NOTIFY").await;
@@ -466,7 +468,7 @@ async fn refer_allow_full_a_reinvite_timeout() {
     let h = Harness::new("refer-allow-full-a-reinvite-timeout");
     let alice = h.agent("alice", "127.0.0.1:5965").await;
     let bob = h.agent("bob", "127.0.0.1:5975").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5975)
         .start(&h, "b2bua", "127.0.0.1:5985")
         .await;
@@ -494,7 +496,7 @@ async fn refer_allow_full_a_reinvite_timeout() {
     n100.respond(200, "OK").await;
 
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
 
     let mut nterm = bob.receive("NOTIFY").await;

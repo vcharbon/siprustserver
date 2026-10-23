@@ -1,0 +1,35 @@
+schema: profile.v1
+name: spike-smoke
+description: >-
+  The spike rule in one run: a steady basic stream, and a burst of short calls
+  at five times its rate that a spike incident starts, holds for 30 s and
+  drains. The system under test absorbs it: no failed setup on any stream.
+duration_s: 300
+drain_s: 120
+settle_s: 15
+setup_slow_ms: 1000
+catalogs: [x-api-call]
+preflight:
+  min_free_memory_gib: 4
+  min_free_disk_gib: 10
+streams:
+  - name: basic
+    driver: sipp
+    shape: basic
+    scenario: uac-basic-hold.xml
+    cps: 20
+    setup_deadline_s: 10
+    ring_s: 5
+    hold_s: 20
+  - name: burst
+    driver: sipp
+    start: incident
+    shape: basic
+    scenario: uac-basic-hold.xml
+    cps: 100
+    setup_deadline_s: 10
+    ring_s: 5
+    hold_s: 2
+schedule:
+  at:
+    - { at_s: 90, incident: spike, stream: burst, budget: spike }

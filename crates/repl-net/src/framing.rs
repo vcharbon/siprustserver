@@ -16,32 +16,29 @@
 /// peer, and we will not pre-allocate against it.
 pub const MAX_FRAME_LEN: u32 = 64 * 1024 * 1024;
 
-/// Failure reading a length-prefixed frame off a stream buffer.
+/// Failure framing a payload or reading a length-prefixed frame off a stream
+/// buffer.
 #[derive(Debug, thiserror::Error)]
 pub enum ReplFramingError {
-    /// The advertised length exceeds [`MAX_FRAME_LEN`].
+    /// The payload's length, to send or advertised, exceeds [`MAX_FRAME_LEN`].
     #[error("framed length {len} exceeds max {MAX_FRAME_LEN}")]
     Oversized {
-        /// The advertised payload length.
-        len: u32,
+        /// The payload length.
+        len: usize,
     },
 }
 
-/// Wrap a payload as `[u32 BE length][payload]`.
-///
-/// # Panics
-/// Never on valid input; a payload longer than `u32::MAX` cannot occur in this
-/// codebase (frames are far smaller), but is debug-asserted for safety.
-pub fn frame_with_len_prefix(payload: &[u8]) -> Vec<u8> {
-    debug_assert!(
-        payload.len() <= u32::MAX as usize,
-        "payload longer than u32::MAX cannot be length-prefixed"
-    );
-    let len = payload.len() as u32;
-    let mut out = Vec::with_capacity(4 + payload.len());
+/// Wrap a payload as `[u32 BE length][payload]`. A payload past
+/// [`MAX_FRAME_LEN`] is refused: the receiving end would cut the stream on it.
+pub fn frame_with_len_prefix(payload: &[u8]) -> Result<Vec<u8>, ReplFramingError> {
+    let len = u32::try_from(payload.len())
+        .ok()
+        .filter(|len| *len <= MAX_FRAME_LEN)
+        .ok_or(ReplFramingError::Oversized { len: payload.len() })?;
+    let mut out = Vec::with_capacity(payload.len().saturating_add(4));
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(payload);
-    out
+    Ok(out)
 }
 
 /// Try to pop one complete length-prefixed payload off the front of `buf`.
@@ -58,21 +55,21 @@ pub fn frame_with_len_prefix(payload: &[u8]) -> Vec<u8> {
 /// This is the streaming-decoder primitive the real TCP reader loops on:
 /// append socket reads to `buf`, then drain frames until it returns `None`.
 pub fn try_read_framed(buf: &mut Vec<u8>) -> Result<Option<Vec<u8>>, ReplFramingError> {
-    if buf.len() < 4 {
+    let Some(prefix) = buf.first_chunk::<4>() else {
         return Ok(None);
-    }
-    let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
-    if len > MAX_FRAME_LEN {
+    };
+    let len = u32::from_be_bytes(*prefix) as usize;
+    if len > MAX_FRAME_LEN as usize {
         return Err(ReplFramingError::Oversized { len });
     }
-    let total = 4 + len as usize;
-    if buf.len() < total {
+    let total = len.saturating_add(4);
+    let Some(payload) = buf.get(4..total).map(<[u8]>::to_vec) else {
         // Header present but payload incomplete.
         return Ok(None);
-    }
-    let payload = buf[4..total].to_vec();
+    };
     // Drain the consumed frame from the front, keeping any trailing bytes
     // (the start of the next frame) for the following call.
+    #[expect(clippy::disallowed_methods, reason = "the range ends inside the buffer, read above")]
     buf.drain(..total);
     Ok(Some(payload))
 }

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<!-- Refuses the call 503 with a Reason whose protocol token holds a character outside [a-z0-9.+-]: the record keys the bare code. -->
+<scenario name="peer-reject-reason-token">
+  <recv request="INVITE" crlf="true"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 503 Service Unavailable
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:];tag=[pid]P[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Reason: Release_Cause;cause=3
+      Content-Length: 0
+    ]]>
+  </send>
+  <recv request="ACK" crlf="true"/>
+</scenario>

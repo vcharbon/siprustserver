@@ -59,11 +59,15 @@ the live map is released exactly once, through the existing `release_call` +
 
 There is **no second teardown vocabulary**: a reaper verdict is a synthetic
 `CallEvent::InternalEvent { topic: "reaper" }` down the existing re-entry
-channel, through the per-call FIFO and per-call lock, handled by **two
-CORE_LAYER rules in `defaults.rs`** (`reaper-stale`, `reaper-fatal-error`)
-that mirror `terminating-safety-timeout` — so reaps are visible in the docgen
+channel, through the per-call FIFO and per-call lock, handled by
+**CORE_LAYER rules in `defaults.rs`** — so reaps are visible in the docgen
 state diagrams and reaper-emitted BYEs are gated by the RFC audit like any
-message. Only the strike-2 **discharge** path bypasses the *rules* stage
+message. `reaper-stale` mirrors `terminating-safety-timeout`: the call is
+dead, its legs are forced terminal with no wire message. `reaper-fatal-error`
+(strike 1: a handler panicked, its peers are alive) tears an Active call down
+on the wire through the ordinary teardown — BYE to each confirmed leg, CANCEL
+to each early b-leg, the final the caller is owed — and forces a terminating
+call terminal (ADR-0051 §5). Only the strike-2 **discharge** path bypasses the *rules* stage
 (rules are the thing that failed); it still runs
 `finalize → enforce → process_result → release_call(Terminated)`. No new
 `CallEvent` variant, no SDK change.
@@ -95,7 +99,8 @@ reaper adds no time-based input to HA reconciliation, and a reaped
 termination propagates its delete through the existing terminate-writer, so
 the HA protocol is untouched.
 
-The **acting-backup terminal contract**: a backup **never discharges** a call —
+The **acting-backup terminal contract** (amended by ADR-0047 D8: a copy whose primary
+has departed discharges the call): a backup **never discharges** a call —
 no CDR, no limiter release, no propagated delete — *not even* on an explicit
 BYE/CANCEL. It answers the wire (SIP continuity), records the terminal into the
 `(p,b)` Element, reverse-flushes it with a **short grace TTL as its alive-timer**,

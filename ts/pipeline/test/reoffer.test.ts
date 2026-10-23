@@ -13,6 +13,7 @@ import {
   CALLER_CALL_ID,
   CALLEE_CALL_ID,
   derivesOnePrefix,
+  nameByCallIds,
   newFromTagRetryFlows,
   plan,
   proxyRetriedCopyFlows,
@@ -40,7 +41,7 @@ const CALLER_TAG = `from-${CALLER_CALL_ID}`
 
 /** The cut's cases of a capture, decided under a policy that refuses nothing of its own. */
 const decide = (flows: Flows.FlowsDoc, capture = "capture.pcap") => {
-  const cut = cutCalls(flows, sutSet(), capture, derivesOnePrefix)
+  const cut = cutCalls(flows, sutSet(), capture, derivesOnePrefix, nameByCallIds)
   const specs: ReadonlyArray<CaseSpec> = cut.calls.map((c) => ({
     id: c.id,
     uac: c.uac,

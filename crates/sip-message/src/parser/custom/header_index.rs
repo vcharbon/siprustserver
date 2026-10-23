@@ -39,17 +39,15 @@ pub struct HeaderIndex<'a> {
     pub cseq: Slot<'a>,
     pub via: Vec<&'a SipStr>,
     pub contact: Vec<&'a SipStr>,
+    pub route: Vec<&'a SipStr>,
+    pub record_route: Vec<&'a SipStr>,
     pub p_asserted_identity: Vec<&'a SipStr>,
     pub p_preferred_identity: Vec<&'a SipStr>,
     pub diversion: Vec<&'a SipStr>,
     pub history_info: Vec<&'a SipStr>,
     pub remote_party_id: Vec<&'a SipStr>,
-    pub geolocation: Vec<&'a SipStr>,
-    pub geolocation_error: Vec<&'a SipStr>,
-    pub geolocation_routing: Slot<'a>,
     pub rack: Slot<'a>,
     pub refer_to: Slot<'a>,
-    pub date: Vec<&'a SipStr>,
 }
 
 impl<'a> HeaderIndex<'a> {
@@ -68,17 +66,15 @@ impl<'a> HeaderIndex<'a> {
                 HeaderName::CSeq => idx.cseq.record(value),
                 HeaderName::Via => idx.via.push(value),
                 HeaderName::Contact => idx.contact.push(value),
+                HeaderName::Route => idx.route.push(value),
+                HeaderName::RecordRoute => idx.record_route.push(value),
                 HeaderName::PAssertedIdentity => idx.p_asserted_identity.push(value),
                 HeaderName::PPreferredIdentity => idx.p_preferred_identity.push(value),
                 HeaderName::Diversion => idx.diversion.push(value),
                 HeaderName::HistoryInfo => idx.history_info.push(value),
                 HeaderName::RemotePartyId => idx.remote_party_id.push(value),
-                HeaderName::Geolocation => idx.geolocation.push(value),
-                HeaderName::GeolocationError => idx.geolocation_error.push(value),
-                HeaderName::GeolocationRouting => idx.geolocation_routing.record(value),
                 HeaderName::RAck => idx.rack.record(value),
                 HeaderName::ReferTo => idx.refer_to.record(value),
-                HeaderName::Date => idx.date.push(value),
                 _ => {}
             }
         }

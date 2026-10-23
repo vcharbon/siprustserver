@@ -31,16 +31,16 @@ use b2bua_harness::limiter::doubles::{answers_released, spy};
 use b2bua_harness::{
     invite_final_statuses, settle_until, B2buaSut, LimiterLeak, WitnessRig, WITNESS_IDS,
 };
-use call::ReleaseEventKind;
+use call::{ReleaseEventKind, TimerKey, TimerType};
 use call_limiter::LimiterConfig;
 use http_net::{HttpRequest, HttpResponse, HttpService};
-use scenario_harness::Harness;
+use scenario_harness::{Harness, Party};
 use sip_message::generators::InDialogMethod;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 const MEDIA_ANSWER: &str = "v=0\r\no=media 7 7 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
-const ALICE_REALIGN: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
+const ALICE_REALIGN: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 
 /// The limiter client's fail-open budget.
 const BUDGET: Duration = Duration::from_millis(150);
@@ -183,7 +183,7 @@ async fn release_reroute_keeping_an_id_at_its_cap_is_admitted() {
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.features.platform.max_duration_sec = 60;
+                r.features.platform.max_duration_ms = 60_000;
                 r.callback_context = Some("release-ctx".into());
                 r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
                 r.call_limiter = limiters(&[("x", 10), ("y", 10)]);
@@ -541,7 +541,7 @@ async fn a_retried_invite_reusing_the_call_identity_is_counted() {
     let mut retry = alice
         .invite(&bob)
         .identity(CALL_ID, FROM_TAG)
-        .cseq(2)
+        .cseq(Party::Caller.first_cseq() + 1)
         .with_sdp(OFFER)
         .through(b2bua.addr)
         .send()
@@ -662,7 +662,7 @@ async fn a_refresh_landing_after_a_refused_reroute_dropped_the_set_re_creates_no
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = limited_route("127.0.0.1", 5070, &[("x", 10)]);
-                r.features.platform.max_duration_sec = 60;
+                r.features.platform.max_duration_ms = 60_000;
                 r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
                 NewCallResponse::Route(r)
             })
@@ -754,7 +754,7 @@ async fn a_dropped_refresh_fire_is_re_armed_by_the_call_s_next_turn() {
 
     // ── the driver loses the refresh fire; the set lapses ──────────────────
     let call_ref = call::derive_call_ref("w0", CALL_ID, FROM_TAG);
-    b2bua.cancel_driver_timer(&call_ref, "LimiterRefresh").await;
+    b2bua.cancel_driver_timer(&call_ref, &TimerKey::call(TimerType::LimiterRefresh)).await;
     for _ in 0..22 {
         h.advance(Duration::from_secs(1)).await;
         rig.refresh_witnesses();
@@ -899,7 +899,7 @@ async fn a_refused_release_reroute_leaves_the_call_uncounted() {
                 let mut r = limited_route("127.0.0.1", 5070, &[("x", 10)]);
                 // Off the refresh period's multiples: no refresh is in flight
                 // when the reroute is admitted.
-                r.features.platform.max_duration_sec = 62;
+                r.features.platform.max_duration_ms = 62_000;
                 r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
                 NewCallResponse::Route(r)
             })

@@ -23,7 +23,7 @@
       }
     },
     "counts": {
-      "description": "Per-`(scenario, class, chaos)` completed-call counts (the report's main\ntable). A row's `ok` marks its class as no failure (`ok`, or the shape's\n`expected_reject`); `chaos == \"near\"` is accepted kill collateral,\n`chaos == \"clear\"` is a genuine result.",
+      "description": "Per-`(scenario, class, case)` completed-call counts (the report's main\ntable). A row's `ok` marks its class as no failure (`ok`: the call ended\non an accepted branch).",
       "type": "array",
       "items": {
         "$ref": "#/$defs/CountRow"
@@ -41,7 +41,7 @@
       "$ref": "#/$defs/LoadRunMeta"
     },
     "samples": {
-      "description": "Links to the stored sampled callflow pages, grouped by their\n`(scenario, class, chaos)` bucket. Paths are RELATIVE to the run dir.",
+      "description": "Links to the stored sampled callflow pages, grouped by their\n`(scenario, class, case)` bucket. Paths are RELATIVE to the run dir.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/SampleGroup"
@@ -162,20 +162,16 @@
       ]
     },
     "CountRow": {
-      "description": "One `(scenario, class, case, chaos)` completed-call count.",
+      "description": "One `(scenario, class, case)` completed-call count.",
       "type": "object",
       "properties": {
         "case": {
-          "description": "The bounded case discriminator refining the class into its distinct\nfailure modes (RFC rule id(s), failed check id(s), `agent@phase`).\nEmpty = un-refined (`ok` rows, indexes written before the field existed).",
+          "description": "The bounded case discriminator refining the class into its distinct\nfailure modes (RFC rule id(s), failed check id(s), the failed step\n`<who>[:<kind>#<index>]@<barrier>`).\nEmpty = un-refined (`ok` rows, indexes written before the field existed).",
           "type": "string",
           "default": ""
         },
-        "chaos": {
-          "description": "Chaos proximity: `clear` (genuine) or `near` (accepted kill collateral).",
-          "type": "string"
-        },
         "class": {
-          "description": "The result class label (`ok`, `expected_reject`, `timeout`, `status_503`,\n`check_fail`, …).",
+          "description": "The result class label (`ok`, `timeout`, `status_503`, `check_fail`, …).",
           "type": "string"
         },
         "count": {
@@ -184,7 +180,7 @@
           "minimum": 0
         },
         "ok": {
-          "description": "`true` iff the class is no failure: `ok`, or `expected_reject` (the\nshape's declared reject). Drives the OK-green / NOK-red split.",
+          "description": "`true` iff the class is no failure (`ok`). Drives the OK-green / NOK-red\nsplit.",
           "type": "boolean"
         },
         "scenario": {
@@ -194,7 +190,6 @@
       "required": [
         "scenario",
         "class",
-        "chaos",
         "count",
         "ok"
       ]
@@ -307,7 +302,7 @@
       ]
     },
     "SampleGroup": {
-      "description": "The stored sampled callflow pages for one `(scenario, class, case, chaos)`\nbucket.",
+      "description": "The stored sampled callflow pages for one `(scenario, class, case)` bucket.",
       "type": "object",
       "properties": {
         "case": {
@@ -315,14 +310,11 @@
           "type": "string",
           "default": ""
         },
-        "chaos": {
-          "type": "string"
-        },
         "class": {
           "type": "string"
         },
         "pages": {
-          "description": "Run-dir-relative paths to each sample's rendered callflow HTML page\n(e.g. `callflows/reinvite/check_fail/alice.invite.from.userInfo/clear/0.html`;\nno case segment when `case` is empty).",
+          "description": "Run-dir-relative paths to each sample's rendered callflow HTML page\n(e.g. `callflows/reinvite/check_fail/alice.invite.from.userInfo/0.html`;\nno case segment when `case` is empty).",
           "type": "array",
           "items": {
             "type": "string"
@@ -335,7 +327,6 @@
       "required": [
         "scenario",
         "class",
-        "chaos",
         "pages"
       ]
     }

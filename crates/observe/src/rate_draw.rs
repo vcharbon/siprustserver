@@ -6,6 +6,22 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Wall-clock nanoseconds mixed with the process id: a seed for a sampling
+/// die or an id stream, not a secret.
+pub(crate) fn clock_pid_entropy() -> u64 {
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| low_bits(d.as_nanos()))
+        .unwrap_or(0x5DEE_CE66);
+    t ^ (u64::from(std::process::id()) << 32)
+}
+
+/// The low 64 bits of `n`.
+#[expect(clippy::cast_possible_truncation, reason = "a seed keeps the fast-moving low bits")]
+fn low_bits(n: u128) -> u64 {
+    n as u64
+}
+
 /// Seedable pseudo-random Bernoulli draw.
 pub struct RateDraw {
     state: AtomicU64,
@@ -20,11 +36,7 @@ impl RateDraw {
 
     /// A draw stream seeded from process/time entropy.
     pub fn from_entropy() -> Self {
-        let t = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0x5DEE_CE66);
-        Self::seeded(t ^ ((std::process::id() as u64) << 32))
+        Self::seeded(clock_pid_entropy())
     }
 
     /// `true` with probability `rate`. A rate at or below 0 never draws, at or

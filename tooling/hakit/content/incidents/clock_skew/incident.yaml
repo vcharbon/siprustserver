@@ -1,0 +1,24 @@
+schema: incident.v1
+name: clock_skew
+description: >-
+  Shift the wall clock of the target pods (one or all) by offset_ms for
+  duration_s (Chaos Mesh TimeChaos on CLOCK_REALTIME): one worker's clock
+  disagreeing with its peers'. Only processes running at inject are shifted.
+kind: fault
+target:
+  selector: app=b2bua-worker
+  pick: one
+params:
+  offset_ms:
+    type: integer
+    default: 5000
+    description: The shift of the wall clock in milliseconds; negative is backwards.
+  inject_wait_s:
+    type: integer
+    default: 30
+    description: How long inject waits for Chaos Mesh to report the shift injected.
+duration_s: 60
+timeouts:
+  inject_s: 60
+  heal_s: 120
+requires: [kind, chaos-mesh]

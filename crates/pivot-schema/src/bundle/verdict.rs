@@ -20,6 +20,10 @@ use crate::must_fail::DeclaredFailure;
 use crate::scoping::CheckClass;
 use crate::violation::RfcRule;
 
+mod abandoned;
+
+pub use abandoned::{Abandoned, CloseAct, CloseOwed};
+
 /// The run's outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -122,6 +126,9 @@ pub enum Failure {
     /// Timer H (RFC 3261 §17.2.1): the system owed one on the INVITE's branch
     /// (§17.1.1.3) and its transaction never completed.
     FinalUnacknowledged { leg: String, status: u16, cseq: u32 },
+    /// An INVITE a scripted leg sent drew no response at all inside Timer B
+    /// (RFC 3261 §17.1.1.2): its client transaction timed out in Calling.
+    InviteUnanswered { leg: String, cseq: u32 },
     /// An inline or postcondition check did not hold.
     CheckFailed { site: String, field: String, op: String, expected: String, observed: String },
     /// A `${…}` could not be resolved at the moment it was read.
@@ -253,6 +260,9 @@ impl std::fmt::Display for Failure {
                 f,
                 "leg {leg}: the {status} to INVITE CSeq {cseq} drew no ACK inside Timer H"
             ),
+            Failure::InviteUnanswered { leg, cseq } => {
+                write!(f, "leg {leg}: INVITE CSeq {cseq} drew no response inside Timer B")
+            }
             Failure::CheckFailed { site, field, op, expected, observed } => write!(
                 f,
                 "{site}: check {field} {op} {expected:?} — observed {observed:?}"
@@ -386,61 +396,6 @@ pub struct DeclaredNote {
     /// having produced none, which fails it and says so in `failures`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recorded: Option<String>,
-}
-
-/// What the generic close put on the wire for one leg (§11.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "kebab-case")]
-pub enum CloseOwed {
-    /// A final response to a request the leg took and never answered.
-    Answer,
-    /// The ACK a final it took is owed (RFC 3261 §13.2.2.4, §17.1.1.3).
-    Ack,
-    /// The BYE that ends a dialog the leg opened (RFC 3261 §15).
-    Bye,
-    /// The CANCEL for an INVITE it sent that has no final (RFC 3261 §9.1).
-    Cancel,
-}
-
-/// One act of the generic close: what a scripted leg emitted to end what it
-/// still held once its script had ended.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields, rename_all = "snake_case")]
-pub struct CloseAct {
-    pub leg: String,
-    /// The obligation it discharged.
-    pub owed: CloseOwed,
-    /// The start line of the message it put on the wire. The datagram itself is
-    /// in the recording, on this leg, noted as the close's.
-    pub sent: String,
-}
-
-/// A script a run that COULD NOT GO ON ended, and the generic close that
-/// terminated its call instead (§11.2). Polarity-free: a positive run that
-/// cannot go on is abandoned and closed exactly like a negative one, and its
-/// verdict still fails.
-///
-/// The abandonment is stated rather than hidden: `completed_steps` stays the
-/// truth about what ran, this is the truth about what did not, and the acts are
-/// what ended the call in the script's place.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields, rename_all = "snake_case")]
-pub struct Abandoned {
-    /// The leg the aborting delta landed on, where the abort named one. A run
-    /// stopped by something legless — a stall, a closed transport, a flow with
-    /// nothing left to wake — abandons with no leg.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub leg: Option<String>,
-    /// The flow step it named, where it named one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub step: Option<String>,
-    /// The flow nodes the script never ran.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pending: Vec<String>,
-    /// What the close emitted, in the order it emitted it. Empty where every
-    /// scripted leg already held nothing open.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub closed: Vec<CloseAct>,
 }
 
 /// One classified check that did not hold and did not gate (§9.1).
@@ -674,106 +629,4 @@ impl RunVerdict {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_first_step_naming_failure_becomes_the_run_s_failed_step() {
-        let mut verdict = RunVerdict::ok("c", "upstream-fake");
-        assert!(verdict.passed());
-        verdict.fail(Failure::SettleTimedOut { budget_ms: 32000, open: vec!["B".into()] });
-        assert!(!verdict.passed());
-        assert_eq!(verdict.failed_step, None);
-        verdict.fail(Failure::ExpectTimedOut {
-            step: "s7".into(),
-            leg: "A".into(),
-            gated_on: "486".into(),
-            within_ms: 32000,
-        });
-        assert_eq!(verdict.failed_step.as_deref(), Some("s7"));
-        verdict.fail(Failure::SendFailed {
-            step: "s9".into(),
-            leg: "A".into(),
-            detail: "x".into(),
-        });
-        assert_eq!(verdict.failed_step.as_deref(), Some("s7"), "the FIRST one stands");
-        assert_eq!(verdict.failures.len(), 3);
-    }
-
-    #[test]
-    fn a_verdict_round_trips_through_its_bundle_form() {
-        let mut verdict = RunVerdict::ok("authored-cancel-race", "upstream-fake");
-        verdict.branches.insert("a1".into(), "cancelled".into());
-        verdict.completed_steps.push("s1".into());
-        verdict.informative.push(Informative {
-            class: CheckClass::CdrVocabulary,
-            finding: Failure::CdrMismatch {
-                expected: "events matches InviteReceived".into(),
-                observed: "invite_received".into(),
-            },
-        });
-        let text = serde_json::to_string(&verdict).unwrap();
-        assert_eq!(serde_json::from_str::<RunVerdict>(&text).unwrap(), verdict);
-        // The status is a statement about gating checks; an informative finding
-        // is not one of them.
-        assert!(verdict.passed());
-    }
-
-    /// What the lane states about how it ran the case survives the bundle
-    /// form, and a verdict stating nothing writes no field.
-    #[test]
-    fn the_lanes_facts_are_written_only_when_stated() {
-        let mut verdict = RunVerdict::ok("c", "upstream-fake");
-        assert!(!serde_json::to_string(&verdict).unwrap().contains("lane_facts"));
-        verdict.lane_facts.insert("service".into(), "scripted".into());
-        let text = serde_json::to_string(&verdict).unwrap();
-        assert!(text.contains(r#""lane_facts":{"service":"scripted"}"#), "{text}");
-        assert_eq!(serde_json::from_str::<RunVerdict>(&text).unwrap(), verdict);
-    }
-
-    fn violation(emitter: &str) -> crate::violation::RfcViolation {
-        crate::violation::RfcViolation {
-            rule: RfcRule::No200AfterCancel,
-            step: "s11".into(),
-            emitter: emitter.into(),
-            relays: None,
-        }
-    }
-
-    #[test]
-    fn a_scripted_peer_s_violation_is_listed_and_gates_nothing() {
-        let mut verdict = RunVerdict::ok("bc-rc-cancel-xing", "upstream-fake");
-        verdict.note_violation(&violation("uas1"));
-        assert_eq!(verdict.rfc_violations.len(), 1);
-        assert!(!verdict.rfc_violations[0].gating);
-        assert!(verdict.passed(), "{:#?}", verdict.failures);
-        // And it survives the bundle, because the listing is the point.
-        let text = serde_json::to_string(&verdict).unwrap();
-        assert!(text.contains("no-200-after-cancel"), "{text}");
-    }
-
-    #[test]
-    fn a_violation_the_system_under_test_emits_gates() {
-        let mut verdict = RunVerdict::ok("bc-rc-cancel-xing", "upstream-fake");
-        verdict.note_violation(&violation("sut"));
-        assert!(verdict.rfc_violations[0].gating);
-        assert!(!verdict.passed());
-        assert!(matches!(verdict.failures.first(), Some(Failure::RfcViolationUnverified { .. })));
-    }
-
-    /// A `sut` entry carrying on a scripted party's is listed with what it
-    /// relays and gates nothing: the claim is the party's, stated beside it.
-    #[test]
-    fn a_relayed_violation_the_system_under_test_carries_on_gates_nothing() {
-        let mut verdict = RunVerdict::ok("relayed", "upstream-fake");
-        verdict.note_violation(&crate::violation::RfcViolation {
-            relays: Some("s4".into()),
-            ..violation("sut")
-        });
-        assert!(!verdict.rfc_violations[0].gating);
-        assert_eq!(verdict.rfc_violations[0].relays.as_deref(), Some("s4"));
-        assert!(verdict.passed(), "{:#?}", verdict.failures);
-        let text = serde_json::to_string(&verdict).unwrap();
-        assert!(text.contains(r#""relays":"s4""#), "{text}");
-    }
-}
+mod tests;

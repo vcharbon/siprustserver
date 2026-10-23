@@ -25,10 +25,3 @@ export const Identity = Schema.Struct({
   catalog: Schema.optionalKey(CatalogEntry)
 })
 export interface Identity extends Schema.Schema.Type<typeof Identity> {}
-
-/**
- * Whether this identity can be dialed in `form` — what a `${num:…}` accessor
- * needs of it, since a lane can only bind a form the plan resolved.
- */
-export const identityHasForm = (identity: Identity, form: string): boolean =>
-  (identity.forms ?? []).includes(form)

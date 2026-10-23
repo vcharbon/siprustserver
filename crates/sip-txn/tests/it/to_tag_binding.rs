@@ -78,14 +78,17 @@ fn to_tags(msgs: &[SipMessage], status: u16) -> Vec<String> {
         .collect()
 }
 
-/// INVITE in, 200 under `tag` out, the caller's ACK in: the transaction is
-/// gone and the dialog's tag is only remembered.
+/// INVITE in, 200 under `tag` out, the caller's ACK in, then Timer L run out
+/// (RFC 6026 §7.1): the transaction is gone and the dialog's tag is only
+/// remembered.
 async fn answered_and_acked(stack: &mut Stack, branch: &str, call_id: &str, tag: &str) {
     stack.inject(&inbound_request("INVITE", branch, call_id, None)).await;
     elapse_ms(20).await;
     send(stack, tu_response(200, "INVITE", branch, call_id, Some(tag))).await;
     stack.inject(&inbound_request("ACK", branch, call_id, Some(tag))).await;
     elapse_ms(20).await;
+    elapse_ms(sip_txn::timers::TIMER_L).await;
+    assert_eq!(stack.txn.metrics().active_transactions(), 0, "Timer L ended the transaction");
     let _ = stack.drain_events();
     let _ = stack.drain_peer();
 }
@@ -101,7 +104,7 @@ async fn a_tagless_answer_to_a_cancel_after_the_ack_takes_the_dialogs_tag() {
     stack.inject(&inbound_request("CANCEL", branch, call_id, None)).await;
     elapse_ms(20).await;
     let cancel = handed_up(&stack.drain_events(), "CANCEL");
-    let answer = generate_response(&cancel, 481, "Gone", &GenerateResponseOpts::default());
+    let answer = generate_response(&cancel, 481, "Gone", &GenerateResponseOpts::default()).unwrap();
     assert!(
         sip_message::generators::response::is_fallback_to_tag(answer.to().tag().unwrap()),
         "the TU minted nothing: {:?}",
@@ -128,7 +131,7 @@ async fn a_wrong_tag_on_a_cancel_answer_is_re_rendered_under_the_bound_one() {
             udp_queue_max: 64,
             id_gen: Arc::new(IdGen::seeded(0xC0FFEE)),
             strict_to_tag: false,
-            ..Default::default()
+            ..common::config()
         },
     )
     .await;
@@ -227,13 +230,9 @@ async fn a_seeded_transaction_pins_the_seeds_tag_for_the_cancel_answer() {
         other => panic!("the seed's INVITE: {other:?}"),
     };
     let seed = TxnSeed::ServerInvite {
-        branch: branch.to_string(),
-        sent_by: peer_sent_by(),
-        call_id: call_id.to_string(),
-        from_tag: "caller-tag".to_string(),
+        request: invite,
         to_tag: Some("t1".to_string()),
         leg_id: Some("a".to_string()),
-        original_request: Some(invite),
     };
     assert_eq!(stack.txn.seed("w0|bind-g|atag", vec![seed]).await.unwrap(), 1);
 
@@ -266,7 +265,7 @@ async fn an_in_dialog_answer_echoes_the_requests_tag_untouched() {
     stack.inject(&inbound_request("BYE", bye_branch, call_id, Some("dlg-d"))).await;
     elapse_ms(20).await;
     let bye = handed_up(&stack.drain_events(), "BYE");
-    let answer = generate_response(&bye, 200, "OK", &GenerateResponseOpts::default());
+    let answer = generate_response(&bye, 200, "OK", &GenerateResponseOpts::default()).unwrap();
     let sent = stack.txn.send_response(answer, addr(PEER)).await.unwrap();
     elapse_ms(20).await;
 
@@ -288,7 +287,7 @@ async fn a_fallback_tag_nothing_binds_leaves_and_is_counted() {
     stack.inject(&inbound_request("CANCEL", branch, call_id, None)).await;
     elapse_ms(20).await;
     let cancel = handed_up(&stack.drain_events(), "CANCEL");
-    let answer = generate_response(&cancel, 481, "Gone", &GenerateResponseOpts::default());
+    let answer = generate_response(&cancel, 481, "Gone", &GenerateResponseOpts::default()).unwrap();
     let fallback = answer.to().tag().unwrap().to_string();
     stack.txn.send_response(answer, addr(PEER)).await.unwrap();
     elapse_ms(20).await;

@@ -24,7 +24,7 @@ const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 
 /// A non-emergency new INVITE against a worker whose CPS bucket is exhausted
-/// (capacity 0, no refill) is refused at router ingress: the caller gets the
+/// (its one token spent, no refill) is refused at router ingress: the caller gets the
 /// new-call `503` through its server transaction — a `Retry-After`, no
 /// `Reason` (ADR-0037 item 3) — and NO per-call state is created — no CDR, no
 /// live call, and bob is never contacted.
@@ -35,15 +35,17 @@ async fn cps_bucket_empty_503s_a_new_invite_before_any_call_state() {
     let alice = h.agent("alice", "127.0.0.1:5063").await;
     // bob exists only to prove he is NEVER reached on a reject.
     let _bob = h.agent("bob", "127.0.0.1:5073").await;
-    // Capacity 0 + rate 0 → the bucket is empty and never refills, so the very
-    // first non-emergency INVITE is rejected deterministically.
+    // One token, spent before the call, and rate 0: the bucket is empty and
+    // never refills, so the very first non-emergency INVITE is rejected
+    // deterministically.
     let b2bua = B2buaSut::route_all_to("127.0.0.1", 5073)
         .tune(|c| {
-            c.cps_bucket_size = 0;
+            c.cps_bucket_size = 1;
             c.cps_bucket_rate = 0;
         })
         .start(&h, "b2bua", "127.0.0.1:5083")
         .await;
+    b2bua.overload().spend_token();
 
     let mut call = alice.invite(&_bob).with_sdp(OFFER).through(b2bua.addr).send().await;
 
@@ -86,11 +88,12 @@ async fn a_shed_strands_no_per_call_lock() {
     let _bob = h.agent("bob", "127.0.0.1:5076").await;
     let b2bua = B2buaSut::route_all_to("127.0.0.1", 5076)
         .tune(|c| {
-            c.cps_bucket_size = 0;
+            c.cps_bucket_size = 1;
             c.cps_bucket_rate = 0;
         })
         .start(&h, "b2bua", "127.0.0.1:5086")
         .await;
+    b2bua.overload().spend_token();
 
     // First non-emergency INVITE is shed deterministically (empty bucket).
     let mut call = alice.invite(&_bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -120,11 +123,12 @@ async fn emergency_invite_bypasses_the_empty_bucket_and_establishes() {
     let bob = h.agent("bob", "127.0.0.1:5074").await;
     let b2bua = B2buaSut::route_all_to("127.0.0.1", 5074)
         .tune(|c| {
-            c.cps_bucket_size = 0;
+            c.cps_bucket_size = 1;
             c.cps_bucket_rate = 0;
         })
         .start(&h, "b2bua", "127.0.0.1:5084")
         .await;
+    b2bua.overload().spend_token();
 
     // `Resource-Priority: esnet.0` marks the INVITE emergency (is_emergency_request).
     let mut call = alice
@@ -295,13 +299,14 @@ async fn invites_refused_by_an_empty_bucket_get_a_jittered_retry_after() {
     let bob = h.agent("bob", "127.0.0.1:5078").await;
     let b2bua = B2buaSut::route_all_to("127.0.0.1", 5078)
         .tune(|c| {
-            c.cps_bucket_size = 0;
+            c.cps_bucket_size = 1;
             c.cps_bucket_rate = 0;
             c.retry_after_base_sec = 5;
             c.retry_after_jitter_sec = 10;
         })
         .start(&h, "b2bua", "127.0.0.1:5088")
         .await;
+    b2bua.overload().spend_token();
 
     let mut calls = Vec::new();
     for _ in 0..8 {

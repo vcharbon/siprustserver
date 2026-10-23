@@ -263,6 +263,7 @@ fn cfg(via: SocketAddr, cps: f64, secs: u64, mif: usize, seed: u64) -> DriverCfg
         },
         default_tuning: CallTuning::default(),
         tuning: std::collections::HashMap::new(),
+        overload_reject: None,
     }
 }
 
@@ -310,8 +311,7 @@ async fn loadgen_mux_smoke_basic_concurrent() {
     // The on-disk report renders an OK callflow.
     let out = std::env::temp_dir().join(format!("loadgen-mux-{}", std::process::id()));
     reporter.finalize(&out).unwrap();
-    // No chaos markers in the smoke run → every call is the `clear` sub-bucket.
-    assert!(out.join("callflows/basic_call/ok/clear/0.html").exists(), "no OK callflow HTML");
+    assert!(out.join("callflows/basic_call/ok/0.html").exists(), "no OK callflow HTML");
     let _ = std::fs::remove_dir_all(&out);
 }
 
@@ -596,78 +596,6 @@ async fn loadgen_mux_orphan_observability() {
         samples.iter().any(|s| s.contains("unknown_token")),
         "no unknown_token sample: {samples:?}"
     );
-}
-
-/// The chaos-flag endpoint: a `POST /chaos?type=…&target=…` records one marker
-/// on the loadgen's HTTP server (the same socket as GET `/metrics`), and a GET
-/// still returns the render body. This is the hook the chaos driver hits at the
-/// kill instant so finished calls get auto-classified near/clear.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "slow lane: loadgen"]
-async fn loadgen_chaos_post_records_marker() {
-    use loadgen::{serve_metrics, ChaosLog};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let chaos = Arc::new(ChaosLog::new(Clock::system()));
-    let bind = addr(6490);
-    let render: Arc<dyn Fn() -> String + Send + Sync> =
-        Arc::new(|| "render-body-marker\n".to_string());
-    let srv_chaos = chaos.clone();
-    tokio::spawn(async move {
-        let _ = serve_metrics(bind, render, Some(srv_chaos), None).await;
-    });
-
-    // Retry-connect until the server is bound.
-    let mut stream = loop {
-        match tokio::net::TcpStream::connect(bind).await {
-            Ok(s) => break s,
-            Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
-        }
-    };
-    stream
-        .write_all(
-            b"POST /chaos?type=kill_worker&target=b2bua-worker-1 HTTP/1.1\r\nHost: x\r\n\r\n",
-        )
-        .await
-        .unwrap();
-    let mut buf = Vec::new();
-    let _ = stream.read_to_end(&mut buf).await;
-    assert!(
-        String::from_utf8_lossy(&buf).contains("recorded chaos marker"),
-        "POST /chaos should ack: {}",
-        String::from_utf8_lossy(&buf)
-    );
-    assert_eq!(chaos.total(), 1, "exactly one marker recorded");
-
-    // A POST carrying `ts` (Unix epoch ms of the kill) is back-dated: the ack
-    // echoes the ts and a second marker is recorded. The driver supplies this so
-    // port-forward latency on the flag path can't shift the marker off the kill.
-    let kill_ms =
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
-            as u64
-            - 1500;
-    let mut s_ts = tokio::net::TcpStream::connect(bind).await.unwrap();
-    s_ts.write_all(
-        format!("POST /chaos?type=kill_worker&target=b2bua-worker-1&ts={kill_ms} HTTP/1.1\r\nHost: x\r\n\r\n")
-            .as_bytes(),
-    )
-    .await
-    .unwrap();
-    let mut bt = Vec::new();
-    let _ = s_ts.read_to_end(&mut bt).await;
-    assert!(
-        String::from_utf8_lossy(&bt).contains(&format!("ts={kill_ms}")),
-        "POST /chaos with ts should ack the timestamp: {}",
-        String::from_utf8_lossy(&bt)
-    );
-    assert_eq!(chaos.total(), 2, "the ts-bearing marker is recorded too");
-
-    // A GET still serves the render body.
-    let mut s2 = tokio::net::TcpStream::connect(bind).await.unwrap();
-    s2.write_all(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();
-    let mut b2 = Vec::new();
-    let _ = s2.read_to_end(&mut b2).await;
-    assert!(String::from_utf8_lossy(&b2).contains("render-body-marker"), "GET should render");
 }
 
 /// The leg-routing **injection API**: two receivers ("charlie", "dave") share
@@ -1048,21 +976,21 @@ async fn loadgen_mux_unrouted_correlated_datagram_taps_for_the_ladder() {
     assert!(ep_alt.try_recv().is_none(), "no inbox got it");
 }
 
-/// Emergency / non-emergency split under overload. The b2bua's CPS bucket is
-/// exhausted (size 0, no refill), so EVERY non-emergency new INVITE is refused
-/// with a 503 while an emergency (`Resource-Priority: esnet.0`) call passes the
-/// empty bucket. Proves the loadgen REPORTING the user wants: non-emergency
-/// calls are classified `status_503` (the NOK side), emergency calls are all
-/// `ok` with ZERO loss, and the report keeps first-N samples for BOTH classes.
+/// Emergency / non-emergency split under overload: the b2bua's CPS bucket is
+/// empty (its one token spent, no refill), so every non-emergency new INVITE
+/// draws a 503 while emergency (`Resource-Priority: esnet.0`) calls pass. The
+/// loadgen classes the former `status_503`, the latter all `ok` with ZERO loss,
+/// and keeps first-N samples for BOTH classes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "slow lane: loadgen"]
 async fn loadgen_mux_emergency_split_under_overload() {
     let (_h, b2bua, core, transport) =
         setup_with(6450, Correlation::header("X-Loadgen-Id"), 5, RECV, |c| {
-            c.cps_bucket_size = 0; // exhausted bucket → shed every non-emergency
+            c.cps_bucket_size = 1; // one token, spent below → shed every non-emergency
             c.cps_bucket_rate = 0; // …and never refill (deterministic).
         })
         .await;
+    b2bua.overload().spend_token();
     let reporter =
         Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
 
@@ -1110,11 +1038,11 @@ async fn loadgen_mux_emergency_split_under_overload() {
     b2bua.assert_fully_reaped();
 }
 
-/// Post-call cleanup across EVERY failure-teardown path, without an endurance
-/// run. A mix of voluntarily-failing scenarios — callee 486 (final reject, no
+/// Post-call cleanup across EVERY abnormal-end teardown path, without an
+/// endurance run. The abnormal-end mix — callee 486 (final reject, no
 /// teardown), abandon-on-180 (CANCEL an early dialog), and a declined REFER
 /// (BYE a still-confirmed call whose transfer leg was rejected) — interleaved
-/// with happy calls. Each failure mode is reported under its NOK class, and the
+/// with happy calls. Each one ends on its accepted branch (class `ok`), and the
 /// SUT must FULLY reap afterwards: no live call, no stranded per-call lock, no
 /// stamp residue (`assert_fully_reaped`), and no mux registry leak. A regression
 /// here is a real post-call-cleanup gap (the leak class endurance otherwise
@@ -1126,27 +1054,26 @@ async fn loadgen_post_call_cleanup_no_leak() {
     let reporter =
         Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 3 }));
 
-    let mut scenarios = MixEntry::failure_mix(&ShapeRegistry::with_defaults(), &inputs());
+    let mut scenarios = MixEntry::abnormal_end_mix(&ShapeRegistry::with_defaults(), &inputs());
     scenarios.push(mix("basic_call", 2.0)); // some happy traffic in the mix
-    let driver =
-        Driver::new(cfg(b2bua.addr, 50.0, 3, 12, 0xFA17), scenarios, reporter.clone(), transport);
+    let mut c = cfg(b2bua.addr, 50.0, 3, 12, 0xFA17);
+    // A ring long enough that the caller's CANCEL always precedes the answer.
+    c.call.ring_delay = Duration::from_millis(500);
+    let driver = Driver::new(c, scenarios, reporter.clone(), transport);
     run_throttled(&driver).await;
 
-    // Each failure mode produced its NOK bucket, and the happy path its OK.
-    assert!(
-        reporter.count("invite_reject", &ResultClass::WrongStatus(486)) > 0,
-        "no 486 final-reject recorded:\n{}",
-        reporter.render_prometheus()
-    );
-    assert!(
-        reporter.count("abandon_ringing", &ResultClass::Timeout) > 0,
-        "no abandoned-early call recorded"
-    );
-    assert!(
-        reporter.count("refer_charlie_reject", &ResultClass::Unexpected) > 0,
-        "no declined-transfer recorded"
-    );
-    assert!(reporter.count("basic_call", &ResultClass::Ok) > 0, "no happy call completed");
+    // Each abnormal end completed on its own branch, and the happy path too.
+    let prom = reporter.render_prometheus();
+    for (scenario, branch) in [
+        ("invite_reject", "rejected"),
+        ("abandon_ringing", "abandoned"),
+        ("refer_charlie_reject", "transfer_declined"),
+        ("basic_call", "answered"),
+    ] {
+        assert!(reporter.count(scenario, &ResultClass::Ok) > 0, "no ok {scenario}:\n{prom}");
+        let series = format!("{{stream=\"main\",shape=\"{scenario}\",branch=\"{branch}\"}}");
+        assert!(prom.contains(&format!("loadgen_branch_total{series}")), "no {series}:\n{prom}");
+    }
 
     // Post-call cleanup is COMPLETE across every failure-teardown path.
     settle_until(|| core.registry_size() == 0).await;
@@ -1719,7 +1646,8 @@ async fn loadgen_abandoned_reject_leg_recovery_lands_on_recording() {
 /// unrecoverable loss. The contract (table §2): the call's teardown still
 /// completes, the settle barrier's 32 s ceiling elapses with the CSeq gap open
 /// (the later BYE reveals the hole), and the verdict maps to the FIXED
-/// `Timeout { who: "settle" }` — class `timeout`, case `settle@transferred` —
+/// `Timeout { who: "settle" }` — class `timeout`, case `settle` (the failed
+/// barrier) —
 /// with the sample DETAIL naming the open obligation. Never a protocol-defect
 /// class: `rfc_audit_fail` stays 0. Real-clock ~35 s (the genuine 64·T1 settle
 /// ceiling — deliberately not a knob).
@@ -1765,16 +1693,16 @@ async fn loadgen_settle_gate_permanent_notify_loss_names_obligation() {
         reporter.render_prometheus()
     );
 
-    // The report names the failure mode: the case bucket is the FIXED
-    // `settle@transferred` (who="settle", last phase `transferred`), and the
-    // sampled page's detail names the open obligation (the never-observed CSeq).
+    // The report names the failure mode: the case bucket is the FIXED `settle`
+    // barrier, and the sampled page's detail names the open obligation (the
+    // never-observed CSeq).
     let out = std::env::temp_dir().join(format!("loadgen-settle-gate-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
     reporter.finalize(&out).expect("finalize report");
-    let case_dir = out.join("callflows/refer/timeout/settle@transferred");
+    let case_dir = out.join("callflows/refer/timeout/settle");
     assert!(
         case_dir.is_dir(),
-        "expected the settle@transferred case bucket; report tree: {:?}",
+        "expected the settle case bucket; report tree: {:?}",
         list_dirs(&out)
     );
     let mut named = false;
@@ -2035,7 +1963,7 @@ async fn loadgen_pooled_case_identities_and_dwell_overrides() {
     let out = std::env::temp_dir().join(format!("loadgen-pooled-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
     reporter.finalize(&out).unwrap();
-    let page = out.join("callflows/pooled_basic/ok/clear/0.html");
+    let page = out.join("callflows/pooled_basic/ok/0.html");
     let html = std::fs::read_to_string(&page)
         .unwrap_or_else(|e| panic!("no OK sample page at {}: {e}", page.display()));
     assert!(html.contains("binding: case=load-basic-pooled"), "banner missing from sample page");
@@ -2117,7 +2045,7 @@ async fn loadgen_case_checks_pass_and_render_verdicts() {
     let out = std::env::temp_dir().join(format!("loadgen-checks-ok-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
     reporter.finalize(&out).unwrap();
-    let html = std::fs::read_to_string(out.join("callflows/basic_call/ok/clear/0.html")).unwrap();
+    let html = std::fs::read_to_string(out.join("callflows/basic_call/ok/0.html")).unwrap();
     assert!(html.contains("check bob.initialInvite from.uri"), "verdict line missing:\n{html}");
     assert!(html.contains("PASS"), "PASS verdicts must render on the OK page");
     assert!(html.contains("check alice.answer to.tag"), "inline-block verdict missing");
@@ -2175,7 +2103,7 @@ async fn loadgen_failing_check_reclassifies_to_check_fail() {
     // The sample path carries the case discriminator (`<on>.<field>` of the
     // failing check), so distinct failing checks keep distinct first-N buckets.
     let html = std::fs::read_to_string(
-        out.join("callflows/basic_call/check_fail/bob.initialInvite.from.userInfo/clear/0.html"),
+        out.join("callflows/basic_call/check_fail/bob.initialInvite.from.userInfo/0.html"),
     )
     .unwrap();
     assert!(html.contains("check bob.initialInvite from.userInfo"), "verdict missing:\n{html}");
@@ -2205,7 +2133,7 @@ impl ActorScenario for ByeWithContact {
                 role: "alice",
                 agent: env.alice.clone(),
                 disposition: Disposition::Caller,
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 goals: vec![
                     Goal::new(
                         Barrier::None,
@@ -2265,7 +2193,7 @@ impl ActorScenario for ByeWithContact {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::HappyBye,
+            expect: Expect::answered(),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -2391,7 +2319,7 @@ impl ActorScenario for NumberPlanRefer {
                 role: "alice",
                 agent: env.alice.clone(),
                 disposition: Disposition::Caller,
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 goals: vec![
                     Goal::new(
                         Barrier::None,
@@ -2466,7 +2394,7 @@ impl ActorScenario for NumberPlanRefer {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::HappyBye,
+            expect: Expect::answered(),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -2569,10 +2497,10 @@ async fn settle_secs(secs: u64, cond: impl Fn() -> bool) {
 /// Plus, once over the whole soak: the loss model actually bit (`drops > 0`, so
 /// the run is not vacuous) and there is NO mux/SUT leak.
 ///
-/// The voluntarily-failing bodies (`invite_reject` / `abandon_ringing` /
-/// `refer_charlie_reject`) are EXCLUDED — they are expected-NOK by design, so
-/// "0 failed calls" does not apply to them (their loss behaviour is a separate
-/// concern; the refer-decline path is exercised by the functional gate).
+/// The abnormal-end bodies (`invite_reject` / `abandon_ringing` /
+/// `refer_charlie_reject`) are EXCLUDED — their loss behaviour is a separate
+/// concern (their no-leak coverage is `loadgen_post_call_cleanup_no_leak` and
+/// the functional gate).
 ///
 /// Real loopback UDP on the REAL clock (the retransmit ladder is wall-clock), so
 /// this is a slow-lane `#[ignore]` test — its paused-clock equivalents are the
@@ -2592,9 +2520,9 @@ async fn loadgen_loss_soak_all_bodies_recover() {
     //    `[bob, bob2]` failover plan walked on b-leg rejection) under the
     //    `ApiCallPin` egress: rerouting_prack. This body's whole point is the
     //    failover, which only the api-call engine registers.
-    // The voluntarily-failing bodies (invite_reject / abandon_ringing /
-    // refer_charlie_reject) are EXCLUDED — expected-NOK by design, so "0 failed"
-    // does not apply (their loss behaviour is a separate concern).
+    // The abnormal-end bodies (invite_reject / abandon_ringing /
+    // refer_charlie_reject) are EXCLUDED — their loss behaviour is a separate
+    // concern.
     const GROUP_A: &[&str] = &[
         "basic_call",
         "basic_call_em",
@@ -2747,11 +2675,11 @@ async fn loadgen_loss_soak_all_bodies_recover() {
         // obligation holds the settle barrier — and thus the recording window —
         // until a lost reject hop-ACK is recovered by the Timer-G 486 retransmit +
         // the SUT's §17.1.1.2 re-ACK, which the call-eviction path does not
-        // purge). Deterministic gate:
-        // `loadgen_abandoned_reject_leg_recovery_lands_on_recording`.
+        // purge). Deterministic gate: `loadgen_abandoned_reject_leg_recovery_lands_on_recording`.
         assert_eq!(
-            audit, 0,
-            "body {id}: {audit} rfc_audit_fail under loss — a retransmitted INVITE final never re-ACKed (§13.2.2.4 2xx / §17.1.1.3 non-2xx → `unacked-invite-non-2xx-final`):\n{}",
+            audit,
+            0,
+            "body {id}: {audit} rfc_audit_fail under loss, by rule in the report's summary.md:\n{}",
             reporter.render_prometheus()
         );
         assert_eq!(panic, 0, "body {id}: {panic} panic:\n{}", reporter.render_prometheus());

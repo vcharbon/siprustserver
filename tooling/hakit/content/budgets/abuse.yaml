@@ -1,0 +1,12 @@
+schema: budget.v1
+name: abuse
+description: >-
+  An abusive peer (ADR-0049 §2.10): a stream flooding in-dialog requests. The
+  system under test absorbs it like a spike: no setup may fail and no ending
+  may be unexpected on any stream, the abusive one included; setups may be
+  slower for about 5 s of offered rate, and traffic is back within 60 s of the
+  drain.
+setup_slow:
+  max_seconds: 5
+recovery:
+  max_s: 60

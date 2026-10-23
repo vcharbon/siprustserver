@@ -1,0 +1,31 @@
+schema: incident.v1
+name: kill_worker_graceful
+description: >-
+  Delete one ready worker pod with its grace period (SIGTERM, then the drain the
+  worker runs before it exits): a rolling restart. The workload re-creates it;
+  the probe waits for the replacement and reads kill_worker's restart timings.
+kind: fault
+target:
+  selector: app=b2bua-worker
+  pick: one
+params:
+  grace_s:
+    type: integer
+    default: -1
+    description: The grace period in seconds; -1 is the pod's own terminationGracePeriodSeconds.
+  proxy_selector:
+    type: string
+    default: app=sip-front-proxy
+    description: The front proxies whose registry join of the replacement is timed; empty skips them.
+  proxy_container:
+    type: string
+    default: sip-front-proxy
+    description: The proxy container whose log holds the registry lines.
+duration_s: 0
+expected_s: 90
+timeouts:
+  inject_s: 30
+  heal_s: 10
+  probe_s: 240
+  probe_interval_s: 2
+requires: [kind]

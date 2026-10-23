@@ -54,13 +54,23 @@ async fn scene(name: &str, rig: Option<&WitnessRig>) -> B2buaScene {
         )
         .on_party("alice"),
     );
-    // The rule names no offending message, so it cannot be scoped to a party;
-    // it is waived by rule, and an unused waiver still fails the run.
-    s.h.waive(WaiverScope::rule(
-        "concurrent-re-invite-500-or-491",
-        "validator false positive: alice's own CANCEL of each concurrent re-INVITE is \
-         matched first, so it draws 487 (RFC 3261 §9.2), not 500",
-    ));
+    s.h.waive(
+        WaiverScope::rule(
+            "cancel-after-1xx",
+            "alice's burst CANCELs each re-INVITE in the instant it leaves, before any \
+             provisional (RFC 3261 §9.1): the flood under test",
+        )
+        .on_party("alice"),
+    );
+    // An accepted SUT deviation, charged to the b2bua at each re-INVITE.
+    s.h.waive(
+        WaiverScope::rule(
+            "concurrent-re-invite-500-or-491",
+            "a CANCEL that reaches a re-INVITE before its final draws 487 (RFC 3261 §9.2); the \
+             flooded overflow path answers no concurrent re-INVITE before it",
+        )
+        .on_party("b2bua"),
+    );
     s
 }
 

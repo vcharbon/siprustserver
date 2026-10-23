@@ -8,7 +8,8 @@ use crate::common;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use call::{
-    CallBodyCodec, CallDecodeError, LegKind, MachineId, MsgpackCodec, PolicyUpdateBody, StateLabel,
+    CallBodyCodec, CallDecodeError, DialogState, LegKind, MachineId, MsgpackCodec,
+    PolicyUpdateBody, StateLabel,
 };
 use common::{arb_call, paced_emission, representative_call};
 use proptest::prelude::*;
@@ -18,7 +19,7 @@ use sip_retransmit::Class;
 fn representative_round_trips() {
     let codec = MsgpackCodec::new();
     let call = representative_call();
-    let bytes = codec.encode(&call);
+    let bytes = codec.encode(&call).unwrap();
     assert!(!bytes.is_empty(), "P14: non-empty output");
     let decoded = codec.decode(&bytes).expect("decode");
     assert_eq!(decoded, call, "P1: round-trip preserves the value");
@@ -27,37 +28,35 @@ fn representative_round_trips() {
 /// A service-owned timer (`TimerType::Service`, the ADR-0016 watchdog seam)
 /// rides the replicated `call.timers` ledger like any core timer: the borrowed
 /// `Cow<'static, str>` declaration form encodes and decodes back as an owned,
-/// **equal** value (the HA takeover-restore path), and the persisted id recipe
-/// (`TimerType::timer_id` == `Debug`) is stable per `(service_id, key)` [+ leg].
+/// **equal** key (the HA takeover-restore path), keeping its scope and
+/// generation; distinct service keys are distinct timer keys.
 #[test]
-fn service_timer_entry_round_trips_and_id_recipe_is_stable() {
-    use call::{TimerEntry, TimerType};
+fn service_timer_entry_round_trips_with_its_key_and_generation() {
+    use call::{TimerEntry, TimerKey, TimerType};
 
     let t = TimerType::service(MachineId::new("routing"), "deadline18x");
-    assert_eq!(t.timer_id(None), "Service:routing:deadline18x");
-    assert_eq!(t.timer_id(Some("b-1")), "Service:routing:deadline18x:b-1");
-    // Distinct keys mint distinct ids (no collision in the driver's
-    // (call_ref, id) keyspace); same key re-derives the same id (supersede).
     assert_ne!(
-        TimerType::service(MachineId::new("routing"), "prack-guard").timer_id(None),
-        t.timer_id(None),
+        TimerKey::call(TimerType::service(MachineId::new("routing"), "prack-guard")),
+        TimerKey::call(t.clone()),
     );
+    assert_ne!(TimerKey::leg(t.clone(), "b-1"), TimerKey::call(t.clone()));
 
     let codec = MsgpackCodec::new();
     let mut call = representative_call();
     call.timers.push(TimerEntry {
-        id: t.timer_id(None),
-        timer_type: t.clone(),
+        key: TimerKey::leg(t.clone(), "b-1"),
+        generation: 7,
         fire_at: 1_234_567,
-        leg_id: None,
     });
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "service timer survives the replication codec");
     let restored = decoded.timers.last().unwrap();
     assert_eq!(
-        restored.timer_type, t,
+        restored.key,
+        TimerKey::leg(t, "b-1"),
         "owned-Cow deserialisation compares equal to the borrowed declaration"
     );
+    assert_eq!(restored.generation, 7);
 }
 
 /// Replication sanity: the release-event `subscriptions` and
@@ -74,12 +73,12 @@ fn release_subscriptions_and_reroute_round_trip() {
 
     call.subscriptions = Vec::new();
     call.reroute = None;
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "unsubscribed / no-reroute shape");
 
     call.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
     call.reroute = None;
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "subscribed-idle shape");
     assert!(decoded.subscriptions.contains(&ReleaseEventKind::MaxCallDuration));
 
@@ -89,7 +88,7 @@ fn release_subscriptions_and_reroute_round_trip() {
         old_leg_id: Some("b-1".into()),
         started_at_ms: 1_779_440_099_000,
     });
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "mid-reroute shape");
 }
 
@@ -107,7 +106,7 @@ fn the_decision_log_round_trips() {
 
     call.decision_log = Vec::new();
     call.decision_ordinal = 0;
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "no decision yet");
 
     let call =
@@ -124,7 +123,7 @@ fn the_decision_log_round_trips() {
             decision_ordinal: 0,
         },
     );
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "two marks");
     assert_eq!(decoded.decision_ordinal, 2);
     let labels: Vec<Option<&str>> =
@@ -150,7 +149,7 @@ fn an_in_dialog_info_decision_round_trips_under_its_own_kind() {
     let call =
         mark_decision(call, 1_000, DecisionKind::InfoRelay, Some("b-1".into()), Some("k1".into()));
     let call = mark_decision(call, 2_000, DecisionKind::InfoAcknowledge, Some("b-1".into()), None);
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call);
     let kinds: Vec<DecisionKind> =
         decoded.decision_log.iter().rev().take(2).map(|m| m.kind).collect();
@@ -170,11 +169,11 @@ fn the_termination_record_round_trips() {
     let mut call = representative_call();
 
     call.termination = None;
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "a live call");
 
     let call = record_termination(call, 3_000, TerminationCause::RemoteBye, Some("b-1".into()));
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "the callee's BYE, not yet cut");
     let t = decoded.termination.as_ref().unwrap();
     assert_eq!(
@@ -192,7 +191,7 @@ fn the_termination_record_round_trips() {
         Some("a".into()),
     );
     let call = seal_termination_seq(call);
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "a deadline, cut");
     let t = decoded.termination.as_ref().unwrap();
     assert_eq!(t.cause, TerminationCause::Timeout(TimeoutKind::Keepalive));
@@ -209,12 +208,12 @@ fn the_invite_final_sent_fact_round_trips() {
     let mut call = representative_call();
 
     call.a_leg.invite_final_sent = None;
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "unanswered a-leg");
     assert_eq!(decoded.a_leg.invite_final_sent, None);
 
     call.a_leg.invite_final_sent = Some(487);
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "a-leg carrying its final");
     assert_eq!(decoded.a_leg.invite_final_sent, Some(487));
 
@@ -233,18 +232,19 @@ fn the_invite_final_sent_fact_round_trips() {
 fn every_caller_facing_early_dialog_survives_a_takeover_copy() {
     let codec = MsgpackCodec::new();
     let mut call = representative_call();
-    let mut second = call.a_leg.dialogs[0].clone();
-    second.sip.local_tag = "second-face".into();
-    second.sip.local_cseq = 3;
-    second.ext.remote_cseq = Some(2);
-    call.a_leg.dialogs.push(second);
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let mut second = call.a_leg.dialogs.confirmed().expect("the answered dialog").clone();
+    second.our_tag = "second-face".into();
+    second.state = DialogState::Early;
+    second.our_cseq = 3;
+    second.peer_cseq = Some(2);
+    call.a_leg.dialogs.insert(second);
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call);
     let faces: Vec<_> = decoded
         .a_leg
         .dialogs
         .iter()
-        .map(|d| (d.sip.local_tag.as_str(), d.sip.local_cseq, d.ext.remote_cseq))
+        .map(|d| (d.our_tag.as_str(), d.our_cseq, d.peer_cseq))
         .collect();
     assert_eq!(faces.len(), 2);
     assert_eq!(faces[1], ("second-face", 3, Some(2)));
@@ -262,81 +262,84 @@ fn a_pending_requests_timestamp_survives_a_takeover_copy() {
         .b_legs
         .iter_mut()
         .flat_map(|leg| leg.dialogs.iter_mut())
-        .flat_map(|d| d.ext.inbound_pending_requests.iter_mut())
+        .flat_map(|d| d.inbound_pending_requests.iter_mut())
         .next()
         .expect("the representative call holds a pending request");
     pending.source_timestamp = Some("54.2".into());
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call);
     let echoed = decoded
         .b_legs
         .iter()
         .flat_map(|leg| leg.dialogs.iter())
-        .flat_map(|d| d.ext.inbound_pending_requests.iter())
+        .flat_map(|d| d.inbound_pending_requests.iter())
         .find_map(|p| p.source_timestamp.clone());
     assert_eq!(echoed.as_deref(), Some("54.2"));
 }
 
-/// RFC 3262 §7.1: the a-facing reliable-provisional map is replicated state —
-/// a PRACK arriving after a takeover must still translate onto the b-leg number
-/// it acknowledges, so the map has to survive the replication codec.
+/// RFC 3262: the record of the reliable provisionals is replicated state — a
+/// PRACK arriving after a takeover must still translate onto the responder's
+/// number it acknowledges, and a responder's repeat must still be discarded —
+/// so the record has to survive the replication codec.
 #[test]
-fn the_reliable_provisional_map_round_trips() {
-    use call::ReliableProvisional;
+fn the_reliable_provisional_record_round_trips() {
+    use call::{CSeq, Ladder, Provisional, ProvisionalId, RSeq, ResponderAck, Shown};
 
     let codec = MsgpackCodec::new();
     let mut call = representative_call();
 
-    call.reliable_provisionals = Vec::new();
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
-    assert_eq!(decoded, call, "no reliable provisional relayed yet");
+    call.provisionals = Vec::new();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
+    assert_eq!(decoded, call, "no reliable provisional received yet");
 
-    call.reliable_provisionals = vec![
-        ReliableProvisional {
-            a_tag: "a1".into(),
-            a_rseq: 9_000,
-            b_leg_id: "b-1".into(),
-            b_tag: "bf1".into(),
-            b_cseq: 1,
-            b_rseq: 4711,
-            acknowledged: true,
-            emission: None,
-            a_cseq: 1,
-            carried_sdp: false,
+    let id = |leg: &str, tag: &str, rseq: u32| ProvisionalId {
+        leg: leg.into(),
+        responder_tag: tag.into(),
+        invite_cseq: CSeq(1),
+        rseq: RSeq(rseq),
+    };
+    let shown = |tag: &str, rseq: u32, ladder: Ladder| Shown {
+        tag: tag.into(),
+        rseq: RSeq(rseq),
+        invite_cseq: CSeq(1),
+        carried_sdp: false,
+        ladder,
+    };
+    call.provisionals = vec![
+        Provisional {
+            id: id("b-1", "bf1", 4711),
             responder_sdp: false,
-            responder_offer: None,
+            responder: ResponderAck::RelayedPrack,
+            shown: Some(shown("a1", 9_000, Ladder::Acknowledged)),
         },
-        ReliableProvisional {
-            a_tag: "a2".into(),
-            a_rseq: 40,
-            b_leg_id: "b-2".into(),
-            b_tag: "bf2".into(),
-            b_cseq: 1,
-            b_rseq: 1,
-            acknowledged: false,
-            emission: None,
-            a_cseq: 1,
-            carried_sdp: false,
+        Provisional {
+            id: id("b-2", "bf2", 1),
+            responder_sdp: true,
+            responder: ResponderAck::Pending,
+            shown: Some(shown("a2", 40, Ladder::Unsent)),
+        },
+        Provisional {
+            id: id("b-2", "bf3", 1),
             responder_sdp: false,
-            responder_offer: None,
+            responder: ResponderAck::OwnPrack { branch: "z9hG4bK-own".into() },
+            shown: None,
         },
     ];
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
-    assert_eq!(decoded, call, "both early dialogs' provisionals survive");
-    assert_eq!(decoded.reliable_provisionals[1].b_rseq, 1);
-    assert!(
-        decoded.reliable_provisionals[0].acknowledged,
-        "the retirement survives a takeover — the survivor must not re-relay a repeat",
-    );
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
+    assert_eq!(decoded, call, "every provisional survives, shown or not");
 
     // A live §3 ladder emission is replicated state too: the exact datagram a
     // takeover node re-sends, its destination, and the rung the ladder stands on.
     let datagram = b"SIP/2.0 183 Session Progress\r\nRSeq: 40\r\n\r\n";
-    call.reliable_provisionals[1].emission =
-        Some(paced_emission(datagram, ("10.0.0.7", 5060), Class::ReliableProvisional, 3));
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let emission = paced_emission(datagram, ("10.0.0.7", 5060), Class::ReliableProvisional, 3);
+    call.provisionals[1].shown = Some(shown("a2", 40, Ladder::Repeating(emission)));
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "the retained emission survives byte-exact");
-    let emission = decoded.reliable_provisionals[1].emission.as_ref().unwrap();
+    let Some(Ladder::Repeating(emission)) =
+        decoded.provisionals[1].shown.as_ref().map(|s| &s.ladder)
+    else {
+        panic!("the ladder is repeating");
+    };
     assert_eq!(emission.wire(), (&datagram[..], ("10.0.0.7", 5060)));
     assert_eq!(
         emission.repeat(),
@@ -357,23 +360,23 @@ fn the_retained_emitted_ack_round_trips() {
     let codec = MsgpackCodec::new();
     let mut call = representative_call();
 
-    if let Some(d) = call.b_legs[0].dialogs.first_mut() {
-        d.ext.emitted_ack = None;
+    if let Some(d) = call.b_legs[0].dialogs.confirmed_mut() {
+        d.emitted_ack = None;
     }
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "no ACK emitted yet on the b-leg dialog");
 
     let datagram = b"ACK sip:bob@10.0.0.7 SIP/2.0\r\nCSeq: 8005 ACK\r\n\r\nanswer";
-    if let Some(d) = call.b_legs[0].dialogs.first_mut() {
-        d.ext.emitted_ack = Some(RetainedEmission::on_trigger(
+    if let Some(d) = call.b_legs[0].dialogs.confirmed_mut() {
+        d.emitted_ack = Some(RetainedEmission::on_trigger(
             datagram.to_vec(),
             ("10.0.0.7".into(), 5060),
             call::Repeated::request("ACK"),
         ));
     }
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "the retained ACK survives byte-exact");
-    let ack = decoded.b_legs[0].dialogs[0].ext.emitted_ack.as_ref().unwrap();
+    let ack = decoded.b_legs[0].dialogs.confirmed().unwrap().emitted_ack.as_ref().unwrap();
     assert_eq!(
         ack.wire(),
         (&datagram[..], ("10.0.0.7", 5060)),
@@ -400,13 +403,19 @@ fn the_retained_answered_2xx_round_trips_with_its_rung() {
 
     let codec = MsgpackCodec::new();
     let call = representative_call();
-    let answered =
-        call.a_leg.dialogs[0].ext.answered_2xx.as_ref().expect("the fixture answered the caller");
+    let answered = call
+        .a_leg
+        .dialogs
+        .confirmed()
+        .unwrap()
+        .answered_2xx
+        .as_ref()
+        .expect("the fixture answered");
     assert_eq!(answered.emission.repeat(), Repeat::Paced { class: Class::Final2xx, rung: 3 });
 
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "the retained 2xx survives byte-exact");
-    let restored = decoded.a_leg.dialogs[0].ext.answered_2xx.as_ref().unwrap();
+    let restored = decoded.a_leg.dialogs.confirmed().unwrap().answered_2xx.as_ref().unwrap();
     assert_eq!(
         (restored.dialog_tag.as_str(), restored.cseq),
         ("b2bua-to-tag-aleg-9876", 1),
@@ -440,7 +449,7 @@ fn p7_binary_integrity_sizes() {
     for len in [0usize, 1, 1024, 65536] {
         let body: Vec<u8> = (0..len).map(|i| (i & 0xff) as u8).collect();
         call.a_leg_invite.body = body.clone();
-        let decoded = codec.decode(&codec.encode(&call)).unwrap();
+        let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
         assert_eq!(decoded.a_leg_invite.body, body, "len={len}");
     }
 }
@@ -453,7 +462,7 @@ fn policy_body_three_states_round_trip() {
     for v in [None, Some(PolicyUpdateBody::Empty), Some(PolicyUpdateBody::Bytes(vec![1, 2, 3, 4]))]
     {
         call.policy_update_body = v.clone();
-        let decoded = codec.decode(&codec.encode(&call)).unwrap();
+        let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
         assert_eq!(decoded.policy_update_body, v);
     }
 }
@@ -487,7 +496,7 @@ fn emergency_three_states_round_trip() {
     let mut call = representative_call();
     for v in [None, Some(false), Some(true)] {
         call.emergency = v;
-        let decoded = codec.decode(&codec.encode(&call)).unwrap();
+        let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
         assert_eq!(decoded.emergency, v, "emergency={v:?} must round-trip");
         assert_eq!(decoded, call, "full value preserved with emergency={v:?}");
     }
@@ -503,14 +512,14 @@ fn sm_cursors_round_trip() {
     let mut call = representative_call();
     call.sm_cursors.insert(MachineId::new("global-call"), StateLabel::new("Active"));
     call.sm_cursors.insert(MachineId::new("transfer"), StateLabel::new("CRinging"));
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded.sm_cursors, call.sm_cursors);
     assert_eq!(decoded, call, "full value preserved with cursors set");
 
     // Empty map round-trips.
     let empty = representative_call();
     assert!(empty.sm_cursors.is_empty());
-    let decoded_empty = codec.decode(&codec.encode(&empty)).unwrap();
+    let decoded_empty = codec.decode(&codec.encode(&empty).unwrap()).unwrap();
     assert!(decoded_empty.sm_cursors.is_empty());
     assert_eq!(decoded_empty, empty);
 }
@@ -540,7 +549,7 @@ fn reroute_plan_in_callback_context_survives_replication() {
         .get_or_insert_with(Default::default)
         .insert("numbering-plan".to_string(), serde_json::json!({"attempt": 1}));
 
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded.callback_context.as_deref(), Some(plan.as_str()));
     assert_eq!(
         decoded.ext.as_ref().and_then(|e| e.get("numbering-plan")),
@@ -559,7 +568,7 @@ fn reroute_plan_in_callback_context_survives_replication() {
 //
 // CODEC ARMS. The `call` crate has exactly **one** `CallBodyCodec` impl:
 // `MsgpackCodec` (`rmp-serde`'s positional/array encoding). There is no
-// protobuf codec (ADR-0008); see the protobuf FIXME at the end of this file.
+// protobuf codec (ADR-0008).
 
 /// `it("a-leg kind/adopted survive encode→decode")` — the explicitly-tagged
 /// a-leg carries `kind=A` / `adopted=true` through the positional msgpack codec.
@@ -576,7 +585,7 @@ fn leg_kind_a_leg_kind_adopted_survive() {
     media.adopted = Some(false);
     call.b_legs.push(media);
 
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded.a_leg.kind, Some(LegKind::A));
     assert_eq!(decoded.a_leg.adopted, Some(true));
     assert_eq!(decoded, call, "full value preserved");
@@ -597,7 +606,7 @@ fn leg_kind_media_leg_kind_adopted_survive() {
     media.adopted = Some(false);
     call.b_legs.push(media);
 
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     let media = decoded
         .b_legs
         .iter()
@@ -620,7 +629,7 @@ fn leg_kind_absent_decodes_absent() {
     absent.a_leg.kind = None;
     absent.a_leg.adopted = None;
 
-    let decoded = codec.decode(&codec.encode(&absent)).unwrap();
+    let decoded = codec.decode(&codec.encode(&absent).unwrap()).unwrap();
     assert_eq!(decoded.a_leg.kind, None);
     assert_eq!(decoded.a_leg.adopted, None);
     assert_eq!(decoded, absent, "full value preserved with both absent");
@@ -700,7 +709,7 @@ fn call_with_ext() -> call::Call {
 fn service_ext_pem_promoted_sdp_base64_survives() {
     let codec = MsgpackCodec::new();
     let call = call_with_ext();
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
 
     let slice = decoded
         .ext
@@ -721,7 +730,7 @@ fn service_ext_pem_promoted_sdp_base64_survives() {
 fn service_ext_leg_ext_entry_survives() {
     let codec = MsgpackCodec::new();
     let call = call_with_ext();
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(
         decoded.a_leg.ext.as_ref().and_then(|e| e.get("demo-leg-service")),
         Some(&serde_json::json!({ "role": "media" }))
@@ -734,7 +743,7 @@ fn service_ext_leg_ext_entry_survives() {
 fn service_ext_transfer_c_initial_sdp_base64_survives() {
     let codec = MsgpackCodec::new();
     let call = call_with_ext();
-    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
 
     let slice =
         decoded.ext.as_ref().and_then(|e| e.get("transfer")).expect("transfer call-ext present");
@@ -747,10 +756,6 @@ fn service_ext_transfer_c_initial_sdp_base64_survives() {
     assert_eq!(slice["cLegId"], "b-2");
 }
 
-// FIXME(codec): no protobuf `CallBodyCodec` exists to run the `leg_kind_*` /
-// `service_ext_*` cases against; drive them from a `&[&dyn CallBodyCodec]` table
-// once one does — a codec that JSON-stringifies `ext` corrupts raw bytes.
-
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
@@ -760,7 +765,7 @@ proptest! {
     #[ignore = "slow lane: real clock >= 1 s"]
     fn p1_round_trip(call in arb_call()) {
         let codec = MsgpackCodec::new();
-        let decoded = codec.decode(&codec.encode(&call)).unwrap();
+        let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
         prop_assert_eq!(decoded, call);
     }
 
@@ -769,7 +774,7 @@ proptest! {
     #[ignore = "slow lane: real clock >= 1 s"]
     fn p2_encode_deterministic(call in arb_call()) {
         let codec = MsgpackCodec::new();
-        prop_assert_eq!(codec.encode(&call), codec.encode(&call));
+        prop_assert_eq!(codec.encode(&call).unwrap(), codec.encode(&call).unwrap());
     }
 
     /// P3 — decode is deterministic.
@@ -777,7 +782,7 @@ proptest! {
     #[ignore = "slow lane: real clock >= 1 s"]
     fn p3_decode_deterministic(call in arb_call()) {
         let codec = MsgpackCodec::new();
-        let bytes = codec.encode(&call);
+        let bytes = codec.encode(&call).unwrap();
         prop_assert_eq!(codec.decode(&bytes).unwrap(), codec.decode(&bytes).unwrap());
     }
 
@@ -786,6 +791,6 @@ proptest! {
     #[ignore = "slow lane: real clock >= 1 s"]
     fn p14_non_empty_output(call in arb_call()) {
         let codec = MsgpackCodec::new();
-        prop_assert!(!codec.encode(&call).is_empty());
+        prop_assert!(!codec.encode(&call).unwrap().is_empty());
     }
 }

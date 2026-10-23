@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Cut the network both ways between the target pods (one or all) and their
+# peers: the pods of peer_selector, or else the other live pods of the target
+# selector (a target is never its own peer): a Chaos Mesh NetworkChaos
+# partition on the pods picked here. Facts: the injected instant, the
+# targets and the peers.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=chaos-mesh.sh
+source "$HAKIT_LIB/chaos-mesh.sh"
+hk_cm_refuse_host_network "$HAKIT_TARGET_SELECTOR"
+hk_pick_targets
+mapfile -t targets <<<"$(hk_targets | awk '{ print $1 }')"
+if [ -n "$HAKIT_PARAM_PEER_SELECTOR" ]; then
+  hk_cm_refuse_host_network "$HAKIT_PARAM_PEER_SELECTOR"
+  peer_sel="$(hk_cm_selector "$HAKIT_PARAM_PEER_SELECTOR")"
+  peers="$(hk_live_pods "$HAKIT_PARAM_PEER_SELECTOR" | awk '{ print $1 }')"
+else
+  live="$(hk_live_pods)"
+  peers="$(awk 'NR == FNR { t[$1] = 1; next } !($1 in t) { print $1 }' "$HAKIT_EVENT_DIR/targets" - <<<"$live")"
+  [ -n "$peers" ] || hk_die "no live pod of $HAKIT_TARGET_SELECTOR is left to be the targets' peer"
+  mapfile -t peer_list <<<"$peers"
+  peer_sel="$(hk_cm_pods_selector "${peer_list[@]}")"
+fi
+at="$(jq -cn --argjson sel "$(hk_cm_pods_selector "${targets[@]}")" --argjson peer "$peer_sel" \
+  '{apiVersion: "chaos-mesh.org/v1alpha1", kind: "NetworkChaos",
+    spec: {action: "partition", mode: "all", selector: $sel, direction: "both",
+           target: {mode: "all", selector: $peer}}}' \
+  | hk_cm_apply networkchaos "$HAKIT_PARAM_INJECT_WAIT_S")"
+jq -cn --argjson at "$at" --argjson pods "$(hk_cm_pods networkchaos)" \
+  --argjson peers "$(jq -Rnc '[inputs | select(length > 0)]' <<<"$peers")" \
+  '{injected_at_ms: $at, pods: $pods, peers: $peers}'

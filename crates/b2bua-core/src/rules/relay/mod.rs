@@ -1,0 +1,105 @@
+//! Relay primitives. Unlike a transparent proxy, the B2BUA *regenerates*
+//! messages on the peer leg's own transaction/dialog (back-to-back UAs): a
+//! response from bob is rebuilt as a fresh response on alice's INVITE server
+//! transaction (stable a-facing To-tag), and an in-dialog request is rebuilt on
+//! the peer dialog. This keeps the two dialogs independent (their tags, CSeq
+//! spaces and Contacts are the B2BUA's own), which is the whole point of a
+//! B2BUA. One module per concern:
+//!
+//! - `originate` — [`build_b_leg`], the single mint point for every leg the
+//!   B2BUA originates (the callee leg and the REFER transfer leg)
+//! - `a_leg_response` — the UAS response minted on the a-leg's INVITE
+//! - `ack` — the ACK-for-2xx on a b-leg dialog
+//! - `egress` — outbound routing policy (loose routes, front-proxy bootstrap)
+//! - `passthrough` — the §16.6 transparency sets + RSeq ownership
+//! - `advert` — the capability advertisement (`Allow`/`Supported`) stamp
+//! - `address` — decision-supplied address reading and its refusal
+//! - `identity` — the B2BUA's own per-leg Via/Contact
+//! - `dialog` — reading the `call` crate's text-typed dialog state back
+//! - `body` — the media type describing a body this stack emits
+//! - `failure_ext` — the relayed-failure-headers `Call.ext` slot
+//! - `sdp_session` — each dialog's one session across description authors
+//! - `session_timer` — which minted requests carry the RFC 4028 negotiation
+//! - `provisional_withhold` — the call's own withhold on relayed provisionals
+//! - `unbuilt` — the record of a message this stack could not build
+//!
+//! Header/message *extraction* does NOT live here — see `sip-message`.
+
+mod a_leg_invite;
+mod a_leg_response;
+mod ack;
+mod address;
+mod advert;
+mod body;
+mod dialog;
+mod egress;
+mod failure_ext;
+mod identity;
+mod option_tags;
+mod originate;
+mod owed_answer;
+mod passthrough;
+mod provisional_withhold;
+mod repeat;
+mod sdp_dialogs;
+mod sdp_session;
+mod session_timer;
+mod stated_text;
+mod unbuilt;
+
+#[cfg(test)]
+mod originate_charging_tests;
+#[cfg(test)]
+mod originate_line_safety_tests;
+#[cfg(test)]
+mod originate_tests;
+
+// Originating a leg + answering/acknowledging on an existing one.
+pub use a_leg_invite::{caller_invite, note_unrebuilt, rebuild_a_leg_invite};
+pub use a_leg_response::{provisional_after_final, response_to_a_leg};
+pub use ack::{ack_b_leg, ack_lost_non_2xx};
+pub(crate) use ack::{acked_invite, acked_invite_carries_offer, acked_invite_cseq};
+pub(crate) use option_tags::apply_withheld_option_tags;
+pub use originate::build_b_leg;
+pub(crate) use originate::dialling_invite;
+pub(crate) use owed_answer::{
+    ack_answer_on_leg, bare_ack_owed, invite_carried_offer, offer_deferred_to_ack,
+    offered_reliably, owes_bare_ack,
+};
+pub(crate) use repeat::retransmitted_2xx;
+pub(crate) use session_timer::{settle_session_timer, TIMER};
+pub(crate) use stated_text::writable_lines;
+pub(crate) use unbuilt::unbuilt;
+
+// One session per dialog, whoever authored the description (RFC 3264 §8).
+pub use sdp_dialogs::{
+    adopt_answered_caller_dialog, adopt_confirmed_dialog, in_dialog_session, next_origin_in_dialog,
+    next_origin_on,
+};
+pub use sdp_session::{
+    continue_on_leg, note_absorbed_offer, note_answered_here, note_request, opened, Author, Carried,
+};
+
+// Wire routing for what those emit.
+pub use egress::{apply_b_leg_egress, leg_egress_dest, outbound_proxy_route_set};
+
+// Transparency + advertisement across the back-to-back UA.
+pub use advert::{stamp_advertisement, stamp_options_advertisement};
+pub use b2bua_sdk::provisional::reliable_rseq;
+pub use passthrough::{
+    own_the_rseq, relay_response_passthrough_headers, strip_reliability, toward_leg,
+};
+pub use provisional_withhold::withhold_from_relayed_provisional;
+
+// Reading text back into typed values (decision fields, dialog state, bodies).
+pub use address::{redirect_contact, UnreadableAddress};
+pub use body::{carries_sdp, describe_body, media_type, mints_offer, sdp};
+pub use dialog::{received_on, target_dest, to_gen_dialog, uas_addresses, wire_cseq};
+
+// The relayed-failure-headers Call.ext slot.
+pub use failure_ext::{
+    failure_headers_ext, is_core_reserved_ext, relayed_failure_headers, RELAYED_FAILURE_HEADERS_EXT,
+};
+
+// The B2BUA's own per-leg identity.
+pub use identity::{leg_contact, leg_via, CallMarks};

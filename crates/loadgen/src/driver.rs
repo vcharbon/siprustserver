@@ -5,7 +5,8 @@
 //! binds its agents on the **mux** (one socket per defined endpoint address,
 //! many dialogs demuxed), runs the scenario inside a `catch_unwind` boundary (a
 //! panic is a *counted* failure, never a worker abort), tears the call down
-//! (CANCEL/BYE) however it ended, classifies the result, and records it —
+//! (CANCEL/BYE) however it ended, classifies the scenario's verdict, and
+//! records it —
 //! optionally projecting a sampled callflow (recording layered on the mux). A
 //! call whose key is missing or unusable is recorded `rejected` before any
 //! datagram; one whose number is held by a concurrent call or cooling after a
@@ -17,24 +18,24 @@ use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use e2e_model::{LegSpec, Scenario, ScenarioInputs, ShapeDescriptor, ShapeRegistry};
+use e2e_model::LegSpec;
 use futures::FutureExt;
 use scenario_harness::{Agent, AgentBinder, EgressPolicy, WaiverScope};
 use sip_clock::Clock;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 
-use crate::call_rtt::CallRtts;
-use crate::case::LoadCase;
-use crate::chaos::{ChaosLog, ChaosTag};
 use crate::class::{CallOutcome, ResultClass};
 use crate::ctx::{CallCtx, CallEnv};
+use crate::mix_entry::{LoadBody, MixEntry};
 use crate::mux::{labelled_prefix_leg_picker_defaulting, CallRouting, Correlation, MuxCore};
+use crate::outcome::{CallWire, OutcomeSink};
 use crate::rate::{Governor, RateHandle};
 use crate::report::{RenderedSample, Reporter};
 use crate::scenarios::ScenarioId;
-use scenario_harness::actor::ActorScenario;
+use crate::{call_rtt::CallRtts, failed_call};
+use scenario_harness::actor::ScenarioVerdict;
 
 /// The mux transport the driver binds calls on.
 pub struct MuxTransport {
@@ -52,8 +53,7 @@ pub struct MuxTransport {
     /// Per-recv wall-clock timeout.
     pub recv_timeout: Duration,
     /// The one process-wide clock every per-call binder records on (created once
-    /// at startup, shared with the chaos log), so all call timelines — and the
-    /// chaos markers — sit on a single monotonic-anchored axis.
+    /// at startup), so all call timelines sit on a single monotonic-anchored axis.
     pub clock: Clock,
 }
 
@@ -65,8 +65,7 @@ pub struct CallConfig {
     /// environment axis shared with the e2e framework (`EndpointConfig.egress`):
     /// [`EgressPolicy::Transparent`] when the SUT routes the callee itself,
     /// [`EgressPolicy::ApiCallPin`] to pin the b-leg back to the static `uas`
-    /// endpoint (`--route-pin-to-uas`). Replaces the hand-rolled
-    /// route/refer `X-Api-Call` pins.
+    /// endpoint (`--route-pin-to-uas`).
     pub egress: EgressPolicy,
     pub options_hold: Duration,
     pub options_cadence: Duration,
@@ -102,7 +101,7 @@ pub struct CallTuning {
     pub drop_nth: Option<crate::mux::TargetedDrop>,
 }
 
-/// Driver construction config.
+/// The settings [`Driver::new`] builds a driver from.
 pub struct DriverCfg {
     pub cps: f64,
     pub duration: Duration,
@@ -115,141 +114,15 @@ pub struct DriverCfg {
     /// Per-scenario-id overrides of [`Self::default_tuning`] (keyed by the
     /// scenario's stable id / CLI name).
     pub tuning: HashMap<String, CallTuning>,
+    /// The final the run declares its SUT refuses a call with under overload:
+    /// a non-emergency call refused with it before it connects ends on its
+    /// `refused_overload` branch ([`CallEnv::overload_reject`]). `None`
+    /// accepts no undeclared refusal.
+    pub overload_reject: Option<u16>,
 }
 
-/// A load shape's per-call body: the declarative actor [`Scenario`] the runner
-/// drives. `run_one` invokes it at the single body-invocation site.
-#[derive(Clone)]
-enum LoadBody {
-    Actor(Scenario),
-}
-
-/// One scenario mix entry: the shape's **report/metrics id** + load attributes
-/// (from its [`ShapeDescriptor`] — the shape's ONE declaration), the load body,
-/// its pick weight, and an optional attached Test case
-/// (`--scenario name=w,case=<path.json>` / the global `--case`) whose binding
-/// pool drives per-call identities and dwells.
-///
-/// Build from the unified registry ([`MixEntry::by_id`] /
-/// [`MixEntry::default_mix`] / [`MixEntry::failure_mix`]); plain
-/// `(scenario, weight)` tuples still convert for hand-rolled test bodies
-/// (attributes default off, id from the body).
-#[derive(Clone)]
-pub struct MixEntry {
-    /// The report/metrics id — the DESCRIPTOR's id (may differ from the body's
-    /// intrinsic `id()` when one body serves several shapes, e.g. `basic_call_em`).
-    pub id: crate::scenarios::ScenarioId,
-    /// The load body — a declarative actor [`Scenario`] the runner drives.
-    /// `run_one` invokes it at the single body-invocation site; everything after
-    /// (teardown, classification, sampling) is shared.
-    body: LoadBody,
-    pub weight: f64,
-    pub case: Option<Arc<LoadCase>>,
-    /// The callee legs bound for this shape's calls
-    /// ([`ShapeDescriptor::callee_legs`]): each leg's agent-name **role** plus
-    /// the R-URI user-part **prefixes** that demux it on the shared UAS
-    /// socket, in the load-bearing bind order.
-    pub legs: &'static [LegSpec],
-    /// Stamp `Resource-Priority: esnet.0` (the SUT force-admits under overload).
-    pub emergency: bool,
-    /// The reject status the shape expects ([`ShapeDescriptor::expected_reject`]):
-    /// a call ending on it classes `expected_reject`, a non-failure.
-    pub expected_reject: Option<u16>,
-    /// **Deferred-by-design auth adapter** (see
-    /// `scenario_harness::realcall::auth`). `None` (the default) = no RFC 3261
-    /// §22.2 retry; a `401`/`407` classifies as `status_401`/`status_407`. Set it
-    /// (via [`MixEntry::with_challenge_responder`]) to point the fleet at a
-    /// challenging registrar/proxy once digest lands — no CLI flag mints one yet.
-    pub challenge_responder: Option<Arc<dyn scenario_harness::realcall::ChallengeResponder>>,
-}
-
-impl From<(Arc<dyn ActorScenario>, f64)> for MixEntry {
-    fn from((scenario, weight): (Arc<dyn ActorScenario>, f64)) -> Self {
-        MixEntry {
-            id: scenario.id(),
-            body: LoadBody::Actor(scenario),
-            weight,
-            case: None,
-            legs: LegSpec::historic(false, false),
-            emergency: false,
-            expected_reject: None,
-            challenge_responder: None,
-        }
-    }
-}
-
-impl MixEntry {
-    /// Build a mix entry from a shape's descriptor (minting its load body from
-    /// the per-run `inputs`). `None` when the shape has no load body
-    /// (functional-only).
-    pub fn from_shape(
-        shape: &ShapeDescriptor,
-        inputs: &ScenarioInputs,
-        weight: f64,
-    ) -> Option<Self> {
-        // The declarative actor scenario (functional-only shapes have none → None).
-        let body = LoadBody::Actor(shape.load_scenario(inputs)?);
-        Some(MixEntry {
-            id: shape.id,
-            body,
-            weight,
-            case: None,
-            legs: shape.callee_legs(),
-            emergency: shape.emergency,
-            expected_reject: shape.expected_reject,
-            challenge_responder: None,
-        })
-    }
-
-    /// Resolve a shape by id in the registry (the CLI's `--scenario name=weight`).
-    /// `None` for an unknown id or a functional-only shape.
-    pub fn by_id(
-        registry: &ShapeRegistry,
-        id: &str,
-        inputs: &ScenarioInputs,
-        weight: f64,
-    ) -> Option<Self> {
-        registry.get(id).and_then(|d| Self::from_shape(d, inputs, weight))
-    }
-
-    /// The shipped DEFAULT mix (every shape with a `default_weight`,
-    /// basic-heavy like real traffic).
-    pub fn default_mix(registry: &ShapeRegistry, inputs: &ScenarioInputs) -> Vec<Self> {
-        registry
-            .default_mix()
-            .into_iter()
-            .filter_map(|d| Self::from_shape(d, inputs, d.default_weight.unwrap_or(1.0)))
-            .collect()
-    }
-
-    /// The voluntarily-failing mix (one shape per post-call-cleanup teardown
-    /// path), for the no-leak cleanup-coverage test.
-    pub fn failure_mix(registry: &ShapeRegistry, inputs: &ScenarioInputs) -> Vec<Self> {
-        registry
-            .failure_mix()
-            .into_iter()
-            .filter_map(|d| Self::from_shape(d, inputs, d.failure_weight.unwrap_or(1.0)))
-            .collect()
-    }
-
-    /// Attach a Test case (binding pool → per-call identities + dwells).
-    pub fn with_case(mut self, case: Option<Arc<LoadCase>>) -> Self {
-        self.case = case;
-        self
-    }
-
-    /// Attach the deferred-by-design auth adapter (see the field docs). The load
-    /// driver folds it into every call's `CallEnv`; the default is `None`.
-    pub fn with_challenge_responder(
-        mut self,
-        responder: Option<Arc<dyn scenario_harness::realcall::ChallengeResponder>>,
-    ) -> Self {
-        self.challenge_responder = responder;
-        self
-    }
-}
-
-/// The load driver.
+/// Offers calls at the live CPS target, one task per call picked from the
+/// weighted mix, shedding a call when `max_in_flight` calls are running.
 pub struct Driver {
     /// The live-tunable offered rate (milli-cps under the hood). Seeded from
     /// `cfg.cps`; `POST /rate` re-targets it and the governor re-anchors its grid.
@@ -265,9 +138,11 @@ pub struct Driver {
     call: Arc<CallConfig>,
     default_tuning: CallTuning,
     tuning: HashMap<String, CallTuning>,
-    /// Optional chaos-marker log: when set, each finished call is classified
-    /// near/clear against the injected-fault markers (the chaos correlation).
-    chaos: Option<Arc<ChaosLog>>,
+    overload_reject: Option<u16>,
+    /// Where each placed call's outcome record goes; `None` = no records.
+    outcomes: Option<Arc<OutcomeSink>>,
+    /// Read-held by each failed call's release tail; the drain write-locks it.
+    tails: Arc<RwLock<()>>,
 }
 
 /// Process-wide per-call id-seed source: a unique 100k-wide window per call so a
@@ -321,11 +196,13 @@ impl Driver {
             scenarios,
             total_weight,
             sem: Arc::new(Semaphore::new(cfg.max_in_flight)),
+            tails: Arc::default(),
             transport,
             call: Arc::new(cfg.call),
             default_tuning: cfg.default_tuning,
             tuning: cfg.tuning,
-            chaos: None,
+            overload_reject: cfg.overload_reject,
+            outcomes: None,
         }
     }
 
@@ -335,10 +212,10 @@ impl Driver {
         self.tuning.get(id).copied().unwrap_or(self.default_tuning)
     }
 
-    /// Attach a [`ChaosLog`] so finished calls are tagged near/clear against the
-    /// injected-fault markers (fed by the `POST /chaos` endpoint).
-    pub fn with_chaos(mut self, chaos: Arc<ChaosLog>) -> Self {
-        self.chaos = Some(chaos);
+    /// Write one outcome record per placed call into `sink`, and count the
+    /// calls never placed (shed, or refused before any datagram).
+    pub fn with_outcomes(mut self, sink: Arc<OutcomeSink>) -> Self {
+        self.outcomes = Some(sink);
         self
     }
 
@@ -380,28 +257,50 @@ impl Driver {
 
         while governor.next_slot().await.is_some() {
             let entry = self.pick(&mut rng).clone();
+            if let Some(sink) = &self.outcomes {
+                sink.offered(entry.id);
+            }
             let permit = match self.sem.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
                     self.reporter.inc_shed(entry.id);
+                    if let Some(sink) = &self.outcomes {
+                        sink.not_placed(entry.id, "shed");
+                    }
                     continue;
                 }
             };
             let tuning = self.tuning_for(entry.id);
-            tokio::spawn(run_one(
+            let (id, reporter, outcomes) = (entry.id, self.reporter.clone(), self.outcomes.clone());
+            let call = run_one(
                 entry,
                 self.reporter.clone(),
                 self.transport.clone(),
                 self.call.clone(),
                 self.seed,
                 tuning,
-                self.chaos.clone(),
+                self.overload_reject,
+                self.outcomes.clone(),
                 permit,
-            ));
+                self.tails.clone(),
+            );
+            // A panic outside the scenario's own boundary (checks, sample
+            // rendering, the bookkeeping) still closes the call's in-flight
+            // count and is counted as a generator failure: the call wrote no
+            // record.
+            tokio::spawn(async move {
+                if AssertUnwindSafe(call).catch_unwind().await.is_err() {
+                    reporter.dec_inflight();
+                    if let Some(sink) = outcomes {
+                        sink.generator_failure(id, "panic");
+                    }
+                }
+            });
         }
 
-        // Drain: acquiring every permit blocks until all in-flight calls release.
+        // Drain: every permit (in-flight calls), then the lock (release tails).
         let _ = self.sem.acquire_many(self.max_in_flight as u32).await;
+        let _ = self.tails.write().await;
     }
 }
 
@@ -415,20 +314,14 @@ async fn run_one(
     call: Arc<CallConfig>,
     seed_base: u64,
     tuning: CallTuning,
-    chaos: Option<Arc<ChaosLog>>,
+    overload_reject: Option<u16>,
+    outcomes: Option<Arc<OutcomeSink>>,
     _permit: OwnedSemaphorePermit,
+    tails: Arc<RwLock<()>>,
 ) {
+    let wire = outcomes.as_ref().map(|_| CallWire::new(transport.clock.clone()));
     reporter.inc_inflight();
-    let MixEntry {
-        id,
-        body,
-        case,
-        legs,
-        emergency,
-        expected_reject,
-        challenge_responder,
-        weight: _,
-    } = entry;
+    let MixEntry { id, body, case, legs, emergency, challenge_responder, weight: _ } = entry;
 
     let from_user = transport.correlation.is_from_user();
     let record = reporter.should_record(id);
@@ -438,7 +331,7 @@ async fn run_one(
     let draws = if from_user && case.is_some() { KEY_DRAWS } else { 1 };
     let mut draw = 0;
     let rtts = CallRtts::new(reporter.clone(), id);
-    let (core, dwells, banner, resolved_input, token, binder, alice, callee_agents) = loop {
+    let (core, dwells, banner, resolved_input, token, net, binder, alice, callee_agents) = loop {
         draw += 1;
         // Resolve THIS call's binding from the attached Test case (pool walk +
         // token expansion): the core From/To/R-URI to fold into the outgoing
@@ -456,7 +349,8 @@ async fn run_one(
             match from_user_key(core.from.as_deref()) {
                 Ok(key) => key,
                 Err(reason) => {
-                    return record_unrun(&reporter, &chaos, id, CallOutcome::Rejected(reason))
+                    let outcome = CallOutcome::Rejected(reason);
+                    return record_unrun(&reporter, &outcomes, id, outcome);
                 }
             }
         } else {
@@ -477,20 +371,24 @@ async fn run_one(
                 tuning.drop_nth,
             )
             .with_rtt_sink(rtts.sink());
-        let binder = AgentBinder::mux(
-            Arc::new(mux_net),
-            transport.clock.clone(),
-            transport.recv_timeout,
-            record,
-        );
+        let net = Arc::new(match &wire {
+            Some(w) => mux_net.with_wire_tap(w.tap()),
+            None => mux_net,
+        });
+        let binder =
+            AgentBinder::mux(net.clone(), transport.clock.clone(), transport.recv_timeout, record);
         binder.seed_ids(next_seed(seed_base));
+        if let Some(sink) = &outcomes {
+            // The run (and its call-id tag) is the Call-ID nonce: no two share one.
+            binder.call_id_nonce(&sink.call_id_nonce);
+        }
         match bind_agents(&binder, &transport, legs).await {
             Ok((alice, callees)) => {
-                break (core, dwells, banner, resolved_input, token, binder, alice, callees)
+                break (core, dwells, banner, resolved_input, token, net, binder, alice, callees)
             }
             Err(e) => match bind_refusal(&e) {
                 CallOutcome::Rejected(_) if draw < draws => continue,
-                outcome => return record_unrun(&reporter, &chaos, id, outcome),
+                outcome => return record_unrun(&reporter, &outcomes, id, outcome),
             },
         }
     };
@@ -508,6 +406,10 @@ async fn run_one(
     if record {
         ctx.enable_anchor_collection();
     }
+    if let Some(wire) = &wire {
+        let wire = wire.clone();
+        ctx.on_resolved(move || wire.seal());
+    }
 
     let env = CallEnv {
         alice: &alice,
@@ -521,6 +423,7 @@ async fn run_one(
         stamp: transport.correlation.stamp(&token),
         token,
         emergency,
+        overload_reject,
         core,
         egress: call.egress.clone(),
         // Deferred-by-design auth adapter (default None): the mix entry's
@@ -538,14 +441,14 @@ async fn run_one(
     };
     // The single body-invocation site: an actor scenario rides the per-endpoint
     // reactor runner (each runner owns its per-actor teardown scopes, so no
-    // outer `CallScope` is needed), yielding the `Result<(), StepError>`
-    // contract everything downstream — classification, sampling, phases, the
-    // ringing gate — buckets on, inside a `catch_unwind` boundary (a panic is a
-    // counted failure, never a worker abort). The body is built ONCE here so
-    // its declared waivers (ADR-0024 §6) can be read for the audit, then the
-    // BUILT call is run — never built twice. A build guard error is part of the
-    // downstream contract, surfaced as the call's Result; a build panic is
-    // caught at the same boundary as a run panic.
+    // outer `CallScope` is needed), yielding the `ScenarioVerdict` everything
+    // downstream — classification, sampling, phases, the ringing gate —
+    // buckets on, inside a `catch_unwind` boundary (a panic is a counted
+    // failure, never a worker abort). The body is built ONCE here so its
+    // declared waivers (ADR-0024 §6) can be read for the audit, then the BUILT
+    // call is run — never built twice. A build guard error is the call's
+    // `build` failure; a build panic is caught at the same boundary as a run
+    // panic.
     let mut plan_waivers: Vec<WaiverScope> = Vec::new();
     let result = match &body {
         LoadBody::Actor(scenario) => {
@@ -558,17 +461,15 @@ async fn run_one(
                     .catch_unwind()
                     .await
                 }
-                Ok(Err(e)) => Ok(Err(e)),
+                Ok(Err(e)) => Ok(ScenarioVerdict::build_failure(e)),
                 Err(payload) => Err(payload),
             }
         }
     };
 
-    let failed = !matches!(result, Ok(Ok(())));
-    if failed && !call.teardown_quiesce.is_zero() {
-        for (_, agent) in &callee_agents {
-            agent.release_failed_call(call.teardown_quiesce).await;
-        }
+    let failed = !matches!(result, Ok(ScenarioVerdict::Success { .. }));
+    if failed {
+        failed_call::release(tails, net, &alice, &callee_agents, call.teardown_quiesce).await;
     }
 
     // The per-call audit policy (ADR-0024 §6): the merged structural waivers —
@@ -581,12 +482,7 @@ async fn run_one(
     merged_waivers.extend(plan_waivers);
 
     let outcome = match result {
-        Ok(Ok(())) => CallOutcome::Ok,
-        Ok(Err(e)) => CallOutcome::Step(e).expecting(
-            expected_reject,
-            CALLER,
-            ctx.phases().iter().any(|(phase, _)| *phase == CONNECTED),
-        ),
+        Ok(verdict) => CallOutcome::from(verdict),
         Err(payload) => CallOutcome::Panic(panic_msg(payload)),
     };
     let outcome = outcome.audited(|| {
@@ -597,8 +493,8 @@ async fn run_one(
         wo.findings
     });
 
-    // Test-case CHECKS — evaluated on SAMPLED calls that are no failure (ok or
-    // the expected reject) only (the per-sample oracle; a non-sampled call has
+    // Test-case CHECKS — evaluated on SAMPLED calls that ended on an accepted
+    // branch only (the per-sample oracle; a non-sampled call has
     // no recording to check, and a failed/RFC-dirty call already explains
     // itself). The verdicts (pass AND
     // fail) render on the sampled callflow page; any failed check reclassifies
@@ -642,38 +538,16 @@ async fn run_one(
     // dropped non-PRACK 18x is expected, so it is a rate, not a per-call failure).
     reporter.record_ringing(ctx.ringing());
 
-    // Classify the call near/clear against the injected-fault markers using the
-    // per-phase rule: `Near` iff a fault landed on a dialog-state transition
-    // (±phase_tolerance — no time to propagate, SIP retransmission recovers it) or
-    // mid-setup. A call stably connected across the fault stays `Clear`. No log →
-    // always Clear (the smoke tests + a chaos-less run).
-    //
-    // BUT a protocol-defect class (RfcAuditFail/WrongMethod/Unexpected/…) is NEVER
-    // excused even if a transition coincided with the kill: the post-reboot reclaim
-    // bug CONNECTS near the kill yet desyncs at teardown, so excusing it on the
-    // near-kill connect would HIDE it (neither self-heal path recovers). Only
-    // transient/transport failures (the real kill collateral) are eligible. See
-    // `CallOutcome::chaos_excusable`.
-    let chaos_tag = match chaos.as_ref() {
-        Some(c) if outcome.chaos_excusable() => {
-            c.classify_call(ctx.start_instant(), Instant::now(), &ctx.phases())
-        }
-        _ => ChaosTag::Clear,
-    };
-
-    // The bounded case discriminator (which RFC rule / failed check / agent@phase)
-    // — computed once; keys the first-N sample buckets AND the counts split.
+    // The bounded case discriminator (which RFC rule / failed check / failed
+    // step) — computed once; keys the first-N sample buckets AND the counts
+    // split.
     let case = outcome.case(ctx.phases().last().map(|(name, _)| *name));
 
-    let sample = if reporter.wants_sample(id, &class, &case, chaos_tag) {
+    let sample = if reporter.wants_sample(id, &class, &case) {
         let detail = phase_annotated_detail(outcome.detail(), &ctx);
         // Thread the failure reason into the rendered callflow so a sampled NOK
         // page explains WHY (header banner + an explicit anomaly), not just "FAIL".
         let html = if binder.is_recording() {
-            // Pass the chaos markers so a sampled NOK flow renders the kill
-            // instant(s) in its window as Lifecycle bands (absolute UTC, on the
-            // call's wall-clock timeline) — see `ChaosLog::markers`.
-            let markers = chaos.as_ref().map(|c| c.markers()).unwrap_or_default();
             // The banner (the resolved binding — the actual From/To used) shows
             // in the page header on PASS and FAIL alike; the failure detail
             // stays FAIL-only; the case's check verdicts render pass AND fail.
@@ -683,7 +557,6 @@ async fn run_one(
                 class.is_ok(),
                 banner.as_deref(),
                 detail.as_deref(),
-                &markers,
                 &check_notes,
             )
         } else {
@@ -702,16 +575,16 @@ async fn run_one(
         None
     };
 
-    reporter.record(id, &outcome, &case, e2e, &checkpoints, sample, chaos_tag);
+    reporter.record(id, &outcome, &case, e2e, &checkpoints, sample);
     rtts.finish();
+    if let (Some(sink), Some(wire)) = (&outcomes, &wire) {
+        crate::outcome::write_call(sink, id, &wire.facts(), &outcome, transport.clock.now_ms());
+    }
     reporter.dec_inflight();
 }
 
 /// The caller agent's name: the agent that originates every call.
 const CALLER: &str = "alice";
-
-/// The lifecycle phase a call reaches once its dialog is confirmed.
-const CONNECTED: &str = "connected";
 
 /// How many numbers a from-user call draws from its case's pool before it is
 /// rejected for contention (every draw held or cooling).
@@ -798,37 +671,33 @@ fn bind_refusal(e: &sip_net::BindError) -> CallOutcome {
 }
 
 /// Record a call that never ran (refused before any datagram) and close its
-/// in-flight count. A chaos-excusable outcome is classified against the
-/// markers of the last [`RELEASE_HOLD`](crate::mux::RELEASE_HOLD): a key's
-/// holder may be a call a fault held open that long.
+/// in-flight count.
 fn record_unrun(
     reporter: &Reporter,
-    chaos: &Option<Arc<ChaosLog>>,
+    outcomes: &Option<Arc<OutcomeSink>>,
     id: ScenarioId,
     outcome: CallOutcome,
 ) {
+    if let Some(sink) = outcomes {
+        match &outcome {
+            CallOutcome::Rejected(reason) => sink.not_placed(id, reason),
+            _ => sink.generator_failure(id, "bind_refused"),
+        }
+    }
     let class = ResultClass::from(&outcome);
     let case = outcome.case(None);
-    let now = Instant::now();
-    let chaos_tag = match chaos {
-        Some(c) if outcome.chaos_excusable() => {
-            let since = now.checked_sub(crate::mux::RELEASE_HOLD).unwrap_or(now);
-            c.classify_call(since, now, &[])
-        }
-        _ => ChaosTag::Clear,
-    };
-    let sample = reporter.wants_sample(id, &class, &case, chaos_tag).then(|| RenderedSample {
+    let sample = reporter.wants_sample(id, &class, &case).then(|| RenderedSample {
         html: None,
         detail: outcome.detail(),
         e2e_ms: 0.0,
     });
-    reporter.record(id, &outcome, &case, Duration::ZERO, &[], sample, chaos_tag);
+    reporter.record(id, &outcome, &case, Duration::ZERO, &[], sample);
     reporter.dec_inflight();
 }
 
 /// Append the call's lifecycle phase trail (`connected@1234ms`, `reinvited@…`) to
 /// a NOK sample's one-line detail, so a sampled failing flow says WHICH phase it
-/// reached before it failed (and, with the chaos correlation, near which fault).
+/// reached before it failed.
 /// `None`/empty detail (an OK call) is left untouched.
 fn phase_annotated_detail(detail: Option<String>, ctx: &CallCtx) -> Option<String> {
     let mut detail = detail?;
@@ -849,183 +718,4 @@ fn phase_annotated_detail(detail: Option<String>, ctx: &CallCtx) -> Option<Strin
         .collect::<Vec<_>>()
         .join(", ");
     Some(format!("{detail} [phases: {trail}]"))
-}
-
-/// A minimal HTTP/1.1 server (hand-rolled over `TcpListener` — no hyper
-/// dependency). Routes:
-///
-/// - **`GET /metrics`** (and any other GET) → `render()`, the Prometheus surface.
-/// - **`POST /chaos?type=<kind>&target=<who>[&ts=<ms>]`** (when a [`ChaosLog`] is
-///   attached) → records a fault marker so finished calls get auto-classified
-///   near/clear. With `ts` (Unix epoch ms of the actual kill, supplied by the
-///   chaos driver) the marker is back-dated to the kill instant — robust to
-///   port-forward latency on the flag path; without it it lands at receipt instant.
-/// - **`POST /rate?cps=<float>`** (when a [`RateHandle`] is attached) → re-targets
-///   the offered call rate live (clamped to `>= 0`; `0` pauses new-call admission).
-///   The governor re-anchors its grid on the next slot. Responds with the applied
-///   value.
-/// - **`GET /rate`** → the current target cps.
-/// - **`GET /debug/flamegraph[?seconds=N]`** → on-demand pprof CPU flamegraph
-///   SVG of this process (default 20 s, max 120). The load driver runs the same
-///   shared `sip-message` parse path the SUT tiers do, at a saturated core, so
-///   it is the high-signal vantage for parse/allocation cost. Sampled on a
-///   blocking thread; zero overhead when no capture is in flight.
-///
-/// Runs until the task is cancelled.
-pub async fn serve_metrics(
-    addr: SocketAddr,
-    render: Arc<dyn Fn() -> String + Send + Sync>,
-    chaos: Option<Arc<ChaosLog>>,
-    rate: Option<RateHandle>,
-) -> std::io::Result<()> {
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    serve_metrics_on(listener, render, chaos, rate).await
-}
-
-/// [`serve_metrics`] over an already-bound listener. Callers that need the
-/// actual bound address — port-0 binds in tests, where a fixed port can
-/// collide with an unrelated listener — bind first and hand the listener over.
-pub async fn serve_metrics_on(
-    listener: tokio::net::TcpListener,
-    render: Arc<dyn Fn() -> String + Send + Sync>,
-    chaos: Option<Arc<ChaosLog>>,
-    rate: Option<RateHandle>,
-) -> std::io::Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    loop {
-        let (mut sock, _) = listener.accept().await?;
-        let render = render.clone();
-        let chaos = chaos.clone();
-        let rate = rate.clone();
-        tokio::spawn(async move {
-            let mut buf = [0u8; 2048];
-            let n = sock.read(&mut buf).await.unwrap_or(0);
-            let (method, path, query) = parse_request_line(&buf[..n]);
-
-            // CPU flamegraph: binary SVG body, so it answers ahead of the
-            // text/plain routes below. Sampled on a blocking thread, leaving the
-            // call-driving async workers to keep offering load.
-            if path == "/debug/flamegraph" {
-                let secs = flamegraph_util::parse_seconds(&format!("?{query}"), 20, 120);
-                let svg =
-                    tokio::task::spawn_blocking(move || flamegraph_util::capture_svg(secs, 99))
-                        .await
-                        .unwrap_or_else(|e| Err(format!("join error: {e}")));
-                let (status, ctype, body) = match svg {
-                    Ok(svg) => ("200 OK", "image/svg+xml", svg),
-                    Err(e) => (
-                        "500 Internal Server Error",
-                        "text/plain",
-                        format!("flamegraph failed: {e}\n").into_bytes(),
-                    ),
-                };
-                let head = format!(
-                    "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                let _ = sock.write_all(head.as_bytes()).await;
-                let _ = sock.write_all(&body).await;
-                return;
-            }
-
-            let (status, body) = if method == "POST" && path == "/chaos" {
-                let body = if let Some(log) = &chaos {
-                    let kind = query_get(&query, "type").unwrap_or_else(|| "unknown".to_string());
-                    let target = query_get(&query, "target");
-                    // `ts` (Unix epoch ms, captured by the chaos script at the
-                    // instant of the kill) back-dates the marker so PF latency does
-                    // not shift it; without it we fall back to the receipt instant.
-                    match query_get(&query, "ts").and_then(|s| s.parse::<u64>().ok()) {
-                        Some(ts) => {
-                            log.record_at(kind.clone(), target.clone(), ts);
-                            format!(
-                                "ok: recorded chaos marker type={kind} target={target:?} ts={ts}\n"
-                            )
-                        }
-                        None => {
-                            log.record(kind.clone(), target.clone());
-                            format!("ok: recorded chaos marker type={kind} target={target:?}\n")
-                        }
-                    }
-                } else {
-                    "ok: no chaos log attached\n".to_string()
-                };
-                ("200 OK", body)
-            } else if path == "/rate" {
-                match &rate {
-                    None => ("404 Not Found", "no rate handle attached\n".to_string()),
-                    Some(h) if method == "POST" => match query_get(&query, "cps")
-                        .map(|s| s.parse::<f64>())
-                    {
-                        Some(Ok(cps)) => {
-                            let applied = h.set(cps);
-                            ("200 OK", format!("ok: target cps={applied}\n"))
-                        }
-                        // A missing or malformed `cps` is a client error (never a
-                        // silent no-op that leaves the rate wherever it was).
-                        _ => ("400 Bad Request", "expected POST /rate?cps=<float>\n".to_string()),
-                    },
-                    // GET /rate → the current target.
-                    Some(h) => ("200 OK", format!("{}\n", h.cps())),
-                }
-            } else {
-                ("200 OK", render())
-            };
-
-            let resp = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = sock.write_all(resp.as_bytes()).await;
-        });
-    }
-}
-
-/// Parse the first request line into `(METHOD, path, query)`. Best-effort: a
-/// malformed/empty request yields `("", "", "")` and falls through to the render
-/// path. The query is the raw `a=b&c=d` after `?` (empty if none).
-fn parse_request_line(buf: &[u8]) -> (String, String, String) {
-    let text = String::from_utf8_lossy(buf);
-    let line = text.lines().next().unwrap_or("");
-    let mut parts = line.split_whitespace();
-    let method = parts.next().unwrap_or("").to_string();
-    let target = parts.next().unwrap_or("");
-    let (path, query) = match target.split_once('?') {
-        Some((p, q)) => (p.to_string(), q.to_string()),
-        None => (target.to_string(), String::new()),
-    };
-    (method, path, query)
-}
-
-/// Pull `key`'s value out of a raw `a=b&c=d` query string (no percent-decoding —
-/// the chaos flags carry simple alnum/`-` values: `kill_worker`, `b2bua-worker-1`).
-fn query_get(query: &str, key: &str) -> Option<String> {
-    query.split('&').find_map(|kv| {
-        let (k, v) = kv.split_once('=')?;
-        (k == key && !v.is_empty()).then(|| v.to_string())
-    })
-}
-
-#[cfg(test)]
-mod load_body_tests {
-    use super::*;
-
-    /// The load driver mints the declarative actor body from a shape that
-    /// declares one, and nothing from a functional-only shape.
-    #[test]
-    #[ignore = "slow lane: loadgen"]
-    fn from_shape_mints_the_actor_body() {
-        let inputs = ScenarioInputs::default();
-
-        let actor = ShapeDescriptor::new("act")
-            .load_shared(Arc::new(scenario_harness::actor::scenarios::BasicCall));
-        let ae = MixEntry::from_shape(&actor, &inputs, 1.0).expect("actor shape has a body");
-        assert!(matches!(ae.body, LoadBody::Actor(_)), "actor shape → actor body");
-
-        let bare = ShapeDescriptor::new("bare");
-        assert!(
-            MixEntry::from_shape(&bare, &inputs, 1.0).is_none(),
-            "functional-only shape has no body"
-        );
-    }
 }

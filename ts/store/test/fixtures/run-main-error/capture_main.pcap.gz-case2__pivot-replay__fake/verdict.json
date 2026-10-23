@@ -1,0 +1,16 @@
+{
+  "case": "capture_main.pcap.gz-case2",
+  "lane": "fake",
+  "status": "failed",
+  "failed_step": "s14",
+  "failures": [
+    {
+      "failure": "unmatched-datagram",
+      "step": "s14",
+      "leg": "A",
+      "gated_on": { "kind": "response", "status": 200, "cseq_method": "INVITE" },
+      "reason": "gated on early dialog \"f5\", which must be a dialog of its own",
+      "arrived": { "kind": "response", "status": 200, "reason": "OK", "cseq_method": "INVITE", "cseq": 1 }
+    }
+  ]
+}

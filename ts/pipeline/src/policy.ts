@@ -21,7 +21,7 @@
 import type { Call, Case, Flow, Flows, MustFail, Placement, Tokens } from "@sip/contracts"
 import type { BackgroundMap } from "./background.js"
 import type * as Captured from "./captured.js"
-import type { CaptureRule } from "./capture-rules.js"
+import { CAPTURE_RULES, type CaptureRule } from "./capture-rules.js"
 import { CASE_RULES, type CaseRule } from "./case-rules.js"
 import { CUT_RULES } from "./cut.js"
 import { neverDerives, type CallIdDerivation } from "./derivation.js"
@@ -43,7 +43,11 @@ export interface CauseReading {
   readonly from: string
   readonly cause: Tokens.Cause
   readonly evidence: ReadonlyArray<string>
-  /** The dwell the platform's own give-up timer ran, where it ran one. */
+  /**
+   * The dwell the platform's own give-up timer ran, where it ran one, ms: a
+   * no-answer's from the attempt's first 18x, a no-provisional's from its
+   * INVITE.
+   */
   readonly after_ms?: number
 }
 
@@ -139,12 +143,19 @@ export interface RefusalEvidence {
  * - `refuses` — decided, final, and a replay could contradict it.
  * - `defers` — waits on the case's own document: refused only where the case
  *   cannot DECLARE the divergence it names, because a case that replays a
- *   divergence it never declared is worse than no case at all.
+ *   divergence it never declared is worse than no case at all. Not recorded
+ *   on a case refused before assembly: with no document it claims nothing.
  * - `not-proposed` — no case was ever on the table. The family is not a call.
  * - `unreachable` — no document can exist for it, so no replay can falsify it.
  *   A DECLARED zero, never a silent one.
+ * - `unrunnable` — the document exists, but no run of it can be driven to its
+ *   end, so no replay can falsify it either. A quarantine carries no document
+ *   such a rule fires on.
+ * - `untrusted` — the capture's record of the call cannot be trusted, so the
+ *   case is dropped whatever a run of it would do: the refusal claims nothing
+ *   a replay could contradict, and a quarantine carries no document for it.
  */
-export type Disposition = "refuses" | "defers" | "not-proposed" | "unreachable"
+export type Disposition = "refuses" | "defers" | "not-proposed" | "unreachable" | "unrunnable" | "untrusted"
 
 /**
  * One reason a proposed case is not generated, in the one shape every tier
@@ -339,7 +350,7 @@ export interface TieredRoster {
 
 /** Every refusal rule a policy runs, by tier, in the order a capture meets them. */
 export const tieredRoster = (policy: CasePolicy): TieredRoster => ({
-  capture: [...CUT_RULES, ...policy.refuseAtCapture],
+  capture: [...CUT_RULES, ...CAPTURE_RULES, ...policy.refuseAtCapture],
   case: [...CASE_RULES, ...policy.refuse],
   document: [...DOCUMENT_RULES, ...policy.refuseOnDocument]
 })

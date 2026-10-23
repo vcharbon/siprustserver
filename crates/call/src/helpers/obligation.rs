@@ -7,9 +7,10 @@
 
 use std::time::Duration;
 
-use crate::model::{Call, Obligation, RetainedEmission, Unacked2xx};
+use crate::model::{Call, Ceased, Ladder, Obligation, Provisional, RetainedEmission, Unacked2xx};
 
-/// Which obligations a retirement covers.
+/// What a retirement covers: the obligations it ends, and for a leg, an
+/// attempt, a service machine or the call, the timers that guard it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Scope<'a> {
     /// Exactly this one — the discharging ACK or PRACK arrived, or a spent
@@ -34,47 +35,47 @@ pub enum Scope<'a> {
     Provisionals,
     /// Every obligation on the call — a terminating call repeats nothing.
     Call,
+    /// The timers guarding one attempt — an ended attempt owes no
+    /// retransmission of its own.
+    Attempt(crate::model::AttemptId),
+    /// The timers a service machine owns — a deactivated machine owes no
+    /// retransmission of its own.
+    Machine(&'a crate::model::MachineId),
 }
 
-/// Every obligation the books name inside `scope`, ladder live or not: a
-/// reliable provisional whose ladder ceased still names the give-up it may
-/// have left armed, so it is retired by name rather than by emission.
+/// Every obligation the books name inside `scope`, ladder live or not: a 2xx
+/// whose ladder ceased at its last rung still names the give-up it left
+/// armed, so it is retired by name rather than by emission.
 pub fn obligations_in(call: &Call, scope: &Scope<'_>) -> Vec<Obligation> {
     match scope {
         Scope::Obligation(o) => vec![o.clone()],
         Scope::Leg(leg_id) => unacked_2xx(call)
             .into_iter()
             .filter(|o| o.leg() == Some(leg_id))
-            .chain(
-                call.reliable_provisionals
-                    .iter()
-                    .filter(|r| {
-                        r.b_leg_id == *leg_id
-                            || crate::helpers::leg_shown(call, &r.a_tag) == Some(leg_id)
-                    })
-                    .map(|r| Obligation::PrackOf { a_tag: r.a_tag.clone(), a_rseq: r.a_rseq }),
-            )
+            .chain(awaited_pracks(call, |p, tag| {
+                p.id.leg == *leg_id || crate::helpers::leg_shown(call, tag) == Some(leg_id)
+            }))
             .collect(),
-        Scope::Transaction { leg_id, cseq } => call
-            .reliable_provisionals
-            .iter()
-            .filter(|r| r.b_leg_id == *leg_id && r.b_cseq == *cseq)
-            .map(|r| Obligation::PrackOf { a_tag: r.a_tag.clone(), a_rseq: r.a_rseq })
-            .collect(),
-        Scope::Provisionals => call
-            .reliable_provisionals
-            .iter()
-            .map(|r| Obligation::PrackOf { a_tag: r.a_tag.clone(), a_rseq: r.a_rseq })
-            .collect(),
-        Scope::Call => unacked_2xx(call)
-            .into_iter()
-            .chain(
-                call.reliable_provisionals
-                    .iter()
-                    .map(|r| Obligation::PrackOf { a_tag: r.a_tag.clone(), a_rseq: r.a_rseq }),
-            )
-            .collect(),
+        Scope::Transaction { leg_id, cseq } => {
+            awaited_pracks(call, |p, _| p.id.leg == *leg_id && p.id.invite_cseq.as_i64() == *cseq)
+        }
+        Scope::Provisionals => awaited_pracks(call, |_, _| true),
+        Scope::Attempt(_) | Scope::Machine(_) => Vec::new(),
+        Scope::Call => {
+            unacked_2xx(call).into_iter().chain(awaited_pracks(call, |_, _| true)).collect()
+        }
     }
+}
+
+/// The PRACK obligation of every shown provisional `keep` selects, by the
+/// record and the tag it was shown under.
+fn awaited_pracks(call: &Call, keep: impl Fn(&Provisional, &str) -> bool) -> Vec<Obligation> {
+    call.provisionals
+        .iter()
+        .filter_map(|p| p.shown.as_ref().map(|s| (p, s)))
+        .filter(|(p, s)| keep(p, &s.tag))
+        .map(|(_, s)| Obligation::AwaitPrack { tag: s.tag.clone(), rseq: s.rseq })
+        .collect()
 }
 
 /// Every 2xx the call still awaits an ACK for, as the key its ACK carries.
@@ -83,7 +84,7 @@ fn unacked_2xx(call: &Call) -> Vec<Obligation> {
         .chain(call.b_legs.iter())
         .flat_map(|leg| {
             leg.dialogs.iter().flat_map(move |d| {
-                d.ext.answered_2xx.iter().chain(d.ext.pending_reinvite_2xx.iter()).map(move |u| {
+                d.answered_2xx.iter().chain(d.pending_reinvite_2xx.iter()).map(move |u| {
                     Obligation::AckOf2xx {
                         leg: leg.leg_id.clone(),
                         dialog_tag: u.dialog_tag.clone(),
@@ -115,10 +116,7 @@ pub fn answers_initial_invite(call: &Call, obligation: &Obligation) -> bool {
     };
     *leg == call.a_leg.leg_id
         && call.a_leg.dialogs.iter().any(|d| {
-            d.ext
-                .answered_2xx
-                .as_ref()
-                .is_some_and(|u| u.dialog_tag == *dialog_tag && u.cseq == *cseq)
+            d.answered_2xx.as_ref().is_some_and(|u| u.dialog_tag == *dialog_tag && u.cseq == *cseq)
         })
 }
 
@@ -127,9 +125,7 @@ pub fn answers_initial_invite(call: &Call, obligation: &Obligation) -> bool {
 pub fn retained_for<'a>(call: &'a Call, obligation: &Obligation) -> Option<&'a RetainedEmission> {
     match obligation {
         Obligation::AckOf2xx { .. } => unacked_2xx_slot(call, obligation).map(|u| &u.emission),
-        Obligation::PrackOf { a_tag, a_rseq } => {
-            crate::helpers::reliable_provisional_emission(call, a_tag, *a_rseq)
-        }
+        Obligation::AwaitPrack { tag, rseq } => crate::helpers::shown_emission(call, tag, *rseq),
     }
 }
 
@@ -146,20 +142,19 @@ pub fn advance_ladder(
         Obligation::AckOf2xx { .. } => {
             unacked_2xx_slot_mut(&mut call, obligation).and_then(|u| u.emission.advance(give_up))
         }
-        Obligation::PrackOf { a_tag, a_rseq } => call
-            .reliable_provisionals
-            .iter_mut()
-            .find(|r| r.a_tag == *a_tag && r.a_rseq == *a_rseq && !r.acknowledged)
-            .and_then(|r| r.emission.as_mut())
-            .and_then(|e| e.advance(give_up)),
+        Obligation::AwaitPrack { tag, rseq } => {
+            crate::helpers::advance_shown_ladder(&mut call, tag, *rseq, give_up)
+        }
     };
     (call, next)
 }
 
 /// Drop what `obligation`'s ladder repeats: the ladder is over — discharged,
-/// ceased, or retired with its leg, transaction or call — so the bytes can
-/// never be sent again and stop riding the replicated body. For a 2xx this is
-/// also the end of the RFC 6026 *Accepted* interval the marker held.
+/// or retired with its leg, transaction or call — so the bytes can never be
+/// sent again and stop riding the replicated body. For a 2xx this is also the
+/// end of the RFC 6026 *Accepted* interval the marker held; a reliable
+/// provisional's ladder ceases with the final it was shown before, an
+/// acknowledged one standing.
 pub fn clear_retained(mut call: Call, obligation: &Obligation) -> Call {
     match obligation {
         Obligation::AckOf2xx { leg, dialog_tag, cseq } => {
@@ -171,17 +166,18 @@ pub fn clear_retained(mut call: Call, obligation: &Obligation) -> Call {
                 .filter(|l| l.leg_id == *leg)
                 .flat_map(|l| l.dialogs.iter_mut())
             {
-                if matches(&d.ext.answered_2xx) {
-                    d.ext.answered_2xx = None;
+                if matches(&d.answered_2xx) {
+                    d.answered_2xx = None;
                 }
-                if matches(&d.ext.pending_reinvite_2xx) {
-                    d.ext.pending_reinvite_2xx = None;
+                if matches(&d.pending_reinvite_2xx) {
+                    d.pending_reinvite_2xx = None;
                 }
             }
             call
         }
-        Obligation::PrackOf { a_tag, a_rseq } => {
-            crate::helpers::clear_reliable_provisional_emission(call, a_tag, *a_rseq)
+        Obligation::AwaitPrack { tag, rseq } => {
+            crate::helpers::cease_shown_ladder(&mut call, tag, *rseq, Ceased::Final);
+            call
         }
     }
 }
@@ -194,7 +190,7 @@ fn unacked_2xx_slot<'a>(call: &'a Call, obligation: &Obligation) -> Option<&'a U
     crate::helpers::find_leg(call, leg)?
         .dialogs
         .iter()
-        .flat_map(|d| d.ext.answered_2xx.iter().chain(d.ext.pending_reinvite_2xx.iter()))
+        .flat_map(|d| d.answered_2xx.iter().chain(d.pending_reinvite_2xx.iter()))
         .find(|u| u.dialog_tag == *dialog_tag && u.cseq == *cseq)
 }
 
@@ -210,7 +206,7 @@ fn unacked_2xx_slot_mut<'a>(
         .find(|l| l.leg_id == *leg)?
         .dialogs
         .iter_mut()
-        .flat_map(|d| d.ext.answered_2xx.iter_mut().chain(d.ext.pending_reinvite_2xx.iter_mut()))
+        .flat_map(|d| d.answered_2xx.iter_mut().chain(d.pending_reinvite_2xx.iter_mut()))
         .find(|u| u.dialog_tag == *dialog_tag && u.cseq == *cseq)
 }
 
@@ -221,7 +217,7 @@ pub fn restate_retained(call: &mut Call, was: &[u8], now: &[u8]) {
     for leg in std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut()) {
         restate_leg_invite(leg, was, now);
         for dialog in &mut leg.dialogs {
-            let ext = &mut dialog.ext;
+            let ext = dialog;
             for unacked in
                 [ext.answered_2xx.as_mut(), ext.pending_reinvite_2xx.as_mut()].into_iter().flatten()
             {
@@ -232,8 +228,8 @@ pub fn restate_retained(call: &mut Call, was: &[u8], now: &[u8]) {
             }
         }
     }
-    for provisional in &mut call.reliable_provisionals {
-        if let Some(emission) = provisional.emission.as_mut() {
+    for shown in call.provisionals.iter_mut().filter_map(|p| p.shown.as_mut()) {
+        if let Ladder::Repeating(emission) = &mut shown.ladder {
             emission.restate(was, now);
         }
     }
@@ -243,9 +239,10 @@ pub fn restate_retained(call: &mut Call, was: &[u8], now: &[u8]) {
 /// the INVITE they hold left restated.
 pub fn restate_leg_invite(leg: &mut crate::model::Leg, was: &[u8], now: &[u8]) {
     let handles = leg
-        .pending_invite_txn
+        .outbound_invite
         .iter_mut()
-        .chain(leg.dialogs.iter_mut().filter_map(|d| d.ext.pending_invite_txn.as_mut()));
+        .filter_map(|i| i.txn.as_mut())
+        .chain(leg.dialogs.iter_mut().filter_map(|d| d.pending_invite_txn.as_mut()));
     for handle in handles {
         if handle.original_invite == was {
             handle.original_invite = now.to_vec();

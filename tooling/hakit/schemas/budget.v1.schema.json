@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "budget.v1.schema.json",
+  "$comment": "minor 6",
+  "title": "budget.v1",
+  "description": "A file `budgets/<name>.yaml`: the impact one incident window may cause. It never says how an incident is made. Every class or key it does not name allows 0. `dialog_request_failed`, `call_cut`, `call_stranded`, `protocol_anomaly`, an `unexpected_ending` after answer (but a consult's contract refusal, below) and `unattributed` take no budget, so this schema has no place for them. ADR-0049.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "name", "description"],
+  "properties": {
+    "schema": { "const": "budget.v1" },
+    "name": {
+      "description": "Equal to the file stem; unique on the search path.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "description": { "type": "string" },
+    "setup_failed": {
+      "description": "Allowances for failed setups. A failed setup matching no entry is a finding.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/keyed" }
+    },
+    "unexpected_ending": {
+      "description": "Allowances for pre-answer endings the catalog does not expect for a shape that does not expect an answer either (a reject with another code). After answer an unexpected ending takes no budget, with one exception: a catalog leg that opens only after an in-dialog consult (`after_consult`), left unopened while its asking leg received the consult's contract refusal on a call with no other failure, is allowed by code 0 and reason `leg:<role>`. The codes here are never 2xx.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/keyed" }
+    },
+    "setup_slow": {
+      "description": "Slow setups in the window. `threshold_ms` replaces the profile's `setup_slow_ms` inside the window; without an allowance, none may be slow.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "threshold_ms": { "type": "number", "exclusiveMinimum": 0 },
+        "max_calls": { "type": "integer", "minimum": 0 },
+        "max_seconds": { "type": "number", "minimum": 0 },
+        "over_outage": {
+          "description": "max_seconds counts beyond the window's outage, from its first inject to its last recovered.",
+          "type": "boolean"
+        }
+      },
+      "if": { "properties": { "over_outage": { "const": true } }, "required": ["over_outage"] },
+      "then": { "required": ["max_seconds"] },
+      "not": { "required": ["max_calls", "max_seconds"] }
+    },
+    "cdr_mismatch": {
+      "description": "CDR mismatches in the window, by kind: `missing` (a call that owes a CDR has none), `extra` (a CDR no call of the run owns), `duplicate` (a second distinct CDR of a call), `differs` (a disposition or a duration other than the caller saw). A kind not named allows 0.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "missing": { "$ref": "#/$defs/counted" },
+        "extra": { "$ref": "#/$defs/counted" },
+        "duplicate": { "$ref": "#/$defs/counted" },
+        "differs": { "$ref": "#/$defs/counted" }
+      }
+    },
+    "recovery": {
+      "description": "How traffic comes back after `healed`. Without `max_s`, it must be back before the window closes.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_s": { "type": "number", "minimum": 0 },
+        "tolerance": {
+          "description": "The relative distance from the baseline that counts as back.",
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "default": 0.1
+        },
+        "baseline_s": {
+          "description": "The length of the baseline, ending at `inject`.",
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 60
+        },
+        "hold_s": {
+          "description": "How long traffic must stay within tolerance to count as back.",
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 10
+        },
+        "latency_slack_ms": {
+          "description": "A span p99 is back within max(baseline × (1 + tolerance), baseline + latency_slack_ms): a relative tolerance alone is jitter on a setup of a few milliseconds.",
+          "type": "number",
+          "minimum": 0,
+          "default": 50
+        }
+      }
+    },
+    "limiter": {
+      "description": "What the window allows the profile's limiters (ADR-0049 §3.13), from its opening to its close plus the limiter's `repair_s`, each direction on its own: the median of admitted calls may reach every call the limiter's streams offer, cps × (ring + hold), with `overshoot: offered` (callers failing open admit them all; absent, the cap), and may fall under the steady band when `undershoot` is true (absent, never).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "overshoot": { "const": "offered" },
+        "undershoot": { "type": "boolean" }
+      }
+    },
+    "classes": {
+      "description": "Allowances for impact classes a product added on the search path (`classes/`), by class name. A built-in class name is refused here.",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_]*$",
+        "not": {
+          "enum": [
+            "setup_failed",
+            "setup_slow",
+            "unexpected_ending",
+            "dialog_request_failed",
+            "call_cut",
+            "call_stranded",
+            "protocol_anomaly",
+            "cdr_mismatch",
+            "recovery",
+            "unattributed"
+          ]
+        }
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["max"],
+        "properties": {
+          "max": { "type": "number", "minimum": 0 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "keyed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stream", "code", "reason"],
+      "properties": {
+        "stream": {
+          "description": "A stream name, or `*` for each stream separately.",
+          "type": "string",
+          "pattern": "^([a-z][a-z0-9_]*|\\*)$"
+        },
+        "code": {
+          "description": "The final's status code; 0 for a setup that ended with no final (reason `timeout`, `transport` or `protocol`). Never a wildcard, never 2xx.",
+          "type": "integer",
+          "anyOf": [
+            { "const": 0 },
+            { "minimum": 300, "maximum": 699 }
+          ]
+        },
+        "reason": {
+          "description": "The record's normalised `reason`, or `*` for any.",
+          "type": "string",
+          "minLength": 1
+        },
+        "max_calls": { "type": "integer", "minimum": 0 },
+        "max_seconds": {
+          "description": "The allowance in seconds of the stream's offered rate: the count may reach max_seconds × the stream's cps in the window.",
+          "type": "number",
+          "minimum": 0
+        },
+        "retry_after": {
+          "description": "Matches only a final that carried a Retry-After (true) or only one that carried none (false); absent, either. Tells a refusal that asks for a retry later from a bare one of the same code.",
+          "type": "boolean"
+        },
+        "over_outage": {
+          "description": "max_seconds counts beyond the window's outage, from its first inject to its last recovered: the count may reach (max_seconds + outage) × the stream's cps, so one budget holds for any hold of the fault.",
+          "type": "boolean"
+        }
+      },
+      "if": { "properties": { "over_outage": { "const": true } }, "required": ["over_outage"] },
+      "then": { "required": ["max_seconds"] },
+      "oneOf": [
+        { "required": ["max_calls"] },
+        { "required": ["max_seconds"] }
+      ]
+    },
+    "counted": {
+      "description": "One kind of a counted class: `max_calls`, or `max_seconds` of the summed offered rate of the run's `run` streams (calls end at the rate they start), optionally beyond the window's outage; for `differs`, `excess_ms` also allows every duration that differs from the caller's by at most that much past the join's own tolerance.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_calls": { "type": "integer", "minimum": 0 },
+        "max_seconds": { "type": "number", "minimum": 0 },
+        "over_outage": {
+          "description": "max_seconds counts beyond the window's outage, from its first inject to its last recovered.",
+          "type": "boolean"
+        },
+        "excess_ms": { "type": "number", "minimum": 0 }
+      },
+      "if": { "properties": { "over_outage": { "const": true } }, "required": ["over_outage"] },
+      "then": { "required": ["max_seconds"] },
+      "not": { "required": ["max_calls", "max_seconds"] }
+    }
+  }
+}

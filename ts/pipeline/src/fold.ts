@@ -8,7 +8,7 @@
  * items by position, `set` by membership.
  *
  * Three properties the comparison rests on: the split is quote- and
- * angle-aware so `"Doe, John" <sip:j@h>` never tears; an empty item is
+ * angle-aware so `"McFakename, Fakey" <sip:j@h>` never tears; an empty item is
  * punctuation, never a value; and item text is compared VERBATIM apart from
  * the named RFC equivalences (name-addr shape, token+params shape) — widening
  * a comparison is how a transparency oracle goes blind.

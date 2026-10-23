@@ -28,10 +28,12 @@
 //!   [`MixEntry`] is built from.
 //! - [`driver`] — the CPS governor + max-in-flight semaphore + per-call
 //!   `catch_unwind` boundary + [`scope`]-based teardown.
-//! - [`app`] — the whole CLI application ([`app::Args`] + [`app::run`]) behind
-//!   an injectable [`ShapeRegistry`], so a
-//!   third-party load bin is a one-liner passing its own composed registry
-//!   (the shipped bin passes `with_defaults()`).
+//! - [`app`] — the whole CLI application ([`app::main`]) behind the
+//!   [`app::Product`] seam: a product names its bin, adds its flags and builds
+//!   the [`ShapeRegistry`] they select, so its load bin is one line (the
+//!   shipped bin passes [`app::Shipped`]).
+//! - [`outcome`] — one `call-outcome.v1` record per call placed, from what
+//!   the call's endpoints saw on the wire.
 //! - [`report`] — bounded-memory counters, latency histograms, sampling gate,
 //!   Prometheus text, on-disk report.
 //! - `call_rtt` — one call's SIP round trips, held by the call and folded
@@ -43,7 +45,7 @@
 //!   non-failure class of its own.
 //! - [`mux`] — the multiplexed SIP transport; its `rtt` module times each SIP
 //!   exchange that holds no scripted timer (request → 100 / 18x / final,
-//!   2xx → ACK) into `loadgen_rtt_seconds{scenario,exchange}`.
+//!   2xx → ACK) into `loadgen_rtt_seconds{stream,shape,exchange}`.
 //!
 //! [`Agent`]: scenario_harness::Agent
 
@@ -51,12 +53,15 @@ pub mod app;
 mod call_rtt;
 pub mod case;
 pub mod catalogue;
-pub mod chaos;
 pub mod class;
 pub mod ctx;
 pub mod driver;
+mod failed_call;
 mod hist;
+mod metrics_server;
+mod mix_entry;
 pub mod mux;
+pub mod outcome;
 pub mod rate;
 pub mod report;
 pub mod scenarios;
@@ -65,13 +70,11 @@ pub mod waiver;
 
 pub use case::{DwellOverrides, LoadCase, ResolvedCall};
 pub use catalogue::CATALOGUE;
-pub use chaos::{ChaosLog, ChaosTag};
 pub use class::{CallOutcome, ResultClass};
 pub use ctx::{CallCtx, CallEnv, CoreIdentity, CorrelationStamp};
-pub use driver::{
-    serve_metrics, serve_metrics_on, CallConfig, CallTuning, Driver, DriverCfg, MixEntry,
-    MuxTransport,
-};
+pub use driver::{CallConfig, CallTuning, Driver, DriverCfg, MuxTransport};
+pub use metrics_server::{serve_metrics, serve_metrics_on};
+pub use mix_entry::MixEntry;
 pub use mux::{
     labelled_prefix_leg_picker, prefix_leg_picker, CallRouting, ClaimRule, Correlation, DropDir,
     EndpointSpec, Exchange, LegInfo, LegPicker, MuxCore, Role, RttSink, TargetedDrop,

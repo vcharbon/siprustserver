@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "CallContext data model (Call→Leg→Dialog) + lens helpers + pluggable body codec. Pure synchronous leaf; the stateful CallState + TimerService live with the b2bua runtime (ADR-0008)."
 
+[package.metadata.purity]
+tier = "pure"
+
 [lints]
 workspace = true
 

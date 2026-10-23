@@ -1,14 +1,15 @@
-//! The owner task: the `select!` loop, transaction-map + timer-wheel
-//! bookkeeping (kept in lockstep), timer dispatch, inbound-packet parsing, and
-//! the periodic sweep tick. Protocol behavior does NOT live here — the UAC FSM is
+//! The owner task's state: transaction-map + timer-wheel bookkeeping (kept in
+//! lockstep), timer dispatch, and the periodic sweep tick; its `select!` loop
+//! is `run`, its inbound-packet parsing `ingress`. Protocol behavior does NOT live here — the UAC FSM is
 //! `layer::client`, the UAS FSM is `layer::server`, output-queue discipline is
 //! `layer::events`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
-use sip_message::{SipMessage, SipParser};
+use sip_message::SipParser;
 use sip_net::UdpEndpoint;
 use tokio::sync::mpsc;
 use tokio_util::time::{delay_queue::Key, DelayQueue};
@@ -16,12 +17,14 @@ use tokio_util::time::{delay_queue::Key, DelayQueue};
 use crate::event::TransactionEvent;
 use crate::metrics::MetricsInner;
 use crate::rng::IdGen;
-use crate::timers::{ms, TXN_SWEEP_INTERVAL};
 
 use super::backlog::DeferredBound;
+use super::call_txns::CallTxns;
 use super::handle::{Command, TransactionConfig};
 use super::key::{ServerTxnId, ServerTxnIdentity, ServerTxnKey};
+use super::parse_refusal::ParseRefusals;
 use super::refusals::InviteRefusals;
+use super::shrink::{shrink_idle, SHRINK_MIN_CAPACITY};
 use super::txn::{CancelWire, Timer, Transaction, TxnId, TxnRef, TxnRole};
 
 pub(super) struct Owner {
@@ -85,16 +88,9 @@ pub(super) struct Owner {
     /// the client timeout of an INVITE that has drawn a provisional and the
     /// backstop of every active INVITE transaction both derive from it.
     pub(super) invite_initial_timeout_ms: u64,
-    /// The initial INVITE's first-response bound
-    /// ([`TransactionConfig::invite_first_response_timeout_ms`](crate::TransactionConfig)):
-    /// the client timeout of an out-of-dialog INVITE that has drawn nothing.
+    /// The TU's first-response deadline on an initial INVITE
+    /// ([`TransactionConfig::invite_first_response_timeout_ms`](crate::TransactionConfig)).
     pub(super) invite_first_response_timeout_ms: u64,
-    /// The held-CANCEL policy
-    /// ([`TransactionConfig::cancel_hold_grace_ms`](crate::TransactionConfig)):
-    /// `Some(ms)` bounds the wait for the branch's first provisional — then
-    /// the CANCEL is sent regardless (ADR-0028); `None` is the strict §9.1
-    /// wait (hold until provisional, drop with the txn).
-    pub(super) cancel_hold_grace_ms: Option<u64>,
     /// The To-tag this node bound to a dialog it answered as UAS, by
     /// (Call-ID, From-tag), kept for Timer L past the transaction so a
     /// CANCEL or a stray answered after the transaction is gone still carries
@@ -103,104 +99,10 @@ pub(super) struct Owner {
     pub(super) recent_uas_tags: HashMap<(String, String), (String, tokio::time::Instant)>,
     /// [`TransactionConfig::strict_to_tag`](crate::TransactionConfig).
     pub(super) strict_to_tag: bool,
-}
-
-/// The live transactions of one call, by role ([`Owner::txn_index`]).
-#[derive(Default)]
-pub(super) struct CallTxns {
-    pub(super) client: HashSet<String>,
-    pub(super) server: HashSet<ServerTxnKey>,
-}
-
-impl CallTxns {
-    pub(super) fn len(&self) -> usize {
-        self.client.len() + self.server.len()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.client.is_empty() && self.server.is_empty()
-    }
-}
-
-/// Below this many buckets a table is never shrunk: the saving is noise and a
-/// small idle node would rehash on every sweep.
-const SHRINK_MIN_CAPACITY: usize = 1024;
-
-/// Give a drained table back to the allocator: once it is under a quarter full
-/// it is rehashed to twice its length. The factor-of-four gap is the hysteresis
-/// that keeps a table oscillating around one size from rehashing every sweep.
-pub(super) fn shrink_idle<K: Eq + std::hash::Hash, V>(map: &mut HashMap<K, V>) {
-    let cap = map.capacity();
-    if cap > SHRINK_MIN_CAPACITY && map.len() < cap / 4 {
-        map.shrink_to(map.len() * 2);
-    }
-}
-
-/// The next expired timer. Only ever awaited while `q` is non-empty — an empty
-/// `DelayQueue` resolves `poll_expired` to `Ready(None)`, which would busy-spin
-/// `select!`, so the call site guards with `if !timers.is_empty()`.
-async fn next_expired(q: &mut DelayQueue<Timer>) -> Timer {
-    std::future::poll_fn(|cx| q.poll_expired(cx))
-        .await
-        .expect("guarded by !is_empty()")
-        .into_inner()
-}
-
-pub(super) async fn run(
-    mut owner: Owner,
-    endpoint: Box<dyn UdpEndpoint>,
-    mut cmd_rx: mpsc::Receiver<Command>,
-) {
-    let endpoint: &dyn UdpEndpoint = endpoint.as_ref();
-    let mut sweep = tokio::time::interval(ms(TXN_SWEEP_INTERVAL));
-    // Coalesce missed ticks: after any owner stall the catch-up must be a single
-    // pass, not a burst of back-to-back full-map scans (default `Burst`).
-    sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // The first `interval` tick is immediate; skip it so the first sweep runs a
-    // full interval after start.
-    sweep.tick().await;
-
-    loop {
-        // `biased` polls the arms top-to-bottom and the INBOUND PACKET arm is LAST
-        // on purpose: a sustained packet flood keeps `endpoint.recv()` ready every
-        // iteration, so if it were polled first it would starve the timer wheel and
-        // the safety-net sweep indefinitely — retransmits/timeouts/cleanups would
-        // stall and the transaction maps + DelayQueue would grow unbounded exactly under
-        // the overload the sweep exists to bound. Polling commands, due timers, and
-        // the sweep ahead of new packets guarantees the internal machinery always
-        // makes progress; the flood source (packets) can only be drained once
-        // nothing else is pending. (cmd/timer can't themselves flood without
-        // packets — the router only issues commands in response to events.)
-        tokio::select! {
-            biased;
-            cmd = cmd_rx.recv() => match cmd {
-                Some(c) => owner.handle_command(endpoint, c).await,
-                None => break, // all handles dropped → shut down
-            },
-            timer = next_expired(&mut owner.timers), if !owner.timers.is_empty() => {
-                owner.fire_timer(endpoint, timer).await;
-            }
-            _ = sweep.tick() => owner.sweep(),
-            packet = endpoint.recv() => match packet {
-                Some(p) => owner.handle_packet(endpoint, p).await,
-                None => break, // endpoint closed
-            },
-        }
-        // End-of-turn: emit deferred CallQuiesced notices AFTER this turn's
-        // protocol events, so the router never self-releases a takeover copy ahead
-        // of the ACK/Timeout that cleared the call's last txn (ADR-0014 ordering).
-        owner.flush_pending_quiesce();
-        // Sample the DelayQueue depth (O(1)) so a timer/slab leak is visible even
-        // when active_transactions is flat (the no-chaos RSS-climb localisation).
-        owner
-            .metrics
-            .timer_queue_len
-            .store(owner.timers.len(), std::sync::atomic::Ordering::Relaxed);
-        owner
-            .metrics
-            .event_queue_deferred
-            .store(owner.deferred_events.len(), std::sync::atomic::Ordering::Relaxed);
-    }
+    /// [`TransactionConfig::stateless_options`](crate::TransactionConfig).
+    pub(super) stateless_options: bool,
+    /// The cap and the To-tags of the 400s answering refused requests.
+    pub(super) parse_refusals: ParseRefusals,
 }
 
 impl Owner {
@@ -212,10 +114,11 @@ impl Owner {
         metrics: Arc<MetricsInner>,
         config: TransactionConfig,
     ) -> Self {
-        assert!(
-            config.deferred_bound.is_none() || config.invite_refusals.is_some(),
-            "a deferred bound refuses through invite_refusals"
-        );
+        let unanswerable = config.deferred_bound.is_some() && config.invite_refusals.is_none();
+        debug_assert!(!unanswerable, "a deferred bound refuses through invite_refusals");
+        if unanswerable {
+            tracing::warn!("a deferred bound without invite_refusals refuses nothing");
+        }
         Self {
             clients: HashMap::new(),
             servers: HashMap::new(),
@@ -223,6 +126,7 @@ impl Owner {
             parser,
             events_tx,
             metrics,
+            parse_refusals: ParseRefusals::new(&config.id_gen, config.advertised),
             id_gen: config.id_gen,
             self_release_watch: HashSet::new(),
             txn_index: HashMap::new(),
@@ -233,9 +137,9 @@ impl Owner {
             pending_quiesce: Vec::new(),
             invite_initial_timeout_ms: config.invite_initial_timeout_ms,
             invite_first_response_timeout_ms: config.invite_first_response_timeout_ms,
-            cancel_hold_grace_ms: config.cancel_hold_grace_ms,
             recent_uas_tags: HashMap::new(),
             strict_to_tag: config.strict_to_tag,
+            stateless_options: config.stateless_options,
         }
     }
 
@@ -291,12 +195,11 @@ impl Owner {
             self.cancel_timer(old.retransmit_key);
             self.cancel_timer(old.timeout_key);
             self.cancel_timer(old.cleanup_key);
-            self.cancel_timer(old.cancel_grace_key);
             self.cancel_timer(old.cancel_retransmit_key);
             self.untrack_call_ref(&old.call_ref, id.as_ref());
             // The displaced txn's held CANCEL dies with it — a never-sent one
             // is counted dropped so the held counters reconcile
-            // (held == flushed + flushed_pre1xx + dropped).
+            // (held == flushed + dropped).
             if old.held_cancel.is_some_and(|h| h.wire == CancelWire::Held) {
                 self.metrics
                     .held_cancels_dropped
@@ -326,10 +229,10 @@ impl Owner {
         let Some(cr) = call_ref else { return };
         let Some(txns) = self.txn_index.get_mut(cr) else { return };
         match id {
-            TxnRef::Client(branch) => txns.client.remove(branch),
+            TxnRef::Client(branch) => txns.client.remove(branch) | txns.accepted.remove(branch),
             TxnRef::Server(id) => txns.server.remove(&id as &dyn ServerTxnIdentity),
         };
-        if txns.is_empty() {
+        if txns.holds_none() {
             self.txn_index.remove(cr);
         }
     }
@@ -343,6 +246,27 @@ impl Owner {
             return;
         };
         self.untrack_call_ref(&Some(cr.clone()), id);
+        self.quiesce_if_last(cr);
+    }
+
+    /// Take the client txn at `branch`, Accepted after a 2xx, off its call's
+    /// books while the call keeps it: `has_txns_for` / `ActiveTxnCount` no
+    /// longer see it, as [`detach_from_call`](Self::detach_from_call), but
+    /// `cancel_txns_for_call` and `relinquish_call` still reach it.
+    pub(super) fn settle_accepted(&mut self, branch: &str) {
+        let Some(cr) = self.clients.get(branch).and_then(|t| t.call_ref.clone()) else {
+            return;
+        };
+        let Some(txns) = self.txn_index.get_mut(&cr) else { return };
+        if txns.client.remove(branch) {
+            txns.accepted.insert(branch.to_string());
+            self.quiesce_if_last(cr);
+        }
+    }
+
+    /// A watched call left with no transaction on its books hears
+    /// `CallQuiesced` at end of turn (ADR-0014).
+    fn quiesce_if_last(&mut self, cr: String) {
         if self.self_release_watch.contains(&cr) && !self.has_txns_for(&cr) {
             self.pending_quiesce.push(cr);
         }
@@ -363,7 +287,6 @@ impl Owner {
                 self.cancel_timer(t.retransmit_key);
                 self.cancel_timer(t.timeout_key);
                 self.cancel_timer(t.cleanup_key);
-                self.cancel_timer(t.cancel_grace_key);
                 self.cancel_timer(t.cancel_retransmit_key);
                 self.untrack_call_ref(&t.call_ref, id);
                 if t.held {
@@ -375,14 +298,10 @@ impl Owner {
                         .orphaned_transactions
                         .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                // A txn leaving with a never-sent CANCEL: the crossing-2xx
-                // final (cancellation moot), an
-                // INVITE that gave up unanswered (its CANCEL waits for a
-                // provisional, §9.1, to the end of the give-up hold), any
-                // INVITE under the strict §9.1 policy, and the sweep. Under
-                // the bounded policy grace expiry, evict and timeout of an
-                // active INVITE send it first. Counted dropped here; a
-                // grace-sent copy is already accounted.
+                // A txn leaving with a never-sent CANCEL — the crossing-2xx
+                // final (cancellation moot), an INVITE whose branch drew no
+                // provisional to the end of its hold (§9.1), the sweep — is
+                // counted dropped here.
                 if t.held_cancel.as_ref().is_some_and(|h| h.wire == CancelWire::Held) {
                     self.metrics
                         .held_cancels_dropped
@@ -393,19 +312,23 @@ impl Owner {
                 // its acting-backup takeover copy — but only AFTER this turn's
                 // protocol event (the ACK/Timeout that drove the delete), so defer
                 // it to `flush_pending_quiesce`. (For a 2xx INVITE the server txn
-                // lingers in `Completed` until Timer H — the ACK reuses a different
-                // branch — so this naturally fires at Timer H, after the ACK relay.
-                // A non-2xx INVITE server txn detached on its ACK, `call_ref`
-                // already `None`, was accounted then.)
+                // lingers in `Accepted` until Timer L — the ACK of a 2xx takes a
+                // new branch and matches no transaction — so this fires at Timer
+                // L, after the ACK relay. An INVITE server txn detached on an ACK
+                // it matched, `call_ref` already `None`, was accounted then, as
+                // was a client txn settled Accepted on its 2xx.)
                 if let Some(cr) = t.call_ref {
-                    if self.self_release_watch.contains(&cr) && !self.has_txns_for(&cr) {
-                        self.pending_quiesce.push(cr);
-                    }
+                    self.quiesce_if_last(cr);
                 }
                 true
             }
             None => false,
         }
+    }
+
+    /// Arm `timer` after `delay`, held within the wheel's range.
+    pub(super) fn arm(&mut self, timer: Timer, delay: Duration) -> Key {
+        sip_clock::delay_queue::insert(&mut self.timers, timer, delay)
     }
 
     pub(super) fn cancel_timer(&mut self, key: Option<Key>) {
@@ -420,10 +343,10 @@ impl Owner {
             .store(self.clients.len() + self.servers.len(), std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Any transaction (any role/state) still attributed to `call_ref`? O(1) via
-    /// the lockstep `txn_index` (an empty branch set has no entry).
+    /// Any transaction (any role/state) still on `call_ref`'s books? O(1) via
+    /// the lockstep `txn_index`; an Accepted client txn is not on them.
     pub(super) fn has_txns_for(&self, call_ref: &str) -> bool {
-        self.txn_index.contains_key(call_ref)
+        self.txn_index.get(call_ref).is_some_and(|t| t.on_books() > 0)
     }
 
     // ── output ──────────────────────────────────────────────────────────────
@@ -439,7 +362,7 @@ impl Owner {
 
     // ── timer firing ─────────────────────────────────────────────────────────
 
-    async fn fire_timer(&mut self, endpoint: &dyn UdpEndpoint, timer: Timer) {
+    pub(super) async fn fire_timer(&mut self, endpoint: &dyn UdpEndpoint, timer: Timer) {
         // A fired entry has already left the `DelayQueue` (`poll_expired` freed its
         // slab slot), so the `Key` we still hold for it is now STALE — the next
         // `insert` reuses that exact slot and yields the SAME `Key`. Null the field
@@ -464,19 +387,14 @@ impl Owner {
                 if let Some(t) = self.clients.get_mut(&branch) {
                     t.timeout_key = None;
                 }
-                self.fire_timeout(endpoint, &branch).await
+                self.fire_timeout(&branch)
             }
+            Timer::FirstResponse(branch) => self.fire_first_response(&branch),
             Timer::Cleanup(id) => {
                 if let Some(t) = self.txn_mut(id.as_ref()) {
                     t.cleanup_key = None;
                 }
                 self.expire(id.as_ref());
-            }
-            Timer::CancelGrace(branch) => {
-                if let Some(t) = self.clients.get_mut(&branch) {
-                    t.cancel_grace_key = None;
-                }
-                self.fire_cancel_grace(endpoint, &branch).await;
             }
             Timer::CancelRetransmit(branch) => {
                 if let Some(t) = self.clients.get_mut(&branch) {
@@ -493,7 +411,7 @@ impl Owner {
 
     /// The periodic housekeeping pass: the lifetime safety net, the Timer L
     /// memo purge, and the idle-table shrink and buffer census.
-    fn sweep(&mut self) {
+    pub(super) fn sweep(&mut self) {
         self.reap_overdue();
         self.forget_expired_uas_tags();
         shrink_idle(&mut self.clients);
@@ -506,19 +424,23 @@ impl Owner {
             self.timers.shrink_to_fit();
         }
         // Census the retained retransmit-buffer bytes (same periodic pass) so a
-        // buffer-retention leak is visible vs flat txns.
+        // buffer-retention leak is visible vs flat txns: the request images
+        // and the ACKs an Accepted client txn keeps for its 2xx repeats.
         let buf_bytes: u64 = self
             .clients
             .values()
             .chain(self.servers.values())
-            .map(|t| t.retransmit_buf.as_ref().map_or(0, |b| b.len()) as u64)
+            .map(|t| {
+                let acks = t.dialogs.iter().filter_map(|d| d.ack.as_ref().map(|(ack, _)| ack));
+                t.retransmit_buf.iter().chain(acks).map(|b| b.len() as u64).sum::<u64>()
+            })
             .sum();
         self.metrics.retransmit_buf_bytes.store(buf_bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
     // ── send API command handling ─────────────────────────────────────────────
 
-    async fn handle_command(&mut self, endpoint: &dyn UdpEndpoint, cmd: Command) {
+    pub(super) async fn handle_command(&mut self, endpoint: &dyn UdpEndpoint, cmd: Command) {
         match cmd {
             Command::SendRequest { msg, dest, txn_type, reply } => {
                 let handle = self.do_send_request(endpoint, *msg, dest, txn_type).await;
@@ -534,19 +456,20 @@ impl Owner {
                 let _ = reply.send(());
             }
             Command::Seed { call_ref, seeds, reply } => {
-                let seeded = self.do_seed(&call_ref, seeds);
-                let _ = reply.send(seeded);
+                let _ = reply.send(self.do_seed(endpoint, &call_ref, seeds).await);
             }
             Command::Reoffer { message, src, reply } => {
                 let disposition = self.do_reoffer(endpoint, *message, src).await;
                 let _ = reply.send(disposition);
             }
             Command::CancelTxnsForCall { call_ref, reply } => {
-                self.do_cancel_txns_for_call(endpoint, &call_ref).await;
+                self.do_cancel_txns_for_call(&call_ref);
                 let _ = reply.send(());
             }
-            Command::ForgetUnanswered { key, call_id, from_tag } => {
-                self.forget_unanswered(&key, &call_id, &from_tag)
+            Command::RelinquishCall { call_ref, reply } => self.relinquish_call(&call_ref, reply),
+            Command::RelinquishServer { key, reply } => self.relinquish_server(&key, reply),
+            Command::RelinquishAccepted { call_ref, reply } => {
+                let _ = reply.send(self.relinquish_accepted_of_call(&call_ref));
             }
             Command::ForgetUnansweredOfCall { call_ref, reply } => {
                 let _ = reply.send(self.forget_unanswered_of_call(&call_ref));
@@ -558,8 +481,8 @@ impl Owner {
                 let _ = reply.send(answered);
             }
             Command::ActiveTxnCount { call_ref, reply } => {
-                let n = self.txn_index.get(call_ref.as_str()).map_or(0, CallTxns::len);
-                let _ = reply.send(n);
+                let on_books = self.txn_index.get(call_ref.as_str()).map_or(0, CallTxns::on_books);
+                let _ = reply.send(on_books);
             }
             Command::WatchSelfRelease { call_ref, reply } => {
                 if self.has_txns_for(&call_ref) {
@@ -572,29 +495,6 @@ impl Owner {
                 }
                 let _ = reply.send(());
             }
-        }
-    }
-
-    // ── inbound packet dispatch ───────────────────────────────────────────────
-
-    async fn handle_packet(&mut self, endpoint: &dyn UdpEndpoint, packet: sip_net::UdpPacket) {
-        use std::sync::atomic::Ordering::Relaxed;
-        let src = packet.src;
-        // Hand the receive buffer to the parser instead of lending it: the
-        // message's `raw`/`body` then share it and no packet byte is copied.
-        let parsed = match self.parser.parse_shared(bytes::Bytes::from(packet.raw)) {
-            Ok(m) => m,
-            Err(_e) => {
-                // Parse error: the datagram is dropped. Count it so a
-                // malformed-traffic flood / parser regression is visible.
-                self.metrics.parse_errors.fetch_add(1, Relaxed);
-                return;
-            }
-        };
-
-        match parsed {
-            SipMessage::Request(req) => self.handle_inbound_request(endpoint, req, src).await,
-            SipMessage::Response(resp) => self.handle_inbound_response(endpoint, resp, src).await,
         }
     }
 }

@@ -338,7 +338,7 @@ async fn unknown_resources_are_404() {
 // Load runs
 // ---------------------------------------------------------------------------
 
-/// The load-result.json for one fixture run: a genuine check_fail reinvite (with
+/// The load-result.json for one fixture run: a check_fail reinvite (with
 /// a sampled callflow page) beside an OK basic_call, plus latency, a check
 /// tally, and canaries. Kept as authored JSON so the test also exercises the
 /// wire shape the loadgen writes.
@@ -356,8 +356,8 @@ fn fixture_load_result() -> serde_json::Value {
             "profile": "endurance baseline"
         },
         "counts": [
-            { "scenario": "basic_call", "class": "ok", "case": "", "chaos": "clear", "count": 1180, "ok": true },
-            { "scenario": "reinvite", "class": "check_fail", "case": "alice.invite.from.userInfo", "chaos": "clear", "count": 1, "ok": false }
+            { "scenario": "basic_call", "class": "ok", "case": "", "count": 1180, "ok": true },
+            { "scenario": "reinvite", "class": "check_fail", "case": "alice.invite.from.userInfo", "count": 1, "ok": false }
         ],
         "latency": [
             { "scenario": "basic_call", "n": 1180, "meanMs": 12.5, "p50Ms": 10.0, "p90Ms": 25.0, "p99Ms": 40.0, "maxMs": 88.0 }
@@ -372,8 +372,8 @@ fn fixture_load_result() -> serde_json::Value {
             "orphans": 0, "shed": 4, "drops": 11, "ringingExpected": 1185, "ringingReceived": 1184
         },
         "samples": [
-            { "scenario": "reinvite", "class": "check_fail", "case": "alice.invite.from.userInfo", "chaos": "clear",
-              "pages": ["callflows/reinvite/check_fail/alice.invite.from.userInfo/clear/0.html"] }
+            { "scenario": "reinvite", "class": "check_fail", "case": "alice.invite.from.userInfo",
+              "pages": ["callflows/reinvite/check_fail/alice.invite.from.userInfo/0.html"] }
         ]
     })
 }
@@ -384,7 +384,7 @@ fn load_run_app(tag: &str) -> (PathBuf, Router) {
     let root = std::env::temp_dir().join(format!("e2e-web-load-{tag}-{}", std::process::id()));
     std::fs::remove_dir_all(&root).ok();
     let run = root.join("endurance-1");
-    let flow_dir = run.join("callflows/reinvite/check_fail/alice.invite.from.userInfo/clear");
+    let flow_dir = run.join("callflows/reinvite/check_fail/alice.invite.from.userInfo");
     std::fs::create_dir_all(&flow_dir).unwrap();
     std::fs::write(
         run.join("load-result.json"),
@@ -419,13 +419,13 @@ async fn load_runs_list_detail_and_json() {
     assert!(html.contains("/load/endurance-1"), "run linked: {html}");
     assert!(!html.contains("half-baked"), "index-less dir hidden");
 
-    // Index JSON mirrors {run, totalCalls, clearFailures, finished}.
+    // Index JSON mirrors {run, totalCalls, failedCalls, finished}.
     let (st, json) = get(&app, "/load", true).await;
     assert_eq!(st, StatusCode::OK);
     let docs: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
     let doc = docs.iter().find(|d| d["run"] == "endurance-1").expect("run in index");
     assert_eq!(doc["totalCalls"], 1181);
-    assert_eq!(doc["clearFailures"], 1);
+    assert_eq!(doc["failedCalls"], 1);
     assert_eq!(doc["finished"], true);
 
     // Detail HTML: counts table + latency + checks + canaries + sample link.
@@ -436,7 +436,7 @@ async fn load_runs_list_detail_and_json() {
     assert!(html.contains("Latency"), "latency section");
     assert!(html.contains("Canaries"), "canaries section");
     assert!(
-        html.contains("/load/endurance-1/files/callflows/reinvite/check_fail/alice.invite.from.userInfo/clear/0.html"),
+        html.contains("/load/endurance-1/files/callflows/reinvite/check_fail/alice.invite.from.userInfo/0.html"),
         "sample page linked: {html}"
     );
 
@@ -460,8 +460,12 @@ async fn load_run_files_serve_and_reject_traversal() {
     let (root, app) = load_run_app("files");
 
     // The sampled page renders.
-    let (st, html) =
-        get(&app, "/load/endurance-1/files/callflows/reinvite/check_fail/alice.invite.from.userInfo/clear/0.html", false).await;
+    let (st, html) = get(
+        &app,
+        "/load/endurance-1/files/callflows/reinvite/check_fail/alice.invite.from.userInfo/0.html",
+        false,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert!(html.contains("reinvite check_fail sample"), "served the callflow page");
 

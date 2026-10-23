@@ -22,34 +22,64 @@
 //! mapped SDK type (ADR-0016); the `announcement` crate compiles against this
 //! surface alone.
 
+// The panic set at deny outside test code (ADR-0051 §3).
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::iter_over_hash_type,
+        clippy::panic,
+        clippy::string_slice,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
+
 pub mod body;
+pub mod caller_invite;
 pub mod config;
+pub mod effect;
 pub mod event;
 pub mod failure_image;
 pub mod fold_payload;
+pub mod glare;
 pub mod header_update;
 pub mod in_dialog_relay;
+pub mod leg_end;
+pub mod lifecycle;
 pub mod model;
 pub mod open_offer;
 pub mod provisional;
 pub mod reason_phrase;
 pub mod relayed_final;
 pub mod release_reason;
+pub mod rule_call;
 pub mod sdp_form;
 pub mod service;
+pub mod service_params;
+pub mod timer_delay;
+mod txn_timeout;
 
 /// The framework-type façade the [`define_service!`] / [`sm_rule!`] macros
 /// reference through `$crate::rules::…`, and the curated surface a service crate
 /// imports (`use b2bua_sdk::rules::*`).
 pub mod rules {
     pub use crate::body::{Body, BodyAuthor};
+    pub use crate::leg_end::LegEnd;
+    pub use crate::lifecycle::{AttemptOpening, LifecycleEvent, RouteAnswer};
     pub use crate::model::{
         Effect, EffectKind, GlareRefusal, Match, MatchKind, MessageTransform, RuleAction, RuleCall,
         RuleContext, RuleDefinition, RuleHandleResult, StatusMatch, TimerDelay, CORE_LAYER,
         SERVICE_LAYER,
     };
     pub use crate::provisional::{
-        absorbed_provisional_actions, originator_final_sent, reliable_rseq,
+        absorbed_provisional_actions, originator_final_sent, reliable_rseq, shown_to_no_one,
     };
     pub use crate::relayed_final::RelayedFinal;
     pub use crate::service::{ServiceDef, ServiceSeed, Terminal};
@@ -60,9 +90,13 @@ pub mod rules {
     // read through the [`RuleCall`](crate::model::RuleCall) view. The full
     // struct stays nameable only as `b2bua_sdk::service::Call`, for the
     // `ServiceSeed::data_write` installer.
-    pub use call::{MachineId, StateLabel, TerminationCause, TimeoutKind};
+    pub use call::{
+        AttemptCause, AttemptId, AttemptOutcome, MachineId, StateLabel, TerminationCause,
+        TimeoutKind, TimerScopeKind,
+    };
 }
 
 pub use config::B2buaConfig;
 pub use event::CallEvent;
 pub use sdp_form::{AsWritten, SdpCrossing, SdpForm, SdpFormPolicy};
+pub use service_params::ServiceParams;

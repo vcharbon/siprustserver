@@ -21,8 +21,10 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use call::helpers::{make_empty_dialog, MakeDialogLegCtx};
-use call::{call_index_keys, Call, CallBodyCodec, IndexHit, IndexLookup, KeyKind, MsgpackCodec};
+use call::{
+    call_index_keys, Call, CallBodyCodec, Dialog, DialogState, IndexHit, IndexLookup, KeyKind,
+    MsgpackCodec, OutboundInvite,
+};
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
@@ -71,23 +73,19 @@ fn call_with_b_leg(
 ) -> Call {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let src = SocketAddr::from(([10, 0, 0, 9], 5060));
-    let call =
-        build_initial_call(&invite(call_id, from_tag), src, &config, &sip_txn::IdGen::seeded(1), 0);
+    let call = build_initial_call(
+        &invite(call_id, from_tag),
+        src,
+        &config,
+        &mut sip_ids::TurnIds::fixed(1),
+        0,
+    );
     let mut b = call.a_leg.clone();
     b.leg_id = "b-1".into();
     b.call_id = b_call_id.into();
-    b.from_tag = b_tag.into();
+    b.outbound_invite = Some(OutboundInvite::new(b_tag, 1, 0, None));
     if !b_peer_tag.is_empty() {
-        b.dialogs = vec![make_empty_dialog(
-            &MakeDialogLegCtx {
-                call_id: b_call_id,
-                local_uri: "sip:alice@example.com",
-                remote_uri: "sip:bob@example.com",
-                local_tag: b_tag,
-                remote_tag: b_peer_tag,
-            },
-            1,
-        )];
+        b.dialogs = vec![Dialog::new(b_tag, b_peer_tag, DialogState::Early, 1)].into();
     }
     call::helpers::add_b_leg(call, b)
 }
@@ -232,7 +230,7 @@ async fn backup_with_replicas(last: u8) -> (CallState, Arc<ReplicatingCallStore>
 }
 
 async fn put_replica(repl: &ReplicatingCallStore, call: &Call) {
-    let body = MsgpackCodec::new().encode(call);
+    let body = MsgpackCodec::new().encode(call).unwrap();
     let idx = call_index_keys(call);
     repl.put_call(
         PartitionRole::Backup,

@@ -62,7 +62,31 @@ pub const SERVER_FINAL_UNSEEN_BRANCH: Family = Family::counter(
 pub const PARSE_ERRORS: Family = Family::counter(
     "b2bua_txn_parse_errors_total",
     Labels::None,
-    "Inbound datagrams the SIP parser rejected and the transaction layer dropped: a malformed-traffic flood or a parser regression.",
+    "Inbound datagrams the SIP parser refused and the transaction layer dropped unanswered (a response, an ACK, a request no response can echo, a limit): a malformed-traffic flood or a parser regression.",
+);
+
+pub const PARSE_REFUSALS_ANSWERED: Family = Family::counter(
+    "b2bua_txn_parse_refusals_answered_total",
+    Labels::None,
+    "Inbound requests the SIP parser refused and the transaction layer answered with a stateless 400 (RFC 3261 section 8.2.6).",
+);
+
+pub const PARSE_REFUSALS_CAPPED: Family = Family::counter(
+    "b2bua_txn_parse_refusals_capped_total",
+    Labels::None,
+    "Inbound requests the SIP parser refused that a 400 could answer, dropped because the token bucket capping those 400s was empty.",
+);
+
+pub const PARSE_PANICS: Family = Family::counter(
+    "b2bua_txn_parse_panics_total",
+    Labels::None,
+    "Inbound datagrams the SIP parser panicked on and the transaction layer dropped; each one is a parser defect, expected 0.",
+);
+
+pub const POISONED_LOCK_RECOVERIES: Family = Family::counter(
+    "b2bua_txn_poisoned_lock_recoveries_total",
+    Labels::Product(&[Dim::new("lock", &crate::poison::LOCKS)]),
+    "Transaction-layer locks a panic poisoned, taken as they stood and cleared (process-wide), by lock; each one is a defect, expected 0.",
 );
 
 pub const SEND_ERRORS: Family = Family::counter(
@@ -117,12 +141,6 @@ pub const UNANSWERED_FORGOTTEN: Family = Family::counter(
     "b2bua_txn_unanswered_forgotten_total",
     Labels::None,
     "Non-INVITE server transactions forgotten because the router discarded their request unrun (queue full, call cap, behind a release), so the retransmission is admitted again.",
-);
-
-pub const FORGET_REFUSED: Family = Family::counter(
-    "b2bua_txn_forget_refused_total",
-    Labels::None,
-    "Forget requests the full txn command queue refused; the transaction absorbs its retransmissions until its backstop. Expected 0.",
 );
 
 pub const RELEASED_UNANSWERED_INVITES_ANSWERED: Family = Family::counter(

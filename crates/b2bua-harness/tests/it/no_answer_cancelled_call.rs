@@ -15,15 +15,14 @@
 //! service watchdog at the source; the executor absorbs a fire that still
 //! reaches a going-away call unless the rule is a teardown rule; and the
 //! `no-answer` spent-check (a teardown rule) absorbs the reclaim-restored
-//! shape — pinned at the rule seam in `b2bua/tests/it/rules.rs`. The second test
+//! shape — pinned at the rule seam in `b2bua-core/tests/it/rules.rs`. The second test
 //! pins the source scrub for a service watchdog; the third pins the
 //! `handle-timeout` sibling: the b-leg INVITE transaction backstop firing on
 //! a caller-CANCELed leg resolves it locally.
 //!
-//! The b-leg CANCEL toward the response-less callee is HELD by sip-txn for
-//! the grace window, then sent regardless (RFC 3261 §9.1 bounded per
-//! ADR-0028) — bob sees Timer-A INVITE retransmits plus exactly ONE
-//! grace-expiry CANCEL, which he (gone dark) never answers.
+//! The b-leg CANCEL toward the response-less callee is HELD by sip-txn until
+//! a provisional that never comes (RFC 3261 §9.1) — bob sees Timer-A INVITE
+//! retransmits and no CANCEL.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -42,6 +41,9 @@ const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.
 /// The route-supplied per-b-leg ring deadline.
 const NO_ANSWER_SEC: i64 = 5;
 
+/// How long after the caller's CANCEL the tests look for the b-leg CANCEL.
+const HELD_PROBE_MS: u64 = 1_500;
+
 /// A failover-capable scripted backend: every call routes to `port` with a
 /// `NoAnswer` ring deadline and a `callback_context` (so the `no-answer` /
 /// `handle-timeout` consult path is REACHABLE); every `/call/failure`
@@ -52,7 +54,7 @@ fn failover_capable_decision(port: u16, consults: Arc<AtomicUsize>) -> Arc<dyn C
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_to("127.0.0.1", port);
-                r.no_answer_timeout_sec = Some(NO_ANSWER_SEC);
+                r.no_answer_ms = Some(NO_ANSWER_SEC * 1000);
                 r.callback_context = Some("nk068".into());
                 NewCallResponse::Route(r)
             })
@@ -83,7 +85,7 @@ mod stalerestore {
         ServiceSeed, Terminal, TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
-    use call::TimerType;
+    use call::{TimerKey, TimerType};
 
     /// When the probe injects the stale entry (after the caller's CANCEL,
     /// inside the 32 s terminating window).
@@ -97,11 +99,10 @@ mod stalerestore {
         states: SrState { Waiting },
         init: |_call: &RuleCall| {
             Some(ServiceSeed::new(SrState::Waiting.label()).with_actions(vec![
-                RuleAction::ScheduleTimer {
-                    timer_type: TimerType::service(STALERESTORE, "inject"),
-                    delay: TimerDelay::secs(INJECT_AT_SEC),
-                    leg_id: None,
-                },
+                RuleAction::arm(
+                    TimerKey::call(TimerType::service(STALERESTORE, "inject")),
+                    TimerDelay::secs(INJECT_AT_SEC),
+                ),
             ]))
         },
         rules: [ inject_stale_entry() ],
@@ -120,6 +121,7 @@ mod stalerestore {
             effects: [
                 Effect::GuardTimer {
                     timer: TimerType::NoAnswer,
+                    scope: call::TimerScopeKind::Leg,
                     label: "re-arm the stale NoAnswer entry",
                 },
             ],
@@ -133,11 +135,10 @@ mod stalerestore {
                     .leg_id
                     .clone();
                 Some(RuleHandleResult::new(vec![
-                    RuleAction::ScheduleTimer {
-                        timer_type: TimerType::NoAnswer,
-                        delay: TimerDelay::secs(STALE_FIRE_SEC),
-                        leg_id: Some(b),
-                    },
+                    RuleAction::arm(
+                        TimerKey::leg(TimerType::NoAnswer, b),
+                        TimerDelay::secs(STALE_FIRE_SEC),
+                    ),
                     RuleAction::ClearState { machine: STALERESTORE },
                 ]))
             },
@@ -171,24 +172,18 @@ async fn no_answer_deadline_on_a_caller_cancelled_call_is_inert() {
     cxl.expect(200).await;
     call.expect(487).await;
 
-    // ── cross exactly the held-CANCEL grace deadline ─────────────────────────
-    // The b-leg branch is response-less, so the CANCEL is held the full grace
-    // window and then sent regardless (ADR-0028). Bob — gone dark — receives
-    // it and answers nothing.
-    h.advance(Duration::from_millis(sip_txn::timers::CANCEL_HOLD_GRACE + 500)).await;
+    // ── the b-leg branch is response-less: its CANCEL stays held (§9.1) ──────
+    h.advance(Duration::from_millis(HELD_PROBE_MS)).await;
     assert!(
-        bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_some(),
-        "the grace expiry puts the b-leg CANCEL on the wire (ADR-0028)",
+        bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_none(),
+        "no CANCEL toward a branch that drew no provisional (§9.1)",
     );
 
     // ── cross exactly the (scrubbed) NoAnswer deadline ───────────────────────
     // Armed at route time (~t0), so +NO_ANSWER_SEC from the CANCEL crosses it
     // and nothing else (the next deadline is the 32 s terminating backstop).
-    h.advance(
-        Duration::from_secs(NO_ANSWER_SEC as u64)
-            - Duration::from_millis(sip_txn::timers::CANCEL_HOLD_GRACE + 500),
-    )
-    .await;
+    h.advance(Duration::from_secs(NO_ANSWER_SEC as u64) - Duration::from_millis(HELD_PROBE_MS))
+        .await;
     assert_eq!(
         consults.load(Ordering::SeqCst),
         0,
@@ -200,11 +195,10 @@ async fn no_answer_deadline_on_a_caller_cancelled_call_is_inert() {
         alice.try_receive_tolerating("CANCEL", &[]).await.is_none(),
         "nothing may reach the caller after the 487",
     );
-    // And no SECOND CANCEL toward bob: the grace copy is sent exactly once
-    // (no provisional ever arrives, so no re-flush either).
+    // Still no CANCEL toward bob: no provisional ever arrives.
     assert!(
         bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_none(),
-        "exactly one grace-expiry CANCEL reaches the dead callee",
+        "no CANCEL reaches the dead callee",
     );
 
     // ── the SUT's own dead-call detection reaps the call ─────────────────────
@@ -264,18 +258,17 @@ async fn a_service_watchdog_armed_before_the_cancel_is_disarmed_at_termination()
     cxl.expect(200).await;
     call.expect(487).await;
 
-    // Cross the held-CANCEL grace deadline first (ADR-0028): bob — gone dark —
-    // receives the grace-expiry CANCEL and answers nothing.
-    h.advance(Duration::from_millis(sip_txn::timers::CANCEL_HOLD_GRACE + 500)).await;
+    // Bob — gone dark — drew no provisional: the b-leg CANCEL stays held (§9.1).
+    h.advance(Duration::from_millis(HELD_PROBE_MS)).await;
     assert!(
-        bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_some(),
-        "the grace expiry puts the b-leg CANCEL on the wire (ADR-0028)",
+        bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_none(),
+        "no CANCEL toward a branch that drew no provisional (§9.1)",
     );
     // Then cross ONLY the probe's inject deadline: disarmed at the CANCEL, it
     // never fires, so no stale per-b-leg NoAnswer entry is re-armed.
     h.advance(
         Duration::from_secs(stalerestore::INJECT_AT_SEC as u64)
-            - Duration::from_millis(sip_txn::timers::CANCEL_HOLD_GRACE + 500),
+            - Duration::from_millis(HELD_PROBE_MS),
     )
     .await;
     // And the deadline the probe would have armed.
@@ -305,7 +298,7 @@ async fn a_service_watchdog_armed_before_the_cancel_is_disarmed_at_termination()
     assert_eq!(consults.load(Ordering::SeqCst), 0, "still no consult through teardown");
     assert!(
         bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_none(),
-        "exactly one grace-expiry CANCEL reaches the dead callee — never a second",
+        "no CANCEL reaches the dead callee",
     );
     b2bua.assert_fully_reaped();
 
@@ -359,7 +352,7 @@ async fn invite_transaction_timeout_on_a_caller_cancelled_call_is_inert() {
     );
     let b2bua = B2buaSut::builder(decision)
         .tune(|c| {
-            c.setup_timeout_sec = 300;
+            c.setup_timeout_ms = 300_000;
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
         })

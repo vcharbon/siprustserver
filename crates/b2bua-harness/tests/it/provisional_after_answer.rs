@@ -42,7 +42,7 @@ mod consult {
         ServiceSeed, TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
-    use call::TimerType;
+    use call::{TimerKey, TimerType};
     use sip_message::Method;
 
     /// Past Timer L of the answer (64·T1 = 32 s), so the caller's INVITE
@@ -56,7 +56,7 @@ mod consult {
         states: ConsultState { Armed, Dialled },
         init: |_call: &RuleCall| {
             Some(ServiceSeed::new(ConsultState::Armed.label()).with_actions(vec![
-                RuleAction::ScheduleTimer { timer_type: DIAL, delay: TimerDelay::secs(DIAL_AT_SEC), leg_id: None },
+                RuleAction::arm(TimerKey::call(DIAL), TimerDelay::secs(DIAL_AT_SEC)),
             ]))
         },
         rules: [ dial_on_deadline() ],
@@ -79,12 +79,12 @@ mod consult {
                         new_ruri: None,
                         new_from: None,
                         new_to: None,
-                        no_answer_timeout_sec: None,
                         callback_context: None,
                         body_override: None,
                         header_updates: vec![],
                         header_adds: vec![],
                         kind: None,
+                        attempt: None,
                     },
                     RuleAction::SetState { machine: CONSULT, to: ConsultState::Dialled.label() },
                 ]))

@@ -21,7 +21,7 @@ use b2bua::decision::{
 use b2bua_harness::{settle_until, B2buaSut};
 use call::ReleaseEventKind;
 use scenario_harness::agent::ServerTxn;
-use scenario_harness::Harness;
+use scenario_harness::{Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
 
 const CHARLIE_PORT: u16 = 5668;
@@ -77,7 +77,7 @@ async fn a_spliced_peer_continues_each_dialog_session() {
     let h = Harness::with_transit_delay("sdp-session-continuity-transfer", 1);
     let alice = h.agent("alice", "127.0.0.1:5932").await;
     let bob = h.agent("bob", "127.0.0.1:5942").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5942)
         .start(&h, "b2bua", "127.0.0.1:5952")
         .await;
@@ -216,7 +216,7 @@ async fn a_reoffer_describing_fewer_streams_keeps_the_dropped_one_rejected() {
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_to("127.0.0.1", 5943);
-                r.features.platform.max_duration_sec = 60;
+                r.features.platform.max_duration_ms = 60_000;
                 r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
                 r.callback_context = Some("ctx-release".into());
                 NewCallResponse::Route(r)
@@ -440,6 +440,14 @@ async fn a_replaced_initial_offer_opens_a_session_of_the_stacks_own() {
 #[tokio::test]
 async fn an_answer_relayed_into_an_early_dialog_is_what_it_confirms_with() {
     let h = Harness::with_transit_delay("sdp-session-early-relayed-answer", 0);
+    h.waive(
+        WaiverScope::rule(
+            "sdp-origin-continuity",
+            "alice deliberately moves to another session id: the stack restating it in the \
+             session bob holds is what this test asserts",
+        )
+        .on_party("alice"),
+    );
     let alice = h.agent("alice", "127.0.0.1:5691").await;
     let bob = h.agent("bob", "127.0.0.1:5692").await;
     let b2bua =
@@ -509,11 +517,13 @@ async fn each_offerless_reinvite_after_a_splice_is_a_new_version() {
     let h = Harness::with_transit_delay("sdp-session-continuity-offerless-reinvite", 1);
     let alice = h.agent("alice", "127.0.0.1:5937").await;
     let bob = h.agent("bob", "127.0.0.1:5947").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5947)
         .start(&h, "b2bua", "127.0.0.1:5957")
         .await;
 
+    // A's realign answer is her second description on her dialog (RFC 3264 §8).
+    let realigned = ALICE_REALIGNED.replace("o=alice 101 3", "o=alice 101 2");
     let mut call = alice.invite(&bob).with_sdp(ALICE_OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(200, "OK").with_sdp(BOB_ANSWER).await;
@@ -545,7 +555,7 @@ async fn each_offerless_reinvite_after_a_splice_is_a_new_version() {
     charlie.receive("ACK").await;
     let mut a_realign = alice.receive("INVITE").await;
     assert_eq!(body_of(&a_realign), continued(CHARLIE_ACTIVE, "bob 202 2 IN IP4 127.0.0.2"));
-    a_realign.respond(200, "OK").with_sdp(ALICE_REALIGNED).await;
+    a_realign.respond(200, "OK").with_sdp(&realigned).await;
     alice.receive("ACK").await;
 
     // ── C's offerless re-INVITEs: A offers the same description each time. ──
@@ -553,11 +563,11 @@ async fn each_offerless_reinvite_after_a_splice_is_a_new_version() {
         let mut reinvite = charlie_dialog.request(InDialogMethod::Invite, None).await;
         let mut at_alice = alice.receive("INVITE").await;
         assert!(at_alice.request().body().is_empty(), "the re-INVITE reaches A offerless");
-        at_alice.respond(200, "OK").with_sdp(ALICE_REALIGNED).await;
+        at_alice.respond(200, "OK").with_sdp(&realigned).await;
         let ok = reinvite.expect(200).await;
         assert_eq!(
             String::from_utf8_lossy(ok.body()),
-            continued(ALICE_REALIGNED, &c_session(c_version)),
+            continued(&realigned, &c_session(c_version)),
             "A's unchanged offer reaches C one version above the previous 2xx",
         );
         charlie_dialog.ack(Some(CHARLIE_ACTIVE)).await;

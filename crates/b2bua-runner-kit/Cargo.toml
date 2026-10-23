@@ -6,11 +6,16 @@ license.workspace = true
 publish.workspace = true
 description = "Reusable B2BUA runner composition: the env -> config -> bind -> deps -> spawn -> drain plumbing shared by every runner binary (the in-tree b2bua-runner and downstream integrators composing their own runner per ADR-0016), so runner policy — env grammar, advertise coercion, overload-brake wiring, drain behavior — lives once instead of being copied per binary."
 
+[package.metadata.purity]
+tier = "shell"
+
 [lints]
 workspace = true
 
 [dependencies]
+lock-poison = { path = "../lock-poison" }
 metric-catalogue = { path = "../metric-catalogue" }
+metric-values = { path = "../metric-values" }
 jemalloc-stats = { path = "../jemalloc-stats" }
 b2bua = { path = "../b2bua" }
 call = { path = "../call" }
@@ -20,32 +25,37 @@ http-net = { path = "../http-net", features = ["real"] }
 probe-http = { path = "../probe-http" }
 sip-clock = { path = "../sip-clock" }
 # Process subscriber installation (ADR-0026): every runner composed from this
-# kit gets the lifecycle-log + OTLP plumbing at `bind`, so no binary re-derives
-# it. `tracing` is the emission facade for the kit's own lifecycle lines.
+# kit links the lifecycle-log + OTLP plumbing and installs it before `bind`.
+# `tracing` is the emission facade for the kit's own lifecycle lines.
 observe = { path = "../observe", features = ["otlp"] }
 tracing = { workspace = true }
 sip-net = { path = "../sip-net" }
 sip-txn = { path = "../sip-txn" }
 tokio = { workspace = true }
 async-trait = { workspace = true }
-# The RabbitMQ CDR sink (cdr_rabbitmq.rs): lapin is runtime-agnostic, the two
-# trait shims bind it to the running tokio runtime, serde_json encodes the CDR.
+# The RabbitMQ CDR sink (cdr_rabbitmq/): lapin on the running tokio runtime,
+# its connection opened over a stream amqp-connect connects; serde_json encodes the CDR.
 lapin = { workspace = true }
-tokio-executor-trait = { workspace = true }
-tokio-reactor-trait = { workspace = true }
+amqp-connect = { path = "../amqp-connect" }
 serde_json = { workspace = true }
 # Replication from env (replication.rs): the real TCP transport and the
 # membership seam with the kube EndpointSlice informer for in-cluster discovery.
 repl-net = { path = "../repl-net" }
 topology = { path = "../topology", features = ["kube"] }
 # The in-cluster client K8sMembership watches through.
-kube = { version = "1", default-features = false, features = ["client", "rustls-tls"] }
+kube = { version = "4.2.0", default-features = false, features = ["client", "rustls-tls"] }
 # rustls 0.23 has no compile-time default CryptoProvider and kube's `rustls-tls`
 # picks none: `ring` is installed before the kube client's first handshake.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [dev-dependencies]
+b2bua = { path = "../b2bua", features = ["testkit"] }
+# The fixed-key turn a test call is built under.
+sip-ids = { path = "../sip-ids", features = ["testkit"] }
 sip-message = { path = "../sip-message" }
+sip-net-testkit = { path = "../sip-net-testkit" }
+http-net-testkit = { path = "../http-net-testkit" }
+repl-net-testkit = { path = "../repl-net-testkit" }
 # The simulated load sampler the /metrics body test builds the overload signal with.
 load-shed = { path = "../load-shed" }
 # The limiter client's boot and re-resolve tests run a real limiter server on
@@ -56,4 +66,7 @@ tokio = { workspace = true, features = ["test-util"] }
 # The scripted AMQP 0-9-1 broker the CDR sink's delivery tests run against
 # (tests/support/fake_broker.rs): lapin's own frame codec, so the wire is the
 # client's.
-amq-protocol = { version = "7", default-features = false }
+amq-protocol = { version = "10.6.3", default-features = false }
+# The black-holed broker of the IO-thread test: a listener whose zero backlog is
+# full, so the kernel drops every further SYN.
+socket2 = { workspace = true }

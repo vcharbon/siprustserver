@@ -5,6 +5,4 @@
 //! Select one (the workspace build `just test` made, no rebuild):
 //! `cargo nextest run --workspace -E 'package(=sip-net) & binary(it)' <module>::`.
 
-mod contracts;
 mod real_loopback;
-mod simulated;

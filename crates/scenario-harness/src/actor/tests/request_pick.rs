@@ -6,7 +6,8 @@
 use std::time::Duration;
 
 use sip_message::generators::InDialogMethod;
-use sip_message::{MessageTemplate, Method, TemplateHeader};
+use sip_message::Method;
+use sip_template::{MessageTemplate, TemplateHeader};
 
 use super::testkit::*;
 use crate::actor::*;

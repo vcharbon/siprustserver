@@ -21,10 +21,9 @@ pub(super) fn detect(at: &Site<'_>, out: &mut Scan, candidates: &[RfcRule]) {
         closed: false,
     };
     let view = WireView { msgs: &msgs, obs: &obs };
-    // Every rule with a body: `candidates` names nothing beyond them.
     let _ = candidates;
     for rule in rfc_rules::all_rules() {
-        for f in rule.eval(&view) {
+        for f in rule.body.eval(&view) {
             out.count(f.rule, f.decided());
             if let Decision::Violated(evidence) = &f.decision {
                 out.hits.push(at.hit(&f, evidence.clone()));

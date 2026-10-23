@@ -28,7 +28,8 @@ use std::sync::Arc;
 
 use sip_message::header::SentBy;
 use sip_message::{CustomParser, SipMessage, SipParser, SipRequest};
-use sip_net::{BindUdpOpts, SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint};
+use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
+use sip_net_testkit::SimulatedSignalingNetwork;
 use sip_txn::{IdGen, ServerTxnKey, TransactionConfig, TransactionEvent, TransactionLayer};
 use tokio::sync::mpsc;
 
@@ -37,6 +38,11 @@ pub const PEER: &str = "10.0.0.1:5555";
 
 pub fn addr(s: &str) -> SocketAddr {
     s.parse().unwrap()
+}
+
+/// The layer's defaults, identifiers drawn deterministically.
+pub fn config() -> TransactionConfig {
+    TransactionConfig::new(Arc::new(IdGen::seeded(0xC0FFEE)))
 }
 
 /// A bound transaction layer over the simulated fabric, plus a peer endpoint
@@ -55,11 +61,7 @@ impl Stack {
         Self::build_with_config(
             transit_ms,
             b2bua_queue,
-            TransactionConfig {
-                udp_queue_max,
-                id_gen: Arc::new(IdGen::seeded(0xC0FFEE)),
-                ..Default::default()
-            },
+            TransactionConfig { udp_queue_max, ..config() },
         )
         .await
     }
@@ -156,6 +158,13 @@ pub fn parse_response(raw: &[u8]) -> sip_message::SipResponse {
 pub fn count_requests(msgs: &[SipMessage], method: &str) -> usize {
     msgs.iter().filter(|m| matches!(m, SipMessage::Request(r) if r.method() == method)).count()
 }
+/// The top-Via branch of the first `method` request in `msgs`.
+pub fn request_branch(msgs: &[SipMessage], method: &str) -> Option<String> {
+    msgs.iter().find_map(|m| match m {
+        SipMessage::Request(r) if r.method() == method => r.top_via().branch().map(str::to_string),
+        _ => None,
+    })
+}
 pub fn count_responses(msgs: &[SipMessage], status: u16) -> usize {
     msgs.iter().filter(|m| matches!(m, SipMessage::Response(r) if r.status() == status)).count()
 }
@@ -236,6 +245,7 @@ pub fn invite_with_cr_lg(call_ref: &str, call_id: &str, branch: &str, leg_id: &s
 }
 
 /// A response from the peer toward the b2bua (absorb / bounded-queue tests).
+/// Its Contact is the peer, so the in-dialog requests a 2xx draws reach it.
 pub fn response_bytes(
     status: u16,
     reason: &str,
@@ -256,6 +266,7 @@ pub fn response_bytes(
          To: {to}\r\n\
          Call-ID: {call_id}\r\n\
          CSeq: 1 {cseq_method}\r\n\
+         Contact: <sip:peer@{PEER}>\r\n\
          Content-Length: 0\r\n\r\n"
     )
     .into_bytes()

@@ -6,7 +6,9 @@ use call::{Call, Direction, IndexHit, IndexLookup, KeyKind};
 use sip_message::header::{ParamValue, Via};
 use sip_message::{Method, SipMessage};
 
+use super::materialise::names_server_branch;
 use super::RouterCtx;
+use crate::initial_invite::foreign_primary;
 use crate::store::StoreError;
 use b2bua_sdk::event::CallEvent;
 
@@ -38,6 +40,14 @@ impl Resolution {
         if !states_leg(event) {
             self.indexed = Some(hit.kind);
         }
+    }
+
+    /// Take the replicated call an initial INVITE is a copy of
+    /// ([`initial_invite_copy`]): the INVITE is that call's, never a new
+    /// call's.
+    pub(super) fn copy_of(&mut self, hit: IndexHit, event: &CallEvent) {
+        self.found_by_index(hit, event);
+        self.initial_invite = false;
     }
 
     /// Bind the source leg of an event whose call the SIP index found to the
@@ -188,8 +198,8 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                 indexed: None,
             }
         }
-        CallEvent::Timer { call_ref, leg_id, .. } => {
-            let leg = leg_id.clone().unwrap_or_else(|| "a".into());
+        CallEvent::Timer { call_ref, key, .. } => {
+            let leg = key.leg_id().unwrap_or("a").to_string();
             Resolution {
                 direction: leg_direction(&leg),
                 call_ref: Some(call_ref.clone()),
@@ -199,16 +209,25 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                 indexed: None,
             }
         }
-        CallEvent::InternalEvent { call_ref, .. } => Resolution {
-            call_ref: Some(call_ref.clone()),
+        CallEvent::InternalEvent { call_ref, .. } | CallEvent::CallQuiesced { call_ref } => {
+            Resolution {
+                call_ref: Some(call_ref.clone()),
+                source_leg_id: "a".into(),
+                direction: Direction::FromA,
+                initial_invite: false,
+                incarnation: None,
+                indexed: None,
+            }
+        }
+        // A lifecycle event is delivered, never dispatched: it names no call.
+        CallEvent::Lifecycle(_) => Resolution {
+            call_ref: None,
             source_leg_id: "a".into(),
             direction: Direction::FromA,
             initial_invite: false,
             incarnation: None,
             indexed: None,
         },
-        // Handled (and returned) in `on_event` before `resolve` is ever called.
-        CallEvent::CallQuiesced { .. } => unreachable!("CallQuiesced is handled before resolve"),
     }
 }
 
@@ -230,6 +249,73 @@ pub(super) async fn replica_takeover(
         return Ok(None);
     }
     ctx.state.resolve_from_replica_index(request_lookup(req)).await
+}
+
+/// What an initial INVITE is to this node ([`initial_invite_copy`]).
+pub(super) enum InitialInvite {
+    /// A call of this node's own, new or a copy of one here.
+    Own,
+    /// A copy of the replicated call the hit names: taken over, it is answered
+    /// from the record.
+    CopyOf(IndexHit),
+    /// Another primary's INVITE this node holds no answered record of: the
+    /// primary owns its transaction, and placing it would dial a second call.
+    Foreign,
+}
+
+/// **A copy of a replicated call's initial INVITE.** An INVITE with no To-tag,
+/// with nothing here under its own `callRef`, reaching a node that
+/// replicates, is a copy (RFC 3261 §17.2.3) of the replicated call whose
+/// incoming leg it names when it carries that call's INVITE CSeq and its
+/// top-Via branch names that call's own server transaction
+/// ([`names_server_branch`]) — the caller retransmitting to the backup of a
+/// dead primary, through the cookie or through a fresh selection — whatever
+/// worker the cookie names. Failing that, an INVITE whose cookie names
+/// another primary is that primary's (the proxy re-placed its
+/// retransmission): foreign. Any other is this node's own, as is every
+/// INVITE of a node that does not replicate: it backs up no primary.
+pub(super) async fn initial_invite_copy(
+    ctx: &RouterCtx,
+    event: &CallEvent,
+    res: &Resolution,
+) -> InitialInvite {
+    let (true, Some(derived)) = (res.initial_invite, res.call_ref.as_deref()) else {
+        return InitialInvite::Own;
+    };
+    let CallEvent::Sip { message, .. } = event else { return InitialInvite::Own };
+    let SipMessage::Request(req) = message.as_ref() else { return InitialInvite::Own };
+    let cseq = req.cseq().seq();
+    if !ctx.state.replicates()
+        || ctx.unborn.holds(derived, cseq)
+        || ctx.state.peek(derived).is_some()
+    {
+        return InitialInvite::Own;
+    }
+    if let Some(hit) = replicated_call_copied(ctx, req).await {
+        ctx.state.note_takeover_resolved(&hit);
+        return InitialInvite::CopyOf(hit);
+    }
+    match foreign_primary(req, &ctx.config.self_ordinal) {
+        Some(_) => InitialInvite::Foreign,
+        None => InitialInvite::Own,
+    }
+}
+
+/// The replicated call `req` is a copy of the initial INVITE of: its
+/// incoming leg is `req`'s, its INVITE CSeq `req`'s, and `req`'s top-Via
+/// branch names its own server transaction.
+async fn replicated_call_copied(
+    ctx: &RouterCtx,
+    req: &sip_message::SipRequest,
+) -> Option<IndexHit> {
+    let call_id = req.call_id().as_str();
+    let from_tag = req.from().tag().unwrap_or("");
+    let lookup = IndexLookup::Invite { call_id, from_tag };
+    let hit = ctx.state.replica_index_hit(lookup).await.ok()??;
+    let (call, _) = ctx.state.peek_replica(&hit.call_ref).await.ok()?;
+    let branch = req.top_via().branch().unwrap_or_default();
+    (call.a_leg_invite.cseq == req.cseq().seq() && names_server_branch(&call, branch))
+        .then_some(hit)
 }
 
 /// The index lookup for a request that carries no `callRef` of ours: a CANCEL

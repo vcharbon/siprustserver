@@ -39,8 +39,8 @@ pub use report::{frame_summary, Marker, ReplReport};
 // Re-export the engine value types tests touch so a consumer needs only this
 // crate for ordinary scenarios.
 pub use b2bua::store::{PartitionRole, PropagateDirection};
-pub use repl_net::transport::{CapturedFrame, Direction};
 pub use repl_net::{Frame, Op, Partition, Watermark};
+pub use repl_net_testkit::{CapturedFrame, Direction};
 pub use topology::Peer;
 
 /// Build a callRef whose encoded primary is `primary` (so `partition_of` / the

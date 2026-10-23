@@ -106,7 +106,15 @@ export const CellSummary = Schema.Struct({
    * `passed` is false because nothing passed, and {@link campaignPassed} ignores
    * it because nothing failed either.
    */
-  skipped: Schema.optionalKey(LaneVerdict)
+  skipped: Schema.optionalKey(LaneVerdict),
+  /**
+   * Set when the cell's RFC audit holds a SOURCE FAULT: a scripted party's
+   * violation the document does not state — the replayed party repeats a
+   * captured message where, in this run, the RFC no longer allows it.
+   * Information beside the verdict, passed or failed: it fails no cell, which
+   * `passed` judges on the system under test alone.
+   */
+  sourceFault: Schema.optionalKey(Schema.Literal(true))
 })
 export interface CellSummary extends Schema.Schema.Type<typeof CellSummary> {}
 
@@ -193,7 +201,8 @@ export const cellSummaryJson = (summary: CellSummary): Record<string, unknown> =
     passed: summary.passed,
     dir: summary.dir,
     error: summary.error,
-    skipped: summary.skipped
+    skipped: summary.skipped,
+    sourceFault: summary.sourceFault
   })
 
 export const cellSkipJson = (skip: CellSkip): Record<string, unknown> => ({

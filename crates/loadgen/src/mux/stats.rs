@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use metric_catalogue::OpenRows;
+use metric_values::OpenRows;
 use sip_message::sniff::{cseq_method_token, cseq_value, first_line};
 
 use super::MuxCore;
@@ -32,6 +32,14 @@ pub struct MuxStats {
     /// A new INVITE (To without a tag) on a Call-ID a caller owns: the SUT
     /// reused the dialog's Call-ID for a new leg (RFC 3261 §8.1.1.4).
     pub orphan_call_id_reuse: AtomicU64,
+    /// Non-2xx finals (retransmissions included) to the INVITE of a caller
+    /// dialog its call already released, each answered with its ACK (RFC 3261
+    /// §17.1.1.3) — never an orphan.
+    pub late_final_acked: AtomicU64,
+    /// 2xx finals to the INVITE of a caller dialog its call already released,
+    /// each answered with its ACK, the first with the BYE ending the dialog
+    /// (RFC 3261 §13.2.2.4, §15) — never an orphan.
+    pub late_answer_ended: AtomicU64,
     pub pending_expired: AtomicU64,
     pub inbox_drop: AtomicU64,
     pub delivered: AtomicU64,
@@ -68,11 +76,23 @@ pub struct MuxStats {
     /// Orphans by reason and CSeq method, under the family's cap (the method
     /// token is wire-controlled).
     orphan_by_method: OrphanRows,
+    /// The load stream every series names (`main` until set).
+    stream: std::sync::OnceLock<String>,
 }
 
 impl MuxStats {
     pub(super) fn new(sample_cap: usize) -> Self {
         Self { sample_cap, ..Default::default() }
+    }
+
+    /// The load stream every series names.
+    pub fn stream(&self) -> &str {
+        self.stream.get().map_or(crate::catalogue::DEFAULT_STREAM, String::as_str)
+    }
+
+    /// Name the load stream every series carries, once.
+    pub(super) fn set_stream(&self, stream: &str) {
+        let _ = self.stream.set(stream.to_string());
     }
 
     pub(super) fn orphan(&self, reason: OrphanReason, raw: &[u8]) {
@@ -87,7 +107,7 @@ impl MuxStats {
             OrphanReason::CallIdReuse => self.orphan_call_id_reuse.fetch_add(1, Ordering::Relaxed),
         };
         let method = cseq_method_token(raw).unwrap_or_else(|| "none".to_string());
-        self.orphan_by_method.0.add(&[reason.label(), &method], 1);
+        self.orphan_by_method.0.add(&[self.stream(), reason.label(), &method], 1);
         let mut g = self.samples.lock().unwrap();
         if g.len() < self.sample_cap {
             // Lead the sample with the CSeq (method + number) so a sampled orphan is
@@ -181,17 +201,21 @@ impl MuxCore {
         // Orphans are labelled by reason AND CSeq method (`sum by(reason)` still
         // aggregates to the per-reason total for existing queries).
         s.orphan_by_method.0.render(&mut out);
-        c::MUX_REGISTRY_SIZE.render_value(&mut out, self.registry_size());
-        c::MUX_PENDING_EXPIRED.render_value(&mut out, load(&s.pending_expired));
-        c::MUX_UNCLAIMED.render_value(&mut out, load(&s.unclaimed));
-        c::MUX_TOKEN_COLLISION.render_value(&mut out, load(&s.token_collision));
-        c::MUX_CALLER_KEY_MISMATCH.render_value(&mut out, load(&s.caller_key_mismatch));
-        c::MUX_KEY_COOLING.render_value(&mut out, load(&s.key_cooling));
-        c::MUX_CLAIM_UNFIRED.render_value(&mut out, load(&s.claim_unfired));
-        c::MUX_INBOX_DROP.render_value(&mut out, load(&s.inbox_drop));
-        c::MUX_DELIVERED.render_value(&mut out, load(&s.delivered));
-        let drops = [load(&s.dropped_out), load(&s.dropped_in)];
-        c::DROP.render(&mut out, |series| drops[series.at(0)]);
+        let st = s.stream();
+        let one = |out: &mut String, family: &metric_catalogue::Family, n: u64| {
+            family.render_rows(out, [([st], n)]);
+        };
+        one(&mut out, &c::MUX_REGISTRY_SIZE, self.registry_size() as u64);
+        one(&mut out, &c::MUX_PENDING_EXPIRED, load(&s.pending_expired));
+        one(&mut out, &c::MUX_UNCLAIMED, load(&s.unclaimed));
+        one(&mut out, &c::MUX_TOKEN_COLLISION, load(&s.token_collision));
+        one(&mut out, &c::MUX_CALLER_KEY_MISMATCH, load(&s.caller_key_mismatch));
+        one(&mut out, &c::MUX_KEY_COOLING, load(&s.key_cooling));
+        one(&mut out, &c::MUX_CLAIM_UNFIRED, load(&s.claim_unfired));
+        one(&mut out, &c::MUX_INBOX_DROP, load(&s.inbox_drop));
+        one(&mut out, &c::MUX_DELIVERED, load(&s.delivered));
+        let drops = [([st, "out"], load(&s.dropped_out)), ([st, "in"], load(&s.dropped_in))];
+        c::DROP.render_rows(&mut out, drops);
         out
     }
 }

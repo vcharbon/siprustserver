@@ -1,6 +1,8 @@
 # 0022 — The initial-INVITE final-response guarantee (accept-and-forward, or 503 within the decision deadline)
 
-**Status:** accepted (2026-07-03)
+**Status:** accepted (2026-07-03). Amended (2026-10-12): X4, the front proxy relays the worker's 100, and an
+INVITE response bound for a dead worker fails over on the cookie of its Record-Route or of the proxy's Via.
+Amended (2026-10-12): X4 and X5, a caller that heard the 100 is answered when its worker departs (ADR-0047).
 
 ## Context
 
@@ -116,12 +118,13 @@ ingress brake, the deferred backlog — gets the 503 with a jittered
 
 ## Decision X4 — the LB proxy stays transaction-less; the caller's timer owns downstream silence
 
-The front proxy is a **stateless UDP forwarder**. It **never generates a 100** and
-it **absorbs the worker's hop-by-hop 100** (`core/response.rs`), so a caller
-routed through the LB receives *no* provisional until a real 18x. That absence is
-load-bearing: with no provisional, the caller's own Timer A/B stays armed (RFC
-3261 §17.1.1), so **the caller** — not a proxy timer — decides when a dead
-downstream is given up on (local 408 at 64·T1 ≈ 32 s). The proxy therefore has
+The front proxy is a **stateless UDP forwarder** (RFC 3261 §16.11). It **never
+generates a 100** and it **relays the worker's 100** like every other response
+(`core/response.rs`), so a caller routed through the LB hears the worker's 100
+as it would on a direct path. A worker that never answers at all sends no 100:
+the caller's own Timer A/B stays armed (§17.1.1), so **the caller** — not a
+proxy timer — decides when a dead downstream is given up on (local 408 at 64·T1
+≈ 32 s). The proxy therefore has
 **no Timer C and no synthesized final** for a blackholed worker, *by design* —
 adding one would re-introduce the per-INVITE proxy transaction state ADR-0009 /
 ADR-0014 deliberately keep out of the LB (and duplicate a backstop the endpoints
@@ -130,9 +133,34 @@ already own). All proxy-*internal* errors do answer immediately with a final
 silent paths are pre-parse recv-queue overflow, unparseable datagrams, and the
 downstream-blackhole case — all three bounded by the caller's transaction timer.
 
+An INVITE response bound for a worker the proxy holds Dead fails over to the
+backup its stickiness cookie names, read from the proxy's own Record-Route entry
+or, on a response carrying none (the answer to a worker's in-dialog INVITE), from
+the Via the proxy pushed on that INVITE (ADR-0009 X1). The survivor takes the
+call over on it, and a round its replica holds completes there
+(`failover-harness/tests/it/reinvite_answer_failover.rs`), or gives up at the
+seeded transaction's INVITE bound when the callee never answers
+(`reinvite_round_gives_up_after_takeover.rs`). A forged cookie routes nothing.
+A non-INVITE response answers a client transaction only its sender holds
+(§17.1.2) and follows the Via.
+
+A caller that heard the worker's 100 sends no retransmission that could re-place
+its call: its client transaction is `Proceeding`, which runs no Timer B. The
+platform answers it without a message from it (ADR-0047): a new call is written
+to its backup at its birth, one replication stream hop after the 100
+(`failover-harness/tests/it/new_call_replication_window.rs`), and when its worker
+leaves the membership set the backup takes over every call with an INVITE in
+flight, answering one still waiting on its routing decision with a 503
+(`undecided_call_settled_on_departure.rs`). A round whose relay has not
+replicated yet is acknowledged when the callee's answer takes the call over, and
+the call ended (`reinvite_round_not_yet_replicated.rs`); the caller's pending
+re-INVITE of that round gets no final, only the BYE.
+
 Coverage: `sip-proxy/tests/it/stateless_final_response_contract.rs` pins both halves
-(no proxy 100 + worker-100 absorbed + 18x/200 relay; blackhole → zero
-proxy-originated upstream messages, retransmit re-forwarded to the same target).
+(no proxy 100 + the downstream 100, 18x and 200 relayed; blackhole → zero
+proxy-originated upstream messages, retransmit re-forwarded to the same target),
+and `sip-proxy/src/core/response/relay_tests.rs`
+(`trying_100_is_relayed_upstream_by_its_via`) the relayed 100's Via pop.
 
 ## Decision X6 — the per-call-cap shed: a new INVITE at capacity gets a 503, not a silent drop
 
@@ -193,9 +221,11 @@ scope) and ADR-0014 draws for reconciliation (`(p,b)`-causal, no clock): **the
 node that holds the live transaction answers; the node that merely holds terminal
 state settles silently.** The decision deadline (X1) further guarantees the
 live-serving node *reaches* that terminal state within 5 s instead of parking a
-limiter/txn slot until the 150 s `SetupTimeout` / crash — the ledger-replicated
-`SetupTimeout` remains the cross-crash backstop for a node that dies mid-setup
-(its caller's txn dies with it, so no wire answer is owed).
+limiter/txn slot until the 150 s `SetupTimeout` / crash. A node that dies mid-setup
+leaves a live body, not a terminal one: whoever materialises it with no message —
+the departure sweep or the restarted node's reclaim — rebuilds the caller's INVITE
+server transaction and answers it 503, so it holds the live transaction and answers
+(ADR-0047 D4).
 
 ## Consequences
 

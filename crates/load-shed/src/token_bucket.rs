@@ -71,6 +71,17 @@ impl TokenBucket {
         self.tokens
     }
 
+    /// The level a refill at `now` would leave, read without crediting it: the
+    /// bucket is unchanged, so a reader never shifts what later takes see.
+    pub fn projected_level(&self, now: Duration) -> f64 {
+        match now.checked_sub(self.credited_to) {
+            Some(elapsed) => {
+                self.capacity.min(self.tokens + elapsed.as_secs_f64() * self.rate_per_sec)
+            }
+            None => self.tokens,
+        }
+    }
+
     /// Change capacity and rate at `now`. Time up to `now` is credited at the
     /// old rate first; the level is then clamped to the new capacity, so a
     /// lowered capacity binds at once.
@@ -199,6 +210,21 @@ mod tests {
         assert!(b.try_take(ms(0)).is_err(), "a step backwards refills nothing");
         assert!(b.try_take(ms(10_000)).is_err(), "an instant already credited buys nothing");
         assert_eq!(b.try_take(ms(11_000)), Ok(()), "a second of new time buys one");
+    }
+
+    /// A projected read agrees with a refilled read and credits nothing: ten
+    /// reads a tenth of a second apart leave the take at 1 s its whole token.
+    #[test]
+    fn a_projected_read_credits_nothing() {
+        let mut b = TokenBucket::full(1.0, 1.0, ms(0));
+        assert_eq!(b.try_take(ms(0)), Ok(()));
+        for step in 1..=10 {
+            assert!(b.projected_level(ms(step * 100)) <= 1.0);
+        }
+        assert_eq!(b.projected_level(ms(500)), b.clone().level(ms(500)));
+        assert_eq!(b.projected_level(ms(5000)), 1.0, "capped at the capacity");
+        assert_eq!(b.try_take(ms(1000)), Ok(()));
+        assert_eq!(b.projected_level(ms(0)), 0.0, "an earlier instant reads the current level");
     }
 
     /// Time before a rate change is credited at the old rate.

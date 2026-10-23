@@ -6,8 +6,10 @@
 //! holds only the replica reads the replicated one and binds the leg once the
 //! takeover copy is in hand.
 
-use call::helpers::{make_empty_dialog, MakeDialogLegCtx};
-use call::{call_index_keys, Call, CallBodyCodec, Direction, KeyKind, MsgpackCodec};
+use call::{
+    call_index_keys, Call, CallBodyCodec, Dialog, DialogState, Direction, KeyKind, MsgpackCodec,
+    OutboundInvite,
+};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
@@ -27,22 +29,18 @@ const BOB_TAG: &str = "bob-tag";
 /// with bob.
 fn answered_call(pri: &str, bak: &str, cid: &str) -> Call {
     let config = B2buaConfig { self_ordinal: pri.into(), ..Default::default() };
-    let call =
-        build_initial_call(&invite(pri, bak, cid), src(), &config, &sip_txn::IdGen::seeded(1), 0);
+    let call = build_initial_call(
+        &invite(pri, bak, cid),
+        src(),
+        &config,
+        &mut sip_ids::TurnIds::fixed(1),
+        0,
+    );
     let mut b = call.a_leg.clone();
     b.leg_id = "b-1".into();
     b.call_id = B_CALL_ID.into();
-    b.from_tag = B_LOCAL_TAG.into();
-    b.dialogs = vec![make_empty_dialog(
-        &MakeDialogLegCtx {
-            call_id: B_CALL_ID,
-            local_uri: "sip:alice@example.com",
-            remote_uri: "sip:bob@example.com",
-            local_tag: B_LOCAL_TAG,
-            remote_tag: BOB_TAG,
-        },
-        1,
-    )];
+    b.outbound_invite = Some(OutboundInvite::new(B_LOCAL_TAG, 1, 0, None));
+    b.dialogs = vec![Dialog::new(B_LOCAL_TAG, BOB_TAG, DialogState::Confirmed, 1)].into();
     call::helpers::add_b_leg(call, b)
 }
 
@@ -105,7 +103,7 @@ async fn an_acting_backup_binds_the_leg_from_the_replicated_index() {
     let ctx = n.core.router_ctx();
     let call = answered_call("w0", "w1", "cid-takeover");
     let r = call.call_ref.clone();
-    let body = MsgpackCodec::new().encode(&call);
+    let body = MsgpackCodec::new().encode(&call).unwrap();
     n.store
         .put_call(
             PartitionRole::Backup,
@@ -129,7 +127,8 @@ async fn an_acting_backup_binds_the_leg_from_the_replicated_index() {
     assert_eq!(res.call_ref.as_deref(), Some(r.as_str()));
 
     let _guard = ctx.state.lock(&r).await;
-    let Materialised::Served(copy) = materialise(ctx, &r, Origin::Takeover).await else {
+    let Materialised::Served { call: copy, .. } = materialise(ctx, &r, Origin::Takeover).await
+    else {
         panic!("the replica is taken over");
     };
     res.bind_indexed_leg(&copy, &event);

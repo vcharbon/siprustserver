@@ -8,11 +8,12 @@
 //! fails here.
 //!
 //! The scenario is a complete callflow: alice ⇄ b2bua ⇄ bob established through
-//! the proxy over a genuine limiter hold, the primary crashes, alice's BYE fails
-//! over to the backup, and the cluster settles to no-trace-anywhere. StayDead
-//! (Model Y, ADR-0020 X3): the crashed primary is the sole CDR authority, so this
-//! call's CDR is the accepted loss and the backup's lossy cleanup is what
-//! releases the limiter and frees the replica.
+//! the proxy over a genuine limiter hold, the primary crashes in place (its
+//! endpoint kept in the backup's membership), alice's BYE fails over to the
+//! backup, and the cluster settles to no-trace-anywhere. StayDead (Model Y,
+//! ADR-0020 X3): the crashed primary is the CDR authority of a call it has not
+//! departed from, so this call's CDR is the accepted loss and the backup's lossy
+//! cleanup is what releases the limiter and frees the replica.
 //!
 //! The trace registry is process-wide (one root span per call per process), so
 //! this file holds exactly ONE test and installs its own gate. It is a test OF
@@ -32,8 +33,10 @@ use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use failover_harness::{
     assert_call_lost_no_cdr, worker_ordinals, FailoverHarness, ReplicatedB2buaSut, WorkerHealth,
 };
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
-use observe::{activation_bucket, CapturedSpan, RateDraw, SampleAdmission};
+use http_net::{HttpServerHandle, HttpTransport};
+use http_net_testkit::SimulatedHttpNetwork;
+use observe::{activation_bucket, RateDraw, SampleAdmission};
+use observe_testkit::CapturedSpan;
 use sip_clock::Clock;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -84,14 +87,14 @@ fn field<'a>(span: &'a CapturedSpan, name: &str) -> &'a str {
 
 /// The root spans opened for calls (`sip.call`), oldest first — HTTP child spans
 /// excluded.
-fn root_spans(log: &observe::TestLogHandle) -> Vec<CapturedSpan> {
+fn root_spans(log: &observe_testkit::TestLogHandle) -> Vec<CapturedSpan> {
     log.spans().into_iter().filter(|s| s.name == "sip.call").collect()
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_takeover_opens_this_nodes_own_root_span_linked_to_the_nominals() {
     sample_everything();
-    let (_log_guard, log) = observe::test_buffer();
+    let (_log_guard, log) = observe_testkit::test_buffer();
 
     let mut fh = FailoverHarness::new("takeover-linked-span", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
@@ -191,7 +194,6 @@ async fn a_takeover_opens_this_nodes_own_root_span_linked_to_the_nominals() {
             if primary_ord == "b1" { (&mut w_b1, &w_b2) } else { (&mut w_b2, &w_b1) };
         primary.crash();
         proxy.set_health(&primary_ord, WorkerHealth::Dead);
-        backup.simulate_peer_removed(&primary_ord);
         backup.metrics().repl_takeover_hydrated_total()
     };
     fh.advance(Duration::from_millis(300)).await;

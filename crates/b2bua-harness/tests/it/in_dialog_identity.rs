@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use b2bua::decision::ScriptedDecisionEngine;
 use b2bua_harness::{B2buaScene, B2buaSut};
+use scenario_harness::Party;
 use sip_message::generators::InDialogMethod;
 use sip_message::header::RSeq;
 use sip_message::SipRequest;
@@ -15,8 +16,8 @@ const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 const BOB_REOFFER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20002 RTP/AVP 0\r\n";
 const ALICE_REANSWER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10002 RTP/AVP 0\r\n";
-const ALICE_REOFFER: &str = "v=0\r\no=alice 1 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10004 RTP/AVP 0\r\n";
-const BOB_REANSWER: &str = "v=0\r\no=bob 1 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20004 RTP/AVP 0\r\n";
+const ALICE_REOFFER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10004 RTP/AVP 0\r\n";
+const BOB_REANSWER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20004 RTP/AVP 0\r\n";
 
 /// The display names a request's From and To state.
 fn displays(req: &SipRequest) -> (Option<String>, Option<String>) {
@@ -170,6 +171,7 @@ async fn a_second_forked_early_dialog_keeps_the_dialled_display_names() {
         .alice
         .invite(&s.bob)
         .with_header("X-Api-Call", &plan)
+        .with_header("Supported", "100rel")
         .with_sdp(OFFER)
         .through(s.b2bua.addr)
         .send()
@@ -186,8 +188,11 @@ async fn a_second_forked_early_dialog_keeps_the_dialled_display_names() {
             .await;
         let p = call.expect(183).await;
         let a_tag = p.to().tag().expect("an a-facing tag").to_string();
-        let rack =
-            format!("{} 1 INVITE", p.header::<RSeq>().expect("RSeq").expect("readable").value());
+        let rack = format!(
+            "{} {} INVITE",
+            p.header::<RSeq>().expect("RSeq").expect("readable").value(),
+            Party::Caller.first_cseq()
+        );
         let mut prack = call
             .send_request(InDialogMethod::Prack)
             .with_to_tag(&a_tag)

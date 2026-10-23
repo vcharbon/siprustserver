@@ -1,0 +1,9 @@
+schema: budget.v1
+name: dependency-fault
+description: >-
+  A fault the system under test absorbs without losing a call: a shared
+  dependency hung, slow, refusing or gone (it fails open), the replication
+  link cut, one clock shifted, a store stalled, dialogs orphaned by a caller.
+  No setup may fail; setups may be slower for about 2 s of offered rate.
+setup_slow:
+  max_seconds: 2

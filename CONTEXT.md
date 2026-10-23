@@ -35,17 +35,20 @@ _Avoid_: "service" (Effect term), "interface" unqualified.
 ### Test porting
 
 **Parity oracle**:
-A second, independent implementation of a **layer interface** kept *only* for
-tests, to cross-check the production impl. For the message layer the oracle is
-`rvoip-sip-core`, checked against the ported `CustomParser`.
+A second, independent implementation kept *only* for tests, to cross-check
+the production impl; it need not implement the **layer interface**. For the
+message layer the oracle is `rvoip-sip-core`, read into the same fields as a
+`CustomParser` message and
+compared seed by seed by a differential test that lists every expected
+difference with its RFC section.
 _Avoid_: "reference parser" (the production custom parser is the reference for
 behaviour; the oracle is the looser cross-check).
 
 **Compliance matrix**:
-The test that runs every parser impl over a shared fixture corpus (RFC 4475
-torture, CVE regressions, RFC 5118 IPv6, param-grammar gaps) and asserts each
-impl's expected accept/reject. The Rust port of `parser-compliance.test.ts`;
-it is how the **parity oracle** is exercised.
+The test that runs the production parser over a shared fixture corpus (RFC
+4475 torture, CVE regressions, RFC 5118 IPv6, param-grammar gaps) and asserts
+its expected accept/reject. The Rust port of `parser-compliance.test.ts`; the
+**parity oracle**'s differential test reads the same fixtures.
 _Avoid_: "parity test" (the source's `parity` wrapper is a distinct
 SignalingNetwork construct, deferred to a later layer).
 
@@ -88,9 +91,9 @@ _Avoid_: "header registry" (there is no global mutable registry anymore).
 
 **Policy rejection** / **Buggy rejection**:
 The two classes a parser rejection of a grammar-valid input falls into.
-*Policy* = a documented ADR-0007 strictness rule (expected; the grammar is
-looser than the parser). *Buggy* = matches no known policy → a real parser
-bug. A clean ABNF run has zero buggy rejections and zero silent misparses.
+*Policy* = a documented strictness rule (the ABNF suite's policy patterns,
+the gates of ADR-0001; expected, the grammar is looser than the parser).
+*Buggy* = matches no known policy → a real parser bug. A clean ABNF run has zero buggy rejections and zero silent misparses.
 
 ## Retransmission vocabulary
 
@@ -100,8 +103,9 @@ paces it. A ladder belongs either to a **transaction** (Timer A/E/G, the CANCEL
 sub-ladder — the transaction layer drives them and its consumers never see
 them) or to a **dialog-level obligation** (RFC 3261 §13.3.1.4, RFC 3262 §3 —
 replicated with the call, visible to rules only as its give-up). See ADR-0032.
-_Avoid_: "retry", "attempt" (they carry HTTP retry semantics elsewhere in the
-workspace), "cadence" for the schedule as a whole.
+_Avoid_: "retry" (it carries HTTP retry semantics elsewhere in the workspace),
+"attempt" (a routing answer's dial, see **Attempt**), "cadence" for the
+schedule as a whole.
 
 **Rung**:
 One step of a ladder. Rung 0 is the original send, rung 1 the first re-send,
@@ -115,11 +119,34 @@ equivalent message (ADR-0032 X3).
 
 **Obligation**:
 What discharges a dialog-level ladder, as a key the framework matches on:
-`AckOf2xx` and `PrackOf`. The engine cancels the ladder when the matching ACK
-or PRACK arrives; a rule sees only the give-up. A transaction ladder needs no
-obligation — the transaction layer owns its own.
+`AckOf2xx` and `AwaitPrack`. The engine cancels the ladder when the matching
+ACK or PRACK arrives; a rule sees only a 2xx's give-up. A transaction ladder needs
+no obligation — the transaction layer owns its own.
 _Avoid_: "watchdog" for the 2xx pair (it names the timer, not the thing
 owed).
+
+**Provisional record**:
+One reliable provisional (RFC 3262) the call received, written by the engine
+before any rule reads it: the responder's identity of it (leg, tag, INVITE
+CSeq, `RSeq`), where the PRACK the responder is owed stands (pending, relayed,
+this stack's own, deferred to the ACK, waived), and where it was shown under
+this stack's own number, with its ladder. A repeat of one, or one out of
+`RSeq` order, is dropped before the rules. A rule decides only whether it is
+shown; the engine sends the PRACK this stack owes.
+_Avoid_: "relayed provisional" for the record (one shown to no one has a
+record too); "owed PRACK" for a PRACK owed TO this stack (that is
+`AwaitPrack`).
+
+**PRACK disposition**:
+What a PRACK this stack receives draws on the face it showed the
+provisional: relayed, answered 200 here, or refused 481. One reading serves
+the live call and the released call's late-PRACK book.
+
+**Dialog owed answer**:
+The offer a dialog's responder made that this side still owes an answer to
+(RFC 3264 §4), with the message that carries it: the ACK of a 2xx that
+carried a delayed offer, the PRACK of the reliable provisional that carried
+it, or that PRACK deferred to the ACK a 2xx awaits. One per dialog.
 
 **Message ring**:
 The capped per-leg history of the distinct SIP messages a leg received or sent,
@@ -249,6 +276,27 @@ and jitter roll from the request (`sip_txn::StatelessTagger`), so every copy of
 one request draws the same answer.
 _Avoid_: "rate limiter" for the bucket (the call limiter owns "limit").
 
+**Proxy refusal** (`sip_proxy::refusals`):
+A request the front proxy refuses itself, at its self-gate or for a failed
+worker selection, draws a 503 with a jittered, floored `Retry-After` and no
+`Reason`, its To-tag derived from the request. It is remembered for 64·T1:
+every copy in that window draws the same bytes and is neither judged nor
+counted again, so a gate or a cap that cleared meanwhile never admits it. The
+CANCEL of a refused INVITE draws a 200 from the proxy, that INVITE's UAS, and
+goes no further; a CANCEL is never remembered. Why it was refused stays in the
+reject counters and the call's trace.
+
+**First worker view** (`sip_proxy::health::FirstView`):
+A starting front proxy's view of its workers is in once the worker registry
+holds its first listing and one OPTIONS round over it has completed, each
+listed worker having answered or run out its reply window (ADR-0050 §11).
+The round leaves as soon as the listing is in. Before the view, a request
+with no target is dropped and counted, never refused: its retransmission meets
+the view. `/readyz` waits for the view; `/vrrp`, which the VRRP check reads, is
+`/healthz` and the view; `/healthz` never waits for it.
+_Avoid_: "warm-up" (there is no fixed delay: the view is in when the first
+round has answered or run out its reply window).
+
 **Metric catalogue** (`metric-catalogue`):
 A process's Prometheus families declared as data: one **catalogue entry** per
 family (name, kind, label sets, presence, help), its label sets a union of
@@ -291,7 +339,8 @@ unrun, by the discard's reason: an answer through the request's transaction
 call's refusal), a forget of the transaction so its retransmission is
 admitted afresh, or nothing. Exactly one per discard; the queue hands the
 event back with it and the router renders it.
-_Avoid_: "discard hook" (the answer is a value, not a callback).
+_Avoid_: "discard hook" (the answer is a value, not a callback); the
+**Dialog owed answer** is RFC 3264's, not this.
 
 ## HA replication glossary
 
@@ -304,6 +353,19 @@ One replicated call replica — a `(partition, callRef)` entry in a backup's
 store. "Which elements do I back up" is not a separate retrieval: it *is* the
 contents of each peer's per-peer changelog (HRW 2nd-best backup, full mesh).
 _Avoid_: "shard", "partition key" (the partition is just pri/bak).
+
+**Silent stream**:
+A replication stream that has delivered nothing for the idle bound (15 s; a
+served stream carries a `Noop` at least every 5 s). The puller leaves it and
+pulls again from its watermark through the backoff (ADR-0045).
+_Avoid_: "dead peer" (the peer may be alive behind a partition).
+
+**Settled membership**:
+The membership view readiness reads: synced (the informer completed its first
+listing), or past the bootstrap hard timer since the supervisor started. Past
+the timer a worker goes Ready with the view it has; peers join as it fills
+(ADR-0045).
+_Avoid_: "synced" for this bounded notion — synced is the informer's own flag.
 
 **Failure domain** (informally **zone**):
 The blast radius a **primary** and its **backup** must be split across so one
@@ -378,16 +440,33 @@ The **Backup** stream (bootstrap + tail) a node opens against each peer *after*
 `Ready` to keep the calls it backs up current. Distinct socket, distinct
 watermark from Reclaim; never gates readiness (metrics-only).
 
-**Takeover copy** (acting-backup live copy) — *reactive only* (ADR-0014):
+**Takeover copy** (acting-backup live copy) (ADR-0014, ADR-0047):
 The live, in-memory call a backup materialises into its own call map **when the
-proxy reroutes an in-dialog request to it** (`router::materialise`) — distinct
-from the serialised backup **Element** (the `bak:{primary}` stored body). There is
-**no** eager/membership-driven takeover: a quiescent failed-over dialog is not
-made live on a survivor; it is recovered by the rebooting primary's **reclaim**.
+proxy reroutes an in-dialog request to it** (`router::materialise`), or when its
+primary departs with an INVITE of the call in flight (the **departure sweep**) —
+distinct from the serialised backup **Element** (the `bak:{primary}` stored body).
+A quiescent failed-over dialog is not made live on a survivor; it is recovered by
+the rebooting primary's **reclaim**, or by a message for it.
 The copy serves the dialog and owns the runtime timers; the Element is just bytes
 + a TTL.
 _Avoid_: using "Element"/"replica" for the live copy, or "takeover copy" for the
-stored body; "eager takeover" (removed).
+stored body; "eager takeover" (removed: it took over every call, quiet ones too).
+
+**Departure sweep** (ADR-0047, `router::departure`): what a backup does when a
+peer leaves the membership set while its flows run — it takes over every call of
+the peer's backup partition that names an INVITE transaction in flight, and
+discharges every ended one (ADR-0047 D8); every other call is left. _Avoid_:
+"eager takeover" for it.
+
+**Undecided call** (ADR-0047, `router::undecided`): a live call still waiting on
+its first routing decision — caller unanswered, no decision applied, nothing
+dialled. Materialised with no message (the departure sweep, a reclaim), it is
+refused 503 without Retry-After, the decision never asked again.
+
+**Lost round** (ADR-0047, `rules::lost_round`): an INVITE transaction a node sent
+on a confirmed dialog that no record holds — the node died before the round
+replicated. Its final is told by a CSeq above the dialog's recorded sequence with
+no relay pending; it is ACKed and the call ended.
 
 **Reclaim** (active) — the sole quiescent-recovery path (ADR-0014):
 A returning primary *re-serving* its calls — materialising each back into the live
@@ -405,37 +484,65 @@ storage-only step).
 
 **Seed**: a transaction the materialisation rebuilds from the record: a
 Proceeding client INVITE from an INVITE handle, a Proceeding server INVITE
-from the a-leg snapshot or a pending relayed re-INVITE. Never a 2xx, PRACK or
-re-ACK: those are ADR-0032 obligations replicated with the call.
+holding the request rebuilt from the a-leg snapshot or a pending relayed
+re-INVITE's snapshot, an Accepted server INVITE (RFC 6026) holding a 2xx a
+dialog retains awaiting its ACK. A fold into the call's record seeds the last
+kind. The 2xx's repeats, a PRACK or a re-ACK are never a transaction's: those
+are ADR-0032 obligations replicated with the call.
 
 **Self-release** (acting-backup takeover-copy lifecycle) — replaces Activate/Deactivate (ADR-0014):
 A backup holds a **takeover copy** only *while actively serving* the rerouted
 request(s). When the **last transaction** for that call reaches a terminal state
-(2xx INVITE → Timer H after the ACK; non-INVITE → Timer J; failed leg → Timer B/F)
+(2xx INVITE → its ACK on the branch, else Timer L; non-INVITE → Timer J; failed leg → Timer B/F)
 the txn layer emits `CallQuiesced` and the backup **self-releases**: it
 `drop_local`s the live copy and stops its timers, reverting to a pure **Element**.
 **Local-only** — no delete propagates; the `bak:` replica + reverse-flushed deltas
 survive, so the call lives on at its reclaiming primary. There is **no** watermark
 handshake and **no** time-based settle; correctness rests on `(p,b)` causality.
+A copy that ends a call whose primary has **departed** does not defer: it
+discharges the call itself — CDR, limiter release, delete; the departure sweep
+discharges an ended call deferred to a peer that then departs; and a node of the
+departed ordinal that still holds the call live drops it, with no CDR, on that
+delete (ADR-0047 D8).
 _Avoid_: "Deactivate"/"handback" (the removed watermark handshake); "ghost backup".
+
+**Stand-down** (ADR-0047 D7, `router::stand_down`): a takeover copy released on a
+write of its primary the backup applied — a returning node's reclaim write, an answer,
+an ending — when the primary's `b` is at or past the copy's (the primary's record
+covers every write the copy made), or on the primary's delete of the call. Local-only
+like a self-release, and its transactions are **relinquished** (deleted with nothing
+sent), never orphaned. _Avoid_: "self-release" for it (that waits for the copy's
+transactions to clear).
 
 **Version vector `(p, b)`** (per-context reconciliation) — replaces LWW-by-`gen` (ADR-0014):
 Each call carries `(p, b)` = `(primary_counter, backup_counter)` =
-`CallTopology.{gen, bak_gen}`. **Each node bumps only its own** counter on a local
-mutation, so the *other* counter on a propagated update is the **branch point**.
+`CallTopology.{gen, bak_gen}`. **Each node bumps only its own** counter, once per
+write it makes that changes the call, so the *other* counter on a propagated update
+is the **branch point**; a quiet turn and a fold are not writes.
 Merge is direction-aware: **Bootstrap** (a node recovering its own partition)
 applies unless the stored vector dominates; **Forward** (primary→backup) applies
 on that same rule *and* never behind the Element's own `b` (ADR-0031 D3 — an
-Element an acting backup authored holds a version the authority never saw);
+Element an acting backup authored holds a version the authority never saw),
+except that at the Element's own `(p,b)` an authored Element whose body is behind
+the frame's takes it: the authority adopted that version and republished its own
+call there (ADR-0047 D7);
 **Reverse** (backup→primary) applies iff `p_in == p_cur && b_in > b_cur`
 (untouched-by-primary since the backup branched, genuinely newer backup
 mutation). A Forward `Put` whose BODY stands behind the Element on the call's
-lifecycle is a **branch** of the call and is refused; **deletes** apply
+lifecycle — read answer first: an unanswered teardown never ends an answered call
+(ADR-0047 D7) — is a **branch** of the call and is refused; **deletes** apply
 unconditionally except Forward, which yields for the **answer** alone — an
 `Active` Element whose caller was answered and to which no forward flush, taken
 or refused, has ever carried the authority's own answer. A refused flush is folded into a live copy
-when it carries lifecycle progress the vector cannot see. A **fold** adopts
-`max` of both counters before the store's own bump, so the split heals; a
+when it carries lifecycle progress the vector cannot see: an answer or an ending,
+folded whole, or the end of a re-INVITE round the live copy holds unfinished or
+the opening of one it never reached, dialog by dialog, whose facts alone are
+merged in. The Reverse rule never folds whole a body whose `p` the backup
+adopted without the primary's body (`CallTopology::gen_adopted`) — nor stores it — and the
+authority's call at an Element's own `(p,b)` replaces such a body there; every
+fold and refusal takes the higher dialog sequences. A **fold** adopts `max` of both counters and
+moves neither, so the split heals and the other owner's next write orders
+against what it published; a
 **refusal** adopts only the axis the other owner bumps — `b` at a primary, `p`
 at a backup — and without that bump, because recording a version somebody else
 published is a read, not a mutation. Closes the latent equal-`gen` divergence
@@ -514,9 +621,22 @@ have drained this flow's backlog." **Sticky** across reconnects; a transient TCP
 blip does not revert a node to NotReady. Tracked **per flow**: the **Reclaim**
 stream's current flag gates readiness; the **Backup** stream's is **metrics-only**.
 
-**Readiness states** (`NotReady → Ready → Draining`):
-Self-reported via OPTIONS (`200` / `503 not-ready` / `503 draining`) and, in
-k8s, via the `/ready` HTTP probe. **Ready** = every **Reclaim** stream to a
+**Readiness states** (`NotReady → Ready ⇄ Cordoned → Draining`):
+Two axes, read apart by the proxy (ADR-0050): **serving dialogs** (OPTIONS `200`,
+every state but NotReady) and **accepting new calls** (`X-Readiness: new=accept`, or
+`new=refuse; cause=backend|cordoned|draining`). NotReady answers OPTIONS `503`; in k8s
+the `/ready` HTTP probe reports NotReady / Ready / Draining and ignores acceptance. A
+**backend gate** open on a `Ready` node reports `cause=backend`. **Cordoned** = set and
+cleared by an operator (`/admin/cordon`, gauge `b2bua_cordoned`): refuses every new
+INVITE with a bare `503` before any decision, its record that of a call no decision
+reached; serves every dialog; no timer; `/ready` reads it Ready. A cordon is refused
+(`409`) while NotReady or Draining; SIGTERM drains a cordoned node as a Ready one.
+**Release-all** = an operator's `POST /admin/release-all`, never implied by a cordon
+or a SIGTERM: every answered call ends with no BYE (an owed ACK is sent, a still-ringing
+leg CANCELled; its record closed under `operator_release`, its holds released, its
+replica deleted, a later request drawing `481`); a call in setup is aborted (`503` to
+the caller, CANCEL to the callee). Counted on `b2bua_operator_released_total{kind}`.
+**Ready** = every **Reclaim** stream to a
 *reachable* peer has hit its first `Noop` (best-effort, hard-timer bounded so a
 dead/slow peer cannot hang readiness). **Backup** streams are opened only *after*
 `Ready` and **never gate it** (fire-and-forget; observable via the store + metrics,
@@ -530,7 +650,9 @@ for one that is, which means a flush window was lost (ADR-0031 D2, D6). The four
 reasons are the `reason` label of `b2bua_drain_exits_total`. Before exiting the
 worker flushes its queued limiter releases within `B2BUA_DRAIN_RELEASE_FLUSH_MS`,
 re-checks a clean exit after the flush, and gives up, counted, what is left
-(ADR-0031 D2, ADR-0040 decision 9).
+(ADR-0031 D2, ADR-0040 decision 9). Every exit then closes the CDR sink within
+`B2BUA_DRAIN_CDR_FLUSH_MS`: the queued records are written and the broker's
+outstanding confirms awaited; what the bound leaves counts in `cdr_dropped_total`.
 
 ## HTTP call-decision adaptation
 
@@ -580,6 +702,45 @@ positional-codec change (ADR-0008), so it survives failover by construction.
 _Avoid_: a structured top-level "routes" field on the call (would be a new
 replicated field); parsing the callback context anywhere but the decision layer
 (the platform keeps it opaque).
+
+## Outbound backend vocabulary
+
+A worker's HTTP backends on the request path (a decision backend, the call
+limiter) and the client policy they share. See
+[ADR-0043](./docs/adr/0043-outbound-backend-client-policy.md).
+
+**Backend client** (`http_net::BackendClient`):
+One backend's client: its own `reqwest` client (rotated on a fixed period),
+its name looked up through a **resolved target**, a cap on requests in
+flight, a **backend breaker**, and the generic retry rule. Every value is an
+env key under the backend's prefix (`<P>_…`).
+_Avoid_: "connection pool" for it (the pool is `reqwest`'s own).
+
+**Resolved target** (`http_net::ResolvedTarget`):
+A backend's socket address, or its `host:port` name looked up on the request
+path: single-flight, bounded, every address kept. **Forget** drops the
+addresses (breaker open, failed probe); **refresh** looks the name up again
+and **serves stale** when that lookup finds nothing (client rotation).
+
+**Backend breaker**:
+Opens when its window saw the configured number of requests sent and no HTTP
+response of any status; a probe of the backend's health path closes it on any
+response. What an open breaker means for a call (fail it, let it through
+uncounted) is the caller's **policy**.
+_Avoid_: "circuit open" for a backend answering errors (an answered `5xx` keeps
+it closed).
+
+**Decision backend failure**:
+No usable answer from the decision backend (timeout, transport error, breaker
+open, a name that does not resolve, an unreadable answer). The stack answers a
+bare `503` (no `Reason`, no `Retry-After`) on the initial INVITE and the
+`/call/failure` consult, and `SIP/2.0 503` in a REFER sipfrag. A reject inside
+an answer is a decision, not a failure.
+
+**Backend gate** (OPTIONS):
+A backend breaker registered on a node's acceptance of new calls: open, a `Ready`
+node answers OPTIONS `200` with `X-Readiness: new=refuse; cause=backend` and keeps
+serving its dialogs; never latched, never read by `/ready`.
 
 ## Call state-machine services (Rust shape)
 
@@ -655,8 +816,11 @@ _Avoid_: re-listing the global machine's downstream BYEs as service leg messages
 
 **Guard timer**:
 A **tracked side effect**: a service safety/watchdog timer the rule **arms** (or
-cancels) — e.g. the REFER re-INVITE-answer watchdog. (Re-uses the existing
-`TimerType`; "armed" is the canonical verb, per the HA glossary above.)
+cancels) — e.g. the REFER re-INVITE-answer watchdog. Declared by its `TimerType`
+(a service timer: its owning service and its key) and the kind of **timer
+scope** its key guards; every key the rule arms or cancels is held to a
+declaration. ("Armed" is the canonical verb, per the HA
+glossary above.)
 
 **Machine deactivation**:
 A machine leaving the call's active set by having its **cursor removed**
@@ -668,6 +832,17 @@ writes, typed-slice writes, async-HTTP kicks) is **auto-allowed** — invisible 
 the diagram and not something an author declares.
 _Avoid_: "clear state" in prose for the *concept* (say a machine **deactivates**
 / reaches its **terminal** state); `ClearState` is the action that realises it.
+
+**Lifecycle event** (ADR-0042):
+What the engine tells every active service at the end of a turn, whichever
+rule claimed the turn: an **attempt** started (with the routing answer it
+dials) or ended (with its outcome), a leg ended (with how). A service hears
+one through a machine-bound rule matching it; its handler may write call ext,
+move its own machine's cursor and arm or cancel its own service timers,
+nothing else. A machine the turn deactivated still hears the events the turn
+caused, for its ext writes.
+_Avoid_: "observer rule" (the rule that ran beside a claim, which lifecycle
+events replace); "callback".
 
 **K8sMembership**:
 The real `topology::Membership` source: a kube EndpointSlice informer over
@@ -689,7 +864,8 @@ its address; the process is untouched but **observes** it: the informer shows a
 worker its own endpoint, and once it has seen itself routable, a `terminating` or
 absent own endpoint (never a readiness flap: `Draining` is terminal) latches
 `Draining` whether or not SIGTERM has come (ADR-0031 D6; `is_withdrawn`
-on the supervisor, the `b2bua_withdrawn_running` gauge). A static membership
+on the supervisor, the `b2bua_withdrawn_running` gauge), and the worker
+drains and exits as on SIGTERM (D5). A static membership
 never shows a worker itself. Four ways out — graceful, abrupt, vanished, restarted in
 place — in ADR-0031.
 
@@ -705,7 +881,9 @@ the replication event is the peer **departing** (parked).
 The proxy registry's memory of an address that left the set: resolvable by
 `lookup_by_address` as its last ordinal with health `Dead` for Timer H, keyed by
 address, so a response still arriving from it reverse-fails to the cookie's
-backup; a join at the address clears it. Never affects ordinal resolution.
+backup; a join at the address clears it. Never affects ordinal resolution. A
+dialog-creating request from a tombstoned address is Record-Routed with a cookie
+naming that ordinal and an alive backup (ADR-0031 D4).
 
 ## Call admission set vocabulary
 
@@ -742,6 +920,97 @@ before; the limiter refuses one not above the number it knows for the key
 The call runs on an id held lacks: it runs fail open, or on a set a service
 or a route moved it onto that held does not name. Restated on every write of
 the call, so the next statement that holds the set ends it.
+
+## Call model vocabulary
+
+**Attempt** (ADR-0042, `Call.attempts`):
+One routing answer that dials and the destination legs it dials: the initial
+route (dialled by the core or by the service its routing deferred to), a
+setup failover, an established call's reroute, a transfer target. Each has a
+**cause**, the decision ordinal it opened under, its legs, the ring deadline
+its answer states, and once ended an **outcome**: answered, failed (every leg
+ended), superseded (the next attempt opened while its legs were still being
+cancelled), call ended, or refused (admission refused its route; it dialled
+nothing). An attempt with a leg still ringing stays open beside the next. A
+dialled leg names its attempt; a media leg names none.
+_Avoid_: "attempt" for a retransmission or a re-send (a **rung** of a
+**ladder**); "try"; "route" alone for the attempt (the route is its answer).
+
+**Ring deadline** (`no_answer_ms`, `TimerType::NoAnswer`, leg scope):
+How long a dialled leg may ring unanswered: its attempt's statement, run
+from the first 180–189 the leg's INVITE draws, to the millisecond, and held
+inside that INVITE's transaction bound. A leg answered or failed before any
+18x never arms it; a later 18x, on any of its early dialogs, does not move it.
+A copy materialised from a replica that shows no 18x on an unanswered leg
+**presumes** it ringing since its INVITE (`Ring::Presumed`): the turn that
+took its first 18x may not have replicated. An 18x it then takes re-arms the
+deadline from that 18x.
+_Avoid_: "no-answer timeout" for the time since the INVITE (that is the
+**setup** deadline's, or a service's own watchdog).
+
+**Timer scope** (ADR-0042, `TimerScope`):
+What a timer guards — the call, an attempt, a leg, or a retransmission
+obligation — and so when it dies: leaving the scope retires every timer of
+it, with no rule cancelling one. A timer is named by its type and its scope
+(`TimerKey`) and armed under the call's next **generation**; a fire the
+ledger no longer holds under that generation is stale and reaches no rule.
+_Avoid_: "timer id" (there is no string name); "cancel" for what a scope's
+end does (it **retires** the scope).
+
+## Dialog model vocabulary
+
+How a leg keeps its dialogs (ADR-0041). The `call` crate's `Dialog` /
+`Dialogs`; the engine and the rules read them, never by position.
+
+**Dialog identity**:
+The leg's Call-ID plus the dialog's **our tag** (this stack's) and **peer
+tag**. A received request names it by `(To-tag, From-tag)`, a response by
+`(From-tag, To-tag)` — on every leg alike (RFC 3261 §12).
+_Avoid_: "identity tag" (one tag never names a dialog of a leg that holds
+several), "local/remote tag" for the fields (the RFC terms stay for the RFC).
+
+**Dialog state**:
+`Early`, `Confirmed`, `Ending` (our BYE, or our CANCEL of its INVITE, in
+flight: the dialog still exists), `Ended` (rejected by the INVITE's final, the
+peer's BYE, our BYE's final or timeout) or **retired**.
+A dialog record stays until its call is released.
+
+**Retired dialog**:
+An early dialog the call let go of without a BYE: a losing callee fork, a
+caller-facing dialog the answer did not take, an early dialog of a leg ended
+before its INVITE's final. It keeps the relays still open
+in it and, for a fork whose 2xx came late, the ACK and BYE that released it;
+while that BYE is in flight it reads as ending.
+_Avoid_: "pruned"/"dropped" dialog (nothing is removed).
+
+**Fronting**:
+A caller-facing dialog **fronts** the callee dialogs it relays (`fronts`); a
+dialog the stack answers itself fronts none.
+_Avoid_: "tag map".
+
+**Outbound INVITE**:
+The dialog-creating INVITE a leg sent (its From-tag, CSeq and client
+transaction, the final it took, whether this stack CANCELled it): each
+dialog a response to it creates is minted from it. A dialled leg holds no
+dialog before such a response.
+
+**Leg state**:
+Read off the leg's dialogs and its INVITE's facts, never stored
+(`Leg::state`): a leg whose BYE or CANCEL is in flight reads `Terminated`.
+_Avoid_: "set the leg state" (`TerminateLeg` records an end, `LegEnd`).
+
+**Dialog gate**:
+The engine step that resolves a message to the dialog it names, before any
+rule reads it, and refuses a request its dialog does not take (481, or 500
+when out of order). An ending dialog answers a request crossing its end
+itself (200, or 487 for what it no longer acts on). Rules read what it
+resolved (`RuleContext::dialog`).
+_Avoid_: "foreign-dialog check" (the gate refuses by state, not only by
+absence).
+
+**Not now**:
+A relayed request no dialog can carry yet while its own dialog lives on:
+500 with `Retry-After`, never silence and never 481.
 
 ## Call reaper vocabulary
 
@@ -921,7 +1190,7 @@ load report directory, metrics label, and functional-body attachment key are the
 same string; a duplicate id panics at registration), its published **Message
 anchors** and required input, an optional authoring params schema, the load
 attributes the driver consults per call (`needs_charlie`/`needs_bob2`/
-`emergency`, default/failure mix weights), and the optional **load body**
+`emergency`, default/abnormal-end mix weights), and the optional **load body**
 factory. Third-party crates `register()` their own on top of `with_defaults()`.
 _Avoid_: "scenario" for a registered shape (say **shape**; `--scenario name=w`
 selects one by id but does not name the concept); declaring a shape's
@@ -968,13 +1237,38 @@ it with the **egress rewrite** (identity vs addressing — orthogonal halves of
 **Load profile**:
 The authored JSON run spec for the load fleet (`--load-profile`, schema
 `load-profile.schema.json`): rate/duration/concurrency, sampling + report
-cadence, global loss/retransmit robustness, and the shape **mix** (id, weight,
-attached case, per-entry overrides). The load analogue of a **Campaign**: a
+cadence, global loss/retransmit robustness, the overload refusal it accepts
+(`overloadReject`: the final the system under test refuses overload with;
+unset, none), and the shape **mix** (id, weight, attached case, per-entry
+overrides). The load analogue of a **Campaign**: a
 Campaign expands a functional {case × shape × infra} matrix; a Load profile
 parameterizes one sustained run. Profile supplies defaults; an explicit CLI flag
 overrides. The rate is live-retargetable (`POST /rate`, re-anchoring governor).
 _Avoid_: "campaign" for a load run; putting addressing/egress in it (that is the
 environment axis — **Endpoint config**).
+
+**Accepted ending** (`scenario_harness::actor::{Branch, Expect}`):
+One named way a scenario's call may end and still be a success (`answered`,
+`rejected`, `early_media_rejected`, `abandoned`, `answered_despite_cancel`,
+`answered_before_cancel`, `transfer_declined`, or a
+scenario-named predicate over the observed state). A call that tears down and
+settles on one of them is `ScenarioVerdict::Success { branch }`, classed `ok`
+and counted under `loadgen_branch_total{stream,shape,branch}`. Nothing else is
+accepted by default. The run, not the scenario, may add `refused_overload`: the
+final its **Load profile** declares as the system under test's overload refusal
+(`overloadReject`, e.g. 503), received by a non-emergency call before it
+connects.
+_Avoid_: excusing a non-200 ending outside the scenario (a consumer-side class
+filter, a per-descriptor reject status): the scenario states it, and `ok` means
+ok everywhere.
+
+**Failed step** (`scenario_harness::actor::FailedAt`):
+Where a call failed: the agent, its pending goal (kind and index) and the
+controller barrier pending, keyed `<who>[:<kind>#<index>]@<barrier>` (a barrier
+that never held reads as its bare name, e.g. `settle`). It is the failed call's
+sample case and the `step` label of `loadgen_failed_step_total`.
+_Avoid_: the last lifecycle phase reached as the failure's location (it names
+where the call got to, not what failed).
 
 **check_fail** (result class):
 The load report/metrics class an otherwise-OK **sampled** call reclassifies to
@@ -985,3 +1279,80 @@ this is a **per-sample oracle, not a per-call gate**, exactly like the RFC
 audit; raise coverage via `--sample-cap` / `--background-record-every 1`.
 _Avoid_: reading `check_fail` counts as full-population totals; using checks as
 a per-call SLA gate (population gating stays with result classes + metrics).
+
+## HA tooling vocabulary
+
+The language of the pluggable HA tooling base
+([ADR-0049](./docs/adr/0049-the-ha-tooling-is-a-pluggable-base.md)): the
+runner `hakit`, what it discovers on the search path, and how it judges a run.
+
+**Search path**:
+`tooling/hakit/content/` followed by the directories of `HAKIT_PATH`. Each
+entry may hold incidents, budgets, profiles, treatment catalogs, impact
+classes, metric catalogues, scenarios and dashboards; a name defined twice on
+the path is refused.
+_Avoid_: "plug-in" for the code of a product (a product adds directories, not
+code to the runner); overriding a base file by placing one of the same name
+earlier.
+
+**Incident**:
+A named thing that happens to the lab, in `incidents/<name>/`: what it acts
+on, `inject`, `heal` and an optional `probe`. A *fault* incident's
+executables act on a deployed component; a *load incident* names a profile
+stream the runner starts at inject and drains at heal. An incident never
+states a tolerance.
+_Avoid_: "chaos event" for the definition (an **event** is one firing of an
+incident in a run); a pass threshold beside the fault.
+
+**Window** (incident window):
+The span an event's budgetable impact is charged to: from its `inject`
+instant to `settle_s` after its `recovered` instant. Windows of one run never
+overlap. An in-dialog impact names its *candidate windows* instead: those
+whose inject fell inside the call's life before the failure.
+_Avoid_: "gate" (the old per-script check after an event).
+
+**Impact class**:
+What went wrong with a call or a run, derived from outcome records and the
+treatment catalog: `setup_failed`, `unexpected_ending`, `setup_slow`,
+`dialog_request_failed`, `call_cut`, `call_stranded`, `protocol_anomaly`,
+`cdr_mismatch`, `recovery`, `unattributed`, plus the classes a product adds.
+_Avoid_: loadgen's result class (`timeout`, `status_503`), which is what the
+generator saw, not what the system under test did.
+
+**Impact budget**:
+What impact one window allows, per class, `setup_failed` and a pre-answer
+`unexpected_ending` keyed by stream × final code × reason. A class or key the
+budget does not name allows 0; the in-dialog classes and an unexpected ending
+after answer take no budget at all; impact outside every window is
+`unattributed` and always a finding.
+_Avoid_: "tolerance" for something an incident or a scenario carries.
+
+**Run profile**:
+One run in `profiles/<name>.yaml`: the load streams, the schedule of incident
+events and the budget of each event's window.
+_Avoid_: **Load profile** (loadgen's own run spec for one load fleet).
+
+**Load stream**:
+One named flow of calls of one shape at one rate, from one generator, for the
+whole run or only inside a load incident's event; its name is the `stream` of
+its records and the `stream` label of its series.
+_Avoid_: "role" (the old SIPp exporter label).
+
+**Call-outcome record**:
+The one record a caller-side generator writes per call it placed, on every
+exit path, stating what the caller observed (`call-outcome.v1`). It carries the generator's own class
+only as `producer_verdict`, which the classifier never reads.
+_Avoid_: a generator classifying or excusing its own calls.
+
+**Treatment catalog**:
+The shapes a system under test offers, by shape id: how a caller requests the
+treatment, the callee-side legs it opens and the endings that count as
+success (`treatment-catalog.v1`). The base's own catalog requests treatments
+with `X-Api-Call`.
+_Avoid_: an accepted ending stated anywhere but the catalog.
+
+**Verdict**:
+`verdict.json` of a run: per window its impact against its budget, the
+unattributed impact and the integrity findings; `pass`, `fail`, or `invalid`
+when the measurement itself is in doubt (a record gap, a failed incident, a
+stale series).

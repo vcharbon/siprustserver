@@ -28,11 +28,11 @@
 //! peer log reap-immune while a serve task is active.
 //!
 //! ## Flow progress (ADR-0031 D2)
-//! Each sub-log also carries the position its puller last reported applying and
-//! whether a flow is connected at all, so a draining worker can ask
+//! Each sub-log also carries the position its puller last reported applying,
+//! when, and whether a flow is connected at all, so a draining worker can ask
 //! [`flow_caught_up`](Changelog::flow_caught_up) whether a peer holds everything
-//! it ever logged for that peer. Purely observational — no apply or send
-//! decision reads it.
+//! it ever logged for that peer ([`progress`]). Purely observational — no apply
+//! or send decision reads it.
 //!
 //! ## Lock discipline (ADR-0011 X8)
 //! [`bump_put`](Changelog::bump_put) / [`bump_delete`](Changelog::bump_delete) take the lock *briefly* (move ref + bump counter).
@@ -51,7 +51,9 @@ use std::sync::{Arc, Mutex};
 use repl_net::frame::{Frame, Op, Partition, Watermark};
 use sip_clock::Clock;
 
-use crate::store::PartitionRole;
+use crate::store::{locked, PartitionRole, REPLICA_CHANGELOG};
+
+pub use progress::DEFAULT_CLAIM_TTL;
 
 /// How long a delete tombstone is retained so a disconnected puller still learns
 /// of the removal before the ref is reaped.
@@ -168,7 +170,7 @@ struct SubLog {
     /// The position the flow's puller last reported applying
     /// ([`Frame::Position`]). `None` while no flow is connected or none has
     /// reported yet: a disconnected flow's position is unknown, never stale.
-    applied: Option<Watermark>,
+    applied: Option<progress::Claim>,
     /// Serve tasks currently streaming this sub-log. `0` ⇒ no flow carries this
     /// partition to the peer, so nothing it holds can be current.
     streams: usize,
@@ -205,15 +207,15 @@ impl SubLog {
         self.entries
             .range((start, Bound::Unbounded))
             .take(limit)
-            .map(|(c, call_ref)| {
-                let st = &self.by_ref[call_ref];
-                Due {
+            .filter_map(|(c, call_ref)| {
+                let st = self.by_ref.get(call_ref)?;
+                Some(Due {
                     counter: *c,
                     call_ref: call_ref.clone(),
                     op: st.op,
                     answered: st.answered,
                     incarnation: st.incarnation.clone(),
-                }
+                })
             })
             .collect()
     }
@@ -263,7 +265,7 @@ pub struct ServeGuard {
 
 impl Drop for ServeGuard {
     fn drop(&mut self) {
-        let mut inner = crate::store::locked(&self.changelog.inner, "replica changelog");
+        let mut inner = locked(&self.changelog.inner, REPLICA_CHANGELOG);
         if let Some(log) = inner.peers.get_mut(&self.peer) {
             log.serving = log.serving.saturating_sub(1);
             let sub = log.sub_mut(self.partition);
@@ -278,6 +280,8 @@ impl Drop for ServeGuard {
 struct Inner {
     counter: u64,
     peers: HashMap<String, PeerLog>,
+    /// How long a flow's claim vouches for it ([`progress`]).
+    claim_ttl: std::time::Duration,
 }
 
 /// Node-global monotonic changelog over per-peer, per-partition compacted
@@ -299,7 +303,11 @@ impl Changelog {
             clock,
             tombstone_ttl_ms: DEFAULT_TOMBSTONE_TTL_MS,
             dead_peer_ttl_ms: DEFAULT_DEAD_PEER_TTL_MS,
-            inner: Arc::new(Mutex::new(Inner { counter: 0, peers: HashMap::new() })),
+            inner: Arc::new(Mutex::new(Inner {
+                counter: 0,
+                peers: HashMap::new(),
+                claim_ttl: DEFAULT_CLAIM_TTL,
+            })),
         }
     }
 
@@ -324,7 +332,7 @@ impl Changelog {
 
     /// The current head `(gen, counter)`.
     pub fn head(&self) -> Watermark {
-        Watermark::new(self.gen, crate::store::locked(&self.inner, "replica changelog").counter)
+        Watermark::new(self.gen, locked(&self.inner, REPLICA_CHANGELOG).counter)
     }
 
     /// This node's shared wall clock (`Clock::now_ms()`), for stamping the
@@ -340,7 +348,7 @@ impl Changelog {
     /// `ServeGuard` drops. Creates the peer log if absent.
     pub fn serving(&self, peer: &str, partition: Partition) -> ServeGuard {
         {
-            let mut inner = crate::store::locked(&self.inner, "replica changelog");
+            let mut inner = locked(&self.inner, REPLICA_CHANGELOG);
             let now = self.clock.now_ms();
             let log = inner.peers.entry(peer.to_string()).or_insert_with(|| PeerLog::new(now));
             log.serving += 1;
@@ -351,35 +359,6 @@ impl Changelog {
             sub.applied = None;
         }
         ServeGuard { changelog: self.clone(), peer: peer.to_string(), partition }
-    }
-
-    /// Record a puller's reported applied position for `(peer, partition)`
-    /// ([`Frame::Position`], ADR-0031 D2). Monotonic — a lower report never
-    /// regresses the recorded one — and ignored for a peer with no log.
-    pub fn note_applied(&self, peer: &str, partition: Partition, at: Watermark) {
-        let mut inner = crate::store::locked(&self.inner, "replica changelog");
-        if let Some(log) = inner.peers.get_mut(peer) {
-            let sub = log.sub_mut(partition);
-            if sub.applied.is_none_or(|prev| at > prev) {
-                sub.applied = Some(at);
-            }
-        }
-    }
-
-    /// Whether `peer`'s flow on `partition` is connected AND has reported
-    /// applying everything this sub-log ever logged (ADR-0031 D2). A report is
-    /// required even for an empty sub-log: a reaped peer log restarts at head 0,
-    /// so an unreported flow is unknown, never vacuously current.
-    pub fn flow_caught_up(&self, peer: &str, partition: Partition) -> bool {
-        let inner = crate::store::locked(&self.inner, "replica changelog");
-        let Some(log) = inner.peers.get(peer) else {
-            return false;
-        };
-        let sub = log.sub(partition);
-        if sub.streams == 0 {
-            return false;
-        }
-        sub.applied.is_some_and(|a| a >= Watermark::new(self.gen, sub.head))
     }
 
     /// Whether a warm puller on `partition` resuming from `since` must
@@ -403,7 +382,7 @@ impl Changelog {
         if since.gen < self.gen {
             return false;
         }
-        let inner = crate::store::locked(&self.inner, "replica changelog");
+        let inner = locked(&self.inner, REPLICA_CHANGELOG);
         if since.counter > inner.counter {
             return true;
         }
@@ -451,7 +430,7 @@ impl Changelog {
         incarnation: Option<String>,
     ) {
         let now = self.clock.now_ms();
-        let inner = &mut *crate::store::locked(&self.inner, "replica changelog");
+        let inner = &mut *locked(&self.inner, REPLICA_CHANGELOG);
         inner.counter += 1;
         let c = inner.counter;
 
@@ -488,7 +467,7 @@ impl Changelog {
         // Brief lock: snapshot the due entries, then DROP the guard before any
         // body read/await.
         let due: Vec<Due> = {
-            let inner = crate::store::locked(&self.inner, "replica changelog");
+            let inner = locked(&self.inner, REPLICA_CHANGELOG);
             let Some(log) = inner.peers.get(peer) else {
                 return Vec::new();
             };
@@ -543,7 +522,7 @@ impl Changelog {
 
     /// The `(op, answered)` `call_ref`'s entry holds now, `None` when it has none.
     fn current(&self, peer: &str, partition: Partition, call_ref: &str) -> Option<(Op, bool)> {
-        let inner = crate::store::locked(&self.inner, "replica changelog");
+        let inner = locked(&self.inner, REPLICA_CHANGELOG);
         let st = inner.peers.get(peer)?.sub(partition).by_ref.get(call_ref)?;
         Some((st.op, st.answered))
     }
@@ -553,7 +532,7 @@ impl Changelog {
     /// and the live peer-log count. A peer whose entries grow without draining is
     /// an outbound leak distinct from the call map. One brief lock; pure read.
     pub fn depth(&self) -> (u64, u64) {
-        let inner = crate::store::locked(&self.inner, "replica changelog");
+        let inner = locked(&self.inner, REPLICA_CHANGELOG);
         let entries: usize =
             inner.peers.values().map(|p| p.pri.entries.len() + p.bak.entries.len()).sum();
         (entries as u64, inner.peers.len() as u64)
@@ -563,7 +542,7 @@ impl Changelog {
     /// (lazy TTL — deterministic, no background task, no `DelayQueue` aliasing).
     pub fn reap(&self, now_ms: i64) {
         let dead_peer_ttl = self.dead_peer_ttl_ms;
-        let mut inner = crate::store::locked(&self.inner, "replica changelog");
+        let mut inner = locked(&self.inner, REPLICA_CHANGELOG);
         // Drop idle peers wholesale — but NEVER one with an active serve task.
         inner.peers.retain(|_, log| log.serving > 0 || now_ms - log.last_active_ms < dead_peer_ttl);
         // Reap expired tombstones from each surviving sub-log, raising its floor.
@@ -588,7 +567,7 @@ impl Changelog {
     /// Whether a peer log exists (test introspection).
     #[cfg(test)]
     pub fn has_peer(&self, peer: &str) -> bool {
-        crate::store::locked(&self.inner, "replica changelog").peers.contains_key(peer)
+        locked(&self.inner, REPLICA_CHANGELOG).peers.contains_key(peer)
     }
 }
 
@@ -636,205 +615,6 @@ fn reap_sublog(sub: &mut SubLog, now_ms: i64) {
     }
 }
 
+mod progress;
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn changelog() -> Changelog {
-        Changelog::new(7, Clock::test_at(0))
-    }
-
-    #[test]
-    fn a_flow_below_the_head_is_not_caught_up_and_at_the_head_is() {
-        let cl = changelog();
-        let _guard = cl.serving("A", Partition::Bak);
-        cl.bump_put("A", "call-1", Partition::Bak);
-        cl.bump_put("A", "call-2", Partition::Bak);
-        assert!(!cl.flow_caught_up("A", Partition::Bak), "nothing reported yet");
-        cl.note_applied("A", Partition::Bak, Watermark::new(7, 1));
-        assert!(!cl.flow_caught_up("A", Partition::Bak), "reported below the head");
-        cl.note_applied("A", Partition::Bak, Watermark::new(7, 2));
-        assert!(cl.flow_caught_up("A", Partition::Bak), "reported the head");
-        // The other partition has its own flow: nothing carries it.
-        assert!(!cl.flow_caught_up("A", Partition::Pri));
-    }
-
-    #[test]
-    fn an_empty_sublog_is_caught_up_only_once_its_flow_reports() {
-        let cl = changelog();
-        assert!(!cl.flow_caught_up("A", Partition::Bak), "no peer log at all");
-        let _guard = cl.serving("A", Partition::Bak);
-        assert!(!cl.flow_caught_up("A", Partition::Bak), "connected, nothing reported");
-        // The first catch-up Noop reports the scan head: current from then on.
-        cl.note_applied("A", Partition::Bak, Watermark::new(7, 0));
-        assert!(cl.flow_caught_up("A", Partition::Bak));
-    }
-
-    #[test]
-    fn a_reaped_peer_log_is_not_vacuously_current_on_return() {
-        let cl = changelog().with_ttls(1_000, 1_000);
-        {
-            let _guard = cl.serving("A", Partition::Bak);
-            cl.bump_put("A", "call-1", Partition::Bak);
-            cl.note_applied("A", Partition::Bak, Watermark::new(7, 1));
-            assert!(cl.flow_caught_up("A", Partition::Bak));
-        }
-        cl.reap(10_000);
-        assert!(!cl.has_peer("A"), "idle past the dead-peer TTL: the log is gone");
-        let _again = cl.serving("A", Partition::Bak);
-        assert!(!cl.flow_caught_up("A", Partition::Bak), "a fresh log has no claim");
-    }
-
-    #[test]
-    fn a_second_flow_does_not_inherit_a_dead_flows_claim() {
-        let cl = changelog();
-        let _dead = cl.serving("A", Partition::Bak);
-        cl.bump_put("A", "call-1", Partition::Bak);
-        cl.note_applied("A", Partition::Bak, Watermark::new(7, 1));
-        assert!(cl.flow_caught_up("A", Partition::Bak));
-        // The peer reconnects while its old socket is still open server-side.
-        let _fresh = cl.serving("A", Partition::Bak);
-        assert!(!cl.flow_caught_up("A", Partition::Bak), "the new flow has reported nothing");
-        cl.note_applied("A", Partition::Bak, Watermark::new(7, 1));
-        assert!(cl.flow_caught_up("A", Partition::Bak));
-    }
-
-    #[test]
-    fn a_disconnected_flow_holds_no_position() {
-        let cl = changelog();
-        let guard = cl.serving("A", Partition::Bak);
-        cl.bump_put("A", "call-1", Partition::Bak);
-        cl.note_applied("A", Partition::Bak, Watermark::new(7, 1));
-        assert!(cl.flow_caught_up("A", Partition::Bak));
-        drop(guard);
-        assert!(!cl.flow_caught_up("A", Partition::Bak), "a cut flow's position is unknown");
-        // A fresh flow starts from "unknown", not from the cleared claim.
-        let _again = cl.serving("A", Partition::Bak);
-        assert!(!cl.flow_caught_up("A", Partition::Bak));
-    }
-
-    #[test]
-    fn the_head_survives_compaction_of_the_same_ref() {
-        let cl = changelog();
-        let _guard = cl.serving("A", Partition::Bak);
-        cl.bump_put("A", "call-1", Partition::Bak);
-        cl.bump_put("A", "call-1", Partition::Bak);
-        assert_eq!(cl.peer_len("A", Partition::Bak), 1, "compacted to one entry");
-        cl.note_applied("A", Partition::Bak, Watermark::new(7, 1));
-        assert!(!cl.flow_caught_up("A", Partition::Bak), "counter 1 was moved to 2");
-        cl.note_applied("A", Partition::Bak, Watermark::new(7, 2));
-        assert!(cl.flow_caught_up("A", Partition::Bak));
-    }
-
-    /// A source holding no bodies: every drained entry is a `Delete`.
-    struct NoBodies;
-
-    #[async_trait::async_trait]
-    impl BodySource for NoBodies {
-        async fn read_body(&self, _: PartitionRole, _: &str, _: &str) -> Option<Arc<[u8]>> {
-            None
-        }
-        fn read_meta(&self, _: &str) -> Option<RefMeta> {
-            None
-        }
-    }
-
-    /// The `(op, answered)` of every frame `cl` drains for `A`'s Backup flow
-    /// from `since`.
-    async fn drained(cl: &Changelog, since: Watermark) -> Vec<(Op, bool)> {
-        cl.drain_since("A", Partition::Bak, since, 100, &NoBodies, PartitionRole::Primary, "self")
-            .await
-            .into_iter()
-            .map(|f| match f {
-                Frame::Data { op, answered, .. } => (op, answered),
-                other => panic!("expected Data, got {other:?}"),
-            })
-            .collect()
-    }
-
-    #[tokio::test]
-    async fn a_put_compacted_into_a_delete_drains_as_one_delete_stating_the_answer() {
-        let cl = changelog();
-        cl.bump_put("A", "call-1", Partition::Bak);
-        cl.bump_delete("A", "call-1", Partition::Bak, true, None);
-        assert_eq!(drained(&cl, Watermark::new(7, 0)).await, vec![(Op::Delete, true)]);
-        // A cold drain reads the same tombstone.
-        assert_eq!(drained(&cl, Watermark::new(0, 0)).await, vec![(Op::Delete, true)]);
-    }
-
-    #[tokio::test]
-    async fn a_later_delete_stating_no_answer_keeps_the_stated_one() {
-        let cl = changelog();
-        cl.bump_delete("A", "call-1", Partition::Bak, true, None);
-        cl.bump_delete("A", "call-1", Partition::Bak, false, None);
-        assert_eq!(drained(&cl, Watermark::new(7, 0)).await, vec![(Op::Delete, true)]);
-        // A delete that never stated one states none.
-        cl.bump_delete("A", "call-2", Partition::Bak, false, None);
-        assert_eq!(
-            drained(&cl, Watermark::new(7, 2)).await,
-            vec![(Op::Delete, false)],
-            "call-2 alone is above counter 2",
-        );
-    }
-
-    #[tokio::test]
-    async fn a_put_after_a_delete_starts_a_new_call_with_no_answer_stated() {
-        let cl = changelog();
-        cl.bump_delete("A", "call-1", Partition::Bak, true, None);
-        // The same ref is reused by a new call inside the tombstone window.
-        cl.bump_put("A", "call-1", Partition::Bak);
-        cl.bump_delete("A", "call-1", Partition::Bak, false, None);
-        assert_eq!(
-            drained(&cl, Watermark::new(7, 0)).await,
-            vec![(Op::Delete, false)],
-            "the earlier call's answer is not the new call's",
-        );
-    }
-
-    /// A source whose body is deleted, with `answered`, between the drain's
-    /// snapshot and its body read: a local delete landing mid-drain.
-    struct DeletedMidDrain {
-        cl: Changelog,
-        answered: bool,
-    }
-
-    #[async_trait::async_trait]
-    impl BodySource for DeletedMidDrain {
-        async fn read_body(&self, _: PartitionRole, _: &str, call_ref: &str) -> Option<Arc<[u8]>> {
-            self.cl.bump_delete("A", call_ref, Partition::Bak, self.answered, None);
-            None
-        }
-        fn read_meta(&self, _: &str) -> Option<RefMeta> {
-            None
-        }
-    }
-
-    #[tokio::test]
-    async fn a_delete_landing_mid_drain_goes_out_once_with_its_own_answer() {
-        let cl = changelog();
-        cl.bump_put("A", "call-1", Partition::Bak);
-        let source = DeletedMidDrain { cl: cl.clone(), answered: true };
-        let first = cl
-            .drain_since(
-                "A",
-                Partition::Bak,
-                Watermark::new(7, 0),
-                100,
-                &source,
-                PartitionRole::Primary,
-                "self",
-            )
-            .await;
-        assert!(first.is_empty(), "the vanished Put leaves its delete to its own entry: {first:?}");
-        assert_eq!(drained(&cl, Watermark::new(7, 1)).await, vec![(Op::Delete, true)]);
-    }
-
-    #[test]
-    fn a_position_from_an_older_incarnation_never_reaches_the_head() {
-        let cl = changelog();
-        let _guard = cl.serving("A", Partition::Bak);
-        cl.bump_put("A", "call-1", Partition::Bak);
-        cl.note_applied("A", Partition::Bak, Watermark::new(6, u64::MAX));
-        assert!(!cl.flow_caught_up("A", Partition::Bak));
-    }
-}
+mod tests;

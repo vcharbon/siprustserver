@@ -34,25 +34,9 @@ export interface CdrAbsent extends Schema.Schema.Type<typeof CdrAbsent> {}
 export const CdrExpectation = Schema.Union([CdrCheck, CdrAbsent])
 export type CdrExpectation = typeof CdrExpectation.Type
 
-export const isCdrAbsent = (expectation: CdrExpectation): expectation is CdrAbsent => "absent" in expectation
-
-/** The field assertions the expectation carries. A stated absence carries none. */
-export const cdrChecks = (expectation: CdrExpectation): ReadonlyArray<Check> =>
-  isCdrAbsent(expectation) ? [] : (expectation.checks ?? [])
-
 /** Assertions evaluated once, after settle. */
 export const Postconditions = Schema.Struct({
   cdr: Schema.optionalKey(CdrExpectation),
   checks: Schema.optionalKey(Schema.Array(Check))
 })
 export interface Postconditions extends Schema.Schema.Type<typeof Postconditions> {}
-
-/**
- * Whether the CDR expectation is stated in either of its two forms, with a
- * non-empty reason where it is an absence.
- */
-export const cdrIsDeclared = (post: Postconditions): boolean => {
-  const cdr = post.cdr
-  if (cdr === undefined) return false
-  return isCdrAbsent(cdr) ? cdr.absent.length > 0 : true
-}

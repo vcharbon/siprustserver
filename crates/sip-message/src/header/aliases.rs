@@ -39,6 +39,9 @@ pub type Privacy = TokenListHeader<kind::Privacy>;
 
 pub type Event = TokenParamsHeader<kind::Event>;
 pub type SubscriptionState = TokenParamsHeader<kind::SubscriptionState>;
+/// RFC 4488 §4 — whether a REFER asks for its implicit subscription:
+/// `true` or `false`, then extension parameters.
+pub type ReferSub = TokenParamsHeader<kind::ReferSub>;
 /// The Content-Type value — the media type describing the body.
 pub type MediaType = TokenParamsHeader<kind::ContentType>;
 /// One media range of an `Accept` line (RFC 3261 §20.1); a line carries several, comma-separated.
@@ -75,7 +78,7 @@ impl MediaType {
     pub fn is_multipart(&self) -> bool {
         const COMPOSITE: &[u8] = b"multipart/";
         let token = self.token().as_bytes();
-        token.len() >= COMPOSITE.len() && token[..COMPOSITE.len()].eq_ignore_ascii_case(COMPOSITE)
+        token.get(..COMPOSITE.len()).is_some_and(|head| head.eq_ignore_ascii_case(COMPOSITE))
     }
 }
 

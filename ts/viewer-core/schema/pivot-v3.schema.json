@@ -1,0 +1,2363 @@
+{
+  "$defs": {
+    "Abandoned": {
+      "additionalProperties": false,
+      "description": "A call the CALLER abandoned before any dial crossed this vantage.\n\nThe CANCEL itself is NOT restated here: `step` names the flow step carrying\nit, so what the caller sent and when it sent it has one home. The final that\nfollows a cancelled INVITE is the `487` RFC 3261 §9.2 owes it and states no\nrouting decision, which is why an abandon is not a [`Refused`].",
+      "properties": {
+        "evidence": {
+          "description": "Why the cut reads this vantage as an abandon rather than as a decision\nthe platform took.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "step": {
+          "description": "The caller-leg step carrying the CANCEL the caller SENT.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "step"
+      ],
+      "type": "object"
+    },
+    "Accessor": {
+      "description": "A run-time value: `${leg:<id>.<field>}`, `${early:<id>.<field>}`, `${step:<id>.<field>}` or `${num:<identity>:<form>}`.",
+      "pattern": "^\\$\\{((leg|early|step):[^.{}]+\\.[^{}]+|num:[^:{}]+:[^:{}]+)\\}$",
+      "type": "string"
+    },
+    "Actor": {
+      "additionalProperties": false,
+      "description": "One simulated network element.",
+      "properties": {
+        "background": {
+          "description": "Traffic this actor answers OUTSIDE the flow: matching messages never\nmove the flow cursor.",
+          "items": {
+            "$ref": "#/$defs/BackgroundPolicy"
+          },
+          "type": "array"
+        },
+        "claim": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Claim"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How a UAS claims its inbound INVITE."
+        },
+        "endpoint": {
+          "description": "Endpoint id.",
+          "type": "string"
+        },
+        "id": {
+          "description": "Unique within the document; what a leg names.",
+          "type": "string"
+        },
+        "identity": {
+          "description": "Name of the actor's own identity in the `identities` registry — the\nCALLER's, in practice: a callee's identity is named by its attempt.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/ActorKind",
+          "description": "The SIP role the actor plays."
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "endpoint"
+      ],
+      "type": "object"
+    },
+    "ActorKind": {
+      "description": "The SIP role an actor plays.",
+      "oneOf": [
+        {
+          "const": "uac",
+          "description": "Places calls: originates the dialogs its legs open.",
+          "type": "string"
+        },
+        {
+          "const": "uas",
+          "description": "Takes calls: answers the INVITEs it claims.",
+          "type": "string"
+        },
+        {
+          "const": "mrf",
+          "description": "Media resource: answers, plays, and takes INFO rather than routing.",
+          "type": "string"
+        }
+      ]
+    },
+    "Alt": {
+      "additionalProperties": false,
+      "description": "Declared alternatives. The interpreter commits on the first discriminating\nmessage and NEVER backtracks, so branches must differ at their first\nmessage — which lint enforces structurally rather than trusting an author.",
+      "properties": {
+        "after": {
+          "description": "Ids of steps that must have completed before the alt opens.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "branches": {
+          "description": "The alternatives, two or more, discriminable at their first message.",
+          "items": {
+            "$ref": "#/$defs/Branch"
+          },
+          "type": "array"
+        },
+        "id": {
+          "description": "Unique within the document. Referenced from outside the alt in place of\nany step inside it, and by `${step:<alt-id>.branch}`.",
+          "type": "string"
+        },
+        "op": {
+          "$ref": "#/$defs/AltOp",
+          "description": "Always `alt`."
+        }
+      },
+      "required": [
+        "id",
+        "op",
+        "branches"
+      ],
+      "type": "object"
+    },
+    "AltOp": {
+      "description": "The `op` of an `alt` node.",
+      "enum": [
+        "alt"
+      ],
+      "type": "string"
+    },
+    "Anchor": {
+      "description": "Delay anchor: `trigger` or `step:<id>`.",
+      "pattern": "^(trigger|step:[^ ]+)$",
+      "type": "string"
+    },
+    "Annotations": {
+      "additionalProperties": false,
+      "description": "Generator diagnostics and detection evidence that drives nothing, save the\n`census-uncovered` flag, which a run's RFC audit reads as the document's\nword that it states none of its scripted parties' violations (§11.1).",
+      "properties": {
+        "flags": {
+          "description": "Decisions the generator owes a human, one per diagnostic.",
+          "items": {
+            "$ref": "#/$defs/Flag"
+          },
+          "type": "array"
+        },
+        "notes": {
+          "description": "Free prose for a reviewer: what the case proves, and what it does not.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Attempt": {
+      "additionalProperties": false,
+      "description": "One dialed attempt in a call's chain.",
+      "properties": {
+        "branch": {
+          "description": "Parallel branch index.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "callee": {
+          "$ref": "#/$defs/Callee",
+          "description": "Who the attempt dials."
+        },
+        "cause": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Cause"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Why the platform left this attempt."
+        },
+        "cause_evidence": {
+          "description": "The captured signals that justify `cause`. Belongs to the attempt that\nFAILED.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "final": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Final"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The attempt's own terminal INVITE final at its vantage. What makes the\nchain barrier derivable without a per-step ordering field."
+        },
+        "join_evidence": {
+          "description": "Why the correlator put THIS attempt in that chain. Belongs to the\nattempt that JOINED.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "joined_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JoinedBy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What ADDED this leg to the call: a transfer, or a media resource\ninserted into it. A joined leg is a parallel arrival, not a failure —\nthe first attempt answered and the call then dialed somebody else — so\nit is exclusive with the failure-only sequential `cause`."
+        },
+        "leg": {
+          "description": "The leg id the flow uses for this attempt.",
+          "type": "string"
+        },
+        "no_answer_ms": {
+          "description": "First-18x-to-CANCEL dwell on the attempt's leg, ms, present exactly\nwhen `cause` is `no-answer`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "position": {
+          "description": "Position within the branch's sequential chain. Explicit, not array\norder, so `(branch, position)` stays a stable key under sorted-key\nformatting.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "branch",
+        "position",
+        "leg",
+        "callee"
+      ],
+      "type": "object"
+    },
+    "BackgroundMatch": {
+      "additionalProperties": false,
+      "description": "What a background policy matches. Method-only today: a keepalive is\nidentified by its method, and a policy that had to inspect a header would\nbe a flow step wearing a disguise.",
+      "properties": {
+        "method": {
+          "description": "The method this policy answers. Matching messages never move the flow\ncursor and never satisfy an `expect`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object"
+    },
+    "BackgroundPolicy": {
+      "additionalProperties": false,
+      "description": "One class of background traffic an actor answers, and what the run must\nhave seen of it by settle.\n\nA matching message is answered per `respond` and recorded; it never\nsatisfies an `expect`, and no flow step is ever written for one. An\nassertion about background traffic is a COUNTER checked at settle, because\n\"the endpoint was polled while the call ran\" is a fact about a period, not\nabout a position in a sequence.",
+      "properties": {
+        "count": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CountBound"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How many such messages the run must have seen, checked at settle."
+        },
+        "match": {
+          "$ref": "#/$defs/BackgroundMatch",
+          "description": "What the policy answers."
+        },
+        "respond": {
+          "$ref": "#/$defs/BackgroundResponse",
+          "description": "How it answers."
+        }
+      },
+      "required": [
+        "match",
+        "respond"
+      ],
+      "type": "object"
+    },
+    "BackgroundResponse": {
+      "additionalProperties": false,
+      "description": "How a background policy answers.",
+      "properties": {
+        "status": {
+          "description": "The status the actor answers with. Mandatory: a policy is never silent.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "Binding": {
+      "description": "How the lane must bind an endpoint. Stated PER ENDPOINT: a case may mix a\nloopback vantage on one attempt with a dedicated one on the next.",
+      "oneOf": [
+        {
+          "const": "dedicated",
+          "description": "The endpoint hosts one role, on its own socket.",
+          "type": "string"
+        },
+        {
+          "const": "loopback",
+          "description": "The endpoint hosts both a UAC and a UAS on one socket.",
+          "type": "string"
+        }
+      ]
+    },
+    "Body": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MultipartBody",
+          "description": "A decomposed multipart body: the parts are sibling resource files."
+        },
+        {
+          "$ref": "#/$defs/ResourceBody",
+          "description": "A single body stored as a resource file."
+        },
+        {
+          "$ref": "#/$defs/ShapeBody",
+          "description": "A declared shape, checked rather than emitted."
+        }
+      ],
+      "description": "The body a step emits or checks."
+    },
+    "BodyCompare": {
+      "description": "How a received body is compared with the resource an expect states.",
+      "oneOf": [
+        {
+          "const": "exact",
+          "description": "Byte for byte.",
+          "type": "string"
+        },
+        {
+          "const": "xml",
+          "description": "As XML text after normalisation on both sides: the XML declaration\ndropped, whitespace-only text between tags removed, leading and\ntrailing whitespace trimmed. Nothing else — no attribute reordering, no\nentity work.",
+          "type": "string"
+        },
+        {
+          "const": "sdp",
+          "description": "As an SDP session description: session section then media sections by\nposition; within a section lines compare as a multiset (attribute order\nerased); `o=` sess-id and sess-version are masked always, and every\nfield a `rewrite` token of the expect names — exactly what the render\nwrites: `c=addr` the address of a `c=IN IP4` line, `m=port` the non-zero\nport of an `m=` line with its `/count` kept; `a=rtcp` never — is masked\nwhere the run's media plane rebooked it. On a verbatim run the tokens\nmask nothing and two descriptions the structure cannot tell apart must\nbe the same bytes. Nothing else.",
+          "type": "string"
+        }
+      ]
+    },
+    "BodyMode": {
+      "description": "How the registry handles a stored body or part: `frozen` replays and\ncompares byte-exact whatever the payload holds, except that an MSCML\n`<response>` a send emits takes the client-defined id of the request it\nanswers (RFC 5022 §10.2, §8.3). Whether the payload is text or bytes is a\nfact of the bytes, never a declared mode (ADR-0035).",
+      "enum": [
+        "frozen"
+      ],
+      "type": "string"
+    },
+    "BodyShape": {
+      "description": "The declared shape of an expected body.",
+      "oneOf": [
+        {
+          "const": "sdp-present",
+          "description": "An SDP body is present; its content is not asserted here.",
+          "type": "string"
+        },
+        {
+          "const": "absent",
+          "description": "The message carries no body, and that IS the assertion (RFC 3264 §5: a\nbodyless INVITE is the delayed offer, not an unclassified body).",
+          "type": "string"
+        },
+        {
+          "const": "multipart-present",
+          "description": "A multipart body is present.",
+          "type": "string"
+        }
+      ]
+    },
+    "Branch": {
+      "additionalProperties": false,
+      "description": "One alternative. Its `name` is what a later assertion cites\n(`${step:<alt-id>.branch}`).",
+      "properties": {
+        "name": {
+          "description": "Unique within the alt; what `${step:<alt-id>.branch}` resolves to.",
+          "type": "string"
+        },
+        "steps": {
+          "description": "The branch's messages, in order. Message steps only — a nested block\nwould have no first message to commit on.",
+          "items": {
+            "$ref": "#/$defs/Step"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "steps"
+      ],
+      "type": "object"
+    },
+    "Call": {
+      "additionalProperties": false,
+      "description": "One call: who places it, where it is routed, and how the system handled\nprovisionals for it.",
+      "properties": {
+        "abandoned": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Abandoned"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The CALLER abandoned the call before any called leg crossed this\nvantage. Exclusive with a chain and with `refused`: the platform took no\nrouting decision here, so nothing it sent the caller states one."
+        },
+        "attempts": {
+          "description": "The attempt chain, in one encoding. Empty exactly when `refused` or\n`abandoned` says why the call dialed nobody.",
+          "items": {
+            "$ref": "#/$defs/Attempt"
+          },
+          "type": "array"
+        },
+        "caller_leg": {
+          "description": "The leg that originates the call.",
+          "type": "string"
+        },
+        "id": {
+          "description": "Unique within the document. Tier-2 position tokens qualify with it\n(`<call-id>.called[b][s]`) once a document declares more than one call.",
+          "type": "string"
+        },
+        "refused": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Refused"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The routing decision REFUSED the call: the platform dialed nobody and\nanswered the caller itself. Exclusive with a chain — a call either has\nattempts or has none because it was refused."
+        },
+        "relay18x": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Relay18x"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The provisional-handling profile the captured system ran for THIS call."
+        }
+      },
+      "required": [
+        "id",
+        "caller_leg",
+        "attempts"
+      ],
+      "type": "object"
+    },
+    "Callee": {
+      "additionalProperties": false,
+      "description": "The dialed target.",
+      "properties": {
+        "identity": {
+          "description": "Name of an entry in the document's `identities` registry. The number\nitself is never embedded here: which number a name becomes is a per-lane\nbinding the driver performs.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity"
+      ],
+      "type": "object"
+    },
+    "Case": {
+      "additionalProperties": false,
+      "description": "Case identity, provenance and replayability.",
+      "properties": {
+        "annotations": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Annotations"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Informative sidecar. The interpreter never reads it."
+        },
+        "defect": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Defect"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The step whose outcome IS the defect, plus a description."
+        },
+        "family": {
+          "description": "Informative classification of the callflow shape. Open token; never\ninterpreted by an interpreter or a lane.",
+          "type": "string"
+        },
+        "id": {
+          "description": "Case directory name.",
+          "type": "string"
+        },
+        "lanes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/LaneVerdict"
+          },
+          "description": "Per-lane replayability verdict, keyed by lane name. The generator STATES\nwhether a lane can replay the case; a driver skips a non-replayable lane\nloudly instead of failing it.",
+          "type": "object"
+        },
+        "origin": {
+          "$ref": "#/$defs/Origin",
+          "description": "Where the document came from. What the generator-subset lint gate turns\non: a captured document may carry only what a capture can justify."
+        },
+        "origin_lane": {
+          "description": "The lane whose system produced the content this document asserts — the\ncaptured platform, or the deployment a test was authored against. Open\ntoken, and the one input to the lane-scoped downgrade of §9.1: replayed\non another lane, a CLASSIFIED check is evaluated and recorded without\ngating. A document that states none downgrades nothing.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requires": {
+          "description": "Capabilities the rig must have for this case to mean anything (`proxy`,\n`ha-pair`, `store-faults`, …). INFORMATIVE and open: the driver refuses\nan impossible scenario/scene pairing loudly instead of running a test\nthat cannot fail. The interpreter never reads it.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Source"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where the case was cut from. Present exactly on a captured document."
+        },
+        "title": {
+          "description": "One line, human-facing.",
+          "type": "string"
+        },
+        "variant": {
+          "$ref": "#/$defs/Variant",
+          "description": "Which side of a fix the document describes."
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "family",
+        "variant",
+        "origin",
+        "lanes"
+      ],
+      "type": "object"
+    },
+    "CatalogEntry": {
+      "additionalProperties": false,
+      "description": "The catalog's own classification of a provisioned number.",
+      "properties": {
+        "class": {
+          "description": "Open catalog class token. Deployment vocabulary — never interpreted\nhere.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "class"
+      ],
+      "type": "object"
+    },
+    "Cause": {
+      "description": "Why the platform left an attempt: `no-answer`, `no-provisional`, `busy`, `transaction-timeout`, `closed:bye`, `redirect:<3xx>` or `external:<4xx-6xx>`.",
+      "pattern": "^(no-answer|no-provisional|busy|transaction-timeout|closed:bye|redirect:3[0-9]{2}|external:[4-6][0-9]{2})$",
+      "type": "string"
+    },
+    "CdrAbsent": {
+      "additionalProperties": false,
+      "description": "A stated absence of a CDR assertion.",
+      "properties": {
+        "absent": {
+          "description": "Open reason token, e.g. `capture-carries-no-cdr`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "absent"
+      ],
+      "type": "object"
+    },
+    "CdrCheck": {
+      "additionalProperties": false,
+      "description": "The CDR count the run must produce, plus any field assertions over them.",
+      "properties": {
+        "checks": {
+          "description": "Field assertions over them, in the one check vocabulary.",
+          "items": {
+            "$ref": "#/$defs/Check"
+          },
+          "type": "array"
+        },
+        "count": {
+          "description": "How many records the run must have written.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "count"
+      ],
+      "type": "object"
+    },
+    "CdrExpectation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CdrCheck",
+          "description": "The records the run must have written."
+        },
+        {
+          "$ref": "#/$defs/CdrAbsent",
+          "description": "No CDR assertion, with the reason stated. An open token, so a\ndeployment names its own gaps; what is closed is that a gap must be\nNAMED."
+        }
+      ],
+      "description": "What the run must have billed, or why nothing can be said about it."
+    },
+    "Check": {
+      "additionalProperties": false,
+      "description": "One field assertion.",
+      "properties": {
+        "class": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckClass"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Which vocabulary the check reads (§9.1). Stated where the assertion is\nthe ORIGIN platform's rather than SIP's, so a run on another lane\nevaluates and records it without gating on it. An unclassified check\ngates on every lane."
+        },
+        "field": {
+          "description": "Field selector. Open token: `from.userInfo`, `header(P-Asserted-Identity)`,\n`body`, or a deployment observable's name in a postcondition.",
+          "type": "string"
+        },
+        "op": {
+          "$ref": "#/$defs/CheckOp",
+          "description": "How the field is compared."
+        },
+        "value": {
+          "description": "Expected value: a literal, a regex (op `Regex`), or a string carrying\n`${…}` accessors. Absent exactly for `Exists` and `Absent`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "field",
+        "op"
+      ],
+      "type": "object"
+    },
+    "CheckClass": {
+      "description": "What vocabulary an assertion reads. Closed: a class is a promise that one\nnamed downgrade rule applies to it, and a rule nothing implements is not a\npromise.",
+      "oneOf": [
+        {
+          "const": "origin-platform-header",
+          "description": "A header only the origin platform emits (`P-Charging-Vector`,\n`X-Vendor-Id`, `X-Vendor-Orig`). Another platform relays a compliant message\nthat simply does not carry it.",
+          "type": "string"
+        },
+        {
+          "const": "cdr-vocabulary",
+          "description": "The origin platform's CDR record vocabulary: event names, disposition\nwords, field spellings. Another platform bills the same call in its own\nwords.",
+          "type": "string"
+        }
+      ]
+    },
+    "CheckMode": {
+      "description": "What an `expect` does with the content it stored. The GENERATOR decides and\nthe document says which; a lane never picks the meaning. Under both values\nthe step still gates on `op`, leg alignment, the discriminator and\n`within_ms`.",
+      "oneOf": [
+        {
+          "const": "assert",
+          "description": "The stored content is MATCHED against the inbound message. Applies where\nsome captured peer emitted the message and the system relayed it.",
+          "type": "string"
+        },
+        {
+          "const": "record",
+          "description": "The stored content is RECORDED for post-run confrontation and matched\nagainst nothing. Applies where the system MINTED the message.",
+          "type": "string"
+        }
+      ]
+    },
+    "CheckOp": {
+      "description": "The assertion operator.",
+      "oneOf": [
+        {
+          "const": "eq",
+          "description": "`value` (after `${…}` substitution) must equal the extracted field.",
+          "type": "string"
+        },
+        {
+          "const": "regex",
+          "description": "`value` is a regex the extracted field must match.",
+          "type": "string"
+        },
+        {
+          "const": "exists",
+          "description": "The field must be present. Takes no `value`.",
+          "type": "string"
+        },
+        {
+          "const": "absent",
+          "description": "The field must be absent. Takes no `value`.",
+          "type": "string"
+        }
+      ]
+    },
+    "Claim": {
+      "additionalProperties": false,
+      "description": "How a UAS decides that an inbound INVITE is the one it is playing. Carries\n`by` and nothing else: which attempt an actor plays is already stated by\n`calls[].attempts[].leg`, and restating it would give the chain two\nencodings.",
+      "properties": {
+        "by": {
+          "$ref": "#/$defs/ClaimBy",
+          "description": "What tells this actor's inbound INVITE from another's."
+        }
+      },
+      "required": [
+        "by"
+      ],
+      "type": "object"
+    },
+    "ClaimBy": {
+      "description": "The claim discriminator.",
+      "oneOf": [
+        {
+          "const": "ruri-pos",
+          "description": "The R-URI carries the number allocated to this actor's attempt.",
+          "type": "string"
+        },
+        {
+          "const": "arrival-order",
+          "description": "Nothing distinguishes the INVITEs; the Nth arrival is the Nth claim.",
+          "type": "string"
+        }
+      ]
+    },
+    "Computed": {
+      "additionalProperties": false,
+      "description": "The one computable form: a referenced value plus a signed offset. There is\nno expression language, deliberately — `{ from, delta }` covers \"the CSeq\nthe peer sent, plus one\", which is every arithmetic the corpus and the\nported tests need.",
+      "properties": {
+        "delta": {
+          "description": "Signed offset applied to it.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "from": {
+          "$ref": "#/$defs/Accessor",
+          "description": "The accessor the value is read from."
+        }
+      },
+      "required": [
+        "from",
+        "delta"
+      ],
+      "type": "object"
+    },
+    "CountBound": {
+      "additionalProperties": false,
+      "description": "A settle-time count assertion. Every bound stated is checked; stating none\nmeans the traffic is answered and not asserted about.",
+      "properties": {
+        "at_least": {
+          "description": "Lower bound on the messages this policy answered.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "at_most": {
+          "description": "Upper bound. `at_most: 0` and `exactly: 0` are how a document states an\nabsence.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "exactly": {
+          "description": "Exact count. Exclusive with the two bounds above.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "CseqValue": {
+      "anyOf": [
+        {
+          "description": "The number to emit, stated outright.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "$ref": "#/$defs/Computed",
+          "description": "Relative to a CSeq the run observed: `{ from: \"${step:s7.cseq}\",\ndelta: 1 }`. A capture cannot state this — the number it saw is\nabsolute — so it is an authored form."
+        }
+      ],
+      "description": "A `cseq-override`'s value."
+    },
+    "DeclaredFailure": {
+      "description": "The failures this format can declare. Closed: each member names a failure\nthe generator can predict from a detector's hit plus this lane's behaviour.",
+      "oneOf": [
+        {
+          "const": "unexpected-ack",
+          "description": "This platform ACKs a dialog-creating 2xx locally (RFC 3261 §13.2.2.4)\nwhere the source platform relayed an ACK that never came. The capture\nholds no such datagram, so the document holds no step for it, and the\nACK arrives where nothing expects it.",
+          "type": "string"
+        },
+        {
+          "const": "unexpected-prack",
+          "description": "This platform PRACKs a reliable provisional it receives (RFC 3262 §4)\nwhere the source platform never did. The capture holds no PRACK, so the\ndocument holds no step for it, and the PRACK arrives where nothing\nexpects it.",
+          "type": "string"
+        },
+        {
+          "const": "unexpected-cancel",
+          "description": "This platform CANCELs an INVITE client transaction while it is still in\nflight (RFC 3261 §9.1) where the source platform sent its CANCEL only\nafter that transaction had taken — and ACKed — a final response. The\ncapture places the CANCEL behind the final, so the document's own CANCEL\nstep sits behind it too, and this platform's CANCEL arrives ahead of\nwhere anything expects it.",
+          "type": "string"
+        }
+      ]
+    },
+    "Defect": {
+      "additionalProperties": false,
+      "description": "The defect a repro case exists to hold still.",
+      "properties": {
+        "description": {
+          "description": "What is wrong, in one human-facing sentence.",
+          "type": "string"
+        },
+        "marker": {
+          "$ref": "#/$defs/DefectMarker",
+          "description": "Where in the flow the defect shows."
+        }
+      },
+      "required": [
+        "marker",
+        "description"
+      ],
+      "type": "object"
+    },
+    "DefectMarker": {
+      "additionalProperties": false,
+      "description": "The flow step whose outcome IS the defect, named by its id — so inserting a\nstep ahead of it does not move the marker.",
+      "properties": {
+        "step": {
+          "description": "Id of the step whose outcome IS the defect.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "step"
+      ],
+      "type": "object"
+    },
+    "Delay": {
+      "additionalProperties": false,
+      "description": "Dwell from an explicit anchor. There are no absolute times in a pivot.",
+      "properties": {
+        "compressible": {
+          "description": "Whether a virtual-clock lane may compress this dwell. STATED, never\nre-derived: a lane that compresses reads this and nothing else.",
+          "type": "boolean"
+        },
+        "from": {
+          "$ref": "#/$defs/Anchor",
+          "description": "What the dwell is measured from: the case's start, or a named step."
+        },
+        "ms": {
+          "description": "Milliseconds from the anchor.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "timer_linked": {
+          "description": "Whether the dwell interacts with a system or session timer.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ms",
+        "from",
+        "compressible",
+        "timer_linked"
+      ],
+      "type": "object"
+    },
+    "Deviation": {
+      "additionalProperties": false,
+      "description": "One reproduced non-compliance.",
+      "properties": {
+        "header": {
+          "description": "The header the deviation targets, canonically named. A deliberate\ncontent-level malformation breaks ONE header's grammar in an otherwise\ncompliant message; without this the entry points at the step and an\ninterpreter cannot tell which of its own renderers to stand down.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Unique within the document; what a review comment cites.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Open token naming the non-compliance. The kinds with a stated payload:\n`cseq-override` (`value`), `suppress-auto` (`step`, an auto step),\n`raw-order` and `verbatim-emission` (`preserve`).",
+          "type": "string"
+        },
+        "leg": {
+          "description": "The leg the deviation applies to.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preserve": {
+          "description": "What must survive emission byte-for-byte (e.g. `header-order`,\n`casing`).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "races": {
+          "description": "The other step this one races with.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retransmits": {
+          "description": "Retransmissions the capture shows, where the deviation IS the repeat.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "step": {
+          "description": "The step id the deviation applies to. For `verbatim-emission` this is\nthe SCRIPTED send that triggers it: an auto step is the stack's own\ncomposition, so asking this document to preserve its header order means\nnothing. For `suppress-auto` it is precisely the auto step withheld —\nwhich is why a withheld ACK stays a step with a deviation on it, rather\nthan a hole in the flow.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CseqValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The CSeq a `cseq-override` emits instead of the stack's own: an absolute\nnumber, or an offset from a CSeq the run already saw."
+        }
+      },
+      "required": [
+        "id",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "Direction": {
+      "description": "Which side of the dialog the actor is on.",
+      "oneOf": [
+        {
+          "const": "out",
+          "description": "The actor originates the dialog.",
+          "type": "string"
+        },
+        {
+          "const": "in",
+          "description": "The actor receives it.",
+          "type": "string"
+        }
+      ]
+    },
+    "Endpoint": {
+      "additionalProperties": false,
+      "description": "One socket the lane must bind.",
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/Binding",
+          "description": "How the lane must bind it."
+        },
+        "id": {
+          "description": "Unique within the document; what an actor names.",
+          "type": "string"
+        },
+        "observed": {
+          "description": "The captured socket. A lane binding by address uses it; nothing else in\nthe document carries one.",
+          "type": "string"
+        },
+        "side": {
+          "$ref": "#/$defs/Side",
+          "description": "What the endpoint is relative to the system under test."
+        }
+      },
+      "required": [
+        "id",
+        "observed",
+        "side",
+        "binding"
+      ],
+      "type": "object"
+    },
+    "EntityHeader": {
+      "additionalProperties": false,
+      "description": "One entity header of a MIME part, exactly as the part carried it (RFC 2045\n§3). A part header states MIME, never the origin platform's vocabulary, so\nunlike a message header (`crate::msg::Header`) it carries no check class.",
+      "properties": {
+        "name": {
+          "description": "Header name, in the part's own spelling and casing.",
+          "type": "string"
+        },
+        "value": {
+          "description": "Header value, verbatim.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "type": "object"
+    },
+    "Final": {
+      "additionalProperties": false,
+      "description": "An attempt's terminal INVITE final at its own vantage.",
+      "properties": {
+        "at_ms": {
+          "description": "When it arrived, in milliseconds from the case's first message.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "description": "The final response's status code.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "status",
+        "at_ms"
+      ],
+      "type": "object"
+    },
+    "Flag": {
+      "additionalProperties": false,
+      "description": "One generator diagnostic: a decision owed, stated rather than guessed.",
+      "properties": {
+        "detail": {
+          "description": "What the generator saw, and what it could not decide.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Open token classifying the diagnostic, so a corpus is greppable by it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "detail"
+      ],
+      "type": "object"
+    },
+    "FlowNode": {
+      "description": "One flow node, discriminated by `op`: a message step, an `inject`, an `alt` or an `unordered` group.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Step"
+        },
+        {
+          "$ref": "#/$defs/Inject"
+        },
+        {
+          "$ref": "#/$defs/Alt"
+        },
+        {
+          "$ref": "#/$defs/Unordered"
+        }
+      ]
+    },
+    "FrozenRef": {
+      "additionalProperties": false,
+      "description": "A tier-2 reference the numbering plan did not resolve.",
+      "properties": {
+        "addr": {
+          "description": "On a From or To: the captured name-addr, tag dropped, its role numbers\ncomposed as `${num:…}`. Present, it is the field's whole value and the\nlane composes no URI around it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "frozen": {
+          "description": "The captured value, replayed verbatim.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Open plan token qualifying the frozen value where the plan classified\nthe ADDRESS without resolving a number (an anonymous caller carries no\nnumber to map, but the class still drives emission).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "frozen"
+      ],
+      "type": "object"
+    },
+    "Header": {
+      "additionalProperties": false,
+      "description": "One frozen header, exactly as the capture carried it.",
+      "properties": {
+        "class": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckClass"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Which vocabulary this header is (§9.1), where it is the ORIGIN\nplatform's rather than SIP's. Under `check: assert` a classified header\nis matched on the lane the document came from and merely recorded\nelsewhere; an unclassified header is matched on every lane."
+        },
+        "name": {
+          "description": "Header name, in the capture's own spelling and casing.",
+          "type": "string"
+        },
+        "value": {
+          "description": "Header value, verbatim — or, in an authored document, composed from\n`${…}` accessors.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "type": "object"
+    },
+    "Identity": {
+      "additionalProperties": false,
+      "description": "One party's identity: what the plan made of it, under the name the rest of\nthe document refers to it by.",
+      "properties": {
+        "catalog": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CatalogEntry"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What the number catalog says about the value, when a catalog answered."
+        },
+        "forms": {
+          "description": "Open dial-form tokens the plan resolved this value into, and the forms\n`${num:<name>:<form>}` may ask for. Omitted when the plan resolved none.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "description": "Open plan token classifying the identity (e.g. a caller class, a\ncatalog class, or `unknown` when the plan does not recognize it).",
+          "type": "string"
+        },
+        "name": {
+          "description": "Unique within the document, and the only handle onto this identity:\n`attempts[].callee`, `actors[].identity` and `${num:<name>:<form>}` all\nname it. A generated document synthesizes the name from the party's\nposition (`caller`, `called-0-1`), so one encoding covers captured and\nauthored documents alike.",
+          "type": "string"
+        },
+        "observed": {
+          "description": "On a captured document: the anonymized value the capture carried, and\nthe provenance that discipline is about. On an authored one: optional\nand purely informative — the lane binds the NAME, never this — so\nprefer omitting it and letting `${num:…}` compose the value.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "Inject": {
+      "additionalProperties": false,
+      "description": "An external event the lane's injector performs. The interpreter NEVER\nexecutes an action: it hands the token to an injector interface the\ndeployment provides, which is why one op spans store faults, HTTP-fabric\nfaults and node kills.",
+      "properties": {
+        "action": {
+          "description": "Open action token from the deployment's injector registry\n(`store-fault:LiveAudit`, `http:decision-cut`, `node-kill`).",
+          "type": "string"
+        },
+        "after": {
+          "description": "Ids of steps that must have completed before the action is handed over.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "delay": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Delay"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Dwell before the action, anchored like a step's."
+        },
+        "id": {
+          "description": "Unique within the document; what `after` and a delay anchor name.",
+          "type": "string"
+        },
+        "op": {
+          "$ref": "#/$defs/InjectOp",
+          "description": "Always `inject`."
+        },
+        "target": {
+          "description": "What the action applies to, in the injector's own vocabulary.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "op",
+        "action"
+      ],
+      "type": "object"
+    },
+    "InjectOp": {
+      "description": "The `op` of an `inject` node.",
+      "enum": [
+        "inject"
+      ],
+      "type": "string"
+    },
+    "JoinKind": {
+      "description": "The mechanisms that join a leg to a running call. Closed: each names a SIP\nevent the document itself carries as a step, and a mechanism nothing can\npoint at is not a join.",
+      "oneOf": [
+        {
+          "const": "refer",
+          "description": "A transfer: an accepted REFER dialed the transferee.",
+          "type": "string"
+        },
+        {
+          "const": "info",
+          "description": "A transfer: an INFO accepted as a transfer order dialed the transferee.",
+          "type": "string"
+        },
+        {
+          "const": "mrf",
+          "description": "A media resource was inserted into the call.",
+          "type": "string"
+        }
+      ]
+    },
+    "JoinedBy": {
+      "additionalProperties": false,
+      "description": "What added a leg to a call that was already running.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/JoinKind",
+          "description": "Which mechanism joined the leg."
+        },
+        "step": {
+          "description": "The flow step that performed the join — the REFER or INFO the platform\naccepted, or the request that inserted the media resource. It must be a step of a\nleg of the SAME call: a join is an event inside one call, and naming\nanother call's step would make the chain unreadable.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "step"
+      ],
+      "type": "object"
+    },
+    "LaneVerdict": {
+      "description": "Lane verdict: `ok` or `blocked:<reason>`.",
+      "pattern": "^(ok|blocked:.+)$",
+      "type": "string"
+    },
+    "Leg": {
+      "additionalProperties": false,
+      "description": "One symbolic dialog.",
+      "properties": {
+        "actor": {
+          "description": "Actor id.",
+          "type": "string"
+        },
+        "dir": {
+          "$ref": "#/$defs/Direction",
+          "description": "Which side of the dialog the actor is on."
+        },
+        "id": {
+          "description": "Unique within the document; what every flow step and leg accessor names.",
+          "type": "string"
+        },
+        "media": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Media"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Per-leg RTP source. Omitted where the leg carries no media."
+        }
+      },
+      "required": [
+        "id",
+        "actor",
+        "dir"
+      ],
+      "type": "object"
+    },
+    "Media": {
+      "additionalProperties": false,
+      "description": "Media the leg carries.",
+      "properties": {
+        "rtp": {
+          "description": "Open token naming how the lane sources RTP for this leg.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rtp"
+      ],
+      "type": "object"
+    },
+    "MsgSpec": {
+      "additionalProperties": false,
+      "description": "The message a step sends or expects.",
+      "properties": {
+        "body": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Body"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The body, by resource reference, multipart structure or asserted shape."
+        },
+        "cseq": {
+          "description": "The captured CSeq NUMBER, on `auto` steps only: the LABEL of the\ntransaction that obliged the message. An identity token for pairing,\nlint and confrontation, and the marker that scopes an auto ACK's DRAWN\n`retransmits` to one transaction — NEVER replayed and never resolved\nagainst: the interpreter's own stack numbers its CSeqs, and an auto ACK\nfinds the final it acknowledges in leg state.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cseq-method": {
+          "description": "On a response: the CSeq method of the transaction it answers. A leg\ncarries the INVITE alongside every automatic, so without it an\nautomatic's 2xx satisfies the expectation meant for the call's answer.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Ref"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Tier-2 ref for the From address."
+        },
+        "headers": {
+          "description": "Tier-3 frozen headers, in wire order with casing and duplicates\npreserved. Stated on an `expect` regardless of `check`: under `assert`\nthey are matched, under `record` they are the recorded value.",
+          "items": {
+            "$ref": "#/$defs/Header"
+          },
+          "type": "array"
+        },
+        "headers-present": {
+          "description": "Existence checks on an expect.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "method": {
+          "description": "Request discriminator.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "The response's reason phrase, as the capture carried it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ruri": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Ref"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Tier-2 refs, on dialog-opening INVITE sends. An in-dialog R-URI is the\ntier-1 learned remote target and is regenerated instead."
+        },
+        "status": {
+          "description": "Response discriminator.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "target-refresh": {
+          "description": "On a send: the leg's party refreshes its remote target here, for the\n`n`-th time (RFC 3261 §12.1.2, §12.2.1.2). The Contact host:port stays\ntier 1; the stack writes a user part of its own per refresh, kept on\nevery later message of the leg, so two messages the capture tells apart\nby their Contact alone stay two messages on the wire.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "to": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Ref"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Tier-2 ref for the To address."
+        }
+      },
+      "type": "object"
+    },
+    "Multipart": {
+      "additionalProperties": false,
+      "description": "The multipart container and its parts.",
+      "properties": {
+        "content-type": {
+          "description": "The container's own media type as the wire wrote it, MINUS its\n`boundary` parameter: the boundary — and only the boundary — is\nregenerated at render, so every other parameter rides through.",
+          "type": "string"
+        },
+        "parts": {
+          "description": "The parts, in wire order.",
+          "items": {
+            "$ref": "#/$defs/Part"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "content-type",
+        "parts"
+      ],
+      "type": "object"
+    },
+    "MultipartBody": {
+      "additionalProperties": false,
+      "description": "A multipart body, referencing its already-decomposed parts.",
+      "properties": {
+        "multipart": {
+          "$ref": "#/$defs/Multipart",
+          "description": "The container and its parts."
+        }
+      },
+      "required": [
+        "multipart"
+      ],
+      "type": "object"
+    },
+    "MustFail": {
+      "additionalProperties": false,
+      "description": "One failure this run must produce, at or immediately after one step.",
+      "properties": {
+        "derived_from": {
+          "$ref": "#/$defs/RfcRule",
+          "description": "The rule the SOURCE broke, whose violation predicts this failure. A\ndeclaration is DERIVED from a detector's hit, never hand-guessed."
+        },
+        "failure": {
+          "$ref": "#/$defs/DeclaredFailure",
+          "description": "What the run must produce."
+        },
+        "step": {
+          "description": "The flow step the failure happens at or immediately after — the anchor,\nso a reader lands on the datagram the divergence turns on.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "failure",
+        "step",
+        "derived_from"
+      ],
+      "type": "object"
+    },
+    "Observed": {
+      "additionalProperties": false,
+      "description": "The step's coordinate in the flows document. Informative: the interpreter\nnever reads it. It exists because the post-run confrontation has to pair a\nrun step with the captured message it is compared against.",
+      "properties": {
+        "at_us": {
+          "description": "Microseconds from the case's FIRST captured message.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "leg": {
+          "description": "Leg index in the flows document.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "msg": {
+          "description": "Message index within that leg.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "leg",
+        "msg",
+        "at_us"
+      ],
+      "type": "object"
+    },
+    "Op": {
+      "description": "Whether the actor emits the message or waits for it.",
+      "oneOf": [
+        {
+          "const": "send",
+          "description": "The actor emits the message.",
+          "type": "string"
+        },
+        {
+          "const": "expect",
+          "description": "The actor waits for the message, within its budget.",
+          "type": "string"
+        }
+      ]
+    },
+    "Origin": {
+      "description": "How the document came to exist. The two are not styles of one thing: a\ncaptured document is a projection of packets a tool saw, and everything it\ncarries must be readable off them.",
+      "oneOf": [
+        {
+          "const": "capture",
+          "description": "Generated from a packet capture. Restricted to the generator subset\n(§13): no authored-only construct may appear.",
+          "type": "string"
+        },
+        {
+          "const": "authored",
+          "description": "Written by hand or by an authoring program. The full format.",
+          "type": "string"
+        }
+      ]
+    },
+    "Part": {
+      "additionalProperties": false,
+      "description": "One MIME part with its per-content-type handling.",
+      "properties": {
+        "cid-linked": {
+          "description": "Header names (lowercased) that reference this part by `cid:`. COMPUTED\nfrom the part's `Content-ID` and the message's header list — it needs no\nMIME parser, only the part id and the names.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "compare": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BodyCompare"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How an EXPECT's received part is held against the resource; absent\nmeans `exact`. Ignored on a send, where the part is emitted and\ncompared with nothing."
+        },
+        "content-id": {
+          "description": "The part's OWN `Content-ID` value, angle brackets as the wire wrote them\n(RFC 2045 §7). It is what a `cid:` reference resolves against (RFC 5621\n§3), so a part any header points at replays under the same id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "content-type": {
+          "description": "The part's `Content-Type` value, VERBATIM and with its parameters —\nthe composer writes this line back unchanged. The body registry (§8.2)\nmatches on the bare type, so a parameter never changes the handling.",
+          "type": "string"
+        },
+        "headers": {
+          "description": "The part's remaining entity headers, verbatim and in wire order —\n`Content-Transfer-Encoding`, `Content-Disposition`, whatever else the\npart states. `Content-Type` and `Content-ID` are held in their own\nfields and are never repeated here.",
+          "items": {
+            "$ref": "#/$defs/EntityHeader"
+          },
+          "type": "array"
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BodyMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Handling mode, on a part the registry freezes."
+        },
+        "ref": {
+          "description": "Path of the part's resource file, relative to the case directory.",
+          "type": "string"
+        },
+        "rewrite": {
+          "description": "Rewrite tokens the lane applies to this part before emission.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "content-type",
+        "ref"
+      ],
+      "type": "object"
+    },
+    "PositionalRef": {
+      "additionalProperties": false,
+      "description": "A tier-2 reference the numbering plan resolved.",
+      "properties": {
+        "addr": {
+          "description": "On a From or To: the captured name-addr, tag dropped, its role numbers\ncomposed as `${num:…}`. Present, it is the field's whole value and the\nlane composes no URI around it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "form": {
+          "description": "Open dial-form token: which form of the number this field carried.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pos": {
+          "description": "Position token in the tier-2 reference namespace, resolved against the\ncall chains: `caller` or `called[<branch>][<position>]`, call-qualified\n(`c2.called[0][1]`) once the document declares more than one call.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pos"
+      ],
+      "type": "object"
+    },
+    "Postconditions": {
+      "additionalProperties": false,
+      "description": "Assertions evaluated once, after settle.",
+      "properties": {
+        "cdr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CdrExpectation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The call-detail-record expectation. Required (lint), because a call test\nthat never looks at what was billed is half a test."
+        },
+        "checks": {
+          "description": "Deployment observables — metric names, store contents — checked at\nsettle and never mid-flow. Open field vocabulary.",
+          "items": {
+            "$ref": "#/$defs/Check"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Ref": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PositionalRef",
+          "description": "Role-mapped: the lane substitutes the number it allocated for this\nposition."
+        },
+        {
+          "$ref": "#/$defs/FrozenRef",
+          "description": "Frozen: the plan did not recognize the value, so it replays verbatim."
+        }
+      ],
+      "description": "A tier-2 reference: either the numbering plan recognized the value and the\ndocument stores its ROLE, or it did not and the document freezes the value."
+    },
+    "Refused": {
+      "additionalProperties": false,
+      "description": "A call the routing decision refused before any dial.\n\nThe final itself is NOT restated here: `step` names the flow step carrying\nit, so the status, the reason phrase and the headers the caller got have one\nhome and cannot disagree with the flow.",
+      "properties": {
+        "evidence": {
+          "description": "Why the cut reads this vantage as a refusal rather than as a dial it\nlost.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "step": {
+          "description": "The caller-leg step carrying the failure final the platform answered\nthe call with.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "step"
+      ],
+      "type": "object"
+    },
+    "Relay18x": {
+      "additionalProperties": false,
+      "description": "The provisional-handling profile the CAPTURED system ran, in the routing\nAPI's own vocabulary so a lane applies it without re-deciding. Every token\nis open: these name a platform's configuration, not a SIP constant.",
+      "properties": {
+        "evidence": {
+          "description": "The detection signals that fired. Rides beside the fact, so a reviewer\nreads the evidence rather than the verdict alone.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "messages": {
+          "description": "Open token: how many upstream `18x` reach the caller.",
+          "type": "string"
+        },
+        "mode": {
+          "description": "Open profile token (how upstream `18x` are rewritten downstream).",
+          "type": "string"
+        },
+        "prack": {
+          "description": "Open prack-mode token, present only where the captured system answered\n100rel itself.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "mode",
+        "messages",
+        "evidence"
+      ],
+      "type": "object"
+    },
+    "ResourceBody": {
+      "additionalProperties": false,
+      "description": "A single body carried by a resource file.",
+      "properties": {
+        "compare": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BodyCompare"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How an EXPECT's received body is held against the resource; absent\nmeans `exact`. Meaningless on a send, where lint refuses it\n(`body/compare-on-send`)."
+        },
+        "content-type": {
+          "description": "The captured `Content-Type` value, VERBATIM and with its parameters, so\nthe body replays under the type the wire wrote. Omitted only where\nrender derives exactly it — a rewritten body whose type is bare\n`application/sdp` — so the stored and derived values cannot drift.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BodyMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Handling mode, on a body the registry freezes."
+        },
+        "ref": {
+          "description": "Path of the resource file, relative to the case directory.",
+          "type": "string"
+        },
+        "rewrite": {
+          "description": "Rewrite tokens the lane applies before emission (e.g. `c=addr`,\n`m=port` on SDP). Omitted where the body replays byte-exact. On an\nexpect the tokens name the lane-owned fields the `sdp` compare masks\nwhere the run rebooked media: `c=addr` the address of a `c=IN IP4`\nline, `m=port` the non-zero port of an `m=` line, its `/count` kept.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "ref"
+      ],
+      "type": "object"
+    },
+    "RfcRule": {
+      "description": "A rule of the RFC validator, by its wire token.",
+      "enum": [
+        "ack-body-after-complete-offer-answer",
+        "ack-cseq-matches-invite",
+        "ack-preserves-invite-route",
+        "ack-require-subset-of-invite",
+        "allow-supported-on-invite",
+        "answer-m-line-count-matches-offer",
+        "answer-media-type-matches-offer",
+        "answer-stream-matches-offer",
+        "answer-t-line-equals-offer",
+        "branch-prefix",
+        "c0-port-non-zero",
+        "cancel-after-1xx",
+        "cancel-cseq-method",
+        "cancel-request-uri",
+        "cancel-route-echoes-invite",
+        "cancel-via-branch",
+        "concurrent-re-invite-500-or-491",
+        "contact-presence",
+        "content-length",
+        "content-type",
+        "cseq-in-dialog-order",
+        "delay-2xx-on-unacked-reliable-1xx-with-sdp",
+        "delayed-offer-answered-in-ack",
+        "dialog-call-id-stable",
+        "direction-pair-valid",
+        "failed-reinvite-tears-down-dialog",
+        "final-2xx-answers-the-offer",
+        "from-tag-presence",
+        "in-dialog-from-tag",
+        "in-dialog-to-tag",
+        "max-forwards",
+        "mid-dialog-route",
+        "mid-dialog-tags",
+        "mid-dialog-uri",
+        "mid-dialog-wire-destination",
+        "no-100rel-require-on-non-invite",
+        "no-1xx-after-final",
+        "no-200-after-cancel",
+        "no-ack-to-dialog-creating-2xx",
+        "no-bye-outside-or-early-dialog",
+        "no-cancel-after-final",
+        "no-contact-on-bye",
+        "no-new-offer-while-offer-pending",
+        "no-new-reliable-1xx-after-final",
+        "no-overlapping-reliable-provisionals",
+        "no-prack-of-100-trying",
+        "no-prack-of-out-of-order-rseq",
+        "no-re-invite-while-invite-in-progress",
+        "no-record-route-from-ua",
+        "no-reliable-1xx-on-in-dialog",
+        "no-require-on-cancel-or-ack",
+        "no-target-404",
+        "no-to-tag-on-initial-request",
+        "non-contiguous-rseq",
+        "options-response-echoes",
+        "payload-type-mapping-stable",
+        "peer-uri-stable",
+        "prack-2xx-or-481",
+        "prack-answers-1xx-offer",
+        "proxy-100-trying-not-forwarded",
+        "proxy-100-within-grace",
+        "rack-without-known-invite",
+        "re-offer-m-line-count-monotonic",
+        "record-route-placement",
+        "register-no-route-set",
+        "rejected-stream-minimal-answer",
+        "reliable-1xx-headers",
+        "reliable-needs-client-opt-in",
+        "require-reliable-1xx-on-require",
+        "response-correlation",
+        "response-cseq-matches-transaction",
+        "response-echoes-request-via",
+        "rport-echo",
+        "rung-byte-identical",
+        "sdp-body-parseable",
+        "sdp-origin-continuity",
+        "second-answer-repeats-the-first",
+        "serial-register",
+        "single-final-per-server-txn",
+        "strict-route-rewrite-handled",
+        "strict-route-shuffle-on-send",
+        "tag-consistency",
+        "to-tag-presence",
+        "unacked-2xx-not-cleared",
+        "unacked-invite-non-2xx-final",
+        "unacked-reliable-provisional",
+        "unknown-dialog-481",
+        "unmatched-prack-proxied",
+        "unsupported-415-accepts",
+        "unsupported-extension-420",
+        "unsupported-extension-421",
+        "unsupported-method-405-allow",
+        "zero-port-propagation"
+      ],
+      "type": "string"
+    },
+    "RfcViolation": {
+      "additionalProperties": false,
+      "description": "One RFC rule a message of this flow breaks.",
+      "properties": {
+        "emitter": {
+          "description": "Who emitted it: an `actors` id, or `sut`. A scripted peer's entry is\nlisted and gates nothing; it cancels the run's finding of the same rule\nagainst that actor on the transaction `step` names. The system under\ntest's gates, unless it `relays` one.",
+          "type": "string"
+        },
+        "relays": {
+          "description": "On a `sut` entry only: the step of a scripted party's entry of the same\nrule that this one carries on — the captured platform relayed onward a\nviolation that party committed first. Such an entry gates nothing; with\nthe party's entry it cancels the run's finding of the rule against the\nsystem under test on the transaction `step` names.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rule": {
+          "$ref": "#/$defs/RfcRule",
+          "description": "Which rule is broken."
+        },
+        "step": {
+          "description": "The flow step whose message breaks it — the anchor, so a reader lands on\nthe datagram rather than on a paragraph.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule",
+        "step",
+        "emitter"
+      ],
+      "type": "object"
+    },
+    "ShapeBody": {
+      "additionalProperties": false,
+      "description": "A body asserted by SHAPE rather than content.",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/BodyShape",
+          "description": "Which shape the expectation asserts."
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "type": "object"
+    },
+    "Side": {
+      "description": "What an endpoint IS relative to the system under test.",
+      "oneOf": [
+        {
+          "const": "peer",
+          "description": "A simulated peer: the replay binds it and plays an actor there.",
+          "type": "string"
+        },
+        {
+          "const": "sut",
+          "description": "The system under test's own socket: the replay sends to it and never\nbinds it.",
+          "type": "string"
+        }
+      ]
+    },
+    "Source": {
+      "additionalProperties": false,
+      "description": "Where the case was cut from.",
+      "properties": {
+        "anonymized": {
+          "description": "Whether identities went through the anonymizer.",
+          "type": "boolean"
+        },
+        "call_groups": {
+          "description": "Upstream call groups the case spans.",
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "capture": {
+          "description": "Capture file the case was cut from.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "capture",
+        "call_groups",
+        "anonymized"
+      ],
+      "type": "object"
+    },
+    "Step": {
+      "additionalProperties": false,
+      "description": "One message at one actor's vantage.",
+      "properties": {
+        "after": {
+          "description": "Ids of steps that must have completed before this one runs. The one\ncross-leg and cross-call ordering device.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "auto": {
+          "description": "`true` when the interpreter's own stack COMPOSES this message (100\nTrying, ACK-to-final, PRACK and its 2xx), deriving its R-URI, Route, Via\nand CSeq from the transaction that obliged it rather than from dialog\nstate (§6.3). It is not a storage policy: the step stores what any step\nstores, and only a body the stack could not place is withheld.",
+          "type": "boolean"
+        },
+        "check": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`expect` only: whether the stored content is matched or merely recorded."
+        },
+        "checks": {
+          "description": "Field assertions over the matched message, in the one check vocabulary.",
+          "items": {
+            "$ref": "#/$defs/Check"
+          },
+          "type": "array"
+        },
+        "confirms_dialog": {
+          "description": "`true` on the one ACK that answers a leg's dialog-creating final, and on\nno other step (§6.1). It separates the ACK completing the dialog\nhandshake from an ordinary in-dialog ACK — a re-INVITE's — which the\nmethod cannot and a CSeq chase may not. It rides BESIDE `in_dialog`,\nnever instead of it, and beside `early` where the ACK names its fork.",
+          "type": "boolean"
+        },
+        "delay": {
+          "$ref": "#/$defs/Delay",
+          "description": "When the step runs, relative to what."
+        },
+        "early": {
+          "description": "Id of the early dialog the step rides: one a UAS-simulated fork answers\nunder (a response `send` carries the id), or one the run observes the\npeer forking (a response `expect` carries it).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Unique within the document. Tool-generated for a capture (`s7`),\nauthor-chosen otherwise. Every reference in the document is to this id;\nnothing references a position.",
+          "type": "string"
+        },
+        "in_dialog": {
+          "description": "`true` when the message belongs to a transaction inside an ESTABLISHED\ndialog. Generic, method-blind and TOTAL (§6.1): every step of a leg\nafter that leg's dialog-creating final carries it, none at or before it\ndoes, and a CANCEL never does. What it marks on a final is that the final\nanswers a re-negotiation rather than creating the dialog, and an\nin-dialog final never closes a leg (§4.1), so a `cause` may not cite one.",
+          "type": "boolean"
+        },
+        "leg": {
+          "description": "The leg this message rides.",
+          "type": "string"
+        },
+        "msg": {
+          "$ref": "#/$defs/MsgSpec",
+          "description": "The message itself, under the three-tier model (§8)."
+        },
+        "observed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Observed"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Capture coordinate. Captured documents only."
+        },
+        "op": {
+          "$ref": "#/$defs/Op",
+          "description": "Whether the actor emits the message or waits for it."
+        },
+        "optional": {
+          "description": "`expect` only: tolerated absence. The step is released when a later step\non the same leg matches first.",
+          "type": "boolean"
+        },
+        "overlap": {
+          "description": "A declared race: this step and the named one may arrive in either order.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retransmit_intervals_ms": {
+          "description": "The gap, in ms, before each repeat this step declares — one entry per\nrepeat, measured from the emission before it. A CAPTURED ladder's own\npacing: `retransmits` says how many rungs and this says when, so a peer\nwhose ladder is not the RFC's is replayed as it ran. Empty — on every\nauthored step, and on a generated one whose producer measured none — the\nladder falls back to the RFC pacing for the message class (§6.9).",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "retransmits": {
+          "description": "Captured retransmissions of THIS message, beyond the first. Appears on\n`send` and `expect` alike: either side of a vantage can retransmit.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "within_ms": {
+          "description": "Per-step override of `timing.expect_budget_ms`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "leg",
+        "op",
+        "msg",
+        "delay"
+      ],
+      "type": "object"
+    },
+    "Timing": {
+      "additionalProperties": false,
+      "description": "Budgets stated once for the whole case.",
+      "properties": {
+        "capture_span_ms": {
+          "description": "The CASE's span — the last flow step's `observed.at_us` in\nmilliseconds. Captured documents only: an authored test has no capture\nto span.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "expect_budget_ms": {
+          "description": "Default assertion timeout for every `expect`; a step's `within_ms`\noverrides it per step.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "settle_budget_ms": {
+          "description": "The ceiling on the settle phase (§10): how long the runner waits for\nevery scripted dialog to reach a terminal state and for the system's\nown call count to fall to zero. Failing to settle inside it is test\nfailure — there is no soft mode.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expect_budget_ms",
+        "settle_budget_ms"
+      ],
+      "type": "object"
+    },
+    "Unordered": {
+      "additionalProperties": false,
+      "description": "Messages that must ALL arrive, in any order — the declarative form of a\nrace whose outcome does not matter.",
+      "properties": {
+        "after": {
+          "description": "Ids of steps that must have completed before the group opens.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "description": "Unique within the document; what a later reference names.",
+          "type": "string"
+        },
+        "op": {
+          "$ref": "#/$defs/UnorderedOp",
+          "description": "Always `unordered`."
+        },
+        "steps": {
+          "description": "The messages, all of which must arrive. They share one place in the\nordering, so none may reference another.",
+          "items": {
+            "$ref": "#/$defs/Step"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "op",
+        "steps"
+      ],
+      "type": "object"
+    },
+    "UnorderedOp": {
+      "description": "The `op` of an `unordered` node.",
+      "enum": [
+        "unordered"
+      ],
+      "type": "string"
+    },
+    "Variant": {
+      "description": "Which side of a fix a document describes.",
+      "oneOf": [
+        {
+          "const": "repro",
+          "description": "Reproduces the defect: authored at issue time.",
+          "type": "string"
+        },
+        {
+          "const": "target",
+          "description": "The behavior the fix must produce: authored WITH the fix.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One replayable case: a captured call reproduced, or an authored test.",
+  "properties": {
+    "actors": {
+      "description": "Simulated elements on those sockets.",
+      "items": {
+        "$ref": "#/$defs/Actor"
+      },
+      "type": "array"
+    },
+    "calls": {
+      "description": "The calls the document plays. A captured case is one call; a\nconcurrency test is several whose flows interleave.",
+      "items": {
+        "$ref": "#/$defs/Call"
+      },
+      "type": "array"
+    },
+    "case": {
+      "$ref": "#/$defs/Case",
+      "description": "Identity, provenance, replayability, informative annotations."
+    },
+    "deviations": {
+      "description": "Peer non-compliance the replay must reproduce.",
+      "items": {
+        "$ref": "#/$defs/Deviation"
+      },
+      "type": "array"
+    },
+    "endpoints": {
+      "description": "Sockets the lane must bind.",
+      "items": {
+        "$ref": "#/$defs/Endpoint"
+      },
+      "type": "array"
+    },
+    "flow": {
+      "description": "The choreography: message steps, injected events and declared\nalternatives, in order.",
+      "items": {
+        "$ref": "#/$defs/FlowNode"
+      },
+      "type": "array"
+    },
+    "identities": {
+      "description": "Every number and domain the document names, declared once. Attempts,\nactors and `${num:…}` accessors reference an entry by name; the driver\nbinds each name to a real number per lane.",
+      "items": {
+        "$ref": "#/$defs/Identity"
+      },
+      "type": "array"
+    },
+    "legs": {
+      "description": "Symbolic dialogs.",
+      "items": {
+        "$ref": "#/$defs/Leg"
+      },
+      "type": "array"
+    },
+    "media": {
+      "additionalProperties": true,
+      "description": "RESERVED (§12): the deployment-extensible media vocabulary. Nothing\nreads it yet; it exists so the vocabulary lands additively rather than\nas a version bump.",
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "must_fail": {
+      "description": "The failures this run MUST produce. A document that declares any is a\nNEGATIVE case: it replays a source whose non-compliance this platform\ndoes not share, so the run cannot pass by behaving well, and the\ndocument says in advance exactly how it fails.",
+      "items": {
+        "$ref": "#/$defs/MustFail"
+      },
+      "type": "array"
+    },
+    "pivot_version": {
+      "const": 3,
+      "description": "Always `3`. Exported as a `const`, so a mirror validating\nagainst the schema refuses an earlier version rather than accepting a\ndocument this crate would then reject.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "postconditions": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Postconditions"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "What must hold once the flow has run and everything has settled."
+    },
+    "rfc_violations": {
+      "description": "RFC rules a message this flow already carries breaks. Behavioural, so\nthe replay reproduces one by running the flow unchanged; `deviations`\ncovers the ones that change an emission.",
+      "items": {
+        "$ref": "#/$defs/RfcViolation"
+      },
+      "type": "array"
+    },
+    "timing": {
+      "$ref": "#/$defs/Timing",
+      "description": "Budgets stated once."
+    }
+  },
+  "required": [
+    "pivot_version",
+    "case",
+    "identities",
+    "calls",
+    "endpoints",
+    "actors",
+    "legs",
+    "flow",
+    "timing"
+  ],
+  "title": "PivotV3",
+  "type": "object"
+}

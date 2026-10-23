@@ -1,5 +1,5 @@
 //! The HTTP plane of a run's ladder: the exchanges recorded on the run's
-//! recorder ([`http_net::HTTP_TAG`]) as rows of the report's doc.
+//! recorder ([`http_net_testkit::HTTP_TAG`]) as rows of the report's doc.
 //!
 //! An exchange is a request row from the requester's lane to the service lane
 //! and a reply row back, each at the `seq` of its own record, so the rows sit
@@ -9,7 +9,8 @@
 
 use std::net::SocketAddr;
 
-use http_net::{HttpOutcome, HttpRequest, HttpResponse, RecordedHttpEntry};
+use http_net::{HttpRequest, HttpResponse};
+use http_net_testkit::{HttpOutcome, RecordedHttpEntry};
 use layer_harness::{Lane as RecLane, NetworkTag};
 use seq_report::{Lane, LaneKind, RowKind, SeqDoc, SeqRow};
 

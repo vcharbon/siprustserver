@@ -5,9 +5,9 @@
 //! tick every key due leaves in one request, whatever the number of counted
 //! calls; the limiter's answer for each key reaches its call on the call's own
 //! turn. A stalled limiter so delays no call; a refresh the limiter did not
-//! answer is sent again at the next tick; a set that lapsed is re-registered
-//! within one tick of its refresh; an answer that finds its call ended is
-//! dropped.
+//! answer is sent again at the next tick; a set that lapsed while the limiter
+//! was out of reach is re-registered by the call's next refresh; an answer
+//! that finds its call ended is dropped.
 //!
 //! Every call holds three limiters.
 
@@ -28,9 +28,9 @@ use b2bua_harness::{settle_until, B2buaSut};
 use call_limiter::wire::AdmitEntry;
 use call_limiter::{AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{
-    BindError, Fault, HttpError, HttpRequest, HttpResponse, HttpServerHandle, HttpService,
-    HttpTransport, SimulatedHttpNetwork,
+    BindError, HttpError, HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport,
 };
+use http_net_testkit::{Fault, SimulatedHttpNetwork};
 use scenario_harness::{Agent, Dialog, Harness};
 use sip_clock::Clock;
 use tokio::time::Instant;
@@ -370,24 +370,23 @@ async fn a_refresh_the_limiter_did_not_answer_is_sent_again_at_the_next_tick() {
     let _ = s.h.finish().await;
 }
 
-/// The limiter's lease (1 s) is shorter than a refresh tick: even at a third
-/// of the lease, a refresh leaves up to one tick after it falls due, so the
-/// call's set lapses before each refresh and the refresh re-registers it
-/// within one tick of falling due.
+/// The limiter (3 s lease: a refresh every second, within half a second) is
+/// cut before the call's first refresh and back past the lease: the call's
+/// set lapsed, and the call's next refresh re-registers it.
 #[tokio::test(start_paused = true)]
-async fn a_lapsed_set_is_re_registered_within_one_tick_of_its_refresh() {
-    let setup = Setup { lease_sec: 1, ..Setup::default() };
+async fn a_set_that_lapsed_while_the_limiter_was_cut_is_re_registered_by_its_next_refresh() {
+    let setup = Setup { lease_sec: 3, ..Setup::default() };
     let s = Scene::new("refresh-batch-reregister", setup).await;
     let mut dialog = s.establish().await;
     assert_eq!(s.holds(), [1, 1, 1]);
 
-    // The refresh falls due a third of the lease after the admit and leaves
-    // one tick later; the set lapsed at one lease.
-    let due = Duration::from_millis(1_000 / 3);
-    s.advance_to(Duration::from_millis(1_100)).await;
+    s.advance_to(Duration::from_millis(900)).await;
+    s.net.apply_fault(Fault::Cut { dst: laddr() });
+    s.advance_to(Duration::from_millis(3_500)).await;
     assert_eq!(s.holds(), [0, 0, 0], "the set lapsed with its lease");
-    s.advance_to(due + TICK + Duration::from_millis(200)).await;
-    assert_eq!(s.holds(), [1, 1, 1], "the refresh re-registered the set within one tick");
+    s.net.apply_fault(Fault::Resume { dst: laddr() });
+    s.advance_to(Duration::from_millis(6_000)).await;
+    assert_eq!(s.holds(), [1, 1, 1], "the next refresh re-registered the set");
     assert_eq!(s.store.stats().reregistered_calls, 1);
     assert_eq!(s.b2bua.metrics().limiter().refresh_answers_total(RefreshOutcome::Reregistered), 1);
 
@@ -464,11 +463,12 @@ async fn a_refresh_answered_slower_than_the_admit_budget_reaches_its_call() {
     let _ = s.h.finish().await;
 }
 
-/// The limiter is cut while the breaker stays closed (no admit is sent, and
-/// only admits trip it): the batch backs off on consecutive unanswered
-/// requests instead of resending every tick. Once the limiter is back, the
-/// next retry is answered and the backoff is gone: the next refresh leaves
-/// within one tick of falling due.
+/// The limiter is cut: the batch backs off on consecutive unanswered
+/// requests instead of resending every tick; its first unanswered requests
+/// fall inside one 2 s window and open the breaker, which holds the batch.
+/// Once the limiter is back, the probe closes it, the held retry is answered
+/// and the backoff is gone: the next refresh leaves within one tick of
+/// falling due.
 #[tokio::test(start_paused = true)]
 async fn a_dead_limiter_is_retried_under_a_backoff_and_answered_once_back() {
     let s = Scene::new("refresh-batch-backoff", Setup::default()).await;
@@ -479,13 +479,16 @@ async fn a_dead_limiter_is_retried_under_a_backoff_and_answered_once_back() {
     s.advance_to(REFRESH + Duration::from_secs(30)).await;
     let sent = s.sent_on("/v1/refresh");
     assert!(sent <= 10, "{sent} refresh requests in 30 s of a dead limiter (one per tick: 30)");
-    assert!(!s.b2bua.metrics().limiter().breaker_open(), "refreshes never trip the breaker");
+    let m = s.b2bua.metrics().limiter();
+    assert_eq!(m.breaker_transitions_total(true), 1, "the dead limiter opens the breaker once");
+    assert!(m.breaker_open(), "and it stays open while the limiter is cut");
 
     s.net.apply_fault(Fault::Resume { dst: laddr() });
     let resumed = s.start.elapsed();
     // The backoff waits 5 s at most; the call's own refresh is due at 40 s.
     s.advance_to(resumed + Duration::from_secs(5) + Duration::from_millis(100)).await;
     let metrics = s.b2bua.metrics();
+    assert!(!metrics.limiter().breaker_open(), "a probe answered closes it");
     assert_eq!(answered_refreshes(metrics), 1, "the retry is answered");
     assert_eq!(s.holds(), [1, 1, 1], "the call stays counted");
 

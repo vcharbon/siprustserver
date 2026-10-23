@@ -11,12 +11,16 @@ RUN apt-get update \
       libpcap-dev libncurses-dev libssl-dev \
  && rm -rf /var/lib/apt/lists/*
 RUN git clone --depth 1 --branch v3.7.7 https://github.com/SIPp/sipp.git /src
+# A response's CSeq method is read from the CSeq header line (RFC 3261 7.3.1),
+# not from the first "CSeq" text of the message.
+COPY cseq-method.patch /tmp/
+RUN git -C /src apply /tmp/cseq-method.patch
 WORKDIR /src/build
 RUN cmake .. -DUSE_PCAP=1 -DUSE_SSL=1 \
  && make -j"$(nproc)"
 
 FROM debian:bookworm-slim
-# python3 (stdlib only, no pip) powers the SIPp stat -> Prometheus sidecar
+# python3 (stdlib only, no pip) powers the SIPp stat -> Prometheus twin
 # exporter (deploy/k8s/sipp/exporter/sipp_stat_exporter.py), run from this same
 # image so the reporting path needs no second image.
 # Full `python3` (not python3-minimal — that strips the stdlib, missing
@@ -27,8 +31,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/build/sipp /usr/local/bin/sipp
 # No ENTRYPOINT: every caller names the binary explicitly — `docker run sipp:dev
-# sipp <args>` for the UAC/UAS generators (run.sh sipp_uas_up, sipext-gen.sh
-# sipext_sipp_uac_up) and `docker run sipp:dev python3 /exporter/...` for the
+# sipp <args>` for the UAC/UAS generators (kind-lab.sh's callees, the HA
+# tooling's SIPp streams) and `docker run sipp:dev python3 /exporter/...` for the
 # stat->Prometheus exporter twin. A hard `ENTRYPOINT ["sipp"]` would prepend a
 # second `sipp` (→ "remote_host given multiple times") to the generators AND make
 # the python3 exporter unrunnable (sipp would parse "python3" as a remote host).

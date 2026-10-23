@@ -1,0 +1,207 @@
+{
+  "uid": "sip-front-proxy",
+  "title": "SIP front-proxy — Load balancer (Rust)",
+  "tags": ["siprustserver", "proxy", "lb", "hakit"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "annotations": {
+    "list": [
+      {
+        "name": "Incident window",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "vm"
+        },
+        "enable": true,
+        "iconColor": "orange",
+        "expr": "max by (incident, run) (sip_chaos_window{incident!=\"\"}) == 1",
+        "titleFormat": "{{incident}}",
+        "tagKeys": "incident,run",
+        "step": "10s"
+      },
+      {
+        "name": "Incident phase",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "vm"
+        },
+        "enable": true,
+        "iconColor": "red",
+        "expr": "timestamp(sip_chaos_event{incident!=\"\"}) * 1000",
+        "useValueForTime": true,
+        "titleFormat": "{{incident}} {{phase}}",
+        "tagKeys": "incident,phase,source,run",
+        "step": "10s"
+      }
+    ]
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "title": "HA tooling dashboards",
+      "tags": [
+        "hakit"
+      ],
+      "asDropdown": true,
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "pod",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "vm" },
+        "query": "label_values(sip_proxy_pending_invite_lru_size, pod)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Pending-INVITE LRU size",
+      "description": "Size of the proxy-local (Call-ID, CSeq#) → target LRU (`sip_proxy_pending_invite_lru_size`). Short-TTL pending-INVITE cache, NOT a dialog count — see the B2BUA worker dashboard for `b2bua_active_calls`.",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(sip_proxy_pending_invite_lru_size{pod=~\"$pod\"})", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "none" } }
+    },
+    {
+      "id": 2, "type": "stat", "title": "Workers alive (proxy view)",
+      "description": "`sip_worker_health{health=\"alive\"}` — count of upstream b2bua workers the proxy's health band considers admissible.",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "max(sip_worker_health{health=\"alive\", pod=~\"$pod\"})", "refId": "A" }],
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "yellow", "value": 1 }, { "color": "green", "value": 2 }] } } }
+    },
+    {
+      "id": 3, "type": "stat", "title": "Workers dead / unknown",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "max(sip_worker_health{health=\"dead\", pod=~\"$pod\"}) + max(sip_worker_health{health=\"unknown\", pod=~\"$pod\"})", "refId": "A" }],
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 2 }] } } }
+    },
+    {
+      "id": 4, "type": "stat", "title": "HMAC failures / sec",
+      "description": "Record-Route HMAC verification failures (`sip_proxy_hmac_failures_total`). Any sustained rate means stickiness tokens are being rejected.",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(rate(sip_proxy_hmac_failures_total{pod=~\"$pod\"}[1m]))", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "cps", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 0.01 }] } } }
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Worker health by state, alive workers by acceptance",
+      "description": "`sip_worker_health` gauge — number of upstream workers in each health band (alive / unknown / dead). `sip_worker_acceptance` gauge — alive workers accepting new calls or refusing them while they serve their dialogs.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "max by (health) (sip_worker_health{pod=~\"$pod\"})", "refId": "A", "legendFormat": "{{health}}" },
+        { "expr": "max by (acceptance) (sip_worker_acceptance{pod=~\"$pod\"})", "refId": "B", "legendFormat": "alive, {{acceptance}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "min": 0 } }
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Messages / sec by direction:result",
+      "description": "`sip_messages_total` — every SIP MESSAGE the proxy moves (requests + responses, both directions), NOT calls. The Rust proxy emits a single `label` dimension holding `direction:result` (e.g. `inbound:forwarded`, `outbound:responded`, `inbound:dropped`).",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum by (label) (rate(sip_messages_total{pod=~\"$pod\"}[1m])) > 0", "refId": "A", "legendFormat": "{{label}}" }],
+      "fieldConfig": { "defaults": { "unit": "msg/s" } }
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Routing decisions / sec by kind",
+      "description": "`sip_routing_decision_total{kind}` — select_new / decode_forward / decode_forward_backup / loose_route / worker_outbound / cancel / reject.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum by (kind) (rate(sip_routing_decision_total{pod=~\"$pod\"}[1m])) > 0", "refId": "A", "legendFormat": "{{kind}}" }],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Routing decision latency (avg)",
+      "description": "Mean routing-decision duration = rate(`sip_routing_duration_seconds_sum`) / rate(`_count`). The Rust exporter currently emits only the +Inf bucket, so quantiles are not available — this is the true average over the window.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(rate(sip_routing_duration_seconds_sum{pod=~\"$pod\"}[1m])) / clamp_min(sum(rate(sip_routing_duration_seconds_count{pod=~\"$pod\"}[1m])), 1e-9)", "refId": "A", "legendFormat": "avg" }],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "HMAC failures / sec by reason",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum by (reason) (rate(sip_proxy_hmac_failures_total{pod=~\"$pod\"}[1m])) > 0", "refId": "A", "legendFormat": "{{reason}}" }],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Record-Route inserted / sec",
+      "description": "`sip_proxy_record_route_inserted_total` (stickiness tokens stamped). The proxy synthesizes no hop-by-hop ACK: the upstream's ACK to a non-2xx final is relayed end to end.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum(rate(sip_proxy_record_route_inserted_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "record-route inserted" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 11, "type": "table", "title": "Worker health snapshot (per proxy pod)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sip_worker_health{pod=~\"$pod\"}", "refId": "A", "format": "table", "instant": true }],
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true, "__name__": true, "job": true, "namespace": true, "container": true, "instance": true, "node": true, "app_kubernetes_io_instance": true, "app_kubernetes_io_name": true, "pod_template_hash": true } } }
+      ]
+    },
+    {
+      "id": 20, "type": "row", "title": "Calls / requests / responses",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 36 }, "collapsed": false
+    },
+    {
+      "id": 21, "type": "stat", "title": "Calls / sec (new dialogs)",
+      "description": "`sip_proxy_calls_total` — initial, dialog-creating INVITEs (no To-tag). This is a CALL rate, distinct from the message rate: one call sets up many messages.",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 37 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(rate(sip_proxy_calls_total{pod=~\"$pod\"}[1m]))", "refId": "A" }],
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": { "unit": "calls/s", "decimals": 1, "color": { "mode": "fixed", "fixedColor": "green" } } }
+    },
+    {
+      "id": 22, "type": "timeseries", "title": "Requests / sec by method",
+      "description": "`sip_proxy_requests_total{method}` — every inbound SIP request the proxy handles, split by method (INVITE / ACK / BYE / CANCEL / OPTIONS / …).",
+      "gridPos": { "h": 8, "w": 9, "x": 6, "y": 37 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum by (method) (rate(sip_proxy_requests_total{pod=~\"$pod\"}[1m])) > 0", "refId": "A", "legendFormat": "{{method}}" }],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1, "stacking": { "mode": "normal", "group": "A" } } } },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 23, "type": "timeseries", "title": "Responses / sec by code + method",
+      "description": "`sip_proxy_responses_total{method,code}` — every inbound SIP response, keyed by its CSeq method and status code (e.g. INVITE 200, INVITE 487, BYE 200, OPTIONS 200).",
+      "gridPos": { "h": 8, "w": 9, "x": 15, "y": 37 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum by (method, code) (rate(sip_proxy_responses_total{pod=~\"$pod\"}[1m])) > 0", "refId": "A", "legendFormat": "{{method}} {{code}}" }],
+      "fieldConfig": { "defaults": { "unit": "cps", "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1, "stacking": { "mode": "normal", "group": "A" } } } },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 30, "type": "row", "title": "Stickiness",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 45 }, "collapsed": false
+    },
+    {
+      "id": 31, "type": "timeseries", "title": "CANCEL lookups, no-target drops / sec",
+      "description": "`sip_proxy_cancel_lookups_total{outcome}`: a CANCEL that found its INVITE's hop (hit) or was routed on its own (miss). `sip_proxy_no_target_dropped_total{kind}`: requests dropped unanswered because neither the primary nor the backup of the cookie placing them is alive (in_dialog, cancel, initial).",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 46 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum by (outcome) (rate(sip_proxy_cancel_lookups_total{pod=~\"$pod\"}[1m])) > 0", "refId": "A", "legendFormat": "CANCEL lookup {{outcome}}" },
+        { "expr": "sum by (kind) (rate(sip_proxy_no_target_dropped_total{pod=~\"$pod\"}[1m])) > 0", "refId": "B", "legendFormat": "no target, dropped: {{kind}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1 } } },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+    }
+  ]
+}

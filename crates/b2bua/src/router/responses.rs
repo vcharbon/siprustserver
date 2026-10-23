@@ -1,16 +1,23 @@
 //! Locally-authored response builders: the OPTIONS health reply, the
 //! call-layer-stateless store-fault 500, the 481 and 405 a request naming
-//! no call draws, the out-of-order 500, the retry-later 500 and the
-//! merged-request 482. The 503 refusing a new INVITE is the admission
-//! ladder's ([`crate::admission::Refusals`]).
+//! no call draws, the 200 and 487 an ending dialog answers, the out-of-order
+//! 500, the retry-later 500 and the merged-request 482. The 503 refusing a new INVITE is the admission
+//! ladder's ([`crate::admission::Refusals`]). A request whose lines no
+//! response can echo draws none: each builder returns why.
 
-use sip_message::generators::{generate_response, CapabilitySet, GenerateResponseOpts};
+use sip_ids::TurnIds;
+use sip_message::generators::{
+    generate_response, CapabilitySet, GenerateError, GenerateResponseOpts,
+};
 use sip_message::types::SipHeader;
+use sip_message::worker_report::{
+    incarnation_value, Readiness as WorkerReadiness, X_INCARNATION, X_READINESS,
+};
 use sip_message::{SipRequest, SipResponse};
-use sip_txn::IdGen;
+use sip_txn::StatelessTagger;
 
 use crate::overload::OverloadSignal;
-use crate::repl::{Readiness, ReadinessState};
+use crate::repl::{OptionsReport, Readiness};
 
 /// Build a plain extension header.
 fn hdr(name: &str, value: impl Into<String>) -> SipHeader {
@@ -18,8 +25,27 @@ fn hdr(name: &str, value: impl Into<String>) -> SipHeader {
 }
 
 /// `200 OK` to `req`, a request in a dialog, under the To-tag it carries.
-pub(super) fn build_200(req: &SipRequest) -> SipResponse {
+pub(super) fn build_200(req: &SipRequest) -> Result<SipResponse, GenerateError> {
     generate_response(req, 200, "OK", &GenerateResponseOpts::default())
+}
+
+/// `200 OK` to `req`, a request in a dialog, stating `advertisement` (RFC
+/// 3261 §11.2: an OPTIONS answer names what this stack supports).
+pub(super) fn build_200_advertising(
+    req: &SipRequest,
+    advertisement: &CapabilitySet,
+) -> Result<SipResponse, GenerateError> {
+    let opts = GenerateResponseOpts {
+        extra_headers: minted_final_lines(advertisement),
+        ..Default::default()
+    };
+    generate_response(req, 200, "OK", &opts)
+}
+
+/// `487 Request Terminated` to `req`, a request in a dialog this stack is
+/// ending by a BYE or a CANCEL (RFC 3261 §21.4.25).
+pub(super) fn build_487(req: &SipRequest) -> Result<SipResponse, GenerateError> {
+    generate_response(req, 487, "Request Terminated", &GenerateResponseOpts::default())
 }
 
 /// `481 Call/Transaction Does Not Exist` to `req`: an in-dialog request naming
@@ -27,14 +53,17 @@ pub(super) fn build_200(req: &SipRequest) -> SipResponse {
 /// transaction here (§9.2). `to_tag` is the tag this node's final to the
 /// INVITE carried, when a call resolves and `req`'s To has none (§9.2: the
 /// CANCEL's response shares that tag); a tagged To is echoed as it came.
-pub(super) fn build_481(req: &SipRequest, to_tag: Option<&str>) -> SipResponse {
+pub(super) fn build_481(
+    req: &SipRequest,
+    to_tag: Option<&str>,
+) -> Result<SipResponse, GenerateError> {
     let opts = GenerateResponseOpts { to_tag: to_tag.map(str::to_owned), ..Default::default() };
     generate_response(req, 481, "Call/Transaction Does Not Exist", &opts)
 }
 
 /// `500 Server Internal Error` to `req`, an in-dialog request whose CSeq is
 /// below the last one its dialog took: out of order (RFC 3261 §12.2.2).
-pub(super) fn build_out_of_order_500(req: &SipRequest) -> SipResponse {
+pub(super) fn build_out_of_order_500(req: &SipRequest) -> Result<SipResponse, GenerateError> {
     generate_response(req, 500, "Server Internal Error", &GenerateResponseOpts::default())
 }
 
@@ -46,7 +75,7 @@ pub(super) fn build_retry_later_500(
     req: &SipRequest,
     to_tag: Option<String>,
     retry_after_sec: u32,
-) -> SipResponse {
+) -> Result<SipResponse, GenerateError> {
     let opts = GenerateResponseOpts {
         to_tag,
         extra_headers: vec![hdr(
@@ -63,12 +92,12 @@ pub(super) fn build_retry_later_500(
 /// §8.2.2.2), under a fresh To-tag (§8.2.6.2), carrying the deployment's
 /// `advertisement` for a minted final.
 pub(super) fn build_merged_482(
-    id_gen: &IdGen,
+    ids: &mut TurnIds,
     req: &SipRequest,
     advertisement: &CapabilitySet,
-) -> SipResponse {
+) -> Result<SipResponse, GenerateError> {
     let opts = GenerateResponseOpts {
-        to_tag: Some(id_gen.new_tag()),
+        to_tag: Some(ids.new_tag()),
         extra_headers: minted_final_lines(advertisement),
         ..Default::default()
     };
@@ -83,7 +112,11 @@ pub(crate) fn minted_final_lines(advertisement: &CapabilitySet) -> Vec<SipHeader
 /// `405 Method Not Allowed` to `req`, a request of a method the node does not
 /// serve (RFC 3261 §8.2.1), stating `allow` — the node's `Allow` — and under
 /// `to_tag` when `req`'s To has none (§8.2.6.2).
-pub(super) fn build_405(req: &SipRequest, to_tag: Option<&str>, allow: &str) -> SipResponse {
+pub(super) fn build_405(
+    req: &SipRequest,
+    to_tag: Option<&str>,
+    allow: &str,
+) -> Result<SipResponse, GenerateError> {
     let opts = GenerateResponseOpts {
         to_tag: to_tag.map(str::to_owned),
         extra_headers: vec![hdr("Allow", allow)],
@@ -93,63 +126,60 @@ pub(super) fn build_405(req: &SipRequest, to_tag: Option<&str>, allow: &str) -> 
 }
 
 /// Build the self-reported readiness reply to an out-of-dialog OPTIONS
-/// keepalive. Every reply mints a local To-tag: RFC 3261 §8.2.6.2 requires
-/// a To-tag on any response > 100 to an out-of-dialog request (the 2xx path
-/// always did; the 503 path needs it too). The status + `Reason` header text is the
-/// contract `sip-proxy::health::probe::classify_503` keys on:
-///   - `Ready`    → `200 OK` + `X-Overload: v=1; elu=…; gc=…; adm=…`.
-///   - `NotReady` → `503` + `Reason: SIP;cause=503;text="not-ready"`.
-///   - `Draining` → `503` + `Reason: SIP;cause=503;text="draining"` +
-///     `Retry-After: 0`.
+/// keepalive, on the two axes of [`Readiness::options_report`] (ADR-0050 §2).
+/// Every reply carries a To-tag derived from the request (RFC 3261 §8.2.7:
+/// no transaction holds it, so every copy draws the same tag) and states the
+/// process's boot generation (`X-Incarnation`), so a proxy tells a restart
+/// at the same address from the process it last read:
+///   - serving dialogs (Ready, Cordoned, Draining) → `200 OK` with the capabilities
+///     (§11.2), `X-Overload: v=1; elu=…; gc=…; adm=…` and `X-Readiness:
+///     new=accept`, or `new=refuse; cause=…` while it refuses new calls;
+///   - NotReady → `503` and nothing more: it serves nothing yet.
 ///
-/// `capabilities` is the node's advertised `Allow`/`Supported`/`Accept` set
-/// (§11.2) — node-scoped, since an out-of-dialog OPTIONS names no call, and
-/// the one message this stack answers on its own behalf; `B2buaConfig`
-/// declares it, defaulting to the stack set.
-///
-/// The `X-Overload` worker load signal rides the **200 path only**: it is the
-/// live signal the proxy's ELU-band AIMD
-/// (`sip_proxy::load_observer::parse_x_overload_header`) consumes to steer (and,
-/// at `AboveCritical`, exclude) a *serving* worker. A 503 already removes the
-/// node from new-dialog selection, so the band signal is not stamped there
-/// (pinned by `options_200_stamps_x_overload_503_does_not`).
+/// `capabilities` is the node's advertised `Allow`/`Supported`/`Accept` set —
+/// node-scoped, since an out-of-dialog OPTIONS names no call; `B2buaConfig`
+/// declares it, defaulting to the stack set. The `X-Overload` payload rides
+/// every `200`, a refusing node's included, so the proxy's stale-payload sweep
+/// never floors a node that answers (ADR-0050 §6).
 pub(crate) fn build_options_health_response(
     readiness: &Readiness,
     overload: &OverloadSignal,
-    id_gen: &IdGen,
+    tagger: &StatelessTagger,
     req: &sip_message::SipRequest,
     capabilities: &CapabilitySet,
-) -> sip_message::SipResponse {
-    let (status, reason, extra_headers): (u16, &str, Vec<SipHeader>) = match readiness.state() {
-        ReadinessState::Ready => (
-            200,
-            "OK",
-            // RFC 3261 §11.2: an OPTIONS 200 SHOULD advertise capabilities so the
-            // querier learns method/extension/body support, not just liveness.
-            // Plus the worker load signal the proxy's AIMD band reads.
-            capabilities
-                .lines()
-                .into_iter()
-                .map(|(name, value)| hdr(name.as_wire_str(), value))
-                .chain([hdr("X-Overload", overload.x_overload_header_value())])
-                .collect(),
-        ),
-        ReadinessState::NotReady => {
-            (503, "Service Unavailable", vec![hdr("Reason", "SIP;cause=503;text=\"not-ready\"")])
-        }
-        ReadinessState::Draining => (
-            503,
-            "Service Unavailable",
-            vec![hdr("Reason", "SIP;cause=503;text=\"draining\""), hdr("Retry-After", "0")],
-        ),
-    };
+) -> Result<SipResponse, GenerateError> {
+    let incarnation = hdr(X_INCARNATION, incarnation_value(readiness.incarnation()));
+    let (status, reason, extra_headers): (u16, &str, Vec<SipHeader>) =
+        match readiness.options_report() {
+            OptionsReport::Serving(refusal) => {
+                let report = match refusal {
+                    None => WorkerReadiness::accept(),
+                    Some(refusal) => WorkerReadiness::refuse(refusal.cause()),
+                };
+                (
+                    200,
+                    "OK",
+                    capabilities
+                        .lines()
+                        .into_iter()
+                        .map(|(name, value)| hdr(name.as_wire_str(), value))
+                        .chain([
+                            hdr("X-Overload", overload.x_overload_header_value()),
+                            hdr(X_READINESS, report.header_value()),
+                            incarnation,
+                        ])
+                        .collect(),
+                )
+            }
+            OptionsReport::NotReady => (503, "Service Unavailable", vec![incarnation]),
+        };
 
     generate_response(
         req,
         status,
         reason,
         &GenerateResponseOpts {
-            to_tag: Some(id_gen.new_tag()),
+            to_tag: Some(tagger.for_request(req).0),
             extra_headers,
             ..Default::default()
         },
@@ -157,24 +187,24 @@ pub(crate) fn build_options_health_response(
 }
 
 /// Build the fail-closed **500 Server Internal Error** for an initial INVITE
-/// whose dialog-existence store lookup failed (ADR-0023). Call-layer
+/// no call is born for: one whose dialog-existence store lookup failed
+/// (ADR-0023), or whose snapshot does not rebuild it (ADR-0052 §11). Call-layer
 /// stateless like an admission refusal: sent through the INVITE server txn (`send_response` supersedes the cached 100, retransmits the final
 /// and absorbs the ACK) with **no** call/dialog/CDR/limiter state born. Fresh
 /// To-tag — this codebase enforces a tag on every non-100 final (RFC 3261
-/// §8.2.6.2). No Reason header: the bare canonical reject (ADR-0022 X3 shape);
-/// the fault is observable via `b2bua_store_fault_rejected_total`. The
-/// deployment's `advertisement` for a minted final rides.
-pub(super) fn build_store_fault_500(
-    id_gen: &IdGen,
+/// §8.2.6.2). No Reason header: the bare canonical reject (ADR-0022 X3 shape).
+/// The deployment's `advertisement` for a minted final rides.
+pub(super) fn build_unborn_500(
+    ids: &mut TurnIds,
     req: &sip_message::SipRequest,
     advertisement: &CapabilitySet,
-) -> sip_message::SipResponse {
+) -> Result<SipResponse, GenerateError> {
     generate_response(
         req,
         500,
         "Server Internal Error",
         &GenerateResponseOpts {
-            to_tag: Some(id_gen.new_tag()),
+            to_tag: Some(ids.new_tag()),
             extra_headers: minted_final_lines(advertisement),
             ..Default::default()
         },
@@ -206,14 +236,14 @@ Content-Length: 0\r\n\r\n";
         CapabilitySet::stating(None, None, Some(vec![AcceptRange::new("application/sdp")]))
     }
 
-    /// The merged-request 482 and the store-fault 500 are finals minted in the
-    /// worker's own name: each carries the deployment's advertisement.
+    /// The merged-request 482 and the unborn call's 500 are finals minted in
+    /// the worker's own name: each carries the deployment's advertisement.
     #[test]
     fn the_stateless_minted_finals_carry_the_advertisement() {
-        let id_gen = IdGen::seeded(1);
+        let mut ids = TurnIds::new(&sip_ids::IdKey::new(&[1u8; 32]), 0);
         for resp in [
-            build_merged_482(&id_gen, &invite(), &policy()),
-            build_store_fault_500(&id_gen, &invite(), &policy()),
+            build_merged_482(&mut ids, &invite(), &policy()).unwrap(),
+            build_unborn_500(&mut ids, &invite(), &policy()).unwrap(),
         ] {
             let accept: Vec<&str> = resp.raw(HeaderName::Accept).collect();
             assert_eq!(accept, ["application/sdp"], "{}", resp.status());

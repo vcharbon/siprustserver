@@ -18,7 +18,7 @@
 use std::collections::HashSet;
 
 use layer_harness::Stamped;
-use sip_net::{RecordedSipEntry, SignalingNetworkEvent};
+use sip_net_testkit::{RecordedSipEntry, SignalingNetworkEvent};
 
 /// One RFC-audit rule accepted over a bounded slice of the run, in capture order.
 struct AcceptanceWindow {
@@ -100,18 +100,20 @@ impl RfcAcceptance {
     }
 
     /// Run the cross-message audit over `events` (already the audit-visible,
-    /// endpoint-scoped view) and split its non-advisory findings into
-    /// `(gating, accepted)`: a finding is accepted when its OFFENDING message was
-    /// captured inside a window for its rule; a lifetime-waived rule is dropped
-    /// outright; an unattributable finding gates.
+    /// endpoint-scoped view, the binds of `scoped_out` taken out of it) and
+    /// split its non-advisory findings into `(gating, accepted)`: a finding is
+    /// accepted when its OFFENDING message was captured inside a window for its
+    /// rule; a lifetime-waived rule is dropped outright; an unattributable
+    /// finding gates.
     pub fn partition(
         &self,
         events: &[Stamped<SignalingNetworkEvent>],
+        scoped_out: &HashSet<String>,
     ) -> (Vec<Finding>, Vec<Finding>) {
-        let entries = sip_net::audit_wire_entries(events);
+        let entries = sip_net_testkit::audit_wire_entries(events);
         let mut gating = Vec::new();
         let mut accepted = Vec::new();
-        for rule in sip_net::rfc_cross_message_rules() {
+        for rule in sip_net_testkit::rfc_cross_message_rules_scoped(scoped_out.clone()) {
             // Honour the advisory tier exactly as the scenario-harness hard gate
             // does: a `force_advisory` rule (a documented B2BUA-architectural
             // divergence — per-leg SDP re-origin, OPTIONS-keepalive response
@@ -125,17 +127,9 @@ impl RfcAcceptance {
                 continue;
             }
             let has_window = self.windows.iter().any(|w| w.rule == rule.name());
-            if !has_window {
-                gating.extend(
-                    rule.check(events)
-                        .into_iter()
-                        .map(|(lane, detail)| (rule.name().to_string(), lane, detail)),
-                );
-                continue;
-            }
             for (lane, detail, offending, _charged) in rule.check_positioned(events) {
                 let finding = (rule.name().to_string(), lane, detail);
-                if self.accepts(rule.name(), offending, &entries) {
+                if has_window && self.accepts(rule.name(), offending, &entries) {
                     accepted.push(finding);
                 } else {
                     gating.push(finding);

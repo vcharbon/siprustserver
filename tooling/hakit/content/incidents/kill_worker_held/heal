@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Lift the hold: note the replacement that waited (its uid and phase), remove
+# the hold taint from every node that carries it, and prove no node carries
+# it, again a second later. Idempotent; correct after a partial inject or
+# none. Facts: the release instant, taken before the first taint goes (the
+# scheduler may place the waiting pod at once), and the waiting replacement.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+tainted() {
+  local nodes
+  nodes="$(kubectl get nodes -o json)"
+  jq -r '.items[] | select(any(.spec.taints[]?; .key == "hakit.io/hold")) | .metadata.name' <<<"$nodes"
+}
+pending_uid="" pending_phase=""
+target="$(hk_targets)"
+if [ -n "$target" ]; then
+  read -r pod _ _ <<<"$target"
+  row="$(kubectl -n "$NS" get pod "$pod" --ignore-not-found -o jsonpath='{.metadata.uid}{" "}{.status.phase}')"
+  read -r pending_uid pending_phase <<<"$row"
+fi
+list="$(tainted)"
+at="$(hk_now_ms)"
+if [ -n "$list" ]; then
+  mapfile -t nodes <<<"$list"
+  kubectl taint nodes "${nodes[@]}" hakit.io/hold:NoSchedule- >&2
+fi
+left="$(tainted)"
+[ -z "$left" ] || hk_die "$left still carries the hold taint"
+sleep "${HK_RECHECK_S:-1}"
+left="$(tainted)"
+[ -z "$left" ] || hk_die "$left carries the hold taint again a second after its release"
+echo "$at" > "$HAKIT_EVENT_DIR/released_at_ms"
+echo "$pending_uid" > "$HAKIT_EVENT_DIR/pending_uid"
+jq -cn --argjson at "$at" --arg uid "$pending_uid" --arg phase "$pending_phase" \
+  '{released_at_ms: $at, pending_uid: (if $uid == "" then null else $uid end), pending_phase: (if $phase == "" then null else $phase end)}'

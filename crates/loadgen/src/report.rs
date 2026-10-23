@@ -1,4 +1,5 @@
-//! Bounded-memory reporting: per-`(scenario, class)` counters, end-to-end and
+//! Bounded-memory reporting: per-`(scenario, class)` counters, per-scenario
+//! accepted-branch and failed-step counters, end-to-end and
 //! named-checkpoint latency histograms, per-`(scenario, exchange)` SIP
 //! round-trip histograms, a bounded sample store (the first N
 //! callflows per `(scenario, class)` — **including OK**, so OK vs failing flows
@@ -9,8 +10,8 @@
 //! samples are capped per bucket; and the sampling gate
 //! ([`Reporter::should_record`]) decides at call start
 //! whether to record at all, converging to ~zero recording once every bucket is
-//! full (with a small background fraction so a late-appearing error class still
-//! gets captured). Recording itself is per-call (freed when the call's binder
+//! full or has chased its next sample long enough (with a small background
+//! fraction so a late-appearing error class still gets captured). Recording itself is per-call (freed when the call's binder
 //! drops), so nothing accumulates across calls.
 
 use std::collections::BTreeMap;
@@ -24,11 +25,11 @@ use e2e_model::{
     SampleGroup,
 };
 
-use crate::chaos::ChaosTag;
 use crate::class::{CallOutcome, ResultClass};
 use crate::hist::Hist;
 use crate::mux::Exchange;
 use crate::scenarios::ScenarioId;
+use scenario_harness::actor::FailedAt;
 
 // ---------------------------------------------------------------------------
 // A rendered sample (a captured callflow for one (scenario, class) bucket)
@@ -56,7 +57,7 @@ pub struct RenderedSample {
 // Reporter
 // ---------------------------------------------------------------------------
 
-/// Reporter config.
+/// The sample bounds of a [`Reporter`].
 #[derive(Clone)]
 pub struct ReporterCfg {
     /// Max stored callflow samples per `(scenario, class)` bucket.
@@ -72,38 +73,56 @@ impl Default for ReporterCfg {
     }
 }
 
-// (scenario, class label, case, chaos near/clear) — the chaos dimension
-// auto-splits a failure class into kill-collateral (`near`) vs genuine
-// (`clear`) sub-buckets; the case dimension ([`CallOutcome::case`]) keeps
+// (scenario, class label, case) — the case dimension ([`CallOutcome::case`]) keeps
 // distinct failure modes of one class apart (which RFC rule, which failed
 // check, which agent/phase), so the first-N sample capture holds N of EACH
 // case instead of N copies of whichever error appeared first. Empty case =
 // un-refined (Ok).
-type Bucket = (ScenarioId, String, String, ChaosTag);
+type Bucket = (ScenarioId, String, String);
+
+/// How many calls of its scenario a bucket under cap keeps recording after its
+/// last sample: the sampling gate chases the bucket's next occurrence that
+/// long, then leaves it to the background fraction, so a rare failure mode
+/// never keeps a whole scenario recording.
+const CHASE_CALLS: u32 = 64;
+
+/// One sample bucket's tally: the samples it holds, and the calls recorded to
+/// chase its next sample since the last one ([`CHASE_CALLS`]).
+#[derive(Default, Clone, Copy)]
+struct BucketTally {
+    taken: u32,
+    chased: u32,
+}
 
 /// The run-dir-relative path of one sample page — THE single place the on-disk
 /// layout is spelled, used by both `finalize` (the writer) and `build_index`
 /// (the machine-readable listing) so the two can never disagree. An empty case
-/// uses the `scenario/class/chaos` layout.
-fn sample_rel(scenario: &str, class: &str, case: &str, chaos: &str, i: usize) -> String {
+/// uses the `scenario/class` layout.
+fn sample_rel(scenario: &str, class: &str, case: &str, i: usize) -> String {
     if case.is_empty() {
-        format!("callflows/{scenario}/{class}/{chaos}/{i}.html")
+        format!("callflows/{scenario}/{class}/{i}.html")
     } else {
-        format!("callflows/{scenario}/{class}/{case}/{chaos}/{i}.html")
+        format!("callflows/{scenario}/{class}/{case}/{i}.html")
     }
 }
 
 #[derive(Default)]
 struct Inner {
+    /// The load stream every series names (`main` until set).
+    stream: Option<String>,
     /// The run's mix, written from the first scrape.
     declared: std::collections::BTreeSet<ScenarioId>,
     counts: BTreeMap<Bucket, u64>,
+    /// Calls classed ok, by the accepted branch they ended on.
+    branches: BTreeMap<(ScenarioId, &'static str), u64>,
+    /// Failed calls, by the step they failed at.
+    failed_steps: BTreeMap<(ScenarioId, FailedAt), u64>,
     shed: BTreeMap<ScenarioId, u64>,
     e2e: BTreeMap<ScenarioId, Hist>,
     checkpoints: BTreeMap<(ScenarioId, &'static str), Hist>,
     /// SIP round trips per scenario and exchange (`Hist::round_trip` bounds).
     rtt: BTreeMap<(ScenarioId, Exchange), Hist>,
-    sample_taken: BTreeMap<Bucket, u32>,
+    sample_taken: BTreeMap<Bucket, BucketTally>,
     samples: BTreeMap<Bucket, Vec<RenderedSample>>,
     /// Per-scenario Test-case check-verdict tally over the SAMPLED calls:
     /// `(passed_all, failed_any)`. Fed only for calls whose attached case had
@@ -169,7 +188,6 @@ impl Reporter {
         }
     }
 
-    /// `(received, expected)` for the cross-call 18x-delivery gate.
     /// Fold one sampled call's per-waiver used mask into its scenario's CAMPAIGN
     /// tally (ADR-0024 §6). `waivers` is the call's stable merged waiver list
     /// (case + plan); `used` is aligned to it. Idempotent to call on an
@@ -202,6 +220,7 @@ impl Reporter {
             .collect()
     }
 
+    /// `(received, expected)` for the cross-call 18x-delivery gate.
     pub fn ringing_totals(&self) -> (u64, u64) {
         (
             self.ringing_received.load(Ordering::Relaxed),
@@ -224,7 +243,8 @@ impl Reporter {
     }
 
     /// The sampling-gate decision at call start: should this call record its
-    /// trace? True while any bucket for the scenario is still under cap (or none
+    /// trace? True while a bucket for the scenario is still under cap and has
+    /// chased its next sample for fewer than `CHASE_CALLS` (64) calls (or none is
     /// recorded yet), plus a small background fraction so a late error class is
     /// eventually captured. Converges to (background-only) once full.
     pub fn should_record(&self, scenario: ScenarioId) -> bool {
@@ -234,12 +254,13 @@ impl Reporter {
         {
             return true;
         }
-        let g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap();
         let mut saw_bucket = false;
-        for ((s, _, _, _), &c) in g.sample_taken.iter() {
+        for ((s, _, _), tally) in g.sample_taken.iter_mut() {
             if *s == scenario {
                 saw_bucket = true;
-                if c < self.cfg.sample_cap {
+                if tally.taken < self.cfg.sample_cap && tally.chased < CHASE_CALLS {
+                    tally.chased += 1;
                     return true;
                 }
             }
@@ -247,26 +268,20 @@ impl Reporter {
         !saw_bucket // nothing recorded for this scenario yet → record
     }
 
-    /// Whether a sample is still wanted for `(scenario, class, case, chaos)`
+    /// Whether a sample is still wanted for `(scenario, class, case)`
     /// (bucket < cap) — a cheap pre-check so the caller can skip the expensive
-    /// HTML render when the bucket is already full. The case and chaos
-    /// sub-buckets are independent, so each distinct failure mode — and its
-    /// near/clear split — gets up to `sample_cap` flows.
-    pub fn wants_sample(
-        &self,
-        scenario: ScenarioId,
-        class: &ResultClass,
-        case: &str,
-        chaos: ChaosTag,
-    ) -> bool {
+    /// HTML render when the bucket is already full. The case sub-buckets are
+    /// independent, so each distinct failure mode gets up to `sample_cap` flows.
+    pub fn wants_sample(&self, scenario: ScenarioId, class: &ResultClass, case: &str) -> bool {
         let g = self.inner.lock().unwrap();
-        let key = (scenario, class.label(), case.to_string(), chaos);
-        g.sample_taken.get(&key).copied().unwrap_or(0) < self.cfg.sample_cap
+        let key = (scenario, class.label(), case.to_string());
+        g.sample_taken.get(&key).map_or(0, |t| t.taken) < self.cfg.sample_cap
     }
 
-    /// Record one completed call: bump its `(scenario, class, case)` count, fold
-    /// its end-to-end time and checkpoints into the histograms, and store its
-    /// sample if the bucket still has room. `case` is the outcome's bounded
+    /// Record one completed call: bump its `(scenario, class, case)` count and
+    /// its accepted-branch or failed-step count, fold its end-to-end time and
+    /// checkpoints into the histograms, and store its sample if the bucket
+    /// still has room. `case` is the outcome's bounded
     /// discriminator ([`CallOutcome::case`] — the driver computes it once, with
     /// the call's phase trail).
     pub fn record(
@@ -277,12 +292,18 @@ impl Reporter {
         e2e: Duration,
         checkpoints: &[(&'static str, Duration)],
         sample: Option<RenderedSample>,
-        chaos: ChaosTag,
     ) {
         let class = ResultClass::from(outcome);
         let label = class.label();
         let mut g = self.inner.lock().unwrap();
-        *g.counts.entry((scenario, label.clone(), case.to_string(), chaos)).or_default() += 1;
+        *g.counts.entry((scenario, label.clone(), case.to_string())).or_default() += 1;
+        match outcome {
+            CallOutcome::Ok { branch } => *g.branches.entry((scenario, branch)).or_default() += 1,
+            CallOutcome::Step { at, .. } => {
+                *g.failed_steps.entry((scenario, *at)).or_default() += 1
+            }
+            _ => {}
+        }
         // A rejected call never ran: it has no end-to-end time to fold in.
         if class != ResultClass::Rejected {
             g.e2e.entry(scenario).or_insert_with(Hist::call).record(e2e.as_secs_f64() * 1000.0);
@@ -294,10 +315,10 @@ impl Reporter {
                 .record(d.as_secs_f64() * 1000.0);
         }
         if let Some(sample) = sample {
-            let key = (scenario, label, case.to_string(), chaos);
-            let taken = g.sample_taken.entry(key.clone()).or_default();
-            if *taken < self.cfg.sample_cap {
-                *taken += 1;
+            let key = (scenario, label, case.to_string());
+            let tally = g.sample_taken.entry(key.clone()).or_default();
+            if tally.taken < self.cfg.sample_cap {
+                *tally = BucketTally { taken: tally.taken + 1, chased: 0 };
                 g.samples.entry(key).or_default().push(sample);
             }
         }
@@ -334,57 +355,9 @@ impl Reporter {
         g.declared.extend(scenarios);
     }
 
-    /// Render the live `/metrics` text in Prometheus exposition format. Series
-    /// mirror the SIPp exporter's naming so existing dashboards/queries extend.
-    pub fn render_prometheus(&self) -> String {
-        use crate::catalogue as c;
-        let g = self.inner.lock().unwrap();
-        let mut out = String::new();
-        // The case dimension is a report/sample refinement only — the Prometheus
-        // series stay (scenario, class, chaos)-keyed (stable dashboards, bounded
-        // series), so aggregate over case here.
-        let mut calls: BTreeMap<(ScenarioId, String, &str), u64> = BTreeMap::new();
-        for scenario in &g.declared {
-            for class in c::CLASS.values {
-                for chaos in c::CHAOS.values {
-                    calls.insert((scenario, class.to_string(), chaos), 0);
-                }
-            }
-        }
-        for ((scenario, class, _case, chaos), n) in &g.counts {
-            *calls.entry((*scenario, class.clone(), chaos.label())).or_default() += n;
-        }
-        c::CALLS.render_rows(
-            &mut out,
-            calls
-                .into_iter()
-                .map(|((s, class, chaos), n)| ([s.to_string(), class, chaos.to_string()], n)),
-        );
-        let mut shed: BTreeMap<ScenarioId, u64> = g.declared.iter().map(|s| (*s, 0)).collect();
-        shed.extend(g.shed.iter().map(|(s, n)| (*s, *n)));
-        c::SHED.render_rows(&mut out, shed.into_iter().map(|(s, n)| ([s], n)));
-        c::INFLIGHT.render_value(&mut out, self.inflight.load(Ordering::Relaxed));
-        c::STARTED.render_value(&mut out, self.started.load(Ordering::Relaxed));
-        // 18x-delivery gate: a non-PRACK ringing provisional is best-effort, so a
-        // miss is EXPECTED. `received/expected` should stay > 0.99; a systemic 18x
-        // regression drops it well below and IS a bug (unlike one dropped 18x).
-        c::RINGING_EXPECTED.render_value(&mut out, self.ringing_expected.load(Ordering::Relaxed));
-        c::RINGING_RECEIVED.render_value(&mut out, self.ringing_received.load(Ordering::Relaxed));
-        let empty = Hist::call();
-        let mut e2e: BTreeMap<ScenarioId, &Hist> =
-            g.declared.iter().map(|s| (*s, &empty)).collect();
-        e2e.extend(g.e2e.iter().map(|(s, h)| (*s, h)));
-        c::E2E_LATENCY_SECONDS
-            .render_histogram_rows(&mut out, e2e.iter().map(|(s, h)| ([*s], h.histogram_value())));
-        c::CHECKPOINT_LATENCY_SECONDS.render_histogram_rows(
-            &mut out,
-            g.checkpoints.iter().map(|((s, name), h)| ([*s, *name], h.histogram_value())),
-        );
-        c::RTT_SECONDS.render_histogram_rows(
-            &mut out,
-            g.rtt.iter().map(|((s, exchange), h)| ([*s, exchange.label()], h.histogram_value())),
-        );
-        out
+    /// Name the load stream every series carries (`main` until set).
+    pub fn set_stream(&self, stream: &str) {
+        self.inner.lock().unwrap().stream = Some(stream.to_string());
     }
 
     // -- Final on-disk report ----------------------------------------------
@@ -414,27 +387,25 @@ impl Reporter {
         use std::fmt::Write as _;
         let g = self.inner.lock().unwrap();
 
-        // Each sample's callflow HTML, split by case (which failure mode) and
-        // chaos sub-bucket (kill-collateral `near` apart from genuine `clear`).
+        // Each sample's callflow HTML, split by case (which failure mode).
         let mut pages: Vec<(String, Arc<str>)> = Vec::new();
         let mut links: BTreeMap<Bucket, Vec<String>> = BTreeMap::new();
-        for ((scenario, class, case, chaos), samples) in &g.samples {
-            let chaos_label = chaos.label();
+        for ((scenario, class, case), samples) in &g.samples {
             for (i, s) in samples.iter().enumerate() {
-                let rel = sample_rel(scenario, class, case, chaos_label, i);
+                let rel = sample_rel(scenario, class, case, i);
                 let html = match &s.html {
                     Some(html) => html.clone(),
                     // No rendered flow (sample taken on a non-recording call) —
                     // a stub so the detail is still linked.
                     None => Arc::from(format!(
-                        "<html><body><h3>{scenario} / {class} / {case} / {chaos_label} #{i}</h3><p>{}</p>\
+                        "<html><body><h3>{scenario} / {class} / {case} #{i}</h3><p>{}</p>\
                          <p>e2e: {:.1} ms</p></body></html>",
                         s.detail.as_deref().unwrap_or("(no detail)"),
                         s.e2e_ms
                     )),
                 };
                 pages.push((rel.clone(), html));
-                links.entry((scenario, class.clone(), case.clone(), *chaos)).or_default().push(rel);
+                links.entry((scenario, class.clone(), case.clone())).or_default().push(rel);
             }
         }
 
@@ -443,23 +414,20 @@ impl Reporter {
         idx.push_str(
             "<html><head><meta charset=\"utf-8\"><title>loadgen report</title>\
             <style>body{font-family:sans-serif}table{border-collapse:collapse}\
-            td,th{border:1px solid #ccc;padding:4px 8px}.ok{color:#070}.nok{color:#a00}\
-            .near{color:#a60;font-weight:bold}</style>\
+            td,th{border:1px solid #ccc;padding:4px 8px}.ok{color:#070}.nok{color:#a00}</style>\
             </head><body><h1>loadgen report</h1>",
         );
-        idx.push_str("<h2>Results by scenario × class × case × chaos</h2>\
-            <p>chaos=<b>clear</b> are the genuine results to triage; chaos=<b>near</b> are \
-            within the chaos tolerance of an injected fault (likely acceptable kill collateral). \
-            The <b>case</b> column splits a class into its distinct failure modes (RFC rule id, \
-            failed check, agent@phase) — each keeps its own first-N samples.</p>\
+        idx.push_str(
+            "<h2>Results by scenario × class × case</h2>\
+            <p>The <b>case</b> column splits a class into its distinct failure modes (RFC rule id, \
+            failed check, failed step) — each keeps its own first-N samples.</p>\
             <table>\
-            <tr><th>scenario</th><th>class</th><th>case</th><th>chaos</th><th>count</th><th>samples</th></tr>");
-        for ((scenario, class, case, chaos), n) in &g.counts {
+            <tr><th>scenario</th><th>class</th><th>case</th><th>count</th><th>samples</th></tr>",
+        );
+        for ((scenario, class, case), n) in &g.counts {
             let cls = if ResultClass::label_is_ok(class) { "ok" } else { "nok" };
-            let chaos_label = chaos.label();
-            let chaos_cls = if chaos_label == "near" { "near" } else { "" };
             let sample_links = links
-                .get(&(scenario, class.clone(), case.clone(), *chaos))
+                .get(&(scenario, class.clone(), case.clone()))
                 .map(|ls| {
                     ls.iter()
                         .enumerate()
@@ -470,7 +438,7 @@ impl Reporter {
                 .unwrap_or_default();
             idx.push_str(&format!(
                 "<tr><td>{scenario}</td><td class=\"{cls}\">{class}</td><td>{case}</td>\
-                 <td class=\"{chaos_cls}\">{chaos_label}</td><td>{n}</td><td>{sample_links}</td></tr>"
+                 <td>{n}</td><td>{sample_links}</td></tr>"
             ));
         }
         idx.push_str("</table><h2>Latency (ms)</h2><table>\
@@ -498,12 +466,12 @@ impl Reporter {
         // summary.md (writing into a String cannot fail).
         let mut md = String::new();
         let _ = writeln!(md, "# loadgen summary\n");
-        let _ = writeln!(md, "## Results by scenario × class × case × chaos\n");
-        let _ = writeln!(md, "(chaos=clear → genuine results to triage; chaos=near → within tolerance of an injected fault; case = the class's distinct failure mode)\n");
-        let _ = writeln!(md, "| scenario | class | case | chaos | count |");
-        let _ = writeln!(md, "|---|---|---|---|---|");
-        for ((scenario, class, case, chaos), n) in &g.counts {
-            let _ = writeln!(md, "| {scenario} | {class} | {case} | {} | {n} |", chaos.label());
+        let _ = writeln!(md, "## Results by scenario × class × case\n");
+        let _ = writeln!(md, "(case = the class's distinct failure mode)\n");
+        let _ = writeln!(md, "| scenario | class | case | count |");
+        let _ = writeln!(md, "|---|---|---|---|");
+        for ((scenario, class, case), n) in &g.counts {
+            let _ = writeln!(md, "| {scenario} | {class} | {case} | {n} |");
         }
         let _ = writeln!(md, "\n## Latency (ms)\n");
         let _ = writeln!(md, "| scenario | n | mean | p50 | p90 | p99 | max |");
@@ -537,11 +505,10 @@ impl Reporter {
         let counts = g
             .counts
             .iter()
-            .map(|((scenario, class, case, chaos), n)| CountRow {
+            .map(|((scenario, class, case), n)| CountRow {
                 scenario: scenario.to_string(),
                 class: class.clone(),
                 case: case.clone(),
-                chaos: chaos.label().to_string(),
                 count: *n,
                 ok: ResultClass::label_is_ok(class),
             })
@@ -584,22 +551,19 @@ impl Reporter {
             })
             .collect();
 
-        // The stored-sample links, keyed by their `(scenario, class, case,
-        // chaos)` bucket — the SAME layout `finalize` writes to disk
+        // The stored-sample links, keyed by their `(scenario, class, case)`
+        // bucket — the SAME layout `finalize` writes to disk
         // (`sample_rel` is the single path authority).
         let samples = g
             .samples
             .iter()
-            .map(|((scenario, class, case, chaos), stored)| {
-                let chaos_label = chaos.label();
-                let pages = (0..stored.len())
-                    .map(|i| sample_rel(scenario, class, case, chaos_label, i))
-                    .collect();
+            .map(|((scenario, class, case), stored)| {
+                let pages =
+                    (0..stored.len()).map(|i| sample_rel(scenario, class, case, i)).collect();
                 SampleGroup {
                     scenario: scenario.to_string(),
                     class: class.clone(),
                     case: case.clone(),
-                    chaos: chaos_label.to_string(),
                     pages,
                 }
             })
@@ -679,8 +643,8 @@ impl Reporter {
 
     // -- Test/inspection accessors -----------------------------------------
 
-    /// Total count for a `(scenario, class)` bucket, summed across all case and
-    /// chaos sub-buckets (for tests / summaries).
+    /// Total count for a `(scenario, class)` bucket, summed across all case
+    /// sub-buckets (for tests / summaries).
     pub fn count(&self, scenario: ScenarioId, class: &ResultClass) -> u64 {
         let label = class.label();
         self.inner
@@ -688,28 +652,13 @@ impl Reporter {
             .unwrap()
             .counts
             .iter()
-            .filter(|((s, c, _, _), _)| *s == scenario && *c == label)
-            .map(|(_, n)| *n)
-            .sum()
-    }
-
-    /// Count for a `(scenario, class, chaos)` sub-bucket — e.g. the genuine
-    /// (`Clear`) failures, isolated from kill collateral — summed across the
-    /// class's case sub-buckets.
-    pub fn count_tagged(&self, scenario: ScenarioId, class: &ResultClass, chaos: ChaosTag) -> u64 {
-        let label = class.label();
-        self.inner
-            .lock()
-            .unwrap()
-            .counts
-            .iter()
-            .filter(|((s, c, _, ch), _)| *s == scenario && *c == label && *ch == chaos)
+            .filter(|((s, c, _), _)| *s == scenario && *c == label)
             .map(|(_, n)| *n)
             .sum()
     }
 
     /// Number of stored samples for a `(scenario, class)` bucket, across all
-    /// case and chaos sub-buckets.
+    /// case sub-buckets.
     pub fn sample_count(&self, scenario: ScenarioId, class: &ResultClass) -> u32 {
         let label = class.label();
         self.inner
@@ -717,8 +666,8 @@ impl Reporter {
             .unwrap()
             .sample_taken
             .iter()
-            .filter(|((s, c, _, _), _)| *s == scenario && *c == label)
-            .map(|(_, n)| *n)
+            .filter(|((s, c, _), _)| *s == scenario && *c == label)
+            .map(|(_, t)| t.taken)
             .sum()
     }
 
@@ -728,472 +677,7 @@ impl Reporter {
     }
 }
 
+mod prometheus;
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn rfc_fail(rule: &str, detail: &str) -> CallOutcome {
-        CallOutcome::RfcAuditFail(vec![sip_net::RfcFinding {
-            rule: rule.to_string(),
-            lane: "10.0.0.1:5060".to_string(),
-            detail: detail.to_string(),
-            advisory: false,
-            offending: None,
-            charged: None,
-        }])
-    }
-
-    /// The chaos dimension splits a failure class into independent near/clear
-    /// sub-buckets across counts, the Prometheus surface, and the on-disk dirs;
-    /// the un-tagged `count` still sums both (so existing summaries are intact).
-    #[test]
-    #[ignore = "slow lane: loadgen"]
-    fn chaos_splits_counts_samples_and_dirs() {
-        let r = Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 0 });
-        let mk =
-            |d: &str| Some(RenderedSample { html: None, detail: Some(d.to_string()), e2e_ms: 1.0 });
-        let outcome = rfc_fail("rfc3261.cseq", "CSeq went backwards");
-        let case = outcome.case(None);
-        r.record(
-            "reinvite",
-            &outcome,
-            &case,
-            Duration::from_millis(1),
-            &[],
-            mk("kill collateral"),
-            ChaosTag::Near,
-        );
-        r.record(
-            "reinvite",
-            &outcome,
-            &case,
-            Duration::from_millis(1),
-            &[],
-            mk("genuine desync"),
-            ChaosTag::Clear,
-        );
-
-        assert_eq!(r.count_tagged("reinvite", &ResultClass::RfcAuditFail, ChaosTag::Near), 1);
-        assert_eq!(r.count_tagged("reinvite", &ResultClass::RfcAuditFail, ChaosTag::Clear), 1);
-        assert_eq!(r.count("reinvite", &ResultClass::RfcAuditFail), 2, "untagged count sums both");
-
-        let prom = r.render_prometheus();
-        assert!(prom.contains("class=\"rfc_audit_fail\",chaos=\"near\""), "{prom}");
-        assert!(prom.contains("class=\"rfc_audit_fail\",chaos=\"clear\""), "{prom}");
-
-        let out = std::env::temp_dir().join(format!("loadgen-chaos-report-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&out);
-        r.finalize(&out).unwrap();
-        assert!(
-            out.join("callflows/reinvite/rfc_audit_fail/rfc3261.cseq/near/0.html").exists(),
-            "near sub-bucket dir missing"
-        );
-        assert!(
-            out.join("callflows/reinvite/rfc_audit_fail/rfc3261.cseq/clear/0.html").exists(),
-            "clear sub-bucket dir missing"
-        );
-        let _ = std::fs::remove_dir_all(&out);
-    }
-
-    /// The latency histograms are exported as Prometheus histograms, so a
-    /// scrape series gives the latency of any time window (histogram_quantile
-    /// over an increase).
-    #[test]
-    #[ignore = "slow lane: loadgen"]
-    fn latency_histograms_are_exported_as_prometheus_histograms() {
-        let r = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
-        for (setup, e2e) in [(5, 9_000), (50, 9_500), (900_000, 950_000)] {
-            r.record(
-                "basic_call",
-                &CallOutcome::Ok,
-                "",
-                Duration::from_millis(e2e),
-                &[("time_to_200", Duration::from_millis(setup))],
-                None,
-                ChaosTag::Clear,
-            );
-        }
-        let prom = r.render_prometheus();
-        assert!(prom.contains("# TYPE loadgen_checkpoint_latency_seconds histogram"), "{prom}");
-        assert!(prom.contains("# TYPE loadgen_e2e_latency_seconds histogram"), "{prom}");
-        let family = "loadgen_checkpoint_latency_seconds";
-        let labels = "scenario=\"basic_call\",checkpoint=\"time_to_200\"";
-        let buckets: Vec<(f64, u64)> = prom
-            .lines()
-            .filter_map(|l| l.strip_prefix(&format!("{family}_bucket{{{labels},le=\"")))
-            .map(|rest| {
-                let (le, n) = rest.split_once("\"} ").unwrap();
-                let le = if le == "+Inf" { f64::INFINITY } else { le.parse().unwrap() };
-                (le, n.parse().unwrap())
-            })
-            .collect();
-        assert_eq!(buckets.len(), 49, "48 bounds and +Inf: {prom}");
-        assert!(buckets.windows(2).all(|w| w[0].0 < w[1].0 && w[0].1 <= w[1].1), "{buckets:?}");
-        let at = |secs: f64| buckets.iter().find(|(le, _)| *le >= secs).unwrap().1;
-        assert_eq!(at(0.005), 1, "5 ms falls in the first bucket reaching 5 ms");
-        assert_eq!(at(0.05), 2);
-        assert_eq!(buckets[47].1, 2, "900 s is past the last bound (~730 s)");
-        assert_eq!(buckets[48], (f64::INFINITY, 3));
-        assert!(prom.contains(&format!("{family}_count{{{labels}}} 3\n")), "{prom}");
-        assert!(prom.contains(&format!("{family}_sum{{{labels}}} 900.055\n")), "{prom}");
-        assert!(
-            prom.contains("loadgen_e2e_latency_seconds_count{scenario=\"basic_call\"} 3\n"),
-            "{prom}"
-        );
-    }
-
-    /// A scrape writes no lifetime quantile gauge (a window's latency is a
-    /// `histogram_quantile` over the histograms), and every declared scenario
-    /// carries its `expected_reject` series from the first scrape.
-    #[test]
-    #[ignore = "slow lane: loadgen"]
-    fn a_scrape_holds_no_quantile_gauge_and_declares_expected_reject() {
-        let r = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
-        r.declare_scenarios(["basic_call"]);
-        r.record(
-            "basic_call",
-            &CallOutcome::Ok,
-            "",
-            Duration::from_millis(9_000),
-            &[("time_to_200", Duration::from_millis(5))],
-            None,
-            ChaosTag::Clear,
-        );
-        let prom = r.render_prometheus();
-        assert!(!prom.contains("loadgen_e2e_seconds"), "{prom}");
-        assert!(!prom.contains("loadgen_checkpoint_seconds"), "{prom}");
-        assert!(!prom.contains("quantile=\""), "{prom}");
-        assert!(
-            prom.contains(
-                "loadgen_calls_total{scenario=\"basic_call\",class=\"expected_reject\",chaos=\"clear\"} 0\n"
-            ),
-            "{prom}"
-        );
-    }
-
-    /// A SIP round trip renders on `loadgen_rtt_seconds{scenario,exchange}`,
-    /// bounds from 0.1 ms in ×1.25 steps: a 2.5 ms and a 3.5 ms exchange land
-    /// in different buckets, and only observed exchanges are written.
-    #[test]
-    #[ignore = "slow lane: loadgen"]
-    fn round_trips_render_as_a_fine_histogram_per_exchange() {
-        let r = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
-        r.declare_scenarios(["basic_call"]);
-        r.record_rtts(
-            "basic_call",
-            &[
-                (Exchange::Invite18x, Duration::from_micros(2_500)),
-                (Exchange::Invite18x, Duration::from_micros(3_500)),
-                (Exchange::ByeFinal, Duration::from_millis(40)),
-            ],
-        );
-        let prom = r.render_prometheus();
-        assert!(prom.contains("# TYPE loadgen_rtt_seconds histogram"), "{prom}");
-        let labels = "scenario=\"basic_call\",exchange=\"invite_18x\"";
-        let buckets: Vec<(f64, u64)> = prom
-            .lines()
-            .filter_map(|l| l.strip_prefix(&format!("loadgen_rtt_seconds_bucket{{{labels},le=\"")))
-            .map(|rest| {
-                let (le, n) = rest.split_once("\"} ").unwrap();
-                let le = if le == "+Inf" { f64::INFINITY } else { le.parse().unwrap() };
-                (le, n.parse().unwrap())
-            })
-            .collect();
-        assert_eq!(buckets.len(), 61, "60 bounds and +Inf: {prom}");
-        assert_eq!(buckets[0].0, 0.0001, "the first bound is 0.1 ms");
-        assert!(buckets[59].0 > 50.0, "the last bound reaches past 50 s: {buckets:?}");
-        assert!(
-            buckets[..60].windows(2).all(|w| w[1].0 / w[0].0 < 1.26),
-            "bounds at most 25 % apart: {buckets:?}"
-        );
-        let at = |secs: f64| buckets.iter().find(|(le, _)| *le >= secs).unwrap().1;
-        assert_eq!(at(0.0025), 1, "2.5 ms alone at its bucket");
-        assert_eq!(at(0.0035), 2);
-        assert!(prom.contains(&format!("loadgen_rtt_seconds_count{{{labels}}} 2\n")), "{prom}");
-        assert!(prom.contains(&format!("loadgen_rtt_seconds_sum{{{labels}}} 0.006\n")), "{prom}");
-        assert!(
-            prom.contains(
-                "loadgen_rtt_seconds_count{scenario=\"basic_call\",exchange=\"bye_final\"} 1\n"
-            ),
-            "{prom}"
-        );
-        assert!(!prom.contains("exchange=\"invite_100\""), "an unobserved exchange is not written");
-    }
-
-    /// The index counts the expected reject as ok: it is no failed call.
-    #[test]
-    #[ignore = "slow lane: loadgen"]
-    fn the_index_counts_the_expected_reject_as_ok() {
-        let r = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
-        let reject = CallOutcome::ExpectedReject(486);
-        r.record(
-            "limited",
-            &reject,
-            &reject.case(None),
-            Duration::from_millis(3),
-            &[],
-            None,
-            ChaosTag::Clear,
-        );
-        let idx = r.build_index(
-            LoadRunMeta {
-                started_ms: 0,
-                finished_ms: 0,
-                finished: true,
-                target: "t".into(),
-                cps: 1.0,
-                duration_secs: 1,
-                max_in_flight: 1,
-                egress: None,
-                profile: None,
-            },
-            Canaries::default(),
-        );
-        let row = idx.counts.iter().find(|c| c.class == "expected_reject").expect("a row");
-        assert!(row.ok, "{row:?}");
-        assert_eq!((idx.total_calls(), idx.failed_calls()), (1, 0));
-    }
-
-    /// The case dimension splits ONE class into per-failure-mode sample buckets:
-    /// two different RFC rules on the same scenario each keep their own first-N
-    /// samples (the whole point — N samples of the first rule to fire no longer
-    /// starve a second, rarer rule), and the counts table carries the case.
-    #[test]
-    #[ignore = "slow lane: loadgen"]
-    fn case_splits_sample_buckets_within_a_class() {
-        let r = Reporter::new(ReporterCfg { sample_cap: 1, background_record_every: 0 });
-        let mk =
-            |d: &str| Some(RenderedSample { html: None, detail: Some(d.to_string()), e2e_ms: 1.0 });
-        let unacked = rfc_fail("unacked-invite-non-2xx-final", "reject never ACKed");
-        let cseq = rfc_fail("rfc3261.cseq", "CSeq went backwards");
-        let (case_a, case_b) = (unacked.case(None), cseq.case(None));
-        assert_ne!(case_a, case_b, "different rules → different cases");
-
-        // Fill rule A's bucket (cap 1), then rule B must STILL want a sample.
-        r.record(
-            "reinvite",
-            &unacked,
-            &case_a,
-            Duration::from_millis(1),
-            &[],
-            mk("a"),
-            ChaosTag::Clear,
-        );
-        assert!(
-            !r.wants_sample("reinvite", &ResultClass::RfcAuditFail, &case_a, ChaosTag::Clear),
-            "rule A bucket full at cap"
-        );
-        assert!(
-            r.wants_sample("reinvite", &ResultClass::RfcAuditFail, &case_b, ChaosTag::Clear),
-            "rule B keeps its own bucket"
-        );
-        r.record(
-            "reinvite",
-            &cseq,
-            &case_b,
-            Duration::from_millis(1),
-            &[],
-            mk("b"),
-            ChaosTag::Clear,
-        );
-        assert_eq!(r.sample_count("reinvite", &ResultClass::RfcAuditFail), 2);
-
-        // The machine-readable index carries the case on counts AND samples,
-        // and the per-case pages land in per-case dirs.
-        let out = std::env::temp_dir().join(format!("loadgen-case-split-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&out);
-        r.finalize(&out).unwrap();
-        let idx = r.build_index(
-            LoadRunMeta {
-                started_ms: 0,
-                finished_ms: 0,
-                finished: true,
-                target: "t".into(),
-                cps: 1.0,
-                duration_secs: 1,
-                max_in_flight: 1,
-                egress: None,
-                profile: None,
-            },
-            Canaries::default(),
-        );
-        assert!(idx.counts.iter().any(|c| c.case == case_a && c.count == 1));
-        assert!(idx.counts.iter().any(|c| c.case == case_b && c.count == 1));
-        for group in &idx.samples {
-            for page in &group.pages {
-                assert!(out.join(page).exists(), "index names a missing page: {page}");
-                assert!(page.contains(&group.case), "page path carries the case: {page}");
-            }
-        }
-        let _ = std::fs::remove_dir_all(&out);
-    }
-
-    /// `finalize_run` writes `load-result.json` next to `index.html`; it parses
-    /// back as a `LoadRunIndex`, its counts/canaries/check-verdicts mirror the
-    /// reporter state, and every sample page it names actually exists on disk (the
-    /// index and the HTML report never disagree).
-    #[test]
-    #[ignore = "slow lane: loadgen"]
-    fn writes_and_parses_the_machine_readable_index() {
-        let r = Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 0 });
-        let mk =
-            |d: &str| Some(RenderedSample { html: None, detail: Some(d.to_string()), e2e_ms: 2.0 });
-
-        // One OK basic call, one genuine check-fail reinvite (sampled), plus the
-        // cross-call ringing gate + a sampled check tally.
-        r.record(
-            "basic_call",
-            &CallOutcome::Ok,
-            "",
-            Duration::from_millis(3),
-            &[("ringing", Duration::from_millis(1))],
-            mk("ok"),
-            ChaosTag::Clear,
-        );
-        let check_fail = CallOutcome::CheckFail(vec![e2e_model::CheckVerdict {
-            on: "alice.invite".to_string(),
-            field: "from.userInfo".to_string(),
-            op: e2e_model::CheckOp::Exists,
-            expected: None,
-            actual: None,
-            passed: false,
-            detail: "from.userInfo mismatch".to_string(),
-        }]);
-        let check_case = check_fail.case(None);
-        r.record(
-            "reinvite",
-            &check_fail,
-            &check_case,
-            Duration::from_millis(5),
-            &[],
-            mk("check fail"),
-            ChaosTag::Clear,
-        );
-        r.record_ringing(Some(true));
-        r.record_ringing(Some(false));
-        r.record_checks("reinvite", true);
-        r.record_checks("reinvite", false);
-        r.inc_shed("basic_call");
-
-        let out = std::env::temp_dir().join(format!("loadgen-index-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&out);
-        let meta = LoadRunMeta {
-            started_ms: 1_000,
-            finished_ms: 61_000,
-            finished: true,
-            target: "10.0.0.1:5060".to_string(),
-            cps: 20.0,
-            duration_secs: 60,
-            max_in_flight: 100,
-            egress: Some("transparent".to_string()),
-            profile: Some("smoke".to_string()),
-        };
-        let canaries = Canaries { orphans: 0, drops: 7, ..Canaries::default() };
-        r.finalize_run(&out, meta.clone(), canaries).unwrap();
-
-        let path = out.join("load-result.json");
-        assert!(path.exists(), "load-result.json missing next to index.html");
-        assert!(out.join("index.html").exists(), "index.html still written");
-        let idx: LoadRunIndex =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-
-        assert_eq!(idx.meta, meta, "run metadata echoed verbatim");
-        assert_eq!(idx.total_calls(), 2);
-        assert_eq!(idx.failed_calls(), 1, "the check_fail reinvite");
-        assert!(idx.counts.iter().any(|c| c.scenario == "basic_call" && c.class == "ok" && c.ok));
-        assert!(idx
-            .counts
-            .iter()
-            .any(|c| c.scenario == "reinvite" && c.class == "check_fail" && !c.ok));
-
-        // Canaries: reporter-owned shed/ringing filled in; caller-owned drops kept.
-        assert_eq!(idx.canaries.shed, 1);
-        assert_eq!(idx.canaries.drops, 7);
-        assert_eq!((idx.canaries.ringing_received, idx.canaries.ringing_expected), (1, 2));
-
-        // Per-scenario check-verdict tally.
-        let cs = idx.checks.iter().find(|c| c.scenario == "reinvite").expect("reinvite check row");
-        assert_eq!((cs.passed, cs.failed), (1, 1));
-
-        // Every listed sample page exists on disk (the paths match what finalize wrote).
-        assert!(!idx.samples.is_empty(), "at least one sample group");
-        for group in &idx.samples {
-            for page in &group.pages {
-                assert!(out.join(page).exists(), "index names a missing sample page: {page}");
-            }
-        }
-        let _ = std::fs::remove_dir_all(&out);
-    }
-
-    /// The periodic snapshot task races the final `finished:true` write whenever
-    /// the report interval divides the run duration — a tick fired at the run's
-    /// last instant would overwrite the final index with a `finished:false`
-    /// snapshot. The shutdown sequence must abort+await the task BEFORE the
-    /// final write; after that, no tick may ever land again.
-    #[tokio::test(start_paused = true)]
-    #[ignore = "slow lane: loadgen"]
-    async fn final_write_is_not_overwritten_by_snapshot_task() {
-        let r = Arc::new(Reporter::new(ReporterCfg { sample_cap: 1, background_record_every: 0 }));
-        r.record(
-            "basic_call",
-            &CallOutcome::Ok,
-            "",
-            Duration::from_millis(3),
-            &[],
-            None,
-            ChaosTag::Clear,
-        );
-
-        let out =
-            std::env::temp_dir().join(format!("loadgen-snapshot-race-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&out);
-        let base = LoadRunMeta {
-            started_ms: 0,
-            finished_ms: 0,
-            finished: false,
-            target: "10.0.0.1:5060".to_string(),
-            cps: 1.0,
-            duration_secs: 60,
-            max_in_flight: 1,
-            egress: None,
-            profile: None,
-        };
-        let read_finished = |out: &Path| -> bool {
-            let idx: LoadRunIndex = serde_json::from_str(
-                &std::fs::read_to_string(out.join("load-result.json")).unwrap(),
-            )
-            .unwrap();
-            idx.meta.finished
-        };
-
-        let snap_meta = base.clone();
-        let snap = r.spawn_snapshots(
-            out.clone(),
-            Duration::from_secs(1),
-            move || snap_meta.clone(),
-            Canaries::default,
-        );
-
-        // Let a few ticks land: mid-run snapshots say finished:false.
-        for _ in 0..3 {
-            tokio::time::advance(Duration::from_secs(1)).await;
-            tokio::task::yield_now().await;
-        }
-        assert!(!read_finished(&out), "mid-run snapshots are finished:false");
-
-        // The shutdown sequence under test: stop the task, THEN write the final.
-        snap.abort();
-        let _ = snap.await;
-        r.finalize_run(&out, LoadRunMeta { finished: true, ..base }, Canaries::default()).unwrap();
-        assert!(read_finished(&out), "final write says finished:true");
-
-        // The regression: advance past several more would-be ticks — a leaked
-        // task would overwrite the final index with a finished:false snapshot.
-        for _ in 0..5 {
-            tokio::time::advance(Duration::from_secs(1)).await;
-            tokio::task::yield_now().await;
-        }
-        assert!(read_finished(&out), "no snapshot tick may land after shutdown");
-        let _ = std::fs::remove_dir_all(&out);
-    }
-}
+mod tests;

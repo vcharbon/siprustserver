@@ -2,7 +2,9 @@
 //! (the call is born and runs the whole call path), cancelled (its caller
 //! CANCELed it before its turn ran: the call is born and ends at once, with
 //! no decision and no limiter admit) or refused by a rung of the admission
-//! ladder ([`crate::admission`]) before any call state exists, and why.
+//! ladder ([`crate::admission`]) before any call state exists, and why. A
+//! cordoned worker's refusal is a refusal too, though its call is born to
+//! write the record of a call no decision reached.
 //!
 //! A new call is a new initial INVITE (no To-tag). Its first refusal is
 //! counted once, on `b2bua_new_calls_total`, in the class it was judged in;
@@ -59,11 +61,17 @@ pub enum Refusal {
     /// A call on the INVITE's Call-ID and From-tag, with another CSeq, is
     /// still here: answered 500 with a Retry-After (RFC 3261 §14.2).
     IdentityInUse,
+    /// An operator cordoned the worker: answered the bare 503 before any
+    /// decision. Its call is born only to write its record.
+    Cordoned,
+    /// The call's record of the INVITE does not rebuild it (ADR-0052 §11):
+    /// answered 500 from the INVITE itself, and no call is born.
+    Unrecoverable,
 }
 
 impl Refusal {
     /// Every reason, in exposition order.
-    pub const ALL: [Refusal; 11] = [
+    pub const ALL: [Refusal; 13] = [
         Refusal::BucketEmpty,
         Refusal::PanicElu,
         Refusal::CapacityCalls,
@@ -75,6 +83,8 @@ impl Refusal {
         Refusal::StoreFault,
         Refusal::DispatchDiscard,
         Refusal::IdentityInUse,
+        Refusal::Cordoned,
+        Refusal::Unrecoverable,
     ];
 
     /// Stable `reason` label.
@@ -91,6 +101,8 @@ impl Refusal {
             Refusal::StoreFault => "store_fault",
             Refusal::DispatchDiscard => "dispatch_discard",
             Refusal::IdentityInUse => "identity_in_use",
+            Refusal::Cordoned => "cordoned",
+            Refusal::Unrecoverable => "unrecoverable",
         }
     }
 
@@ -123,23 +135,30 @@ pub struct NewCallTally {
 impl NewCallTally {
     /// Count one new call admitted: its call is born.
     pub fn accept(&self, class: Class) {
-        self.rows.accepted[class.index()].fetch_add(1, Ordering::Relaxed);
+        bump(self.rows.accepted.get(class.index()));
     }
 
     /// Count one new call its caller CANCELed before its turn ran: its call
     /// is born and ends without a decision.
     pub fn cancel(&self, class: Class) {
-        self.rows.cancelled[class.index()].fetch_add(1, Ordering::Relaxed);
+        bump(self.rows.cancelled.get(class.index()));
     }
 
     /// Count one new call refused for `reason`.
     pub fn reject(&self, reason: Refusal, class: Class) {
-        self.rows.rejected[reason.index()][class.index()].fetch_add(1, Ordering::Relaxed);
+        bump(self.rows.rejected.get(reason.index()).and_then(|row| row.get(class.index())));
     }
 
     /// Count one copy of a call already here refused: no new call.
     pub fn refuse_copy(&self) {
         self.rows.refused_copies.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Count one into `cell`, a tally row's slot.
+fn bump(cell: Option<&AtomicU64>) {
+    if let Some(cell) = cell {
+        cell.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -188,7 +207,8 @@ impl NewCallCounts {
         };
         for (reason, stage) in [(Refusal::DeferredBacklog, backlog), (Refusal::IngressBrake, brake)]
         {
-            for (slot, n) in counts.rejected[reason.index()].iter_mut().zip(stage.refused) {
+            let row = counts.rejected.get_mut(reason.index()).into_iter().flatten();
+            for (slot, n) in row.zip(stage.refused) {
                 *slot += n;
             }
         }
@@ -197,17 +217,18 @@ impl NewCallCounts {
 
     /// New calls of this class admitted.
     pub fn accepted(&self, class: Class) -> u64 {
-        self.accepted[class.index()]
+        self.accepted.get(class.index()).copied().unwrap_or(0)
     }
 
     /// New calls of this class CANCELed before their turn ran.
     pub fn cancelled(&self, class: Class) -> u64 {
-        self.cancelled[class.index()]
+        self.cancelled.get(class.index()).copied().unwrap_or(0)
     }
 
     /// INVITEs of this class refused for `reason`.
     pub fn rejected(&self, reason: Refusal, class: Class) -> u64 {
-        self.rejected[reason.index()][class.index()]
+        let row = self.rejected.get(reason.index());
+        row.and_then(|row| row.get(class.index())).copied().unwrap_or(0)
     }
 
     /// Copies of a refused INVITE refused again.
@@ -232,14 +253,17 @@ impl NewCallCounts {
     /// included, so a rate reads from the first scrape. An accepted or a
     /// cancelled series carries no `reason`.
     pub fn prometheus_text(&self) -> String {
-        let mut s = catalogue::NEW_CALLS.text(|series| match series.block() {
-            0 => self.accepted(NEW_CALL_CLASSES[series.index(&catalogue::CLASS)]),
-            1 => self.cancelled(NEW_CALL_CLASSES[series.index(&catalogue::CLASS)]),
-            2 => self.rejected(
-                Refusal::ALL[series.index(&catalogue::REFUSAL)],
-                NEW_CALL_CLASSES[series.index(&catalogue::CLASS)],
-            ),
-            _ => self.rejected(Refusal::DeferredBacklog, Class::InDialog),
+        let mut s = catalogue::NEW_CALLS.text(|series| {
+            let class = || NEW_CALL_CLASSES.get(series.index(&catalogue::CLASS)).copied();
+            match series.block() {
+                0 => class().map_or(0, |class| self.accepted(class)),
+                1 => class().map_or(0, |class| self.cancelled(class)),
+                2 => {
+                    let reason = Refusal::ALL.get(series.index(&catalogue::REFUSAL)).copied();
+                    reason.zip(class()).map_or(0, |(reason, class)| self.rejected(reason, class))
+                }
+                _ => self.rejected(Refusal::DeferredBacklog, Class::InDialog),
+            }
         });
         catalogue::NEW_CALL_REFUSED_COPIES.render_value(&mut s, self.refused_copies);
         s

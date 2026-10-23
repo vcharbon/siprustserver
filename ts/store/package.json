@@ -1,0 +1,30 @@
+{
+  "name": "@sip/store",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The run store: the postgres record of which capture was cut how and ran on which lane, what each call said, and the reads that compare two run sets.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./test-server": "./test/server.ts",
+    "./test-identity": "./test/identity.ts",
+    "./*": "./src/*.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@effect/sql-pg": "4.0.0-rc.111",
+    "@sip/contracts": "workspace:*",
+    "effect": "4.0.0-rc.111"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "4.0.0-rc.111",
+    "@types/node": "24.10.1",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

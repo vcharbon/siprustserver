@@ -50,6 +50,16 @@
         "$ref": "#/$defs/MixSpec"
       }
     },
+    "overloadReject": {
+      "description": "The final the system under test refuses a call with under overload\n(e.g. `503`). When set, that final to a non-emergency call's initial\nINVITE before it connects is an accepted ending (`refused_overload`).\nUnset (the default), it is a failure like any final the scenario does\nnot declare.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0
+    },
     "recvTimeoutMs": {
       "description": "Per-`recv` wall-clock wait bound (ms) handed to every agent.",
       "type": "integer",

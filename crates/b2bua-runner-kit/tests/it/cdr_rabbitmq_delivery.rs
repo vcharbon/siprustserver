@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use b2bua::cdr::{CdrEncodeError, CdrEncoder, CdrWriter};
+use b2bua::cdr::{BufferedCdrWriter, CdrEncodeError, CdrEncoder, CdrWriter};
 use b2bua::config::B2buaConfig;
 use b2bua::initial_invite::build_initial_call;
 use b2bua::metrics::B2buaMetrics;
@@ -23,7 +23,7 @@ use tokio::time::Instant;
 
 const MS: Duration = Duration::from_millis(1);
 
-fn a_call() -> Call {
+pub(crate) fn a_call() -> Call {
     let raw = "INVITE sip:bob@example.com SIP/2.0\r\n\
         Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-sink\r\n\
         Max-Forwards: 70\r\n\
@@ -42,7 +42,7 @@ fn a_call() -> Call {
         &req,
         SocketAddr::from(([10, 0, 0, 9], 5060)),
         &cfg,
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         1_000,
     )
 }
@@ -429,4 +429,64 @@ async fn a_record_waiting_for_a_slot_returns_when_the_session_ends() {
     assert!(took < 1_000 * MS, "the waiter took {took:?}: the session end must release it");
     settle(&m, (0, 2)).await;
     assert_eq!(broker.count(|c| &c.published), 1, "nothing is published on an ended session");
+}
+
+#[tokio::test]
+async fn close_returns_once_the_outstanding_confirms_are_counted() {
+    let broker = FakeBroker::start(Reply::AckAfter(150 * MS)).await;
+    let (w, m) = writer_to(broker.url(), bounds(), 64);
+    let call = a_call();
+    for _ in 0..5 {
+        w.write(&call, 2_000).await;
+    }
+    let deadline = Instant::now() + 500 * MS;
+    w.close(deadline).await;
+    assert_eq!(counts(&m), (5, 0), "every confirm is counted when close returns");
+    assert!(Instant::now() < deadline, "no wait past the last confirm");
+}
+
+#[tokio::test]
+async fn close_drops_every_confirm_still_outstanding_at_its_deadline() {
+    let broker = FakeBroker::start(Reply::Silent).await;
+    let (w, m) = writer_to(broker.url(), bounds(), 64);
+    let call = a_call();
+    for _ in 0..3 {
+        w.write(&call, 2_000).await;
+    }
+    let t0 = Instant::now();
+    w.close(t0 + 100 * MS).await;
+    assert_eq!(counts(&m), (0, 3), "the close counted each unconfirmed publish dropped");
+    assert!(t0.elapsed() < bounds().confirm_timeout, "the close deadline, not the confirm bound");
+}
+
+#[tokio::test]
+async fn a_write_after_close_is_dropped_without_a_connection() {
+    let broker = FakeBroker::start(Reply::Ack).await;
+    let (w, m) = writer_to(broker.url(), bounds(), 64);
+    let call = a_call();
+    w.write(&call, 2_000).await;
+    w.close(Instant::now() + 500 * MS).await;
+    w.write(&call, 2_000).await;
+    assert_eq!(counts(&m), (1, 1));
+    assert_eq!(broker.count(|c| &c.accepted), 1, "no connection after the close");
+    assert_eq!(broker.count(|c| &c.published), 1);
+}
+
+/// The production composition: a close whose deadline cuts a write waiting for
+/// a window slot still counts every record handed to the buffer exactly once.
+#[tokio::test]
+async fn a_buffered_close_cutting_a_write_counts_every_record_once() {
+    let broker = FakeBroker::start(Reply::Silent).await;
+    let (w, m) = writer_to(broker.url(), CdrDeliveryBounds { window: 1, ..bounds() }, 64);
+    let buf = BufferedCdrWriter::spawn(Arc::new(w), 16, m.clone());
+    let call = a_call();
+    for _ in 0..4 {
+        buf.write(&call, 2_000).await;
+    }
+    // The first publish holds the only slot; the second write waits for it.
+    published(&broker, 1).await;
+    let t0 = Instant::now();
+    buf.close(t0 + 100 * MS).await;
+    assert_eq!(counts(&m), (0, 4), "(written, dropped) once each");
+    assert!(t0.elapsed() < bounds().publish_timeout, "cut at the close deadline");
 }

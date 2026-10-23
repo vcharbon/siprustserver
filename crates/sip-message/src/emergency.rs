@@ -6,9 +6,8 @@ use crate::header::HeaderName;
 use crate::types::SipRequest;
 
 /// The emergency Resource-Priority r-values (RFC 4412 namespace.priority).
-/// Compared ASCII-case-insensitively, as RFC 4412 r-values are. Shared with
-/// the raw-datagram classifier in [`crate::sniff`] so the two sides can never
-/// disagree on what counts as emergency.
+/// Compared ASCII-case-insensitively, as RFC 4412 r-values are. The tooling's
+/// raw-datagram reader (`crate::sniff`) reads the same list.
 pub(crate) const EMERGENCY_RPH_TOKENS: [&str; 3] = ["esnet.0", "wps.0", "q735.0"];
 
 /// Whether a request carries an emergency Resource-Priority header

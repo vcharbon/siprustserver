@@ -42,9 +42,9 @@ cross-layer dependency cycle forces it (Rust crates cannot be cyclic).
 Port the source's **custom** zero-regex parser whole; keep `rvoip-sip-core`
 as a **dev-only parity oracle** — see
 [ADR-0001](./adr/0001-port-custom-parser-rvoip-as-parity-oracle.md). The
-ABNF fuzz suite and the ADR-0007 strict gate are both built around the custom
+ABNF fuzz suite and the strict wire-grammar gates are both built around the custom
 parser's per-header functions, so porting it whole keeps the test corpus a 1:1
-port; rvoip cross-checks it in the compliance matrix.
+port; rvoip cross-checks it in a differential test.
 
 ## ABNF tests
 

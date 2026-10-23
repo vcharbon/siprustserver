@@ -1,4 +1,5 @@
-use sip_message::{EmitOpts, MessageTemplate, Method, TemplateHeader};
+use sip_message::Method;
+use sip_template::{EmitOpts, MessageTemplate, TemplateHeader};
 use std::time::Duration;
 
 use super::testkit::*;
@@ -29,7 +30,7 @@ async fn request_template_reinvite_completes_renegotiation() {
                 role: "alice",
                 agent: alice.clone(),
                 disposition: Disposition::Caller,
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 goals: vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
                     Goal::new(
@@ -57,7 +58,7 @@ async fn request_template_reinvite_completes_renegotiation() {
                 role: "bob",
                 agent: bob.clone(),
                 disposition: Disposition::RingThenAnswer { ring: Duration::from_millis(100) },
-                media: MediaState::full(ANSWER_SDP, ANSWER_SDP),
+                media: MediaState::answer(ANSWER_SDP),
                 goals: vec![],
                 invite_targets: vec![],
                 via: None,
@@ -172,7 +173,7 @@ async fn request_template_early_update_rides_early_dialog() {
             ActorSpec {
                 role: "alice",
                 agent: alice.clone(),
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 disposition: Disposition::Caller,
                 goals: vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: Some(plan) }),
@@ -253,7 +254,7 @@ async fn request_template_reinvite_glare_491_hop_acks_and_retries() {
             ActorSpec {
                 role: "alice",
                 agent: alice.clone(),
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 disposition: Disposition::Caller,
                 goals: vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
@@ -279,7 +280,7 @@ async fn request_template_reinvite_glare_491_hop_acks_and_retries() {
                 role: "bob",
                 agent: bob.clone(),
                 disposition: Disposition::RingThenAnswer { ring: Duration::from_millis(100) },
-                media: MediaState::full(ANSWER_SDP, ANSWER_SDP),
+                media: MediaState::answer(ANSWER_SDP),
                 goals: vec![Goal::new(both_confirmed.clone(), GoalStep::Reinvite)],
                 invite_targets: vec![],
                 via: None,

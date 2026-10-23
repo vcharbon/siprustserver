@@ -1,17 +1,27 @@
 //! Replication-driven reclaim and the terminal-discharge funnels (ADR-0011 X11
-//! / ADR-0014 / ADR-0020 X3): bulk reboot reclaim, the reactive reverse-flush
-//! reconcile, on-reboot discharge of deferred terminals, and the periodic
-//! replica-store reap.
+//! / ADR-0014 / ADR-0020 X3): the reactive reverse-flush reconcile, on-reboot
+//! discharge of deferred terminals; the bulk reboot reclaim and the straggler
+//! reclaim live in `bulk`, how a fold lands in `fold`, the periodic
+//! replica-store reap in `reap`.
 
 use std::sync::Arc;
 
-use call::{helpers::lifecycle_advances, Call, CallModelState, TimerType};
+use call::helpers::{lifecycle_behind, lifecycle_progress, raise_sequences};
+use call::{Call, CallModelState};
 
 use super::interpret::process_result;
-use super::materialise::{materialise, Materialised, Origin, Reason};
-use super::restore_hygiene::{reanchor_timers, sanitize_restored_timers, Smoothing};
 use super::RouterCtx;
 use crate::store::{role_of, MaterialiseOrigin, PartitionRole};
+
+mod bulk;
+mod ending;
+mod fold;
+mod reap;
+pub(super) use bulk::reclaim_all;
+use bulk::reclaim_into_live;
+use ending::discharge_folded_terminal;
+use fold::{fold_quietly, Fold};
+pub(crate) use reap::reap_expired_replicas;
 
 /// Apply a backup's reverse-flushed mutation that the puller just landed in our
 /// `pri:{self}` partition into our **live** map (ADR-0014 Reclaim-tail
@@ -22,7 +32,7 @@ use crate::store::{role_of, MaterialiseOrigin, PartitionRole};
 /// - **Terminated** → discharge as our own through the reaper funnel — one CDR,
 ///   limiter released, the propagated delete evicts the backup's deferred copy.
 /// - **Active** (a re-INVITE/UPDATE the backup re-originated) → fold the new state
-///   in, notably the bumped b-leg `local_cseq`, so OUR next request to the peer
+///   in, notably the bumped b-leg `our_cseq`, so OUR next request to the peer
 ///   continues the dialog monotonically (C11: no CSeq split).
 /// - **Terminating** → transient teardown-in-progress; wait for the Terminated
 ///   flush rather than fold a half-state.
@@ -31,36 +41,46 @@ use crate::store::{role_of, MaterialiseOrigin, PartitionRole};
 /// discharge (no keepalive arming); anything else is the existing reactive
 /// straggler, materialised + re-armed by [`reclaim_into_live`].
 ///
-/// The reverse gate ([`reverse_flush_dominates`]) is re-checked under the
+/// The reverse gate ([`reverse_fold`]) is re-checked under the
 /// per-call lock; a primary that mutated the call since the backup branched
 /// keeps its own copy unless the flush carries lifecycle progress it could not
-/// have made itself. Idempotent: `update` bumps our `p` and the fold takes the
-/// progress, so a re-delivered flush no longer dominates.
+/// have made itself. A fold is not this node's write ([`fold_quietly`]): the
+/// live copy then holds the backup's version, so a re-delivered flush no
+/// longer dominates and the backup's next write is the next version.
 pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str) {
     // A read that sees an expired body too: an expired reverse-flushed terminal
     // is still folded and discharged here.
-    let Some((mut replica, skew_offset_ms)) = ctx.state.peek_reclaimable_raw(call_ref).await else {
+    let Some((first, _)) = ctx.state.peek_reclaimable_raw(call_ref).await else {
         return;
     };
-    // Not-live + non-terminal is the original reactive-straggler path; it manages
+    // Not-live + non-terminal is the reactive-straggler path; it manages
     // its own per-call lock, so route it BEFORE taking the lock here (the guard is
     // not reentrant).
-    if ctx.state.peek(call_ref).is_none() && replica.state != CallModelState::Terminated {
+    if ctx.state.peek(call_ref).is_none() && first.state != CallModelState::Terminated {
         reclaim_into_live(ctx, call_ref, None).await;
         return;
     }
-    let _guard = ctx.state.lock(call_ref).await;
+    let guard = ctx.state.lock(call_ref).await;
+    // Read again under the lock: a turn that held it may have ended the call
+    // and deleted the body, its CDR written; the body read before is stale.
+    let Some((replica, skew_offset_ms)) = ctx.state.peek_reclaimable_raw(call_ref).await else {
+        if ctx.state.peek(call_ref).is_none() {
+            drop(guard);
+            ctx.state.discard_orphan(call_ref);
+        }
+        return;
+    };
     let now_ms = ctx.clock.now_ms();
     match ctx.state.peek(call_ref) {
         // The stored body is another call than the live one (the release of
         // the stored call is still queued): it is not this call's progress.
         Some(live) if replica.incarnation() != live.incarnation() => {}
         Some(live) => {
-            if !reverse_flush_dominates(&replica, &live) {
+            let Some(fold) = reverse_fold(&replica, &live) else {
                 ctx.metrics.bump_repl_reverse_flush_refused();
                 adopt_seen_counter(ctx, FlushDirection::Reverse, &live, &replica);
                 return;
-            }
+            };
             // Rare by construction (a backup served an in-dialog request for a
             // call we still own), so it gets its own line with the identity an
             // operator correlates by: the call and both `(p,b)` views.
@@ -81,13 +101,21 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
                     discharge_folded_terminal(ctx, call_ref, &live, replica, now_ms).await;
                 }
                 // The backup served the call on: an answer, or a re-INVITE/UPDATE
-                // it re-originated (the bumped b-leg `local_cseq`, C11). Fold its
+                // it re-originated (the bumped b-leg `our_cseq`, C11). Fold its
                 // state in and let the timer service follow the folded ledger. No
                 // discharge — the call continues.
                 CallModelState::Active => {
-                    adopt_counters(&mut replica, &live);
-                    resync_timers(ctx, call_ref, &live, &mut replica, skew_offset_ms, now_ms).await;
-                    ctx.state.update(replica);
+                    fold_quietly(
+                        ctx,
+                        FlushDirection::Reverse,
+                        call_ref,
+                        &live,
+                        replica,
+                        fold,
+                        skew_offset_ms,
+                        now_ms,
+                    )
+                    .await;
                 }
                 // Transient teardown-in-progress; wait for the Terminated flush.
                 CallModelState::Terminating => {}
@@ -119,15 +147,16 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
 /// Materialise-first so `backup_of` resolves and the propagated delete reaches the
 /// peer. The caller MUST hold the per-call lock. No-op if already resident
 /// (idempotent reclaim/reap re-pass — `materialize_if_absent` returns false).
+/// Returns whether it discharged the body.
 pub(super) async fn discharge_materialized_terminal(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
     terminal: Call,
     now_ms: i64,
     force_terminal: bool,
-) {
+) -> bool {
     if !ctx.state.materialize_if_absent(terminal.clone(), MaterialiseOrigin::Reclaim) {
-        return;
+        return false;
     }
     let mut before = terminal.clone();
     before.state = CallModelState::Active; // synth non-terminal → became_terminated fires
@@ -136,6 +165,7 @@ pub(super) async fn discharge_materialized_terminal(
     } else {
         crate::effects::HandlerResult::new(terminal)
     };
+    let mut notes = crate::turn_notes::TurnNotes::default();
     let result = crate::rules::invariants::enforce(
         &ctx.obligations,
         &before,
@@ -145,74 +175,19 @@ pub(super) async fn discharge_materialized_terminal(
         // answered on the wire (or its caller died with the crashed node).
         // Reclaim-discharge stays OFF the SIP wire (ADR-0022 / ADR-0014).
         crate::rules::invariants::UnansweredCaller::Leave,
+        &mut notes,
     );
-    process_result(ctx, call_ref, result, now_ms).await;
-}
-
-/// Discharge an already-`Terminated` body (a backup's deferred terminal, folded
-/// into our live map or reclaimed on reboot) through the ONE enforcement funnel.
-/// `before` is the live (non-terminal) snapshot so `enforce`'s `became_terminated`
-/// edge fires — `discharge_result`/`discharge_as_own` cannot be reused here because
-/// they synthesise the terminal from a NON-terminal call, whereas this body is
-/// already Terminated (the edge would be vacuous and the ObligationSet would never
-/// settle the CDR / limiter / RemoveCall). The CDR + limiter release + propagated
-/// delete all ride `process_result`, exactly as a primary-served BYE would.
-async fn discharge_folded_terminal(
-    ctx: &Arc<RouterCtx>,
-    call_ref: &str,
-    before: &Call,
-    terminal: Call,
-    now_ms: i64,
-) {
-    let result = crate::rules::invariants::enforce(
-        &ctx.obligations,
-        before,
-        crate::rules::invariants::finalize(crate::effects::HandlerResult::new(terminal)),
+    super::notes::drain_notes(ctx, call_ref, notes);
+    process_result(
+        ctx,
+        call_ref,
+        result,
         now_ms,
-        // Folded already-terminal body: same off-the-wire contract as
-        // `discharge_materialized_terminal` above.
-        crate::rules::invariants::UnansweredCaller::Leave,
-    );
-    process_result(ctx, call_ref, result, now_ms).await;
-}
-
-/// Periodic replica-store maintenance. **No CDR is ever written here** — the
-/// acting-backup terminal contract (ADR-0020 X3) makes the **primary the sole CDR
-/// authority**. But a deferred terminal whose primary never came back to reclaim
-/// it (crashed for good, past the replica TTL = `reboot_budget`) must NOT be left
-/// to pin its limiter slot or leak its replica body. `reap_replica` evicts every
-/// expired body and hands back the deferred terminals among them, whichever
-/// partition holds the body (a replica its primary flushed, or a takeover copy's
-/// own terminal); each one is released on the limiter by its key — the SAME
-/// `release(key)` the discharge funnel emits — and counted as a lost-CDR cleanup:
-/// limiter freed, memory freed, **CDR lost**. An expired body is returned by one
-/// pass only, and no read evicts it before this pass sees it.
-///
-/// A primary that reboots *inside* `reboot_budget` reclaims and discharges first;
-/// when its propagated delete never reaches this backup, this pass releases the
-/// same call a second time, which the limiter applies as a no-op (the release is
-/// keyed by the call). Spawned as a paced task by `b2bua_core`.
-pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
-    for terminal in ctx.state.reap_replica(now_ms).await {
-        // No per-call lock: the body is already evicted and this node does not
-        // serve the call live (a takeover copy self-released at its terminal), so
-        // there is no writer to serialize against — and taking the lock would leak
-        // a `locks` map entry (only `release_call`/`discard_orphan` clear it). The
-        // decoded snapshot is all the limiter release needs.
-        release_orphaned_limiter_holds(ctx, &terminal);
-        ctx.metrics.bump_repl_terminal_lost();
-    }
-}
-
-/// Release the cluster-wide limiter set a never-reclaimed deferred terminal
-/// still owns (`CallLimiterState::owed_release`: a call that sent no admit
-/// owes nothing), WITHOUT writing a CDR or propagating a delete. No turn
-/// serves the body, so the release goes to the worker directly. The backup is
-/// the only node that can free this slot once its primary is dead for good.
-fn release_orphaned_limiter_holds(ctx: &Arc<RouterCtx>, call: &Call) {
-    if let Some(key) = call.limiter.owed_release() {
-        ctx.limiter.release(key);
-    }
+        &"the discharge of a materialised terminal body",
+        None,
+    )
+    .await;
+    true
 }
 
 /// The call's `(p,b)` version vector rendered for a lifecycle line
@@ -254,6 +229,14 @@ impl FlushDirection {
         }
     }
 
+    /// Whether this direction lands in the call's record: a Reverse flush
+    /// reaches the primary's live copy, whose body is the primary's and so
+    /// names no version adopted without its body
+    /// ([`CallTopology::gen_adopted`](call::CallTopology::gen_adopted)).
+    pub(super) fn into_the_record(self) -> bool {
+        matches!(self, FlushDirection::Reverse)
+    }
+
     /// Count a fold refusal. The forward direction is already counted by op
     /// where the store refused it (`b2bua_repl_forward_flush_refused_total`), so
     /// only the reverse direction — whose sole refusal site is this fold —
@@ -267,9 +250,11 @@ impl FlushDirection {
 
 /// Fold a flush the store's `(p,b)` gate refused (the body rides the command,
 /// the store never took it): the call model reads it for lifecycle progress
-/// ([`lifecycle_advances`]) our live copy lacks — the other owner's answer or
-/// teardown of a call we read one step behind — and folds exactly as an applied
-/// flush would. Anything else stays refused. **A live copy is required**: an
+/// ([`lifecycle_progress`]) our live copy lacks — the other owner's answer or
+/// teardown of a call we read one step behind, folded whole as an applied flush
+/// would be, or the end of a re-INVITE round we hold unfinished or the opening
+/// of one we never reached, whose facts alone are folded. Anything else stays
+/// refused. **A live copy is required**: an
 /// Element alone is kept as it is, its merge deferred to the next
 /// materialisation, and a call we do not serve live is never resurrected here.
 pub(super) async fn fold_refused_flush(
@@ -282,7 +267,7 @@ pub(super) async fn fold_refused_flush(
     if role_of(&ctx.config.self_ordinal, call_ref) != direction.expected_role() {
         return;
     }
-    let Some(mut replica) = ctx.state.decode_body(body) else {
+    let Some(replica) = ctx.state.decode_body(body) else {
         return;
     };
     // No live copy ⇒ nothing to fold — tested BEFORE the per-call lock, because
@@ -306,11 +291,11 @@ pub(super) async fn fold_refused_flush(
     if replica.incarnation() != live.incarnation() {
         return;
     }
-    if !lifecycle_advances(&replica, &live) {
+    let Some(progress) = lifecycle_progress(&replica, &live) else {
         direction.count_refused(&ctx.metrics);
         adopt_seen_counter(ctx, direction, &live, &replica);
         return;
-    }
+    };
     let skew_offset_ms = if origin_now_ms > 0 { now_ms - origin_now_ms } else { 0 };
     // Whose ending signals end the call is the direction: toward a PRIMARY the
     // live copy defers to the record it owns, so a folded terminal is discharged
@@ -340,22 +325,17 @@ pub(super) async fn fold_refused_flush(
         discharge_folded_terminal(ctx, call_ref, &live, replica, now_ms).await;
         return;
     }
-    adopt_counters(&mut replica, &live);
-    resync_timers(ctx, call_ref, &live, &mut replica, skew_offset_ms, now_ms).await;
-    ctx.state.update(replica);
-}
-
-/// A fold adopts BOTH counters: the folded body takes `max` of the two views on
-/// each axis before [`CallState::update`](crate::store::CallState::update) bumps
-/// this node's own. The next flush this node sends therefore dominates every
-/// version either owner published, so the split vector heals instead of each
-/// side refusing the other for ever (ADR-0031 D3). A body without topology is
-/// not replicable and is left alone.
-fn adopt_counters(folded: &mut Call, live: &Call) {
-    if let (Some(f), Some(l)) = (folded.topology.as_mut(), live.topology.as_ref()) {
-        f.gen = f.gen.max(l.gen);
-        f.bak_gen = f.bak_gen.max(l.bak_gen);
-    }
+    fold_quietly(
+        ctx,
+        direction,
+        call_ref,
+        &live,
+        replica,
+        Fold::of(progress),
+        skew_offset_ms,
+        now_ms,
+    )
+    .await;
 }
 
 /// A REFUSED flush still moves the counter: seeing a version is not taking it,
@@ -364,12 +344,24 @@ fn adopt_counters(folded: &mut Call, live: &Call) {
 /// takes only the axis the *other* owner bumps — `b` at a primary, `p` at a
 /// backup — through [`adopt_version`](crate::store::CallState::adopt_version),
 /// which records it without the authoritative bump an ordinary mutation makes.
+/// It takes the higher dialog sequences too ([`raise_sequences`]): the other
+/// owner's requests left on the wire, and this node's next request on each
+/// dialog continues from them (RFC 3261 §12.2.1.1). A round the refused body
+/// holds stays one this node never reached: rounds are read from their
+/// transactions, not from the sequence (`call::helpers::round_opened`).
 ///
 /// The adopted view is **flushed**, not only written to the live map: an
 /// adoption that never reaches the store is inert — it is lost if a takeover
 /// copy self-releases before the next local mutation, and until then this node's
 /// stored `(p,b)` still names the version the other owner refuses, so the split
 /// stays open and its next flush is refused in turn.
+///
+/// At a backup the flush never lands over the version it adopted
+/// ([`flush_adopted`](crate::store::CallState::flush_adopted)): the primary may
+/// have refused the copy's write, adopted its `b` and republished its own call
+/// at that very version, which the Element already took — the copy's body is
+/// not to replace it. At a primary the adopted flush is its own call over the
+/// backup's body its store took at that version, and lands.
 fn adopt_seen_counter(
     ctx: &Arc<RouterCtx>,
     direction: FlushDirection,
@@ -379,141 +371,54 @@ fn adopt_seen_counter(
     let (Some(l), Some(r)) = (live.topology.as_ref(), replica.topology.as_ref()) else {
         return;
     };
+    let raised = raise_sequences(live.clone(), replica);
+    if raised != *live {
+        ctx.state.update_quiet(raised);
+    }
     let (gen, bak_gen) = match direction {
         FlushDirection::Reverse => (l.gen, r.bak_gen),
         FlushDirection::Forward => (r.gen, l.bak_gen),
     };
-    if let Some(adopted) = ctx.state.adopt_version(&live.call_ref, gen, bak_gen) {
-        ctx.state.flush(&adopted);
+    let Some(adopted) = ctx.state.adopt_version(&live.call_ref, gen, bak_gen) else { return };
+    match direction {
+        FlushDirection::Reverse => ctx.state.flush(&adopted),
+        FlushDirection::Forward => ctx.state.flush_adopted(&adopted),
     }
 }
 
-/// The ADR-0014 **Reverse** apply rule for a live-map fold. The reverse-flushed
-/// `replica` dominates our `live` copy when the `(p,b)` vector says so (`p`
-/// unchanged since the backup branched, `b` advanced) OR when it carries
-/// lifecycle progress ([`lifecycle_advances`]) a reclaimed copy cannot have made
-/// on its own: a `p` bump from a turn on a stale record does not outrank the
-/// backup's answer or teardown. A call with no topology never folds.
-fn reverse_flush_dominates(replica: &Call, live: &Call) -> bool {
+/// The ADR-0014 **Reverse** apply rule for a live-map fold, and how the
+/// reverse-flushed `replica` folds into our `live` copy. It folds whole when
+/// the `(p,b)` vector says it is newer — `p` unchanged since the backup
+/// branched, `b` advanced, and the backup's body holds the version our `p`
+/// names — or when it carries lifecycle progress a reclaimed copy cannot have
+/// made on its own: a `p` bump from a turn on a stale record does not outrank
+/// the backup's answer or teardown. It folds only its rounds when its sole
+/// progress is a re-INVITE round's end or opening ([`lifecycle_progress`]):
+/// our own writes since the backup branched stay. A `p` the backup adopted
+/// without the body that carried it (ADR-0031 D3,
+/// [`CallTopology::gen_adopted`](call::CallTopology::gen_adopted)) never makes
+/// its body newer, and neither does a body behind ours ([`lifecycle_behind`],
+/// the order the forward gate reads too: an unanswered teardown never ends an
+/// answered call). A call with no topology never folds.
+fn reverse_fold(replica: &Call, live: &Call) -> Option<Fold> {
     let (Some(r), Some(l)) = (replica.topology.as_ref(), live.topology.as_ref()) else {
-        return false;
+        return None;
     };
-    (r.gen == l.gen && r.bak_gen > l.bak_gen) || lifecycle_advances(replica, live)
+    let newer = r.gen == l.gen
+        && !r.gen_adopted
+        && r.bak_gen > l.bak_gen
+        && !lifecycle_behind(replica, live);
+    if newer {
+        return Some(Fold::Whole);
+    }
+    lifecycle_progress(replica, live).map(Fold::of)
 }
 
-/// The live timer service follows the folded ledger: every entry the folded
-/// body no longer carries is cancelled, every entry it carries is (re)armed in
-/// this node's clock frame through the restore-hygiene seam, and the folded
-/// body keeps the re-anchored ledger it was armed from.
-async fn resync_timers(
-    ctx: &Arc<RouterCtx>,
-    call_ref: &str,
-    live: &Call,
-    folded: &mut Call,
-    skew_offset_ms: i64,
-    now_ms: i64,
-) {
-    for stale in live.timers.iter().filter(|t| !folded.timers.iter().any(|f| f.id == t.id)) {
-        ctx.timers.cancel(call_ref.to_string(), stale.id.clone()).await;
-    }
-    sanitize_restored_timers(
-        &mut folded.timers,
-        call_ref,
-        now_ms,
-        Some(skew_offset_ms),
-        ctx.config.keepalive_interval_sec * 1000,
-        None,
-    );
-    ctx.timers.restore(folded.timers.clone(), call_ref.to_string(), folded.incarnation()).await;
-}
-
-/// **Bulk reclaim** (ADR-0014): re-materialise every `pri:{self}`
-/// call into the live map + re-arm its timers — what makes a rebooted primary
-/// re-*serve* its partition, not just re-*store* it. The scan decodes the
-/// partition to size the cohort; each body is then materialised through the
-/// TTL-gated reclaim read, so a body whose TTL ran out is dead and is never
-/// re-served: it counts in `scanned` and not in `materialized`.
-///
-/// **Keepalive smoothing (ADR-0014, performance-only).** Many keepalive timers in
-/// a just-rehydrated partition are past-due; firing them all at once floods the
-/// node with a synchronized OPTIONS burst. So we stagger the past-due keepalives
-/// oldest-first: with `L = now - fire_at` the overdue gap and `L_max` the largest
-/// over the batch, a keepalive's new `fire_at` is `now + (L_max - L)/speedup`, so
-/// the most-overdue (most at-risk of a UAC keepalive timeout) fires first and the
-/// backlog drains over `L_max/speedup`, bounded to `speedup`× the normal cadence
-/// (optionally capped by `max_catchup_window_sec`). After the burst each call
-/// re-arms `+interval`, naturally re-spreading load. This is **load management
-/// only** — `(p,b)` reconciliation makes any incidental keepalive overlap
-/// non-corrupting, so there is no settle/handback floor. `fire_at` is pre-computed
-/// here, in the reclaim handler — never inside the timer driver (CLAUDE.md).
-pub(super) async fn reclaim_all(ctx: &Arc<RouterCtx>) {
-    let start_ms = ctx.clock.now_ms();
-    let now_ms = start_ms;
-    let active_before = ctx.state.active_count() as u64;
-    let mut calls = ctx.state.reclaim_scan().await;
-    let scanned = calls.len() as u64;
-    // The cohort classification below (past-due vs future-dated) and `l_max`
-    // read SKEW-CORRECTED deadlines: re-anchor every scanned copy by its own
-    // persisted offset first. These copies are discarded; `materialise` re-reads
-    // each body and re-anchors it once itself.
-    for (call, skew) in calls.iter_mut() {
-        reanchor_timers(&mut call.timers, *skew);
-    }
-    // L_max = the largest past-due keepalive gap across the whole partition, over
-    // the now skew-corrected deadlines.
-    let l_max = calls
-        .iter()
-        .flat_map(|(c, _)| c.timers.iter())
-        .filter(|t| matches!(t.timer_type, TimerType::Keepalive))
-        .map(|t| (now_ms - t.fire_at).max(0))
-        .max()
-        .unwrap_or(0);
-    let smoothing = Smoothing {
-        now_ms,
-        l_max,
-        speedup: ctx.config.keepalive_catchup_speedup.max(1),
-        cap_ms: ctx.config.max_catchup_window_sec.map(|s| s * 1000),
-    };
-    let mut materialized = 0u64;
-    for (call, _skew) in calls {
-        if reclaim_into_live(ctx, &call.call_ref, Some(smoothing)).await {
-            materialized += 1;
-        }
-    }
-    // Per-reboot completeness telemetry. The gauges expose the pass's
-    // denominator/numerator; the structured lifecycle line (visible in
-    // `kubectl logs`) records the per-pass triple.
-    ctx.metrics.set_repl_reclaim_pass(scanned, materialized);
-    let active_after = ctx.state.active_count() as u64;
-    let duration_ms = ctx.clock.now_ms() - start_ms;
-    tracing::info!(
-        node = observe::node(),
-        active_before,
-        scanned,
-        materialized,
-        active_after,
-        l_max_ms = l_max,
-        duration_ms,
-        "reboot reclaim"
-    );
-}
-
-/// Reclaim one call of this node's `pri:{self}` partition into the live map
-/// under its per-call lock (ADR-0011 X11). `smoothing = Some(_)` is the bulk
-/// reboot sweep ([`reclaim_all`]); `None` a single straggler. Returns `true`
-/// iff this pass did the work — freshly materialised, or a deferred terminal
-/// discharged — so the caller meters per-pass reclaim completeness; `false`
-/// for a call already resident (idempotent re-pass) or gone from the store.
-async fn reclaim_into_live(
-    ctx: &Arc<RouterCtx>,
-    call_ref: &str,
-    smoothing: Option<Smoothing>,
-) -> bool {
-    let _guard = ctx.state.lock(call_ref).await;
-    matches!(
-        materialise(ctx, call_ref, Origin::Reclaim(smoothing)).await,
-        Materialised::Served(_) | Materialised::Refused(Reason::Terminated)
-    )
+/// Whether the reverse-flushed `replica` folds into `live` at all
+/// ([`reverse_fold`]).
+#[cfg(test)]
+fn reverse_flush_dominates(replica: &Call, live: &Call) -> bool {
+    reverse_fold(replica, live).is_some()
 }
 
 /// Force the last persisted snapshot of `call_ref` terminal and run it through
@@ -527,6 +432,7 @@ async fn reclaim_into_live(
 pub(super) async fn discharge_as_own(ctx: &Arc<RouterCtx>, call_ref: &str, now_ms: i64) {
     let Some(call) = ctx.state.peek(call_ref) else { return };
     let before = call.clone();
+    let mut notes = crate::turn_notes::TurnNotes::default();
     let result = crate::rules::invariants::enforce(
         &ctx.obligations,
         &before,
@@ -535,445 +441,11 @@ pub(super) async fn discharge_as_own(ctx: &Arc<RouterCtx>, call_ref: &str, now_m
         // LIVE call the rules path failed on twice — if its a-leg is still
         // unanswered the caller is waiting on OUR server txn: answer it.
         crate::rules::invariants::UnansweredCaller::Answer(&ctx.config.minted_final_advertisement),
+        &mut notes,
     );
-    process_result(ctx, call_ref, result, now_ms).await;
+    super::notes::drain_notes(ctx, call_ref, notes);
+    process_result(ctx, call_ref, result, now_ms, &"the reaper discharge", None).await;
 }
 
 #[cfg(test)]
-mod tests {
-    //! Pins the fold predicate ([`reverse_flush_dominates`]) directly — which
-    //! bodies carry lifecycle progress a live copy lacks, and which are a branch
-    //! off a stale view — and the direction rule of [`fold_refused_flush`]
-    //! itself: who may end a call on a folded body (ADR-0031 D3).
-
-    use call::{
-        Call, CallBodyCodec, CallModelState, CallTopology, LegDisposition, LegState, MsgpackCodec,
-    };
-
-    use super::{
-        fold_refused_flush, reap_expired_replicas, reconcile_reverse_flush,
-        reverse_flush_dominates, FlushDirection,
-    };
-    use crate::config::B2buaConfig;
-    use crate::initial_invite::build_initial_call;
-    use crate::router::test_support::{invite, node, src};
-    use crate::store::{CallStore, MaterialiseOrigin, PartitionRole, PutOpts};
-
-    /// A replicable call at `(p, b)`, owned by `w0` and backed up by `w1`.
-    fn base(p: i64, b: i64) -> Call {
-        let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-        let mut call = build_initial_call(
-            &invite("w0", "w1", "fold"),
-            src(),
-            &config,
-            &sip_txn::IdGen::seeded(1),
-            0,
-        );
-        call.topology =
-            Some(CallTopology { pri: "w0".into(), bak: "w1".into(), gen: p, bak_gen: b });
-        call
-    }
-
-    /// The caller is ringing: no final has left toward her yet.
-    fn unanswered(p: i64, b: i64, state: CallModelState) -> Call {
-        let mut call = base(p, b);
-        call.state = state;
-        call.a_leg.state =
-            if state == CallModelState::Active { LegState::Early } else { LegState::Terminated };
-        call.a_leg.disposition = LegDisposition::Pending;
-        call.a_leg.invite_final_sent = (state != CallModelState::Active).then_some(480);
-        call
-    }
-
-    /// The caller was answered — a durable fact of the body: the 2xx this stack
-    /// sent her is recorded on the leg and the pair is bridged, both of which
-    /// outlive the leg going `Terminated`.
-    fn answered(p: i64, b: i64, state: CallModelState) -> Call {
-        let mut call = base(p, b);
-        call.state = state;
-        call.a_leg.state = if state == CallModelState::Active {
-            LegState::Confirmed
-        } else {
-            LegState::Terminated
-        };
-        call.a_leg.disposition = LegDisposition::Bridged;
-        call.a_leg.invite_final_sent = Some(200);
-        call
-    }
-
-    /// Lifecycle progress is a CHAIN: the replica folds only when it made every
-    /// step the live copy made and at least one more. A teardown of a caller who
-    /// was never answered, arriving at a live copy whose caller IS answered, is a
-    /// ring-deadline teardown on a stale view — a branch, and refused (ADR-0031
-    /// D3). Folding it ends a call the other owner is serving.
-    #[test]
-    fn a_terminal_body_that_never_answered_does_not_fold_into_an_answered_live_copy() {
-        let replica = unanswered(1, 0, CallModelState::Terminated);
-        let live = answered(3, 1, CallModelState::Active);
-        assert!(
-            !reverse_flush_dominates(&replica, &live),
-            "an unanswered teardown is a branch off a stale view, not progress",
-        );
-    }
-
-    /// The same shape one step along the chain: a teardown of a call the replica
-    /// ALSO reads as answered is genuine progress and folds.
-    #[test]
-    fn a_terminal_body_that_answered_folds_into_an_answered_live_copy() {
-        let replica = answered(1, 1, CallModelState::Terminated);
-        let live = answered(3, 0, CallModelState::Active);
-        assert!(
-            reverse_flush_dominates(&replica, &live),
-            "ending is the second axis: terminated over active, both answered",
-        );
-    }
-
-    /// The answer itself: the replica answered the caller our live copy still
-    /// reads as ringing.
-    #[test]
-    fn an_answer_folds_into_an_unanswered_live_copy() {
-        let replica = answered(1, 1, CallModelState::Active);
-        let live = unanswered(3, 0, CallModelState::Active);
-        assert!(reverse_flush_dominates(&replica, &live), "answered over unanswered");
-    }
-
-    /// And the reverse of that is not progress.
-    #[test]
-    fn an_unanswered_body_does_not_fold_into_an_answered_live_copy() {
-        let replica = unanswered(1, 1, CallModelState::Active);
-        let live = answered(2, 1, CallModelState::Active);
-        assert!(
-            !reverse_flush_dominates(&replica, &live),
-            "a ringing view never outranks an answered one; the vector says nothing here",
-        );
-    }
-
-    /// The vector clause is untouched: `p` unchanged since the backup branched
-    /// and `b` advanced still folds, whatever the chain says.
-    #[test]
-    fn the_vector_clause_still_folds_an_advanced_backup_counter() {
-        let replica = answered(1, 2, CallModelState::Active);
-        let live = answered(1, 1, CallModelState::Active);
-        assert!(reverse_flush_dominates(&replica, &live), "p unchanged, b advanced");
-    }
-
-    /// The `(p,b)` of the live copy `n` holds for `call_ref`.
-    fn live_pb(n: &crate::router::test_support::Node, call_ref: &str) -> (i64, i64) {
-        let t = n.core.router_ctx().state.peek(call_ref).expect("the copy is live").topology;
-        let t = t.expect("the copy is replicable");
-        (t.gen, t.bak_gen)
-    }
-
-    /// **Only a primary discharges.** A primary's terminal body reaching the
-    /// BACKUP that took its call over carries real progress — but the live
-    /// takeover copy is the call's record and only its own signals end it
-    /// (ADR-0014 §2 / ADR-0020 X3). The fold reads the body for its counter
-    /// alone: no CDR, no release, the call plays on.
-    #[tokio::test(start_paused = true)]
-    async fn a_forward_terminal_ends_no_call_at_the_backup_and_its_counter_is_adopted() {
-        let n = node("w1").await;
-        let ctx = n.core.router_ctx();
-        let live = answered(1, 2, CallModelState::Active);
-        let call_ref = live.call_ref.clone();
-        assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
-
-        // The partitioned primary tore its own copy down and flushed it forward.
-        let replica = answered(3, 1, CallModelState::Terminated);
-        let body = MsgpackCodec::new().encode(&replica);
-        fold_refused_flush(ctx, FlushDirection::Forward, &call_ref, &body, 0).await;
-        sip_clock::testkit::settle().await;
-
-        let after = ctx.state.peek(&call_ref).expect("the takeover copy still serves the call");
-        assert_eq!(after.state, CallModelState::Active, "no discharge in the Forward direction");
-        assert!(
-            n.cdr.snapshot().is_empty(),
-            "an acting backup writes no CDR for a folded terminal"
-        );
-        // `p` is taken from the flush; `b` is untouched — adopting a version is a
-        // read this node records, not a mutation of the call.
-        assert_eq!(live_pb(&n, &call_ref), (3, 2), "the seen `p` is adopted, and only it");
-    }
-
-    /// **The answer crosses the split toward a backup too.** A forward `Put`
-    /// refused on the counters alone (`sb > b_in`) can still carry the authority's
-    /// own answer for a call this node's takeover copy reads as ringing. That is
-    /// progress the copy lacks, so it folds: the copy takes the answer, both
-    /// counters are adopted, and nothing is discharged — the call plays on.
-    #[tokio::test(start_paused = true)]
-    async fn a_forward_answer_folds_into_a_ringing_takeover_copy_without_ending_it() {
-        let n = node("w1").await;
-        let ctx = n.core.router_ctx();
-        let live = unanswered(1, 2, CallModelState::Active);
-        let call_ref = live.call_ref.clone();
-        assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
-
-        // The authority answered the caller and flushed; its `b` is behind the
-        // Element's, so the store refused the frame and handed the body up.
-        let replica = answered(3, 1, CallModelState::Active);
-        let body = MsgpackCodec::new().encode(&replica);
-        fold_refused_flush(ctx, FlushDirection::Forward, &call_ref, &body, 0).await;
-        sip_clock::testkit::settle().await;
-
-        let after = ctx.state.peek(&call_ref).expect("the takeover copy still serves the call");
-        assert_eq!(after.state, CallModelState::Active, "the fold ends no call");
-        assert!(call::helpers::caller_answered(&after), "the copy took the authority's answer");
-        assert!(n.cdr.snapshot().is_empty(), "a fold that ends nothing writes no record");
-        // A fold adopts `max` on BOTH axes — (3,2) — and the write that lands it
-        // is this node's own mutation, so its own axis bumps once on top.
-        assert_eq!(live_pb(&n, &call_ref), (3, 3), "both counters adopted, ours bumped once");
-    }
-
-    /// A `Terminating` body ends no call in either direction — it is a teardown
-    /// still in flight — but the version it names is still seen, so the counter
-    /// is adopted and this node's next flush is not refused in its turn.
-    #[tokio::test(start_paused = true)]
-    async fn a_forward_terminating_body_only_moves_the_counter() {
-        let n = node("w1").await;
-        let ctx = n.core.router_ctx();
-        let live = answered(1, 2, CallModelState::Active);
-        let call_ref = live.call_ref.clone();
-        assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
-
-        let replica = answered(4, 1, CallModelState::Terminating);
-        let body = MsgpackCodec::new().encode(&replica);
-        fold_refused_flush(ctx, FlushDirection::Forward, &call_ref, &body, 0).await;
-        sip_clock::testkit::settle().await;
-
-        let after = ctx.state.peek(&call_ref).expect("the copy still serves the call");
-        assert_eq!(after.state, CallModelState::Active, "a teardown in flight ends nothing");
-        assert_eq!(live_pb(&n, &call_ref), (4, 2), "the seen `p` is adopted, and only it");
-    }
-
-    /// The direction must match the role this node plays for the ref: a
-    /// Forward-labelled command for a call this node is PRIMARY of is a
-    /// misrouted frame and folds nothing.
-    #[tokio::test(start_paused = true)]
-    async fn a_direction_that_contradicts_this_nodes_role_folds_nothing() {
-        let n = node("w0").await; // w0 is the ref's primary, so Forward is wrong.
-        let ctx = n.core.router_ctx();
-        let live = answered(1, 2, CallModelState::Active);
-        let call_ref = live.call_ref.clone();
-        assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
-
-        let replica = answered(5, 1, CallModelState::Terminated);
-        let body = MsgpackCodec::new().encode(&replica);
-        fold_refused_flush(ctx, FlushDirection::Forward, &call_ref, &body, 0).await;
-        sip_clock::testkit::settle().await;
-
-        assert_eq!(live_pb(&n, &call_ref), (1, 2), "nothing was read, nothing was written");
-        assert!(n.cdr.snapshot().is_empty(), "and nothing was discharged");
-    }
-
-    /// **A read never takes a deferred terminal's release.** A backup holds a
-    /// terminal it deferred to its dead primary; the body's TTL runs out and a
-    /// request for the call reaches the backup before the periodic reap does.
-    /// The takeover read finds nothing to serve, and the reap that follows
-    /// still releases the call's key and counts its CDR lost, once; a second
-    /// pass finds nothing.
-    #[tokio::test(start_paused = true)]
-    async fn an_expired_deferred_terminal_read_before_the_reap_is_still_released_once() {
-        let n = node("w1").await;
-        let ctx = n.core.router_ctx();
-        ctx.limiter.hold_releases();
-        let mut terminal = answered(1, 2, CallModelState::Terminated);
-        terminal.limiter = call::CallLimiterState::admitted(
-            "fold-key".into(),
-            1,
-            vec![
-                call::LimiterEntry { id: "x".into(), limit: 10 },
-                call::LimiterEntry { id: "x".into(), limit: 10 },
-                call::LimiterEntry { id: "y".into(), limit: 10 },
-            ],
-        );
-        let call_ref = terminal.call_ref.clone();
-        let body = MsgpackCodec::new().encode(&terminal);
-        n.store
-            .put_call(
-                PartitionRole::Backup,
-                "w0",
-                &call_ref,
-                body,
-                &[],
-                1_000,
-                1,
-                2,
-                &PutOpts::default(),
-            )
-            .await
-            .unwrap();
-
-        // Past the body's TTL, before the core's first reap tick (30 s).
-        tokio::time::advance(std::time::Duration::from_millis(2_000)).await;
-        assert!(ctx.state.peek_replica(&call_ref).await.is_err(), "nothing left to serve");
-
-        reap_expired_replicas(ctx, n.clock.now_ms()).await;
-        assert_eq!(
-            ctx.limiter.waiting_keys(),
-            vec!["fold-key".to_string()],
-            "the reap released the call by its key"
-        );
-        assert_eq!(n.metrics.repl_terminal_lost_total(), 1, "its CDR counted lost, once");
-        assert!(
-            n.store.peek_body_raw(PartitionRole::Backup, "w0", &call_ref).await.is_none(),
-            "the reap evicted the body"
-        );
-
-        reap_expired_replicas(ctx, n.clock.now_ms()).await;
-        assert_eq!(ctx.limiter.waiting(), 1, "a second pass releases nothing");
-        assert_eq!(n.metrics.repl_terminal_lost_total(), 1, "and counts nothing");
-    }
-
-    /// **A panic in the store's other upkeep never takes the evicted bodies.**
-    /// With the replica changelog's lock poisoned, the reap still releases an
-    /// expired deferred terminal's key and counts its CDR lost, once.
-    #[tokio::test(start_paused = true)]
-    async fn a_poisoned_changelog_lock_does_not_cost_an_expired_terminal_its_release() {
-        let n = node("w1").await;
-        let ctx = n.core.router_ctx();
-        ctx.limiter.hold_releases();
-        let mut terminal = answered(1, 2, CallModelState::Terminated);
-        terminal.limiter = call::CallLimiterState::admitted(
-            "upkeep-key".into(),
-            1,
-            vec![
-                call::LimiterEntry { id: "x".into(), limit: 10 },
-                call::LimiterEntry { id: "y".into(), limit: 10 },
-            ],
-        );
-        let call_ref = terminal.call_ref.clone();
-        let body = MsgpackCodec::new().encode(&terminal);
-        n.store
-            .put_call(
-                PartitionRole::Backup,
-                "w0",
-                &call_ref,
-                body,
-                &[],
-                1_000,
-                1,
-                2,
-                &PutOpts::default(),
-            )
-            .await
-            .unwrap();
-        n.store.changelog().poison_for_test();
-
-        tokio::time::advance(std::time::Duration::from_millis(2_000)).await;
-        let pass = tokio::spawn({
-            let ctx = ctx.clone();
-            async move { reap_expired_replicas(&ctx, ctx.clock.now_ms()).await }
-        });
-        assert!(pass.await.is_ok(), "the reap pass completes");
-        assert_eq!(ctx.limiter.waiting_keys(), vec!["upkeep-key".to_string()]);
-        assert_eq!(n.metrics.repl_terminal_lost_total(), 1);
-        reap_expired_replicas(ctx, n.clock.now_ms()).await;
-        assert_eq!(ctx.limiter.waiting(), 1, "released once");
-        assert_eq!(n.metrics.repl_terminal_lost_total(), 1, "counted once");
-    }
-
-    /// `call` as another call on the same ref: its own incarnation, holding
-    /// `x` under it.
-    fn as_call(mut call: Call, key: &str) -> Call {
-        call.limiter = call::CallLimiterState::admitted(
-            key.into(),
-            1,
-            vec![call::LimiterEntry { id: "x".into(), limit: 10 }],
-        );
-        call
-    }
-
-    /// **A refused flush of another call never folds into the live one.** The
-    /// primary serves a retry on the identity of a call a backup took over and
-    /// ended; that call's terminal, refused by the store, reaches the fold. It
-    /// carries lifecycle progress over the retry's live copy, but it is another
-    /// call: folding it would end the retry.
-    #[tokio::test(start_paused = true)]
-    async fn a_refused_flush_of_another_call_never_ends_the_live_one() {
-        let n = node("w0").await;
-        let ctx = n.core.router_ctx();
-        let live = as_call(answered(1, 0, CallModelState::Active), "retry-key");
-        let call_ref = live.call_ref.clone();
-        assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
-
-        let replica = as_call(answered(1, 3, CallModelState::Terminated), "first-key");
-        let body = MsgpackCodec::new().encode(&replica);
-        fold_refused_flush(ctx, FlushDirection::Reverse, &call_ref, &body, 0).await;
-        sip_clock::testkit::settle().await;
-
-        let after = ctx.state.peek(&call_ref).expect("the retry is still served");
-        assert_eq!(after.incarnation(), "retry-key");
-        assert_eq!(after.state, CallModelState::Active, "the retry plays on");
-        assert!(n.cdr.snapshot().is_empty(), "nothing was discharged");
-    }
-
-    /// **The reverse reconcile reads only its own call.** The primary's store
-    /// still holds a call its release is about to delete (the write is queued)
-    /// when the retry on the same identity is already live; a reconcile of the
-    /// ref reads that stored call, which is not the live one, and leaves the
-    /// retry alone.
-    #[tokio::test(start_paused = true)]
-    async fn a_reverse_reconcile_of_another_stored_call_never_ends_the_live_one() {
-        let n = node("w0").await;
-        let ctx = n.core.router_ctx();
-        let live = as_call(answered(1, 0, CallModelState::Active), "retry-key");
-        let call_ref = live.call_ref.clone();
-        assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
-        let stored = as_call(answered(2, 1, CallModelState::Terminated), "first-key");
-        n.store
-            .put_call(
-                PartitionRole::Primary,
-                "w0",
-                &call_ref,
-                MsgpackCodec::new().encode(&stored),
-                &[],
-                60_000,
-                2,
-                1,
-                &PutOpts::default(),
-            )
-            .await
-            .unwrap();
-
-        reconcile_reverse_flush(ctx, &call_ref).await;
-        sip_clock::testkit::settle().await;
-
-        let after = ctx.state.peek(&call_ref).expect("the retry is still served");
-        assert_eq!(after.incarnation(), "retry-key");
-        assert_eq!(after.state, CallModelState::Active, "the retry plays on");
-        assert!(n.cdr.snapshot().is_empty(), "nothing was discharged");
-    }
-
-    /// **A deferred terminal another call replaced is released by its own
-    /// key.** A backup holds the terminal its takeover copy deferred to the
-    /// primary; the primary's next write on the ref is a retry, which replaces
-    /// it. The reap releases the replaced call's own key and counts its CDR
-    /// lost, once; the retry's key is never touched.
-    #[tokio::test(start_paused = true)]
-    async fn a_deferred_terminal_another_call_replaced_is_released_by_its_own_key() {
-        let n = node("w1").await;
-        let ctx = n.core.router_ctx();
-        ctx.limiter.hold_releases();
-        let terminal = as_call(answered(1, 2, CallModelState::Terminated), "first-key");
-        let retry = as_call(unanswered(1, 0, CallModelState::Active), "retry-key");
-        let call_ref = terminal.call_ref.clone();
-        for (call, (p, b), ttl_ms) in [(&terminal, (1, 2), 30_000), (&retry, (1, 0), 600_000)] {
-            let opts = PutOpts {
-                origin_now_ms: Some(0),
-                incarnation: Some(call.incarnation().to_string()),
-                ..PutOpts::default()
-            };
-            let body = MsgpackCodec::new().encode(call);
-            n.store
-                .put_call(PartitionRole::Backup, "w0", &call_ref, body, &[], ttl_ms, p, b, &opts)
-                .await
-                .unwrap();
-        }
-
-        reap_expired_replicas(ctx, n.clock.now_ms()).await;
-        assert_eq!(ctx.limiter.waiting_keys(), vec!["first-key".to_string()]);
-        assert_eq!(n.metrics.repl_terminal_lost_total(), 1, "its CDR counted lost");
-        reap_expired_replicas(ctx, n.clock.now_ms()).await;
-        assert_eq!(ctx.limiter.waiting(), 1, "released once");
-        assert_eq!(n.metrics.repl_terminal_lost_total(), 1, "counted once");
-    }
-}
+mod tests;

@@ -4,9 +4,12 @@
 //! ADR-0003 makes them **eager + non-fatal** fields on `OptionalHeaders` (parsed
 //! once at parse time, a malformed value captured as `Err` rather than rejecting
 //! the message): `msg.optional().p_asserted_identity`. Repeated access returns
-//! the same stored field.
+//! the same stored field. The Geolocation family is read on access instead,
+//! through the typed read surface.
 
-use sip_message::header::{NameAddr, RAck};
+use sip_message::header::{
+    Geolocation, GeolocationError, GeolocationRouting, HeaderValue, NameAddr, RAck,
+};
 use sip_message::method::Method;
 use sip_message::{CustomParser, SipMessage, SipParser};
 
@@ -121,38 +124,69 @@ fn history_info_indexed_entries() {
     assert_eq!(na_param(&list[1], "index"), Some("1.1"));
 }
 
-// --- Geolocation / -Routing / -Error (RFC 6442 / 7378) ---
+// --- Geolocation / -Routing / -Error (RFC 6442), read on access ---
 
 #[test]
 fn geolocation_list() {
-    let msg =
-        invite("Geolocation: <https://ls.example.com/loc1>, <https://ls.example.com/loc2>\r\n");
-    let list = msg.optional().geolocation.as_ref().unwrap();
+    let msg = invite(
+        "Geolocation: <https://ls.example.com/loc1>, <cid:loc2@example.com>;inserted-by=192.0.2.1\r\n",
+    );
+    let list = msg.list::<Geolocation>().unwrap();
     assert_eq!(list.len(), 2);
     assert_eq!(list[0].uri().text(), "https://ls.example.com/loc1");
-    assert_eq!(list[1].uri().text(), "https://ls.example.com/loc2");
+    assert_eq!(list[1].uri().text(), "cid:loc2@example.com");
+    assert_eq!(list[1].params().value("inserted-by"), Some("192.0.2.1"));
 }
 
+/// `locationValue = LAQUOT locationURI RAQUOT *(SEMI geoloc-param)`: no
+/// display name, no bare URI.
 #[test]
-fn geolocation_routing_yes_no_absent_invalid() {
-    assert_eq!(
-        *invite("Geolocation-Routing: yes\r\n").optional().geolocation_routing.as_ref().unwrap(),
-        Some(true)
-    );
-    assert_eq!(
-        *invite("Geolocation-Routing: NO\r\n").optional().geolocation_routing.as_ref().unwrap(),
-        Some(false)
-    );
-    assert_eq!(*invite("").optional().geolocation_routing.as_ref().unwrap(), None);
-    assert!(invite("Geolocation-Routing: maybe\r\n").optional().geolocation_routing.is_err());
+fn geolocation_outside_its_grammar_is_err_on_read() {
+    assert!(invite("Geolocation: cid:loc1@example.com\r\n").list::<Geolocation>().is_err());
+    assert!(invite("Geolocation: \"Here\" <cid:loc1@example.com>\r\n")
+        .list::<Geolocation>()
+        .is_err());
 }
 
+/// §4.2: "yes" allows routing on the location; "no", or any value this
+/// element does not understand, does not.
 #[test]
-fn geolocation_error_with_code_param() {
-    let msg = invite("Geolocation-Error: <sip:locinfo@example.com>;code=200\r\n");
-    let list = msg.optional().geolocation_error.as_ref().unwrap();
-    assert_eq!(list.len(), 1);
-    assert_eq!(na_param(&list[0], "code"), Some("200"));
+fn geolocation_routing_yes_no_absent_unknown() {
+    let routing =
+        |line: &str| invite(line).header::<GeolocationRouting>().map(|r| r.unwrap().allowed());
+    assert_eq!(routing("Geolocation-Routing: yes\r\n"), Some(true));
+    assert_eq!(routing("Geolocation-Routing: NO\r\n"), Some(false));
+    assert_eq!(routing("Geolocation-Routing: maybe\r\n"), Some(false));
+    assert_eq!(routing(""), None);
+}
+
+/// §4.3: `locationErrorValue = location-error-code *(SEMI
+/// location-error-params)`, the code three digits at most.
+#[test]
+fn geolocation_error_is_a_code_and_params() {
+    let msg = invite("Geolocation-Error: 100;code=\"Cannot Process Location\"\r\n");
+    let error = msg.header::<GeolocationError>().unwrap().unwrap();
+    assert_eq!(error.code(), 100);
+    assert_eq!(error.text(), Some("Cannot Process Location"));
+    assert_eq!(error.to_wire(), "100;code=\"Cannot Process Location\"");
+    let spaced = invite("Geolocation-Error: 200 ; code=\"None\"\r\n");
+    assert_eq!(spaced.header::<GeolocationError>().unwrap().unwrap().code(), 200);
+    for refused in ["1000", "busy", "<sip:locinfo@example.com>;code=200", "100 trailing"] {
+        let msg = invite(&format!("Geolocation-Error: {refused}\r\n"));
+        assert!(msg.header::<GeolocationError>().unwrap().is_err(), "{refused:?}");
+    }
+}
+
+/// The parser reads none of the three: a malformed value costs nothing at
+/// parse and never surfaces until a reader asks for it.
+#[test]
+fn geolocation_headers_are_not_read_at_parse() {
+    let msg = invite(
+        "Geolocation: junk\r\nGeolocation-Error: junk\r\nGeolocation-Routing: \"quoted\"\r\n",
+    );
+    assert!(!format!("{:?}", msg.optional()).contains("junk"));
+    assert!(msg.list::<Geolocation>().is_err());
+    assert!(msg.header::<GeolocationError>().unwrap().is_err());
 }
 
 // --- RAck (RFC 3262) ---
@@ -182,6 +216,15 @@ fn rack_extra_whitespace_tolerated() {
 fn rack_missing_method_or_non_numeric_is_err() {
     assert!(build("PRACK", PRACK_BASE, "RAck: 1 2\r\n").optional().rack.is_err());
     assert!(build("PRACK", PRACK_BASE, "RAck: foo 2 INVITE\r\n").optional().rack.is_err());
+}
+
+/// RFC 3262 §7.2: LWS separates the CSeq-num from the Method, and the Method
+/// is a token. A malformed RAck stays a non-fatal `Err`.
+#[test]
+fn rack_without_lws_or_with_a_non_token_method_is_err() {
+    assert!(build("PRACK", PRACK_BASE, "RAck: 776656 1INVITE\r\n").optional().rack.is_err());
+    assert!(build("PRACK", PRACK_BASE, "RAck: 776656 1 INVITE/extra\r\n").optional().rack.is_err());
+    assert!(build("PRACK", PRACK_BASE, "RAck: 776656\u{a0} 1 INVITE\r\n").optional().rack.is_err());
 }
 
 // --- Refer-To (RFC 3515 + RFC 3891) ---

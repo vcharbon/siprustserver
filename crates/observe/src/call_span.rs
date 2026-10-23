@@ -1,6 +1,6 @@
 //! The per-call root span and the facts recorded on it (ADR-0026).
 //!
-//! ONE root span per call per process, opened only for an admitted call and
+//! ONE root span per call per node, opened only for an admitted call and
 //! closed at the call's terminal state or reap. Detail rides as span EVENTS
 //! carrying `at_ms` — when the fact HAPPENED — so a backfilled activation
 //! records the INVITE, the auto-100 and the decision round trip at their
@@ -18,6 +18,10 @@
 //! naming the nominal's root — a link, never a parent: the nominal's span is
 //! closed or lost by definition, so claiming it as a parent would claim a live
 //! span that never closes.
+//!
+//! Every span also names the `node` that opened it ([`crate::node`]): the
+//! nominal's span and a takeover backup's share a trace and a Call-ID, and the
+//! node is what tells their facts apart.
 
 use tracing::Span;
 
@@ -71,6 +75,8 @@ pub struct CallSpan {
     span: Span,
     trace_id: String,
     span_id: String,
+    /// The node serving the call, named on every span of it.
+    node: String,
     /// The dialog identity, owned so EVERY span on the call — root and child —
     /// carries it (ADR-0026). Owning it costs one clone per span OPEN, never
     /// per packet.
@@ -96,7 +102,8 @@ impl From<CallIdentity<'_>> for OwnedIdentity {
 }
 
 impl CallSpan {
-    /// Open a root span for a newly admitted call.
+    /// Open a root span for a newly admitted call, naming the node the caller
+    /// serves.
     pub fn open(lease: TraceLease, id: CallIdentity<'_>) -> Self {
         Self::build(lease, id, new_trace_id(), None)
     }
@@ -128,18 +135,20 @@ impl CallSpan {
         link_span_id: Option<&str>,
     ) -> Self {
         let span_id = new_span_id();
+        let node = crate::node::node();
         let span = tracing::info_span!(
             target: TRACE_TARGET,
             "sip.call",
             trace_id = %trace_id,
             span_id = %span_id,
+            node = %node,
             sip.call_id = %id.call_id,
             sip.from_tag = %id.from_tag,
             sip.to_tag = %id.to_tag,
             link.trace_id = link_span_id.map(|_| trace_id.as_str()).unwrap_or(""),
             link.span_id = link_span_id.unwrap_or(""),
         );
-        Self { span, trace_id, span_id, id: id.into(), _lease: lease }
+        Self { span, trace_id, span_id, node, id: id.into(), _lease: lease }
     }
 
     /// The trace this call belongs to — replicated on `Call.trace_id`.
@@ -168,6 +177,7 @@ impl CallSpan {
                 parent: &self.span,
                 "sip.call.http",
                 trace_id = %self.trace_id,
+                node = %self.node,
                 sip.call_id = %self.id.call_id,
                 sip.from_tag = %self.id.from_tag,
                 sip.to_tag = %self.id.to_tag,
@@ -236,7 +246,7 @@ mod tests {
     use crate::admission::activation_bucket;
     use crate::admission::SampleAdmission;
     use crate::rate_draw::RateDraw;
-    use crate::test_buffer::test_buffer;
+    use observe_testkit::test_buffer;
 
     fn lease() -> TraceLease {
         SampleAdmission::new(true, 1.0, 10, RateDraw::seeded(1), activation_bucket(0))
@@ -345,6 +355,22 @@ mod tests {
         assert!(http[0].contains("sip.call_id=c1@host"), "{}", http[0].line());
         assert!(http[0].contains("sip.from_tag=ft"), "{}", http[0].line());
         assert!(http[0].contains("http.route=/call/new"));
+    }
+
+    #[test]
+    fn every_span_on_a_call_names_the_node_that_opened_it() {
+        let (_guard, log) = test_buffer();
+        let span = crate::NodeScope::named("n1#g2").enter(|| CallSpan::open(lease(), identity()));
+        span.child("/call/new").record(TraceEvent::new("http.request", 1, "POST"));
+        span.record(TraceEvent::new("sip.in", 2, "alice"));
+
+        let spans = log.spans();
+        assert_eq!(spans.len(), 2);
+        assert!(spans.iter().all(|s| s.contains("node=n1#g2")), "{spans:?}");
+        assert!(
+            log.snapshot().iter().all(|e| e.node.as_deref() == Some("n1#g2")),
+            "the span's node is every fact's, wherever it is recorded from"
+        );
     }
 
     #[test]

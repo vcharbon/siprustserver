@@ -30,7 +30,7 @@ and drive the load driver against it:
 
 ```bash
 # all loadgen smoke tests (correlation/demux, no-leak, orphans, picker,
-# emergency-under-overload, post-call cleanup across failure modes)
+# emergency-under-overload, post-call cleanup across abnormal ends)
 cargo test -p loadgen --test it smoke::
 
 # one test, with its full SIP trace printed:
@@ -66,7 +66,7 @@ Prerequisites for the real cluster (one-time):
 
 - With the default `header` correlation, the B2BUA must be **transparent to the
   correlation header**: deploy it with `B2BUA_RELAY_HEADERS=X-Loadgen-Id`
-  (already set in `deploy/k8s/manifests/20-worker.yaml`). Without it the callee
+  (already set in `deploy/helm/siprust/values-kind.yaml`). Without it the callee
   leg never correlates and you'll see `loadgen_mux_orphan_total` climb / zero OK
   calls — or switch to `--correlate to-user`, which needs no SUT cooperation
   (see *Correlation strategies* below).
@@ -83,8 +83,12 @@ three on `base`; see *Shared socket*), `--correlate` /
 data fed into the refer scenarios), `--scenario name=weight` (repeatable; omit
 for the default mix), `--out-dir`, `--metrics-addr` (default `0.0.0.0:9300`),
 `--sample-cap`, `--drop-rate` / `--drop` / `--auto-retransmit` (see *Packet loss
-+ auto-retransmit* below), `--load-profile` (see *The run-spec axis* below). Run
-`--help` for the full list.
++ auto-retransmit* below), `--load-profile` (see *The run-spec axis* below),
+`--overload-reject <code>` (see *Accepted endings*). Run `--help` for the full
+list. Each mux socket requests 2 MiB receive and send buffers: one socket
+carries every concurrent call, so an overflowing buffer would drop datagrams
+before the loadgen sees them and fail their calls on a timeout. The loadgen
+warns at bind when `net.core.rmem_max` / `wmem_max` clamped the request.
 
 ### The run-spec axis: `--load-profile`
 
@@ -93,7 +97,8 @@ document** — a `LoadProfile` JSON (schema:
 `e2e/schemas/load-profile.schema.json`) — the load analogue of an e2e *Campaign*.
 It carries every run knob (`cps`, `durationSecs`, `maxInFlight`, `sampleCap`,
 `backgroundRecordEvery`, `reportIntervalSecs`, `recvTimeoutMs`), the global
-`robustness` (`dropRate` + `retransmit`) defaults, and the scenario **`mix`**
+`robustness` (`dropRate` + `retransmit`) defaults, `overloadReject` (see
+*Accepted endings* below), and the scenario **`mix`**
 (each entry: `shape` id, `weight`, an optional attached `case`, and per-scenario
 `dropRate`/`retransmit` overrides):
 
@@ -133,7 +138,7 @@ startup**, never silently mid-run.
 ### Live rate control (`POST /rate`)
 
 The offered rate is **re-targetable at runtime** — no restart — over the same
-HTTP socket as `/metrics` and `/chaos`:
+HTTP socket as `/metrics`:
 
 - **`POST /rate?cps=<float>`** — set the target call rate. The value is validated
   and **clamped to `>= 0`** (a negative/`NaN`/`inf` clamps to `0`); a missing or
@@ -240,8 +245,7 @@ per run with `--correlate`; all mux endpoints share the one strategy:
     holds or that is cooling is re-drawn from the case's pool, up to 8 draws;
     only when every draw is unavailable is the call `rejected`. Each refused
     draw counts once (`loadgen_mux_token_collision_total`,
-    `loadgen_mux_key_cooling_total`), so these count draws, not calls. Those contention rejections are classified against the
-    chaos markers of the last 64·T1, like the failure that caused them;
+    `loadgen_mux_key_cooling_total`), so these count draws, not calls;
   - the caller's first INVITE must carry the key as its From user; a mismatch
     fails the send and counts `loadgen_mux_caller_key_mismatch_total`;
   - a number whose call ended not ok cools for 64·T1 (32 s): a draw of it
@@ -324,7 +328,7 @@ call, the driver tracks the **cross-call delivery rate** and exports it:
 
 `received / expected` should stay **> 99%** (at the 1/1000 default it is ~99.8%);
 a value well below that is a *systemic* 18x regression (a real bug), unlike one
-dropped 180. The endurance harness gates on this ratio.
+dropped 180.
 
 ### Realistic timers + the long recorded call
 
@@ -474,37 +478,28 @@ empty = the full audit. Smoke coverage:
 `loadgen_failing_check_reclassifies_to_check_fail`,
 `loadgen_allow_violations_waives_named_rfc_rule`.
 
-### In the endurance run (parallel to SIPp)
+### In a soak (parallel to SIPp)
 
-The endurance harness runs `loadgen` as an **in-cluster Job alongside the SIPp
-baseline** — same image (`siprustserver:dev`, now carrying the `loadgen` binary),
-scraped via the same pod annotations. It is wired in `deploy/k8s`:
-
-- `manifests/45-loadgen-job.yaml` — the Job (binds the mux on the pod IP, pins the
-  b-leg back to itself, 20 cps base, the timers above, full recording).
-- `endurance.sh` — `LOADGEN_*` knobs (default `LOADGEN_CPS=20`); the stream starts
-  in `start_baseline`, is supervised by `ensure_loadgen`, stopped in `stop_streams`,
-  and its HTML report is copied out at the end (and anytime via
-  `./endurance.sh fetch-loadgen`) into `results/endurance-*/loadgen-report/`.
-- `deploy/observability/.../dashboards/loadgen.json` — the Grafana panels
-  (in-flight summed over every loadgen next to the offered rate and the mean
-  call hold, the success ratio over admitted calls next to the 503 refusal
-  ratio, completion rate by class/scenario, SIP round-trip quantiles, RSS +
-  leak canaries), aligned to the chaos-window annotations.
-
-Disable it for a SIPp-only run with `LOADGEN_ENABLE=0`. REFER is off by default in
-the endurance mix (`LOADGEN_W_REFER=0`) because it needs cluster REFER auth; raise
-the weight to include it.
+A run profile of the HA tooling (`tooling/hakit`, ADR-0049) runs `loadgen` as a
+stream beside the SIPp reference streams: `driver: loadgen`, its image and
+command in the stream's `params`, a docker container on the external plane or a
+pod in the cluster (`placement: pod`). The runner starts, drains (SIGUSR1) and
+stops it, reads its counters and its call-outcome records, and attributes its
+failures to the incident windows. `tooling/hakit/content/dashboards/loadgen.json`
+holds the Grafana panels (in-flight summed over every loadgen next to the
+offered rate and the mean call hold, the success ratio over admitted calls next
+to the 503 refusal ratio, completion rate by class/shape, SIP round-trip
+quantiles, RSS + leak canaries), with the incident windows annotated.
 
 ---
 
 ## Where the results are (and *why* calls failed)
 
-The report is written to `--out-dir`, bucketed per `(scenario × result-class × chaos)`:
+The report is written to `--out-dir`, bucketed per `(scenario × result-class × case)`:
 
-- **`index.html`** — counts table (`scenario | class | chaos | count | sample-links`),
+- **`index.html`** — counts table (`scenario | class | case | count | sample-links`),
   OK rows green, failing rows red; plus latency percentiles and checkpoints.
-- **`callflows/<scenario>/<class>/<chaos>/<i>.html`** — the per-call **SIP sequence
+- **`callflows/<scenario>/<class>[/<case>]/<i>.html`** — the per-call **SIP sequence
   diagram** for sampled calls. For a failing call the page shows `FAIL` **and the
   reason** (the `StepError` / outcome) as the header banner and a `call-result`
   anomaly — e.g. *"alice expected 200, got 486 Busy Here"*,
@@ -513,48 +508,58 @@ The report is written to `--out-dir`, bucketed per `(scenario × result-class ×
   directory name: `status_503`, `status_486`, `timeout`, `unexpected`,
   `rfc_audit_fail`, `check_fail`, `panic`, `transport`, `unparseable`. A call
   with an attached Test case also lists its check verdicts (PASS and FAIL).
-  A shape that declares an expected reject (`ShapeDescriptor::expected_reject`)
-  classes a call ending on that status `expected_reject` (case = the status),
-  counted with `ok` as no failure.
+  A failed call's sample bucket (its *case*) is the step it failed at,
+  `<who>[:<goal kind>#<goal index>]@<barrier>` (e.g. `alice:bye#1@established`,
+  or `settle` for an unmet settle barrier), in a filesystem-safe spelling.
 - **`summary.md`** — the same counts in markdown.
-- **Live:** `curl <metrics-addr>/metrics` during a run for the per-`(scenario,
-  class, chaos)` counters, the call and checkpoint latency histograms, the SIP
-  round trips `loadgen_rtt_seconds{scenario,exchange}` (request first sent →
+- **Live:** `curl <metrics-addr>/metrics` during a run (every series names its
+  `--stream` first) for the per-`(stream, shape,
+  class)` counters, `loadgen_branch_total{stream,shape,branch}` (ok calls by
+  the accepted ending they took) and `loadgen_failed_step_total{stream,shape,step}`
+  (failed calls by the step they failed at), the call and checkpoint latency
+  histograms, the SIP
+  round trips `loadgen_rtt_seconds{stream,shape,exchange}` (request first sent →
   first `100` / first `18x` for INVITE, → final for every other method; a 2xx
   to an INVITE first sent → its ACK; none of them holds a scripted timer), plus
   the `loadgen_mux_orphan_total` /
-  `loadgen_mux_registry_size` canaries, `loadgen_chaos_markers_total`, and
-  `loadgen_target_cps` (the current offered-rate target). The same socket serves
-  `POST /rate?cps=<float>` / `GET /rate` (live rate control — see *Live rate
-  control* above) and `POST /chaos` (chaos correlation — below).
+  `loadgen_mux_registry_size` canaries, and `loadgen_target_cps` (the current
+  offered-rate target). The same socket serves `POST /rate?cps=<float>` /
+  `GET /rate` (live rate control — see *Live rate control* above) and
+  `POST /drain`.
 
-### Chaos correlation (near vs clear)
+### Calls across an incident
 
-When a fault is injected during a run, the chaos driver flags the loadgen at the
-kill instant via **`POST /chaos?type=<kind>&target=<who>`** (same socket as
-`/metrics`; the endurance harness does this in `loadgen_chaos_flag`). Each
-finished call is then auto-classified on the `chaos` label:
-
-- **`chaos="near"`** — an injected fault landed on a *fragile moment* of the
-  call: within `--chaos-phase-tolerance-ms` (default 200) of a dialog-state
-  transition (connected/reinvited/transferred/…), or mid-setup before it
-  connected. The state had no time to propagate and SIP retransmission normally
-  recovers it → likely acceptable kill collateral (in-setup at the kill → 408,
-  etc.) — **counted, but not hand-triaged.**
-- **`chaos="clear"`** — the call was stably connected across the fault (or none
-  overlapped). A genuine SUT signal.
-
-The loadgen timestamps the marker on its **own** clock — the single process-wide
-`Clock::system()` the calls also record on — so the overlap is exact (no
-Call-ID/tag ms-base reconciliation) and the marker renders on the very axis the
-frames do, even if the host wall clock steps mid-run. A post-reboot call (created
-seconds after the worker came back) is `clear`, so a reclaim-path defect stays
-visible. **Triage `loadgen_calls_total{class="rfc_audit_fail",chaos="clear"}`**
-and the `callflows/<sc>/<class>/clear/` flows; revisit `near` only if wanted.
+loadgen does not judge whether a failure is an incident's collateral: each
+call's record carries its own instants, and the HA tooling's verdict
+attributes it to the incident window it fell in, against that window's budget
+(ADR-0049 §3.5).
 
 Sampling is bounded: a small fraction of calls record their trace (`--sample-cap`
 per bucket); the rest are counted only. A non-sampled failure still gets a stub
-page with its one-line reason.
+page with its one-line reason. A bucket still under its cap keeps its scenario
+recording for 64 calls after its last sample, then leaves it to
+`--background-record-every`. So after warm-up the RFC audit and the case
+checks, which run on recorded calls only, cover fewer calls: a rare outcome
+may go without its second sample. Lower `--background-record-every`
+(`1` records every call) when the audit's reach matters more than CPU.
+
+### Call-outcome records
+
+Every call placed writes one `call-outcome.v1` record
+(`tooling/hakit/schemas/call-outcome.v1.schema.json`, ADR-0049 §4) when the
+driver is done with it: what the caller saw on the wire (its first INVITE,
+first provisional, final and its Reason cause key, answer, teardown, failed
+in-dialog requests) and how each callee leg loadgen played ended. The result
+class rides in `producer_verdict` only. Records are appended to
+`--records-file` (default `<out-dir>/call-outcomes.jsonl`) and, with
+`--records-url http://host:port`, pushed to VictoriaLogs' `/insert/jsonline`
+(`_stream_fields=run,source,stream`, `_time` = the record's end). `--run`
+and `--stream` name the run and the stream every record carries; `source` is
+the product name. A call never placed (shed at the in-flight cap, or its key
+refused) writes no record and counts in
+`loadgen_not_placed_total{stream,shape,reason}`; records count in
+`loadgen_outcome_records_total{stream,shape,ending}`. `--list-shapes` prints
+the shape ids the product registered and exits.
 
 ---
 
@@ -636,7 +641,7 @@ page with its one-line reason.
    `.load_shared(Arc::new(MyFlow))`, or `.load_with(|inputs| …)` when it needs
    per-run SUT auth data (`ScenarioInputs`). That is the whole wiring: the
    driver resolves the descriptor from the registry (`MixEntry::by_id` /
-   `--scenario my_flow=…`, `MixEntry::default_mix` / `failure_mix` for the
+   `--scenario my_flow=…`, `MixEntry::default_mix` / `abnormal_end_mix` for the
    shipped tables) — there is no `match` table left to extend, and a duplicate
    id panics at registration. An **emergency variant** is free: a second
    descriptor (`"my_flow_em"`) with `.emergency()` reusing the same body — the
@@ -645,26 +650,44 @@ page with its one-line reason.
    `e2e-core/src/shapes/mod.rs::default_bodies` (see `rerouting_prack`, the
    first dual-body shape; ADR-0021).
 
-### Add a *voluntarily-failing* scenario (post-call-cleanup coverage)
+### Accepted endings
 
-Failure scenario bodies live in
-`crates/scenario-harness/src/realcall/scenarios/failures.rs`, one per teardown
-path, and are registered like any other shape but with `.failure_weight(w)`
-instead of `.default_weight(w)` — that flag is what puts them in the registry's
-`failure_mix`, which the no-leak coverage test runs so every reclamation branch
-is exercised **without an endurance run**:
+A scenario declares the endings it accepts as named branches
+(`scenario_harness::actor::{Expect, Branch}` on its `ActorCall`): `answered`
+(connected, then torn down), `rejected` (a final to the caller's INVITE before
+it connects), `early_media_rejected`, `abandoned` (the caller CANCELled),
+`answered_despite_cancel` / `answered_before_cancel` (the callee's 200 crossed
+the CANCEL, or reached the caller before it left: she ACKs and BYEs),
+`transfer_declined`, or any scenario-named predicate over the observed state. A
+call that tears down and settles on one of them classes `ok` and counts under
+its branch in `loadgen_branch_total`; an accepted ending still runs the RFC
+audit and the case checks, so an RFC-dirty reject is `rfc_audit_fail`. Every
+other ending fails under its cause's class, keyed by the failed step.
 
-| ends in scope state | teardown the driver runs | example |
+Nothing else is accepted by default. One branch comes from the run instead of
+the scenario: how a system under test refuses a call under overload is its own
+convention, so a run that drives overload on purpose declares that final
+(`--overload-reject 503`, or `"overloadReject": 503` in the load profile). That
+final to a non-emergency call's INVITE before it connects is then the
+`refused_overload` branch. Unset (the default), it fails like any final the
+scenario does not declare. A scenario opts out with
+`Expect::without_overload_refusal()`.
+
+### Add an *abnormal-end* scenario (post-call-cleanup coverage)
+
+Abnormal-end bodies — a call that ends without connecting and hanging up — live
+in `crates/scenario-harness/src/actor/scenarios.rs`, one per teardown path, and
+are registered like any other shape but with `.abnormal_end_weight(w)` instead
+of `.default_weight(w)` — that flag is what puts them in the registry's
+`abnormal_end_mix`, which the no-leak coverage test runs so every reclamation
+branch is exercised **without an endurance run**. Each declares its ending as an
+accepted branch, so a correct SUT leaves every call `ok`:
+
+| ending | branch | example |
 |---|---|---|
-| `Terminated` (final received) | none | `InviteReject` (callee 486) |
-| `Early` (no final) | CANCEL | `AbandonRinging` (caller quits on 180) |
-| `Confirmed` | BYE | `ReferCharlieReject` (transfer 603) |
-
-Return a `StepError` describing the failure (it becomes the report `detail` and
-the NOK callflow banner). If a real final (`status >= 200`) ended the
-transaction, `scope.mark_terminated()` so teardown is a no-op; otherwise leave
-the scope as-is and let the driver CANCEL/BYE. To fully reap an early-CANCEL,
-drive the callee's `200`+`487` in-scenario (see `AbandonRinging`).
+| final received, no dialog | `rejected` | `InviteReject` (callee 486) |
+| caller CANCELs on 180 | `abandoned` | `AbandonRinging` |
+| transfer target declines, caller BYEs | `transfer_declined` | `ReferCharlieReject` (603) |
 
 ### Add a smoke test
 

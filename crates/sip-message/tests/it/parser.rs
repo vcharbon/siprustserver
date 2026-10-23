@@ -2,10 +2,8 @@
 //! Port of `tests/sip/Parser.test.ts`.
 //!
 //! The accept/reject verdicts overlap `compliance_matrix.rs`; what this file
-//! adds is (a) assertions on the *parsed field content* of the messages that
-//! parse, and (b) the eager-only §3.1.2 leniency split — `parse()` alone
-//! accepts the Date / bare-addr-spec / non-token-display cases that
-//! `validate_strict()` (exercised in the compliance matrix) rejects.
+//! adds is assertions on the *parsed field content* of the messages that
+//! parse, and the two §3.1.2 messages `parse()` still reads.
 
 use std::fs;
 use std::path::PathBuf;
@@ -79,16 +77,18 @@ fn v3_1_1_11_multipart_mime() {
     assert!(!req.body().is_empty(), "body should be non-empty");
 }
 
-// --- §3.1.1 valid-per-RFC but rejected by ADR-0007 ---
+// --- §3.1.1 valid-per-RFC but refused by a gate of ADR-0001 ---
 
 #[test]
-fn v3_1_1_7_long_values_rejected_by_adr_0007() {
+fn v3_1_1_7_long_values_refused_for_its_cookie_less_top_via() {
     assert!(parse("rfc4475-valid", "longValues").is_err());
 }
 
 #[test]
-fn v3_1_1_10_varied_transports_rejected_by_adr_0007() {
-    assert!(parse("rfc4475-valid", "variedTransports").is_err());
+fn v3_1_1_10_varied_transports_parses_its_lower_hops_whatever_the_transport() {
+    let msg = parse("rfc4475-valid", "variedTransports").unwrap_or_else(|e| panic!("{}", e.reason));
+    let transports: Vec<&str> = msg.via().iter().map(|v| v.transport()).collect();
+    assert_eq!(transports, ["UDP", "SCTP", "TLS", "UNKNOWN", "TCP"]);
 }
 
 // --- §3.1.2 invalid messages the eager parser REJECTS ---
@@ -105,7 +105,10 @@ fn invalid_messages_rejected_by_eager_parse() {
         "angleBracketRequestUri",   // 3.1.2.7
         "embeddedLwsInUri",         // 3.1.2.8
         "multipleSPInRequestLine",  // 3.1.2.9
+        "escapedHeadersInUri",      // 3.1.2.11
+        "unencloseNameAddr",        // 3.1.2.13
         "spacesInAddrSpec",         // 3.1.2.14
+        "nonTokenDisplayName",      // 3.1.2.15
         "unknownProtocolVersion",   // 3.1.2.16
         "methodMismatch",           // 3.1.2.17
         "unknownMethodMismatch",    // 3.1.2.18
@@ -116,21 +119,14 @@ fn invalid_messages_rejected_by_eager_parse() {
     }
 }
 
-// --- §3.1.2 cases the EAGER parser accepts (validate_strict rejects them; see
-//     compliance_matrix.rs) — documents the tolerant-parse / strict-validate split ---
+// --- §3.1.2 the parser still reads ---
 
 #[test]
-fn invalid_messages_accepted_eagerly_as_request() {
-    let accepted = [
-        "trailingSpacesInRequestLine", // 3.1.2.10
-        "escapedHeadersInUri",         // 3.1.2.11
-        "invalidTimezone",             // 3.1.2.12
-        "unencloseNameAddr",           // 3.1.2.13
-        "nonTokenDisplayName",         // 3.1.2.15
-    ];
-    for name in accepted {
+fn trailing_spaces_and_a_malformed_date_still_read_as_a_request() {
+    // 3.1.2.10, and 3.1.2.12: a malformed Date never refuses a message.
+    for name in ["trailingSpacesInRequestLine", "invalidTimezone"] {
         let msg = parse("rfc4475-invalid", name)
-            .unwrap_or_else(|e| panic!("{name} should parse eagerly: {}", e.reason));
+            .unwrap_or_else(|e| panic!("{name} should parse: {}", e.reason));
         assert!(matches!(msg, SipMessage::Request(_)), "{name}: expected request");
     }
 }

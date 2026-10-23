@@ -12,6 +12,10 @@
 //!
 //! Boundary, held by `reack_retransmitted_2xx` / `repeated_2xx_before_caller_ack`:
 //! absorbing a surplus ACK must not absorb an ACK owed to a repeated 2xx.
+//!
+//! The absorbing turn changes nothing a peer, a CDR or a node restoring the
+//! call needs, so it is persisted quietly (`absorbed-ack`, ADR-0014); the ACK
+//! that discharged the 2xx is a write.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -22,8 +26,8 @@ use scenario_harness::Harness;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
-const REOFFER: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
-const REANSWER: &str = "v=0\r\no=bob 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
+const REOFFER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
+const REANSWER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
 
 /// The ACK `from` put on the wire for `cseq`, as recorded — the datagram a
 /// duplicate repeats.
@@ -81,6 +85,8 @@ async fn a_duplicate_ack_on_a_fresh_branch_draws_no_second_b_leg_ack() {
     let invite_cseq = call.invite_cseq();
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
+    let absorbed = || b2bua.metrics().repl_quiet_turns_total("absorbed-ack");
+    assert_eq!(absorbed(), 0, "the ACK that discharged the answer is a write");
 
     // ── the duplicate: same dialog, same CSeq, a fresh branch ────────────────
     let first = recorded_ack(&h, alice.addr(), b2bua.addr, invite_cseq);
@@ -96,6 +102,7 @@ async fn a_duplicate_ack_on_a_fresh_branch_draws_no_second_b_leg_ack() {
         "one ACK per 2xx RECEIVED (RFC 3261 §13.2.2.4): bob answered once, so a second \
          caller ACK draws nothing"
     );
+    assert_eq!(absorbed(), 1, "the absorbing turn is persisted quietly");
 
     // ── the call is untouched by the absorption: clean teardown, one CDR ─────
     bob.drain().await;
@@ -206,6 +213,11 @@ async fn a_duplicate_reinvite_ack_draws_no_third_b_leg_ack() {
         2,
         "two 2xx were received on the b-leg (the answer and the renegotiation), so two \
          ACKs are owed and no more"
+    );
+    assert_eq!(
+        b2bua.metrics().repl_quiet_turns_total("absorbed-ack"),
+        1,
+        "the duplicate alone is absorbed, quietly",
     );
 
     bob.drain().await;

@@ -152,7 +152,7 @@ From: <sip:001555900@h>;tag=f1\r\n\
 To: <sip:+1555123@h;npdi>\r\n\
 Call-ID: refer-1\r\n\
 CSeq: 2 REFER\r\n\
-P-Asserted-Identity: <tel:+41319852573>\r\n\
+P-Asserted-Identity: <tel:+41555123456>\r\n\
 X-Api-Call: call-9\r\n\
 x-api-call: call-10\r\n\
 Refer-To: <sip:+1555456@h?Replaces=abc%40h%3Bto-tag%3Dtt%3Bfrom-tag%3Dff>\r\n\
@@ -211,7 +211,7 @@ l: 0\r\n\r\n";
         assert_eq!(m.identities.to.digits.as_deref(), Some("1555123"));
         assert_eq!(m.identities.ruri.as_ref().unwrap().digits.as_deref(), Some("1555123"));
         assert_eq!(m.identities.pai.len(), 1);
-        assert_eq!(m.identities.pai[0].digits.as_deref(), Some("41319852573"));
+        assert_eq!(m.identities.pai[0].digits.as_deref(), Some("41555123456"));
     }
 
     /// A Refer-To's escaped `?Replaces=` is resolved to the dialog it names.

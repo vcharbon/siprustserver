@@ -1,0 +1,22 @@
+[package]
+name = "sip-net-testkit"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Test support of the SIP signaling network layer: the in-memory simulated fabric, the recording and paranoid SignalingNetwork decorators, the RFC 3261/3262/3264 audit over the recording, the wire-trace projection and the random-loss model. It declares no purity tier, so no production binary links it."
+
+[lints]
+workspace = true
+
+[dependencies]
+sip-net = { path = "../sip-net" }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+# The recording decorators record onto the harness's typed `Recorder`.
+layer-harness = { path = "../layer-harness" }
+sip-clock = { path = "../sip-clock" }
+sip-message = { path = "../sip-message", features = ["sniff"] }
+# The RFC rule bodies the audit runs over the recording.
+rfc-rules = { path = "../rfc-rules" }

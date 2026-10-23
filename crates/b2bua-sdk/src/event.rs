@@ -3,9 +3,9 @@
 
 use std::net::SocketAddr;
 
-use call::TimerType;
+use call::TimerKey;
+use call::TxnTimeoutKind;
 use sip_message::{SipHeader, SipMessage};
-use sip_txn::{TimeoutKind, TransactionEvent};
 
 /// One thing that happens to a call: an inbound SIP message, a fired timer, a
 /// CANCEL the txn layer already answered, a client-transaction timeout, or a
@@ -23,11 +23,13 @@ pub enum CallEvent {
         /// for a request.
         matched_client_txn: bool,
     },
-    /// A B2BUA timer fired (keepalive, no-answer, max-duration, …).
+    /// A B2BUA timer fired (keepalive, no-answer, max-duration, …): its key
+    /// and the generation it was armed under. The router delivers it only
+    /// while the call's ledger holds that key under that generation.
     Timer {
-        timer_type: TimerType,
+        key: TimerKey,
+        generation: u64,
         call_ref: String,
-        leg_id: Option<String>,
         /// The incarnation of the call that scheduled it ([`Self::incarnation`]).
         incarnation: Option<String>,
     },
@@ -53,18 +55,20 @@ pub enum CallEvent {
         call_ref: Option<String>,
         leg_id: Option<String>,
         method: Option<String>,
+        /// The CSeq number of the request that drew no final.
+        cseq: u32,
         /// The peer the timed-out request was sent to (forwarded from the txn
         /// layer). `None` when the txn never stored a destination — the consumer
         /// then skips per-peer failure attribution.
         destination: Option<SocketAddr>,
         /// Response-detection (Timer B/F, or an initial INVITE's
-        /// `invite_first_response_timeout_sec`: nothing at all answered, the
-        /// hop is dead) vs the configured out-of-dialog INVITE bound
+        /// first-response deadline `invite_first_response_timeout_sec`:
+        /// nothing at all answered, the hop is dead) vs the configured out-of-dialog INVITE bound
         /// (`invite_txn_timeout_sec`, default 158 s: it answered, then went
         /// silent). Drives the per-peer metric's `response_timeout` vs
         /// `transaction_timeout` split and the `call_failure` consult's
         /// `timeout_kind`.
-        timeout_kind: TimeoutKind,
+        timeout_kind: TxnTimeoutKind,
         /// The incarnation of the call that sent the request
         /// ([`Self::incarnation`]), from the mark on its Via.
         incarnation: Option<String>,
@@ -92,52 +96,12 @@ pub enum CallEvent {
     /// cleared (ADR-0014). The router uses it to self-release an acting-backup
     /// takeover copy whose served transaction(s) are done.
     CallQuiesced { call_ref: String },
+    /// A lifecycle event of the call the turn caused, as the engine delivers
+    /// it to the active services after the turn's claim. Never dispatched.
+    Lifecycle(crate::lifecycle::LifecycleEvent),
 }
 
 impl CallEvent {
-    /// Map a transaction-layer event into a `CallEvent`. Pure.
-    pub fn from_txn(event: TransactionEvent) -> Self {
-        match event {
-            TransactionEvent::Message { message, src, matched_client_txn } => {
-                CallEvent::Sip { message, src, matched_client_txn }
-            }
-            TransactionEvent::Cancelled {
-                call_id,
-                from_tag,
-                invite_cseq,
-                in_dialog,
-                headers,
-                to_tag,
-            } => {
-                CallEvent::Cancelled { call_id, from_tag, invite_cseq, in_dialog, headers, to_tag }
-            }
-            TransactionEvent::Timeout {
-                branch,
-                call_ref,
-                leg_id,
-                incarnation_mark,
-                method,
-                destination,
-                kind,
-            } => {
-                let incarnation = call_ref
-                    .as_deref()
-                    .zip(incarnation_mark.as_deref())
-                    .map(|(call_ref, mark)| call::derive_incarnation(call_ref, mark));
-                CallEvent::Timeout {
-                    branch,
-                    call_ref,
-                    leg_id,
-                    method,
-                    destination,
-                    timeout_kind: kind,
-                    incarnation,
-                }
-            }
-            TransactionEvent::CallQuiesced { call_ref } => CallEvent::CallQuiesced { call_ref },
-        }
-    }
-
     /// The incarnation of the call this event belongs to
     /// (`call::Call::incarnation`): a timer fire, a transaction timeout and an
     /// internal event carry the one of the call they were armed, sent or
@@ -151,7 +115,8 @@ impl CallEvent {
             | CallEvent::InternalEvent { incarnation, .. } => incarnation.as_deref(),
             CallEvent::Sip { .. }
             | CallEvent::Cancelled { .. }
-            | CallEvent::CallQuiesced { .. } => None,
+            | CallEvent::CallQuiesced { .. }
+            | CallEvent::Lifecycle(_) => None,
         }
     }
 
@@ -188,6 +153,7 @@ impl CallEvent {
             CallEvent::Timeout { .. } => "timeout",
             CallEvent::InternalEvent { .. } => "internal-event",
             CallEvent::CallQuiesced { .. } => "call-quiesced",
+            CallEvent::Lifecycle(_) => "lifecycle",
         }
     }
 }
@@ -195,25 +161,6 @@ impl CallEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn timeout(call_ref: Option<&str>, mark: Option<&str>) -> CallEvent {
-        CallEvent::from_txn(TransactionEvent::Timeout {
-            branch: "z9hG4bK-t".into(),
-            call_ref: call_ref.map(str::to_string),
-            leg_id: Some("b-1".into()),
-            incarnation_mark: mark.map(str::to_string),
-            method: Some("INVITE".into()),
-            destination: None,
-            kind: TimeoutKind::Response,
-        })
-    }
-
-    #[test]
-    fn a_timeout_names_the_incarnation_its_via_marked() {
-        assert_eq!(timeout(Some("w0|cid|tag"), Some("k3")).incarnation(), Some("w0|cid|tag#k3"));
-        assert_eq!(timeout(Some("w0|cid|tag"), None).incarnation(), None, "unmarked");
-        assert_eq!(timeout(None, Some("k3")).incarnation(), None, "attributed to no call");
-    }
 
     #[test]
     fn a_re_entered_event_takes_its_turns_incarnation_unless_it_states_one() {

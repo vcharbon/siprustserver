@@ -27,6 +27,8 @@
 
 use sip_message::{SipRequest, SipResponse};
 
+use crate::ReplicatedB2buaSut;
+
 /// What one UA logically observed during a scenario, in order. Tokens embed the
 /// dialog identifiers so the differential compare is strict on From/To/CSeq.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -97,20 +99,9 @@ pub enum Who {
 
 /// Strict differential assertion: the variant (failover) observation must equal
 /// the baseline (clean) observation, token-for-token, including the embedded
-/// From/To tags and CSeq. Panics with a precise diff on mismatch.
-/// `compare_disposition` is `false` for a StayDead cell: the failover is
-/// SIP-transparent (alice/bob observe the baseline behavior — the backup answers the
-/// wire) but NOT billing-transparent — the primary never reclaims, so the variant
-/// loses its CDR (disposition `"no-cdr"` vs the baseline's `"terminated"`). That
-/// divergence is the *expected* accepted double-failure, so we still enforce the
-/// strict SIP-observation compare but skip the disposition equality. Every other cell
-/// remains fully transparent, disposition included.
-pub fn assert_transparent(
-    cell: &str,
-    baseline: &Observation,
-    variant: &Observation,
-    compare_disposition: bool,
-) {
+/// From/To tags and CSeq, and the final CDR disposition. Panics with a precise
+/// diff on mismatch.
+pub fn assert_transparent(cell: &str, baseline: &Observation, variant: &Observation) {
     assert_eq!(
         baseline.alice, variant.alice,
         "[{cell}] TRANSPARENCY VIOLATION on the caller (alice) leg: the failover \
@@ -124,14 +115,12 @@ pub fn assert_transparent(
          here).\n  baseline = {:#?}\n  variant  = {:#?}",
         baseline.bob, variant.bob,
     );
-    if compare_disposition {
-        assert_eq!(
-            baseline.disposition, variant.disposition,
-            "[{cell}] the final CDR disposition differs between the clean and \
-             failover runs: baseline={:?} variant={:?}",
-            baseline.disposition, variant.disposition,
-        );
-    }
+    assert_eq!(
+        baseline.disposition, variant.disposition,
+        "[{cell}] the final CDR disposition differs between the clean and \
+         failover runs: baseline={:?} variant={:?}",
+        baseline.disposition, variant.disposition,
+    );
 }
 
 /// The end-state observed on one node after the call terminated + flushed.
@@ -143,6 +132,25 @@ pub struct NodeEndState {
     pub lock_count: usize,
     pub residual_pri: Vec<String>,
     pub residual_bak: Vec<String>,
+    /// The store entries the node's reaper sweep corrected.
+    pub store_reconciled: u64,
+}
+
+impl NodeEndState {
+    /// The end state of `node`, named `ordinal`, for the call whose primary is
+    /// `primary_ord`.
+    pub(crate) fn of(node: &ReplicatedB2buaSut, primary_ord: &str, ordinal: &str) -> Self {
+        let alive = node.is_ready() || node.active_calls() > 0 || node.lock_count() > 0;
+        NodeEndState {
+            ordinal: ordinal.to_string(),
+            alive,
+            active_calls: node.active_calls(),
+            lock_count: node.lock_count(),
+            residual_pri: node.scan_primary(primary_ord),
+            residual_bak: node.scan_backed_up(primary_ord),
+            store_reconciled: node.metrics().store_reconciled_total(),
+        }
+    }
 }
 
 /// The universal post-condition checked a few simulated seconds after every
@@ -152,20 +160,14 @@ pub struct TeardownSweep {
     pub nodes: Vec<NodeEndState>,
     pub cdr_count: usize,
     pub limiter_total: i64,
-    /// Whether this run should have produced a CDR. `true` for every normal run;
-    /// `false` for a **StayDead variant** (Model Y, ADR-0020 X3) — the backup never
-    /// discharges and the dead primary never reclaims, so the CDR is the accepted
-    /// loss of the double-failure. The limiter must STILL drain to 0 and the replica
-    /// memory must STILL be freed (via the backup's lossy auto-cleanup reap), so only
-    /// the CDR count expectation differs.
-    pub expect_cdr: bool,
+    /// The poisoned locks recovered and the tasks restarted during the cell.
+    pub shell_faults: u64,
 }
 
 impl TeardownSweep {
     /// Assert everything cleared: no held context on any alive node, the limiter
-    /// drained to zero, and the CDR count matches [`expect_cdr`](Self::expect_cdr) —
-    /// exactly one for a normal run, exactly zero for a StayDead variant (CDR lost,
-    /// the accepted double-failure; limiter + memory still reclaimed).
+    /// drained to zero, exactly one CDR written for the call, and no store
+    /// correction, poisoned lock or task restart met on the way.
     pub fn assert_clean(&self, cell: &str) {
         for n in &self.nodes {
             if !n.alive {
@@ -191,23 +193,26 @@ impl TeardownSweep {
                 "[{cell}] node {} left {} residual bak: Element(s) {:?} — a later reboot could resurrect them",
                 n.ordinal, n.residual_bak.len(), n.residual_bak,
             );
-        }
-        if self.expect_cdr {
-            assert!(
-                self.cdr_count >= 1,
-                "[{cell}] no CDR was written for the call (expected one end-event after the flush window)",
-            );
-        } else {
-            // StayDead variant: the primary never reclaimed, so the CDR is the
-            // accepted loss. A non-zero count here means a backup illegally
-            // discharged (the removed durable fallback).
             assert_eq!(
-                self.cdr_count, 0,
-                "[{cell}] StayDead: expected ZERO CDRs (primary never reclaimed; CDR is the \
-                 accepted loss), but {} were written — a backup illegally discharged",
-                self.cdr_count,
+                n.store_reconciled, 0,
+                "[{cell}] node {} store defect: the reaper sweep corrected {} entr(ies)",
+                n.ordinal, n.store_reconciled,
             );
         }
+        assert_eq!(
+            self.shell_faults, 0,
+            "[{cell}] shell defect: {} poisoned lock(s) recovered or task(s) restarted",
+            self.shell_faults,
+        );
+        assert!(
+            self.cdr_count >= 1,
+            "[{cell}] no CDR was written for the call (expected one end-event after the flush window)",
+        );
+        assert_eq!(
+            self.cdr_count, 1,
+            "[{cell}] {} CDRs were written for the call: one node discharges it",
+            self.cdr_count,
+        );
         assert_eq!(
             self.limiter_total, 0,
             "[{cell}] the call limiter did not drain: {} hold(s) still outstanding",
@@ -270,7 +275,7 @@ mod tests {
             assert!(!variant.resp(Who::Alice, &response(OK_200)), "a rung appends no token");
         }
         assert_eq!(variant.alice, sample().alice);
-        assert_transparent("self", &sample(), &variant, true); // does not panic
+        assert_transparent("self", &sample(), &variant); // does not panic
     }
 
     /// A repeat that is not the datagram — a re-composed 2xx — is a token of
@@ -285,7 +290,7 @@ mod tests {
             "a differing datagram is a token"
         );
         assert_eq!(variant.alice, vec!["RESP 200 cseq=1", "RESP 200 cseq=1"]);
-        assert_transparent("self", &sample(), &variant, true);
+        assert_transparent("self", &sample(), &variant);
     }
 
     /// The fold reads one emitter's stream: the same datagram again after
@@ -301,7 +306,7 @@ mod tests {
 
     #[test]
     fn identical_observations_are_transparent() {
-        assert_transparent("self", &sample(), &sample(), true); // does not panic
+        assert_transparent("self", &sample(), &sample()); // does not panic
     }
 
     #[test]
@@ -311,24 +316,31 @@ mod tests {
         let mut variant = sample();
         // Simulate a takeover that re-minted the b-leg To-tag on the ACK.
         variant.bob[1] = "REQ ACK cseq=1 from=ftag to=DIFFERENT".into();
-        assert_transparent("self", &base, &variant, true);
+        assert_transparent("self", &base, &variant);
     }
 
     #[test]
-    fn staydead_disposition_divergence_is_exempt_but_sip_still_compared() {
-        // A StayDead variant: identical SIP observations, but the CDR (and thus the
-        // disposition) is lost. With the disposition compare OFF it is transparent.
+    #[should_panic(expected = "disposition differs")]
+    fn a_lost_cdr_fails_the_oracle() {
         let base = sample();
         let mut variant = sample();
         variant.disposition = "no-cdr".into();
-        assert_transparent("self", &base, &variant, false); // does not panic
+        assert_transparent("self", &base, &variant);
+    }
+
+    #[test]
+    #[should_panic(expected = "shell defect: 1 poisoned lock(s)")]
+    fn a_shell_fault_fails_the_sweep() {
+        let sweep =
+            TeardownSweep { nodes: vec![], cdr_count: 1, limiter_total: 0, shell_faults: 1 };
+        sweep.assert_clean("self");
     }
 
     #[test]
     #[should_panic(expected = "did not drain")]
     fn an_outstanding_limiter_hold_fails_the_sweep() {
         let sweep =
-            TeardownSweep { nodes: vec![], cdr_count: 1, limiter_total: 1, expect_cdr: true };
+            TeardownSweep { nodes: vec![], cdr_count: 1, limiter_total: 1, shell_faults: 0 };
         sweep.assert_clean("self");
     }
 
@@ -343,10 +355,11 @@ mod tests {
                 lock_count: 0,
                 residual_pri: vec![],
                 residual_bak: vec![],
+                store_reconciled: 0,
             }],
             cdr_count: 1,
             limiter_total: 0,
-            expect_cdr: true,
+            shell_faults: 0,
         };
         sweep.assert_clean("self");
     }
@@ -355,24 +368,15 @@ mod tests {
     #[should_panic(expected = "no CDR")]
     fn a_missing_cdr_fails_the_sweep() {
         let sweep =
-            TeardownSweep { nodes: vec![], cdr_count: 0, limiter_total: 0, expect_cdr: true };
+            TeardownSweep { nodes: vec![], cdr_count: 0, limiter_total: 0, shell_faults: 0 };
         sweep.assert_clean("self");
     }
 
     #[test]
-    fn staydead_zero_cdr_passes_the_sweep() {
-        // StayDead variant: zero CDRs is correct (the accepted loss); limiter drained.
+    #[should_panic(expected = "one node discharges it")]
+    fn a_call_discharged_twice_fails_the_sweep() {
         let sweep =
-            TeardownSweep { nodes: vec![], cdr_count: 0, limiter_total: 0, expect_cdr: false };
-        sweep.assert_clean("self"); // does not panic
-    }
-
-    #[test]
-    #[should_panic(expected = "illegally discharged")]
-    fn staydead_with_a_cdr_fails_the_sweep() {
-        // A backup that illegally discharged a StayDead deferral → a CDR appears.
-        let sweep =
-            TeardownSweep { nodes: vec![], cdr_count: 1, limiter_total: 0, expect_cdr: false };
+            TeardownSweep { nodes: vec![], cdr_count: 2, limiter_total: 0, shell_faults: 0 };
         sweep.assert_clean("self");
     }
 }

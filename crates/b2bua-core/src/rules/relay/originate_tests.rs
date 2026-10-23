@@ -1,0 +1,721 @@
+//! Wire-output pins on [`build_b_leg`]: per-leg dialog-identity independence
+//! (ID-1/2/3, HDR-2) and the §16.6 relay onto the originated leg — every
+//! assertion reads the serialized INVITE.
+
+use sip_ids::TurnIds;
+use sip_message::generators::CapabilitySet;
+use sip_message::header::HeaderValue;
+use sip_message::{SipHeader as MsgHeader, SipRequest, SipStr};
+
+use crate::config::B2buaConfig;
+use crate::effects::OutboundBody;
+use crate::rules::relay::{build_b_leg, CallMarks};
+
+mod identity_tests {
+    //! Per-leg identity invariants (ID-1/2/3, HDR-2) — the core back-to-back-UA
+    //! property: the B2BUA mints the b-leg's dialog identity from scratch, copying
+    //! *nothing* dialog-identifying from the a-leg. A b-leg whose Call-ID / From-tag
+    //! / CSeq / Contact leaked from the a-leg would couple the two dialogs and is
+    //! exactly what a transparent proxy (not a B2BUA) would do. Asserted directly
+    //! against [`build_b_leg`] (the single mint point, `super::originate`).
+    use super::*;
+    use sip_message::header::Contact;
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{SipMessage, SipParser};
+
+    fn parse(raw: &str) -> SipRequest {
+        match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+            SipMessage::Request(r) => r,
+            _ => panic!("expected request"),
+        }
+    }
+
+    /// A representative inbound a-leg INVITE with its OWN Call-ID, From-tag, an
+    /// absent To-tag (initial INVITE), CSeq 314 and a caller-owned Contact user.
+    fn a_leg_invite() -> SipRequest {
+        parse(
+            "INVITE sip:bob@10.244.2.7:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.5:5060;branch=z9hG4bK-alice;lg=a\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@192.0.2.5:5060>;tag=alice-from-tag\r\n\
+To: <sip:bob@10.244.2.7:5060>\r\n\
+Contact: <sip:alice@192.0.2.5:5060>\r\n\
+Call-ID: alice-call-id@192.0.2.5\r\n\
+CSeq: 314 INVITE\r\n\
+Content-Length: 0\r\n\r\n",
+        )
+    }
+
+    /// The b-leg INVITE's Contact.
+    fn contact_of(req: &SipRequest) -> Contact {
+        req.header::<Contact>().expect("b-leg INVITE has a Contact").expect("a readable Contact")
+    }
+
+    // The b-leg INVITE's dialog identity is independent of the a-leg's: a fresh
+    // Call-ID, a fresh From-tag, no To-tag, CSeq 1, and the B2BUA's own Contact.
+    #[test]
+    fn b_leg_identity_is_independent_of_a_leg() {
+        let a = a_leg_invite();
+        let config = B2buaConfig::default(); // sip_local_ip = 127.0.0.1
+        let mut ids = TurnIds::fixed(0xB2B);
+
+        let (leg, effect) = build_b_leg(
+            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
+            "b-1",
+            &a,
+            ("10.244.2.7".to_string(), 5060),
+            None, // R-URI defaults to a-leg's
+            None, // From URI relayed from a-leg
+            None, // To URI relayed from a-leg
+            &config,
+            &mut ids,
+            None,                      // no body override
+            &[],                       // no header updates
+            &CapabilitySet::default(), // the stack's own set, stated in full
+            None,
+            &[],
+            &[],  // no withheld option tags
+            None, // Destination leg
+            true,
+            0,
+            &mut Vec::new(),
+        )
+        .expect("no identity rewrites, so nothing to refuse");
+
+        let invite = match effect.body {
+            OutboundBody::Request(r) => r,
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => {
+                panic!("b-leg effect must carry a request")
+            }
+        };
+
+        // (a) ID-1 — fresh Call-ID, NOT the a-leg's.
+        let call_id = invite.call_id();
+        let call_id = call_id.as_str();
+        assert_ne!(call_id, a.call_id().as_str(), "b-leg Call-ID must not be the a-leg's");
+        assert_eq!(call_id, leg.call_id, "leg + INVITE Call-IDs agree");
+        // The mint shape is `<leg>-<tag>@<local_ip>` (the `build_b_leg` mint), so it carries the
+        // leg id and the B2BUA's own host — never alice's Call-ID host.
+        assert!(call_id.starts_with("b-1-"), "Call-ID carries the leg id: {call_id}");
+        assert!(call_id.ends_with("@127.0.0.1"), "Call-ID host is the B2BUA's: {call_id}");
+
+        // (b) ID-2 — fresh From-tag (B2BUA-owned), NOT the a-leg's; To-tag absent
+        // on the initial INVITE (the callee mints it in its 2xx, RFC 3261 §12.1.1).
+        let from = invite.from();
+        let from_tag = from.tag().expect("b-leg From carries a tag");
+        assert_ne!(from_tag, "alice-from-tag", "b-leg From-tag must not be the a-leg's");
+        assert_eq!(
+            Some(from_tag),
+            leg.outbound_invite.as_ref().map(|i| i.our_tag.as_str()),
+            "leg + INVITE From-tags agree"
+        );
+        let to = invite.to();
+        assert!(to.tag().is_none(), "initial b-leg INVITE has no To-tag, got {:?}", to.tag());
+
+        // (c) ID-3 — the b-leg dialog starts a fresh CSeq space at 1 (the a-leg's
+        // INVITE was CSeq 314).
+        assert_eq!(
+            invite.cseq().seq(),
+            1,
+            "b-leg CSeq starts at 1, independent of the a-leg's 314"
+        );
+
+        // (d) HDR-2 — Contact is the B2BUA's own address (host = local_ip), and its
+        // user is the B2BUA's, NOT the a-leg caller's ("alice").
+        let contact = contact_of(&invite);
+        let cuser = contact.uri().user().unwrap_or("");
+        assert_ne!(cuser, "alice", "b-leg Contact user must not be the a-leg caller's");
+        assert_eq!(cuser, "b2bua", "b-leg Contact is the B2BUA's own identity");
+        assert_eq!(
+            contact.uri().host(),
+            "127.0.0.1",
+            "b-leg Contact host must be the B2BUA local addr: {}",
+            contact.uri()
+        );
+    }
+
+    /// Build the initial b-leg INVITE for `is_emergency` and return its raw Via +
+    /// Contact header values (the on-the-wire surface, not the builder structs).
+    fn b_leg_invite_via_contact(is_emergency: bool) -> (String, String) {
+        let (_leg, effect) = build_b_leg(
+            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency },
+            "b-1",
+            &a_leg_invite(),
+            ("10.244.2.7".to_string(), 5060),
+            None,
+            None,
+            None,
+            &B2buaConfig::default(),
+            &mut TurnIds::fixed(0xE3E),
+            None,
+            &[],
+            &CapabilitySet::default(),
+            None, // no charging vector
+            &[],
+            &[], // no withheld option tags
+            None,
+            true,
+            0,
+            &mut Vec::new(),
+        )
+        .expect("no identity rewrites, so nothing to refuse");
+        let invite = match effect.body {
+            OutboundBody::Request(r) => r,
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => {
+                panic!("b-leg effect must carry a request")
+            }
+        };
+        (invite.top_via().to_string(), contact_of(&invite).to_wire())
+    }
+
+    // The wiring contract: an EMERGENCY call's initial b-leg INVITE (the single
+    // mint point) carries `;em=1` on its Via and `;emerg=1` on its Contact ON
+    // THE WIRE, so the call stays identifiable in-dialog. The pure-builder tests
+    // prove the `if is_emergency` branch in isolation; this proves a production
+    // relay path actually passes `true` and the markers reach the serialized
+    // message.
+    #[test]
+    fn emergency_b_leg_invite_via_and_contact_carry_the_markers() {
+        let (via, contact) = b_leg_invite_via_contact(true);
+        assert!(via.contains(";em=1"), "emergency b-leg Via must carry ;em=1: {via}");
+        assert!(
+            contact.contains(";emerg=1"),
+            "emergency b-leg Contact must carry ;emerg=1: {contact}"
+        );
+    }
+
+    // A non-emergency call's b-leg INVITE carries NEITHER marker (the markers are
+    // strictly an emergency signal — stamping them on a normal call would exempt
+    // it from overload shedding).
+    #[test]
+    fn non_emergency_b_leg_invite_omits_the_markers() {
+        let (via, contact) = b_leg_invite_via_contact(false);
+        assert!(!via.contains(";em=1"), "non-emergency Via must NOT carry ;em=1: {via}");
+        assert!(
+            !contact.contains(";emerg=1"),
+            "non-emergency Contact must NOT carry ;emerg=1: {contact}"
+        );
+    }
+
+    /// An a-leg INVITE carrying, alongside its structural headers: an extension
+    /// header and an unmodelled vendor one (both relayable), a `Record-Route`
+    /// (alice's route set is not the callee's to learn), one member of each
+    /// withheld class, a session interval and a clock stamp.
+    fn a_leg_invite_with_relay_header() -> SipRequest {
+        parse(
+            "INVITE sip:bob@10.244.2.7:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.5:5060;branch=z9hG4bK-alice;lg=a\r\n\
+Max-Forwards: 70\r\n\
+Record-Route: <sip:proxy.alice.example;lr>\r\n\
+From: <sip:alice@192.0.2.5:5060>;tag=alice-from-tag\r\n\
+To: <sip:bob@10.244.2.7:5060>\r\n\
+Contact: <sip:alice@192.0.2.5:5060>\r\n\
+Call-ID: alice-call-id@192.0.2.5\r\n\
+CSeq: 314 INVITE\r\n\
+X-Loadgen-Id: lg-abc123\r\n\
+P-Charging-Vector: icid-value=\"icid-from-alice\"\r\n\
+Authorization: Digest username=\"alice\",realm=\"alice.example\"\r\n\
+Session-Expires: 1800;refresher=uac\r\n\
+Timestamp: 54\r\n\
+Replaces: other-call-id;to-tag=t;from-tag=f\r\n\
+Require: precondition\r\n\
+Content-Length: 0\r\n\r\n",
+        )
+    }
+
+    /// Build the originated b-leg INVITE for the given relay config + R-URI and
+    /// return its parsed headers. `new_ruri` lets one helper drive BOTH the
+    /// normal callee leg (`None` → keeps the a-leg R-URI / bob) and the REFER
+    /// transfer leg (`Some(charlie)` → the rebuilt a-leg invite re-aimed).
+    fn relay_b_leg_headers(relay_headers: Vec<String>, new_ruri: Option<&str>) -> Vec<MsgHeader> {
+        let config = B2buaConfig { relay_headers, ..B2buaConfig::default() };
+        let (_leg, effect) = build_b_leg(
+            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
+            "b-1",
+            &a_leg_invite_with_relay_header(),
+            ("10.244.2.7".to_string(), 5060),
+            new_ruri,
+            None,
+            None,
+            &config,
+            &mut TurnIds::fixed(0x4747),
+            None,
+            &[],
+            &CapabilitySet::default(),
+            None, // no charging vector
+            &[],
+            &[], // no withheld option tags
+            None,
+            true,
+            0,
+            &mut Vec::new(),
+        )
+        .expect("the R-URI under test reads");
+        match effect.body {
+            OutboundBody::Request(r) => r.headers().to_vec(),
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => {
+                panic!("b-leg effect must carry a request")
+            }
+        }
+    }
+
+    /// RFC 3261 §16.6: a header alice sent that the generator does not own rides
+    /// onto BOTH originated legs — the callee leg and the REFER transfer leg,
+    /// which is the same mint point fed alice's rehydrated INVITE. The
+    /// generator-owned headers stay the generator's: naming `To` in the
+    /// configured list still yields exactly one, structurally minted `To`, and
+    /// alice's `Record-Route`/`Contact`/`Via` never reach the callee.
+    #[test]
+    fn a_received_header_rides_both_originated_legs_and_never_the_owned_ones() {
+        let has = |hs: &[MsgHeader], name: &str, val: &str| {
+            hs.iter().any(|h| h.name.eq_ignore_ascii_case(name) && h.value == val)
+        };
+        let count = |hs: &[MsgHeader], name: &str| {
+            hs.iter().filter(|h| h.name.eq_ignore_ascii_case(name)).count()
+        };
+
+        // (a) NORMAL callee leg (bob), with nothing configured: the relay carries
+        //     the extension header and the vendor header it has no model for.
+        let bob = relay_b_leg_headers(Vec::new(), None);
+        assert!(has(&bob, "X-Loadgen-Id", "lg-abc123"), "callee leg carries it: {bob:?}");
+        assert!(
+            has(&bob, "P-Charging-Vector", "icid-value=\"icid-from-alice\""),
+            "an unmodelled header rides verbatim: {bob:?}"
+        );
+
+        // (b) REFER transfer leg (charlie): same mint point, R-URI re-aimed.
+        let charlie = relay_b_leg_headers(Vec::new(), Some("sip:charlie@10.244.2.9:5060"));
+        assert!(has(&charlie, "X-Loadgen-Id", "lg-abc123"), "transfer leg carries it");
+
+        // (c) The generator's own headers are the generator's: alice's route set
+        //     and her Contact are hers, and her Via would be a routing loop.
+        assert_eq!(count(&bob, "Record-Route"), 0, "alice's route set stays alice's: {bob:?}");
+        assert_eq!(count(&bob, "Via"), 1, "exactly the b-leg's own Via: {bob:?}");
+        assert!(
+            !has(&bob, "Contact", "<sip:alice@192.0.2.5:5060>"),
+            "the b-leg Contact is this stack's: {bob:?}"
+        );
+
+        // (d) Naming a generator-owned header in the configured list cannot
+        //     duplicate it — configuration does not reach past §16.6.
+        let with_to = relay_b_leg_headers(vec!["To".into()], None);
+        assert_eq!(count(&with_to, "To"), 1, "one structural To, never a relayed dup: {with_to:?}");
+    }
+
+    /// The withheld classes do not ride the originated INVITE: a credential
+    /// scoped to alice's realm, a dialog identifier this stack re-mints, and a
+    /// requirement this stack already accepted as the UAS. Her session interval
+    /// rides; her `Timestamp` becomes this stack's clock reading (RFC 3261
+    /// §20.38), the turn's `now_ms` of 0.
+    #[test]
+    fn the_withheld_classes_never_reach_the_callee() {
+        let bob = relay_b_leg_headers(Vec::new(), None);
+        for name in ["Authorization", "Replaces", "Require"] {
+            assert!(
+                !bob.iter().any(|h| h.name.eq_ignore_ascii_case(name)),
+                "{name} must not reach the callee: {bob:?}"
+            );
+        }
+        for (name, value) in [("Session-Expires", "1800;refresher=uac"), ("Timestamp", "0.000")] {
+            assert!(
+                bob.iter().any(|h| h.name.eq_ignore_ascii_case(name) && h.value == value),
+                "{name} rides to the callee: {bob:?}"
+            );
+        }
+    }
+
+    /// Precedence at the originated-leg mint point: a decision's explicit header
+    /// update is more specific than the relayed value and wins, as exactly one
+    /// line of that name.
+    #[test]
+    fn an_explicit_header_update_beats_the_relayed_value() {
+        let updates =
+            vec![("X-Loadgen-Id".to_string(), Some("stated-by-the-decision".to_string()))];
+        let bob = build_b_leg(
+            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
+            "b-1",
+            &a_leg_invite_with_relay_header(),
+            ("10.244.2.7".to_string(), 5060),
+            None,
+            None,
+            None,
+            &B2buaConfig::default(),
+            &mut TurnIds::fixed(0x4747),
+            None,
+            &updates,
+            &CapabilitySet::default(),
+            None, // no charging vector
+            &[],
+            &[], // no withheld option tags
+            None,
+            true,
+            0,
+            &mut Vec::new(),
+        )
+        .map(|(_leg, effect)| match effect.body {
+            OutboundBody::Request(r) => r.headers().to_vec(),
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => {
+                panic!("b-leg effect must carry a request")
+            }
+        })
+        .expect("no identity rewrites, so nothing to refuse");
+        let stated: Vec<&str> = bob
+            .iter()
+            .filter(|h| h.name.eq_ignore_ascii_case("X-Loadgen-Id"))
+            .map(|h| h.value.as_str())
+            .collect();
+        assert_eq!(stated, ["stated-by-the-decision"], "the update wins, alone: {bob:?}");
+    }
+}
+
+mod withhold_tests {
+    //! The call-scoped option-tag withhold and offer on a leg the B2BUA
+    //! originates (`features.withhold_option_tags`, the strategy's own offer):
+    //! a withheld tag never rides the originated INVITE, whichever source
+    //! stated its line; an offered one always does, unless withheld.
+    use super::super::advert::advertisement_tests::a_leg_invite_carrying;
+    use super::*;
+    use sip_message::header::HeaderName;
+
+    /// Build the originated b-leg INVITE under `withheld` and return every
+    /// value line of `name` on it, verbatim.
+    fn b_leg_values(a: &SipRequest, withheld: &[String], name: HeaderName) -> Vec<String> {
+        b_leg_values_offering(a, withheld, &[], name)
+    }
+
+    /// [`b_leg_values`] with `offered` stated on the stack's own behalf too.
+    fn b_leg_values_offering(
+        a: &SipRequest,
+        withheld: &[String],
+        offered: &[String],
+        name: HeaderName,
+    ) -> Vec<String> {
+        let (_leg, effect) = build_b_leg(
+            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
+            "b-1",
+            a,
+            ("10.244.2.7".to_string(), 5060),
+            None,
+            None,
+            None,
+            &B2buaConfig::default(),
+            &mut TurnIds::fixed(0x100),
+            None,
+            &[],
+            &crate::rules::capabilities::relaying_in(
+                None,
+                crate::rules::capabilities::Face::Originated,
+                a.headers(),
+            ),
+            None, // no charging vector
+            withheld,
+            offered,
+            None,
+            true,
+            0,
+            &mut Vec::new(),
+        )
+        .expect("no identity rewrites, so nothing to refuse");
+        let invite = match effect.body {
+            OutboundBody::Request(r) => r,
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => {
+                panic!("b-leg effect must carry a request")
+            }
+        };
+        invite.raw_text(name).map(|v| v.as_str().to_string()).collect()
+    }
+
+    fn withheld_100rel() -> Vec<String> {
+        vec!["100rel".to_string()]
+    }
+
+    /// A withheld tag is narrowed out of the relayed `Supported` set; the rest
+    /// of the set rides untouched.
+    #[test]
+    fn a_withheld_tag_is_narrowed_out_of_the_relayed_supported() {
+        let a = a_leg_invite_carrying(&[("Supported", "100rel, timer")]);
+        assert_eq!(b_leg_values(&a, &withheld_100rel(), HeaderName::Supported), ["timer"]);
+    }
+
+    /// An emptied `Supported` drops its header: a set narrowed to nothing claims
+    /// nothing, and so does an absent line (RFC 3261 §20.37). The two legs of one
+    /// call reach their callees in the same wire form whichever mint built them.
+    #[test]
+    fn an_emptied_supported_drops_its_header() {
+        let a = a_leg_invite_carrying(&[("Supported", "100rel")]);
+        assert!(b_leg_values(&a, &withheld_100rel(), HeaderName::Supported).is_empty());
+    }
+
+    /// Nothing withheld — the relayed advertisement rides byte-identical.
+    #[test]
+    fn nothing_withheld_leaves_the_advertisement_untouched() {
+        let a = a_leg_invite_carrying(&[("Supported", "100rel, timer")]);
+        assert_eq!(b_leg_values(&a, &[], HeaderName::Supported), ["100rel, timer"],);
+    }
+
+    /// A set not naming a withheld tag is left byte-identical too — the
+    /// withhold narrows, it never rewrites.
+    #[test]
+    fn a_set_without_the_withheld_tag_is_left_byte_identical() {
+        let a = a_leg_invite_carrying(&[("Supported", "timer, replaces")]);
+        assert_eq!(
+            b_leg_values(&a, &withheld_100rel(), HeaderName::Supported),
+            ["timer, replaces"],
+        );
+    }
+
+    /// An offered tag rides the originated INVITE whatever the originator
+    /// advertised: a `Supported` comes into being where it sent none, the tag
+    /// is added to the set it did send, and a set already naming it is left
+    /// byte-identical.
+    #[test]
+    fn an_offered_tag_is_stated_once_whatever_the_originator_advertised() {
+        let offered = withheld_100rel();
+        let none = a_leg_invite_carrying(&[]);
+        assert_eq!(b_leg_values_offering(&none, &[], &offered, HeaderName::Supported), ["100rel"]);
+        let other = a_leg_invite_carrying(&[("Supported", "timer")]);
+        assert_eq!(
+            b_leg_values_offering(&other, &[], &offered, HeaderName::Supported),
+            ["timer, 100rel"],
+        );
+        let same = a_leg_invite_carrying(&[("Supported", "100rel, timer")]);
+        assert_eq!(
+            b_leg_values_offering(&same, &[], &offered, HeaderName::Supported),
+            ["100rel, timer"],
+        );
+    }
+
+    /// The withhold outranks the offer: a tag the call both offers and
+    /// withholds never rides.
+    #[test]
+    fn a_withheld_tag_never_rides_even_when_offered() {
+        let a = a_leg_invite_carrying(&[]);
+        let tags = withheld_100rel();
+        assert!(b_leg_values_offering(&a, &tags, &tags, HeaderName::Supported).is_empty());
+    }
+}
+
+mod typed_override_tests {
+    //! A body override of another media type than the originator's body is
+    //! the minted INVITE's whole body: typed by that type, with none of the
+    //! originator's entity headers beside it.
+    use super::*;
+    use b2bua_sdk::model::Body;
+    use sip_message::header::{HeaderName, MediaType};
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{SipMessage, SipParser};
+
+    const OFFER: &str = "v=0\r\no=b 1 1 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n";
+
+    /// An originator INVITE framing its offer beside another part.
+    fn multipart_invite() -> SipRequest {
+        let body = "--X\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n\r\n--X\r\nContent-Type: application/isup\r\nContent-Disposition: signal;handling=optional\r\n\r\nAB\r\n--X--\r\n";
+        let raw = format!(
+            "INVITE sip:bob@10.244.2.7:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.5:5060;branch=z9hG4bK-alice\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@192.0.2.5>;tag=a\r\n\
+To: <sip:bob@10.244.2.7>\r\n\
+Contact: <sip:alice@192.0.2.5>\r\n\
+Call-ID: mp@192.0.2.5\r\n\
+CSeq: 1 INVITE\r\n\
+MIME-Version: 1.0\r\n\
+Content-Disposition: session\r\n\
+Content-Type: multipart/mixed;boundary=X\r\n\
+Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+            SipMessage::Request(r) => r,
+            _ => unreachable!(),
+        }
+    }
+
+    fn minted(a: &SipRequest, body: &Body) -> SipRequest {
+        let (_leg, effect) = build_b_leg(
+            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
+            "b-2",
+            a,
+            ("10.244.2.7".to_string(), 5060),
+            None,
+            None,
+            None,
+            &B2buaConfig::default(),
+            &mut TurnIds::fixed(0x0FF),
+            Some(body),
+            &[],
+            &CapabilitySet::default(),
+            None,
+            &[],
+            &[],
+            None,
+            false,
+            0,
+            &mut Vec::new(),
+        )
+        .expect("nothing to refuse");
+        match effect.body {
+            OutboundBody::Request(r) => r,
+            _ => panic!("a request"),
+        }
+    }
+
+    #[test]
+    fn an_override_typed_for_itself_carries_none_of_the_originators_framing() {
+        let invite = minted(
+            &multipart_invite(),
+            &Body::own(OFFER.as_bytes().to_vec(), Some("application/sdp".into())),
+        );
+        let ct = invite.header::<MediaType>().expect("a Content-Type").expect("it reads");
+        assert!(ct.is_sdp(), "{}", ct.token());
+        assert_eq!(invite.body(), OFFER.as_bytes());
+        for name in ["MIME-Version", "Content-Disposition"] {
+            assert!(invite.raw(HeaderName::from(name)).next().is_none(), "no {name}");
+        }
+    }
+
+    /// An override stating no type re-sends the originator's kind of body: its
+    /// type and role ride.
+    #[test]
+    fn an_untyped_override_keeps_the_originators_type() {
+        let invite = minted(&multipart_invite(), &Body::own(b"--X--\r\n".to_vec(), None));
+        let ct = invite.header::<MediaType>().expect("a Content-Type").expect("it reads");
+        assert!(ct.is("multipart/mixed"), "{}", ct.token());
+        assert_eq!(invite.raw(HeaderName::ContentDisposition).collect::<Vec<_>>(), ["session"]);
+    }
+}
+
+mod override_role_tests {
+    //! An override is classed by what it is to the originator's body: her own
+    //! bytes carry every line describing them; a body of her body's media
+    //! type standing in its place keeps the line stating its role (RFC 3261
+    //! §20.11) and none stating her octets; no body carries none; a body taken
+    //! whole from another message carries that message's lines.
+    use super::*;
+    use b2bua_sdk::model::Body;
+    use sip_message::header::HeaderName;
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{SipMessage, SipParser};
+
+    const CALLER_SDP: &str = "v=0\r\no=a 1 1 IN IP4 192.0.2.5\r\ns=-\r\nc=IN IP4 192.0.2.5\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n";
+    const OWN_SDP: &str = "v=0\r\no=b 7 7 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 5000 RTP/AVP 0\r\n";
+
+    /// An originator INVITE whose offer states its role and its MIME framing.
+    fn described_invite() -> SipRequest {
+        let raw = format!(
+            "INVITE sip:bob@10.244.2.7:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.5:5060;branch=z9hG4bK-alice\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@192.0.2.5>;tag=a\r\n\
+To: <sip:bob@10.244.2.7>\r\n\
+Contact: <sip:alice@192.0.2.5>\r\n\
+Call-ID: dsc@192.0.2.5\r\n\
+CSeq: 1 INVITE\r\n\
+MIME-Version: 1.0\r\n\
+Content-Disposition: session;handling=required\r\n\
+Content-Type: application/sdp\r\n\
+Content-Length: {}\r\n\r\n{CALLER_SDP}",
+            CALLER_SDP.len()
+        );
+        match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+            SipMessage::Request(r) => r,
+            _ => unreachable!(),
+        }
+    }
+
+    fn minted(a: &SipRequest, body: &Body) -> SipRequest {
+        let (_leg, effect) = build_b_leg(
+            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
+            "b-2",
+            a,
+            ("10.244.2.7".to_string(), 5060),
+            None,
+            None,
+            None,
+            &B2buaConfig::default(),
+            &mut TurnIds::fixed(0x0FE),
+            Some(body),
+            &[],
+            &CapabilitySet::default(),
+            None,
+            &[],
+            &[],
+            None,
+            false,
+            0,
+            &mut Vec::new(),
+        )
+        .expect("nothing to refuse");
+        match effect.body {
+            OutboundBody::Request(r) => r,
+            _ => panic!("a request"),
+        }
+    }
+
+    fn values(req: &SipRequest, name: &str) -> Vec<String> {
+        req.raw(HeaderName::from(name)).map(str::to_string).collect()
+    }
+
+    /// The stack's own offer standing for the caller's (typed SDP like hers)
+    /// keeps her disposition and leaves her MIME framing behind.
+    #[test]
+    fn an_offer_standing_for_the_originators_keeps_its_role_alone() {
+        let own = Body::own(OWN_SDP.as_bytes().to_vec(), Some("application/sdp".into()));
+        let invite = minted(&described_invite(), &own);
+        assert_eq!(values(&invite, "Content-Disposition"), ["session;handling=required"]);
+        assert!(values(&invite, "MIME-Version").is_empty(), "her octets are not these");
+        assert_eq!(invite.body(), OWN_SDP.as_bytes());
+    }
+
+    /// Her own bytes as an override are her body: every line describing it rides.
+    #[test]
+    fn the_originators_own_bytes_carry_every_line_describing_them() {
+        let same = Body::from_leg(CALLER_SDP.as_bytes().to_vec(), "a");
+        let invite = minted(&described_invite(), &same);
+        assert_eq!(values(&invite, "Content-Disposition"), ["session;handling=required"]);
+        assert_eq!(values(&invite, "MIME-Version"), ["1.0"]);
+    }
+
+    /// No body, no line describing one.
+    #[test]
+    fn an_empty_override_carries_no_line_describing_a_body() {
+        let invite = minted(&described_invite(), &Body::own(Vec::new(), None));
+        for name in ["Content-Disposition", "MIME-Version", "Content-Type"] {
+            assert!(values(&invite, name).is_empty(), "no {name}");
+        }
+    }
+
+    /// The stack's own offer beside attached parts: her disposition heads the
+    /// session description it stands for, her MIME framing does not.
+    #[test]
+    fn a_stand_in_beside_parts_is_headed_by_the_originators_role() {
+        let part = sip_message::MultipartPart::new("application/isup", b"AB".to_vec());
+        let own = Body::own(OWN_SDP.as_bytes().to_vec(), Some("application/sdp".into()))
+            .with_parts(vec![part]);
+        let invite = minted(&described_invite(), &own);
+        let body = String::from_utf8_lossy(invite.body()).into_owned();
+        let sdp_part =
+            body.split("--").find(|p| p.contains("application/sdp")).expect("an SDP part");
+        assert!(
+            sdp_part.contains("Content-Disposition: session;handling=required"),
+            "her role heads the description: {body}"
+        );
+        assert!(values(&invite, "Content-Disposition").is_empty(), "not the multipart's role");
+    }
+
+    /// A body taken whole from another message reads as it read there.
+    #[test]
+    fn a_body_described_by_its_own_message_carries_that_message_s_lines() {
+        let other = described_invite();
+        let mut headers = other.headers().to_vec();
+        headers.retain(|h| !HeaderName::ContentDisposition.matches(&h.name));
+        headers.push(sip_message::SipHeader {
+            name: SipStr::from_static("Content-Disposition"),
+            value: SipStr::from_static("session;handling=optional"),
+        });
+        let theirs = Body::own(OWN_SDP.as_bytes().to_vec(), None).described_by(&headers);
+        let invite = minted(&described_invite(), &theirs);
+        assert_eq!(values(&invite, "Content-Disposition"), ["session;handling=optional"]);
+        assert_eq!(values(&invite, "MIME-Version"), ["1.0"]);
+    }
+}

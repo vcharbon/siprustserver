@@ -18,7 +18,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use repl_net::transport::{Fault, SimulatedReplicationNetwork};
+use repl_net_testkit::{Fault, SimulatedReplicationNetwork};
 use sip_clock::Clock;
 
 use super::test_support::{cref, fast_config, one_peer, rev, supervisor_for, tick, Node};

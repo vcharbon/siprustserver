@@ -7,7 +7,7 @@ services:
     # exporters :9035 / loadgen :9300) DIRECTLY on the no-NAT sipext bridge —
     # docker inter-bridge isolation would otherwise block it (the in-cluster
     # vmagent cannot see them at all). install.sh ensures the network exists
-    # before compose up. Side effect: while VM is attached, `run.sh down`'s
+    # before compose up. Side effect: while VM is attached, `kind-lab.sh down`'s
     # `docker network rm sipext` fails silently and the bridge lingers — fine,
     # sipext_up reuses a same-subnet bridge on the next `up`.
     networks: [default, kind, sipext]
@@ -15,7 +15,9 @@ services:
       - "8428:8428"
     volumes:
       - ./data/victoriametrics:/storage
-      - ./victoriametrics/prometheus.yml:/etc/vm/prometheus.yml:ro
+      # The directory, not the file: a git checkout replaces prometheus.yml (a
+      # new inode) and a single-file bind mount keeps showing the old one.
+      - ./victoriametrics:/etc/vm:ro
     command:
       - "-storageDataPath=/storage"
       - "-retentionPeriod=2d"
@@ -35,7 +37,10 @@ services:
     image: victoriametrics/victoria-logs:v1.40.0
     container_name: victorialogs
     restart: unless-stopped
-    networks: [default, kind]
+    # `sipext` attachment: the SIPp exporter twins ship their call-outcome
+    # records to http://victorialogs:9428 from the generator bridge, as VM
+    # scrapes them there (see victoriametrics above).
+    networks: [default, kind, sipext]
     ports:
       - "9428:9428"
     volumes:
@@ -103,7 +108,10 @@ services:
     volumes:
       - ./data/grafana:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      # The dashboards of the HA tooling search path, in place: the base content
+      # here at /hakit/dashboards/0; a product's HAKIT_PATH entries are added by
+      # the override `hakit dashboards --compose-override` writes (install.sh).
+      - ../../../tooling/hakit/content/dashboards:/hakit/dashboards/0:ro
     environment:
       # Listen on all interfaces so the published host-IP port is reachable.
       - GF_SERVER_HTTP_ADDR=0.0.0.0
@@ -141,7 +149,7 @@ networks:
   kind:
     external: true
     name: kind
-  # External SIP plane (sipext dual-plane layout): created by run.sh sipext_up,
+  # External SIP plane (sipext dual-plane layout): created by kind-lab.sh up,
   # or by install.sh's ensure_sipext_net guard when the obs stack comes up
   # first. Name overridable to match deploy/k8s/lib/net-env.sh SIPEXT_NET.
   sipext:

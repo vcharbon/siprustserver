@@ -19,8 +19,8 @@ describe("item flattening", () => {
   })
 
   it("a comma inside a quoted display or angle brackets never tears", () => {
-    expect(topLevelSplit(`"Doe, John" <sip:j@h>, <sip:k@h>`, ",")).toHaveLength(2)
-    expect(items("Contact", [`"Doe, John" <sip:j@h>`])).toHaveLength(1)
+    expect(topLevelSplit(`"McFakename, Fakey" <sip:j@h>, <sip:k@h>`, ",")).toHaveLength(2)
+    expect(items("Contact", [`"McFakename, Fakey" <sip:j@h>`])).toHaveLength(1)
   })
 
   it("an empty item is punctuation, never a value", () => {

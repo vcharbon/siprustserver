@@ -2,7 +2,7 @@
 //! Port of `scripts/abnf-fuzz-driver.ts` + `run-suite.sh`.
 //!
 //! The contract: for grammar-valid input the parsers must never *buggily*
-//! reject (a rejection that matches no documented ADR-0007 policy) and never
+//! reject (a rejection that matches no documented policy, [`POLICY_PATTERNS`]) and never
 //! *silently misparse* (accept but drop an obvious field). A clean run has
 //! `buggy == 0` and `silentMisparse == 0` across every target.
 //!
@@ -15,12 +15,9 @@
 use std::fs;
 use std::path::PathBuf;
 
-use sip_message::header::{HeaderValue, RAck, ReferTo};
-use sip_message::parser::custom::structured_headers::{
-    find_uri_embedded_headers_start, parse_contact, parse_cseq, parse_name_addr,
-    parse_sip_uri_string, parse_via, split_top_level_commas, validate_strict_sip_uri,
-};
-use sip_message::SipStr;
+use sip_message::header::{Contact, HeaderValue, NameAddr, RAck, ReferTo, Uri, Via};
+use sip_message::parser::custom::structured_headers::{parse_cseq, split_top_level_commas};
+use sip_message::{CustomParser, SipMessage, SipParser, SipStr};
 
 /// Rejection reasons reflecting documented semantic constraints (RFC limits
 /// beyond pure ABNF) rather than parser bugs — abnfgen happily emits port=88161
@@ -28,13 +25,16 @@ use sip_message::SipStr;
 const POLICY_PATTERNS: &[&str] = &[
     "port out of range",
     "non-digit in port",
-    "empty hostport",
+    "empty port",
     "empty host",
-    "multiple `@`",
-    "multiple `:` in hostport",
-    "hostport starts with `:`",
     "unclosed IPv6 reference",
     "empty IPv6 reference",
+    // RFC 3261 §19.1.1 Table 1: the grammar's Request-URI admits `?headers`,
+    // the table forbids them there.
+    "Request-URI carries escaped headers",
+    // The vendored grammars draw a header parameter's name from the URI's
+    // `paramchar`; RFC 3261 §25.1 `generic-param = token [ EQUAL gen-value ]`.
+    "parameter name is not a token",
 ];
 
 fn is_policy(reason: &str) -> bool {
@@ -74,36 +74,27 @@ impl Stat {
 // --- per-target fuzz functions (ported from the driver) ---
 
 fn fuzz_sip_uri(line: &str, s: &mut Stat) {
-    if let Some(reason) = validate_strict_sip_uri(line) {
-        s.reject(line, reason);
-        return;
-    }
+    let uri = match Uri::parse(&SipStr::owned(line)) {
+        Ok(uri) => uri,
+        Err(e) => return s.reject(line, e.reason),
+    };
     s.accepted += 1;
-    if line.contains('@') {
-        if let Some(parsed) = parse_sip_uri_string(&SipStr::owned(line)) {
-            if parsed.user.is_none() {
-                s.silent(line);
-            }
-        }
+    if line.contains('@') && uri.user().is_none() {
+        s.silent(line);
     }
 }
 
-fn fuzz_name_addr(line: &str, header: &str, s: &mut Stat) {
-    let parsed = parse_name_addr(&SipStr::owned(line));
-    if parsed.uri.is_empty() {
-        s.reject(line, "empty parsed.uri".to_string());
-        return;
-    }
-    if let Some(reason) = validate_strict_sip_uri(&parsed.uri) {
-        s.reject(line, format!("Strict {header} URI: {reason} (\"{}\")", parsed.uri));
-        return;
-    }
+fn fuzz_name_addr(line: &str, s: &mut Stat) {
+    let addr = match NameAddr::parse(&SipStr::owned(line)) {
+        Ok(addr) => addr,
+        Err(e) => return s.reject(line, e.reason),
+    };
     s.accepted += 1;
     // Silent-misparse heuristic: an `@` inside `<...>` must survive into the URI.
     if let Some(lt) = line.find('<') {
         if let Some(gt_rel) = line[lt + 1..].find('>') {
             let between = &line[lt + 1..lt + 1 + gt_rel];
-            if between.contains('@') && !parsed.uri.contains('@') {
+            if between.contains('@') && !addr.uri().text().contains('@') {
                 s.silent(line);
             }
         }
@@ -111,16 +102,10 @@ fn fuzz_name_addr(line: &str, header: &str, s: &mut Stat) {
 }
 
 fn fuzz_pai_entry(entry: &str, s: &mut Stat) {
-    let parsed = parse_name_addr(&SipStr::owned(entry));
-    if parsed.uri.is_empty() {
-        s.reject(entry, "empty parsed.uri".to_string());
-        return;
+    match NameAddr::parse(&SipStr::owned(entry)) {
+        Ok(_) => s.accepted += 1,
+        Err(e) => s.reject(entry, e.reason),
     }
-    if let Some(reason) = validate_strict_sip_uri(&parsed.uri) {
-        s.reject(entry, format!("Strict PAI URI: {reason} (\"{}\")", parsed.uri));
-        return;
-    }
-    s.accepted += 1;
 }
 
 fn fuzz_contact(line: &str, s: &mut Stat) {
@@ -129,17 +114,8 @@ fn fuzz_contact(line: &str, s: &mut Stat) {
         return;
     }
     for entry in split_top_level_commas(line) {
-        if entry.is_empty() {
-            continue;
-        }
-        let parsed = parse_contact(&SipStr::owned(entry));
-        if parsed.uri.is_empty() {
-            s.reject(entry, "empty parsed.uri".to_string());
-            return;
-        }
-        if let Some(reason) = validate_strict_sip_uri(&parsed.uri) {
-            s.reject(entry, format!("Strict Contact URI: {reason} (\"{}\")", parsed.uri));
-            return;
+        if let Err(e) = Contact::parse(&SipStr::owned(entry)) {
+            return s.reject(entry, e.reason);
         }
     }
     s.accepted += 1;
@@ -150,22 +126,13 @@ fn fuzz_via(line: &str, s: &mut Stat) {
         if entry.is_empty() {
             continue;
         }
-        let parsed = parse_via(&SipStr::owned(entry));
-        if parsed.transport.is_empty() || parsed.host.is_empty() {
-            s.reject(
-                entry,
-                format!(
-                    "empty transport/host (transport=\"{}\" host=\"{}\")",
-                    parsed.transport, parsed.host
-                ),
-            );
+        let parsed = match Via::parse(&SipStr::owned(entry)) {
+            Ok(parsed) => parsed,
+            Err(e) => return s.reject(entry, e.reason),
+        };
+        if parsed.port() == Some(0) {
+            s.reject(entry, "port out of range (0)".to_string());
             return;
-        }
-        if let Some(port) = parsed.port {
-            if port == 0 || port > 65535 {
-                s.reject(entry, format!("port out of range ({port})"));
-                return;
-            }
         }
     }
     s.accepted += 1;
@@ -189,25 +156,14 @@ fn fuzz_rack(line: &str, s: &mut Stat) {
 }
 
 fn fuzz_refer_to(line: &str, s: &mut Stat) {
-    let parsed = match ReferTo::parse(&SipStr::owned(line)) {
-        Ok(parsed) => parsed,
-        Err(e) => {
-            s.reject(line, e.reason);
-            return;
-        }
-    };
-    let uri = parsed.uri().text();
-    let head = match find_uri_embedded_headers_start(&uri) {
-        Some(q) => &uri[..q],
-        None => &uri[..],
-    };
-    if let Some(reason) = validate_strict_sip_uri(head) {
-        s.reject(line, format!("Strict Refer-To URI: {reason} (\"{head}\")"));
-        return;
+    match ReferTo::parse(&SipStr::owned(line)) {
+        Ok(_) => s.accepted += 1,
+        Err(e) => s.reject(line, e.reason),
     }
-    s.accepted += 1;
 }
 
+/// The request line read as the start of a whole request, so the Request-URI
+/// meets every check a peer's request does.
 fn fuzz_request_line(line: &str, s: &mut Stat) {
     // "METHOD SP REQUEST-URI SP SIP-Version" — SIP-Version case-insensitive.
     let parts: Vec<&str> = line.split(' ').collect();
@@ -219,19 +175,21 @@ fn fuzz_request_line(line: &str, s: &mut Stat) {
         s.reject(line, "request-line shape check failed".to_string());
         return;
     }
-    let req_uri = parts[1];
-    if let Some(reason) = validate_strict_sip_uri(req_uri) {
-        s.reject(line, format!("Strict Request-URI: {reason} (\"{req_uri}\")"));
-        return;
-    }
-    if req_uri.contains('@') {
-        if let Some(parsed) = parse_sip_uri_string(&SipStr::owned(req_uri)) {
-            if parsed.user.is_none() {
-                s.silent(line);
-            }
-        }
-    }
+    let (method, req_uri) = (parts[0], parts[1]);
+    let raw = format!(
+        "{method} {req_uri} SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-abnf\r\n\
+         From: <sip:a@example.com>;tag=1\r\nTo: <sip:b@example.com>\r\nCall-ID: abnf\r\n\
+         CSeq: 1 {method}\r\nContent-Length: 0\r\n\r\n"
+    );
+    let request = match CustomParser::new().parse(raw.as_bytes()) {
+        Ok(SipMessage::Request(r)) => r,
+        Ok(SipMessage::Response(_)) => return s.reject(line, "read as a response".to_string()),
+        Err(e) => return s.reject(line, e.reason),
+    };
     s.accepted += 1;
+    if req_uri.contains('@') && request.request_uri().user().is_none() {
+        s.silent(line);
+    }
 }
 
 fn is_method_char(c: char) -> bool {
@@ -241,7 +199,7 @@ fn is_method_char(c: char) -> bool {
 fn dispatch(target: &str, line: &str, s: &mut Stat) {
     match target {
         "sip-uri" => fuzz_sip_uri(line, s),
-        "from" => fuzz_name_addr(line, "From", s),
+        "from" => fuzz_name_addr(line, s),
         "pai" => {
             for entry in split_top_level_commas(line) {
                 if !entry.is_empty() {

@@ -245,7 +245,7 @@ async fn serve(socket: TcpStream, admit: Admit, counters: Arc<Counters>, reply: 
                 AMQPFrame::Method(ch, AMQPClass::Basic(basic::AMQPMethod::Publish(p))) => {
                     publishing = Some((ch, p.routing_key.to_string(), None));
                 }
-                AMQPFrame::Header(_, _, h) => {
+                AMQPFrame::Header(_, h) => {
                     if let Some((_, _, due)) = publishing.as_mut() {
                         *due = Some(h.body_size);
                     }
@@ -341,12 +341,11 @@ fn answer(reply: Reply, ch: u16, tag: u64, rk: &str, out: &mpsc::UnboundedSender
             );
             bytes.extend(encode(&AMQPFrame::Header(
                 ch,
-                60,
-                Box::new(AMQPContentHeader {
+                AMQPContentHeader {
                     class_id: 60,
                     body_size: body.len() as u64,
                     properties: basic::AMQPProperties::default(),
-                }),
+                },
             )));
             bytes.extend(encode(&AMQPFrame::Body(ch, body)));
             bytes.extend(ack(ch, tag));

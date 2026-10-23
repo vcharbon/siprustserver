@@ -7,7 +7,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use metric_catalogue::{Family, Labels};
+use metric_catalogue::{Dim, Family, Labels};
 
 /// Lifecycle log lines dropped because the writer's bounded queue was full.
 pub static LOG_LINES_DROPPED: AtomicU64 = AtomicU64::new(0);
@@ -34,6 +34,10 @@ pub static TRACE_ADMITTED: AtomicU64 = AtomicU64::new(0);
 /// so its story simply has a gap at this node; a mass takeover turns that into a
 /// population, which is what makes the count worth having.
 pub static TRACE_ADOPTION_REFUSED: AtomicU64 = AtomicU64::new(0);
+
+/// Panics at a source location the process panic hook reported less than
+/// its interval ago: counted, not reported ([`crate::panic_report`]).
+pub static PANICS_REPEATED: AtomicU64 = AtomicU64::new(0);
 
 /// Bump a counter by one.
 pub fn bump(c: &AtomicU64) {
@@ -94,6 +98,20 @@ pub const TRACE_ADOPTION_REFUSED_TOTAL: Family = Family::counter(
     "Hydrated traced calls this node opened no root span for because the admission chain refused.",
 );
 
+/// Panics the process panic hook counted instead of reporting.
+pub const PANICS_REPEATED_TOTAL: Family = Family::counter(
+    "panics_repeated_total",
+    Labels::None,
+    "Panics at a source location the process panic hook reported less than its interval (60 s) ago: counted, not reported.",
+);
+
+/// The crate's lock recoveries, by lock ([`crate::poison`]).
+pub const POISONED_LOCK_RECOVERIES_TOTAL: Family = Family::counter(
+    "observe_poisoned_lock_recoveries_total",
+    Labels::Product(&[Dim::new("lock", &crate::poison::LOCKS)]),
+    "observability locks a panic poisoned, taken as they stood and cleared (process-wide), by lock — expected 0",
+);
+
 /// Every family [`prometheus_text`] renders, in exposition order.
 pub const FAMILIES: &[Family] = &[
     LOG_LINES_DROPPED_TOTAL,
@@ -103,6 +121,8 @@ pub const FAMILIES: &[Family] = &[
     TRACE_HEADER_MALFORMED_TOTAL,
     TRACE_ADMITTED_TOTAL,
     TRACE_ADOPTION_REFUSED_TOTAL,
+    PANICS_REPEATED_TOTAL,
+    POISONED_LOCK_RECOVERIES_TOTAL,
 ];
 
 /// Prometheus exposition for every counter above, appended by each runner's
@@ -117,9 +137,12 @@ pub fn prometheus_text() -> String {
         &TRACE_HEADER_MALFORMED,
         &TRACE_ADMITTED,
         &TRACE_ADOPTION_REFUSED,
+        &PANICS_REPEATED,
     ]) {
         family.render_value(&mut s, get(counter));
     }
+    let recoveries = &crate::poison::RECOVERIES;
+    POISONED_LOCK_RECOVERIES_TOTAL.render(&mut s, |series| recoveries.count_at(series.at(0)));
     s
 }
 

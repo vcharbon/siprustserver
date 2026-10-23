@@ -111,7 +111,8 @@ pub struct Attempt {
     /// attempt that JOINED.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub join_evidence: Option<String>,
-    /// INVITE-to-CANCEL dwell, present exactly when `cause` is `no-answer`.
+    /// First-18x-to-CANCEL dwell on the attempt's leg, ms, present exactly
+    /// when `cause` is `no-answer`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_answer_ms: Option<u64>,
 }

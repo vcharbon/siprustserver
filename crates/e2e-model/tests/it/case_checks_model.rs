@@ -11,7 +11,7 @@ use e2e_model::model::{collect_case_blocks, schemas, CheckSet, TestCase};
 use scenario_harness::{AnchorKeys, AnchorTag};
 use sip_message::parser::custom::CustomParser;
 use sip_message::SipParser;
-use sip_net::RecordedSipEntry;
+use sip_net_testkit::RecordedSipEntry;
 
 fn parse_case(json: &str) -> TestCase {
     serde_json::from_str(json).unwrap()

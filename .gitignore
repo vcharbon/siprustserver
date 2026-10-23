@@ -27,5 +27,6 @@ _TODOS.md
 portsource/
 .vscode/
 
-# TypeScript workspace (`ts/`) — installed dependencies only; sources are committed
+# TypeScript workspace (`ts/`) — installed dependencies and build output; sources are committed
 **/node_modules/
+ts/viewer-app/dist/

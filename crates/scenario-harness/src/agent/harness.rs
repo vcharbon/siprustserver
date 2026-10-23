@@ -1,8 +1,9 @@
 //! The fluent session: [`Harness`] owns the recording-wrapped simulated
 //! network, binds agents/proxies/SUTs, advances virtual time, and renders the
 //! [`RunReport`] at [`Harness::finish`] behind the mandatory RFC hard gate.
-//! The Drop-armed backstops live in [`super::run_guards`] (wire trace, RFC
-//! gate) and [`super::log_dump`] (what the SUT logged and traced).
+//! The Drop-armed backstops live in [`super::run_guards`] (the RFC gate) and
+//! [`super::failure_dump`] (the digest, ladder, traces and tables of a failing
+//! run).
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -10,21 +11,30 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use layer_harness::{NetworkTag, Recorder, RunContext, TransportKind};
 use sip_clock::Clock;
-use sip_net::{with_all_contracts, BindUdpOpts, ScopedAuditOptions, SignalingNetwork, UdpEndpoint};
+use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
 
+use super::addr_alloc::AddrAlloc;
 use super::artifact_dump::ArtifactDump;
-use super::log_dump::LogDump;
+use super::dialog_gate::{as_findings, render_dialog_panic, surviving_verdicts};
+use super::failure_dump::{first_cause, FailureDump, FailureView, FailureViews, Judges};
+use super::ids::Ids;
+use super::party::Party;
 use super::rr_fold::decide_rr_fold;
-use super::run_guards::{render_rfc_panic, rfc_hard_gate_findings, CseqGate, PanicDump};
+use super::rule_coverage::{self, WaivedFindings};
+use super::run_guards::{
+    render_rfc_panic, rfc_hard_gate_findings, waived_sut_line, CseqGate, HardGate,
+};
+use super::step::StepCounter;
+use super::ua::WeakAgent;
 use super::waiver::{unused_waivers, WaiverScope, WaiverState};
 use super::{Agent, Proxy};
 use crate::absorption::Absorption;
+use crate::dialogs::{DialogJudge, DialogJudging, DialogOptIns};
 use crate::run::RunReport;
 
 /// Fake-fabric per-`recv` silent-wait bound (virtual time — a paused clock
@@ -35,22 +45,11 @@ const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 /// The inbound queue bound of a SUT's bind.
 const SUT_QUEUE_MAX: usize = 256;
 
-/// Monotonic id source for branches / tags / Call-IDs. Deterministic (no RNG),
-/// so report bytes are stable across runs. `pub(crate)` so the Send
-/// [`loadbind::AgentBinder`](crate::loadbind::AgentBinder) can share an id
-/// source the same way [`Harness`] does.
-pub(crate) struct Ids(pub(crate) AtomicU64);
-impl Ids {
-    pub(crate) fn next(&self) -> u64 {
-        self.0.fetch_add(1, Ordering::Relaxed)
-    }
-}
-
 /// A running fluent session: owns the recording-wrapped simulated network and
 /// hands out [`Agent`]s. Drop or [`finish`](Harness::finish) when done.
 pub struct Harness {
     network: Arc<dyn SignalingNetwork>,
-    recording: sip_net::RecordingSignalingNetwork,
+    recording: sip_net_testkit::RecordingSignalingNetwork,
     recorder: Recorder,
     ids: Arc<Ids>,
     name: String,
@@ -59,25 +58,23 @@ pub struct Harness {
     /// [`describe`](Harness::describe) set — one cell, no second copy to
     /// drift.
     description: Rc<RefCell<Option<String>>>,
-    /// Dumps the recorded trace to stderr if the scenario task unwinds before
-    /// [`finish`](Harness::finish) renders a report. `finish` disarms it.
-    dump: PanicDump,
-    /// Captures what the SUT logs and traces for the run and dumps it to stderr
-    /// next to [`dump`](Self::dump)'s wire trace on the same panic path.
-    /// Declared after `dump` so the wire trace prints first. `finish` disarms it.
-    log_dump: LogDump,
-    /// Writes the full report artifacts (SVG/HTML/text ladders) when the
-    /// harness drops WITHOUT [`finish`](Harness::finish) — panic unwind or a
-    /// forgotten `finish` — under `SCENARIO_ARTIFACT_DIR` (unset ⇒ off).
-    /// Declared after the stderr dumps so the compact trace prints first.
-    /// `finish` disarms it only AFTER its RFC hard gate, so a gate failure
-    /// still writes settled FAIL artifacts.
-    artifact_dump: ArtifactDump,
     /// MANDATORY HARD GATE: fails the test on Drop if the recorded trace violates
     /// any non-advisory RFC rule — the backstop for a harness dropped WITHOUT
     /// [`finish`](Harness::finish) (which enforces the same gate inline).
-    /// `finish` disarms it (it has already run the gate itself).
+    /// `finish` disarms it (it has already run the gate itself). Declared
+    /// first so its panic is dumped by the guards below.
     cseq_gate: CseqGate,
+    /// Writes the failure dump to stderr if the run unwinds before
+    /// [`finish`](Harness::finish) returns; `finish` disarms it once its gates
+    /// passed, so a gate failure is dumped too.
+    dump: FailureDump,
+    /// Writes the full report artifacts (SVG/HTML/text ladders) when the
+    /// harness drops WITHOUT [`finish`](Harness::finish) — panic unwind or a
+    /// forgotten `finish` — under `SCENARIO_ARTIFACT_DIR` (unset ⇒ off).
+    /// Declared after the stderr dump, which reads the panic note first.
+    /// `finish` disarms it only AFTER its RFC hard gate, so a gate failure
+    /// still writes settled FAIL artifacts.
+    artifact_dump: ArtifactDump,
     /// Scoped RFC-audit waivers a test declared (a deliberate non-compliance
     /// fixture where a simulated peer intentionally emits non-conforming SIP).
     /// The hard gate drops each finding a waiver covers. Shared (`Rc`) with
@@ -96,6 +93,21 @@ pub struct Harness {
     /// Futures [`finish`](Harness::finish) awaits before it settles the fabric
     /// (see [`settle_before_finish`](Harness::settle_before_finish)).
     finish_settles: RefCell<Vec<Pin<Box<dyn Future<Output = ()>>>>>,
+    /// The dialog judge of every UA this harness bound; [`finish`](Self::finish)
+    /// gates their verdicts and the failure dump shows their tables.
+    judges: Judges,
+    /// Every UA this harness bound, its socket not held: `finish` sights what
+    /// each still has queued, so an unread request meets its dialog table.
+    bound: RefCell<Vec<WeakAgent>>,
+    /// What the SUTs bound on this harness add to its failure dump.
+    views: FailureViews,
+    /// The ordinal source of the run's scripted waits, shared by its agents.
+    steps: StepCounter,
+    /// The `dialog-…` waivers, shared with every UA so a scripted receive
+    /// honours them.
+    dialog_opt_ins: DialogOptIns,
+    /// The loopback addresses [`next_addr`](Self::next_addr) hands out.
+    addrs: AddrAlloc,
 }
 
 impl Harness {
@@ -113,7 +125,7 @@ impl Harness {
     /// runtime is a determinism trap (the delivery `sleep(0)` races the txn →
     /// router → dispatcher pipeline, so timer cancels land after the timer
     /// fired). A non-zero delay makes each `recv` park auto-advance
-    /// deterministically. See [`sip_net::SimulatedSignalingNetwork::new`].
+    /// deterministically. See [`sip_net_testkit::SimulatedSignalingNetwork::new`].
     pub fn with_transit_delay(scenario_name: impl Into<String>, transit_delay_ms: u64) -> Self {
         Self::with_transit_delay_and_send_fault(scenario_name, transit_delay_ms, None)
     }
@@ -126,9 +138,9 @@ impl Harness {
     pub fn with_transit_delay_and_send_fault(
         scenario_name: impl Into<String>,
         transit_delay_ms: u64,
-        fault: Option<sip_net::SendFault>,
+        fault: Option<sip_net_testkit::SendFault>,
     ) -> Self {
-        let net = sip_net::SimulatedSignalingNetwork::new(transit_delay_ms.max(1));
+        let net = sip_net_testkit::SimulatedSignalingNetwork::new(transit_delay_ms.max(1));
         let net = match fault {
             Some(fault) => net.with_send_fault(fault),
             None => net,
@@ -169,19 +181,26 @@ impl Harness {
         recv_timeout: Duration,
     ) -> Self {
         let recorder = Recorder::with_clock(transport_kind, clock);
-        let audit_opts = ScopedAuditOptions {
-            cross_message_rules: sip_net::rfc_cross_message_rules(),
+        let audit_opts = sip_net_testkit::ScopedAuditOptions {
+            cross_message_rules: sip_net_testkit::rfc_cross_message_rules(),
             ..Default::default()
         };
-        let wrapped = with_all_contracts(
+        let wrapped = sip_net_testkit::with_all_contracts(
             raw_network,
             recorder.clone(),
             RunContext::TestWithRecorder,
             audit_opts,
             true,
         );
-        let dump = PanicDump::new(name.clone(), wrapped.recording.channel(), recorder.clone());
-        let log_dump = LogDump::install(name.clone());
+        let judges: Judges = Rc::default();
+        let views: FailureViews = Rc::default();
+        let dump = FailureDump::new(
+            name.clone(),
+            wrapped.recording.channel(),
+            recorder.clone(),
+            judges.clone(),
+            views.clone(),
+        );
         super::panic_note::install();
         let anchors: Rc<RefCell<Vec<crate::anchors::AnchorTag>>> =
             Rc::new(RefCell::new(Vec::new()));
@@ -199,23 +218,49 @@ impl Harness {
             wrapped.recording.channel(),
             waivers.clone(),
             recorder.clone(),
+            judges.clone(),
         );
         Self {
             network: wrapped.network,
             recording: wrapped.recording,
             recorder,
-            ids: Arc::new(Ids(AtomicU64::new(1))),
+            ids: Arc::new(Ids::new()),
             name,
             description,
-            dump,
-            log_dump,
-            artifact_dump,
             cseq_gate,
+            dump,
+            artifact_dump,
             waivers,
             recv_timeout,
             anchors,
             finish_settles: RefCell::new(Vec::new()),
+            judges,
+            bound: RefCell::new(Vec::new()),
+            views,
+            steps: StepCounter::default(),
+            dialog_opt_ins: DialogOptIns::default(),
+            addrs: AddrAlloc::default(),
         }
+    }
+
+    /// A harness-judged dialog table for the UA `party`, gated at
+    /// [`finish`](Self::finish).
+    pub(crate) fn dialog_judge(&self, party: &str) -> Arc<DialogJudge> {
+        let judge =
+            Arc::new(DialogJudge::new(party, self.dialog_opt_ins.clone(), DialogJudging::Harness));
+        self.judges.borrow_mut().push(judge.clone());
+        judge
+    }
+
+    /// Register what a SUT bound on this harness adds to the run's failure
+    /// dump; [`finish`](Self::finish) also fails on the cause it names.
+    pub fn add_failure_view(&self, view: Rc<dyn FailureView>) {
+        self.views.borrow_mut().push(view);
+    }
+
+    /// The ordinal source of the run's scripted waits.
+    pub(crate) fn steps(&self) -> StepCounter {
+        self.steps.clone()
     }
 
     /// Re-seed the shared branch/tag/Call-ID counter. The default (1) is
@@ -229,7 +274,7 @@ impl Harness {
     /// entropy so identifiers are unique across runs, as RFC 3261 §8.1.1.4
     /// demands of a real UA.
     pub fn seed_ids(&self, seed: u64) {
-        self.ids.0.store(seed, Ordering::Relaxed);
+        self.ids.seed(seed);
     }
 
     /// Label a message `agent` received with a canonical **anchor** name
@@ -264,18 +309,19 @@ impl Harness {
     /// hard gate — the **only** sanctioned way to deactivate a rule in a test.
     ///
     /// Reserve this for a deliberate non-compliance fixture, where Alice/Bob
-    /// intentionally emit non-conforming SIP to exercise the B2BUA's reject /
+    /// intentionally emit non-conforming SIP to exercise the SUT's reject /
     /// error path (e.g. an out-of-dialog BYE to drive a 481). The `justification`
-    /// is mandatory and logged. It is **not** an escape hatch for a finding that
-    /// reflects a real B2BUA bug — fix the B2BUA (or the test peer) instead.
+    /// is mandatory and logged.
     ///
     /// `rule` is the rule's `name()` (e.g. `"no-bye-outside-or-early-dialog"`). The
     /// finding is still recorded (advisory) so the report shows what was waived.
     ///
     /// This is the COARSE form, reimplemented over the scoped machinery: it
-    /// waives the rule for ANY emitting party and message and does not error if
-    /// it happens to filter nothing (a conditional waiver). Reach for
-    /// [`waive`](Self::waive) to scope a waiver to one party / message.
+    /// waives the rule for any SIMULATED party and message and does not error
+    /// if it happens to filter nothing (a conditional waiver). It never covers a
+    /// finding charged to the SUT: an accepted SUT deviation is waived with
+    /// [`waive`](Self::waive) and `.on_party(<the SUT's lane name>)`, and is
+    /// counted on the report ([`RunReport::waived_sut_findings`]).
     pub fn allow_violation(&self, rule: impl Into<String>, justification: impl Into<String>) {
         self.waive(WaiverScope::rule(rule, justification).conditional());
     }
@@ -295,6 +341,9 @@ impl Harness {
             self.name,
             scope.justification,
         );
+        if scope.rule.starts_with("dialog-") {
+            self.dialog_opt_ins.lock().unwrap().push(scope.clone());
+        }
         self.waivers.borrow_mut().push(WaiverState::new(scope));
     }
 
@@ -302,8 +351,8 @@ impl Harness {
     /// locate the 1-based index of an offending message to scope a
     /// [`WaiverScope::at_position`] before `finish` — the SAME index a finding's
     /// `offending` field carries.
-    pub fn wire_entries(&self) -> Vec<sip_net::RecordedSipEntry> {
-        sip_net::audit_wire_entries(&self.recording.channel().snapshot())
+    pub fn wire_entries(&self) -> Vec<sip_net_testkit::RecordedSipEntry> {
+        sip_net_testkit::audit_wire_entries(&self.recording.channel().snapshot())
     }
 
     /// Register a future that [`finish`](Self::finish) and
@@ -325,17 +374,35 @@ impl Harness {
         }
     }
 
+    /// The panic text of the dialog verdicts this run's UAs recorded that no
+    /// `dialog-…` waiver covers, or `None`: the dialog gate a wrapping harness
+    /// that runs its own audit (the failover matrix) applies at its end.
+    pub fn dialog_gate_failure(&self) -> Option<String> {
+        let (verdicts, _) = surviving_verdicts(&self.judges.borrow(), &self.waivers.borrow());
+        (!verdicts.is_empty()).then(|| render_dialog_panic(&self.name, &verdicts))
+    }
+
     /// Disarm the Drop-time RFC 3261 CSeq hard gate. For multi-SUT harnesses
     /// (e.g. the failover matrix) that wrap this `Harness` and run their OWN,
-    /// **bind-scoped** CSeq audit at their layer-close: the generic gate here is
-    /// unscoped — it audits every recorded bind, including the internal cluster
-    /// workers, where a *transparent* failover legitimately splits one logical
-    /// dialog's CSeq stream across nodes (CSeq 1 → primary, 2 → backup-takeover,
-    /// 3 → reclaimed primary) and so reports a phantom "skip" no real UA sees.
-    /// The wrapping harness substitutes the correct endpoint-scoped check, so it
-    /// disarms this one to avoid a redundant, unscoped double-gate.
+    /// **bind-scoped** CSeq audit at their layer-close. The dialog verdicts of
+    /// its UAs are not disarmed: the wrapper gates them through
+    /// [`dialog_gate_failure`](Self::dialog_gate_failure).
     pub fn disarm_cseq_gate(&self) {
         self.cseq_gate.disarm();
+    }
+
+    /// A fresh loopback address on this harness's simulated network: unique
+    /// within the harness, never one it already bound. Ports run 5060, 5070,
+    /// 5080, … so a fresh harness's first three are the canonical ones.
+    pub fn next_addr(&self) -> SocketAddr {
+        self.addrs.next()
+    }
+
+    /// [`agent`](Self::agent) on [`next_addr`](Self::next_addr): a UA whose
+    /// address the test reads back with [`Agent::addr`] instead of picking it.
+    pub async fn agent_auto(&self, name: impl Into<String>) -> Agent {
+        let addr = self.next_addr().to_string();
+        self.agent(name, &addr).await
     }
 
     /// Declare and bind a named UA at `addr` (e.g. `"127.0.0.1:5060"`). The
@@ -394,7 +461,11 @@ impl Harness {
     ) -> Agent {
         let name = name.into();
         let addr: SocketAddr = addr.parse().unwrap_or_else(|e| panic!("bad addr {addr:?}: {e}"));
+        self.addrs.note_bound(addr);
         self.recorder.register_lane(addr, name.clone(), NetworkTag::Ext);
+        // A proxy relays requests it is not a party to: it holds no dialogs.
+        let holds_dialogs =
+            roles.contains(&sip_net::UaRole::Uac) || roles.contains(&sip_net::UaRole::Uas);
         let mut opts = BindUdpOpts::new(addr, 64).with_roles(roles);
         if let Some(hook) = pre_ingress {
             opts = opts.with_pre_ingress(hook);
@@ -406,7 +477,11 @@ impl Harness {
             "[harness] UA {name}: Record-Route fold = {rr_fold:?} \
              (set HARNESS_RR_FOLD=separate|combined to pin)"
         );
-        Agent {
+        let dialogs = self.dialog_judge(&name);
+        if !holds_dialogs {
+            dialogs.set_judging(DialogJudging::Off);
+        }
+        let agent = Agent {
             name: name.clone(),
             addr,
             uri: format!("sip:{name}@{}", addr.ip()),
@@ -417,6 +492,24 @@ impl Harness {
             txn: Arc::new(Absorption::transaction_view()),
             two_xx_acks: Arc::default(),
             holdback: Arc::default(),
+            dialogs,
+            steps: self.steps.clone(),
+            answers_as: Party::Callee,
+        };
+        self.keep_bound(&agent);
+        agent
+    }
+
+    /// Hold `agent` for the end-of-run sighting of what it left unread.
+    pub(crate) fn keep_bound(&self, agent: &Agent) {
+        self.bound.borrow_mut().push(agent.downgrade());
+    }
+
+    /// Let every UA's dialog table judge what it still has queued, left
+    /// unread, so a request no step pulled still meets its table.
+    fn judge_unread(&self) {
+        for agent in self.bound.borrow().iter().filter_map(WeakAgent::upgrade) {
+            agent.judge_unread();
         }
     }
 
@@ -442,6 +535,7 @@ impl Harness {
     /// [`agent_with_roles`](Self::agent_with_roles) and the `callee_group`
     /// builder, which registers a single lane for the shared callee socket.
     pub(crate) fn register_lane(&self, addr: SocketAddr, name: String, tag: NetworkTag) {
+        self.addrs.note_bound(addr);
         self.recorder.register_lane(addr, name, tag);
     }
 
@@ -508,11 +602,32 @@ impl Harness {
     ) -> (Box<dyn UdpEndpoint>, SocketAddr) {
         let name = name.into();
         let addr: SocketAddr = addr.parse().unwrap_or_else(|e| panic!("bad addr {addr:?}: {e}"));
+        self.addrs.note_bound(addr);
         self.recorder.register_lane(addr, name, NetworkTag::Core);
         let mut opts = BindUdpOpts::new(addr, SUT_QUEUE_MAX).with_roles(roles);
         if let Some(hook) = pre_ingress {
             opts = opts.with_pre_ingress(hook);
         }
+        let ep =
+            self.network.bind_udp(opts).await.unwrap_or_else(|e| panic!("bind {addr} failed: {e}"));
+        (ep, addr)
+    }
+
+    /// Bind a raw endpoint for a SIMULATED party (a byte-level fixture peer) on
+    /// the shared, recording-wrapped fabric: a UA-role (`{Uac, Uas}`) bind on
+    /// an `Ext` lane, so its findings are the party's own, never the SUT's
+    /// (a party-less waiver covers them). The SUT itself binds with
+    /// [`bind_sut`](Self::bind_sut).
+    pub async fn bind_peer(
+        &self,
+        name: impl Into<String>,
+        addr: &str,
+    ) -> (Box<dyn UdpEndpoint>, SocketAddr) {
+        let addr: SocketAddr = addr.parse().unwrap_or_else(|e| panic!("bad addr {addr:?}: {e}"));
+        self.addrs.note_bound(addr);
+        self.recorder.register_lane(addr, name.into(), NetworkTag::Ext);
+        let roles = HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]);
+        let opts = BindUdpOpts::new(addr, SUT_QUEUE_MAX).with_roles(roles);
         let ep =
             self.network.bind_udp(opts).await.unwrap_or_else(|e| panic!("bind {addr} failed: {e}"));
         (ep, addr)
@@ -560,7 +675,7 @@ impl Harness {
     /// directly over the trace WITHOUT consuming the harness or invoking the
     /// structural layer-close checks. Used by long-lived multi-SUT harnesses
     /// (e.g. the failover matrix) that assert the RFC CSeq check mid-life.
-    pub fn recording(&self) -> sip_net::RecordingSignalingNetwork {
+    pub fn recording(&self) -> sip_net_testkit::RecordingSignalingNetwork {
         self.recording.clone()
     }
 
@@ -597,34 +712,52 @@ impl Harness {
     /// (inFlightImbalance / queueLeak), which legitimately occur in timeout / reap
     /// / stall fixtures and must not fail those tests.
     pub async fn finish(self) -> RunReport {
-        // A returned report is by construction a passing run, so the post-mortem
-        // dump is no longer wanted: disarm it before tearing the session down. The
-        // Drop-time cseq backstop is likewise disarmed — `finish` runs the SAME
-        // gate inline just below, so the Drop guard would only double-check.
-        // The artifact writer stays armed THROUGH the gate: a gate panic unwinds
-        // with it live, so even a finish-time failure leaves its artifacts.
-        self.dump.disarm();
-        self.log_dump.disarm();
+        // The Drop-time cseq backstop is disarmed — `finish` runs the SAME gate
+        // inline just below, so the Drop guard would only double-check. The
+        // failure dump and the artifact writer stay armed THROUGH the gates: a
+        // gate panic unwinds with them live, so a finish-time failure is dumped
+        // (ladder included) and leaves its artifacts.
         self.cseq_gate.disarm();
         self.run_finish_settles().await;
         self.settle_network().await;
+        self.judge_unread();
         let events = self.recording.channel().snapshot();
         // The full RFC suite runs ONCE per finished run: this set feeds the hard
         // gate below and is seeded into the report so the projection reuses it.
-        let rfc_findings = sip_net::evaluate_rfc_findings(&events);
+        let audit = sip_net_testkit::evaluate_rfc_audit(&events);
+        let rfc_findings = audit.findings;
         // Hard gate on the RFC CSeq rule(s) BEFORE the structural close: a CSeq
         // violation must fail the test (a real UA would reject these). Skip if the
         // test is already unwinding so we never double-panic. The structural
         // close() anomalies are intentionally NOT gated.
         // The whole waiver gate sits in a scope so the `RefCell` borrow is
         // released before the `close().await` below.
+        // A failure a SUT met out of the scenario's sight explains everything
+        // after it.
+        if let Some(cause) = first_cause(&self.views) {
+            if !std::thread::panicking() {
+                panic!("{cause}");
+            }
+        }
+        let waived_sut;
         {
             let waivers = self.waivers.borrow();
-            let names = super::run_guards::addr_names(&self.recorder);
-            let cseq_findings = rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &names);
-            if !cseq_findings.is_empty() && !std::thread::panicking() {
-                panic!("{}", render_rfc_panic(&self.name, &cseq_findings));
+            // The dialog verdicts first: they name the UA and the request, the
+            // most specific reason a run can fail for.
+            let (verdicts, waived_dialog) = surviving_verdicts(&self.judges.borrow(), &waivers);
+            let mut gate = rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &self.recorder);
+            rule_coverage::record(&self.name, &audit.population, waived_findings(&gate));
+            if !verdicts.is_empty() && !std::thread::panicking() {
+                panic!("{}", render_dialog_panic(&self.name, &verdicts));
             }
+            if !gate.gating.is_empty() && !std::thread::panicking() {
+                panic!("{}", render_rfc_panic(&self.name, &gate.gating));
+            }
+            gate.waived_sut.extend(waived_dialog);
+            if let Some(line) = waived_sut_line(&gate.waived_sut) {
+                eprintln!("[{}] {line}", self.name);
+            }
+            waived_sut = gate.waived_sut;
             // A declared, non-conditional waiver that filtered nothing is an
             // error — a position-dependent waiver that stopped matching is
             // silent otherwise.
@@ -646,11 +779,12 @@ impl Harness {
                 );
             }
         }
+        self.dump.disarm();
         self.artifact_dump.disarm();
         let audit = self.recording.close().await;
         let anchors = self.anchors.borrow().clone();
         let description = self.description.borrow().clone();
-        let report = RunReport::from_recording(
+        let mut report = RunReport::from_recording(
             self.name,
             description,
             self.recorder,
@@ -659,6 +793,7 @@ impl Harness {
             anchors,
         );
         report.seed_rfc_findings(rfc_findings);
+        report.seed_waived_sut_findings(waived_sut);
         report
     }
 
@@ -673,36 +808,37 @@ impl Harness {
     /// The unused-waiver check is [`finish`](Self::finish)-only: this collecting
     /// path applies the waivers but does NOT error on one that filtered nothing
     /// (an executor keeps the report over a dead-waiver abort).
-    pub async fn finish_collecting(self) -> (RunReport, Vec<sip_net::RfcFinding>) {
+    pub async fn finish_collecting(self) -> (RunReport, Vec<sip_net_testkit::RfcFinding>) {
         self.dump.disarm();
-        self.log_dump.disarm();
         self.artifact_dump.disarm();
         self.cseq_gate.disarm();
         self.run_finish_settles().await;
         self.settle_network().await;
+        self.judge_unread();
         let events = self.recording.channel().snapshot();
         // The full RFC suite runs ONCE per finished run: this set feeds the gate,
         // the returned gating findings, and (seeded) the report projection.
-        let rfc_findings = sip_net::evaluate_rfc_findings(&events);
-        // The gating set the scoped waivers leave unwaived — drop the
-        // (lane, detail) pairs `rfc_hard_gate_findings` would waive, then keep
-        // the matching `RfcFinding`s so the caller gets the full objects.
-        // Compute the gating set in a scope so the borrow is released before the
-        // `close().await` below.
-        let gate: std::collections::HashSet<(String, String)> = {
+        let audit = sip_net_testkit::evaluate_rfc_audit(&events);
+        let rfc_findings = audit.findings;
+        // The gating set the scoped waivers leave unwaived. Computed in a scope
+        // so the borrow is released before the `close().await` below.
+        let (gate, verdicts) = {
             let waivers = self.waivers.borrow();
-            let names = super::run_guards::addr_names(&self.recorder);
-            rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &names).into_iter().collect()
+            let mut gate = rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &self.recorder);
+            rule_coverage::record(&self.name, &audit.population, waived_findings(&gate));
+            let (verdicts, waived_dialog) = surviving_verdicts(&self.judges.borrow(), &waivers);
+            gate.waived_sut.extend(waived_dialog);
+            (gate, verdicts)
         };
-        let gating: Vec<sip_net::RfcFinding> = rfc_findings
-            .iter()
-            .filter(|f| !f.advisory && gate.contains(&(f.lane.clone(), f.detail.clone())))
-            .cloned()
-            .collect();
+        if let Some(line) = waived_sut_line(&gate.waived_sut) {
+            eprintln!("[{}] {line}", self.name);
+        }
+        let mut gating = as_findings(verdicts);
+        gating.extend(gate.gating.into_iter().map(|g| g.finding));
         let audit = self.recording.close().await;
         let anchors = self.anchors.borrow().clone();
         let description = self.description.borrow().clone();
-        let report = RunReport::from_recording(
+        let mut report = RunReport::from_recording(
             self.name,
             description,
             self.recorder,
@@ -711,6 +847,12 @@ impl Harness {
             anchors,
         );
         report.seed_rfc_findings(rfc_findings);
+        report.seed_waived_sut_findings(gate.waived_sut);
         (report, gating)
     }
+}
+
+/// The RFC findings `gate`'s waivers covered, by whose they were.
+fn waived_findings(gate: &HardGate) -> WaivedFindings<'_> {
+    WaivedFindings { sut: &gate.waived_sut, simulated: &gate.waived_simulated }
 }

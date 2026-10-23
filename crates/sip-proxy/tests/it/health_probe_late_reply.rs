@@ -78,6 +78,17 @@ impl sip_proxy::registry::control::WorkerRegistryControl for RecordingControl {
         self.writes.lock().unwrap().push((worker_id.to_string(), health));
         self.inner.set_health(worker_id, health);
     }
+    fn set_view(
+        &self,
+        worker_id: &str,
+        health: Option<WorkerHealth>,
+        acceptance: Option<sip_proxy::registry::Acceptance>,
+    ) {
+        if let Some(health) = health {
+            self.writes.lock().unwrap().push((worker_id.to_string(), health));
+        }
+        self.inner.set_view(worker_id, health, acceptance);
+    }
 }
 
 /// Spawn a responder that answers every OPTIONS with 200 OK, but only AFTER
@@ -111,13 +122,16 @@ fn spawn_late_responder(
             // even though it is deliberately late.
             let opts = GenerateResponseOpts {
                 to_tag: Some("probe-uas".into()),
-                extra_headers: vec![SipHeader {
-                    name: "X-Overload".into(),
-                    value: "v=1; elu=0.2; gc=0.0; adm=3".into(),
-                }],
+                extra_headers: crate::common::options_capabilities()
+                    .into_iter()
+                    .chain([SipHeader {
+                        name: "X-Overload".into(),
+                        value: "v=1; elu=0.2; gc=0.0; adm=3".into(),
+                    }])
+                    .collect(),
                 ..Default::default()
             };
-            let resp = generate_response(&req, 200, "OK", &opts);
+            let resp = generate_response(&req, 200, "OK", &opts).unwrap();
             let raw = serialize(&SipMessage::Response(resp));
             let ep = ep.clone();
             let src = pkt.src;
@@ -169,8 +183,12 @@ fn spawn_capture_responder(ep: Box<dyn UdpEndpoint>) -> (tokio::task::JoinHandle
                     if req.method() != "OPTIONS" {
                         continue;
                     }
-                    let opts = GenerateResponseOpts { to_tag: Some("probe-uas".into()), ..Default::default() };
-                    let resp = generate_response(&req, 200, "OK", &opts);
+                    let opts = GenerateResponseOpts {
+                        to_tag: Some("probe-uas".into()),
+                        extra_headers: crate::common::options_capabilities(),
+                        ..Default::default()
+                    };
+                    let resp = generate_response(&req, 200, "OK", &opts).unwrap();
                     let raw = serialize(&SipMessage::Response(resp));
                     if hold.load(Ordering::SeqCst) {
                         held.push((raw, pkt.src));
@@ -546,12 +564,14 @@ fn synthetic_200(
             max_forwards: Some(70),
             ..Default::default()
         },
-    );
+    )
+    .unwrap();
     let resp = generate_response(
         &fake_options,
         200,
         "OK",
         &GenerateResponseOpts { to_tag: Some("spoof-uas".into()), ..Default::default() },
-    );
+    )
+    .unwrap();
     serialize(&SipMessage::Response(resp))
 }

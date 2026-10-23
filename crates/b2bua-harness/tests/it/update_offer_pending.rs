@@ -9,15 +9,18 @@ use std::sync::Arc;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallTreatment, NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::{settle_until, stated_by_response, B2buaSut};
-use scenario_harness::{Harness, WaiverScope};
+use scenario_harness::{Harness, Party, WaiverScope};
 use sip_message::generators::InDialogMethod;
 use sip_message::SipResponse;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
-const REOFFER: &str = "v=0\r\no=bob 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
-const REANSWER: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
-const REOFFER2: &str = "v=0\r\no=bob 3 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30002 RTP/AVP 0\r\n";
+const REOFFER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
+const REANSWER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
+/// Alice's PRACK answer after her refused `REANSWER` offer: her session's next
+/// version (RFC 3264 §8).
+const ALICE_PRACK_ANSWER: &str = "v=0\r\no=alice 1 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
+const REOFFER2: &str = "v=0\r\no=bob 1 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30002 RTP/AVP 0\r\n";
 
 /// The `Retry-After` seconds `refused` carries, which RFC 3311 §5.2 bounds.
 fn retry_after_sec(refused: &SipResponse) -> u32 {
@@ -402,7 +405,7 @@ async fn an_update_offer_after_a_reliable_provisional_without_sdp_is_refused_500
     let mut prack = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&a_tag)
-        .with_rack(&format!("{rseq} 1 INVITE"))
+        .with_rack(&format!("{rseq} {} INVITE", Party::Caller.first_cseq()))
         .send()
         .await;
     bob.receive("PRACK").await.respond(200, "OK").await;
@@ -469,8 +472,8 @@ async fn an_update_offer_while_the_offer_in_a_reliable_183_is_unanswered_is_refu
     let mut prack = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&a_tag)
-        .with_rack(&format!("{rseq} 1 INVITE"))
-        .with_sdp(OFFER)
+        .with_rack(&format!("{rseq} {} INVITE", Party::Caller.first_cseq()))
+        .with_sdp(ALICE_PRACK_ANSWER)
         .send()
         .await;
     bob.receive("PRACK").await.respond(200, "OK").await;
@@ -528,7 +531,7 @@ async fn an_update_offer_after_a_reroute_whose_new_leg_has_not_answered_is_refus
     let mut prack = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&a_tag)
-        .with_rack(&format!("{rseq} 1 INVITE"))
+        .with_rack(&format!("{rseq} {} INVITE", Party::Caller.first_cseq()))
         .send()
         .await;
     carol.receive("PRACK").await.respond(200, "OK").await;

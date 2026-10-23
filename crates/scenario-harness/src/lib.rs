@@ -6,7 +6,7 @@
 //! `RecordingSignalingNetwork` tees every `send_to`/`recv` onto the
 //! `layer-harness` `Recorder` — and **the recording is the trace**. The
 //! reports are *projected* from the recorded events
-//! (`sip_net::to_sip_entries`) + the recorder's lane registry, never from
+//! (`sip_net_testkit::to_sip_entries`) + the recorder's lane registry, never from
 //! harness-maintained state.
 //!
 //! **TEST-ONLY.** This crate composes the recording/audit decorators, which
@@ -19,6 +19,7 @@ pub mod anchors;
 pub mod callee_group;
 pub mod callflow;
 pub mod claim;
+pub mod dialogs;
 pub mod dsl;
 pub mod egress;
 pub mod legpick;
@@ -38,17 +39,19 @@ pub const SIMULATED_TRANSIT_DELAY_MS: u64 = 100;
 
 // The fluent, dialog-aware DSL (auto-generates correct-by-default B2B messages).
 // This is the primary surface — scenarios should not hand-author headers.
+pub(crate) use agent::shared_cseq_applier;
 pub use agent::{
-    forwarded_request, forwarded_response, request_next_hop, response_next_hop, Agent,
-    CancelHandle, ClientInvite, ClientReinvite, Dialog, Harness, InDialogRequest, InDialogTxn,
-    Inbound, Invite, OutOfDialogRequest, Proxy, Respond, ServerTxn, StepError, WaiverScope,
+    expect_failure, forwarded_request, forwarded_response, request_next_hop, response_next_hop,
+    Agent, CancelHandle, ClientInvite, ClientReinvite, Dialog, DumpSection, FailedRun, FailureView,
+    Harness, InDialogRequest, InDialogTxn, Inbound, Invite, OutOfDialogRequest, Party, Proxy,
+    Respond, ServerTxn, StepError, WaiverScope,
 };
-// Captured-message replay vocabulary (`sip_message::template` + matching),
-// re-exported so a `send_template`/`expect_template` caller reaches the harness
-// and its templates from one crate.
-pub use sip_message::{
-    Automatic, CseqOp, CseqOpAt, CseqPattern, DelayedAutomatic, EmitOpts, HeaderClass, MatchOpts,
-    MessageTemplate, Mismatch, TemplateHeader, TemplateStart,
+// Captured-message replay vocabulary (`sip_template` + matching), re-exported
+// so a `send_template`/`expect_template` caller reaches the harness and its
+// templates from one crate.
+pub use sip_message::{Automatic, CseqOp, CseqOpAt, CseqPattern, DelayedAutomatic, HeaderClass};
+pub use sip_template::{
+    EmitOpts, MatchOpts, MessageTemplate, Mismatch, TemplateHeader, TemplateStart,
 };
 // Multi-callee routing: several logical agents on one bound socket, demuxed by
 // the shared R-URI leg-picker (the transfer Bob/Charlie/David fabric).
@@ -75,8 +78,8 @@ pub use egress::{ApiCall, CalleeTarget, EgressPolicy, EgressRewrite};
 pub use run::{run, ExpectOutcome, RunReport};
 // The per-call environment shared by the load generator and the in-process
 // functional leak gate, plus the actor-scenario runners
-// (`realcall::run_actor_asserting` for happy-path flows,
-// `realcall::run_actor_collecting` for the voluntarily-failing ones).
+// (`realcall::run_actor_asserting` panics on a failure and returns the accepted
+// branch, `realcall::run_actor_collecting` returns the verdict).
 pub use realcall::{
     run_actor_asserting, run_actor_collecting, CallCtx, CallEnv, CallScope, Challenge,
     ChallengeResponder, CoreIdentity, ScenarioId,

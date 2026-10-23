@@ -14,6 +14,9 @@ use scenario_harness::Harness;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
+/// The caller's first CSeq: its INVITE's.
+const C: u32 = scenario_harness::Party::Caller.first_cseq();
+
 const SDP_OFFER: &str = "v=0\r\no=alice 2890 2890 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
 const SDP_ANSWER: &str = "v=0\r\no=bob 2890 2890 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49180 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
 
@@ -98,12 +101,12 @@ async fn full_dialog_auto_generated() {
 
     // The auto-generated CSeq numbering is correct: 1 INVITE → 1 ACK → 2 BYE,
     // responses echo their request's CSeq.
-    assert_request(&entries[0].raw, "INVITE", 1);
-    assert_response(&entries[1].raw, 180, 1, "INVITE");
-    assert_response(&entries[2].raw, 200, 1, "INVITE");
-    assert_request(&entries[3].raw, "ACK", 1);
-    assert_request(&entries[4].raw, "BYE", 2);
-    assert_response(&entries[5].raw, 200, 2, "BYE");
+    assert_request(&entries[0].raw, "INVITE", C);
+    assert_response(&entries[1].raw, 180, C, "INVITE");
+    assert_response(&entries[2].raw, 200, C, "INVITE");
+    assert_request(&entries[3].raw, "ACK", C);
+    assert_request(&entries[4].raw, "BYE", C + 1);
+    assert_response(&entries[5].raw, 200, C + 1, "BYE");
 
     // Dialog correctness: the INVITE has no To-tag; every later message shares
     // one stable To-tag (bob's) and one Call-ID.
@@ -135,8 +138,8 @@ async fn full_dialog_auto_generated() {
     assert!(global.contains("180 Ringing"));
     assert!(global.contains("ACK sip:bob@127.0.0.1:5070 SIP/2.0"));
     assert!(global.contains("BYE sip:bob@127.0.0.1:5070 SIP/2.0"));
-    assert!(global.contains("CSeq: 1 ACK"));
-    assert!(global.contains("CSeq: 2 BYE"));
+    assert!(global.contains(&format!("CSeq: {C} ACK")));
+    assert!(global.contains(&format!("CSeq: {} BYE", C + 1)));
 
     // The HTML is produced by the SHARED unified renderer (seq-report): a legend
     // naming the planes, a two-pane layout (a scrollable inline-SVG diagram on

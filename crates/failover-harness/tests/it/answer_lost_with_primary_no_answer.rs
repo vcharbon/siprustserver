@@ -16,6 +16,10 @@
 //!
 //! Unlike the 059 pin (`stale_no_answer_reclaim.rs`, a Confirmed replica with a
 //! stale timer), both restored copies read the caller as unanswered.
+//!
+//! The two cells whose callee's 2xx takes the call over kill the primary
+//! unannounced to the peers (ADR-0031 cases 3a and 4), so no departure sweep
+//! takes the ringing call over first.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -57,7 +61,7 @@ fn no_answer_decision() -> Arc<dyn CallDecisionEngine> {
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.no_answer_timeout_sec = Some(NO_ANSWER_SEC);
+                r.no_answer_ms = Some(NO_ANSWER_SEC * 1000);
                 r.callback_context = Some("078-no-answer-ctx".into());
                 NewCallResponse::Route(r)
             })
@@ -152,7 +156,7 @@ async fn replica(
 fn no_answer_deadline(call: &call::Call) -> i64 {
     call.timers
         .iter()
-        .find(|t| t.timer_type == TimerType::NoAnswer)
+        .find(|t| *t.timer_type() == TimerType::NoAnswer)
         .map(|t| t.fire_at)
         .expect("the replica carries the route-time NoAnswer")
 }
@@ -273,9 +277,9 @@ fn assert_answered_on(node: &ReplicatedB2buaSut, call_ref: &str, what: &str) {
     let live = node
         .live_call(call_ref)
         .unwrap_or_else(|| panic!("{what}: {} serves the call", node.ordinal()));
-    assert_eq!(live.a_leg.state, LegState::Confirmed, "{what}: a-leg Confirmed");
+    assert_eq!(live.a_leg.state(), LegState::Confirmed, "{what}: a-leg Confirmed");
     assert!(
-        !live.timers.iter().any(|t| t.timer_type == TimerType::NoAnswer),
+        !live.timers.iter().any(|t| *t.timer_type() == TimerType::NoAnswer),
         "{what}: the folded ledger carries no NoAnswer",
     );
 }
@@ -310,7 +314,7 @@ async fn an_answer_the_primary_never_replicated_draws_no_second_final_from_no_an
 
     let call_ref = find_backed_up_ref(b2, &primary_ord).await;
     let (ringing_body, ringing) = replica(b2, &primary_ord, &call_ref).await;
-    assert_ne!(ringing.a_leg.state, LegState::Confirmed, "the backup holds the ringing a-leg");
+    assert_ne!(ringing.a_leg.state(), LegState::Confirmed, "the backup holds the ringing a-leg");
     let fire_at = no_answer_deadline(&ringing);
 
     // ── the answer: 2xx to alice, alice ACKs, bob is ACKed — all on the primary
@@ -334,7 +338,7 @@ async fn an_answer_the_primary_never_replicated_draws_no_second_final_from_no_an
     b2.rewind_replica(BAK, &primary_ord, &call_ref, ringing_body).await;
     let (_, stale) = replica(b2, &primary_ord, &call_ref).await;
     assert_ne!(
-        stale.a_leg.state,
+        stale.a_leg.state(),
         LegState::Confirmed,
         "the backup still reads the call as ringing"
     );
@@ -404,7 +408,6 @@ async fn an_answer_served_by_the_takeover_copy_draws_no_second_final_from_no_ans
     fh.mark(&primary_ord, None, "crash", "primary down while the callee rings");
     b1.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
-    b2.simulate_peer_removed(&primary_ord);
     fh.advance(Duration::from_millis(300)).await;
     let hydrated_before = b2.metrics().repl_takeover_hydrated_total();
 
@@ -490,7 +493,6 @@ async fn an_answer_served_by_the_takeover_copy_after_the_reclaim_draws_no_second
     fh.mark(&primary_ord, None, "crash", "primary down while the callee rings");
     b1.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
-    b2.simulate_peer_removed(&primary_ord);
     fh.advance(Duration::from_millis(300)).await;
     let new_addr = reboot_and_reclaim(&mut fh, b1, b2, &primary_ord, &proxy, false).await;
     assert!(b1.serves(&call_ref), "the rebooted primary reclaimed the ringing call");

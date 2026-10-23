@@ -1,15 +1,18 @@
 //! The UAS answer/reject primitives shared by every path that responds to an
 //! initial INVITE — the disposition entry policy ([`apply_disposition`]), the
 //! single answer-200 recipe ([`answer_initial_invite`]), the reject-final
-//! hop-ACK obligation ([`arm_reject_final`]), and the teardown discharge.
+//! hop-ACK obligation ([`arm_reject_final`]), the forking answer plan
+//! ([`ForkAnswer`]), and the teardown discharge.
 //! The reactive in-dialog answer table does NOT live here — see
 //! [`super::react`].
 
+use std::collections::HashSet;
+
 use tokio::time::Instant;
 
-use super::endpoint::Disposition;
+use super::endpoint::{Disposition, ForkWinner};
 use super::ledger::{ObligationKey, ObligationKind};
-use super::runner::{ActorState, ForkAnswer, ParkedRequest, PendingRejectAck, TimedAnswer};
+use super::runner::{ActorState, ParkedRequest, PendingRejectAck, TimedAnswer};
 use super::script::scripted_wants_initial;
 use super::state::Observation;
 use crate::agent::top_via_branch;
@@ -31,13 +34,52 @@ pub(super) fn arm_reject_final(st: &mut ActorState<'_>, uas: &ServerTxn, code: u
     st.pending_reject_ack = Some(PendingRejectAck { key, call_id: call_id.to_string(), branch });
 }
 
+/// The forking-UAS answer plan carried from the 18x emission to the moment the
+/// INVITE is answered (the timed-answer arm, or the releasing PRACK): the `200`
+/// goes out under the `winner` (adopted as the transaction's dialog tag), then
+/// optionally a LATE `200` under `loser_late_200`.
+#[derive(Debug, Clone)]
+pub(super) struct ForkAnswer {
+    pub(super) winner: ForkWinner,
+    pub(super) loser_late_200: Option<&'static str>,
+    /// Reliable forks whose PRACK has not arrived; an unrung winner's `200`
+    /// waits until it is empty.
+    pub(super) unpracked: HashSet<&'static str>,
+}
+
+impl ForkAnswer {
+    /// Note the PRACK of fork `tag`; true when it releases the held `200`
+    /// (the winner's own PRACK, or the last fork's PRACK for an unrung winner).
+    pub(super) fn releases_on_prack(&mut self, tag: &str) -> bool {
+        self.unpracked.remove(tag);
+        match self.winner {
+            ForkWinner::Tag(w) => tag == w,
+            ForkWinner::Unrung => self.unpracked.is_empty(),
+        }
+    }
+}
+
+/// Send the non-2xx final `code` on the initial INVITE `uas`: the leg ends
+/// and the final awaits its hop-ACK.
+pub(super) async fn reject_initial(
+    st: &mut ActorState<'_>,
+    mut uas: ServerTxn,
+    code: u16,
+) -> Result<(), StepError> {
+    uas.respond(code, reject_reason(code)).try_send().await?;
+    arm_reject_final(st, &uas, code);
+    st.obs.record(Observation::LegTerminated { leg: st.role }, Instant::now());
+    st.scope.mark_terminated();
+    Ok(())
+}
+
 /// Discharge this leg's still-open in-dialog acknowledgement obligations because
 /// its DIALOG is being torn down (a BYE in either direction, §15). Any pending
 /// ack — a re-INVITE we answered awaiting its ACK, a PRACK/UPDATE awaiting its
 /// 200, an in-dialog request awaiting its 2xx — is MOOT once the dialog ends: the
 /// far end's transaction dies with the call, so the ack can never arrive. Without
 /// this the settle barrier holds the verdict its full 32 s ceiling waiting for
-/// that impossible ack, surfacing under loss as a spurious `settle@…` timeout —
+/// that impossible ack, surfacing under loss as a spurious `settle` timeout —
 /// the residual re-INVITE/realign/PRACK tail where an answering/renegotiating leg
 /// strands when the peer BYEs (`reinvite_gap = 0`) before a lost ack could be
 /// recovered. The `RejectFinal` obligation is deliberately preserved (it outlives
@@ -64,9 +106,9 @@ pub(super) async fn respond_200_sdp(uas: &mut ServerTxn, sdp: &str) -> Result<()
 /// barrier holds the verdict until it does), and stamp the declared
 /// answer-sent feed. Shared by the timed answer and the immediate disposition.
 ///
-/// A forking callee (`fork: Some`) answers under the WINNER fork's tag (adopted
-/// as the txn's dialog tag, so `uas.dialog()` keys the confirmed dialog under
-/// it), then optionally emits a losing fork's LATE `200` (distinct tag on the
+/// A forking callee (`fork: Some`) answers under the WINNER fork's tag, or a
+/// fresh tag for an unrung winner (adopted as the txn's dialog tag, so
+/// `uas.dialog()` keys the confirmed dialog under it), then optionally emits a losing fork's LATE `200` (distinct tag on the
 /// same transaction — §13.2.2.4: the caller ACKs then BYEs it). Both 200s share
 /// the INVITE's CSeq, so the ONE answered-awaiting-ACK obligation covers them
 /// (the wire-level per-fork ACK completeness is the RFC audit's to judge).
@@ -76,8 +118,12 @@ pub(super) async fn answer_initial_invite(
     fork: Option<ForkAnswer>,
 ) -> Result<(), StepError> {
     let sdp = st.answer_body();
-    if let Some(f) = &fork {
-        uas.adopt_to_tag(f.winner_tag);
+    match fork.as_ref().map(|f| f.winner) {
+        Some(ForkWinner::Tag(tag)) => uas.adopt_to_tag(tag),
+        Some(ForkWinner::Unrung) => {
+            uas.answer_unrung();
+        }
+        None => {}
     }
     respond_200_sdp(&mut uas, sdp).await?;
     note_uas_answered(st, &uas);
@@ -99,6 +145,11 @@ pub(super) fn note_uas_answered(st: &mut ActorState<'_>, uas: &ServerTxn) {
     let cseq = uas.request().cseq().seq();
     let now = Instant::now();
     let mut dialog = uas.dialog();
+    // The dialog this 2xx confirms continues the CSeq its early requests
+    // spent (RFC 3261 §12.2.1.1).
+    if let Some(early) = st.early_dialogs.get(dialog.local_tag()) {
+        dialog.set_local_cseq(early.local_cseq());
+    }
     // Dialog-formation point: attach this leg's shared CSeq counter (ADR-0024 §6).
     dialog.set_shared_cseq_dev(st.cseq_dev.clone());
     st.dialogs.confirmed = Some(dialog);
@@ -133,6 +184,7 @@ pub(super) async fn apply_disposition(
     // from a previous initial (a reroute-retry to this actor) must not leak
     // into the policy snapshot. A retransmit re-inserts the same tags.
     st.early_provisionals.clear();
+    st.unpracked.clear();
     st.ctx.anchor(&st.agent, "initialInvite", uas.request());
     // The rerouted winning leg stamps `rerouted` on receiving its INVITE
     // (default NONE for every other body — see `CtxFeed::on_invite_rx`).
@@ -167,8 +219,12 @@ pub(super) async fn apply_disposition(
         // 200 under the winner's tag — timed (plain 180s) or on the winner's
         // PRACK (reliable 183s, MUST-014).
         Disposition::ForkingRing { tags, winner, ring, reliable, loser_late_200 } => {
-            let wired_ok = tags.contains(&winner)
-                && loser_late_200.is_none_or(|l| l != winner && tags.contains(&l));
+            let wired_ok = match winner {
+                ForkWinner::Tag(w) => {
+                    tags.contains(&w) && loser_late_200.is_none_or(|l| l != w && tags.contains(&l))
+                }
+                ForkWinner::Unrung => loser_late_200.is_none_or(|l| tags.contains(&l)),
+            };
             if !wired_ok {
                 return Err(StepError::UnexpectedKind {
                     who: st.role.to_string(),
@@ -187,16 +243,22 @@ pub(super) async fn apply_disposition(
                         .with_sdp(sdp)
                         .try_send()
                         .await?;
+                    st.unpracked.entry((*tag).to_string()).or_insert(now);
                 } else {
                     uas.respond(180, "Ringing").with_to_tag(tag).try_send().await?;
                 }
                 st.early_provisionals.insert((*tag).to_string());
             }
-            if let Some(loser) = loser_late_200 {
-                st.fork_loser_tags.insert(loser.to_string());
-            }
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
-            let fork = ForkAnswer { winner_tag: winner, loser_late_200 };
+            let fork = ForkAnswer {
+                winner,
+                loser_late_200,
+                unpracked: if reliable {
+                    tags.iter().copied().collect()
+                } else {
+                    Default::default()
+                },
+            };
             if reliable {
                 // The 200 waits for the WINNER fork's PRACK (see the PRACK arm).
                 st.fork_answer = Some(fork);
@@ -206,12 +268,7 @@ pub(super) async fn apply_disposition(
                     Some(TimedAnswer { at: Instant::now() + ring, uas, fork: Some(fork) });
             }
         }
-        Disposition::Reject(code) => {
-            uas.respond(code, reject_reason(code)).try_send().await?;
-            arm_reject_final(st, &uas, code);
-            st.obs.record(Observation::LegTerminated { leg: st.role }, now);
-            st.scope.mark_terminated();
-        }
+        Disposition::Reject(code) => reject_initial(st, uas, code).await?,
         // RFC 3262: answer RELIABLY with a 183 (Require:100rel + RSeq:1 + the
         // answer SDP) and HOLD the INVITE txn — the 200 to the INVITE waits for
         // the PRACK (MUST-014, fired from the PRACK arm of `react_request`).
@@ -222,10 +279,13 @@ pub(super) async fn apply_disposition(
         Disposition::ReliableAnswer | Disposition::ReliableAnswerEarlyUpdate => {
             let sdp = st.answer_body();
             uas.respond(183, "Session Progress").reliable(1).with_sdp(sdp).try_send().await?;
+            st.unpracked.insert(uas.dialog().local_tag().to_string(), now);
             st.early_provisionals.insert(String::new());
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
             st.pending_prack_answer = Some(uas);
         }
+        // The goals ring and answer the held INVITE (`super::held`).
+        Disposition::Held => super::held::hold_initial(st, uas).await?,
         // Scripted park-or-react for the initial INVITE: park when a remaining
         // goal will consume/answer it, else auto-answer 200 (the RFC-compliant
         // react default) and record the stray. The ADR-0024 §5 automatic answers `100
@@ -269,6 +329,7 @@ pub(super) fn reject_reason(code: u16) -> &'static str {
         603 => "Decline",
         487 => "Request Terminated",
         480 => "Temporarily Unavailable",
+        504 => "Server Time-out",
         _ => "Error",
     }
 }

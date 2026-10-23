@@ -9,7 +9,8 @@ use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 use sip_net::types::BindUdpOpts;
-use sip_net::{SignalingNetwork, SimulatedSignalingNetwork};
+use sip_net::SignalingNetwork;
+use sip_net_testkit::SimulatedSignalingNetwork;
 
 use crate::addr::ProxyAddr;
 use crate::core::{ProxyCore, ProxyCoreBuilder};
@@ -72,7 +73,7 @@ async fn fixture() -> Fixture {
             "w1",
             ProxyAddr::new(W1_POD, 5060),
         )]));
-    let core = ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy.clone(), reg)
+    let core = ProxyCoreBuilder::for_test(ProxyAddr::new(PROXY_VIP, 5060), strategy.clone(), reg)
         .clock(Clock::test_at(0))
         .build(ep);
     Fixture { core, strategy }
@@ -107,7 +108,7 @@ async fn snat_masqueraded_bleg_invite_encodes_cookie_for_the_via_worker() {
     let req = bleg_invite(W1_POD);
     let snat_src = format!("{SNAT_NODE}:63522").parse().unwrap();
 
-    let outcome = f.core.route_request(&req, snat_src).await;
+    let outcome = f.core.route_request_from(&req, snat_src).await;
 
     assert_eq!(outcome.decision, RoutingDecisionKind::WorkerOutbound);
     assert_eq!(
@@ -126,7 +127,7 @@ async fn pod_direct_source_remains_the_cookie_fallback() {
     let req = bleg_invite("10.244.9.99"); // not in the registry
     let pod_src = format!("{W1_POD}:5060").parse().unwrap();
 
-    let outcome = f.core.route_request(&req, pod_src).await;
+    let outcome = f.core.route_request_from(&req, pod_src).await;
 
     assert_eq!(outcome.decision, RoutingDecisionKind::WorkerOutbound);
     assert_eq!(

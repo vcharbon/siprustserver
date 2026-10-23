@@ -28,6 +28,7 @@ import {
   resolveBinding,
   rfcAuditPassed,
   rfcGating,
+  rfcSourceFaults,
   verdictPassed
 } from "../src/bundle/index.js"
 import { PIVOT_FIXTURES, read } from "./fixtures.js"
@@ -62,6 +63,34 @@ describe("the post-run RFC audit", () => {
     expect(audit.status).toBe("audited")
     expect(rfcGating(audit).map((f) => f.rule)).toEqual(["cseq-in-dialog-order"])
     expect(rfcAuditPassed(audit)).toBe(false)
+  })
+
+  it("names a scripted party's source fault apart from the SUT's charges, and fails on none of a party's findings", () => {
+    const audit = decodeRunRfcAuditSync(JSON.parse(read(BUNDLE, "rfc.json")) as unknown)
+    expect(rfcSourceFaults(audit).map((f) => [f.rule, f.actor])).toEqual([
+      ["unacked-invite-non-2xx-final", "uas1"]
+    ])
+    const party = {
+      rule: "no-200-after-cancel",
+      lane: "127.0.0.1:5060",
+      detail: "answered 200 after the CANCEL",
+      advisory: false,
+      gating: false,
+      actor: "uas1"
+    }
+    const info = decodeRunRfcAuditSync({
+      status: "audited",
+      findings: [
+        { ...party, cancelled_by: "rfc_violations: no-200-after-cancel at s12 by uas1" },
+        { ...party, unjudged: "census-uncovered: the census covers no capture 'c'" }
+      ]
+    })
+    expect([rfcGating(info), rfcSourceFaults(info)]).toEqual([[], []])
+    expect(rfcAuditPassed(info)).toBe(true)
+    const fault = decodeRunRfcAuditSync({ status: "audited", findings: [{ ...party, source_fault: true }] })
+    expect(rfcGating(fault)).toEqual([])
+    expect(rfcSourceFaults(fault).length).toBe(1)
+    expect(rfcAuditPassed(fault)).toBe(true)
   })
 
   it("reads not-audited as its own value, never as a clean audit", () => {

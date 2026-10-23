@@ -44,7 +44,7 @@ fn invite(call_id: &str) -> SipRequest {
         content_type: None,
         extra_headers: vec![],
     };
-    generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts)
+    generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts).expect("an INVITE")
 }
 
 fn state(clock: Clock) -> CallState {
@@ -58,7 +58,7 @@ fn call(call_id: &str, created_at: i64) -> call::Call {
         &invite(call_id),
         src,
         &B2buaConfig::default(),
-        &sip_txn::IdGen::seeded(1),
+        &mut sip_ids::TurnIds::fixed(1),
         created_at,
     )
 }

@@ -22,7 +22,8 @@ use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use failover_harness::{
     assert_call_fully_over, cookie_field, FailoverHarness, ReplicatedB2buaSut, WorkerHealth,
 };
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpServerHandle, HttpTransport};
+use http_net_testkit::SimulatedHttpNetwork;
 use sip_clock::Clock;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -75,7 +76,7 @@ async fn raised_bound_holds_a_ring_across_crash_reboot_reclaim_until_the_origina
     let mut fh = FailoverHarness::new("long-ring-ha-crash-reclaim", &["b1", "b2"])
         .with_worker_tune(|c| {
             c.invite_txn_timeout_sec = INVITE_TXN_SEC;
-            c.setup_timeout_sec = SETUP_SEC;
+            c.setup_timeout_ms = SETUP_SEC * 1000;
         });
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;

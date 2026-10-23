@@ -998,7 +998,8 @@ the rule silent instead of throwing or guessing. A rule states one invariant, an
 a message whose grammar is already wrong belongs to the grammar rules — the
 auditor still sees every deliberately-broken peer message, because the audit
 parses leniently (`lenient_parser`, unchanged) and the *rules* decide, which is
-exactly the split ADR-0007 set up. The 260 audit unit tests (many of which are
+exactly the split between the strict wire-grammar gates and the lenient audit
+parse. The 260 audit unit tests (many of which are
 hand-built malformed fixtures) pass unchanged.
 
 **Behaviour deltas, all deliberate:**

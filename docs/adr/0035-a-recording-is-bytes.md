@@ -41,7 +41,8 @@ Four invariants, held in Rust, the TypeScript contracts and the pipeline alike.
   the parser's, `Content-Length`-bounded.
 - The head ends by one rule wherever the arm, the layout or a reader measures
   it: the empty line that ends the header block (RFC 3261 §7), CRLF being the
-  terminator (§25.1), a bare CR or LF accepted as the parser accepts them.
+  terminator (§25.1), a bare CR or LF ending a line where the parser's
+  header-block split ends one (the parser then refuses such a head, ADR-0053).
 - The interpreter writes a layout for every parsable datagram carrying a body,
   so a line with no layout is bodiless in the confrontation and the cut; the
   cut stores a body under the same bound, so a resource never holds a tail the

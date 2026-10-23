@@ -38,15 +38,19 @@ impl Family {
         let fail = |what: String| Err(Mismatch { family: self.name, what });
         let lines: Vec<&str> = text.lines().collect();
         let help_prefix = format!("# HELP {} ", self.name);
-        let helps: Vec<usize> =
-            (0..lines.len()).filter(|&i| lines[i].starts_with(&help_prefix)).collect();
-        let [at] = helps[..] else {
+        let helps: Vec<(usize, &str)> = lines
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, l)| l.starts_with(&help_prefix))
+            .collect();
+        let [(at, help)] = helps[..] else {
             return fail(format!("{} HELP lines, want 1", helps.len()));
         };
         let mut want_help = help_prefix.clone();
         escape_help(&mut want_help, self.help);
-        if lines[at] != want_help {
-            return fail(format!("HELP is {:?}, want {want_help:?}", lines[at]));
+        if help != want_help {
+            return fail(format!("HELP is {help:?}, want {want_help:?}"));
         }
         let want_type = format!("# TYPE {} {}", self.name, self.kind.as_str());
         if lines.get(at + 1) != Some(&want_type.as_str()) {
@@ -79,18 +83,20 @@ impl Family {
                 None => return fail(format!("text ends before series {k} {labels:?}")),
             }
         }
-        let extra = &series[want.len()..];
-        if !extra.is_empty() && !self.is_semi_open() {
-            return fail(format!("undeclared series {:?} of a fixed family", extra[0]));
+        let extra = series.get(want.len()..).unwrap_or_default();
+        if let (Some(first), false) = (extra.first(), self.is_semi_open()) {
+            return fail(format!("undeclared series {first:?} of a fixed family"));
         }
-        for (k, got) in extra.iter().enumerate() {
+        let mut seen: Vec<&Pairs> = Vec::new();
+        for got in extra {
             let names: Vec<&str> = got.iter().map(|(n, _)| n.as_str()).collect();
             if self.labels.block_named(&names).is_none() {
                 return fail(format!("series {got:?} matches no block's label names"));
             }
-            if want.contains(got) || extra[..k].contains(got) {
+            if want.contains(got) || seen.contains(&got) {
                 return fail(format!("series {got:?} is written twice"));
             }
+            seen.push(got);
         }
         let type_prefix = format!("# TYPE {} ", self.name);
         for (i, line) in lines.iter().enumerate() {
@@ -124,21 +130,24 @@ impl Family {
     /// The series starting at line `i`, its label pairs and the line after
     /// it; `None` when line `i` is no sample of this family.
     fn series_at(&self, lines: &[&str], i: usize) -> Result<Option<(Pairs, usize)>, String> {
-        let Some((suffix, pairs)) = lines.get(i).and_then(|l| self.sample(l)) else {
+        let Some((line, (suffix, pairs))) = lines.get(i).and_then(|l| Some((*l, self.sample(l)?)))
+        else {
             return Ok(None);
         };
         if self.kind != Kind::Histogram {
             return Ok(Some((pairs, i + 1)));
         }
         let le = |p: &Pairs| p.last().filter(|(n, _)| n == "le").map(|(_, v)| v.clone());
-        if suffix != "_bucket" || le(&pairs).is_none() {
-            return Err(format!("line {i} {:?} does not open a series with a bucket", lines[i]));
-        }
-        let labels: Pairs = pairs[..pairs.len() - 1].to_vec();
+        // A bucket's labels: its pairs before its `le`.
+        let before_le = |p: &Pairs| p.split_last().map(|(_, rest)| rest.to_vec());
+        let labels = match before_le(&pairs) {
+            Some(labels) if suffix == "_bucket" && le(&pairs).is_some() => labels,
+            _ => return Err(format!("line {i} {line:?} does not open a series with a bucket")),
+        };
         let mut j = i;
         loop {
             match lines.get(j).and_then(|l| self.sample(l)) {
-                Some(("_bucket", p)) if p[..p.len().saturating_sub(1)] == labels[..] => {
+                Some(("_bucket", p)) if before_le(&p).unwrap_or_default() == labels => {
                     let last = le(&p).as_deref() == Some("+Inf");
                     j += 1;
                     if last {

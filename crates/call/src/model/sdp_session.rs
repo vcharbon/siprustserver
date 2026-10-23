@@ -13,6 +13,17 @@ pub struct LegSdpSession {
     pub sent_origin: Option<String>,
     /// The `m=` values of that description, in order.
     pub sent_media: Vec<String>,
+    /// A digest (64-bit FNV-1a) of that description apart from its `o=`
+    /// line: a later one with the same digest repeats it (RFC 3264 §8 keeps a
+    /// repeat at its version).
+    #[serde(default)]
+    pub sent_digest: Option<u64>,
+    /// The `o=` value of the last offer this leg's peer made that the stack
+    /// answered itself — refused (a glare 491 or 500) or answered locally —
+    /// so no other leg received it: a version the peer spent that the far
+    /// parties never saw.
+    #[serde(default)]
+    pub absorbed_origin: Option<String>,
     /// Where that description restated another author's: for each of its
     /// m-lines, the position of the author's stream it carries (`None` for a
     /// slot kept rejected). Empty when it left as its author wrote it.

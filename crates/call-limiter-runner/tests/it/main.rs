@@ -5,4 +5,5 @@
 //! Select one (the workspace build `just test` made, no rebuild):
 //! `cargo nextest run --workspace -E 'package(=call-limiter-runner) & binary(it)' <module>::`.
 
+mod sigterm;
 mod smoke;

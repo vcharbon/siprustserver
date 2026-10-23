@@ -1,5 +1,13 @@
 # Actor-harness P1 downstream-contract table
 
+> **Superseded verdict contract.** The `Expect` variants (`HappyBye`,
+> `Reject`, `AbandonedEarly`, `TransferDeclined`, `EitherOf`), `into_result`
+> and the "voluntarily-failing" shapes below are the plan this harness was
+> built from. A scenario now declares its accepted endings
+> (`scenario_harness::actor::{Expect, Branch}`) and the runner returns a
+> `ScenarioVerdict`: the reject, abandon and declined-transfer shapes succeed on
+> their own branch, and a failure is keyed by its `FailedAt` step.
+
 **P1-entry artifact** for plan §4.2 (B7, decisions 3/5) of
 [`actor-harness-impl-plan.md`](actor-harness-impl-plan.md). Read that section
 (lines ~238–303) alongside this.
@@ -62,10 +70,6 @@ So the **full sample path** of a NOK call is
 `<scenario_id>/<class-label>/<who>@<last_phase>`. Example: `abandon_ringing`'s
 terminal (below) → `abandon_ringing / timeout / alice-abandoned-after-ringing@start`.
 
-`ResultClass::chaos_excusable` (`class.rs:97-99`) additionally gates near/clear
-auto-excusal: everything **except** `Panic`/`Unparseable` is excusable — the
-actor port changes none of this.
-
 ---
 
 ## 2. Settle-verdict mapping (decision 3, plan §4.3 — fixed HERE)
@@ -123,8 +127,7 @@ counting refer's 180, or the gate denominator shifts and the >99% ratio drifts.
 
 Phases are stamped by `ctx.phase(name)` — `env.rs:452-454`, unconditional, `name`
 is `'static` (bounded). The last-reached phase keys the case suffix (§1) and the
-chaos near/clear classifier consumes the whole trail
-(`driver.rs:609-614`). "Trigger" is the message/observation immediately
+NOK sample banner lists the whole trail. "Trigger" is the message/observation immediately
 preceding the stamp.
 
 | phase            | fires after (observation / driven step)                           | source (shared or body)                    |

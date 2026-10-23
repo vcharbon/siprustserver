@@ -5,6 +5,7 @@
 //! Pure and deterministic: no clocks, no randomness, no I/O.
 
 use crate::sdp_doc::{direction_of, media_line, Sections};
+use lookup_map::LookupMap;
 
 /// `sdp` in canonical form, or `None` where it already is one, states no
 /// media section, or is not a session description (no `v=` first line).
@@ -27,7 +28,7 @@ pub fn canonical_form(sdp: &[u8]) -> Option<Vec<u8>> {
     if !text.starts_with("v=") {
         return None;
     }
-    let sections = Sections::of(text);
+    let sections = Sections::of(text)?;
     if sections.media.is_empty() {
         return None;
     }
@@ -61,13 +62,22 @@ fn media_in_form<'a>(section: &'a str, session_direction: &'a str) -> Vec<&'a st
     let mut taken = vec![false; attributes.len()];
     let mut out = vec![m];
     out.extend(others);
+    // Each format's `rtpmap` then `fmtp` attributes, in wire order, read in one pass.
+    let mut bound: LookupMap<&str, (Vec<usize>, Vec<usize>)> = LookupMap::new();
+    for (i, attribute) in attributes.iter().enumerate() {
+        if let Some(format) = format_of(attribute, "a=rtpmap:") {
+            bound.entry(format).or_default().0.push(i);
+        }
+        if let Some(format) = format_of(attribute, "a=fmtp:") {
+            bound.entry(format).or_default().1.push(i);
+        }
+    }
     for format in &formats {
-        for prefix in ["a=rtpmap:", "a=fmtp:"] {
-            for (i, attribute) in attributes.iter().enumerate() {
-                if !taken[i] && format_of(attribute, prefix) == Some(format.as_str()) {
-                    taken[i] = true;
-                    out.push(attribute);
-                }
+        let Some((rtpmaps, fmtps)) = bound.remove(format.as_str()) else { continue };
+        for i in rtpmaps.into_iter().chain(fmtps) {
+            if let (Some(taken), Some(attribute)) = (taken.get_mut(i), attributes.get(i)) {
+                *taken = true;
+                out.push(attribute);
             }
         }
     }
@@ -75,9 +85,9 @@ fn media_in_form<'a>(section: &'a str, session_direction: &'a str) -> Vec<&'a st
     out.extend(
         attributes
             .iter()
-            .enumerate()
-            .filter(|(i, a)| !taken[*i] && !is_direction(a))
-            .map(|(_, a)| *a),
+            .zip(&taken)
+            .filter(|(a, taken)| !**taken && !is_direction(a))
+            .map(|(a, _)| *a),
     );
     if !directions.is_empty() {
         out.extend(directions);

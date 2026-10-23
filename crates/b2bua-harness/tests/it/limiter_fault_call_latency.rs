@@ -32,9 +32,9 @@ use b2bua::metrics::{LimiterFailure, LimiterOp};
 use b2bua_harness::B2buaSut;
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{
-    BindError, Fault, HttpError, HttpRequest, HttpResponse, HttpServerHandle, HttpService,
-    HttpTransport, SimulatedHttpNetwork,
+    BindError, HttpError, HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport,
 };
+use http_net_testkit::{Fault, SimulatedHttpNetwork};
 use scenario_harness::{
     Agent, ClientInvite, Dialog, Harness, ServerTxn, SIMULATED_TRANSIT_DELAY_MS,
 };

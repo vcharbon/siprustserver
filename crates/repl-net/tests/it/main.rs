@@ -5,5 +5,6 @@
 //! Select one (the workspace build `just test` made, no rebuild):
 //! `cargo nextest run --workspace -E 'package(=repl-net) & binary(it)' <module>::`.
 
+mod no_panic_lane;
 mod property;
 mod roundtrip;

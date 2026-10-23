@@ -65,20 +65,43 @@ pub struct CseqDeviation {
 /// `[1, MAX_CSEQ]` — a fresh in-dialog request is never 0.
 const MAX_CSEQ: i128 = i32::MAX as i128;
 
-impl CseqDeviation {
-    /// Build the applier, rejecting a malformed pattern loudly: at most one op
-    /// per step (a second op at the same step would be silently dead).
-    pub fn new(pattern: CseqPattern) -> Self {
-        let mut seen = std::collections::BTreeSet::new();
-        for o in &pattern.ops {
-            if !seen.insert(o.at) {
-                panic!(
-                    "CseqPattern declares more than one op at step {} — a step carries at most one operation",
-                    o.at
-                );
-            }
+/// Why a [`CseqPattern`] cannot be applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviationError {
+    /// The pattern declares more than one op at this step.
+    TwoOpsAtStep(usize),
+    /// The pattern's arithmetic leaves the legal CSeq range at this step.
+    OutOfRange { value: i128, step: usize, op: Option<CseqOp> },
+}
+
+impl std::fmt::Display for DeviationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeviationError::TwoOpsAtStep(step) => write!(
+                f,
+                "CseqPattern declares more than one op at step {step} — a step carries at most one operation"
+            ),
+            DeviationError::OutOfRange { value, step, op } => write!(
+                f,
+                "CSeq deviation produced out-of-range value {value} at step {step} (op {op:?}) — \
+                 a CSeq must be in [1, {MAX_CSEQ}] (RFC 3261 §8.1.1.5)"
+            ),
         }
-        CseqDeviation { pattern, step: 0, offset_applied: false }
+    }
+}
+
+impl std::error::Error for DeviationError {}
+
+#[deny(clippy::arithmetic_side_effects)]
+impl CseqDeviation {
+    /// Build the applier, refusing a malformed pattern: at most one op per
+    /// step (a second op at the same step would be silently dead).
+    pub fn new(pattern: CseqPattern) -> Result<Self, DeviationError> {
+        let mut seen = std::collections::BTreeSet::new();
+        if let Some(twice) = pattern.ops.iter().find(|o| !seen.insert(o.at)) {
+            return Err(DeviationError::TwoOpsAtStep(twice.at));
+        }
+        Ok(CseqDeviation { pattern, step: 0, offset_applied: false })
     }
 
     /// Whether the underlying pattern is the identity.
@@ -98,35 +121,37 @@ impl CseqDeviation {
     /// Advances the internal step. The dialog then sets its `local_cseq` to the
     /// returned value, so subsequent natural increments continue from here.
     ///
-    /// Panics if the pattern's arithmetic leaves the legal CSeq range
-    /// `[1, MAX_CSEQ]` (a clamp would put a bogus number on the wire silently),
-    /// naming the offending step, op, and computed value.
-    pub fn next_cseq(&mut self, local_cseq: u32) -> u32 {
+    /// Refuses a value the pattern's arithmetic takes out of the legal CSeq
+    /// range `[1, MAX_CSEQ]` (a clamp would put a bogus number on the wire
+    /// silently), naming the offending step, op, and computed value.
+    pub fn next_cseq(&mut self, local_cseq: u32) -> Result<u32, DeviationError> {
         let step = self.step;
-        self.step += 1;
+        self.step = self.step.saturating_add(1);
         // The offset folds into the running baseline ONCE, regardless of which
         // op consumes the first deviated step (a Reuse then reuses the
-        // offset-adjusted number). i128 keeps every intermediate overflow-free.
-        let base: i128 = local_cseq as i128
-            + if self.offset_applied {
-                0
-            } else {
-                self.offset_applied = true;
-                self.pattern.offset as i128
-            };
-        let op = self.pattern.op_at(step);
-        let emit: i128 = match op {
-            Some(CseqOp::Reuse) => base,
-            Some(CseqOp::Jump { by }) => base + 1 + by as i128,
-            None => base + 1,
+        // offset-adjusted number). i128 holds every intermediate of i64 and u32
+        // operands, and the checked forms state it.
+        let offset = if self.offset_applied {
+            0
+        } else {
+            self.offset_applied = true;
+            i128::from(self.pattern.offset)
         };
-        if !(1..=MAX_CSEQ).contains(&emit) {
-            panic!(
-                "CSeq deviation produced out-of-range value {emit} at step {step} (op {op:?}) — \
-                 a CSeq must be in [1, {MAX_CSEQ}] (RFC 3261 §8.1.1.5)"
-            );
-        }
-        emit as u32
+        let op = self.pattern.op_at(step);
+        let base = i128::from(local_cseq).checked_add(offset);
+        let emit = match op {
+            Some(CseqOp::Reuse) => base,
+            Some(CseqOp::Jump { by }) => {
+                base.and_then(|b| b.checked_add(1)?.checked_add(i128::from(by)))
+            }
+            None => base.and_then(|b| b.checked_add(1)),
+        };
+        let out_of_range = |value| DeviationError::OutOfRange { value, step, op };
+        let emit = emit.ok_or(out_of_range(i128::MAX))?;
+        u32::try_from(emit)
+            .ok()
+            .filter(|_| (1..=MAX_CSEQ).contains(&emit))
+            .ok_or(out_of_range(emit))
     }
 }
 
@@ -170,13 +195,34 @@ impl DelayedAutomatic {
 mod tests {
     use super::*;
 
+    /// The applier of `pattern`; a refusal fails the test with its reason.
+    fn applier(pattern: CseqPattern) -> CseqDeviation {
+        CseqDeviation::new(pattern).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// The next CSeq `dev` emits; a refusal fails the test with its reason.
+    fn step(dev: &mut CseqDeviation, local_cseq: u32) -> u32 {
+        dev.next_cseq(local_cseq).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn refusals_are_values() {
+        let twice = CseqPattern {
+            offset: 0,
+            ops: vec![CseqOpAt { at: 2, op: CseqOp::Reuse }, CseqOpAt { at: 2, op: CseqOp::Reuse }],
+        };
+        assert_eq!(CseqDeviation::new(twice).err(), Some(DeviationError::TwoOpsAtStep(2)));
+        let mut dev = applier(CseqPattern::with_offset(-5));
+        assert!(matches!(dev.next_cseq(1), Err(DeviationError::OutOfRange { value: -3, .. })));
+    }
+
     #[test]
     fn identity_pattern_is_natural_increment() {
-        let mut dev = CseqDeviation::new(CseqPattern::default());
+        let mut dev = applier(CseqPattern::default());
         // INVITE was 1; successive in-dialog requests: 2, 3, 4.
-        assert_eq!(dev.next_cseq(1), 2);
-        assert_eq!(dev.next_cseq(2), 3);
-        assert_eq!(dev.next_cseq(3), 4);
+        assert_eq!(step(&mut dev, 1), 2);
+        assert_eq!(step(&mut dev, 2), 3);
+        assert_eq!(step(&mut dev, 3), 4);
     }
 
     #[test]
@@ -184,12 +230,12 @@ mod tests {
         // Jump by +48 at step 0: 2+48 = 50, then continue 51, 52.
         let pat =
             CseqPattern { offset: 0, ops: vec![CseqOpAt { at: 0, op: CseqOp::Jump { by: 48 } }] };
-        let mut dev = CseqDeviation::new(pat);
-        let c0 = dev.next_cseq(1);
+        let mut dev = applier(pat);
+        let c0 = step(&mut dev, 1);
         assert_eq!(c0, 50);
-        let c1 = dev.next_cseq(c0);
+        let c1 = step(&mut dev, c0);
         assert_eq!(c1, 51);
-        let c2 = dev.next_cseq(c1);
+        let c2 = step(&mut dev, c1);
         assert_eq!(c2, 52);
     }
 
@@ -197,21 +243,21 @@ mod tests {
     fn reuse_emits_previous_number_then_continues() {
         // step 0: 2, step 1: reuse 2, step 2: continue to 3.
         let pat = CseqPattern { offset: 0, ops: vec![CseqOpAt { at: 1, op: CseqOp::Reuse }] };
-        let mut dev = CseqDeviation::new(pat);
-        let c0 = dev.next_cseq(1);
+        let mut dev = applier(pat);
+        let c0 = step(&mut dev, 1);
         assert_eq!(c0, 2);
-        let c1 = dev.next_cseq(c0);
+        let c1 = step(&mut dev, c0);
         assert_eq!(c1, 2, "reuse emits the previous number");
-        let c2 = dev.next_cseq(c1);
+        let c2 = step(&mut dev, c1);
         assert_eq!(c2, 3, "continues from the reused number");
     }
 
     #[test]
     fn offset_applied_once_and_inherited() {
-        let mut dev = CseqDeviation::new(CseqPattern::with_offset(100));
-        let c0 = dev.next_cseq(1);
+        let mut dev = applier(CseqPattern::with_offset(100));
+        let c0 = step(&mut dev, 1);
         assert_eq!(c0, 102, "2 + offset 100");
-        let c1 = dev.next_cseq(c0);
+        let c1 = step(&mut dev, c0);
         assert_eq!(c1, 103, "offset not re-applied; inherited via the running value");
     }
 
@@ -220,10 +266,10 @@ mod tests {
         // The offset folds into the baseline even though a Reuse consumes step 0;
         // step 1 continues from the offset-adjusted number.
         let pat = CseqPattern { offset: 100, ops: vec![CseqOpAt { at: 0, op: CseqOp::Reuse }] };
-        let mut dev = CseqDeviation::new(pat);
-        let c0 = dev.next_cseq(1);
+        let mut dev = applier(pat);
+        let c0 = step(&mut dev, 1);
         assert_eq!(c0, 101, "reuse of the offset-adjusted baseline (1 + 100)");
-        let c1 = dev.next_cseq(c0);
+        let c1 = step(&mut dev, c0);
         assert_eq!(c1, 102, "offset-shifted continuation");
     }
 
@@ -231,19 +277,19 @@ mod tests {
     fn offset_and_jump_interplay() {
         let pat =
             CseqPattern { offset: 10, ops: vec![CseqOpAt { at: 0, op: CseqOp::Jump { by: 5 } }] };
-        let mut dev = CseqDeviation::new(pat);
-        let c0 = dev.next_cseq(1);
+        let mut dev = applier(pat);
+        let c0 = step(&mut dev, 1);
         assert_eq!(c0, 17, "1 + offset 10 + 1 + jump 5");
-        let c1 = dev.next_cseq(c0);
+        let c1 = step(&mut dev, c0);
         assert_eq!(c1, 18);
     }
 
     #[test]
     #[should_panic(expected = "out-of-range")]
     fn negative_result_is_rejected_loudly() {
-        let mut dev = CseqDeviation::new(CseqPattern::with_offset(-5));
+        let mut dev = applier(CseqPattern::with_offset(-5));
         // base = 1 - 5 = -4, +1 = -3 → below 1 → reject (never clamp to 0).
-        let _ = dev.next_cseq(1);
+        let _ = step(&mut dev, 1);
     }
 
     #[test]
@@ -253,9 +299,9 @@ mod tests {
             offset: 0,
             ops: vec![CseqOpAt { at: 0, op: CseqOp::Jump { by: i32::MAX as i64 } }],
         };
-        let mut dev = CseqDeviation::new(pat);
+        let mut dev = applier(pat);
         // 1 + 1 + 2147483647 = 2147483649 > 2^31-1 → reject.
-        let _ = dev.next_cseq(1);
+        let _ = step(&mut dev, 1);
     }
 
     #[test]
@@ -265,8 +311,8 @@ mod tests {
             offset: 0,
             ops: vec![CseqOpAt { at: 0, op: CseqOp::Jump { by: i64::MAX } }],
         };
-        let mut dev = CseqDeviation::new(pat);
-        let _ = dev.next_cseq(1); // i128 math → no overflow, a clean range reject.
+        let mut dev = applier(pat);
+        let _ = step(&mut dev, 1); // i128 math → no overflow, a clean range reject.
     }
 
     #[test]
@@ -279,7 +325,7 @@ mod tests {
                 CseqOpAt { at: 0, op: CseqOp::Jump { by: 1 } },
             ],
         };
-        let _ = CseqDeviation::new(pat);
+        let _ = applier(pat);
     }
 
     #[test]
@@ -291,8 +337,8 @@ mod tests {
                 CseqOpAt { at: 5, op: CseqOp::Reuse },
             ],
         };
-        let mut dev = CseqDeviation::new(pat);
-        let _ = dev.next_cseq(1); // consumes step 0.
+        let mut dev = applier(pat);
+        let _ = step(&mut dev, 1); // consumes step 0.
         let un = dev.unconsumed_ops();
         assert_eq!(un.len(), 1);
         assert_eq!(un[0].at, 5, "the op at a step never reached is reported");

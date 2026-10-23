@@ -8,7 +8,13 @@
 // Shared fixtures, reached from a test module as `crate::common::…`.
 mod common;
 
+mod attempts;
 mod callref;
 mod codec_roundtrip;
+mod decode_bounds;
 mod index_key;
+mod invite_glare;
+mod lifecycle;
 mod model_helpers;
+mod round;
+mod sequence;

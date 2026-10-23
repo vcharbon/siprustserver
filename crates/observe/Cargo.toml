@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Process observability foundation (ADR-0026): subscriber installation (compact key=value lifecycle logs over a non-blocking bounded lossy stdout writer; OTLP trace export, feature `otlp`, only when OTEL_EXPORTER_OTLP_ENDPOINT is set), the per-call trace admission chain (rate draw -> token bucket -> active cap), the 16 KiB attribute cap, the rising-edge/summary/falling-edge burst aggregation that keeps lifecycle logging traffic-independent, and the thread-scoped in-memory subscriber tests capture with. The OpenTelemetry dependency tree terminates here and is feature-gated off for domain crates."
 
+[package.metadata.purity]
+tier = "shell"
+
 [lints]
 workspace = true
 
@@ -22,6 +25,7 @@ otlp = [
 ]
 
 [dependencies]
+lock-poison = { path = "../lock-poison" }
 metric-catalogue = { path = "../metric-catalogue" }
 tracing = { workspace = true }
 # The trace-activation token bucket (`activation_bucket`).
@@ -41,3 +45,4 @@ opentelemetry-otlp = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+observe-testkit = { path = "../observe-testkit" }

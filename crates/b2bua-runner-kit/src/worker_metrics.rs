@@ -1,10 +1,14 @@
 //! The worker's `/metrics` body: every metric source of a worker, rendered
 //! in one fixed order.
 
+use std::time::Duration;
+
 use b2bua::capacity::CapacityGate;
+use b2bua::loops::WorkerLoops;
 use b2bua::metrics::{catalogue, B2buaMetrics, UdpTransportMetrics};
 use b2bua::new_calls::NewCallCounts;
 use b2bua::overload::OverloadSignal;
+use b2bua::repl::Readiness;
 use metric_catalogue::Catalogue;
 
 /// The metric sources of one worker. Clone-cheap: every field shares its
@@ -22,6 +26,12 @@ pub struct WorkerMetrics {
     pub overload: OverloadSignal,
     /// The capacity gate.
     pub capacity: CapacityGate,
+    /// The transaction owner and router loops.
+    pub loops: WorkerLoops,
+    /// How long one turn may run before its loop reads stalled.
+    pub loop_stall: Duration,
+    /// The worker's readiness: its operator cordon.
+    pub readiness: Readiness,
 }
 
 /// The b2bua worker's `/metrics` catalogue: every family of
@@ -35,9 +45,14 @@ pub const CATALOGUE: Catalogue = Catalogue {
         catalogue::UDP,
         catalogue::OVERLOAD,
         catalogue::CAPACITY,
+        catalogue::LOOPS,
+        catalogue::READINESS,
         catalogue::NEW_CALL_OUTCOMES,
         observe::counters::FAMILIES,
         http_net::failures::FAMILIES,
+        http_net::poison::FAMILIES,
+        metric_values::poison::FAMILIES,
+        crate::poison::FAMILIES,
         jemalloc_stats::catalogue::FAMILIES,
     ],
 };
@@ -45,12 +60,16 @@ pub const CATALOGUE: Catalogue = Catalogue {
 impl WorkerMetrics {
     /// The `/metrics` body: the worker's families, the process-wide
     /// observability counters (dropped log lines, trace admission), the
-    /// cause-labelled client HTTP failures, then `extra` (the allocator's
+    /// cause-labelled client HTTP failures, the HTTP client's, the metric
+    /// rows' and the kit's lock recoveries, then `extra` (the allocator's
     /// exposition).
     pub fn body(&self, extra: Option<&probe_http::MetricsFn>) -> String {
         let mut text = self.prometheus_text();
         text.push_str(&observe::counters::prometheus_text());
         text.push_str(&http_net::failures::prometheus_text());
+        text.push_str(&http_net::poison::prometheus_text());
+        text.push_str(&metric_values::poison::prometheus_text());
+        text.push_str(&crate::poison::prometheus_text());
         if let Some(extra) = extra {
             text.push_str(&extra());
         }
@@ -58,14 +77,17 @@ impl WorkerMetrics {
     }
 
     /// The worker's families as Prometheus text: core registry, txn
-    /// backpressure, UDP transport, overload signal, capacity gate, then every
-    /// new call's admission outcome, every rung composed.
+    /// backpressure, UDP transport, overload signal, capacity gate, the loops'
+    /// stall gauge, the cordon gauge, then every new call's admission outcome,
+    /// every rung composed.
     pub fn prometheus_text(&self) -> String {
         let mut text = self.core.prometheus_text();
         text.push_str(&txn_metrics_text(&self.txn));
         text.push_str(&self.udp.prometheus_text());
         text.push_str(&self.overload.prometheus_text());
         text.push_str(&self.capacity.prometheus_text());
+        text.push_str(&self.loops.prometheus_text(self.loop_stall));
+        text.push_str(&self.readiness.prometheus_text());
         text.push_str(
             &NewCallCounts::read(self.core.new_calls(), &self.txn, Some(self.udp.brake()))
                 .prometheus_text(),
@@ -88,19 +110,25 @@ pub fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
     c::RETRANSMIT_BUF_BYTES.render_value(&mut s, m.retransmit_buf_bytes());
     c::SERVER_FINAL_UNSEEN_BRANCH.render_value(&mut s, m.server_final_unseen_branch());
     c::PARSE_ERRORS.render_value(&mut s, m.parse_errors());
+    c::PARSE_REFUSALS_ANSWERED.render_value(&mut s, m.parse_refusals_answered());
+    c::PARSE_REFUSALS_CAPPED.render_value(&mut s, m.parse_refusals_capped());
+    c::PARSE_PANICS.render_value(&mut s, m.parse_panics());
+    let recoveries = &sip_txn::LOCK_RECOVERIES;
+    c::POISONED_LOCK_RECOVERIES.render(&mut s, |series| recoveries.count_at(series.at(0)));
     c::SEND_ERRORS.render_value(&mut s, m.send_errors());
     c::EVENT_QUEUE_DEPTH.render_value(&mut s, m.event_queue_depth());
     c::EVENT_QUEUE_CAPACITY.render_value(&mut s, m.event_queue_capacity());
     let class = |series: &metric_catalogue::Series<'_>| {
-        EventQueueClass::ALL[series.index(&c::EVENT_QUEUE_CLASS)]
+        EventQueueClass::ALL.get(series.index(&c::EVENT_QUEUE_CLASS)).copied()
     };
-    c::EVENT_QUEUE_DROPS.render(&mut s, |series| m.event_queue_drops(class(series)));
-    c::EVENT_QUEUE_DEFERRALS.render(&mut s, |series| m.event_queue_deferrals(class(series)));
+    c::EVENT_QUEUE_DROPS
+        .render(&mut s, |series| class(series).map_or(0, |cl| m.event_queue_drops(cl)));
+    c::EVENT_QUEUE_DEFERRALS
+        .render(&mut s, |series| class(series).map_or(0, |cl| m.event_queue_deferrals(cl)));
     c::EVENT_QUEUE_DEFERRED.render_value(&mut s, m.event_queue_deferred());
     c::DEFERRED_SWEPT.render_value(&mut s, m.deferred_swept());
     c::SWEEP_REAPED.render_value(&mut s, m.sweep_reaped());
     c::UNANSWERED_FORGOTTEN.render_value(&mut s, m.unanswered_forgotten());
-    c::FORGET_REFUSED.render_value(&mut s, m.forget_refused());
     c::RELEASED_UNANSWERED_INVITES_ANSWERED
         .render_value(&mut s, m.released_unanswered_invites_answered());
     c::RELEASED_UNANSWERED_FORGOTTEN.render_value(&mut s, m.released_unanswered_forgotten());
@@ -123,7 +151,8 @@ mod tests {
     use super::*;
 
     async fn txn_layer() -> sip_txn::TransactionLayer {
-        use sip_net::{BindUdpOpts, SignalingNetwork, SimulatedSignalingNetwork};
+        use sip_net::{BindUdpOpts, SignalingNetwork};
+        use sip_net_testkit::SimulatedSignalingNetwork;
         let net = SimulatedSignalingNetwork::new(1);
         let endpoint = net
             .bind_udp(BindUdpOpts::new("127.0.0.1:5070".parse().unwrap(), 64))
@@ -133,7 +162,7 @@ mod tests {
         let (txn, _events) = sip_txn::TransactionLayer::spawn(
             endpoint,
             parser,
-            sip_txn::TransactionConfig::default(),
+            sip_txn::TransactionConfig::new(Arc::new(sip_txn::IdGen::seeded(1))),
         );
         txn
     }
@@ -145,16 +174,19 @@ mod tests {
             8,
             IngressBrakeCounters::new(),
             Arc::new(|| 0),
-            Arc::new(|| 0),
-            Arc::new(|| 0),
-            Arc::new(|| 0),
+            Arc::new(Default::default),
         );
+        let pulse = || Arc::new(sip_txn::LoopPulse::new());
+        let parked = || tokio::spawn(std::future::pending::<()>()).abort_handle();
         WorkerMetrics {
             core: B2buaMetrics::new(),
             txn: txn.metrics().clone(),
             udp,
             overload: OverloadSignal::new(Arc::new(sampler)),
             capacity: CapacityGate::new(Arc::new(probe)),
+            loops: WorkerLoops::new((pulse(), parked()), (pulse(), parked())),
+            loop_stall: Duration::from_secs(5),
+            readiness: Readiness::always_ready(),
         }
     }
 
@@ -203,6 +235,22 @@ mod tests {
                 panic!("{mismatch}\n{text}");
             }
         }
+    }
+
+    /// `b2bua_cordoned` reads the operator's cordon at each scrape.
+    #[tokio::test]
+    async fn the_cordon_gauge_follows_the_cordon() {
+        let txn = txn_layer().await;
+        let w = worker(&txn);
+        let gauge = |w: &WorkerMetrics| {
+            let text = w.prometheus_text();
+            text.lines().find(|l| l.starts_with("b2bua_cordoned ")).map(str::to_owned)
+        };
+        assert_eq!(gauge(&w).as_deref(), Some("b2bua_cordoned 0"));
+        w.readiness.cordon().unwrap();
+        assert_eq!(gauge(&w).as_deref(), Some("b2bua_cordoned 1"));
+        w.readiness.uncordon().unwrap();
+        assert_eq!(gauge(&w).as_deref(), Some("b2bua_cordoned 0"));
     }
 
     /// The deferred-backlog and lifetime series of the transaction layer are

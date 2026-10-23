@@ -5,8 +5,8 @@
 //! leg after answering the BYE. When the peer never answers it, the NOTIFY's
 //! transaction times out (Timer F, RFC 3261 §17.1.2.2) on a leg whose
 //! disposition is already terminal: the leg keeps the disposition its BYE gave
-//! it, the rest of the call stays up, and a request relayed toward that leg
-//! and still pending is answered 481 (RFC 3261 §12.2.2).
+//! it and the rest of the call stays up. A request of the INVITE usage toward
+//! that leg is never relayed: this stack answers it 481 (RFC 3261 §12.2.2).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,7 +15,8 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::{settle_until, B2buaSut};
 use call::ByeDisposition;
-use scenario_harness::Harness;
+use scenario_harness::dialogs::DIALOG_ENDED;
+use scenario_harness::{Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -29,7 +30,7 @@ mod lingering {
         Match, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, ServiceDef,
         ServiceSeed, SERVICE_LAYER,
     };
-    use call::{ByeDisposition, Direction};
+    use call::Direction;
 
     fn on_callee_bye(ctx: &RuleContext) -> Option<RuleHandleResult> {
         let leg = ctx.source_leg_id.to_string();
@@ -49,7 +50,7 @@ mod lingering {
             },
             RuleAction::TerminateLeg {
                 leg_id: leg,
-                bye_disposition: Some(ByeDisposition::ByeReceived),
+                end: b2bua_sdk::model::LegEnd::PeerByeAnswered,
             },
         ]))
     }
@@ -94,6 +95,13 @@ async fn a_transaction_timing_out_on_an_ended_leg_keeps_its_disposition() {
     let h = Harness::new("ended-leg-txn-timeout");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
+    h.waive(
+        WaiverScope::rule(
+            DIALOG_ENDED,
+            "the test's own service sends the NOTIFY after bob's BYE: its timeout is the subject",
+        )
+        .on_party("bob"),
+    );
     let b2bua = B2buaSut::builder(decision())
         .services(vec![lingering::service_def()])
         // No keepalive inside the Timer F window: the caller side answers none.
@@ -121,7 +129,7 @@ async fn a_transaction_timing_out_on_an_ended_leg_keeps_its_disposition() {
     let live = b2bua.live_call(&call_ref).expect("the caller's side of the call is live");
     let callee = live.b_legs.iter().find(|l| l.leg_id == "b-1").expect("the callee's leg");
     assert_eq!(
-        callee.bye_disposition,
+        callee.end(),
         Some(ByeDisposition::ByeReceived),
         "a timeout on an ended leg leaves the disposition its BYE gave it",
     );
@@ -134,14 +142,23 @@ async fn a_transaction_timing_out_on_an_ended_leg_keeps_its_disposition() {
     h.finish().await;
 }
 
-/// The caller's in-dialog INFO is relayed toward the callee's ended leg while
-/// the NOTIFY there is unanswered; when the NOTIFY's transaction times out,
-/// the pending INFO is answered 481 and the leg keeps `ByeReceived`.
+/// The caller's in-dialog INFO, sent while the NOTIFY on the callee's ended
+/// leg is unanswered, has no live peer dialog to ride: her own dialog lives,
+/// so this stack tells her to retry (500 with `Retry-After`, RFC 3261 §14.2),
+/// never 481, which would end her dialog (§12.2.1.2); nothing reaches the
+/// callee. The NOTIFY's own timeout still leaves the leg `ByeReceived`.
 #[tokio::test(start_paused = true)]
-async fn a_request_pending_on_an_ended_leg_is_answered_when_its_transaction_times_out() {
+async fn a_request_toward_a_leg_a_bye_ended_is_told_to_retry() {
     let h = Harness::new("ended-leg-txn-timeout-pending");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
+    h.waive(
+        WaiverScope::rule(
+            DIALOG_ENDED,
+            "the test's own service sends the NOTIFY after bob's BYE: its timeout is the subject",
+        )
+        .on_party("bob"),
+    );
     let b2bua = B2buaSut::builder(decision())
         .services(vec![lingering::service_def()])
         // No keepalive inside the Timer F window: the caller side answers none.
@@ -162,23 +179,58 @@ async fn a_request_pending_on_an_ended_leg_is_answered_when_its_transaction_time
     bob_bye.expect(200).await;
     bob.receive("NOTIFY").await;
 
-    // One second later the caller's INFO reaches the callee's ended dialog.
+    // One second later the caller's INFO names the callee's ended dialog.
     h.advance(Duration::from_secs(1)).await;
     let mut info = alice_dialog.send_request(InDialogMethod::Info).send().await;
-    bob.receive_absorbing("INFO", &["NOTIFY"]).await;
+    let refused = info.expect(500).await;
+    assert!(
+        b2bua_harness::stated_by_response(&refused, "Retry-After").is_some_and(|v| v.trim() == "1"),
+        "the 500 states Retry-After: 1"
+    );
 
-    // The NOTIFY's Timer F (32 s after the BYE) answers the pending INFO.
-    h.advance(Duration::from_millis(31_500)).await;
-    info.expect(481).await;
-    bob.drain().await; // the retransmissions of the unanswered requests
+    // Past the NOTIFY's Timer F (32 s after the BYE).
+    h.advance(Duration::from_secs(33)).await;
+    assert_eq!(bob.drain_tu().await, 0, "nothing new reaches the callee");
+    assert!(
+        !bob.wire_view().iter().any(|e| e.raw.starts_with(b"INFO ")),
+        "the INFO never reaches the callee",
+    );
     let live = b2bua.live_call(&call_ref).expect("the caller's side of the call is live");
     let callee = live.b_legs.iter().find(|l| l.leg_id == "b-1").expect("the callee's leg");
-    assert_eq!(callee.bye_disposition, Some(ByeDisposition::ByeReceived));
+    assert_eq!(callee.end(), Some(ByeDisposition::ByeReceived));
 
-    h.advance(Duration::from_secs(2)).await;
     let mut alice_bye = alice_dialog.bye().await;
     alice_bye.expect(200).await;
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
+    h.finish().await;
+}
+
+/// What the SUT sends onto a dialog a BYE ended reaches the callee's dialog
+/// table even when no step pulls it: the drained NOTIFY fails the run.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "dialog rule dialog-ended fired on bob")]
+async fn a_drained_request_on_an_ended_dialog_fails_the_run() {
+    let h = Harness::new("ended-leg-drained-notify");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let b2bua = B2buaSut::builder(decision())
+        .services(vec![lingering::service_def()])
+        .tune(|c| c.keepalive_interval_sec = 300)
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut b_inv = bob.receive("INVITE").await;
+    b_inv.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let _alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    let mut bob_dialog = b_inv.dialog();
+    let mut bob_bye = bob_dialog.bye().await;
+    bob_bye.expect(200).await;
+    h.advance(Duration::from_millis(500)).await;
+    assert!(bob.drain().await >= 1, "the NOTIFY reached bob");
     h.finish().await;
 }

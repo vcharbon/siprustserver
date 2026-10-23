@@ -1,0 +1,321 @@
+"""A SIPp stream: one UAC container and its exporter twin on the generator network.
+
+The twin starts first and holds the stream's address; the UAC joins its network
+namespace, so the twin keeps shipping the last records after the UAC exits.
+The UAC writes one call-outcome record per call (its `<log>` action) into a
+FIFO in the generator's working directory (workdir.py); the twin carries the
+records through a bounded buffer into `records.jsonl` of the stream directory
+on disk, ships each line to VictoriaLogs and serves the stat counters
+(ADR-0049 §4.2, §6.4). Its status file counts the records it dropped and says
+when every record SIPp wrote is on disk. Neither container swaps: a page of
+SIPp's swapped out stalls every call.
+
+A drain is SIGUSR1: SIPp places no new call and exits once its calls are done.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+
+from . import jsonval as jv
+from .executor import Executor
+from .generator import RecordCopy, Tally
+from .lab import Lab, resolve_target
+from .paths import SIPP_EXPORTER_DIR
+from .profile import Stream
+from .scenario_lint import key_defaults
+
+# Retransmission bound of an INVITE or BYE without an answer (64 * T1).
+TXN_BOUND_S = 32
+# Tail of SIPp's error file the exporter twin keeps: every 1 s deadline check
+# logs a line there, and the file is not rotated, since -ringbuffer_* would
+# rotate the record file too.
+ERROR_KEEP_BYTES = 16 * 1024 * 1024
+# Every error entry but the scenario's own receive timer, kept whole for the
+# run (the tail above holds minutes at a high rate), bounded by this tail. The
+# twin writes it, so its tmpfs pages are charged to the twin's TWIN_MEMORY,
+# beside its record buffer and the exporter's own resident memory (workdir.py).
+ERROR_KEPT_FILE = "/stats/errors.kept.log"
+ERROR_KEPT_BYTES = 64 * 1024 * 1024
+TWIN_MEMORY = "512m"
+# The UAC's -log_file, a FIFO in the working directory; the twin's copy of it in
+# the stream directory, mounted at /records, and the copy's status beside it.
+RECORD_FIFO = "records.fifo"
+RECORD_FILE = "records.jsonl"
+RECORD_STATUS = "records.copy.json"
+# The records the twin holds while the disk is slower than SIPp.
+RECORD_BUFFER_BYTES = 100 * 1024 * 1024
+# Margin of the global `-recv_timeout` above every timeout of the scenario.
+RECV_BACKSTOP_MARGIN_S = 60
+# SIPp's remote control port, where a rate step is sent.
+CONTROL_PORT = 8888
+# The `-key`s every stream passes; a scenario's other keys come from the stream's params.
+DRIVER_KEYS = ("run", "stream", "shape", "hold_ms", "setup_ms")
+
+
+def _key_number(stream: Stream, defaults: Mapping[str, str], key: str) -> float:
+    raw = stream.params.get(key, defaults.get(key, "0"))
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def worst_call_s(stream: Stream, defaults: Mapping[str, str] | None = None) -> float:
+    """The longest a call of the base UAC scenario can take: the setup deadline
+    (or Timer B, when later), then either the hold (or a flood) with each
+    re-INVITE's transaction bound, or the 64*T1 wait for the INVITE's final
+    after a CANCEL, then a BYE that gets no final. `defaults` are the
+    scenario's declared keys, under the stream's params."""
+    d = defaults or {}
+    flood_s = _key_number(stream, d, "flood_count") * _key_number(stream, d, "flood_gap_ms") / 1000
+    flooding = str(stream.params.get("abuse", d.get("abuse", "none"))).endswith("_flood")
+    hold = max(stream.hold_s, flood_s if flooding else 0.0) + _key_number(stream, d, "reinvites") * TXN_BOUND_S
+    return max(stream.setup_deadline_s, TXN_BOUND_S) + max(hold, TXN_BOUND_S) + TXN_BOUND_S
+
+
+@dataclass(frozen=True)
+class Counters:
+    calls_created: int | None
+    current_calls: int | None
+
+
+def parse_stat_csv(text: str | None) -> Counters:
+    if not text:
+        return Counters(None, None)
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return Counters(None, None)
+    header = lines[0].split(";")
+    row = lines[-1].split(";")
+
+    def col(name: str) -> int | None:
+        if name not in header:
+            return None
+        i = header.index(name)
+        try:
+            return int(row[i]) if i < len(row) else None
+        except ValueError:
+            return None
+
+    return Counters(col("TotalCallCreated"), col("CurrentCall"))
+
+
+class SippStream:
+    def __init__(
+        self,
+        run: str,
+        stream: Stream,
+        slot: int,
+        scenario: Path,
+        stream_dir: Path,
+        lab: Lab,
+        executor: Executor,
+        call_id_tag: str = "",
+        records_dir: Path | None = None,
+    ) -> None:
+        """`stream_dir` is the working directory; `records_dir` the directory on
+        disk the twin writes the records into (the working directory when
+        None). `call_id_tag` follows the run id in every Call-ID: two
+        generators of one stream in one run (two firings of a load incident)
+        each carry their own, so no Call-ID repeats."""
+        self.run = run
+        self.call_id_tag = call_id_tag
+        self.stream = stream
+        self.slot = slot
+        self.scenario = scenario
+        self.dir = stream_dir
+        self.records_dir = records_dir or stream_dir
+        self.lab = lab
+        self.executor = executor
+        self.uac = f"hakit-{stream.name}"
+        self.twin = f"hakit-{stream.name}-exporter"
+
+    @property
+    def records_path(self) -> Path:
+        return self.records_dir / RECORD_FILE
+
+    @property
+    def fifo_path(self) -> Path:
+        return self.dir / RECORD_FIFO
+
+    def recv_timeout_ms(self) -> int:
+        s = self.stream
+        return int((worst_call_s(s, key_defaults(self.scenario)) + RECV_BACKSTOP_MARGIN_S) * 1000)
+
+    def max_concurrent(self) -> int:
+        """SIPp's call limit: every call the peak rate places, each at its worst
+        length, so the limit is reached only when the system under test holds
+        calls past every deadline of the scenario (ADR-0049 §3.12)."""
+        s = self.stream
+        if s.max_concurrent is not None:
+            return s.max_concurrent
+        return int(math.ceil(s.peak_cps * worst_call_s(s, key_defaults(self.scenario)))) + 10
+
+    def sipp_argv(self, target: str | None = None) -> list[str]:
+        s = self.stream
+        argv = [
+            "sipp",
+            target or self.lab.sip_target,
+            "-sf",
+            f"/scenarios/{self.scenario.name}",
+            "-inf",
+            "/stats/inject.csv",
+            "-key",
+            "run",
+            self.run,
+            "-key",
+            "stream",
+            s.name,
+            "-key",
+            "shape",
+            s.shape,
+            "-key",
+            "hold_ms",
+            str(int(s.hold_s * 1000)),
+            "-key",
+            "setup_ms",
+            str(int(s.setup_deadline_s * 1000)),
+            "-cid_str",
+            f"%u-%p-{self.run}{self.call_id_tag}@%s",
+            "-i",
+            self.lab.sipp_ip(self.slot),
+            "-p",
+            "5060",
+            "-r",
+            f"{s.cps:g}",
+            "-rp",
+            "1000",
+            "-l",
+            str(self.max_concurrent()),
+            "-recv_timeout",
+            str(self.recv_timeout_ms()),
+            "-trace_logs",
+            "-log_file",
+            f"/stats/{RECORD_FIFO}",
+            "-trace_err",
+            "-error_file",
+            "/stats/errors.log",
+            "-trace_stat",
+            "-stf",
+            "/stats/stat.csv",
+            "-fd",
+            "1",
+            "-cp",
+            str(CONTROL_PORT),
+        ]
+        for k, v in sorted(key_defaults(self.scenario).items()):
+            if k not in DRIVER_KEYS:
+                argv += ["-key", k, v]
+        for k, v in sorted(s.params.items()):
+            argv += ["-key", k, str(v)]
+        return argv
+
+    def start(self) -> str | None:
+        """Start the twin then the UAC; an error text when either refused to start."""
+        target, err = resolve_target(self.lab, self.executor, self.stream.target)
+        if target is None:
+            return f"SIPp UAC of {self.stream.name} did not start: {err}"
+        ip = self.lab.sipp_ip(self.slot)
+        labels = ["--label", f"hakit-run={self.run}", "--label", f"hakit-stream={self.stream.name}"]
+        self.remove()
+        fifo = self.executor.run(["mkfifo", str(self.fifo_path)], timeout_s=30)
+        if fifo.rc != 0:
+            return f"record FIFO of {self.stream.name} not made: {fifo.stderr.strip()[:300]}"
+        twin = self.executor.run(
+            ["docker", "run", "-d", "--name", self.twin, "--user", self.lab.generator_user, *labels]
+            + ["--network", self.lab.sipp_network, "--ip", ip, "--cpus", "0.5", "--memory", TWIN_MEMORY, "--memory-swap", TWIN_MEMORY]
+            + ["-v", f"{self.dir}:/stats", "-v", f"{self.records_dir}:/records", "-v", f"{SIPP_EXPORTER_DIR}:/exporter:ro"]
+            + ["-e", "SIPP_STAT_FILE=/stats/stat.csv", "-e", f"SIPP_SCENARIO={self.scenario.name}"]
+            + ["-e", f"SIPP_ROLE={self.stream.name}", "-e", f"SIPP_JOB={self.uac}"]
+            + ["-e", f"SIPP_STREAM={self.stream.name}", "-e", f"SIPP_SHAPE={self.stream.shape}"]
+            + ["-e", f"SIPP_START={self.stream.start}"]
+            + ["-e", f"SIPP_RECORD_FIFO=/stats/{RECORD_FIFO}", "-e", f"SIPP_RECORD_FILE=/records/{RECORD_FILE}"]
+            + ["-e", f"SIPP_RECORD_STATUS=/records/{RECORD_STATUS}", "-e", f"SIPP_RECORD_BUFFER_BYTES={RECORD_BUFFER_BYTES}"]
+            + ["-e", f"SIPP_RUN={self.run}"]
+            + ["-e", f"SIPP_ERROR_KEEP_BYTES={ERROR_KEEP_BYTES}"]
+            + ["-e", f"SIPP_ERROR_KEPT_FILE={ERROR_KEPT_FILE}", "-e", f"SIPP_ERROR_KEPT_BYTES={ERROR_KEPT_BYTES}"]
+            + ["-e", f"SIPP_RECORD_URL={self.lab.vlogs_url_from_generators}"]
+            + [self.lab.sipp_image, "python3", "/exporter/sipp_stat_exporter.py"],
+            timeout_s=60,
+        )
+        if twin.rc != 0:
+            return f"exporter twin of {self.stream.name} did not start: {twin.stderr.strip()[:300]}"
+        uac = self.executor.run(
+            ["docker", "run", "-d", "--name", self.uac, "--user", self.lab.generator_user, *labels]
+            + ["--network", f"container:{self.twin}", "--cpus", "8", "--memory", "1536m", "--memory-swap", "1536m"]
+            + ["-v", f"{self.scenario.parent}:/scenarios:ro", "-v", f"{self.dir}:/stats", "-w", "/stats"]
+            + [self.lab.sipp_image, *self.sipp_argv(target)],
+            timeout_s=60,
+        )
+        if uac.rc != 0:
+            return f"SIPp UAC of {self.stream.name} did not start: {uac.stderr.strip()[:300]}"
+        return None
+
+    def _inspect(self, name: str, fmt: str) -> str | None:
+        res = self.executor.run(["docker", "inspect", "-f", fmt, name], timeout_s=30)
+        return res.stdout.strip() if res.rc == 0 else None
+
+    def running(self) -> bool:
+        return self._inspect(self.uac, "{{.State.Running}}") == "true"
+
+    def exit_code(self) -> int | None:
+        raw = self._inspect(self.uac, "{{.State.ExitCode}}")
+        try:
+            return int(raw) if raw is not None else None
+        except ValueError:
+            return None
+
+    def drain(self) -> bool:
+        """Signal SIPp to place no new call and exit once its calls end; whether
+        docker delivered the signal. Never sent twice: a second SIGUSR1 makes
+        SIPp exit at once."""
+        return self.executor.run(["docker", "kill", "--signal", "USR1", self.uac], timeout_s=30).rc == 0
+
+    def kill(self) -> bool:
+        return self.executor.run(["docker", "kill", self.uac], timeout_s=30).rc == 0
+
+    def set_rate(self, cps: float) -> bool:
+        """SIPp's remote control: `cset rate <cps>` on its control port, sent
+        from the twin, which shares the UAC's network namespace."""
+        send = (
+            "import socket, sys; "
+            "socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(sys.argv[1].encode(), (sys.argv[2], int(sys.argv[3])))"
+        )
+        argv = ["docker", "exec", self.twin, "python3", "-c", send, f"cset rate {cps:g}", self.lab.sipp_ip(self.slot)]
+        return self.executor.run([*argv, str(CONTROL_PORT)], timeout_s=30).rc == 0
+
+    def counters(self) -> Counters:
+        return parse_stat_csv(self.executor.read_text(self.dir / "stat.csv"))
+
+    def tally(self) -> Tally:
+        """SIPp places every call it creates and fails none on its own."""
+        return Tally(self.counters().calls_created)
+
+    def clean_exit(self, code: int | None) -> bool:
+        """SIPp's exit code counts the calls that failed, not the drain: a
+        drained SIPp has ended once it no longer runs."""
+        return True
+
+    def local_records(self) -> int:
+        text = self.executor.read_text(self.records_path) or ""
+        return sum(1 for ln in text.splitlines() if ln.strip())
+
+    def record_copy(self) -> RecordCopy:
+        """The twin's status: complete once SIPp closed the FIFO and every
+        record is on disk or counted lost."""
+        raw = self.executor.read_text(self.records_dir / RECORD_STATUS)
+        try:
+            doc = jv.as_obj(json.loads(raw or "{}"))
+            return RecordCopy(jv.boolean(doc, "complete", False), jv.opt_int(doc, "lost") or 0)
+        except ValueError:
+            return RecordCopy(False)
+
+    def remove(self) -> None:
+        """Remove both containers, then the FIFO, so it never reaches the run directory."""
+        self.executor.run(["docker", "rm", "-f", self.uac, self.twin], timeout_s=60)
+        self.executor.run(["rm", "-f", "--", str(self.fifo_path)], timeout_s=30)

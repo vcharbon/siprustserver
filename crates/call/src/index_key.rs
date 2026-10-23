@@ -82,13 +82,15 @@ pub fn callback_key(ctx: &str) -> String {
 
 /// Every index key a call owns.
 pub fn call_index_keys(call: &Call) -> Vec<String> {
-    let mut keys = vec![a_leg_key(&call.a_leg.call_id, &call.a_leg.from_tag)];
+    let mut keys = vec![a_leg_key(&call.a_leg.call_id, &call.a_leg_invite.from_tag)];
     for b in &call.b_legs {
-        keys.push(b_local_key(&b.call_id, &b.from_tag));
+        if let Some(invite) = &b.outbound_invite {
+            keys.push(b_local_key(&b.call_id, &invite.our_tag));
+        }
         keys.push(b_leg_key(&b.call_id));
         for d in &b.dialogs {
-            if !d.sip.remote_tag.is_empty() {
-                keys.push(b_dialog_key(&b.call_id, &d.sip.remote_tag));
+            if !d.peer_tag.is_empty() {
+                keys.push(b_dialog_key(&b.call_id, &d.peer_tag));
             }
         }
     }
@@ -116,25 +118,24 @@ pub fn call_index_keys_from_unknown(state: &serde_json::Value) -> Vec<String> {
     }
     let mut keys = Vec::new();
 
-    if let Some(a_leg) = obj.get("a_leg") {
-        if let (Some(call_id), Some(from_tag)) =
-            (str_field(a_leg, "call_id"), str_field(a_leg, "from_tag"))
-        {
-            keys.push(a_leg_key(call_id, from_tag));
-        }
+    let caller_tag = obj.get("a_leg_invite").and_then(|i| str_field(i, "from_tag"));
+    if let (Some(call_id), Some(from_tag)) =
+        (obj.get("a_leg").and_then(|a| str_field(a, "call_id")), caller_tag)
+    {
+        keys.push(a_leg_key(call_id, from_tag));
     }
 
     if let Some(b_legs) = obj.get("b_legs").and_then(|v| v.as_array()) {
         for b in b_legs {
             let Some(cid) = str_field(b, "call_id") else { continue };
-            if let Some(local_tag) = str_field(b, "from_tag") {
+            if let Some(local_tag) = b.get("outbound_invite").and_then(|i| str_field(i, "our_tag"))
+            {
                 keys.push(b_local_key(cid, local_tag));
             }
             keys.push(b_leg_key(cid));
             for d in b.get("dialogs").and_then(|v| v.as_array()).into_iter().flatten() {
-                let remote_tag = d.get("sip").and_then(|s| str_field(s, "remote_tag"));
-                if let Some(remote_tag) = remote_tag.filter(|t| !t.is_empty()) {
-                    keys.push(b_dialog_key(cid, remote_tag));
+                if let Some(peer_tag) = str_field(d, "peer_tag").filter(|t| !t.is_empty()) {
+                    keys.push(b_dialog_key(cid, peer_tag));
                 }
             }
         }
@@ -156,6 +157,10 @@ pub enum IndexLookup<'a> {
     /// In a spiral (§16.3) another call's outgoing leg carries this Call-ID
     /// and From-tag as its own; it is never the CANCEL's target.
     Cancel { call_id: &'a str, from_tag: &'a str },
+    /// An INVITE with no To-tag: the Call-ID and From-tag of the incoming leg
+    /// it opens. A copy of a call's initial INVITE (RFC 3261 §17.2.3) names
+    /// that call's incoming leg; nothing else does.
+    Invite { call_id: &'a str, from_tag: &'a str },
     /// An in-dialog request (its From-tag) or a response (its To-tag): the tag
     /// the remote peer of the dialog owns, on either side of the B2BUA.
     Peer { call_id: &'a str, tag: &'a str },
@@ -179,6 +184,7 @@ pub enum Probe {
 }
 
 const CANCEL_PROBES: [Probe; 2] = [Probe::Resolve(KeyKind::ALeg), Probe::Resolve(KeyKind::BDialog)];
+const INVITE_PROBES: [Probe; 1] = [Probe::Resolve(KeyKind::ALeg)];
 const PEER_PROBES: [Probe; 4] = [
     Probe::Resolve(KeyKind::ALeg),
     Probe::Resolve(KeyKind::BDialog),
@@ -188,13 +194,15 @@ const PEER_PROBES: [Probe; 4] = [
 
 impl IndexLookup<'_> {
     /// The probes that resolve this lookup, in order. A CANCEL never resolves
-    /// by an outgoing leg's Call-ID alone or by its own tag. A peer tag that
+    /// by an outgoing leg's Call-ID alone or by its own tag; an INVITE with no
+    /// To-tag resolves by an incoming leg alone. A peer tag that
     /// is an outgoing leg's own tag stops before the Call-ID-only key: the
     /// message belongs to the incoming leg with that identity, and no such
     /// leg is indexed.
     pub fn probes(&self) -> &'static [Probe] {
         match self {
             IndexLookup::Cancel { .. } => &CANCEL_PROBES,
+            IndexLookup::Invite { .. } => &INVITE_PROBES,
             IndexLookup::Peer { .. } => &PEER_PROBES,
         }
     }
@@ -223,11 +231,10 @@ impl IndexLookup<'_> {
         let leg = match kind {
             KeyKind::ALeg => {
                 let a = &call.a_leg;
-                return (a.call_id == call_id && a.from_tag == tag).then_some(a.leg_id.as_str());
+                let caller_tag = &call.a_leg_invite.from_tag;
+                return (a.call_id == call_id && caller_tag == tag).then_some(a.leg_id.as_str());
             }
-            KeyKind::BDialog => {
-                outgoing.find(|b| b.dialogs.iter().any(|d| d.sip.remote_tag == tag))
-            }
+            KeyKind::BDialog => outgoing.find(|b| b.dialogs.iter().any(|d| d.peer_tag == tag)),
             KeyKind::BLeg => outgoing.next(),
             KeyKind::BLocal => None,
         };
@@ -236,7 +243,8 @@ impl IndexLookup<'_> {
 
     fn identity(&self) -> (&str, &str) {
         match *self {
-            IndexLookup::Cancel { call_id, from_tag } => (call_id, from_tag),
+            IndexLookup::Cancel { call_id, from_tag }
+            | IndexLookup::Invite { call_id, from_tag } => (call_id, from_tag),
             IndexLookup::Peer { call_id, tag } => (call_id, tag),
         }
     }

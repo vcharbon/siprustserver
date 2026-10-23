@@ -97,7 +97,46 @@ fn the_review_of_the_selection_is_placed_on_the_stated_side() {
     );
     assert_eq!(report["sut"]["decided_by"], "stated");
     assert_eq!(report["hits"][0]["capture"], "capture.pcap.gz");
-    golden("review.golden.json", &std::fs::read_to_string(&json).expect("report"));
+    let text = std::fs::read_to_string(&json).expect("report");
+    golden("review.golden.json", &with_occasions_only(&text, &report));
+}
+
+/// The report text without the rules this capture gave no occasion: those
+/// rows restate the rule list, which `pivot-schema`'s rule-copies test pins;
+/// the golden pins what the capture decided.
+fn with_occasions_only(text: &str, report: &serde_json::Value) -> String {
+    let empty: Vec<&str> = report["rules"]
+        .as_object()
+        .expect("rules")
+        .iter()
+        .filter(|(_, tally)| tally["occasions"].as_u64() == Some(0))
+        .map(|(rule, _)| rule.as_str())
+        .collect();
+    let (mut out, mut in_rules, mut skipping) = (Vec::new(), false, false);
+    for line in text.lines() {
+        if skipping {
+            skipping = !(line == "    }," || line == "    }");
+            continue;
+        }
+        if line == "  \"rules\": {" {
+            in_rules = true;
+        } else if in_rules && line.starts_with("  }") {
+            in_rules = false;
+            if out.last() == Some(&"    },") {
+                out.pop();
+                out.push("    }");
+            }
+        } else if in_rules {
+            let rule = line.strip_prefix("    \"").and_then(|l| l.strip_suffix("\": {"));
+            if rule.is_some_and(|r| empty.contains(&r)) {
+                skipping = true;
+                continue;
+            }
+        }
+        out.push(line);
+    }
+    let end = if text.ends_with('\n') { "\n" } else { "" };
+    format!("{}{end}", out.join("\n"))
 }
 
 /// `auto` reads the platform off the derived-Call-ID evidence — the socket
@@ -144,7 +183,7 @@ fn the_rule_set_is_named_and_an_unknown_rule_is_refused() {
         sipflow(&["--sut", "192.0.2.10", "--rfc", "--rfc-rules", "all", "--list"]);
     assert!(ok, "{stderr}");
     assert!(stderr.contains("rules=all"), "{stderr}");
-    assert!(stderr.contains("sdp-origin-continuity: 1 hit(s)"), "{stderr}");
+    assert!(stderr.contains("no-ack-to-dialog-creating-2xx: 2 hit(s)"), "{stderr}");
     assert!(!stderr.contains("serial-register"), "a rule with no occasion is not listed\n{stderr}");
 
     let (_, stderr, ok) = sipflow(&["--rfc", "--rfc-rules", "no-such-rule"]);

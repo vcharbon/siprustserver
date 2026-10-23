@@ -52,9 +52,9 @@ pub async fn spawn_proxy(
 ) -> ProxySut {
     let (ep, sock) = h.bind_sut("proxy", addr).await;
     let metrics = Arc::new(ProxyMetrics::new());
-    let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry)
+    let id_gen = Arc::new(IdGen::seeded(0xC0FFEE));
+    let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry, id_gen)
         .clock(Clock::test_at(0))
-        .id_gen(Arc::new(IdGen::seeded(0xC0FFEE)))
         .metrics(metrics.clone())
         .build(ep);
     let task = tokio::spawn(core.run());
@@ -72,9 +72,9 @@ pub async fn spawn_proxy_with_traces(
 ) -> ProxySut {
     let (ep, sock) = h.bind_sut("proxy", addr).await;
     let metrics = Arc::new(ProxyMetrics::new());
-    let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry)
+    let id_gen = Arc::new(IdGen::seeded(0xC0FFEE));
+    let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry, id_gen)
         .clock(Clock::test_at(0))
-        .id_gen(Arc::new(IdGen::seeded(0xC0FFEE)))
         .metrics(metrics.clone())
         .traces(traces)
         .build(ep);
@@ -89,4 +89,17 @@ pub fn forward_all(target: SocketAddr) -> (Arc<dyn RoutingStrategy>, Arc<dyn Wor
         Arc::new(sip_proxy::ForwardAllStrategy::new(ProxyAddr::from(target)));
     let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
     (strategy, registry)
+}
+
+/// The capability lines a simulated worker states on its 200 to an OPTIONS
+/// (RFC 3261 §11.2): the stack set.
+pub fn options_capabilities() -> Vec<sip_message::types::SipHeader> {
+    sip_message::generators::CapabilitySet::default()
+        .lines()
+        .into_iter()
+        .map(|(name, value)| sip_message::types::SipHeader {
+            name: name.as_wire_str().into(),
+            value: value.into(),
+        })
+        .collect()
 }

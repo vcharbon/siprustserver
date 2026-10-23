@@ -310,7 +310,7 @@ fn a_stale_decrease_caps_the_bucket() {
     });
     o.apply_payload(W, &payload(0.7), 0);
     while o.try_consume_for(W, 0).is_ok() {}
-    assert_eq!(o.sweep_stale(6000), 1);
+    assert_eq!(o.sweep_stale(6000, |_| true), 1);
     let snap = snap_within_cap(&o, 6000);
     assert_eq!(snap.cap_cps, 75.0);
     assert_eq!(snap.tokens, 75.0);
@@ -385,7 +385,7 @@ fn sweep_below_stale_threshold_is_a_no_op() {
         c.payload_stale_ms = 5000;
     });
     o.apply_payload(W, &payload(0.7), 1000);
-    assert_eq!(o.sweep_stale(1500), 0, "no worker floored below the stale threshold");
+    assert_eq!(o.sweep_stale(1500, |_| true), 0, "no worker floored below the stale threshold");
     let snap = snap1(&o, 1500);
     assert_eq!(snap.last_action, AimdAction::Hold);
     assert_eq!(snap.payload_missing_count, 0);
@@ -401,7 +401,7 @@ fn sweep_above_stale_threshold_triggers_conservative_decrease() {
     });
     o.apply_payload(W, &payload(0.7), 0);
     assert_eq!(
-        o.sweep_stale(6000),
+        o.sweep_stale(6000, |_| true),
         1,
         "the one stale worker is floored (feeds the aggregate counter)"
     );
@@ -409,6 +409,23 @@ fn sweep_above_stale_threshold_triggers_conservative_decrease() {
     assert_eq!(snap.last_action, AimdAction::StaleDecrease);
     assert_eq!(snap.cap_cps, 75.0); // 100 × 0.75 — cap unchanged by seed (hold band)
     assert_eq!(snap.payload_missing_count, 1);
+}
+
+/// A stale payload floors only a worker read alive: a worker not alive gets
+/// no new call, and keeps the cap its last payload set.
+#[test]
+fn sweep_leaves_a_worker_not_alive_as_it_is() {
+    let o = obs_with(|c| {
+        bands_cfg(c);
+        c.cap_initial_cps = 100.0;
+        c.payload_stale_ms = 5000;
+    });
+    o.apply_payload(W, &payload(0.7), 0);
+    assert_eq!(o.sweep_stale(6000, |_| false), 0, "nothing floored");
+    let snap = snap1(&o, 6000);
+    assert_eq!(snap.last_action, AimdAction::Hold);
+    assert_eq!(snap.cap_cps, 100.0);
+    assert_eq!(snap.payload_missing_count, 0);
 }
 
 // ── diagnostics ───────────────────────────────────────────────────────────
@@ -468,7 +485,7 @@ fn an_empty_bucket_refuses_with_its_time_to_a_token() {
 /// reported the pre-slam cap, the one number an operator reads that line for.
 #[test]
 fn the_band_change_line_reports_the_cap_the_transition_produced() {
-    let (_guard, log) = observe::test_buffer();
+    let (_guard, log) = observe_testkit::test_buffer();
     let o = obs_with(|c| {
         bands_cfg(c);
         c.cap_initial_cps = 100.0;

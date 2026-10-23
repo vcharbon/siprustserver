@@ -17,10 +17,12 @@
 //! module would shadow the prelude's `From` trait.
 
 mod aliases;
+mod authority;
 mod charging;
 mod class;
 mod credentials;
 mod equivalence;
+mod geolocation;
 mod identity;
 mod item_separator;
 pub mod kind;
@@ -31,6 +33,7 @@ mod numeric;
 mod params;
 mod reason;
 mod restatement;
+mod retry_after;
 mod scan;
 mod sent_by;
 mod token_list;
@@ -38,33 +41,40 @@ mod token_params;
 mod uri;
 mod value;
 mod via;
+mod warning;
 mod wire;
 
 pub use aliases::{
     AcceptRange, Allow, AllowEvents, Authorization, Contact, ContentDisposition, ContentLength,
     Diversion, Event, Expires, From, HistoryInfo, MaxForwards, MediaType, MinExpires, MinSe,
     PAssertedIdentity, PPreferredIdentity, PathEntry, Privacy, ProxyAuthenticate,
-    ProxyAuthorization, ProxyRequire, RSeq, Reason, RecordRouteEntry, ReferTo, ReferredBy,
-    RemotePartyId, Replaces, ReplyTo, Require, RetryAfter, RouteEntry, ServiceRouteEntry,
-    SessionExpires, SubscriptionState, Supported, To, Unsupported, WwwAuthenticate,
+    ProxyAuthorization, ProxyRequire, RSeq, Reason, RecordRouteEntry, ReferSub, ReferTo,
+    ReferredBy, RemotePartyId, Replaces, ReplyTo, Require, RetryAfter, RouteEntry,
+    ServiceRouteEntry, SessionExpires, SubscriptionState, Supported, To, Unsupported,
+    WwwAuthenticate,
 };
+pub use authority::{host_of, message_id_domain, network_host};
 pub use charging::ChargingVector;
 pub use class::HeaderClass;
 pub use credentials::Credentials;
 pub use equivalence::{canonical_header_items, header_forms_equivalent};
+pub use geolocation::{Geolocation, GeolocationError, GeolocationRouting};
 pub use identity::{CSeq, CallId, RAck};
 pub use item_separator::ItemSeparator;
 pub use name::HeaderName;
-pub use name_addr::NameAddr;
+pub use name_addr::{AddrForm, NameAddr};
 pub use name_addr_header::NameAddrHeader;
 pub use numeric::NumericHeader;
 pub use params::{ParamValue, Params};
-pub use reason::{q850_cause_alone, readable_reasons, reason_for, Q850};
+pub use reason::{cause_key, q850_cause_alone, readable_reasons, reason_for, Q850};
 pub use restatement::Restatement;
+pub use retry_after::retry_after_seconds;
 pub use sent_by::{SentBy, SentByRef};
 pub use token_list::TokenListHeader;
 pub use token_params::{parse_token_params, TokenParamsHeader};
-pub use uri::{HostPort, Uri};
+pub(crate) use uri::read_sent_by;
+pub use uri::{HostPort, Uri, UriRole};
 pub use value::{Folding, HeaderValue};
 pub use via::{Rport, Via, BRANCH_MAGIC_COOKIE};
+pub use warning::{warn_agents, warning_value, WARN_TEXT_MAX};
 pub use wire::Wire;

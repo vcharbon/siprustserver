@@ -1,0 +1,21 @@
+[package]
+name = "task-restart"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Supervised long-lived tasks: a run that panics is logged, counted per named task and run again, so a dead loop never hides behind a live process."
+
+[package.metadata.purity]
+tier = "shell"
+
+[lints]
+workspace = true
+
+[dependencies]
+observe = { path = "../observe", default-features = false }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

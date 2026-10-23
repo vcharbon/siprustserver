@@ -8,11 +8,11 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use repl_net::transport::SimulatedReplicationNetwork;
+use repl_net::transport::ReplicationNetwork;
+use repl_net_testkit::SimulatedReplicationNetwork;
 use sip_clock::Clock;
-use sip_message::parser::custom::CustomParser;
-use sip_message::{SipMessage, SipParser, SipRequest};
-use sip_net::{BindUdpOpts, SignalingNetwork, SimulatedSignalingNetwork};
+use sip_net::{BindUdpOpts, SignalingNetwork};
+use sip_net_testkit::SimulatedSignalingNetwork;
 use sip_txn::IdGen;
 use topology::{Membership, Peer, SimulatedMembership};
 
@@ -21,7 +21,7 @@ use crate::config::B2buaConfig;
 use crate::decision::ScriptedDecisionEngine;
 use crate::limiter::NoopLimiter;
 use crate::metrics::B2buaMetrics;
-use crate::repl::{AddrResolver, FnPeerResolver, ReplicatingCallStore};
+use crate::repl::{AddrResolver, FnPeerResolver, PullerConfig, ReplicatingCallStore, ServeConfig};
 use crate::store::InMemoryCallStore;
 use crate::{B2buaCore, B2buaDeps, ReplicationSetup};
 
@@ -29,10 +29,38 @@ use crate::{B2buaCore, B2buaDeps, ReplicationSetup};
 /// and clock in hand.
 pub struct Node {
     pub core: B2buaCore,
+    /// The node's membership view: a peer added then removed departs.
+    pub membership: Arc<SimulatedMembership>,
     pub store: Arc<ReplicatingCallStore>,
     pub cdr: InMemoryCdrWriter,
     pub metrics: B2buaMetrics,
     pub clock: Clock,
+    /// The model-invariant record's mark at the node's start: the node fails
+    /// its test on drop with the first violation kept after it.
+    since: usize,
+}
+
+impl Node {
+    /// The violations kept since the node's start or the last take, which the
+    /// node then no longer fails its test with: a test that builds a defect
+    /// takes the ones it expects.
+    pub fn take_violations(&mut self) -> Vec<String> {
+        let kept = crate::model_invariants::violations();
+        let taken = kept.get(self.since..).unwrap_or_default().to_vec();
+        self.since = kept.len();
+        taken
+    }
+}
+
+impl Drop for Node {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
+        if let Some(first) = crate::model_invariants::violations().get(self.since) {
+            panic!("{first}");
+        }
+    }
 }
 
 /// Spawn a core on simulated SIP and replication fabrics with no peers.
@@ -71,17 +99,21 @@ pub async fn node_on(
         .await
         .expect("bind the simulated SIP endpoint");
     let store = Arc::new(ReplicatingCallStore::new(1, clock.clone()));
-    let membership: Arc<dyn Membership> =
-        Arc::new(SimulatedMembership::with_clock(Vec::new(), clock.clone()));
+    let view = Arc::new(SimulatedMembership::with_clock(Vec::new(), clock.clone()));
+    let membership: Arc<dyn Membership> = view.clone();
     let addr_resolver: AddrResolver =
         Arc::new(FnPeerResolver(|_: &Peer| SocketAddr::from(([127, 0, 0, 2], 1))));
+    let network = SimulatedReplicationNetwork::with_delay(1);
+    let listener = network.listen(SocketAddr::from(([127, 0, 0, 2], 9600))).await.unwrap();
     let setup = ReplicationSetup {
-        network: Arc::new(SimulatedReplicationNetwork::with_delay(1)),
+        network: Arc::new(network),
         membership,
         store: store.clone(),
-        listen_addr: SocketAddr::from(([127, 0, 0, 2], 9600)),
+        listener,
         addr_resolver,
         incarnation_gen: 1,
+        puller: PullerConfig::default(),
+        serve: ServeConfig::default(),
     };
     let config = B2buaConfig {
         self_ordinal: ordinal.into(),
@@ -115,35 +147,13 @@ pub async fn node_on(
     };
     Node {
         core: B2buaCore::spawn_with_services(endpoint, deps, services),
+        membership: view,
         store,
         cdr,
         metrics,
         clock,
+        since: crate::model_invariants::mark(),
     }
 }
 
-/// The caller's source address on the simulated fabric.
-pub fn src() -> SocketAddr {
-    SocketAddr::from(([10, 0, 0, 9], 5060))
-}
-
-/// A proxied INVITE carrying the `w_pri`/`w_bak` cookie, keyed by Call-ID so
-/// each call gets a distinct `callRef` (`{pri}|{cid}@…|alicetag`).
-pub fn invite(pri: &str, bak: &str, cid: &str) -> SipRequest {
-    let raw = format!(
-        "INVITE sip:bob@example.com SIP/2.0\r\n\
-         Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-{cid}\r\n\
-         Record-Route: <sip:10.0.0.1:5060;v=3;w_pri={pri};w_bak={bak};e=0;kid=k1;sig=abc;lr>\r\n\
-         Max-Forwards: 70\r\n\
-         From: <sip:alice@example.com>;tag=alicetag\r\n\
-         To: <sip:bob@example.com>\r\n\
-         Call-ID: {cid}@10.0.0.9\r\n\
-         CSeq: 1 INVITE\r\n\
-         Contact: <sip:alice@10.0.0.9:5060>\r\n\
-         Content-Length: 0\r\n\r\n"
-    );
-    match CustomParser::new().parse(raw.as_bytes()).unwrap() {
-        SipMessage::Request(r) => r,
-        _ => panic!("expected a request"),
-    }
-}
+pub use crate::test_call::{invite, src, turn};

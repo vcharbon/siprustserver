@@ -10,6 +10,8 @@
 //! prelude's `From` trait.
 
 use super::name::HeaderName;
+use super::name_addr::AddrForm;
+use super::uri::UriRole;
 use super::value::Folding;
 
 /// `2^31 - 1` — the ceiling RFC 3261 puts on the 32-bit signed counters.
@@ -23,7 +25,15 @@ pub trait HeaderKind: std::fmt::Debug + Clone + Copy + Send + Sync + 'static {
 }
 
 /// A header whose value is a name-addr.
-pub trait NameAddrKind: HeaderKind {}
+pub trait NameAddrKind: HeaderKind {
+    /// Where this header's grammar lets its address stand.
+    const FORM: AddrForm = AddrForm::NameAddrOrSpec;
+    /// What the address's host is for.
+    const ROLE: UriRole = UriRole::Target;
+    /// The address names a hop a request is sent to, so its URI must name a
+    /// host: one of an opaque scheme is refused.
+    const NAMES_HOP: bool = false;
+}
 
 /// A name-addr header whose grammar admits header parameters. Absent on
 /// P-Asserted-Identity and P-Preferred-Identity, whose RFC 3325 grammar is a
@@ -128,6 +138,7 @@ kinds! {
     RetryAfter => RetryAfter, Single;
     Reason => Reason, Comma;
     Replaces => Replaces, Single;
+    ReferSub => ReferSub, Single;
 
     MaxForwards => MaxForwards, Single;
     ContentLength => ContentLength, Single;
@@ -142,10 +153,40 @@ kinds! {
     ProxyAuthenticate => ProxyAuthenticate, Opaque;
 }
 
-capability! { NameAddrKind:
-    From, To, Contact, Route, RecordRoute, Path, ServiceRoute, ReferTo, ReferredBy, ReplyTo,
-    Diversion, HistoryInfo, RemotePartyId, PAssertedIdentity, PPreferredIdentity,
+capability! { NameAddrKind: Contact, ReferTo, ReplyTo }
+
+/// The headers whose address names a party and is never resolved.
+macro_rules! identity_kinds {
+    ($($marker:ident),+) => {
+        $(impl NameAddrKind for $marker {
+            const ROLE: UriRole = UriRole::Identity;
+        })+
+    };
 }
+
+identity_kinds!(
+    From,
+    To,
+    ReferredBy,
+    Diversion,
+    HistoryInfo,
+    RemotePartyId,
+    PAssertedIdentity,
+    PPreferredIdentity
+);
+
+/// The route family: `route-param = name-addr *( SEMI rr-param )` (RFC 3261
+/// §20.30, §20.34; RFC 3327 §4; RFC 3608 §5).
+macro_rules! route_kinds {
+    ($($marker:ident),+) => {
+        $(impl NameAddrKind for $marker {
+            const FORM: AddrForm = AddrForm::NameAddrOnly;
+            const NAMES_HOP: bool = true;
+        })+
+    };
+}
+
+route_kinds!(Route, RecordRoute, Path, ServiceRoute);
 
 capability! { RichParams:
     From, To, Contact, Route, RecordRoute, Path, ServiceRoute, ReferTo, ReferredBy, ReplyTo,
@@ -160,7 +201,7 @@ capability! { TokenKind: Require, ProxyRequire, Supported, Unsupported, Allow, A
 
 capability! { TokenParamsKind:
     Event, SubscriptionState, Accept, ContentType, ContentDisposition, SessionExpires, RetryAfter, Reason,
-    Replaces,
+    Replaces, ReferSub,
 }
 
 numeric_kinds! {

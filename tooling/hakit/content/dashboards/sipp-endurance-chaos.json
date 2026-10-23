@@ -1,0 +1,2491 @@
+{
+  "uid": "sipp-endurance-chaos",
+  "title": "SIPp Endurance & Chaos",
+  "tags": [
+    "sip",
+    "endurance",
+    "chaos",
+    "sipp",
+    "hakit"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": {
+    "from": "now-2h",
+    "to": "now"
+  },
+  "annotations": {
+    "list": [
+      {
+        "name": "Incident window",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "vm"
+        },
+        "enable": true,
+        "iconColor": "orange",
+        "expr": "max by (incident, run) (sip_chaos_window{incident!=\"\"}) == 1",
+        "titleFormat": "{{incident}}",
+        "tagKeys": "incident,run",
+        "step": "10s"
+      },
+      {
+        "name": "Incident phase",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "vm"
+        },
+        "enable": true,
+        "iconColor": "red",
+        "expr": "timestamp(sip_chaos_event{incident!=\"\"}) * 1000",
+        "useValueForTime": true,
+        "titleFormat": "{{incident}} {{phase}}",
+        "tagKeys": "incident,phase,source,run",
+        "step": "10s"
+      },
+      {
+        "name": "Workflow marks",
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "iconColor": "purple",
+        "target": {
+          "type": "tags",
+          "matchAny": false,
+          "tags": [
+            "soak"
+          ],
+          "limit": 200
+        }
+      }
+    ]
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "title": "HA tooling dashboards",
+      "tags": [
+        "hakit"
+      ],
+      "asDropdown": true,
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "run",
+        "label": "run",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "vm"
+        },
+        "query": {
+          "query": "label_values(sip_chaos_event{incident!=\"\"}, run)",
+          "refId": "run"
+        },
+        "definition": "label_values(sip_chaos_event{incident!=\"\"}, run)",
+        "includeAll": true,
+        "allValue": ".+",
+        "multi": false,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 2,
+        "sort": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Run workflow (what the supervising workflow is doing)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 101,
+      "type": "stat",
+      "title": "Workflow phase",
+      "description": "The phase a workflow supervising the run reports (sip_soak_phase): bring-up, launching, running, investigating, remediating, reporting, done. An empty board in bring-up means the lab is still coming up, not that the system under test is down.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "last_over_time(sip_soak_phase[15m]) == 1",
+          "refId": "A",
+          "legendFormat": "{{phase}}"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "textMode": "name",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 102,
+      "type": "stat",
+      "title": "Incident events: seen / expected",
+      "description": "How far through its planned incidents the supervised run is.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "last_over_time(sip_soak_events_seen[15m])",
+          "refId": "A",
+          "legendFormat": "seen"
+        },
+        {
+          "expr": "last_over_time(sip_soak_events_expected[15m])",
+          "refId": "B",
+          "legendFormat": "expected"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "textMode": "value_and_name",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 103,
+      "type": "table",
+      "title": "Findings escalated this run",
+      "description": "One row per root-cause signature the supervising workflow escalated (sip_soak_finding), with its severity.",
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "last_over_time(sip_soak_finding[6h])",
+          "refId": "A",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "options": {
+        "showHeader": true
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Overview",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Concurrent calls (all streams)",
+      "description": "Live established dialogs across every SIPp stream.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum(sipp_current_calls)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 4000
+              },
+              {
+                "color": "red",
+                "value": 8000
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Call setup rate (created/s)",
+      "description": "Aggregate INVITEs/s created by all UAC streams.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(sipp_calls_created_total[1m]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Success ratio (5m, excl. load-incident streams)",
+      "description": "Resolved-call success ratio over 5m for the run streams. The streams a load incident starts (start=\"incident\") are left out: what they cost is their budget's question; see the panel that counts them apart.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "100*sum(rate(sipp_successful_calls_total{start!=\"incident\"}[5m]))/clamp_min(sum(rate(sipp_successful_calls_total{start!=\"incident\"}[5m]))+sum(rate(sipp_failed_calls_total{start!=\"incident\"}[5m])),1)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 90
+              },
+              {
+                "color": "green",
+                "value": 99
+              }
+            ]
+          },
+          "unit": "percent",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Failed calls (cumulative, excl. load-incident streams)",
+      "description": "Total failed calls across the run streams (load-incident streams counted apart).",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum(sipp_failed_calls_total{start!=\"incident\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "row",
+      "title": "Traffic",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Concurrent calls by stream",
+      "description": "Live dialogs per stream (role is the stream name).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 11
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (role)(sipp_current_calls)",
+          "refId": "A",
+          "legendFormat": "{{role}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 18,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Call rate by stream",
+      "description": "SIPp cumulative call rate (cps) per stream (role is the stream name).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 11
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (role)(sipp_call_rate)",
+          "refId": "A",
+          "legendFormat": "{{role}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 1
+          },
+          "unit": "cps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": "row",
+      "title": "Outcomes",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Successful vs failed (calls/s, excl. load-incident streams)",
+      "description": "Per-second resolved call outcomes for the run streams (load-incident streams counted apart below).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(sipp_successful_calls_total{start!=\"incident\"}[1m]))",
+          "refId": "A",
+          "legendFormat": "successful"
+        },
+        {
+          "expr": "sum(rate(sipp_failed_calls_total{start!=\"incident\"}[1m]))",
+          "refId": "B",
+          "legendFormat": "failed"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Failure causes (calls/s, excl. load-incident streams)",
+      "description": "Per-second failures by SIPp failure class for the run streams (load-incident streams counted apart below).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (cause)(rate(sipp_failed_total{start!=\"incident\"}[1m]))",
+          "refId": "A",
+          "legendFormat": "{{cause}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 18,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "table",
+      "title": "Failure causes (cumulative) by stream",
+      "description": "Cumulative count per failure class AND per SIPp stream/endpoint (role + scenario), non-zero only. This attributes each 'unexpected_msg' (and every other cause) to the exact stream that saw it.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (cause, role, scenario)(sipp_failed_total) > 0",
+          "refId": "A",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Retransmissions / out-of-call / dead-call (per-s)",
+      "description": "Protocol-health signals.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(sipp_retransmissions_total[1m]))",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(sipp_out_of_call_msgs_total[1m]))",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(sipp_dead_call_msgs_total[1m]))",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 19,
+      "type": "row",
+      "title": "Infra (SUT pods)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 45
+      }
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Worker / proxy restarts (SUT)",
+      "description": "Container restart counters — chaos kills show here.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 46
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vm"
+          },
+          "expr": "sum by (exported_pod)(kube_pod_container_status_restarts_total{exported_namespace=\"sip-test\",exported_pod=~\"b2bua-worker.*|sip-front-proxy.*|call-limiter.*|cdr-consumer.*\"})",
+          "legendFormat": "{{exported_pod}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "SUT pod CPU (cores)",
+      "description": "cAdvisor CPU per worker/proxy pod.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 46
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod)(rate(container_cpu_usage_seconds_total{namespace=\"sip-test\",pod=~\"b2bua-worker.*|sip-front-proxy.*\"}[1m]))",
+          "refId": "A",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 22,
+      "type": "row",
+      "title": "Call-leak / orphan detector",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 53
+      }
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "B2BUA active calls per worker (must fall to ~0 when idle — leak detector)",
+      "description": "b2bua_active_calls per worker. A flat plateau after traffic stops = the call leak. With the reaper fix it tracks real concurrency and drains.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 54
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod)(b2bua_active_calls)",
+          "refId": "A",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 34,
+      "type": "timeseries",
+      "title": "Ghost gap = b2bua_active − sipp_current − loadgen_inflight (double-serve leak detector, ADR-0014)",
+      "description": "The HA leak signal: the workers' active calls against the calls the generators hold (SIPp current calls plus the loadgens' calls in flight, which are the workers' calls too). A healthy cluster keeps the gap near 0 (plus scrape skew). A gap that rises and stays risen after a worker restart is a call served twice: a takeover copy the restarted primary serves as well (self-release failed), or an eager-takeover storm (ADR-0014). The threshold line is 300. A product call with several legs (a reroute, a transfer, a media leg) can hold more than one B2BUA call per generator call, so such a load keeps a positive gap at rest: read its trend, not its level.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 62
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum(b2bua_active_calls) - (sum(sipp_current_calls) or vector(0)) - (sum(loadgen_inflight) or vector(0))",
+          "refId": "A",
+          "legendFormat": "ghost gap (live)"
+        },
+        {
+          "expr": "sum(b2bua_active_calls)",
+          "refId": "B",
+          "legendFormat": "b2bua active"
+        },
+        {
+          "expr": "sum(sipp_current_calls)",
+          "refId": "C",
+          "legendFormat": "sipp current"
+        },
+        {
+          "expr": "sum(loadgen_inflight)",
+          "refId": "D",
+          "legendFormat": "loadgen in flight"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "lineWidth": 1
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ghost gap (live)"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 25,
+      "type": "row",
+      "title": "Per-stream (SIPp instance) breakdown",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 70
+      }
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "Messages/sec per stream (calls created by role)",
+      "description": "`sipp_calls_created_total` rate split by SIPp stream (role is the stream name). Each stream counts its own traffic; all share this graph.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 71
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (role)(rate(sipp_calls_created_total[1m]))",
+          "refId": "A",
+          "legendFormat": "{{role}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "custom": {
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "Errors/sec per stream (failed calls by role)",
+      "description": "`sipp_failed_calls_total` rate split by SIPp instance (role). Each stream counts its own failures; all roles share this graph so you can see which endpoint is erroring.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 71
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (role)(rate(sipp_failed_calls_total[1m]))",
+          "refId": "A",
+          "legendFormat": "{{role}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "Unexpected messages by endpoint (role + scenario)",
+      "description": "`sipp_failed_total{cause=\"unexpected_msg\"}` rate split by the SIPp instance that received it (role + scenario). This is the answer to 'which endpoint generated the unexpected message'.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 79
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (role, scenario)(rate(sipp_failed_total{cause=\"unexpected_msg\"}[1m]))",
+          "refId": "A",
+          "legendFormat": "{{role}} ({{scenario}})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Failure causes per stream (cause + role)",
+      "description": "`sipp_failed_total` rate by failure class AND SIPp instance (role) — full per-endpoint error breakdown across every cause, not just unexpected_msg.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 79
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (cause, role)(rate(sipp_failed_total[1m]))",
+          "refId": "A",
+          "legendFormat": "{{cause}} · {{role}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Load-incident streams — counted apart (EXCLUDED from headline)",
+      "description": "The SIPp streams a load incident starts (start=\"incident\": an abuse flood, an orphaning peer, …) in isolation: calls/s, failures/s and failure causes. Such a stream fails by design, so it is left out of the headline panels and its cost is judged by its window's budget; the run streams carry the headline.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 87
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(sipp_calls_created_total{start=\"incident\"}[1m]))",
+          "refId": "A",
+          "legendFormat": "load-incident calls/s"
+        },
+        {
+          "expr": "sum(rate(sipp_failed_calls_total{start=\"incident\"}[1m]))",
+          "refId": "B",
+          "legendFormat": "load-incident failed/s"
+        },
+        {
+          "expr": "sum by (cause)(rate(sipp_failed_total{start=\"incident\"}[1m]))",
+          "refId": "C",
+          "legendFormat": "load-incident {{cause}}/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "custom": {
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 31,
+      "type": "row",
+      "title": "Call limiter",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 95
+      }
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "Call-limiter — admit vs rejected (per-s)",
+      "description": "Limiter service throughput: admits/s (every call traverses the limiter) vs rejected/s (a stream calling over its cap). Rejects drop to 0 while the limiter is unreachable (the b2bua fails open) and resume after.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 96
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(limiter_admits_total[1m]))",
+          "refId": "A",
+          "legendFormat": "admit/s"
+        },
+        {
+          "expr": "rate(limiter_admits_total{outcome=\"admitted\"}[1m])",
+          "refId": "B",
+          "legendFormat": "admitted/s"
+        },
+        {
+          "expr": "rate(limiter_admits_total{outcome=\"rejected\"}[1m])",
+          "refId": "C",
+          "legendFormat": "rejected/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "custom": {
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 35,
+      "type": "row",
+      "title": "HA Recovery / Re-hydration (continuous reclaim + ADR-0014)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 105
+      }
+    },
+    {
+      "id": 36,
+      "type": "timeseries",
+      "title": "Re-hydration: bootstrap outcome (passes/min)",
+      "description": "A rebooting primary pulls its partition back from the backup. SEEDED = a pass reached the terminal Noop (full keyset streamed). STALLED = a pass tripped the (now 2-min) idle window — the stream went silent mid-rehydration. Persistent STALLED = a peer-side stall truncating the stream, not the materialisation.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 106
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod)(rate(b2bua_repl_bootstrap_seeded_total[5m]))*60",
+          "refId": "A",
+          "legendFormat": "seeded/min {{pod}}"
+        },
+        {
+          "expr": "sum by (pod)(rate(b2bua_repl_bootstrap_stalled_total[5m]))*60",
+          "refId": "B",
+          "legendFormat": "STALLED/min {{pod}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "lineWidth": 2
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 37,
+      "type": "timeseries",
+      "title": "Re-hydration: bodies imported per bootstrap pass (last_applied)",
+      "description": "Bodies the MOST RECENT bootstrap pass imported, per worker. After a kill, this should jump to ~the worker's held partition size. If successive STALLED passes re-pin last_applied at the SAME value, the stream is truncating (peer-side stall) — the failure class behind the long-call-on-reboot 481.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 106
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "max by (pod)(b2bua_repl_bootstrap_last_applied)",
+          "refId": "A",
+          "legendFormat": "last_applied {{pod}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "lineWidth": 2
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 38,
+      "type": "timeseries",
+      "title": "Reclaim: calls re-materialised into the serving map",
+      "description": "b2bua_repl_reclaimed_total = calls the rebooted primary materialised into its LIVE serving map + re-armed timers (now puller-driven & continuous, not a one-shot 10s-bounded sweep). After a kill this should climb to ~the reclaimed worker's pre-kill long+short concurrency. A flat/short climb = incomplete rebuild (the stranding bug).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 114
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod)(rate(b2bua_repl_reclaimed_total[1m]))*60",
+          "refId": "A",
+          "legendFormat": "reclaimed/min {{pod}}"
+        },
+        {
+          "expr": "sum(b2bua_repl_reclaimed_total)",
+          "refId": "B",
+          "legendFormat": "reclaimed cumulative (all)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "lineWidth": 2
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 39,
+      "type": "timeseries",
+      "title": "Reactive takeover vs self-release (rate/min)",
+      "description": "ADR-0014 reactive-only takeover: the backup hydrates a dialog on demand when the proxy reroutes (takeover_hydrated) and self-releases the copy once the served txn terminates (self_release), or stands it down on a covering write of its returned primary (stand_down, ADR-0047 D7). Balanced rates ⇒ no double-serve buildup.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 114
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod)(rate(b2bua_repl_takeover_hydrated_total[5m]))*60",
+          "refId": "A",
+          "legendFormat": "takeover_hydrated/min {{pod}}"
+        },
+        {
+          "expr": "sum by (pod)(rate(b2bua_repl_self_release_total[5m]))*60",
+          "refId": "B",
+          "legendFormat": "self_release/min {{pod}}"
+        },
+        {
+          "expr": "sum by (pod)(rate(b2bua_repl_stand_down_total[5m]))*60",
+          "refId": "C",
+          "legendFormat": "stand_down/min {{pod}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "lineWidth": 2
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 42,
+      "type": "stat",
+      "title": "Reverse flush refused per worker in range (must stay far below takeover_hydrated)",
+      "description": "ADR-0014: a backup's reverse flush for a call this primary serves live that neither the (p,b) vector nor lifecycle progress let it fold, so the primary kept its own copy. A count near takeover_hydrated means the answered body is not reaching the fold: established calls are being lost.",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 130
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod)(increase(b2bua_repl_reverse_flush_refused_total[$__range]))",
+          "refId": "A",
+          "legendFormat": "refused {{pod}}",
+          "instant": true
+        },
+        {
+          "expr": "sum(increase(b2bua_repl_takeover_hydrated_total[$__range]))",
+          "refId": "B",
+          "legendFormat": "takeover_hydrated (all workers)",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "textMode": "value_and_name",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 200,
+      "type": "row",
+      "title": "Incident windows and verdicts",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 134
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 201,
+      "type": "timeseries",
+      "title": "Incident windows (1 while open)",
+      "description": "Each incident window of a run (sip_chaos_window), from its inject to its close at recovery plus the settle time. The same windows shade every dashboard as annotations.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 135
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "max by (incident, run) (sip_chaos_window{incident!=\"\",run=~\"$run\"})",
+          "refId": "A",
+          "legendFormat": "{{incident}} {{run}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "lineInterpolation": "stepAfter"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 202,
+      "type": "table",
+      "title": "Incident phases in range",
+      "description": "Every phase an incident reached in the time range (sip_chaos_event): inject, injected, heal, healed, recovered, or failed when a step failed or overran.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 135
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "count_over_time(sip_chaos_event{incident!=\"\",run=~\"$run\"}[$__range])",
+          "refId": "A",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "options": {
+        "showHeader": true
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true
+            },
+            "renameByName": {
+              "Value": "events"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 203,
+      "type": "table",
+      "title": "Verdict per window",
+      "description": "Each window's verdict when its run's verdict was written: pass, fail (impacts above the window's budget, counted in findings) or invalid (its incident failed). verdict.json holds the impacts. Filtered by the run variable.",
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 0,
+        "y": 143
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "max by (run, event, budget) (last_over_time(sip_chaos_window_verdict{run=~\"$run\"}[$__range]))",
+          "refId": "A",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "expr": "max by (run, event, budget) (last_over_time(sip_chaos_window_findings{run=~\"$run\"}[$__range]))",
+          "refId": "B",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "options": {
+        "showHeader": true
+      },
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true
+            },
+            "renameByName": {
+              "Value #A": "verdict",
+              "Value #B": "findings"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "verdict"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "pass",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "1": {
+                        "text": "fail",
+                        "color": "red",
+                        "index": 1
+                      },
+                      "2": {
+                        "text": "invalid",
+                        "color": "orange",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 204,
+      "type": "stat",
+      "title": "Run verdicts",
+      "description": "The verdict of each run whose verdict was written in the time range: pass, fail or invalid (an integrity problem: the run cannot charge the system under test).",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 143
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "last_over_time(sip_chaos_run_verdict{run=~\"$run\"}[$__range])",
+          "refId": "A",
+          "legendFormat": "{{run}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "textMode": "value_and_name",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "pass",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "fail",
+                  "color": "red",
+                  "index": 1
+                },
+                "2": {
+                  "text": "invalid",
+                  "color": "orange",
+                  "index": 2
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 210,
+      "type": "row",
+      "title": "Call outcomes (one record per call)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 151
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 211,
+      "type": "timeseries",
+      "title": "Records by stream, shape and ending (calls/s)",
+      "description": "The call-outcome records the generators write, one per call placed: SIPp UACs (sipp_records_total) and loadgens (loadgen_outcome_records_total), by stream, shape and ending.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 152
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (stream, shape, ending)(rate(sipp_records_total[1m]))",
+          "refId": "A",
+          "legendFormat": "sipp {{stream}} {{shape}} {{ending}}"
+        },
+        {
+          "expr": "sum by (stream, shape, ending)(rate(loadgen_outcome_records_total[1m]))",
+          "refId": "B",
+          "legendFormat": "loadgen {{stream}} {{shape}} {{ending}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 212,
+      "type": "timeseries",
+      "title": "Endings other than answered, by reason (records per interval)",
+      "description": "Call-outcome records in the log store whose ending is not answered, by stream, shape, ending and reason (the SIP code, a Reason protocol cause, timeout, transport or protocol). Filtered by the run variable.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 152
+      },
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "vl"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "vl"
+          },
+          "expr": "_stream:{run=~\"$run\"} | unpack_json from _msg fields (schema, reason, final_code) keep_original_fields | schema:=\"call-outcome.v1\" !ending:=answered | stats by (stream, shape, ending, reason) count() calls",
+          "queryType": "statsRange",
+          "legendFormat": "{{stream}} {{shape}} {{ending}} {{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 60,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "drawStyle": "bars"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 213,
+      "type": "table",
+      "title": "Outcomes in range by stream, shape, ending, code and reason",
+      "description": "Every call-outcome record in the time range, counted by stream, shape, ending, final code and reason. Filtered by the run variable.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 160
+      },
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "vl"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "vl"
+          },
+          "expr": "_stream:{run=~\"$run\"} | unpack_json from _msg fields (schema, reason, final_code) keep_original_fields | schema:=\"call-outcome.v1\" | stats by (stream, shape, ending, final_code, reason) count() calls",
+          "queryType": "stats"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      },
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ],
+            "labelsToFields": true,
+            "mode": "seriesToRows"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Field": true,
+              "__name__": true
+            },
+            "renameByName": {
+              "Last *": "calls"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "calls",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 214,
+      "type": "timeseries",
+      "title": "Calls offered and never recorded (calls/s)",
+      "description": "Calls a loadgen offered that left no record: refused before any datagram (not placed) or failed by the generator itself, by stream, shape and reason. Either is the generator's, never the system's.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 168
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (stream, shape, reason)(rate(loadgen_not_placed_total[1m]))",
+          "refId": "A",
+          "legendFormat": "not placed {{stream}} {{shape}} {{reason}}"
+        },
+        {
+          "expr": "sum by (stream, shape, reason)(rate(loadgen_generator_failures_total[1m]))",
+          "refId": "B",
+          "legendFormat": "generator failure {{stream}} {{shape}} {{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 215,
+      "type": "timeseries",
+      "title": "Record shipping to the log store (must stay at 0)",
+      "description": "Records not yet posted, failed posts and records lost on their way to the log store. A record lost is a record gap: the run's verdict turns invalid.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 168
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (stream)(sipp_records_pending)",
+          "refId": "A",
+          "legendFormat": "sipp pending {{stream}}"
+        },
+        {
+          "expr": "sum by (stream)(rate(sipp_records_ship_failures_total[1m]))",
+          "refId": "B",
+          "legendFormat": "sipp failed posts/s {{stream}}"
+        },
+        {
+          "expr": "sum by (stream, stage)(rate(loadgen_outcome_records_dropped_total[1m]))",
+          "refId": "C",
+          "legendFormat": "loadgen dropped/s {{stream}} {{stage}}"
+        },
+        {
+          "expr": "sum by (stream)(rate(loadgen_outcome_records_push_failed_total[1m]))",
+          "refId": "D",
+          "legendFormat": "loadgen failed pushes/s {{stream}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 220,
+      "type": "row",
+      "title": "Streams (run streams and load-incident streams)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 176
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 221,
+      "type": "timeseries",
+      "title": "Offered calls per stream (calls/s)",
+      "description": "Calls each stream placed. A load-incident stream (a spike) shows from its incident's inject to its heal, inside the incident's window.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 177
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (stream)(rate(sipp_calls_created_total{stream!=\"\"}[1m]))",
+          "refId": "A",
+          "legendFormat": "sipp {{stream}}"
+        },
+        {
+          "expr": "sum by (stream)(rate(loadgen_calls_offered_total[1m]))",
+          "refId": "B",
+          "legendFormat": "loadgen {{stream}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 222,
+      "type": "timeseries",
+      "title": "Calls in flight per stream",
+      "description": "Calls each stream holds open. A load-incident stream drains to 0 at heal, or stops at once when its incident abandons it.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 177
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (stream)(sipp_current_calls{stream!=\"\"})",
+          "refId": "A",
+          "legendFormat": "sipp {{stream}}"
+        },
+        {
+          "expr": "sum by (stream)(loadgen_inflight)",
+          "refId": "B",
+          "legendFormat": "loadgen {{stream}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 223,
+      "type": "timeseries",
+      "title": "Failed calls per stream (calls/s)",
+      "description": "Calls each stream counted failed: SIPp's failed calls and loadgen calls classed other than ok. The verdict judges the records, against the budget of each window.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 185
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum by (stream)(rate(sipp_failed_calls_total{stream!=\"\"}[1m]))",
+          "refId": "A",
+          "legendFormat": "sipp {{stream}}"
+        },
+        {
+          "expr": "sum by (stream)(rate(loadgen_calls_total{class!=\"ok\"}[1m]))",
+          "refId": "B",
+          "legendFormat": "loadgen {{stream}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 230,
+      "type": "row",
+      "title": "Host under the run (pressure and swap: a stall here is the host's, not the SUT's)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 193
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 231,
+      "type": "timeseries",
+      "title": "Host full pressure (share of time stalled)",
+      "description": "Sampled by the hakit runner every second for the whole run (/proc/pressure, /proc/vmstat). A generator stall inside a stressed interval is reported as host_under_stress.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 194
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "100 * max by (resource) (hakit_host_pressure_ratio{kind=\"full\"})",
+          "refId": "A",
+          "legendFormat": "{{resource}} full"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "lineWidth": 1
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 232,
+      "type": "timeseries",
+      "title": "Host swap (pages/s)",
+      "description": "Sampled by the hakit runner every second for the whole run (/proc/pressure, /proc/vmstat). A generator stall inside a stressed interval is reported as host_under_stress.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 194
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "max by (direction) (hakit_host_swap_pages_per_second)",
+          "refId": "A",
+          "legendFormat": "swap {{direction}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "lineWidth": 1
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    }
+  ]
+}

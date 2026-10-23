@@ -15,7 +15,7 @@ use b2bua::metrics::B2buaMetrics;
 use b2bua::store::{CallStore, FaultInjectingCallStore, InMemoryCallStore, StoreFaults};
 use b2bua::wire_faults::WireFaults;
 use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
-use scenario_harness::{Agent, Dialog, Harness, RunReport};
+use scenario_harness::{Harness, RunReport};
 
 // The canonical INVITE/180/200/ACK choreography lives in
 // `scenario_harness::callflow`, one implementation shared by the single-SUT
@@ -24,22 +24,21 @@ use scenario_harness::{Agent, Dialog, Harness, RunReport};
 pub use scenario_harness::callflow::{self, establish, hangup, ANSWER_SDP, OFFER_SDP};
 use sip_clock::Clock;
 use sip_net::UdpEndpoint;
-use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
-use sip_proxy::registry::simulated::SimulatedWorkerRegistry;
-use sip_proxy::registry::{WorkerEntry, WorkerRegistry};
-use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
-use sip_proxy::{
-    LoadBalancerConfig, LoadBalancerStrategy, ProxyAddr, ProxyCoreBuilder, ProxyMetrics,
-    RoutingStrategy,
-};
 use sip_txn::IdGen;
-use tokio::task::JoinHandle;
 
+pub mod failure_view;
 pub mod limiter;
+pub mod model_gate;
+mod operator;
+mod proxy_core;
+mod reaped;
+mod scene;
 pub mod terminated;
 pub mod witness;
 
 pub use limiter::{LimiterCount, LimiterLeak, LimiterProbe, DEFAULT_LIMITER_ID};
+pub use proxy_core::{spawn_proxy_core, spawn_proxy_core_with, ExternalProxyFace, ProxyCoreParts};
+pub use scene::{B2buaScene, ALICE_PORT, B2BUA_PORT, BOB_PORT};
 use terminated::{TerminatedCalls, TerminatedCallsWriter};
 pub use witness::{WitnessRig, WITNESS_IDS, WITNESS_LIMITER_ADDR};
 
@@ -113,6 +112,9 @@ pub struct B2buaSpawnParams {
     /// The deferred backlog's ceilings ([`B2buaDeps::deferred_ceilings`]).
     /// `None` → the worker's own.
     pub deferred_ceilings: Option<sip_txn::DeferredBound>,
+    /// The node the worker serves ([`observe::NodeScope`]): what its log lines
+    /// and per-call trace facts name in a failure dump. `None` → `ordinal`.
+    pub node: Option<String>,
 }
 
 /// Builds the base [`B2buaConfig`] (ip/port/ordinal/outbound_proxy wired),
@@ -148,12 +150,17 @@ pub fn spawn_b2bua_core(
         wire_faults,
         capacity,
         deferred_ceilings,
+        node,
     } = params;
+    let node: Arc<str> = Arc::from(node.as_deref().unwrap_or(&ordinal));
     let mut config = B2buaConfig {
         self_ordinal: ordinal,
         sip_local_ip: sip_addr.ip().to_string(),
         sip_local_port: sip_addr.port(),
         b2b_outbound_proxy: outbound_proxy,
+        // Every harness B2BUA checks the model invariants after each turn,
+        // release builds included.
+        model_invariants: true,
         ..Default::default()
     };
     tune(&mut config);
@@ -195,134 +202,13 @@ pub fn spawn_b2bua_core(
         compose,
         capacity,
     };
-    B2buaCore::spawn_with_overload(endpoint, deps, services, overload)
+    observe::NodeScope::named(node)
+        .enter(|| B2buaCore::spawn_with_overload(endpoint, deps, services, overload))
 }
 
 // The multi-node HA failover harness (FailoverHarness / ReplicatedB2buaSut /
 // ProxySut) lives in the `failover-harness` crate (ADR-0013 §0). This crate is
 // the single-SUT b2bua harness.
-
-// ===========================================================================
-// Shared load-balancing ProxyCore spawn primitive
-// ===========================================================================
-//
-// The registry→hmac→load-observer→LoadBalancerStrategy→ProxyCoreBuilder→spawn
-// wiring for a real `sip_proxy::ProxyCore` LB SUT is identical between the
-// single-worker proxy helper in this crate's `tests/common/mod.rs`
-// (`spawn_lb_proxy`) and the multi-worker `failover-harness`
-// (`FailoverHarness::spawn_proxy_inner`): the ONLY things that vary are
-// single-vs-N workers (single = a one-element slice), the clock source, and the
-// failover-only health-probe task + retained registry handle. The endpoint is
-// bound by each caller (this crate via `Harness::bind_sut`, failover via its
-// `HarnessHandle::bind_sut`) — both yield the same `(endpoint, sock)` — so, as
-// with `spawn_b2bua_core`, the caller binds and passes the bound pair in; the
-// SHARED part is everything from "build the registry" to "spawn the core",
-// captured by [`spawn_proxy_core`] returning [`ProxyCoreParts`]. Each caller
-// wraps the parts in its own `ProxySut` (the two structs differ — the test one
-// is minimal; failover's retains the registry handle for health control and
-// adds the OPTIONS probe task — so only the wiring is unified, not the struct).
-
-/// The wired-but-caller-owned pieces of a load-balancing `ProxyCore` SUT, as
-/// returned by [`spawn_proxy_core`]. The caller wraps these in its own
-/// `ProxySut`. The `registry` is the CONCRETE [`SimulatedWorkerRegistry`] the
-/// running `ProxyCore` resolves through (a clone of the same instance), so a
-/// caller that retains it can flip worker health/address and have the live proxy
-/// observe the change.
-pub struct ProxyCoreParts {
-    /// The proxy's listen address (the bound `sock`).
-    pub addr: SocketAddr,
-    /// The concrete registry the live `ProxyCore` resolves through. Retain it to
-    /// drive worker health/address; a probe loop can take its `control()` seam.
-    pub registry: SimulatedWorkerRegistry,
-    /// The proxy's metrics (the same `Arc` wired into the core).
-    pub metrics: Arc<ProxyMetrics>,
-    /// The AIMD load observer the `LoadBalancerStrategy` reads. Returned so a
-    /// caller running a `HealthProbe` can feed the SAME instance the probe's
-    /// `X-Overload` payloads (failover wires this; the single-worker test
-    /// helper drops it).
-    pub observer: Arc<WorkerLoadObserver>,
-    /// The spawned recv-loop task. The caller's `ProxySut::drop` aborts it.
-    pub task: JoinHandle<()>,
-}
-
-/// Spawn a real load-balancing `ProxyCore` on the harness fabric fronting
-/// `workers` (single-worker = a one-element slice; HRW always picks the lone
-/// entry). The caller binds the proxy endpoint (`Harness::bind_sut("proxy", …)`)
-/// and passes the resulting `(endpoint, addr)` plus the shared `clock`; this
-/// builds the `SimulatedWorkerRegistry` (all workers alive), the HMAC provider
-/// (`k1`/`[7;32]`), the load observer, the `LoadBalancerStrategy`, and the core
-/// (id-gen seed `0xC0FFEE`), spawns its run loop, and returns the common
-/// [`ProxyCoreParts`] for the caller to wrap in its own `ProxySut`.
-///
-/// The health-probe task and the retained-registry health controls (the
-/// failover-only extras) stay at the call site: `failover-harness` takes
-/// `parts.registry.control()` for the `HealthProbe` and keeps `parts.registry`
-/// in its `ProxySut` so `set_health`/`set_address` drive the live proxy.
-pub fn spawn_proxy_core(
-    endpoint: Box<dyn UdpEndpoint>,
-    addr: SocketAddr,
-    workers: &[(&str, SocketAddr)],
-    clock: Clock,
-) -> ProxyCoreParts {
-    spawn_proxy_core_with(endpoint, addr, None, workers, clock, 0xC0FFEE)
-}
-
-/// The **external face** of a dual-face proxy SUT (see
-/// [`spawn_proxy_core_with`]): a second bound endpoint on the caller plane +
-/// its advertise + the internal-plane CIDR list driving the egress face picker
-/// (`PROXY_FACE_INT_CIDRS` equivalent).
-pub struct ExternalProxyFace {
-    pub endpoint: Box<dyn UdpEndpoint>,
-    pub addr: SocketAddr,
-    pub int_cidrs: sip_proxy::FaceCidrs,
-}
-
-/// [`spawn_proxy_core`] generalized: optional dual-face external endpoint and
-/// an explicit `id_seed` (a takeover twin re-bound on the same VIPs must mint
-/// DIFFERENT Via branches than the proxy it replaces — reusing the seed would
-/// replay the dead proxy's branch sequence into the same dialogs).
-pub fn spawn_proxy_core_with(
-    endpoint: Box<dyn UdpEndpoint>,
-    addr: SocketAddr,
-    external: Option<ExternalProxyFace>,
-    workers: &[(&str, SocketAddr)],
-    clock: Clock,
-    id_seed: u64,
-) -> ProxyCoreParts {
-    let entries: Vec<WorkerEntry> = workers
-        .iter()
-        .map(|(id, sa)| WorkerEntry::alive(*id, ProxyAddr::new(sa.ip().to_string(), sa.port())))
-        .collect();
-    let registry = SimulatedWorkerRegistry::with_clock(entries, clock.clone());
-    let registry_dyn: Arc<dyn WorkerRegistry> = Arc::new(registry.clone());
-    let hmac =
-        Arc::new(StaticHmacKeyProvider::new(HmacKey::new("k1", vec![7u8; 32]), None).unwrap());
-    let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
-    let strategy: Arc<dyn RoutingStrategy> = Arc::new(LoadBalancerStrategy::new(
-        registry_dyn.clone(),
-        hmac,
-        observer.clone(),
-        Arc::new(ProxyMetrics::new()),
-        clock.clone(),
-        LoadBalancerConfig::default(),
-    ));
-
-    let metrics = Arc::new(ProxyMetrics::new());
-    let mut builder = ProxyCoreBuilder::new(ProxyAddr::from(addr), strategy, registry_dyn)
-        .clock(clock)
-        .id_gen(Arc::new(IdGen::seeded(id_seed)))
-        .metrics(metrics.clone());
-    if let Some(ext) = external {
-        builder = builder.external_face(sip_proxy::ExternalFaceParts {
-            endpoint: ext.endpoint,
-            advertised: ProxyAddr::from(ext.addr),
-            int_cidrs: ext.int_cidrs,
-        });
-    }
-    let core = builder.build(endpoint);
-    let task = tokio::spawn(core.run());
-    ProxyCoreParts { addr, registry, metrics, observer, task }
-}
 
 /// Poll `cond` until it holds, yielding so spawned teardown / CDR-writer tasks
 /// drain. The single home for the "wait for the async teardown to land" loop.
@@ -396,6 +282,10 @@ pub struct B2buaSut {
     /// The ingress brake's counters and the queue depth forced on it, when the
     /// SUT's bind carries one.
     brake: Option<(b2bua::ingress_brake::IngressBrakeCounters, Arc<AtomicUsize>)>,
+    /// Where this SUT's run starts in the process's model-invariant record.
+    since: model_gate::Since,
+    /// The shell faults the run met ([`reaped::ShellFaults`]).
+    shell: reaped::ShellFaults,
     _core: B2buaCore,
 }
 
@@ -427,9 +317,19 @@ pub struct B2buaSutBuilder {
     deferred_ceilings: Option<sip_txn::DeferredBound>,
     keep_terminated_calls: bool,
     cdr_tap: Option<Arc<dyn CdrWriter>>,
+    untraced: bool,
 }
 
 impl B2buaSutBuilder {
+    /// Trace no call: the process keeps the production trace gate, so a run
+    /// measuring the per-call cost pays exactly what production pays. By
+    /// default [`start`](Self::start) traces every call
+    /// ([`failure_view::trace_every_call`]) for the failure dump.
+    pub fn untraced(mut self) -> Self {
+        self.untraced = true;
+        self
+    }
+
     /// Keep every terminated `Call` whole for [`B2buaSut::terminated_calls`].
     /// Off by default: a long-running SUT keeps the records only.
     pub fn keep_terminated_calls(mut self) -> Self {
@@ -578,6 +478,8 @@ impl B2buaSutBuilder {
 
     /// Bind the B2BUA at `addr` and spawn its core, consuming the builder.
     pub async fn start(self, h: &Harness, name: &str, addr: &str) -> B2buaSut {
+        // This run judges only the violations its own turns record.
+        let since = model_gate::Since::now();
         let B2buaSutBuilder {
             decision,
             outbound_proxy,
@@ -596,7 +498,11 @@ impl B2buaSutBuilder {
             deferred_ceilings,
             keep_terminated_calls,
             cdr_tap,
+            untraced,
         } = self;
+        if !untraced {
+            failure_view::trace_every_call();
+        }
         let (decision, limiter, sut_limiter) = match limiter {
             Some(own) => (decision, own, limiter::SutLimiter::own(limiter_store)),
             None => {
@@ -621,10 +527,10 @@ impl B2buaSutBuilder {
             let slot: Arc<OnceLock<sip_net::PreIngressHook>> = Arc::new(OnceLock::new());
             let forced = Arc::new(AtomicUsize::new(NO_FORCED_DEPTH));
             let (depth, installed) = (forced.clone(), slot.clone());
-            let hook: sip_net::PreIngressHook = Arc::new(move |raw, src, live| {
+            let hook: sip_net::PreIngressHook = Arc::new(move |arrival, src, live| {
                 let Some(brake) = installed.get() else { return sip_net::PreIngressAction::Accept };
                 let forced = depth.load(Ordering::Relaxed);
-                brake(raw, src, if forced == NO_FORCED_DEPTH { live } else { forced })
+                brake(arrival, src, if forced == NO_FORCED_DEPTH { live } else { forced })
             });
             ((config, counters, forced, slot), hook)
         });
@@ -665,6 +571,7 @@ impl B2buaSutBuilder {
             wire_faults,
             capacity,
             deferred_ceilings,
+            node: None,
         };
         let core = spawn_b2bua_core(endpoint, params, |config| {
             // Production default is 300 s (5 min); the paused-clock keepalive
@@ -695,7 +602,32 @@ impl B2buaSutBuilder {
             assert!(slot.set(hook).is_ok(), "the brake is installed once");
             (counters, forced)
         });
-        B2buaSut { addr: sa, cdr, metrics, limiter: sut_limiter, clock, brake, _core: core }
+        h.add_failure_view(std::rc::Rc::new(failure_view::B2buaFailureView {
+            name: name.to_string(),
+            calls: core.live_calls_probe(),
+            clock: clock.clone(),
+            since: since.clone(),
+        }));
+        let shell = reaped::ShellFaults::from_now();
+        B2buaSut {
+            addr: sa,
+            cdr,
+            metrics,
+            limiter: sut_limiter,
+            clock,
+            brake,
+            since,
+            shell,
+            _core: core,
+        }
+    }
+}
+
+/// A SUT dropped at the end of a test fails it on any model-invariant
+/// violation a turn of its run met ([`model_gate`]).
+impl Drop for B2buaSut {
+    fn drop(&mut self) {
+        model_gate::gate_on_drop(self.since.mark());
     }
 }
 
@@ -721,6 +653,7 @@ impl B2buaSut {
             deferred_ceilings: None,
             keep_terminated_calls: false,
             cdr_tap: None,
+            untraced: false,
         }
     }
 
@@ -814,7 +747,7 @@ impl B2buaSut {
                     r.callback_context = Some("failover-test".into());
                     // The TS relies on the 30 s platform no-answer default the Rust
                     // default route omits — set it so the no-answer failover fires.
-                    r.no_answer_timeout_sec = Some(30);
+                    r.no_answer_ms = Some(30_000);
                     NewCallResponse::Route(r)
                 })
                 .on_failure(move |_req| {
@@ -882,15 +815,9 @@ impl B2buaSut {
     /// valued by the sum of its series.
     pub fn catalogued_counts(&self) -> std::collections::BTreeMap<&'static str, f64> {
         let udp = self.ingress_brake().map(|brake| {
-            b2bua::metrics::UdpTransportMetrics::new(
-                0,
-                brake.clone(),
-                Arc::new(|| 0),
-                Arc::new(|| 0),
-                Arc::new(|| 0),
-                Arc::new(|| 0),
-            )
-            .prometheus_text()
+            let counters: b2bua::metrics::LiveCounters = Arc::new(Default::default);
+            b2bua::metrics::UdpTransportMetrics::new(0, brake.clone(), Arc::new(|| 0), counters)
+                .prometheus_text()
         });
         let text = [
             self.metrics.prometheus_text(),
@@ -962,10 +889,10 @@ impl B2buaSut {
         self._core.active_calls()
     }
 
-    /// Cancel `id` in the SUT's timer driver, the record untouched: a stand-in
-    /// for a fire the per-call queue dropped.
-    pub async fn cancel_driver_timer(&self, call_ref: &str, id: &str) {
-        self._core.cancel_driver_timer(call_ref, id).await;
+    /// Cancel `key` in the SUT's timer driver, the record untouched: a
+    /// stand-in for a fire the per-call queue dropped.
+    pub async fn cancel_driver_timer(&self, call_ref: &str, key: &call::TimerKey) {
+        self._core.cancel_driver_timer(call_ref, key).await;
     }
 
     /// Post `event` to the SUT's router as its timer driver or a callout
@@ -1049,6 +976,9 @@ impl B2buaSut {
     ///      its limiter store counts no hold, and the default limiter never
     ///      failed open ([`limiter_count`](Self::limiter_count)).
     ///   7. the worker's limiter release queue is empty.
+    ///   8. the store's sweep corrected nothing, and no lock was poisoned
+    ///      nor supervised task restarted since the SUT started, unless the
+    ///      test declared it ([`expect_shell_faults`](Self::expect_shell_faults)).
     ///
     /// A new leak dimension (e.g. the `b2bua_timer_queue_len − b2bua_timer_live`
     /// tombstone gap from the CLAUDE.md timer hazard) is added here once and is
@@ -1067,6 +997,7 @@ impl B2buaSut {
     /// and 7 require exactly `leak`, every other check is unchanged.
     #[track_caller]
     pub fn assert_fully_reaped_leaving(&self, leak: LimiterLeak) {
+        model_gate::assert_no_model_violation(self.since.mark());
         self.assert_calls_reaped();
         // 6. every limiter hold granted is released once, the store counts
         //    none, and the default limiter never failed open.
@@ -1090,156 +1021,5 @@ impl B2buaSut {
         let mut keys = self._core.limiter().waiting_keys();
         keys.sort();
         keys
-    }
-
-    /// Checks 1–5 of [`assert_fully_reaped`](Self::assert_fully_reaped): every
-    /// call created was reaped and no per-call state survives, the limiter
-    /// aside. For a caller that judges the calls at one instant and the
-    /// limiter after a later settle, which a release still in flight needs.
-    #[track_caller]
-    pub fn assert_calls_reaped(&self) {
-        let (creations, removals) = (self.metrics.creations_total(), self.metrics.removals_total());
-        assert_eq!(
-            creations, removals,
-            "call leak: creations ({creations}) != removals ({removals}) — a call \
-             was created but never reaped"
-        );
-        assert_eq!(
-            self.active_calls(),
-            0,
-            "call leak: {} live call(s) left in the map",
-            self.active_calls()
-        );
-        assert_eq!(
-            self._core.unborn_calls(),
-            0,
-            "admission leak: {} admitted new call(s) still counted unborn",
-            self._core.unborn_calls()
-        );
-        assert_eq!(
-            self.lock_count(),
-            0,
-            "lock leak: {} stranded per-call serialization lock(s)",
-            self.lock_count()
-        );
-        // 4. (ADR-0020) the reaper's last-touched ledger mirrors the call map;
-        //    a residue is a stamp leak.
-        assert_eq!(
-            self._core.touched_count(),
-            0,
-            "stamp leak: {} stranded last-touched ledger entr(ies)",
-            self._core.touched_count()
-        );
-        // 5. the setup-CANCEL marks (the decision-application drop guard) are
-        //    cleared on every teardown path; a residue is a mark leak.
-        assert_eq!(
-            self._core.setup_cancelled_count(),
-            0,
-            "mark leak: {} stranded setup-CANCEL mark(s)",
-            self._core.setup_cancelled_count()
-        );
-    }
-}
-
-/// Canonical default port for `alice` in a [`B2buaScene`].
-pub const ALICE_PORT: u16 = 5060;
-/// Canonical default port for `bob` in a [`B2buaScene`].
-pub const BOB_PORT: u16 = 5070;
-/// Canonical default port for the `b2bua` SUT in a [`B2buaScene`].
-pub const B2BUA_PORT: u16 = 5080;
-
-/// The standard alice ↔ b2bua ↔ bob fixture with canonical default ports and a
-/// b2bua that routes every call to bob — so a new test never picks ports or
-/// wires routing by hand. Access [`alice`](Self::alice)/[`bob`](Self::bob)/
-/// [`b2bua`](Self::b2bua) for the interesting part; [`establish`](Self::establish)
-/// runs the canonical call (delegating to [`callflow::establish`]);
-/// [`finish`](Self::finish) gates RFC + renders.
-///
-/// # Writing a new single-SUT b2bua test
-///
-/// The 90% case is one line:
-///
-/// ```ignore
-/// let s = B2buaScene::new("my-test").await;
-/// let mut dialog = s.establish().await;          // alice → b2bua → bob, confirmed
-/// // ... the interesting part, driving `s.alice` / `s.bob` / `s.b2bua` ...
-/// s.hangup(&mut dialog).await;                    // BYE / 200
-/// s.finish().await;                              // reaped check + RFC gate + render
-/// ```
-///
-/// [`finish`](Self::finish) settles the SUT and runs
-/// [`B2buaSut::assert_fully_reaped`]: a call the scenario left up, or a
-/// limiter hold never released, fails the test. A scenario that leaves
-/// limiter holds behind on purpose declares them with
-/// [`finish_leaving`](Self::finish_leaving).
-///
-/// Each `Harness` has its own simulated network namespace, so the fixed ports
-/// never collide between tests. For a non-default b2bua decision (refer, limiter,
-/// services, config tune) build it via [`with_b2bua`](Self::with_b2bua), which
-/// hands you bob's port and the full [`B2buaSutBuilder`]:
-///
-/// ```ignore
-/// let s = B2buaScene::with_b2bua("refer-test", |bob_port| {
-///     B2buaSut::route_all_with_refer("127.0.0.1", bob_port)
-/// }).await;
-/// ```
-pub struct B2buaScene {
-    pub h: Harness,
-    pub alice: Agent,
-    pub bob: Agent,
-    pub b2bua: B2buaSut,
-}
-
-impl B2buaScene {
-    /// alice/bob/b2bua bound at the canonical default ports
-    /// ([`ALICE_PORT`]/[`BOB_PORT`]/[`B2BUA_PORT`]); the b2bua routes every call
-    /// to bob. The 90%-case fixture — one line for a new test.
-    pub async fn new(name: &str) -> Self {
-        Self::with_b2bua(name, |bob_port| B2buaSut::route_all_to("127.0.0.1", bob_port)).await
-    }
-
-    /// Like [`new`](Self::new) but customise the b2bua: `build` is handed bob's
-    /// canonical port and must return the [`B2buaSutBuilder`] to start (start is
-    /// done for you at [`B2BUA_PORT`]). This composes cleanly with every existing
-    /// `B2buaSut::route_all*` entry point and the builder's chain methods
-    /// (`outbound_proxy`, `limiter`, `services`, `tune`), so a test needing a
-    /// non-default decision still gets the canonical alice/bob/ports wiring for
-    /// free. Default decision = `route_all_to(bob)` (see [`new`](Self::new)).
-    pub async fn with_b2bua(name: &str, build: impl FnOnce(u16) -> B2buaSutBuilder) -> Self {
-        // Match the common b2bua-test convention: the harness's default
-        // SIMULATED_TRANSIT_DELAY_MS (1 ms floor enforced by the fabric).
-        let h = Harness::new(name);
-        let alice = h.agent("alice", &format!("127.0.0.1:{ALICE_PORT}")).await;
-        let bob = h.agent("bob", &format!("127.0.0.1:{BOB_PORT}")).await;
-        let b2bua = build(BOB_PORT).start(&h, "b2bua", &format!("127.0.0.1:{B2BUA_PORT}")).await;
-        Self { h, alice, bob, b2bua }
-    }
-
-    /// Run the canonical call (alice → b2bua → bob, confirmed) and return alice's
-    /// [`Dialog`]. Equivalent to
-    /// `callflow::establish(&self.alice, &self.bob, self.b2bua.addr)`.
-    pub async fn establish(&self) -> Dialog {
-        callflow::establish(&self.alice, &self.bob, self.b2bua.addr).await
-    }
-
-    /// Tear the call down (alice BYE / bob 200). Equivalent to
-    /// `callflow::hangup(dialog, &self.bob)`.
-    pub async fn hangup(&self, dialog: &mut Dialog) {
-        callflow::hangup(dialog, &self.bob).await
-    }
-
-    /// Settle until every call is reaped, run [`B2buaSut::assert_fully_reaped`],
-    /// then gate the RFC audit and render the report. Consumes the scene
-    /// (`Harness::finish` consumes `self`).
-    pub async fn finish(self) -> RunReport {
-        self.finish_leaving(LimiterLeak::NONE).await
-    }
-
-    /// [`finish`](Self::finish) for a scenario that leaves limiter holds
-    /// behind on purpose: the reaped check requires exactly `leak`.
-    pub async fn finish_leaving(self, leak: LimiterLeak) -> RunReport {
-        settle_until(|| self.b2bua.is_reaped_leaving(&leak)).await;
-        self.b2bua.assert_fully_reaped_leaving(leak);
-        self.h.finish().await
     }
 }

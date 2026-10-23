@@ -20,6 +20,13 @@
  * OWN order: the capture's by the flow, the replay's by its wire (RFC 3264
  * §8). A session's first description opens in the same form on both sides
  * (sess-version equal to sess-id on both or on neither).
+ *
+ * The complementary reading is per leg: where the capture's description keeps
+ * the identity its previous one on that leg carried, and the replay's breaks
+ * RFC 3264 §8 against its own previous one there — another identity, or a
+ * sess-version step that is neither +1 nor 0 over an unchanged description —
+ * {@link notContinued} reads it as the replayed endpoint breaking the session
+ * it holds toward that peer.
  */
 
 /** One parsed `o=` line: the two numbers apart from the fields every run reproduces. */
@@ -79,6 +86,8 @@ export interface Sighting {
   readonly capturedAt: number
   /** Its place in the replay's order: the wire position of its reception. */
   readonly replayedAt: number
+  /** The leg that received it. */
+  readonly leg: number
 }
 
 /** Each sighting's predecessor on its own side: the index of the same identity's previous one in `order`. */
@@ -145,25 +154,83 @@ export const readOrigins = (sightings: ReadonlyArray<Sighting>, driven: Driven):
   })
 }
 
+/** A description's text with its `o=` line taken out: what a sess-version counts. */
+const withoutOrigin = (text: string): string => text.replace(ORIGIN_LINE, "")
+
+/**
+ * Whether each sighting is a session the capture keeps on its leg and the
+ * replay breaks (RFC 3264 §8): the capture's previous sighting on the leg
+ * (capture order) carries the same identity, and against the replay's
+ * previous one there (replay order) the replayed description carries another
+ * identity, or steps sess-version by neither +1 nor 0 over an unchanged
+ * description. A side whose origin does not parse, here or at the
+ * predecessor, reads nothing.
+ */
+export const notContinued = (sightings: ReadonlyArray<Sighting>): ReadonlyArray<boolean> => {
+  const left = sightings.map((s) => originOf(s.captured))
+  const right = sightings.map((s) => originOf(s.replayed))
+  const onLeg = (key: (s: Sighting) => number): ReadonlyArray<number | undefined> => {
+    const out: Array<number | undefined> = sightings.map(() => undefined)
+    const last = new Map<number, number>()
+    for (const at of orderBy(sightings, key)) {
+      const leg = sightings[at]!.leg
+      out[at] = last.get(leg)
+      last.set(leg, at)
+    }
+    return out
+  }
+  const beforeLeft = onLeg((s) => s.capturedAt)
+  const beforeRight = onLeg((s) => s.replayedAt)
+  return sightings.map((_, at) => {
+    const a = left[at]
+    const b = right[at]
+    const pa = beforeLeft[at]
+    const pb = beforeRight[at]
+    const priorA = pa === undefined ? undefined : left[pa]
+    const priorB = pb === undefined ? undefined : right[pb]
+    if (a === undefined || b === undefined || priorA === undefined || priorB === undefined) return false
+    if (identityOf(priorA) !== identityOf(a)) return false
+    if (identityOf(priorB) !== identityOf(b)) return true
+    const step = b.sessVersion - priorB.sessVersion
+    const unchanged = withoutOrigin(sightings[at]!.replayed) === withoutOrigin(sightings[pb!]!.replayed)
+    return !(step === 1n || (step === 0n && unchanged))
+  })
+}
+
+/**
+ * How one description pair's origins read: an origin the replayed endpoint
+ * mints and its counterpart, a session the replay breaks (RFC 3264 §8) on a
+ * leg where the capture keeps it, or neither (`undefined`).
+ */
+export type OriginReading = "minted" | "not-continued" | undefined
+
+/** Every sighting's reading, {@link readOrigins} and {@link notContinued} together. */
+export const readings = (sightings: ReadonlyArray<Sighting>, driven: Driven): ReadonlyArray<OriginReading> => {
+  const minted = readOrigins(sightings, driven)
+  const broken = notContinued(sightings)
+  return sightings.map((_, at) => (minted[at] ? "minted" : broken[at] ? "not-continued" : undefined))
+}
+
 /**
  * The origin reading of one reception, as the body confrontation asks it: one
  * `read` per description pair the reception carries, in the order it carries
  * them.
  */
 export interface Reception {
-  readonly read: (captured: string, replayed: string) => boolean
+  readonly read: (captured: string, replayed: string) => OriginReading
 }
 
-/** Where a reception sits in each side's own order. */
+/** Where a reception sits in each side's own order, and the leg that received it. */
 export interface Place {
   readonly capturedAt: number
   readonly replayedAt: number
+  readonly leg: number
 }
 
 /**
  * The two passes of a cell's origin reading over one deterministic walk of
- * its receptions: `collecting` notes every pair and answers false, then
- * `answering` answers the same walk, call for call, from {@link readOrigins}.
+ * its receptions: `collecting` notes every pair and answers nothing, then
+ * `answering` answers the same walk, call for call, from {@link readings}.
  */
 export interface Ledger {
   readonly at: (place: Place) => Reception
@@ -174,15 +241,15 @@ export const collecting = (into: Array<Sighting>): Ledger => ({
   at: (place) => ({
     read: (captured, replayed) => {
       into.push({ captured, replayed, ...place })
-      return false
+      return undefined
     }
   })
 })
 
 /** The second pass: the answers of the first pass's pairs, in the same walk order. */
-export const answering = (answers: ReadonlyArray<boolean>): Ledger => {
+export const answering = (answers: ReadonlyArray<OriginReading>): Ledger => {
   let next = 0
-  return { at: () => ({ read: () => answers[next++] ?? false }) }
+  return { at: () => ({ read: () => answers[next++] }) }
 }
 
 /** The text with its first `o=` line replaced by the first one of `from`; the text itself where either states none. */

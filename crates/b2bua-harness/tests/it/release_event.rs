@@ -38,7 +38,8 @@ use b2bua_harness::{settle_until, B2buaSut};
 use crate::common::sdp::apart_from_origin;
 use call::{DecisionKind, ReleaseEventKind};
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpServerHandle, HttpTransport};
+use http_net_testkit::SimulatedHttpNetwork;
 use scenario_harness::Harness;
 use sip_clock::Clock;
 
@@ -89,7 +90,7 @@ async fn absorb_invite_retransmit(
 /// so test 1 proves the subscription — not the context — is the gate).
 fn route_with_cap(bob_port: u16, subscribe: bool) -> b2bua::decision::RouteDecision {
     let mut r = route_to("127.0.0.1", bob_port);
-    r.features.platform.max_duration_sec = 60;
+    r.features.platform.max_duration_ms = 60_000;
     r.callback_context = Some("ctx-release".into());
     if subscribe {
         r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
@@ -466,7 +467,7 @@ async fn reroute_route_rearms_cap_and_owns_subscriptions() {
                 // declares NO subscriptions — it owns the registry, so the
                 // second expiry must act locally with no second consult.
                 let mut r = route_to("127.0.0.1", 5093);
-                r.features.platform.max_duration_sec = 60;
+                r.features.platform.max_duration_ms = 60_000;
                 ReleaseOutcome::Respond(CallReleaseResponse::Route(r))
             })
             .build(),

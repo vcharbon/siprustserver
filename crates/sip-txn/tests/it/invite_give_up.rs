@@ -1,15 +1,17 @@
-//! RFC 3261 §9.1 / §17.1.1.3 for an INVITE client transaction that gives up:
-//! its TU abandons the INVITE with a CANCEL, which may provoke a 487. The
-//! transaction is held 64·T1 past its `Timeout`, so the CANCEL still matches
-//! it and the 487 is ACKed and handed up. It stops retransmitting at the
-//! give-up and never times out a second time.
+//! RFC 3261 §9.1 / §17.1.1.3 for an INVITE client transaction its TU gives up
+//! on: the TU abandons the INVITE with a CANCEL, which may provoke a 487. The
+//! transaction is held 64·T1 past its give-up, so the CANCEL still matches it
+//! and the 487 is ACKed and handed up, and it reports a timeout once. An
+//! unanswered initial INVITE reported at the TU's first-response deadline
+//! (ADR-0044) keeps Timer A to Timer B.
 
 use crate::common;
 use std::sync::Arc;
 
+use call::{TxnKind, TxnTimeoutKind};
 use common::*;
 use sip_message::SipMessage;
-use sip_txn::{IdGen, TimeoutKind, TransactionConfig, TransactionEvent, TxnKind};
+use sip_txn::{IdGen, TransactionConfig, TransactionEvent};
 
 const BOUND_MS: u64 = 40_000;
 
@@ -22,13 +24,13 @@ async fn stack() -> Stack {
             id_gen: Arc::new(IdGen::seeded(0xC0FFEE)),
             invite_initial_timeout_ms: BOUND_MS,
             invite_first_response_timeout_ms: 5_000,
-            ..Default::default()
+            ..common::config()
         },
     )
     .await
 }
 
-fn timeouts(events: &[TransactionEvent]) -> Vec<TimeoutKind> {
+fn timeouts(events: &[TransactionEvent]) -> Vec<TxnTimeoutKind> {
     events
         .iter()
         .filter_map(|e| match e {
@@ -67,7 +69,7 @@ async fn a_ringing_invite_that_gave_up_acks_the_487_its_cancel_provokes() {
         .inject(&response_bytes(180, "Ringing", "INVITE", branch, "handle-shape-test", true))
         .await;
     elapse_ms(BOUND_MS + 100).await;
-    assert_eq!(timeouts(&stack.drain_events()), vec![TimeoutKind::Transaction]);
+    assert_eq!(timeouts(&stack.drain_events()), vec![TxnTimeoutKind::Transaction]);
     let _ = stack.drain_peer();
 
     stack
@@ -99,7 +101,7 @@ async fn a_ringing_invite_that_gave_up_acks_the_487_its_cancel_provokes() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_invite_that_gave_up_unanswered_stops_retransmitting_and_never_times_out_again() {
+async fn an_invite_reported_dead_never_times_out_again() {
     let mut stack = stack().await;
     let branch = "z9hG4bK-gave-up-silent";
     stack
@@ -108,17 +110,18 @@ async fn an_invite_that_gave_up_unanswered_stops_retransmitting_and_never_times_
         .await
         .unwrap();
     elapse_ms(5_100).await;
-    assert_eq!(timeouts(&stack.drain_events()), vec![TimeoutKind::Response]);
+    assert_eq!(timeouts(&stack.drain_events()), vec![TxnTimeoutKind::Response]);
     let _ = stack.drain_peer();
 
-    // The late provisional does not start a new bound on the given-up INVITE.
+    // The late provisional stops Timer A and starts no new bound: Timer B
+    // ends the transaction unreported.
     stack
         .inject(&response_bytes(180, "Ringing", "INVITE", branch, "handle-shape-test", true))
         .await;
     elapse_ms(BOUND_MS).await;
     let out = stack.drain_peer();
-    assert_eq!(count_requests(&out, "INVITE"), 0, "no Timer A re-send past the give-up: {out:?}");
-    assert!(timeouts(&stack.drain_events()).is_empty(), "the give-up fires once");
+    assert_eq!(count_requests(&out, "INVITE"), 0, "no Timer A re-send past the 1xx: {out:?}");
+    assert!(timeouts(&stack.drain_events()).is_empty(), "the hop is reported dead once");
 }
 
 #[tokio::test(start_paused = true)]
@@ -154,8 +157,8 @@ async fn an_invite_that_gave_up_is_forgotten_64_t1_later() {
 }
 
 /// RFC 3261 §9.1: a CANCEL MUST NOT be sent for a request that drew no
-/// provisional. The TU's CANCEL on an INVITE that gave up unanswered is held
-/// with no grace, and dies with the transaction.
+/// provisional. The TU's CANCEL on an INVITE reported dead is held, and dies
+/// with the transaction at the end of its hold past Timer B.
 #[tokio::test(start_paused = true)]
 async fn a_cancel_after_an_unanswered_give_up_never_reaches_the_wire() {
     let mut stack = stack().await;
@@ -166,7 +169,7 @@ async fn a_cancel_after_an_unanswered_give_up_never_reaches_the_wire() {
         .await
         .unwrap();
     elapse_ms(5_100).await;
-    assert_eq!(timeouts(&stack.drain_events()), vec![TimeoutKind::Response]);
+    assert_eq!(timeouts(&stack.drain_events()), vec![TxnTimeoutKind::Response]);
     let _ = stack.drain_peer();
 
     stack
@@ -174,7 +177,7 @@ async fn a_cancel_after_an_unanswered_give_up_never_reaches_the_wire() {
         .send_request(outbound_request("CANCEL", branch), addr(PEER), TxnKind::Invite)
         .await
         .unwrap();
-    elapse_ms(40_000).await;
+    elapse_ms(60_000).await;
     assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 0, "no CANCEL without a 1xx");
     assert_eq!(stack.txn.metrics().held_cancels_dropped(), 1, "dropped with the transaction");
     assert_eq!(stack.txn.metrics().active_transactions(), 0);
@@ -281,6 +284,36 @@ async fn an_orphans_late_2xx_replaces_the_give_up_hold_with_timer_m() {
     let ok = response_bytes(200, "OK", "INVITE", branch, "callid-gave-up-2xx", true);
     stack.inject(&ok).await;
     elapse_ms(20).await;
-    assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1, "the 2xx is ACKed");
+    let out = stack.drain_peer();
+    assert_eq!(count_requests(&out, "ACK"), 1, "the 2xx is ACKed");
+    let bye = request_branch(&out, "BYE").expect("the unheld dialog is ended");
+    stack.inject(&response_bytes(200, "OK", "BYE", &bye, "callid-gave-up-2xx", true)).await;
+    elapse_ms(20).await;
     assert_eq!(stack.txn.metrics().timer_queue_len(), 1, "Timer M is the one timer holding it");
+}
+
+/// A provisional after the TU was told the hop is dead swaps in no long bound
+/// (ADR-0044): the transaction gives up at Timer B and is forgotten 64·T1
+/// later, not at the long INVITE bound.
+#[tokio::test(start_paused = true)]
+async fn a_provisional_after_the_dead_hop_report_keeps_timer_b() {
+    let mut stack = stack().await;
+    let branch = "z9hG4bK-reported-then-180";
+    stack
+        .txn
+        .send_request(outbound_request("INVITE", branch), addr(PEER), TxnKind::Invite)
+        .await
+        .unwrap();
+    elapse_ms(5_100).await;
+    assert_eq!(timeouts(&stack.drain_events()), vec![TxnTimeoutKind::Response]);
+    stack
+        .inject(&response_bytes(180, "Ringing", "INVITE", branch, "handle-shape-test", true))
+        .await;
+    // Timer B at 32 s, then its 64·T1 hold: gone by 64 s; the long bound
+    // (40 s) plus that hold would keep it to 72 s.
+    elapse_ms(63_000 - 5_100).await;
+    assert_eq!(stack.txn.metrics().active_transactions(), 1, "held past Timer B");
+    elapse_ms(2_000).await;
+    assert_eq!(stack.txn.metrics().active_transactions(), 0, "forgotten 64·T1 after Timer B");
+    assert!(timeouts(&stack.drain_events()).is_empty(), "reported once");
 }

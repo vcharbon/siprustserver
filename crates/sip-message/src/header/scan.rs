@@ -9,40 +9,47 @@
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
+/// The byte at `i`, `None` past the end.
+pub(crate) fn byte_at(s: &[u8], i: usize) -> Option<u8> {
+    s.get(i).copied()
+}
+
 pub(crate) fn skip_ws(s: &[u8], mut i: usize) -> usize {
-    while i < s.len() && (s[i] == b' ' || s[i] == b'\t') {
+    while matches!(byte_at(s, i), Some(b' ' | b'\t')) {
         i += 1;
     }
     i
 }
 
 pub(crate) fn index_of(s: &[u8], needle: u8, from: usize) -> Option<usize> {
-    s[from.min(s.len())..].iter().position(|&b| b == needle).map(|p| from + p)
+    s.get(from..)?.iter().position(|&b| b == needle).map(|p| from + p)
 }
 
-/// Scan forward until one of the (ASCII) delimiter bytes, or the end.
-pub(crate) fn scan_until(s: &[u8], mut i: usize, delims: &[u8]) -> usize {
-    while i < s.len() {
-        if delims.contains(&s[i]) {
-            return i;
-        }
-        i += 1;
+/// Scan forward until one of the (ASCII) delimiter bytes, or the end; `i`
+/// itself when it is past the end.
+pub(crate) fn scan_until(s: &[u8], i: usize, delims: &[u8]) -> usize {
+    match s.get(i..) {
+        Some(rest) => rest.iter().position(|c| delims.contains(c)).map_or(s.len(), |p| i + p),
+        None => i,
     }
-    i
+}
+
+/// `text[a..b]`, both indices clamped; empty when the clamped range is not one
+/// of `text` (`a` past `b`, or inside a character).
+pub(crate) fn clamped(text: &str, a: usize, b: usize) -> &str {
+    text.get(a.min(text.len())..b.min(text.len())).unwrap_or("")
 }
 
 /// `base[a..b]` as a span of `base`, both indices clamped — the single
 /// materialization point for every field, and the reason a parsed value copies
 /// no bytes.
 pub(crate) fn sub(base: &SipStr, a: usize, b: usize) -> SipStr {
-    let text = base.as_str();
-    base.reslice(&text[a.min(text.len())..b.min(text.len())])
+    base.reslice(clamped(base.as_str(), a, b))
 }
 
 /// [`sub`] with surrounding whitespace excluded.
 pub(crate) fn sub_trimmed(base: &SipStr, a: usize, b: usize) -> SipStr {
-    let text = base.as_str();
-    base.reslice(text[a.min(text.len())..b.min(text.len())].trim())
+    base.reslice(clamped(base.as_str(), a, b).trim())
 }
 
 /// [`sub`] lowercased — a span when it is already lowercase, an owned copy only
@@ -66,12 +73,12 @@ pub(crate) fn read_quoted(base: &SipStr, mut i: usize) -> (SipStr, usize) {
     i += 1;
     let mut rebuilt: Option<String> = None;
     let mut run_start = i;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if c == b'\\' && i + 1 < bytes.len() {
+    while let Some(c) = byte_at(bytes, i) {
+        let escaped =
+            if c == b'\\' { s.get(i + 1..).and_then(|rest| rest.chars().next()) } else { None };
+        if let Some(esc) = escaped {
             let out = rebuilt.get_or_insert_with(String::new);
-            out.push_str(&s[run_start..i]);
-            let esc = s[i + 1..].chars().next().unwrap_or('\\');
+            out.push_str(clamped(s, run_start, i));
             out.push(esc);
             i += 1 + esc.len_utf8();
             run_start = i;
@@ -85,6 +92,23 @@ pub(crate) fn read_quoted(base: &SipStr, mut i: usize) -> (SipStr, usize) {
     (finish_quoted(base, rebuilt, s, run_start, bytes.len()), i)
 }
 
+/// The position after the `"` closing the quoted string opened at byte
+/// `open`, a `\` escaping the byte after it; `None` when nothing closes it
+/// before a CR or LF, escaped or not (RFC 3261 §25.1: `qdtext` and
+/// `quoted-pair` exclude both).
+pub(crate) fn quoted_close(s: &[u8], open: usize) -> Option<usize> {
+    let mut i = open + 1;
+    loop {
+        match byte_at(s, i)? {
+            b'\r' | b'\n' => return None,
+            b'\\' if matches!(byte_at(s, i + 1), Some(b'\r' | b'\n')) => return None,
+            b'\\' => i += 2,
+            b'"' => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+}
+
 fn finish_quoted(
     base: &SipStr,
     rebuilt: Option<String>,
@@ -94,16 +118,16 @@ fn finish_quoted(
 ) -> SipStr {
     match rebuilt {
         Some(mut out) => {
-            out.push_str(&s[run_start..end]);
+            out.push_str(clamped(s, run_start, end));
             SipStr::owned(&out)
         }
-        None => base.reslice(&s[run_start..end]),
+        None => base.reslice(clamped(s, run_start, end)),
     }
 }
 
 /// The end of the ASCII digit run starting at `i`.
 pub(crate) fn digits_end(s: &[u8], mut i: usize) -> usize {
-    while i < s.len() && s[i].is_ascii_digit() {
+    while byte_at(s, i).is_some_and(|b| b.is_ascii_digit()) {
         i += 1;
     }
     i
@@ -118,15 +142,6 @@ pub(crate) fn parse_u32(text: &str, field: &str) -> Result<u32, SipParseError> {
         return Err(SipParseError::new(format!("{field} is not 1*DIGIT: {t:?}")));
     }
     t.parse::<u32>().map_err(|_| SipParseError::new(format!("{field} out of range: {t:?}")))
-}
-
-/// A port: `1*DIGIT` within the 16-bit range. `None` when the field is absent.
-pub(crate) fn parse_port(text: &str) -> Result<u16, SipParseError> {
-    let t = text.trim();
-    if t.is_empty() || !t.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(SipParseError::new(format!("non-digit in port: {t:?}")));
-    }
-    t.parse::<u16>().map_err(|_| SipParseError::new(format!("port out of range: {t:?}")))
 }
 
 #[cfg(test)]
@@ -160,7 +175,5 @@ mod tests {
     #[test]
     fn out_of_range_numbers_are_errors_not_saturations() {
         assert!(parse_u32("4294967296", "CSeq").is_err());
-        assert!(parse_port("88161").is_err());
-        assert_eq!(parse_port("5060").unwrap(), 5060);
     }
 }

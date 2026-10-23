@@ -25,6 +25,9 @@ use sip_message::header::{Contact, Event, HeaderValue, ParamValue, SubscriptionS
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+/// The transfer target's answer to its INVITE: its own session, which its
+/// later answers on that dialog continue (RFC 3264 §8).
+const CHARLIE_FIRST_ANSWER: &str = "v=0\r\no=charlie 9 8 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 // C's active answer to the c-realign re-INVITE (sendrecv on C's real port). The
 // a-realign re-INVITE toward A must carry *this* body (not the initial held
 // answer) — the one-way-audio guard (slice5-refer-design.md §4).
@@ -71,7 +74,7 @@ async fn end_transferred_call(alice_dialog: &mut Dialog, bob: &Agent, charlie: &
     alice_bye.expect(200).await;
 }
 
-/// Assert a re-INVITE carries `body`, an INVITE CSeq > 1 (a re-INVITE, not the
+/// Assert a re-INVITE carries `body`, a To-tag (a re-INVITE, not the
 /// initial INVITE), and a Contact whose URI carries `leg=<leg>`.
 fn assert_reinvite(req: &sip_message::SipRequest, body: &str, leg: &str) {
     assert_eq!(req.method(), "INVITE", "expected re-INVITE");
@@ -80,7 +83,10 @@ fn assert_reinvite(req: &sip_message::SipRequest, body: &str, leg: &str) {
         apart_from_origin(body),
         "re-INVITE body should equal expected SDP, under the dialog's own o="
     );
-    assert!(req.cseq().seq() > 1, "re-INVITE CSeq.seq {} should be > 1", req.cseq().seq());
+    assert!(
+        req.to().tag().is_some(),
+        "a re-INVITE names its dialog by the To-tag (RFC 3261 §14.1)"
+    );
     let contact = req.header::<Contact>().expect("a Contact").expect("readable Contact");
     assert_eq!(
         contact.uri().param("leg").and_then(ParamValue::as_str),
@@ -97,7 +103,7 @@ async fn refer_allow_c_realign_happy() {
     let h = Harness::with_transit_delay("refer-allow-c-realign-happy", 1);
     let alice = h.agent("alice", "127.0.0.1:5931").await;
     let bob = h.agent("bob", "127.0.0.1:5941").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5941)
         .start(&h, "b2bua", "127.0.0.1:5951")
         .await;
@@ -131,13 +137,8 @@ async fn refer_allow_c_realign_happy() {
     let mut charlie_uas = charlie.receive("INVITE").await;
     charlie_uas.respond(180, "Ringing").await;
 
-    // NOTIFY 180 active.
-    let mut n180 = bob.receive("NOTIFY").await;
-    assert_notify(&n180, "active", "SIP/2.0 180 Ringing");
-    n180.respond(200, "OK").await;
-
     // C answers initial INVITE 200; B2BUA ACKs (it is C's UAC).
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
 
     // NOTIFY 200 terminated (final).
@@ -174,7 +175,7 @@ async fn refer_allow_c_realign_c_reject_488() {
     let h = Harness::with_transit_delay("refer-allow-c-realign-c-reject-488", 1);
     let alice = h.agent("alice", "127.0.0.1:5932").await;
     let bob = h.agent("bob", "127.0.0.1:5942").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5942)
         .start(&h, "b2bua", "127.0.0.1:5952")
         .await;
@@ -202,7 +203,7 @@ async fn refer_allow_c_realign_c_reject_488() {
     n100.respond(200, "OK").await;
 
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
 
     let mut nterm = bob.receive("NOTIFY").await;
@@ -242,7 +243,7 @@ async fn refer_allow_c_realign_c_timeout() {
     let h = Harness::new("refer-allow-c-realign-c-timeout");
     let alice = h.agent("alice", "127.0.0.1:5933").await;
     let bob = h.agent("bob", "127.0.0.1:5943").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5943)
         .start(&h, "b2bua", "127.0.0.1:5953")
         .await;
@@ -270,7 +271,7 @@ async fn refer_allow_c_realign_c_timeout() {
     n100.respond(200, "OK").await;
 
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
 
     let mut nterm = bob.receive("NOTIFY").await;
@@ -311,7 +312,7 @@ async fn refer_allow_c_realign_c_glare() {
     let h = Harness::with_transit_delay("refer-allow-c-realign-c-glare", 1);
     let alice = h.agent("alice", "127.0.0.1:5934").await;
     let bob = h.agent("bob", "127.0.0.1:5944").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5944)
         .start(&h, "b2bua", "127.0.0.1:5954")
         .await;
@@ -339,7 +340,7 @@ async fn refer_allow_c_realign_c_glare() {
     n100.respond(200, "OK").await;
 
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
     let mut charlie_dialog = charlie_uas.dialog();
 
@@ -384,7 +385,7 @@ async fn refer_allow_c_realign_b_non_bye() {
     let h = Harness::with_transit_delay("refer-allow-c-realign-b-non-bye", 1);
     let alice = h.agent("alice", "127.0.0.1:5935").await;
     let bob = h.agent("bob", "127.0.0.1:5945").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5945)
         .start(&h, "b2bua", "127.0.0.1:5955")
         .await;
@@ -412,7 +413,7 @@ async fn refer_allow_c_realign_b_non_bye() {
     n100.respond(200, "OK").await;
 
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
 
     let mut nterm = bob.receive("NOTIFY").await;
@@ -459,7 +460,7 @@ async fn refer_allow_c_realign_carries_the_answer_whole() {
     let h = Harness::with_transit_delay("refer-allow-c-realign-whole-answer", 1);
     let alice = h.agent("alice", "127.0.0.1:5936").await;
     let bob = h.agent("bob", "127.0.0.1:5946").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5946)
         .start(&h, "b2bua", "127.0.0.1:5956")
         .await;
@@ -481,7 +482,7 @@ async fn refer_allow_c_realign_carries_the_answer_whole() {
     refer.expect(202).await;
     bob.receive("NOTIFY").await.respond(200, "OK").await;
     let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_FIRST_ANSWER).await;
     charlie.receive("ACK").await;
     bob.receive("NOTIFY").await.respond(200, "OK").await;
 

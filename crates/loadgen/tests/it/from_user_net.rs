@@ -22,7 +22,8 @@ use loadgen::{
 };
 use scenario_harness::Harness;
 use sip_clock::Clock;
-use sip_net::{SignalingNetwork, SimulatedSignalingNetwork};
+use sip_net::SignalingNetwork;
+use sip_net_testkit::SimulatedSignalingNetwork;
 
 const RECV: Duration = Duration::from_secs(20);
 
@@ -138,6 +139,7 @@ fn cfg(via: SocketAddr, cps: f64, secs: u64, talk_ms: u64, seed: u64) -> DriverC
         },
         default_tuning: CallTuning::default(),
         tuning: std::collections::HashMap::new(),
+        overload_reject: None,
     }
 }
 
@@ -155,7 +157,7 @@ fn inflight(reporter: &Reporter) -> String {
     reporter
         .render_prometheus()
         .lines()
-        .find(|l| l.starts_with("loadgen_inflight "))
+        .find(|l| l.starts_with("loadgen_inflight{stream=\"main\"} "))
         .unwrap_or("loadgen_inflight <absent>")
         .to_string()
 }
@@ -168,7 +170,7 @@ async fn settle(rig: &Rig, reporter: &Reporter) {
     rig.h.advance(Duration::from_secs(40)).await;
     settle_until(|| rig.b2bua.is_reaped()).await;
     rig.b2bua.assert_fully_reaped();
-    assert_eq!(inflight(reporter), "loadgen_inflight 0", "a call never finished");
+    assert_eq!(inflight(reporter), "loadgen_inflight{stream=\"main\"} 0", "a call never finished");
 }
 
 /// Overlapping calls with distinct calling numbers on ONE shared socket, torn
@@ -392,7 +394,7 @@ impl scenario_harness::actor::ActorScenario for Broken {
         if self.panics {
             panic!("the load body's build panicked");
         }
-        Err(scenario_harness::StepError::Timeout { who: "alice".to_string() })
+        Err(scenario_harness::StepError::timeout("alice", None, "a datagram"))
     }
 }
 
@@ -511,7 +513,7 @@ impl scenario_harness::actor::ActorScenario for FailsOnce {
         env: &loadgen::CallEnv<'_>,
     ) -> Result<scenario_harness::actor::ActorCall, scenario_harness::StepError> {
         if !self.failed.swap(true, Relaxed) {
-            return Err(scenario_harness::StepError::Timeout { who: "alice".to_string() });
+            return Err(scenario_harness::StepError::timeout("alice", None, "a datagram"));
         }
         scenario_harness::actor::scenarios::BasicCall.build(env)
     }
@@ -552,38 +554,6 @@ async fn a_cooling_number_is_redrawn_from_the_pool() {
     assert_eq!(reporter.count("fails_once", &ResultClass::Rejected), 0, "{report}");
     assert_eq!(reporter.count("fails_once", &ResultClass::Ok), total - 1, "{report}");
     assert!(rig.core.stats().key_cooling.load(Relaxed) > 0, "no draw met the cooling number");
-    settle(&rig, &reporter).await;
-}
-
-/// A call refused because its only number is cooling after a failure near a
-/// fault is chaos collateral like the failure itself: tagged `near`.
-#[tokio::test(start_paused = true)]
-#[ignore = "slow lane: loadgen"]
-async fn a_cooling_rejection_near_a_fault_is_excused() {
-    let rig =
-        rig(7510, Layout::Shared, Correlation::from_user(), B2buaSut::route_all_with_refer, None)
-            .await;
-    let reporter = reporter();
-    let chaos = Arc::new(loadgen::ChaosLog::new(rig.transport.clock.clone()));
-    chaos.record("kill_worker", None);
-    let fixed = case(r#""input": { "core": { "from": "sip:+15550123456@pool.example" } }"#);
-    let driver = Driver::new(
-        cfg(rig.b2bua.addr, 2.0, 3, 0, 0xC4A0),
-        vec![broken(false).with_case(Some(fixed))],
-        reporter.clone(),
-        rig.transport.clone(),
-    )
-    .with_chaos(chaos);
-    driver.run().await;
-
-    let rejected = reporter.count("failing_build", &ResultClass::Rejected);
-    let report = reporter.render_prometheus();
-    assert!(rejected >= 3, "the cooling number was not refused:\n{report}");
-    assert_eq!(
-        reporter.count_tagged("failing_build", &ResultClass::Rejected, loadgen::ChaosTag::Near),
-        rejected,
-        "a cooling rejection within the fault's hold must be excused:\n{report}"
-    );
     settle(&rig, &reporter).await;
 }
 

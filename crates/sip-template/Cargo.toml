@@ -1,0 +1,13 @@
+[package]
+name = "sip-template"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Captured SIP messages prepared for near-verbatim replay, and the matching of a received message against one. Test and replay support: no production binary links it."
+
+[lints]
+workspace = true
+
+[dependencies]
+sip-message = { path = "../sip-message" }

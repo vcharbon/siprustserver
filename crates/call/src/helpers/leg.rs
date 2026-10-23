@@ -1,12 +1,9 @@
-//! Leg-level helpers: role resolution, leg/dialog lookup, state and
-//! disposition setters, termination-resolution predicates, and the per-leg
-//! tag readers.
+//! Leg-level helpers: role resolution, leg lookup, the dialog of a leg named
+//! by the one tag a caller does not already know, and termination-resolution
+//! predicates. What a leg's INVITE and dialogs record as they end lives in
+//! [`super::leg_end`].
 
-use crate::model::{
-    ByeDisposition, Call, CallModelState, Dialog, Leg, LegDisposition, LegKind, LegState,
-};
-
-use super::lens::update_leg;
+use crate::model::{Call, CallModelState, Dialog, Leg, LegKind, LegState};
 
 /// Resolve a leg's role, defaulting from `legId` when `kind` is absent.
 pub fn leg_kind(leg: &Leg) -> LegKind {
@@ -23,72 +20,82 @@ pub fn is_adopted(leg: &Leg) -> bool {
     !matches!(leg_kind(leg), LegKind::Media | LegKind::TransferTarget)
 }
 
-/// Find a dialog by remote tag (early-state forking on the b-leg).
-pub fn find_dialog_by_to_tag<'a>(leg: &'a Leg, to_tag: &str) -> Option<&'a Dialog> {
-    leg.dialogs.iter().find(|d| d.sip.remote_tag == to_tag)
+/// The dialog of a leg this stack dialled whose peer tag is `peer_tag`: its
+/// own tag is the From-tag of the leg's INVITE ([`Leg::outbound_invite`]).
+pub fn callee_dialog<'a>(leg: &'a Leg, peer_tag: &str) -> Option<&'a Dialog> {
+    let ours = &leg.outbound_invite.as_ref()?.our_tag;
+    leg.dialogs.by_tags(ours, peer_tag)
 }
 
-/// The single confirmed dialog (only valid when `leg.state == Confirmed`).
-pub fn confirmed_dialog(leg: &Leg) -> Option<&Dialog> {
-    leg.dialogs.first()
+/// The dialog of `leg` whose peer tag is `peer_tag`, on either face: on a leg
+/// this stack dialled, its [`callee_dialog`]; on a leg whose INVITE it
+/// received, where every dialog carries the caller's tag, the one the leg's
+/// requests ride ([`crate::Dialogs::carrying`]) when it is that peer's.
+pub fn dialog_with_peer<'a>(leg: &'a Leg, peer_tag: &str) -> Option<&'a Dialog> {
+    if leg.outbound_invite.is_some() {
+        return callee_dialog(leg, peer_tag);
+    }
+    leg.dialogs.carrying().filter(|d| d.peer_tag == peer_tag)
 }
 
-/// Set the state of a specific leg.
-pub fn set_leg_state(call: Call, leg_id: &str, state: LegState) -> Call {
-    update_leg(call, leg_id, |l| l.state = state)
+/// [`dialog_with_peer`], to update.
+pub fn dialog_with_peer_mut<'a>(leg: &'a mut Leg, peer_tag: &str) -> Option<&'a mut Dialog> {
+    let id = dialog_with_peer(leg, peer_tag)?.id();
+    leg.dialogs.by_tags_mut(&id.our_tag, &id.peer_tag)
 }
 
-/// Set the disposition of a specific leg.
-pub fn set_leg_disposition(call: Call, leg_id: &str, disposition: LegDisposition) -> Call {
-    update_leg(call, leg_id, |l| l.disposition = disposition)
+/// [`callee_dialog`], to update.
+pub fn callee_dialog_mut<'a>(leg: &'a mut Leg, peer_tag: &str) -> Option<&'a mut Dialog> {
+    let ours = leg.outbound_invite.as_ref()?.our_tag.clone();
+    leg.dialogs.by_tags_mut(&ours, peer_tag)
 }
 
-/// Set the BYE disposition of a specific leg.
-pub fn set_bye_disposition(call: Call, leg_id: &str, bye: ByeDisposition) -> Call {
-    update_leg(call, leg_id, |l| l.bye_disposition = Some(bye))
+/// This stack's tag on `leg` for a message no dialog names (RFC 3261
+/// §8.2.6.2): the From-tag of the INVITE it sent the leg, else the tag of the
+/// dialog it answers the leg's INVITE under ([`Leg::own_tag`]).
+pub fn leg_own_tag(leg: &Leg) -> Option<&str> {
+    leg.outbound_invite.as_ref().map(|i| i.our_tag.as_str()).or(leg.own_tag.as_deref())
 }
 
-/// Record the final sent on a leg's initial inbound INVITE
-/// ([`Leg::invite_final_sent`]). The first final stands: a leg that already
-/// carries one is left as is — the transaction took exactly that one final.
-pub fn record_invite_final(call: Call, leg_id: &str, status: u16) -> Call {
-    update_leg(call, leg_id, |l| {
-        l.invite_final_sent.get_or_insert(status);
-    })
+/// The dialog a request this stack originates on `leg` rides: the leg's
+/// confirmed dialog, else — before the leg's INVITE is answered — the dialog
+/// it answers that INVITE under ([`Leg::own_tag`]).
+pub fn carrying_dialog(leg: &Leg) -> Option<&Dialog> {
+    leg.dialogs.confirmed().or_else(|| own_dialog(leg).filter(|d| d.is_live()))
 }
 
-/// Whether a single leg has reached a terminal resolution for termination
-/// bookkeeping. A `trying` leg with no `byeDisposition` never established, so it
-/// is considered resolved.
-///
-/// A leg still in `Cancelling` disposition is **not** resolved even though its
-/// interim `Cancelled` bye disposition reads terminal: an internal CANCEL is in
-/// flight and its transaction has not settled — the callee owes us a `487`, or a
-/// `200 OK` may still be crossing our CANCEL on the wire (RFC 3261 §9.1). Holding
-/// the leg unresolved keeps the call alive until `resolve-cancel-response` (the
-/// 487) or `cancel-200-crossing` (200 → ACK + BYE) reaps the abandoned callee, so
-/// finalization (RemoveCall) never strands a ringing b-leg. Both of those rules —
-/// and the force-terminal reaper/safety paths — clear the `Cancelling`
-/// disposition as they resolve the leg, so this stays unresolved only for the
-/// duration of the in-flight CANCEL (bounded by the terminating safety timer).
+/// The dialog `leg` answers its INVITE under ([`Leg::own_tag`]), in any
+/// state; `None` on a leg this stack dialled, and before it holds a dialog.
+pub fn own_dialog(leg: &Leg) -> Option<&Dialog> {
+    let own = leg.own_tag.as_deref()?;
+    leg.dialogs.iter().find(|d| d.our_tag == own)
+}
+
+/// The caller-facing dialog whose own tag is `our_tag`: its peer tag is the
+/// caller's, the From-tag of her INVITE.
+pub fn caller_dialog<'a>(call: &'a Call, our_tag: &str) -> Option<&'a Dialog> {
+    call.a_leg.dialogs.by_tags(our_tag, &call.a_leg_invite.from_tag)
+}
+
+/// [`caller_dialog`], to update.
+pub fn caller_dialog_mut<'a>(call: &'a mut Call, our_tag: &str) -> Option<&'a mut Dialog> {
+    call.a_leg.dialogs.by_tags_mut(our_tag, &call.a_leg_invite.from_tag)
+}
+
+/// Whether the call waits on nothing more from `leg` before its record is
+/// released ([`Leg::is_resolved`]). A leg whose CANCEL is in flight is not:
+/// the callee owes a `487`, or a `200` may still cross the CANCEL (RFC 3261
+/// §9.1), and finalization must not strand a ringing callee.
 pub fn leg_is_resolved(leg: &Leg) -> bool {
-    if leg.disposition == LegDisposition::Cancelling {
-        return false;
-    }
-    match leg.bye_disposition {
-        None => leg.state == LegState::Trying,
-        Some(b) => b.is_terminal(),
-    }
+    leg.is_resolved()
 }
 
 /// Whether a leg — or its whole call — is already going away, so an
 /// asynchronous trigger (a timer fire, a transaction timeout, a failure
 /// result) must drive NO forward progress through it: no failover consult,
 /// no new final on a transaction that already carries one. True when the
-/// call's lifecycle has entered `Terminating`/`Terminated`, when the leg's
-/// CANCEL is in flight (`Cancelling` — the leg's state still reads `Trying`,
-/// so state alone cannot discriminate), or when the leg itself is
-/// `Terminated`.
+/// call's lifecycle has entered `Terminating`/`Terminated`, or when the leg
+/// itself reads `Terminated` (its CANCEL or BYE sent, its INVITE ended).
 ///
 /// Distinct from [`leg_is_resolved`]: a `Cancelling` leg is *unresolved*
 /// (its callee still owes a 487 or a crossing 200, so finalization waits) yet
@@ -96,8 +103,7 @@ pub fn leg_is_resolved(leg: &Leg) -> bool {
 /// questions.
 pub fn leg_is_going_away(call_state: CallModelState, leg: &Leg) -> bool {
     matches!(call_state, CallModelState::Terminating | CallModelState::Terminated)
-        || leg.disposition == LegDisposition::Cancelling
-        || leg.state == LegState::Terminated
+        || leg.state() == LegState::Terminated
 }
 
 /// Whether all legs of a terminating call have reached a terminal resolution
@@ -114,6 +120,19 @@ pub fn add_b_leg(mut call: Call, leg: Leg) -> Call {
     call
 }
 
+/// The id the next leg this stack dials takes: `b-{n}`, `n` one more than
+/// the legs it dialled so far.
+pub fn next_b_leg_id(call: &Call) -> String {
+    format!("b-{}", call.b_legs.len() + 1)
+}
+
+/// Record that `leg_id` rang: its INVITE received a 180–189 provisional.
+pub fn mark_rang(call: &mut Call, leg_id: &str) {
+    if let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) {
+        leg.ring = crate::model::Ring::Rang;
+    }
+}
+
 /// Find a b-leg by legId.
 pub fn find_b_leg<'a>(call: &'a Call, leg_id: &str) -> Option<&'a Leg> {
     call.b_legs.iter().find(|l| l.leg_id == leg_id)
@@ -128,58 +147,25 @@ pub fn find_leg<'a>(call: &'a Call, leg_id: &str) -> Option<&'a Leg> {
     }
 }
 
+/// Every leg of the call, the a-leg first.
+pub(crate) fn every_leg(call: &Call) -> impl Iterator<Item = &Leg> {
+    std::iter::once(&call.a_leg).chain(call.b_legs.iter())
+}
+
 /// Find a b-leg by callId.
 pub fn find_b_leg_by_call_id<'a>(call: &'a Call, call_id: &str) -> Option<&'a Leg> {
     call.b_legs.iter().find(|l| l.call_id == call_id)
 }
 
-/// The B2BUA's own tag for a leg (`sip.localTag` of `dialogs[0]`).
-pub fn b2bua_tag(call: &Call, leg_id: &str) -> Option<String> {
-    if leg_id == "a" {
-        return call.a_leg.dialogs.first().map(|d| d.sip.local_tag.clone());
-    }
-    let b = find_b_leg(call, leg_id)?;
-    Some(b.dialogs.first().map(|d| d.sip.local_tag.clone()).unwrap_or_else(|| b.from_tag.clone()))
-}
-
-/// Whether `tag` is one this stack put on `leg_id`: the `localTag` of any of
-/// its dialogs, an a-facing fork tag in the tag map, or the From-tag the leg's
-/// own INVITE carried (a b-leg). `None` while the leg holds no tag of its own,
-/// so a request's To-tag has nothing to be measured against (RFC 3261 §12.2.2).
-pub fn holds_local_tag(call: &Call, leg_id: &str, tag: &str) -> Option<bool> {
-    let leg = find_leg(call, leg_id)?;
-    let mut own: Vec<&str> =
-        leg.dialogs.iter().map(|d| d.sip.local_tag.as_str()).filter(|t| !t.is_empty()).collect();
-    if leg_id == "a" {
-        own.extend(call.tag_map.iter().map(|m| m.a_tag.as_str()).filter(|t| !t.is_empty()));
-    } else if !leg.from_tag.is_empty() {
-        own.push(leg.from_tag.as_str());
-    }
-    (!own.is_empty()).then(|| own.contains(&tag))
-}
-
-/// The remote party's tag for a leg (`sip.remoteTag` of `dialogs[0]`).
-pub fn remote_tag(call: &Call, leg_id: &str) -> Option<String> {
-    if leg_id == "a" {
-        return Some(
-            call.a_leg
-                .dialogs
-                .first()
-                .map(|d| d.sip.remote_tag.clone())
-                .unwrap_or_else(|| call.a_leg.from_tag.clone()),
-        );
-    }
-    let b = find_b_leg(call, leg_id)?;
-    b.dialogs.first().map(|d| d.sip.remote_tag.clone())
-}
-
-/// Whether this stack answered the caller — a **durable** fact of the record,
-/// true from the 2xx onward and still true once the leg is `Terminated`. It
-/// reads the final the a-leg's initial INVITE server transaction took
-/// (`invite_final_sent`, written at the one a-facing final seam), not
-/// `LegState::Confirmed`, which the teardown clears. Replication reconciliation
-/// compares two copies of a call on this fact, so it must not read differently
-/// before and after the call ends.
+/// Whether this stack answered the caller: true from the 2xx onward and still
+/// true once the leg is `Terminated`. It reads the final the a-leg's initial
+/// INVITE server transaction took (`invite_final_sent`, written at the one
+/// a-facing final seam), not `LegState::Confirmed`, which a BYE ends.
+/// One case turns it back to false: a 2xx the transaction layer's CANCEL 487
+/// pre-empted before it reached the wire, which the record then states apart
+/// ([`Leg::answer_preempted`]). Replication reconciliation reads the two
+/// together ([`super::lifecycle_position`]), so its answer axis never moves
+/// back.
 pub fn caller_answered(call: &Call) -> bool {
     matches!(call.a_leg.invite_final_sent, Some(status) if (200..300).contains(&status))
 }

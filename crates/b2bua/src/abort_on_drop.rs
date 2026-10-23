@@ -4,9 +4,9 @@ use tokio::task::JoinHandle;
 
 /// Aborts the task it holds when dropped: a supervised task dies with its
 /// supervisor, a reader with the flow that owns its connection.
-pub(crate) struct AbortOnDrop(pub(crate) JoinHandle<()>);
+pub(crate) struct AbortOnDrop<T = ()>(pub(crate) JoinHandle<T>);
 
-impl Drop for AbortOnDrop {
+impl<T> Drop for AbortOnDrop<T> {
     fn drop(&mut self) {
         self.0.abort();
     }

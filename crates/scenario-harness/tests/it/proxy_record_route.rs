@@ -17,6 +17,9 @@ use sip_message::header::HeaderName;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
+/// The caller's first CSeq: its INVITE's.
+const C: u32 = scenario_harness::Party::Caller.first_cseq();
+
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49180 RTP/AVP 0\r\n";
 
@@ -109,8 +112,8 @@ async fn record_routed_call_through_proxy() {
     assert!(fwd_bye.raw(HeaderName::Route).next().is_none());
     assert!(fwd_bye.request_uri().text().contains("bob@127.0.0.1:5070"));
 
-    // The dialog CSeq still increments correctly through the proxy: BYE = 2.
-    assert_eq!(bye_req.cseq().seq(), 2);
+    // The dialog CSeq still increments correctly through the proxy: BYE = C+1.
+    assert_eq!(bye_req.cseq().seq(), C + 1);
     assert_eq!(bye_req.cseq().method(), "BYE");
 
     // Render the report (3-lane diagram) and confirm the routing headers are on
@@ -128,7 +131,7 @@ fn fmt_addr(a: std::net::SocketAddr) -> String {
     a.to_string()
 }
 fn fwd_bye_source(
-    entries: &[sip_net::RecordedSipEntry],
+    entries: &[sip_net_testkit::RecordedSipEntry],
     alice: std::net::SocketAddr,
     proxy: std::net::SocketAddr,
 ) -> Vec<u8> {

@@ -1,12 +1,17 @@
 //! [`NameAddr`] — the `[display-name] <uri> *(";" param)` core every
 //! address-valued header is built from.
 
+use std::ops::Range;
+
+use crate::char_class::is_token_char;
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
-use super::params::{parse_semicolon_params, ParamValue, Params, HEADER_PARAMS};
-use super::scan::{index_of, read_quoted, skip_ws, sub_trimmed};
-use super::uri::Uri;
+use super::params::{read_generic_params, ParamValue, Params};
+use super::scan::{
+    byte_at, clamped, index_of, quoted_close, read_quoted, skip_ws, sub, sub_trimmed,
+};
+use super::uri::{Uri, UriRole};
 use super::wire::Wire;
 
 /// An address with an optional display name and header parameters. The URI is
@@ -73,44 +78,97 @@ impl NameAddr {
         self
     }
 
-    /// Read `[display-name] ("<" uri ">" / addr-spec) *(";" param)`.
+    /// Read `( name-addr / addr-spec ) *( SEMI generic-param )` — the
+    /// [`AddrForm::NameAddrOrSpec`], [`UriRole::Target`] reading of
+    /// [`parse_as`](Self::parse_as).
     pub fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
-        let value = raw.trimmed();
-        let bytes = value.as_bytes();
-        let len = bytes.len();
-        let start = skip_ws(bytes, 0);
-
-        let (display, uri_text, params_at) = if start < len && bytes[start] == b'"' {
-            let (text, after) = read_quoted(&value, start);
-            let open = skip_ws(bytes, after);
-            let (uri_text, params_at) = angle_uri(&value, open)?;
-            (Some(text), uri_text, params_at)
-        } else if let Some(open) = index_of(bytes, b'<', start) {
-            let before = sub_trimmed(&value, start, open);
-            let display = if before.is_empty() { None } else { Some(before) };
-            let (uri_text, params_at) = angle_uri(&value, open)?;
-            (display, uri_text, params_at)
-        } else {
-            // addr-spec: every parameter after the URI is a HEADER parameter.
-            let semi = index_of(bytes, b';', start).unwrap_or(len);
-            (None, sub_trimmed(&value, start, semi), semi)
-        };
-
-        let uri = Uri::parse(&uri_text)?;
-        let (params, _) = parse_semicolon_params(&value, params_at, &HEADER_PARAMS);
-        Ok(Self { display, uri, params })
+        Self::parse_as(raw, AddrForm::NameAddrOrSpec, UriRole::Target)
     }
 
-    /// Read an identity a caller states as text: bracketed, the name-addr [`parse`]
-    /// reads; bare, an addr-spec whose every `;`-parameter is a URI parameter, the
-    /// way a Request-URI reads. The two readings differ only on a bare value's tail.
+    /// Read one address value whole by the RFC 3261 §25.1 grammar:
+    /// `name-addr = [ display-name ] LAQUOT addr-spec RAQUOT`, a display name
+    /// being a quoted-string or tokens separated by LWS, the addr-spec read by
+    /// the one URI reader in `role` with no whitespace inside the brackets,
+    /// then the header parameters and nothing else. A bare addr-spec ends at
+    /// the first `;`, every parameter after it is the header's, and it carries
+    /// no `,` or `?` (§20); [`AddrForm::NameAddrOnly`] refuses it.
+    pub fn parse_as(raw: &SipStr, form: AddrForm, role: UriRole) -> Result<Self, SipParseError> {
+        Self::parse_spanned(raw, form, role).map(|(addr, _)| addr)
+    }
+
+    /// [`parse_as`](Self::parse_as), with the byte range of `raw` the URI's
+    /// text takes: the seam a rewrite of the URI alone splices at, every other
+    /// byte kept as written.
+    pub(crate) fn parse_spanned(
+        raw: &SipStr,
+        form: AddrForm,
+        role: UriRole,
+    ) -> Result<(Self, Range<usize>), SipParseError> {
+        let lead = raw.as_str().len() - raw.as_str().trim_start().len();
+        let value = raw.trimmed();
+        let bytes = value.as_bytes();
+        let (display, open) = match byte_at(bytes, 0) {
+            Some(b'"') => {
+                let after = quoted_close(bytes, 0).ok_or_else(|| {
+                    SipParseError::new(format!(
+                        "unterminated quoted display name: {:?}",
+                        raw.as_str()
+                    ))
+                })?;
+                (Some(read_quoted(&value, 0).0), Some(skip_ws(bytes, after)))
+            }
+            _ => {
+                let run = display_run_end(bytes);
+                let display = sub_trimmed(&value, 0, run);
+                let open = (byte_at(bytes, run) == Some(b'<')).then_some(run);
+                (open.filter(|_| !display.is_empty()).map(|_| display), open)
+            }
+        };
+        let (uri_span, params_at) = match open {
+            Some(open) => angle_uri(&value, open)?,
+            None => {
+                let semi = index_of(bytes, b';', 0).unwrap_or(bytes.len());
+                // No URI byte is a `<`: one before the first `;` opens a
+                // name-addr whose display name is neither tokens nor quoted.
+                if index_of(bytes, b'<', 0).is_some_and(|lt| lt < semi) {
+                    return Err(SipParseError::new(format!(
+                        "display name is neither tokens nor a quoted-string: {:?}",
+                        value.as_str()
+                    )));
+                }
+                if form == AddrForm::NameAddrOnly {
+                    return Err(SipParseError::new(format!(
+                        "a bare addr-spec where the grammar requires <uri>: {:?}",
+                        value.as_str()
+                    )));
+                }
+                let spec = clamped(value.as_str(), 0, semi);
+                if spec.contains([',', '?']) {
+                    return Err(SipParseError::new(format!(
+                        "bare addr-spec with `,` or `?`; name-addr \"<uri>\" form required (RFC 3261 §20): {:?}",
+                        spec.trim_end()
+                    )));
+                }
+                (0..spec.trim_end().len(), semi)
+            }
+        };
+        let uri = Uri::read_exact(&sub(&value, uri_span.start, uri_span.end), role)?;
+        let params = read_generic_params(&value, params_at)?;
+        let span = lead + uri_span.start..lead + uri_span.end;
+        Ok((Self { display, uri, params }, span))
+    }
+
+    /// Read an identity a caller states as text, its URI a [`UriRole::Identity`]:
+    /// bracketed, the name-addr [`parse_as`] reads; bare, an addr-spec whose
+    /// every `;`-parameter is a URI parameter, the way a Request-URI reads. The
+    /// two readings differ only on a bare value's tail.
     ///
-    /// [`parse`]: Self::parse
+    /// [`parse_as`]: Self::parse_as
     pub fn parse_identity(raw: &SipStr) -> Result<Self, SipParseError> {
         if raw.as_str().contains('<') {
-            Self::parse(raw)
+            Self::parse_as(raw, AddrForm::NameAddrOrSpec, UriRole::Identity)
         } else {
-            Uri::parse(&raw.trimmed()).map(Self::new)
+            Uri::parse_as(raw, UriRole::Identity).map(Self::new)
         }
     }
 
@@ -144,12 +202,9 @@ impl NameAddr {
         let value = raw.trimmed();
         let bytes = value.as_bytes();
         let start = skip_ws(bytes, 0);
-        if start >= bytes.len() {
-            return None;
-        }
-        if bytes[start] == b'"' {
+        if byte_at(bytes, start)? == b'"' {
             let (_, after) = read_quoted(&value, start);
-            return Some(value.subspan(start, after - start));
+            return Some(value.subspan(start, after.saturating_sub(start)));
         }
         let open = index_of(bytes, b'<', start)?;
         let before = sub_trimmed(&value, start, open);
@@ -171,18 +226,47 @@ impl NameAddr {
     }
 }
 
-/// The URI inside `<...>` opening at byte `open`, plus the position of the
-/// header parameters that follow it.
-fn angle_uri(value: &SipStr, open: usize) -> Result<(SipStr, usize), SipParseError> {
+/// Where a header's grammar lets its address stand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddrForm {
+    /// `name-addr / addr-spec`: From, To, Contact and the identity headers.
+    NameAddrOrSpec,
+    /// `name-addr` alone: the route family (Route, Record-Route, Path,
+    /// Service-Route), whose parameters a bare URI would swallow, and the
+    /// bracketed RFC 6442 Geolocation value.
+    NameAddrOnly,
+}
+
+/// The end of the leading run of token characters and LWS — the extent an
+/// unquoted display name may take before its `<`.
+fn display_run_end(bytes: &[u8]) -> usize {
+    bytes
+        .iter()
+        .position(|&b| !(is_token_char(b) || b == b' ' || b == b'\t'))
+        .unwrap_or(bytes.len())
+}
+
+/// The byte range of the URI inside `<...>` opening at byte `open`, untrimmed,
+/// plus the position of the header parameters that follow it.
+fn angle_uri(value: &SipStr, open: usize) -> Result<(Range<usize>, usize), SipParseError> {
     let bytes = value.as_bytes();
-    if open >= bytes.len() || bytes[open] != b'<' {
+    if byte_at(bytes, open) != Some(b'<') {
         return Err(SipParseError::new(format!(
             "name-addr display name is not followed by <uri>: {:?}",
             value.as_str()
         )));
     }
     match index_of(bytes, b'>', open + 1) {
-        Some(close) => Ok((sub_trimmed(value, open + 1, close), close + 1)),
+        Some(close) => {
+            let inner = clamped(value.as_str(), open + 1, close);
+            if inner != inner.trim_matches([' ', '\t']) {
+                return Err(SipParseError::new(format!(
+                    "LWS inside \"<...>\" addr-spec: {:?}",
+                    value.as_str()
+                )));
+            }
+            Ok((open + 1..close, close + 1))
+        }
         None => {
             Err(SipParseError::new(format!("name-addr has no closing `>`: {:?}", value.as_str())))
         }

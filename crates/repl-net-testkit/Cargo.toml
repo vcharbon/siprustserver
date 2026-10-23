@@ -1,0 +1,24 @@
+[package]
+name = "repl-net-testkit"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Test support of the HA replication transport seam: the in-process SimulatedReplicationNetwork (ordered delivery, fault switchboard, paused-clock cooperative) and the RecordingReplicationNetwork capture decorator. It declares no purity tier, so no production binary links it."
+
+[lints]
+workspace = true
+
+[dependencies]
+repl-net = { path = "../repl-net" }
+# The sim fabric's spawned-sleep delivery and bounded channels:
+# `tokio::time::pause`/`advance` drives delivery under the paused-clock tests
+# exactly like the SIP fabric.
+tokio = { workspace = true }
+async-trait = { workspace = true }
+# Recording timestamps come from the injected wall-clock seam.
+sip-clock = { path = "../sip-clock" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+sip-clock = { path = "../sip-clock", features = ["testkit"] }

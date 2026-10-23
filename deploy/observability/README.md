@@ -1,8 +1,8 @@
 # Observability — VictoriaMetrics + Grafana (Rust SUT)
 
-Self-contained metrics/logs stack for the Rust SIP SUT running in kind. This is
-the siprustserver-owned copy (it depends on no sibling sipjsserver checkout).
-Host-side storage + UI, in-cluster scraper/forwarder.
+Self-contained metrics/logs/traces stack for the Rust SIP SUT running in kind:
+host-side storage + UI (this directory), in-cluster scraper/forwarder (the
+`siprust-observability` helm release, `deploy/helm`).
 
 ```
             host (docker compose)                     kind cluster (sip-e2e)
@@ -11,30 +11,26 @@ Host-side storage + UI, in-cluster scraper/forwarder.
                ◀── LogsQL ── VictoriaLogs   :9428 ◀── HTTP push   ── fluent-bit (DaemonSet)
                ◀── Jaeger ── VictoriaTraces :10428 ◀── OTLP/HTTP  ── b2bua-worker + sip-front-proxy
 
-                                              vmagent k8s SD scrapes:
+                                              vmagent k8s SD scrapes (helm release):
                                                 • pods annotated prometheus.io/scrape=true
                                                   (sip-front-proxy :9090, b2bua-worker :9091,
                                                    kube-state-metrics, node-exporter)
                                                 • kubelet /metrics + cAdvisor (every node)
 ```
 
-## Automatic deployment
+## Bring-up
 
-`deploy/k8s/run.sh up` (and `all`) calls `install.sh --bootstrap` after the
-cluster is created, so scraping + dashboards are always wired against the fresh
-cluster. Recreating the kind cluster wipes the in-cluster `observability`
-namespace, so the addons are re-applied on every `up`. The host docker-compose
-stack persists across runs (its data dir is gitignored but survives `down`).
-
-Skip with `OBS_ENABLE=0 ./run.sh up`. Re-apply by hand with `./run.sh obs`.
-
-## Manual control
+The host stack outlives every cluster: it attaches to the `kind` docker network,
+so it comes up after the first `deploy/helm/kind-lab.sh up` and stays up across
+cluster recreates (its data dir is gitignored and survives `down`).
+`kind-lab.sh deploy` installs the in-cluster collectors and refuses to run while
+the host stack is down.
 
 ```bash
-./install.sh --bootstrap   # bring up host stack + apply kind-addons
-./install.sh --apply       # idempotent: reload dashboards/scrape + reapply addons
+./install.sh --bootstrap   # data dirs, sipext network, compose up --build, health wait
+./install.sh --apply       # idempotent: reload VictoriaMetrics' scrape config
 ./install.sh --status      # probe endpoints + dump scrape targets
-./install.sh --down        # tear down host stack + delete observability ns
+./install.sh --down        # tear the host stack down (data kept)
 ```
 
 - Grafana:        http://localhost:3333  (anonymous admin)
@@ -42,10 +38,22 @@ Skip with `OBS_ENABLE=0 ./run.sh up`. Re-apply by hand with `./run.sh obs`.
 - VictoriaLogs:    http://localhost:9428/select/vmui
 - VictoriaTraces:  http://localhost:10428  (OTLP ingest `/insert/opentelemetry/v1/traces`)
 
-## Dashboards (auto-provisioned, bind-mounted)
+## Dashboards (auto-provisioned, mounted in place)
 
-`stack/grafana/dashboards/*.json` are bind-mounted into Grafana and reload within
-~10s — edit the JSON in this repo, no restart/upload needed.
+The dashboards live on the HA tooling search path (ADR-0049 §7.5): the base set
+in `tooling/hakit/content/dashboards/`, a product's in the `dashboards/`
+directory of each of its `HAKIT_PATH` entries. Grafana's file provider reads
+`/hakit/dashboards` recursively; each directory is bind-mounted read-only at
+`/hakit/dashboards/<i>`, `i` its position on the path. The base is in the
+compose file; with `HAKIT_PATH` set, `install.sh` runs
+`hakit dashboards --compose-override` (it validates the path first) and adds
+the override it writes. Nothing is copied: an edit reloads within ~10s.
+
+Every dashboard carries the generic block, and `hakit validate` refuses one
+without it: the `Incident window` annotation (regions from
+`sip_chaos_window == 1`), the `Incident phase` annotation (points from
+`sip_chaos_event`), the tag `hakit` and the link listing every dashboard so
+tagged with the time range kept.
 
 | UID | Title | Built from |
 |---|---|---|
@@ -73,8 +81,7 @@ metadata:
     prometheus.io/port:   "<port>"     # the /metrics container port
 ```
 
-The Rust manifests already set these: `deploy/k8s/manifests/30-proxy.yaml`
-(:9090) and `20-worker.yaml` (:9091).
+The SUT chart sets these on the proxy (:9090) and the worker (:9091).
 
 ## Notes / caveats
 
@@ -85,6 +92,6 @@ The Rust manifests already set these: `deploy/k8s/manifests/30-proxy.yaml`
   (`localhost` → IPv6 `::1` gets connection-reset against these containers).
 - Per-call traces (ADR-0026) are SAMPLED, so the VictoriaTraces datasource is
   near-empty by design: the default draw is 1e-4. To see a specific call, send
-  `X-Trace-Sample: 1.0` on its INVITE (`run.sh` sets `SIP_TRACE_HEADER=1`, which
-  is what makes the lab honour that header) or return `"trace": true` from the
+  `X-Trace-Sample: 1.0` on its INVITE (the kind values set `SIP_TRACE_HEADER=1`,
+  which is what makes the lab honour that header) or return `"trace": true` from the
   decision engine. See [docs/observability.md](../../docs/observability.md).

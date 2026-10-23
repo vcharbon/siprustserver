@@ -74,16 +74,6 @@ pub const TIMER_L: u64 = 64 * T1;
 /// (RFC 3261 §13.2.2.4). Equal to that retransmission bound.
 pub const TIMER_M: u64 = 64 * T1;
 
-/// DEFAULT for the held-CANCEL grace window
-/// (`sip_txn::TransactionConfig::cancel_hold_grace_ms`) — how long a CANCEL for
-/// a response-less INVITE client txn waits for the branch's first provisional
-/// (RFC 3261 §9.1) before being sent regardless (ADR-0028). 2·T1: long enough
-/// for the original INVITE plus one Timer-A retransmit to reach a UAS and draw
-/// its 100, so the grace-expiry send is a rare fallback, not the common path.
-/// The RFC-audit acceptance floor (`rfc_rules::rules::cancel::CANCEL_GRACE_FLOOR_US`,
-/// the `cancel-after-1xx` rule) sits just below this value — keep them in step.
-pub const CANCEL_HOLD_GRACE: u64 = 2 * T1;
-
 /// Safety-net sweep cadence (ms): how often `sip-txn` checks for a
 /// transaction past its lifetime deadline.
 pub const TXN_SWEEP_INTERVAL: u64 = 10_000;

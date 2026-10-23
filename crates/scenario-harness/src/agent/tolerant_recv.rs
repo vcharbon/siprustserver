@@ -5,6 +5,7 @@
 //! [`release_failed_call`](Agent::release_failed_call). The plain asserting
 //! receive lives in [`super::ua`].
 
+use std::future::Future;
 use std::time::Duration;
 
 use sip_message::generators::{generate_response, GenerateResponseOpts};
@@ -13,7 +14,7 @@ use sip_message::{SipMessage, SipParser, SipRequest};
 
 use super::addressing::top_via_addr;
 use super::server_txn::ServerTxn;
-use super::step::StepError;
+use super::step::{unwrap_step, unwrap_step_at, StepError, StepSite};
 use super::Agent;
 
 /// The stateless answer a UA with **no remaining dialog state** owes an
@@ -71,8 +72,12 @@ impl Agent {
                 Ok(Some(pkt)) => pkt,
                 _ => return, // timed out or queue closed
             };
-            let Ok(SipMessage::Request(r)) = CustomParser::new().parse(&pkt.raw) else {
-                continue; // responses / unparseable noise: nothing to answer
+            let Ok(msg) = CustomParser::new().parse(&pkt.raw) else {
+                continue; // unparseable noise: nothing to answer
+            };
+            self.dialogs.sight(&msg);
+            let SipMessage::Request(r) = msg else {
+                continue; // responses: nothing to answer
             };
             let Some((status, reason)) =
                 release_verdict(r.method().as_str(), r.to().tag().is_some())
@@ -82,7 +87,8 @@ impl Agent {
                 self.ack_obligation_claims(&r);
                 continue;
             };
-            let resp = generate_response(&r, status, reason, &GenerateResponseOpts::default());
+            let resp = generate_response(&r, status, reason, &GenerateResponseOpts::default())
+                .expect("a response to the request");
             let dst = top_via_addr(&r).unwrap_or(self.addr);
             let _ = self.try_send(&SipMessage::Response(resp), dst).await;
         }
@@ -114,6 +120,7 @@ impl Agent {
             let msg = CustomParser::new()
                 .parse(&pkt.raw)
                 .unwrap_or_else(|e| panic!("{} drained an unparseable datagram: {e}", self.name));
+            self.dialogs.sight(&msg);
             let r = match msg {
                 SipMessage::Request(r) => r,
                 SipMessage::Response(resp) => panic!(
@@ -169,6 +176,7 @@ impl Agent {
                     r.reason()
                 ),
             };
+            unwrap_step(self.dialog_check(&r));
             let mut txn = ServerTxn::from_request(self.clone(), r);
             if txn.request.method() == method {
                 return Some(txn);
@@ -177,7 +185,8 @@ impl Agent {
                 continue; // txn-owned §17.1.1.3 hop ACK
             }
             if tolerate.iter().any(|t| txn.request.method() == *t) {
-                txn.respond(200, "OK").send().await;
+                let (code, reason) = self.dialog_refusal(&txn.request).unwrap_or((200, "OK"));
+                txn.respond(code, reason).send().await;
                 continue;
             }
             panic!(
@@ -213,7 +222,9 @@ impl Agent {
     ) -> Result<(ServerTxn, Vec<SipRequest>), StepError> {
         let mut absorbed = Vec::new();
         loop {
-            let r = match self.try_recv().await? {
+            let next =
+                self.try_recv().await.map_err(|e| e.awaiting(|| self.awaited_request(method)));
+            let r = match next? {
                 SipMessage::Request(r) => r,
                 SipMessage::Response(r) => {
                     return Err(StepError::UnexpectedKind {
@@ -225,6 +236,7 @@ impl Agent {
                     })
                 }
             };
+            self.dialog_check(&r)?;
             let mut txn = ServerTxn::from_request(self.clone(), r);
             if txn.request.method() == method {
                 return Ok((txn, absorbed));
@@ -232,6 +244,13 @@ impl Agent {
             if txn.request.method().as_str() == "ACK" {
                 absorbed.push(txn.request);
                 continue;
+            }
+            if let Some((code, reason)) = self.dialog_refusal(&txn.request) {
+                if tolerate.iter().any(|t| txn.request.method() == *t) {
+                    txn.respond(code, reason).try_send().await?;
+                    absorbed.push(txn.request);
+                    continue;
+                }
             }
             if tolerate.iter().any(|t| txn.request.method() == *t) {
                 let is_offer_reinvite =
@@ -260,11 +279,28 @@ impl Agent {
     /// the txn-layer retransmit, so several identical copies queue before the
     /// awaited message (CLAUDE.md: tolerate retransmits, don't relax the
     /// assertion). Returns the first request matching `method`.
-    pub async fn receive_tolerating(&self, method: &str, tolerate: &[&str]) -> ServerTxn {
+    #[track_caller]
+    pub fn receive_tolerating<'a>(
+        &'a self,
+        method: &'a str,
+        tolerate: &'a [&'a str],
+    ) -> impl Future<Output = ServerTxn> + 'a {
+        let site = self.step("receive_tolerating");
+        self.receive_tolerating_at(method, tolerate, site)
+    }
+
+    async fn receive_tolerating_at(
+        &self,
+        method: &str,
+        tolerate: &[&str],
+        site: StepSite,
+    ) -> ServerTxn {
         loop {
-            let msg = self.recv().await;
-            match msg {
+            let msg =
+                self.try_recv().await.map_err(|e| e.awaiting(|| self.awaited_request(method)));
+            match unwrap_step_at(msg, site) {
                 SipMessage::Request(r) => {
+                    unwrap_step_at(self.dialog_check(&r), site);
                     if r.method() == method {
                         return ServerTxn::from_request(self.clone(), r);
                     }
@@ -274,18 +310,19 @@ impl Agent {
                     if tolerate.iter().any(|t| r.method() == *t) {
                         // Drain + answer the duplicate so the txn layer stops
                         // retransmitting it, then keep waiting for `method`.
+                        let (code, reason) = self.dialog_refusal(&r).unwrap_or((200, "OK"));
                         let mut txn = ServerTxn::from_request(self.clone(), r);
-                        txn.respond(200, "OK").send().await;
+                        txn.respond(code, reason).send().await;
                         continue;
                     }
                     panic!(
-                        "{} expected a {method} request (tolerating {tolerate:?}), got {}",
+                        "{} expected a {method} request (tolerating {tolerate:?}), got {} at {site}",
                         self.name,
                         r.method()
                     );
                 }
                 SipMessage::Response(r) => panic!(
-                    "{} expected a {method} request, got a {} {} response",
+                    "{} expected a {method} request, got a {} {} response at {site}",
                     self.name,
                     r.status(),
                     r.reason()
@@ -309,35 +346,51 @@ impl Agent {
     /// The load-bearing difference from [`receive_tolerating`](Agent::receive_tolerating)
     /// is that the absorbed request is **not** `200 OK`'d: a 200 would ANSWER it.
     /// The intended case is a b-leg INVITE the callee is deliberately leaving
-    /// unanswered (a **silent callee**, no `>=180`) while the UAC's Timer A keeps
-    /// retransmitting the INVITE hop-by-hop through a front proxy that absorbs the
-    /// callee's bare `100 Trying` (RFC 3261 §16.7) — so the UAC never stops its
-    /// retransmit timer and the duplicates queue ahead of the message under test
-    /// (the internally-originated CANCEL, the crossing-200's ACK, the reap BYE).
-    pub async fn receive_absorbing(&self, method: &str, absorb: &[&str]) -> ServerTxn {
+    /// unanswered (a **silent callee** that sends no response at all) while the
+    /// UAC's Timer A keeps retransmitting it (RFC 3261 §17.1.1.2) — so the
+    /// duplicates queue ahead of the message under test (the
+    /// internally-originated CANCEL, the crossing-200's ACK, the reap BYE).
+    #[track_caller]
+    pub fn receive_absorbing<'a>(
+        &'a self,
+        method: &'a str,
+        absorb: &'a [&'a str],
+    ) -> impl Future<Output = ServerTxn> + 'a {
+        let site = self.step("receive_absorbing");
+        self.receive_absorbing_at(method, absorb, site)
+    }
+
+    async fn receive_absorbing_at(
+        &self,
+        method: &str,
+        absorb: &[&str],
+        site: StepSite,
+    ) -> ServerTxn {
         loop {
-            match self.recv().await {
+            let msg =
+                self.try_recv().await.map_err(|e| e.awaiting(|| self.awaited_request(method)));
+            match unwrap_step_at(msg, site) {
                 SipMessage::Request(r) => {
                     if r.method() == method {
+                        unwrap_step_at(self.dialog_check(&r), site);
                         return ServerTxn::from_request(self.clone(), r);
                     }
                     if absorb.iter().any(|t| r.method() == *t) {
-                        // Drop the retransmission silently — no response (a UAS that
-                        // has only 100'd its INVITE absorbs retransmits, replaying at
-                        // most the 100 the proxy already eats). Keep waiting.
+                        // Drop the retransmission silently — no response, as the
+                        // silent callee sent none. Keep waiting.
                         continue;
                     }
                     if self.ack_obligation_claims(&r) {
                         continue; // txn-owned §17.1.1.3 hop ACK
                     }
                     panic!(
-                        "{} expected a {method} request (absorbing {absorb:?}), got {}",
+                        "{} expected a {method} request (absorbing {absorb:?}), got {} at {site}",
                         self.name,
                         r.method()
                     );
                 }
                 SipMessage::Response(r) => panic!(
-                    "{} expected a {method} request, got a {} {} response",
+                    "{} expected a {method} request, got a {} {} response at {site}",
                     self.name,
                     r.status(),
                     r.reason()

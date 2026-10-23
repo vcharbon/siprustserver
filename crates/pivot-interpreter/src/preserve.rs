@@ -11,7 +11,8 @@
 //! The check runs on the COMPOSED message rather than on the document, because
 //! a property nothing verifies is a property a later change can drop silently.
 
-use sip_message::{SipHeader, TemplateHeader};
+use sip_message::SipHeader;
+use sip_template::TemplateHeader;
 
 /// Hold `emitted` to the stored block `stated` names: each stated header occurs
 /// in the emitted message, in order, spelled and valued as stated. Names the

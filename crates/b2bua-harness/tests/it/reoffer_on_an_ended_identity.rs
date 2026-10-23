@@ -6,8 +6,7 @@
 //! Whether the first call is still resident decides the outcome; the state of
 //! its INVITE server transaction does not:
 //! - same CSeq while the first call is resident (waiting for its callee's
-//!   487), inside Timer I: answered 482 as a merged copy
-//!   (`FIXME(copy-after-end)` in `router/admit.rs`);
+//!   487), inside Timer I: answered 482 as a merged copy;
 //! - same CSeq after the release, the server transaction still in Timer I:
 //!   a new call;
 //! - same CSeq after the release and past Timer I: a new call;
@@ -140,7 +139,7 @@ async fn a_reoffer_after_the_release_of_a_cancelled_call_is_a_new_call() {
 
 /// The re-offer arrives after the caller's ACK, inside Timer I, while the
 /// first call still waits for its callee's 487: it is answered 482 as a
-/// merged copy of the first INVITE (`FIXME(copy-after-end)`), and the first
+/// merged copy of the first INVITE, and the first
 /// call ends on its own.
 #[tokio::test(start_paused = true)]
 async fn a_reoffer_before_the_release_inside_timer_i_is_answered_482() {

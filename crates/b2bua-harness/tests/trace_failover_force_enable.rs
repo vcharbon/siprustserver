@@ -47,7 +47,7 @@ fn sample_nothing_by_default() {
 #[tokio::test]
 async fn a_failover_route_turns_the_trace_on_and_backfills_the_call() {
     sample_nothing_by_default();
-    let (_log_guard, log) = observe::test_buffer();
+    let (_log_guard, log) = observe_testkit::test_buffer();
 
     let h = Harness::with_transit_delay("b2bua-trace-failover-force-enable", 0);
     let alice = h.agent("alice", "127.0.0.1:5063").await;

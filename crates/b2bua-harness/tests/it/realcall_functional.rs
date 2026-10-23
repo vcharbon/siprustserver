@@ -11,10 +11,11 @@
 //! (the sleeps auto-advance under `start_paused`).
 //!
 //! This is the proof that one scenario definition feeds both lanes — every
-//! scenario is covered here: the happy-path flows (`run_actor_asserting`) AND
-//! the voluntarily-failing ones (`run_actor_collecting`, where a FAILED call
-//! that still cleans up is the leak gate's most valuable assertion). As more
-//! flows land in `actor::scenarios`, add a case here per flow.
+//! scenario is covered here: the happy-path flows AND the abnormal-end ones (a
+//! reject, an abandon, a declined transfer — each its own accepted branch,
+//! where a call that ends early yet cleans up is the leak gate's most valuable
+//! assertion). As more flows land in `actor::scenarios`, add a case here per
+//! flow.
 
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use scenario_harness::actor::scenarios::{
@@ -24,7 +25,7 @@ use scenario_harness::actor::scenarios::{
     ReferCharlieReject as ActorReferCharlieReject, Reinvite as ActorReinvite,
 };
 use scenario_harness::actor::ActorScenario;
-use scenario_harness::realcall::{run_actor_asserting, run_actor_collecting, CallEnv};
+use scenario_harness::realcall::{run_actor_asserting, CallEnv};
 use scenario_harness::Agent;
 
 // The REFER backend the b2bua's scripted `/call/refer` authorizes (see
@@ -66,13 +67,29 @@ async fn assert_no_leak_actor(name: &str, scenario: &dyn ActorScenario) {
         format!("{name}-tok"),
     );
 
-    run_actor_asserting(scenario, &env).await;
+    assert_eq!(run_actor_asserting(scenario, &env).await, "answered");
 
     settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
 
     let report = scene.finish().await;
     assert!(report.passed(), "RFC audit failed for `{name}`");
+}
+
+/// A forked establishment through the SUT's transparent relay: three forks
+/// ring under distinct tags, the middle one answers.
+#[tokio::test(start_paused = true)]
+async fn realcall_forked_no_leak() {
+    let shape = callshapes::shapes::forked(callshapes::shapes::default_binder());
+    assert_no_leak_actor("realcall-forked", &shape).await;
+}
+
+/// A forked establishment answered by a fork that sent no provisional
+/// (RFC 3261 §12.1.2, §13.2.2.4): the 2xx carries a To-tag no 18x announced.
+#[tokio::test(start_paused = true)]
+async fn realcall_forked_unrung_no_leak() {
+    let shape = callshapes::shapes::forked_unrung(callshapes::shapes::default_binder());
+    assert_no_leak_actor("realcall-forked-unrung", &shape).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -129,7 +146,8 @@ async fn refer_scene(name: &str) -> (B2buaScene, Agent) {
         B2buaSut::route_all_with_refer("127.0.0.1", bob_port)
     })
     .await;
-    let charlie = scene.h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie =
+        scene.h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     (scene, charlie)
 }
 
@@ -161,7 +179,7 @@ async fn realcall_refer_no_leak() {
     let (scene, charlie) = refer_scene(name).await;
     let env = refer_env(name, &scene, &charlie);
 
-    run_actor_asserting(&ActorRefer::new(REFER_KEY), &env).await;
+    assert_eq!(run_actor_asserting(&ActorRefer::new(REFER_KEY), &env).await, "answered");
 
     // After alice BYEs, the SUT relays a BYE to BOTH downstream legs (bob + charlie)
     // and reaps the call only once each answers `200`. The scenario's own 150 ms
@@ -184,16 +202,14 @@ async fn realcall_refer_no_leak() {
     assert!(report.passed(), "RFC audit failed for `{name}`");
 }
 
-// ── Voluntarily-failing leak gate — a FAILED call must still clean up ────────
+// ── Abnormal-end leak gate — a call that ends early must still clean up ──────
 
-/// Drive an alice/bob-only failing actor body via the actor runner (which OWNS
-/// teardown), assert it surfaced its NOK terminal, and assert the SUT fully
-/// reaped. The whole point of these flows is that a FAILED call leaves no leaked
-/// dialog/limiter/lock behind, so the leak invariant IS the assertion — no RFC
-/// gate (a deliberately-truncated flow does not satisfy the happy-path audit).
-/// The refer failing case ([`ActorReferCharlieReject`]) needs the charlie scene,
-/// so it is wired separately below.
-async fn failing_no_leak_actor(name: &str, scenario: &dyn ActorScenario) {
+/// Drive an alice/bob-only abnormal-end actor body via the actor runner (which
+/// OWNS teardown), assert it ended on its accepted `branch`, and assert the SUT
+/// fully reaped under the RFC audit. The declined-transfer case
+/// ([`ActorReferCharlieReject`]) needs the charlie scene, so it is wired
+/// separately below.
+async fn abnormal_end_no_leak_actor(name: &str, scenario: &dyn ActorScenario, branch: &str) {
     let scene = B2buaScene::new(name).await;
     let env = CallEnv::for_functional(
         &scene.alice,
@@ -204,13 +220,10 @@ async fn failing_no_leak_actor(name: &str, scenario: &dyn ActorScenario) {
         format!("{name}-tok"),
     );
 
-    let result = run_actor_collecting(scenario, &env).await;
-    assert!(
-        result.is_err(),
-        "voluntarily-failing actor scenario `{name}` unexpectedly succeeded: {result:?}"
-    );
+    assert_eq!(run_actor_asserting(scenario, &env).await, branch, "`{name}`");
 
-    let _ = scene.finish().await;
+    let report = scene.finish().await;
+    assert!(report.passed(), "RFC audit failed for `{name}`");
 }
 
 #[tokio::test(start_paused = true)]
@@ -218,7 +231,7 @@ async fn realcall_invite_reject_no_leak() {
     // Bob 486s the INVITE: the final completes the transaction (auto-ACKed), so
     // there is nothing to CANCEL/BYE — the SUT must reap the rejected call.
     // Since P3 the load body is the ACTOR-declared port.
-    failing_no_leak_actor("realcall-invite-reject", &ActorInviteReject).await;
+    abnormal_end_no_leak_actor("realcall-invite-reject", &ActorInviteReject, "rejected").await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -226,7 +239,58 @@ async fn realcall_abandon_ringing_no_leak() {
     // Alice abandons after 180: the scenario drives the full CANCEL handshake
     // (CANCEL → bob 200/487) so the SUT reaps both legs immediately.
     // Since P3 the load body is the ACTOR-declared port.
-    failing_no_leak_actor("realcall-abandon-ringing", &ActorAbandonRinging).await;
+    abnormal_end_no_leak_actor("realcall-abandon-ringing", &ActorAbandonRinging, "abandoned").await;
+}
+
+/// The abandon's branch through the SUT when bob answers `ring` after his
+/// 180, every hop one transit long, and whether bob sent a 2xx to the INVITE.
+async fn abandon_with_ring(name: &str, ring: std::time::Duration) -> (&'static str, bool) {
+    let scene = B2buaScene::new(name).await;
+    let mut env = CallEnv::for_functional(
+        &scene.alice,
+        &scene.bob,
+        None,
+        scene.b2bua.addr,
+        "X-Loadgen-Id",
+        format!("{name}-tok"),
+    );
+    env.ring_delay = ring;
+    let bob = scene.bob.addr();
+    let branch = run_actor_asserting(&ActorAbandonRinging, &env).await;
+    settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
+    let report = scene.finish().await;
+    assert!(report.passed(), "RFC audit failed for `{name}`");
+    let bob_answered = report.entries().iter().any(|e| {
+        let text = String::from_utf8_lossy(&e.raw);
+        e.from == bob && text.starts_with("SIP/2.0 2") && text.contains(" INVITE\r\n")
+    });
+    (branch, bob_answered)
+}
+
+/// The two abandon endings timing alone decides through the SUT. With no ring
+/// the 200 trails the 180 by nothing and reaches alice before her CANCEL
+/// leaves: `answered_before_cancel`. With a ring of 2.5 transits her CANCEL
+/// (sent on the 180, two transits after bob sent it) reaches the SUT after
+/// bob's 200 left him but before it arrives: the SUT answers her CANCEL 200
+/// and her INVITE 487, and tears bob's answered leg down — `abandoned`, with
+/// bob's answer on the wire. The no-ring case repeats: the order of two
+/// messages landing in one instant must not decide it.
+#[tokio::test(start_paused = true)]
+async fn realcall_abandon_ringing_ending_follows_the_answer_timing() {
+    let transit = std::time::Duration::from_millis(scenario_harness::SIMULATED_TRANSIT_DELAY_MS);
+    for i in 0..8 {
+        assert_eq!(
+            abandon_with_ring(&format!("realcall-abandon-no-ring-{i}"), std::time::Duration::ZERO)
+                .await,
+            ("answered_before_cancel", true),
+            "run {i}"
+        );
+    }
+    assert_eq!(
+        abandon_with_ring("realcall-abandon-cancel-meets-the-200", transit * 5 / 2).await,
+        ("abandoned", true)
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -240,16 +304,14 @@ async fn realcall_refer_charlie_reject_no_leak() {
     let (scene, charlie) = refer_scene(name).await;
     let env = refer_env(name, &scene, &charlie);
 
-    let result = run_actor_collecting(&ActorReferCharlieReject::new(REFER_KEY), &env).await;
-    assert!(
-        result.is_err(),
-        "the declined-transfer body must surface its NOK terminal, got {result:?}"
-    );
+    let branch = run_actor_asserting(&ActorReferCharlieReject::new(REFER_KEY), &env).await;
+    assert_eq!(branch, "transfer_declined");
 
     // The actor's own teardown BYEs the still-live A↔B; pump bob (and charlie,
     // harmless — its leg was already declined) so the relayed b-leg BYE is answered
     // and the SUT reaps promptly (see the refer happy-path note on the late BYE).
     drain_callees(&scene.bob, &charlie).await;
 
-    let _ = scene.finish().await;
+    let report = scene.finish().await;
+    assert!(report.passed(), "RFC audit failed for `{name}`");
 }

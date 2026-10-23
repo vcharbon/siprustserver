@@ -94,7 +94,7 @@ fn limiters(ids: &[&str]) -> Vec<LimiterEntry> {
 /// (so a failure consults the decision), and `ids` as its call limiters.
 fn initial_route(port: u16, ids: &[&str]) -> NewCallResponse {
     let mut r = route_to("127.0.0.1", port);
-    r.no_answer_timeout_sec = Some(NO_ANSWER_SEC);
+    r.no_answer_ms = Some(NO_ANSWER_SEC * 1000);
     r.callback_context = Some("failover-ctx".into());
     r.call_limiter = limiters(ids);
     NewCallResponse::Route(r)
@@ -259,7 +259,7 @@ async fn release_reroute_fold_on_a_terminating_call_releases_its_holds() {
             ScriptedDecisionEngine::builder()
                 .fallback(|_| {
                     let mut r = route_to("127.0.0.1", 5070);
-                    r.features.platform.max_duration_sec = 60;
+                    r.features.platform.max_duration_ms = 60_000;
                     r.callback_context = Some("release-ctx".into());
                     r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
                     r.call_limiter = limiters(&["x", "y"]);
@@ -511,7 +511,7 @@ async fn a_fail_open_fold_on_an_ending_call_is_freed_by_its_release() {
             ScriptedDecisionEngine::builder()
                 .fallback(|_| {
                     let mut r = route_to("127.0.0.1", 5070);
-                    r.features.platform.max_duration_sec = 60;
+                    r.features.platform.max_duration_ms = 60_000;
                     r.callback_context = Some("release-ctx".into());
                     r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
                     r.call_limiter = limiters(&["x", "y"]);
@@ -552,7 +552,8 @@ async fn a_fail_open_fold_on_an_ending_call_is_freed_by_its_release() {
     // ── the caller hangs up; the limiter stalls before the fold's admit ────
     let mut bye = dialog.bye().await;
     let mut bob_bye = bob.receive("BYE").await;
-    rig.http.apply_fault(http_net::Fault::Stall { dst: WITNESS_LIMITER_ADDR.parse().unwrap() });
+    rig.http
+        .apply_fault(http_net_testkit::Fault::Stall { dst: WITNESS_LIMITER_ADDR.parse().unwrap() });
     for _ in 0..RELEASE_DELAY.as_secs() {
         h.advance(Duration::from_secs(1)).await;
         rig.refresh_witnesses();
@@ -561,7 +562,9 @@ async fn a_fail_open_fold_on_an_ending_call_is_freed_by_its_release() {
         media.try_receive_tolerating("INVITE", &[]).await.is_none(),
         "the fold dials no replacement leg for a call whose parties hung up",
     );
-    rig.http.apply_fault(http_net::Fault::Resume { dst: WITNESS_LIMITER_ADDR.parse().unwrap() });
+    rig.http.apply_fault(http_net_testkit::Fault::Resume {
+        dst: WITNESS_LIMITER_ADDR.parse().unwrap(),
+    });
 
     // ── bob's 200 ends the call: still counted, it releases its set ────────
     bob_bye.respond(200, "OK").await;

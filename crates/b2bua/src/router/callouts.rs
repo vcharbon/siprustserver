@@ -7,22 +7,24 @@
 
 use std::sync::Arc;
 
-use call::{AdmitReport, Call, CallLimiterState};
+use call::{AdmitReport, Call, CallLimiterState, ConsultAdmits};
 use serde::Serialize;
 use serde_json::json;
 
+use super::fold_payload::{put, to_payload};
 use super::RouterCtx;
 use crate::answer_deadline;
 use crate::decision::{
-    CallDecisionError, CallFailureRequest, CallReferResponse, CallReleaseResponse, CallSnapshot,
-    CallTreatment, FailureInfo, RouteDecision, SipHeaderUpdates,
+    CallDecisionError, CallFailureRequest, CallReleaseResponse, CallSnapshot, CallTreatment,
+    FailureInfo, SipHeaderUpdates,
 };
 use crate::decision_log::STACK_AUTHORED;
-use crate::failure_terminate;
 use crate::limiter::report::{admit_report_of, LimiterAdmitResult};
-use crate::limiter::{AdmitOutcome, LimiterEntry, LimiterHeld, LimiterWorker};
+use crate::limiter::{LimiterEntry, LimiterHeld, LimiterWorker};
 use crate::metrics::AdmitSite;
+use crate::{failure_terminate, failure_unavailable};
 use b2bua_sdk::event::CallEvent;
+use route_admit::admit_route_limiters;
 use tokio::sync::mpsc;
 
 /// The call a callout answers: its `call_ref`, and the incarnation whose turn
@@ -119,74 +121,7 @@ fn record_round_trip(
     );
 }
 
-/// Serialize a typed payload to the internal-event JSON. Payload structs are
-/// program-constructed (no non-string keys, no non-finite floats), so failure
-/// is unreachable; degrade to an empty object rather than kill the callout task.
-fn to_payload<T: Serialize>(p: T) -> serde_json::Value {
-    serde_json::to_value(p).unwrap_or_else(|_| serde_json::Value::Object(Default::default()))
-}
-
-/// Replace the call's set on the cluster limiter with a route's
-/// `call_limiter` entries — the ONE fold shared by the failover and release
-/// callouts, so the two can never drift from each other. One
-/// `admit(key, change, held, entries, release_on_refusal = true)`, checked
-/// net of the set the call holds (`held`, the call's held set, which it
-/// carries): a refusal releases that set in the same step. Nothing is sent for
-/// a route stating no limiter on a call holding nothing: the report states an
-/// unsent admit of nothing, which asks for nothing. The worker answers just
-/// past the limiter's admit budget, `unavailable` when the limiter did not,
-/// so the consult's answer deadline lies past the whole chain. `Ok(report)`: the
-/// admit the fold carries — admitted, lost, superseded, or refused by a release
-/// fence (the call ended; counted as
-/// `b2bua_limiter_admit_released_total{site="fold"}`); `Err(report)`: refused
-/// on a cap — the caller owns the treatment, the call holds nothing and owes
-/// its release.
-async fn admit_route_limiters(
-    ctx: &RouterCtx,
-    key: &str,
-    held: &LimiterHeld,
-    change: u64,
-    route: &RouteDecision,
-) -> Result<AdmitReport, AdmitReport> {
-    if route.call_limiter.is_empty() && held.entries.is_empty() {
-        let outcome = AdmitOutcome::NotSent;
-        return Ok(AdmitReport { key: key.to_string(), change, entries: Vec::new(), outcome });
-    }
-    let entries = route.call_limiter.clone();
-    let report = ctx.limiter.admit(AdmitSite::Fold, key, change, held, entries, true).await;
-    match &report.outcome {
-        AdmitOutcome::Rejected { .. } => Err(report),
-        _ => Ok(report),
-    }
-}
-
 // ── /call/refer ─────────────────────────────────────────────────────────────
-
-#[derive(Serialize)]
-struct ReferDestinationPayload {
-    host: String,
-    // Emitted even when None (null) — the fold rule reads absent-vs-null alike,
-    // but the wire shape is pinned by the e2e refer tests.
-    port: Option<u16>,
-    transport: Option<String>,
-}
-
-#[derive(Serialize)]
-struct ReferAllowPayload {
-    action: &'static str,
-    destination: ReferDestinationPayload,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    new_refer_to: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    update_headers: Option<SipHeaderUpdates>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    no_answer_timeout_sec: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    callback_context: Option<String>,
-    /// The decision's label, for the fold's `MarkDecision`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    label: Option<String>,
-}
 
 /// Kick the async `/call/refer` round-trip and fold the decision back in as a
 /// `refer-http-result` internal event. Call-scoped context is attached HERE
@@ -202,39 +137,12 @@ pub(super) fn spawn_refer_callout(
     let snapshot = CallSnapshot::of(call);
     let trace = crate::trace::emit::TraceHandle::of(call);
     let to = Caller::of(call_ref, call);
-    tokio::spawn(async move {
+    observe::spawn_keeping_node(async move {
         let sent_at_ms = ctx2.clock.now_ms();
-        let mut req = parse_call_refer_request(&request);
+        let mut req = super::callout_requests::parse_call_refer_request(&request);
         req.snapshot = snapshot;
-        let (outcome, payload) = match ctx2.decision.call_refer(req).await {
-            Ok(CallReferResponse::Allow {
-                destination,
-                new_refer_to,
-                update_headers,
-                no_answer_timeout_sec,
-                callback_context,
-                label,
-            }) => (
-                "allow",
-                to_payload(ReferAllowPayload {
-                    action: "allow",
-                    destination: ReferDestinationPayload {
-                        host: destination.host,
-                        port: destination.port,
-                        transport: destination.transport,
-                    },
-                    new_refer_to,
-                    update_headers,
-                    no_answer_timeout_sec,
-                    callback_context,
-                    label,
-                }),
-            ),
-            Ok(CallReferResponse::Reject { code, reason, label }) => {
-                ("reject", json!({ "reject_code": code, "reject_reason": reason, "label": label }))
-            }
-            Err(_) => ("error", json!({ STACK_AUTHORED: true })),
-        };
+        let (outcome, payload) =
+            super::refer_result::refer_result(ctx2.decision.call_refer(req).await);
         record_round_trip(&trace, &ctx2, "/call/refer", sent_at_ms, &request, outcome, &payload);
         send_internal(&ctx2, to, "refer-http-result", outcome, payload, Vec::new());
     });
@@ -300,7 +208,7 @@ pub(super) fn spawn_failure_callout(
     call: &Call,
     call_ref: String,
     request: serde_json::Value,
-    limiter_change: u64,
+    admits: ConsultAdmits,
     deadline: Option<u64>,
 ) {
     let ctx2 = ctx.clone();
@@ -308,14 +216,14 @@ pub(super) fn spawn_failure_callout(
     let trace = crate::trace::emit::TraceHandle::of(call);
     let limiter = call.limiter.clone();
     let to = Caller::of(call_ref, call);
-    tokio::spawn(async move {
+    observe::spawn_keeping_node(async move {
         let sent_at_ms = ctx2.clock.now_ms();
         let (outcome, mut payload) =
-            failure_outcome(&ctx2, &limiter, limiter_change, snapshot, &request).await;
+            failure_outcome(&ctx2, &limiter, admits, snapshot, &request).await;
         record_round_trip(&trace, &ctx2, "/call/failure", sent_at_ms, &request, outcome, &payload);
         // The fold names the deadline it answers, when its turn armed one.
         if let Some(deadline) = deadline {
-            payload[answer_deadline::CONSULT_CHANGE] = json!(deadline);
+            put(&mut payload, answer_deadline::CONSULT_CHANGE, json!(deadline));
         }
         let fold = internal_event(to, "call-failure-result", outcome, payload, Vec::new());
         send_admit_fold(&ctx2.reentry_tx, &ctx2.limiter, fold);
@@ -335,35 +243,47 @@ pub(super) fn spawn_failure_callout(
 /// `origin`, so the a-facing mint carries none of the peer's relayed headers
 /// (ADR-0017 X2). A resolution other than a route after a refusal carries the
 /// refused admit's report in `limiter_admit`: the refusal dropped the call's
-/// set. The chain's admits are numbered from `first_change` on, one each, in
-/// the block the dispatching turn reserved for them.
+/// set. The chain's admits are numbered from `admits.first_change` on, one
+/// each, in the block the dispatching turn reserved for them.
 async fn failure_outcome(
     ctx: &Arc<RouterCtx>,
     limiter: &CallLimiterState,
-    first_change: u64,
+    admits: ConsultAdmits,
     snapshot: CallSnapshot,
     request: &serde_json::Value,
 ) -> (&'static str, serde_json::Value) {
-    let mut req = parse_call_failure_request(request);
+    let mut req = super::callout_requests::parse_call_failure_request(request);
     req.snapshot = snapshot.clone();
     let failed_leg_id = failure_terminate::failed_leg_id(request).to_string();
     let mut depth: u32 = 0;
     // A refused replacement released the call's set: the re-consult's admit
-    // carries the set the refusal stated (none), and a resolution other than
-    // a route carries the refusal's report.
+    // carries the set the refusal stated (none), which is all the limiter
+    // holds, and a resolution other than a route carries the refusal's report.
     let mut held = limiter.held_set();
+    let mut may_hold = admits.may_hold;
     let mut refused: Option<AdmitReport> = None;
+    // Every route the limiter refused on the way, for the engine to record
+    // as an attempt that dialled nothing.
+    let mut refused_routes = Vec::new();
     let (outcome, mut payload) = loop {
         match ctx.decision.call_failure(req).await {
             Ok(CallTreatment::Route(route)) => {
-                let change = first_change + u64::from(depth);
+                let change = admits.first_change + u64::from(depth);
                 let admitted =
-                    match admit_route_limiters(ctx, limiter.key(), &held, change, &route).await {
+                    match admit_route_limiters(ctx, limiter.key(), &held, may_hold, change, &route)
+                        .await
+                    {
                         Ok(admitted) => admitted,
                         Err(report) => {
+                            refused_routes.push(crate::attempts::refused_route_entry(
+                                route.label.as_deref(),
+                                &route.service_ext,
+                                route.no_answer(),
+                            ));
                             let limiter_id =
                                 report.outcome.refused_on().unwrap_or_default().to_string();
                             held = report.held().unwrap_or_default();
+                            may_hold = !held.entries.is_empty();
                             refused = Some(report);
                             if route.callback_context.is_some()
                                 && depth < crate::decision::apply_route::MAX_LIMITER_FAILOVER
@@ -397,7 +317,14 @@ async fn failure_outcome(
                             );
                         }
                     };
-                break ("failover", route_result_payload(route, admitted, Some(failed_leg_id)));
+                break (
+                    "failover",
+                    super::route_payload::route_result_payload(
+                        route,
+                        admitted,
+                        Some(failed_leg_id),
+                    ),
+                );
             }
             // Decision-authored reject — the plan declined to fail over and
             // supplied its own final failure (code/reason/headers).
@@ -435,13 +362,13 @@ async fn failure_outcome(
                     }),
                 );
             }
-            // Explicit `Relay`, or a backend error → relay the original b-leg
-            // failure (response path) + tear the call down. Echo the failure's
-            // status/reason the seed stashed for the relay.
+            // Explicit `Relay` → relay the original b-leg failure (response
+            // path) + tear the call down. Echo the failure's status/reason the
+            // seed stashed for the relay.
             Ok(CallTreatment::Relay { label }) => {
                 break (
                     failure_terminate::OUTCOME,
-                    failure_terminate::payload(request, &failed_leg_id, Some(label)),
+                    failure_terminate::payload(request, &failed_leg_id, label),
                 );
             }
             // The engine's stated refusal: the reject fold a decision reject
@@ -456,16 +383,19 @@ async fn failure_outcome(
                     service_ext: Default::default(),
                     label: None,
                 });
-                payload[STACK_AUTHORED] = json!(true);
+                put(&mut payload, STACK_AUTHORED, json!(true));
                 break ("reject", payload);
             }
             Err(CallDecisionError::Unavailable(_)) => {
-                break (failure_terminate::OUTCOME, failure_terminate::unanswered(request));
+                break (failure_unavailable::OUTCOME, failure_unavailable::payload(request));
             }
         }
     };
     if let Some(report) = refused.filter(|_| outcome != "failover") {
-        payload[LimiterAdmitResult::REPORT] = to_payload(report);
+        put(&mut payload, LimiterAdmitResult::REPORT, to_payload(report));
+    }
+    if !refused_routes.is_empty() {
+        put(&mut payload, crate::attempts::REFUSED_ROUTES, json!(refused_routes));
     }
     (outcome, payload)
 }
@@ -483,16 +413,17 @@ pub(super) fn spawn_release_callout(
     call: &Call,
     call_ref: String,
     request: serde_json::Value,
-    limiter_change: u64,
+    admits: ConsultAdmits,
+    deadline: Option<u64>,
 ) {
     let ctx2 = ctx.clone();
     let snapshot = CallSnapshot::of(call);
     let trace = crate::trace::emit::TraceHandle::of(call);
     let limiter = call.limiter.clone();
     let to = Caller::of(call_ref, call);
-    tokio::spawn(async move {
+    observe::spawn_keeping_node(async move {
         let sent_at_ms = ctx2.clock.now_ms();
-        let req = parse_call_release_request(&request, snapshot);
+        let req = super::callout_requests::parse_call_release_request(&request, snapshot);
         // Every `release` fold names the event that raised the consult, so
         // the rule that applies it can end the call under that event where
         // no decision stands behind the fold.
@@ -503,30 +434,38 @@ pub(super) fn spawn_release_callout(
                     &ctx2,
                     limiter.key(),
                     &limiter.held_set(),
-                    limiter_change,
+                    admits.may_hold,
+                    admits.first_change,
                     &route,
                 )
                 .await;
                 match admitted {
-                    Ok(admitted) => ("reroute", route_result_payload(route, admitted, None)),
-                    // Divergence from the failover chain, DOCUMENTED: a limiter
-                    // reject here does NOT re-consult the engine — the call was
-                    // going down anyway, so the reject degrades to the release
-                    // default (local teardown) instead of a recursive failover
-                    // walk; the refusal released the call's set, and the fold
-                    // states the call uncounted, owing its release. The answer
-                    // still stands for everything but its route: the release
-                    // is marked under its label and its service slices are
-                    // merged.
+                    Ok(admitted) => (
+                        "reroute",
+                        super::route_payload::route_result_payload(route, admitted, None),
+                    ),
+                    // A limiter reject here does NOT re-consult the engine: the
+                    // reject degrades to the release default (local teardown)
+                    // instead of a recursive failover walk; the refusal released
+                    // the call's set, and the fold states the call uncounted,
+                    // owing its release. The answer still stands for everything
+                    // but its route: the release is marked under its label and
+                    // its service slices are merged.
                     Err(report) => {
+                        let refused = crate::attempts::refused_route_entry(
+                            route.label.as_deref(),
+                            &route.service_ext,
+                            route.no_answer(),
+                        );
                         let mut payload = json!({
                             "reason": "limiter_rejected",
                             "event": event,
                             "label": route.label,
                             LimiterAdmitResult::REPORT: report,
+                            crate::attempts::REFUSED_ROUTES: [refused],
                         });
                         if !route.service_ext.is_empty() {
-                            payload["service_ext"] = json!(route.service_ext);
+                            put(&mut payload, "service_ext", json!(route.service_ext));
                         }
                         ("release", payload)
                     }
@@ -537,7 +476,7 @@ pub(super) fn spawn_release_callout(
             Ok(CallReleaseResponse::Release { label, service_ext }) => {
                 let mut payload = json!({ "label": label, "event": event });
                 if !service_ext.is_empty() {
-                    payload["service_ext"] = json!(service_ext);
+                    put(&mut payload, "service_ext", json!(service_ext));
                 }
                 ("release", payload)
             }
@@ -545,7 +484,12 @@ pub(super) fn spawn_release_callout(
                 ("release", json!({"reason": "engine_error", "event": event, STACK_AUTHORED: true}))
             }
         };
+        let mut payload = payload;
         record_round_trip(&trace, &ctx2, "/call/release", sent_at_ms, &request, outcome, &payload);
+        // The fold names the deadline it answers, when its turn armed one.
+        if let Some(deadline) = deadline {
+            put(&mut payload, answer_deadline::CONSULT_CHANGE, json!(deadline));
+        }
         let fold = internal_event(to, "call-release-result", outcome, payload, Vec::new());
         send_admit_fold(&ctx2.reentry_tx, &ctx2.limiter, fold);
     });
@@ -588,12 +532,13 @@ pub(super) fn spawn_service_http_callout(ctx: &Arc<RouterCtx>, c: ServiceHttpCal
     let ctx2 = ctx.clone();
     // The transport request future IS `Send`, so the whole spawned task is
     // `Send` (unlike the `on_event` cycle).
-    tokio::spawn(async move {
+    observe::spawn_keeping_node(async move {
         // Per-request budget is INDEPENDENT of `call_control_timeout_ms` (the
         // `DeadlineDecisionEngine` wraps only new_call/call_failure). Fail-safe
         // on teardown: a re-entry landing on a dead `call_ref` is dropped.
-        let budget =
+        let total =
             c.timeout_ms.map(std::time::Duration::from_millis).unwrap_or(port.default_timeout);
+        let budgets = http_net::Budgets { attempt: port.attempt.min(total), total };
         let mut req = http_net::HttpRequest {
             method: c.method,
             path: c.endpoint,
@@ -604,8 +549,8 @@ pub(super) fn spawn_service_http_callout(ctx: &Arc<RouterCtx>, c: ServiceHttpCal
             req.headers.push(("Content-Type".to_string(), ct));
         }
         let (outcome, payload, body): (&str, serde_json::Value, Vec<u8>) =
-            match tokio::time::timeout(budget, port.transport.request(port.base, req)).await {
-                Ok(Ok(resp)) => {
+            match port.client.send_with_retry(req, budgets).await {
+                Ok(resp) => {
                     let http_net::HttpResponse { status, headers, body } = resp;
                     (
                         "ok",
@@ -617,19 +562,14 @@ pub(super) fn spawn_service_http_callout(ctx: &Arc<RouterCtx>, c: ServiceHttpCal
                         body,
                     )
                 }
-                Ok(Err(e)) => (
+                Err(e) => (
                     "error",
                     json!({
                         "correlation_id": c.correlation_id,
-                        "error": e.to_string(),
-                    }),
-                    Vec::new(),
-                ),
-                Err(_elapsed) => (
-                    "error",
-                    json!({
-                        "correlation_id": c.correlation_id,
-                        "error": "timeout",
+                        "error": match e {
+                            http_net::AttemptError::Timeout => "timeout".to_string(),
+                            other => other.to_string(),
+                        },
                     }),
                     Vec::new(),
                 ),
@@ -657,7 +597,7 @@ pub(super) struct LimiterAdmitCallout {
 /// key when the request left.
 pub(super) fn spawn_limiter_admit_callout(ctx: &Arc<RouterCtx>, c: LimiterAdmitCallout) {
     let ctx2 = ctx.clone();
-    tokio::spawn(async move {
+    observe::spawn_keeping_node(async move {
         // Answered just past the limiter's admit budget, whatever the
         // limiter does: the answer's deadline (ADR-0039) lies past it.
         let report = ctx2
@@ -670,245 +610,6 @@ pub(super) fn spawn_limiter_admit_callout(ctx: &Arc<RouterCtx>, c: LimiterAdmitC
     });
 }
 
-// ── route-result payload (shared by failover + release) ────────────────────
-
-#[derive(Serialize)]
-struct RouteDestinationPayload {
-    host: String,
-    // Emitted even when None (null) — matches the initial-route wire shape.
-    port: Option<u16>,
-}
-
-/// The internal-event payload the route-fold rules (`failover-create-leg` /
-/// `release-reroute`) consume: destination, identity/header rewrites, the
-/// output-parity fields the initial `apply_route` honors (features,
-/// service_ext, update_body, subscriptions), and the admit the dispatching
-/// task **already sent** to the limiter. ONE shape shared
-/// by the failover and release folds, so the two can never drift.
-#[derive(Serialize)]
-struct RoutePayload {
-    destination: RouteDestinationPayload,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    new_ruri: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    new_from: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    new_to: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    update_headers: Option<SipHeaderUpdates>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    no_answer_timeout_sec: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    callback_context: Option<String>,
-    // Route parity: the fields the initial `apply_route` honors, forwarded to
-    // the resolution rule.
-    features: call::features::FeatureActivations,
-    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    service_ext: std::collections::BTreeMap<String, serde_json::Value>,
-    // Always present (even when empty): the latest applied route OWNS the
-    // subscription registry, so a route with no subscriptions must CLEAR a
-    // previous route's — exactly what `apply_route` does on the initial path.
-    subscriptions: Vec<call::ReleaseEventKind>,
-    // Keep / AttachParts → absent; Drop → null; Replace(s) → the string.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    update_body: Option<Option<String>>,
-    // AttachParts(parts) → the parts; absent otherwise.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    attach_parts: Option<Vec<sip_message::MultipartPart>>,
-    /// The admit the dispatching task sent to replace the call's set.
-    limiter_admit: AdmitReport,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    failed_leg_id: Option<String>,
-    /// The decision's label, for the fold's `MarkDecision`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    label: Option<String>,
-}
-
-/// Serialize a [`RouteDecision`] into the [`RoutePayload`] internal-event JSON.
-/// `admitted` is the admit `admit_route_limiters` sent (or did not send);
-/// `failed_leg_id` is the failover fold's echo (release folds pass `None`).
-fn route_result_payload(
-    route: RouteDecision,
-    admitted: AdmitReport,
-    failed_leg_id: Option<String>,
-) -> serde_json::Value {
-    let no_answer_timeout_sec =
-        route.no_answer_timeout_sec.or(route.features.no_answer_timeout_sec);
-    to_payload(RoutePayload {
-        destination: RouteDestinationPayload {
-            host: route.destination.host,
-            port: route.destination.port,
-        },
-        new_ruri: route.new_ruri,
-        new_from: route.new_from,
-        new_to: route.new_to,
-        update_headers: route.update_headers,
-        no_answer_timeout_sec,
-        callback_context: route.callback_context,
-        features: route.features,
-        service_ext: route.service_ext,
-        subscriptions: route.subscriptions,
-        update_body: match &route.update_body {
-            crate::decision::BodyUpdate::Keep | crate::decision::BodyUpdate::AttachParts(_) => None,
-            crate::decision::BodyUpdate::Drop => Some(None),
-            crate::decision::BodyUpdate::Replace(s) => Some(Some(s.clone())),
-        },
-        attach_parts: match route.update_body {
-            crate::decision::BodyUpdate::AttachParts(parts) => Some(parts),
-            _ => None,
-        },
-        limiter_admit: admitted,
-        failed_leg_id,
-        label: route.label,
-    })
-}
-
-// ── request parsers (seed-rule JSON → typed decision requests) ─────────────
-
-/// `[[name, value], …]` as emitted by a seed rule → header lines, wire order and
-/// duplicates preserved; absent or malformed → empty.
-fn parse_header_lines(v: Option<&serde_json::Value>) -> Vec<(String, String)> {
-    v.and_then(|x| x.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|pair| {
-                    let p = pair.as_array()?;
-                    Some((p.first()?.as_str()?.to_string(), p.get(1)?.as_str()?.to_string()))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Rebuild a [`CallReferRequest`](crate::decision::CallReferRequest) from the
-/// JSON the seed rule emitted.
-fn parse_call_refer_request(v: &serde_json::Value) -> crate::decision::CallReferRequest {
-    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
-    crate::decision::CallReferRequest {
-        call_id: s("call_id").unwrap_or_default(),
-        dialog_id: s("dialog_id").unwrap_or_default(),
-        callback_context: s("callback_context"),
-        refer_to: s("refer_to").unwrap_or_default(),
-        referred_by: s("referred_by"),
-        sip_headers: parse_header_lines(v.get("sip_headers")),
-        snapshot: CallSnapshot::default(),
-    }
-}
-
-/// Rebuild a [`CallReleaseRequest`](crate::decision::CallReleaseRequest) from
-/// the JSON the `max-duration` seed rule emitted, attaching the call-scoped
-/// snapshot the dispatch site built from the authoritative call.
-fn parse_call_release_request(
-    v: &serde_json::Value,
-    snapshot: CallSnapshot,
-) -> crate::decision::CallReleaseRequest {
-    // The closed v1 set is the single `max_call_duration`; parse it via serde
-    // (the enum's snake_case wire form) and default to it — the one event that
-    // can currently emit this seed.
-    let event = v
-        .get("event")
-        .and_then(|x| serde_json::from_value::<call::ReleaseEventKind>(x.clone()).ok())
-        .unwrap_or(call::ReleaseEventKind::MaxCallDuration);
-    crate::decision::CallReleaseRequest {
-        callback_context: v.get("callback_context").and_then(|x| x.as_str()).map(str::to_string),
-        event,
-        snapshot,
-    }
-}
-
-/// Rebuild a [`CallFailureRequest`] from the JSON the seed rule emitted. The
-/// call-scoped `snapshot` is not part of the rule JSON — the dispatch site
-/// attaches it from the authoritative call.
-fn parse_call_failure_request(v: &serde_json::Value) -> CallFailureRequest {
-    CallFailureRequest {
-        callback_context: v.get("callback_context").and_then(|x| x.as_str()).map(str::to_string),
-        failure: FailureInfo {
-            origin: v.get("origin").and_then(|x| x.as_str()).unwrap_or("external").to_string(),
-            status_code: v.get("sip_code").and_then(|x| x.as_u64()).map(|c| c as u16),
-            limiter_id: v.get("limiter_id").and_then(|x| x.as_str()).map(str::to_string),
-            failed_leg_id: v
-                .get("failed_leg_id")
-                .and_then(|x| x.as_str())
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
-            timeout_kind: v.get("timeout_kind").and_then(|x| x.as_str()).map(str::to_string),
-            sip_headers: parse_header_lines(v.get("sip_headers")),
-        },
-        snapshot: CallSnapshot::default(),
-    }
-}
-
+mod route_admit;
 #[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use super::*;
-    use crate::limiter::NoopLimiter;
-
-    /// A worker whose release queue is held: what a fold queued stays
-    /// readable.
-    fn releases() -> LimiterWorker {
-        let (reentry, _) = mpsc::unbounded_channel();
-        let (worker, _tasks) = LimiterWorker::start(
-            Arc::new(NoopLimiter),
-            &crate::config::B2buaConfig::default(),
-            crate::metrics::B2buaMetrics::new(),
-            reentry,
-        );
-        worker.hold_releases();
-        worker
-    }
-
-    /// A failover fold whose admit of `[x, y]` came back `outcome`.
-    fn failover_fold(outcome: AdmitOutcome) -> CallEvent {
-        let mut route = crate::decision::test_adapter::route_to("127.0.0.1", 5070);
-        route.call_limiter = vec![
-            call::LimiterEntry { id: "x".into(), limit: 10 },
-            call::LimiterEntry { id: "y".into(), limit: 10 },
-        ];
-        let entries = ["x", "y"].map(|id| LimiterEntry { id: id.into(), limit: 10 }).to_vec();
-        let admitted = AdmitReport { key: "call-1#k".into(), change: 4, entries, outcome };
-        let payload = route_result_payload(route, admitted, Some("b-1".into()));
-        let to = Caller { call_ref: "call-1".into(), incarnation: "call-1#k".into() };
-        internal_event(to, "call-failure-result", "failover", payload, Vec::new())
-    }
-
-    #[tokio::test]
-    async fn a_route_fold_the_router_cannot_take_releases_its_call() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        drop(rx);
-        let releases = releases();
-        send_admit_fold(&tx, &releases, failover_fold(AdmitOutcome::Admitted));
-        assert_eq!(releases.waiting_keys(), ["call-1#k"], "by its key");
-    }
-
-    #[tokio::test]
-    async fn an_uncounted_route_fold_owing_its_release_releases_its_call() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        drop(rx);
-        let releases = releases();
-        send_admit_fold(&tx, &releases, failover_fold(AdmitOutcome::Unavailable));
-        assert_eq!(releases.waiting_keys(), ["call-1#k"], "by its key");
-    }
-
-    #[tokio::test]
-    async fn a_route_fold_owing_nothing_releases_nothing() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        drop(rx);
-        let releases = releases();
-        send_admit_fold(&tx, &releases, failover_fold(AdmitOutcome::NotSent));
-        assert!(releases.waiting_keys().is_empty(), "a call that sent no admit owes nothing");
-    }
-
-    #[tokio::test]
-    async fn a_delivered_route_fold_keeps_its_state_for_the_call() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let releases = releases();
-        send_admit_fold(&tx, &releases, failover_fold(AdmitOutcome::Admitted));
-        assert!(releases.waiting_keys().is_empty(), "the call applies it");
-        let report = admit_report_of(&rx.recv().await.unwrap()).expect("the fold carries it");
-        assert_eq!(report.owed_release(), Some("call-1#k"));
-        assert_eq!((report.key.as_str(), report.change), ("call-1#k", 4));
-        assert_eq!(report.held().map(|h| h.entries.len()), Some(2));
-    }
-}
+mod tests;

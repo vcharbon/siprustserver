@@ -4,5 +4,6 @@
 //! Select one (the workspace build `just test` made, no rebuild):
 //! `cargo nextest run --workspace -E 'package(=metric-contract) & binary(it)' <module>::`.
 
+mod content;
 mod deploy_readers;
 mod export;

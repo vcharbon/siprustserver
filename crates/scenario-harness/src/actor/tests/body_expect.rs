@@ -9,7 +9,7 @@ use sip_message::generators::InDialogMethod;
 
 use super::testkit::*;
 use crate::actor::*;
-use crate::{Harness, ANSWER_SDP, OFFER_SDP};
+use crate::{Harness, OFFER_SDP};
 
 /// End to end: the delayed-offer re-INVITE is bodyless, so the callee's
 /// `ExpectRequest{InDialog(Invite), Absent}` consumes it and the call
@@ -29,7 +29,7 @@ async fn absent_consumes_the_bodyless_reinvite() {
                 role: "alice",
                 agent: alice.clone(),
                 disposition: Disposition::Caller,
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 goals: vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
                     Goal::new(Barrier::AllConfirmed(&["alice", "bob"]), GoalStep::Reinvite),

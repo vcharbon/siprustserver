@@ -1,0 +1,16 @@
+[package]
+name = "lock-poison"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Poison-tolerant std locks (ADR-0051 §7): a poisoned lock is taken as it stands, its poison cleared, and the recovery logged and counted per named lock."
+
+[package.metadata.purity]
+tier = "shell"
+
+[lints]
+workspace = true
+
+[dependencies]
+tracing.workspace = true

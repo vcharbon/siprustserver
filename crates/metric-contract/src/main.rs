@@ -1,21 +1,21 @@
 //! `metric-contract` — the metric contract on the command line.
 //!
 //! - `metric-contract export` prints every shipped binary's catalogue as JSON.
-//! - `metric-contract check --catalogue <json> [--allow <file>]... <path>...`
-//!   checks every metric name and plain selector label under `<path>` (a file,
-//!   or a directory read recursively; `dir/**` reads as `dir`) against the
-//!   catalogue, and exits 1 naming each finding. An allow entry no checked
-//!   file used is a finding (stale), so give it every path the allow-lists
-//!   scope.
+//! - `metric-contract check --catalogue <json> [--content <dir>]...
+//!   [--allow <file>]... <path>...` checks every metric name and plain
+//!   selector label under `<path>` (a file, or a directory read recursively;
+//!   `dir/**` reads as `dir`) against the catalogue extended with the
+//!   `metrics/*.json` catalogues of each HA tooling search-path entry `<dir>`,
+//!   and exits 1 naming each finding. An allow entry no checked file used is a
+//!   finding (stale), so give it every path the allow-lists scope.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use metric_contract::allow::Allow;
-use metric_contract::contract::Contract;
 use metric_contract::scan::check_paths;
 
-const USAGE: &str = "usage: metric-contract export\n       metric-contract check --catalogue <json> [--allow <file>]... <path>...";
+const USAGE: &str = "usage: metric-contract export\n       metric-contract check --catalogue <json> [--content <dir>]... [--allow <file>]... <path>...";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -40,12 +40,16 @@ fn main() -> ExitCode {
 
 fn check(args: &[String]) -> Result<ExitCode, String> {
     let mut catalogue = None;
+    let mut content = Vec::new();
     let mut allow = Allow::default();
     let mut paths = Vec::new();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--catalogue" => catalogue = Some(it.next().ok_or("--catalogue needs a file")?),
+            "--content" => {
+                content.push(PathBuf::from(it.next().ok_or("--content needs a directory")?))
+            }
             "--allow" => {
                 let file = it.next().ok_or("--allow needs a file")?;
                 let text = std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
@@ -56,7 +60,7 @@ fn check(args: &[String]) -> Result<ExitCode, String> {
     }
     let file = catalogue.ok_or("no --catalogue")?;
     let json = std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
-    let contract = Contract::from_json(&json)?;
+    let contract = metric_contract::content::contract(&json, &content)?;
     if paths.is_empty() {
         return Err("no path to check".to_owned());
     }

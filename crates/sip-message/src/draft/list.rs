@@ -23,7 +23,9 @@ impl<H: HeaderValue> HeaderList<H> {
 
     /// Add a value at the top — where a proxy's own Via and Route go.
     pub fn push_front(mut self, value: H) -> Self {
-        self.values.insert(0, value);
+        self.values.push(value);
+        // One value at least: the rotation is in range.
+        self.values.rotate_right(1);
         self
     }
 
@@ -35,10 +37,10 @@ impl<H: HeaderValue> HeaderList<H> {
     /// Take the top value off.
     pub fn pop_front(&mut self) -> Option<H> {
         if self.values.is_empty() {
-            None
-        } else {
-            Some(self.values.remove(0))
+            return None;
         }
+        self.values.rotate_left(1);
+        self.values.pop()
     }
 
     pub fn first(&self) -> Option<&H> {
@@ -63,9 +65,8 @@ impl<H: HeaderValue> HeaderList<H> {
 
     /// Rewrite the top value — the shape of stamping `received`/`rport`.
     pub fn map_first(mut self, f: impl FnOnce(H) -> H) -> Self {
-        if !self.values.is_empty() {
-            let head = self.values.remove(0);
-            self.values.insert(0, f(head));
+        if let Some(head) = self.pop_front() {
+            self = self.push_front(f(head));
         }
         self
     }

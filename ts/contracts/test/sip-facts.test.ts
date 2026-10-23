@@ -83,6 +83,12 @@ describe("the facts read off a captured message", () => {
     expect(Flows.isFinalToInvite(response(200, "BYE"))).toBe(false)
   })
 
+  it("a relayed answer to an INVITE is a 180–189 or a 2xx, never the 100 or a failure", () => {
+    expect([100, 180, 183, 200, 202, 486].map((status) => Flows.isRelayedInviteAnswer(response(status, "INVITE"))))
+      .toEqual([false, true, true, true, true, false])
+    expect(Flows.isRelayedInviteAnswer(response(180, "UPDATE"))).toBe(false)
+  })
+
   it("only an INVITE with no To-tag opens a dialog", () => {
     expect(Flows.opensDialog(request("INVITE", null))).toBe(true)
     expect(Flows.opensDialog(request("INVITE", "t1"))).toBe(false)
@@ -99,6 +105,7 @@ describe("the two models state one claim", () => {
       expect(Flow.isFinalToInvite(step)).toBe(Flows.isFinalToInvite(msg))
       expect(Flow.isSuccessToInvite(step)).toBe(Flows.isSuccessToInvite(msg))
       expect(Flow.opensDialog(step)).toBe(Flows.opensDialog(msg))
+      expect(Flow.isRelayedInviteAnswer(step)).toBe(Flows.isRelayedInviteAnswer(msg))
       expect(Flow.inviteStatus(step)).toBe(Flows.inviteStatus(msg))
     }
   )

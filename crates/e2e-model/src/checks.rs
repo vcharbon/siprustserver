@@ -22,7 +22,7 @@ use sip_message::header::kind::NameAddrKind;
 use sip_message::header::{self, HeaderName, NameAddr, NameAddrHeader, ParamValue, Uri};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParseError, SipParser};
-use sip_net::RecordedSipEntry;
+use sip_net_testkit::RecordedSipEntry;
 
 use crate::model::{Check, CheckBlock, CheckOp, CheckSet, Input, TestCase};
 

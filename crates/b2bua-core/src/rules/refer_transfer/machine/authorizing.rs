@@ -1,0 +1,256 @@
+//! ReferAuthorizing phase: resolution of the `/call/refer` consult — denial,
+//! authorization (dial C on held SDP), and the consult-hung timeout.
+
+use b2bua_sdk::lifecycle::{AttemptOpening, RouteAnswer};
+use b2bua_sdk::sm_rule;
+use call::{AttemptCause, TransferPhase};
+use sip_message::header::{HeaderValue, ReferTo};
+use sip_message::{Method, SipStr};
+
+use super::{state, Phase, TRANSFER_MACHINE};
+use crate::rules::defaults::parse_header_updates;
+use crate::rules::refer_transfer::notify::{
+    notify, SUB_STATE_TERMINATED_NORESOURCE, SUB_STATE_TERMINATED_TIMEOUT,
+};
+use crate::rules::refer_transfer::ok;
+use crate::rules::{relay, Terminal};
+use b2bua_sdk::model::{
+    Body, Effect, Match, RuleAction, RuleContext, RuleDefinition, RuleDiagnostic, RuleHandleResult,
+};
+use call::TimerKey;
+
+/// Reduce a Refer-To to the bare `sip:user@host:port;params` URI a
+/// Request-URI may carry: the display name and the `?headers` list drop
+/// (RFC 3261 §19.1.1 forbids escaped headers in a Request-URI).
+///
+/// Errs when the value does not read. The transfer target is what the C leg
+/// dials, so keeping unreadable text verbatim would originate toward an address
+/// nobody named — the referrer is told the transfer failed instead.
+fn to_bare_uri(refer_to: &str) -> Result<String, relay::UnreadableAddress> {
+    ReferTo::parse(&SipStr::owned(refer_to))
+        .map(|value| value.uri().clone().without_escaped_headers().to_string())
+        .map_err(|err| relay::UnreadableAddress {
+            field: "refer_to",
+            value: refer_to.to_string(),
+            reason: err.reason,
+        })
+}
+
+/// End a transfer whose authorization named a target no reader accepts: tell the
+/// referrer the transfer failed (NOTIFY `terminated`, 502), disarm the transfer
+/// watchdogs and clear the slice — the same terminal shape a `/call/refer` denial
+/// takes. The call itself survives; only the transfer is abandoned.
+fn refuse_transfer(ctx: &RuleContext, field: &str, reason: &str) -> Option<RuleHandleResult> {
+    let st = state(ctx)?;
+    let mut actions = Vec::new();
+    actions.extend(notify(
+        st,
+        SUB_STATE_TERMINATED_NORESOURCE,
+        502,
+        &format!("Unreadable Transfer Target ({field})"),
+    ));
+    actions.extend([
+        RuleAction::cancel(TimerKey::call(call::TimerType::ReferSubscriptionExpiry)),
+        RuleAction::cancel(TimerKey::call(call::TimerType::ReferOverallSafety)),
+        RuleAction::SetTransfer { state: None },
+    ]);
+    Some(RuleHandleResult::new(actions).with_diagnostic(RuleDiagnostic::unreadable(field, reason)))
+}
+
+/// Read the `reject`/`error` reject code+reason from the internal-event payload.
+/// A stated code that is no non-2xx final rejects nothing: the referrer is
+/// told the plain server error, never a success.
+fn reject_code_reason(ctx: &RuleContext) -> (u16, String) {
+    let (is_reject, payload) = match ctx.event {
+        b2bua_sdk::event::CallEvent::InternalEvent { outcome, payload, .. } => {
+            (outcome == "reject", payload)
+        }
+        _ => (false, &serde_json::Value::Null),
+    };
+    if is_reject {
+        let stated = payload.get("reject_code").and_then(|v| v.as_u64());
+        let code = stated.map_or(Some(603), |c| u16::try_from(c).ok());
+        let Some(code) = code.filter(|c| crate::decision::apply_reject::is_reject_code(*c)) else {
+            tracing::warn!(call_ref = %ctx.call_ref, code = ?stated, "refer reject refused: not a non-2xx final");
+            let reason = crate::decision::apply_reject::REFUSED_DECISION_REASON;
+            return (500, reason.to_string());
+        };
+        let reason =
+            payload.get("reject_reason").and_then(|v| v.as_str()).unwrap_or("Declined").to_string();
+        (code, reason)
+    } else {
+        // The engine gave no answer: the backend failure's 503 (ADR-0043).
+        (503, "Service Unavailable".to_string())
+    }
+}
+
+/// transfer-http-reject / -error — `/call/refer` denied.
+pub(super) fn http_reject() -> RuleDefinition {
+    sm_rule! {
+        id: "transfer-http-reject",
+        machine: TRANSFER_MACHINE,
+        active: [ Phase::ReferAuthorizing ],
+        transitions: [ Phase::ReferAuthorizing => Terminal ],
+        effects: [
+            Effect::Originate { method: Method::Notify, label: "NOTIFY terminated → referrer" },
+            Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, scope: call::TimerScopeKind::Call, label: "cancel subscription-expiry" },
+            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, scope: call::TimerScopeKind::Call, label: "cancel overall-safety" },
+        ],
+        matcher: Match::internal_event()
+            .topic("refer-http-result")
+            .filter(|ctx| {
+                matches!(
+                    ctx.event,
+                    b2bua_sdk::event::CallEvent::InternalEvent { outcome, .. }
+                        if outcome == "reject" || outcome == "error"
+                )
+            }),
+        handle: |ctx| {
+            let st = state(ctx)?;
+            let (code, reason) = reject_code_reason(ctx);
+            let mut actions = Vec::new();
+            actions.extend(notify(st, SUB_STATE_TERMINATED_NORESOURCE, code, &reason));
+            actions.extend([
+                RuleAction::cancel(TimerKey::call(call::TimerType::ReferSubscriptionExpiry)),
+                RuleAction::cancel(TimerKey::call(call::TimerType::ReferOverallSafety)),
+                RuleAction::SetTransfer { state: None },
+            ]);
+            ok(actions)
+        },
+    }
+}
+
+/// transfer-http-allow — `/call/refer` authorized → create C leg. An
+/// authorization naming a target no reader accepts (unreadable Refer-To,
+/// out-of-range port) takes the same terminal path as a denial rather than
+/// dialing a fabricated address — hence the second transition edge and the
+/// NOTIFY/guard-timer effects.
+pub(super) fn http_allow() -> RuleDefinition {
+    sm_rule! {
+        id: "transfer-http-allow",
+        machine: TRANSFER_MACHINE,
+        active: [ Phase::ReferAuthorizing ],
+        transitions: [
+            Phase::ReferAuthorizing => Phase::CRinging,
+            Phase::ReferAuthorizing => Terminal,
+        ],
+        effects: [
+            Effect::Originate { method: Method::Invite, label: "INVITE → C (transfer target)" },
+            Effect::Originate { method: Method::Notify, label: "NOTIFY terminated → referrer (unreadable target)" },
+            Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, scope: call::TimerScopeKind::Call, label: "cancel subscription-expiry" },
+            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, scope: call::TimerScopeKind::Call, label: "cancel overall-safety" },
+        ],
+        matcher: Match::internal_event()
+            .topic("refer-http-result")
+            .outcome("allow"),
+        handle: |ctx| {
+            let st = state(ctx)?.clone();
+            let payload = match ctx.event {
+                b2bua_sdk::event::CallEvent::InternalEvent { payload, .. } => payload,
+                _ => return None,
+            };
+            let host = payload.get("destination").and_then(|d| d.get("host")).and_then(|v| v.as_str())?.to_string();
+            let port = match crate::decision::read_stated_port(
+                payload.get("destination").and_then(|d| d.get("port")),
+            ) {
+                Some(p) => p,
+                None => {
+                    return refuse_transfer(
+                        ctx,
+                        "destination.port",
+                        "not a port number in 1..=65535",
+                    )
+                }
+            };
+            let no_answer = crate::decision::no_answer_deadline(
+                payload.get("no_answer_ms").and_then(|v| v.as_i64()),
+                None,
+            );
+            let callback_context = payload.get("callback_context").and_then(|v| v.as_str()).map(str::to_string);
+            let new_refer_to = payload.get("new_refer_to").and_then(|v| v.as_str()).map(str::to_string);
+            let header_updates = parse_header_updates(payload);
+            let header_adds = b2bua_sdk::header_update::payload_adds(payload.get("update_headers"));
+
+            // Held SDP from A's INVITE snapshot (preserves codecs, port 0,
+            // a=inactive). No profile → drop the body.
+            let Some(a_invite) = ctx.caller_invite() else {
+                return Some(RuleHandleResult::unrecoverable());
+            };
+            let held = a_invite.sdp().and_then(sip_message::extract_codec_profile).map(|profile| {
+                sip_message::build_held_sdp_from_profile(
+                    &profile,
+                    &sip_message::BuildHeldSdpOptions {
+                        local_ip: ctx.config.sip_local_ip.clone(),
+                        now_ms: ctx.now_ms,
+                    },
+                )
+            });
+            // `Some(bytes)` set / `Some(empty)` drop. The C INVITE never
+            // carries A's real SDP until the c-realign re-INVITE.
+            let body_override = Some(Body::own(held.unwrap_or_default(), None));
+
+            let raw_refer_to = new_refer_to.unwrap_or_else(|| st.refer_to_uri.clone());
+            let effective = match to_bare_uri(&raw_refer_to) {
+                Ok(uri) => uri,
+                Err(err) => return refuse_transfer(ctx, err.field, &err.reason),
+            };
+            let c_leg_id = ctx.call.next_b_leg_id();
+            let route = RouteAnswer {
+                label: payload.get("label").and_then(|v| v.as_str()).map(str::to_string),
+                service_ext: crate::rules::defaults::parse_service_ext(payload),
+            };
+
+            let mut new_state = st.clone();
+            new_state.phase = TransferPhase::CRinging;
+            new_state.c_leg_id = Some(c_leg_id.clone());
+            new_state.effective_refer_to_uri = Some(effective.clone());
+            if callback_context.is_some() {
+                new_state.callback_context = callback_context.clone();
+            }
+
+            ok(vec![
+                RuleAction::CreateLeg {
+                    destination: (host, port),
+                    new_ruri: Some(effective),
+                    new_from: None,
+                    new_to: None,
+                    callback_context,
+                    body_override,
+                    header_updates,
+                    header_adds,
+                    kind: None,
+                    attempt: Some(
+                        AttemptOpening::new(AttemptCause::Transfer, route).ringing(no_answer),
+                    ),
+                },
+                RuleAction::SetTransfer { state: Some(new_state) },
+            ])
+        },
+    }
+}
+
+/// transfer-http-timeout — subscription-expiry fired (HTTP hung).
+pub(super) fn http_timeout() -> RuleDefinition {
+    sm_rule! {
+        id: "transfer-http-timeout",
+        machine: TRANSFER_MACHINE,
+        active: [ Phase::ReferAuthorizing ],
+        transitions: [ Phase::ReferAuthorizing => Terminal ],
+        effects: [
+            Effect::Originate { method: Method::Notify, label: "NOTIFY terminated;timeout → referrer" },
+            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, scope: call::TimerScopeKind::Call, label: "cancel overall-safety" },
+        ],
+        matcher: Match::timer()
+            .timer_type(call::TimerType::ReferSubscriptionExpiry),
+        handle: |ctx| {
+            let st = state(ctx)?;
+            let mut actions = Vec::new();
+            actions.extend(notify(st, SUB_STATE_TERMINATED_TIMEOUT, 500, "Server Internal Error"));
+            actions.extend([
+                RuleAction::cancel(TimerKey::call(call::TimerType::ReferOverallSafety)),
+                RuleAction::SetTransfer { state: None },
+            ]);
+            ok(actions)
+        },
+    }
+}

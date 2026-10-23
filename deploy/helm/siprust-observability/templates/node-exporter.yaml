@@ -1,0 +1,49 @@
+{{- if .Values.nodeExporter.enabled }}
+{{- $n := .Values.nodeExporter }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "obs.labels" (dict "root" $ "app" "node-exporter") | nindent 4 }}
+spec:
+  selector:
+    matchLabels: { app: node-exporter }
+  template:
+    metadata:
+      labels: { app: node-exporter }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ int $n.port | toString | quote }}
+    spec:
+      hostNetwork: true
+      hostPID: true
+      {{- with include "obs.pullSecrets" . | trim }}{{ . | nindent 6 }}{{- end }}
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: node-exporter
+          {{- include "obs.image" $n.image | nindent 10 }}
+          args:
+            - --path.procfs=/host/proc
+            - --path.sysfs=/host/sys
+            - --path.rootfs=/host/root
+            - {{ printf "--web.listen-address=:%d" (int $n.port) }}
+            - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/kubelet/.+)($|/)
+          ports:
+            - name: metrics
+              containerPort: {{ int $n.port }}
+              hostPort: {{ int $n.port }}
+              protocol: TCP
+          resources:
+            {{- toYaml $n.resources | nindent 12 }}
+          volumeMounts:
+            - { name: proc, mountPath: /host/proc, readOnly: true }
+            - { name: sys, mountPath: /host/sys, readOnly: true }
+            - { name: rootfs, mountPath: /host/root, readOnly: true, mountPropagation: HostToContainer }
+      volumes:
+        - { name: proc, hostPath: { path: /proc } }
+        - { name: sys, hostPath: { path: /sys } }
+        - { name: rootfs, hostPath: { path: / } }
+{{- end }}

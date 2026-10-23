@@ -5,11 +5,12 @@
 
 use std::time::Duration;
 
+use super::ending::{Branch, Ending, Expect};
 use super::endpoint::{
     CtxFeed, Disposition, Feed, MediaState, SUBFLOW_REALIGN, SUBFLOW_REFER, SUBFLOW_RENEG,
 };
 use super::goals::{Barrier, Goal, GoalStep};
-use super::spec::{ActorCall, ActorScenario, Expect};
+use super::spec::{ActorCall, ActorScenario};
 use super::state::{LegPhase, StateInner, SubflowState};
 use super::{phase, ActorSpec, SettleBarrier};
 use crate::realcall::{CallEnv, ScenarioId};
@@ -27,10 +28,10 @@ fn established(s: &StateInner) -> bool {
     s.leg_at_least("alice", LegPhase::Confirmed) && s.leg_at_least("bob", LegPhase::Confirmed)
 }
 
-/// Alice's leg reached (at least) an early dialog — she received the 180 (the
-/// abandon body's CANCEL trigger).
-fn alice_early(s: &StateInner) -> bool {
-    s.leg_at_least("alice", LegPhase::Early)
+/// Alice received the 180 (the abandon body's CANCEL trigger): the callee
+/// holds the INVITE, so her CANCEL reaches a ringing leg (RFC 3261 §9.1).
+fn alice_ringing(s: &StateInner) -> bool {
+    s.leg_rang("alice")
 }
 
 /// Guard [`StepError`] under a fixed synthetic `who` (a bounded sample-key) —
@@ -101,13 +102,13 @@ impl ActorScenario for Refer {
 
         let actors = vec![
             // Alice originates through the SUT, answers the a-realign
-            // re-INVITE reactively (offer on her INVITE, answer SDP on every
-            // realign 200 — RFC 3264 §5), and BYEs once the merge completes.
+            // re-INVITE reactively (her own session on every realign 200 —
+            // RFC 3264 §5, §8), and BYEs once the merge completes.
             ActorSpec {
                 role: "alice",
                 agent: env.alice.clone(),
                 disposition: Disposition::Caller,
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 goals: vec![
                     Goal::new(
                         Barrier::None,
@@ -156,7 +157,7 @@ impl ActorScenario for Refer {
             // the linear shape) and the c-realign re-INVITE reactively.
             ActorSpec {
                 role: "charlie",
-                agent: env.callee_agent("charlie").clone(),
+                agent: env.callee_agent("charlie").clone().transfer_target(),
                 disposition: Disposition::RingThenAnswer { ring: Duration::ZERO },
                 media: MediaState::answer(ANSWER_SDP),
                 goals: vec![],
@@ -189,7 +190,7 @@ impl ActorScenario for Refer {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::HappyBye,
+            expect: Expect::answered(),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -200,21 +201,16 @@ impl ActorScenario for Refer {
     }
 }
 
-/// A blind transfer whose target DECLINES (`603`), actor-declared — the port of
-/// `ReferCharlieReject`. A↔B establish, bob REFERs
-/// to charlie, charlie 603-declines the transfer INVITE; the transfer fails and
-/// A↔B stays up. The linear body returns its NOK terminal and leaves the scope
-/// Confirmed so the *driver's* teardown BYEs A↔B; the actor runner OWNS teardown
-/// (its own per-actor scopes), so here **alice BYEs A↔B herself** once the
-/// decline is observed — the call reaches a clean torn-down + settled
-/// [`CallVerdict::Ok`](super::CallVerdict::Ok), which [`Expect::TransferDeclined`]
-/// then maps onto the EXACT contract Err (`UnexpectedKind { who: "refer_charlie_reject", detail:
-/// "transfer declined by charlie (603)" }`). Same net SUT effect (A↔B BYE'd,
-/// fully reaped), same downstream `Result`.
+/// A blind transfer whose target DECLINES (`603`), actor-declared. A↔B
+/// establish, bob REFERs to charlie, charlie 603-declines the transfer INVITE;
+/// the transfer fails and A↔B stays up. The actor runner OWNS teardown (its own
+/// per-actor scopes), so **alice BYEs A↔B herself** once the decline is
+/// observed — the call tears down, settles, and succeeds under its
+/// `transfer_declined` branch.
 ///
 /// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.10):
 /// NO phases, NO anchors, checkpoint `time_to_200` only, NO `mark_ringing`;
-/// guard errors + the terminal all under `who: "refer_charlie_reject"`.
+/// guard errors under `who: "refer_charlie_reject"`.
 pub struct ReferCharlieReject {
     /// The `X-Api-Call.refer_key` the SUT's REFER backend authorizes.
     pub refer_key: String,
@@ -231,6 +227,10 @@ impl ReferCharlieReject {
 fn declined(s: &StateInner) -> bool {
     s.leg_at_least("charlie", LegPhase::Terminated)
 }
+
+/// The declined transfer's accepted ending: the transfer target refused, and
+/// the original call tore down.
+const TRANSFER_DECLINED: Branch = Branch::new("transfer_declined", Ending::Observed(declined));
 
 impl ActorScenario for ReferCharlieReject {
     fn id(&self) -> ScenarioId {
@@ -256,7 +256,7 @@ impl ActorScenario for ReferCharlieReject {
                 role: "alice",
                 agent: env.alice.clone(),
                 disposition: Disposition::Caller,
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 goals: vec![
                     Goal::new(
                         Barrier::None,
@@ -302,7 +302,7 @@ impl ActorScenario for ReferCharlieReject {
             // TransferDeclined outcome).
             ActorSpec {
                 role: "charlie",
-                agent: env.callee_agent("charlie").clone(),
+                agent: env.callee_agent("charlie").clone().transfer_target(),
                 disposition: Disposition::Reject(603),
                 media: MediaState::answer(ANSWER_SDP),
                 goals: vec![],
@@ -331,7 +331,7 @@ impl ActorScenario for ReferCharlieReject {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::TransferDeclined,
+            expect: Expect::one(TRANSFER_DECLINED),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -457,7 +457,7 @@ impl ActorScenario for ReroutingPrack {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::HappyBye,
+            expect: Expect::answered(),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -556,7 +556,7 @@ impl ActorScenario for PrackUpdate {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::HappyBye,
+            expect: Expect::answered(),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -588,12 +588,12 @@ impl ActorScenario for Reinvite {
     fn build(&self, env: &CallEnv<'_>) -> Result<ActorCall, StepError> {
         let actors = vec![
             // Alice originates, ACKs the delayed-offer re-INVITE's 2xx with her
-            // answer SDP reactively, and BYEs once the renegotiation completes.
+            // own session reactively, and BYEs once the renegotiation completes.
             ActorSpec {
                 role: "alice",
                 agent: env.alice.clone(),
                 disposition: Disposition::Caller,
-                media: MediaState::full(OFFER_SDP, ANSWER_SDP),
+                media: MediaState::offer(OFFER_SDP),
                 goals: vec![
                     Goal::new(
                         Barrier::None,
@@ -646,7 +646,7 @@ impl ActorScenario for Reinvite {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::HappyBye,
+            expect: Expect::answered(),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -733,7 +733,7 @@ impl ActorScenario for OptionsHold {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::HappyBye,
+            expect: Expect::answered(),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -822,7 +822,7 @@ impl ActorScenario for LongCall {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::HappyBye,
+            expect: Expect::answered(),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -833,17 +833,14 @@ impl ActorScenario for LongCall {
     }
 }
 
-/// The callee REJECTS the INVITE with `486 Busy Here`, actor-declared — the port
-/// of `InviteReject`. Alice INVITEs, bob 486s (the
-/// final auto-ACKed on both legs), and the transaction completes with nothing to
-/// CANCEL/BYE; the SUT must still reap the rejected call. Alice has ONLY the
-/// INVITE goal (her INVITE is rejected — no dialog, no BYE); the clean torn-down
-/// verdict is re-interpreted by [`Expect::Reject`] into the contract terminal.
+/// The callee REJECTS the INVITE with `486 Busy Here`, actor-declared. Alice
+/// INVITEs, bob 486s (the final auto-ACKed on both legs), and the transaction
+/// completes with nothing to CANCEL/BYE; the SUT must still reap the rejected
+/// call. Alice has ONLY the INVITE goal (her INVITE is rejected — no dialog, no
+/// BYE); the torn-down, settled call succeeds under its `rejected` branch.
 ///
 /// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.8):
-/// NO phases, NO anchors, NO checkpoints, NO `mark_ringing`; terminal
-/// `WrongStatus { who: "alice", expected: 200, got: 486, reason: "Busy Here" }`
-/// → class `status_486`, case `alice@start`.
+/// NO phases, NO anchors, NO checkpoints, NO `mark_ringing`.
 pub struct InviteReject;
 
 impl ActorScenario for InviteReject {
@@ -898,7 +895,7 @@ impl ActorScenario for InviteReject {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::Reject(486),
+            expect: Expect::one(Branch::rejected(486)),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -909,18 +906,27 @@ impl ActorScenario for InviteReject {
     }
 }
 
-/// The caller ABANDONS after ringing (CANCEL), actor-declared — the port of
-/// `AbandonRinging`. Alice INVITEs, sees the 180,
-/// then CANCELs the still-pending INVITE (RFC 3261 §9.1); the SUT relays the
-/// CANCEL to bob, who 200s it and 487s his held INVITE, and both legs reap. The
-/// clean torn-down verdict is re-interpreted by [`Expect::AbandonedEarly`] into
-/// the synthetic terminal.
+/// The caller ABANDONS after ringing (CANCEL), actor-declared. Alice INVITEs,
+/// sees the 180, then CANCELs the still-pending INVITE (RFC 3261 §9.1); the SUT
+/// relays the CANCEL to bob, who 200s it and 487s his held INVITE, and both legs
+/// reap. The torn-down, settled call succeeds under [`Branch::ABANDONED`]. When
+/// bob's 200 crosses the CANCEL, alice ACKs it and BYEs, and the call succeeds
+/// under [`Branch::ANSWERED_DESPITE_CANCEL`]; when it reaches her before her
+/// CANCEL leaves, under [`Branch::ANSWERED_BEFORE_CANCEL`].
 ///
 /// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.9):
-/// NO phases, NO anchors, checkpoint `time_to_180` only, NO `mark_ringing`;
-/// terminal `Timeout { who: "alice-abandoned-after-ringing" }` → class `timeout`,
-/// case `alice-abandoned-after-ringing@start`.
+/// NO phases, NO anchors, checkpoint `time_to_180` only, NO `mark_ringing`.
 pub struct AbandonRinging;
+
+/// The abandon's accepted endings: the CANCEL won (487), the 200 crossed it,
+/// or the 200 reached alice before her CANCEL left.
+const ABANDON_ENDINGS: &[Branch] =
+    &[Branch::ABANDONED, Branch::ANSWERED_DESPITE_CANCEL, Branch::ANSWERED_BEFORE_CANCEL];
+
+/// Alice's call confirmed (a 2xx answered her INVITE).
+fn alice_confirmed(s: &StateInner) -> bool {
+    s.leg_at_least("alice", LegPhase::Confirmed)
+}
 
 impl ActorScenario for AbandonRinging {
     fn id(&self) -> ScenarioId {
@@ -942,9 +948,12 @@ impl ActorScenario for AbandonRinging {
                         GoalStep::Invite { callee: "bob", plan: Some(env.invite_plan(&["bob"])) },
                     ),
                     Goal::new(
-                        Barrier::pred("ringing", alice_early),
+                        Barrier::pred("ringing", alice_ringing),
                         GoalStep::Cancel { stated: Vec::new() },
                     ),
+                    // A 200 that crossed the CANCEL confirmed the call: hang
+                    // up (§15). After a 487 the accepted final drops this goal.
+                    Goal::new(Barrier::pred("answered", alice_confirmed), GoalStep::ByeIfConfirmed),
                 ],
                 invite_targets: vec![("bob", env.bob.clone())],
                 via: None,
@@ -978,13 +987,13 @@ impl ActorScenario for AbandonRinging {
         ];
 
         // Internal controller gating only: alice rang (Early) → both torn down.
-        let plan = vec![phase("ringing", alice_early)];
+        let plan = vec![phase("ringing", alice_ringing)];
 
         Ok(ActorCall {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::AbandonedEarly,
+            expect: Expect::of(ABANDON_ENDINGS),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -1065,7 +1074,7 @@ impl ActorScenario for BasicCall {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::HappyBye,
+            expect: Expect::answered(),
 
             waivers: Vec::new(),
             automatics: Default::default(),

@@ -1,6 +1,8 @@
 # ADR-0014 — Reactive-only takeover + `(p,b)` version-vector reconciliation
 
-**Status:** accepted (2026-06-05)
+**Status:** accepted (2026-06-05). Amended (2026-10-12): D1, a departed peer's calls with an
+INVITE in flight are taken over at its departure (ADR-0047). Amended (2026-10-16): §5, affinity
+is the ACK/CANCEL exemption and liveness routing, no fresh-pod guard (ADR-0050).
 **Amends:** ADR-0011 Decision X11 — removes the *eager* (membership-driven) takeover
 and the *`Deactivate` watermark handshake*; **keeps** reactive takeover; **replaces**
 LWW-by-`gen` reconciliation with a per-context `(primary, backup)` version vector.
@@ -29,7 +31,9 @@ primary+backup mutations (a latent equal-`gen` divergence).
    rebooting primary's **reclaim** (smoothed, §Keepalive smoothing), or earlier if
    they get in-dialog traffic the LB reroutes to a survivor (**reactive takeover**,
    kept — SIP retransmission cannot bridge an outage; real endpoints give up well
-   before Timer F).
+   before Timer F). A call with an INVITE transaction in flight is not quiescent: a
+   caller that heard a 100 and a silent callee send nothing more, so its backups take
+   it over when its primary leaves the membership set (ADR-0047).
 
 2. **Remove the `Deactivate` handback** (wire frame tag 5 + the watermark handshake
    + the go-active burst). The acting-backup **self-releases**: when the **last
@@ -128,8 +132,9 @@ watermark collision that capped re-hydration at ~203/3000 — and conflated the
     sleep — each `Data` carries its own `at`, so the cursor rides the data); at
     `≤500`, flush the remainder and sleep. A **`Noop` is emitted only on the catch-up
     edge** (drained to head — the *first* such Noop sets the puller's sticky
-    `current` flag = "mostly caught up") **and on a ~20s idle floor** (liveness). A
-    trickle needs no Noop.
+    `current` flag = "mostly caught up") **and on an idle interval** (liveness; 5 s,
+    and the puller leaves a stream silent for 15 s — ADR-0045). A trickle needs no
+    Noop.
 
     The drain is cheap by design (it runs ~10 Hz × peers × 2 flows): the per-peer
     changelog splits into **per-partition compacted sub-logs** (one
@@ -156,7 +161,7 @@ watermark collision that capped re-hydration at ~203/3000 — and conflated the
     |---|---|---|---|
     | **PullRequest** | C→S | `proto_ver, caller, partition, since` | Open one flow. Bootstrap is **implicit** when `since==(0,0)`; else tail. |
     | **Data** | S→C | `at, op, partition, call_ref, p, b, body_ttl_ms, origin_now_ms, indexes, body?, answered, incarnation?` | One mutation. `op∈{Put,Delete}` — **Create and Update are merged into one idempotent `Put`** (carries a body); `Delete` carries none (delete-wins), and states in `answered` whether the deleting node had answered the call (ADR-0031 D3). A `Put` names the call incarnation its body is of, a `Delete` the one it removed (§"Amendment — `(p,b)` orders one call incarnation"). |
-    | **Noop** | S→C | `at` | Catch-up edge (first ⇒ ready) + 20s idle keepalive. |
+    | **Noop** | S→C | `at` | Catch-up edge (first ⇒ ready) + idle keepalive (ADR-0045). |
     | **ResetToBootstrap** | S→C | `reason` | `since` fell below the compacted tail → re-bootstrap from `(0,0)`. |
     | **Position** | C→S | `at` | "I have applied everything up to `at`" — the drain's exit signal only (ADR-0031 D2), never a retention or readiness input. |
 
@@ -196,10 +201,11 @@ The trigger is the transaction layer, push-based — the router never polls:
   delete itself.
 
 "Last transaction left the map" — not merely "reached its final response" — is
-deliberate: a **2xx INVITE** server transaction lingers in `Completed` until Timer H
-(the 2xx ACK reuses a *different* branch, so it does not terminate the INVITE txn),
-so self-release naturally fires at Timer H, **after** the ACK has been relayed. A
-non-INVITE clears at Timer J; a failed leg at Timer B/F.
+deliberate: a **2xx INVITE** server transaction lingers in RFC 6026 `Accepted` until
+Timer L (the 2xx ACK takes a *different* branch, so it neither ends nor detaches the
+INVITE txn), so self-release naturally fires at Timer L, **after** the ACK has been
+relayed. A 2xx's Accepted seed (below) holds a takeover copy the same way, up to
+Timer L from the seed. A non-INVITE clears at Timer J; a failed leg at Timer B/F.
 
 ## Why this is safe where the old design was not
 
@@ -252,7 +258,7 @@ non-INVITE clears at Timer J; a failed leg at Timer B/F.
 
   **NOT accepted — the protected set, which this trade-off must never touch:**
   - **Established calls** — any call confirmed more than the acceptance window
-    (default 200 ms) before the kill has already flushed its collapsed `Confirmed`
+    before the kill has already flushed its collapsed `Confirmed`
     state, so it reclaims clean. A confirmed call dropping on a kill is a **bug**,
     not this trade-off.
   - **Ringing calls** — a still-`Early` (not-yet-confirming) call has no winner to
@@ -278,21 +284,10 @@ memory_clean, holds_any_trace}`). External behaviour (Alice/Bob: responses, CSeq
 order, call survival, clean teardown) is unchanged by this refactor.
 
 **Chaos-aware classification of the confirm-race (the accepted trade-off above).**
-The endurance load generator (`crates/loadgen`) is *chaos-aware*: the chaos driver
-flags it at each fault instant (`POST /chaos`), and every call carries dialog-state
-**phase markers** (`connected`, `reinvited`, `transferred`, …). A failed call is
-auto-bucketed `chaos="near"` (accepted) **iff** a dialog-state transition fell
-within the **acceptance window** of a fault — or the call was still mid-setup at
-the fault — exactly encoding the accepted-vs-protected boundary above. The window
-is a single knob, `--chaos-phase-tolerance-ms` (default **200 ms**,
-`LOADGEN_CHAOS_PHASE_TOL_MS` in endurance). A **stably-established** call that
-fails far from any fault stays `chaos="clear"` — the protected set. Only
-timing-independent classes (`Panic`, `Unparseable`) are never excused. So the
-confirm-race is **counted but not triaged** (`class=rfc_audit_fail,chaos="near"`),
-while a genuine bug — an established call dropping, or a post-reboot fresh call
-desyncing far from the kill — surfaces in `chaos="clear"` and must be investigated.
-This is classification, never suppression: the `near` bucket is fully retained and
-queryable.
+Superseded by ADR-0049 §3.5: the HA tooling attributes each impact to its
+incident window and budget; loadgen carries no chaos classifier. Before it,
+loadgen bucketed a failed call `chaos="near"` when a dialog-state transition fell
+within 200 ms of a fault it was told of, and `chaos="clear"` otherwise.
 
 ## Terminal reconcile, deferred discharge & resurrection guard
 
@@ -380,8 +375,21 @@ INVITE transactions the replicated record names**, in one router module
   the INVITE bound armed and no re-send;
 - a `Proceeding` server INVITE for the a-leg's initial INVITE while the a-leg
   is unanswered (request rebuilt from the replicated snapshot, To-tag pinned),
-  and for each pending relayed INVITE (no request retained: it absorbs the
-  retransmission and replays a 100, and a CANCEL naming it is handed up).
+  and for each pending relayed INVITE, holding the originator's request rebuilt
+  from its relay snapshot (Via stack, From, To, Call-ID, CSeq): it absorbs the
+  retransmission and replays a 100, answers a CANCEL 200 + 487, and is answered
+  at the call's release;
+- a server INVITE in RFC 6026 Accepted for each 2xx a dialog retains awaiting
+  its ACK, holding that 2xx: a copy of the INVITE draws the 2xx in the layer and
+  never reaches the rules, whose glare check would answer it 491. A transaction
+  the copy itself opened before the record was read, with no final, takes the
+  seed's 2xx and sends it once. Answering a copy with the 2xx is this stack's
+  choice, not RFC 6026's (§8.7 absorbs it silently): the takeover node never sent
+  the 2xx the copy may have missed. The seed holds a takeover copy up to Timer L
+  from the seed, as the 2xx's ACK takes a new branch and never detaches it. An
+  answered round awaiting its ACK is an INVITE
+  transaction a live copy serves: the departure sweep takes it over and resumes
+  its 2xx ladder (RFC 3261 §13.3.1.4).
 
 The datagram that caused the materialisation is re-offered to the transaction
 layer after the seed, so the layer owns every hop ACK, Timer D re-ACK and
@@ -406,8 +414,34 @@ The front proxy's CANCEL memo (Decision 5's ACK/CANCEL exemption) re-resolves a
 dead pinned worker through the stickiness cookie's own health ladder, so the
 caller's give-up reaches the survivor that holds the seeded INVITE.
 
-Pinned by `failover-harness/tests/it/{prack_takeover,inflight_resend,released_copy}.rs`,
-`sip-txn/tests/it/seed.rs` and `b2bua/src/router/materialise/tests.rs`.
+**A fold into the call's record seeds the answered INVITEs it brings.** A body
+folded into the primary's live copy (ADR-0031 D3) may hold a round the other copy
+answered and whose 2xx awaits its ACK; its Accepted server INVITE is seeded as at a
+materialisation, so the originator's copy of the INVITE, routed to the primary once
+the proxy reads it alive, draws the retained 2xx. A round still open is not seeded
+there: its target's responses follow the Via of the node that relayed it, so only
+that node can CANCEL it or take its final, and a client seed elsewhere would run
+out its bound on a round another node finishes.
+
+**A non-INVITE relay this node cannot finish is superseded.** A non-INVITE request
+that reaches the rules found no server transaction on this node, so the relay the
+record holds for it, if any, was made by another node, or this one's former
+incarnation: the relay's final follows its Via there and a non-INVITE response is
+never failed over (`sip-proxy/src/core/response.rs`), and the target does not repeat
+it (RFC 3261 §17.2.2). This node cannot tell whether the relaying node lives. The
+record drops that relay — same method, originator CSeq, Call-ID, top-Via branch and
+sent-by — before the rules read the call, and the request is relayed afresh, under
+this node's `relayed_by`. Absorbing the retransmission instead would leave its
+originator to run out Timer F when the relaying node is dead. Residuals: the target
+sees the request twice (`superseded_relay.rs`); and when the relaying node lives —
+the proxy read it dead for a moment and routed a Timer E rung here — both relays are
+answered, the originator absorbs the second final as a retransmission, and two
+UPDATE answers that differ can leave the parties' descriptions apart (RFC 3311).
+
+Pinned by `failover-harness/tests/it/{prack_takeover,inflight_resend,released_copy,
+reinvite_server_side_at_the_takeover,retained_2xx_folded_into_the_record,superseded_relay}.rs`,
+`sip-txn/tests/it/{seed,accepted}.rs`, `b2bua/src/router/materialise/tests.rs` and
+`b2bua/src/router/superseded_relay/tests.rs`.
 
 ## Amendment — lifecycle progress folds over a refused reverse flush
 
@@ -449,18 +483,21 @@ the replicated call state, and flushes that turn. A dialog-level
 retransmission turn changes no fact a CDR, a peer or a node restoring the call
 needs: it is **quiet** — the live copy is replaced (the armed rung advances),
 no axis moves, nothing flushes. The quiet list is closed
-(`b2bua::effects::QuietTurn`); a third member is a line here first:
+(`b2bua::effects::QuietTurn`); a further member is a line here first:
 
 1. a rung of this node's own un-ACKed 2xx ladder (RFC 3261 §13.3.1.4),
 2. a rung of this node's own reliable-provisional ladder (RFC 3262 §3),
-3. the re-ACK of a repeated inbound 2xx (RFC 3261 §13.2.2.4).
+3. the re-ACK of a repeated inbound 2xx (RFC 3261 §13.2.2.4),
+4. an inbound ACK the rules absorb: it discharges nothing this node awaits
+   and no ACK is owed toward the peer for it (RFC 3261 §13.2.2.4).
 
 A rung is quiet only while the ladder goes on: a copy left and the next rung
 is armed, so the body differs from the last write by the rung index and the
 rung timer's due instant. The class is decided from the turn's effect set,
 not from the action that repeated: a quiet turn is one outbound repeat of the
 retained datagram on an `Active` call, and for a rung its own re-arm, and
-nothing else. The rung that ceases the ladder, a spent fire, a give-up, a
+nothing else; an absorbed ACK is a turn with no effect at all that leaves the
+body as the rules read it. The rung that ceases the ladder, a spent fire, a give-up, a
 keepalive OPTIONS turn, a request refused into the message ring, a re-ACK a
 rule emits beside a BYE or a CDR event, a re-ACK on a terminating call and
 every other turn is a write and bumps. A transaction-level retransmission
@@ -472,7 +509,9 @@ axis — has the other owner written since I branched — and strict greater on
 the writer's axis — is this a newer write of yours; that is the Reverse rule
 as it stands (`p_in == p_cur && b_in > b_cur`). It never orders two owners'
 progress; the body does (the lifecycle chain, the answer latch, ADR-0031's
-amendment).
+amendment). An adopted `p` names a version without its body, and the body says
+so (`CallTopology::gen_adopted`): the Reverse rule never folds such a body
+whole (ADR-0031, "an adopted counter is not the body it counts").
 
 **One increment means** one turn on that owner changed the replicated call
 state, and the flush carrying that body is on the wire. **It does not mean** a
@@ -481,6 +520,23 @@ along than a copy with a lower count on the other axis, or that the cap
 counter moved: a rung of this node's own ladder never counts toward
 `max_messages_per_call`; a repeated inbound 2xx does, and its count rides in
 the next write.
+
+**A fold is not an increment.** A node that folds the other owner's body — the
+reverse reconcile, or a refused flush folded in either direction — moves
+neither axis and flushes nothing: its live copy carries `max` of the two
+views on each axis, and its store keeps the version it last flushed. What the
+live copy holds depends on the path. The reverse reconcile of a flush the
+vector took holds the other owner's body at the version it published. A
+refused flush folded whole holds the other owner's content at `(max p, max b)`,
+a vector neither owner published. A round's end or opening folded alone
+(ADR-0031, "a round's end folds alone") holds this node's own content with the
+round merged in, at that same vector. Every path holds the
+higher of both views' dialog sequences. On every path the other owner's next write orders
+against what it published: a fold that bumped would read that write as made on
+a version this node has moved past and refuse it. Timers a fold takes are
+re-anchored into this node's clock and a stale keepalive guard is dropped,
+which no peer reads; the live copy's own timers stay where it armed them
+(`a_round_fold_leaves_the_live_copys_own_timers_where_it_armed_them`).
 
 **Accepted degradation.** A node restoring the call — the reclaiming primary,
 since a survivor's takeover copy is reactive and sheds when its last
@@ -508,6 +564,8 @@ cell that pins the rule:
 | Re-ACK is quiet, the repeated 2xx counts | `b2bua-harness/tests/it/reack_retransmitted_2xx.rs` | `retransmission_turn_is_quiet.rs` (`a_re_ack_of_a_repeated_2xx_replicates_nothing`), `retransmission_turn_and_message_cap.rs` (`a_repeated_inbound_2xx_counts_toward_the_message_cap`) |
 | The vector answers equality and strict-greater only | `failover-harness/tests/it/forward_flush_never_regresses_backup_progress.rs` (both `HealAt` cells), `answer_lost_with_primary_no_answer.rs`, `b2bua/src/repl/s12_tests.rs` | the same cells, unchanged |
 | A restored ladder restarts from the last write, bounded by the deadline | — (a residual, not a rule) | `retransmission_turn_is_quiet.rs` (`a_reclaim_after_three_rungs_restarts_the_2xx_ladder_from_the_answer`) |
+| An absorbed ACK is quiet; the ACK that discharges is a write | `b2bua-harness/tests/it/duplicate_ack_absorbed.rs`, `reack_retransmitted_2xx.rs` | `duplicate_ack_absorbed.rs` (`a_duplicate_ack_on_a_fresh_branch_draws_no_second_b_leg_ack`, `a_duplicate_reinvite_ack_draws_no_third_b_leg_ack`) |
+| A fold is not an increment | `call_terminate_on_backup.rs` (`c11_reinvite_on_backup__primary_alive__no_terminal`), `reinvite_answer_failover.rs`, `forward_flush_never_regresses_backup_progress.rs`, `answer_lost_with_primary_no_answer.rs` | `b2bua/src/router/reclaim/tests.rs` (`a_reverse_fold_holds_the_backups_version_so_its_next_write_folds`, `a_forward_answer_folds_into_a_ringing_takeover_copy_without_ending_it`, `a_refused_flush_answering_the_round_the_live_copy_holds_open_folds`, `a_round_fold_keeps_what_the_live_copy_wrote_since_the_branch`) |
 
 `b2bua_repl_quiet_turns_total{kind}` counts the turns persisted this way, so
 N rungs in `b2bua_retransmits_total` against 0 in `b2bua_repl_flush_propagated_total`

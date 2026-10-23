@@ -8,8 +8,8 @@
 //! call; a copy materialised from a replica arrives with no live timers here,
 //! and its serialised intents (`call.timers`, which IS replicated) re-arm into
 //! the local driver exactly once, on the materialisation that created the copy.
-//! Re-arming is idempotent: a later rule-emitted `ScheduleTimer` for the same
-//! id supersedes the restored entry through the driver's epoch bump.
+//! Each entry re-arms under its key and generation; a later rule-emitted
+//! `ScheduleTimer` for the same key supersedes the restored entry.
 //!
 //! The caller holds the per-call lock. In order:
 //! 1. residency — a call already live is handed back untouched
@@ -24,11 +24,15 @@
 //!    reclaim discharges a terminal body through the reclaim funnel instead of
 //!    re-serving a dead dialog, `Terminating` forced terminal (ADR-0020 X3);
 //! 4. `sanitize_restored_timers` — re-anchor by the persisted skew offset, drop
-//!    the stale `KeepaliveTimeout`, cohort-smooth on the bulk sweep only;
+//!    the stale `KeepaliveTimeout`, cohort-smooth on the bulk sweep only; then
+//!    `ring_deadline::presume_after_restore` re-anchors each dialled INVITE's
+//!    send instant and arms the ring deadline of an unanswered leg with no ring
+//!    on record from its INVITE;
 //! 5. the residency insert through the store, then `timers.restore`;
-//! 6. **seed** — the in-flight INVITE transactions the record names
-//!    ([`seeds::seeds_for`]) are rebuilt in the transaction layer, on every
-//!    origin, so the layer owns their ACKs and their Timer D / G;
+//! 6. **seed** — the in-flight INVITE transactions the record names, and the
+//!    answered ones whose 2xx it retains ([`seeds::seeds_for`]), are rebuilt
+//!    in the transaction layer, on every origin, so the layer owns their ACKs,
+//!    their Timer D / G / L and the copies of their requests;
 //! 7. takeover only: `mark_takeover` + `watch_self_release`, so the copy is
 //!    shed once the transactions it serves — the seeds among them — clear
 //!    (ADR-0014); the watch is armed after the seeds so it cannot fire on a
@@ -47,7 +51,9 @@
 //! mark and no watch. A call never imported into `pri:{self}` (its only copy is
 //! the peer's `bak:{self}`) is a genuine miss here.
 
+mod relayed_invite;
 mod seeds;
+pub(in crate::router) use seeds::{names_server_branch, relayed_server_key};
 #[cfg(test)]
 mod tests;
 
@@ -58,7 +64,7 @@ use sip_message::{Method, SipMessage};
 use sip_txn::Reoffer;
 
 use super::reclaim::{discharge_materialized_terminal, format_pb};
-use super::restore_hygiene::{sanitize_restored_timers, Smoothing};
+use super::restore_hygiene::{applied_offset, sanitize_restored_timers, Smoothing};
 use super::RouterCtx;
 use crate::store::{MaterialiseOrigin, ReplicaMiss};
 use b2bua_sdk::event::CallEvent;
@@ -98,14 +104,19 @@ pub(super) enum Reason {
     Decode,
     /// A terminal body: refused on a takeover, discharged on a reclaim.
     Terminated,
+    /// A body that does not rebuild its caller's INVITE, discharged
+    /// (ADR-0052 §11).
+    Unrecoverable,
 }
 
 /// The disposition of one [`materialise`] call.
 #[derive(Debug)]
 pub(super) enum Materialised {
     /// Freshly materialised on this call: inserted, timers re-armed, and for a
-    /// takeover marked and watched.
-    Served(Call),
+    /// takeover marked and watched. `seeded` counts the seeds the layer took
+    /// — one whose branch a transaction here already held is not among them —
+    /// and is `None` when the layer could not be asked (it has closed).
+    Served { call: Call, seeded: Option<usize> },
     /// Already live on this node; nothing was re-armed.
     Resident(Call),
     /// Not served; the caller's orphan path answers.
@@ -146,6 +157,9 @@ pub(super) async fn materialise(
         }
         _ => {}
     }
+    if !super::unrecoverable::copy_recoverable(ctx, call_ref, &call, origin.into(), now_ms).await {
+        return Materialised::Refused(Reason::Unrecoverable);
+    }
     let smoothing = match origin {
         Origin::Takeover => None,
         Origin::Reclaim(smoothing) => smoothing,
@@ -158,19 +172,24 @@ pub(super) async fn materialise(
         ctx.config.keepalive_interval_sec * 1000,
         smoothing,
     );
+    crate::ring_deadline::presume_after_restore(
+        &ctx.config,
+        &mut call,
+        applied_offset(skew_offset_ms),
+    );
     let timers = call.timers.clone();
     if !ctx.state.materialize_if_absent(call.clone(), origin.into()) {
         return Materialised::Resident(ctx.state.peek(call_ref).unwrap_or(call));
     }
     ctx.timers.restore(timers, call_ref.to_string(), call.incarnation()).await;
-    let seeded = ctx.txn.seed(call_ref, seeds::seeds_for(&call)).await.unwrap_or(0);
+    let seeded = ctx.txn.seed(call_ref, seeds::seeds_for(&call)).await.ok();
     match origin {
         Origin::Takeover => {
             ctx.state.mark_takeover(call_ref);
             let _ = ctx.txn.watch_self_release(call_ref).await;
             ctx.metrics.bump_repl_takeover_hydrated();
             ctx.state.note_takeover(call_ref, "hydrated");
-            ctx.state.note_takeover_count(call_ref, "seeded", seeded as u64);
+            ctx.state.note_takeover_count(call_ref, "seeded", seeded.unwrap_or(0) as u64);
         }
         Origin::Reclaim(smoothing) => {
             ctx.metrics.bump_repl_reclaimed();
@@ -190,7 +209,7 @@ pub(super) async fn materialise(
     }
     // The resident copy is the authoritative one: it carries this node's own
     // root span ids when the call is traced (ADR-0026 §5).
-    Materialised::Served(ctx.state.peek(call_ref).unwrap_or(call))
+    Materialised::Served { call: ctx.state.peek(call_ref).unwrap_or(call), seeded }
 }
 
 /// Re-offer `event` — a datagram the layer emitted with no transaction to
@@ -199,8 +218,9 @@ pub(super) async fn materialise(
 /// a seeded client INVITE ACKs the final it was waiting for, a seeded server
 /// INVITE answers the CANCEL 200 + 487. An in-dialog INVITE is re-offered only
 /// when the record names its branch as a relayed INVITE a peer already admitted
-/// ([`seeds::names_server_branch`]: a retransmission the layer's own
-/// transaction absorbs, so the rules never mint a second relay for the round);
+/// or an INVITE whose 2xx it retains ([`seeds::names_server_branch`]: a
+/// retransmission the layer's own transaction absorbs, so the rules never mint
+/// a second relay for the round nor refuse its copy as glare);
 /// any other request, a response a transaction here already took, and any
 /// non-SIP event are the turn's to process. `Matched`: the layer re-emitted
 /// whatever it owes, so this turn ends without running the rules; `Unmatched`
@@ -225,6 +245,28 @@ pub(super) async fn reoffer_trigger(
         return Reoffer::Unmatched;
     }
     ctx.txn.reoffer((**message).clone(), *src).await.unwrap_or(Reoffer::Unmatched)
+}
+
+/// The seeds a fold into the call's record hands the layer: the INVITE server
+/// transactions answered 2xx whose ACK the folded record still awaits, in RFC
+/// 6026 Accepted with the 2xx it retains. They are the only transactions of
+/// another node's rounds this node can serve while that node lives: a copy of
+/// the INVITE reaches whichever node the proxy reads alive, and the 2xx that
+/// answers it is in the record; the rest of a round runs where its Via sends
+/// the target's responses, the node that relayed it.
+pub(in crate::router) fn answered_invite_seeds(call: &Call) -> Vec<sip_txn::TxnSeed> {
+    seeds::seeds_for(call)
+        .into_iter()
+        .filter(|s| matches!(s, sip_txn::TxnSeed::ServerAccepted { .. }))
+        .collect()
+}
+
+/// Whether `call` names an INVITE transaction a live copy must serve — one a
+/// materialisation would seed ([`seeds::seeds_for`]): an INVITE awaiting its
+/// final, whose bound and finals the copy owns, or a 2xx awaiting its ACK,
+/// whose retransmission ladder the copy resumes (RFC 3261 §13.3.1.4).
+pub(super) fn has_invite_to_serve(call: &Call) -> bool {
+    !seeds::seeds_for(call).is_empty()
 }
 
 /// The typed miss of the store read, named from the origin's side.

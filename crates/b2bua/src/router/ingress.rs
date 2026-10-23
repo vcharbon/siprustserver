@@ -1,13 +1,12 @@
 //! The pre-dispatch pipeline: every event enters here once. Data-path metrics,
-//! per-peer timeout attribution, the acting-backup self-release notice, the
-//! out-of-dialog OPTIONS health responder, resolution (an event resolving to
-//! no call goes to [`super::unroutable`]), a new INVITE's router rungs of the
-//! admission ladder ([`super::admit`]), then the offer of the event's
-//! [`Turn`] to its call's queue under its dispatch class
-//! ([`crate::dispatch::class`]). The router acts on the offer: an admitted
-//! new INVITE spends its CPS token once its turn is queued, the reaper hears
-//! a call past its lifetime cap or at its overflow ceiling, and a discarded
-//! request is paid what it is owed ([`super::owed`]).
+//! per-peer timeout attribution, the out-of-dialog OPTIONS health responder,
+//! resolution (an event resolving to no call goes to [`super::unroutable`]), a
+//! new INVITE's router rungs of the admission ladder ([`super::admit`]), then
+//! the offer of the event's [`Turn`] to its call's queue under its dispatch
+//! class ([`crate::dispatch::class`]). The router acts on the offer: an
+//! admitted new INVITE spends its CPS token once its turn is queued, the reaper
+//! hears a call past its lifetime cap or at its overflow ceiling, and a
+//! discarded request is paid what it is owed ([`super::owed`]).
 
 use std::sync::Arc;
 
@@ -16,8 +15,7 @@ use sip_message::SipMessage;
 use super::admit;
 use super::owed::OwedAnswer;
 use super::peer_metrics::classify_b2bua_peer;
-use super::release::{release_call, ReleaseKind};
-use super::resolve::{replica_takeover, resolve};
+use super::resolve::{initial_invite_copy, replica_takeover, resolve, InitialInvite};
 use super::responses::build_options_health_response;
 use super::turn::Turn;
 use super::unroutable::Lookup;
@@ -46,84 +44,43 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     // skipped rather than fabricated.
     if let CallEvent::Timeout { destination: Some(dest), timeout_kind, .. } = &event {
         let kind = match timeout_kind {
-            sip_txn::TimeoutKind::Response => {
+            call::TxnTimeoutKind::Response => {
                 crate::peer_failures::PeerFailureKind::ResponseTimeout
             }
-            sip_txn::TimeoutKind::Transaction => {
+            call::TxnTimeoutKind::Transaction => {
                 crate::peer_failures::PeerFailureKind::TransactionTimeout
             }
         };
-        ctx.metrics.record_peer_failure(dest, classify_b2bua_peer(&ctx.config, dest), kind);
+        ctx.metrics.record_peer_failure(
+            dest,
+            classify_b2bua_peer(ctx.outbound_proxy.as_deref(), dest),
+            kind,
+        );
     }
 
-    // ADR-0014 acting-backup self-release: the txn layer reports the last
-    // transaction we served for a takeover copy has cleared; shed the live copy
-    // (the `bak:` replica + reverse-flushed deltas remain). Re-checked under the
-    // per-call lock, and the guard is held ACROSS the release — dropping it
-    // between the re-check and `drop_local` re-opens the X11 double-serve
-    // zombie window (ADR-0014): a parked handler could hydrate the still-
-    // resident copy unmarked/unwatched and re-insert it after `drop_local`.
-    // `release_call` takes no per-call lock itself, so holding the guard across
-    // it is deadlock-free.
+    // A self-release notice for a call this node holds no takeover copy of
+    // has nothing to shed.
     if let CallEvent::CallQuiesced { call_ref } = &event {
-        let call_ref = call_ref.clone();
-        if ctx.state.is_takeover(&call_ref) {
-            let _guard = ctx.state.lock(&call_ref).await;
-            if ctx.state.is_takeover(&call_ref) {
-                if ctx.txn.active_txn_count_for_call(&call_ref).await.unwrap_or(0) == 0 {
-                    // Model Y (ADR-0020 X3): a takeover copy DEFERS its discharge
-                    // to the live primary regardless of its state — it is never an
-                    // independent CDR/limiter writer — so self-release
-                    // unconditionally. An Active copy continues at the reclaiming
-                    // primary (ADR-0014); a Terminating/Terminated copy was
-                    // reverse-flushed in `process_result` and the primary
-                    // discharges it exactly once (immediately if reconciling, on
-                    // reboot via reclaim). A primary that never returns inside the
-                    // replica TTL loses the CDR/limiter cleanup — the accepted
-                    // double-failure.
-                    if let Some(call) = ctx.state.peek(&call_ref) {
-                        if matches!(
-                            call.state,
-                            call::CallModelState::Terminating | call::CallModelState::Terminated
-                        ) {
-                            // Belt-and-braces reverse-flush of the terminal state (a
-                            // Terminated copy skips the process_result flush gate) so
-                            // the primary's reconcile/reclaim has it — held with the
-                            // normal replica TTL (`reboot_budget`).
-                            ctx.state.flush(&call);
-                        }
-                    }
-                    release_call(ctx, &call_ref, ReleaseKind::SelfRelease { ended: false }).await;
-                } else {
-                    // A fresh in-dialog request (a second takeover during a
-                    // sustained partition) re-armed a transaction since this notice
-                    // was emitted, and the txn layer's watch is one-shot — it was
-                    // consumed delivering THIS CallQuiesced. Re-arm it so the
-                    // eventual last-txn clear notifies us again; otherwise the
-                    // takeover copy is stranded double-serving until its
-                    // GlobalDuration backstop (hydrate never re-arms the watch for
-                    // an already-resident copy: it returns fresh == false).
-                    let _ = ctx.txn.watch_self_release(&call_ref).await;
-                }
-            }
+        if !ctx.state.is_takeover(call_ref) {
+            return;
         }
-        return;
     }
 
-    // Out-of-dialog OPTIONS keepalive: self-report readiness (ADR-0011 X6).
-    // The front proxy probe keys on the status + Reason header text
-    // (`sip-proxy::health::probe::classify_503`).
+    // Out-of-dialog OPTIONS keepalive: self-report readiness (ADR-0011 X6) on
+    // its two axes (ADR-0050 §2), read by the front proxy's health probe.
     if let CallEvent::Sip { message, src, .. } = &event {
         if let SipMessage::Request(req) = message.as_ref() {
             if req.method() == "OPTIONS" && req.to().tag().is_none() {
                 let resp = build_options_health_response(
                     &ctx.readiness,
                     &ctx.overload,
-                    &ctx.id_gen,
+                    &ctx.options_tagger,
                     req,
                     &ctx.config.node_capabilities,
                 );
-                let _ = ctx.txn.send_response(resp, *src).await;
+                if let Ok(resp) = resp {
+                    let _ = ctx.txn.send_response(resp, *src).await;
+                }
                 return;
             }
         }
@@ -131,6 +88,26 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
 
     let mut res = resolve(ctx, &event);
     let mut lookup = Lookup::Answered;
+    // An initial INVITE copying a call this node holds the answered record of
+    // is that call's, answered from the record; one placed here as another
+    // primary's backup and copying none belongs to that primary and gets no
+    // final (its 100 Trying went out on receipt), its transaction
+    // relinquished — never a second call.
+    match initial_invite_copy(ctx, &event, &res).await {
+        InitialInvite::Own => {}
+        InitialInvite::CopyOf(hit) => res.copy_of(hit, &event),
+        InitialInvite::Foreign => {
+            ctx.metrics.bump_foreign_invite_copy_dropped();
+            if let CallEvent::Sip { message, .. } = &event {
+                if let SipMessage::Request(req) = message.as_ref() {
+                    if let Some(key) = sip_txn::ServerTxnKey::of(req) {
+                        let _ = ctx.txn.relinquish_server(key).await;
+                    }
+                }
+            }
+            return;
+        }
+    }
     if res.call_ref.is_none() {
         // Acting-backup takeover BACKSTOP. The normal in-dialog key is the R-URI
         // `callref` param the B2BUA Contact stamps and the proxy preserves under
@@ -177,8 +154,14 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
         }
     }
 
-    // `CallQuiesced`, the one event with no dispatch class, returned above.
     let Some(class) = DispatchClass::of(&event) else { return };
+    // A copy of a replicated call's INVITE opens no call: it queues as a
+    // request of that call.
+    let class = if class.is_new_call() && !res.initial_invite {
+        DispatchClass::InDialogInvite
+    } else {
+        class
+    };
     // A new INVITE is judged unless it is a copy of a call already here (live,
     // or admitted and not born yet, on the same CSeq). The check and the offer
     // run with no await between them.

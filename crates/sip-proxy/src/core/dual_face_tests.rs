@@ -24,7 +24,7 @@ use sip_net::{SendError, UdpEndpoint, UdpEndpointCounters, UdpPacket};
 use crate::addr::ProxyAddr;
 use crate::core::{ExternalFaceParts, ProxyCore, ProxyCoreBuilder};
 use crate::face::FaceCidrs;
-use crate::observability::metrics::RoutingDecisionKind;
+use crate::observability::metrics::{Face, RoutingDecisionKind};
 use crate::registry::static_reg::StaticWorkerRegistry;
 use crate::registry::{WorkerEntry, WorkerRegistry};
 use crate::strategies::forward_all::ForwardAllStrategy;
@@ -110,7 +110,7 @@ fn dual_face_core() -> Fixture {
     let strategy: Arc<dyn RoutingStrategy> =
         Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
     let metrics = Arc::new(ProxyMetrics::new());
-    let core = ProxyCoreBuilder::new(ProxyAddr::new(INT_VIP, INT_PORT), strategy, reg)
+    let core = ProxyCoreBuilder::for_test(ProxyAddr::new(INT_VIP, INT_PORT), strategy, reg)
         .clock(Clock::test_at(0))
         .metrics(metrics.clone())
         .external_face(ExternalFaceParts {
@@ -128,6 +128,10 @@ fn parse_msg(raw: &str) -> SipMessage {
 
 fn caller_src() -> SocketAddr {
     format!("{CALLER}:5060").parse().unwrap()
+}
+
+fn callee_src() -> SocketAddr {
+    format!("{CALLEE}:5060").parse().unwrap()
 }
 
 /// Header lines named `name` (case-insensitive), in wire order.
@@ -156,7 +160,7 @@ Content-Length: 0\r\n\r\n"
 }
 
 /// A worker-originated b-leg INVITE toward the external callee (top Via = the
-/// worker's registry identity; preloaded outbound Route as the b2bua sends it).
+/// worker's registry identity; the plain preloaded `;lr` Route the b2bua sends).
 fn worker_bleg_invite(call_id: &str) -> SipMessage {
     parse_msg(&format!(
         "INVITE sip:bob@{CALLEE}:5060 SIP/2.0\r\n\
@@ -167,7 +171,7 @@ To: <sip:bob@{CALLEE}>\r\n\
 Call-ID: {call_id}\r\n\
 CSeq: 1 INVITE\r\n\
 Contact: <sip:b2bua@{W1}:5060;leg=b>\r\n\
-Route: <sip:{INT_VIP}:{INT_PORT};lr;outbound>\r\n\
+Route: <sip:{INT_VIP}:{INT_PORT};lr>\r\n\
 Content-Length: 0\r\n\r\n"
     ))
 }
@@ -177,7 +181,7 @@ Content-Length: 0\r\n\r\n"
 #[tokio::test]
 async fn inbound_invite_egresses_internal_with_internal_via_and_per_face_rr() {
     let f = dual_face_core();
-    let outcome = f.core.route_request(&caller_invite("df-in@test"), caller_src()).await;
+    let outcome = f.core.route_request_from(&caller_invite("df-in@test"), caller_src()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::SelectNew);
     assert_eq!(outcome.target, Some(ProxyAddr::new(W1, 5060)));
 
@@ -237,7 +241,7 @@ async fn inbound_invite_egresses_internal_with_internal_via_and_per_face_rr() {
 async fn worker_outbound_invite_egresses_external_with_external_via_and_mirrored_rr() {
     let f = dual_face_core();
     let src = format!("{W1}:5060").parse().unwrap();
-    let outcome = f.core.route_request(&worker_bleg_invite("df-out@test"), src).await;
+    let outcome = f.core.route_request_from(&worker_bleg_invite("df-out@test"), src).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::WorkerOutbound);
     assert_eq!(outcome.target, Some(ProxyAddr::new(CALLEE, 5060)));
 
@@ -302,14 +306,15 @@ CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
     );
     let SipMessage::Response(resp) = parse_msg(&raw) else { panic!("response") };
-    f.core.handle_response(resp, format!("{W1}:5060").parse().unwrap()).await;
+    f.core.handle_response(resp, format!("{W1}:5060").parse().unwrap(), Face::Internal).await;
     let sent = f.take_sent();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].0, "ext", "a caller-bound response must egress the EXTERNAL socket");
     assert_eq!(sent[0].1, caller_src());
 
-    // b-leg response: proxy's EXTERNAL Via on top (the b-leg INVITE egressed
-    // toward the callee), next Via = the worker → relays on the INT socket.
+    // b-leg response: the callee's answer arrives on the EXTERNAL face, the
+    // proxy's EXTERNAL Via on top (the b-leg INVITE egressed toward the
+    // callee), next Via = the worker → relays on the INT socket.
     // The external-face top Via must be accepted as "us" (§16.7.3).
     let raw = format!(
         "SIP/2.0 200 OK\r\n\
@@ -322,7 +327,7 @@ CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
     );
     let SipMessage::Response(resp) = parse_msg(&raw) else { panic!("response") };
-    f.core.handle_response(resp, format!("{W1}:5060").parse().unwrap()).await;
+    f.core.handle_response(resp, callee_src(), Face::External).await;
     let sent = f.take_sent();
     assert_eq!(sent.len(), 1, "the external-face top Via must be recognised as ours");
     assert_eq!(sent[0].0, "int", "a worker-bound response must egress the INTERNAL socket");
@@ -334,7 +339,7 @@ Content-Length: 0\r\n\r\n"
 #[tokio::test]
 async fn relayed_non_2xx_ack_follows_the_invite_face() {
     let f = dual_face_core();
-    f.core.route_request(&caller_invite("df-ack@test"), caller_src()).await;
+    f.core.route_request_from(&caller_invite("df-ack@test"), caller_src()).await;
     let fwd_invite = f.take_sent();
     let invite_via = header_lines(&fwd_invite[0].2, "Via");
     let proxy_branch = invite_via[0]
@@ -354,7 +359,7 @@ CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
     );
     let SipMessage::Response(resp) = parse_msg(&raw) else { panic!("response") };
-    f.core.handle_response(resp, format!("{W1}:5060").parse().unwrap()).await;
+    f.core.handle_response(resp, format!("{W1}:5060").parse().unwrap(), Face::Internal).await;
 
     let sent = f.take_sent();
     // No synthesized hop ACK (ADR-0022 X4: the proxy is transaction-less; the
@@ -382,7 +387,7 @@ Call-ID: df-ack@test\r\n\
 CSeq: 1 ACK\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let outcome = f.core.route_request(&parse_msg(&raw_ack), caller_src()).await;
+    let outcome = f.core.route_request_from(&parse_msg(&raw_ack), caller_src()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::AckHop);
 
     let sent = f.take_sent();
@@ -427,8 +432,10 @@ Route: <sip:{EXT_VIP}:{EXT_PORT};target={W1}:5060;lr>\r\n\
 Route: <sip:{INT_VIP}:{INT_PORT};target={W1}:5060;outbound;lr>\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let outcome =
-        f.core.route_request(&parse_msg(&raw), format!("{CALLEE}:5060").parse().unwrap()).await;
+    let outcome = f
+        .core
+        .route_request_from(&parse_msg(&raw), format!("{CALLEE}:5060").parse().unwrap())
+        .await;
     assert_eq!(
         outcome.decision,
         RoutingDecisionKind::DecodeForward,
@@ -465,7 +472,7 @@ Route: <sip:{EXT_VIP}:{EXT_PORT};target={W1}:5060;lr>\r\n\
 Content-Length: 0\r\n\r\n"
     );
     let outcome =
-        f.core.route_request(&parse_msg(&raw), format!("{W1}:5060").parse().unwrap()).await;
+        f.core.route_request_from(&parse_msg(&raw), format!("{W1}:5060").parse().unwrap()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::WorkerOutbound);
     assert_eq!(outcome.target, Some(ProxyAddr::new(CALLER, 5060)));
 
@@ -501,11 +508,11 @@ async fn single_face_rr_format_is_unchanged() {
         )]));
     let strategy: Arc<dyn RoutingStrategy> =
         Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
-    let core = ProxyCoreBuilder::new(ProxyAddr::new(INT_VIP, INT_PORT), strategy, reg)
+    let core = ProxyCoreBuilder::for_test(ProxyAddr::new(INT_VIP, INT_PORT), strategy, reg)
         .clock(Clock::test_at(0))
         .build(Box::new(int_ep));
 
-    core.route_request(&caller_invite("sf-rr@test"), caller_src()).await;
+    core.route_request_from(&caller_invite("sf-rr@test"), caller_src()).await;
     let sent = std::mem::take(&mut *sent.lock().unwrap());
     assert_eq!(sent.len(), 1);
     let rrs = header_lines(&sent[0].2, "Record-Route");

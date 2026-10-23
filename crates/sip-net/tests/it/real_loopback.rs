@@ -5,8 +5,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use sip_message::{CustomParser, SipMessage};
 use sip_net::types::PreIngressAction;
-use sip_net::{BindUdpOpts, PreIngressHook, RealSignalingNetwork, SignalingNetwork};
+use sip_net::{Arrival, BindUdpOpts, PreIngressHook, RealSignalingNetwork, SignalingNetwork};
 use tokio::time::timeout;
 
 fn loopback(queue_max: usize) -> BindUdpOpts {
@@ -29,7 +30,8 @@ async fn loopback_send_recv() {
         .await
         .expect("recv timed out")
         .expect("queue closed");
-    assert_eq!(pkt.raw, b"hello over the wire");
+    assert_eq!(pkt.raw, &b"hello over the wire"[..]);
+    assert_eq!(pkt.parsed, None, "no hook made a parse");
     assert_eq!(pkt.src.ip(), a.local_addr().ip());
     assert_eq!(b.counters().enqueued, 1);
 }
@@ -37,8 +39,8 @@ async fn loopback_send_recv() {
 #[tokio::test]
 async fn pre_ingress_reply_round_trips() {
     let net = RealSignalingNetwork::new();
-    let hook: PreIngressHook = Arc::new(|raw: &[u8], _src, _depth| {
-        if raw == b"PING" {
+    let hook: PreIngressHook = Arc::new(|arrival: &mut Arrival, _src, _depth| {
+        if arrival.raw() == b"PING" {
             PreIngressAction::Reply(b"PONG".to_vec())
         } else {
             PreIngressAction::Accept
@@ -50,9 +52,85 @@ async fn pre_ingress_reply_round_trips() {
     a.send_to(b"PING", b.local_addr()).await.unwrap();
 
     let reply = timeout(Duration::from_secs(2), a.recv()).await.expect("reply timed out").unwrap();
-    assert_eq!(reply.raw, b"PONG");
+    assert_eq!(reply.raw, &b"PONG"[..]);
     assert_eq!(b.counters().pre_ingress_replies, 1);
     assert_eq!(b.counters().enqueued, 0);
+}
+
+/// A pre-ingress hook that panics on one datagram costs the pump nothing:
+/// that datagram is accepted and counted, and the next one is received.
+#[tokio::test]
+async fn a_panicking_pre_ingress_hook_keeps_the_pump_receiving() {
+    let net = RealSignalingNetwork::new();
+    let hook: PreIngressHook = Arc::new(|arrival: &mut Arrival, _src, _depth| {
+        if arrival.raw() == b"PANIC" {
+            panic!("probe: pre-ingress hook panic");
+        }
+        PreIngressAction::Accept
+    });
+    let a = net.bind_udp(loopback(64)).await.unwrap();
+    let b = net.bind_udp(loopback(64).with_pre_ingress(hook)).await.unwrap();
+
+    a.send_to(b"PANIC", b.local_addr()).await.unwrap();
+    a.send_to(b"after the panic", b.local_addr()).await.unwrap();
+
+    let first = timeout(Duration::from_secs(2), b.recv()).await.expect("recv timed out");
+    assert_eq!(first.expect("the pump outlives the hook's panic").raw, &b"PANIC"[..]);
+    let second = timeout(Duration::from_secs(2), b.recv()).await.expect("recv timed out");
+    assert_eq!(second.expect("the pump keeps receiving").raw, &b"after the panic"[..]);
+    assert_eq!(b.counters().pre_ingress_panics, 1);
+}
+
+/// The parse a hook made on the receive path is queued with the datagram,
+/// so the consumer takes it instead of parsing the datagram again.
+#[tokio::test]
+async fn a_hook_s_parse_is_queued_with_the_datagram() {
+    const OPTIONS: &[u8] = b"OPTIONS sip:bob@127.0.0.1 SIP/2.0\r\n\
+        Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-pump\r\n\
+        Max-Forwards: 70\r\n\
+        From: <sip:alice@example.com>;tag=a1\r\n\
+        To: <sip:bob@example.com>\r\n\
+        Call-ID: pump@127.0.0.1\r\n\
+        CSeq: 1 OPTIONS\r\n\
+        Content-Length: 0\r\n\r\n";
+    let net = RealSignalingNetwork::new();
+    let parser = CustomParser::new();
+    let hook: PreIngressHook = Arc::new(move |arrival: &mut Arrival, _src, _depth| {
+        arrival.parse(&parser);
+        PreIngressAction::Accept
+    });
+    let a = net.bind_udp(loopback(64)).await.unwrap();
+    let b = net.bind_udp(loopback(64).with_pre_ingress(hook)).await.unwrap();
+
+    a.send_to(OPTIONS, b.local_addr()).await.unwrap();
+
+    let pkt = timeout(Duration::from_secs(2), b.recv()).await.expect("recv timed out").unwrap();
+    assert_eq!(pkt.raw, OPTIONS);
+    let Some(Ok(Ok(SipMessage::Request(req)))) = pkt.parsed.as_deref() else {
+        panic!("the hook's parse is queued: {:?}", pkt.parsed);
+    };
+    assert_eq!(req.call_id().as_str(), "pump@127.0.0.1");
+}
+
+/// A pump that ends abnormally — here a receive tap that panics — closes the
+/// queue on its way out, so the consumer's `recv()` resolves instead of
+/// waiting forever on a pump that is gone.
+#[tokio::test]
+async fn a_pump_that_panics_closes_the_queue() {
+    let net = RealSignalingNetwork::new();
+    let a = net.bind_udp(loopback(64)).await.unwrap();
+    let b = net.bind_udp(loopback(64)).await.unwrap();
+    let tap: sip_net::RecvTap = Arc::new(|_, _| panic!("probe: receive tap panic"));
+    assert!(b.install_recv_tap(tap));
+
+    a.send_to(b"ends the pump", b.local_addr()).await.unwrap();
+
+    let ended = timeout(Duration::from_secs(2), b.recv()).await;
+    assert!(
+        matches!(ended, Ok(None)),
+        "the queue closes when the pump ends: {:?}",
+        ended.map(|p| p.map(|p| p.raw))
+    );
 }
 
 #[tokio::test]

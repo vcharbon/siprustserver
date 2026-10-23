@@ -4,8 +4,8 @@
 //! This is the single serialization point for all outbound SIP messages.
 //! Headers are UTF-8; body is raw bytes passed through unmodified. The
 //! serializer enforces Content-Length correctness at the boundary: a declared
-//! length that disagrees with the body is auto-corrected (and a warning is
-//! emitted), and a missing Content-Length is added when a body is present.
+//! length that disagrees with the body is restated to the body's, and a missing
+//! Content-Length is added when a body is present.
 
 use crate::types::{SipHeader, SipMessage, SipRequest, SipResponse};
 
@@ -20,7 +20,7 @@ pub fn serialize(msg: &SipMessage) -> Vec<u8> {
 /// Render a message whose header block is stated by the caller — the template
 /// lane's emission seam, where the capture's header-name spelling and
 /// remote-target rewrites are applied to the block a generator produced.
-pub(crate) fn render(
+pub fn render(
     headers: &[SipHeader],
     body: &[u8],
     start_line: impl FnOnce(&mut Vec<u8>),
@@ -30,12 +30,14 @@ pub(crate) fn render(
     finish(out, headers, body)
 }
 
-pub(crate) fn write_request_line(out: &mut Vec<u8>, req: &SipRequest) {
+/// The request line of `req`, as the wire writes it.
+pub fn write_request_line(out: &mut Vec<u8>, req: &SipRequest) {
     use std::io::Write;
     let _ = write!(out, "{} {} {}", req.method(), req.request_uri().text(), req.version());
 }
 
-pub(crate) fn write_status_line(out: &mut Vec<u8>, resp: &SipResponse) {
+/// The status line of `resp`, as the wire writes it.
+pub fn write_status_line(out: &mut Vec<u8>, resp: &SipResponse) {
     use std::io::Write;
     let _ = write!(out, "{} {} {}", resp.version(), resp.status(), resp.reason());
 }
@@ -55,22 +57,13 @@ fn finish(mut out: Vec<u8>, headers: &[SipHeader], body: &[u8]) -> Vec<u8> {
     use std::io::Write;
 
     let actual_length = body.len();
-    let first_line_end = out.len();
-    let cl_index = headers.iter().position(|h| h.name.eq_ignore_ascii_case("content-length"));
-    let declared_ok = match cl_index {
-        Some(i) => headers[i].value.trim().parse::<usize>().ok() == Some(actual_length),
+    let cl =
+        headers.iter().enumerate().find(|(_, h)| h.name.eq_ignore_ascii_case("content-length"));
+    let cl_index = cl.map(|(i, _)| i);
+    let declared_ok = match cl {
+        Some((_, h)) => h.value.trim().parse::<usize>().ok() == Some(actual_length),
         None => actual_length == 0,
     };
-    if let Some(i) = cl_index {
-        if !declared_ok {
-            eprintln!(
-                "[Serializer] Content-Length mismatch: header={}, body={actual_length}. \
-                 Auto-correcting. First line: {}",
-                headers[i].value,
-                String::from_utf8_lossy(&out[..first_line_end])
-            );
-        }
-    }
 
     out.extend_from_slice(b"\r\n");
     for (i, h) in headers.iter().enumerate() {
@@ -97,12 +90,12 @@ pub fn sip_summary(raw: &[u8]) -> String {
     let lf = raw.iter().position(|&b| b == 0x0a);
     // TS: Math.min(indexOf 0x0d, indexOf 0x0a, 200), where a missing byte is -1.
     // Mirror that exactly: -1 wins the min and falls back to min(len, 200).
-    let end = [cr.map(|n| n as isize).unwrap_or(-1), lf.map(|n| n as isize).unwrap_or(-1), 200]
-        .into_iter()
-        .min()
-        .unwrap();
-    let cut = if end > 0 { end as usize } else { raw.len().min(200) };
-    String::from_utf8_lossy(&raw[..cut.min(raw.len())]).into_owned()
+    let cut = match (cr, lf) {
+        (Some(cr), Some(lf)) if cr.min(lf) > 0 => cr.min(lf).min(200),
+        _ => raw.len().min(200),
+    };
+    let head = raw.split_at_checked(cut.min(raw.len())).map_or(raw, |(head, _)| head);
+    String::from_utf8_lossy(head).into_owned()
 }
 
 /// One-line summary from a structured message (no buffer needed).

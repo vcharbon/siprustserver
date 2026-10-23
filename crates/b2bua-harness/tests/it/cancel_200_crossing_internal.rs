@@ -59,7 +59,7 @@ async fn no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee_and_failover
                 // Short no-answer deadline + a callback context so the no-answer
                 // path CANCELs the ringing leg AND keeps the call alive for the
                 // /call/failure consult (the reroute below).
-                r.no_answer_timeout_sec = Some(30);
+                r.no_answer_ms = Some(30_000);
                 r.callback_context = Some("noanswer-ctx".into());
                 NewCallResponse::Route(r)
             })
@@ -71,7 +71,7 @@ async fn no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee_and_failover
             // Setup deadline past the no-answer so the NoAnswer timer is what
             // fires; keepalive far out for a quiet tail; reaper off to isolate
             // the crossing-200 mechanism from the liveness sweep.
-            c.setup_timeout_sec = 300;
+            c.setup_timeout_ms = 300_000;
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
         })
@@ -156,7 +156,7 @@ async fn no_answer_reject_cancel_crossed_by_200_reaps_the_abandoned_callee() {
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5072);
-                r.no_answer_timeout_sec = Some(30);
+                r.no_answer_ms = Some(30_000);
                 NewCallResponse::Route(r)
             })
             .build(),
@@ -166,7 +166,7 @@ async fn no_answer_reject_cancel_crossed_by_200_reaps_the_abandoned_callee() {
             // Setup deadline past the no-answer so the NoAnswer timer is what
             // fires; keepalive far out; reaper off to isolate the crossing-200
             // mechanism from the liveness sweep.
-            c.setup_timeout_sec = 300;
+            c.setup_timeout_ms = 300_000;
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
         })
@@ -233,7 +233,7 @@ async fn drop_sdp_no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee() {
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to_with_18x("127.0.0.1", 5074, RelayFirst18xStrategy::DropSdp);
-                r.no_answer_timeout_sec = Some(30);
+                r.no_answer_ms = Some(30_000);
                 r.callback_context = Some("noanswer-ctx".into());
                 NewCallResponse::Route(r)
             })
@@ -250,7 +250,7 @@ async fn drop_sdp_no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee() {
     );
     let b2bua = B2buaSut::builder(decision)
         .tune(|c| {
-            c.setup_timeout_sec = 300;
+            c.setup_timeout_ms = 300_000;
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
         })
@@ -345,7 +345,7 @@ async fn transaction_timeout_cancel_crossed_by_200_reaps_the_abandoned_callee() 
     // txn-backstop treatment itself.
     let b2bua = B2buaSut::builder(decision)
         .tune(|c| {
-            c.setup_timeout_sec = 300;
+            c.setup_timeout_ms = 300_000;
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
         })
@@ -384,6 +384,156 @@ async fn transaction_timeout_cancel_crossed_by_200_reaps_the_abandoned_callee() 
     d_bye.expect(200).await;
 
     settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+/// A reaped crossing 200 answers no one: the caller's INVITE is still
+/// unanswered (RFC 3261 §13.3.1), so the reroute target's rejection reaches
+/// her as the final it is, and the call ends without a BYE toward a dialog
+/// she never had.
+#[tokio::test(start_paused = true)]
+async fn a_reaped_crossing_200_leaves_the_caller_unanswered_for_the_reroute_final() {
+    let h = Harness::with_transit_delay("noanswer-cancel-200-crossing-reroute-rejects", 1);
+    let alice = h.agent("alice", "127.0.0.1:5066").await;
+    let carol = h.agent("carol", "127.0.0.1:5076").await; // rings, no-answer'd, answers late
+    h.waive(
+        WaiverScope::rule(
+            "no-200-after-cancel",
+            "carol deliberately answers 200 after taking the CANCEL (RFC 3261 §9.2) — the crossing under test",
+        )
+        .on_party("carol"),
+    );
+    let bob = h.agent("bob", "127.0.0.1:5077").await; // reroute target, busy
+
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| {
+                let mut r = route_to("127.0.0.1", 5076);
+                r.no_answer_ms = Some(30_000);
+                r.callback_context = Some("noanswer-ctx".into());
+                NewCallResponse::Route(r)
+            })
+            .on_failure(|req| match req.failure.failed_leg_id.as_deref() {
+                Some("b-1") => {
+                    let mut r = route_to("127.0.0.1", 5077);
+                    r.callback_context = Some("noanswer-ctx".into());
+                    CallTreatment::Route(r)
+                }
+                _ => CallTreatment::Relay { label: None },
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| {
+            c.setup_timeout_ms = 300_000;
+            c.keepalive_interval_sec = 3_600;
+            c.reaper_enabled = false;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5086")
+        .await;
+
+    let mut call = alice.invite(&carol).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut carol_uas = carol.receive("INVITE").await;
+    carol_uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+
+    h.advance(Duration::from_secs(30) + Duration::from_millis(300)).await;
+    let mut cancel = carol.receive("CANCEL").await;
+    cancel.respond(200, "OK").await;
+    carol_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    carol.receive("ACK").await;
+    carol.receive("BYE").await.respond(200, "OK").await;
+
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(486, "Busy Here").await;
+    bob.receive("ACK").await;
+    let busy = call.expect(486).await;
+    assert_eq!(busy.status(), 486, "the reroute's rejection is the caller's final");
+
+    settle_until(|| b2bua.is_reaped()).await;
+    alice.drain().await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+/// A reaped crossing 200 shows the caller nothing, so the reroute is one
+/// like any other (`reroute_rejection_tag`): in transparent mode the second
+/// attempt's ringing opens her second early dialog under a tag of its own,
+/// and its 200 establishes that dialog. Every caller-facing message of the
+/// second attempt carries that one tag.
+#[tokio::test(start_paused = true)]
+async fn after_a_reaped_crossing_200_the_reroute_rings_and_answers_as_any_reroute() {
+    let h = Harness::with_transit_delay("noanswer-cancel-200-crossing-reroute-rings", 1);
+    let alice = h.agent("alice", "127.0.0.1:5066").await;
+    let carol = h.agent("carol", "127.0.0.1:5076").await; // rings, no-answer'd, answers late
+    h.waive(
+        WaiverScope::rule(
+            "no-200-after-cancel",
+            "carol deliberately answers 200 after taking the CANCEL (RFC 3261 §9.2) — the crossing under test",
+        )
+        .on_party("carol"),
+    );
+    let bob = h.agent("bob", "127.0.0.1:5077").await; // reroute target, rings then answers
+
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| {
+                let mut r = route_to("127.0.0.1", 5076);
+                r.no_answer_ms = Some(30_000);
+                r.callback_context = Some("noanswer-ctx".into());
+                NewCallResponse::Route(r)
+            })
+            .on_failure(|req| match req.failure.failed_leg_id.as_deref() {
+                Some("b-1") => {
+                    let mut r = route_to("127.0.0.1", 5077);
+                    r.callback_context = Some("noanswer-ctx".into());
+                    CallTreatment::Route(r)
+                }
+                _ => CallTreatment::Relay { label: None },
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| {
+            c.setup_timeout_ms = 300_000;
+            c.keepalive_interval_sec = 3_600;
+            c.reaper_enabled = false;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5086")
+        .await;
+
+    let mut call = alice.invite(&carol).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut carol_uas = carol.receive("INVITE").await;
+    carol_uas.respond(180, "Ringing").await;
+    let first = call.expect(180).await;
+    let first_tag = first.to().tag().expect("the first attempt's caller-facing tag").to_string();
+
+    h.advance(Duration::from_secs(30) + Duration::from_millis(300)).await;
+    carol.receive("CANCEL").await.respond(200, "OK").await;
+    carol_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    carol.receive("ACK").await;
+    carol.receive("BYE").await.respond(200, "OK").await;
+
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(180, "Ringing").await;
+    let ringing = call.expect(180).await;
+    let second_tag = ringing.to().tag().expect("the reroute's caller-facing tag").to_string();
+    assert_ne!(
+        second_tag, first_tag,
+        "transparent mode: the reroute's ring opens the caller's second early dialog"
+    );
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    let answer = call.expect(200).await;
+    assert_eq!(answer.to().tag(), Some(second_tag.as_str()), "the answer confirms that dialog");
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    alice.drain().await;
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

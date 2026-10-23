@@ -1,6 +1,6 @@
 # One home for retransmission: a shared schedule, an opaque retained datagram, and obligations the framework discharges
 
-**Status:** accepted (2026-09-05)
+**Status:** accepted (2026-09-05); X6 added (2026-10-11)
 
 ## Context
 
@@ -10,7 +10,7 @@ two crates:
 | site | class | state carried |
 |---|---|---|
 | `sip-txn/src/layer/client.rs:417-432` | Timer A / E | `interval_ms` + `elapsed_ms` + `max_ms` (u64) |
-| `sip-txn/src/layer/client.rs:311` | CANCEL Timer E (ADR-0028 X4) | `HeldCancel` interval + elapsed |
+| `sip-txn/src/layer/client.rs:311` | CANCEL Timer E (ADR-0043 X4) | `HeldCancel` interval + elapsed |
 | `sip-txn/src/layer/server.rs:32-61` | Timer G | `interval_ms` |
 | `b2bua/src/rules/actions/respond.rs:257-276` | §13.3.1.4 2xx | `ack_retransmit_interval_ms` (i64, replicated) |
 | `b2bua/src/rules/actions/reliable_ladder.rs:97-158` | RFC 3262 §3 | `interval_ms` (i64, replicated) |
@@ -72,24 +72,8 @@ is a compile error rather than a review comment.
 It is a pure leaf on the ADR-0002 model, like `sip-clock`: `sip-txn`, `call`,
 `b2bua` and `pivot-interpreter` depend on it and nothing depends back.
 
-**Amendment — the initial INVITE's first-response bound.** A deployment may
-tighten the bound an *initial* INVITE (no To-tag) waits in `Calling` for a
-response of any kind below Timer B:
-`TransactionConfig::invite_first_response_timeout_ms` (default Timer B),
-surfaced as `B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC` (default 32, range
-`2..=32`). It is a deliberate RFC 3261 §17.1.1.2 deviation, recorded as
-telephony policy: a hop that draws nothing — not even a `100 Trying` — is
-dead, and a caller cannot be left in silence for 64·T1 before the reroute to
-an alternate hop. The Timer A ladder is armed under the same bound, so no rung
-lands past the give-up and the bound buys a rung count — 2 s → 2 re-sends
-(0.5/1.5 s), 5 s → 3, 10 s → 4, 32 s → 6; the 2 s floor guarantees a lossy
-path more than one chance, and the ceiling is the RFC value itself. The
-expiry keeps `TimeoutKind::Response` ("nothing answered"), and the
-`call_failure` consult carries it as `timeout_kind: "response" | "transaction"`
-beside an unchanged `origin`. An in-dialog INVITE and every non-INVITE keep
-64·T1 (Timer B / Timer F), and the first provisional still swaps in the long
-`invite_initial_timeout_ms` bound. The proxy's `cancel_lru` TTLs do not
-follow: they are ceilings derived from the long bound.
+**Amendment — the initial INVITE's first-response deadline** is the TU's,
+beside an untouched Timer B: ADR-0044.
 
 ## Decision X2 — the only ladder state is a rung index
 
@@ -153,9 +137,10 @@ ladder becomes an **obligation** the framework tracks:
 - `AckOf2xx { leg, dialog_tag, cseq }` — discharged by an ACK of that CSeq on
   that dialog. One key covers the initial INVITE and the re-INVITE, so the twin
   timer pair and `relay-ack`'s CSeq comparison both disappear.
-- `PrackOf { a_tag, a_rseq }` — discharged by a PRACK whose RAck names that
-  RSeq, matched on the whole RAck so this and `relay-prack`'s 481 cannot
-  disagree.
+- `AwaitPrack { tag, rseq }` — the reliable provisional shown as `rseq` in
+  this stack's `tag` dialog, discharged by a PRACK whose RAck names it on all
+  three §7.2 tokens, the same match `prack_disposition` answers by (X6), so the
+  discharge and the PRACK's answer cannot disagree.
 
 A `Non2xxAck` obligation is deliberately absent: `sip-txn` owns Timer G/H, does
 not depend on `call`, and nothing would construct one.
@@ -168,7 +153,8 @@ is done; it never pushes `CancelTimer` for a ladder, and `ClearAnsweredInvite2xx
 
 The one thing that reaches a rule is the give-up, as
 `TimerType::RepeatGiveUp { obligation }` — a single event kind a service rule
-may override per obligation. Existing CDR marker strings are unchanged.
+may override per obligation. Only `AckOf2xx` arms one (X5). Existing CDR marker
+strings are unchanged.
 
 ## Decision X5 — the 2xx ladder is not configurable away, and neither is its give-up
 
@@ -194,15 +180,66 @@ releases the legs — but not whether the session ends. The framework settles th
 `AckOf2xx` give-up after the rules have run (`settle_give_up`): the retained 2xx
 leaves the replicated body whatever they decided (its RFC 6026 *Accepted*
 interval is over, so `reinvite-glare` stops answering 491), and a call still
-Active is torn down with the CORE verdict. The `PrackOf` give-up keeps its own
-RFC 3262 §3 policy — reject the pending re-INVITE, absorb, or tear down — and
-is left to the rules.
+Active is torn down with the CORE verdict.
+
+`AwaitPrack` arms no give-up. The provisional it repeats relays a responder's
+own, whose PRACK is relayed end to end, so RFC 3262 §3's "reject the original
+request with a 5xx" belongs to that responder: this stack's ladder stops at its
+64·T1 bound, and the responder's reject reaches the PRACKing party as the
+INVITE's final through the ordinary failure path. A second timer here would race
+the responder's for the same bound and answer the INVITE in its place.
 
 The one consumer of the old behaviour is `failover-harness`
 (`src/harness.rs:605-612`), whose token-for-token differential oracle could not
 align the retransmits. Since X3 makes every rung byte-identical by
 construction, the oracle folds byte-identical datagrams from one emitter into
 one token — which makes the oracle itself an assertion of the X3 invariant.
+
+## Decision X6 — a reliable provisional is one record, and the PRACK this stack owes is the engine's
+
+X4 made the PRACK owed *to* this stack an obligation the framework discharges.
+The PRACK this stack owes its *responder* stayed with the rules: each rule that
+absorbed a reliable provisional emitted its own PRACK, each teardown path swept
+for the ones left, and "a PRACK is owed" was read from gaps between two lists.
+A rule or a path that forgot leaked a provisional the responder repeats to its
+give-up (RFC 3262 §4).
+
+- **One record.** `Call.provisionals` holds one `Provisional` per reliable
+  provisional received: `ProvisionalId { leg, responder_tag, invite_cseq, rseq }`
+  (typed `CSeq`/`RSeq`), what the responder is owed (`ResponderAck`: `Pending`,
+  `RelayedPrack`, `OwnPrack { branch }`, `DeferredToAck`, `Waived`), and, when
+  it was shown, where and how (`Shown { tag, rseq, invite_cseq, ladder }` with
+  `Ladder`: `Unsent`, `Repeating`, `Acknowledged`, `Ceased`). The two faces are
+  separate facts: this stack may have PRACKed the responder and the party
+  shown it may PRACK later.
+- **Recorded by the engine before the rules.** A reliable provisional that
+  repeats a recorded one (§3) or is out of `RSeq` order (§4) is dropped there and
+  reaches no rule. A new one is recorded, opens its early dialog (RFC 3261
+  §12.1.2) and notes the offer it carries. A rule only chooses to relay or absorb.
+- **One PRACK step.** `settle_owed_pracks` PRACKs what is `Pending` and shown to
+  no one live. It runs inside the primitives that end a dialog or an INVITE —
+  the CANCEL and BYE builders, the re-INVITE CANCEL, confirm's retirement of the
+  losing forks, the INVITE's final — so the PRACK leaves ahead of the CANCEL or
+  BYE on its dialog, and once more after the rules. Never twice per `RSeq`, in
+  §4 order per dialog. A PRACK owed on a dialog the leg lacks is a model
+  defect; `Waived` is only for a dialog already ended (RFC 3261 §15.1.2). Where
+  no party answered an offer the PRACK owes an answer to, it carries one
+  rejecting every stream (RFC 3262 §5, RFC 3264 §6).
+- **One answer to a received PRACK.** `prack_disposition` gives `Relay`,
+  `Answer200` or `Refuse481`, in-call and from the released call's late-PRACK
+  book alike: a PRACK naming nothing shown, or a provisional its party already
+  acknowledged, draws 481 here (§3), never a relay.
+- **Owed answers on the dialog.** `Dialog.owed_answer` (`InAck`, `InPrack`,
+  `DeferredToAck`) is the one offer a dialog this stack dialled still owes an
+  answer to (RFC 3264 §4), and the message that carries it.
+- **Opt-in.** A provisional is shown reliably only to an INVITE that offered
+  `100rel` (§3); otherwise it leaves unreliably and the engine PRACKs it. The
+  live audit's `reliable-needs-client-opt-in` gates rather than advises.
+
+Per-turn invariants hold the step to its contract: no `Pending` provisional
+shown to no one at the end of a turn, none on a leg whose INVITE has its final
+or is ending, and a shown ladder `Repeating` exactly while its `AwaitPrack`
+rung is armed, with never a give-up.
 
 ## Consequences
 
@@ -232,9 +269,13 @@ unacked_2xx_reap,unacked_reinvite_2xx_reap,prack_reliable_ladder}.rs`
 non-positive `ack_timeout_sec` still ends the session at Timer L, and a service
 rule that answers the give-up without terminating does not keep it up.
 `b2bua/tests/it/rules.rs` (answering the caller leaves a b-leg's pending re-INVITE
-2xx ladder alone; `settle_give_up` ends a session a service parked and leaves a
-`PrackOf` give-up to the rules), `b2bua-sdk/src/config.rs` (a non-positive
+2xx ladder alone; `settle_give_up` ends a session a service parked), `b2bua-sdk/src/config.rs` (a non-positive
 deadline is refused and falls back to 32 s), `call/tests/it/model_helpers.rs` (the 2xx ladder never runs
 past Timer L; `Scope::Provisionals` names no 2xx),
-`failover-harness/tests/it/prack_takeover.rs`, and the new byte-identity rule in
-the `rfc-rules` census.
+`failover-harness/tests/it/{prack_takeover,prack_repeat_takeover}.rs`, and the new
+byte-identity rule in the `rfc-rules` census. X6:
+`b2bua-harness/tests/it/{prack_disposition,reliable_1xx_out_of_order,
+reliable_provisional_repeat_prack,prack_owed_at_final,prack_owed_at_cancel,
+prack_rejects_an_unanswered_offer}.rs`, `b2bua/src/router/provisional_turn_tests.rs`,
+the provisional invariants in `b2bua/src/rules/model_invariants_provisionals.rs`,
+and the `prack-2xx-or-481` and `reliable-needs-client-opt-in` rules.

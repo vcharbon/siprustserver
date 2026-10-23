@@ -35,14 +35,15 @@ use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
 use b2bua_harness::{settle_until, B2buaSut};
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use http_net::{HttpServerHandle, HttpTransport};
+use http_net_testkit::SimulatedHttpNetwork;
 use scenario_harness::Harness;
 use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
-const REOFFER: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
+const REOFFER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
 
 const LIMITER_ADDR: &str = "10.0.0.1:8080";
 
@@ -66,7 +67,7 @@ fn limiter_client(net: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
 
 /// A decision that routes every call to `host:port`, takes a limiter hold under
 /// `id` (capacity `limit`), and arms the call's `GlobalDuration` at
-/// `max_duration_sec` (the per-call `features.platform.max_duration_sec` the
+/// `max_duration_sec` (the per-call `features.platform.max_duration_ms` the
 /// `max-duration` rule reads — see `rules/defaults.rs`).
 fn route_limited(
     host: &str,
@@ -82,7 +83,7 @@ fn route_limited(
             .fallback(move |_req| {
                 let mut r = route_to(&host, port);
                 r.call_limiter = vec![LimiterEntry { id: id.clone(), limit }];
-                r.features.platform.max_duration_sec = max_duration_sec;
+                r.features.platform.max_duration_ms = max_duration_sec * 1000;
                 NewCallResponse::Route(r)
             })
             .build(),
@@ -327,7 +328,13 @@ async fn prack_loop_storm_before_connect_trips_the_cap_and_releases_the_limiter(
         .await;
 
     // alice INVITEs advertising reliable provisionals.
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
     let mut uas = bob.receive("INVITE").await;
     assert_eq!(store.stats().current_total, 1, "in-setup call holds one limiter slot");
 
@@ -498,7 +505,7 @@ async fn cap_trip_on_the_resolving_turn_discharges_in_the_same_turn() {
             let mut r = route_to("127.0.0.1", 5073);
             r.callback_context = Some("cap-failover".into());
             r.call_limiter = vec![LimiterEntry { id: "trunk-A".into(), limit: 1 }];
-            r.features.platform.max_duration_sec = 3_600;
+            r.features.platform.max_duration_ms = 3_600_000;
             Ok(NewCallResponse::Route(r))
         }
         async fn call_failure(
