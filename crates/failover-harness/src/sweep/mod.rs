@@ -44,8 +44,24 @@ pub trait SweepShape: Send + Sync {
     /// What the parties play.
     fn scenario(&self) -> Box<dyn ActorScenario>;
 
+    /// The callee roles that share [`BOB`]'s address, as `(role, prefix)`
+    /// pairs: a role owns the legs whose Request-URI user part starts with
+    /// one of its prefixes, the longest match winning. A shape whose decision
+    /// routes every leg to one address names its roles here; each is bound in
+    /// the call's environment, and bob is the first. Empty, the default,
+    /// binds bob alone.
+    fn shared_callees(&self) -> Vec<(&'static str, &'static str)> {
+        Vec::new()
+    }
+
     /// Adjust the call's environment (its dwells) before the parties play.
     fn call_env(&self, _env: &mut CallEnv<'_>) {}
+
+    /// Whether the shape is cut by a split that never heals
+    /// ([`Incident::Split`]). A shape that answers `false` runs no such cell.
+    fn splits_unhealed(&self) -> bool {
+        true
+    }
 
     /// Check the call's one CDR beyond its count.
     fn check_cdr(&self, _cdr: &CdrRecord) -> Result<(), String> {
@@ -101,9 +117,15 @@ pub fn baseline(shape: &dyn SweepShape) -> Vec<crate::turn_points::Turn> {
 /// Cut `shape` at every turn point of its baseline by `incident`, and hold
 /// the failing cells to `ratchet`.
 pub fn sweep(shape: &dyn SweepShape, incident: Incident, ratchet: &Ratchet) {
-    let turns = baseline(shape);
+    let prefix = format!("{}/{}/", shape.id(), incident.label());
     let mut ran = Vec::new();
     let mut failed = std::collections::BTreeMap::new();
+    if incident == Incident::Split && !shape.splits_unhealed() {
+        eprintln!("{prefix}: no cell, the shape is not cut by a split that never heals");
+        ratchet.hold(&prefix, &ran, &failed);
+        return;
+    }
+    let turns = baseline(shape);
     for (i, turn) in turns.iter().enumerate() {
         for &point in turn.points() {
             let at = TurnAt { turn: i + 1, point };
@@ -115,7 +137,6 @@ pub fn sweep(shape: &dyn SweepShape, incident: Incident, ratchet: &Ratchet) {
             ran.push(name);
         }
     }
-    let prefix = format!("{}/{}/", shape.id(), incident.label());
     eprintln!("{prefix}: {} cells, {} failing", ran.len(), failed.len());
     ratchet.hold(&prefix, &ran, &failed);
 }

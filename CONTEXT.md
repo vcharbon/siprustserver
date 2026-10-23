@@ -1395,7 +1395,9 @@ _Avoid_: "safe-point" (the transparent matrix's quiescent states, ADR-0013).
 Every shape of a catalogue cut at every turn point by each sweep incident
 (primary killed, backup killed, split, split then healed); each cell must end
 RFC-clean, fully terminated, with its CDR count and nothing left on any node.
-A consumer adds shapes with `failover_sweep!` and a ratchet of its own. Its
+A consumer adds shapes with `failover_sweep!` and a ratchet of its own; a
+shape may name callee roles that share the callee's address, told apart by the
+Request-URI user part, and may stay out of the split that never heals. Its
 lane is `just sweep`.
 _Avoid_: "matrix" (the hand-listed transparent matrix of ADR-0013).
 

@@ -1,6 +1,7 @@
 //! The parties of a sweep cell: the caller, the callee, a second callee, the
-//! transfer target and a media server, each bound on its own address, and how
-//! they answer what the cluster still sends once their call is over.
+//! transfer target and a media server, each bound on its own address, the
+//! callee roles a shape shares on bob's address, and how they answer what the
+//! cluster still sends once their call is over.
 
 use std::net::SocketAddr;
 
@@ -30,24 +31,47 @@ pub struct Parties {
     pub bob2: Agent,
     pub media: Agent,
     pub charlie: Agent,
+    /// The callee roles sharing bob's address, each with its agent, in
+    /// declaration order.
+    pub shared: Vec<(&'static str, Agent)>,
 }
 
 impl Parties {
-    /// Bind every party on `fh`'s signalling fabric.
-    pub async fn bind(fh: &FailoverHarness) -> Parties {
+    /// Bind every party on `fh`'s signalling fabric. `shared` lists the
+    /// callee roles that share bob's address as `(role, prefix)` pairs
+    /// ([`SweepShape::shared_callees`](super::SweepShape::shared_callees)):
+    /// empty, bob is bound alone; otherwise bob is the first role.
+    pub async fn bind(fh: &FailoverHarness, shared: &[(&'static str, &'static str)]) -> Parties {
+        let shared = if shared.is_empty() {
+            Vec::new()
+        } else {
+            let group = fh.callee_group(BOB, shared).await;
+            let mut roles: Vec<&'static str> = Vec::new();
+            for (role, _) in shared {
+                if !roles.contains(role) {
+                    roles.push(role);
+                }
+            }
+            roles.into_iter().map(|role| (role, group.agent(role))).collect()
+        };
+        let bob = match shared.first() {
+            Some((_, agent)) => agent.clone(),
+            None => fh.agent("bob", BOB).await,
+        };
         Parties {
             alice: fh.agent("alice", ALICE).await,
-            bob: fh.agent("bob", BOB).await,
+            bob,
             bob2: fh.agent("bob2", BOB2).await,
             media: fh.agent(MEDIA_ROLE, MEDIA).await,
             charlie: fh.agent("charlie", CHARLIE).await.transfer_target(),
+            shared,
         }
     }
 
     /// The call environment of a shape run through `via`, every callee role
     /// bound.
     pub fn env(&self, via: SocketAddr, token: &str) -> CallEnv<'_> {
-        CallEnv::for_functional(
+        let env = CallEnv::for_functional(
             &self.alice,
             &self.bob,
             Some(&self.charlie),
@@ -56,11 +80,14 @@ impl Parties {
             token,
         )
         .with_bob2(&self.bob2)
-        .with_callee(MEDIA_ROLE, &self.media)
+        .with_callee(MEDIA_ROLE, &self.media);
+        self.shared.iter().fold(env, |env, (role, agent)| env.with_callee(role, agent))
     }
 
-    fn all(&self) -> [&Agent; 5] {
+    fn all(&self) -> impl Iterator<Item = &Agent> {
         [&self.alice, &self.bob, &self.bob2, &self.media, &self.charlie]
+            .into_iter()
+            .chain(self.shared.iter().map(|(_, agent)| agent))
     }
 
     /// Answer every request queued at a party whose call is over, as a UA

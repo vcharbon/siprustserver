@@ -79,6 +79,7 @@ mod stood_down_round;
 mod superseded_incarnation;
 mod superseded_relay;
 mod sweep;
+mod sweep_shape_seam;
 mod swept_call_answered_inside_the_lag;
 mod swept_call_primary_returns;
 mod takeover_request_uri_rewritten;

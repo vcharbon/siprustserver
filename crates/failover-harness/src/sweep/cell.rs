@@ -49,7 +49,7 @@ pub async fn run_cell(
     if !report {
         cluster.fh.disarm_report_on_drop();
     }
-    let parties = Parties::bind(&cluster.fh).await;
+    let parties = Parties::bind(&cluster.fh, &shape.shared_callees()).await;
     let placement = cluster.place_next_call(&parties.alice, PRIMARY);
     let turn_points = cluster.fh.turn_points().clone();
     let mut reached = cut.map(|c| turn_points.arm(c.at));
