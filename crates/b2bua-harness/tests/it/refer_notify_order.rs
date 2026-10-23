@@ -14,7 +14,9 @@
 //! 7. a request relayed to the referrer meanwhile never overtakes the held
 //!    NOTIFY's number: a held request is numbered when it leaves;
 //! 8. a held NOTIFY never leaves once the answer to the one ahead of it ended
-//!    their subscription (RFC 6665 §4.2.2), and the BYE ending the call does.
+//!    their subscription (RFC 6665 §4.2.2), and the BYE ending the call does;
+//! 9. a second REFER on the dialog after the first's subscription ended opens
+//!    its own, notified under its `id` (RFC 3515 §2.4.6).
 //!
 //! Each referrer request arrives numbered right after the one before it.
 
@@ -24,7 +26,7 @@ use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::agent::{Agent, Dialog, ServerTxn};
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
-use sip_message::header::SubscriptionState;
+use sip_message::header::{Event, SubscriptionState};
 use tokio::time::Instant;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
@@ -347,6 +349,46 @@ async fn a_held_notify_never_leaves_once_the_answer_ahead_ended_the_subscription
         bob.try_receive_tolerating("NOTIFY", &[]).await.is_none(),
         "a 481 to a NOTIFY ends its subscription: the NOTIFY held behind it never leaves"
     );
+
+    alice_dialog.bye().await.expect(200).await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_second_refer_is_notified_under_its_id_once_the_first_subscription_ended() {
+    let h = Harness::with_transit_delay("refer-second-subscription", 1);
+    let alice = h.agent("alice", "127.0.0.1:6281").await;
+    let bob = h.agent("bob", "127.0.0.1:6282").await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6282)
+        .start(&h, "b2bua", "127.0.0.1:6284")
+        .await;
+    let (mut alice_dialog, mut bob_dialog) =
+        bob_refers(&alice, &bob, &b2bua, &x_api_reject()).await;
+    bob.receive("NOTIFY").await.respond(200, "OK").await;
+    let mut last = bob.receive("NOTIFY").await;
+    assert_subscription(&last, "terminated");
+    last.respond(200, "OK").await;
+
+    let mut refer = bob_dialog
+        .send_request(InDialogMethod::Refer)
+        .with_header("Refer-To", "<sip:charlie@127.0.0.1>")
+        .with_header("X-Api-Call", &x_api_reject())
+        .send()
+        .await;
+    refer.expect(202).await;
+    let second = bob_dialog.local_cseq();
+    for state in ["active", "terminated"] {
+        let mut notify = bob.receive("NOTIFY").await;
+        assert_subscription(&notify, state);
+        let event = notify.request().header::<Event>().expect("an Event").expect("readable");
+        assert!(event.is("refer"), "the refer package");
+        let id = event.param("id").and_then(|v| v.as_str()).map(str::to_string);
+        assert_eq!(id, Some(second.to_string()), "the second REFER's subscription is its CSeq");
+        notify.respond(200, "OK").await;
+    }
 
     alice_dialog.bye().await.expect(200).await;
     bob.receive("BYE").await.respond(200, "OK").await;

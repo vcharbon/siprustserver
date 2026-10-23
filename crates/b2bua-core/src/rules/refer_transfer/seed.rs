@@ -86,6 +86,18 @@ fn state_dialog_id(ctx: &RuleContext, leg_id: &str) -> String {
     format!("{call_id};to-tag={to_tag};from-tag={from_tag}")
 }
 
+/// The `Event` of the NOTIFYs of the REFER numbered `cseq` on the event's
+/// dialog: `refer` for the dialog's first refer subscription, `refer;id=<CSeq>`
+/// for any later one (RFC 3515 §2.4.6).
+fn notify_event(ctx: &RuleContext, cseq: u32) -> String {
+    let earlier = ctx.dialog().is_some_and(|d| d.subscriptions.iter().any(|s| s.event == "refer"));
+    if earlier {
+        format!("refer;id={cseq}")
+    } else {
+        "refer".to_string()
+    }
+}
+
 /// The seed (CORE_LAYER) REFER rules — they run before the transfer slice
 /// exists, and only on a call whose route activated local REFER processing.
 pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
@@ -177,6 +189,7 @@ pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
                     callback_context: None,
                     c_leg_id: None,
                     refer_cseq: Some(req.cseq().seq()),
+                    notify_event: notify_event(ctx, req.cseq().seq()),
                     started_at_ms: ctx.now_ms,
                     last_c_leg_provisional_status: None,
                     c_initial_sdp: None,

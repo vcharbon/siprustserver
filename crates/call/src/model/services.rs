@@ -46,6 +46,10 @@ pub struct TransferState {
     pub c_leg_id: Option<String>,
     /// CSeq of the REFER request on the referrer's dialog (NOTIFY correlation).
     pub refer_cseq: Option<u32>,
+    /// The `Event` of the REFER's NOTIFYs: `refer`, or `refer;id=<CSeq>` when
+    /// the referrer's dialog already carries a refer subscription (RFC 3515
+    /// §2.4.6).
+    pub notify_event: String,
     /// Wall-clock ms when the REFER was received.
     pub started_at_ms: i64,
     /// Last 1xx status C sent: a repeat of it is accounted no second time.

@@ -23,7 +23,7 @@ pub(super) fn notify(
 ) -> RuleAction {
     RuleAction::SendNotify {
         leg_id: st.referrer_leg_id.clone(),
-        event: "refer".to_string(),
+        event: st.notify_event.clone(),
         subscription_state: subscription_state.to_string(),
         content_type: Some(SIPFRAG_CT.to_string()),
         body: sipfrag_from_status(code, reason),

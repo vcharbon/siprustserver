@@ -22,6 +22,7 @@ fn every_instant_present() -> Call {
         callback_context: None,
         c_leg_id: Some("b-2".into()),
         refer_cseq: Some(4003),
+        notify_event: "refer".into(),
         started_at_ms: 1_779_440_060_000,
         last_c_leg_provisional_status: None,
         c_initial_sdp: None,
