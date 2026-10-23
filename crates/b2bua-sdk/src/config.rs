@@ -149,7 +149,7 @@ pub struct B2buaConfig {
     /// never `created_at`, never timer deadlines.
     pub reaper_idle_max_sec: i64,
     /// **Setup timeout**, milliseconds — the caller's initial-INVITE deadline:
-    /// armed at route time, ended by the caller's answer, deliberately NOT reset
+    /// armed at route time, cancelled at answer, deliberately NOT reset
     /// by reroute/failover (each new b-leg that rings gets its own `NoAnswer`;
     /// this caps the caller's *total* wait for a final response). It rides the
     /// call record's timer ledger, which outlives the transactions that bound

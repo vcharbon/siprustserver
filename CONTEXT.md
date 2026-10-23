@@ -991,8 +991,9 @@ _Avoid_: "no-answer timeout" for the time since the INVITE (that is the
 
 **Timer scope** (ADR-0042, `TimerScope`):
 What a timer guards — the call, an attempt, a leg, a retransmission
-obligation, or the caller's wait for the final to its INVITE
-(`UntilAnswered`, the **setup** deadline's) — and so when it dies: leaving
+obligation, or the call's setup (`Setup`, the **setup** deadline's: over
+while any leg holds a confirmed dialog, a media server's included, and once
+the call is terminating) — and so when it dies: leaving
 the scope retires every timer of it, with no rule cancelling one. A timer is
 named by its type and its scope (`TimerKey`) and armed under the call's next
 **generation**; a fire the ledger no longer holds under that generation, or

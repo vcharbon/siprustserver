@@ -422,6 +422,21 @@ fn mutated(event: CallEvent, mutations: &[Mutation]) -> Option<CallEvent> {
 /// screen, the dialog gate's resolution, the rule chain, the landing pass.
 /// Each turn's input is fixed, so two runs of one case compare.
 pub fn run(dialled: &Dialled, script: &[Step], mutated_at: usize, mutations: &[Mutation]) -> Run {
+    run_from(dialled, dialled.call.clone(), script, mutated_at, mutations)
+}
+
+/// [`run`] over `call`, the dialled call as an earlier script left it.
+pub fn run_on(dialled: &Dialled, call: Call, script: &[Step]) -> Run {
+    run_from(dialled, call, script, usize::MAX, &[])
+}
+
+fn run_from(
+    dialled: &Dialled,
+    mut call: Call,
+    script: &[Step],
+    mutated_at: usize,
+    mutations: &[Mutation],
+) -> Run {
     let config = &dialled.config;
     let fw = Framework { config, rules: &dialled.rules, obligations: &dialled.obligations };
     let landing = Landing {
@@ -434,7 +449,6 @@ pub fn run(dialled: &Dialled, script: &[Step], mutated_at: usize, mutations: &[M
         },
         refresh_period: Duration::from_secs(60),
     };
-    let mut call = dialled.call.clone();
     let mut peers = Peers::new(dialled);
     let mut run = Run {
         turns: Vec::new(),

@@ -159,7 +159,9 @@ pub fn rule_chain_turn(
     // of `RSeq` order — dropped unread, its turn a write of nothing else.
     let arrival = exec.take_reliable_provisional(&mut call, event, source_leg_id);
     let screened = matches!(arrival, Some(Arrival::Repeat | Arrival::OutOfOrder));
-    let rules_read = rules_read && !screened;
+    // A fire of the setup's deadline once the setup is over reaches no rule:
+    // its scope is read as the call stands at the fire.
+    let rules_read = rules_read && !screened && !setup_spent(event, &call);
     let discharged = exec.discharge(&mut call, &mut ladder_fx, event, source_leg_id);
     if let CallEvent::Sip { message, .. } = event {
         if let SipMessage::Response(resp) = message.as_ref() {
@@ -292,6 +294,13 @@ pub fn enforced(
         crate::rules::invariants::UnansweredCaller::Answer(&fw.config.minted_final_advertisement),
         notes,
     )
+}
+
+/// Whether `event` fires a timer guarding the call's setup on a call whose
+/// setup is over ([`call::helpers::setup_over`]).
+fn setup_spent(event: &CallEvent, call: &Call) -> bool {
+    matches!(event, CallEvent::Timer { key, .. } if key.scope == call::TimerScope::Setup)
+        && call::helpers::setup_over(call)
 }
 
 /// Whether `event` is a fire of a timer of type `timer_type`.

@@ -28,8 +28,8 @@ next leg id was predicted as `b-{len+1}` wherever a rule needed it.
 
 1. **A timer is a typed key under a generation.** `TimerKey { timer_type,
    scope }`, `TimerScope::{Call, Attempt(id), Leg(id), Obligation(o),
-   UntilAnswered}`; `UntilAnswered` guards the caller's wait for the final to
-   its INVITE and ends with that final or the call's termination (the setup
+   Setup}`; `Setup` guards the call's setup, over while any leg holds a
+   confirmed dialog and once the call's termination began (the setup
    deadline's scope, ADR-0055 §10). A call
    holds at most one entry per key; arming a key replaces it under the call's
    next generation (`Call::timer_generation`, replicated). Cancel takes the
@@ -37,13 +37,16 @@ next leg id was predicted as `b-{len+1}` wherever a rule needed it.
 2. **A stale fire is screened.** The driver fires `(key, generation)`. The
    router drops a fire whose key the ledger holds under another generation, or
    not at all, or whose scope ended whatever the ledger holds (trace
-   `timer.drop`), and removes the entry it delivers. A rule that handles a fire
-   handles a live instance of a live scope; it re-checks only business
-   conditions, never a stale ledger.
+   `timer.drop`), and removes the entry it delivers. A fire of `Setup` is read
+   against the call as it stands at the fire: delivered, it reaches no rule
+   once the setup is over. A rule that handles a fire handles a live instance
+   of a live scope; it re-checks only business conditions, never a stale
+   ledger.
 3. **Leaving a scope retires it.** `retire(Scope)` disarms every timer of the
    scope, beside the ladders it owes: a cancelled, destroyed or terminated
-   leg retires `Leg`; an attempt's end retires `Attempt`; the caller's answer
-   retires `UntilAnswered` at the end of its turn; a service machine's
+   leg retires `Leg`; an attempt's end retires `Attempt`; the answer's rule
+   cancels the `Setup` deadline (a leg's confirmed dialog may end before the
+   setup does, so `Setup` is not retired on one); a service machine's
    deactivation retires its service timers; the start of the call's
    termination retires `Call` (the teardown's own safety net, the limiter
    refresh and the deadlines of answers awaited off the turn excepted). No

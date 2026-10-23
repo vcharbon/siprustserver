@@ -156,6 +156,7 @@ mod fresh_tag {
             effects: [
                 Effect::Respond { status: 200, label: "200 under a fresh To-tag" },
                 Effect::GuardTimer { timer: TimerType::NoAnswer, scope: call::TimerScopeKind::Leg, label: "disarm the ring timer" },
+                Effect::GuardTimer { timer: TimerType::SetupTimeout, scope: call::TimerScopeKind::Setup, label: "disarm the setup timer" },
                 Effect::LifecycleCommand { label: "bridge caller and callee" },
             ],
             matcher: Match::response()
@@ -193,6 +194,7 @@ mod fresh_tag {
                         reason: None,
                     },
                     RuleAction::cancel(TimerKey::leg(TimerType::NoAnswer, &b)),
+                    RuleAction::cancel(TimerKey::setup(TimerType::SetupTimeout)),
                     RuleAction::Merge { leg_a: a, leg_b: b },
                     RuleAction::ClearState { machine: FRESH },
                 ]))

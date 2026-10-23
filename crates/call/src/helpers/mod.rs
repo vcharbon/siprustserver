@@ -123,4 +123,4 @@ pub use timer::{
     arm_timer, cap_keepalive_fire_at, disarm_timer, holds_timer, retire_timers,
     TERMINATING_TIMEOUT_MS,
 };
-pub use timer_scope::scope_ended;
+pub use timer_scope::{scope_ended, setup_over};

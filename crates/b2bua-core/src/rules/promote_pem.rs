@@ -202,6 +202,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                     }
                 }
                 actions.push(RuleAction::cancel(TimerKey::leg(TimerType::NoAnswer, &b)));
+                actions.push(RuleAction::cancel(TimerKey::setup(TimerType::SetupTimeout)));
                 actions.push(RuleAction::arm(
                     TimerKey::call(TimerType::GlobalDuration),
                     TimerDelay::millis(max_duration(ctx)),

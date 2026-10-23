@@ -81,6 +81,7 @@ mod withhold {
             transitions: [ WithholdState::Holding => Terminal ],
             effects: [
                 Effect::Respond { status: 200, label: "200 → caller under a fresh To-tag" },
+                Effect::GuardTimer { timer: TimerType::SetupTimeout, scope: call::TimerScopeKind::Setup, label: "disarm the setup timer" },
                 Effect::LifecycleCommand { label: "bridge caller and callee" },
             ],
             matcher: Match::timer().timer_type(ANSWER_TIMER),
@@ -99,6 +100,7 @@ mod withhold {
                         header_updates: vec![],
                         relayed: RelayedFinal::none(),
                     },
+                    RuleAction::cancel(TimerKey::setup(TimerType::SetupTimeout)),
                     RuleAction::Merge { leg_a: a, leg_b: b },
                     RuleAction::ClearState { machine: WITHHOLD },
                 ]))

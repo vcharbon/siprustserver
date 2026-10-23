@@ -303,26 +303,6 @@ fn end_dialogs(leg: &mut Leg, state: DialogState) {
     }
 }
 
-#[test]
-fn setup_timeout_fire_on_a_terminating_call_reaches_no_rule() {
-    // A terminating call authors no new final on the a-leg's completed
-    // transaction: the caller's wait ended with the termination, so the fire
-    // is screened out before any rule, the ledger holding it or not.
-    let mut call = test_call();
-    call.state = CallModelState::Terminating;
-    let key = TimerKey::until_answered(TimerType::SetupTimeout);
-    let armed = call::helpers::arm_timer(&mut call, key.clone(), 0);
-    let event = CallEvent::Timer {
-        key,
-        generation: armed.generation,
-        call_ref: call.call_ref.clone(),
-        incarnation: None,
-    };
-    let mut notes = b2bua_core::turn_scope::TurnScope::of(sip_ids::TurnIds::fixed(1)).notes;
-    let screened = b2bua_core::rule_chain::timer_screen::screen(&mut call, &event, 0, &mut notes);
-    assert_eq!(screened, Err(b2bua_core::rule_chain::timer_screen::Dropped::ScopeEnded));
-}
-
 /// The `max-duration` rule's output for a `GlobalDuration` fire on `call`.
 fn max_duration_result(call: &call::Call) -> Vec<RuleAction> {
     let event = CallEvent::Timer {

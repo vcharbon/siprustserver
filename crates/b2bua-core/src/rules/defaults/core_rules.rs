@@ -475,6 +475,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 // Nothing is composed here.
                 actions.extend(vec![
                     RuleAction::cancel(TimerKey::leg(TimerType::NoAnswer, &b)),
+                    RuleAction::cancel(TimerKey::setup(TimerType::SetupTimeout)),
                     RuleAction::arm(
                         TimerKey::call(TimerType::GlobalDuration),
                         TimerDelay::millis(max_duration(ctx)),
@@ -1307,9 +1308,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             ok(actions)
         })
         .runs_while_terminating(),
-        // The caller's setup deadline, armed at route time under the scope
-        // that ends with the caller answered or the call's termination (a
-        // fire past either reaches no rule). Deliberately NOT per-b-leg:
+        // The call's setup deadline (setup scope: a fire once a leg holds a
+        // confirmed dialog or the call is terminating reaches no rule). Deliberately NOT per-b-leg:
         // reroute/failover creates fresh b-legs (each with its own optional
         // NoAnswer), while this caps the caller's TOTAL wait for a final
         // response, so a stuck-in-setup call is torn down at the deadline

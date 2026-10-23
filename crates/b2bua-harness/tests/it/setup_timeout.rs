@@ -8,9 +8,9 @@
 //! it is route-supplied (a route may supply `None`) and reroute/failover
 //! creates fresh b-legs, each needing its own.
 //!
-//! The guard is a single **`SetupTimeout`** guarding the caller until its
-//! INVITE is answered: armed at route time on the call record's ledger,
-//! untouched by reroutes, ended by the caller's answer.
+//! The guard is a single **`SetupTimeout`** guarding the call's setup: armed
+//! at route time on the call record's ledger, untouched by reroutes,
+//! cancelled at answer.
 //! On fire for a still-unanswered call: 408 to the a-leg, CANCEL the pending
 //! b-leg(s), terminate — which settles the obligations (the limiter release +
 //! CDR) through the ordinary enforce path.

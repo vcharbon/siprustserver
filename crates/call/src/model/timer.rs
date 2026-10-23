@@ -26,11 +26,11 @@ use super::sm::MachineId;
 #[serde(rename_all = "snake_case")]
 pub enum TimerType {
     NoAnswer,
-    /// The caller's setup deadline: armed at route time under
-    /// [`TimerScope::UntilAnswered`], untouched by reroutes (each reroute gets
-    /// its own per-leg `NoAnswer`; this caps the *whole* setup). It rides the
-    /// call record's ledger, so a call whose transactions are gone is still
-    /// ended at the deadline.
+    /// The call's setup deadline: armed at route time under
+    /// [`TimerScope::Setup`], untouched by reroutes (each reroute gets its own
+    /// per-leg `NoAnswer`; this caps the *whole* setup). It rides the call
+    /// record's ledger, so a call whose transactions are gone is still ended
+    /// at the deadline.
     SetupTimeout,
     GlobalDuration,
     LimiterRefresh,
@@ -239,16 +239,19 @@ pub enum TimerScope {
     Leg(String),
     /// One retransmission obligation (ADR-0032 X4): retired with its ladder.
     Obligation(Obligation),
-    /// The caller's wait for the final to its INVITE: retired once that final
-    /// is sent, 2xx or not, or when the call's termination begins.
-    UntilAnswered,
+    /// The call's setup: over while any leg holds a confirmed dialog (a
+    /// media-server leg's included) and once the call's termination began. A
+    /// fire is read against it as it stands at the fire, so a timer of this
+    /// scope is retired by the rule that answers or by the termination, never
+    /// because a leg's dialog was confirmed for a while.
+    Setup,
 }
 
 impl std::fmt::Debug for TimerScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TimerScope::Call => f.write_str("call"),
-            TimerScope::UntilAnswered => f.write_str("until answered"),
+            TimerScope::Setup => f.write_str("setup"),
             TimerScope::Attempt(id) => write!(f, "{id:?}"),
             TimerScope::Leg(leg) => write!(f, "leg {leg}"),
             TimerScope::Obligation(o) => write!(f, "{o:?}"),
@@ -264,7 +267,7 @@ pub enum TimerScopeKind {
     Attempt,
     Leg,
     Obligation,
-    UntilAnswered,
+    Setup,
 }
 
 impl TimerScope {
@@ -275,7 +278,7 @@ impl TimerScope {
             TimerScope::Attempt(_) => TimerScopeKind::Attempt,
             TimerScope::Leg(_) => TimerScopeKind::Leg,
             TimerScope::Obligation(_) => TimerScopeKind::Obligation,
-            TimerScope::UntilAnswered => TimerScopeKind::UntilAnswered,
+            TimerScope::Setup => TimerScopeKind::Setup,
         }
     }
 }
@@ -295,9 +298,9 @@ impl TimerKey {
         TimerKey { timer_type, scope: TimerScope::Call }
     }
 
-    /// `timer_type` guarding the caller until its INVITE is answered.
-    pub const fn until_answered(timer_type: TimerType) -> Self {
-        TimerKey { timer_type, scope: TimerScope::UntilAnswered }
+    /// `timer_type` guarding the call's setup.
+    pub const fn setup(timer_type: TimerType) -> Self {
+        TimerKey { timer_type, scope: TimerScope::Setup }
     }
 
     /// `timer_type` guarding attempt `id`.

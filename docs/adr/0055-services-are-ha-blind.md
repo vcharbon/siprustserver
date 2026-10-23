@@ -331,8 +331,9 @@ number of takeovers unshifted.
 - A leg's ring state is `Silent` or `Rang`. A restore that finds no 18x on
   record keeps the core's ring deadline running from the INVITE, inside the
   core; services read the leg as not having rung.
-- A timer declares its scope (ADR-0042), and a scope "until the caller is
-  answered" joins `Call`, `Attempt`, `Leg` and `Obligation`
+- A timer declares its scope (ADR-0042), and a scope "the call's setup", over
+  while any leg holds a confirmed dialog and once the call is terminating,
+  joins `Call`, `Attempt`, `Leg` and `Obligation`
   (`call/src/model/timer.rs:259-264`). A fire whose scope ended, on a restored
   ledger or not, is dropped by the turn engine. A rule never re-checks for a
   stale ledger, so a service overriding a core rule takes on nothing.

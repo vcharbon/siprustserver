@@ -247,6 +247,7 @@ define_service! {
                 Effect::Relay { label: "200 OK → A (shown dialog: the 180's To-tag; unshown: a fresh one; fake-prack: inject cached SDP)" },
                 Effect::LifecycleCommand { label: "merge A↔B (bridge)" },
                 Effect::GuardTimer { timer: TimerType::NoAnswer, scope: call::TimerScopeKind::Leg, label: "cancel B no-answer" },
+                Effect::GuardTimer { timer: TimerType::SetupTimeout, scope: call::TimerScopeKind::Setup, label: "cancel the setup deadline" },
                 Effect::GuardTimer { timer: TimerType::GlobalDuration, scope: call::TimerScopeKind::Call, label: "arm max-duration" },
                 Effect::GuardTimer { timer: TimerType::Keepalive, scope: call::TimerScopeKind::Call, label: "arm keepalive" },
             ],
@@ -495,12 +496,10 @@ fn confirm_dialog_actions(ctx: &RuleContext) -> Vec<RuleAction> {
     let b = ctx.source_leg_id.to_string();
     let a = ctx.call.a_leg().leg_id.clone();
     let cap = ctx.call.features().map(|f| f.platform.max_duration_ms).unwrap_or(3_600_000);
-    // Operator/worker knob (`B2buaConfig::keepalive_interval_sec`, production
-    // default 300 s) — not the per-call feature; see `defaults::keepalive_interval`.
+    // The worker's knob, not the per-call feature (`defaults::keepalive_interval`).
     let keepalive = ctx.config.keepalive_interval_sec;
     // `ConfirmDialog` FIRST: it stashes the a-facing answer SDP for 2xx
-    // retransmits, reading the one-shot `policy_update_body` that the later
-    // `RelayToPeer` takes.
+    // retransmits, reading the one-shot `policy_update_body` `RelayToPeer` takes.
     let mut actions = vec![
         RuleAction::ConfirmDialog { leg_id: b.clone() },
         RuleAction::Merge { leg_a: a, leg_b: b.clone() },
@@ -511,6 +510,7 @@ fn confirm_dialog_actions(ctx: &RuleContext) -> Vec<RuleAction> {
     // callee gets.
     actions.extend(vec![
         RuleAction::cancel(TimerKey::leg(TimerType::NoAnswer, &b)),
+        RuleAction::cancel(TimerKey::setup(TimerType::SetupTimeout)),
         RuleAction::arm(TimerKey::call(TimerType::GlobalDuration), TimerDelay::millis(cap)),
         RuleAction::arm(TimerKey::call(TimerType::Keepalive), TimerDelay::secs(keepalive)),
         RuleAction::AddCdrEvent {

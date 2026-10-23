@@ -1,36 +1,55 @@
 //! A timer's scope ends with what it guards (ADR-0042, ADR-0055 §10): the
-//! caller's wait with its INVITE's final or the call's termination, an attempt
-//! as it ends, a leg as it is terminated, a service timer with its machine.
+//! call's setup while a leg holds a confirmed dialog or once the call is
+//! terminating, an attempt as it ends, a leg as it is terminated, a service
+//! timer with its machine.
 
 use crate::common::representative_call;
-use call::helpers::{end_attempt, open_attempt, scope_ended};
+use call::helpers::{add_b_leg, end_attempt, open_attempt, scope_ended, setup_over};
 use call::model::*;
+use call::testkit::{dialled_leg, stage_leg};
 
-/// A call still in setup: no final sent to its caller, its termination not
-/// begun, no attempt, no service machine active.
+/// A call still in setup: no final sent to its caller, no dialled leg, its
+/// termination not begun, no attempt, no service machine active.
 fn call() -> Call {
     let mut call = representative_call();
     call.a_leg.invite_final_sent = None;
+    call.a_leg.dialogs = Default::default();
+    stage_leg(&mut call.a_leg, LegState::Early);
+    call.b_legs.clear();
     call.state = CallModelState::Active;
     call.attempts.clear();
     call.sm_cursors.clear();
     call
 }
 
+/// A media server's leg answering ends the setup, as a callee's does: the
+/// setup is over while any leg holds a confirmed dialog.
 #[test]
-fn the_callers_final_ends_the_wait_for_it() {
-    let mut call = call();
-    let key = TimerKey::until_answered(TimerType::SetupTimeout);
-    assert!(!scope_ended(&call, &key), "the caller waits");
-    call.a_leg.invite_final_sent = Some(486);
-    assert!(scope_ended(&call, &key), "a refusal answers the caller too");
+fn an_answered_media_server_leg_ends_the_setup() {
+    let mut media = dialled_leg("b-1", "mrf-tag");
+    media.kind = Some(LegKind::Media);
+    stage_leg(&mut media, LegState::Early);
+    let mut call = add_b_leg(call(), media);
+    assert!(!setup_over(&call), "the media server rings");
+    stage_leg(&mut call.b_legs[0], LegState::Confirmed);
+    assert!(setup_over(&call), "the media server answered");
 }
 
 #[test]
-fn the_termination_ends_the_wait_for_the_callers_final() {
+fn the_termination_ends_the_setup() {
+    let mut call = call();
+    assert!(!setup_over(&call));
+    call.state = CallModelState::Terminating;
+    assert!(setup_over(&call));
+}
+
+/// The setup is read as the call stands at the fire, never left for good: a
+/// confirmed dialog may end before the setup does.
+#[test]
+fn the_setup_scope_is_read_at_the_fire() {
     let mut call = call();
     call.state = CallModelState::Terminating;
-    assert!(scope_ended(&call, &TimerKey::until_answered(TimerType::SetupTimeout)));
+    assert!(!scope_ended(&call, &TimerKey::setup(TimerType::SetupTimeout)));
     assert!(!scope_ended(&call, &TimerKey::call(TimerType::TerminatingTimeout)));
 }
 

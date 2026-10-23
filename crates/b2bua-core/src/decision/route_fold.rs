@@ -393,16 +393,17 @@ fn arm_global_duration(
     arm(call, fx, TimerKey::call(TimerType::GlobalDuration), fire_at);
 }
 
-/// Arm the caller's setup deadline (`SetupTimeout`), once, under the scope
-/// that ends with the caller's INVITE answered: the initial route's turn is
-/// the one turn that runs this, whichever route of its limiter-failover chain
-/// lands, so no later attempt extends the caller's total wait. Fired by the
-/// CORE `setup-timeout` rule (408 to A, CANCEL pending b-legs). It lives in
+/// Arm the call's setup deadline (`SetupTimeout`), once, under the setup's
+/// scope: the initial route's turn is the one turn that runs this, whichever
+/// route of its limiter-failover chain lands, so no later attempt extends the
+/// caller's total wait. Cancelled at answer (`confirm-dialog` and the
+/// promote/18x confirm paths); fired by the CORE `setup-timeout` rule (408 to
+/// A, CANCEL pending b-legs). It lives in
 /// the call record's ledger, where the transaction layer's initial-INVITE
 /// bound does not. A non-positive `setup_timeout_ms` is off.
 fn arm_setup_timeout(call: &mut Call, fx: &mut HandlerEffects, setup_timeout_ms: i64, now_ms: i64) {
     if let Some(ms) = Deadline::of_millis(Some(setup_timeout_ms)).millis() {
-        arm(call, fx, TimerKey::until_answered(TimerType::SetupTimeout), now_ms + ms);
+        arm(call, fx, TimerKey::setup(TimerType::SetupTimeout), now_ms + ms);
     }
 }
 

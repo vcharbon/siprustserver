@@ -180,7 +180,7 @@ pub(super) fn arb_message_ring() -> impl Strategy<Value = MessageRing> {
 pub(super) fn arb_timer() -> impl Strategy<Value = TimerEntry> {
     let scope = prop_oneof![
         Just(TimerScope::Call),
-        Just(TimerScope::UntilAnswered),
+        Just(TimerScope::Setup),
         (0usize..4).prop_map(|id| TimerScope::Attempt(AttemptId(id))),
         arb_tag().prop_map(TimerScope::Leg),
     ];

@@ -351,7 +351,7 @@ fn setup_timeout_is_reanchored_not_reaped_early_or_extended() {
     // Model the restored entry as it arrives on the takeover node, whose `now`
     // is 100 s past the (origin-frame) ring start.
     let setup = |fire_at: i64| TimerEntry {
-        key: TimerKey::until_answered(TimerType::SetupTimeout),
+        key: TimerKey::setup(TimerType::SetupTimeout),
         generation: 1,
         fire_at,
     };

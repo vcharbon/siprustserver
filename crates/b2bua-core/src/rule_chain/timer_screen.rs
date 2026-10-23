@@ -4,7 +4,10 @@
 //! the ledger — a timer that fired is no longer armed. A fire the ledger no
 //! longer holds (its key re-armed under a later generation, disarmed, or
 //! retired with its scope), or one whose scope ended whatever the ledger holds
-//! (ADR-0055 §10), reaches no rule; a rule never re-checks for either.
+//! (ADR-0055 §10), reaches no rule; a rule never re-checks for either. The
+//! call's setup is read at the fire by the rule chain instead
+//! ([`call::helpers::setup_over`]): a confirmed dialog may end before the
+//! setup does.
 
 use call::Call;
 
