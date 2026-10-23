@@ -51,8 +51,8 @@ pub const DEFAULT_REPLICATED_TTL_MS: i64 = 3_600_000;
 /// fill a `Frame::Data` without touching the typed call map. Keyed by callRef
 /// alone and rewritten by every local writer, so a `put_call` replaces only
 /// the fields the write carries and carries over every other one (`backup`,
-/// `skew_offset_ms`, `authority_answered`): each of those is written by its own
-/// writer and would otherwise be cleared by the next write of another. A write
+/// `authority_answered`): each of those is written by its own writer and would
+/// otherwise be cleared by the next write of another. A write
 /// of another call incarnation carries nothing over: those facts were about
 /// the call it replaces.
 #[derive(Clone, Debug)]
@@ -68,15 +68,6 @@ struct CallMeta {
     backup: Option<String>,
     /// Absolute body-expiry deadline; `None` when `ttl_ms <= 0`.
     expiry_at_ms: Option<i64>,
-    /// Receive-time **wall-clock skew offset** `receiver_now_ms − origin_now_ms`
-    /// (clock-skew hardening), computed on an origin-stamped write
-    /// (`PutOpts.origin_now_ms`, the puller's apply), kept across every write
-    /// that carries no origin, `None` for a record no origin-stamped write has
-    /// reached. A later failover/reclaim re-anchors the call's ABSOLUTE
-    /// `TimerEntry.fire_at` deadlines (minted on the ORIGIN node's clock) by
-    /// adding this offset, bounding restore skew to ~replication latency. The
-    /// offset includes one transit latency.
-    skew_offset_ms: Option<i64>,
     /// Whether a forward flush has ever shown this Element an ANSWERED call —
     /// the authority's own view of it, taken or refused. Set by the forward
     /// apply path alone; every other write (an acting backup's own mutation, an
@@ -195,13 +186,13 @@ impl ReplicatingCallStore {
             .map(|m| (m.meta.call_gen, m.meta.call_bgen))
     }
 
-    /// The persisted receive-time clock-skew offset for a callRef
-    /// (`receiver_now_ms − origin_now_ms`, clock-skew hardening), or `None` when
-    /// the ref is absent / was written locally (no cross-node skew). The router's
-    /// failover/reclaim hydration reads this to re-anchor the call's absolute
-    /// timer deadlines before re-arming them. Pure read (one brief lock).
+    /// This node's clock minus the clock the instants of the body held for a
+    /// callRef were written on ([`RefMeta::skew_offset_ms`]), or `None` when
+    /// the ref is absent or its body was written here. The router's
+    /// materialisation reads it to move the call's instants into this node's
+    /// frame. Pure read (one brief lock).
     pub fn skew_offset_ms(&self, call_ref: &str) -> Option<i64> {
-        locked(&self.meta, REPLICA_METADATA).get(call_ref).and_then(|m| m.skew_offset_ms)
+        locked(&self.meta, REPLICA_METADATA).get(call_ref).and_then(|m| m.meta.skew_offset_ms)
     }
 
     /// Snapshot the LIVE callRef KEYS stored in `(role, primary)` under a BRIEF
@@ -471,11 +462,11 @@ impl CallStore for ReplicatingCallStore {
         // Apply the backstop TTL for ttl_ms <= 0 so a missed-delete replica still
         // self-evicts (the wire-carried `body_ttl_ms` keeps the original ttl_ms).
         let expiry_at_ms = self.expiry_for(now, ttl_ms);
-        // Receive-time clock-skew offset (clock-skew hardening): the SAME `now`
-        // reading that anchors `expiry_at_ms` minus the origin node's send-time
-        // wall clock. Persisted so a later failover/reclaim re-anchors this call's
-        // absolute timer deadlines. `None` on a locally-originated write.
-        let skew_offset_ms = opts.origin_now_ms.map(|origin| now - origin);
+        // The body's clock offset (ADR-0055 §9): the SAME `now` reading that
+        // anchors `expiry_at_ms` minus the sender's send-time reading in the
+        // body's frame. `None` on a write of this node's own body: its
+        // instants are in this node's frame, whatever the body it replaces.
+        let skew_offset_ms = opts.origin_now_ms.map(|origin| now.saturating_sub(origin));
         // Everything the write carries is built before the lock: the critical
         // section is map operations only.
         let body: Arc<[u8]> = Arc::from(body);
@@ -485,6 +476,7 @@ impl CallStore for ReplicatingCallStore {
             body_ttl_ms: ttl_ms,
             indexes: indexes.to_vec(),
             incarnation: opts.incarnation.clone(),
+            skew_offset_ms,
         };
         // A Forward flush carries the backup ordinal as `opts.peer`.
         let flushed_backup = match (opts.direction, &opts.peer) {
@@ -495,10 +487,10 @@ impl CallStore for ReplicatingCallStore {
         // Store the body and update the per-ref metadata in one critical section
         // under the metadata lock, the lock the reap evicts under, so a reap
         // never splits a write. A write CARRIES OVER every field it does not
-        // itself carry: the backup ordinal, the skew offset and the authority's
-        // view of the answer are facts about the ref that only their own writer
-        // may change, and rebuilding the entry from this write alone would
-        // silently clear each of them.
+        // itself carry: the backup ordinal and the authority's view of the
+        // answer are facts about the ref that only their own writer may change,
+        // and rebuilding the entry from this write alone would silently clear
+        // each of them.
         {
             let mut meta = locked(&self.meta, REPLICA_METADATA);
             // An unnamed write is one of the held call: it takes its name.
@@ -523,9 +515,6 @@ impl CallStore for ReplicatingCallStore {
                     if flushed_backup.is_some() {
                         m.backup = flushed_backup;
                     }
-                    if skew_offset_ms.is_some() {
-                        m.skew_offset_ms = skew_offset_ms;
-                    }
                 }
                 None => {
                     self.account_role(None, Some(role));
@@ -537,7 +526,6 @@ impl CallStore for ReplicatingCallStore {
                             primary: primary.to_string(),
                             backup: flushed_backup,
                             expiry_at_ms,
-                            skew_offset_ms,
                             // Until a forward flush shows one, no answer of the
                             // authority's own stands on this Element.
                             authority_answered: false,

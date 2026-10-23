@@ -23,11 +23,12 @@
 //!    serves a `Terminating` one, which still owes the teardown's end; a
 //!    reclaim discharges a terminal body through the reclaim funnel instead of
 //!    re-serving a dead dialog, `Terminating` forced terminal (ADR-0020 X3);
-//! 4. `sanitize_restored_timers` — re-anchor by the persisted skew offset, drop
-//!    the stale `KeepaliveTimeout`, cohort-smooth on the bulk sweep only; then
-//!    `ring_deadline::presume_after_restore` re-anchors each dialled INVITE's
-//!    send instant and arms the ring deadline of an unanswered leg with no ring
-//!    on record from its INVITE;
+//! 4. `reanchor` — every instant of the copy moved into this node's clock
+//!    frame by the persisted skew offset (ADR-0055 §9), right after the read;
+//!    then `sanitize_restored_timers` drops the stale `KeepaliveTimeout` and
+//!    cohort-smooths on the bulk sweep only, and
+//!    `ring_deadline::presume_after_restore` arms the ring deadline of an
+//!    unanswered leg with no ring on record from its INVITE;
 //! 5. the residency insert through the store, then `timers.restore`;
 //! 6. **seed** — the in-flight INVITE transactions the record names, and the
 //!    answered ones whose 2xx it retains ([`seeds::seeds_for`]), are rebuilt
@@ -64,7 +65,7 @@ use sip_message::{Method, SipMessage};
 use sip_txn::Reoffer;
 
 use super::reclaim::{discharge_materialized_terminal, format_pb};
-use super::restore_hygiene::{applied_offset, sanitize_restored_timers, Smoothing};
+use super::restore_hygiene::{reanchor, sanitize_restored_timers, Smoothing};
 use super::RouterCtx;
 use crate::store::{MaterialiseOrigin, ReplicaMiss};
 use b2bua_sdk::event::CallEvent;
@@ -141,6 +142,7 @@ pub(super) async fn materialise(
         Ok(hit) => hit,
         Err(miss) => return Materialised::Refused(refusal(origin, miss)),
     };
+    reanchor(&mut call, skew_offset_ms);
     let now_ms = ctx.clock.now_ms();
     match origin {
         Origin::Takeover if call.state == CallModelState::Terminated => {
@@ -168,15 +170,10 @@ pub(super) async fn materialise(
         &mut call.timers,
         call_ref,
         now_ms,
-        Some(skew_offset_ms),
         ctx.config.keepalive_interval_sec * 1000,
         smoothing,
     );
-    crate::ring_deadline::presume_after_restore(
-        &ctx.config,
-        &mut call,
-        applied_offset(skew_offset_ms),
-    );
+    crate::ring_deadline::presume_after_restore(&ctx.config, &mut call);
     let timers = call.timers.clone();
     if !ctx.state.materialize_if_absent(call.clone(), origin.into()) {
         return Materialised::Resident(ctx.state.peek(call_ref).unwrap_or(call));

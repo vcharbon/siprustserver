@@ -509,10 +509,10 @@ async fn reap_frees_expired_replica_index_entries() {
 // ---------------------------------------------------------------------------
 // Per-ref metadata across writers: the record is keyed by callRef alone and
 // every local writer rewrites it. A write carries over each field it does not
-// itself carry (`backup`, `skew_offset_ms`, `authority_answered`) and replaces
-// the ones it does (`(p,b)`, expiry, role/primary, the index set — every writer
-// computes the full index set from the body, so `indexes` is carried by the
-// write, not lost). Nothing here is scheduled: the store is synchronous under
+// itself carry (`backup`, `authority_answered`) and replaces the ones it does
+// (`(p,b)`, expiry, role/primary, the index set — every writer computes the
+// full index set from the body, so `indexes` is carried by the write, not
+// lost — and the skew offset, which names the body's clock frame). Nothing here is scheduled: the store is synchronous under
 // one mutex, so the order of the writes IS the order of the calls.
 // ---------------------------------------------------------------------------
 
@@ -582,11 +582,13 @@ async fn backup_ordinal_survives_every_write_that_does_not_carry_one() {
     assert_eq!(store.scan_refs_backed_by(SELF, "w2"), vec!["c1".to_string()]);
 }
 
-/// The skew offset is carried only by an origin-stamped write (the puller's
-/// apply): every local flush keeps it, and a later apply replaces it.
+/// The skew offset names the clock frame of the body it is stored with: an
+/// origin-stamped write (the puller's apply) sets it, every write of this
+/// node's own body clears it — that body's instants are in this node's frame
+/// (ADR-0055 §9) — and a later apply replaces it.
 #[tokio::test(start_paused = true)]
-async fn skew_offset_survives_every_write_that_does_not_carry_one() {
-    let lost = writers_losing(
+async fn skew_offset_names_the_frame_of_the_body_it_is_stored_with() {
+    let kept = writers_losing(
         "skew offset",
         every_writer_but("apply"),
         &applied(70_000),
@@ -594,7 +596,7 @@ async fn skew_offset_survives_every_write_that_does_not_carry_one() {
         |store| store.skew_offset_ms("c1") == Some(30_000),
     )
     .await;
-    assert!(lost.is_empty(), "skew offset lost by {lost:?}");
+    assert_eq!(kept, ["peerless", "reverse", "forward"], "every local write clears it");
 
     let store = ReplicatingCallStore::new(1, Clock::test_at(100_000));
     put(&store, "c1", b"v1", 0, 1, &applied(70_000)).await;
@@ -744,7 +746,7 @@ async fn a_delete_naming_its_call_buries_it_with_no_body_held() {
 
 /// A write of another call on the ref starts a fresh record: the facts the
 /// record kept about the call it replaces (the authority's answer, the backup
-/// ordinal, the skew offset) are not the new call's. An unnamed write is one
+/// ordinal) are not the new call's. An unnamed write is one
 /// of the held call and keeps its name.
 #[tokio::test(start_paused = true)]
 async fn a_write_of_another_call_on_the_ref_starts_a_fresh_record() {
@@ -755,14 +757,12 @@ async fn a_write_of_another_call_on_the_ref_starts_a_fresh_record() {
     put(&store, "c1", b"first", 0, 4, &PutOpts::default()).await;
     assert_eq!(store.incarnation("c1").as_deref(), Some("c1#1"), "an unnamed write keeps it");
     assert!(store.authority_answered("c1"));
-    assert_eq!(store.skew_offset_ms("c1"), Some(40_000));
     assert_eq!(store.scan_refs_backed_by(SELF, "w1"), vec!["c1".to_string()]);
 
     put(&store, "c1", b"retry", 0, 1, &named(PutOpts::default(), "c1#2")).await;
     assert_eq!(store.incarnation("c1").as_deref(), Some("c1#2"));
     assert_eq!(store.current_cv(PRI, SELF, "c1"), Some((1, 0)));
     assert!(!store.authority_answered("c1"), "the new call starts unanswered");
-    assert_eq!(store.skew_offset_ms("c1"), None, "and with no skew offset");
     assert!(store.scan_refs_backed_by(SELF, "w1").is_empty(), "and with no backup ordinal");
 }
 

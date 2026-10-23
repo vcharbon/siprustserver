@@ -10,9 +10,9 @@ impl CallState {
     /// — this node's own `pri:{self}` for the bulk reclaim (ADR-0011 X11).
     /// The router materialises what it serves through the per-call read. Empty
     /// when no replicating store is wired. Each entry pairs the decoded call with
-    /// its persisted receive-time clock-skew offset (`0` when the record carries
-    /// none) — the router re-anchors the call's absolute timer deadlines by this
-    /// offset before re-arming them (clock-skew hardening). `beat` runs once
+    /// its persisted clock-skew offset (`0` when the record carries none) — the
+    /// router moves the call's instants into this node's frame by it before
+    /// reading them (ADR-0055 §9). `beat` runs once
     /// per body read, so a caller's loop pulse shows a long scan making
     /// progress.
     pub async fn scan_partition(

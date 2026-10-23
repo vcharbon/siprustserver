@@ -54,6 +54,7 @@ use sip_clock::Clock;
 use crate::store::{locked, PartitionRole, REPLICA_CHANGELOG};
 
 pub use progress::DEFAULT_CLAIM_TTL;
+pub use source::{BodySource, RefMeta};
 
 /// How long a delete tombstone is retained so a disconnected puller still learns
 /// of the removal before the ref is reaped.
@@ -62,70 +63,6 @@ pub const DEFAULT_TOMBSTONE_TTL_MS: i64 = 30_000;
 /// How long a peer's whole changelog is kept after its last activity before an
 /// idle [`reap`](Changelog::reap) drops it (the peer re-bootstraps on return).
 pub const DEFAULT_DEAD_PEER_TTL_MS: i64 = 300_000;
-
-/// Per-callRef metadata needed to build a [`Frame::Data`] without re-reading the
-/// (typed) call. Carried alongside the body by [`ReplicatingCallStore`].
-///
-/// [`ReplicatingCallStore`]: super::store::ReplicatingCallStore
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RefMeta {
-    /// Primary counter `p` of the `(p,b)` version vector.
-    pub call_gen: i64,
-    /// Backup counter `b` of the `(p,b)` version vector (ADR-0014).
-    pub call_bgen: i64,
-    /// Body TTL in ms (the store `ttl`).
-    pub body_ttl_ms: i64,
-    /// Index keys for this call.
-    pub indexes: Vec<String>,
-    /// The call incarnation the body is of (`PutOpts::incarnation`); the
-    /// `(p,b)` vector orders versions of this incarnation only.
-    pub incarnation: Option<String>,
-}
-
-/// The store-side seam the drain reads through to build [`Frame::Data`]. The
-/// changelog stays decoupled from [`ReplicatingCallStore`]: it asks for a live
-/// body (`Arc<[u8]>`) and the per-ref metadata.
-///
-/// [`ReplicatingCallStore`]: super::store::ReplicatingCallStore
-#[async_trait::async_trait]
-pub trait BodySource: Send + Sync {
-    /// The live encoded body for a callRef in `(role, primary)`, or `None` if it
-    /// is gone (→ the drain emits a `Delete`).
-    async fn read_body(
-        &self,
-        role: PartitionRole,
-        primary: &str,
-        call_ref: &str,
-    ) -> Option<Arc<[u8]>>;
-
-    /// The per-ref metadata (call_gen / ttl / indexes), or `None` if gone.
-    fn read_meta(&self, call_ref: &str) -> Option<RefMeta>;
-
-    /// The live body and its metadata, read together: the frame built from
-    /// them must name the version and incarnation of the body it carries.
-    async fn read_entry(
-        &self,
-        role: PartitionRole,
-        primary: &str,
-        call_ref: &str,
-    ) -> Option<(Arc<[u8]>, RefMeta)> {
-        let body = self.read_body(role, primary, call_ref).await?;
-        Some((body, self.read_meta(call_ref)?))
-    }
-
-    /// Snapshot the live callRef KEYS in `(role, primary)` under a BRIEF lock.
-    /// The **Reclaim** bootstrap copies the `bak:{caller}` keyset this way.
-    fn scan_refs(&self, _role: PartitionRole, _primary: &str) -> Vec<String> {
-        Vec::new()
-    }
-
-    /// Snapshot the live callRef KEYS this node is **primary** for whose **backup
-    /// is `backup`** (ADR-0014 Option B). The **Backup** bootstrap uses this to
-    /// scan `pri:{self}` filtered to the calls `caller` backs up.
-    fn scan_refs_backed_by(&self, _primary: &str, _backup: &str) -> Vec<String> {
-        Vec::new()
-    }
-}
 
 /// Per-callRef position in a compacted sub-log.
 #[derive(Clone, Debug)]
@@ -335,10 +272,10 @@ impl Changelog {
         Watermark::new(self.gen, locked(&self.inner, REPLICA_CHANGELOG).counter)
     }
 
-    /// This node's shared wall clock (`Clock::now_ms()`), for stamping the
-    /// `origin_now_ms` on a bootstrap `Data` frame — the send-time reading the
-    /// receiver re-anchors against (clock-skew hardening). Uses the SAME clock the
-    /// changelog TTL math and `drain_since` stamp read.
+    /// This node's shared wall clock (`Clock::now_ms()`), the send-time reading
+    /// a bootstrap `Data` frame's `origin_now_ms` is derived from
+    /// ([`RefMeta::origin_now_ms`]). Uses the SAME clock the changelog TTL math
+    /// and `drain_since` stamp read.
     pub fn now_ms(&self) -> i64 {
         self.clock.now_ms()
     }
@@ -482,13 +419,9 @@ impl Changelog {
                 frames.push(delete_frame(at, partition, call_ref, answered, incarnation));
                 continue;
             }
-            // Body read at send time — lock already dropped. Stamp the SENDER's
-            // wall clock at send time so the receiver can re-anchor the body's
-            // absolute timer deadlines against inter-node clock skew (clock-skew
-            // hardening; mirrors the receiver-side `body_ttl_ms → expiry_for`
-            // re-anchor). Flushes are built and sent promptly, so a per-frame
-            // send-time reading is the right origin instant.
-            let origin_now_ms = self.clock.now_ms();
+            // Body read at send time — lock already dropped. The frame is
+            // stamped at send time, in the frame of the body's instants, so the
+            // receiver re-anchors them against the clock that wrote them.
             match source.read_entry(role, primary, &call_ref).await {
                 Some((body, meta)) => frames.push(Frame::Data {
                     at,
@@ -498,7 +431,7 @@ impl Changelog {
                     call_gen: meta.call_gen,
                     call_bgen: meta.call_bgen,
                     body_ttl_ms: meta.body_ttl_ms,
-                    origin_now_ms,
+                    origin_now_ms: meta.origin_now_ms(self.clock.now_ms()),
                     indexes: meta.indexes,
                     body: Some(body),
                     answered: false,
@@ -616,5 +549,6 @@ fn reap_sublog(sub: &mut SubLog, now_ms: i64) {
 }
 
 mod progress;
+mod source;
 #[cfg(test)]
 mod tests;

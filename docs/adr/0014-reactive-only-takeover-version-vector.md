@@ -348,6 +348,11 @@ that lacked an offset, then cohort-smooth. The offset includes one transit
 latency — acceptable at in-cluster ms scale. This bounds restore skew to
 ~replication latency instead of the raw inter-node clock disagreement.
 
+Amended by ADR-0055 §9: the stamp is read in the frame of the body's instants,
+so the offset composes across hops; a write of a node's own body clears it; the
+re-anchor moves every instant of the copy, not only its timers, so no path
+restores with an unknown offset and the defensive floor is gone.
+
 This introduces **no** wall-clock-dependent correctness rule, settle window, or
 handback: `(p,b)` reconciliation remains the sole correctness mechanism, and the
 `timers.rs` epoch+lockstep-`Key` driver is untouched (no skew/smoothing logic in

@@ -52,21 +52,14 @@ pub fn arm_at_first_18x(
     arm(call, fx, TimerKey::leg(TimerType::NoAnswer, leg_id), held);
 }
 
-/// Bring a copy materialised from a replica into this node's clock frame and
-/// presume its unrung legs ringing. `skew_offset_ms` (this node's clock minus
-/// the writer's, zero when below the re-anchor deadband) moves each dialled
-/// INVITE's send instant into this node's frame. A leg whose INVITE is still
-/// unanswered and uncancelled, with no 18x on record and no ring deadline
-/// armed, under an attempt whose ring deadline is on, is marked
+/// Presume the unrung legs of a copy materialised from a replica ringing; the
+/// copy's instants are already in this node's clock frame. A leg whose INVITE
+/// is still unanswered and uncancelled, with no 18x on record and no ring
+/// deadline armed, under an attempt whose ring deadline is on, is marked
 /// [`Ring::Presumed`] and armed from its INVITE, held under the transaction
 /// bound: the turn that took its first 18x may have died with the writer.
 /// Its ledger entry rides `call.timers`, which the caller restores.
-pub fn presume_after_restore(config: &B2buaConfig, call: &mut Call, skew_offset_ms: i64) {
-    for leg in &mut call.b_legs {
-        if let Some(invite) = leg.outbound_invite.as_mut() {
-            invite.sent_at_ms = invite.sent_at_ms.saturating_add(skew_offset_ms);
-        }
-    }
+pub fn presume_after_restore(config: &B2buaConfig, call: &mut Call) {
     let presumed: Vec<(String, i64)> = call
         .b_legs
         .iter()

@@ -29,6 +29,8 @@
 //!   - [`record`] — CDR append (and the originated leg's attach-and-record), rule
 //!     deactivation, SM-cursor rendering
 //!   - [`decision_log`] — the decision-log append and its ordinal
+//!   - [`instants`] — every absolute instant the record holds, moved together
+//!     into another clock frame
 //!   - [`message_ring`] — the message-ring append and its call-wide sequence
 //!   - [`termination`] — the termination record and its message-ring cut
 //!   - [`timer`] — the timer ledger (`arm_timer`, `disarm_timer`, terminating cap,
@@ -37,6 +39,7 @@
 pub mod attempt;
 pub mod decision_log;
 pub mod dialog;
+pub mod instants;
 pub mod leg;
 pub mod leg_end;
 pub mod lens;
@@ -67,6 +70,7 @@ pub use dialog::{
     retired_relay_count, sender_invite_unacknowledged, sender_invite_unanswered,
     set_awaited_ack_cseq, settle_straggler_release, take_retired_relays, PendingHolder,
 };
+pub use instants::shift_instants;
 pub use leg::{
     add_b_leg, callee_dialog, callee_dialog_mut, caller_answered, caller_dialog, caller_dialog_mut,
     carrying_dialog, dialog_with_peer, dialog_with_peer_mut, find_b_leg, find_b_leg_by_call_id,

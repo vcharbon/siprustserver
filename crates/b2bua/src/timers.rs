@@ -171,13 +171,13 @@ impl TimerService {
     /// came from the *dead* node's clock and is compared against *this* node's
     /// `now_ms()`, so the reconstructed deadline is only as accurate as the two
     /// nodes' wall clocks agree. That residual is **corrected before restore**:
-    /// the router's `sanitize_restored_timers` seam re-anchors every rehydrated
-    /// `fire_at` by the `skew_offset_ms` the replication boundary persisted
-    /// (`receiver_now − origin_now`), so this driver receives deadlines already in
+    /// the router re-anchors every instant of a rehydrated copy by the
+    /// `skew_offset_ms` the replication boundary persisted, composed across every
+    /// hop (ADR-0055 §9), so this driver receives deadlines already in
     /// its own clock frame and its `fire_at − now_ms` math bounds skew to
     /// ~replication latency instead of trusting the dead node's clock unboundedly.
     /// The driver itself stays clock-skew-agnostic — NO re-anchor/smoothing logic
-    /// lives here (ADR-0014); all of it is in the router hydration seam. This is the
+    /// lives here (ADR-0014); all of it is in the router hydration path. This is the
     /// one place `now_ms()` is a behavioural, cross-node input — see the HA note in
     /// `sip-clock`'s crate docs. Under the simulated clock there is a single process
     /// and one paused `tokio::time` timeline, so `fire_at` and `now_ms()` ride the

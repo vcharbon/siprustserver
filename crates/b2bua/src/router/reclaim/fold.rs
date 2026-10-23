@@ -57,7 +57,6 @@ pub(in crate::router) async fn fold_quietly(
     live: &Call,
     replica: Call,
     fold: Fold,
-    skew_offset_ms: i64,
     now_ms: i64,
 ) {
     // A live copy is never replaced by a body that does not rebuild its
@@ -84,7 +83,7 @@ pub(in crate::router) async fn fold_quietly(
     if let (true, Some(t)) = (direction.into_the_record(), folded.topology.as_mut()) {
         t.gen_adopted = false;
     }
-    resync_timers(ctx, call_ref, live, &mut folded, skew_offset_ms, now_ms).await;
+    resync_timers(ctx, call_ref, live, &mut folded, now_ms).await;
     let seeds = if direction.into_the_record() { answered_invite_seeds(&folded) } else { vec![] };
     ctx.state.update_quiet(folded);
     if !seeds.is_empty() {
@@ -118,7 +117,6 @@ async fn resync_timers(
     call_ref: &str,
     live: &Call,
     folded: &mut Call,
-    skew_offset_ms: i64,
     now_ms: i64,
 ) {
     for stale in live.timers.iter().filter(|t| !folded.timers.iter().any(|f| f.key == t.key)) {
@@ -130,7 +128,6 @@ async fn resync_timers(
         &mut taken,
         call_ref,
         now_ms,
-        Some(skew_offset_ms),
         ctx.config.keepalive_interval_sec * 1000,
         None,
     );

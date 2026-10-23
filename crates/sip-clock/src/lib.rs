@@ -60,14 +60,14 @@
 //!
 //! The raw cross-node trust above is **bounded to ~replication latency**. The
 //! replication `Data` frame carries an `origin_now_ms` stamp (the sender's
-//! `now_ms()` at flush-send time); the receiving store persists
-//! `skew_offset_ms = receiver_now_ms − origin_now_ms` alongside the body's
-//! `expiry_at_ms` (the SAME re-anchor idiom already used for `body_ttl_ms`). On
-//! failover/reclaim the B2BUA router's single restore-hygiene seam
-//! (`router::sanitize_restored_timers`) adds that offset back to every rehydrated
-//! `TimerEntry.fire_at` before re-arming it, so the deadline lands in the LIVE
-//! node's clock frame regardless of a host NTP step that anchored the two pods on
-//! opposite sides. A small deadband ignores sub-second offsets (dominated by
+//! `now_ms()` at send time, read in the frame of the body's instants); the
+//! receiving store persists `skew_offset_ms = receiver_now_ms − origin_now_ms`
+//! alongside the body's `expiry_at_ms` (the SAME re-anchor idiom already used for
+//! `body_ttl_ms`), and a write of the node's own body clears it. On
+//! failover/reclaim the B2BUA router moves every instant of the rehydrated call
+//! by that offset before re-arming its timers (ADR-0055 §9), so each lands in the
+//! LIVE node's clock frame however many hops the body made, regardless of a host
+//! NTP step that anchored the pods on opposite sides. A small deadband ignores sub-second offsets (dominated by
 //! transit latency, not real skew). This is **accuracy only** — `(p,b)`-causal
 //! reconciliation (ADR-0014) remains the sole correctness mechanism; the boundary
 //! re-anchor introduces no wall-clock-dependent rule, settle window, or handback.

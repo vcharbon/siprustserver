@@ -6,7 +6,7 @@ use std::sync::Arc;
 use call::{Call, TimerType};
 
 use super::super::materialise::{has_invite_to_serve, materialise, Materialised, Origin, Reason};
-use super::super::restore_hygiene::{reanchor_timers, Smoothing};
+use super::super::restore_hygiene::{reanchor, Smoothing};
 use super::super::undecided::{is_undecided, settle_undecided};
 use super::super::RouterCtx;
 use crate::store::PartitionRole;
@@ -82,7 +82,7 @@ fn largest_keepalive_gap(calls: &mut [(call::Call, i64)], now_ms: i64, beat: &dy
     let mut l_max = 0;
     for (call, skew) in calls.iter_mut() {
         beat();
-        reanchor_timers(&mut call.timers, *skew);
+        reanchor(call, *skew);
         let gap = call
             .timers
             .iter()

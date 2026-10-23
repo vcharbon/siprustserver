@@ -208,9 +208,9 @@ impl Puller {
                             call_gen,
                             call_bgen,
                             // Apply locally only — do NOT re-propagate (peer:None).
-                            // Carry the origin wall clock so the store can persist
-                            // the receive-time skew offset for later timer
-                            // re-anchoring on failover/reclaim (clock-skew hardening).
+                            // Carry the origin wall clock so the store keeps the
+                            // body's skew offset, which re-anchors its instants on
+                            // failover/reclaim (ADR-0055 §9).
                             &PutOpts {
                                 origin_now_ms: Some(origin_now_ms),
                                 incarnation,

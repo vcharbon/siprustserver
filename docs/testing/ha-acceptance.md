@@ -35,10 +35,12 @@ the dead node becomes past-due on the takeover node. Its symptom:
 Two halves, do not conflate them:
 
 - **The SUT bounds the residual (accuracy only).** The replication `Data`
-  frame carries `origin_now_ms`; the receiver persists `skew_offset_ms`; the
-  ONE router seam `sanitize_restored_timers` re-anchors every restored
-  `fire_at` on EVERY hydration path (with a sub-second deadband, stale
-  `KeepaliveTimeout` drop, defensive floor, cohort smoothing). Observability:
+  frame carries `origin_now_ms`, read in the frame of the body's instants; the
+  receiver persists `skew_offset_ms`, composed across every hop, and a write of
+  the node's own body clears it. EVERY hydration path re-anchors every instant
+  of the copy by it (`restore_hygiene::reanchor`, sub-second deadband), then
+  the ONE timer seam `sanitize_restored_timers` drops a stale
+  `KeepaliveTimeout`, caps and cohort-smooths the keepalives. Observability:
   `clock_wall_divergence_ms` gauge + rate-limited warn (>500 ms). This is the
   ADR-0014 amendment; `(p,b)` reconciliation stays the sole correctness
   mechanism, and **the re-anchor never moves into the timer driver**.

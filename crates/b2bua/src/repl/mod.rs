@@ -54,6 +54,9 @@ pub use supervisor::{PeerLink, ReplicationSupervisor};
 mod tests;
 
 #[cfg(test)]
+mod anchor_tests;
+
+#[cfg(test)]
 mod test_support;
 
 #[cfg(test)]

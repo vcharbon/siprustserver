@@ -35,6 +35,7 @@ mod fault_primitives;
 mod forward_flush_never_regresses_backup_progress;
 mod held_cancel_takeover;
 mod inflight_resend;
+mod instants_across_takeovers;
 mod limiter_ha;
 mod limiter_refresh_batch;
 mod limiter_release_by_call;

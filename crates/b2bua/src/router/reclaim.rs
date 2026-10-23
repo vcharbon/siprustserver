@@ -10,6 +10,7 @@ use call::helpers::{lifecycle_behind, lifecycle_progress, raise_sequences};
 use call::{Call, CallModelState};
 
 use super::interpret::process_result;
+use super::restore_hygiene::reanchor;
 use super::RouterCtx;
 use crate::store::{role_of, MaterialiseOrigin, PartitionRole};
 
@@ -63,13 +64,14 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
     let guard = ctx.state.lock(call_ref).await;
     // Read again under the lock: a turn that held it may have ended the call
     // and deleted the body, its CDR written; the body read before is stale.
-    let Some((replica, skew_offset_ms)) = ctx.state.peek_reclaimable_raw(call_ref).await else {
+    let Some((mut replica, skew_offset_ms)) = ctx.state.peek_reclaimable_raw(call_ref).await else {
         if ctx.state.peek(call_ref).is_none() {
             drop(guard);
             ctx.state.discard_orphan(call_ref);
         }
         return;
     };
+    reanchor(&mut replica, skew_offset_ms);
     let now_ms = ctx.clock.now_ms();
     match ctx.state.peek(call_ref) {
         // The stored body is another call than the live one (the release of
@@ -112,7 +114,6 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
                         &live,
                         replica,
                         fold,
-                        skew_offset_ms,
                         now_ms,
                     )
                     .await;
@@ -267,7 +268,7 @@ pub(super) async fn fold_refused_flush(
     if role_of(&ctx.config.self_ordinal, call_ref) != direction.expected_role() {
         return;
     }
-    let Some(replica) = ctx.state.decode_body(body) else {
+    let Some(mut replica) = ctx.state.decode_body(body) else {
         return;
     };
     // No live copy ⇒ nothing to fold — tested BEFORE the per-call lock, because
@@ -296,7 +297,7 @@ pub(super) async fn fold_refused_flush(
         adopt_seen_counter(ctx, direction, &live, &replica);
         return;
     };
-    let skew_offset_ms = if origin_now_ms > 0 { now_ms - origin_now_ms } else { 0 };
+    reanchor(&mut replica, now_ms.saturating_sub(origin_now_ms));
     // Whose ending signals end the call is the direction: toward a PRIMARY the
     // live copy defers to the record it owns, so a folded terminal is discharged
     // (Model Y, ADR-0014 §2 / ADR-0020 X3); toward a BACKUP the live takeover
@@ -325,17 +326,7 @@ pub(super) async fn fold_refused_flush(
         discharge_folded_terminal(ctx, call_ref, &live, replica, now_ms).await;
         return;
     }
-    fold_quietly(
-        ctx,
-        direction,
-        call_ref,
-        &live,
-        replica,
-        Fold::of(progress),
-        skew_offset_ms,
-        now_ms,
-    )
-    .await;
+    fold_quietly(ctx, direction, call_ref, &live, replica, Fold::of(progress), now_ms).await;
 }
 
 /// A REFUSED flush still moves the counter: seeing a version is not taking it,

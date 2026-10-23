@@ -398,9 +398,6 @@ impl ReplServer {
     ) -> Vec<Frame> {
         let mut frames = Vec::with_capacity(group.len());
         for key in group {
-            // Send-time origin stamp for skew re-anchoring on the receiver
-            // (mirrors `drain_since`); one clock reading per bootstrap frame.
-            let origin_now_ms = self.changelog.now_ms();
             match self.source.read_entry(role, primary, key).await {
                 Some((body, meta)) => frames.push(Frame::Data {
                     at: w,
@@ -410,7 +407,9 @@ impl ReplServer {
                     call_gen: meta.call_gen,
                     call_bgen: meta.call_bgen,
                     body_ttl_ms: meta.body_ttl_ms,
-                    origin_now_ms,
+                    // Send-time stamp in the frame of the body's instants, as
+                    // `drain_since` stamps it.
+                    origin_now_ms: meta.origin_now_ms(self.changelog.now_ms()),
                     indexes: meta.indexes,
                     body: Some(body),
                     answered: false,

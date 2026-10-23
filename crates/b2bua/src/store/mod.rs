@@ -612,9 +612,9 @@ impl CallState {
     /// active-replica TTL = `reboot_budget` elapsed without a refresh), so it is
     /// NOT re-served; the periodic reap evicts it. The reverse-flush reconcile
     /// path wants the opposite (see [`peek_reclaimable_raw`]).
-    /// Returns the decoded call plus its persisted receive-time clock-skew offset
-    /// (`0` when none) so the reclaim re-anchors its timers before re-arming them
-    /// (clock-skew hardening).
+    /// Returns the decoded call plus its persisted clock-skew offset (`0` when
+    /// none) so the reclaim re-anchors its instants before re-arming its timers
+    /// (ADR-0055 §9).
     ///
     /// [`peek_reclaimable_raw`]: Self::peek_reclaimable_raw
     pub async fn peek_reclaimable(&self, call_ref: &str) -> Result<(Call, i64), ReplicaMiss> {

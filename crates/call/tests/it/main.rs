@@ -13,6 +13,7 @@ mod callref;
 mod codec_roundtrip;
 mod decode_bounds;
 mod index_key;
+mod instants;
 mod invite_glare;
 mod lifecycle;
 mod model_helpers;

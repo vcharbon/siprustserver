@@ -173,16 +173,15 @@ pub enum Frame {
         call_bgen: i64,
         /// Body TTL in ms; `i64`, may be negative on the wire.
         body_ttl_ms: i64,
-        /// **Origin wall clock** at flush-send time — the SENDER's shared
-        /// `Clock::now_ms()` when this frame was built (clock-skew hardening).
-        /// The receiver re-anchors it as `skew_offset_ms = receiver_now_ms −
-        /// origin_now_ms` and persists that offset so a failover/reclaim can
-        /// correct the ABSOLUTE `TimerEntry.fire_at` deadlines (which were minted
-        /// on the origin node's clock) against the two nodes' wall-clock skew.
+        /// **Origin wall clock** at send time: the sender's `Clock::now_ms()`
+        /// when this frame was built, read on the clock the body's absolute
+        /// instants were written on (the sender's own clock less the offset it
+        /// holds for a body it received). The receiver keeps `skew_offset_ms =
+        /// receiver_now_ms − origin_now_ms`, which composes every hop the body
+        /// made, so a failover/reclaim moves those instants into its own frame.
         /// This mirrors the receiver-side `body_ttl_ms → expiry_for` re-anchor
-        /// idiom — timers were the one deadline class left absolute. `i64`, may be
-        /// negative on the wire; `0` on a delete/bootstrap frame that carries no
-        /// re-anchorable timers.
+        /// idiom. `i64`, may be negative on the wire; `0` on a delete frame,
+        /// which carries no body.
         origin_now_ms: i64,
         /// Index keys for this call.
         indexes: Vec<String>,

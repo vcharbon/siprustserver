@@ -27,6 +27,7 @@ use call::CallModelState;
 
 use super::materialise::{has_invite_to_serve, materialise, Materialised, Origin};
 use super::reclaim::discharge_materialized_terminal;
+use super::restore_hygiene::reanchor;
 use super::undecided::{is_undecided, settle_undecided};
 use super::RouterCtx;
 use crate::abort_on_drop::AbortOnDrop;
@@ -118,7 +119,10 @@ async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str) -> Swept {
         // of them may have deleted it since the read above.
         let guard = ctx.state.lock(call_ref).await;
         let ended = match ctx.state.peek_replica(call_ref).await {
-            Ok((ended, _skew)) if ended.state == CallModelState::Terminated => ended,
+            Ok((mut ended, skew)) if ended.state == CallModelState::Terminated => {
+                reanchor(&mut ended, skew);
+                ended
+            }
             _ if ctx.state.peek(call_ref).is_some() => return Swept::Left,
             _ => {
                 drop(guard);

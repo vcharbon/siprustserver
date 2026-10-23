@@ -44,13 +44,13 @@ pub enum PropagateDirection {
 pub struct PutOpts {
     pub peer: Option<String>,
     pub direction: Option<PropagateDirection>,
-    /// The **origin node's** wall clock at flush-send time, carried on an inbound
-    /// replica `Put` (`Frame::Data.origin_now_ms`). The replicating store computes
-    /// `skew_offset_ms = receiver_now_ms − origin_now_ms` from it (clock-skew
-    /// hardening) and persists that alongside `expiry_at_ms`, so a later
-    /// failover/reclaim can re-anchor the call's absolute timer deadlines against
-    /// inter-node clock skew. `None` on a locally-originated write (no skew to
-    /// correct — the deadlines were minted on THIS node's clock).
+    /// The sender's clock at send time, read in the frame of the body's
+    /// instants, carried on an inbound replica `Put` (`Frame::Data.origin_now_ms`).
+    /// The replicating store keeps `skew_offset_ms = receiver_now_ms −
+    /// origin_now_ms` beside the body, so a later materialisation moves the
+    /// call's instants into this node's frame (ADR-0055 §9). `None` on a write of
+    /// this node's own body: its instants are in this node's frame, and the
+    /// write clears the offset the body it replaces held.
     pub origin_now_ms: Option<i64>,
     /// The call incarnation ([`call::Call::incarnation`]) the write is of: the
     /// body a `Put` stores, or the call a `Delete` removes. A replicating store
