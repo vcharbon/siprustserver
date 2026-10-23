@@ -72,9 +72,14 @@ impl SelfEndpoint {
         matches!(self, SelfEndpoint::Withdrawn(_) | SelfEndpoint::Superseded)
     }
 
-    /// Whether the endpoint left the slice after it was routable (sticky).
+    /// Whether the endpoint left the slice after it was routable, or the
+    /// ordinal now names another worker identity (sticky): either way the
+    /// ordinal names a replacement.
     pub fn left_the_slice(self) -> bool {
-        self == SelfEndpoint::Withdrawn(WithdrawalCondition::Absent)
+        matches!(
+            self,
+            SelfEndpoint::Withdrawn(WithdrawalCondition::Absent) | SelfEndpoint::Superseded
+        )
     }
 
     pub fn is_superseded(self) -> bool {
@@ -359,6 +364,7 @@ mod tests {
         assert_eq!(o.observe(&[bound("w0", "uid-b")], true), Some(SelfEndpoint::Superseded));
         assert!(o.current().is_superseded());
         assert!(o.is_withdrawn(), "nothing new is routed to it");
+        assert!(o.current().left_the_slice(), "its ordinal names a replacement");
         assert_eq!(o.observe(&[bound("w0", "uid-a")], true), None, "sticky");
         assert_eq!(o.observe(&[], true), None, "terminal");
     }

@@ -76,7 +76,7 @@
 //! puller never reads a peer it cannot reach as reached — and two live
 //! incarnations of one ordinal, each on its own listen address, keep their
 //! streams apart. The `PullRequest` attribution covers a stream opened through
-//! the bare fabric, and never re-attributes one already attributed.
+//! the bare fabric.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
@@ -232,16 +232,10 @@ impl SimShared {
     }
 
     /// Attribute the stream opened from `client` to the node `caller` names,
-    /// returning that node's address when `caller` is declared. A stream
-    /// already attributed — opened through a node's own handle — keeps its
-    /// owner, which is returned.
+    /// returning that node's address when `caller` is declared.
     fn attribute(&self, client: SocketAddr, caller: &str) -> Option<SocketAddr> {
-        let mut owners = self.stream_owner.lock().unwrap();
-        if let Some(owner) = owners.get(&client) {
-            return Some(*owner);
-        }
         let owner = self.endpoints.lock().unwrap().get(caller).copied()?;
-        owners.insert(client, owner);
+        self.stream_owner.lock().unwrap().insert(client, owner);
         Some(owner)
     }
 
@@ -483,8 +477,8 @@ impl SimulatedReplicationNetwork {
     /// declaration a stream stands for its own address and a fault between two
     /// listen addresses reaches only the wires that literally run on the pair.
     /// Declaring an ordinal again re-points it: later `PullRequest`
-    /// attributions read the new address; a stream opened through a node's
-    /// own handle keeps the address the handle names.
+    /// attributions read the new address; a node's own handle keeps the
+    /// address it was made for.
     pub fn declare_endpoint(&self, ordinal: &str, listen: SocketAddr) {
         self.shared.endpoints.lock().unwrap().insert(ordinal.to_string(), listen);
     }
