@@ -488,19 +488,18 @@ impl Agent {
     /// explicit `receive("ACK")` keeps working.
     pub(crate) async fn surface(&self, raw: &[u8], msg: SipMessage) -> Option<SipMessage> {
         let sighting = self.txn.sight(raw, &msg);
+        if let SipMessage::Response(r) = &msg {
+            let repeated_2xx = || sighting.repeat.then(|| self.two_xx_acks.owed_for(r)).flatten();
+            if let Some((ack, dst)) = self.txn.abandoned_ack_for(r).or_else(repeated_2xx) {
+                let _ = self.try_send(&SipMessage::Request(ack), dst).await;
+                return None;
+            }
+        }
         if sighting.owner == Owner::TxnDuplicate {
             return None;
         }
         if sighting.owner == Owner::Tu && !sighting.repeat {
             self.dialogs.sight(&msg);
-        }
-        if sighting.repeat {
-            if let SipMessage::Response(r) = &msg {
-                if let Some((ack, dst)) = self.two_xx_acks.owed_for(r) {
-                    let _ = self.try_send(&SipMessage::Request(ack), dst).await;
-                    return None;
-                }
-            }
         }
         Some(msg)
     }

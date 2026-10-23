@@ -26,6 +26,7 @@
 //! over-approximate "a repeat of what I already saw" into "any message of this
 //! method", which can swallow a genuine signal.
 
+mod abandoned;
 mod hop_ack;
 mod two_xx_ack;
 mod wire_log;
@@ -34,7 +35,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use sip_net_testkit::repeat::{repeat_belongs_to_tu, RepeatTables};
 
-use sip_message::{SipMessage, SipRequest};
+use std::net::SocketAddr;
+
+use sip_message::{SipMessage, SipRequest, SipResponse};
 
 pub(crate) use two_xx_ack::TwoXxAcks;
 pub use two_xx_ack::{ack_key_of_ack, ack_key_of_final, AckKey};
@@ -101,6 +104,9 @@ pub struct Absorption {
     /// first-sighting token back, it only asks "is this a repeat".
     sighted: AtomicU64,
     hop_acks: hop_ack::HopAcks,
+    /// The INVITE client transactions whose caller gave up (§9.1) and that
+    /// still ACK their non-2xx final (§17.1.1.3).
+    abandoned: abandoned::AbandonedInvites,
     log: wire_log::WireLog,
 }
 
@@ -113,6 +119,7 @@ impl Absorption {
             tables: RepeatTables::default(),
             sighted: AtomicU64::new(0),
             hop_acks: hop_ack::HopAcks::default(),
+            abandoned: abandoned::AbandonedInvites::default(),
             log: wire_log::WireLog::default(),
         }
     }
@@ -125,6 +132,7 @@ impl Absorption {
             tables: RepeatTables::default(),
             sighted: AtomicU64::new(0),
             hop_acks: hop_ack::HopAcks::default(),
+            abandoned: abandoned::AbandonedInvites::default(),
             log: wire_log::WireLog::default(),
         }
     }
@@ -192,6 +200,18 @@ impl Absorption {
     /// pulling from the inbox. Never times out; callers bound it.
     pub(crate) async fn hop_ack_fulfilled(&self, call_id: &str, branch: &str) {
         self.hop_acks.fulfilled(call_id, branch).await
+    }
+
+    /// Keep the client transaction of an INVITE its caller gave up on, sent to
+    /// `wire_dst`: its non-2xx final is still ACKed (§17.1.1.3).
+    pub fn abandon_invite(&self, invite: SipRequest, wire_dst: SocketAddr) {
+        self.abandoned.abandon(invite, wire_dst);
+    }
+
+    /// The hop ACK, and its destination, a non-2xx final to an abandoned
+    /// INVITE draws.
+    pub(crate) fn abandoned_ack_for(&self, resp: &SipResponse) -> Option<(SipRequest, SocketAddr)> {
+        self.abandoned.ack_for(resp)
     }
 
     fn hop_ack_claims_msg(&self, msg: &SipMessage) -> bool {

@@ -177,6 +177,7 @@ async fn spawn_reclaimer_core(
         store: Arc::new(InMemoryCallStore::new()), // throwaway legacy slot
         store_faults: Default::default(),          // no injected faults
         wire_faults: Default::default(),
+        turn_probe: Default::default(),
         clock: clock.clone(),
         id_gen: Arc::new(IdGen::seeded(0xB2B1)),
         refusals: None,
@@ -253,10 +254,9 @@ fn spawn_puller(
 }
 
 // ---------------------------------------------------------------------------
-// An in-dialog mutation made on the primary AFTER the puller has connected +
-// bootstrapped (cold, empty store) must stream over real TCP and land on the
-// backup (a broken tail shows as `repl_pull_applied = 0`); the sim suite cannot
-// reach it (no real socket).
+// An in-dialog mutation made on the primary AFTER the puller has connected + bootstrapped
+// (cold, empty store) must stream over real TCP and land on the backup (a broken tail
+// shows as `repl_pull_applied = 0`); the sim suite cannot reach it (no real socket).
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn tail_delivers_post_connect_mutation_over_real_tcp() {

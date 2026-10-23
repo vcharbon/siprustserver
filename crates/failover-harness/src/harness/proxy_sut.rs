@@ -7,6 +7,7 @@ use std::sync::Arc;
 use observe::NodeScope;
 use sip_proxy::registry::simulated::SimulatedWorkerRegistry;
 use sip_proxy::registry::{Acceptance, WorkerHealth, WorkerRegistry};
+use sip_proxy::strategies::rendezvous::{rendezvous_select, RendezvousCandidate};
 use sip_proxy::{ProxyAddr, ProxyMetrics};
 use tokio::task::JoinHandle;
 
@@ -116,6 +117,33 @@ impl ProxySut {
     /// probe (rather than asserting it via `set_health`).
     pub fn health(&self, ordinal: &str) -> Option<WorkerHealth> {
         self.registry.resolve(ordinal).map(|w| w.health)
+    }
+
+    /// The `(primary, backup)` the proxy places a new call with `call_id` on
+    /// under its current view: rendezvous hashing over the workers that take
+    /// new calls, then over the others for the backup. `None` when no worker
+    /// takes it.
+    pub fn placement_of(&self, call_id: &str) -> Option<(String, String)> {
+        let snapshot = self.registry.snapshot();
+        let accepting: Vec<Key> =
+            snapshot.iter().filter(|w| w.accepts_new_calls()).map(|w| Key(w.id.clone())).collect();
+        let primary = rendezvous_select(call_id, &accepting)?.0.clone();
+        let others: Vec<Key> = snapshot
+            .iter()
+            .filter(|w| w.is_alive() && w.id != primary)
+            .map(|w| Key(w.id.clone()))
+            .collect();
+        let backup = rendezvous_select(call_id, &others).map(|k| k.0.clone()).unwrap_or_default();
+        Some((primary, backup))
+    }
+}
+
+/// A worker ordinal as a rendezvous candidate.
+struct Key(String);
+
+impl RendezvousCandidate for Key {
+    fn id(&self) -> &str {
+        &self.0
     }
 }
 

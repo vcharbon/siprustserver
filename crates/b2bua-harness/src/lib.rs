@@ -14,7 +14,7 @@ use b2bua::limiter::CallLimiter;
 use b2bua::metrics::B2buaMetrics;
 use b2bua::store::{CallStore, FaultInjectingCallStore, InMemoryCallStore, StoreFaults};
 use b2bua::wire_faults::WireFaults;
-use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
+use b2bua::{B2buaCore, B2buaDeps};
 use scenario_harness::{Harness, RunReport};
 
 // The canonical INVITE/180/200/ACK choreography lives in
@@ -33,12 +33,14 @@ mod operator;
 mod proxy_core;
 mod reaped;
 mod scene;
+mod spawn_params;
 pub mod terminated;
 pub mod witness;
 
 pub use limiter::{LimiterCount, LimiterLeak, LimiterProbe, DEFAULT_LIMITER_ID};
 pub use proxy_core::{spawn_proxy_core, spawn_proxy_core_with, ExternalProxyFace, ProxyCoreParts};
 pub use scene::{B2buaScene, ALICE_PORT, B2BUA_PORT, BOB_PORT};
+pub use spawn_params::B2buaSpawnParams;
 use terminated::{TerminatedCalls, TerminatedCallsWriter};
 pub use witness::{WitnessRig, WITNESS_IDS, WITNESS_LIMITER_ADDR};
 
@@ -55,67 +57,6 @@ pub use witness::{WitnessRig, WITNESS_IDS, WITNESS_LIMITER_ADDR};
 // harness handle); the SHARED part is everything from "build the config" to
 // "spawn the core", captured by [`B2buaSpawnParams`] + [`spawn_b2bua_core`].
 // `failover-harness` reuses these (it depends on this crate).
-
-/// Everything that varies between a single-SUT and a replicated b2bua spawn.
-/// The caller binds its own endpoint and passes it (plus these params) to
-/// [`spawn_b2bua_core`].
-pub struct B2buaSpawnParams {
-    /// `self_ordinal` (e.g. "w0" single-SUT, the worker ordinal in a cluster).
-    pub ordinal: String,
-    /// This worker's SIP wire address (drives `sip_local_ip`/`sip_local_port`).
-    pub sip_addr: SocketAddr,
-    pub decision: Arc<dyn CallDecisionEngine>,
-    pub limiter: Arc<dyn CallLimiter>,
-    /// Callflow services to register (ADR-0016). Empty for the plain path.
-    pub services: Vec<b2bua::rules::ServiceDef>,
-    pub outbound_proxy: Option<(String, u16)>,
-    /// Already-built replication setup (`None` → non-replicating). The caller
-    /// constructs this — keeping repl-net/topology deps out of this crate.
-    pub replication: Option<ReplicationSetup>,
-    pub clock: Clock,
-    pub id_gen: Arc<IdGen>,
-    /// CDR writer handed to the deps (the caller keeps its own handle to
-    /// snapshot what it wrote).
-    pub cdr: Arc<dyn CdrWriter>,
-    /// Worker-side overload signal to inject. `None` → the core mints a fresh
-    /// [`OverloadSignal::live`](b2bua::overload::OverloadSignal::live). A
-    /// `start_paused` test passes one built over the `simulated()`
-    /// sampler (retaining its control) so it can drive a known ELU THROUGH the
-    /// running 100 ms sampler task into the published `X-Overload` header.
-    pub overload: Option<b2bua::overload::OverloadSignal>,
-    /// Host-injected generic async-HTTP capability for a service's
-    /// `RuleAction::ServiceHttpRequest` (ADR-0016 seam). `None` → a service
-    /// firing the effect gets an `outcome:"error"` re-entry. A test builds one
-    /// over `SimulatedHttpNetwork` (mirroring the limiter injection) to
-    /// round-trip a binary adaptation body.
-    pub adaptation_http: Option<b2bua::AdaptationHttpPort>,
-    /// Compose-time built-in-machine selection (ADR-0016 opt-out seam).
-    /// `Default` = every built-in included. A downstream that
-    /// owns REFER via its own transfer machine passes
-    /// `ComposeOptions::default().without_core_refer_transfer()`.
-    pub compose: b2bua::rules::ComposeOptions,
-    /// [`CallStore`] override (ADR-0023). `None` → a fresh
-    /// [`InMemoryCallStore`]. On the replicating path the replication store is
-    /// the drain target and this slot is unused.
-    pub store: Option<Arc<dyn CallStore>>,
-    /// Store fault-injection handle (ADR-0023). `None` → no faults. `Some` does
-    /// two things with the SAME handle: wraps the (default or overridden)
-    /// store in a [`FaultInjectingCallStore`] and threads the handle as the
-    /// router's live-path probe, so one control drives both halves of the seam.
-    pub store_faults: Option<StoreFaults>,
-    /// Wire-fault handle (`b2bua::wire_faults`). `None` → compliant emission.
-    pub wire_faults: Option<WireFaults>,
-    /// Memory admission gate (ADR-0037). `None` → the core builds one over the
-    /// real process. A test passes one over a simulated
-    /// [`SystemProbe`](b2bua::capacity::SystemProbe) to drive the RSS bounds.
-    pub capacity: Option<b2bua::capacity::CapacityGate>,
-    /// The deferred backlog's ceilings ([`B2buaDeps::deferred_ceilings`]).
-    /// `None` → the worker's own.
-    pub deferred_ceilings: Option<sip_txn::DeferredBound>,
-    /// The node the worker serves ([`observe::NodeScope`]): what its log lines
-    /// and per-call trace facts name in a failure dump. `None` → `ordinal`.
-    pub node: Option<String>,
-}
 
 /// Builds the base [`B2buaConfig`] (ip/port/ordinal/outbound_proxy wired),
 /// applies `tune`, assembles [`B2buaDeps`], and spawns the core on the
@@ -148,6 +89,7 @@ pub fn spawn_b2bua_core(
         store,
         store_faults,
         wire_faults,
+        turn_probe,
         capacity,
         deferred_ceilings,
         node,
@@ -192,6 +134,7 @@ pub fn spawn_b2bua_core(
         store,
         store_faults,
         wire_faults: wire_faults.unwrap_or_default(),
+        turn_probe: turn_probe.unwrap_or_default(),
         clock,
         id_gen,
         refusals: Some(refusals),
@@ -569,6 +512,7 @@ impl B2buaSutBuilder {
             store,
             store_faults,
             wire_faults,
+            turn_probe: None,
             capacity,
             deferred_ceilings,
             node: None,

@@ -38,7 +38,12 @@ seq-report = { path = "../seq-report" }
 call-limiter = { path = "../call-limiter" }
 http-net = { path = "../http-net" }
 http-net-testkit = { path = "../http-net-testkit" }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+# The parties of the failover sweep play composed call shapes (ADR-0055 §11).
+callshapes = { path = "../callshapes" }
+# The sweep's media-server leg is the announcement service's.
+announcement = { path = "../announcement" }
+serde_json = { workspace = true }
 # The node each SUT serves (`NodeScope`); the trace-plane tests also install
 # their own sampling gate and read the captured subscriber buffer (ADR-0026).
 observe = { path = "../observe" }
@@ -50,4 +55,3 @@ observe-testkit = { path = "../observe-testkit" }
 b2bua-sdk = { path = "../b2bua-sdk" }
 # A test wraps the limiter client (the `CallLimiter` trait is async-trait).
 async-trait = { workspace = true }
-serde_json = { workspace = true }

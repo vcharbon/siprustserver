@@ -1356,3 +1356,32 @@ _Avoid_: an accepted ending stated anywhere but the catalog.
 unattributed impact and the integrity findings; `pass`, `fail`, or `invalid`
 when the measurement itself is in doubt (a record gap, a failed incident, a
 stale series).
+
+## Failover sweep vocabulary
+
+The in-process proof of HA-blind services
+([ADR-0055](./docs/adr/0055-services-are-ha-blind.md) §11, §13), in
+`crates/failover-harness`.
+
+**Turn point**:
+One sub-point of one turn a call takes at its primary, the turns numbered from
+1: the turn's write handed to replication (`logged`), its effects left
+(`left`), its write applied at the backup (`applied`, only for a turn that
+wrote). Where a sweep incident arms; the harness holds the turn there until
+the incident struck.
+_Avoid_: "safe-point" (the transparent matrix's quiescent states, ADR-0013).
+
+**Failover sweep**:
+Every shape of a catalogue cut at every turn point by each sweep incident
+(primary killed, backup killed, split, split then healed); each cell must end
+RFC-clean, fully terminated, with its CDR count and nothing left on any node.
+A consumer adds shapes with `failover_sweep!` and a ratchet of its own. Its
+lane is `just sweep`.
+_Avoid_: "matrix" (the hand-listed transparent matrix of ADR-0013).
+
+**Sweep ratchet**:
+`failover-sweep.ratchet`: the cells that fail today, each with the ADR section
+that owns its correction. A failing cell it does not list fails the lane, and
+so does a listed cell that passes; it only shrinks.
+_Avoid_: "allow-list" or "waiver" (a listed cell still fails; the ratchet
+only records that it is known).

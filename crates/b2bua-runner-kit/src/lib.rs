@@ -542,10 +542,10 @@ impl RunnerBase {
             limiter: self.limiter_from_env().await,
             cdr: Arc::new(BufferedCdrWriter::spawn(sink, self.env.cdr_queue, self.metrics.clone())),
             store: Arc::new(InMemoryCallStore::new()),
-            // No injected store faults in production (ADR-0023: the live-path
-            // probe is a no-op while disarmed).
+            // No injected fault and no turn probe in production (ADR-0023).
             store_faults: Default::default(),
             wire_faults: Default::default(),
+            turn_probe: Default::default(),
             clock: self.clock.clone(),
             id_gen: self.id_gen.clone(),
             // The refusals the ingress brake holds (see [`RunnerBase::refusals`]).

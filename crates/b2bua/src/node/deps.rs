@@ -17,6 +17,7 @@ use crate::limiter::CallLimiter;
 use crate::metrics::B2buaMetrics;
 use crate::repl::ReplicatingCallStore;
 use crate::store::{CallStore, StoreFaults};
+use crate::turn_probe::TurnProbes;
 use crate::wire_faults::WireFaults;
 
 /// Optional replication wiring for [`B2buaDeps`]. Supplying `Some(..)` turns a
@@ -72,6 +73,9 @@ pub struct B2buaDeps {
     /// Wire-fault seam: one named RFC deviation the core emits on purpose so
     /// the post-run audit gate can be proven live. Default = never armed.
     pub wire_faults: WireFaults,
+    /// Turn-point seam (ADR-0055 §13): a test observes and may hold each turn
+    /// of a call at its sub-points. Default = no probe.
+    pub turn_probe: TurnProbes,
     pub clock: Clock,
     pub id_gen: Arc<IdGen>,
     /// The worker's refusals of new INVITEs ([`crate::admission::Refusals`]),

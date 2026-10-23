@@ -16,6 +16,7 @@ use crate::effects::{
     BufferedObservabilityEffect, CriticalStateEffect, FireAndForgetEffect, HandlerResult,
     OutboundBody, OutboundTxnMode, SoftBoundedEffect,
 };
+use crate::turn_probe::{TurnMark, TurnPoint};
 
 /// Whether `call_ref`'s primary is another node that has departed.
 fn primary_departed(ctx: &RouterCtx, call_ref: &str) -> bool {
@@ -108,10 +109,12 @@ pub(super) async fn process_result(
         // poll; a rebooting primary still has its full reclaim window to fold and
         // discharge it. The primary is the sole discharge authority either way.
         ctx.state.flush(&result.call);
+        reach(ctx, call_ref, TurnPoint::Logged, true).await;
         // What the turn owes the WIRE is not deferred: the final that ends the
         // caller's INVITE and the hop-by-hop ACK toward the callee leave from the
         // node that took the event, or the peers wedge on Timer B / Timer H.
         emit_outbound(ctx, call_ref, &result, now_ms).await;
+        reach(ctx, call_ref, TurnPoint::Left, true).await;
         release_call(ctx, call_ref, ReleaseKind::SelfRelease { ended: true }).await;
         return;
     }
@@ -132,12 +135,13 @@ pub(super) async fn process_result(
     // termination, and re-sends the BYE at the *reused* CSeq a real UAS drops
     // (matrix cells C7/RFC). Only `Terminated` is excluded — it takes the
     // `RemoveCall` delete path below instead.
-    if quiet.is_none()
+    let wrote = quiet.is_none()
         && matches!(result.call.state, CallModelState::Active | CallModelState::Terminating)
-        && result.call.topology.as_ref().is_some_and(|t| !t.bak.is_empty())
-    {
+        && result.call.topology.as_ref().is_some_and(|t| !t.bak.is_empty());
+    if wrote {
         ctx.state.flush(&result.call);
     }
+    reach(ctx, call_ref, TurnPoint::Logged, wrote).await;
 
     // The terminal `RemoveCall` is interpreted LAST — after the buffered
     // `WriteCdr` enqueue (ADR-0020 X2): propagating the replica delete before
@@ -169,6 +173,7 @@ pub(super) async fn process_result(
     }
 
     emit_outbound(ctx, call_ref, &result, now_ms).await;
+    reach(ctx, call_ref, TurnPoint::Left, wrote).await;
 
     for eff in &result.effects.soft {
         match eff {
@@ -284,6 +289,23 @@ pub(super) async fn process_result(
             }
         }
     }
+}
+
+/// Report the turn of `call_ref` at `point` to the turn-point seam, with the
+/// write counters the live copy holds (ADR-0055 §13).
+async fn reach(ctx: &RouterCtx, call_ref: &str, point: TurnPoint, wrote: bool) {
+    let version =
+        || ctx.state.peek(call_ref).and_then(|c| c.topology).map_or((0, 0), |t| (t.gen, t.bak_gen));
+    ctx.turn_probe
+        .at(|| TurnMark {
+            node: &ctx.config.self_ordinal,
+            call_ref,
+            point,
+            version: version(),
+            wrote,
+            removed: false,
+        })
+        .await;
 }
 
 /// Put the turn's outbound SIP on the wire, in emission order. Sent SIP is

@@ -153,6 +153,9 @@ pub struct RouterCtx {
     /// Wire-fault seam (`wire_faults`): read by the action executor at the one
     /// emission site it guards; default = never armed.
     pub wire_faults: crate::wire_faults::WireFaults,
+    /// Turn-point seam (ADR-0055 §13): reached at a turn's sub-points;
+    /// default = no probe.
+    pub turn_probe: crate::turn_probe::TurnProbes,
     pub txn: TransactionLayer,
     /// The router loop's pulse: stamped per turn, and per call by a turn that
     /// works through many (the bulk reboot reclaim).

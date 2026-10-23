@@ -44,6 +44,7 @@ pub(super) async fn unwired_core(ordinal: &str) -> B2buaCore {
         store: Arc::new(InMemoryCallStore::new()),
         store_faults: Default::default(),
         wire_faults: Default::default(),
+        turn_probe: Default::default(),
         clock: Clock::test_at(0),
         id_gen: Arc::new(IdGen::seeded(0xB2B2)),
         refusals: None,

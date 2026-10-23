@@ -18,28 +18,42 @@
 //!   gate the run and which a scenario declared accepted for a bounded window.
 //! - [`views`] — the views ledger: what the orchestrator, the proxy and each
 //!   worker incarnation believed about every worker, and where they disagreed.
+//! - [`turn_points`] — every turn of a call at its primary and its three
+//!   sub-points, where a test arms an incident (ADR-0055 §13).
+//! - [`cluster`] + [`roles`] — a two-worker cluster built from a recipe, and
+//!   the verbs that place a call, steer its traffic to a role and name its
+//!   nodes by role (ADR-0055 §13).
+//! - [`sweep`] — the failover sweep, its catalogue and its ratchet
+//!   (ADR-0055 §11).
 //! - the [`transparent_matrix!`] matrix macro — expands a table of
 //!   `(state, event, fault, recovery, seed)` rows into one named
 //!   `#[tokio::test]` per legal cell (`tests/it/transparent_v1.rs`).
 
+pub mod cluster;
 pub mod combine;
 pub mod cookie;
 mod harness;
 pub mod oracle;
 pub mod rfc_acceptance;
+pub mod roles;
 pub mod runner;
 pub mod scenario;
+pub mod sweep;
+pub mod turn_points;
 pub mod views;
 
 pub use b2bua::drain::{DrainBounds, DrainExit, DrainOutcome};
+pub use cluster::{Cluster, ClusterRecipe};
 pub use combine::{combine_doc, WorkerAxis};
 pub use cookie::{cookie_field, worker_ordinals};
 pub use harness::{
     FailoverHarness, PendingDrain, ProxySut, ReplicatedB2buaSut, RULE_CSEQ_IN_DIALOG_ORDER,
     RULE_NO_CANCEL_AFTER_FINAL,
 };
+pub use roles::{Cause, Placement, Role};
 pub use runner::run_cell;
 pub use scenario::{Cell, DialogState, Event, Fault, Party, Recovery};
+pub use turn_points::{HeldTurn, Turn, TurnAt, TurnPoint, TurnPoints};
 pub use views::{Belief, View, ViewLedger};
 
 /// Run one matrix cell as a differential transparency check: drive it clean

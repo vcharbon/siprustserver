@@ -53,6 +53,12 @@ test-slow *filter:
     cargo nextest run --workspace --release -P slow --run-ignored only --no-tests=warn -E {{ quote("(not " + property_lane + ")" + if filter == "" { "" } else { " & (" + filter + ")" }) }}
     cargo nextest run --workspace -P slow --run-ignored only --no-tests=warn -E {{ quote(property_lane + if filter == "" { "" } else { " & (" + filter + ")" }) }}
 
+# The failover sweep (ADR-0055 §11): every shape of the catalogue cut at every
+# turn point by every incident, held to each crate's `failover-sweep.ratchet`.
+# Its own lane, out of `test`. Optional filter: `just sweep reinvite`.
+sweep filter='':
+    cargo nextest run --workspace -P sweep --no-tests=fail {{ filter }}
+
 # Both lanes.
 test-all: test test-slow
 

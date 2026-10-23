@@ -589,10 +589,10 @@ pub struct CancelHandle {
 }
 
 impl CancelHandle {
-    /// Send a CANCEL for the pending INVITE (RFC 3261 §9.1) on a best-effort
-    /// basis — a transport error is swallowed (the call is already failing). Does
-    /// not wait for the 200/487.
+    /// CANCEL the pending INVITE (RFC 3261 §9.1), a transport error swallowed,
+    /// and give it up: the transaction layer ACKs its non-2xx final (§17.1.1.3).
     pub async fn cancel_best_effort(&self) {
         let _ = try_send_cancel(&self.agent, &self.original_invite, self.wire_dst, &[]).await;
+        self.agent.txn.abandon_invite(self.original_invite.clone(), self.wire_dst);
     }
 }

@@ -65,6 +65,7 @@ use crate::poison::{locked, SUPERVISOR_PEERS, SUPERVISOR_WIRING};
 
 mod backup_deferral;
 mod follow;
+mod wiring;
 
 /// One of the supervisor's wiring slots ([`SUPERVISOR_WIRING`]).
 fn wiring<T>(slot: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -255,6 +256,8 @@ struct SupervisorInner {
     /// The memory admission gate handed to every spawned puller (ADR-0037).
     /// `None` until [`set_capacity`](ReplicationSupervisor::set_capacity).
     capacity: Mutex<Option<crate::capacity::CapacityGate>>,
+    /// The turn-point seam handed to every spawned puller (ADR-0055 §13).
+    turn_probe: Mutex<crate::turn_probe::TurnProbes>,
     /// Set once the Reclaim flows are all ready and the Backup streams may open
     /// (ADR-0014 boot order). Latched true; subsequent reconciles spawn Backup
     /// pullers for any newly-added peer.
@@ -344,6 +347,7 @@ impl ReplicationSupervisor {
                 reconcile_period: DEFAULT_RECONCILE_PERIOD,
                 repl_tx: Mutex::new(None),
                 capacity: Mutex::new(None),
+                turn_probe: Mutex::new(Default::default()),
                 backup_enabled: AtomicBool::new(false),
                 membership: Mutex::new(None),
                 peers: Mutex::new(HashMap::new()),
@@ -352,19 +356,6 @@ impl ReplicationSupervisor {
                 started_at: Mutex::new(None),
             }),
         }
-    }
-
-    /// Wire the router command sink every puller forwards X11 fail-back commands
-    /// to (reactive reclaim / bulk reclaim). Call **before** [`start`](Self::start)
-    /// so the initial pullers pick it up; a re-spawned puller reads it too.
-    pub fn set_repl_sink(&self, sink: impl Into<super::RouterSink>) {
-        *wiring(&self.inner.repl_tx) = Some(sink.into());
-    }
-
-    /// Wire the memory admission gate whose backup ceilings every puller
-    /// applies (ADR-0037). Call **before** [`start`](Self::start).
-    pub fn set_capacity(&self, gate: crate::capacity::CapacityGate) {
-        *wiring(&self.inner.capacity) = Some(gate);
     }
 
     /// Spawn the Reclaim pullers per current peer (excluding self), keep them in
@@ -561,6 +552,7 @@ impl ReplicationSupervisor {
             Some(gate) => puller.with_capacity(gate),
             None => puller,
         };
+        let puller = puller.with_turn_probe(wiring(&self.inner.turn_probe).clone());
         let (cancel_tx, cancel_rx) = watch::channel(false);
         flow.status_rx = Some(status_rx);
         flow.cancel_tx = Some(cancel_tx);

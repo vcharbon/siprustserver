@@ -1,0 +1,231 @@
+//! The failover sweep (ADR-0055 §11): every shape of a catalogue is cut at
+//! every turn point of its call — each turn's write handed to replication,
+//! its effects left, its write applied at the backup — by each [`Incident`].
+//! Every cell must end with an RFC-clean, fully terminated call, one CDR and
+//! nothing left on any node or in the limiter.
+//!
+//! A cell is named `<shape>/<incident>/t<k>-<point>`. The cells that fail
+//! before their correction lands are listed in a [`Ratchet`] with the decision
+//! that owns them; a lane fails on a failing cell the ratchet does not list
+//! and on a listed cell that passes.
+//!
+//! A consumer adds shapes with nothing but the shape: a [`SweepShape`] states
+//! how the cluster decides the call and what the parties play, and
+//! [`failover_sweep!`](crate::failover_sweep) expands a list of shapes into
+//! the lane's tests against the consumer's own ratchet.
+
+pub mod catalogue;
+mod cell;
+mod parties;
+mod ratchet;
+
+use b2bua::cdr::CdrRecord;
+use scenario_harness::actor::ActorScenario;
+use scenario_harness::realcall::CallEnv;
+
+pub use cell::{run_cell, Cut, PRIMARY};
+pub use parties::{Parties, ALICE, BOB, BOB2, CHARLIE, MEDIA, MEDIA_ROLE};
+pub use ratchet::Ratchet;
+
+use crate::cluster::ClusterRecipe;
+use crate::turn_points::TurnAt;
+
+/// A call shape the sweep cuts.
+pub trait SweepShape: Send + Sync {
+    /// The shape's name: the first segment of its cells' names.
+    fn id(&self) -> &'static str;
+
+    /// How the cluster's workers are built: by default every call is routed
+    /// to [`BOB`] holding one limiter set.
+    fn recipe(&self) -> ClusterRecipe {
+        ClusterRecipe::routing_to(BOB.parse().expect("bob's address"))
+    }
+
+    /// What the parties play.
+    fn scenario(&self) -> Box<dyn ActorScenario>;
+
+    /// Adjust the call's environment (its dwells) before the parties play.
+    fn call_env(&self, _env: &mut CallEnv<'_>) {}
+
+    /// Check the call's one CDR beyond its count.
+    fn check_cdr(&self, _cdr: &CdrRecord) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// What befalls the call's owners at the armed turn point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Incident {
+    /// The primary dies; the proxy and the backup see it gone.
+    PrimaryKilled,
+    /// The backup dies; the proxy and the primary see it gone.
+    BackupKilled,
+    /// The replication between the two owners is cut and the proxy reads the
+    /// primary dead while it runs on; nothing heals.
+    Split,
+    /// A [`Split`](Self::Split) healed one second later.
+    SplitHealed,
+}
+
+impl Incident {
+    /// Every incident, in lane order.
+    pub const ALL: [Incident; 4] =
+        [Incident::PrimaryKilled, Incident::BackupKilled, Incident::Split, Incident::SplitHealed];
+
+    /// The incident's name in a cell's name.
+    pub fn label(self) -> &'static str {
+        match self {
+            Incident::PrimaryKilled => "primary-killed",
+            Incident::BackupKilled => "backup-killed",
+            Incident::Split => "split",
+            Incident::SplitHealed => "split-healed",
+        }
+    }
+}
+
+/// The name of a cell: `<shape>/<incident>/t<k>-<point>`.
+pub fn cell_name(shape: &str, incident: Incident, at: TurnAt) -> String {
+    format!("{shape}/{}/{}", incident.label(), at.label())
+}
+
+/// Run `shape` with no incident: the call must pass every check and take at
+/// least one turn. Its turns are the sweep's turn points.
+pub fn baseline(shape: &dyn SweepShape) -> Vec<crate::turn_points::Turn> {
+    let name = format!("{}/baseline", shape.id());
+    let turns = in_cell(|| run_cell(shape, &name, None, false))
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+    assert!(!turns.is_empty(), "[{name}] the call took no turn at its primary");
+    turns
+}
+
+/// Cut `shape` at every turn point of its baseline by `incident`, and hold
+/// the failing cells to `ratchet`.
+pub fn sweep(shape: &dyn SweepShape, incident: Incident, ratchet: &Ratchet) {
+    let turns = baseline(shape);
+    let mut ran = Vec::new();
+    let mut failed = std::collections::BTreeMap::new();
+    for (i, turn) in turns.iter().enumerate() {
+        for &point in turn.points() {
+            let at = TurnAt { turn: i + 1, point };
+            let name = cell_name(shape.id(), incident, at);
+            let cut = Some(Cut { at, incident });
+            if let Err(payload) = in_cell(|| run_cell(shape, &name, cut, false)) {
+                failed.insert(name.clone(), panic_text(payload.as_ref()));
+            }
+            ran.push(name);
+        }
+    }
+    let prefix = format!("{}/{}/", shape.id(), incident.label());
+    eprintln!("{prefix}: {} cells, {} failing", ran.len(), failed.len());
+    ratchet.hold(&prefix, &ran, &failed);
+}
+
+/// Run the one cell of `shape` cut at `at` by `incident`, its unified report
+/// kept under `target/seq-reports/`: the reproduction of a failing cell.
+/// Panics on any finding.
+pub fn replay(shape: &dyn SweepShape, incident: Incident, at: TurnAt) {
+    let name = cell_name(shape.id(), incident, at);
+    in_cell(|| run_cell(shape, &name, Some(Cut { at, incident }), true))
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+}
+
+/// The stack a cell runs on: a whole cluster's futures nest deep.
+const CELL_STACK: usize = 256 * 1024 * 1024;
+
+/// Drive the future `cell` builds to its end on a thread of its own, on a
+/// fresh current-thread runtime whose clock is paused: a cell's tasks die with
+/// its runtime, and its panic is handed back.
+fn in_cell<F: std::future::Future>(
+    cell: impl FnOnce() -> F + Send,
+) -> std::thread::Result<F::Output>
+where
+    F::Output: Send,
+{
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("sweep-cell".into())
+            .stack_size(CELL_STACK)
+            .spawn_scoped(scope, || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .start_paused(true)
+                    .build()
+                    .expect("a paused runtime")
+                    .block_on(Box::pin(cell()))
+            })
+            .expect("a cell thread")
+            .join()
+    })
+}
+
+/// The text a panic carried.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else {
+        "a panic without a message".to_string()
+    }
+}
+
+/// Expand shapes into the sweep lane's tests: per shape, its baseline and one
+/// test per [`Incident`], each holding its failing cells to the ratchet at
+/// `$ratchet` (a path). The tests live under a `failover_sweep` module, the
+/// name the lane selects them by.
+///
+/// ```ignore
+/// failover_harness::failover_sweep! {
+///     ratchet: concat!(env!("CARGO_MANIFEST_DIR"), "/failover-sweep.ratchet");
+///     reinvite => failover_harness::sweep::catalogue::Reinvite,
+/// }
+/// ```
+#[macro_export]
+macro_rules! failover_sweep {
+    (ratchet: $ratchet:expr; $( $name:ident => $shape:expr ),+ $(,)?) => {
+        mod failover_sweep {
+            #[allow(unused_imports)]
+            use super::*;
+            $(
+                mod $name {
+                    #[allow(unused_imports)]
+                    use super::*;
+                    use $crate::sweep::{Incident, Ratchet, SweepShape};
+
+                    fn shape() -> Box<dyn SweepShape> {
+                        Box::new($shape)
+                    }
+
+                    fn run(incident: Incident) {
+                        $crate::sweep::sweep(&*shape(), incident, &Ratchet::load($ratchet));
+                    }
+
+                    #[test]
+                    fn baseline() {
+                        $crate::sweep::baseline(&*shape());
+                    }
+
+                    #[test]
+                    fn primary_killed() {
+                        run(Incident::PrimaryKilled);
+                    }
+
+                    #[test]
+                    fn backup_killed() {
+                        run(Incident::BackupKilled);
+                    }
+
+                    #[test]
+                    fn split() {
+                        run(Incident::Split);
+                    }
+
+                    #[test]
+                    fn split_healed() {
+                        run(Incident::SplitHealed);
+                    }
+                }
+            )+
+        }
+    };
+}

@@ -95,6 +95,7 @@ use crate::router::ReplCommand;
 
 mod apply;
 mod config;
+mod wiring;
 use apply::{ApplyMode, ApplyOutcome};
 pub use config::PullerConfig;
 
@@ -204,6 +205,8 @@ pub struct Puller {
     /// The memory admission gate whose backup ceilings bound the replicas this
     /// node stores for its peers (ADR-0037). `None` stores every replica.
     capacity: Option<crate::capacity::CapacityGate>,
+    /// Where an applied write of a primary is reported (ADR-0055 §13).
+    turn_probe: crate::turn_probe::TurnProbes,
     /// Decoder for a stored Element's body. The Forward `Delete` guard reads the
     /// Element's lifecycle state, and the store persists the same encoding.
     codec: MsgpackCodec,
@@ -254,6 +257,7 @@ impl Puller {
                 metrics,
                 repl_tx: None,
                 capacity: None,
+                turn_probe: Default::default(),
                 codec: MsgpackCodec::new(),
                 bootstrap_started_at: std::sync::Mutex::new(
                     (!warm).then(tokio::time::Instant::now),
@@ -261,14 +265,6 @@ impl Puller {
             },
             status_rx,
         )
-    }
-
-    /// Attach the router command sink (ADR-0011 X11 fail-back). A puller built
-    /// without it (sim + unit tests, which assert on the store directly) sends no
-    /// router commands.
-    pub fn with_repl_sink(mut self, sink: impl Into<RouterSink>) -> Self {
-        self.repl_tx = Some(sink.into());
-        self
     }
 
     /// The position this flow may report having applied, given it received
@@ -283,13 +279,6 @@ impl Puller {
             Some(floor) if floor < at => floor,
             _ => at,
         }
-    }
-
-    /// Attach the memory admission gate whose backup ceilings this puller
-    /// applies (ADR-0037).
-    pub fn with_capacity(mut self, gate: crate::capacity::CapacityGate) -> Self {
-        self.capacity = Some(gate);
-        self
     }
 
     /// Convenience constructor for a puller that always connects to a **fixed**
@@ -694,6 +683,7 @@ impl Puller {
                     if !bootstrapped {
                         applied_in_bootstrap += 1;
                     }
+                    self.report_applied(mode, outcome, op, &call_ref, (call_gen, call_bgen)).await;
                     self.signal(mode, outcome, bootstrapped, &call_ref, write, origin_now_ms);
                     // Pre-bootstrap frames share `at = W`; only the post-bootstrap
                     // tail advances W.
