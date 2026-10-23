@@ -11,7 +11,7 @@ use super::dispatch::opens_dialog;
 use super::unscripted::{OWED_BYE_FINAL, REJECT_ACK};
 use super::Runner;
 use crate::cancel;
-use crate::gate::{self, GateVerdict, Inbound};
+use crate::gate::{self, BodyTypeFinding, GateVerdict, Inbound};
 use crate::plan::{CompiledStep, Discriminator};
 use crate::program::ItemKind;
 use crate::progress;
@@ -212,12 +212,18 @@ impl<'a, 'p> Runner<'a, 'p> {
         for finding in findings {
             self.instance.record(finding);
         }
-        // A body assertion a lane-declared known bug took out of the match is
-        // still READ, and what it found is recorded — the match was bought, and
-        // the verdict says so.
-        let waived = gate::waived_body_findings(&step, &inbound, &self.instance.scope());
-        for (bug, finding) in waived {
-            self.instance.record_waived(bug, finding);
+        // The body TYPE the step states is held under either `check`: a miss
+        // fails the run, and one a lane-declared known bug names is recorded as
+        // waived — the match was bought, and the verdict says so.
+        let body_type = gate::body_type_finding(&step, &inbound, &self.instance.scope());
+        match body_type {
+            Some(BodyTypeFinding::Gating(finding)) => {
+                self.instance.record(finding);
+            }
+            Some(BodyTypeFinding::Waived(bug, finding)) => {
+                self.instance.record_waived(bug, finding);
+            }
+            None => {}
         }
         // A finding is a fact about the verdict, never about the flow: the
         // message matched, so what comes after it is still composable and the

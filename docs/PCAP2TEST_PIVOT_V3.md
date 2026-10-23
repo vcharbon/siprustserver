@@ -70,6 +70,20 @@ document, the `pivot-schema` structs and the generator. Every batch gets an
 entry here, and the entry is the index: what changed, and where the contract
 now reads.
 
+**2026-10-23 — the body TYPE is held on every expect, and a shape-only
+expect is confronted.** A body of another type than the one a `check: record`
+expect states — present where none is stated, a bare session description where
+a multipart one is, a missing or reordered part — reached no verdict: the
+interpreter read bodies under `assert` alone, and the confrontation read no
+declared shape. No document field changes; the verdict and the confrontation
+gain findings.
+
+| change | where |
+|---|---|
+| every expect holds the body TYPE it states — presence, the bare media type, and for a decomposed multipart the part count and each part's bare type by position — under `assert` and `record` alike; a miss fails the run as `check-failed` (`field: body`, `op: type`, the stated and received types) and the step keeps its datagram. Framing and part entity headers are not part of the type, content stays the confrontation's under `record` | §6.4, §8.3, `pivot-interpreter` |
+| the unstripped-provisional waiver applies to the type finding under either check, recorded in `waived` | §8.3, `pivot-interpreter` |
+| a shape-only expect whose reception breaks the shape is one `body` record, `body:<shape>:<scope>`, the shape and the received bare type (`absent` where nothing arrived) one a side | §8.3, the pipeline's `confront` |
+
 **2026-10-16 — the settle waits on the scripted legs' own INVITE client
 transactions, and a leg ACKs every non-2xx final it takes.** An INVITE a
 scripted leg sent holds a client transaction until its final (RFC 3261
@@ -1307,11 +1321,13 @@ meaningless.
 | value | contract |
 |---|---|
 | `assert` | the stored content of `msg` is MATCHED against the inbound message |
-| `record` | the stored content is RECORDED for post-run confrontation and matched against nothing |
+| `record` | the stored content is RECORDED for post-run confrontation and matched against nothing; only its body TYPE is held (§8.3) |
 
 Under both values the step still gates on `op`, leg alignment, and the
 discriminator (`method`, or `status` + `cseq-method`), and still times out at
-`within_ms`.
+`within_ms`. Under both, the body TYPE the step states is held against the
+datagram it took, and a type that does not hold fails the run without
+refusing the datagram (§8.3).
 
 **A lane never reinterprets a stored field.** The rule the generator applies: a
 message some captured peer emitted and the SUT relayed is asserted; a message the
@@ -2275,14 +2291,30 @@ lint refuses it (`body/compare-on-send`); `sdp` on a body whose stated content
 type is not `application/sdp` names a fold that cannot read the file
 (`body/compare-sdp-type`).
 
-The two halves of the assertion run at two times, and only one of them
-depends on `check`. The interpreter gates on PRESENCE alone, and only under
-`check: assert` — a body must have arrived, whatever it holds — so a differing
-body never abandons the call: the message is answered, the dialog walks to its
-captured teardown, and the post-run confrontation states the difference as a
-`body` record (`body:<type/subtype>:<scope>`, the expected text and the
-received text side by side, both verbatim), which a lane's rule lists then
-classify. Under `sdp` there is one record per differing line key,
+The two halves of the assertion run at two times. The interpreter holds the
+body's TYPE on every expect, under `check: assert` and `check: record` alike:
+the body is present or absent as stated, its bare media type (`type/subtype`,
+lowercased, parameters such as `boundary` ignored) is the one stated — a
+resource's `content-type`, bare `application/sdp` where it states none, the
+`sdp-present` shape's `application/sdp`, any `multipart/…` for the
+`multipart-present` shape — and a decomposed multipart arrives with as many
+parts as stated, each of the stated bare type by position. The multipart
+framing (boundary, delimiters, preamble) and a part's entity headers other
+than `Content-Type` are not part of the type. Under `assert` presence and the
+container type (an `sdp-present` shape or a `compare: sdp` resource arriving as
+SDP, a multipart arriving as `multipart/…`) gate the MATCH; every other type
+miss, and every one under `record`, is a finding on the datagram the step
+took: `check-failed` with `field: body`, `op: type`, the stated and received
+types (`multipart/mixed (application/sdp, …)` for a multipart, `absent` where
+nothing arrived). It fails the run; the step keeps its datagram, so the call
+walks to its teardown. A body on a provisional the expect states `absent` is
+the miss the `provisional-rewrite-not-applied` known bug names, waived under
+either check on a lane whose run configuration declares it (`known_bugs`).
+The CONTENT is never the interpreter's, so a differing body never abandons the
+call: the message is answered, the dialog walks to its captured teardown, and
+the post-run confrontation states the difference as a `body` record
+(`body:<type/subtype>:<scope>`, the expected text and the received text side
+by side, both verbatim), which a lane's rule lists then classify. Under `sdp` there is one record per differing line key,
 `body:sdp:<section>:<line>:<scope>` — `<section>` is `session` or `m<i>`
 (0-based, wire order), `<line>` is `<type>=` for a session line or `a=<name>`
 for an attribute, the four direction attributes under one key `a=direction` —
@@ -2294,8 +2326,10 @@ record with that side's lines; two descriptions a verbatim run carried as
 different bytes with the structure equal are one `document:bytes` record
 with both texts whole. A reception carrying NO body where content is asserted is confronted
 as the empty text; under `check: assert` the interpreter also refuses it, and
-under `check: record` — every generated expect — the confrontation's record is
-the only statement of it.
+under `check: record` it fails the run as a body-type finding. A shape-only
+expect is confronted by type: a reception that breaks the shape is one
+`body:<shape>:<scope>` record (`absent`, `sdp-present`, `multipart-present`),
+the shape against the received bare type, `absent` where nothing arrived.
 
 **A frozen body compares byte for byte.** The confrontation holds the received
 bytes — the recording keeps them as they crossed the socket (§14 item 12),
@@ -2316,8 +2350,8 @@ differs, one per differing part under that part's `compare`; a line that
 recorded no layout, or a layout its bytes cannot honour, is one record saying
 so. A part's entity headers are not compared. Where
 extraction handed no parts over, the expect falls back to the shape
-`{ "mode": "multipart-present" }`, and the interpreter gates the reception's
-container type either way.
+`{ "mode": "multipart-present" }`. The interpreter holds the container type
+either way, and the part count and part types where the parts are stated.
 
 Multipart bodies reference DECOMPOSED parts:
 

@@ -4,7 +4,8 @@
 //! Gating is structural and nothing else: op, leg alignment, the discriminator
 //! (`method`, or `status` plus `cseq-method`), and the budget. Then `check`
 //! decides whether the stored content is MATCHED or merely RECORDED, and the
-//! inline `checks` run over what matched.
+//! inline `checks` run over what matched. The body TYPE is held on every
+//! expect, under either `check` (`body`).
 //!
 //! **The non-matching-datagram contract.** A byte-identical retransmission of
 //! something already surfaced is absorbed BELOW this API — the harness's
@@ -17,20 +18,19 @@
 //! by a background policy, or a FAILURE — it is never quietly tolerated and
 //! never silently dropped. There is no absorb-set and no window construct.
 
-use pivot_schema::body::{Body, BodyCompare, BodyShape};
 use pivot_schema::bundle::{Arrived, Failure};
-use pivot_schema::known_bug::KnownBug;
 use pivot_schema::msg::{Header, MsgSpec};
 use sip_message::generators::states_send_time;
-use sip_message::header::{HeaderValue, MediaType};
-use sip_message::{
-    header_forms_equivalent, HeaderName, HeaderProjection, Method, SipMessage, SipStr,
-};
+use sip_message::{header_forms_equivalent, HeaderName, HeaderProjection, Method, SipMessage};
 
 use crate::early::LearnedForks;
 use crate::plan::{CompiledStep, Discriminator};
 use crate::resolve::Resolver;
 use crate::scope::{Finding, Scope};
+
+mod body;
+
+pub use body::{body_type_finding, BodyTypeFinding};
 
 /// The facts a gate reads off an inbound datagram. Extraction lives in
 /// `sip-message`; this is the projection the gate compares against.
@@ -259,7 +259,8 @@ pub fn rides_observed_fork(
 
 /// The WHOLE content an asserted expect states, headers included (§6.4). Under
 /// `record` the stored content is the recorded value and is matched against
-/// nothing — which is a document decision, never a lane's.
+/// nothing — which is a document decision, never a lane's — and only its body
+/// type is held, after the match ([`body_type_finding`]).
 ///
 /// This is the PREFERRED reading rather than the match itself: a datagram that
 /// satisfies it is the step's beyond doubt, so `exec` offers every armed step
@@ -302,52 +303,12 @@ pub fn body_content_holds(
     if !step.asserts_content() {
         return GateVerdict::Matches;
     }
-    if let Some((reason, bug)) = body_holds(&step.msg, inbound) {
+    if let Some((reason, bug)) = body::body_holds(&step.msg, inbound) {
         if !bug.is_some_and(|bug| scope.waives(bug)) {
             return GateVerdict::Rejects(reason);
         }
     }
     GateVerdict::Matches
-}
-
-/// What a body assertion this lane does NOT gate on found — its declared known
-/// bug and the miss itself. Empty where the body held, where no known bug names
-/// the miss, and under `check: record`, which asserts nothing at all.
-pub fn waived_body_findings(
-    step: &CompiledStep,
-    inbound: &Inbound,
-    scope: &Scope<'_>,
-) -> Vec<(KnownBug, Failure)> {
-    if !step.asserts_content() {
-        return Vec::new();
-    }
-    body_holds(&step.msg, inbound)
-        .and_then(|(reason, bug)| bug.filter(|bug| scope.waives(*bug)).map(|bug| (bug, reason)))
-        .map(|(bug, reason)| {
-            vec![(
-                bug,
-                Failure::CheckFailed {
-                    site: format!("step {:?}", step.id),
-                    field: "body".into(),
-                    op: "shape".into(),
-                    expected: shape_token(&step.msg).unwrap_or_default(),
-                    observed: reason,
-                },
-            )]
-        })
-        .unwrap_or_default()
-}
-
-/// The body shape token an expect declares, for a finding to name.
-fn shape_token(spec: &MsgSpec) -> Option<String> {
-    match spec.body.as_ref()? {
-        Body::Shape(shape) => Some(match shape.mode {
-            BodyShape::Absent => "absent".into(),
-            BodyShape::SdpPresent => "sdp-present".into(),
-            BodyShape::MultipartPresent => "multipart-present".into(),
-        }),
-        Body::Resource(_) | Body::Multipart(_) => Some("present".into()),
-    }
 }
 
 /// What every header an asserted expect declares found on the datagram that
@@ -530,80 +491,6 @@ fn folded_rows_hold(
 /// reason it could not, which no wire value equals and every finding can state.
 fn frozen_value(want: &Header, resolver: &Resolver<'_>) -> Result<String, String> {
     resolver.text(&want.value).map_err(|e| format!("unresolved accessor: {e}"))
-}
-
-/// A declared body SHAPE on an expect, and the lane-declarable known bug that
-/// names the miss where one does. A resource or multipart body on an expect
-/// gates on PRESENCE only: the content assertion a text resource carries is the
-/// post-run confrontation's, read off the recording (§8.3), and a binary
-/// resource is presence-only everywhere.
-///
-/// The one nameable miss is a body on a PROVISIONAL the document expects
-/// stripped: that is a SUT that did not apply the 18x rewrite its routing
-/// decision armed, and the call continues around it. A body missing where one
-/// is owed, or the wrong media type, names no known bug and always gates.
-fn body_holds(spec: &MsgSpec, inbound: &Inbound) -> Option<(String, Option<KnownBug>)> {
-    let Some(body) = &spec.body else { return None };
-    let media =
-        inbound.content_type.as_deref().and_then(|t| MediaType::parse(&SipStr::owned(t)).ok());
-    let is_sdp = media.as_ref().is_some_and(MediaType::is_sdp);
-    let is_multipart = media.as_ref().is_some_and(MediaType::is_multipart);
-    match body {
-        Body::Shape(shape) => match shape.mode {
-            BodyShape::Absent if !inbound.body.is_empty() => Some((
-                format!("body must be absent; {} bytes arrived", inbound.body.len()),
-                unstripped_provisional(spec),
-            )),
-            BodyShape::SdpPresent if !is_sdp => Some((
-                format!(
-                    "body must be SDP; content type is {:?}",
-                    inbound.content_type.as_deref().unwrap_or("absent")
-                ),
-                None,
-            )),
-            BodyShape::MultipartPresent if !is_multipart => Some((
-                format!(
-                    "body must be multipart; content type is {:?}",
-                    inbound.content_type.as_deref().unwrap_or("absent")
-                ),
-                None,
-            )),
-            _ => None,
-        },
-        Body::Resource(_) | Body::Multipart(_) if inbound.body.is_empty() => {
-            Some(("body must be present; none arrived".into(), None))
-        }
-        // A resource compared as a session description keeps the media-type
-        // gate the `sdp-present` shape carries: what arrived must be SDP for
-        // the confrontation to read it as one.
-        Body::Resource(resource) if resource.compare == Some(BodyCompare::Sdp) && !is_sdp => {
-            Some((
-                format!(
-                    "body must be SDP; content type is {:?}",
-                    inbound.content_type.as_deref().unwrap_or("absent")
-                ),
-                None,
-            ))
-        }
-        // A multipart expect keeps the media-type gate the `multipart-present`
-        // shape carries: what arrived must be multipart for the confrontation
-        // to locate its parts. The parts' content stays the confrontation's.
-        Body::Multipart(_) if !is_multipart => Some((
-            format!(
-                "body must be multipart; content type is {:?}",
-                inbound.content_type.as_deref().unwrap_or("absent")
-            ),
-            None,
-        )),
-        Body::Resource(_) | Body::Multipart(_) => None,
-    }
-}
-
-/// The known bug a body-on-a-stripped-provisional miss falls under, where the
-/// step is one: a 1xx above 100, which is the message a `relay18x` mode
-/// rewrites. On any other message an unexpected body is nobody's known defect.
-fn unstripped_provisional(spec: &MsgSpec) -> Option<KnownBug> {
-    matches!(spec.status, Some(101..=199)).then_some(KnownBug::ProvisionalRewriteNotApplied)
 }
 
 #[cfg(test)]

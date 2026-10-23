@@ -159,7 +159,7 @@ export interface ShapeProbe extends ProbeSite {
  */
 export interface BodyProbe extends ProbeSite {
   readonly kind: "body"
-  /** The expectation's bare `type/subtype`, lowercased, parameters stripped. */
+  /** The expectation's bare `type/subtype`, lowercased, parameters stripped; the declared shape on a shape-only one. */
   readonly mediaType: string
   readonly scope: MsgScope
   readonly compare: Body.BodyCompare

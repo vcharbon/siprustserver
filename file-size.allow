@@ -70,7 +70,6 @@ crates/media/src/transport.rs 533
 crates/pivot-interpreter/src/close.rs 649
 crates/pivot-interpreter/src/close/tests.rs 833
 crates/pivot-interpreter/src/cursor.rs 540
-crates/pivot-interpreter/src/gate.rs 610
 crates/pivot-interpreter/src/plan.rs 1620
 crates/pivot-interpreter/src/render/tests.rs 901
 crates/pivot-interpreter/src/retransmit.rs 684

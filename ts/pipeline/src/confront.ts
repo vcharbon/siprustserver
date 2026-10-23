@@ -359,7 +359,8 @@ const headerProbes = (
 /**
  * One probe per recorded reception whose `expect` asserts a body the reception
  * does not carry: a resource body under the expectation's `compare` mode, a
- * multipart body part by part. A frozen body compares byte for byte, whatever
+ * multipart body part by part, a declared shape (`absent`, `sdp-present`,
+ * `multipart-present`) by the reception's presence and bare type. A frozen body compares byte for byte, whatever
  * its bytes hold; `sdp` and `xml` fold both sides after a strict UTF-8 decode,
  * and a side that is not UTF-8 under a text compare is a probe. Under `sdp`
  * there is one probe per differing line key, each side one element per line
@@ -454,7 +455,30 @@ const messageBodyProbes = (
     return multipartProbes(step.id, body.multipart, scope, input.resources, message, media, origins)
       .map((probe) => ({ step: step.id, probe }))
   }
-  return []
+  return shapeBodyProbes(step.id, body.mode, scope, message).map((probe) => ({ step: step.id, probe }))
+}
+
+/**
+ * A shape-only expectation held against the reception's type: one probe where
+ * the reception breaks the shape — a body where `absent` is stated, none or one
+ * of another type where `sdp-present` or `multipart-present` is — keyed by the
+ * shape, its sides the shape and the received bare type (`absent` where the
+ * reception carried no body). Read under either check.
+ */
+const shapeBodyProbes = (
+  step: string,
+  shape: Body.BodyShape,
+  scope: MsgScope,
+  message: Bundle.RecordedMessage
+): ReadonlyArray<BodyProbe> => {
+  const received = recordedBodiless(message) ? "absent" : mediaTypeOf(undefined, message)
+  const holds = shape === "absent"
+    ? received === "absent"
+    : shape === "sdp-present"
+    ? received === "application/sdp"
+    : received.startsWith("multipart/")
+  if (holds) return []
+  return [{ kind: "body", step, mediaType: shape, scope, compare: "exact", captured: [shape], replayed: [received] }]
 }
 
 /**
