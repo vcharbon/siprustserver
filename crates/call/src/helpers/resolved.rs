@@ -72,8 +72,8 @@ pub fn response_origin(call: &Call, leg_id: &str, facts: ResponseFacts<'_>) -> R
     let Some(from) = facts.from.filter(|f| holds_our_tag(leg, f)) else {
         return ResponseOrigin::Stray;
     };
-    let dialling =
-        leg.outbound_invite.as_ref().is_some_and(|i| i.our_tag == from && i.cseq == facts.cseq);
+    let dialling = leg.outbound_invite().is_some_and(|i| i.our_tag == from)
+        && leg.dialled_cseq() == Some(facts.cseq);
     let invite = facts.method.eq_ignore_ascii_case("INVITE");
     if dialling && invite && facts.to.is_some() && (101..300).contains(&facts.status) {
         return ResponseOrigin::Creates;

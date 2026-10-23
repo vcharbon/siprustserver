@@ -381,7 +381,7 @@ define_service! {
                 let b_leg = ctx.call.b_legs().iter().find(|l| l.leg_id == leg);
                 let sent = b_leg.and_then(|l| {
                     call::helpers::callee_dialog(l, &b_tag)
-                        .and_then(relay::acked_invite)
+                        .and_then(|d| relay::acked_invite(l, d))
                         .or_else(|| relay::dialling_invite(l))
                 });
                 let origin = b_leg.and_then(|l| relay::next_origin_in_dialog(l, &b_tag));

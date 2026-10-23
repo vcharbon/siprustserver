@@ -73,8 +73,10 @@ async fn each_dialog_carries_the_state_its_messages_put_it_in() {
     assert_eq!(ok.to().tag(), Some(a2.as_str()), "the answer names fork 2's face");
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
-    settle_until(|| live().is_some_and(|c| callee_fork(&c, "fork2").awaited_ack_cseq.is_none()))
-        .await;
+    settle_until(|| {
+        live().is_some_and(|c| call::helpers::awaited_ack_cseq(callee_fork(&c, "fork2")).is_none())
+    })
+    .await;
     let answered = live().expect("the call is live");
     assert_eq!(callee_fork(&answered, "fork2").state, DialogState::Confirmed);
     assert!(callee_fork(&answered, "fork1").retired().is_some(), "the losing fork retires");

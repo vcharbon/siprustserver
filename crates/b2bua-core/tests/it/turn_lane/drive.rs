@@ -389,7 +389,7 @@ fn resolve(call: Call, leg: &str, event: &CallEvent) -> Option<(Resolved, Call)>
         SipMessage::Request(req) => {
             let Some(to) = req.to().tag() else { return Some((Resolved::default(), call)) };
             let found = call::helpers::find_leg(&call, leg)?;
-            let dialled = found.outbound_invite.is_some();
+            let dialled = found.outbound_invite().is_some();
             let dialog = found
                 .dialogs
                 .of_request(Some(to), req.from().tag())

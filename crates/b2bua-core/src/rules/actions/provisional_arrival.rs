@@ -86,23 +86,19 @@ fn reliable_provisional(resp: &SipResponse, leg_id: &str) -> Option<ProvisionalI
 /// Whether the INVITE `id` answers still awaits its final on the responder's
 /// leg: the INVITE the leg was dialled with before its final, or a re-INVITE
 /// in flight on the dialog the responder's tag names — relayed there and
-/// awaiting its final, or this stack's own, the round its client-transaction
-/// handle holds still open (no 2xx taken). The one reading the screen, the
-/// PRACK step and the model invariants share.
+/// awaiting its final, or this stack's own, the INVITE the dialog's record
+/// holds with no 2xx taken. The one reading the screen, the PRACK step and the
+/// model invariants share.
 pub fn invite_open(call: &Call, id: &ProvisionalId) -> bool {
     let Some(leg) = call::helpers::find_leg(call, &id.leg) else { return false };
     let cseq = id.invite_cseq.as_i64();
-    if let Some(invite) = leg.outbound_invite.as_ref().filter(|i| i.cseq == cseq) {
+    if let Some(invite) = leg.outbound_invite().filter(|_| leg.dialled_cseq() == Some(cseq)) {
         return invite.final_received.is_none();
     }
     call::helpers::dialog_with_peer(leg, &id.responder_tag).is_some_and(|d| {
-        let relayed = d
-            .requests
-            .iter()
-            .any(|p| p.method.eq_ignore_ascii_case("INVITE") && p.outbound_cseq == cseq);
-        let own_round = invite_cseq_from_handle(d) == Some(cseq)
-            && d.ack_branch.is_none()
-            && d.awaited_ack_cseq.is_none();
+        let relayed = call::helpers::invite_relay(d).is_some_and(|p| p.outbound_cseq == cseq);
+        let own_round =
+            invite_cseq_from_handle(leg, d) == Some(cseq) && !call::helpers::invite_taken(d);
         d.is_confirmed() && (relayed || own_round)
     })
 }
@@ -111,8 +107,8 @@ pub fn invite_open(call: &Call, id: &ProvisionalId) -> bool {
 /// whose provisionals create early dialogs.
 fn dials_the_leg(call: &Call, id: &ProvisionalId) -> bool {
     call::helpers::find_leg(call, &id.leg)
-        .and_then(|l| l.outbound_invite.as_ref())
-        .is_some_and(|i| i.cseq == id.invite_cseq.as_i64())
+        .and_then(|l| l.dialled_cseq())
+        .is_some_and(|cseq| cseq == id.invite_cseq.as_i64())
 }
 
 /// The responder's dialog of `id` owes the answer to `offer` in the PRACK of

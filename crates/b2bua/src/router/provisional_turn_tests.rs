@@ -38,7 +38,7 @@ fn call_with_a_ringing_callee(answered: bool) -> Call {
         call.a_leg.dialogs = vec![a1].into();
         call.a_leg.own_tag = Some("a1".into());
         call::testkit::stage_leg(&mut call.a_leg, LegState::Confirmed);
-        call.a_leg.invite_final_sent = Some(200);
+        *call.a_leg.invite_final_sent_mut() = Some(200);
     }
     let mut b = call::testkit::dialled_leg("b-1", "svc");
     b.call_id = "bcid@x".into();
@@ -108,7 +108,7 @@ fn recorded(rseq: u32) -> Provisional {
             rseq: RSeq(rseq),
         },
         responder_sdp: false,
-        responder: ResponderAck::OwnPrack { branch: "z9hG4bK-own".into() },
+        responder: ResponderAck::OwnPrack,
         shown: None,
     }
 }

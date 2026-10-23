@@ -50,21 +50,6 @@ pub struct TurnInput<'a> {
     pub now_ms: i64,
 }
 
-/// The branch of a BYE client transaction `event` ends: a final to it, or a
-/// transaction timeout (whose branch names it alone).
-fn bye_transaction_end(event: &CallEvent) -> Option<&str> {
-    match event {
-        CallEvent::Sip { message, .. } => match message.as_ref() {
-            SipMessage::Response(r) if r.status() >= 200 && r.cseq().method() == Method::Bye => {
-                r.top_via().branch()
-            }
-            _ => None,
-        },
-        CallEvent::Timeout { branch, .. } => Some(branch.as_str()),
-        _ => None,
-    }
-}
-
 /// Run the synchronous rule chain for one in-dialog event, with the
 /// MAX_MESSAGES_PER_CALL cap-defense wrapped around it.
 ///
@@ -190,11 +175,6 @@ pub fn rule_chain_turn(
     // The request record a final or a timeout settles is settled before the
     // rules read the event, which they read on `resolved` (ADR-0055 §2).
     exec.settle_before_rules(&mut call, event, source_leg_id, &mut resolved);
-    // The end of a BYE that released a retired dialog, its final or its
-    // timeout, settles that release (§15.1.1) before the rules read it.
-    if let Some(branch) = bye_transaction_end(event) {
-        call = call::helpers::settle_straggler_release(call, branch);
-    }
     // The transaction layer answered an out-of-dialog CANCEL itself — 200 to
     // the CANCEL, 487 to the initial INVITE (RFC 3261 §9.2): the record
     // carries that transaction's one final before the rules read it, over a

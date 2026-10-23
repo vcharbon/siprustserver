@@ -34,7 +34,7 @@ fn a_call_with_an_applied_decision_is_decided() {
 #[test]
 fn a_call_whose_caller_was_answered_is_decided() {
     let mut call = born();
-    call.a_leg.invite_final_sent = Some(503);
+    *call.a_leg.invite_final_sent_mut() = Some(503);
     assert!(!is_undecided(&call), "the caller already has her final");
 }
 

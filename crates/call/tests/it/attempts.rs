@@ -32,7 +32,7 @@ fn an_attempt_names_its_legs_and_its_legs_name_it() {
 #[test]
 fn the_next_attempt_supersedes_one_whose_leg_is_being_cancelled() {
     let mut call = call_with_attempt(LegState::Early);
-    call.b_legs[0].outbound_invite.as_mut().unwrap().cancel_sent = true;
+    call.b_legs[0].outbound_invite_mut().unwrap().cancel_sent = true;
     let (id, ended) = open_attempt(&mut call, AttemptCause::Failover, Deadline::Off);
     assert_eq!((id, ended), (AttemptId(1), vec![AttemptId(0)]));
     assert_eq!(call.attempts[0].outcome, Some(AttemptOutcome::Superseded));
@@ -61,7 +61,7 @@ fn settling_reads_the_legs_and_the_call() {
     assert_eq!(settle_attempts(&mut ringing), vec![], "a ringing attempt stays open");
 
     let mut cancelling = call_with_attempt(LegState::Early);
-    cancelling.b_legs[0].outbound_invite.as_mut().unwrap().cancel_sent = true;
+    cancelling.b_legs[0].outbound_invite_mut().unwrap().cancel_sent = true;
     assert_eq!(settle_attempts(&mut cancelling), vec![], "a cancelling leg has not ended");
 
     let mut refused = call_with_attempt(LegState::Terminated);

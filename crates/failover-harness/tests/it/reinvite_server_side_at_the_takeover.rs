@@ -252,6 +252,19 @@ fn responses_from_toward(
         .count()
 }
 
+/// The INVITE the survivor re-sends once its held CANCEL waits on it (§9.1):
+/// the callee's transaction took it as a retransmission, below its TU.
+fn assert_resent_once_and_absorbed(bob: &Agent) {
+    let invites: Vec<_> = bob
+        .wire_view()
+        .into_iter()
+        .filter(|e| e.start_line().starts_with("INVITE "))
+        .skip(1)
+        .collect();
+    assert_eq!(invites.len(), 2, "the re-INVITE and its one re-send");
+    assert_eq!(invites[1].seen_by(), scenario_harness::absorption::SeenBy::WireOnly);
+}
+
 /// Which request reaches the survivor first after the kill.
 #[derive(Clone, Copy)]
 enum FirstAtTheSurvivor {
@@ -301,11 +314,10 @@ async fn reinvite_cancelled_at_the_takeover(name: &str, first: FirstAtTheSurvivo
     fh.advance(Duration::from_millis(200)).await;
     assert_taken_over_once(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before);
 
-    // ── The callee's side: the INVITE re-sent once, its 100, the CANCEL ─────
-    let resent = bob.receive("INVITE").await;
-    assert_eq!(resent.request().top_via().branch(), at_bob.request().top_via().branch());
-    at_bob.respond(100, "Trying").await;
+    // ── The callee's side: the INVITE re-sent once, its transaction repeating
+    //    its 100 (§17.2.1), the CANCEL ────────────────────────────────────────
     bob.receive_absorbing("CANCEL", &["INVITE"]).await.respond(200, "OK").await;
+    assert_resent_once_and_absorbed(&bob);
     at_bob.respond(487, "Request Terminated").await;
     bob.receive_absorbing("ACK", &["INVITE"]).await;
     assert_eq!(round_invites_sent_to(&fh, bob.addr(), REOFFER), 1, "one b-leg INVITE");

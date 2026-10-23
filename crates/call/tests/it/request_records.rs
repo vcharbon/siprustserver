@@ -25,7 +25,7 @@ fn a_retired_dialogs_relay_is_found_by_its_tags_and_closed_in_place() {
         ..RequestRecord::relayed("UPDATE", 3, 3)
     };
     let lost = Dialog {
-        state: DialogState::Retired(RetiredDialog { open_requests: vec![open], release: None }),
+        state: DialogState::Retired(RetiredDialog { open_requests: vec![open] }),
         ..Dialog::new(B_LOCAL_TAG, "lost-fork", DialogState::Early, 3)
     };
     call.b_legs[0].dialogs.insert(lost);

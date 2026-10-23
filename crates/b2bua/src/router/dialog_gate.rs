@@ -119,7 +119,7 @@ pub(super) fn request_verdict(call: &Call, leg_id: &str, req: &SipRequest) -> Ve
     };
     // A caller-facing dialog names nothing until the caller was shown its tag:
     // in a provisional, or in the 2xx that established it.
-    let dialled = leg.outbound_invite.is_some();
+    let dialled = leg.outbound_invite().is_some();
     let dialog = leg
         .dialogs
         .of_request(Some(to), req.from().tag())

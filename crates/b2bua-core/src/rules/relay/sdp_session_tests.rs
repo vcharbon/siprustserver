@@ -320,14 +320,17 @@ fn peer_relays(call: &mut Call, leg: &str, method: &str, with_sdp: bool) {
         offered: with_sdp,
         ..call::RequestRecord::relayed(method, 7, 7)
     };
-    let target = std::iter::once(&mut call.a_leg)
-        .chain(call.b_legs.iter_mut())
-        .find(|l| l.leg_id == target)
-        .unwrap();
-    if target.dialogs.confirmed().is_none() {
-        target.dialogs.insert(call::Dialog::new("as", "bob", call::DialogState::Confirmed, 1));
-    }
-    target.dialogs.confirmed_mut().unwrap().requests.push(pending);
+    *call = call::helpers::update_leg(call.clone(), &target, |target| {
+        if target.dialogs.confirmed().is_none() {
+            target.dialogs.insert(call::Dialog::new("as", "bob", call::DialogState::Confirmed, 1));
+        }
+        let d = target.dialogs.confirmed_mut().unwrap();
+        if pending.is_invite() {
+            d.sent_invite = Some(pending);
+        } else {
+            d.requests.push(pending);
+        }
+    });
 }
 
 /// The peer of `leg` opens an offer/answer exchange with a request carrying a
@@ -573,18 +576,13 @@ fn forked() -> Call {
     let mut c = call();
     let leg = &mut c.b_legs[0];
     call::testkit::stage_leg(leg, LegState::Early);
-    leg.outbound_invite = Some(call::OutboundInvite::new("as", 1, 0, None));
+    leg.invite = Some(call::RequestRecord::dialled(1, None, call::OutboundInvite::new("as", 0)));
     leg.dialogs = ["f1", "f2"]
         .into_iter()
         .map(|tag| call::Dialog::new("as", tag, call::DialogState::Early, 1))
         .collect();
-    send(
-        &mut c,
-        "b-1",
-        Author::Leg("a"),
-        Carried::Opening,
-        &sdp("alice 1 1 IN IP4 192.0.2.1", 10000),
-    );
+    let opening = sdp("alice 1 1 IN IP4 192.0.2.1", 10000);
+    send(&mut c, "b-1", Author::Leg("a"), Carried::Opening, &opening);
     c
 }
 

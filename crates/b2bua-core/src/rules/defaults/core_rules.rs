@@ -15,19 +15,18 @@ use call::{
 use sip_message::header::RAck;
 use sip_message::{Method, SipRequest};
 
-use b2bua_sdk::provisional::{
-    absorbed_provisional_actions, originator_final_sent, shown_to_no_one,
-};
-
+use crate::rules::method_table::row;
 use b2bua_sdk::model::{
     LegEnd, Match, MessageTransform, RuleAction, RuleCall, RuleContext, RuleDefinition,
     RuleHandleResult, TimerDelay, CORE_LAYER,
 };
+use b2bua_sdk::provisional::{
+    absorbed_provisional_actions, originator_final_sent, shown_to_no_one,
+};
 
 use super::reaper_verdicts::{reap_handler_panic, reap_message_cap, reap_overflow, reap_stale};
-use super::request_timeouts::{
-    going_away_timeout, record_timeout_actions, straggler_release_timeout,
-};
+use super::request_timeouts::{going_away_timeout, record_timeout_actions};
+use super::straggler::{fork_straggler, straggler_release, straggler_release_timeout};
 
 /// A CORE_LAYER rule.
 pub(super) fn rule(
@@ -113,13 +112,8 @@ pub(crate) fn still_owed_bare_ack<'a>(call: &'a RuleCall) -> impl Iterator<Item 
 fn find_pending_relayed_invite(ctx: &RuleContext, inbound_cseq: i64) -> Option<(String, i64)> {
     std::iter::once(ctx.call.a_leg()).chain(ctx.call.b_legs().iter()).find_map(|leg| {
         leg.dialogs.iter().find_map(|d| {
-            d.requests
-                .iter()
-                .find(|p| {
-                    p.method.eq_ignore_ascii_case("INVITE")
-                        && p.inbound_cseq == inbound_cseq
-                        && !p.cancelled
-                })
+            call::helpers::invite_relay(d)
+                .filter(|p| p.inbound_cseq == inbound_cseq && !p.cancelled)
                 .map(|p| (leg.leg_id.clone(), p.outbound_cseq))
         })
     })
@@ -251,7 +245,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule(
             "reinvite-glare",
             &["relay-reinvite"],
-            Match::request().method("INVITE").filter(|ctx| ctx.invite_glare()),
+            Match::request()
+                .method("INVITE")
+                .filter(|ctx| row(&Method::Invite).glare && ctx.invite_glare()),
             |ctx| ok(vec![RuleAction::RefuseGlare { refusal: ctx.glare_refusal() }]),
         ),
         // UPDATE glare (RFC 3311 §5.2, `RuleContext::update_refusal`): 500 over
@@ -262,7 +258,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule(
             "update-glare",
             &["relay-update", "update-peer-unavailable"],
-            Match::request().method("UPDATE").filter(|ctx| ctx.update_refusal().is_some()),
+            Match::request()
+                .method("UPDATE")
+                .filter(|ctx| row(&Method::Update).glare && ctx.update_refusal().is_some()),
             |ctx| {
                 let refusal = ctx.update_refusal()?;
                 ok(vec![RuleAction::RefuseGlare { refusal }])
@@ -397,8 +395,10 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .leg_states(&[LegState::Confirmed, LegState::Terminated])
                 .filter(|ctx| {
                     let Some(d) = ctx.dialog() else { return false };
+                    let Some(leg) = ctx.source_leg() else { return false };
                     let Some(resp) = ctx.response() else { return false };
-                    d.ack_branch.is_some() && crate::rules::relay::retransmitted_2xx(d, resp)
+                    call::helpers::ack_branch(d).is_some()
+                        && crate::rules::relay::retransmitted_2xx(leg, d, resp)
                 }),
             |ctx| {
                 ok(vec![RuleAction::AckLeg { leg_id: ctx.source_leg_id.to_string(), body: None }])
@@ -778,9 +778,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule(
             "absorb-straggler-release-final",
             &[],
-            Match::response().method("BYE").filter(|ctx| {
-                ctx.dialog().and_then(|d| d.retired()).is_some_and(|r| r.release.is_some())
-            }),
+            Match::response().method("BYE").filter(|ctx| straggler_release(ctx.resolved)),
             |_ctx| ok(vec![]),
         )
         .runs_while_terminating(),
@@ -896,7 +894,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .method("BYE")
                 .direction(Direction::FromA)
                 .leg_states(&[LegState::Trying, LegState::Early])
-                .filter(|ctx| ctx.call.a_leg().invite_final_sent.is_none()),
+                .filter(|ctx| ctx.call.a_leg().invite_final_sent().is_none()),
             |ctx| {
                 let a = ctx.source_leg_id.to_string();
                 let mut actions = vec![
@@ -940,8 +938,13 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             |ctx| {
                 // Pre-mark the BYE-sending leg `bye_received` (RFC 3261 §15.1.2) so the
                 // subsequent begin-termination skips it (no duplicate BYE back to the
-                // sender) and only tears down the peer.
-                ok(vec![
+                // sender) and only tears down the peer. The 2xx the sender answered
+                // this stack's INVITE with is ACKed first where the ACK owes no answer
+                // (§13.2.2.4): its sender may take no other.
+                let source = ctx.source_leg_id.to_string();
+                let owed = ctx.source_leg().is_some_and(crate::rules::relay::bare_ack_owed);
+                let ack = owed.then(|| RuleAction::AckLeg { leg_id: source.clone(), body: None });
+                let answer = [
                     RuleAction::Respond {
                         status: 200,
                         reason: "OK".into(),
@@ -949,21 +952,22 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                         content_type: None,
                     },
                     RuleAction::TerminateLeg {
-                        leg_id: ctx.source_leg_id.to_string(),
+                        leg_id: source.clone(),
                         end: LegEnd::PeerByeAnswered,
                     },
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Bye,
-                        leg_id: ctx.source_leg_id.to_string(),
+                        leg_id: source.clone(),
                         status_code: None,
                         reason: None,
                     },
                     RuleAction::BeginTermination {
                         reason: Some("BYE".into()),
                         cause: TerminationCause::RemoteBye,
-                        by_leg: Some(ctx.source_leg_id.to_string()),
+                        by_leg: Some(source),
                     },
-                ])
+                ];
+                ok(ack.into_iter().chain(answer).collect())
             },
         ),
         rule("relay-reinvite", &[], Match::request().method("INVITE"), |_| {
@@ -1102,15 +1106,15 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             ok(actions)
         }),
         rule("handle-timeout", &[], Match::timeout(), |ctx| {
-            // A request record's timeout reads by the record's origin and the
-            // method table (ADR-0055 §2).
-            if let Some(record) = ctx.timed_out_record() {
-                return ok(record_timeout_actions(ctx, record));
-            }
             // The BYE that released a fork straggler times out the release's
             // alone (§15.1.1): the winning dialog on the leg never reads it.
             if straggler_release_timeout(ctx) {
                 return ok(vec![]);
+            }
+            // A request record's timeout reads by the record's origin and the
+            // method table (ADR-0055 §2).
+            if let Some(record) = ctx.timed_out_record() {
+                return ok(record_timeout_actions(ctx, record));
             }
             // A **pending b-leg INVITE** transaction timeout (Timer B / the long
             // INVITE backstop) on a failover-capable call is a failure the
@@ -1565,23 +1569,4 @@ fn rack_tokens(req: &SipRequest) -> Option<RAckTokens> {
         cseq: CSeq(rack.seq()),
         names_invite: *rack.method() == Method::Invite,
     })
-}
-
-/// Whether the current response is a fork straggler's 2xx on its b-leg: a
-/// To-tag naming no dialog of the leg, or a retired one, on a leg a 2xx
-/// established, answering an INVITE no later than the one the established
-/// dialog's ACK acknowledges (every fork of one INVITE answers on its CSeq,
-/// RFC 3261 §12.1.2).
-fn fork_straggler(ctx: &RuleContext) -> bool {
-    let Some(resp) = ctx.response() else { return false };
-    if resp.to().tag().is_none_or(str::is_empty) {
-        return false;
-    }
-    let Some(leg) = ctx.call.b_legs().iter().find(|l| l.leg_id == ctx.source_leg_id) else {
-        return false;
-    };
-    let Some(established) = leg.dialogs.established() else { return false };
-    ctx.dialog().is_none_or(|d| d.retired().is_some())
-        && crate::rules::relay::acked_invite_cseq(established)
-            .is_some_and(|acked| resp.cseq().seq() <= acked)
 }

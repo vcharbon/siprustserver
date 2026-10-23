@@ -54,7 +54,7 @@ fn scripts() -> Vec<(&'static str, Vec<Step>)> {
     vec![
         (
             "answered-bob-hangs-up",
-            vec![Step::BobAnswers(180), Step::BobAnswers(200), Step::BobByes],
+            vec![Step::BobAnswers(180), Step::BobAnswers(200), Step::AliceAcks, Step::BobByes],
         ),
         (
             "answered-alice-hangs-up",

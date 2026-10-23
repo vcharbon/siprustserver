@@ -54,7 +54,7 @@ fn call() -> Call {
     b.leg_id = "b-1".into();
     b.call_id = "bcid".into();
     b.own_tag = None;
-    b.outbound_invite = Some(OutboundInvite::new("own", 1, 0, None));
+    b.invite = Some(call::RequestRecord::dialled(1, None, OutboundInvite::new("own", 0)));
     b.dialogs = vec![dialog("own", "b1")].into();
     call::helpers::add_b_leg(call, b)
 }
@@ -138,7 +138,11 @@ fn an_owed_prack_on_an_ended_leg_breaks_the_prack_invariant() {
     );
     call::testkit::stage_leg(&mut call.b_legs[0], LegState::Confirmed);
     let confirmed = call.b_legs[0].dialogs.confirmed_mut().expect("a confirmed dialog");
-    confirmed.awaited_ack_cseq = Some(1);
+    let mut taken = call::testkit::own_invite(1, None);
+    if let Some(x) = taken.invite.as_mut() {
+        x.awaited_ack_cseq = Some(1);
+    }
+    confirmed.sent_invite = Some(taken);
     call.provisionals[0].id.responder_tag = confirmed.peer_tag.clone();
     assert_eq!(no_owed_prack_past_its_invite(&after(&call)), Ok(()), "waiting for the ACK");
 }
@@ -160,7 +164,7 @@ fn an_unshown_provisional_still_owed_its_prack_breaks_the_invariant() {
     call.provisionals.push(owed);
     let err = no_unshown_owed_prack(&after(&call)).unwrap_err();
     assert!(err.contains("RSeq 7"), "{err}");
-    call.provisionals[0].responder = ResponderAck::OwnPrack { branch: "z9hG4bK-own".into() };
+    call.provisionals[0].responder = ResponderAck::OwnPrack;
     assert_eq!(no_unshown_owed_prack(&after(&call)), Ok(()));
 }
 
@@ -225,7 +229,7 @@ fn a_give_up_under_a_shown_provisional_breaks_the_ladder_invariant() {
 #[test]
 fn an_early_a_leg_past_a_rejection_breaks_the_ended_dialog_invariant() {
     let mut call = call();
-    call.a_leg.invite_final_sent = Some(486);
+    *call.a_leg.invite_final_sent_mut() = Some(486);
     let err = no_a_dialog_past_a_rejection(&after(&call)).unwrap_err();
     assert!(err.contains("took 486 but her dialog a1 is Early"), "{err}");
 }
@@ -317,7 +321,7 @@ fn a_dialog_dropped_from_its_leg_breaks_the_monotonic_invariant() {
 fn an_early_dialog_past_its_invite_breaks_the_early_dialog_invariant() {
     let mut rejected = call();
     assert_eq!(no_early_dialog_past_its_invite(&after(&rejected)), Ok(()), "both INVITEs open");
-    rejected.b_legs[0].outbound_invite.as_mut().unwrap().record_final(486);
+    rejected.b_legs[0].outbound_invite_mut().unwrap().record_final(486);
     let err = no_early_dialog_past_its_invite(&after(&rejected)).unwrap_err();
     assert!(err.contains("leg b-1 (answered 486) holds early dialog own/b1"), "{err}");
     let mut ended = call_with_b_dialog(DialogState::Ended(call::DialogEnd::PeerBye));
@@ -325,7 +329,7 @@ fn an_early_dialog_past_its_invite_breaks_the_early_dialog_invariant() {
     let err = no_early_dialog_past_its_invite(&after(&ended)).unwrap_err();
     assert!(err.contains("leg b-1 (Terminated) holds early dialog own/b1"), "{err}");
     let mut answered = call();
-    answered.a_leg.invite_final_sent = Some(486);
+    *answered.a_leg.invite_final_sent_mut() = Some(486);
     let err = no_early_dialog_past_its_invite(&after(&answered)).unwrap_err();
     assert!(err.contains("leg a (answered 486) holds early dialog a1/atag"), "{err}");
 }
@@ -333,15 +337,15 @@ fn an_early_dialog_past_its_invite_breaks_the_early_dialog_invariant() {
 #[test]
 fn a_cancelled_early_dialog_past_its_invites_final_breaks_the_cancel_invariant() {
     let mut call = call();
-    call.b_legs[0].outbound_invite.as_mut().unwrap().cancel_sent = true;
+    call.b_legs[0].outbound_invite_mut().unwrap().cancel_sent = true;
     call.b_legs[0].dialogs.by_tags_mut("own", "b1").unwrap().state =
         DialogState::Ending(call::EndingBy::Cancel);
     assert_eq!(no_cancelled_dialog_past_its_invites_final(&after(&call)), Ok(()), "awaits 487");
-    call.b_legs[0].outbound_invite.as_mut().unwrap().record_final(487);
+    call.b_legs[0].outbound_invite_mut().unwrap().record_final(487);
     let err = no_cancelled_dialog_past_its_invites_final(&after(&call)).unwrap_err();
     assert!(err.contains("dialog own/b1 is ending by CANCEL but its INVITE took 487"), "{err}");
-    call.b_legs[0].outbound_invite.as_mut().unwrap().final_received = None;
-    call.b_legs[0].outbound_invite.as_mut().unwrap().cancel_sent = false;
+    call.b_legs[0].outbound_invite_mut().unwrap().final_received = None;
+    call.b_legs[0].outbound_invite_mut().unwrap().cancel_sent = false;
     let err = no_cancelled_dialog_past_its_invites_final(&after(&call)).unwrap_err();
     assert!(err.contains("no CANCEL of its INVITE was sent"), "{err}");
 }
@@ -429,6 +433,7 @@ fn an_in_dialog_request_neither_answered_nor_relayed_breaks_the_answer_invariant
             source_timestamp: None,
             relayed_by: Default::default(),
             author: None,
+            invite: None,
         },
     );
     let turn = Turn { before: None, after: &relayed, received: Some(&req), sent: &[] };

@@ -64,7 +64,7 @@ pub(super) fn bridged() -> call::Call {
     a.remote_target = "sip:alice@127.0.0.1:5060".into();
     call.a_leg.dialogs.insert(a);
     call.a_leg.own_tag = Some("b2bua-a".into());
-    call.a_leg.invite_final_sent = Some(200);
+    *call.a_leg.invite_final_sent_mut() = Some(200);
     call::testkit::stage_leg(&mut call.a_leg, LegState::Confirmed);
     let mut b = Leg {
         leg_id: "b-1".into(),
@@ -74,13 +74,11 @@ pub(super) fn bridged() -> call::Call {
         local_uri: Some("sip:svc@10.0.0.9".into()),
         remote_uri: Some("sip:bob@10.0.0.2".into()),
         invite_request_uri: Some("sip:bob@10.0.0.2:5070".into()),
-        outbound_invite: Some(OutboundInvite::new("svc", 1, 0, None)),
+        invite: Some(call::RequestRecord::dialled(1, None, OutboundInvite::new("svc", 0))),
         own_tag: None,
         ext: None,
         kind: Some(LegKind::Destination),
         adopted: None,
-        invite_final_sent: None,
-        answer_preempted: None,
         attempt: None,
         ring: call::Ring::Silent,
         in_session_timer: None,

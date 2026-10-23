@@ -1,17 +1,28 @@
-//! A request the call takes part in on one of its dialogs ([`RequestRecord`],
-//! ADR-0055 §2): relayed from the peer leg, this stack's own, or received and
-//! held for a later answer. A record has a sent half (the request this side
-//! put on the dialog: its CSeq, branch, image and destination) and a received
-//! half (the request this side received and owes a final: the originator's
-//! for a relay, the request itself for a held record). It lives on the dialog
-//! holding it until its transaction settles, through that dialog's
-//! retirement, so a takeover copy rebuilds each transaction from it.
+//! A request the call takes part in ([`RequestRecord`], ADR-0055 §2): relayed
+//! from the peer leg, this stack's own, received and held for a later answer,
+//! or received and answered with a 2xx that awaits its ACK. A record has a
+//! sent half (the request this side put on the dialog: its CSeq, branch, image
+//! and destination) and a received half (the request this side received and
+//! owes a final: the originator's for a relay, the request itself for a held
+//! record). An INVITE's record carries its exchange beyond the final
+//! ([`InviteExchange`]). A record lives where its transaction does — a leg's
+//! dialog-creating INVITE on the leg, any other on the dialog holding it —
+//! until that transaction settles, through the dialog's retirement, so a
+//! takeover copy rebuilds each transaction from it.
 
 use serde::{Deserialize, Serialize};
 use sip_retransmit::timers::{T2, TIMER_F};
 
-use super::invite_txn::HostPort;
+use super::invite_exchange::InviteExchange;
+use super::outbound_invite::OutboundInvite;
 use super::relay_owner::RelayOwner;
+
+/// Host/port destination a request left toward.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostPort {
+    pub host: String,
+    pub port: u16,
+}
 
 /// Where a request record comes from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -26,6 +37,10 @@ pub enum RequestOrigin {
     /// Received on the dialog holding the record and owed a final a service
     /// gives on a later turn; nothing was sent for it.
     Held,
+    /// Received and answered by this stack: a leg's dialog-creating INVITE,
+    /// or an INVITE whose 2xx awaits its ACK on the dialog holding the record
+    /// (RFC 3261 §13.3.1.4). Nothing was sent for it.
+    Received,
 }
 
 /// The dialog usage a request belongs to (RFC 5057 §3).
@@ -54,13 +69,13 @@ pub struct SentRequest {
     pub destination: HostPort,
 }
 
-/// One request a dialog of the call holds open.
+/// One request of the call still open.
 ///
 /// The received half (`inbound_cseq` and the `source_*` lines) holds the
 /// originator's own bytes as text, so a response to it echoes them unaltered
-/// (RFC 3261 §8.2.6.2); an own record has none. A dialog-creating or
-/// in-dialog INVITE's sent half is the dialog's INVITE transaction handle, so
-/// its record carries no [`SentRequest`].
+/// (RFC 3261 §8.2.6.2); an own record has none. The dialling INVITE's record
+/// on a dialog it created holds no [`SentRequest`]: the leg's record of that
+/// INVITE holds its one image.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestRecord {
     pub method: String,
@@ -68,10 +83,11 @@ pub struct RequestRecord {
     /// The usage the request belongs to.
     pub usage: DialogUsage,
     /// The CSeq number this side sent the request with on the dialog holding
-    /// the record; 0 for a held record, which sent nothing.
+    /// the record; 0 for a received record, which sent nothing.
     pub outbound_cseq: i64,
-    /// The non-INVITE transaction this side sent; `None` for a held record
-    /// and for an INVITE.
+    /// The transaction this side sent; `None` for a received record, for the
+    /// dialling INVITE on a dialog it created, and for an INVITE whose
+    /// transaction the record never held.
     pub sent: Option<SentRequest>,
     /// When the record's transaction ends with no final: the sent request's
     /// Timer F, or the held request's answer deadline
@@ -115,6 +131,8 @@ pub struct RequestRecord {
     /// for a request no rule's action sent (a relay, a held request, the
     /// engine's own PRACK).
     pub author: Option<String>,
+    /// An INVITE's exchange beyond its final; `None` on any other method.
+    pub invite: Option<InviteExchange>,
 }
 
 impl RequestRecord {
@@ -151,6 +169,7 @@ impl RequestRecord {
             source_timestamp: None,
             relayed_by: RelayOwner::default(),
             author: None,
+            invite: method.eq_ignore_ascii_case("INVITE").then(InviteExchange::default),
         }
     }
 
@@ -172,9 +191,34 @@ impl RequestRecord {
         }
     }
 
+    /// The dialling INVITE of a leg, numbered `cseq` and sent as `sent`
+    /// (`None` where its image is not kept), with its dialling facts.
+    pub fn dialled(cseq: i64, sent: Option<SentRequest>, dialled: OutboundInvite) -> Self {
+        RequestRecord {
+            origin: RequestOrigin::Own,
+            sent,
+            invite: Some(InviteExchange { dialled: Some(dialled), ..InviteExchange::default() }),
+            ..RequestRecord::relayed("INVITE", cseq, 0)
+        }
+    }
+
+    /// The dialling INVITE numbered `cseq` on a dialog it created: its image
+    /// and dialling facts are the leg's record's.
+    pub fn dialled_on_dialog(cseq: i64) -> Self {
+        RequestRecord { origin: RequestOrigin::Own, ..RequestRecord::relayed("INVITE", cseq, 0) }
+    }
+
+    /// An INVITE this stack received numbered `cseq` and answers itself.
+    pub fn received_invite(cseq: i64) -> Self {
+        RequestRecord {
+            origin: RequestOrigin::Received,
+            ..RequestRecord::relayed("INVITE", 0, cseq)
+        }
+    }
+
     /// Whether this side sent the request: a relayed or own record.
     pub fn is_sent(&self) -> bool {
-        self.origin != RequestOrigin::Held
+        matches!(self.origin, RequestOrigin::Relayed | RequestOrigin::Own)
     }
 
     /// Whether the record is a relay.
@@ -198,17 +242,33 @@ impl RequestRecord {
         self.sent.as_ref().map(|s| s.branch.as_str())
     }
 
+    /// Whether the record is an INVITE's.
+    pub fn is_invite(&self) -> bool {
+        self.invite.is_some()
+    }
+
+    /// Whether a final this side receives still settles the record: a sent
+    /// non-INVITE until its final; a relayed INVITE until a 2xx is taken for
+    /// it. An INVITE this stack sent on its own account settles through its
+    /// dialog's INVITE exchange, not as an answered record.
+    pub fn awaits_final(&self) -> bool {
+        match &self.invite {
+            None => self.is_sent(),
+            Some(exchange) => self.is_relay() && !exchange.taken(),
+        }
+    }
+
     /// Whether the record's sent half is the request a final numbered `cseq`
     /// for `method`, on the client transaction `branch`, answers: a sent
-    /// transaction by its branch (RFC 3261 §17.1.3), so a final to another
-    /// request reusing the number answers nothing here; an INVITE's by its
-    /// number.
+    /// non-INVITE transaction by its branch (RFC 3261 §17.1.3), so a final to
+    /// another request reusing the number answers nothing here; an INVITE's
+    /// by its number.
     pub fn answered_by(&self, method: &str, cseq: i64, branch: Option<&str>) -> bool {
-        let transaction = match &self.sent {
-            Some(sent) => branch == Some(sent.branch.as_str()),
-            None => true,
+        let transaction = match (&self.sent, self.is_invite()) {
+            (Some(sent), false) => branch == Some(sent.branch.as_str()),
+            _ => true,
         };
-        self.is_sent()
+        self.awaits_final()
             && transaction
             && self.outbound_cseq == cseq
             && self.method.eq_ignore_ascii_case(method)

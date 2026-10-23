@@ -4,10 +4,10 @@
 //! handled" the rule that re-ACKs and the message ring share; a reliable
 //! provisional's repeat is the engine's to drop before the rules.
 
-use call::Dialog;
+use call::{Dialog, Leg};
 use sip_message::{Method, SipResponse};
 
-/// Whether `resp` is a copy of an INVITE 2xx this dialog already took
+/// Whether `resp` is a copy of an INVITE 2xx `leg`'s `dialog` already took
 /// (RFC 3261 §13.3.1.4 — the answerer repeats it until ACKed): the dialog
 /// holds the taking's mark — its ACK client transaction, or the ACK it still
 /// awaits from the peer while a delayed-offer answer is composable by no one
@@ -17,9 +17,9 @@ use sip_message::{Method, SipResponse};
 /// last sent on it while no pending relay of that CSeq is open (a first-time
 /// re-INVITE final is claimed by the relay rules). A 2xx answering anything
 /// but an INVITE — the 200 to a CANCEL carries the INVITE's number — is never
-/// a copy of one.
-pub(crate) fn retransmitted_2xx(dialog: &Dialog, resp: &SipResponse) -> bool {
-    let taken = dialog.ack_branch.is_some() || dialog.awaited_ack_cseq.is_some();
+/// a copy of one, nor is a retired fork's: its release answers each copy.
+pub(crate) fn retransmitted_2xx(leg: &Leg, dialog: &Dialog, resp: &SipResponse) -> bool {
+    let taken = call::helpers::invite_taken(dialog) && dialog.retired().is_none();
     if !taken || !(200..300).contains(&resp.status()) || resp.cseq().method() != Method::Invite {
         return false;
     }
@@ -27,6 +27,6 @@ pub(crate) fn retransmitted_2xx(dialog: &Dialog, resp: &SipResponse) -> bool {
         return false;
     }
     let cseq = resp.cseq().seq();
-    super::acked_invite_cseq(dialog) == Some(cseq)
+    super::acked_invite_cseq(leg, dialog) == Some(cseq)
         && call::helpers::find_relay(dialog, i64::from(cseq)).is_none()
 }

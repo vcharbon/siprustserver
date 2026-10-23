@@ -47,7 +47,7 @@ pub fn response_to_a_leg(
     // is not built leaves it so.
     let unsent = call.clone();
     if status >= 200 {
-        if let Some(carried) = call.a_leg.invite_final_sent {
+        if let Some(carried) = call.a_leg.invite_final_sent() {
             tracing::warn!(
                 call_ref = %call.call_ref,
                 status,
@@ -57,7 +57,7 @@ pub fn response_to_a_leg(
             fx.buffered.push(BufferedObservabilityEffect::SecondFinalRefused { status, carried });
             return None;
         }
-        call.a_leg.invite_final_sent = Some(status);
+        *call.a_leg.invite_final_sent_mut() = Some(status);
         // A non-2xx final ends every early dialog the INVITE opened (RFC
         // 3261 §12.1).
         if status >= 300 {
@@ -136,7 +136,7 @@ pub fn response_to_a_leg(
 /// executors that would mint one ask here first, so a refused provisional
 /// touches no dialog tag and no reliable-provisional ladder on the way.
 pub fn provisional_after_final(call: &Call, fx: &mut HandlerEffects, status: u16) -> bool {
-    let Some(carried) = call.a_leg.invite_final_sent else { return false };
+    let Some(carried) = call.a_leg.invite_final_sent() else { return false };
     tracing::warn!(
         call_ref = %call.call_ref,
         status,

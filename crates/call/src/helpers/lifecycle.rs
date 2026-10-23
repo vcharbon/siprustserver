@@ -21,7 +21,7 @@ pub fn lifecycle_position(call: &Call) -> (u8, u8) {
         CallModelState::Terminating => 1,
         CallModelState::Terminated => 2,
     };
-    let answered = super::caller_answered(call) || call.a_leg.answer_preempted.is_some();
+    let answered = super::caller_answered(call) || call.a_leg.answer_preempted().is_some();
     (u8::from(answered), ending)
 }
 

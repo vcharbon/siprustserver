@@ -111,7 +111,7 @@ Content-Length: 0\r\n\r\n",
         assert_ne!(from_tag, "alice-from-tag", "b-leg From-tag must not be the a-leg's");
         assert_eq!(
             Some(from_tag),
-            leg.outbound_invite.as_ref().map(|i| i.our_tag.as_str()),
+            leg.outbound_invite().map(|i| i.our_tag.as_str()),
             "leg + INVITE From-tags agree"
         );
         let to = invite.to();

@@ -23,7 +23,7 @@ pub fn is_adopted(leg: &Leg) -> bool {
 /// The dialog of a leg this stack dialled whose peer tag is `peer_tag`: its
 /// own tag is the From-tag of the leg's INVITE ([`Leg::outbound_invite`]).
 pub fn callee_dialog<'a>(leg: &'a Leg, peer_tag: &str) -> Option<&'a Dialog> {
-    let ours = &leg.outbound_invite.as_ref()?.our_tag;
+    let ours = &leg.outbound_invite()?.our_tag;
     leg.dialogs.by_tags(ours, peer_tag)
 }
 
@@ -32,7 +32,7 @@ pub fn callee_dialog<'a>(leg: &'a Leg, peer_tag: &str) -> Option<&'a Dialog> {
 /// received, where every dialog carries the caller's tag, the one the leg's
 /// requests ride ([`crate::Dialogs::carrying`]) when it is that peer's.
 pub fn dialog_with_peer<'a>(leg: &'a Leg, peer_tag: &str) -> Option<&'a Dialog> {
-    if leg.outbound_invite.is_some() {
+    if leg.outbound_invite().is_some() {
         return callee_dialog(leg, peer_tag);
     }
     leg.dialogs.carrying().filter(|d| d.peer_tag == peer_tag)
@@ -46,7 +46,7 @@ pub fn dialog_with_peer_mut<'a>(leg: &'a mut Leg, peer_tag: &str) -> Option<&'a 
 
 /// [`callee_dialog`], to update.
 pub fn callee_dialog_mut<'a>(leg: &'a mut Leg, peer_tag: &str) -> Option<&'a mut Dialog> {
-    let ours = leg.outbound_invite.as_ref()?.our_tag.clone();
+    let ours = leg.outbound_invite()?.our_tag.clone();
     leg.dialogs.by_tags_mut(&ours, peer_tag)
 }
 
@@ -54,7 +54,7 @@ pub fn callee_dialog_mut<'a>(leg: &'a mut Leg, peer_tag: &str) -> Option<&'a mut
 /// §8.2.6.2): the From-tag of the INVITE it sent the leg, else the tag of the
 /// dialog it answers the leg's INVITE under ([`Leg::own_tag`]).
 pub fn leg_own_tag(leg: &Leg) -> Option<&str> {
-    leg.outbound_invite.as_ref().map(|i| i.our_tag.as_str()).or(leg.own_tag.as_deref())
+    leg.outbound_invite().map(|i| i.our_tag.as_str()).or(leg.own_tag.as_deref())
 }
 
 /// The dialog a request this stack originates on `leg` rides: the leg's
@@ -167,5 +167,5 @@ pub fn find_b_leg_by_call_id<'a>(call: &'a Call, call_id: &str) -> Option<&'a Le
 /// together ([`super::lifecycle_position`]), so its answer axis never moves
 /// back.
 pub fn caller_answered(call: &Call) -> bool {
-    matches!(call.a_leg.invite_final_sent, Some(status) if (200..300).contains(&status))
+    matches!(call.a_leg.invite_final_sent(), Some(status) if (200..300).contains(&status))
 }

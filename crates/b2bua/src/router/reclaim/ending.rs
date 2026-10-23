@@ -133,12 +133,12 @@ fn own_open_rounds(
         let theirs = call::helpers::find_leg(ending, &leg.leg_id);
         for d in leg.dialogs.iter() {
             let held = theirs.and_then(|l| l.dialogs.by_tags(&d.our_tag, &d.peer_tag));
-            let open = d.requests.iter().filter(|p| {
-                p.method.eq_ignore_ascii_case("INVITE") && !p.cancelled && p.relayed_by == *by
-            });
-            for p in open {
+            let open =
+                call::helpers::invite_relay(d).filter(|p| !p.cancelled && p.relayed_by == *by);
+            if let Some(p) = open {
                 let cancelled_there = held.is_some_and(|h| {
-                    h.requests.iter().any(|t| t.outbound_cseq == p.outbound_cseq && t.cancelled)
+                    call::helpers::invite_relay(h)
+                        .is_some_and(|t| t.outbound_cseq == p.outbound_cseq && t.cancelled)
                 });
                 if cancelled_there {
                     answered_there.push(p.clone());

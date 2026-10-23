@@ -43,9 +43,9 @@ fn a_invite() -> SipRequest {
     .expect("the caller's INVITE")
 }
 
-/// A b-leg INVITE handle on `branch` with CSeq `cseq`, stamped with this
+/// A b-leg INVITE as it left on `branch` with CSeq `cseq`, stamped with this
 /// call's `cr` / `lg`.
-fn b_handle(branch: &str, cseq: u32) -> InviteTxnHandle {
+fn b_handle(branch: &str, cseq: u32) -> call::SentRequest {
     let invite = generate_out_of_dialog_request(
         OutOfDialogMethod::Invite,
         &GenerateOutOfDialogRequestOpts {
@@ -77,17 +77,21 @@ fn b_handle(branch: &str, cseq: u32) -> InviteTxnHandle {
         },
     )
     .expect("a b-leg INVITE");
-    InviteTxnHandle {
+    call::SentRequest {
         branch: branch.into(),
-        cseq: i64::from(cseq),
-        original_invite: invite.image().to_vec(),
+        image: invite.image().to_vec(),
         destination: HostPort { host: "10.0.0.2".into(), port: 5070 },
     }
 }
 
+/// This stack's own re-INVITE numbered `cseq`, sent as `sent`.
+fn own_reinvite(cseq: i64, sent: call::SentRequest) -> RequestRecord {
+    call::testkit::own_invite(cseq, Some(sent))
+}
+
 /// The b-leg in `state`: a Trying leg holds no dialog, an Early one the
 /// fork that rang, a Confirmed one the dialog its 2xx confirmed.
-fn b_leg(state: LegState, handle: Option<InviteTxnHandle>) -> Leg {
+fn b_leg(state: LegState, handle: Option<call::SentRequest>) -> Leg {
     let mut leg = Leg {
         leg_id: "b-1".into(),
         call_id: "bcid@x".into(),
@@ -96,13 +100,11 @@ fn b_leg(state: LegState, handle: Option<InviteTxnHandle>) -> Leg {
         local_uri: Some("sip:svc@10.0.0.9".into()),
         remote_uri: Some("sip:bob@10.0.0.2".into()),
         invite_request_uri: Some("sip:bob@10.0.0.2:5070".into()),
-        outbound_invite: Some(OutboundInvite::new("svc", 1, 0, handle.clone())),
+        invite: Some(RequestRecord::dialled(1, handle.clone(), OutboundInvite::new("svc", 0))),
         own_tag: None,
         ext: None,
         kind: Some(LegKind::Destination),
         adopted: None,
-        invite_final_sent: None,
-        answer_preempted: None,
         attempt: None,
         ring: call::Ring::Silent,
         in_session_timer: None,
@@ -120,8 +122,13 @@ fn b_leg(state: LegState, handle: Option<InviteTxnHandle>) -> Leg {
     };
     let mut dialog = Dialog::new("svc", "btag", dialog_state, 1);
     dialog.remote_target = "sip:bob@10.0.0.2:5070".into();
-    dialog.ack_branch = (state == LegState::Confirmed).then(|| "z9hG4bK-ack".to_string());
-    dialog.pending_invite_txn = handle;
+    dialog.sent_invite = handle.map(|_| {
+        let mut record = RequestRecord::dialled_on_dialog(1);
+        if let Some(x) = record.invite.as_mut() {
+            x.ack_branch = (state == LegState::Confirmed).then(|| "z9hG4bK-ack".to_string());
+        }
+        record
+    });
     leg.dialogs.insert(dialog);
     if state == LegState::Confirmed {
         call::testkit::stage_leg(&mut leg, state);
@@ -153,6 +160,7 @@ fn relayed_reinvite(outbound_cseq: i64, cancelled: bool) -> RequestRecord {
         source_timestamp: None,
         relayed_by: Default::default(),
         author: None,
+        invite: Some(Default::default()),
     }
 }
 
@@ -165,7 +173,7 @@ fn call_with(a_state: LegState, b: Leg) -> Call {
         &mut sip_ids::TurnIds::fixed(1),
         0,
     );
-    call.a_leg.invite_final_sent = match a_state {
+    *call.a_leg.invite_final_sent_mut() = match a_state {
         LegState::Trying | LegState::Early => None,
         LegState::Confirmed => Some(200),
         LegState::Terminated => Some(487),
@@ -295,12 +303,11 @@ fn an_established_call_seeds_nothing() {
 #[test]
 fn a_relayed_reinvite_in_flight_seeds_both_halves_of_the_round() {
     let mut leg = b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1)));
-    confirmed(&mut leg).pending_invite_txn = Some(b_handle(REINVITE_BRANCH, 2));
-    confirmed(&mut leg).ack_branch = None;
     let mut pending = relayed_reinvite(2, false);
     pending.inbound_cseq = 7;
     pending.source_timestamp = Some("54.2".into());
-    confirmed(&mut leg).requests.push(pending);
+    pending.sent = Some(b_handle(REINVITE_BRANCH, 2));
+    confirmed(&mut leg).sent_invite = Some(pending);
     let call = call_with(LegState::Confirmed, leg);
     let seeds = seeds_for(&call, 0);
     assert_eq!(server_branches(&seeds), vec![RELAYED_BRANCH.to_string()]);
@@ -345,15 +352,16 @@ fn a_relayed_reinvite_in_flight_seeds_both_halves_of_the_round() {
 #[test]
 fn a_self_originated_reinvite_in_flight_seeds_its_client_invite() {
     let mut leg = b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1)));
-    confirmed(&mut leg).pending_invite_txn = Some(b_handle(REINVITE_BRANCH, 2));
-    confirmed(&mut leg).ack_branch = None;
+    confirmed(&mut leg).sent_invite = Some(own_reinvite(2, b_handle(REINVITE_BRANCH, 2)));
     let open = call_with(LegState::Confirmed, leg.clone());
     let seeds = seeds_for(&open, 0);
     assert!(server_branches(&seeds).is_empty(), "nothing was relayed, so no server seed");
     assert_eq!(client_branches(&seeds), vec![REINVITE_BRANCH.to_string()]);
 
     let mut answered = leg.clone();
-    confirmed(&mut answered).awaited_ack_cseq = Some(2);
+    call::helpers::sent_exchange_mut(confirmed(&mut answered))
+        .expect("its record")
+        .awaited_ack_cseq = Some(2);
     assert!(
         seeds_for(&call_with(LegState::Confirmed, answered), 0).is_empty(),
         "a 2xx taken closes the round"
@@ -370,7 +378,7 @@ fn closing_a_round_touches_only_a_confirmed_leg() {
     let call = call_with(LegState::Early, b_leg(LegState::Early, Some(b_handle(B_BRANCH, 1))));
     let call = call::helpers::close_rejected_invite_round(call, "b-1", B_BRANCH);
     let fork = call.b_legs[0].dialogs.by_tags("svc", "btag").expect("the fork that rang");
-    assert!(fork.pending_invite_txn.is_some());
+    assert!(fork.sent_invite.is_some());
 }
 
 /// A relayed re-INVITE already CANCELled has had its finals from the node
@@ -378,9 +386,9 @@ fn closing_a_round_touches_only_a_confirmed_leg() {
 #[test]
 fn a_cancelled_relayed_reinvite_seeds_nothing() {
     let mut leg = b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1)));
-    confirmed(&mut leg).pending_invite_txn = Some(b_handle(REINVITE_BRANCH, 2));
-    confirmed(&mut leg).ack_branch = None;
-    confirmed(&mut leg).requests.push(relayed_reinvite(2, true));
+    let mut cancelled = relayed_reinvite(2, true);
+    cancelled.sent = Some(b_handle(REINVITE_BRANCH, 2));
+    confirmed(&mut leg).sent_invite = Some(cancelled);
     assert!(seeds_for(&call_with(LegState::Confirmed, leg), 0).is_empty());
 }
 
@@ -388,7 +396,7 @@ fn a_cancelled_relayed_reinvite_seeds_nothing() {
 #[test]
 fn an_unreadable_handle_is_skipped() {
     let mut handle = b_handle(B_BRANCH, 1);
-    handle.original_invite = b"garbage".to_vec();
+    handle.image = b"garbage".to_vec();
     let call = call_with(LegState::Early, b_leg(LegState::Trying, Some(handle)));
     let seeds = seeds_for(&call, 0);
     assert_eq!(server_branches(&seeds), vec![A_BRANCH.to_string()]);
@@ -413,8 +421,11 @@ fn retain_reinvite_2xx(leg: &mut Leg, branch: &str) {
         sip_retransmit::Class::Final2xx,
         call::Repeated::response("INVITE", 200),
     );
-    confirmed(leg).pending_reinvite_2xx =
-        Some(Unacked2xx { dialog_tag: "svc".into(), cseq: 4, emission });
+    call::helpers::hold_answered_2xx(
+        confirmed(leg),
+        4,
+        Unacked2xx { dialog_tag: "svc".into(), cseq: 4, emission },
+    );
 }
 
 /// A re-INVITE whose 2xx the dialog retains awaiting its ACK seeds an
@@ -494,7 +505,7 @@ fn a_cancelled_b_leg_seeds_its_held_cancel_with_the_stated_reason() {
 /// image of the b-leg's INVITE handle under `branch`, its Timer F ending at
 /// `deadline_ms`.
 fn own_info(leg: &mut Leg, branch: &str, deadline_ms: i64) {
-    let image = b_handle(branch, 2).original_invite;
+    let image = b_handle(branch, 2).image;
     let sent = call::SentRequest {
         branch: branch.into(),
         image,

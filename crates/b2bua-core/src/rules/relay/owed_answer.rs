@@ -5,7 +5,7 @@
 //! the ACK that answers an offer the 2xx left to it.
 
 use call::{Call, Leg, OwedAnswer};
-use sip_message::SipRequest;
+use sip_message::{SipRequest, SipResponse};
 
 use super::ack::{acked_invite_carries_offer, parse_request};
 use super::sdp_session::{continue_on_leg, Author, Carried};
@@ -17,12 +17,10 @@ use crate::config::SdpFormPolicy;
 /// whose INVITE this stack cannot read is never taken for an offer.
 pub(crate) fn invite_carried_offer(call: &Call, leg_id: &str, invite_cseq: i64) -> bool {
     let Some(leg) = call::helpers::find_leg(call, leg_id) else { return true };
-    leg.outbound_invite
-        .iter()
-        .map(|i| i.txn.as_ref())
-        .chain(leg.dialogs.iter().map(|d| d.pending_invite_txn.as_ref()))
-        .flatten()
-        .filter_map(|h| parse_request(&h.original_invite))
+    leg.dialled_sent()
+        .into_iter()
+        .chain(leg.dialogs.iter().filter_map(|d| call::helpers::sent_invite_image(leg, d)))
+        .filter_map(|sent| parse_request(&sent.image))
         .find(|r| i64::from(r.cseq().seq()) == invite_cseq)
         .is_none_or(|r| r.sdp().is_some())
 }
@@ -87,8 +85,41 @@ pub(crate) fn ack_answer_on_leg(
 /// carries the answer (RFC 3262 §5).
 pub(crate) fn bare_ack_owed(leg: &Leg) -> bool {
     leg.dialogs.confirmed().is_some_and(|d| {
-        d.awaited_ack_cseq.is_some() && (offer_waits_for_ack(leg) || acked_invite_carries_offer(d))
+        call::helpers::awaited_ack_cseq(d).is_some()
+            && (offer_waits_for_ack(leg) || acked_invite_carries_offer(leg, d))
     })
+}
+
+/// Note on `leg_id`'s confirmed dialog the offer `resp`, the 2xx it took,
+/// made where its INVITE delayed it — the INVITE this stack sent carried
+/// none, and no reliable provisional of the dialog carried one first (RFC
+/// 3262 §5): the ACK numbered `ack_cseq` answers it ([`OwedAnswer::InAck`],
+/// RFC 3264 §4).
+pub(crate) fn owe_answer_in_ack(call: &mut Call, leg_id: &str, resp: &SipResponse, ack_cseq: i64) {
+    let Some(offer) = resp.sdp() else { return };
+    let tag = resp.to().tag().unwrap_or_default();
+    let invite_cseq = i64::from(resp.cseq().seq());
+    if offered_reliably(call, leg_id, tag, invite_cseq) {
+        return;
+    }
+    let offer = offer.to_vec();
+    *call = call::helpers::update_leg(call.clone(), leg_id, |leg| {
+        let carries = leg.dialogs.confirmed().is_none_or(|d| acked_invite_carries_offer(leg, d));
+        if let Some(d) = leg.dialogs.confirmed_mut().filter(|_| !carries) {
+            d.owed_answer = Some(OwedAnswer::InAck { ack_cseq, offer });
+        }
+    });
+}
+
+/// The offer `leg`'s confirmed dialog left to the ACK its 2xx still awaits
+/// ([`OwedAnswer::InAck`]): the ACK owes its answer (RFC 3264 §4).
+pub(crate) fn offer_owed_in_ack(leg: &Leg) -> Option<&[u8]> {
+    let d = leg.dialogs.confirmed()?;
+    call::helpers::awaited_ack_cseq(d)?;
+    match d.owed_answer.as_ref()? {
+        OwedAnswer::InAck { offer, .. } => Some(offer),
+        _ => None,
+    }
 }
 
 /// [`bare_ack_owed`] for `leg_id` of `call`.

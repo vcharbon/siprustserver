@@ -42,7 +42,7 @@ pub fn shift_instants(call: &mut Call, offset_ms: i64) {
 /// The instants one leg holds: its INVITE's send time, its message ring, each
 /// dialog's own NOTIFY and the deadline of each request record.
 fn shift_leg(leg: &mut Leg, offset_ms: i64) {
-    if let Some(invite) = leg.outbound_invite.as_mut() {
+    if let Some(invite) = leg.outbound_invite_mut() {
         invite.sent_at_ms = invite.sent_at_ms.saturating_add(offset_ms);
     }
     for entry in &mut leg.messages.entries {

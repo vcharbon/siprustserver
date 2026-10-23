@@ -84,7 +84,7 @@ pub fn callback_key(ctx: &str) -> String {
 pub fn call_index_keys(call: &Call) -> Vec<String> {
     let mut keys = vec![a_leg_key(&call.a_leg.call_id, &call.a_leg_invite.from_tag)];
     for b in &call.b_legs {
-        if let Some(invite) = &b.outbound_invite {
+        if let Some(invite) = b.outbound_invite() {
             keys.push(b_local_key(&b.call_id, &invite.our_tag));
         }
         keys.push(b_leg_key(&b.call_id));
@@ -128,8 +128,9 @@ pub fn call_index_keys_from_unknown(state: &serde_json::Value) -> Vec<String> {
     if let Some(b_legs) = obj.get("b_legs").and_then(|v| v.as_array()) {
         for b in b_legs {
             let Some(cid) = str_field(b, "call_id") else { continue };
-            if let Some(local_tag) = b.get("outbound_invite").and_then(|i| str_field(i, "our_tag"))
-            {
+            let dialled =
+                b.get("invite").and_then(|r| r.get("invite")).and_then(|x| x.get("dialled"));
+            if let Some(local_tag) = dialled.and_then(|i| str_field(i, "our_tag")) {
                 keys.push(b_local_key(cid, local_tag));
             }
             keys.push(b_leg_key(cid));

@@ -237,12 +237,11 @@ fn the_end_of_turn_stamp_rebinds_the_launched_invites_handle() {
     let OutboundBody::Request(sent) = &result.effects.outbound[0].body else { unreachable!() };
     assert_eq!(sent.raw(HeaderName::from("X-Stamp")).collect::<Vec<_>>(), ["s"]);
     let leg = &result.call.b_legs[0];
-    let held =
-        leg.outbound_invite.as_ref().and_then(|i| i.txn.as_ref()).expect("the INVITE handle");
-    assert_eq!(held.original_invite, sent.image().to_vec(), "the handle holds what left");
+    let held = leg.dialled_sent().expect("the INVITE's record");
+    assert_eq!(held.image, sent.image().to_vec(), "the record holds what left");
     for d in &leg.dialogs {
-        if let Some(h) = &d.pending_invite_txn {
-            assert_eq!(h.original_invite, sent.image().to_vec());
+        if let Some(h) = d.sent_invite.as_ref().and_then(|r| r.sent.as_ref()) {
+            assert_eq!(h.image, sent.image().to_vec());
         }
     }
 }

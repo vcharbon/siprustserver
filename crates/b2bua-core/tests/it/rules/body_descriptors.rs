@@ -5,7 +5,7 @@
 
 use super::*;
 use b2bua_core::effects::OutboundBody;
-use call::{HostPort, InviteTxnHandle};
+use call::HostPort;
 
 const SDP: &str = "v=0\r\no=b 1 1 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n";
 
@@ -38,12 +38,14 @@ pub(super) fn bridged() -> call::Call {
     call.a_leg.own_tag = Some("a-svc".into());
     let mut leg = b_leg_pending();
     call::testkit::stage_leg(&mut leg, LegState::Confirmed);
-    with_dialog(&mut leg, "b-tag").pending_invite_txn = Some(InviteTxnHandle {
-        branch: "z9hG4bKb1".into(),
-        cseq: 1,
-        original_invite: invite().image().to_vec(),
-        destination: HostPort { host: "10.0.0.2".into(), port: 5070 },
-    });
+    with_dialog(&mut leg, "b-tag").sent_invite = Some(call::testkit::own_invite(
+        1,
+        Some(call::SentRequest {
+            branch: "z9hG4bKb1".into(),
+            image: invite().image().to_vec(),
+            destination: HostPort { host: "10.0.0.2".into(), port: 5070 },
+        }),
+    ));
     call.b_legs = vec![leg];
     call
 }

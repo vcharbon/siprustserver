@@ -13,7 +13,7 @@ use super::lens::update_leg;
 pub fn retire_early_dialogs(leg: &mut Leg) {
     for d in leg.dialogs.iter_mut().filter(|d| d.state == DialogState::Early) {
         let open_requests = std::mem::take(&mut d.requests);
-        d.state = DialogState::Retired(RetiredDialog { open_requests, release: None });
+        d.state = DialogState::Retired(RetiredDialog { open_requests });
     }
 }
 
@@ -33,10 +33,10 @@ pub fn cancel_early_dialogs(call: Call, leg_id: &str) -> Call {
 /// A non-2xx final ends every early dialog of the leg (RFC 3261 §12.1).
 pub fn record_invite_final(call: Call, leg_id: &str, status: u16) -> Call {
     update_leg(call, leg_id, |l| {
-        if l.invite_final_sent.is_none() && status >= 300 {
+        if l.invite_final_sent().is_none() && status >= 300 {
             reject_early_dialogs(l, status);
         }
-        l.invite_final_sent.get_or_insert(status);
+        l.invite_final_sent_mut().get_or_insert(status);
     })
 }
 
@@ -46,7 +46,7 @@ pub fn record_invite_final(call: Call, leg_id: &str, status: u16) -> Call {
 /// §12.1). A final to a re-INVITE changes no dialog's state (§14.1).
 pub fn record_dialling_invite_rejected(call: Call, leg_id: &str, cseq: i64, status: u16) -> Call {
     update_leg(call, leg_id, |l| {
-        if l.outbound_invite.as_ref().is_some_and(|i| i.cseq == cseq) {
+        if l.dialled_cseq() == Some(cseq) {
             reject_early_dialogs(l, status);
         }
     })
@@ -59,7 +59,10 @@ pub fn record_dialling_invite_rejected(call: Call, leg_id: &str, cseq: i64, stat
 /// created (§12.1).
 pub fn record_dialled_invite_final(call: Call, leg_id: &str, cseq: i64, status: u16) -> Call {
     update_leg(call, leg_id, |l| {
-        let Some(invite) = l.outbound_invite.as_mut().filter(|i| i.cseq == cseq) else { return };
+        if l.dialled_cseq() != Some(cseq) {
+            return;
+        }
+        let Some(invite) = l.outbound_invite_mut() else { return };
         invite.record_final(status);
         if status >= 300 {
             reject_early_dialogs(l, status);
@@ -73,11 +76,11 @@ pub fn record_dialled_invite_final(call: Call, leg_id: &str, cseq: i64, status: 
 /// a 2xx confirmed, its BYE in flight or not, ends without a final
 /// (§15.1.1).
 pub fn abandon_leg(leg: &mut Leg) {
-    if let Some(invite) = leg.outbound_invite.as_mut().filter(|i| i.final_received.is_none()) {
+    if let Some(invite) = leg.outbound_invite_mut().filter(|i| i.final_received.is_none()) {
         invite.record_final(408);
         for d in leg.dialogs.iter_mut().filter(|d| d.awaits_invite_final()) {
             let open_requests = std::mem::take(&mut d.requests);
-            d.state = DialogState::Retired(RetiredDialog { open_requests, release: None });
+            d.state = DialogState::Retired(RetiredDialog { open_requests });
         }
     }
     for d in leg.dialogs.iter_mut().filter(|d| d.is_confirmed()) {
@@ -90,7 +93,7 @@ pub fn abandon_leg(leg: &mut Leg) {
 /// opened is ending, to end on the INVITE's final.
 pub fn record_cancel_sent(call: Call, leg_id: &str, stated: Vec<(String, String)>) -> Call {
     let call = update_leg(call, leg_id, |l| {
-        if let Some(invite) = l.outbound_invite.as_mut() {
+        if let Some(invite) = l.outbound_invite_mut() {
             invite.cancel_sent = true;
             invite.cancel_headers = stated;
         }
@@ -112,19 +115,21 @@ pub fn reject_early_dialogs(leg: &mut Leg, status: u16) {
 /// go; every dialog the INVITE opened ends under the 487 (§12.1).
 pub fn record_cancelled_invite(call: Call, leg_id: &str) -> Call {
     update_leg(call, leg_id, |l| {
-        if let Some(answer) = l.invite_final_sent.filter(|s| (200..300).contains(s)) {
-            l.answer_preempted = Some(answer);
+        if let Some(answer) = l.invite_final_sent().filter(|s| (200..300).contains(s)) {
+            *l.answer_preempted_mut() = Some(answer);
             l.messages.entries.retain(|e| !is_sent_invite_2xx(e));
             for d in l.dialogs.iter_mut() {
-                d.answered_2xx = None;
-                d.awaited_ack_cseq = None;
+                d.answered_invite = None;
+                if let Some(x) = d.sent_invite.as_mut().and_then(|r| r.invite.as_mut()) {
+                    x.awaited_ack_cseq = None;
+                }
                 if d.state == DialogState::Confirmed {
                     d.state = DialogState::Early;
                 }
             }
         }
         reject_early_dialogs(l, 487);
-        l.invite_final_sent = Some(487);
+        *l.invite_final_sent_mut() = Some(487);
     })
 }
 

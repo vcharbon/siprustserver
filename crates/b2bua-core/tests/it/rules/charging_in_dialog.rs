@@ -8,7 +8,7 @@ use super::*;
 use call::features::{
     ChargingVectorFeature, FeatureActivations, KeepaliveActivation, PlatformActivations,
 };
-use call::{ActivePeer, HostPort, InviteTxnHandle};
+use call::{ActivePeer, HostPort};
 use sip_message::draft::Entry;
 
 const CALLER: &str = "icid-value=caller-0001;icid-generated-at=edge.example";
@@ -54,8 +54,12 @@ fn confirmed(leg_id: &str, kind: LegKind, vector: &str) -> Leg {
         .expect("the dialling INVITE");
     let dest = HostPort { host: "10.0.0.2".into(), port: 5070 };
     let branch = format!("z9hG4bK{leg_id}");
-    let handle = InviteTxnHandle::new(&branch, 1, dialled.image().to_vec(), dest);
-    leg.outbound_invite.as_mut().expect("a dialled leg").txn = Some(handle);
+    let handle = call::SentRequest {
+        branch: branch.to_string(),
+        image: dialled.image().to_vec(),
+        destination: dest,
+    };
+    call::testkit::dial_with(&mut leg, handle);
     leg
 }
 
@@ -118,10 +122,11 @@ fn toward_an_originated_leg_the_vector_its_invite_carried_and_the_retained_bytes
         .dialogs
         .confirmed()
         .expect("the confirmed dialog")
-        .pending_invite_txn
+        .sent_invite
         .as_ref()
+        .and_then(|r| r.sent.as_ref())
         .expect("the re-INVITE's client transaction is held");
-    let retained = String::from_utf8_lossy(&held.original_invite);
+    let retained = String::from_utf8_lossy(&held.image);
     assert!(retained.contains(B2), "the held bytes are the request as it left: {retained}");
 }
 

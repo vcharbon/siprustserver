@@ -87,9 +87,9 @@ fn restore(call: &mut Call) {
 #[test]
 fn a_restore_runs_an_unrung_legs_deadline_from_its_invite_and_leaves_it_silent() {
     let mut call = call(ringing(), LegState::Early);
-    call.b_legs[0].outbound_invite.as_mut().expect("dialled").sent_at_ms = 6_000;
+    call.b_legs[0].outbound_invite_mut().expect("dialled").sent_at_ms = 6_000;
     restore(&mut call);
-    assert_eq!(call.b_legs[0].outbound_invite.as_ref().map(|i| i.sent_at_ms), Some(6_000));
+    assert_eq!(call.b_legs[0].outbound_invite().map(|i| i.sent_at_ms), Some(6_000));
     assert_eq!(call.b_legs[0].ring, Ring::Silent, "no 18x is on record");
     assert_eq!(deadline(&call), Some(6_000 + RING_MS as i64));
 }
@@ -117,7 +117,7 @@ fn a_restore_arms_nothing_of_an_answered_cancelled_or_ended_leg_or_one_ringing_u
         assert_eq!(deadline(&call), None, "{state:?}");
     }
     let mut cancelled = call(ringing(), LegState::Trying);
-    cancelled.b_legs[0].outbound_invite.as_mut().expect("dialled").cancel_sent = true;
+    cancelled.b_legs[0].outbound_invite_mut().expect("dialled").cancel_sent = true;
     restore(&mut cancelled);
     assert_eq!(deadline(&cancelled), None, "a CANCEL is on record");
 
@@ -159,7 +159,7 @@ fn a_leg_no_attempt_dialled_arms_nothing() {
 #[test]
 fn a_ring_past_the_invite_bound_is_held_inside_it() {
     let mut call = call(Deadline::After(Duration::from_secs(150)), LegState::Trying);
-    call.b_legs[0].outbound_invite.as_mut().expect("dialled").sent_at_ms = 1_000;
+    call.b_legs[0].outbound_invite_mut().expect("dialled").sent_at_ms = 1_000;
     let config = B2buaConfig::default();
     let ceiling_ms =
         (config.invite_txn_timeout_sec - B2buaConfig::NO_ANSWER_CANCEL_MARGIN_SEC) * 1000;

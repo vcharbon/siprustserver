@@ -171,7 +171,7 @@ impl ActionExecutor<'_> {
                 }
             };
         *call = bump_our_cseq(call.clone(), &id.leg, &t_id, 1);
-        call::helpers::note_responder_ack(call, id, ResponderAck::OwnPrack { branch });
+        call::helpers::note_responder_ack(call, id, ResponderAck::OwnPrack);
         clear_owed_offer(call, id);
         let dest = relay::target_dest(&gen_dialog.remote_target);
         let (out_req, dest) = relay::apply_b_leg_egress(

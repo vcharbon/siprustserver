@@ -1,9 +1,10 @@
-//! Dialog-level helpers: CSeq bookkeeping, the ACK-branch retention rule,
-//! INVITE glare, a retired dialog's release, and the per-dialog SDP cache. The
-//! request records a dialog holds are [`super::request_records`]'.
+//! Dialog-level helpers: CSeq bookkeeping, INVITE glare and the per-dialog
+//! SDP cache. The request records a dialog holds are
+//! [`super::request_records`]' and [`super::invite_records`]'.
 
-use crate::model::{Call, Dialog, DialogId, DialogState, Leg, RetainedEmission, RetiredDialog};
+use crate::model::{Call, Dialog, DialogId, Leg};
 
+use super::invite_records::{awaited_ack_cseq, invite_untaken, relayed_invite_pending};
 use super::leg::find_leg;
 use super::lens::{update_dialog, update_leg};
 use super::peering::relay_peer_dialog;
@@ -27,105 +28,19 @@ pub fn advance_peer_cseq(call: Call, leg_id: &str, id: &DialogId, cseq: i64) -> 
     })
 }
 
-// ── ACK branch ──────────────────────────────────────────────────────────────
-
-/// Retain the Via branch of the ACK-for-2xx just sent on `leg_id`'s
-/// established dialog, so a
-/// re-ACK of a **retransmitted** 2xx reuses the SAME branch (RFC 3261 §13.2.2.4).
-/// A fresh branch would mint a new client transaction and never quiesce the
-/// answerer's INVITE server txn, leaking / late-timing-out the confirmed call
-/// when the first ACK is lost. Idempotent: whoever writes it first wins — the
-/// 2xx that armed it on confirmation, else the first ACK — and every later ACK
-/// re-observes that value. Reset to `None` wherever a new INVITE transaction is
-/// cached on the dialog, so the stored branch always belongs to the current
-/// INVITE's CSeq.
-pub fn retain_ack_branch(call: Call, leg_id: &str, branch: &str) -> Call {
-    update_leg(call, leg_id, |leg| {
-        if let Some(d) = leg.dialogs.established_mut() {
-            if d.ack_branch.is_none() {
-                d.ack_branch = Some(branch.to_string());
-            }
-        }
-    })
-}
-
-/// Retain the ACK-for-2xx datagram just emitted on `leg_id`'s established
-/// dialog, so a
-/// re-ACK of a **retransmitted** 2xx re-passes THE ACK to the transport
-/// (RFC 3261 §13.2.2.4) instead of composing an equivalent — on a delayed offer
-/// the retained bytes carry the answer a fresh composition would drop
-/// (RFC 3264 §4). First write wins, like `retain_ack_branch`: the ACK the 2xx
-/// triggered is the one every later copy re-sends. Reset to `None` alongside
-/// `ack_branch` wherever a new INVITE transaction is cached on the dialog.
-pub fn retain_emitted_ack(call: Call, leg_id: &str, ack: RetainedEmission) -> Call {
-    update_leg(call, leg_id, |leg| {
-        if let Some(d) = leg.dialogs.established_mut() {
-            if d.emitted_ack.is_none() {
-                d.emitted_ack = Some(ack.clone());
-            }
-        }
-    })
-}
-
-/// Forget the INVITE client-transaction handle on `leg_id`'s dialog whose
-/// branch a non-2xx final answered (RFC 3261 §17.1.1.3: the transaction ends
-/// with that final, hop-ACKed below the TU), so the record names nothing in
-/// flight for it. Only an open round is closed: a handle kept for a taken 2xx
-/// (`ack_branch` / `awaited_ack_cseq` set) stays for the ACK and its re-ACKs,
-/// whatever a later final on the same branch says; the initial INVITE of a leg
-/// holding no confirmed dialog keeps it for the CANCEL.
-pub fn close_rejected_invite_round(call: Call, leg_id: &str, branch: &str) -> Call {
-    update_leg(call, leg_id, |leg| {
-        if leg.dialogs.confirmed().is_none() {
-            return;
-        }
-        for d in leg.dialogs.iter_mut() {
-            let round_open = d.ack_branch.is_none() && d.awaited_ack_cseq.is_none();
-            if round_open && d.pending_invite_txn.as_ref().is_some_and(|h| h.branch == branch) {
-                d.pending_invite_txn = None;
-            }
-        }
-    })
-}
-
-/// Arm (`Some`) or discharge (`None`) the §13.2.2.4 relay-ACK obligation on
-/// `leg_id`'s established dialog. `cseq` is the number the acknowledging peer's
-/// ACK will carry — the peer's own INVITE CSeq, not this dialog's.
-pub fn set_awaited_ack_cseq(call: Call, leg_id: &str, cseq: Option<i64>) -> Call {
-    update_leg(call, leg_id, |leg| {
-        if let Some(d) = leg.dialogs.established_mut() {
-            d.awaited_ack_cseq = cseq;
-        }
-    })
-}
-
 // ── INVITE glare ────────────────────────────────────────────────────────────
 
 /// Whether an INVITE transaction is still open on this dialog (RFC 3261
-/// §14.1): a transparently relayed INVITE awaiting its final response, or an
-/// INVITE this side sent on the dialog, relayed or its own, with no 2xx taken
-/// (rule 1), or a 2xx un-ACKed on either face — one this side sent (a
-/// re-INVITE's or the call's own answer) or one taken here whose ACK has not
-/// left yet (rule 2; RFC 6026 names the interval *Accepted*). While any
-/// holds, a new INVITE on the dialog is glare and is refused, 491 or 500 by
-/// which INVITE is open (RFC 3261 §14.2).
+/// §14.1): an INVITE this side sent on the dialog, relayed or its own, with
+/// no 2xx taken (rule 1), or a 2xx un-ACKed on either face — one this side
+/// sent (a re-INVITE's or the call's own answer) or one taken here whose ACK
+/// has not left yet (rule 2; RFC 6026 names the interval *Accepted*). While
+/// any holds, a new INVITE on the dialog is glare and is refused, 491 or 500
+/// by which INVITE is open (RFC 3261 §14.2). A non-2xx final closes a
+/// re-INVITE ([`super::close_rejected_invite_round`]); on a leg holding no
+/// confirmed dialog the dialling INVITE stays, and its early dialogs end.
 pub fn invite_transaction_open(dialog: &Dialog) -> bool {
-    dialog.requests.iter().any(|p| p.method.eq_ignore_ascii_case("INVITE"))
-        || own_invite_untaken(dialog)
-        || dialog.pending_reinvite_2xx.is_some()
-        || dialog.answered_2xx.is_some()
-        || dialog.awaited_ack_cseq.is_some()
-}
-
-/// Whether the INVITE client transaction cached on the dialog has no 2xx
-/// taken: a 2xx arms its ACK (`ack_branch`) or the ACK the peer owes
-/// (`awaited_ack_cseq`). A non-2xx final forgets the transaction on a leg
-/// holding a confirmed dialog ([`close_rejected_invite_round`]); on a leg
-/// holding none it keeps it and ends the leg's early dialogs instead.
-fn own_invite_untaken(dialog: &Dialog) -> bool {
-    dialog.pending_invite_txn.is_some()
-        && dialog.ack_branch.is_none()
-        && dialog.awaited_ack_cseq.is_none()
+    invite_untaken(dialog) || dialog.answered_invite.is_some() || awaited_ack_cseq(dialog).is_some()
 }
 
 /// Whether an INVITE from `source_leg_id`'s peer, on its dialog `source`,
@@ -148,7 +63,7 @@ pub fn invite_glare(call: &Call, source_leg_id: &str, source: Option<&DialogId>)
 /// dialogs is a second INVITE before the first's final (RFC 3261 §14.2,
 /// first clause).
 fn initial_invite_unanswered(call: &Call, leg: &Leg) -> bool {
-    leg.leg_id == call.a_leg.leg_id && leg.invite_final_sent.is_none()
+    leg.leg_id == call.a_leg.leg_id && leg.invite_final_sent().is_none()
 }
 
 /// [`initial_invite_unanswered`] for the leg named `leg_id`.
@@ -172,9 +87,8 @@ pub fn sender_invite_unanswered(
     source_leg_id: &str,
     source: Option<&DialogId>,
 ) -> bool {
-    let relayed = relay_peer_dialog(call, source_leg_id, source).is_some_and(|(_, d)| {
-        d.requests.iter().any(|p| p.method.eq_ignore_ascii_case("INVITE") && !p.cancelled)
-    });
+    let relayed = relay_peer_dialog(call, source_leg_id, source)
+        .is_some_and(|(_, d)| relayed_invite_pending(d));
     relayed
         || (named_dialog(call, source_leg_id, source).is_some()
             && source_initial_invite_unanswered(call, source_leg_id))
@@ -188,8 +102,7 @@ pub fn sender_invite_unacknowledged(
     source_leg_id: &str,
     source: Option<&DialogId>,
 ) -> bool {
-    named_dialog(call, source_leg_id, source)
-        .is_some_and(|d| d.pending_reinvite_2xx.is_some() || d.answered_2xx.is_some())
+    named_dialog(call, source_leg_id, source).is_some_and(|d| d.answered_invite.is_some())
 }
 
 /// Whether an UPDATE that `source_leg_id`'s peer sent is still awaiting its
@@ -224,18 +137,4 @@ pub fn cached_sdp_for_leg_dialog<'a>(
 ) -> Option<&'a [u8]> {
     let leg = find_leg(call, leg_id)?;
     super::leg::callee_dialog(leg, b_tag)?.cached_sdp.as_deref()
-}
-
-/// Note the final or the timeout of the BYE on `bye_branch` that released a
-/// retired dialog (RFC 3261 §15.1.1): that release is settled.
-pub fn settle_straggler_release(mut call: Call, bye_branch: &str) -> Call {
-    let legs = std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut());
-    for d in legs.flat_map(|l| l.dialogs.iter_mut()) {
-        if let DialogState::Retired(RetiredDialog { release: Some(r), .. }) = &mut d.state {
-            if r.bye_branch == bye_branch {
-                r.settled = true;
-            }
-        }
-    }
-    call
 }

@@ -69,7 +69,7 @@ fn nth(cid: &str, n: u32, state: CallModelState) -> Call {
     call.state = state;
     if state != CallModelState::Active {
         call::testkit::stage_leg(&mut call.a_leg, LegState::Terminated);
-        call.a_leg.invite_final_sent = Some(401);
+        *call.a_leg.invite_final_sent_mut() = Some(401);
     }
     call
 }

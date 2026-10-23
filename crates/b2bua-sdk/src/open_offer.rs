@@ -43,7 +43,7 @@ pub fn open_offer(
 
 /// The re-INVITE relayed onto `dialog` still awaiting its final.
 fn pending_invite(dialog: &Dialog) -> Option<&RequestRecord> {
-    dialog.requests.iter().find(|p| p.method.eq_ignore_ascii_case("INVITE"))
+    call::helpers::invite_relay(dialog)
 }
 
 /// A relayed re-INVITE: its offer is the sender's until answered, this stack's
@@ -85,7 +85,7 @@ fn dialled(call: &Call, leg: &Leg, callee_tag: &str) -> Option<OpenOffer> {
     if !matches!(leg.state(), LegState::Trying | LegState::Early) {
         return None;
     }
-    let bytes = &leg.outbound_invite.as_ref()?.txn.as_ref()?.original_invite;
+    let bytes = &leg.dialled_sent()?.image;
     let SipMessage::Request(invite) =
         sip_message::CustomParser::new().parse(bytes.as_slice()).ok()?
     else {

@@ -191,6 +191,7 @@ impl ActionExecutor<'_> {
                 source_leg_id,
                 Some(pending.inbound_cseq),
             );
+            relay::owe_answer_in_ack(call, source_leg_id, r.resp, pending.inbound_cseq);
             self.retain_reinvite_2xx(call, fx, &mut relayed, dest.clone(), target_leg);
         }
         let mut effect = OutboundSipEffect {

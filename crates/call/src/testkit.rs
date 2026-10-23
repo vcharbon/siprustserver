@@ -3,9 +3,8 @@
 //! relayed into a dialog, for tests that start a call mid-flight.
 
 use crate::model::{
-    CSeq, Dialog, DialogEnd, DialogState, HostPort, InviteTxnHandle, Ladder, Leg, LegKind,
-    LegState, OutboundInvite, Provisional, ProvisionalId, RSeq, RemoteInfo, RequestRecord,
-    ResponderAck, Shown,
+    CSeq, Dialog, DialogEnd, DialogState, HostPort, Ladder, Leg, LegKind, LegState, OutboundInvite,
+    Provisional, ProvisionalId, RSeq, RemoteInfo, RequestRecord, ResponderAck, SentRequest, Shown,
 };
 
 /// A reliable provisional `rseq` of the responder `responder_tag` on
@@ -65,7 +64,7 @@ pub fn stage_leg(leg: &mut Leg, state: LegState) {
                 let d = staged_dialog(leg, DialogState::Confirmed);
                 leg.dialogs.insert(d);
             }
-            if let Some(invite) = leg.outbound_invite.as_mut() {
+            if let Some(invite) = leg.outbound_invite_mut() {
                 invite.record_final(200);
             }
         }
@@ -75,10 +74,10 @@ pub fn stage_leg(leg: &mut Leg, state: LegState) {
                 return;
             }
             crate::helpers::retire_early_dialogs(leg);
-            match leg.outbound_invite.as_mut() {
+            match leg.outbound_invite_mut() {
                 Some(invite) => invite.record_final(487),
                 None => {
-                    leg.invite_final_sent.get_or_insert(487);
+                    leg.invite_final_sent_mut().get_or_insert(487);
                 }
             }
         }
@@ -87,7 +86,7 @@ pub fn stage_leg(leg: &mut Leg, state: LegState) {
 
 fn staged_dialog(leg: &Leg, state: DialogState) -> Dialog {
     let ours = crate::helpers::leg_own_tag(leg).unwrap_or("staged").to_string();
-    let cseq = leg.outbound_invite.as_ref().map_or(0, |i| i.cseq);
+    let cseq = leg.dialled_cseq().unwrap_or(0);
     let mut d = Dialog::new(ours, "staged-peer", state, cseq);
     d.remote_target = "sip:staged-peer@staged.invalid".into();
     d
@@ -104,18 +103,34 @@ pub fn dialled_leg(leg_id: &str, our_tag: &str) -> Leg {
         local_uri: None,
         remote_uri: None,
         invite_request_uri: None,
-        outbound_invite: Some(OutboundInvite::new(our_tag, 1, 0, None)),
+        invite: Some(RequestRecord::dialled(1, None, OutboundInvite::new(our_tag, 0))),
         own_tag: None,
         ext: None,
         kind: Some(LegKind::Destination),
         in_session_timer: None,
         adopted: None,
-        invite_final_sent: None,
-        answer_preempted: None,
         attempt: None,
         ring: crate::model::Ring::Silent,
         messages: Default::default(),
         sdp_session: Default::default(),
+    }
+}
+
+/// Record what `leg`'s dialling INVITE left as, `sent`: the image a CANCEL,
+/// an ACK or a takeover rebuilds from.
+pub fn dial_with(leg: &mut Leg, sent: SentRequest) {
+    if let Some(record) = leg.invite.as_mut() {
+        record.sent = Some(sent);
+    }
+}
+
+/// The INVITE this stack sent on its own account on a dialog, numbered
+/// `cseq`, as it left (`sent`).
+pub fn own_invite(cseq: i64, sent: Option<SentRequest>) -> RequestRecord {
+    RequestRecord {
+        origin: crate::model::RequestOrigin::Own,
+        sent,
+        ..RequestRecord::relayed("INVITE", cseq, 0)
     }
 }
 
@@ -146,38 +161,24 @@ pub fn stage_reinvite_round(leg: &mut Leg, branch: &str, stage: RoundStage) {
         return;
     };
     d.our_cseq += 1;
-    d.pending_invite_txn = Some(InviteTxnHandle {
-        branch: branch.into(),
-        cseq: d.our_cseq,
-        original_invite: Vec::new(),
-        destination: HostPort { host: "staged.invalid".into(), port: 5060 },
-    });
-    d.requests.retain(|p| !p.method.eq_ignore_ascii_case("INVITE"));
-    d.ack_branch = None;
-    d.emitted_ack = None;
-    d.awaited_ack_cseq = None;
-    match stage {
-        RoundStage::Open => d.requests.push(RequestRecord {
-            method: "INVITE".into(),
-            outbound_cseq: d.our_cseq,
-            inbound_cseq: STAGED_ROUND_CSEQ,
-            source_vias: Vec::new(),
-            source_call_id: String::new(),
-            source_from: String::new(),
-            source_to: String::new(),
-            origin: Default::default(),
-            usage: Default::default(),
-            sent: None,
-            deadline_ms: None,
-            cancelled: false,
-            offered_100rel: false,
-            offered: true,
-            source_timestamp: None,
-            relayed_by: Default::default(),
-            author: None,
+    let mut round = RequestRecord {
+        sent: Some(SentRequest {
+            branch: branch.into(),
+            image: Vec::new(),
+            destination: HostPort { host: "staged.invalid".into(), port: 5060 },
         }),
-        RoundStage::Answered => d.awaited_ack_cseq = Some(STAGED_ROUND_CSEQ),
-        RoundStage::Acked => d.ack_branch = Some(format!("{branch}-ack")),
-        RoundStage::Refused => d.pending_invite_txn = None,
+        offered: true,
+        ..RequestRecord::relayed("INVITE", d.our_cseq, STAGED_ROUND_CSEQ)
+    };
+    let exchange = round.invite.get_or_insert_with(Default::default);
+    match stage {
+        RoundStage::Open => {}
+        RoundStage::Answered => exchange.awaited_ack_cseq = Some(STAGED_ROUND_CSEQ),
+        RoundStage::Acked => exchange.ack_branch = Some(format!("{branch}-ack")),
+        RoundStage::Refused => {
+            d.sent_invite = None;
+            return;
+        }
     }
+    d.sent_invite = Some(round);
 }

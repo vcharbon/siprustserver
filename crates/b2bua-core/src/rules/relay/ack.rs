@@ -33,7 +33,7 @@ use super::identity::{leg_via, CallMarks};
 /// an ACK this stack composes on its own account.
 ///
 /// Returns the effect **and the Via branch it used**, so the caller can retain
-/// the branch on the dialog ([`call::helpers::retain_ack_branch`]) for a
+/// the branch on the dialog's INVITE record ([`call::helpers::retain_ack_branch`]) for a
 /// §13.2.2.4 re-ACK of a retransmitted 2xx. `provenance` says whose ACK it
 /// is: the peer's relayed, or one this stack composes on its own account.
 #[allow(clippy::too_many_arguments)]
@@ -60,16 +60,17 @@ pub fn ack_b_leg(
     // so a retransmitted 2xx MUST be re-ACKed reusing the SAME Via branch — a
     // fresh branch would mint a *new* client transaction and never quiesce the
     // answerer's INVITE server txn, leaking / late-timing-out the confirmed call
-    // when the first ACK is lost. Reuse the branch this INVITE transaction's 2xx
-    // armed (`confirm_dialog`), else mint one here. `ack_branch` is reset wherever
-    // a new INVITE transaction is cached on the dialog, so a `Some(_)` here always
+    // when the first ACK is lost. Reuse the branch this INVITE's 2xx drew, else
+    // mint one here. The branch belongs to the dialog's INVITE record, which the
+    // next INVITE sent on the dialog replaces, so a `Some(_)` here always
     // belongs to the CSeq echoed just below.
-    let branch = dialog.ack_branch.clone().unwrap_or_else(|| ids.new_branch());
+    let branch = call::helpers::ack_branch(dialog).map_or_else(|| ids.new_branch(), str::to_string);
     // The ACK reuses the CSeq of the INVITE it acknowledges — not the dialog's
     // running `our_cseq`, which an intervening early PRACK/UPDATE (or a later
-    // in-dialog request) has advanced past the INVITE. Recover it from the cached
-    // INVITE transaction handle.
-    let ack_cseq = acked_invite_cseq(dialog).unwrap_or_else(|| super::wire_cseq(dialog.our_cseq));
+    // in-dialog request) has advanced past the INVITE. Recover it from the
+    // INVITE's record.
+    let ack_cseq =
+        acked_invite_cseq(leg, dialog).unwrap_or_else(|| super::wire_cseq(dialog.our_cseq));
     let opts = GenerateAckFor2xxOpts {
         via: Some(leg_via(config, marks, &leg.leg_id, branch.clone())),
         cseq: Some(ack_cseq),
@@ -96,14 +97,14 @@ pub fn ack_b_leg(
     ))
 }
 
-/// The CSeq sequence number of the INVITE whose 2xx this dialog acknowledges
-/// (RFC 3261 §13.2.2.4): the INVITE last sent on it (initial or re-INVITE),
-/// recovered from the cached client-transaction handle — or, for a round the
-/// record never held (no handle), the ACK this stack sent for its 2xx.
-pub(crate) fn acked_invite_cseq(dialog: &Dialog) -> Option<u32> {
-    match &dialog.pending_invite_txn {
-        Some(_) => acked_invite(dialog).map(|r| r.cseq().seq()),
-        None => parse_request(dialog.emitted_ack.as_ref()?.wire().0).map(|r| r.cseq().seq()),
+/// The CSeq sequence number of the INVITE whose 2xx `leg`'s `dialog`
+/// acknowledges (RFC 3261 §13.2.2.4): the INVITE last sent on it (initial or
+/// re-INVITE), read off its image — or, for a round the record never held (no
+/// image), the ACK this stack sent for its 2xx.
+pub(crate) fn acked_invite_cseq(leg: &Leg, dialog: &Dialog) -> Option<u32> {
+    match call::helpers::sent_invite_image(leg, dialog) {
+        Some(_) => acked_invite(leg, dialog).map(|r| r.cseq().seq()),
+        None => parse_request(call::helpers::emitted_ack(dialog)?.wire().0).map(|r| r.cseq().seq()),
     }
 }
 
@@ -133,22 +134,23 @@ pub fn ack_lost_non_2xx(
     })
 }
 
-/// `true` when the INVITE last sent on this dialog carried the offer, so the ACK
-/// for its 2xx owes no answer body (RFC 3264 §4) and this stack can compose it
-/// from the dialog alone. A delayed-offer INVITE answers this `false`, a body
-/// framing no session description included (RFC 5621 §3.1): its ACK carries
-/// the answer, which only the acknowledging peer's own ACK supplies.
-pub(crate) fn acked_invite_carries_offer(dialog: &Dialog) -> bool {
-    acked_invite(dialog).is_some_and(|r| r.sdp().is_some())
+/// `true` when the INVITE last sent on `leg`'s `dialog` carried the offer, so
+/// the ACK for its 2xx owes no answer body (RFC 3264 §4) and this stack can
+/// compose it from the dialog alone. A delayed-offer INVITE answers this
+/// `false`, a body framing no session description included (RFC 5621 §3.1):
+/// its ACK carries the answer, which only the acknowledging peer's own ACK
+/// supplies.
+pub(crate) fn acked_invite_carries_offer(leg: &Leg, dialog: &Dialog) -> bool {
+    acked_invite(leg, dialog).is_some_and(|r| r.sdp().is_some())
 }
 
-/// The INVITE last sent on this dialog, re-parsed from its cached
-/// client-transaction handle.
-pub(crate) fn acked_invite(dialog: &Dialog) -> Option<sip_message::SipRequest> {
-    parse_request(&dialog.pending_invite_txn.as_ref()?.original_invite)
+/// The INVITE last sent on `leg`'s `dialog`, re-parsed from its record's
+/// image.
+pub(crate) fn acked_invite(leg: &Leg, dialog: &Dialog) -> Option<sip_message::SipRequest> {
+    parse_request(&call::helpers::sent_invite_image(leg, dialog)?.image)
 }
 
-/// A request re-parsed from the bytes a client-transaction handle caches it as.
+/// A request re-parsed from the bytes a record keeps it as.
 pub(super) fn parse_request(bytes: &[u8]) -> Option<sip_message::SipRequest> {
     use sip_message::SipParser;
     match sip_message::parser::custom::CustomParser::new().parse(bytes).ok()? {

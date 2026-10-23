@@ -2,7 +2,7 @@
 //! modules: pending-relay lookup, peer resolution and index-based leg access.
 //! Pure reads — no state mutation, no SIP building.
 
-use call::{Call, Dialog, DialogId};
+use call::{Call, Dialog, DialogId, Leg};
 use sip_message::generators::InDialogMethod;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser};
@@ -24,11 +24,11 @@ pub(super) fn find_pending_dialog(
     find_relay(d, outbound_cseq).map(|_| (d.id(), d.clone()))
 }
 
-/// The INVITE CSeq cached on a dialog's pending INVITE handle (RFC 3261
-/// §13.2.2.4 / RFC 3262 §7.2). Parses the snapshot; `None` if absent/unparseable.
-pub(super) fn invite_cseq_from_handle(dialog: &Dialog) -> Option<i64> {
-    let handle = dialog.pending_invite_txn.as_ref()?;
-    match CustomParser::new().parse(&handle.original_invite).ok()? {
+/// The CSeq of the INVITE `leg`'s `dialog` last sent (RFC 3261 §13.2.2.4 /
+/// RFC 3262 §7.2), read off its image; `None` if absent or unparseable.
+pub(super) fn invite_cseq_from_handle(leg: &Leg, dialog: &Dialog) -> Option<i64> {
+    let sent = call::helpers::sent_invite_image(leg, dialog)?;
+    match CustomParser::new().parse(&sent.image).ok()? {
         SipMessage::Request(r) => Some(r.cseq().seq() as i64),
         _ => None,
     }

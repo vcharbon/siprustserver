@@ -12,10 +12,10 @@ ext .rs
 # `exclude <path glob>`.
 
 crates/b2bua-core/src/rules/actions/respond.rs 621
-crates/b2bua-core/src/rules/defaults/core_rules.rs 1587
+crates/b2bua-core/src/rules/defaults/core_rules.rs 1572
 crates/b2bua-core/src/rules/relay_first_18x.rs 524
-crates/b2bua-core/src/rules/relay/sdp_session_tests.rs 923
-crates/b2bua-core/tests/it/rules.rs 5007
+crates/b2bua-core/src/rules/relay/sdp_session_tests.rs 921
+crates/b2bua-core/tests/it/rules.rs 5000
 crates/b2bua-harness/src/lib.rs 969
 crates/b2bua-harness/tests/it/call_keyed_holds.rs 1036
 crates/b2bua-harness/tests/it/fake_prack.rs 810
@@ -47,8 +47,8 @@ crates/b2bua/src/store/mod.rs 936
 crates/call-limiter/src/store.rs 578
 crates/call-limiter/tests/it/keyed_by_call.rs 877
 crates/callshapes/src/plan.rs 1174
-crates/call/tests/it/common/mod.rs 916
-crates/call/tests/it/model_helpers.rs 902
+crates/call/tests/it/common/mod.rs 891
+crates/call/tests/it/model_helpers.rs 895
 crates/e2e-core/src/infra.rs 622
 crates/e2e-model/src/registry.rs 575
 crates/e2e-web/src/lib.rs 1280

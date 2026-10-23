@@ -5,11 +5,11 @@
 #
 # The owner is read from the finding: a missing or extra CDR §5; a final
 # under another tag than a provisional that left inside the replication
-# window, a request a copy sends without the record of what the dead owner
-# sent, and a request into a dialog the other copy ended §4; the non-2xx final
-# of a dialled INVITE nobody ACKs §12; a PRACK, an owed ACK or an in-dialog
-# request left unanswered §2; a 2xx repeat routed through the other owner §8;
-# and any other finding of a split cell §7.
+# window, a request or final a copy sends without the record of what the dead
+# owner sent, and a request into a dialog the other copy ended §4; the non-2xx
+# final of a dialled INVITE nobody ACKs §12; a PRACK, an owed ACK or an
+# in-dialog request left unanswered §2; a 2xx repeat routed through the other
+# owner §8; and any other finding of a split cell §7.
 
 basic/primary-killed/t3-left  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
 basic/primary-killed/t5-left  ADR-0055 §5  # CDR count
@@ -54,14 +54,10 @@ keepalive/stalled-killed/t1-logged  ADR-0055 §4  # final under another tag than
 keepalive/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
 keepalive/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
 media-leg/primary-killed/t2-left  ADR-0055 §4  # final under another tag than a provisional that left inside the replication window
-media-leg/primary-killed/t2-logged  ADR-0055 §2  # a reliable provisional and its PRACK across the kill
 media-leg/primary-killed/t4-left  ADR-0055 §2  # in-dialog request neither answered nor relayed
 media-leg/primary-killed/t4-logged  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
-media-leg/primary-killed/t5-applied  ADR-0055 §2  # a later turn in flight at the kill: a reliable provisional and its PRACK the copy never saw
-media-leg/primary-killed/t5-left  ADR-0055 §2  # in-dialog request neither answered nor relayed
-media-leg/primary-killed/t5-logged  ADR-0055 §2  # in-dialog request neither answered nor relayed
+media-leg/primary-killed/t5-applied  ADR-0055 §4  # the copy times out an INVITE the dead primary answered
 media-leg/primary-killed/t6-left  ADR-0055 §4  # request on an ended dialog
-media-leg/primary-killed/t6-logged  ADR-0055 §2  # in-dialog request neither answered nor relayed
 media-leg/primary-killed/t8-left  ADR-0055 §5  # CDR count
 media-leg/primary-killed/t9-left  ADR-0055 §5  # CDR count
 media-leg/primary-killed/t9-logged  ADR-0055 §5  # CDR count
@@ -73,10 +69,10 @@ media-leg/stalled-killed/t2-left  ADR-0055 §4  # final under another tag than t
 media-leg/stalled-killed/t2-logged  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
 media-leg/stalled-killed/t4-left  ADR-0055 §4  # a request into a dialog the other copy ended
 media-leg/stalled-killed/t4-logged  ADR-0055 §4  # a request into a dialog the other copy ended
-media-leg/stalled-killed/t5-left  ADR-0055 §2  # a reliable provisional and its PRACK across the kill
-media-leg/stalled-killed/t5-logged  ADR-0055 §2  # a reliable provisional and its PRACK across the kill
-media-leg/stalled-killed/t6-left  ADR-0055 §2  # a reliable provisional and its PRACK across the kill
-media-leg/stalled-killed/t6-logged  ADR-0055 §2  # a reliable provisional and its PRACK across the kill
+media-leg/stalled-killed/t5-left  ADR-0055 §4  # the copy times out an INVITE the dead primary answered
+media-leg/stalled-killed/t5-logged  ADR-0055 §4  # the copy times out an INVITE the dead primary answered
+media-leg/stalled-killed/t6-left  ADR-0055 §4  # the copy times out an INVITE the dead primary answered
+media-leg/stalled-killed/t6-logged  ADR-0055 §4  # the copy times out an INVITE the dead primary answered
 prack/primary-killed/t2-left  ADR-0055 §4  # final under another tag than a provisional that left inside the replication window
 prack/primary-killed/t2-logged  ADR-0055 §2  # a reliable provisional and its PRACK across the kill
 prack/primary-killed/t3-left  ADR-0055 §4  # final under another tag than a provisional that left inside the replication window
@@ -86,8 +82,6 @@ prack/primary-killed/t5-left  ADR-0055 §4  # final under another tag than a pro
 prack/primary-killed/t7-left  ADR-0055 §5  # CDR count
 prack/primary-killed/t8-left  ADR-0055 §5  # CDR count
 prack/primary-killed/t8-logged  ADR-0055 §5  # CDR count
-prack/split-healed/t1-left  ADR-0055 §7  # two copies
-prack/split-healed/t1-logged  ADR-0055 §7  # two copies
 prack/split-healed/t2-left  ADR-0055 §2  # PRACK answered 481
 prack/split-healed/t2-logged  ADR-0055 §2  # PRACK answered 481
 prack/split-healed/t3-left  ADR-0055 §2  # PRACK's 200 reaches a copy holding no record of it
@@ -119,14 +113,9 @@ refer/primary-killed/t14-logged  ADR-0055 §5  # CDR count
 refer/primary-killed/t15-left  ADR-0055 §5  # CDR count
 refer/primary-killed/t15-logged  ADR-0055 §5  # CDR count
 refer/primary-killed/t3-left  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
-refer/primary-killed/t7-applied  ADR-0055 §2  # the re-INVITE turn in flight at the kill: the copy reads its 2xx as the INVITE's
-refer/primary-killed/t7-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
-refer/primary-killed/t7-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
-refer/primary-killed/t8-applied  ADR-0055 §2  # the re-INVITE turn in flight at the kill: the copy reads its 2xx as the INVITE's
-refer/primary-killed/t8-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
-refer/primary-killed/t8-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
+refer/primary-killed/t7-applied  ADR-0055 §4  # the copy reads the 2xx of a re-INVITE the dead primary sent as its dialled INVITE's
+refer/primary-killed/t8-applied  ADR-0055 §4  # the copy reads the 2xx of a re-INVITE the dead primary sent as its dialled INVITE's
 refer/primary-killed/t9-left  ADR-0055 §4  # copy reuses an in-dialog CSeq
-refer/primary-killed/t9-logged  ADR-0055 §4  # copy reuses an in-dialog CSeq
 refer/split-healed/t7-applied  ADR-0055 §7  # the copy behind the split reads the re-INVITE's 2xx as the INVITE's
 refer/split-healed/t7-left  ADR-0055 §7  # the copy behind the split reads the re-INVITE's 2xx as the INVITE's
 refer/split-healed/t7-logged  ADR-0055 §7  # the copy behind the split reads the re-INVITE's 2xx as the INVITE's
@@ -196,8 +185,8 @@ reinvite/stalled-killed/t1-left  ADR-0055 §4  # final under another tag than th
 reinvite/stalled-killed/t1-logged  ADR-0055 §4  # final under another tag than the provisional, the copy behind the dead primary
 reinvite/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
 reinvite/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered
-reinvite/stalled-killed/t6-left  ADR-0055 §2  # an owed ACK of a 2xx across the kill
-reinvite/stalled-killed/t6-logged  ADR-0055 §2  # an owed ACK of a 2xx across the kill
+reinvite/stalled-killed/t6-left  ADR-0055 §4  # the copy answers 487 to a re-INVITE the dead primary answered
+reinvite/stalled-killed/t6-logged  ADR-0055 §4  # the copy answers 487 to a re-INVITE the dead primary answered
 update-x-bye/primary-killed/t3-left  ADR-0055 §12  # non-2xx final of a dialled INVITE never ACKed
 update-x-bye/primary-killed/t5-left  ADR-0055 §5  # CDR count
 update-x-bye/primary-killed/t6-left  ADR-0055 §5  # CDR count

@@ -5,9 +5,7 @@
 //! caller's dialog be re-identified and the ACK obligation be armed.
 
 use call::helpers::{callee_dialog_mut, fronting_dialog, is_adopted};
-use call::{
-    Call, CallModelState, DialogId, DialogState, LegDisposition, OwedAnswer, RetiredDialog,
-};
+use call::{Call, CallModelState, DialogId, DialogState, LegDisposition, RetiredDialog};
 use sip_message::header;
 use sip_message::SipResponse;
 
@@ -101,7 +99,7 @@ impl ActionExecutor<'_> {
             }
             losers =
                 leg.dialogs.iter().filter(|d| d.awaits_invite_final()).map(|d| d.id()).collect();
-            if let Some(invite) = leg.outbound_invite.as_mut() {
+            if let Some(invite) = leg.outbound_invite_mut() {
                 invite.record_final(resp.status());
             }
         }
@@ -125,7 +123,7 @@ impl ActionExecutor<'_> {
         let answers_the_caller = call.state == CallModelState::Active
             && adopted
             && !crossed_cancel
-            && call.a_leg.invite_final_sent.is_none();
+            && call.a_leg.invite_final_sent().is_none();
         // The caller-facing tag of the dialog this 2xx creates: the one its
         // relayed provisional or `MapUnshownDialog` showed, or the one the
         // relay of a live answer takes now (`a_face_tag`). A 2xx crossing the
@@ -165,7 +163,7 @@ fn retire_losers(call: &mut Call, promoted: Promoted) -> Retired {
         for id in &losers {
             if let Some(lost) = leg.dialogs.by_tags_mut(&id.our_tag, &id.peer_tag) {
                 let open_requests = std::mem::take(&mut lost.requests);
-                lost.state = DialogState::Retired(RetiredDialog { open_requests, release: None });
+                lost.state = DialogState::Retired(RetiredDialog { open_requests });
             }
         }
     }
@@ -179,16 +177,17 @@ fn retire_losers(call: &mut Call, promoted: Promoted) -> Retired {
 /// dialog carried one first (RFC 3262 §5) — makes the 2xx's description the
 /// offer that ACK answers ([`OwedAnswer::InAck`]).
 fn arm_ack_obligation(call: &mut Call, resp: &SipResponse, retired: Retired) {
-    let Retired { leg_id, winner, .. } = retired;
+    let Retired { leg_id, .. } = retired;
     let awaited_ack_cseq = i64::from(call.a_leg_invite.cseq);
     let invite_cseq = i64::from(resp.cseq().seq());
-    let offered_reliably = relay::offered_reliably(call, &leg_id, &winner, invite_cseq);
-    let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) else { return };
-    let Some(d) = leg.dialogs.confirmed_mut() else { return };
-    d.awaited_ack_cseq = Some(awaited_ack_cseq);
-    let delayed = !offered_reliably && !relay::acked_invite_carries_offer(d);
-    if let Some(offer) = resp.sdp().filter(|_| delayed) {
-        d.owed_answer =
-            Some(OwedAnswer::InAck { ack_cseq: awaited_ack_cseq, offer: offer.to_vec() });
-    }
+    *call = call::helpers::update_leg(call.clone(), &leg_id, |leg| {
+        let Some(d) = leg.dialogs.confirmed_mut() else { return };
+        let exchange = d
+            .sent_invite
+            .get_or_insert_with(|| call::RequestRecord::dialled_on_dialog(invite_cseq))
+            .invite
+            .get_or_insert_with(Default::default);
+        exchange.awaited_ack_cseq = Some(awaited_ack_cseq);
+    });
+    relay::owe_answer_in_ack(call, &leg_id, resp, awaited_ack_cseq);
 }

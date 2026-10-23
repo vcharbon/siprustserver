@@ -155,7 +155,7 @@ fn a_caller_rejected_with_a_non_2xx_final_gains_no_dialog() {
     let mut exec = ActionExecutor { config: &config, turn: &mut scope, now_ms: 0 };
 
     let mut rejected = open.clone();
-    rejected.a_leg.invite_final_sent = Some(487);
+    *rejected.a_leg.invite_final_sent_mut() = Some(487);
     exec.ensure_a_dialog_with(&mut rejected, None);
     exec.ensure_a_dialog_with(&mut rejected, Some("shown".into()));
     assert!(rejected.a_leg.dialogs.is_empty(), "a rejected caller gains no dialog");

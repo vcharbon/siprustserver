@@ -1,7 +1,7 @@
 //! What a client transaction's timeout means for `handle-timeout`, the
 //! default of the rules, before its INVITE readings: the request record the
 //! timeout settled, read by its origin and method (ADR-0055 §2); a leg
-//! already going away; the BYE that released a fork straggler. A service
+//! already going away. A service
 //! rule outranks it for a request of its own
 //! ([`b2bua_sdk::model::RuleContext::timed_out_record`] names the rule that
 //! sent it).
@@ -85,16 +85,4 @@ pub(super) fn going_away_timeout(ctx: &RuleContext, leg: &call::Leg) -> Vec<Rule
         _ => LegEnd::Abandon,
     };
     vec![RuleAction::TerminateLeg { leg_id, end }]
-}
-
-/// Whether the turn's timeout is the BYE that released a fork straggler on
-/// the source leg ([`call::StragglerRelease`]).
-pub(super) fn straggler_release_timeout(ctx: &RuleContext) -> bool {
-    let branch = ctx.timeout_branch().unwrap_or_default();
-    ctx.source_leg().is_some_and(|l| {
-        l.dialogs
-            .iter()
-            .filter_map(|d| d.retired())
-            .any(|r| r.release.as_ref().is_some_and(|rel| rel.bye_branch == branch))
-    })
 }

@@ -58,7 +58,7 @@ impl ActionExecutor<'_> {
         // first emission and composes below.
         if body.is_empty() {
             if let Some(retained) =
-                leg.and_then(|l| l.dialogs.established()).and_then(|d| d.emitted_ack.as_ref())
+                leg.and_then(|l| l.dialogs.established()).and_then(call::helpers::emitted_ack)
             {
                 fx.outbound.push(super::ladder::repeat_of(
                     retained,
@@ -82,24 +82,21 @@ impl ActionExecutor<'_> {
             )
         });
         if let Some((e, branch)) = ack {
+            let OutboundBody::Request(r) = &e.body else { return };
+            let cseq = i64::from(r.cseq().seq());
             // Retain THE ACK's exact bytes + destination before it leaves, so a
             // retransmitted 2xx re-passes this datagram (§13.2.2.4); the
             // end-of-turn stamp rebinds it to the bytes that leave.
-            if let OutboundBody::Request(r) = &e.body {
-                *call = call::helpers::retain_emitted_ack(
-                    call.clone(),
-                    leg_id,
-                    RetainedEmission::on_trigger(
-                        r.image().to_vec(),
-                        e.destination.clone(),
-                        call::Repeated::request(r.method().as_str()),
-                    ),
-                );
-            }
+            let retained = RetainedEmission::on_trigger(
+                r.image().to_vec(),
+                e.destination.clone(),
+                call::Repeated::request(r.method().as_str()),
+            );
+            *call = call::helpers::retain_emitted_ack(call.clone(), leg_id, retained, cseq);
             fx.outbound.push(e);
             // Retain the ACK branch so a retransmitted 2xx is re-ACKed on the
             // SAME transaction (§13.2.2.4 — `re-ack-retransmitted-2xx`).
-            *call = call::helpers::retain_ack_branch(call.clone(), leg_id, &branch);
+            *call = call::helpers::retain_ack_branch(call.clone(), leg_id, &branch, cseq);
             // The ACK this dialog owed is on the wire, so the §13.2.2.4
             // obligation is discharged HERE — by the emission, whoever composed
             // it. A peer ACK for the same 2xx is then absorbed rather than
@@ -153,6 +150,35 @@ impl ActionExecutor<'_> {
             leg_id,
             Vec::new(),
             None,
+            Vec::new(),
+            Provenance::Authored,
+            relay::Author::Stack,
+        );
+    }
+
+    /// ACK `leg_id`'s confirmed dialog on this stack's own account, answering
+    /// the offer its 2xx made with every stream rejected (RFC 3264 §6), in the
+    /// session this stack stated on the dialog (§8): no ACK carrying a peer's
+    /// answer will come, and the dialog is BYEd next. Nothing when the ACK owes
+    /// no answer.
+    pub(super) fn ack_rejecting(&mut self, call: &mut Call, fx: &mut HandlerEffects, leg_id: &str) {
+        let Some(leg) = call::helpers::find_leg(call, leg_id) else { return };
+        let Some(offer) = relay::offer_owed_in_ack(leg) else { return };
+        let origin = leg.dialogs.confirmed().and_then(|d| relay::next_origin_on(leg, d));
+        let options = sip_message::BuildHeldSdpOptions {
+            local_ip: self.config.sip_local_ip.clone(),
+            now_ms: self.now_ms,
+        };
+        let answer = sip_message::sdp_answer::reject_offer(offer, &options)
+            .and_then(|bytes| relay::in_dialog_session(bytes, origin.as_deref()))
+            .unwrap_or_default();
+        let content_type = (!answer.is_empty()).then(relay::sdp);
+        self.ack_leg(
+            call,
+            fx,
+            leg_id,
+            answer,
+            content_type,
             Vec::new(),
             Provenance::Authored,
             relay::Author::Stack,

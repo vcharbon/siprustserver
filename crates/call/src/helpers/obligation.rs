@@ -83,14 +83,12 @@ fn unacked_2xx(call: &Call) -> Vec<Obligation> {
     std::iter::once(&call.a_leg)
         .chain(call.b_legs.iter())
         .flat_map(|leg| {
-            leg.dialogs.iter().flat_map(move |d| {
-                d.answered_2xx.iter().chain(d.pending_reinvite_2xx.iter()).map(move |u| {
-                    Obligation::AckOf2xx {
-                        leg: leg.leg_id.clone(),
-                        dialog_tag: u.dialog_tag.clone(),
-                        cseq: u.cseq,
-                    }
-                })
+            leg.dialogs.iter().filter_map(crate::helpers::answered_2xx).map(move |u| {
+                Obligation::AckOf2xx {
+                    leg: leg.leg_id.clone(),
+                    dialog_tag: u.dialog_tag.clone(),
+                    cseq: u.cseq,
+                }
             })
         })
         .collect()
@@ -107,17 +105,16 @@ pub fn acked_2xx(call: &Call, leg_id: &str, dialog_tag: &str, cseq: i64) -> Opti
 }
 
 /// Whether `obligation` is the caller's ACK of the a-leg's INITIAL answer —
-/// the 2xx that confirmed the call — rather than of a re-INVITE's 2xx. Read
-/// off the a-leg dialog's retained answer, which stays until that ACK arrives
-/// or the call ends.
+/// the 2xx that confirmed the call — rather than of a re-INVITE's 2xx: the
+/// a-leg retains a 2xx to her dialog-creating INVITE's CSeq, until that ACK
+/// arrives or the call ends.
 pub fn answers_initial_invite(call: &Call, obligation: &Obligation) -> bool {
-    let Obligation::AckOf2xx { leg, dialog_tag, cseq } = obligation else {
+    let Obligation::AckOf2xx { leg, .. } = obligation else {
         return false;
     };
     *leg == call.a_leg.leg_id
-        && call.a_leg.dialogs.iter().any(|d| {
-            d.answered_2xx.as_ref().is_some_and(|u| u.dialog_tag == *dialog_tag && u.cseq == *cseq)
-        })
+        && unacked_2xx_slot(call, obligation)
+            .is_some_and(|u| u.cseq == i64::from(call.a_leg_invite.cseq))
 }
 
 /// The retained emission `obligation`'s ladder repeats — `None` once the
@@ -166,11 +163,8 @@ pub fn clear_retained(mut call: Call, obligation: &Obligation) -> Call {
                 .filter(|l| l.leg_id == *leg)
                 .flat_map(|l| l.dialogs.iter_mut())
             {
-                if matches(&d.answered_2xx) {
-                    d.answered_2xx = None;
-                }
-                if matches(&d.pending_reinvite_2xx) {
-                    d.pending_reinvite_2xx = None;
+                if matches(&crate::helpers::answered_2xx(d).cloned()) {
+                    d.answered_invite = None;
                 }
             }
             call
@@ -190,7 +184,7 @@ fn unacked_2xx_slot<'a>(call: &'a Call, obligation: &Obligation) -> Option<&'a U
     crate::helpers::find_leg(call, leg)?
         .dialogs
         .iter()
-        .flat_map(|d| d.answered_2xx.iter().chain(d.pending_reinvite_2xx.iter()))
+        .filter_map(crate::helpers::answered_2xx)
         .find(|u| u.dialog_tag == *dialog_tag && u.cseq == *cseq)
 }
 
@@ -206,24 +200,22 @@ fn unacked_2xx_slot_mut<'a>(
         .find(|l| l.leg_id == *leg)?
         .dialogs
         .iter_mut()
-        .flat_map(|d| d.answered_2xx.iter_mut().chain(d.pending_reinvite_2xx.iter_mut()))
+        .filter_map(crate::helpers::answered_2xx_mut)
         .find(|u| u.dialog_tag == *dialog_tag && u.cseq == *cseq)
 }
 
 /// Rebind every retained copy of a message in `call` whose bytes are `was`
 /// to `now` — the retained emissions ([`RetainedEmission::restate`]) and the
-/// INVITE client-transaction handles: the message they copy left restated.
+/// images of the INVITEs this side sent: the message they copy left restated.
 pub fn restate_retained(call: &mut Call, was: &[u8], now: &[u8]) {
     for leg in std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut()) {
         restate_leg_invite(leg, was, now);
         for dialog in &mut leg.dialogs {
-            let ext = dialog;
-            for unacked in
-                [ext.answered_2xx.as_mut(), ext.pending_reinvite_2xx.as_mut()].into_iter().flatten()
-            {
+            if let Some(unacked) = crate::helpers::answered_2xx_mut(dialog) {
                 unacked.emission.restate(was, now);
             }
-            if let Some(ack) = ext.emitted_ack.as_mut() {
+            let sent = dialog.sent_invite.as_mut().and_then(|r| r.invite.as_mut());
+            if let Some(ack) = sent.and_then(|x| x.emitted_ack.as_mut()) {
                 ack.restate(was, now);
             }
         }
@@ -235,17 +227,17 @@ pub fn restate_retained(call: &mut Call, was: &[u8], now: &[u8]) {
     }
 }
 
-/// Rebind `leg`'s INVITE client-transaction handles holding `was` to `now`:
-/// the INVITE they hold left restated.
+/// Rebind the images of `leg`'s INVITEs holding `was` to `now`: the INVITE
+/// they hold left restated.
 pub fn restate_leg_invite(leg: &mut crate::model::Leg, was: &[u8], now: &[u8]) {
-    let handles = leg
-        .outbound_invite
+    let images = leg
+        .invite
         .iter_mut()
-        .filter_map(|i| i.txn.as_mut())
-        .chain(leg.dialogs.iter_mut().filter_map(|d| d.pending_invite_txn.as_mut()));
-    for handle in handles {
-        if handle.original_invite == was {
-            handle.original_invite = now.to_vec();
+        .chain(leg.dialogs.iter_mut().filter_map(|d| d.sent_invite.as_mut()))
+        .filter_map(|r| r.sent.as_mut());
+    for sent in images {
+        if sent.image == was {
+            sent.image = now.to_vec();
         }
     }
 }

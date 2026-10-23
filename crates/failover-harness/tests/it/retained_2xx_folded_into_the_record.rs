@@ -79,7 +79,7 @@ async fn a_reinvite_retransmitted_to_the_primary_draws_the_2xx_its_copy_retained
     assert!(copy.serves(&est.call_ref), "the copy serves the round");
     let record = primary.live_call(&est.call_ref).expect("the primary serves the call");
     assert!(
-        record.a_leg.dialogs.iter().any(|d| d.pending_reinvite_2xx.is_some()),
+        record.a_leg.dialogs.iter().any(|d| d.answered_invite.is_some()),
         "the primary's record holds the retained 2xx the copy's write carried",
     );
 

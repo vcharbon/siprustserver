@@ -3,10 +3,12 @@
 //! repeated stops riding the replicated body — and every timer guarding the
 //! scope is disarmed: a leg's timers with the leg, an attempt's as it ends, a
 //! service machine's as it deactivates, the call's as its termination
-//! begins. No rule cancels a timer its scope already took.
+//! begins. No rule cancels a timer its scope already took. A 2xx a BYE of
+//! this stack waits behind (RFC 3261 §15) outlives the call's termination:
+//! its ACK or its give-up releases that BYE.
 
 use call::helpers::Scope;
-use call::{Call, TimerType};
+use call::{Call, DialogId, HeldRequest, Obligation, TimerType};
 
 use crate::effects::HandlerEffects;
 
@@ -25,9 +27,20 @@ impl ActionExecutor<'_> {
                 }
             }
         }
+        let held: Vec<Obligation> =
+            obligations.iter().filter(|o| bye_behind(call, o).is_some()).cloned().collect();
         for obligation in obligations {
+            if scope == Scope::Call && held.contains(&obligation) {
+                continue;
+            }
+            let bye = bye_behind(call, &obligation);
             self.scrub_timers(call, fx, &obligation);
             *call = call::helpers::clear_retained(call.clone(), &obligation);
+            // Discharged — its ACK arrived — the BYE behind it leaves; with its
+            // leg the dialog it would end is gone.
+            if let (Scope::Obligation(_), Some((leg_id, id, bye))) = (&scope, bye) {
+                self.send_held_bye(call, fx, &leg_id, &id, bye);
+            }
         }
         match scope {
             Scope::Leg(leg_id) => self.scrub_where(call, fx, |t| t.leg_id() == Some(leg_id)),
@@ -35,10 +48,42 @@ impl ActionExecutor<'_> {
             Scope::Machine(machine) => self.scrub_where(call, fx, |t| {
                 matches!(t.timer_type(), TimerType::Service { service_id, .. } if service_id == machine)
             }),
-            Scope::Call => self.scrub_where(call, fx, |t| !outlives_termination(t.timer_type())),
+            Scope::Call => self.scrub_where(call, fx, |t| {
+                !outlives_termination(t.timer_type())
+                    && t.key.obligation_of().is_none_or(|o| !held.contains(o))
+            }),
             Scope::Obligation(_) | Scope::Transaction { .. } | Scope::Provisionals => {}
         }
     }
+
+    /// The 2xx `obligation` names was given up on (RFC 3261 §13.3.1.4): the
+    /// BYE that waited behind its ACK leaves now (§15).
+    pub(super) fn release_bye_at_give_up(
+        &mut self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        obligation: &Obligation,
+    ) {
+        if let Some((leg_id, id, bye)) = bye_behind(call, obligation) {
+            *call = call::helpers::clear_retained(call.clone(), obligation);
+            self.send_held_bye(call, fx, &leg_id, &id, bye);
+        }
+    }
+}
+
+/// The BYE of this stack waiting behind the ACK of the 2xx `obligation`
+/// names, with the leg and dialog it rides.
+pub(super) fn bye_behind(
+    call: &Call,
+    obligation: &Obligation,
+) -> Option<(String, DialogId, HeldRequest)> {
+    let Obligation::AckOf2xx { leg, dialog_tag, cseq } = obligation else { return None };
+    let d = call::helpers::find_leg(call, leg)?.dialogs.iter().find(|d| {
+        call::helpers::answered_2xx(d)
+            .is_some_and(|u| u.dialog_tag == *dialog_tag && u.cseq == *cseq)
+    })?;
+    let bye = d.answered_invite.as_ref()?.invite.as_ref()?.bye_behind_ack.clone()?;
+    Some((leg.clone(), d.id(), bye))
 }
 
 /// Whether a timer outlives the start of the call's termination: the

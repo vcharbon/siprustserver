@@ -16,8 +16,9 @@ pub(super) fn no_owed_prack_past_its_invite(turn: &Turn<'_>) -> Result<(), Strin
     for p in call.provisionals.iter().filter(|p| p.responder.is_owed()) {
         let leg = find_leg(call, &p.id.leg);
         let held = if p.responder == ResponderAck::DeferredToAck {
-            leg.and_then(|l| l.dialogs.confirmed())
-                .is_some_and(|d| d.peer_tag == p.id.responder_tag && d.awaited_ack_cseq.is_some())
+            leg.and_then(|l| l.dialogs.confirmed()).is_some_and(|d| {
+                d.peer_tag == p.id.responder_tag && call::helpers::awaited_ack_cseq(d).is_some()
+            })
         } else {
             let ended = leg.is_none_or(|l| {
                 l.state() == LegState::Terminated || l.disposition() == LegDisposition::Cancelling

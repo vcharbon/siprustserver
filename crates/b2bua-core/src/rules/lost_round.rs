@@ -50,13 +50,17 @@ pub fn lost_round_rules() -> Vec<RuleDefinition> {
 }
 
 /// Whether the current response repeats the non-2xx of a lost round: the
-/// dialog holds no INVITE of its own and the ACK it kept names this CSeq.
+/// dialog's INVITE record holds no image of the INVITE and the ACK it kept
+/// names this CSeq.
 fn repeated_lost_failure(ctx: &RuleContext) -> bool {
-    let (Some(resp), Some(dialog)) = (ctx.response(), ctx.dialog()) else { return false };
+    let (Some(resp), Some(dialog), Some(leg)) = (ctx.response(), ctx.dialog(), ctx.source_leg())
+    else {
+        return false;
+    };
     resp.status() >= 300
-        && dialog.pending_invite_txn.is_none()
-        && dialog.emitted_ack.is_some()
-        && crate::rules::relay::acked_invite_cseq(dialog) == Some(resp.cseq().seq())
+        && call::helpers::sent_invite_image(leg, dialog).is_none()
+        && call::helpers::emitted_ack(dialog).is_some()
+        && crate::rules::relay::acked_invite_cseq(leg, dialog) == Some(resp.cseq().seq())
         && ctx.relayed_pending().is_none()
 }
 

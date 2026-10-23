@@ -244,7 +244,7 @@ impl ActionExecutor<'_> {
         leg_id: &str,
     ) {
         let Some(leg) = find_leg(call, leg_id) else { return };
-        let owed = |r: &RequestRecord| !r.is_own() && !r.method.eq_ignore_ascii_case("INVITE");
+        let owed = |r: &RequestRecord| (r.is_relay() || r.is_held()) && !r.is_invite();
         let mut settled: Vec<RequestRecord> = leg
             .dialogs
             .iter()

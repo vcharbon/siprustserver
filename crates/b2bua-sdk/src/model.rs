@@ -565,7 +565,7 @@ pub enum RuleAction {
     /// CANCEL a relayed, still-unanswered **re-INVITE** client transaction on
     /// `leg_id`'s dialog (RFC 3261 §9.1) — transaction-scoped: no leg state or
     /// disposition change, the established dialog and the call stay up. Builds
-    /// the CANCEL from the dialog's cached `pending_invite_txn` handle (same
+    /// the CANCEL from the INVITE the dialog's record holds (same
     /// branch / Route set / wire destination as the re-INVITE) and marks the
     /// matching pending-relay snapshot (`outbound_cseq`) cancelled so the
     /// peer's eventual final is resolved locally instead of relayed: the

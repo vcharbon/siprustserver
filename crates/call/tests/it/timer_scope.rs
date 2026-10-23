@@ -12,7 +12,7 @@ use call::testkit::{dialled_leg, stage_leg};
 /// termination not begun, no attempt, no service machine active.
 fn call() -> Call {
     let mut call = representative_call();
-    call.a_leg.invite_final_sent = None;
+    *call.a_leg.invite_final_sent_mut() = None;
     call.a_leg.dialogs = Default::default();
     stage_leg(&mut call.a_leg, LegState::Early);
     call.b_legs.clear();

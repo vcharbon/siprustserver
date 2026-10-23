@@ -158,7 +158,7 @@ fn termination_resolution() {
 fn a_legs_state_reads_off_its_invite_and_its_dialogs() {
     let mut leg = representative_call().b_legs[0].clone();
     leg.dialogs.retain(|_| false);
-    let invite = leg.outbound_invite.clone().expect("a dialled leg");
+    let invite = leg.outbound_invite().cloned().expect("a dialled leg");
     let read = |l: &Leg| (l.state(), l.end(), l.disposition(), l.is_resolved());
     assert_eq!(read(&leg), (LegState::Trying, None, LegDisposition::Pending, true));
 
@@ -166,7 +166,7 @@ fn a_legs_state_reads_off_its_invite_and_its_dialogs() {
     assert_eq!(read(&leg), (LegState::Early, None, LegDisposition::Pending, false));
 
     let mut cancelling = leg.clone();
-    cancelling.outbound_invite.as_mut().unwrap().cancel_sent = true;
+    cancelling.outbound_invite_mut().unwrap().cancel_sent = true;
     for d in cancelling.dialogs.iter_mut() {
         d.state = DialogState::Ending(EndingBy::Cancel);
     }
@@ -175,18 +175,18 @@ fn a_legs_state_reads_off_its_invite_and_its_dialogs() {
         read(&cancelling),
         (LegState::Terminated, cancelled, LegDisposition::Cancelling, false)
     );
-    cancelling.outbound_invite.as_mut().unwrap().record_final(487);
+    cancelling.outbound_invite_mut().unwrap().record_final(487);
     assert_eq!(
         read(&cancelling),
         (LegState::Terminated, cancelled, LegDisposition::Rejected, true)
     );
 
     let mut rejected = leg.clone();
-    rejected.outbound_invite.as_mut().unwrap().record_final(486);
+    rejected.outbound_invite_mut().unwrap().record_final(486);
     let end = Some(ByeDisposition::Rejected);
     assert_eq!(read(&rejected), (LegState::Terminated, end, LegDisposition::Rejected, true));
 
-    leg.outbound_invite.as_mut().unwrap().record_final(200);
+    leg.outbound_invite_mut().unwrap().record_final(200);
     leg.dialogs.iter_mut().for_each(|d| d.state = DialogState::Confirmed);
     assert_eq!(read(&leg), (LegState::Confirmed, None, LegDisposition::Bridged, false));
     leg.dialogs.iter_mut().for_each(|d| d.state = DialogState::Ending(EndingBy::Bye));
@@ -205,18 +205,18 @@ fn a_legs_state_reads_off_its_invite_and_its_dialogs() {
 fn the_callers_leg_reads_the_final_it_was_sent() {
     let mut leg = representative_call().a_leg;
     let read = |l: &Leg| (l.state(), l.end(), l.disposition(), l.is_resolved());
-    leg.invite_final_sent = None;
+    *leg.invite_final_sent_mut() = None;
     leg.dialogs.iter_mut().for_each(|d| d.state = DialogState::Early);
     assert_eq!(read(&leg), (LegState::Early, None, LegDisposition::Pending, true));
     let mut rejected = leg.clone();
-    rejected.invite_final_sent = Some(480);
+    *rejected.invite_final_sent_mut() = Some(480);
     rejected
         .dialogs
         .iter_mut()
         .for_each(|d| d.state = DialogState::Ended(DialogEnd::Rejected(480)));
     let end = Some(ByeDisposition::Rejected);
     assert_eq!(read(&rejected), (LegState::Terminated, end, LegDisposition::Rejected, true));
-    leg.invite_final_sent = Some(200);
+    *leg.invite_final_sent_mut() = Some(200);
     leg.dialogs.iter_mut().for_each(|d| d.state = DialogState::Confirmed);
     assert_eq!(read(&leg), (LegState::Confirmed, None, LegDisposition::Bridged, false));
 }
@@ -424,7 +424,7 @@ fn a_prack_is_relayed_answered_or_refused_by_what_it_names() {
 
     let other = pid("b-1", B_TAG, 1, 4712);
     let (mut call, s2) = shown(call, &other, "a1", 1, 9_000);
-    note_responder_ack(&mut call, &other, ResponderAck::OwnPrack { branch: "z9hG4bK-own".into() });
+    note_responder_ack(&mut call, &other, ResponderAck::OwnPrack);
     assert_eq!(prack_disposition(&call, "a1", rack(s2, 1), None), PrackDisposition::Answer200);
 }
 
@@ -562,17 +562,11 @@ fn a_2xx_ladder_never_runs_past_timer_l() {
 #[test]
 fn the_provisionals_scope_leaves_every_unacked_2xx_alone() {
     let mut call = representative_call();
-    call.b_legs[0].dialogs.by_tags_mut(B_LOCAL_TAG, B_TAG).unwrap().pending_reinvite_2xx =
-        Some(Unacked2xx {
-            dialog_tag: B_TAG.into(),
-            cseq: 4002,
-            emission: common::paced_emission(
-                common::ANSWERED_2XX,
-                ("203.0.113.42", 5060),
-                Class::Final2xx,
-                1,
-            ),
-        });
+    let emission =
+        common::paced_emission(common::ANSWERED_2XX, ("203.0.113.42", 5060), Class::Final2xx, 1);
+    let answer = Unacked2xx { dialog_tag: B_TAG.into(), cseq: 4002, emission };
+    let d = call.b_legs[0].dialogs.by_tags_mut(B_LOCAL_TAG, B_TAG).unwrap();
+    hold_answered_2xx(d, 4002, answer);
     let (call, s) = shown(call, &pid("b-1", B_TAG, 1, 7), A_TAG, 1, 1);
 
     let provisionals = obligations_in(&call, &Scope::Provisionals);
@@ -730,9 +724,8 @@ fn every_open_invite_transaction_mark_makes_a_newcomer_glare() {
     let pristine = |call: &Call| {
         let mut d = b_dialog(call).clone();
         d.requests.clear();
-        d.pending_reinvite_2xx = None;
-        d.answered_2xx = None;
-        d.awaited_ack_cseq = None;
+        d.sent_invite = None;
+        d.answered_invite = None;
         d
     };
     let call = representative_call();
@@ -741,8 +734,8 @@ fn every_open_invite_transaction_mark_makes_a_newcomer_glare() {
 
     // Rule 1: a relayed INVITE still awaiting its final response.
     let mut relayed = base.clone();
-    relayed.requests = b_dialog(&call).requests.clone();
-    assert!(!relayed.requests.is_empty(), "the fixture dialog carries a pending relayed INVITE");
+    relayed.sent_invite = Some(RequestRecord::relayed("INVITE", 4012, 4012));
+    assert!(invite_relay(&relayed).is_some(), "a relayed INVITE awaits its final");
     assert!(invite_transaction_open(&relayed));
 
     let unacked = || Unacked2xx {
@@ -758,16 +751,16 @@ fn every_open_invite_transaction_mark_makes_a_newcomer_glare() {
 
     // Rule 2, a 2xx this side sent: a relayed re-INVITE's, and the call's answer.
     let mut reinvite = base.clone();
-    reinvite.pending_reinvite_2xx = Some(unacked());
+    hold_answered_2xx(&mut reinvite, 4002, unacked());
     assert!(invite_transaction_open(&reinvite));
 
     let mut answered = base.clone();
-    answered.answered_2xx = Some(unacked());
+    hold_answered_2xx(&mut answered, 1, unacked());
     assert!(invite_transaction_open(&answered));
 
     // Rule 2, a 2xx taken here: its ACK is the peer's, not relayed yet.
     let mut owes_ack = base.clone();
-    owes_ack.awaited_ack_cseq = Some(4002);
+    owes_ack.sent_invite = Some(common::invite_awaiting_ack(4002));
     assert!(invite_transaction_open(&owes_ack));
 }
 
@@ -817,7 +810,8 @@ fn only_the_first_description_of_a_dialog_is_its_offer() {
 #[test]
 fn a_cancelled_invite_takes_back_the_2xx_that_never_left() {
     let mut call = representative_call();
-    call.a_leg.dialogs.by_tags_mut(A_TAG, ALICE_TAG).unwrap().awaited_ack_cseq = Some(1);
+    call.a_leg.dialogs.by_tags_mut(A_TAG, ALICE_TAG).unwrap().sent_invite =
+        Some(common::invite_awaiting_ack(1));
     let entry = |seq, direction, code: Option<u16>| MessageEntry {
         seq,
         at_ms: 0,
@@ -839,12 +833,12 @@ fn a_cancelled_invite_takes_back_the_2xx_that_never_left() {
     let call = record_cancelled_invite(call, "a");
 
     let a = &call.a_leg;
-    assert_eq!(a.invite_final_sent, Some(487));
-    assert_eq!(a.answer_preempted, Some(200));
+    assert_eq!(a.invite_final_sent(), Some(487));
+    assert_eq!(a.answer_preempted(), Some(200));
     assert_eq!(a.state(), LegState::Terminated, "her INVITE's final is the 487");
     assert!(a.dialogs.confirmed().is_none(), "no dialog stands confirmed");
-    assert!(a.dialogs.iter().all(|d| d.answered_2xx.is_none()), "no ACK ladder stands");
-    assert!(a.dialogs.iter().all(|d| d.awaited_ack_cseq.is_none()), "no ACK is awaited");
+    assert!(a.dialogs.iter().all(|d| answered_2xx(d).is_none()), "no ACK ladder stands");
+    assert!(a.dialogs.iter().all(|d| awaited_ack_cseq(d).is_none()), "no ACK is awaited");
     let ring: Vec<_> = a.messages.entries.iter().map(|e| e.seq).collect();
     assert_eq!(ring, [1, 2], "the ring holds what reached the wire");
 }
@@ -891,10 +885,9 @@ fn the_carrying_dialog_is_the_confirmed_or_the_only_live_one() {
 #[test]
 fn an_early_dialog_the_peers_bye_ended_was_never_established() {
     let mut leg = representative_call().b_legs[0].clone();
-    let ours = leg.outbound_invite.clone().expect("a dialled leg").our_tag;
+    let ours = leg.outbound_invite().cloned().expect("a dialled leg").our_tag;
     leg.dialogs.retain(|_| false);
-    let mut early = Dialog::new(&ours, "fork1", DialogState::Ended(DialogEnd::EarlyPeerBye), 1);
-    early.ack_branch = None;
+    let early = Dialog::new(&ours, "fork1", DialogState::Ended(DialogEnd::EarlyPeerBye), 1);
     leg.dialogs.insert(early);
     leg.dialogs.insert(Dialog::new(&ours, "fork2", DialogState::Confirmed, 1));
     assert_eq!(leg.dialogs.established().map(|d| d.peer_tag.as_str()), Some("fork2"));

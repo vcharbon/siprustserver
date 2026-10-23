@@ -21,7 +21,7 @@ use crate::rules::invariants::{enforce, finalize, UnansweredCaller};
 /// caller unanswered, no decision applied, nothing dialled.
 pub(super) fn is_undecided(call: &Call) -> bool {
     call.state == CallModelState::Active
-        && call.a_leg.invite_final_sent.is_none()
+        && call.a_leg.invite_final_sent().is_none()
         && call.decision_ordinal == 0
         && call.attempts.is_empty()
         && call.b_legs.is_empty()

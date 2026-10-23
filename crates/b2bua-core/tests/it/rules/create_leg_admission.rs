@@ -123,8 +123,12 @@ fn create_leg_refused_mid_call_ends_every_leg_on_the_wire() {
             Leg { leg_id: "b-2".into(), call_id: "b2cid@x".into(), ..b_leg_pending() };
         // The INVITE `b-2` rings on, which its CANCEL names (RFC 3261 §9.1).
         let dest = call::HostPort { host: "10.0.0.2".into(), port: 5070 };
-        let handle = call::InviteTxnHandle::new("z9hG4bK-b2", 1, invite().image().to_vec(), dest);
-        ringing.outbound_invite.as_mut().expect("a dialled leg").txn = Some(handle);
+        let handle = call::SentRequest {
+            branch: "z9hG4bK-b2".to_string(),
+            image: invite().image().to_vec(),
+            destination: dest,
+        };
+        call::testkit::dial_with(&mut ringing, handle);
         call = call::helpers::add_b_leg(call, ringing);
         let guard = TimerKey::call(TimerType::ReferOverallSafety);
         let result =

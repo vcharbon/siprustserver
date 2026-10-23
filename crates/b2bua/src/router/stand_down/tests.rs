@@ -73,7 +73,7 @@ fn a_write_of_another_call_on_the_ref_never_covers_a_copy() {
 /// dialog standing at `stage`, or none.
 fn in_round(b: i64, stage: Option<RoundStage>) -> Call {
     let mut call = at_b(ringing("round"), b);
-    call.a_leg.invite_final_sent = Some(200);
+    *call.a_leg.invite_final_sent_mut() = Some(200);
     stage_leg(&mut call.a_leg, LegState::Confirmed);
     if let Some(stage) = stage {
         stage_reinvite_round(&mut call.a_leg, "z9hG4bK-round", stage);
@@ -121,6 +121,7 @@ fn relaying(mut call: Call, by: RelayOwner) -> Call {
         source_timestamp: None,
         relayed_by: by,
         author: None,
+        invite: None,
     });
     call
 }
@@ -163,7 +164,7 @@ fn a_deleted_record_releases_only_a_copy_that_finishes_nothing_alone() {
     assert!(!finishes_nothing_alone(None, &relaying(call.clone(), copy_worker()), &copy_worker()));
     let mut round = in_round(2, Some(RoundStage::Open));
     let d = round.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
-    d.requests.iter_mut().for_each(|p| p.relayed_by = copy_worker());
+    d.sent_invite.iter_mut().for_each(|p| p.relayed_by = copy_worker());
     assert!(
         !finishes_nothing_alone(None, &round, &copy_worker()),
         "the round's final is the copy's"
@@ -181,7 +182,7 @@ fn a_deleted_record_releases_only_a_copy_that_finishes_nothing_alone() {
 fn a_raised_sequence_is_no_round_the_primary_holds() {
     let mut copy = in_round(2, Some(RoundStage::Open));
     let d = copy.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
-    d.requests.iter_mut().for_each(|p| p.relayed_by = copy_worker());
+    d.sent_invite.iter_mut().for_each(|p| p.relayed_by = copy_worker());
     let mut primary = in_round(2, None);
     primary.a_leg.dialogs.confirmed_mut().expect("the caller's dialog").our_cseq += 5;
     assert!(!covers(&primary, &copy), "the copy alone holds the round's transaction");

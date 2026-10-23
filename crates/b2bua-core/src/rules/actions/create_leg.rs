@@ -98,7 +98,7 @@ impl ActionExecutor<'_> {
             &capabilities::withheld_option_tags(call, kind, offers_sdp),
             &capabilities::offered_option_tags(call, kind),
             kind,
-            call.a_leg.invite_final_sent.is_none(),
+            call.a_leg.invite_final_sent().is_none(),
             self.now_ms,
             &mut skipped,
         ) {

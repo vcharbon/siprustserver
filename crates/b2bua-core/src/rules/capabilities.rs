@@ -207,7 +207,7 @@ pub fn offered_option_tags_in(
 /// [`offered_option_tags_in`] for the strategy `call` arms, as `call`'s
 /// originator INVITE stands now.
 pub fn offered_option_tags(call: &Call, kind: Option<LegKind>) -> Vec<String> {
-    offered_option_tags_in(call.features.as_ref(), kind, call.a_leg.invite_final_sent.is_none())
+    offered_option_tags_in(call.features.as_ref(), kind, call.a_leg.invite_final_sent().is_none())
 }
 
 /// The option tags the armed strategy WITHHOLDS from an INVITE the stack

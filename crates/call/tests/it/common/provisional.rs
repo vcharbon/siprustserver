@@ -32,7 +32,7 @@ pub(super) fn arb_provisional() -> impl Strategy<Value = Provisional> {
     let responder = prop_oneof![
         Just(ResponderAck::Pending),
         Just(ResponderAck::RelayedPrack),
-        arb_tag().prop_map(|branch| ResponderAck::OwnPrack { branch }),
+        Just(ResponderAck::OwnPrack),
         Just(ResponderAck::DeferredToAck),
         Just(ResponderAck::Waived),
     ];

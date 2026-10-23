@@ -285,7 +285,7 @@ async fn ring_lost_with_the_primary(
                 .expect("the backup holds the call"),
         )
         .expect("the replica decodes");
-    let sent_at = replica.b_legs[0].outbound_invite.as_ref().expect("dialled").sent_at_ms;
+    let sent_at = replica.b_legs[0].outbound_invite().expect("dialled").sent_at_ms;
     assert_eq!(ring_deadline(&replica), None, "no ring deadline before the 180");
 
     // ── the primary dies; bob's 180 is forwarded to it and lost ─────────────
@@ -329,11 +329,13 @@ async fn a_first_18x_lost_with_the_primary_presumes_the_ring_from_the_invite() {
         "the caller is answered at the presumed deadline"
     );
 
-    let resent = bob.receive("INVITE").await;
-    assert_eq!(resent.request().top_via().branch(), uas.request().top_via().branch());
-    assert!(bob.try_receive_tolerating("CANCEL", &[]).await.is_none(), "the CANCEL is held");
-    uas.respond(180, "Ringing").await;
+    // bob's transaction repeats his 180 to the re-sent INVITE (§17.2.1).
     let mut cancel = bob.receive_absorbing("CANCEL", &["INVITE"]).await;
+    let invites: Vec<_> =
+        bob.wire_view().into_iter().filter(|e| e.start_line().starts_with("INVITE ")).collect();
+    let resent = invites.last().expect("the re-sent INVITE reached bob");
+    assert!(invites.len() >= 2, "the INVITE and its re-send");
+    assert_eq!(resent.seen_by(), scenario_harness::absorption::SeenBy::WireOnly);
     cancel.respond(200, "OK").await;
     uas.respond(487, "Request Terminated").await;
     bob.receive_absorbing("ACK", &["INVITE"]).await;

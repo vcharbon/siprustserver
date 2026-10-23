@@ -17,10 +17,12 @@
 //!     view of a round's end or opening lands in the other
 //!   - [`sequence`] — the in-dialog requests two copies of one call carry:
 //!     the sequences they reached, the relays they hold
-//!   - [`dialog`] — CSeq, ACK branch, INVITE glare, a retired dialog's
-//!     release, SDP cache
+//!   - [`dialog`] — CSeq, INVITE glare, SDP cache
 //!   - [`request_records`] — the request records a call's dialogs hold: add,
 //!     find by final or branch, close (ADR-0055 §2)
+//!   - [`invite_records`] — the INVITE records: the one a dialog last sent
+//!     and the ACK its 2xx owes, the one it answered 2xx, a dialling
+//!     INVITE's image
 //!   - [`peering`] — caller-facing fronts, active peer pair, relay-peer
 //!     resolution
 //!   - [`reliable`] — the reliable provisionals the call received and where
@@ -44,6 +46,7 @@ pub mod attempt;
 pub mod decision_log;
 pub mod dialog;
 pub mod instants;
+pub mod invite_records;
 pub mod leg;
 pub mod leg_end;
 pub mod lens;
@@ -70,11 +73,16 @@ pub use attempt::{
 pub use decision_log::mark_decision;
 pub use dialog::{
     advance_peer_cseq, bump_our_cseq, cache_sdp_on_leg_dialog, cached_sdp_for_leg_dialog,
-    close_rejected_invite_round, invite_glare, invite_transaction_open, peer_update_pending,
-    retain_ack_branch, retain_emitted_ack, sender_invite_unacknowledged, sender_invite_unanswered,
-    set_awaited_ack_cseq, settle_straggler_release,
+    invite_glare, invite_transaction_open, peer_update_pending, sender_invite_unacknowledged,
+    sender_invite_unanswered,
 };
 pub use instants::shift_instants;
+pub use invite_records::{
+    ack_branch, answered_2xx, answered_2xx_mut, awaited_ack_cseq, close_rejected_invite_round,
+    emitted_ack, hold_answered_2xx, invite_image, invite_relay, invite_taken, invite_untaken,
+    open_sent_invite, relayed_invite_pending, retain_ack_branch, retain_emitted_ack, sent_exchange,
+    sent_exchange_mut, sent_invite_image, set_awaited_ack_cseq,
+};
 pub use leg::{
     add_b_leg, callee_dialog, callee_dialog_mut, caller_answered, caller_dialog, caller_dialog_mut,
     carrying_dialog, dialog_with_peer, dialog_with_peer_mut, find_b_leg, find_b_leg_by_call_id,

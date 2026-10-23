@@ -38,7 +38,7 @@ fn a_setup_deadline_held_past_the_answer_reaches_no_rule() {
     assert_eq!(fired.turns.len(), 1, "the fire takes a turn");
     assert!(fired.sent.is_empty(), "nothing is sent: {:?}", fired.sent);
     assert_eq!(fired.call.state, CallModelState::Active, "the answered call stays up");
-    assert_eq!(fired.call.a_leg.invite_final_sent, Some(200), "no final follows the 2xx");
+    assert_eq!(fired.call.a_leg.invite_final_sent(), Some(200), "no final follows the 2xx");
     assert_eq!(setup_deadline(&fired.call), None, "the fired instance left the ledger");
 }
 
@@ -47,10 +47,10 @@ fn a_setup_deadline_held_past_the_answer_reaches_no_rule() {
 fn a_setup_deadline_held_past_the_termination_reaches_no_rule() {
     let (dialled, armed, mut call) = after(&[Step::BobAnswers(180), Step::AliceCancels]);
     assert_eq!(call.state, CallModelState::Terminating, "the caller's CANCEL ends the call");
-    let final_sent = call.a_leg.invite_final_sent;
+    let final_sent = call.a_leg.invite_final_sent();
     call.timers.push(armed);
     let fired = run_on(&dialled, call, &[Step::Fires(TimerType::SetupTimeout)]);
     assert_eq!(fired.turns.len(), 1, "the fire takes a turn");
     assert!(fired.sent.is_empty(), "nothing is sent: {:?}", fired.sent);
-    assert_eq!(fired.call.a_leg.invite_final_sent, final_sent, "no second final");
+    assert_eq!(fired.call.a_leg.invite_final_sent(), final_sent, "no second final");
 }

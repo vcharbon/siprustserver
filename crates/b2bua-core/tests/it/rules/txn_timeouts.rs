@@ -137,7 +137,7 @@ fn a_timeout_on_an_ended_leg_keeps_its_disposition() {
         confirm_a(&mut call);
         end_dialogs(&mut call.a_leg, ended.clone());
         if matches!(ended, DialogState::Ended(call::DialogEnd::Rejected(_))) {
-            call.a_leg.invite_final_sent = Some(487);
+            *call.a_leg.invite_final_sent_mut() = Some(487);
         }
         let actions = a_leg_timeout_result(&call, "NOTIFY");
         assert!(

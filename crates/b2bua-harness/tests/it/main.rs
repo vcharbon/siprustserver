@@ -52,6 +52,7 @@ mod decision_log;
 mod destination_allowlist_gate;
 mod destroy_leg_caller;
 mod destroy_leg_stated_reason;
+mod dialled_invite_held_once;
 mod dialog_gate;
 mod dialog_states;
 mod discarded_invite_and_cancel;

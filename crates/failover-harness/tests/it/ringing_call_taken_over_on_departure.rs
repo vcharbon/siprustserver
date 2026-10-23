@@ -148,7 +148,7 @@ async fn replicated_deadline(p: &Placed) -> i64 {
     let body = p.w_b2.get(PartitionRole::Backup, "b1", &p.ringing_ref).await.expect("the replica");
     let call = MsgpackCodec::new().decode(&body).expect("the replica decodes");
     let presumed = || {
-        let invite = call.b_legs[0].outbound_invite.as_ref().expect("the callee was dialled");
+        let invite = call.b_legs[0].outbound_invite().expect("the callee was dialled");
         invite.sent_at_ms + p.no_answer.as_millis() as i64
     };
     call.timers
@@ -228,9 +228,9 @@ async fn a_call_ringing_at_its_nodes_departure_ends_at_its_replicated_deadline()
 
 /// A 100 is hop-by-hop and leaves no dialog in the record (§16.7), so the
 /// backup holds the callee's INVITE as one that drew no provisional: the
-/// CANCEL waits for the callee's next provisional (§9.1). The callee's 100 to
-/// the backup's resend fails over to the backup on the cookie of the proxy's
-/// Via, and the CANCEL goes out on it.
+/// CANCEL waits for the callee's next provisional (§9.1). The 100 the callee's
+/// transaction repeats to the backup's resend (§17.2.1) fails over to the
+/// backup on the cookie of the proxy's Via, and the CANCEL goes out on it.
 #[tokio::test(start_paused = true)]
 async fn a_call_whose_callee_sent_a_100_alone_ends_at_its_replicated_deadline() {
     let mut p = place("trying-callee-departure", Callee::TryingOnly).await;
@@ -238,9 +238,13 @@ async fn a_call_whose_callee_sent_a_100_alone_ends_at_its_replicated_deadline() 
     ring_until(&p, deadline).await;
     p.fh.advance(Duration::from_millis(600)).await;
     final_at(&mut p, deadline).await;
-    resent_invite(&p).await;
-    p.at_bob.respond(100, "Trying").await;
-    p.bob.receive("CANCEL").await.respond(200, "OK").await;
+    // bob's transaction repeats its 100 to the re-sent INVITE (§17.2.1).
+    p.bob.receive_absorbing("CANCEL", &["INVITE"]).await.respond(200, "OK").await;
+    let invites: Vec<_> =
+        p.bob.wire_view().into_iter().filter(|e| e.start_line().starts_with("INVITE ")).collect();
+    let resent = invites.last().expect("the re-sent INVITE reached bob");
+    assert!(invites.len() >= 2, "the INVITE and its re-send");
+    assert_eq!(resent.seen_by(), scenario_harness::absorption::SeenBy::WireOnly);
     p.at_bob.respond(487, "Request Terminated").await;
     p.bob.receive("ACK").await;
     finish(p).await;

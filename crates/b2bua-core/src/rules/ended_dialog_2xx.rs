@@ -36,31 +36,31 @@ pub fn ended_dialog_2xx_rules() -> Vec<RuleDefinition> {
 /// dialog ending or ended by a BYE, with no relay pending for it and no relayed
 /// ACK awaited for it.
 fn answers_our_invite_after_bye(ctx: &RuleContext) -> bool {
-    let (Some(resp), Some(dialog)) = (ctx.response(), ctx.dialog()) else { return false };
+    let (Some(resp), Some(dialog), Some(leg)) = (ctx.response(), ctx.dialog(), ctx.source_leg())
+    else {
+        return false;
+    };
     dialog.was_established()
         && dialog.state != DialogState::Confirmed
-        && dialog.pending_invite_txn.is_some()
-        && dialog.ack_branch.is_none()
-        && dialog.awaited_ack_cseq.is_none()
+        && call::helpers::sent_invite_image(leg, dialog).is_some()
+        && !call::helpers::invite_taken(dialog)
         && resp.to().tag() == Some(dialog.peer_tag.as_str())
-        && relay::acked_invite_cseq(dialog) == Some(resp.cseq().seq())
+        && relay::acked_invite_cseq(leg, dialog) == Some(resp.cseq().seq())
         && ctx.relayed_pending().is_none()
 }
 
 fn ack_2xx(ctx: &RuleContext) -> Option<RuleHandleResult> {
     let resp = ctx.response()?;
     let dialog = ctx.dialog()?;
+    let leg = ctx.source_leg()?;
     let options = sip_message::BuildHeldSdpOptions {
         local_ip: ctx.config.sip_local_ip.clone(),
         now_ms: ctx.now_ms,
     };
     // The answer continues the session this stack stated on the dialog (RFC
     // 3264 §8).
-    let origin = std::iter::once(ctx.call.a_leg())
-        .chain(ctx.call.b_legs())
-        .find(|l| l.leg_id == ctx.source_leg_id)
-        .and_then(|l| relay::next_origin_on(l, dialog));
-    let answer = (!relay::acked_invite_carries_offer(dialog))
+    let origin = relay::next_origin_on(leg, dialog);
+    let answer = (!relay::acked_invite_carries_offer(leg, dialog))
         .then(|| resp.sdp())
         .flatten()
         .and_then(|offer| sip_message::sdp_answer::reject_offer(offer, &options))

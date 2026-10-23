@@ -85,7 +85,7 @@ fn call_in(pri: &str, bak: &str, cid: &str, a_state: LegState, state: CallModelS
     let mut ids = sip_ids::TurnIds::fixed(1);
     let mut call = build_initial_call(&invite(pri, bak, cid), src(), &config, &mut ids, 0);
     let answered = a_state == LegState::Confirmed;
-    call.a_leg.invite_final_sent = match (answered, state) {
+    *call.a_leg.invite_final_sent_mut() = match (answered, state) {
         (true, _) => Some(200),
         (false, CallModelState::Active) => None,
         (false, _) => Some(480),

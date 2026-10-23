@@ -33,8 +33,8 @@ pub fn arm_at_first_18x(
     now_ms: i64,
 ) {
     let Some(leg) = call::helpers::find_b_leg(call, leg_id) else { return };
-    let Some(invite) = leg.outbound_invite.as_ref() else { return };
-    if leg.ring.rang() || invite.cseq != cseq || !rings_unanswered(leg) {
+    let Some(invite) = leg.outbound_invite() else { return };
+    if leg.ring.rang() || leg.dialled_cseq() != Some(cseq) || !rings_unanswered(leg) {
         return;
     }
     let Some(ms) = ring_ms(call, leg) else { return };
@@ -68,7 +68,7 @@ pub fn arm_unrung_after_restore(config: &B2buaConfig, call: &mut Call) {
         .iter()
         .filter(|leg| !leg.ring.rang() && rings_unanswered(leg))
         .filter_map(|leg| {
-            let invite = leg.outbound_invite.as_ref()?;
+            let invite = leg.outbound_invite()?;
             if invite.final_received.is_some() || invite.cancel_sent {
                 return None;
             }

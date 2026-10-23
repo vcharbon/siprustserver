@@ -21,7 +21,7 @@ impl ActionExecutor<'_> {
     /// `leg_id`'s dialog (RFC 3261 §9.1). Unlike [`Self::cancel_to_leg`] /
     /// `CancelLeg` this touches NO leg state or disposition — the established
     /// dialog and the call stay up; only the renegotiation ends. The CANCEL is
-    /// built from the dialog's cached `pending_invite_txn` handle, so it reuses
+    /// built from the INVITE the dialog's record holds, so it reuses
     /// the re-INVITE's branch, echoes its Route set (`generate_cancel`), and
     /// goes to the re-INVITE's cached wire destination — the same next-hop
     /// consistency as the initial-INVITE `cancel_to_leg` path. The matching
@@ -142,20 +142,21 @@ struct PendingReinviteCancel {
 }
 
 /// Build the transaction-scoped CANCEL of the relayed re-INVITE pending on
-/// `leg_id`'s dialog under `outbound_cseq` (RFC 3261 §9.1), from the dialog's
-/// cached `pending_invite_txn` handle: the re-INVITE's own branch, Route set
-/// and wire destination. `None` where no such transaction can be CANCELled —
-/// no pending dialog, no cached handle, an unreadable one, or a handle naming
-/// another CSeq than the snapshot (the glare guard forbids a second in-flight
-/// INVITE on one dialog, and a mismatched transaction is never CANCELled).
+/// `leg_id`'s dialog under `outbound_cseq` (RFC 3261 §9.1), from the INVITE
+/// the dialog's record holds: the re-INVITE's own branch, Route set and wire
+/// destination. `None` where no such transaction can be CANCELled — no
+/// pending dialog, no image, an unreadable one, or one naming another CSeq
+/// than the relay (the glare guard forbids a second in-flight INVITE on one
+/// dialog, and a mismatched transaction is never CANCELled).
 fn pending_reinvite_cancel(
     call: &Call,
     leg_id: &str,
     outbound_cseq: i64,
 ) -> Option<PendingReinviteCancel> {
     let (t_id, dialog) = find_pending_dialog(call, leg_id, outbound_cseq)?;
-    let handle = dialog.pending_invite_txn.as_ref()?;
-    let Ok(SipMessage::Request(req)) = CustomParser::new().parse(&handle.original_invite) else {
+    let leg = call::helpers::find_leg(call, leg_id)?;
+    let handle = call::helpers::sent_invite_image(leg, &dialog)?;
+    let Ok(SipMessage::Request(req)) = CustomParser::new().parse(&handle.image) else {
         return None;
     };
     if req.cseq().seq() as i64 != outbound_cseq {

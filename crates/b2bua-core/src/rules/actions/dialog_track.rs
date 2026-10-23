@@ -55,7 +55,9 @@ impl ActionExecutor<'_> {
         to_tag: &str,
     ) {
         let Some(leg) = call.b_legs.iter().find(|l| l.leg_id == source_leg_id) else { return };
-        let Some(invite) = leg.outbound_invite.clone() else { return };
+        let Some(invite) = leg.outbound_invite().cloned() else { return };
+        let cseq = leg.dialled_cseq().unwrap_or_default();
+        let sent_invite = leg.dialled_on_dialog();
         if callee_dialog(leg, to_tag).is_some() {
             return;
         }
@@ -77,8 +79,8 @@ impl ActionExecutor<'_> {
             DialogState::Early
         };
         *call = call::helpers::update_leg(call.clone(), source_leg_id, |leg| {
-            let mut d = Dialog::new(invite.our_tag, to_tag, state, invite.cseq);
-            d.pending_invite_txn = invite.txn;
+            let mut d = Dialog::new(invite.our_tag, to_tag, state, cseq);
+            d.sent_invite = sent_invite;
             d.remote_target = contact;
             d.route_set = route_set;
             leg.dialogs.insert(d);
@@ -235,7 +237,7 @@ impl ActionExecutor<'_> {
                 return own;
             }
         }
-        if call.a_leg.invite_final_sent.is_some_and(|status| !(200..300).contains(&status)) {
+        if call.a_leg.invite_final_sent().is_some_and(|status| !(200..300).contains(&status)) {
             return call.a_leg.own_tag.clone().or(preferred).unwrap_or_default();
         }
         let tag = preferred.unwrap_or_else(|| self.turn.ids.new_tag());
@@ -266,7 +268,7 @@ impl ActionExecutor<'_> {
     /// none. Nothing is shown once the caller's INVITE has its final, nor for
     /// a callee dialog already fronted.
     pub(super) fn map_a_face(&mut self, call: &mut Call, a_tag: &str, b_leg_id: &str, b_tag: &str) {
-        if call.a_leg.invite_final_sent.is_some()
+        if call.a_leg.invite_final_sent().is_some()
             || a_tag.is_empty()
             || fronting_dialog(call, b_leg_id, b_tag).is_some()
         {
@@ -388,7 +390,7 @@ pub(super) fn adopt_a_tag(call: &mut Call, tag: &str) {
             d.state = DialogState::Confirmed;
         } else if matches!(d.state, DialogState::Early | DialogState::Confirmed) {
             let open_requests = std::mem::take(&mut d.requests);
-            d.state = DialogState::Retired(RetiredDialog { open_requests, release: None });
+            d.state = DialogState::Retired(RetiredDialog { open_requests });
         }
     }
     call.a_leg.own_tag = Some(tag.to_string());

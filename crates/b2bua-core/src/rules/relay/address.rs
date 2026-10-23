@@ -225,7 +225,7 @@ Content-Length: 0\r\n\r\n";
         let invite = invite_of(effect);
         let tag = invite.from().tag().expect("a From tag").to_string();
         assert_ne!(tag, "stated-tag");
-        assert_eq!(leg.outbound_invite.as_ref().map(|i| i.our_tag.as_str()), Some(tag.as_str()));
+        assert_eq!(leg.outbound_invite().map(|i| i.our_tag.as_str()), Some(tag.as_str()));
         assert_eq!(invite.from().uri().user(), Some("+15551234"));
         assert_eq!(invite.from().uri().param("user").and_then(|p| p.as_str()), Some("phone"));
         let from_line = invite

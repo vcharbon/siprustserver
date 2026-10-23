@@ -83,7 +83,7 @@ async fn an_answered_media_server_leg_ends_the_setup_deadline() {
     // The announcement plays past the deadline: its fire reaches no rule.
     h.advance(Duration::from_millis(SETUP_MS + 2_000)).await;
     let playing = b2bua.live_call(&call_ref).expect("the call is live");
-    assert_eq!(playing.a_leg.invite_final_sent, None, "the caller still hears the announcement");
+    assert_eq!(playing.a_leg.invite_final_sent(), None, "the caller still hears the announcement");
     assert!(
         playing.timers.iter().all(|t| t.timer_type() != &TimerType::SetupTimeout),
         "the fired deadline left the ledger"

@@ -1,10 +1,10 @@
 //! The BYE this stack sends on a confirmed dialog (RFC 3261 §15): what the
 //! leg is owed before it, its composition with the `Reason` and the lines of
-//! the peer's it restates, and its order behind this stack's own NOTIFY there
-//! ([`super::own_notify`]).
+//! the peer's it restates, and its order behind the ACK of the dialog's own
+//! 2xx and behind this stack's own NOTIFY there ([`super::own_notify`]).
 
 use call::TxnKind;
-use call::{Call, Dialog, DialogId, HeldRequest, Leg};
+use call::{Call, Dialog, DialogId, HeldRequest, Leg, Obligation};
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
 use sip_message::header::HeaderName;
 use sip_message::{Method, SipHeader};
@@ -22,8 +22,13 @@ impl ActionExecutor<'_> {
     /// BYE `leg_id`'s confirmed dialog carrying `reason` and `relayed`
     /// (RFC 3261 §15): the PRACKs the leg's responders are owed leave first,
     /// an offer left to the ACK answered rejecting (RFC 3262 §4, §5), then a
-    /// 2xx still unACKed is ACKed bare (§13.2.2.4), then the BYE — held while
-    /// this stack's NOTIFY on the dialog awaits its final.
+    /// 2xx still unACKed is ACKed (§13.2.2.4) — bare where the ACK owes no
+    /// answer, and where it owes one and `peer_left` (the teardown answers a
+    /// peer's BYE, so no ACK will bring that answer) answering every stream
+    /// rejected — then the BYE. The BYE waits for the ACK of the leg's own
+    /// 2xx to its dialog-creating INVITE (§15), and behind this stack's NOTIFY
+    /// on the dialog awaiting its final.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn send_bye(
         &mut self,
         call: &mut Call,
@@ -32,11 +37,14 @@ impl ActionExecutor<'_> {
         reason: Option<&str>,
         relayed: Relayed,
         hops: Option<u32>,
+        peer_left: bool,
     ) {
         let ack_owed = relay::owes_bare_ack(call, leg_id);
         self.settle_owed_pracks(call, fx, Owed::Leg(leg_id), Settle::Ending);
         if ack_owed {
             self.ack_own_bare(call, fx, leg_id);
+        } else if peer_left {
+            self.ack_rejecting(call, fx, leg_id);
         }
         let Some(leg) = call::helpers::find_leg(call, leg_id) else { return };
         let (reason, relayed) = if is_media(leg) {
@@ -45,8 +53,12 @@ impl ActionExecutor<'_> {
             (reason, relayed)
         };
         let Some(id) = leg.dialogs.confirmed().map(|d| d.id()) else { return };
-        let waits = row(&Method::Bye).waits_behind_own_notify;
-        if waits && self.held_behind_notify(call, leg_id, &id) {
+        let row = row(&Method::Bye);
+        if row.waits_behind_unacked_answer && answer_unacked(call, leg_id) {
+            hold_behind_ack(call, leg_id, &id, relayed.held_bye(reason, hops));
+            return;
+        }
+        if row.waits_behind_own_notify && self.held_behind_notify(call, leg_id, &id) {
             self.hold(call, fx, leg_id, &id, relayed.held_bye(reason, hops));
             return;
         }
@@ -153,4 +165,31 @@ impl ActionExecutor<'_> {
             provenance: Provenance::Authored,
         })
     }
+}
+
+/// Whether `leg_id`'s confirmed dialog holds this stack's 2xx to the leg's
+/// dialog-creating INVITE still awaiting its ACK: the call's answer to the
+/// caller (RFC 3261 §13.3.1.4).
+fn answer_unacked(call: &Call, leg_id: &str) -> bool {
+    let Some(d) = call::helpers::find_leg(call, leg_id).and_then(|l| l.dialogs.confirmed()) else {
+        return false;
+    };
+    call::helpers::answered_2xx(d).is_some_and(|u| {
+        let key = Obligation::AckOf2xx {
+            leg: leg_id.to_string(),
+            dialog_tag: u.dialog_tag.clone(),
+            cseq: u.cseq,
+        };
+        call::helpers::answers_initial_invite(call, &key)
+    })
+}
+
+/// Hold `bye` behind the ACK of the 2xx `leg_id`'s dialog `id` answered
+/// the leg's dialog-creating INVITE with (RFC 3261 §15).
+fn hold_behind_ack(call: &mut Call, leg_id: &str, id: &DialogId, bye: HeldRequest) {
+    *call = call::helpers::update_dialog(call.clone(), leg_id, id, |d| {
+        if let Some(x) = d.answered_invite.as_mut().and_then(|r| r.invite.as_mut()) {
+            x.bye_behind_ack = Some(bye);
+        }
+    });
 }

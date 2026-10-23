@@ -1,26 +1,22 @@
-//! The dialog-creating INVITE a leg sent ([`OutboundInvite`]): what each
-//! dialog a response to it creates starts from (RFC 3261 §12.1.2), and how
-//! its client transaction ended.
+//! The dialling facts of the dialog-creating INVITE a leg sent
+//! ([`OutboundInvite`]): what each dialog a response to it creates starts from
+//! (RFC 3261 §12.1.2), and how its client transaction ended. The INVITE's
+//! number and image are its request record's
+//! ([`RequestRecord`](super::RequestRecord)), which holds these facts.
 
 use serde::{Deserialize, Serialize};
 
-use super::invite_txn::InviteTxnHandle;
-
 /// The INVITE this stack sent to open a leg. Every dialog its responses
-/// create carries `our_tag`, its From-tag, and starts its own sequence at
-/// `cseq`, the INVITE's (§12.1.2).
+/// create carries `our_tag`, its From-tag, and starts its own sequence at the
+/// INVITE's CSeq (§12.1.2).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboundInvite {
     pub our_tag: String,
-    pub cseq: i64,
     /// When the INVITE left, epoch ms: the start of its client transaction,
     /// whose bound every deadline of the leg's setup stays inside. Past an
     /// admission its turn awaited it is later than the turn's instant, which
     /// the turn's CDR events keep.
     pub sent_at_ms: i64,
-    /// The INVITE's client transaction: what a CANCEL (§9.1) and each
-    /// dialog's ACK for its 2xx (§13.2.2.4) are built from.
-    pub txn: Option<InviteTxnHandle>,
     /// The final the INVITE took: the first final response's status, or 408
     /// for a transaction this stack gave up on (§8.1.3.1). `None` while it
     /// has none.
@@ -34,19 +30,12 @@ pub struct OutboundInvite {
 }
 
 impl OutboundInvite {
-    /// The INVITE `our_tag` / `cseq` names, sent at `sent_at_ms` under the
-    /// transaction `txn`, with no final and no CANCEL yet.
-    pub fn new(
-        our_tag: impl Into<String>,
-        cseq: i64,
-        sent_at_ms: i64,
-        txn: Option<InviteTxnHandle>,
-    ) -> Self {
+    /// The INVITE `our_tag` names, sent at `sent_at_ms`, with no final and no
+    /// CANCEL yet.
+    pub fn new(our_tag: impl Into<String>, sent_at_ms: i64) -> Self {
         OutboundInvite {
             our_tag: our_tag.into(),
-            cseq,
             sent_at_ms,
-            txn,
             final_received: None,
             cancel_sent: false,
             cancel_headers: Vec::new(),

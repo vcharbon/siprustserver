@@ -49,6 +49,7 @@ fn relaying_by(mut call: Call, method: &str, owner: RelayOwner) -> Call {
         source_timestamp: None,
         relayed_by: owner,
         author: None,
+        invite: None,
     });
     call
 }
@@ -116,7 +117,7 @@ fn a_retired_dialogs_open_relays_are_relays_of_the_copy() {
     let mut copy = relaying(held.clone(), "INFO");
     let d = caller_mut(&mut copy);
     let open_requests = std::mem::take(&mut d.requests);
-    d.state = DialogState::Retired(RetiredDialog { open_requests, release: None });
+    d.state = DialogState::Retired(RetiredDialog { open_requests });
     assert!(!holds_records_of(Some(&held), &copy, &by()));
     assert!(holds_records_of(Some(&copy), &copy, &by()));
 }

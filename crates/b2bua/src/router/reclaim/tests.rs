@@ -35,7 +35,7 @@ fn base(p: i64, b: i64) -> Call {
 fn unanswered(p: i64, b: i64, state: CallModelState) -> Call {
     let mut call = base(p, b);
     call.state = state;
-    call.a_leg.invite_final_sent = (state != CallModelState::Active).then_some(480);
+    *call.a_leg.invite_final_sent_mut() = (state != CallModelState::Active).then_some(480);
     let a_state =
         if state == CallModelState::Active { LegState::Early } else { LegState::Terminated };
     call::testkit::stage_leg(&mut call.a_leg, a_state);
@@ -48,7 +48,7 @@ fn unanswered(p: i64, b: i64, state: CallModelState) -> Call {
 fn answered(p: i64, b: i64, state: CallModelState) -> Call {
     let mut call = base(p, b);
     call.state = state;
-    call.a_leg.invite_final_sent = Some(200);
+    *call.a_leg.invite_final_sent_mut() = Some(200);
     call::testkit::stage_leg(&mut call.a_leg, LegState::Confirmed);
     if state != CallModelState::Active {
         call::testkit::stage_leg(&mut call.a_leg, LegState::Terminated);
@@ -229,12 +229,14 @@ fn with_callee(mut call: Call, our_cseq: i64) -> Call {
     call::testkit::stage_leg(&mut leg, LegState::Confirmed);
     let d = leg.dialogs.confirmed_mut().expect("the callee's dialog");
     d.our_cseq = our_cseq;
-    d.pending_invite_txn = Some(call::InviteTxnHandle {
-        branch: "z9hG4bK-initial".into(),
-        cseq: 1,
-        original_invite: Vec::new(),
-        destination: call::HostPort { host: "staged.invalid".into(), port: 5060 },
-    });
+    d.sent_invite = Some(call::testkit::own_invite(
+        1,
+        Some(call::SentRequest {
+            branch: "z9hG4bK-initial".into(),
+            image: Vec::new(),
+            destination: call::HostPort { host: "staged.invalid".into(), port: 5060 },
+        }),
+    ));
     call.b_legs = vec![leg];
     call
 }
@@ -713,7 +715,7 @@ async fn a_refused_flush_answering_the_round_the_live_copy_holds_open_folds() {
         sip_clock::testkit::settle().await;
 
         let after = ctx.state.peek(&call_ref).expect("the call plays on");
-        let awaited = after.a_leg.dialogs.confirmed().and_then(|d| d.awaited_ack_cseq);
+        let awaited = after.a_leg.dialogs.confirmed().and_then(call::helpers::awaited_ack_cseq);
         let expected = folds.then_some(STAGED_ROUND_CSEQ);
         assert_eq!(awaited, expected, "{stage:?}: the round's ACK is awaited iff it folded");
         assert_eq!(live_pb(&n, &call_ref), (6, 2), "{stage:?}: the backup's `b`, our `p`");
@@ -740,7 +742,7 @@ async fn a_round_fold_keeps_what_the_live_copy_wrote_since_the_branch() {
     sip_clock::testkit::settle().await;
 
     let after = ctx.state.peek(&call_ref).expect("the call plays on");
-    let awaited = after.a_leg.dialogs.confirmed().and_then(|d| d.awaited_ack_cseq);
+    let awaited = after.a_leg.dialogs.confirmed().and_then(call::helpers::awaited_ack_cseq);
     assert_eq!(awaited, Some(STAGED_ROUND_CSEQ), "the round's end came in");
     assert_eq!(after.message_count, Some(42), "the live copy's own write stays");
     assert_eq!(live_pb(&n, &call_ref), (6, 2), "the backup's `b`, our `p`, no bump");

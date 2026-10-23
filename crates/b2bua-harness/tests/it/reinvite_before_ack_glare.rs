@@ -103,9 +103,9 @@ async fn reinvite_overtaking_the_ack_is_491ed() {
 }
 
 /// The same overtaking shape from the CALLER face: alice holds the ACK for her
-/// first re-INVITE's 2xx and re-INVITEs again. The un-ACKed-2xx state was
-/// already tracked on the a-leg dialog (`pending_reinvite_2xx`); this pins the
-/// glare arm reading it there.
+/// first re-INVITE's 2xx and re-INVITEs again. The a-leg dialog's record of
+/// the INVITE it answered holds the un-ACKed 2xx; this pins the glare arm
+/// reading it there.
 #[tokio::test]
 async fn caller_reinvite_overtaking_the_ack_is_491ed() {
     let h = Harness::with_transit_delay("b2bua-reinvite-before-ack-a", 0);

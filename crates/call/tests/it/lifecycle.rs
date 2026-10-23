@@ -17,8 +17,8 @@ use call::testkit::{stage_reinvite_round, RoundStage};
 /// `state`.
 fn at(final_sent: Option<u16>, state: CallModelState) -> Call {
     let mut call = common::representative_call();
-    call.a_leg.invite_final_sent = final_sent;
-    call.a_leg.answer_preempted = None;
+    *call.a_leg.invite_final_sent_mut() = final_sent;
+    *call.a_leg.answer_preempted_mut() = None;
     call.state = state;
     call
 }
@@ -156,11 +156,14 @@ fn a_sequence_raised_past_a_round_does_not_reach_it() {
     let opened = round(CallModelState::Active, ROUND, RoundStage::Acked);
     let mut raised = at(ANSWERED, CallModelState::Active);
     let d = raised.b_legs[0].dialogs.confirmed_mut().expect("the callee's dialog");
-    d.pending_invite_txn = Some(call::model::InviteTxnHandle {
-        branch: "z9hG4bK-initial".into(),
-        cseq: 1,
-        original_invite: Vec::new(),
-        destination: call::model::HostPort { host: "staged.invalid".into(), port: 5060 },
+    d.sent_invite = Some(call::model::RequestRecord {
+        origin: call::model::RequestOrigin::Own,
+        sent: Some(call::model::SentRequest {
+            branch: "z9hG4bK-initial".into(),
+            image: Vec::new(),
+            destination: call::model::HostPort { host: "staged.invalid".into(), port: 5060 },
+        }),
+        ..call::model::RequestRecord::relayed("INVITE", 1, 0)
     });
     d.our_cseq += 5;
     assert!(round_opened(&opened, &raised), "an earlier transaction is no reach of the round");

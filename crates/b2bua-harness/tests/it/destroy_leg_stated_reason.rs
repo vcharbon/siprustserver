@@ -241,7 +241,6 @@ async fn a_destroyed_callee_is_pracked_for_an_offer_still_owed() {
     let h = Harness::new("destroy-leg-owed-prack");
     for (rule, party, why) in [
         ("unacked-reliable-provisional", "alice", "alice never PRACKs the 183 shown to her"),
-        ("no-ack-to-dialog-creating-2xx", "alice", "alice has not ACKed when the service fires"),
         (
             "delay-2xx-on-unacked-reliable-1xx-with-sdp",
             "bob",
@@ -286,6 +285,8 @@ async fn a_destroyed_callee_is_pracked_for_an_offer_still_owed() {
     assert!(ack.request().body().is_empty(), "the answer rode the PRACK");
     assert_eq!(ack.request().cseq().seq(), uas.request().cseq().seq(), "the 2xx's INVITE");
     bob.receive("BYE").await.respond(200, "OK").await;
+    // §15: alice holds a 2xx she has not ACKed; her BYE waits behind her ACK.
+    let _dialog = call.ack().await;
     alice.receive("BYE").await.respond(200, "OK").await;
 
     settle_until(|| b2bua.is_reaped()).await;
@@ -300,13 +301,6 @@ async fn a_destroyed_callee_is_pracked_for_an_offer_still_owed() {
 #[tokio::test(start_paused = true)]
 async fn a_callee_destroyed_before_the_callers_ack_is_acked_before_its_bye() {
     let h = Harness::new("destroy-leg-unacked-2xx");
-    h.waive(
-        scenario_harness::WaiverScope::rule(
-            "no-ack-to-dialog-creating-2xx",
-            "alice has not ACKed when the service fires",
-        )
-        .on_party("alice"),
-    );
     let alice = h.agent("alice", "127.0.0.1:7453").await;
     let bob = h.agent("bob", "127.0.0.1:7454").await;
     let b2bua =
@@ -327,6 +321,8 @@ async fn a_callee_destroyed_before_the_callers_ack_is_acked_before_its_bye() {
     assert!(ack.request().body().is_empty(), "the INVITE carried the offer");
     assert_eq!(ack.request().cseq().seq(), uas.request().cseq().seq(), "the 2xx's INVITE");
     bob.receive("BYE").await.respond(200, "OK").await;
+    // §15: alice holds a 2xx she has not ACKed; her BYE waits behind her ACK.
+    let _dialog = call.ack().await;
     alice.receive("BYE").await.respond(200, "OK").await;
 
     settle_until(|| b2bua.is_reaped()).await;

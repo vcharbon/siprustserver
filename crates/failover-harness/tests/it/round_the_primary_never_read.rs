@@ -126,7 +126,7 @@ async fn a_round_served_at_the_copy_across_the_primarys_own_round_reaches_the_pr
     est.fh.advance(Duration::from_millis(100)).await;
     let copys = backup(&est).live_call(&est.call_ref).expect("the copy serves the call");
     let callee_txn =
-        |c: &call::Call| c.b_legs[0].dialogs.confirmed().and_then(|d| d.pending_invite_txn.clone());
+        |c: &call::Call| c.b_legs[0].dialogs.confirmed().and_then(|d| d.sent_invite.clone());
     let served = callee_txn(&copys).expect("the copy's round");
     est.proxy.set_health(&est.primary_ord, WorkerHealth::Alive);
     let mut theirs = est.bob_dialog.request(InDialogMethod::Invite, Some(ANSWER)).await;

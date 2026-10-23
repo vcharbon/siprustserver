@@ -33,9 +33,7 @@ impl ActionExecutor<'_> {
         *call = update_leg(call.clone(), leg_id, |leg| {
             if let Some(d) = leg.dialogs.established_mut() {
                 d.our_cseq = d.our_cseq.max(cseq);
-                d.pending_invite_txn = None;
-                d.ack_branch = None;
-                d.emitted_ack = None;
+                d.sent_invite = None;
             }
         });
         if answered {
@@ -79,7 +77,7 @@ impl ActionExecutor<'_> {
                 ack.destination.clone(),
                 Repeated::request("ACK"),
             );
-            *call = call::helpers::retain_emitted_ack(call.clone(), leg_id, kept);
+            *call = call::helpers::retain_emitted_ack(call.clone(), leg_id, kept, cseq);
         }
         fx.outbound.push(ack);
     }

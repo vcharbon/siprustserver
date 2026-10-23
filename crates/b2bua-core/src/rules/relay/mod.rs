@@ -66,7 +66,7 @@ pub use originate::build_b_leg;
 pub(crate) use originate::dialling_invite;
 pub(crate) use owed_answer::{
     ack_answer_on_leg, bare_ack_owed, invite_carried_offer, offer_deferred_to_ack,
-    offered_reliably, owes_bare_ack,
+    offer_owed_in_ack, offered_reliably, owe_answer_in_ack, owes_bare_ack,
 };
 pub(crate) use repeat::retransmitted_2xx;
 pub(crate) use session_timer::{settle_session_timer, TIMER};

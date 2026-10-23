@@ -1,15 +1,21 @@
 //! The request records a call's dialogs hold (ADR-0055 §2): adding one,
 //! finding the one a response or a transaction timeout names, closing it, and
-//! the records a retired dialog still holds.
+//! the records a retired dialog still holds. A dialog's INVITE exchanges are
+//! records of their own ([`super::invite_records`]); a final finds a relayed
+//! INVITE here as it finds any relay.
 
 use crate::model::{Call, Dialog, DialogId, Leg, RequestRecord};
 
 use super::leg::find_leg;
 use super::lens::update_dialog;
 
-/// Add `record` to `leg_id`'s dialog `id`.
+/// Add `record` to `leg_id`'s dialog `id`, among its open requests once it
+/// retired.
 pub fn add_record(call: Call, leg_id: &str, id: &DialogId, record: RequestRecord) -> Call {
-    update_dialog(call, leg_id, id, |d| d.requests.push(record))
+    update_dialog(call, leg_id, id, |d| match d.retired_mut() {
+        Some(retired) => retired.open_requests.push(record),
+        None => d.requests.push(record),
+    })
 }
 
 /// Where a request record is kept.
@@ -61,6 +67,7 @@ pub fn answered_record(
     };
     records_of(d)
         .iter()
+        .chain(d.sent_invite.iter())
         .find(|r| r.answered_by(answers.method, answers.cseq, answers.branch))
         .map(|r| (holder_of(d), r.clone()))
 }
@@ -81,8 +88,10 @@ pub fn record_with_branch(
     })
 }
 
-/// Close the sent record `holder` keeps with outbound CSeq `cseq` on
-/// `leg_id`: its transaction settled.
+/// Close the sent non-INVITE record `holder` keeps with outbound CSeq `cseq`
+/// on `leg_id`: its transaction settled. An INVITE's record stays for the
+/// ACK its 2xx owes; a non-2xx closes it
+/// ([`super::close_rejected_invite_round`]).
 pub fn close_record(call: Call, leg_id: &str, holder: &RecordHolder, cseq: i64) -> Call {
     let sent = |r: &RequestRecord| r.is_sent() && r.outbound_cseq == cseq;
     match holder {
@@ -149,29 +158,38 @@ pub fn take_retired_owed(leg: &mut Leg) -> Vec<(DialogId, RequestRecord)> {
     taken
 }
 
-/// The relay `dialog` holds with outbound CSeq `outbound_cseq`.
+/// The relay `dialog` holds with outbound CSeq `outbound_cseq` awaiting its
+/// final: a non-INVITE's, or the INVITE it last sent.
 pub fn find_relay(dialog: &Dialog, outbound_cseq: i64) -> Option<&RequestRecord> {
-    dialog.requests.iter().find(|p| p.is_relay() && p.outbound_cseq == outbound_cseq)
+    dialog
+        .requests
+        .iter()
+        .chain(super::invite_records::invite_relay(dialog))
+        .find(|p| p.is_relay() && p.outbound_cseq == outbound_cseq)
 }
 
-/// Mark a relay CANCELled (RFC 3261 §9): the relayed (re-)INVITE it records
-/// has been CANCELled toward its target, so the eventual final response
-/// resolves locally instead of being relayed back.
+/// Mark a relayed INVITE CANCELled (RFC 3261 §9): it has been CANCELled
+/// toward its target, so the eventual final response resolves locally instead
+/// of being relayed back.
 pub fn cancel_relay(call: Call, leg_id: &str, id: &DialogId, outbound_cseq: i64) -> Call {
     update_dialog(call, leg_id, id, |d| {
-        if let Some(p) =
-            d.requests.iter_mut().find(|p| p.is_relay() && p.outbound_cseq == outbound_cseq)
-        {
+        let relay = d.sent_invite.as_mut().filter(|p| p.is_relay());
+        if let Some(p) = relay.filter(|p| p.outbound_cseq == outbound_cseq) {
             p.cancelled = true;
         }
     })
 }
 
-/// Remove the relay `leg_id`'s dialog `id` holds with outbound CSeq
-/// `outbound_cseq`.
+/// Close the relay `leg_id`'s dialog `id` holds with outbound CSeq
+/// `outbound_cseq`: a relayed INVITE no 2xx was taken for is closed, one taken
+/// stays for the ACK and its re-ACKs.
 pub fn remove_relay(call: Call, leg_id: &str, id: &DialogId, outbound_cseq: i64) -> Call {
     update_dialog(call, leg_id, id, |d| {
-        d.requests.retain(|p| !(p.is_relay() && p.outbound_cseq == outbound_cseq))
+        d.requests.retain(|p| !(p.is_relay() && p.outbound_cseq == outbound_cseq));
+        if super::invite_records::invite_relay(d).is_some_and(|p| p.outbound_cseq == outbound_cseq)
+        {
+            d.sent_invite = None;
+        }
     })
 }
 

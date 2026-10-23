@@ -4,10 +4,16 @@
 use call::model::*;
 use proptest::prelude::*;
 
+use super::emission::{arb_retained_emission, arb_unacked_2xx};
 use super::{arb_tag, arb_uri};
 
 fn arb_origin() -> impl Strategy<Value = RequestOrigin> {
-    prop_oneof![Just(RequestOrigin::Relayed), Just(RequestOrigin::Own), Just(RequestOrigin::Held)]
+    prop_oneof![
+        Just(RequestOrigin::Relayed),
+        Just(RequestOrigin::Own),
+        Just(RequestOrigin::Held),
+        Just(RequestOrigin::Received),
+    ]
 }
 
 fn arb_usage() -> impl Strategy<Value = DialogUsage> {
@@ -18,7 +24,7 @@ fn arb_usage() -> impl Strategy<Value = DialogUsage> {
     ]
 }
 
-fn arb_sent() -> impl Strategy<Value = SentRequest> {
+pub(super) fn arb_sent() -> impl Strategy<Value = SentRequest> {
     (arb_tag(), proptest::collection::vec(any::<u8>(), 0..64), any::<u16>()).prop_map(
         |(branch, image, port)| SentRequest {
             branch,
@@ -78,7 +84,63 @@ pub(super) fn arb_pending_request() -> impl Strategy<Value = RequestRecord> {
                     source_timestamp,
                     relayed_by: Default::default(),
                     author,
+                    invite: None,
                 }
             },
         )
+}
+
+/// Any INVITE exchange: the ACK its 2xx drew or awaits, the 2xx it answered,
+/// a BYE held behind that 2xx's ACK, the dialling facts or the final sent.
+fn arb_exchange() -> impl Strategy<Value = InviteExchange> {
+    (
+        (
+            proptest::option::of(arb_tag()),
+            proptest::option::of(arb_retained_emission()),
+            proptest::option::of(any::<i64>()),
+            proptest::option::of(arb_unacked_2xx()),
+        ),
+        (
+            proptest::option::of((arb_tag(), any::<i64>(), proptest::option::of(100u16..700))),
+            proptest::option::of(100u16..700),
+            proptest::option::of(200u16..300),
+            proptest::option::of(proptest::option::of(arb_tag())),
+        ),
+    )
+        .prop_map(
+            |(
+                (ack_branch, emitted_ack, awaited_ack_cseq, answered_2xx),
+                (dialled, final_sent, answer_preempted, bye_reason),
+            )| InviteExchange {
+                ack_branch,
+                emitted_ack,
+                awaited_ack_cseq,
+                answered_2xx,
+                bye_behind_ack: bye_reason.map(|reason| HeldRequest::Bye {
+                    reason,
+                    headers: Vec::new(),
+                    body: Vec::new(),
+                    content_type: None,
+                    max_forwards: None,
+                }),
+                dialled: dialled.map(|(tag, sent_at, final_received)| OutboundInvite {
+                    final_received,
+                    ..OutboundInvite::new(tag, sent_at)
+                }),
+                final_sent,
+                answer_preempted,
+            },
+        )
+}
+
+/// Any INVITE's record: a request record carrying its exchange.
+pub(super) fn arb_invite_record() -> impl Strategy<Value = RequestRecord> {
+    (arb_pending_request(), arb_exchange(), any::<bool>()).prop_map(
+        |(record, exchange, cancelled)| RequestRecord {
+            method: "INVITE".into(),
+            cancelled,
+            invite: Some(exchange),
+            ..record
+        },
+    )
 }

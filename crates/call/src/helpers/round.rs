@@ -14,8 +14,11 @@
 //! state; a dialog's sequence speaks only for a round a non-2xx ended, which
 //! leaves no transaction behind.
 
-use crate::model::{Call, Dialog, DialogId, Obligation, RelayOwner, RequestRecord, TimerEntry};
+use crate::model::{
+    Call, Dialog, DialogId, Leg, Obligation, RelayOwner, RequestRecord, TimerEntry,
+};
 
+use super::invite_records::{ack_branch, awaited_ack_cseq, invite_image};
 use super::leg::{every_leg, find_leg};
 use super::lens::update_leg;
 use super::peering::relay_peer_dialog;
@@ -59,24 +62,24 @@ pub fn holds_rounds_of(held: Option<&Call>, other: &Call, by: &RelayOwner) -> bo
     every_leg(other).all(|other_leg| {
         let held_leg = held.and_then(|h| find_leg(h, &other_leg.leg_id));
         other_leg.dialogs.iter().all(|o| {
-            let Some(round) = unfinished(o) else { return true };
+            let Some(round) = unfinished(other_leg, o) else { return true };
             let Stage::Open { outbound_cseq } = round.stage else { return true };
             if !invite_relays(o).any(|p| p.outbound_cseq == outbound_cseq && p.relayed_by == *by) {
                 return true;
             }
-            let ours = held_leg.and_then(|l| l.dialogs.by_tags(&o.our_tag, &o.peer_tag));
-            let txn = ours.and_then(|d| d.pending_invite_txn.as_ref());
+            let ours =
+                held_leg.and_then(|l| l.dialogs.by_tags(&o.our_tag, &o.peer_tag).map(|d| (l, d)));
+            let txn = ours.and_then(|(l, d)| sent_txn(l, d));
             txn.is_some_and(|t| t.branch == round.branch || t.cseq > round.cseq)
         })
     })
 }
 
 /// `held` with every round `incoming` stands ahead on ([`round_ahead`]) taken
-/// from `incoming`, and nothing else: per such dialog, its INVITE relays, its
-/// INVITE client transaction and the ACK state of that transaction's 2xx, the
-/// offer it owes an answer to, its own sequence at the higher of the two; on
-/// the originator's dialog the 2xx it awaits an ACK for and the higher remote
-/// sequence; that 2xx's ladder timers; and the session state of both legs
+/// from `incoming`, and nothing else: per such dialog, the INVITE it last sent
+/// with the 2xx it took and that 2xx's ACK, the offer it owes an answer to,
+/// its own sequence at the higher of the two; on the originator's dialog the
+/// re-INVITE 2xx it awaits an ACK for and the higher remote sequence; that 2xx's ladder timers; and the session state of both legs
 /// when `incoming` opened at least as many offer/answer exchanges on each of
 /// them, so no exchange count is lowered (RFC 3264 §8). Every other fact is
 /// `held`'s, its own requests and its own rounds on other dialogs included.
@@ -120,44 +123,57 @@ enum Stage {
     Answered,
 }
 
-fn unfinished(dialog: &Dialog) -> Option<Unfinished<'_>> {
-    let txn = dialog.pending_invite_txn.as_ref()?;
+/// The client transaction of the INVITE a dialog of `leg` last sent: its
+/// branch and the CSeq it went out with. `None` where the record holds none.
+struct SentTxn<'a> {
+    branch: &'a str,
+    cseq: i64,
+}
+
+fn sent_txn<'a>(leg: &'a Leg, dialog: &'a Dialog) -> Option<SentTxn<'a>> {
+    let record = dialog.sent_invite.as_ref()?;
+    let sent = invite_image(leg, record)?;
+    Some(SentTxn { branch: sent.branch.as_str(), cseq: record.outbound_cseq })
+}
+
+fn unfinished<'a>(leg: &'a Leg, dialog: &'a Dialog) -> Option<Unfinished<'a>> {
+    let txn = sent_txn(leg, dialog)?;
     let (inbound_cseq, stage) = match invite_relays(dialog).next() {
         Some(relay) => (relay.inbound_cseq, Stage::Open { outbound_cseq: relay.outbound_cseq }),
-        None => (dialog.awaited_ack_cseq?, Stage::Answered),
+        None => (awaited_ack_cseq(dialog)?, Stage::Answered),
     };
-    Some(Unfinished { branch: txn.branch.as_str(), cseq: txn.cseq, inbound_cseq, stage })
+    Some(Unfinished { branch: txn.branch, cseq: txn.cseq, inbound_cseq, stage })
 }
 
+/// The relay of the INVITE `dialog` last sent, while it awaits its final.
 fn invite_relays(dialog: &Dialog) -> impl Iterator<Item = &RequestRecord> {
-    dialog.requests.iter().filter(|p| p.method.eq_ignore_ascii_case("INVITE"))
+    super::invite_records::invite_relay(dialog).into_iter()
 }
 
-/// Whether `incoming`, the same dialog in the other copy, ended `round`.
-fn ended(incoming: &Dialog, round: &Unfinished<'_>) -> bool {
-    let txn = incoming.pending_invite_txn.as_ref();
-    let same = txn.is_some_and(|t| t.branch == round.branch);
-    let later = txn.is_some_and(|t| t.branch != round.branch && t.cseq > round.cseq);
+/// Whether `incoming`, the same dialog of `leg` in the other copy, ended
+/// `round`.
+fn ended(leg: &Leg, incoming: &Dialog, round: &Unfinished<'_>) -> bool {
+    let txn = sent_txn(leg, incoming);
+    let same = txn.as_ref().is_some_and(|t| t.branch == round.branch);
+    let later = txn.as_ref().is_some_and(|t| t.branch != round.branch && t.cseq > round.cseq);
     match round.stage {
         Stage::Open { outbound_cseq } => {
-            let relayed = incoming.requests.iter().any(|p| {
-                p.outbound_cseq == outbound_cseq && p.method.eq_ignore_ascii_case("INVITE")
-            });
+            let relayed = invite_relays(incoming).any(|p| p.outbound_cseq == outbound_cseq);
             let refused = txn.is_none() && incoming.our_cseq >= outbound_cseq;
             !relayed && (same || later || refused)
         }
         Stage::Answered => {
-            let awaited = same && incoming.awaited_ack_cseq == Some(round.inbound_cseq);
-            let acked = same && incoming.ack_branch.is_some();
+            let awaited = same && awaited_ack_cseq(incoming) == Some(round.inbound_cseq);
+            let acked = same && ack_branch(incoming).is_some();
             !awaited && (acked || later)
         }
     }
 }
 
-/// Whether `ours`, the same dialog in the other copy, reached the round on
-/// the client transaction `branch` sent at `cseq`.
-fn reached(ours: &Dialog, branch: &str, cseq: i64) -> bool {
-    match ours.pending_invite_txn.as_ref() {
+/// Whether `ours`, the same dialog of `leg` in the other copy, reached the
+/// round on the client transaction `branch` sent at `cseq`.
+fn reached(leg: &Leg, ours: &Dialog, branch: &str, cseq: i64) -> bool {
+    match sent_txn(leg, ours) {
         Some(t) => t.branch == branch || t.cseq > cseq,
         None => ours.our_cseq >= cseq,
     }
@@ -168,11 +184,11 @@ fn rounds_ended(incoming: &Call, held: &Call) -> Vec<RoundAhead> {
     for held_leg in every_leg(held) {
         let Some(incoming_leg) = find_leg(incoming, &held_leg.leg_id) else { continue };
         for d in held_leg.dialogs.iter() {
-            let Some(round) = unfinished(d) else { continue };
+            let Some(round) = unfinished(held_leg, d) else { continue };
             let Some(theirs) = incoming_leg.dialogs.by_tags(&d.our_tag, &d.peer_tag) else {
                 continue;
             };
-            if ended(theirs, &round) {
+            if ended(incoming_leg, theirs, &round) {
                 out.push(RoundAhead {
                     leg_id: held_leg.leg_id.clone(),
                     dialog: d.id(),
@@ -189,15 +205,15 @@ fn rounds_opened(incoming: &Call, held: &Call) -> Vec<RoundAhead> {
     for incoming_leg in every_leg(incoming) {
         let Some(held_leg) = find_leg(held, &incoming_leg.leg_id) else { continue };
         for d in incoming_leg.dialogs.iter() {
-            let Some(txn) = d.pending_invite_txn.as_ref() else { continue };
+            let Some(txn) = sent_txn(incoming_leg, d) else { continue };
             let Some(ours) = held_leg.dialogs.by_tags(&d.our_tag, &d.peer_tag) else {
                 continue;
             };
-            if !reached(ours, &txn.branch, txn.cseq) {
+            if !reached(held_leg, ours, txn.branch, txn.cseq) {
                 out.push(RoundAhead {
                     leg_id: incoming_leg.leg_id.clone(),
                     dialog: d.id(),
-                    inbound_cseq: unfinished(d).map(|r| r.inbound_cseq),
+                    inbound_cseq: unfinished(incoming_leg, d).map(|r| r.inbound_cseq),
                 });
             }
         }
@@ -224,12 +240,17 @@ fn merge_round(held: Call, incoming: &Call, round: &RoundAhead) -> Call {
         return take_sessions(held, incoming, &[&round.leg_id]);
     };
     let theirs_o = dialog_of(incoming, &o_leg, &o_id).cloned();
+    let call_answer = (o_leg == held.a_leg.leg_id).then_some(i64::from(held.a_leg_invite.cseq));
+    let is_call_answer = |r: &RequestRecord| Some(r.inbound_cseq) == call_answer;
     held = update_leg(held, &o_leg, |leg| {
         let (Some(d), Some(t)) = (leg.dialogs.by_tags_mut(&o_id.our_tag, &o_id.peer_tag), theirs_o)
         else {
             return;
         };
-        d.pending_reinvite_2xx = t.pending_reinvite_2xx;
+        // The other copy's answer to the round; the call's own answer is the
+        // record's, whatever the round.
+        let ours = d.answered_invite.take().filter(|r| is_call_answer(r));
+        d.answered_invite = t.answered_invite.filter(|r| !is_call_answer(r)).or(ours);
         d.peer_cseq = d.peer_cseq.max(t.peer_cseq);
     });
     held = take_sessions(held, incoming, &[&round.leg_id, &o_leg]);
@@ -239,15 +260,11 @@ fn merge_round(held: Call, incoming: &Call, round: &RoundAhead) -> Call {
     }
 }
 
-/// The INVITE round facts of the target dialog, from `theirs`; its own
-/// non-INVITE relays and the higher of the two sequences are kept.
+/// The INVITE round facts of the target dialog, from `theirs`: the INVITE it
+/// last sent with the 2xx and ACK of it, and the offer it owes an answer to;
+/// its own non-INVITE requests and the higher of the two sequences are kept.
 fn take_round(d: &mut Dialog, theirs: &Dialog) {
-    d.requests.retain(|p| !p.method.eq_ignore_ascii_case("INVITE"));
-    d.requests.extend(invite_relays(theirs).cloned());
-    d.pending_invite_txn = theirs.pending_invite_txn.clone();
-    d.awaited_ack_cseq = theirs.awaited_ack_cseq;
-    d.ack_branch = theirs.ack_branch.clone();
-    d.emitted_ack = theirs.emitted_ack.clone();
+    d.sent_invite = theirs.sent_invite.clone();
     d.owed_answer = theirs.owed_answer.clone();
     d.our_cseq = d.our_cseq.max(theirs.our_cseq);
 }

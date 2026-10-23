@@ -293,7 +293,7 @@ fn cancelling_a_leg_retires_its_timers() {
 
 /// Record this stack's CANCEL of `leg`'s INVITE: the leg reads `Cancelling`.
 fn cancel_sent(leg: &mut Leg) {
-    leg.outbound_invite.as_mut().expect("a dialled leg").cancel_sent = true;
+    leg.outbound_invite_mut().expect("a dialled leg").cancel_sent = true;
 }
 
 /// Put every dialog of `leg` in `state`.
@@ -582,9 +582,9 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
 fn a_2xx_the_cancel_beat_to_the_caller_leaves_her_no_dialog_to_bye() {
     let mut call = call_with_early_a_dialog("a1");
     confirm_a(&mut call);
-    call.a_leg.invite_final_sent = Some(200);
+    *call.a_leg.invite_final_sent_mut() = Some(200);
     let call = call::helpers::record_cancelled_invite(call, "a");
-    assert_eq!(call.a_leg.invite_final_sent, Some(487), "the wire's final is the layer's 487");
+    assert_eq!(call.a_leg.invite_final_sent(), Some(487), "the wire's final is the layer's 487");
     let result = execute_on(
         &call,
         &[RuleAction::BeginTermination {
@@ -659,7 +659,7 @@ fn bye_on_the_early_a_dialog_selects_early_dialog_bye_with_487_and_termination()
     assert!(bye_ok < invite_487, "200 to the BYE, then 487 to the INVITE, got {actions:?}");
 
     let mut answered = call.clone();
-    answered.a_leg.invite_final_sent = Some(487);
+    *answered.a_leg.invite_final_sent_mut() = Some(487);
     let ctx = RuleContext { call: RuleCall::new(&answered), ..ctx };
     let ranked = pick_ranked(&rules, &answered, &ctx);
     assert_ne!(
@@ -933,7 +933,8 @@ fn no_synthesized_final_when_the_turn_already_answered() {
     )
     .expect("the transaction's first final is admitted");
     result.effects.outbound.push(effect);
-    assert_eq!(result.call.a_leg.invite_final_sent, Some(486), "the final is recorded on the leg");
+    let final_sent = result.call.a_leg.invite_final_sent();
+    assert_eq!(final_sent, Some(486), "the final is recorded on the leg");
     let result = invariants::enforce(
         &ObligationSet::core(),
         &before,
@@ -987,7 +988,7 @@ fn no_synthesized_final_when_the_txn_layer_answered_the_cancel() {
             .any(|e| e.reason.as_deref() == Some("unanswered_at_termination")),
         "no synthesized-final CDR event either"
     );
-    assert_eq!(result.call.a_leg.invite_final_sent, Some(487));
+    assert_eq!(result.call.a_leg.invite_final_sent(), Some(487));
 }
 
 /// One executor turn, one Cancelled-shaped context, over `call`.
@@ -1069,7 +1070,7 @@ fn a_second_final_to_the_a_leg_is_refused_and_reported() {
         ],
     );
     assert_eq!(finals_to_a(&result), vec![486], "exactly the first final leaves");
-    assert_eq!(result.call.a_leg.invite_final_sent, Some(486));
+    assert_eq!(result.call.a_leg.invite_final_sent(), Some(486));
     assert_eq!(
         refusals(&result),
         vec![(480, 486), (503, 486)],
@@ -1093,7 +1094,7 @@ fn a_final_after_the_autonomous_487_is_refused() {
     );
     assert!(finals_to_a(&result).is_empty(), "nothing reaches the caller after the 487");
     assert_eq!(refusals(&result), vec![(480, 487)]);
-    assert_eq!(result.call.a_leg.invite_final_sent, Some(487), "the 487 stands");
+    assert_eq!(result.call.a_leg.invite_final_sent(), Some(487), "the 487 stands");
 }
 
 #[test]
@@ -1121,7 +1122,7 @@ fn a_provisional_is_not_refused_by_the_final_guard() {
         )
         .count();
     assert_eq!(provisionals, 1, "the 183 leaves: {:?}", result.effects.outbound);
-    assert_eq!(result.call.a_leg.invite_final_sent, None, "a provisional records no final");
+    assert_eq!(result.call.a_leg.invite_final_sent(), None, "a provisional records no final");
     assert!(refusals(&result).is_empty());
     assert!(late_provisional_refusals(&result).is_empty());
 }
@@ -1183,7 +1184,7 @@ fn a_provisional_after_the_final_is_refused() {
         result.call.a_leg.dialogs.iter().all(|d| d.our_tag != "late-tag"),
         "a refused provisional re-tags no dialog",
     );
-    assert_eq!(result.call.a_leg.invite_final_sent, Some(200), "the 200 stands");
+    assert_eq!(result.call.a_leg.invite_final_sent(), Some(200), "the 200 stands");
     assert_eq!(
         late_provisional_refusals(&result),
         vec![(183, 200)],
@@ -1773,13 +1774,11 @@ fn b_leg_pending() -> Leg {
         local_uri: Some("sip:svc@10.0.0.9".into()),
         remote_uri: Some("sip:bob@10.0.0.2".into()),
         invite_request_uri: Some("sip:bob@10.0.0.2:5070".into()),
-        outbound_invite: Some(OutboundInvite::new("svc", 1, 0, None)),
+        invite: Some(call::RequestRecord::dialled(1, None, OutboundInvite::new("svc", 0))),
         own_tag: None,
         ext: None,
         kind: Some(LegKind::Destination),
         adopted: None,
-        invite_final_sent: None,
-        answer_preempted: None,
         attempt: None,
         ring: call::Ring::Silent,
         in_session_timer: None,
@@ -2535,11 +2534,11 @@ mod answer_a_leg_new_dialog {
     /// *Accepted* marker `reinvite-glare` reads), while the caller-facing §3
     /// ladder is retired with the final (§17.2.1).
     #[test]
-    fn answering_the_caller_leaves_a_b_legs_pending_reinvite_2xx_ladder_alone() {
+    fn answering_the_caller_leaves_a_b_legs_reinvite_2xx_ladder_alone() {
         let mut call = call_with_early_a_dialog("A1early");
         let mut b = super::b_leg_pending();
         call::testkit::stage_leg(&mut b, LegState::Confirmed);
-        with_dialog(&mut b, "bobtag").pending_reinvite_2xx = Some(call::Unacked2xx {
+        let reinvite_2xx = call::Unacked2xx {
             dialog_tag: "svc".into(),
             cseq: 7,
             emission: call::RetainedEmission::paced(
@@ -2549,7 +2548,8 @@ mod answer_a_leg_new_dialog {
                 call::Repeated::response("INVITE", 200),
             )
             .0,
-        });
+        };
+        call::helpers::hold_answered_2xx(with_dialog(&mut b, "bobtag"), 7, reinvite_2xx);
         call = call::helpers::add_b_leg(call, b);
         let reinvite_2xx =
             call::Obligation::AckOf2xx { leg: "b-1".into(), dialog_tag: "svc".into(), cseq: 7 };
@@ -2602,7 +2602,7 @@ mod answer_a_leg_new_dialog {
 
         let b_dialog = result.call.b_legs[0].dialogs.confirmed().expect("the b-leg dialog");
         assert!(
-            b_dialog.pending_reinvite_2xx.is_some(),
+            call::helpers::answered_2xx(b_dialog).is_some(),
             "the b-leg's re-INVITE 2xx still awaits its ACK: marker kept",
         );
         let ladder_timers = |o: &call::Obligation| {
@@ -2637,8 +2637,9 @@ mod answer_a_leg_new_dialog {
             vec!["Rung on AwaitPrack:A1early:1"],
             "only the provisional's timers leave the driver",
         );
+        let caller = result.call.a_leg.dialogs.confirmed();
         assert!(
-            result.call.a_leg.dialogs.confirmed().is_some_and(|d| d.answered_2xx.is_some()),
+            caller.and_then(call::helpers::answered_2xx).is_some(),
             "the caller's answer is retained under its own obligation",
         );
     }
@@ -3129,7 +3130,7 @@ mod ack_leg_body {
         let retained = result.call.b_legs[0]
             .dialogs
             .confirmed()
-            .and_then(|d| d.emitted_ack.clone())
+            .and_then(|d| call::helpers::emitted_ack(d).cloned())
             .expect("the emitted ACK datagram is retained on the dialog");
         let (bytes, dest) = retained.wire();
         assert_eq!(bytes, sent.image(), "retained bytes are the wire bytes");
@@ -3188,7 +3189,7 @@ mod ack_leg_body {
         let retained = first.call.b_legs[0]
             .dialogs
             .confirmed()
-            .and_then(|d| d.emitted_ack.clone())
+            .and_then(|d| call::helpers::emitted_ack(d).cloned())
             .expect("the bare ACK is retained as well");
         assert_eq!(retained.wire().0, sent.image());
         assert!(sent.body().is_empty(), "a minted ACK stays bare");
@@ -4063,6 +4064,22 @@ fn arming_a_keepalive_beyond_one_cadence_is_a_defect_and_is_clamped() {
 
 // ── §13.3.1.4 answered-2xx discharge (the engine's, before the rules) ────────
 
+/// A 200 to the INVITE numbered `cseq`, retained on `dialog_tag`'s face
+/// toward port `port` on the §13.3.1.4 ladder (RFC 3261).
+fn retained_2xx(dialog_tag: &str, cseq: i64, port: u16) -> call::Unacked2xx {
+    call::Unacked2xx {
+        dialog_tag: dialog_tag.into(),
+        cseq,
+        emission: call::RetainedEmission::paced(
+            b"SIP/2.0 200 OK\r\n\r\n".to_vec(),
+            ("127.0.0.1".into(), port),
+            sip_retransmit::Class::Final2xx,
+            call::Repeated::response("INVITE", 200),
+        )
+        .0,
+    }
+}
+
 /// A call whose a-leg dialog retains the initial-INVITE 2xx under the key the
 /// caller's ACK carries (To-tag `btag`, CSeq 1), its ladder armed — the state
 /// the engine must discharge.
@@ -4073,17 +4090,7 @@ fn call_with_retained_answered_2xx() -> call::Call {
     call = call::helpers::add_b_leg(call, b);
     // The confirmed a-leg UAS dialog the answer seam retained the 2xx on.
     let mut answered = a_dialog(&call, "btag", DialogState::Confirmed);
-    answered.answered_2xx = Some(call::Unacked2xx {
-        dialog_tag: "btag".into(),
-        cseq: 1,
-        emission: call::RetainedEmission::paced(
-            b"SIP/2.0 200 OK\r\n\r\n".to_vec(),
-            ("127.0.0.1".into(), 5060),
-            sip_retransmit::Class::Final2xx,
-            call::Repeated::response("INVITE", 200),
-        )
-        .0,
-    });
+    call::helpers::hold_answered_2xx(&mut answered, 1, retained_2xx("btag", 1, 5060));
     call.a_leg.dialogs.insert(answered);
     call.a_leg.own_tag = Some("btag".into());
     let obligation = answered_obligation();
@@ -4129,7 +4136,7 @@ fn caller_ack_discharges_the_retained_answered_2xx() {
     let (discharged, after, fx) = discharge_ack(&call, "a");
     assert_eq!(discharged, Some(answered_obligation()), "the a-leg ACK names the retained answer");
     assert!(
-        after.a_leg.dialogs.confirmed().expect("dialog kept").answered_2xx.is_none(),
+        after.a_leg.dialogs.confirmed().expect("dialog kept").answered_invite.is_none(),
         "the retained datagram is discharged from the replicated body",
     );
     assert!(
@@ -4160,7 +4167,7 @@ fn callee_side_ack_leaves_the_retained_answered_2xx() {
     let (discharged, after, fx) = discharge_ack(&call, "b-1");
     assert_eq!(discharged, None, "a b-leg ACK must not discharge the caller's obligation");
     assert!(
-        after.a_leg.dialogs.confirmed().expect("dialog kept").answered_2xx.is_some(),
+        after.a_leg.dialogs.confirmed().expect("dialog kept").answered_invite.is_some(),
         "the retained datagram still awaits the caller's ACK",
     );
     assert_eq!(after.timers.len(), call.timers.len(), "the ladder keeps running");
@@ -4202,8 +4209,7 @@ fn relay_ack_pushes_no_ladder_plumbing() {
 mod ladder_give_up {
     use super::*;
     use b2bua_core::effects::OutboundBody;
-    use call::{CdrEventType, Obligation, RetainedEmission, Unacked2xx};
-    use sip_retransmit::Class;
+    use call::{CdrEventType, Obligation};
 
     const A_TAG: &str = "a-svc";
 
@@ -4214,27 +4220,13 @@ mod ladder_give_up {
         let mut call = test_call();
         confirm_a(&mut call);
         let mut answered = a_dialog(&call, A_TAG, DialogState::Confirmed);
-        answered.answered_2xx = Some(retained_2xx(A_TAG, 1, 5060));
+        call::helpers::hold_answered_2xx(&mut answered, 1, retained_2xx(A_TAG, 1, 5060));
         call.a_leg.dialogs = vec![answered].into();
         call.a_leg.own_tag = Some(A_TAG.into());
         let mut b = super::b_leg_pending();
         call::testkit::stage_leg(&mut b, LegState::Confirmed);
         with_dialog(&mut b, "bobtag").peer_cseq = Some(1);
         call::helpers::add_b_leg(call, b)
-    }
-
-    fn retained_2xx(dialog_tag: &str, cseq: i64, port: u16) -> Unacked2xx {
-        Unacked2xx {
-            dialog_tag: dialog_tag.into(),
-            cseq,
-            emission: RetainedEmission::paced(
-                b"SIP/2.0 200 OK\r\n\r\n".to_vec(),
-                ("127.0.0.1".into(), port),
-                Class::Final2xx,
-                call::Repeated::response("INVITE", 200),
-            )
-            .0,
-        }
     }
 
     fn give_up_of(call: &call::Call, obligation: &Obligation) -> CallEvent {
@@ -4328,7 +4320,7 @@ mod ladder_give_up {
         // What the rules alone left: the defect's shape.
         assert_eq!(ruled.call.state, CallModelState::Active, "the service parked the call");
         assert!(
-            ruled.call.a_leg.dialogs.confirmed().unwrap().answered_2xx.is_some(),
+            ruled.call.a_leg.dialogs.confirmed().unwrap().answered_invite.is_some(),
             "the rules alone keep the retained 2xx"
         );
 
@@ -4340,7 +4332,7 @@ mod ladder_give_up {
             "RFC 3261 §13.3.1.4: the session ends"
         );
         assert!(
-            settled.call.a_leg.dialogs.confirmed().unwrap().answered_2xx.is_none(),
+            settled.call.a_leg.dialogs.confirmed().unwrap().answered_invite.is_none(),
             "no retained datagram survives the give-up"
         );
         let mut byes = byes_in(&settled);
@@ -4364,9 +4356,9 @@ mod ladder_give_up {
         let mut call = answered_call();
         // The caller's initial ACK arrived; the b-leg's re-INVITE 2xx (CSeq 7)
         // is the one still owed.
-        call.a_leg.dialogs.confirmed_mut().unwrap().answered_2xx = None;
-        call.b_legs[0].dialogs.confirmed_mut().unwrap().pending_reinvite_2xx =
-            Some(retained_2xx("svc", 7, 5070));
+        call.a_leg.dialogs.confirmed_mut().unwrap().answered_invite = None;
+        let callee = call.b_legs[0].dialogs.confirmed_mut().unwrap();
+        call::helpers::hold_answered_2xx(callee, 7, retained_2xx("svc", 7, 5070));
         let obligation =
             Obligation::AckOf2xx { leg: "b-1".into(), dialog_tag: "svc".into(), cseq: 7 };
         let mut rules = vec![parking_rule(is_2xx_give_up)];
@@ -4376,7 +4368,7 @@ mod ladder_give_up {
 
         assert_eq!(settled.call.state, CallModelState::Terminating);
         assert!(
-            settled.call.b_legs[0].dialogs.confirmed().unwrap().pending_reinvite_2xx.is_none(),
+            settled.call.b_legs[0].dialogs.confirmed().unwrap().answered_invite.is_none(),
             "the re-INVITE 2xx is not retained either"
         );
         let marker = settled
@@ -4773,8 +4765,9 @@ fn ringing_call() -> call::Call {
     let mut leg = b_leg_pending();
     // The INVITE this leg is ringing on, which its CANCEL names (RFC 3261 §9.1).
     let dest = call::HostPort { host: "10.0.0.2".into(), port: 5070 };
-    let handle = call::InviteTxnHandle::new("z9hG4bK-b1", 1, invite().image().to_vec(), dest);
-    leg.outbound_invite.as_mut().expect("a dialled leg").txn = Some(handle);
+    let image = invite().image().to_vec();
+    let sent = call::SentRequest { branch: "z9hG4bK-b1".into(), image, destination: dest };
+    call::testkit::dial_with(&mut leg, sent);
     let call = call::helpers::add_b_leg(test_call(), leg);
     let (_, actions) = handle_from_b1(&call, &b_leg_ringing_event(false));
     let ringing = execute_from_b1(&call, &b_leg_ringing_event(false), &actions).call;

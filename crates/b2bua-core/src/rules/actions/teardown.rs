@@ -75,9 +75,8 @@ impl ActionExecutor<'_> {
             .chain(call.b_legs.iter())
             .flat_map(|leg| leg.dialogs.iter().map(move |d| (leg, d)))
             .flat_map(|(leg, d)| {
-                d.requests
-                    .iter()
-                    .filter(|p| p.method.eq_ignore_ascii_case("INVITE") && !p.cancelled)
+                call::helpers::invite_relay(d)
+                    .filter(|p| !p.cancelled)
                     .map(move |p| (leg.leg_id.clone(), p.outbound_cseq))
             })
             .collect();
@@ -100,6 +99,9 @@ impl ActionExecutor<'_> {
             relayed_teardown(ctx, RelaySituation::request(method, relay::toward_leg(leg_id)))
         };
         let hops = relayed_teardown_hops(ctx);
+        // A teardown a peer's BYE asked for: the ACK an owed answer would
+        // ride will not come.
+        let peer_left = ctx.request().is_some_and(|r| r.method() == Method::Bye);
         // RFC 3326: the firing rule's teardown cause rides each BYE only when
         // it is a structured `SIP;cause=…` value (the `promote18xPemTo200`
         // diagnostic teardown). The CORE rules pass opaque labels
@@ -120,7 +122,7 @@ impl ActionExecutor<'_> {
                 LegState::Confirmed => {
                     let relayed = relayed(&Method::Bye, &id);
                     let reason = reason_header.or_else(|| own_release_reason(ctx));
-                    self.send_bye(call, fx, &id, reason, relayed, hops);
+                    self.send_bye(call, fx, &id, reason, relayed, hops, peer_left);
                     super::dialog_end::end_dialogs(call, ctx, &id, LegEnd::OurByeSent);
                 }
                 // The caller's INVITE is answered by the firing rule, or by
@@ -129,7 +131,7 @@ impl ActionExecutor<'_> {
                 // layer's autonomous 487 — the requests relayed toward her
                 // are answered too.
                 _ if is_a => {
-                    if call.a_leg.invite_final_sent.is_some() {
+                    if call.a_leg.invite_final_sent().is_some() {
                         self.settle_at_leg_end(call, fx, &id);
                     }
                 }
@@ -202,7 +204,7 @@ impl ActionExecutor<'_> {
                 // where the rule states none (RFC 3326 §2).
                 let stated_reason = stated.iter().any(|h| HeaderName::Reason.matches(&h.name));
                 let own = own_release_reason(ctx).filter(|_| !stated_reason);
-                self.send_bye(call, fx, leg_id, own, Relayed::headers(stated), None);
+                self.send_bye(call, fx, leg_id, own, Relayed::headers(stated), None, false);
                 super::dialog_end::end_dialogs(call, ctx, leg_id, LegEnd::OurByeSent);
             }
             // The CANCEL leaves the leg `Cancelling`: a 200 OK crossing it
@@ -292,9 +294,8 @@ impl ActionExecutor<'_> {
         relayed: &[SipHeader],
     ) -> Option<OutboundSipEffect> {
         let leg = call.b_legs.iter().find(|l| l.leg_id == leg_id)?;
-        let handle = leg.outbound_invite.as_ref()?.txn.as_ref()?;
-        let Ok(SipMessage::Request(req)) = CustomParser::new().parse(&handle.original_invite)
-        else {
+        let handle = leg.dialled_sent()?;
+        let Ok(SipMessage::Request(req)) = CustomParser::new().parse(&handle.image) else {
             return None;
         };
         let cancel = generators::generate_cancel(

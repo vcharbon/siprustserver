@@ -32,7 +32,7 @@ fn born(cid: &str) -> Call {
 /// A call whose caller was answered and that has nothing in flight.
 fn quiet(cid: &str) -> Call {
     let mut call = born(cid);
-    call.a_leg.invite_final_sent = Some(200);
+    *call.a_leg.invite_final_sent_mut() = Some(200);
     call::testkit::stage_leg(&mut call.a_leg, LegState::Confirmed);
     call
 }
@@ -40,7 +40,7 @@ fn quiet(cid: &str) -> Call {
 /// A call that already ended.
 fn ended(cid: &str) -> Call {
     let mut call = born(cid);
-    call.a_leg.invite_final_sent = Some(486);
+    *call.a_leg.invite_final_sent_mut() = Some(486);
     call::testkit::stage_leg(&mut call.a_leg, LegState::Terminated);
     call.state = CallModelState::Terminated;
     call::helpers::record_termination(call, 0, call::TerminationCause::RemoteFinal, None)

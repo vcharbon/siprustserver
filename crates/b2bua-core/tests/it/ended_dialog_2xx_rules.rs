@@ -177,7 +177,8 @@ fn a_2xx_whose_relayed_ack_is_still_owed_is_left_to_its_originator() {
     let (mut call, reinvite, _) = reinvite_then_bye();
     let leg = call.b_legs.iter_mut().find(|l| l.leg_id == "b-1").expect("the callee's leg");
     let dialog = leg.dialogs.established_mut().expect("the callee's dialog");
-    dialog.awaited_ack_cseq = Some(i64::from(reinvite));
+    call::helpers::sent_exchange_mut(dialog).expect("the re-INVITE's record").awaited_ack_cseq =
+        Some(i64::from(reinvite));
     let (rule, _) = turn(&call, &from_bob(200, reinvite, "INVITE", OFFER));
     assert_ne!(rule, Some("ack-2xx-on-ended-dialog"));
 }

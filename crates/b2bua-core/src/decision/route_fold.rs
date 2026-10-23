@@ -267,7 +267,7 @@ pub fn admitted(
         &capabilities::withheld_option_tags(&call, None, offers_sdp),
         &capabilities::offered_option_tags(&call, None),
         None,
-        call.a_leg.invite_final_sent.is_none(),
+        call.a_leg.invite_final_sent().is_none(),
         now_ms,
         &mut skipped,
     ) {
@@ -324,10 +324,10 @@ pub fn admitted(
         if let Ok(edited) = draft.freeze() {
             *req = edited;
         }
-        // The client-transaction handle holds the INVITE as it leaves; the
+        // The dialling INVITE's record holds the INVITE as it leaves; the
         // leg holds no dialog before a response to it.
-        if let Some(handle) = leg.outbound_invite.as_mut().and_then(|i| i.txn.as_mut()) {
-            handle.original_invite = req.image().to_vec();
+        if let Some(sent) = leg.invite.as_mut().and_then(|r| r.sent.as_mut()) {
+            sent.image = req.image().to_vec();
         }
     }
 
@@ -338,7 +338,7 @@ pub fn admitted(
             BodyUpdate::Drop | BodyUpdate::Replace(_) => relay::Author::Stack,
         },
     );
-    if let Some(invite) = leg.outbound_invite.as_mut() {
+    if let Some(invite) = leg.outbound_invite_mut() {
         invite.sent_at_ms = sent_ms;
     }
     call = add_originated_b_leg(call, leg, now_ms);

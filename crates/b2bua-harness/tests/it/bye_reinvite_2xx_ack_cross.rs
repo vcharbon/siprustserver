@@ -11,15 +11,20 @@
 //!
 //! Every shape has the crossing window. §13.2.2.4 gives one ACK per 2xx, and on
 //! a relayed INVITE that ACK is the acknowledging party's own, relayed: a BYE
-//! from either side can land while it is still on its way. Offer-in-INVITE and
-//! delayed-offer differ only in the BODY the ACK carries (RFC 3264 §4), never in
-//! who owes it or when.
+//! from either side can land while it is still on its way. Where the ACK owes
+//! no answer (the INVITE carried the offer), the BYE of the 2xx's sender draws
+//! it from this stack at once; where it owes the answer, the acknowledging
+//! party's own ACK still carries it. A BYE this stack relays onto a dialog
+//! owing an ACK leaves behind that ACK, answering a delayed offer with every
+//! stream rejected (RFC 3264 §6): the party that would have answered it left.
+//! The caller is never BYEd before her ACK of the call's answer (§15).
 //!
 //! ```text
 //!   callee_byes_across_the_initial_2xx_…           offer in the INVITE
 //!   callee_byes_across_the_delayed_offer_initial…  the answer rides the ACK
 //!   callee_byes_across_the_reinvite_2xx_…          both offer shapes, in-dialog
 //!   caller_byes_…       the caller BYEs, so the SUT is Mortal by its own act
+//!   the_callers_bye_…   §15: the caller's BYE waits for her ACK, or the give-up
 //!   late_inbound_…      the receiving half: a late ACK into a reaped dialog is
 //!                       absorbed, never answered (§17.1.1.3 — an ACK draws no
 //!                       response at all, least of all a 481)
@@ -29,7 +34,7 @@
 use std::net::SocketAddr;
 
 use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::{Harness, RunReport, WaiverScope};
+use scenario_harness::{Harness, Inbound, RunReport};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -46,15 +51,23 @@ fn acks_to(report: &RunReport, sut: SocketAddr, callee: SocketAddr) -> Vec<Vec<u
         .collect()
 }
 
+/// Nothing reaches `party` within 100 ms: one hop is a millisecond, and the
+/// nearest repeat of a 2xx toward her is T1 away.
+async fn hears_nothing(h: &Harness, party: &scenario_harness::Agent, why: &str) {
+    h.advance(std::time::Duration::from_millis(100)).await;
+    assert!(party.take_queued().await.is_none(), "{why}");
+}
+
 /// **The dialog-creating 2xx, offer in the INVITE.** bob's 200 answers the offer
-/// alice made, so the ACK it owes carries no body — but it is still alice's ACK,
-/// relayed, so bob can BYE while it is in flight. He hangs up on an un-ACKed
-/// answer; her ACK lands afterwards and must still reach him, bare, on his
-/// INVITE's CSeq.
-#[tokio::test]
-async fn callee_byes_across_the_initial_2xx_and_the_callers_ack_still_lands() {
+/// alice made, so the ACK it owes carries no body: this stack can compose it.
+/// bob hangs up on an un-ACKed answer; the stack ACKs his 2xx before answering
+/// his BYE (§13.2.2.4). alice holds a 2xx she has not ACKed, so no BYE reaches
+/// her before her ACK (§15); her ACK, a second one for bob's 2xx, goes no
+/// further.
+#[tokio::test(start_paused = true)]
+async fn callee_byes_across_the_initial_2xx_draws_the_ack_and_the_caller_is_byed_after_hers() {
     const BOB: &str = "127.0.0.1:5071";
-    let h = Harness::with_transit_delay("b2bua-bye-initial-offer-ack", 0);
+    let h = Harness::new("b2bua-bye-initial-offer-ack");
     let alice = h.agent("alice", "127.0.0.1:5061").await;
     let bob = h.agent("bob", BOB).await;
     let b2bua =
@@ -68,14 +81,9 @@ async fn callee_byes_across_the_initial_2xx_and_the_callers_ack_still_lands() {
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
 
-    // ── bob hangs up on an answer nobody has ACKed yet ───────────────────────
+    // ── bob hangs up on an answer nobody has ACKed yet: his ACK comes first ──
     let mut bob_dialog = uas.dialog();
     let mut bob_bye = bob_dialog.bye().await;
-    bob_bye.expect(200).await;
-    let mut alice_bye = alice.receive("BYE").await;
-
-    // ── alice's ACK lands last and still crosses to bob ──────────────────────
-    let _alice_dialog = call.ack().await;
     let ack_txn = bob.receive("ACK").await;
     let ack = ack_txn.request();
     assert_eq!(
@@ -83,8 +91,13 @@ async fn callee_byes_across_the_initial_2xx_and_the_callers_ack_still_lands() {
         uas.request().cseq().seq(),
         "§13.2.2.4: the ACK echoes the INVITE's CSeq",
     );
-    assert!(ack.body().is_empty(), "alice ACKed bare, so the relayed ACK is bare");
+    assert!(ack.body().is_empty(), "the INVITE carried the offer, so the ACK is bare");
+    bob_bye.expect(200).await;
 
+    // ── §15: alice is not BYEd before she ACKs the call's answer ─────────────
+    hears_nothing(&h, &alice, "no BYE reaches alice before her ACK (RFC 3261 §15)").await;
+    let _alice_dialog = call.ack().await;
+    let mut alice_bye = alice.receive("BYE").await;
     alice_bye.respond(200, "OK").await;
     settle_until(|| b2bua.is_reaped()).await;
     alice.drain().await;
@@ -95,7 +108,7 @@ async fn callee_byes_across_the_initial_2xx_and_the_callers_ack_still_lands() {
     assert_eq!(
         acks_to(&report, b2bua.addr, bob_addr).len(),
         1,
-        "one 2xx received, one ACK sent — the caller's, relayed",
+        "one 2xx received, one ACK sent — this stack's, ahead of bob's BYE",
     );
 }
 
@@ -103,10 +116,10 @@ async fn callee_byes_across_the_initial_2xx_and_the_callers_ack_still_lands() {
 /// 200 holds the offer and the ACK carries the answer only her ACK supplies
 /// (RFC 3264 §4). bob hangs up first; the SUT is Mortal on a b-leg whose invite
 /// usage is not even confirmed yet, and still owes the ACK that completes the
-/// handshake.
-#[tokio::test]
+/// handshake. alice is not BYEd before her ACK (§15), which relays her answer.
+#[tokio::test(start_paused = true)]
 async fn callee_byes_across_the_delayed_offer_initial_2xx_and_the_sut_still_acks() {
-    let h = Harness::with_transit_delay("b2bua-bye-initial-ack", 0);
+    let h = Harness::new("b2bua-bye-initial-ack");
     let alice = h.agent("alice", "127.0.0.1:5066").await;
     let bob = h.agent("bob", "127.0.0.1:5076").await;
     let b2bua =
@@ -128,7 +141,7 @@ async fn callee_byes_across_the_delayed_offer_initial_2xx_and_the_sut_still_acks
     let mut bob_dialog = uas.dialog();
     let mut bob_bye = bob_dialog.bye().await;
     bob_bye.expect(200).await;
-    let mut alice_bye = alice.receive("BYE").await;
+    hears_nothing(&h, &alice, "no BYE reaches alice before her ACK (RFC 3261 §15)").await;
 
     // ── alice supplies the answer at last; the ACK must still reach bob ──────
     let _alice_dialog = call.ack_with(Some(ANSWER)).await;
@@ -137,6 +150,7 @@ async fn callee_byes_across_the_delayed_offer_initial_2xx_and_the_sut_still_acks
         !ack.request().body().is_empty(),
         "the b-leg ACK must carry alice's answer to bob's offer"
     );
+    let mut alice_bye = alice.receive("BYE").await;
 
     alice_bye.respond(200, "OK").await;
     settle_until(|| b2bua.is_reaped()).await;
@@ -210,35 +224,18 @@ async fn callee_byes_across_the_reinvite_2xx_and_the_sut_still_acks() {
 }
 
 /// **The same cross with the offer in the re-INVITE.** alice's re-INVITE carries
-/// the offer and bob's 200 the answer, so the round is closed and her ACK owes
-/// no body — she puts one on it anyway, and the SUT relays what it does not
-/// interpret (RFC 3261 §13.2.1). bob BYEs first; the ACK still crosses, bytes
-/// and `Content-Type` intact.
-#[tokio::test]
-async fn callee_byes_across_an_offer_carrying_reinvite_2xx_and_the_ack_keeps_its_body() {
-    let h = Harness::with_transit_delay("b2bua-bye-reinvite-ack-offer", 0);
-    // The stray body on an ACK closing a finished round is charged to whoever
-    // put it there, on each lane that carried it.
-    h.waive(
-        WaiverScope::rule(
-            "ack-body-after-complete-offer-answer",
-            "alice deliberately repeats a description on an ACK whose round is closed — the \
-             body the relay must carry is the subject of the test",
-        )
-        .on_party("alice"),
-    );
-    h.waive(
-        WaiverScope::rule(
-            "ack-body-after-complete-offer-answer",
-            "the SUT relays that body verbatim toward the callee: a back-to-back UA owes a \
-             body it does not interpret to the far party, and authors none of its own",
-        )
-        .on_party("b2bua"),
-    );
+/// the offer and bob's 200 the answer, so the ACK owes no body and this stack
+/// composes it: bob's BYE draws it ahead of the 200 (§13.2.2.4). alice's own
+/// ACK, arriving later, is a second ACK for that 2xx and goes no further.
+#[tokio::test(start_paused = true)]
+async fn callee_byes_across_an_offer_carrying_reinvite_2xx_and_draws_the_ack_first() {
+    const BOB: &str = "127.0.0.1:5070";
+    let h = Harness::new("b2bua-bye-reinvite-ack-offer");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
-    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let bob = h.agent("bob", BOB).await;
     let b2bua =
         B2buaSut::route_all_to("127.0.0.1", 5070).start(&h, "b2bua", "127.0.0.1:5080").await;
+    let bob_addr: SocketAddr = BOB.parse().unwrap();
 
     let (mut alice_dialog, mut bob_dialog) = establish(&alice, &bob, &b2bua).await;
 
@@ -246,75 +243,135 @@ async fn callee_byes_across_an_offer_carrying_reinvite_2xx_and_the_ack_keeps_its
     let reinvite_cseq = alice_dialog.local_cseq();
     let mut bob_reinv = bob.receive("INVITE").await;
     assert!(!bob_reinv.request().body().is_empty(), "alice's re-offer reached bob");
+    let relayed_cseq = bob_reinv.request().cseq().seq();
     bob_reinv.respond(200, "OK").with_sdp(REANSWER).await;
     reinv.expect(200).await;
 
-    // ── bob hangs up before the ACK gets to him ──────────────────────────────
+    // ── bob hangs up before alice's ACK gets to him: this stack's ACK first ──
     let mut bob_bye = bob_dialog.bye().await;
+    let ack_txn = bob.receive("ACK").await;
+    let ack = ack_txn.request();
+    assert_eq!(ack.cseq().seq(), relayed_cseq, "§13.2.2.4: the ACK echoes the re-INVITE's CSeq");
+    assert!(ack.body().is_empty(), "the re-INVITE carried the offer, so the ACK is bare");
     bob_bye.expect(200).await;
     let mut alice_bye = alice.receive("BYE").await;
 
-    // ── alice's ACK repeats the offer; both the bytes and the type cross ─────
-    alice_dialog.ack_for(reinvite_cseq, Some(REOFFER)).await;
-    let ack_txn = bob.receive("ACK").await;
-    let ack = ack_txn.request();
-    assert_eq!(
-        ack.cseq().seq(),
-        bob_reinv.request().cseq().seq(),
-        "§13.2.2.4: the ACK echoes the re-INVITE's CSeq",
-    );
-    assert_eq!(ack.body(), REOFFER.as_bytes(), "the relayed ACK carries alice's bytes verbatim");
-    assert_eq!(
-        ack.raw(sip_message::HeaderName::ContentType).next(),
-        Some("application/sdp"),
-        "and the Content-Type she stated",
-    );
-
+    // ── alice's own ACK lands on a 2xx already acknowledged ──────────────────
+    alice_dialog.ack_for(reinvite_cseq, None).await;
     alice_bye.respond(200, "OK").await;
     settle_until(|| b2bua.is_reaped()).await;
     alice.drain().await;
     bob.drain().await;
     b2bua.assert_fully_reaped();
 
-    let _report = h.finish().await;
+    let report = h.finish().await;
+    let reinvite_acks = acks_to(&report, b2bua.addr, bob_addr)
+        .into_iter()
+        .filter(|raw| sip_message::sniff::cseq_number(raw) == Some(relayed_cseq))
+        .count();
+    assert_eq!(reinvite_acks, 1, "one 2xx received, one ACK sent (§13.2.2.4)");
 }
 
 /// **The caller hangs up inside the re-INVITE transaction** — RFC 5407 §3.2.3's
-/// depicted flow. alice re-INVITEs bodyless, bob answers 200, alice BYEs. The
-/// SUT is now Mortal on the b-leg by its OWN act (it relayed that BYE), and the
-/// ban on new in-dialog requests still does not reach the ACK it owes bob.
-#[tokio::test]
-async fn caller_byes_across_the_reinvite_2xx_and_the_sut_still_acks() {
-    let h = Harness::with_transit_delay("b2bua-bye-reinvite-ack-caller", 0);
+/// depicted flow. alice re-INVITEs bodyless, bob answers 200 with the offer,
+/// alice BYEs before she ACKs. The BYE relayed onto the b-leg leaves behind the
+/// ACK bob is owed (§13.2.2.4); the answer it owes can come from nobody now, so
+/// it rejects every stream of bob's offer (RFC 3264 §6). alice's late ACK goes
+/// no further.
+#[tokio::test(start_paused = true)]
+async fn caller_byes_across_the_reinvite_2xx_and_the_callee_is_acked_before_the_bye() {
+    const BOB: &str = "127.0.0.1:5074";
+    let h = Harness::new("b2bua-bye-reinvite-ack-caller");
     let alice = h.agent("alice", "127.0.0.1:5064").await;
-    let bob = h.agent("bob", "127.0.0.1:5074").await;
+    let bob = h.agent("bob", BOB).await;
     let b2bua =
         B2buaSut::route_all_to("127.0.0.1", 5074).start(&h, "b2bua", "127.0.0.1:5084").await;
+    let bob_addr: SocketAddr = BOB.parse().unwrap();
 
     let (mut alice_dialog, _bob_dialog) = establish(&alice, &bob, &b2bua).await;
 
     let mut reinv = alice_dialog.reinvite(None).await;
     let reinvite_cseq = alice_dialog.local_cseq();
     let mut bob_reinv = bob.receive("INVITE").await;
+    let relayed_cseq = bob_reinv.request().cseq().seq();
     bob_reinv.respond(200, "OK").with_sdp(REANSWER).await;
     reinv.expect(200).await;
 
-    // ── alice hangs up; the BYE is relayed onto the b-leg ────────────────────
+    // ── alice hangs up; bob's 2xx is ACKed ahead of the relayed BYE ──────────
     let mut alice_bye = alice_dialog.bye().await;
     alice_bye.expect(200).await;
-    let mut bob_bye = bob.receive("BYE").await;
-
-    // ── and only then does she ACK. The SUT, Mortal on the leg it just BYEd,
-    //    still emits the b-leg ACK. ────────────────────────────────────────────
-    alice_dialog.ack_for(reinvite_cseq, Some(REOFFER)).await;
     let ack = bob.receive("ACK").await;
     assert_eq!(
         ack.request().cseq().seq(),
-        bob_reinv.request().cseq().seq(),
+        relayed_cseq,
         "§13.2.2.4: the ACK echoes the re-INVITE's CSeq",
     );
+    let answer = String::from_utf8_lossy(ack.request().body()).to_string();
+    assert!(
+        answer.contains("m=audio 0 "),
+        "the ACK answers bob's offer with every stream rejected (RFC 3264 §6): {answer}"
+    );
+    let mut bob_bye = bob.receive("BYE").await;
 
+    // ── her late ACK lands on a 2xx already acknowledged ─────────────────────
+    alice_dialog.ack_for(reinvite_cseq, Some(REOFFER)).await;
     bob_bye.respond(200, "OK").await;
+    settle_until(|| b2bua.is_reaped()).await;
+    alice.drain().await;
+    bob.drain().await;
+    b2bua.assert_fully_reaped();
+
+    let report = h.finish().await;
+    let reinvite_acks = acks_to(&report, b2bua.addr, bob_addr)
+        .into_iter()
+        .filter(|raw| sip_message::sniff::cseq_number(raw) == Some(relayed_cseq))
+        .count();
+    assert_eq!(reinvite_acks, 1, "one 2xx received, one ACK sent (§13.2.2.4)");
+}
+
+/// **§15 against a silent caller.** bob hangs up on the call's un-ACKed answer
+/// and alice never ACKs it: her BYE waits behind the ACK until the 2xx's
+/// give-up (64·T1), then leaves; the 2xx keeps repeating toward her until then
+/// (§13.3.1.4).
+#[tokio::test(start_paused = true)]
+async fn the_callers_bye_waits_for_her_ack_until_the_2xx_give_up() {
+    let h = Harness::new("b2bua-bye-initial-give-up");
+    h.allow_violation(
+        "no-ack-to-dialog-creating-2xx",
+        "alice deliberately never ACKs — the BYE behind her ACK under test",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5069").await;
+    let bob = h.agent("bob", "127.0.0.1:5079").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5079).start(&h, "b2bua", "127.0.0.1:5089").await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+
+    let mut bob_dialog = uas.dialog();
+    let mut bob_bye = bob_dialog.bye().await;
+    bob.receive("ACK").await;
+    bob_bye.expect(200).await;
+
+    // ── the 2xx repeats toward her, and no BYE, short of the give-up ─────────
+    let mut byed_at = None;
+    for second in 1..=33 {
+        h.advance(std::time::Duration::from_secs(1)).await;
+        while let Some(inbound) = alice.take_queued_inbound().await {
+            match inbound {
+                Inbound::Response(r) => assert_eq!(r.status(), 200, "only her 2xx repeats"),
+                Inbound::Request(mut txn) => {
+                    assert_eq!(txn.request().method().as_str(), "BYE", "only a BYE reaches her");
+                    assert!(byed_at.is_none(), "one BYE");
+                    byed_at = Some(second);
+                    txn.respond(200, "OK").await;
+                }
+            }
+        }
+    }
+    assert_eq!(byed_at, Some(32), "the BYE leaves at the 2xx's give-up (64·T1)");
     settle_until(|| b2bua.is_reaped()).await;
     alice.drain().await;
     bob.drain().await;

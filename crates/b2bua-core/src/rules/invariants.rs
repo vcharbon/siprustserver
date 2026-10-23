@@ -136,7 +136,7 @@ pub fn enforce(
 ///    unanswered (an answered a-leg reads `Confirmed` or `Terminated`).
 ///  - a non-empty `a_leg_invite` snapshot (nothing to answer otherwise —
 ///    degenerate synthetic fixtures).
-///  - `a_leg.invite_final_sent` is `None` — the transaction carries no final
+///  - `a_leg.invite_final_sent()` is `None` — the transaction carries no final
 ///    yet: neither a reject / relay / setup-timeout final of this turn nor the
 ///    487 the txn layer sent autonomously on a CANCEL.
 ///
@@ -170,7 +170,7 @@ pub(crate) fn answer_unanswered_caller(
     advertisement: &CapabilitySet,
     notes: &mut TurnNotes,
 ) {
-    if call.a_leg_invite.headers.is_empty() || call.a_leg.invite_final_sent.is_some() {
+    if call.a_leg_invite.headers.is_empty() || call.a_leg.invite_final_sent().is_some() {
         return;
     }
     let Some(a_invite) = super::relay::caller_invite(call, notes) else { return };

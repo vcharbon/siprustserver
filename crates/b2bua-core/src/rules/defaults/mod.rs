@@ -26,6 +26,7 @@ mod failover_rules;
 mod reaper_verdicts;
 mod request_timeouts;
 mod route_fold;
+mod straggler;
 
 pub use compose::{default_rules, default_rules_with, ComposeOptions};
 pub(crate) use core_rules::{still_owed_bare_ack, unacked_2xx_give_up_actions};

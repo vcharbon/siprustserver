@@ -8,8 +8,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::emission::RetainedEmission;
-use super::invite_txn::InviteTxnHandle;
 use super::owed_answer::OwedAnswer;
 use super::own_notify::OwnNotify;
 use super::request_record::RequestRecord;
@@ -21,27 +19,6 @@ use super::sdp_session::LegSdpSession;
 pub enum Direction {
     FromA,
     FromB,
-}
-
-/// A 2xx to an INVITE this side sent and still awaits the ACK for (RFC 3261
-/// §13.3.1.4), held on the dialog it was sent on: the retained emission its
-/// ladder repeats, with the two wire facts the discharging ACK carries — so
-/// the ACK is matched on what the 2xx said, not on what the dialog records.
-/// While set, the dialog's INVITE server transaction is in the RFC 6026
-/// *Accepted* state, so a new INVITE on either face is glare (§14.1) and gets
-/// 491. The ladder is always armed (ADR-0032 X5), so the marker lives exactly
-/// as long as its give-up: the discharging ACK, the give-up, or the call's end
-/// clears it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Unacked2xx {
-    /// The To-tag the 2xx carried — the discharging ACK's To-tag.
-    pub dialog_tag: String,
-    /// The CSeq of the INVITE the 2xx answers — the discharging ACK's CSeq.
-    /// Only an ACK echoing this number discharges the obligation, so a
-    /// retransmitted *initial* ACK cannot discharge a re-INVITE's.
-    pub cseq: i64,
-    /// The 2xx as it left, on the §13.3.1.4 ladder ([`super::Repeat::Paced`]).
-    pub emission: RetainedEmission,
 }
 
 /// Where a dialog stands (RFC 3261 §12, §15). A dialog record is kept in every
@@ -92,33 +69,20 @@ pub enum DialogEnd {
 }
 
 /// What a retired dialog still carries: the request records it holds open
-/// until they settle (§8.1.3.3, ADR-0055 §2), and the release this stack sent
-/// when the dialog, as a losing fork, answered with a 2xx anyway (§13.2.2.4).
-/// The dialog's own `our_cseq` stays the sequence that release continues.
+/// until they settle (§8.1.3.3, ADR-0055 §2) — the BYE this stack released a
+/// late 2xx of it with among them (§13.2.2.4). The dialog's own `our_cseq`
+/// stays the sequence such a release continues.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RetiredDialog {
-    /// The dialog's request records still open when it retired.
+    /// The dialog's request records still open.
     pub open_requests: Vec<RequestRecord>,
-    /// The ACK and BYE this stack answered the dialog's late 2xx with.
-    pub release: Option<StragglerRelease>,
-}
-
-/// The release of a retired fork's 2xx (RFC 3261 §13.2.2.4): every repeat of
-/// that 2xx re-sends the ACK on `ack_branch`; the BYE on `bye_branch` ends the
-/// dialog, and its final belongs to the release alone.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StragglerRelease {
-    pub ack_branch: String,
-    pub bye_branch: String,
-    /// The BYE's transaction ended: a final, or its timeout (§15.1.1).
-    pub settled: bool,
 }
 
 impl RetiredDialog {
-    /// Whether this stack's release BYE of the dialog awaits its final: the
+    /// Whether this stack's BYE releasing the dialog awaits its final: the
     /// dialog then reads as ending (§15.1.2).
     pub fn release_in_flight(&self) -> bool {
-        self.release.as_ref().is_some_and(|r| !r.settled)
+        self.open_requests.iter().any(|r| r.is_own() && r.method.eq_ignore_ascii_case("BYE"))
     }
 }
 
@@ -175,49 +139,26 @@ pub struct Dialog {
     /// route: requests on the dialog go where [`Self::fronts`] sends them.
     #[serde(default)]
     pub shows_media: Option<String>,
-    /// The requests open on the dialog (ADR-0055 §2): relayed into it, sent
-    /// by this stack, or received and held for a later answer.
+    /// The requests open on the dialog other than its INVITE exchanges
+    /// (ADR-0055 §2): relayed into it, sent by this stack, or received and
+    /// held for a later answer.
     pub requests: Vec<RequestRecord>,
-    /// Via branch of the first ACK for this dialog's 2xx (§13.2.2.4 re-ACK).
-    pub ack_branch: Option<String>,
-    /// In-flight INVITE client transaction handle on this dialog.
-    pub pending_invite_txn: Option<InviteTxnHandle>,
+    /// The INVITE this side last sent on the dialog (RFC 3261 §14): a
+    /// re-INVITE, relayed or its own, or on a dialog the leg's dialling INVITE
+    /// created, that INVITE; with the 2xx it took and the ACK that 2xx owes
+    /// (§13.2.2.4). The next INVITE this side sends on the dialog replaces it,
+    /// and a non-2xx ending a re-INVITE closes it.
+    pub sent_invite: Option<RequestRecord>,
+    /// The INVITE this side received on the dialog and answered 2xx, while
+    /// that 2xx awaits its ACK (§13.3.1.4): the call's answer on a
+    /// caller-facing dialog, or a relayed re-INVITE's. The discharging ACK,
+    /// the give-up or the call's end closes it.
+    pub answered_invite: Option<RequestRecord>,
     /// Under the `fake-prack` strategy, the description a 2xx without one gives
     /// the caller: the reliable 18x's answer, or her offer answered from the
     /// latest early UPDATE offer.
     #[serde(with = "serde_bytes")]
     pub cached_sdp: Option<Vec<u8>>,
-    /// RFC 3261 §13.3.1.4 (in-dialog) — a re-INVITE 2xx this side sent that
-    /// still awaits the originator's ACK, on the originator's own dialog.
-    /// `None` normally; see [`Unacked2xx`].
-    pub pending_reinvite_2xx: Option<Unacked2xx>,
-    /// CSeq (in the acknowledging peer's own sequence space) of the ACK this
-    /// dialog's 2xx still awaits from that peer (RFC 3261 §13.2.2.4): armed when
-    /// the 2xx is taken, discharged by the ACK actually leaving — the peer's
-    /// relayed, or one this stack composed on its own account. `None` = nothing
-    /// owed, so a further peer ACK is absorbed rather than put on a quiesced
-    /// transaction; a retransmitted 2xx re-ACKs via `ack_branch` without
-    /// consulting this. While it is armed the dialog is in RFC 6026 *Accepted*,
-    /// so a newcomer INVITE there is glare (`invite_transaction_open`).
-    pub awaited_ack_cseq: Option<i64>,
-    /// RFC 3261 §13.3.1.4 — the initial-INVITE 2xx this call answered the
-    /// caller with, as the exact datagram the retransmit ladder repeats
-    /// ([`Unacked2xx`]; caller-facing dialog only). Captured at the one seam
-    /// every a-facing answer is emitted through. `None` until answered, and
-    /// again once the caller's ACK discharges it — retained bytes are never
-    /// sent after that, and a later re-answer through the seam retains its own
-    /// datagram afresh.
-    pub answered_2xx: Option<Unacked2xx>,
-    /// RFC 3261 §13.2.2.4 — the ACK emitted on this dialog's current INVITE
-    /// transaction, as the exact datagram a retransmitted 2xx re-sends
-    /// (`re-ack-retransmitted-2xx`; [`RetainedEmission`] repeated on trigger).
-    /// §13.2.2.4 hands *the* ACK back to the transport for every copy of the
-    /// 2xx: on a delayed offer it carries the answer only that ACK supplied
-    /// (RFC 3264 §4). `None` until that ACK leaves, and again once a new INVITE
-    /// transaction resets it alongside `ack_branch` — the bytes belong to
-    /// exactly one INVITE's ACK. For a round the record never held, the ACK of
-    /// its non-2xx too, which no transaction here re-sends (ADR-0047).
-    pub emitted_ack: Option<RetainedEmission>,
     /// The session this early dialog carries where the stack has described
     /// something inside it before its leg is confirmed: each early dialog of a
     /// fork is its own offer/answer exchange (RFC 3261 §12.1.2, RFC 3264 §4),
@@ -226,7 +167,8 @@ pub struct Dialog {
     pub sdp_session: Option<LegSdpSession>,
     /// The offer the dialog's responder made that this side still owes an
     /// answer to, and the message that carries it (RFC 3264 §4); `None` when
-    /// nothing is owed.
+    /// nothing is owed. A fact of the session: the offer opens in one
+    /// transaction and its answer may ride another (ADR-0055 §2).
     #[serde(default)]
     pub owed_answer: Option<OwedAnswer>,
     /// This stack's NOTIFY on the dialog that awaits its final, and its
@@ -257,13 +199,9 @@ impl Dialog {
             shown: false,
             shows_media: None,
             requests: Vec::new(),
-            ack_branch: None,
-            pending_invite_txn: None,
+            sent_invite: None,
+            answered_invite: None,
             cached_sdp: None,
-            pending_reinvite_2xx: None,
-            awaited_ack_cseq: None,
-            answered_2xx: None,
-            emitted_ack: None,
             sdp_session: None,
             owed_answer: None,
             own_notify: None,

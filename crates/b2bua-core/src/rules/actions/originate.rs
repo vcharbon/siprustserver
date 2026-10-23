@@ -234,21 +234,18 @@ impl ActionExecutor<'_> {
             dest,
         );
 
-        // Cache the re-INVITE's client-transaction handle so the ACK-for-2xx
-        // echoes its CSeq (§13.2.2.4). Reset the retained ACK branch, its
-        // retained datagram, and any armed ACK obligation: all belonged to the
-        // prior CSeq — this new INVITE transaction's 2xx mints/arms its own.
-        *call = call::helpers::update_dialog(call.clone(), leg_id, &t_id, |d| {
-            d.pending_invite_txn = Some(call::InviteTxnHandle {
-                branch: branch.clone(),
-                cseq: i64::from(out_req.cseq().seq()),
-                original_invite: out_req.image().to_vec(),
-                destination: call::HostPort { host: dest.0.clone(), port: dest.1 },
-            });
-            d.ack_branch = None;
-            d.emitted_ack = None;
-            d.awaited_ack_cseq = None;
-        });
+        // The re-INVITE becomes the dialog's INVITE record, so the ACK-for-2xx
+        // echoes its CSeq (§13.2.2.4). The ACK branch, its retained datagram
+        // and any armed ACK obligation belonged to the prior INVITE — this new
+        // transaction's 2xx mints/arms its own.
+        let record = call::RequestRecord {
+            origin: call::RequestOrigin::Own,
+            sent: Some(super::request_record::sent_request(&out_req, &dest)),
+            relayed_by: self.config.relay_owner(),
+            author: self.turn.rule.map(str::to_string),
+            ..call::RequestRecord::relayed("INVITE", i64::from(out_req.cseq().seq()), 0)
+        };
+        *call = call::helpers::open_sent_invite(call.clone(), leg_id, &t_id, record);
 
         fx.outbound.push(OutboundSipEffect {
             body: OutboundBody::Request(out_req),

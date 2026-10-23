@@ -1,28 +1,24 @@
-//! The seeds a materialised call hands the transaction layer: the in-flight
-//! transactions the record names, read off the `Call` alone. Pure — the layer
-//! takes typed seeds and never learns the record (ADR-0014, ADR-0055 §2).
+//! The seeds a materialised call hands the transaction layer: one transaction
+//! per request record the call holds, read off the `Call` alone through one
+//! path, whatever its method (ADR-0055 §2). Pure — the layer takes typed seeds
+//! and never learns the record (ADR-0014).
 //!
 //! In flight, on the record's own terms:
-//! - a **client INVITE** this stack sent: the initial INVITE of a leg still
-//!   `Trying` / `Early` (its handle on the leg and on every early dialog), and
-//!   a re-INVITE whose round is still open on its confirmed dialog, whichever
-//!   side originated it. A handle names an open round while no 2xx has been
-//!   taken for it (`ack_branch` / `awaited_ack_cseq` unset — the handle stays
-//!   after a 2xx for the ACK and its re-ACKs) and the record has not closed it
-//!   (a non-2xx final drops it, `close_rejected_invite_round`); a relayed round
-//!   already CANCELled toward its target awaits a final only the dead node's
-//!   Via can carry, so it is not in flight here.
-//! - a **server INVITE** this stack admitted: the a-leg's initial INVITE while
-//!   the a-leg is unanswered, rebuilt whole so a CANCEL draws its 487 under the
-//!   To-tag the caller's early dialog holds, and every relayed INVITE still
-//!   pending on a dialog, rebuilt from its snapshot and keyed by the
-//!   originator's top Via, so its retransmission is absorbed, a CANCEL draws
-//!   200 + 487 and a release answers it. A pending request already CANCELled
-//!   has had its 200 + 487 from the node that held it and is not in flight.
+//! - a **client INVITE** this stack sent: a leg's dialling INVITE while it has
+//!   no final, its CANCEL sent or not, and the INVITE a dialog last sent while
+//!   no 2xx was taken for it — a non-2xx closes a re-INVITE's record — and,
+//!   for a relay, while it was not CANCELled toward its target: such a round
+//!   awaits a final only the dead node's Via can carry.
+//! - a **server INVITE** this stack admitted: the a-leg's dialog-creating
+//!   INVITE while it has no final, rebuilt whole so a CANCEL draws its 487
+//!   under the To-tag the caller's early dialog holds, and every relayed
+//!   INVITE still pending on a dialog, rebuilt from its record and keyed by
+//!   the originator's top Via, so its retransmission is absorbed, a CANCEL
+//!   draws 200 + 487 and a release answers it. A relay already CANCELled has
+//!   had its 200 + 487 from the node that held it and is not in flight.
 //! - a **server INVITE** this stack answered 2xx and still awaits the ACK for:
-//!   a retained 2xx on a dialog (`answered_2xx`, `pending_reinvite_2xx`),
-//!   seeded in RFC 6026 Accepted with that 2xx, so a copy of its INVITE draws
-//!   the 2xx and never reaches the rules.
+//!   a dialog's answered INVITE, seeded in RFC 6026 Accepted with that 2xx, so
+//!   a copy of its INVITE draws the 2xx and never reaches the rules.
 //! - a **client non-INVITE** for every non-INVITE request record holding a
 //!   sent request, relayed or this stack's own, on a live or a retired
 //!   dialog: it retransmits the request as it left under its branch, so the
@@ -37,7 +33,7 @@ use std::collections::HashSet;
 
 use b2bua_sdk::event::CallEvent;
 use call::helpers::records_of;
-use call::{Call, Dialog, InviteTxnHandle, Leg, RequestRecord, Unacked2xx};
+use call::{Call, Dialog, Leg, RequestRecord, SentRequest, Unacked2xx};
 use sip_message::generators::{generate_cancel, InviteClientTransactionHandle};
 use sip_message::header::{HeaderValue, SentBy, Via};
 use sip_message::parser::custom::CustomParser;
@@ -53,85 +49,113 @@ use crate::rules::relay::rebuild_a_leg_invite;
 pub(super) fn seeds_for(call: &Call, now_ms: i64) -> Vec<TxnSeed> {
     let mut seeds = Vec::new();
     let mut branches = HashSet::new();
-    let mut push = |seed: TxnSeed| {
-        // A client and a server transaction are told apart (RFC 3261 §17.1.3,
-        // §17.2.3): one of each may share a branch.
-        let (server, via) = match &seed {
-            TxnSeed::ClientInvite { invite, .. } => (false, invite.top_via()),
-            TxnSeed::ServerInvite { request, .. } => (true, request.top_via()),
-            TxnSeed::ServerAccepted { response, .. } => (true, response.top_via()),
-            TxnSeed::ClientNonInvite { request, .. } => (false, request.top_via()),
-            TxnSeed::ServerNonInvite { request, .. } => (true, request.top_via()),
-        };
-        let branch = via.branch().unwrap_or_default().to_string();
-        if !branch.is_empty() && branches.insert((server, branch)) {
-            seeds.push(seed);
-        }
-    };
-
-    // A record that does not rebuild the caller's INVITE is never served
-    // (ADR-0052 §11): it seeds none.
-    let unanswered = call.a_leg.invite_final_sent.is_none();
-    let caller = unanswered.then(|| rebuild_a_leg_invite(&call.a_leg_invite));
-    if let Some(Ok(request)) = caller {
-        push(TxnSeed::ServerInvite {
-            request,
-            // The tag the a-leg's own responses carry (`ensure_a_dialog`);
-            // none while nothing above a 100 went out.
-            to_tag: call.a_leg.own_tag.clone().filter(|t| !t.is_empty()),
-            leg_id: Some(call.a_leg.leg_id.clone()),
-        });
-    }
-
     for leg in std::iter::once(&call.a_leg).chain(call.b_legs.iter()) {
-        // The INVITE that dialled the leg is in flight until its final,
-        // its CANCEL sent or not (RFC 3261 §9.1).
-        let initial = leg.outbound_invite.as_ref().filter(|i| i.final_received.is_none());
-        let initial_in_flight = initial.is_some();
-        // A dialog of the leg is the record of a provisional — early, or
-        // ending on a CANCEL — and a 100 leaves none. A CANCEL sent with a
-        // provisional on record is on the wire already; one sent with none is
-        // still held, and rides the seed (RFC 3261 §9.1).
-        let provisional = !leg.dialogs.is_empty();
-        if let Some(i) = initial {
-            let cancel = (i.cancel_sent && !provisional).then_some(i.cancel_headers.as_slice());
-            if let Some(seed) = i.txn.as_ref().and_then(|t| client_seed(t, provisional, cancel)) {
-                push(seed);
-            }
-        }
-        for dialog in &leg.dialogs {
-            if let Some(handle) = &dialog.pending_invite_txn {
-                if initial_in_flight || round_open(dialog, handle) {
-                    // A re-INVITE round records no provisional.
-                    if let Some(seed) = client_seed(handle, initial_in_flight && provisional, None)
-                    {
-                        push(seed);
-                    }
-                }
-            }
-            for pending in dialog.requests.iter().filter(|p| pending_invite(p)) {
-                if let Some(seed) = relayed_server_seed(call, leg, pending) {
-                    push(seed);
-                }
-            }
-            for retained in retained_2xx(dialog) {
-                if let Some(response) = parse_response(retained) {
-                    push(TxnSeed::ServerAccepted { response, leg_id: Some(leg.leg_id.clone()) });
-                }
-            }
-            for record in records_of(dialog).iter().filter(|r| !invite_record(r)) {
-                if let Some(seed) = client_non_invite_seed(record, now_ms) {
-                    push(seed);
-                }
-                if !record.is_own() {
-                    if let Some(seed) = server_non_invite_seed(call, leg, record) {
-                        push(seed);
-                    }
+        let dialog_records = leg.dialogs.iter().flat_map(|d| {
+            d.sent_invite
+                .iter()
+                .chain(d.answered_invite.iter())
+                .chain(records_of(d).iter())
+                .map(move |r| (Some(d), r))
+        });
+        for (dialog, record) in leg.invite.iter().map(|r| (None, r)).chain(dialog_records) {
+            for seed in record_seeds(call, leg, dialog, record, now_ms) {
+                // A client and a server transaction are told apart (RFC 3261
+                // §17.1.3, §17.2.3): one of each may share a branch.
+                let (server, via) = match &seed {
+                    TxnSeed::ClientInvite { invite, .. } => (false, invite.top_via()),
+                    TxnSeed::ServerInvite { request, .. } => (true, request.top_via()),
+                    TxnSeed::ServerAccepted { response, .. } => (true, response.top_via()),
+                    TxnSeed::ClientNonInvite { request, .. } => (false, request.top_via()),
+                    TxnSeed::ServerNonInvite { request, .. } => (true, request.top_via()),
+                };
+                let branch = via.branch().unwrap_or_default().to_string();
+                if !branch.is_empty() && branches.insert((server, branch)) {
+                    seeds.push(seed);
                 }
             }
         }
     }
     seeds
+}
+
+/// The seeds of one request record `leg` holds — on the leg for its
+/// dialog-creating INVITE, else on `dialog`.
+fn record_seeds(
+    call: &Call,
+    leg: &Leg,
+    dialog: Option<&Dialog>,
+    record: &RequestRecord,
+    now_ms: i64,
+) -> Vec<TxnSeed> {
+    let Some(dialog) = dialog else {
+        return dialog_creating_seed(call, leg, record).into_iter().collect();
+    };
+    if dialog.answered_invite.as_ref() == Some(record) {
+        let answered = record.invite.as_ref().and_then(|x| x.answered_2xx.as_ref());
+        let accepted = answered
+            .and_then(parse_response)
+            .map(|response| TxnSeed::ServerAccepted { response, leg_id: Some(leg.leg_id.clone()) });
+        return accepted.into_iter().collect();
+    }
+    if record.is_invite() {
+        let mut seeds: Vec<TxnSeed> = sent_invite_seed(leg, dialog, record).into_iter().collect();
+        if call::helpers::relayed_invite_pending(dialog) {
+            seeds.extend(relayed_server_seed(call, leg, record));
+        }
+        return seeds;
+    }
+    let mut seeds: Vec<TxnSeed> = client_non_invite_seed(record, now_ms).into_iter().collect();
+    if !record.is_own() {
+        seeds.extend(server_non_invite_seed(call, leg, record));
+    }
+    seeds
+}
+
+/// The seed of a leg's dialog-creating INVITE while it has no final: the
+/// caller's, this stack admitted, rebuilt from the call's snapshot of it; or
+/// the one this stack dialled, with the CANCEL the record says was sent for
+/// it while it had drawn no provisional (RFC 3261 §9.1). A record that does
+/// not rebuild the caller's INVITE is never served (ADR-0052 §11): it seeds
+/// none.
+fn dialog_creating_seed(call: &Call, leg: &Leg, record: &RequestRecord) -> Option<TxnSeed> {
+    let Some(dialled) = leg.outbound_invite() else {
+        if leg.leg_id != call.a_leg.leg_id || leg.invite_final_sent().is_some() {
+            return None;
+        }
+        let request = rebuild_a_leg_invite(&call.a_leg_invite).ok()?;
+        return Some(TxnSeed::ServerInvite {
+            request,
+            // The tag the a-leg's own responses carry (`ensure_a_dialog`);
+            // none while nothing above a 100 went out.
+            to_tag: leg.own_tag.clone().filter(|t| !t.is_empty()),
+            leg_id: Some(leg.leg_id.clone()),
+        });
+    };
+    if dialled.final_received.is_some() {
+        return None;
+    }
+    // A dialog of the leg is the record of a provisional — early, or ending
+    // on a CANCEL — and a 100 leaves none. A CANCEL sent with a provisional on
+    // record is on the wire already; one sent with none is still held, and
+    // rides the seed (RFC 3261 §9.1).
+    let provisional = !leg.dialogs.is_empty();
+    let cancel = (dialled.cancel_sent && !provisional).then_some(dialled.cancel_headers.as_slice());
+    client_seed(record.sent.as_ref()?, provisional, cancel)
+}
+
+/// The client seed of the INVITE `leg`'s `dialog` last sent, `record`: while
+/// the leg's dialling INVITE has no final, or no 2xx was taken for it and,
+/// for a relay, it was not CANCELled toward its target. A re-INVITE records
+/// no provisional.
+fn sent_invite_seed(leg: &Leg, dialog: &Dialog, record: &RequestRecord) -> Option<TxnSeed> {
+    let sent = call::helpers::invite_image(leg, record)?;
+    let initial_in_flight = leg.outbound_invite().is_some_and(|i| i.final_received.is_none());
+    let round_open = !call::helpers::invite_taken(dialog) && !record.cancelled;
+    if !(initial_in_flight || round_open) {
+        return None;
+    }
+    let provisional = initial_in_flight && !leg.dialogs.is_empty();
+    client_seed(sent, provisional, None)
 }
 
 /// Whether the record is an INVITE's, whose transactions the INVITE seeds
@@ -232,8 +256,8 @@ fn server_non_invite_seed(call: &Call, leg: &Leg, record: &RequestRecord) -> Opt
 }
 
 /// Whether `branch` names a server seed an INVITE can be a copy of: a relayed
-/// INVITE still pending on one of `call`'s dialogs, or an INVITE whose 2xx a
-/// dialog retains, the answered initial INVITE's included. The a-leg's
+/// INVITE still pending on one of `call`'s dialogs, or an INVITE a dialog
+/// answered 2xx, the answered initial INVITE's included. The a-leg's
 /// unanswered initial INVITE is not named: on the node serving the call the
 /// layer's own transaction absorbs its retransmission below the router.
 pub(in crate::router) fn names_server_branch(call: &Call, branch: &str) -> bool {
@@ -243,38 +267,15 @@ pub(in crate::router) fn names_server_branch(call: &Call, branch: &str) -> bool 
     let dialogs =
         || std::iter::once(&call.a_leg).chain(&call.b_legs).flat_map(|l| l.dialogs.iter());
     let relayed = dialogs()
-        .flat_map(|d| d.requests.iter())
-        .filter(|p| pending_invite(p))
+        .filter(|d| call::helpers::relayed_invite_pending(d))
+        .filter_map(|d| d.sent_invite.as_ref())
         .filter_map(pending_via)
         .any(|v| v.branch() == Some(branch));
     relayed
         || dialogs()
-            .flat_map(retained_2xx)
+            .filter_map(call::helpers::answered_2xx)
             .filter_map(parse_response)
             .any(|r| r.top_via().branch() == Some(branch))
-}
-
-/// The 2xx finals `dialog` retains while their ACK is awaited (RFC 3261
-/// §13.3.1.4): the call's answer and a relayed re-INVITE's.
-fn retained_2xx(dialog: &Dialog) -> impl Iterator<Item = &Unacked2xx> {
-    dialog.answered_2xx.iter().chain(dialog.pending_reinvite_2xx.iter())
-}
-
-/// A re-INVITE round on a confirmed dialog still open for `handle`'s INVITE:
-/// no 2xx taken for it, and — for a relayed round — its snapshot not already
-/// CANCELled toward the target.
-fn round_open(dialog: &Dialog, handle: &InviteTxnHandle) -> bool {
-    if dialog.ack_branch.is_some() || dialog.awaited_ack_cseq.is_some() {
-        return false;
-    }
-    let Some(cseq) = parse_request(&handle.original_invite).map(|r| r.cseq().seq() as i64) else {
-        return false;
-    };
-    dialog
-        .requests
-        .iter()
-        .filter(|p| p.method.eq_ignore_ascii_case("INVITE") && p.outbound_cseq == cseq)
-        .all(|p| !p.cancelled)
 }
 
 /// The INVITE server transaction the originator's request of the pending
@@ -291,23 +292,18 @@ fn pending_via(p: &RequestRecord) -> Option<Via> {
     Via::parse(&SipStr::owned(top_via)).ok()
 }
 
-fn pending_invite(p: &RequestRecord) -> bool {
-    p.method.eq_ignore_ascii_case("INVITE") && !p.cancelled
-}
-
-/// The client seed for an INVITE handle: the retained INVITE, the wire
+/// The client seed of the INVITE `sent`: the INVITE as it left, the wire
 /// destination it was sent to, whether the record holds a provisional for it,
-/// and the CANCEL of it the record says was sent, rebuilt stating
-/// `cancel`'s headers (RFC 3261 §9.1). `None` for a handle whose bytes or
-/// destination do not read, or whose CANCEL does not rebuild — nothing can
-/// be rebuilt from it.
+/// and the CANCEL of it the record says was sent, rebuilt stating `cancel`'s
+/// headers (RFC 3261 §9.1). `None` where the image or destination does not
+/// read, or the CANCEL does not rebuild — nothing can be rebuilt from it.
 fn client_seed(
-    handle: &InviteTxnHandle,
+    sent: &SentRequest,
     provisional: bool,
     cancel: Option<&[(String, String)]>,
 ) -> Option<TxnSeed> {
-    let invite = parse_request(&handle.original_invite)?;
-    let dest = sip_net::ip_socket_addr(&handle.destination.host, handle.destination.port)?;
+    let invite = parse_request(&sent.image)?;
+    let dest = sip_net::ip_socket_addr(&sent.destination.host, sent.destination.port)?;
     let cancel = cancel.map(|stated| {
         let stated: Vec<SipHeader> = stated
             .iter()
@@ -342,7 +338,7 @@ fn relayed_server_seed(call: &Call, leg: &Leg, pending: &RequestRecord) -> Optio
     Some(TxnSeed::ServerInvite { request, to_tag, leg_id: Some(originator) })
 }
 
-/// A request re-parsed from the bytes an INVITE handle caches it as.
+/// A request re-parsed from the bytes a record keeps it as.
 fn parse_request(bytes: &[u8]) -> Option<SipRequest> {
     match CustomParser::new().parse(bytes).ok()? {
         SipMessage::Request(r) => Some(r),

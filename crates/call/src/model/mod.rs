@@ -15,7 +15,7 @@
 //!   (`serde_json::Value`); core never interprets them.
 //! - **Maps are `BTreeMap`** (not `HashMap`) so encode is deterministic
 //!   (codec property P2).
-//! - **Byte fields** (`a_leg_invite.body`, `cached_sdp`, INVITE handle) use
+//! - **Byte fields** (`a_leg_invite.body`, `cached_sdp`, a sent request's image) use
 //!   `serde_bytes` so msgpack stores them as `bin`; SIP payloads stay raw
 //!   bytes — the data model takes no `sip-message` dep.
 //!
@@ -28,16 +28,18 @@
 //!   - [`dialog`] — one §12 dialog: identity, state, sequences, what the
 //!     B2BUA keeps on it
 //!   - [`dialogs`] — a leg's dialogs and the one lookup surface over them
-//!   - [`request_record`] — one request a dialog holds open: relayed, own or
-//!     held for a later answer (ADR-0055 §2)
-//!   - [`outbound_invite`] — the dialog-creating INVITE a leg sent
+//!   - [`request_record`] — one request of the call still open: relayed, own,
+//!     held for a later answer or answered (ADR-0055 §2)
+//!   - [`invite_exchange`] — what an INVITE's record holds beyond its final:
+//!     the 2xx taken or sent and its ACK
+//!   - [`outbound_invite`] — the dialling facts of the INVITE a leg sent
+//!   - [`leg_invite`] — a leg's dialog-creating INVITE read off its record
 //!   - [`emission`] / [`obligation`] — the retained emission a ladder repeats
 //!     and the key that discharges it (ADR-0032)
 //!   - [`provisional`] — one reliable provisional the call received (RFC 3262)
 //!   - [`owed_answer`] — the offer a dialog's responder awaits an answer to
 //!   - [`own_notify`] — this stack's unanswered NOTIFY on a dialog and the
 //!     requests held behind it
-//!   - [`invite_txn`] — in-flight INVITE client-transaction handle
 //!   - [`timer`] — serializable timer intents ([`TimerType`], [`TimerScope`],
 //!     [`TimerKey`], [`TimerEntry`])
 //!   - [`deadline`] — a configured wait that may be off ([`Deadline`])
@@ -55,8 +57,9 @@ pub mod decision_log;
 pub mod dialog;
 pub mod dialogs;
 pub mod emission;
-pub mod invite_txn;
+pub mod invite_exchange;
 pub mod leg;
+pub mod leg_invite;
 pub mod leg_state;
 pub mod limiter;
 pub mod message_ring;
@@ -80,11 +83,10 @@ pub use deadline::{millis_i64, millis_u64, Deadline};
 pub use decision_log::{DecisionKind, DecisionMark};
 pub use dialog::{
     Dialog, DialogEnd, DialogId, DialogState, Direction, EndingBy, PeerDialog, RetiredDialog,
-    StragglerRelease, Unacked2xx,
 };
 pub use dialogs::Dialogs;
 pub use emission::{Repeat, Repeated, RetainedEmission};
-pub use invite_txn::{HostPort, InviteTxnHandle};
+pub use invite_exchange::{InviteExchange, Unacked2xx};
 pub use leg::{Leg, LegKind, RemoteInfo, Ring};
 pub use leg_state::{ByeDisposition, LegDisposition, LegState};
 pub use limiter::{
@@ -104,7 +106,7 @@ pub use record::{
     PolicyUpdateBody, SipHeader,
 };
 pub use relay_owner::RelayOwner;
-pub use request_record::{DialogUsage, RequestOrigin, RequestRecord, SentRequest};
+pub use request_record::{DialogUsage, HostPort, RequestOrigin, RequestRecord, SentRequest};
 pub use sdp_session::LegSdpSession;
 pub use services::{
     ExtMap, PromotePemState, RelayFirst18xState, ReleaseEventKind, ReroutePhase, RerouteState,

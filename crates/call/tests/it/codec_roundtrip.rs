@@ -7,6 +7,7 @@
 use crate::common;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use call::helpers::{answered_2xx, emitted_ack, sent_exchange_mut};
 use call::{
     CallBodyCodec, CallDecodeError, DialogState, LegKind, MachineId, MsgpackCodec,
     PolicyUpdateBody, StateLabel,
@@ -207,21 +208,21 @@ fn the_invite_final_sent_fact_round_trips() {
     let codec = MsgpackCodec::new();
     let mut call = representative_call();
 
-    call.a_leg.invite_final_sent = None;
+    *call.a_leg.invite_final_sent_mut() = None;
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "unanswered a-leg");
-    assert_eq!(decoded.a_leg.invite_final_sent, None);
+    assert_eq!(decoded.a_leg.invite_final_sent(), None);
 
-    call.a_leg.invite_final_sent = Some(487);
+    *call.a_leg.invite_final_sent_mut() = Some(487);
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "a-leg carrying its final");
-    assert_eq!(decoded.a_leg.invite_final_sent, Some(487));
+    assert_eq!(decoded.a_leg.invite_final_sent(), Some(487));
 
     // The helper records the first final only.
     let call = call::helpers::record_invite_final(call, "a", 480);
-    assert_eq!(call.a_leg.invite_final_sent, Some(487), "the first final stands");
+    assert_eq!(call.a_leg.invite_final_sent(), Some(487), "the first final stands");
     let call = call::helpers::record_invite_final(call, "b-1", 200);
-    assert_eq!(call.b_legs[0].invite_final_sent, Some(200));
+    assert_eq!(call.b_legs[0].invite_final_sent(), Some(200));
 }
 
 /// Each caller-facing early dialog is a record of its own on the a-leg, with
@@ -321,7 +322,7 @@ fn the_reliable_provisional_record_round_trips() {
         Provisional {
             id: id("b-2", "bf3", 1),
             responder_sdp: false,
-            responder: ResponderAck::OwnPrack { branch: "z9hG4bK-own".into() },
+            responder: ResponderAck::OwnPrack,
             shown: None,
         },
     ];
@@ -360,15 +361,15 @@ fn the_retained_emitted_ack_round_trips() {
     let codec = MsgpackCodec::new();
     let mut call = representative_call();
 
-    if let Some(d) = call.b_legs[0].dialogs.confirmed_mut() {
-        d.emitted_ack = None;
+    if let Some(x) = call.b_legs[0].dialogs.confirmed_mut().and_then(sent_exchange_mut) {
+        x.emitted_ack = None;
     }
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "no ACK emitted yet on the b-leg dialog");
 
     let datagram = b"ACK sip:bob@10.0.0.7 SIP/2.0\r\nCSeq: 8005 ACK\r\n\r\nanswer";
-    if let Some(d) = call.b_legs[0].dialogs.confirmed_mut() {
-        d.emitted_ack = Some(RetainedEmission::on_trigger(
+    if let Some(x) = call.b_legs[0].dialogs.confirmed_mut().and_then(sent_exchange_mut) {
+        x.emitted_ack = Some(RetainedEmission::on_trigger(
             datagram.to_vec(),
             ("10.0.0.7".into(), 5060),
             call::Repeated::request("ACK"),
@@ -376,7 +377,7 @@ fn the_retained_emitted_ack_round_trips() {
     }
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "the retained ACK survives byte-exact");
-    let ack = decoded.b_legs[0].dialogs.confirmed().unwrap().emitted_ack.as_ref().unwrap();
+    let ack = emitted_ack(decoded.b_legs[0].dialogs.confirmed().unwrap()).unwrap();
     assert_eq!(
         ack.wire(),
         (&datagram[..], ("10.0.0.7", 5060)),
@@ -403,19 +404,13 @@ fn the_retained_answered_2xx_round_trips_with_its_rung() {
 
     let codec = MsgpackCodec::new();
     let call = representative_call();
-    let answered = call
-        .a_leg
-        .dialogs
-        .confirmed()
-        .unwrap()
-        .answered_2xx
-        .as_ref()
-        .expect("the fixture answered");
+    let answered =
+        answered_2xx(call.a_leg.dialogs.confirmed().unwrap()).expect("the fixture answered");
     assert_eq!(answered.emission.repeat(), Repeat::Paced { class: Class::Final2xx, rung: 3 });
 
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "the retained 2xx survives byte-exact");
-    let restored = decoded.a_leg.dialogs.confirmed().unwrap().answered_2xx.as_ref().unwrap();
+    let restored = answered_2xx(decoded.a_leg.dialogs.confirmed().unwrap()).unwrap();
     assert_eq!(
         (restored.dialog_tag.as_str(), restored.cseq),
         ("b2bua-to-tag-aleg-9876", 1),

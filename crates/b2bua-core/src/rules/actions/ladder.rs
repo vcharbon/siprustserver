@@ -51,18 +51,18 @@ impl ActionExecutor<'_> {
         };
         let (unacked, obligation, first) =
             unacked_2xx_of(resp, effect.destination.clone(), &call.a_leg.leg_id);
+        let cseq = unacked.cseq;
         if let Some(d) = call::helpers::caller_dialog_mut(call, &unacked.dialog_tag.clone()) {
-            d.answered_2xx = Some(unacked);
+            call::helpers::hold_answered_2xx(d, cseq, unacked);
         }
         self.arm_ack_ladder(call, fx, obligation, first);
     }
 
     /// Retain a **re-INVITE** 2xx relayed toward its originator (`target_leg`,
-    /// either face), on the originator's dialog the 2xx names, and arm its
-    /// §13.3.1.4 ladder. The
-    /// marker also holds the dialog's INVITE server transaction in RFC 6026
-    /// *Accepted* for `reinvite-glare`, for exactly as long as the ladder's
-    /// give-up stands.
+    /// either face), as the answered INVITE of the originator's dialog the 2xx
+    /// names, and arm its §13.3.1.4 ladder. The record also holds the dialog's
+    /// INVITE server transaction in RFC 6026 *Accepted* for `reinvite-glare`,
+    /// for exactly as long as the ladder's give-up stands.
     pub(super) fn retain_reinvite_2xx(
         &mut self,
         call: &mut Call,
@@ -76,7 +76,7 @@ impl ActionExecutor<'_> {
             (resp.to().tag().map(str::to_string), resp.from().tag().map(str::to_string));
         *call = call::helpers::update_leg(call.clone(), target_leg, |leg| {
             if let Some(d) = ours.zip(peer).and_then(|(o, p)| leg.dialogs.by_tags_mut(&o, &p)) {
-                d.pending_reinvite_2xx = Some(unacked);
+                call::helpers::hold_answered_2xx(d, unacked.cseq, unacked);
             }
         });
         self.arm_ack_ladder(call, fx, obligation, first);
@@ -162,9 +162,10 @@ impl ActionExecutor<'_> {
     /// write it is.
     pub fn repeat(&mut self, call: &mut Call, fx: &mut HandlerEffects, obligation: &Obligation) {
         let rung = TimerKey::obligation(TimerType::Rung, obligation.clone());
-        let effect = (call.state == CallModelState::Active)
-            .then(|| repeat_toward(call, obligation))
-            .flatten();
+        // A terminating call repeats only the 2xx a BYE waits behind (§15).
+        let live = call.state == CallModelState::Active
+            || super::retire::bye_behind(call, obligation).is_some();
+        let effect = live.then(|| repeat_toward(call, obligation)).flatten();
         let Some(effect) = effect else {
             self.retire(call, fx, Scope::Obligation(obligation.clone()));
             return;
@@ -216,7 +217,8 @@ impl ActionExecutor<'_> {
         let Obligation::AckOf2xx { .. } = obligation else {
             return result;
         };
-        let HandlerResult { call, mut effects } = result;
+        let HandlerResult { mut call, mut effects } = result;
+        self.release_bye_at_give_up(&mut call, &mut effects, obligation);
         let forced = (call.state == CallModelState::Active)
             .then(|| unacked_2xx_give_up_actions(&RuleCall::new(&call), obligation));
         let call = call::helpers::clear_retained(call, obligation);

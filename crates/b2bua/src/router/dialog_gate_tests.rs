@@ -2,9 +2,7 @@
 //! and what a caller-facing dialog the caller was never shown names.
 
 use b2bua_sdk::event::CallEvent;
-use call::{
-    Call, CallModelState, Dialog, DialogEnd, DialogState, EndingBy, RetiredDialog, StragglerRelease,
-};
+use call::{Call, CallModelState, Dialog, DialogEnd, DialogState, EndingBy, RetiredDialog};
 use sip_message::{Method, SipMessage, SipRequest};
 
 use super::dialog_gate::{admission, note_in_order, request_verdict, Admission, Verdict};
@@ -19,9 +17,22 @@ fn dialog(state: DialogState) -> Dialog {
     Dialog::new("ours", CALLER_TAG, state, 1)
 }
 
+/// A retired dialog; `Some(settled)`: this stack released it with a BYE,
+/// its record open until that BYE settled.
 fn retired(release: Option<bool>) -> DialogState {
-    let release = release.map(|settled| StragglerRelease { settled, ..Default::default() });
-    DialogState::Retired(RetiredDialog { open_requests: vec![], release })
+    let bye = call::RequestRecord::own(
+        "BYE",
+        2,
+        call::SentRequest {
+            branch: "z9hG4bK-release".into(),
+            image: Vec::new(),
+            destination: call::HostPort { host: "10.0.0.2".into(), port: 5070 },
+        },
+        32_000,
+        Default::default(),
+    );
+    let open_requests = if release == Some(false) { vec![bye] } else { vec![] };
+    DialogState::Retired(RetiredDialog { open_requests })
 }
 
 const METHODS: [Method; 12] = [
