@@ -303,3 +303,16 @@ fn the_waiver_reaches_no_other_body_type() {
         Some(BodyTypeFinding::Gating(_))
     ));
 }
+
+/// A body captured with no `Content-Type` is stored with an empty one: relayed
+/// as it came, it holds, and a typed arrival does not.
+#[test]
+fn a_body_stored_untyped_holds_the_same_untyped_arrival() {
+    let stated = || resource(Some(""));
+    assert_eq!(miss(stated(), CheckMode::Record, &invite(None, b"opaque")), None);
+    assert_eq!(miss(stated(), CheckMode::Record, &invite(Some(""), b"opaque")), None);
+    assert_eq!(
+        miss(stated(), CheckMode::Record, &invite(Some("application/sdp"), b"v=0\r\n")),
+        pair("untyped", "application/sdp")
+    );
+}

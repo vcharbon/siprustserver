@@ -30,7 +30,7 @@ use crate::scope::{Finding, Scope};
 
 mod body;
 
-pub use body::{body_type_finding, BodyTypeFinding};
+pub use body::{body_type_finding, body_type_holds, BodyTypeFinding};
 
 /// The facts a gate reads off an inbound datagram. Extraction lives in
 /// `sip-message`; this is the projection the gate compares against.

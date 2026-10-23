@@ -304,3 +304,30 @@ async fn a_body_on_a_recorded_provisional_fails_the_run_on_a_lane_declaring_noth
     assert!(outcome.verdict.waived.is_empty());
     scene.finish().await;
 }
+
+/// Two armed `record` expects one datagram could satisfy: an optional one
+/// stating a session description in front of the one stating none. A bare
+/// 180 is the step whose stated body type it carries, and the optional is
+/// released.
+#[tokio::test(start_paused = true)]
+async fn a_datagram_goes_to_the_armed_record_expect_whose_body_type_it_carries() {
+    let scene = api_scene("pivot-body-type-preference").await;
+    let mut case = fixture("binary-multipart.v3.json");
+    let mut early = step_of(&mut case, "s5").clone();
+    early.id = "s5a".into();
+    early.optional = true;
+    early.msg.body = Some(shape(BodyShape::SdpPresent));
+    step_of(&mut case, "s5").msg.body = Some(shape(BodyShape::Absent));
+    let at = case
+        .document
+        .flow
+        .iter()
+        .position(|node| matches!(node, pivot_schema::flow::FlowNode::Message(s) if s.id == "s5"))
+        .expect("s5 is in the flow");
+    case.document.flow.insert(at, pivot_schema::flow::FlowNode::Message(Box::new(early)));
+    let (outcome, dir) = replay_case(&scene, case, BTreeMap::new()).await;
+    assert_bundle_is_complete(&outcome, &dir);
+    assert!(outcome.verdict.completed_steps.contains(&"s5".to_string()));
+    assert!(!outcome.verdict.completed_steps.contains(&"s5a".to_string()));
+    scene.finish().await;
+}

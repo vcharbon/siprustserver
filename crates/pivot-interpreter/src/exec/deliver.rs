@@ -139,13 +139,17 @@ impl<'a, 'p> Runner<'a, 'p> {
         let gates = |step: &CompiledStep| {
             gate::discriminates(step, &inbound).matches() || late_cancel(step)
         };
+        let holds = |step: &CompiledStep| {
+            gates(step)
+                && self.rides_fork(step, &inbound).matches()
+                && gate::content_holds(step, &inbound, &scope, &resolver).matches()
+        };
+        // Among those, the step whose stated body TYPE the datagram carries
+        // first: under `record` the content is no evidence, the type is.
         let matched = gated
             .iter()
-            .find(|step| {
-                gates(step)
-                    && self.rides_fork(step, &inbound).matches()
-                    && gate::content_holds(step, &inbound, &scope, &resolver).matches()
-            })
+            .find(|step| holds(step) && gate::body_type_holds(step, &inbound))
+            .or_else(|| gated.iter().find(|step| holds(step)))
             .or_else(|| {
                 gated.iter().find(|step| {
                     gates(step)

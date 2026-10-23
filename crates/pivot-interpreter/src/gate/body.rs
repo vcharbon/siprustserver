@@ -36,8 +36,9 @@ pub enum BodyTypeFinding {
 ///
 /// A step keeps the datagram whatever this finds: the call walks to its
 /// teardown and the finding fails the run, never the script. Under `assert`
-/// the presence and container type already gated the match ([`body_holds`]),
-/// so what is left there is a resource's media type and a multipart's parts.
+/// the match already refused what [`body_holds`] refuses; every other miss —
+/// a body of zero bytes under a stated type, a resource's media type, a
+/// multipart's parts — is found here.
 pub fn body_type_finding(
     step: &CompiledStep,
     inbound: &Inbound,
@@ -70,6 +71,12 @@ pub fn body_type_finding(
     })
 }
 
+/// Whether the datagram carries the body type `step` states; true where it
+/// states none. What tells apart two armed expects one datagram could satisfy.
+pub fn body_type_holds(step: &CompiledStep, inbound: &Inbound) -> bool {
+    step.msg.body.as_ref().is_none_or(|body| type_holds(body, &ArrivedType::of(inbound)))
+}
+
 /// The body type a datagram carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ArrivedType {
@@ -85,9 +92,7 @@ impl ArrivedType {
         if inbound.body.is_empty() {
             return ArrivedType::Absent;
         }
-        let Some(content_type) = inbound.content_type.as_deref() else {
-            return ArrivedType::Typed { media: "untyped".into(), parts: None };
-        };
+        let content_type = inbound.content_type.as_deref().unwrap_or("");
         let media = bare(content_type);
         let parts = media.starts_with("multipart/").then(|| {
             entity_parts(Some(content_type), &[], &inbound.body)
@@ -160,13 +165,24 @@ fn resource_type(content_type: Option<&str>) -> String {
     content_type.map_or_else(|| "application/sdp".into(), bare)
 }
 
-/// The bare `type/subtype` of a media type, lowercased, parameters stripped;
-/// a value that does not parse as one is kept as it reads.
+/// The bare `type/subtype` of a media type, lowercased, parameters stripped:
+/// the text before the first `;` where the value does not parse as one, and
+/// `untyped` where it states none, stored or received alike.
 fn bare(content_type: &str) -> String {
-    MediaType::parse(&SipStr::owned(content_type))
+    let head = MediaType::parse(&SipStr::owned(content_type))
         .map(|media| media.token().to_ascii_lowercase())
-        .unwrap_or_else(|_| content_type.trim().to_ascii_lowercase())
+        .unwrap_or_else(|_| {
+            content_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase()
+        });
+    if head.is_empty() {
+        UNTYPED.into()
+    } else {
+        head
+    }
 }
+
+/// The type a body carried with no `Content-Type`, or an empty one.
+const UNTYPED: &str = "untyped";
 
 /// The body an ASSERTED expect gates its match on, and the lane-declarable
 /// known bug that names the miss where one does: presence, an `sdp-present`
