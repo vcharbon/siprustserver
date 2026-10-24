@@ -31,6 +31,8 @@ media-leg/stalled-killed/t5-logged  ADR-0055 §4  # the copy sends the caller a 
 media-leg/stalled-killed/t6-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
 media-leg/stalled-killed/t6-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
 prack/primary-killed/t3-logged  ADR-0055 §4  # final under another tag than a provisional that left inside the replication window
+prack/split-healed/t2-left  ADR-0055 §7  # the primary meets the copy's first write behind the cut, before its answer arrives: its clean end CANCELs the INVITE the copy saw answered and ACKed
+prack/split-healed/t2-logged  ADR-0055 §7  # the primary meets the copy's first write behind the cut, before its answer arrives: its clean end CANCELs the INVITE the copy saw answered and ACKed
 prack/stalled-killed/t1-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
 prack/stalled-killed/t1-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
 prack/stalled-killed/t2-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed

@@ -1,8 +1,8 @@
 //! The stand-down rule, as a pure decision over the two bodies and as the
 //! turn a wired core runs on the notice: a takeover copy stands down on a
-//! write of its primary that covers every write the copy made and holds every
-//! re-INVITE round the copy holds, as far along, and on its primary's delete
-//! of the call; every other copy plays on.
+//! write of its primary that contains it (ADR-0055 §7) and holds every
+//! request record the copy keeps open, and on its primary's delete of the
+//! call when it holds none; every other copy plays on.
 
 use std::sync::Arc;
 
@@ -33,9 +33,11 @@ fn ringing(cid: &str) -> Call {
     build_initial_call(&invite("w0", "w1", cid), src(), &config, &mut sip_ids::TurnIds::fixed(1), 0)
 }
 
-/// `call` at backup counter `b`.
+/// `call` at backup counter `b`, its last compared write made there.
 fn at_b(mut call: Call, b: i64) -> Call {
-    call.topology.as_mut().expect("a proxied call has a topology").bak_gen = b;
+    let t = call.topology.as_mut().expect("a proxied call has a topology");
+    t.bak_gen = b;
+    t.stamp_vector();
     call
 }
 
@@ -47,7 +49,7 @@ fn reborn(call: &Call) -> Call {
 }
 
 #[test]
-fn a_primary_at_or_past_the_copys_backup_counter_covers_it() {
+fn a_primary_that_read_the_copys_last_compared_write_covers_it() {
     let copy = ringing("covered");
     assert!(covers(&copy, &copy), "a copy that wrote nothing: any write of its primary");
     let wrote = at_b(copy.clone(), 2);
@@ -56,7 +58,7 @@ fn a_primary_at_or_past_the_copys_backup_counter_covers_it() {
 }
 
 #[test]
-fn a_primary_behind_the_copys_backup_counter_does_not_cover_it() {
+fn a_primary_that_never_read_the_copys_last_compared_write_does_not_cover_it() {
     let copy = ringing("uncovered");
     assert!(!covers(&at_b(copy.clone(), 1), &at_b(copy, 2)), "one write the primary never read");
 }
@@ -82,10 +84,10 @@ fn in_round(b: i64, stage: Option<RoundStage>) -> Call {
 }
 
 #[test]
-fn a_primary_that_never_reached_the_copys_round_does_not_cover_it() {
+fn a_primary_that_never_read_the_copys_round_does_not_cover_it() {
     for stage in [RoundStage::Open, RoundStage::Answered, RoundStage::Acked] {
         let copy = in_round(2, Some(stage));
-        let primary = in_round(2, None);
+        let primary = in_round(1, None);
         assert!(!covers(&primary, &copy), "{stage:?}: the round is the copy's alone");
     }
 }
@@ -189,9 +191,9 @@ fn a_raised_sequence_is_no_round_the_primary_holds() {
 }
 
 #[test]
-fn a_primary_behind_the_copy_on_its_round_does_not_cover_it() {
+fn a_primary_that_never_read_the_copys_answer_to_its_round_does_not_cover_it() {
     let copy = in_round(2, Some(RoundStage::Answered));
-    let primary = in_round(2, Some(RoundStage::Open));
+    let primary = in_round(1, Some(RoundStage::Open));
     assert!(!covers(&primary, &copy), "only the copy took the round's 2xx");
 }
 
@@ -209,10 +211,14 @@ async fn taken_over(n: &Node, call: &Call) {
     assert!(matches!(served, Materialised::Served { .. }), "taken over: {served:?}");
 }
 
-/// The copy of `call_ref` writes once, as a turn of its own would.
+/// The copy of `call_ref` writes once, changing a compared field, as a turn
+/// of its own would.
 fn authors(n: &Node, call_ref: &str) {
     let ctx = n.core.router_ctx();
-    ctx.state.update(ctx.state.peek(call_ref).expect("the live copy"));
+    let mut call = ctx.state.peek(call_ref).expect("the live copy");
+    let written = call.callback_context.as_ref().map_or(0, String::len);
+    call.callback_context = Some("w".repeat(written + 1));
+    ctx.state.update(call);
 }
 
 /// The notice of the primary's applied `write` of `call_ref`, offered and its

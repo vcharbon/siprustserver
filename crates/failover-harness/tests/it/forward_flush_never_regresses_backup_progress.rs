@@ -36,7 +36,12 @@
 //!
 //! Each cell runs twice, on [`HealAt`]: with the cut healing while the survivor
 //! still SERVES its takeover copy, and with it healing once that copy has
-//! self-released and the Element is the call's last record.
+//! self-released and the Element is the call's last record. The primary's
+//! teardown and the survivor's answer are each a write the other never read:
+//! the copies diverged (ADR-0055 §7). A live copy meeting the teardown's `Put`
+//! ends the answered call cleanly from its own copy, ranked higher on the
+//! answer; an Element alone keeps the answered call for the caller's next
+//! request.
 //!
 //! The cut outlasts the puller's idle bound (ADR-0045), so the heal lands
 //! through a reconnect, at the puller's next backoff step (within the 2 s
@@ -69,9 +74,10 @@ use failover_harness::{
 };
 use repl_net::frame::{Frame, Op};
 use repl_net_testkit::Direction;
-use scenario_harness::{Agent, Inbound};
+use scenario_harness::Agent;
 use sip_message::generators::InDialogMethod;
-use sip_message::SipMessage;
+mod peers;
+use peers::{answer_healed_peers, settle_released, sweep};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -243,113 +249,6 @@ fn relayed_to(hops: &[(SocketAddr, SocketAddr, bool)]) -> Vec<String> {
             },
         )
         .collect()
-}
-
-/// What crossing a window did on the wire: every INVITE final the caller took,
-/// and the CANCELs the callee's answered INVITE drew.
-struct Crossing {
-    finals_to_alice: Vec<u16>,
-    cancels_to_bob: usize,
-}
-
-/// Pump `secs` seconds of virtual time, collecting what reaches the peers. The
-/// callee's INVITE transaction took its 2xx, so a CANCEL reaching it draws a 481
-/// (RFC 3261 §9.2); every non-2xx final the caller takes is hop-ACKed, as a real
-/// UAC's transaction layer does (§17.1.1.3).
-async fn sweep(
-    fh: &FailoverHarness,
-    call: &scenario_harness::ClientInvite,
-    alice: &Agent,
-    bob: &Agent,
-    secs: u64,
-) -> Crossing {
-    let mut out = Crossing { finals_to_alice: Vec::new(), cancels_to_bob: 0 };
-    for _ in 0..secs {
-        fh.advance(Duration::from_secs(1)).await;
-        while let Some(mut cancel) = bob.try_receive_tolerating("CANCEL", &["OPTIONS", "ACK"]).await
-        {
-            out.cancels_to_bob += 1;
-            cancel.respond(481, "Call/Transaction Does Not Exist").await;
-        }
-        while let Some(msg) = alice.take_queued().await {
-            match msg {
-                SipMessage::Response(r) if r.cseq().method().as_str() == "INVITE" => {
-                    if r.status() >= 300 {
-                        call.ack_non_2xx(&r).await.expect("the caller hop-ACKs the final");
-                    }
-                    out.finals_to_alice.push(r.status());
-                }
-                SipMessage::Response(_) => {}
-                SipMessage::Request(r) => panic!("unexpected {} toward alice", r.method()),
-            }
-        }
-    }
-    out
-}
-
-/// Answer what the peers take once the SIP plane is healed: a keepalive OPTIONS
-/// with 200, and a CANCEL with 481 — the callee's INVITE transaction took its
-/// 2xx long ago (RFC 3261 §9.2). The CANCEL is the partitioned primary's: the
-/// ring deadline's CANCEL client transaction outlives the copy it tore down and
-/// keeps its Timer E ladder to Timer F (ADR-0034), so a retransmission crosses
-/// as soon as the cut lifts. So does the primary's 480, which its INVITE server
-/// transaction repeats on Timer G until the ACK or Timer H (§17.2.1): the
-/// caller hop-ACKs it as every non-2xx final she takes (§17.1.1.3, as in
-/// [`sweep`]). Returns how many CANCELs the callee answered.
-async fn answer_healed_peers(
-    call: &scenario_harness::ClientInvite,
-    alice: &Agent,
-    bob: &Agent,
-) -> usize {
-    while let Some(inbound) = alice.take_queued_inbound().await {
-        match inbound {
-            Inbound::Request(mut t) if t.request().method() == "OPTIONS" => {
-                t.respond(200, "OK").await;
-            }
-            Inbound::Response(r) if r.cseq().method() == "INVITE" && r.status() >= 300 => {
-                call.ack_non_2xx(&r).await.expect("the caller hop-ACKs the final");
-            }
-            Inbound::Request(t) => panic!("unexpected {} toward alice", t.request().method()),
-            Inbound::Response(r) => panic!("unexpected {} toward alice", r.status()),
-        }
-    }
-    let mut cancels = 0;
-    while let Some(mut cancel) = bob.try_receive_tolerating("CANCEL", &["OPTIONS"]).await {
-        cancels += 1;
-        cancel.respond(481, "Call/Transaction Does Not Exist").await;
-    }
-    cancels
-}
-
-/// Pump until no node holds a trace of `call_ref`, then assert the cluster-wide
-/// release. Answers the healed peers along the way and returns the CANCELs the
-/// callee took.
-async fn settle_released(
-    fh: &FailoverHarness,
-    call: &scenario_harness::ClientInvite,
-    alice: &Agent,
-    bob: &Agent,
-    nodes: &[&ReplicatedB2buaSut],
-    call_ref: &str,
-) -> usize {
-    let mut cancels = 0;
-    let released = fh
-        .pump_until(Duration::from_secs(1), Duration::from_secs(90), async || {
-            cancels += answer_healed_peers(call, alice, bob).await;
-            let mut clean = true;
-            for n in nodes {
-                if n.holds_any_trace(call_ref).await {
-                    clean = false;
-                }
-            }
-            clean
-        })
-        .await;
-    assert!(released, "every node released {call_ref} within Timer H of the teardown");
-    failover_harness::assert_call_fully_released(nodes, call_ref).await;
-    // The answers sent on the last step cross before the wire is audited.
-    fh.advance(Duration::from_millis(100)).await;
-    cancels + answer_healed_peers(call, alice, bob).await
 }
 
 /// The CDRs `nodes` wrote for `call_ref` that record an `Answer` event — the
@@ -560,6 +459,32 @@ async fn run(name: &str, title: &str, pending: Pending, heal_at: HealAt) {
         Pending::Delete => "delete",
     };
 
+    // ── heal while the takeover copy is still LIVE, the primary's teardown
+    // pending: the copies diverged, and the survivor ends the call cleanly
+    // from its answered copy (ADR-0055 §7) ─────────────────────────────────
+    if heal_at == HealAt::BeforeTimerH && matches!(pending, Pending::Put) {
+        fh.heal(&pri_ord, &bak_ord);
+        alice.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
+        bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
+        fh.mark(&bak_ord, Some(&pri_ord), "diverged", "the survivor ends the answered call");
+        fh.accept_rfc_deviations_from_now(RULE_NO_CANCEL_AFTER_FINAL, STALE_CANCEL);
+        fh.restore_signalling(&pri_ord, pri_sip);
+        let nodes: [&ReplicatedB2buaSut; 2] = [&*primary, survivor];
+        settle_released(&fh, &call, &alice, &bob, &nodes[..], &call_ref).await;
+        assert_eq!(
+            failover_harness::total_cdrs_for(&nodes[..], &call_ref),
+            1,
+            "one record for the call across the cluster",
+        );
+        assert_eq!(answered_cdrs(&nodes[..], &call_ref), 1, "and it is the answered call's");
+        let passed = true;
+        fh.write_unified_report(&report_dir(name), "report", title, passed)
+            .expect("report written");
+        fh.assert_sip_rfc_clean(name);
+        drop((w_b1, w_b2, proxy));
+        return;
+    }
+
     // ── heal while the takeover copy is still LIVE: the refusal is silent ─────
     if heal_at == HealAt::BeforeTimerH {
         // The Delete cell's primary needs its whole teardown to complete before
@@ -769,10 +694,12 @@ async fn a_forward_delete_of_the_answered_element_leaves_the_answered_call_alive
 }
 
 /// **The refused `Put`, with the copy still live.** The same flush, landing
-/// while the survivor still serves the call: it carries no progress the live
-/// copy lacks, so nothing folds — the answered call is untouched and plays on.
+/// while the survivor still serves the call: the primary's teardown and the
+/// survivor's answer each are a write the other never read, so the copies
+/// diverged (ADR-0055 §7), and the survivor ends the answered call cleanly
+/// from its copy, the call ranked higher — one record, the answered call's.
 #[tokio::test(start_paused = true)]
-async fn a_forward_put_refused_under_a_live_takeover_copy_leaves_the_call_untouched() {
+async fn a_forward_put_diverged_from_a_live_takeover_copy_ends_the_answered_call_cleanly() {
     run(
         "forward-flush-guard-put-live",
         "A forward Put refused under a live takeover copy",

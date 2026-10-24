@@ -4,7 +4,9 @@
 Amended (2026-10-23): D5 and its residuals, the lost round becomes the evidence rule of
 any method (ADR-0055 §3, §4); a removed process superseded by its replacement authors
 nothing (ADR-0055 §6); D2's sweep also serves a departed primary's `Terminating` calls
-and discharges those with nothing left to serve (ADR-0055 §5).
+and discharges those with nothing left to serve (ADR-0055 §5); D7's stand-down reads
+containment, and the lifecycle order its gates read only ranks the base of a diverged
+call's end (ADR-0055 §7).
 
 **Amends:** ADR-0014 D1 (takeover is reactive only), ADR-0022 X4 and X5, ADR-0031's
 case table and its D3 split rule (the lifecycle order the forward and reverse gates read),

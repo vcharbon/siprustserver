@@ -6,9 +6,9 @@
 //! [`MsgpackCodec`] only for flush/replication. Routing uses the in-memory
 //! `sip_index`; the store's `get_index` is the fallback.
 
-mod adoption;
 mod backup;
 mod call_store;
+pub mod containment;
 mod faults;
 mod flush_body;
 mod memory;
@@ -377,16 +377,11 @@ impl CallState {
     /// call increments **the local node's own** counter of that call's `(p,b)`
     /// version vector (`CallTopology.{gen, bak_gen}`) — the central, single
     /// bump-point. Which counter depends on the role this node plays for the
-    /// call (resolved by [`partition_of`]):
-    /// - **Primary** (the ref's encoded ordinal is ours) → bump `gen` (`p`).
-    /// - **Acting-backup** (the ref names a crashed peer we took over) → bump
-    ///   `bak_gen` (`b`).
-    ///
-    /// Because each node bumps only its own counter, the *other* counter carried
-    /// on a propagated update is, by construction, the branch point — which is
-    /// what lets the asymmetric apply rule (see [`Puller`](crate::repl::Puller)) resolve
-    /// concurrent primary+backup mutations, where a single shared counter would
-    /// tie at equal generations and diverge. A brand-new call enters at
+    /// call (resolved by [`partition_of`]): **Primary** (the ref's encoded
+    /// ordinal is ours) bumps `gen` (`p`), **acting-backup** (the ref names a
+    /// crashed peer we took over) bumps `bak_gen` (`b`). Each node bumps only
+    /// its own counter, so the *other* counter carried on a propagated update
+    /// is, by construction, the branch point. A brand-new call enters at
     /// `(1,0)` (stamped at INVITE time in [`crate::initial_invite`]). The bump is
     /// a no-op for non-proxied calls that carry no `topology`.
     ///
@@ -399,24 +394,30 @@ impl CallState {
     /// this node by an authoritative teardown, and any later event re-enters via
     /// a fresh hydrate.
     ///
-    /// A bump counts a write this node made that changes the call; a quiet turn
-    /// ([`crate::effects::QuietTurn`]) and a fold of the other owner's body go
-    /// through [`update_quiet`](Self::update_quiet) and move no axis.
+    /// A bump counts a write this node made; a quiet turn
+    /// ([`crate::effects::QuietTurn`]) and a meeting with the other owner's
+    /// copy go through [`update_quiet`](Self::update_quiet) and move no axis.
     ///
-    /// The primary's write is its own body at its own `gen`, which therefore
-    /// no longer names a version adopted without its body
-    /// ([`CallTopology::gen_adopted`](call::CallTopology::gen_adopted)).
+    /// **The state stamp (ADR-0055 §7)** is set here and nowhere else: a write
+    /// that changes a compared field of the resident copy
+    /// ([`call::helpers::same_state`]) stamps the vector it bumps; a write that
+    /// changes only exempt fields leaves the stamp where it was ([`containment`]).
     pub fn update(&self, mut call: Call) {
+        let mut inner = self.locked();
+        let Some(resident) = inner.calls.get(&call.call_ref) else {
+            return;
+        };
+        let changed = !call::helpers::same_state(resident, &call);
         if let Some(t) = call.topology.as_mut() {
             match role_of(&self.self_ordinal, &call.call_ref) {
-                PartitionRole::Primary => {
-                    t.gen += 1;
-                    t.gen_adopted = false;
-                }
+                PartitionRole::Primary => t.gen += 1,
                 PartitionRole::Backup => t.bak_gen += 1,
             }
+            if changed {
+                t.stamp_vector();
+            }
         }
-        self.replace(call);
+        self.replace_locked(&mut inner, call);
     }
 
     /// Replace the in-memory call for a quiet turn or a fold: the same
@@ -424,19 +425,19 @@ impl CallState {
     /// the `(p,b)` the resident copy carries is the last write's, either
     /// owner's, and so is what the next flush publishes.
     pub fn update_quiet(&self, call: Call) {
-        self.replace(call);
+        let mut inner = self.locked();
+        self.replace_locked(&mut inner, call);
     }
 
-    fn replace(&self, call: Call) {
-        let mut inner = self.locked();
+    fn replace_locked(&self, inner: &mut Inner, call: Call) {
         if !inner.calls.contains_key(&call.call_ref) {
             return;
         }
-        Self::reindex(&mut inner, &call);
+        Self::reindex(inner, &call);
         let was = inner.calls.get(&call.call_ref).is_some_and(|c| c.limiter.runs_uncounted());
         if was != call.limiter.runs_uncounted() {
             inner.restate_uncounted(was, call.limiter.runs_uncounted());
-            self.publish_uncounted(&inner);
+            self.publish_uncounted(inner);
         }
         if let Some(slot) = inner.calls.get_mut(&call.call_ref) {
             **slot = call;
@@ -598,6 +599,12 @@ impl CallState {
         self.read_partition(PartitionRole::Primary, call_ref).await
     }
 
+    /// The skew offset held beside `call_ref`'s body (ADR-0055 §9); `0` for a
+    /// body written here, an absent one, or no replicating store.
+    pub fn held_skew_offset_ms(&self, call_ref: &str) -> i64 {
+        self.repl_store().and_then(|r| r.skew_offset_ms(call_ref)).unwrap_or(0)
+    }
+
     /// Decode a replica body this node did not store (a reverse flush the
     /// `(p,b)` gate refused), so the router can read the call it carries.
     pub fn decode_body(&self, body: &[u8]) -> Option<Call> {
@@ -748,12 +755,6 @@ impl CallState {
     /// replicas keep the long backstop (refreshed every keepalive), so a held call's
     /// replica never expires mid-call.
     pub fn flush_with_ttl(&self, call: &Call, ttl_ms: i64) {
-        self.submit_flush(call, ttl_ms, false);
-    }
-
-    /// The write behind [`flush`](Self::flush): `adopted` marks a version this
-    /// node adopted without its body ([`PutOpts::adopted`]).
-    fn submit_flush(&self, call: &Call, ttl_ms: i64, adopted: bool) {
         let Some(repl) = self.repl.as_ref() else {
             return;
         };
@@ -772,7 +773,6 @@ impl CallState {
             return self.abandon_backup(&opts, &call.call_ref);
         };
         opts.incarnation = Some(call.incarnation().to_string());
-        opts.adopted = adopted;
         // Observability: a propagating flush is one whose call carries a backup
         // peer (topology.bak from the proxy cookie). Rising on the PRIMARY proves
         // the b2bua is attempting replication — distinguishing a cookie/topology

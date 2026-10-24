@@ -13,7 +13,6 @@ mod stateful_proxy;
 
 mod a_returned_primary_serves_its_dialogs;
 mod abandoned_callee_via_lb;
-mod adopted_counter_reverse_fold;
 mod answer_lost;
 mod answer_lost_with_primary_no_answer;
 mod backup_capacity;
@@ -25,6 +24,7 @@ mod crossed_reinvite_round;
 mod deferred_end_of_a_departed_primary;
 mod departure_support;
 mod discharged_call_dropped_by_its_primary;
+mod diverged_end;
 mod drain_exits_caught_up_inside_grace;
 mod drain_flushes_releases_before_a_verified_exit;
 mod drain_waits_for_a_backup_behind;

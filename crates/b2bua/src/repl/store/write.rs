@@ -14,6 +14,16 @@ use crate::store::{
 };
 
 impl ReplicatingCallStore {
+    /// The clock the instants of the body held for a callRef were written
+    /// on, read now ([`RefMeta::origin_now_ms`]): what a rewrite of that body
+    /// states as its origin so its offset stands. `None` when the ref is
+    /// absent or its body was written here.
+    pub fn held_origin_now_ms(&self, call_ref: &str) -> Option<i64> {
+        let meta = locked(&self.meta, REPLICA_METADATA);
+        let m = meta.get(call_ref)?;
+        m.meta.skew_offset_ms.map(|_| m.meta.origin_now_ms(self.clock.now_ms()))
+    }
+
     /// [`CallStore::put_call`](crate::store::CallStore::put_call),
     /// synchronously: the body and its metadata are stored and the changelog
     /// entry for `opts.peer` moved in this call, so a turn's write is in the
@@ -71,9 +81,7 @@ impl ReplicatingCallStore {
                 .incarnation
                 .take()
                 .or_else(|| meta.get(call_ref).and_then(|m| m.meta.incarnation.clone()));
-            let version = (call_gen, call_bgen);
-            let write =
-                Write { role, direction: opts.direction, now, version, adopted: opts.adopted };
+            let write = Write { role, direction: opts.direction, now };
             if !self.admits(&mut meta, call_ref, ref_meta.incarnation.as_deref(), &body, write) {
                 return Ok(());
             }

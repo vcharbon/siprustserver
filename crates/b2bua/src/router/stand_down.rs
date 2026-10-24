@@ -1,11 +1,12 @@
 //! A takeover copy stands down on its primary's write (ADR-0047 D7). A write
 //! the call's primary published, applied to this node's Element of a call it
-//! serves as a live takeover copy, is the primary serving the call again. The
+//! serves as a live takeover copy, is the primary serving the call again: it
+//! meets the copy ([`meet_live`](super::reclaim::meet_live), ADR-0055 §7). The
 //! copy is released local-only — timers cancelled, transactions relinquished,
-//! no store write, no CDR (ADR-0020 X3) — when the primary's record covers
-//! every write the copy made ([`covers`]), or when the primary deleted the
-//! call and the copy holds no request whose final only it sees
-//! ([`finishes_nothing_alone`]); otherwise it plays on and is shed at
+//! no store write, no CDR (ADR-0020 X3) — when the primary's copy contains it
+//! and holds every request record it keeps open ([`covers`]), or when the
+//! primary deleted the call and the copy holds no request whose final only it
+//! sees ([`finishes_nothing_alone`]); otherwise it plays on and is shed at
 //! quiescence (ADR-0014).
 //!
 //! The notice is a turn of the call's own queue, so a message queued for the
@@ -14,11 +15,14 @@
 
 use std::sync::Arc;
 
-use call::helpers::{holds_records_of, holds_rounds_of, round_ahead};
+use call::helpers::holds_records_of;
 use call::{Call, RelayOwner};
 
+use super::reclaim::{meet_live, FlushDirection};
 use super::release::{release_call, ReleaseKind};
+use super::restore_hygiene::reanchor;
 use super::{PrimaryWrite, RouterCtx};
+use crate::store::containment::contains;
 use b2bua_sdk::event::CallEvent;
 
 /// The topic of the stand-down notice, an internal event the router raises
@@ -73,51 +77,54 @@ pub(super) async fn stand_down_turn(
     if !ctx.state.is_takeover(call_ref) {
         return;
     }
-    let by = &ctx.config.relay_owner();
-    let stands_down = match outcome {
-        PUT => ctx.state.decode_body(body).is_some_and(|primary| covers(&primary, &copy, by)),
-        DELETE => {
-            payload.as_str().is_none_or(|deleted| deleted == copy.incarnation())
-                && finishes_nothing_alone(None, &copy, by)
+    match outcome {
+        PUT => {
+            let Some(mut primary) = ctx.state.decode_body(body) else { return };
+            if primary.incarnation() != copy.incarnation() {
+                return;
+            }
+            reanchor(&mut primary, ctx.state.held_skew_offset_ms(call_ref));
+            let now_ms = ctx.clock.now_ms();
+            meet_live(ctx, FlushDirection::Forward, call_ref, &copy, primary, now_ms).await;
         }
-        _ => false,
-    };
-    if stands_down {
-        release_call(ctx, call_ref, ReleaseKind::StandDown).await;
+        DELETE => {
+            let by = &ctx.config.relay_owner();
+            if payload.as_str().is_none_or(|deleted| deleted == copy.incarnation())
+                && finishes_nothing_alone(None, &copy, by)
+            {
+                release_call(ctx, call_ref, ReleaseKind::StandDown).await;
+            }
+        }
+        _ => {}
     }
 }
 
-/// Whether the primary's body `primary` covers every write the takeover
-/// `copy` made on worker `by`: the same call (one incarnation), the primary's
-/// `b` at or past the copy's, no re-INVITE round on which the copy stands
-/// ahead (`call::helpers::round_ahead`), and every request record the copy
-/// keeps open held in the primary's record
-/// ([`finishes_nothing_alone`]). One `b` increment is one write the copy made
-/// as the call's acting backup (`CallState::update` on this node); a fold of
-/// the primary's body is not one. A primary reaches a `b` by reading the
-/// copy's write that carries it, applied or folded into its record, or
-/// refused and its counter adopted (ADR-0031 D3).
+/// Whether the primary's body `primary` covers the takeover `copy` on worker
+/// `by`: the same call (one incarnation), the primary's copy containing the
+/// copy (ADR-0055 §7: the copy's state stamp at or below the primary's
+/// vector, so the primary read every compared write the copy made), and
+/// every request record the copy keeps open held in the primary's record
+/// ([`finishes_nothing_alone`]).
 pub(super) fn covers(primary: &Call, copy: &Call, by: &RelayOwner) -> bool {
-    let bak_gen = |c: &Call| c.topology.as_ref().map_or(0, |t| t.bak_gen);
+    let contained = match (primary.topology.as_ref(), copy.topology.as_ref()) {
+        (Some(p), Some(c)) => contains(p, c),
+        _ => false,
+    };
     primary.incarnation() == copy.incarnation()
-        && bak_gen(primary) >= bak_gen(copy)
-        && !round_ahead(copy, primary)
+        && contained
         && finishes_nothing_alone(Some(primary), copy, by)
 }
 
 /// Whether `copy` on worker `by` holds no request whose final only it sees
-/// that `record` — the primary's, or none once deleted — lacks: every
-/// re-INVITE round it holds the transaction of, unfinished, is the record's
-/// transaction or behind a later one (`call::helpers::holds_rounds_of`), and
-/// every other request record it keeps open — relayed, its own, or held for a
-/// later final — is the record's (`call::helpers::holds_records_of`). A
-/// final follows the Via to the node that sent the request (RFC 3261
-/// §18.2.2), and a held request's final leaves on the server transaction
-/// only the copy holds: a copy that relinquished either leaves its peer with
-/// no final, so the copy plays on with it and self-releases once its
-/// transactions clear.
+/// that `record` — the primary's, or none once deleted — lacks: every request
+/// record it keeps open — relayed, its own, or held for a later final, any
+/// method — is the record's (`call::helpers::holds_records_of`). A final
+/// follows the Via to the node that sent the request (RFC 3261 §18.2.2), and
+/// a held request's final leaves on the server transaction only the copy
+/// holds: a copy that relinquished either leaves its peer with no final, so
+/// the copy plays on with it and self-releases once its transactions clear.
 pub(super) fn finishes_nothing_alone(record: Option<&Call>, copy: &Call, by: &RelayOwner) -> bool {
-    holds_rounds_of(record, copy, by) && holds_records_of(record, copy, by)
+    holds_records_of(record, copy, by)
 }
 
 #[cfg(test)]

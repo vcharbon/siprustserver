@@ -59,11 +59,6 @@ pub struct PutOpts {
     /// `None` names no incarnation: the write is taken as one of the call the
     /// store already holds for the ref.
     pub incarnation: Option<String>,
-    /// The write publishes a version this node ADOPTED from another owner of
-    /// the call, without that owner's body (ADR-0031 D3): a replicating store
-    /// that already holds the same call at that version or past it keeps what
-    /// it holds — the other owner's body at that version.
-    pub adopted: bool,
 }
 
 #[derive(Debug, thiserror::Error)]

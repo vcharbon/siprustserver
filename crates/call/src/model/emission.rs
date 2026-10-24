@@ -131,6 +131,16 @@ impl RetainedEmission {
         true
     }
 
+    /// This emission with its ladder at its first rung: what it holds that a
+    /// quiet turn's rung does not move.
+    pub fn at_rest(&self) -> Self {
+        let repeat = match self.repeat {
+            Repeat::Paced { class, .. } => Repeat::Paced { class, rung: 0 },
+            Repeat::OnTrigger => Repeat::OnTrigger,
+        };
+        RetainedEmission { repeat, ..self.clone() }
+    }
+
     /// How this emission is repeated.
     pub fn repeat(&self) -> Repeat {
         self.repeat

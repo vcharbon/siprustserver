@@ -270,17 +270,17 @@ pub enum ReplCommand {
     /// **Reactive reclaim** of one call a backup just reverse-flushed to us — the
     /// flip-race straggler an acting-backup took over *after* the bulk sweep.
     ReclaimCall(String),
-    /// A backup's reverse flush the store's `(p,b)` gate refused: the body is
-    /// handed up so the call model can fold lifecycle progress the vector
-    /// cannot see (`reclaim::fold_refused_flush`). `origin_now_ms` is
-    /// the flushing node's wall clock, for timer re-anchoring.
+    /// A backup's reverse flush the store did not take — the stored copy
+    /// contains it or the two diverged — or one the store already read: the
+    /// body is handed up to meet the live copy (`reclaim::meet_refused_flush`,
+    /// ADR-0055 §7). `origin_now_ms` is the flushing node's wall clock, for
+    /// timer re-anchoring.
     ReverseFlushRefused { call_ref: String, body: Arc<[u8]>, origin_now_ms: i64 },
-    /// A primary's forward flush this backup refused (ADR-0031 D3): the body is
-    /// handed up on the same terms as the reverse case, and folds only where a
-    /// live takeover copy of the call exists — an Element alone is kept as it
-    /// is, its merge deferred to the next materialisation. Only the steady tail
-    /// sends it: a bulk re-seed's refusals are the state of the two views, not
-    /// events, and are counted alone.
+    /// A primary's forward flush this backup did not take: the body is handed
+    /// up on the same terms as the reverse case, and meets only a live
+    /// takeover copy of the call — an Element alone is kept as it is. Only the
+    /// steady tail sends it: a bulk re-seed's refusals are the state of the two
+    /// views, not events, and are counted alone.
     ForwardFlushRefused { call_ref: String, body: Arc<[u8]>, origin_now_ms: i64 },
     /// A primary's forward write this backup applied to the Element of a call
     /// it serves as a live takeover copy, in a scan or on the tail: handed up so
@@ -394,11 +394,11 @@ async fn on_repl_command(ctx: &Arc<RouterCtx>, cmd: ReplCommand) {
         }
         ReplCommand::ReverseFlushRefused { call_ref, body, origin_now_ms } => {
             let dir = reclaim::FlushDirection::Reverse;
-            reclaim::fold_refused_flush(ctx, dir, &call_ref, &body, origin_now_ms).await
+            reclaim::meet_refused_flush(ctx, dir, &call_ref, &body, origin_now_ms).await
         }
         ReplCommand::ForwardFlushRefused { call_ref, body, origin_now_ms } => {
             let dir = reclaim::FlushDirection::Forward;
-            reclaim::fold_refused_flush(ctx, dir, &call_ref, &body, origin_now_ms).await
+            reclaim::meet_refused_flush(ctx, dir, &call_ref, &body, origin_now_ms).await
         }
         ReplCommand::ForwardFlushApplied { call_ref, write } => {
             stand_down::offer(ctx, call_ref, write).await

@@ -5,33 +5,61 @@
 //! copy relays or takes moves one of them; the next request either copy sends
 //! on a dialog continues from the higher of the two.
 
-use crate::model::{Call, Leg, RelayOwner, RequestRecord};
+use crate::model::{Call, Dialog, Leg, RelayOwner, RequestRecord};
 
+use super::invite_records::{invite_image, invite_relay};
 use super::leg::{every_leg, find_leg};
 use super::request_records::records_of;
 
-/// Does `held` — a record, or none — hold every non-INVITE request record
-/// the worker `by` keeps open in `other`, as the same record on the same
-/// dialog — its origin, the CSeq it went out with, the method, and the CSeq
-/// and Call-ID of the request it received — a retired dialog's open records
-/// included? A non-INVITE final follows the Via to the node that sent the
-/// request (RFC 3261 §18.2.2): only `by` sees the final of a relay or an own
-/// request it sent, and only `by` holds the server transaction of a request
-/// it holds for a later final; a record that lacks it settles none of these.
-/// A record another worker made — another ordinal, or a former boot of
-/// `by`'s — returns to that worker. INVITE relays are rounds, read by
-/// `super::round`.
+/// Does `held` — a record, or none — hold every request record the worker
+/// `by` keeps open in `other`, a retired dialog's open records included? A
+/// final follows the Via to the node that sent the request (RFC 3261
+/// §18.2.2): only `by` sees the final of a relay or an own request it sent,
+/// and only `by` holds the server transaction of a request it holds for a
+/// later final; a record that lacks it settles none of these. A record
+/// another worker made — another ordinal, or a former boot of `by`'s —
+/// returns to that worker.
+///
+/// A non-INVITE record is held as the same record on the same dialog: its
+/// origin, the CSeq it went out with, the method, and the CSeq and Call-ID of
+/// the request it received. An INVITE relay awaiting its final is held by the
+/// same dialog's last INVITE when it is the same transaction or a later one;
+/// an INVITE whose 2xx is taken awaits no final (its ACK follows the route
+/// set, not the node).
 pub fn holds_records_of(held: Option<&Call>, other: &Call, by: &RelayOwner) -> bool {
     every_leg(other).all(|other_leg| {
         let held_leg = held.and_then(|h| find_leg(h, &other_leg.leg_id));
         other_leg.dialogs.iter().all(|o| {
             let ours = held_leg.and_then(|l| l.dialogs.by_tags(&o.our_tag, &o.peer_tag));
-            records_of(o)
+            let records = records_of(o)
                 .iter()
                 .filter(|p| !p.method.eq_ignore_ascii_case("INVITE") && p.relayed_by == *by)
-                .all(|p| ours.is_some_and(|d| records_of(d).iter().any(|h| same_record(h, p))))
+                .all(|p| ours.is_some_and(|d| records_of(d).iter().any(|h| same_record(h, p))));
+            records && holds_invite_relay(held_leg.zip(ours), other_leg, o, by)
         })
     })
+}
+
+/// Whether `ours` — the same dialog in the other record, on its leg — holds
+/// the INVITE relay `by` made that `theirs`, a dialog of `their_leg`, holds
+/// awaiting its final: the same transaction, or a later INVITE.
+fn holds_invite_relay(
+    ours: Option<(&Leg, &Dialog)>,
+    their_leg: &Leg,
+    theirs: &Dialog,
+    by: &RelayOwner,
+) -> bool {
+    let Some(relay) = invite_relay(theirs).filter(|r| r.relayed_by == *by) else {
+        return true;
+    };
+    let Some(branch) = invite_image(their_leg, relay).map(|s| s.branch.as_str()) else {
+        return true;
+    };
+    let held = ours.and_then(|(leg, d)| {
+        let record = d.sent_invite.as_ref()?;
+        Some((invite_image(leg, record)?.branch.as_str(), record.outbound_cseq))
+    });
+    held.is_some_and(|(b, cseq)| b == branch || cseq > relay.outbound_cseq)
 }
 
 fn same_record(a: &RequestRecord, b: &RequestRecord) -> bool {

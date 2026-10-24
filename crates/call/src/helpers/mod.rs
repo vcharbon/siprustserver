@@ -12,9 +12,9 @@
 //!   - [`resolved`] — what a received message names: its dialog, the request
 //!     record a response answers
 //!   - [`lifecycle`] — the two monotone axes of a call's life and how two copies
-//!     of one call compare on them (replication reconciliation)
-//!   - [`round`] — the re-INVITE rounds two copies share, and how one copy's
-//!     view of a round's end or opening lands in the other
+//!     of one call rank on them
+//!   - [`compared`] — the compared fields of a call record and the closed
+//!     exempt list (ADR-0055 §7)
 //!   - [`sequence`] — the in-dialog requests two copies of one call carry:
 //!     the sequences they reached, the relays they hold
 //!   - [`dialog`] — CSeq, INVITE glare, SDP cache
@@ -43,6 +43,7 @@
 //!   - [`timer_scope`] — whether the scope a timer guards has ended
 
 pub mod attempt;
+pub mod compared;
 pub mod decision_log;
 pub mod dialog;
 pub mod instants;
@@ -59,7 +60,6 @@ pub mod record;
 pub mod reliable;
 pub mod request_records;
 pub mod resolved;
-pub mod round;
 pub mod sequence;
 pub mod services;
 pub mod termination;
@@ -70,6 +70,7 @@ pub use attempt::{
     dialled_leg_ended, end_attempt, find_attempt, join_attempt, next_attempt_id, open_attempt,
     settle_attempts,
 };
+pub use compared::{merge_exempt, same_state};
 pub use decision_log::mark_decision;
 pub use dialog::{
     advance_peer_cseq, bump_our_cseq, cache_sdp_on_leg_dialog, cached_sdp_for_leg_dialog,
@@ -95,9 +96,7 @@ pub use leg_end::{
     reject_early_dialogs, retire_early_dialogs,
 };
 pub use lens::{update_dialog, update_leg};
-pub use lifecycle::{
-    lifecycle_advances, lifecycle_behind, lifecycle_position, lifecycle_progress, Progress,
-};
+pub use lifecycle::{lifecycle_behind, lifecycle_position};
 pub use message_ring::{record_message, seal_turn};
 pub use obligation::{
     acked_2xx, advance_ladder, answers_initial_invite, clear_retained, obligations_in,
@@ -124,7 +123,6 @@ pub use request_records::{
     take_overdue_held, take_retired_owed, Answers, RecordHolder,
 };
 pub use resolved::{response_origin, Resolved, ResponseFacts, ResponseOrigin, UNRESOLVED};
-pub use round::{holds_rounds_of, merge_rounds, round_ahead, round_further, round_opened};
 pub use sequence::{holds_records_of, raise_sequences};
 pub use services::{
     promote_pem_promoted, promote_pem_state, promote_pem_window_open, record_relay_first_18x_value,

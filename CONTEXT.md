@@ -573,8 +573,8 @@ provisional for it (RFC 3261 §17.1.1.2), a Proceeding server INVITE holding the
 rebuilt from the a-leg snapshot or a pending relayed re-INVITE's record, an
 Accepted server INVITE (RFC 6026) holding a 2xx a dialog retains awaiting its
 ACK, and for a non-INVITE a client transaction retransmitting its sent request
-under its branch and a server transaction holding its received request. A fold into the call's
-record seeds the Accepted kind. The 2xx's repeats, a PRACK or a re-ACK are never a transaction's: those
+under its branch and a server transaction holding its received request. A copy the call's
+record takes whole at a meeting seeds the Accepted kind. The 2xx's repeats, a PRACK or a re-ACK are never a transaction's: those
 are ADR-0032 obligations replicated with the call.
 
 **Self-release** (acting-backup takeover-copy lifecycle) — replaces Activate/Deactivate (ADR-0014):
@@ -595,47 +595,43 @@ _Avoid_: "Deactivate"/"handback" (the removed watermark handshake); "ghost backu
 
 **Stand-down** (ADR-0047 D7, `router::stand_down`): a takeover copy released on a
 write of its primary the backup applied — a returning node's reclaim write, an answer,
-an ending — when the primary's `b` is at or past the copy's (the primary's record
-covers every write the copy made), or on the primary's delete of the call. Local-only
-like a self-release, and its transactions are **relinquished** (deleted with nothing
-sent), never orphaned. _Avoid_: "self-release" for it (that waits for the copy's
-transactions to clear).
+an ending — when the primary's copy **contains** the copy and holds every request
+record it keeps open, or on the primary's delete of the call when it holds none.
+Local-only like a self-release, and its transactions are **relinquished** (deleted
+with nothing sent), never orphaned. _Avoid_: "self-release" for it (that waits for the
+copy's transactions to clear).
 
 **Version vector `(p, b)`** (per-context reconciliation) — replaces LWW-by-`gen` (ADR-0014):
 Each call carries `(p, b)` = `(primary_counter, backup_counter)` =
 `CallTopology.{gen, bak_gen}`. **Each node bumps only its own** counter, once per
-write it makes that changes the call, so the *other* counter on a propagated update
-is the **branch point**; a quiet turn and a fold are not writes.
-Merge is direction-aware: **Bootstrap** (a node recovering its own partition)
-applies unless the stored vector dominates; **Forward** (primary→backup) applies
-on that same rule *and* never behind the Element's own `b` (ADR-0031 D3 — an
-Element an acting backup authored holds a version the authority never saw),
-except that at the Element's own `(p,b)` an authored Element whose body is behind
-the frame's takes it: the authority adopted that version and republished its own
-call there (ADR-0047 D7);
-**Reverse** (backup→primary) applies iff `p_in == p_cur && b_in > b_cur`
-(untouched-by-primary since the backup branched, genuinely newer backup
-mutation). A Forward `Put` whose BODY stands behind the Element on the call's
-lifecycle — read answer first: an unanswered teardown never ends an answered call
-(ADR-0047 D7) — is a **branch** of the call and is refused; **deletes** apply
-unconditionally except Forward, which yields for the **answer** alone — an
-`Active` Element whose caller was answered and to which no forward flush, taken
-or refused, has ever carried the authority's own answer. A refused flush is folded into a live copy
-when it carries lifecycle progress the vector cannot see: an answer or an ending,
-folded whole, or the end of a re-INVITE round the live copy holds unfinished or
-the opening of one it never reached, dialog by dialog, whose facts alone are
-merged in. The Reverse rule never folds whole a body whose `p` the backup
-adopted without the primary's body (`CallTopology::gen_adopted`) — nor stores it — and the
-authority's call at an Element's own `(p,b)` replaces such a body there; every
-fold and refusal takes the higher dialog sequences. A **fold** adopts `max` of both counters and
-moves neither, so the split heals and the other owner's next write orders
-against what it published; a
-**refusal** adopts only the axis the other owner bumps — `b` at a primary, `p`
-at a backup — and without that bump, because recording a version somebody else
-published is a read, not a mutation. Closes the latent equal-`gen` divergence
-the single counter suffered.
-_Avoid_: "call_gen LWW"/"highest gen wins" (both propagating directions guard:
-reverse on the branch point, forward on the backup's own progress).
+write it makes, so the *other* counter on a propagated update is the **branch
+point**; a quiet turn and a meeting are not writes. **Bootstrap** (a node recovering
+its own partition) applies unless the stored vector dominates; the **Forward** and
+**Reverse** flows apply a write at or past the stored vector on both counters and
+meet two concurrent copies by **containment**; **deletes** apply unconditionally
+except Forward, which yields for the **answer** alone — an `Active` Element whose
+caller was answered and to which no forward flush, taken or refused, has ever
+carried the authority's own answer (ADR-0031).
+_Avoid_: "call_gen LWW"/"highest gen wins".
+
+**State stamp** (ADR-0055 §7, `CallTopology.{stamp_gen, stamp_bak_gen}`): the vector
+of a copy's last write that changed a **compared field**, set only where the vector is
+bumped (`CallState::update`). Every field of the call record is compared except the
+closed **exempt list** (`call::helpers::compared`): the vector, each dialog's
+sequences, the message and turn counters, the timer generation (maximum of two
+copies); the CDR events and the message rings (union); the keepalive records, the
+keepalive and limiter-refresh ledger entries, the ladder rungs, the limiter's change
+counter, the trace fields (the container's).
+
+**Containment** (ADR-0055 §7, `store::containment`): of two copies of one call
+incarnation, R **contains** L when L's state stamp is at or below R's vector on both
+counters — R read every compared write L made (replication is pull-only and no vector
+is ever taken without its body). At a **meeting** the copy that contains the other is
+taken whole with the other's exempt fields merged in; when each contains the other the
+primary's stands; when neither does, the copies **diverged** and the meeting node ends
+the call cleanly from the copy ranked higher on the lifecycle, over the union of both
+copies' dialogs (`router::reclaim::diverged`). _Avoid_: "fold", "adopted counter",
+"rounds fold" (the per-axis reconciliation containment replaced).
 
 **Call incarnation** (`call::Call::incarnation`):
 Which of the successive calls on one `call_ref` a record is — a retried INVITE

@@ -248,7 +248,7 @@ plain_counters! {
     ) => unrecoverable_calls, bump_unrecoverable_call, unrecoverable_calls_total;
     UNRECOVERABLE_FOLDS = (
         "b2bua_unrecoverable_folds_total",
-        "folds refused because the other owner's body does not rebuild the caller's INVITE; the live copy keeps serving (ADR-0052 §11; ALARM: expected 0)",
+        "copies of the other owner not taken at a meeting because they do not rebuild the caller's INVITE; the live copy keeps serving (ADR-0052 §11; ALARM: expected 0)",
     ) => unrecoverable_folds, bump_unrecoverable_fold, unrecoverable_folds_total;
     // replication (peer-to-peer HA; separate namespace `b2bua_repl_*`). These
     // localise an HA failure to a layer: `flush_propagated` rising on the PRIMARY
@@ -280,11 +280,16 @@ plain_counters! {
         "b2bua_repl_takeover_hydrated_total",
         "calls hydrated from a backup replica to serve a failed-over request",
     ) => repl_takeover_hydrated, bump_repl_takeover_hydrated, repl_takeover_hydrated_total;
-    // Reverse flushes a live primary refused to fold; the gate is `router::reclaim`.
+    // Reverse copies a live primary's copy contains; the meeting is `router::reclaim`.
     REPL_REVERSE_FLUSH_REFUSED = (
         "b2bua_repl_reverse_flush_refused_total",
-        "a backup's reverse flush for a call this primary serves live that neither the (p,b) vector nor lifecycle progress let it fold (ADR-0014): the primary kept its own copy",
+        "a backup's reverse flush for a call this primary serves live that the live copy contains (ADR-0055 §7): the primary kept its own copy",
     ) => repl_reverse_flush_refused, bump_repl_reverse_flush_refused, repl_reverse_flush_refused_total;
+    // Copies of one call that met diverged; the meeting is `router::reclaim`.
+    REPL_COPIES_DIVERGED = (
+        "b2bua_repl_copies_diverged_total",
+        "a copy of a call this node serves live met the other owner's copy and neither contained the other (ADR-0055 §7): the call was ended cleanly",
+    ) => repl_copies_diverged, bump_repl_copies_diverged, repl_copies_diverged_total;
     // Refusals of a `Terminated` replica; the rule is `router::materialise`.
     REPL_TAKEOVER_REFUSED_TERMINATED = (
         "b2bua_repl_takeover_refused_terminated_total",

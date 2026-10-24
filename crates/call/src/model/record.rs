@@ -63,15 +63,20 @@ pub enum CallModelState {
 }
 
 /// Persisted topology hint: the worker pair stamped at INVITE time plus a
-/// per-context **version vector** `(gen, bak_gen)` = `(p, b)` (ADR-0014).
+/// per-context **version vector** `(gen, bak_gen)` = `(p, b)` (ADR-0014) and
+/// the **state stamp** (ADR-0055 §7).
 ///
 /// `gen` (`p`) is the **primary** counter — bumped only by the call's primary on
 /// a local mutation. `bak_gen` (`b`) is the **backup** counter — bumped only by
 /// an acting-backup on a takeover mutation. Each node bumps only its own role's
 /// counter, so the *other* node's counter in an incoming update is, by
-/// construction, the branch point. A single-counter "highest gen wins" LWW
-/// cannot disambiguate concurrent primary+backup mutations. See the apply
-/// rule in `b2bua::repl::puller`.
+/// construction, the branch point.
+///
+/// The stamp is the vector of the last write that changed a compared field
+/// (`crate::helpers::same_state`): a write that changed only exempt fields
+/// moves the vector and leaves the stamp. Of two copies of one call
+/// incarnation, R contains L when L's stamp is at or below R's vector,
+/// component by component.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallTopology {
     pub pri: String,
@@ -80,20 +85,39 @@ pub struct CallTopology {
     pub gen: i64,
     /// Backup counter `b` of the `(p,b)` version vector.
     pub bak_gen: i64,
-    /// `gen` names a primary version whose body this body does not hold: a
-    /// backup took it from the primary's write it refused, or from a fold of
-    /// only the primary's re-INVITE rounds. Such a body is never a newer
-    /// version of the primary's at that `gen`. False on every primary's body:
-    /// the primary's own write and every fold at the primary clear it.
-    #[serde(default)]
-    pub gen_adopted: bool,
+    /// The `p` of the state stamp.
+    pub stamp_gen: i64,
+    /// The `b` of the state stamp.
+    pub stamp_bak_gen: i64,
 }
 
 impl CallTopology {
     /// The topology of a call `pri` serves and `bak` backs up, at `(gen,
-    /// bak_gen)`, its `gen` the primary's own.
+    /// bak_gen)`, stamped at that version.
     pub fn new(pri: impl Into<String>, bak: impl Into<String>, gen: i64, bak_gen: i64) -> Self {
-        CallTopology { pri: pri.into(), bak: bak.into(), gen, bak_gen, gen_adopted: false }
+        CallTopology {
+            pri: pri.into(),
+            bak: bak.into(),
+            gen,
+            bak_gen,
+            stamp_gen: gen,
+            stamp_bak_gen: bak_gen,
+        }
+    }
+
+    /// The version vector `(p, b)`.
+    pub fn vector(&self) -> (i64, i64) {
+        (self.gen, self.bak_gen)
+    }
+
+    /// The state stamp `(p, b)`.
+    pub fn stamp(&self) -> (i64, i64) {
+        (self.stamp_gen, self.stamp_bak_gen)
+    }
+
+    /// Stamp the current vector: the write it counts changed a compared field.
+    pub fn stamp_vector(&mut self) {
+        (self.stamp_gen, self.stamp_bak_gen) = (self.gen, self.bak_gen);
     }
 }
 

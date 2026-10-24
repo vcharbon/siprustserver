@@ -279,6 +279,12 @@ impl CallLimiterState {
         AdmitReport::lost(self.key.clone(), change, entries)
     }
 
+    /// This state with its change counter at zero: what it holds that a
+    /// refresh's counter does not move.
+    pub fn without_change(&self) -> Self {
+        CallLimiterState { change: 0, ..self.clone() }
+    }
+
     /// The call's turn dispatches a consult whose answer may admit a route:
     /// the call owes its release from this turn, and `n` change numbers are
     /// reserved, one per admit the consult may send (a failure consult's
