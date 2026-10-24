@@ -53,7 +53,10 @@ impl ActionExecutor<'_> {
     /// A final above its dialog's local sequence: the sequence is raised to
     /// it, so no later request re-uses a number the peer saw (RFC 3261
     /// §12.2.1.1); an INVITE final is ACKed, the round becoming the dialog's
-    /// INVITE exchange; a BYE's final ends its dialog.
+    /// INVITE exchange, and one above the dialled INVITE's number on an early
+    /// dialog proves that dialog confirmed and the dialled INVITE answered, so
+    /// the teardown BYEs it instead of cancelling an answered INVITE; a BYE's
+    /// final ends its dialog.
     fn take_evidence_final(
         &mut self,
         call: &mut Call,
@@ -66,10 +69,20 @@ impl ActionExecutor<'_> {
         let cseq = i64::from(resp.cseq().seq());
         let invite = resp.cseq().method() == Method::Invite;
         *call = update_leg(call.clone(), leg_id, |leg| {
+            // A re-INVITE rides a confirmed dialog (RFC 3261 §14).
+            let reinvite = invite && leg.dialled_cseq().is_some_and(|dialled| cseq > dialled);
+            if reinvite && leg.outbound_invite().is_some_and(|i| i.our_tag == id.our_tag) {
+                if let Some(dialled) = leg.outbound_invite_mut() {
+                    dialled.record_final(200);
+                }
+            }
             if let Some(d) = leg.dialogs.by_tags_mut(&id.our_tag, &id.peer_tag) {
                 d.our_cseq = d.our_cseq.max(cseq);
                 if invite {
                     d.sent_invite = None;
+                }
+                if reinvite && d.state == DialogState::Early {
+                    d.state = DialogState::Confirmed;
                 }
             }
         });

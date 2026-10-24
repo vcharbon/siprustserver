@@ -9,7 +9,7 @@ use layer_harness::Stamped;
 use sip_net_testkit::{audit_visible_event, SignalingNetworkEvent};
 
 use super::FailoverHarness;
-use crate::rfc_acceptance::{lane_details, Finding};
+use crate::rfc_acceptance::{lane_details, Admits, Finding};
 
 impl FailoverHarness {
     /// [`accept_rfc_deviations_from_now`](Self::accept_rfc_deviations_from_now),
@@ -20,6 +20,23 @@ impl FailoverHarness {
         debug_assert!(!justification.trim().is_empty(), "acceptance needs a justification");
         let from = self.harness.recording().channel().snapshot().iter().map(|s| s.seq).max();
         self.rfc_acceptance.open_window_once_per_dialog(rule, from.unwrap_or(0));
+    }
+
+    /// [`accept_rfc_deviations_once_per_dialog`](Self::accept_rfc_deviations_once_per_dialog),
+    /// accepting only the offending messages `admits` passes.
+    pub fn accept_rfc_deviations_once_per_dialog_where(
+        &mut self,
+        rule: &str,
+        admits: Admits,
+        justification: &str,
+    ) {
+        debug_assert!(!justification.trim().is_empty(), "acceptance needs a justification");
+        let from = self.harness.recording().channel().snapshot().iter().map(|s| s.seq).max();
+        self.rfc_acceptance.open_window_once_per_dialog_where(
+            rule,
+            from.unwrap_or(0),
+            Some(admits),
+        );
     }
 
     /// Accept the dialog verdicts of `rule` (a `dialog-…` rule) each UA of

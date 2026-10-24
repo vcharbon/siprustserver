@@ -5,24 +5,23 @@
 #
 # The owner is read from the finding: a second CDR where the departure sweep
 # ends a call a killed primary ended behind the replication window (no marker
-# tells it), §5; a final under another tag than a provisional that left inside
-# the replication window, a request or final a copy sends without the record
-# of what the dead owner sent, a request into a dialog the other copy ended,
-# and the non-2xx a copy owes a caller the dead primary answered §4; a CSeq
-# re-used outside a primary kill, §11 (no declared window covers it); a PRACK,
-# an owed ACK or an in-dialog request left unanswered §2; a 2xx repeat routed
-# through the other owner §8; and any other finding of a split cell §7.
+# tells it), §5; a request or final a copy sends without the record of what
+# the dead owner sent, a request into a dialog the other copy ended, and the
+# non-2xx a copy owes a caller the dead primary answered §4; a deviation no
+# declared window of §11 covers, §11; a PRACK, an owed ACK or an in-dialog
+# request left unanswered §2; a 2xx repeat routed through the other owner §8;
+# and any other finding of a split cell §7.
 
-basic/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-basic/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-forked/stalled-killed/t5-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-forked/stalled-killed/t5-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-info-x-bye/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-info-x-bye/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-info/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-info/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-keepalive/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-keepalive/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
+basic/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+basic/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+forked/stalled-killed/t5-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+forked/stalled-killed/t5-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+info-x-bye/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+info-x-bye/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+info/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+info/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+keepalive/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+keepalive/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
 media-leg/primary-killed/t4-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
 media-leg/stalled-killed/t4-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
 media-leg/stalled-killed/t4-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
@@ -30,63 +29,42 @@ media-leg/stalled-killed/t5-left  ADR-0055 §4  # the copy sends the caller a no
 media-leg/stalled-killed/t5-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
 media-leg/stalled-killed/t6-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
 media-leg/stalled-killed/t6-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-prack/primary-killed/t3-logged  ADR-0055 §4  # final under another tag than a provisional that left inside the replication window
 prack/stalled-killed/t1-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
 prack/stalled-killed/t1-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
 prack/stalled-killed/t2-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
 prack/stalled-killed/t2-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-prack/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-prack/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-prack/stalled-killed/t4-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-prack/stalled-killed/t4-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-prack/stalled-killed/t5-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-prack/stalled-killed/t5-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-prack/unbacked-killed/t3-left  ADR-0055 §11  # the BYE of a 2xx no node holds re-uses a CSeq the dead primary sent: the window is declared for a primary kill only
-refer-x-bye/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-refer-x-bye/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
+prack/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+prack/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+prack/stalled-killed/t4-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+prack/stalled-killed/t4-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+prack/stalled-killed/t5-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+prack/stalled-killed/t5-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+refer-x-bye/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+refer-x-bye/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
 refer/primary-killed/t14-applied  ADR-0055 §5  # the departure sweep ends a call its primary ended behind the window: a second CDR, no marker
-refer/primary-killed/t7-applied  ADR-0055 §4  # the copy reads the 2xx of a re-INVITE the dead primary sent as its dialled INVITE's
-refer/primary-killed/t8-applied  ADR-0055 §4  # the copy reads the 2xx of a re-INVITE the dead primary sent as its dialled INVITE's
-refer/primary-killed/t9-left  ADR-0055 §4  # the copy reads the 2xx of a re-INVITE the dead primary sent as its dialled INVITE's
-refer/split-healed/t7-applied  ADR-0055 §7  # the copy behind the split reads the re-INVITE's 2xx as the INVITE's
-refer/split-healed/t7-left  ADR-0055 §7  # the copy behind the split reads the re-INVITE's 2xx as the INVITE's
-refer/split-healed/t7-logged  ADR-0055 §7  # the copy behind the split reads the re-INVITE's 2xx as the INVITE's
-refer/split-healed/t8-applied  ADR-0055 §7  # the copy behind the split reads the re-INVITE's 2xx as the INVITE's
-refer/split-healed/t8-left  ADR-0055 §7  # the copy behind the split reads the re-INVITE's 2xx as the INVITE's
-refer/split-healed/t8-logged  ADR-0055 §7  # the copy behind the split reads the re-INVITE's 2xx as the INVITE's
-refer/split-healed/t9-left  ADR-0055 §7  # the copy behind the split reads the re-INVITE's 2xx as the INVITE's
-refer/split-healed/t9-logged  ADR-0055 §7  # the copy behind the split reads the re-INVITE's 2xx as the INVITE's
 refer/split/t1-applied  ADR-0055 §7  # two copies
 refer/split/t2-applied  ADR-0055 §7  # two copies
-refer/split/t2-left  ADR-0055 §4  # final under another tag than the provisional
-refer/split/t2-logged  ADR-0055 §4  # final under another tag than the provisional
-refer/split/t7-applied  ADR-0055 §7  # the copy behind the split reads the re-INVITE's 2xx as the INVITE's
-refer/split/t7-left  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split/t7-logged  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split/t8-applied  ADR-0055 §7  # the copy behind the split reads the re-INVITE's 2xx as the INVITE's
-refer/split/t8-left  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split/t8-logged  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split/t9-left  ADR-0055 §7  # second copy acts on an ended dialog
-refer/split/t9-logged  ADR-0055 §7  # second copy acts on an ended dialog
-refer/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-refer/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-reinvite-x-bye/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-reinvite-x-bye/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
+refer/split/t2-left  ADR-0055 §7  # the split-off primary's setup timeout sends the caller a non-2xx after the other copy's 2xx
+refer/split/t2-logged  ADR-0055 §7  # the split-off primary's setup timeout sends the caller a non-2xx after the other copy's 2xx
+refer/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+refer/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+reinvite-x-bye/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+reinvite-x-bye/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
 reinvite/primary-killed/t6-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
 reinvite/split-healed/t5-left  ADR-0055 §7  # two copies
 reinvite/split-healed/t5-logged  ADR-0055 §7  # two copies
 reinvite/split/t1-applied  ADR-0055 §7  # two copies
 reinvite/split/t2-applied  ADR-0055 §7  # two copies
-reinvite/split/t2-left  ADR-0055 §4  # final under another tag than the provisional
-reinvite/split/t2-logged  ADR-0055 §4  # final under another tag than the provisional
+reinvite/split/t2-left  ADR-0055 §7  # the split-off primary's setup timeout sends the caller a non-2xx after the other copy's 2xx
+reinvite/split/t2-logged  ADR-0055 §7  # the split-off primary's setup timeout sends the caller a non-2xx after the other copy's 2xx
 reinvite/split/t5-applied  ADR-0055 §7  # second copy acts on an ended dialog
 reinvite/split/t5-left  ADR-0055 §7  # second copy acts on an ended dialog
 reinvite/split/t5-logged  ADR-0055 §7  # second copy acts on an ended dialog
-reinvite/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-reinvite/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
+reinvite/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+reinvite/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
 reinvite/stalled-killed/t6-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
 reinvite/stalled-killed/t6-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-update-x-bye/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-update-x-bye/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-update/stalled-killed/t3-left  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
-update/stalled-killed/t3-logged  ADR-0055 §4  # a copy CANCELs an INVITE the dead primary saw answered and sends the caller a non-2xx after its 2xx
+update-x-bye/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+update-x-bye/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+update/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+update/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed

@@ -247,7 +247,9 @@ call record or the evidence names:
   replicated with its record, and from what the tag fronts (the leg and the
   callee's tag; RFC 3261 §19.3), so any owner computes the same tag. A BYE that
   meets no dialog draws a 481 and does no harm; an ACK proves its INVITE
-  answered, so that INVITE's transaction draws no final here;
+  answered, so that INVITE's transaction draws no final here; a re-INVITE's
+  final proves the dialog it rides confirmed and the INVITE that dialled it
+  answered, so that INVITE draws no CANCEL;
 - one CDR (§5), every hold released.
 
 Every effect outside SIP is keyed per call: a limiter admit is keyed and expires
@@ -316,12 +318,13 @@ The exempt fields are a closed list; every other field is compared, so a new
 field fails safe:
 
 - maximum: the vector, each dialog's local and remote CSeq (§12.2.1.1), the
-  message and turn counters, the timer generation;
-- union: CDR events, each leg's message ring;
+  message and turn counters, the timer generation, the limiter's change
+  counter (no change number either copy reserved is reused);
+- union: CDR events, each leg's message ring, a limiter release either copy
+  owes;
 - the container's or the base copy's value stands: keepalive request records,
   keepalive and refresh ledger entries and the ladder rungs a quiet turn moves
-  (none changes a dialog), the limiter's refresh counter (its lease expires),
-  the skew offsets of §9, trace fields.
+  (none changes a dialog), the skew offsets of §9, trace fields.
 
 There is no per-axis fold.
 
@@ -386,7 +389,9 @@ number of takeovers unshifted.
   - replication stalled past the cap of §3, then a kill: a caller whose INVITE
     transaction saw neither final nor provisional from the copy is answered by
     its own Timer B, and a callee whose 2xx tag the call record never held keeps
-    its dialog until its own timers end it; the call leaves one CDR or two (the
+    its dialog until its own timers end it (the copy's one CANCEL of that
+    callee's INVITE draws its answer and changes nothing); the call leaves one
+    CDR or two (the
     stalled primary's and the departure sweep's, §5), never none;
   - a backlog over the high-water mark, or a backup at its memory ceiling, then
     a kill: a call with no backup is lost as on a non-HA B2BUA.
@@ -402,7 +407,9 @@ number of takeovers unshifted.
     end's BYE into a dialog the other owner already ended, closed by its 481;
   - a kill inside the replication window: a copy re-uses a CSeq the dead
     primary sent before the backup applied the write, at most one rejected
-    request per dialog; the call still ends or continues cleanly. A kill at an
+    request per dialog; the call still ends or continues cleanly. A call with
+    no backup is inside the window for its whole life: the node answering a
+    response no node holds (§4) re-uses a CSeq the same way. A kill at an
     applied sub-point is inside the window only when the primary already wrote
     a later turn;
   - a kill inside the replication window, and a split that heals (user

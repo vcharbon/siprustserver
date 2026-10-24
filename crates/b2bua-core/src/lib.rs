@@ -37,7 +37,7 @@
 
 pub mod answer_deadline;
 pub mod attempts;
-pub mod caller_tags;
+pub use b2bua_sdk::caller_tags;
 pub mod config;
 pub mod decision;
 pub mod decision_log;

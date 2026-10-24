@@ -74,6 +74,16 @@ impl<'a> RuleCall<'a> {
     }
 
     // ── legs ─────────────────────────────────────────────────────────────
+    /// The To-tag the caller knows the call's own dialog by: the a-leg's own
+    /// tag once one was minted, else the one any holder of the record derives
+    /// for it ([`crate::caller_tags::own`]). A service stating a caller-facing
+    /// tag of its own states this one, so every owner of the call names the
+    /// dialog alike (ADR-0055 §4).
+    pub fn caller_tag(&self) -> String {
+        let own = self.0.a_leg.own_tag.clone().filter(|t| !t.is_empty());
+        own.unwrap_or_else(|| crate::caller_tags::own(self.0))
+    }
+
     pub fn a_leg(&self) -> &'a Leg {
         &self.0.a_leg
     }

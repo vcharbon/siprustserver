@@ -34,12 +34,26 @@ struct AcceptanceWindow {
     /// At most one offending request per dialog is accepted when set; a
     /// second request of a dialog the window already accepted one of gates.
     once_per_dialog: bool,
+    /// What the window admits of an offending message beyond its rule and
+    /// span; `None` admits every one.
+    admits: Option<Admits>,
 }
+
+/// A window's test of an offending message: the message's entry and every
+/// entry captured before it.
+pub type Admits = fn(&RecordedSipEntry, &[RecordedSipEntry]) -> bool;
 
 impl AcceptanceWindow {
     /// Whether the message captured at `seq` falls inside this window.
     fn covers(&self, seq: u64) -> bool {
         seq > self.from_seq && self.until_seq.is_none_or(|until| seq <= until)
+    }
+
+    /// Whether the window takes the offending message at `entries[i]`: inside
+    /// its span and admitted by its test.
+    fn takes(&self, i: usize, entries: &[RecordedSipEntry]) -> bool {
+        let Some(entry) = entries.get(i) else { return false };
+        self.covers(entry.seq) && self.admits.is_none_or(|admits| admits(entry, &entries[..i]))
     }
 }
 
@@ -76,6 +90,7 @@ impl RfcAcceptance {
             from_seq,
             until_seq: None,
             once_per_dialog: false,
+            admits: None,
         };
         self.windows.push(window);
     }
@@ -84,11 +99,23 @@ impl RfcAcceptance {
     /// request per dialog: the request is named by its dialog (Call-ID and
     /// tags), method and CSeq, so its copies on every hop count once.
     pub fn open_window_once_per_dialog(&mut self, rule: &str, from_seq: u64) {
+        self.open_window_once_per_dialog_where(rule, from_seq, None);
+    }
+
+    /// [`open_window_once_per_dialog`](Self::open_window_once_per_dialog),
+    /// accepting only the offending messages `admits` passes.
+    pub fn open_window_once_per_dialog_where(
+        &mut self,
+        rule: &str,
+        from_seq: u64,
+        admits: Option<Admits>,
+    ) {
         let window = AcceptanceWindow {
             rule: rule.to_string(),
             from_seq,
             until_seq: None,
             once_per_dialog: true,
+            admits,
         };
         self.windows.push(window);
     }
@@ -115,12 +142,11 @@ impl RfcAcceptance {
         offending: Option<usize>,
         entries: &[RecordedSipEntry],
     ) -> bool {
-        let Some(seq) =
-            offending.and_then(|i| i.checked_sub(1)).and_then(|i| entries.get(i)).map(|e| e.seq)
+        let Some(i) = offending.and_then(|i| i.checked_sub(1)).filter(|i| *i < entries.len())
         else {
             return false;
         };
-        self.windows.iter().any(|w| w.rule == rule && w.covers(seq))
+        self.windows.iter().any(|w| w.rule == rule && w.takes(i, entries))
     }
 
     /// Whether the window that covers the finding at `offending` accepts one
@@ -131,10 +157,9 @@ impl RfcAcceptance {
         offending: Option<usize>,
         entries: &[RecordedSipEntry],
     ) -> bool {
-        let seq =
-            offending.and_then(|i| i.checked_sub(1)).and_then(|i| entries.get(i)).map(|e| e.seq);
-        seq.is_some_and(|seq| {
-            self.windows.iter().any(|w| w.rule == rule && w.covers(seq) && w.once_per_dialog)
+        let i = offending.and_then(|i| i.checked_sub(1)).filter(|i| *i < entries.len());
+        i.is_some_and(|i| {
+            self.windows.iter().any(|w| w.rule == rule && w.takes(i, entries) && w.once_per_dialog)
         })
     }
 

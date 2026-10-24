@@ -9,6 +9,9 @@ use std::time::Duration;
 
 use scenario_harness::actor::run_actor_scenario;
 use scenario_harness::realcall::CallCtx;
+use sip_message::parser::custom::CustomParser;
+use sip_message::{Method, SipMessage, SipParser};
+use sip_net_testkit::RecordedSipEntry;
 
 use super::parties::Parties;
 use super::{Incident, SweepShape};
@@ -97,6 +100,7 @@ pub async fn run_cell(
             }
             () = &mut kill, if kill_pending => {
                 kill_pending = false;
+                accept_cancel_of_an_unseen_answer(&mut cluster);
                 kill_inside_the_window(&mut cluster, &placement);
             }
             () = &mut heal, if heal_pending => {
@@ -201,6 +205,7 @@ fn strike(
         }
         Incident::UnbackedKilled => {
             accept_clean_end_into_ended_dialogs(cluster, names);
+            accept_reused_cseq(cluster);
             cluster.kill(&placement.primary, &placement.backup);
             Some(placement.primary.as_str())
         }
@@ -247,13 +252,49 @@ fn wrote_past(cluster: &Cluster, held: &HeldTurn, cut: Cut) -> bool {
 /// send a reliable provisional whose RSeq does not continue the dead
 /// primary's (ADR-0055 §11).
 fn kill_inside_the_window(cluster: &mut Cluster, placement: &Placement) {
-    cluster.fh.accept_rfc_deviations_once_per_dialog(
-        crate::RULE_CSEQ_IN_DIALOG_ORDER,
-        "ADR-0055 §11: a copy re-uses once per dialog a CSeq the dead primary sent \
-         inside the replication window",
-    );
+    accept_reused_cseq(cluster);
     accept_unseen_rseq(cluster);
     cluster.kill(&placement.primary, &placement.backup);
+}
+
+/// A node holding no record of what the dead primary sent — a copy whose
+/// backup never applied the write, or the node answering a response no node
+/// holds of a call that had no backup — re-uses, once per dialog, a CSeq the
+/// dead primary sent, the request drawing its peer's reject (ADR-0055 §11).
+fn accept_reused_cseq(cluster: &mut Cluster) {
+    cluster.fh.accept_rfc_deviations_once_per_dialog(
+        crate::RULE_CSEQ_IN_DIALOG_ORDER,
+        "ADR-0055 §11: a node without the dead primary's record re-uses once per dialog \
+         a CSeq the dead primary sent inside the replication window",
+    );
+}
+
+/// After a stall, the copy holds unanswered a callee INVITE the dead primary
+/// saw answered and ACKed: no evidence of that 2xx reaches it, so it CANCELs
+/// the INVITE once, the callee answers the CANCEL and keeps its dialog until
+/// its own timers end it (ADR-0055 §11).
+fn accept_cancel_of_an_unseen_answer(cluster: &mut Cluster) {
+    cluster.fh.accept_rfc_deviations_once_per_dialog_where(
+        crate::RULE_NO_CANCEL_AFTER_FINAL,
+        cancels_an_invite_answered_2xx,
+        "ADR-0055 §11: after a stall, a callee whose 2xx tag the record never held keeps its \
+         dialog; the copy's CANCEL of its INVITE changes nothing",
+    );
+}
+
+/// Whether `cancel` names an INVITE an entry of `earlier` answered 2xx: the
+/// same Call-ID, From-tag and CSeq number.
+fn cancels_an_invite_answered_2xx(cancel: &RecordedSipEntry, earlier: &[RecordedSipEntry]) -> bool {
+    let parser = CustomParser::new();
+    let Ok(SipMessage::Request(cancel)) = parser.parse(&cancel.raw) else { return false };
+    earlier.iter().any(|entry| {
+        let Ok(SipMessage::Response(resp)) = parser.parse(&entry.raw) else { return false };
+        (200..300).contains(&resp.status())
+            && resp.cseq().method() == Method::Invite
+            && resp.cseq().seq() == cancel.cseq().seq()
+            && resp.call_id().as_str() == cancel.call_id().as_str()
+            && resp.from().tag() == cancel.from().tag()
+    })
 }
 
 /// The §4 clean end BYEs every dialog the record or the evidence names; one

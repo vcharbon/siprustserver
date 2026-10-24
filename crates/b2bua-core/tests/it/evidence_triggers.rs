@@ -273,3 +273,55 @@ Content-Length: 0\r\n\r\n",
     assert_eq!(to_carol, ["ACK", "BYE"]);
     assert_eq!(result.call.state, call::CallModelState::Terminating);
 }
+
+/// The callee's 2xx to a re-INVITE another owner sent, on the early dialog
+/// the record holds: the re-INVITE proves the dialog confirmed and the
+/// dialled INVITE answered. The 2xx is ACKed, the dialog BYEd past its
+/// number, and no CANCEL follows the answer.
+#[test]
+fn a_2xx_above_the_dialled_number_on_an_early_dialog_confirms_it_and_byes_it() {
+    let event = final_from_bob(200, "INVITE", 2, "z9hG4bKreinvite");
+    let config = B2buaConfig::default();
+    let (rule, result) = turn_on(&ringing(), &event, "b-1", &on_bobs_dialog(), &config);
+    assert_eq!(rule, Some("evidence-final"));
+    let result = result.expect("a turn");
+    let to_bob = requests_to(&result, "b-1");
+    assert_eq!(to_bob.first(), Some(&("ACK".to_string(), 2)), "{to_bob:?}");
+    assert!(to_bob.iter().any(|(m, c)| m == "BYE" && *c == 3), "{to_bob:?}");
+    assert!(to_bob.iter().all(|(m, _)| m != "CANCEL"), "{to_bob:?}");
+}
+
+/// The transfer target's 2xx at a CSeq above the INVITE that dialled it
+/// answers a later request of its early-held dialog — a re-INVITE another
+/// owner sent after the target's answer: the transfer machine does not read
+/// it as the target answering its INVITE, and the evidence rule claims it.
+#[test]
+fn a_transfer_targets_2xx_above_its_dialled_number_is_evidence_not_its_answer() {
+    let mut call = bridged();
+    let mut target = call::helpers::find_leg(&call, "b-1").expect("the referrer").clone();
+    target.leg_id = "b-2".into();
+    target.dialogs = Default::default();
+    target.dialogs.insert(Dialog::new("svc", "bobtag", DialogState::Early, 1));
+    if let Some(invite) = target.outbound_invite_mut() {
+        invite.final_received = None;
+    }
+    call = call::helpers::add_b_leg(call, target);
+    call.transfer = Some(call::TransferState {
+        phase: call::TransferPhase::CRinging,
+        referrer_leg_id: "b-1".into(),
+        refer_to_uri: "sip:carol@10.0.0.3".into(),
+        effective_refer_to_uri: None,
+        callback_context: None,
+        c_leg_id: Some("b-2".into()),
+        refer_cseq: Some(2),
+        notify_event: "refer".into(),
+        started_at_ms: 0,
+        last_c_leg_provisional_status: Some(180),
+        c_initial_sdp: None,
+    });
+    b2bua_core::rules::refer_transfer::project_cursor(&mut call);
+    let event = final_from_bob(200, "INVITE", 2, "z9hG4bKreinvite");
+    let config = B2buaConfig::default();
+    let (rule, _) = turn_on(&call, &event, "b-2", &on_bobs_dialog(), &config);
+    assert_eq!(rule, Some("evidence-final"));
+}

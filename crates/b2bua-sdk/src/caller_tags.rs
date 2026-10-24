@@ -24,7 +24,7 @@ pub fn of_leg(call: &Call, leg: &str) -> String {
 }
 
 /// The caller dialog a 2xx opens in place of the early dialog the caller was
-/// shown media under ([`b2bua_sdk::model::RuleAction::AnswerALegNewDialog`]).
+/// shown media under ([`crate::model::RuleAction::AnswerALegNewDialog`]).
 pub fn answering(call: &Call) -> String {
     sip_ids::derived_tag(call.tag_seed, &[call.a_leg.leg_id.as_bytes(), b"answering"])
 }

@@ -40,3 +40,17 @@ fn two_calls_derive_unrelated_tags() {
     other.tag_seed = call.tag_seed.wrapping_add(1);
     assert_ne!(caller_tags::own(&call), caller_tags::own(&other));
 }
+
+/// The caller tag a service reads is the a-leg's own once minted, else the
+/// one every holder of the record derives: a copy that never saw the
+/// provisional names the same dialog.
+#[test]
+fn a_service_reads_the_caller_tag_every_owner_derives() {
+    let minted = bridged();
+    assert_eq!(b2bua_sdk::rule_call::RuleCall::new(&minted).caller_tag(), "b2bua-a");
+    let mut unshown = minted.clone();
+    unshown.a_leg.own_tag = None;
+    let read = b2bua_sdk::rule_call::RuleCall::new(&unshown).caller_tag();
+    assert_eq!(read, caller_tags::own(&unshown));
+    assert_eq!(read, b2bua_sdk::rule_call::RuleCall::new(&unshown.clone()).caller_tag());
+}

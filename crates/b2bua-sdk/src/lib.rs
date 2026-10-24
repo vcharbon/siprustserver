@@ -43,6 +43,7 @@
 
 pub mod body;
 pub mod caller_invite;
+pub mod caller_tags;
 pub mod config;
 pub mod effect;
 pub mod event;

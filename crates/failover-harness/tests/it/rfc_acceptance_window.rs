@@ -159,3 +159,43 @@ async fn resume_closes_every_open_window_for_the_rule() {
     hangup(&mut dialog, &bob).await;
     fh.advance(Duration::from_secs(1)).await;
 }
+
+/// A window's admission test narrows what it accepts: the in-window deviation
+/// it admits is accepted.
+#[tokio::test(start_paused = true)]
+async fn a_deviation_the_windows_test_admits_is_accepted() {
+    let mut fh = FailoverHarness::new("rfc-window-admitted", &["b1"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+
+    let mut dialog = establish(&alice, &bob).await;
+    fh.accept_rfc_deviations_once_per_dialog_where(
+        RULE_CSEQ_IN_DIALOG_ORDER,
+        |entry, earlier| !earlier.is_empty() && !entry.raw.is_empty(),
+        JUSTIFICATION,
+    );
+    commit_cseq_reuse(&mut dialog, &alice, &bob).await;
+    hangup(&mut dialog, &bob).await;
+    fh.advance(Duration::from_secs(1)).await;
+    assert_eq!(fh.accepted_rfc_deviations().len(), 1, "the admitted reuse is accepted");
+}
+
+/// The same in-window deviation its window's test refuses still gates.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "RFC 3261 audit violation")]
+async fn a_deviation_the_windows_test_refuses_still_gates() {
+    let mut fh = FailoverHarness::new("rfc-window-refused", &["b1"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+
+    let mut dialog = establish(&alice, &bob).await;
+    fh.accept_rfc_deviations_once_per_dialog_where(
+        RULE_CSEQ_IN_DIALOG_ORDER,
+        |_, _| false,
+        JUSTIFICATION,
+    );
+    commit_cseq_reuse(&mut dialog, &alice, &bob).await;
+    hangup(&mut dialog, &bob).await;
+    fh.advance(Duration::from_secs(1)).await;
+    assert!(fh.accepted_rfc_deviations().is_empty(), "the refused reuse is not accepted");
+}
