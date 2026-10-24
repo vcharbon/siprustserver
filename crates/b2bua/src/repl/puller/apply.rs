@@ -171,7 +171,6 @@ impl Puller {
                                         }
                                         Met::Held(merged) => {
                                             let kept = KeptCopy {
-                                                indexes,
                                                 body_ttl_ms,
                                                 incarnation: incarnation.clone(),
                                             };
@@ -287,15 +286,16 @@ impl Puller {
     }
 
     /// Store `merged`, the stored copy with an incoming copy's exempt fields
-    /// merged in, at its own vector: a local apply, never re-propagated, its
-    /// instants in the frame the stored copy's were.
+    /// merged in, at its own vector and under its own index keys: a local
+    /// apply, never re-propagated, its instants in the frame the stored copy's
+    /// were.
     async fn keep_merged(
         &self,
         role: PartitionRole,
         primary: &str,
         call_ref: &str,
         merged: &call::Call,
-        kept: KeptCopy<'_>,
+        kept: KeptCopy,
     ) {
         let (Ok(body), Some(t)) = (self.codec.encode(merged), merged.topology.as_ref()) else {
             return;
@@ -306,9 +306,10 @@ impl Puller {
             incarnation: kept.incarnation,
             ..PutOpts::default()
         };
+        let indexes = call::call_index_keys(merged);
         let _ = self
             .store
-            .put_call(role, primary, call_ref, body, kept.indexes, kept.body_ttl_ms, p, b, &opts)
+            .put_call(role, primary, call_ref, body, &indexes, kept.body_ttl_ms, p, b, &opts)
             .await;
     }
 
@@ -365,15 +366,18 @@ impl Puller {
     }
 
     /// Hand a frame's outcome up to the router (ADR-0011 X11 / ADR-0014 /
-    /// ADR-0031 D3). An applied reverse flush is reclaimed; a refused one, in
-    /// either direction, rides up **with its body**, because the call model can
-    /// read lifecycle progress in it that the counters cannot carry. A bootstrap
-    /// import signals nothing — the bulk reclaim covers the whole partition once.
+    /// ADR-0055 §7). An applied reverse flush is reclaimed; a refused one, in
+    /// either direction, rides up **with its body** to meet the live copy, the
+    /// latest of its call in the batch, once the batch is read whole
+    /// ([`held_meetings`](super::held_meetings)); any other frame of the call
+    /// rides up after it. A bootstrap import signals nothing — the bulk reclaim
+    /// covers the whole partition once.
     ///
     /// A pre-bootstrap Backup-flow refusal signals nothing either: the bulk
     /// re-seed replays the whole `bak:{peer}` keyspace, so its refusals are the
-    /// state of the two views and not an event, and folding each one would drive
-    /// one fold per resident call. They are counted; only the tail is handed up.
+    /// state of the two views and not an event, and meeting each one would drive
+    /// one meeting per resident call. They are counted; only the tail is handed
+    /// up.
     ///
     /// An applied forward write — a `Put` with its body, a `Delete` with the
     /// incarnation it names — rides up only for a call this node serves as a
@@ -392,54 +396,86 @@ impl Puller {
         write: PrimaryWrite,
         origin_now_ms: i64,
     ) {
-        use ApplyOutcome::{Applied, Dominated, Refused, Shed, Superseded};
         let Some(sink) = &self.repl_tx else { return };
-        if (mode, outcome) == (ApplyMode::Forward, Applied) {
-            if sink.serves_takeover(call_ref) {
-                let call_ref = call_ref.to_string();
-                sink.send(ReplCommand::ForwardFlushApplied { call_ref, write });
-            }
-            return;
-        }
-        let body = match write {
-            PrimaryWrite::Put(body) => body,
-            PrimaryWrite::Delete(incarnation) => {
-                if mode != ApplyMode::Forward && outcome == Applied {
-                    let call_ref = call_ref.to_string();
-                    sink.send(ReplCommand::ReverseDeleteApplied { call_ref, incarnation });
+        let cmd = command(mode, outcome, bootstrapped, call_ref, write, origin_now_ms, sink);
+        match cmd {
+            Some(
+                cmd @ (ReplCommand::ReverseFlushRefused { .. }
+                | ReplCommand::ForwardFlushRefused { .. }),
+            ) => self.held_meetings.hold(call_ref, cmd),
+            other => {
+                if let Some(held) = self.held_meetings.take(call_ref) {
+                    sink.send(held);
                 }
-                return;
+                if let Some(cmd) = other {
+                    sink.send(cmd);
+                }
             }
-        };
-        if mode == ApplyMode::Forward && !bootstrapped {
-            return;
         }
-        let cmd = match (mode, outcome) {
-            // Reclaim straggler: a backup reverse-flushed one of OUR calls after
-            // the bulk sweep — re-materialise + re-serve it.
-            (ApplyMode::Reverse, Applied) => ReplCommand::ReclaimCall(call_ref.to_string()),
-            (ApplyMode::Reverse, Dominated | Refused) => ReplCommand::ReverseFlushRefused {
-                call_ref: call_ref.to_string(),
-                body,
-                origin_now_ms,
-            },
-            // Forward: only a SPLIT rides up. A dominated re-delivery says nothing
-            // the live copy does not already hold.
-            (ApplyMode::Forward, Refused) => ReplCommand::ForwardFlushRefused {
-                call_ref: call_ref.to_string(),
-                body,
-                origin_now_ms,
-            },
-            (ApplyMode::Forward, Applied | Dominated) | (ApplyMode::Bootstrap, _) => return,
-            (_, Shed | Superseded) => return,
-        };
-        sink.send(cmd);
+    }
+
+    /// Hand the router every refused copy the batch held, the batch read
+    /// whole ([`held_meetings`](super::held_meetings)).
+    pub(super) fn release_meetings(&self) {
+        let held = self.held_meetings.take_all();
+        if let Some(sink) = &self.repl_tx {
+            for cmd in held {
+                sink.send(cmd);
+            }
+        }
+    }
+}
+
+/// The command a frame's outcome hands the router ([`Puller::signal`]), or
+/// none.
+fn command(
+    mode: ApplyMode,
+    outcome: ApplyOutcome,
+    bootstrapped: bool,
+    call_ref: &str,
+    write: PrimaryWrite,
+    origin_now_ms: i64,
+    sink: &crate::repl::RouterSink,
+) -> Option<ReplCommand> {
+    use ApplyOutcome::{Applied, Dominated, Refused, Shed, Superseded};
+    if (mode, outcome) == (ApplyMode::Forward, Applied) {
+        let call_ref = call_ref.to_string();
+        return sink
+            .serves_takeover(&call_ref)
+            .then_some(ReplCommand::ForwardFlushApplied { call_ref, write });
+    }
+    let body = match write {
+        PrimaryWrite::Put(body) => body,
+        PrimaryWrite::Delete(incarnation) => {
+            let applied_reverse = mode != ApplyMode::Forward && outcome == Applied;
+            let call_ref = call_ref.to_string();
+            return applied_reverse
+                .then_some(ReplCommand::ReverseDeleteApplied { call_ref, incarnation });
+        }
+    };
+    if mode == ApplyMode::Forward && !bootstrapped {
+        return None;
+    }
+    let call_ref = call_ref.to_string();
+    match (mode, outcome) {
+        // Reclaim straggler: a backup reverse-flushed one of OUR calls after
+        // the bulk sweep — re-materialise + re-serve it.
+        (ApplyMode::Reverse, Applied) => Some(ReplCommand::ReclaimCall(call_ref)),
+        (ApplyMode::Reverse, Dominated | Refused) => {
+            Some(ReplCommand::ReverseFlushRefused { call_ref, body, origin_now_ms })
+        }
+        // Forward: only a SPLIT rides up. A dominated re-delivery says nothing
+        // the live copy does not already hold.
+        (ApplyMode::Forward, Refused) => {
+            Some(ReplCommand::ForwardFlushRefused { call_ref, body, origin_now_ms })
+        }
+        (ApplyMode::Forward, Applied | Dominated) | (ApplyMode::Bootstrap, _) => None,
+        (_, Shed | Superseded) => None,
     }
 }
 
 /// What a stored copy kept over an incoming one is written with.
-struct KeptCopy<'a> {
-    indexes: &'a [String],
+struct KeptCopy {
     body_ttl_ms: i64,
     incarnation: Option<String>,
 }

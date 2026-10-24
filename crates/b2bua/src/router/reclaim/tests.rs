@@ -233,8 +233,8 @@ async fn the_backups_ending_is_discharged_and_its_teardown_awaited() {
 }
 
 /// **A copy that does not rebuild the caller's INVITE is never taken**
-/// (ADR-0052 §11): the live copy, which does, keeps serving the call with
-/// the other's exempt fields, and the refusal is counted.
+/// (ADR-0052 §11): the live copy, which does, keeps serving the call at its
+/// own vector, and the refusal is counted.
 #[tokio::test(start_paused = true)]
 async fn a_copy_that_does_not_rebuild_the_callers_invite_is_never_taken() {
     let n = node("w0").await;
@@ -247,7 +247,7 @@ async fn a_copy_that_does_not_rebuild_the_callers_invite_is_never_taken() {
     assert_eq!(after.a_leg_invite, live.a_leg_invite, "the caller's INVITE is the live one");
     assert!(!call::helpers::caller_answered(&after), "nothing compared of the copy landed");
     assert_eq!(n.metrics.unrecoverable_folds_total(), 1);
-    assert_eq!(live_versions(&n, &live.call_ref).0, (4, 2), "its counters are seen");
+    assert_eq!(live_versions(&n, &live.call_ref).0, (4, 1), "no vector without its body");
 }
 
 /// **A meeting is not this node's write.** The backup's write the store took
@@ -537,4 +537,72 @@ async fn a_deferred_terminal_another_call_replaced_is_released_by_its_own_key() 
     reap_expired_replicas(ctx, n.clock.now_ms()).await;
     assert_eq!(ctx.limiter.waiting(), 1, "released once");
     assert_eq!(n.metrics.repl_terminal_lost_total(), 1, "counted once");
+}
+
+/// `call` with an INFO relayed toward the caller by worker `by`, awaiting its
+/// final.
+fn relaying(mut call: Call, by: call::RelayOwner) -> Call {
+    let d = call.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
+    d.our_cseq += 1;
+    let mut record = call::RequestRecord::relayed("INFO", d.our_cseq, 9);
+    record.relayed_by = by;
+    d.requests.push(record);
+    call
+}
+
+/// **A contained copy that plays on does so from the primary's copy.** The
+/// primary's write contains the takeover copy but lacks the INFO the copy
+/// relays, whose final returns to the copy: the copy plays on from the
+/// primary's copy taken whole, its own relay carried, and never claims the
+/// primary's vector over its own body.
+#[tokio::test(start_paused = true)]
+async fn a_contained_copy_that_plays_on_takes_the_primarys_copy_with_its_own_records() {
+    let n = node("w1").await;
+    let by = n.core.router_ctx().config.relay_owner();
+    let copy = relaying(answered(4, 2, CallModelState::Active), by.clone());
+    let mut primary = answered(6, 2, CallModelState::Active);
+    primary.callback_context = Some("the primary's".into());
+    meet(&n, &copy, &primary, FlushDirection::Forward, MaterialiseOrigin::Takeover).await;
+
+    let after = n.core.router_ctx().state.peek(&copy.call_ref).expect("the copy plays on");
+    assert_eq!(after.callback_context, primary.callback_context, "the primary's copy, whole");
+    let d = after.a_leg.dialogs.confirmed().expect("the caller's dialog");
+    assert!(d.requests.iter().any(|r| r.relayed_by == by), "the copy's own relay is kept");
+    assert_eq!(live_versions(&n, &copy.call_ref), ((6, 2), (6, 2)), "the primary's version");
+}
+
+/// `call` with a confirmed callee leg `b-9` only this copy dialled.
+fn with_a_leg_only_here(mut call: Call) -> Call {
+    let mut leg = call::testkit::dialled_leg("b-9", "only-here-tag");
+    call::testkit::stage_leg(&mut leg, LegState::Confirmed);
+    call.b_legs.push(leg);
+    call
+}
+
+/// **An ending copy ranked higher still ends a dialog only the record
+/// holds.** The backup ended the call behind the split while the record
+/// confirmed a callee leg the backup never read: meeting the backup's
+/// terminal, the record BYEs that leg before it discharges the call.
+#[tokio::test(start_paused = true)]
+async fn an_ending_ranked_higher_still_ends_a_leg_only_the_record_holds() {
+    let n = node("w0").await;
+    let live = with_a_leg_only_here(answered(6, 1, CallModelState::Active));
+    let ended = answered(4, 2, CallModelState::Terminated);
+    meet(&n, &live, &ended, FlushDirection::Reverse, MaterialiseOrigin::Reclaim).await;
+
+    assert_eq!(n.metrics.repl_copies_diverged_total(), 1, "the record ends the call");
+    let ending = |c: &Call| {
+        let leg = c.b_legs.iter().find(|l| l.leg_id == "b-9").expect("the leg only here");
+        leg.state() == LegState::Terminated
+    };
+    match n.core.router_ctx().state.peek(&live.call_ref) {
+        Some(after) => assert!(ending(&after), "the leg only here is ending"),
+        None => {
+            let cdrs = n.cdr.snapshot();
+            assert_eq!(cdrs.len(), 1, "one record");
+            assert!(cdrs[0].b_legs.iter().any(|l| l.leg_id == "b-9"), "it holds the leg only here");
+            let reason = cdrs[0].events.iter().filter_map(|e| e.reason.as_deref()).next_back();
+            assert_eq!(reason, Some("diverged"), "the record's teardown ended the call");
+        }
+    }
 }

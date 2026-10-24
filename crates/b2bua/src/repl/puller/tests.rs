@@ -1,6 +1,7 @@
 use super::*;
 use crate::metrics::B2buaMetrics;
 use crate::repl::ReplicatingCallStore;
+use crate::router::ReplCommand;
 use crate::store::{CallStore, PartitionRole};
 use async_trait::async_trait;
 use repl_net::frame::{Frame, Op, Partition, Watermark};

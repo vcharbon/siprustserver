@@ -5,9 +5,10 @@
 //! union of both copies' dialogs by their tags (ADR-0041): each dialog at the
 //! further of its two states and at the higher of each of its sequences, so
 //! the BYE goes at the greater CSeq plus one; the caller answered when either
-//! copy answered her; the CDR events of both. The request records whose
-//! transactions this node holds stay in the union, so its teardown answers
-//! them (RFC 3261 §15.1.2); the other node's teardown answers its own.
+//! copy answered her; the CDR events of both. The union holds only the
+//! request records whose transactions this node holds, so its teardown
+//! answers them (RFC 3261 §15.1.2); the other node's teardown answers its
+//! own.
 
 use std::sync::Arc;
 
@@ -52,69 +53,147 @@ pub(super) async fn end_diverged(
     let incoming_ranks = lifecycle_behind(live, &incoming)
         || (!lifecycle_behind(&incoming, live) && incoming_is_primary);
     let by = ctx.config.relay_owner();
-    let mut union = if incoming_ranks {
-        merge_exempt(union_of(incoming.clone(), live, Some(&by)), live)
+    let union = if incoming_ranks {
+        merge_exempt(union_of(incoming, live, live, &by), live)
     } else {
-        merge_exempt(union_of(live.clone(), &incoming, None), &incoming)
+        merge_exempt(union_of(live.clone(), &incoming, live, &by), &incoming)
     };
+    end_from(ctx, call_ref, live, union, now_ms).await;
+}
+
+/// The other owner's ending copy `ending`, ranked higher than the `live`
+/// copy it diverged from, ends the call over the union of both: when a
+/// callee dialog only this node holds is still up, or a request only this
+/// node relays or holds is still open, this node's teardown ends it and
+/// the call discharges once it has; otherwise the ending stands alone.
+/// Returns whether a teardown ran here.
+pub(super) async fn end_over_an_ending(
+    ctx: &Arc<RouterCtx>,
+    call_ref: &str,
+    live: &Call,
+    ending: &Call,
+    now_ms: i64,
+) -> bool {
+    let by = ctx.config.relay_owner();
+    if !only_here_to_end(live, ending, &by) {
+        return false;
+    }
+    let mut union = merge_exempt(union_of(ending.clone(), live, live, &by), live);
+    union.state = CallModelState::Terminating;
+    end_from(ctx, call_ref, live, union, now_ms).await;
+    true
+}
+
+/// Install `union` as the live copy and end the call from it, counted.
+async fn end_from(ctx: &Arc<RouterCtx>, call_ref: &str, live: &Call, mut union: Call, now_ms: i64) {
+    ctx.metrics.bump_repl_copies_diverged();
     resync_timers(ctx, call_ref, live, &mut union, now_ms).await;
     ctx.state.update_quiet(union.clone());
     end_cleanly(ctx, call_ref, &union, now_ms).await;
 }
 
+/// Whether `live` holds what `ending` cannot end: an early or confirmed
+/// callee dialog `ending` does not hold, or a relayed or held request the
+/// worker `by` keeps open. A dialled INVITE no dialog answered yet is left
+/// to its own transaction (RFC 3261 §9.1: no CANCEL before a provisional).
+fn only_here_to_end(live: &Call, ending: &Call, by: &RelayOwner) -> bool {
+    let up = |d: &Dialog| matches!(d.state, DialogState::Early | DialogState::Confirmed);
+    let leg_only_here = live.b_legs.iter().any(|leg| {
+        let theirs =
+            ending.b_legs.iter().find(|l| l.leg_id == leg.leg_id && l.call_id == leg.call_id);
+        let held_there = |d: &Dialog| {
+            theirs.is_some_and(|t| t.dialogs.by_tags(&d.our_tag, &d.peer_tag).is_some())
+        };
+        leg.dialogs.iter().any(|d| up(d) && !held_there(d))
+    });
+    let mine = |r: &RequestRecord| r.relayed_by == *by && !r.is_own();
+    let open_here = std::iter::once(&live.a_leg).chain(live.b_legs.iter()).any(|leg| {
+        leg.dialogs.iter().any(|d| {
+            d.requests.iter().any(mine) || call::helpers::invite_relay(d).is_some_and(mine)
+        })
+    });
+    leg_only_here || open_here
+}
+
 /// `base` with every dialog of `other` it lacks, by the leg and the two tags;
-/// a dialog both hold at the further of its two states and the higher of
-/// each sequence, with the open request records of `other` the worker
-/// `carry` made, when it names one; a leg only `other` dialled; the caller
-/// answered when `other` answered her. A leg both name under one id with
-/// another Call-ID is not the same leg, and stays `base`'s alone.
-fn union_of(mut base: Call, other: &Call, carry: Option<&RelayOwner>) -> Call {
-    union_leg(&mut base.a_leg, &other.a_leg, carry);
+/// a dialog both hold at the further of its two states, the higher of each
+/// sequence, and the remote target and route set of the copy that read the
+/// peer's later request (a target refresh is the peer's request, RFC 3261
+/// §12.2); a leg only `other` dialled; the caller answered when `other`
+/// answered her, and every early dialog of hers ended once she took a final. A leg both name under one id with another Call-ID is not
+/// the same leg, and stays `base`'s alone. The request records of the union
+/// are those of `live` the worker `by` made: this node's teardown answers its
+/// own transactions, the other node's teardown its own.
+fn union_of(mut base: Call, other: &Call, live: &Call, by: &RelayOwner) -> Call {
+    union_leg(&mut base.a_leg, &other.a_leg);
     for theirs in &other.b_legs {
         match base.b_legs.iter_mut().find(|l| l.leg_id == theirs.leg_id) {
-            Some(ours) => union_leg(ours, theirs, carry),
+            Some(ours) => union_leg(ours, theirs),
             None => base.b_legs.push(theirs.clone()),
         }
     }
     if caller_answered(other) && !caller_answered(&base) {
         *base.a_leg.invite_final_sent_mut() = other.a_leg.invite_final_sent();
     }
-    base
+    // The caller's final ends every early dialog of her INVITE (RFC 3261
+    // §12.1, §13.2.2.4), the other copy's included.
+    match base.a_leg.invite_final_sent() {
+        Some(status) if status >= 300 => {
+            call::helpers::reject_early_dialogs(&mut base.a_leg, status)
+        }
+        Some(_) => call::helpers::retire_early_dialogs(&mut base.a_leg),
+        None => {}
+    }
+    own_records(base, live, by)
 }
 
-fn union_leg(ours: &mut Leg, theirs: &Leg, carry: Option<&RelayOwner>) {
+/// `call` with, on each dialog, the open request records of the same dialog
+/// of `live` the worker `by` made and no other: an INVITE relay another
+/// worker made is left to it.
+pub(super) fn own_records(mut call: Call, live: &Call, by: &RelayOwner) -> Call {
+    let mine = |r: &RequestRecord| r.relayed_by == *by;
+    let legs = std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut());
+    for leg in legs {
+        let theirs =
+            call::helpers::find_leg(live, &leg.leg_id).filter(|l| l.call_id == leg.call_id);
+        for d in leg.dialogs.iter_mut() {
+            let held = theirs.and_then(|l| l.dialogs.by_tags(&d.our_tag, &d.peer_tag));
+            d.requests = held
+                .map(|h| h.requests.iter().filter(|r| mine(r)).cloned().collect())
+                .unwrap_or_default();
+            let relay = held.and_then(call::helpers::invite_relay).filter(|r| mine(r));
+            if let Some(relay) = relay {
+                d.sent_invite = Some(relay.clone());
+            } else if call::helpers::invite_relay(d).is_some_and(|r| !mine(r)) {
+                d.sent_invite = None;
+            }
+        }
+    }
+    call
+}
+
+fn union_leg(ours: &mut Leg, theirs: &Leg) {
     if ours.call_id != theirs.call_id {
         return;
     }
     for d in theirs.dialogs.iter() {
         match ours.dialogs.by_tags_mut(&d.our_tag, &d.peer_tag) {
-            Some(o) => union_dialog(o, d, carry),
+            Some(o) => union_dialog(o, d),
             None => ours.dialogs.insert(d.clone()),
         }
     }
 }
 
-fn union_dialog(ours: &mut Dialog, theirs: &Dialog, carry: Option<&RelayOwner>) {
+fn union_dialog(ours: &mut Dialog, theirs: &Dialog) {
     if rank(&theirs.state) > rank(&ours.state) {
         ours.state = theirs.state.clone();
     }
+    if theirs.peer_cseq > ours.peer_cseq {
+        ours.remote_target = theirs.remote_target.clone();
+        ours.route_set = theirs.route_set.clone();
+    }
     ours.our_cseq = ours.our_cseq.max(theirs.our_cseq);
     ours.peer_cseq = ours.peer_cseq.max(theirs.peer_cseq);
-    let Some(by) = carry else { return };
-    let mine = |r: &RequestRecord| r.relayed_by == *by;
-    for record in theirs.requests.iter().filter(|r| mine(r)) {
-        if !ours.requests.contains(record) {
-            ours.requests.push(record.clone());
-        }
-    }
-    let open_relay = call::helpers::invite_relay(theirs).filter(|r| r.relayed_by == *by);
-    if let Some(relay) = open_relay {
-        let later =
-            ours.sent_invite.as_ref().is_some_and(|r| r.outbound_cseq > relay.outbound_cseq);
-        if !later {
-            ours.sent_invite = theirs.sent_invite.clone();
-        }
-    }
 }
 
 /// How far along its life a dialog stands: early; ended while early (let go,

@@ -12,8 +12,8 @@ use super::{ApplyMode, ApplyOutcome, Puller};
 use crate::repl::ReplicatingCallStore;
 use crate::store::PartitionRole;
 
-/// A `Put` of `body` on the flow `partition` in `mode`, at the version the
-/// body states.
+/// A `Put` of `body` on the flow `partition` in `mode`, at the version and
+/// under the index keys the body states.
 async fn put_body(
     p: &Puller,
     partition: Partition,
@@ -22,6 +22,7 @@ async fn put_body(
 ) -> ApplyOutcome {
     use call::CallBodyCodec;
     let call = call::MsgpackCodec::new().decode(&body).expect("decodes");
+    let indexes = call::call_index_keys(&call);
     let (gen, bgen) = call.topology.expect("replicated").vector();
     p.apply_to_store(
         Op::Put,
@@ -31,7 +32,7 @@ async fn put_body(
         bgen,
         60_000,
         0,
-        &[],
+        &indexes,
         Some(body),
         false,
         None,
@@ -132,4 +133,29 @@ async fn copies_that_contain_each_other_keep_the_primarys_in_the_store() {
     let held = stored(&store, PartitionRole::Primary).await;
     assert!(call::helpers::caller_answered(&held));
     assert_eq!(held.topology.expect("replicated").vector(), (5, 3));
+}
+
+/// `body` with a callback context, an index key only it carries.
+fn with_callback(body: Arc<[u8]>, ctx: &str) -> Arc<[u8]> {
+    use call::CallBodyCodec;
+    let codec = call::MsgpackCodec::new();
+    let mut call = codec.decode(&body).expect("decodes");
+    call.callback_context = Some(ctx.into());
+    Arc::from(codec.encode(&call).unwrap())
+}
+
+/// An Element kept over a write it contains keeps its own index keys, not the
+/// write's: a key only the Element's call carries still resolves to it.
+#[tokio::test]
+async fn a_kept_element_keeps_its_own_index_keys() {
+    use crate::store::CallStore;
+    use call::CallModelState::Active;
+    let (p, store, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
+    let copy = with_callback(body_at(Some(200), Active, (5, 3), (5, 3)), "kept-ctx");
+    assert_eq!(forward(&p, copy).await, ApplyOutcome::Applied);
+    let keepalive = body_at(None, Active, (6, 2), (5, 2));
+    assert_eq!(forward(&p, keepalive).await, ApplyOutcome::Refused, "the Element contains it");
+    let key = call::index_key::callback_key("kept-ctx");
+    let resolved = store.get_index(&key).await.expect("the index reads");
+    assert_eq!(resolved.as_deref(), Some("w0|split|t"), "the Element's own key stays");
 }

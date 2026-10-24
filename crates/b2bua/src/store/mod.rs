@@ -81,7 +81,7 @@ struct Inner {
     /// Boxed so a bucket is a pointer, not the whole record: the table's
     /// doubling step and its footprint after a drain stay small, and a call's
     /// own memory goes back to the allocator when it is removed.
-    calls: HashMap<String, Box<Call>>,
+    calls: HashMap<String, Arc<Call>>,
     /// SIP routing index: a [`call::index_key`] key → callRef.
     sip_index: HashMap<String, String>,
     /// The index keys each call currently owns (for clean re-index on update).
@@ -291,7 +291,7 @@ impl CallState {
         inner.touched.insert(call_ref.clone(), now_ms);
         inner.restate_uncounted(was, is);
         self.publish_uncounted(&inner);
-        inner.calls.insert(call_ref.clone(), Box::new(call));
+        inner.calls.insert(call_ref.clone(), Arc::new(call));
         call_ref
     }
 
@@ -401,13 +401,14 @@ impl CallState {
     /// **The state stamp (ADR-0055 §7)** is set here and nowhere else: a write
     /// that changes a compared field of the resident copy
     /// ([`call::helpers::same_state`]) stamps the vector it bumps; a write that
-    /// changes only exempt fields leaves the stamp where it was ([`containment`]).
+    /// changes only exempt fields leaves the stamp ([`containment`]). It runs
+    /// outside the map lock: the caller holds the call's own.
     pub fn update(&self, mut call: Call) {
-        let mut inner = self.locked();
-        let Some(resident) = inner.calls.get(&call.call_ref) else {
+        let Some(resident) = self.locked().calls.get(&call.call_ref).cloned() else {
             return;
         };
-        let changed = !call::helpers::same_state(resident, &call);
+        let changed = !call::helpers::same_state(&resident, &call);
+        let mut inner = self.locked();
         if let Some(t) = call.topology.as_mut() {
             match role_of(&self.self_ordinal, &call.call_ref) {
                 PartitionRole::Primary => t.gen += 1,
@@ -440,7 +441,7 @@ impl CallState {
             self.publish_uncounted(inner);
         }
         if let Some(slot) = inner.calls.get_mut(&call.call_ref) {
-            **slot = call;
+            *slot = Arc::new(call);
         }
     }
 
@@ -599,8 +600,7 @@ impl CallState {
         self.read_partition(PartitionRole::Primary, call_ref).await
     }
 
-    /// The skew offset held beside `call_ref`'s body (ADR-0055 §9); `0` for a
-    /// body written here, an absent one, or no replicating store.
+    /// The skew offset held beside `call_ref`'s body (ADR-0055 §9), else `0`.
     pub fn held_skew_offset_ms(&self, call_ref: &str) -> i64 {
         self.repl_store().and_then(|r| r.skew_offset_ms(call_ref)).unwrap_or(0)
     }
@@ -724,7 +724,7 @@ impl CallState {
             inner.touched.insert(call_ref.clone(), now_ms);
             inner.restate_uncounted(false, call.limiter.runs_uncounted());
             self.publish_uncounted(&inner);
-            inner.calls.insert(call_ref.clone(), Box::new(call));
+            inner.calls.insert(call_ref.clone(), Arc::new(call));
         }
         if origin == MaterialiseOrigin::Reclaim {
             if let (Some(repl), Some(backup)) = (self.repl_store(), backup) {

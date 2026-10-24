@@ -180,3 +180,34 @@ async fn no_replication_wired_sends_the_store_neither_put_nor_delete() {
     assert_eq!(store.puts.load(Ordering::SeqCst), 0, "no put reaches the store");
     assert_eq!(store.deletes.load(Ordering::SeqCst), 0, "no delete reaches the store");
 }
+
+/// The state stamp is set where the vector is bumped (ADR-0055 §7): a write
+/// that changes only exempt fields moves the vector and leaves the stamp; a
+/// write that changes a compared field stamps the vector it bumps.
+#[test]
+fn a_write_stamps_the_vector_only_when_it_changes_a_compared_field() {
+    let store = Arc::new(InMemoryCallStore::new());
+    let state = unwired_state(&store, &B2buaMetrics::new());
+    let call = cookie_call();
+    let call_ref = state.create(call.clone());
+    let versions = || {
+        let t = state.peek(&call_ref).and_then(|c| c.topology).expect("a proxied call");
+        (t.vector(), t.stamp())
+    };
+    let start = versions();
+
+    let mut exempt = state.peek(&call_ref).expect("resident");
+    exempt.message_count = Some(7);
+    exempt.timer_generation += 3;
+    state.update(exempt);
+    let (vector, stamp) = versions();
+    assert_eq!(vector, (start.0 .0 + 1, start.0 .1), "the write is counted");
+    assert_eq!(stamp, start.1, "an exempt-only write leaves the stamp");
+
+    let mut compared = state.peek(&call_ref).expect("resident");
+    compared.callback_context = Some("a compared field".into());
+    state.update(compared);
+    let (vector, stamp) = versions();
+    assert_eq!(stamp, vector, "a compared write stamps the vector it bumps");
+    assert_eq!(vector, (start.0 .0 + 2, start.0 .1));
+}

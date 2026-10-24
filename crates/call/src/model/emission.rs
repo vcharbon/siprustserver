@@ -131,14 +131,21 @@ impl RetainedEmission {
         true
     }
 
-    /// This emission with its ladder at its first rung: what it holds that a
-    /// quiet turn's rung does not move.
-    pub fn at_rest(&self) -> Self {
-        let repeat = match self.repeat {
-            Repeat::Paced { class, .. } => Repeat::Paced { class, rung: 0 },
-            Repeat::OnTrigger => Repeat::OnTrigger,
+    /// Whether `other` is this emission at any rung of its ladder: what it
+    /// holds that a quiet turn's rung does not move.
+    pub fn same_at_rest(&self, other: &Self) -> bool {
+        let RetainedEmission { datagram, dest_host, dest_port, repeat, repeated } = self;
+        let same_repeat = match (repeat, &other.repeat) {
+            (Repeat::Paced { class, .. }, Repeat::Paced { class: other_class, .. }) => {
+                class == other_class
+            }
+            (r, o) => r == o,
         };
-        RetainedEmission { repeat, ..self.clone() }
+        *datagram == other.datagram
+            && *dest_host == other.dest_host
+            && *dest_port == other.dest_port
+            && *repeated == other.repeated
+            && same_repeat
     }
 
     /// How this emission is repeated.

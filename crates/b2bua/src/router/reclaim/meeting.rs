@@ -16,10 +16,10 @@ use super::super::release::{release_call, ReleaseKind};
 use super::super::restore_hygiene::sanitize_restored_timers;
 use super::super::stand_down::covers;
 use super::super::RouterCtx;
-use super::diverged::end_diverged;
+use super::diverged::{end_diverged, end_over_an_ending, own_records};
 use super::ending::discharge_folded_terminal;
 use super::{format_pb, FlushDirection};
-use crate::store::containment::{meet, Met};
+use crate::store::containment::{containment, meet, Containment, Met};
 
 /// The other owner's copy `incoming` of the call meets the `live` copy here,
 /// one call incarnation, under the per-call lock; `direction` says whose
@@ -34,8 +34,11 @@ use crate::store::containment::{meet, Met};
 ///   the layer ([`answered_invite_seeds`]).
 /// - A **forward** copy is the primary's, reaching a takeover copy. A primary
 ///   that contains the copy and holds every request record it keeps open
-///   stands it down ([`covers`]); otherwise the copy plays on, the primary's
-///   exempt fields merged in.
+///   stands it down ([`covers`]). Otherwise the copy plays on: with the
+///   primary's exempt fields merged in when each contains the other, or on
+///   the primary's copy taken whole when only the primary's contains it, the
+///   copy's own open request records carried into it — a vector is never
+///   taken without the body it counts.
 ///
 /// Copies that diverged end the call cleanly from here ([`end_diverged`]).
 pub(in crate::router) async fn meet_live(
@@ -72,12 +75,21 @@ pub(in crate::router) async fn meet_live(
             Met::Held(_) => false,
         };
         if ends_here {
+            let diverged = matches!(met, Met::Diverged) && live.state == CallModelState::Active;
+            if diverged && end_over_an_ending(ctx, call_ref, live, &incoming, now_ms).await {
+                return;
+            }
             if incoming.state == CallModelState::Terminated {
                 discharge_folded_terminal(ctx, call_ref, live, incoming, now_ms).await;
             }
             return;
         }
     }
+    let by = ctx.config.relay_owner();
+    let both = matches!(
+        (live.topology.as_ref(), incoming.topology.as_ref()),
+        (Some(l), Some(i)) if containment(l, i) == Containment::Both
+    );
     match met {
         Met::Held(kept) => {
             if let FlushDirection::Reverse = direction {
@@ -89,16 +101,19 @@ pub(in crate::router) async fn meet_live(
             FlushDirection::Reverse => {
                 take_whole(ctx, call_ref, live, &incoming, taken, now_ms).await
             }
+            FlushDirection::Forward if covers(&incoming, live, &by) => {
+                release_call(ctx, call_ref, ReleaseKind::StandDown).await;
+            }
+            FlushDirection::Forward if both => {
+                keep(ctx, live, merge_exempt(live.clone(), &incoming));
+            }
             FlushDirection::Forward => {
-                if covers(&incoming, live, &ctx.config.relay_owner()) {
-                    release_call(ctx, call_ref, ReleaseKind::StandDown).await;
-                } else {
-                    keep(ctx, live, merge_exempt(live.clone(), &incoming));
-                }
+                let mut taken = own_records(taken, live, &by);
+                resync_timers(ctx, call_ref, live, &mut taken, now_ms).await;
+                ctx.state.update_quiet(taken);
             }
         },
         Met::Diverged => {
-            ctx.metrics.bump_repl_copies_diverged();
             end_diverged(ctx, direction, call_ref, live, incoming, now_ms).await;
         }
     }
@@ -115,7 +130,8 @@ fn keep(ctx: &Arc<RouterCtx>, live: &Call, kept: Call) {
 /// The record takes `taken`, the other owner's copy whole with the live
 /// copy's exempt fields merged in. A copy that does not rebuild its caller's
 /// INVITE never replaces a live one (ADR-0052 §11): it is counted, and the
-/// live copy stands with the other's exempt fields. The live timer service
+/// live copy stands at its own vector — a vector is never taken without the
+/// body it counts — with the other's exempt fields. The live timer service
 /// follows the ledger taken, and every INVITE it holds answered 2xx and
 /// awaiting its ACK is seeded in the layer, so a copy of that INVITE draws
 /// the 2xx (an identity already held is left as it is).
@@ -130,7 +146,9 @@ async fn take_whole(
     if let Err(err) = crate::rules::relay::rebuild_a_leg_invite(&taken.a_leg_invite) {
         ctx.metrics.bump_unrecoverable_fold();
         tracing::error!(%call_ref, error = %err, "a met copy does not rebuild the caller's INVITE: the live copy stays");
-        keep(ctx, live, merge_exempt(live.clone(), incoming));
+        let mut kept = merge_exempt(live.clone(), incoming);
+        kept.topology.clone_from(&live.topology);
+        keep(ctx, live, kept);
         return;
     }
     resync_timers(ctx, call_ref, live, &mut taken, now_ms).await;

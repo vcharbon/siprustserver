@@ -25,6 +25,7 @@ pub(crate) const MODEL_VIOLATIONS: &str = "model_violations";
 pub(crate) const OVERLOAD_SAMPLER: &str = "overload_sampler";
 pub(crate) const OVERLOAD_SIGNAL: &str = "overload_signal";
 pub(crate) const PULLER_BOOTSTRAP: &str = "puller_bootstrap";
+pub(crate) const PULLER_HELD_MEETINGS: &str = "puller_held_meetings";
 pub(crate) const READINESS_TRANSITIONS: &str = "readiness_transitions";
 pub(crate) const REAPER_LEDGERS: &str = "reaper_ledgers";
 pub(crate) const SUPERVISOR_PEERS: &str = "supervisor_peers";
@@ -33,7 +34,7 @@ pub(crate) const TRACE_PROCESS: &str = "trace_process";
 pub(crate) const TRACE_SPANS: &str = "trace_spans";
 
 /// Every lock name, in counter order: the `lock` label's values.
-pub const LOCKS: [&str; 23] = [
+pub const LOCKS: [&str; 24] = [
     ADMIT_BY_CALL,
     BACKEND_GATE,
     CAPACITY_LIMITS,
@@ -51,6 +52,7 @@ pub const LOCKS: [&str; 23] = [
     OVERLOAD_SAMPLER,
     OVERLOAD_SIGNAL,
     PULLER_BOOTSTRAP,
+    PULLER_HELD_MEETINGS,
     READINESS_TRANSITIONS,
     REAPER_LEDGERS,
     SUPERVISOR_PEERS,

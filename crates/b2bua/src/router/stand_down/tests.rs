@@ -83,6 +83,18 @@ fn in_round(b: i64, stage: Option<RoundStage>) -> Call {
     call
 }
 
+/// At the copy's own version the primary's record lacks the round the copy
+/// relayed, whose final returns to the copy: the primary does not cover it,
+/// however much of the copy it read.
+#[test]
+fn a_primary_lacking_the_round_the_copy_relays_does_not_cover_it() {
+    let mut copy = in_round(2, Some(RoundStage::Open));
+    let d = copy.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
+    d.sent_invite.iter_mut().for_each(|p| p.relayed_by = copy_worker());
+    let primary = in_round(2, None);
+    assert!(!covers(&primary, &copy), "the round's final is the copy's alone");
+}
+
 #[test]
 fn a_primary_that_never_read_the_copys_round_does_not_cover_it() {
     for stage in [RoundStage::Open, RoundStage::Answered, RoundStage::Acked] {

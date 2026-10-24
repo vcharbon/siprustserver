@@ -618,10 +618,10 @@ _Avoid_: "call_gen LWW"/"highest gen wins".
 of a copy's last write that changed a **compared field**, set only where the vector is
 bumped (`CallState::update`). Every field of the call record is compared except the
 closed **exempt list** (`call::helpers::compared`): the vector, each dialog's
-sequences, the message and turn counters, the timer generation (maximum of two
-copies); the CDR events and the message rings (union); the keepalive records, the
-keepalive and limiter-refresh ledger entries, the ladder rungs, the limiter's change
-counter, the trace fields (the container's).
+sequences, the message and turn counters, the timer generation, the limiter's change
+counter (maximum of two copies); the CDR events and the message rings (union); the
+keepalive records, the keepalive and limiter-refresh ledger entries, the ladder
+rungs, the trace fields (the container's).
 
 **Containment** (ADR-0055 §7, `store::containment`): of two copies of one call
 incarnation, R **contains** L when L's state stamp is at or below R's vector on both

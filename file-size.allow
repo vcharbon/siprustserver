@@ -36,7 +36,7 @@ crates/b2bua/src/metrics/limiter.rs 504
 crates/b2bua/src/metrics.rs 828
 crates/b2bua/src/node.rs 582
 crates/b2bua/src/repl/changelog.rs 528
-crates/b2bua/src/repl/puller.rs 760
+crates/b2bua/src/repl/puller.rs 742
 crates/b2bua/src/repl/real_transport_tests.rs 1186
 crates/b2bua/src/repl/s12_tests.rs 890
 crates/b2bua/src/repl/store.rs 526

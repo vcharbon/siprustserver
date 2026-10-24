@@ -279,10 +279,38 @@ impl CallLimiterState {
         AdmitReport::lost(self.key.clone(), change, entries)
     }
 
-    /// This state with its change counter at zero: what it holds that a
-    /// refresh's counter does not move.
-    pub fn without_change(&self) -> Self {
-        CallLimiterState { change: 0, ..self.clone() }
+    /// Whether `other` is this state at any change counter: what it holds
+    /// that a refresh's counter does not move.
+    pub fn same_but_change(&self, other: &Self) -> bool {
+        let CallLimiterState {
+            key,
+            release_owed,
+            held,
+            held_change,
+            target,
+            target_change,
+            change: _,
+            runs_on,
+            admit_sent,
+            consults_open,
+        } = self;
+        *key == other.key
+            && *release_owed == other.release_owed
+            && *held == other.held
+            && *held_change == other.held_change
+            && *target == other.target
+            && *target_change == other.target_change
+            && *runs_on == other.runs_on
+            && *admit_sent == other.admit_sent
+            && *consults_open == other.consults_open
+    }
+
+    /// Take the higher of the two change counters, and the release `other`
+    /// owes: two copies of one call never reuse a change number either
+    /// reserved, and a release either owes is owed.
+    pub fn merge_change(&mut self, other: &Self) {
+        self.change = self.change.max(other.change);
+        self.release_owed |= other.release_owed;
     }
 
     /// The call's turn dispatches a consult whose answer may admit a route:

@@ -48,10 +48,10 @@
 //! ```
 //! - connect ok → send one `PullRequest{ partition, since = retained W }`.
 //! - `Data{at}` → apply under `(p,b)`; if `bootstrapped`, `W = at` (+ Reclaim
-//!   straggler [`ReclaimCall`](ReplCommand::ReclaimCall)).
+//!   straggler [`ReclaimCall`](crate::router::ReplCommand::ReclaimCall)).
 //! - `Noop{at}` → `current = true` (sticky); first one marks bootstrap-complete,
 //!   flips `bootstrapped`, and (Reclaim flow) fires the bulk
-//!   [`ReclaimAll`](ReplCommand::ReclaimAll); advance `W` if greater.
+//!   [`ReclaimAll`](crate::router::ReplCommand::ReclaimAll); advance `W` if greater.
 //! - `ResetToBootstrap` → discard `W`, clear bootstrap-complete, bump
 //!   `reset_gen`, disconnect (reconnect re-bootstraps from `(0,0)`).
 //! - after a post-bootstrap `Data` and on every `Noop` → `Position{at}` back to
@@ -91,10 +91,11 @@ use tokio::sync::watch;
 use topology::Peer;
 
 use super::{AddrResolver, ReplicatingCallStore, RouterSink};
-use crate::router::ReplCommand;
 
 mod apply;
+mod bootstrap_complete;
 mod config;
+mod held_meetings;
 mod wiring;
 use apply::{ApplyMode, ApplyOutcome};
 pub use config::PullerConfig;
@@ -209,6 +210,8 @@ pub struct Puller {
     /// bootstrap to time). Written from the single task that runs the FSM; the
     /// mutex is what keeps `&Puller` `Sync` across its awaits.
     bootstrap_started_at: std::sync::Mutex<Option<tokio::time::Instant>>,
+    /// The copies a batch refused, until it is read whole (ADR-0055 §7).
+    held_meetings: held_meetings::HeldMeetings,
 }
 
 impl Puller {
@@ -256,6 +259,7 @@ impl Puller {
                 bootstrap_started_at: std::sync::Mutex::new(
                     (!warm).then(tokio::time::Instant::now),
                 ),
+                held_meetings: Default::default(),
             },
             status_rx,
         )
@@ -400,40 +404,6 @@ impl Puller {
         }
     }
 
-    /// Mark this puller **bootstrap-complete** (sticky). Called on the first
-    /// catch-up `Noop` and on the hard-timer firing (best-effort). Lines the
-    /// per-peer completion once — `applied` bodies imported, `reason` telling a
-    /// real catch-up from a best-effort timer expiry.
-    fn mark_bootstrap_complete(&self, applied: u64, reason: &'static str) {
-        if !self.status_tx.borrow().bootstrap_complete {
-            let started =
-                crate::poison::locked(&self.bootstrap_started_at, crate::poison::PULLER_BOOTSTRAP)
-                    .take();
-            let duration_ms = started.map_or(0, |at| sip_clock::wall::millis_u64(at.elapsed()));
-            tracing::info!(
-                node = observe::node(),
-                peer = %self.peer.ordinal,
-                flow = self.flow_label(),
-                applied,
-                duration_ms,
-                reason,
-                "peer bootstrap complete"
-            );
-        }
-        self.status_tx.send_modify(|s| s.bootstrap_complete = true);
-    }
-
-    /// Signal the router to **bulk-reclaim** every `pri:{self}` body — materialise
-    /// each into the live serving map + re-arm its timers, with the keepalive
-    /// backlog smoothed (ADR-0014 §4). Fired by the **Reclaim** flow on bootstrap
-    /// completion (first `Noop` or best-effort hard-timer). Idempotent
-    /// (`materialize_if_absent`), so a partial pass plus a later one self-heal.
-    fn signal_reclaim_all(&self) {
-        if let Some(sink) = &self.repl_tx {
-            sink.send(ReplCommand::ReclaimAll);
-        }
-    }
-
     /// Race `fut` against the cancel signal and (optionally) the bootstrap hard
     /// deadline. Returns which fired. A `None` deadline means "no hard timer".
     async fn select_with_deadline<F: std::future::Future>(
@@ -465,8 +435,10 @@ impl Puller {
         self.ended(connected_at)
     }
 
-    /// A stream connected at `connected_at` ended.
+    /// A stream connected at `connected_at` ended: the copies its last batch
+    /// refused meet the live copy now.
     fn ended(&self, connected_at: tokio::time::Instant) -> RunOutcome {
+        self.release_meetings();
         let idle = Duration::from_millis(self.config.idle_timeout_ms);
         RunOutcome::Disconnected { lasted: connected_at.elapsed() >= idle }
     }
@@ -573,11 +545,16 @@ impl Puller {
             // hard deadline; once complete (or warm), race cancel only. Both
             // race the idle bound.
             let arm = if bootstrapped { None } else { *deadline };
+            let held = !self.held_meetings.is_empty();
             let frame = match arm {
                 Some(at) => tokio::select! {
                     f = conn.recv() => f,
                     _ = tokio::time::sleep_until(quiet_until) => {
                         return self.left_idle(connected_at);
+                    }
+                    () = tokio::time::sleep(held_meetings::BATCH_QUIET), if held => {
+                        self.release_meetings();
+                        continue;
                     }
                     _ = tokio::time::sleep_until(at) => {
                         // First Noop is taking too long. Mark complete best-effort
@@ -603,6 +580,10 @@ impl Puller {
                     f = conn.recv() => f,
                     _ = tokio::time::sleep_until(quiet_until) => {
                         return self.left_idle(connected_at);
+                    }
+                    () = tokio::time::sleep(held_meetings::BATCH_QUIET), if held => {
+                        self.release_meetings();
+                        continue;
                     }
                     () = cancelled(cancel) => return RunOutcome::Cancelled,
                 },
@@ -698,6 +679,7 @@ impl Puller {
                             self.signal_reclaim_all();
                         }
                     }
+                    self.release_meetings();
                     // Every `Noop` is answered with the position it announced:
                     // the first one is the bootstrap's own claim (every scan body
                     // is applied by now), the idle ones keep the claim fresh
