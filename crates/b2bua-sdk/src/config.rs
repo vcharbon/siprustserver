@@ -17,10 +17,6 @@ pub use retry_after::RetryAfterRange;
 pub struct B2buaConfig {
     /// This worker's ordinal, encoded into `callRef` for partition routing.
     pub self_ordinal: String,
-    /// This worker's identity: one boot of one worker, compared for equality
-    /// only (ADR-0055 §6). A request this worker relays names it beside the
-    /// ordinal. Empty: the worker states none.
-    pub self_identity: String,
     /// The key every worker of the cluster shares to sign what it states
     /// about its own requests (the via-extension, ADR-0055 §12): a peer
     /// verifies the statement on a response its request drew. `None`: the
@@ -372,7 +368,6 @@ impl Default for B2buaConfig {
     fn default() -> Self {
         Self {
             self_ordinal: "w0".to_string(),
-            self_identity: String::new(),
             cluster_key: None,
             sip_local_ip: "127.0.0.1".to_string(),
             sip_local_port: 5060,
@@ -476,12 +471,6 @@ impl B2buaConfig {
     /// Default [`ack_timeout_sec`](Self::ack_timeout_sec) (s): RFC 3261
     /// §13.3.1.4's `64·T1`, Timer L.
     pub const DEFAULT_ACK_TIMEOUT_SEC: i64 = 32;
-
-    /// This worker as a request record names the worker that relayed it: its
-    /// ordinal and its identity.
-    pub fn relay_owner(&self) -> call::RelayOwner {
-        call::RelayOwner::new(self.self_ordinal.clone(), self.self_identity.clone())
-    }
 
     /// The configured initial-INVITE transaction bound in ms — the value wired
     /// into `TransactionConfig::invite_initial_timeout_ms`. `<= 0` is NOT

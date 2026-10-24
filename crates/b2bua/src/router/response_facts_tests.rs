@@ -70,6 +70,7 @@ async fn turn(call: Call, event: &CallEvent) -> HandlerResult {
         resolved: Default::default(),
         matched_client_txn: true,
         now_ms: NOW_MS,
+        owners: Default::default(),
     };
     let fw = node.core.router_ctx().framework();
     rule_chain_turn(&fw, call, input, &mut super::test_support::turn(1))

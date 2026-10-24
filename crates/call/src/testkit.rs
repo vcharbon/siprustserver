@@ -117,7 +117,7 @@ pub fn dialled_leg(leg_id: &str, our_tag: &str) -> Leg {
 }
 
 /// Record what `leg`'s dialling INVITE left as, `sent`: the image a CANCEL,
-/// an ACK or a takeover rebuilds from.
+/// an ACK or a restored record rebuilds from.
 pub fn dial_with(leg: &mut Leg, sent: SentRequest) {
     if let Some(record) = leg.invite.as_mut() {
         record.sent = Some(sent);

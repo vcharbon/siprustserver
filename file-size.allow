@@ -11,12 +11,12 @@ ext .rs
 # No generated or fixture .rs file is tracked; one would go here as
 # `exclude <path glob>`.
 
-crates/b2bua-core/src/rules/actions/respond.rs 621
+crates/b2bua-core/src/rules/actions/respond.rs 616
 crates/b2bua-core/src/rules/defaults/core_rules.rs 1560
 crates/b2bua-core/src/rules/relay_first_18x.rs 524
 crates/b2bua-core/src/rules/relay/sdp_session_tests.rs 921
-crates/b2bua-core/tests/it/rules.rs 4947
-crates/b2bua-harness/src/lib.rs 969
+crates/b2bua-core/tests/it/rules.rs 4906
+crates/b2bua-harness/src/lib.rs 967
 crates/b2bua-harness/tests/it/call_keyed_holds.rs 1036
 crates/b2bua-harness/tests/it/fake_prack.rs 810
 crates/b2bua-harness/tests/it/message_ring.rs 832
@@ -26,9 +26,9 @@ crates/b2bua-harness/tests/it/reroute_limiter_holds.rs 858
 crates/b2bua-harness/tests/it/session_timer_transparency.rs 818
 crates/b2bua-harness/tests/it/stated_headers.rs 1453
 crates/b2bua-harness/tests/it/suppress_18x.rs 818
-crates/b2bua-runner-kit/src/lib.rs 621
-crates/b2bua-sdk/src/config.rs 590
-crates/b2bua-sdk/src/model.rs 1193
+crates/b2bua-runner-kit/src/lib.rs 593
+crates/b2bua-sdk/src/config.rs 579
+crates/b2bua-sdk/src/model.rs 1171
 crates/b2bua/src/decision/test_adapter.rs 818
 crates/b2bua/src/limiter/refresh_batch.rs 517
 crates/b2bua/src/limiter/release_queue.rs 513
@@ -38,21 +38,21 @@ crates/b2bua/src/node.rs 582
 crates/b2bua/src/repl/changelog.rs 528
 crates/b2bua/src/repl/puller.rs 742
 crates/b2bua/src/repl/real_transport_tests.rs 1186
-crates/b2bua/src/repl/s12_tests.rs 890
+crates/b2bua/src/repl/s12_tests.rs 889
 crates/b2bua/src/repl/store.rs 526
 crates/b2bua/src/repl/supervisor.rs 756
 crates/b2bua/src/repl/tests.rs 823
 crates/b2bua/src/router/callouts.rs 615
-crates/b2bua/src/store/mod.rs 936
+crates/b2bua/src/store/mod.rs 887
 crates/call-limiter/src/store.rs 578
 crates/call-limiter/tests/it/keyed_by_call.rs 877
 crates/callshapes/src/plan.rs 1174
-crates/call/tests/it/common/mod.rs 808
+crates/call/tests/it/common/mod.rs 802
 crates/call/tests/it/model_helpers.rs 895
 crates/e2e-core/src/infra.rs 622
 crates/e2e-model/src/registry.rs 575
 crates/e2e-web/src/lib.rs 1280
-crates/failover-harness/src/harness.rs 2039
+crates/failover-harness/src/harness.rs 2027
 crates/failover-harness/src/runner.rs 626
 crates/failover-harness/tests/it/call_terminate_on_backup.rs 1017
 crates/failover-harness/tests/it/failover.rs 1570
@@ -60,7 +60,7 @@ crates/failover-harness/tests/it/fault_primitives.rs 887
 crates/failover-harness/tests/it/inflight_resend.rs 811
 crates/failover-harness/tests/it/limiter_ha.rs 881
 crates/failover-harness/tests/it/limiter_release_by_call.rs 958
-crates/failover-harness/tests/it/prack_takeover.rs 903
+crates/failover-harness/tests/it/prack_takeover.rs 901
 crates/http-net-testkit/tests/it/scripted.rs 921
 crates/loadgen/src/driver.rs 721
 crates/loadgen/src/report.rs 683

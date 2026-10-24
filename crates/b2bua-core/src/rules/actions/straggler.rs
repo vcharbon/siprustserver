@@ -40,7 +40,7 @@ impl ActionExecutor<'_> {
         let Some(tag) = resp.to().tag().filter(|t| !t.is_empty()).map(str::to_string) else {
             return;
         };
-        let marks = relay::CallMarks::of(call);
+        let marks = self.marks(call);
         let Some(leg) = call.b_legs.iter().find(|l| l.leg_id == leg_id) else { return };
         let Some(invite) = leg.outbound_invite().cloned() else { return };
         let dialled = leg.dialled_on_dialog();

@@ -10,7 +10,7 @@
 //!    sent, whose request it answers (`evidence-final`);
 //! 3. an ACK naming a dialog by its To-tag and an INVITE on a leg for which
 //!    the record holds no final sent (`evidence-ack`); the router passes the
-//!    caller's own only on a call a takeover copy served;
+//!    caller's own only on a call a copy served;
 //! 4. a BYE from the callee on a dialog the record holds as early: RFC 3261
 //!    §15 forbids it before a 2xx (`evidence-early-bye`, on a call a copy
 //!    served; on one node served it is a broken callee and `relay-bye`'s);
@@ -164,7 +164,7 @@ fn relayed_open(ctx: &RuleContext, cseq: i64) -> bool {
 fn callee_bye_on_early_dialog(ctx: &RuleContext) -> bool {
     ctx.dialog().is_some_and(|d| d.state == DialogState::Early)
         && ctx.call.a_leg().invite_final_sent().is_none()
-        && ctx.call.copy_served(&ctx.config.self_ordinal)
+        && ctx.copy_served
 }
 
 /// Trigger 5: a 2xx whose verified via-extension names a leg the record

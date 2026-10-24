@@ -44,7 +44,12 @@ fn run_create_leg(config: &B2buaConfig, host: &str, port: u16) -> HandlerResult 
     let event = CallEvent::sip(SipMessage::Request(reinvite), "127.0.0.1:5060".parse().unwrap());
     let mut id_gen = scope(1);
     let now_ms = 1_700_000_000_000;
-    let mut exec = ActionExecutor { config, turn: &mut id_gen, now_ms };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config,
+        turn: &mut id_gen,
+        now_ms,
+    };
     let ctx = RuleContext {
         call: RuleCall::new(&call),
         call_ref: &call.call_ref,
@@ -55,6 +60,7 @@ fn run_create_leg(config: &B2buaConfig, host: &str, port: u16) -> HandlerResult 
         config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     exec.execute(&[create_leg(host, port)], &call, &ctx)
 }

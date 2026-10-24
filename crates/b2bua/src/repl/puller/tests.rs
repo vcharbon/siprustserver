@@ -682,7 +682,6 @@ fn body_at(
     vector: (i64, i64),
     stamp: (i64, i64),
 ) -> Arc<[u8]> {
-    use call::CallBodyCodec;
     let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let invite = crate::router::test_support::invite("w0", "w1", "split");
     let mut ids = sip_ids::TurnIds::fixed(1);
@@ -690,10 +689,10 @@ fn body_at(
     let mut call = crate::initial_invite::build_initial_call(&invite, src, &config, &mut ids, 0);
     *call.a_leg.invite_final_sent_mut() = final_sent;
     call.state = state;
-    let mut topology = call::CallTopology::new("w0", "w1", vector.0, vector.1);
+    let mut topology = crate::store::CallTopology::new("w0", "w1", vector.0, vector.1);
     (topology.stamp_gen, topology.stamp_bak_gen) = stamp;
-    call.topology = Some(topology);
-    Arc::from(call::MsgpackCodec::new().encode(&call).unwrap())
+    let body = crate::store::envelope::encode(&call::MsgpackCodec::new(), Some(&topology), &call);
+    Arc::from(body.unwrap())
 }
 
 /// A forward `Put` of `body` at `(p, b)`, whatever the body states.

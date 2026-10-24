@@ -4,9 +4,9 @@
 //! and the core's `/call/failure` and release-event consults
 //! (`RuleAction::FailureAsyncHttp`, `RuleAction::ReleaseAsyncHttp`).
 //! The task awaiting the answer lives on the node that sent the request and
-//! dies with it; the deadline lives in the call's replicated timer ledger and
-//! is re-armed wherever the call is materialised, so a call taken over or
-//! reclaimed elsewhere reads the lost answer at the deadline (ADR-0039).
+//! dies with it; the deadline lives in the call's timer ledger and is re-armed
+//! wherever the record is restored, so a call restored from its record reads
+//! the lost answer at the deadline (ADR-0039).
 //!
 //! - [`arm`]: the turn that sends a request arms its deadline at the request's
 //!   budget plus [`MARGIN`]; the router answers every request by its budget,

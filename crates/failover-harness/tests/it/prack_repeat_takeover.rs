@@ -27,6 +27,7 @@
 //! The sibling cell for a shown provisional — a PRACK the SURVIVOR must
 //! translate — is `prack_takeover.rs`.
 
+use b2bua::store::envelope;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,7 +36,7 @@ use b2bua::decision::test_adapter::route_to_with_18x;
 use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
 use b2bua::limiter::NoopLimiter;
 use call::features::RelayFirst18xStrategy;
-use call::{CallBodyCodec, MsgpackCodec, Provisional, ResponderAck};
+use call::{MsgpackCodec, Provisional, ResponderAck};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
     ProxySut, ReplicatedB2buaSut, WorkerHealth,
@@ -86,7 +87,7 @@ async fn replicated_pracked(
         .get(PartitionRole::Backup, primary, call_ref)
         .await
         .expect("the backup holds a replica body for the call");
-    MsgpackCodec::new().decode(&body).expect("replica body decodes").provisionals
+    envelope::decode(&MsgpackCodec::new(), &body).expect("replica body decodes").call.provisionals
 }
 
 /// Reboot the crashed primary EMPTY at a higher gen + new pod IP and let the

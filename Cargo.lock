@@ -493,6 +493,7 @@ dependencies = [
  "alloc-counter",
  "async-trait",
  "b2bua-core",
+ "b2bua-decision",
  "b2bua-sdk",
  "call",
  "call-limiter",
@@ -508,7 +509,9 @@ dependencies = [
  "proptest",
  "repl-net",
  "repl-net-testkit",
+ "rmp-serde",
  "serde",
+ "serde_bytes",
  "serde_json",
  "sip-clock",
  "sip-ids",
@@ -541,6 +544,15 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "wire-mutations",
+]
+
+[[package]]
+name = "b2bua-decision"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "b2bua-core",
+ "http-net",
 ]
 
 [[package]]

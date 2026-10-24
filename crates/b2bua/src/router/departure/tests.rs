@@ -9,7 +9,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use call::{Call, CallBodyCodec, CallModelState, LegState, MsgpackCodec};
+use call::{Call, CallModelState, LegState, MsgpackCodec};
 use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
 use sip_net_testkit::SimulatedSignalingNetwork;
 
@@ -48,7 +48,7 @@ fn ended(cid: &str) -> Call {
 }
 
 async fn put(store: &ReplicatingCallStore, call: &Call) {
-    let body = MsgpackCodec::new().encode(call).unwrap();
+    let body = crate::store::envelope::placed_body(call).unwrap();
     store
         .put_call(BAK, "w0", &call.call_ref, body, &[], 60_000, 1, 0, &PutOpts::default())
         .await
@@ -58,7 +58,7 @@ async fn put(store: &ReplicatingCallStore, call: &Call) {
 /// The `w0` backup body of `call_ref` this node holds, decoded.
 async fn element(store: &ReplicatingCallStore, call_ref: &str) -> Call {
     let body = store.get_call(BAK, "w0", call_ref).await.unwrap().expect("the element");
-    MsgpackCodec::new().decode(&body).unwrap()
+    crate::store::envelope::decode(&MsgpackCodec::new(), &body).unwrap().call
 }
 
 /// The status lines `caller` receives within `within`.

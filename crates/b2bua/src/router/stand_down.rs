@@ -23,6 +23,7 @@ use super::release::{release_call, ReleaseKind};
 use super::restore_hygiene::reanchor;
 use super::{PrimaryWrite, RouterCtx};
 use crate::store::containment::contains;
+use crate::store::Enveloped;
 use b2bua_sdk::event::CallEvent;
 
 /// The topic of the stand-down notice, an internal event the router raises
@@ -67,7 +68,7 @@ pub(super) async fn stand_down_turn(
     body: &[u8],
 ) {
     let guard = ctx.state.lock(call_ref).await;
-    let Some(copy) = ctx.state.peek(call_ref) else {
+    let Some(copy) = ctx.state.peek_enveloped(call_ref) else {
         // Shed between the notice and its turn: what this turn's queue and
         // lock entry are is all that is left of the call here.
         drop(guard);
@@ -80,17 +81,17 @@ pub(super) async fn stand_down_turn(
     match outcome {
         PUT => {
             let Some(mut primary) = ctx.state.decode_body(body) else { return };
-            if primary.incarnation() != copy.incarnation() {
+            if primary.call.incarnation() != copy.call.incarnation() {
                 return;
             }
-            reanchor(&mut primary, ctx.state.held_skew_offset_ms(call_ref));
+            reanchor(&mut primary.call, ctx.state.held_skew_offset_ms(call_ref));
             let now_ms = ctx.clock.now_ms();
             meet_live(ctx, FlushDirection::Forward, call_ref, &copy, primary, now_ms).await;
         }
         DELETE => {
-            let by = &ctx.config.relay_owner();
-            if payload.as_str().is_none_or(|deleted| deleted == copy.incarnation())
-                && finishes_nothing_alone(None, &copy, by)
+            let by = &ctx.relay_owner;
+            if payload.as_str().is_none_or(|deleted| deleted == copy.call.incarnation())
+                && finishes_nothing_alone(None, &copy.call, by)
             {
                 release_call(ctx, call_ref, ReleaseKind::StandDown).await;
             }
@@ -105,14 +106,14 @@ pub(super) async fn stand_down_turn(
 /// vector, so the primary read every compared write the copy made), and
 /// every request record the copy keeps open held in the primary's record
 /// ([`finishes_nothing_alone`]).
-pub(super) fn covers(primary: &Call, copy: &Call, by: &RelayOwner) -> bool {
+pub(super) fn covers(primary: &Enveloped, copy: &Enveloped, by: &RelayOwner) -> bool {
     let contained = match (primary.topology.as_ref(), copy.topology.as_ref()) {
         (Some(p), Some(c)) => contains(p, c),
         _ => false,
     };
-    primary.incarnation() == copy.incarnation()
+    primary.call.incarnation() == copy.call.incarnation()
         && contained
-        && finishes_nothing_alone(Some(primary), copy, by)
+        && finishes_nothing_alone(Some(&primary.call), &copy.call, by)
 }
 
 /// Whether `copy` on worker `by` holds no request whose final only it sees

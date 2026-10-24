@@ -417,7 +417,7 @@ pub fn build_b_leg(
     let request_uri = request_uri.text().into_owned();
 
     let dialled = call::RequestRecord {
-        relayed_by: config.relay_owner(),
+        relayed_by: marks.owners.this.clone(),
         ..call::RequestRecord::dialled(
             i64::from(invite.cseq().seq()),
             Some(call::SentRequest {

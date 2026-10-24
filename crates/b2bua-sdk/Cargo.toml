@@ -9,6 +9,9 @@ description = "Public Rule SDK (ADR-0016 X6): the callflow-service authoring sur
 [package.metadata.purity]
 tier = "pure"
 
+[package.metadata.ha]
+side = "blind"
+
 [lints]
 workspace = true
 

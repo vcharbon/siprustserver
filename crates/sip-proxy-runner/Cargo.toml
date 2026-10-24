@@ -9,6 +9,9 @@ description = "Standalone runnable SIP front proxy: binds a real UDP endpoint (n
 [package.metadata.purity]
 tier = "shell"
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 

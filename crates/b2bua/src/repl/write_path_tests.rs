@@ -33,6 +33,11 @@ fn wired(repl: &Arc<ReplicatingCallStore>) -> CallState {
 }
 
 /// A call of primary `w0` backed up by `w1`, built from a proxied INVITE.
+/// The topology the router places `call` under.
+fn placed(call: &call::Call) -> Option<crate::store::CallTopology> {
+    crate::router::topology_cookie::placement(call)
+}
+
 fn backed_call(id: usize) -> call::Call {
     let invite = crate::test_call::invite("w0", "w1", &format!("burst-{id}"));
     let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
@@ -55,7 +60,7 @@ async fn every_write_of_a_burst_reaches_the_change_log() {
     const BURST: usize = 2_000;
     for id in 0..BURST {
         let call = backed_call(id);
-        state.create(call.clone());
+        state.create_placed(call.clone());
         state.flush(&call);
     }
     tokio::task::yield_now().await;
@@ -170,12 +175,18 @@ async fn a_call_admitted_over_high_water_writes_to_no_backup_for_life() {
     repl.changelog().set_backlog_marks(BacklogMarks { low_entries: 0, ..marks(1, 0) });
     let state = wired(&repl);
     let first = backed_call(1);
-    assert!(state.admit_backup(&first), "an empty backlog admits a backup");
-    state.create(first.clone());
+    assert!(
+        state.admit_backup(&first.call_ref, placed(&first).as_ref()),
+        "an empty backlog admits a backup"
+    );
+    state.create_placed(first.clone());
     state.flush(&first);
     let second = backed_call(2);
-    assert!(!state.admit_backup(&second), "the first call's pending write is the high-water mark");
-    state.create(second.clone());
+    assert!(
+        !state.admit_backup(&second.call_ref, placed(&second).as_ref()),
+        "the first call's pending write is the high-water mark"
+    );
+    state.create_placed(second.clone());
     state.flush(&second);
     assert_eq!(repl.changelog().peer_len("w1", Partition::Bak), 1, "only the first call's entry");
     assert_eq!(repl.unbacked_count(), 1);
@@ -194,7 +205,7 @@ async fn a_backed_retry_on_the_ref_clears_the_earlier_calls_mark() {
     let state = wired(&repl);
     let retry = backed_call(1);
     repl.leave_unbacked(&retry.call_ref);
-    assert!(state.admit_backup(&retry));
+    assert!(state.admit_backup(&retry.call_ref, placed(&retry).as_ref()));
     assert!(!repl.unbacked(&retry.call_ref), "the retry has its backup");
 }
 
@@ -205,8 +216,8 @@ async fn a_backup_refusal_leaves_the_call_without_a_backup() {
     let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
     let state = wired(&repl);
     let call = backed_call(1);
-    assert!(state.admit_backup(&call));
-    state.create(call.clone());
+    assert!(state.admit_backup(&call.call_ref, placed(&call).as_ref()));
+    state.create_placed(call.clone());
     state.flush(&call);
     assert_eq!(repl.scan_refs_backed_by("w0", "w1"), vec![call.call_ref.clone()]);
     repl.backup_refused("w1", &call.call_ref);
@@ -227,7 +238,7 @@ async fn a_hold_waits_for_the_backup_to_apply_the_calls_entry() {
     let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
     let state = wired(&repl);
     let call = backed_call(1);
-    state.create(call.clone());
+    state.create_placed(call.clone());
     state.flush(&call);
     assert!(state.hold_target(&call.call_ref).is_none(), "no flow toward the backup: no hold");
     let _serving = repl.changelog().serving("w1", Partition::Bak);
@@ -260,8 +271,8 @@ async fn a_hold_follows_its_calls_entry_past_another_calls_applied_write() {
     let _serving = repl.changelog().serving("w1", Partition::Bak);
     repl.changelog().note_applied("w1", Partition::Bak, Watermark::new(1, 0));
     let (a, b) = (backed_call(1), backed_call(2));
-    state.create(a.clone());
-    state.create(b.clone());
+    state.create_placed(a.clone());
+    state.create_placed(b.clone());
     state.flush(&a);
     let waiting = held(&state, &a.call_ref);
     tokio::task::yield_now().await;
@@ -324,7 +335,7 @@ async fn a_body_that_does_not_encode_leaves_the_call_without_a_backup() {
     let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
     let state = wired(&repl);
     let call = backed_call(1);
-    state.create(call.clone());
+    state.create_placed(call.clone());
     state.flush(&call);
     let deep = (0..200).fold(serde_json::Value::Null, |v, _| serde_json::json!([v]));
     let deep = call::helpers::set_call_ext(call.clone(), "svc", Some(deep));

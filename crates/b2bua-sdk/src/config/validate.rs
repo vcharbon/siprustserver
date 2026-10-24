@@ -1,5 +1,5 @@
 //! The boot check of a worker's tunables: the first value that would break a
-//! call or the replicas refuses the start.
+//! call refuses the start.
 
 use super::B2buaConfig;
 

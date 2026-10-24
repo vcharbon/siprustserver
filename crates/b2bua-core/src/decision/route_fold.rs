@@ -93,7 +93,7 @@ pub fn up_to_admit(
     call.features = Some(features);
     call.callback_context = route.callback_context.clone();
     // Release-event subscription registry: recorded like
-    // `features`, so it replicates and survives takeover. The latest applied
+    // `features`, so it rides the call record. The latest applied
     // route owns the set (a limiter-reject failover recursion re-enters here
     // and overwrites with ITS route's subscriptions — decision-response
     // parity, same as `features`).
@@ -173,11 +173,13 @@ pub fn refused(route: AdmittingRoute) -> (Call, HandlerEffects) {
 /// leaving at `sent_ms` (`OutboundInvite::sent_at_ms`), after the admission
 /// the turn waited on; a route whose dial a service defers opens none here.
 /// `now_ms` is the turn's timestamp: every CDR entry and timer deadline below
-/// reads it.
+/// reads it; `owners` are the call's, as the shell states them.
+#[allow(clippy::too_many_arguments)]
 pub fn admitted(
     route: AdmittingRoute,
     a_invite: &SipRequest,
     config: &B2buaConfig,
+    owners: &crate::owners::Owners,
     ids: &mut TurnIds,
     now_ms: i64,
     sent_ms: i64,
@@ -251,7 +253,7 @@ pub fn admitted(
     // wire cannot carry whole is left off the INVITE and reported.
     let mut skipped = Vec::new();
     let (mut leg, mut effect) = match relay::build_b_leg(
-        relay::CallMarks::of(&call),
+        relay::CallMarks::of(&call, owners),
         leg_id,
         a_invite,
         dest,

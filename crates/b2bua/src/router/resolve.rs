@@ -7,8 +7,8 @@ use sip_message::header::{ParamValue, Via};
 use sip_message::{Method, SipMessage};
 
 use super::materialise::names_server_branch;
+use super::topology_cookie::foreign_primary;
 use super::RouterCtx;
-use crate::initial_invite::foreign_primary;
 use crate::store::StoreError;
 use b2bua_sdk::event::CallEvent;
 
@@ -310,7 +310,8 @@ async fn replicated_call_copied(
     let from_tag = req.from().tag().unwrap_or("");
     let lookup = IndexLookup::Invite { call_id, from_tag };
     let hit = ctx.state.replica_index_hit(lookup).await.ok()??;
-    let (call, _) = ctx.state.peek_replica(&hit.call_ref).await.ok()?;
+    let (copy, _) = ctx.state.peek_replica(&hit.call_ref).await.ok()?;
+    let call = copy.call;
     let branch = req.top_via().branch().unwrap_or_default();
     (call.a_leg_invite.cseq == req.cseq().seq() && names_server_branch(&call, branch))
         .then_some(hit)

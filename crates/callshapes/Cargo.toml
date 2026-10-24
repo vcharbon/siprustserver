@@ -3,6 +3,9 @@ name = "callshapes"
 version = "0.1.0"
 edition = "2021"
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 

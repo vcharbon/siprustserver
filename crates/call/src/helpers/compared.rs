@@ -6,18 +6,18 @@
 //!
 //! The exempt fields are what a write changes without changing the call:
 //!
-//! - the maximum of two copies stands: the version vector, each dialog's
-//!   local and remote CSeq (RFC 3261 §12.2.1.1), the message and turn
-//!   counters, the timer generation, the limiter's change counter (no change
-//!   number either copy reserved is reused);
+//! - the maximum of two copies stands: each dialog's local and remote CSeq
+//!   (RFC 3261 §12.2.1.1), the message and turn counters, the timer
+//!   generation, the limiter's change counter (no change number either copy
+//!   reserved is reused);
 //! - the union of two copies stands: the CDR events, each leg's message ring;
 //! - the container's value stands: the keepalive request records, the
 //!   keepalive and limiter-refresh ledger entries, the ladder rungs a quiet
 //!   turn moves (none changes a dialog), the trace fields.
 
 use crate::model::{
-    Call, CallTopology, Dialog, InviteExchange, Ladder, Leg, MessageRing, Provisional,
-    RequestRecord, Shown, TimerEntry, TimerType, Unacked2xx,
+    Call, Dialog, InviteExchange, Ladder, Leg, MessageRing, Provisional, RequestRecord, Shown,
+    TimerEntry, TimerType, Unacked2xx,
 };
 
 use super::sequence::raise_sequences;
@@ -43,7 +43,6 @@ pub fn same_state(a: &Call, b: &Call) -> bool {
         root_span_id: _,
         sampled: _,
         worker_index,
-        topology,
         emergency,
         features,
         policy_update_headers,
@@ -82,7 +81,6 @@ pub fn same_state(a: &Call, b: &Call) -> bool {
         && *state == b.state
         && *created_at == b.created_at
         && *worker_index == b.worker_index
-        && same_option(topology, &b.topology, same_topology)
         && *emergency == b.emergency
         && *features == b.features
         && *policy_update_headers == b.policy_update_headers
@@ -115,12 +113,6 @@ fn same_option<T>(a: &Option<T>, b: &Option<T>, same: impl Fn(&T, &T) -> bool) -
         (Some(x), Some(y)) => same(x, y),
         _ => false,
     }
-}
-
-/// The worker pair; the vector and the stamp are exempt.
-fn same_topology(a: &CallTopology, b: &CallTopology) -> bool {
-    let CallTopology { pri, bak, gen: _, bak_gen: _, stamp_gen: _, stamp_bak_gen: _ } = a;
-    *pri == b.pri && *bak == b.bak
 }
 
 fn same_leg(a: &Leg, b: &Leg) -> bool {
@@ -296,16 +288,11 @@ fn same_provisional(a: &Provisional, b: &Provisional) -> bool {
 }
 
 /// `container` with the exempt fields of `other` merged in: the higher of
-/// the two vectors and of each counter and dialog sequence, the union of the
-/// CDR events and of each leg's message ring; a limiter release either copy
-/// owes stays owed. Every other field, the stamp included, is the
-/// container's.
+/// each counter and dialog sequence, the union of the CDR events and of each
+/// leg's message ring; a limiter release either copy owes stays owed. Every
+/// other field is the container's.
 pub fn merge_exempt(container: Call, other: &Call) -> Call {
     let mut merged = raise_sequences(container, other);
-    if let (Some(m), Some(o)) = (merged.topology.as_mut(), other.topology.as_ref()) {
-        m.gen = m.gen.max(o.gen);
-        m.bak_gen = m.bak_gen.max(o.bak_gen);
-    }
     merged.timer_generation = merged.timer_generation.max(other.timer_generation);
     merged.limiter.merge_change(&other.limiter);
     merged.message_seq = merged.message_seq.max(other.message_seq);

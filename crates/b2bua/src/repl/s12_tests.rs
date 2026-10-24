@@ -27,7 +27,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use call::{Call, CallBodyCodec, CallModelState, LegState, MsgpackCodec};
+use call::{Call, CallModelState, LegState, MsgpackCodec};
 use repl_net_testkit::SimulatedReplicationNetwork;
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
@@ -94,20 +94,20 @@ fn call_in(pri: &str, bak: &str, cid: &str, a_state: LegState, state: CallModelS
     call
 }
 
-/// The msgpack body of `call` — what a flush puts on the wire.
+/// The msgpack body of `call` in its placed envelope — what a flush puts on the wire.
 fn body(call: &Call) -> Vec<u8> {
-    MsgpackCodec::new().encode(call).unwrap()
+    crate::store::envelope::placed_body(call).unwrap()
 }
 
 /// The body of `call` written at `(p, b)` by a write that changed a compared
 /// field: the topology a flush embeds states that version and that stamp.
 fn body_at(call: &Call, p: i64, b: i64) -> Vec<u8> {
-    let mut call = call.clone();
-    if let Some(t) = call.topology.as_mut() {
+    let mut topology = crate::router::topology_cookie::placement(call);
+    if let Some(t) = topology.as_mut() {
         (t.gen, t.bak_gen) = (p, b);
         t.stamp_vector();
     }
-    body(&call)
+    crate::store::envelope::encode(&MsgpackCodec::new(), topology.as_ref(), call).unwrap()
 }
 
 /// The lifecycle state of the body `node` holds in `(role, primary, call_ref)`,
@@ -119,8 +119,8 @@ async fn stored_state(
     call_ref: &str,
 ) -> (CallModelState, LegState) {
     let raw = store.get_call(role, primary, call_ref).await.unwrap().expect("Element present");
-    let call: Call = MsgpackCodec::new().decode(&raw).expect("Element body decodes");
-    (call.state, call.a_leg.state())
+    let copy = crate::store::envelope::decode(&MsgpackCodec::new(), &raw).expect("decodes");
+    (copy.call.state, copy.call.a_leg.state())
 }
 
 /// A → B forward flush at `(p, b)` carrying `call`'s body.
@@ -623,16 +623,15 @@ async fn an_authority_that_answered_ends_the_call_within_one_drain() {
     let call_ref = ringing.call_ref.clone();
     forward(&a.store, &ringing, 1, 0).await;
     tick(150).await;
-    let mut answered =
+    let answered =
         call_in("A", "B", "s12-del-compacted", LegState::Confirmed, CallModelState::Active);
     element(&b.store, &answered, 1, 1).await;
 
     // A holds the answered call it adopted from B, at B's (1,1).
-    if let Some(t) = answered.topology.as_mut() {
-        t.bak_gen = 1;
-    }
+    let topology = crate::router::topology_cookie::placement(&answered)
+        .map(|t| crate::store::CallTopology { bak_gen: 1, ..t });
     let state = call_state("A", &a.store);
-    state.create(answered.clone());
+    state.create(answered.clone(), topology);
     let mut ending = answered;
     ending.state = CallModelState::Terminating;
     state.update(ending.clone());
@@ -677,7 +676,7 @@ async fn an_authority_that_never_answered_ends_the_call_within_one_drain() {
 
     // A, behind the cut, ends its own ringing copy in one turn.
     let state = call_state("A", &a.store);
-    state.create(ringing.clone());
+    state.create_placed(ringing.clone());
     let ending =
         call_in("A", "B", "s12-del-unanswered", LegState::Early, CallModelState::Terminating);
     state.update(ending.clone());

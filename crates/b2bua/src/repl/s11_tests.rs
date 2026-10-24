@@ -21,7 +21,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use call::{Call, CallBodyCodec, CallModelState, MsgpackCodec};
+use call::{Call, CallModelState};
 use sip_clock::Clock;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 
@@ -108,8 +108,8 @@ fn call_state_metered(
 
 /// Seed a call body into `(role, primary)` of the replicating store.
 async fn put(store: &ReplicatingCallStore, role: PartitionRole, primary: &str, call: &Call) {
-    let body = MsgpackCodec::new().encode(call).unwrap();
-    let gen = call.topology.as_ref().map(|t| t.gen).unwrap_or(1);
+    let body = crate::store::envelope::placed_body(call).unwrap();
+    let gen = crate::router::topology_cookie::placement(call).map_or(1, |t| t.gen);
     store
         .put_call(role, primary, &call.call_ref, body, &[], 60_000, gen, 0, &PutOpts::default())
         .await
@@ -133,7 +133,7 @@ async fn mark_takeover_flags_the_copy_for_self_release() {
     );
     let r0 = c0.call_ref.clone();
     assert!(r0.starts_with("w0|"));
-    state.create(c0);
+    state.create_placed(c0);
 
     assert!(!state.is_takeover(&r0), "a freshly-created call is not a takeover copy");
     state.mark_takeover(&r0);
@@ -170,7 +170,7 @@ async fn a_takeover_copy_running_on_an_unheld_set_counts_as_uncounted() {
     put(&repl, BAK, "w0", &call).await;
 
     let (c, _skew) = state.peek_replica(&r).await.expect("read from bak:w0");
-    assert_eq!(c.limiter.runs_on(), Some(&[entry("y")][..]), "runs_on replicates");
+    assert_eq!(c.call.limiter.runs_on(), Some(&[entry("y")][..]), "runs_on replicates");
     assert!(state.materialize_if_absent(c, MaterialiseOrigin::Takeover));
     assert_eq!(metrics.limiter().uncounted_calls(), 1, "the copy runs on y, which is not held");
     assert!(state.drop_local(&r));
@@ -233,8 +233,8 @@ async fn put_with_origin(
     call: &Call,
     origin_now_ms: i64,
 ) {
-    let body = MsgpackCodec::new().encode(call).unwrap();
-    let gen = call.topology.as_ref().map(|t| t.gen).unwrap_or(1);
+    let body = crate::store::envelope::placed_body(call).unwrap();
+    let gen = crate::router::topology_cookie::placement(call).map_or(1, |t| t.gen);
     store
         .put_call(
             role,
@@ -279,12 +279,12 @@ async fn skew_offset_is_computed_persisted_and_reaches_hydration() {
     // Reaches hydration: scan_partition pairs each call with its offset.
     let scanned = state.scan_partition(PRI, "w0", &|| {}).await;
     assert_eq!(scanned.len(), 1);
-    assert_eq!(scanned[0].0.call_ref, r);
+    assert_eq!(scanned[0].0.call.call_ref, r);
     assert_eq!(scanned[0].1, 30_000, "scan_partition surfaces the skew offset to the router");
 
     // And the on-demand reclaim read-path surfaces it too.
     let (peeked, skew) = state.peek_reclaimable(&r).await.expect("reclaimable");
-    assert_eq!(peeked.call_ref, r);
+    assert_eq!(peeked.call.call_ref, r);
     assert_eq!(skew, 30_000, "peek_reclaimable surfaces the skew offset");
 
     // The backup-partition takeover read surfaces it too.
@@ -346,7 +346,7 @@ async fn peek_replica_reads_the_backup_body_without_deciding_or_inserting() {
     put(&repl, BAK, "w0", &ended).await;
 
     let (read, skew) = state.peek_replica(&r_ended).await.expect("the body is read as-is");
-    assert_eq!(read.state, CallModelState::Terminated, "the state is the caller's to judge");
+    assert_eq!(read.call.state, CallModelState::Terminated, "the state is the caller's to judge");
     assert_eq!(skew, 0, "a local write carries no skew offset");
     assert_eq!(metrics.repl_takeover_refused_terminated_total(), 0, "the store counts no refusal");
     assert_eq!(metrics.repl_takeover_hydrated_total(), 0, "the store counts no hydration");
@@ -391,7 +391,7 @@ async fn reclaim_scan_materialises_pri_partition_idempotently() {
     // Bulk sweep sees it.
     let scanned = state.scan_partition(PRI, "w0", &|| {}).await;
     assert_eq!(scanned.len(), 1);
-    assert_eq!(scanned[0].0.call_ref, r);
+    assert_eq!(scanned[0].0.call.call_ref, r);
 
     // Materialise into the live map: first inserts, second is a no-op.
     assert!(
@@ -405,7 +405,10 @@ async fn reclaim_scan_materialises_pri_partition_idempotently() {
     );
 
     // Reactive read-path returns the same call; a backup-role ref never reclaims.
-    assert_eq!(state.peek_reclaimable(&r).await.ok().map(|(c, _)| c.call_ref), Some(r.clone()));
+    assert_eq!(
+        state.peek_reclaimable(&r).await.ok().map(|(c, _)| c.call.call_ref),
+        Some(r.clone())
+    );
     assert_eq!(
         state.peek_reclaimable("w5|other|t").await.err(),
         Some(ReplicaMiss::WrongRole),
@@ -495,7 +498,7 @@ async fn reboot_primary_481s_bye_for_unmaterialised_pri_call() {
     // refuses to look. `peek_reclaimable` recovers it — the read the on-demand
     // reclaim wires in.
     assert_eq!(
-        state.peek_reclaimable(&r).await.ok().map(|(c, _)| c.call_ref),
+        state.peek_reclaimable(&r).await.ok().map(|(c, _)| c.call.call_ref),
         Some(r.clone()),
         "the call sits fully reclaimable in pri:w0 on THIS node"
     );
@@ -575,8 +578,8 @@ async fn reclaimed_call_is_visible_to_backup_bootstrap() {
     );
     let r = call.call_ref.clone();
     assert_eq!(
-        call.topology.as_ref().map(|t| t.bak.as_str()),
-        Some("w1"),
+        crate::router::topology_cookie::placement(&call).map(|t| t.bak),
+        Some("w1".to_string()),
         "the w_bak cookie names w1 as this call's backup"
     );
 
@@ -649,7 +652,7 @@ async fn churn_during_reclaim_keeps_state_consistent() {
         let state = state.clone();
         tokio::spawn(async move {
             for (call, _skew) in state.scan_partition(PRI, "w0", &|| {}).await {
-                let cr = call.call_ref.clone();
+                let cr = call.call.call_ref.clone();
                 let _g = state.lock(&cr).await;
                 state.materialize_if_absent(call, MaterialiseOrigin::Reclaim);
             }
@@ -672,7 +675,7 @@ async fn churn_during_reclaim_keeps_state_consistent() {
                 );
                 let cr = call.call_ref.clone();
                 let _g = state.lock(&cr).await;
-                state.create(call.clone());
+                state.create_placed(call.clone());
                 state.update(call);
                 state.remove(&cr);
             }

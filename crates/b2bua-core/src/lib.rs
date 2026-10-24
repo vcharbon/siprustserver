@@ -15,8 +15,8 @@
 //!   decision DTOs;
 //! - [`effects`] — the effect vocabulary a turn returns;
 //! - [`unheld_response`] — the answer to a response for a call no node holds;
-//! - [`turn_scope`], [`turn_notes`], [`wire_fault_set`] — a turn's inputs and
-//!   what it reports.
+//! - [`turn_scope`], [`turn_notes`], [`wire_fault_set`], [`owners`] — a turn's
+//!   inputs and what it reports.
 #![cfg_attr(
     not(test),
     deny(
@@ -50,6 +50,7 @@ pub mod landing;
 pub mod limiter;
 pub mod message_ring;
 pub mod obligations;
+pub mod owners;
 pub mod reaper_verdict;
 pub mod ring_deadline;
 pub mod rule_chain;

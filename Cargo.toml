@@ -37,6 +37,7 @@ members = [
     "crates/b2bua-sdk",
     "crates/announcement",
     "crates/b2bua-core",
+    "crates/b2bua-decision",
     "crates/b2bua",
     "crates/b2bua-harness",
     "crates/ha-harness",

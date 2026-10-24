@@ -204,7 +204,7 @@ impl ActionExecutor<'_> {
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(
                 self.config,
-                relay::CallMarks::of(call),
+                self.marks(call),
                 target_leg,
                 Some(relay::RequestFacts {
                     method: req.method().as_str(),
@@ -213,7 +213,7 @@ impl ActionExecutor<'_> {
                 }),
                 branch.clone(),
             )),
-            contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), target_leg)),
+            contact: Some(relay::leg_contact(self.config, self.marks(call), target_leg)),
             body,
             content_type,
             cseq: Some(relay::wire_cseq(outbound_cseq)),
@@ -253,7 +253,7 @@ impl ActionExecutor<'_> {
 
         // The relay's record: the inbound request's lines, so the response
         // echoes its Via/From/To/Call-ID/CSeq (§8.1.3.3), and its sent half,
-        // which a takeover rebuilds (ADR-0055 §2). A re-INVITE's is the target
+        // which a restored record rebuilds (ADR-0055 §2). A re-INVITE's is the target
         // dialog's INVITE record: glare detection there sees it in flight
         // (`reinvite-glare`), its ACK-for-2xx echoes its CSeq (RFC 3261
         // §13.2.2.4) and a CANCEL reuses its branch (§9.1); it replaces the
@@ -269,7 +269,7 @@ impl ActionExecutor<'_> {
                 offered_100rel: req.offers_100rel(),
                 offered: relay::carries_sdp(req),
                 source_timestamp: req.raw(HeaderName::Timestamp).next().map(str::to_string),
-                relayed_by: self.config.relay_owner(),
+                relayed_by: self.owners.this.clone(),
                 ..RequestRecord::relayed(req.method().as_str(), outbound_cseq, inbound_cseq)
             };
             *call = match method {

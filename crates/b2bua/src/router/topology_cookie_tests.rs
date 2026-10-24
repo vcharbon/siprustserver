@@ -6,12 +6,10 @@
 //! the first is a call that silently stops surviving a takeover, so it is
 //! named on stderr. Pure builder, no clock.
 
-use super::build_initial_call;
-use super::topology_cookie::{read_topology_cookie, CookieRead};
-use crate::config::B2buaConfig;
+use super::topology_cookie::{read_topology_cookie, topology_from_cookie, CookieRead};
+use crate::store::CallTopology;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipParserLimits, SipRequest};
-use std::net::SocketAddr;
 
 /// A port no reader accepts (RFC 3261 §19.1.1 `port` is 16-bit): the wire
 /// parse refuses the message, a read without the wire grammar keeps it and the
@@ -63,15 +61,9 @@ fn raw_invite(rr: Option<&str>) -> String {
     )
 }
 
-fn call_for(invite: &SipRequest) -> call::Call {
-    let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-    build_initial_call(
-        invite,
-        SocketAddr::from(([10, 0, 0, 9], 5060)),
-        &config,
-        &mut sip_ids::TurnIds::fixed(1),
-        0,
-    )
+/// The topology the call `invite` opens is born under on worker `w0`.
+fn topology_for(invite: &SipRequest) -> Option<CallTopology> {
+    topology_from_cookie(invite, "w0", "w0|cookie-iih|alicetag")
 }
 
 #[test]
@@ -81,7 +73,7 @@ fn a_cookie_record_route_places_the_call_on_the_proxys_choice() {
         matches!(read_topology_cookie(&invite, "w0"), CookieRead::Topology(_)),
         "the cookie half must be found below the `;outbound` half"
     );
-    let topology = call_for(&invite).topology.expect("a cookie INVITE gets a topology");
+    let topology = topology_for(&invite).expect("a cookie INVITE gets a topology");
     assert_eq!((topology.pri.as_str(), topology.bak.as_str()), ("w7", "w9"));
     assert_eq!((topology.gen, topology.bak_gen), (1, 0), "a brand-new call is (p=1, b=0)");
 }
@@ -94,7 +86,7 @@ fn no_record_route_and_a_cookieless_one_are_both_ordinary() {
             matches!(read_topology_cookie(&invite, "w0"), CookieRead::NoCookie),
             "readable, cookie-less recorded routes ({rr:?}) are not a failed read"
         );
-        assert!(call_for(&invite).topology.is_none(), "non-proxied INVITE stays local-only");
+        assert!(topology_for(&invite).is_none(), "non-proxied INVITE stays local-only");
     }
 }
 
@@ -109,7 +101,7 @@ fn an_unreadable_record_route_is_not_mistaken_for_an_absent_cookie() {
         "an out-of-range port fails the recorded-route read"
     );
     assert!(
-        call_for(&invite).topology.is_none(),
+        topology_for(&invite).is_none(),
         "an unreadable cookie falls back to non-replicating placement"
     );
 }
@@ -130,6 +122,6 @@ fn an_empty_w_pri_falls_back_to_this_worker() {
     // empty) means the proxy named no primary; the call is placed here, and
     // `w_bak` still steers the backup.
     let invite = invite_with_record_route(Some("<sip:10.0.0.9:5060;v=3;w_pri;w_bak=w9;lr>"));
-    let topology = call_for(&invite).topology.expect("the cookie is still a cookie");
+    let topology = topology_for(&invite).expect("the cookie is still a cookie");
     assert_eq!((topology.pri.as_str(), topology.bak.as_str()), ("w0", "w9"));
 }

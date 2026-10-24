@@ -144,7 +144,15 @@ pub fn dialled() -> Dialled {
     else {
         panic!("the route stands");
     };
-    let routed = route_fold::admitted(*admitting, &caller, &config, &mut ids, 0, 0);
+    let routed = route_fold::admitted(
+        *admitting,
+        &caller,
+        &config,
+        b2bua_core::owners::Owners::none(),
+        &mut ids,
+        0,
+        0,
+    );
     let b_invite = sent_to(&routed, "b-1").expect("the b-leg INVITE");
     Dialled {
         call: routed.call,
@@ -485,6 +493,7 @@ fn run_from(
             matched_client_txn: matches!(&event, CallEvent::Sip { message, .. }
                 if matches!(message.as_ref(), SipMessage::Response(_))),
             now_ms: NOW,
+            owners: Default::default(),
         };
         let result: HandlerResult =
             land(rule_chain_turn(&fw, gated, input, &mut turn), &landing, NOW);

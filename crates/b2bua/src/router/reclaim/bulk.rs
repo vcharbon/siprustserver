@@ -9,7 +9,7 @@ use super::super::materialise::{has_invite_to_serve, materialise, Materialised, 
 use super::super::restore_hygiene::{reanchor, Smoothing};
 use super::super::undecided::{is_undecided, settle_undecided};
 use super::super::RouterCtx;
-use crate::store::PartitionRole;
+use crate::store::{Enveloped, PartitionRole};
 
 /// **Bulk reclaim** (ADR-0014): re-materialise every `pri:{self}`
 /// call into the live map + re-arm its timers — what makes a rebooted primary
@@ -50,9 +50,9 @@ pub(in crate::router) async fn reclaim_all(ctx: &Arc<RouterCtx>) {
         cap_ms: ctx.replica.max_catchup_window_sec.map(|s| s * 1000),
     };
     let mut materialized = 0u64;
-    for (call, _skew) in calls {
+    for (copy, _skew) in calls {
         beat();
-        if reclaim_into_live(ctx, &call.call_ref, Some(smoothing)).await {
+        if reclaim_into_live(ctx, &copy.call.call_ref, Some(smoothing)).await {
             materialized += 1;
         }
     }
@@ -78,10 +78,11 @@ pub(in crate::router) async fn reclaim_all(ctx: &Arc<RouterCtx>) {
 /// read on SKEW-CORRECTED deadlines — each copy is re-anchored by its own
 /// persisted offset first. The copies are then only named; `materialise`
 /// re-reads each body and re-anchors it once itself. `beat` runs once per call.
-fn largest_keepalive_gap(calls: &mut [(call::Call, i64)], now_ms: i64, beat: &dyn Fn()) -> i64 {
+fn largest_keepalive_gap(calls: &mut [(Enveloped, i64)], now_ms: i64, beat: &dyn Fn()) -> i64 {
     let mut l_max = 0;
-    for (call, skew) in calls.iter_mut() {
+    for (copy, skew) in calls.iter_mut() {
         beat();
+        let call = &mut copy.call;
         reanchor(call, *skew);
         let gap = call
             .timers

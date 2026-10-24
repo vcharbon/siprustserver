@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "The pivot v3 scenario interpreter: compiles a scenario document to an immutable plan, runs a plan instance over the scenario harness with per-leg verbatim recording, and writes the run bundle (pivot.json, run-config.json, recording/*.jsonl, verdict.json, timing.json). Deliberately dumb: it holds no callflow knowledge — every corner case is document data."
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 

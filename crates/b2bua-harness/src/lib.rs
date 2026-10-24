@@ -27,6 +27,7 @@ use sip_txn::IdGen;
 
 pub mod failure_view;
 pub mod limiter;
+mod live;
 pub mod model_gate;
 mod operator;
 mod proxy_core;
@@ -73,6 +74,7 @@ pub fn spawn_b2bua_core(
 ) -> B2buaCore {
     let B2buaSpawnParams {
         ordinal,
+        identity,
         sip_addr,
         decision,
         limiter,
@@ -128,6 +130,7 @@ pub fn spawn_b2bua_core(
     );
     let deps = B2buaDeps {
         config,
+        identity,
         decision,
         limiter,
         cdr,
@@ -497,6 +500,7 @@ impl B2buaSutBuilder {
         let clock = Clock::test_at(0);
         let params = B2buaSpawnParams {
             ordinal: "w0".into(),
+            identity: String::new(),
             sip_addr: sa,
             decision,
             limiter,
@@ -843,12 +847,6 @@ impl B2buaSut {
     /// posts one: a stand-in for an event already in flight when it is posted.
     pub fn post_event(&self, event: b2bua::CallEvent) {
         self._core.post_event(event);
-    }
-
-    /// The live copy of `call_ref` this worker serves, if any (introspection:
-    /// what its rules read at the next event).
-    pub fn live_call(&self, call_ref: &str) -> Option<call::Call> {
-        self._core.live_call(call_ref)
     }
 
     /// Live per-call serialization-lock count. Should return to 0 once traffic

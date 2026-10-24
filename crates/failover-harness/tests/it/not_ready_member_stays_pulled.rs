@@ -21,6 +21,7 @@
 //! worker authors while it is unroutable, and the ring deadline it fires would
 //! exist on one node only. The caller takes exactly one final.
 
+use b2bua::store::envelope;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -31,7 +32,7 @@ use b2bua::decision::{
     CallDecisionEngine, CallTreatment, NewCallResponse, RejectDecision, ScriptedDecisionEngine,
 };
 use b2bua::limiter::NoopLimiter;
-use call::{CallBodyCodec, LegState, MsgpackCodec, TimerType};
+use call::{LegState, MsgpackCodec, TimerType};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, Belief, FailoverHarness,
     PartitionRole, PeerLink, ReplicatedB2buaSut, WorkerHealth,
@@ -92,7 +93,7 @@ async fn find_backed_up_ref(backup: &ReplicatedB2buaSut, primary: &str) -> Strin
 /// The survivor's replica, decoded (`None` once the replica is gone).
 async fn replica(backup: &ReplicatedB2buaSut, primary: &str, call_ref: &str) -> Option<call::Call> {
     let body = backup.get(BAK, primary, call_ref).await?;
-    Some(MsgpackCodec::new().decode(&body).expect("replica body decodes"))
+    Some(envelope::decode(&MsgpackCodec::new(), &body).expect("replica body decodes").call)
 }
 
 /// The absolute deadline of the survivor's replica per-b-leg `NoAnswer` entry.

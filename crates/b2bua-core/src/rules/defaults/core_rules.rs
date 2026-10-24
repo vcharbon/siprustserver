@@ -129,7 +129,7 @@ fn keepalive_interval(ctx: &RuleContext) -> i64 {
 fn keepalive_timeout(ctx: &RuleContext) -> i64 {
     // Grace for the in-dialog OPTIONS 200 before the leg is declared dead and the
     // call is torn down. Operator knob (`B2BUA_KEEPALIVE_TIMEOUT_SEC`, default
-    // 32 s) — wide enough that a healthy reclaimed dialog whose keepalive
+    // 32 s) — wide enough that a healthy restored dialog whose keepalive
     // round-trip is still settling across a reboot is not BYE'd as dead.
     ctx.config.keepalive_timeout_sec
 }

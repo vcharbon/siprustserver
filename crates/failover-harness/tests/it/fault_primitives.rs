@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use call::{CallBodyCodec, LegState, MsgpackCodec};
+use call::{LegState, MsgpackCodec};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
     ProxySut, ReplicatedB2buaSut, WorkerHealth,
@@ -125,7 +125,7 @@ async fn find_backed_up_ref(backup: &ReplicatedB2buaSut, primary: &str) -> Strin
 /// The replica body the backup holds for `call_ref`, decoded.
 async fn replica(backup: &ReplicatedB2buaSut, primary: &str, call_ref: &str) -> call::Call {
     let body = backup.get(BAK, primary, call_ref).await.expect("replica body present");
-    MsgpackCodec::new().decode(&body).expect("replica body decodes")
+    b2bua::store::envelope::decode(&MsgpackCodec::new(), &body).expect("a copy decodes").call
 }
 
 /// The recording-order seq of the last marker the harness appended — the

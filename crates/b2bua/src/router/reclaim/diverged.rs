@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::RuleAction;
-use call::helpers::{caller_answered, lifecycle_behind, merge_exempt};
+use call::helpers::{caller_answered, lifecycle_behind};
 use call::TerminationCause;
 use call::{
     Call, CallModelState, CdrEventType, Dialog, DialogEnd, DialogState, Direction, EndingBy, Leg,
@@ -26,6 +26,7 @@ use super::super::RouterCtx;
 use super::meeting::resync_timers;
 use super::FlushDirection;
 use crate::rules::{ActionExecutor, RuleCall, RuleContext};
+use crate::store::Enveloped;
 use crate::turn_scope::TurnScope;
 
 /// The reason the CDR event and the termination of a call ended on two
@@ -42,23 +43,23 @@ pub(super) async fn end_diverged(
     ctx: &Arc<RouterCtx>,
     direction: FlushDirection,
     call_ref: &str,
-    live: &Call,
-    incoming: Call,
+    live: &Enveloped,
+    incoming: Enveloped,
     now_ms: i64,
 ) {
-    if live.state != CallModelState::Active {
+    if live.call.state != CallModelState::Active {
         return;
     }
     let incoming_is_primary = matches!(direction, FlushDirection::Forward);
-    let incoming_ranks = lifecycle_behind(live, &incoming)
-        || (!lifecycle_behind(&incoming, live) && incoming_is_primary);
-    let by = ctx.config.relay_owner();
+    let incoming_ranks = lifecycle_behind(&live.call, &incoming.call)
+        || (!lifecycle_behind(&incoming.call, &live.call) && incoming_is_primary);
+    let by = &ctx.relay_owner;
     let union = if incoming_ranks {
-        merge_exempt(union_of(incoming, live, live, &by), live)
+        union_of(incoming, &live.call, &live.call, by).merge_exempt(live)
     } else {
-        merge_exempt(union_of(live.clone(), &incoming, live, &by), &incoming)
+        union_of(live.clone(), &incoming.call, &live.call, by).merge_exempt(&incoming)
     };
-    end_from(ctx, call_ref, live, union, now_ms).await;
+    end_from(ctx, call_ref, &live.call, union, now_ms).await;
 }
 
 /// The other owner's ending copy `ending`, ranked higher than the `live`
@@ -70,26 +71,33 @@ pub(super) async fn end_diverged(
 pub(super) async fn end_over_an_ending(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
-    live: &Call,
-    ending: &Call,
+    live: &Enveloped,
+    ending: &Enveloped,
     now_ms: i64,
 ) -> bool {
-    let by = ctx.config.relay_owner();
-    if !only_here_to_end(live, ending, &by) {
+    let by = &ctx.relay_owner;
+    if !only_here_to_end(&live.call, &ending.call, by) {
         return false;
     }
-    let mut union = merge_exempt(union_of(ending.clone(), live, live, &by), live);
-    union.state = CallModelState::Terminating;
-    end_from(ctx, call_ref, live, union, now_ms).await;
+    let mut union = union_of(ending.clone(), &live.call, &live.call, by).merge_exempt(live);
+    union.call.state = CallModelState::Terminating;
+    end_from(ctx, call_ref, &live.call, union, now_ms).await;
     true
 }
 
 /// Install `union` as the live copy and end the call from it, counted.
-async fn end_from(ctx: &Arc<RouterCtx>, call_ref: &str, live: &Call, mut union: Call, now_ms: i64) {
+async fn end_from(
+    ctx: &Arc<RouterCtx>,
+    call_ref: &str,
+    live: &Call,
+    mut union: Enveloped,
+    now_ms: i64,
+) {
     ctx.metrics.bump_repl_copies_diverged();
-    resync_timers(ctx, call_ref, live, &mut union, now_ms).await;
-    ctx.state.update_quiet(union.clone());
-    end_cleanly(ctx, call_ref, &union, now_ms).await;
+    resync_timers(ctx, call_ref, live, &mut union.call, now_ms).await;
+    ctx.state.update_enveloped(union.clone());
+    let owners = ctx.owners_of(&union);
+    end_cleanly(ctx, call_ref, &union.call, &owners, now_ms).await;
 }
 
 /// Whether `live` holds what `ending` cannot end: an early or confirmed
@@ -115,16 +123,18 @@ fn only_here_to_end(live: &Call, ending: &Call, by: &RelayOwner) -> bool {
     leg_only_here || open_here
 }
 
-/// `base` with every dialog of `other` it lacks, by the leg and the two tags;
-/// a dialog both hold at the further of its two states, the higher of each
-/// sequence, and the remote target and route set of the copy that read the
-/// peer's later request (a target refresh is the peer's request, RFC 3261
-/// §12.2); a leg only `other` dialled; the caller answered when `other`
-/// answered her, and every early dialog of hers ended once she took a final. A leg both name under one id with another Call-ID is not
+/// `base`, in its envelope, with every dialog of `other` it lacks, by the leg
+/// and the two tags; a dialog both hold at the further of its two states, the
+/// higher of each sequence, and the remote target and route set of the copy
+/// that read the peer's later request (a target refresh is the peer's
+/// request, RFC 3261 §12.2); a leg only `other` dialled; the caller answered
+/// when `other` answered her, and every early dialog of hers ended once she
+/// took a final. A leg both name under one id with another Call-ID is not
 /// the same leg, and stays `base`'s alone. The request records of the union
 /// are those of `live` the worker `by` made: this node's teardown answers its
 /// own transactions, the other node's teardown its own.
-fn union_of(mut base: Call, other: &Call, live: &Call, by: &RelayOwner) -> Call {
+fn union_of(base: Enveloped, other: &Call, live: &Call, by: &RelayOwner) -> Enveloped {
+    let Enveloped { call: mut base, topology } = base;
     union_leg(&mut base.a_leg, &other.a_leg);
     for theirs in &other.b_legs {
         match base.b_legs.iter_mut().find(|l| l.leg_id == theirs.leg_id) {
@@ -144,7 +154,7 @@ fn union_of(mut base: Call, other: &Call, live: &Call, by: &RelayOwner) -> Call 
         Some(_) => call::helpers::retire_early_dialogs(&mut base.a_leg),
         None => {}
     }
-    own_records(base, live, by)
+    Enveloped::new(own_records(base, live, by), topology)
 }
 
 /// `call` with, on each dialog, the open request records of the same dialog
@@ -214,7 +224,13 @@ fn rank(state: &DialogState) -> u8 {
 /// The teardown of `call` as a turn of its own: the closing CDR event and the
 /// termination, through the one enforcement funnel, the caller answered if
 /// she still waits on this node.
-async fn end_cleanly(ctx: &Arc<RouterCtx>, call_ref: &str, call: &Call, now_ms: i64) {
+async fn end_cleanly(
+    ctx: &Arc<RouterCtx>,
+    call_ref: &str,
+    call: &Call,
+    owners: &crate::owners::Owners,
+    now_ms: i64,
+) {
     let actions = [
         RuleAction::AddCdrEvent {
             event_type: CdrEventType::Bye,
@@ -246,9 +262,10 @@ async fn end_cleanly(ctx: &Arc<RouterCtx>, call_ref: &str, call: &Call, now_ms: 
         config: &ctx.config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: owners.copy_served,
     };
     let mut turn = TurnScope::of(ctx.id_gen.turn()).with_faults(ctx.wire_faults.snapshot());
-    let mut exec = ActionExecutor { config: &ctx.config, turn: &mut turn, now_ms };
+    let mut exec = ActionExecutor { config: &ctx.config, owners, turn: &mut turn, now_ms };
     let result = exec.execute(&actions, call, &rule_ctx);
     let result = crate::rules::invariants::enforce(
         &ctx.obligations,

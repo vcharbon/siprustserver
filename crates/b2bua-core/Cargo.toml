@@ -9,6 +9,9 @@ description = "The B2BUA's decision core (ADR-0052): the rule engine and its act
 [package.metadata.purity]
 tier = "pure"
 
+[package.metadata.ha]
+side = "blind"
+
 [lints]
 workspace = true
 

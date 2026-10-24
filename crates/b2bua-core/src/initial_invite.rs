@@ -88,7 +88,6 @@ pub fn build_initial_call(
         messages: Default::default(),
         sdp_session: Default::default(),
     };
-    let topology = topology_from_cookie(invite, &config.self_ordinal, &call_ref);
     let a_leg_invite = ALegInviteSnapshot {
         uri: invite.request_uri().to_string(),
         headers: invite
@@ -126,7 +125,6 @@ pub fn build_initial_call(
         root_span_id: None,
         sampled: None,
         worker_index: None,
-        topology,
         // A non-emergency INVITE writes *absence* (`None`), never `Some(false)`
         // — production only ever stamps `Some(true)` or leaves the field unset
         // (see `call` codec_roundtrip emergency contract). The field carries the
@@ -429,15 +427,8 @@ fn build_reject_headers(
     Ok(out)
 }
 
-mod topology_cookie;
-pub use topology_cookie::foreign_primary;
-use topology_cookie::topology_from_cookie;
-
 #[cfg(test)]
 mod emergency_on_invite_tests;
-
-#[cfg(test)]
-mod stickiness_cookie_tests;
 
 #[cfg(test)]
 mod multi_instance_header_tests;

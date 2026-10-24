@@ -38,15 +38,15 @@ impl ActionExecutor<'_> {
     /// per-leg `NoAnswer` entry and every service watchdog leaves the ledger
     /// and the driver, the ladders end, and every service machine is
     /// deactivated (its cursor removed) — so no fire reaches the terminating
-    /// window and a reclaim cannot restore one into it. A rule that keeps its
+    /// window and no restore of the record brings one back into it. A rule that keeps its
     /// machine through the teardown re-installs its cursor with a `SetState`
     /// after this action.
     ///
     /// A relayed INVITE still pending on any dialog is answered first (RFC 3261
     /// §15.1.2: a UAS ending a dialog still responds to its pending requests,
     /// 487 recommended), its target CANCELled, so no INVITE transaction is
-    /// left open behind the BYEs — a takeover copy is resident exactly while
-    /// one is (ADR-0014). Every request a service held is answered 487 too.
+    /// left open behind the BYEs — a copy of the call another owner serves is
+    /// resident exactly while one is (ADR-0014). Every request a service held is answered 487 too.
     ///
     /// `source_leg_id` is intentionally *not* special-cased here: rules that
     /// consume a BYE end their source leg (`TerminateLeg`) before emitting
@@ -164,8 +164,8 @@ impl ActionExecutor<'_> {
         // Nothing awaits an answer, no service makes progress and nothing is
         // repeated once the call is terminating: the call's scope retires —
         // every leg's timers, every service watchdog and every ladder (a
-        // caller who CANCELled must not keep receiving rungs), so a reclaim
-        // cannot restore one into it.
+        // caller who CANCELled must not keep receiving rungs), so no restore of
+        // the record brings one back into it.
         self.retire(call, fx, Scope::Call);
         deactivate_service_machines(call);
         call.state = call::CallModelState::Terminating;

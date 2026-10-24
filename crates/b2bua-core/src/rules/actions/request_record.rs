@@ -71,7 +71,7 @@ impl ActionExecutor<'_> {
         dest: &(String, u16),
     ) {
         let record = RequestRecord {
-            relayed_by: self.config.relay_owner(),
+            relayed_by: self.owners.this.clone(),
             author: self.turn.rule.map(str::to_string),
             ..RequestRecord::own(
                 req.method().as_str(),
@@ -186,7 +186,7 @@ impl ActionExecutor<'_> {
             source_from: req.raw(HeaderName::From).next().unwrap_or_default().to_string(),
             source_to: req.raw(HeaderName::To).next().unwrap_or_default().to_string(),
             source_timestamp: req.raw(HeaderName::Timestamp).next().map(str::to_string),
-            relayed_by: self.config.relay_owner(),
+            relayed_by: self.owners.this.clone(),
             ..RequestRecord::relayed(req.method().as_str(), 0, i64::from(req.cseq().seq()))
         };
         *call = add_record(call.clone(), ctx.source_leg_id, &id, record);

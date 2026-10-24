@@ -11,7 +11,7 @@
 //! ## What this crate is NOT (deferred — see ADR-0008)
 //!
 //! - **`CallState`** — the stateful, per-call-serialized owner of the in-memory
-//!   call map + persistence + orphan sweep + HA topology; it lives with the
+//!   call map + persistence + orphan sweep; it lives with the
 //!   b2bua runtime, not in this leaf.
 //! - **`TimerService`** — live timer scheduling. The data model carries only
 //!   *serializable* [`model::TimerEntry`] intents; firing rides `sip-txn`'s
@@ -64,8 +64,8 @@ pub use txn::{TxnKind, TxnTimeoutKind};
 pub use codec::{CallBodyCodec, CallDecodeError, CallEncodeError, MsgpackCodec};
 // The Call→Leg→Dialog tree + call-level satellites.
 pub use model::{
-    ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallModelState, CallTopology, Leg,
-    PolicyUpdateBody, SipHeader,
+    ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallModelState, Leg, PolicyUpdateBody,
+    SipHeader,
 };
 // The reliable provisionals a call received (RFC 3262) and the answers its
 // dialogs owe (RFC 3264).

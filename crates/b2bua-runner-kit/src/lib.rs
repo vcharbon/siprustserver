@@ -98,6 +98,7 @@ use sip_net::types::BindUdpOpts;
 use sip_net::{RealSignalingNetwork, SignalingNetwork, UdpEndpoint};
 
 pub mod backend_url;
+mod base;
 mod capacity_env;
 mod cdr_rabbitmq;
 mod drain_env;
@@ -116,6 +117,7 @@ mod shutdown;
 mod socket_buffers;
 mod validate;
 mod worker_metrics;
+pub use base::RunnerBase;
 pub use cdr_rabbitmq::{
     rabbitmq_cdr_writer_from_lookup, rabbitmq_cdr_writer_from_lookup_with_encoder,
     CdrDeliveryBounds, CdrQueueDeclare, RabbitMqCdrSettings, RabbitMqCdrWriter,
@@ -332,9 +334,9 @@ impl RunnerEnv {
             ),
         }
 
+        let identity = entropy::worker_identity(name, self.identity.clone(), &id_gen);
         let config = B2buaConfig {
             self_ordinal: self.ordinal.clone(),
-            self_identity: entropy::worker_identity(name, self.identity.clone(), &id_gen),
             cluster_key: self.cluster_key.clone(),
             sip_local_ip: advertise_ip,
             sip_local_port: advertise_port,
@@ -388,6 +390,7 @@ impl RunnerEnv {
             endpoint,
             local,
             config,
+            identity,
             udp_metrics,
             id_gen,
             refusals,
@@ -405,38 +408,6 @@ impl RunnerEnv {
 /// Comma-separated env list: trimmed, empties dropped.
 pub(crate) fn split_csv(s: &str) -> Vec<String> {
     s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()
-}
-
-/// Everything a bound runner shares between its assembly steps: the endpoint,
-/// the validated config, and the process-wide metrics/clock. All fields pub so
-/// a runner can reach any piece (e.g. `base.metrics` for a custom CDR sink,
-/// `base.clock` for a replication store).
-pub struct RunnerBase {
-    /// Log-line prefix (the binary's name).
-    pub name: String,
-    /// The parsed env this base was built from (post any field overrides).
-    pub env: RunnerEnv,
-    /// The shared bound UDP endpoint (core recv loop + live metrics getters).
-    pub endpoint: Arc<dyn UdpEndpoint>,
-    /// The actually-bound local address.
-    pub local: SocketAddr,
-    /// The validated worker config (advertise coercion applied).
-    pub config: B2buaConfig,
-    /// The `UdpTransport` metrics facade over [`Self::endpoint`].
-    pub udp_metrics: UdpTransportMetrics,
-    /// The worker's identifier generator, keyed from the OS RNG at bind;
-    /// [`deps`](Self::deps) hands it to the core.
-    pub id_gen: Arc<sip_txn::IdGen>,
-    /// The worker's refusals of new INVITEs, held by the ingress brake on
-    /// [`Self::endpoint`]; [`deps`](Self::deps) hands the core the same
-    /// instance, so a runner swapping one swaps both.
-    pub refusals: Refusals,
-    /// The process-wide metrics registry the core exports at `/metrics`.
-    pub metrics: B2buaMetrics,
-    /// System wall clock (transaction/dialog timers fire for real).
-    pub clock: Clock,
-    /// Resolved probe/metrics HTTP listen address.
-    pub metrics_sa: SocketAddr,
 }
 
 impl RunnerBase {
@@ -538,6 +509,7 @@ impl RunnerBase {
         let sink = cdr_sink.unwrap_or_else(|| Arc::new(NullCdrWriter));
         B2buaDeps {
             config: self.config.clone(),
+            identity: self.identity.clone(),
             decision,
             limiter: self.limiter_from_env().await,
             cdr: Arc::new(BufferedCdrWriter::spawn(sink, self.env.cdr_queue, self.metrics.clone())),

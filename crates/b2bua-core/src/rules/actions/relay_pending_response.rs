@@ -56,7 +56,7 @@ impl ActionExecutor<'_> {
         // relayed 3xx / 485 carries the peer's targets in passthrough.
         let contact =
             generators::response_states_own_contact(&Method::from_wire(&r.cseq_method), status)
-                .then(|| relay::leg_contact(self.config, relay::CallMarks::of(call), target_leg));
+                .then(|| relay::leg_contact(self.config, self.marks(call), target_leg));
         let mut transparent_headers = r.passthrough(relay::relay_response_passthrough_headers(
             r.resp,
             self.config
@@ -175,7 +175,7 @@ impl ActionExecutor<'_> {
         // carries no relay snapshot (it takes the per-fork branch
         // below), and a B2BUA-originated re-INVITE (realign / reroute /
         // promote, whose 2xx is ACKed by the B2BUA itself) leaves no
-        // snapshot either — so a reclaim/realign leg never arms this.
+        // snapshot either — so a restored or realign leg never arms this.
         if r.cseq_method == "INVITE" && (200..300).contains(&status) {
             // RFC 3261 §13.2.2.4 on the ANSWERING leg — `confirm_dialog`'s
             // in-dialog twin: the ACK this 2xx owes is the originator's

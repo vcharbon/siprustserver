@@ -15,6 +15,7 @@ use super::super::materialise::relayed_server_key;
 use super::super::RouterCtx;
 use crate::effects::HandlerResult;
 use crate::rules::{ActionExecutor, RuleCall, RuleContext};
+use crate::store::Enveloped;
 use crate::turn_scope::TurnScope;
 
 /// Discharge an already-`Terminated` body (a backup's deferred terminal, folded
@@ -37,22 +38,26 @@ use crate::turn_scope::TurnScope;
 ///   originator, a CANCEL to its target.
 ///
 /// A round the other copy relayed has its server transaction there, and its
-/// ending answers it.
+/// ending answers it. The record takes the ending body's envelope.
 pub(super) async fn discharge_folded_terminal(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
     before: &Call,
-    terminal: Call,
+    terminal: Enveloped,
     now_ms: i64,
 ) {
-    let by = ctx.config.relay_owner();
-    let (answered_there, ours) = own_open_rounds(before, &terminal, &by);
+    let Enveloped { call: terminal, topology } = terminal;
+    let by = &ctx.relay_owner;
+    let (answered_there, ours) = own_open_rounds(before, &terminal, by);
     for key in answered_there.iter().filter_map(relayed_server_key) {
         let _ = ctx.txn.relinquish_server(key).await;
     }
     let mut result = HandlerResult::new(raise_sequences(terminal, before));
     let mut turn = TurnScope::of(ctx.id_gen.turn()).with_faults(ctx.wire_faults.snapshot());
-    answer_the_records_rounds(ctx, call_ref, before, ours, &mut result, now_ms, &mut turn);
+    let owners = ctx.owners(call_ref);
+    let rounds = Rounds { record: before, rounds: ours, owners: &owners };
+    answer_the_records_rounds(ctx, call_ref, rounds, &mut result, now_ms, &mut turn);
+    ctx.state.update_enveloped(Enveloped::new(before.clone(), topology));
     let result = crate::rules::invariants::enforce(
         &ctx.obligations,
         before,
@@ -68,17 +73,25 @@ pub(super) async fn discharge_folded_terminal(
         .await;
 }
 
-/// The effects answering the record's re-INVITE relays `rounds` — `(leg,
-/// outbound CSeq)` — 487 to the originator and CANCEL to the target.
+/// The record's re-INVITE relays to answer — `(leg, outbound CSeq)` — and
+/// the call's owners.
+struct Rounds<'a> {
+    record: &'a Call,
+    rounds: Vec<(String, i64)>,
+    owners: &'a crate::owners::Owners,
+}
+
+/// The effects answering the record's re-INVITE relays `rounds`: 487 to the
+/// originator and CANCEL to the target.
 fn answer_the_records_rounds(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
-    record: &Call,
-    rounds: Vec<(String, i64)>,
+    rounds: Rounds,
     result: &mut HandlerResult,
     now_ms: i64,
     turn: &mut TurnScope,
 ) {
+    let Rounds { record, rounds, owners } = rounds;
     let actions: Vec<RuleAction> = rounds
         .into_iter()
         .map(|(leg_id, outbound_cseq)| RuleAction::RejectPendingReinvite {
@@ -109,8 +122,9 @@ fn answer_the_records_rounds(
         config: &ctx.config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: owners.copy_served,
     };
-    let mut exec = ActionExecutor { config: &ctx.config, turn, now_ms };
+    let mut exec = ActionExecutor { config: &ctx.config, owners, turn, now_ms };
     let answered = exec.execute(&actions, record, &rule_ctx).effects;
     result.effects.critical.extend(answered.critical);
     result.effects.outbound.extend(answered.outbound);

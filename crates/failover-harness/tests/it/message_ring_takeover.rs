@@ -13,10 +13,11 @@
 //!   primary reboots            nothing left to reclaim: one CDR
 //! ```
 
+use b2bua::store::envelope;
 use std::time::Duration;
 
 use b2bua::config::CdrConfig;
-use call::{Call, CallBodyCodec, MessageDirection, MsgpackCodec};
+use call::{Call, MessageDirection, MsgpackCodec};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
     ProxySut, ReplicatedB2buaSut, WorkerHealth,
@@ -115,14 +116,15 @@ async fn a_takeover_numbers_its_turns_past_the_replicated_ring() {
 
     let call_ref = find_backed_up_ref(&fh, backup, &primary_ord).await;
     let served = primary.live_call(&call_ref).expect("the primary serves the call");
-    let replica = MsgpackCodec::new()
-        .decode(
-            &backup
-                .get(PartitionRole::Backup, &primary_ord, &call_ref)
-                .await
-                .expect("the backup holds the replica"),
-        )
-        .expect("the replica decodes");
+    let replica = envelope::decode(
+        &MsgpackCodec::new(),
+        &backup
+            .get(PartitionRole::Backup, &primary_ord, &call_ref)
+            .await
+            .expect("the backup holds the replica"),
+    )
+    .expect("the replica decodes")
+    .call;
     assert_eq!(replica.message_turn, served.message_turn, "the counter rides the replica");
     assert_eq!(entries(&replica).len(), entries(&served).len(), "the ring rides the replica");
     let recorded = entries(&replica);

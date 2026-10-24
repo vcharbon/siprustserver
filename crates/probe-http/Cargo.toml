@@ -9,6 +9,9 @@ description = "The single hand-rolled HTTP probe/metrics server both runner bina
 [package.metadata.purity]
 tier = "shell"
 
+[package.metadata.ha]
+side = "blind"
+
 [lints]
 workspace = true
 

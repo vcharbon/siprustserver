@@ -86,7 +86,8 @@ pub(crate) mod advertisement_tests {
     use sip_message::{SipMessage, SipParser, SipRequest};
 
     fn marks() -> CallMarks<'static> {
-        CallMarks { call_ref: "w0|c|x", incarnation_mark: "k", is_emergency: false, owners: None }
+        let owners = crate::owners::Owners::none();
+        CallMarks { call_ref: "w0|c|x", incarnation_mark: "k", is_emergency: false, owners }
     }
 
     fn a_leg_invite() -> SipRequest {

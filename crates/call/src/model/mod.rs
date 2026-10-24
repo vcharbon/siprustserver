@@ -21,7 +21,7 @@
 //!
 //! Concern map:
 //!   - [`record`] — master [`Call`] record + call-level satellites (lifecycle
-//!     state, topology, peering, INVITE snapshot, policy)
+//!     state, peering, INVITE snapshot, policy)
 //!   - [`limiter`] — the call's admission state on the call limiter
 //!   - [`leg`] — [`Leg`] + state / disposition / role enums
 //!   - [`attempt`] — one routing answer the call dials and its legs
@@ -104,8 +104,7 @@ pub use provisional::{
 };
 pub use queued_request::QueuedRequest;
 pub use record::{
-    ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallModelState, CallTopology,
-    PolicyUpdateBody, SipHeader,
+    ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallModelState, PolicyUpdateBody, SipHeader,
 };
 pub use relay_owner::RelayOwner;
 pub use request_record::{DialogUsage, HostPort, RequestOrigin, RequestRecord, SentRequest};

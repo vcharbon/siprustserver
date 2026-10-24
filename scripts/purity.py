@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Tiers, production closures and the pure dependency rule (ADR-0051 §1, §3).
+"""Tiers, production closures and the pure dependency rule (ADR-0051 §1, §3);
+the blind/aware boundary and the word net (ADR-0055 §11).
 
   purity.py [-C DIR] [--config FILE] [--base REV] [--staged]
 
-A crate declares its tier in its manifest:
+A crate declares its tier and its HA side in its manifest:
 
   [package.metadata.purity]
   tier = "pure"                  # or "shell"
+
+  [package.metadata.ha]
+  side = "blind"                 # or "aware"
 
 The configuration (`purity.toml` at the root of DIR's repository):
 
@@ -40,6 +44,9 @@ Checks:
              crate version followed through its own dependencies, an entry
              naming every version); a `pure-deps` entry no pure crate reaches
              is stale
+  ha         every member declares its HA side; a blind member depends on
+             blind first-party crates only and its files hold no word of the
+             word net (ha_side.py)
   lints      every member inherits `[lints] workspace = true` or restates
              the workspace's table, `rust.unsafe_code = "deny"` its one
              allowed difference; no clippy.toml below the root and no
@@ -64,6 +71,7 @@ import subprocess
 import sys
 import tomllib
 
+import ha_side
 import purity_images
 
 TIERS = ("pure", "shell")
@@ -158,6 +166,7 @@ class Workspace:
         local = [p for p in meta["packages"] if p.get("source") is None]
         self.tiers = {p["name"]: tier_of(p) for p in local}
         self.members = [p for p in local if p["id"] in members]
+        self.local = local
         self.local_names = set(self.tiers)
 
     def bad_tiers(self):
@@ -403,6 +412,7 @@ def main():
     rc = report(closure(ws, config)) or rc
     rc = report(images(root, config)) or rc
     rc = report(pure_violations(ws, config)) or rc
+    rc = report(ha_side.violations(ws.root, ws.members, ws.local)) or rc
     rc = report(lint_tables(ws)) or rc
     return report(against_base(config, base_config(root, base, a.config))) or rc
 

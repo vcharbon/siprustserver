@@ -8,7 +8,7 @@
 //! ([`InviteExchange`]). A record lives where its transaction does — a leg's
 //! dialog-creating INVITE on the leg, any other on the dialog holding it —
 //! until that transaction settles, through the dialog's retirement, so a
-//! takeover copy rebuilds each transaction from it.
+//! restored record rebuilds each transaction from it.
 
 use serde::{Deserialize, Serialize};
 use sip_retransmit::timers::{T2, TIMER_F};

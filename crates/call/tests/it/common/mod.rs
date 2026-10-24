@@ -296,7 +296,6 @@ pub fn representative_call() -> Call {
         root_span_id: Some("fedcba9876543210".into()),
         sampled: Some(true),
         worker_index: Some(0),
-        topology: Some(CallTopology::new("worker-0", "worker-1", 3, 0)),
         emergency: Some(true),
         features: Some(FeatureActivations {
             platform: PlatformActivations {
@@ -424,7 +423,7 @@ fn arb_timer_type() -> impl Strategy<Value = TimerType> {
         Just(TimerType::NotifyAnswerCap),
         Just(TimerType::HeldAnswer),
         // Service-owned timer: arbitrary (service_id, key) — both deserialise
-        // into owned strings on the replica side (Cow::Owned), so the codec
+        // into owned strings on the decoding side (Cow::Owned), so the codec
         // P1 round-trip property covers the HA replication path for it.
         ("[a-z][a-z0-9-]{0,8}", "[a-zA-Z0-9_-]{1,12}").prop_map(|(sid, key)| {
             TimerType::Service { service_id: MachineId(sid.into()), key: key.into() }
@@ -702,10 +701,6 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
         proptest::option::of("[0-9a-f]{16}"),
         proptest::option::of(any::<bool>()),
         proptest::option::of(any::<i64>()),
-        proptest::option::of(
-            (arb_tag(), arb_tag(), any::<i64>(), any::<i64>())
-                .prop_map(|(pri, bak, gen, bak_gen)| CallTopology::new(pri, bak, gen, bak_gen)),
-        ),
     );
     let tail = (
         proptest::option::of(any::<bool>()),
@@ -748,7 +743,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             (call_ref, a_leg, b_legs, active_peer, callback_context, billing_context, a_leg_invite),
             (limiter, timers, cdr_events, attempts),
             (state, created_at),
-            (trace_id, root_span_id, sampled, worker_index, topology),
+            (trace_id, root_span_id, sampled, worker_index),
             (
                 emergency,
                 features,
@@ -781,7 +776,6 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             root_span_id,
             sampled,
             worker_index,
-            topology,
             emergency,
             features,
             policy_update_headers,

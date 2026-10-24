@@ -21,6 +21,7 @@ pub use crate::leg_end::LegEnd;
 pub use crate::lifecycle::{AttemptOpening, LifecycleEvent, RouteAnswer};
 use crate::relayed_final::RelayedFinal;
 pub use crate::rule_call::RuleCall;
+pub use crate::rule_diagnostic::RuleDiagnostic;
 pub use crate::timer_delay::TimerDelay;
 
 pub const CORE_LAYER: u8 = 0;
@@ -369,32 +370,6 @@ impl RuleDefinition {
     pub fn runs_while_terminating(mut self) -> Self {
         self.teardown = true;
         self
-    }
-}
-
-/// An input a rule could not read, stated as a fact instead of absorbed into a
-/// fabricated value. A rule that hits one names the field and why, emits
-/// whatever refusal it owns (a reject response, a terminated subscription), and
-/// lets the engine log and count the diagnostic — the alternative a rule surface
-/// without this seam is forced into is choosing between silence and acting as if
-/// the input were fine.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuleDiagnostic {
-    /// The input that did not read (`refer_to`, `destination.port`, …).
-    pub field: String,
-    /// Why it did not read.
-    pub reason: String,
-}
-
-impl RuleDiagnostic {
-    pub fn unreadable(field: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self { field: field.into(), reason: reason.into() }
-    }
-}
-
-impl std::fmt::Display for RuleDiagnostic {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "unreadable {}: {}", self.field, self.reason)
     }
 }
 
@@ -999,6 +974,9 @@ pub struct RuleContext<'a> {
     /// the rules ran: the dialog it names on the source leg, and the relay a
     /// response answers. Empty for any other event.
     pub resolved: &'a call::helpers::Resolved,
+    /// Whether another owner served the call, so its record may lack what
+    /// that owner sent (ADR-0055 §4); `false` on a call one node serves.
+    pub copy_served: bool,
 }
 
 impl<'a> RuleContext<'a> {

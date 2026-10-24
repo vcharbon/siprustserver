@@ -41,8 +41,8 @@ fn state() -> CallState {
 #[test]
 fn a_whole_store_needs_no_correction() {
     let state = state();
-    state.create(call("a", "a@192.0.2.9"));
-    state.create(call("b", "b@192.0.2.9"));
+    state.create_placed(call("a", "a@192.0.2.9"));
+    state.create_placed(call("b", "b@192.0.2.9"));
     assert!(state.reconcile(7).is_clean());
     assert_eq!(state.touched_count(), 2);
 }
@@ -52,7 +52,7 @@ fn a_whole_store_needs_no_correction() {
 #[test]
 fn a_call_with_no_stamp_is_stamped_by_the_next_pass() {
     let state = state();
-    state.create(call("a", "a@192.0.2.9"));
+    state.create_placed(call("a", "a@192.0.2.9"));
     state.locked().touched.remove("a");
     assert_eq!(state.last_touched("a"), None);
 
@@ -66,7 +66,7 @@ fn a_call_with_no_stamp_is_stamped_by_the_next_pass() {
 #[test]
 fn a_removed_call_leaves_no_takeover_mark() {
     let state = state();
-    state.create(call("a", "a@192.0.2.9"));
+    state.create_placed(call("a", "a@192.0.2.9"));
     state.mark_takeover("a");
     state.remove("a");
     assert!(!state.is_takeover("a"));
@@ -78,8 +78,8 @@ fn a_removed_call_leaves_no_takeover_mark() {
 #[test]
 fn a_takeover_mark_of_a_gone_call_is_dropped_by_the_next_pass() {
     let state = state();
-    state.create(call("a", "a@192.0.2.9"));
-    state.create(call("b", "b@192.0.2.9"));
+    state.create_placed(call("a", "a@192.0.2.9"));
+    state.create_placed(call("b", "b@192.0.2.9"));
     state.mark_takeover("a");
     state.mark_takeover("b");
     {
@@ -102,8 +102,8 @@ fn a_takeover_mark_of_a_gone_call_is_dropped_by_the_next_pass() {
 #[test]
 fn the_entries_of_a_call_that_is_gone_are_dropped() {
     let state = state();
-    state.create(call("a", "a@192.0.2.9"));
-    state.create(call("b", "b@192.0.2.9"));
+    state.create_placed(call("a", "a@192.0.2.9"));
+    state.create_placed(call("b", "b@192.0.2.9"));
     let held_by_b: Vec<String> = state.locked().indexed.get("b").cloned().unwrap();
     {
         let mut inner = state.locked();
@@ -123,12 +123,29 @@ fn the_entries_of_a_call_that_is_gone_are_dropped() {
     }
 }
 
+/// A removal a panic cut after the call left its envelope: the next pass
+/// drops it with the call's other entries.
+#[test]
+fn the_envelope_of_a_call_that_is_gone_is_dropped() {
+    let state = state();
+    let topology = Some(crate::store::CallTopology::new("w0", "w1", 1, 0));
+    state.create(call("a", "a@192.0.2.9"), topology.clone());
+    state.create(call("b", "b@192.0.2.9"), topology);
+    state.locked().calls.remove("a");
+
+    let fixed = state.reconcile(9);
+    assert_eq!(fixed.orphan_envelopes, 1, "{fixed:?}");
+    assert!(!state.locked().topologies.contains_key("a"), "a's envelope is dropped");
+    assert!(state.topology("b").is_some(), "a resident call's envelope stays");
+    assert!(state.reconcile(10).is_clean(), "the store is whole again");
+}
+
 /// A resident call that lost its key list is indexed again, without taking
 /// a key another resident call holds.
 #[test]
 fn a_call_with_no_key_list_is_indexed_again() {
     let state = state();
-    state.create(call("a", "a@192.0.2.9"));
+    state.create_placed(call("a", "a@192.0.2.9"));
     let keys = {
         let mut inner = state.locked();
         let keys = inner.indexed.remove("a").unwrap();
@@ -150,7 +167,7 @@ fn a_call_with_no_key_list_is_indexed_again() {
 #[test]
 fn a_poisoned_call_map_lock_is_recovered_and_counted() {
     let state = state();
-    state.create(call("a", "a@192.0.2.9"));
+    state.create_placed(call("a", "a@192.0.2.9"));
     let before = LOCK_RECOVERIES.count(super::super::poison::CALL_STORE);
     let poisoner = state.clone();
     let _ = std::thread::spawn(move || {
@@ -160,7 +177,7 @@ fn a_poisoned_call_map_lock_is_recovered_and_counted() {
     .join();
 
     assert!(state.contains("a"), "the store answers after the panic");
-    state.create(call("b", "b@192.0.2.9"));
+    state.create_placed(call("b", "b@192.0.2.9"));
     assert_eq!(state.active_count(), 2);
     assert_eq!(LOCK_RECOVERIES.count(super::super::poison::CALL_STORE) - before, 1);
 }

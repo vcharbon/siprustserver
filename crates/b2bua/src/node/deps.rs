@@ -62,6 +62,10 @@ pub struct ReplicationSetup {
 /// Wiring inputs for [`B2buaCore::spawn`](super::B2buaCore::spawn).
 pub struct B2buaDeps {
     pub config: B2buaConfig,
+    /// This worker's identity: one boot of one worker, compared for equality
+    /// only (ADR-0055 §6). A request this worker relays names it beside the
+    /// ordinal. Empty: the worker states none.
+    pub identity: String,
     pub decision: Arc<dyn CallDecisionEngine>,
     pub limiter: Arc<dyn CallLimiter>,
     pub cdr: Arc<dyn CdrWriter>,

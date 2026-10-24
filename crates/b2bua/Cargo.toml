@@ -9,6 +9,9 @@ description = "B2BUA core: per-call FIFO dispatch (SipRouter/PerCallDispatcher) 
 [package.metadata.purity]
 tier = "shell"
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 
@@ -25,6 +28,9 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# The replicated body: the store envelope beside the call body (store/envelope.rs).
+rmp-serde = { workspace = true }
+serde_bytes = { workspace = true }
 # Instrumentation facade (ADR-0026): warnings and lifecycle events are emitted
 # through `tracing`. The subscriber — and the whole OpenTelemetry tree — is the
 # runner's, installed via `crates/observe`; this crate never sees it.
@@ -34,6 +40,8 @@ observe = { path = "../observe", default-features = false }
 b2bua-sdk = { path = "../b2bua-sdk" }
 # The decision core every turn runs (ADR-0052).
 b2bua-core = { path = "../b2bua-core" }
+# The decision seam: the engine port and the adaptation port (ADR-0055 §11).
+b2bua-decision = { path = "../b2bua-decision" }
 call = { path = "../call" }
 sip-message = { path = "../sip-message" }
 sip-net = { path = "../sip-net" }

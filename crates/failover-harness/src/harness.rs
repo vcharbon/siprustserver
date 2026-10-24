@@ -40,7 +40,7 @@ use b2bua::rules::ServiceDef;
 use b2bua::store::{CallStore, PartitionRole, PutOpts};
 use b2bua::{B2buaCore, ReplicationSetup};
 use b2bua_harness::{spawn_proxy_core, B2buaSpawnParams};
-use call::{CallBodyCodec, MsgpackCodec, TimerKey, TimerType};
+use call::{MsgpackCodec, TimerKey, TimerType};
 use ha_harness::{Marker, ReplReport};
 use observe::NodeScope;
 use repl_net::transport::ReplicationNetwork;
@@ -57,6 +57,7 @@ use crate::turn_points::TurnPoints;
 use crate::views::{Belief, Incarnation, ViewLedger};
 
 mod acceptance;
+mod live;
 mod membership;
 mod proxy_sut;
 mod release_all;
@@ -372,20 +373,6 @@ impl ReplicatedB2buaSut {
     // replica it could take over from), and whether a node's *memory is clean*
     // (no per-call state left behind).
 
-    /// Does this node currently **serve** `call_ref` — hold it live, so it would
-    /// emit the call's keepalive and answer in-dialog traffic? The cluster
-    /// invariant is "exactly one node serves a given call" (see
-    /// [`assert_single_owner`](crate::assert_single_owner)). `false` while crashed.
-    pub fn serves(&self, call_ref: &str) -> bool {
-        self.core.as_ref().map(|c| c.serves(call_ref)).unwrap_or(false)
-    }
-
-    /// The live copy this worker serves for `call_ref`, if any — what its rules
-    /// read at the next event.
-    pub fn live_call(&self, call_ref: &str) -> Option<call::Call> {
-        self.core.as_ref().and_then(|c| c.live_call(call_ref))
-    }
-
     /// Post an in-flight `event` to this node's router; nothing while crashed.
     pub fn post_event(&self, event: b2bua::CallEvent) {
         let _ = self.core.as_ref().map(|core| core.post_event(event));
@@ -421,7 +408,8 @@ impl ReplicatedB2buaSut {
             .expect("replica store read")
             .expect("replica body present");
         let codec = MsgpackCodec::new();
-        let mut call = codec.decode(&body).expect("replica body decodes");
+        let copy = b2bua::store::envelope::decode(&codec, &body).expect("replica body decodes");
+        let mut call = copy.call;
         let leg = call.b_legs.first().expect("replicated call has a b-leg").leg_id.clone();
         call::helpers::arm_timer(&mut call, TimerKey::leg(TimerType::NoAnswer, &leg), fire_at_ms);
         let (p, b) =
@@ -431,7 +419,8 @@ impl ReplicatedB2buaSut {
                 role,
                 primary,
                 call_ref,
-                codec.encode(&call).expect("replica body encodes"),
+                b2bua::store::envelope::encode(&codec, copy.topology.as_ref(), &call)
+                    .expect("replica body encodes"),
                 &[],
                 600_000,
                 p,
@@ -739,9 +728,9 @@ impl ReplicatedB2buaSut {
     /// given replication setup.
     async fn spawn_core(&self, replication: Option<ReplicationSetup>) -> B2buaCore {
         let (endpoint, _sa) = self.harness.bind_sut(&self.sip_name, &self.sip_bind).await;
-        let identity = self.incarnation_key();
         let params = B2buaSpawnParams {
             ordinal: self.ordinal.clone(),
+            identity: self.incarnation_key(),
             sip_addr: self.sip_addr,
             decision: self.decision.clone(),
             limiter: self.limiter.clone(),
@@ -790,7 +779,6 @@ impl ReplicatedB2buaSut {
             // code default (32 s), so it is set here for parity.
             config.keepalive_interval_sec = 300;
             config.keepalive_timeout_sec = 45;
-            config.self_identity = identity.clone();
             // The scenario tune runs LAST so it can override any parity
             // default above — on this spawn and on every reboot re-spawn.
             (self.tune)(config);

@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use call::helpers::{lifecycle_behind, merge_exempt};
+use call::helpers::lifecycle_behind;
 use call::{Call, CallModelState};
 
 use super::super::materialise::answered_invite_seeds;
@@ -19,7 +19,8 @@ use super::super::RouterCtx;
 use super::diverged::{end_diverged, end_over_an_ending, own_records};
 use super::ending::discharge_folded_terminal;
 use super::{format_pb, FlushDirection};
-use crate::store::containment::{containment, meet, Containment, Met};
+use crate::store::containment::{meet, standing, Containment, Met};
+use crate::store::Enveloped;
 
 /// The other owner's copy `incoming` of the call meets the `live` copy here,
 /// one call incarnation, under the per-call lock; `direction` says whose
@@ -45,8 +46,8 @@ pub(in crate::router) async fn meet_live(
     ctx: &Arc<RouterCtx>,
     direction: FlushDirection,
     call_ref: &str,
-    live: &Call,
-    incoming: Call,
+    live: &Enveloped,
+    incoming: Enveloped,
     now_ms: i64,
 ) {
     let incoming_is_primary = matches!(direction, FlushDirection::Forward);
@@ -59,37 +60,35 @@ pub(in crate::router) async fn meet_live(
     tracing::info!(
         node = observe::node(),
         call_ref,
-        call_id = %live.a_leg.call_id,
+        call_id = %live.call.a_leg.call_id,
         direction = direction.label(),
         met = label,
-        state = ?incoming.state,
-        replica_pb = %format_pb(&incoming),
-        live_pb = %format_pb(live),
+        state = ?incoming.call.state,
+        replica_pb = %format_pb(incoming.topology.as_ref()),
+        live_pb = %format_pb(live.topology.as_ref()),
         "copies met"
     );
-    let ending = incoming.state != CallModelState::Active;
+    let ending = incoming.call.state != CallModelState::Active;
     if let (FlushDirection::Reverse, true) = (direction, ending) {
         let ends_here = match &met {
             Met::Incoming(_) => true,
-            Met::Diverged => lifecycle_behind(live, &incoming),
+            Met::Diverged => lifecycle_behind(&live.call, &incoming.call),
             Met::Held(_) => false,
         };
         if ends_here {
-            let diverged = matches!(met, Met::Diverged) && live.state == CallModelState::Active;
+            let diverged =
+                matches!(met, Met::Diverged) && live.call.state == CallModelState::Active;
             if diverged && end_over_an_ending(ctx, call_ref, live, &incoming, now_ms).await {
                 return;
             }
-            if incoming.state == CallModelState::Terminated {
-                discharge_folded_terminal(ctx, call_ref, live, incoming, now_ms).await;
+            if incoming.call.state == CallModelState::Terminated {
+                discharge_folded_terminal(ctx, call_ref, &live.call, incoming, now_ms).await;
             }
             return;
         }
     }
-    let by = ctx.config.relay_owner();
-    let both = matches!(
-        (live.topology.as_ref(), incoming.topology.as_ref()),
-        (Some(l), Some(i)) if containment(l, i) == Containment::Both
-    );
+    let by = &ctx.relay_owner;
+    let both = standing(live, &incoming) == Some(Containment::Both);
     match met {
         Met::Held(kept) => {
             if let FlushDirection::Reverse = direction {
@@ -101,16 +100,17 @@ pub(in crate::router) async fn meet_live(
             FlushDirection::Reverse => {
                 take_whole(ctx, call_ref, live, &incoming, taken, now_ms).await
             }
-            FlushDirection::Forward if covers(&incoming, live, &by) => {
+            FlushDirection::Forward if covers(&incoming, live, by) => {
                 release_call(ctx, call_ref, ReleaseKind::StandDown).await;
             }
             FlushDirection::Forward if both => {
-                keep(ctx, live, merge_exempt(live.clone(), &incoming));
+                keep(ctx, live, live.clone().merge_exempt(&incoming));
             }
             FlushDirection::Forward => {
-                let mut taken = own_records(taken, live, &by);
-                resync_timers(ctx, call_ref, live, &mut taken, now_ms).await;
-                ctx.state.update_quiet(taken);
+                let Enveloped { call: taken, topology } = taken;
+                let mut taken = own_records(taken, &live.call, by);
+                resync_timers(ctx, call_ref, &live.call, &mut taken, now_ms).await;
+                ctx.state.update_enveloped(Enveloped::new(taken, topology));
             }
         },
         Met::Diverged => {
@@ -121,9 +121,9 @@ pub(in crate::router) async fn meet_live(
 
 /// The live copy stands, `kept` being it with the other copy's exempt fields
 /// merged in.
-fn keep(ctx: &Arc<RouterCtx>, live: &Call, kept: Call) {
+fn keep(ctx: &Arc<RouterCtx>, live: &Enveloped, kept: Enveloped) {
     if kept != *live {
-        ctx.state.update_quiet(kept);
+        ctx.state.update_enveloped(kept);
     }
 }
 
@@ -138,22 +138,23 @@ fn keep(ctx: &Arc<RouterCtx>, live: &Call, kept: Call) {
 async fn take_whole(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
-    live: &Call,
-    incoming: &Call,
-    mut taken: Call,
+    live: &Enveloped,
+    incoming: &Enveloped,
+    taken: Enveloped,
     now_ms: i64,
 ) {
-    if let Err(err) = crate::rules::relay::rebuild_a_leg_invite(&taken.a_leg_invite) {
+    if let Err(err) = crate::rules::relay::rebuild_a_leg_invite(&taken.call.a_leg_invite) {
         ctx.metrics.bump_unrecoverable_fold();
         tracing::error!(%call_ref, error = %err, "a met copy does not rebuild the caller's INVITE: the live copy stays");
-        let mut kept = merge_exempt(live.clone(), incoming);
+        let mut kept = live.clone().merge_exempt(incoming);
         kept.topology.clone_from(&live.topology);
         keep(ctx, live, kept);
         return;
     }
-    resync_timers(ctx, call_ref, live, &mut taken, now_ms).await;
+    let Enveloped { call: mut taken, topology } = taken;
+    resync_timers(ctx, call_ref, &live.call, &mut taken, now_ms).await;
     let seeds = answered_invite_seeds(&taken);
-    ctx.state.update_quiet(taken);
+    ctx.state.update_enveloped(Enveloped::new(taken, topology));
     if !seeds.is_empty() {
         let _ = ctx.txn.seed(call_ref, seeds).await;
     }

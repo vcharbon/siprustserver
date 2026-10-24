@@ -3,7 +3,7 @@
 //! simulated fabric) so the post-materialise list runs for real. Each test
 //! holds the per-call lock across the call, as every caller does.
 
-use call::{Call, CallBodyCodec, CallModelState, MsgpackCodec, TimerEntry, TimerKey, TimerType};
+use call::{Call, CallModelState, TimerEntry, TimerKey, TimerType};
 use sip_clock::Clock;
 
 use super::{materialise, Materialised, Origin, Reason};
@@ -42,8 +42,8 @@ fn call_in(pri: &str, bak: &str, cid: &str, state: CallModelState, clock: &Clock
 
 /// Seed `call` into `(role, primary)` of the replicating store.
 async fn put(store: &ReplicatingCallStore, role: PartitionRole, primary: &str, call: &Call) {
-    let body = MsgpackCodec::new().encode(call).unwrap();
-    let gen = call.topology.as_ref().map(|t| t.gen).unwrap_or(1);
+    let body = crate::store::envelope::placed_body(call).unwrap();
+    let gen = crate::router::topology_cookie::placement(call).map_or(1, |t| t.gen);
     store
         .put_call(role, primary, &call.call_ref, body, &[], 60_000, gen, 0, &PutOpts::default())
         .await

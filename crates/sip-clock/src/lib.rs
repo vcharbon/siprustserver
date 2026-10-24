@@ -36,11 +36,11 @@
 //!
 //! # HA note — failover timer reconstruction
 //!
-//! Monotonic `Instant`s are not portable across processes / restarts / replicas,
+//! Monotonic `Instant`s are not portable across processes / restarts / nodes,
 //! so a replicated timer can never ship a raw `Instant`. Replicated timers use
 //! the **absolute-wall-deadline** option: each `call::TimerEntry` carries
 //! `fire_at` as an epoch-ms deadline (`now_ms()` at schedule time + the delay),
-//! which IS replicated as part of the `Call`. On takeover the standby rebuilds its
+//! which IS replicated as part of the `Call`. A node restoring the call rebuilds its
 //! local monotonic timer from that deadline — see
 //! `b2bua::timers::TimerService::restore`.
 //!
@@ -64,7 +64,7 @@
 //! receiving store persists `skew_offset_ms = receiver_now_ms − origin_now_ms`
 //! alongside the body's `expiry_at_ms` (the SAME re-anchor idiom already used for
 //! `body_ttl_ms`), and a write of the node's own body clears it. On
-//! failover/reclaim the B2BUA router moves every instant of the rehydrated call
+//! a restore the B2BUA router moves every instant of the rehydrated call
 //! by that offset before re-arming its timers (ADR-0055 §9), so each lands in the
 //! LIVE node's clock frame however many hops the body made, regardless of a host
 //! NTP step that anchored the pods on opposite sides. A small deadband ignores sub-second offsets (dominated by

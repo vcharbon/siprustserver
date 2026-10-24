@@ -121,7 +121,8 @@ where
 /// ([`has_work_to_serve`]). The body is read once without the lock to leave a
 /// quiet call untouched; a call already live here is left as it is.
 async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str) -> Swept {
-    let Ok((call, _skew)) = ctx.state.peek_replica(call_ref).await else { return Swept::Left };
+    let Ok((copy, _skew)) = ctx.state.peek_replica(call_ref).await else { return Swept::Left };
+    let call = copy.call;
     if finished(&call) {
         return discharge_finished(ctx, call_ref).await;
     }
@@ -168,8 +169,8 @@ fn finished(call: &Call) -> bool {
 async fn discharge_finished(ctx: &Arc<RouterCtx>, call_ref: &str) -> Swept {
     let guard = ctx.state.lock(call_ref).await;
     let ended = match ctx.state.peek_replica(call_ref).await {
-        Ok((mut ended, skew)) if finished(&ended) => {
-            reanchor(&mut ended, skew);
+        Ok((mut ended, skew)) if finished(&ended.call) => {
+            reanchor(&mut ended.call, skew);
             ended
         }
         _ if ctx.state.peek(call_ref).is_some() => return Swept::Left,
@@ -181,7 +182,7 @@ async fn discharge_finished(ctx: &Arc<RouterCtx>, call_ref: &str) -> Swept {
         }
     };
     let now_ms = ctx.clock.now_ms();
-    let force_terminal = ended.state == CallModelState::Terminating;
+    let force_terminal = ended.call.state == CallModelState::Terminating;
     if discharge_materialized_terminal(ctx, call_ref, ended, now_ms, force_terminal).await {
         return Swept::Discharged;
     }

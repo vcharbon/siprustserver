@@ -15,9 +15,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use call::{
-    Call, CallBodyCodec, CallLimiterState, CallModelState, LegState, LimiterEntry, MsgpackCodec,
-};
+use call::{Call, CallLimiterState, CallModelState, LegState, LimiterEntry, MsgpackCodec};
 use repl_net_testkit::SimulatedReplicationNetwork;
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
@@ -85,7 +83,7 @@ fn named(call: &Call, opts: PutOpts) -> PutOpts {
 
 /// The primary's own write of `call` at `(p, 0)`, flushed toward B.
 async fn primary_put(a: &ReplicatingCallStore, call: &Call, p: i64) {
-    let body = MsgpackCodec::new().encode(call).unwrap();
+    let body = crate::store::envelope::placed_body(call).unwrap();
     a.put_call(PRI, "A", &call.call_ref, body, &[], 600_000, p, 0, &named(call, fwd("B")))
         .await
         .unwrap();
@@ -99,7 +97,7 @@ async fn primary_delete(a: &ReplicatingCallStore, call: &Call) {
 /// B's own write of `call` at `(p, b)`: what its takeover copy flushes back
 /// toward the primary (`b > 0`).
 async fn takeover_write(b: &ReplicatingCallStore, call: &Call, p: i64, bgen: i64) {
-    let body = MsgpackCodec::new().encode(call).unwrap();
+    let body = crate::store::envelope::placed_body(call).unwrap();
     b.put_call(BAK, "A", &call.call_ref, body, &[], 30_000, p, bgen, &named(call, rev("A")))
         .await
         .unwrap();
@@ -107,7 +105,7 @@ async fn takeover_write(b: &ReplicatingCallStore, call: &Call, p: i64, bgen: i64
 
 /// B's copy of a call A replicated: what B's Backup flow applies.
 async fn replicated(b: &ReplicatingCallStore, call: &Call, p: i64) {
-    let body = MsgpackCodec::new().encode(call).unwrap();
+    let body = crate::store::envelope::placed_body(call).unwrap();
     let opts = named(call, PutOpts { origin_now_ms: Some(0), ..PutOpts::default() });
     b.put_call(BAK, "A", &call.call_ref, body, &[], 600_000, p, 0, &opts).await.unwrap();
 }
@@ -115,7 +113,8 @@ async fn replicated(b: &ReplicatingCallStore, call: &Call, p: i64) {
 /// The incarnation of the body `store` holds for `call_ref` in `role`, decoded.
 async fn held(store: &ReplicatingCallStore, role: PartitionRole, call_ref: &str) -> Option<String> {
     let raw = store.get_call(role, "A", call_ref).await.unwrap()?;
-    let call: Call = MsgpackCodec::new().decode(&raw).expect("the body decodes");
+    let call =
+        crate::store::envelope::decode(&MsgpackCodec::new(), &raw).expect("the body decodes").call;
     Some(call.incarnation().to_string())
 }
 
@@ -292,7 +291,11 @@ async fn a_deferred_terminal_the_retry_replaces(at: TakeoverWrite, base: u16) {
         .store
         .take_displaced()
         .iter()
-        .map(|raw| MsgpackCodec::new().decode(raw).expect("the body decodes"))
+        .map(|raw| {
+            crate::store::envelope::decode(&MsgpackCodec::new(), raw)
+                .expect("the body decodes")
+                .call
+        })
         .filter(|c: &Call| c.state == CallModelState::Terminated)
         .map(|c| c.incarnation().to_string())
         .collect();

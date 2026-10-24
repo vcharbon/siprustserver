@@ -14,6 +14,7 @@ use crate::decision::{CallDecisionEngine, NewCallResponse};
 use crate::effects::{HandlerEffects, HandlerResult};
 use crate::initial_invite::{build_request, setup_event, treatment, Initial};
 use crate::limiter::LimiterWorker;
+use crate::owners::Owners;
 use crate::rules::{seed_services, ActionExecutor, ServiceDef};
 use crate::trace;
 use crate::turn_scope::TurnScope;
@@ -46,6 +47,7 @@ pub async fn handle_initial_invite(
     decision: &dyn CallDecisionEngine,
     limiter: &LimiterWorker,
     config: &B2buaConfig,
+    owners: &Owners,
     turn: &mut TurnScope,
     services: &[ServiceDef],
     invite_wire: &[u8],
@@ -90,13 +92,14 @@ pub async fn handle_initial_invite(
                 decision,
                 limiter,
                 config,
+                owners,
                 &mut turn.ids,
                 clock,
                 now_ms,
                 0,
             )
             .await;
-            let mut exec = ActionExecutor { config, turn, now_ms };
+            let mut exec = ActionExecutor { config, owners, turn, now_ms };
             let setup_event = setup_event(&result.call, a_invite);
             seed_services(result, services, &mut exec, &setup_event, "a", Direction::FromA)
         }

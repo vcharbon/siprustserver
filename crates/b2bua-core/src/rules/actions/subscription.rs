@@ -13,8 +13,8 @@
 //! - A final that removes the subscription, or the NOTIFY's timeout, ends it
 //!   and drops its queued NOTIFYs; the rest of the queue still leaves.
 //!
-//! The record rides the dialog and the cap the ledger, so a takeover copy
-//! resumes the wait and composes what it releases itself.
+//! The record rides the dialog and the cap the ledger, so a restored copy of
+//! the call resumes the wait and composes what it releases itself.
 
 use call::helpers::{find_leg, RecordHolder};
 use call::{

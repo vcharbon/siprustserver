@@ -9,6 +9,9 @@ description = "CallContext data model (Call→Leg→Dialog) + lens helpers + plu
 [package.metadata.purity]
 tier = "pure"
 
+[package.metadata.ha]
+side = "blind"
+
 [lints]
 workspace = true
 

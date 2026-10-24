@@ -71,11 +71,11 @@ async fn a_store_with_no_replication_wired_holds_nothing_after_a_call() {
     let call = cookie_call();
     let call_ref = call.call_ref.clone();
     assert_eq!(
-        call.topology.as_ref().map(|t| t.bak.as_str()),
-        Some("w1"),
+        crate::router::topology_cookie::placement(&call).map(|t| t.bak),
+        Some("w1".to_string()),
         "the cookie stamps a backup peer; the topology alone must not open the store"
     );
-    state.create(call);
+    state.create_placed(call);
 
     // Three authoritative turns, each flushed the way the router flushes an
     // Active call after a non-quiet turn (the pre-bump clone is what it passes).
@@ -171,7 +171,7 @@ async fn no_replication_wired_sends_the_store_neither_put_nor_delete() {
 
     let call = cookie_call();
     let call_ref = call.call_ref.clone();
-    state.create(call);
+    state.create_placed(call);
     let before = state.peek(&call_ref).unwrap();
     state.update(before.clone());
     state.flush(&before);
@@ -189,9 +189,9 @@ fn a_write_stamps_the_vector_only_when_it_changes_a_compared_field() {
     let store = Arc::new(InMemoryCallStore::new());
     let state = unwired_state(&store, &B2buaMetrics::new());
     let call = cookie_call();
-    let call_ref = state.create(call.clone());
+    let call_ref = state.create_placed(call.clone());
     let versions = || {
-        let t = state.peek(&call_ref).and_then(|c| c.topology).expect("a proxied call");
+        let t = state.topology(&call_ref).expect("a proxied call");
         (t.vector(), t.stamp())
     };
     let start = versions();

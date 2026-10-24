@@ -3,13 +3,14 @@
 
 use std::sync::Arc;
 
-use call::{CallBodyCodec, CallModelState};
+use call::CallModelState;
 use repl_net::frame::{Op, Partition};
 
 use super::super::incarnation::is_another_call;
 use super::Puller;
 use crate::router::{PrimaryWrite, ReplCommand};
 use crate::store::containment::{meet, Met};
+use crate::store::envelope::{self, Enveloped};
 use crate::store::{partition_of, CallStore, PartitionRole, PutOpts};
 
 /// How an inbound `Data` frame is reconciled into the local store
@@ -161,12 +162,14 @@ impl Puller {
                                                 .topology
                                                 .as_ref()
                                                 .map_or(version, |t| t.vector());
-                                            body = self
-                                                .codec
-                                                .encode(&merged)
-                                                .ok()
-                                                .map(Arc::from)
-                                                .or(body);
+                                            body = envelope::encode(
+                                                &self.codec,
+                                                merged.topology.as_ref(),
+                                                &merged.call,
+                                            )
+                                            .ok()
+                                            .map(Arc::from)
+                                            .or(body);
                                             ApplyOutcome::Applied
                                         }
                                         Met::Held(merged) => {
@@ -242,7 +245,8 @@ impl Puller {
                 // whether or not the Element takes its body: latch the answer for
                 // the `Delete` guard. Refusing a body is a decision about which
                 // version the Element keeps, never about what its sender saw.
-                if incoming.as_ref().is_some_and(call::helpers::caller_answered) {
+                if incoming.as_ref().is_some_and(|copy| call::helpers::caller_answered(&copy.call))
+                {
                     self.store.note_authority_answer(call_ref);
                 }
                 outcome
@@ -280,7 +284,7 @@ impl Puller {
         role: PartitionRole,
         primary: &str,
         call_ref: &str,
-    ) -> Option<call::Call> {
+    ) -> Option<Enveloped> {
         let raw = self.store.peek_body_raw(role, primary, call_ref).await?;
         self.decode_counted(&raw)
     }
@@ -294,10 +298,11 @@ impl Puller {
         role: PartitionRole,
         primary: &str,
         call_ref: &str,
-        merged: &call::Call,
+        merged: &Enveloped,
         kept: KeptCopy,
     ) {
-        let (Ok(body), Some(t)) = (self.codec.encode(merged), merged.topology.as_ref()) else {
+        let encoded = envelope::encode(&self.codec, merged.topology.as_ref(), &merged.call);
+        let (Ok(body), Some(t)) = (encoded, merged.topology.as_ref()) else {
             return;
         };
         let (p, b) = t.vector();
@@ -306,7 +311,7 @@ impl Puller {
             incarnation: kept.incarnation,
             ..PutOpts::default()
         };
-        let indexes = call::call_index_keys(merged);
+        let indexes = call::call_index_keys(&merged.call);
         let _ = self
             .store
             .put_call(role, primary, call_ref, body, &indexes, kept.body_ttl_ms, p, b, &opts)
@@ -314,7 +319,7 @@ impl Puller {
     }
 
     /// A stored or incoming body decoded, its refusal counted and logged.
-    fn decode_counted(&self, body: &[u8]) -> Option<call::Call> {
+    fn decode_counted(&self, body: &[u8]) -> Option<Enveloped> {
         crate::repl::decode_peer_body(&self.codec, &self.metrics, body)
     }
 
@@ -360,8 +365,8 @@ impl Puller {
         let Some(raw) = self.store.peek_body_raw(role, primary, call_ref).await else {
             return false;
         };
-        self.decode_counted(&raw).is_some_and(|call| {
-            call.state == CallModelState::Active && call::helpers::caller_answered(&call)
+        self.decode_counted(&raw).is_some_and(|copy| {
+            copy.call.state == CallModelState::Active && call::helpers::caller_answered(&copy.call)
         })
     }
 

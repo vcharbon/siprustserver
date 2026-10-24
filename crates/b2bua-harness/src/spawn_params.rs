@@ -18,6 +18,9 @@ use sip_txn::IdGen;
 pub struct B2buaSpawnParams {
     /// `self_ordinal` (e.g. "w0" single-SUT, the worker ordinal in a cluster).
     pub ordinal: String,
+    /// The worker's identity, one boot of its ordinal (ADR-0055 §6). Empty:
+    /// it states none.
+    pub identity: String,
     /// This worker's SIP wire address (drives `sip_local_ip`/`sip_local_port`).
     pub sip_addr: SocketAddr,
     pub decision: Arc<dyn CallDecisionEngine>,

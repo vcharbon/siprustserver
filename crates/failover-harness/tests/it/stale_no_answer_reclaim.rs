@@ -15,13 +15,14 @@
 //! re-arms its timers (`sanitize_restored_timers` + `TimerService::restore`).
 //! The fire then reaches the `no-answer` rule exactly as it did on the cluster.
 
+use b2bua::store::envelope;
 use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
 use b2bua::limiter::NoopLimiter;
-use call::{parse_call_ref, CallBodyCodec, CdrEventType, MsgpackCodec, TimerType};
+use call::{parse_call_ref, CdrEventType, MsgpackCodec, TimerType};
 use failover_harness::{
     worker_ordinals, FailoverHarness, PartitionRole, ReplicatedB2buaSut, WorkerHealth,
 };
@@ -84,7 +85,7 @@ async fn replica_carries_no_answer(
     let Some(body) = backup.get(BAK, primary, call_ref).await else {
         return false;
     };
-    let call = MsgpackCodec::new().decode(&body).expect("replica body decodes");
+    let call = envelope::decode(&MsgpackCodec::new(), &body).expect("replica body decodes").call;
     call.timers.iter().any(|t| *t.timer_type() == TimerType::NoAnswer)
 }
 

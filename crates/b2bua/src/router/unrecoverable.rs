@@ -15,7 +15,7 @@ use super::interpret::process_result;
 use super::unroutable::answer_vanished;
 use super::RouterCtx;
 use crate::rules::invariants::{enforce, finalize, UnansweredCaller};
-use crate::store::MaterialiseOrigin;
+use crate::store::{Enveloped, MaterialiseOrigin};
 
 /// Whether the materialised `copy` rebuilds its caller's INVITE; one that does
 /// not is made resident under `origin` and discharged. The caller holds the
@@ -23,15 +23,15 @@ use crate::store::MaterialiseOrigin;
 pub(super) async fn copy_recoverable(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
-    copy: &Call,
+    copy: &Enveloped,
     origin: MaterialiseOrigin,
     now_ms: i64,
 ) -> bool {
-    let Err(err) = crate::rules::relay::rebuild_a_leg_invite(&copy.a_leg_invite) else {
+    let Err(err) = crate::rules::relay::rebuild_a_leg_invite(&copy.call.a_leg_invite) else {
         return true;
     };
     if ctx.state.materialize_if_absent(copy.clone(), origin) {
-        discharge(ctx, call_ref, copy.clone(), now_ms, &err).await;
+        discharge(ctx, call_ref, copy.call.clone(), now_ms, &err).await;
     }
     false
 }

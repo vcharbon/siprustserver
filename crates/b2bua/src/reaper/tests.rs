@@ -26,7 +26,7 @@ async fn an_overflowing_call_is_condemned_once_and_swept_until_gone() {
     let state = CallState::new(Arc::new(InMemoryCallStore::new()), "w0", metrics.clone());
     let src = "10.0.0.9:5060".parse().unwrap();
     let invite = test_support::invite("w0", "w1", "flood");
-    let call_ref = state.create(build_initial_call(
+    let call_ref = state.create_placed(build_initial_call(
         &invite,
         src,
         &B2buaConfig::default(),
@@ -85,7 +85,7 @@ fn condemned_rig(
     let refs = (0..calls)
         .map(|n| {
             let invite = test_support::invite("w0", "w1", &format!("flood{n}"));
-            state.create(build_initial_call(
+            state.create_placed(build_initial_call(
                 &invite,
                 src,
                 &B2buaConfig::default(),

@@ -11,12 +11,13 @@
 //! established call of the same node, with nothing in flight, is not taken
 //! over: it stays reactive (ADR-0014 §1).
 
+use b2bua::store::envelope;
 use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
-use call::{CallBodyCodec, MsgpackCodec, TimerType};
+use call::{MsgpackCodec, TimerType};
 use failover_harness::{FailoverHarness, PartitionRole, ProxySut, ReplicatedB2buaSut};
 use scenario_harness::agent::{Agent, ClientInvite, ServerTxn};
 
@@ -146,7 +147,7 @@ pub(crate) async fn place_ringing_for(name: &str, callee: Callee, no_answer: Dur
 /// its callee not having rung, the one a takeover presumes from its INVITE.
 async fn replicated_deadline(p: &Placed) -> i64 {
     let body = p.w_b2.get(PartitionRole::Backup, "b1", &p.ringing_ref).await.expect("the replica");
-    let call = MsgpackCodec::new().decode(&body).expect("the replica decodes");
+    let call = envelope::decode(&MsgpackCodec::new(), &body).expect("the replica decodes").call;
     let presumed = || {
         let invite = call.b_legs[0].outbound_invite().expect("the callee was dialled");
         invite.sent_at_ms + p.no_answer.as_millis() as i64

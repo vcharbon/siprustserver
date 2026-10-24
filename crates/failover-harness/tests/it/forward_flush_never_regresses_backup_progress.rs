@@ -57,6 +57,7 @@
 //! resurrection tombstone then refuses the terminal the survivor defers to it, so
 //! that terminal is counted lost when the Element ages out.
 
+use b2bua::store::envelope;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -67,7 +68,7 @@ use b2bua::decision::{
     CallDecisionEngine, CallTreatment, NewCallResponse, RejectDecision, ScriptedDecisionEngine,
 };
 use b2bua::limiter::NoopLimiter;
-use call::{CallBodyCodec, CallModelState, CdrEventType, LegState, MsgpackCodec, TimerType};
+use call::{CallModelState, CdrEventType, LegState, MsgpackCodec, TimerType};
 use failover_harness::{
     worker_ordinals, FailoverHarness, PartitionRole, ProxySut, ReplicatedB2buaSut, WorkerHealth,
     RULE_CSEQ_IN_DIALOG_ORDER, RULE_NO_CANCEL_AFTER_FINAL,
@@ -203,14 +204,16 @@ async fn element_state(
     call_ref: &str,
 ) -> Option<(CallModelState, LegState)> {
     let body = backup.get(BAK, primary, call_ref).await?;
-    let call: call::Call = MsgpackCodec::new().decode(&body).expect("Element body decodes");
+    let call: call::Call =
+        envelope::decode(&MsgpackCodec::new(), &body).expect("Element body decodes").call;
     Some((call.state, call.a_leg.state()))
 }
 
 /// The absolute deadline of the replica's per-b-leg `NoAnswer` entry.
 async fn ring_deadline(backup: &ReplicatedB2buaSut, primary: &str, call_ref: &str) -> i64 {
     let body = backup.get(BAK, primary, call_ref).await.expect("replica body present");
-    let call: call::Call = MsgpackCodec::new().decode(&body).expect("replica body decodes");
+    let call: call::Call =
+        envelope::decode(&MsgpackCodec::new(), &body).expect("replica body decodes").call;
     assert_ne!(call.a_leg.state(), LegState::Confirmed, "the survivor holds the ringing a-leg");
     call.timers
         .iter()

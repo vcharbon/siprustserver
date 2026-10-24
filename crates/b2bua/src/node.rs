@@ -132,6 +132,7 @@ impl B2buaCore {
     ) -> Self {
         let B2buaDeps {
             config,
+            identity,
             decision,
             limiter,
             cdr,
@@ -200,11 +201,9 @@ impl B2buaCore {
                     .with_replication(setup.store.clone())
                     .with_replicated_ttl_ms(replicated_ttl_ms);
 
-                let self_identity =
-                    (!config.self_identity.is_empty()).then(|| config.self_identity.clone());
                 let supervisor = ReplicationSupervisor::new(
                     self_ordinal.clone(),
-                    self_identity,
+                    (!identity.is_empty()).then(|| identity.clone()),
                     setup.network.clone(),
                     (*setup.store).clone(),
                     setup.addr_resolver.clone(),
@@ -349,6 +348,7 @@ impl B2buaCore {
         let options_tagger = sip_txn::StatelessTagger::from_id_gen(&id_gen);
         let ctx = Arc::new(RouterCtx {
             outbound_proxy: crate::router::outbound_proxy_target(&config),
+            relay_owner: call::RelayOwner::new(config.self_ordinal.clone(), identity),
             config,
             replica,
             state,

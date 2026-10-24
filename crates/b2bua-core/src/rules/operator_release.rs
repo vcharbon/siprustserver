@@ -5,7 +5,7 @@
 //! - An answered call ends with no BYE: a 2xx whose ACK this stack can compose
 //!   is ACKed (RFC 3261 §13.2.2.4), a leg still ringing is CANCELled
 //!   (§9.1), every other leg is let go as it stands. The ordinary release then
-//!   closes the record, frees the holds and deletes the replica.
+//!   closes the record, frees the holds and deletes every stored copy.
 //! - A call in setup is aborted: `503` to the caller, then the ordinary
 //!   teardown CANCELs a ringing callee.
 

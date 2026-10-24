@@ -16,6 +16,10 @@ tier = "shell"
 # each carry a narrow `#[allow(unsafe_code)]` with a SAFETY comment. Leaving
 # `[lints] workspace = true` out drops the workspace table entirely, so the
 # clippy table below restates it exactly (scripts/purity.py checks it).
+
+[package.metadata.ha]
+side = "blind"
+
 [lints.rust]
 unsafe_code = "deny"
 

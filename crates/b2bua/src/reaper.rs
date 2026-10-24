@@ -204,6 +204,7 @@ impl Reaper {
             (fixed.orphan_index, B2buaMetrics::bump_store_reconciled_orphan_index),
             (fixed.missing_index, B2buaMetrics::bump_store_reconciled_missing_index),
             (fixed.orphan_takeover, B2buaMetrics::bump_store_reconciled_orphan_takeover),
+            (fixed.orphan_envelopes, B2buaMetrics::bump_store_reconciled_orphan_envelope),
         ] {
             for _ in 0..n {
                 bump(m);

@@ -137,7 +137,7 @@ pub(super) async fn process_result(
     // `RemoveCall` delete path below instead.
     let wrote = quiet.is_none()
         && matches!(result.call.state, CallModelState::Active | CallModelState::Terminating)
-        && result.call.topology.as_ref().is_some_and(|t| !t.bak.is_empty());
+        && ctx.state.topology(call_ref).is_some_and(|t| !t.bak.is_empty());
     if wrote {
         ctx.state.flush(&result.call);
     }
@@ -309,8 +309,7 @@ pub(super) async fn process_result(
 /// Report the turn of `call_ref` at `point` to the turn-point seam, with the
 /// write counters the live copy holds (ADR-0055 §13).
 async fn reach(ctx: &RouterCtx, call_ref: &str, point: TurnPoint, wrote: bool) {
-    let version =
-        || ctx.state.peek(call_ref).and_then(|c| c.topology).map_or((0, 0), |t| (t.gen, t.bak_gen));
+    let version = || ctx.state.topology(call_ref).map_or((0, 0), |t| (t.gen, t.bak_gen));
     ctx.turn_probe
         .at(|| TurnMark {
             node: &ctx.config.self_ordinal,

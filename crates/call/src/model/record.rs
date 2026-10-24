@@ -1,5 +1,5 @@
 //! The master [`Call`] record and its call-level satellites: lifecycle state,
-//! HA topology hint, active peering, the a-leg INVITE
+//! active peering, the a-leg INVITE
 //! snapshot, policy overrides, active rules.
 
 use std::collections::BTreeMap;
@@ -62,65 +62,6 @@ pub enum CallModelState {
     Terminated,
 }
 
-/// Persisted topology hint: the worker pair stamped at INVITE time plus a
-/// per-context **version vector** `(gen, bak_gen)` = `(p, b)` (ADR-0014) and
-/// the **state stamp** (ADR-0055 §7).
-///
-/// `gen` (`p`) is the **primary** counter — bumped only by the call's primary on
-/// a local mutation. `bak_gen` (`b`) is the **backup** counter — bumped only by
-/// an acting-backup on a takeover mutation. Each node bumps only its own role's
-/// counter, so the *other* node's counter in an incoming update is, by
-/// construction, the branch point.
-///
-/// The stamp is the vector of the last write that changed a compared field
-/// (`crate::helpers::same_state`): a write that changed only exempt fields
-/// moves the vector and leaves the stamp. Of two copies of one call
-/// incarnation, R contains L when L's stamp is at or below R's vector,
-/// component by component.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CallTopology {
-    pub pri: String,
-    pub bak: String,
-    /// Primary counter `p` of the `(p,b)` version vector.
-    pub gen: i64,
-    /// Backup counter `b` of the `(p,b)` version vector.
-    pub bak_gen: i64,
-    /// The `p` of the state stamp.
-    pub stamp_gen: i64,
-    /// The `b` of the state stamp.
-    pub stamp_bak_gen: i64,
-}
-
-impl CallTopology {
-    /// The topology of a call `pri` serves and `bak` backs up, at `(gen,
-    /// bak_gen)`, stamped at that version.
-    pub fn new(pri: impl Into<String>, bak: impl Into<String>, gen: i64, bak_gen: i64) -> Self {
-        CallTopology {
-            pri: pri.into(),
-            bak: bak.into(),
-            gen,
-            bak_gen,
-            stamp_gen: gen,
-            stamp_bak_gen: bak_gen,
-        }
-    }
-
-    /// The version vector `(p, b)`.
-    pub fn vector(&self) -> (i64, i64) {
-        (self.gen, self.bak_gen)
-    }
-
-    /// The state stamp `(p, b)`.
-    pub fn stamp(&self) -> (i64, i64) {
-        (self.stamp_gen, self.stamp_bak_gen)
-    }
-
-    /// Stamp the current vector: the write it counts changed a compared field.
-    pub fn stamp_vector(&mut self) {
-        (self.stamp_gen, self.stamp_bak_gen) = (self.gen, self.bak_gen);
-    }
-}
-
 /// The single active leg pair (1↔1). `None` on the [`Call`] means 1↔0.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivePeer {
@@ -173,9 +114,6 @@ pub struct Call {
     pub root_span_id: Option<String>,
     pub sampled: Option<bool>,
     pub worker_index: Option<i64>,
-    /// HA topology hint.
-    #[serde(rename = "_topology")]
-    pub topology: Option<CallTopology>,
     /// True if this call carries an emergency Resource-Priority.
     pub emergency: Option<bool>,
     /// Feature activations decoded from the decision-engine response.
@@ -213,7 +151,7 @@ pub struct Call {
     /// (`GlobalDuration`) is call-scoped, so a per-leg registry would be
     /// speculative — revisit when a genuinely per-leg event (BYE/INFO
     /// reporting) lands. Replicated like `features` (an ordinary `Call` field
-    /// on the msgpack body), so a takeover node keeps honoring the
+    /// on the msgpack body), so a restored record keeps honoring the
     /// subscription.
     pub subscriptions: Vec<ReleaseEventKind>,
     /// Per-call runtime state for an in-flight **established-call reroute**
@@ -225,7 +163,7 @@ pub struct Call {
     /// Every reliable provisional the call received (RFC 3262), in arrival
     /// order, for the life of the call: the engine records each one before
     /// any rule reads it ([`crate::helpers::reliable`] is the one writer).
-    /// Replicated with the call, so a takeover node discards a responder's
+    /// Replicated with the call, so a restored record discards a responder's
     /// retransmission, translates a PRACK's `RAck` and answers a late PRACK
     /// as the primary would.
     pub provisionals: Vec<Provisional>,
@@ -247,8 +185,8 @@ pub struct Call {
     /// The turn being handled (one event under the call's lock), whose number
     /// every ring entry it appends carries; `1` for the initial INVITE's turn,
     /// advanced by one as each turn lands ([`crate::helpers::seal_turn`]).
-    /// A takeover resumes from the last flushed body: later turns died with
-    /// their entries on the primary, so no surviving entry shares a number.
+    /// A restored record resumes from the last flushed body: later turns were
+    /// never written, so no surviving entry shares a number.
     pub message_turn: u32,
     /// Per-call state-machine cursors (ADR-0016 X4): the single home for every
     /// active machine's current state label, keyed by [`MachineId`]. The

@@ -121,7 +121,9 @@ file-size-check:
 # `testkit`/`test-util` feature and no first-party crate without a tier, and
 # the listed Dockerfiles build it by a cargo command of its own; a pure crate
 # depends on pure crates and `pure-deps` only; every member's lint table is the
-# workspace's. The pre-commit hook checks the staged known entries.
+# workspace's; every member states its HA side, and a blind one depends on
+# blind crates only and passes the word net (scripts/ha_side.py, ADR-0055 §11).
+# The pre-commit hook checks the staged known entries.
 purity:
     scripts/purity.py
 

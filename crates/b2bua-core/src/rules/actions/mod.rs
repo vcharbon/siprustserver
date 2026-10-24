@@ -88,10 +88,23 @@ pub(crate) use subscription::holds_requests;
 /// identifier it mints from its turn and noting there what it reports.
 pub struct ActionExecutor<'a> {
     pub config: &'a B2buaConfig,
+    /// The call's owners, as the shell states them for the turn.
+    pub owners: &'a crate::owners::Owners,
     /// The turn the actions run in: its identifier source, its notes and the
     /// wire faults its guarded emissions read.
     pub turn: &'a mut TurnScope,
     pub now_ms: i64,
+}
+
+impl<'a> ActionExecutor<'a> {
+    /// The marks this stack stamps on what it emits for `call`, under the
+    /// turn's owners.
+    fn marks<'c>(&self, call: &'c Call) -> crate::rules::relay::CallMarks<'c>
+    where
+        'a: 'c,
+    {
+        crate::rules::relay::CallMarks::of(call, self.owners)
+    }
 }
 
 impl ActionExecutor<'_> {

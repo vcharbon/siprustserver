@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "The wire contract for the replay PIVOT: serde structs + schemars JSON Schema for the pivot v3 scenario document, the correlation-rule file and the four record kinds a run bundle holds (run config, verdict, timing, per-leg recording), the canonical formatter (sorted keys, two-space indent, trailing newline; one line per JSON Lines record), the semantic linter (referential integrity, alt discriminability, the generator-subset gate), and the normative tier/body-handling data export that generators and interpreters consume instead of reverse-engineering it. Schema-only: no capture decoding, no replay machinery — `sip-message` is the single dependency, for the RFC 3261 §7.3.3 compact-form table."
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 

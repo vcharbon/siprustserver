@@ -5,47 +5,53 @@
 //! the call cleanly; a meeting is not this node's write (ADR-0014). The
 //! replica reap's release of deferred terminals.
 
-use call::{
-    Call, CallBodyCodec, CallModelState, CallTopology, LegState, MsgpackCodec, TerminationCause,
-};
+use call::{Call, CallModelState, LegState, MsgpackCodec, TerminationCause};
 
 use super::{meet_refused_flush, reap_expired_replicas, reconcile_reverse_flush, FlushDirection};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::router::test_support::{invite, node, src, Node};
-use crate::store::{CallStore, MaterialiseOrigin, PartitionRole, PutOpts};
+use crate::store::PutOpts;
+use crate::store::{
+    envelope, CallStore, CallTopology, Enveloped, MaterialiseOrigin, PartitionRole,
+};
 
 /// A replicable call at `(p, b)`, owned by `w0` and backed up by `w1`,
 /// stamped there.
-fn base(p: i64, b: i64) -> Call {
+fn base(p: i64, b: i64) -> Enveloped {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-    let mut call = build_initial_call(
+    let call = build_initial_call(
         &invite("w0", "w1", "meet"),
         src(),
         &config,
         &mut sip_ids::TurnIds::fixed(1),
         0,
     );
-    call.topology = Some(CallTopology::new("w0", "w1", p, b));
-    call
+    Enveloped::new(call, Some(CallTopology::new("w0", "w1", p, b)))
+}
+
+/// `copy` as a replicated body.
+fn body(copy: &Enveloped) -> Vec<u8> {
+    envelope::encode(&MsgpackCodec::new(), copy.topology.as_ref(), &copy.call).unwrap()
 }
 
 /// The caller is ringing: no final has left toward her yet.
-fn unanswered(p: i64, b: i64, state: CallModelState) -> Call {
-    let mut call = base(p, b);
+fn unanswered(p: i64, b: i64, state: CallModelState) -> Enveloped {
+    let mut copy = base(p, b);
+    let call = &mut copy.call;
     call.state = state;
     *call.a_leg.invite_final_sent_mut() = (state != CallModelState::Active).then_some(480);
     let a_state =
         if state == CallModelState::Active { LegState::Early } else { LegState::Terminated };
     call::testkit::stage_leg(&mut call.a_leg, a_state);
-    call
+    copy
 }
 
 /// The caller was answered — a durable fact of the body: the 2xx this stack
 /// sent her is recorded on the leg and the pair is bridged, both of which
 /// outlive the leg going `Terminated`.
-fn answered(p: i64, b: i64, state: CallModelState) -> Call {
-    let mut call = base(p, b);
+fn answered(p: i64, b: i64, state: CallModelState) -> Enveloped {
+    let Enveloped { mut call, topology } = base(p, b);
     call.state = state;
     *call.a_leg.invite_final_sent_mut() = Some(200);
     call::testkit::stage_leg(&mut call.a_leg, LegState::Confirmed);
@@ -54,20 +60,20 @@ fn answered(p: i64, b: i64, state: CallModelState) -> Call {
         call::testkit::stage_leg(&mut call.a_leg, LegState::Terminated);
         call = call::helpers::record_termination(call, 0, TerminationCause::RemoteBye, None);
     }
-    call
+    Enveloped::new(call, topology)
 }
 
 /// `call` stamped at `(p, b)`: its last write that changed a compared field.
-fn stamped(mut call: Call, p: i64, b: i64) -> Call {
-    let t = call.topology.as_mut().expect("a replicable call");
+fn stamped(mut copy: Enveloped, p: i64, b: i64) -> Enveloped {
+    let t = copy.topology.as_mut().expect("a replicable call");
     (t.stamp_gen, t.stamp_bak_gen) = (p, b);
-    call
+    copy
 }
 
 /// `call` once this stack sent `n` more requests to the caller.
-fn sent_to_the_caller(mut call: Call, n: i64) -> Call {
-    call.a_leg.dialogs.confirmed_mut().expect("the caller's dialog").our_cseq += n;
-    call
+fn sent_to_the_caller(mut copy: Enveloped, n: i64) -> Enveloped {
+    copy.call.a_leg.dialogs.confirmed_mut().expect("the caller's dialog").our_cseq += n;
+    copy
 }
 
 fn callers_sequence(call: &Call) -> i64 {
@@ -76,23 +82,23 @@ fn callers_sequence(call: &Call) -> i64 {
 
 /// The vector and the stamp of the live copy `n` holds for `call_ref`.
 fn live_versions(n: &Node, call_ref: &str) -> ((i64, i64), (i64, i64)) {
-    let t = n.core.router_ctx().state.peek(call_ref).expect("the copy is live").topology;
-    let t = t.expect("the copy is replicable");
+    let state = &n.core.router_ctx().state;
+    assert!(state.peek(call_ref).is_some(), "the copy is live");
+    let t = state.topology(call_ref).expect("the copy is replicable");
     (t.vector(), t.stamp())
 }
 
 /// `n` serving `live` as `origin`, meeting `incoming` from `direction`.
 async fn meet(
     n: &Node,
-    live: &Call,
-    incoming: &Call,
+    live: &Enveloped,
+    incoming: &Enveloped,
     direction: FlushDirection,
     origin: MaterialiseOrigin,
 ) {
     let ctx = n.core.router_ctx();
     assert!(ctx.state.materialize_if_absent(live.clone(), origin));
-    let body = MsgpackCodec::new().encode(incoming).unwrap();
-    meet_refused_flush(ctx, direction, &live.call_ref, &body, 0).await;
+    meet_refused_flush(ctx, direction, &live.call.call_ref, &body(incoming), 0).await;
     sip_clock::testkit::settle().await;
 }
 
@@ -104,14 +110,14 @@ async fn meet(
 async fn a_copy_the_record_contains_brings_its_exempt_fields_alone() {
     let n = node("w0").await;
     let mut live = answered(6, 1, CallModelState::Active);
-    live.callback_context = Some("the record's".into());
+    live.call.callback_context = Some("the record's".into());
     let copy = sent_to_the_caller(stamped(answered(4, 2, CallModelState::Active), 4, 1), 1);
     meet(&n, &live, &copy, FlushDirection::Reverse, MaterialiseOrigin::Reclaim).await;
 
-    let after = n.core.router_ctx().state.peek(&live.call_ref).expect("the call plays on");
-    assert_eq!(callers_sequence(&after), callers_sequence(&copy), "the backup's request");
-    assert_eq!(after.callback_context, live.callback_context, "the record's own content");
-    assert_eq!(live_versions(&n, &live.call_ref), ((6, 2), (6, 1)));
+    let after = n.core.router_ctx().state.peek(&live.call.call_ref).expect("the call plays on");
+    assert_eq!(callers_sequence(&after), callers_sequence(&copy.call), "the backup's request");
+    assert_eq!(after.callback_context, live.call.callback_context, "the record's own content");
+    assert_eq!(live_versions(&n, &live.call.call_ref), ((6, 2), (6, 1)));
     assert_eq!(n.metrics.repl_reverse_flush_refused_total(), 1, "the record kept its copy");
     assert_eq!(n.metrics.repl_copies_diverged_total(), 0);
 }
@@ -127,9 +133,9 @@ async fn a_copy_that_contains_the_record_is_taken_whole() {
     let copy = answered(4, 2, CallModelState::Active);
     meet(&n, &live, &copy, FlushDirection::Reverse, MaterialiseOrigin::Reclaim).await;
 
-    let after = n.core.router_ctx().state.peek(&live.call_ref).expect("the call plays on");
+    let after = n.core.router_ctx().state.peek(&live.call.call_ref).expect("the call plays on");
     assert!(call::helpers::caller_answered(&after), "the backup's answer");
-    assert_eq!(live_versions(&n, &live.call_ref), ((5, 2), (4, 2)));
+    assert_eq!(live_versions(&n, &live.call.call_ref), ((5, 2), (4, 2)));
     assert!(n.cdr.snapshot().is_empty(), "nothing ends");
 }
 
@@ -139,18 +145,18 @@ async fn a_copy_that_contains_the_record_is_taken_whole() {
 #[tokio::test(start_paused = true)]
 async fn copies_that_contain_each_other_keep_the_primarys() {
     let mut primary = stamped(unanswered(5, 1, CallModelState::Active), 4, 1);
-    primary.callback_context = Some("the primary's".into());
+    primary.call.callback_context = Some("the primary's".into());
     let copy = stamped(unanswered(4, 2, CallModelState::Active), 4, 1);
 
     let n = node("w0").await;
     meet(&n, &primary, &copy, FlushDirection::Reverse, MaterialiseOrigin::Reclaim).await;
-    let after = n.core.router_ctx().state.peek(&primary.call_ref).expect("the call plays on");
-    assert_eq!(after.callback_context, primary.callback_context);
-    assert_eq!(live_versions(&n, &primary.call_ref), ((5, 2), (4, 1)));
+    let after = n.core.router_ctx().state.peek(&primary.call.call_ref).expect("the call plays on");
+    assert_eq!(after.callback_context, primary.call.callback_context);
+    assert_eq!(live_versions(&n, &primary.call.call_ref), ((5, 2), (4, 1)));
 
     let n = node("w1").await;
     meet(&n, &copy, &primary, FlushDirection::Forward, MaterialiseOrigin::Takeover).await;
-    assert!(n.core.router_ctx().state.peek(&copy.call_ref).is_none(), "the copy stood down");
+    assert!(n.core.router_ctx().state.peek(&copy.call.call_ref).is_none(), "the copy stood down");
     assert!(n.cdr.snapshot().is_empty(), "a copy that stands down writes no record");
 }
 
@@ -174,7 +180,7 @@ async fn diverged_copies_end_the_call_cleanly() {
     meet(&n, &live, &copy, FlushDirection::Reverse, MaterialiseOrigin::Reclaim).await;
 
     assert_eq!(n.metrics.repl_copies_diverged_total(), 1);
-    assert!(ending(&n, &live.call_ref), "the call ends");
+    assert!(ending(&n, &live.call.call_ref), "the call ends");
 }
 
 /// **The copy ranked higher is the base of the end.** The backup answered
@@ -185,12 +191,12 @@ async fn diverged_copies_end_the_call_cleanly() {
 async fn diverged_copies_end_from_the_one_that_answered_the_caller() {
     let n = node("w0").await;
     let mut live = unanswered(6, 1, CallModelState::Active);
-    live.callback_context = Some("the record's".into());
+    live.call.callback_context = Some("the record's".into());
     let copy = answered(4, 2, CallModelState::Active);
     meet(&n, &live, &copy, FlushDirection::Reverse, MaterialiseOrigin::Reclaim).await;
 
-    assert!(ending(&n, &live.call_ref), "the call ends");
-    if let Some(after) = n.core.router_ctx().state.peek(&live.call_ref) {
+    assert!(ending(&n, &live.call.call_ref), "the call ends");
+    if let Some(after) = n.core.router_ctx().state.peek(&live.call.call_ref) {
         assert!(call::helpers::caller_answered(&after), "the backup's answer stands");
         assert_eq!(after.callback_context, None, "the backup's copy is the base");
     }
@@ -204,11 +210,11 @@ async fn a_takeover_copy_ends_the_call_on_a_primary_it_diverged_from() {
     let n = node("w1").await;
     let copy = sent_to_the_caller(answered(4, 2, CallModelState::Active), 1);
     let mut primary = answered(6, 1, CallModelState::Active);
-    primary.callback_context = Some("the primary's".into());
+    primary.call.callback_context = Some("the primary's".into());
     meet(&n, &copy, &primary, FlushDirection::Forward, MaterialiseOrigin::Takeover).await;
 
     assert_eq!(n.metrics.repl_copies_diverged_total(), 1);
-    assert!(ending(&n, &copy.call_ref), "the call ends");
+    assert!(ending(&n, &copy.call.call_ref), "the call ends");
 }
 
 /// **The backup's ending ends the call at the record**; its teardown still in
@@ -219,16 +225,16 @@ async fn the_backups_ending_is_discharged_and_its_teardown_awaited() {
     let live = answered(6, 1, CallModelState::Active);
     let ending = answered(4, 2, CallModelState::Terminating);
     meet(&n, &live, &ending, FlushDirection::Reverse, MaterialiseOrigin::Reclaim).await;
-    let after = n.core.router_ctx().state.peek(&live.call_ref).expect("the call plays on");
+    let after = n.core.router_ctx().state.peek(&live.call.call_ref).expect("the call plays on");
     assert_eq!(after.state, CallModelState::Active, "a teardown in flight is awaited");
-    assert_eq!(live_versions(&n, &live.call_ref).0, (6, 1), "nothing of it is read");
+    assert_eq!(live_versions(&n, &live.call.call_ref).0, (6, 1), "nothing of it is read");
 
     let ended = answered(4, 3, CallModelState::Terminated);
-    let body = MsgpackCodec::new().encode(&ended).unwrap();
-    meet_refused_flush(n.core.router_ctx(), FlushDirection::Reverse, &live.call_ref, &body, 0)
+    let body = body(&ended);
+    meet_refused_flush(n.core.router_ctx(), FlushDirection::Reverse, &live.call.call_ref, &body, 0)
         .await;
     sip_clock::testkit::settle().await;
-    assert!(n.core.router_ctx().state.peek(&live.call_ref).is_none(), "discharged");
+    assert!(n.core.router_ctx().state.peek(&live.call.call_ref).is_none(), "discharged");
     assert_eq!(n.cdr.snapshot().len(), 1, "one record");
 }
 
@@ -240,14 +246,14 @@ async fn a_copy_that_does_not_rebuild_the_callers_invite_is_never_taken() {
     let n = node("w0").await;
     let live = unanswered(4, 1, CallModelState::Active);
     let mut copy = answered(4, 2, CallModelState::Active);
-    copy.a_leg_invite.headers.clear();
+    copy.call.a_leg_invite.headers.clear();
     meet(&n, &live, &copy, FlushDirection::Reverse, MaterialiseOrigin::Reclaim).await;
 
-    let after = n.core.router_ctx().state.peek(&live.call_ref).expect("the live copy serves");
-    assert_eq!(after.a_leg_invite, live.a_leg_invite, "the caller's INVITE is the live one");
+    let after = n.core.router_ctx().state.peek(&live.call.call_ref).expect("the live copy serves");
+    assert_eq!(after.a_leg_invite, live.call.a_leg_invite, "the caller's INVITE is the live one");
     assert!(!call::helpers::caller_answered(&after), "nothing compared of the copy landed");
     assert_eq!(n.metrics.unrecoverable_folds_total(), 1);
-    assert_eq!(live_versions(&n, &live.call_ref).0, (4, 1), "no vector without its body");
+    assert_eq!(live_versions(&n, &live.call.call_ref).0, (4, 1), "no vector without its body");
 }
 
 /// **A meeting is not this node's write.** The backup's write the store took
@@ -259,24 +265,24 @@ async fn a_taken_copy_holds_the_backups_version_so_its_next_write_is_taken() {
     let n = node("w0").await;
     let ctx = n.core.router_ctx();
     let live = unanswered(4, 1, CallModelState::Active);
-    let call_ref = live.call_ref.clone();
+    let call_ref = live.call.call_ref.clone();
     assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
     let answered_there = answered(4, 2, CallModelState::Active);
-    let body = MsgpackCodec::new().encode(&answered_there).unwrap();
+    let first = body(&answered_there);
     let opts = PutOpts::default();
     let pri = PartitionRole::Primary;
-    n.store.put_call(pri, "w0", &call_ref, body, &[], 60_000, 4, 2, &opts).await.unwrap();
+    n.store.put_call(pri, "w0", &call_ref, first, &[], 60_000, 4, 2, &opts).await.unwrap();
     reconcile_reverse_flush(ctx, &call_ref).await;
     sip_clock::testkit::settle().await;
     assert_eq!(live_versions(&n, &call_ref), ((4, 2), (4, 2)), "the backup's version, no bump");
 
     let mut next = answered(4, 3, CallModelState::Active);
-    next.callback_context = Some("the backup's next".into());
-    let body = MsgpackCodec::new().encode(&next).unwrap();
-    meet_refused_flush(ctx, FlushDirection::Reverse, &call_ref, &body, 0).await;
+    next.call.callback_context = Some("the backup's next".into());
+    let next_body = body(&next);
+    meet_refused_flush(ctx, FlushDirection::Reverse, &call_ref, &next_body, 0).await;
     sip_clock::testkit::settle().await;
     let after = ctx.state.peek(&call_ref).expect("the call plays on");
-    assert_eq!(after.callback_context, next.callback_context, "the next write is taken");
+    assert_eq!(after.callback_context, next.call.callback_context, "the next write is taken");
 }
 
 /// **Only the timers a taken copy brings are moved into this node's clock.**
@@ -293,12 +299,12 @@ async fn a_kept_copy_leaves_its_own_timers_where_it_armed_them() {
         generation: 3,
         fire_at: now + 600_000,
     };
-    live.timers.push(own.clone());
-    let call_ref = live.call_ref.clone();
+    live.call.timers.push(own.clone());
+    let call_ref = live.call.call_ref.clone();
     assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
 
     let copy = stamped(answered(4, 2, CallModelState::Active), 4, 1);
-    let body = MsgpackCodec::new().encode(&copy).unwrap();
+    let body = body(&copy);
     meet_refused_flush(ctx, FlushDirection::Reverse, &call_ref, &body, now + 5_000).await;
     sip_clock::testkit::settle().await;
 
@@ -315,11 +321,11 @@ async fn a_direction_that_contradicts_this_nodes_role_meets_nothing() {
     let n = node("w0").await; // w0 is the ref's primary, so Forward is wrong.
     let ctx = n.core.router_ctx();
     let live = answered(1, 2, CallModelState::Active);
-    let call_ref = live.call_ref.clone();
+    let call_ref = live.call.call_ref.clone();
     assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
 
     let replica = answered(5, 1, CallModelState::Terminated);
-    let body = MsgpackCodec::new().encode(&replica).unwrap();
+    let body = body(&replica);
     meet_refused_flush(ctx, FlushDirection::Forward, &call_ref, &body, 0).await;
     sip_clock::testkit::settle().await;
 
@@ -339,7 +345,7 @@ async fn an_expired_deferred_terminal_read_before_the_reap_is_still_released_onc
     let ctx = n.core.router_ctx();
     ctx.limiter.hold_releases();
     let mut terminal = answered(1, 2, CallModelState::Terminated);
-    terminal.limiter = call::CallLimiterState::admitted(
+    terminal.call.limiter = call::CallLimiterState::admitted(
         "fold-key".into(),
         1,
         vec![
@@ -348,8 +354,8 @@ async fn an_expired_deferred_terminal_read_before_the_reap_is_still_released_onc
             call::LimiterEntry { id: "y".into(), limit: 10 },
         ],
     );
-    let call_ref = terminal.call_ref.clone();
-    let body = MsgpackCodec::new().encode(&terminal).unwrap();
+    let call_ref = terminal.call.call_ref.clone();
+    let body = body(&terminal);
     n.store
         .put_call(
             PartitionRole::Backup,
@@ -395,7 +401,7 @@ async fn a_poisoned_changelog_lock_does_not_cost_an_expired_terminal_its_release
     let ctx = n.core.router_ctx();
     ctx.limiter.hold_releases();
     let mut terminal = answered(1, 2, CallModelState::Terminated);
-    terminal.limiter = call::CallLimiterState::admitted(
+    terminal.call.limiter = call::CallLimiterState::admitted(
         "upkeep-key".into(),
         1,
         vec![
@@ -403,8 +409,8 @@ async fn a_poisoned_changelog_lock_does_not_cost_an_expired_terminal_its_release
             call::LimiterEntry { id: "y".into(), limit: 10 },
         ],
     );
-    let call_ref = terminal.call_ref.clone();
-    let body = MsgpackCodec::new().encode(&terminal).unwrap();
+    let call_ref = terminal.call.call_ref.clone();
+    let body = body(&terminal);
     n.store
         .put_call(
             PartitionRole::Backup,
@@ -436,13 +442,13 @@ async fn a_poisoned_changelog_lock_does_not_cost_an_expired_terminal_its_release
 
 /// `call` as another call on the same ref: its own incarnation, holding
 /// `x` under it.
-fn as_call(mut call: Call, key: &str) -> Call {
-    call.limiter = call::CallLimiterState::admitted(
+fn as_call(mut copy: Enveloped, key: &str) -> Enveloped {
+    copy.call.limiter = call::CallLimiterState::admitted(
         key.into(),
         1,
         vec![call::LimiterEntry { id: "x".into(), limit: 10 }],
     );
-    call
+    copy
 }
 
 /// **A refused flush of another call never meets the live one.** The
@@ -454,11 +460,11 @@ async fn a_refused_flush_of_another_call_never_ends_the_live_one() {
     let n = node("w0").await;
     let ctx = n.core.router_ctx();
     let live = as_call(answered(1, 0, CallModelState::Active), "retry-key");
-    let call_ref = live.call_ref.clone();
+    let call_ref = live.call.call_ref.clone();
     assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
 
     let replica = as_call(answered(1, 3, CallModelState::Terminated), "first-key");
-    let body = MsgpackCodec::new().encode(&replica).unwrap();
+    let body = body(&replica);
     meet_refused_flush(ctx, FlushDirection::Reverse, &call_ref, &body, 0).await;
     sip_clock::testkit::settle().await;
 
@@ -478,7 +484,7 @@ async fn a_reverse_reconcile_of_another_stored_call_never_ends_the_live_one() {
     let n = node("w0").await;
     let ctx = n.core.router_ctx();
     let live = as_call(answered(1, 0, CallModelState::Active), "retry-key");
-    let call_ref = live.call_ref.clone();
+    let call_ref = live.call.call_ref.clone();
     assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
     let stored = as_call(answered(2, 1, CallModelState::Terminated), "first-key");
     n.store
@@ -486,7 +492,7 @@ async fn a_reverse_reconcile_of_another_stored_call_never_ends_the_live_one() {
             PartitionRole::Primary,
             "w0",
             &call_ref,
-            MsgpackCodec::new().encode(&stored).unwrap(),
+            body(&stored),
             &[],
             60_000,
             2,
@@ -517,14 +523,14 @@ async fn a_deferred_terminal_another_call_replaced_is_released_by_its_own_key() 
     ctx.limiter.hold_releases();
     let terminal = as_call(answered(1, 2, CallModelState::Terminated), "first-key");
     let retry = as_call(unanswered(1, 0, CallModelState::Active), "retry-key");
-    let call_ref = terminal.call_ref.clone();
+    let call_ref = terminal.call.call_ref.clone();
     for (call, (p, b), ttl_ms) in [(&terminal, (1, 2), 30_000), (&retry, (1, 0), 600_000)] {
         let opts = PutOpts {
             origin_now_ms: Some(0),
-            incarnation: Some(call.incarnation().to_string()),
+            incarnation: Some(call.call.incarnation().to_string()),
             ..PutOpts::default()
         };
-        let body = MsgpackCodec::new().encode(call).unwrap();
+        let body = body(call);
         n.store
             .put_call(PartitionRole::Backup, "w0", &call_ref, body, &[], ttl_ms, p, b, &opts)
             .await
@@ -541,13 +547,13 @@ async fn a_deferred_terminal_another_call_replaced_is_released_by_its_own_key() 
 
 /// `call` with an INFO relayed toward the caller by worker `by`, awaiting its
 /// final.
-fn relaying(mut call: Call, by: call::RelayOwner) -> Call {
-    let d = call.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
+fn relaying(mut copy: Enveloped, by: call::RelayOwner) -> Enveloped {
+    let d = copy.call.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
     d.our_cseq += 1;
     let mut record = call::RequestRecord::relayed("INFO", d.our_cseq, 9);
     record.relayed_by = by;
     d.requests.push(record);
-    call
+    copy
 }
 
 /// **A contained copy that plays on does so from the primary's copy.** The
@@ -558,25 +564,25 @@ fn relaying(mut call: Call, by: call::RelayOwner) -> Call {
 #[tokio::test(start_paused = true)]
 async fn a_contained_copy_that_plays_on_takes_the_primarys_copy_with_its_own_records() {
     let n = node("w1").await;
-    let by = n.core.router_ctx().config.relay_owner();
+    let by = n.core.router_ctx().relay_owner.clone();
     let copy = relaying(answered(4, 2, CallModelState::Active), by.clone());
     let mut primary = answered(6, 2, CallModelState::Active);
-    primary.callback_context = Some("the primary's".into());
+    primary.call.callback_context = Some("the primary's".into());
     meet(&n, &copy, &primary, FlushDirection::Forward, MaterialiseOrigin::Takeover).await;
 
-    let after = n.core.router_ctx().state.peek(&copy.call_ref).expect("the copy plays on");
-    assert_eq!(after.callback_context, primary.callback_context, "the primary's copy, whole");
+    let after = n.core.router_ctx().state.peek(&copy.call.call_ref).expect("the copy plays on");
+    assert_eq!(after.callback_context, primary.call.callback_context, "the primary's copy, whole");
     let d = after.a_leg.dialogs.confirmed().expect("the caller's dialog");
     assert!(d.requests.iter().any(|r| r.relayed_by == by), "the copy's own relay is kept");
-    assert_eq!(live_versions(&n, &copy.call_ref), ((6, 2), (6, 2)), "the primary's version");
+    assert_eq!(live_versions(&n, &copy.call.call_ref), ((6, 2), (6, 2)), "the primary's version");
 }
 
 /// `call` with a confirmed callee leg `b-9` only this copy dialled.
-fn with_a_leg_only_here(mut call: Call) -> Call {
+fn with_a_leg_only_here(mut copy: Enveloped) -> Enveloped {
     let mut leg = call::testkit::dialled_leg("b-9", "only-here-tag");
     call::testkit::stage_leg(&mut leg, LegState::Confirmed);
-    call.b_legs.push(leg);
-    call
+    copy.call.b_legs.push(leg);
+    copy
 }
 
 /// **An ending copy ranked higher still ends a dialog only the record
@@ -595,7 +601,7 @@ async fn an_ending_ranked_higher_still_ends_a_leg_only_the_record_holds() {
         let leg = c.b_legs.iter().find(|l| l.leg_id == "b-9").expect("the leg only here");
         leg.state() == LegState::Terminated
     };
-    match n.core.router_ctx().state.peek(&live.call_ref) {
+    match n.core.router_ctx().state.peek(&live.call.call_ref) {
         Some(after) => assert!(ending(&after), "the leg only here is ending"),
         None => {
             let cdrs = n.cdr.snapshot();

@@ -21,9 +21,15 @@ fn execute_at(call: &call::Call, now_ms: i64, actions: &[RuleAction]) -> Handler
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut id_gen,
+        now_ms,
+    };
     exec.execute(actions, call, &ctx)
 }
 

@@ -25,7 +25,7 @@ fn a_declared_capability_set_reaches_the_originated_leg_wire_header() {
     let call = call_declaring_asymmetric_capabilities();
     let a_invite = crate::caller_of(&call);
     let (_leg, effect) = b2bua_core::rules::relay::build_b_leg(
-        b2bua_core::rules::relay::CallMarks::of(&call),
+        b2bua_core::rules::relay::CallMarks::of(&call, b2bua_core::owners::Owners::none()),
         "b-1",
         &a_invite,
         ("10.0.0.2".to_string(), 5070),

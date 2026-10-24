@@ -149,7 +149,7 @@ impl ActionExecutor<'_> {
         let outbound_cseq = dialog.our_cseq + 1;
         let gen_dialog = relay::to_gen_dialog(leg, &dialog);
         let branch = self.turn.ids.new_branch();
-        let marks = relay::CallMarks::of(call);
+        let marks = self.marks(call);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(
                 self.config,

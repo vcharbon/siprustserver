@@ -9,6 +9,9 @@ description = "Declared Prometheus metric families: one catalogue entry per fami
 [package.metadata.purity]
 tier = "pure"
 
+[package.metadata.ha]
+side = "blind"
+
 [lints]
 workspace = true
 

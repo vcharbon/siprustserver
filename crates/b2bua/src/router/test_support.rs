@@ -130,6 +130,7 @@ pub async fn node_on(
     let metrics = B2buaMetrics::new();
     let deps = B2buaDeps {
         config,
+        identity: String::new(),
         decision: Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.2", 9)),
         limiter: Arc::new(NoopLimiter),
         cdr: Arc::new(cdr.clone()),

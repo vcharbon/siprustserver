@@ -8,6 +8,9 @@ publish = false
 [package.metadata.purity]
 tier = "shell"
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 

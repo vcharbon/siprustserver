@@ -42,9 +42,16 @@ fn executed(call: &call::Call, actions: &[RuleAction]) -> HandlerResult {
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let mut ids = TurnScope::of(TurnIds::fixed(2));
-    ActionExecutor { config: &config, turn: &mut ids, now_ms: 0 }.execute(actions, call, &ctx)
+    ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut ids,
+        now_ms: 0,
+    }
+    .execute(actions, call, &ctx)
 }
 
 /// The branch of the request of CSeq `cseq` the record holds as sent on
@@ -268,14 +275,20 @@ fn on_the_callers_leg_the_rejecting_answer_continues_the_stacks_session() {
         config: &config,
         discharged: None,
         resolved: &resolved,
+        copy_served: false,
     };
     let rules = b2bua_core::rules::default_rules();
     let rule = b2bua_core::rules::pick_ranked(&rules, &call, &ctx).into_iter().next();
     assert_eq!(rule.map(|r| r.id), Some("ack-2xx-on-ended-dialog"));
     let actions = (rule.expect("the rule").handle)(&ctx).map(|r| r.actions).unwrap_or_default();
     let mut ids = TurnScope::of(TurnIds::fixed(3));
-    let result = ActionExecutor { config: &config, turn: &mut ids, now_ms: 0 }
-        .execute(&actions, &call, &ctx);
+    let result = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut ids,
+        now_ms: 0,
+    }
+    .execute(&actions, &call, &ctx);
     let ack = requests_to(&result, "a");
     assert!(ack.iter().any(|(m, _)| m == "ACK"), "{ack:?}");
     let body: Vec<String> = result

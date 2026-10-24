@@ -21,6 +21,7 @@
 //! unannounced to the peers (ADR-0031 cases 3a and 4), so no departure sweep
 //! takes the ringing call over first.
 
+use b2bua::store::envelope;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,7 +31,7 @@ use b2bua::decision::{
     CallDecisionEngine, CallTreatment, NewCallResponse, RejectDecision, ScriptedDecisionEngine,
 };
 use b2bua::limiter::NoopLimiter;
-use call::{parse_call_ref, CallBodyCodec, LegState, MsgpackCodec, TimerType};
+use call::{parse_call_ref, LegState, MsgpackCodec, TimerType};
 use failover_harness::{
     worker_ordinals, FailoverHarness, PartitionRole, ProxySut, ReplicatedB2buaSut, WorkerHealth,
 };
@@ -148,7 +149,7 @@ async fn replica(
     call_ref: &str,
 ) -> (Vec<u8>, call::Call) {
     let body = backup.get(BAK, primary, call_ref).await.expect("replica body present");
-    let call = MsgpackCodec::new().decode(&body).expect("replica body decodes");
+    let call = envelope::decode(&MsgpackCodec::new(), &body).expect("replica body decodes").call;
     (body, call)
 }
 

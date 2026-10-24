@@ -312,7 +312,7 @@ fn skip_digits(s: &[u8], mut i: usize) -> usize {
 }
 
 /// `base[a..b]` as a span of `base`, clamped like [`subslice`] — the single
-/// materialization point for every structured field, and the reason a parsed
+/// point every structured field is read out at, and the reason a parsed
 /// From/Via/Contact copies no bytes.
 fn slice(base: &SipStr, a: usize, b: usize) -> SipStr {
     span_of(base, subslice(base.as_str(), a, b))

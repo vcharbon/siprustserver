@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "The metric contract of every shipped binary: exports each binary's catalogue as JSON, and checks the metric names and selector labels that readers (dashboards, probes, scripts) spell against it."
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 

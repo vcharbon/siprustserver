@@ -6,15 +6,13 @@
 use crate::common;
 use call::helpers::{merge_exempt, same_state};
 use call::model::{
-    Call, CallTopology, CdrEvent, CdrEventType, DialogState, DialogUsage, EndingBy, HostPort,
-    MessageDirection, MessageEntry, RequestRecord, SentRequest, TimerEntry, TimerKey, TimerType,
+    Call, CdrEvent, CdrEventType, DialogState, DialogUsage, EndingBy, HostPort, MessageDirection,
+    MessageEntry, RequestRecord, SentRequest, TimerEntry, TimerKey, TimerType,
 };
 
-/// The representative call, replicated at `(p, b)` and stamped there.
-fn at(p: i64, b: i64) -> Call {
-    let mut call = common::representative_call();
-    call.topology = Some(CallTopology::new("w0", "w1", p, b));
-    call
+/// The representative call.
+fn call() -> Call {
+    common::representative_call()
 }
 
 /// A keepalive OPTIONS this stack sent on the caller's dialog at `cseq`.
@@ -54,11 +52,11 @@ fn bye_event(leg: &str) -> CdrEvent {
 }
 
 /// A keepalive round leaves the record's state as it was: its request
-/// record, the CSeq it took, its timers, the ring entries, the counters, the
-/// vector and the stamp are all exempt.
+/// record, the CSeq it took, its timers, the ring entries and the counters
+/// are all exempt.
 #[test]
 fn a_keepalive_round_changes_no_compared_field() {
-    let before = at(4, 0);
+    let before = call();
     let mut after = before.clone();
     let d = after.a_leg.dialogs.confirmed_mut().expect("the answered dialog");
     d.our_cseq += 1;
@@ -75,9 +73,6 @@ fn a_keepalive_round_changes_no_compared_field() {
     after.message_count = Some(3);
     after.cdr_events.push(bye_event("a"));
     after.trace_id = Some("trace".into());
-    let t = after.topology.as_mut().expect("replicated");
-    t.gen = 9;
-    t.stamp_vector();
     assert!(same_state(&before, &after));
 }
 
@@ -85,7 +80,7 @@ fn a_keepalive_round_changes_no_compared_field() {
 /// compared.
 #[test]
 fn a_relay_or_a_dialog_state_is_compared() {
-    let before = at(4, 0);
+    let before = call();
     let mut relayed = before.clone();
     let d = relayed.a_leg.dialogs.confirmed_mut().expect("the answered dialog");
     d.requests.push(RequestRecord::relayed("INFO", 8006, 3));
@@ -99,7 +94,7 @@ fn a_relay_or_a_dialog_state_is_compared() {
 /// A rung a quiet turn moves is exempt; the 2xx it repeats is compared.
 #[test]
 fn a_ladder_rung_is_exempt_and_its_emission_compared() {
-    let before = at(4, 0);
+    let before = call();
     let mut rung = before.clone();
     let d = rung.a_leg.dialogs.confirmed_mut().expect("the answered dialog");
     let answered = call::helpers::answered_2xx_mut(d).expect("the 2xx awaiting its ACK");
@@ -112,15 +107,13 @@ fn a_ladder_rung_is_exempt_and_its_emission_compared() {
 }
 
 /// The merge takes the container whole and the other copy's exempt fields:
-/// the higher vector and sequences, the union of the CDR events and of the
-/// rings; the container's stamp.
+/// the higher sequences, the union of the CDR events and of the rings.
 #[test]
 fn a_merge_keeps_the_container_and_raises_the_exempt_fields() {
-    let mut container = at(6, 1);
+    let mut container = call();
     container.cdr_events = vec![bye_event("a")];
     container.a_leg.messages.entries = vec![entry(1), entry(3)];
-    let mut other = at(5, 3);
-    other.topology.as_mut().expect("replicated").stamp_gen = 5;
+    let mut other = call();
     other.a_leg.dialogs.confirmed_mut().expect("the answered dialog").our_cseq = 9000;
     other.cdr_events = vec![bye_event("a"), bye_event("b-1")];
     other.a_leg.messages.entries = vec![entry(1), entry(2)];
@@ -128,9 +121,6 @@ fn a_merge_keeps_the_container_and_raises_the_exempt_fields() {
     other.callback_context = Some("the other copy's".into());
 
     let merged = merge_exempt(container.clone(), &other);
-    let t = merged.topology.as_ref().expect("replicated");
-    assert_eq!(t.vector(), (6, 3), "the component-wise maximum");
-    assert_eq!(t.stamp(), (6, 1), "the container's stamp");
     let d = merged.a_leg.dialogs.confirmed().expect("the answered dialog");
     assert_eq!(d.our_cseq, 9000, "the higher sequence");
     assert_eq!(merged.cdr_events, vec![bye_event("a"), bye_event("b-1")]);

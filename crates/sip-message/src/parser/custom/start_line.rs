@@ -9,7 +9,7 @@ use crate::char_class::is_token_char;
 use crate::error::SipParseError;
 use crate::parser::SipParserLimits;
 
-/// The start line's elements as image spans — materialized by the caller,
+/// The start line's elements as image spans — read out by the caller,
 /// which owns the image the spans index into.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestLine {

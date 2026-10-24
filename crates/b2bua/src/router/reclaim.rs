@@ -7,12 +7,12 @@
 
 use std::sync::Arc;
 
-use call::{Call, CallModelState};
+use call::CallModelState;
 
 use super::interpret::process_result;
 use super::restore_hygiene::reanchor;
 use super::RouterCtx;
-use crate::store::{role_of, MaterialiseOrigin, PartitionRole};
+use crate::store::{role_of, CallTopology, Enveloped, MaterialiseOrigin, PartitionRole};
 
 mod bulk;
 mod diverged;
@@ -36,7 +36,8 @@ pub(crate) use reap::reap_expired_replicas;
 pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str) {
     // A read that sees an expired body too: an expired reverse-flushed terminal
     // is still discharged here.
-    let Some((first, _)) = ctx.state.peek_reclaimable_raw(call_ref).await else {
+    let Some((Enveloped { call: first, .. }, _)) = ctx.state.peek_reclaimable_raw(call_ref).await
+    else {
         return;
     };
     // Not-live + non-terminal is the reactive-straggler path; it manages
@@ -56,19 +57,19 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
         }
         return;
     };
-    reanchor(&mut replica, skew_offset_ms);
+    reanchor(&mut replica.call, skew_offset_ms);
     let now_ms = ctx.clock.now_ms();
-    match ctx.state.peek(call_ref) {
+    match ctx.state.peek_enveloped(call_ref) {
         // The stored body is another call than the live one (the release of
         // the stored call is still queued): it is no copy of this call.
-        Some(live) if replica.incarnation() != live.incarnation() => {}
+        Some(live) if replica.call.incarnation() != live.call.incarnation() => {}
         Some(live) => {
             meet_live(ctx, FlushDirection::Reverse, call_ref, &live, replica, now_ms).await;
         }
         // A reverse-flushed deferral for a call we no longer hold live (the
         // reactive straggler equivalent of the reboot-reclaim terminal): discharge.
         None => {
-            if replica.state == CallModelState::Terminated {
+            if replica.call.state == CallModelState::Terminated {
                 discharge_materialized_terminal(ctx, call_ref, replica, now_ms, false).await;
             }
         }
@@ -95,13 +96,14 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
 pub(super) async fn discharge_materialized_terminal(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
-    terminal: Call,
+    terminal: Enveloped,
     now_ms: i64,
     force_terminal: bool,
 ) -> bool {
     if !ctx.state.materialize_if_absent(terminal.clone(), MaterialiseOrigin::Reclaim) {
         return false;
     }
+    let terminal = terminal.call;
     let mut before = terminal.clone();
     before.state = CallModelState::Active; // synth non-terminal → became_terminated fires
     let discharged = if force_terminal {
@@ -134,10 +136,10 @@ pub(super) async fn discharge_materialized_terminal(
     true
 }
 
-/// The call's `(p,b)` version vector rendered for a lifecycle line
-/// (`-` when the call carries no topology and is therefore non-replicable).
-pub(super) fn format_pb(call: &Call) -> String {
-    match call.topology.as_ref() {
+/// A call's `(p,b)` version vector rendered for a lifecycle line (`-` when
+/// the call is placed under no topology and is therefore non-replicable).
+pub(super) fn format_pb(topology: Option<&CallTopology>) -> String {
+    match topology {
         Some(t) => format!("({},{})", t.gen, t.bak_gen),
         None => "-".to_string(),
     }
@@ -202,7 +204,7 @@ pub(super) async fn meet_refused_flush(
     }
     let guard = ctx.state.lock(call_ref).await;
     let now_ms = ctx.clock.now_ms();
-    let Some(live) = ctx.state.peek(call_ref) else {
+    let Some(live) = ctx.state.peek_enveloped(call_ref) else {
         // The call was released between the peek and the lock. Drop the guard
         // FIRST: `discard_orphan` removes the very `locks` entry this guard is
         // held on, and a live guard would re-strand it.
@@ -212,10 +214,10 @@ pub(super) async fn meet_refused_flush(
     };
     // Another call on the ref (the one the live call retried, or one a
     // takeover copy still serves) is never a copy of this call.
-    if replica.incarnation() != live.incarnation() {
+    if replica.call.incarnation() != live.call.incarnation() {
         return;
     }
-    reanchor(&mut replica, now_ms.saturating_sub(origin_now_ms));
+    reanchor(&mut replica.call, now_ms.saturating_sub(origin_now_ms));
     meet_live(ctx, direction, call_ref, &live, replica, now_ms).await;
 }
 

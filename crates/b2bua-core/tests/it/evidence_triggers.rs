@@ -69,6 +69,7 @@ fn turn_on(
         config,
         discharged: None,
         resolved,
+        copy_served: false,
     };
     let rules = default_rules();
     let Some(rule) = pick_ranked(&rules, call, &ctx).into_iter().next() else {
@@ -76,7 +77,12 @@ fn turn_on(
     };
     let actions: Vec<RuleAction> = (rule.handle)(&ctx).map(|r| r.actions).unwrap_or_default();
     let mut ids = TurnScope::of(TurnIds::fixed(1));
-    let mut exec = ActionExecutor { config, turn: &mut ids, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config,
+        turn: &mut ids,
+        now_ms: 0,
+    };
     (Some(rule.id), Some(exec.execute(&actions, call, &ctx)))
 }
 

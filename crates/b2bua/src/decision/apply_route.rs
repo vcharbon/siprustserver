@@ -14,6 +14,7 @@ use crate::decision::CallDecisionEngine;
 use crate::effects::HandlerResult;
 use crate::limiter::{LimiterEntry, LimiterWorker};
 use crate::metrics::AdmitSite;
+use crate::owners::Owners;
 
 use crate::decision::RouteDecision;
 
@@ -38,6 +39,7 @@ pub async fn apply_route(
     decision: &dyn CallDecisionEngine,
     limiter: &LimiterWorker,
     config: &B2buaConfig,
+    owners: &Owners,
     ids: &mut TurnIds,
     clock: &Clock,
     now_ms: i64,
@@ -59,6 +61,7 @@ pub async fn apply_route(
             decision,
             limiter,
             config,
+            owners,
             ids,
             clock,
             now_ms,
@@ -71,7 +74,7 @@ pub async fn apply_route(
     }
     // The INVITE leaves now, after the admission this turn awaited.
     let sent_ms = clock.now_ms();
-    route_fold::admitted(*admitting, a_invite, config, ids, now_ms, sent_ms)
+    route_fold::admitted(*admitting, a_invite, config, owners, ids, now_ms, sent_ms)
 }
 
 /// Admission control: one admit of the route's whole limiter set, as

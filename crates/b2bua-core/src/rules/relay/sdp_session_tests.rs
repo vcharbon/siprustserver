@@ -813,7 +813,7 @@ fn a_stack_description_at_the_next_version_is_no_restatement() {
 }
 
 /// The restatement is the call's: a leg that restated nothing itself, whose
-/// state travels with a replicated or reclaimed call, still sees it.
+/// state travels with the call record, still sees it.
 #[test]
 fn the_calls_restatement_is_recorded_on_the_leg_it_crossed() {
     let (c, _) = restated_once(SdpForm::AsWritten);

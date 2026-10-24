@@ -66,7 +66,12 @@ fn originate(
     }
     let event = CallEvent::sip(SipMessage::Request(invite()), src);
     let mut id_gen = TurnScope::of(TurnIds::fixed(2));
-    let mut exec = ActionExecutor { config, turn: &mut id_gen, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config,
+        turn: &mut id_gen,
+        now_ms: 0,
+    };
     let ctx = RuleContext {
         call: RuleCall::new(&call),
         call_ref: &call.call_ref,
@@ -77,6 +82,7 @@ fn originate(
         config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let leg = RuleAction::CreateLeg {
         destination: ("127.0.0.1".into(), 5090),

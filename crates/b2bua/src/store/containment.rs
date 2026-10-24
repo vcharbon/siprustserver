@@ -9,8 +9,7 @@
 //! compared field (`call::helpers::same_state`) — is at or below R's vector,
 //! component by component: R read every compared write L made.
 
-use call::helpers::merge_exempt;
-use call::{Call, CallTopology};
+use super::envelope::{CallTopology, Enveloped};
 
 /// How two copies of one call incarnation stand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,9 +46,9 @@ pub fn containment(held: &CallTopology, incoming: &CallTopology) -> Containment 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Met {
     /// The held copy, whole, the incoming copy's exempt fields merged in.
-    Held(Call),
+    Held(Enveloped),
     /// The incoming copy, whole, the held copy's exempt fields merged in.
-    Incoming(Call),
+    Incoming(Enveloped),
     /// Neither contains the other: the call ends cleanly from the union of
     /// both (`router::diverged`).
     Diverged,
@@ -57,23 +56,28 @@ pub enum Met {
 
 /// `held` meets `incoming`, two copies of one call incarnation: the copy that
 /// contains the other is taken whole with the other's exempt fields merged
-/// in (`call::helpers::merge_exempt`: the vector at the component-wise
+/// in ([`Enveloped::merge_exempt`]: the vector at the component-wise
 /// maximum, the stamp the container's); when each contains the other, the
 /// primary's — `incoming` when `incoming_is_primary`. A copy with no topology
 /// is not replicated and meets nothing: `held` stands.
-pub fn meet(held: Call, incoming: &Call, incoming_is_primary: bool) -> Met {
+pub fn meet(held: Enveloped, incoming: &Enveloped, incoming_is_primary: bool) -> Met {
     let (Some(h), Some(i)) = (held.topology.as_ref(), incoming.topology.as_ref()) else {
         return Met::Held(held);
     };
     match containment(h, i) {
-        Containment::Held => Met::Held(merge_exempt(held, incoming)),
-        Containment::Incoming => Met::Incoming(merge_exempt(incoming.clone(), &held)),
+        Containment::Held => Met::Held(held.merge_exempt(incoming)),
+        Containment::Incoming => Met::Incoming(incoming.clone().merge_exempt(&held)),
         Containment::Both if incoming_is_primary => {
-            Met::Incoming(merge_exempt(incoming.clone(), &held))
+            Met::Incoming(incoming.clone().merge_exempt(&held))
         }
-        Containment::Both => Met::Held(merge_exempt(held, incoming)),
+        Containment::Both => Met::Held(held.merge_exempt(incoming)),
         Containment::Neither => Met::Diverged,
     }
+}
+
+/// How the two copies' envelopes stand; `None` when either has none.
+pub fn standing(held: &Enveloped, incoming: &Enveloped) -> Option<Containment> {
+    Some(containment(held.topology.as_ref()?, incoming.topology.as_ref()?))
 }
 
 #[cfg(test)]

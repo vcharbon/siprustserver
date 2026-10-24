@@ -1,7 +1,7 @@
-//! The call-decision adapter seam — port of `CallDecisionEngine`. The router
-//! depends only on this trait; the production HTTP adapter and the
-//! deterministic `ScriptedDecisionEngine` (feature `testkit`) both implement
-//! it. The decision DTOs and folds are the core's, re-exported here; the
+//! The call-decision adapter seam: the port, [`CallDecisionEngine`], and the
+//! decision DTOs are `b2bua-decision`'s, re-exported here. The router depends
+//! only on the port; the production HTTP adapter and the deterministic
+//! `ScriptedDecisionEngine` (feature `testkit`) both implement it. The
 //! consults that await an engine live in [`apply_route`] and
 //! [`crate::initial_consult`].
 
@@ -10,44 +10,11 @@ mod limiter_failover;
 #[cfg(any(test, feature = "testkit"))]
 pub mod test_adapter;
 
-pub use b2bua_core::decision::*;
+pub use b2bua_decision::*;
 #[cfg(any(test, feature = "testkit"))]
 pub use test_adapter::{default_call_refer, ReferOutcome, ReleaseOutcome, ScriptedDecisionEngine};
 
 use async_trait::async_trait;
-
-/// The backend that decides how to handle a call. In production it is an HTTP
-/// client; in tests it is the scripted adapter.
-#[async_trait]
-pub trait CallDecisionEngine: Send + Sync {
-    /// Decide routing/services for a new INVITE.
-    async fn new_call(&self, req: NewCallRequest) -> Result<NewCallResponse, CallDecisionError>;
-    /// Decide failover vs terminate when a b-leg fails.
-    async fn call_failure(
-        &self,
-        req: CallFailureRequest,
-    ) -> Result<CallFailureResponse, CallDecisionError>;
-    /// Authorize/deny a REFER transfer (dormant until the transfer slice).
-    async fn call_refer(
-        &self,
-        req: CallReferRequest,
-    ) -> Result<CallReferResponse, CallDecisionError>;
-    /// Decide release vs reroute when a **subscribed** internal release event
-    /// fires (max-call-duration first). Consulted only when
-    /// the event kind is in `Call.subscriptions` AND the call carries a
-    /// `callback_context` — otherwise the core acts locally and this is never
-    /// called.
-    ///
-    /// **Defaulted for back-compat**: existing engines compile unchanged and
-    /// behave exactly as before (every release event → local teardown); an
-    /// engine opts into the release round-trip by overriding this.
-    async fn call_release(
-        &self,
-        _req: CallReleaseRequest,
-    ) -> Result<CallReleaseResponse, CallDecisionError> {
-        Ok(CallReleaseResponse::Release { label: None, service_ext: Default::default() })
-    }
-}
 
 /// Hard per-round-trip deadline on the decision backend (ADR-0022). The core
 /// wraps whatever engine the host injects (see `B2buaCore::spawn_with_overload`)

@@ -26,12 +26,13 @@
 //! Every kill here is unannounced to the peers (ADR-0031 cases 3a and 4): no
 //! departure sweep runs, so the message each cell is about takes the call over.
 
+use b2bua::store::envelope;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering, Ordering::SeqCst};
 use std::sync::Arc;
 use std::time::Duration;
 
-use call::{CallBodyCodec, Ladder, MsgpackCodec, Provisional, Repeat};
+use call::{Ladder, MsgpackCodec, Provisional, Repeat};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
     ProxySut, ReplicatedB2buaSut, WorkerHealth,
@@ -67,11 +68,8 @@ async fn replicated_provisionals(
     primary: &str,
     call_ref: &str,
 ) -> Vec<Provisional> {
-    let body = backup
-        .get(PartitionRole::Backup, primary, call_ref)
-        .await
-        .expect("the backup holds a replica body for the early call");
-    MsgpackCodec::new().decode(&body).expect("replica body decodes").provisionals
+    let body = backup.get(PartitionRole::Backup, primary, call_ref).await.expect("a held copy");
+    envelope::decode(&MsgpackCodec::new(), &body).expect("replica body decodes").call.provisionals
 }
 
 /// Reboot the crashed primary EMPTY at a higher gen + new pod IP, re-learn its

@@ -153,9 +153,9 @@ impl ActionExecutor<'_> {
     /// equivalent — then arm the next rung, or cease at the last one inside
     /// the bound. A spent fire — the ladder is
     /// discharged, the call is no longer active, or the reliable provisional's
-    /// raising fork is torn down (a reclaim can restore a ladder whose cancel
-    /// died with the crashed node) — sends nothing and retires the obligation
-    /// so a later reclaim cannot re-fire it. A rung that arms the next one
+    /// raising fork is torn down (a restored record can hold a ladder whose
+    /// cancel was never written) — sends nothing and retires the obligation
+    /// so a later restore cannot re-fire it. A rung that arms the next one
     /// leaves the repeat and its re-arm as the turn's whole effect set
     /// ([`QuietTurn::OwnRung`](crate::effects::QuietTurn::OwnRung)); a cease or
     /// a spent fire cancels a ledger entry, and the router reads that as the
@@ -235,6 +235,7 @@ impl ActionExecutor<'_> {
             config: turn.config,
             discharged: turn.discharged,
             resolved: turn.resolved,
+            copy_served: turn.copy_served,
         };
         let forced = self.execute(&actions, &call, &ctx);
         effects.extend(forced.effects);

@@ -226,7 +226,8 @@ pub(super) fn admission(dialog: Option<&Dialog>, method: &Method) -> Admission {
 /// then is an ACK of the caller's unanswered INVITE evidence (ADR-0055 §4);
 /// otherwise the copy that answered it is live and its write is on its way.
 fn copy_served(ctx: &RouterCtx, call: &Call) -> bool {
-    ctx.state.is_takeover(&call.call_ref) || call.topology.as_ref().is_some_and(|t| t.bak_gen > 0)
+    ctx.state.is_takeover(&call.call_ref)
+        || ctx.state.topology(&call.call_ref).is_some_and(|t| t.bak_gen > 0)
 }
 
 /// Whether `ack`, an ACK on `leg_id` naming a dialog by its To-tag, names

@@ -149,9 +149,9 @@ async fn worker_with_cdr(cdr: impl FnOnce(&B2buaMetrics) -> Arc<dyn CdrWriter>) 
         write_path: Default::default(),
     };
     let deps = B2buaDeps {
+        identity: OWN_IDENTITY.into(),
         config: B2buaConfig {
             self_ordinal: "w0".into(),
-            self_identity: OWN_IDENTITY.into(),
             sip_local_ip: NODE.ip().to_string(),
             sip_local_port: NODE.port(),
             // The test process's own load never refuses the call.

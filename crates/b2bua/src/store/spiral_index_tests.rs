@@ -22,8 +22,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use call::{
-    call_index_keys, Call, CallBodyCodec, Dialog, DialogState, IndexHit, IndexLookup, KeyKind,
-    MsgpackCodec, OutboundInvite,
+    call_index_keys, Call, Dialog, DialogState, IndexHit, IndexLookup, KeyKind, OutboundInvite,
 };
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
@@ -116,8 +115,8 @@ fn both_resident(last: u8) -> (CallState, String, String) {
     let s = state();
     let (one, two) = (call_1(), call_2());
     let (r1, r2) = (one.call_ref.clone(), two.call_ref.clone());
-    s.create(one);
-    s.create(two);
+    s.create_placed(one);
+    s.create_placed(two);
     let rewrite = if last == 1 { &r1 } else { &r2 };
     let again = s.peek(rewrite).expect("resident");
     s.update(again);
@@ -171,7 +170,7 @@ async fn every_hit_names_the_side_that_owns_the_identity() {
 #[test]
 fn a_cancel_never_resolves_through_an_outgoing_leg() {
     let s = state();
-    s.create(call_1());
+    s.create_placed(call_1());
     assert_eq!(s.resolve_from_sip_key_sync(cancel(X, F1)).map(|h| h.call_ref), None);
 }
 
@@ -181,7 +180,7 @@ fn a_cancel_never_resolves_through_an_outgoing_leg() {
 #[test]
 fn a_cancel_sharing_only_the_call_id_of_an_outgoing_leg_misses() {
     let s = state();
-    s.create(call_1());
+    s.create_placed(call_1());
     assert_eq!(s.resolve_from_sip_key_sync(cancel(X, "other-tag")).map(|h| h.call_ref), None);
 }
 
@@ -227,7 +226,7 @@ async fn backup_with_replicas(last: u8) -> (CallState, Arc<ReplicatingCallStore>
 }
 
 async fn put_replica(repl: &ReplicatingCallStore, call: &Call) {
-    let body = MsgpackCodec::new().encode(call).unwrap();
+    let body = crate::store::envelope::placed_body(call).unwrap();
     let idx = call_index_keys(call);
     repl.put_call(
         PartitionRole::Backup,
@@ -285,8 +284,8 @@ fn a_shared_key_stays_with_its_last_writer_when_the_other_call_leaves() {
     one.callback_context = Some("shared".into());
     two.callback_context = Some("shared".into());
     let r1 = one.call_ref.clone();
-    s.create(one);
-    s.create(two);
+    s.create_placed(one);
+    s.create_placed(two);
     s.remove(&r1);
     assert!(
         s.inner.lock().unwrap().sip_index.contains_key(&call::index_key::callback_key("shared")),

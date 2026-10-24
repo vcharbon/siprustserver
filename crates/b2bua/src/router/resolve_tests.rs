@@ -6,10 +6,7 @@
 //! holds only the replica reads the replicated one and binds the leg once the
 //! takeover copy is in hand.
 
-use call::{
-    call_index_keys, Call, CallBodyCodec, Dialog, DialogState, Direction, KeyKind, MsgpackCodec,
-    OutboundInvite,
-};
+use call::{call_index_keys, Call, Dialog, DialogState, Direction, KeyKind, OutboundInvite};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
@@ -79,7 +76,7 @@ async fn the_serving_node_binds_the_leg_owning_the_matched_key() {
     let n = node("w0").await;
     let ctx = n.core.router_ctx();
     let call = answered_call("w0", "w1", "cid-live");
-    ctx.state.create(call.clone());
+    ctx.state.create_placed(call.clone());
 
     let event = callee_bye();
     let mut res = resolve(ctx, &event);
@@ -103,7 +100,7 @@ async fn an_acting_backup_binds_the_leg_from_the_replicated_index() {
     let ctx = n.core.router_ctx();
     let call = answered_call("w0", "w1", "cid-takeover");
     let r = call.call_ref.clone();
-    let body = MsgpackCodec::new().encode(&call).unwrap();
+    let body = crate::store::envelope::placed_body(&call).unwrap();
     n.store
         .put_call(
             PartitionRole::Backup,
@@ -143,7 +140,7 @@ async fn a_stated_leg_wins_over_the_index() {
     let n = node("w0").await;
     let ctx = n.core.router_ctx();
     let call = answered_call("w0", "w1", "cid-stated");
-    ctx.state.create(call.clone());
+    ctx.state.create_placed(call.clone());
 
     let event = bye_to("sip:127.0.0.2:5080;leg=a", B_CALL_ID, BOB_TAG, B_LOCAL_TAG);
     let mut res = resolve(ctx, &event);

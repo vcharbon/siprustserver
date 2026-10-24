@@ -141,6 +141,7 @@ pub(super) fn turn(
         config: &config,
         discharged: None,
         resolved: &resolved,
+        copy_served: false,
     };
     let rules = default_rules();
     let Some(rule) = pick_ranked(&rules, call, &ctx).into_iter().next() else {
@@ -148,7 +149,12 @@ pub(super) fn turn(
     };
     let actions: Vec<RuleAction> = (rule.handle)(&ctx).map(|r| r.actions).unwrap_or_default();
     let mut id_gen = TurnScope::of(TurnIds::fixed(1));
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut id_gen,
+        now_ms: 0,
+    };
     (Some(rule.id), Some(exec.execute(&actions, call, &ctx)))
 }
 

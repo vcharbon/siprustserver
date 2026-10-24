@@ -22,9 +22,10 @@
 //! keeps one entry per callRef — and holds the challenged call, at a higher
 //! `(p,b)` than the retry's first versions, when the retry's `Put` lands.
 
+use b2bua::store::{envelope, Enveloped};
 use std::time::Duration;
 
-use call::{Call, CallBodyCodec, MsgpackCodec};
+use call::MsgpackCodec;
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
     ProxySut, ReplicatedB2buaSut, WorkerHealth,
@@ -59,8 +60,8 @@ enum Retry {
 }
 
 /// Decode a stored body.
-fn decode(body: &[u8]) -> Call {
-    MsgpackCodec::new().decode(body).expect("the stored body decodes")
+fn decode(body: &[u8]) -> Enveloped {
+    envelope::decode(&MsgpackCodec::new(), body).expect("the stored body decodes")
 }
 
 /// Reboot the crashed primary EMPTY at a higher gen + new pod IP, re-learn its
@@ -175,27 +176,35 @@ async fn a_retry_on_a_challenged_identity(name: &str, retry: Retry) {
     fh.advance(Duration::from_millis(500)).await;
 
     let served = primary.live_call(&call_ref).expect("the primary serves the retry");
-    assert_ne!(served.incarnation(), challenged.incarnation(), "the retry is a call of its own");
+    assert_ne!(
+        served.incarnation(),
+        challenged.call.incarnation(),
+        "the retry is a call of its own"
+    );
     if retry == Retry::WhileTheStreamIsDown {
         // This timing is what the scenario is for: the backup held the
         // challenged call when the retry's Put landed, at a version the retry's
         // write does not dominate.
         assert!(!delete_received(&fh, &call_ref), "the delete and the retry's Put compacted");
-        let p = served.topology.as_ref().expect("the retry has topology").gen;
+        let p = primary.live_topology(&call_ref).expect("the retry has topology").gen;
         assert!(p <= challenged_p, "the retry's version ({p}) dominates the challenged one's");
     }
     let stored = primary
         .get(PartitionRole::Primary, &primary_ord, &call_ref)
         .await
         .expect("the retry's body is in the primary's store");
-    assert_eq!(decode(&stored).incarnation(), served.incarnation(), "the primary stores the retry");
+    assert_eq!(
+        decode(&stored).call.incarnation(),
+        served.incarnation(),
+        "the primary stores the retry"
+    );
     let replica = backup
         .get(PartitionRole::Backup, &primary_ord, &call_ref)
         .await
         .expect("the retry's body is replicated to the backup");
     let replica = decode(&replica);
-    assert_eq!(replica.incarnation(), served.incarnation(), "the backup holds the retry");
-    assert!(call::helpers::caller_answered(&replica), "the backup holds the answered retry");
+    assert_eq!(replica.call.incarnation(), served.incarnation(), "the backup holds the retry");
+    assert!(call::helpers::caller_answered(&replica.call), "the backup holds the answered retry");
 
     // ── the primary dies; the backup serves the re-INVITE ───────────────────
     fh.mark(&primary_ord, None, "crash", "primary down");

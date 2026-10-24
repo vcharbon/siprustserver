@@ -10,6 +10,7 @@ use sip_message::SipRequest;
 
 use super::admit::UnbornCall;
 use super::responses::{build_merged_482, build_retry_later_500, build_unborn_500};
+use super::topology_cookie::topology_from_cookie;
 use super::RouterCtx;
 use crate::admission::{class_of, Class};
 use crate::effects::{HandlerEffects, HandlerResult};
@@ -149,10 +150,13 @@ pub(super) async fn initial_invite_turn(
         let a_leg = call.a_leg.leg_id.clone();
         call = ring.invite_received(call, &a_leg, req, now_ms);
     }
-    // The backlog toward the backup the proxy named may leave the call with
-    // none, for life (ADR-0055 §3).
-    let backed = ctx.state.admit_backup(&call);
-    ctx.state.create(call.clone());
+    // The call is placed on the worker pair the proxy's cookie names; the
+    // backlog toward that backup may leave the call with none, for life
+    // (ADR-0055 §3).
+    let topology = topology_from_cookie(req, &ctx.config.self_ordinal, call_ref);
+    let owners = crate::store::envelope::owners(&ctx.relay_owner, topology.as_ref());
+    let backed = ctx.state.admit_backup(call_ref, topology.as_ref());
+    ctx.state.create(call.clone(), topology);
     // The caller's 100 follows the call's creation write, so the backup holds
     // the call from before the caller stops retransmitting, not from its
     // decision (ADR-0047, ADR-0055 §3); this turn's own write supersedes this
@@ -198,6 +202,7 @@ pub(super) async fn initial_invite_turn(
             ctx.decision.as_ref(),
             &ctx.limiter,
             &ctx.config,
+            &owners,
             turn,
             &ctx.services,
             req.image(),
@@ -243,7 +248,7 @@ pub(super) async fn initial_invite_turn(
         crate::rules::invariants::UnansweredCaller::Answer(&ctx.config.minted_final_advertisement),
         &mut turn.notes,
     );
-    let mut exec = ActionExecutor { config: &ctx.config, turn, now_ms };
+    let mut exec = ActionExecutor { config: &ctx.config, owners: &owners, turn, now_ms };
     Turn::Result(Box::new(close_turn(&ctx.rules, &TurnStart::unborn(), enforced, &mut exec)))
 }
 

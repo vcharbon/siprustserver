@@ -88,6 +88,7 @@ async fn a_cancel_that_beat_the_relayed_2xx_byes_the_callee_only() {
         resolved: Default::default(),
         matched_client_txn: false,
         now_ms: 1_000,
+        owners: Default::default(),
     };
     let fw = node.core.router_ctx().framework();
     let result = rule_chain_turn(&fw, call, input, &mut super::test_support::turn(1));

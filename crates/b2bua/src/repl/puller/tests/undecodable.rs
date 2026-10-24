@@ -11,15 +11,15 @@ use super::{backup_puller, body_at, forward_at};
 /// levels deeper.
 fn nested_body(depth: usize) -> Arc<[u8]> {
     let codec = call::MsgpackCodec::new();
-    let call = codec
-        .decode(&body_at(Some(200), call::CallModelState::Active, (1, 0), (1, 0)))
-        .expect("decodes");
-    let call = call::helpers::set_call_ext(call, "svc", Some(1.into()));
-    let mut body = codec.encode(&call).expect("encodes");
+    let body = body_at(Some(200), call::CallModelState::Active, (1, 0), (1, 0));
+    let copy = crate::store::envelope::decode(&codec, &body).expect("decodes");
+    let call = call::helpers::set_call_ext(copy.call, "svc", Some(1.into()));
+    let mut inner = codec.encode(&call).expect("encodes");
     let key = b"\xa3svc";
-    let at = body.windows(key.len()).position(|w| w == key).expect("the service key") + key.len();
-    body.splice(at..at, std::iter::repeat_n(0x91, depth));
-    Arc::from(body)
+    let at = inner.windows(key.len()).position(|w| w == key).expect("the service key") + key.len();
+    inner.splice(at..at, std::iter::repeat_n(0x91, depth));
+    let body = rmp_serde::to_vec(&(copy.topology, serde_bytes::Bytes::new(&inner)));
+    Arc::from(body.expect("the envelope encodes"))
 }
 
 #[tokio::test]

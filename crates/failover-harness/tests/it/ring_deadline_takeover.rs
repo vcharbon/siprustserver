@@ -16,13 +16,14 @@
 //!   not having rung, and an 18x it later takes runs the ring from that 18x
 //!   (`a_later_18x_on_the_survivor_…`).
 
+use b2bua::store::envelope;
 use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
 use b2bua::limiter::NoopLimiter;
-use call::{CallBodyCodec, MsgpackCodec, Ring, TimerType};
+use call::{MsgpackCodec, Ring, TimerType};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
     ProxySut, ReplicatedB2buaSut, WorkerHealth,
@@ -174,14 +175,15 @@ async fn a_ring_deadline_armed_before_the_kill_fires_on_the_survivor_at_its_inst
     call.expect(180).await;
     fh.advance(Duration::from_millis(500)).await;
     let call_ref = survivor.scan_one_backed_up(&pri_ord).await.expect("the call replicated");
-    let replica = MsgpackCodec::new()
-        .decode(
-            &survivor
-                .get(PartitionRole::Backup, &pri_ord, &call_ref)
-                .await
-                .expect("the backup holds the replica"),
-        )
-        .expect("the replica decodes");
+    let replica = envelope::decode(
+        &MsgpackCodec::new(),
+        &survivor
+            .get(PartitionRole::Backup, &pri_ord, &call_ref)
+            .await
+            .expect("the backup holds the replica"),
+    )
+    .expect("the replica decodes")
+    .call;
     let fire_at = ring_deadline(&replica).expect("the replica carries the ring deadline");
     assert_eq!(fire_at, rang + HOPS_IN_MS + RING_MS, "the deadline runs from the 180's arrival");
 
@@ -286,14 +288,15 @@ async fn ring_lost_with_the_primary(
         if *primary_is_b1 { (&mut c.w_b1, &mut c.w_b2) } else { (&mut c.w_b2, &mut c.w_b1) };
     c.fh.advance(Duration::from_millis(500)).await;
     let call_ref = backup.scan_one_backed_up(&pri_ord).await.expect("the call replicated");
-    let replica = MsgpackCodec::new()
-        .decode(
-            &backup
-                .get(PartitionRole::Backup, &pri_ord, &call_ref)
-                .await
-                .expect("the backup holds the call"),
-        )
-        .expect("the replica decodes");
+    let replica = envelope::decode(
+        &MsgpackCodec::new(),
+        &backup
+            .get(PartitionRole::Backup, &pri_ord, &call_ref)
+            .await
+            .expect("the backup holds the call"),
+    )
+    .expect("the replica decodes")
+    .call;
     let sent_at = replica.b_legs[0].outbound_invite().expect("dialled").sent_at_ms;
     assert_eq!(ring_deadline(&replica), None, "no ring deadline before the 180");
 

@@ -46,7 +46,7 @@ impl ActionExecutor<'_> {
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(
                 self.config,
-                relay::CallMarks::of(call),
+                self.marks(call),
                 leg_id,
                 Some(relay::RequestFacts {
                     method: "NOTIFY",
@@ -55,7 +55,7 @@ impl ActionExecutor<'_> {
                 }),
                 branch,
             )),
-            contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), leg_id)),
+            contact: Some(relay::leg_contact(self.config, self.marks(call), leg_id)),
             body: body.to_vec(),
             content_type: content_type.and_then(relay::media_type),
             cseq: Some(relay::wire_cseq(outbound_cseq)),
@@ -169,7 +169,7 @@ impl ActionExecutor<'_> {
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(
                 self.config,
-                relay::CallMarks::of(call),
+                self.marks(call),
                 leg_id,
                 Some(relay::RequestFacts {
                     method: "INVITE",
@@ -178,7 +178,7 @@ impl ActionExecutor<'_> {
                 }),
                 branch.clone(),
             )),
-            contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), leg_id)),
+            contact: Some(relay::leg_contact(self.config, self.marks(call), leg_id)),
             body: relay::continue_on_leg(
                 call,
                 leg_id,
@@ -222,7 +222,7 @@ impl ActionExecutor<'_> {
         let record = call::RequestRecord {
             origin: call::RequestOrigin::Own,
             sent: Some(super::request_record::sent_request(&out_req, &dest)),
-            relayed_by: self.config.relay_owner(),
+            relayed_by: self.owners.this.clone(),
             author: self.turn.rule.map(str::to_string),
             ..call::RequestRecord::relayed("INVITE", i64::from(out_req.cseq().seq()), 0)
         };
@@ -336,7 +336,7 @@ impl ActionExecutor<'_> {
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(
                 self.config,
-                relay::CallMarks::of(call),
+                self.marks(call),
                 leg_id,
                 Some(relay::RequestFacts {
                     method,
@@ -345,7 +345,7 @@ impl ActionExecutor<'_> {
                 }),
                 branch,
             )),
-            contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), leg_id)),
+            contact: Some(relay::leg_contact(self.config, self.marks(call), leg_id)),
             cseq: Some(relay::wire_cseq(outbound_cseq)),
             body: relay::continue_on_leg(
                 call,

@@ -113,7 +113,7 @@ pub fn is_fully_resolved(call: &Call) -> bool {
 }
 
 /// Attach a b-leg without recording anything: the event-less attach for
-/// fixtures and replica images. A leg this element originates goes through
+/// fixtures and stored images. A leg this element originates goes through
 /// [`super::add_originated_b_leg`], which records its INVITE.
 pub fn add_b_leg(mut call: Call, leg: Leg) -> Call {
     call.b_legs.push(leg);

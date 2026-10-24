@@ -108,7 +108,7 @@ impl ActionExecutor<'_> {
     ) {
         let Some(leg) = call::helpers::find_leg(call, leg_id) else { return };
         let Some(d) = leg.dialogs.by_tags(&id.our_tag, &id.peer_tag) else { return };
-        let marks = relay::CallMarks::of(call);
+        let marks = self.marks(call);
         let Some(bye) = self.bye_on_dialog(marks, leg, d, reason, relayed, hops) else { return };
         *call = call::helpers::bump_our_cseq(call.clone(), leg_id, id, 1);
         self.record_own_effect(call, leg_id, id, &bye);

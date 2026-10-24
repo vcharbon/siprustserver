@@ -38,6 +38,7 @@ pub(super) async fn unwired_core(ordinal: &str) -> B2buaCore {
     };
     let deps = B2buaDeps {
         config,
+        identity: String::new(),
         decision: Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.3", 9)),
         limiter: Arc::new(NoopLimiter),
         cdr: Arc::new(InMemoryCdrWriter::new()),

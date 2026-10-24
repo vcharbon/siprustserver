@@ -162,6 +162,7 @@ fn turn(node: &Node, mut call: Call, event: &CallEvent) -> crate::effects::Handl
         resolved: Default::default(),
         matched_client_txn: false,
         now_ms: NOW,
+        owners: Default::default(),
     };
     rule_chain_turn(&node.core.router_ctx().framework(), call, input, &mut scope)
 }

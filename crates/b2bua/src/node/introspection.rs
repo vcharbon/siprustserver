@@ -46,6 +46,12 @@ impl B2buaCore {
         self.ctx.state.peek(call_ref)
     }
 
+    /// The store envelope of the live copy of `call_ref` (introspection: the
+    /// worker pair, the version vector and the state stamp, ADR-0055 §7).
+    pub fn live_topology(&self, call_ref: &str) -> Option<crate::store::CallTopology> {
+        self.ctx.state.topology(call_ref)
+    }
+
     /// Every call this worker serves, read through a probe that outlives a
     /// borrow of the core and reads `None` once the worker's state is gone
     /// (introspection: a failure dump's view of the live calls).

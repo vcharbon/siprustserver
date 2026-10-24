@@ -40,7 +40,7 @@ use topology::{Peer, SimulatedMembership};
 // landed in the store"; this reaches "call live + routable + keepalive re-armed".
 use std::collections::HashMap;
 
-use call::{CallBodyCodec, MsgpackCodec, TimerKey, TimerType};
+use call::{TimerKey, TimerType};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
 use sip_net::{BindUdpOpts, RealSignalingNetwork, SignalingNetwork};
@@ -117,7 +117,7 @@ fn reclaim_body(primary: &str, backup: &str, cid: &str, clock: &Clock) -> (Strin
     // +5 min: restored into the DelayQueue but never fires during the test.
     let fire_at = clock.now_ms() + 300_000;
     call::helpers::arm_timer(&mut call, TimerKey::call(TimerType::Keepalive), fire_at);
-    let body = MsgpackCodec::new().encode(&call).unwrap();
+    let body = crate::store::envelope::placed_body(&call).unwrap();
     (call.call_ref.clone(), body)
 }
 
@@ -163,15 +163,15 @@ async fn spawn_reclaimer_core(
         replica: crate::node::replica::ReplicaConfig::default(),
         write_path: Default::default(),
     };
-    let config = B2buaConfig {
-        self_ordinal: self_ordinal.into(),
-        sip_local_ip: "127.0.0.1".into(),
-        sip_local_port: sip_port,
-        keepalive_interval_sec: 300,
-        ..Default::default()
-    };
     let deps = B2buaDeps {
-        config,
+        config: B2buaConfig {
+            self_ordinal: self_ordinal.into(),
+            sip_local_ip: "127.0.0.1".into(),
+            sip_local_port: sip_port,
+            keepalive_interval_sec: 300,
+            ..Default::default()
+        },
+        identity: String::new(),
         decision: Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 9)),
         limiter: Arc::new(NoopLimiter),
         cdr: Arc::new(InMemoryCdrWriter::new()),

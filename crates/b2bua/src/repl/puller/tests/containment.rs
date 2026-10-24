@@ -10,6 +10,7 @@ use repl_net::frame::{Op, Partition};
 use super::{backup_puller, body_at};
 use super::{ApplyMode, ApplyOutcome, Puller};
 use crate::repl::ReplicatingCallStore;
+use crate::store::envelope::{self, Enveloped};
 use crate::store::PartitionRole;
 
 /// A `Put` of `body` on the flow `partition` in `mode`, at the version and
@@ -20,10 +21,9 @@ async fn put_body(
     mode: ApplyMode,
     body: Arc<[u8]>,
 ) -> ApplyOutcome {
-    use call::CallBodyCodec;
-    let call = call::MsgpackCodec::new().decode(&body).expect("decodes");
-    let indexes = call::call_index_keys(&call);
-    let (gen, bgen) = call.topology.expect("replicated").vector();
+    let copy = envelope::decode(&call::MsgpackCodec::new(), &body).expect("decodes");
+    let indexes = call::call_index_keys(&copy.call);
+    let (gen, bgen) = copy.topology.expect("replicated").vector();
     p.apply_to_store(
         Op::Put,
         partition,
@@ -47,10 +47,9 @@ async fn forward(p: &Puller, body: Arc<[u8]>) -> ApplyOutcome {
 }
 
 /// The stored copy of the split call in `role`, decoded.
-async fn stored(store: &ReplicatingCallStore, role: PartitionRole) -> call::Call {
-    use call::CallBodyCodec;
+async fn stored(store: &ReplicatingCallStore, role: PartitionRole) -> Enveloped {
     let raw = store.peek_body_raw(role, "w0", "w0|split|t").await.expect("held");
-    call::MsgpackCodec::new().decode(&raw).expect("decodes")
+    envelope::decode(&call::MsgpackCodec::new(), &raw).expect("decodes")
 }
 
 /// A forward write at or past the Element's version on both counters read
@@ -80,7 +79,7 @@ async fn a_write_that_diverged_from_the_element_is_refused_and_leaves_it() {
     let branch = body_at(Some(480), Terminated, (6, 2), (6, 2));
     assert_eq!(forward(&p, branch).await, ApplyOutcome::Refused);
     assert_eq!(store.current_cv(PartitionRole::Backup, "w0", "w0|split|t"), Some((5, 3)));
-    assert!(call::helpers::caller_answered(&stored(&store, PartitionRole::Backup).await));
+    assert!(call::helpers::caller_answered(&stored(&store, PartitionRole::Backup).await.call));
 }
 
 /// A write that contains the Element — the Element's own writes since the
@@ -97,7 +96,7 @@ async fn the_copy_that_contains_the_other_stands_at_the_higher_counters() {
     assert_eq!(forward(&p, answered).await, ApplyOutcome::Applied, "it contains the Element");
     assert_eq!(store.current_cv(PartitionRole::Backup, "w0", r), Some((6, 3)));
     let held = stored(&store, PartitionRole::Backup).await;
-    assert!(call::helpers::caller_answered(&held), "the primary's body");
+    assert!(call::helpers::caller_answered(&held.call), "the primary's body");
     assert_eq!(held.topology.expect("replicated").stamp(), (6, 2), "and its stamp");
 
     let (p, store, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
@@ -107,7 +106,7 @@ async fn the_copy_that_contains_the_other_stands_at_the_higher_counters() {
     assert_eq!(forward(&p, keepalive).await, ApplyOutcome::Refused, "the Element contains it");
     assert_eq!(store.current_cv(PartitionRole::Backup, "w0", r), Some((6, 3)));
     let held = stored(&store, PartitionRole::Backup).await;
-    assert!(call::helpers::caller_answered(&held), "the Element's own body");
+    assert!(call::helpers::caller_answered(&held.call), "the Element's own body");
 }
 
 /// Copies that contain each other: the primary's stands — the incoming one on
@@ -119,7 +118,7 @@ async fn copies_that_contain_each_other_keep_the_primarys_in_the_store() {
     assert_eq!(forward(&p, body_at(None, Active, (4, 3), (4, 1))).await, ApplyOutcome::Applied);
     let primary = body_at(Some(200), Active, (5, 1), (4, 1));
     assert_eq!(forward(&p, primary).await, ApplyOutcome::Applied);
-    assert!(call::helpers::caller_answered(&stored(&store, PartitionRole::Backup).await));
+    assert!(call::helpers::caller_answered(&stored(&store, PartitionRole::Backup).await.call));
 
     let (p, store, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
     let own = body_at(Some(200), Active, (5, 1), (4, 1));
@@ -131,17 +130,16 @@ async fn copies_that_contain_each_other_keep_the_primarys_in_the_store() {
     let outcome = put_body(&p, Partition::Pri, ApplyMode::Reverse, copy).await;
     assert_eq!(outcome, ApplyOutcome::Refused, "the record's own stands");
     let held = stored(&store, PartitionRole::Primary).await;
-    assert!(call::helpers::caller_answered(&held));
+    assert!(call::helpers::caller_answered(&held.call));
     assert_eq!(held.topology.expect("replicated").vector(), (5, 3));
 }
 
 /// `body` with a callback context, an index key only it carries.
 fn with_callback(body: Arc<[u8]>, ctx: &str) -> Arc<[u8]> {
-    use call::CallBodyCodec;
     let codec = call::MsgpackCodec::new();
-    let mut call = codec.decode(&body).expect("decodes");
-    call.callback_context = Some(ctx.into());
-    Arc::from(codec.encode(&call).unwrap())
+    let mut copy = envelope::decode(&codec, &body).expect("decodes");
+    copy.call.callback_context = Some(ctx.into());
+    Arc::from(envelope::encode(&codec, copy.topology.as_ref(), &copy.call).unwrap())
 }
 
 /// An Element kept over a write it contains keeps its own index keys, not the

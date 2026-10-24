@@ -188,7 +188,7 @@ fn the_end_of_turn_stamp_rebinds_a_retained_copy_of_what_it_changes() {
 }
 
 /// The launched INVITE the end-of-turn stamp changes is the one the leg's
-/// client-transaction handle holds: a takeover seeds the client INVITE
+/// client-transaction handle holds: a restored record seeds the client INVITE
 /// from that handle, and a retransmission of a request is the request it
 /// repeats (RFC 3261 §17.1.1.2).
 #[test]
@@ -204,7 +204,7 @@ fn the_end_of_turn_stamp_rebinds_the_launched_invites_handle() {
     );
     let a_invite = caller_of(&call);
     let (leg, effect) = crate::rules::relay::build_b_leg(
-        crate::rules::relay::CallMarks::of(&call),
+        crate::rules::relay::CallMarks::of(&call, crate::owners::Owners::none()),
         "b-1",
         &a_invite,
         ("192.0.2.9".into(), 5060),
@@ -261,7 +261,7 @@ fn an_ended_legs_own_set_stays_with_the_call() {
     );
     let a_invite = caller_of(&call);
     let (mut leg, effect) = crate::rules::relay::build_b_leg(
-        crate::rules::relay::CallMarks::of(&call),
+        crate::rules::relay::CallMarks::of(&call, crate::owners::Owners::none()),
         "b-1",
         &a_invite,
         ("192.0.2.9".into(), 5060),

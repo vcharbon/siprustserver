@@ -230,6 +230,10 @@ plain_counters! {
         "b2bua_store_reconciled_orphan_takeover_total",
         "takeover marks of no resident call the reaper sweep dropped; each is a store write a panic cut short — expected 0",
     ) => store_reconciled_orphan_takeover, bump_store_reconciled_orphan_takeover, store_reconciled_orphan_takeover_total;
+    STORE_RECONCILED_ORPHAN_ENVELOPE = (
+        "b2bua_store_reconciled_orphan_envelope_total",
+        "store envelopes of no resident call the reaper sweep dropped; each is a store write a panic cut short — expected 0",
+    ) => store_reconciled_orphan_envelope, bump_store_reconciled_orphan_envelope, store_reconciled_orphan_envelope_total;
     REPLICA_REAP_PANICS = (
         "b2bua_replica_reap_panics_total",
         "replica reap steps that panicked; the next pass runs one interval later — expected 0",

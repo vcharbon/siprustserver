@@ -73,8 +73,9 @@ pub struct AdmitRequest {
     /// The call the set belongs to.
     pub key: String,
     /// The call's change number for this admit: above every number the call
-    /// reserved before for the key (a takeover copy may reuse one its dead
-    /// node sent: the answer is then `superseded`, stating the number).
+    /// reserved before for the key (a call restored on another node may reuse
+    /// one its previous holder sent: the answer is then `superseded`, stating
+    /// the number).
     pub change: u64,
     /// The set the call last learnt the server holds for the key, under its
     /// number (empty under 0 when it learnt none). A server that holds no set

@@ -35,11 +35,11 @@ impl CallState {
     pub fn live_topologies(&self) -> Option<Vec<(String, String)>> {
         let inner = self.locked();
         let mut pairs: Vec<(String, String)> = Vec::new();
-        for (call_ref, call) in inner.calls.iter() {
+        for call_ref in inner.calls.keys() {
             if self.repl_store().is_some_and(|repl| repl.unbacked(call_ref)) {
                 return None;
             }
-            let t = call.topology.as_ref()?;
+            let t = inner.topologies.get(call_ref)?;
             if !pairs.iter().any(|(pri, bak)| *pri == t.pri && *bak == t.bak) {
                 pairs.push((t.pri.clone(), t.bak.clone()));
             }
@@ -53,17 +53,17 @@ mod tests {
     use std::net::SocketAddr;
     use std::sync::Arc;
 
-    use call::{Call, CallTopology};
+    use call::Call;
     use sip_message::parser::custom::CustomParser;
     use sip_message::{SipMessage, SipParser};
 
-    use super::super::{CallStore, InMemoryCallStore};
+    use super::super::{CallStore, CallTopology, InMemoryCallStore};
     use super::*;
     use crate::config::B2buaConfig;
     use crate::initial_invite::build_initial_call;
     use crate::metrics::B2buaMetrics;
 
-    fn call(call_ref: &str, topology: Option<(&str, &str)>) -> Call {
+    fn call(call_ref: &str) -> Call {
         let raw = "INVITE sip:bob@example.com SIP/2.0\r\n\
             Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-resident\r\n\
             Max-Forwards: 70\r\n\
@@ -80,8 +80,13 @@ mod tests {
         let src = SocketAddr::from(([10, 0, 0, 9], 5060));
         let mut call = build_initial_call(&req, src, &cfg, &mut sip_ids::TurnIds::fixed(1), 0);
         call.call_ref = call_ref.into();
-        call.topology = topology.map(|(pri, bak)| CallTopology::new(pri, bak, 0, 0));
         call
+    }
+
+    /// Create the call `call_ref` placed on `topology`'s pair.
+    fn create(state: &CallState, call_ref: &str, topology: Option<(&str, &str)>) {
+        let topology = topology.map(|(pri, bak)| CallTopology::new(pri, bak, 0, 0));
+        state.create(call(call_ref), topology);
     }
 
     fn state() -> CallState {
@@ -92,9 +97,9 @@ mod tests {
     #[test]
     fn each_topology_is_listed_once() {
         let state = state();
-        state.create(call("a", Some(("w0", "w1"))));
-        state.create(call("b", Some(("w0", "w1"))));
-        state.create(call("c", Some(("w2", "w0"))));
+        create(&state, "a", Some(("w0", "w1")));
+        create(&state, "b", Some(("w0", "w1")));
+        create(&state, "c", Some(("w2", "w0")));
         let mut pairs = state.live_topologies().expect("every call names one");
         pairs.sort();
         assert_eq!(pairs, [("w0".into(), "w1".into()), ("w2".into(), "w0".into())]);
@@ -104,8 +109,8 @@ mod tests {
     fn a_call_naming_no_topology_lists_none() {
         assert_eq!(state().live_topologies(), Some(Vec::new()), "no call, nothing named");
         let state = state();
-        state.create(call("a", Some(("w0", "w1"))));
-        state.create(call("b", None));
+        create(&state, "a", Some(("w0", "w1")));
+        create(&state, "b", None);
         assert_eq!(state.live_topologies(), None);
     }
 }

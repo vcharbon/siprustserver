@@ -71,7 +71,7 @@ impl ActionExecutor<'_> {
         }
         let ack = leg.and_then(|leg| {
             relay::ack_b_leg(
-                relay::CallMarks::of(call),
+                self.marks(call),
                 leg,
                 self.config,
                 &mut self.turn.ids,

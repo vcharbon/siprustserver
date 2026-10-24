@@ -141,6 +141,7 @@ fn timer_global_duration_selects_max_duration() {
         config: &B2buaConfig::default(),
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -181,6 +182,7 @@ fn no_answer_result(call: &call::Call, fired_leg_id: &str) -> Vec<RuleAction> {
         config: &B2buaConfig::default(),
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, call, &ctx);
@@ -260,9 +262,15 @@ fn executed(call: &call::Call, actions: &[RuleAction]) -> HandlerResult {
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut id_gen,
+        now_ms: 0,
+    };
     exec.execute(actions, call, &ctx)
 }
 
@@ -321,6 +329,7 @@ fn max_duration_result(call: &call::Call) -> Vec<RuleAction> {
         config: &B2buaConfig::default(),
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, call, &ctx);
@@ -332,7 +341,7 @@ fn max_duration_result(call: &call::Call) -> Vec<RuleAction> {
 #[test]
 fn max_duration_fire_on_a_terminating_call_is_absorbed() {
     // The cap crossing the terminating window (caller BYE'd just before it, or
-    // a reclaim restored a stale entry): even the consult-eligible shape —
+    // a restored record held a stale entry): even the consult-eligible shape —
     // answered, subscribed, callback_context — is spent on a going-away call.
     // No `call_release` consult (a `reroute` outcome would dial a fresh b-leg),
     // no BeginTermination re-arm — absorbed.
@@ -518,8 +527,8 @@ fn decision_folds_on_a_live_call_still_apply() {
 fn begin_termination_scrubs_per_leg_no_answer_entries() {
     // Entering `terminating` cancels every per-leg NoAnswer ledger entry —
     // including the entry of a leg the teardown loop skips as already
-    // `Cancelling` — so the fire is stopped at the source and a reclaim cannot
-    // restore it into the terminating window.
+    // `Cancelling` — so the fire is stopped at the source and no restore of the
+    // record brings it back into the terminating window.
     let mut call = test_call();
     let mut b = b_leg_pending();
     cancel_sent(&mut b);
@@ -545,9 +554,15 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut id_gen,
+        now_ms: 0,
+    };
     let result = exec.execute(
         &[RuleAction::BeginTermination {
             reason: Some("CANCEL".into()),
@@ -621,6 +636,7 @@ fn in_dialog_bye_selects_relay_bye() {
         config: &B2buaConfig::default(),
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -648,6 +664,7 @@ fn bye_on_the_early_a_dialog_selects_early_dialog_bye_with_487_and_termination()
         config: &B2buaConfig::default(),
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -697,6 +714,7 @@ fn bye_on_the_early_a_dialog_of_a_terminating_call_still_answers_the_invite() {
         config: &B2buaConfig::default(),
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -738,6 +756,7 @@ fn bye_from_an_ended_leg_selects_resolve_ended_leg_bye_without_termination() {
         config: &B2buaConfig::default(),
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -785,6 +804,7 @@ Content-Length: 0\r\n\r\n";
         config: &B2buaConfig::default(),
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -1016,9 +1036,15 @@ fn execute_with(config: &B2buaConfig, call: &call::Call, actions: &[RuleAction])
         config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor { config, turn: &mut id_gen, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config,
+        turn: &mut id_gen,
+        now_ms: 0,
+    };
     exec.execute(actions, call, &ctx)
 }
 
@@ -1233,6 +1259,7 @@ fn handle_from(call: &call::Call, event: &CallEvent, leg: &str) -> (&'static str
         config: &B2buaConfig::default(),
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, call, &ctx);
@@ -1260,9 +1287,15 @@ fn execute_from_b1(call: &call::Call, event: &CallEvent, actions: &[RuleAction])
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut id_gen,
+        now_ms: 0,
+    };
     exec.execute(actions, call, &ctx)
 }
 
@@ -1423,6 +1456,7 @@ fn a_provisional_on_a_confirmed_b_leg_selects_no_relay_rule() {
         config: &B2buaConfig::default(),
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let rules = default_rules();
     let ranked: Vec<&str> = pick_ranked(&rules, &call, &ctx).iter().map(|r| r.id).collect();
@@ -1594,6 +1628,7 @@ fn ctx_for<'a>(
         config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     }
 }
 
@@ -1636,7 +1671,12 @@ fn set_state_moves_cursor_and_gates_the_next_event() {
     let event = info_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut id_gen,
+        now_ms: 0,
+    };
     let rules = vec![sm_rule(handle_to_s1)];
 
     let result = {
@@ -1666,7 +1706,12 @@ fn undeclared_transition_is_a_noted_defect() {
     let event = info_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut id_gen,
+        now_ms: 0,
+    };
     let rules = vec![sm_rule(handle_to_s2_undeclared)];
 
     let ctx = ctx_for(&call, &event, &config);
@@ -1689,7 +1734,12 @@ fn undeclared_effect_is_a_noted_defect() {
     let event = info_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut id_gen,
+        now_ms: 0,
+    };
     // `sm_rule` declares `effects: &[]`, but the handler emits a `LegMessage`.
     let rules = vec![sm_rule(handle_emits_leg_message)];
 
@@ -1707,7 +1757,12 @@ fn declared_effect_passes_the_drift_check() {
     let event = info_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut id_gen,
+        now_ms: 0,
+    };
     let rules = vec![sm_rule_with_effects(handle_emits_leg_message, &SM_EFFECTS_LEG_MESSAGE)];
 
     let ctx = ctx_for(&call, &event, &config);
@@ -1725,7 +1780,12 @@ fn declared_terminal_clear_state_deactivates_machine() {
     let event = info_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut id_gen,
+        now_ms: 0,
+    };
     let rules = vec![sm_rule_with_transitions(handle_clears_state, &SM_TRANSITIONS_TERMINAL)];
 
     let ctx = ctx_for(&call, &event, &config);
@@ -1743,7 +1803,12 @@ fn undeclared_terminal_clear_state_is_a_noted_defect() {
     let event = info_event();
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut id_gen,
+        now_ms: 0,
+    };
     let rules = vec![sm_rule(handle_clears_state)]; // transitions: S0 => S1 only
 
     let ctx = ctx_for(&call, &event, &config);
@@ -1820,9 +1885,15 @@ Content-Length: 0\r\n\r\n";
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut id_gen,
+        now_ms: 0,
+    };
 
     let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx);
 
@@ -1880,9 +1951,15 @@ Content-Length: 0\r\n\r\n";
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut id_gen,
+        now_ms: 0,
+    };
 
     let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx);
     let rs = &result.call.b_legs[0].dialogs.confirmed().expect("the confirmed dialog").route_set;
@@ -1927,9 +2004,15 @@ Content-Length: 0\r\n\r\n";
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut id_gen,
+        now_ms: 0,
+    };
 
     let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx);
 
@@ -1970,7 +2053,7 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
     // go here (it must go to the proxy).
     let callee_dest = ("10.0.0.2".to_string(), 5070u16);
     let (leg, invite_effect) = b2bua_core::rules::relay::build_b_leg(
-        b2bua_core::rules::relay::CallMarks::of(&call),
+        b2bua_core::rules::relay::CallMarks::of(&call, b2bua_core::owners::Owners::none()),
         "b-1",
         &a_invite,
         callee_dest.clone(),
@@ -2023,8 +2106,14 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut id_gen,
+        now_ms: 0,
+    };
     let result = exec.execute(&[RuleAction::CancelLeg { leg_id: "b-1".into() }], &call, &ctx);
 
     let cancel_effect = result
@@ -2114,7 +2203,12 @@ mod media_primitives {
         id_gen: &'a mut TurnScope,
         actions: &[RuleAction],
     ) -> HandlerResult {
-        let mut exec = ActionExecutor { config, turn: id_gen, now_ms: 0 };
+        let mut exec = ActionExecutor {
+            owners: b2bua_core::owners::Owners::none(),
+            config,
+            turn: id_gen,
+            now_ms: 0,
+        };
         let ctx = RuleContext {
             call: RuleCall::new(call),
             call_ref: &call.call_ref,
@@ -2125,6 +2219,7 @@ mod media_primitives {
             config,
             discharged: None,
             resolved: &call::helpers::UNRESOLVED,
+            copy_served: false,
         };
         exec.execute(actions, call, &ctx)
     }
@@ -2450,7 +2545,12 @@ mod answer_a_leg_new_dialog {
         id_gen: &'a mut TurnScope,
         actions: &[RuleAction],
     ) -> HandlerResult {
-        let mut exec = ActionExecutor { config, turn: id_gen, now_ms: 0 };
+        let mut exec = ActionExecutor {
+            owners: b2bua_core::owners::Owners::none(),
+            config,
+            turn: id_gen,
+            now_ms: 0,
+        };
         let ctx = RuleContext {
             call: RuleCall::new(call),
             call_ref: &call.call_ref,
@@ -2461,6 +2561,7 @@ mod answer_a_leg_new_dialog {
             config,
             discharged: None,
             resolved: &call::helpers::UNRESOLVED,
+            copy_served: false,
         };
         exec.execute(actions, call, &ctx)
     }
@@ -2986,9 +3087,15 @@ mod ack_leg_body {
             config: &config,
             discharged: None,
             resolved: &call::helpers::UNRESOLVED,
+            copy_served: false,
         };
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+        let mut exec = ActionExecutor {
+            owners: b2bua_core::owners::Owners::none(),
+            config: &config,
+            turn: &mut id_gen,
+            now_ms: 0,
+        };
         let result = exec.execute(
             &[RuleAction::AckLeg {
                 leg_id: "b-1".into(),
@@ -3079,9 +3186,15 @@ mod ack_leg_body {
             config: &config,
             discharged: None,
             resolved: &call::helpers::UNRESOLVED,
+            copy_served: false,
         };
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+        let mut exec = ActionExecutor {
+            owners: b2bua_core::owners::Owners::none(),
+            config: &config,
+            turn: &mut id_gen,
+            now_ms: 0,
+        };
         exec.execute(
             &[RuleAction::AckLeg {
                 leg_id: "b-1".into(),
@@ -3240,9 +3353,15 @@ mod default_sdp_create_leg {
             config: &config,
             discharged: None,
             resolved: &call::helpers::UNRESOLVED,
+            copy_served: false,
         };
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+        let mut exec = ActionExecutor {
+            owners: b2bua_core::owners::Owners::none(),
+            config: &config,
+            turn: &mut id_gen,
+            now_ms: 0,
+        };
 
         // The service sources the fake offer from the config parameter — the whole
         // opt-in wiring. (A normal reroute passes `body_override: None` here, which
@@ -3338,9 +3457,15 @@ mod header_update_removal_withholds_a_relayed_name {
             config: &config,
             discharged: None,
             resolved: &call::helpers::UNRESOLVED,
+            copy_served: false,
         };
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+        let mut exec = ActionExecutor {
+            owners: b2bua_core::owners::Owners::none(),
+            config: &config,
+            turn: &mut id_gen,
+            now_ms: 0,
+        };
         let create = RuleAction::CreateLeg {
             destination: ("10.0.1.5".into(), 5070), // IP literal → admission passes
             new_ruri: None,
@@ -3574,218 +3699,7 @@ mod enforce_equivalence {
 }
 
 // ── the limiter settle: one release per call that sent an admit ─────────────
-mod limiter_settle {
-    use super::*;
-    use b2bua_core::effects::{FireAndForgetEffect, HandlerEffects, SoftBoundedEffect};
-    use b2bua_core::obligations::ObligationSet;
-    use call::CallLimiterState;
-
-    /// The releases the turn sends.
-    fn releases(effects: &HandlerEffects) -> usize {
-        effects
-            .soft
-            .iter()
-            .filter(|e| matches!(e, SoftBoundedEffect::ReleaseLimiter { .. }))
-            .count()
-    }
-
-    #[test]
-    fn a_counted_call_is_released_once_whatever_its_set() {
-        let mut call = test_call();
-        call.limiter = CallLimiterState::admitted(
-            call.limiter.key().to_string(),
-            1,
-            vec![
-                call::LimiterEntry { id: "x".into(), limit: 10 },
-                call::LimiterEntry { id: "x".into(), limit: 10 },
-                call::LimiterEntry { id: "y".into(), limit: 10 },
-            ],
-        );
-        let mut effects = HandlerEffects::new();
-        ObligationSet::core().settle(&call, &mut effects);
-        assert_eq!(releases(&effects), 1, "{:?}", effects.soft);
-        assert_eq!(ObligationSet::core().owed(&call).len(), 2, "the limiter and the CDR");
-
-        // Settling again discharges nothing more.
-        ObligationSet::core().settle(&call, &mut effects);
-        assert_eq!(releases(&effects), 1, "{:?}", effects.soft);
-    }
-
-    #[test]
-    fn a_rule_emitted_release_discharges_the_call() {
-        let mut call = test_call();
-        call.limiter = CallLimiterState::admitted(
-            call.limiter.key().to_string(),
-            1,
-            vec![call::LimiterEntry { id: "x".into(), limit: 10 }],
-        );
-        let mut effects = HandlerEffects::new();
-        effects
-            .soft
-            .push(SoftBoundedEffect::ReleaseLimiter { key: call.limiter.key().to_string() });
-        ObligationSet::core().settle(&call, &mut effects);
-        assert_eq!(releases(&effects), 1, "{:?}", effects.soft);
-    }
-
-    #[test]
-    fn a_call_that_sent_no_admit_owes_no_release() {
-        let mut call = test_call();
-        call.limiter = CallLimiterState::uncounted(call.limiter.key().to_string());
-        let mut effects = HandlerEffects::new();
-        ObligationSet::core().settle(&call, &mut effects);
-        assert_eq!(releases(&effects), 0, "{:?}", effects.soft);
-        assert!(ObligationSet::core().owed(&call).iter().all(|o| o.kind == "cdr"));
-    }
-
-    #[test]
-    fn an_uncounted_call_that_sent_an_admit_is_released_once() {
-        let mut call = test_call();
-        call.limiter = unconfirmed(call.limiter.key());
-        let mut effects = HandlerEffects::new();
-        ObligationSet::core().settle(&call, &mut effects);
-        assert_eq!(releases(&effects), 1, "{:?}", effects.soft);
-        assert_eq!(ObligationSet::core().owed(&call).len(), 2, "the limiter and the CDR");
-        ObligationSet::core().settle(&call, &mut effects);
-        assert_eq!(releases(&effects), 1, "{:?}", effects.soft);
-    }
-
-    /// Execute `actions` on `call` for a turn, then enforce.
-    fn turn(call: &call::Call, actions: &[RuleAction]) -> HandlerResult {
-        let event = fold_event(call, "call-failure-result", "failover", route_fold_payload());
-        let config = B2buaConfig::default();
-        let ctx = ctx_for(call, &event, &config);
-        let mut id_gen = scope(1);
-        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
-        let result = exec.execute(actions, call, &ctx);
-        invariants::enforce(
-            &ObligationSet::core(),
-            call,
-            result,
-            0,
-            invariants::UnansweredCaller::Leave,
-            &mut TurnNotes::default(),
-        )
-    }
-
-    #[test]
-    fn a_call_ended_holding_a_set_or_after_a_dropped_one_releases_once() {
-        // One release of the call, which frees whatever set the limiter
-        // holds for it; a call that never sent an admit ends with none.
-        let end = [RuleAction::TerminateCall { cause: TerminationCause::Supervisor, by_leg: None }];
-        let mut call = test_call();
-        call.limiter = CallLimiterState::admitted(
-            call.limiter.key().to_string(),
-            1,
-            vec![call::LimiterEntry { id: "x".into(), limit: 10 }],
-        );
-        let result = turn(&call, &end);
-        assert_eq!(result.call.state, CallModelState::Terminated, "the turn ends the call");
-        assert_eq!(releases(&result.effects), 1, "{:?}", result.effects.soft);
-
-        call.limiter = unconfirmed(call.limiter.key());
-        let result = turn(&call, &end);
-        assert_eq!(releases(&result.effects), 1, "{:?}", result.effects.soft);
-
-        call.limiter = CallLimiterState::uncounted(call.limiter.key().to_string());
-        let result = turn(&call, &end);
-        assert_eq!(result.call.state, CallModelState::Terminated);
-        assert_eq!(releases(&result.effects), 0, "{:?}", result.effects.soft);
-    }
-
-    /// A turn that sends an admit off the call's turn (a service's
-    /// replacement, a failure consult, a release consult) owes the call's
-    /// release from that turn on: the admit may land while the call is taken
-    /// over or ended before its report comes back.
-    #[test]
-    fn a_turn_sending_an_admit_owes_the_release() {
-        for action in [
-            RuleAction::ReplaceAdmissionSet {
-                correlation_id: "svc:1".into(),
-                entries: vec![call::LimiterEntry { id: "x".into(), limit: 1 }],
-                moves_call: false,
-            },
-            RuleAction::FailureAsyncHttp { request: serde_json::json!({}) },
-            RuleAction::ReleaseAsyncHttp { request: serde_json::json!({}) },
-        ] {
-            let mut call = test_call();
-            call.limiter = CallLimiterState::uncounted(call.limiter.key().to_string());
-            let result = turn(&call, std::slice::from_ref(&action));
-            assert!(result.call.limiter.owed_release().is_some(), "{action:?} owes the release");
-        }
-    }
-
-    /// A service's replacement is the call's target from the turn that sends
-    /// it: a change computed before its report comes back sees it.
-    #[test]
-    fn a_service_replacement_is_the_target_from_its_sending_turn() {
-        let mut call = test_call();
-        call.limiter = CallLimiterState::uncounted(call.limiter.key().to_string());
-        let entries = vec![call::LimiterEntry { id: "x".into(), limit: 1 }];
-        let action = RuleAction::ReplaceAdmissionSet {
-            correlation_id: "svc:1".into(),
-            entries: entries.clone(),
-            moves_call: false,
-        };
-        let result = turn(&call, &[action]);
-        assert_eq!(result.call.limiter.target(), entries);
-    }
-
-    /// A service moves a call that holds nothing and owes nothing onto an
-    /// empty set: nothing can have landed and nothing is asked, so no admit
-    /// leaves; the move is recorded on the turn, and the result re-enters as
-    /// `not_sent`.
-    #[test]
-    fn a_move_onto_nothing_with_nothing_to_send_sends_no_admit() {
-        let mut call = test_call();
-        let moved_onto = vec![call::LimiterEntry { id: "y".into(), limit: 1 }];
-        call.limiter = CallLimiterState::from_parts(
-            call.limiter.key().to_string(),
-            false,
-            (Vec::new(), 0),
-            (Vec::new(), 0),
-            0,
-            Some(moved_onto),
-        );
-        assert!(call.limiter.runs_uncounted(), "the call runs on y, which nothing holds");
-        let action = RuleAction::ReplaceAdmissionSet {
-            correlation_id: "svc:1".into(),
-            entries: Vec::new(),
-            moves_call: true,
-        };
-        let result = turn(&call, &[action]);
-        assert_eq!(result.call.limiter.runs_on(), Some(&[][..]), "moved onto nothing");
-        assert!(
-            !result.call.limiter.runs_uncounted() && result.call.limiter.owed_release().is_none()
-        );
-        let ff = &result.effects.fire_and_forget;
-        assert!(
-            !ff.iter().any(|e| matches!(e, FireAndForgetEffect::LimiterAdmit { .. })),
-            "no admit leaves: {ff:?}"
-        );
-        assert!(
-            ff.iter().any(|e| matches!(e, FireAndForgetEffect::Reenter(ev)
-                if matches!(ev.as_ref(), CallEvent::InternalEvent { topic, outcome, .. }
-                    if topic == "limiter-admit-result" && outcome == "not_sent"))),
-            "the result re-enters as not_sent: {ff:?}"
-        );
-    }
-
-    /// The state of a call whose admit a cap refused, dropping its set: it
-    /// holds nothing and owes its release.
-    fn unconfirmed(key: &str) -> CallLimiterState {
-        let mut state = CallLimiterState::uncounted(key.to_string());
-        state.apply_admit(&call::AdmitReport {
-            key: key.to_string(),
-            change: 1,
-            entries: vec![call::LimiterEntry { id: "x".into(), limit: 1 }],
-            outcome: call::AdmitOutcome::Rejected {
-                limiter_id: "x".into(),
-                held: call::LimiterHeld { change: 1, entries: vec![] },
-            },
-        });
-        state
-    }
-}
+mod limiter_settle;
 
 // ── Service-owned timers (TimerType::Service) ────────────────────────────────
 //
@@ -3809,7 +3723,12 @@ mod service_timers {
         let config = B2buaConfig::default();
         let mut id_gen = scope(1);
         let call = test_call();
-        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 1_000 };
+        let mut exec = ActionExecutor {
+            owners: b2bua_core::owners::Owners::none(),
+            config: &config,
+            turn: &mut id_gen,
+            now_ms: 1_000,
+        };
         let event = info_like_event(&call);
         let ctx = ctx_at(&call, &event, &config);
 
@@ -3927,6 +3846,7 @@ mod service_timers {
             config,
             discharged: None,
             resolved: &call::helpers::UNRESOLVED,
+            copy_served: false,
         }
     }
 }
@@ -3951,6 +3871,7 @@ fn timer_ctx<'a>(
         config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     }
 }
 
@@ -3979,7 +3900,12 @@ fn the_keepalive_rule_arms_its_ledger_deadline_at_exactly_one_cadence() {
         .push(RuleAction::arm(TimerKey::call(TimerType::GlobalDuration), TimerDelay::secs(3600)));
 
     let mut id_gen = scope(0x65);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut id_gen,
+        now_ms,
+    };
     let result = exec.execute(&actions, &call, &ctx);
 
     let armed = result
@@ -4039,7 +3965,12 @@ fn arming_a_keepalive_beyond_one_cadence_is_a_defect_and_is_clamped() {
     };
     let ctx = timer_ctx(&call, &event, &config, now_ms);
     let mut id_gen = scope(0x65);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut id_gen,
+        now_ms,
+    };
     let result = exec.execute(
         &[RuleAction::arm(
             TimerKey::call(TimerType::Keepalive),
@@ -4121,7 +4052,12 @@ fn discharge_ack(
     let event = CallEvent::sip(SipMessage::Request(ack), "127.0.0.1:5060".parse().unwrap());
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut id_gen,
+        now_ms: 0,
+    };
     let mut call = call.clone();
     let mut fx = b2bua_core::effects::HandlerEffects::new();
     let discharged = exec.discharge(&mut call, &mut fx, &event, source_leg_id);
@@ -4193,6 +4129,7 @@ fn relay_ack_pushes_no_ladder_plumbing() {
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -4268,7 +4205,12 @@ mod ladder_give_up {
     ) -> (HandlerResult, HandlerResult) {
         let config = B2buaConfig::default();
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+        let mut exec = ActionExecutor {
+            owners: b2bua_core::owners::Owners::none(),
+            config: &config,
+            turn: &mut id_gen,
+            now_ms: 0,
+        };
         let event = give_up_of(call, obligation);
         let mut call = call.clone();
         let mut fx = b2bua_core::effects::HandlerEffects::new();
@@ -4283,6 +4225,7 @@ mod ladder_give_up {
             config: &config,
             discharged: None,
             resolved: &call::helpers::UNRESOLVED,
+            copy_served: false,
         };
         let picked: Vec<&str> = pick_ranked(rules, &call, &ctx).iter().map(|r| r.id).collect();
         assert_eq!(
@@ -4482,7 +4425,12 @@ mod going_away_gate {
     fn run(rules: &[RuleDefinition], call: &call::Call, event: &CallEvent) -> HandlerResult {
         let config = B2buaConfig::default();
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+        let mut exec = ActionExecutor {
+            owners: b2bua_core::owners::Owners::none(),
+            config: &config,
+            turn: &mut id_gen,
+            now_ms: 0,
+        };
         let ctx = ctx_for(call, event, &config);
         execute_rules(rules, call, &ctx, &mut exec, &ObligationSet::core())
     }
@@ -4593,7 +4541,12 @@ mod going_away_gate {
         let config = B2buaConfig::default();
         let ctx = ctx_for(&call, &event, &config);
         let mut id_gen = scope(1);
-        let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+        let mut exec = ActionExecutor {
+            owners: b2bua_core::owners::Owners::none(),
+            config: &config,
+            turn: &mut id_gen,
+            now_ms: 0,
+        };
         let result = exec.execute(
             &[RuleAction::BeginTermination {
                 reason: Some("CANCEL".into()),
@@ -4756,7 +4709,12 @@ fn on_verdict(call: &call::Call, outcome: &str) -> HandlerResult {
     let event = reaper_verdict(call, outcome);
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut id_gen,
+        now_ms: 0,
+    };
     let ctx = ctx_for(call, &event, &config);
     execute_rules(&default_rules(), call, &ctx, &mut exec, &ObligationSet::core())
 }
@@ -4933,6 +4891,7 @@ fn an_update_offer_answered_on_the_caller_face_waits_on_the_current_peer() {
             config: &config,
             discharged: None,
             resolved: &resolved,
+            copy_served: false,
         };
         ctx.update_refusal()
     };

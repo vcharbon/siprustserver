@@ -4,7 +4,7 @@
 //! via-extension the cluster key verifies (ADR-0055 §12).
 
 use b2bua_sdk::event::CallEvent;
-use call::{Call, CallTopology, Direction};
+use call::{Call, Direction};
 use sip_message::header::HeaderValue;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser, SipRequest};
@@ -12,25 +12,29 @@ use sip_message::{Method, SipMessage, SipParser, SipRequest};
 use super::dialog_gate::{admit, Gate};
 use super::resolve::Resolution;
 use super::test_support::{invite, node_with, src};
+use super::RouterCtx;
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::stack_identity::{build_call_via, RequestFacts, StackIdentityOpts};
+use crate::store::CallTopology;
 
 fn key() -> sip_ids::SigningKey {
     sip_ids::SigningKey::new(&[7u8; 32]).expect("a 32-byte key")
 }
 
 /// A call `w0` serves with `w1` as its backup, its caller's INVITE
-/// unanswered; `bak_gen`: the copy writes the record folded.
-fn unanswered_call(bak_gen: i64) -> Call {
-    let mut call = build_initial_call(
+/// unanswered, resident on `ctx` at `(3, bak_gen)`; `bak_gen`: the copy
+/// writes the record folded.
+fn unanswered_call(ctx: &RouterCtx, bak_gen: i64) -> Call {
+    let call = build_initial_call(
         &invite("w0", "w1", "evidence-gate"),
         src(),
         &B2buaConfig { self_ordinal: "w0".into(), ..Default::default() },
         &mut sip_ids::TurnIds::fixed(1),
         0,
     );
-    call.topology = Some(CallTopology::new("w0", "w1", 3, bak_gen));
+    ctx.state.remove(&call.call_ref);
+    ctx.state.create(call.clone(), Some(CallTopology::new("w0", "w1", 3, bak_gen)));
     call
 }
 
@@ -75,7 +79,7 @@ async fn an_ack_of_the_unanswered_caller_invite_is_evidence_once_a_copy_served_t
     let ctx = node.core.router_ctx();
     let ack = event(SipMessage::Request(caller_ack("answered-elsewhere")));
 
-    let unserved = unanswered_call(0);
+    let unserved = unanswered_call(ctx, 0);
     let gate = admit(ctx, &unserved, &ack, &resolution(&unserved, "a")).await;
     assert!(
         matches!(gate, Gate::Answered { answer: None, .. }),
@@ -83,7 +87,7 @@ async fn an_ack_of_the_unanswered_caller_invite_is_evidence_once_a_copy_served_t
         kind(&gate)
     );
 
-    let served = unanswered_call(1);
+    let served = unanswered_call(ctx, 1);
     let gate = admit(ctx, &served, &ack, &resolution(&served, "a")).await;
     assert!(matches!(gate, Gate::Pass(_)), "a copy's write folded here: evidence, {}", kind(&gate));
 }
@@ -118,7 +122,7 @@ fn answer_on(call: &Call, leg: &str, signing: Option<&sip_ids::SigningKey>) -> S
 async fn a_2xx_on_a_leg_the_record_lacks_reaches_the_rules_under_a_verified_extension_only() {
     let node = node_with("w0", |c| c.cluster_key = Some(key())).await;
     let ctx = node.core.router_ctx();
-    let call = unanswered_call(0);
+    let call = unanswered_call(ctx, 0);
 
     let signed = event(answer_on(&call, "b-7", Some(&key())));
     let gate = admit(ctx, &call, &signed, &resolution(&call, "b-7")).await;
@@ -138,7 +142,7 @@ async fn a_2xx_on_a_leg_the_record_lacks_reaches_the_rules_under_a_verified_exte
 async fn her_ack_reaches_the_turn_only_while_its_dialog_is_held_possibly_confirmed() {
     let node = node_with("w0", |c| c.cluster_key = Some(key())).await;
     let ctx = node.core.router_ctx();
-    let mut call = unanswered_call(1);
+    let mut call = unanswered_call(ctx, 1);
     let tag = "held-tag";
     let mut d =
         call::Dialog::new(tag, call.a_leg_invite.from_tag.clone(), call::DialogState::Early, 1);

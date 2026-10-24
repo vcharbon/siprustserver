@@ -9,6 +9,9 @@ description = "Opening an AMQP 0-9-1 connection on the running tokio runtime: th
 [package.metadata.purity]
 tier = "shell"
 
+[package.metadata.ha]
+side = "blind"
+
 [lints]
 workspace = true
 

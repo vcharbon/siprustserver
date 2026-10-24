@@ -62,8 +62,8 @@ pub fn finalize(mut result: HandlerResult) -> HandlerResult {
 pub enum UnansweredCaller<'a> {
     /// Answer her 503 under the deployment's advertisement for a minted final.
     Answer(&'a CapabilitySet),
-    /// Leave the wire alone: an already-terminal reclaimed or folded body, or
-    /// an unrecoverable call (ADR-0052 §11).
+    /// Leave the wire alone: a body already terminal when it reached this
+    /// node, or an unrecoverable call (ADR-0052 §11).
     Leave,
 }
 
@@ -75,12 +75,11 @@ pub enum UnansweredCaller<'a> {
 ///
 /// `unanswered` is `Answer` on every LIVE-serving funnel (rules,
 /// initial-INVITE, limiter-refresh, reaper discharge) and `Leave` ONLY on the
-/// two HA discharge helpers for already-terminal reclaimed/folded bodies
-/// (`discharge_materialized_terminal` / `discharge_folded_terminal`): those
-/// bodies were answered by whichever node served them to terminal — or their
-/// caller's transaction died with that node ≥ `reboot_budget` ago — and the HA
-/// contract keeps reclaim-discharge OFF the SIP wire. An unrecoverable call
-/// (ADR-0052 §11) takes `Leave` too: it has no INVITE to answer. What the
+/// shell's discharge of a body already terminal when it reached this node:
+/// the node that served it to terminal answered its caller, or her
+/// transaction ended long before, so its discharge stays OFF the SIP wire. An
+/// unrecoverable call (ADR-0052 §11) takes `Leave` too: it has no INVITE to
+/// answer. What the
 /// funnel meets that it cannot carry is noted on `notes`.
 pub fn enforce(
     obligations: &ObligationSet,

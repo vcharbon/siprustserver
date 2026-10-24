@@ -29,9 +29,15 @@ fn reinvite_body(author: BodyAuthor) -> String {
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
+        copy_served: false,
     };
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor { config: &config, turn: &mut id_gen, now_ms: 0 };
+    let mut exec = ActionExecutor {
+        owners: b2bua_core::owners::Owners::none(),
+        config: &config,
+        turn: &mut id_gen,
+        now_ms: 0,
+    };
     let reinvite = RuleAction::SendReinvite {
         leg_id: "a".into(),
         body: Some(Body::new(BOB_V5.as_bytes().to_vec(), None, author)),

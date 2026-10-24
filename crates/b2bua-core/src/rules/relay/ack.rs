@@ -8,8 +8,8 @@
 //! re-passes that same datagram. Only an INVITE this stack originated is ACKed
 //! on its own account, with nothing of a peer's. A non-2xx
 //! final's hop-by-hop ACK (§17.1.1.3) is the transaction layer's, whichever node
-//! sent the INVITE (a taken-over call seeds that transaction,
-//! `router::materialise`), except for a round the record never held, which no
+//! sent the INVITE (a call restored from its record seeds that transaction),
+//! except for a round the record never held, which no
 //! transaction can be rebuilt for: that ACK is built from the dialog here.
 
 use call::{Dialog, Leg, LegState};

@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "SIP load generator that reuses the functional scenario-harness choreography (basic call, re-INVITE, REFER, OPTIONS keepalive) as a partial SIPp substitute: managed CPS, bounded memory, live Prometheus /metrics + on-disk callflow report with bounded per-result samples. Drives the real cluster from the host; not production code."
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 

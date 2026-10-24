@@ -53,7 +53,7 @@ pub(super) fn with_routes(mut draft: RequestDraft, routes: &[String]) -> Request
 
 /// The dialog's identity headers (RFC 3261 §12.2.1.1): local identity plus
 /// local tag in From, remote identity plus remote tag in To, then the Call-ID.
-/// A dialog hydrated mid-confirm by a reactive failover takeover can carry an
+/// A dialog restored mid-confirm on another node can carry an
 /// EMPTY remote tag; the To then goes out tag-less rather than malformed, and
 /// the degenerate dialog is handled elsewhere.
 pub(super) fn with_dialog_identity(draft: RequestDraft, dialog: &StackDialog) -> RequestDraft {

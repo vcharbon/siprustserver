@@ -40,6 +40,7 @@
 //! keep pulling it through its drain, no kill at all — ADR-0031 case 1), C makes
 //! the process die WITH its endpoint. The answer reaches the caller in all three.
 
+use b2bua::store::envelope;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -50,7 +51,7 @@ use b2bua::decision::{
     CallDecisionEngine, CallTreatment, NewCallResponse, RejectDecision, ScriptedDecisionEngine,
 };
 use b2bua::limiter::NoopLimiter;
-use call::{CallBodyCodec, LegState, MsgpackCodec, TimerType};
+use call::{LegState, MsgpackCodec, TimerType};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, Belief, FailoverHarness,
     PartitionRole, ProxySut, ReplicatedB2buaSut, WorkerHealth, RULE_CSEQ_IN_DIALOG_ORDER,
@@ -182,7 +183,8 @@ async fn find_backed_up_ref(backup: &ReplicatedB2buaSut, primary: &str) -> Strin
 /// The absolute deadline of the survivor's replica per-b-leg `NoAnswer` entry.
 async fn ring_deadline(backup: &ReplicatedB2buaSut, primary: &str, call_ref: &str) -> i64 {
     let body = backup.get(BAK, primary, call_ref).await.expect("replica body present");
-    let call: call::Call = MsgpackCodec::new().decode(&body).expect("replica body decodes");
+    let call: call::Call =
+        envelope::decode(&MsgpackCodec::new(), &body).expect("replica body decodes").call;
     assert_ne!(call.a_leg.state(), LegState::Confirmed, "the survivor holds the ringing a-leg");
     call.timers
         .iter()

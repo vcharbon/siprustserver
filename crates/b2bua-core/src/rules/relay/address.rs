@@ -129,7 +129,7 @@ Content-Length: 0\r\n\r\n";
                 call_ref: "w0|call-ref|xyz",
                 incarnation_mark: "k",
                 is_emergency: false,
-                owners: None,
+                owners: crate::owners::Owners::none(),
             },
             "b-1",
             &a_leg_invite(),

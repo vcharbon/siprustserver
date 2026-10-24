@@ -216,6 +216,7 @@ pub(super) async fn process(
                 resolved,
                 matched_client_txn,
                 now_ms,
+                owners: ctx.owners(&call_ref),
             };
             rule_chain_turn(&ctx.framework(), call, input, &mut turn)
         }

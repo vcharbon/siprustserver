@@ -9,6 +9,9 @@ description = "Poison-tolerant std locks (ADR-0051 §7): a poisoned lock is take
 [package.metadata.purity]
 tier = "shell"
 
+[package.metadata.ha]
+side = "blind"
+
 [lints]
 workspace = true
 

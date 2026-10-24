@@ -123,7 +123,7 @@ pub struct ProbeRoutes {
     pub admin: Option<AdminFn>,
 }
 
-/// A connection that sends nothing for this long is cut and its fd reclaimed.
+/// A connection that sends nothing for this long is cut and its fd freed.
 /// See the module docs: this is bug-stranded-fd reclamation, not DDoS defence,
 /// so it is long enough that a healthy probe/scrape never nears it.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -226,7 +226,7 @@ pub(crate) async fn handle_conn(
     let Served { routes, live } = served;
     let mut buf = [0u8; 1024];
     // Fully-idle cut: if no request line arrives within the window, drop the
-    // connection (reclaim the fd). Only a connection that sent *nothing* trips
+    // connection (free the fd). Only a connection that sent *nothing* trips
     // this — any first byte proceeds to handling.
     let n = match tokio::time::timeout(idle_timeout, stream.read(&mut buf)).await {
         Ok(read) => read?,

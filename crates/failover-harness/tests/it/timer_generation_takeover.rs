@@ -15,10 +15,11 @@
 //!   primary reboots            nothing left to reclaim: one CDR
 //! ```
 
+use b2bua::store::envelope;
 use std::time::Duration;
 
 use b2bua::CallEvent;
-use call::{Call, CallBodyCodec, MsgpackCodec, TimerKey, TimerType};
+use call::{Call, MsgpackCodec, TimerKey, TimerType};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
     ProxySut, ReplicatedB2buaSut, WorkerHealth,
@@ -112,14 +113,15 @@ async fn a_stale_fire_across_a_takeover_is_dropped() {
     bob.receive("ACK").await;
     fh.advance(Duration::from_millis(500)).await;
 
-    let replica = MsgpackCodec::new()
-        .decode(
-            &backup
-                .get(PartitionRole::Backup, &primary_ord, &call_ref)
-                .await
-                .expect("the backup holds the replica"),
-        )
-        .expect("the replica decodes");
+    let replica = envelope::decode(
+        &MsgpackCodec::new(),
+        &backup
+            .get(PartitionRole::Backup, &primary_ord, &call_ref)
+            .await
+            .expect("the backup holds the replica"),
+    )
+    .expect("the replica decodes")
+    .call;
     let answer_cap = cap_generation(&replica).expect("the answer's cap rides the replica");
     assert!(answer_cap > setup_cap, "the answer re-armed the cap under a later generation");
 
@@ -213,14 +215,15 @@ async fn a_stale_fire_across_a_reclaim_is_dropped() {
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
     fh.advance(Duration::from_millis(500)).await;
-    let replica = MsgpackCodec::new()
-        .decode(
-            &backup
-                .get(PartitionRole::Backup, &primary_ord, &call_ref)
-                .await
-                .expect("the backup holds the replica"),
-        )
-        .expect("the replica decodes");
+    let replica = envelope::decode(
+        &MsgpackCodec::new(),
+        &backup
+            .get(PartitionRole::Backup, &primary_ord, &call_ref)
+            .await
+            .expect("the backup holds the replica"),
+    )
+    .expect("the replica decodes")
+    .call;
     let answer_cap = cap_generation(&replica).expect("the answer's cap rides the replica");
     assert!(answer_cap > setup_cap, "the answer re-armed the cap under a later generation");
 

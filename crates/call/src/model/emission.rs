@@ -71,7 +71,7 @@ impl Repeated {
 /// IS the message the RFC names rather than a re-composition of one. Opaque:
 /// the one outward operation yields the bytes and their destination, so no
 /// caller can parse, edit and re-emit them as a "repeat". Replicated with the
-/// call, so a takeover node keeps the obligation byte for byte.
+/// call, so a restored record keeps the obligation byte for byte.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetainedEmission {
     #[serde(with = "serde_bytes")]

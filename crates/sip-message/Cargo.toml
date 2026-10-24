@@ -9,6 +9,9 @@ description = "Pure SIP message layer (parse / serialize / strict-validate) — 
 [package.metadata.purity]
 tier = "pure"
 
+[package.metadata.ha]
+side = "blind"
+
 [lints]
 workspace = true
 

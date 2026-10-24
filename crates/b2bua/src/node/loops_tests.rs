@@ -6,7 +6,6 @@
 
 use std::time::Duration;
 
-use call::{CallBodyCodec, MsgpackCodec};
 use sip_ids::TurnIds;
 
 use super::unwired_tests::unwired_core;
@@ -42,7 +41,7 @@ async fn seeded(n: &Node, cid: &str) -> String {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let call =
         build_initial_call(&invite("w0", "w1", cid), src(), &config, &mut TurnIds::fixed(1), 0);
-    let body = MsgpackCodec::new().encode(&call).unwrap();
+    let body = crate::store::envelope::placed_body(&call).unwrap();
     n.store
         .put_call(
             PartitionRole::Primary,
@@ -96,7 +95,7 @@ async fn a_bulk_reclaim_of_calls_each_under_the_threshold_never_reads_stalled() 
         .scan_partition(PartitionRole::Primary, "w0", &|| {})
         .await
         .into_iter()
-        .map(|(call, _)| call.call_ref)
+        .map(|(copy, _)| copy.call.call_ref)
         .collect();
     let mut held = Vec::new();
     for call_ref in &order {

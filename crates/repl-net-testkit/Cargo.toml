@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Test support of the HA replication transport seam: the in-process SimulatedReplicationNetwork (ordered delivery, fault switchboard, paused-clock cooperative) and the RecordingReplicationNetwork capture decorator. It declares no purity tier, so no production binary links it."
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 

@@ -67,6 +67,9 @@ fn turn_on(
     now_ms: i64,
 ) -> HandlerResult {
     let call_ref = call.call_ref.clone();
+    let placed = crate::router::topology_cookie::placement(&call);
+    let owners =
+        node.core.router_ctx().owners_of(&crate::store::Enveloped::new(call.clone(), placed));
     let input = TurnInput {
         event,
         call_ref: &call_ref,
@@ -75,6 +78,7 @@ fn turn_on(
         resolved,
         matched_client_txn: false,
         now_ms,
+        owners,
     };
     let fw = node.core.router_ctx().framework();
     rule_chain_turn(&fw, call, input, &mut turn(1))

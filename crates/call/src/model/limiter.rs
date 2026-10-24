@@ -40,8 +40,8 @@ pub use admit::{AdmitOutcome, AdmitReport};
 /// The call's admission state on the call limiter. The key is minted once at
 /// the call's creation and is unique over time (`call_ref` alone is not: a
 /// retried INVITE reuses it), so a release names this call and no later one;
-/// it is replicated with the call, so a takeover, a reclaim and the lossy
-/// reap release with the same key.
+/// it rides the call record, so every node that restores the record, and the
+/// lossy reap, release with the same key.
 ///
 /// `held` is what the limiter last stated it holds for the key, under
 /// `held_change`; `target` is what the call's latest admit asked for, under
@@ -49,7 +49,7 @@ pub use admit::{AdmitOutcome, AdmitReport};
 /// ([`replace_set`](Self::replace_set)), else from its report, and after a
 /// refused or superseded change the held set; `change` is the last change
 /// number the call gave an admit (or learnt the limiter knows), so the next
-/// admit is numbered above it. A call materialised on another node moves
+/// admit is numbered above it. A call restored on another node moves
 /// `change` to its next epoch ([`enter_epoch`](Self::enter_epoch)). `runs_on`
 /// is the set the call runs on when a service moved it onto one on the turn
 /// that sent its admit ([`replace_set`](Self::replace_set)), whatever the
@@ -84,7 +84,7 @@ pub struct CallLimiterState {
 }
 
 /// The change numbers of one epoch: a call's counter moves to the next
-/// multiple on each materialisation on another node, so the new holder never
+/// multiple on each restore on another node, so the new holder never
 /// reuses a number the previous one reserved in its own epoch and sent
 /// without replicating it. The bound that matters: a holder reserves far
 /// fewer numbers over its whole lifetime on the call (a few per turn) than
@@ -356,7 +356,7 @@ impl CallLimiterState {
     }
 
     /// Move the change counter to the start of its next epoch
-    /// ([`CHANGE_EPOCH`]): the call was materialised on another node, whose
+    /// ([`CHANGE_EPOCH`]): the call was restored on another node, whose
     /// previous holder may have reserved and sent numbers its last replicated
     /// write does not show.
     pub fn enter_epoch(&mut self) {

@@ -75,7 +75,7 @@ fn elapsed_is_the_sum_of_the_rungs_before_it() {
     // The cadence ADR-0007 X1 states: sends at +500 / +1500 / +3500 ms.
 }
 
-/// A takeover restores a rung index alone; the ladder it rebuilds is the one
+/// A restored record keeps a rung index alone; the ladder it rebuilds is the one
 /// that was running.
 #[test]
 fn a_ladder_rebuilt_from_its_rung_stands_where_it_stood() {

@@ -5,10 +5,9 @@
 //! the ACK and the first provisional of an INVITE wait for the backup to apply
 //! the call's current change-log entry, when it has a live one.
 
-use call::Call;
 use repl_net::frame::{Partition, Watermark};
 
-use super::{CallState, PropagateDirection, PutOpts};
+use super::{CallState, CallTopology, PropagateDirection, PutOpts};
 
 /// What a turn's held message waits for: `peer` applying `at` on `partition`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,21 +18,20 @@ pub struct HoldTarget {
 }
 
 impl CallState {
-    /// Admit the new call `call` with the backup its topology names, or with
-    /// none for its whole life when the backlog toward that backup is over its
-    /// high-water mark. Called before the call's first write. `true` when the
-    /// call has a backup.
-    pub fn admit_backup(&self, call: &Call) -> bool {
+    /// Admit the new call `call_ref` with the backup its `topology` names, or
+    /// with none for its whole life when the backlog toward that backup is
+    /// over its high-water mark. Called before the call's first write. `true`
+    /// when the call has a backup.
+    pub fn admit_backup(&self, call_ref: &str, topology: Option<&CallTopology>) -> bool {
         let Some(repl) = self.repl_store() else { return false };
-        let Some(bak) = call.topology.as_ref().map(|t| t.bak.as_str()).filter(|b| !b.is_empty())
-        else {
+        let Some(bak) = topology.map(|t| t.bak.as_str()).filter(|b| !b.is_empty()) else {
             return false;
         };
         if repl.changelog().admits_backup(bak) {
-            repl.admit_backed(&call.call_ref);
+            repl.admit_backed(call_ref);
             return true;
         }
-        repl.leave_unbacked(&call.call_ref);
+        repl.leave_unbacked(call_ref);
         self.metrics.bump_repl_new_call_unbacked();
         false
     }

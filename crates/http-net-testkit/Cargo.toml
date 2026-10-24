@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Test support of the unary HTTP transport seam: the SimulatedHttpNetwork in-memory fabric (per-destination and per-attempt faults reported as reqwest classifies them, transit delay) for paused-clock tests, the RecordingHttpNetwork decorator onto the layer-harness Recorder, and the scripted HttpService. It declares no purity tier, so no production binary links it."
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 

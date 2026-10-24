@@ -1,7 +1,7 @@
 //! The HA topology a new call is born under, read off the front proxy's
 //! stickiness cookie.
 
-use call::CallTopology;
+use crate::store::CallTopology;
 use sip_message::header::{ParamValue, RecordRouteEntry};
 use sip_message::SipRequest;
 
@@ -11,7 +11,7 @@ use sip_message::SipRequest;
 /// b2bua reads `w_pri`/`w_bak` so the backup peer AGREES with the proxy's
 /// rendezvous (HRW 2nd-best) choice by construction rather than re-deriving it
 /// (the proxy keys HRW off the alive-set + Call-ID the b2bua cannot reproduce
-/// locally — see the shell's `repl::replication_target`).
+/// locally — see `repl::replication_target`).
 ///
 /// The proxy double-record-routes (`ProxyCore` §16.6): it inserts BOTH a cookie
 /// RR and a direction-only `;outbound` RR, and on an inbound INVITE the
@@ -20,8 +20,8 @@ use sip_message::SipRequest;
 ///
 /// - Cookie present → [`CookieRead::Topology`] carrying `CallTopology { pri:
 ///   w_pri (or self_ordinal if the param is absent/empty), bak: w_bak (may be
-///   empty), gen: 1 }`. A brand-new call starts at `gen = 1`; the b2bua's update
-///   path bumps it per mutation (the shell's `store::CallState::update`).
+///   empty), gen: 1 }`. A brand-new call starts at `gen = 1`; the update path
+///   bumps it per mutation (`store::CallState::update`).
 /// - Every recorded route reads and none carries the stickiness grammar
 ///   (non-proxied / legacy INVITE) → [`CookieRead::NoCookie`].
 /// - A recorded route no reader accepts → [`CookieRead::Unreadable`]. The cookie
@@ -30,7 +30,7 @@ use sip_message::SipRequest;
 ///
 /// The read is all-or-nothing: one unreadable recorded route makes the whole
 /// list unreadable, including a cookie half that would have read on its own.
-pub(super) fn read_topology_cookie(invite: &SipRequest, self_ordinal: &str) -> CookieRead {
+pub(crate) fn read_topology_cookie(invite: &SipRequest, self_ordinal: &str) -> CookieRead {
     // Find the Record-Route that carries the stickiness cookie; the partner
     // `;outbound` half (direction only) has no `w_pri`/`w_bak`.
     let recorded = match invite.list::<RecordRouteEntry>() {
@@ -71,7 +71,7 @@ pub fn foreign_primary(invite: &SipRequest, self_ordinal: &str) -> Option<String
 /// cookie. Two of the three outcomes are ordinary; the third is a placement the
 /// call loses, so they are kept apart rather than collapsed to `Option`.
 #[derive(Debug)]
-pub(super) enum CookieRead {
+pub(crate) enum CookieRead {
     /// The cookie reads: the call's HA topology comes off it.
     Topology(CallTopology),
     /// The recorded routes read and carry no stickiness cookie — a non-proxied
@@ -90,7 +90,7 @@ pub(super) enum CookieRead {
 /// worse than not replicating. The fallback is silent-degrade-shaped, so it is
 /// never silent: the call is placed on this worker only and does not survive a
 /// takeover.
-pub(super) fn topology_from_cookie(
+pub(crate) fn topology_from_cookie(
     invite: &SipRequest,
     self_ordinal: &str,
     call_ref: &str,
@@ -109,4 +109,14 @@ pub(super) fn topology_from_cookie(
             None
         }
     }
+}
+
+/// The topology the router places `call` under at its birth, read off the
+/// cookie of its caller's INVITE as the call records it; the primary
+/// encoded in its `call_ref` when the cookie names none.
+#[cfg(any(test, feature = "testkit"))]
+pub(crate) fn placement(call: &call::Call) -> Option<CallTopology> {
+    let invite = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite).ok()?;
+    let (_, primary) = crate::store::partition_of("", &call.call_ref);
+    topology_from_cookie(&invite, &primary, &call.call_ref)
 }

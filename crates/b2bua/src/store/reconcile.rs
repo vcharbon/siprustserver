@@ -22,6 +22,8 @@ pub struct Reconciled {
     pub missing_index: u64,
     /// Takeover marks of no resident call, dropped.
     pub orphan_takeover: u64,
+    /// Store envelopes of no resident call, dropped.
+    pub orphan_envelopes: u64,
 }
 
 impl Reconciled {
@@ -35,8 +37,8 @@ impl CallState {
     /// One reconcile pass at `now_ms`. A takeover mark of no resident call is
     /// dropped (the marks are few, so they are walked every pass). The map
     /// lengths are compared next, and the entries are walked only when one of
-    /// them differs from the call map's: an orphan stamp or index entry is
-    /// dropped, a resident call with no stamp is stamped now, one with no key
+    /// them differs from the call map's: an orphan stamp, index entry or
+    /// envelope is dropped, a resident call with no stamp is stamped now, one with no key
     /// list is indexed again under the keys no other call holds, and a key a
     /// resident call owns is never moved.
     pub fn reconcile(&self, now_ms: i64) -> Reconciled {
@@ -77,7 +79,12 @@ impl CallState {
 
 fn reconcile_inner(inner: &mut Inner, now_ms: i64) -> Reconciled {
     let mut fixed = Reconciled::default();
-    let Inner { calls, touched, indexed, sip_index, .. } = inner;
+    let Inner { calls, touched, indexed, sip_index, topologies, .. } = inner;
+    topologies.retain(|call_ref, _| {
+        let resident = calls.contains_key(call_ref);
+        fixed.orphan_envelopes += u64::from(!resident);
+        resident
+    });
     touched.retain(|call_ref, _| {
         let resident = calls.contains_key(call_ref);
         fixed.orphan_stamps += u64::from(!resident);

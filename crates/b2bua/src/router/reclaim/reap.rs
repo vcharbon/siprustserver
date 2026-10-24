@@ -30,7 +30,7 @@ pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
         // there is no writer to serialize against — and taking the lock would leak
         // a `locks` map entry (only `release_call`/`discard_orphan` clear it). The
         // decoded snapshot is all the limiter release needs.
-        release_orphaned_limiter_holds(ctx, &terminal);
+        release_orphaned_limiter_holds(ctx, &terminal.call);
         ctx.metrics.bump_repl_terminal_lost();
     }
 }

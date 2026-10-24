@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use call::testkit::{stage_leg, stage_reinvite_round, RoundStage};
-use call::{Call, CallBodyCodec, LegState, MsgpackCodec, RelayOwner, RequestRecord};
+use call::{LegState, MsgpackCodec, RelayOwner, RequestRecord};
 
 use super::{covers as covers_on, finishes_nothing_alone, offer};
 use crate::config::B2buaConfig;
@@ -15,7 +15,7 @@ use crate::initial_invite::build_initial_call;
 use crate::router::materialise::{materialise, Materialised, Origin};
 use crate::router::test_support::{invite, node, src, Node};
 use crate::router::PrimaryWrite;
-use crate::store::{CallStore, PartitionRole, PutOpts};
+use crate::store::{envelope, CallStore, Enveloped, PartitionRole, PutOpts};
 
 /// The worker serving the takeover copy.
 fn copy_worker() -> RelayOwner {
@@ -23,28 +23,36 @@ fn copy_worker() -> RelayOwner {
 }
 
 /// [`covers_on`] the copy's worker.
-fn covers(primary: &Call, copy: &Call) -> bool {
+fn covers(primary: &Enveloped, copy: &Enveloped) -> bool {
     covers_on(primary, copy, &copy_worker())
 }
 
 /// A ringing call `w0` owns and `w1` backs up: live, its caller unanswered.
-fn ringing(cid: &str) -> Call {
+fn ringing(cid: &str) -> Enveloped {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-    build_initial_call(&invite("w0", "w1", cid), src(), &config, &mut sip_ids::TurnIds::fixed(1), 0)
+    let invite = invite("w0", "w1", cid);
+    let call = build_initial_call(&invite, src(), &config, &mut sip_ids::TurnIds::fixed(1), 0);
+    let topology = crate::router::topology_cookie::placement(&call);
+    Enveloped::new(call, topology)
+}
+
+/// `copy` as a replicated body.
+fn body(copy: &Enveloped) -> Vec<u8> {
+    envelope::encode(&MsgpackCodec::new(), copy.topology.as_ref(), &copy.call).unwrap()
 }
 
 /// `call` at backup counter `b`, its last compared write made there.
-fn at_b(mut call: Call, b: i64) -> Call {
-    let t = call.topology.as_mut().expect("a proxied call has a topology");
+fn at_b(mut copy: Enveloped, b: i64) -> Enveloped {
+    let t = copy.topology.as_mut().expect("a proxied call has a topology");
     t.bak_gen = b;
     t.stamp_vector();
-    call
+    copy
 }
 
 /// `call` as another call on the same ref: a new incarnation.
-fn reborn(call: &Call) -> Call {
+fn reborn(copy: &Enveloped) -> Enveloped {
     let mut other = ringing("reborn");
-    other.call_ref = call.call_ref.clone();
+    other.call.call_ref = copy.call.call_ref.clone();
     other
 }
 
@@ -67,20 +75,21 @@ fn a_primary_that_never_read_the_copys_last_compared_write_does_not_cover_it() {
 fn a_write_of_another_call_on_the_ref_never_covers_a_copy() {
     let copy = ringing("incarnation");
     let other = at_b(reborn(&copy), 5);
-    assert_ne!(other.incarnation(), copy.incarnation());
+    assert_ne!(other.call.incarnation(), copy.call.incarnation());
     assert!(!covers(&other, &copy));
 }
 
 /// The answered call at backup counter `b`, a re-INVITE round on the caller's
 /// dialog standing at `stage`, or none.
-fn in_round(b: i64, stage: Option<RoundStage>) -> Call {
-    let mut call = at_b(ringing("round"), b);
+fn in_round(b: i64, stage: Option<RoundStage>) -> Enveloped {
+    let mut copy = at_b(ringing("round"), b);
+    let call = &mut copy.call;
     *call.a_leg.invite_final_sent_mut() = Some(200);
     stage_leg(&mut call.a_leg, LegState::Confirmed);
     if let Some(stage) = stage {
         stage_reinvite_round(&mut call.a_leg, "z9hG4bK-round", stage);
     }
-    call
+    copy
 }
 
 /// At the copy's own version the primary's record lacks the round the copy
@@ -89,7 +98,7 @@ fn in_round(b: i64, stage: Option<RoundStage>) -> Call {
 #[test]
 fn a_primary_lacking_the_round_the_copy_relays_does_not_cover_it() {
     let mut copy = in_round(2, Some(RoundStage::Open));
-    let d = copy.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
+    let d = copy.call.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
     d.sent_invite.iter_mut().for_each(|p| p.relayed_by = copy_worker());
     let primary = in_round(2, None);
     assert!(!covers(&primary, &copy), "the round's final is the copy's alone");
@@ -114,8 +123,8 @@ fn a_primary_holding_the_copys_round_at_its_stage_or_past_covers_it() {
 
 /// `call` with one more INFO relayed toward the caller by worker `by`,
 /// awaiting its final.
-fn relaying(mut call: Call, by: RelayOwner) -> Call {
-    let d = call.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
+fn relaying(mut copy: Enveloped, by: RelayOwner) -> Enveloped {
+    let d = copy.call.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
     d.our_cseq += 1;
     d.requests.push(RequestRecord {
         method: "INFO".into(),
@@ -137,7 +146,7 @@ fn relaying(mut call: Call, by: RelayOwner) -> Call {
         author: None,
         invite: None,
     });
-    call
+    copy
 }
 
 #[test]
@@ -156,7 +165,10 @@ fn a_relay_another_node_made_never_pins_the_copy() {
     let primary = in_round(2, None);
     let copy = relaying(primary.clone(), RelayOwner::new("w0", "w0-boot-1"));
     assert!(covers(&primary, &copy));
-    assert!(finishes_nothing_alone(None, &copy, &copy_worker()), "nor on the primary's delete");
+    assert!(
+        finishes_nothing_alone(None, &copy.call, &copy_worker()),
+        "nor on the primary's delete"
+    );
 }
 
 /// A relay the copy's ordinal made in a former boot returns to that boot: it
@@ -166,7 +178,10 @@ fn a_relay_a_former_boot_of_the_copys_ordinal_made_never_pins_the_copy() {
     let primary = in_round(2, None);
     let copy = relaying(primary.clone(), RelayOwner::new("w1", "w1-boot-1"));
     assert!(covers(&primary, &copy));
-    assert!(finishes_nothing_alone(None, &copy, &copy_worker()), "nor on the primary's delete");
+    assert!(
+        finishes_nothing_alone(None, &copy.call, &copy_worker()),
+        "nor on the primary's delete"
+    );
 }
 
 /// The primary's delete releases a copy that holds nothing only it can
@@ -174,18 +189,22 @@ fn a_relay_a_former_boot_of_the_copys_ordinal_made_never_pins_the_copy() {
 #[test]
 fn a_deleted_record_releases_only_a_copy_that_finishes_nothing_alone() {
     let call = in_round(2, None);
-    assert!(finishes_nothing_alone(None, &call, &copy_worker()));
-    assert!(!finishes_nothing_alone(None, &relaying(call.clone(), copy_worker()), &copy_worker()));
+    assert!(finishes_nothing_alone(None, &call.call, &copy_worker()));
+    assert!(!finishes_nothing_alone(
+        None,
+        &relaying(call.clone(), copy_worker()).call,
+        &copy_worker()
+    ));
     let mut round = in_round(2, Some(RoundStage::Open));
-    let d = round.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
+    let d = round.call.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
     d.sent_invite.iter_mut().for_each(|p| p.relayed_by = copy_worker());
     assert!(
-        !finishes_nothing_alone(None, &round, &copy_worker()),
+        !finishes_nothing_alone(None, &round.call, &copy_worker()),
         "the round's final is the copy's"
     );
     let answered = in_round(2, Some(RoundStage::Answered));
     assert!(
-        finishes_nothing_alone(None, &answered, &copy_worker()),
+        finishes_nothing_alone(None, &answered.call, &copy_worker()),
         "its final is taken, its ACK routed"
     );
 }
@@ -195,10 +214,10 @@ fn a_deleted_record_releases_only_a_copy_that_finishes_nothing_alone() {
 #[test]
 fn a_raised_sequence_is_no_round_the_primary_holds() {
     let mut copy = in_round(2, Some(RoundStage::Open));
-    let d = copy.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
+    let d = copy.call.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
     d.sent_invite.iter_mut().for_each(|p| p.relayed_by = copy_worker());
     let mut primary = in_round(2, None);
-    primary.a_leg.dialogs.confirmed_mut().expect("the caller's dialog").our_cseq += 5;
+    primary.call.a_leg.dialogs.confirmed_mut().expect("the caller's dialog").our_cseq += 5;
     assert!(!covers(&primary, &copy), "the copy alone holds the round's transaction");
 }
 
@@ -211,11 +230,11 @@ fn a_primary_that_never_read_the_copys_answer_to_its_round_does_not_cover_it() {
 
 /// `call`, stored as `w1`'s Element of `w0`'s call and taken over: the live
 /// takeover copy, its lock released.
-async fn taken_over(n: &Node, call: &Call) {
-    let body = MsgpackCodec::new().encode(call).unwrap();
+async fn taken_over(n: &Node, copy: &Enveloped) {
+    let body = body(copy);
     let ttl = 60_000;
     let opts = PutOpts::default();
-    let r = &call.call_ref;
+    let r = &copy.call.call_ref;
     n.store.put_call(PartitionRole::Backup, "w0", r, body, &[], ttl, 1, 0, &opts).await.unwrap();
     let ctx = n.core.router_ctx();
     let _guard = ctx.state.lock(r).await;
@@ -240,8 +259,8 @@ async fn primary_wrote(n: &Node, call_ref: &str, write: PrimaryWrite) {
     sip_clock::testkit::settle().await;
 }
 
-fn put(call: &Call) -> PrimaryWrite {
-    PrimaryWrite::Put(Arc::from(MsgpackCodec::new().encode(call).unwrap()))
+fn put(copy: &Enveloped) -> PrimaryWrite {
+    PrimaryWrite::Put(Arc::from(body(copy)))
 }
 
 #[tokio::test(start_paused = true)]
@@ -249,7 +268,7 @@ async fn the_turn_stands_a_covered_copy_down_off_the_store() {
     let n = node("w1").await;
     let ctx = n.core.router_ctx();
     let call = ringing("turn-covered");
-    let r = call.call_ref.clone();
+    let r = call.call.call_ref.clone();
     taken_over(&n, &call).await;
 
     primary_wrote(&n, &r, put(&call)).await;
@@ -273,7 +292,7 @@ async fn the_turn_keeps_a_copy_until_its_primary_read_its_every_write() {
     let n = node("w1").await;
     let ctx = n.core.router_ctx();
     let call = ringing("turn-uncovered");
-    let r = call.call_ref.clone();
+    let r = call.call.call_ref.clone();
     taken_over(&n, &call).await;
     authors(&n, &r);
     authors(&n, &r);
@@ -291,15 +310,15 @@ async fn the_turn_stands_a_copy_down_on_its_primarys_delete_of_the_call_alone() 
     let n = node("w1").await;
     let ctx = n.core.router_ctx();
     let call = ringing("turn-deleted");
-    let r = call.call_ref.clone();
+    let r = call.call.call_ref.clone();
     taken_over(&n, &call).await;
     authors(&n, &r);
 
-    let another = reborn(&call).incarnation().to_string();
+    let another = reborn(&call).call.incarnation().to_string();
     primary_wrote(&n, &r, PrimaryWrite::Delete(Some(another))).await;
     assert!(ctx.state.is_takeover(&r), "the delete of another call on the ref");
 
-    let own = call.incarnation().to_string();
+    let own = call.call.incarnation().to_string();
     primary_wrote(&n, &r, PrimaryWrite::Delete(Some(own))).await;
     assert!(ctx.state.peek(&r).is_none(), "the primary ended and deleted the call");
     assert!(n.cdr.snapshot().is_empty(), "the copy writes no CDR");
@@ -311,8 +330,8 @@ async fn a_notice_for_a_call_with_no_takeover_copy_here_queues_nothing() {
     let ctx = n.core.router_ctx();
     let call = ringing("no-copy");
 
-    primary_wrote(&n, &call.call_ref, put(&call)).await;
+    primary_wrote(&n, &call.call.call_ref, put(&call)).await;
 
-    assert!(!ctx.dispatcher.has_queue(&call.call_ref), "no queue opened for the call");
+    assert!(!ctx.dispatcher.has_queue(&call.call.call_ref), "no queue opened for the call");
     assert_eq!(ctx.state.lock_count(), 0);
 }

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use b2bua::config::B2buaConfig;
 use b2bua::initial_invite::build_initial_call;
 use b2bua::metrics::B2buaMetrics;
-use b2bua::store::{CallState, InMemoryCallStore, MaterialiseOrigin};
+use b2bua::store::{CallState, Enveloped, InMemoryCallStore, MaterialiseOrigin};
 use sip_clock::Clock;
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
@@ -72,7 +72,7 @@ async fn a_materialised_call_numbers_its_next_admit_above_the_previous_holder_s(
         let s = state(Clock::test_at(0));
         let mut copy = call("epoch@x", 0);
         let replicated = copy.limiter.owe_consult(4).first_change + 3;
-        assert!(s.materialize_if_absent(copy.clone(), origin));
+        assert!(s.materialize_if_absent(Enveloped::new(copy.clone(), None), origin));
         let mut resident = s.peek(&copy.call_ref).expect("resident");
         let (next, _) = resident.limiter.number_admit();
         assert!(next > replicated, "{origin:?}: above the replicated number");

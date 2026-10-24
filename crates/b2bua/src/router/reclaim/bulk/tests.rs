@@ -9,8 +9,9 @@ use super::largest_keepalive_gap;
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::router::test_support::{invite, src};
+use crate::store::Enveloped;
 
-fn call_with_keepalive_at(cid: &str, fire_at: i64) -> call::Call {
+fn call_with_keepalive_at(cid: &str, fire_at: i64) -> Enveloped {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let mut call = build_initial_call(
         &invite("w0", "w1", cid),
@@ -24,7 +25,7 @@ fn call_with_keepalive_at(cid: &str, fire_at: i64) -> call::Call {
         generation: 1,
         fire_at,
     });
-    call
+    Enveloped::new(call, None)
 }
 
 #[test]

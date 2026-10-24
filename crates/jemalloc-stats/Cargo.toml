@@ -15,6 +15,10 @@ tier = "shell"
 # crate's guarantee still holds here — and each of the two call sites carries a
 # narrow `#[allow(unsafe_code)]` with a SAFETY comment. The clippy table
 # restates the workspace's exactly (scripts/purity.py checks it).
+
+[package.metadata.ha]
+side = "blind"
+
 [lints.rust]
 unsafe_code = "deny"
 

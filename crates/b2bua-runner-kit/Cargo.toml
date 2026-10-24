@@ -9,6 +9,9 @@ description = "Reusable B2BUA runner composition: the env -> config -> bind -> d
 [package.metadata.purity]
 tier = "shell"
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 

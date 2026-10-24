@@ -17,6 +17,7 @@ use crate::answer_deadline::Screened;
 use crate::config::B2buaConfig;
 use crate::effects::{HandlerEffects, HandlerResult, QuietTurn};
 use crate::obligations::ObligationSet;
+use crate::owners::Owners;
 use crate::rules::actions::{possibly_confirmed, Owed, Settle};
 use crate::rules::lifecycle_delivery::{close_turn, TurnStart};
 use crate::rules::{execute_rules, ActionExecutor, RuleCall, RuleContext, RuleDefinition};
@@ -48,6 +49,8 @@ pub struct TurnInput<'a> {
     /// 3261 §17.1.1.3). `false` for a request.
     pub matched_client_txn: bool,
     pub now_ms: i64,
+    /// The call's owners, as the shell read them at the turn's start.
+    pub owners: Owners,
 }
 
 /// Run the synchronous rule chain for one in-dialog event, with the
@@ -82,6 +85,7 @@ pub fn rule_chain_turn(
         mut resolved,
         matched_client_txn,
         now_ms,
+        owners,
     } = input;
     // The cap budget is a PER-LIVENESS-INTERVAL rate, not a lifetime total: the
     // keepalive tick RESETS the counter, opening a fresh window. A runaway
@@ -103,7 +107,7 @@ pub fn rule_chain_turn(
     call.message_count = Some(bumped);
     let cap_exceeded = i64::try_from(fw.config.max_messages_per_call).is_ok_and(|cap| bumped > cap)
         && !matches!(call.state, CallModelState::Terminating | CallModelState::Terminated);
-    let mut exec = ActionExecutor { config: fw.config, turn, now_ms };
+    let mut exec = ActionExecutor { config: fw.config, owners: &owners, turn, now_ms };
     // The dialog-level ladders are the framework's (ADR-0032 X4): a rung is
     // repeated here and never reaches a rule; the discharging ACK or PRACK
     // retires its ladder before the rules run and they read the fact; a
@@ -251,6 +255,7 @@ pub fn rule_chain_turn(
         config: fw.config,
         discharged: discharged.as_ref(),
         resolved: &resolved,
+        copy_served: owners.copy_served,
     };
     let mut result = if rules_read {
         execute_rules(fw.rules, &call, &rule_ctx, &mut exec, fw.obligations)

@@ -9,6 +9,9 @@ description = "SIP identifier derivation: tags, Via branches and sequence starts
 [package.metadata.purity]
 tier = "pure"
 
+[package.metadata.ha]
+side = "blind"
+
 [lints]
 workspace = true
 

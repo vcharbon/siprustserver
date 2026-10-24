@@ -9,6 +9,9 @@ description = "Process observability foundation (ADR-0026): subscriber installat
 [package.metadata.purity]
 tier = "shell"
 
+[package.metadata.ha]
+side = "aware"
+
 [lints]
 workspace = true
 

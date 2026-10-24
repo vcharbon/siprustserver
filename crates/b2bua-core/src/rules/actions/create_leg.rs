@@ -82,7 +82,7 @@ impl ActionExecutor<'_> {
         // A stated line the wire cannot carry whole is left off and reported.
         let mut skipped = Vec::new();
         let (mut leg, mut effect) = match relay::build_b_leg(
-            relay::CallMarks::of(call),
+            self.marks(call),
             &leg_id,
             &a_invite,
             destination.clone(),

@@ -68,7 +68,7 @@ use sip_txn::Reoffer;
 use super::reclaim::{discharge_materialized_terminal, format_pb};
 use super::restore_hygiene::{reanchor, sanitize_restored_timers, Smoothing};
 use super::RouterCtx;
-use crate::store::{MaterialiseOrigin, ReplicaMiss};
+use crate::store::{Enveloped, MaterialiseOrigin, ReplicaMiss};
 use b2bua_sdk::event::CallEvent;
 
 /// Which entry path is materialising: the whole axis of behaviour (spec D5).
@@ -139,7 +139,7 @@ pub(super) async fn materialise(
         Origin::Takeover => ctx.state.peek_replica(call_ref).await,
         Origin::Reclaim(_) => ctx.state.peek_reclaimable(call_ref).await,
     };
-    let (mut call, skew_offset_ms) = match read {
+    let (Enveloped { mut call, topology }, skew_offset_ms) = match read {
         Ok(hit) => hit,
         Err(miss) => return Materialised::Refused(refusal(origin, miss)),
     };
@@ -155,14 +155,17 @@ pub(super) async fn materialise(
             if matches!(call.state, CallModelState::Terminated | CallModelState::Terminating) =>
         {
             let force_terminal = call.state == CallModelState::Terminating;
-            discharge_materialized_terminal(ctx, call_ref, call, now_ms, force_terminal).await;
+            let terminal = Enveloped::new(call, topology);
+            discharge_materialized_terminal(ctx, call_ref, terminal, now_ms, force_terminal).await;
             return Materialised::Refused(Reason::Terminated);
         }
         _ => {}
     }
-    if !super::unrecoverable::copy_recoverable(ctx, call_ref, &call, origin.into(), now_ms).await {
+    let copy = Enveloped::new(call, topology);
+    if !super::unrecoverable::copy_recoverable(ctx, call_ref, &copy, origin.into(), now_ms).await {
         return Materialised::Refused(Reason::Unrecoverable);
     }
+    let Enveloped { mut call, topology } = copy;
     let smoothing = match origin {
         Origin::Takeover => None,
         Origin::Reclaim(smoothing) => smoothing,
@@ -176,7 +179,8 @@ pub(super) async fn materialise(
     );
     crate::ring_deadline::arm_unrung_after_restore(&ctx.config, &mut call);
     let timers = call.timers.clone();
-    if !ctx.state.materialize_if_absent(call.clone(), origin.into()) {
+    let pb = format_pb(topology.as_ref());
+    if !ctx.state.materialize_if_absent(Enveloped::new(call.clone(), topology), origin.into()) {
         return Materialised::Resident(ctx.state.peek(call_ref).unwrap_or(call));
     }
     ctx.timers.restore(timers, call_ref.to_string(), call.incarnation()).await;
@@ -202,7 +206,7 @@ pub(super) async fn materialise(
                     node = observe::node(),
                     call_ref,
                     call_id = %call.a_leg.call_id,
-                    pb = %format_pb(&call),
+                    pb = %pb,
                     timers = call.timers.len(),
                     "straggler reclaim"
                 );
