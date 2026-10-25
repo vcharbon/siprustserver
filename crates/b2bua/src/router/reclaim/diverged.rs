@@ -262,7 +262,6 @@ async fn end_cleanly(
         config: &ctx.config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: owners.copy_served,
     };
     let mut turn = TurnScope::of(ctx.id_gen.turn()).with_faults(ctx.wire_faults.snapshot());
     let mut exec = ActionExecutor { config: &ctx.config, owners, turn: &mut turn, now_ms };

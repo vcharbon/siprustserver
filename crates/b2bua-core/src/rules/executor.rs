@@ -106,14 +106,51 @@ pub fn execute_rules(
     obligations: &ObligationSet,
 ) -> HandlerResult {
     let selection = select(rules, call, ctx);
-    for rule in selection.ranked {
+    if let Some(handled) = first_handling(&selection, call, ctx, exec, obligations) {
+        return handled;
+    }
+    let mut result = HandlerResult::new(call.clone());
+    note_absorbed(&mut result.effects, call, ctx, &selection.absorbed);
+    result
+}
+
+/// Run the evidence stage, then the rule chain: a message only a lost write
+/// explains is the evidence rules' alone (ADR-0055 §4), read before any rule
+/// of `rules` can see it. `copy_served` — another owner served the call — is
+/// the stage's own input; no rule of the chain reads it.
+pub fn execute_turn(
+    rules: &[RuleDefinition],
+    call: &Call,
+    ctx: &RuleContext,
+    copy_served: bool,
+    exec: &mut ActionExecutor,
+    obligations: &ObligationSet,
+) -> HandlerResult {
+    let evidence = crate::rules::evidence::evidence_rules(copy_served);
+    let selection = select(&evidence, call, ctx);
+    if let Some(handled) = first_handling(&selection, call, ctx, exec, obligations) {
+        return handled;
+    }
+    execute_rules(rules, call, ctx, exec, obligations)
+}
+
+/// The turn of the first ranked rule of `selection` that handles the event,
+/// or `None` when none does.
+fn first_handling(
+    selection: &Selection,
+    call: &Call,
+    ctx: &RuleContext,
+    exec: &mut ActionExecutor,
+    obligations: &ObligationSet,
+) -> Option<HandlerResult> {
+    for &rule in &selection.ranked {
         let Some(outcome) = (rule.handle)(ctx) else {
             continue;
         };
         if outcome.unrecoverable {
             let why = format!("read by rule {}", rule.id);
             crate::rules::relay::note_unrebuilt(call, &mut exec.turn.notes, &why);
-            return HandlerResult::new(call.clone());
+            return Some(HandlerResult::new(call.clone()));
         }
         let before = call.clone();
         report_diagnostics(rule, call, &outcome);
@@ -147,11 +184,9 @@ pub fn execute_rules(
         // `call.transition`.
         record_transitions(rule, &before, &enforced.call, exec.now_ms, &mut exec.turn.notes);
         note_absorbed(&mut enforced.effects, call, ctx, &selection.absorbed);
-        return enforced;
+        return Some(enforced);
     }
-    let mut result = HandlerResult::new(call.clone());
-    note_absorbed(&mut result.effects, call, ctx, &selection.absorbed);
-    result
+    None
 }
 
 /// Count a fire the going-away gate absorbed: one effect per turn, naming

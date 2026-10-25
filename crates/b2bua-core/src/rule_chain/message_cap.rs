@@ -32,7 +32,6 @@ pub(super) fn tear_down_runaway(
         config: turn.config,
         discharged: turn.discharged,
         resolved: turn.resolved,
-        copy_served: turn.copy_served,
     };
     // An UNANSWERED a-leg (still trying/early) has no final response yet:
     // `begin_termination` assumes the firing *rule* already replied (as

@@ -20,7 +20,7 @@ use crate::obligations::ObligationSet;
 use crate::owners::Owners;
 use crate::rules::actions::{possibly_confirmed, Owed, Settle};
 use crate::rules::lifecycle_delivery::{close_turn, TurnStart};
-use crate::rules::{execute_rules, ActionExecutor, RuleCall, RuleContext, RuleDefinition};
+use crate::rules::{execute_turn, ActionExecutor, RuleCall, RuleContext, RuleDefinition};
 use crate::turn_notes::TurnNotes;
 use crate::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
@@ -255,10 +255,9 @@ pub fn rule_chain_turn(
         config: fw.config,
         discharged: discharged.as_ref(),
         resolved: &resolved,
-        copy_served: owners.copy_served,
     };
     let mut result = if rules_read {
-        execute_rules(fw.rules, &call, &rule_ctx, &mut exec, fw.obligations)
+        execute_turn(fw.rules, &call, &rule_ctx, owners.copy_served, &mut exec, fw.obligations)
     } else {
         HandlerResult { call: call.clone(), effects: HandlerEffects::new() }
     };

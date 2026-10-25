@@ -20,7 +20,7 @@ const T2: Duration = Duration::from_secs(4);
 /// The request a retransmission repeats.
 pub(super) enum Retransmitted {
     /// A PRACK, on its own transaction.
-    Prack(InDialogTxn),
+    Prack(Box<InDialogTxn>),
     /// A re-INVITE, whose transaction the leg keeps among its sent re-INVITEs.
     Reinvite,
 }
@@ -48,7 +48,7 @@ impl Pending {
 /// Retransmit the PRACK numbered `cseq`, sent on `txn` at `now`, until its
 /// final.
 pub(super) fn prack_sent(st: &mut ActorState<'_>, cseq: u32, txn: InDialogTxn, now: Instant) {
-    st.retransmits.push(Pending::sent(cseq, Retransmitted::Prack(txn), now));
+    st.retransmits.push(Pending::sent(cseq, Retransmitted::Prack(Box::new(txn)), now));
 }
 
 /// Park until the earliest timer is due (or forever if none).

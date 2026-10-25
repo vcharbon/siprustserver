@@ -204,7 +204,11 @@ transparency is not the goal; the window is the transport delay.
 ### 4. Evidence the call record cannot explain: one rule, any method
 
 One rule, in `b2bua-core`, fires on any node; on a single node only a broken or
-forged peer can trigger it. Its triggers are closed:
+forged peer can trigger it. It is a stage of its own, read before every rule of
+the chain (user ruling): no service rule sees or pre-empts a message only a lost
+write explains, and whether another owner served the call reaches that stage
+alone, never a rule's context. On a single node it changes nothing. Its triggers
+are closed:
 
 1. a final in a dialog whose CSeq is strictly above the dialog's local sequence,
    any method;

@@ -37,9 +37,13 @@ use b2bua_sdk::model::{
 /// The CDR reason of a call ended on evidence.
 const EVIDENCE: &str = "evidence";
 
-/// The evidence rule family: CORE, registered before the generic core set.
-pub fn evidence_rules() -> Vec<RuleDefinition> {
-    vec![
+/// The evidence rules: their own stage, read before every rule of the chain
+/// (ADR-0055 §4), so no service sees or pre-empts a message only a lost write
+/// explains. Trigger 4 is a rule only on a call another owner served
+/// (`copy_served`); on a call one node served the callee's BYE is
+/// `relay-bye`'s.
+pub fn evidence_rules(copy_served: bool) -> Vec<RuleDefinition> {
+    let mut rules = vec![
         RuleDefinition::core(
             "evidence-final",
             CORE_LAYER,
@@ -98,7 +102,9 @@ pub fn evidence_rules() -> Vec<RuleDefinition> {
                 Some(RuleHandleResult::new(vec![RuleAction::AckLeg { leg_id, body: None }]))
             },
         ),
-    ]
+    ];
+    rules.retain(|r| copy_served || r.id != "evidence-early-bye");
+    rules
 }
 
 /// Triggers 1 and 2: a final no request record answers, in a dialog whose
@@ -158,13 +164,10 @@ fn relayed_open(ctx: &RuleContext, cseq: i64) -> bool {
 }
 
 /// Trigger 4, on a call another owner may have answered: a BYE from the
-/// callee on a dialog the record holds as early (RFC 3261 §15). On a call one
-/// node served it is `relay-bye`'s: a broken callee, whose caller holds no
-/// 2xx.
+/// callee on a dialog the record holds as early (RFC 3261 §15).
 fn callee_bye_on_early_dialog(ctx: &RuleContext) -> bool {
     ctx.dialog().is_some_and(|d| d.state == DialogState::Early)
         && ctx.call.a_leg().invite_final_sent().is_none()
-        && ctx.copy_served
 }
 
 /// Trigger 5: a 2xx whose verified via-extension names a leg the record

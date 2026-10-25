@@ -141,10 +141,12 @@ pub(super) fn turn(
         config: &config,
         discharged: None,
         resolved: &resolved,
-        copy_served: false,
     };
+    // The evidence stage reads the event before the rule chain does.
+    let evidence = b2bua_core::rules::evidence::evidence_rules(false);
     let rules = default_rules();
-    let Some(rule) = pick_ranked(&rules, call, &ctx).into_iter().next() else {
+    let first = pick_ranked(&evidence, call, &ctx).into_iter().next();
+    let Some(rule) = first.or_else(|| pick_ranked(&rules, call, &ctx).into_iter().next()) else {
         return (None, None);
     };
     let actions: Vec<RuleAction> = (rule.handle)(&ctx).map(|r| r.actions).unwrap_or_default();

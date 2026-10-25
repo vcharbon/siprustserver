@@ -57,7 +57,6 @@ fn handled(
         config: &B2buaConfig::default(),
         discharged: None,
         resolved: &resolved,
-        copy_served: false,
     };
     let rules = default_rules();
     pick_ranked(&rules, call, &ctx)

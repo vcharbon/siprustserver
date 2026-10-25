@@ -123,7 +123,6 @@ fn a_lifecycle_handlers_cursor_move_is_on_the_trace() {
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let rules = [listener(), ending_claimer()];
     let claimed = execute_rules(

@@ -42,7 +42,6 @@ fn executed(call: &call::Call, actions: &[RuleAction]) -> HandlerResult {
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let mut ids = TurnScope::of(TurnIds::fixed(2));
     ActionExecutor {
@@ -275,7 +274,6 @@ fn on_the_callers_leg_the_rejecting_answer_continues_the_stacks_session() {
         config: &config,
         discharged: None,
         resolved: &resolved,
-        copy_served: false,
     };
     let rules = b2bua_core::rules::default_rules();
     let rule = b2bua_core::rules::pick_ranked(&rules, &call, &ctx).into_iter().next();

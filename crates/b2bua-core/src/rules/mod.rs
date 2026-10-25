@@ -37,7 +37,7 @@ pub use b2bua_sdk::model::{
 pub use b2bua_sdk::relayed_final::RelayedFinal;
 pub use defaults::{default_rules, default_rules_with, ComposeOptions};
 pub use docgen::{check_registry, render_registry, render_registry_html, MachineGraph};
-pub use executor::{execute_rules, pick_ranked};
+pub use executor::{execute_rules, execute_turn, pick_ranked};
 pub use promote_pem::promote_pem_rules;
 pub use refer_transfer::{transfer_rules, transfer_seed_rules, transfer_service_def};
 pub use relay_first_18x::{relay_first_18x_rules, relay_first_18x_service_def};

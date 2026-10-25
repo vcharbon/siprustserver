@@ -69,10 +69,12 @@ fn turn_on(
         config,
         discharged: None,
         resolved,
-        copy_served: false,
     };
+    // The evidence stage reads the event before the rule chain does.
+    let evidence = b2bua_core::rules::evidence::evidence_rules(false);
     let rules = default_rules();
-    let Some(rule) = pick_ranked(&rules, call, &ctx).into_iter().next() else {
+    let first = pick_ranked(&evidence, call, &ctx).into_iter().next();
+    let Some(rule) = first.or_else(|| pick_ranked(&rules, call, &ctx).into_iter().next()) else {
         return (None, None);
     };
     let actions: Vec<RuleAction> = (rule.handle)(&ctx).map(|r| r.actions).unwrap_or_default();
@@ -330,4 +332,53 @@ fn a_transfer_targets_2xx_above_its_dialled_number_is_evidence_not_its_answer() 
     let config = B2buaConfig::default();
     let (rule, _) = turn_on(&call, &event, "b-2", &on_bobs_dialog(), &config);
     assert_eq!(rule, Some("evidence-final"));
+}
+
+/// The evidence stage reads the event before any rule: a service rule that
+/// claims every response on the callee's leg does not pre-empt a final only
+/// a lost write explains (ADR-0055 §4) — the evidence ends the call. With no
+/// evidence stage the service rule would have claimed it.
+#[test]
+fn a_service_rule_on_the_same_leg_does_not_pre_empt_evidence() {
+    use b2bua_core::obligations::ObligationSet;
+    use b2bua_core::rules::{execute_rules, execute_turn, Match, RuleDefinition};
+    use b2bua_sdk::model::{RuleHandleResult, SERVICE_LAYER};
+
+    let greedy = RuleDefinition::core(
+        "greedy-service",
+        SERVICE_LAYER,
+        &[],
+        Match::response().direction(Direction::FromB),
+        |_| Some(RuleHandleResult::new(vec![])),
+    );
+    let mut rules = default_rules();
+    rules.push(greedy);
+    let call = bridged();
+    let event = final_from_bob(200, "BYE", RECORDED + 1, "z9hG4bKgone");
+    let config = B2buaConfig::default();
+    let resolved = on_bobs_dialog();
+    let ctx = RuleContext {
+        call: RuleCall::new(&call),
+        call_ref: &call.call_ref,
+        event: &event,
+        source_leg_id: "b-1",
+        direction: Direction::FromB,
+        now_ms: 0,
+        config: &config,
+        discharged: None,
+        resolved: &resolved,
+    };
+    let run = |stage: bool| {
+        let mut ids = TurnScope::of(TurnIds::fixed(1));
+        let owners = b2bua_core::owners::Owners::none();
+        let mut exec = ActionExecutor { owners, config: &config, turn: &mut ids, now_ms: 0 };
+        let obligations = ObligationSet::core();
+        if stage {
+            execute_turn(&rules, &call, &ctx, false, &mut exec, &obligations)
+        } else {
+            execute_rules(&rules, &call, &ctx, &mut exec, &obligations)
+        }
+    };
+    assert_eq!(run(true).call.state, call::CallModelState::Terminating, "evidence ends the call");
+    assert_eq!(run(false).call.state, call.state, "the service rule alone claims the final");
 }

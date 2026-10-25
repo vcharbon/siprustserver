@@ -122,7 +122,6 @@ fn answer_the_records_rounds(
         config: &ctx.config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: owners.copy_served,
     };
     let mut exec = ActionExecutor { config: &ctx.config, owners, turn, now_ms };
     let answered = exec.execute(&actions, record, &rule_ctx).effects;

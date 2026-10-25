@@ -60,7 +60,6 @@ fn run_create_leg(config: &B2buaConfig, host: &str, port: u16) -> HandlerResult 
         config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     exec.execute(&[create_leg(host, port)], &call, &ctx)
 }

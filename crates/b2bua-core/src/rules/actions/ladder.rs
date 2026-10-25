@@ -235,7 +235,6 @@ impl ActionExecutor<'_> {
             config: turn.config,
             discharged: turn.discharged,
             resolved: turn.resolved,
-            copy_served: turn.copy_served,
         };
         let forced = self.execute(&actions, &call, &ctx);
         effects.extend(forced.effects);

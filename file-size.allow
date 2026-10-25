@@ -15,7 +15,7 @@ crates/b2bua-core/src/rules/actions/respond.rs 616
 crates/b2bua-core/src/rules/defaults/core_rules.rs 1560
 crates/b2bua-core/src/rules/relay_first_18x.rs 524
 crates/b2bua-core/src/rules/relay/sdp_session_tests.rs 921
-crates/b2bua-core/tests/it/rules.rs 4906
+crates/b2bua-core/tests/it/rules.rs 4876
 crates/b2bua-harness/src/lib.rs 967
 crates/b2bua-harness/tests/it/call_keyed_holds.rs 1036
 crates/b2bua-harness/tests/it/fake_prack.rs 810
@@ -28,7 +28,7 @@ crates/b2bua-harness/tests/it/stated_headers.rs 1453
 crates/b2bua-harness/tests/it/suppress_18x.rs 818
 crates/b2bua-runner-kit/src/lib.rs 593
 crates/b2bua-sdk/src/config.rs 579
-crates/b2bua-sdk/src/model.rs 1171
+crates/b2bua-sdk/src/model.rs 1168
 crates/b2bua/src/decision/test_adapter.rs 818
 crates/b2bua/src/limiter/refresh_batch.rs 517
 crates/b2bua/src/limiter/release_queue.rs 513
@@ -43,7 +43,7 @@ crates/b2bua/src/repl/store.rs 526
 crates/b2bua/src/repl/supervisor.rs 756
 crates/b2bua/src/repl/tests.rs 823
 crates/b2bua/src/router/callouts.rs 615
-crates/b2bua/src/store/mod.rs 887
+crates/b2bua/src/store/mod.rs 863
 crates/call-limiter/src/store.rs 578
 crates/call-limiter/tests/it/keyed_by_call.rs 877
 crates/callshapes/src/plan.rs 1174
@@ -94,7 +94,7 @@ crates/scenario-harness/src/actor/scenarios.rs 1086
 crates/scenario-harness/src/actor/script.rs 532
 crates/scenario-harness/src/actor/state.rs 667
 crates/scenario-harness/src/agent/client_invite.rs 598
-crates/scenario-harness/src/agent/dialog.rs 719
+crates/scenario-harness/src/agent/dialog.rs 718
 crates/scenario-harness/src/agent/harness.rs 858
 crates/scenario-harness/src/agent/server_txn.rs 599
 crates/scenario-harness/src/agent/ua.rs 796

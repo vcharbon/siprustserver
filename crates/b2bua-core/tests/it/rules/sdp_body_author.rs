@@ -29,7 +29,6 @@ fn reinvite_body(author: BodyAuthor) -> String {
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let mut id_gen = scope(1);
     let mut exec = ActionExecutor {

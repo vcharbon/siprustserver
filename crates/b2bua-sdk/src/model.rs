@@ -974,9 +974,6 @@ pub struct RuleContext<'a> {
     /// the rules ran: the dialog it names on the source leg, and the relay a
     /// response answers. Empty for any other event.
     pub resolved: &'a call::helpers::Resolved,
-    /// Whether another owner served the call, so its record may lack what
-    /// that owner sent (ADR-0055 §4); `false` on a call one node serves.
-    pub copy_served: bool,
 }
 
 impl<'a> RuleContext<'a> {

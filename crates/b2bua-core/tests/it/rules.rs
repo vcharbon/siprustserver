@@ -141,7 +141,6 @@ fn timer_global_duration_selects_max_duration() {
         config: &B2buaConfig::default(),
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -182,7 +181,6 @@ fn no_answer_result(call: &call::Call, fired_leg_id: &str) -> Vec<RuleAction> {
         config: &B2buaConfig::default(),
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, call, &ctx);
@@ -262,7 +260,6 @@ fn executed(call: &call::Call, actions: &[RuleAction]) -> HandlerResult {
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let mut id_gen = scope(1);
     let mut exec = ActionExecutor {
@@ -329,7 +326,6 @@ fn max_duration_result(call: &call::Call) -> Vec<RuleAction> {
         config: &B2buaConfig::default(),
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, call, &ctx);
@@ -554,7 +550,6 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let mut id_gen = scope(1);
     let mut exec = ActionExecutor {
@@ -636,7 +631,6 @@ fn in_dialog_bye_selects_relay_bye() {
         config: &B2buaConfig::default(),
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -664,7 +658,6 @@ fn bye_on_the_early_a_dialog_selects_early_dialog_bye_with_487_and_termination()
         config: &B2buaConfig::default(),
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -714,7 +707,6 @@ fn bye_on_the_early_a_dialog_of_a_terminating_call_still_answers_the_invite() {
         config: &B2buaConfig::default(),
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -756,7 +748,6 @@ fn bye_from_an_ended_leg_selects_resolve_ended_leg_bye_without_termination() {
         config: &B2buaConfig::default(),
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -804,7 +795,6 @@ Content-Length: 0\r\n\r\n";
         config: &B2buaConfig::default(),
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -1036,7 +1026,6 @@ fn execute_with(config: &B2buaConfig, call: &call::Call, actions: &[RuleAction])
         config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let mut id_gen = scope(1);
     let mut exec = ActionExecutor {
@@ -1259,7 +1248,6 @@ fn handle_from(call: &call::Call, event: &CallEvent, leg: &str) -> (&'static str
         config: &B2buaConfig::default(),
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, call, &ctx);
@@ -1287,7 +1275,6 @@ fn execute_from_b1(call: &call::Call, event: &CallEvent, actions: &[RuleAction])
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let mut id_gen = scope(1);
     let mut exec = ActionExecutor {
@@ -1456,7 +1443,6 @@ fn a_provisional_on_a_confirmed_b_leg_selects_no_relay_rule() {
         config: &B2buaConfig::default(),
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let rules = default_rules();
     let ranked: Vec<&str> = pick_ranked(&rules, &call, &ctx).iter().map(|r| r.id).collect();
@@ -1628,7 +1614,6 @@ fn ctx_for<'a>(
         config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     }
 }
 
@@ -1885,7 +1870,6 @@ Content-Length: 0\r\n\r\n";
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let mut id_gen = scope(1);
     let mut exec = ActionExecutor {
@@ -1951,7 +1935,6 @@ Content-Length: 0\r\n\r\n";
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let mut id_gen = scope(1);
     let mut exec = ActionExecutor {
@@ -2004,7 +1987,6 @@ Content-Length: 0\r\n\r\n";
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let mut id_gen = scope(1);
     let mut exec = ActionExecutor {
@@ -2106,7 +2088,6 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let mut exec = ActionExecutor {
         owners: b2bua_core::owners::Owners::none(),
@@ -2219,7 +2200,6 @@ mod media_primitives {
             config,
             discharged: None,
             resolved: &call::helpers::UNRESOLVED,
-            copy_served: false,
         };
         exec.execute(actions, call, &ctx)
     }
@@ -2561,7 +2541,6 @@ mod answer_a_leg_new_dialog {
             config,
             discharged: None,
             resolved: &call::helpers::UNRESOLVED,
-            copy_served: false,
         };
         exec.execute(actions, call, &ctx)
     }
@@ -3087,7 +3066,6 @@ mod ack_leg_body {
             config: &config,
             discharged: None,
             resolved: &call::helpers::UNRESOLVED,
-            copy_served: false,
         };
         let mut id_gen = scope(1);
         let mut exec = ActionExecutor {
@@ -3186,7 +3164,6 @@ mod ack_leg_body {
             config: &config,
             discharged: None,
             resolved: &call::helpers::UNRESOLVED,
-            copy_served: false,
         };
         let mut id_gen = scope(1);
         let mut exec = ActionExecutor {
@@ -3353,7 +3330,6 @@ mod default_sdp_create_leg {
             config: &config,
             discharged: None,
             resolved: &call::helpers::UNRESOLVED,
-            copy_served: false,
         };
         let mut id_gen = scope(1);
         let mut exec = ActionExecutor {
@@ -3457,7 +3433,6 @@ mod header_update_removal_withholds_a_relayed_name {
             config: &config,
             discharged: None,
             resolved: &call::helpers::UNRESOLVED,
-            copy_served: false,
         };
         let mut id_gen = scope(1);
         let mut exec = ActionExecutor {
@@ -3846,7 +3821,6 @@ mod service_timers {
             config,
             discharged: None,
             resolved: &call::helpers::UNRESOLVED,
-            copy_served: false,
         }
     }
 }
@@ -3871,7 +3845,6 @@ fn timer_ctx<'a>(
         config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     }
 }
 
@@ -4129,7 +4102,6 @@ fn relay_ack_pushes_no_ladder_plumbing() {
         config: &config,
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
-        copy_served: false,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -4225,7 +4197,6 @@ mod ladder_give_up {
             config: &config,
             discharged: None,
             resolved: &call::helpers::UNRESOLVED,
-            copy_served: false,
         };
         let picked: Vec<&str> = pick_ranked(rules, &call, &ctx).iter().map(|r| r.id).collect();
         assert_eq!(
@@ -4891,7 +4862,6 @@ fn an_update_offer_answered_on_the_caller_face_waits_on_the_current_peer() {
             config: &config,
             discharged: None,
             resolved: &resolved,
-            copy_served: false,
         };
         ctx.update_refusal()
     };

@@ -159,7 +159,6 @@ fn deliver(
                 config: exec.config,
                 discharged: None,
                 resolved: &call::helpers::UNRESOLVED,
-                copy_served: exec.owners.copy_served,
             };
             if !rule.matcher.accepts_columns(&ctx) || !rule.matcher.filter.is_none_or(|f| f(&ctx)) {
                 continue;

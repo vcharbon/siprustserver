@@ -78,7 +78,6 @@ pub fn seed_services(
                     config: exec.config,
                     discharged: None,
                     resolved: &call::helpers::UNRESOLVED,
-                    copy_served: exec.owners.copy_served,
                 };
                 exec.execute(&actions, &result.call, &ctx)
             };
