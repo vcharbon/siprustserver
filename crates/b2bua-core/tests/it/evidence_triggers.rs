@@ -382,3 +382,59 @@ fn a_service_rule_on_the_same_leg_does_not_pre_empt_evidence() {
     assert_eq!(run(true).call.state, call::CallModelState::Terminating, "evidence ends the call");
     assert_eq!(run(false).call.state, call.state, "the service rule alone claims the final");
 }
+
+/// A 2xx carrying an offer — the INVITE that dialled the leg made none —
+/// ACKed on this stack's own account with no body given: the ACK still
+/// answers the offer, rejecting every stream (RFC 3261 §13.2.2.4, RFC 3264
+/// §6), never bare.
+#[test]
+fn an_authored_bare_ack_of_an_offering_2xx_answers_it_rejecting_every_stream() {
+    let offer = "v=0\r\no=bob 1 1 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\n\
+                 m=audio 20000 RTP/AVP 0\r\n";
+    let raw = format!(
+        "SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bKdialled\r\n\
+From: <sip:svc@10.0.0.9>;tag=svc\r\n\
+To: <sip:bob@10.0.0.2>;tag=bobtag\r\n\
+Call-ID: bcid@x\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:bob@10.0.0.2:5070>\r\n\
+Content-Type: application/sdp\r\n\
+Content-Length: {}\r\n\r\n{offer}",
+        offer.len()
+    );
+    let event = CallEvent::sip(parse(&raw), "10.0.0.2:5070".parse().unwrap());
+    let call = ringing();
+    let config = B2buaConfig::default();
+    let resolved = on_bobs_dialog();
+    let ctx = RuleContext {
+        call: RuleCall::new(&call),
+        call_ref: &call.call_ref,
+        event: &event,
+        source_leg_id: "b-1",
+        direction: Direction::FromB,
+        now_ms: 0,
+        config: &config,
+        discharged: None,
+        resolved: &resolved,
+    };
+    let mut ids = TurnScope::of(TurnIds::fixed(1));
+    let owners = b2bua_core::owners::Owners::none();
+    let mut exec = ActionExecutor { owners, config: &config, turn: &mut ids, now_ms: 0 };
+    let actions = [
+        RuleAction::ConfirmDialog { leg_id: "b-1".into() },
+        RuleAction::AckLeg { leg_id: "b-1".into(), body: None },
+    ];
+    let result = exec.execute(&actions, &call, &ctx);
+    let ack = result
+        .effects
+        .outbound
+        .iter()
+        .find_map(|e| match &e.body {
+            OutboundBody::Request(r) if r.method().as_str() == "ACK" => Some(r.clone()),
+            _ => None,
+        })
+        .expect("the ACK");
+    let answer = String::from_utf8_lossy(ack.body()).to_string();
+    assert!(answer.contains("m=audio 0 "), "every stream rejected: {answer}");
+}

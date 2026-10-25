@@ -272,7 +272,7 @@ defers it to the primary (ADR-0020 X3). An HA corner case may write a second
 CDR, and it is accepted: a primary killed after ending a call whose end its
 backup never applied, a split. By user ruling a kill of a primary with a backup
 never loses the CDR: a split may, and a call with no backup is lost with its
-primary as on a non-HA B2BUA.
+primary as on a non-HA B2BUA, leaving one CDR or none (user ruling).
 
 The departure sweep takes over every call of a departed primary with an INVITE
 transaction to serve, and every `Terminating` one with any request record open
@@ -334,7 +334,9 @@ field fails safe:
   keepalive and refresh ledger entries and the ladder rungs a quiet turn moves
   (none changes a dialog), the skew offsets of §9, trace fields.
 
-There is no per-axis fold.
+A node that meets the other copy's ending discharges it keeping every dialog
+either copy opened, at the higher of the two sequences. There is no per-axis
+fold.
 
 ### 8. The proxy routes on one rule
 
@@ -398,21 +400,26 @@ number of takeovers unshifted.
   - replication stalled past the cap of §3, then a kill: a caller whose INVITE
     transaction saw neither final nor provisional from the copy is answered by
     its own Timer B, and a callee whose 2xx tag the call record never held keeps
-    its dialog until its own timers end it (the copy's one CANCEL of that
-    callee's INVITE draws its answer and changes nothing); the call leaves one
-    CDR or two (the
-    stalled primary's and the departure sweep's, §5), never none;
+    its dialog until its own timers end it; the call leaves one CDR or two
+    (the stalled primary's and the departure sweep's, §5), never none;
   - a backlog over the high-water mark, or a backup at its memory ceiling, then
-    a kill: a call with no backup is lost as on a non-HA B2BUA, its CDR with
-    it.
+    a kill: a call with no backup is lost as on a non-HA B2BUA, its cell
+    leaving one CDR or none.
 
   A split that never heals is not supposed to last: it cuts a representative
   few shapes (the re-INVITE, the REFER), whose cells check the worst case, no
   leaked resource (the call ends on every side, full cleanup, the limiter
   released), in a declared degraded mode. These windows are declared, nothing
   else:
-  - a split that never heals: the stale copy's requests into a dialog the
-    other copy ended, each closed by the 481 it draws;
+  - a split that never heals, its cells judging leaks, cleanup and the CDR
+    count only (user ruling): the stale copy's requests into a dialog the other
+    copy ended, each closed by the 481 it draws; one copy's CANCEL of an INVITE
+    the other copy saw answered; one copy's non-2xx after the 2xx the other
+    copy sent the caller, which she discards; one copy's BYE of a caller
+    dialog it holds early, which the other copy answered;
+  - a kill (user ruling): a copy's one CANCEL of a callee's INVITE the dead
+    owner saw finally answered, 2xx or not; the callee answers it and keeps
+    what its final left it, a dialog its own timers end or none;
   - a kill of the primary, and a split that heals (user ruling): the §4 clean
     end's BYE into a dialog the other owner already ended, closed by its 481;
   - a kill inside the replication window: a copy re-uses a CSeq the dead

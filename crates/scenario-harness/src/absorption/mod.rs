@@ -38,6 +38,7 @@ mod answered;
 mod hop_ack;
 mod invited;
 mod two_xx_ack;
+mod unacked_2xx;
 mod wire_log;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -123,6 +124,8 @@ pub struct Absorption {
     /// The INVITE server transactions this endpoint holds, with the response a
     /// copy of each draws (§17.2.1).
     invited: invited::Invited,
+    /// The 2xx finals to an INVITE awaiting their ACK (§13.3.1.4).
+    unacked_2xx: unacked_2xx::Unacked2xx,
     /// The finals a [`Owner::TxnCompleted`] sighting owes, not yet sent.
     repeats: std::sync::Mutex<Vec<(Vec<u8>, SocketAddr)>>,
     /// The INVITE client transactions whose caller gave up (§9.1) and that
@@ -142,6 +145,7 @@ impl Absorption {
             hop_acks: hop_ack::HopAcks::default(),
             answered: answered::Answered::default(),
             invited: invited::Invited::default(),
+            unacked_2xx: Default::default(),
             repeats: Default::default(),
             abandoned: abandoned::AbandonedInvites::default(),
             log: wire_log::WireLog::default(),
@@ -158,6 +162,7 @@ impl Absorption {
             hop_acks: hop_ack::HopAcks::default(),
             answered: answered::Answered::default(),
             invited: invited::Invited::default(),
+            unacked_2xx: Default::default(),
             repeats: Default::default(),
             abandoned: abandoned::AbandonedInvites::default(),
             log: wire_log::WireLog::default(),
@@ -177,6 +182,9 @@ impl Absorption {
     pub fn sight(&self, raw: &[u8], msg: &SipMessage) -> Sighting {
         let dedup = self.dedup.load(Ordering::Relaxed);
         let ordinal = self.sighted.fetch_add(1, Ordering::Relaxed);
+        if let SipMessage::Request(r) = msg {
+            self.unacked_2xx.sight(r);
+        }
         let identical = dedup && self.tables.note(raw, msg, ordinal).is_some();
         let copy = match msg {
             SipMessage::Request(r) if dedup => self.answered.sight(r, ordinal),
@@ -220,7 +228,19 @@ impl Absorption {
             let after = self.sighted.load(Ordering::Relaxed) + queued as u64;
             self.answered.note_sent(r, wire, dst, after);
             self.invited.note_sent(r, wire, dst, after);
+            self.unacked_2xx.note_sent(r, wire, dst);
         }
+    }
+
+    /// When a 2xx this endpoint sent is due again, if one awaits its ACK
+    /// (§13.3.1.4).
+    pub fn next_2xx_due(&self) -> Option<tokio::time::Instant> {
+        self.unacked_2xx.next_due()
+    }
+
+    /// The 2xx finals due again at `now`, each with its destination.
+    pub fn take_due_2xx(&self, now: tokio::time::Instant) -> Vec<(Vec<u8>, SocketAddr)> {
+        self.unacked_2xx.take_due(now)
     }
 
     /// The finals the [`Owner::TxnCompleted`] sightings since the last call

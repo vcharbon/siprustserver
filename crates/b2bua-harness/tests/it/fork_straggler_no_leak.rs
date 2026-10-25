@@ -443,6 +443,54 @@ async fn a_delayed_offer_straggler_is_answered_in_its_ack() {
     let _report = h.finish().await;
 }
 
+/// A delayed-offer straggler that repeats its 2xx after the winning dialog
+/// renegotiated draws the ACK it drew first, byte for byte (RFC 3261
+/// §13.2.2.4): the answer is not composed again in the session the leg moved
+/// on to.
+#[tokio::test(start_paused = true)]
+async fn a_delayed_offer_straggler_repeat_draws_its_first_ack() {
+    let (h, alice, bob, b2bua, mut dialog, mut uas) = bridged(
+        "b2bua-fork-straggler-delayed-offer-repeat",
+        (6091, 6092, 6093),
+        None,
+        OFFER_LATE,
+        Some(OFFER),
+    )
+    .await;
+    uas.respond(200, "OK").with_to_tag(STRAGGLER).with_sdp(STRAGGLER_OFFER).await;
+    let first = bob.receive("ACK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+
+    let mut reinvite = dialog.reinvite(Some(OFFER_AGAIN)).await;
+    let reinvite_cseq = dialog.local_cseq();
+    let mut bob_reinvite = bob.receive("INVITE").await;
+    bob_reinvite.respond(200, "OK").with_sdp(OFFER_LATE_AGAIN).await;
+    reinvite.expect(200).await;
+    dialog.ack_for(reinvite_cseq, None).await;
+    bob.receive("ACK").await;
+
+    uas.respond(200, "OK").with_to_tag(STRAGGLER).with_sdp(STRAGGLER_OFFER).await;
+    let again = bob.receive("ACK").await;
+    assert_eq!(
+        again.request().image(),
+        first.request().image(),
+        "the repeat draws the first ACK, byte for byte"
+    );
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    alice.drain().await;
+    bob.drain().await;
+    let _report = h.finish().await;
+}
+
+const OFFER_AGAIN: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendonly\r\n";
+const OFFER_LATE_AGAIN: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20001 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=recvonly\r\n";
+
 /// RFC 3261 §12.2.1.1: each fork of one INVITE numbers its own requests, and
 /// the straggler's BYE continues the straggler's sequence — fork 1 spent CSeq
 /// 2 on its PRACK, so its BYE is 3, never a number it already used.

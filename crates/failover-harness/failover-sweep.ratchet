@@ -11,18 +11,3 @@
 # declared window of §11 covers, §11; a PRACK, an owed ACK or an in-dialog
 # request left unanswered §2; a 2xx repeat routed through the other owner §8;
 # and any other finding of a split cell §7.
-
-refer/split/t1-applied  ADR-0055 §7  # two copies
-refer/split/t2-applied  ADR-0055 §7  # two copies
-refer/split/t2-left  ADR-0055 §7  # the split-off primary's setup timeout sends the caller a non-2xx after the other copy's 2xx
-refer/split/t2-logged  ADR-0055 §7  # the split-off primary's setup timeout sends the caller a non-2xx after the other copy's 2xx
-reinvite/primary-killed/t6-logged  ADR-0055 §11  # the test callee never retransmits its re-INVITE 2xx (RFC 3261 §13.3.1.4): the 2xx the dead primary took never reaches the copy, which 487s the caller's re-INVITE at her BYE and she leaves it unACKed
-reinvite/split-healed/t5-left  ADR-0055 §7  # two copies
-reinvite/split-healed/t5-logged  ADR-0055 §7  # two copies
-reinvite/split/t1-applied  ADR-0055 §7  # two copies
-reinvite/split/t2-applied  ADR-0055 §7  # two copies
-reinvite/split/t2-left  ADR-0055 §7  # the split-off primary's setup timeout sends the caller a non-2xx after the other copy's 2xx
-reinvite/split/t2-logged  ADR-0055 §7  # the split-off primary's setup timeout sends the caller a non-2xx after the other copy's 2xx
-reinvite/split/t5-applied  ADR-0055 §7  # second copy acts on an ended dialog
-reinvite/split/t5-left  ADR-0055 §7  # second copy acts on an ended dialog
-reinvite/split/t5-logged  ADR-0055 §7  # second copy acts on an ended dialog

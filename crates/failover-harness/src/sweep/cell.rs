@@ -102,7 +102,6 @@ pub async fn run_cell(
             }
             () = &mut kill, if kill_pending => {
                 kill_pending = false;
-                accept_cancel_of_an_unseen_answer(&mut cluster);
                 kill_inside_the_window(&mut cluster, &placement);
             }
             () = &mut heal, if heal_pending => {
@@ -214,6 +213,7 @@ fn strike(
         Incident::UnbackedKilled => {
             accept_clean_end_into_ended_dialogs(cluster, names);
             accept_reused_cseq(cluster);
+            accept_cancel_of_an_unseen_final(cluster);
             cluster.kill(&placement.primary, &placement.backup);
             Some(placement.primary.as_str())
         }
@@ -228,12 +228,7 @@ fn strike(
         }
         Incident::Split => {
             cluster.split(placement);
-            cluster.fh.accept_dialog_verdicts(
-                scenario_harness::dialogs::DIALOG_ENDED,
-                names,
-                "ADR-0055 §11: a split that never heals sends the stale copy's requests \
-                 into a dialog the other copy ended, closed by the 481 they draw",
-            );
+            accept_two_copies_never_healed(cluster, names);
             None
         }
         Incident::SplitHealed => {
@@ -258,10 +253,12 @@ fn wrote_past(cluster: &Cluster, held: &HeldTurn, cut: Cut) -> bool {
 /// re-use, once per dialog, an in-dialog CSeq the dead primary sent before its
 /// backup applied the write, the request drawing its peer's reject, may send
 /// a reliable provisional whose RSeq does not continue the dead primary's, and
-/// may send the caller a non-2xx after the 2xx the dead primary sent her
+/// may send the caller a non-2xx after the 2xx the dead primary sent her, and
+/// may CANCEL once an INVITE the dead primary saw finally answered
 /// (ADR-0055 §11).
 fn kill_inside_the_window(cluster: &mut Cluster, placement: &Placement) {
     accept_reused_cseq(cluster);
+    accept_cancel_of_an_unseen_final(cluster);
     accept_non_2xx_after_the_dead_owners_2xx(cluster);
     accept_unseen_rseq(cluster);
     cluster.kill(&placement.primary, &placement.backup);
@@ -279,32 +276,66 @@ fn accept_reused_cseq(cluster: &mut Cluster) {
     );
 }
 
-/// After a stall, the copy holds unanswered a callee INVITE the dead primary
-/// saw answered and ACKed: no evidence of that 2xx reaches it, so it CANCELs
-/// the INVITE once, the callee answers the CANCEL and keeps its dialog until
-/// its own timers end it (ADR-0055 §11).
-fn accept_cancel_of_an_unseen_answer(cluster: &mut Cluster) {
+/// A kill takes the record of a callee's final with it: the copy holds the
+/// callee's INVITE unanswered and CANCELs it once; the callee answers the
+/// CANCEL and keeps what its final left it — a dialog its own timers end, or
+/// none (ADR-0055 §11).
+fn accept_cancel_of_an_unseen_final(cluster: &mut Cluster) {
     cluster.fh.accept_rfc_deviations_once_per_dialog_where(
         crate::RULE_NO_CANCEL_AFTER_FINAL,
-        cancels_an_invite_answered_2xx,
-        "ADR-0055 §11: after a stall, a callee whose 2xx tag the record never held keeps its \
-         dialog; the copy's CANCEL of its INVITE changes nothing",
+        cancels_an_answered_invite,
+        "ADR-0055 §11: a kill: the copy's one CANCEL of an INVITE the dead primary saw finally \
+         answered changes nothing",
     );
 }
 
-/// Whether `cancel` names an INVITE the dead primary saw answered 2xx: an
-/// entry captured before the kill (`opened_at`) is that 2xx.
-fn cancels_an_invite_answered_2xx(
+/// Whether `cancel` names an INVITE an entry of `earlier` captured at or
+/// before `upto` — before the kill, for a window opened at it — answered with
+/// a final.
+fn cancels_an_answered_invite(
     cancel: &RecordedSipEntry,
     earlier: &[RecordedSipEntry],
-    opened_at: u64,
+    upto: u64,
 ) -> bool {
     let Ok(SipMessage::Request(cancel)) = CustomParser::new().parse(&cancel.raw) else {
         return false;
     };
-    let answered = |resp: &SipResponse| resp.from().tag() == cancel.from().tag();
     let key = (cancel.call_id().as_str(), cancel.cseq().seq());
-    answered_before_the_kill(earlier, opened_at, key, None, answered)
+    let ours =
+        |resp: &SipResponse| resp.status() >= 200 && resp.from().tag() == cancel.from().tag();
+    answered_before(earlier, upto, key, None, ours)
+}
+
+/// A split that never heals leaves two copies acting, each in a degraded mode
+/// only a leak check judges (ADR-0055 §11): the stale copy's requests into a
+/// dialog the other copy ended, closed by the 481 they draw; one copy's CANCEL
+/// of an INVITE the other copy saw answered; one copy's non-2xx after the 2xx
+/// the other copy sent the caller, which she discards; and one copy's BYE of a
+/// caller dialog it holds early, which the other copy answered.
+fn accept_two_copies_never_healed(cluster: &mut Cluster, names: &[String]) {
+    cluster.fh.accept_dialog_verdicts(
+        scenario_harness::dialogs::DIALOG_ENDED,
+        names,
+        "ADR-0055 §11: a split that never heals sends the stale copy's requests \
+         into a dialog the other copy ended, closed by the 481 they draw",
+    );
+    cluster.fh.accept_rfc_deviations_once_per_dialog_where(
+        crate::RULE_NO_CANCEL_AFTER_FINAL,
+        |cancel, earlier, _| cancels_an_answered_invite(cancel, earlier, u64::MAX),
+        "ADR-0055 §11: a split that never heals: one copy CANCELs an INVITE the other copy \
+         saw answered",
+    );
+    cluster.fh.accept_rfc_deviations_from_now_where(
+        RULE_UNACKED_NON_2XX,
+        |final_, earlier, _| non_2xx_after_a_2xx(final_, earlier, None, u64::MAX),
+        "ADR-0055 §11: a split that never heals: one copy's non-2xx after the 2xx the other \
+         copy sent, discarded",
+    );
+    cluster.fh.accept_rfc_deviations_once_per_dialog(
+        "no-bye-outside-or-early-dialog",
+        "ADR-0055 §11: a split that never heals: one copy BYEs a caller dialog it holds early, \
+         which the other copy answered",
+    );
 }
 
 /// The non-2xx a node without the dead primary's record sends the caller
@@ -329,37 +360,45 @@ fn non_2xx_after_the_dead_owners_2xx(
     earlier: &[RecordedSipEntry],
     opened_at: u64,
 ) -> bool {
-    let caller: Option<std::net::SocketAddr> = ALICE.parse().ok();
+    non_2xx_after_a_2xx(final_, earlier, ALICE.parse().ok(), opened_at)
+}
+
+/// Whether `final_` is a non-2xx to an INVITE, sent to `to` when it is
+/// stated, after a 2xx to that INVITE sent there and captured at or before
+/// `upto`.
+fn non_2xx_after_a_2xx(
+    final_: &RecordedSipEntry,
+    earlier: &[RecordedSipEntry],
+    to: Option<std::net::SocketAddr>,
+    upto: u64,
+) -> bool {
     let Ok(SipMessage::Response(resp)) = CustomParser::new().parse(&final_.raw) else {
         return false;
     };
+    if to.is_some_and(|to| final_.to != to) {
+        return false;
+    }
+    let invite = (resp.call_id().as_str(), resp.cseq().seq());
+    let answer = |r: &SipResponse| (200..300).contains(&r.status());
     resp.status() >= 300
         && resp.cseq().method() == Method::Invite
-        && Some(final_.to) == caller
-        && answered_before_the_kill(
-            earlier,
-            opened_at,
-            (resp.call_id().as_str(), resp.cseq().seq()),
-            caller,
-            |_| true,
-        )
+        && answered_before(earlier, upto, invite, to, answer)
 }
 
-/// Whether an entry of `earlier` captured at or before `opened_at` — before
-/// the kill — is a 2xx to the INVITE `invite` names (its Call-ID and CSeq
-/// number), sent to `to` when it is stated, and `also` holds of it.
-fn answered_before_the_kill(
+/// Whether an entry of `earlier` captured at or before `upto` is a response
+/// to the INVITE `invite` names (its Call-ID and CSeq number), sent to `to`
+/// when it is stated, of which `also` holds.
+fn answered_before(
     earlier: &[RecordedSipEntry],
-    opened_at: u64,
+    upto: u64,
     invite: (&str, u32),
     to: Option<std::net::SocketAddr>,
     also: impl Fn(&SipResponse) -> bool,
 ) -> bool {
     let parser = CustomParser::new();
-    earlier.iter().filter(|e| e.seq <= opened_at && to.is_none_or(|to| e.to == to)).any(|entry| {
+    earlier.iter().filter(|e| e.seq <= upto && to.is_none_or(|to| e.to == to)).any(|entry| {
         let Ok(SipMessage::Response(resp)) = parser.parse(&entry.raw) else { return false };
-        (200..300).contains(&resp.status())
-            && resp.cseq().method() == Method::Invite
+        resp.cseq().method() == Method::Invite
             && resp.cseq().seq() == invite.1
             && resp.call_id().as_str() == invite.0
             && also(&resp)

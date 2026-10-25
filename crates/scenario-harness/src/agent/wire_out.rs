@@ -32,4 +32,17 @@ impl Agent {
             let _ = self.send_bytes(&wire, dst).await;
         }
     }
+
+    /// When a 2xx this UA sent is due again for want of its ACK (RFC 3261
+    /// §13.3.1.4).
+    pub(crate) fn next_2xx_due(&self) -> Option<tokio::time::Instant> {
+        self.txn.next_2xx_due()
+    }
+
+    /// Send again every 2xx due for want of its ACK (RFC 3261 §13.3.1.4).
+    pub(crate) async fn send_due_2xx(&self) {
+        for (wire, dst) in self.txn.take_due_2xx(tokio::time::Instant::now()) {
+            let _ = self.send_bytes(&wire, dst).await;
+        }
+    }
 }

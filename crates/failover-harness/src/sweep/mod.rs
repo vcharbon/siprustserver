@@ -12,10 +12,12 @@
 //! dialog, an in-dialog CSeq the dead primary sent before its backup applied
 //! the write — so may the node answering a response of a call that had no
 //! backup — and may send a reliable provisional whose RSeq cannot continue
-//! the dead primary's. After a stall, the copy may CANCEL once a callee INVITE
-//! the dead primary saw answered 2xx. Every kill of the primary and a healed
-//! split accept the §4 clean end's BYE into a dialog the other owner ended,
-//! closed by its 481 (ADR-0055 §11).
+//! the dead primary's. After a kill, the copy may CANCEL once a callee INVITE
+//! the dead primary saw finally answered. Every kill of the primary and a
+//! healed split accept the §4 clean end's BYE into a dialog the other owner
+//! ended, closed by its 481. A split that never heals is judged on leaks,
+//! cleanup and the CDR count: the two copies' degraded-mode findings are
+//! accepted there alone (ADR-0055 §11).
 //!
 //! A cell is named `<shape>/<incident>/t<k>-<point>`. The cells that fail
 //! before their correction lands are listed in a [`Ratchet`] with the decision

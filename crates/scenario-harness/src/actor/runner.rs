@@ -455,6 +455,7 @@ async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), StepError> {
     let mut inbox = st.inbox.take().unwrap_or_else(|| Inbox::Own(agent.clone()));
     loop {
         let give_up_at = give_up::due(st);
+        let retransmit_at = st.retransmit_due(); // a request's timer, or a 2xx awaiting its ACK
         tokio::select! {
             inbound = inbox.recv() => {
                 match inbound {
@@ -536,8 +537,7 @@ async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), StepError> {
             _ = super::held_acks::wait_held_ack(&st.held_acks), if !st.held_acks.is_empty() => {
                 super::held_acks::fire_due_held_ack(st).await?;
             }
-            // A request awaiting its answer is retransmitted (RFC 3261 §17.1.1.2, §17.1.2.2).
-            _ = super::client_retransmit::wait(&st.retransmits), if !st.retransmits.is_empty() => {
+            _ = super::client_retransmit::wait(retransmit_at), if retransmit_at.is_some() => {
                 super::client_retransmit::fire(st).await?;
             }
         }

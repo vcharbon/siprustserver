@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::RuleAction;
-use call::helpers::raise_sequences;
+use call::helpers::{keep_dialogs, raise_sequences};
 use call::{Call, Direction, RelayOwner, RequestRecord};
 
 use super::super::interpret::process_result;
@@ -26,7 +26,8 @@ use crate::turn_scope::TurnScope;
 /// already Terminated (the edge would be vacuous and the ObligationSet would never
 /// settle the CDR / limiter / RemoveCall). The CDR + limiter release + propagated
 /// delete all ride `process_result`, exactly as a primary-served BYE would. The
-/// discharged body keeps the higher of both views' dialog sequences.
+/// discharged body keeps the higher of both views' dialog sequences, and the
+/// dialogs only this node's copy holds.
 ///
 /// Every re-INVITE this node relayed and the record holds open draws one
 /// final for its originator (RFC 3261 §15.1.2), from the server transaction
@@ -52,7 +53,7 @@ pub(super) async fn discharge_folded_terminal(
     for key in answered_there.iter().filter_map(relayed_server_key) {
         let _ = ctx.txn.relinquish_server(key).await;
     }
-    let mut result = HandlerResult::new(raise_sequences(terminal, before));
+    let mut result = HandlerResult::new(keep_dialogs(raise_sequences(terminal, before), before));
     let mut turn = TurnScope::of(ctx.id_gen.turn()).with_faults(ctx.wire_faults.snapshot());
     let owners = ctx.owners(call_ref);
     let rounds = Rounds { record: before, rounds: ours, owners: &owners };

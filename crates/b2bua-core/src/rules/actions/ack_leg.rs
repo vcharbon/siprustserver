@@ -118,7 +118,8 @@ impl ActionExecutor<'_> {
     /// ([`b2bua_sdk::model::RuleAction::AckLeg`]): a body-bearing ACK carries a
     /// delayed-offer answer (RFC 3261 §13.2.2.4), its type `application/sdp`
     /// when none is given; an empty ACK stays a bare ACK — no body, no
-    /// Content-Type.
+    /// Content-Type — unless the 2xx made an offer the ACK must answer, which
+    /// it then answers rejecting every stream (RFC 3264 §6).
     pub(super) fn ack_authored(
         &mut self,
         call: &mut Call,
@@ -128,7 +129,12 @@ impl ActionExecutor<'_> {
     ) {
         let (bytes, content_type, author, descriptors) = super::dispatch::parts(body);
         if bytes.is_empty() {
-            self.ack_own_bare(call, fx, leg_id);
+            let owed = call::helpers::find_leg(call, leg_id).and_then(relay::offer_owed_in_ack);
+            if owed.is_some() {
+                self.ack_rejecting(call, fx, leg_id);
+            } else {
+                self.ack_own_bare(call, fx, leg_id);
+            }
             return;
         }
         let ct = content_type.and_then(relay::media_type).unwrap_or_else(relay::sdp);

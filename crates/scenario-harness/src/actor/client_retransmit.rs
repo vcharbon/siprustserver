@@ -3,7 +3,8 @@
 //! §17.1.1.2, §17.1.2.2): a re-INVITE on Timer A — after T1, doubling —
 //! until any response or Timer B; a PRACK on Timer E — after T1, doubling up
 //! to T2 — until its final or Timer F. Both timers end the retransmission at
-//! 64·T1.
+//! 64·T1. A 2xx the leg sent to an INVITE goes again until its ACK
+//! (§13.3.1.4), on the ladder its endpoint keeps.
 
 use std::time::Duration;
 
@@ -51,17 +52,27 @@ pub(super) fn prack_sent(st: &mut ActorState<'_>, cseq: u32, txn: InDialogTxn, n
     st.retransmits.push(Pending::sent(cseq, Retransmitted::Prack(Box::new(txn)), now));
 }
 
-/// Park until the earliest timer is due (or forever if none).
-pub(super) async fn wait(pending: &[Pending]) {
-    match pending.iter().map(|p| p.next).min() {
+impl ActorState<'_> {
+    /// When the leg next owes a retransmission: a request's timer, or a 2xx
+    /// its endpoint repeats for want of the ACK.
+    pub(super) fn retransmit_due(&self) -> Option<Instant> {
+        let requests = self.retransmits.iter().map(|p| p.next).min();
+        requests.into_iter().chain(self.agent.next_2xx_due()).min()
+    }
+}
+
+/// Park until `at` (or forever if none).
+pub(super) async fn wait(at: Option<Instant>) {
+    match at {
         Some(at) => tokio::time::sleep_until(at).await,
         None => std::future::pending().await,
     }
 }
 
-/// Retransmit every request whose timer is due and drop those whose
-/// transaction timed out.
+/// Send again every 2xx due for want of its ACK and every request whose timer
+/// is due, and drop the requests whose transaction timed out.
 pub(super) async fn fire(st: &mut ActorState<'_>) -> Result<(), StepError> {
+    st.agent.send_due_2xx().await;
     let now = Instant::now();
     st.retransmits.retain(|p| p.until > now);
     for i in 0..st.retransmits.len() {

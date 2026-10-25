@@ -87,6 +87,9 @@ pub(super) async fn reject_initial(
 /// `answered_reinvites` set is drained in lockstep for hygiene.
 pub(super) fn discharge_on_teardown(st: &mut ActorState<'_>, now: Instant) {
     st.answered_reinvites.clear();
+    // A re-INVITE still pending outlives this actor: its endpoint ACKs a
+    // non-2xx final crossing the BYE (RFC 3261 §17.1.1.3).
+    st.sent_reinvite_txns.values().for_each(crate::InDialogTxn::abandon);
     st.obs.record(Observation::DialogTornDown { leg: st.role }, now);
 }
 

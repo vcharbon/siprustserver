@@ -123,7 +123,7 @@ pub use request_records::{
     take_overdue_held, take_retired_owed, Answers, RecordHolder,
 };
 pub use resolved::{response_origin, Resolved, ResponseFacts, ResponseOrigin, UNRESOLVED};
-pub use sequence::{holds_records_of, raise_sequences};
+pub use sequence::{holds_records_of, keep_dialogs, raise_sequences};
 pub use services::{
     promote_pem_promoted, promote_pem_state, promote_pem_window_open, record_relay_first_18x_value,
     refer_processed_locally, relay_first_18x_first_relayed, relay_first_18x_messages,

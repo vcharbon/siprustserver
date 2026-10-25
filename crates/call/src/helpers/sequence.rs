@@ -90,3 +90,20 @@ fn raise_leg(leg: &mut Leg, incoming: &Call) {
         }
     }
 }
+
+/// `ending` with every dialog `held` holds and `ending` lacks, on the leg both
+/// hold, kept as `held` holds it: a record that ends the call names every
+/// dialog either copy opened (ADR-0055 §7).
+pub fn keep_dialogs(mut ending: Call, held: &Call) -> Call {
+    let keep = |leg: &mut Leg| {
+        let Some(mine) = find_leg(held, &leg.leg_id) else { return };
+        for d in mine.dialogs.iter() {
+            if leg.dialogs.by_tags(&d.our_tag, &d.peer_tag).is_none() {
+                leg.dialogs.insert(d.clone());
+            }
+        }
+    };
+    keep(&mut ending.a_leg);
+    ending.b_legs.iter_mut().for_each(keep);
+    ending
+}

@@ -6,6 +6,7 @@
 //! expectation, the parked-request pick, and message templates.
 //! Shared plan/template builders live in [`testkit`].
 
+mod abandoned_reinvite;
 mod auth;
 mod body_expect;
 mod cancel_race;

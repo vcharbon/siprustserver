@@ -2,10 +2,10 @@
 //! To-tag no live dialog of an already confirmed b-leg carries is ACKed and
 //! its dialog BYEd, once per straggler; a repeat is re-ACKed with the same ACK.
 //! The straggler is a retired dialog of the leg ([`call::RetiredDialog`]): its
-//! INVITE record keeps the ACK's branch, and the BYE, continuing its own
+//! INVITE record keeps the ACK's branch and bytes, and the BYE, continuing its own
 //! sequence, is a request record of its own until it settles (ADR-0055 §2).
 
-use call::{Call, Dialog, DialogState, RetiredDialog};
+use call::{Call, Dialog, DialogState, RetainedEmission, RetiredDialog};
 use sip_message::generators::{self, GenerateAckFor2xxOpts};
 use sip_message::header;
 
@@ -66,7 +66,12 @@ impl ActionExecutor<'_> {
             straggler.remote_target = target;
         }
         straggler.route_set = self.dialog_route_set(uac_route_set(resp), &call.call_ref, leg_id);
-        // Released already: its ACK left, its branch kept on the INVITE record.
+        // Released already: its ACK left, re-passed as it left (§13.2.2.4).
+        if let Some(first) = call::helpers::emitted_ack(&straggler) {
+            let label = format!("ACK (fork straggler {tag}, 2xx retransmit) → {leg_id}");
+            fx.outbound.push(super::ladder::repeat_of(first, label, leg_id));
+            return;
+        }
         let released = call::helpers::ack_branch(&straggler).map(str::to_string);
         let offered_reliably = relay::offered_reliably(call, leg_id, &tag, i64::from(invite_cseq));
         let answer = (!relay::acked_invite_carries_offer(leg, &straggler) && !offered_reliably)
@@ -100,6 +105,11 @@ impl ActionExecutor<'_> {
         let dest = relay::target_dest(&dialog.remote_target);
         let (ack, dest) =
             relay::apply_b_leg_egress(self.config, leg_id, &dialog.route_set, ack, dest);
+        let retained = RetainedEmission::on_trigger(
+            ack.image().to_vec(),
+            dest.clone(),
+            call::Repeated::request("ACK"),
+        );
         fx.outbound.push(OutboundSipEffect {
             body: OutboundBody::Request(ack),
             mode: OutboundTxnMode::Raw,
@@ -123,6 +133,7 @@ impl ActionExecutor<'_> {
             .invite
             .get_or_insert_with(Default::default);
         exchange.ack_branch = Some(ack_branch);
+        exchange.emitted_ack = Some(retained);
         if !matches!(straggler.state, DialogState::Retired(_)) {
             straggler.state = DialogState::Retired(RetiredDialog::default());
         }

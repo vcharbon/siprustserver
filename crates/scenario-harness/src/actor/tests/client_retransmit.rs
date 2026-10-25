@@ -139,3 +139,55 @@ async fn a_reinvite_left_unanswered_is_retransmitted_until_a_response() {
     );
     h.finish().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_2xx_left_unacked_is_retransmitted_until_its_ack() {
+    let h = Harness::new("actor-2xx-until-ack").describe(
+        "bob answers alice's INVITE 200; alice ACKs only after 1.2 s, so bob's 2xx \
+         goes again once at T1 (RFC 3261 §13.3.1.4); the call then completes",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let alice_task = {
+        let alice = alice.clone();
+        let bob = bob.clone();
+        tokio::spawn(async move {
+            let mut call = alice.invite(&bob).with_sdp(OFFER_SDP).send().await;
+            call.expect(200).await;
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            let mut dialog = call.ack().await;
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            let mut bye = dialog.bye().await;
+            bye.expect(200).await;
+        })
+    };
+
+    let call = CallPlan {
+        actors: vec![ActorSpec {
+            role: "bob",
+            agent: bob.clone(),
+            disposition: Disposition::Answer,
+            media: MediaState::answer(ANSWER_SDP),
+            goals: vec![],
+            invite_targets: vec![],
+            via: None,
+            feed: CtxFeed::default(),
+            cseq: None,
+            delayed: vec![],
+            claim: None,
+        }],
+        plan: vec![phase("established", |s| s.leg_at_least("bob", LegPhase::Confirmed))],
+        settle: SettleBarrier::default_ceiling(),
+        automatics: Automatics::default(),
+        delta_policy: None,
+        reception_observer: None,
+    };
+
+    let verdict = run_call(call, Duration::from_secs(5)).await;
+    assert!(verdict.is_ok(), "the call completes, got {verdict:?}");
+    alice_task.await.expect("alice's side completes");
+    let answers = alice.wire_view().iter().filter(|e| e.raw.starts_with(b"SIP/2.0 200")).count();
+    assert_eq!(answers, 3, "the 2xx, its one repeat before the ACK, and the BYE's 200");
+    h.finish().await;
+}
