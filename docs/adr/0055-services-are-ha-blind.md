@@ -420,6 +420,9 @@ number of takeovers unshifted.
   - a kill (user ruling): a copy's one CANCEL of a callee's INVITE the dead
     owner saw finally answered, 2xx or not; the callee answers it and keeps
     what its final left it, a dialog its own timers end or none;
+  - a stall (user ruling): a copy's repeat of the caller's 2xx that differs
+    from the dead owner's only in its own Contact, every other header field
+    and the body unchanged; the Contact of a node is its own;
   - a kill of the primary, and a split that heals (user ruling): the §4 clean
     end's BYE into a dialog the other owner already ended, closed by its 481;
   - a kill inside the replication window: a copy re-uses a CSeq the dead

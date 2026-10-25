@@ -15,7 +15,8 @@
 //! the dead primary's. After a kill, the copy may CANCEL once a callee INVITE
 //! the dead primary saw finally answered. Every kill of the primary and a
 //! healed split accept the §4 clean end's BYE into a dialog the other owner
-//! ended, closed by its 481. A split that never heals is judged on leaks,
+//! ended, closed by its 481. After a stall, the copy's repeat of the caller's
+//! 2xx may differ from the dead owner's in its own Contact alone. A split that never heals is judged on leaks,
 //! cleanup and the CDR count: the two copies' degraded-mode findings are
 //! accepted there alone (ADR-0055 §11).
 //!
@@ -31,6 +32,7 @@
 
 pub mod catalogue;
 mod cell;
+mod contact_repeat;
 mod parties;
 mod ratchet;
 
