@@ -26,6 +26,7 @@ use super::ua::media_type;
 use super::Agent;
 
 mod fallible;
+mod retransmit;
 
 /// A confirmed dialog. In-dialog requests auto-increment CSeq and route to the
 /// remote target. `Clone` so the load driver can snapshot it into its teardown
@@ -80,14 +81,12 @@ impl Dialog {
         Dialog { agent, fallback_addr, dialog, cseq_dev: None }
     }
 
-    /// Declare a CSeq relative-pattern deviation for this dialog's outbound
-    /// in-dialog requests (offset / jump / reuse relative to the stack's base).
-    /// Captured out-of-pattern CSeq anomalies replay without freezing absolute
-    /// numbers. ACK/CANCEL are unaffected (they reuse the related request's
-    /// CSeq, RFC 3261 §12.2.1.1). Panics if the pattern declares more than one
-    /// op at the same step. Ops at steps the dialog never reaches are surfaced
-    /// by [`assert_deviations_consumed`](Self::assert_deviations_consumed) and a
-    /// Drop-time warning.
+    /// Declare a CSeq relative-pattern deviation for this dialog's outbound in-dialog requests
+    /// (offset / jump / reuse relative to the stack's base). Captured out-of-pattern CSeq anomalies
+    /// replay without freezing absolute numbers. ACK/CANCEL are unaffected (they reuse the related
+    /// request's CSeq, RFC 3261 §12.2.1.1). Panics if the pattern declares more than one op at the
+    /// same step. Ops at steps the dialog never reaches are surfaced by
+    /// [`assert_deviations_consumed`](Self::assert_deviations_consumed) and a Drop-time warning.
     pub fn set_cseq_pattern(&mut self, pattern: CseqPattern) {
         self.cseq_dev = Some(shared_cseq_applier(pattern));
     }
@@ -303,17 +302,15 @@ impl ClientReinvite {
             .map_err(|e| e.awaiting(|| awaited_response(status, &self.original_invite)))
     }
 
-    /// CANCEL this still-pending re-INVITE (RFC 3261 §9.1) — the in-dialog
-    /// mirror of [`ClientInvite::cancel`](super::ClientInvite::cancel). The
-    /// CANCEL reuses the re-INVITE's Request-URI / Call-ID / From / To / topmost
-    /// Via branch, echoes its Route set, uses the re-INVITE's CSeq *number* with
-    /// method `CANCEL`, and goes to the SAME wire destination the re-INVITE
-    /// took. Returns a client transaction to `expect(200)` on; the matching
-    /// `487 Request Terminated` for the re-INVITE arrives on this same UA via
-    /// [`ClientReinvite::expect`]. Per §9, this ends only the renegotiation —
-    /// the established dialog (and the call through a B2BUA) must survive. CANCEL
-    /// is a dedicated primitive: it takes no template in v1 (a captured CANCEL's
-    /// frozen-header quirks are not replayable yet).
+    /// CANCEL this still-pending re-INVITE (RFC 3261 §9.1) — the in-dialog mirror of
+    /// [`ClientInvite::cancel`](super::ClientInvite::cancel). The CANCEL reuses the re-INVITE's
+    /// Request-URI / Call-ID / From / To / topmost Via branch, echoes its Route set, uses the
+    /// re-INVITE's CSeq *number* with method `CANCEL`, and goes to the SAME wire destination the
+    /// re-INVITE took. Returns a client transaction to `expect(200)` on; the matching `487 Request
+    /// Terminated` for the re-INVITE arrives on this same UA via [`ClientReinvite::expect`]. Per
+    /// §9, this ends only the renegotiation — the established dialog (and the call through a B2BUA)
+    /// must survive. CANCEL is a dedicated primitive: it takes no template in v1 (a captured
+    /// CANCEL's frozen-header quirks are not replayable yet).
     pub async fn cancel(&self) -> InDialogTxn {
         unwrap_step(try_send_cancel(&self.agent, &self.original_invite, self.wire_dst, &[]).await);
         InDialogTxn::new(
@@ -587,18 +584,18 @@ impl<'a> InDialogRequest<'a> {
             &apply_name_forms(msg.headers(), &self.name_forms),
             &self.remote_emits,
         );
-        self.agent.try_send_emitted(&msg, &emitted_wire(&msg, &headers), dst).await?;
-        Ok((
-            InDialogTxn::new(
-                self.agent.clone(),
-                // A re-INVITE's non-2xx final takes a txn-layer ACK
-                // (§17.1.1.3) — retain the request so the txn can build it.
-                matches!(self.method, InDialogMethod::Invite).then(|| request.clone()),
-                dst,
-                request_label(None, &request),
-            ),
-            request,
-        ))
+        let wire = emitted_wire(&msg, &headers);
+        self.agent.try_send_emitted(&msg, &wire, dst).await?;
+        let mut txn = InDialogTxn::new(
+            self.agent.clone(),
+            // A re-INVITE's non-2xx final takes a txn-layer ACK
+            // (§17.1.1.3) — retain the request so the txn can build it.
+            matches!(self.method, InDialogMethod::Invite).then(|| request.clone()),
+            dst,
+            request_label(None, &request),
+        );
+        txn.wire = wire;
+        Ok((txn, request))
     }
 }
 
@@ -620,6 +617,8 @@ pub struct InDialogTxn {
     /// The request as a timed-out expect names it
     /// ([`request_label`](super::client_txn::request_label)).
     label: String,
+    /// The datagram the request left as, for a retransmission; empty for a CANCEL.
+    wire: Vec<u8>,
 }
 
 impl InDialogTxn {
@@ -629,7 +628,7 @@ impl InDialogTxn {
         wire_dst: SocketAddr,
         label: String,
     ) -> Self {
-        InDialogTxn { agent, invite, wire_dst, label }
+        InDialogTxn { agent, invite, wire_dst, label, wire: Vec::new() }
     }
 
     /// The (re-)INVITE this transaction put on the wire — `None` for a

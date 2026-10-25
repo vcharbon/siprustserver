@@ -264,9 +264,11 @@ The CDR carries the `call_ref` and the call incarnation. No CDR key, no
 consumer dedupe and no discharged marker: the node that ends the call writes
 its CDR — the primary, a takeover copy whose primary departed (ADR-0047 D8),
 the departure sweep, the TTL reap; a copy whose primary is still a member
-defers it to the primary (ADR-0020 X3). An HA corner case may lose a CDR or
-write a second one, and both are accepted: a primary killed after ending a call
-whose end its backup never applied, a split.
+defers it to the primary (ADR-0020 X3). An HA corner case may write a second
+CDR, and it is accepted: a primary killed after ending a call whose end its
+backup never applied, a split. By user ruling a kill of a primary with a backup
+never loses the CDR: a split may, and a call with no backup is lost with its
+primary as on a non-HA B2BUA.
 
 The departure sweep takes over every call of a departed primary with an INVITE
 transaction to serve, and every `Terminating` one with any request record open
@@ -276,8 +278,10 @@ with its CDR, which may be the second (the primary wrote one when it ended the
 call, and only its delete was lost). By user ruling, a quiet call of a departed
 primary stays reactive (ADR-0014 §1): no eager takeover. The trade-off is a
 ghost call whose parties stay silent: it ends at the endpoints' own timers
-(session refresh, RTP inactivity) or at the replica's TTL, with no BYE and no
-CDR.
+(session refresh, RTP inactivity) and at the replica's TTL, with no BYE; the
+reap that evicts the replica of a departed primary's call ends it, off the
+wire, with its CDR. A takeover copy that sheds once the transactions it served
+cleared leaves the call to that reap the same way.
 
 ### 6. One author per ordinal: identity, compared for equality
 
@@ -383,9 +387,10 @@ number of takeovers unshifted.
   media-server leg) is cut at every turn point, each split into write in the
   change log, effect left and write applied at the backup, by these incidents:
   - primary killed, backup killed, split, split then healed: each cell ends
-    with an RFC-clean, fully terminated call, one CDR, full cleanup; a split
-    cell declares the duplicate-CSeq window of §8, and may leave no CDR or two
-    (§5);
+    with an RFC-clean, fully terminated call, one CDR, full cleanup; a cell
+    killing the primary may leave two (the dead primary's and the survivor's,
+    §5), never none; a split cell declares the duplicate-CSeq window of §8,
+    and may leave no CDR or two (§5);
   - replication stalled past the cap of §3, then a kill: a caller whose INVITE
     transaction saw neither final nor provisional from the copy is answered by
     its own Timer B, and a callee whose 2xx tag the call record never held keeps
@@ -394,7 +399,8 @@ number of takeovers unshifted.
     CDR or two (the
     stalled primary's and the departure sweep's, §5), never none;
   - a backlog over the high-water mark, or a backup at its memory ceiling, then
-    a kill: a call with no backup is lost as on a non-HA B2BUA.
+    a kill: a call with no backup is lost as on a non-HA B2BUA, its CDR with
+    it.
 
   A split that never heals is not supposed to last: it cuts a representative
   few shapes (the re-INVITE, the REFER), whose cells check the worst case, no
@@ -415,7 +421,11 @@ number of takeovers unshifted.
   - a kill inside the replication window, and a split that heals (user
     ruling): a copy's reliable provisional under the dialog's derived tag whose
     RSeq cannot continue the sequence the dead primary sent (RFC 3262 §4); the
-    call still ends cleanly.
+    call still ends cleanly;
+  - a kill inside the replication window (user ruling, where no 2xx the copy
+    could build would repeat the dead primary's byte for byte): a copy's
+    non-2xx to a caller's INVITE the dead primary answered 2xx before the
+    kill; she discards it (RFC 6026 §8.4) and owes it no ACK.
 
   A consumer adds shapes through the plug-in base (ADR-0049) and nothing else;
   a consumer shape that needs HA code of its own is a defect of this layer.

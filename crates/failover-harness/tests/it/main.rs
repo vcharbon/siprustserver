@@ -35,6 +35,7 @@ mod failover;
 mod failure_dump_names_the_node;
 mod fault_primitives;
 mod forward_flush_never_regresses_backup_progress;
+mod ghost_of_a_departed_primary;
 
 mod held_cancel_takeover;
 mod held_request_takeover;

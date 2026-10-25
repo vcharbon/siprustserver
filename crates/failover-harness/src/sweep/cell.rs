@@ -2,18 +2,19 @@
 //! turn point by one incident, driven until the cluster holds nothing of it,
 //! and judged. Every check panics: the RFC audit and the model invariants when
 //! the harness drops; here, no node holding anything of the call, no limiter
-//! set left, its CDR count — exactly one, up to two in a split cell, at most
-//! one where the incident may lose the call — and the shape's check of it.
+//! set left, its CDR count — exactly one, up to two in a split cell, one or
+//! two where a backed primary is killed, at most one where an unbacked one is
+//! — and the shape's check of it.
 
 use std::time::Duration;
 
 use scenario_harness::actor::run_actor_scenario;
 use scenario_harness::realcall::CallCtx;
 use sip_message::parser::custom::CustomParser;
-use sip_message::{Method, SipMessage, SipParser};
+use sip_message::{Method, SipMessage, SipParser, SipResponse};
 use sip_net_testkit::RecordedSipEntry;
 
-use super::parties::Parties;
+use super::parties::{Parties, ALICE};
 use super::{Incident, SweepShape};
 use crate::cluster::Cluster;
 use crate::roles::Placement;
@@ -81,6 +82,7 @@ pub async fn run_cell(
     let mut heal_pending = false;
     let mut call_ref: Option<String> = None;
     let mut settled = Duration::ZERO;
+    let mut was_clear = false;
     loop {
         tokio::select! {
             biased;
@@ -116,9 +118,13 @@ pub async fn run_cell(
                 let call = call_ref.get_or_insert_with(|| first_call(&cluster, name));
                 let clear = cluster.is_clear_of(call).await;
                 let pending = heal_pending || kill_pending;
-                if (clear && reached.is_none() && !pending) || settled >= SETTLE_BUDGET {
+                // A cluster clear for a whole step: what a party sent as the
+                // cluster forgot the call (a hop ACK) has landed.
+                let quiet = clear && reached.is_none() && !pending;
+                if (quiet && was_clear) || settled >= SETTLE_BUDGET {
                     break;
                 }
+                was_clear = quiet;
             }
         }
     }
@@ -156,12 +162,14 @@ pub async fn run_cell(
 
 /// Whether `n` CDRs of the call are what `incident` may leave (ADR-0055 §5):
 /// one, or for a split call's two copies each one or neither (no CDR is
-/// deduplicated, its loss in a split is accepted), for a stalled primary its
-/// own and the departure sweep's, and for an unbacked kill one or none.
+/// deduplicated, its loss in a split is accepted), for a kill of a backed
+/// primary one or two — the dead primary's and the survivor's — never none,
+/// and for a call with no backup, lost with its primary as on a non-HA
+/// B2BUA, one or none.
 fn cdr_count_accepted(incident: Option<Incident>, n: usize) -> bool {
     match incident {
         Some(Incident::Split | Incident::SplitHealed) => n <= 2,
-        Some(Incident::StalledKilled) => (1..=2).contains(&n),
+        Some(Incident::PrimaryKilled | Incident::StalledKilled) => (1..=2).contains(&n),
         Some(Incident::UnbackedKilled) => n <= 1,
         _ => n == 1,
     }
@@ -248,11 +256,13 @@ fn wrote_past(cluster: &Cluster, held: &HeldTurn, cut: Cut) -> bool {
 
 /// Kill the primary of `placement` inside the replication window: a copy may
 /// re-use, once per dialog, an in-dialog CSeq the dead primary sent before its
-/// backup applied the write, the request drawing its peer's reject, and may
-/// send a reliable provisional whose RSeq does not continue the dead
-/// primary's (ADR-0055 §11).
+/// backup applied the write, the request drawing its peer's reject, may send
+/// a reliable provisional whose RSeq does not continue the dead primary's, and
+/// may send the caller a non-2xx after the 2xx the dead primary sent her
+/// (ADR-0055 §11).
 fn kill_inside_the_window(cluster: &mut Cluster, placement: &Placement) {
     accept_reused_cseq(cluster);
+    accept_non_2xx_after_the_dead_owners_2xx(cluster);
     accept_unseen_rseq(cluster);
     cluster.kill(&placement.primary, &placement.backup);
 }
@@ -282,18 +292,77 @@ fn accept_cancel_of_an_unseen_answer(cluster: &mut Cluster) {
     );
 }
 
-/// Whether `cancel` names an INVITE an entry of `earlier` answered 2xx: the
-/// same Call-ID, From-tag and CSeq number.
-fn cancels_an_invite_answered_2xx(cancel: &RecordedSipEntry, earlier: &[RecordedSipEntry]) -> bool {
+/// Whether `cancel` names an INVITE the dead primary saw answered 2xx: an
+/// entry captured before the kill (`opened_at`) is that 2xx.
+fn cancels_an_invite_answered_2xx(
+    cancel: &RecordedSipEntry,
+    earlier: &[RecordedSipEntry],
+    opened_at: u64,
+) -> bool {
+    let Ok(SipMessage::Request(cancel)) = CustomParser::new().parse(&cancel.raw) else {
+        return false;
+    };
+    let answered = |resp: &SipResponse| resp.from().tag() == cancel.from().tag();
+    let key = (cancel.call_id().as_str(), cancel.cseq().seq());
+    answered_before_the_kill(earlier, opened_at, key, None, answered)
+}
+
+/// The non-2xx a node without the dead primary's record sends the caller
+/// after the 2xx the dead primary sent her: the caller discards it (RFC 6026
+/// §8.4) and owes it no ACK (ADR-0055 §11).
+fn accept_non_2xx_after_the_dead_owners_2xx(cluster: &mut Cluster) {
+    cluster.fh.accept_rfc_deviations_from_now_where(
+        RULE_UNACKED_NON_2XX,
+        non_2xx_after_the_dead_owners_2xx,
+        "ADR-0055 §11: a kill inside the replication window: the caller discards the copy's \
+         non-2xx after the 2xx the dead primary sent her",
+    );
+}
+
+/// The audit rule a caller's unACKed non-2xx INVITE final meets.
+const RULE_UNACKED_NON_2XX: &str = "unacked-invite-non-2xx-final";
+
+/// Whether `final_` is a non-2xx to the caller's INVITE after a 2xx to that
+/// INVITE sent to her before the kill (`opened_at`).
+fn non_2xx_after_the_dead_owners_2xx(
+    final_: &RecordedSipEntry,
+    earlier: &[RecordedSipEntry],
+    opened_at: u64,
+) -> bool {
+    let caller: Option<std::net::SocketAddr> = ALICE.parse().ok();
+    let Ok(SipMessage::Response(resp)) = CustomParser::new().parse(&final_.raw) else {
+        return false;
+    };
+    resp.status() >= 300
+        && resp.cseq().method() == Method::Invite
+        && Some(final_.to) == caller
+        && answered_before_the_kill(
+            earlier,
+            opened_at,
+            (resp.call_id().as_str(), resp.cseq().seq()),
+            caller,
+            |_| true,
+        )
+}
+
+/// Whether an entry of `earlier` captured at or before `opened_at` — before
+/// the kill — is a 2xx to the INVITE `invite` names (its Call-ID and CSeq
+/// number), sent to `to` when it is stated, and `also` holds of it.
+fn answered_before_the_kill(
+    earlier: &[RecordedSipEntry],
+    opened_at: u64,
+    invite: (&str, u32),
+    to: Option<std::net::SocketAddr>,
+    also: impl Fn(&SipResponse) -> bool,
+) -> bool {
     let parser = CustomParser::new();
-    let Ok(SipMessage::Request(cancel)) = parser.parse(&cancel.raw) else { return false };
-    earlier.iter().any(|entry| {
+    earlier.iter().filter(|e| e.seq <= opened_at && to.is_none_or(|to| e.to == to)).any(|entry| {
         let Ok(SipMessage::Response(resp)) = parser.parse(&entry.raw) else { return false };
         (200..300).contains(&resp.status())
             && resp.cseq().method() == Method::Invite
-            && resp.cseq().seq() == cancel.cseq().seq()
-            && resp.call_id().as_str() == cancel.call_id().as_str()
-            && resp.from().tag() == cancel.from().tag()
+            && resp.cseq().seq() == invite.1
+            && resp.call_id().as_str() == invite.0
+            && also(&resp)
     })
 }
 

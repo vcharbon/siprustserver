@@ -39,9 +39,10 @@ struct AcceptanceWindow {
     admits: Option<Admits>,
 }
 
-/// A window's test of an offending message: the message's entry and every
-/// entry captured before it.
-pub type Admits = fn(&RecordedSipEntry, &[RecordedSipEntry]) -> bool;
+/// A window's test of an offending message: the message's entry, every entry
+/// captured before it, and the capture `seq` the window opened after (an
+/// entry at or below it was captured before the window).
+pub type Admits = fn(&RecordedSipEntry, &[RecordedSipEntry], u64) -> bool;
 
 impl AcceptanceWindow {
     /// Whether the message captured at `seq` falls inside this window.
@@ -53,7 +54,8 @@ impl AcceptanceWindow {
     /// its span and admitted by its test.
     fn takes(&self, i: usize, entries: &[RecordedSipEntry]) -> bool {
         let Some(entry) = entries.get(i) else { return false };
-        self.covers(entry.seq) && self.admits.is_none_or(|admits| admits(entry, &entries[..i]))
+        self.covers(entry.seq)
+            && self.admits.is_none_or(|admits| admits(entry, &entries[..i], self.from_seq))
     }
 }
 
@@ -99,22 +101,24 @@ impl RfcAcceptance {
     /// request per dialog: the request is named by its dialog (Call-ID and
     /// tags), method and CSeq, so its copies on every hop count once.
     pub fn open_window_once_per_dialog(&mut self, rule: &str, from_seq: u64) {
-        self.open_window_once_per_dialog_where(rule, from_seq, None);
+        self.open_window_where(rule, from_seq, true, None);
     }
 
-    /// [`open_window_once_per_dialog`](Self::open_window_once_per_dialog),
-    /// accepting only the offending messages `admits` passes.
-    pub fn open_window_once_per_dialog_where(
+    /// An acceptance window for `rule` over every message captured after
+    /// `from_seq`, one request per dialog when `once_per_dialog`, accepting
+    /// only the offending messages `admits` passes when it is stated.
+    pub fn open_window_where(
         &mut self,
         rule: &str,
         from_seq: u64,
+        once_per_dialog: bool,
         admits: Option<Admits>,
     ) {
         let window = AcceptanceWindow {
             rule: rule.to_string(),
             from_seq,
             until_seq: None,
-            once_per_dialog: true,
+            once_per_dialog,
             admits,
         };
         self.windows.push(window);

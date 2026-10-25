@@ -4,8 +4,10 @@
 //! Every cell must end with an RFC-clean, fully terminated call, one CDR and
 //! nothing left on any node or in the limiter; an incident that loses the
 //! call states what the parties are left with instead
-//! ([`Incident::loses_the_call`]), a split's copies and a stalled primary
-//! with the departure sweep may each write a CDR (ADR-0055 §5). A kill inside
+//! ([`Incident::loses_the_call`]); a split's copies may each write a CDR or
+//! none, a killed primary and the node that ends the call after it each one,
+//! never none between them, and a call with no backup at most one
+//! (ADR-0055 §5). A kill inside
 //! the replication window declares its windows: a copy may re-use, once per
 //! dialog, an in-dialog CSeq the dead primary sent before its backup applied
 //! the write — so may the node answering a response of a call that had no
@@ -127,9 +129,10 @@ impl Incident {
     /// Whether the incident may lose the call as a non-HA B2BUA loses it
     /// (ADR-0055 §11): a caller whose INVITE drew nothing from a copy is
     /// answered by its own Timer B, a callee whose dialog no copy holds keeps
-    /// it until its own timers end it. An unbacked call leaves at most one
-    /// CDR; a stalled one its primary's, the departure sweep's, or both.
-    /// Nothing is left on any node or in the limiter either way.
+    /// it until its own timers end it. A stalled call leaves its primary's
+    /// CDR, the one of the node that ends it after, or both, never none; an
+    /// unbacked one at most one. Nothing is left on any node or in the limiter
+    /// either way.
     pub fn loses_the_call(self) -> bool {
         matches!(self, Incident::StalledKilled | Incident::UnbackedKilled)
     }

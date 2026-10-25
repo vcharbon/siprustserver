@@ -274,6 +274,8 @@ pub(super) async fn originate_reinvite(st: &mut ActorState<'_>) -> Result<(), St
     };
     st.sent_reinvites.insert(key.cseq);
     st.sent_reinvite_txns.insert(key.cseq, txn);
+    let retransmitted = super::client_retransmit::Retransmitted::Reinvite;
+    st.retransmits.push(super::client_retransmit::Pending::sent(key.cseq, retransmitted, now));
     // This origination consumes an ordinal in the actor's originated-INVITE
     // space — a scoped delayed automatic resolves against it at the 2xx.
     st.reinvite_ordinals.insert(key.cseq, st.originated_invites);

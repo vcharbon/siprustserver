@@ -38,10 +38,9 @@ pub(super) fn media_type(text: &str) -> header::MediaType {
         .unwrap_or_else(|_| header::MediaType::new(SipStr::owned(text)))
 }
 
-/// The URI a scenario names as text. A test case states identities as strings
-/// (they come from scenario data); the value model is what reaches the wire, and
-/// an address no reader accepts is carried whole so the peer sees what the test
-/// wrote.
+/// The URI a scenario names as text. A test case states identities as strings (they come from
+/// scenario data); the value model is what reaches the wire, and an address no reader accepts is
+/// carried whole so the peer sees what the test wrote.
 pub(super) fn uri_of(text: &str) -> Uri {
     Uri::parse_or_verbatim(&SipStr::owned(text))
 }
@@ -63,10 +62,9 @@ pub(super) fn to_of(uri: &str) -> header::To {
     header::To::new(addr_of(uri))
 }
 
-/// One inbound SIP message surfaced through the §17.2 receive view — a request
-/// (as a UAS-side [`ServerTxn`]) or a response — WITHOUT asserting either the
-/// kind or, for a request, the method. The reactive per-endpoint actor
-/// ([`crate::actor`]) dispatches on this via [`Agent::recv_any`].
+/// One inbound SIP message surfaced through the §17.2 receive view — a request (as a UAS-side
+/// [`ServerTxn`]) or a response — WITHOUT asserting either the kind or, for a request, the method.
+/// The reactive per-endpoint actor ([`crate::actor`]) dispatches on this via [`Agent::recv_any`].
 pub enum Inbound {
     /// A received request, wrapped in its UAS-side transaction.
     Request(ServerTxn),
@@ -74,20 +72,18 @@ pub enum Inbound {
     Response(SipResponse),
 }
 
-/// A stateful fake UA. Cheap to clone (shares the endpoint, the id source, the
-/// transaction layer and the dialog table). The per-transaction handles it
-/// returns carry what a request is composed from; the UA's RFC 3261 §12 dialog
-/// table ([`DialogJudge`]) is fed by every message it sends and sights and
-/// judges every in-dialog request it receives: a scripted receive of a request
-/// on no dialog, an ended one, or out of CSeq order is a
-/// [`StepError::Dialog`], and [`Harness::finish`](super::Harness::finish)
-/// fails on any such verdict a `dialog-…` waiver on this UA does not opt out.
+/// A stateful fake UA. Cheap to clone (shares the endpoint, the id source, the transaction layer
+/// and the dialog table). The per-transaction handles it returns carry what a request is composed
+/// from; the UA's RFC 3261 §12 dialog table ([`DialogJudge`]) is fed by every message it sends and
+/// sights and judges every in-dialog request it receives: a scripted receive of a request on no
+/// dialog, an ended one, or out of CSeq order is a [`StepError::Dialog`], and
+/// [`Harness::finish`](super::Harness::finish) fails on any such verdict a `dialog-…` waiver on
+/// this UA does not opt out.
 #[derive(Clone)]
 pub struct Agent {
-    // Fields are `pub(crate)` so the Send [`crate::loadbind::AgentBinder`] can
-    // construct an `Agent` the same way `Harness::agent_with_roles` does,
-    // without the `!Send` `Harness` wrapper. The fluent API is the public
-    // surface.
+    // Fields are `pub(crate)` so the Send [`crate::loadbind::AgentBinder`] can construct an `Agent`
+    // the same way `Harness::agent_with_roles` does, without the `!Send` `Harness` wrapper. The
+    // fluent API is the public surface.
     pub(crate) name: String,
     pub(crate) addr: SocketAddr,
     /// Dialog URI (`sip:name@ip`, no port) — used for From/To.
@@ -112,8 +108,7 @@ pub struct Agent {
     pub(crate) holdback: Arc<Mutex<VecDeque<Result<SipMessage, StepError>>>>,
     /// This UA's dialog table and the verdicts it recorded. Shared across clones.
     pub(crate) dialogs: Arc<DialogJudge>,
-    /// The ordinal source of the run's scripted waits, shared by every agent
-    /// of one harness.
+    /// The ordinal source of the run's scripted waits, shared by every agent of one harness.
     pub(crate) steps: StepCounter,
     /// The side this UA stands on when it answers an INVITE: its own CSeq
     /// sequence in that dialog starts at [`Party::first_cseq`].
@@ -225,6 +220,11 @@ impl Agent {
     /// [`wire_view`](Self::wire_view), in the same order.
     pub fn tu_view(&self) -> Vec<WireEntry> {
         self.txn.tu_view()
+    }
+
+    /// Whether `prack` names a reliable provisional this UA sent (RFC 3262 §3).
+    pub fn prack_names_a_sent_provisional(&self, prack: &SipRequest) -> bool {
+        self.dialogs.prack_names_a_sent_provisional(prack)
     }
 
     /// The verdict this UA's dialog table passed on `request` when it was

@@ -437,6 +437,9 @@ pub(super) async fn react_in_dialog_request(
                 uas.respond(481, "Call/Transaction Does Not Exist").try_send().await?;
                 return Ok(());
             }
+            if super::prack_rx::after_the_leg(st) {
+                return uas.respond(200, "OK").try_send().await;
+            }
             let prack_tag = uas.request().to().tag().map(str::to_owned);
             st.ctx.anchor(&st.agent, "prack", uas.request());
             uas.respond(200, "OK").try_send().await?;

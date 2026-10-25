@@ -19,7 +19,7 @@ use crate::effects::{
 use crate::turn_probe::{TurnMark, TurnPoint};
 
 /// Whether `call_ref`'s primary is another node that has departed.
-fn primary_departed(ctx: &RouterCtx, call_ref: &str) -> bool {
+pub(super) fn primary_departed(ctx: &RouterCtx, call_ref: &str) -> bool {
     match (&ctx.departed, call::call_ref_primary(call_ref)) {
         (Some(departed), Some(primary)) => primary != ctx.config.self_ordinal && departed(primary),
         _ => false,

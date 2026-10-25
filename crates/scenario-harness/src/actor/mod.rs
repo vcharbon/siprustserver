@@ -44,6 +44,7 @@
 mod accept_delta;
 mod answer;
 mod barrier;
+mod client_retransmit;
 mod delta;
 mod drive;
 mod ending;

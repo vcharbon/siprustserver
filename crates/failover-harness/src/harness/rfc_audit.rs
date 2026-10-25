@@ -32,11 +32,20 @@ impl FailoverHarness {
     ) {
         debug_assert!(!justification.trim().is_empty(), "acceptance needs a justification");
         let from = self.harness.recording().channel().snapshot().iter().map(|s| s.seq).max();
-        self.rfc_acceptance.open_window_once_per_dialog_where(
-            rule,
-            from.unwrap_or(0),
-            Some(admits),
-        );
+        self.rfc_acceptance.open_window_where(rule, from.unwrap_or(0), true, Some(admits));
+    }
+
+    /// [`accept_rfc_deviations_from_now`](Self::accept_rfc_deviations_from_now),
+    /// accepting only the offending messages `admits` passes.
+    pub fn accept_rfc_deviations_from_now_where(
+        &mut self,
+        rule: &str,
+        admits: Admits,
+        justification: &str,
+    ) {
+        debug_assert!(!justification.trim().is_empty(), "acceptance needs a justification");
+        let from = self.harness.recording().channel().snapshot().iter().map(|s| s.seq).max();
+        self.rfc_acceptance.open_window_where(rule, from.unwrap_or(0), false, Some(admits));
     }
 
     /// Accept the dialog verdicts of `rule` (a `dialog-…` rule) each UA of

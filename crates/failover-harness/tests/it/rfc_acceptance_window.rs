@@ -171,7 +171,7 @@ async fn a_deviation_the_windows_test_admits_is_accepted() {
     let mut dialog = establish(&alice, &bob).await;
     fh.accept_rfc_deviations_once_per_dialog_where(
         RULE_CSEQ_IN_DIALOG_ORDER,
-        |entry, earlier| !earlier.is_empty() && !entry.raw.is_empty(),
+        |entry, earlier, _| !earlier.is_empty() && !entry.raw.is_empty(),
         JUSTIFICATION,
     );
     commit_cseq_reuse(&mut dialog, &alice, &bob).await;
@@ -191,7 +191,7 @@ async fn a_deviation_the_windows_test_refuses_still_gates() {
     let mut dialog = establish(&alice, &bob).await;
     fh.accept_rfc_deviations_once_per_dialog_where(
         RULE_CSEQ_IN_DIALOG_ORDER,
-        |_, _| false,
+        |_, _, _| false,
         JUSTIFICATION,
     );
     commit_cseq_reuse(&mut dialog, &alice, &bob).await;

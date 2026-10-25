@@ -15,6 +15,7 @@ mod flush_body;
 mod materialise;
 mod memory;
 mod poison;
+mod reap;
 mod reconcile;
 mod replica_index;
 mod resident;
@@ -26,6 +27,7 @@ mod setup_cancel_tests;
 #[cfg(test)]
 mod spiral_index_tests;
 mod takeover;
+pub use reap::ReapedBodies;
 #[cfg(test)]
 mod unwired_tests;
 
@@ -663,32 +665,6 @@ impl CallState {
         let copy = envelope::decode(&self.codec, &body).map_err(|_| ReplicaMiss::Undecodable)?;
         let skew = repl.skew_offset_ms(call_ref).unwrap_or(0);
         Ok((copy, skew))
-    }
-
-    /// Physically evict every expired replica body, changelog tombstone and
-    /// stale resurrection tombstone (the missed-delete ghost backstop,
-    /// ADR-0014), and return the evicted bodies that are **deferred terminals**
-    /// (`Terminating`/`Terminated`): a node served the call's end and deferred
-    /// its discharge to a primary that never reconciled it inside the TTL. The
-    /// router releases each one's limiter key and counts its CDR lost (the
-    /// accepted double-failure); an expired non-terminal ghost is evicted
-    /// silently. A read never evicts, so each expired body is returned by
-    /// exactly one pass. A deferred terminal another call on its ref replaced
-    /// on this backup is returned the same way
-    /// ([`take_displaced`](crate::repl::ReplicatingCallStore::take_displaced)).
-    /// Empty without a replicating store.
-    pub async fn reap_replica(&self, now_ms: i64) -> Vec<Enveloped> {
-        let Some(repl) = self.repl_store() else {
-            return Vec::new();
-        };
-        let mut owed = repl.reap(now_ms).await;
-        owed.extend(repl.take_displaced());
-        owed.iter()
-            .filter_map(|body| envelope::decode(&self.codec, body).ok())
-            .filter(|copy| {
-                matches!(copy.call.state, CallModelState::Terminating | CallModelState::Terminated)
-            })
-            .collect()
     }
 
     /// Encode + write the call to the store (replication path), its change-log

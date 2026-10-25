@@ -18,6 +18,7 @@
 //! one naming no UA covers nothing.
 
 mod judge;
+mod reliable;
 mod table;
 mod verdict;
 

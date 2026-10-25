@@ -52,7 +52,8 @@ async fn absorb_establishing_provisional(
     if let Some(rseq) = reliable_rseq(resp) {
         let fork = resp.to().tag().map(str::to_owned).unwrap_or_default();
         if st.pracked_rseqs.insert((fork.to_string(), rseq)) {
-            let (_txn, req) = inv.try_prack_with_request(resp).await?;
+            let (txn, req) = inv.try_prack_with_request(resp).await?;
+            super::client_retransmit::prack_sent(st, req.cseq().seq(), txn, now);
             st.obs.record(
                 Observation::RequestSent {
                     key: ObligationKey::new(st.role, ObligationKind::Prack, req.cseq().seq()),
@@ -77,15 +78,13 @@ async fn absorb_establishing_provisional(
     Ok(())
 }
 
-/// A non-2xx final on the caller's establishing INVITE. Returns `true` when a
-/// §22.2 authenticated resend consumed the challenge (caller re-parks the
-/// INVITE); otherwise records the terminal. A final the call accepts
-/// ([`ActorState::accepts`](super::runner::ActorState)) ends the call: it is
-/// recorded as the accepted ending and — unless the next pending goal is a
-/// RECEPTION goal, which then owns the final — the remaining goals are
-/// dropped. Any other final, with a non-reception goal pending, surfaces as
-/// the incidental establishment failure `WrongStatus{expected: <180|183>}`,
-/// never a 32 s barrier timeout.
+/// A non-2xx final on the caller's establishing INVITE. Returns `true` when a §22.2 authenticated
+/// resend consumed the challenge (caller re-parks the INVITE); otherwise records the terminal. A
+/// final the call accepts ([`ActorState::accepts`](super::runner::ActorState)) ends the call: it is
+/// recorded as the accepted ending and — unless the next pending goal is a RECEPTION goal, which
+/// then owns the final — the remaining goals are dropped. Any other final, with a non-reception
+/// goal pending, surfaces as the incidental establishment failure `WrongStatus{expected:
+/// <180|183>}`, never a 32 s barrier timeout.
 async fn absorb_establishing_failure(
     st: &mut ActorState<'_>,
     inv: &mut ClientInvite,
@@ -171,6 +170,7 @@ pub(super) async fn react_response(
     resp: SipResponse,
 ) -> Result<(), StepError> {
     let now = Instant::now();
+    super::client_retransmit::settle(st, &resp);
     // A 2xx RETRANSMITTED while this leg holds its ACK (RFC 3261 §13.3.1.4: the
     // answerer re-passes its 2xx to the transport until the ACK arrives).
     // Absorbed ABOVE the response log — the held ACK is the one answer

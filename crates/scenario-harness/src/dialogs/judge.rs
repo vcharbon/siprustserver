@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use sip_message::{SipMessage, SipRequest, SipResponse};
 use tokio::time::Instant;
 
+use super::reliable::ReliableSent;
 use super::table::{BackwardsCseq, DialogTable};
 use super::verdict::DialogVerdict;
 use crate::WaiverScope;
@@ -32,6 +33,7 @@ pub enum DialogJudging {
 struct Inner {
     judging: DialogJudging,
     table: DialogTable,
+    reliable: ReliableSent,
     recorded: Vec<DialogVerdict>,
 }
 
@@ -58,6 +60,7 @@ impl DialogJudge {
             inner: Mutex::new(Inner {
                 judging,
                 table: DialogTable::new(backwards),
+                reliable: ReliableSent::default(),
                 recorded: Vec::new(),
             }),
         }
@@ -90,8 +93,17 @@ impl DialogJudge {
         }
         match msg {
             SipMessage::Request(r) => inner.table.note_sent_request(r),
-            SipMessage::Response(r) => inner.table.note_sent_response(r, now_us),
+            SipMessage::Response(r) => {
+                inner.reliable.note(r);
+                inner.table.note_sent_response(r, now_us);
+            }
         }
+    }
+
+    /// Whether `prack`'s `RAck` names a reliable provisional this UA sent on
+    /// the dialog it rides (RFC 3262 §3).
+    pub fn prack_names_a_sent_provisional(&self, prack: &SipRequest) -> bool {
+        self.inner.lock().unwrap().reliable.names(prack)
     }
 
     /// Whether the judge is fed at all.

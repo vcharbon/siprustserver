@@ -9,6 +9,7 @@
 mod auth;
 mod body_expect;
 mod cancel_race;
+mod client_retransmit;
 mod delta_request;
 mod delta_response;
 mod dialog_refusal;

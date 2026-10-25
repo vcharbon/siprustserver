@@ -12,45 +12,11 @@
 # request left unanswered §2; a 2xx repeat routed through the other owner §8;
 # and any other finding of a split cell §7.
 
-basic/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-basic/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-forked/stalled-killed/t5-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-forked/stalled-killed/t5-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-info-x-bye/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-info-x-bye/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-info/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-info/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-keepalive/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-keepalive/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-media-leg/primary-killed/t4-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-media-leg/stalled-killed/t4-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-media-leg/stalled-killed/t4-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-media-leg/stalled-killed/t5-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-media-leg/stalled-killed/t5-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-media-leg/stalled-killed/t6-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-media-leg/stalled-killed/t6-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-prack/stalled-killed/t1-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-prack/stalled-killed/t1-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-prack/stalled-killed/t2-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-prack/stalled-killed/t2-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-prack/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-prack/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-prack/stalled-killed/t4-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-prack/stalled-killed/t4-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-prack/stalled-killed/t5-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-prack/stalled-killed/t5-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-refer-x-bye/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-refer-x-bye/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-refer/primary-killed/t14-applied  ADR-0055 §5  # the departure sweep ends a call its primary ended behind the window: a second CDR, no marker
 refer/split/t1-applied  ADR-0055 §7  # two copies
 refer/split/t2-applied  ADR-0055 §7  # two copies
 refer/split/t2-left  ADR-0055 §7  # the split-off primary's setup timeout sends the caller a non-2xx after the other copy's 2xx
 refer/split/t2-logged  ADR-0055 §7  # the split-off primary's setup timeout sends the caller a non-2xx after the other copy's 2xx
-refer/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-refer/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-reinvite-x-bye/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-reinvite-x-bye/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-reinvite/primary-killed/t6-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
+reinvite/primary-killed/t6-logged  ADR-0055 §11  # the test callee never retransmits its re-INVITE 2xx (RFC 3261 §13.3.1.4): the 2xx the dead primary took never reaches the copy, which 487s the caller's re-INVITE at her BYE and she leaves it unACKed
 reinvite/split-healed/t5-left  ADR-0055 §7  # two copies
 reinvite/split-healed/t5-logged  ADR-0055 §7  # two copies
 reinvite/split/t1-applied  ADR-0055 §7  # two copies
@@ -60,11 +26,3 @@ reinvite/split/t2-logged  ADR-0055 §7  # the split-off primary's setup timeout 
 reinvite/split/t5-applied  ADR-0055 §7  # second copy acts on an ended dialog
 reinvite/split/t5-left  ADR-0055 §7  # second copy acts on an ended dialog
 reinvite/split/t5-logged  ADR-0055 §7  # second copy acts on an ended dialog
-reinvite/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-reinvite/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-reinvite/stalled-killed/t6-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-reinvite/stalled-killed/t6-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-update-x-bye/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-update-x-bye/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-update/stalled-killed/t3-left  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed
-update/stalled-killed/t3-logged  ADR-0055 §4  # the copy sends the caller a non-2xx after the dead primary's 2xx: she discards it (RFC 6026), the audit counts it unACKed

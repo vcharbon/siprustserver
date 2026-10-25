@@ -46,9 +46,8 @@ pub(super) struct ParkedRequest {
     pub(super) initial: bool,
 }
 
-/// A ring/answer scheduled for `at` — held as its own interruptible arm so a
-/// CANCEL that lands before it fires answers `487` on the retained INVITE txn
-/// instead of racing an inline sleep.
+/// A ring/answer scheduled for `at` — held as its own interruptible arm so a CANCEL that lands
+/// before it fires answers `487` on the retained INVITE txn instead of racing an inline sleep.
 pub(super) struct TimedAnswer {
     pub(super) at: Instant,
     /// The pending UAS INVITE transaction — answered `200` when the timer fires
@@ -72,14 +71,12 @@ pub(super) struct HeldAck {
     pub(super) sdp: Option<String>,
 }
 
-/// A non-2xx final we sent to an initial INVITE, awaiting its §17.1.1.3
-/// hop-ACK. The receive core claims that ACK below `recv_any` (it never
-/// surfaces to the reactor), so the actor watches the transaction
-/// layer's fulfilment as its own `select!` arm and closes the `reject-final`
-/// ledger obligation there. This is what makes the UA outlive the call: a
-/// REJECTED leg abandoned by a reroute keeps its actor reactive (and the
-/// settle barrier holds the verdict + recording window, Timer-H-bounded) until
-/// a lost hop-ACK is recovered by the Timer-G final retransmit + the SUT's
+/// A non-2xx final we sent to an initial INVITE, awaiting its §17.1.1.3 hop-ACK. The receive core
+/// claims that ACK below `recv_any` (it never surfaces to the reactor), so the actor watches the
+/// transaction layer's fulfilment as its own `select!` arm and closes the `reject-final` ledger
+/// obligation there. This is what makes the UA outlive the call: a REJECTED leg abandoned by a
+/// reroute keeps its actor reactive (and the settle barrier holds the verdict + recording window,
+/// Timer-H-bounded) until a lost hop-ACK is recovered by the Timer-G final retransmit + the SUT's
 /// §17.1.1.2 re-ACK.
 pub(super) struct PendingRejectAck {
     pub(super) key: ObligationKey,
@@ -87,11 +84,10 @@ pub(super) struct PendingRejectAck {
     pub(super) branch: String,
 }
 
-/// The confirmed dialog(s) + pending INVITE transaction an endpoint owns.
-/// Deliberately minimal: one caller INVITE, one confirmed dialog — enough for
-/// every current body incl. the realign flows, which ride the confirmed dialog
-/// as in-dialog UAS transactions. (The reliable-183 / `Reject` pending-UAS
-/// holds live as [`ActorState`] fields, not here.)
+/// The confirmed dialog(s) + pending INVITE transaction an endpoint owns. Deliberately minimal: one
+/// caller INVITE, one confirmed dialog — enough for every current body incl. the realign flows,
+/// which ride the confirmed dialog as in-dialog UAS transactions. (The reliable-183 / `Reject`
+/// pending-UAS holds live as [`ActorState`] fields, not here.)
 #[derive(Default)]
 pub(super) struct DialogTable {
     /// The caller's outgoing INVITE, awaiting its confirmation (learned from the
@@ -138,10 +134,9 @@ pub struct ActorState<'c> {
     /// CSeq numbers of in-dialog re-INVITEs this leg has ANSWERED (200 sent,
     /// ACK outstanding) — the matching ACK advances the realign sub-flow.
     pub(super) answered_reinvites: HashSet<u32>,
-    /// A reliable-`183` answer (RFC 3262) awaiting the caller's PRACK: the held
-    /// UAS INVITE transaction, answered `200` only once the PRACK arrives
-    /// (MUST-014). `Some` for a [`Disposition::ReliableAnswer`] leg between its
-    /// 183 and the PRACK.
+    /// A reliable-`183` answer (RFC 3262) awaiting the caller's PRACK: the held UAS INVITE
+    /// transaction, answered `200` only once the PRACK arrives (MUST-014). `Some` for a
+    /// [`Disposition::ReliableAnswer`] leg between its 183 and the PRACK.
     pub(super) pending_prack_answer: Option<ServerTxn>,
     /// A [`Disposition::RingThenSilent`] leg's held INVITE server transaction
     /// (180 sent, no final EVER originated by this leg): released only by an
@@ -153,13 +148,11 @@ pub struct ActorState<'c> {
     /// The To-tags of reliable provisionals no PRACK has acknowledged yet,
     /// each with when it was first sent (RFC 3262 §3, [`super::give_up`]).
     pub(super) unpracked: HashMap<String, Instant>,
-    /// The early dialogs this callee sent requests on, by local tag: the
-    /// dialog its 2xx confirms continues that dialog's CSeq (RFC 3261
-    /// §12.2.1.1).
+    /// The early dialogs this callee sent requests on, by local tag: the dialog its 2xx confirms
+    /// continues that dialog's CSeq (RFC 3261 §12.2.1.1).
     pub(super) early_dialogs: HashMap<String, Dialog>,
-    /// `(dialog tag, RSeq)` of the reliable provisionals PRACKed on this leg:
-    /// a caller PRACKs each once per fork (C1/E3); a callee answers a second
-    /// PRACK of one 481 (RFC 3262 §3).
+    /// `(dialog tag, RSeq)` of the reliable provisionals PRACKed on this leg: a caller PRACKs each
+    /// once per fork (C1/E3); a callee answers a second PRACK of one 481 (RFC 3262 §3).
     pub(super) pracked_rseqs: HashSet<(String, u32)>,
     /// A held forking-UAS answer plan (C1/E3): set alongside
     /// `pending_prack_answer` by a RELIABLE [`Disposition::ForkingRing`], so the
@@ -275,6 +268,8 @@ pub struct ActorState<'c> {
     /// their own reactor arm — so goal progress (the deviation's point: traffic
     /// DURING the hold) never blocks on the hold.
     pub(super) held_acks: Vec<HeldAck>,
+    /// The re-INVITEs and PRACKs awaiting an answer, retransmitted by their own arm.
+    pub(super) retransmits: Vec<super::client_retransmit::Pending>,
     /// Whether this actor ORIGINATES the dialog — its first goal is an
     /// `Invite`/`InviteTemplate` (fallback: `Disposition::Caller`). Keys the
     /// §14.1 glare owner dwell and the caller attribution.
@@ -383,6 +378,7 @@ impl<'c> ActorState<'c> {
             originated_invites: 0,
             reinvite_ordinals: HashMap::new(),
             held_acks: Vec::new(),
+            retransmits: Vec::new(),
             originates,
             delta_policy,
             reception_observer,
@@ -539,6 +535,10 @@ async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), StepError> {
             // send is THIS arm's obligation, so no call finishes un-ACKed.
             _ = super::held_acks::wait_held_ack(&st.held_acks), if !st.held_acks.is_empty() => {
                 super::held_acks::fire_due_held_ack(st).await?;
+            }
+            // A request awaiting its answer is retransmitted (RFC 3261 §17.1.1.2, §17.1.2.2).
+            _ = super::client_retransmit::wait(&st.retransmits), if !st.retransmits.is_empty() => {
+                super::client_retransmit::fire(st).await?;
             }
         }
         // An open obligation or a re-INVITE of this leg still unanswered keeps
