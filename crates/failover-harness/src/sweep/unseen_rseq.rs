@@ -3,7 +3,7 @@
 //! cannot continue the sequence the dead primary sent (RFC 3262 §4), once per
 //! dialog.
 
-use sip_message::header::{HeaderName, RSeq};
+use sip_message::header::{HeaderName, RAck, RSeq};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipResponse};
 use sip_net_testkit::RecordedSipEntry;
@@ -19,28 +19,42 @@ pub(super) fn accept_unseen_rseq(cluster: &mut Cluster) {
     for rule in RULES {
         cluster.fh.accept_rfc_deviations_once_per_dialog_where(
             rule,
-            from_another_node,
+            |entry, earlier, _| from_another_node(entry, earlier),
             "ADR-0055 §11: a copy's reliable provisional under the dialog's derived tag cannot \
              continue the RSeq the dead primary sent",
         );
     }
 }
 
-/// Whether `entry` is a reliable provisional under a To-tag a reliable
-/// provisional captured before the window (`from_seq`) already carried on
-/// that INVITE, stated by another node: the two name different Contacts. A
-/// node derives the dialog's tag as the first owner did, and its Contact is
-/// its own.
-fn from_another_node(
-    entry: &RecordedSipEntry,
-    earlier: &[RecordedSipEntry],
-    from_seq: u64,
-) -> bool {
+/// Whether `entry` is a reliable provisional under a To-tag an earlier
+/// reliable provisional carried on that INVITE, stated by another node — the
+/// two name different Contacts; a node derives the dialog's tag as the first
+/// owner did, and its Contact is its own — or the caller's PRACK of such a
+/// provisional. The window it falls in opened at the incident.
+fn from_another_node(entry: &RecordedSipEntry, earlier: &[RecordedSipEntry]) -> bool {
+    if let Some(i) = acknowledged(entry, earlier) {
+        return from_another_node(&earlier[i], &earlier[..i]);
+    }
     let Some((key, contact)) = reliable_provisional(&entry.raw) else { return false };
     earlier
         .iter()
-        .filter(|e| e.seq <= from_seq)
         .any(|e| reliable_provisional(&e.raw).is_some_and(|(k, c)| k == key && c != contact))
+}
+
+/// The index in `earlier` of the reliable provisional the PRACK `entry`
+/// acknowledges: the last one of its Call-ID and INVITE whose RSeq its RAck
+/// names.
+fn acknowledged(entry: &RecordedSipEntry, earlier: &[RecordedSipEntry]) -> Option<usize> {
+    let Ok(SipMessage::Request(prack)) = CustomParser::new().parse(&entry.raw) else { return None };
+    let rack = prack.header::<RAck>()?.ok()?;
+    earlier.iter().rposition(|e| {
+        let Ok(SipMessage::Response(resp)) = CustomParser::new().parse(&e.raw) else {
+            return false;
+        };
+        resp.call_id() == prack.call_id()
+            && resp.cseq().seq() == rack.seq()
+            && resp.header::<RSeq>().and_then(Result::ok).is_some_and(|r| r.value() == rack.rseq())
+    })
 }
 
 /// The Call-ID, To-tag and CSeq number of a reliable provisional, and its
@@ -94,20 +108,34 @@ mod tests {
     #[test]
     fn a_copys_provisional_under_the_dead_owners_tag_is_declared() {
         let earlier = [entry(1, reliable("t1", 7, DEAD))];
-        assert!(from_another_node(&entry(5, reliable("t1", 1, COPY)), &earlier, 2));
+        assert!(from_another_node(&entry(5, reliable("t1", 1, COPY)), &earlier));
     }
 
     #[test]
     fn the_same_nodes_provisional_keeps_the_finding() {
         let earlier = [entry(1, reliable("t1", 7, DEAD))];
-        assert!(!from_another_node(&entry(5, reliable("t1", 9, DEAD)), &earlier, 2));
+        assert!(!from_another_node(&entry(5, reliable("t1", 9, DEAD)), &earlier));
+    }
+
+    /// The caller's PRACK of the provisional numbered `rseq`.
+    fn prack(rseq: u32) -> String {
+        format!(
+            "PRACK sip:b2bua@x SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-p1\r\n\
+             From: <sip:a@x>;tag=a\r\nTo: <sip:b@x>;tag=t1\r\nCall-ID: c1\r\nCSeq: 2 PRACK\r\n\
+             RAck: {rseq} 1 INVITE\r\nContent-Length: 0\r\n\r\n"
+        )
     }
 
     #[test]
-    fn another_tag_or_a_provisional_after_the_incident_keeps_the_finding() {
-        let before = [entry(1, reliable("t1", 7, DEAD))];
-        assert!(!from_another_node(&entry(5, reliable("t2", 1, COPY)), &before, 2));
-        let after = [entry(3, reliable("t1", 7, DEAD))];
-        assert!(!from_another_node(&entry(5, reliable("t1", 1, COPY)), &after, 2));
+    fn the_callers_prack_of_a_copys_provisional_is_declared() {
+        let earlier = [entry(1, reliable("t1", 7, DEAD)), entry(5, reliable("t1", 1, COPY))];
+        assert!(from_another_node(&entry(6, prack(1)), &earlier));
+        assert!(!from_another_node(&entry(6, prack(7)), &earlier), "the dead owner's");
+    }
+
+    #[test]
+    fn a_provisional_under_another_tag_keeps_the_finding() {
+        let earlier = [entry(1, reliable("t1", 7, DEAD))];
+        assert!(!from_another_node(&entry(5, reliable("t2", 1, COPY)), &earlier));
     }
 }
