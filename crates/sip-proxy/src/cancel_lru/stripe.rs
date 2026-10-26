@@ -1,126 +1,65 @@
-//! One independently locked stripe of the branch memo: a table of entries
-//! with an index ordered by expiry, so an expiry pass and an eviction reach
-//! the entry nearest its expiry without looking at any other.
+//! One independently locked stripe of the branch memo: a [`Pool`] per
+//! [`Lifetime`], each with its own share of the stripe's bounds, so entries
+//! of one lifetime never push out entries of the other.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use super::pool::{Change, Pool};
+use super::{CancelEntry, Lifetime, MemoBounds};
 
-use super::bounds::footprint;
-use super::CancelEntry;
-
-/// An entry's place in the expiry index: its expiry, then the stripe's write
-/// sequence, which keeps two entries expiring together apart.
-type ExpiryKey = (u64, u64);
-
-struct Slot {
-    entry: CancelEntry,
-    at: ExpiryKey,
-    bytes: usize,
-}
-
-/// What an operation on a stripe changed, for the memo's totals.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Change {
-    pub added: usize,
-    pub removed: usize,
-    pub bytes_added: usize,
-    pub bytes_removed: usize,
-    /// Entries forgotten before their expiry, the stripe being past a bound.
-    pub evicted: usize,
-    /// Expiry-index entries an expiry pass looked at.
-    pub inspected: usize,
-}
-
-/// One stripe's entries, held to at most `max_entries` entries and
-/// `max_bytes` accounted bytes ([`footprint`]).
 pub(super) struct Stripe {
-    table: HashMap<Arc<str>, Slot>,
-    by_expiry: BTreeMap<ExpiryKey, Arc<str>>,
-    bytes: usize,
-    next_seq: u64,
-    max_entries: usize,
-    max_bytes: usize,
+    invite: Pool,
+    retransmission: Pool,
 }
 
 impl Stripe {
-    pub(super) fn new(max_entries: usize, max_bytes: usize) -> Self {
+    pub(super) fn new(bounds: &MemoBounds) -> Self {
+        let pool = |lifetime| {
+            let (entries, bytes) = bounds.per_pool(lifetime);
+            Pool::new(entries, bytes)
+        };
         Self {
-            table: HashMap::new(),
-            by_expiry: BTreeMap::new(),
-            bytes: 0,
-            next_seq: 0,
-            max_entries,
-            max_bytes,
+            invite: pool(Lifetime::InviteTransaction),
+            retransmission: pool(Lifetime::Retransmission),
         }
     }
 
-    /// Forget every entry expired at `now_ms`: the expiry index is walked
-    /// from its front and the walk ends at the first entry still live.
+    fn pools(&mut self, lifetime: Lifetime) -> (&mut Pool, &mut Pool) {
+        match lifetime {
+            Lifetime::InviteTransaction => (&mut self.invite, &mut self.retransmission),
+            Lifetime::Retransmission => (&mut self.retransmission, &mut self.invite),
+        }
+    }
+
+    /// Forget the expired entries of both pools.
     pub(super) fn expire(&mut self, now_ms: u64, change: &mut Change) {
-        while let Some((&at, _)) = self.by_expiry.first_key_value() {
-            change.inspected = change.inspected.saturating_add(1);
-            if at.0 > now_ms {
-                break;
-            }
-            self.remove_at(at, change);
-        }
+        self.invite.expire(now_ms, change);
+        self.retransmission.expire(now_ms, change);
     }
 
-    /// Write `entry` under `key`, expiring at `expires_at_ms`; a key already
-    /// held keeps one entry, the new one. Past a bound the entries nearest
-    /// their expiry are forgotten first, the new one included when it is.
+    /// Write `entry` under `key` into `lifetime`'s pool, after that pool's
+    /// expired entries are forgotten; the key leaves the other pool.
     pub(super) fn insert(
         &mut self,
         key: &str,
         entry: CancelEntry,
-        expires_at_ms: u64,
+        lifetime: Lifetime,
+        now_ms: u64,
         change: &mut Change,
     ) {
-        let at = (expires_at_ms, self.next_seq);
-        self.next_seq = self.next_seq.wrapping_add(1);
-        let bytes = footprint(key, &entry);
-        let shared = match self.table.get_key_value(key) {
-            Some((shared, slot)) => {
-                let (shared, old_at) = (shared.clone(), slot.at);
-                self.remove_at(old_at, change);
-                shared
-            }
-            None => Arc::from(key),
-        };
-        self.by_expiry.insert(at, shared.clone());
-        self.table.insert(shared, Slot { entry, at, bytes });
-        self.bytes = self.bytes.saturating_add(bytes);
-        change.added = change.added.saturating_add(1);
-        change.bytes_added = change.bytes_added.saturating_add(bytes);
-        while self.table.len() > self.max_entries || self.bytes > self.max_bytes {
-            let Some((&front, _)) = self.by_expiry.first_key_value() else { break };
-            self.remove_at(front, change);
-            change.evicted = change.evicted.saturating_add(1);
-        }
+        let (own, other) = self.pools(lifetime);
+        other.remove(key, change);
+        own.expire(now_ms, change);
+        own.insert(key, entry, now_ms.saturating_add(lifetime.ttl_ms()), change);
     }
 
-    /// The entry under `key` while it is live at `now_ms`; an expired one is
-    /// forgotten here.
+    /// The live entry under `key`, from whichever pool holds it.
     pub(super) fn get(
         &mut self,
         key: &str,
         now_ms: u64,
         change: &mut Change,
     ) -> Option<CancelEntry> {
-        let slot = self.table.get(key)?;
-        if slot.at.0 > now_ms {
-            return Some(slot.entry.clone());
-        }
-        let at = slot.at;
-        self.remove_at(at, change);
-        None
-    }
-
-    fn remove_at(&mut self, at: ExpiryKey, change: &mut Change) {
-        let Some(key) = self.by_expiry.remove(&at) else { return };
-        let Some(slot) = self.table.remove(&key) else { return };
-        self.bytes = self.bytes.saturating_sub(slot.bytes);
-        change.removed = change.removed.saturating_add(1);
-        change.bytes_removed = change.bytes_removed.saturating_add(slot.bytes);
+        self.invite
+            .get(key, now_ms, change)
+            .or_else(|| self.retransmission.get(key, now_ms, change))
     }
 }

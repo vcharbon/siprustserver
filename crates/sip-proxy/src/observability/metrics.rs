@@ -172,8 +172,6 @@ pub struct ProxyMetrics {
     routing_duration_sum_us: AtomicU64,
     record_route_inserted: AtomicU64,
     pending_invite_lru_size: AtomicU64,
-    branch_memo_bytes: AtomicU64,
-    branch_memo_evictions: AtomicU64,
     /// By outcome, indexed like `crate::resolver::outcome::ALL`.
     named_sends: [AtomicU64; outcome::ALL.len()],
     /// Proactive resolver refresh + startup prewarm events, keyed outcome
@@ -234,8 +232,6 @@ impl Default for ProxyMetrics {
             routing_duration_sum_us: Default::default(),
             record_route_inserted: Default::default(),
             pending_invite_lru_size: Default::default(),
-            branch_memo_bytes: Default::default(),
-            branch_memo_evictions: Default::default(),
             named_sends: Default::default(),
             resolver_refresh: Default::default(),
             resolver_cache_size: Default::default(),
@@ -321,12 +317,6 @@ impl ProxyMetrics {
         self.pending_invite_lru_size.store(n, Ordering::Relaxed);
     }
 
-    /// Publish the branch memo's accounted bytes and its evictions so far.
-    pub fn set_branch_memo(&self, bytes: u64, evictions: u64) {
-        self.branch_memo_bytes.store(bytes, Ordering::Relaxed);
-        self.branch_memo_evictions.store(evictions, Ordering::Relaxed);
-    }
-
     /// Count a named-target send by outcome (cached/resolved/dropped_*…), for
     /// `sip_proxy_named_sends_total{outcome}`. See [`crate::resolver`].
     pub fn record_named_send(&self, outcome: &str) {
@@ -399,8 +389,6 @@ impl ProxyMetrics {
         });
         c::RECORD_ROUTE_INSERTED.render_value(&mut s, load(&self.record_route_inserted));
         c::PENDING_INVITE_LRU_SIZE.render_value(&mut s, load(&self.pending_invite_lru_size));
-        c::BRANCH_MEMO_BYTES.render_value(&mut s, load(&self.branch_memo_bytes));
-        c::BRANCH_MEMO_EVICTIONS.render_value(&mut s, load(&self.branch_memo_evictions));
         c::NAMED_SENDS.render(&mut s, |series| read(&self.named_sends, series.at(0)));
         c::RESOLVER_REFRESH.render(&mut s, |series| read(&self.resolver_refresh, series.at(0)));
         c::RESOLVER_CACHE_SIZE.render_value(&mut s, load(&self.resolver_cache_size));

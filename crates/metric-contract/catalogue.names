@@ -254,8 +254,6 @@ sip-proxy-runner sip_proxy_no_target_dropped_total counter fixed {kind}
 sip-proxy-runner sip_routing_duration_seconds histogram fixed {}
 sip-proxy-runner sip_proxy_record_route_inserted_total counter fixed {}
 sip-proxy-runner sip_proxy_pending_invite_lru_size gauge fixed {}
-sip-proxy-runner sip_proxy_branch_memo_bytes gauge fixed {}
-sip-proxy-runner sip_proxy_branch_memo_evictions_total counter fixed {}
 sip-proxy-runner sip_proxy_named_sends_total counter fixed {outcome}
 sip-proxy-runner sip_proxy_resolver_refresh_total counter fixed {outcome}
 sip-proxy-runner sip_proxy_resolver_cache_size gauge fixed {}
@@ -295,6 +293,8 @@ sip-proxy-runner sip_proxy_self_external_invites_admitted_total counter fixed {}
 sip-proxy-runner sip_proxy_self_external_invites_rejected_total counter fixed {reason}
 sip-proxy-runner sip_proxy_self_emergency_bypassed_total counter fixed {}
 sip-proxy-runner sip_proxy_self_internal_bypassed_total counter fixed {}
+sip-proxy-runner sip_proxy_branch_memo_bytes gauge fixed {}
+sip-proxy-runner sip_proxy_branch_memo_evictions_total counter fixed {}
 sip-proxy-runner sip_proxy_task_restarts_total counter fixed {task}
 sip-proxy-runner metric_values_poisoned_lock_recoveries_total counter fixed {lock}
 sip-proxy-runner log_lines_dropped_total counter fixed {}

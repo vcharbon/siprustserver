@@ -28,6 +28,12 @@ impl StatelessTagger {
         Self { secret: h.finish() }
     }
 
+    /// A tagger keyed by `secret`: every instance given the same secret
+    /// derives the same tags, across restarts and hosts.
+    pub fn with_secret(secret: u64) -> Self {
+        Self { secret }
+    }
+
     /// The `(To-tag, roll)` for `req`: a keyed hash over Call-ID, From-tag,
     /// top-`Via` branch and CSeq, the fields RFC 3261 §19.3 names for a
     /// request-derived tag. Both come from the one hash, so the tag and a

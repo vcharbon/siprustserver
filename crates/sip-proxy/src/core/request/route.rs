@@ -13,9 +13,9 @@ use sip_message::emergency::is_emergency_request;
 use sip_message::header::{MaxForwards, ProxyRequire, Unsupported, Via};
 use sip_message::{Method, SipMessage};
 
-use crate::addr::ProxyAddr;
+use crate::addr::{observed_source, ProxyAddr};
 use crate::branch::stateless_branch;
-use crate::cancel_lru::{invite_txn_key, retransmit_key, CancelEntry};
+use crate::cancel_lru::{invite_txn_key, retransmit_key, CancelEntry, Lifetime};
 use crate::headers::via_with_cookie;
 use crate::observability::metrics::{
     Direction, Face, MessageResult, NoTargetDrop, RoutingDecisionKind,
@@ -118,20 +118,27 @@ impl ProxyCore {
         // incarnation's INVITE branch — but no non-2xx final was ever relayed
         // for a confirmed call, so no memo exists and the ACK flows.
         //
-        // What a match means depends on who generated the final:
-        //  • relayed final (memo names the node the final arrived from) —
-        //    RELAY the ACK there, where §16.11 puts it on the INVITE's outbound
-        //    branch so the downstream server transaction (§17.2.3) matches it
-        //    and stops retransmitting the final (Timer G). This transaction-less
-        //    proxy never synthesizes the hop ACK itself (ADR-0022 X4; see
-        //    `core/response.rs`) — the upstream's ACK is the only quench,
-        //    end-to-end, which is what keeps a lossy caller hop recoverable.
-        //  • the proxy's OWN final (memo written by `reply()`, empty `branch`:
-        //    no downstream exists) — the ACK terminates HERE: absorb it, never
-        //    run the strategy over it and hand a worker a stray ACK matching
-        //    no transaction it ever created.
+        // A match is a relayed final (the memo names the node the final
+        // arrived from): RELAY the ACK there, where §16.11 puts it on the
+        // INVITE's outbound branch so the downstream server transaction
+        // (§17.2.3) matches it and stops retransmitting the final (Timer G).
+        // This transaction-less proxy never synthesizes the hop ACK itself
+        // (ADR-0022 X4; see `core/response.rs`) — the upstream's ACK is the
+        // only quench, end-to-end, which is what keeps a lossy caller hop
+        // recoverable.
+        //
+        // The ACK to a final the proxy generated ITSELF carries the To-tag the
+        // proxy derived for that INVITE under the deployment's shared key
+        // (`crate::security::own_final_tag`): the ACK terminates HERE, at any
+        // proxy holding the key, and is never run through the strategy to hand
+        // a worker a stray ACK matching no transaction it ever created.
         let mut ack_hop: Option<CancelEntry> = None;
         if method == Method::Ack {
+            if self.refusals.acknowledges_own_final(req)
+                || self.parse_refusals.acknowledges_own_final(req)
+            {
+                return RouteOutcome { decision: select, target: None };
+            }
             let key = crate::cancel_lru::ack_hop_key(
                 req.top_via(),
                 call_id.as_str(),
@@ -147,9 +154,6 @@ impl ProxyCore {
                 let same_txn = top_via_branch(req).is_some();
                 let legacy_routeless = !same_txn && !req.has(&sip_message::HeaderName::Route);
                 if same_txn || legacy_routeless {
-                    if found.branch.is_empty() {
-                        return RouteOutcome { decision: select, target: None };
-                    }
                     ack_hop = Some(found);
                 }
             }
@@ -268,8 +272,8 @@ impl ProxyCore {
         };
 
         // ── §16.6 received/rport, Max-Forwards, Record-Route, Via ───────────
-        let src_ip = src.ip().to_string();
-        draft = match draft.update_top::<Via>(|via| via.stamped_from(&src_ip, src.port())) {
+        let (src_host, src_port) = observed_source(src);
+        draft = match draft.update_top::<Via>(|via| via.stamped_from(&src_host, src_port)) {
             Ok(d) => d,
             Err(_) => return self.drop_unforwardable(),
         };
@@ -332,7 +336,7 @@ impl ProxyCore {
                         minted: minted_cookie.clone(),
                         via_cookie: via_cookie.clone(),
                     },
-                    crate::cancel_lru::RTX_ENTRY_TTL_MS,
+                    Lifetime::Retransmission,
                 );
             }
         }
@@ -358,7 +362,7 @@ impl ProxyCore {
                 minted: None,
                 via_cookie: via_cookie.clone(),
             };
-            self.cancel_lru.remember(&key, entry, crate::cancel_lru::INVITE_ENTRY_TTL_MS);
+            self.cancel_lru.remember(&key, entry, Lifetime::InviteTransaction);
             self.cancel_lru.publish(&self.metrics);
         }
 

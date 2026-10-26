@@ -6,6 +6,7 @@ use super::emit;
 use super::error::GenerateError;
 use crate::draft::ResponseDraft;
 use crate::header::{self, HeaderName, HeaderValue, MediaType, To, Via};
+use crate::parser::custom::structured_headers::top_level_comma_entries;
 use crate::sip_str::SipStr;
 use crate::types::{SipHeader, SipRequest, SipResponse};
 
@@ -55,8 +56,9 @@ pub struct GenerateResponseOpts {
 }
 
 /// Echo one Via line. The topmost records what the receiving side observed
-/// (RFC 3261 §18.2.1, RFC 3581 §4); a line needing no stamp — or folding
-/// several hops onto one line — is echoed byte for byte.
+/// (RFC 3261 §18.2.1, RFC 3581 §4) on its first hop; a hop needing no stamp,
+/// and every hop after the first of a line folding several, is echoed byte
+/// for byte.
 pub(super) fn echo_via(
     draft: ResponseDraft,
     line: SipStr,
@@ -65,17 +67,24 @@ pub(super) fn echo_via(
     let Some((host, port)) = source else {
         return draft.push_raw(HeaderName::Via, line);
     };
-    let single = Via::parse_line(&line).ok().filter(|hops| hops.len() == 1);
-    match single.and_then(|hops| hops.into_iter().next()) {
-        Some(hop) => {
-            let stamped = hop.clone().stamped_from(host, *port);
-            if stamped == hop {
-                draft.push_raw(HeaderName::Via, line)
-            } else {
-                draft.push(stamped)
-            }
-        }
-        None => draft.push_raw(HeaderName::Via, line),
+    let text = line.as_str();
+    let mut entries = top_level_comma_entries(text);
+    let Some(first) = entries.next() else {
+        return draft.push_raw(HeaderName::Via, line);
+    };
+    let Ok(hop) = Via::parse(&line.reslice(first)) else {
+        return draft.push_raw(HeaderName::Via, line);
+    };
+    let rest = entries.next().and_then(|second| {
+        let start = (second.as_ptr() as usize).checked_sub(text.as_ptr() as usize)?;
+        text.get(start..)
+    });
+    let stamped = hop.clone().stamped_from(host, *port);
+    match rest {
+        None if stamped == hop => draft.push_raw(HeaderName::Via, line),
+        None => draft.push(stamped),
+        Some(_) if stamped == hop => draft.push_raw(HeaderName::Via, line),
+        Some(rest) => draft.push(stamped).push_raw(HeaderName::Via, line.reslice(rest)),
     }
 }
 

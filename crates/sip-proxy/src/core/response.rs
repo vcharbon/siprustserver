@@ -184,7 +184,7 @@ impl ProxyCore {
                         minted: None,
                         via_cookie: None,
                     },
-                    crate::cancel_lru::RTX_ENTRY_TTL_MS,
+                    crate::cancel_lru::Lifetime::Retransmission,
                 );
             }
         }

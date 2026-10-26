@@ -1,4 +1,5 @@
 use super::*;
+use sip_message::header::{HeaderValue, Rport};
 use sip_message::{serialize, CustomParser, SipMessage, SipParser};
 
 /// Where every request of these tests comes from: its Via's own sent-by.
@@ -134,4 +135,38 @@ fn a_refused_cancel_is_never_remembered() {
     r.refuse(&cancel("z9hG4bK-a"), SRC, 1, 0).expect("a refusal");
     assert!(r.repeat(&cancel("z9hG4bK-a"), SRC, 0).is_none());
     assert!(r.cancel(&cancel("z9hG4bK-a"), SRC, 0).is_none());
+}
+
+/// `req` with `;rport` on its Via, asking for the source port back.
+fn asking_rport(req: SipRequest) -> SipRequest {
+    let raw = String::from_utf8(req.image().to_vec()).expect("utf-8");
+    let raw = raw.replacen(":5555;branch=", ":5555;rport;branch=", 1);
+    match CustomParser::new().parse(raw.as_bytes()).expect("fixture parses") {
+        SipMessage::Request(r) => r,
+        SipMessage::Response(_) => panic!("expected a request"),
+    }
+}
+
+/// A NAT-mapped source other than the Via's sent-by.
+const MAPPED: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 7)), 40_000);
+
+fn assert_stamped(resp: &SipResponse) {
+    let top = resp.top_via();
+    assert_eq!(top.received(), Some("192.0.2.7"), "{}", top.to_wire());
+    assert_eq!(top.rport(), Some(Rport::Observed(40_000)), "{}", top.to_wire());
+}
+
+/// The repeated 503 and the 200 to a CANCEL record the source of the copy
+/// they answer on the topmost Via (RFC 3261 §18.2.1, RFC 3581 §4).
+#[test]
+fn a_repeated_503_and_a_cancels_200_are_stamped_with_their_source() {
+    let r = Refusals::new(&IdGen::seeded(1), 0);
+    let invite = || asking_rport(invite("z9hG4bK-a"));
+    r.refuse(&invite(), SRC, 1, 0).expect("a refusal");
+    let copy = r.repeat(&invite(), MAPPED, 1).expect("a copy is remembered");
+    assert_stamped(&copy);
+    let ok = r.cancel(&asking_rport(cancel("z9hG4bK-a")), MAPPED, 1).expect("a refused INVITE");
+    assert_eq!(ok.status(), 200);
+    assert_stamped(&ok);
 }

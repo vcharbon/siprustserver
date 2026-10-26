@@ -30,6 +30,7 @@ use sip_message::{Method, SipRequest, SipResponse};
 use sip_txn::timers::TIMER_B;
 use sip_txn::{IdGen, StatelessTagger};
 
+use crate::addr::observed_source;
 use crate::cancel_lru::retransmit_key;
 
 /// The most refused requests a memo holds by default; past it the oldest is
@@ -93,7 +94,8 @@ impl Memo {
 impl Refusals {
     /// Refusals whose `Retry-After` is spread over `jitter_sec` past its base,
     /// remembering at most [`REFUSED_MEMO_MAX`] refused requests. The To-tag
-    /// secret is drawn from `id_gen` once, here.
+    /// secret is drawn from `id_gen` once, here: this instance's own, for a
+    /// proxy with no shared key (tests, development).
     pub fn new(id_gen: &IdGen, jitter_sec: u32) -> Self {
         Self::with_capacity(id_gen, jitter_sec, REFUSED_MEMO_MAX)
     }
@@ -101,9 +103,16 @@ impl Refusals {
     /// [`new`](Self::new), remembering at most about `max` refused requests:
     /// each stripe holds `max / STRIPES`, rounded up.
     pub fn with_capacity(id_gen: &IdGen, jitter_sec: u32, max: usize) -> Self {
+        Self::keyed(StatelessTagger::from_id_gen(id_gen), jitter_sec, max)
+    }
+
+    /// Refusals whose To-tags `tagger` derives (a deployment's shared key,
+    /// `crate::security::own_final_tag`), remembering at most about `max`
+    /// refused requests.
+    pub fn keyed(tagger: StatelessTagger, jitter_sec: u32, max: usize) -> Self {
         let per_stripe = max.div_ceil(STRIPES).max(1);
         Self {
-            tagger: StatelessTagger::from_id_gen(id_gen),
+            tagger,
             jitter_sec,
             hasher: RandomState::new(),
             stripes: std::array::from_fn(|_| {
@@ -120,6 +129,13 @@ impl Refusals {
     /// The To-tag of any final the proxy answers `req` with itself.
     pub fn to_tag(&self, req: &SipRequest) -> String {
         self.tagger.for_request(req).0
+    }
+
+    /// Whether `ack` acknowledges a non-2xx final the proxy answered an
+    /// INVITE with itself: its To-tag is the one this tagger derives for that
+    /// INVITE (RFC 3261 §17.1.1.3).
+    pub fn acknowledges_own_final(&self, ack: &SipRequest) -> bool {
+        self.tagger.acknowledges_own_final(ack)
     }
 
     /// Refuse `req`, received from `src`, at `now_ms`, `retry_after_sec`
@@ -234,7 +250,7 @@ fn answer(
     let opts = GenerateResponseOpts {
         to_tag: Some(to_tag),
         extra_headers,
-        incoming_source: Some((src.ip().to_string(), src.port())),
+        incoming_source: Some(observed_source(src)),
         ..Default::default()
     };
     generate_response(req, status, reason, &opts)

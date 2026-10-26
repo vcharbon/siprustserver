@@ -32,6 +32,8 @@ mod cookie_identity_tests;
 #[cfg(test)]
 mod memo_bound_tests;
 #[cfg(test)]
+mod own_final_ack_tests;
+#[cfg(test)]
 mod reject_metric_tests;
 #[cfg(test)]
 mod retransmission_tests;

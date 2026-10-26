@@ -26,7 +26,7 @@ fn key(call_id: &str) -> String {
 fn a_panic_under_the_table_lock_leaves_it_serving() {
     let bounds = MemoBounds { stripes: 1, ..MemoBounds::default() };
     let lru = Arc::new(CancelBranchLru::with_bounds(Clock::test_at(0), bounds));
-    lru.remember(&key("before"), entry("z9hG4bK-before"), 60_000);
+    lru.remember(&key("before"), entry("z9hG4bK-before"), Lifetime::InviteTransaction);
     let poisoner = lru.clone();
     let _ = std::thread::spawn(move || {
         let _held = poisoner.stripes[0].lock();
@@ -36,7 +36,7 @@ fn a_panic_under_the_table_lock_leaves_it_serving() {
     let counted = || crate::poison::RECOVERIES.count(INVITE_BRANCH_LRU);
     let recovered = counted();
     assert_eq!(lru.size(), 1, "the table as it stood");
-    lru.remember(&key("after"), entry("z9hG4bK-after"), 60_000);
+    lru.remember(&key("after"), entry("z9hG4bK-after"), Lifetime::InviteTransaction);
     assert!(lru.lookup(&key("after")).is_some());
     assert_eq!(counted() - recovered, 1, "the recovery is counted once, under its lock");
 }
@@ -92,7 +92,7 @@ fn from_tag_disambiguates_the_two_dialog_directions() {
 fn remember_then_lookup_returns_entry() {
     let lru = CancelBranchLru::with_clock(Clock::test_at(0));
     let k = key("call-1");
-    lru.remember(&k, entry("z9hG4bK-1"), 1000);
+    lru.remember(&k, entry("z9hG4bK-1"), Lifetime::Retransmission);
     assert_eq!(lru.lookup(&k).unwrap().branch, "z9hG4bK-1");
     assert_eq!(lru.size(), 1);
     assert!(lru.lookup("absent").is_none());
@@ -103,9 +103,9 @@ async fn entries_expire_after_their_own_ttl() {
     let lru = CancelBranchLru::with_clock(Clock::test_at(0));
     let short = key("call-1");
     let long = key("call-2");
-    lru.remember(&short, entry("a"), 1000);
-    lru.remember(&long, entry("b"), 5000);
-    tokio::time::advance(std::time::Duration::from_millis(1001)).await;
+    lru.remember(&short, entry("a"), Lifetime::Retransmission);
+    lru.remember(&long, entry("b"), Lifetime::InviteTransaction);
+    tokio::time::advance(std::time::Duration::from_millis(RTX_ENTRY_TTL_MS + 1)).await;
     assert!(lru.lookup(&short).is_none(), "short-TTL entry should have expired");
     assert!(lru.lookup(&long).is_some(), "long-TTL entry must outlive the short one");
     assert_eq!(lru.sweep_expired().removed, 0, "lazy lookup already evicted the expired one");
@@ -122,21 +122,28 @@ async fn tick() {
     tokio::time::advance(std::time::Duration::from_millis(1)).await;
 }
 
-/// Past its entry cap the memo forgets the oldest entries first and
-/// counts each one it forgot; the newest stay readable.
+fn retransmission_share(bounds: MemoBounds) -> usize {
+    bounds.per_pool(Lifetime::Retransmission).0
+}
+
+/// Past its pool's share of the entry cap the memo forgets that pool's
+/// oldest writes first and counts each one; the newest stay readable.
 #[tokio::test(start_paused = true)]
 async fn a_flood_past_the_entry_cap_evicts_the_oldest() {
-    let lru = one_stripe(8, usize::MAX);
+    let lru = one_stripe(16, usize::MAX);
+    let cap =
+        retransmission_share(MemoBounds { max_entries: 16, max_bytes: usize::MAX, stripes: 1 });
+    assert!(cap > 1 && cap < 16, "the pool holds a share of the cap: {cap}");
     for i in 0..20 {
-        lru.remember(&key(&format!("flood-{i}")), entry("b"), RTX_ENTRY_TTL_MS);
+        lru.remember(&key(&format!("flood-{i}")), entry("b"), Lifetime::Retransmission);
         tick().await;
     }
-    assert_eq!(lru.size(), 8, "the table stays at its cap");
-    assert_eq!(lru.evicted(), 12, "every forgotten entry is counted");
-    for i in 0..12 {
+    assert_eq!(lru.size(), cap, "the pool stays at its share");
+    assert_eq!(lru.evicted(), (20 - cap) as u64, "every forgotten entry is counted");
+    for i in 0..20 - cap {
         assert!(lru.lookup(&key(&format!("flood-{i}"))).is_none(), "flood-{i} was evicted");
     }
-    for i in 12..20 {
+    for i in 20 - cap..20 {
         assert!(lru.lookup(&key(&format!("flood-{i}"))).is_some(), "flood-{i} is kept");
     }
 }
@@ -149,7 +156,7 @@ async fn oversized_keys_stay_inside_the_byte_budget() {
     let lru = one_stripe(1_000, budget);
     let long = "x".repeat(4_000);
     for i in 0..100 {
-        lru.remember(&key(&format!("{long}-{i}")), entry("b"), RTX_ENTRY_TTL_MS);
+        lru.remember(&key(&format!("{long}-{i}")), entry("b"), Lifetime::Retransmission);
         tick().await;
     }
     assert!(lru.bytes() <= budget, "{} bytes held past a {budget} budget", lru.bytes());
@@ -160,16 +167,16 @@ async fn oversized_keys_stay_inside_the_byte_budget() {
 }
 
 /// A flood of short-lived memos never pushes out an INVITE transaction's
-/// entry with time left: the entry nearest its expiry goes first.
+/// entry: each lifetime holds its own share of the bounds.
 #[tokio::test(start_paused = true)]
 async fn a_flood_of_short_memos_keeps_a_ringing_invites_entry() {
     let lru = one_stripe(8, usize::MAX);
-    lru.remember(&key("ringing"), entry("inv"), INVITE_ENTRY_TTL_MS);
+    lru.remember(&key("ringing"), entry("inv"), Lifetime::InviteTransaction);
     for i in 0..50 {
         tick().await;
-        lru.remember(&key(&format!("flood-{i}")), entry("b"), RTX_ENTRY_TTL_MS);
+        lru.remember(&key(&format!("flood-{i}")), entry("b"), Lifetime::Retransmission);
     }
-    assert_eq!(lru.size(), 8);
+    assert!(lru.evicted() > 0, "the flood evicts its own memos");
     assert_eq!(lru.lookup(&key("ringing")).map(|e| e.branch), Some("inv".to_string()));
 }
 
@@ -177,9 +184,9 @@ async fn a_flood_of_short_memos_keeps_a_ringing_invites_entry() {
 #[tokio::test(start_paused = true)]
 async fn a_rewrite_refreshes_one_entry() {
     let lru = one_stripe(8, usize::MAX);
-    lru.remember(&key("c"), entry("first"), RTX_ENTRY_TTL_MS);
+    lru.remember(&key("c"), entry("first"), Lifetime::Retransmission);
     tokio::time::advance(std::time::Duration::from_millis(RTX_ENTRY_TTL_MS - 1)).await;
-    lru.remember(&key("c"), entry("second"), RTX_ENTRY_TTL_MS);
+    lru.remember(&key("c"), entry("second"), Lifetime::Retransmission);
     assert_eq!(lru.size(), 1);
     tokio::time::advance(std::time::Duration::from_millis(RTX_ENTRY_TTL_MS - 1)).await;
     assert_eq!(lru.sweep_expired().removed, 0, "the rewrite moved the expiry");
@@ -196,10 +203,10 @@ async fn a_rewrite_refreshes_one_entry() {
 async fn an_expiry_pass_inspects_what_expired_not_the_table() {
     let lru = one_stripe(usize::MAX, usize::MAX);
     for i in 0..1_000 {
-        lru.remember(&key(&format!("long-{i}")), entry("b"), INVITE_ENTRY_TTL_MS);
+        lru.remember(&key(&format!("long-{i}")), entry("b"), Lifetime::InviteTransaction);
     }
     for i in 0..10 {
-        lru.remember(&key(&format!("short-{i}")), entry("b"), RTX_ENTRY_TTL_MS);
+        lru.remember(&key(&format!("short-{i}")), entry("b"), Lifetime::Retransmission);
     }
     tokio::time::advance(std::time::Duration::from_millis(RTX_ENTRY_TTL_MS + 1)).await;
     assert_eq!(lru.sweep_expired(), Swept { removed: 10, inspected: 11 });
@@ -209,24 +216,57 @@ async fn an_expiry_pass_inspects_what_expired_not_the_table() {
 #[tokio::test(start_paused = true)]
 async fn sweep_drops_expired() {
     let lru = CancelBranchLru::with_clock(Clock::test_at(0));
-    lru.remember(&key("c1"), entry("a"), 1000);
-    lru.remember(&key("c2"), entry("b"), 1000);
-    tokio::time::advance(std::time::Duration::from_millis(1001)).await;
+    lru.remember(&key("c1"), entry("a"), Lifetime::Retransmission);
+    lru.remember(&key("c2"), entry("b"), Lifetime::Retransmission);
+    tokio::time::advance(std::time::Duration::from_millis(RTX_ENTRY_TTL_MS + 1)).await;
     assert_eq!(lru.sweep_expired().removed, 2);
     assert_eq!(lru.size(), 0);
 }
 
-/// The default bounds hold the working set of `DESIGN_CPS` calls a second,
-/// the figures the proxy's settings table states.
+/// A cookie as the load balancer mints it (`strategies::load_balancer`).
+fn cookie() -> RouteParams {
+    [
+        ("w_pri", "b2bua-worker-7f9c8d6b5d-x2k4p"),
+        ("w_bak", "b2bua-worker-7f9c8d6b5d-q8z1m"),
+        ("e", "0"),
+        ("v", "1"),
+        ("kid", "k0"),
+        ("sig", "Qm9ndXMtc2lnbmF0dXJlLTEy"),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_string(), value.to_string()))
+    .collect()
+}
+
+/// The defaults: 3/8 of a 512 MiB pod in accounted bytes, as many entries
+/// of the heaviest shape the request path writes (a worker's INVITE
+/// retransmission memo with its minted and its Via cookie) as those bytes
+/// hold, and the call rate that working set stands for.
 #[test]
-fn the_default_bounds_hold_the_design_working_set() {
+fn the_default_bounds_hold_the_heaviest_entries_in_their_bytes() {
     let d = MemoBounds::default();
-    assert_eq!(d.max_entries, 1_464_320);
-    assert_eq!(d.max_bytes, 1_464_320 * TYPICAL_ENTRY_BYTES);
+    assert_eq!(d.max_bytes, 192 << 20);
+    assert_eq!(d.max_entries, d.max_bytes / TYPICAL_ENTRY_BYTES);
     assert_eq!(d.stripes, DEFAULT_STRIPES);
-    let ordinary = entry("z9hG4bK.4f3c1b2a9e8d7c6b5a4f3e2d1c0b");
-    let at = super::bounds::footprint(&key("a84b4c76e66710@pc33.atlanta.example.com"), &ordinary);
-    assert!(at <= TYPICAL_ENTRY_BYTES, "an ordinary entry accounts {at} bytes");
+    let via = via("SIP/2.0/UDP 10.244.5.8:5060;branch=z9hG4bK-b2bua-4f3c1b2a9e8d7c6b5a;lg=b;rport");
+    let heaviest = CancelEntry {
+        target: ProxyAddr::new("203.0.113.40", 5060),
+        branch: "z9hG4bK.4f3c1b2a9e8d7c6b5a4f3e2d1c0b".to_string(),
+        stickiness: None,
+        minted: Some(cookie()),
+        via_cookie: Some(cookie()),
+    };
+    let rtx = retransmit_key(
+        &via,
+        "b2bua-c4f1e2a3b4c5d6e7f8a9@10.244.5.8",
+        Some("b2b-7f3e9a"),
+        "INVITE",
+        1,
+    );
+    let bytes = super::footprint::footprint(&rtx, &heaviest);
+    assert!(bytes <= TYPICAL_ENTRY_BYTES, "the heaviest entry accounts {bytes} bytes");
+    assert!(bytes > TYPICAL_ENTRY_BYTES * 9 / 10, "the typical figure is that entry's: {bytes}");
+    assert_eq!(calls_per_second(&d), 109);
 }
 
 /// A flood of INVITE entries never pushes out a short memo: each lifetime
@@ -234,10 +274,10 @@ fn the_default_bounds_hold_the_design_working_set() {
 #[tokio::test(start_paused = true)]
 async fn a_flood_of_invite_entries_keeps_a_short_memo() {
     let lru = one_stripe(8, usize::MAX);
-    lru.remember(&key("rtx"), entry("short"), RTX_ENTRY_TTL_MS);
+    lru.remember(&key("rtx"), entry("short"), Lifetime::Retransmission);
     for i in 0..50 {
         tick().await;
-        lru.remember(&key(&format!("invite-{i}")), entry("b"), INVITE_ENTRY_TTL_MS);
+        lru.remember(&key(&format!("invite-{i}")), entry("b"), Lifetime::InviteTransaction);
     }
     assert_eq!(lru.lookup(&key("rtx")).map(|e| e.branch), Some("short".to_string()));
 }

@@ -108,7 +108,9 @@ its family.
    random bytes, base64 text, kid `k1`); both proxies read it through
    `secretKeyRef` and every redeploy reuses it. Rotation through env is not
    supported: changing the key fails the cookie check (403) for the in-dialog
-   requests of every call in progress.
+   requests of every call in progress. The To-tags of the finals a proxy
+   answers itself are keyed by a key derived from it, so either proxy, and a
+   restarted one, absorbs the ACK to a final the other sent.
 8. **Named-target lookups are bounded.** Each lookup is bounded at
    `PROXY_RESOLVER_LOOKUP_TIMEOUT_MS` (2 s). A packet whose name is being
    looked up waits on that lookup (at most 32 per name) and leaves after the
@@ -155,7 +157,7 @@ its family.
 | `PROXY_SELF_GATE_ELU_CRITICAL` | (0, 1] | 0.8 |
 | `PROXY_SELF_GATE_CPS_SIZE`, `PROXY_SELF_GATE_CPS_RATE` | ≥ 1 | 50, 100 |
 | `PROXY_RETRY_AFTER_JITTER_SEC` | 0..3600 s | 5 |
-| `PROXY_BRANCH_MEMO_MAX_ENTRIES`, `PROXY_BRANCH_MEMO_MAX_BYTES` | ≥ 1 | 1 464 320 (2 048 calls/s of working set, a quarter of headroom), that × 512 bytes |
+| `PROXY_BRANCH_MEMO_MAX_ENTRIES`, `PROXY_BRANCH_MEMO_MAX_BYTES` | ≥ 1 | 78 643, 192 MiB accounted (3/8 of the 512 MiB pod limit; that many entries of the heaviest shape, 109 calls/s of working set with a quarter of headroom) |
 | `PROXY_RESOLVER_POSITIVE_TTL_MS`, `PROXY_RESOLVER_NEGATIVE_TTL_MS`, `PROXY_RESOLVER_LOOKUP_TIMEOUT_MS` | ≥ 1 ms | 60000, 5000, 2000 |
 | `PROXY_RESOLVER_PREWARM` | `host:port` list | none |
 

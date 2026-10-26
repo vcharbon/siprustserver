@@ -15,18 +15,22 @@
 //! to a different worker.
 //!
 //! The same cache also drives the non-2xx ACK hop decision (`ackhop|` keys —
-//! relay the upstream's §17.1.1.3 ACK to the node the final arrived from, or
-//! absorb it when the proxy itself generated the final; see `core/request`
-//! and `core/response.rs`) and the retransmission target memo (`rtx|`-prefixed
-//! keys, see `core/request`).
+//! relay the upstream's §17.1.1.3 ACK for a relayed final to the node the
+//! final arrived from; see `core/request` and `core/response.rs`) and the
+//! retransmission target memo (`rtx|`-prefixed keys, see `core/request`).
+//! The ACK to a final the proxy generated itself is recognised by its To-tag
+//! and writes nothing here (`crate::refusals`).
 //!
 //! Keys are written by whoever sends the proxy a request, so the memo is
-//! bounded in entries and bytes ([`MemoBounds`]); past a bound it forgets the
-//! entries nearest their expiry and counts them. Expiry and eviction walk an
-//! index ordered by expiry, so their work is what they remove, never the
-//! table. Reads and writes take one stripe's lock and never block on I/O.
+//! bounded in entries and accounted bytes ([`MemoBounds`]). Each [`Lifetime`]
+//! has its own pool and share of the bounds; past a bound a pool forgets its
+//! oldest writes and counts them. Expiry and eviction walk a pool's write
+//! order from its front, so their work is what they remove, never the table.
+//! Reads and writes take one stripe's lock and never block on I/O.
 
 mod bounds;
+mod footprint;
+mod pool;
 mod stripe;
 
 use std::collections::hash_map::RandomState;
@@ -40,14 +44,15 @@ use sip_message::header::Via;
 use sip_txn::timers::{INVITE_INITIAL_TIMEOUT, TIMER_F, TIMER_H};
 
 use crate::addr::ProxyAddr;
-use crate::observability::ProxyMetrics;
+use crate::observability::{catalogue, ProxyMetrics};
 use crate::poison::{locked, INVITE_BRANCH_LRU};
 use crate::strategy::RouteParams;
 pub use bounds::{
-    MemoBounds, DEFAULT_MAX_BYTES, DEFAULT_MAX_ENTRIES, DEFAULT_STRIPES, DESIGN_CPS,
+    calls_per_second, MemoBounds, DEFAULT_MAX_BYTES, DEFAULT_MAX_ENTRIES, DEFAULT_STRIPES,
     ENTRY_MS_PER_CALL, TYPICAL_ENTRY_BYTES,
 };
-use stripe::{Change, Stripe};
+use pool::Change;
+use stripe::Stripe;
 
 /// TTL for pending-INVITE entries (CANCEL forwarding + non-2xx ACK synthesis).
 /// Must cover the downstream UA's **whole INVITE transaction window**: the
@@ -67,6 +72,25 @@ pub const INVITE_ENTRY_TTL_MS: u64 = INVITE_INITIAL_TIMEOUT + TIMER_H;
 /// written for EVERY forwarded request — including each keepalive OPTIONS — so
 /// keeping them short keeps the map at ≈ one transaction window of traffic.
 pub const RTX_ENTRY_TTL_MS: u64 = TIMER_F;
+
+/// How long a memo entry lives, and the pool of each stripe it is held in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lifetime {
+    /// [`INVITE_ENTRY_TTL_MS`]: an INVITE transaction's CANCEL target.
+    InviteTransaction,
+    /// [`RTX_ENTRY_TTL_MS`]: a retransmission target or a relayed non-2xx
+    /// final's ACK hop.
+    Retransmission,
+}
+
+impl Lifetime {
+    pub const fn ttl_ms(self) -> u64 {
+        match self {
+            Lifetime::InviteTransaction => INVITE_ENTRY_TTL_MS,
+            Lifetime::Retransmission => RTX_ENTRY_TTL_MS,
+        }
+    }
+}
 
 /// Default sweep cadence — half the SHORT (rtx) TTL, so the dominant entry
 /// class is physically reclaimed near its expiry and the map stays at ~1×
@@ -211,9 +235,7 @@ impl CancelBranchLru {
 
     /// Explicit clock and bounds.
     pub fn with_bounds(clock: Clock, bounds: MemoBounds) -> Self {
-        let (max_entries, max_bytes) = bounds.per_stripe();
-        let stripes =
-            (0..bounds.stripe_count()).map(|_| Mutex::new(Stripe::new(max_entries, max_bytes)));
+        let stripes = (0..bounds.stripe_count()).map(|_| Mutex::new(Stripe::new(&bounds)));
         Self {
             stripes: stripes.collect(),
             hasher: RandomState::new(),
@@ -283,20 +305,17 @@ impl CancelBranchLru {
         self.evicted.fetch_add(evicted, Ordering::Relaxed);
     }
 
-    /// Remember the downstream target + outbound branch used on a forward.
-    /// TTL is per entry: [`INVITE_ENTRY_TTL_MS`] for CANCEL/ACK correlation,
-    /// [`RTX_ENTRY_TTL_MS`] for retransmission target memos. A rewrite of a
-    /// held key replaces its entry and its expiry. The write first forgets
-    /// the expired entries of its stripe, then, past a bound, the entries
-    /// nearest their expiry (counted in [`evicted`](Self::evicted)). Nothing
-    /// is refused for want of room: a request whose memo was forgotten is
-    /// routed as one this hop never saw.
-    pub fn remember(&self, key: &str, entry: CancelEntry, ttl_ms: u64) {
+    /// Remember the downstream target + outbound branch used on a forward,
+    /// for `lifetime`. A rewrite of a held key replaces its entry and its
+    /// expiry. The write first forgets the expired entries of its pool, then,
+    /// past a bound, that pool's oldest writes (counted in
+    /// [`evicted`](Self::evicted)). Nothing is refused for want of room: a
+    /// request whose memo was forgotten is routed as one this hop never saw.
+    pub fn remember(&self, key: &str, entry: CancelEntry, lifetime: Lifetime) {
         let now = self.now_ms();
         let mut change = Change::default();
         let mut stripe = self.stripe(key);
-        stripe.expire(now, &mut change);
-        stripe.insert(key, entry, now.saturating_add(ttl_ms), &mut change);
+        stripe.insert(key, entry, lifetime, now, &mut change);
         self.account(&change);
     }
 
@@ -343,11 +362,19 @@ impl CancelBranchLru {
         swept
     }
 
-    /// Publish the memo's size, bytes and evictions to `metrics`.
+    /// Publish the memo's size to `metrics`.
     pub fn publish(&self, metrics: &ProxyMetrics) {
-        let as_u64 = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
-        metrics.set_pending_invite_lru_size(as_u64(self.size()));
-        metrics.set_branch_memo(as_u64(self.bytes()), self.evicted());
+        metrics.set_pending_invite_lru_size(u64::try_from(self.size()).unwrap_or(u64::MAX));
+    }
+
+    /// The memo's families ([`catalogue::BRANCH_MEMO`]) as Prometheus text,
+    /// read at the scrape from the memo's own counters.
+    pub fn prometheus_text(&self) -> String {
+        let mut text = String::new();
+        let bytes = u64::try_from(self.bytes()).unwrap_or(u64::MAX);
+        catalogue::BRANCH_MEMO_BYTES.render_value(&mut text, bytes);
+        catalogue::BRANCH_MEMO_EVICTIONS.render_value(&mut text, self.evicted());
+        text
     }
 }
 

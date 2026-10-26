@@ -77,7 +77,8 @@
 //!                    ms ≥ 1                               (default 5000)
 //!   PROXY_HMAC_KID   stickiness cookie key id              (default k0)
 //!   PROXY_HMAC_KEY   stickiness cookie secret, ≥ 16 bytes  (REQUIRED, no
-//!                    default; every proxy of a cluster shares it)
+//!                    default; every proxy of a cluster shares it); a key
+//!                    derived from it keys the To-tags of the proxy's own finals
 //!   HEALTH_INTERVAL_MS / HEALTH_TIMEOUT_MS  OPTIONS probe tick and reply
 //!                    window, ms ≥ 1                  (default 1000 / 1500)
 //!   HEALTH_THRESHOLD  consecutive misses that mark a worker Dead, ≥ 1
@@ -107,10 +108,11 @@
 //!   PROXY_RETRY_AFTER_JITTER_SEC  spread added to a refusal's Retry-After
 //!                    base, seconds 0..3600; every copy of one request draws
 //!                    the same value                           (default 5)
-//!   PROXY_BRANCH_MEMO_MAX_ENTRIES  entry cap of the CANCEL/ACK/retransmission
-//!                    branch memo, ≥ 1 (default: 2 048 calls/s of working set)
-//!   PROXY_BRANCH_MEMO_MAX_BYTES    byte budget of that memo, ≥ 1 (default:
-//!                    the entry cap × 512 bytes)
+//!   PROXY_BRANCH_MEMO_MAX_BYTES    accounted-byte budget of the CANCEL/ACK/
+//!                    retransmission branch memo, ≥ 1 (default 192 MiB, 3/8
+//!                    of the 512 MiB pod limit)
+//!   PROXY_BRANCH_MEMO_MAX_ENTRIES  entry cap of that memo, ≥ 1 (default: the
+//!                    entries of the heaviest shape the budget holds, 78 643)
 
 // The panic set at deny outside test code (ADR-0051 §3).
 #![cfg_attr(
@@ -149,8 +151,10 @@ use sip_clock::Clock;
 use sip_proxy::health::FirstView;
 use sip_proxy::load_observer::WorkerLoadObserver;
 use sip_proxy::observability::ProxyMetrics;
+use sip_proxy::refusals::{Refusals, REFUSED_MEMO_MAX};
 use sip_proxy::registry::WorkerRegistry;
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
+use sip_proxy::security::own_final_tag::own_final_tagger;
 use sip_proxy::self_gate::{AlwaysAdmitGate, EluCpsGate, IntakeAgeRecorder, ProxySelfGate};
 use sip_proxy::strategies::LoadBalancerStrategy;
 use sip_proxy::{ExternalFaceParts, RoutingStrategy};
@@ -311,9 +315,12 @@ async fn run() -> Result<i32, String> {
         clock.clone(),
         cfg.branch_memo,
     ));
-    let refusals =
-        Arc::new(sip_proxy::refusals::Refusals::new(&id_gen, cfg.retry_after_jitter_sec));
-    let parse_refusals = Arc::new(sip_proxy::parse_refusals::ParseRefusals::new(&id_gen));
+    let metrics_memo = cancel_lru.clone();
+    // Their To-tags are keyed by the shared cookie key (ADR-0046 §7).
+    let tagger = own_final_tagger(cfg.hmac_key.as_bytes(), &id_gen);
+    let jitter = cfg.retry_after_jitter_sec;
+    let refusals = Arc::new(Refusals::keyed(tagger.clone(), jitter, REFUSED_MEMO_MAX));
+    let parse_refusals = Arc::new(sip_proxy::parse_refusals::ParseRefusals::keyed(tagger));
 
     // Named-target resolver tuning + startup prewarm. A COLD
     // name (fresh deploy, CoreDNS restart, TTL expiry) would cost the first
@@ -424,6 +431,7 @@ async fn run() -> Result<i32, String> {
             sip_proxy_runner::metrics_body::body(
                 &metrics,
                 gate.as_ref(),
+                &metrics_memo,
                 &jemalloc_stats::prometheus_text,
             )
         }),

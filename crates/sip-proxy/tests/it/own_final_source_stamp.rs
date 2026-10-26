@@ -92,9 +92,9 @@ fn assert_stamped(resp: &SipResponse, source: SocketAddr) {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_refused_invite_503_carries_received_and_rport() {
-    let h = Harness::with_transit_delay("own-final-stamp-503", 0);
+    let h = Harness::with_transit_delay("own-final-stamp-503", 1);
     let proxy = proxy(&h).await;
     let (client, alice) = h.bind_sut("alice", ALICE).await;
     let branch = "z9hG4bK-stamp503";
@@ -108,9 +108,9 @@ async fn a_refused_invite_503_carries_received_and_rport() {
     let _ = h.finish().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_exhausted_max_forwards_483_carries_received_and_rport() {
-    let h = Harness::with_transit_delay("own-final-stamp-483", 0);
+    let h = Harness::with_transit_delay("own-final-stamp-483", 1);
     let proxy = proxy(&h).await;
     let (client, alice) = h.bind_sut("alice", ALICE).await;
     let branch = "z9hG4bK-stamp483";
@@ -124,9 +124,9 @@ async fn an_exhausted_max_forwards_483_carries_received_and_rport() {
     let _ = h.finish().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_unsupported_proxy_require_420_carries_received_and_rport() {
-    let h = Harness::with_transit_delay("own-final-stamp-420", 0);
+    let h = Harness::with_transit_delay("own-final-stamp-420", 1);
     let proxy = proxy(&h).await;
     let (client, alice) = h.bind_sut("alice", ALICE).await;
     let options = request(
@@ -143,9 +143,9 @@ async fn an_unsupported_proxy_require_420_carries_received_and_rport() {
     let _ = h.finish().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_unsupported_uri_scheme_416_carries_received_and_rport() {
-    let h = Harness::with_transit_delay("own-final-stamp-416", 0);
+    let h = Harness::with_transit_delay("own-final-stamp-416", 1);
     let proxy = proxy(&h).await;
     let (client, alice) = h.bind_sut("alice", ALICE).await;
     // A request on the worker-outbound path goes to its Request-URI, and

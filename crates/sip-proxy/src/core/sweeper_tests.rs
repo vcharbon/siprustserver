@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use sip_net::{SendError, UdpEndpointCounters, UdpPacket};
 
-use crate::cancel_lru::{CancelEntry, RTX_ENTRY_TTL_MS};
+use crate::cancel_lru::{CancelEntry, Lifetime};
 use crate::registry::static_reg::StaticWorkerRegistry;
 use crate::ForwardAllStrategy;
 
@@ -61,7 +61,7 @@ async fn run_sweeps_expired_pending_invite_entries() {
             minted: None,
             via_cookie: None,
         },
-        RTX_ENTRY_TTL_MS,
+        Lifetime::Retransmission,
     );
     metrics.set_pending_invite_lru_size(lru.size() as u64);
     assert_eq!(metrics.pending_invite_lru_size(), 1);
