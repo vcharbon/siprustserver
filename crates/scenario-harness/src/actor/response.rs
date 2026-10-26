@@ -18,7 +18,7 @@ use super::endpoint::{SUBFLOW_EARLY, SUBFLOW_REFER, SUBFLOW_RENEG};
 use super::goals::GoalStep;
 use super::ledger::{ObligationKey, ObligationKind};
 use super::runner::{ActorState, HeldAck};
-use super::state::{Observation, ResponseFact, SubflowState};
+use super::state::{Observation, SubflowState};
 use crate::agent::InviteResponseFate;
 use crate::{ClientInvite, StepError};
 
@@ -52,8 +52,7 @@ async fn absorb_establishing_provisional(
     if let Some(rseq) = reliable_rseq(resp) {
         let fork = resp.to().tag().map(str::to_owned).unwrap_or_default();
         if st.pracked_rseqs.insert((fork.to_string(), rseq)) {
-            let (txn, req) = inv.try_prack_with_request(resp).await?;
-            super::client_retransmit::prack_sent(st, req.cseq().seq(), txn, now);
+            let (_txn, req) = inv.try_prack_with_request(resp).await?;
             st.obs.record(
                 Observation::RequestSent {
                     key: ObligationKey::new(st.role, ObligationKind::Prack, req.cseq().seq()),
@@ -115,6 +114,9 @@ async fn absorb_establishing_failure(
     );
     st.obs.record(Observation::LegTerminated { leg: st.role }, now);
     st.scope.mark_terminated();
+    if super::clean_end::end_cleanly(st, now) {
+        return Ok(false);
+    }
     let reception_pending = st.goals.next_step().is_some_and(GoalStep::is_reception);
     if st.accepts.accepts_final(status) {
         st.obs.record(Observation::AcceptedEnding, now);
@@ -135,42 +137,11 @@ async fn absorb_establishing_failure(
     Ok(false)
 }
 
-/// Fold one inbound response into this leg's ordered response-fact log. The
-/// typed message is retained while a matcher-carrying reception goal is still
-/// pending on this actor (the content matcher compares it later), and — with a
-/// reception observer installed — for every response, so a reception goal that
-/// carries no matcher still hands the hook a fully populated message. With
-/// neither, nothing is retained.
-pub(super) fn record_response_fact(st: &mut ActorState<'_>, resp: &SipResponse, now: Instant) {
-    let retain = st.reception_observer.is_some()
-        || st
-            .goals
-            .remaining_steps()
-            .any(|s| matches!(s, GoalStep::ExpectResponse { matcher: Some(_), .. }));
-    let body_is_sdp = carries_sdp(resp.body(), resp.header::<MediaType>());
-    st.obs.record(
-        Observation::LegResponse {
-            leg: st.role,
-            fact: ResponseFact {
-                status: resp.status(),
-                reason: resp.reason().to_string(),
-                cseq_method: resp.cseq().method().as_str().to_string(),
-                body_len: resp.body().len(),
-                body_is_sdp,
-                early_tag: resp.to().tag().map(str::to_string),
-                typed: retain.then(|| Box::new(resp.clone())),
-            },
-        },
-        now,
-    );
-}
-
 pub(super) async fn react_response(
     st: &mut ActorState<'_>,
     resp: SipResponse,
 ) -> Result<(), StepError> {
     let now = Instant::now();
-    super::client_retransmit::settle(st, &resp);
     // A 2xx RETRANSMITTED while this leg holds its ACK (RFC 3261 §13.3.1.4: the
     // answerer re-passes its 2xx to the transport until the ACK arrives).
     // Absorbed ABOVE the response log — the held ACK is the one answer
@@ -191,7 +162,7 @@ pub(super) async fn react_response(
         );
         return Ok(());
     }
-    record_response_fact(st, &resp, now);
+    super::facts::record_response_fact(st, &resp, now);
     // A response to our still-pending caller INVITE drives the establish flow —
     // but ONLY a response whose CSeq method is INVITE. A PRACK's 200 (or any
     // other in-dialog final) sharing the early dialog must NOT be fed to the
@@ -398,6 +369,12 @@ pub(super) async fn react_response(
         let kind = if fork_teardown { ObligationKind::ForkBye } else { kind };
         let key = ObligationKey::new(st.role, kind, resp.cseq().seq());
         st.obs.record(Observation::ResponseObserved { key }, now);
+        // A 481 or 408 to our BYE ends the dialog all the same (RFC 3261
+        // §15.1.1): no peer holds it.
+        if kind == ObligationKind::Bye && matches!(resp.status(), 408 | 481) {
+            st.obs.record(Observation::LegTerminated { leg: st.role }, now);
+            st.scope.mark_terminated();
+        }
         if (200..300).contains(&resp.status()) {
             match kind {
                 ObligationKind::Bye => {
@@ -449,6 +426,14 @@ pub(super) async fn react_response(
                     );
                     st.feed.on_update_ok.stamp(st.ctx);
                 }
+                // The 200 to our OPTIONS keepalive ping: the first stamps the
+                // `keepalive_ack` feed, once.
+                ObligationKind::InDialog
+                    if resp.cseq().method().as_str() == "OPTIONS" && !st.saw_options_200 =>
+                {
+                    st.saw_options_200 = true;
+                    st.feed.on_options_ok.stamp(st.ctx);
+                }
                 _ => {}
             }
         }
@@ -483,7 +468,10 @@ pub(super) fn complete_originated_reinvite(st: &mut ActorState<'_>, cseq: u32, n
 
 /// Whether a message carries a session description: a non-empty body typed
 /// `application/sdp`. `content_type` is the message's own [`MediaType`] read.
-fn carries_sdp(body: &[u8], content_type: Option<Result<MediaType, SipParseError>>) -> bool {
+pub(super) fn carries_sdp(
+    body: &[u8],
+    content_type: Option<Result<MediaType, SipParseError>>,
+) -> bool {
     !body.is_empty()
         && content_type
             .and_then(Result::ok)

@@ -9,7 +9,9 @@
 mod abandoned_reinvite;
 mod auth;
 mod body_expect;
+mod bye_refused;
 mod cancel_race;
+mod clean_end;
 mod client_retransmit;
 mod delta_request;
 mod delta_response;
@@ -17,6 +19,7 @@ mod dialog_refusal;
 mod endings;
 mod forking;
 mod held;
+mod prack_refused;
 mod rang;
 mod reception_observer;
 mod reinvite_ack_body;

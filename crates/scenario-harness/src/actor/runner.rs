@@ -4,11 +4,11 @@
 //! the glare retries on ONE task. What each arm DOES lives in its own module:
 //! reactions in [`super::react`]/[`super::response`], goal steps in [`super::drive`].
 //!
-//! The actor owns **no retransmit timers** — it answers idempotently and keeps
-//! its inbox open; the transport (`loadgen::mux::CallTxns`) or the SUT owns
-//! retransmission. Its only obligation is to stay reactive long enough for
-//! those retransmitters to heal a loss (the ack-gated settle barrier,
-//! [`super::settle`]).
+//! The actor drives its endpoint's retransmission ladders on one arm
+//! ([`super::client_retransmit`]): a request until its answer, a final to an
+//! INVITE until its ACK. It answers idempotently and keeps its inbox open, so
+//! it stays reactive long enough for either side's retransmissions to heal a
+//! loss (the ack-gated settle barrier, [`super::settle`]).
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -268,8 +268,6 @@ pub struct ActorState<'c> {
     /// their own reactor arm — so goal progress (the deviation's point: traffic
     /// DURING the hold) never blocks on the hold.
     pub(super) held_acks: Vec<HeldAck>,
-    /// The re-INVITEs and PRACKs awaiting an answer, retransmitted by their own arm.
-    pub(super) retransmits: Vec<super::client_retransmit::Pending>,
     /// Whether this actor ORIGINATES the dialog — its first goal is an
     /// `Invite`/`InviteTemplate` (fallback: `Disposition::Caller`). Keys the
     /// §14.1 glare owner dwell and the caller attribution.
@@ -378,7 +376,6 @@ impl<'c> ActorState<'c> {
             originated_invites: 0,
             reinvite_ordinals: HashMap::new(),
             held_acks: Vec::new(),
-            retransmits: Vec::new(),
             originates,
             delta_policy,
             reception_observer,
@@ -450,12 +447,13 @@ async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), StepError> {
     let agent = st.agent.clone();
     let obs = st.obs.clone();
     let step_timeout = st.step_timeout;
+    let role = st.role;
     // Inbound source: this actor's own UA, or — when several actors share the
     // endpoint — the seat its pump delivers to. Same vocabulary either way.
     let mut inbox = st.inbox.take().unwrap_or_else(|| Inbox::Own(agent.clone()));
     loop {
         let give_up_at = give_up::due(st);
-        let retransmit_at = st.retransmit_due(); // a request's timer, or a 2xx awaiting its ACK
+        let retransmit_at = st.retransmit_due(); // a request awaiting its answer, or a final its ACK
         tokio::select! {
             inbound = inbox.recv() => {
                 match inbound {
@@ -474,7 +472,7 @@ async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), StepError> {
             // (a wait inside the body would starve the reactor: the documented
             // inline-pull hazard). Every consumable appears via this actor's
             // own loop body, so the gate is re-evaluated on each iteration.
-            ready = st.goals.next_ready(&obs, step_timeout), if st.goals.has_pending() && goal_arm_enabled(st) => {
+            ready = st.goals.next_ready(&obs, step_timeout, |s| s.caller_ended_cleanly() && s.leg_idle_or_ended(role)), if st.goals.has_pending() && goal_arm_enabled(st) => {
                 if let Some(step) = ready? {
                     if matches!(step, GoalStep::Invite { .. } | GoalStep::InviteTemplate { .. }) {
                         st.invite_goal = st.goals.pending();

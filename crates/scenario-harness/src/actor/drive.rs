@@ -143,10 +143,10 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
         GoalStep::Ring { forks, reliable } => ring(st, forks, reliable).await?,
         GoalStep::Answer { winner } => answer_held(st, winner).await?,
         GoalStep::Reject { status } => reject_held(st, status).await?,
-        // One in-dialog OPTIONS keepalive ping, its 200 read inline (the reactor
-        // has nothing else to do for this leg during the ping).
+        // One in-dialog OPTIONS keepalive ping; its 200 arrives through the
+        // reactor, which stays free to answer whatever crosses it.
         GoalStep::Options => {
-            ping_options_once(st).await?;
+            originate_in_dialog(st, InDialogMethod::Options, None, None, Vec::new()).await?;
         }
         // The OPTIONS-keepalive hold loop: ping every `cadence` until `hold`
         // elapses. Each 200 is read inline; the first stamps `keepalive_ack`.

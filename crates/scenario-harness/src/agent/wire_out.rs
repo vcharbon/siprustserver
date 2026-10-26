@@ -1,6 +1,8 @@
-//! One datagram out of a UA, and the finals of its non-INVITE server
-//! transactions the §17.2 receive view ([`Absorption`](crate::absorption::Absorption))
-//! records and repeats (RFC 3261 §17.2.2).
+//! One datagram out of a UA, and what the transaction layer
+//! ([`Absorption`](crate::absorption::Absorption)) sends again: the finals a
+//! copy of an answered request draws (RFC 3261 §17.2.1, §17.2.2), the finals
+//! to an INVITE until their ACK (§13.3.1.4, §17.2.1) and the requests until
+//! their answer (§17.1.1.2, §17.1.2.2).
 
 use std::net::SocketAddr;
 
@@ -11,13 +13,11 @@ use super::step::StepError;
 use super::Agent;
 
 impl Agent {
-    /// One datagram out, nothing fed but the record of a final it carries
-    /// to a non-INVITE request ([`Absorption::note_sent`](crate::absorption::Absorption::note_sent)).
+    /// One datagram out, nothing fed but its record in the transaction layer
+    /// ([`Absorption::note_sent`](crate::absorption::Absorption::note_sent)).
     pub(super) async fn send_bytes(&self, wire: &[u8], dst: SocketAddr) -> Result<(), StepError> {
-        if wire.starts_with(b"SIP/2.0 ") {
-            if let Ok(msg) = CustomParser::new().parse(wire) {
-                self.txn.note_sent(&msg, wire, dst, self.ep.queue_depth());
-            }
+        if let Ok(msg) = CustomParser::new().parse(wire) {
+            self.txn.note_sent(&msg, wire, dst, self.ep.queue_depth());
         }
         self.ep
             .send_to(wire, dst)
@@ -33,16 +33,24 @@ impl Agent {
         }
     }
 
-    /// When a 2xx this UA sent is due again for want of its ACK (RFC 3261
-    /// §13.3.1.4).
-    pub(crate) fn next_2xx_due(&self) -> Option<tokio::time::Instant> {
-        self.txn.next_2xx_due()
+    /// When a datagram this UA sent is due again for want of its answer or
+    /// its ACK. Only the actor layer drives it: a hand-scripted body sends
+    /// each retransmission itself.
+    pub(crate) fn next_due(&self) -> Option<tokio::time::Instant> {
+        self.txn.next_due()
     }
 
-    /// Send again every 2xx due for want of its ACK (RFC 3261 §13.3.1.4).
-    pub(crate) async fn send_due_2xx(&self) {
-        for (wire, dst) in self.txn.take_due_2xx(tokio::time::Instant::now()) {
+    /// Send again every datagram due for want of its answer or its ACK.
+    pub(crate) async fn send_due(&self) {
+        for (wire, dst) in self.txn.take_due(tokio::time::Instant::now()) {
             let _ = self.send_bytes(&wire, dst).await;
         }
+    }
+
+    /// This UA plays a peer that never retransmits: an actor driving it
+    /// sends no request again for want of its answer and no final for want
+    /// of its ACK.
+    pub fn silence_retransmissions(&self) {
+        self.txn.silence_retransmissions();
     }
 }

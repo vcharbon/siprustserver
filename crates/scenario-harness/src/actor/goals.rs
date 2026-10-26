@@ -429,7 +429,8 @@ impl GoalCursor {
     /// Resolve once the next pending goal's guard holds (immediately for
     /// [`Barrier::None`]) and its post-guard dwell has elapsed, returning the
     /// step to drive, or `None` when its [`unless`](Goal::unless) branch held
-    /// first (the goal is not owed: the caller advances past it) — the guard
+    /// first (the goal is not owed: the caller advances past it) or `moot`
+    /// held (every remaining goal is dropped) — the guard
     /// wait is bounded by `timeout` so a genuinely stuck guard fails the actor
     /// rather than hanging. Parks forever if the cursor is exhausted (the
     /// reactor gates this arm on [`has_pending`](Self::has_pending), so the
@@ -438,6 +439,7 @@ impl GoalCursor {
         &mut self,
         obs: &ObservedState,
         timeout: Duration,
+        moot: impl Fn(&super::state::StateInner) -> bool,
     ) -> Result<Option<GoalStep>, StepError> {
         let Some(goal) = self.goals.get(self.cursor) else {
             return std::future::pending().await;
@@ -449,7 +451,12 @@ impl GoalCursor {
         let deadline =
             *self.deadline_at.get_or_insert_with(|| Instant::now() + bound.unwrap_or(timeout));
         let skipped = |s: &super::state::StateInner| unless.as_ref().is_some_and(|b| b.holds(s));
-        await_pred(obs, guard.name(), |s| guard.holds(s) || skipped(s), deadline).await?;
+        await_pred(obs, guard.name(), |s| guard.holds(s) || skipped(s) || moot(s), deadline)
+            .await?;
+        if obs.with_snapshot(&moot) {
+            self.abandon();
+            return Ok(None);
+        }
         if !obs.with_snapshot(|s| guard.holds(s)) {
             return Ok(None);
         }

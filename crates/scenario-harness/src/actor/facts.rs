@@ -2,11 +2,14 @@
 //! received ([`RequestFact`]) or a response ([`ResponseFact`]), the facts the
 //! observed state folds and the barriers read.
 
+use sip_message::header::MediaType;
 use sip_message::header::{HeaderName, HeaderValue, SubscriptionState};
 use sip_message::sip_str::SipStr;
-use sip_message::SipRequest;
+use sip_message::{SipRequest, SipResponse};
 use tokio::time::Instant;
 
+use super::goals::GoalStep;
+use super::response::carries_sdp;
 use super::runner::ActorState;
 use super::state::Observation;
 
@@ -65,5 +68,35 @@ pub(super) fn record_request(st: &ActorState<'_>, req: &SipRequest) {
             },
         },
         Instant::now(),
+    );
+}
+
+/// Fold one inbound response into this leg's ordered response-fact log. The
+/// typed message is retained while a matcher-carrying reception goal is still
+/// pending on this actor (the content matcher compares it later), and — with a
+/// reception observer installed — for every response, so a reception goal that
+/// carries no matcher still hands the hook a fully populated message. With
+/// neither, nothing is retained.
+pub(super) fn record_response_fact(st: &mut ActorState<'_>, resp: &SipResponse, now: Instant) {
+    let retain = st.reception_observer.is_some()
+        || st
+            .goals
+            .remaining_steps()
+            .any(|s| matches!(s, GoalStep::ExpectResponse { matcher: Some(_), .. }));
+    let body_is_sdp = carries_sdp(resp.body(), resp.header::<MediaType>());
+    st.obs.record(
+        Observation::LegResponse {
+            leg: st.role,
+            fact: ResponseFact {
+                status: resp.status(),
+                reason: resp.reason().to_string(),
+                cseq_method: resp.cseq().method().as_str().to_string(),
+                body_len: resp.body().len(),
+                body_is_sdp,
+                early_tag: resp.to().tag().map(str::to_string),
+                typed: retain.then(|| Box::new(resp.clone())),
+            },
+        },
+        now,
     );
 }

@@ -114,6 +114,10 @@ struct SubEndpoint {
     addr: SocketAddr,
     shared: Arc<dyn UdpEndpoint>,
     router: Arc<Mutex<Router>>,
+    /// Woken whenever a packet is stashed for a sibling: a sibling parked on
+    /// the shared socket, whose packet another member pulled, takes it at
+    /// once rather than at its next arrival or receive bound.
+    stashed: Arc<tokio::sync::Notify>,
 }
 
 impl SubEndpoint {
@@ -130,6 +134,7 @@ impl SubEndpoint {
             Some(owner) if owner == self.owner => Route::Mine(pkt),
             Some(owner) => {
                 r.stash.entry(owner).or_default().push_back(pkt);
+                self.stashed.notify_waiters();
                 Route::Stashed
             }
             None => {
@@ -151,14 +156,21 @@ impl UdpEndpoint for SubEndpoint {
 
     async fn recv(&self) -> Option<UdpPacket> {
         loop {
+            // Registered before the stash is read, so a sibling's stash in
+            // between still wakes this wait.
+            let stashed = self.stashed.notified();
+            tokio::pin!(stashed);
+            stashed.as_mut().enable();
             if let Some(pkt) = self.pop_own() {
                 return Some(pkt);
             }
             // No lock held across this await — siblings can classify concurrently.
-            let pkt = self.shared.recv().await?;
-            match self.route(pkt) {
-                Route::Mine(pkt) => return Some(pkt),
-                Route::Stashed | Route::Orphan => continue,
+            tokio::select! {
+                pkt = self.shared.recv() => match self.route(pkt?) {
+                    Route::Mine(pkt) => return Some(pkt),
+                    Route::Stashed | Route::Orphan => continue,
+                },
+                () = &mut stashed => continue,
             }
         }
     }
@@ -309,6 +321,7 @@ impl<'h> CalleeGroupBuilder<'h> {
             stash: HashMap::new(),
         }));
 
+        let stashed = Arc::new(tokio::sync::Notify::new());
         let ids = self.harness.ids();
         let recv_timeout = self.harness.recv_timeout();
         let mut agents = HashMap::new();
@@ -318,6 +331,7 @@ impl<'h> CalleeGroupBuilder<'h> {
                 addr: self.addr,
                 shared: shared.clone(),
                 router: router.clone(),
+                stashed: stashed.clone(),
             };
             let ep: Arc<dyn UdpEndpoint> = Arc::new(sub);
             let agent = Agent {

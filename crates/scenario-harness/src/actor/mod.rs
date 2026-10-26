@@ -44,6 +44,7 @@
 mod accept_delta;
 mod answer;
 mod barrier;
+mod clean_end;
 mod client_retransmit;
 mod delta;
 mod drive;
@@ -59,6 +60,7 @@ mod observe;
 mod originate;
 mod prack_rx;
 mod react;
+mod replay_record;
 mod response;
 mod runner;
 pub mod scenarios;
@@ -99,8 +101,8 @@ pub use ledger::{ObligationKey, ObligationKind, ObligationLedger};
 pub use observe::{ReceivedMessage, ReceptionContext, ReceptionObserver};
 pub use settle::{SettleBarrier, SettleVerdict, T1};
 pub use spec::{
-    originating_role, run_actor_scenario, run_built_actor_call, ActorCall, ActorScenario,
-    STEP_TIMEOUT,
+    originating_role, run_actor_scenario, run_actor_scenario_observed, run_built_actor_call,
+    ActorCall, ActorScenario, STEP_TIMEOUT,
 };
 pub use state::{
     await_pred, LegObservation, LegPhase, Observation, ObservedState, RecordedFinal, ReplayEntry,
@@ -187,7 +189,7 @@ struct CallController {
 }
 
 /// The teardown barrier: every leg terminated.
-const TORN_DOWN: &str = "torn_down";
+const TORN_DOWN: &str = FailedAt::TORN_DOWN;
 /// The acknowledgement-gated settle barrier.
 const SETTLE: &str = "settle";
 
@@ -215,7 +217,8 @@ impl CallController {
         for (i, phase) in self.plan.iter().enumerate() {
             self.pending.store(i, Ordering::Relaxed);
             let deadline = tokio::time::Instant::now() + self.step_timeout;
-            let held = |s: &StateInner| (phase.pred)(s) || s.accepted_ending();
+            let held =
+                |s: &StateInner| (phase.pred)(s) || s.accepted_ending() || s.caller_ended_cleanly();
             if let Err(e) = await_pred(&self.obs, phase.name, held, deadline).await {
                 return CallVerdict::Failed(FailedAt::at_barrier(phase.name), e);
             }

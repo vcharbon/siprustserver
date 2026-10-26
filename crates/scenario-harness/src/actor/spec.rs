@@ -150,9 +150,19 @@ pub async fn run_actor_scenario(
     env: &CallEnv<'_>,
     ctx: &CallCtx,
 ) -> ScenarioVerdict {
+    run_actor_scenario_observed(scenario, env, ctx).await.0
+}
+
+/// [`run_actor_scenario`], with the call's observed state for a reader that
+/// judges a failed verdict against what each leg was left with.
+pub async fn run_actor_scenario_observed(
+    scenario: &dyn ActorScenario,
+    env: &CallEnv<'_>,
+    ctx: &CallCtx,
+) -> (ScenarioVerdict, ObservedState) {
     match scenario.build(env) {
-        Ok(call) => run_built_actor_call(call, env, ctx).await,
-        Err(cause) => ScenarioVerdict::build_failure(cause),
+        Ok(call) => run_built_actor_call_observed(call, env, ctx).await,
+        Err(cause) => (ScenarioVerdict::build_failure(cause), ObservedState::new()),
     }
 }
 
@@ -165,6 +175,14 @@ pub async fn run_built_actor_call(
     env: &CallEnv<'_>,
     ctx: &CallCtx,
 ) -> ScenarioVerdict {
+    run_built_actor_call_observed(call, env, ctx).await.0
+}
+
+async fn run_built_actor_call_observed(
+    call: ActorCall,
+    env: &CallEnv<'_>,
+    ctx: &CallCtx,
+) -> (ScenarioVerdict, ObservedState) {
     let ActorCall {
         actors,
         plan,
@@ -213,7 +231,7 @@ pub async fn run_built_actor_call(
             ));
         }
     }
-    verdict(expect, run, &obs, caller)
+    (verdict(expect, run, &obs, caller), obs)
 }
 
 /// The per-barrier / per-goal-guard wait bound: `64·T1 = 32 s` — the protocol's

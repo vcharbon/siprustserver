@@ -68,7 +68,8 @@ pub enum ObligationKind {
     /// re-emitted: the loss-soak contract every in-dialog request gets (a lost
     /// NOTIFY, a lost realign ACK). That is the whole reason to route it through
     /// the ledger rather than fire-and-forget. `INFO` today (an MRF media leg's
-    /// MSCML `INFO(EOF)`), `MESSAGE` next — see [`from_cseq_method`](Self::from_cseq_method).
+    /// MSCML `INFO(EOF)`), an OPTIONS keepalive ping, `MESSAGE` next — see
+    /// [`from_cseq_method`](Self::from_cseq_method).
     InDialog,
     /// A non-2xx final we sent to an initial INVITE (a reject, or the 487 to a
     /// CANCELled ring), awaiting its hop-ACK (§17.2.1). Closed by the
@@ -113,7 +114,7 @@ impl ObligationKind {
             // A plain body-carrying in-dialog request whose 2xx alone completes
             // it (no ACK, no sub-flow) — the generic origination behind
             // [`super::goals::GoalStep::InDialog`].
-            "INFO" | "MESSAGE" => Some(ObligationKind::InDialog),
+            "INFO" | "MESSAGE" | "OPTIONS" => Some(ObligationKind::InDialog),
             "CANCEL" => Some(ObligationKind::Cancel),
             // A re-INVITE's 2xx is matched by the ReInvite kind; the initial
             // INVITE creates the dialog and opens no obligation (its CSeq seeds

@@ -304,6 +304,7 @@ pub(super) async fn react_in_dialog_request(
             discharge_on_teardown(st, now);
             st.obs.record(Observation::LegTerminated { leg: st.role }, now);
             st.scope.mark_terminated();
+            super::clean_end::end_cleanly(st, now);
         }
         // A CANCEL (RFC 3261 §9.2): always 200 the CANCEL. If the INVITE is
         // still PENDING (a ring not yet answered, or a reliable 183 held for its
@@ -427,57 +428,7 @@ pub(super) async fn react_in_dialog_request(
                 maybe_answer_held_invite(st).await?;
             }
         }
-        // A PRACK (RFC 3262) for our reliable 183: 200 it, then — MUST-014 — this
-        // is the trigger to answer 200 to the HELD INVITE txn (the reliable
-        // provisional's whole point: no 200-to-INVITE before the PRACK). A
-        // FORKING callee (C1/E3) answers only on the WINNER fork's PRACK — a
-        // losing fork's PRACK (identified by its To-tag) is 200'd and absorbed.
-        "PRACK" => {
-            if super::prack_rx::names_nothing(st, uas.request()) {
-                uas.respond(481, "Call/Transaction Does Not Exist").try_send().await?;
-                return Ok(());
-            }
-            if super::prack_rx::after_the_leg(st) {
-                return uas.respond(200, "OK").try_send().await;
-            }
-            let prack_tag = uas.request().to().tag().map(str::to_owned);
-            st.ctx.anchor(&st.agent, "prack", uas.request());
-            uas.respond(200, "OK").try_send().await?;
-            if let Some(tag) = &prack_tag {
-                st.unpracked.remove(tag);
-            }
-            st.obs.record(
-                Observation::InDialogRequest {
-                    leg: st.role,
-                    call_id: call_id.to_string(),
-                    cseq,
-                    method: method.clone(),
-                },
-                now,
-            );
-            // C5: this callee holds the INVITE for an early UPDATE — mark the
-            // 183 PRACKed and release the held 200 only once the UPDATE is also
-            // done (MUST-014 + RFC 3311 §5.1, in either arrival order).
-            if st.hold_for_early_update {
-                st.early_pracked = true;
-                maybe_answer_held_invite(st).await?;
-                return Ok(());
-            }
-            let releases_answer = match (&mut st.fork_answer, prack_tag.as_deref()) {
-                // Forking: the winner fork's PRACK (or, for an unrung winner,
-                // the last fork's PRACK) releases the 200.
-                (Some(f), Some(tag)) => f.releases_on_prack(tag),
-                (Some(_), None) => false,
-                // Non-forking reliable answer: any PRACK releases (as before).
-                (None, _) => true,
-            };
-            if releases_answer {
-                if let Some(inv_txn) = st.pending_prack_answer.take() {
-                    let fork = st.fork_answer.take();
-                    answer_initial_invite(st, inv_txn, fork).await?;
-                }
-            }
-        }
+        "PRACK" => super::prack_rx::react_prack(st, uas).await?,
         // Any other in-dialog method: a plain 200 (dialog-neutral).
         _ => {
             uas.respond(200, "OK").try_send().await?;
@@ -490,7 +441,7 @@ pub(super) async fn react_in_dialog_request(
 /// INVITE 200, but only once BOTH the reliable 183 is PRACKed (RFC 3262
 /// MUST-014) AND the early UPDATE is 200'd (RFC 3311 §5.1) — regardless of the
 /// order those two arrive in. A no-op otherwise.
-async fn maybe_answer_held_invite(st: &mut ActorState<'_>) -> Result<(), StepError> {
+pub(super) async fn maybe_answer_held_invite(st: &mut ActorState<'_>) -> Result<(), StepError> {
     if st.hold_for_early_update && st.early_pracked && st.early_updated {
         if let Some(inv_txn) = st.pending_prack_answer.take() {
             answer_initial_invite(st, inv_txn, None).await?;
