@@ -178,6 +178,12 @@ pub(super) async fn materialise(
         smoothing,
     );
     crate::ring_deadline::arm_unrung_after_restore(&ctx.config, &mut call);
+    // A copy acting on a call another node created mints its legs from a
+    // space of its own; the creating node, reclaiming it, from the call's.
+    call.leg_space = match origin {
+        Origin::Takeover => call::LegSpace::Other,
+        Origin::Reclaim(_) => call::LegSpace::Creator,
+    };
     let timers = call.timers.clone();
     let pb = format_pb(topology.as_ref());
     if !ctx.state.materialize_if_absent(Enveloped::new(call.clone(), topology), origin.into()) {
@@ -321,10 +327,12 @@ pub(super) fn has_invite_to_serve(call: &Call) -> bool {
 /// final, whose bound and finals the copy owns, a 2xx awaiting its ACK, whose
 /// retransmission ladder the copy resumes (RFC 3261 §13.3.1.4), or a
 /// non-INVITE request record open on either side — a request sent awaiting
-/// its final, one received awaiting its answer.
+/// its final, whatever its deadline, one received awaiting its answer. A
+/// sent request past its deadline is still work: the copy settles it as its
+/// timeout ([`seeds::overdue_sent`]).
 pub(super) fn has_work_to_serve(call: &Call) -> bool {
-    // A seed's instants only bound what is left of it: the latest one is read.
-    !seeds::seeds_for(call, i64::MAX).is_empty()
+    // No deadline has passed at the earliest instant.
+    !seeds::seeds_for(call, i64::MIN).is_empty()
 }
 
 /// The typed miss of the store read, named from the origin's side.

@@ -129,8 +129,8 @@ fn only_here_to_end(live: &Call, ending: &Call, by: &RelayOwner) -> bool {
 /// that read the peer's later request (a target refresh is the peer's
 /// request, RFC 3261 §12.2); a leg only `other` dialled; the caller answered
 /// when `other` answered her, and every early dialog of hers ended once she
-/// took a final. A leg both name under one id with another Call-ID is not
-/// the same leg, and stays `base`'s alone. The request records of the union
+/// took a final. A leg id names one leg in both copies: two copies acting at
+/// once mint from distinct leg-id spaces (`call::LegSpace`). The request records of the union
 /// are those of `live` the worker `by` made: this node's teardown answers its
 /// own transactions, the other node's teardown its own.
 fn union_of(base: Enveloped, other: &Call, live: &Call, by: &RelayOwner) -> Enveloped {

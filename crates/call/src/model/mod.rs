@@ -61,6 +61,7 @@ pub mod emission;
 pub mod invite_exchange;
 pub mod leg;
 pub mod leg_invite;
+pub mod leg_space;
 pub mod leg_state;
 pub mod limiter;
 pub mod message_ring;
@@ -90,6 +91,7 @@ pub use dialogs::Dialogs;
 pub use emission::{Repeat, Repeated, RetainedEmission};
 pub use invite_exchange::{InviteExchange, Unacked2xx};
 pub use leg::{Leg, LegKind, RemoteInfo, Ring};
+pub use leg_space::LegSpace;
 pub use leg_state::{ByeDisposition, LegDisposition, LegState};
 pub use limiter::{
     AdmitOutcome, AdmitReport, CallLimiterState, ConsultAdmits, LimiterEntry, LimiterHeld,

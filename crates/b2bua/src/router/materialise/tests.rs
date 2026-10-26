@@ -133,6 +133,25 @@ async fn takeover_serves_a_backup_replica_once_then_finds_it_resident() {
     assert_eq!(n.metrics.timer_queue_len(), 1, "a resident copy re-arms nothing");
 }
 
+/// A copy acting on a call another node created mints its legs from a
+/// leg-id space of its own: while two copies act at once, as in a split,
+/// they never mint one id for two legs (ADR-0055 §7). The creating node's
+/// space is the call's from its birth.
+#[tokio::test(start_paused = true)]
+async fn a_takeover_copy_mints_leg_ids_the_creating_node_never_mints() {
+    let n = node("w1").await;
+    let ctx = n.core.router_ctx();
+    let call = call_in("w0", "w1", "cid-leg-space", CallModelState::Active, &n.clock);
+    let r = call.call_ref.clone();
+    put(&n.store, BAK, "w0", &call).await;
+
+    let _guard = ctx.state.lock(&r).await;
+    let copy = served(materialise(ctx, &r, Origin::Takeover).await);
+    let (theirs, ours) = (call::helpers::next_b_leg_id(&call), call::helpers::next_b_leg_id(&copy));
+    assert_eq!(theirs, "b-1", "the creating node's space");
+    assert_ne!(ours, theirs, "the copy mints from a space of its own");
+}
+
 /// A `Terminated` replica — the image of a call that already ended — is
 /// refused, counted, logged and left in place for its primary; a `Terminating`
 /// one still owes the teardown's end and is served (D1).

@@ -133,6 +133,43 @@ async fn an_ending_call_with_nothing_left_to_serve_is_discharged() {
     assert_eq!(ctx.state.lock_count(), 0, "no lock entry is left behind");
 }
 
+/// A call whose ending the departed peer had begun, its own BYE to the caller
+/// sent and not yet answered: the BYE is a transaction to serve, whatever its
+/// deadline. The sweep takes the call over and the BYE goes again under its
+/// branch; nothing is discharged while it is in flight (ADR-0055 §5).
+#[tokio::test(start_paused = true)]
+async fn an_ending_call_whose_bye_is_in_flight_is_taken_over_not_discharged() {
+    let net = SimulatedSignalingNetwork::new(1);
+    let n = node_on(&net, "w1", |_| {}, Vec::new()).await;
+    let caller = net.bind_udp(BindUdpOpts::new(src(), 64)).await.unwrap();
+    let ctx = n.core.router_ctx();
+    let mut ending = quiet("bye-in-flight");
+    ending.a_leg.own_tag = Some("staged".into());
+    ending.state = CallModelState::Terminating;
+    let at = src();
+    let bye = format!(
+        "BYE sip:alice@{at} SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.2:5080;branch=z9hG4bK-own-bye\r\n\
+         Max-Forwards: 70\r\nFrom: <sip:bob@127.0.0.2>;tag=staged\r\n\
+         To: <sip:alice@{at}>;tag=alicetag\r\nCall-ID: bye-in-flight@x\r\nCSeq: 2 BYE\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    let sent = call::SentRequest {
+        branch: "z9hG4bK-own-bye".into(),
+        image: bye.into_bytes(),
+        destination: call::HostPort { host: at.ip().to_string(), port: at.port() },
+    };
+    let deadline = ctx.clock.now_ms() + 30_000;
+    let dialog = ending.a_leg.dialogs.confirmed_mut().expect("the caller's dialog");
+    dialog.requests.push(call::RequestRecord::own("BYE", 2, sent, deadline, Default::default()));
+    put(&n.store, &ending).await;
+
+    take_over_departed(ctx, "w0");
+
+    let lines = heard(caller.as_ref(), Duration::from_millis(700)).await;
+    assert!(lines.iter().any(|l| l.starts_with("BYE ")), "the BYE in flight goes again: {lines:?}");
+    assert!(n.cdr.snapshot().is_empty(), "no CDR while the BYE is in flight");
+}
+
 /// A call its copy ends while its primary is out of the membership set has no
 /// primary to discharge it: the copy writes the one CDR and deletes the call.
 #[tokio::test(start_paused = true)]

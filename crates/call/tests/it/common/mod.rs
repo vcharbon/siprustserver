@@ -93,8 +93,7 @@ pub fn invite_awaiting_ack(cseq: i64) -> RequestRecord {
 }
 
 /// A retained emission standing on `rung` of the ladder `class` paces: the
-/// first rung armed by `paced`, then advanced rung by rung — the way the
-/// stack itself reaches one.
+/// first rung armed by `paced`, then advanced rung by rung, as the stack does.
 pub fn paced_emission(
     datagram: &[u8],
     dest: (&str, u16),
@@ -114,8 +113,7 @@ pub fn paced_emission(
 }
 
 /// The initial-INVITE 2xx the representative call answered the caller with,
-/// three rungs into its §13.3.1.4 ladder (RFC 3261) — the caller's ACK is
-/// still outstanding.
+/// three rungs into its §13.3.1.4 ladder (RFC 3261), her ACK outstanding.
 pub const ANSWERED_2XX: &[u8] = b"SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-123;rport=5060\r\n\
 From: <sip:alice@example.com>;tag=alice-from-tag-001\r\nTo: <sip:bob@example.com>;tag=b2bua-to-tag-aleg-9876\r\n\
 Call-ID: call-id-deadbeef@example.com\r\nCSeq: 1 INVITE\r\nP-Charging-Vector: icid-value=icid-9f2c\r\n\
@@ -343,6 +341,7 @@ pub fn representative_call() -> Call {
         message_turn: 1,
         sm_cursors: BTreeMap::new(),
         tag_seed: 0,
+        leg_space: call::LegSpace::Creator,
     }
 }
 
@@ -797,6 +796,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             message_turn,
             sm_cursors,
             tag_seed: 7,
+            leg_space: call::LegSpace::Creator,
         },
     )
 }

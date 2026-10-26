@@ -120,10 +120,11 @@ pub fn add_b_leg(mut call: Call, leg: Leg) -> Call {
     call
 }
 
-/// The id the next leg this stack dials takes: `b-{n}`, `n` one more than
-/// the legs it dialled so far.
+/// The id the next leg this stack dials takes: `{prefix}-{n}` in the call's
+/// [`leg_space`](crate::Call::leg_space), `n` one more than the legs it
+/// dialled so far.
 pub fn next_b_leg_id(call: &Call) -> String {
-    format!("b-{}", call.b_legs.len() + 1)
+    format!("{}-{}", call.leg_space.prefix(), call.b_legs.len() + 1)
 }
 
 /// Record that `leg_id` rang: its INVITE received a 180–189 provisional.

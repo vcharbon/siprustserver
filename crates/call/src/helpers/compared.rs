@@ -13,7 +13,8 @@
 //! - the union of two copies stands: the CDR events, each leg's message ring;
 //! - the container's value stands: the keepalive request records, the
 //!   keepalive and limiter-refresh ledger entries, the ladder rungs a quiet
-//!   turn moves (none changes a dialog), the trace fields.
+//!   turn moves (none changes a dialog), the trace fields, the leg-id space
+//!   the node acting on the call mints from.
 
 use crate::model::{
     Call, Dialog, InviteExchange, Ladder, Leg, MessageRing, Provisional, RequestRecord, Shown,
@@ -64,6 +65,7 @@ pub fn same_state(a: &Call, b: &Call) -> bool {
         message_turn: _,
         sm_cursors,
         tag_seed,
+        leg_space: _,
     } = a;
     *call_ref == b.call_ref
         && same_leg(a_leg, &b.a_leg)

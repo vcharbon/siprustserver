@@ -85,8 +85,9 @@ pub struct Call {
     /// Deterministic: derived from a-leg call-id + from-tag (+ primary ordinal).
     pub call_ref: String,
     pub a_leg: Leg,
-    /// The legs this stack dialled, in creation order ("b-1", "b-2", …):
-    /// destination, transfer-target and media legs alike.
+    /// The legs this stack dialled, in creation order ("b-1", "b-2", …, in
+    /// the [`leg_space`](Self::leg_space) that minted each): destination,
+    /// transfer-target and media legs alike.
     pub b_legs: Vec<Leg>,
     /// The routing answers the call dialled, in opening order
     /// ([`crate::helpers::attempt`] is the writer).
@@ -199,6 +200,10 @@ pub struct Call {
     /// first owner showed the caller (RFC 3261 §19.3, ADR-0055 §4).
     #[serde(default)]
     pub tag_seed: u64,
+    /// The leg-id space the node acting on the call mints from: the creating
+    /// node's from the call's birth, set by whichever node acts on it.
+    #[serde(default)]
+    pub leg_space: super::leg_space::LegSpace,
 }
 
 impl Call {

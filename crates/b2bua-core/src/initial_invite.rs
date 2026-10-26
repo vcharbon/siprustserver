@@ -153,6 +153,7 @@ pub fn build_initial_call(
         message_turn: 1,
         sm_cursors: std::collections::BTreeMap::new(),
         tag_seed,
+        leg_space: call::LegSpace::Creator,
     }
 }
 
