@@ -168,7 +168,7 @@ pub fn parse_headers(
 ) -> Result<ParsedHeaders, SipParseError> {
     // Size the list up front from the block's line count — growing it from
     // empty cost one reallocation per doubling, several per message.
-    let mut kept = Kept { lines: Vec::with_capacity(lines), ids: Ids::new() };
+    let mut kept = Kept { lines: Vec::with_capacity(lines), ids: Ids::with_capacity(lines) };
     let mut refusal: Option<SipParseError> = None;
     let mut echoed_line_refused = false;
     let mut singletons = Singletons::default();
