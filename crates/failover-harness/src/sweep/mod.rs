@@ -1,13 +1,15 @@
 //! The failover sweep (ADR-0055 §11): every shape of a catalogue is cut at
 //! every turn point of its call — each turn's write handed to replication,
 //! its effects left, its write applied at the backup — by each [`Incident`].
-//! Every cell must end with an RFC-clean, fully terminated call, one CDR and
-//! nothing left on any node or in the limiter; an incident that loses the
-//! call states what the parties are left with instead
-//! ([`Incident::loses_the_call`]); a split's copies may each write a CDR or
-//! none, a killed primary and the node that ends the call after it each one,
-//! never none between them, and a call with no backup at most one
-//! (ADR-0055 §5). A kill inside
+//! Every cell must end with an RFC-clean, fully terminated call the parties
+//! judge as their play declares, one CDR and nothing left on any node or in
+//! the limiter; once the incident strikes, a clean end is one (§1, §4), and an
+//! incident that loses the call states what the parties are left with instead
+//! ([`Incident::loses_the_call`]); the copies of a split that never heals may
+//! each write a CDR or none, the two copies of a split that heals, a killed
+//! primary and the node that ends the call after it each one, never none
+//! between them, and a call with no backup at most one (ADR-0055 §5). A kill
+//! inside
 //! the replication window declares its windows: a copy may re-use, once per
 //! dialog, an in-dialog CSeq the dead primary sent before its backup applied
 //! the write — so may the node answering a response of a call that had no
@@ -16,9 +18,10 @@
 //! the dead primary saw finally answered. Every kill of the primary and a
 //! healed split accept the §4 clean end's BYE into a dialog the other owner
 //! ended, closed by its 481. After a stall, the copy's repeat of the caller's
-//! 2xx may differ from the dead owner's in its own Contact alone. A split that never heals is judged on leaks,
-//! cleanup and the CDR count: the two copies' degraded-mode findings are
-//! accepted there alone (ADR-0055 §11).
+//! 2xx may differ from the dead owner's in its own Contact alone. A split that
+//! never heals is judged on leaks, cleanup and the CDR count, never on the
+//! parties' verdict: the two copies' degraded-mode findings are accepted
+//! there alone (ADR-0055 §11).
 //!
 //! A cell is named `<shape>/<incident>/t<k>-<point>`. The cells that fail
 //! before their correction lands are listed in a [`Ratchet`] with the decision
@@ -36,6 +39,7 @@ mod contact_repeat;
 mod outcome;
 mod parties;
 mod ratchet;
+mod unseen_rseq;
 
 use b2bua::cdr::CdrRecord;
 use scenario_harness::actor::ActorScenario;
@@ -82,7 +86,8 @@ pub trait SweepShape: Send + Sync {
         false
     }
 
-    /// Check the call's one CDR beyond its count.
+    /// Check each CDR the call left, beyond their count: the dead owner's and
+    /// the survivor's alike.
     fn check_cdr(&self, _cdr: &CdrRecord) -> Result<(), String> {
         Ok(())
     }

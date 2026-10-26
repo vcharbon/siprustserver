@@ -3,11 +3,9 @@
 # correction. A change that makes a cell pass removes its line; a new failure
 # is never added without its owner. The list only shrinks.
 #
-# The owner is read from the finding: a second CDR where the departure sweep
-# ends a call a killed primary ended behind the replication window (no marker
-# tells it), §5; a request or final a copy sends without the record of what
-# the dead owner sent, a request into a dialog the other copy ended, and the
-# non-2xx a copy owes a caller the dead primary answered §4; a deviation no
-# declared window of §11 covers, §11; a PRACK, an owed ACK or an in-dialog
-# request left unanswered §2; a 2xx repeat routed through the other owner §8;
-# and any other finding of a split cell §7.
+# The owner is read from the finding: a request or final a copy sends without
+# the record of what the dead owner sent, a request into a dialog the other
+# copy ended, and the non-2xx a copy owes a caller the dead primary answered
+# §4; a deviation no declared window of §11 covers, §11; a PRACK, an owed ACK
+# or an in-dialog request left unanswered §2; a 2xx repeat routed through the
+# other owner §8; and any other finding of a split cell §7.

@@ -1,10 +1,11 @@
 //! One cell of the sweep: the shape's call placed on [`PRIMARY`], cut at one
 //! turn point by one incident, driven until the cluster holds nothing of it,
 //! and judged. Every check panics: the RFC audit and the model invariants when
-//! the harness drops; here, no node holding anything of the call, no limiter
-//! set left, its CDR count — exactly one, up to two in a split cell, one or
-//! two where a backed primary is killed, at most one where an unbacked one is
-//! — and the shape's check of it.
+//! the harness drops; here, the parties' verdict ([`super::outcome`]), no node
+//! holding anything of the call, no limiter set left, its CDR count — exactly
+//! one, up to two in a split that never heals, one or two in a split that
+//! heals and where a backed primary is killed, at most one where an unbacked
+//! one is — and the shape's check of every CDR.
 
 use std::time::Duration;
 
@@ -157,24 +158,26 @@ pub async fn run_cell(
     if !cdr_count_accepted(cut.map(|c| c.incident), cdrs.len()) {
         panic!("[{name}] the call left {} CDRs", cdrs.len());
     }
-    if let Some(cdr) = cdrs.first() {
+    for cdr in &cdrs {
         if let Err(why) = shape.check_cdr(cdr) {
-            panic!("[{name}] the CDR is wrong: {why}");
+            panic!("[{name}] a CDR is wrong: {why}");
         }
     }
     turn_points.turns(&call_ref)
 }
 
 /// Whether `n` CDRs of the call are what `incident` may leave (ADR-0055 §5):
-/// one, or for a split call's two copies each one or neither (no CDR is
-/// deduplicated, its loss in a split is accepted), for a kill of a backed
-/// primary one or two — the dead primary's and the survivor's — never none,
-/// and for a call with no backup, lost with its primary as on a non-HA
-/// B2BUA, one or none.
+/// one, or for the two copies of a split that never heals each one or neither
+/// (no CDR is deduplicated, its loss in a split is accepted), for a split that
+/// heals and a kill of a backed primary one or two — the two copies', the
+/// dead primary's and the survivor's — never none, and for a call with no
+/// backup, lost with its primary as on a non-HA B2BUA, one or none.
 fn cdr_count_accepted(incident: Option<Incident>, n: usize) -> bool {
     match incident {
-        Some(Incident::Split | Incident::SplitHealed) => n <= 2,
-        Some(Incident::PrimaryKilled | Incident::StalledKilled) => (1..=2).contains(&n),
+        Some(Incident::Split) => n <= 2,
+        Some(Incident::SplitHealed | Incident::PrimaryKilled | Incident::StalledKilled) => {
+            (1..=2).contains(&n)
+        }
         Some(Incident::UnbackedKilled) => n <= 1,
         _ => n == 1,
     }
@@ -240,7 +243,7 @@ fn strike(
         }
         Incident::SplitHealed => {
             accept_clean_end_into_ended_dialogs(cluster, names);
-            accept_unseen_rseq(cluster);
+            super::unseen_rseq::accept_unseen_rseq(cluster);
             cluster.split(placement);
             None
         }
@@ -267,7 +270,7 @@ fn kill_inside_the_window(cluster: &mut Cluster, placement: &Placement) {
     accept_reused_cseq(cluster);
     accept_cancel_of_an_unseen_final(cluster);
     accept_non_2xx_after_the_dead_owners_2xx(cluster);
-    accept_unseen_rseq(cluster);
+    super::unseen_rseq::accept_unseen_rseq(cluster);
     cluster.kill(&placement.primary, &placement.backup);
 }
 
@@ -413,25 +416,27 @@ fn answered_before(
 }
 
 /// The §4 clean end BYEs every dialog the record or the evidence names; one
-/// the other owner already ended draws its 481 at the party (ADR-0055 §11).
+/// the other owner already ended draws its 481 at the party, once, from the
+/// incident on (ADR-0055 §11).
 fn accept_clean_end_into_ended_dialogs(cluster: &Cluster, names: &[String]) {
-    cluster.fh.accept_dialog_verdicts(
-        scenario_harness::dialogs::DIALOG_ENDED,
+    cluster.fh.accept_clean_end_byes(
         names,
         "ADR-0055 §11: the §4 clean end's BYE into a dialog the other owner ended, \
          closed by the 481 it draws",
     );
 }
 
-/// A copy's reliable provisional, under the dialog's derived tag, whose RSeq
-/// cannot continue the sequence the dead primary sent (RFC 3262 §4); the
-/// call still ends cleanly (ADR-0055 §11).
-fn accept_unseen_rseq(cluster: &mut Cluster) {
-    for rule in ["non-contiguous-rseq", "no-prack-of-out-of-order-rseq"] {
-        cluster.fh.accept_rfc_deviations_from_now(
-            rule,
-            "ADR-0055 §11: a copy's reliable provisional cannot continue the RSeq the \
-             dead primary sent",
-        );
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A split that heals leaves its call one CDR or two, never none; only a
+    /// split that never heals may lose it.
+    #[test]
+    fn a_healed_split_leaves_one_cdr_or_two() {
+        assert!(!cdr_count_accepted(Some(Incident::SplitHealed), 0));
+        assert!(cdr_count_accepted(Some(Incident::SplitHealed), 1));
+        assert!(cdr_count_accepted(Some(Incident::SplitHealed), 2));
+        assert!(cdr_count_accepted(Some(Incident::Split), 0));
     }
 }

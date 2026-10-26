@@ -87,18 +87,13 @@ pub(super) async fn process_result(
         None => ctx.state.update(result.call.clone()),
     }
 
-    // Model Y (ADR-0020 X3 amended): an acting-backup **takeover copy** that
-    // reaches Terminated DEFERS the discharge to the live primary. It reverse-
-    // flushes the terminal body — so the primary's Reclaim-tail reconcile
-    // (`reclaim::reconcile_reverse_flush`) folds it in and discharges it
-    // **exactly once** — then self-releases its live copy. It writes **NO** CDR,
-    // releases **NO** limiter hold, propagates **NO** delete here (that is the
-    // primary's sole authority, so exactly-once holds by construction — no
-    // cross-node idempotency). If the primary departs before reconciling, the
-    // departure sweep discharges the retained body; if it neither returns nor
-    // departs, the periodic reap evicts it, releases its limiter key and counts
-    // the CDR LOST. A copy whose primary has already departed (ADR-0047 D8) has
-    // no primary to defer to: it discharges the call below, as does a
+    // A takeover copy that reaches Terminated defers the discharge to its live
+    // primary (ADR-0020 X3, ADR-0055 §5): it reverse-flushes the terminal body,
+    // which the primary's reconcile discharges, then self-releases its live
+    // copy, writing no CDR, releasing no limiter hold, propagating no delete. A
+    // primary that departs first leaves the body to the departure sweep, one
+    // that neither returns nor departs to the reap. A copy whose primary has
+    // already departed (ADR-0047 D8) discharges the call below, as does a
     // primary-served terminal.
     if result.call.state == CallModelState::Terminated
         && ctx.state.is_takeover(call_ref)
@@ -121,11 +116,9 @@ pub(super) async fn process_result(
 
     // Replicate a non-terminated, backed-up call to its peer after each authoritative mutation
     // (flush-on-mutation), into the change log before any effect of the turn leaves (ADR-0055
-    // §3). The backup test here keeps a wired node from writing a call nobody backs up;
-    // `CallState::flush` itself is a no-op on a node with no replication store, so a backup peer
-    // stamped by the front proxy alone never opens the store. A backed-up call on a wired node
-    // routes through the write-side policy (Forward when primary, Reverse when acting-backup) so
-    // the backup holds the latest state.
+    // §3). A call writes only while it has a backup: on a wired node, a backup peer named and no
+    // refusal leaving it unbacked for life. A backed-up call routes through the write-side policy
+    // (Forward when primary, Reverse when acting-backup) so the backup holds the latest state.
     //
     // `Terminating` MUST flush too, not just `Active`: a teardown-in-progress
     // carries authoritative state the replica needs — the b-leg `ByeSent`
@@ -137,7 +130,7 @@ pub(super) async fn process_result(
     // `RemoveCall` delete path below instead.
     let wrote = quiet.is_none()
         && matches!(result.call.state, CallModelState::Active | CallModelState::Terminating)
-        && ctx.state.topology(call_ref).is_some_and(|t| !t.bak.is_empty());
+        && ctx.state.backup_of(call_ref).is_some();
     if wrote {
         ctx.state.flush(&result.call);
     }

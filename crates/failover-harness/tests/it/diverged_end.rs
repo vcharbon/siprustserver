@@ -27,8 +27,7 @@ const STEP: Duration = Duration::from_millis(100);
 /// nodes' BYEs at one CSeq (ADR-0055 §8, §11).
 pub(crate) fn accept_the_clean_end(est: &mut Established) {
     let names = [est.alice.name().to_string(), est.bob.name().to_string()];
-    est.fh.accept_dialog_verdicts(
-        scenario_harness::dialogs::DIALOG_ENDED,
+    est.fh.accept_clean_end_byes(
         &names,
         "ADR-0055 §11: the clean end's BYE into a dialog the other owner ended, closed by \
          the 481 it draws",

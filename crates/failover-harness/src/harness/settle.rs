@@ -47,19 +47,17 @@ impl FailoverHarness {
         false
     }
 
-    /// **Mutualised long-wait teardown settle** (TODO `FixCallTerminateOnBackup`
-    /// §5.4). After a call's terminal request, [`advance`](Self::advance) the
-    /// paused clock until `drained` is satisfied — first in
-    /// fine 200 ms steps for the immediate flush (CDR write, soft limiter release,
-    /// reverse-delete drain and an acting-backup takeover copy's self-release on
-    /// Timer H/J ~32 s), then in coarse 5 s steps **past one full
+    /// **The long-wait teardown settle.** After a call's terminal request,
+    /// [`advance`](Self::advance) the paused clock until `drained` is satisfied —
+    /// first in fine 200 ms steps for the immediate flush (CDR write, soft limiter
+    /// release, reverse-delete drain and an acting-backup takeover copy's
+    /// self-release on Timer H/J ~32 s), then in coarse 5 s steps **past one full
     /// `keepalive_interval` (300 s) + `keepalive_timeout` (45 s)** so that any
     /// zombie a buggy teardown left resurrectable *would* have armed its keepalive,
     /// probed, and surfaced (or self-healed) before we assert. Returns `true` if
     /// `drained` was satisfied within the budget, `false` if it timed out (the
     /// caller's `assert_call_fully_over` then reports precisely which invariant is
-    /// still broken). Replaces the ad-hoc `for _ in 0..40 { advance(200ms) }` loops
-    /// in `limiter_ha.rs` and `runner.rs`.
+    /// still broken).
     pub async fn settle_terminal(&self, mut drained: impl AsyncFnMut() -> bool) -> bool {
         if drained().await {
             return true;
@@ -88,7 +86,7 @@ impl FailoverHarness {
     }
 
     /// Like [`settle_terminal`](Self::settle_terminal) but pumps past the deferral's
-    /// replica TTL (`reboot_budget`, 600 s) so the Model-Y backup auto-cleanup reap
+    /// replica TTL (`reboot_budget`, 600 s) so the backup's auto-cleanup reap
     /// has fired: a never-reclaimed deferred terminal has its limiter hold released
     /// and its body evicted only once that TTL expires. A cell whose backup defers
     /// to a primary that never returns needs this because NOTHING drains until then. Coarse 30 s steps (the reap cadence is

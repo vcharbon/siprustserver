@@ -132,6 +132,11 @@ impl RfcAcceptance {
         }
     }
 
+    /// Whether a window for `rule` is open: it accepts what is captured next.
+    pub fn open(&self, rule: &str) -> bool {
+        self.windows.iter().any(|w| w.rule == rule && w.until_seq.is_none())
+    }
+
     /// Whether `rule` carries a lifetime waiver.
     pub fn waived(&self, rule: &str) -> bool {
         self.waived.contains(rule)

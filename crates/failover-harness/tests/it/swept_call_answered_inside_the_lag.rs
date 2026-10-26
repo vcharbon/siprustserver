@@ -74,8 +74,7 @@ async fn answered_inside_the_lag_then_ended(mut p: Placed, stall_after_deadline:
     for (rule, why) in LAG_DEVIATIONS {
         p.fh.accept_rfc_deviations_from_now(rule, why);
     }
-    p.fh.accept_dialog_verdicts(
-        scenario_harness::dialogs::DIALOG_ENDED,
+    p.fh.accept_clean_end_byes(
         &[p.alice.name().to_string(), p.bob.name().to_string()],
         "ADR-0055 §11: the clean end's BYE into a dialog the other owner ended, closed by \
          the 481 it draws",
