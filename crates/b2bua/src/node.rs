@@ -405,7 +405,7 @@ impl B2buaCore {
         //   1. the reaper sweep (ADR-0020): scan the last-touched ledger + inject
         //      verdicts through the re-entry channel — `maybe_sweep` is a no-op for
         //      a disabled reaper.
-        //   2. the Model-Y replica-store maintenance (ADR-0020 X3): the one
+        //   2. the replica-store maintenance (ADR-0055 §5, ADR-0020 X3): the one
         //      eviction site of expired replica bodies (missed-delete ghosts AND a
         //      deferred terminal whose primary never reclaimed it), plus the
         //      resurrection-tombstone prune. **No discharge** — the primary is the

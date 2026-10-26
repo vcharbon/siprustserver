@@ -625,7 +625,7 @@ impl CallState {
 
     /// Like [`peek_reclaimable`](Self::peek_reclaimable) but it reads an expired
     /// body too (`peek_body_raw`): a reverse-flushed *terminal* the live primary is
-    /// about to fold is folded whatever its TTL, so the reconcile writes its CDR.
+    /// about to meet is met whatever its TTL, so the reconcile writes its CDR.
     /// Used by the reverse-flush reconcile to classify the body; a non-terminal one
     /// is then materialised through the TTL-gated read. Returns the decoded call
     /// plus its persisted receive-time clock-skew offset (`0` when none).
@@ -680,8 +680,8 @@ impl CallState {
         self.flush_with_ttl(call, self.replicated_ttl_ms);
     }
 
-    /// Like [`flush`](Self::flush) but stamps an explicit body TTL. The Model-Y
-    /// **deferred-terminal** flush uses a SHORT grace here (not the 1 h active
+    /// Like [`flush`](Self::flush) but stamps an explicit body TTL. The
+    /// **deferred-terminal** flush (ADR-0055 §5) uses a SHORT grace here (not the 1 h active
     /// backstop): a `Terminating`/`Terminated` `bak:` Element a backup deferred is
     /// the backup-durable-fallback's alive-timer — if the primary never reconciles
     /// it (and forward-deletes it) within the grace, the reap discharges it. Active

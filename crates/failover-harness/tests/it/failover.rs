@@ -123,14 +123,13 @@ async fn canonical_failover() {
         b2.metrics().creations_total() > b2_creations_before,
         "GATE 3: b2 processed the failed-over in-dialog request (created the call locally)",
     );
-    // Model Y (amends ADR-0020 X3): the acting-backup DEFERS — it answers the wire
-    // but does NOT discharge a CDR itself (the rebooting primary discharges the
-    // deferred terminal on reclaim, or the backup's alive-timer fallback does if it
-    // never returns). Exactly-once CDR accounting is covered by the matrix +
-    // `acting_backup_terminate`; here we assert the defer.
+    // The deferral (ADR-0055 §5, ADR-0020 X3): a copy whose primary is a member
+    // answers the wire but does NOT discharge a CDR itself (the rebooting primary
+    // discharges the deferred terminal on reclaim). The CDR count is covered by the
+    // matrix + `acting_backup_terminate`; here we assert the defer.
     assert!(
         b2.cdr_records().is_empty(),
-        "GATE 3 (Model Y): the acting-backup must DEFER (write no CDR itself); got {} CDR(s)",
+        "GATE 3 (deferral): the acting-backup must DEFER (write no CDR itself); got {} CDR(s)",
         b2.cdr_records().len(),
     );
 
@@ -907,19 +906,16 @@ async fn acting_backup_terminate_leaves_no_expired_context_for_reclaim() {
     bye.expect(200).await; // ← external: the failed-over BYE completes
     fh.advance(Duration::from_millis(500)).await;
 
-    // ── INVARIANT 1 (Model Y — amends ADR-0020 X3): the acting-backup DEFERS its
+    // ── INVARIANT 1 (ADR-0055 §5, ADR-0020 X3): the acting-backup DEFERS its
     //    terminal. It answers the wire (alice/bob's BYE completed above), records the
     //    terminal + reverse-flushes it as a short-TTL deferred `bak:` context, and
     //    self-releases its LIVE copy — but it does NOT discharge: no CDR, no limiter
-    //    release, no delete. The live/rebooting primary is the sole discharge
-    //    authority (it reclaims + discharges EXACTLY ONCE; or the backup's own
-    //    alive-timer fallback fires only if the primary never returns). So b2 has
-    //    written NO CDR here. (This INVERTS the pre-Model-Y contract this test's name
-    //    was written for: the backup now deliberately DOES leave a transient
-    //    deferred context for reclaim — cleaned by INVARIANT 2 below.) ─────────────
+    //    release, no delete. Its primary is a member, so the rebooting primary
+    //    reclaims and discharges the call. So b2 has written NO CDR here, and the
+    //    deferred context it leaves is cleaned by INVARIANT 2 below. ─────────────
     assert!(
         b2.cdr_records().is_empty(),
-        "Model Y: the acting-backup must DEFER (write no CDR itself); the primary \
+        "deferral: the acting-backup must DEFER (write no CDR itself); the primary \
          discharges on reclaim. b2 wrote {} CDR(s)",
         b2.cdr_records().len(),
     );
@@ -943,14 +939,14 @@ async fn acting_backup_terminate_leaves_no_expired_context_for_reclaim() {
     fh.advance(Duration::from_secs(10)).await; // ReclaimAll (smoothed) + straggler sweep
 
     // ── INVARIANT 2: the rebooted primary reclaimed the deferred terminal and
-    //    discharged it EXACTLY ONCE — the call is fully released cluster-wide (no
-    //    owner, no replica anywhere; no resurrection) AND there is exactly one CDR
-    //    across the cluster (the reclaiming primary's, the backup having deferred). ─
+    //    discharged it — the call is fully released cluster-wide (no owner, no
+    //    replica anywhere; no resurrection) AND there is one CDR across the cluster
+    //    (the reclaiming primary's, the backup having deferred). ─
     failover_harness::assert_call_fully_released(&[&*b1, &*b2], &call_ref).await;
     assert_eq!(
         failover_harness::total_cdrs_for(&[&*b1, &*b2], &call_ref),
         1,
-        "Model Y: exactly one CDR cluster-wide for the reclaimed-and-discharged deferred terminal",
+        "one CDR cluster-wide for the reclaimed-and-discharged deferred terminal",
     );
 
     drop((w_b1, w_b2, proxy));

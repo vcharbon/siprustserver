@@ -50,16 +50,19 @@ Automatic (you cannot opt out, only waive per-rule):
   every such waived SUT finding. See the default test requirements in
   [CLAUDE.md](../../CLAUDE.md), which forbid waiving a finding the SUT caused
   unless it is an accepted deviation.
-  `failover-harness` adds one narrower scope for a deviation an ADR declares an
-  **accepted trade-off** (today only ADR-0014's dual-owner in-dialog CSeq
-  overlap): `accept_rfc_deviations_from_now(rule, justification)` /
-  `resume_rfc_gate(rule)` accept the rule only on messages captured inside the
-  window (arm it at the fault injection), list what they accepted in
-  `accepted_rfc_deviations()` + the unified report as advisory, and leave the
-  rule gating on establishment and on every fault-free scenario — so the run
-  still has a baseline. It is not a waiver hatch: an accepted deviation needs
-  the ADR entry AND the scenario's own assertion on the accepted outcome. A
-  SUT-side deviation with no such ADR entry is a bug to fix, never a window.
+  `failover-harness` adds one narrower scope for a **declared window** of
+  [ADR-0055](../adr/0055-services-are-ha-blind.md) §11, the only SUT-side
+  deviations an incident may cause:
+  `accept_rfc_deviations_from_now(rule, justification)` (and the `_where`,
+  `_seeing` and `accept_rfc_deviations_once_per_dialog*` variants that narrow
+  what it admits) accepts the rule only on messages
+  captured inside the window (armed when the incident strikes), and
+  `resume_rfc_gate(rule)` closes it. What they accepted is listed in
+  `accepted_rfc_deviations()` and in the unified report as advisory; the rule
+  keeps gating on establishment and on every fault-free run. It is not a
+  waiver hatch: a window needs its §11 entry and the test's own assertion on
+  the outcome (no leak, full cleanup, the CDR count). A SUT-side deviation no
+  §11 entry declares is a bug to fix, never a window.
 - **Dialog table** — every simulated UA (an `Agent`, the reactive actor's
   agents, the load lane's) keeps an RFC 3261 §12 dialog table
   (`scenario_harness::dialogs`), fed by every message it sends, sights,
@@ -116,6 +119,53 @@ NOT automatic (deliberately — timeout/reap/stall fixtures would false-fail):
   asserts it explicitly (single-SUT), or `assert_call_fully_over` /
   `assert_call_fully_released` in failover tests. Drain async teardown first
   with `settle_until`.
+
+## The actor parties
+
+The reactive actor (`scenario_harness::actor`) plays each party as an RFC 3261
+UA over UDP, with its transactions' retransmissions: every request but ACK
+goes again until it is answered (an INVITE on Timer A until any response, any
+other request on Timer E until its final), and every final to an INVITE goes
+again until its ACK, each given up at 64·T1 (`actor/client_retransmit.rs`, the
+ladders in `absorption`). A party that plays a peer that never retransmits
+opts out by name: `Agent::silence_retransmissions()`.
+
+**Clean end.** A test whose fault may make the SUT end the call arms
+`CallCtx::accept_clean_ends()` when the fault strikes. From then on, a party
+the SUT ends cleanly (a non-2xx final to her establishing INVITE, a BYE she
+answers 200) drops her remaining goals; once the caller is ended so, the call
+is, and the verdict records it (`Observation::EndedCleanly`). A request left
+without its final or a dialog left open still fails the call.
+
+## The failover sweep
+
+`failover-harness::sweep` is the in-process proof of
+[ADR-0055](../adr/0055-services-are-ha-blind.md) §11, in a lane of its own:
+`just sweep` (nextest profile `sweep`), on the paused clock.
+
+- **Shapes.** A catalogue of call shapes (`sweep::catalogue`), each a
+  `SweepShape`: how the cluster decides the call and what the actor parties
+  play. A consumer adds its own shapes with `failover_sweep!` and a ratchet
+  of its own, nothing else.
+- **Turn points.** Every turn the call takes at its primary, numbered from 1,
+  split into three sub-points (`TurnPoint`): `Logged` (the write handed to
+  replication), `Left` (the turn's effects sent) and `Applied` (the write
+  applied at the backup; only for a turn that wrote). The harness holds the
+  turn at the armed sub-point until the incident struck (`turn_points`).
+- **Incidents.** `sweep::Incident`: primary killed, backup killed, split,
+  split healed, stalled then killed, unbacked then killed. A cell is named
+  `<shape>/<incident>/t<k>-<point>`.
+- **Verdict.** Every cell requires no leak on any node or in the limiter and
+  its incident's CDR count. A split, healed or not, is judged on that alone;
+  every other cell also requires an RFC-clean call the parties judge as their
+  play declares, a clean end included once the incident struck
+  (`sweep/outcome.rs`). Only the incident's declared windows are accepted
+  (`sweep/cell.rs`).
+- **Ratchet.** `failover-sweep.ratchet` beside the crate's manifest (and a
+  consumer's own) lists the cells that fail today, each with the ADR-0055
+  section that owns its correction (`sweep::Ratchet`). The lane fails on a
+  failing cell the ratchet does not list and on a listed cell that passes, so
+  the list only shrinks. An empty ratchet is the steady state.
 
 ## Cookbook
 
@@ -245,6 +295,7 @@ uses.
 | `crates/scenario-harness/src/callflow.rs` module doc | The reusable choreography — "use these; don't re-type the dance" |
 | `crates/b2bua-harness/src/lib.rs` — `B2buaScene` + `assert_fully_reaped` docs | The scene's addresses, the six-check leak oracle |
 | `crates/failover-harness/src/lib.rs` + `src/harness.rs` | Cluster invariants, `transparent_matrix!`, `worker_clock_offsets` design |
+| `crates/failover-harness/src/sweep/mod.rs` + `sweep/outcome.rs` module docs | The failover sweep: cells, CDR counts, the parties' verdict per incident |
 | `crates/ha-harness/src/lib.rs` module doc | Pure repl-plane harness |
 | `crates/http-net-testkit/src/scripted/mod.rs` module doc | The scripted HTTP service: program, continuation token and its codec (ADR-0036), faults, hard-failure rule |
 | `crates/http-net-testkit/src/recording.rs` module doc | HTTP on the `Recorder`: the client and served sides, abandoned exchanges, pairing |

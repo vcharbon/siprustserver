@@ -586,7 +586,7 @@ impl<'a> InDialogRequest<'a> {
         );
         let wire = emitted_wire(&msg, &headers);
         self.agent.try_send_emitted(&msg, &wire, dst).await?;
-        let mut txn = InDialogTxn::new(
+        let txn = InDialogTxn::new(
             self.agent.clone(),
             // A re-INVITE's non-2xx final takes a txn-layer ACK
             // (§17.1.1.3) — retain the request so the txn can build it.
@@ -594,7 +594,6 @@ impl<'a> InDialogRequest<'a> {
             dst,
             request_label(None, &request),
         );
-        txn.wire = wire;
         Ok((txn, request))
     }
 }
@@ -617,8 +616,6 @@ pub struct InDialogTxn {
     /// The request as a timed-out expect names it
     /// ([`request_label`](super::client_txn::request_label)).
     label: String,
-    /// The datagram the request left as, for a retransmission; empty for a CANCEL.
-    wire: Vec<u8>,
 }
 
 impl InDialogTxn {
@@ -628,7 +625,7 @@ impl InDialogTxn {
         wire_dst: SocketAddr,
         label: String,
     ) -> Self {
-        InDialogTxn { agent, invite, wire_dst, label, wire: Vec::new() }
+        InDialogTxn { agent, invite, wire_dst, label }
     }
 
     /// The (re-)INVITE this transaction put on the wire — `None` for a

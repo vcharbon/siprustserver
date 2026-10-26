@@ -211,8 +211,8 @@ flowchart LR
 
 <!-- =================================================================== -->
 <h2 id="sendloop" class="repl">3 · The unified server send loop</h2>
-<p class="lead">One mechanism for both flows: a pure <code>sleep</code>-poll. The old
-   <code>Notify</code>/subscriber/<code>Subscription</code> machinery is deleted.</p>
+<p class="lead">One mechanism for both flows: the tail is sent on write
+   (ADR-0055 §3).</p>
 
 <p>A node <code>listen</code>s once and serves each accepted connection
    <strong>one flow</strong> (the opening <code>PullRequest.partition</code> selects
@@ -229,18 +229,18 @@ flowchart LR
       <code>Data{op: Put, at: W}</code> in chunks (one write+flush per chunk, never a
       lock held across the socket). The tail then resumes warm from <code>W</code>,
       so scan and tail never double-deliver.</li>
-  <li><strong>Poll-tail.</strong> Every ~100&nbsp;ms drain the sub-log range
-      <code>(since,..]</code> taking <strong><code>limit+1</code> (= 501)</strong>.
-      While <code>&gt; 500</code> pending, stream <code>Data</code> back-to-back with
-      no <code>Noop</code> and no sleep (each <code>Data</code> carries its own
-      <code>at</code>, so the cursor rides the data and the TCP buffer fills). At
-      <code>≤ 500</code>, flush the remainder and sleep.</li>
+  <li><strong>Tail, sent on write.</strong> Each time a write lands in the
+      flow's sub-log, drain up to a batch above the cursor. While a full batch
+      comes back, stream <code>Data</code> back-to-back with no <code>Noop</code>
+      (each <code>Data</code> carries its own <code>at</code>, so the cursor rides
+      the data and the TCP buffer fills); below a batch, wait for the next
+      write.</li>
 </ol>
 
 <p>A <strong><code>Noop</code> is emitted only on the catch-up edge</strong> (just
    drained a real backlog to head — the <em>first</em> such Noop sets the puller's
-   sticky <code>current</code> flag) and on a <strong>~20&nbsp;s idle floor</strong>
-   (liveness keepalive). A steady trickle needs no Noop. Bodies are read
+   sticky <code>current</code> flag) and every <strong><code>noop_interval</code></strong> (5&nbsp;s) after the
+   last one (liveness keepalive). Bodies are read
    <strong>live at send time</strong>, so a slow puller always gets latest-per-call.
    The serve side is independent of local readiness: a NotReady node still answers
    its peers' pulls.</p>

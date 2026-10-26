@@ -281,7 +281,7 @@ fn assert_answered_on(node: &ReplicatedB2buaSut, call_ref: &str, what: &str) {
     assert_eq!(live.a_leg.state(), LegState::Confirmed, "{what}: a-leg Confirmed");
     assert!(
         !live.timers.iter().any(|t| *t.timer_type() == TimerType::NoAnswer),
-        "{what}: the folded ledger carries no NoAnswer",
+        "{what}: the ledger it took carries no NoAnswer",
     );
 }
 
@@ -526,7 +526,7 @@ async fn an_answer_served_by_the_takeover_copy_after_the_reclaim_draws_no_second
         ),
     );
     assert!(fh.now_ms() < fire_at, "the answer lands before the ring deadline");
-    assert_answered_on(b1, &call_ref, "the primary folded the survivor's answer");
+    assert_answered_on(b1, &call_ref, "the primary took the survivor's answer");
 
     let crossed = cross_deadline(&fh, &alice, &bob, fire_at).await;
     let passed = crossed.stray_final.is_none() && crossed.cancels_to_bob == 0;
@@ -561,11 +561,11 @@ async fn an_answer_served_by_the_takeover_copy_after_the_reclaim_draws_no_second
 /// answer must still be taken: no second final at the ring deadline.
 ///
 /// The ACK that landed on a ringing copy acknowledged nothing, so the handshake
-/// completes on alice's §13.2.2.4 re-pass once the answer has folded in.
+/// completes on alice's §13.2.2.4 re-pass once the answer has been taken in.
 #[tokio::test(start_paused = true)]
 async fn an_answer_the_reclaimed_copy_saw_the_ack_of_first_draws_no_second_final() {
     let Cluster { mut fh, alice, bob, proxy, mut w_b1, mut w_b2 } =
-        spawn_cluster("078-ack-lands-before-the-answer-folds").await;
+        spawn_cluster("078-ack-lands-before-the-answer").await;
 
     // ── ring: the route arms NoAnswer and the ringing version reaches the backup
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
@@ -621,7 +621,7 @@ async fn an_answer_the_reclaimed_copy_saw_the_ack_of_first_draws_no_second_final
         None,
         "before deadline",
         &format!(
-            "primary serves={} survivor serves={} folds refused={}",
+            "primary serves={} survivor serves={} reverse flushes refused={}",
             b1.serves(&call_ref),
             b2.serves(&call_ref),
             b1.metrics().repl_reverse_flush_refused_total()
@@ -629,17 +629,13 @@ async fn an_answer_the_reclaimed_copy_saw_the_ack_of_first_draws_no_second_final
     );
     assert!(fh.now_ms() < fire_at, "the answer lands before the ring deadline");
     assert_eq!(b1.metrics().repl_reverse_flush_refused_total(), 0, "the answer was not refused");
-    assert_answered_on(
-        b1,
-        &call_ref,
-        "the primary folded the survivor's answer over its own p bump",
-    );
+    assert_answered_on(b1, &call_ref, "the primary took the survivor's answer over its own p bump");
 
     let crossed = cross_deadline(&fh, &alice, &bob, fire_at).await;
     let passed = crossed.stray_final.is_none() && crossed.cancels_to_bob == 0;
     let written = fh
         .write_unified_report(
-            &report_dir("078-ack-lands-before-the-answer-folds"),
+            &report_dir("078-ack-lands-before-the-answer"),
             "report",
             "078 — alice's ACK reaches the reclaimed copy before the survivor's answer",
             passed,

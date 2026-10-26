@@ -25,9 +25,7 @@ use call::TerminationCause;
 use failover_harness::{assert_call_fully_over, cookie_field, FailoverHarness, WorkerHealth};
 use sip_message::generators::InDialogMethod;
 
-use crate::limiter_release_by_call::{
-    accept_takeover_cseq_overlap, limited_decision, spawn_workers, LimiterRig,
-};
+use crate::limiter_release_by_call::{limited_decision, spawn_workers, LimiterRig};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -58,7 +56,6 @@ async fn a_released_takeover_copy_is_settled_once_by_the_departure_sweep() {
     let call_ref = backup.scan_one_backed_up(&pri).await.expect("the call replicated");
 
     // ── the primary crashes in place; an INFO makes the backup serve the call
-    accept_takeover_cseq_overlap(&mut fh);
     primary.crash();
     proxy.set_health(&pri, WorkerHealth::Dead);
     fh.advance(Duration::from_millis(300)).await;

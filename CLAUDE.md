@@ -33,14 +33,17 @@ summaries + hard directives only.
   test-infrastructure stack: which harness for which test, what `finish()`
   gates automatically vs what you must assert.
 - [docs/testing/ha-acceptance.md](docs/testing/ha-acceptance.md) — HA/chaos/
-  endurance triage: SUT bug vs accepted collateral vs infra artifact, and the
-  HA design invariants that must never be reintroduced.
+  endurance triage: SUT bug vs a declared window (ADR-0055 §11) vs infra
+  artifact, and the HA design invariants that must never be reintroduced.
 - [docs/observability.md](docs/observability.md) — **read before adding any
   `info!` or any per-call trace emission**: operating the lab trace stack, plus
   the directive guidelines for new code.
 - [docs/adr/](docs/adr/) — decisions. Load-bearing day-to-day:
+  [ADR-0055](docs/adr/0055-services-are-ha-blind.md) (services are HA-blind:
+  the replication write path, the evidence rule, containment, the failover
+  sweep), on
   [ADR-0014](docs/adr/0014-reactive-only-takeover-version-vector.md) (reactive
-  takeover, `(p,b)` reconciliation),
+  takeover, the `(p,b)` vector),
   [ADR-0022](docs/adr/0022-initial-invite-final-response-guarantee.md)
   (initial-INVITE final-response guarantee).
 
@@ -172,17 +175,21 @@ long-lived test process (SUT, loadgen, e2e-web) then gets its own small scope.
 
 ## HA / chaos — summary ([acceptance guide](docs/testing/ha-acceptance.md))
 
-A failover/kill failure is NOT automatically a SUT bug. Protected: ringing and
-established calls — a confirmed call dropping is always genuine. Accepted
-collateral: a dialog whose state changed at a kill (the confirm-race); the HA
-tooling attributes each impact to its incident window and judges it against
-that window's budget (ADR-0049 §3.5). A takeover keepalive firing ~one interval
-early on an endurance run is a host clock-STEP artifact (fix is infra; the SUT
-re-anchors restored timers to bound the residual). Design invariants — never
-reintroduce: time-based settle/handback (reconciliation is `(p,b)`-causal
-only), smoothing or skew re-anchoring inside the timer driver, reclaim
-discharge touching the SIP wire, a non-pristine reboot. Details + references
-in the guide.
+Services are HA-blind (ADR-0055 §1): HA lives only in the aware crates. What
+an incident may cost is ADR-0055 §11 and nothing else: per incident, the CDR
+count, what the parties may be left waiting for, and the declared windows (the
+only RFC deviations accepted). Once an incident strikes the SUT may end a call
+cleanly at any instant (§4); a kill may cost the calls whose state changed in
+the replication window (§3). A deviation no window declares is a SUT defect.
+The failover sweep (`just sweep`) checks every cell against §11 and holds the
+failing ones to a ratchet that only shrinks. On a real cluster the HA tooling
+judges each impact against its incident window's budget (ADR-0049 §3.5). A
+takeover keepalive firing ~one interval early on an endurance run is a host
+clock-STEP artifact (fix is infra; the SUT re-anchors replicated instants,
+§9). Design invariants — never reintroduce: time-based settle/handback (copies
+reconcile by containment, §7), smoothing or skew re-anchoring inside the timer
+driver, a discharge of an already-terminal body answering the caller, a
+non-pristine reboot. Details + references in the guide.
 
 ## Logging & tracing — summary ([guide](docs/observability.md), [ADR-0026](docs/adr/0026-observability-logging-tracing.md))
 

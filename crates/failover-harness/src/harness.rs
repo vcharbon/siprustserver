@@ -1126,16 +1126,12 @@ impl FailoverHarness {
     /// unified report as advisory anomalies, and the scenario still asserts the
     /// accepted OUTCOME (call fully over, one CDR, limiter released).
     ///
-    /// The one deviation this exists for is [`RULE_CSEQ_IN_DIALOG_ORDER`] across a
-    /// takeover window: ADR-0014's accepted keepalive-vs-backup-transaction
-    /// overlap. Two owners of one leg (a proxy-Dead-but-alive primary and/or a
-    /// stale-hydrated backup) each mint `dialog.our_cseq + 1`; `(p,b)` rejects
-    /// the loser, but its mutation already reached the wire. The reused number rides
-    /// a FRESH `branch`, so a compliant UAS does not fold it away as a
-    /// retransmission: it sees a new server transaction whose sequence number did
-    /// not advance and rejects it out of order (RFC 3261 §12.2.2 — 500, or an
-    /// implementation-defined reject of the stale number). That one call drops
-    /// cleanly; nothing else on the dialog is affected.
+    /// The windows it opens are the ones ADR-0055 §11 declares, such as
+    /// [`RULE_CSEQ_IN_DIALOG_ORDER`] across a split (§8): two copies of the call
+    /// each mint `dialog.our_cseq + 1`. The reused number rides a FRESH `branch`,
+    /// so a compliant UAS does not absorb it as a retransmission: it sees a new
+    /// server transaction whose sequence number did not advance and rejects it
+    /// out of order (RFC 3261 §12.2.2).
     pub fn accept_rfc_deviations_from_now(&mut self, rule: &str, justification: &str) {
         debug_assert!(!justification.trim().is_empty(), "acceptance needs a justification");
         let _ = justification;

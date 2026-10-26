@@ -316,10 +316,11 @@ plain_counters! {
         "b2bua_repl_stand_down_total",
         "acting-backup takeover copies stood down on a write of their primary that covers every write the copy made, or on its delete (ADR-0047 D7)",
     ) => repl_stand_down, bump_repl_stand_down, repl_stand_down_total;
-    // Model Y (ADR-0020 X3): a backup-held deferred terminal whose primary never
-    // came back to reclaim it (crashed for good, past the replica TTL). The backup
-    // is NOT a discharge authority, so its periodic reap releases the call's limiter
-    // hold(s) + frees the replica memory but writes **no CDR**.
+    // A backup-held deferred terminal whose primary, still a member, never came
+    // back to reclaim it (past the replica TTL). A copy whose primary is a member
+    // defers the CDR to it (ADR-0055 §5, ADR-0020 X3), so its periodic reap
+    // releases the call's limiter hold(s) + frees the replica memory but writes
+    // **no CDR**.
     // This counter is that lost-CDR count: it should stay ~0 in a healthy cluster
     // and only climbs when a primary is permanently lost mid-call.
     REPL_TERMINAL_LOST = (

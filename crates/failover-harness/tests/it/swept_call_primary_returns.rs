@@ -192,7 +192,7 @@ async fn a_swept_call_answered_while_its_node_is_down_gets_no_final_but_its_200(
 /// fails over to the backup's takeover copy, which relays it and the ACK. The
 /// node then becomes ready: the caller gets the 200 alone. On the paused
 /// runtime the node reclaims the ringing call before the backup's answer
-/// reaches it, and folds that answer as the backup's reverse flush; the answer
+/// reaches it, and meets that answer in the backup's reverse flush; the answer
 /// landing first is the node-down cell above.
 #[tokio::test(start_paused = true)]
 async fn a_swept_call_answered_before_its_returning_node_is_routable_gets_no_final_but_its_200() {

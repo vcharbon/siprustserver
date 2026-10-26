@@ -1,8 +1,8 @@
 //! **The RFC-audit acceptance WINDOW** — `FailoverHarness::{accept_rfc_deviations_from_now,
-//! resume_rfc_gate}`. A takeover-only deviation (ADR-0014's accepted dual-owner
-//! in-dialog CSeq overlap) must be accepted *for the takeover window only*: the
-//! same rule keeps gating on establishment and on everything after the window
-//! closes, so a new regression outside it still fails the test.
+//! resume_rfc_gate}`. A deviation an incident window declares (ADR-0055 §11,
+//! such as the duplicate in-dialog CSeq of a split, §8) is accepted *for that
+//! window only*: the same rule keeps gating on establishment and on everything
+//! after the window closes, so a new regression outside it still fails the test.
 //!
 //! Peer-only scenarios (alice ⇄ bob, no worker, no proxy): the deviation is
 //! alice's, declared through the `CseqPattern` DSL, so the SUT-side output is not
@@ -21,8 +21,7 @@ const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
 
 /// The acceptance the failover suites declare, worded as they word it.
-const JUSTIFICATION: &str = "ADR-0014 accepted trade-off: dual-owner in-dialog CSeq \
-                             overlap in the takeover window — one call drops cleanly";
+const JUSTIFICATION: &str = "ADR-0055 §8: two copies of a split call mint one in-dialog CSeq";
 
 /// Establish alice ⇄ bob (INVITE / 180 / 200 / ACK) and hand back alice's dialog.
 async fn establish(alice: &Agent, bob: &Agent) -> scenario_harness::Dialog {

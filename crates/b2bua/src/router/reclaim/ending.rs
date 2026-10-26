@@ -1,5 +1,5 @@
 //! The other owner's ending of the call, met in the record that ends it
-//! here (ADR-0014 §2, ADR-0020 X3): its terminal body is discharged through
+//! here (ADR-0055 §7, ADR-0020 X3): its terminal body is discharged through
 //! the one enforcement funnel, and every re-INVITE this node relayed draws
 //! one final for its originator.
 
@@ -40,7 +40,7 @@ use crate::turn_scope::TurnScope;
 ///
 /// A round the other copy relayed has its server transaction there, and its
 /// ending answers it. The record takes the ending body's envelope.
-pub(super) async fn discharge_folded_terminal(
+pub(super) async fn discharge_met_ending(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
     before: &Call,
@@ -64,14 +64,21 @@ pub(super) async fn discharge_folded_terminal(
         before,
         crate::rules::invariants::finalize(result),
         now_ms,
-        // Folded already-terminal body: same off-the-wire contract as
+        // The other copy's already-terminal body: same off-the-wire contract as
         // `discharge_materialized_terminal`.
         crate::rules::invariants::UnansweredCaller::Leave,
         &mut turn.notes,
     );
     super::super::notes::drain(ctx, call_ref, &mut turn);
-    process_result(ctx, call_ref, result, now_ms, &"the discharge of a folded terminal body", None)
-        .await;
+    process_result(
+        ctx,
+        call_ref,
+        result,
+        now_ms,
+        &"the discharge of the other copy's ending",
+        None,
+    )
+    .await;
 }
 
 /// The record's re-INVITE relays to answer — `(leg, outbound CSeq)` — and

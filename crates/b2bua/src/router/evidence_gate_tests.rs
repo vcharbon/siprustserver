@@ -23,8 +23,8 @@ fn key() -> sip_ids::SigningKey {
 }
 
 /// A call `w0` serves with `w1` as its backup, its caller's INVITE
-/// unanswered, resident on `ctx` at `(3, bak_gen)`; `bak_gen`: the copy
-/// writes the record folded.
+/// unanswered, resident on `ctx` at `(3, bak_gen)`; `bak_gen`: the writes of
+/// a copy the record took.
 fn unanswered_call(ctx: &RouterCtx, bak_gen: i64) -> Call {
     let call = build_initial_call(
         &invite("w0", "w1", "evidence-gate"),
@@ -89,7 +89,7 @@ async fn an_ack_of_the_unanswered_caller_invite_is_evidence_once_a_copy_served_t
 
     let served = unanswered_call(ctx, 1);
     let gate = admit(ctx, &served, &ack, &resolution(&served, "a")).await;
-    assert!(matches!(gate, Gate::Pass(_)), "a copy's write folded here: evidence, {}", kind(&gate));
+    assert!(matches!(gate, Gate::Pass(_)), "a copy's write taken here: evidence, {}", kind(&gate));
 }
 
 /// A 2xx to the INVITE of `leg`, its Via ours with the via-extension signed

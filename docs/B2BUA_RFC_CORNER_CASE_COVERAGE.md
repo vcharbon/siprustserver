@@ -57,7 +57,7 @@ Severity = operational risk if the behaviour is wrong.
 | NIT-2 | 17.1.2.2 | B-leg non-INVITE → Timer F | Give up request, still tear down | high | 🟡 | bye_no_200_reap covers wedged BYE; add `bleg_bye_timerF_timeout_still_tears_down` |
 | NIT-3 | 17.2.2 | A-leg BYE retransmit → Timer J | Absorb; one B-leg BYE only | high | ✅ | sip-txn `cancel_txns_for_call_spares_server_timer_j_absorption` |
 | RTX-4 | 17 | Terminal state releases all leg timers | CancelAll physically frees queue slots | high | ✅ | b2bua `cancel_physically_reclaims_the_queue_slot`, rules `invariants_append_cleanup_on_terminated` |
-| RTX-5 | 13.3.1.4 | 2xx resend exhausted, no ACK | Give up → BYE, release both legs | high | ❌ | add `aleg_2xx_no_ack_full_teardown_both_legs` |
+| RTX-5 | 13.3.1.4 | 2xx resend exhausted, no ACK | Give up → BYE, release both legs | high | ✅ | unacked_2xx_reap `unacked_2xx_is_retransmitted_then_byes_both_legs` |
 
 ### ACK handling (the 2xx vs non-2xx split)
 
@@ -66,7 +66,7 @@ Severity = operational risk if the behaviour is wrong.
 | ACK-1 | 17.1.1.3 | B-leg non-2xx → ACK | B2BUA generates ACK, same branch (part of INVITE txn) | high | ✅ | sip-txn `client_auto_acks_non_2xx_final` |
 | ACK-2 | 13.2.2.4 | B-leg 2xx → ACK | New branch, separate txn, dialog target | high | 🟡 | sip-txn `an_answered_invite_absorbs_a_late_copy_until_timer_l`, generators ACK-2xx; add B2BUA `bleg_2xx_ack_new_branch_separate_txn` |
 | ACK-3 | 13.3.1.4 | A-leg 2xx ACK arrives | Absorb, stop 2xx resend, not forwarded | high | ✅ | sip-txn `an_answered_invite_absorbs_a_late_copy_until_timer_l` + `self_release_fires...` |
-| ACK-4 | 13.3.1.4 | A-leg 2xx, ACK never arrives | Retransmit 2xx then BYE | high | ❌ | add `aleg_2xx_no_ack_retransmit_then_bye` |
+| ACK-4 | 13.3.1.4 | A-leg 2xx, ACK never arrives | Retransmit 2xx then BYE | high | ✅ | unacked_2xx_reap `unacked_2xx_is_retransmitted_then_byes_both_legs`, unacked_reinvite_2xx_reap |
 | ACK-5 | 13.2.2.4 | A-leg ACK carries SDP (delayed-offer answer) | Honour body, map to B-leg | med | ✅ | reinvite `alice_reinvite`, fake_prack `delayed_offer_fallback` |
 | ACK-6 | 17.1.1.2 | Retransmit non-2xx after ACK | Resend same ACK (Timer D) | med | ✅ | sip-txn `non_2xx_invite_final_absorbs_retransmits_for_timer_d` |
 | ACK-7 | 13.2.2.4 | Orphan/mismatched ACK | Absorb silently, no phantom dialog | med | 🟡 | sip-txn `ack_for_non_2xx_is_absorbed`; add explicit orphan-ACK case |
@@ -94,7 +94,7 @@ Severity = operational risk if the behaviour is wrong.
 | REINV-2 | 14.2 | Both legs re-INVITE (glare) | Incoming gets 491, no deadlock | high | ✅ | reinvite `crossing_reinvite_glare`; rfc-audit `concurrent-re-invite-500-or-491` |
 | REINV-2b | 14.2, 20.33 | re-INVITE while the sender's earlier INVITE is open | no final yet: 500 with a 0–10 s `Retry-After`; 2xx un-ACKed: 491 with `glare_retry_after` when configured; crossing: 491, none | med | ✅ | reinvite_glare_retry_after; rfc-audit `concurrent-re-invite-500-or-491` |
 | REINV-3 | 14.1 | B-leg returns 491 | Back off + retry, no instant loop | med | ❌ | add `bleg_491_backoff_before_retry` |
-| REINV-4 | 14.1 | Failed re-INVITE (4xx/5xx) | Keep prior session, don't drop call | high | 🟡 | fake_prack `update_codec_mismatch` (UPDATE); add re-INVITE `failed_reinvite_keeps_dialog_state` |
+| REINV-4 | 14.1 | Failed re-INVITE (4xx/5xx) | Keep prior session, don't drop call | high | ✅ | reinvite `failed_reinvite_keeps_dialog_state`, `reinvite_18x_then_488_keeps_call`; fake_prack `update_codec_mismatch` (UPDATE) |
 
 ### BYE & in-dialog routing
 
@@ -248,7 +248,7 @@ Severity = operational risk if the behaviour is wrong.
 | REFER-NOTIFY-6 | 6665 §4.1.3 | Subscription expiry (HTTP hung) | terminated;reason=timeout | high | ✅ | refer_reject `refer_http_timeout` |
 | REFER-NOTIFY-7 | 6665 §4.1.3 | `expires` matches real timer | Advertised expires = actual lifetime | med | ❌ | hard-coded `active;expires=60`; add `notify_expires_matches_timer` |
 | REFER-NOTIFY-8 | 6665 §4.4.1 | NOTIFY 481/408 from referrer | Stop subscription, no NOTIFY into void | med | ❌ | add `notify_481_stops_subscription` |
-| REFER-NOTIFY-9 | 3265 §3.2.4 | Late C 1xx after terminal NOTIFY | No NOTIFY after terminated | med | ❌ | add `no_notify_after_terminated` |
+| REFER-NOTIFY-9 | 3265 §3.2.4 | Late C 1xx after terminal NOTIFY | No NOTIFY after terminated | med | ✅ | refer_no_notify_after_terminated `no_notify_after_terminated` |
 
 ### Refer-To, Replaces (attended), Refer-Sub
 
@@ -375,38 +375,32 @@ reconsidered.
 
 ## Verified bug status (code-traced, not just RFC-inferred)
 
-The items below were traced through the implementation. Only **one** is a genuine
-latent defect; the rest are **correct-but-untested** (test debt, not bugs).
+The items below were traced through the implementation.
 
 | Case | Verdict | Evidence |
 |------|---------|----------|
-| ACK-4 / RTX-5 — 2xx un-ACKed by caller | **REAL BUG** | No 2xx retransmit (`sip-txn/src/layer.rs:744` only retransmits while txn `is_active`; 2xx → `Completed`) and no ACK-timeout detector. An answered/bridged call with a never-ACKing caller leaks until the 1 h `GlobalDuration` cap (or keepalive-timeout on the B-leg). RFC 3261 §13.3.1.4 (retransmit 2xx, then BYE) unimplemented. Slow leak, not unbounded. |
-| REINV-4 — failed re-INVITE (provisional then final) | **NARROW LATENT GAP** | Happy path is correct (`relay-reinvite-response` overrides `route-failure`, keeps the call up — `b2bua/src/rules/defaults.rs:178-191`). But the pending snapshot is removed on *any* matched response incl. a provisional (`actions.rs:786-814`); a re-INVITE that sends `18x` then `488` loses the snapshot on the 18x, so the 488 falls through to `route-failure` → `TerminateCall`. Edge-of-an-edge (re-INVITEs rarely send provisionals). |
+| ACK-4 / RTX-5 — 2xx un-ACKed by caller | Correct, tested | The framework's 2xx ladder (ADR-0032, `b2bua-core/src/rules/actions/ladder.rs`) repeats the un-ACKed 2xx, initial INVITE and re-INVITE alike, and its give-up BYEs both legs (RFC 3261 §13.3.1.4). |
+| REINV-4 — failed re-INVITE (provisional then final) | Correct, tested | A relayed re-INVITE is a request record that a provisional does not settle (ADR-0055 §2), so a `488` after an `18x` still matches `relay-reinvite-response` and the call stays up. |
 | CANCEL-2 — late A CANCEL after B answered | Correct, untested | Post-2xx CANCEL gets 481 at txn layer (no event); in-window, `handle-cancel` BYEs a Confirmed B-leg, never CANCELs (`defaults.rs:582-599`, `actions.rs:1250-1264`). |
 | CANCEL-6 — B-leg CANCEL/2xx glare | Correct, untested | `cancel-200-crossing` rule: ConfirmDialog → ACK → BYE (`defaults.rs:112-128`). |
 | REFER-SCOPE-4 — REFER retransmission | Correct, untested | Absorbed at txn layer (`layer.rs:1136-1143`, cached-202 replay); transfer code never sees the dup. |
-| REFER-NOTIFY-9 — no NOTIFY after terminal | Correct, untested | Terminal NOTIFY clears the transfer slice → cursor removed → all NOTIFY-emitting transfer rules deactivated (`executor.rs:21-27`). |
+| REFER-NOTIFY-9 — no NOTIFY after terminal | Correct, tested | The core's subscription record refuses a NOTIFY on a terminated subscription, whoever asks (RFC 6665 §4.2.2; ADR-0055 §2, `b2bua-core/src/rules/actions/subscription.rs`). |
 | ID-1/2/3, HDR-2 — per-leg identity | Correct, untested | `build_b_leg` mints fresh Call-ID/From-tag/CSeq=1 and rewrites Contact to the B2BUA (`relay.rs:195-246`, `stack_identity.rs:45-59`). |
 
 ## Priority recommendations (what to add first)
 
-**P0 — fix the one real defect**
-1. **ACK-4 / RTX-5** — implement §13.3.1.4: retransmit the 2xx (T1→T2, give up at 64·T1), and on no-ACK send BYE on the A-leg + tear down the B-leg. Add `aleg_2xx_no_ack_retransmit_then_bye`.
-2. **REINV-4 narrow gap** — decide whether the pending-request snapshot should survive a provisional and only clear on the final; add `reinvite_18x_then_488_keeps_call`.
-
 **P1 — regression tests for correct-but-untested behaviour** (lock it in; no code change)
-3. `cancel_after_2xx_byes_confirmed_bleg` (CANCEL-2) + `bleg_cancel_glare_2xx_ack_then_bye` (CANCEL-6)
-4. `failed_reinvite_keeps_dialog_state` (REINV-4 happy path, the 488-without-provisional case)
-5. Explicit per-leg identity asserts on `build_b_leg`: Call-ID≠A, tag independence, CSeq=1, Contact-rewrite (ID-1/2/3, HDR-2)
-6. `no_notify_after_terminated` (REFER-NOTIFY-9). (REFER-SCOPE-4 needs a harness primitive to resend an identical branch/CSeq — defer until the DSL supports it.)
+1. `cancel_after_2xx_byes_confirmed_bleg` (CANCEL-2) + `bleg_cancel_glare_2xx_ack_then_bye` (CANCEL-6)
+2. Explicit per-leg identity asserts on `build_b_leg`: Call-ID≠A, tag independence, CSeq=1, Contact-rewrite (ID-1/2/3, HDR-2)
+3. REFER-SCOPE-4 needs a harness primitive to resend an identical branch/CSeq; defer until the DSL supports it.
 
 **P2 — robustness / forward-looking**
-7. `torture_indialog_bad_msg_no_call_leak` (TORTURE-8)
-8. `b2bua_self_loop_detected` (LOOP-1)
-9. `bleg_3xx_followed_not_leaked_to_aleg` + redirect recursion bound (RDR-1/2)
-10. UPDATE guards (UPDATE-ALLOWED-1, UPDATE-PENDING-1)
-11. RTP anchoring corner cases if/when media is anchored (RTP-4/6/8)
-12. Reason on a transfer rollback BYE (REASON-2)
+4. `torture_indialog_bad_msg_no_call_leak` (TORTURE-8)
+5. `b2bua_self_loop_detected` (LOOP-1)
+6. `bleg_3xx_followed_not_leaked_to_aleg` + redirect recursion bound (RDR-1/2)
+7. UPDATE guards (UPDATE-ALLOWED-1, UPDATE-PENDING-1)
+8. RTP anchoring corner cases if/when media is anchored (RTP-4/6/8)
+9. Reason on a transfer rollback BYE (REASON-2)
 
 > Replaces, auth and session timers are recorded under **Deliberate non-goals**
 > above, not as unimplemented gaps.

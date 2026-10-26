@@ -1,8 +1,8 @@
 //! **A datagram that arrives after the takeover copy has been released.**
 //!
 //! A backup that takes a call over sheds its live copy once the transaction(s)
-//! it served quiesce, reverse-flushing the terminal body so the primary folds or
-//! reclaims it (ADR-0014, ADR-0020 X3). That retained body is the image of a call
+//! it served quiesce, reverse-flushing the terminal body so the primary meets or
+//! reclaims it (ADR-0055 §7, ADR-0020 X3). That retained body is the image of a call
 //! that has ENDED — it is not a call to serve. Anything still addressing the
 //! dialog after the shed must be answered as a call that no longer exists:
 //!
@@ -34,7 +34,7 @@ use b2bua::rules::{
 };
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, ProxySut,
-    ReplicatedB2buaSut, WorkerHealth, RULE_CSEQ_IN_DIALOG_ORDER,
+    ReplicatedB2buaSut, WorkerHealth,
 };
 use scenario_harness::{Agent, Dialog};
 use sip_message::generators::InDialogMethod;
@@ -49,14 +49,6 @@ const BOB: &str = "127.0.0.1:5070";
 const PROXY: &str = "127.0.0.1:5080";
 const B1: &str = "127.0.0.1:5091";
 const B2: &str = "127.0.0.1:5092";
-
-/// Why `cseq-in-dialog-order` is accepted from the kill onward: with two
-/// potential owners of one leg in the takeover window, the b-leg CSeq the dead
-/// primary minted may be minted again by the survivor (ADR-0014).
-const CSEQ_OVERLAP: &str =
-    "ADR-0014 accepted trade-off: with two potential owners of one leg in the \
-                            takeover window, the b-leg CSeq the dead primary minted may be minted \
-                            again by the survivor";
 
 /// The proxy plus both workers, ready at steady state.
 async fn bring_up(fh: &mut FailoverHarness) -> (ProxySut, ReplicatedB2buaSut, ReplicatedB2buaSut) {
@@ -149,7 +141,6 @@ async fn kill_serving_node(
     pri_ord: &str,
     proxy: &ProxySut,
 ) {
-    fh.accept_rfc_deviations_from_now(RULE_CSEQ_IN_DIALOG_ORDER, CSEQ_OVERLAP);
     fh.mark(pri_ord, None, "crash", "serving node down on an established call");
     primary.crash();
     proxy.set_health(pri_ord, WorkerHealth::Dead);

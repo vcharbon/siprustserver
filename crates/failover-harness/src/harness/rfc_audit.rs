@@ -179,7 +179,7 @@ impl FailoverHarness {
     /// scenario declared accepted via
     /// [`accept_rfc_deviations_from_now`](Self::accept_rfc_deviations_from_now).
     /// They do not gate, but they are recorded (advisory anomalies in the unified
-    /// report) so an accepted trade-off stays visible, and a test can assert on
+    /// report) so an accepted deviation stays visible, and a test can assert on
     /// them to prove its window matched something.
     pub fn accepted_rfc_deviations(&self) -> Vec<(String, String)> {
         lane_details(self.partition_rfc_findings().1)

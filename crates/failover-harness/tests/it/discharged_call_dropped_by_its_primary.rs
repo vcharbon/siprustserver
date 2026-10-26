@@ -69,10 +69,6 @@ pub(crate) async fn establish(name: &str) -> Established {
     let backup = if pri_ord == "b1" { &w_b2 } else { &w_b1 };
     let call_ref =
         backup.scan_one_backed_up(&pri_ord).await.expect("the call replicated to the backup");
-    fh.accept_rfc_deviations_from_now(
-        failover_harness::RULE_CSEQ_IN_DIALOG_ORDER,
-        "ADR-0014 accepted trade-off: dual-owner in-dialog CSeq overlap in the takeover window",
-    );
     Established { fh, alice, bob, proxy, w_b1, w_b2, pri_ord, call_ref, dialog }
 }
 

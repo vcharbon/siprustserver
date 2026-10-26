@@ -68,8 +68,8 @@ struct CallMeta {
     expiry_at_ms: Option<i64>,
     /// Whether a forward flush has ever shown this Element an ANSWERED call —
     /// the authority's own view of it, taken or refused. Set by the forward
-    /// apply path alone; every other write (an acting backup's own mutation, an
-    /// adoption flush) carries it over, so it keeps naming what the AUTHORITY
+    /// apply path alone; every other write (an acting backup's own mutation
+    /// among them) carries it over, so it keeps naming what the AUTHORITY
     /// published and not what this node did afterwards. Monotone, like the fact
     /// it records: an answered call never un-answers. The `Delete` guard reads
     /// it, beside the answer a `Delete` itself states — an authority that never
@@ -212,7 +212,7 @@ impl ReplicatingCallStore {
 
     /// Read a body whatever its TTL. [`get_call`](Self::get_call) reads an
     /// expired body as absent; the live reverse-flush reconcile reads through
-    /// here ([`CallState::peek_reclaimable_raw`]) so it can still fold an
+    /// here ([`CallState::peek_reclaimable_raw`]) so it can still meet an
     /// expired terminal. Pure read of the backing store; no meta change.
     ///
     /// [`CallState::peek_reclaimable_raw`]: crate::store::CallState::peek_reclaimable_raw

@@ -101,9 +101,10 @@ pub(super) async fn process_result(
         && !primary_departed(ctx, call_ref)
     {
         // Reverse-flush the Terminated body held with the normal replica TTL
-        // (`reboot_budget`): a live primary reconciles + forward-deletes it within ~1
-        // poll; a rebooting primary still has its full reclaim window to fold and
-        // discharge it. The primary is the sole discharge authority either way.
+        // (`reboot_budget`): a live primary meets it and forward-deletes it once
+        // the write reaches it; a rebooting primary still has its full reclaim
+        // window to meet and discharge it. A copy whose primary is a member
+        // defers the discharge to it (ADR-0055 §5).
         ctx.state.flush(&result.call);
         reach(ctx, call_ref, TurnPoint::Logged, true, kind).await;
         // What the turn owes the WIRE is not deferred: the final that ends the

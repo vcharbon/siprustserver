@@ -172,7 +172,7 @@ impl Reaper {
 
     /// One paced sweep pass, gated on `enabled` (a no-op for a disabled reaper).
     /// Driven per tick by the single sweep task `b2bua_core` spawns — which also
-    /// drives the Model-Y backup-durable reap, so the two periodic concerns share
+    /// drives the replica-store reap, so the two periodic concerns share
     /// one `tokio::time::interval` (deterministic under `start_paused` +
     /// `Harness::advance`) with an explicit ordering instead of two racing timers.
     ///

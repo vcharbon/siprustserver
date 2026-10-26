@@ -36,7 +36,7 @@ use call_limiter::wire::AdmitEntry;
 use call_limiter::{AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use failover_harness::{
     assert_call_fully_over, assert_call_lost_no_cdr, cookie_field, FailoverHarness,
-    ReplicatedB2buaSut, WorkerHealth, LEASE_OUTLIVING_THE_REPLICA_TTL, RULE_CSEQ_IN_DIALOG_ORDER,
+    ReplicatedB2buaSut, WorkerHealth, LEASE_OUTLIVING_THE_REPLICA_TTL,
 };
 use http_net::{HttpServerHandle, HttpTransport};
 use sip_clock::Clock;
@@ -73,18 +73,6 @@ fn laddr() -> SocketAddr {
 
 fn ha_harness(name: &str) -> FailoverHarness {
     FailoverHarness::new(name, &["b1", "b2"])
-}
-
-/// ADR-0014's accepted keepalive-vs-backup-transaction overlap from this
-/// instant on: while one leg has two potential owners, both can mint the same
-/// `local_cseq + 1`; the accepted outcome is one call dropping cleanly, which
-/// each case asserts through its limiter-drain checks.
-pub(crate) fn accept_takeover_cseq_overlap(fh: &mut FailoverHarness) {
-    fh.accept_rfc_deviations_from_now(
-        RULE_CSEQ_IN_DIALOG_ORDER,
-        "ADR-0014 accepted trade-off: dual-owner in-dialog CSeq overlap in the \
-         takeover window — one call drops cleanly",
-    );
 }
 
 fn limiter_client(http: &http_net_testkit::SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
@@ -287,7 +275,6 @@ async fn a_crash_between_a_reroute_fold_and_its_flush_releases_the_call_once() {
     // ── the primary crashes with the fold's flush unlanded ───────────────
     let (primary, backup): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
         if primary_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
-    accept_takeover_cseq_overlap(&mut fh);
     primary.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     fh.advance(Duration::from_millis(300)).await;
@@ -344,7 +331,6 @@ async fn a_late_landed_initial_admit_is_released_by_the_takeover_s_lossy_cleanup
     // ── the primary crashes ──────────────────────────────────────────────
     let (primary, backup): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
         if primary_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
-    accept_takeover_cseq_overlap(&mut fh);
     primary.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     fh.advance(Duration::from_millis(300)).await;
@@ -411,7 +397,6 @@ async fn a_deferred_terminal_of_a_departing_primary_is_released_once() {
         if primary_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
 
     // ── the primary crashes in place ─────────────────────────────────────
-    accept_takeover_cseq_overlap(&mut fh);
     primary.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     fh.advance(Duration::from_millis(300)).await;
@@ -498,7 +483,6 @@ async fn a_call_whose_set_lapsed_while_its_primary_was_down_is_counted_again_on_
         if primary_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
 
     // ── the primary crashes; the call is silent past the lease ───────────
-    accept_takeover_cseq_overlap(&mut fh);
     primary.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     for _ in 0..15 {
@@ -598,7 +582,6 @@ async fn the_reap_releases_a_terminal_deferred_after_the_backup_served_a_request
         if primary_ord == "b1" { (&mut w_b1, &w_b2) } else { (&mut w_b2, &w_b1) };
 
     // ── the primary crashes; a re-INVITE fails over to the backup ─────────
-    accept_takeover_cseq_overlap(&mut fh);
     primary.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     fh.advance(Duration::from_secs(5)).await;
@@ -676,7 +659,6 @@ async fn a_primary_back_inside_the_ttl_discharges_the_served_terminal_and_the_re
         if primary_ord == "b1" { (&mut w_b1, &w_b2) } else { (&mut w_b2, &w_b1) };
 
     // ── the primary crashes; a re-INVITE then the BYE fail over ──────────
-    accept_takeover_cseq_overlap(&mut fh);
     primary.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     fh.advance(Duration::from_secs(5)).await;
@@ -880,7 +862,6 @@ async fn a_fold_set_of_an_uncounted_call_lost_with_the_primary_lapses_with_its_l
     // ── the primary crashes with the fold's flush unlanded ───────────────
     let (primary, backup): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
         if primary_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
-    accept_takeover_cseq_overlap(&mut fh);
     primary.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     fh.advance(Duration::from_millis(300)).await;

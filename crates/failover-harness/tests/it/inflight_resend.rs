@@ -58,7 +58,7 @@ use crate::answer_lost::kill_serving_node_answer_lost;
 use crate::relay_resumed_at_the_takeover::callee_repeats_its_final;
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, ProxySut,
-    ReplicatedB2buaSut, WorkerHealth, RULE_CSEQ_IN_DIALOG_ORDER,
+    ReplicatedB2buaSut, WorkerHealth,
 };
 use scenario_harness::agent::{Agent, Dialog};
 use sip_message::generators::InDialogMethod;
@@ -95,10 +95,6 @@ pub(crate) const HEALTH_LAG: Duration = Duration::from_millis(200);
 /// The pause that lets a relayed round replicate before the kill, when the
 /// cell's contract is what the survivor rebuilds from the record.
 pub(crate) const REPLICATE: Duration = Duration::from_millis(500);
-
-/// Why `cseq-in-dialog-order` is accepted from the kill onward in every cell.
-const CSEQ_OVERLAP: &str = "ADR-0014 accepted trade-off: two potential owners of one leg in the \
-    takeover window, so the b-leg CSeq the dead primary minted may be minted again by the survivor";
 
 /// The proxy plus both workers, ready at steady state.
 pub(crate) async fn bring_up(
@@ -163,7 +159,6 @@ pub(crate) fn crash_serving_node(
     survivor: &ReplicatedB2buaSut,
     pri_ord: &str,
 ) -> u64 {
-    fh.accept_rfc_deviations_from_now(RULE_CSEQ_IN_DIALOG_ORDER, CSEQ_OVERLAP);
     fh.mark(pri_ord, None, "crash", "serving node down with the peer's request in flight");
     let hydrated_before = survivor.metrics().repl_takeover_hydrated_total();
     primary.crash();

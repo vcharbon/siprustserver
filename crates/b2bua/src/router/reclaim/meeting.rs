@@ -17,7 +17,7 @@ use super::super::restore_hygiene::sanitize_restored_timers;
 use super::super::stand_down::covers;
 use super::super::RouterCtx;
 use super::diverged::{end_diverged, end_over_an_ending, own_records};
-use super::ending::discharge_folded_terminal;
+use super::ending::discharge_met_ending;
 use super::{format_pb, FlushDirection};
 use crate::store::containment::{meet, standing, Containment, Met};
 use crate::store::Enveloped;
@@ -29,7 +29,7 @@ use crate::store::Enveloped;
 /// - A **reverse** copy reaches the call's record. An ending copy that
 ///   contains the record, or that diverged from it and ranks higher on the
 ///   lifecycle, ends the call: `Terminated`, it is discharged here
-///   ([`discharge_folded_terminal`]); `Terminating`, its `Terminated` write is
+///   ([`discharge_met_ending`]); `Terminating`, its `Terminated` write is
 ///   awaited. Otherwise the copy that contains the other stands: the copy
 ///   taken whole is the call's new record, its answered INVITEs seeded in
 ///   the layer ([`answered_invite_seeds`]).
@@ -85,7 +85,7 @@ pub(in crate::router) async fn meet_live(
                 return;
             }
             if incoming.call.state == CallModelState::Terminated {
-                discharge_folded_terminal(ctx, call_ref, &live.call, incoming, now_ms).await;
+                discharge_met_ending(ctx, call_ref, &live.call, incoming, now_ms).await;
             }
             return;
         }

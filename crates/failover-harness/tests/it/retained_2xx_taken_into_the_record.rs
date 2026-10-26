@@ -1,17 +1,17 @@
-//! **A 2xx the backup's copy retains, folded into the primary's record.** The
+//! **A 2xx the backup's copy retains, taken into the primary's record.** The
 //! proxy misroutes the caller's re-INVITE to the backup while the primary
 //! lives (ADR-0014); the copy relays it and the callee's 2xx, which is lost on
 //! its way to the caller. The copy's writes reach the primary, whose record
 //! then holds the answered round and its retained 2xx. Read alive again, the
 //! primary receives the caller's retransmission of the re-INVITE: its
 //! transaction layer holds that INVITE's server transaction in RFC 6026
-//! Accepted, seeded by the fold, and answers the copy with the retained 2xx —
+//! Accepted, seeded from the record it took, and answers the copy with the retained 2xx —
 //! no 100 and no 491. The caller's ACK, through the primary, reaches the
 //! callee once, and the call ends with one CDR.
 //!
 //! ```text
 //!   alice ─INVITE─▶ COPY ─INVITE─▶ bob ─200─▶ COPY ─200─╳ alice
-//!                   COPY ══ write ══▶ PRIMARY (folds the round and its 2xx)
+//!                   COPY ══ write ══▶ PRIMARY (takes the round and its 2xx)
 //!   alice ─INVITE─▶ PRIMARY ─200 (the retained one)─▶ alice
 //! ```
 
@@ -62,7 +62,7 @@ fn nodes(est: &Established) -> (&ReplicatedB2buaSut, &ReplicatedB2buaSut) {
 
 #[tokio::test(start_paused = true)]
 async fn a_reinvite_retransmitted_to_the_primary_draws_the_2xx_its_copy_retained() {
-    let mut est = establish("retained-2xx-folded-into-the-record").await;
+    let mut est = establish("retained-2xx-taken-into-the-record").await;
     let p_ord = est.primary_ord.clone();
 
     // ── The round goes through the copy; its 2xx is lost to the caller ──────

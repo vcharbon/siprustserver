@@ -175,7 +175,7 @@ async fn takeover_refuses_a_terminated_replica_and_serves_a_terminating_one() {
     assert!(!ctx.state.is_takeover(&r_ended), "nothing was marked");
     assert!(
         n.store.get_call(BAK, "w0", &r_ended).await.unwrap().is_some(),
-        "the replica stays for the primary to fold or reclaim"
+        "the replica stays for the primary to meet or reclaim"
     );
     assert_eq!(tallied(&takeover_rising(&log, "w0"), "refused_terminated"), 1);
     drop(_guard);

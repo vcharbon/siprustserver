@@ -630,10 +630,10 @@ async fn a_new_call_on_the_ref_replaces_an_element_its_version_does_not_dominate
 
 /// A reverse flush of a call the Element no longer holds — a takeover
 /// copy's view of the call the authority replaced on the ref — is refused
-/// whatever its version, and nothing is handed to the fold: folding it
+/// whatever its version, and nothing is handed to the reconcile: meeting it
 /// would end or rewrite the new call.
 #[tokio::test]
-async fn a_reverse_flush_of_a_replaced_call_folds_into_nothing() {
+async fn a_reverse_flush_of_a_replaced_call_meets_nothing() {
     let (p, store, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
     let (tx, mut rx) = mpsc::unbounded_channel();
     let p = p.with_repl_sink(tx);

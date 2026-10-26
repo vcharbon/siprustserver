@@ -27,8 +27,9 @@ pub(crate) use reap::reap_expired_replicas;
 /// Apply a backup's reverse-flushed copy that the puller just landed in our
 /// `pri:{self}` partition (ADR-0014 Reclaim-tail reconcile, extended to the
 /// live copy). The acting backup served the call while we still own it live:
-/// its copy meets our live copy ([`meet_live`], ADR-0055 §7) — Model Y: the
-/// live primary is the *sole* discharge authority, the backup only defers.
+/// its copy meets our live copy ([`meet_live`], ADR-0055 §7). A copy whose
+/// primary is a member defers the CDR to it (ADR-0055 §5): the live primary
+/// discharges the call.
 ///
 /// Not live: a **Terminated** body is a reboot-reclaimed deferral — materialise +
 /// discharge (no keepalive arming); anything else is the existing reactive

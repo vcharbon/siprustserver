@@ -71,7 +71,7 @@ use b2bua::limiter::NoopLimiter;
 use call::{CallModelState, CdrEventType, LegState, MsgpackCodec, TimerType};
 use failover_harness::{
     worker_ordinals, FailoverHarness, PartitionRole, ProxySut, ReplicatedB2buaSut, WorkerHealth,
-    RULE_CSEQ_IN_DIALOG_ORDER, RULE_NO_CANCEL_AFTER_FINAL,
+    RULE_NO_CANCEL_AFTER_FINAL,
 };
 use repl_net::frame::{Frame, Op};
 use repl_net_testkit::Direction;
@@ -98,19 +98,13 @@ const REPLICA_TTL_WAIT: Duration = Duration::from_secs(700);
 /// The deployed ring deadline: armed at route time on both copies of the call.
 const NO_ANSWER_SEC: i64 = 30;
 
-/// Why `cseq-in-dialog-order` is accepted from the partition onward: two
-/// potential owners of one leg mint b-leg CSeqs independently (ADR-0014).
-const CSEQ_OVERLAP: &str =
-    "ADR-0014 accepted trade-off: dual-owner in-dialog CSeq overlap while a partitioned \
-     primary and its backup both hold the call";
-
 /// Why `no-cancel-after-final` is accepted from the SIP heal onward: the
 /// partitioned primary's ring-deadline CANCEL outlives the copy it tore down
 /// (ADR-0034) and crosses once the plane heals, on the proxy lane that relayed
-/// the other owner's ACK — the dual-owner residual of ADR-0014, answered 481.
+/// the other owner's ACK, answered 481 — a split's declared window (ADR-0055 §11).
 const STALE_CANCEL: &str =
-    "ADR-0014 accepted trade-off: a partitioned owner's CANCEL ladder (ADR-0034) crosses the \
-     healed SIP plane after its backup answered the same leg";
+    "ADR-0055 §11 split window: one copy's CANCEL of an INVITE the other copy saw \
+     answered, and its repeats after the heal";
 
 /// The deployed shape: a failover-capable route (callback context) arming the
 /// per-b-leg `NoAnswer`, whose `no_answer_timeout` failure consult answers with
@@ -325,7 +319,7 @@ async fn reinvite(
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HealAt {
     /// While the survivor still SERVES the takeover copy: the refusal must leave
-    /// the live call alone. Nothing is folded (the flush carries no progress the
+    /// the live call alone. Nothing is met (the flush carries no progress the
     /// copy lacks), so no CDR is written, no delete is propagated back, and the
     /// call plays on to its own BYE.
     BeforeTimerH,
@@ -353,7 +347,7 @@ fn cdrs_on(node: &ReplicatedB2buaSut, call_ref: &str) -> usize {
 }
 
 /// Every replication `Delete` for `call_ref` that left `ordinal`'s listener —
-/// what an acting backup discharging a folded body would propagate back to the
+/// what an acting backup discharging the other copy's ending would propagate back to the
 /// primary. The lane map names each node's listen address, and a listener's
 /// frames are the ones it SENDS from that address.
 fn deletes_sent_by(fh: &FailoverHarness, ordinal: &str, call_ref: &str) -> usize {
@@ -394,7 +388,6 @@ async fn run(name: &str, title: &str, pending: Pending, heal_at: HealAt) {
     assert!(primary.serves(&call_ref), "the primary serves the ringing call");
 
     // ── the primary vanishes: both planes cut, the probe reads it Dead ───────
-    fh.accept_rfc_deviations_from_now(RULE_CSEQ_IN_DIALOG_ORDER, CSEQ_OVERLAP);
     let pri_sip = primary.sip_addr();
     fh.partition(&pri_ord, &bak_ord);
     fh.cut_signalling(&pri_ord, pri_sip);
@@ -470,7 +463,6 @@ async fn run(name: &str, title: &str, pending: Pending, heal_at: HealAt) {
         alice.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
         bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
         fh.mark(&bak_ord, Some(&pri_ord), "diverged", "the survivor ends the answered call");
-        fh.accept_rfc_deviations_from_now(RULE_NO_CANCEL_AFTER_FINAL, STALE_CANCEL);
         fh.restore_signalling(&pri_ord, pri_sip);
         let nodes: [&ReplicatedB2buaSut; 2] = [&*primary, survivor];
         settle_released(&fh, &call, &alice, &bob, &nodes[..], &call_ref).await;

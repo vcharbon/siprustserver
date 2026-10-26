@@ -20,7 +20,7 @@
 use std::time::Duration;
 
 use b2bua::decision::ScriptedDecisionEngine;
-use failover_harness::{worker_ordinals, FailoverHarness, WorkerHealth, RULE_CSEQ_IN_DIALOG_ORDER};
+use failover_harness::{worker_ordinals, FailoverHarness, WorkerHealth};
 use sip_message::Method;
 
 use crate::departure_support::{bring_up_deciding, placed, CountedDecision};
@@ -212,11 +212,6 @@ async fn a_cancel_follows_its_reinvite_to_the_copy_after_the_primary_reads_alive
     let hydrated_before = survivor.metrics().repl_takeover_hydrated_total();
 
     // ── the proxy reads P dead; the round goes to C, which relays it ────────
-    fh.accept_rfc_deviations_from_now(
-        RULE_CSEQ_IN_DIALOG_ORDER,
-        "ADR-0014 accepted trade-off: two potential owners of one leg while the proxy \
-         misreads the primary dead",
-    );
     fh.mark(&pri_ord, None, "misread dead", "the proxy reads the running primary dead");
     proxy.set_health(&pri_ord, WorkerHealth::Dead);
     let mut reinvite = dialog.reinvite(Some(REOFFER)).await;
@@ -280,7 +275,7 @@ async fn an_initial_invite_retransmitted_after_an_unannounced_kill_draws_the_rep
     let mut dialog = call.ack().await;
     bob.receive_tolerating("ACK", &["INVITE"]).await;
 
-    // ── the caller hangs up; the primary returns and folds the record ───────
+    // ── the caller hangs up; the primary returns and meets the record ───────
     fh.advance(Duration::from_secs(4)).await;
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     fh.advance(Duration::from_secs(60)).await;

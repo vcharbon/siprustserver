@@ -245,7 +245,8 @@ impl ReplServer {
         }
     }
 
-    /// Drive one flow: optional bootstrap store-scan (cold), then the poll-tail.
+    /// Drive one flow: optional bootstrap store-scan (cold), then the tail sent
+    /// on write.
     async fn serve_flow(
         &self,
         conn: Arc<dyn ReplicationConnection>,

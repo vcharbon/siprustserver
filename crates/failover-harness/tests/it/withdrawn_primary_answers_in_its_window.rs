@@ -29,7 +29,7 @@
 //! set keeps resolving as `Dead` for Timer H, so the callee's 2xx reverse-fails
 //! to the cookie's backup instead of returning to the incarnation that sent the
 //! INVITE: the survivor's takeover copy answers the caller, the caller's ACK
-//! follows the same cookie to it, and the reverse-flush fold hands the answer to
+//! follows the same cookie to it, and the reverse flush hands the answer to
 //! the replacement's reclaimed copy. Every owner then reads the call as
 //! answered, so no ring deadline authors a second final on an INVITE server
 //! transaction the caller already ACKed (RFC 3261 §17.2.1, §13.3.1.4).
@@ -54,7 +54,7 @@ use b2bua::limiter::NoopLimiter;
 use call::{LegState, MsgpackCodec, TimerType};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, Belief, FailoverHarness,
-    PartitionRole, ProxySut, ReplicatedB2buaSut, WorkerHealth, RULE_CSEQ_IN_DIALOG_ORDER,
+    PartitionRole, ProxySut, ReplicatedB2buaSut, WorkerHealth,
 };
 use scenario_harness::Agent;
 use sip_message::SipMessage;
@@ -421,14 +421,6 @@ async fn run(name: &str, title: &str, removal: Removal) {
     assert!(elder.serves(&call_ref), "the primary serves the ringing call");
 
     // ── t0: the endpoint is withdrawn; the process is signalled ──────────────
-    // From here the dialog has two potential owners of one leg, so ADR-0014's
-    // accepted in-dialog CSeq overlap is in scope; the establishment above kept
-    // the rule fully gating.
-    fh.accept_rfc_deviations_from_now(
-        RULE_CSEQ_IN_DIALOG_ORDER,
-        "ADR-0014 accepted trade-off: dual-owner in-dialog CSeq overlap while an \
-         ordinal runs two incarnations",
-    );
     let t0 = fh.now_ms();
     match removal {
         Removal::Graceful => fh.withdraw_routing(&pri_ord),

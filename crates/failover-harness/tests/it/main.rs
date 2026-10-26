@@ -69,7 +69,7 @@ mod release_all_takeover;
 mod released_copy;
 mod reoffer_on_the_backup;
 mod replication_hold;
-mod retained_2xx_folded_into_the_record;
+mod retained_2xx_taken_into_the_record;
 mod retransmission_turn_is_quiet;
 mod retry_on_a_challenged_identity;
 mod rfc_acceptance_window;

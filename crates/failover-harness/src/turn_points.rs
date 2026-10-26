@@ -91,10 +91,9 @@ struct Inner {
     armed: Option<Armed>,
 }
 
+/// An arm on the first call that takes a turn.
 struct Armed {
     at: TurnAt,
-    /// The call armed; `None` arms the first call that takes a turn.
-    call_ref: Option<String>,
     reached: oneshot::Sender<HeldTurn>,
 }
 
@@ -120,14 +119,7 @@ impl TurnPoints {
     /// yields the turn held there once it is reached. Replaces any arm.
     pub fn arm(&self, at: TurnAt) -> oneshot::Receiver<HeldTurn> {
         let (reached, rx) = oneshot::channel();
-        self.lock().armed = Some(Armed { at, call_ref: None, reached });
-        rx
-    }
-
-    /// [`arm`](Self::arm) on the call `call_ref`.
-    pub fn arm_call(&self, call_ref: &str, at: TurnAt) -> oneshot::Receiver<HeldTurn> {
-        let (reached, rx) = oneshot::channel();
-        self.lock().armed = Some(Armed { at, call_ref: Some(call_ref.to_string()), reached });
+        self.lock().armed = Some(Armed { at, reached });
         rx
     }
 
@@ -168,10 +160,7 @@ impl Inner {
         let Some(armed) = &self.armed else {
             return false;
         };
-        let call_ok = match &armed.call_ref {
-            Some(c) => c == mark.call_ref,
-            None => self.order.first().is_some_and(|c| c == mark.call_ref),
-        };
+        let call_ok = self.order.first().is_some_and(|c| c == mark.call_ref);
         if !call_ok || armed.at.point != mark.point {
             return false;
         }

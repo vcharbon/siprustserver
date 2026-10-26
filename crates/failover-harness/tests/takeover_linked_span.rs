@@ -10,9 +10,9 @@
 //! The scenario is a complete callflow: alice ⇄ b2bua ⇄ bob established through
 //! the proxy over a genuine limiter hold, the primary crashes in place (its
 //! endpoint kept in the backup's membership), alice's BYE fails over to the
-//! backup, and the cluster settles to no-trace-anywhere. StayDead (Model Y,
-//! ADR-0020 X3): the crashed primary is the CDR authority of a call it has not
-//! departed from, so this call's CDR is the accepted loss and the backup's lossy
+//! backup, and the cluster settles to no-trace-anywhere. StayDead (ADR-0055 §5,
+//! ADR-0020 X3): the crashed primary is still a member, so the backup defers the
+//! CDR to it and this call's CDR is the accepted loss and the backup's lossy
 //! cleanup is what releases the limiter and frees the replica.
 //!
 //! The trace registry is process-wide (one root span per call per process), so
@@ -179,15 +179,6 @@ async fn a_takeover_opens_this_nodes_own_root_span_linked_to_the_nominals() {
     assert_eq!(field(&nominal, "link.span_id"), "", "a first-hand call links nothing");
 
     // ── Crash the primary; the proxy fails alice's dialog over to the backup ─
-    // From here the leg has two potential owners, so ADR-0014's accepted
-    // keepalive-vs-backup-transaction overlap may reuse an in-dialog CSeq (one call
-    // drops cleanly). Accepted for the takeover window only — establishment above
-    // keeps `cseq-in-dialog-order` fully gating.
-    fh.accept_rfc_deviations_from_now(
-        failover_harness::RULE_CSEQ_IN_DIALOG_ORDER,
-        "ADR-0014 accepted trade-off: dual-owner in-dialog CSeq overlap in the \
-         takeover window — one call drops cleanly",
-    );
     fh.mark(&primary_ord, None, "crash", "primary down");
     let hydrated_before = {
         let (primary, backup): (&mut ReplicatedB2buaSut, &ReplicatedB2buaSut) =

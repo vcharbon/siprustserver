@@ -1,17 +1,16 @@
-//! The "call terminated on the backup" matrix (TODO `FixCallTerminateOnBackup`,
-//! §6). Every cell drives one call to a terminal that is (in most cells) served
-//! by the **backup**, then asserts the four universal invariants via
-//! [`assert_call_fully_over`]: exactly one CDR across the cluster, the call fully
-//! over everywhere (0 owners, no resurrectable replica, memory clean), and the
-//! shared limiter released exactly once.
+//! The "call terminated on the backup" matrix. Every cell drives one call to a
+//! terminal that is (in most cells) served by the **backup**, then asserts the
+//! universal invariants via [`assert_call_fully_over`]: one CDR across the
+//! cluster, the call fully over everywhere (0 owners, no resurrectable replica,
+//! memory clean), and the shared limiter released. No cell kills a primary
+//! inside its call's replication window, so none leaves the second CDR ADR-0055
+//! §5 accepts there.
 //!
-//! These are written **RED first** (TDD): C1 (`bye_on_primary`) and C11
-//! (`reinvite_on_backup`, the no-discharge guard rail) are the controls expected
-//! to pass today; C2–C10 exercise the backup terminating a call and are expected
-//! to break one of the invariants until the production fix (Model A vs B, decided
-//! from these signatures) lands. Each cell's `FailoverHarness` name is unique, so
-//! its unified callflow is written to `target/seq-reports/<cell>/report.html` on
-//! drop (including on failure) for review.
+//! C1 (`bye_on_primary`) and C11 (`reinvite_on_backup`, the no-discharge guard
+//! rail) are the controls; C2–C10 exercise the backup terminating a call. Each
+//! cell's `FailoverHarness` name is unique, so its unified callflow is written
+//! to `target/seq-reports/<cell>/report.html` on drop (including on failure)
+//! for review.
 //!
 //! ## Misroute mechanism (primary stays ALIVE)
 //! ADR-0014: a partition can route an in-dialog request to the backup at any time
@@ -205,29 +204,6 @@ async fn establish_with(name: &str, decision: Arc<dyn CallDecisionEngine>) -> Es
     }
 }
 
-/// Declare ADR-0014's accepted keepalive-vs-backup-transaction overlap from this
-/// instant to the end of the cell: while one leg has two potential owners, both can
-/// mint the same `local_cseq + 1` (the loser's mutation reaches the wire before
-/// `(p,b)` rejects it), and the accepted outcome is that one call dropping cleanly —
-/// which every cell asserts via `assert_call_fully_over` / `assert_call_lost_no_cdr`.
-/// Call it at the cell's fault injection. Cells that never give one leg two
-/// concurrent owners keep `cseq-in-dialog-order` fully gating for their whole run, and
-/// so does every cell's establishment: C1 (no fault at all), C12 (the call is
-/// terminated before the crash, so the reboot reclaims nothing), and C8/C9 — the
-/// primary is genuinely dead, the passive backup never takes over an idle call, and
-/// only the reboot-reclaimed copy originates (keepalive OPTIONS / the terminal). Its
-/// hydrated CSeq high-water is therefore judged in full: those two cells are the
-/// suite's baseline for the reclaim-origination path.
-///
-/// The two limiter-HA cases and the takeover-span cell make the same distinction.
-pub(crate) fn accept_takeover_cseq_overlap(fh: &mut FailoverHarness) {
-    fh.accept_rfc_deviations_from_now(
-        failover_harness::RULE_CSEQ_IN_DIALOG_ORDER,
-        "ADR-0014 accepted trade-off: dual-owner in-dialog CSeq overlap in the \
-         takeover window — one call drops cleanly",
-    );
-}
-
 /// Reboot the (crashed) primary EMPTY at a higher gen + new pod IP, re-learn its
 /// address, drive it ready, mark it Alive, and let the go-active reclaim run. The
 /// no-probe analogue of `runner::reboot_and_reclaim` (we set health directly).
@@ -278,7 +254,7 @@ fn crash_primary_in_place(primary: &mut ReplicatedB2buaSut, primary_ord: &str, p
 }
 
 // =============================================================================
-// C1 — control: BYE handled by the primary, no fault. Expected GREEN today.
+// C1 — control: BYE handled by the primary, no fault.
 // =============================================================================
 #[tokio::test(start_paused = true)]
 async fn c1_bye_on_primary__no_fault() {
@@ -342,7 +318,6 @@ async fn c2_bye_on_backup__primary_alive__misroute() {
         bob_dialog: _bd,
     } = establish("cterm-c2-bye-backup-primary-alive").await;
 
-    accept_takeover_cseq_overlap(&mut fh);
     // Misroute: primary looks Dead to the proxy but keeps running + owning.
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     fh.advance(Duration::from_millis(200)).await;
@@ -390,7 +365,6 @@ async fn c3_bye_on_backup__primary_alive__peer_silent() {
         bob_dialog: _bd,
     } = establish("cterm-c3-bye-backup-peer-silent").await;
 
-    accept_takeover_cseq_overlap(&mut fh);
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     fh.advance(Duration::from_millis(200)).await;
 
@@ -438,7 +412,6 @@ async fn c4_bye_on_backup__primary_crashed__stay_dead() {
         bob_dialog: _bd,
     } = establish("cterm-c4-bye-backup-crashed-staydead").await;
 
-    accept_takeover_cseq_overlap(&mut fh);
     let primary = if primary_ord == "b1" { &mut w_b1 } else { &mut w_b2 };
     crash_primary_in_place(primary, &primary_ord, &proxy);
     fh.advance(Duration::from_millis(300)).await;
@@ -446,9 +419,10 @@ async fn c4_bye_on_backup__primary_crashed__stay_dead() {
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     let _ = &alice;
 
-    // StayDead (Model Y, ADR-0020 X3): the backup deferred a `Terminated` body and
-    // the primary CRASHED for good — it never reclaims. The primary is the sole CDR
-    // authority, so the CDR is LOST (the accepted double-failure). But the backup's
+    // StayDead (ADR-0055 §5, ADR-0020 X3): the backup deferred a `Terminated` body
+    // and the primary CRASHED for good, still a member — it never reclaims. The
+    // deferral leaves the CDR to the primary, so it is LOST (the accepted
+    // double-failure). But the backup's
     // periodic reap MUST still release the limiter hold + free the replica memory
     // once the deferral's replica TTL (`reboot_budget`) expires. Advance past it so
     // the reap runs, then assert the StayDead contract: NO CDR, limiter back to 0,
@@ -492,7 +466,6 @@ async fn c5_bye_on_backup__primary_crashed__peer_silent__stay_dead() {
         bob_dialog: _bd,
     } = establish("cterm-c5-bye-backup-crashed-silent-staydead").await;
 
-    accept_takeover_cseq_overlap(&mut fh);
     let primary = if primary_ord == "b1" { &mut w_b1 } else { &mut w_b2 };
     crash_primary_in_place(primary, &primary_ord, &proxy);
     fh.advance(Duration::from_millis(300)).await;
@@ -545,7 +518,6 @@ async fn c6_bye_on_backup__primary_crashed__reboot_reclaim() {
         bob_dialog: _bd,
     } = establish("cterm-c6-bye-backup-crashed-reboot").await;
 
-    accept_takeover_cseq_overlap(&mut fh);
     let primary = if primary_ord == "b1" { &mut w_b1 } else { &mut w_b2 };
     crash_primary_in_place(primary, &primary_ord, &proxy);
     fh.advance(Duration::from_millis(300)).await;
@@ -630,7 +602,6 @@ async fn c7_bye_on_backup__primary_crashed__peer_silent__reboot() {
         bob_dialog: _bd,
     } = establish("cterm-c7-bye-backup-silent-reboot").await;
 
-    accept_takeover_cseq_overlap(&mut fh);
     let primary = if primary_ord == "b1" { &mut w_b1 } else { &mut w_b2 };
     crash_primary_in_place(primary, &primary_ord, &proxy);
     fh.advance(Duration::from_millis(300)).await;
@@ -672,8 +643,8 @@ async fn c7_bye_on_backup__primary_crashed__peer_silent__reboot() {
 
 // =============================================================================
 // C10 — SPLIT-BRAIN: both nodes serve a terminal for the same dialog. alice BYEs
-// to the backup (misroute), then bob BYEs to the (re-Alive) primary. The
-// exactly-once stress: still EXACTLY ONE CDR, one limiter release.
+// to the backup (misroute), then bob BYEs to the (re-Alive) primary. No node is
+// killed: still one CDR, one limiter release.
 // =============================================================================
 #[tokio::test(start_paused = true)]
 async fn c10_bye_split_brain__primary_and_backup() {
@@ -693,19 +664,18 @@ async fn c10_bye_split_brain__primary_and_backup() {
         mut bob_dialog,
     } = establish("cterm-c10-split-brain").await;
 
-    accept_takeover_cseq_overlap(&mut fh);
     // (1) Misroute alice's BYE to the backup; the live primary still owns it.
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     fh.advance(Duration::from_millis(200)).await;
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     fh.advance(Duration::from_millis(500)).await;
 
-    // (2) Heal the misroute; bob now BYEs the SAME dialog. Under Model Y, alice's
-    //     BYE via the backup already ENDED the call — the live primary reconciled the
-    //     backup's deferred terminal and discharged it exactly once — so bob's
-    //     redundant BYE finds NO call at the primary → 481 (RFC-correct; the call is
-    //     gone). alice therefore never receives a relayed BYE. The split-brain
-    //     invariant under test is EXACTLY-ONE CDR cluster-wide despite both parties
+    // (2) Heal the misroute; bob now BYEs the SAME dialog. alice's BYE via the
+    //     backup already ENDED the call — the backup deferred its terminal to the
+    //     live primary (ADR-0055 §5), which met it and discharged the call — so
+    //     bob's redundant BYE finds NO call at the primary → 481 (RFC-correct; the
+    //     call is gone). alice therefore never receives a relayed BYE. No node is
+    //     killed, so the cell holds one CDR cluster-wide despite both parties
     //     issuing a terminal, which `assert_call_fully_over` checks below.
     //
     //     bob MUST receive that 481: the LB proxy relays the owning b2bua's 481 back
@@ -740,8 +710,8 @@ async fn c10_bye_split_brain__primary_and_backup() {
 // =============================================================================
 // C11 — GUARD RAIL: a NON-terminal in-dialog request (re-INVITE) served by the
 // backup must NOT discharge — the call genuinely continues at the primary. We
-// then end the call normally and assert exactly one CDR (a backup that discharges
-// on the re-INVITE is wrong).
+// then end the call normally and assert one CDR (a backup that discharges on the
+// re-INVITE is wrong).
 // =============================================================================
 #[tokio::test(start_paused = true)]
 async fn c11_reinvite_on_backup__primary_alive__no_terminal() {
@@ -761,7 +731,6 @@ async fn c11_reinvite_on_backup__primary_alive__no_terminal() {
         bob_dialog: _bd,
     } = establish("cterm-c11-reinvite-backup-no-terminal").await;
 
-    accept_takeover_cseq_overlap(&mut fh);
     // Misroute a non-terminal re-INVITE to the backup.
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     fh.advance(Duration::from_millis(200)).await;
@@ -851,7 +820,7 @@ async fn c8_keepalive_timeout_on_backup__reboot() {
 
     // NO BYE. NO keepalive answers. The settle pump crosses keepalive_interval
     // (300 s) + keepalive_timeout (45 s); the reclaimed copy's unanswered probe
-    // must tear the call down and discharge it exactly once.
+    // must tear the call down and discharge it.
     let _ = fh
         .settle_terminal(async || {
             store.stats().current_total == 0

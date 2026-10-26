@@ -411,12 +411,15 @@ reported applying, and the age of the oldest. Over a high-water mark new calls
 are admitted unbacked; under the low-water marks they get a backup again. No
 call is refused for it (ADR-0055 §3).
 
-**Hold** (of a turn's message):
-The ACK of a 2xx and the first provisional of an INVITE leave once the call's
-backup applied the call's current change-log entry, or at the **hold cap**,
-whichever comes first; a call with no live, bootstrapped backup holds nothing.
-Every other message leaves at once (ADR-0055 §3).
-_Avoid_: "sync replication" (only these two messages wait, at most the cap).
+**Hold** (of a turn's message, `router::hold`):
+The messages that stop a peer retransmitting (the ACK of a 2xx, the first
+provisional of every INVITE, initial or re-INVITE, and the final to every
+non-INVITE request) leave once the call's backup applied the call's current
+change-log entry, or at the **hold cap**, whichever comes first. A call with no
+live, bootstrapped backup holds nothing, nor does the final a call's terminal
+turn sends; a held message leaves before any later effect on its dialog. Every
+other message leaves at once (ADR-0055 §3).
+_Avoid_: "sync replication" (only these messages wait, at most the cap).
 
 **Silent stream**:
 A replication stream that has delivered nothing for the idle bound (15 s; a
@@ -577,7 +580,7 @@ under its branch and a server transaction holding its received request. A copy t
 record takes whole at a meeting seeds the Accepted kind. The 2xx's repeats, a PRACK or a re-ACK are never a transaction's: those
 are ADR-0032 obligations replicated with the call.
 
-**Self-release** (acting-backup takeover-copy lifecycle) — replaces Activate/Deactivate (ADR-0014):
+**Self-release** (acting-backup takeover-copy lifecycle, ADR-0014):
 A backup holds a **takeover copy** only *while actively serving* the rerouted
 request(s). When the **last transaction** for that call reaches a terminal state
 (2xx INVITE → its ACK on the branch, else Timer L; non-INVITE → Timer J; failed leg → Timer B/F)
@@ -585,7 +588,7 @@ the txn layer emits `CallQuiesced` and the backup **self-releases**: it
 `drop_local`s the live copy and stops its timers, reverting to a pure **Element**.
 **Local-only** — no delete propagates; the `bak:` replica + reverse-flushed deltas
 survive, so the call lives on at its reclaiming primary. There is **no** watermark
-handshake and **no** time-based settle; correctness rests on `(p,b)` causality.
+handshake and **no** time-based settle; two copies meet by containment (ADR-0055 §7).
 A copy that ends a call whose primary has **departed** does not defer: it
 discharges the call itself — CDR, limiter release, delete; the departure sweep
 discharges an ended call deferred to a peer that then departs; and a node of the
@@ -601,7 +604,7 @@ Local-only like a self-release, and its transactions are **relinquished** (delet
 with nothing sent), never orphaned. _Avoid_: "self-release" for it (that waits for the
 copy's transactions to clear).
 
-**Version vector `(p, b)`** (per-context reconciliation) — replaces LWW-by-`gen` (ADR-0014):
+**Version vector `(p, b)`** (per-context reconciliation, ADR-0014):
 Each call's **store envelope** carries `(p, b)` = `(primary_counter, backup_counter)` =
 `CallTopology.{gen, bak_gen}`. **Each node bumps only its own** counter, once per
 write it makes, so the *other* counter on a propagated update is the **branch
@@ -632,6 +635,12 @@ primary's stands; when neither does, the copies **diverged** and the meeting nod
 the call cleanly from the copy ranked higher on the lifecycle, over the union of both
 copies' dialogs (`router::reclaim::diverged`). _Avoid_: "fold", "adopted counter",
 "rounds fold" (the per-axis reconciliation containment replaced).
+
+**Leg-id space** (ADR-0055 §7, `call::LegSpace`): one of a call's two sets of leg
+ids. The node the call was created on mints `b-{n}`, any other node acting on the
+call `c-{n}`, so two copies acting at once never mint one id for two legs and a
+leg id names one leg in any union of their records. Which space a node mints from
+is an exempt field: the container's value stands.
 
 **Call incarnation** (`call::Call::incarnation`):
 Which of the successive calls on one `call_ref` a record is — a retried INVITE
@@ -1510,12 +1519,14 @@ _Avoid_: "safe-point" (the transparent matrix's quiescent states, ADR-0013).
 
 **Failover sweep**:
 Every shape of a catalogue cut at every turn point by each sweep incident
-(primary killed, backup killed, split, split then healed); each cell must end
-RFC-clean, fully terminated, with its CDR count and nothing left on any node.
-A consumer adds shapes with `failover_sweep!` and a ratchet of its own; a
-shape may name callee roles that share the callee's address, told apart by the
-Request-URI user part, and may stay out of the split that never heals. Its
-lane is `just sweep`.
+(primary killed, backup killed, split, split then healed, stalled then killed,
+unbacked then killed). Each cell must end with its CDR count and nothing left
+on any node; every cell but a split's must also end with an RFC-clean, fully
+terminated call the parties accept (a **clean end** included), its **declared
+windows** the only deviations accepted. A consumer adds shapes with
+`failover_sweep!` and a ratchet of its own; a shape may name callee roles that
+share the callee's address, told apart by the Request-URI user part, and may
+stay out of the split that never heals. Its lane is `just sweep`.
 _Avoid_: "matrix" (the hand-listed transparent matrix of ADR-0013).
 
 **Sweep ratchet**:
@@ -1524,3 +1535,22 @@ that owns its correction. A failing cell it does not list fails the lane, and
 so does a listed cell that passes; it only shrinks.
 _Avoid_: "allow-list" or "waiver" (a listed cell still fails; the ratchet
 only records that it is known).
+
+**Clean end**:
+The system under test ending a call the way RFC 3261 allows after an incident:
+a non-2xx final to an INVITE it holds unanswered, a BYE of every dialog the
+record or the evidence names, a NOTIFY ending a subscription (ADR-0055 §1, §4).
+A party it ends cleanly drops her remaining goals; once the caller is ended so,
+the call is (`CallCtx::accept_clean_ends`, armed when the incident strikes). A
+request left without its final or a dialog left open is never a clean end.
+_Avoid_: "dropped call" for it (a clean end is a pass of the cell).
+
+**Declared window**:
+One of the RFC deviations ADR-0055 §11 lists for an incident, the only ones the
+sweep accepts: a CSeq a copy re-uses inside the replication window, a copy's
+CANCEL of an INVITE the dead owner saw answered, a clean end's BYE into a dialog
+the other owner ended, and the rest of that list. Opened when the incident
+strikes (`accept_rfc_deviations_*`, `accept_clean_end_requests`), scoped to its
+rule and its message, each with the §11 entry it implements.
+_Avoid_: "waiver" (a waiver is not tied to an incident or to §11), "accepted
+trade-off".

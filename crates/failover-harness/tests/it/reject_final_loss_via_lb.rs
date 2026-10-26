@@ -4,7 +4,7 @@
 //! relayed a non-2xx INVITE final upstream would quench the worker's §17.2.1
 //! Timer G — the ONLY retransmitter of the final in the whole system (the
 //! worker's auto-100 already silences the caller's INVITE Timer A) — while the
-//! relay itself stays exactly-once (the proxy is transaction-less, ADR-0022
+//! relay itself sends each copy once (the proxy is transaction-less, ADR-0022
 //! X4). Lose that single relayed copy and the caller never sees the reject at
 //! all: nothing retransmits, the caller wedges to Timer B / the 32 s safety
 //! ceiling, the call lands `torn_down`.

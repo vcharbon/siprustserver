@@ -353,7 +353,7 @@ async fn peek_replica_reads_the_backup_body_without_deciding_or_inserting() {
     assert!(state.live_call_refs().is_empty(), "the read inserts nothing");
     assert!(
         repl.get_call(BAK, "w0", &r_ended).await.unwrap().is_some(),
-        "the read leaves the replica in place for the primary to fold/reclaim",
+        "the read leaves the replica in place for the primary to meet/reclaim",
     );
 
     // A ref this node is primary for is not a takeover source; an unknown

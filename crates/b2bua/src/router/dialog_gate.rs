@@ -29,8 +29,8 @@
 //! a-leg naming the caller's INVITE while the record holds no final sent for
 //! it reaches the rules only on a takeover copy, as evidence of an answer the
 //! record lacks whatever tag it names (ADR-0055 §4), with no dialog resolved
-//! when none names it; on the call's own node, whose record a copy that
-//! answered may still be folding into, it acknowledges nothing and is dropped
+//! when none names it; on the call's own node, whose record the write of a
+//! copy that answered may not have reached yet, it acknowledges nothing and is dropped
 //! (the answer's ladder draws the ACK again, RFC 3261 §13.2.2.4). A CANCEL is matched by
 //! transaction (§9.1) and passes unread. A response whose From-tag is no tag
 //! this stack put on the leg answers nothing of this stack's and is dropped,

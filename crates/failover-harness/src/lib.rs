@@ -84,11 +84,10 @@ pub fn assert_single_owner(nodes: &[&ReplicatedB2buaSut], call_ref: &str) {
     );
 }
 
-/// Count the CDRs whose `call_ref` matches across **every** node's CDR sink — the
-/// cross-cluster "exactly one CDR" tally (`§2` invariant #1). Today only per-node
-/// `cdr_records()` exists, so this folds them: `0` = the call's end-event was lost
-/// (the backup self-released without a CDR), `2` = double-billed (both nodes
-/// discharged). A correct teardown leaves exactly `1` *anywhere* in the cluster.
+/// Count the CDRs whose `call_ref` matches across **every** node's CDR sink. A
+/// teardown no incident touched inside the call's replication window leaves `1`
+/// *anywhere* in the cluster; a kill of the primary or a split may leave a second
+/// (ADR-0055 §5), and `0` is a lost CDR.
 pub fn total_cdrs_for(nodes: &[&ReplicatedB2buaSut], call_ref: &str) -> usize {
     nodes
         .iter()
@@ -105,13 +104,12 @@ pub fn total_cdrs_for(nodes: &[&ReplicatedB2buaSut], call_ref: &str) -> usize {
 pub const LEASE_OUTLIVING_THE_REPLICA_TTL: call_limiter::LimiterConfig =
     call_limiter::LimiterConfig { lease_sec: 3600 };
 
-/// **The universal "call terminated on the backup" post-condition** (TODO
-/// `FixCallTerminateOnBackup` §2). After the call ends and the cluster settles,
-/// *every* cell must hold all four invariants, regardless of which node served the
-/// terminal request and whatever the primary's fate:
+/// **The "call terminated on the backup" post-condition.** After the call ends and
+/// the cluster settles, a cell that kills no primary inside the call's replication
+/// window holds these invariants, whichever node served the terminal request:
 ///
-/// 1. **Exactly ONE CDR** for `call_ref` across all nodes (not zero = lost, not
-///    two = double-billed) — [`total_cdrs_for`].
+/// 1. **One CDR** for `call_ref` across all nodes (zero = lost; the second CDR
+///    ADR-0055 §5 accepts needs a kill inside the window) — [`total_cdrs_for`].
 /// 2. **The call is OVER** — no node serves it and no node holds a replica body,
 ///    so no later reboot can resurrect it, and both nodes' per-call memory is
 ///    clean ([`assert_call_fully_released`], which also asserts 0 serving owners).
@@ -129,27 +127,28 @@ pub async fn assert_call_fully_over(
 ) {
     // #2 — over everywhere (0 owners, no replica trace, memory clean).
     assert_call_fully_released(nodes, call_ref).await;
-    // #1 — exactly one CDR across the whole cluster.
+    // #1 — one CDR across the whole cluster.
     let cdrs = total_cdrs_for(nodes, call_ref);
     assert_eq!(
         cdrs, 1,
-        "expected EXACTLY ONE CDR for {call_ref} across the cluster (0 = lost / \
-         backup self-released without a CDR, 2 = double-billed); got {cdrs}",
+        "expected one CDR for {call_ref} across the cluster (0 = lost / backup \
+         self-released without a CDR, 2 = both nodes discharged); got {cdrs}",
     );
     // #3 — limiter released (drained to zero).
     let total = limiter.stats().current_total;
     assert_eq!(total, 0, "limiter set of {call_ref} not released: current_total = {total}");
 }
 
-/// **The StayDead post-condition** (ADR-0020 X3, Model Y): a call whose terminal was
-/// served on the backup while the primary CRASHED with its endpoint still in the
-/// backup's membership, and NEVER returned (past the replica TTL). The primary is
-/// the CDR authority of a call it has not departed from, so when it never reclaims
-/// the deferral the CDR is **lost** — the accepted double-failure (primary down AND
-/// never returns). But the periodic backup reap must still:
+/// **The StayDead post-condition** (ADR-0055 §5, ADR-0020 X3): a call whose terminal
+/// was served on the backup while the primary CRASHED with its endpoint still in the
+/// backup's membership, and NEVER returned (past the replica TTL). A copy whose
+/// primary is a member defers the CDR to it, so when the primary never reclaims the
+/// deferral the CDR is **lost** — the accepted double-failure (primary down AND
+/// never returns, with its endpoint never removed). The periodic backup reap must
+/// still:
 ///
 /// 1. **Write NO CDR** — exactly zero across the cluster ([`total_cdrs_for`] == 0).
-///    A `1` would mean the backup illegally discharged (the removed fallback).
+///    A `1` would mean the backup discharged a call its member primary owns.
 /// 2. **Release the limiter anyway** — the shared `CallStore`'s
 ///    `current_total == 0` (not leaked at ≥1 by skipping the release). This is
 ///    the auto-cleanup the contract requires.

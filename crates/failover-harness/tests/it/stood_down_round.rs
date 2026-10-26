@@ -12,14 +12,12 @@ use std::time::Duration;
 use failover_harness::{assert_call_fully_over, WorkerHealth};
 use sip_message::generators::InDialogMethod;
 
-use crate::call_terminate_on_backup::{
-    accept_takeover_cseq_overlap, establish, Established, ANSWER, OFFER,
-};
+use crate::call_terminate_on_backup::{establish, Established, ANSWER, OFFER};
 
 #[tokio::test(start_paused = true)]
 async fn a_copy_stood_down_mid_round_takes_the_call_over_afresh_on_the_callees_answer() {
     let Established {
-        mut fh,
+        fh,
         alice,
         bob,
         proxy,
@@ -33,7 +31,6 @@ async fn a_copy_stood_down_mid_round_takes_the_call_over_afresh_on_the_callees_a
         mut bob_dialog,
         ..
     } = establish("copy-stood-down-mid-round").await;
-    accept_takeover_cseq_overlap(&mut fh);
     let backup = if primary_ord == "b1" { &w_b2 } else { &w_b1 };
 
     proxy.set_health(&primary_ord, WorkerHealth::Dead);

@@ -263,8 +263,8 @@ async fn forward_put_at_or_ahead_of_the_elements_backup_counter_applies() {
     element(&b.store, &answered, 1, 1).await;
 
     // The primary took the backup's write and flushes on top of it: `b' == b`.
-    let folded = call_in("A", "B", "s12-ahead", LegState::Confirmed, CallModelState::Terminating);
-    forward(&a.store, &folded, 2, 1).await;
+    let on_top = call_in("A", "B", "s12-ahead", LegState::Confirmed, CallModelState::Terminating);
+    forward(&a.store, &on_top, 2, 1).await;
     tick(200).await;
     assert_eq!(
         stored_state(&b.store, BAK, "A", &call_ref).await,
@@ -554,9 +554,8 @@ async fn the_backups_own_writes_do_not_hand_the_authority_the_delete() {
 // ---------------------------------------------------------------------------
 // FORWARD `Delete`: an authority that PUBLISHED THE ANSWER deletes cleanly.
 // Once one of its flushes has carried an answered body, the Element's answer is
-// the authority's own and its teardown is the end of a call it knows about —
-// the ADR-0014 dual-owner trade-off, not a call destroyed behind its owner's
-// back.
+// the authority's own and its teardown is the end of a call it knows about,
+// not a call destroyed behind its owner's back.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]

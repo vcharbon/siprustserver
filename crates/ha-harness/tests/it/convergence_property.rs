@@ -16,7 +16,7 @@
 //! clean function of LWW + delivery (no incarnation churn to confound it).
 //!
 //! ## callRefs are unique — deletes are final (resurrection tombstone)
-//! The store's Model Y resurrection tombstone (`put_call` delete-wins guard,
+//! The store's resurrection tombstone (`put_call` delete-wins guard,
 //! `RESURRECTION_TOMBSTONE_MS`) silently rejects a Put for a ref deleted within
 //! the tombstone window: production callRefs are unique, so a deleted ref never
 //! legitimately comes back, and a late reverse-flush must not re-create a

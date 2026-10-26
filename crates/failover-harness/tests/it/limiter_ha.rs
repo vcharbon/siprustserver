@@ -17,7 +17,7 @@ use call_limiter::wire::AdmitEntry;
 use call_limiter::{AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use failover_harness::{
     assert_call_fully_over, cookie_field, FailoverHarness, ReplicatedB2buaSut, WorkerHealth,
-    LEASE_OUTLIVING_THE_REPLICA_TTL, RULE_CSEQ_IN_DIALOG_ORDER,
+    LEASE_OUTLIVING_THE_REPLICA_TTL,
 };
 use http_net::{HttpServerHandle, HttpTransport};
 use sip_clock::Clock;
@@ -43,25 +43,9 @@ fn laddr() -> SocketAddr {
 }
 
 /// The `FailoverHarness` every limiter-HA case runs on. The RFC audit gates in
-/// full; a case whose fault gives one leg two owners declares ADR-0014's accepted
-/// overlap for that window with [`accept_takeover_cseq_overlap`].
+/// full.
 fn ha_harness(name: &str) -> FailoverHarness {
     FailoverHarness::new(name, &["b1", "b2"])
-}
-
-/// Declare ADR-0014's accepted keepalive-vs-backup-transaction overlap from this
-/// instant on: while one leg has two potential owners, both can mint the same
-/// `local_cseq + 1` (the loser's mutation reaches the wire before `(p,b)` rejects
-/// it) and the accepted outcome is that one call dropping cleanly — which each case
-/// asserts through its limiter-drain / call-over checks. Call it at the fault
-/// injection: establishment, and any case that never hands a live call to a second
-/// owner, keep `cseq-in-dialog-order` fully gating.
-fn accept_takeover_cseq_overlap(fh: &mut FailoverHarness) {
-    fh.accept_rfc_deviations_from_now(
-        RULE_CSEQ_IN_DIALOG_ORDER,
-        "ADR-0014 accepted trade-off: dual-owner in-dialog CSeq overlap in the \
-         takeover window — one call drops cleanly",
-    );
 }
 
 fn limiter_client(http: &http_net_testkit::SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
@@ -163,7 +147,6 @@ async fn hold_is_released_on_the_takeover_node_after_primary_crash() {
 
     // Crash the primary; mark it dead so the proxy fails the in-dialog request
     // over to the backup.
-    accept_takeover_cseq_overlap(&mut fh);
     primary.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     fh.advance(Duration::from_millis(300)).await;
@@ -172,9 +155,9 @@ async fn hold_is_released_on_the_takeover_node_after_primary_crash() {
     let creations_before = backup.metrics().creations_total();
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
 
-    // Model Y (ADR-0020 X3): the takeover backup DEFERS the discharge — it answers
-    // the wire but writes NO CDR and does NOT release the limiter itself (the primary
-    // is the sole CDR authority). With the primary crashed and NEVER rebooting, the
+    // The deferral (ADR-0055 §5, ADR-0020 X3): the takeover backup DEFERS the
+    // discharge — it answers the wire but writes NO CDR and does NOT release the
+    // limiter itself (its primary is a member and owns the CDR). With the primary crashed and NEVER rebooting, the
     // CDR is the accepted loss — BUT the backup must still not leak the limiter slot:
     // once the deferral's replica TTL (`reboot_budget`) expires, the periodic reap
     // releases the hold (no CDR) and frees the body. Pump past that TTL, then assert
@@ -343,7 +326,7 @@ async fn setup_stalled_call_is_released_at_the_deadline_after_crash_reboot_recla
 ///   2. The primary crashes **permanently** — no graceful BYE, no respawn, no
 ///      reclaim. The set is leaked: nothing on the SIP plane will ever release
 ///      it. The backup holds a *non-terminal* (`Established`) replica, so the
-///      Model-Y `reap_expired_replicas` lossy path — which only releases
+///      `reap_expired_replicas` lossy path — which only releases
 ///      `Terminating`/`Terminated` replicas (`CallState::reap_replica`) —
 ///      does **not** touch it either. The ONLY remaining recovery is the lease.
 ///   3. Advance one lease + slack (~125 s): the set lapsed. Call B is then
@@ -420,7 +403,7 @@ async fn leaked_limiter_slot_recovers_via_the_lease_when_primary_is_permanently_
     call.expect(200).await;
     // Call A is fully confirmed so the leaked replica is `Established`, not
     // early: `Established` and early replicas are BOTH non-terminal, so both are
-    // equally ignored by the Model-Y lossy reap (`CallState::reap_replica`
+    // equally ignored by the lossy reap (`CallState::reap_replica`
     // returns only `Terminating`/`Terminated`).
     let _dialog = call.ack().await;
     bob1.receive("ACK").await;
@@ -435,7 +418,7 @@ async fn leaked_limiter_slot_recovers_via_the_lease_when_primary_is_permanently_
     // ── Permanently kill the primary: no BYE, no respawn, no reclaim ──────────
     // The set is leaked. With no in-dialog request ever routed to the backup,
     // the backup never takes the call over, so its replica stays `Established`
-    // (non-terminal) — invisible to the Model-Y lossy reap.
+    // (non-terminal) — invisible to the lossy reap.
     primary.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
 
@@ -464,14 +447,14 @@ async fn leaked_limiter_slot_recovers_via_the_lease_when_primary_is_permanently_
         lapsed_before + 1,
         "the recovery was the lease lapsing (Call A's set), not an active release",
     );
-    // Belt-and-braces, NOT the discriminator: no Model-Y lossy reap was counted.
+    // Belt-and-braces, NOT the discriminator: no lossy reap was counted.
     // The reap only fires after `reboot_budget_sec` (600 s) of replica TTL, and
     // the test finishes at ~126 s, so this reads 0 regardless of the replica's
     // terminal state.
     assert_eq!(
         w_b1.metrics().repl_terminal_lost_total() + w_b2.metrics().repl_terminal_lost_total(),
         0,
-        "no Model-Y lossy reap was counted within the ~126 s test budget (reboot_budget is \
+        "no lossy reap was counted within the ~126 s test budget (reboot_budget is \
          600 s, so the reap cannot fire here regardless): recovery came from the lease",
     );
 
@@ -509,14 +492,14 @@ async fn leaked_limiter_slot_recovers_via_the_lease_when_primary_is_permanently_
 ///     served on the **backup** while the primary stays dead (lossy reap releases).
 ///   - `setup_stalled_call…` / the `decrement-after-respawn` shape — the primary
 ///     reboots and reclaims, but NOTHING was served on the backup in between (no
-///     reverse-fold to merge).
+///     reverse flush to meet).
 ///
 /// Here the dialog is **served on the backup mid-outage** (a re-INVITE the backup
 /// takes over and reverse-propagates), THEN the primary returns and the terminal
-/// BYE lands back on the **reborn primary**, which discharges the reverse-folded
+/// BYE lands back on the **reborn primary**, which discharges the reverse-flushed
 /// call. The signal under test (TS `expectLimiterCount(0)`): the call's
 /// `call_ref` and counted state stamped at the original admit must survive the
-/// whole bak→pri round-trip (admit on pri → takeover-fold on bak →
+/// whole bak→pri round-trip (admit on pri → takeover on bak →
 /// reverse-flush back to pri → reclaim → BYE-discharge on pri). If the
 /// reclaim/switchback re-derived the key or dropped the counted flag, the
 /// release would name a call the limiter never admitted, the count would stay
@@ -529,7 +512,7 @@ async fn leaked_limiter_slot_recovers_via_the_lease_when_primary_is_permanently_
 /// takeover copy once the re-INVITE transaction completes (keeping only the
 /// reverse-flushed replica in `pri:{primary}`); `reboot()` + `set_address` +
 /// `set_health(Alive)` returns the primary, whose bootstrap-rehydrate + bulk
-/// reclaim re-materialises the reverse-folded call from its own `pri:` partition;
+/// reclaim re-materialises the reverse-flushed call from its own `pri:` partition;
 /// the cookie's `w_pri` is alive again, so alice's BYE routes back to it
 /// (`decode_forward`) and the reborn primary discharges — one CDR, limiter to 0.
 #[tokio::test(start_paused = true)]
@@ -607,7 +590,6 @@ async fn switchback_bye_on_returned_primary_releases_the_shared_limiter() {
     // CSeq, and reverse-propagates the takeover state to pri:{primary}. The
     // re-INVITE must NOT touch the limiter (no checkAndIncrement-on-reinvite path),
     // so the shared counter stays 1.
-    accept_takeover_cseq_overlap(&mut fh);
     {
         let (primary, backup): (&mut ReplicatedB2buaSut, &ReplicatedB2buaSut) =
             if primary_ord == "b1" { (&mut w_b1, &w_b2) } else { (&mut w_b2, &w_b1) };
@@ -659,7 +641,7 @@ async fn switchback_bye_on_returned_primary_releases_the_shared_limiter() {
 
     // ── Phase 2: respawn primary → switchback window ──────────────────────────
     // Reboot EMPTY at a higher gen + new pod IP, re-learn the address, drive ready,
-    // mark Alive. The go-active bulk reclaim re-materialises the reverse-folded call
+    // mark Alive. The go-active bulk reclaim re-materialises the reverse-flushed call
     // from pri:{primary} so the returned primary serves it again.
     {
         let (primary, backup): (&mut ReplicatedB2buaSut, &ReplicatedB2buaSut) =
@@ -684,7 +666,7 @@ async fn switchback_bye_on_returned_primary_releases_the_shared_limiter() {
     let primary = if primary_ord == "b1" { &w_b1 } else { &w_b2 };
     assert!(
         primary.serves(&call_ref),
-        "the returned primary reclaimed the reverse-folded call and serves it again",
+        "the returned primary reclaimed the reverse-flushed call and serves it again",
     );
     failover_harness::assert_single_owner(&[&w_b1, &w_b2], &call_ref);
     assert_eq!(
@@ -697,7 +679,7 @@ async fn switchback_bye_on_returned_primary_releases_the_shared_limiter() {
     // The cookie's w_pri is alive again, so alice's BYE routes to the reborn
     // primary — NOT the backup. It terminates the reclaimed call locally and
     // releases it on the cluster-shared store by its PRESERVED `call_ref`
-    // (carried through admit→takeover-fold→reverse-flush→reclaim). If the
+    // (carried through admit→takeover→reverse-flush→reclaim). If the
     // switchback re-derived the key, this release would miss and
     // `current_total` would stay a leaked 1.
     let creations_before = primary.metrics().creations_total();
@@ -736,7 +718,7 @@ async fn switchback_bye_on_returned_primary_releases_the_shared_limiter() {
     assert_eq!(
         w_b1.metrics().repl_terminal_lost_total() + w_b2.metrics().repl_terminal_lost_total(),
         0,
-        "switchback reclaimed within budget → no Model-Y lossy reap (the active BYE \
+        "switchback reclaimed within budget → no lossy reap (the active BYE \
          discharged, the deferral was never abandoned)",
     );
 
@@ -854,7 +836,6 @@ async fn rerouted_call_holds_drain_on_the_takeover_node_without_re_releasing_the
         if primary_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
 
     // ── the primary crashes; the BYE fails over to the backup ────────────────
-    accept_takeover_cseq_overlap(&mut fh);
     primary.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     fh.advance(Duration::from_millis(300)).await;

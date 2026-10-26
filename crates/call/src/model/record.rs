@@ -28,7 +28,7 @@ pub struct SipHeader {
 
 /// Snapshot of the original a-leg INVITE — source of truth for failover b-leg
 /// reconstruction and INVITE-response relay (§8.2.6.2). Written when the call
-/// is built; only a whole fold of another owner's body replaces it.
+/// is built; only another owner's body, taken whole, replaces it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ALegInviteSnapshot {
     pub uri: String,
