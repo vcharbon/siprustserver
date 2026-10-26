@@ -488,8 +488,8 @@ impl BodySource for ReplicatingCallStore {
         self.scan_call_refs(role, primary)
     }
 
-    fn backup_refused(&self, backup: &str, call_ref: &str) {
-        ReplicatingCallStore::backup_refused(self, backup, call_ref);
+    fn backup_refused(&self, backup: &str, call_ref: &str, incarnation: Option<&str>) {
+        ReplicatingCallStore::backup_refused(self, backup, call_ref, incarnation);
     }
 
     fn abandon_backup(&self, backup: &str, call_ref: &str) {

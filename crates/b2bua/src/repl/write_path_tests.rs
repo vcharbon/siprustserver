@@ -39,9 +39,15 @@ fn placed(call: &call::Call) -> Option<crate::store::CallTopology> {
 }
 
 fn backed_call(id: usize) -> call::Call {
+    backed_call_drawn(id, 1)
+}
+
+/// The call `id` of [`backed_call`], its ids drawn at turn `turn_seq`: another
+/// incarnation on the same ref.
+fn backed_call_drawn(id: usize, turn_seq: u64) -> call::Call {
     let invite = crate::test_call::invite("w0", "w1", &format!("burst-{id}"));
     let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-    let mut ids = sip_ids::TurnIds::fixed(1);
+    let mut ids = sip_ids::TurnIds::fixed(turn_seq);
     crate::initial_invite::build_initial_call(
         &invite,
         crate::test_call::src(),
@@ -113,7 +119,7 @@ async fn a_logged_write_reaches_an_idle_backup_one_transit_later() {
 async fn a_tombstone_stays_until_the_peer_reports_applying_it() {
     let clock = Clock::test_at(0);
     let log = Changelog::new(1, clock.clone());
-    let _serving = log.serving("B", Partition::Bak);
+    let _serving = log.serving("B", None, Partition::Bak);
     log.bump_put("B", "c", Partition::Bak);
     log.bump_delete("B", "c", Partition::Bak, false, None);
     let deleted_at = log.head();
@@ -122,11 +128,11 @@ async fn a_tombstone_stays_until_the_peer_reports_applying_it() {
     log.reap(clock.now_ms());
     assert_eq!(log.peer_len("B", Partition::Bak), 1, "an unapplied delete outlives any TTL");
 
-    log.note_applied("B", Partition::Bak, Watermark::new(1, deleted_at.counter - 1));
+    log.note_applied("B", None, Partition::Bak, Watermark::new(1, deleted_at.counter - 1));
     log.reap(clock.now_ms());
     assert_eq!(log.peer_len("B", Partition::Bak), 1, "a position below the delete keeps it");
 
-    log.note_applied("B", Partition::Bak, deleted_at);
+    log.note_applied("B", None, Partition::Bak, deleted_at);
     log.reap(clock.now_ms());
     assert_eq!(log.peer_len("B", Partition::Bak), 0, "the peer applied it: reaped");
 }
@@ -147,21 +153,21 @@ fn marks(high_entries: usize, low_entries: usize) -> BacklogMarks {
 async fn a_backlog_over_high_water_gives_new_calls_no_backup_until_under_low_water() {
     let log = Changelog::new(1, Clock::test_at(0));
     log.set_backlog_marks(marks(3, 1));
-    let _serving = log.serving("B", Partition::Bak);
+    let _serving = log.serving("B", None, Partition::Bak);
     assert!(log.admits_backup("B"), "an empty backlog");
     for i in 0..3 {
         log.bump_put("B", &format!("c{i}"), Partition::Bak);
     }
     assert!(!log.admits_backup("B"), "three pending entries reach the high-water mark");
-    log.note_applied("B", Partition::Bak, Watermark::new(1, 2));
+    log.note_applied("B", None, Partition::Bak, Watermark::new(1, 2));
     assert!(!log.admits_backup("B"), "one pending entry is not under the low-water mark");
-    log.note_applied("B", Partition::Bak, Watermark::new(1, 3));
+    log.note_applied("B", None, Partition::Bak, Watermark::new(1, 3));
     assert!(log.admits_backup("B"), "none pending: new calls get a backup again");
 
     log.bump_put("B", "c9", Partition::Bak);
     tokio::time::advance(Duration::from_secs(5)).await;
     assert!(!log.admits_backup("B"), "the oldest pending entry reached the high-water age");
-    log.note_applied("B", Partition::Bak, log.head());
+    log.note_applied("B", None, Partition::Bak, log.head());
     assert!(log.admits_backup("B"));
     assert!(log.admits_backup("C"), "another peer has its own backlog");
 }
@@ -220,7 +226,7 @@ async fn a_backup_refusal_leaves_the_call_without_a_backup() {
     state.create_placed(call.clone());
     state.flush(&call);
     assert_eq!(repl.scan_refs_backed_by("w0", "w1"), vec![call.call_ref.clone()]);
-    repl.backup_refused("w1", &call.call_ref);
+    repl.backup_refused("w1", &call.call_ref, Some(call.incarnation()));
     assert_eq!(repl.changelog().peer_len("w1", Partition::Bak), 0, "its entry went");
     assert!(repl.scan_refs_backed_by("w0", "w1").is_empty(), "no scan offers it again");
     state.flush(&call);
@@ -228,6 +234,31 @@ async fn a_backup_refusal_leaves_the_call_without_a_backup() {
     assert_eq!(repl.unbacked_count(), 1);
     state.remove(&call.call_ref);
     assert_eq!(repl.unbacked_count(), 0);
+}
+
+/// **A refusal names the call it refuses.** The backup's refusal of an earlier
+/// call on the ref, in flight while the retry is admitted with its backup,
+/// leaves the retry backed; the retry's own refusal unbacks it.
+#[tokio::test(start_paused = true)]
+async fn a_refusal_of_an_earlier_call_on_the_ref_leaves_the_retry_backed() {
+    let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
+    let state = wired(&repl);
+    let first = backed_call_drawn(1, 1);
+    assert!(state.admit_backup(&first.call_ref, placed(&first).as_ref()));
+    state.create_placed(first.clone());
+    state.flush(&first);
+    state.remove(&first.call_ref);
+    let retry = backed_call_drawn(1, 2);
+    assert_eq!(retry.call_ref, first.call_ref);
+    assert_ne!(retry.incarnation(), first.incarnation());
+    assert!(state.admit_backup(&retry.call_ref, placed(&retry).as_ref()));
+    state.create_placed(retry.clone());
+    state.flush(&retry);
+    repl.backup_refused("w1", &retry.call_ref, Some(first.incarnation()));
+    assert!(!repl.unbacked(&retry.call_ref), "the earlier call's refusal leaves the retry backed");
+    repl.backup_refused("w1", &retry.call_ref, Some(retry.incarnation()));
+    assert!(repl.unbacked(&retry.call_ref), "its own refusal unbacks it");
+    state.remove(&retry.call_ref);
 }
 
 /// **The hold reads the applied position.** A call whose backup flow is live
@@ -241,15 +272,15 @@ async fn a_hold_waits_for_the_backup_to_apply_the_calls_entry() {
     state.create_placed(call.clone());
     state.flush(&call);
     assert!(state.hold_target(&call.call_ref).is_none(), "no flow toward the backup: no hold");
-    let _serving = repl.changelog().serving("w1", Partition::Bak);
+    let _serving = repl.changelog().serving("w1", None, Partition::Bak);
     assert!(state.hold_target(&call.call_ref).is_none(), "a flow that reported nothing: no hold");
-    repl.changelog().note_applied("w1", Partition::Bak, Watermark::new(1, 0));
+    repl.changelog().note_applied("w1", None, Partition::Bak, Watermark::new(1, 0));
     let target = state.hold_target(&call.call_ref).expect("a live, bootstrapped backup");
     assert_eq!(target.at, Watermark::new(1, 1), "the call's current entry");
     let waiting = held(&state, &call.call_ref);
     tokio::task::yield_now().await;
     assert!(!waiting.is_finished(), "not applied yet");
-    repl.changelog().note_applied("w1", Partition::Bak, Watermark::new(1, 1));
+    repl.changelog().note_applied("w1", None, Partition::Bak, Watermark::new(1, 1));
     let resolved = tokio::time::timeout(Duration::from_millis(1), waiting).await;
     assert!(resolved.is_ok(), "applied: the hold resolves");
 }
@@ -268,8 +299,8 @@ fn held(state: &CallState, call_ref: &str) -> tokio::task::JoinHandle<()> {
 async fn a_hold_follows_its_calls_entry_past_another_calls_applied_write() {
     let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
     let state = wired(&repl);
-    let _serving = repl.changelog().serving("w1", Partition::Bak);
-    repl.changelog().note_applied("w1", Partition::Bak, Watermark::new(1, 0));
+    let _serving = repl.changelog().serving("w1", None, Partition::Bak);
+    repl.changelog().note_applied("w1", None, Partition::Bak, Watermark::new(1, 0));
     let (a, b) = (backed_call(1), backed_call(2));
     state.create_placed(a.clone());
     state.create_placed(b.clone());
@@ -282,12 +313,12 @@ async fn a_hold_follows_its_calls_entry_past_another_calls_applied_write() {
         repl.changelog().position_of("w1", Partition::Bak, &a.call_ref),
         Some(Watermark::new(1, 3))
     );
-    repl.changelog().note_applied("w1", Partition::Bak, Watermark::new(1, 2));
+    repl.changelog().note_applied("w1", None, Partition::Bak, Watermark::new(1, 2));
     for _ in 0..3 {
         tokio::task::yield_now().await;
     }
     assert!(!waiting.is_finished(), "B's applied write does not stand for A's");
-    repl.changelog().note_applied("w1", Partition::Bak, Watermark::new(1, 3));
+    repl.changelog().note_applied("w1", None, Partition::Bak, Watermark::new(1, 3));
     let resolved = tokio::time::timeout(Duration::from_millis(1), waiting).await;
     assert!(resolved.is_ok(), "A's current entry applied: the hold resolves");
 }
@@ -308,18 +339,21 @@ async fn a_backups_refusal_frame_leaves_the_primarys_call_without_a_backup() {
     let pull = Frame::PullRequest {
         proto_ver: PROTO_VER,
         caller: "B".into(),
+        identity: None,
         partition: Partition::Bak,
         since: Watermark::new(1, 0),
     };
     conn.send(pull).await.unwrap();
-    let at = loop {
+    let (at, incarnation) = loop {
         match conn.recv().await {
-            Some(Frame::Data { at, call_ref, .. }) if call_ref == c => break at,
+            Some(Frame::Data { at, call_ref, incarnation, .. }) if call_ref == c => {
+                break (at, incarnation)
+            }
             Some(_) => continue,
             None => panic!("the stream closed before the call's write"),
         }
     };
-    conn.send(Frame::ReplicaRefused { at, call_ref: c.clone() }).await.unwrap();
+    conn.send(Frame::ReplicaRefused { at, call_ref: c.clone(), incarnation }).await.unwrap();
     tick(50).await;
     assert!(a.store.unbacked(&c), "the primary's call has no backup");
     assert_eq!(a.store.changelog().peer_len("B", Partition::Bak), 0, "its entry went");

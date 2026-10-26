@@ -38,6 +38,7 @@ async fn a_pull_announcing_another_version_is_refused_with_nothing_else() {
     let pull = Frame::PullRequest {
         proto_ver: older,
         caller: "B".into(),
+        identity: None,
         partition: Partition::Bak,
         since: Watermark::new(0, 0),
     };

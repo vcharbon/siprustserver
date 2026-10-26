@@ -41,12 +41,23 @@ impl Changelog {
     /// ([`repl_net::frame::Frame::Position`]), stamped now. The latest report
     /// stands, lower or not: a peer that shed what it held claims less, and
     /// its earlier claim no longer vouches for it. Ignored for a peer with no
-    /// log.
-    pub fn note_applied(&self, peer: &str, partition: Partition, at: Watermark) {
+    /// log, and from a worker `identity` other than the one that opened the
+    /// sub-log's latest flow: a superseded worker on the ordinal vouches for
+    /// nothing its successor holds (ADR-0055 §6).
+    pub fn note_applied(
+        &self,
+        peer: &str,
+        identity: Option<&str>,
+        partition: Partition,
+        at: Watermark,
+    ) {
         let gen = self.gen;
         let mut inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
         if let Some(log) = inner.peers.get_mut(peer) {
             let sub = log.sub_mut(partition);
+            if sub.identity.as_deref() != identity {
+                return;
+            }
             sub.applied = Some(Claim { at, made: Instant::now() });
             if at.gen == gen {
                 sub.acked.send_if_modified(|acked| {

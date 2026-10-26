@@ -312,7 +312,9 @@ as a changed address. A worker that finds its own ordinal bound to another
 identity enters `Superseded`: it stops authoring at once (no SIP, no write, no
 CDR) and exits without draining. Peers need no refusal rule: replication is
 pull-only (§3) and a peer pulls from the address membership binds to the ordinal
-(`repl-net/src/frame.rs:136-200`). A request record names a relay's owner by
+(`repl-net/src/frame.rs:136-200`). A puller states its identity when it opens
+a flow, and the serving side counts a flow's applied positions only from the
+identity that opened its latest flow. A request record names a relay's owner by
 ordinal and worker identity. No order is drawn from a clock.
 
 A worker cut off from the orchestrator is not fenced; its writes meet §7 at the

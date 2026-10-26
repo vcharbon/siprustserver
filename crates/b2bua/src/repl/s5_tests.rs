@@ -538,6 +538,7 @@ async fn catchup_noop_carries_flow_cursor_not_global_head() {
     conn.send(Frame::PullRequest {
         proto_ver: repl_net::PROTO_VER,
         caller: "B".into(),
+        identity: None,
         partition: Partition::Bak,
         since: Watermark::new(1, 0),
     })

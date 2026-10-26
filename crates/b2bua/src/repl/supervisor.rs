@@ -531,16 +531,7 @@ impl ReplicationSupervisor {
             start_w,
             self.inner.metrics.clone(),
         );
-        // Forward X11 fail-back commands to the router when a live core wired a sink.
-        let puller = match wiring(&self.inner.repl_tx).clone() {
-            Some(sink) => puller.with_repl_sink(sink),
-            None => puller,
-        };
-        let puller = match wiring(&self.inner.capacity).clone() {
-            Some(gate) => puller.with_capacity(gate),
-            None => puller,
-        };
-        let puller = puller.with_turn_probe(wiring(&self.inner.turn_probe).clone());
+        let puller = self.wire(puller);
         let (cancel_tx, cancel_rx) = watch::channel(false);
         flow.status_rx = Some(status_rx);
         flow.cancel_tx = Some(cancel_tx);

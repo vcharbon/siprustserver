@@ -35,6 +35,7 @@ fn pull_request(caller: &str) -> Frame {
     Frame::PullRequest {
         proto_ver: 3,
         caller: caller.into(),
+        identity: None,
         partition: crate::Partition::Bak,
         since: crate::Watermark::new(1, 0),
     }

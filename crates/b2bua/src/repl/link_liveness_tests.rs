@@ -384,6 +384,7 @@ async fn a_peer_that_stops_reading_is_dropped_after_15_s_and_its_log_becomes_rea
         .send(Frame::PullRequest {
             proto_ver: repl_net::PROTO_VER,
             caller: "A".into(),
+            identity: None,
             partition: Partition::Pri,
             since: Watermark::new(0, 0),
         })
@@ -486,6 +487,7 @@ async fn a_served_stream_carries_a_noop_at_least_every_noop_interval_during_and_
         .send(Frame::PullRequest {
             proto_ver: repl_net::PROTO_VER,
             caller: "A".into(),
+            identity: None,
             partition: Partition::Pri,
             since: Watermark::new(0, 0),
         })

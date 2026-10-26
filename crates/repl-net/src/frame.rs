@@ -11,13 +11,13 @@
 
 use std::sync::Arc;
 
-/// The protocol version a [`Frame::PullRequest`] announces: **v4**, the seven
+/// The protocol version a [`Frame::PullRequest`] announces: **v5**, the seven
 /// frames `{PullRequest, Data, Noop, ResetToBootstrap, Position,
 /// ReplicaRefused, StreamRefused}`, one socket = one flow, scan-then-tail,
 /// `Op` = `{Put, Delete}`. Bumped on every change to a frame's shape or to the
 /// frame set; a server refuses a stream announcing another version
 /// ([`Frame::StreamRefused`]), and no upgrade compatibility is kept.
-pub const PROTO_VER: u16 = 4;
+pub const PROTO_VER: u16 = 5;
 
 /// Discriminant outside the accepted range for an enum-coded byte field.
 ///
@@ -142,7 +142,7 @@ impl Ord for Watermark {
 /// whose element 0 is the integer tag in the doc-comment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
-    /// `[0, proto_ver, caller, partition, since_gen, since_counter]`
+    /// `[0, proto_ver, caller, identity, partition, since_gen, since_counter]`
     ///
     /// Client → server: opens **one flow's** stream (`partition` selects Reclaim
     /// vs Backup). The server does a store-scan **bootstrap then tail** when
@@ -152,6 +152,10 @@ pub enum Frame {
         proto_ver: u16,
         /// The pulling node's identifier.
         caller: String,
+        /// The pulling worker's identity (ADR-0055 §6): the server's flow
+        /// state toward `caller` follows the latest identity that opened a
+        /// flow. `None` when the worker states none.
+        identity: Option<String>,
         /// Which flow: `Pri` = Reclaim, `Bak` = Backup.
         partition: Partition,
         /// Watermark to resume from; `(0,0)` ⇒ bootstrap-then-tail.
@@ -236,7 +240,7 @@ pub enum Frame {
         /// The highest position this client has applied on this flow.
         at: Watermark,
     },
-    /// `[5, gen, counter, call_ref]`
+    /// `[5, gen, counter, call_ref, incarnation]`
     ///
     /// Client → server: the client refuses to hold the replica of `call_ref`
     /// the `Data` at `at` carried (a backup at its memory ceiling, ADR-0037
@@ -247,6 +251,9 @@ pub enum Frame {
         at: Watermark,
         /// The call whose replica is refused.
         call_ref: String,
+        /// The incarnation the refused `Data` carried: the refusal unbacks
+        /// that call, never a later one born on `call_ref`.
+        incarnation: Option<String>,
     },
     /// `[6, proto_ver, reason]`
     ///

@@ -36,6 +36,7 @@ fn roundtrip_pull_request_backup_tail() {
     assert_roundtrip(&Frame::PullRequest {
         proto_ver: 1,
         caller: "worker-3".into(),
+        identity: Some("pod-uid-3".into()),
         partition: Partition::Bak,
         since: Watermark::new(7, 42),
     });
@@ -47,6 +48,7 @@ fn roundtrip_pull_request_reclaim_bootstrap_empty_caller() {
     assert_roundtrip(&Frame::PullRequest {
         proto_ver: u16::MAX,
         caller: String::new(),
+        identity: None,
         partition: Partition::Pri,
         since: Watermark::new(0, 0),
     });
@@ -149,6 +151,12 @@ fn roundtrip_replica_refused() {
     assert_roundtrip(&Frame::ReplicaRefused {
         at: Watermark::new(3, 9),
         call_ref: "w0|c|t".into(),
+        incarnation: Some("w0#7".into()),
+    });
+    assert_roundtrip(&Frame::ReplicaRefused {
+        at: Watermark::new(3, 9),
+        call_ref: "w0|c|t".into(),
+        incarnation: None,
     });
 }
 
@@ -183,10 +191,11 @@ fn err_unknown_tag() {
 fn err_unknown_enum_discriminant_partition() {
     // PullRequest with partition = 7.
     let mut bytes = Vec::new();
-    rmp::encode::write_array_len(&mut bytes, 6).unwrap();
+    rmp::encode::write_array_len(&mut bytes, 7).unwrap();
     rmp::encode::write_uint(&mut bytes, 0).unwrap(); // tag PullRequest
     rmp::encode::write_uint(&mut bytes, 1).unwrap(); // proto_ver
     rmp::encode::write_str(&mut bytes, "w").unwrap(); // caller
+    rmp::encode::write_nil(&mut bytes).unwrap(); // identity
     rmp::encode::write_uint(&mut bytes, 7).unwrap(); // partition = 7 (invalid)
     rmp::encode::write_uint(&mut bytes, 0).unwrap(); // since_gen
     rmp::encode::write_uint(&mut bytes, 0).unwrap(); // since_counter
@@ -315,6 +324,7 @@ fn framing_partial_then_completes() {
     let payload = enc(&Frame::PullRequest {
         proto_ver: 3,
         caller: "abc".into(),
+        identity: None,
         partition: Partition::Pri,
         since: Watermark::new(2, 2),
     });

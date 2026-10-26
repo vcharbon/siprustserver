@@ -377,7 +377,7 @@ async fn needs_reset_after_tombstone_reap_raises_floor() {
 
     // The peer reports applying the delete; the reap drops it and the floor
     // rises to 2.
-    cl.note_applied("A", BAK_P, Watermark::new(1, 2));
+    cl.note_applied("A", None, BAK_P, Watermark::new(1, 2));
     cl.reap(clock.now_ms());
 
     assert!(cl.needs_reset("A", BAK_P, Watermark::new(1, 1)), "since below reaped tail → reset");
@@ -424,14 +424,14 @@ async fn gen_collision_or_backward_clock_forces_reset() {
 /// it is draining out from under itself); once the guard drops, the next reap
 /// evicts the now-unserved log.
 ///
-/// [`ServeGuard`]: super::changelog::ServeGuard
+/// [`ServeGuard`]: super::changelog::serving::ServeGuard
 #[tokio::test(start_paused = true)]
 async fn served_peer_log_survives_reap_until_guard_dropped() {
     let clock = Clock::test_at(0);
     let cl = Changelog::new(1, clock.clone()).with_dead_peer_ttl(2_000); // dead-peer TTL 2s
     let _store = ReplicatingCallStore::with_changelog(cl.clone(), clock.clone());
 
-    let guard = cl.serving("A", Partition::Bak);
+    let guard = cl.serving("A", None, Partition::Bak);
     assert!(cl.has_peer("A"));
 
     // Idle well past the dead-peer TTL, then reap: the served log survives.

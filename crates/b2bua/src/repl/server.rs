@@ -6,13 +6,13 @@
 //! socket = one flow.
 //!
 //! ```text
-//! peer → us:  PullRequest{ proto_ver, partition, since } # ONCE, opens one flow
+//! peer → us:  PullRequest{ proto_ver, identity, partition, since } # ONCE, opens one flow
 //! us → peer:  StreamRefused{ proto_ver }                 # another version: closed
 //! us → peer:  [bootstrap store-scan if since==(0,0)]     # snapshot, stamped at W=head
 //!             Data…(entries > W, batched) ; Noop(head)   # drain, catch-up Noop
 //!             …wait for a write; drain again; Noop only on the catch-up edge + idle interval…
 //! peer → us:  Position{ at }                             # what the peer has applied
-//! peer → us:  ReplicaRefused{ at, call_ref }             # a replica the peer will not hold
+//! peer → us:  ReplicaRefused{ at, call_ref, incarnation } # a replica the peer will not hold
 //! ```
 //!
 //! ## One protocol version
@@ -211,11 +211,11 @@ impl ReplServer {
     /// its single flow to completion (until the socket closes).
     async fn serve_connection(self, conn: Box<dyn ReplicationConnection>) {
         let conn: Arc<dyn ReplicationConnection> = Arc::from(conn);
-        let (caller, partition, since) = match conn.recv().await {
-            Some(Frame::PullRequest { proto_ver, caller, partition, since })
+        let (caller, identity, partition, since) = match conn.recv().await {
+            Some(Frame::PullRequest { proto_ver, caller, identity, partition, since })
                 if proto_ver == PROTO_VER =>
             {
-                (caller, partition, since)
+                (caller, identity, partition, since)
             }
             Some(Frame::PullRequest { proto_ver, caller, .. }) => {
                 tracing::error!(
@@ -233,7 +233,7 @@ impl ReplServer {
             // Anything other than an opening PullRequest, or a close → done.
             _ => return,
         };
-        self.serve_flow(conn, &caller, partition, since).await;
+        self.serve_flow(conn, &caller, identity, partition, since).await;
     }
 
     /// `(role, primary)` body keyspace for a flow (fixed by the partition):
@@ -251,12 +251,13 @@ impl ReplServer {
         &self,
         conn: Arc<dyn ReplicationConnection>,
         caller: &str,
+        identity: Option<String>,
         partition: Partition,
         since: Watermark,
     ) {
         // Keep this peer's changelog reap-immune, and this partition's flow
         // marked connected, while we serve it.
-        let mut guard = self.changelog.serving(caller, partition);
+        let mut guard = self.changelog.serving(caller, identity.as_deref(), partition);
         // The peer's back-channel: positions in, and a close that ends us.
         let (closed_tx, mut closed) = tokio::sync::watch::channel(false);
         let _recv = AbortOnDrop(observe::spawn_keeping_node({
@@ -267,9 +268,13 @@ impl ReplServer {
             async move {
                 while let Some(frame) = conn.recv().await {
                     match frame {
-                        Frame::Position { at } => changelog.note_applied(&peer, partition, at),
-                        Frame::ReplicaRefused { call_ref, .. } if partition == Partition::Bak => {
-                            source.backup_refused(&peer, &call_ref);
+                        Frame::Position { at } => {
+                            changelog.note_applied(&peer, identity.as_deref(), partition, at)
+                        }
+                        Frame::ReplicaRefused { call_ref, incarnation, .. }
+                            if partition == Partition::Bak =>
+                        {
+                            source.backup_refused(&peer, &call_ref, incarnation.as_deref());
                         }
                         _ => {}
                     }

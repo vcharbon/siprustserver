@@ -24,8 +24,9 @@
 //!
 //! ## Send model (ADR-0055 §3)
 //! Every write moves its sub-log's head, which wakes the serve task streaming
-//! that sub-log ([`ServeGuard::written`]): the server drains on write, bounded
-//! by a `limit` so a huge backlog streams in batches. The `serving` count keeps
+//! that sub-log ([`ServeGuard::written`](serving::ServeGuard::written)): the
+//! server drains on write, bounded by a `limit` so a huge backlog streams in
+//! batches. The `serving` count keeps
 //! a peer log reap-immune while a serve task is active.
 //!
 //! ## Flow progress (ADR-0031 D2)
@@ -112,6 +113,9 @@ struct SubLog {
     /// Serve tasks currently streaming this sub-log. `0` ⇒ no flow carries this
     /// partition to the peer, so nothing it holds can be current.
     streams: usize,
+    /// The worker identity that opened the latest flow: only its reports
+    /// count ([`progress`]).
+    identity: Option<String>,
     /// The highest position the peer ever reported applying on this sub-log
     /// under this node's incarnation, connected or not ([`progress`]).
     acked: watch::Sender<Watermark>,
@@ -129,6 +133,7 @@ impl SubLog {
             head: 0,
             applied: None,
             streams: 0,
+            identity: None,
             acked: watch::Sender::new(Watermark::new(0, 0)),
             written: watch::Sender::new(0),
         }
@@ -230,41 +235,6 @@ impl PeerLog {
     }
 }
 
-/// RAII handle keeping a peer log reap-immune while a serve task drains ONE of
-/// its sub-logs. Drop decrements both the peer's reap-immunity count and the
-/// sub-log's connected-flow count, and clears the flow's reported position — a
-/// disconnected flow holds nothing current (ADR-0031 D2).
-pub struct ServeGuard {
-    changelog: Changelog,
-    peer: String,
-    partition: Partition,
-    written: watch::Receiver<u64>,
-}
-
-impl ServeGuard {
-    /// Resolves once a write lands in the sub-log after the last call: the
-    /// serve task drains on it. A write between two calls is never missed.
-    pub async fn written(&mut self) {
-        if self.written.changed().await.is_err() {
-            std::future::pending::<()>().await;
-        }
-    }
-}
-
-impl Drop for ServeGuard {
-    fn drop(&mut self) {
-        let mut inner = locked(&self.changelog.inner, REPLICA_CHANGELOG);
-        if let Some(log) = inner.peers.get_mut(&self.peer) {
-            log.serving = log.serving.saturating_sub(1);
-            let sub = log.sub_mut(self.partition);
-            sub.streams = sub.streams.saturating_sub(1);
-            if sub.streams == 0 {
-                sub.applied = None;
-            }
-        }
-    }
-}
-
 struct Inner {
     counter: u64,
     peers: HashMap<String, PeerLog>,
@@ -330,26 +300,6 @@ impl Changelog {
     /// and `drain_since` stamp read.
     pub fn now_ms(&self) -> i64 {
         self.clock.now_ms()
-    }
-
-    /// Register a serve task for `(peer, partition)`: keeps the peer's log
-    /// reap-immune and marks the partition's flow connected, until the returned
-    /// `ServeGuard` drops. Creates the peer log if absent.
-    pub fn serving(&self, peer: &str, partition: Partition) -> ServeGuard {
-        let written = {
-            let mut inner = locked(&self.inner, REPLICA_CHANGELOG);
-            let (now, counter) = (self.clock.now_ms(), inner.counter);
-            let log =
-                inner.peers.entry(peer.to_string()).or_insert_with(|| PeerLog::new(now, counter));
-            log.serving += 1;
-            let sub = log.sub_mut(partition);
-            sub.streams += 1;
-            // A new flow starts unknown: a claim left by a flow the peer never
-            // closed (a dead node sends no FIN) must not vouch for this one.
-            sub.applied = None;
-            sub.written.subscribe()
-        };
-        ServeGuard { changelog: self.clone(), peer: peer.to_string(), partition, written }
     }
 
     /// Whether a warm puller on `partition` resuming from `since` must
@@ -523,6 +473,7 @@ fn reap_sublog(sub: &mut SubLog, gen: u64) {
 mod backlog;
 mod drain;
 mod progress;
+mod serving;
 mod source;
 #[cfg(test)]
 mod tests;

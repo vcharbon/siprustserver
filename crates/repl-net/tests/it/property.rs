@@ -20,14 +20,15 @@ fn partition_strat() -> impl Strategy<Value = Partition> {
 }
 
 fn frame_strat() -> impl Strategy<Value = Frame> {
-    let pull = (any::<u16>(), ".*", partition_strat(), watermark_strat()).prop_map(
-        |(proto_ver, caller, partition, since)| Frame::PullRequest {
-            proto_ver,
-            caller,
-            partition,
-            since,
-        },
-    );
+    let pull =
+        (any::<u16>(), ".*", proptest::option::of(".*"), partition_strat(), watermark_strat())
+            .prop_map(|(proto_ver, caller, identity, partition, since)| Frame::PullRequest {
+                proto_ver,
+                caller,
+                identity,
+                partition,
+                since,
+            });
 
     let data = (
         watermark_strat(),
@@ -81,8 +82,9 @@ fn frame_strat() -> impl Strategy<Value = Frame> {
 
     let position = watermark_strat().prop_map(|at| Frame::Position { at });
 
-    let refused =
-        (watermark_strat(), ".*").prop_map(|(at, call_ref)| Frame::ReplicaRefused { at, call_ref });
+    let refused = (watermark_strat(), ".*", proptest::option::of(".*")).prop_map(
+        |(at, call_ref, incarnation)| Frame::ReplicaRefused { at, call_ref, incarnation },
+    );
 
     let stream_refused = (any::<u16>(), ".*")
         .prop_map(|(proto_ver, reason)| Frame::StreamRefused { proto_ver, reason });

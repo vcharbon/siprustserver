@@ -50,16 +50,19 @@ impl ReplicatingCallStore {
         locked(&self.refusals, REPLICA_REFUSALS).unbacked.remove(call_ref);
     }
 
-    /// `backup` refused the replica of this node's call `call_ref`: the call has
-    /// no backup from here on, its entry toward `backup` goes, and no scan of
-    /// this node offers it to `backup` again. A call this node does not hold
-    /// with `backup` as its backup (gone, or another call on the ref) is left
-    /// alone.
-    pub fn backup_refused(&self, backup: &str, call_ref: &str) {
+    /// `backup` refused the replica of this node's call `incarnation` on
+    /// `call_ref`: the call has no backup from here on, its entry toward
+    /// `backup` goes, and no scan of this node offers it to `backup` again. A
+    /// call this node does not hold with `backup` as its backup (gone, or
+    /// another call on the ref) is left alone.
+    pub fn backup_refused(&self, backup: &str, call_ref: &str, incarnation: Option<&str>) {
         {
             let mut meta = locked(&self.meta, REPLICA_METADATA);
             let Some(m) = meta.get_mut(call_ref) else { return };
             if m.role != PartitionRole::Primary || m.backup.as_deref() != Some(backup) {
+                return;
+            }
+            if incarnation.is_some_and(|i| m.meta.incarnation.as_deref() != Some(i)) {
                 return;
             }
             m.backup = None;

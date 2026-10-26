@@ -475,7 +475,7 @@ fn position(counter: u64) -> Frame {
 }
 
 fn refused(call_ref: &str, counter: u64) -> Frame {
-    Frame::ReplicaRefused { at: at(counter), call_ref: call_ref.into() }
+    Frame::ReplicaRefused { at: at(counter), call_ref: call_ref.into(), incarnation: None }
 }
 
 /// A replica refused at the backup's ceiling is told to the primary, and the

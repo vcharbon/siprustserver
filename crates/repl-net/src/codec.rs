@@ -119,17 +119,29 @@ impl Encoder {
         let Ok(()) = encode::write_nil(&mut self.0);
     }
 
+    /// A `str`, or `nil` for `None`.
+    fn opt_str(&mut self, v: Option<&str>, at: &'static str) -> Result<(), ReplCodecError> {
+        match v {
+            Some(v) => self.str(v, at),
+            None => {
+                self.nil();
+                Ok(())
+            }
+        }
+    }
+
     fn bool(&mut self, v: bool) {
         let Ok(()) = encode::write_bool(&mut self.0, v);
     }
 
     fn frame(&mut self, frame: &Frame) -> Result<(), ReplCodecError> {
         match frame {
-            Frame::PullRequest { proto_ver, caller, partition, since } => {
-                self.array(6, "PullRequest")?;
+            Frame::PullRequest { proto_ver, caller, identity, partition, since } => {
+                self.array(7, "PullRequest")?;
                 self.uint(tag::PULL_REQUEST);
                 self.uint(u64::from(*proto_ver));
                 self.str(caller, "caller")?;
+                self.opt_str(identity.as_deref(), "identity")?;
                 self.uint(u64::from(partition.as_u8()));
                 self.uint(since.gen);
                 self.uint(since.counter);
@@ -168,10 +180,7 @@ impl Encoder {
                     None => self.nil(),
                 }
                 self.bool(*answered);
-                match incarnation {
-                    Some(id) => self.str(id, "incarnation")?,
-                    None => self.nil(),
-                }
+                self.opt_str(incarnation.as_deref(), "incarnation")?;
             }
             Frame::Noop { at } => {
                 self.array(3, "Noop")?;
@@ -190,12 +199,13 @@ impl Encoder {
                 self.uint(at.gen);
                 self.uint(at.counter);
             }
-            Frame::ReplicaRefused { at, call_ref } => {
-                self.array(4, "ReplicaRefused")?;
+            Frame::ReplicaRefused { at, call_ref, incarnation } => {
+                self.array(5, "ReplicaRefused")?;
                 self.uint(tag::REPLICA_REFUSED);
                 self.uint(at.gen);
                 self.uint(at.counter);
                 self.str(call_ref, "call_ref")?;
+                self.opt_str(incarnation.as_deref(), "incarnation")?;
             }
             Frame::StreamRefused { proto_ver, reason } => {
                 self.array(3, "StreamRefused")?;
@@ -245,15 +255,17 @@ fn expect_len(got: u32, want: u32, frame: &'static str) -> Result<(), ReplCodecE
 }
 
 fn decode_pull_request(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
-    expect_len(len, 6, "PullRequest")?;
+    expect_len(len, 7, "PullRequest")?;
     let proto_ver = read_u16(rd, "proto_ver")?;
     let caller = read_str(rd, "caller")?;
+    let identity = read_opt_str(rd, "identity")?;
     let partition = Partition::from_u8(read_u8(rd, "partition")?)?;
     let since_gen = read_u64(rd, "since_gen")?;
     let since_counter = read_u64(rd, "since_counter")?;
     Ok(Frame::PullRequest {
         proto_ver,
         caller,
+        identity,
         partition,
         since: Watermark::new(since_gen, since_counter),
     })
@@ -313,11 +325,12 @@ fn decode_position(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
 }
 
 fn decode_replica_refused(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
-    expect_len(len, 4, "ReplicaRefused")?;
+    expect_len(len, 5, "ReplicaRefused")?;
     let gen = read_u64(rd, "gen")?;
     let counter = read_u64(rd, "counter")?;
     let call_ref = read_str(rd, "call_ref")?;
-    Ok(Frame::ReplicaRefused { at: Watermark::new(gen, counter), call_ref })
+    let incarnation = read_opt_str(rd, "incarnation")?;
+    Ok(Frame::ReplicaRefused { at: Watermark::new(gen, counter), call_ref, incarnation })
 }
 
 fn decode_stream_refused(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {

@@ -47,6 +47,7 @@ pub fn all() -> Vec<Seed> {
             vec![Frame::PullRequest {
                 proto_ver: 3,
                 caller: "w-1".into(),
+                identity: None,
                 partition: Partition::Pri,
                 since: Watermark::new(2, 9),
             }],
@@ -61,7 +62,11 @@ pub fn all() -> Vec<Seed> {
         ),
         seed(
             "replica-refused",
-            vec![Frame::ReplicaRefused { at: Watermark::new(3, 20), call_ref: "w0|c|t".into() }],
+            vec![Frame::ReplicaRefused {
+                at: Watermark::new(3, 20),
+                call_ref: "w0|c|t".into(),
+                incarnation: Some("w0#7".into()),
+            }],
         ),
         seed(
             "stream-refused",

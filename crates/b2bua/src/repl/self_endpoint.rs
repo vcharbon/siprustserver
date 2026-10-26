@@ -115,6 +115,11 @@ impl SelfObserver {
         }
     }
 
+    /// This worker's identity; `None` when it states none.
+    pub fn identity(&self) -> Option<&str> {
+        self.self_identity.as_deref()
+    }
+
     /// Start evaluating snapshots. Called once the membership source is known to
     /// show the worker its own endpoint ([`topology::Membership::observes_self`]).
     pub fn enable(&self) {

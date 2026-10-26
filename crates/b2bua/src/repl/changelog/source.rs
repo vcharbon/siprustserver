@@ -74,9 +74,9 @@ pub trait BodySource: Send + Sync {
         Vec::new()
     }
 
-    /// `backup` refused the replica of this node's call `call_ref` (ADR-0055
-    /// §3): the call has no backup from here on.
-    fn backup_refused(&self, _backup: &str, _call_ref: &str) {}
+    /// `backup` refused the replica of this node's call `incarnation` on
+    /// `call_ref` (ADR-0055 §3): the call has no backup from here on.
+    fn backup_refused(&self, _backup: &str, _call_ref: &str, _incarnation: Option<&str>) {}
 
     /// A write of this node's call `call_ref` cannot reach `backup` (its frame
     /// is refused unsent): the call has no backup from here on (ADR-0055 §3).

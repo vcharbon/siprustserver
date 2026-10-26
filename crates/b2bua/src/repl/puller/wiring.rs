@@ -24,6 +24,12 @@ impl Puller {
         self
     }
 
+    /// State this worker's `identity` on every flow it opens (ADR-0055 §6).
+    pub fn with_identity(mut self, identity: Option<String>) -> Self {
+        self.identity = identity;
+        self
+    }
+
     /// Report every write of a primary this puller applies to `probe`
     /// (ADR-0055 §13).
     pub fn with_turn_probe(mut self, probe: crate::turn_probe::TurnProbes) -> Self {
@@ -69,7 +75,11 @@ impl Puller {
         incarnation: Option<&str>,
     ) -> bool {
         self.store.refuse_replica(call_ref, self.peer_ordinal(), incarnation);
-        let frame = Frame::ReplicaRefused { at, call_ref: call_ref.to_string() };
+        let frame = Frame::ReplicaRefused {
+            at,
+            call_ref: call_ref.to_string(),
+            incarnation: incarnation.map(str::to_string),
+        };
         self.send(conn, frame).await
     }
 }
