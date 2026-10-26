@@ -305,6 +305,8 @@ fn observer_overrides(env: &mut EnvReader, mut cfg: LoadObserverConfig) -> LoadO
     set("LB_BAND_HYSTERESIS", &mut cfg.band_hysteresis, Span::FromZero);
     set("LB_AIMD_DECREASE_FACTOR", &mut cfg.aimd_decrease_factor, Span::OpenUnit);
     set("LB_AIMD_INCREASE_STEP_CPS", &mut cfg.aimd_increase_step_cps, Span::Positive);
+    set("LB_AIMD_COOLDOWN_TICKS", &mut cfg.aimd_cooldown_ticks, Span::Positive);
+    set("LB_CAP_INITIAL_CPS", &mut cfg.cap_initial_cps, Span::Positive);
     set("LB_CAP_CEILING_CPS", &mut cfg.cap_ceiling_cps, Span::Positive);
     set("LB_CAP_FLOOR_CPS", &mut cfg.cap_floor_cps, Span::Positive);
     cfg

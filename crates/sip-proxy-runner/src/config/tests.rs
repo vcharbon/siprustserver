@@ -79,6 +79,9 @@ fn lb_overrides_replace_their_fields() {
         ("LB_ELU_CRITICAL", "0.6"),
         ("LB_BAND_HYSTERESIS", "0.05"),
         ("LB_AIMD_DECREASE_FACTOR", "0.4"),
+        ("LB_AIMD_INCREASE_STEP_CPS", "25"),
+        ("LB_AIMD_COOLDOWN_TICKS", "3"),
+        ("LB_CAP_INITIAL_CPS", "120"),
         ("LB_CAP_CEILING_CPS", "150"),
         ("LB_CAP_FLOOR_CPS", "2"),
     ])
@@ -86,9 +89,25 @@ fn lb_overrides_replace_their_fields() {
     assert_eq!(cfg.observer.elu_soft, 0.3);
     assert_eq!(cfg.observer.elu_hard, 0.45);
     assert_eq!(cfg.observer.elu_critical, 0.6);
+    assert_eq!(cfg.observer.band_hysteresis, 0.05);
     assert_eq!(cfg.observer.aimd_decrease_factor, 0.4);
+    assert_eq!(cfg.observer.aimd_increase_step_cps, 25.0);
+    assert_eq!(cfg.observer.aimd_cooldown_ticks, 3.0);
+    assert_eq!(cfg.observer.cap_initial_cps, 120.0);
     assert_eq!(cfg.observer.cap_ceiling_cps, 150.0);
     assert_eq!(cfg.observer.cap_floor_cps, 2.0);
+}
+
+/// An initial cap above the ceiling refuses the boot.
+#[test]
+fn an_initial_cap_above_the_ceiling_refuses_the_boot() {
+    refused(&[("LB_CAP_INITIAL_CPS", "300")], "cap_initial_cps");
+}
+
+/// A cooldown shorter than one probe cycle (1000 + 1500 ms) refuses the boot.
+#[test]
+fn a_cooldown_shorter_than_a_probe_cycle_refuses_the_boot() {
+    refused(&[("LB_AIMD_COOLDOWN_TICKS", "2")], "aimd cooldown");
 }
 
 /// An incoherent set (reversed bands) refuses the boot.

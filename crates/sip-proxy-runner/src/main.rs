@@ -87,8 +87,10 @@
 //!   LB_BAND_HYSTERESIS  in [0, 1), below the narrower band gap (default 0.05)
 //!   LB_AIMD_DECREASE_FACTOR  in (0, 1)                     (default 0.5)
 //!   LB_AIMD_INCREASE_STEP_CPS  > 0                         (default 2)
-//!   LB_CAP_CEILING_CPS / LB_CAP_FLOOR_CPS  > 0, floor ≤ 30 (the initial cap)
-//!                    ≤ ceiling                       (default 200 / 1)
+//!   LB_AIMD_COOLDOWN_TICKS  > 0, the probe ticks a decrease blocks increases;
+//!                    × 1000 ms ≥ one probe cycle             (default 5)
+//!   LB_CAP_INITIAL_CPS / LB_CAP_CEILING_CPS / LB_CAP_FLOOR_CPS  > 0,
+//!                    floor ≤ initial ≤ ceiling       (default 30 / 200 / 1)
 //!   PROXY_RESOLVER_PREWARM  comma-separated host:port DNS targets to resolve
 //!                    at startup and pin permanently warm      (default none)
 //!   PROXY_RESOLVER_POSITIVE_TTL_MS  resolver positive-cache TTL, ms ≥ 1

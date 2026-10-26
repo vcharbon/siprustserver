@@ -149,7 +149,8 @@ its family.
 | `LB_ELU_SOFT`, `LB_ELU_HARD`, `LB_ELU_CRITICAL` | (0, 1], soft < hard < critical | 0.4, 0.5, 0.65 |
 | `LB_BAND_HYSTERESIS` | [0, 1), below the narrower band gap | 0.05 |
 | `LB_AIMD_DECREASE_FACTOR` | (0, 1) | 0.5 |
-| `LB_AIMD_INCREASE_STEP_CPS`, `LB_CAP_CEILING_CPS`, `LB_CAP_FLOOR_CPS` | > 0, floor ≤ initial cap ≤ ceiling | 2, 200, 1 |
+| `LB_AIMD_INCREASE_STEP_CPS`, `LB_CAP_INITIAL_CPS`, `LB_CAP_CEILING_CPS`, `LB_CAP_FLOOR_CPS` | > 0, floor ≤ initial ≤ ceiling | 2, 30, 200, 1 |
+| `LB_AIMD_COOLDOWN_TICKS` | > 0, × the 1000 ms tick ≥ one probe cycle (`HEALTH_INTERVAL_MS + HEALTH_TIMEOUT_MS`) | 5 |
 | `PROXY_SELF_GATE` | one of `1`, `true`, `yes`, `on`, `0`, `false`, `no`, `off` | on |
 | `PROXY_SELF_GATE_ELU_CRITICAL` | (0, 1] | 0.8 |
 | `PROXY_SELF_GATE_CPS_SIZE`, `PROXY_SELF_GATE_CPS_RATE` | ≥ 1 | 50, 100 |
