@@ -154,7 +154,7 @@ impl ActionExecutor<'_> {
         *call = settled;
         for (leg_id, _, record) in overdue {
             let (status, reason) = UNANSWERED_HELD;
-            self.answer_received(call, fx, &leg_id, &record, status, reason, Vec::new(), None);
+            answer_received(call, fx, &leg_id, &record, status, reason, Vec::new(), None);
         }
         self.arm_held_answer(call, fx);
     }
@@ -217,16 +217,7 @@ impl ActionExecutor<'_> {
         let Some((holder, _)) = held_record(call, leg_id, &record.method, cseq) else { return };
         *call = close_held(call.clone(), leg_id, &holder, cseq);
         let content_type = content_type.and_then(relay::media_type);
-        self.answer_received(
-            call,
-            fx,
-            leg_id,
-            &record,
-            status,
-            reason,
-            body.to_vec(),
-            content_type,
-        );
+        answer_received(call, fx, leg_id, &record, status, reason, body.to_vec(), content_type);
         self.arm_held_answer(call, fx);
     }
 
@@ -243,30 +234,8 @@ impl ActionExecutor<'_> {
         fx: &mut HandlerEffects,
         leg_id: &str,
     ) {
-        let Some(leg) = find_leg(call, leg_id) else { return };
-        let owed = |r: &RequestRecord| (r.is_relay() || r.is_held()) && !r.is_invite();
-        let mut settled: Vec<RequestRecord> = leg
-            .dialogs
-            .iter()
-            .flat_map(|d| d.requests.iter().filter(|r| owed(r)).cloned())
-            .collect();
-        let mut retired = Vec::new();
-        *call = update_leg(call.clone(), leg_id, |l| {
-            for d in l.dialogs.iter_mut() {
-                d.requests.retain(|r| !owed(r));
-            }
-            retired = take_retired_owed(l);
-        });
-        // A relayed INVITE a retired dialog still holds ends with the leg,
-        // unanswered here.
-        settled.extend(retired.into_iter().map(|(_, r)| r).filter(|r| owed(r)));
-        if !settled.is_empty() {
+        if settle_owed(call, fx, leg_id) {
             self.arm_held_answer(call, fx);
-        }
-        for record in settled {
-            let (status, reason) =
-                if record.is_held() { ENDED_HELD } else { row_of(&record.method).owed_at_leg_end };
-            self.answer_received(call, fx, leg_id, &record, status, reason, Vec::new(), None);
         }
     }
 
@@ -295,61 +264,9 @@ impl ActionExecutor<'_> {
                 *call = close_held(call.clone(), &leg_id, &holder, record.inbound_cseq);
             }
             let (status, reason) = ENDED_HELD;
-            self.answer_received(call, fx, &leg_id, &record, status, reason, Vec::new(), None);
+            answer_received(call, fx, &leg_id, &record, status, reason, Vec::new(), None);
         }
         self.arm_held_answer(call, fx);
-    }
-
-    /// The final `status` to the received half of `record`, held on (or
-    /// relayed toward) `leg_id`, sent to its originator's top Via sent-by
-    /// (RFC 3261 §18.2.2).
-    #[allow(clippy::too_many_arguments)]
-    fn answer_received(
-        &mut self,
-        call: &mut Call,
-        fx: &mut HandlerEffects,
-        leg_id: &str,
-        record: &RequestRecord,
-        status: u16,
-        reason: &str,
-        body: Vec<u8>,
-        content_type: Option<MediaType>,
-    ) {
-        // A relay's originator is the peer of the leg it was relayed toward;
-        // a held request's, the leg it arrived on.
-        let originator = if record.is_held() {
-            leg_id.to_string()
-        } else {
-            get_peer(call, leg_id).unwrap_or(call.a_leg.leg_id.as_str()).to_string()
-        };
-        let Some(dest) = record.source_vias.first().and_then(|v| via_sent_by(v)) else {
-            tracing::warn!(
-                call_ref = %call.call_ref,
-                leg_id = %leg_id,
-                method = %record.method,
-                "request left unanswered — the originator's top Via names no destination"
-            );
-            return;
-        };
-        let Ok(answer) =
-            received_answer(record, &record.method, status, reason, body, content_type)
-        else {
-            tracing::warn!(
-                call_ref = %call.call_ref,
-                leg_id = %leg_id,
-                method = %record.method,
-                "request left unanswered — the originator's request lines make no response"
-            );
-            return;
-        };
-        fx.outbound.push(OutboundSipEffect {
-            body: OutboundBody::Response(answer),
-            mode: OutboundTxnMode::ServerResponse,
-            destination: dest,
-            label: format!("{status} {} → {originator}", record.method),
-            leg_id: Some(originator),
-            provenance: Provenance::Authored,
-        });
     }
 
     /// The [`TimerType::HeldAnswer`] stands at the earliest deadline of a
@@ -360,6 +277,82 @@ impl ActionExecutor<'_> {
             None => self.disarm(call, fx, &held_answer_key()),
         }
     }
+}
+
+/// Settle every record `leg_id` owes a final for as the leg ends (the
+/// table's "its leg's end" row): each relay toward it and each request held
+/// on it leaves the record and is answered. Returns whether one was.
+pub(crate) fn settle_owed(call: &mut Call, fx: &mut HandlerEffects, leg_id: &str) -> bool {
+    let Some(leg) = find_leg(call, leg_id) else { return false };
+    let owed = |r: &RequestRecord| (r.is_relay() || r.is_held()) && !r.is_invite();
+    let mut settled: Vec<RequestRecord> =
+        leg.dialogs.iter().flat_map(|d| d.requests.iter().filter(|r| owed(r)).cloned()).collect();
+    let mut retired = Vec::new();
+    *call = update_leg(call.clone(), leg_id, |l| {
+        for d in l.dialogs.iter_mut() {
+            d.requests.retain(|r| !owed(r));
+        }
+        retired = take_retired_owed(l);
+    });
+    // A relayed INVITE a retired dialog still holds ends with the leg,
+    // unanswered here.
+    settled.extend(retired.into_iter().map(|(_, r)| r).filter(|r| owed(r)));
+    for record in &settled {
+        let (status, reason) =
+            if record.is_held() { ENDED_HELD } else { row_of(&record.method).owed_at_leg_end };
+        answer_received(call, fx, leg_id, record, status, reason, Vec::new(), None);
+    }
+    !settled.is_empty()
+}
+
+/// The final `status` to the received half of `record`, held on (or
+/// relayed toward) `leg_id`, sent to its originator's top Via sent-by
+/// (RFC 3261 §18.2.2).
+#[allow(clippy::too_many_arguments)]
+fn answer_received(
+    call: &Call,
+    fx: &mut HandlerEffects,
+    leg_id: &str,
+    record: &RequestRecord,
+    status: u16,
+    reason: &str,
+    body: Vec<u8>,
+    content_type: Option<MediaType>,
+) {
+    // A relay's originator is the peer of the leg it was relayed toward;
+    // a held request's, the leg it arrived on.
+    let originator = if record.is_held() {
+        leg_id.to_string()
+    } else {
+        get_peer(call, leg_id).unwrap_or(call.a_leg.leg_id.as_str()).to_string()
+    };
+    let Some(dest) = record.source_vias.first().and_then(|v| via_sent_by(v)) else {
+        tracing::warn!(
+            call_ref = %call.call_ref,
+            leg_id = %leg_id,
+            method = %record.method,
+            "request left unanswered — the originator's top Via names no destination"
+        );
+        return;
+    };
+    let Ok(answer) = received_answer(record, &record.method, status, reason, body, content_type)
+    else {
+        tracing::warn!(
+            call_ref = %call.call_ref,
+            leg_id = %leg_id,
+            method = %record.method,
+            "request left unanswered — the originator's request lines make no response"
+        );
+        return;
+    };
+    fx.outbound.push(OutboundSipEffect {
+        body: OutboundBody::Response(answer),
+        mode: OutboundTxnMode::ServerResponse,
+        destination: dest,
+        label: format!("{status} {} → {originator}", record.method),
+        leg_id: Some(originator),
+        provenance: Provenance::Authored,
+    });
 }
 
 /// The final `status` to `record`'s received half, carrying `body`.

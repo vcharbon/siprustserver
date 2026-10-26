@@ -82,6 +82,7 @@ use b2bua_sdk::model::{RuleAction, RuleContext};
 
 pub use prack::{Owed, Settle};
 pub use provisional_arrival::invite_open;
+pub(crate) use request_record::settle_owed;
 pub(crate) use subscription::holds_requests;
 
 /// Executes rule actions against a working copy of the call, drawing every

@@ -552,3 +552,55 @@ fn a_sent_record_seeds_what_is_left_of_its_timer_f_and_none_past_it() {
         "the record settles as its timeout: {overdue:?}"
     );
 }
+
+/// The caller's INFO relayed onto the b-leg's confirmed dialog under
+/// `branch`, its Timer F ending at `deadline_ms`.
+fn relayed_info(leg: &mut Leg, branch: &str, deadline_ms: i64) {
+    let sent = call::SentRequest {
+        branch: branch.into(),
+        image: b_handle(branch, 2).image,
+        destination: HostPort { host: "10.0.0.9".into(), port: 5080 },
+    };
+    confirmed(leg).requests.push(RequestRecord {
+        source_vias: vec![format!("SIP/2.0/UDP 10.0.0.1:5060;branch={A_BRANCH}-info")],
+        source_call_id: "acid@alice".into(),
+        source_from: "<sip:alice@10.0.0.1>;tag=atag".into(),
+        source_to: "<sip:bob@10.0.0.9>;tag=svca".into(),
+        sent: Some(sent),
+        deadline_ms: Some(deadline_ms),
+        ..RequestRecord::relayed("INFO", 2, 2)
+    });
+}
+
+/// The branches of the server non-INVITE seeds.
+fn server_non_invite_branches(seeds: &[TxnSeed]) -> Vec<String> {
+    seeds
+        .iter()
+        .filter_map(|s| match s {
+            TxnSeed::ServerNonInvite { request, .. } => {
+                Some(request.top_via().branch().unwrap_or_default().to_string())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A relay seeds both halves while its Timer F runs; past its deadline it
+/// settles as its timeout, which answers its originator nothing, so its
+/// received half is not seeded either.
+#[test]
+fn a_relay_past_its_deadline_seeds_neither_half() {
+    let mut leg = b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1)));
+    relayed_info(&mut leg, "z9hG4bK-relayed-info", 30_000);
+    let call = call_with(LegState::Confirmed, leg);
+    let info = format!("{A_BRANCH}-info");
+
+    assert_eq!(server_non_invite_branches(&seeds_for(&call, 10_000)), [info]);
+    let past = seeds_for(&call, 30_000);
+    assert!(
+        !past.iter().any(|s| matches!(s, TxnSeed::ClientNonInvite { .. })),
+        "nothing is re-sent past the deadline"
+    );
+    assert!(server_non_invite_branches(&past).is_empty(), "nor awaits its final: {past:?}");
+    assert_eq!(overdue_sent(&call, 30_000).len(), 1, "the record settles as its timeout");
+}

@@ -17,6 +17,7 @@ use crate::rules::capabilities;
 use crate::rules::relay;
 
 use super::select::{in_dialog_method, leg_at};
+use super::teardown::Relayed;
 use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
@@ -240,7 +241,8 @@ impl ActionExecutor<'_> {
 
     /// Originate an in-dialog request on `leg_id`'s confirmed dialog
     /// ([`b2bua_sdk::model::RuleAction::SendRequestToLeg`]): keepalive
-    /// OPTIONS, opaque-body INFO (MSCML), deferred-relay re-emission.
+    /// OPTIONS, opaque-body INFO (MSCML), deferred-relay re-emission. A BYE
+    /// takes the method table's BYE row ([`Self::send_bye`]).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn send_request_to_leg(
         &mut self,
@@ -258,6 +260,14 @@ impl ActionExecutor<'_> {
             Some(m) => m,
             None => return,
         };
+        if m == InDialogMethod::Bye {
+            let content_type = content_type
+                .and_then(relay::media_type)
+                .or_else(|| (!body.is_empty()).then(relay::sdp));
+            let lines = stated_lines(method, headers, body, descriptors, fx);
+            let relayed = Relayed { headers: lines, body: body.to_vec(), content_type };
+            return self.send_bye(call, fx, leg_id, None, relayed, None, false);
+        }
         let Some(leg) = leg_at(call, leg_id) else { return };
         // Probe the dialog the leg's requests ride ([`call::helpers::carrying_dialog`]).
         // Skip when the leg holds none (nothing to probe).
@@ -305,27 +315,7 @@ impl ActionExecutor<'_> {
         let content_type = content_type
             .and_then(relay::media_type)
             .or_else(|| (!body.is_empty()).then(relay::sdp));
-        // Forward the service-nominated application headers verbatim (e.g. a held
-        // `User-To-User` re-emitted toward the peer on a deferred User-to-User relay).
-        // Body-owned headers are dropped: `body`/`content_type` own
-        // Content-Type/Content-Length via `append_body_headers`, so listing them
-        // here would duplicate them.
-        let mut extra_headers: Vec<sip_message::SipHeader> = headers
-            .iter()
-            .filter(|(n, _)| {
-                let named = sip_message::HeaderName::from(n.as_str());
-                named != sip_message::HeaderName::ContentType
-                    && named != sip_message::HeaderName::ContentLength
-            })
-            .map(|(name, value)| sip_message::SipHeader {
-                name: name.clone().into(),
-                value: value.clone().into(),
-            })
-            .collect();
-        relay::describe_body(&mut extra_headers, body, descriptors);
-        // A stated line the wire cannot carry whole is left out: the request
-        // still leaves (a BYE above all, its leg already recorded as ending).
-        let extra_headers = relay::writable_lines(&format!("{method} to a leg"), extra_headers, fx);
+        let extra_headers = stated_lines(method, headers, body, descriptors, fx);
         let branch = self.turn.ids.new_branch();
         let Some(leg) = leg_at(call, leg_id) else {
             *call = unsent;
@@ -406,4 +396,32 @@ impl ActionExecutor<'_> {
             },
         )
     }
+}
+
+/// The lines a service states on its `method` request carrying `body`: its
+/// application headers verbatim (a held `User-To-User` re-emitted toward the
+/// peer on a deferred relay) and the descriptors of the body. Body-owned
+/// headers are left to `body` and its content type. A line the wire cannot
+/// carry whole is left out: the request still leaves.
+fn stated_lines(
+    method: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+    descriptors: &[sip_message::SipHeader],
+    fx: &mut HandlerEffects,
+) -> Vec<sip_message::SipHeader> {
+    let mut lines: Vec<sip_message::SipHeader> = headers
+        .iter()
+        .filter(|(n, _)| {
+            let named = sip_message::HeaderName::from(n.as_str());
+            named != sip_message::HeaderName::ContentType
+                && named != sip_message::HeaderName::ContentLength
+        })
+        .map(|(name, value)| sip_message::SipHeader {
+            name: name.clone().into(),
+            value: value.clone().into(),
+        })
+        .collect();
+    relay::describe_body(&mut lines, body, descriptors);
+    relay::writable_lines(&format!("{method} to a leg"), lines, fx)
 }

@@ -15,6 +15,10 @@ use b2bua_sdk::model::{LegEnd, RuleContext};
 use super::dialog_track::open_early_a_dialog;
 use super::ActionExecutor;
 
+/// The status recorded for a non-2xx another owner sent the caller: her ACK
+/// proves a final of 300 or more and names none.
+const UNSEEN_REFUSAL: u16 = 500;
+
 impl ActionExecutor<'_> {
     /// Owe the current message on `leg_id`, evidence the record cannot
     /// explain, what RFC 3261 requires of it, and take into the record the
@@ -216,8 +220,25 @@ impl ActionExecutor<'_> {
         call::helpers::retire_early_dialogs(&mut call.a_leg);
     }
 
+    /// Another owner answered the caller's INVITE `invite` with a non-2xx,
+    /// whose ACK she sent: her INVITE is recorded refused, each of her early
+    /// dialogs ended with it, and its server transaction here relinquished,
+    /// so no final follows hers. No dialog of hers is left for a BYE.
+    fn take_caller_refused(
+        &mut self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        invite: &SipRequest,
+    ) {
+        let via = invite.top_via().clone();
+        fx.critical.push(CriticalStateEffect::RelinquishAnsweredInvite { via });
+        *call = record_invite_final(call.clone(), leg_id, UNSEEN_REFUSAL);
+    }
+
     /// An ACK naming an INVITE the record holds unanswered: another owner
-    /// answered it 2xx. The caller's INVITE is recorded answered and the
+    /// answered it, 2xx unless the caller's ACK rides her INVITE's branch.
+    /// Answered 2xx, the caller's INVITE is recorded answered and the
     /// dialog the ACK names confirmed under its tags; a re-INVITE's open
     /// round is taken as answered. The INVITE's server transaction here is
     /// relinquished, so no final follows the 2xx; nothing is sent for the ACK
@@ -236,7 +257,14 @@ impl ActionExecutor<'_> {
             .tag()
             .filter(|_| leg_id == call.a_leg.leg_id && cseq == i64::from(call.a_leg_invite.cseq));
         if let Some(tag) = caller_ack {
-            self.take_caller_answered(call, fx, leg_id, tag);
+            match self.caller_invite(call) {
+                // The ACK of a non-2xx rides the INVITE's own branch (RFC 3261
+                // §17.1.1.3): her INVITE took a final that confirmed no dialog.
+                Some(invite) if invite.top_via().branch() == req.top_via().branch() => {
+                    self.take_caller_refused(call, fx, leg_id, &invite);
+                }
+                _ => self.take_caller_answered(call, fx, leg_id, tag),
+            }
             return;
         }
         // A re-INVITE whose round the record holds open: its 2xx left with

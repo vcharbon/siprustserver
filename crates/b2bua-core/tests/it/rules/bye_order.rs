@@ -80,3 +80,33 @@ fn a_destroyed_callers_leg_byes_her_after_her_ack() {
     let ladder = TimerKey::obligation(TimerType::RepeatGiveUp, answered_obligation());
     assert!(result.call.timers.iter().any(|t| t.key == ladder), "her 2xx's give-up stays armed");
 }
+
+/// A service's own BYE to the caller (`SendRequestToLeg`) while her 2xx
+/// awaits its ACK takes the BYE row of the method table: it waits behind
+/// that ACK as the stack's own BYE does (RFC 3261 §15).
+#[test]
+fn a_services_bye_to_the_caller_waits_for_her_ack() {
+    let mut call = call_with_retained_answered_2xx();
+    *call.a_leg.invite_final_sent_mut() = Some(200);
+    call::testkit::stage_leg(&mut call.a_leg, LegState::Confirmed);
+    let bye = RuleAction::SendRequestToLeg {
+        leg_id: "a".into(),
+        method: "BYE".into(),
+        body: None,
+        headers: vec![("Reason".into(), "Q.850;cause=16".into())],
+    };
+    let result = execute_on(&call, &[bye]);
+    let byes = result.effects.outbound.iter().filter(
+        |e| matches!(&e.body, OutboundBody::Request(r) if *r.method() == sip_message::Method::Bye),
+    );
+    assert_eq!(byes.count(), 0, "no BYE reaches her before her ACK");
+    let held = result.call.a_leg.dialogs.iter().find_map(|d| d.answered_invite.as_ref());
+    let held = held.and_then(|r| r.invite.as_ref()).and_then(|x| x.bye_behind_ack.as_ref());
+    let Some(call::QueuedRequest::Bye { headers, .. }) = held else {
+        panic!("the BYE waits on her 2xx's record: {held:?}");
+    };
+    assert!(
+        headers.iter().any(|(name, value)| name == "Reason" && value == "Q.850;cause=16"),
+        "the service's lines ride the held BYE: {headers:?}"
+    );
+}

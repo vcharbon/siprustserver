@@ -27,7 +27,8 @@
 //! - a **server non-INVITE** for every non-INVITE record's received half —
 //!   a relay's originator's request, or a request held for a later final —
 //!   rebuilt from the record, so a copy is absorbed and the final leaves on
-//!   it (§17.2.2).
+//!   it (§17.2.2). A relay past its deadline has none: it settles as its
+//!   timeout, which answers its originator nothing.
 
 use std::collections::HashSet;
 
@@ -104,8 +105,13 @@ fn record_seeds(
         }
         return seeds;
     }
+    // A relay whose sent half is overdue settles as its timeout, which owes
+    // its originator nothing (RFC 4320 §4.2): its received half is not in
+    // flight either.
+    let overdue_relay =
+        record.is_relay() && record.sent.is_some() && remaining_ms(record, now_ms).is_none();
     let mut seeds: Vec<TxnSeed> = client_non_invite_seed(record, now_ms).into_iter().collect();
-    if !record.is_own() {
+    if !record.is_own() && !overdue_relay {
         seeds.extend(server_non_invite_seed(call, leg, record));
     }
     seeds

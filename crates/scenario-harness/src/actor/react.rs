@@ -320,6 +320,7 @@ pub(super) async fn react_in_dialog_request(
         }
         // In-dialog non-offer requests: 200 and fold the CSeq into the dialog's
         // gap detector (all methods share the dialog CSeq space, §12.2.1.1).
+        // A NOTIFY ending her own subscription is a clean end too.
         "NOTIFY" | "OPTIONS" | "INFO" | "MESSAGE" => {
             uas.respond(200, "OK").try_send().await?;
             st.obs.record(
@@ -331,6 +332,9 @@ pub(super) async fn react_in_dialog_request(
                 },
                 now,
             );
+            if method == "NOTIFY" && super::clean_end::ends_own_subscription(st, uas.request()) {
+                super::clean_end::end_cleanly(st, now);
+            }
         }
         // An in-dialog (re-)INVITE — an offer realign. Answer 200 WITH SDP; a
         // delayed-offer bodyless re-INVITE still gets 200 + our SDP (no

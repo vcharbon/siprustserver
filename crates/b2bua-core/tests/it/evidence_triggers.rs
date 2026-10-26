@@ -272,6 +272,46 @@ Content-Length: 0\r\n\r\n";
     assert_eq!(bye.to().tag(), Some("atag"));
 }
 
+/// The caller ACKs a non-2xx the record never saw sent: the ACK rides her
+/// INVITE's branch (RFC 3261 §17.1.1.3), so her INVITE was refused and no
+/// dialog of hers is confirmed. It draws no final here, its transaction is
+/// relinquished, and nothing BYEs her; the callee's ringing INVITE is
+/// CANCELled.
+#[test]
+fn an_ack_of_a_non_2xx_to_the_unanswered_caller_ends_the_call_without_a_bye_to_her() {
+    let call = ringing();
+    let raw = "ACK sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bKa\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@host>;tag=atag\r\n\
+To: <sip:bob@host>;tag=shown\r\n\
+Call-ID: c1@alice\r\n\
+CSeq: 1 ACK\r\n\
+Content-Length: 0\r\n\r\n";
+    let event = CallEvent::sip(parse(raw), "127.0.0.1:5060".parse().unwrap());
+    let (rule, result) = turn_on(&call, &event, "a", &Resolved::default(), &B2buaConfig::default());
+    assert_eq!(rule, Some("evidence-ack"));
+    let result = result.expect("a turn");
+    assert!(
+        result.call.a_leg.invite_final_sent().is_some_and(|s| s >= 300),
+        "refused elsewhere: {:?}",
+        result.call.a_leg.invite_final_sent()
+    );
+    assert!(responds_to(&result, "a").is_empty(), "no final follows hers");
+    assert!(
+        result
+            .effects
+            .critical
+            .iter()
+            .any(|e| matches!(e, CriticalStateEffect::RelinquishAnsweredInvite { .. })),
+        "the caller's INVITE transaction is relinquished"
+    );
+    let to_her = requests_to(&result, "a");
+    assert!(to_her.is_empty(), "no request reaches her: {to_her:?}");
+    let bob = call::helpers::find_leg(&result.call, "b-1").and_then(|l| l.outbound_invite());
+    assert!(bob.is_some_and(|i| i.cancel_sent), "bob's ringing INVITE is CANCELled");
+}
+
 /// The caller's re-INVITE on a dialog the record holds early, on a call a
 /// copy served: a re-INVITE rides a confirmed dialog only, so another owner
 /// answered her 2xx. Her INVITE draws no final here — its transaction is

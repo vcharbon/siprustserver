@@ -162,7 +162,8 @@ fn answer_a_leg_if_unanswered(
 /// Answer the caller's INVITE `503` when it carries no final yet and a
 /// snapshot to answer exists, recording it on the CDR: the funnel above, and
 /// a teardown whose release waits on a callee's CANCEL (the caller is owed
-/// nothing from it).
+/// nothing from it). Her leg's end follows her final: every request relayed
+/// toward her or held on her leg is answered (ADR-0055 §2).
 pub(crate) fn answer_unanswered_caller(
     call: &mut Call,
     effects: &mut HandlerEffects,
@@ -203,6 +204,7 @@ pub(crate) fn answer_unanswered_caller(
     };
     effect.label = "503 (terminated unanswered) → a-leg".to_string();
     effects.outbound.push(effect);
+    super::actions::settle_owed(call, effects, &a_leg_id);
     // Before `obligations.settle` reads the snapshot, so the CDR carries it.
     call.cdr_events.push(CdrEvent {
         event_type: CdrEventType::Reject,
