@@ -33,6 +33,7 @@
 pub mod catalogue;
 mod cell;
 mod contact_repeat;
+mod outcome;
 mod parties;
 mod ratchet;
 

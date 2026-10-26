@@ -322,6 +322,13 @@ component by component.
   the further of the two, the BYE goes at the greater CSeq plus one, answered is
   the OR of both, CDR events are the union.
 
+A leg id names one leg in both copies: the record holds two leg-id spaces,
+the node the call was created on mints `b-{n}` and any other node acting on
+the call `c-{n}` (user ruling), so two copies acting at once never mint one id
+for two legs, the union pairs legs by id, and every lookup by leg id is
+unchanged. The space a node mints from is an exempt field (the container's
+value stands).
+
 The exempt fields are a closed list; every other field is compared, so a new
 field fails safe:
 
@@ -332,7 +339,8 @@ field fails safe:
   owes;
 - the container's or the base copy's value stands: keepalive request records,
   keepalive and refresh ledger entries and the ladder rungs a quiet turn moves
-  (none changes a dialog), the skew offsets of §9, trace fields.
+  (none changes a dialog), the skew offsets of §9, trace fields, the leg-id
+  space a node mints from.
 
 A node that meets the other copy's ending discharges it keeping every dialog
 either copy opened, at the higher of the two sequences. There is no per-axis
@@ -406,17 +414,31 @@ number of takeovers unshifted.
     a kill: a call with no backup is lost as on a non-HA B2BUA, its cell
     leaving one CDR or none.
 
+  The parties' verdict is checked in every cell (user ruling). The parties
+  are RFC 3261 transactions over UDP: every request but ACK goes again on
+  Timer A or E until it is answered, and every final to an INVITE until its
+  ACK; a party that plays a broken peer opts out by name. The uncut call must
+  succeed. Once the incident strikes, the system under test may end the call
+  cleanly at any instant (§1): a party it ends cleanly — a non-2xx to her
+  INVITE, a BYE she answers 200 — drops her remaining goals, and a caller so
+  ended ends the call cleanly, which the verdict says. A request left without
+  its final, or a dialog left open, still fails the cell, except as declared
+  below. An incident that loses the call accepts only its two outcomes above:
+  the caller's INVITE drawing no final, left to her Timer B, and a callee
+  holding a confirmed dialog its own timers end.
+
   A split that never heals is not supposed to last: it cuts a representative
   few shapes (the re-INVITE, the REFER), whose cells check the worst case, no
   leaked resource (the call ends on every side, full cleanup, the limiter
   released), in a declared degraded mode. These windows are declared, nothing
   else:
   - a split that never heals, its cells judging leaks, cleanup and the CDR
-    count only (user ruling): the stale copy's requests into a dialog the other
-    copy ended, each closed by the 481 it draws; one copy's CANCEL of an INVITE
-    the other copy saw answered; one copy's non-2xx after the 2xx the other
-    copy sent the caller, which she discards; one copy's BYE of a caller
-    dialog it holds early, which the other copy answered;
+    count only, never the parties' verdict (user ruling): the stale copy's
+    requests into a dialog the other copy ended, each closed by the 481 it
+    draws; one copy's CANCEL of an INVITE the other copy saw answered; one
+    copy's non-2xx after the 2xx the other copy sent the caller, which she
+    discards; one copy's BYE of a caller dialog it holds early, which the
+    other copy answered;
   - a kill (user ruling): a copy's one CANCEL of a callee's INVITE the dead
     owner saw finally answered, 2xx or not; the callee answers it and keeps
     what its final left it, a dialog its own timers end or none;
@@ -425,6 +447,10 @@ number of takeovers unshifted.
     and the body unchanged; the Contact of a node is its own;
   - a kill of the primary, and a split that heals (user ruling): the §4 clean
     end's BYE into a dialog the other owner already ended, closed by its 481;
+  - a kill of the primary at a logged or left sub-point (user ruling): a
+    dialog left to its endpoint's own timer when the write of a teardown the
+    node began was not applied at the kill; a quiet call of a departed primary
+    stays reactive (§5);
   - a kill inside the replication window: a copy re-uses a CSeq the dead
     primary sent before the backup applied the write, at most one rejected
     request per dialog; the call still ends or continues cleanly. A call with

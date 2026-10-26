@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use scenario_harness::actor::run_actor_scenario;
+use scenario_harness::actor::run_actor_scenario_observed;
 use scenario_harness::realcall::CallCtx;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser, SipResponse};
@@ -70,7 +70,7 @@ pub async fn run_cell(
     let mut env = parties.env(cluster.proxy.addr(), name);
     shape.call_env(&mut env);
     let ctx = CallCtx::new();
-    let run = run_actor_scenario(&*scenario, &env, &ctx);
+    let run = run_actor_scenario_observed(&*scenario, &env, &ctx);
     tokio::pin!(run);
     let heal = tokio::time::sleep(Duration::MAX);
     tokio::pin!(heal);
@@ -90,6 +90,9 @@ pub async fn run_cell(
                 reached = None;
                 let held = held.expect("the turn points keep the arm");
                 let cut = cut.expect("armed");
+                if cut.incident != Incident::Split {
+                    ctx.accept_clean_ends();
+                }
                 strike(&mut cluster, &placement, cut, held, &parties.names());
                 if cut.incident == Incident::SplitHealed {
                     heal.as_mut().reset(tokio::time::Instant::now() + HEAL_AFTER);
@@ -132,8 +135,11 @@ pub async fn run_cell(
         panic!("[{name}] the call never reached {}", cut.at.label());
     }
     let call_ref = call_ref.unwrap_or_else(|| first_call(&cluster, name));
-    let verdict = verdict.expect("the parties finished");
+    let (verdict, obs) = verdict.expect("the parties finished");
     eprintln!("[{name}] the parties ended: {verdict:?}");
+    if !super::outcome::accepted(cut.map(|c| (c.incident, c.at.point)), &verdict, &obs) {
+        panic!("[{name}] the parties failed: {verdict:?} {:?}", ctx.notes());
+    }
     assert_eq!(
         call::call_ref_primary(&call_ref),
         Some(placement.primary.as_str()),
