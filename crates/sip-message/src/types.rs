@@ -129,6 +129,7 @@ pub struct CoreHeaders {
     pub(crate) cseq: header::CSeq,
     pub(crate) via: NonEmpty<header::Via>,
     pub(crate) contacts: ContactSet,
+    pub(crate) routes: ReadRoutes,
 }
 
 impl CoreHeaders {
@@ -140,7 +141,12 @@ impl CoreHeaders {
         via: NonEmpty<header::Via>,
         contacts: ContactSet,
     ) -> Self {
-        Self { from, to, call_id, cseq, via, contacts }
+        Self { from, to, call_id, cseq, via, contacts, routes: ReadRoutes::default() }
+    }
+
+    /// These headers with the route sets the parse read and validated.
+    pub(crate) fn with_routes(self, routes: ReadRoutes) -> Self {
+        Self { routes, ..self }
     }
 
     pub fn from(&self) -> &header::From {
@@ -167,6 +173,24 @@ impl CoreHeaders {
         &self.contacts
     }
 }
+
+/// The Route and Record-Route entries the parse read and validated, top
+/// first, so a reader takes them instead of parsing the lines again; empty
+/// where the parse did not read them (a final of 300 or more, a message the
+/// stack built). They are derived from the header lines, so they take no part
+/// in equality.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ReadRoutes {
+    pub(crate) sets: Option<(Vec<header::RouteEntry>, Vec<header::RecordRouteEntry>)>,
+}
+
+impl PartialEq for ReadRoutes {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for ReadRoutes {}
 
 /// Everything a request and a response share, written once.
 #[derive(Debug, Clone, PartialEq, Eq)]

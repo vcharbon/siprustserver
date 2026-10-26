@@ -53,19 +53,26 @@ pub trait HeaderValue: Sized + Clone + std::fmt::Debug + Send + Sync + 'static {
 
     /// Every value carried on one header line.
     fn parse_line(raw: &SipStr) -> Result<Vec<Self>, SipParseError> {
+        // Sized for the one-value line the wire almost always carries: a value
+        // type is a wide struct, so a growth step costs real bytes on the
+        // relay path.
+        let mut values = Vec::with_capacity(1);
+        Self::parse_line_into(raw, &mut values)?;
+        Ok(values)
+    }
+
+    /// [`parse_line`](Self::parse_line) appending to `out`, so a reader that
+    /// folds every line of a header into one list allocates it once.
+    fn parse_line_into(raw: &SipStr, out: &mut Vec<Self>) -> Result<(), SipParseError> {
         match Self::folding() {
             Folding::Comma => {
-                // Sized for the one-value line the wire almost always carries:
-                // a value type is a wide struct, so a growth step costs real
-                // bytes on the relay path.
-                let mut values = Vec::with_capacity(1);
                 for entry in top_level_comma_entries(raw.as_str()) {
-                    values.push(Self::parse(&raw.reslice(entry))?);
+                    out.push(Self::parse(&raw.reslice(entry))?);
                 }
-                Ok(values)
             }
-            Folding::Single | Folding::Opaque | Folding::SetPerLine => Ok(vec![Self::parse(raw)?]),
+            Folding::Single | Folding::Opaque | Folding::SetPerLine => out.push(Self::parse(raw)?),
         }
+        Ok(())
     }
 
     /// The single logical value a reader sees when the message carries several

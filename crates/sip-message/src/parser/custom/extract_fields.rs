@@ -15,7 +15,7 @@ use super::dialog_contact::{can_establish_dialog, dialog_contact_refusal};
 use super::dialog_ids::{count_tag_params, is_call_id, read_address, tag_refusal};
 use super::header_index::HeaderIndex;
 use super::request_uri::read_request_uri;
-use super::routes::route_refusal;
+use super::routes::read_routes;
 use super::stated::Stated;
 use super::structured_headers::{parse_cseq, parse_via, top_level_comma_entries};
 use super::top_via;
@@ -25,7 +25,9 @@ use crate::header::{self, HeaderValue, HostPort, Uri};
 use crate::method::Method;
 use crate::parser::SipParserLimits;
 use crate::sip_str::SipStr;
-use crate::types::{ContactSet, CoreHeaders, NonEmpty};
+use smallvec::SmallVec;
+
+use crate::types::{ContactSet, CoreHeaders, NonEmpty, ReadRoutes};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtractMode {
@@ -118,11 +120,13 @@ pub fn extract_common_fields(
     let identity = extract_identity(idx, limits, mode)?;
     let wire = mode == ExtractMode::Wire;
     let contacts = read_contacts(idx, wire, contact_reading)?;
-    if wire && contact_reading == ContactReading::Strict {
-        route_refusal(idx)?;
-    }
+    let routes = if wire && contact_reading == ContactReading::Strict {
+        read_routes(idx)?
+    } else {
+        ReadRoutes::default()
+    };
     let Identity { from, to, call_id, cseq, via } = identity;
-    Ok(CoreHeaders::new(from, to, call_id, cseq, via, contacts))
+    Ok(CoreHeaders::new(from, to, call_id, cseq, via, contacts).with_routes(routes))
 }
 
 /// The fields every response to a message echoes (RFC 3261 §8.2.6.2), typed.
@@ -227,22 +231,27 @@ pub(super) fn extract_identity(
     if idx.via.is_empty() {
         return Err(SipParseError::new("Missing mandatory Via header"));
     }
-    let via_segments = || idx.via.iter().flat_map(|v| top_level_comma_entries(v.as_str()));
+    let typed_vias = stated.vias().transpose()?;
+    let parse_text = typed_vias.is_none();
+    // Each line is split into its entries once, for the grammar check and
+    // the read alike.
+    let mut segments: SmallVec<[(&SipStr, &str); 4]> = SmallVec::new();
+    if parse_text {
+        segments.reserve(idx.via.len());
+        segments.extend(
+            idx.via.iter().flat_map(|v| top_level_comma_entries(v.as_str()).map(move |s| (*v, s))),
+        );
+    }
     if wire {
-        for segment in via_segments() {
+        for (_, segment) in &segments {
             if let Some(reason) = check_sent_protocol(segment) {
                 return Err(SipParseError::new(format!("{reason}: \"{segment}\"")));
             }
         }
     }
-    let typed_vias = stated.vias().transpose()?;
-    let parse_text = typed_vias.is_none();
     let mut vias: Vec<header::Via> =
-        typed_vias.unwrap_or_else(|| Vec::with_capacity(idx.via.len()));
-    let segments = idx.via.iter().filter(|_| parse_text);
-    for (value, raw) in
-        segments.flat_map(|v| top_level_comma_entries(v.as_str()).map(move |s| (*v, s)))
-    {
+        typed_vias.unwrap_or_else(|| Vec::with_capacity(segments.len()));
+    for &(value, raw) in &segments {
         let v = parse_via(&value.reslice(raw));
         let top = vias.is_empty();
         // A lenient reading holds a sent-by the reader refuses whole, as it
@@ -309,22 +318,25 @@ fn read_contacts(
     if let Some(typed) = (!wire).then(|| idx.stated.contacts()).flatten() {
         return Ok(ContactSet::Contacts(typed));
     }
-    let spans = || idx.contact.iter().flat_map(|v| contact_entry_spans(v));
+    // Each line is split into its entries once, for the wildcard rule and the
+    // read alike.
+    let spans: SmallVec<[SipStr; 2]> =
+        idx.contact.iter().flat_map(|v| contact_entry_spans(v)).collect();
     let strict = contact_reading == ContactReading::Strict;
-    let contact_wildcard = spans().any(|e| e.as_str() == "*");
-    if strict && contact_wildcard && spans().any(|e| e.as_str() != "*") {
+    let contact_wildcard = spans.iter().any(|e| e.as_str() == "*");
+    if strict && contact_wildcard && spans.iter().any(|e| e.as_str() != "*") {
         return Err(SipParseError::new(
             "Contact: * wildcard must be the only value (RFC 3261 §10.2.2)",
         ));
     }
     let mut contact_list: Vec<header::Contact> = Vec::new();
-    for span in spans() {
-        match read_contact_entry(&span) {
+    for span in &spans {
+        match read_contact_entry(span) {
             ContactEntry::Wildcard => {}
             ContactEntry::Readable(contact) => contact_list.push(*contact),
             // The grammar holds on wire bytes only.
             ContactEntry::Unreadable { .. } if !wire => {
-                contact_list.push(read_contact_entry_lenient(&span));
+                contact_list.push(read_contact_entry_lenient(span));
             }
             ContactEntry::Unreadable { .. } if !strict => {}
             ContactEntry::Unreadable { reason } => {

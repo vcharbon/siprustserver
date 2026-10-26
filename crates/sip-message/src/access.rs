@@ -9,6 +9,8 @@
 //! The surface is written once here and attached to both message types, so
 //! neither direction carries a copy of it.
 
+use std::any::Any;
+
 use bytes::Bytes;
 
 use crate::draft::{HeaderList, RequestDraft, ResponseDraft};
@@ -35,22 +37,37 @@ fn raw_text_values(headers: &HeaderTable, name: HeaderName) -> impl Iterator<Ite
     headers.of(name).map(|h| h.value.clone())
 }
 
-fn values_of<H: HeaderValue>(headers: &HeaderTable) -> Result<Vec<H>, SipParseError> {
+fn values_of<H: HeaderValue>(core: &MessageCore) -> Result<Vec<H>, SipParseError> {
+    if let Some(read) = read_at_parse::<H>(core) {
+        return Ok(read.clone());
+    }
     let name = H::header_name();
     let mut values = Vec::new();
-    for header in headers.of(&name) {
-        values.extend(H::parse_line(&header.value)?);
+    for header in core.headers.of(&name) {
+        H::parse_line_into(&header.value, &mut values)?;
     }
     Ok(values)
+}
+
+/// The values of `H` the parse already read and validated: the Route and
+/// Record-Route sets of a message whose parse reads them.
+fn read_at_parse<H: HeaderValue>(core: &MessageCore) -> Option<&Vec<H>> {
+    let (routes, recorded) = core.core.routes.sets.as_ref()?;
+    let routes: &dyn Any = routes;
+    let recorded: &dyn Any = recorded;
+    routes.downcast_ref::<Vec<H>>().or_else(|| recorded.downcast_ref::<Vec<H>>())
 }
 
 /// The recorded routes, top first. A route whose URI fails the Request-URI
 /// checks is no hop any request can be addressed to (RFC 3261 §12.2.1.1), so
 /// it refuses the whole set rather than become a dialog's route.
 fn recorded_routes(
-    headers: &HeaderTable,
+    core: &MessageCore,
 ) -> Result<HeaderList<header::RecordRouteEntry>, SipParseError> {
-    let set = values_of::<header::RecordRouteEntry>(headers)?;
+    if let Some(read) = read_at_parse::<header::RecordRouteEntry>(core) {
+        return Ok(HeaderList::new(read.clone()));
+    }
+    let set = values_of::<header::RecordRouteEntry>(core)?;
     for entry in &set {
         request_uri_refusal(entry.uri())?;
     }
@@ -60,16 +77,16 @@ fn recorded_routes(
 /// The single logical value of `H`. A header whose reader sees only the first
 /// value ([`HeaderValue::combine`] by default) reads only the first line that
 /// carries it; a set-like or comma-folded one reads them all.
-fn header_of<H: HeaderValue>(headers: &HeaderTable) -> Option<Result<H, SipParseError>> {
+fn header_of<H: HeaderValue>(core: &MessageCore) -> Option<Result<H, SipParseError>> {
     if matches!(H::folding(), Folding::Single | Folding::Opaque) {
         let name = H::header_name();
-        let first = headers.of(&name).next()?;
+        let first = core.headers.of(&name).next()?;
         return match H::parse_line(&first.value) {
             Err(e) => Some(Err(e)),
             Ok(values) => H::combine(values).map(Ok),
         };
     }
-    match values_of::<H>(headers) {
+    match values_of::<H>(core) {
         Err(e) => Some(Err(e)),
         Ok(values) if values.is_empty() => None,
         Ok(values) => H::combine(values).map(Ok),
@@ -153,13 +170,13 @@ macro_rules! core_read_surface {
             /// The single logical value of `H`, or `None` when the message
             /// carries no such header.
             pub fn header<H: HeaderValue>(&self) -> Option<Result<H, SipParseError>> {
-                header_of::<H>(&self.core().headers)
+                header_of::<H>(self.core())
             }
 
             /// Every value of `H`, flattening comma folds where the header's
             /// grammar admits them.
             pub fn list<H: HeaderValue>(&self) -> Result<Vec<H>, SipParseError> {
-                values_of::<H>(&self.core().headers)
+                values_of::<H>(self.core())
             }
 
             /// The unparsed values of one header, in wire order — the escape
@@ -190,7 +207,7 @@ macro_rules! core_read_surface {
             pub fn record_route_set(
                 &self,
             ) -> Result<HeaderList<header::RecordRouteEntry>, SipParseError> {
-                recorded_routes(&self.core().headers)
+                recorded_routes(self.core())
             }
         }
     };
@@ -302,11 +319,11 @@ impl SipMessage {
     }
 
     pub fn header<H: HeaderValue>(&self) -> Option<Result<H, SipParseError>> {
-        header_of::<H>(&self.core().headers)
+        header_of::<H>(self.core())
     }
 
     pub fn list<H: HeaderValue>(&self) -> Result<Vec<H>, SipParseError> {
-        values_of::<H>(&self.core().headers)
+        values_of::<H>(self.core())
     }
 
     pub fn raw(&self, name: HeaderName) -> impl Iterator<Item = &str> {
@@ -326,7 +343,7 @@ impl SipMessage {
     }
 
     pub fn record_route_set(&self) -> Result<HeaderList<header::RecordRouteEntry>, SipParseError> {
-        recorded_routes(&self.core().headers)
+        recorded_routes(self.core())
     }
 }
 

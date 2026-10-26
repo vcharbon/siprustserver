@@ -59,11 +59,11 @@ impl HeaderValue for Geolocation {
 
     /// Every location of one line; an empty entry between commas, or after
     /// the last one, names none and is skipped.
-    fn parse_line(raw: &SipStr) -> Result<Vec<Self>, SipParseError> {
-        top_level_comma_entries(raw.as_str())
-            .filter(|entry| !entry.is_empty())
-            .map(|entry| Self::parse(&raw.reslice(entry)))
-            .collect()
+    fn parse_line_into(raw: &SipStr, out: &mut Vec<Self>) -> Result<(), SipParseError> {
+        for entry in top_level_comma_entries(raw.as_str()).filter(|entry| !entry.is_empty()) {
+            out.push(Self::parse(&raw.reslice(entry))?);
+        }
+        Ok(())
     }
 
     fn render(&self, out: &mut Wire) {

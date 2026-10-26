@@ -10,20 +10,24 @@ use super::header_index::HeaderIndex;
 use super::request_uri::request_uri_refusal;
 use crate::error::SipParseError;
 use crate::header::{HeaderValue, RecordRouteEntry, RouteEntry};
+use crate::types::ReadRoutes;
 
-/// Why a Route or Record-Route line of the message does not read, if one
-/// does not.
-pub(super) fn route_refusal(idx: &HeaderIndex) -> Result<(), SipParseError> {
+/// The Route and Record-Route entries of the message, or why one of them does
+/// not read.
+pub(super) fn read_routes(idx: &HeaderIndex) -> Result<ReadRoutes, SipParseError> {
+    let mut routes = Vec::with_capacity(idx.route.len());
     for line in &idx.route {
-        RouteEntry::parse_line(line)
+        RouteEntry::parse_line_into(line, &mut routes)
             .map_err(|e| SipParseError::new(format!("Strict Route: {}", e.reason)))?;
     }
+    let mut recorded = Vec::with_capacity(idx.record_route.len());
     for line in &idx.record_route {
-        let recorded = RecordRouteEntry::parse_line(line)
+        let read = recorded.len();
+        RecordRouteEntry::parse_line_into(line, &mut recorded)
             .map_err(|e| SipParseError::new(format!("Strict Record-Route: {}", e.reason)))?;
-        for entry in &recorded {
+        for entry in recorded.get(read..).unwrap_or_default() {
             request_uri_refusal(entry.uri())?;
         }
     }
-    Ok(())
+    Ok(ReadRoutes { sets: Some((routes, recorded)) })
 }
