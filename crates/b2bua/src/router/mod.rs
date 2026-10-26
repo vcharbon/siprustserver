@@ -195,6 +195,10 @@ pub struct RouterCtx {
     /// (ADR-0026): a peer going away is ONE episode — rising edge, ~5 s
     /// summaries, falling-edge totals — not one line per dead call.
     pub keepalive_waves: Arc<observe::WaveSet>,
+    /// Meetings of two copies of a call, aggregated per other owner
+    /// (ADR-0026): a node coming back meets every call it shares in one
+    /// episode, not one line per call.
+    pub meeting_waves: Arc<observe::WaveSet>,
     /// The configured outbound proxy, its name looked up off the router task
     /// (per-peer failure attribution reads only its kept addresses).
     pub outbound_proxy: Option<Arc<http_net::ResolvedTarget>>,

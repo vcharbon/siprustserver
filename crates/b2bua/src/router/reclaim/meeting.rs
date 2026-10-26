@@ -57,7 +57,7 @@ pub(in crate::router) async fn meet_live(
         Met::Incoming(_) => "incoming",
         Met::Diverged => "diverged",
     };
-    tracing::info!(
+    tracing::debug!(
         node = observe::node(),
         call_ref,
         call_id = %live.call.a_leg.call_id,
@@ -68,6 +68,9 @@ pub(in crate::router) async fn meet_live(
         live_pb = %format_pb(live.topology.as_ref()),
         "copies met"
     );
+    let this = &ctx.relay_owner.ordinal;
+    let peer = live.topology.as_ref().and_then(|t| t.other_owner(this)).unwrap_or("unknown");
+    ctx.meeting_waves.record(peer, label, 1);
     let ending = incoming.call.state != CallModelState::Active;
     if let (FlushDirection::Reverse, true) = (direction, ending) {
         let ends_here = match &met {

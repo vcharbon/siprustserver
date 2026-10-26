@@ -48,6 +48,23 @@ pub fn keepalive_timeout_waves() -> Arc<WaveSet> {
     })
 }
 
+/// Copies of one call meeting (ADR-0055 §7), keyed by the call's other
+/// owner: a node coming back or a heal meets every call it shares in one
+/// burst. Counted by outcome — `held` (this copy stands), `incoming` (the
+/// other copy is taken), `diverged` (the call ends cleanly).
+pub fn meeting_waves() -> Arc<WaveSet> {
+    WaveSet::new(|peer: &str, r: &WaveReport| {
+        tracing::info!(
+            node = observe::node(),
+            peer,
+            edge = %r.edge,
+            elapsed_ms = r.elapsed_ms,
+            totals = %r.tally,
+            "copies met"
+        );
+    })
+}
+
 /// A backend degradation episode — decision-engine deadline breaches, limiter
 /// fail-open — keyed by the target the calls were headed for. `backend` names
 /// which dependency; the episode ends once successes have run for the idle

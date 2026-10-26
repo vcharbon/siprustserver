@@ -139,6 +139,23 @@ async fn a_copy_that_contains_the_record_is_taken_whole() {
     assert!(n.cdr.snapshot().is_empty(), "nothing ends");
 }
 
+/// **Meetings log per peer, not per call** (ADR-0026): each meeting is a
+/// `debug!` line of its call, and the burst one episode keyed by the other
+/// owner, its outcomes counted.
+#[tokio::test(start_paused = true)]
+async fn meetings_log_one_episode_per_peer_and_no_info_line_per_call() {
+    let (_capture, log) = observe_testkit::test_buffer();
+    let n = node("w0").await;
+    let live = answered(6, 1, CallModelState::Active);
+    let copy = sent_to_the_caller(stamped(answered(4, 2, CallModelState::Active), 4, 1), 1);
+    meet(&n, &live, &copy, FlushDirection::Reverse, MaterialiseOrigin::Reclaim).await;
+
+    let met = log.matching("copies met");
+    assert!(met.iter().all(|e| e.level != "INFO" || e.fields.iter().any(|(k, _)| k == "edge")));
+    let episode = met.iter().find(|e| e.level == "INFO").expect("the episode's rising edge");
+    assert!(episode.fields.iter().any(|(k, v)| k == "peer" && v == "w1"), "{}", episode.line());
+}
+
 /// **Copies that contain each other keep the primary's.** Each wrote only
 /// exempt fields since their common version: at the primary its own copy
 /// stands; at the backup the primary's write stands the takeover copy down.

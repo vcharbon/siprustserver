@@ -379,6 +379,7 @@ impl B2buaCore {
             refusals: refusals.clone(),
             unborn: Default::default(),
             keepalive_waves: crate::lifecycle::keepalive_timeout_waves(),
+            meeting_waves: crate::lifecycle::meeting_waves(),
             unroutable_waves: crate::lifecycle::UnroutableWaves::new(),
             late_pracks: Default::default(),
             holds: router::Holds::new(hold_cap),
@@ -444,11 +445,10 @@ impl B2buaCore {
         }
 
         // The worker-side load sampler. Rides `tokio::time::interval` so a
-        // paused-clock test advances it with `tokio::time::advance` like every
-        // other behaviour
-        // timer (CLAUDE.md: behaviour rides `tokio::time` directly). Each tick
-        // reads the ELU/GC sampler and feeds the EWMAs published on `X-Overload`,
-        // then samples the capacity gate (RSS + the level the ingress brake reads).
+        // paused-clock test advances it like every other behaviour timer
+        // (CLAUDE.md). Each tick reads the ELU/GC sampler, feeds the EWMAs
+        // published on `X-Overload`, then samples the capacity gate (RSS +
+        // the level the ingress brake reads).
         // Aborted with the other tasks on a simulated `crash()`.
         tasks.push(samplers::spawn_overload_sampler(overload.clone(), ctx.clone()));
 
