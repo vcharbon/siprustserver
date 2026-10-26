@@ -29,6 +29,7 @@ pub(crate) mod request_uri;
 mod routes;
 pub mod scanner;
 pub mod start_line;
+pub(crate) mod stated;
 pub mod structured_headers;
 mod top_via;
 
@@ -50,11 +51,16 @@ pub fn hydrate_request(
     headers: Vec<SipHeader>,
     body: impl Into<Bytes>,
 ) -> Result<SipRequest, SipParseError> {
-    let limits = SipParserLimits::default();
     let uri = SipStr::owned(uri);
     let headers = HeaderTable::new(headers);
     let idx = HeaderIndex::build(&headers);
-    let eager = extract_request_fields(&idx, &uri, &limits, Some(method), ExtractMode::Hydrate)?;
+    let eager = extract_request_fields(
+        &idx,
+        &uri,
+        &SipParserLimits::DEFAULT,
+        Some(method),
+        ExtractMode::Hydrate,
+    )?;
     let optional = optional_headers::extract_optional_indexed(&idx);
     let body: Bytes = body.into();
     let start = RequestLine {

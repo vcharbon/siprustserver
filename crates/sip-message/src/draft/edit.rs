@@ -13,6 +13,7 @@ use bytes::Bytes;
 use crate::error::SipParseError;
 use crate::header::{ContentLength, Folding, HeaderName, HeaderValue, MediaType, Via};
 use crate::header_table::HeaderTable;
+use crate::parser::custom::stated::Stated;
 use crate::sip_str::{SharedText, SipStr};
 use crate::types::SipHeader;
 use crate::write_check::WriteRefusal;
@@ -348,7 +349,8 @@ impl<S: StartKind> Draft<S> {
         let headers = HeaderTable::classified(lines, ids);
         let raw = Bytes::from(rendered.bytes);
         let body = crate::checked::slice(&raw, rendered.body_at..raw.len()).ok_or_else(outside)?;
-        S::assemble(draft.start, &image, rendered.start, headers, body, raw)
+        let stated = Stated::of(&draft.entries);
+        S::assemble(draft.start, &image, rendered.start, headers, stated, body, raw)
             .map_err(IncompleteDraft::Unreadable)
     }
 

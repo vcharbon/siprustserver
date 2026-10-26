@@ -16,6 +16,7 @@ use crate::parser::custom::extract_fields::{
 };
 use crate::parser::custom::header_index::HeaderIndex;
 use crate::parser::custom::optional_headers::extract_optional_indexed;
+use crate::parser::custom::stated::Stated;
 use crate::parser::SipParserLimits;
 use crate::sip_str::{SharedText, SipStr};
 use crate::types::{MessageCore, SipRequest, SipResponse};
@@ -48,6 +49,7 @@ pub trait StartKind: 'static {
         image: &SharedText,
         spans: StartSpans,
         headers: HeaderTable,
+        stated: Stated<'_>,
         body: Bytes,
         raw: Bytes,
     ) -> Result<Self::Message, SipParseError>;
@@ -112,16 +114,17 @@ impl StartKind for kind::Request {
         image: &SharedText,
         spans: StartSpans,
         headers: HeaderTable,
+        stated: Stated<'_>,
         body: Bytes,
         raw: Bytes,
     ) -> Result<Self::Message, SipParseError> {
-        let limits = SipParserLimits::default();
         let uri = image.span(spans.subject.0, spans.subject.1);
-        let idx = HeaderIndex::build(&headers);
+        let mut idx = HeaderIndex::build(&headers);
+        idx.stated = stated;
         let eager = extract_request_fields(
             &idx,
             &uri,
-            &limits,
+            &SipParserLimits::DEFAULT,
             Some(line.method.as_str()),
             ExtractMode::Hydrate,
         )?;
@@ -161,12 +164,18 @@ impl StartKind for kind::Response {
         image: &SharedText,
         spans: StartSpans,
         headers: HeaderTable,
+        stated: Stated<'_>,
         body: Bytes,
         raw: Bytes,
     ) -> Result<Self::Message, SipParseError> {
-        let limits = SipParserLimits::default();
-        let idx = HeaderIndex::build(&headers);
-        let core = extract_response_fields(&idx, line.status, &limits, ExtractMode::Hydrate)?;
+        let mut idx = HeaderIndex::build(&headers);
+        idx.stated = stated;
+        let core = extract_response_fields(
+            &idx,
+            line.status,
+            &SipParserLimits::DEFAULT,
+            ExtractMode::Hydrate,
+        )?;
         let optional = extract_optional_indexed(&idx);
         Ok(SipResponse::new(
             StatusLine {

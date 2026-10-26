@@ -12,6 +12,7 @@ mod compliance_matrix;
 mod contact_set;
 mod dialog_contact;
 mod draft_round_trip;
+mod freeze_stated_values;
 mod generated;
 mod generators;
 mod header_cardinality;

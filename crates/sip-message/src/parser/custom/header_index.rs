@@ -9,6 +9,7 @@
 //! indexing a message allocates only for the multi-valued headers it actually
 //! carries.
 
+use super::stated::Stated;
 use crate::header::HeaderId;
 use crate::header_table::HeaderTable;
 use crate::sip_str::SipStr;
@@ -49,6 +50,9 @@ pub struct HeaderIndex<'a> {
     pub remote_party_id: Vec<&'a SipStr>,
     pub rack: Slot<'a>,
     pub refer_to: Slot<'a>,
+    /// The typed values a stack-built message states for its mandatory
+    /// headers; empty for a received one.
+    pub stated: Stated<'a>,
 }
 
 impl<'a> HeaderIndex<'a> {

@@ -13,7 +13,7 @@ use bytes::Bytes;
 
 use crate::error::SipParseError;
 use crate::types::SipMessage;
-use std::collections::BTreeSet;
+use std::borrow::Cow;
 
 pub mod custom;
 
@@ -51,7 +51,7 @@ pub struct SipParserLimits {
     pub max_header_lines: usize,
     /// Case-insensitive transport allowlist of the topmost Via, the hop this
     /// element answers. Fail-closed by default.
-    pub allowed_transports: BTreeSet<String>,
+    pub allowed_transports: Cow<'static, [Cow<'static, str>]>,
     /// When `true` (default) the parse holds wire bytes to the RFC 3261 §25.1
     /// grammar of every element it reads and to the gates of ADR-0001. Set
     /// `false` for a message the stack built or a harness or rule validator
@@ -78,18 +78,31 @@ pub enum Framing {
     Stream,
 }
 
+/// The transports every SIP stack runs over (RFC 3261 §18, RFC 4168, RFC 7118).
+const STANDARD_TRANSPORTS: &[Cow<'static, str>] = &[
+    Cow::Borrowed("UDP"),
+    Cow::Borrowed("TCP"),
+    Cow::Borrowed("TLS"),
+    Cow::Borrowed("SCTP"),
+    Cow::Borrowed("WS"),
+    Cow::Borrowed("WSS"),
+];
+
+impl SipParserLimits {
+    /// The default bounds, built without allocating: what a stack-built
+    /// message is assembled under.
+    pub const DEFAULT: SipParserLimits = SipParserLimits {
+        max_header_length: 2048,
+        max_uri_length: 2048,
+        max_header_lines: 100,
+        allowed_transports: Cow::Borrowed(STANDARD_TRANSPORTS),
+        wire_grammar: true,
+        framing: Framing::Datagram,
+    };
+}
+
 impl Default for SipParserLimits {
     fn default() -> Self {
-        Self {
-            max_header_length: 2048,
-            max_uri_length: 2048,
-            max_header_lines: 100,
-            allowed_transports: ["UDP", "TCP", "TLS", "SCTP", "WS", "WSS"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-            wire_grammar: true,
-            framing: Framing::Datagram,
-        }
+        Self::DEFAULT
     }
 }
