@@ -1,5 +1,4 @@
-//! Structured SIP header extraction — quote-aware, zero-regex. Port of
-//! `src/sip/parsers/custom/structured-headers.ts`.
+//! Structured SIP header extraction — quote-aware, zero-regex.
 //!
 //! Scans From/To, Via, Contact and CSeq values into their parts, leniently:
 //! the reading of a message held to no wire grammar, and the Via and CSeq
@@ -288,8 +287,8 @@ pub fn parse_cseq(value: &SipStr) -> ParsedCSeq {
 // byte can never equal one, so byte-wise scanning visits exactly the same
 // structural positions a `&[char]` walk would, and every index handed to
 // a `&str` slice below lands on a char boundary. Indices may run past the end
-// (the callers propagate `end + 1` positions on missing delimiters, as the TS
-// did) — hence the clamping in `subslice`.
+// (the callers propagate `end + 1` positions on missing delimiters) — hence
+// the clamping in `subslice`.
 
 /// Borrowed `s[a..b]` with both byte indices clamped to `s.len()`; empty when
 /// the clamped range is not one of `s` (`a` past `b`, or inside a character),

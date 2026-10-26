@@ -78,7 +78,7 @@ pub(super) fn going_away_timeout(ctx: &RuleContext, leg: &call::Leg) -> Vec<Rule
     {
         return vec![RuleAction::TerminateLeg { leg_id, end: LegEnd::Settle }];
     }
-    let timed_out_bye = ctx.timeout_method().is_some_and(|m| m.eq_ignore_ascii_case("BYE"));
+    let timed_out_bye = ctx.timeout_method().is_some_and(|m| m == "BYE");
     let end = match leg.end() {
         Some(ByeDisposition::ByeSent) if timed_out_bye => LegEnd::OurByeTimedOut,
         Some(ByeDisposition::ByeSent) => return vec![],

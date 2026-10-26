@@ -33,7 +33,7 @@ pub fn holds_records_of(held: Option<&Call>, other: &Call, by: &RelayOwner) -> b
             let ours = held_leg.and_then(|l| l.dialogs.by_tags(&o.our_tag, &o.peer_tag));
             let records = records_of(o)
                 .iter()
-                .filter(|p| !p.method.eq_ignore_ascii_case("INVITE") && p.relayed_by == *by)
+                .filter(|p| p.method != "INVITE" && p.relayed_by == *by)
                 .all(|p| ours.is_some_and(|d| records_of(d).iter().any(|h| same_record(h, p))));
             records && holds_invite_relay(held_leg.zip(ours), other_leg, o, by)
         })

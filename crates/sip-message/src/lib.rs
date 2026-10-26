@@ -32,6 +32,7 @@ mod access;
 pub mod capture;
 pub mod char_class;
 mod checked;
+mod control_bytes;
 pub mod draft;
 pub mod error;
 pub mod header;

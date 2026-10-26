@@ -83,7 +83,7 @@ impl RetiredDialog {
     /// Whether this stack's BYE releasing the dialog awaits its final: the
     /// dialog then reads as ending (§15.1.2).
     pub fn release_in_flight(&self) -> bool {
-        self.open_requests.iter().any(|r| r.is_own() && r.method.eq_ignore_ascii_case("BYE"))
+        self.open_requests.iter().any(|r| r.is_own() && r.method == "BYE")
     }
 }
 

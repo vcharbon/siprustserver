@@ -148,21 +148,21 @@ pub fn cseq_value(raw: &[u8]) -> String {
     }
 }
 
-/// The CSeq method token, uppercased; `None` when the CSeq is absent or
-/// carries no method.
+/// The CSeq method token as written (a method is case-sensitive, RFC 3261
+/// §7.1); `None` when the CSeq is absent or carries no method.
 pub fn cseq_method_token(raw: &[u8]) -> Option<String> {
     let line = cseq_line(raw)?;
-    line.split_whitespace().nth(1).map(str::to_ascii_uppercase)
+    line.split_whitespace().nth(1).map(str::to_string)
 }
 
 /// The CSeq method mapped to a BOUNDED static label — safe as a low-cardinality
 /// metrics label AND usable for method comparison (every RFC 3261/3262/3515
-/// method maps to itself). `"none"` when absent, `"other"` for an unknown
-/// method.
+/// method maps to itself, in its own case: RFC 3261 §7.1). `"none"` when
+/// absent, `"other"` for any other method.
 pub fn cseq_method_label(raw: &[u8]) -> &'static str {
     let Some(l) = cseq_line(raw) else { return "none" };
     let m = l.split_whitespace().nth(1).unwrap_or("");
-    match m.to_ascii_uppercase().as_str() {
+    match m {
         "INVITE" => "INVITE",
         "ACK" => "ACK",
         "BYE" => "BYE",

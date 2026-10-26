@@ -8,6 +8,7 @@ CSeq: 8 REGISTER
 Via: SIP/2.0/UDP 192.0.2.125;branch=z9hG4bKkdjuw23492
 Content-Length: 0
 
+
 INVITE sip:joe@example.com SIP/2.0
 t: sip:joe@example.com
 From: sip:caller@example.net;tag=141334
@@ -26,3 +27,4 @@ t=0 0
 m=audio 49217 RTP/AVP 0 12
 m =video 3227 RTP/AVP 31
 a=rtpmap:31 LPC
+

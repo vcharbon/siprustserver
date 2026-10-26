@@ -12,7 +12,7 @@ ext .rs
 # `exclude <path glob>`.
 
 crates/b2bua-core/src/rules/actions/respond.rs 616
-crates/b2bua-core/src/rules/defaults/core_rules.rs 1560
+crates/b2bua-core/src/rules/defaults/core_rules.rs 1559
 crates/b2bua-core/src/rules/relay_first_18x.rs 524
 crates/b2bua-core/src/rules/relay/sdp_session_tests.rs 916
 crates/b2bua-core/tests/it/rules.rs 4876
@@ -100,7 +100,7 @@ crates/scenario-harness/src/agent/ua.rs 796
 crates/scenario-harness/tests/it/template_emission.rs 1016
 crates/seq-report/src/html.rs 1005
 crates/sip-message/src/generators/relay.rs 504
-crates/sip-message/src/parser/custom/structured_headers.rs 504
+crates/sip-message/src/parser/custom/structured_headers.rs 503
 crates/sip-message/src/sdp_answer.rs 534
 crates/sip-message/src/sniff.rs 608
 crates/sip-message/tests/it/generators.rs 1401

@@ -15,9 +15,7 @@ pub(super) fn straggler_release_timeout(ctx: &RuleContext) -> bool {
 /// §13.2.2.4). Its end is the release's alone.
 pub(super) fn straggler_release(resolved: &call::helpers::Resolved) -> bool {
     resolved.record.as_deref().is_some_and(|(holder, r)| {
-        matches!(holder, call::helpers::RecordHolder::Retired(_))
-            && r.is_own()
-            && r.method.eq_ignore_ascii_case("BYE")
+        matches!(holder, call::helpers::RecordHolder::Retired(_)) && r.is_own() && r.method == "BYE"
     })
 }
 

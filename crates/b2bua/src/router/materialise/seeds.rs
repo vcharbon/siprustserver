@@ -167,7 +167,7 @@ fn sent_invite_seed(leg: &Leg, dialog: &Dialog, record: &RequestRecord) -> Optio
 /// Whether the record is an INVITE's, whose transactions the INVITE seeds
 /// above rebuild.
 fn invite_record(record: &RequestRecord) -> bool {
-    record.method.eq_ignore_ascii_case("INVITE")
+    record.method == "INVITE"
 }
 
 /// The non-INVITE record of `call` whose received half `branch` names: a

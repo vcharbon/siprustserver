@@ -345,6 +345,6 @@ fn exempt_timer(timer: &TimerEntry) -> bool {
 /// on its own.
 fn keepalive_record(record: &RequestRecord) -> bool {
     record.is_own()
-        && record.method.eq_ignore_ascii_case("OPTIONS")
+        && record.method == "OPTIONS"
         && record.author.as_deref() == Some(crate::KEEPALIVE_AUTHOR)
 }

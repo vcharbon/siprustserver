@@ -1,16 +1,9 @@
 //! method — the one canonical SIP method type, owned by `sip-message` and shared
-//! by every crate.
+//! by every crate, parsed once at the wire.
 //!
-//! Before this module a method was spelled three ways: the partial, overlapping
-//! [`InDialogMethod`](crate::generators::InDialogMethod) /
-//! [`OutOfDialogMethod`](crate::generators::OutOfDialogMethod) enums, and a bare
-//! `String` on every message field (`SipRequest.method`, `CSeq.method`, …) plus
-//! ~50 string comparisons across the workspace. [`Method`] collapses all of that
-//! into a single representation parsed once at the wire.
-//!
-//! - Known methods fold case-insensitively to a canonical variant; their
-//!   [`as_str`](Method::as_str) is always the RFC uppercase spelling.
-//! - Any extension method the stack doesn't model is preserved verbatim as
+//! - A method is case-sensitive (RFC 3261 §7.1): a known method is its RFC
+//!   spelling exactly, upper case, and reads as its variant; any other token,
+//!   `invite` included, is an extension method preserved verbatim as
 //!   [`Method::Other`], so nothing is lost on the wire.
 //! - The admissibility split (you may not send `ACK`/`CANCEL` as an ordinary
 //!   in-dialog request; `REGISTER`/`SUBSCRIBE`/`PUBLISH` are out-of-dialog only)
@@ -75,7 +68,7 @@ impl Method {
         "REFER",
     ];
 
-    /// The canonical wire spelling. Known methods are RFC uppercase; an
+    /// The wire spelling. Known methods are RFC upper case; an
     /// [`Other`](Method::Other) returns its preserved token verbatim.
     pub fn as_str(&self) -> &str {
         match self {
@@ -97,42 +90,26 @@ impl Method {
         }
     }
 
-    /// Parse a wire method token. Known methods fold case-insensitively to
-    /// their canonical variant — without minting an uppercased copy, since this
-    /// runs on the request line AND the CSeq of every message; anything else is
-    /// preserved verbatim as [`Other`](Method::Other) (case as given).
+    /// Parse a wire method token, case-sensitively (RFC 3261 §7.1): a known
+    /// method's exact spelling reads as its variant; anything else is
+    /// preserved verbatim as [`Other`](Method::Other).
     pub fn from_wire(s: &str) -> Self {
-        let eq = |lit: &str| s.eq_ignore_ascii_case(lit);
-        if eq("INVITE") {
-            Method::Invite
-        } else if eq("ACK") {
-            Method::Ack
-        } else if eq("BYE") {
-            Method::Bye
-        } else if eq("CANCEL") {
-            Method::Cancel
-        } else if eq("OPTIONS") {
-            Method::Options
-        } else if eq("REGISTER") {
-            Method::Register
-        } else if eq("INFO") {
-            Method::Info
-        } else if eq("UPDATE") {
-            Method::Update
-        } else if eq("PRACK") {
-            Method::Prack
-        } else if eq("SUBSCRIBE") {
-            Method::Subscribe
-        } else if eq("NOTIFY") {
-            Method::Notify
-        } else if eq("PUBLISH") {
-            Method::Publish
-        } else if eq("MESSAGE") {
-            Method::Message
-        } else if eq("REFER") {
-            Method::Refer
-        } else {
-            Method::Other(s.to_string())
+        match s {
+            "INVITE" => Method::Invite,
+            "ACK" => Method::Ack,
+            "BYE" => Method::Bye,
+            "CANCEL" => Method::Cancel,
+            "OPTIONS" => Method::Options,
+            "REGISTER" => Method::Register,
+            "INFO" => Method::Info,
+            "UPDATE" => Method::Update,
+            "PRACK" => Method::Prack,
+            "SUBSCRIBE" => Method::Subscribe,
+            "NOTIFY" => Method::Notify,
+            "PUBLISH" => Method::Publish,
+            "MESSAGE" => Method::Message,
+            "REFER" => Method::Refer,
+            _ => Method::Other(s.to_string()),
         }
     }
 
@@ -183,30 +160,29 @@ impl From<Method> for String {
     }
 }
 
-// Ergonomic, case-insensitive comparison against string literals so the existing
-// `req.method == "INVITE"` call sites work, case-insensitively (as
-// `eq_ignore_ascii_case`), without a `Method::` rewrite.
+// A method compares with a wire token by its spelling, case-sensitively
+// (RFC 3261 §7.1), as two methods do.
 impl PartialEq<str> for Method {
     fn eq(&self, other: &str) -> bool {
-        self.as_str().eq_ignore_ascii_case(other)
+        self.as_str() == other
     }
 }
 
 impl PartialEq<&str> for Method {
     fn eq(&self, other: &&str) -> bool {
-        self.as_str().eq_ignore_ascii_case(other)
+        self.as_str() == *other
     }
 }
 
 impl PartialEq<String> for Method {
     fn eq(&self, other: &String) -> bool {
-        self.as_str().eq_ignore_ascii_case(other)
+        self.as_str() == other.as_str()
     }
 }
 
 impl PartialEq<Method> for &str {
     fn eq(&self, other: &Method) -> bool {
-        other.as_str().eq_ignore_ascii_case(self)
+        other.as_str() == *self
     }
 }
 
@@ -224,10 +200,10 @@ mod tests {
     }
 
     #[test]
-    fn known_methods_fold_case_insensitively() {
-        assert_eq!(Method::from_wire("invite"), Method::Invite);
-        assert_eq!(Method::from_wire("Invite"), Method::Invite);
+    fn a_known_method_reads_only_in_its_own_spelling() {
         assert_eq!(Method::from_wire("INVITE"), Method::Invite);
+        assert_eq!(Method::from_wire("invite"), Method::Other("invite".to_string()));
+        assert_eq!(Method::from_wire("Invite"), Method::Other("Invite".to_string()));
         assert_eq!(Method::Invite.as_str(), "INVITE");
     }
 
@@ -245,8 +221,8 @@ mod tests {
     }
 
     #[test]
-    fn case_insensitive_str_compare() {
-        assert!(Method::Invite == "invite");
+    fn a_str_compare_is_case_sensitive() {
+        assert!(Method::Invite != "invite");
         assert!(Method::Invite == "INVITE");
         assert!(Method::Bye != "INVITE");
     }
@@ -263,7 +239,7 @@ mod tests {
     fn serde_roundtrips_as_wire_token() {
         let j = serde_json::to_string(&Method::Invite).unwrap();
         assert_eq!(j, "\"INVITE\"");
-        let back: Method = serde_json::from_str("\"bye\"").unwrap();
+        let back: Method = serde_json::from_str("\"BYE\"").unwrap();
         assert_eq!(back, Method::Bye);
         let ext: Method = serde_json::from_str("\"X-FOO\"").unwrap();
         assert_eq!(ext, Method::Other("X-FOO".to_string()));

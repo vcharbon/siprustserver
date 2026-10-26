@@ -74,7 +74,7 @@ pub fn response_origin(call: &Call, leg_id: &str, facts: ResponseFacts<'_>) -> R
     };
     let dialling = leg.outbound_invite().is_some_and(|i| i.our_tag == from)
         && leg.dialled_cseq() == Some(facts.cseq);
-    let invite = facts.method.eq_ignore_ascii_case("INVITE");
+    let invite = facts.method == "INVITE";
     if dialling && invite && facts.to.is_some() && (101..300).contains(&facts.status) {
         return ResponseOrigin::Creates;
     }

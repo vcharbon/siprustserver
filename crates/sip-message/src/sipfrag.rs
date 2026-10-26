@@ -1,6 +1,6 @@
 //! `message/sipfrag` payloads (RFC 3420): built for the REFER subscription
 //! NOTIFY sequence, which echoes the current state of the transferred-to call
-//! back to the referrer (port of `src/sip/SipFragUtils.ts`), and read back for
+//! back to the referrer, and read back for
 //! the header fields a fragment carries.
 
 use crate::{CustomParser, SipHeader};

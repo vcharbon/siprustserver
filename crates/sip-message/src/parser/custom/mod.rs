@@ -1,7 +1,6 @@
 //! Custom SIP parser — RFC 3261 compliant, zero-regex, state-machine based.
-//! Port of `src/sip/parsers/custom/` + `src/sip/parsers/extract-fields.ts`.
 //!
-//! Pipeline (each submodule ports the like-named TS file):
+//! Pipeline:
 //!   scanner -> start_line -> headers -> structured_headers -> extract_fields
 //!
 //! Observationally pure: internal helpers may use early returns as control
@@ -40,8 +39,8 @@ use start_line::{parse_start_line, StartLine};
 use crate::types::SipHeader;
 
 /// Build a trusted [`SipRequest`] from already-structured components (method,
-/// Request-URI, header list, body) — the port of `extract-fields.ts`'
-/// `hydrateRequest`. Used by `generators` to assemble outbound messages.
+/// Request-URI, header list, body). Used by `generators` to assemble outbound
+/// messages.
 /// Runs the eager field extraction in [`ExtractMode::Hydrate`] (lenient: no
 /// strict wire-grammar gates), so well-formed stack-built input always hydrates.
 pub fn hydrate_request(
@@ -106,7 +105,7 @@ impl CustomParser {
         if let Some(bare) = block.bare_break {
             return Err(bare.refusal());
         }
-        let text = decode_image(head(raw, block.end)?);
+        let text = decode_image(head(raw, block.end)?)?;
         let mut s = Scanner::new(text.as_str().as_bytes());
         parse_start_line(&mut s, text.as_str(), &self.limits)?;
         let parsed = headers::parse_headers(&mut s, &text, block.lines, &self.limits)?;
@@ -149,7 +148,8 @@ impl SipParser for CustomParser {
             return Err(bare.refusal());
         }
         let body_at = block.end;
-        let text = decode_image(head(&raw, body_at)?);
+        // A header block that is not UTF-8 is never answered either.
+        let text = decode_image(head(&raw, body_at)?)?;
         let image = text.as_str();
 
         let mut s = Scanner::new(image.as_bytes());
@@ -213,7 +213,8 @@ impl SipParser for CustomParser {
 
         match start {
             StartLine::Request(ref rl) => {
-                // A method is case-sensitive (RFC 3261 §7.1): the token as written.
+                // A method is case-sensitive (RFC 3261 §7.1): the token as
+                // written, a known method only in its own spelling.
                 let method = scanner::span_text(image, &rl.method)?;
                 let uri = text.span(rl.uri.start, rl.uri.len());
                 let eager: RequestEager =
@@ -257,13 +258,15 @@ fn head(raw: &[u8], end: usize) -> Result<&[u8], SipParseError> {
         .ok_or_else(|| SipParseError::new(format!("header block end {end} past the datagram")))
 }
 
-/// The header block as one shared text image. Predominantly-ASCII input takes
-/// the `str::from_utf8` validation fast path; genuinely invalid bytes fall back
-/// to the same lossy decode the per-field path used, so the image is
-/// byte-identical either way.
-fn decode_image(header_block: &[u8]) -> SharedText {
-    match std::str::from_utf8(header_block) {
-        Ok(s) => SharedText::new(s),
-        Err(_) => SharedText::from(String::from_utf8_lossy(header_block).into_owned()),
-    }
+/// The header block as one shared text image, its bytes exactly as received.
+/// A block that is not UTF-8 is refused: no element of the RFC 3261 §25.1
+/// grammar holds such a byte, and a replacement character would make the
+/// message's text differ from its bytes.
+fn decode_image(header_block: &[u8]) -> Result<SharedText, SipParseError> {
+    std::str::from_utf8(header_block).map(SharedText::new).map_err(|e| {
+        SipParseError::new(format!(
+            "header block is not UTF-8 at byte {} (RFC 3261 §25.1)",
+            e.valid_up_to()
+        ))
+    })
 }

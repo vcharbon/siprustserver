@@ -109,9 +109,8 @@ pub fn sender_invite_unacknowledged(
 /// final (RFC 3311 §5.2): its relay record is on the dialog a request from
 /// that leg's dialog `source` is relayed on.
 pub fn peer_update_pending(call: &Call, source_leg_id: &str, source: Option<&DialogId>) -> bool {
-    relay_peer_dialog(call, source_leg_id, source).is_some_and(|(_, d)| {
-        d.requests.iter().any(|p| p.is_relay() && p.method.eq_ignore_ascii_case("UPDATE"))
-    })
+    relay_peer_dialog(call, source_leg_id, source)
+        .is_some_and(|(_, d)| d.requests.iter().any(|p| p.is_relay() && p.method == "UPDATE"))
 }
 
 // ── Per-dialog SDP cache ────────────────────────────────────────────────────

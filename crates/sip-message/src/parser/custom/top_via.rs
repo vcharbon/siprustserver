@@ -16,20 +16,28 @@ pub(super) fn port_out_of_range(port: u64, top: bool) -> bool {
     !is_valid_port(port) && (top || port != 0)
 }
 
-/// The refusal of a topmost Via whose branch lacks the magic cookie.
+/// The refusal of a topmost Via whose branch lacks the magic cookie, or is
+/// the cookie alone: a branch is the cookie followed by the transaction's
+/// identifier (RFC 3261 §8.1.1.7; RFC 4475 §3.2.1).
 pub(super) fn cookie_refusal(v: &ParsedVia) -> Option<SipParseError> {
-    match &v.branch {
-        Some(b) if b.starts_with(VIA_BRANCH_MAGIC_COOKIE) => None,
-        other => {
-            let shown = match other {
-                None => "<no branch>".to_string(),
-                Some(b) => format!("\"{b}\""),
-            };
-            Some(SipParseError::new(format!(
-                "Top Via branch missing magic cookie \"{VIA_BRANCH_MAGIC_COOKIE}\": {shown}"
-            )))
+    let shown = match &v.branch {
+        Some(b)
+            if b.len() > VIA_BRANCH_MAGIC_COOKIE.len()
+                && b.starts_with(VIA_BRANCH_MAGIC_COOKIE) =>
+        {
+            return None
         }
-    }
+        Some(b) if b.as_str() == VIA_BRANCH_MAGIC_COOKIE => {
+            return Some(SipParseError::new(
+                "Top Via branch is the magic cookie alone, no transaction identifier",
+            ))
+        }
+        None => "<no branch>".to_string(),
+        Some(b) => format!("\"{b}\""),
+    };
+    Some(SipParseError::new(format!(
+        "Top Via branch missing magic cookie \"{VIA_BRANCH_MAGIC_COOKIE}\": {shown}"
+    )))
 }
 
 /// The refusal of a topmost Via whose transport is not in the allowlist. The

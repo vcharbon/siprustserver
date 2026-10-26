@@ -122,7 +122,7 @@ impl CancelLookup {
     }
 }
 
-/// The fixed counter slot of a native method (uppercased by the caller);
+/// The fixed counter slot of a native method, spelled as RFC 3261 spells it;
 /// `None` for an extension method, counted under its own label in
 /// [`ProxyMetrics`]'s open rows, under the family's cap.
 fn method_slot(method: &str) -> Option<usize> {
@@ -273,7 +273,7 @@ impl ProxyMetrics {
         }
     }
 
-    /// Count one inbound request by SIP method (uppercased by the caller), for
+    /// Count one inbound request by SIP method, as written, for
     /// `sip_proxy_requests_total{method}`: a native method on its lock-free
     /// slot, an extension method under its own label, under the cap.
     pub fn record_request(&self, method: &str) {

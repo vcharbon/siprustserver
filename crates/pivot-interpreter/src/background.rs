@@ -45,7 +45,8 @@ impl Background {
     }
 
     /// The policy of `actor` that answers `method`, if any. Matching is by
-    /// method identity, so a policy written `options` answers an `OPTIONS`.
+    /// method, case-sensitively (RFC 3261 §7.1): a policy written `options`
+    /// answers the extension method `options`, never an `OPTIONS`.
     pub fn policy_for(&self, actor: &str, method: &str) -> Option<(usize, &Policy)> {
         let wanted = Method::from_wire(method);
         self.policies
@@ -136,11 +137,16 @@ mod tests {
     }
 
     #[test]
-    fn a_policy_answers_by_method_identity_and_only_for_its_own_actor() {
-        let table =
-            Background::new(vec![policy("uas1", "options", None), policy("uac1", "OPTIONS", None)]);
-        assert_eq!(table.policy_for("uas1", "OPTIONS").unwrap().0, 0);
+    fn a_policy_answers_its_method_as_spelled_and_only_for_its_own_actor() {
+        let table = Background::new(vec![
+            policy("uas1", "options", None),
+            policy("uac1", "OPTIONS", None),
+            policy("uas1", "OPTIONS", None),
+        ]);
+        assert_eq!(table.policy_for("uas1", "OPTIONS").unwrap().0, 2);
+        assert_eq!(table.policy_for("uas1", "options").unwrap().0, 0);
         assert_eq!(table.policy_for("uac1", "OPTIONS").unwrap().0, 1);
+        assert!(table.policy_for("uac1", "options").is_none());
         assert!(table.policy_for("uas1", "INFO").is_none());
         assert!(table.policy_for("uas2", "OPTIONS").is_none());
     }

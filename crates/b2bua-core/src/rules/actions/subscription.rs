@@ -204,7 +204,7 @@ impl ActionExecutor<'_> {
         else {
             return;
         };
-        if !record.is_own() || !record.method.eq_ignore_ascii_case("NOTIFY") {
+        if !record.is_own() || record.method != "NOTIFY" {
             return;
         }
         let ends = status.is_none_or(|s| SUBSCRIPTION_ENDING.contains(&s));

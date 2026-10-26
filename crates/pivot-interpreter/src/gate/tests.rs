@@ -244,11 +244,15 @@ fn a_binding_on_another_leg_is_another_dialog() {
 }
 
 #[test]
-fn a_request_gate_reads_method_identity_not_spelling() {
-    let step =
+fn a_request_gate_reads_the_method_as_spelled() {
+    let invite =
+        step(MsgSpec { method: Some("INVITE".into()), ..MsgSpec::default() }, CheckMode::Record);
+    assert!(discriminates(&invite, &inbound_request("INVITE")).matches());
+    assert!(!discriminates(&invite, &inbound_request("ACK")).matches());
+    // A method is case-sensitive (RFC 3261 §7.1): `Invite` is no INVITE.
+    let extension =
         step(MsgSpec { method: Some("Invite".into()), ..MsgSpec::default() }, CheckMode::Record);
-    assert!(discriminates(&step, &inbound_request("INVITE")).matches());
-    assert!(!discriminates(&step, &inbound_request("ACK")).matches());
+    assert!(!discriminates(&extension, &inbound_request("INVITE")).matches());
 }
 
 #[test]

@@ -4608,6 +4608,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "criterion",
+ "flate2",
  "lookup-map",
  "memchr",
  "proptest",

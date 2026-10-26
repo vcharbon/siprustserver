@@ -1,11 +1,11 @@
-//! SIP start-line parser — Request-Line and Status-Line. Port of
-//! `src/sip/parsers/custom/start-line.ts`. No regex.
+//! SIP start-line parser — Request-Line and Status-Line. No regex.
 //!
 //!   Request-Line:  Method SP Request-URI SP SIP-Version CRLF
 //!   Status-Line:   SIP-Version SP Status-Code SP Reason-Phrase CRLF
 
 use super::scanner::{span_text, Scanner, Span, CR, LF, SP};
 use crate::char_class::is_token_char;
+use crate::control_bytes::is_control;
 use crate::error::SipParseError;
 use crate::parser::SipParserLimits;
 
@@ -123,48 +123,39 @@ fn parse_status_line(
     // Status-Code: exactly 3 digits.
     let status_span = read_until_sp(s);
     let status_str = span_text(image, &status_span)?;
-    let status = match js_parse_int_base10(status_str) {
-        Some(status) if status_str.len() == 3 => status,
+    let status = match status_str.parse::<u16>() {
+        Ok(status) if status_str.len() == 3 && status_str.bytes().all(|b| b.is_ascii_digit()) => {
+            status
+        }
         _ => return Err(SipParseError::new(format!("Invalid status code: \"{status_str}\""))),
     };
-    let status = match u16::try_from(status) {
-        Ok(status) if (100..=699).contains(&status) => status,
-        _ => return Err(SipParseError::new(format!("Status code out of range: {status}"))),
-    };
+    if !(100..=699).contains(&status) {
+        return Err(SipParseError::new(format!("Status code out of range: {status}")));
+    }
 
     // SP before reason phrase, but the reason may be empty (3.1.1.13) so the
     // SP is optional in that case.
     s.skip_if(SP);
 
+    // Reason-Phrase holds no control byte but HTAB (RFC 3261 §25.1).
     let reason = read_until_crlf(s);
+    if let Some(byte) = span_text(image, &reason)?.bytes().find(|&b| is_control(b)) {
+        return Err(SipParseError::new(format!(
+            "Reason phrase holds control byte 0x{byte:02x} (RFC 3261 §25.1)"
+        )));
+    }
     s.expect_crlf()?;
 
     Ok(StatusLine { version, status, reason })
 }
 
-/// Read bytes until SP (or CR/LF for empty-reason edge cases), without
-/// consuming the delimiter.
+/// Read bytes up to SP, or up to the line end (an empty reason phrase),
+/// without consuming the delimiter.
 fn read_until_sp(s: &mut Scanner) -> Span {
     s.take_while(|b| b != SP && b != CR && b != LF)
 }
 
-/// Read bytes until CRLF (or bare LF), without consuming the line ending.
+/// Read bytes up to the line's CRLF, without consuming it.
 fn read_until_crlf(s: &mut Scanner) -> Span {
     s.take_while(|b| b != CR && b != LF)
-}
-
-/// Mimic JS `parseInt(s, 10)`: optional leading ASCII whitespace, optional
-/// sign, then a run of decimal digits; trailing garbage ignored; no digits →
-/// `None` (NaN). Reproduces the status-code validation exactly.
-fn js_parse_int_base10(s: &str) -> Option<i64> {
-    let s = s.trim_start_matches([' ', '\t']);
-    let (neg, s) = match s.as_bytes().first() {
-        Some(b'-') => (true, s.get(1..)?),
-        Some(b'+') => (false, s.get(1..)?),
-        _ => (false, s),
-    };
-    let mut digits = s.bytes().map_while(|b| char::from(b).to_digit(10)).peekable();
-    digits.peek()?;
-    let n = digits.fold(0i64, |n, d| n.saturating_mul(10).saturating_add(i64::from(d)));
-    Some(if neg { -n } else { n })
 }

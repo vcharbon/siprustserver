@@ -1,5 +1,4 @@
-//! RFC 3261 §7.3.3 — compact header form expansion. Port of
-//! `src/sip/parsers/custom/compact-forms.ts`.
+//! RFC 3261 §7.3.3 — compact header form expansion.
 
 use super::scanner::Span;
 use crate::sip_str::{SharedText, SipStr};

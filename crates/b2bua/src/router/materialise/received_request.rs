@@ -14,7 +14,7 @@ use sip_message::{Method, SipRequest, SipStr};
 /// when the record's To does not read.
 pub(super) fn rebuild_received_request(record: &RequestRecord) -> Option<SipRequest> {
     let to = header::To::parse(&SipStr::owned(&record.source_to)).ok()?;
-    let method = Method::from_wire(&record.method.to_ascii_uppercase());
+    let method = Method::from_wire(&record.method);
     let cseq = format!("{} {}", record.inbound_cseq, method.as_str());
     let mut draft = RequestDraft::new(method, to.uri().clone());
     for via in &record.source_vias {

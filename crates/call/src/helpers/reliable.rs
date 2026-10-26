@@ -239,7 +239,7 @@ pub fn responder_of<'a>(call: &'a Call, tag: &str, rseq: RSeq) -> Option<&'a Pro
 /// send the provisional response reliably". A reliable provisional to a
 /// request this refuses leaves unreliably and is shown to no one.
 pub fn admits_reliable_provisional(pending: &RequestRecord) -> bool {
-    pending.method.eq_ignore_ascii_case("INVITE") && pending.offered_100rel
+    pending.method == "INVITE" && pending.offered_100rel
 }
 
 /// The leg a reliable provisional shown in the `shown_tag` dialog was shown

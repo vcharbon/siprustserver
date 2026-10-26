@@ -173,7 +173,7 @@ impl RequestRecord {
             source_timestamp: None,
             relayed_by: RelayOwner::default(),
             author: None,
-            invite: method.eq_ignore_ascii_case("INVITE").then(InviteExchange::default),
+            invite: (method == "INVITE").then(InviteExchange::default),
         }
     }
 

@@ -124,8 +124,6 @@ const EXPECTED: &[Expected] = &[
         .values(0x377fef051d494302),
     rvoip("rfc4475-invalid/escapedHeadersInUri", OnlyCustomRefuses, "RFC 3261 §19.1.1 Table 1")
         .values(0x6752bdbce2491d00),
-    rvoip("rfc4475-invalid/nonTokenDisplayName", OnlyCustomRefuses, "RFC 4475 §3.1.2.15")
-        .values(0xde535a809e338700),
     rvoip("rfc4475-invalid/unencloseNameAddr", OnlyCustomRefuses, "RFC 4475 §3.1.2.13")
         .values(0x01a87ce68e28faa0),
     rvoip("synthetic/utf8-raw-user", OnlyCustomRefuses, "RFC 3261 §25.1 user, escaped")
@@ -149,11 +147,7 @@ const EXPECTED: &[Expected] = &[
     rvoip("rfc4475-invalid/unterminatedQuotedString", OnlyCustomRefuses, "RFC 4475 §3.1.2.6")
         .values(0x5375cbaccf51bcc2),
     // Valid messages the oracle refuses.
-    rvoip("rfc4475-valid/emptyReasonPhrase", OnlyRvoipRefuses, "RFC 4475 §3.1.1.13")
-        .values(0x768d41a8cf8b34aa),
     rvoip("rfc4475-valid/extraTrailingOctets", OnlyRvoipRefuses, "RFC 3261 §18.3")
-        .values(0x768d41a8cf8b34aa),
-    rvoip("rfc4475-valid/multipartMime", OnlyRvoipRefuses, "RFC 4475 §3.1.1.11")
         .values(0x768d41a8cf8b34aa),
     // The tag of an unbracketed From/To URI.
     rvoip("ipv6/v410a_extraColon", FromTag, ADDR_SPEC_PARAMS).values(0xa0f4a29e4b2e58f8),

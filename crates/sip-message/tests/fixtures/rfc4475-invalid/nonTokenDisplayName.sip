@@ -7,4 +7,3 @@ Call-ID: baddn.31415@c.example.com
 Accept: application/sdp
 CSeq:    3923239 OPTIONS
 l: 0
-

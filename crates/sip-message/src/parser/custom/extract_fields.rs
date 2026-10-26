@@ -1,5 +1,5 @@
 //! Mandatory-header extraction + the strict wire-grammar gates (`Wire` vs
-//! `Hydrate` mode; those beyond the RFC grammar are listed in ADR-0001). Port of `src/sip/parsers/extract-fields.ts`.
+//! `Hydrate` mode; those beyond the RFC grammar are listed in ADR-0001).
 //!
 //! Produces the typed [`CoreHeaders`] from the
 //! [`HeaderIndex`] of one dispatch pass — this module locates nothing itself,
@@ -345,21 +345,16 @@ pub fn extract_request_fields(
             }
         }
         if let Some(method) = method {
-            let dialog_creating = method.eq_ignore_ascii_case("INVITE")
-                || method.eq_ignore_ascii_case("SUBSCRIBE")
-                || method.eq_ignore_ascii_case("REFER");
-            if dialog_creating {
+            if matches!(method, "INVITE" | "SUBSCRIBE" | "REFER") {
                 match common.contacts() {
                     ContactSet::Wildcard => {
                         return Err(SipParseError::new(format!(
-                            "Contact: * wildcard is not valid in {} (RFC 3261 §10.2.2)",
-                            method.to_ascii_uppercase()
+                            "Contact: * wildcard is not valid in {method} (RFC 3261 §10.2.2)"
                         )));
                     }
                     ContactSet::Contacts(cs) if cs.len() > 1 => {
                         return Err(SipParseError::new(format!(
-                            "{} must not contain multiple Contact headers (RFC 3261 §8.1.1.8 — found {})",
-                            method.to_ascii_uppercase(),
+                            "{method} must not contain multiple Contact headers (RFC 3261 §8.1.1.8 — found {})",
                             cs.len()
                         )));
                     }
@@ -369,8 +364,8 @@ pub fn extract_request_fields(
         }
     }
 
-    // CSeq method must match the request method: a known method in any case,
-    // an extension method in its own (RFC 3261 §7.1).
+    // CSeq method must match the request method, spelling for spelling
+    // (RFC 3261 §7.1, §8.1.1.5).
     if let Some(method) = method {
         if let Some(cseq_val) = idx.cseq.first {
             let trimmed = cseq_val.trim();

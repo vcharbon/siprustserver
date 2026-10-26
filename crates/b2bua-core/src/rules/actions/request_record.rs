@@ -331,8 +331,8 @@ impl ActionExecutor<'_> {
             );
             return;
         };
-        let method = record.method.to_ascii_uppercase();
-        let Ok(answer) = received_answer(record, &method, status, reason, body, content_type)
+        let Ok(answer) =
+            received_answer(record, &record.method, status, reason, body, content_type)
         else {
             tracing::warn!(
                 call_ref = %call.call_ref,
@@ -346,7 +346,7 @@ impl ActionExecutor<'_> {
             body: OutboundBody::Response(answer),
             mode: OutboundTxnMode::ServerResponse,
             destination: dest,
-            label: format!("{status} {method} → {originator}"),
+            label: format!("{status} {} → {originator}", record.method),
             leg_id: Some(originator),
             provenance: Provenance::Authored,
         });

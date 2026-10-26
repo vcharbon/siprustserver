@@ -69,8 +69,9 @@ absorbs it as the ACK to its own non-2xx final.
 
 ### 4. What is never answered
 
-A response, an ACK, a request without a partial, a limit refusal: each is
-dropped as before.
+A response, an ACK, a request without a partial, a limit refusal, a header
+block holding a bare CR or LF or bytes that are not UTF-8: each is dropped as
+before.
 
 ### 5. One cap per ingress
 

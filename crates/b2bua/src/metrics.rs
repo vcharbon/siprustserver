@@ -447,9 +447,10 @@ impl B2buaMetrics {
         self.inner.rows.repl_forward_flush_refused.get(&[op])
     }
 
-    /// Count one inbound request by SIP method, for `b2bua_requests_total{method}`.
+    /// Count one inbound request by SIP method, as written (a method is
+    /// case-sensitive, RFC 3261 §7.1), for `b2bua_requests_total{method}`.
     pub fn record_request(&self, method: &str) {
-        self.inner.rows.requests.add(&[&method.to_ascii_uppercase()], 1);
+        self.inner.rows.requests.add(&[method], 1);
     }
 
     /// Count one OUTBOUND request this worker originated/relayed, for
@@ -457,14 +458,13 @@ impl B2buaMetrics {
     /// here; pairing OPTIONS-out with the inbound `responses_total{OPTIONS,200}`
     /// isolates the keepalive round-trip (sent vs answered) on the b2bua itself.
     pub fn record_request_out(&self, method: &str) {
-        self.inner.rows.requests_out.add(&[&method.to_ascii_uppercase()], 1);
+        self.inner.rows.requests_out.add(&[method], 1);
     }
 
     /// Count one inbound response by its CSeq method + status code, for
     /// `b2bua_responses_total{method,code}`.
     pub fn record_response(&self, method: &str, code: u16) {
-        let (method, code) = (method.to_ascii_uppercase(), code.to_string());
-        self.inner.rows.responses.add(&[&method, &code], 1);
+        self.inner.rows.responses.add(&[method, &code.to_string()], 1);
     }
 
     /// Count one repeat that left this worker, for

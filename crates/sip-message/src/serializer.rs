@@ -1,12 +1,12 @@
-//! SIP message serializer (`SipMessage` -> wire bytes). Port of
-//! `src/sip/Serializer.ts`.
+//! SIP message serializer (`SipMessage` -> wire bytes).
 //!
-//! This is the single serialization point for all outbound SIP messages.
 //! Headers are UTF-8; body is raw bytes passed through unmodified. The
-//! serializer enforces Content-Length correctness at the boundary: a declared
-//! length that disagrees with the body is restated to the body's, and a missing
-//! Content-Length is added when a body is present.
+//! serializer enforces Content-Length correctness at the boundary: exactly one
+//! Content-Length leaves, at the place of the first row stating one (in either
+//! name form), restated to the body's length when it disagrees; a later row is
+//! dropped; one is added when none is stated and a body is present.
 
+use crate::header::HeaderName;
 use crate::types::{SipHeader, SipMessage, SipRequest, SipResponse};
 
 /// Serialize a structured SIP message to wire-format bytes.
@@ -57,8 +57,9 @@ fn finish(mut out: Vec<u8>, headers: &[SipHeader], body: &[u8]) -> Vec<u8> {
     use std::io::Write;
 
     let actual_length = body.len();
-    let cl =
-        headers.iter().enumerate().find(|(_, h)| h.name.eq_ignore_ascii_case("content-length"));
+    let is_content_length =
+        |h: &SipHeader| HeaderName::known(&h.name) == Some(HeaderName::ContentLength);
+    let cl = headers.iter().enumerate().find(|(_, h)| is_content_length(h));
     let cl_index = cl.map(|(i, _)| i);
     let declared_ok = match cl {
         Some((_, h)) => h.value.trim().parse::<usize>().ok() == Some(actual_length),
@@ -67,6 +68,9 @@ fn finish(mut out: Vec<u8>, headers: &[SipHeader], body: &[u8]) -> Vec<u8> {
 
     out.extend_from_slice(b"\r\n");
     for (i, h) in headers.iter().enumerate() {
+        if cl_index != Some(i) && is_content_length(h) {
+            continue;
+        }
         out.extend_from_slice(h.name.as_bytes());
         out.extend_from_slice(b": ");
         if cl_index == Some(i) && !declared_ok {
@@ -88,8 +92,8 @@ fn finish(mut out: Vec<u8>, headers: &[SipHeader], body: &[u8]) -> Vec<u8> {
 pub fn sip_summary(raw: &[u8]) -> String {
     let cr = raw.iter().position(|&b| b == 0x0d);
     let lf = raw.iter().position(|&b| b == 0x0a);
-    // TS: Math.min(indexOf 0x0d, indexOf 0x0a, 200), where a missing byte is -1.
-    // Mirror that exactly: -1 wins the min and falls back to min(len, 200).
+    // The first line, cut at 200 bytes, when the datagram holds a CR and an
+    // LF and neither opens it; otherwise its first 200 bytes.
     let cut = match (cr, lf) {
         (Some(cr), Some(lf)) if cr.min(lf) > 0 => cr.min(lf).min(200),
         _ => raw.len().min(200),

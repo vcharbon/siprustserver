@@ -82,13 +82,17 @@ is no percent-encoding on egress: what arrives escaped stays escaped, what
 arrives raw is refused. On wire bytes the classes also hold the Call-ID
 (`word [ "@" word ]`), the From and To tags and the Via branch (`token`), the
 request-line and CSeq methods (`token`) and every header name (`token`).
-Headers the parser does not read are not newly checked. A method keeps the case
-it was written in (§7.1): an extension method is never uppercased, and its CSeq
-names it in the same case; a known method matches in any case.
+Headers the parser does not read are not newly checked. A method is
+case-sensitive (§7.1): it keeps the case it was written in, its CSeq names it
+in the same case, and a known method is its upper-case spelling alone, so
+`invite` is an extension method.
 
 A header line ends with CRLF and nowhere else, in and out: the parser refuses
 a bare CR or LF anywhere in the header block, and no writer puts a CR or LF
-inside a line (`src/write_check.rs`).
+inside a line (`src/write_check.rs`). Any other control byte but HTAB stands in
+a header value only as the escaped byte of a quoted-pair, and nowhere in a
+reason phrase; a header block that is not UTF-8 is refused whole, its bytes
+never replaced (`src/control_bytes.rs`).
 
 ### 4. The name-addr
 

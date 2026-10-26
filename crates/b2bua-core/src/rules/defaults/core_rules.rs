@@ -1115,8 +1115,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             // Everything else (a-leg, confirmed-leg re-INVITE, BYE/OPTIONS
             // timeouts, no callback context) keeps the unconditional
             // termination below.
-            let timed_out_invite =
-                ctx.timeout_method().map(|m| m.eq_ignore_ascii_case("INVITE")).unwrap_or(false);
+            let timed_out_invite = ctx.timeout_method().map(|m| m == "INVITE").unwrap_or(false);
             let pending_b_leg = ctx.source_leg().is_some_and(|l| {
                 l.leg_id != ctx.call.a_leg().leg_id
                     && matches!(l.state(), LegState::Trying | LegState::Early)

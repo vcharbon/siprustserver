@@ -14,29 +14,40 @@ use sip_message::header::HeaderName;
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 
+/// What the audit, which reads without the wire grammar, makes of the 2xx.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Audit {
+    /// The URI grammar alone refuses the route: the audit reads the 2xx and
+    /// sees a dialog the B2BUA's parser refused.
+    ReadsTheDialog,
+    /// A control byte outside a quoted-pair refuses the 2xx in every reading.
+    ReadsNothing,
+}
+
 /// Alice calls bob, bob's 200 records `route`: the B2BUA drops it and fails
 /// the call at Timer B.
-async fn call_recording(name: &str, route: &str) {
+async fn call_recording(name: &str, route: &str, audit: Audit) {
     let s = B2buaScene::new(name).await;
-    // The audit reads the 2xx without the wire grammar, so it sees a dialog
-    // the B2BUA's parser refused: the 2xx (wire entry 4) is the input under
-    // test, and its ACK and BYE are owed by nobody.
-    s.h.waive(
-        WaiverScope::rule(
-            "no-ack-to-dialog-creating-2xx",
-            "the 2xx records a route the grammar refuses; the B2BUA's parser discards it (RFC 3261 §25.1)",
-        )
-        .on_party("b2bua")
-        .at_position(4),
-    );
-    s.h.waive(
-        WaiverScope::rule(
-            "unacked-2xx-not-cleared",
-            "bob deliberately sends one malformed 2xx and nothing after it — the input under test",
-        )
-        .on_party("bob")
-        .at_position(4),
-    );
+    // A 2xx the audit reads is the input under test (wire entry 4): its ACK
+    // and BYE are owed by nobody.
+    if audit == Audit::ReadsTheDialog {
+        s.h.waive(
+            WaiverScope::rule(
+                "no-ack-to-dialog-creating-2xx",
+                "the 2xx records a route the grammar refuses; the B2BUA's parser discards it (RFC 3261 §25.1)",
+            )
+            .on_party("b2bua")
+            .at_position(4),
+        );
+        s.h.waive(
+            WaiverScope::rule(
+                "unacked-2xx-not-cleared",
+                "bob deliberately sends one malformed 2xx and nothing after it — the input under test",
+            )
+            .on_party("bob")
+            .at_position(4),
+        );
+    }
     let mut call = s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
     let uas = s.bob.receive("INVITE").await;
     let req = uas.request();
@@ -76,15 +87,15 @@ async fn call_recording(name: &str, route: &str) {
 
 #[tokio::test(start_paused = true)]
 async fn a_recorded_port_with_trailing_garbage_refuses_the_2xx() {
-    call_recording("b2bua-rr-port-garbage", "<sip:10.0.0.9:5060x>").await;
+    call_recording("b2bua-rr-port-garbage", "<sip:10.0.0.9:5060x>", Audit::ReadsTheDialog).await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_recorded_route_with_no_host_refuses_the_2xx() {
-    call_recording("b2bua-rr-no-host", "<sip:@>").await;
+    call_recording("b2bua-rr-no-host", "<sip:@>", Audit::ReadsTheDialog).await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_recorded_route_with_a_control_byte_refuses_the_2xx() {
-    call_recording("b2bua-rr-control-byte", "<sip:10.0.0.\u{7f}9>").await;
+    call_recording("b2bua-rr-control-byte", "<sip:10.0.0.\u{7f}9>", Audit::ReadsNothing).await;
 }

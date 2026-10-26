@@ -92,7 +92,7 @@ impl ActionExecutor<'_> {
         let Some(pending) = call::helpers::find_relay(&dialog, outbound_cseq).cloned() else {
             return;
         };
-        if pending.cancelled || !pending.method.eq_ignore_ascii_case("INVITE") {
+        if pending.cancelled || pending.method != "INVITE" {
             return;
         }
         let refused = |what: &str| {

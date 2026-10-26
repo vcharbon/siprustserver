@@ -1,5 +1,5 @@
-//! Byte-level cursor scanner. Port of `src/sip/parsers/custom/scanner.ts`.
-//! All character classification is direct byte comparison — zero regex.
+//! Byte-level cursor scanner over the header block's text image. All
+//! character classification is direct byte comparison — zero regex.
 //!
 //! The cursor never leaves its buffer: every read is checked access and every
 //! move goes through `Scanner::bump`, which stops at the end, so the offset
@@ -23,18 +23,6 @@ pub fn is_digit(b: u8) -> bool {
 
 pub fn is_wsp(b: u8) -> bool {
     b == SP || b == HTAB
-}
-
-/// Lenient UTF-8 decode of a byte range, matching Node `Buffer.toString("utf-8")`
-/// (invalid sequences → U+FFFD). The common SIP path is pure ASCII: try the
-/// `str::from_utf8` fast path first (word-at-a-time validation, one alloc) and
-/// only fall back to the `Utf8Chunks`-based lossy machinery on genuinely
-/// invalid input — output is byte-identical either way.
-pub(crate) fn decode(bytes: &[u8]) -> String {
-    match std::str::from_utf8(bytes) {
-        Ok(s) => s.to_owned(),
-        Err(_) => String::from_utf8_lossy(bytes).into_owned(),
-    }
 }
 
 /// A byte range of the message image. Every token the scanner reads is one of
@@ -254,9 +242,9 @@ impl<'a> Scanner<'a> {
                 return self.finish_value(line..end, unfolded);
             }
             self.bump(1); // the fold's WSP: the fold becomes one SP
-            let text = self.bytes(line..end)?;
+            let text = self.text(line..end)?;
             let out = unfolded.get_or_insert_with(String::new);
-            out.push_str(&String::from_utf8_lossy(text));
+            out.push_str(text);
             out.push(' ');
             line = self.pos;
         }
@@ -264,11 +252,13 @@ impl<'a> Scanner<'a> {
         self.finish_value(line..self.pos, unfolded)
     }
 
-    /// The bytes of a span this scanner read.
-    fn bytes(&self, span: Span) -> Result<&'a [u8], SipParseError> {
+    /// The text of a span this scanner read: a run of whole lines of the
+    /// image, so UTF-8 wherever the image is.
+    fn text(&self, span: Span) -> Result<&'a str, SipParseError> {
         self.buf
             .get(span.clone())
-            .ok_or_else(|| SipParseError::new(format!("span {span:?} outside the scanned bytes")))
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .ok_or_else(|| SipParseError::new(format!("span {span:?} outside the scanned text")))
     }
 
     /// The value whose last line is `last`: that span itself when nothing was
@@ -281,7 +271,7 @@ impl<'a> Scanner<'a> {
         Ok(match unfolded {
             None => HeaderValue::Span(last),
             Some(mut out) => {
-                out.push_str(&String::from_utf8_lossy(self.bytes(last)?));
+                out.push_str(self.text(last)?);
                 HeaderValue::Unfolded(out)
             }
         })

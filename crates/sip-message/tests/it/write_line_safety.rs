@@ -212,3 +212,54 @@ fn an_identity_with_crlf_inside_quotes_is_refused() {
         assert!(read.is_err(), "{text:?} read as {read:?}");
     }
 }
+
+/// A control byte other than HTAB stands in a value only as the escaped byte
+/// of a quoted-pair (RFC 3261 §25.1), and caller text carries no NUL at all:
+/// a peer reading a value up to its first NUL reads another value.
+#[test]
+fn caller_text_carries_no_bare_control_byte_and_no_nul() {
+    use sip_message::write_check;
+    for bad in ["a\x07b", "a\x7fb", "a\x1fb", "a\0b", "\"a\\\0\"", "a\\\x07"] {
+        assert!(write_check::header_value(bad).is_err(), "value {bad:?}");
+    }
+    for good in ["a\tb", "\"BEL:\\\x07 DEL:\\\x7f\"", "ü"] {
+        assert!(write_check::header_value(good).is_ok(), "value {good:?}");
+    }
+    for bad in ["O\x07K", "O\x7fK", "O\0K"] {
+        assert!(write_check::reason_phrase(bad).is_err(), "reason {bad:?}");
+    }
+    assert!(write_check::reason_phrase("O\tK ü").is_ok());
+}
+
+#[test]
+fn a_raw_value_with_a_bare_control_byte_does_not_freeze() {
+    for value in ["a\x07b", "a\0b", "a\x7fb"] {
+        let draft = request().thaw().push_raw(HeaderName::from("X-Test"), value);
+        assert_request_refused(draft, value);
+    }
+}
+
+#[test]
+fn a_reason_phrase_with_a_control_byte_does_not_freeze() {
+    let draft = response().thaw().with_status(486, "Busy\x07Here");
+    assert!(draft.freeze_bytes().is_err(), "freeze_bytes");
+}
+
+/// The quoted-pairs a peer sent (RFC 4475 §3.1.1.2) freeze and relay as
+/// received.
+#[test]
+fn a_received_quoted_pair_control_byte_freezes() {
+    let raw = format!(
+        "INVITE sip:bob@example.com SIP/2.0\r\nVia: {VIA}\r\nMax-Forwards: 70\r\n\
+         From: <sip:alice@example.com>;tag=a1\r\n\
+         To: \"BEL:\\\x07 NUL:\\\0 DEL:\\\x7f\" <sip:bob@example.com>\r\n\
+         Call-ID: write-1@192.0.2.10\r\nCSeq: 1 INVITE\r\n\
+         Contact: <sip:alice@192.0.2.10:5060>\r\nContent-Length: 0\r\n\r\n"
+    );
+    let req = match CustomParser::new().parse(raw.as_bytes()) {
+        Ok(SipMessage::Request(r)) => r,
+        other => panic!("RFC 4475 §3.1.1.2 quoted-pairs parse: {other:?}"),
+    };
+    let frozen = req.thaw().push_raw(HeaderName::from("X-Test"), "ok").freeze().expect("freeze");
+    frozen_agrees_with_reparse(SipMessage::Request(frozen));
+}
