@@ -51,7 +51,7 @@ fn cost_per_op<T>(mut op: impl FnMut() -> T) -> AllocCost {
     total.per(ITERS)
 }
 
-/// Upper budget for one case: the measured cost rounded up ~20%, so ordinary
+/// Upper budget for one case: the measured cost plus about 10%, so ordinary
 /// allocator and `std` variation does not fail the lane while a real regression
 /// does.
 struct Budget {
@@ -60,26 +60,26 @@ struct Budget {
     bytes: usize,
 }
 
-/// The allocation budget, re-baselined on the ADR-0025 header model.
+/// The allocation budget, re-baselined on header lines classified once and a
+/// freeze that takes the values its draft states.
 ///
 /// ADR-0025's guardrails target ≤ ~10 allocs per parse and ≤ ~12 per
-/// thawed-draft hop. `hop/stamp_rport` — the smallest edit a hop can make —
-/// meets the hop target; `decode/*` sits two above its own and
-/// `hop/rewrite_set` (six edits, two Route pops) well above. A budget states
-/// what the code costs today, never what would let it pass, so those two carry
-/// their measured cost and the gap is tracked in the migration log.
+/// thawed-draft hop. `decode/*` and `hop/stamp_rport` — the smallest edit a
+/// hop can make — meet them; `hop/rewrite_set` (six edits, two Route pops)
+/// sits above. A budget states what the code costs today, never what would
+/// let it pass.
 const BUDGETS: &[Budget] = &[
-    Budget { case: "decode/invite", allocs: 14, bytes: 4090 },
-    Budget { case: "decode/invite_sdp", allocs: 15, bytes: 4490 },
-    Budget { case: "decode/200_ok", allocs: 14, bytes: 3890 },
-    Budget { case: "hop/rewrite_set", allocs: 34, bytes: 10070 },
-    Budget { case: "hop/stamp_rport", allocs: 9, bytes: 2810 },
-    Budget { case: "proxy_hop/invite", allocs: 25, bytes: 6870 },
-    Budget { case: "proxy_hop/invite_sdp", allocs: 26, bytes: 7750 },
-    Budget { case: "build/blank_draft", allocs: 32, bytes: 8460 },
-    Budget { case: "build/invite_sdp", allocs: 54, bytes: 8780 },
-    Budget { case: "build/bye", allocs: 60, bytes: 5020 },
-    Budget { case: "build/response_200", allocs: 38, bytes: 7520 },
+    Budget { case: "decode/invite", allocs: 9, bytes: 4050 },
+    Budget { case: "decode/invite_sdp", allocs: 10, bytes: 4420 },
+    Budget { case: "decode/200_ok", allocs: 11, bytes: 3970 },
+    Budget { case: "hop/rewrite_set", allocs: 30, bytes: 7740 },
+    Budget { case: "hop/stamp_rport", allocs: 9, bytes: 2680 },
+    Budget { case: "proxy_hop/invite", allocs: 19, bytes: 6780 },
+    Budget { case: "proxy_hop/invite_sdp", allocs: 20, bytes: 7610 },
+    Budget { case: "build/blank_draft", allocs: 24, bytes: 6170 },
+    Budget { case: "build/invite_sdp", allocs: 27, bytes: 6430 },
+    Budget { case: "build/bye", allocs: 42, bytes: 4140 },
+    Budget { case: "build/response_200", allocs: 24, bytes: 4910 },
     Budget { case: "refuse/12000_headers", allocs: 1, bytes: 90 },
 ];
 

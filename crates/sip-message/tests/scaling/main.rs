@@ -24,6 +24,20 @@ use insn_counter::InsnCounter;
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
 
+/// The work count every case reads. Without one the gate cannot judge, so
+/// it fails and says how to give it one.
+fn counter() -> InsnCounter {
+    InsnCounter::open().unwrap_or_else(|e| {
+        panic!(
+            "no user-space instruction counter ({e}): this gate reads the instructions each case \
+             retires through perf_event_open. Run it on a host with a hardware counter (bare \
+             metal, or a VM with a virtual PMU) where /proc/sys/kernel/perf_event_paranoid is 2 \
+             or lower (`sysctl kernel.perf_event_paranoid=2`), outside a seccomp profile that \
+             refuses perf_event_open"
+        )
+    })
+}
+
 /// Operations per allocation-measured region.
 const REPS: usize = 8;
 
@@ -241,10 +255,7 @@ fn breach(
 /// Every gated case grows no faster than its stated shape.
 #[test]
 fn work_grows_with_the_input_as_each_path_states() {
-    let mut counter = InsnCounter::open().expect(
-        "a user-space instruction counter (perf_event_open, perf_event_paranoid <= 2) is the \
-         work count this gate reads",
-    );
+    let mut counter = counter();
     let mut breaches = Vec::new();
     for case in CASES {
         let Some((small, large, growth)) = case.gate else { continue };
@@ -268,7 +279,7 @@ fn work_grows_with_the_input_as_each_path_states() {
 #[test]
 #[ignore = "shape report: run on demand, prints the table"]
 fn shape_table() {
-    let mut counter = InsnCounter::open().expect("a user-space instruction counter");
+    let mut counter = counter();
     println!("| path | axis | size | allocs | bytes | instructions | allocs x | instructions x |");
     println!("|---|---|---:|---:|---:|---:|---:|---:|");
     for case in CASES {
