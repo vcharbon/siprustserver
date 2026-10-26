@@ -20,6 +20,7 @@ mod no_target;
 mod overload;
 mod parse;
 mod pool;
+mod readers;
 mod slots;
 mod udp_shard;
 use crate::resolver::{outcome, refresh_outcome};
@@ -352,39 +353,6 @@ impl ProxyMetrics {
     /// Publish how many recv shards are stalled (the readiness gate's reading).
     pub fn set_recv_shards_stalled(&self, n: u64) {
         self.recv_shards_stalled.store(n, Ordering::Relaxed);
-    }
-
-    // --- read helpers (tests) ---
-    pub fn messages_total(&self) -> u64 {
-        self.messages.iter().flatten().map(|c| c.load(Ordering::Relaxed)).sum()
-    }
-    pub fn routing_decisions_total(&self) -> u64 {
-        self.routing_decisions.iter().map(|c| c.load(Ordering::Relaxed)).sum()
-    }
-    pub fn routing_duration_count(&self) -> u64 {
-        self.routing_duration_count.load(Ordering::Relaxed)
-    }
-    pub fn record_route_inserted_total(&self) -> u64 {
-        self.record_route_inserted.load(Ordering::Relaxed)
-    }
-    pub fn pending_invite_lru_size(&self) -> u64 {
-        self.pending_invite_lru_size.load(Ordering::Relaxed)
-    }
-    pub fn calls_total(&self) -> u64 {
-        self.calls.load(Ordering::Relaxed)
-    }
-    pub fn named_send_count(&self, outcome: &str) -> u64 {
-        outcome::ALL.iter().position(|o| *o == outcome).map_or(0, |i| read(&self.named_sends, i))
-    }
-    pub fn resolver_refresh_count(&self, outcome: &str) -> u64 {
-        let at = refresh_outcome::ALL.iter().position(|o| *o == outcome);
-        at.map_or(0, |i| read(&self.resolver_refresh, i))
-    }
-    pub fn resolver_cache_size(&self) -> u64 {
-        self.resolver_cache_size.load(Ordering::Relaxed)
-    }
-    pub fn reject_count(&self, reason: &str) -> u64 {
-        self.rejects.get(&[reason])
     }
 
     /// Render Prometheus text exposition (the `/metrics` body): every

@@ -163,6 +163,27 @@ struct StoredEntry {
     expires_at_ms: u64,
 }
 
+/// The bounds of a [`CancelBranchLru`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoBounds {
+    pub max_entries: usize,
+    pub max_bytes: usize,
+    pub stripes: usize,
+}
+
+impl Default for MemoBounds {
+    fn default() -> Self {
+        Self { max_entries: usize::MAX, max_bytes: usize::MAX, stripes: 1 }
+    }
+}
+
+/// What one expiry pass did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Swept {
+    pub removed: usize,
+    pub inspected: usize,
+}
+
 /// The TTL cache. Cheap to share behind an `Arc`.
 pub struct CancelBranchLru {
     table: Mutex<HashMap<String, StoredEntry>>,
@@ -182,6 +203,18 @@ impl CancelBranchLru {
     /// eviction under `tokio::time`).
     pub fn with_clock(clock: Clock) -> Self {
         Self { table: Mutex::new(HashMap::new()), clock, sweeper_claimed: AtomicBool::new(false) }
+    }
+
+    pub fn with_bounds(clock: Clock, _bounds: MemoBounds) -> Self {
+        Self::with_clock(clock)
+    }
+
+    pub fn evicted(&self) -> u64 {
+        0
+    }
+
+    pub fn bytes(&self) -> usize {
+        0
     }
 
     /// Spawn the background sweeper for this LRU — once. Every `ProxyCore::run`
@@ -255,12 +288,12 @@ impl CancelBranchLru {
 
     /// Drop all expired entries; returns the count swept. The owner task calls
     /// this periodically.
-    pub fn sweep_expired(&self) -> usize {
+    pub fn sweep_expired(&self) -> Swept {
         let now = self.now_ms();
         let mut table = locked(&self.table, INVITE_BRANCH_LRU);
         let before = table.len();
         table.retain(|_, e| e.expires_at_ms > now);
-        before - table.len()
+        Swept { removed: before - table.len(), inspected: before }
     }
 }
 
@@ -271,126 +304,4 @@ impl Default for CancelBranchLru {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use sip_message::header::HeaderValue;
-    use sip_message::sip_str::SipStr;
-
-    fn entry(branch: &str) -> CancelEntry {
-        CancelEntry {
-            target: ProxyAddr::new("10.0.0.2", 5070),
-            branch: branch.to_string(),
-            stickiness: None,
-            minted: None,
-            via_cookie: None,
-        }
-    }
-
-    fn via(line: &str) -> Via {
-        Via::parse(&SipStr::owned(line)).expect("a Via value")
-    }
-
-    fn key(call_id: &str) -> String {
-        invite_txn_key(&via("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK1"), call_id, Some("t"), 1)
-    }
-
-    /// A panic under the table's lock leaves the table serving: the next
-    /// caller takes it as it stands, and the recovery is counted.
-    #[test]
-    fn a_panic_under_the_table_lock_leaves_it_serving() {
-        let lru = Arc::new(CancelBranchLru::with_clock(Clock::test_at(0)));
-        lru.remember(&key("before"), entry("z9hG4bK-before"), 60_000);
-        let poisoner = lru.clone();
-        let _ = std::thread::spawn(move || {
-            let _held = poisoner.table.lock();
-            panic!("a panic under the table lock");
-        })
-        .join();
-        let counted = || crate::poison::RECOVERIES.count(INVITE_BRANCH_LRU);
-        let recovered = counted();
-        assert_eq!(lru.size(), 1, "the table as it stood");
-        lru.remember(&key("after"), entry("z9hG4bK-after"), 60_000);
-        assert!(lru.lookup(&key("after")).is_some());
-        assert_eq!(counted() - recovered, 1, "the recovery is counted once, under its lock");
-    }
-
-    #[test]
-    fn key_format_is_branch_sent_by_then_dialog_fields() {
-        let v = via("SIP/2.0/UDP Host.Example:5060;branch=z9hG4bK1;received=10.0.0.9;rport=4");
-        assert_eq!(
-            invite_txn_key(&v, "abc@h", Some("t1"), 7),
-            "inv|z9hG4bK1|host.example:5060|abc@h|t1|7"
-        );
-        assert_eq!(
-            invite_txn_key(&via("SIP/2.0/UDP h;branch=z9hG4bK1"), "abc@h", None, 7),
-            "inv|z9hG4bK1|h|abc@h||7"
-        );
-        assert_eq!(
-            ack_hop_key(&v, "abc@h", Some("t1"), 7),
-            "ackhop|z9hG4bK1|host.example:5060|abc@h|t1|7"
-        );
-    }
-
-    #[test]
-    fn the_received_transaction_disambiguates_one_dialog_identity() {
-        // A spiral crosses the proxy twice under one Call-ID, From tag and
-        // CSeq: the branch and the sent-by keep the two passes apart.
-        let first = via("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKa");
-        for other in [
-            "SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKb",
-            "SIP/2.0/UDP 10.0.0.2:5060;branch=z9hG4bKa",
-            "SIP/2.0/UDP 10.0.0.1:5061;branch=z9hG4bKa",
-            "SIP/2.0/UDP 10.0.0.1;branch=z9hG4bKa",
-        ] {
-            assert_ne!(
-                invite_txn_key(&first, "c1", Some("t"), 5),
-                invite_txn_key(&via(other), "c1", Some("t"), 5),
-                "{other}"
-            );
-        }
-    }
-
-    #[test]
-    fn from_tag_disambiguates_the_two_dialog_directions() {
-        // Both directions share the Call-ID; CSeq spaces are independent and
-        // can collide on the same number — the From-tag keeps them apart.
-        let v = via("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKa");
-        assert_ne!(
-            invite_txn_key(&v, "c1", Some("uac"), 5),
-            invite_txn_key(&v, "c1", Some("b2bua"), 5)
-        );
-    }
-
-    #[test]
-    fn remember_then_lookup_returns_entry() {
-        let lru = CancelBranchLru::with_clock(Clock::test_at(0));
-        let k = key("call-1");
-        lru.remember(&k, entry("z9hG4bK-1"), 1000);
-        assert_eq!(lru.lookup(&k).unwrap().branch, "z9hG4bK-1");
-        assert_eq!(lru.size(), 1);
-        assert!(lru.lookup("absent").is_none());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn entries_expire_after_their_own_ttl() {
-        let lru = CancelBranchLru::with_clock(Clock::test_at(0));
-        let short = key("call-1");
-        let long = key("call-2");
-        lru.remember(&short, entry("a"), 1000);
-        lru.remember(&long, entry("b"), 5000);
-        tokio::time::advance(std::time::Duration::from_millis(1001)).await;
-        assert!(lru.lookup(&short).is_none(), "short-TTL entry should have expired");
-        assert!(lru.lookup(&long).is_some(), "long-TTL entry must outlive the short one");
-        assert_eq!(lru.sweep_expired(), 0, "lazy lookup already evicted the expired one");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn sweep_drops_expired() {
-        let lru = CancelBranchLru::with_clock(Clock::test_at(0));
-        lru.remember(&key("c1"), entry("a"), 1000);
-        lru.remember(&key("c2"), entry("b"), 1000);
-        tokio::time::advance(std::time::Duration::from_millis(1001)).await;
-        assert_eq!(lru.sweep_expired(), 2);
-        assert_eq!(lru.size(), 0);
-    }
-}
+mod tests;

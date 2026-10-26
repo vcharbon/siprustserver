@@ -317,6 +317,20 @@ mod tests {
         );
     }
 
+    /// RFC 3581 §4: the `rport` a response carries is the port the request
+    /// came from, whatever value the sender wrote there.
+    #[test]
+    fn stamping_replaces_an_rport_the_sender_wrote() {
+        let stamped = via("SIP/2.0/UDP 10.0.0.1:5060;branch=z1;rport=1234")
+            .stamped_from("198.51.100.4", 33000);
+        assert_eq!(stamped.rport(), Some(Rport::Observed(33000)));
+        assert_eq!(stamped.received(), Some("198.51.100.4"));
+        let unreadable =
+            via("SIP/2.0/UDP 10.0.0.1:5060;branch=z1;rport=x").stamped_from("10.0.0.1", 33000);
+        assert_eq!(unreadable.rport(), Some(Rport::Observed(33000)));
+        assert_eq!(unreadable.response_target(), ("10.0.0.1", 33000));
+    }
+
     #[test]
     fn stamping_replaces_a_received_the_sender_wrote() {
         let stamped = via("SIP/2.0/UDP 10.0.0.1:5060;branch=z1;received=192.0.2.7")

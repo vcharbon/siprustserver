@@ -30,6 +30,8 @@ mod cancel_route_tests;
 #[cfg(test)]
 mod cookie_identity_tests;
 #[cfg(test)]
+mod memo_bound_tests;
+#[cfg(test)]
 mod reject_metric_tests;
 #[cfg(test)]
 mod retransmission_tests;
