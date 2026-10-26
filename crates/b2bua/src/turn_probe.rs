@@ -45,6 +45,9 @@ pub struct TurnMark<'a> {
     pub wrote: bool,
     /// The applied write removes the call.
     pub removed: bool,
+    /// The turn handled a SIP request, not a response, a timer or an
+    /// off-turn answer.
+    pub on_request: bool,
 }
 
 /// What a probe hands back to hold a turn: the turn goes on once it resolves.
@@ -97,7 +100,16 @@ mod tests {
     }
 
     fn mark(point: TurnPoint) -> TurnMark<'static> {
-        TurnMark { node: "n1", call_ref: "c", point, version: (3, 0), wrote: true, removed: false }
+        let (version, on_request) = ((3, 0), true);
+        TurnMark {
+            node: "n1",
+            call_ref: "c",
+            point,
+            version,
+            wrote: true,
+            removed: false,
+            on_request,
+        }
     }
 
     #[tokio::test]

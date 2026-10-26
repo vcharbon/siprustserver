@@ -104,12 +104,12 @@ pub(super) async fn process_result(
         // poll; a rebooting primary still has its full reclaim window to fold and
         // discharge it. The primary is the sole discharge authority either way.
         ctx.state.flush(&result.call);
-        reach(ctx, call_ref, TurnPoint::Logged, true).await;
+        reach(ctx, call_ref, TurnPoint::Logged, true, received.is_some()).await;
         // What the turn owes the WIRE is not deferred: the final that ends the
         // caller's INVITE and the hop-by-hop ACK toward the callee leave from the
         // node that took the event, or the peers wedge on Timer B / Timer H.
         emit_outbound(ctx, call_ref, &result, now_ms).await;
-        reach(ctx, call_ref, TurnPoint::Left, true).await;
+        reach(ctx, call_ref, TurnPoint::Left, true, received.is_some()).await;
         release_call(ctx, call_ref, ReleaseKind::SelfRelease { ended: true }).await;
         return;
     }
@@ -134,7 +134,7 @@ pub(super) async fn process_result(
     if wrote {
         ctx.state.flush(&result.call);
     }
-    reach(ctx, call_ref, TurnPoint::Logged, wrote).await;
+    reach(ctx, call_ref, TurnPoint::Logged, wrote, received.is_some()).await;
     // A re-INVITE's first provisional follows the write that records it.
     if let Some(reinvite) =
         received.filter(|r| *r.method() == Method::Invite && r.to().tag().is_some())
@@ -181,7 +181,7 @@ pub(super) async fn process_result(
     }
 
     emit_outbound(ctx, call_ref, &result, now_ms).await;
-    reach(ctx, call_ref, TurnPoint::Left, wrote).await;
+    reach(ctx, call_ref, TurnPoint::Left, wrote, received.is_some()).await;
 
     for eff in &result.effects.soft {
         match eff {
@@ -301,7 +301,7 @@ pub(super) async fn process_result(
 
 /// Report the turn of `call_ref` at `point` to the turn-point seam, with the
 /// write counters the live copy holds (ADR-0055 §13).
-async fn reach(ctx: &RouterCtx, call_ref: &str, point: TurnPoint, wrote: bool) {
+async fn reach(ctx: &RouterCtx, call_ref: &str, point: TurnPoint, wrote: bool, on_request: bool) {
     let version = || ctx.state.topology(call_ref).map_or((0, 0), |t| (t.gen, t.bak_gen));
     ctx.turn_probe
         .at(|| TurnMark {
@@ -311,6 +311,7 @@ async fn reach(ctx: &RouterCtx, call_ref: &str, point: TurnPoint, wrote: bool) {
             version: version(),
             wrote,
             removed: false,
+            on_request,
         })
         .await;
 }
@@ -328,9 +329,17 @@ async fn emit_outbound(ctx: &Arc<RouterCtx>, call_ref: &str, result: &HandlerRes
     }
 
     for eff in &result.effects.outbound {
-        // A held ACK leaves before any later message of its call (RFC 3261
-        // §14.1), this turn's included.
-        super::hold::release(ctx, call_ref).await;
+        // A held message leaves before any later message of its dialog (RFC
+        // 3261 §14.1), this turn's included.
+        match &eff.body {
+            OutboundBody::Request(req) => {
+                super::hold::release_dialog(ctx, call_ref, &req.call_id().to_string()).await
+            }
+            OutboundBody::Response(resp) => {
+                super::hold::release_dialog(ctx, call_ref, &resp.call_id().to_string()).await
+            }
+            OutboundBody::Datagram(_) => super::hold::release(ctx, call_ref).await,
+        }
         let Some(dest) = sip_net::ip_socket_addr(&eff.destination.0, eff.destination.1) else {
             super::unaddressable::fail_unaddressable(ctx, call_ref, result, eff);
             continue;
@@ -373,6 +382,13 @@ async fn emit_outbound(ctx: &Arc<RouterCtx>, call_ref: &str, result: &HandlerRes
             // bytes is a retained `Datagram` (ADR-0032 X3). The layer sends the
             // response's image verbatim, so what a rule retained from that
             // same image is what leaves here.
+            // The final to a non-INVITE request is held for the call's backup
+            // (ADR-0055 §3): it stops its sender retransmitting.
+            (OutboundBody::Response(resp), _)
+                if resp.status() >= 200 && resp.cseq().method() != Method::Invite =>
+            {
+                super::hold::non_invite_final(ctx, call_ref, resp, dest).await;
+            }
             (OutboundBody::Response(resp), mode) => {
                 debug_assert!(
                     !matches!(mode, OutboundTxnMode::Raw),

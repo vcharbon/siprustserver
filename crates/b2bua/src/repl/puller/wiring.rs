@@ -52,6 +52,7 @@ impl Puller {
                 version,
                 wrote: true,
                 removed: matches!(op, Op::Delete),
+                on_request: false,
             })
             .await;
     }
