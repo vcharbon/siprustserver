@@ -241,9 +241,7 @@ impl<S: StartKind> Draft<S> {
         // first one's position survives taking them all out.
         let at = self.entries.iter().position(|e| e.is_key(&key)).unwrap_or(self.entries.len());
         self.entries.retain(|e| !e.is_key(&key));
-        for (offset, value) in updated.into_iter().enumerate() {
-            insert_entry(&mut self.entries, at + offset, Entry::typed(value));
-        }
+        replace_entries(&mut self.entries, at..at, updated.into_iter().map(Entry::typed));
         Ok(self)
     }
 
@@ -284,11 +282,12 @@ impl<S: StartKind> Draft<S> {
             return Ok(self);
         };
         let values = entry.read::<H>()?;
-        let updated = f(HeaderList::new(values)).into_vec();
-        remove_entry(&mut self.entries, at);
-        for (offset, value) in updated.into_iter().enumerate() {
-            insert_entry(&mut self.entries, at + offset, Entry::typed(value));
-        }
+        let updated = f(HeaderList::new(values));
+        replace_entries(
+            &mut self.entries,
+            at..at.saturating_add(1),
+            updated.into_iter().map(Entry::typed),
+        );
         Ok(self)
     }
 
@@ -410,16 +409,20 @@ impl<S: StartKind> Draft<S> {
 /// Puts `entry` at `at`, the lines from `at` on moving down one; past the end
 /// it goes last.
 fn insert_entry(entries: &mut Vec<Entry>, at: usize, entry: Entry) {
-    entries.push(entry);
-    if let Some(tail) = entries.get_mut(at..) {
-        tail.rotate_right(1);
-    }
+    let at = at.min(entries.len());
+    replace_entries(entries, at..at, std::iter::once(entry));
 }
 
-/// Takes out the line at `at`; `None` past the end.
-fn remove_entry(entries: &mut Vec<Entry>, at: usize) -> Option<Entry> {
-    entries.get_mut(at..).filter(|tail| !tail.is_empty())?.rotate_left(1);
-    entries.pop()
+/// Replaces the lines in `range` by `with`, moving the lines after them once
+/// whatever the number of lines put in. A range past the end appends.
+fn replace_entries(
+    entries: &mut Vec<Entry>,
+    range: std::ops::Range<usize>,
+    with: impl IntoIterator<Item = Entry>,
+) {
+    let end = range.end.min(entries.len());
+    let start = range.start.min(end);
+    entries.splice(start..end, with);
 }
 
 /// The rendered header block as one shared text image. Everything written came

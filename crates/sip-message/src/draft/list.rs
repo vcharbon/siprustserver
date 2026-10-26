@@ -4,51 +4,48 @@
 //! the RFC 3261 §7.3.1 aware "pop the top entry" lives here once instead of at
 //! every consumer that has to remove a Via or a Route.
 
+use std::collections::VecDeque;
+
 use crate::header::HeaderValue;
 
-/// Every value of one header, in wire order.
+/// Every value of one header, in wire order. Adding or taking the top value
+/// costs the same whatever the list's length.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderList<H: HeaderValue> {
-    values: Vec<H>,
+    values: VecDeque<H>,
 }
 
 impl<H: HeaderValue> HeaderList<H> {
     pub fn new(values: Vec<H>) -> Self {
-        Self { values }
+        Self { values: VecDeque::from(values) }
     }
 
     pub fn empty() -> Self {
-        Self { values: Vec::new() }
+        Self { values: VecDeque::new() }
     }
 
     /// Add a value at the top — where a proxy's own Via and Route go.
     pub fn push_front(mut self, value: H) -> Self {
-        self.values.push(value);
-        // One value at least: the rotation is in range.
-        self.values.rotate_right(1);
+        self.values.push_front(value);
         self
     }
 
     pub fn push_back(mut self, value: H) -> Self {
-        self.values.push(value);
+        self.values.push_back(value);
         self
     }
 
     /// Take the top value off.
     pub fn pop_front(&mut self) -> Option<H> {
-        if self.values.is_empty() {
-            return None;
-        }
-        self.values.rotate_left(1);
-        self.values.pop()
+        self.values.pop_front()
     }
 
     pub fn first(&self) -> Option<&H> {
-        self.values.first()
+        self.values.front()
     }
 
     pub fn last(&self) -> Option<&H> {
-        self.values.last()
+        self.values.back()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &H> {
@@ -84,12 +81,12 @@ impl<H: HeaderValue> HeaderList<H> {
     /// The list in reverse — a Record-Route set read as the route set to apply
     /// (RFC 3261 §12.1.1).
     pub fn reversed(mut self) -> Self {
-        self.values.reverse();
+        self.values.make_contiguous().reverse();
         self
     }
 
     pub fn into_vec(self) -> Vec<H> {
-        self.values
+        Vec::from(self.values)
     }
 }
 
@@ -101,7 +98,7 @@ impl<H: HeaderValue> FromIterator<H> for HeaderList<H> {
 
 impl<H: HeaderValue> IntoIterator for HeaderList<H> {
     type Item = H;
-    type IntoIter = std::vec::IntoIter<H>;
+    type IntoIter = std::collections::vec_deque::IntoIter<H>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.values.into_iter()
