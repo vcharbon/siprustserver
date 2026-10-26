@@ -8,6 +8,7 @@ members = [
     "crates/observe",
     "crates/observe-testkit",
     "crates/alloc-counter",
+    "crates/insn-counter",
     "crates/sip-clock",
     "crates/lock-poison",
     "crates/task-restart",
@@ -244,7 +245,7 @@ debug = false
 # error rather than a silent perf shortcut nobody reviewed. `forbid` (stronger
 # than `deny`) cannot be locally re-enabled with `#[allow(unsafe_code)]`. The
 # exceptions are the crates whose FFI or socket-option calls are irreducibly
-# unsafe (`jemalloc-stats`, `sip-net`, `alloc-counter`): they do NOT opt into
+# unsafe (`jemalloc-stats`, `sip-net`, `alloc-counter`, `insn-counter`): they do NOT opt into
 # this table, pin their own `deny` + a narrow `#[allow(unsafe_code)]` on each
 # documented call site, and otherwise restate the workspace lint tables exactly
 # (scripts/purity.py checks it). This governs OUR source only; dependencies

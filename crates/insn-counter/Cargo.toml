@@ -1,0 +1,28 @@
+[package]
+name = "insn-counter"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "User-space instructions retired by the calling thread over a measured region (Linux perf_event_open): the deterministic work count behind scaling tests, beside alloc-counter's allocation count."
+
+# Opening a hardware counter is a raw `perf_event_open` syscall and two
+# `ioctl`s, which the workspace's `forbid(unsafe_code)` cannot admit locally.
+# This crate pins `deny` instead and each call site carries a narrow
+# `#[allow(unsafe_code)]` with a SAFETY comment. The clippy table restates the
+# workspace's exactly (scripts/purity.py checks it).
+
+[package.metadata.ha]
+side = "aware"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+too_many_lines = "warn"
+disallowed_macros = "allow"
+disallowed_methods = "allow"
+disallowed_types = "allow"
+
+[dependencies]
+libc = { workspace = true }

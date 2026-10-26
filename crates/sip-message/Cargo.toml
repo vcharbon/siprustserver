@@ -59,6 +59,9 @@ flate2.workspace = true
 # Counting #[global_allocator] behind `tests/alloc_budget.rs` — the deterministic
 # allocs-per-message budget on the parse + proxy-hop paths.
 alloc-counter = { path = "../alloc-counter" }
+# The user-space instruction count behind `tests/scaling`, the work count that
+# sees what allocates nothing.
+insn-counter = { path = "../insn-counter" }
 
 [[bench]]
 name = "sip_parser"

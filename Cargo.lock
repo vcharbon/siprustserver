@@ -2391,6 +2391,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "insn-counter"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "ipconfig"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4609,6 +4616,7 @@ dependencies = [
  "bytes",
  "criterion",
  "flate2",
+ "insn-counter",
  "lookup-map",
  "memchr",
  "proptest",
