@@ -39,9 +39,9 @@ const EVIDENCE: &str = "evidence";
 
 /// The evidence rules: their own stage, read before every rule of the chain
 /// (ADR-0055 §4), so no service sees or pre-empts a message only a lost write
-/// explains. Trigger 4 is a rule only on a call another owner served
+/// explains. Triggers 4 and 6 are rules only on a call another owner served
 /// (`copy_served`); on a call one node served the callee's BYE is
-/// `relay-bye`'s.
+/// `relay-bye`'s and the caller's re-INVITE the chain's.
 pub fn evidence_rules(copy_served: bool) -> Vec<RuleDefinition> {
     let mut rules = vec![
         RuleDefinition::core(

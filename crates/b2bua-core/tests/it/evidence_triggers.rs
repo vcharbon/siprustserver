@@ -61,7 +61,7 @@ fn turn_on(
     turn_on_served(call, event, leg, resolved, config, false)
 }
 
-/// [`turn_on`] on a call a takeover copy served when `copy_served`.
+/// [`turn_on`], on a call another owner served when `copy_served`.
 fn turn_on_served(
     call: &call::Call,
     event: &CallEvent,

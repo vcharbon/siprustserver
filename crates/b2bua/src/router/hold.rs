@@ -21,8 +21,8 @@ use crate::poison::{locked, HELD_ACKS};
 /// A message a hold keeps back: the ACK of a 2xx, or the final to a
 /// non-INVITE request.
 enum Kept {
-    Ack(SipRequest),
-    Final(SipResponse),
+    Ack(Box<SipRequest>),
+    Final(Box<SipResponse>),
 }
 
 /// A message waiting for its call's backup: sent once, by whichever comes
@@ -42,7 +42,7 @@ impl Held {
         match slot.take() {
             Some((Kept::Ack(ack), dest)) => send_ack(ctx, &ack, dest).await,
             Some((Kept::Final(resp), dest)) => {
-                let _ = ctx.txn.send_response(resp, dest).await;
+                let _ = ctx.txn.send_response(*resp, dest).await;
             }
             None => {}
         }
@@ -102,7 +102,7 @@ pub(super) async fn ack(ctx: &Arc<RouterCtx>, call_ref: &str, ack: &SipRequest, 
         send_ack(ctx, ack, dest).await;
         return;
     }
-    hold(ctx, call_ref, &ack.call_id().to_string(), Kept::Ack(ack.clone()), dest);
+    hold(ctx, call_ref, &ack.call_id().to_string(), Kept::Ack(Box::new(ack.clone())), dest);
 }
 
 /// Send `resp`, the final to a non-INVITE request of `call_ref`, toward
@@ -117,7 +117,7 @@ pub(super) async fn non_invite_final(
         let _ = ctx.txn.send_response(resp.clone(), dest).await;
         return;
     }
-    hold(ctx, call_ref, &resp.call_id().to_string(), Kept::Final(resp.clone()), dest);
+    hold(ctx, call_ref, &resp.call_id().to_string(), Kept::Final(Box::new(resp.clone())), dest);
 }
 
 /// Keep `kept` of `call_ref` until the call's backup applied its current
