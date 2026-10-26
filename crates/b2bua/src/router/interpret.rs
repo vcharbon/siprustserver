@@ -363,7 +363,10 @@ async fn reach(ctx: &RouterCtx, call_ref: &str, point: TurnPoint, wrote: bool, k
 /// (LimiterRefresh, absorbed events) stamp nothing; a terminated result is
 /// being released and stamps nothing either.
 async fn emit_outbound(ctx: &Arc<RouterCtx>, call_ref: &str, result: &HandlerResult, now_ms: i64) {
-    if !result.effects.outbound.is_empty() && result.call.state != CallModelState::Terminated {
+    // The turn ends the call, which is released with it: nothing it sends is
+    // held (ADR-0055 §3).
+    let ends = result.call.state == CallModelState::Terminated;
+    if !result.effects.outbound.is_empty() && !ends {
         ctx.state.touch(call_ref, now_ms);
     }
 
@@ -426,7 +429,7 @@ async fn emit_outbound(ctx: &Arc<RouterCtx>, call_ref: &str, result: &HandlerRes
             (OutboundBody::Response(resp), _)
                 if resp.status() >= 200 && resp.cseq().method() != Method::Invite =>
             {
-                super::hold::non_invite_final(ctx, call_ref, resp, dest).await;
+                super::hold::non_invite_final(ctx, call_ref, resp, dest, ends).await;
             }
             (OutboundBody::Response(resp), mode) => {
                 debug_assert!(
@@ -458,7 +461,7 @@ async fn emit_outbound(ctx: &Arc<RouterCtx>, call_ref: &str, result: &HandlerRes
                 // repeat of that 2xx once this call is released (RFC 6026 §7.2).
                 // The ACK of a 2xx is held for the call's backup (ADR-0055 §3).
                 if *req.method() == Method::Ack {
-                    super::hold::ack(ctx, call_ref, req, dest).await;
+                    super::hold::ack(ctx, call_ref, req, dest, ends).await;
                 } else if *req.method() == Method::Cancel {
                     let _ = ctx.txn.send_request(req.clone(), dest, TxnKind::Invite).await;
                 } else {

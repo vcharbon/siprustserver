@@ -119,7 +119,7 @@ async fn a_logged_write_reaches_an_idle_backup_one_transit_later() {
 async fn a_tombstone_stays_until_the_peer_reports_applying_it() {
     let clock = Clock::test_at(0);
     let log = Changelog::new(1, clock.clone());
-    let _serving = log.serving("B", None, Partition::Bak);
+    let _serving = log.serving("B", Partition::Bak);
     log.bump_put("B", "c", Partition::Bak);
     log.bump_delete("B", "c", Partition::Bak, false, None);
     let deleted_at = log.head();
@@ -153,7 +153,7 @@ fn marks(high_entries: usize, low_entries: usize) -> BacklogMarks {
 async fn a_backlog_over_high_water_gives_new_calls_no_backup_until_under_low_water() {
     let log = Changelog::new(1, Clock::test_at(0));
     log.set_backlog_marks(marks(3, 1));
-    let _serving = log.serving("B", None, Partition::Bak);
+    let _serving = log.serving("B", Partition::Bak);
     assert!(log.admits_backup("B"), "an empty backlog");
     for i in 0..3 {
         log.bump_put("B", &format!("c{i}"), Partition::Bak);
@@ -272,7 +272,7 @@ async fn a_hold_waits_for_the_backup_to_apply_the_calls_entry() {
     state.create_placed(call.clone());
     state.flush(&call);
     assert!(state.hold_target(&call.call_ref).is_none(), "no flow toward the backup: no hold");
-    let _serving = repl.changelog().serving("w1", None, Partition::Bak);
+    let _serving = repl.changelog().serving("w1", Partition::Bak);
     assert!(state.hold_target(&call.call_ref).is_none(), "a flow that reported nothing: no hold");
     repl.changelog().note_applied("w1", None, Partition::Bak, Watermark::new(1, 0));
     let target = state.hold_target(&call.call_ref).expect("a live, bootstrapped backup");
@@ -299,7 +299,7 @@ fn held(state: &CallState, call_ref: &str) -> tokio::task::JoinHandle<()> {
 async fn a_hold_follows_its_calls_entry_past_another_calls_applied_write() {
     let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
     let state = wired(&repl);
-    let _serving = repl.changelog().serving("w1", None, Partition::Bak);
+    let _serving = repl.changelog().serving("w1", Partition::Bak);
     repl.changelog().note_applied("w1", None, Partition::Bak, Watermark::new(1, 0));
     let (a, b) = (backed_call(1), backed_call(2));
     state.create_placed(a.clone());
@@ -394,4 +394,34 @@ async fn a_body_that_does_not_encode_leaves_the_call_without_a_backup() {
     );
     state.remove(&call.call_ref);
     assert_eq!(repl.unbacked_count(), 0);
+}
+
+/// **A puller's position counts under the identity membership binds.** B's
+/// supervisor states B's worker identity on the flow it opens toward A; A
+/// counts B's applied position only once its membership binds ordinal B to
+/// that identity (ADR-0055 §6).
+#[tokio::test(start_paused = true)]
+async fn a_pullers_position_counts_under_the_identity_membership_binds() {
+    let clock = Clock::test_at(0);
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let a = Node::spawn("A", addr(6), 1, &net, &clock).await;
+    let b = Node::spawn("B", addr(7), 1, &net, &clock).await;
+    a.store.changelog().bind_identity("B", Some("uid-other"));
+    let a_addr = a.addr;
+    let resolve = Arc::new(super::FnPeerResolver(move |_: &topology::Peer| a_addr));
+    let b_sup = super::ReplicationSupervisor::new(
+        "B",
+        Some("uid-b".into()),
+        net.clone(),
+        b.store.clone(),
+        resolve,
+        fast_config(),
+        B2buaMetrics::new(),
+    );
+    b_sup.start(one_peer("A", &clock));
+    tick(6_000).await;
+    assert!(!a.store.changelog().flow_caught_up("B", Partition::Pri), "another identity's flow");
+    a.store.changelog().bind_identity("B", Some("uid-b"));
+    tick(6_000).await;
+    assert!(a.store.changelog().flow_caught_up("B", Partition::Pri), "B's identity counts");
 }

@@ -1,7 +1,6 @@
 //! A serve task's hold on the sub-log it streams: the peer's log stays
-//! reap-immune and the flow counts as connected while the task runs, and the
-//! worker identity that opened the latest flow is the one whose positions
-//! count (ADR-0031 D2, ADR-0055 §6).
+//! reap-immune and the flow counts as connected while the task runs (ADR-0031
+//! D2).
 
 use repl_net::frame::Partition;
 use tokio::sync::watch;
@@ -10,11 +9,10 @@ use super::{Changelog, PeerLog};
 use crate::store::{locked, REPLICA_CHANGELOG};
 
 impl Changelog {
-    /// Register a serve task for `(peer, partition)` opened by the worker
-    /// `identity`: keeps the peer's log reap-immune and marks the partition's
-    /// flow connected, until the returned `ServeGuard` drops; from now on only
-    /// `identity` reports for the flow. Creates the peer log if absent.
-    pub fn serving(&self, peer: &str, identity: Option<&str>, partition: Partition) -> ServeGuard {
+    /// Register a serve task for `(peer, partition)`: keeps the peer's log
+    /// reap-immune and marks the partition's flow connected, until the returned
+    /// `ServeGuard` drops. Creates the peer log if absent.
+    pub fn serving(&self, peer: &str, partition: Partition) -> ServeGuard {
         let written = {
             let mut inner = locked(&self.inner, REPLICA_CHANGELOG);
             let (now, counter) = (self.clock.now_ms(), inner.counter);
@@ -26,7 +24,6 @@ impl Changelog {
             // A new flow starts unknown: a claim left by a flow the peer never
             // closed (a dead node sends no FIN) must not vouch for this one.
             sub.applied = None;
-            sub.identity = identity.map(str::to_string);
             sub.written.subscribe()
         };
         ServeGuard { changelog: self.clone(), peer: peer.to_string(), partition, written }

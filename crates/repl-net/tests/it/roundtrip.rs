@@ -205,6 +205,23 @@ fn err_unknown_enum_discriminant_partition() {
     }
 }
 
+/// A v4 peer's 6-element `PullRequest` decodes with no identity, so a server
+/// reads its version to refuse it.
+#[test]
+fn a_v4_pull_request_decodes_for_its_refusal() {
+    let mut bytes = Vec::new();
+    rmp::encode::write_array_len(&mut bytes, 6).unwrap();
+    rmp::encode::write_uint(&mut bytes, 0).unwrap(); // tag PullRequest
+    rmp::encode::write_uint(&mut bytes, 4).unwrap(); // proto_ver
+    rmp::encode::write_str(&mut bytes, "w").unwrap(); // caller
+    rmp::encode::write_uint(&mut bytes, 1).unwrap(); // partition
+    rmp::encode::write_uint(&mut bytes, 0).unwrap(); // since_gen
+    rmp::encode::write_uint(&mut bytes, 0).unwrap(); // since_counter
+    let Ok(Frame::PullRequest { proto_ver: 4, identity: None, .. }) = decode_frame(&bytes) else {
+        panic!("a v4 PullRequest decodes: {:?}", decode_frame(&bytes));
+    };
+}
+
 #[test]
 fn err_unknown_enum_discriminant_op() {
     // Data with op = 5.

@@ -67,8 +67,8 @@ use super::ReplicatingCallStore;
 use crate::poison::{locked, SUPERVISOR_PEERS, SUPERVISOR_WIRING};
 
 mod backup_deferral;
+mod bindings;
 mod follow;
-mod own_endpoint;
 mod wiring;
 
 /// One of the supervisor's wiring slots ([`SUPERVISOR_WIRING`]).
@@ -413,7 +413,7 @@ impl ReplicationSupervisor {
     /// loop vs. the backup gate) cannot interleave check-then-spawn and
     /// double-spawn a flow.
     fn reconcile_from_snapshot(&self, snapshot: Vec<Peer>) {
-        self.observe_self(&snapshot);
+        self.observe_bindings(&snapshot);
         let desired: Vec<Peer> =
             snapshot.into_iter().filter(|p| p.ordinal != self.inner.self_ordinal).collect();
         let backup_enabled = self.inner.backup_enabled.load(Ordering::SeqCst);

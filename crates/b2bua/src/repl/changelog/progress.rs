@@ -41,9 +41,10 @@ impl Changelog {
     /// ([`repl_net::frame::Frame::Position`]), stamped now. The latest report
     /// stands, lower or not: a peer that shed what it held claims less, and
     /// its earlier claim no longer vouches for it. Ignored for a peer with no
-    /// log, and from a worker `identity` other than the one that opened the
-    /// sub-log's latest flow: a superseded worker on the ordinal vouches for
-    /// nothing its successor holds (ADR-0055 §6).
+    /// log, and from a worker `identity` other than the one membership binds to
+    /// the ordinal ([`bind_identity`](Self::bind_identity)): a superseded
+    /// worker on the ordinal vouches for nothing its successor holds (ADR-0055
+    /// §6).
     pub fn note_applied(
         &self,
         peer: &str,
@@ -53,11 +54,11 @@ impl Changelog {
     ) {
         let gen = self.gen;
         let mut inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
+        if inner.bound.get(peer).is_some_and(|bound| Some(bound.as_str()) != identity) {
+            return;
+        }
         if let Some(log) = inner.peers.get_mut(peer) {
             let sub = log.sub_mut(partition);
-            if sub.identity.as_deref() != identity {
-                return;
-            }
             sub.applied = Some(Claim { at, made: Instant::now() });
             if at.gen == gen {
                 sub.acked.send_if_modified(|acked| {
@@ -69,6 +70,17 @@ impl Changelog {
                 });
             }
         }
+    }
+
+    /// Bind `peer`'s ordinal to the worker `identity` membership names for it
+    /// (ADR-0055 §6): only that identity's reports count from now on. `None`:
+    /// membership names no identity, and every report counts.
+    pub fn bind_identity(&self, peer: &str, identity: Option<&str>) {
+        let mut inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
+        match identity {
+            Some(identity) => inner.bound.insert(peer.to_string(), identity.to_string()),
+            None => inner.bound.remove(peer),
+        };
     }
 
     /// Whether `peer` is a live, bootstrapped holder of `partition`: its flow is

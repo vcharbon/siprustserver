@@ -254,11 +254,15 @@ fn expect_len(got: u32, want: u32, frame: &'static str) -> Result<(), ReplCodecE
     Ok(())
 }
 
+/// A `PullRequest` of 7 elements, or the 6 of a v4 one with no `identity`:
+/// a server reads an older peer's version to refuse it.
 fn decode_pull_request(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
-    expect_len(len, 7, "PullRequest")?;
+    if len != 6 {
+        expect_len(len, 7, "PullRequest")?;
+    }
     let proto_ver = read_u16(rd, "proto_ver")?;
     let caller = read_str(rd, "caller")?;
-    let identity = read_opt_str(rd, "identity")?;
+    let identity = if len == 7 { read_opt_str(rd, "identity")? } else { None };
     let partition = Partition::from_u8(read_u8(rd, "partition")?)?;
     let since_gen = read_u64(rd, "since_gen")?;
     let since_counter = read_u64(rd, "since_counter")?;

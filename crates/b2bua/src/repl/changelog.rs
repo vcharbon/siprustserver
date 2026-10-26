@@ -113,9 +113,6 @@ struct SubLog {
     /// Serve tasks currently streaming this sub-log. `0` ⇒ no flow carries this
     /// partition to the peer, so nothing it holds can be current.
     streams: usize,
-    /// The worker identity that opened the latest flow: only its reports
-    /// count ([`progress`]).
-    identity: Option<String>,
     /// The highest position the peer ever reported applying on this sub-log
     /// under this node's incarnation, connected or not ([`progress`]).
     acked: watch::Sender<Watermark>,
@@ -133,7 +130,6 @@ impl SubLog {
             head: 0,
             applied: None,
             streams: 0,
-            identity: None,
             acked: watch::Sender::new(Watermark::new(0, 0)),
             written: watch::Sender::new(0),
         }
@@ -240,6 +236,9 @@ struct Inner {
     peers: HashMap<String, PeerLog>,
     /// How long a flow's claim vouches for it ([`progress`]).
     claim_ttl: std::time::Duration,
+    /// The worker identity membership binds to each peer ordinal, where it
+    /// names one: only that identity's reports count ([`progress`]).
+    bound: HashMap<String, String>,
     /// When the backlog toward a peer stops and resumes giving new calls a
     /// backup ([`backlog`]).
     marks: BacklogMarks,
@@ -266,6 +265,7 @@ impl Changelog {
                 counter: 0,
                 peers: HashMap::new(),
                 claim_ttl: DEFAULT_CLAIM_TTL,
+                bound: HashMap::new(),
                 marks: BacklogMarks::default(),
             })),
         }

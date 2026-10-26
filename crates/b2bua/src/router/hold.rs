@@ -96,9 +96,16 @@ impl Holds {
 }
 
 /// Send the ACK `ack` of `call_ref` toward `dest`: held for the call's backup,
-/// or at once when the call holds nothing.
-pub(super) async fn ack(ctx: &Arc<RouterCtx>, call_ref: &str, ack: &SipRequest, dest: SocketAddr) {
-    if ctx.state.hold_target(call_ref).is_none() {
+/// or at once when the call holds nothing or the turn `ends` it, the call
+/// released with it (ADR-0055 §3).
+pub(super) async fn ack(
+    ctx: &Arc<RouterCtx>,
+    call_ref: &str,
+    ack: &SipRequest,
+    dest: SocketAddr,
+    ends: bool,
+) {
+    if ends || ctx.state.hold_target(call_ref).is_none() {
         send_ack(ctx, ack, dest).await;
         return;
     }
@@ -106,14 +113,16 @@ pub(super) async fn ack(ctx: &Arc<RouterCtx>, call_ref: &str, ack: &SipRequest, 
 }
 
 /// Send `resp`, the final to a non-INVITE request of `call_ref`, toward
-/// `dest`: held for the call's backup, or at once when the call holds nothing.
+/// `dest`: held for the call's backup, or at once when the call holds nothing
+/// or the turn `ends` it, the call released with it (ADR-0055 §3).
 pub(super) async fn non_invite_final(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
     resp: &SipResponse,
     dest: SocketAddr,
+    ends: bool,
 ) {
-    if ctx.state.hold_target(call_ref).is_none() {
+    if ends || ctx.state.hold_target(call_ref).is_none() {
         let _ = ctx.txn.send_response(resp.clone(), dest).await;
         return;
     }

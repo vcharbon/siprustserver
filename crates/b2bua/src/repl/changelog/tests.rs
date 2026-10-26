@@ -12,7 +12,7 @@ fn changelog() -> Changelog {
 #[test]
 fn a_flow_below_the_head_is_not_caught_up_and_at_the_head_is() {
     let cl = changelog();
-    let _guard = cl.serving("A", None, Partition::Bak);
+    let _guard = cl.serving("A", Partition::Bak);
     cl.bump_put("A", "call-1", Partition::Bak);
     cl.bump_put("A", "call-2", Partition::Bak);
     assert!(!cl.flow_caught_up("A", Partition::Bak), "nothing reported yet");
@@ -28,7 +28,7 @@ fn a_flow_below_the_head_is_not_caught_up_and_at_the_head_is() {
 fn an_empty_sublog_is_caught_up_only_once_its_flow_reports() {
     let cl = changelog();
     assert!(!cl.flow_caught_up("A", Partition::Bak), "no peer log at all");
-    let _guard = cl.serving("A", None, Partition::Bak);
+    let _guard = cl.serving("A", Partition::Bak);
     assert!(!cl.flow_caught_up("A", Partition::Bak), "connected, nothing reported");
     // The first catch-up Noop reports the scan head: current from then on.
     cl.note_applied("A", None, Partition::Bak, Watermark::new(7, 0));
@@ -39,42 +39,47 @@ fn an_empty_sublog_is_caught_up_only_once_its_flow_reports() {
 fn a_reaped_peer_log_is_not_vacuously_current_on_return() {
     let cl = changelog().with_dead_peer_ttl(1_000);
     {
-        let _guard = cl.serving("A", None, Partition::Bak);
+        let _guard = cl.serving("A", Partition::Bak);
         cl.bump_put("A", "call-1", Partition::Bak);
         cl.note_applied("A", None, Partition::Bak, Watermark::new(7, 1));
         assert!(cl.flow_caught_up("A", Partition::Bak));
     }
     cl.reap(10_000);
     assert!(!cl.has_peer("A"), "idle past the dead-peer TTL: the log is gone");
-    let _again = cl.serving("A", None, Partition::Bak);
+    let _again = cl.serving("A", Partition::Bak);
     assert!(!cl.flow_caught_up("A", Partition::Bak), "a fresh log has no claim");
 }
 
 #[test]
 fn a_second_flow_does_not_inherit_a_dead_flows_claim() {
     let cl = changelog();
-    let _dead = cl.serving("A", None, Partition::Bak);
+    let _dead = cl.serving("A", Partition::Bak);
     cl.bump_put("A", "call-1", Partition::Bak);
     cl.note_applied("A", None, Partition::Bak, Watermark::new(7, 1));
     assert!(cl.flow_caught_up("A", Partition::Bak));
     // The peer reconnects while its old socket is still open server-side.
-    let _fresh = cl.serving("A", None, Partition::Bak);
+    let _fresh = cl.serving("A", Partition::Bak);
     assert!(!cl.flow_caught_up("A", Partition::Bak), "the new flow has reported nothing");
     cl.note_applied("A", None, Partition::Bak, Watermark::new(7, 1));
     assert!(cl.flow_caught_up("A", Partition::Bak));
 }
 
 /// A worker superseded on the ordinal vouches for nothing its successor
-/// holds (ADR-0055 §6): once the successor's identity opened a flow, the old
-/// identity's reports, on its flow still open, raise nothing.
+/// holds (ADR-0055 §6): once membership binds the ordinal to the successor's
+/// identity, the old identity's reports raise nothing, on its flow still open
+/// or on one it opens again.
 #[tokio::test(start_paused = true)]
 async fn a_superseded_identitys_report_releases_no_hold() {
     let cl = changelog();
-    let _old = cl.serving("A", Some("uid-1"), Partition::Bak);
+    cl.bind_identity("A", Some("uid-1"));
+    let _old = cl.serving("A", Partition::Bak);
     cl.bump_put("A", "call-1", Partition::Bak);
     cl.note_applied("A", Some("uid-1"), Partition::Bak, Watermark::new(7, 1));
-    let _new = cl.serving("A", Some("uid-2"), Partition::Bak);
+    assert!(cl.flow_caught_up("A", Partition::Bak), "the bound identity's report stands");
+    cl.bind_identity("A", Some("uid-2"));
+    let _new = cl.serving("A", Partition::Bak);
     cl.bump_put("A", "call-2", Partition::Bak);
+    let _old_again = cl.serving("A", Partition::Bak);
     cl.note_applied("A", Some("uid-1"), Partition::Bak, Watermark::new(7, 2));
     assert!(!cl.flow_caught_up("A", Partition::Bak), "the old identity vouches for nothing");
     let reached = cl.applied_reaches("A", Partition::Bak, Watermark::new(7, 2));
@@ -86,17 +91,28 @@ async fn a_superseded_identitys_report_releases_no_hold() {
     assert!(cl.flow_caught_up("A", Partition::Bak), "the successor's report stands");
 }
 
+/// A membership that names no identity for the ordinal filters nothing.
+#[test]
+fn an_ordinal_bound_to_no_identity_counts_every_report() {
+    let cl = changelog();
+    cl.bind_identity("A", Some("uid-1"));
+    cl.bind_identity("A", None);
+    let _guard = cl.serving("A", Partition::Bak);
+    cl.note_applied("A", Some("uid-2"), Partition::Bak, Watermark::new(7, 0));
+    assert!(cl.flow_caught_up("A", Partition::Bak));
+}
+
 #[test]
 fn a_disconnected_flow_holds_no_position() {
     let cl = changelog();
-    let guard = cl.serving("A", None, Partition::Bak);
+    let guard = cl.serving("A", Partition::Bak);
     cl.bump_put("A", "call-1", Partition::Bak);
     cl.note_applied("A", None, Partition::Bak, Watermark::new(7, 1));
     assert!(cl.flow_caught_up("A", Partition::Bak));
     drop(guard);
     assert!(!cl.flow_caught_up("A", Partition::Bak), "a cut flow's position is unknown");
     // A fresh flow starts from "unknown", not from the cleared claim.
-    let _again = cl.serving("A", None, Partition::Bak);
+    let _again = cl.serving("A", Partition::Bak);
     assert!(!cl.flow_caught_up("A", Partition::Bak));
 }
 
@@ -111,7 +127,7 @@ fn the_default_claim_ttl_is_two_default_noop_intervals() {
 #[tokio::test(start_paused = true)]
 async fn a_claim_no_noop_answer_refreshed_goes_stale() {
     let cl = changelog();
-    let _guard = cl.serving("A", None, Partition::Bak);
+    let _guard = cl.serving("A", Partition::Bak);
     cl.bump_put("A", "call-1", Partition::Bak);
     cl.note_applied("A", None, Partition::Bak, Watermark::new(7, 1));
     tokio::time::advance(Duration::from_secs(9)).await;
@@ -128,7 +144,7 @@ async fn a_claim_no_noop_answer_refreshed_goes_stale() {
 #[test]
 fn a_lower_claim_replaces_a_higher_one() {
     let cl = changelog();
-    let _guard = cl.serving("A", None, Partition::Bak);
+    let _guard = cl.serving("A", Partition::Bak);
     cl.bump_put("A", "call-1", Partition::Bak);
     cl.bump_put("A", "call-2", Partition::Bak);
     cl.note_applied("A", None, Partition::Bak, Watermark::new(7, 2));
@@ -140,7 +156,7 @@ fn a_lower_claim_replaces_a_higher_one() {
 #[test]
 fn the_head_survives_compaction_of_the_same_ref() {
     let cl = changelog();
-    let _guard = cl.serving("A", None, Partition::Bak);
+    let _guard = cl.serving("A", Partition::Bak);
     cl.bump_put("A", "call-1", Partition::Bak);
     cl.bump_put("A", "call-1", Partition::Bak);
     assert_eq!(cl.peer_len("A", Partition::Bak), 1, "compacted to one entry");
@@ -256,7 +272,7 @@ async fn a_delete_landing_mid_drain_goes_out_once_with_its_own_answer() {
 #[test]
 fn a_position_from_an_older_incarnation_never_reaches_the_head() {
     let cl = changelog();
-    let _guard = cl.serving("A", None, Partition::Bak);
+    let _guard = cl.serving("A", Partition::Bak);
     cl.bump_put("A", "call-1", Partition::Bak);
     cl.note_applied("A", None, Partition::Bak, Watermark::new(6, u64::MAX));
     assert!(!cl.flow_caught_up("A", Partition::Bak));

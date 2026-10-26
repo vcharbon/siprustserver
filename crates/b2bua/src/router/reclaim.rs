@@ -224,8 +224,8 @@ pub(super) async fn meet_refused_flush(
 
 /// Force the last persisted snapshot of `call_ref` terminal and run it through
 /// the ordinary `finalize → enforce → process_result` funnel: the `ObligationSet`
-/// discharges the CDR + limiter holds, `RemoveCall` rides
-/// `release_call(Terminated)`, and the delete propagates. Reached ONLY by the
+/// discharges the CDR + limiter holds, and `RemoveCall` logs the delete and
+/// rides `release_call(Terminated)`. Reached ONLY by the
 /// reaper `OUTCOME_DISCHARGE` branch — a takeover copy DEFERS its discharge to
 /// the primary instead of discharging here (see `process_result`). `discharge_result` forces every leg terminal with NO wire
 /// traffic. The caller MUST hold the per-call lock.

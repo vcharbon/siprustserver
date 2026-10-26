@@ -287,8 +287,8 @@ async fn reaper_verdict_gate(
                 // Strike-2: the rules path itself failed. Force the last
                 // persisted snapshot terminal and run it through the ORDINARY
                 // finalize → enforce → process_result — the ObligationSet
-                // discharges the CDR + limiter holds, RemoveCall rides
-                // release_call(Terminated), the delete propagates (X6).
+                // discharges the CDR + limiter holds, RemoveCall logs the
+                // delete and rides release_call(Terminated) (X6).
                 if ctx.state.peek(call_ref).is_none() {
                     return Gate::Consumed;
                 }

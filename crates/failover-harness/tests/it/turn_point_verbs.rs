@@ -154,6 +154,8 @@ async fn a_terminal_turn_logs_its_delete_before_its_effects_leave() {
     cluster.fh.advance(Duration::from_millis(300)).await;
     let turn = cluster.fh.turn_points().turns(&call_ref)[terminal - 1];
     assert!(turn.wrote, "the terminal turn wrote the call's delete");
+    let cdrs = failover_harness::total_cdrs_for(&cluster.nodes(), &call_ref);
+    assert_eq!(cdrs, 1, "the CDR was enqueued before the delete");
     assert!(
         !backup.scan_backed_up(&placement.primary).contains(&call_ref),
         "the backup applied the delete while the turn's effects wait"
