@@ -48,6 +48,8 @@ mod stated_text;
 mod unbuilt;
 
 #[cfg(test)]
+mod contact_tests;
+#[cfg(test)]
 mod identity_tests;
 #[cfg(test)]
 mod originate_charging_tests;
@@ -104,4 +106,6 @@ pub use failure_ext::{
 };
 
 // The B2BUA's own per-leg identity.
-pub use identity::{leg_contact, leg_via, CallMarks, RequestFacts};
+pub use identity::{
+    allocate_leg_contact, leg_contact, leg_via, CallMarks, ContactMarks, RequestFacts,
+};

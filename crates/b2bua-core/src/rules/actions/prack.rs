@@ -162,7 +162,7 @@ impl ActionExecutor<'_> {
                 }),
                 branch.clone(),
             )),
-            contact: Some(relay::leg_contact(self.config, marks, &id.leg)),
+            contact: relay::leg_contact(call, &id.leg),
             rack: Some(RAck::new(id.rseq.0, id.invite_cseq.0, Method::Invite)),
             cseq: Some(relay::wire_cseq(outbound_cseq)),
             content_type: answer.is_some().then(relay::sdp),

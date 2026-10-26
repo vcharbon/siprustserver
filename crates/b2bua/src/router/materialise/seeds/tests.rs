@@ -99,6 +99,7 @@ fn b_leg(state: LegState, handle: Option<call::SentRequest>) -> Leg {
         dialogs: Default::default(),
         local_uri: Some("sip:svc@10.0.0.9".into()),
         remote_uri: Some("sip:bob@10.0.0.2".into()),
+        contact: "sip:b2bua@127.0.0.1:5060".into(),
         invite_request_uri: Some("sip:bob@10.0.0.2:5070".into()),
         invite: Some(RequestRecord::dialled(1, handle.clone(), OutboundInvite::new("svc", 0))),
         own_tag: None,

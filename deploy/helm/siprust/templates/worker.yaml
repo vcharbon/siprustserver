@@ -12,7 +12,7 @@ B2BUA_LOOP_STALL_MS.
 {{- $w := .Values.worker }}
 {{- $env := dict
   "B2BUA_LISTEN" "0.0.0.0:5060"
-  "B2BUA_ADVERTISE" "$(POD_IP)"
+  "B2BUA_ADVERTISE" "$(POD_IP):5060"
   "B2BUA_ORDINAL" "$(POD_NAME)"
   "B2BUA_METRICS" "0.0.0.0:9091"
   "B2BUA_REPL" (ternary "1" "0" $w.replication.enabled)
@@ -25,9 +25,14 @@ B2BUA_LOOP_STALL_MS.
 {{- with $w.dest }}
 {{- $_ := set $env "B2BUA_DEST" . }}
 {{- end }}
-{{- if and .Values.proxy.enabled $w.outboundProxy }}
+{{- /* Behind the proxy, b-leg requests go through its internal VIP and every
+Contact names its external VIP; without it the worker is standalone. */ -}}
+{{- if .Values.proxy.enabled }}
+{{- $_ := set $env "B2BUA_MODE" "proxied" }}
 {{- $_ := set $env "B2BUA_OUTBOUND_PROXY" (printf "%s:%d" (include "siprust.net" (dict "root" $ "key" "proxyVip")) (int .Values.network.sipPort)) }}
-{{- $_ := set $env "B2BUA_REQUIRE_OUTBOUND_PROXY" "1" }}
+{{- $_ := set $env "B2BUA_CONTACT_ADDRESS" (printf "%s:%d" (include "siprust.net" (dict "root" $ "key" "externalVip")) (int .Values.network.sipPort)) }}
+{{- else }}
+{{- $_ := set $env "B2BUA_MODE" "standalone" }}
 {{- end }}
 {{- if .Values.callLimiter.enabled }}
 {{- $_ := set $env "LIMITER_URL" (printf "%s:8080" (include "siprust.svcHost" (list $ "call-limiter"))) }}

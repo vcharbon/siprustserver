@@ -125,6 +125,7 @@ fn same_leg(a: &Leg, b: &Leg) -> bool {
         dialogs,
         local_uri,
         remote_uri,
+        contact,
         invite_request_uri,
         invite,
         own_tag,
@@ -144,6 +145,7 @@ fn same_leg(a: &Leg, b: &Leg) -> bool {
         && dialogs.iter().zip(b.dialogs.iter()).all(|(x, y)| same_dialog(x, y))
         && *local_uri == b.local_uri
         && *remote_uri == b.remote_uri
+        && *contact == b.contact
         && *invite_request_uri == b.invite_request_uri
         && same_option(invite, &b.invite, same_record)
         && *own_tag == b.own_tag

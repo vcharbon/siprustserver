@@ -68,6 +68,16 @@ pub fn build_initial_call(
     let limiter = CallLimiterState::uncounted(call::derive_incarnation(&call_ref, &ids.new_tag()));
     let tag_seed = ids.draw();
     let (local_addr, remote_addr) = relay::uas_addresses(invite);
+    let emergency = is_emergency_request(invite).then_some(true);
+    let contact = relay::allocate_leg_contact(
+        config,
+        relay::ContactMarks {
+            call_ref: &call_ref,
+            incarnation_mark: call::incarnation_mark(limiter.key()),
+            is_emergency: emergency == Some(true),
+        },
+        "a",
+    );
     let a_leg = Leg {
         leg_id: "a".to_string(),
         call_id: invite.call_id().to_string(),
@@ -75,6 +85,7 @@ pub fn build_initial_call(
         dialogs: Default::default(),
         local_uri: Some(local_addr),
         remote_uri: Some(remote_addr),
+        contact,
         invite_request_uri: Some(invite.request_uri().to_string()),
         invite: Some(call::RequestRecord::received_invite(i64::from(invite.cseq().seq()))),
         own_tag: None,
@@ -132,7 +143,7 @@ pub fn build_initial_call(
         // `stack_identity`, so it is derived from the INVITE here, not
         // hard-coded. The admission ladder classifies the wire request directly and
         // never read this field.
-        emergency: is_emergency_request(invite).then_some(true),
+        emergency,
         features: None,
         policy_update_headers: None,
         policy_update_body: None,

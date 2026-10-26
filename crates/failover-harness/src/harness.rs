@@ -38,7 +38,7 @@ use b2bua::metrics::B2buaMetrics;
 use b2bua::repl::ReplicatingCallStore;
 use b2bua::rules::ServiceDef;
 use b2bua::store::{CallStore, PartitionRole, PutOpts};
-use b2bua::{B2buaCore, ReplicationSetup};
+use b2bua::{config::Front, B2buaCore, ReplicationSetup};
 use b2bua_harness::{spawn_proxy_core, B2buaSpawnParams};
 use call::{MsgpackCodec, TimerKey, TimerType};
 use ha_harness::{Marker, ReplReport};
@@ -100,8 +100,8 @@ pub struct ReplicatedB2buaSut {
     /// stored in `decision`, which a limiter scenario may override).
     #[allow(dead_code)]
     dest: (String, u16),
-    /// The b-leg outbound proxy (so the worker's bob traffic traverses the proxy).
-    outbound_proxy: Option<(String, u16)>,
+    /// The front proxy: the worker's bob traffic and every Contact go through it.
+    front: Front,
     wiring: ReplWiring,
     clock: Clock,
     /// The live core (`None` only transiently between crash and reboot).
@@ -735,7 +735,7 @@ impl ReplicatedB2buaSut {
             decision: self.decision.clone(),
             limiter: self.limiter.clone(),
             services: (self.services)(),
-            outbound_proxy: self.outbound_proxy.clone(),
+            front: self.front.clone(),
             replication,
             clock: self.clock.clone(),
             id_gen: Arc::new(IdGen::seeded(self.id_seed())),
@@ -1542,7 +1542,7 @@ impl FailoverHarness {
             cdr: cdr.clone(),
             metrics: B2buaMetrics::new(),
             dest: spec.dest.clone(),
-            outbound_proxy: Some(spec.outbound_proxy.clone()),
+            front: Front::single_face(&spec.outbound_proxy.0, spec.outbound_proxy.1),
             wiring,
             clock: node_clock.clone(),
             core: None,

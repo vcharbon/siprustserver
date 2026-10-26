@@ -18,8 +18,7 @@
 //! After a kill, the copy may CANCEL once a callee INVITE the dead primary saw
 //! finally answered, and every kill of the primary accepts the §4 clean end's
 //! BYE or terminating NOTIFY into a dialog the other owner ended, closed by
-//! its 481. After a stall, the copy's repeat of the caller's 2xx may differ
-//! from the dead owner's in its own Contact alone.
+//! its 481.
 //!
 //! A cell is named `<shape>/<incident>/t<k>-<point>`. The cells that fail
 //! before their correction lands are listed in a [`Ratchet`] with the decision

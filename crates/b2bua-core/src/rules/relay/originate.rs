@@ -19,7 +19,7 @@ use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenanc
 use super::address::{address, identity, UnreadableAddress};
 use super::body::{media_type, sdp, source_content_type};
 use super::egress::apply_b_leg_egress;
-use super::identity::{leg_contact, leg_via, CallMarks};
+use super::identity::{allocate_leg_contact, leg_via, stated_contact, CallMarks};
 use super::option_tags::{apply_offered_option_tags, apply_withheld_option_tags};
 use super::stated_text::writable;
 use b2bua_sdk::model::Body;
@@ -239,6 +239,7 @@ pub fn build_b_leg(
     let branch = ids.new_branch();
     let from_tag = ids.new_tag();
     let b_call_id = format!("{}-{}@{}", leg_id, ids.new_tag(), config.sip_local_ip);
+    let contact = allocate_leg_contact(config, marks.into(), leg_id);
     // Each rewrite is read here or the leg is not built. `None` keeps the
     // relayed a-leg value, which the parser already accepted.
     let request_uri = match new_ruri {
@@ -389,7 +390,7 @@ pub fn build_b_leg(
             }),
             branch.clone(),
         )),
-        contact: Some(leg_contact(config, marks, leg_id)),
+        contact: stated_contact(&contact),
         // §16.6 step 3: the originated leg continues the budget of the INVITE
         // that caused it rather than refilling — a B2BUA that restated 70 would
         // let a routing loop through it run forever. A REFER transfer leg reads
@@ -435,6 +436,7 @@ pub fn build_b_leg(
         dialogs: Default::default(),
         local_uri: Some(local_addr),
         remote_uri: Some(remote_addr),
+        contact,
         invite_request_uri: Some(request_uri),
         // Each dialog a response to this INVITE creates reads its image, for
         // its ACK-for-2xx / RAck CSeq (RFC 3261 §13.2.2.4 / RFC 3262 §7.2).

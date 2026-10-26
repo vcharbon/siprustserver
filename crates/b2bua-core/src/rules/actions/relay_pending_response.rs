@@ -54,9 +54,9 @@ impl ActionExecutor<'_> {
         // or answers a target refresh (`response_states_own_contact`) —
         // a relayed 200 to PRACK/OPTIONS/INFO/MESSAGE states none, and a
         // relayed 3xx / 485 carries the peer's targets in passthrough.
-        let contact =
+        let contact = relay::leg_contact(call, target_leg).filter(|_| {
             generators::response_states_own_contact(&Method::from_wire(&r.cseq_method), status)
-                .then(|| relay::leg_contact(self.config, self.marks(call), target_leg));
+        });
         let mut transparent_headers = r.passthrough(relay::relay_response_passthrough_headers(
             r.resp,
             self.config

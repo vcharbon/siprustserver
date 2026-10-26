@@ -20,7 +20,7 @@ use crate::config::B2buaConfig;
 ///      in-dialog requests toward a record-routing proxy traverse it.
 ///   2. **b-leg outbound-proxy bootstrap**: when the route set is empty (the
 ///      pre-confirmation initial INVITE), `leg_id` is a b-leg, and
-///      `config.b2b_outbound_proxy` is set, preload a *plain* loose `Route` at the
+///      the worker runs behind the proxy (`Front::Proxied`), preload a *plain* loose `Route` at the
 ///      proxy and redirect the wire destination there (the b-leg invariant: every
 ///      B2BUA→callee message traverses the front proxy). The proxy classifies the
 ///      initial INVITE worker-outbound from the top Via and double-record-routes
@@ -30,7 +30,7 @@ use crate::config::B2buaConfig;
 ///
 /// `route_set` is the source dialog's route set in dialog order. For the a-leg
 /// the natural route set (from the inbound INVITE's Record-Route) carries the
-/// routing; `b2b_outbound_proxy` is a b-leg concept and is not applied there.
+/// routing; the outbound proxy is a b-leg concept and is not applied there.
 pub fn apply_b_leg_egress(
     config: &B2buaConfig,
     leg_id: &str,
@@ -92,7 +92,7 @@ pub fn apply_b_leg_egress(
 /// destination it resolves to. `None` when no outbound proxy is configured
 /// (local/dev, where the transport IS peer-direct).
 fn outbound_proxy_route(config: &B2buaConfig) -> Option<(RouteEntry, (String, u16))> {
-    let (host, port) = config.b2b_outbound_proxy.clone()?;
+    let (host, port) = config.front.outbound_proxy().cloned()?;
     let route = RouteEntry::from_uri(Uri::sip(host.clone()).with_port(port).with_flag("lr"));
     Some((route, (host, port)))
 }
@@ -132,7 +132,7 @@ pub fn leg_egress_dest(
     if leg_id == "a" {
         return base_dest;
     }
-    if let Some((host, port)) = config.b2b_outbound_proxy.clone() {
+    if let Some((host, port)) = config.front.outbound_proxy().cloned() {
         return (host, port);
     }
     base_dest
@@ -224,7 +224,7 @@ Content-Length: 0\r\n\r\n"
     #[test]
     fn b_leg_bootstrap_preloads_plain_loose_route() {
         let mut config = B2buaConfig::default();
-        config.b2b_outbound_proxy = Some(("10.0.0.9".to_string(), 5060));
+        config.front = crate::config::Front::single_face("10.0.0.9", 5060);
         let invite = parse(
             "INVITE sip:bob@10.244.2.7:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP 10.244.1.5:5060;branch=z9hG4bKb;lg=b\r\n\
@@ -296,7 +296,7 @@ Content-Length: 0\r\n\r\n",
 
         // (2) Empty route set, b-leg, outbound proxy configured → the proxy.
         let mut config = B2buaConfig::default();
-        config.b2b_outbound_proxy = Some(("10.0.0.9".to_string(), 5060));
+        config.front = crate::config::Front::single_face("10.0.0.9", 5060);
         assert_eq!(
             leg_egress_dest(&config, "b-1", &[], base.clone()),
             ("10.0.0.9".to_string(), 5060),

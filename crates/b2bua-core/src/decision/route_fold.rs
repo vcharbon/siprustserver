@@ -215,7 +215,7 @@ pub fn admitted(
 
     // NOTE: a DNS-name b-leg callee (e.g. a headless-StatefulSet `sipp-uas` pod
     // FQDN the UAC injects via `X-Api-Call.destination`) is NOT resolved here. The
-    // B2BUA only routes the b-leg to the LB (via the `b2b_outbound_proxy` Route);
+    // B2BUA only routes the b-leg to the LB (via the outbound-proxy Route);
     // the LB resolves the Request-URI name to the pod IP and forwards it (kept off
     // the B2BUA so resolution/next-hop selection lives in one place — the proxy).
     // A per-pod name is single-A, so it resolves consistently across retransmits

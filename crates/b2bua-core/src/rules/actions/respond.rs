@@ -91,8 +91,8 @@ impl ActionExecutor<'_> {
             // (`leg_own_tag`; none on the a-leg before its dialog exists). No
             // rule answers locally with a 1xx, so the policy's tagged-1xx
             // clause needs no check here.
-            let contact = generators::response_states_own_contact(req.method(), status)
-                .then(|| relay::leg_contact(self.config, self.marks(call), ctx.source_leg_id));
+            let contact = relay::leg_contact(call, ctx.source_leg_id)
+                .filter(|_| generators::response_states_own_contact(req.method(), status));
             let opts = GenerateResponseOpts {
                 to_tag,
                 contact,
@@ -169,7 +169,7 @@ impl ActionExecutor<'_> {
         self.retire(call, fx, Scope::Provisionals);
         let a_tag = self.ensure_a_dialog(call);
         let Some(a_invite) = self.caller_invite(call) else { return };
-        let contact = relay::leg_contact(self.config, self.marks(call), &call.a_leg.leg_id);
+        let contact = relay::leg_contact(call, &call.a_leg.leg_id);
         // Guard: the status relayed here is the failing peer's own, so the
         // image already holds retry targets only on a 3xx / 485. Any other
         // status keeps no Contact line, whatever the image holds.
@@ -191,7 +191,7 @@ impl ActionExecutor<'_> {
             status,
             reason,
             Some(a_tag),
-            Some(contact),
+            contact,
             vec![],
             None,
             None,
@@ -365,7 +365,7 @@ impl ActionExecutor<'_> {
             .and_then(relay::media_type)
             .or_else(|| (!body.is_empty()).then(relay::sdp));
         let Some(a_invite) = self.caller_invite(call) else { return };
-        let contact = relay::leg_contact(self.config, self.marks(call), &call.a_leg.leg_id);
+        let contact = relay::leg_contact(call, &call.a_leg.leg_id);
         let mut extra_headers = Vec::new();
         if let Some(pem) = p_early_media {
             extra_headers.push(SipHeader {
@@ -381,7 +381,7 @@ impl ActionExecutor<'_> {
             status,
             reason,
             Some(to_tag),
-            Some(contact),
+            contact,
             body.to_vec(),
             content_type,
             None,
@@ -451,7 +451,7 @@ impl ActionExecutor<'_> {
             .and_then(relay::media_type)
             .or_else(|| (!body.is_empty()).then(relay::sdp));
         let Some(a_invite) = self.caller_invite(call) else { return };
-        let contact = relay::leg_contact(self.config, self.marks(call), &call.a_leg.leg_id);
+        let contact = relay::leg_contact(call, &call.a_leg.leg_id);
         // §16.6: the delivered final's lines ride as received, except the names
         // the service's `header_updates` state — those are the service's, set
         // or removed, and a relayed line of the same name never competes.
@@ -498,7 +498,7 @@ impl ActionExecutor<'_> {
             status,
             reason,
             Some(a2.clone()),
-            Some(contact),
+            contact,
             body.to_vec(),
             content_type,
             None,

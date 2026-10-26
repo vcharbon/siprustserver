@@ -6,9 +6,11 @@ use crate::sdp_form::{AsWritten, SdpFormPolicy};
 use crate::service_params::ServiceParams;
 
 mod capacity;
+mod front;
 mod retry_after;
 mod validate;
 pub use capacity::{CapacityConfig, Ceilings};
+pub use front::Front;
 pub use retry_after::RetryAfterRange;
 
 /// Tunables for a B2BUA worker. Cheap to clone (a handful of scalars + two
@@ -22,17 +24,12 @@ pub struct B2buaConfig {
     /// verifies the statement on a response its request drew. `None`: the
     /// worker states nothing and trusts no statement.
     pub cluster_key: Option<sip_ids::SigningKey>,
-    /// Local signaling IP stamped into Via / Contact.
+    /// Local signaling IP stamped into Via, and into Contact standalone.
     pub sip_local_ip: String,
-    /// Local signaling port stamped into Via / Contact.
+    /// Local signaling port stamped into Via, and into Contact standalone.
     pub sip_local_port: u16,
-    /// When the worker is deployed behind the SIP front proxy, every b-leg
-    /// (worker→callee) outbound request is sent to this `(host, port)` with a
-    /// preloaded plain `Route: <sip:host:port;lr>`; the proxy's internal face
-    /// classifies it worker-outbound (skip LB, forward to the R-URI; ADR-0048).
-    /// The R-URI / remote target stays the callee (RFC 3261 §16.12). `None` =
-    /// send b-leg traffic straight to the callee.
-    pub b2b_outbound_proxy: Option<(String, u16)>,
+    /// The deployment mode: standalone, or behind the SIP front proxy.
+    pub front: Front,
     /// Global cap on concurrently-running handlers across all calls.
     pub event_dispatch_concurrency: usize,
     /// Per-call queue depth (events buffered behind a busy handler).
@@ -371,7 +368,7 @@ impl Default for B2buaConfig {
             cluster_key: None,
             sip_local_ip: "127.0.0.1".to_string(),
             sip_local_port: 5060,
-            b2b_outbound_proxy: None,
+            front: Front::Standalone,
             event_dispatch_concurrency: 1024,
             per_call_queue_depth: 64,
             per_call_queue_cap: 200_000,

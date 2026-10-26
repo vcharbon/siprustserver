@@ -71,10 +71,6 @@ worker:
   # B2BUA_DEST: the callee of the scripted decision backend, an IP literal
   # (workers never resolve an external name). Empty leaves the runner default.
   dest: ""
-  # With the proxy enabled, every b-leg request goes through the proxy's
-  # internal VIP (B2BUA_OUTBOUND_PROXY, ADR-0048) and the worker refuses to
-  # boot without it (B2BUA_REQUIRE_OUTBOUND_PROXY).
-  outboundProxy: true
   # The Secret holding the key the workers share to sign the via-extension
   # on their own requests (ADR-0055 §12), key `key` (16 to 64 bytes).
   # Required with `replication.enabled`: the chart never draws it, so every

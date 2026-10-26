@@ -463,9 +463,6 @@ number of takeovers unshifted.
   - a kill (user ruling): a copy's one CANCEL of a callee's INVITE the dead
     owner saw finally answered, 2xx or not; the callee answers it and keeps
     what its final left it, a dialog its own timers end or none;
-  - a stall (user ruling): a copy's repeat of the caller's 2xx that differs
-    from the dead owner's only in its own Contact, every other header field
-    and the body unchanged; the Contact of a node is its own;
   - a stall (user ruling): a copy's repeat of a CANCEL that differs from the
     dead owner's only in its Reason header field; every other difference
     keeps the finding;
@@ -535,6 +532,18 @@ responses to a named role, carried out through real causes (health, kill,
 partition), never by bypassing the proxy; turn points with their three
 sub-points, so an incident arms at turn k; and views named by role (primary,
 backup, copy).
+
+### 14. A leg states one Contact
+
+A leg's Contact is allocated once, when the leg is created, and stored in the
+call record: every message of the leg that states a Contact states that one,
+whichever copy sends it, so a takeover never moves the peer's remote target
+and a copy's repeat of a response the other owner sent states the same
+Contact.
+Behind the proxy the Contact names the proxy's peer-facing address; a
+standalone worker's names the worker. The worker's mode is explicit, and a
+worker whose parameters do not match its mode refuses to start. The Via keeps
+naming the node that sends.
 
 ## Considered and rejected
 

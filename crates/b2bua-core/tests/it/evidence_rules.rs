@@ -73,6 +73,7 @@ pub(super) fn bridged() -> call::Call {
         dialogs: Default::default(),
         local_uri: Some("sip:svc@10.0.0.9".into()),
         remote_uri: Some("sip:bob@10.0.0.2".into()),
+        contact: "sip:b2bua@127.0.0.1:5060".into(),
         invite_request_uri: Some("sip:bob@10.0.0.2:5070".into()),
         invite: Some(call::RequestRecord::dialled(1, None, OutboundInvite::new("svc", 0))),
         own_tag: None,

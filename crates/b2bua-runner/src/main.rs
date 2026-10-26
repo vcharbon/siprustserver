@@ -4,7 +4,7 @@
 //! (`sip_net::RealSignalingNetwork` — no `Recorder` decorator, no simulated
 //! fabric) and a **system wall clock** (`Clock::system`, so transaction/dialog
 //! timers fire). The generic runner plumbing — env grammar, bind + ingress
-//! brake, advertise coercion, deps defaults, probe server, gauge sampler,
+//! brake, the worker's addresses and mode, deps defaults, probe server, gauge sampler,
 //! SIGTERM/drain — lives in `b2bua-runner-kit` (shared with downstream runner
 //! binaries per ADR-0016); this binary keeps only its OWN composition choices:
 //!   - route: `ScriptedDecisionEngine::route_all_to_with_limiter(DEST, stress)`
@@ -21,20 +21,20 @@
 //!   - alloc: jemalloc (+ heap-profiling `/debug/heap` route, jemalloc stats
 //!            appended to `/metrics`).
 //!
-//! Config via env (all optional; the generic `B2BUA_*`/`LIMITER_*`/`WORKER_*`
+//! Config via env (optional unless marked; the generic `B2BUA_*`/`LIMITER_*`/`WORKER_*`
 //! knobs are parsed by `b2bua_runner_kit::RunnerEnv` — see its field docs):
 //!   B2BUA_LISTEN    SIP/signaling listen addr        (default 0.0.0.0:5060)
-//!   B2BUA_ADVERTISE SIP host\[:port\] stamped on Via/Contact/b-leg Call-ID
-//!                   (default: bound IP, or loopback if bind is 0.0.0.0).
-//!                   In k8s inject the pod IP via downward API `status.podIP`,
-//!                   else peers route responses to 0.0.0.0 (a storm).
+//!   B2BUA_ADVERTISE REQUIRED: the worker's IP-literal ip:port on every Via and
+//!                   b-leg Call-ID, and standalone on every Contact. In k8s
+//!                   inject the pod IP via downward API `status.podIP`.
+//!   B2BUA_MODE      REQUIRED: `proxied` (behind the front proxy) or `standalone`
+//!   B2BUA_OUTBOUND_PROXY  proxied only, REQUIRED there: the proxy's worker-facing
+//!                   IP-literal ip:port every b-leg (worker→callee) request is
+//!                   forced through (a preloaded plain `;lr` Route).
+//!   B2BUA_CONTACT_ADDRESS proxied only, REQUIRED there: the proxy's peer-facing
+//!                   IP-literal ip:port every Contact names.
+//!                   (the full consistency table: `b2bua_runner_kit::addresses_from_lookup`)
 //!   B2BUA_DEST      downstream UAS host:port          (default 127.0.0.1:5070)
-//!   B2BUA_OUTBOUND_PROXY  front-proxy IP-literal ip:port every b-leg (worker→callee)
-//!                   request is forced through (a preloaded plain `;lr` Route).
-//!                   REQUIRED in the k8s cluster: a peer's internal pod IP is not
-//!                   routable peer-to-peer in a real deployment, so ALL outbound
-//!                   SIP must traverse the LB proxy — never go pod-direct. Unset →
-//!                   b-leg goes straight to the callee (local/dev only). (unset)
 //!   B2BUA_METRICS   Prometheus HTTP listen addr       (default 0.0.0.0:9091)
 //!   B2BUA_QUEUE     inbound UDP queue depth (packets)  (default 8192)
 //!   B2BUA_UDP_SNDBUF SO_SNDBUF on the signalling socket, bytes (default 4 MiB;
@@ -154,13 +154,13 @@ async fn run() -> Result<std::process::ExitCode, String> {
 
     // The b-leg callee (`B2BUA_DEST`) is passed to the decision engine as an
     // unresolved host:port: the core never resolves a destination name for
-    // sending. Behind the `B2BUA_OUTBOUND_PROXY` the proxy resolves the
+    // sending. Behind the proxy (`B2BUA_MODE=proxied`) it resolves the
     // Request-URI name; without it the b-leg INVITE to a name fails at send.
     let dest = env_or("B2BUA_DEST", "127.0.0.1:5070");
     let (dest_host, dest_port) = split_host_port(&dest);
 
     // Generic runner plumbing (b2bua-runner-kit): env grammar → bind (ingress
-    // brake installed) → advertise coercion → validated config + metrics/clock.
+    // brake installed) → the worker's addresses → validated config + metrics/clock.
     let base = RunnerEnv::from_env()?.bind("b2bua-runner").await?;
 
     // Runner-only coherence (not visible to `B2buaConfig::validate`): the default

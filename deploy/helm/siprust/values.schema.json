@@ -252,9 +252,6 @@
         "dest": {
           "type": "string"
         },
-        "outboundProxy": {
-          "type": "boolean"
-        },
         "clusterKey": {
           "type": "object",
           "additionalProperties": false,

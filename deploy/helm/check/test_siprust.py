@@ -65,14 +65,20 @@ class Network(unittest.TestCase):
         self.assertNotIn(("Secret", "sip-front-proxy-hmac"), names(docs))
         self.assertNotIn(("DaemonSet", "masq-exempt"), names(docs))
         e = env(container(find(docs, "StatefulSet", "b2bua-worker"), "b2bua-worker"))
+        self.assertEqual(e["B2BUA_MODE"], "standalone")
         self.assertNotIn("B2BUA_OUTBOUND_PROXY", e)
-        self.assertNotIn("B2BUA_REQUIRE_OUTBOUND_PROXY", e)
+        self.assertNotIn("B2BUA_CONTACT_ADDRESS", e)
 
     def test_workers_reach_the_world_through_the_internal_vip(self) -> None:
         e = env(container(find(render(SIPRUST, *KIND), "StatefulSet", "b2bua-worker"),
                           "b2bua-worker"))
+        self.assertEqual(e["B2BUA_MODE"], "proxied")
         self.assertEqual(e["B2BUA_OUTBOUND_PROXY"], "172.20.255.250:5060")
-        self.assertEqual(e["B2BUA_REQUIRE_OUTBOUND_PROXY"], "1")
+
+    def test_every_contact_names_the_external_vip(self) -> None:
+        docs = render(SIPRUST, *KIND, "--set", "network.sipPort=5070")
+        e = env(container(find(docs, "StatefulSet", "b2bua-worker"), "b2bua-worker"))
+        self.assertEqual(e["B2BUA_CONTACT_ADDRESS"], "192.168.60.250:5070")
 
     def test_the_proxy_listens_and_advertises_both_vips(self) -> None:
         docs = render(SIPRUST, *KIND, "--set", "network.sipPort=5070")
@@ -206,7 +212,8 @@ class GenericDefaults(unittest.TestCase):
     DERIVED = {
         "b2bua-worker": {"B2BUA_LISTEN", "B2BUA_ADVERTISE", "B2BUA_ORDINAL", "B2BUA_METRICS",
                          "B2BUA_REPL", "B2BUA_REPL_LISTEN", "B2BUA_REPL_PORT", "B2BUA_REPL_SERVICE",
-                         "B2BUA_OUTBOUND_PROXY", "B2BUA_REQUIRE_OUTBOUND_PROXY", "LIMITER_URL",
+                         "B2BUA_MODE", "B2BUA_OUTBOUND_PROXY", "B2BUA_CONTACT_ADDRESS",
+                         "LIMITER_URL",
                          "B2BUA_CDR_RABBITMQ_URL", "B2BUA_CDR_RABBITMQ_QUEUE",
                          "B2BUA_CDR_RABBITMQ_MAX_LEN", "OTEL_EXPORTER_OTLP_ENDPOINT",
                          "SIP_TRACE_HEADER"},

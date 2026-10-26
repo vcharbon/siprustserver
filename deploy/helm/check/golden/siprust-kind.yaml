@@ -838,13 +838,15 @@ spec:
               key: key
               name: b2bua-worker-cluster-key
         - name: B2BUA_ADVERTISE
-          value: $(POD_IP)
+          value: $(POD_IP):5060
         - name: B2BUA_CDR_RABBITMQ_MAX_LEN
           value: '100000'
         - name: B2BUA_CDR_RABBITMQ_QUEUE
           value: cdr
         - name: B2BUA_CDR_RABBITMQ_URL
           value: amqp://guest:guest@rabbitmq.sip-test.svc.cluster.local:5672/%2f
+        - name: B2BUA_CONTACT_ADDRESS
+          value: 192.168.60.250:5060
         - name: B2BUA_DEST
           value: 192.168.60.21:5060
         - name: B2BUA_DRAIN_CDR_FLUSH_MS
@@ -863,6 +865,8 @@ spec:
           value: 0.0.0.0:5060
         - name: B2BUA_METRICS
           value: 0.0.0.0:9091
+        - name: B2BUA_MODE
+          value: proxied
         - name: B2BUA_ORDINAL
           value: $(POD_NAME)
         - name: B2BUA_OUTBOUND_PROXY
@@ -877,8 +881,6 @@ spec:
           value: '9092'
         - name: B2BUA_REPL_SERVICE
           value: b2bua-worker
-        - name: B2BUA_REQUIRE_OUTBOUND_PROXY
-          value: '1'
         - name: B2BUA_STRESS_LIMITER_ID
           value: global-stress
         - name: B2BUA_STRESS_LIMITER_LIMIT

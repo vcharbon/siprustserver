@@ -15,7 +15,7 @@
 
 use crate::config::B2buaConfig;
 use sip_ids::SigningKey;
-use sip_message::header::{self, ParamValue, Uri, Via};
+use sip_message::header::{ParamValue, Uri, Via};
 use sip_message::via_extension::{self, ViaExtension};
 use sip_message::SipStr;
 // The cr/lg/callRef param codec lives in sip-message so the encoder and its
@@ -23,7 +23,7 @@ use sip_message::SipStr;
 // callers (the router's read path) are unchanged.
 pub use sip_message::param_codec::{decode_param, encode_param};
 
-/// Inputs shared by the Via + Contact builders.
+/// Inputs of the Via builder.
 pub struct StackIdentityOpts<'a> {
     pub local_ip: &'a str,
     pub local_port: u16,
@@ -144,27 +144,29 @@ fn signed_parts<'a>(stated: &'a Stated, ext: &'a ViaExtension) -> [&'a [u8]; 8] 
     ]
 }
 
-/// Build the B2BUA Contact for an outbound message (with `callRef`/`leg`/`ci` params).
-pub fn build_call_contact(opts: &StackIdentityOpts) -> header::Contact {
-    let mut uri = Uri::sip_user(SipStr::from_static("b2bua"), SipStr::owned(opts.local_ip))
-        .with_port(opts.local_port)
-        .with_param("callRef", encoded(opts.call_ref))
-        .with_param("leg", encoded(opts.leg))
-        .with_param("ci", encoded(opts.incarnation_mark));
-    if opts.is_emergency {
-        uri = uri.with_param("emerg", ParamValue::Token(SipStr::from_static("1")));
-    }
-    header::Contact::from_uri(uri)
+/// Inputs of the Contact builder: the address the Contact names and the
+/// call's markers.
+pub struct ContactFacts<'a> {
+    pub host: &'a str,
+    pub port: u16,
+    pub call_ref: &'a str,
+    pub leg: &'a str,
+    /// The call's [`call::Call::incarnation_mark`].
+    pub incarnation_mark: &'a str,
+    pub is_emergency: bool,
 }
 
-/// Convenience: both the Via and Contact for a single outbound hop (port of
-/// `buildCallViaAndContact`). The Contact ignores `branch`, so callers that need
-/// only one of the two should call the single builders directly.
-pub fn build_call_via_and_contact(
-    opts: &StackIdentityOpts,
-    branch: String,
-) -> (Via, header::Contact) {
-    (build_call_via(opts, branch), build_call_contact(opts))
+/// Build the B2BUA Contact URI of a leg (with `callRef`/`leg`/`ci` params).
+pub fn build_call_contact(facts: &ContactFacts) -> Uri {
+    let mut uri = Uri::sip_user(SipStr::from_static("b2bua"), SipStr::owned(facts.host))
+        .with_port(facts.port)
+        .with_param("callRef", encoded(facts.call_ref))
+        .with_param("leg", encoded(facts.leg))
+        .with_param("ci", encoded(facts.incarnation_mark));
+    if facts.is_emergency {
+        uri = uri.with_param("emerg", ParamValue::Token(SipStr::from_static("1")));
+    }
+    uri
 }
 
 // ---------------------------------------------------------------------------
@@ -181,8 +183,8 @@ pub fn build_call_via_and_contact(
 /// A pure config projection: a cheap value with accessors, mirroring
 /// `sip_proxy`'s `ProxyCore::advertised()`. [`StackIdentity::from_config`]
 /// derives the advertised host/port from [`B2buaConfig::sip_local_ip`] /
-/// [`B2buaConfig::sip_local_port`]. If a separate "advertised" address slot is
-/// ever added, the accessor names stay the same.
+/// [`B2buaConfig::sip_local_port`], the node's own address; behind the proxy
+/// the Contact names [`B2buaConfig::contact_address`] instead.
 ///
 /// This is a **consumer seam** with no in-tree caller (the outbound builders
 /// above read the same fields straight off [`B2buaConfig`]). It exists so a
@@ -204,14 +206,14 @@ impl StackIdentity {
         }
     }
 
-    /// Host the B2BUA stamps on outbound Contact and Via (`advertisedHost`).
-    /// Today this maps to [`B2buaConfig::sip_local_ip`].
+    /// Host the B2BUA stamps on outbound Via (`advertisedHost`):
+    /// [`B2buaConfig::sip_local_ip`].
     pub fn advertised_host(&self) -> &str {
         &self.advertised_host
     }
 
-    /// Port the B2BUA stamps on outbound Contact and Via (`advertisedPort`).
-    /// Today this maps to [`B2buaConfig::sip_local_port`].
+    /// Port the B2BUA stamps on outbound Via (`advertisedPort`):
+    /// [`B2buaConfig::sip_local_port`].
     pub fn advertised_port(&self) -> u16 {
         self.advertised_port
     }
@@ -320,6 +322,17 @@ mod tests {
         }
     }
 
+    fn contact_facts(is_emergency: bool) -> ContactFacts<'static> {
+        ContactFacts {
+            host: "10.0.0.1",
+            port: 5060,
+            call_ref: "w0|cid|tag",
+            leg: "b-1",
+            incarnation_mark: "k3x9",
+            is_emergency,
+        }
+    }
+
     /// Parameter names in wire order.
     fn param_names(params: &sip_message::header::Params) -> Vec<&str> {
         params.iter().map(|(name, _)| name.as_str()).collect()
@@ -327,7 +340,7 @@ mod tests {
 
     // --- emergency stack-identity markers ---------------------------------
     // `build_call_via` appends `;em=1` and `build_call_contact` appends
-    // `;emerg=1` iff `opts.is_emergency`, so every in-dialog packet of an
+    // `;emerg=1` iff the call is an emergency, so every in-dialog packet of an
     // admitted emergency call is identifiable on the wire.
 
     #[test]
@@ -346,27 +359,16 @@ mod tests {
 
     #[test]
     fn contact_appends_emerg_marker_when_emergency() {
-        let contact = build_call_contact(&opts(true));
-        assert_eq!(contact.uri().param("emerg").and_then(ParamValue::as_str), Some("1"));
-        assert_eq!(param_names(contact.uri().params()), vec!["callRef", "leg", "ci", "emerg"]);
+        let contact = build_call_contact(&contact_facts(true));
+        assert_eq!(contact.param("emerg").and_then(ParamValue::as_str), Some("1"));
+        assert_eq!(param_names(contact.params()), vec!["callRef", "leg", "ci", "emerg"]);
     }
 
     #[test]
     fn contact_omits_emerg_marker_when_not_emergency() {
-        let contact = build_call_contact(&opts(false));
-        assert_eq!(contact.uri().param("emerg"), None);
-        assert_eq!(param_names(contact.uri().params()), vec!["callRef", "leg", "ci"]);
-    }
-
-    #[test]
-    fn via_and_contact_convenience_agrees_with_single_builders() {
-        let o = opts(true);
-        let (via, contact) = build_call_via_and_contact(&o, "z9hG4bKxyz".to_string());
-        assert_eq!(via, build_call_via(&o, "z9hG4bKxyz".to_string()));
-        assert_eq!(contact, build_call_contact(&o));
-        // Both carry the emergency marker for an emergency hop.
-        assert_eq!(via.param("em").and_then(ParamValue::as_str), Some("1"));
-        assert_eq!(contact.uri().param("emerg").and_then(ParamValue::as_str), Some("1"));
+        let contact = build_call_contact(&contact_facts(false));
+        assert_eq!(contact.param("emerg"), None);
+        assert_eq!(param_names(contact.params()), vec!["callRef", "leg", "ci"]);
     }
 
     // --- StackIdentity public read-API ------------------------------------

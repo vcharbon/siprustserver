@@ -234,7 +234,7 @@ pub fn known_ids() -> Vec<&'static str> {
 
 /// The **fake** infra: alice / bob1 / bob2 on the simulated fabric under a paused
 /// clock, with an in-process LSBC LB (a real `ProxyCore`) fronting one in-process
-/// b2bua worker. The b2bua's b-leg egresses through the LB (`b2b_outbound_proxy`
+/// b2bua worker. The b2bua's b-leg egresses through the LB (`Front::Proxied`
 /// = LB VIP) — topology identical to real, so a portable scenario exercises the
 /// same path both ways.
 pub struct FakeLsbcB2bua;
@@ -308,7 +308,7 @@ impl InfraShape for FakeLsbcB2bua {
             .on_refer(default_call_refer)
             .build();
         let b2bua = B2buaSut::builder(Arc::new(decision))
-            .outbound_proxy(&lb.ip().to_string(), lb.port())
+            .behind_proxy(&lb.ip().to_string(), lb.port())
             .start(&h, "b2bua", &b2bua_addr.to_string())
             .await;
 

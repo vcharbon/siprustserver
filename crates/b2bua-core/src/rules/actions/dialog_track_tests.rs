@@ -65,7 +65,7 @@ Content-Length: 0\r\n\r\n"
 }
 
 fn proxied_config() -> B2buaConfig {
-    B2buaConfig { b2b_outbound_proxy: Some(("10.0.0.9".to_string(), 5060)), ..Default::default() }
+    B2buaConfig { front: crate::config::Front::single_face("10.0.0.9", 5060), ..Default::default() }
 }
 
 // A recorded route no reader accepts must never leave the dialog with an

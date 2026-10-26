@@ -213,7 +213,7 @@ impl ActionExecutor<'_> {
                 }),
                 branch.clone(),
             )),
-            contact: Some(relay::leg_contact(self.config, self.marks(call), target_leg)),
+            contact: relay::leg_contact(call, target_leg),
             body,
             content_type,
             cseq: Some(relay::wire_cseq(outbound_cseq)),

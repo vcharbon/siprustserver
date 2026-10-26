@@ -63,6 +63,10 @@ pub struct Leg {
     /// Remote party's address on this leg, in the same form: the To of every
     /// such request.
     pub remote_uri: Option<String>,
+    /// The URI of this stack's Contact on the leg, allocated once when the
+    /// leg is created: every message of the leg that states a Contact states
+    /// this one, whichever copy of the call sends it (ADR-0055 §14).
+    pub contact: String,
     /// Request-URI of the outbound INVITE — needed for CANCEL (§9.1).
     pub invite_request_uri: Option<String>,
     /// The request record of the leg's dialog-creating INVITE (ADR-0055 §2):

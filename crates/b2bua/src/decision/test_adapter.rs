@@ -148,7 +148,7 @@ impl ScriptedDecisionEngine {
                 // which behind an LB front proxy is the proxy's OWN VIP (the UAC
                 // dialed the VIP). That is harmless when the b-leg goes pod-direct
                 // (the wire destination, not the R-URI, picks the hop), but FATAL
-                // when the b-leg is forced through the proxy (b2b_outbound_proxy):
+                // when the b-leg is forced through the proxy (`Front::Proxied`):
                 // the proxy forwards a worker-outbound request to its R-URI, so a
                 // VIP R-URI bounces straight back to a worker, which re-INVITEs a
                 // fresh b-leg — a call-creation storm the §16.6 hop gate ends

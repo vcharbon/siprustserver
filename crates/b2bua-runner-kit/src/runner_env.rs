@@ -10,8 +10,8 @@ use std::time::Duration;
 use b2bua::config::CapacityConfig;
 
 use crate::{
-    capacity_env, drain_env, env_or, limiter_env, liveness_env, parse_outbound_proxy, split_csv,
-    stated, stated_list,
+    addresses_from_lookup, capacity_env, drain_env, env_or, limiter_env, liveness_env, split_csv,
+    stated, stated_list, WorkerAddresses,
 };
 
 /// Every generic runner knob, parsed once from env by [`RunnerEnv::from_env`].
@@ -21,26 +21,10 @@ use crate::{
 pub struct RunnerEnv {
     /// `B2BUA_LISTEN` — SIP/signaling listen addr (default `0.0.0.0:5060`).
     pub listen: String,
-    /// `B2BUA_ADVERTISE` — SIP `host[:port]` stamped on Via/Contact/b-leg
-    /// Call-ID. `None` → the bound IP, with an unspecified `0.0.0.0` coerced to
-    /// loopback so the literal is at least routable. In k8s inject the pod IP
-    /// via the downward API `status.podIP`, else peers route responses to
-    /// `0.0.0.0` (a storm).
-    pub advertise: Option<String>,
-    /// `B2BUA_OUTBOUND_PROXY` — front-proxy IP-literal `ip:port` every b-leg
-    /// (worker→callee) request is forced through (a preloaded plain `;lr` Route).
-    /// REQUIRED in the k8s cluster (pod IPs are not peer-routable); unset →
-    /// b-leg goes straight to the callee (local/dev only). A malformed value is
-    /// fatal at parse — a silent fallback to pod-direct would send b-leg traffic
-    /// to unroutable pod IPs.
-    pub outbound_proxy: Option<(String, u16)>,
-    /// `B2BUA_REQUIRE_OUTBOUND_PROXY` — set (to ANY non-empty value) to refuse
-    /// boot when `B2BUA_OUTBOUND_PROXY` is unset. In the cluster profile a
-    /// worker silently dialing R-URIs pod-direct violates the "only the proxy
-    /// sees the external world" invariant (the dual-face network split);
-    /// refusing the boot turns that misconfiguration into a loud
-    /// CrashLoopBackOff instead of a live plane leak.
-    pub require_outbound_proxy: bool,
+    /// `B2BUA_ADVERTISE` and `B2BUA_MODE` with the proxy's addresses: the
+    /// worker's own `ip:port` and its deployment mode, read by
+    /// [`addresses_from_lookup`], which refuses an inconsistent pair.
+    pub addresses: WorkerAddresses,
     /// `B2BUA_METRICS` — Prometheus HTTP listen addr (default `0.0.0.0:9091`).
     pub metrics_addr: String,
     /// `B2BUA_QUEUE` — inbound UDP queue depth, packets (default 8192).
@@ -261,15 +245,10 @@ impl RunnerEnv {
         let call_control_timeout_ms: i64 = knob("B2BUA_CALL_CONTROL_TIMEOUT_MS", "5000")?;
         let call_control =
             Duration::from_millis(u64::try_from(call_control_timeout_ms).unwrap_or(0));
-        let outbound_proxy = match stated(env::var("B2BUA_OUTBOUND_PROXY").ok()) {
-            Some(s) => Some(parse_outbound_proxy(&s)?),
-            None => None,
-        };
+        let addresses = addresses_from_lookup(lookup)?;
         Ok(Self {
             listen: env_or("B2BUA_LISTEN", "0.0.0.0:5060"),
-            advertise: env::var("B2BUA_ADVERTISE").ok(),
-            outbound_proxy,
-            require_outbound_proxy: stated(env::var("B2BUA_REQUIRE_OUTBOUND_PROXY").ok()).is_some(),
+            addresses,
             metrics_addr: env_or("B2BUA_METRICS", "0.0.0.0:9091"),
             queue_max: knob("B2BUA_QUEUE", "8192")?,
             udp_sndbuf: socket_buffer_knob("B2BUA_UDP_SNDBUF")?,

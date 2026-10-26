@@ -169,7 +169,9 @@ for run in $(seq 1 "$RUNS"); do
       "$RESULTS/r${run}_proxy.log" "$BIN_DIR/sip-proxy-runner" || exit 1
   PX=$(cat "$RESULTS/r${run}_proxy.pid"); PIDS+=("$PX")
 
-  B2BUA_LISTEN=$B2BUA_SIP B2BUA_ADVERTISE=$B2BUA_SIP \
+  # Standalone: the b-leg goes straight to the loadgen, and the proxy fronts
+  # the a-leg only, as the topology line of the report states.
+  B2BUA_LISTEN=$B2BUA_SIP B2BUA_ADVERTISE=$B2BUA_SIP B2BUA_MODE=standalone \
   B2BUA_DEST=127.0.0.1:$((LG_BASE + 1)) B2BUA_METRICS=$B2BUA_HTTP \
   B2BUA_RELAY_HEADERS=X-Loadgen-Id \
     scope_run "b3t-b2bua-$run" 4G 600% "$RESULTS/r${run}_b2bua.pid" \

@@ -109,44 +109,11 @@ fn split_host_port_defaults_and_parses() {
 }
 
 #[test]
-fn require_outbound_proxy_without_proxy_refuses_boot() {
-    let e = validate_outbound_proxy_requirement(true, false)
-        .expect_err("required-but-unset outbound proxy must fail boot");
-    assert!(e.contains("B2BUA_OUTBOUND_PROXY"), "msg was: {e}");
-    assert!(e.contains("B2BUA_REQUIRE_OUTBOUND_PROXY"), "msg names the guard: {e}");
-}
-
-#[test]
-fn require_outbound_proxy_with_proxy_boots() {
-    assert!(validate_outbound_proxy_requirement(true, true).is_ok());
-}
-
-#[test]
-fn outbound_proxy_optional_when_not_required() {
-    assert!(validate_outbound_proxy_requirement(false, false).is_ok());
-    assert!(validate_outbound_proxy_requirement(false, true).is_ok());
-}
-
-#[test]
 fn truthy_flag_grammar() {
     for t in ["1", "true", "YES", " on "] {
         assert!(is_truthy(t), "{t:?} must be truthy");
     }
     for f in ["0", "", "off", "nope"] {
         assert!(!is_truthy(f), "{f:?} must be falsy");
-    }
-}
-
-#[test]
-fn outbound_proxy_takes_an_ip_literal_of_either_family() {
-    assert_eq!(parse_outbound_proxy("10.0.0.9:5060"), Ok(("10.0.0.9".to_string(), 5060)));
-    assert_eq!(parse_outbound_proxy("[2001:db8::9]:5060"), Ok(("2001:db8::9".to_string(), 5060)));
-}
-
-#[test]
-fn outbound_proxy_named_or_portless_refuses_boot() {
-    for value in ["proxy.ns.svc.cluster.local:5060", "10.0.0.9", "10.0.0.9:notaport"] {
-        let e = parse_outbound_proxy(value).expect_err(value);
-        assert!(e.contains("B2BUA_OUTBOUND_PROXY"), "msg was: {e}");
     }
 }

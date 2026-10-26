@@ -1807,7 +1807,7 @@ fn undeclared_terminal_clear_state_is_a_noted_defect() {
 // the dialog-creating 2xx's Record-Route headers in *reverse* order. Without
 // this the route set stays empty and every worker→callee in-dialog request
 // (keepalive OPTIONS, BYE, re-INVITE) falls back to the synthetic
-// `b2b_outbound_proxy` Route in `relay::apply_b_leg_egress`, silently dropping
+// outbound-proxy Route in `relay::apply_b_leg_egress`, silently dropping
 // the proxy's signed Record-Route cookie. The transparent-failover matrix
 // routes identically with or without this capture (the proxy classifies the
 // request `;outbound` and ignores the cookie either way), so the only place the
@@ -1823,6 +1823,7 @@ fn b_leg_pending() -> Leg {
         dialogs: Default::default(),
         local_uri: Some("sip:svc@10.0.0.9".into()),
         remote_uri: Some("sip:bob@10.0.0.2".into()),
+        contact: "sip:b2bua@127.0.0.1:5060".into(),
         invite_request_uri: Some("sip:bob@10.0.0.2:5070".into()),
         invite: Some(call::RequestRecord::dialled(1, None, OutboundInvite::new("svc", 0))),
         own_tag: None,
@@ -2011,20 +2012,19 @@ Content-Length: 0\r\n\r\n";
 
 // ── CANCEL follows the INVITE's route set + next hop (RFC 3261 §9.1) ─────────
 //
-// Via-LB topology: the b-leg egresses through the front proxy
-// (`b2b_outbound_proxy`), so the b-leg INVITE carries a preloaded outbound-proxy
-// Route and its wire destination is the proxy. When the B2BUA later cancels the
-// pending INVITE (no-answer teardown / reroute-on-486), §9.1 requires the CANCEL
-// to take the SAME path — same next hop (the proxy, NOT `leg.source`, the
-// callee's advertised address) and the same Route set, with the transaction-
-// correlation Via branch echoed verbatim. A CANCEL sent to `leg.source` or
-// without the Route bypasses the proxy and never reaches the pending server txn.
+// Via-LB topology (`Front::Proxied`): the b-leg egresses through the front proxy, so the
+// b-leg INVITE carries a preloaded outbound-proxy Route and its wire destination is the
+// proxy. When the B2BUA later cancels the pending INVITE (no-answer teardown /
+// reroute-on-486), §9.1 requires the CANCEL to take the SAME path — same next hop (the
+// proxy, NOT `leg.source`, the callee's advertised address) and the same Route set, with
+// the transaction-correlation Via branch echoed verbatim. A CANCEL sent to `leg.source`
+// or without the Route bypasses the proxy and never reaches the pending server txn.
 #[test]
 fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
     use b2bua_core::effects::OutboundBody;
 
     let config = B2buaConfig {
-        b2b_outbound_proxy: Some(("proxy.example".to_string(), 5060)),
+        front: b2bua_core::config::Front::single_face("proxy.example", 5060),
         ..B2buaConfig::default()
     };
 

@@ -68,7 +68,7 @@ fn hop_address(proxy: Option<&ResolvedTarget>, host: &str, port: u16) -> Option<
 /// The configured outbound proxy as a target whose name is looked up off the
 /// router task; an IP literal is never looked up.
 pub(crate) fn outbound_proxy_target(config: &B2buaConfig) -> Option<Arc<ResolvedTarget>> {
-    let (host, port) = config.b2b_outbound_proxy.as_ref()?;
+    let (host, port) = config.front.outbound_proxy()?;
     let target = match sip_net::ip_socket_addr(host, *port) {
         Some(addr) => ResolvedTarget::addr(addr),
         None => {
@@ -105,7 +105,7 @@ fn keepalive_timeout_peer(
 
 /// Classify a destination as an internal cluster peer or an external one for the
 /// per-peer failure metric. A b2bua's only config-resolvable cluster peer is the
-/// configured outbound proxy (`b2b_outbound_proxy`): every b-leg egresses through
+/// configured outbound proxy (`Front::Proxied`): every b-leg egresses through
 /// it, so a worker→callee timeout we count against the outbound proxy is the
 /// in-cluster hop. Replication-peer addresses are NOT in `B2buaConfig` as
 /// `SocketAddr`s (the repl layer addresses peers by endpoint URL, resolved
@@ -143,14 +143,14 @@ mod tests {
     fn classify_b2bua_peer_internal_iff_outbound_proxy() {
         use crate::peer_failures::PeerScope;
         let mut config = B2buaConfig::default();
-        config.b2b_outbound_proxy = Some(("10.0.0.9".to_string(), 5060));
+        config.front = crate::config::Front::single_face("10.0.0.9", 5060);
         let proxy: SocketAddr = "10.0.0.9:5060".parse().unwrap();
         let other: SocketAddr = "203.0.113.7:5060".parse().unwrap();
         let target = outbound_proxy_target(&config);
         assert_eq!(classify_b2bua_peer(target.as_deref(), &proxy), PeerScope::Internal);
         assert_eq!(classify_b2bua_peer(target.as_deref(), &other), PeerScope::External);
         // With no outbound proxy configured, every peer is external.
-        config.b2b_outbound_proxy = None;
+        config.front = crate::config::Front::Standalone;
         let target = outbound_proxy_target(&config);
         assert_eq!(classify_b2bua_peer(target.as_deref(), &proxy), PeerScope::External);
     }
@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn keepalive_timeout_attributes_to_the_failed_b_leg_egress_hop() {
         let mut config = B2buaConfig::default();
-        config.b2b_outbound_proxy = Some(("10.0.0.9".to_string(), 5060));
+        config.front = crate::config::Front::single_face("10.0.0.9", 5060);
 
         // a-leg dialog: remote target is the external UAC (the surviving leg's hop).
         let a_dialog = test_dialog("203.0.113.7", 5060, &[]);
@@ -254,6 +254,7 @@ mod tests {
             dialogs: dialogs.into(),
             local_uri: None,
             remote_uri: None,
+            contact: "sip:b2bua@127.0.0.1:5060".into(),
             invite_request_uri: None,
             invite: None,
             own_tag: None,

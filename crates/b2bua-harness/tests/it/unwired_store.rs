@@ -32,7 +32,7 @@ const W1: &str = "127.0.0.1:5091";
 async fn worker(h: &Harness, name: &str, addr: &str) -> (B2buaSut, Arc<InMemoryCallStore>) {
     let store = Arc::new(InMemoryCallStore::new());
     let sut = B2buaSut::route_all_to("127.0.0.1", 5070)
-        .outbound_proxy("127.0.0.1", 5080)
+        .behind_proxy("127.0.0.1", 5080)
         .with_store(store.clone())
         .start(h, name, addr)
         .await;

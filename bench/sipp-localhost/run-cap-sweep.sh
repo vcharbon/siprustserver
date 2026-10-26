@@ -61,7 +61,7 @@ for cap in "${CAPS[@]}"; do
   sleep 0.4
 
   # Fresh B2BUA process under test
-  B2BUA_LISTEN=127.0.0.1:$B2BUA_PORT B2BUA_DEST=127.0.0.1:$UAS_PORT "$BIN" \
+  B2BUA_LISTEN=127.0.0.1:$B2BUA_PORT B2BUA_ADVERTISE=127.0.0.1:$B2BUA_PORT B2BUA_MODE=standalone B2BUA_DEST=127.0.0.1:$UAS_PORT "$BIN" \
        > "$RESULTS/${tag}_b2bua.log" 2>&1 &
   B2PID=$!
   sleep 0.6

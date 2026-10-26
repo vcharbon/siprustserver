@@ -18,15 +18,14 @@ use sip_retransmit::Class;
 
 mod dialog;
 mod emission;
+mod leg;
 mod provisional;
 mod request_record;
 mod sdp_session;
 mod subscription;
-use dialog::arb_dialog;
 use emission::arb_retained_emission;
+use leg::arb_leg;
 use provisional::arb_provisional;
-use request_record::arb_invite_record;
-use sdp_session::arb_sdp_session;
 
 // ── Representative fixture (port of fixture.ts) ─────────────────────────────
 
@@ -142,6 +141,7 @@ pub fn representative_call() -> Call {
         .into(),
         local_uri: Some("sip:bob@example.com".into()),
         remote_uri: Some("sip:alice@example.com".into()),
+        contact: "sip:b2bua@127.0.0.1:5060".into(),
         invite_request_uri: None,
         invite: None,
         own_tag: Some("b2bua-to-tag-aleg-9876".into()),
@@ -195,6 +195,7 @@ pub fn representative_call() -> Call {
         .into(),
         local_uri: Some("sip:alice@example.com".into()),
         remote_uri: Some("sip:bob@example.com".into()),
+        contact: "sip:b2bua@127.0.0.1:5060".into(),
         invite_request_uri: Some("sip:bob@example.com".into()),
         invite: Some(RequestRecord::dialled(
             1,
@@ -359,9 +360,7 @@ fn representative_mark() -> DecisionMark {
 // ── proptest strategies ─────────────────────────────────────────────────────
 
 mod records;
-use records::{
-    arb_attempt, arb_cdr, arb_decision_log, arb_message_ring, arb_ring, arb_termination, arb_timer,
-};
+use records::{arb_attempt, arb_cdr, arb_decision_log, arb_termination, arb_timer};
 
 fn arb_tag() -> impl Strategy<Value = String> {
     "[a-z0-9-]{1,16}"
@@ -394,19 +393,8 @@ fn arb_sm_cursors() -> impl Strategy<Value = BTreeMap<MachineId, StateLabel>> {
     )
 }
 
-fn arb_remote_info() -> impl Strategy<Value = RemoteInfo> {
-    ("[a-z0-9.]{1,15}", any::<u16>()).prop_map(|(address, port)| RemoteInfo { address, port })
-}
 fn arb_host_port() -> impl Strategy<Value = HostPort> {
     ("[a-z0-9.]{1,15}", any::<u16>()).prop_map(|(host, port)| HostPort { host, port })
-}
-fn arb_leg_kind() -> impl Strategy<Value = LegKind> {
-    prop_oneof![
-        Just(LegKind::A),
-        Just(LegKind::Destination),
-        Just(LegKind::Media),
-        Just(LegKind::TransferTarget),
-    ]
 }
 fn arb_timer_type() -> impl Strategy<Value = TimerType> {
     prop_oneof![
@@ -443,65 +431,6 @@ fn arb_cdr_type() -> impl Strategy<Value = CdrEventType> {
 }
 fn arb_direction() -> impl Strategy<Value = Direction> {
     prop_oneof![Just(Direction::FromA), Just(Direction::FromB)]
-}
-
-/// Boxed: a value tree this size, held by value in every enclosing tuple, is
-/// past the 2 MiB test-thread stack of a debug build.
-fn arb_leg() -> BoxedStrategy<Leg> {
-    (
-        "(a|b-[0-9]{1,2})",
-        arb_tag(),
-        (proptest::option::of(arb_invite_record()), proptest::option::of(arb_tag())),
-        arb_remote_info(),
-        proptest::collection::vec(arb_dialog(), 0..3),
-        (
-            proptest::option::of(arb_uri()),
-            proptest::option::of(arb_uri()),
-            proptest::option::of(arb_uri()),
-        ),
-        (
-            arb_ext(),
-            proptest::option::of(arb_leg_kind()),
-            proptest::option::of(any::<bool>()),
-            proptest::option::of(any::<bool>()),
-        ),
-        arb_message_ring(),
-        arb_sdp_session(),
-        (proptest::option::of((0usize..4).prop_map(AttemptId)), arb_ring()),
-    )
-        .prop_map(
-            |(
-                leg_id,
-                call_id,
-                (invite, own_tag),
-                source,
-                dialogs,
-                (local_uri, remote_uri, invite_request_uri),
-                (ext, kind, adopted, in_session_timer),
-                messages,
-                sdp_session,
-                (attempt, ring),
-            )| Leg {
-                leg_id,
-                call_id,
-                source,
-                dialogs: dialogs.into(),
-                local_uri,
-                remote_uri,
-                invite_request_uri,
-                invite,
-                own_tag,
-                ext,
-                kind,
-                adopted,
-                in_session_timer,
-                attempt,
-                ring,
-                messages,
-                sdp_session,
-            },
-        )
-        .boxed()
 }
 
 fn arb_limiter() -> impl Strategy<Value = CallLimiterState> {

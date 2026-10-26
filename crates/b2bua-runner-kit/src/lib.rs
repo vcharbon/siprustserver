@@ -12,7 +12,7 @@
 //! - [`RunnerEnv::from_env`] — the `B2BUA_*`/`LIMITER_*`/`WORKER_*` env
 //!   grammar parsed into a plain struct of pub fields (tweak any before bind);
 //! - [`RunnerEnv::bind`] — UDP bind with the ingress brake installed,
-//!   advertise-address coercion, [`B2buaConfig`] assembly + validation;
+//!   the worker's addresses and mode, [`B2buaConfig`] assembly + validation;
 //! - [`RunnerBase::deps`] — production-shaped defaults for every dependency
 //!   (store / buffered CDR / limiter-from-env / metrics / clock / id-gen),
 //!   each overridable field-by-field on the returned [`B2buaDeps`];
@@ -77,13 +77,13 @@
 )]
 
 use std::env;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::admission::Refusals;
 use b2bua::cdr::{BufferedCdrWriter, CdrEncoder, CdrWriter};
-use b2bua::config::{B2buaConfig, CdrConfig};
+use b2bua::config::{B2buaConfig, CdrConfig, Front};
 use b2bua::decision::CallDecisionEngine;
 use b2bua::ingress_brake::{build_ingress_brake_hook, IngressBrakeConfig, IngressBrakeCounters};
 use b2bua::limiter::CallLimiter;
@@ -103,11 +103,11 @@ mod capacity_env;
 mod cdr_rabbitmq;
 mod drain_env;
 mod entropy;
+mod front_env;
 mod limiter_client;
 mod limiter_env;
 mod liveness_env;
 mod null_cdr;
-mod outbound_proxy_env;
 pub mod poison;
 mod probe;
 mod replication;
@@ -123,8 +123,8 @@ pub use cdr_rabbitmq::{
     CdrDeliveryBounds, CdrQueueDeclare, RabbitMqCdrSettings, RabbitMqCdrWriter,
     MAX_DRAINER_WAIT_MS, MAX_WAIT_MS, MAX_WINDOW,
 };
+pub use front_env::{addresses_from_lookup, WorkerAddresses};
 pub use null_cdr::NullCdrWriter;
-pub use outbound_proxy_env::{parse_outbound_proxy, validate_outbound_proxy_requirement};
 pub use replication::{replication_setup_from_lookup, ReplicationSettings};
 pub use runner_env::RunnerEnv;
 use socket_buffers::log_socket_buffers;
@@ -203,11 +203,6 @@ impl RunnerEnv {
             b2bua::trace::CallTraces::from_env(0),
         ));
         validate_ingress_brake_pct(self.udp_ingress_brake_pct).map_err(invalid)?;
-        validate_outbound_proxy_requirement(
-            self.require_outbound_proxy,
-            self.outbound_proxy.is_some(),
-        )
-        .map_err(invalid)?;
         let clock = Clock::checked_system().map_err(|e| e.to_string())?;
 
         let listen_sa = resolve(&self.listen)?;
@@ -283,34 +278,10 @@ impl RunnerEnv {
             "ingress brake armed: stateless-503 for new non-emergency INVITEs at ingress depth >= threshold"
         );
 
-        // Advertised SIP host:port stamped on every outbound Via / Contact /
-        // b-leg Call-ID (see `b2bua::stack_identity`). It MUST be an address the
-        // callee / proxy can route a response back to — the *bind* address may
-        // be `0.0.0.0`, which is NOT routable: a peer's 200 OK to a Via/Contact
-        // of `0.0.0.0` goes nowhere, the B2BUA never sees the answer, and it
-        // retransmits the INVITE then CANCELs → a retransmission storm. Take
-        // `B2BUA_ADVERTISE` (`host[:port]`) verbatim when set (k8s injects the
-        // pod IP via the downward API `status.podIP`); otherwise fall back to
-        // the bound address, coercing an unspecified `0.0.0.0` to loopback so
-        // the literal is at least routable.
-        let (advertise_ip, advertise_port) = match &self.advertise {
-            Some(s) => {
-                let s = s.trim();
-                match s.rsplit_once(':').and_then(|(h, p)| p.parse::<u16>().ok().map(|p| (h, p))) {
-                    Some((h, p)) => (h.to_string(), p),
-                    // No `:port` (or unparseable port) → host-only; listen port.
-                    None => (s.to_string(), local.port()),
-                }
-            }
-            None => {
-                let ip = if local.ip().is_unspecified() {
-                    IpAddr::V4(Ipv4Addr::LOCALHOST)
-                } else {
-                    local.ip()
-                };
-                (ip.to_string(), local.port())
-            }
-        };
+        // The worker's own address on every Via; behind the proxy, every
+        // Contact names the proxy instead ([`front_env`]).
+        let (advertise_ip, advertise_port) =
+            (self.addresses.advertise.ip().to_string(), self.addresses.advertise.port());
         tracing::info!(
             service = name,
             %advertise_ip,
@@ -318,19 +289,20 @@ impl RunnerEnv {
             bind = %local,
             "advertised SIP identity"
         );
-
-        match &self.outbound_proxy {
+        match &self.addresses.front {
             // Every b-leg request goes to the front proxy with a preloaded plain `;lr`
             // Route; it classifies it worker-outbound (ADR-0048) and record-routes.
-            Some((h, p)) => tracing::info!(
+            Front::Proxied { outbound_proxy: (h, p), contact_address: (ch, cp) } => tracing::info!(
                 service = name,
                 proxy_host = %h,
                 proxy_port = p,
-                "b-leg egress forced through the front proxy (all worker->callee SIP traverses the LB)"
+                contact_host = %ch,
+                contact_port = cp,
+                "behind the front proxy: b-leg egress through it, every Contact names it"
             ),
-            None => tracing::warn!(
+            Front::Standalone => tracing::info!(
                 service = name,
-                "B2BUA_OUTBOUND_PROXY unset — b-leg goes pod-direct (local/dev only; NOT for the cluster)"
+                "standalone: b-leg goes straight to the callee, every Contact names the worker"
             ),
         }
 
@@ -340,7 +312,7 @@ impl RunnerEnv {
             cluster_key: self.cluster_key.clone(),
             sip_local_ip: advertise_ip,
             sip_local_port: advertise_port,
-            b2b_outbound_proxy: self.outbound_proxy.clone(),
+            front: self.addresses.front.clone(),
             cdr_buffer_queue_max: self.cdr_queue,
             event_dispatch_concurrency: self.concurrency,
             per_call_queue_cap: self.call_cap,

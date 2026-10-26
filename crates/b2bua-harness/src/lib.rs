@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use b2bua::cdr::{CdrRecord, CdrWriter};
-use b2bua::config::B2buaConfig;
+use b2bua::config::{B2buaConfig, Front};
 use b2bua::decision::{CallDecisionEngine, ScriptedDecisionEngine};
 use b2bua::limiter::CallLimiter;
 use b2bua::metrics::B2buaMetrics;
@@ -58,7 +58,7 @@ pub use witness::{WitnessRig, WITNESS_IDS, WITNESS_LIMITER_ADDR};
 // "spawn the core", captured by [`B2buaSpawnParams`] + [`spawn_b2bua_core`].
 // `failover-harness` reuses these (it depends on this crate).
 
-/// Builds the base [`B2buaConfig`] (ip/port/ordinal/outbound_proxy wired),
+/// Builds the base [`B2buaConfig`] (ip/port/ordinal/front wired),
 /// applies `tune`, assembles [`B2buaDeps`], and spawns the core on the
 /// already-bound `endpoint`. The single home for the spawn wiring that
 /// `B2buaSut` and `failover-harness`'s `ReplicatedB2buaSut` share.
@@ -79,7 +79,7 @@ pub fn spawn_b2bua_core(
         decision,
         limiter,
         services,
-        outbound_proxy,
+        front,
         replication,
         clock,
         id_gen,
@@ -100,7 +100,7 @@ pub fn spawn_b2bua_core(
         self_ordinal: ordinal,
         sip_local_ip: sip_addr.ip().to_string(),
         sip_local_port: sip_addr.port(),
-        b2b_outbound_proxy: outbound_proxy,
+        front,
         // Every harness B2BUA checks the model invariants after each turn, and
         // shares one cluster key with every other (ADR-0055 §12).
         model_invariants: true,
@@ -247,7 +247,7 @@ pub struct B2buaSut {
 /// `"w0"` defaults).
 pub struct B2buaSutBuilder {
     decision: Arc<dyn CallDecisionEngine>,
-    outbound_proxy: Option<(String, u16)>,
+    front: Front,
     limiter: Option<Arc<dyn CallLimiter>>,
     limiter_store: Option<Arc<call_limiter::CallStore>>,
     services: Vec<b2bua::rules::ServiceDef>,
@@ -291,11 +291,11 @@ impl B2buaSutBuilder {
         self
     }
 
-    /// Route the b-leg through the front proxy at `(host, port)` (the
-    /// `alice → proxy → b2bua → proxy → bob` topology; see
-    /// [`B2buaConfig::b2b_outbound_proxy`]).
-    pub fn outbound_proxy(mut self, host: &str, port: u16) -> Self {
-        self.outbound_proxy = Some((host.to_string(), port));
+    /// Run behind the single-face front proxy at `(host, port)` (the
+    /// `alice → proxy → b2bua → proxy → bob` topology): the b-leg goes through
+    /// it and every Contact names it ([`Front::single_face`]).
+    pub fn behind_proxy(mut self, host: &str, port: u16) -> Self {
+        self.front = Front::single_face(host, port);
         self
     }
 
@@ -428,7 +428,7 @@ impl B2buaSutBuilder {
         let since = model_gate::Since::now();
         let B2buaSutBuilder {
             decision,
-            outbound_proxy,
+            front,
             limiter,
             limiter_store,
             services,
@@ -505,7 +505,7 @@ impl B2buaSutBuilder {
             decision,
             limiter,
             services,
-            outbound_proxy,
+            front,
             replication: None,
             clock: clock.clone(),
             id_gen: Arc::new(IdGen::seeded(0xB2B0)),
@@ -581,11 +581,11 @@ impl Drop for B2buaSut {
 
 impl B2buaSut {
     /// Base builder: a B2BUA driven by `decision`, every other axis at its
-    /// default (no outbound proxy, the default limiter, no services, no-op tune).
+    /// default (standalone, the default limiter, no services, no-op tune).
     pub fn builder(decision: Arc<dyn CallDecisionEngine>) -> B2buaSutBuilder {
         B2buaSutBuilder {
             decision,
-            outbound_proxy: None,
+            front: Front::Standalone,
             limiter: None,
             limiter_store: None,
             services: Vec::new(),

@@ -26,8 +26,8 @@ crates/b2bua-harness/tests/it/reroute_limiter_holds.rs 858
 crates/b2bua-harness/tests/it/session_timer_transparency.rs 818
 crates/b2bua-harness/tests/it/stated_headers.rs 1453
 crates/b2bua-harness/tests/it/suppress_18x.rs 818
-crates/b2bua-runner-kit/src/lib.rs 593
-crates/b2bua-sdk/src/config.rs 579
+crates/b2bua-runner-kit/src/lib.rs 565
+crates/b2bua-sdk/src/config.rs 576
 crates/b2bua-sdk/src/model.rs 1168
 crates/b2bua/src/decision/test_adapter.rs 818
 crates/b2bua/src/limiter/refresh_batch.rs 517
@@ -47,7 +47,6 @@ crates/b2bua/src/store/mod.rs 863
 crates/call-limiter/src/store.rs 578
 crates/call-limiter/tests/it/keyed_by_call.rs 877
 crates/callshapes/src/plan.rs 1174
-crates/call/tests/it/common/mod.rs 802
 crates/call/tests/it/model_helpers.rs 895
 crates/e2e-core/src/infra.rs 622
 crates/e2e-model/src/registry.rs 575

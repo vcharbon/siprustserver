@@ -45,8 +45,7 @@ pub trait UdpEndpoint: Send + Sync {
     /// Non-blocking inbound poll (the TS `poll`).
     fn try_recv(&self) -> Option<UdpPacket>;
 
-    /// The bound local address (single source of truth for Via/Contact
-    /// stamping in later layers).
+    /// The bound local address.
     fn local_addr(&self) -> SocketAddr;
 
     /// The local address a datagram to `dst` leaves from: the bound address

@@ -89,7 +89,7 @@ class EnvTemplating(unittest.TestCase):
 
     def test_a_kubelet_reference_passes_through(self) -> None:
         w = find(render(SIPRUST, *KIND), "StatefulSet", "b2bua-worker")
-        self.assertEqual(env(container(w, "b2bua-worker"))["B2BUA_ADVERTISE"], "$(POD_IP)")
+        self.assertEqual(env(container(w, "b2bua-worker"))["B2BUA_ADVERTISE"], "$(POD_IP):5060")
 
 
 if __name__ == "__main__":

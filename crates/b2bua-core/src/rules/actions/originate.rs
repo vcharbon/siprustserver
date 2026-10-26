@@ -55,7 +55,7 @@ impl ActionExecutor<'_> {
                 }),
                 branch,
             )),
-            contact: Some(relay::leg_contact(self.config, self.marks(call), leg_id)),
+            contact: relay::leg_contact(call, leg_id),
             body: body.to_vec(),
             content_type: content_type.and_then(relay::media_type),
             cseq: Some(relay::wire_cseq(outbound_cseq)),
@@ -178,7 +178,7 @@ impl ActionExecutor<'_> {
                 }),
                 branch.clone(),
             )),
-            contact: Some(relay::leg_contact(self.config, self.marks(call), leg_id)),
+            contact: relay::leg_contact(call, leg_id),
             body: relay::continue_on_leg(
                 call,
                 leg_id,
@@ -345,7 +345,7 @@ impl ActionExecutor<'_> {
                 }),
                 branch,
             )),
-            contact: Some(relay::leg_contact(self.config, self.marks(call), leg_id)),
+            contact: relay::leg_contact(call, leg_id),
             cseq: Some(relay::wire_cseq(outbound_cseq)),
             body: relay::continue_on_leg(
                 call,

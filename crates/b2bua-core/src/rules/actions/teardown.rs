@@ -312,7 +312,7 @@ impl ActionExecutor<'_> {
         .ok()?;
         // RFC 3261 §9.1: the CANCEL follows the INVITE's next hop, NOT `leg.source`
         // (the callee's advertised address). When the b-leg egresses through the
-        // front proxy (`b2b_outbound_proxy`), the INVITE's wire destination — cached
+        // front proxy (`Front::Proxied`), the INVITE's wire destination — cached
         // on the txn handle at send — is the proxy; sending to `leg.source` would
         // bypass it, and the CANCEL would never reach the pending server txn the
         // proxy holds. The echoed Route set (above) keeps the CANCEL's path aligned

@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use b2bua::cdr::CdrWriter;
+use b2bua::config::Front;
 use b2bua::decision::CallDecisionEngine;
 use b2bua::limiter::CallLimiter;
 use b2bua::store::{CallStore, StoreFaults};
@@ -27,7 +28,8 @@ pub struct B2buaSpawnParams {
     pub limiter: Arc<dyn CallLimiter>,
     /// Callflow services to register (ADR-0016). Empty for the plain path.
     pub services: Vec<b2bua::rules::ServiceDef>,
-    pub outbound_proxy: Option<(String, u16)>,
+    /// The worker's deployment mode: standalone, or behind the proxy.
+    pub front: Front,
     /// Already-built replication setup (`None` → non-replicating). The caller
     /// constructs this — keeping repl-net/topology deps out of this crate.
     pub replication: Option<ReplicationSetup>,

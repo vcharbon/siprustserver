@@ -192,7 +192,7 @@ impl ActionExecutor<'_> {
             let a_face = self.a_face_tag(call, source_leg_id, to_tag, answering);
             call::helpers::note_shown(call, source_leg_id, to_tag);
             let Some(a_invite) = self.caller_invite(call) else { return };
-            let contact = relay::leg_contact(self.config, self.marks(call), &call.a_leg.leg_id);
+            let contact = relay::leg_contact(call, &call.a_leg.leg_id);
             let mut passthrough = r.passthrough(relay::relay_response_passthrough_headers(
                 resp,
                 self.config
@@ -233,7 +233,7 @@ impl ActionExecutor<'_> {
                 status,
                 &r.reason,
                 Some(a_face.clone()),
-                Some(contact),
+                contact,
                 r.body,
                 r.content_type,
                 None,
@@ -274,7 +274,7 @@ impl ActionExecutor<'_> {
         // owned bare 180's under `relayFirst18xTo180`.
         let a_tag = self.ensure_a_dialog(call);
         let Some(a_invite) = self.caller_invite(call) else { return };
-        let contact = relay::leg_contact(self.config, self.marks(call), &call.a_leg.leg_id);
+        let contact = relay::leg_contact(call, &call.a_leg.leg_id);
         // Reliable-provisional negotiation (Require/Supported) passes through
         // transparently so end-to-end PRACK keeps working (RFC 3262); the RSeq
         // it rides on is this transaction's own (`own_relayed_rseq`).
@@ -318,7 +318,7 @@ impl ActionExecutor<'_> {
             status,
             &r.reason,
             Some(a_tag.clone()),
-            Some(contact),
+            contact,
             r.body,
             r.content_type,
             None,

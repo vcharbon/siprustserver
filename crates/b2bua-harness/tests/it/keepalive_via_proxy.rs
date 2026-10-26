@@ -49,7 +49,7 @@ async fn keepalive_options_travels_via_proxy_on_both_legs() {
     let bob = h.agent("bob", BOB).await;
     let proxy = common::spawn_lb_proxy(&h, PROXY, "b2bua", B2BUA.parse().unwrap()).await;
     let b2bua = B2buaSut::route_all_to("127.0.0.1", 5071)
-        .outbound_proxy("127.0.0.1", 5081)
+        .behind_proxy("127.0.0.1", 5081)
         .start(&h, "b2bua", B2BUA)
         .await;
 

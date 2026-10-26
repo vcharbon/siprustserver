@@ -102,6 +102,7 @@ pub fn dialled_leg(leg_id: &str, our_tag: &str) -> Leg {
         dialogs: Default::default(),
         local_uri: None,
         remote_uri: None,
+        contact: "sip:b2bua@127.0.0.1:5060".into(),
         invite_request_uri: None,
         invite: Some(RequestRecord::dialled(1, None, OutboundInvite::new(our_tag, 0))),
         own_tag: None,

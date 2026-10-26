@@ -249,7 +249,6 @@ fn strike(
         }
         Incident::StalledKilled => {
             accept_clean_end_into_ended_dialogs(cluster, names);
-            super::stall_repeat::accept_contact_only_2xx_repeat(cluster);
             super::stall_repeat::accept_reason_only_cancel_repeat(cluster);
             super::stall_cseq::accept_cseqs_sent_during_the_stall(cluster);
             cluster.fh.stall(&placement.primary, &placement.backup);
