@@ -134,16 +134,31 @@ impl ActionExecutor<'_> {
                 fronts.any(|f| f.leg_id == b_leg_id)
             }
         };
-        // A media leg's early media holds the primary as its own dialog: the
-        // callee's dialog is another session, under another tag (RFC 3264 §8).
-        let primary_shows_media =
-            caller_dialog(call, &primary).is_some_and(|d| d.shows_media.is_some());
-        let a_face = if already_published || primary_shows_media {
+        let a_face = if already_published || primary_shows_media(call, &primary) {
             crate::caller_tags::fronting(call, b_leg_id, b_tag)
         } else {
             primary
         };
         self.map_a_face(call, &a_face, b_leg_id, b_tag);
+        a_face
+    }
+
+    /// The tag a 2xx of `b_leg_id`, a leg the record lacks, was relayed to the
+    /// caller under, as [`Self::a_face_tag`] chose it for an answer from a
+    /// leg nothing fronts yet: the fronting tag beside a media leg's early
+    /// media, else the primary. Its early dialog is opened under it.
+    pub(super) fn unknown_leg_face_tag(
+        &mut self,
+        call: &mut Call,
+        b_leg_id: &str,
+        b_tag: &str,
+    ) -> String {
+        let primary = self.ensure_a_dialog(call);
+        if !primary_shows_media(call, &primary) {
+            return primary;
+        }
+        let a_face = crate::caller_tags::fronting(call, b_leg_id, b_tag);
+        open_early_a_dialog(call, &a_face);
         a_face
     }
 
@@ -315,6 +330,12 @@ impl ActionExecutor<'_> {
             }
         }
     }
+}
+
+/// Whether the caller's dialog `primary` carries a media leg's early media:
+/// a callee's dialog is then another session, under another tag (RFC 3264 §8).
+fn primary_shows_media(call: &Call, primary: &str) -> bool {
+    caller_dialog(call, primary).is_some_and(|d| d.shows_media.is_some())
 }
 
 /// Record that the caller-facing dialog `tag` shows the early media of the

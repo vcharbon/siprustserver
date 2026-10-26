@@ -26,7 +26,9 @@ use super::dialog::{target_dest, to_gen_dialog};
 use super::egress::apply_b_leg_egress;
 use super::identity::{leg_via, CallMarks};
 
-/// Build an ACK-for-2xx on a b-leg dialog (toward bob), sent raw. `body` carries
+/// Build an ACK-for-2xx on a b-leg dialog (toward bob), sent raw, at `acked`,
+/// the number of the INVITE it acknowledges, when the caller states it, else
+/// at the number the dialog's INVITE record holds. `body` carries
 /// the inbound ACK's payload through (the delayed-offer re-INVITE answer rides
 /// the ACK, RFC 3264 §4); pass empty for a bodyless ACK. `extra_headers` are
 /// the relayed ACK's end-to-end lines, already filtered for this leg; empty for
@@ -42,6 +44,7 @@ pub fn ack_b_leg(
     leg: &Leg,
     config: &B2buaConfig,
     ids: &mut TurnIds,
+    acked: Option<u32>,
     body: Vec<u8>,
     content_type: Option<MediaType>,
     extra_headers: Vec<SipHeader>,
@@ -69,8 +72,9 @@ pub fn ack_b_leg(
     // running `our_cseq`, which an intervening early PRACK/UPDATE (or a later
     // in-dialog request) has advanced past the INVITE. Recover it from the
     // INVITE's record.
-    let ack_cseq =
-        acked_invite_cseq(leg, dialog).unwrap_or_else(|| super::wire_cseq(dialog.our_cseq));
+    let ack_cseq = acked
+        .or_else(|| acked_invite_cseq(leg, dialog))
+        .unwrap_or_else(|| super::wire_cseq(dialog.our_cseq));
     let opts = GenerateAckFor2xxOpts {
         via: Some(leg_via(config, marks, &leg.leg_id, None, branch.clone())),
         cseq: Some(ack_cseq),

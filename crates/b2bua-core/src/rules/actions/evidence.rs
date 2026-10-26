@@ -6,7 +6,7 @@
 
 use call::helpers::{caller_dialog, record_invite_final, update_leg};
 use call::{Call, DialogState, Repeated, RetainedEmission};
-use sip_message::{Method, SipRequest, SipResponse};
+use sip_message::{HeaderName, Method, SipRequest, SipResponse};
 
 use crate::effects::{CriticalStateEffect, HandlerEffects, OutboundBody, Provenance};
 use crate::rules::relay;
@@ -124,13 +124,13 @@ impl ActionExecutor<'_> {
                 .and_then(|bytes| relay::in_dialog_session(bytes, origin.as_deref()))
                 .unwrap_or_default();
             let content_type = (!answer.is_empty()).then(relay::sdp);
-            self.ack_leg(
+            // At the number the 2xx names: this side may have sent past it.
+            self.ack_leg_at(
                 call,
                 fx,
                 leg_id,
-                answer,
-                content_type,
-                Vec::new(),
+                Some(resp.cseq().seq()),
+                (answer, content_type, Vec::new()),
                 Provenance::Authored,
                 relay::Author::Stack,
             );
@@ -218,19 +218,37 @@ impl ActionExecutor<'_> {
             return;
         }
         // A re-INVITE whose round the record holds open: its 2xx left with
-        // another owner, so the teardown answers it nothing.
+        // another owner, so the teardown answers it nothing. A relayed one's
+        // 2xx came from the peer, which is owed this very ACK (RFC 3261
+        // §13.2.2.4): it goes on at the relayed INVITE's number, retained for
+        // a repeat of that 2xx.
         let mut answered = Vec::new();
+        let mut owed_ack = None;
         if let (Some(peer), Some(peer_leg)) = (
             ctx.peer_dialog().map(call::Dialog::id),
             call::helpers::get_peer(call, leg_id).map(str::to_string),
         ) {
-            *call = update_leg(call.clone(), &peer_leg, |leg| {
-                if let Some(d) = leg.dialogs.by_tags_mut(&peer.our_tag, &peer.peer_tag) {
-                    if call::helpers::invite_relay(d).is_some_and(|r| r.inbound_cseq == cseq) {
-                        answered.extend(d.sent_invite.take());
-                    }
-                }
-            });
+            let relay = call::helpers::find_leg(call, &peer_leg)
+                .and_then(|leg| leg.dialogs.by_tags(&peer.our_tag, &peer.peer_tag))
+                .and_then(call::helpers::invite_relay)
+                .filter(|r| r.inbound_cseq == cseq);
+            if let Some(relay) = relay {
+                answered.push(relay.clone());
+                owed_ack = Some(peer_leg);
+            }
+        }
+        if let Some(peer_leg) = owed_ack {
+            let content_type = req.raw(HeaderName::ContentType).next().and_then(relay::media_type);
+            self.ack_leg(
+                call,
+                fx,
+                &peer_leg,
+                req.body().to_vec(),
+                content_type,
+                Vec::new(),
+                Provenance::Relayed,
+                relay::Author::Leg(ctx.source_leg_id),
+            );
         }
         if let Some(id) = ctx.dialog().map(call::Dialog::id) {
             *call = update_leg(call.clone(), leg_id, |leg| {

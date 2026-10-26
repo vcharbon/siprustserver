@@ -31,6 +31,24 @@ impl ActionExecutor<'_> {
         provenance: Provenance,
         author: relay::Author<'_>,
     ) {
+        let parts = (body, content_type, extra_headers);
+        self.ack_leg_at(call, fx, leg_id, None, parts, provenance, author);
+    }
+
+    /// [`Self::ack_leg`] for the 2xx to the INVITE numbered `acked`, when the
+    /// record holds no image of it: the ACK takes that number (RFC 3261
+    /// §13.2.2.4). `None` reads the number off the dialog's INVITE record.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn ack_leg_at(
+        &mut self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        acked: Option<u32>,
+        (body, content_type, extra_headers): (Vec<u8>, Option<MediaType>, Vec<SipHeader>),
+        provenance: Provenance,
+        author: relay::Author<'_>,
+    ) {
         // The ACK rides the leg's dialog: the one a 2xx established.
         let dialog = call::helpers::find_leg(call, leg_id)
             .and_then(|l| l.dialogs.established())
@@ -75,6 +93,7 @@ impl ActionExecutor<'_> {
                 leg,
                 self.config,
                 &mut self.turn.ids,
+                acked,
                 body,
                 content_type,
                 extra_headers,

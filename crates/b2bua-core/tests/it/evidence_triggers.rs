@@ -173,6 +173,42 @@ fn a_final_at_a_reused_number_under_another_branch_is_evidence() {
     assert_eq!(rule, Some("evidence-final"));
 }
 
+/// This side re-used the number of a re-INVITE another owner sent, and has
+/// sent past it since: the 2xx to the other owner's re-INVITE is ACKed at its
+/// own number, the one that 2xx names (RFC 3261 §13.2.2.4), not at this
+/// side's latest.
+#[test]
+fn the_ack_of_a_2xx_at_a_reused_number_takes_that_number() {
+    let reinvite = format!(
+        "INVITE sip:bob@10.0.0.2:5070 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bKmine\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:svc@10.0.0.9>;tag=svc\r\n\
+To: <sip:bob@10.0.0.2>;tag=bobtag\r\n\
+Call-ID: bcid@x\r\n\
+CSeq: {RECORDED} INVITE\r\n\
+Contact: <sip:b2bua@10.0.0.9:5060>\r\n\
+Content-Length: 0\r\n\r\n"
+    );
+    let sent = call::SentRequest {
+        branch: "z9hG4bKmine".into(),
+        image: reinvite.into_bytes(),
+        destination: call::HostPort { host: "10.0.0.2".into(), port: 5070 },
+    };
+    let call = call::helpers::update_leg(bridged(), "b-1", |leg| {
+        if let Some(d) = leg.dialogs.established_mut() {
+            d.sent_invite = Some(call::testkit::own_invite(i64::from(RECORDED), Some(sent)));
+            d.our_cseq = i64::from(RECORDED + 1);
+        }
+    });
+    let event = final_from_bob(200, "INVITE", RECORDED, "z9hG4bKother");
+    let (rule, result) = turn_on(&call, &event, "b-1", &on_bobs_dialog(), &B2buaConfig::default());
+    assert_eq!(rule, Some("evidence-final"));
+    let result = result.expect("a turn");
+    let ack = ack_to(&result, "b-1").expect("the 2xx is ACKed");
+    assert_eq!(ack.cseq().seq(), RECORDED, "at the number the 2xx names");
+}
+
 /// A final at or below the sequence that answers no request held open at its
 /// number is a stray, not evidence.
 #[test]
@@ -280,6 +316,68 @@ Content-Length: 0\r\n\r\n",
     let to_carol: Vec<String> = requests_to(&result, "b-9").into_iter().map(|(m, _)| m).collect();
     assert_eq!(to_carol, ["ACK", "BYE"]);
     assert_eq!(result.call.state, call::CallModelState::Terminating);
+}
+
+/// A 2xx of a leg the record lacks, on a ringing call whose caller hears a
+/// media leg's early media under her primary tag: another owner relayed that
+/// 2xx under the tag fronting the callee's dialog, as the primary is the media
+/// leg's own session (RFC 3264 §8). The non-2xx she is owed, and the hold,
+/// take that fronting tag (ADR-0055 §4).
+#[test]
+fn the_hold_of_a_leg_the_record_lacks_takes_the_fronting_tag_beside_early_media() {
+    let key = SigningKey::new(&[7u8; 32]).expect("a key");
+    let config = B2buaConfig { cluster_key: Some(key.clone()), ..B2buaConfig::default() };
+    let mut call = ringing();
+    let mut primary = Dialog::new("media-face", "atag", DialogState::Early, 1);
+    primary.remote_target = "sip:alice@127.0.0.1:5060".into();
+    primary.shows_media = Some("m-1".into());
+    call.a_leg.dialogs.insert(primary);
+    call.a_leg.own_tag = Some("media-face".into());
+    let facts = RequestFacts { method: "INVITE", uri: "sip:carol@10.0.0.3:5070", offer: true };
+    let via = build_call_via(
+        &StackIdentityOpts {
+            local_ip: "10.0.0.9",
+            local_port: 5060,
+            call_ref: &call.call_ref,
+            leg: "b-9",
+            incarnation_mark: call.incarnation_mark(),
+            is_emergency: false,
+            other_owner: None,
+            request: Some((facts, &key)),
+        },
+        "z9hG4bKcarol".to_string(),
+    );
+    let raw = format!(
+        "SIP/2.0 200 OK\r\n\
+Via: {}\r\n\
+From: <sip:svc@10.0.0.9>;tag=svc9\r\n\
+To: <sip:carol@10.0.0.3>;tag=caroltag\r\n\
+Call-ID: b9cid@x\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:carol@10.0.0.3:5070>\r\n\
+Content-Length: 0\r\n\r\n",
+        sip_message::header::HeaderValue::to_wire(&via)
+    );
+    let event = CallEvent::sip(parse(&raw), "10.0.0.3:5070".parse().unwrap());
+    let (rule, result) = turn_on(&call, &event, "b-9", &Resolved::default(), &config);
+    assert_eq!(rule, Some("evidence-unknown-leg-2xx"));
+    let result = result.expect("a turn");
+    let fronting = b2bua_core::caller_tags::fronting(&call, "b-9", "caroltag");
+    let to_her = result
+        .effects
+        .outbound
+        .iter()
+        .filter(|e| e.leg_id.as_deref() == Some("a"))
+        .find_map(|e| match &e.body {
+            OutboundBody::Response(r) if r.status() >= 300 => Some(r.clone()),
+            _ => None,
+        })
+        .expect("the non-2xx she is owed");
+    assert_eq!(to_her.to().tag(), Some(fronting.as_str()), "under the fronting tag");
+    assert!(
+        call::helpers::caller_dialog(&result.call, &fronting).is_some(),
+        "the held dialog is the fronting one, BYEd on her ACK or at 64·T1"
+    );
 }
 
 /// The callee's 2xx to a re-INVITE another owner sent, on the early dialog
@@ -437,4 +535,86 @@ Content-Length: {}\r\n\r\n{offer}",
         .expect("the ACK");
     let answer = String::from_utf8_lossy(ack.body()).to_string();
     assert!(answer.contains("m=audio 0 "), "every stream rejected: {answer}");
+}
+
+/// The caller's re-INVITE, relayed to bob at the next number of his dialog
+/// and still open in the record: bob's 2xx left with another owner.
+fn relaying_reinvite() -> call::Call {
+    let reinvite = format!(
+        "INVITE sip:bob@10.0.0.2:5070 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bKrelayed\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:svc@10.0.0.9>;tag=svc\r\n\
+To: <sip:bob@10.0.0.2>;tag=bobtag\r\n\
+Call-ID: bcid@x\r\n\
+CSeq: {} INVITE\r\n\
+Contact: <sip:b2bua@10.0.0.9:5060>\r\n\
+Content-Length: 0\r\n\r\n",
+        RECORDED + 1
+    );
+    let mut relay = call::RequestRecord::relayed("INVITE", i64::from(RECORDED + 1), 2);
+    relay.source_vias = vec!["SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bKre".into()];
+    relay.sent = Some(call::SentRequest {
+        branch: "z9hG4bKrelayed".into(),
+        image: reinvite.into_bytes(),
+        destination: call::HostPort { host: "10.0.0.2".into(), port: 5070 },
+    });
+    let mut call = bridged();
+    call.active_peer = Some(call::ActivePeer { leg_a: "a".into(), leg_b: "b-1".into() });
+    call::helpers::update_leg(call, "b-1", |leg| {
+        if let Some(d) = leg.dialogs.established_mut() {
+            d.our_cseq = i64::from(RECORDED + 1);
+            d.sent_invite = Some(relay);
+        }
+    })
+}
+
+/// The ACK `result` sends toward `leg`, composed or repeated as the bytes it
+/// left as, if any.
+fn ack_to(result: &HandlerResult, leg: &str) -> Option<sip_message::SipRequest> {
+    result.effects.outbound.iter().filter(|e| e.leg_id.as_deref() == Some(leg)).find_map(|e| {
+        let request = match &e.body {
+            OutboundBody::Request(r) => r.clone(),
+            OutboundBody::Datagram(d) => match CustomParser::new().parse(d.wire().0).ok()? {
+                SipMessage::Request(r) => r,
+                SipMessage::Response(_) => return None,
+            },
+            OutboundBody::Response(_) => return None,
+        };
+        (request.method().as_str() == "ACK").then_some(request)
+    })
+}
+
+/// The caller ACKs the 2xx another owner relayed her for her re-INVITE: the
+/// ACK is the one bob's 2xx is owed (RFC 3261 §13.2.2.4). It goes to bob at
+/// the relayed INVITE's number, and a repeat of bob's 2xx draws it again;
+/// the call then ends on the evidence.
+#[test]
+fn an_ack_of_a_relayed_reinvite_keeps_the_callees_2xx_acked() {
+    let call = relaying_reinvite();
+    let raw = "ACK sip:b2bua@10.0.0.9:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bKreack\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@host>;tag=atag\r\n\
+To: <sip:bob@host>;tag=b2bua-a\r\n\
+Call-ID: c1@alice\r\n\
+CSeq: 2 ACK\r\n\
+Content-Length: 0\r\n\r\n";
+    let event = CallEvent::sip(parse(raw), "127.0.0.1:5060".parse().unwrap());
+    let on_hers = Resolved {
+        dialog: Some(DialogId { our_tag: "b2bua-a".into(), peer_tag: "atag".into() }),
+        record: None,
+    };
+    let (rule, result) = turn_on(&call, &event, "a", &on_hers, &B2buaConfig::default());
+    assert_eq!(rule, Some("evidence-ack"));
+    let result = result.expect("a turn");
+    let ack = ack_to(&result, "b-1").expect("bob's 2xx is ACKed");
+    assert_eq!(ack.cseq().seq(), RECORDED + 1, "at the relayed INVITE's number");
+
+    let repeat = final_from_bob(200, "INVITE", RECORDED + 1, "z9hG4bKrelayed");
+    let config = B2buaConfig::default();
+    let (_, again) = turn_on(&result.call, &repeat, "b-1", &on_bobs_dialog(), &config);
+    let again = again.expect("a turn on the repeat");
+    let reack = ack_to(&again, "b-1").expect("the repeat of bob's 2xx is ACKed again");
+    assert_eq!(reack.cseq().seq(), RECORDED + 1);
 }

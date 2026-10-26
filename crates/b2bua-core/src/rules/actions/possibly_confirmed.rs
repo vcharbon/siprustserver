@@ -32,12 +32,11 @@ impl ActionExecutor<'_> {
         {
             return;
         }
-        // The tag a 2xx relayed from that dialog carried: a leg the record
-        // lacks answered under the caller's primary dialog.
+        // The tag a 2xx relayed from that dialog carried.
         let tag = if call::helpers::find_leg(call, b_leg).is_some() {
             self.a_face_tag(call, b_leg, callee_tag, true)
         } else {
-            self.ensure_a_dialog(call)
+            self.unknown_leg_face_tag(call, b_leg, callee_tag)
         };
         crate::rules::invariants::answer_unanswered_caller(
             call,
