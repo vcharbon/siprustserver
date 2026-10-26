@@ -414,14 +414,20 @@ number of takeovers unshifted.
     terminated call, one CDR, full cleanup; a cell killing the primary may
     leave two (the dead primary's and the survivor's, §5), never none;
   - split, healed or not: judged like a split that never heals below;
-  - replication stalled past the cap of §3, then a kill: a caller whose INVITE
-    transaction saw neither final nor provisional from the copy is answered by
-    its own Timer B, and a callee whose 2xx tag the call record never held keeps
-    its dialog until its own timers end it; the call leaves one CDR or two
-    (the stalled primary's and the departure sweep's, §5), never none;
+  - replication stalled past the cap of §3, then a kill: the call leaves one
+    CDR or two (the stalled primary's and the departure sweep's, §5), never
+    none;
   - a backlog over the high-water mark, or a backup at its memory ceiling, then
     a kill: a call with no backup is lost as on a non-HA B2BUA, its cell
     leaving one CDR or none.
+
+  Both lose the call (user ruling): every dialog, the caller's included, may
+  be left to its endpoint's own timers. The cell still requires no leak, full
+  cleanup and its CDR count, and a final for every request that reaches a
+  living worker; a transaction the dead primary took is its own, its repeats
+  included wherever they land. A stalled copy answering an UPDATE 500 with
+  Retry-After, its INVITE unanswered, is RFC 3311 §5.2; a re-INVITE of a call
+  with no backup that drew only the dead primary's 100 is a non-HA death.
 
   The parties' verdict is checked in every cell (user ruling). The parties
   are RFC 3261 transactions over UDP: every request but ACK goes again on
@@ -437,9 +443,7 @@ number of takeovers unshifted.
   §14.1) and ends a dialog on a 481 or 408 to a request inside it
   (§12.2.1.2). A request left without
   its final, or a dialog left open, still fails the cell, except as declared
-  below. An incident that loses the call accepts only its two outcomes above:
-  the caller's INVITE drawing no final, left to her Timer B, and a callee
-  holding a confirmed dialog its own timers end.
+  above for a lost call and below.
 
   A split that never heals is not supposed to last: it cuts a representative
   few shapes (the re-INVITE, the REFER), whose cells check the worst case, no
@@ -462,6 +466,11 @@ number of takeovers unshifted.
   - a stall (user ruling): a copy's repeat of the caller's 2xx that differs
     from the dead owner's only in its own Contact, every other header field
     and the body unchanged; the Contact of a node is its own;
+  - a stall (user ruling): a copy's repeat of a CANCEL that differs from the
+    dead owner's only in its Reason header field; every other difference
+    keeps the finding;
+  - a stall (user ruling): a copy's requests at the CSeqs the dead owner sent
+    on the dialog during the stall, each closed by the 481 it draws;
   - a kill of the primary, and a split that heals (user ruling): the §4 clean
     end's BYE into a dialog the other owner already ended, closed by its 481;
   - a kill of the primary at a logged or left sub-point (user ruling): a
@@ -474,6 +483,11 @@ number of takeovers unshifted.
     them in vain, and every dialog, early or confirmed, is left to its
     endpoint's own timers. A turn taken on a request is not in this window:
     the message that stops its sender repeating it is held (§3);
+  - a kill of the primary at the applied sub-point of a turn that sent a
+    request to an outside service (a routing service, the limiter), the
+    primary taking no later turn (user ruling): the answer in flight on the
+    dead node is lost, and the copy stays reactive (§5); every dialog is left
+    to its endpoint's own timers;
   - a kill inside the replication window: a copy re-uses a CSeq the dead
     primary sent before the backup applied the write, at most one rejected
     request per dialog; the call still ends or continues cleanly. A call with

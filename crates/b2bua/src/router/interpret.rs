@@ -56,6 +56,7 @@ pub(super) async fn process_result(
         refresh_period: ctx.limiter.refresh_period(),
     };
     let result = crate::landing::land(result, &landing, now_ms);
+    let kind = TurnKind::of(&result, received);
     // Stated text the turn's messages left out is a defect of the model that
     // stated it, reported whichever node sends them.
     for eff in &result.effects.buffered {
@@ -104,12 +105,12 @@ pub(super) async fn process_result(
         // poll; a rebooting primary still has its full reclaim window to fold and
         // discharge it. The primary is the sole discharge authority either way.
         ctx.state.flush(&result.call);
-        reach(ctx, call_ref, TurnPoint::Logged, true, received.is_some()).await;
+        reach(ctx, call_ref, TurnPoint::Logged, true, kind).await;
         // What the turn owes the WIRE is not deferred: the final that ends the
         // caller's INVITE and the hop-by-hop ACK toward the callee leave from the
         // node that took the event, or the peers wedge on Timer B / Timer H.
         emit_outbound(ctx, call_ref, &result, now_ms).await;
-        reach(ctx, call_ref, TurnPoint::Left, true, received.is_some()).await;
+        reach(ctx, call_ref, TurnPoint::Left, true, kind).await;
         release_call(ctx, call_ref, ReleaseKind::SelfRelease { ended: true }).await;
         return;
     }
@@ -134,7 +135,7 @@ pub(super) async fn process_result(
     if wrote {
         ctx.state.flush(&result.call);
     }
-    reach(ctx, call_ref, TurnPoint::Logged, wrote, received.is_some()).await;
+    reach(ctx, call_ref, TurnPoint::Logged, wrote, kind).await;
     // A re-INVITE's first provisional follows the write that records it.
     if let Some(reinvite) =
         received.filter(|r| *r.method() == Method::Invite && r.to().tag().is_some())
@@ -181,7 +182,7 @@ pub(super) async fn process_result(
     }
 
     emit_outbound(ctx, call_ref, &result, now_ms).await;
-    reach(ctx, call_ref, TurnPoint::Left, wrote, received.is_some()).await;
+    reach(ctx, call_ref, TurnPoint::Left, wrote, kind).await;
 
     for eff in &result.effects.soft {
         match eff {
@@ -301,7 +302,25 @@ pub(super) async fn process_result(
 
 /// Report the turn of `call_ref` at `point` to the turn-point seam, with the
 /// write counters the live copy holds (ADR-0055 §13).
-async fn reach(ctx: &RouterCtx, call_ref: &str, point: TurnPoint, wrote: bool, on_request: bool) {
+/// What a turn was taken on and what it started, as its turn marks report.
+#[derive(Clone, Copy)]
+struct TurnKind {
+    on_request: bool,
+    called_out: bool,
+}
+
+impl TurnKind {
+    fn of(result: &HandlerResult, received: Option<&SipRequest>) -> Self {
+        let called_out = result
+            .effects
+            .fire_and_forget
+            .iter()
+            .any(|e| !matches!(e, FireAndForgetEffect::Reenter(_)));
+        Self { on_request: received.is_some(), called_out }
+    }
+}
+
+async fn reach(ctx: &RouterCtx, call_ref: &str, point: TurnPoint, wrote: bool, kind: TurnKind) {
     let version = || ctx.state.topology(call_ref).map_or((0, 0), |t| (t.gen, t.bak_gen));
     ctx.turn_probe
         .at(|| TurnMark {
@@ -311,7 +330,8 @@ async fn reach(ctx: &RouterCtx, call_ref: &str, point: TurnPoint, wrote: bool, o
             version: version(),
             wrote,
             removed: false,
-            on_request,
+            on_request: kind.on_request,
+            called_out: kind.called_out,
         })
         .await;
 }

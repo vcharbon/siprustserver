@@ -139,10 +139,25 @@ pub async fn run_cell(
     let (verdict, obs) = verdict.expect("the parties finished");
     eprintln!("[{name}] the parties ended: {verdict:?}");
     let turns = turn_points.turns(&call_ref);
-    let cut_at = cut.map(|c| super::outcome::CutAt {
-        incident: c.incident,
-        point: c.at.point,
-        on_request: turns.get(c.at.turn - 1).is_none_or(|t| t.on_request),
+    let living: Vec<_> = cluster
+        .workers
+        .iter()
+        .filter(|w| w.ordinal() != placement.primary)
+        .map(|w| w.sip_addr())
+        .collect();
+    let cut_at = cut.map(|c| {
+        let turn = turns.get(c.at.turn - 1);
+        super::outcome::CutAt {
+            incident: c.incident,
+            point: c.at.point,
+            on_request: turn.is_none_or(|t| t.on_request),
+            answer_in_flight: turn.is_some_and(|t| t.called_out) && turns.len() == c.at.turn,
+            living_answered: super::answered::living_workers_answered(
+                &cluster.fh.sip_entries(),
+                &living,
+                cluster.node(&placement.primary).sip_addr(),
+            ),
+        }
     });
     if !super::outcome::accepted(cut_at, &verdict, &obs) {
         panic!("[{name}] the parties failed: {verdict:?} {:?}", ctx.notes());
@@ -234,7 +249,9 @@ fn strike(
         }
         Incident::StalledKilled => {
             accept_clean_end_into_ended_dialogs(cluster, names);
-            super::contact_repeat::accept_contact_only_2xx_repeat(cluster);
+            super::stall_repeat::accept_contact_only_2xx_repeat(cluster);
+            super::stall_repeat::accept_reason_only_cancel_repeat(cluster);
+            super::stall_cseq::accept_cseqs_sent_during_the_stall(cluster);
             cluster.fh.stall(&placement.primary, &placement.backup);
             None
         }

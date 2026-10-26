@@ -53,6 +53,7 @@ impl Puller {
                 wrote: true,
                 removed: matches!(op, Op::Delete),
                 on_request: false,
+                called_out: false,
             })
             .await;
     }

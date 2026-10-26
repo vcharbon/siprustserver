@@ -31,12 +31,14 @@
 //! [`failover_sweep!`](crate::failover_sweep) expands a list of shapes into
 //! the lane's tests against the consumer's own ratchet.
 
+mod answered;
 pub mod catalogue;
 mod cell;
-mod contact_repeat;
 mod outcome;
 mod parties;
 mod ratchet;
+mod stall_cseq;
+mod stall_repeat;
 mod unseen_rseq;
 
 use b2bua::cdr::CdrRecord;
@@ -135,9 +137,9 @@ impl Incident {
     }
 
     /// Whether the incident may lose the call as a non-HA B2BUA loses it
-    /// (ADR-0055 §11): a caller whose INVITE drew nothing from a copy is
-    /// answered by its own Timer B, a callee whose dialog no copy holds keeps
-    /// it until its own timers end it. A stalled call leaves its primary's
+    /// (ADR-0055 §11): every dialog, the caller's included, may be left to its
+    /// endpoint's own timers, and every request that reaches a living worker
+    /// still draws its final there. A stalled call leaves its primary's
     /// CDR, the one of the node that ends it after, or both, never none; an
     /// unbacked one at most one. Nothing is left on any node or in the limiter
     /// either way.

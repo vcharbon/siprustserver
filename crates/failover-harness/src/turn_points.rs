@@ -27,6 +27,8 @@ pub struct Turn {
     /// Whether the turn handled a SIP request rather than a response, a timer
     /// or an off-turn answer.
     pub on_request: bool,
+    /// Whether the turn sent a request to an outside service.
+    pub called_out: bool,
 }
 
 impl Turn {
@@ -146,7 +148,7 @@ impl Inner {
                 }
                 let turns = self.calls.entry(mark.call_ref.to_string()).or_default();
                 let (version, wrote, on_request) = (mark.version, mark.wrote, mark.on_request);
-                turns.push(Turn { version, wrote, on_request });
+                turns.push(Turn { version, wrote, on_request, called_out: mark.called_out });
                 Some(turns.len())
             }
             (TurnPoint::Left, true) => self.calls.get(mark.call_ref).map(Vec::len),

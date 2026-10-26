@@ -36,13 +36,27 @@ struct AcceptanceWindow {
     once_per_dialog: bool,
     /// What the window admits of an offending message beyond its rule and
     /// span; `None` admits every one.
-    admits: Option<Admits>,
+    admits: Option<Test>,
+}
+
+/// How a window tests an offending message.
+#[derive(Clone, Copy)]
+enum Test {
+    /// On the message and what was captured before it.
+    Earlier(Admits),
+    /// On the message's place in the whole capture.
+    Whole(AdmitsWhole),
 }
 
 /// A window's test of an offending message: the message's entry, every entry
 /// captured before it, and the capture `seq` the window opened after (an
 /// entry at or below it was captured before the window).
 pub type Admits = fn(&RecordedSipEntry, &[RecordedSipEntry], u64) -> bool;
+
+/// A window's test of an offending message that reads what followed it too:
+/// the message's index in every captured entry, those entries, and the
+/// capture `seq` the window opened after.
+pub type AdmitsWhole = fn(usize, &[RecordedSipEntry], u64) -> bool;
 
 impl AcceptanceWindow {
     /// Whether the message captured at `seq` falls inside this window.
@@ -55,7 +69,10 @@ impl AcceptanceWindow {
     fn takes(&self, i: usize, entries: &[RecordedSipEntry]) -> bool {
         let Some(entry) = entries.get(i) else { return false };
         self.covers(entry.seq)
-            && self.admits.is_none_or(|admits| admits(entry, &entries[..i], self.from_seq))
+            && self.admits.is_none_or(|test| match test {
+                Test::Earlier(admits) => admits(entry, &entries[..i], self.from_seq),
+                Test::Whole(admits) => admits(i, entries, self.from_seq),
+            })
     }
 }
 
@@ -114,12 +131,27 @@ impl RfcAcceptance {
         once_per_dialog: bool,
         admits: Option<Admits>,
     ) {
+        let admits = admits.map(Test::Earlier);
         let window = AcceptanceWindow {
             rule: rule.to_string(),
             from_seq,
             until_seq: None,
             once_per_dialog,
             admits,
+        };
+        self.windows.push(window);
+    }
+
+    /// An acceptance window for `rule` over every message captured after
+    /// `from_seq`, accepting only the offending messages `admits` passes,
+    /// read against the whole capture.
+    pub fn open_window_seeing(&mut self, rule: &str, from_seq: u64, admits: AdmitsWhole) {
+        let window = AcceptanceWindow {
+            rule: rule.to_string(),
+            from_seq,
+            until_seq: None,
+            once_per_dialog: false,
+            admits: Some(Test::Whole(admits)),
         };
         self.windows.push(window);
     }
@@ -153,17 +185,21 @@ impl RfcAcceptance {
         self.windows.iter().any(|w| w.rule == rule && w.takes(i, entries))
     }
 
-    /// Whether the window that covers the finding at `offending` accepts one
-    /// request per dialog only.
-    fn once_per_dialog(
+    /// Whether a window for `rule` taking the finding at `offending` is one
+    /// that accepts one request per dialog (`once_per_dialog`), or one that
+    /// accepts every request it takes (`!once_per_dialog`).
+    fn taken_by(
         &self,
         rule: &str,
         offending: Option<usize>,
         entries: &[RecordedSipEntry],
+        once_per_dialog: bool,
     ) -> bool {
         let i = offending.and_then(|i| i.checked_sub(1)).filter(|i| *i < entries.len());
         i.is_some_and(|i| {
-            self.windows.iter().any(|w| w.rule == rule && w.takes(i, entries) && w.once_per_dialog)
+            self.windows.iter().any(|w| {
+                w.rule == rule && w.once_per_dialog == once_per_dialog && w.takes(i, entries)
+            })
         })
     }
 
@@ -198,10 +234,12 @@ impl RfcAcceptance {
             let mut per_dialog = DialogRequests::default();
             for (lane, detail, offending, _charged) in rule.check_positioned(events) {
                 let finding = (rule.name().to_string(), lane, detail);
+                // A window taking every request it covers accepts the finding
+                // outright; one taking a request per dialog, its dialog's first.
                 let accepted_here = has_window
-                    && self.accepts(rule.name(), offending, &entries)
-                    && (!self.once_per_dialog(rule.name(), offending, &entries)
-                        || per_dialog.first_of_its_dialog(offending, &entries));
+                    && (self.taken_by(rule.name(), offending, &entries, false)
+                        || (self.taken_by(rule.name(), offending, &entries, true)
+                            && per_dialog.first_of_its_dialog(offending, &entries)));
                 if accepted_here {
                     accepted.push(finding);
                 } else {

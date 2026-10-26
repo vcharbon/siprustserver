@@ -48,6 +48,9 @@ pub struct TurnMark<'a> {
     /// The turn handled a SIP request, not a response, a timer or an
     /// off-turn answer.
     pub on_request: bool,
+    /// The turn sent a request to an outside service, whose answer a later
+    /// turn takes.
+    pub called_out: bool,
 }
 
 /// What a probe hands back to hold a turn: the turn goes on once it resolves.
@@ -109,6 +112,7 @@ mod tests {
             wrote: true,
             removed: false,
             on_request,
+            called_out: false,
         }
     }
 
