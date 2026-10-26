@@ -228,3 +228,16 @@ fn the_default_bounds_hold_the_design_working_set() {
     let at = super::bounds::footprint(&key("a84b4c76e66710@pc33.atlanta.example.com"), &ordinary);
     assert!(at <= TYPICAL_ENTRY_BYTES, "an ordinary entry accounts {at} bytes");
 }
+
+/// A flood of INVITE entries never pushes out a short memo: each lifetime
+/// class holds its own share of the bounds.
+#[tokio::test(start_paused = true)]
+async fn a_flood_of_invite_entries_keeps_a_short_memo() {
+    let lru = one_stripe(8, usize::MAX);
+    lru.remember(&key("rtx"), entry("short"), RTX_ENTRY_TTL_MS);
+    for i in 0..50 {
+        tick().await;
+        lru.remember(&key(&format!("invite-{i}")), entry("b"), INVITE_ENTRY_TTL_MS);
+    }
+    assert_eq!(lru.lookup(&key("rtx")).map(|e| e.branch), Some("short".to_string()));
+}

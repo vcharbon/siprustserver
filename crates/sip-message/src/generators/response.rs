@@ -253,4 +253,36 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(stamps[0].as_str(), "54.25 1.234");
         assert!(delayed_trying_timestamp(&notify(), std::time::Duration::ZERO).is_none());
     }
+
+    /// RFC 3261 §18.2.1 / RFC 3581 §4 — a topmost Via line folding several
+    /// hops has its first hop stamped; the hops after it are echoed as sent.
+    #[test]
+    fn the_first_hop_of_a_folded_top_via_line_is_stamped() {
+        let raw = "OPTIONS sip:as@127.0.0.1:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.44:5999;branch=z9hG4bK-a;rport , SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-b\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@127.0.0.1:5070>;tag=a1\r\n\
+To: <sip:as@127.0.0.1:5060>\r\n\
+Call-ID: folded-via\r\n\
+CSeq: 2 OPTIONS\r\n\
+Content-Length: 0\r\n\r\n";
+        let request = match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+            crate::SipMessage::Request(r) => r,
+            _ => panic!("expected request"),
+        };
+        let opts = GenerateResponseOpts {
+            incoming_source: Some(("198.51.100.4".to_string(), 33000)),
+            ..Default::default()
+        };
+        let resp = generate_response(&request, 200, "OK", &opts).unwrap();
+        let lines: Vec<_> =
+            resp.raw_text(HeaderName::Via).map(|l| l.as_str().to_string()).collect();
+        assert_eq!(
+            lines,
+            [
+                "SIP/2.0/UDP 192.0.2.44:5999;branch=z9hG4bK-a;rport=33000;received=198.51.100.4",
+                "SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-b",
+            ]
+        );
+    }
 }

@@ -26,7 +26,7 @@ const FLOODER: &str = "203.0.113.66";
 const PROXY_VIP: &str = "192.0.2.250";
 const W1: &str = "10.0.0.1";
 const W2: &str = "10.0.0.2";
-const CAP: usize = 8;
+const CAP: usize = 16;
 
 async fn core(lru: Arc<CancelBranchLru>, metrics: Arc<ProxyMetrics>) -> ProxyCore {
     let net = SimulatedSignalingNetwork::new(1);
@@ -114,7 +114,8 @@ async fn cancel_and_ack_find_their_hop_through_a_flood_at_the_cap() {
 
     core.route_request_from(&uac_request("INVITE", "INVITE", ""), uac).await;
     flood(&core, 0, 3 * CAP).await;
-    assert_eq!(lru.size(), CAP, "the flood holds the memo at its cap");
+    assert!(lru.size() <= CAP, "the flood holds the memo at its cap");
+    assert!(lru.evicted() > 0, "the flood's own memos are evicted");
 
     let cancel = core.route_request_from(&uac_request("CANCEL", "CANCEL", ""), uac).await;
     assert_eq!(cancel.decision, RoutingDecisionKind::Cancel);
@@ -128,9 +129,64 @@ async fn cancel_and_ack_find_their_hop_through_a_flood_at_the_cap() {
     // The 486 comes from the node that took the transaction over.
     let survivor: SocketAddr = format!("{W2}:5060").parse().unwrap();
     core.handle_response_from(busy_486(), survivor).await;
-    flood(&core, 3 * CAP, CAP / 2).await;
+    flood(&core, 3 * CAP, 2).await;
     let ack = core.route_request_from(&uac_request("ACK", "ACK", ";tag=callee-1"), uac).await;
     assert_eq!(ack.decision, RoutingDecisionKind::AckHop);
     assert_eq!(ack.target, Some(ProxyAddr::new(W2, 5060)), "the ACK reaches the final's sender");
-    assert_eq!(lru.size(), CAP);
+}
+
+/// One INVITE of a flood carrying a To-tag and no Route: no admission gate
+/// meets it, and each writes an INVITE entry beside its retransmission memo.
+fn flood_tagged_invite(i: usize) -> SipMessage {
+    parse(&format!(
+        "INVITE sip:probe@10.0.0.50:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {FLOODER}:5060;branch=z9hG4bKtagged{i};rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:flood@{FLOODER}>;tag=f{i}\r\n\
+To: <sip:probe@10.0.0.50>;tag=t{i}\r\n\
+Call-ID: tagged-{i}@test\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:flood@{FLOODER}:5060>\r\n\
+Content-Length: 0\r\n\r\n"
+    ))
+}
+
+/// A flood that fills the memo with INVITE entries, which outlive every
+/// short memo, leaves a later INVITE its retransmission memo and a relayed
+/// non-2xx final its ACK hop: the short memos are not the ones a long-lived
+/// flood pushes out.
+#[tokio::test(start_paused = true)]
+async fn a_flood_of_invite_entries_keeps_the_short_memos_of_a_new_transaction() {
+    let lru = Arc::new(CancelBranchLru::with_bounds(
+        Clock::test_at(0),
+        MemoBounds { max_entries: CAP, max_bytes: usize::MAX, stripes: 1 },
+    ));
+    let metrics = Arc::new(ProxyMetrics::new());
+    let core = core(lru.clone(), metrics.clone()).await;
+    let flooder: SocketAddr = format!("{FLOODER}:5060").parse().unwrap();
+    for i in 0..2 * CAP {
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        core.route_request_from(&flood_tagged_invite(i), flooder).await;
+    }
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+
+    let uac: SocketAddr = format!("{UAC}:5060").parse().unwrap();
+    let invite = uac_request("INVITE", "INVITE", "");
+    core.route_request_from(&invite, uac).await;
+    let SipMessage::Request(req) = &invite else { unreachable!() };
+    let rtx = crate::cancel_lru::retransmit_key(
+        req.top_via(),
+        req.call_id().as_str(),
+        req.from().tag(),
+        "INVITE",
+        1,
+    );
+    assert!(lru.lookup(&rtx).is_some(), "the INVITE's retransmission memo is kept");
+
+    let survivor: SocketAddr = format!("{W2}:5060").parse().unwrap();
+    core.handle_response_from(busy_486(), survivor).await;
+    let ack = core.route_request_from(&uac_request("ACK", "ACK", ";tag=callee-1"), uac).await;
+    assert_eq!(ack.decision, RoutingDecisionKind::AckHop, "the relayed final's ACK hop is kept");
+    assert_eq!(ack.target, Some(ProxyAddr::new(W2, 5060)));
+    assert!(lru.lookup(&rtx).is_some(), "and the retransmission memo still");
 }
