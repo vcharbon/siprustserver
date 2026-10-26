@@ -15,7 +15,7 @@ use bytes::Bytes;
 
 use crate::draft::{HeaderList, RequestDraft, ResponseDraft};
 use crate::error::SipParseError;
-use crate::header::{self, Folding, HeaderName, HeaderValue, Uri};
+use crate::header::{self, HeaderName, HeaderValue, Uri};
 use crate::header_table::HeaderTable;
 use crate::method::Method;
 use crate::parser::custom::request_uri::request_uri_refusal;
@@ -79,11 +79,12 @@ fn recorded_routes(
     Ok(HeaderList::new(set))
 }
 
-/// The single logical value of `H`. A header whose reader sees only the first
-/// value ([`HeaderValue::combine`] by default) reads only the first line that
-/// carries it; a set-like or comma-folded one reads them all.
+/// The single logical value of `H`. A header read from its first line only
+/// ([`HeaderValue::first_line_only`]) is that line's value, whatever a later
+/// line of it holds, malformed or not; any other reads every line and
+/// [`combine`](HeaderValue::combine)s them.
 fn header_of<H: HeaderValue>(core: &MessageCore) -> Option<Result<H, SipParseError>> {
-    if matches!(H::folding(), Folding::Single | Folding::Opaque) {
+    if H::first_line_only() {
         let name = H::header_name();
         let first = core.headers.of(&name).next()?;
         return match H::parse_line(&first.value) {

@@ -60,8 +60,7 @@ struct Budget {
     bytes: usize,
 }
 
-/// The allocation budget, re-baselined on header lines classified once and a
-/// freeze that takes the values its draft states.
+/// The allocation budget, re-baselined on header lines classified once.
 ///
 /// ADR-0025's guardrails target ≤ ~10 allocs per parse and ≤ ~12 per
 /// thawed-draft hop. `decode/*` and `hop/stamp_rport` — the smallest edit a
@@ -76,10 +75,10 @@ const BUDGETS: &[Budget] = &[
     Budget { case: "hop/stamp_rport", allocs: 9, bytes: 2680 },
     Budget { case: "proxy_hop/invite", allocs: 19, bytes: 6780 },
     Budget { case: "proxy_hop/invite_sdp", allocs: 20, bytes: 7610 },
-    Budget { case: "build/blank_draft", allocs: 24, bytes: 6170 },
-    Budget { case: "build/invite_sdp", allocs: 27, bytes: 6430 },
-    Budget { case: "build/bye", allocs: 42, bytes: 4140 },
-    Budget { case: "build/response_200", allocs: 24, bytes: 4910 },
+    Budget { case: "build/blank_draft", allocs: 22, bytes: 8140 },
+    Budget { case: "build/invite_sdp", allocs: 26, bytes: 8400 },
+    Budget { case: "build/bye", allocs: 41, bytes: 4100 },
+    Budget { case: "build/response_200", allocs: 22, bytes: 6880 },
     Budget { case: "refuse/12000_headers", allocs: 1, bytes: 90 },
 ];
 

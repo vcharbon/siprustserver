@@ -75,6 +75,21 @@ pub trait HeaderValue: Sized + Clone + std::fmt::Debug + Send + Sync + 'static {
         Ok(())
     }
 
+    /// Whether [`combine`](Self::combine) reads every value: `true` for a type
+    /// that overrides it, which must say so here. A type that keeps the first
+    /// value and carries one value per line is read from its first line only.
+    const COMBINES: bool = false;
+
+    /// Whether a reader of the single logical value reads the first line that
+    /// carries this header and no other: the type keeps the first value
+    /// ([`COMBINES`](Self::COMBINES) is `false`) and a line carries one value
+    /// ([`Folding::Single`] or [`Folding::Opaque`]). A later line, malformed
+    /// or not, then takes no part in that value (RFC 3261 §7.3.1: such a
+    /// header appears once).
+    fn first_line_only() -> bool {
+        !Self::COMBINES && matches!(Self::folding(), Folding::Single | Folding::Opaque)
+    }
+
     /// The single logical value a reader sees when the message carries several
     /// lines of this header. Set-like headers union; everything else is the
     /// first line, which is the value RFC 3261 gives meaning to.

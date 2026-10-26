@@ -16,7 +16,6 @@ use super::dialog_ids::{count_tag_params, is_call_id, read_address, tag_refusal}
 use super::header_index::HeaderIndex;
 use super::request_uri::read_request_uri;
 use super::routes::read_routes;
-use super::stated::Stated;
 use super::structured_headers::{parse_cseq, parse_via, top_level_comma_entries};
 use super::top_via;
 use crate::char_class::is_token_char;
@@ -170,13 +169,9 @@ pub(super) fn extract_identity(
         ));
     }
 
-    let stated = if wire { Stated::default() } else { idx.stated };
     let from_val =
         idx.from.first.ok_or_else(|| SipParseError::new("Missing mandatory From header"))?;
-    let from = match stated.from {
-        Some(from) => from.addr().clone(),
-        None => read_address(from_val, "From", wire)?,
-    };
+    let from = read_address(from_val, "From", wire)?;
     if from.params().value("tag") == Some("") {
         return Err(SipParseError::new("Empty From tag parameter"));
     }
@@ -185,10 +180,7 @@ pub(super) fn extract_identity(
     }
 
     let to_val = idx.to.first.ok_or_else(|| SipParseError::new("Missing mandatory To header"))?;
-    let to = match stated.to {
-        Some(to) => to.addr().clone(),
-        None => read_address(to_val, "To", wire)?,
-    };
+    let to = read_address(to_val, "To", wire)?;
     if to.params().value("tag") == Some("") {
         return Err(SipParseError::new("Empty To tag parameter"));
     }
@@ -212,9 +204,7 @@ pub(super) fn extract_identity(
 
     let cseq_val =
         idx.cseq.first.ok_or_else(|| SipParseError::new("Missing mandatory CSeq header"))?;
-    let cseq = if let Some(cseq) = stated.cseq {
-        cseq.clone()
-    } else if wire {
+    let cseq = if wire {
         header::CSeq::parse(cseq_val)?
     } else {
         // The lenient read saturates a sequence number past `u32`.
@@ -231,17 +221,12 @@ pub(super) fn extract_identity(
     if idx.via.is_empty() {
         return Err(SipParseError::new("Missing mandatory Via header"));
     }
-    let typed_vias = stated.vias().transpose()?;
-    let parse_text = typed_vias.is_none();
     // Each line is split into its entries once, for the grammar check and
     // the read alike.
-    let mut segments: SmallVec<[(&SipStr, &str); 4]> = SmallVec::new();
-    if parse_text {
-        segments.reserve(idx.via.len());
-        segments.extend(
-            idx.via.iter().flat_map(|v| top_level_comma_entries(v.as_str()).map(move |s| (*v, s))),
-        );
-    }
+    let mut segments: SmallVec<[(&SipStr, &str); 4]> = SmallVec::with_capacity(idx.via.len());
+    segments.extend(
+        idx.via.iter().flat_map(|v| top_level_comma_entries(v.as_str()).map(move |s| (*v, s))),
+    );
     if wire {
         for (_, segment) in &segments {
             if let Some(reason) = check_sent_protocol(segment) {
@@ -249,8 +234,7 @@ pub(super) fn extract_identity(
             }
         }
     }
-    let mut vias: Vec<header::Via> =
-        typed_vias.unwrap_or_else(|| Vec::with_capacity(segments.len()));
+    let mut vias: Vec<header::Via> = Vec::with_capacity(segments.len());
     for &(value, raw) in &segments {
         let v = parse_via(&value.reslice(raw));
         let top = vias.is_empty();
@@ -315,9 +299,6 @@ fn read_contacts(
     wire: bool,
     contact_reading: ContactReading,
 ) -> Result<ContactSet, SipParseError> {
-    if let Some(typed) = (!wire).then(|| idx.stated.contacts()).flatten() {
-        return Ok(ContactSet::Contacts(typed));
-    }
     // Each line is split into its entries once, for the wildcard rule and the
     // read alike.
     let spans: SmallVec<[SipStr; 2]> =

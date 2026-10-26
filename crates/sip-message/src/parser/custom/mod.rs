@@ -29,7 +29,6 @@ pub(crate) mod request_uri;
 mod routes;
 pub mod scanner;
 pub mod start_line;
-pub(crate) mod stated;
 pub mod structured_headers;
 mod top_via;
 

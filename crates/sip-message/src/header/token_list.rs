@@ -138,6 +138,8 @@ impl<K: TokenKind> HeaderValue for TokenListHeader<K> {
         }
     }
 
+    const COMBINES: bool = true;
+
     /// Several lines of a set-like header are one set.
     fn combine(values: Vec<Self>) -> Option<Self> {
         let mut it = values.into_iter();

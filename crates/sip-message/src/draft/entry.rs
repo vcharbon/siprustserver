@@ -131,14 +131,6 @@ impl Entry {
         }
     }
 
-    /// The typed value this line holds, when it holds an `H`.
-    pub(crate) fn typed_ref<H: HeaderValue>(&self) -> Option<&H> {
-        match &self.value {
-            Value::Typed(value) => value.as_any().downcast_ref::<H>(),
-            Value::Raw(_) => None,
-        }
-    }
-
     /// Every value this line carries, read as `H`. A typed entry already
     /// holding an `H` is handed back without a parse.
     pub(crate) fn read<H: HeaderValue>(&self) -> Result<Vec<H>, SipParseError> {
