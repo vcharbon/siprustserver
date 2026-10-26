@@ -37,6 +37,7 @@ dependencies = [
  "cfg-if",
  "getrandom 0.3.4",
  "once_cell",
+ "serde",
  "version_check",
  "zerocopy",
 ]
@@ -3965,6 +3966,9 @@ dependencies = [
  "log",
  "percent-encoding",
  "pin-project-lite",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tower",
@@ -5866,6 +5870,20 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "workspace-hack"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "aho-corasick",
+ "clap",
+ "linux-raw-sys",
+ "regex-automata",
+ "reqwest",
+ "rustix",
+ "serde_json",
+]
 
 [[package]]
 name = "writeable"

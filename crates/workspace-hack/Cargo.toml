@@ -1,0 +1,25 @@
+[package]
+name = "workspace-hack"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "No code: the dependency features a workspace that embeds this one as path dependencies turns on, turned on here too, so a third-party crate resolves the same features from both workspaces and one build in a shared target serves both. Nothing depends on it; a `--workspace` build includes it as a member. Production binaries, each built alone, never see it. A feature the embedding workspace turns on and this one does not belongs here."
+
+[package.metadata.ha]
+side = "aware"
+
+[lints]
+workspace = true
+
+[dependencies]
+ahash = { version = "0.8", default-features = false, features = ["serde"] }
+aho-corasick = "1.1"
+clap = { version = "4", default-features = false, features = ["env"] }
+regex-automata = { version = "0.4", default-features = false, features = ["nfa", "perf"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query"] }
+rustix = { version = "1", default-features = false, features = ["process"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+linux-raw-sys = { version = "0.12", default-features = false, features = ["prctl"] }

@@ -62,6 +62,7 @@ members = [
     "crates/sip-pcap",
     "crates/pivot-schema",
     "crates/pivot-interpreter",
+    "crates/workspace-hack",
     "xtask",
 ]
 
