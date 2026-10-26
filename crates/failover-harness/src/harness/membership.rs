@@ -4,6 +4,7 @@
 //! bound to the worker identity of its newest incarnation (ADR-0055 §6).
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use sip_proxy::registry::WorkerHealth;
 use sip_proxy::ProxyAddr;
@@ -136,6 +137,35 @@ impl FailoverHarness {
     pub fn readmit(&mut self, ordinal: &str, addr: SocketAddr) {
         self.mark(ordinal, None, "readmit", &format!("endpoint published at {addr}"));
         self.publish(ordinal, addr, "readmit");
+    }
+
+    /// **Publish `node` once it is ready** — its readiness probe passing puts
+    /// it in the slice: pumps until `node` reports ready, then
+    /// [`readmit`](Self::readmit)s its ordinal at its address. `false`, with
+    /// nothing published, when it is not ready within 30 s.
+    pub async fn readmit_once_ready(&mut self, node: &ReplicatedB2buaSut) -> bool {
+        let ready = self
+            .pump_until(Duration::from_millis(100), Duration::from_secs(30), async || {
+                node.is_ready()
+            })
+            .await;
+        if ready {
+            self.readmit(node.ordinal(), node.sip_addr());
+        }
+        ready
+    }
+
+    /// **Publish `ordinal` to its own informer only** — the slice lists its
+    /// newest incarnation and the worker has seen it before the proxy and every
+    /// peer: it observes its own endpoint routable while nothing routes to it
+    /// and no peer pulls it as rejoined. [`readmit`](Self::readmit) publishes it
+    /// to the rest.
+    pub fn publish_to_itself(&mut self, ordinal: &str) {
+        self.mark(ordinal, None, "publish_to_itself", "its own informer lists the endpoint");
+        let member = self.bound_member(ordinal);
+        for (_, membership) in self.views.live_incarnations_of(ordinal) {
+            membership.add(member.clone());
+        }
     }
 
     /// **Force-delete `ordinal`** — the orchestrator removes the pod without

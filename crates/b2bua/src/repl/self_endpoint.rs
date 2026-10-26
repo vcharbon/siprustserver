@@ -117,6 +117,11 @@ impl SelfObserver {
         self.enabled.store(true, Ordering::SeqCst);
     }
 
+    /// Whether [`enable`](Self::enable) was called.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::SeqCst)
+    }
+
     /// Evaluate one membership `snapshot`. `synced` is the source's
     /// [`topology::Membership::synced`]: an informer's pre-LIST placeholder says
     /// nothing about this worker. Returns the new state on a transition, `None`

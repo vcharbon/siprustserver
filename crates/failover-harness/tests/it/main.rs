@@ -55,6 +55,7 @@ mod one_backup_on_every_leg;
 mod outbound_invite_after_the_departure;
 mod prack_repeat_takeover;
 mod prack_takeover;
+mod reclaim_waits_for_a_routable_endpoint;
 mod reinvite_2xx_acked_through_the_primary;
 mod reinvite_answer_failover;
 mod reinvite_round_gives_up_after_takeover;

@@ -5,7 +5,7 @@
 //! instants: membership drops the ordinal at once, the process takes the
 //! SIGTERM as a drain and keeps serving its live calls until the SIGKILL
 //! lands. A same-ordinal replacement comes up inside that window, bootstraps
-//! and reclaims the ringing snapshot from the survivor.
+//! from the survivor, and reclaims the call once its endpoint is published.
 //!
 //! ```text
 //!   ringing · elder serves · survivor holds the ringing replica
@@ -13,10 +13,11 @@
 //!             A, C: registry + peers drop the ordinal
 //!             B:    the endpoint stays in the slice as terminating — the proxy
 //!                   departs it, the peers keep pulling it (ADR-0031 case 1)
-//!   +0.5 s    A, C: a replacement of the SAME ordinal comes up alongside and
-//!                   reclaims the ringing copy
+//!   +0.5 s    A, C: a replacement of the SAME ordinal comes up alongside,
+//!                   ready and unpublished: it reclaims nothing yet
 //!   +1.1 s    the callee answers 200 — the elder is still bound and still serving
-//!   +1.8 s    A, C: the replacement's address is published, then judged alive
+//!   +1.8 s    A, C: the replacement's address is published, it reclaims the
+//!                   call, then it is judged alive
 //!   +2.1 s    A: SIGKILL · C: dead since t0
 //!   +5 s      B: the drain returns, the endpoint leaves the slice (peers park it),
 //!                the process exits; only then the replacement comes up, reclaims
@@ -56,8 +57,7 @@ use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, Belief, FailoverHarness,
     PartitionRole, ProxySut, ReplicatedB2buaSut, WorkerHealth,
 };
-use scenario_harness::Agent;
-use sip_message::SipMessage;
+use scenario_harness::{Agent, Inbound};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -256,6 +256,7 @@ impl DeadlineCrossing {
 /// Cross the ring deadline. The callee's INVITE transaction took its 2xx, so a
 /// CANCEL reaching it draws a 481 (RFC 3261 §9.2); every non-2xx final the
 /// caller takes is hop-ACKed, as a real UAC's transaction layer does (§17.1.1.3).
+/// A keepalive OPTIONS the reclaimed copy sends is answered 200 (§11.2).
 async fn cross_deadline(
     fh: &FailoverHarness,
     call: &scenario_harness::ClientInvite,
@@ -273,16 +274,19 @@ async fn cross_deadline(
             out.cancels_to_bob += 1;
             cancel.respond(481, "Call/Transaction Does Not Exist").await;
         }
-        while let Some(msg) = alice.take_queued().await {
-            match msg {
-                SipMessage::Response(r) if r.cseq().method().as_str() == "INVITE" => {
+        while let Some(inbound) = alice.take_queued_inbound().await {
+            match inbound {
+                Inbound::Response(r) if r.cseq().method().as_str() == "INVITE" => {
                     if r.status() >= 300 {
                         call.ack_non_2xx(&r).await.expect("the caller hop-ACKs the final");
                     }
                     out.finals_to_alice.push(r.status());
                 }
-                SipMessage::Response(_) => {}
-                SipMessage::Request(r) => panic!("unexpected {} toward alice", r.method()),
+                Inbound::Response(_) => {}
+                Inbound::Request(mut keepalive) if keepalive.request().method() == "OPTIONS" => {
+                    keepalive.respond(200, "OK").await;
+                }
+                Inbound::Request(r) => panic!("unexpected {} toward alice", r.request().method()),
             }
         }
     }
@@ -447,20 +451,21 @@ async fn run(name: &str, title: &str, removal: Removal) {
         _ => {
             advance_to(&fh, t0, REPLACEMENT_AT).await;
             let replacement = fh.spawn_replacement(&pri_ord).await;
-            let reclaimed = fh
+            let ready = fh
                 .pump_until(Duration::from_millis(100), Duration::from_secs(30), async || {
-                    replacement.is_ready() && replacement.serves(&call_ref)
+                    replacement.is_ready()
                 })
                 .await;
             if let Some(d) = drain.as_mut() {
                 d.poll();
             }
-            assert!(reclaimed, "the replacement bootstrapped and reclaimed the ringing copy");
+            assert!(ready, "the replacement bootstrapped");
+            assert!(!replacement.serves(&call_ref), "the unpublished replacement reclaims nothing");
             fh.mark(
                 &pri_ord,
                 None,
-                "reclaimed",
-                &format!("the replacement holds the ringing copy at +{} ms", fh.now_ms() - t0),
+                "ready",
+                &format!("the replacement is ready, unpublished, at +{} ms", fh.now_ms() - t0),
             );
             Some(replacement)
         }
@@ -487,7 +492,14 @@ async fn run(name: &str, title: &str, removal: Removal) {
         Removal::Forced | Removal::Crash => {
             // t0 + 1.8 s: the replacement's address is published.
             advance_to(&fh, t0, READMIT_AT).await;
-            fh.readmit(&pri_ord, replacement.as_ref().expect("spawned alongside").sip_addr());
+            let published = replacement.as_ref().expect("spawned alongside");
+            fh.readmit(&pri_ord, published.sip_addr());
+            let reclaimed = fh
+                .pump_until(Duration::from_millis(100), Duration::from_secs(30), async || {
+                    published.serves(&call_ref)
+                })
+                .await;
+            assert!(reclaimed, "the published replacement reclaimed the call");
             if let Removal::Forced = removal {
                 // t0 + 2.0 s: SIGKILL ends the drain with the process.
                 advance_to(&fh, t0, SIGKILL_AT).await;
@@ -565,9 +577,10 @@ async fn run(name: &str, title: &str, removal: Removal) {
             // The StatefulSet creates the same ordinal again, on a new address;
             // it bootstraps from the survivor and reclaims the answered copy.
             let r = fh.spawn_replacement(&pri_ord).await;
+            assert!(fh.readmit_once_ready(&r).await, "the replacement became ready");
             let reclaimed = fh
                 .pump_until(Duration::from_millis(100), Duration::from_secs(30), async || {
-                    r.is_ready() && r.serves(&call_ref)
+                    r.serves(&call_ref)
                 })
                 .await;
             assert!(reclaimed, "the replacement bootstrapped and reclaimed the answered copy");
@@ -577,7 +590,6 @@ async fn run(name: &str, title: &str, removal: Removal) {
                 "reclaimed",
                 &format!("the replacement holds the answered copy at +{} ms", fh.now_ms() - t0),
             );
-            fh.readmit(&pri_ord, r.sip_addr());
             replacement = Some(r);
         }
     }

@@ -165,9 +165,10 @@ async fn a_withdrawn_workers_drain_exits_on_its_backup_holding_the_call() {
 
     // ── a replacement of the SAME ordinal reclaims the abandoned call ─────────
     let replacement = fh.spawn_replacement(&pri_ord).await;
+    assert!(fh.readmit_once_ready(&replacement).await, "the replacement became ready");
     let reclaimed = fh
         .pump_until(Duration::from_millis(100), Duration::from_secs(30), async || {
-            replacement.is_ready() && replacement.serves(&call_ref)
+            replacement.serves(&call_ref)
         })
         .await;
     assert!(reclaimed, "the replacement bootstrapped and reclaimed the handed-over call");
@@ -177,7 +178,6 @@ async fn a_withdrawn_workers_drain_exits_on_its_backup_holding_the_call() {
         "reclaimed",
         &format!("the replacement holds the call at +{} ms", fh.now_ms() - t0),
     );
-    fh.readmit(&pri_ord, replacement.sip_addr());
     proxy.set_health(&pri_ord, WorkerHealth::Alive);
     fh.advance(Duration::from_millis(500)).await;
 

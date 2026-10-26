@@ -372,6 +372,13 @@ split, or the moment before an owner learns the other took a dialog), both can
 mint one CSeq on a dialog; §11's split cells declare that window as an RFC
 deviation, and §7 ends a call whose copies diverged.
 
+A returning worker re-serves its own calls only once it has observed its own
+endpoint routable (`SelfEndpoint::Routable`). Before that the proxy holds no
+address for it, so the response to a request it sends goes to the call's other
+owner, which reads it as evidence (§4) and ends the call. The reclaim waits;
+the evidence rule stays as it is, every method alike
+(`reclaim_waits_for_a_routable_endpoint.rs`).
+
 ### 9. Every instant in the call record carries its own anchor
 
 Every absolute instant the call record holds (ledger deadlines, `sent_at`

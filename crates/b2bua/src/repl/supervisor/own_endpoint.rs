@@ -30,4 +30,10 @@ impl ReplicationSupervisor {
     pub fn self_endpoint(&self) -> watch::Receiver<SelfEndpoint> {
         self.inner.self_endpoint.subscribe()
     }
+
+    /// [`self_endpoint`](Self::self_endpoint) when the membership shows the
+    /// node itself (set by `start`); `None` on one that never will.
+    pub fn observed_self_endpoint(&self) -> Option<watch::Receiver<SelfEndpoint>> {
+        self.inner.self_endpoint.is_enabled().then(|| self.self_endpoint())
+    }
 }

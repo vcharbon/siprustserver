@@ -296,13 +296,13 @@ async fn an_ack_the_kill_takes_is_resent_by_the_copy_to_the_2xx_repeat() {
 
     // ── the primary's replacement reclaims the call and discharges its CDR ───
     let replacement = c.fh.spawn_replacement(&primary).await;
+    assert!(c.fh.readmit_once_ready(&replacement).await, "the replacement became ready");
     let reclaimed =
         c.fh.pump_until(Duration::from_millis(100), Duration::from_secs(30), async || {
-            replacement.is_ready() && replacement.serves(&call_ref)
+            replacement.serves(&call_ref)
         })
         .await;
     assert!(reclaimed, "the replacement reclaimed the call");
-    c.fh.readmit(&primary, replacement.sip_addr());
     c._proxy.set_health(&primary, WorkerHealth::Alive);
     if primary == "b1" {
         c.w_b1 = replacement

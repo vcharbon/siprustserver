@@ -59,6 +59,7 @@ use crate::views::{Belief, Incarnation, ViewLedger};
 mod acceptance;
 mod live;
 mod membership;
+mod peer_view;
 mod proxy_sut;
 mod release_all;
 mod repl_faults;
@@ -624,27 +625,6 @@ impl ReplicatedB2buaSut {
         pending
     }
 
-    /// Drive a `MemberDelta::Removed` for `ordinal` into THIS node's membership —
-    /// the simulation of k8s dropping a killed pod's endpoint from the survivor's
-    /// view. The node's supervisor reconciles it to a Park, and the node takes
-    /// over the departed peer's calls with an INVITE in flight (ADR-0047); a
-    /// quiet dialog is taken over only when the proxy reroutes its traffic.
-    /// A kill the peers are not told of (ADR-0031 cases 3a, 4) skips this.
-    pub fn simulate_peer_removed(&self, ordinal: &str) {
-        self.membership.remove(ordinal);
-    }
-
-    /// Drive a `MemberDelta::Added` for `ordinal` into THIS node's membership —
-    /// the simulation of k8s re-publishing a restarted pod's endpoint. The
-    /// survivor's supervisor re-spawns its puller to the peer (seeded from the
-    /// retained watermark) → fresh forward replication. A statefulset restart is
-    /// observed as Removed-then-Added; pair this with a prior
-    /// [`simulate_peer_removed`](Self::simulate_peer_removed). Host == ordinal,
-    /// matching the harness's `Peer::new(p, p)` convention.
-    pub fn simulate_peer_added(&self, ordinal: &str) {
-        self.membership.add(Peer::new(ordinal, ordinal));
-    }
-
     /// The SIP address a reboot at the current `gen` binds on. Models a new pod
     /// IP: same port, a gen-stamped HOST (`127.0.<gen>.1`) so the reborn worker
     /// shares NO network endpoint with the dead incarnation — in-flight SIP toward
@@ -689,6 +669,7 @@ impl ReplicatedB2buaSut {
         let (setup, store, membership) = self.wiring.setup(self.gen, &self.clock).await;
         self.store = store;
         self.membership = membership;
+        self.list_own_endpoint();
         let core = self.spawn_core(Some(setup)).await;
         self.register_incarnation(&core);
         self.core = Some(core);

@@ -221,13 +221,13 @@ async fn a_withdrawn_workers_exit_waits_for_its_release_flush_and_a_current_back
     elder.crash();
     fh.advance(Duration::from_millis(200)).await;
     let replacement = fh.spawn_replacement(&pri_ord).await;
+    assert!(fh.readmit_once_ready(&replacement).await, "the replacement became ready");
     let reclaimed = fh
         .pump_until(Duration::from_millis(100), Duration::from_secs(30), async || {
-            replacement.is_ready() && replacement.serves(&call_ref)
+            replacement.serves(&call_ref)
         })
         .await;
     assert!(reclaimed, "the replacement reclaimed the handed-over call");
-    fh.readmit(&pri_ord, replacement.sip_addr());
     proxy.set_health(&pri_ord, WorkerHealth::Alive);
     fh.advance(Duration::from_millis(500)).await;
 

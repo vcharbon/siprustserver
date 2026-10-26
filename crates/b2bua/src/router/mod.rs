@@ -14,7 +14,8 @@
 //! self-release turn of a takeover copy, `stand_down` the turn that releases a
 //! takeover copy on its primary's write, `dropped_on_delete` the turn that
 //! drops a live copy of a call its backup discharged, `reclaim`
-//! the replication reclaim/discharge funnels,
+//! the replication reclaim/discharge funnels, `readmission` the hold of those
+//! reclaims until the node's own endpoint is routable,
 //! `restore_hygiene` the replicated-timer restore seam, `release` the one
 //! per-call teardown executor, `responses` the locally-authored response
 //! builders, `peer_metrics` per-peer failure attribution, `turn` the
@@ -54,6 +55,7 @@ mod process;
 #[cfg(test)]
 mod provisional_turn_tests;
 mod quiesced;
+mod readmission;
 mod reclaim;
 mod refer_result;
 mod release;
@@ -85,6 +87,7 @@ mod unrecoverable_tests;
 mod unroutable;
 
 pub(crate) use hold::Holds;
+use readmission::ReadmissionGate;
 pub(crate) use reclaim::reap_expired_replicas;
 // Consumed by the S7 readiness tests (`repl::s7_tests`) only.
 #[cfg(test)]
@@ -244,13 +247,15 @@ impl RouterCtx {
 pub enum ReplCommand {
     /// **Bulk reclaim** — materialise every `pri:{self}` call into the
     /// live map + re-arm timers (a rebooted primary re-*serving* its partition,
-    /// not just re-storing it). Fired once the supervisor reports bootstrap-complete.
+    /// not just re-storing it). Fired once the supervisor reports bootstrap-complete,
+    /// run once the node's own endpoint is routable ([`ReadmissionGate`]).
     /// Keepalive timers are *smoothed* (oldest-overdue first; see
     /// `reclaim::reclaim_all`) so a freshly-rehydrated node is not flooded by a
     /// burst of past-due OPTIONS.
     ReclaimAll,
     /// **Reactive reclaim** of one call a backup just reverse-flushed to us — the
     /// flip-race straggler an acting-backup took over *after* the bulk sweep.
+    /// Held with the bulk reclaim until the node's own endpoint is routable.
     ReclaimCall(String),
     /// A backup's reverse flush the store did not take — the stored copy
     /// contains it or the two diverged — or one the store already read: the
@@ -295,11 +300,14 @@ pub enum PrimaryWrite {
 enum Work {
     Event(CallEvent, bool),
     Repl(ReplCommand),
+    /// The reclaim commands `readmission` held, released in arrival order.
+    Released(Vec<ReplCommand>),
 }
 
 /// Run the router loop over the txn-event + timer-fire channels until both close.
 /// `repl_rx` is the fail-back command receiver of a wired node; an unwired node
-/// passes `None` and the loop never polls for one. Each turn is stamped on
+/// passes `None` and the loop never polls for one. Its reclaim commands wait
+/// for the node's own endpoint to be routable ([`ReadmissionGate`]). Each turn is stamped on
 /// `ctx.router_pulse` from the instant it takes work until it waits again.
 pub async fn run(
     ctx: Arc<RouterCtx>,
@@ -308,6 +316,7 @@ pub async fn run(
     mut reentry_rx: mpsc::UnboundedReceiver<CallEvent>,
     mut repl_rx: Option<mpsc::UnboundedReceiver<ReplCommand>>,
 ) {
+    let mut readmission = ReadmissionGate::new(ctx.readiness.own_endpoint());
     let pulse = ctx.router_pulse.clone();
     // A timer or re-entry channel whose senders are all gone retires its arm
     // instead of resolving `None` on every poll.
@@ -345,13 +354,23 @@ pub async fn run(
                     continue;
                 }
             },
+            cmds = readmission.released() => Work::Released(cmds),
         };
         pulse.turning();
         match work {
             Work::Event(ev, matched_client_txn) => {
                 ingress::on_event(&ctx, ev, matched_client_txn).await
             }
-            Work::Repl(cmd) => on_repl_command(&ctx, cmd).await,
+            Work::Repl(cmd) => {
+                if let Some(cmd) = readmission.admit(cmd) {
+                    on_repl_command(&ctx, cmd).await
+                }
+            }
+            Work::Released(cmds) => {
+                for cmd in cmds {
+                    on_repl_command(&ctx, cmd).await
+                }
+            }
         }
         pulse.waiting();
     }

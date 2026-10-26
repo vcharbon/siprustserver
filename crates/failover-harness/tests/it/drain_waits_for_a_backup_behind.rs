@@ -168,13 +168,13 @@ async fn a_withdrawn_worker_whose_backup_reports_nothing_drains_to_the_grace() {
     // The peer's copy was current the whole time, so a replacement of the same
     // ordinal reclaims it and can carry it to its end.
     let replacement = fh.spawn_replacement(&pri_ord).await;
+    assert!(fh.readmit_once_ready(&replacement).await, "the replacement became ready");
     let reclaimed = fh
         .pump_until(Duration::from_millis(100), Duration::from_secs(30), async || {
-            replacement.is_ready() && replacement.serves(&call_ref)
+            replacement.serves(&call_ref)
         })
         .await;
     assert!(reclaimed, "the replacement bootstrapped and reclaimed the abandoned call");
-    fh.readmit(&pri_ord, replacement.sip_addr());
     proxy.set_health(&pri_ord, WorkerHealth::Alive);
     fh.advance(Duration::from_millis(500)).await;
 

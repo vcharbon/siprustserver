@@ -99,7 +99,9 @@ pub async fn node_on(
         .await
         .expect("bind the simulated SIP endpoint");
     let store = Arc::new(ReplicatingCallStore::new(1, clock.clone()));
-    let view = Arc::new(SimulatedMembership::with_clock(Vec::new(), clock.clone()));
+    // The node's own endpoint is published, so it reads itself routable.
+    let own = Peer::new(ordinal, ordinal);
+    let view = Arc::new(SimulatedMembership::with_clock(vec![own], clock.clone()));
     let membership: Arc<dyn Membership> = view.clone();
     let addr_resolver: AddrResolver =
         Arc::new(FnPeerResolver(|_: &Peer| SocketAddr::from(([127, 0, 0, 2], 1))));
