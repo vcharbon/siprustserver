@@ -23,7 +23,7 @@ use b2bua::release_all::{ReleasedAll, TOPIC};
 use b2bua::CallEvent;
 use failover_harness::{assert_call_fully_released, total_cdrs_for, FailoverHarness, WorkerHealth};
 
-use crate::new_call_acceptance::{answered, bring_up, call_ref_of, caller_hangs_up, drain};
+use crate::new_call_acceptance::{answered, bring_up, call_ref_of, caller_hangs_up, drain_call};
 
 const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
@@ -63,7 +63,7 @@ async fn a_released_call_is_gone_from_its_backup_and_a_later_bye_draws_481_on_ei
     fh.advance(Duration::from_millis(300)).await;
     bob_dialog.bye().await.expect(481).await;
 
-    drain(&fh, &c).await;
+    drain_call(&fh, &c, &call_ref).await;
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     assert_eq!(c.takeovers(), takeovers, "the backup took nothing over");
     assert_eq!(total_cdrs_for(&c.nodes(), &call_ref), 1, "one record for the call");
@@ -102,7 +102,7 @@ async fn a_release_for_a_call_the_worker_does_not_serve_takes_nothing_over() {
     assert_eq!(total_cdrs_for(&c.nodes(), &call_ref), 0, "the call is not over");
 
     caller_hangs_up(&mut dialog, &bob).await;
-    drain(&fh, &c).await;
+    drain_call(&fh, &c, &call_ref).await;
     assert_eq!(total_cdrs_for(&c.nodes(), &call_ref), 1, "one record, its BYE's");
     assert_call_fully_released(&c.nodes(), &call_ref).await;
 }

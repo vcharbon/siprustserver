@@ -158,7 +158,7 @@ async fn a_round_answered_2xx_before_it_replicated_is_acknowledged_and_the_call_
     lost.ended_on_both_legs().await;
 
     // The callee's §13.3.1.4 ladder, as if the ACK were lost: the call is ended.
-    lost.fh.accept_clean_end_byes(
+    lost.fh.accept_clean_end_requests(
         &["bob".to_string()],
         "ADR-0055 §11: a 2xx repeat no node holds draws a BYE into the dialog the copy \
          ended, closed by its 481",

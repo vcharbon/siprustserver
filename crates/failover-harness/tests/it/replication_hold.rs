@@ -1,8 +1,10 @@
-//! **The ACK of a 2xx and the first provisional of an INVITE leave once the
-//! backup applied the write that records what they answer, or at the cap**
-//! (ADR-0055 §3). They are the messages that stop a peer retransmitting: the
-//! callee retransmits its 2xx until the ACK reaches it (RFC 3261 §13.3.1.4),
-//! the caller its INVITE until a provisional does (§17.1.1.2), so a primary
+//! **The ACK of a 2xx, the first provisional of an INVITE and the final to a
+//! non-INVITE request leave once the backup applied the write that records
+//! what they answer, or at the cap** (ADR-0055 §3). They are the messages
+//! that stop a peer retransmitting: the callee retransmits its 2xx until the
+//! ACK reaches it (RFC 3261 §13.3.1.4), the caller its INVITE until a
+//! provisional does (§17.1.1.2), a sender its request until its final
+//! (§17.1.2.2), so a primary
 //! that dies before its backup holds the write leaves the peer a
 //! retransmission for the backup to take. Every other message leaves at once,
 //! and a held ACK leaves before any later message on its dialog (§14.1).
@@ -12,6 +14,7 @@
 //!                                        the round trip
 //!   replication delayed 40 ms            the callee's ACK trails the caller's by the delay
 //!   replication stalled                  the ACK leaves at the cap, never later
+//!   stalled, the callee's INFO           its relayed 200 leaves at the cap
 //!   stalled, the caller's BYE            the callee reads the ACK before the BYE,
 //!     right behind her ACK               and the BYE is not held
 //!   the primary dies after its backup    the callee's 2xx repeat draws the
@@ -180,6 +183,35 @@ async fn a_stalled_backup_holds_the_ack_no_longer_than_the_cap() {
     assert!(after <= CAP + Duration::from_millis(5), "the ACK outlived the cap: {after:?}");
     let backup = if primary == "b1" { "b2" } else { "b1" };
     c.fh.resume(&primary, backup);
+    ends(c, dialog, &call_ref).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stalled_backup_holds_the_final_to_a_request_no_longer_than_the_cap() {
+    let mut c = cluster("held-final-stalled").await;
+    let mut call = c.alice.invite(&c.bob).with_sdp(OFFER).through(c._proxy.addr()).send().await;
+    let mut uas = c.bob.receive("INVITE").await;
+    let (primary, backup) = worker_ordinals(uas.request());
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    let mut bob_dialog = uas.dialog();
+    call.expect(200).await;
+    let dialog = call.ack().await;
+    c.bob.receive("ACK").await;
+    c.fh.advance(Duration::from_millis(300)).await;
+    c.fh.stall(&primary, &backup);
+
+    let mut info = bob_dialog.request(sip_message::generators::InDialogMethod::Info, None).await;
+    let mut relayed = c.alice.receive("INFO").await;
+    let answered = tokio::time::Instant::now();
+    relayed.respond(200, "OK").await;
+    info.expect(200).await;
+    let after = answered.elapsed();
+    assert!(after >= CAP, "the 200 left before the cap on a stalled backup: {after:?}");
+    assert!(after <= CAP + Duration::from_millis(5), "the 200 outlived the cap: {after:?}");
+
+    c.fh.resume(&primary, &backup);
+    let primary_node = if primary == "b1" { &c.w_b1 } else { &c.w_b2 };
+    let call_ref = primary_node.scan_primary(&primary).pop().expect("the primary holds the call");
     ends(c, dialog, &call_ref).await;
 }
 

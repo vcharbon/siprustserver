@@ -151,11 +151,10 @@ impl Cluster {
         self.proxy.set_health(&placement.primary, WorkerHealth::Dead);
     }
 
-    /// Heal a [`split`](Self::split): the replication flows again, the proxy
-    /// reads the primary alive, and the duplicate-CSeq window closes: one
-    /// copy is left to number the call's requests.
+    /// Heal a [`split`](Self::split): the replication flows again and the
+    /// proxy reads the primary alive. The duplicate-CSeq window stays open:
+    /// both copies act until they meet, and both may end the call there.
     pub fn heal(&mut self, placement: &Placement) {
-        self.fh.resume_rfc_gate(crate::RULE_CSEQ_IN_DIALOG_ORDER);
         self.fh.heal(&placement.primary, &placement.backup);
         self.proxy.set_health(&placement.primary, WorkerHealth::Alive);
     }

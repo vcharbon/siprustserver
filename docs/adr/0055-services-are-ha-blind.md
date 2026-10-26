@@ -170,9 +170,10 @@ record's image under its branch (§17.1.2.2).
   for the backlog. A gauge counts the live calls with no backup; such a call
   runs as on a non-HA B2BUA.
 - **No effect waits for the peer, with one bounded exception.** The ACK and the
-  first provisional of every INVITE, initial or re-INVITE (the messages that
-  stop a peer retransmitting), leave once the backup has applied the write that
-  records what they answer, or once a cap expires, whichever comes first.
+  first provisional of every INVITE, initial or re-INVITE, and the final to
+  every non-INVITE request (the messages that stop a peer retransmitting,
+  user ruling) leave once the backup has applied the write that records what
+  they answer, or once a cap expires, whichever comes first.
   "Applied" means the backup's applied position reached the call's current
   change-log entry. The cap is a configuration value; its default and the
   first-provisional bound below are set from the SIP timers, and configuration
@@ -180,9 +181,11 @@ record's image under its branch (§17.1.2.2).
   first provisional is counted from the INVITE's receipt: the turn engine sends
   it after the call's write, and the transaction layer sends the 100 itself if
   no turn released one by the §17.2.1 bound. A call with no live, bootstrapped
-  backup skips the hold. A held ACK leaves before any later effect on its dialog
-  (RFC 3261 §14.1). Every other effect (a final, a relayed request, the dialled
-  INVITE, media) leaves at once.
+  backup skips the hold, and so does the final a call's terminal turn sends: the
+  call is released with it. A held ACK or final leaves before any later effect
+  on its dialog (RFC 3261 §14.1). Every other effect (a final to an INVITE, a
+  relayed request, the dialled INVITE, media) leaves at once. The hold lives in
+  the aware crates; the services stay blind.
 - **A write is abandoned only with its backup.** It stays in the change log
   until the backup applies it, or until the replication link to that backup is
   down (ADR-0045 link liveness) and the call loses its backup.
@@ -225,12 +228,19 @@ are closed:
    §15 forbids it before a 2xx); on a call one node served it is a broken
    callee, whose caller holds no 2xx, and the default `relay-bye` ends the call
    on it;
-5. a 2xx whose via-extension (§12) names a leg the call record lacks.
+5. a 2xx whose via-extension (§12) names a leg the call record lacks;
+6. a re-INVITE from the caller naming her dialog by its To-tag, on a call a
+   takeover copy served, while the call record holds her INVITE unanswered: a
+   re-INVITE needs a confirmed dialog, so it proves the 2xx she holds (user
+   ruling). The node relinquishes her INVITE's server transaction, which draws
+   no final, answers the re-INVITE 487, BYEs her dialog under its tag, and
+   CANCELs each callee INVITE the record holds unanswered, a confirmed callee
+   dialog BYEd.
 
 A final with no request record that matches none of these is stray and is
 discarded or re-ACKed as today (§17.1.1.2, §18.1.2). A caller's BYE on an early
-dialog, an UPDATE, PRACK or INFO on an early dialog, and a request with an
-unknown To-tag (481, §12.2.2) are not evidence. A response for a call no node
+dialog, an UPDATE, PRACK or INFO on an early dialog (each allowed there), and a
+request with an unknown To-tag (481, §12.2.2) are not evidence. A response for a call no node
 holds is answered as an unknown dialog would be: a 2xx is ACKed and BYEd from
 its own headers, a non-2xx INVITE final is ACKed from the via-extension.
 
@@ -400,11 +410,10 @@ number of takeovers unshifted.
   NOTIFYs, INFO, PRACK, a BYE crossing each, the keepalive, a forked answer, a
   media-server leg) is cut at every turn point, each split into write in the
   change log, effect left and write applied at the backup, by these incidents:
-  - primary killed, backup killed, split, split then healed: each cell ends
-    with an RFC-clean, fully terminated call, one CDR, full cleanup; a cell
-    killing the primary may leave two (the dead primary's and the survivor's,
-    §5), never none; a split cell declares the duplicate-CSeq window of §8,
-    and may leave no CDR or two (§5);
+  - primary killed, backup killed: each cell ends with an RFC-clean, fully
+    terminated call, one CDR, full cleanup; a cell killing the primary may
+    leave two (the dead primary's and the survivor's, §5), never none;
+  - split, healed or not: judged like a split that never heals below;
   - replication stalled past the cap of §3, then a kill: a caller whose INVITE
     transaction saw neither final nor provisional from the copy is answered by
     its own Timer B, and a callee whose 2xx tag the call record never held keeps
@@ -420,8 +429,13 @@ number of takeovers unshifted.
   ACK; a party that plays a broken peer opts out by name. The uncut call must
   succeed. Once the incident strikes, the system under test may end the call
   cleanly at any instant (§1): a party it ends cleanly — a non-2xx to her
-  INVITE, a BYE she answers 200 — drops her remaining goals, and a caller so
-  ended ends the call cleanly, which the verdict says. A request left without
+  INVITE, a BYE she answers 200, a NOTIFY ending her subscription
+  (`Subscription-State: terminated`) — drops her remaining goals, and a caller
+  so ended ends the call cleanly, which the verdict says. The clean end's BYE
+  and terminating NOTIFY are each accepted once per dialog after the incident
+  (user ruling). A party honours a 500's Retry-After on a re-INVITE (RFC 3261
+  §14.1) and ends a dialog on a 481 or 408 to a request inside it
+  (§12.2.1.2). A request left without
   its final, or a dialog left open, still fails the cell, except as declared
   below. An incident that loses the call accepts only its two outcomes above:
   the caller's INVITE drawing no final, left to her Timer B, and a callee
@@ -432,13 +446,16 @@ number of takeovers unshifted.
   leaked resource (the call ends on every side, full cleanup, the limiter
   released), in a declared degraded mode. These windows are declared, nothing
   else:
-  - a split that never heals, its cells judging leaks, cleanup and the CDR
-    count only, never the parties' verdict (user ruling): the stale copy's
-    requests into a dialog the other copy ended, each closed by the 481 it
-    draws; one copy's CANCEL of an INVITE the other copy saw answered; one
+  - a split, healed or not, its cells judging leaks, cleanup and the CDR
+    count only (none to two unhealed, one or two healed), never the parties'
+    verdict (user ruling): what two
+    acting copies send — the stale copy's requests into a dialog the other
+    copy ended, each closed by the 481 it draws; one copy's CANCEL of an
+    INVITE the other copy saw answered, and its repeats after the heal; one
     copy's non-2xx after the 2xx the other copy sent the caller, which she
-    discards; one copy's BYE of a caller dialog it holds early, which the
-    other copy answered;
+    discards, and its repeats; one copy's BYE of a caller dialog it holds
+    early, which the other copy answered; two BYEs of one dialog at one CSeq;
+    a CSeq one copy re-uses after the other sent it;
   - a kill (user ruling): a copy's one CANCEL of a callee's INVITE the dead
     owner saw finally answered, 2xx or not; the callee answers it and keeps
     what its final left it, a dialog its own timers end or none;
@@ -451,6 +468,12 @@ number of takeovers unshifted.
     dialog left to its endpoint's own timer when the write of a teardown the
     node began was not applied at the kill; a quiet call of a departed primary
     stays reactive (§5);
+  - a kill of the primary at a logged or left sub-point of a turn taken on
+    something no peer repeats — a response, a timer, an off-turn answer (user
+    ruling): the turn's effects are lost with the node, the parties wait for
+    them in vain, and every dialog, early or confirmed, is left to its
+    endpoint's own timers. A turn taken on a request is not in this window:
+    the message that stops its sender repeating it is held (§3);
   - a kill inside the replication window: a copy re-uses a CSeq the dead
     primary sent before the backup applied the write, at most one rejected
     request per dialog; the call still ends or continues cleanly. A call with

@@ -193,6 +193,18 @@ pub(crate) async fn drain(fh: &FailoverHarness, c: &Cluster) {
     assert!(drained, "the cluster drains every call");
 }
 
+/// [`drain`], and no node holds a trace of `call_ref`: its replica's delete
+/// may still be on its way to the backup when the last response arrives.
+pub(crate) async fn drain_call(fh: &FailoverHarness, c: &Cluster, call_ref: &str) {
+    let drained = fh
+        .settle_terminal(async || {
+            let clean = c.b1.memory_clean() && c.b2.memory_clean();
+            clean && !c.b1.holds_any_trace(call_ref).await && !c.b2.holds_any_trace(call_ref).await
+        })
+        .await;
+    assert!(drained, "the cluster drains the call, its replicas included");
+}
+
 /// The backend is down for the whole cluster with one call answered and one
 /// ringing. Neither call loses its BYE: the caller's BYE of the first and,
 /// once the ringing call is answered, the callee's BYE of the second reach the

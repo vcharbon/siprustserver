@@ -91,7 +91,7 @@ pub async fn run_cell(
                 reached = None;
                 let held = held.expect("the turn points keep the arm");
                 let cut = cut.expect("armed");
-                if cut.incident != Incident::Split {
+                if !cut.incident.splits() {
                     ctx.accept_clean_ends();
                 }
                 strike(&mut cluster, &placement, cut, held, &parties.names());
@@ -138,7 +138,13 @@ pub async fn run_cell(
     let call_ref = call_ref.unwrap_or_else(|| first_call(&cluster, name));
     let (verdict, obs) = verdict.expect("the parties finished");
     eprintln!("[{name}] the parties ended: {verdict:?}");
-    if !super::outcome::accepted(cut.map(|c| (c.incident, c.at.point)), &verdict, &obs) {
+    let turns = turn_points.turns(&call_ref);
+    let cut_at = cut.map(|c| super::outcome::CutAt {
+        incident: c.incident,
+        point: c.at.point,
+        on_request: turns.get(c.at.turn - 1).is_none_or(|t| t.on_request),
+    });
+    if !super::outcome::accepted(cut_at, &verdict, &obs) {
         panic!("[{name}] the parties failed: {verdict:?} {:?}", ctx.notes());
     }
     assert_eq!(
@@ -163,7 +169,7 @@ pub async fn run_cell(
             panic!("[{name}] a CDR is wrong: {why}");
         }
     }
-    turn_points.turns(&call_ref)
+    turns
 }
 
 /// Whether `n` CDRs of the call are what `incident` may leave (ADR-0055 §5):
@@ -238,13 +244,13 @@ fn strike(
         }
         Incident::Split => {
             cluster.split(placement);
-            accept_two_copies_never_healed(cluster, names);
+            accept_two_copies(cluster, names);
             None
         }
         Incident::SplitHealed => {
-            accept_clean_end_into_ended_dialogs(cluster, names);
-            super::unseen_rseq::accept_unseen_rseq(cluster);
             cluster.split(placement);
+            accept_two_copies(cluster, names);
+            super::unseen_rseq::accept_unseen_rseq(cluster);
             None
         }
     };
@@ -316,35 +322,36 @@ fn cancels_an_answered_invite(
     answered_before(earlier, upto, key, None, ours)
 }
 
-/// A split that never heals leaves two copies acting, each in a degraded mode
+/// A split, healed or not, leaves two copies acting, each in a degraded mode
 /// only a leak check judges (ADR-0055 §11): the stale copy's requests into a
 /// dialog the other copy ended, closed by the 481 they draw; one copy's CANCEL
-/// of an INVITE the other copy saw answered; one copy's non-2xx after the 2xx
-/// the other copy sent the caller, which she discards; and one copy's BYE of a
-/// caller dialog it holds early, which the other copy answered.
-fn accept_two_copies_never_healed(cluster: &mut Cluster, names: &[String]) {
+/// of an INVITE the other copy saw answered, its retransmissions crossing a
+/// heal included; one copy's non-2xx after the 2xx the other copy sent the
+/// caller, which she discards; one copy's BYE of a caller dialog it holds
+/// early, which the other copy answered. The two copies' duplicate in-dialog
+/// CSeqs are accepted from the split on ([`Cluster::split`]).
+fn accept_two_copies(cluster: &mut Cluster, names: &[String]) {
     cluster.fh.accept_dialog_verdicts(
         scenario_harness::dialogs::DIALOG_ENDED,
         names,
-        "ADR-0055 §11: a split that never heals sends the stale copy's requests \
-         into a dialog the other copy ended, closed by the 481 they draw",
+        "ADR-0055 §11: a split sends the stale copy's requests into a dialog the other copy \
+         ended, closed by the 481 they draw",
     );
     cluster.fh.accept_rfc_deviations_once_per_dialog_where(
         crate::RULE_NO_CANCEL_AFTER_FINAL,
         |cancel, earlier, _| cancels_an_answered_invite(cancel, earlier, u64::MAX),
-        "ADR-0055 §11: a split that never heals: one copy CANCELs an INVITE the other copy \
-         saw answered",
+        "ADR-0055 §11: a split: one copy CANCELs an INVITE the other copy saw answered",
     );
     cluster.fh.accept_rfc_deviations_from_now_where(
         RULE_UNACKED_NON_2XX,
         |final_, earlier, _| non_2xx_after_a_2xx(final_, earlier, None, u64::MAX),
-        "ADR-0055 §11: a split that never heals: one copy's non-2xx after the 2xx the other \
-         copy sent, discarded",
+        "ADR-0055 §11: a split: one copy's non-2xx after the 2xx the other copy sent, \
+         discarded",
     );
     cluster.fh.accept_rfc_deviations_once_per_dialog(
         "no-bye-outside-or-early-dialog",
-        "ADR-0055 §11: a split that never heals: one copy BYEs a caller dialog it holds early, \
-         which the other copy answered",
+        "ADR-0055 §11: a split: one copy BYEs a caller dialog it holds early, which the other \
+         copy answered",
     );
 }
 
@@ -415,11 +422,12 @@ fn answered_before(
     })
 }
 
-/// The §4 clean end BYEs every dialog the record or the evidence names; one
-/// the other owner already ended draws its 481 at the party, once, from the
-/// incident on (ADR-0055 §11).
+/// The §4 clean end BYEs every dialog the record or the evidence names, after
+/// a terminating NOTIFY of a subscription it holds; one the other owner
+/// already ended draws its 481 at the party, once each, from the incident on
+/// (ADR-0055 §11).
 fn accept_clean_end_into_ended_dialogs(cluster: &Cluster, names: &[String]) {
-    cluster.fh.accept_clean_end_byes(
+    cluster.fh.accept_clean_end_requests(
         names,
         "ADR-0055 §11: the §4 clean end's BYE into a dialog the other owner ended, \
          closed by the 481 it draws",

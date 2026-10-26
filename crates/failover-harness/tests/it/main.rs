@@ -80,7 +80,6 @@ mod service_answer_deadline;
 mod silent_replication_stream;
 mod spiral_takeover;
 mod split_dialog_sequence;
-mod split_window_closes_at_the_heal;
 mod stale_no_answer_reclaim;
 mod stood_down_round;
 mod superseded_incarnation;

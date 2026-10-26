@@ -24,6 +24,9 @@ pub struct Turn {
     pub version: (i64, i64),
     /// Whether the turn wrote the call to replication.
     pub wrote: bool,
+    /// Whether the turn handled a SIP request rather than a response, a timer
+    /// or an off-turn answer.
+    pub on_request: bool,
 }
 
 impl Turn {
@@ -142,7 +145,8 @@ impl Inner {
                     self.order.push(mark.call_ref.to_string());
                 }
                 let turns = self.calls.entry(mark.call_ref.to_string()).or_default();
-                turns.push(Turn { version: mark.version, wrote: mark.wrote });
+                let (version, wrote, on_request) = (mark.version, mark.wrote, mark.on_request);
+                turns.push(Turn { version, wrote, on_request });
                 Some(turns.len())
             }
             (TurnPoint::Left, true) => self.calls.get(mark.call_ref).map(Vec::len),

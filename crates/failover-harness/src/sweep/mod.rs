@@ -1,27 +1,25 @@
 //! The failover sweep (ADR-0055 §11): every shape of a catalogue is cut at
 //! every turn point of its call — each turn's write handed to replication,
 //! its effects left, its write applied at the backup — by each [`Incident`].
-//! Every cell must end with an RFC-clean, fully terminated call the parties
-//! judge as their play declares, one CDR and nothing left on any node or in
-//! the limiter; once the incident strikes, a clean end is one (§1, §4), and an
-//! incident that loses the call states what the parties are left with instead
-//! ([`Incident::loses_the_call`]); the copies of a split that never heals may
-//! each write a CDR or none, the two copies of a split that heals, a killed
-//! primary and the node that ends the call after it each one, never none
-//! between them, and a call with no backup at most one (ADR-0055 §5). A kill
-//! inside
-//! the replication window declares its windows: a copy may re-use, once per
-//! dialog, an in-dialog CSeq the dead primary sent before its backup applied
-//! the write — so may the node answering a response of a call that had no
-//! backup — and may send a reliable provisional whose RSeq cannot continue
-//! the dead primary's. After a kill, the copy may CANCEL once a callee INVITE
-//! the dead primary saw finally answered. Every kill of the primary and a
-//! healed split accept the §4 clean end's BYE into a dialog the other owner
-//! ended, closed by its 481. After a stall, the copy's repeat of the caller's
-//! 2xx may differ from the dead owner's in its own Contact alone. A split that
-//! never heals is judged on leaks, cleanup and the CDR count, never on the
-//! parties' verdict: the two copies' degraded-mode findings are accepted
-//! there alone (ADR-0055 §11).
+//! Every cell must end with nothing left on any node or in the limiter and
+//! an accepted CDR count: one, for the copies of a split that never heals
+//! one each or none, for a split that heals and a killed primary one or two,
+//! never none, for a call with no backup at most one (§5). A split, healed or
+//! not, is judged on that alone: the findings its two acting copies cause are
+//! accepted there ([`Incident::splits`]). Any other cell must also end with an
+//! RFC-clean, fully terminated call the parties judge as their play declares;
+//! once the incident strikes, a clean end is one (§1, §4), and an incident
+//! that loses the call states what the parties are left with instead
+//! ([`Incident::loses_the_call`]). A kill inside the replication window
+//! declares its windows: a copy may re-use, once per dialog, an in-dialog
+//! CSeq the dead primary sent before its backup applied the write — so may
+//! the node answering a response of a call that had no backup — and may send
+//! a reliable provisional whose RSeq cannot continue the dead primary's.
+//! After a kill, the copy may CANCEL once a callee INVITE the dead primary saw
+//! finally answered, and every kill of the primary accepts the §4 clean end's
+//! BYE or terminating NOTIFY into a dialog the other owner ended, closed by
+//! its 481. After a stall, the copy's repeat of the caller's 2xx may differ
+//! from the dead owner's in its own Contact alone.
 //!
 //! A cell is named `<shape>/<incident>/t<k>-<point>`. The cells that fail
 //! before their correction lands are listed in a [`Ratchet`] with the decision
@@ -145,6 +143,13 @@ impl Incident {
     /// either way.
     pub fn loses_the_call(self) -> bool {
         matches!(self, Incident::StalledKilled | Incident::UnbackedKilled)
+    }
+
+    /// Whether the incident splits the call's two owners, healed or not: its
+    /// cells judge leaks, cleanup and the CDR count, never the parties'
+    /// verdict (ADR-0055 §11).
+    pub fn splits(self) -> bool {
+        matches!(self, Incident::Split | Incident::SplitHealed)
     }
 
     /// Whether the incident is cut at a turn's applied sub-point: a call with

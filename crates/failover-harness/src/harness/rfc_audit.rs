@@ -61,29 +61,25 @@ impl FailoverHarness {
         }
     }
 
-    /// Whether an acceptance window for `rule` is open: what is captured next
-    /// is accepted.
-    pub fn rfc_window_open(&self, rule: &str) -> bool {
-        self.rfc_acceptance.open(rule)
-    }
-
-    /// Accept the §4 clean end's BYE into a dialog the other owner already
-    /// ended, closed by the 481 it draws (ADR-0055 §11): on each UA of
-    /// `parties`, the `dialog-ended` verdicts on a BYE recorded from now on,
-    /// one per dialog.
-    pub fn accept_clean_end_byes(&self, parties: &[String], justification: &str) {
-        if let Ok(guard) = self.harness.inner.lock() {
-            if let Some(harness) = guard.as_ref() {
-                for party in parties {
-                    let scope = scenario_harness::WaiverScope::rule(
-                        scenario_harness::dialogs::DIALOG_ENDED,
-                        justification,
-                    )
-                    .on_method("BYE")
-                    .from_now_once_per_dialog();
-                    harness.waive(scope.on_party(party.as_str()).conditional());
-                }
-            }
+    /// Accept the §4 clean end's BYE, and its subscription's terminating
+    /// NOTIFY, into a dialog the other owner already ended, closed by the 481
+    /// each draws (ADR-0055 §11): on each UA of `parties`, the `dialog-ended`
+    /// verdicts recorded from now on, one BYE and one such NOTIFY per dialog.
+    pub fn accept_clean_end_requests(&self, parties: &[String], justification: &str) {
+        let Ok(guard) = self.harness.inner.lock() else { return };
+        let Some(harness) = guard.as_ref() else { return };
+        for party in parties {
+            let rule = || {
+                scenario_harness::WaiverScope::rule(
+                    scenario_harness::dialogs::DIALOG_ENDED,
+                    justification,
+                )
+                .on_party(party.as_str())
+                .from_now_once_per_dialog()
+                .conditional()
+            };
+            harness.waive(rule().on_method("BYE"));
+            harness.waive(rule().on_method("NOTIFY").terminating());
         }
     }
 

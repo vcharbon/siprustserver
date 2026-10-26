@@ -38,7 +38,9 @@ async fn a_relay_the_primary_never_read_and_the_primarys_own_end_the_call() {
 /// The same, the callee holding the caller's INFO through the clean end. The
 /// copy keeps its relay through the end and answers it as its own teardown
 /// does once the callee's dialog ended under its BYE: `481` to the caller
-/// (RFC 3261 §15.1.2), whatever the callee then answers.
+/// (RFC 3261 §15.1.2), whatever the callee then answers. The primary holds
+/// the caller's 200 to the callee's INFO for its stalled backup (ADR-0055
+/// §3): the clean end's BYE reaches the callee first.
 #[tokio::test(start_paused = true)]
 async fn a_relay_the_copy_holds_through_the_end_draws_its_final() {
     let mut est = establish("relay-held-through-the-end").await;
@@ -50,8 +52,10 @@ async fn a_relay_the_copy_holds_through_the_end_draws_its_final() {
     let mut info_at_bob = est.bob.receive("INFO").await;
     est.proxy.set_health(&p_ord, WorkerHealth::Alive);
     accept_the_clean_end(&mut est);
-    info_crossing_the_end(&est.alice, &mut est.bob_dialog).await;
+    let mut crossing = est.bob_dialog.request(InDialogMethod::Info, None).await;
+    est.alice.receive_tolerating("INFO", &["BYE"]).await.respond(200, "OK").await;
     est.bob.receive("BYE").await.respond(200, "OK").await;
+    crossing.expect(200).await;
     info.expect_tolerating(481, &["BYE"]).await;
     info_at_bob.respond(487, "Request Terminated").await;
     est.fh.resume(&b_ord, &p_ord);
