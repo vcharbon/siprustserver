@@ -17,7 +17,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::header::{HeaderClass, HeaderName, HeaderValue, MediaType, ParamValue};
+use crate::header::{HeaderClass, HeaderId, HeaderName, HeaderValue, MediaType, ParamValue};
+use crate::header_table::HeaderTable;
 use crate::sip_str::SipStr;
 use crate::write_check::WriteRefusal;
 
@@ -369,57 +370,18 @@ pub struct LocatedPart {
 /// split on `--boundary`, drop the preamble and the closing delimiter, then
 /// read each block's entity headers and the offsets of its content.
 pub fn decompose(body: &[u8], boundary: &str) -> Vec<LocatedPart> {
-    let delim = format!("--{boundary}");
-    let mut out = Vec::new();
-    for (start, block) in segments(body, delim.as_bytes()).into_iter().skip(1) {
-        // A closing delimiter's remainder begins with `--`.
-        if block.starts_with(b"--") {
-            continue;
-        }
-        // The CRLF that ended the boundary line belongs to the delimiter.
-        let lead = if block.starts_with(b"\r\n") {
-            2
-        } else if block.starts_with(b"\n") {
-            1
-        } else {
-            0
-        };
-        let Some(block) = block.get(lead..).filter(|b| !b.is_empty()) else {
-            continue;
-        };
-        let (head_len, gap) = match find(block, b"\r\n\r\n") {
-            Some(i) => (i, 4),
-            None => match find(block, b"\n\n") {
-                Some(i) => (i, 2),
-                None => (0, 0),
-            },
-        };
-        let (Some(head), Some(content)) = (block.get(..head_len), block.get(head_len + gap..))
-        else {
-            continue;
-        };
-        // Exactly the ONE trailing CRLF that separates the content from the
-        // next delimiter — never greedily, so a binary part ending in 0x0a
-        // survives byte-exact.
-        let trailing = if content.ends_with(b"\r\n") {
-            2
-        } else if content.ends_with(b"\n") {
-            1
-        } else {
-            0
-        };
-        out.push(LocatedPart {
-            content_type: part_header(head, "content-type")
+    framed_parts(body, boundary)
+        .map(|part| LocatedPart {
+            content_type: part_header(part.head, "content-type")
                 .unwrap_or_else(|| "text/plain".to_string()),
-            content_id: part_header(head, "content-id"),
-            headers: part_headers_beyond(head, &["content-type", "content-id"]),
-            entity_headers: part_headers_beyond(head, &["content-type"]),
-            entity_spans: part_header_spans(head, start + lead),
-            offset: start + lead + head_len + gap,
-            len: content.len() - trailing,
-        });
-    }
-    out
+            content_id: part_header(part.head, "content-id"),
+            headers: part_headers_beyond(part.head, &["content-type", "content-id"]),
+            entity_headers: part_headers_beyond(part.head, &["content-type"]),
+            entity_spans: part_header_spans(part.head, part.head_at),
+            offset: part.offset,
+            len: part.len,
+        })
+        .collect()
 }
 
 /// The session description a body carries under `content_type`, as the range
@@ -438,41 +400,35 @@ pub fn sdp_range(content_type: &MediaType, body: &[u8]) -> Option<std::ops::Rang
         return None;
     }
     let boundary = content_type.param("boundary").and_then(ParamValue::as_str)?;
-    decompose(body, boundary)
-        .into_iter()
+    framed_parts(body, boundary)
         .find(|part| {
             part.len > 0
-                && MediaType::parse(&SipStr::owned(&part.content_type)).is_ok_and(|ct| ct.is_sdp())
+                && part_header(part.head, "content-type").is_some_and(|ct| {
+                    MediaType::parse(&SipStr::owned(&ct)).is_ok_and(|ct| ct.is_sdp())
+                })
         })
         .map(|part| part.offset..part.offset + part.len)
 }
 
-/// `(offset, slice)` for every stretch of `hay` between occurrences of `sep`,
-/// the separators dropped. The first entry is whatever preceded the first
-/// separator, so a caller wanting the parts skips it.
-fn segments<'a>(hay: &'a [u8], sep: &[u8]) -> Vec<(usize, &'a [u8])> {
-    let mut out = Vec::new();
-    let mut at = 0;
-    let mut rest = hay;
-    while let Some((rel, before, after)) =
-        find(rest, sep).and_then(|rel| Some((rel, rest.get(..rel)?, rest.get(rel + sep.len()..)?)))
-    {
-        out.push((at, before));
-        at += rel + sep.len();
-        rest = after;
-    }
-    out.push((at, rest));
-    out
-}
-
-fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() {
+/// Where the body of the message `headers` head holds its session
+/// description, by its `Content-Type` ([`sdp_range`]); `None` where the type
+/// does not read or names none.
+pub(crate) fn message_sdp_range(
+    headers: &HeaderTable,
+    body: &[u8],
+) -> Option<std::ops::Range<usize>> {
+    if body.is_empty() {
         return None;
     }
-    memchr::memmem::find(hay, needle)
+    let line = headers.of_id(HeaderId::ContentType).next()?;
+    let content_type = MediaType::parse(&line.value).ok()?;
+    sdp_range(&content_type, body)
 }
 
 mod entity;
+
+mod framing;
+use framing::framed_parts;
 
 use entity::{part_header, part_header_spans, part_headers_beyond};
 

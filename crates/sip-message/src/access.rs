@@ -156,10 +156,10 @@ macro_rules! core_read_surface {
 
             /// The session description this message carries, bare under
             /// `application/sdp` or framed in a `multipart/…` body (RFC 5621
-            /// §3.1); `None` where it carries none.
+            /// §3.1); `None` where it carries none. Located once, when the
+            /// message was parsed or built.
             pub fn sdp(&self) -> Option<&[u8]> {
-                let ct = self.header::<header::MediaType>()?.ok()?;
-                crate::multipart::sdp_range(&ct, self.body()).and_then(|r| self.body().get(r))
+                self.core().sdp.clone().and_then(|r| self.body().get(r))
             }
 
             /// The datagram this message is — received or rendered at freeze.

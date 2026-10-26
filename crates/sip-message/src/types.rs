@@ -15,7 +15,7 @@
 //! [`InviteRequest`] and [`SipResponseTagged`] are flat newtypes built once at a
 //! boundary, `Deref`-ing to the base so no accessor is duplicated.
 
-use std::ops::Deref;
+use std::ops::{Deref, Range};
 
 use bytes::Bytes;
 
@@ -205,6 +205,8 @@ pub struct MessageCore {
     pub(crate) body: Bytes,
     /// The datagram this message is, whether it was received or built.
     pub(crate) image: Bytes,
+    /// Where the body holds the session description, located once.
+    pub(crate) sdp: Option<Range<usize>>,
 }
 
 impl MessageCore {
@@ -215,7 +217,8 @@ impl MessageCore {
         body: Bytes,
         image: Bytes,
     ) -> Self {
-        Self { headers, core, optional, body, image }
+        let sdp = crate::multipart::message_sdp_range(&headers, &body);
+        Self { headers, core, optional, body, image, sdp }
     }
 }
 
