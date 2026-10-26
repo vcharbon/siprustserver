@@ -98,6 +98,14 @@ pub enum HeaderKey<'a> {
 }
 
 impl HeaderKey<'_> {
+    /// The known header this key names; `None` for an extension header.
+    pub fn id(&self) -> Option<HeaderId> {
+        match self {
+            HeaderKey::Known(id) => Some(*id),
+            HeaderKey::Extension(_) => None,
+        }
+    }
+
     /// Whether a line classified as `id`, named `wire`, carries this header.
     pub fn is(&self, id: Option<HeaderId>, wire: &str) -> bool {
         match (self, id) {

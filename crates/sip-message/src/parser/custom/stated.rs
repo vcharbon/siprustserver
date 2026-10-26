@@ -61,7 +61,7 @@ impl<'a> Stated<'a> {
 }
 
 fn lines_of(entries: &[Entry], id: HeaderId) -> impl Iterator<Item = &Entry> {
-    entries.iter().filter(move |e| e.name().id() == Some(id))
+    entries.iter().filter(move |e| e.id() == Some(id))
 }
 
 fn first_typed<H: HeaderValue>(entries: &[Entry], id: HeaderId) -> Option<&H> {

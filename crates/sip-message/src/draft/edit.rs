@@ -345,7 +345,7 @@ impl<S: StartKind> Draft<S> {
                 value: image.span(value.0, value.1),
             })
             .collect();
-        let ids = draft.entries.iter().map(|e| e.name().id()).collect();
+        let ids = draft.entries.iter().map(|e| e.id()).collect();
         let headers = HeaderTable::classified(lines, ids);
         let raw = Bytes::from(rendered.bytes);
         let body = crate::checked::slice(&raw, rendered.body_at..raw.len()).ok_or_else(outside)?;
