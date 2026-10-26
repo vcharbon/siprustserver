@@ -437,3 +437,29 @@ pub fn parse_from_uri_params(n: usize) -> Op {
         black_box(parser.parse_shared(datagram.clone()).expect("the fixture parses"));
     })
 }
+
+/// A request with a multipart body of `kib` KiB parsed, then its session
+/// description read `reads` times, as the handlers of one turn read it.
+fn parse_and_read_sdp(kib: usize, reads: usize) -> Op {
+    let parser = wire::parser();
+    let datagram = wire::invite(&Shape::body(&wire::multipart_type(), wire::multipart(kib * 1024)));
+    Box::new(move || {
+        let request = match parser.parse_shared(datagram.clone()).expect("the fixture parses") {
+            sip_message::SipMessage::Request(request) => request,
+            sip_message::SipMessage::Response(_) => panic!("the fixture is a request"),
+        };
+        for _ in 0..reads {
+            black_box(request.sdp());
+        }
+    })
+}
+
+/// [`parse_and_read_sdp`] over the number of reads, on a 32 KiB body.
+pub fn sdp_reads_multipart(reads: usize) -> Op {
+    parse_and_read_sdp(32, reads)
+}
+
+/// [`parse_and_read_sdp`] with eight reads, over the body size.
+pub fn sdp_eight_reads_multipart_kib(kib: usize) -> Op {
+    parse_and_read_sdp(kib, 8)
+}
