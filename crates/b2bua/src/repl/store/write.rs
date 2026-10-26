@@ -24,6 +24,13 @@ impl ReplicatingCallStore {
         m.meta.skew_offset_ms.map(|_| m.meta.origin_now_ms(self.clock.now_ms()))
     }
 
+    /// This node's clock minus `origin_now_ms`, the clock a frame's sender
+    /// read at its send: the offset a body of that frame is stored under
+    /// ([`RefMeta::skew_offset_ms`]).
+    pub fn skew_of(&self, origin_now_ms: i64) -> i64 {
+        self.clock.now_ms().saturating_sub(origin_now_ms)
+    }
+
     /// [`CallStore::put_call`](crate::store::CallStore::put_call),
     /// synchronously: the body and its metadata are stored and the changelog
     /// entry for `opts.peer` moved in this call, so a turn's write is in the

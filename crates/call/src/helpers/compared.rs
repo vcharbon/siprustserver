@@ -10,17 +10,21 @@
 //!   (RFC 3261 §12.2.1.1), the message and turn counters, the timer
 //!   generation, the limiter's change counter (no change number either copy
 //!   reserved is reused);
-//! - the union of two copies stands: the CDR events, each leg's message ring;
+//! - the union of two copies stands: the CDR events, each leg's message ring,
+//!   an item both hold counted once however its two clock frames read it;
 //! - the container's value stands: the keepalive request records, the
 //!   keepalive and limiter-refresh ledger entries, the ladder rungs a quiet
 //!   turn moves (none changes a dialog), the trace fields, the leg-id space
 //!   the node acting on the call mints from.
 
+use std::collections::BTreeSet;
+
 use crate::model::{
-    Call, Dialog, InviteExchange, Ladder, Leg, MessageRing, Provisional, RequestRecord, Shown,
-    TimerEntry, TimerType, Unacked2xx,
+    Call, CdrEvent, Dialog, InviteExchange, Ladder, Leg, MessageEntry, MessageRing, Provisional,
+    RequestRecord, Shown, TimerEntry, TimerType, Unacked2xx,
 };
 
+use super::instants::REANCHOR_DEADBAND_MS;
 use super::sequence::raise_sequences;
 
 /// Whether `a` and `b` agree on every compared field.
@@ -293,8 +297,9 @@ fn same_provisional(a: &Provisional, b: &Provisional) -> bool {
 
 /// `container` with the exempt fields of `other` merged in: the higher of
 /// each counter and dialog sequence, the union of the CDR events and of each
-/// leg's message ring; a limiter release either copy owes stays owed. Every
-/// other field is the container's.
+/// leg's message ring, an item both hold counted once however its two clock
+/// frames read it; a limiter release either copy owes stays owed. Every other
+/// field is the container's.
 pub fn merge_exempt(container: Call, other: &Call) -> Call {
     let mut merged = raise_sequences(container, other);
     merged.timer_generation = merged.timer_generation.max(other.timer_generation);
@@ -305,11 +310,8 @@ pub fn merge_exempt(container: Call, other: &Call) -> Call {
         (Some(m), Some(o)) => Some(m.max(o)),
         (m, o) => m.or(o),
     };
-    for event in &other.cdr_events {
-        if !merged.cdr_events.contains(event) {
-            merged.cdr_events.push(event.clone());
-        }
-    }
+    merged.cdr_events =
+        union_one_for_one(&merged.cdr_events, &other.cdr_events, same_event, |e| e.timestamp);
     let theirs = |leg_id: &str| super::leg::find_leg(other, leg_id).map(|l| &l.messages);
     merged.a_leg.messages = union_ring(&merged.a_leg.messages, theirs(&merged.a_leg.leg_id));
     for leg in merged.b_legs.iter_mut() {
@@ -318,14 +320,92 @@ pub fn merge_exempt(container: Call, other: &Call) -> Call {
     merged
 }
 
-/// The entries of `ours` and those of `theirs` it lacks, by the call-wide
-/// sequence; the higher eviction count.
+/// `taken`, the other copy's body that the acting copy `own` plays on from,
+/// with what `own` runs on its own: the leg-id space it mints from and its
+/// exempt ledger entries, never the other copy's.
+pub fn with_own_running(mut taken: Call, own: &Call) -> Call {
+    taken.leg_space = own.leg_space;
+    taken.timers.retain(|t| !exempt_timer(t));
+    taken.timers.extend(own.timers.iter().filter(|t| exempt_timer(t)).cloned());
+    taken
+}
+
+/// The entries of `ours` and those of `theirs` it lacks ([`union_one_for_one`]),
+/// by the call-wide sequence; the higher eviction count.
 fn union_ring(ours: &MessageRing, theirs: Option<&MessageRing>) -> MessageRing {
     let Some(theirs) = theirs else { return ours.clone() };
-    let mut entries = ours.entries.clone();
-    entries.extend(theirs.entries.iter().filter(|e| !ours.entries.contains(e)).cloned());
+    let mut entries = union_one_for_one(&ours.entries, &theirs.entries, same_entry, |e| e.at_ms);
     entries.sort_by_key(|e| (e.seq, e.at_ms));
     MessageRing { entries, dropped: ours.dropped.max(theirs.dropped) }
+}
+
+/// `ours`, then each item of `theirs` no item of `ours` stands for, one for
+/// one. An item stands for another `same` as it whose instant (`at`) reads at
+/// most twice [`REANCHOR_DEADBAND_MS`] apart: one event read through two
+/// re-anchored clock frames (ADR-0055 §9). Taken in instant order, each item
+/// of `theirs` pairs with the earliest unpaired one of `ours` it may stand
+/// for, which pairs as many as can be.
+fn union_one_for_one<T: Clone>(
+    ours: &[T],
+    theirs: &[T],
+    same: impl Fn(&T, &T) -> bool,
+    at: impl Fn(&T) -> i64,
+) -> Vec<T> {
+    let window = REANCHOR_DEADBAND_MS.unsigned_abs().saturating_mul(2);
+    let mut in_order: Vec<&T> = theirs.iter().collect();
+    in_order.sort_by_key(|t| at(t));
+    let mut paired = BTreeSet::new();
+    let mut union = ours.to_vec();
+    for item in in_order {
+        let partner = ours
+            .iter()
+            .enumerate()
+            .filter(|(i, o)| !paired.contains(i) && same(o, item))
+            .filter(|(_, o)| at(o).abs_diff(at(item)) <= window)
+            .min_by_key(|(_, o)| at(o));
+        match partner {
+            Some((i, _)) => {
+                paired.insert(i);
+            }
+            None => union.push(item.clone()),
+        }
+    }
+    union
+}
+
+/// Whether two CDR events are one, their instants set aside.
+fn same_event(a: &CdrEvent, b: &CdrEvent) -> bool {
+    let CdrEvent { event_type, timestamp: _, leg_id, status_code, reason, decision_ordinal } = a;
+    *event_type == b.event_type
+        && *leg_id == b.leg_id
+        && *status_code == b.status_code
+        && *reason == b.reason
+        && *decision_ordinal == b.decision_ordinal
+}
+
+/// Whether two message-ring entries are one, their instants set aside.
+fn same_entry(a: &MessageEntry, b: &MessageEntry) -> bool {
+    let MessageEntry {
+        seq,
+        at_ms: _,
+        direction,
+        method,
+        cseq,
+        code,
+        to_tag,
+        decision_ordinal,
+        headers,
+        turn,
+    } = a;
+    *seq == b.seq
+        && *direction == b.direction
+        && *method == b.method
+        && *cseq == b.cseq
+        && *code == b.code
+        && *to_tag == b.to_tag
+        && *decision_ordinal == b.decision_ordinal
+        && *headers == b.headers
+        && *turn == b.turn
 }
 
 /// Whether `timer` is an exempt ledger entry: the keepalive, its timeout,

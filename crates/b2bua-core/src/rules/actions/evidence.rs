@@ -11,6 +11,7 @@ use sip_message::{HeaderName, Method, SipRequest, SipResponse, SipStr};
 
 use crate::effects::{CriticalStateEffect, HandlerEffects, OutboundBody, Provenance};
 use crate::rules::relay;
+use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::{LegEnd, RuleContext};
 
 use super::dialog_track::open_early_a_dialog;
@@ -34,7 +35,7 @@ impl ActionExecutor<'_> {
     ) {
         if let Some(resp) = ctx.response() {
             if call::helpers::find_leg(call, leg_id).is_none() {
-                self.release_unknown_leg_2xx(fx, resp, leg_id);
+                self.release_unknown_leg_2xx(fx, ctx, resp, leg_id);
                 let tag = resp.to().tag().unwrap_or_default();
                 self.hold_possibly_confirmed(call, fx, leg_id, tag);
             } else {
@@ -171,11 +172,12 @@ impl ActionExecutor<'_> {
     fn release_unknown_leg_2xx(
         &mut self,
         fx: &mut HandlerEffects,
+        ctx: &RuleContext,
         resp: &SipResponse,
         leg_id: &str,
     ) {
-        let src = resp.top_via().sent_by().pair();
-        let from = (src.0.to_string(), src.1);
+        let CallEvent::Sip { src, .. } = ctx.event else { return };
+        let from = (src.ip().to_string(), src.port());
         let answers = crate::unheld_response::answer_unheld_response(
             self.config,
             resp,

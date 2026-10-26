@@ -1,7 +1,8 @@
 //! What a UAC owes a final to an INVITE it holds no record of, built from the
 //! final alone: the ACK and the BYE of a 2xx (RFC 3261 §13.2.2.4, §15.1.1),
-//! and the hop-by-hop ACK of a non-2xx (§17.1.1.3), whose Request-URI the
-//! caller supplies from what the request stated on its own Via.
+//! each on the Via the caller states for it, and the hop-by-hop ACK of a
+//! non-2xx (§17.1.1.3), whose Request-URI the caller supplies from what the
+//! request stated on its own Via.
 
 use super::emit;
 use super::error::GenerateError;
@@ -24,18 +25,17 @@ fn dialog_target(final_response: &SipResponse) -> Option<(Uri, Vec<String>)> {
     Some(route_for_in_dialog(target, &route_set))
 }
 
-/// A request of the 2xx's dialog: its Request-URI and route from the 2xx, this
-/// hop's Via (the 2xx's own on `branch`), From, To and Call-ID echoing it.
+/// A request of the 2xx's dialog: its Request-URI and route from the 2xx, the
+/// sender's `hop` Via (RFC 3261 §8.1.1.7), From, To and Call-ID echoing it.
 fn in_dialog_of(
     final_response: &SipResponse,
     method: Method,
     cseq: u32,
-    branch: &str,
+    hop: Via,
 ) -> Result<RequestDraft, GenerateError> {
     let (uri, routes) =
         dialog_target(final_response).ok_or(GenerateError::Missing("the 2xx's Contact"))?;
     let echoed = |name: HeaderName| final_response.raw_text(name).next().unwrap_or(SipStr::EMPTY);
-    let hop: Via = final_response.top_via().clone().with_branch(branch.to_string());
     let draft = RequestDraft::new(method.clone(), uri)
         .push(hop)
         .push(MaxForwards::DEFAULT)
@@ -47,27 +47,27 @@ fn in_dialog_of(
 }
 
 /// The ACK of a 2xx to an INVITE whose UAC holds neither the INVITE nor the
-/// dialog (RFC 3261 §13.2.2.4): its own transaction on `branch`, the 2xx's
-/// CSeq number with method ACK, routed by the 2xx's Contact and Record-Route,
+/// dialog (RFC 3261 §13.2.2.4): its own transaction on `hop`, the 2xx's CSeq
+/// number with method ACK, routed by the 2xx's Contact and Record-Route,
 /// carrying `answer` as its session description when the 2xx made an offer
 /// (RFC 3264 §4).
 pub fn generate_ack_for_unheld_2xx(
     final_response: &SipResponse,
-    branch: &str,
+    hop: Via,
     answer: Option<Vec<u8>>,
 ) -> Result<SipRequest, GenerateError> {
-    let draft = in_dialog_of(final_response, Method::Ack, final_response.cseq().seq(), branch)?;
+    let draft = in_dialog_of(final_response, Method::Ack, final_response.cseq().seq(), hop)?;
     emit::request(emit::framed(draft, answer.unwrap_or_default(), None))
 }
 
 /// The BYE ending the dialog of a 2xx whose UAC holds no record of it (RFC
-/// 3261 §15.1.1), at `cseq`, on `branch`.
+/// 3261 §15.1.1), at `cseq`, on `hop`.
 pub fn generate_bye_for_unheld_2xx(
     final_response: &SipResponse,
     cseq: u32,
-    branch: &str,
+    hop: Via,
 ) -> Result<SipRequest, GenerateError> {
-    let draft = in_dialog_of(final_response, Method::Bye, cseq, branch)?;
+    let draft = in_dialog_of(final_response, Method::Bye, cseq, hop)?;
     emit::request(draft.push(ContentLength::new(0)))
 }
 
@@ -124,13 +124,20 @@ Content-Length: 0\r\n\r\n",
         )
     }
 
+    /// The sender's own hop on `branch`.
+    fn hop(branch: &str) -> Via {
+        Via::udp(SipStr::from_static("10.0.0.7"), 5062).with_branch(branch.to_string())
+    }
+
     #[test]
     fn a_2xx_is_acked_on_its_own_transaction_toward_its_contact() {
-        let ack = generate_ack_for_unheld_2xx(&two_hundred(), "z9hG4bKack", None).expect("an ACK");
+        let ack =
+            generate_ack_for_unheld_2xx(&two_hundred(), hop("z9hG4bKack"), None).expect("an ACK");
         assert_eq!(ack.method(), &Method::Ack);
         assert_eq!(ack.request_uri().to_string(), "sip:bob@10.0.0.2:5070");
         assert_eq!(ack.cseq().seq(), 4);
         assert_eq!(ack.top_via().branch(), Some("z9hG4bKack"));
+        assert_eq!(ack.top_via().host_port(), ("10.0.0.7", 5062), "the sender's hop");
         assert_eq!(ack.to().tag(), Some("bobs"));
         assert_eq!(ack.from().tag(), Some("ours"));
         let routes: Vec<String> = ack.raw_text(HeaderName::Route).map(|r| r.to_string()).collect();
@@ -141,14 +148,15 @@ Content-Length: 0\r\n\r\n",
     #[test]
     fn an_answer_rides_the_ack() {
         let answer = b"v=0\r\n".to_vec();
-        let ack = generate_ack_for_unheld_2xx(&two_hundred(), "z9hG4bKack", Some(answer.clone()))
-            .expect("an ACK");
+        let ack =
+            generate_ack_for_unheld_2xx(&two_hundred(), hop("z9hG4bKack"), Some(answer.clone()))
+                .expect("an ACK");
         assert_eq!(ack.body(), answer.as_slice());
     }
 
     #[test]
     fn the_bye_follows_at_the_next_sequence() {
-        let bye = generate_bye_for_unheld_2xx(&two_hundred(), 5, "z9hG4bKbye").expect("a BYE");
+        let bye = generate_bye_for_unheld_2xx(&two_hundred(), 5, hop("z9hG4bKbye")).expect("a BYE");
         assert_eq!(bye.method(), &Method::Bye);
         assert_eq!(bye.cseq().seq(), 5);
         assert_eq!(bye.request_uri().to_string(), "sip:bob@10.0.0.2:5070");
@@ -165,7 +173,7 @@ Call-ID: c\r\n\
 CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n",
         );
-        assert!(generate_ack_for_unheld_2xx(&no_contact, "z9hG4bKa", None).is_err());
+        assert!(generate_ack_for_unheld_2xx(&no_contact, hop("z9hG4bKa"), None).is_err());
     }
 
     #[test]

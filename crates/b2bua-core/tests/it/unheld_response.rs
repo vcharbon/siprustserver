@@ -10,7 +10,7 @@ use b2bua_core::effects::{OutboundBody, OutboundSipEffect};
 use b2bua_core::stack_identity::{build_call_via, RequestFacts, StackIdentityOpts};
 use b2bua_core::unheld_response::answer_unheld_response;
 use sip_ids::{SigningKey, TurnIds};
-use sip_message::header::HeaderValue;
+use sip_message::header::{HeaderValue, Rport};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipResponse};
 
@@ -118,4 +118,30 @@ fn a_non_2xx_is_acked_on_its_own_branch_at_the_stated_uri() {
 #[test]
 fn a_non_2xx_without_a_verified_extension_draws_nothing() {
     assert!(answer(&response(487, &our_via(true, false), "")).is_empty());
+}
+
+/// The ACK and the BYE of the 2xx are this node's requests: their Via names
+/// this node's sent-by and the call and leg the 2xx's Via names, never the
+/// sent-by of the node that sent the INVITE nor what the next hop stamped on
+/// it (RFC 3261 §8.1.1.7, §18.2.1, RFC 3581 §4).
+#[test]
+fn the_ack_and_the_bye_of_a_2xx_carry_this_nodes_via() {
+    let stamped = our_via(true, true).replacen(";rport", ";rport=5061;received=10.0.0.8", 1);
+    let config = B2buaConfig { sip_local_ip: "10.0.0.7".into(), sip_local_port: 5062, ..config() };
+    let src = ("10.0.0.5".to_string(), 5080);
+    let resp = response(200, &stamped, "");
+    let sent = requests(&answer_unheld_response(&config, &resp, src, &mut TurnIds::fixed(1), 0));
+    assert_eq!(sent.len(), 2, "the ACK and the BYE");
+    let invite_hop = resp.top_via();
+    for req in &sent {
+        let hop = req.top_via();
+        let method = req.method().as_str();
+        assert_eq!(hop.host_port(), ("10.0.0.7", 5062), "{method}: this node's sent-by");
+        assert_eq!(hop.received(), None, "{method}: nothing the next hop stamped");
+        assert_eq!(hop.rport(), Some(Rport::Requested), "{method}: rport requested, not valued");
+        assert_ne!(hop.branch(), invite_hop.branch(), "{method}: a transaction of its own");
+        for mark in ["cr", "lg", "ci"] {
+            assert_eq!(hop.param(mark), invite_hop.param(mark), "{method}: the call's {mark}");
+        }
+    }
 }

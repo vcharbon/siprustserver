@@ -6,6 +6,7 @@
 //! `(p,b)`-causal reconciliation remains the sole correctness mechanism
 //! (ADR-0014).
 
+use call::helpers::instants::reanchor_offset;
 use call::helpers::{cap_keepalive_fire_at, shift_instants};
 use call::{Call, TimerEntry, TimerType};
 
@@ -108,38 +109,15 @@ fn cap_future_keepalives(timers: &mut [TimerEntry], now_ms: i64, keepalive_inter
     }
 }
 
-/// Re-anchor **deadband** (ms): a persisted `skew_offset_ms` whose magnitude is
-/// below this is NOT applied — it is dominated by replication transit latency +
-/// clock jitter, not a genuine inter-node clock disagreement worth correcting.
-/// Under the single-clock harness `receiver_now − origin_now` is pure latency
-/// with ZERO real skew, so the re-anchor is a *no-op* there and a keepalive
-/// keeps the deadline the harness's strict SIP-transparency oracle expects. A
-/// real host clock STEP is interval-sized
-/// (≥ the keepalive cadence, hundreds of seconds), so it clears this deadband by
-/// orders of magnitude. Correcting only skew that materially exceeds latency is
-/// also strictly better in production: sub-second offsets do not meaningfully
-/// move a 300 s keepalive / 150 s setup timer.
-const REANCHOR_DEADBAND_MS: i64 = 1_000;
-
 /// Move every absolute instant of `call`, a copy read from the replicating
 /// store, into this node's clock frame (ADR-0055 §9): `skew_offset_ms` is the
 /// store's offset for the body (this node's clock minus the clock its instants
-/// were written on, composed across every hop), applied once it clears
-/// [`REANCHOR_DEADBAND_MS`]. Run once per copy read, before any of its instants
-/// is compared or re-armed, so every downstream past-due reading is
+/// were written on, composed across every hop), as far as
+/// [`reanchor_offset`] applies it. Run once per copy read, before any of its
+/// instants is compared or re-armed, so every downstream past-due reading is
 /// skew-corrected. No `(p,b)` interaction — accuracy only (ADR-0014 untouched).
 pub(super) fn reanchor(call: &mut Call, skew_offset_ms: i64) {
-    shift_instants(call, applied_offset(skew_offset_ms));
-}
-
-/// The part of `skew_offset_ms` a re-anchor applies: all of it once it clears
-/// [`REANCHOR_DEADBAND_MS`], none below.
-fn applied_offset(skew_offset_ms: i64) -> i64 {
-    if skew_offset_ms.abs() < REANCHOR_DEADBAND_MS {
-        0
-    } else {
-        skew_offset_ms
-    }
+    shift_instants(call, reanchor_offset(skew_offset_ms));
 }
 
 /// **The single restore-hygiene seam** every failover/reclaim hydration path runs

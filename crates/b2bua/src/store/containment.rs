@@ -75,11 +75,6 @@ pub fn meet(held: Enveloped, incoming: &Enveloped, incoming_is_primary: bool) ->
     }
 }
 
-/// How the two copies' envelopes stand; `None` when either has none.
-pub fn standing(held: &Enveloped, incoming: &Enveloped) -> Option<Containment> {
-    Some(containment(held.topology.as_ref()?, incoming.topology.as_ref()?))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

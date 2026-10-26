@@ -594,6 +594,37 @@ async fn a_contained_copy_that_plays_on_takes_the_primarys_copy_with_its_own_rec
     assert_eq!(live_versions(&n, &copy.call.call_ref), ((6, 2), (6, 2)), "the primary's version");
 }
 
+/// **Copies that contain each other play on from the primary's.** The two
+/// copies made exempt writes alone since their common version, and the
+/// takeover copy relays an INFO the primary's write lacks: the copy plays on
+/// from the primary's copy taken whole, as the store keeps it, with its own
+/// relay, leg-id space and keepalive (ADR-0055 §7).
+#[tokio::test(start_paused = true)]
+async fn copies_that_contain_each_other_play_on_from_the_primarys_copy() {
+    let n = node("w1").await;
+    let by = n.core.router_ctx().relay_owner.clone();
+    let mut copy = relaying(stamped(answered(4, 2, CallModelState::Active), 4, 1), by.clone());
+    copy.call.leg_space = call::LegSpace::Other;
+    let keepalive = |fire_at| call::TimerEntry {
+        key: call::TimerKey::call(call::TimerType::Keepalive),
+        generation: 1,
+        fire_at,
+    };
+    copy.call.timers.push(keepalive(300_000));
+    let mut primary = stamped(answered(5, 1, CallModelState::Active), 4, 1);
+    primary.call.callback_context = Some("the primary's".into());
+    primary.call.timers.push(keepalive(200_000));
+    meet(&n, &copy, &primary, FlushDirection::Forward, MaterialiseOrigin::Takeover).await;
+
+    let after = n.core.router_ctx().state.peek(&copy.call.call_ref).expect("the copy plays on");
+    assert_eq!(after.callback_context, primary.call.callback_context, "the primary's copy, whole");
+    assert_eq!(after.leg_space, call::LegSpace::Other, "the copy mints from its own space");
+    assert_eq!(after.timers, [keepalive(300_000)], "the copy runs its own keepalive");
+    let d = after.a_leg.dialogs.confirmed().expect("the caller's dialog");
+    assert!(d.requests.iter().any(|r| r.relayed_by == by), "the copy's own relay is kept");
+    assert_eq!(live_versions(&n, &copy.call.call_ref), ((5, 2), (4, 1)), "the primary's stamp");
+}
+
 /// `call` with a confirmed callee leg `b-9` only this copy dialled.
 fn with_a_leg_only_here(mut copy: Enveloped) -> Enveloped {
     let mut leg = call::testkit::dialled_leg("b-9", "only-here-tag");

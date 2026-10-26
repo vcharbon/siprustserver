@@ -3,10 +3,14 @@
 //! `bak:` replica and the reverse-flushed deltas remain. The notice is a turn
 //! of the call's own queue, so the turns of the messages that cleared those
 //! transactions run first (ADR-0010 X2): a response still queued is served by
-//! the copy, never by a second takeover after the shed.
+//! the copy, never by a second takeover after the shed. A copy that holds the
+//! end of a call whose primary departed — the call ending, or a 2xx awaiting
+//! its ACK — is never shed: no other node runs those deadlines (ADR-0055 §5),
+//! and the copy discharges the call once it ends.
 
 use std::sync::Arc;
 
+use super::interpret::primary_departed;
 use super::release::{release_call, ReleaseKind};
 use super::RouterCtx;
 use b2bua_sdk::event::CallEvent;
@@ -53,6 +57,9 @@ pub(super) async fn self_release_turn(ctx: &Arc<RouterCtx>, call_ref: &str) {
         }
         return;
     }
+    if ends_for_departed_primary(ctx, call_ref) {
+        return;
+    }
     if ctx.txn.active_txn_count_for_call(call_ref).await.unwrap_or(0) != 0 {
         // A transaction opened since the notice, and the layer's watch is
         // one-shot — it was consumed delivering this notice. Re-arm it so the
@@ -74,12 +81,24 @@ pub(super) async fn shed_if_quiesced(ctx: &Arc<RouterCtx>, call_ref: &str) -> bo
     }
     let _guard = ctx.state.lock(call_ref).await;
     if !ctx.state.is_takeover(call_ref)
+        || ends_for_departed_primary(ctx, call_ref)
         || ctx.txn.active_txn_count_for_call(call_ref).await.unwrap_or(0) != 0
     {
         return false;
     }
     shed(ctx, call_ref).await;
     true
+}
+
+/// Whether the copy of `call_ref` here holds the end of a call whose primary
+/// departed: the call is ending, or a 2xx it sent awaits the ACK whose
+/// absence ends the call (RFC 3261 §13.3.1.4).
+fn ends_for_departed_primary(ctx: &RouterCtx, call_ref: &str) -> bool {
+    let ends = |c: &call::Call| {
+        c.state == call::CallModelState::Terminating
+            || c.timers.iter().any(|t| *t.timer_type() == call::TimerType::RepeatGiveUp)
+    };
+    ctx.state.peek(call_ref).is_some_and(|c| ends(&c)) && primary_departed(ctx, call_ref)
 }
 
 /// Shed the takeover copy of `call_ref`, under its per-call lock. A takeover

@@ -242,8 +242,9 @@ A final with no request record that matches none of these is stray and is
 discarded or re-ACKed as today (§17.1.1.2, §18.1.2). A caller's BYE on an early
 dialog, an UPDATE, PRACK or INFO on an early dialog (each allowed there), and a
 request with an unknown To-tag (481, §12.2.2) are not evidence. A response for a call no node
-holds is answered as an unknown dialog would be: a 2xx is ACKed and BYEd from
-its own headers, a non-2xx INVITE final is ACKed from the via-extension.
+holds is answered as an unknown dialog would be, whichever node sent the
+request: a 2xx is ACKed and BYEd from its own headers on this node's Via, a
+non-2xx INVITE final is ACKed from the via-extension.
 
 The rule sends what RFC 3261 requires for the message (the ACK of an INVITE
 final, §13.2.2.4, §17.1.1.3) and ends the call cleanly over every dialog the
@@ -287,7 +288,8 @@ primary as on a non-HA B2BUA, leaving one CDR or none (user ruling).
 
 The departure sweep takes over every call of a departed primary with an INVITE
 transaction to serve, and every `Terminating` one with any request record open
-(its own BYE in flight, a request it held); a `Terminating` call with nothing
+(its own BYE in flight, a request it held) or a caller dialog held possibly
+confirmed (§4); a `Terminating` call with nothing
 left to serve finished its ending on the departed primary and is discharged
 with its CDR, which may be the second (the primary wrote one when it ended the
 call, and only its delete was lost). By user ruling, a quiet call of a departed
@@ -296,7 +298,10 @@ ghost call whose parties stay silent: it ends at the endpoints' own timers
 (session refresh, RTP inactivity) and at the replica's TTL, with no BYE; the
 reap that evicts the replica of a departed primary's call ends it, off the
 wire, with its CDR. A takeover copy that sheds once the transactions it served
-cleared leaves the call to that reap the same way.
+cleared leaves the call to that reap the same way; a copy that holds the end
+of a call whose primary departed (the call ending, or a 2xx awaiting its ACK)
+never sheds, as no other node runs those deadlines, and it writes the CDR once
+the call ends.
 
 ### 6. One author per ordinal: identity, compared for equality
 
@@ -338,7 +343,8 @@ the node the call was created on mints `b-{n}` and any other node acting on
 the call `c-{n}` (user ruling), so two copies acting at once never mint one id
 for two legs, the union pairs legs by id, and every lookup by leg id is
 unchanged. The space a node mints from is an exempt field (the container's
-value stands).
+value stands); a takeover copy that plays on from the primary's copy keeps its
+own space and its own exempt ledger entries, which are what it runs.
 
 The exempt fields are a closed list; every other field is compared, so a new
 field fails safe:
@@ -386,7 +392,10 @@ few milliseconds apart.
 Every absolute instant the call record holds (ledger deadlines, `sent_at`
 stamps, the INVITE's send time, the creation time) is replicated with the skew
 composed across hops, and a local write resets the offset, so it survives any
-number of takeovers unshifted.
+number of takeovers unshifted. Two copies that meet, in the store or at a live
+copy, are read in one clock frame first, and an item of a union both hold (a
+CDR event, a ring entry) is held once when its two instants read within twice
+the re-anchor deadband of each other.
 
 ### 10. The seam carries no HA value
 

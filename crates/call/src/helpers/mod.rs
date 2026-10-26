@@ -70,7 +70,7 @@ pub use attempt::{
     dialled_leg_ended, end_attempt, find_attempt, join_attempt, next_attempt_id, open_attempt,
     settle_attempts,
 };
-pub use compared::{merge_exempt, same_state};
+pub use compared::{merge_exempt, same_state, with_own_running};
 pub use decision_log::mark_decision;
 pub use dialog::{
     advance_peer_cseq, bump_our_cseq, cache_sdp_on_leg_dialog, cached_sdp_for_leg_dialog,

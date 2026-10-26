@@ -3,6 +3,29 @@
 
 use crate::model::{Call, Leg};
 
+/// Re-anchor **deadband** (ms): an offset between two clock frames whose
+/// magnitude is below this is replication transit latency and clock jitter,
+/// not a clock disagreement worth correcting, and a re-anchor applies none of
+/// it. Under a single-clock harness `receiver_now − origin_now` is pure
+/// latency, so the re-anchor is a no-op there and a keepalive keeps the
+/// deadline a strict SIP-transparency oracle expects. A real host clock step
+/// is interval-sized (the keepalive cadence, hundreds of seconds) and clears
+/// it by orders of magnitude; a sub-second offset does not meaningfully move
+/// a 300 s keepalive or a 150 s setup timer. One event read through two
+/// re-anchored frames reads at most twice this apart.
+pub const REANCHOR_DEADBAND_MS: i64 = 1_000;
+
+/// The part of `skew_offset_ms`, a body's offset from this node's clock, a
+/// re-anchor applies: all of it once it clears [`REANCHOR_DEADBAND_MS`], none
+/// below.
+pub fn reanchor_offset(skew_offset_ms: i64) -> i64 {
+    if skew_offset_ms.abs() < REANCHOR_DEADBAND_MS {
+        0
+    } else {
+        skew_offset_ms
+    }
+}
+
 /// Move every absolute instant `call` holds by `offset_ms` (the reading
 /// clock minus the writing clock): the timer ledger's deadlines, the creation
 /// time, each dialled INVITE's send time, each NOTIFY in flight's send time, each

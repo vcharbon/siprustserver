@@ -9,9 +9,11 @@ use repl_net::frame::{Op, Partition};
 use super::super::incarnation::is_another_call;
 use super::Puller;
 use crate::router::{PrimaryWrite, ReplCommand};
-use crate::store::containment::{meet, Met};
-use crate::store::envelope::{self, Enveloped};
+use crate::store::envelope::Enveloped;
 use crate::store::{partition_of, CallStore, PartitionRole, PutOpts};
+use store_meeting::KeptCopy;
+
+mod store_meeting;
 
 /// How an inbound `Data` frame is reconciled into the local store
 /// ([`Puller::apply_to_store`]). Selected per frame from `(flow, bootstrapped)`
@@ -68,7 +70,8 @@ impl Puller {
     ///   dominated by `(sp, sb)` ⇒ a version the stored copy read; at or past
     ///   `(sp, sb)` on both components ⇒ a copy that read every write the
     ///   stored one holds, applied; otherwise the two copies meet (ADR-0055 §7,
-    ///   [`meet`]): the incoming copy contains the stored one ⇒ applied, the
+    ///   [`Puller::meet_stored`]) in one clock frame (§9): the incoming copy
+    ///   contains the stored one ⇒ applied, the
     ///   stored copy's exempt fields merged in; the stored copy contains it ⇒
     ///   refused, the incoming copy's exempt fields merged into the stored one;
     ///   neither ⇒ refused, the store untouched. When each contains the other
@@ -152,41 +155,27 @@ impl Puller {
                         Some((sp, sb)) if dominated(sp, sb) => ApplyOutcome::Dominated,
                         Some((sp, sb)) if descends(sp, sb) => ApplyOutcome::Applied,
                         Some(_) => {
+                            let kept = KeptCopy { body_ttl_ms, incarnation: incarnation.clone() };
                             let primary_incoming = mode == ApplyMode::Forward;
-                            let held = self.stored_copy(role, &primary, call_ref).await;
-                            match (held, incoming.as_ref()) {
-                                (Some(held), Some(theirs)) => {
-                                    match meet(held, theirs, primary_incoming) {
-                                        Met::Incoming(merged) => {
-                                            version = merged
-                                                .topology
-                                                .as_ref()
-                                                .map_or(version, |t| t.vector());
-                                            body = envelope::encode(
-                                                &self.codec,
-                                                merged.topology.as_ref(),
-                                                &merged.call,
-                                            )
-                                            .ok()
-                                            .map(Arc::from)
-                                            .or(body);
-                                            ApplyOutcome::Applied
-                                        }
-                                        Met::Held(merged) => {
-                                            let kept = KeptCopy {
-                                                body_ttl_ms,
-                                                incarnation: incarnation.clone(),
-                                            };
-                                            self.keep_merged(
-                                                role, &primary, call_ref, &merged, kept,
-                                            )
-                                            .await;
-                                            ApplyOutcome::Refused
-                                        }
-                                        Met::Diverged => ApplyOutcome::Refused,
-                                    }
+                            let (met, origin) = (incoming.as_ref(), origin_now_ms);
+                            match self
+                                .meet_stored(
+                                    role,
+                                    &primary,
+                                    call_ref,
+                                    met,
+                                    primary_incoming,
+                                    origin,
+                                    kept,
+                                )
+                                .await
+                            {
+                                Some(taken) => {
+                                    version = taken.version.unwrap_or(version);
+                                    body = taken.body.or(body);
+                                    ApplyOutcome::Applied
                                 }
-                                _ => ApplyOutcome::Refused,
+                                None => ApplyOutcome::Refused,
                             }
                         }
                     },
@@ -275,51 +264,8 @@ impl Puller {
         }
     }
 
-    /// The stored copy of `call_ref`, decoded; `None` for an absent one or one
-    /// the model cannot read. Read with the **non-evicting**
-    /// [`peek_body_raw`](crate::repl::ReplicatingCallStore::peek_body_raw), so
-    /// the meeting never destroys it.
-    async fn stored_copy(
-        &self,
-        role: PartitionRole,
-        primary: &str,
-        call_ref: &str,
-    ) -> Option<Enveloped> {
-        let raw = self.store.peek_body_raw(role, primary, call_ref).await?;
-        self.decode_counted(&raw)
-    }
-
-    /// Store `merged`, the stored copy with an incoming copy's exempt fields
-    /// merged in, at its own vector and under its own index keys: a local
-    /// apply, never re-propagated, its instants in the frame the stored copy's
-    /// were.
-    async fn keep_merged(
-        &self,
-        role: PartitionRole,
-        primary: &str,
-        call_ref: &str,
-        merged: &Enveloped,
-        kept: KeptCopy,
-    ) {
-        let encoded = envelope::encode(&self.codec, merged.topology.as_ref(), &merged.call);
-        let (Ok(body), Some(t)) = (encoded, merged.topology.as_ref()) else {
-            return;
-        };
-        let (p, b) = t.vector();
-        let opts = PutOpts {
-            origin_now_ms: self.store.held_origin_now_ms(call_ref),
-            incarnation: kept.incarnation,
-            ..PutOpts::default()
-        };
-        let indexes = call::call_index_keys(&merged.call);
-        let _ = self
-            .store
-            .put_call(role, primary, call_ref, body, &indexes, kept.body_ttl_ms, p, b, &opts)
-            .await;
-    }
-
     /// A stored or incoming body decoded, its refusal counted and logged.
-    fn decode_counted(&self, body: &[u8]) -> Option<Enveloped> {
+    pub(super) fn decode_counted(&self, body: &[u8]) -> Option<Enveloped> {
         crate::repl::decode_peer_body(&self.codec, &self.metrics, body)
     }
 
@@ -477,12 +423,6 @@ fn command(
         (ApplyMode::Forward, Applied | Dominated) | (ApplyMode::Bootstrap, _) => None,
         (_, Shed | Superseded) => None,
     }
-}
-
-/// What a stored copy kept over an incoming one is written with.
-struct KeptCopy {
-    body_ttl_ms: i64,
-    incarnation: Option<String>,
 }
 
 /// What a `Data` frame wrote, as [`Puller::signal`] hands it up: a `Put`'s

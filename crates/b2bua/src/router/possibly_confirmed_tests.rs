@@ -171,3 +171,73 @@ async fn on_a_call_one_node_served_the_caller_is_answered_and_nothing_held() {
     assert_eq!(sent.len(), 1, "her one final: {sent:?}");
     assert!(sent[0].0.starts_with('5') || sent[0].0.starts_with('4'), "a non-2xx: {sent:?}");
 }
+
+/// The requests `peer` receives within `within`.
+async fn requests_heard(
+    peer: &dyn sip_net::UdpEndpoint,
+    within: std::time::Duration,
+) -> Vec<sip_message::SipRequest> {
+    let mut requests = Vec::new();
+    let deadline = tokio::time::Instant::now() + within;
+    while let Ok(Some(p)) = tokio::time::timeout_at(deadline, peer.recv()).await {
+        if let SipMessage::Request(r) = parse(&String::from_utf8_lossy(&p.raw)) {
+            requests.push(r);
+        }
+    }
+    requests
+}
+
+/// A held caller whose call's primary departs: the backup's copy is the
+/// only node left to end the call, so it serves the hold to its end — it is
+/// not discharged, and not shed once its transactions clear — and the held
+/// dialog is BYEd at 64·T1, and the copy ends the call with its one CDR
+/// (ADR-0055 §4, §5).
+#[tokio::test(start_paused = true)]
+async fn a_held_caller_of_a_departed_primary_is_byed_by_the_backup() {
+    use std::time::Duration;
+
+    use sip_message::generators::{generate_response, GenerateResponseOpts};
+    use sip_net::{BindUdpOpts, SignalingNetwork};
+
+    use crate::store::{CallStore, PartitionRole, PutOpts};
+
+    let first = bob_hangs_up_at(&node("w1").await);
+    let (tag, _) = held(&first).expect("the caller dialog is held");
+    let call_ref = first.call.call_ref.clone();
+    let net = sip_net_testkit::SimulatedSignalingNetwork::new(1);
+    let backup = super::test_support::node_on(&net, "w1", |_| {}, Vec::new()).await;
+    // Her dialog's route set starts at the proxy her INVITE came through.
+    let proxy = net.bind_udp(BindUdpOpts::new("10.0.0.1:5060".parse().unwrap(), 64)).await.unwrap();
+    let _caller = net.bind_udp(BindUdpOpts::new(src(), 64)).await.unwrap();
+    let body = crate::store::envelope::placed_body(&first.call).unwrap();
+    let opts = PutOpts::default();
+    let store = backup.store.as_ref();
+    let bak = PartitionRole::Backup;
+    store.put_call(bak, "w0", &call_ref, body, &[], 120_000, 1, 0, &opts).await.unwrap();
+    backup.membership.add(topology::Peer::new("w0", "w0"));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    backup.membership.remove("w0");
+
+    // She holds the dead owner's 2xx: her INVITE's transaction ended with it,
+    // and the 503 is a stray she discards (RFC 3261 §17.1.1.2), so nothing
+    // comes from her until the hold ends.
+    let node_addr = std::net::SocketAddr::from(super::test_support::NODE_SIP_ADDR);
+    let before = requests_heard(proxy.as_ref(), Duration::from_secs(30)).await;
+    assert!(before.is_empty(), "nothing before 64·T1: {} requests", before.len());
+    assert!(backup.cdr.snapshot().is_empty(), "no CDR while the caller is held");
+    let at_hold = requests_heard(proxy.as_ref(), Duration::from_secs(5)).await;
+    let bye = at_hold.first().expect("the held dialog is BYEd");
+    assert_eq!((bye.method().as_str(), bye.from().tag()), ("BYE", Some(tag.as_str())));
+    let ok = generate_response(bye, 200, "OK", &GenerateResponseOpts::default()).unwrap();
+    proxy.send_to(ok.image(), node_addr).await.unwrap();
+    // The callee's CANCELled INVITE, whose 487 went to the node that sent the
+    // CANCEL, is ended by the teardown's backstop.
+    tokio::time::sleep(Duration::from_secs(40)).await;
+
+    let cdrs: Vec<String> = backup.cdr.snapshot().into_iter().map(|r| r.call_ref).collect();
+    assert_eq!(cdrs, [call_ref.clone()], "the call's one CDR");
+    assert!(backup.core.router_ctx().state.peek(&call_ref).is_none(), "no copy is left");
+    let kept = store.get_call(bak, "w0", &call_ref).await.unwrap();
+    assert!(kept.is_none(), "the ended call is deleted");
+}

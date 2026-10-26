@@ -5,7 +5,8 @@
 //! caller lost (§13.3.1.4), and nobody else ends a call the peer was ending.
 //! Every call this node backs up for the peer with an INVITE transaction to
 //! serve, and every `Terminating` one with any request record open — its own
-//! BYE in flight, a request it held — is taken over at once: its timers run
+//! BYE in flight, a request it held — or a caller dialog held possibly
+//! confirmed (ADR-0055 §4), is taken over at once: its timers run
 //! at their replicated deadlines, its transactions are rebuilt, and an
 //! undecided call is answered. A `Terminating` call with nothing left to serve
 //! finished its ending on the peer, whose last write was lost: it is
@@ -40,6 +41,7 @@ use super::restore_hygiene::reanchor;
 use super::undecided::{is_undecided, settle_undecided};
 use super::RouterCtx;
 use crate::abort_on_drop::AbortOnDrop;
+use crate::rules::actions::possibly_confirmed;
 use crate::store::PartitionRole;
 
 /// How many calls the sweep reads between two yields to the runtime.
@@ -117,8 +119,8 @@ where
 
 /// Discharge `call_ref` when its body is ended, or ending with nothing left to
 /// serve, else take it over when it names an INVITE transaction to serve
-/// ([`has_invite_to_serve`]), or is ending with any transaction to serve
-/// ([`has_work_to_serve`]). The body is read once without the lock to leave a
+/// ([`has_invite_to_serve`]), or is ending with work left ([`ending_work`]).
+/// The body is read once without the lock to leave a
 /// quiet call untouched; a call already live here is left as it is.
 async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str) -> Swept {
     let Ok((copy, _skew)) = ctx.state.peek_replica(call_ref).await else { return Swept::Left };
@@ -127,7 +129,7 @@ async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str) -> Swept {
         return discharge_finished(ctx, call_ref).await;
     }
     let ending = call.state == CallModelState::Terminating;
-    if !has_invite_to_serve(&call) && !(ending && has_work_to_serve(&call)) {
+    if !has_invite_to_serve(&call) && !(ending && ending_work(&call)) {
         return Swept::Left;
     }
     let guard = ctx.state.lock(call_ref).await;
@@ -152,13 +154,20 @@ async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str) -> Swept {
 }
 
 /// Whether `call` needs no copy to serve it, only its discharge: ended, or
-/// ending with no transaction left to serve.
+/// ending with no work left.
 fn finished(call: &Call) -> bool {
     match call.state {
         CallModelState::Terminated => true,
-        CallModelState::Terminating => !has_work_to_serve(call),
+        CallModelState::Terminating => !ending_work(call),
         _ => false,
     }
+}
+
+/// What an ending call still waits on before it ends: a transaction to serve
+/// ([`has_work_to_serve`]), or a caller dialog held possibly confirmed, BYEd
+/// on her ACK or when its hold ends.
+fn ending_work(call: &Call) -> bool {
+    has_work_to_serve(call) || possibly_confirmed::holds_any(call)
 }
 
 /// Discharge the finished `call_ref` — a takeover copy here ended it and

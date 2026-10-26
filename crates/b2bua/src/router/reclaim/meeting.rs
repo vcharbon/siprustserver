@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use call::helpers::lifecycle_behind;
+use call::helpers::{lifecycle_behind, with_own_running};
 use call::{Call, CallModelState};
 
 use super::super::materialise::answered_invite_seeds;
@@ -19,7 +19,7 @@ use super::super::RouterCtx;
 use super::diverged::{end_diverged, end_over_an_ending, own_records};
 use super::ending::discharge_met_ending;
 use super::{format_pb, FlushDirection};
-use crate::store::containment::{meet, standing, Containment, Met};
+use crate::store::containment::{meet, Met};
 use crate::store::Enveloped;
 
 /// The other owner's copy `incoming` of the call meets the `live` copy here,
@@ -35,11 +35,11 @@ use crate::store::Enveloped;
 ///   the layer ([`answered_invite_seeds`]).
 /// - A **forward** copy is the primary's, reaching a takeover copy. A primary
 ///   that contains the copy and holds every request record it keeps open
-///   stands it down ([`covers`]). Otherwise the copy plays on: with the
-///   primary's exempt fields merged in when each contains the other, or on
-///   the primary's copy taken whole when only the primary's contains it, the
-///   copy's own open request records carried into it — a vector is never
-///   taken without the body it counts.
+///   stands it down ([`covers`]). Otherwise a copy the primary's contains,
+///   each containing the other included, plays on from the primary's copy
+///   taken whole, its own open request records, leg-id space and exempt
+///   ledger entries carried into it — a vector is never taken without the
+///   body it counts.
 ///
 /// Copies that diverged end the call cleanly from here ([`end_diverged`]).
 pub(in crate::router) async fn meet_live(
@@ -91,7 +91,6 @@ pub(in crate::router) async fn meet_live(
         }
     }
     let by = &ctx.relay_owner;
-    let both = standing(live, &incoming) == Some(Containment::Both);
     match met {
         Met::Held(kept) => {
             if let FlushDirection::Reverse = direction {
@@ -106,12 +105,10 @@ pub(in crate::router) async fn meet_live(
             FlushDirection::Forward if covers(&incoming, live, by) => {
                 release_call(ctx, call_ref, ReleaseKind::StandDown).await;
             }
-            FlushDirection::Forward if both => {
-                keep(ctx, live, live.clone().merge_exempt(&incoming));
-            }
             FlushDirection::Forward => {
                 let Enveloped { call: taken, topology } = taken;
-                let mut taken = own_records(taken, &live.call, by);
+                let taken = own_records(taken, &live.call, by);
+                let mut taken = with_own_running(taken, &live.call);
                 resync_timers(ctx, call_ref, &live.call, &mut taken, now_ms).await;
                 ctx.state.update_enveloped(Enveloped::new(taken, topology));
             }

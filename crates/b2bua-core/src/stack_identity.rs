@@ -95,6 +95,27 @@ pub fn build_call_via(opts: &StackIdentityOpts, branch: String) -> Via {
     via
 }
 
+/// This node's Via, at `local_ip:local_port` on `branch`, for a request of the
+/// call and leg another of the stack's Vias names — the one a final for a
+/// call no node holds rides (ADR-0055 §4): the call, leg, incarnation and
+/// emergency marks `via` carries, decoded and stamped again, no other owner
+/// and no via-extension. `None` when `via` names no call.
+pub fn call_via_of(via: &Via, local_ip: &str, local_port: u16, branch: String) -> Option<Via> {
+    let decoded = |name: &str| via.param(name).and_then(ParamValue::as_str).map(decode_param);
+    let (call_ref, leg, incarnation_mark) = (decoded("cr")?, decoded("lg")?, decoded("ci")?);
+    let opts = StackIdentityOpts {
+        local_ip,
+        local_port,
+        call_ref: &call_ref,
+        leg: &leg,
+        incarnation_mark: &incarnation_mark,
+        is_emergency: via.param("em").is_some(),
+        other_owner: None,
+        request: None,
+    };
+    Some(build_call_via(&opts, branch))
+}
+
 /// The via-extension `via` carries on a response to a `method` request, when
 /// its signature verifies under `key` for the call, leg, incarnation and
 /// branch the Via names; `None` without a key, an extension, or a signature

@@ -552,6 +552,51 @@ async fn the_straggler_bye_continues_its_forks_own_sequence() {
     let _report = h.finish().await;
 }
 
+/// A fork that answers after the call ended and its record was released is
+/// still a 2xx our INVITE drew: the INVITE's transaction, orphaned by the
+/// release (ADR-0034), ACKs it and BYEs its dialog (RFC 3261 §13.2.2.4).
+#[tokio::test(start_paused = true)]
+async fn a_fork_answering_after_the_call_was_released_is_acked_and_byed() {
+    let h = Harness::new("b2bua-fork-straggler-after-release");
+    let alice = h.agent("alice", ALICE).await;
+    let bob = h.agent("bob", BOB).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 6062).start(&h, "b2bua", B2BUA).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").with_to_tag(WINNER).await;
+    call.expect(180).await;
+    uas.respond(180, "Ringing").with_to_tag(STRAGGLER).await;
+    call.expect(180).await;
+    uas.adopt_to_tag(WINNER);
+    uas.respond(200, "OK").with_sdp(ANSWER_WINNER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+
+    uas.respond(200, "OK").with_to_tag(STRAGGLER).with_sdp(ANSWER_STRAGGLER).await;
+    let ack = bob.receive("ACK").await;
+    assert_eq!(ack.request().to().tag(), Some(STRAGGLER), "the ACK names the late fork");
+    let mut late_bye = bob.receive("BYE").await;
+    assert_eq!(late_bye.request().to().tag(), Some(STRAGGLER), "the BYE ends the late fork");
+    late_bye.respond(200, "OK").await;
+    for _ in 0..5 {
+        h.advance(Duration::from_millis(100)).await;
+    }
+
+    b2bua.assert_fully_reaped();
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    assert_eq!(b2bua.cdr_records().len(), 1, "one CDR for the one call");
+    alice.drain().await;
+    bob.drain().await;
+    let _report = h.finish().await;
+}
+
 /// Datagrams the SUT put on the wire toward bob carrying `tag` in their To.
 fn datagrams_to_bob_tagged(h: &Harness, b2bua: &B2buaSut, tag: &str) -> usize {
     h.wire_entries()

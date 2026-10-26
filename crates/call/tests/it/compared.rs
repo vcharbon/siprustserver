@@ -146,3 +146,51 @@ fn a_merge_keeps_the_container_and_raises_the_exempt_fields() {
     assert_eq!(merged.timer_generation, 40);
     assert_eq!(merged.callback_context, container.callback_context, "a compared field");
 }
+
+/// `event` at `timestamp`.
+fn at(mut event: CdrEvent, timestamp: i64) -> CdrEvent {
+    event.timestamp = timestamp;
+    event
+}
+
+/// An event both copies hold, read through two clock frames a few
+/// milliseconds apart, is one event; one the other copy alone holds is
+/// added, even a near twin of an event both hold (ADR-0055 §9).
+#[test]
+fn the_union_counts_an_event_both_copies_hold_once_across_clock_frames() {
+    let mut container = call();
+    container.cdr_events = vec![at(bye_event("a"), 1_000)];
+    container.a_leg.messages.entries = vec![entry(1)];
+    let mut other = call();
+    other.cdr_events = vec![at(bye_event("a"), 1_900), at(bye_event("a"), 1_003)];
+    let mut skewed = entry(1);
+    skewed.at_ms += 4;
+    other.a_leg.messages.entries = vec![skewed];
+
+    let merged = merge_exempt(container, &other);
+    let instants: Vec<i64> = merged.cdr_events.iter().map(|e| e.timestamp).collect();
+    assert_eq!(instants, [1_000, 1_900], "the shared event once, the other's own added");
+    assert_eq!(merged.a_leg.messages.entries.len(), 1, "the shared entry once");
+}
+
+/// Two forks' provisionals on one leg, both copies holding both, the other
+/// copy's read half a second off: each pairs with its own, none is doubled.
+#[test]
+fn provisionals_of_two_forks_pair_in_instant_order() {
+    let ringing = |timestamp| CdrEvent {
+        event_type: CdrEventType::Provisional,
+        timestamp,
+        leg_id: "b-1".into(),
+        status_code: Some(180),
+        reason: None,
+        decision_ordinal: 0,
+    };
+    let mut container = call();
+    container.cdr_events = vec![ringing(0), ringing(900)];
+    let mut other = call();
+    other.cdr_events = vec![ringing(500), ringing(1_400)];
+
+    let merged = merge_exempt(container, &other);
+    let instants: Vec<i64> = merged.cdr_events.iter().map(|e| e.timestamp).collect();
+    assert_eq!(instants, [0, 900], "two provisionals, as each copy holds");
+}

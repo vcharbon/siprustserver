@@ -21,6 +21,18 @@ async fn put_body(
     mode: ApplyMode,
     body: Arc<[u8]>,
 ) -> ApplyOutcome {
+    put_from(p, partition, mode, body, 0).await
+}
+
+/// [`put_body`], its instants written on a clock reading `origin_now_ms`
+/// when the frame left.
+async fn put_from(
+    p: &Puller,
+    partition: Partition,
+    mode: ApplyMode,
+    body: Arc<[u8]>,
+    origin_now_ms: i64,
+) -> ApplyOutcome {
     let copy = envelope::decode(&call::MsgpackCodec::new(), &body).expect("decodes");
     let indexes = call::call_index_keys(&copy.call);
     let (gen, bgen) = copy.topology.expect("replicated").vector();
@@ -31,7 +43,7 @@ async fn put_body(
         gen,
         bgen,
         60_000,
-        0,
+        origin_now_ms,
         &indexes,
         Some(body),
         false,
@@ -156,4 +168,61 @@ async fn a_kept_element_keeps_its_own_index_keys() {
     let key = call::index_key::callback_key("kept-ctx");
     let resolved = store.get_index(&key).await.expect("the index reads");
     assert_eq!(resolved.as_deref(), Some("w0|split|t"), "the Element's own key stays");
+}
+
+/// `body` as a node whose clock reads `offset_ms` off this one's wrote it,
+/// with one more provisional, at `extra_at` on this node's clock, that only
+/// it holds.
+fn written_on(body: Arc<[u8]>, offset_ms: i64, extra_at: i64) -> Arc<[u8]> {
+    let codec = call::MsgpackCodec::new();
+    let mut copy = envelope::decode(&codec, &body).expect("decodes");
+    copy.call.cdr_events.push(call::CdrEvent {
+        event_type: call::CdrEventType::Provisional,
+        timestamp: extra_at,
+        leg_id: "a".into(),
+        status_code: Some(180),
+        reason: Some("only-here".into()),
+        decision_ordinal: 0,
+    });
+    call::helpers::shift_instants(&mut copy.call, offset_ms);
+    Arc::from(envelope::encode(&codec, copy.topology.as_ref(), &copy.call).unwrap())
+}
+
+/// The CDR events of `copy`: how many record the INVITE received, and the
+/// instant of the provisional only one copy held.
+fn events(copy: &Enveloped) -> (usize, Option<i64>) {
+    let events = &copy.call.cdr_events;
+    let received =
+        events.iter().filter(|e| e.event_type == call::CdrEventType::InviteReceived).count();
+    let only = events.iter().find(|e| e.reason.as_deref() == Some("only-here"));
+    (received, only.map(|e| e.timestamp))
+}
+
+/// Two copies meeting in the store were written on clocks 5 s apart: the
+/// copy kept states every instant in its own frame, the other's union
+/// included, so an event both hold is held once (ADR-0055 §9).
+#[tokio::test(start_paused = true)]
+async fn copies_written_on_skewed_clocks_meet_in_one_frame() {
+    use call::CallModelState::Active;
+    // The Element, written 5 s behind; the primary's write contains it.
+    let (p, store, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
+    let element = written_on(body_at(None, Active, (5, 3), (5, 2)), -5_000, 1_000);
+    let outcome = put_from(&p, Partition::Bak, ApplyMode::Forward, element, -5_000).await;
+    assert_eq!(outcome, ApplyOutcome::Applied);
+    let answered = body_at(Some(200), Active, (6, 2), (6, 2));
+    assert_eq!(forward(&p, answered).await, ApplyOutcome::Applied, "it contains the Element");
+    let taken = stored(&store, PartitionRole::Backup).await;
+    assert_eq!(events(&taken), (1, Some(1_000)), "the Element's events in the primary's frame");
+
+    // The Element contains a write made 5 s behind.
+    let (p, store, _, _) = backup_puller(crate::capacity::BackupCeilings::default());
+    assert_eq!(
+        forward(&p, body_at(Some(200), Active, (5, 3), (5, 3))).await,
+        ApplyOutcome::Applied
+    );
+    let keepalive = written_on(body_at(None, Active, (6, 2), (5, 2)), -5_000, 1_000);
+    let outcome = put_from(&p, Partition::Bak, ApplyMode::Forward, keepalive, -5_000).await;
+    assert_eq!(outcome, ApplyOutcome::Refused, "the Element contains it");
+    let kept = stored(&store, PartitionRole::Backup).await;
+    assert_eq!(events(&kept), (1, Some(1_000)), "the write's events in the Element's frame");
 }

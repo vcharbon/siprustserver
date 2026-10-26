@@ -1,7 +1,8 @@
 //! A response to a request of ours for a call this node does not hold,
 //! answered as an unknown dialog would be (ADR-0055 §4) when its via-extension
 //! verifies (ADR-0055 §12): a 2xx to an INVITE is ACKed and its dialog BYEd
-//! from the 2xx's own headers (RFC 3261 §13.2.2.4, §15.1.1), an offer the 2xx
+//! from the 2xx's own headers (RFC 3261 §13.2.2.4, §15.1.1), on this node's
+//! Via whichever node sent the INVITE (§8.1.1.7), an offer the 2xx
 //! makes to an INVITE that carried none answered with every stream rejected
 //! (RFC 3264 §4, §6); a non-2xx final to an INVITE is ACKed hop by hop
 //! (§17.1.1.3) at the Request-URI the extension states. A BYE into a dialog
@@ -17,7 +18,7 @@ use sip_message::{Method, SipRequest, SipResponse, SipStr};
 use crate::config::B2buaConfig;
 use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance};
 use crate::rules::relay::{apply_b_leg_egress, target_dest};
-use crate::stack_identity::read_via_extension;
+use crate::stack_identity::{call_via_of, read_via_extension};
 
 /// What this node sends for `resp`, a response to a request of ours whose
 /// call it does not hold, received from `src` at `now_ms`. `ids` draws the
@@ -63,9 +64,15 @@ fn answer_2xx(
     ids: &mut TurnIds,
 ) -> Vec<OutboundSipEffect> {
     let next = resp.cseq().seq().saturating_add(1);
+    let hop = |branch: String| {
+        call_via_of(resp.top_via(), &config.sip_local_ip, config.sip_local_port, branch)
+    };
+    let (Some(ack_hop), Some(bye_hop)) = (hop(ids.new_branch()), hop(ids.new_branch())) else {
+        return Vec::new();
+    };
     let (Ok(ack), Ok(bye)) = (
-        generate_ack_for_unheld_2xx(resp, &ids.new_branch(), answer),
-        generate_bye_for_unheld_2xx(resp, next, &ids.new_branch()),
+        generate_ack_for_unheld_2xx(resp, ack_hop, answer),
+        generate_bye_for_unheld_2xx(resp, next, bye_hop),
     ) else {
         return Vec::new();
     };
