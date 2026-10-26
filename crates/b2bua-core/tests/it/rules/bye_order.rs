@@ -110,3 +110,34 @@ fn a_services_bye_to_the_caller_waits_for_her_ack() {
         "the service's lines ride the held BYE: {headers:?}"
     );
 }
+
+/// The same BYE followed, as every service sends it, by the leg's end as
+/// this stack's BYE sent: the BYE still waits behind her 2xx, whose ladder
+/// stays armed, and leaves on her ACK (RFC 3261 §15).
+#[test]
+fn a_services_bye_ending_the_callers_leg_leaves_on_her_ack() {
+    let mut call = call_with_retained_answered_2xx();
+    *call.a_leg.invite_final_sent_mut() = Some(200);
+    call::testkit::stage_leg(&mut call.a_leg, LegState::Confirmed);
+    let actions = [
+        RuleAction::SendRequestToLeg {
+            leg_id: "a".into(),
+            method: "BYE".into(),
+            body: None,
+            headers: vec![],
+        },
+        RuleAction::TerminateLeg { leg_id: "a".into(), end: LegEnd::OurByeSent },
+    ];
+    let result = execute_on(&call, &actions);
+    let held = result.call.a_leg.dialogs.iter().find_map(|d| d.answered_invite.as_ref());
+    let held = held.and_then(|r| r.invite.as_ref()).and_then(|x| x.bye_behind_ack.as_ref());
+    assert!(held.is_some(), "the BYE waits on her 2xx's record");
+    let ladder = TimerKey::obligation(TimerType::RepeatGiveUp, answered_obligation());
+    assert!(result.call.timers.iter().any(|t| t.key == ladder), "her 2xx's give-up stays armed");
+
+    let (_, _, fx) = super::discharge_ack(&result.call, "a");
+    let byes = fx.outbound.iter().filter(
+        |e| matches!(&e.body, OutboundBody::Request(r) if *r.method() == sip_message::Method::Bye),
+    );
+    assert_eq!(byes.count(), 1, "her ACK releases the BYE");
+}

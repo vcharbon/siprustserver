@@ -133,10 +133,11 @@ What differs by method is one table that knows no HA:
 - BYE: ends the dialog; it is queued behind an owed ACK and behind an own NOTIFY
   in flight (RFC 3261 §15).
 
-A held request record lets a service answer a received request on a later turn.
-A held non-INVITE carries a deadline under the originator's Timer F, 64·T1,
-with a margin, and is answered by the platform when it passes (RFC 4320 §4.1,
-RFC 5057 §5.1). A held re-INVITE owes a provisional (RFC 3261 §13.3.1.1).
+A held request record lets a service answer a received non-INVITE request on a
+later turn. It carries a deadline under the originator's Timer F, 64·T1, with
+a margin, and is answered by the platform when it passes (RFC 4320 §4.1,
+RFC 5057 §5.1). An INVITE is never held: one a service asks to hold is answered
+500 at once.
 
 Takeover seeds a transaction from every request record, any method, client or
 server, through one path. A seeded client transaction retransmits the request

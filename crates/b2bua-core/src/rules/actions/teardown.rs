@@ -250,9 +250,14 @@ impl ActionExecutor<'_> {
         leg_id: &str,
         end: LegEnd,
     ) {
-        // The terminal leg's ladders die with it (RFC 3262 §3), and the
+        // The terminal leg's ladders die with it (RFC 3262 §3), short of the
+        // 2xx a BYE of this stack waits behind (RFC 3261 §15), and the
         // requests it holds are settled by its end (§8.2.6, §15.1.2).
-        self.retire(call, fx, Scope::Leg(leg_id));
+        if end == LegEnd::OurByeSent {
+            self.retire_byed_leg(call, fx, leg_id);
+        } else {
+            self.retire(call, fx, Scope::Leg(leg_id));
+        }
         self.settle_at_leg_end(call, fx, leg_id);
         match end {
             LegEnd::InviteRejected => match rejecting_final(ctx, leg_id) {

@@ -162,8 +162,8 @@ fn answer_a_leg_if_unanswered(
 /// Answer the caller's INVITE `503` when it carries no final yet and a
 /// snapshot to answer exists, recording it on the CDR: the funnel above, and
 /// a teardown whose release waits on a callee's CANCEL (the caller is owed
-/// nothing from it). Her leg's end follows her final: every request relayed
-/// toward her or held on her leg is answered (ADR-0055 §2).
+/// nothing from it). Once her final left, every request relayed toward her
+/// or held on her leg is answered (ADR-0055 §2).
 pub(crate) fn answer_unanswered_caller(
     call: &mut Call,
     effects: &mut HandlerEffects,

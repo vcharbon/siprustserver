@@ -6,7 +6,8 @@
 
 use call::helpers::{caller_dialog, record_invite_final, update_leg};
 use call::{Call, DialogState, Repeated, RetainedEmission};
-use sip_message::{HeaderName, Method, SipRequest, SipResponse};
+use sip_message::header::{HeaderValue, Via};
+use sip_message::{HeaderName, Method, SipRequest, SipResponse, SipStr};
 
 use crate::effects::{CriticalStateEffect, HandlerEffects, OutboundBody, Provenance};
 use crate::rules::relay;
@@ -237,12 +238,12 @@ impl ActionExecutor<'_> {
     }
 
     /// An ACK naming an INVITE the record holds unanswered: another owner
-    /// answered it, 2xx unless the caller's ACK rides her INVITE's branch.
-    /// Answered 2xx, the caller's INVITE is recorded answered and the
-    /// dialog the ACK names confirmed under its tags; a re-INVITE's open
-    /// round is taken as answered. The INVITE's server transaction here is
-    /// relinquished, so no final follows the 2xx; nothing is sent for the ACK
-    /// (RFC 3261 §17.1.1.3); the teardown BYEs the dialog.
+    /// answered it, a non-2xx when the ACK rides that INVITE's transaction
+    /// ([`acks_a_refusal`]), else a 2xx. Answered 2xx, the caller's INVITE is
+    /// recorded answered and the dialog the ACK names confirmed under its
+    /// tags, which the teardown BYEs. The INVITE's server transaction here is
+    /// relinquished, so no final follows the other owner's; nothing is sent
+    /// for the ACK (RFC 3261 §17.1.1.3).
     fn take_evidence_ack(
         &mut self,
         call: &mut Call,
@@ -258,36 +259,34 @@ impl ActionExecutor<'_> {
             .filter(|_| leg_id == call.a_leg.leg_id && cseq == i64::from(call.a_leg_invite.cseq));
         if let Some(tag) = caller_ack {
             match self.caller_invite(call) {
-                // The ACK of a non-2xx rides the INVITE's own branch (RFC 3261
-                // §17.1.1.3): her INVITE took a final that confirmed no dialog.
-                Some(invite) if invite.top_via().branch() == req.top_via().branch() => {
+                // Her INVITE took a final that confirmed no dialog.
+                Some(invite) if acks_a_refusal(invite.top_via(), req) => {
                     self.take_caller_refused(call, fx, leg_id, &invite);
                 }
                 _ => self.take_caller_answered(call, fx, leg_id, tag),
             }
             return;
         }
-        // A re-INVITE whose round the record holds open: its 2xx left with
+        // A re-INVITE whose round the record holds open: its final left with
         // another owner, so the teardown answers it nothing. A relayed one's
         // 2xx came from the peer, which is owed this very ACK (RFC 3261
         // §13.2.2.4): it goes on at the relayed INVITE's number, retained for
-        // a repeat of that 2xx.
-        let mut answered = Vec::new();
-        let mut owed_ack = None;
-        if let (Some(peer), Some(peer_leg)) = (
-            ctx.peer_dialog().map(call::Dialog::id),
-            call::helpers::get_peer(call, leg_id).map(str::to_string),
-        ) {
-            let relay = call::helpers::find_leg(call, &peer_leg)
-                .and_then(|leg| leg.dialogs.by_tags(&peer.our_tag, &peer.peer_tag))
-                .and_then(call::helpers::invite_relay)
-                .filter(|r| r.inbound_cseq == cseq);
-            if let Some(relay) = relay {
-                answered.push(relay.clone());
-                owed_ack = Some(peer_leg);
-            }
-        }
-        if let Some(peer_leg) = owed_ack {
+        // a repeat of that 2xx. A non-2xx's ACK owes the peer nothing: its
+        // own was sent hop by hop (§17.1.1.3).
+        let Some(peer) = ctx.peer_dialog().map(call::Dialog::id) else { return };
+        let Some(peer_leg) = call::helpers::get_peer(call, leg_id).map(str::to_string) else {
+            return;
+        };
+        let Some(relay) = call::helpers::find_leg(call, &peer_leg)
+            .and_then(|leg| leg.dialogs.by_tags(&peer.our_tag, &peer.peer_tag))
+            .and_then(call::helpers::invite_relay)
+            .filter(|r| r.inbound_cseq == cseq)
+            .cloned()
+        else {
+            return;
+        };
+        let via = relay.source_vias.first().and_then(|v| Via::parse(&SipStr::owned(v)).ok());
+        if !via.as_ref().is_some_and(|via| acks_a_refusal(via, req)) {
             let content_type = req.raw(HeaderName::ContentType).next().and_then(relay::media_type);
             self.ack_leg(
                 call,
@@ -300,27 +299,17 @@ impl ActionExecutor<'_> {
                 relay::Author::Leg(ctx.source_leg_id),
             );
         }
-        if let Some(id) = ctx.dialog().map(call::Dialog::id) {
-            *call = update_leg(call.clone(), leg_id, |leg| {
-                if let Some(d) = leg.dialogs.by_tags_mut(&id.our_tag, &id.peer_tag) {
-                    let held = |r: &call::RequestRecord| {
-                        r.is_invite() && r.inbound_cseq == cseq && r.is_held()
-                    };
-                    answered.extend(d.requests.iter().filter(|r| held(r)).cloned());
-                    d.requests.retain(|r| !held(r));
-                }
-            });
-        }
-        for record in answered {
-            let via = record.source_vias.first().and_then(|v| {
-                <sip_message::header::Via as sip_message::header::HeaderValue>::parse(
-                    &sip_message::SipStr::owned(v),
-                )
-                .ok()
-            });
-            if let Some(via) = via {
-                fx.critical.push(CriticalStateEffect::RelinquishAnsweredInvite { via });
-            }
+        if let Some(via) = via {
+            fx.critical.push(CriticalStateEffect::RelinquishAnsweredInvite { via });
         }
     }
+}
+
+/// Whether `ack` acknowledges a non-2xx to the INVITE whose top Via is `via`:
+/// it rides that INVITE's own transaction, an RFC 3261 branch from the same
+/// sent-by (§17.1.1.3, §17.2.3). The ACK of a 2xx is a transaction of its
+/// own (§13.2.2.4).
+fn acks_a_refusal(via: &Via, ack: &SipRequest) -> bool {
+    let top = ack.top_via();
+    via.is_rfc3261_branch() && top.branch() == via.branch() && top.sent_by() == via.sent_by()
 }

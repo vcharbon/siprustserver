@@ -154,7 +154,7 @@ fn reused_cseq(dialog: &call::Dialog, cseq: i64, branch: Option<&str>) -> bool {
 /// Trigger 3: an ACK naming a dialog by its To-tag and an INVITE of the leg
 /// it arrives on for which the record holds no final sent — the caller's
 /// INVITE unanswered, a re-INVITE the record never saw, or one it holds open
-/// (relayed and untaken, or held).
+/// (relayed and untaken).
 fn ack_of_unanswered_invite(ctx: &RuleContext) -> bool {
     let (Some(req), Some(leg)) = (ctx.request(), ctx.source_leg()) else { return false };
     let cseq = i64::from(req.cseq().seq());
@@ -169,12 +169,7 @@ fn ack_of_unanswered_invite(ctx: &RuleContext) -> bool {
     if dialog.peer_cseq.is_none_or(|last| cseq > last) {
         return true;
     }
-    held_invite(dialog, cseq) || relayed_open(ctx, cseq)
-}
-
-/// Whether `dialog` holds the INVITE of CSeq `cseq` it received unanswered.
-fn held_invite(dialog: &call::Dialog, cseq: i64) -> bool {
-    dialog.requests.iter().any(|r| r.is_invite() && r.inbound_cseq == cseq && r.is_held())
+    relayed_open(ctx, cseq)
 }
 
 /// Whether the INVITE of CSeq `cseq` the source leg's peer sent was relayed
