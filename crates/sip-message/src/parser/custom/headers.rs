@@ -14,7 +14,8 @@ use super::structured_headers::split_top_level_commas;
 use crate::char_class::is_token_char;
 use crate::control_bytes::{bare_control_byte, has_comments};
 use crate::error::SipParseError;
-use crate::header::HeaderName;
+use crate::header::{HeaderId, HeaderName};
+use crate::header_table::{HeaderTable, Ids};
 use crate::parser::SipParserLimits;
 use crate::sip_str::{SharedText, SipStr};
 use crate::types::SipHeader;
@@ -75,8 +76,9 @@ struct Singletons {
 }
 
 pub struct ParsedHeaders {
-    /// The lines that passed, in wire order.
-    pub headers: Vec<SipHeader>,
+    /// The lines that passed, in wire order, each with the header it was
+    /// classified as.
+    pub headers: HeaderTable,
     /// The declared `Content-Length`; `None` when the block states none, which
     /// the transport framing then resolves (RFC 3261 §18.3).
     pub content_length: Option<u64>,
@@ -164,14 +166,11 @@ pub fn parse_headers(
     lines: usize,
     limits: &SipParserLimits,
 ) -> Result<ParsedHeaders, SipParseError> {
-    let mut parsed = ParsedHeaders {
-        // Size the list up front from the block's line count — growing it from
-        // empty cost one reallocation per doubling, several per message.
-        headers: Vec::with_capacity(lines),
-        content_length: None,
-        refusal: None,
-        echoed_line_refused: false,
-    };
+    // Size the list up front from the block's line count — growing it from
+    // empty cost one reallocation per doubling, several per message.
+    let mut kept = Kept { lines: Vec::with_capacity(lines), ids: Ids::new() };
+    let mut refusal: Option<SipParseError> = None;
+    let mut echoed_line_refused = false;
     let mut singletons = Singletons::default();
 
     loop {
@@ -182,18 +181,28 @@ pub fn parse_headers(
         if s.at_end() {
             break;
         }
-        match parse_line(s, text, limits, &mut parsed, &mut singletons) {
+        match parse_line(s, text, limits, &mut kept, &mut singletons) {
             Ok(Line::Kept) => {}
             Ok(Line::Refused { error, echoed }) => {
-                parsed.echoed_line_refused |= echoed;
-                parsed.refusal.get_or_insert(error);
+                echoed_line_refused |= echoed;
+                refusal.get_or_insert(error);
             }
-            Err(limit) => return Err(parsed.refusal.unwrap_or(limit)),
+            Err(limit) => return Err(refusal.unwrap_or(limit)),
         }
     }
 
-    parsed.content_length = singletons.content_length;
-    Ok(parsed)
+    Ok(ParsedHeaders {
+        headers: HeaderTable::classified(kept.lines, kept.ids),
+        content_length: singletons.content_length,
+        refusal,
+        echoed_line_refused,
+    })
+}
+
+/// The lines kept so far and the header each was classified as.
+struct Kept {
+    lines: Vec<SipHeader>,
+    ids: Ids,
 }
 
 /// The rest of a refused line consumed, folds included, so the split resumes
@@ -209,7 +218,7 @@ fn parse_line(
     s: &mut Scanner,
     text: &SharedText,
     limits: &SipParserLimits,
-    parsed: &mut ParsedHeaders,
+    kept: &mut Kept,
     singletons: &mut Singletons,
 ) -> Result<Line, SipParseError> {
     let image = text.as_str();
@@ -236,7 +245,8 @@ fn parse_line(
     // Header identity is resolved once, here, from bytes the scanner has just
     // walked; every gate below dispatches on it instead of re-probing the name
     // against a candidate list.
-    let known = HeaderName::known(&name);
+    let id = HeaderId::of(&name);
+    let known = id.map(HeaderId::name);
     if let Err(error) = s.expect(COLON) {
         return refused(s, error, known.as_ref().is_some_and(is_echoed));
     }
@@ -278,7 +288,8 @@ fn parse_line(
         }
     }
 
-    parsed.headers.push(SipHeader { name, value: trimmed_value });
+    kept.lines.push(SipHeader { name, value: trimmed_value });
+    kept.ids.push(id);
     Ok(Line::Kept)
 }
 

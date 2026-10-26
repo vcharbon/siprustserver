@@ -21,6 +21,7 @@ use bytes::Bytes;
 
 use crate::draft::{RequestLine, StatusLine};
 use crate::header;
+use crate::header_table::HeaderTable;
 use crate::method::Method;
 use crate::sip_str::SipStr;
 
@@ -170,8 +171,9 @@ impl CoreHeaders {
 /// Everything a request and a response share, written once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageCore {
-    /// Full header list in wire order — THE source of truth.
-    pub(crate) headers: Vec<SipHeader>,
+    /// Full header list in wire order, each line classified — THE source of
+    /// truth.
+    pub(crate) headers: HeaderTable,
     pub(crate) core: CoreHeaders,
     pub(crate) optional: OptionalHeaders,
     /// Raw body bytes — opaque to the B2BUA. A slice of the image on a parsed
@@ -183,7 +185,7 @@ pub struct MessageCore {
 
 impl MessageCore {
     pub(crate) fn new(
-        headers: Vec<SipHeader>,
+        headers: HeaderTable,
         core: CoreHeaders,
         optional: OptionalHeaders,
         body: Bytes,
@@ -236,7 +238,7 @@ impl SipMessage {
     }
 
     pub fn headers(&self) -> &[SipHeader] {
-        &self.core().headers
+        self.core().headers.lines()
     }
 
     pub fn body(&self) -> &Bytes {

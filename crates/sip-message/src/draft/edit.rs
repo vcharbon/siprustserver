@@ -11,7 +11,8 @@
 use bytes::Bytes;
 
 use crate::error::SipParseError;
-use crate::header::{ContentLength, HeaderName, HeaderValue, MediaType, Via};
+use crate::header::{ContentLength, Folding, HeaderName, HeaderValue, MediaType, Via};
+use crate::header_table::HeaderTable;
 use crate::sip_str::{SharedText, SipStr};
 use crate::types::SipHeader;
 use crate::write_check::WriteRefusal;
@@ -90,26 +91,40 @@ impl<S: StartKind> Draft<S> {
     }
 
     pub fn has(&self, name: &HeaderName) -> bool {
-        self.entries.iter().any(|e| e.is(name))
+        let key = name.key();
+        self.entries.iter().any(|e| e.is_key(&key))
     }
 
     /// Every line of `name` as text, in wire order.
     pub fn raw(&self, name: &HeaderName) -> Vec<SipStr> {
-        self.entries.iter().filter(|e| e.is(name)).map(Entry::text).collect()
+        let key = name.key();
+        self.entries.iter().filter(|e| e.is_key(&key)).map(Entry::text).collect()
     }
 
     /// Every value of `H` the draft carries.
     pub fn values<H: HeaderValue>(&self) -> Result<Vec<H>, SipParseError> {
         let name = H::header_name();
+        let key = name.key();
         let mut values = Vec::new();
-        for entry in self.entries.iter().filter(|e| e.is(&name)) {
+        for entry in self.entries.iter().filter(|e| e.is_key(&key)) {
             values.extend(entry.read::<H>()?);
         }
         Ok(values)
     }
 
     /// The single logical value of `H`, or `None` when the draft carries none.
+    /// A header whose reader sees only the first value reads only its first
+    /// line, as on a message.
     pub fn header<H: HeaderValue>(&self) -> Option<Result<H, SipParseError>> {
+        if matches!(H::folding(), Folding::Single | Folding::Opaque) {
+            let name = H::header_name();
+            let key = name.key();
+            let first = self.entries.iter().find(|e| e.is_key(&key))?;
+            return match first.read::<H>() {
+                Err(e) => Some(Err(e)),
+                Ok(values) => H::combine(values).map(Ok),
+            };
+        }
         match self.values::<H>() {
             Err(e) => Some(Err(e)),
             Ok(values) if values.is_empty() => None,
@@ -149,7 +164,8 @@ impl<S: StartKind> Draft<S> {
     /// edit; [`list`](Self::list) is the way in when the existing values matter.
     pub fn prepend(mut self, value: impl HeaderValue) -> Self {
         let name = value.name();
-        let at = self.entries.iter().position(|e| e.is(&name)).unwrap_or(self.entries.len());
+        let key = name.key();
+        let at = self.entries.iter().position(|e| e.is_key(&key)).unwrap_or(self.entries.len());
         insert_entry(&mut self.entries, at, Entry::typed(value));
         self
     }
@@ -177,16 +193,18 @@ impl<S: StartKind> Draft<S> {
     /// wire position the header already had.
     pub fn set(mut self, value: impl HeaderValue) -> Self {
         let name = value.name();
-        let Some(at) = self.entries.iter().position(|e| e.is(&name)) else {
+        let key = name.key();
+        let Some(at) = self.entries.iter().position(|e| e.is_key(&key)) else {
             return self.push(value);
         };
-        self.entries.retain(|e| !e.is(&name));
+        self.entries.retain(|e| !e.is_key(&key));
         insert_entry(&mut self.entries, at, Entry::typed(value));
         self
     }
 
     pub fn remove(mut self, name: &HeaderName) -> Self {
-        self.entries.retain(|e| !e.is(name));
+        let key = name.key();
+        self.entries.retain(|e| !e.is_key(&key));
         self
     }
 
@@ -212,16 +230,17 @@ impl<S: StartKind> Draft<S> {
         f: impl FnOnce(HeaderList<H>) -> HeaderList<H>,
     ) -> Result<Self, SipParseError> {
         let name = H::header_name();
+        let key = name.key();
         let mut values = Vec::new();
-        for entry in self.entries.iter().filter(|e| e.is(&name)) {
+        for entry in self.entries.iter().filter(|e| e.is_key(&key)) {
             values.extend(entry.read::<H>()?);
         }
 
         let updated = f(HeaderList::new(values)).into_vec();
         // The lines above the first one of this header are none of it, so the
         // first one's position survives taking them all out.
-        let at = self.entries.iter().position(|e| e.is(&name)).unwrap_or(self.entries.len());
-        self.entries.retain(|e| !e.is(&name));
+        let at = self.entries.iter().position(|e| e.is_key(&key)).unwrap_or(self.entries.len());
+        self.entries.retain(|e| !e.is_key(&key));
         for (offset, value) in updated.into_iter().enumerate() {
             insert_entry(&mut self.entries, at + offset, Entry::typed(value));
         }
@@ -259,7 +278,9 @@ impl<S: StartKind> Draft<S> {
         f: impl FnOnce(HeaderList<H>) -> HeaderList<H>,
     ) -> Result<Self, SipParseError> {
         let name = H::header_name();
-        let Some((at, entry)) = self.entries.iter().enumerate().find(|(_, e)| e.is(&name)) else {
+        let key = name.key();
+        let Some((at, entry)) = self.entries.iter().enumerate().find(|(_, e)| e.is_key(&key))
+        else {
             return Ok(self);
         };
         let values = entry.read::<H>()?;
@@ -316,7 +337,7 @@ impl<S: StartKind> Draft<S> {
             ))
         };
         let image = decode(rendered.bytes.get(..rendered.body_at).ok_or_else(outside)?);
-        let headers: Vec<SipHeader> = rendered
+        let lines: Vec<SipHeader> = rendered
             .headers
             .iter()
             .map(|(name, value)| SipHeader {
@@ -324,6 +345,8 @@ impl<S: StartKind> Draft<S> {
                 value: image.span(value.0, value.1),
             })
             .collect();
+        let ids = draft.entries.iter().map(|e| e.name().id()).collect();
+        let headers = HeaderTable::classified(lines, ids);
         let raw = Bytes::from(rendered.bytes);
         let body = crate::checked::slice(&raw, rendered.body_at..raw.len()).ok_or_else(outside)?;
         S::assemble(draft.start, &image, rendered.start, headers, body, raw)

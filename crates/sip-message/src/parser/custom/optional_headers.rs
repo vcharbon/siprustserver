@@ -79,5 +79,5 @@ pub fn extract_optional_indexed(idx: &HeaderIndex) -> OptionalHeaders {
 /// Parse every optional structured header of a header list — the entry point
 /// for callers that hold no [`HeaderIndex`].
 pub fn extract_optional(headers: &[SipHeader]) -> OptionalHeaders {
-    extract_optional_indexed(&HeaderIndex::build(headers))
+    extract_optional_indexed(&HeaderIndex::of_lines(headers))
 }

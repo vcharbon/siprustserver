@@ -9,7 +9,7 @@
 use std::any::Any;
 
 use crate::error::SipParseError;
-use crate::header::{HeaderName, HeaderValue, Wire};
+use crate::header::{HeaderId, HeaderKey, HeaderName, HeaderValue, Wire};
 use crate::sip_str::SipStr;
 use crate::write_check::{self, WriteRefusal};
 
@@ -46,14 +46,28 @@ enum Value {
 /// One header line: a name and what it carries.
 #[derive(Debug)]
 pub struct Entry {
+    /// The header this line carries, classified once: an
+    /// [`Other`](HeaderName::Other) here never spells a known header.
     name: HeaderName,
+    /// The caller's own spelling of a known header — a compact form, an odd
+    /// casing — written instead of the canonical one.
+    spelling: Option<SipStr>,
     value: Value,
 }
 
 impl Entry {
-    /// An entry holding wire bytes. The value is NOT parsed or validated.
+    /// An entry holding wire bytes. The value is NOT parsed or validated. A
+    /// name given as [`Other`](HeaderName::Other) that spells a known header
+    /// is that header, written with the spelling given.
     pub fn raw(name: HeaderName, value: impl Into<SipStr>) -> Self {
-        Self { name, value: Value::Raw(value.into()) }
+        let (name, spelling) = classify(name);
+        Self { name, spelling, value: Value::Raw(value.into()) }
+    }
+
+    /// A raw entry for a line some message already classified as `id`.
+    pub(crate) fn classified_raw(id: Option<HeaderId>, wire: &SipStr, value: SipStr) -> Self {
+        let name = id.map_or_else(|| HeaderName::Other(wire.clone()), HeaderId::name);
+        Self { name, spelling: None, value: Value::Raw(value) }
     }
 
     /// A raw entry for a line stated from outside the stack, refused unless
@@ -66,17 +80,33 @@ impl Entry {
 
     /// An entry holding a typed value, named by that value's header.
     pub fn typed<H: HeaderValue>(value: H) -> Self {
-        Self { name: H::header_name(), value: Value::Typed(Box::new(value)) }
+        Self { name: H::header_name(), spelling: None, value: Value::Typed(Box::new(value)) }
     }
 
+    /// The header this line carries.
     pub fn name(&self) -> &HeaderName {
         &self.name
+    }
+
+    /// The name as this line writes it.
+    pub fn wire_name(&self) -> &str {
+        self.spelling.as_deref().unwrap_or_else(|| self.name.as_wire_str())
+    }
+
+    /// The caller's own spelling of a known header, where it kept one.
+    pub(crate) fn spelling(&self) -> Option<&SipStr> {
+        self.spelling.as_ref()
     }
 
     /// Whether this line carries `name`. An entry that kept a caller's own
     /// spelling still answers to the header it names.
     pub fn is(&self, name: &HeaderName) -> bool {
-        self.name.same_header(name)
+        self.is_key(&name.key())
+    }
+
+    /// Whether this line carries the header `key` names.
+    pub(crate) fn is_key(&self, key: &HeaderKey<'_>) -> bool {
+        key.is(self.name.id(), self.name.as_wire_str())
     }
 
     /// Whether this entry still holds untouched wire bytes.
@@ -122,7 +152,19 @@ impl Clone for Entry {
             Value::Raw(text) => Value::Raw(text.clone()),
             Value::Typed(value) => Value::Typed(value.clone_entry()),
         };
-        Self { name: self.name.clone(), value }
+        Self { name: self.name.clone(), spelling: self.spelling.clone(), value }
+    }
+}
+
+/// `name` as an entry holds it: a spelling of a known header becomes that
+/// header, the spelling kept to write it with.
+fn classify(name: HeaderName) -> (HeaderName, Option<SipStr>) {
+    match name {
+        HeaderName::Other(text) => match HeaderId::of(text.as_str()) {
+            Some(id) => (id.name(), Some(text)),
+            None => (HeaderName::Other(text), None),
+        },
+        known => (known, None),
     }
 }
 

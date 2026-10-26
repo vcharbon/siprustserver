@@ -9,7 +9,8 @@
 //! indexing a message allocates only for the multi-valued headers it actually
 //! carries.
 
-use crate::header::HeaderName;
+use crate::header::HeaderId;
+use crate::header_table::HeaderTable;
 use crate::sip_str::SipStr;
 use crate::types::SipHeader;
 
@@ -51,30 +52,40 @@ pub struct HeaderIndex<'a> {
 }
 
 impl<'a> HeaderIndex<'a> {
-    /// Walk `headers` once, filing each value under its name. Names the field
-    /// model does not read are skipped; compact forms file under their long
-    /// name (RFC 3261 §7.3.3).
-    pub fn build(headers: &'a [SipHeader]) -> Self {
+    /// Walk the classified lines of `headers` once, filing each value under
+    /// its header. Headers the field model does not read are skipped.
+    pub fn build(headers: &'a HeaderTable) -> Self {
+        Self::file(headers.classified_lines())
+    }
+
+    /// [`build`](Self::build) over lines no table classified yet: each is
+    /// classified here, once; compact forms file under their long name
+    /// (RFC 3261 §7.3.3).
+    pub fn of_lines(headers: &'a [SipHeader]) -> Self {
+        Self::file(headers.iter().map(|h| (HeaderId::of(&h.name), h)))
+    }
+
+    fn file(lines: impl Iterator<Item = (Option<HeaderId>, &'a SipHeader)>) -> Self {
         let mut idx = Self::default();
-        for header in headers {
-            let Some(name) = HeaderName::known(&header.name) else { continue };
+        for (id, header) in lines {
+            let Some(id) = id else { continue };
             let value = &header.value;
-            match name {
-                HeaderName::From => idx.from.record(value),
-                HeaderName::To => idx.to.record(value),
-                HeaderName::CallId => idx.call_id.record(value),
-                HeaderName::CSeq => idx.cseq.record(value),
-                HeaderName::Via => idx.via.push(value),
-                HeaderName::Contact => idx.contact.push(value),
-                HeaderName::Route => idx.route.push(value),
-                HeaderName::RecordRoute => idx.record_route.push(value),
-                HeaderName::PAssertedIdentity => idx.p_asserted_identity.push(value),
-                HeaderName::PPreferredIdentity => idx.p_preferred_identity.push(value),
-                HeaderName::Diversion => idx.diversion.push(value),
-                HeaderName::HistoryInfo => idx.history_info.push(value),
-                HeaderName::RemotePartyId => idx.remote_party_id.push(value),
-                HeaderName::RAck => idx.rack.record(value),
-                HeaderName::ReferTo => idx.refer_to.record(value),
+            match id {
+                HeaderId::From => idx.from.record(value),
+                HeaderId::To => idx.to.record(value),
+                HeaderId::CallId => idx.call_id.record(value),
+                HeaderId::CSeq => idx.cseq.record(value),
+                HeaderId::Via => idx.via.push(value),
+                HeaderId::Contact => idx.contact.push(value),
+                HeaderId::Route => idx.route.push(value),
+                HeaderId::RecordRoute => idx.record_route.push(value),
+                HeaderId::PAssertedIdentity => idx.p_asserted_identity.push(value),
+                HeaderId::PPreferredIdentity => idx.p_preferred_identity.push(value),
+                HeaderId::Diversion => idx.diversion.push(value),
+                HeaderId::HistoryInfo => idx.history_info.push(value),
+                HeaderId::RemotePartyId => idx.remote_party_id.push(value),
+                HeaderId::RAck => idx.rack.record(value),
+                HeaderId::ReferTo => idx.refer_to.record(value),
                 _ => {}
             }
         }
@@ -101,7 +112,7 @@ mod tests {
             header("CSeq", "1 INVITE"),
             header("X-Custom", "ignored"),
         ];
-        let idx = HeaderIndex::build(&headers);
+        let idx = HeaderIndex::of_lines(&headers);
         assert_eq!(idx.via.len(), 2, "compact Via files under Via");
         assert_eq!(idx.to.first.map(|v| v.as_str()), Some("<sip:b@h>"));
         assert_eq!(idx.from.count, 1);
@@ -112,7 +123,7 @@ mod tests {
     #[test]
     fn a_repeated_single_valued_header_keeps_the_first_and_counts_both() {
         let headers = vec![header("From", "<sip:a@h>"), header("From", "<sip:b@h>")];
-        let idx = HeaderIndex::build(&headers);
+        let idx = HeaderIndex::of_lines(&headers);
         assert_eq!(idx.from.count, 2);
         assert_eq!(idx.from.first.map(|v| v.as_str()), Some("<sip:a@h>"));
     }

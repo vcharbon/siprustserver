@@ -1,6 +1,8 @@
-//! [`HeaderName`] — the header identity every reader dispatches on.
+//! [`HeaderName`] — the header identity every reader dispatches on — and
+//! [`HeaderId`], the one-byte identity of a known header a parsed message
+//! stores per line.
 
-use crate::parser::custom::compact_forms::expanded_name;
+use super::id::HeaderKey;
 use crate::sip_str::SipStr;
 
 /// Declares the known-name variants and their canonical wire spellings in one
@@ -21,6 +23,34 @@ macro_rules! known_header_names {
             Other(SipStr),
         }
 
+        /// The identity of a known header in one byte: what a parsed message
+        /// stores beside each header line, so a reader compares ids instead
+        /// of names. Declaration order matches [`HeaderName`]'s.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[repr(u8)]
+        pub enum HeaderId {
+            $($variant,)+
+        }
+
+        impl HeaderId {
+            /// Every known header, in declaration order.
+            pub const ALL: &'static [HeaderId] = &[$(HeaderId::$variant,)+];
+
+            /// The canonical wire spelling.
+            pub const fn wire(self) -> &'static str {
+                match self {
+                    $(HeaderId::$variant => $wire,)+
+                }
+            }
+
+            /// The [`HeaderName`] this id stands for.
+            pub const fn name(self) -> HeaderName {
+                match self {
+                    $(HeaderId::$variant => HeaderName::$variant,)+
+                }
+            }
+        }
+
         impl HeaderName {
             /// Every name resolvable to a unit variant, in declaration order.
             pub const KNOWN: &'static [HeaderName] = &[$(HeaderName::$variant,)+];
@@ -30,6 +60,15 @@ macro_rules! known_header_names {
                 match self {
                     $(HeaderName::$variant => $wire,)+
                     HeaderName::Other(name) => name.as_str(),
+                }
+            }
+
+            /// The id of a unit variant; `None` for [`Other`](Self::Other),
+            /// whatever it spells (see [`key`](Self::key)).
+            pub const fn id(&self) -> Option<HeaderId> {
+                match self {
+                    $(HeaderName::$variant => Some(HeaderId::$variant),)+
+                    HeaderName::Other(_) => None,
                 }
             }
         }
@@ -113,19 +152,10 @@ known_header_names! {
 
 impl HeaderName {
     /// The variant `name` resolves to, or `None` for an extension header.
-    /// Allocation-free — the probe a dispatch loop runs per header.
+    /// Allocation-free, and a bounded number of byte compares whatever the
+    /// name — the probe a dispatch loop runs per header.
     pub fn known(name: &str) -> Option<HeaderName> {
-        let wire = expanded_name(name).as_bytes();
-        let first = wire.first()?.to_ascii_lowercase();
-        Self::KNOWN
-            .iter()
-            .find(|candidate| {
-                let c = candidate.as_wire_str().as_bytes();
-                c.len() == wire.len()
-                    && c.first().map(u8::to_ascii_lowercase) == Some(first)
-                    && c.eq_ignore_ascii_case(wire)
-            })
-            .cloned()
+        HeaderId::of(name).map(HeaderId::name)
     }
 
     /// The identity of a parsed header name. An extension header shares the
@@ -134,26 +164,32 @@ impl HeaderName {
         Self::known(name.as_str()).unwrap_or_else(|| HeaderName::Other(name.clone()))
     }
 
+    /// The header this name identifies: a unit variant by its id, and an
+    /// [`Other`](Self::Other) that spells a known name — a compact form, an
+    /// odd casing — by that known name's id.
+    pub fn key(&self) -> HeaderKey<'_> {
+        match (self.id(), self) {
+            (Some(id), _) => HeaderKey::Known(id),
+            (None, HeaderName::Other(text)) => match HeaderId::of(text.as_str()) {
+                Some(id) => HeaderKey::Known(id),
+                None => HeaderKey::Extension(text.as_str()),
+            },
+            (None, _) => HeaderKey::Extension(self.as_wire_str()),
+        }
+    }
+
     /// Whether both spellings name the same header. An extension name that
     /// happens to be a known spelling — a compact form, an odd casing — IS that
     /// known name: identity is the header, not the bytes that wrote it.
     pub fn same_header(&self, other: &HeaderName) -> bool {
-        match (self, other) {
-            (HeaderName::Other(a), HeaderName::Other(b)) => a.eq_ignore_ascii_case(b),
-            (HeaderName::Other(a), known) => Self::known(a.as_str()).as_ref() == Some(known),
-            (known, HeaderName::Other(b)) => Self::known(b.as_str()).as_ref() == Some(known),
-            (a, b) => a == b,
-        }
+        self.key() == other.key()
     }
 
     /// Whether `wire` — a header name exactly as it appeared — is this name.
     /// Allocation-free, and casing- and compact-form-insensitive, so it is the
     /// probe a header-list scan runs per line.
     pub fn matches(&self, wire: &str) -> bool {
-        match Self::known(wire) {
-            Some(known) => known == *self,
-            None => matches!(self, HeaderName::Other(name) if name.eq_ignore_ascii_case(wire)),
-        }
+        self.key().matches(wire)
     }
 }
 

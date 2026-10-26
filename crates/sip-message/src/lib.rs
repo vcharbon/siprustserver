@@ -36,6 +36,7 @@ mod control_bytes;
 pub mod draft;
 pub mod error;
 pub mod header;
+pub mod header_table;
 pub mod method;
 pub mod parser;
 pub mod sip_str;

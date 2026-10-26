@@ -13,7 +13,8 @@ use bytes::Bytes;
 
 use crate::draft::{HeaderList, RequestDraft, ResponseDraft};
 use crate::error::SipParseError;
-use crate::header::{self, HeaderName, HeaderValue, Uri};
+use crate::header::{self, Folding, HeaderName, HeaderValue, Uri};
+use crate::header_table::HeaderTable;
 use crate::method::Method;
 use crate::parser::custom::request_uri::request_uri_refusal;
 use crate::sip_str::SipStr;
@@ -26,24 +27,18 @@ use crate::types::{
 // Header-list reads
 // ---------------------------------------------------------------------------
 
-fn raw_values<'a>(
-    headers: &'a [SipHeader],
-    name: HeaderName,
-) -> impl Iterator<Item = &'a str> + 'a {
-    headers.iter().filter(move |h| name.matches(&h.name)).map(|h| h.value.as_str())
+fn raw_values(headers: &HeaderTable, name: HeaderName) -> impl Iterator<Item = &str> {
+    headers.of(name).map(|h| h.value.as_str())
 }
 
-fn raw_text_values<'a>(
-    headers: &'a [SipHeader],
-    name: HeaderName,
-) -> impl Iterator<Item = SipStr> + 'a {
-    headers.iter().filter(move |h| name.matches(&h.name)).map(|h| h.value.clone())
+fn raw_text_values(headers: &HeaderTable, name: HeaderName) -> impl Iterator<Item = SipStr> + '_ {
+    headers.of(name).map(|h| h.value.clone())
 }
 
-fn values_of<H: HeaderValue>(headers: &[SipHeader]) -> Result<Vec<H>, SipParseError> {
+fn values_of<H: HeaderValue>(headers: &HeaderTable) -> Result<Vec<H>, SipParseError> {
     let name = H::header_name();
     let mut values = Vec::new();
-    for header in headers.iter().filter(|h| name.matches(&h.name)) {
+    for header in headers.of(&name) {
         values.extend(H::parse_line(&header.value)?);
     }
     Ok(values)
@@ -53,7 +48,7 @@ fn values_of<H: HeaderValue>(headers: &[SipHeader]) -> Result<Vec<H>, SipParseEr
 /// checks is no hop any request can be addressed to (RFC 3261 §12.2.1.1), so
 /// it refuses the whole set rather than become a dialog's route.
 fn recorded_routes(
-    headers: &[SipHeader],
+    headers: &HeaderTable,
 ) -> Result<HeaderList<header::RecordRouteEntry>, SipParseError> {
     let set = values_of::<header::RecordRouteEntry>(headers)?;
     for entry in &set {
@@ -62,7 +57,18 @@ fn recorded_routes(
     Ok(HeaderList::new(set))
 }
 
-fn header_of<H: HeaderValue>(headers: &[SipHeader]) -> Option<Result<H, SipParseError>> {
+/// The single logical value of `H`. A header whose reader sees only the first
+/// value ([`HeaderValue::combine`] by default) reads only the first line that
+/// carries it; a set-like or comma-folded one reads them all.
+fn header_of<H: HeaderValue>(headers: &HeaderTable) -> Option<Result<H, SipParseError>> {
+    if matches!(H::folding(), Folding::Single | Folding::Opaque) {
+        let name = H::header_name();
+        let first = headers.of(&name).next()?;
+        return match H::parse_line(&first.value) {
+            Err(e) => Some(Err(e)),
+            Ok(values) => H::combine(values).map(Ok),
+        };
+    }
     match values_of::<H>(headers) {
         Err(e) => Some(Err(e)),
         Ok(values) if values.is_empty() => None,
@@ -119,6 +125,11 @@ macro_rules! core_read_surface {
 
             /// The full header list in wire order.
             pub fn headers(&self) -> &[SipHeader] {
+                self.core().headers.lines()
+            }
+
+            /// The header lines with the header each was classified as.
+            pub fn header_table(&self) -> &HeaderTable {
                 &self.core().headers
             }
 
@@ -142,29 +153,29 @@ macro_rules! core_read_surface {
             /// The single logical value of `H`, or `None` when the message
             /// carries no such header.
             pub fn header<H: HeaderValue>(&self) -> Option<Result<H, SipParseError>> {
-                header_of::<H>(self.headers())
+                header_of::<H>(&self.core().headers)
             }
 
             /// Every value of `H`, flattening comma folds where the header's
             /// grammar admits them.
             pub fn list<H: HeaderValue>(&self) -> Result<Vec<H>, SipParseError> {
-                values_of::<H>(self.headers())
+                values_of::<H>(&self.core().headers)
             }
 
             /// The unparsed values of one header, in wire order — the escape
             /// hatch for a header that genuinely stays opaque.
             pub fn raw(&self, name: HeaderName) -> impl Iterator<Item = &str> {
-                raw_values(self.headers(), name)
+                raw_values(&self.core().headers, name)
             }
 
             /// The unparsed values of one header as shared text — the seam a
             /// verbatim echo seeds from, copying no bytes.
             pub fn raw_text(&self, name: HeaderName) -> impl Iterator<Item = SipStr> + '_ {
-                raw_text_values(self.headers(), name)
+                raw_text_values(&self.core().headers, name)
             }
 
             pub fn has(&self, name: &HeaderName) -> bool {
-                self.headers().iter().any(|h| name.matches(&h.name))
+                self.core().headers.has(name)
             }
 
             /// The Route set carried on this message, top first.
@@ -179,7 +190,7 @@ macro_rules! core_read_surface {
             pub fn record_route_set(
                 &self,
             ) -> Result<HeaderList<header::RecordRouteEntry>, SipParseError> {
-                recorded_routes(self.headers())
+                recorded_routes(&self.core().headers)
             }
         }
     };
@@ -291,23 +302,23 @@ impl SipMessage {
     }
 
     pub fn header<H: HeaderValue>(&self) -> Option<Result<H, SipParseError>> {
-        header_of::<H>(self.headers())
+        header_of::<H>(&self.core().headers)
     }
 
     pub fn list<H: HeaderValue>(&self) -> Result<Vec<H>, SipParseError> {
-        values_of::<H>(self.headers())
+        values_of::<H>(&self.core().headers)
     }
 
     pub fn raw(&self, name: HeaderName) -> impl Iterator<Item = &str> {
-        raw_values(self.headers(), name)
+        raw_values(&self.core().headers, name)
     }
 
     pub fn raw_text(&self, name: HeaderName) -> impl Iterator<Item = SipStr> + '_ {
-        raw_text_values(self.headers(), name)
+        raw_text_values(&self.core().headers, name)
     }
 
     pub fn has(&self, name: &HeaderName) -> bool {
-        self.headers().iter().any(|h| name.matches(&h.name))
+        self.core().headers.has(name)
     }
 
     pub fn route_set(&self) -> Result<HeaderList<header::RouteEntry>, SipParseError> {
@@ -315,7 +326,7 @@ impl SipMessage {
     }
 
     pub fn record_route_set(&self) -> Result<HeaderList<header::RecordRouteEntry>, SipParseError> {
-        recorded_routes(self.headers())
+        recorded_routes(&self.core().headers)
     }
 }
 

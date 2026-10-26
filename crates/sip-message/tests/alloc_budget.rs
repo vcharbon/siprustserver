@@ -77,7 +77,7 @@ const BUDGETS: &[Budget] = &[
     Budget { case: "proxy_hop/invite", allocs: 25, bytes: 6870 },
     Budget { case: "proxy_hop/invite_sdp", allocs: 26, bytes: 7750 },
     Budget { case: "build/blank_draft", allocs: 32, bytes: 8460 },
-    Budget { case: "build/invite_sdp", allocs: 54, bytes: 8210 },
+    Budget { case: "build/invite_sdp", allocs: 54, bytes: 8780 },
     Budget { case: "build/bye", allocs: 60, bytes: 5020 },
     Budget { case: "build/response_200", allocs: 38, bytes: 7520 },
     Budget { case: "refuse/12000_headers", allocs: 1, bytes: 90 },

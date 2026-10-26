@@ -11,6 +11,7 @@ use bytes::Bytes;
 
 use crate::draft::{RequestLine, StatusLine, SIP_VERSION};
 use crate::error::SipParseError;
+use crate::header_table::HeaderTable;
 use crate::parser::{Framing, SipParser, SipParserLimits};
 use crate::sip_str::{SharedText, SipStr};
 use crate::types::{MessageCore, SipMessage, SipRequest, SipResponse};
@@ -51,6 +52,7 @@ pub fn hydrate_request(
 ) -> Result<SipRequest, SipParseError> {
     let limits = SipParserLimits::default();
     let uri = SipStr::owned(uri);
+    let headers = HeaderTable::new(headers);
     let idx = HeaderIndex::build(&headers);
     let eager = extract_request_fields(&idx, &uri, &limits, Some(method), ExtractMode::Hydrate)?;
     let optional = optional_headers::extract_optional_indexed(&idx);
@@ -62,7 +64,7 @@ pub fn hydrate_request(
     };
     // A message always carries its datagram: `image()` is what the transport
     // sends, so a hydrated request renders it once here.
-    let image = Bytes::from(crate::serializer::render(&headers, &body, |out| {
+    let image = Bytes::from(crate::serializer::render(headers.lines(), &body, |out| {
         use std::io::Write;
         let _ = write!(out, "{} {} {}", start.method, start.uri.text(), start.version);
     }));
@@ -114,7 +116,7 @@ impl CustomParser {
         let parsed = headers::parse_headers(&mut s, &text, block.lines, &self.limits)?;
         match parsed.refusal {
             Some(refusal) => Err(refusal),
-            None => Ok(parsed.headers),
+            None => Ok(parsed.headers.into_lines()),
         }
     }
 

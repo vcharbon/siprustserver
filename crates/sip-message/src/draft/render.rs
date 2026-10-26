@@ -63,7 +63,7 @@ fn write<S: StartKind>(line: &S::Line, entries: &[Entry], body: &[u8], record: b
     let mut headers = if record { Vec::with_capacity(entries.len()) } else { Vec::new() };
     for entry in entries {
         let name_at = out.len();
-        out.str(entry.name().as_wire_str());
+        out.str(entry.wire_name());
         let name = (name_at, out.len() - name_at);
         out.str(": ");
         let value_at = out.len();
@@ -72,8 +72,7 @@ fn write<S: StartKind>(line: &S::Line, entries: &[Entry], body: &[u8], record: b
             headers.push((name, (value_at, out.len() - value_at)));
         }
         if refusal.is_none() {
-            refusal =
-                line_refusal(entry.name(), out.as_bytes().get(value_at..).unwrap_or_default());
+            refusal = line_refusal(entry, out.as_bytes().get(value_at..).unwrap_or_default());
         }
         out.str("\r\n");
     }
@@ -86,11 +85,16 @@ fn write<S: StartKind>(line: &S::Line, entries: &[Entry], body: &[u8], record: b
     Rendered { bytes, start, headers, body_at, refusal }
 }
 
-/// Why the line `name: value` cannot be written whole: an extension name off
-/// `token`, or a control byte outside a quoted-pair in the value. A known
-/// name is a constant `token`.
-fn line_refusal(name: &HeaderName, value: &[u8]) -> Option<WriteRefusal> {
-    if let HeaderName::Other(text) = name {
+/// Why the line `name: value` cannot be written whole: an extension name or a
+/// caller's spelling off `token`, or a control byte outside a quoted-pair in
+/// the value. A canonical known name is a constant `token`.
+fn line_refusal(entry: &Entry, value: &[u8]) -> Option<WriteRefusal> {
+    let name = entry.name();
+    let spelled = match name {
+        HeaderName::Other(text) => Some(text),
+        _ => entry.spelling(),
+    };
+    if let Some(text) = spelled {
         if let Err(refusal) = write_check::header_name(text.as_str()) {
             return Some(refusal);
         }
