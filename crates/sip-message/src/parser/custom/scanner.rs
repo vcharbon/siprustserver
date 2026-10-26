@@ -93,7 +93,7 @@ pub fn header_block(raw: &[u8]) -> HeaderBlock {
         if s.at_end() {
             return HeaderBlock { end: raw.len(), lines, bare_break };
         }
-        let line = s.take_while(|b| b != CR && b != LF);
+        let line = s.take_until_either(CR, LF);
         let at = s.pos();
         let cr = s.skip_if(CR);
         let lf = s.skip_if(LF);
@@ -195,7 +195,19 @@ impl<'a> Scanner<'a> {
 
     /// Consumes bytes up to `byte`, which is left unread; the span read.
     pub fn take_until(&mut self, byte: u8) -> Span {
-        self.take_while(|b| b != byte)
+        let start = self.pos;
+        let rest = self.buf.get(start..).unwrap_or_default();
+        self.bump(memchr::memchr(byte, rest).unwrap_or(rest.len()));
+        start..self.pos
+    }
+
+    /// Consumes bytes up to the first `a` or `b`, which is left unread; the
+    /// span read.
+    pub fn take_until_either(&mut self, a: u8, b: u8) -> Span {
+        let start = self.pos;
+        let rest = self.buf.get(start..).unwrap_or_default();
+        self.bump(memchr::memchr2(a, b, rest).unwrap_or(rest.len()));
+        start..self.pos
     }
 
     /// Skip over SP and HTAB.
@@ -232,6 +244,7 @@ impl<'a> Scanner<'a> {
         let mut line = self.pos;
         let mut unfolded: Option<String> = None;
         while !self.at_end() {
+            self.take_until(CR);
             if !self.at_crlf() {
                 self.bump(1);
                 continue;

@@ -32,6 +32,13 @@ enum At {
 /// whether a `(` opens a comment, as it does in the headers
 /// [`has_comments`] names; elsewhere it is a plain byte.
 pub(crate) fn bare_control_byte(value: &[u8], comments: bool) -> Option<usize> {
+    // A value that opens no quoted-string and no comment has no quoted-pair:
+    // its first control byte is the answer, found without the state machine.
+    let opens =
+        if comments { memchr::memchr2(b'"', b'(', value) } else { memchr::memchr(b'"', value) };
+    if opens.is_none() {
+        return value.iter().position(|&b| is_control(b));
+    }
     let mut at = At::Plain;
     let mut bytes = value.iter().copied().enumerate();
     while let Some((i, b)) = bytes.next() {
