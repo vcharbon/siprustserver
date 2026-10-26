@@ -14,7 +14,7 @@ ext .rs
 crates/b2bua-core/src/rules/actions/respond.rs 616
 crates/b2bua-core/src/rules/defaults/core_rules.rs 1560
 crates/b2bua-core/src/rules/relay_first_18x.rs 524
-crates/b2bua-core/src/rules/relay/sdp_session_tests.rs 921
+crates/b2bua-core/src/rules/relay/sdp_session_tests.rs 916
 crates/b2bua-core/tests/it/rules.rs 4876
 crates/b2bua-harness/src/lib.rs 967
 crates/b2bua-harness/tests/it/call_keyed_holds.rs 1036
@@ -88,11 +88,11 @@ crates/rfc-rules/src/rules/dialog/tests.rs 1152
 crates/rfc-rules/src/rules/proxy.rs 634
 crates/rfc-rules/src/rules/wellformed.rs 656
 crates/rfc-rules/src/verdict/evidence.rs 1722
-crates/scenario-harness/src/actor/response.rs 537
-crates/scenario-harness/src/actor/runner.rs 572
+crates/scenario-harness/src/actor/response.rs 525
+crates/scenario-harness/src/actor/runner.rs 570
 crates/scenario-harness/src/actor/scenarios.rs 1086
 crates/scenario-harness/src/actor/script.rs 532
-crates/scenario-harness/src/actor/state.rs 667
+crates/scenario-harness/src/actor/state.rs 625
 crates/scenario-harness/src/agent/client_invite.rs 598
 crates/scenario-harness/src/agent/dialog.rs 718
 crates/scenario-harness/src/agent/harness.rs 858

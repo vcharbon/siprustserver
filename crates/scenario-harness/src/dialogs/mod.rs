@@ -22,7 +22,9 @@ mod reliable;
 mod table;
 mod verdict;
 
-pub use judge::{covers, is_partyless_dialog_waiver, DialogJudge, DialogJudging, DialogOptIns};
+pub use judge::{
+    covers, covers_at, is_partyless_dialog_waiver, DialogJudge, DialogJudging, DialogOptIns,
+};
 pub use table::{BackwardsCseq, DialogState, DialogTable};
 pub use verdict::{
     DialogVerdict, VerdictKind, DIALOG_CSEQ_BACKWARDS, DIALOG_CSEQ_SKIP, DIALOG_EARLY_REQUEST,

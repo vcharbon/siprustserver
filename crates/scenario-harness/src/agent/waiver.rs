@@ -53,6 +53,14 @@ pub struct WaiverScope {
     /// When `true`, a waiver that filters nothing is NOT an error at `finish()`
     /// (a legitimately conditional shape). Default `false` (unused ⇒ loud).
     pub conditional: bool,
+    /// A dialog-verdict waiver's method: only verdicts on requests of it are
+    /// covered. `None` = any method.
+    pub method: Option<String>,
+    /// A dialog-verdict waiver's start: only verdicts recorded from this
+    /// instant on are covered. Set by a live run, never by a scenario file.
+    pub since: Option<tokio::time::Instant>,
+    /// A dialog-verdict waiver that covers at most one verdict per dialog.
+    pub once_per_dialog: bool,
     /// Human-readable reason (surfaced on registration / in the report).
     pub justification: String,
 }
@@ -66,8 +74,25 @@ impl WaiverScope {
             party: None,
             position: None,
             conditional: false,
+            method: None,
+            since: None,
+            once_per_dialog: false,
             justification: justification.into(),
         }
+    }
+
+    /// Narrow a dialog-verdict waiver to the verdicts on `method` requests.
+    pub fn on_method(mut self, method: impl Into<String>) -> Self {
+        self.method = Some(method.into());
+        self
+    }
+
+    /// Narrow a dialog-verdict waiver to the verdicts recorded from now on,
+    /// at most one per dialog.
+    pub fn from_now_once_per_dialog(mut self) -> Self {
+        self.since = Some(tokio::time::Instant::now());
+        self.once_per_dialog = true;
+        self
     }
 
     /// Narrow to the emitting party (a bind/lane name).

@@ -428,7 +428,8 @@ pub(super) async fn react_in_dialog_request(
                 maybe_answer_held_invite(st).await?;
             }
         }
-        "PRACK" => super::prack_rx::react_prack(st, uas).await?,
+        // Boxed: its state stays off the reactor future's own.
+        "PRACK" => Box::pin(super::prack_rx::react_prack(st, uas)).await?,
         // Any other in-dialog method: a plain 200 (dialog-neutral).
         _ => {
             uas.respond(200, "OK").try_send().await?;
