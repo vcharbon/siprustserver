@@ -7,12 +7,11 @@
 //! copy reaching a call still here is answered 482, and a new request on the
 //! identity of a call still live is answered 500 with a Retry-After.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use b2bua::admission::Class;
-use b2bua::cdr::{CdrRecord, CdrWriter};
 use b2bua::metrics::RemovalClass;
 use b2bua::new_calls::Refusal;
 use b2bua::store::{StoreFaultPoint, StoreFaults};
@@ -26,38 +25,42 @@ const FROM_TAG: &str = "same-identity-from-tag";
 /// Past the simulated transit of a request and its answer.
 const TRANSIT: Duration = Duration::from_millis(500);
 
-/// Holds every CDR write until opened: the turn that ends a call parks
-/// there, after its final reached the caller and before its release.
-struct GatedCdr {
+/// Once armed, holds the next turn where its messages left, until opened:
+/// the turn that ends a call parks there, after its final reached the caller
+/// and before its release.
+struct HeldLeft {
+    armed: AtomicBool,
     open: watch::Receiver<bool>,
 }
 
-#[async_trait]
-impl CdrWriter for GatedCdr {
-    async fn write(&self, _call: &call::Call, _terminated_at: i64) {
+impl b2bua::TurnProbe for HeldLeft {
+    fn reached(&self, mark: &b2bua::TurnMark<'_>) -> Option<b2bua::turn_probe::Hold> {
+        if mark.point != b2bua::TurnPoint::Left || !self.armed.swap(false, Ordering::SeqCst) {
+            return None;
+        }
         let mut open = self.open.clone();
-        let _ = open.wait_for(|o| *o).await;
+        Some(Box::pin(async move {
+            let _ = open.wait_for(|o| *o).await;
+        }))
     }
-    async fn read_all(&self) -> Vec<CdrRecord> {
-        Vec::new()
-    }
-    async fn close(&self, _deadline: tokio::time::Instant) {}
 }
 
-/// The scene of a callee challenging the first INVITE, the CDR writes gated
-/// by the returned sender.
-async fn challenged_scene(name: &str) -> (B2buaScene, watch::Sender<bool>) {
+/// The scene of a callee challenging the first INVITE, the turn its
+/// challenge ends held by the returned probe until its sender opens.
+async fn challenged_scene(name: &str) -> (B2buaScene, Arc<HeldLeft>, watch::Sender<bool>) {
     let (open, gate) = watch::channel(false);
+    let held = Arc::new(HeldLeft { armed: AtomicBool::new(false), open: gate });
+    let probe = b2bua::TurnProbes::new(held.clone());
     let s = B2buaScene::with_b2bua(name, |bob_port| {
-        B2buaSut::route_all_to("127.0.0.1", bob_port).cdr_tap(Arc::new(GatedCdr { open: gate }))
+        B2buaSut::route_all_to("127.0.0.1", bob_port).turn_probe(probe.clone())
     })
     .await;
-    (s, open)
+    (s, held, open)
 }
 
-/// alice's first INVITE is challenged by bob; its call's last turn parks on
-/// the gated CDR write.
-async fn challenge_the_first_invite(s: &B2buaScene) {
+/// alice's first INVITE is challenged by bob; the turn the challenge ends
+/// the call on parks once its messages left.
+async fn challenge_the_first_invite(s: &B2buaScene, held: &HeldLeft) {
     let mut first = s
         .alice
         .invite(&s.bob)
@@ -66,10 +69,9 @@ async fn challenge_the_first_invite(s: &B2buaScene) {
         .through(s.b2bua.addr)
         .send()
         .await;
-    s.bob
-        .receive("INVITE")
-        .await
-        .respond(407, "Proxy Authentication Required")
+    let mut uas = s.bob.receive("INVITE").await;
+    held.armed.store(true, Ordering::SeqCst);
+    uas.respond(407, "Proxy Authentication Required")
         .with_header("Proxy-Authenticate", "Digest realm=\"bob\", nonce=\"n1\"")
         .await;
     s.bob.receive("ACK").await;
@@ -94,13 +96,13 @@ async fn send_the_retry(s: &B2buaScene) -> ClientInvite {
 }
 
 /// The callee challenges the first INVITE; the caller's authenticated retry
-/// reaches the node while the challenged call's last turn is still writing
-/// its CDR. The retry is judged, routed to the callee and answered: two
-/// accepted calls, no copy refused, one CDR each.
+/// reaches the node while the challenged call's last turn is still finishing.
+/// The retry is judged, routed to the callee and answered: two accepted
+/// calls, no copy refused, one CDR each.
 #[tokio::test(start_paused = true)]
 async fn a_retry_inside_the_challenged_calls_last_turn_is_routed_as_a_new_call() {
-    let (s, open) = challenged_scene("retry-inside-challenged-turn").await;
-    challenge_the_first_invite(&s).await;
+    let (s, held, open) = challenged_scene("retry-inside-challenged-turn").await;
+    challenge_the_first_invite(&s, &held).await;
     let mut retry = send_the_retry(&s).await;
     s.h.advance(TRANSIT).await;
     assert_eq!(s.b2bua.active_calls(), 1, "the challenged call's last turn is still running");
@@ -200,8 +202,8 @@ async fn a_new_request_on_a_live_calls_identity_is_answered_retry_later() {
 /// and never reaches the callee. Each attempt writes its CDR.
 #[tokio::test(start_paused = true)]
 async fn a_retry_canceled_while_waiting_for_the_release_is_not_routed() {
-    let (s, open) = challenged_scene("retry-canceled-behind-release").await;
-    challenge_the_first_invite(&s).await;
+    let (s, held, open) = challenged_scene("retry-canceled-behind-release").await;
+    challenge_the_first_invite(&s, &held).await;
     let mut retry = send_the_retry(&s).await;
     s.h.advance(TRANSIT).await;
     let mut cxl = retry.cancel().await;

@@ -67,7 +67,7 @@ impl Puller {
 
     /// Convenience constructor for a puller that always connects to a **fixed**
     /// `peer_addr` (a resolver-less caller / tests with a concrete bound socket).
-    /// Wraps `peer_addr` in a constant [`FnPeerResolver`](super::FnPeerResolver).
+    /// Wraps `peer_addr` in a constant [`FnPeerResolver`](crate::repl::FnPeerResolver).
     #[allow(clippy::too_many_arguments)]
     pub fn new_at(
         peer_ordinal: impl Into<String>,
