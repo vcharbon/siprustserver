@@ -196,6 +196,29 @@ fn decrease_arms_a_cooldown_that_blocks_subsequent_increases() {
     assert_eq!(snap.cap_cps, 80.0); // 75 + 5
 }
 
+/// A cooldown of 2.5 ticks ends half a tick before the third reply is due, so
+/// a third reply up to 500 ms early still increases: from the floor, two
+/// increases of 50 land on replies 3 and 4.
+#[test]
+fn a_half_tick_cooldown_lets_an_early_third_reply_increase() {
+    let o = obs_with(|c| {
+        bands_cfg(c);
+        c.cap_floor_cps = 1.0;
+        c.aimd_cooldown_ticks = 2.5;
+        c.options_interval_ms = 1000;
+        c.aimd_increase_step_cps = 50.0;
+    });
+    o.apply_payload(W, &payload(0.99), 1000);
+    assert_eq!(snap1(&o, 1000).cap_cps, 1.0);
+    o.apply_payload(W, &payload(0.1), 2100);
+    o.apply_payload(W, &payload(0.1), 2900);
+    assert_eq!(snap1(&o, 2900).last_action, AimdAction::Cooldown);
+    o.apply_payload(W, &payload(0.1), 3600);
+    assert_eq!(snap1(&o, 3600).cap_cps, 51.0);
+    o.apply_payload(W, &payload(0.1), 4900);
+    assert_eq!(snap1(&o, 4900).cap_cps, 101.0);
+}
+
 #[test]
 fn decrease_never_goes_below_cap_floor_cps() {
     let o = obs_with(|c| {

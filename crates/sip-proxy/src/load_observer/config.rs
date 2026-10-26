@@ -19,7 +19,8 @@ pub struct LoadObserverConfig {
     pub aimd_decrease_factor: f64,
     /// No increases for this many OPTIONS ticks after any decrease.
     pub aimd_cooldown_ticks: f64,
-    /// Cap each worker starts at before any payload has arrived.
+    /// Cap a worker's bucket is created at, on its first OPTIONS reply; the
+    /// AIMD step of a reply carrying a payload follows at once.
     pub cap_initial_cps: f64,
     /// Cap never decreases below this.
     pub cap_floor_cps: f64,
