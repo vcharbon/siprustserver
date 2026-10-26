@@ -112,7 +112,8 @@ pub struct OptionalHeaders {
     pub history_info: Result<Vec<header::NameAddr>, crate::error::SipParseError>,
     pub remote_party_id: Result<Vec<header::NameAddr>, crate::error::SipParseError>,
     pub rack: Result<Option<header::RAck>, crate::error::SipParseError>,
-    pub refer_to: Result<Option<header::ReferTo>, crate::error::SipParseError>,
+    /// Boxed: only a REFER carries one, and a message is moved often.
+    pub refer_to: Result<Option<Box<header::ReferTo>>, crate::error::SipParseError>,
 }
 
 // ---------------------------------------------------------------------------
@@ -155,13 +156,9 @@ impl CoreHeaders {
         cseq: header::CSeq,
         via: NonEmpty<header::Via>,
         contacts: ContactSet,
+        routes: ReadRoutes,
     ) -> Self {
-        Self { from, to, call_id, cseq, via, contacts, routes: ReadRoutes::default() }
-    }
-
-    /// These headers with the route sets the parse read and validated.
-    pub(crate) fn with_routes(self, routes: ReadRoutes) -> Self {
-        Self { routes, ..self }
+        Self { from, to, call_id, cseq, via, contacts, routes }
     }
 
     pub fn from(&self) -> &header::From {
@@ -195,9 +192,17 @@ impl CoreHeaders {
 /// stack built). They are derived from the header lines, so they take no part
 /// in equality.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct ReadRoutes {
-    pub(crate) sets: Option<(Vec<header::RouteEntry>, Vec<header::RecordRouteEntry>)>,
+pub(crate) enum ReadRoutes {
+    /// The parse did not read them.
+    #[default]
+    Unread,
+    /// The parse read them: `None` where the message carries neither header.
+    /// Boxed, so a message that is moved often stays narrow.
+    Read(Option<Box<RouteSets>>),
 }
+
+/// The Route entries, then the Record-Route entries, of one message.
+pub(crate) type RouteSets = (Vec<header::RouteEntry>, Vec<header::RecordRouteEntry>);
 
 impl PartialEq for ReadRoutes {
     fn eq(&self, _: &Self) -> bool {
@@ -223,7 +228,7 @@ pub struct MessageCore {
     /// The datagram this message is, whether it was received or built.
     pub(crate) image: Bytes,
     /// Where the body holds the session description, located once.
-    pub(crate) sdp: Option<Range<usize>>,
+    pub(crate) sdp: Option<Range<u32>>,
 }
 
 impl std::fmt::Debug for MessageCore {
@@ -247,7 +252,8 @@ impl MessageCore {
         body: Bytes,
         image: Bytes,
     ) -> Self {
-        let sdp = crate::multipart::message_sdp_range(&headers, &body);
+        let sdp = crate::multipart::message_sdp_range(&headers, &body)
+            .and_then(|r| Some(u32::try_from(r.start).ok()?..u32::try_from(r.end).ok()?));
         Self { headers, core, optional, body, image, sdp }
     }
 }

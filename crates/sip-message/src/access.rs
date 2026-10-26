@@ -9,7 +9,7 @@
 //! The surface is written once here and attached to both message types, so
 //! neither direction carries a copy of it.
 
-use std::any::Any;
+use std::any::{Any, TypeId};
 
 use bytes::Bytes;
 
@@ -21,8 +21,8 @@ use crate::method::Method;
 use crate::parser::custom::request_uri::request_uri_refusal;
 use crate::sip_str::SipStr;
 use crate::types::{
-    ContactSet, MessageCore, NonEmpty, OptionalHeaders, SipHeader, SipMessage, SipRequest,
-    SipResponse,
+    ContactSet, MessageCore, NonEmpty, OptionalHeaders, ReadRoutes, SipHeader, SipMessage,
+    SipRequest, SipResponse,
 };
 
 // ---------------------------------------------------------------------------
@@ -39,7 +39,7 @@ fn raw_text_values(headers: &HeaderTable, name: HeaderName) -> impl Iterator<Ite
 
 fn values_of<H: HeaderValue>(core: &MessageCore) -> Result<Vec<H>, SipParseError> {
     if let Some(read) = read_at_parse::<H>(core) {
-        return Ok(read.clone());
+        return Ok(read);
     }
     let name = H::header_name();
     let mut values = Vec::new();
@@ -51,11 +51,16 @@ fn values_of<H: HeaderValue>(core: &MessageCore) -> Result<Vec<H>, SipParseError
 
 /// The values of `H` the parse already read and validated: the Route and
 /// Record-Route sets of a message whose parse reads them.
-fn read_at_parse<H: HeaderValue>(core: &MessageCore) -> Option<&Vec<H>> {
-    let (routes, recorded) = core.core.routes.sets.as_ref()?;
-    let routes: &dyn Any = routes;
-    let recorded: &dyn Any = recorded;
-    routes.downcast_ref::<Vec<H>>().or_else(|| recorded.downcast_ref::<Vec<H>>())
+fn read_at_parse<H: HeaderValue>(core: &MessageCore) -> Option<Vec<H>> {
+    let is_route = TypeId::of::<H>() == TypeId::of::<header::RouteEntry>()
+        || TypeId::of::<H>() == TypeId::of::<header::RecordRouteEntry>();
+    let ReadRoutes::Read(sets) = &core.core.routes else { return None };
+    if !is_route {
+        return None;
+    }
+    let Some(sets) = sets else { return Some(Vec::new()) };
+    let (routes, recorded): (&dyn Any, &dyn Any) = (&sets.0, &sets.1);
+    routes.downcast_ref::<Vec<H>>().or_else(|| recorded.downcast_ref::<Vec<H>>()).cloned()
 }
 
 /// The recorded routes, top first. A route whose URI fails the Request-URI
@@ -65,7 +70,7 @@ fn recorded_routes(
     core: &MessageCore,
 ) -> Result<HeaderList<header::RecordRouteEntry>, SipParseError> {
     if let Some(read) = read_at_parse::<header::RecordRouteEntry>(core) {
-        return Ok(HeaderList::new(read.clone()));
+        return Ok(HeaderList::new(read));
     }
     let set = values_of::<header::RecordRouteEntry>(core)?;
     for entry in &set {
@@ -159,7 +164,8 @@ macro_rules! core_read_surface {
             /// §3.1); `None` where it carries none. Located once, when the
             /// message was parsed or built.
             pub fn sdp(&self) -> Option<&[u8]> {
-                self.core().sdp.clone().and_then(|r| self.body().get(r))
+                let r = self.core().sdp.clone()?;
+                self.body().get(usize::try_from(r.start).ok()?..usize::try_from(r.end).ok()?)
             }
 
             /// The datagram this message is — received or rendered at freeze.

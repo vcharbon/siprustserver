@@ -14,7 +14,7 @@ use crate::types::SipHeader;
 
 /// The ids of a message's lines, inline for the header counts the wire
 /// usually carries.
-pub(crate) type Ids = SmallVec<[Option<HeaderId>; 64]>;
+pub(crate) type Ids = SmallVec<[Option<HeaderId>; 16]>;
 
 /// Header lines in wire order, each with its classification. It reads, and
 /// prints, as its lines: the classification is derived from them.
@@ -22,8 +22,16 @@ pub(crate) type Ids = SmallVec<[Option<HeaderId>; 64]>;
 pub struct HeaderTable {
     lines: Vec<SipHeader>,
     ids: Ids,
-    /// One bit per known header present ([`HeaderId::bit`]).
-    present: u128,
+    /// One bit per known header present ([`HeaderId::bit`]), low half first:
+    /// two words keep the table word-aligned.
+    present: [u64; 2],
+}
+
+/// `set` as its low and high words.
+fn halves(set: u128) -> [u64; 2] {
+    let lo = u64::try_from(set & u128::from(u64::MAX)).unwrap_or_default();
+    let hi = u64::try_from(set >> 64).unwrap_or_default();
+    [lo, hi]
 }
 
 impl std::fmt::Debug for HeaderTable {
@@ -42,8 +50,8 @@ impl HeaderTable {
     /// The table of `lines` already classified as `ids`, one per line.
     pub(crate) fn classified(lines: Vec<SipHeader>, ids: Ids) -> Self {
         debug_assert_eq!(lines.len(), ids.len());
-        let present = ids.iter().flatten().fold(0, |set, id| set | id.bit());
-        Self { lines, ids, present }
+        let set = ids.iter().flatten().fold(0, |set, id| set | id.bit());
+        Self { lines, ids, present: halves(set) }
     }
 
     /// Every line, in wire order.
@@ -63,7 +71,9 @@ impl HeaderTable {
 
     /// Whether the message carries `id` on any line.
     pub fn carries(&self, id: HeaderId) -> bool {
-        self.present & id.bit() != 0
+        let [lo, hi] = halves(id.bit());
+        let [low, high] = self.present;
+        low & lo != 0 || high & hi != 0
     }
 
     /// Whether the message carries the header `name` names.

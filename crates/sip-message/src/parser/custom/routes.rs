@@ -29,5 +29,6 @@ pub(super) fn read_routes(idx: &HeaderIndex) -> Result<ReadRoutes, SipParseError
             request_uri_refusal(entry.uri())?;
         }
     }
-    Ok(ReadRoutes { sets: Some((routes, recorded)) })
+    let sets = (!routes.is_empty() || !recorded.is_empty()).then(|| Box::new((routes, recorded)));
+    Ok(ReadRoutes::Read(sets))
 }

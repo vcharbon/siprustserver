@@ -47,12 +47,12 @@ fn parse_rack_header(value: Option<&SipStr>) -> Result<Option<RAck>, SipParseErr
         .map_err(|e| SipParseError::new(format!("Malformed RAck: {}", e.reason)))
 }
 
-fn parse_refer_to_header(value: Option<&SipStr>) -> Result<Option<ReferTo>, SipParseError> {
+fn parse_refer_to_header(value: Option<&SipStr>) -> Result<Option<Box<ReferTo>>, SipParseError> {
     let Some(value) = value else {
         return Ok(None);
     };
     ReferTo::parse(value)
-        .map(Some)
+        .map(|refer_to| Some(Box::new(refer_to)))
         .map_err(|e| SipParseError::new(format!("Malformed Refer-To: {}", e.reason)))
 }
 

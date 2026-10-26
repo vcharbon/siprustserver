@@ -126,7 +126,7 @@ pub fn extract_common_fields(
         ReadRoutes::default()
     };
     let Identity { from, to, call_id, cseq, via } = identity;
-    Ok(CoreHeaders::new(from, to, call_id, cseq, via, contacts).with_routes(routes))
+    Ok(CoreHeaders::new(from, to, call_id, cseq, via, contacts, routes))
 }
 
 /// The fields every response to a message echoes (RFC 3261 §8.2.6.2), typed.
