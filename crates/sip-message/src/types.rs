@@ -120,8 +120,9 @@ pub struct OptionalHeaders {
 // ---------------------------------------------------------------------------
 
 /// The mandatory headers, typed and validated by the parser — so every reader
-/// gets them infallibly.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// gets them infallibly. The route sets it keeps are derived from the header
+/// lines, so they take no part in its equality or its printed form.
+#[derive(Clone, PartialEq, Eq)]
 pub struct CoreHeaders {
     pub(crate) from: header::From,
     pub(crate) to: header::To,
@@ -130,6 +131,20 @@ pub struct CoreHeaders {
     pub(crate) via: NonEmpty<header::Via>,
     pub(crate) contacts: ContactSet,
     pub(crate) routes: ReadRoutes,
+}
+
+impl std::fmt::Debug for CoreHeaders {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { from, to, call_id, cseq, via, contacts, routes: _ } = self;
+        f.debug_struct("CoreHeaders")
+            .field("from", from)
+            .field("to", to)
+            .field("call_id", call_id)
+            .field("cseq", cseq)
+            .field("via", via)
+            .field("contacts", contacts)
+            .finish()
+    }
 }
 
 impl CoreHeaders {
@@ -192,8 +207,10 @@ impl PartialEq for ReadRoutes {
 
 impl Eq for ReadRoutes {}
 
-/// Everything a request and a response share, written once.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Everything a request and a response share, written once. Where its body
+/// holds the session description is derived from the body and its headers,
+/// so it takes no part in its printed form.
+#[derive(Clone, PartialEq, Eq)]
 pub struct MessageCore {
     /// Full header list in wire order, each line classified — THE source of
     /// truth.
@@ -207,6 +224,19 @@ pub struct MessageCore {
     pub(crate) image: Bytes,
     /// Where the body holds the session description, located once.
     pub(crate) sdp: Option<Range<usize>>,
+}
+
+impl std::fmt::Debug for MessageCore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { headers, core, optional, body, image, sdp: _ } = self;
+        f.debug_struct("MessageCore")
+            .field("headers", headers)
+            .field("core", core)
+            .field("optional", optional)
+            .field("body", body)
+            .field("image", image)
+            .finish()
+    }
 }
 
 impl MessageCore {

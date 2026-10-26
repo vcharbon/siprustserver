@@ -16,13 +16,20 @@ use crate::types::SipHeader;
 /// usually carries.
 pub(crate) type Ids = SmallVec<[Option<HeaderId>; 64]>;
 
-/// Header lines in wire order, each with its classification.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Header lines in wire order, each with its classification. It reads, and
+/// prints, as its lines: the classification is derived from them.
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct HeaderTable {
     lines: Vec<SipHeader>,
     ids: Ids,
     /// One bit per known header present ([`HeaderId::bit`]).
     present: u128,
+}
+
+impl std::fmt::Debug for HeaderTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(&self.lines).finish()
+    }
 }
 
 impl HeaderTable {
