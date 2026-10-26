@@ -1,6 +1,10 @@
 use super::*;
 use sip_message::{serialize, CustomParser, SipMessage, SipParser};
 
+/// Where every request of these tests comes from: its Via's own sent-by.
+const SRC: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)), 5555);
+
 fn invite(branch: &str) -> SipRequest {
     let raw = format!(
         "INVITE sip:bob@127.0.0.1:5060 SIP/2.0\r\n\
@@ -33,7 +37,7 @@ fn refusal_wire(resp: Result<SipResponse, GenerateError>) -> String {
 #[test]
 fn a_refusal_is_a_tagged_503_with_retry_after_and_no_reason() {
     let r = Refusals::new(&IdGen::seeded(1), 0);
-    let out = refusal_wire(r.refuse(&invite("z9hG4bK-a"), 0, 0));
+    let out = refusal_wire(r.refuse(&invite("z9hG4bK-a"), SRC, 0, 0));
     assert!(out.starts_with("SIP/2.0 503 Service Unavailable\r\n"), "{out}");
     assert!(out.contains("Retry-After: 1\r\n"), "a hint of 0 goes out as 1: {out}");
     assert!(!out.contains("Reason:"), "{out}");
@@ -46,12 +50,12 @@ fn a_refusal_is_a_tagged_503_with_retry_after_and_no_reason() {
 #[test]
 fn every_copy_draws_the_same_refusal() {
     let r = Refusals::new(&IdGen::seeded(1), 30);
-    assert!(r.repeat(&invite("z9hG4bK-a"), 0).is_none(), "nothing is remembered yet");
-    let first = refusal_wire(r.refuse(&invite("z9hG4bK-a"), 5, 0));
-    let copy = r.repeat(&invite("z9hG4bK-a"), TIMER_B - 1).expect("a copy is remembered");
+    assert!(r.repeat(&invite("z9hG4bK-a"), SRC, 0).is_none(), "nothing is remembered yet");
+    let first = refusal_wire(r.refuse(&invite("z9hG4bK-a"), SRC, 5, 0));
+    let copy = r.repeat(&invite("z9hG4bK-a"), SRC, TIMER_B - 1).expect("a copy is remembered");
     assert_eq!(first, wire(copy));
-    assert!(r.repeat(&invite("z9hG4bK-b"), 0).is_none(), "another INVITE is no copy");
-    let other = refusal_wire(r.refuse(&invite("z9hG4bK-b"), 5, 0));
+    assert!(r.repeat(&invite("z9hG4bK-b"), SRC, 0).is_none(), "another INVITE is no copy");
+    let other = refusal_wire(r.refuse(&invite("z9hG4bK-b"), SRC, 5, 0));
     let tag = |w: &str| w.lines().find(|l| l.starts_with("To:")).map(str::to_owned);
     assert_ne!(tag(&first), tag(&other), "distinct INVITEs get distinct tags");
 }
@@ -61,7 +65,7 @@ fn every_copy_draws_the_same_refusal() {
 fn the_retry_after_is_spread_over_the_jitter() {
     let r = Refusals::new(&IdGen::seeded(1), 4);
     for i in 0..20 {
-        let out = refusal_wire(r.refuse(&invite(&format!("z9hG4bK-{i}")), 10, 0));
+        let out = refusal_wire(r.refuse(&invite(&format!("z9hG4bK-{i}")), SRC, 10, 0));
         let secs: u32 = out
             .lines()
             .find_map(|l| l.strip_prefix("Retry-After: "))
@@ -76,18 +80,19 @@ fn the_retry_after_is_spread_over_the_jitter() {
 #[test]
 fn a_refusal_is_forgotten_after_64_t1_or_past_capacity() {
     let r = Refusals::new(&IdGen::seeded(1), 0);
-    r.refuse(&invite("z9hG4bK-a"), 1, 0).expect("a refusal");
-    assert!(r.repeat(&invite("z9hG4bK-a"), TIMER_B).is_none());
+    r.refuse(&invite("z9hG4bK-a"), SRC, 1, 0).expect("a refusal");
+    assert!(r.repeat(&invite("z9hG4bK-a"), SRC, TIMER_B).is_none());
 
     // One refusal per stripe: of 100 refused, at most one per stripe stays,
     // and the latest is always among them.
     let small = Refusals::with_capacity(&IdGen::seeded(1), 0, 1);
     for i in 0..100 {
-        small.refuse(&invite(&format!("z9hG4bK-{i}")), 1, 0).expect("a refusal");
+        small.refuse(&invite(&format!("z9hG4bK-{i}")), SRC, 1, 0).expect("a refusal");
     }
-    let kept = (0..100).filter(|i| small.repeat(&invite(&format!("z9hG4bK-{i}")), 0).is_some());
+    let kept =
+        (0..100).filter(|i| small.repeat(&invite(&format!("z9hG4bK-{i}")), SRC, 0).is_some());
     assert!(kept.count() <= STRIPES);
-    assert!(small.repeat(&invite("z9hG4bK-99"), 0).is_some());
+    assert!(small.repeat(&invite("z9hG4bK-99"), SRC, 0).is_some());
 }
 
 fn cancel(branch: &str) -> SipRequest {
@@ -112,21 +117,21 @@ Content-Length: 0\r\n\r\n"
 #[test]
 fn the_cancel_of_a_refused_invite_draws_200_with_its_final_s_tag() {
     let r = Refusals::new(&IdGen::seeded(1), 0);
-    let refused = refusal_wire(r.refuse(&invite("z9hG4bK-a"), 1, 0));
-    let ok = wire(r.cancel(&cancel("z9hG4bK-a"), 0).expect("a refused INVITE"));
+    let refused = refusal_wire(r.refuse(&invite("z9hG4bK-a"), SRC, 1, 0));
+    let ok = wire(r.cancel(&cancel("z9hG4bK-a"), SRC, 0).expect("a refused INVITE"));
     assert!(ok.starts_with("SIP/2.0 200 OK\r\n"), "{ok}");
     assert!(ok.contains("CSeq: 1 CANCEL\r\n"), "{ok}");
     assert!(!ok.contains("Retry-After"), "{ok}");
     let to = |w: &str| w.lines().find(|l| l.starts_with("To:")).map(str::to_owned);
     assert_eq!(to(&ok), to(&refused));
-    assert!(r.cancel(&cancel("z9hG4bK-b"), 0).is_none(), "an INVITE never refused");
+    assert!(r.cancel(&cancel("z9hG4bK-b"), SRC, 0).is_none(), "an INVITE never refused");
 }
 
 /// A CANCEL refused for want of a target is answered but never remembered.
 #[test]
 fn a_refused_cancel_is_never_remembered() {
     let r = Refusals::new(&IdGen::seeded(1), 0);
-    r.refuse(&cancel("z9hG4bK-a"), 1, 0).expect("a refusal");
-    assert!(r.repeat(&cancel("z9hG4bK-a"), 0).is_none());
-    assert!(r.cancel(&cancel("z9hG4bK-a"), 0).is_none());
+    r.refuse(&cancel("z9hG4bK-a"), SRC, 1, 0).expect("a refusal");
+    assert!(r.repeat(&cancel("z9hG4bK-a"), SRC, 0).is_none());
+    assert!(r.cancel(&cancel("z9hG4bK-a"), SRC, 0).is_none());
 }

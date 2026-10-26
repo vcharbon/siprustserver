@@ -39,6 +39,22 @@ fn the_retry_after_jitter_is_bounded() {
     assert!(errors.iter().any(|e| e.contains("PROXY_RETRY_AFTER_JITTER_SEC")), "{errors:?}");
 }
 
+/// The branch memo's bounds default to the design working set and take any
+/// positive count; zero is refused.
+#[test]
+fn the_branch_memo_bounds_are_read() {
+    let cfg = boot(&[]).expect("valid");
+    assert_eq!(cfg.branch_memo, sip_proxy::cancel_lru::MemoBounds::default());
+    let cfg = boot(&[
+        ("PROXY_BRANCH_MEMO_MAX_ENTRIES", "1000"),
+        ("PROXY_BRANCH_MEMO_MAX_BYTES", "8589934592"),
+    ])
+    .expect("valid");
+    assert_eq!((cfg.branch_memo.max_entries, cfg.branch_memo.max_bytes), (1000, 8 << 30));
+    let errors = boot(&[("PROXY_BRANCH_MEMO_MAX_BYTES", "0")]).expect_err("zero bytes");
+    assert!(errors.iter().any(|e| e.contains("PROXY_BRANCH_MEMO_MAX_BYTES")), "{errors:?}");
+}
+
 // ── parse_ext_face_cidrs — dual-face boot rule ───────────────────────────
 
 #[test]

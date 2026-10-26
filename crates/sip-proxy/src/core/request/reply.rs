@@ -80,7 +80,7 @@ impl ProxyCore {
 
     /// Refuse the new request `req` with a 503, `retry_after_sec` being the
     /// refusing stage's hint, counted once under `metric`: every later copy
-    /// draws the same bytes from [`repeat_refusal`](Self::repeat_refusal).
+    /// draws the same 503 from [`repeat_refusal`](Self::repeat_refusal).
     pub(super) async fn refuse_new(
         &self,
         req: &SipRequest,
@@ -89,7 +89,7 @@ impl ProxyCore {
         metric: &str,
     ) -> RouteOutcome {
         // A request whose lines no response can echo is refused unanswered.
-        if let Ok(resp) = self.refusals.refuse(req, retry_after_sec, self.now_ms()) {
+        if let Ok(resp) = self.refusals.refuse(req, src, retry_after_sec, self.now_ms()) {
             self.send_own_final(req, src, &resp).await;
         }
         self.metrics.record_reject(metric);
@@ -103,7 +103,7 @@ impl ProxyCore {
         req: &SipRequest,
         src: SocketAddr,
     ) -> Option<RouteOutcome> {
-        let resp = self.refusals.repeat(req, self.now_ms())?;
+        let resp = self.refusals.repeat(req, src, self.now_ms())?;
         self.send_own_final(req, src, &resp).await;
         Some(RouteOutcome { decision: RoutingDecisionKind::Reject, target: None })
     }
@@ -117,12 +117,13 @@ impl ProxyCore {
         req: &SipRequest,
         src: SocketAddr,
     ) -> Option<RouteOutcome> {
-        let resp = self.refusals.cancel(req, self.now_ms())?;
+        let resp = self.refusals.cancel(req, src, self.now_ms())?;
         self.send_own_final(req, src, &resp).await;
         Some(RouteOutcome { decision: RoutingDecisionKind::Cancel, target: None })
     }
 
-    /// Synthesize a UAS response to the source.
+    /// Synthesize a UAS response to the source, recorded on its topmost Via
+    /// (RFC 3261 §18.2.1, RFC 3581 §4).
     async fn reply(
         &self,
         req: &SipRequest,
@@ -134,6 +135,7 @@ impl ProxyCore {
         let opts = GenerateResponseOpts {
             to_tag: Some(self.refusals.to_tag(req)),
             extra_headers: extra.to_vec(),
+            incoming_source: Some((src.ip().to_string(), src.port())),
             ..Default::default()
         };
         if let Ok(resp) = generate_response(req, status, reason, &opts) {

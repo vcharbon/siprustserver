@@ -186,7 +186,7 @@ impl ProxyCore {
         };
 
         // ── A copy of a refused request (§8.2.7) ────────────────────────────
-        // It draws the refusal's bytes and is neither counted as a new call
+        // It draws the refusal's 503 and is neither counted as a new call
         // nor judged again: a gate or a cap that cleared since must not admit
         // a transaction this hop already refused. A worker's request is never
         // refused (it bypasses the gate and goes to its Request-URI), so it
@@ -359,7 +359,7 @@ impl ProxyCore {
                 via_cookie: via_cookie.clone(),
             };
             self.cancel_lru.remember(&key, entry, crate::cancel_lru::INVITE_ENTRY_TTL_MS);
-            self.metrics.set_pending_invite_lru_size(self.cancel_lru.size() as u64);
+            self.cancel_lru.publish(&self.metrics);
         }
 
         // ── Freeze + forward ────────────────────────────────────────────────

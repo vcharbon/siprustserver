@@ -15,9 +15,11 @@ use super::peer_failures::{PeerFailureKind, PeerScope};
 use crate::resolver::{outcome, refresh_outcome};
 use crate::self_gate::ShedReason;
 
+mod branch_memo;
 mod intake;
 mod overload;
 mod parse;
+pub use branch_memo::{BRANCH_MEMO_BYTES, BRANCH_MEMO_EVICTIONS};
 pub use intake::{INTAKE_SHED, INTAKE_UNANSWERABLE};
 pub use overload::{
     LB_EMERGENCY_BYPASSED, LB_RATE_CAP_SPILLED, OVERLOAD_REJECTIONS, WORKER_STALE_DECREASE,
@@ -437,6 +439,8 @@ pub const PROXY: &[Family] = &[
     ROUTING_DURATION_SECONDS,
     RECORD_ROUTE_INSERTED,
     PENDING_INVITE_LRU_SIZE,
+    BRANCH_MEMO_BYTES,
+    BRANCH_MEMO_EVICTIONS,
     NAMED_SENDS,
     RESOLVER_REFRESH,
     RESOLVER_CACHE_SIZE,

@@ -107,6 +107,10 @@
 //!   PROXY_RETRY_AFTER_JITTER_SEC  spread added to a refusal's Retry-After
 //!                    base, seconds 0..3600; every copy of one request draws
 //!                    the same value                           (default 5)
+//!   PROXY_BRANCH_MEMO_MAX_ENTRIES  entry cap of the CANCEL/ACK/retransmission
+//!                    branch memo, ≥ 1 (default: 2 048 calls/s of working set)
+//!   PROXY_BRANCH_MEMO_MAX_BYTES    byte budget of that memo, ≥ 1 (default:
+//!                    the entry cap × 512 bytes)
 
 // The panic set at deny outside test code (ADR-0051 §3).
 #![cfg_attr(
@@ -303,7 +307,10 @@ async fn run() -> Result<i32, String> {
 
     // The CANCEL/rtx LRU, the refusal memo and the cap on parse-refusal 400s
     // are ONE instance across shards (`SharedRouting`).
-    let cancel_lru = Arc::new(sip_proxy::cancel_lru::CancelBranchLru::with_clock(clock.clone()));
+    let cancel_lru = Arc::new(sip_proxy::cancel_lru::CancelBranchLru::with_bounds(
+        clock.clone(),
+        cfg.branch_memo,
+    ));
     let refusals =
         Arc::new(sip_proxy::refusals::Refusals::new(&id_gen, cfg.retry_after_jitter_sec));
     let parse_refusals = Arc::new(sip_proxy::parse_refusals::ParseRefusals::new(&id_gen));

@@ -20,14 +20,20 @@
 //! and `core/response.rs`) and the retransmission target memo (`rtx|`-prefixed
 //! keys, see `core/request`).
 //!
-//! Reads are O(1) and lock-only (never block on I/O). Eviction is lazy on
-//! lookup plus an optional periodic [`sweep_expired`](CancelBranchLru::sweep_expired)
-//! the owner task can drive.
+//! Keys are written by whoever sends the proxy a request, so the memo is
+//! bounded in entries and bytes ([`MemoBounds`]); past a bound it forgets the
+//! entries nearest their expiry and counts them. Expiry and eviction walk an
+//! index ordered by expiry, so their work is what they remove, never the
+//! table. Reads and writes take one stripe's lock and never block on I/O.
 
-use std::collections::HashMap;
+mod bounds;
+mod stripe;
+
+use std::collections::hash_map::RandomState;
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::hash::BuildHasher;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use sip_clock::Clock;
 use sip_message::header::Via;
@@ -37,6 +43,11 @@ use crate::addr::ProxyAddr;
 use crate::observability::ProxyMetrics;
 use crate::poison::{locked, INVITE_BRANCH_LRU};
 use crate::strategy::RouteParams;
+pub use bounds::{
+    MemoBounds, DEFAULT_MAX_BYTES, DEFAULT_MAX_ENTRIES, DEFAULT_STRIPES, DESIGN_CPS,
+    ENTRY_MS_PER_CALL, TYPICAL_ENTRY_BYTES,
+};
+use stripe::{Change, Stripe};
 
 /// TTL for pending-INVITE entries (CANCEL forwarding + non-2xx ACK synthesis).
 /// Must cover the downstream UA's **whole INVITE transaction window**: the
@@ -158,76 +169,71 @@ pub struct CancelEntry {
     pub via_cookie: Option<RouteParams>,
 }
 
-struct StoredEntry {
-    entry: CancelEntry,
-    expires_at_ms: u64,
+/// The CANCEL / ACK / retransmission memo: [`DEFAULT_STRIPES`] independently
+/// locked stripes, each bounded by its share of [`MemoBounds`]. Cheap to
+/// share behind an `Arc`.
+///
+/// Concurrency: a key hashes to one stripe and every operation on it takes
+/// that stripe's lock alone, for work proportional to what it removes; the
+/// totals are lock-free counters.
+pub struct CancelBranchLru {
+    stripes: Box<[Mutex<Stripe>]>,
+    hasher: RandomState,
+    clock: Clock,
+    len: AtomicUsize,
+    bytes: AtomicUsize,
+    evicted: AtomicU64,
+    /// Latched by the first [`ensure_sweeper`](Self::ensure_sweeper) caller so
+    /// N recv-shard cores sharing one LRU spawn exactly one sweeper.
+    sweeper_claimed: AtomicBool,
 }
 
-/// The bounds of a [`CancelBranchLru`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MemoBounds {
-    pub max_entries: usize,
-    pub max_bytes: usize,
-    pub stripes: usize,
-}
-
-impl Default for MemoBounds {
-    fn default() -> Self {
-        Self { max_entries: usize::MAX, max_bytes: usize::MAX, stripes: 1 }
-    }
-}
-
-/// What one expiry pass did.
+/// What one expiry pass did: the entries it removed and the expiry-index
+/// entries it looked at (each removed one, plus the live one that ends the
+/// pass in each non-empty stripe).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Swept {
     pub removed: usize,
     pub inspected: usize,
 }
 
-/// The TTL cache. Cheap to share behind an `Arc`.
-pub struct CancelBranchLru {
-    table: Mutex<HashMap<String, StoredEntry>>,
-    clock: Clock,
-    /// Latched by the first [`ensure_sweeper`](Self::ensure_sweeper) caller so
-    /// N recv-shard cores sharing one LRU spawn exactly one sweeper.
-    sweeper_claimed: AtomicBool,
-}
-
 impl CancelBranchLru {
-    /// System clock.
+    /// System clock, default bounds.
     pub fn new() -> Self {
         Self::with_clock(Clock::system())
     }
 
     /// Explicit clock (tests use `Clock::test_at(..)` for deterministic
-    /// eviction under `tokio::time`).
+    /// eviction under `tokio::time`), default bounds.
     pub fn with_clock(clock: Clock) -> Self {
-        Self { table: Mutex::new(HashMap::new()), clock, sweeper_claimed: AtomicBool::new(false) }
+        Self::with_bounds(clock, MemoBounds::default())
     }
 
-    pub fn with_bounds(clock: Clock, _bounds: MemoBounds) -> Self {
-        Self::with_clock(clock)
-    }
-
-    pub fn evicted(&self) -> u64 {
-        0
-    }
-
-    pub fn bytes(&self) -> usize {
-        0
+    /// Explicit clock and bounds.
+    pub fn with_bounds(clock: Clock, bounds: MemoBounds) -> Self {
+        let (max_entries, max_bytes) = bounds.per_stripe();
+        let stripes =
+            (0..bounds.stripe_count()).map(|_| Mutex::new(Stripe::new(max_entries, max_bytes)));
+        Self {
+            stripes: stripes.collect(),
+            hasher: RandomState::new(),
+            clock,
+            len: AtomicUsize::new(0),
+            bytes: AtomicUsize::new(0),
+            evicted: AtomicU64::new(0),
+            sweeper_claimed: AtomicBool::new(false),
+        }
     }
 
     /// Spawn the background sweeper for this LRU — once. Every `ProxyCore::run`
     /// calls this; the first caller claims it and N recv-shard cores sharing one
-    /// LRU don't end up with N sweepers. `lookup` only evicts an entry looked up
-    /// *after* expiry — which an answered (2xx) call never is (no CANCEL, no
-    /// proxy-absorbed ACK) — so without the sweep the map (and
-    /// `sip_proxy_pending_invite_lru_size`) grows ≈ the cumulative-INVITE count
-    /// for the life of the process. Sweeping every half-TTL physically reclaims
-    /// expired slots and re-publishes the gauge, pinning the map at ~1× working
-    /// set. The task is detached (process-lifetime, like the LRU itself) and
-    /// restarted when a sweep panics; supervision exits the process if a core
-    /// dies, so an orphaned sweeper cannot outlive the data path in production.
+    /// LRU don't end up with N sweepers. A write expires its own stripe and a
+    /// lookup an expired entry it meets, so a stripe nobody writes to keeps its
+    /// expired entries until this sweep reclaims them; each sweep also
+    /// re-publishes the memo's series ([`publish`](Self::publish)). The task is
+    /// detached (process-lifetime, like the LRU itself) and restarted when a
+    /// sweep panics; supervision exits the process if a core dies, so an
+    /// orphaned sweeper cannot outlive the data path in production.
     pub fn ensure_sweeper(self: &Arc<Self>, metrics: Arc<ProxyMetrics>) {
         if self.sweeper_claimed.swap(true, Ordering::SeqCst) {
             return;
@@ -247,7 +253,7 @@ impl CancelBranchLru {
                 loop {
                     tick.tick().await;
                     lru.sweep_expired();
-                    metrics.set_pending_invite_lru_size(lru.size() as u64);
+                    lru.publish(&metrics);
                 }
             }
         });
@@ -257,43 +263,91 @@ impl CancelBranchLru {
         u64::try_from(self.clock.now_ms()).unwrap_or(0)
     }
 
+    fn stripe(&self, key: &str) -> MutexGuard<'_, Stripe> {
+        let count = u64::try_from(self.stripes.len()).unwrap_or(1).max(1);
+        let slot = usize::try_from(self.hasher.hash_one(key) % count).unwrap_or(0);
+        #[expect(clippy::indexing_slicing, reason = "a remainder of the stripe count")]
+        let stripe = &self.stripes[slot];
+        locked(stripe, INVITE_BRANCH_LRU)
+    }
+
+    /// Fold one stripe operation's [`Change`] into the totals, under that
+    /// stripe's lock: an entry's removal is then counted after its addition,
+    /// and no total reads below what the stripes hold.
+    fn account(&self, change: &Change) {
+        self.len.fetch_add(change.added, Ordering::Relaxed);
+        self.len.fetch_sub(change.removed, Ordering::Relaxed);
+        self.bytes.fetch_add(change.bytes_added, Ordering::Relaxed);
+        self.bytes.fetch_sub(change.bytes_removed, Ordering::Relaxed);
+        let evicted = u64::try_from(change.evicted).unwrap_or(u64::MAX);
+        self.evicted.fetch_add(evicted, Ordering::Relaxed);
+    }
+
     /// Remember the downstream target + outbound branch used on a forward.
     /// TTL is per entry: [`INVITE_ENTRY_TTL_MS`] for CANCEL/ACK correlation,
-    /// [`RTX_ENTRY_TTL_MS`] for retransmission target memos.
+    /// [`RTX_ENTRY_TTL_MS`] for retransmission target memos. A rewrite of a
+    /// held key replaces its entry and its expiry. The write first forgets
+    /// the expired entries of its stripe, then, past a bound, the entries
+    /// nearest their expiry (counted in [`evicted`](Self::evicted)). Nothing
+    /// is refused for want of room: a request whose memo was forgotten is
+    /// routed as one this hop never saw.
     pub fn remember(&self, key: &str, entry: CancelEntry, ttl_ms: u64) {
-        let expires_at_ms = self.now_ms() + ttl_ms;
-        locked(&self.table, INVITE_BRANCH_LRU)
-            .insert(key.to_string(), StoredEntry { entry, expires_at_ms });
+        let now = self.now_ms();
+        let mut change = Change::default();
+        let mut stripe = self.stripe(key);
+        stripe.expire(now, &mut change);
+        stripe.insert(key, entry, now.saturating_add(ttl_ms), &mut change);
+        self.account(&change);
     }
 
     /// Look up a remembered entry (for a CANCEL / ACK). Lazily evicts an expired
     /// entry and returns `None` for it.
     pub fn lookup(&self, key: &str) -> Option<CancelEntry> {
         let now = self.now_ms();
-        let mut table = locked(&self.table, INVITE_BRANCH_LRU);
-        match table.get(key) {
-            Some(e) if e.expires_at_ms <= now => {
-                table.remove(key);
-                None
-            }
-            Some(e) => Some(e.entry.clone()),
-            None => None,
-        }
+        let mut change = Change::default();
+        let mut stripe = self.stripe(key);
+        let found = stripe.get(key, now, &mut change);
+        self.account(&change);
+        found
     }
 
-    /// Current map size — tests/metrics.
+    /// The entries held.
     pub fn size(&self) -> usize {
-        locked(&self.table, INVITE_BRANCH_LRU).len()
+        self.len.load(Ordering::Relaxed)
     }
 
-    /// Drop all expired entries; returns the count swept. The owner task calls
-    /// this periodically.
+    /// The bytes the held entries account for.
+    pub fn bytes(&self) -> usize {
+        self.bytes.load(Ordering::Relaxed)
+    }
+
+    /// The entries forgotten before their expiry, the memo being at a bound.
+    pub fn evicted(&self) -> u64 {
+        self.evicted.load(Ordering::Relaxed)
+    }
+
+    /// Drop every expired entry, stripe by stripe. The owner task calls this
+    /// periodically.
     pub fn sweep_expired(&self) -> Swept {
         let now = self.now_ms();
-        let mut table = locked(&self.table, INVITE_BRANCH_LRU);
-        let before = table.len();
-        table.retain(|_, e| e.expires_at_ms > now);
-        Swept { removed: before - table.len(), inspected: before }
+        let mut swept = Swept { removed: 0, inspected: 0 };
+        for stripe in &self.stripes {
+            let mut change = Change::default();
+            let mut stripe = locked(stripe, INVITE_BRANCH_LRU);
+            stripe.expire(now, &mut change);
+            self.account(&change);
+            drop(stripe);
+            swept.removed = swept.removed.saturating_add(change.removed);
+            swept.inspected = swept.inspected.saturating_add(change.inspected);
+        }
+        swept
+    }
+
+    /// Publish the memo's size, bytes and evictions to `metrics`.
+    pub fn publish(&self, metrics: &ProxyMetrics) {
+        let as_u64 = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+        metrics.set_pending_invite_lru_size(as_u64(self.size()));
+        metrics.set_branch_memo(as_u64(self.bytes()), self.evicted());
     }
 }
 

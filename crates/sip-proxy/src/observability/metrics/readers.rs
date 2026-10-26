@@ -23,6 +23,9 @@ impl ProxyMetrics {
     pub fn pending_invite_lru_size(&self) -> u64 {
         self.pending_invite_lru_size.load(Ordering::Relaxed)
     }
+    pub fn branch_memo_evictions(&self) -> u64 {
+        self.branch_memo_evictions.load(Ordering::Relaxed)
+    }
     pub fn calls_total(&self) -> u64 {
         self.calls.load(Ordering::Relaxed)
     }

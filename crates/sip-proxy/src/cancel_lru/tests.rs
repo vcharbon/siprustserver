@@ -24,11 +24,12 @@ fn key(call_id: &str) -> String {
 /// caller takes it as it stands, and the recovery is counted.
 #[test]
 fn a_panic_under_the_table_lock_leaves_it_serving() {
-    let lru = Arc::new(CancelBranchLru::with_clock(Clock::test_at(0)));
+    let bounds = MemoBounds { stripes: 1, ..MemoBounds::default() };
+    let lru = Arc::new(CancelBranchLru::with_bounds(Clock::test_at(0), bounds));
     lru.remember(&key("before"), entry("z9hG4bK-before"), 60_000);
     let poisoner = lru.clone();
     let _ = std::thread::spawn(move || {
-        let _held = poisoner.table.lock();
+        let _held = poisoner.stripes[0].lock();
         panic!("a panic under the table lock");
     })
     .join();
@@ -213,4 +214,17 @@ async fn sweep_drops_expired() {
     tokio::time::advance(std::time::Duration::from_millis(1001)).await;
     assert_eq!(lru.sweep_expired().removed, 2);
     assert_eq!(lru.size(), 0);
+}
+
+/// The default bounds hold the working set of `DESIGN_CPS` calls a second,
+/// the figures the proxy's settings table states.
+#[test]
+fn the_default_bounds_hold_the_design_working_set() {
+    let d = MemoBounds::default();
+    assert_eq!(d.max_entries, 1_464_320);
+    assert_eq!(d.max_bytes, 1_464_320 * TYPICAL_ENTRY_BYTES);
+    assert_eq!(d.stripes, DEFAULT_STRIPES);
+    let ordinary = entry("z9hG4bK.4f3c1b2a9e8d7c6b5a4f3e2d1c0b");
+    let at = super::bounds::footprint(&key("a84b4c76e66710@pc33.atlanta.example.com"), &ordinary);
+    assert!(at <= TYPICAL_ENTRY_BYTES, "an ordinary entry accounts {at} bytes");
 }

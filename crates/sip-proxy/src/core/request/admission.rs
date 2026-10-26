@@ -1,6 +1,6 @@
 //! Which requests are new calls, and the proxy-self gate (intake-age/CPS
 //! admission) a new call meets: a refused one is answered 503 with
-//! Retry-After and no Reason, the same bytes for every copy; an emergency
+//! Retry-After and no Reason, the same one for every copy; an emergency
 //! call bypasses the gate.
 //!
 //! A new call is an initial INVITE (no To-tag), first transmission only, that

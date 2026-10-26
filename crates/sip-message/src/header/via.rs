@@ -181,13 +181,13 @@ impl Via {
 
     /// Stamp what the receiving side observed (RFC 3261 §18.2.1, RFC 3581 §4):
     /// `received` is the source address whenever it differs from the sent-by
-    /// host, the sender asked for `rport` (even when they are equal), or the
-    /// hop already carries a `received`, which is the sender's own writing and
-    /// is never kept; `rport` is the source port when the sender asked for it.
+    /// host, the hop carries `rport` (even when they are equal), or the hop
+    /// already carries a `received`; `rport` is the source port whenever the
+    /// hop carries one. A value the sender wrote in either is never kept.
     /// Two IP literals differ as addresses, an IPv4-mapped IPv6 address being
     /// its IPv4 address; anything else as text.
     pub fn stamped_from(mut self, source_host: &str, source_port: u16) -> Self {
-        let rport_asked = matches!(self.rport(), Some(Rport::Requested));
+        let rport_asked = self.params.get(RPORT.as_str()).is_some();
         let same_host = match (ip_host(self.host()), ip_host(source_host)) {
             (Some(sent_by), Some(source)) => sent_by.to_canonical() == source.to_canonical(),
             _ => self.host() == source_host,

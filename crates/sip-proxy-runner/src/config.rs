@@ -9,6 +9,7 @@ mod reader;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use sip_proxy::cancel_lru::MemoBounds;
 use sip_proxy::health::HealthProbeConfig;
 use sip_proxy::load_observer::LoadObserverConfig;
 use sip_proxy::resolver::ResolverConfig;
@@ -61,6 +62,8 @@ pub struct ProxyConfig {
     pub self_gate: Option<ProxySelfGateConfig>,
     /// The spread, seconds, added to a refusal's `Retry-After` base.
     pub retry_after_jitter_sec: u32,
+    /// The entry cap and byte budget of the CANCEL/ACK branch memo.
+    pub branch_memo: MemoBounds,
     pub resolver: ResolverConfig,
     pub prewarm: Vec<ProxyAddr>,
     pub drain_grace: Duration,
@@ -107,6 +110,7 @@ impl ProxyConfig {
         let intake_shed_pct = env.int("PROXY_INTAKE_SHED_PCT", 50, 0, 100);
         let self_gate = self_gate(&mut env);
         let retry_after_jitter_sec = env.int_u32("PROXY_RETRY_AFTER_JITTER_SEC", 5, 0, 3600);
+        let branch_memo = branch_memo(&mut env);
         let resolver = resolver(&mut env);
         let prewarm = prewarm(&mut env);
         let drain_grace = Duration::from_millis(env.int("PROXY_DRAIN_GRACE_MS", 5000, 1, MAX_MS));
@@ -140,6 +144,7 @@ impl ProxyConfig {
             intake_shed_pct,
             self_gate,
             retry_after_jitter_sec,
+            branch_memo,
             resolver,
             prewarm,
             drain_grace,
@@ -323,6 +328,20 @@ fn self_gate(env: &mut EnvReader) -> Option<ProxySelfGateConfig> {
         ..d
     };
     on.then_some(cfg)
+}
+
+/// The branch memo's entry cap and byte budget.
+fn branch_memo(env: &mut EnvReader) -> MemoBounds {
+    let d = MemoBounds::default();
+    let mut size = |key: &str, default: usize| {
+        let default = u64::try_from(default).unwrap_or(u64::MAX);
+        usize::try_from(env.int(key, default, 1, u64::MAX)).unwrap_or(usize::MAX)
+    };
+    MemoBounds {
+        max_entries: size("PROXY_BRANCH_MEMO_MAX_ENTRIES", d.max_entries),
+        max_bytes: size("PROXY_BRANCH_MEMO_MAX_BYTES", d.max_bytes),
+        ..d
+    }
 }
 
 /// The named-target resolver's cache and lookup bounds.
