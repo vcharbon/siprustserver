@@ -506,38 +506,31 @@ impl CallState {
     /// resident copy the store is left alone: the delete would name no call, and
     /// what the store holds for the ref may be another one.
     pub fn remove(&self, call_ref: &str) {
-        // Resolve the replication target BEFORE evicting the in-memory call (the
-        // topology lookup `backup_of` needs the call still present).
-        let target = self.repl.as_ref().map(|repl| (self.store_target(call_ref), repl));
+        self.log_delete(call_ref);
+        self.drop_local(call_ref);
+    }
 
-        // The call map first, the stamp last: a panic between them leaves only
-        // derived entries the sweep reconciles.
-        let mut inner = self.locked();
-        let removed = inner.calls.remove(call_ref);
-        inner.topologies.remove(call_ref);
-        inner.takeover.remove(call_ref);
-        let keys = inner.indexed.remove(call_ref).unwrap_or_default();
-        inner.unindex(call_ref, &keys);
-        let mut answered = false;
-        let mut incarnation = None;
-        if let Some(was) = removed {
-            inner.restate_uncounted(was.limiter.runs_uncounted(), false);
-            self.publish_uncounted(&inner);
-            answered = call::helpers::caller_answered(&was);
-            incarnation = Some(was.incarnation().to_string());
-        }
-        inner.locks.remove(call_ref);
-        inner.touched.remove(call_ref);
-        inner.shrink_idle();
-        drop(inner);
-
-        if let (Some(((role, primary, mut opts), repl)), Some(incarnation)) = (target, incarnation)
-        {
-            // The delete names the call it removes: its tombstone buries that
-            // call, not a later one born on the same ref.
-            opts.incarnation = Some(incarnation);
-            let _ = repl.write_delete(role, &primary, call_ref, &keys, answered, &opts);
-        }
+    /// Write the delete of the resident call `call_ref` to the store, when a
+    /// replication store is wired, leaving the call resident: a terminal turn
+    /// logs its delete before its effects leave (ADR-0055 §3) and evicts the
+    /// call after them. The delete states whether the copy had answered the
+    /// caller (ADR-0031 D3) and names the call it removes, so its tombstone
+    /// buries that call, not a later one born on the same ref.
+    pub fn log_delete(&self, call_ref: &str) {
+        let Some(repl) = self.repl.as_ref() else {
+            return;
+        };
+        let (role, primary, mut opts) = self.store_target(call_ref);
+        let (keys, answered, incarnation) = {
+            let inner = self.locked();
+            let Some(call) = inner.calls.get(call_ref) else {
+                return;
+            };
+            let keys = inner.indexed.get(call_ref).cloned().unwrap_or_default();
+            (keys, call::helpers::caller_answered(call), call.incarnation().to_string())
+        };
+        opts.incarnation = Some(incarnation);
+        let _ = repl.write_delete(role, &primary, call_ref, &keys, answered, &opts);
     }
 
     /// **Local-only self-release teardown** (ADR-0014): drop a live acting-backup

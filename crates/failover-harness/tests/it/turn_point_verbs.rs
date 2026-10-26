@@ -128,3 +128,40 @@ async fn a_request_steered_by_health_is_served_by_the_backups_copy() {
     cluster.fh.advance(Duration::from_millis(500)).await;
     hang_up(&cluster, &mut dialog, &bob, &alice).await;
 }
+
+/// A turn that ends the call hands the call's delete to replication before
+/// any of its effects leaves (ADR-0055 §3): held where its write is logged,
+/// the turn counts as one that wrote, and the backup drops the call's replica.
+#[tokio::test(start_paused = true)]
+async fn a_terminal_turn_logs_its_delete_before_its_effects_leave() {
+    let (cluster, alice, bob) = cluster("terminal-turn-logged").await;
+    let placement = cluster.place_next_call(&alice, "b1");
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(cluster.proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let (mut dialog, _) = answer(&mut call, &mut uas, &bob).await;
+    cluster.fh.advance(Duration::from_millis(500)).await;
+    let call_ref = cluster.fh.turn_points().first_call().expect("a call").0;
+    let backup = cluster.node(&placement.backup);
+    assert!(backup.scan_backed_up(&placement.primary).contains(&call_ref));
+
+    let mut bye = dialog.bye().await;
+    let mut bye_in = bob.receive_tolerating("BYE", &["OPTIONS"]).await;
+    let terminal = cluster.fh.turn_points().turns(&call_ref).len() + 1;
+    let reached = cluster.fh.turn_points().arm(TurnAt { turn: terminal, point: TurnPoint::Logged });
+    bye_in.respond(200, "OK").await;
+    let held = reached.await.expect("the terminal turn is reached");
+    assert_eq!(held.node, placement.primary, "the turn is held at the primary");
+    cluster.fh.advance(Duration::from_millis(300)).await;
+    let turn = cluster.fh.turn_points().turns(&call_ref)[terminal - 1];
+    assert!(turn.wrote, "the terminal turn wrote the call's delete");
+    assert!(
+        !backup.scan_backed_up(&placement.primary).contains(&call_ref),
+        "the backup applied the delete while the turn's effects wait"
+    );
+    held.release();
+    bye.expect_tolerating(200, &["OPTIONS"]).await;
+    let drained = cluster.fh.settle_terminal(async || cluster.is_clear_of(&call_ref).await).await;
+    assert!(drained, "the cluster forgets the call");
+    cluster.fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    assert_call_fully_over(&cluster.nodes(), &call_ref, &cluster.limiter).await;
+}

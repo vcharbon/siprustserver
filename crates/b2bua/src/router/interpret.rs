@@ -1,7 +1,8 @@
 //! The effect interpreter: persist the handler result, then run its typed
 //! effects in the fixed order persist → critical → outbound → soft → buffered,
-//! with terminal eviction last (ADR-0020 X2) and fire-and-forget callouts
-//! detached at the end.
+//! with fire-and-forget callouts detached at the end. A turn that removes the
+//! call enqueues its CDR and logs its delete at the persist step, before any
+//! effect leaves (ADR-0020 X2, ADR-0055 §3), and evicts the call last.
 
 use std::sync::Arc;
 
@@ -128,14 +129,28 @@ pub(super) async fn process_result(
     // whose primary crashed never propagates that progress; a reclaim racing
     // the in-flight BYE then pulls a STALE `Active` snapshot, restarts
     // termination, and re-sends the BYE at the *reused* CSeq a real UAS drops
-    // (matrix cells C7/RFC). Only `Terminated` is excluded — it takes the
-    // `RemoveCall` delete path below instead.
-    let wrote = quiet.is_none()
-        && matches!(result.call.state, CallModelState::Active | CallModelState::Terminating)
-        && ctx.state.backup_of(call_ref).is_some();
-    if wrote {
-        ctx.state.flush(&result.call);
-    }
+    // (matrix cells C7/RFC). A turn that removes the call writes its delete
+    // instead, after its CDR is enqueued (ADR-0020 X2): a delete propagated
+    // before the CDR would let a failure in that window erase the call
+    // everywhere with no CDR.
+    let remove_call =
+        result.effects.critical.iter().any(|e| matches!(e, CriticalStateEffect::RemoveCall));
+    let backed = ctx.state.backup_of(call_ref).is_some();
+    let wrote = if remove_call {
+        if has_cdr(&result) {
+            ctx.cdr.write(&result.call, now_ms).await;
+        }
+        ctx.state.log_delete(call_ref);
+        backed
+    } else {
+        let wrote = quiet.is_none()
+            && matches!(result.call.state, CallModelState::Active | CallModelState::Terminating)
+            && backed;
+        if wrote {
+            ctx.state.flush(&result.call);
+        }
+        wrote
+    };
     reach(ctx, call_ref, TurnPoint::Logged, wrote, kind).await;
     // A re-INVITE's first provisional follows the write that records it.
     if let Some(reinvite) =
@@ -144,13 +159,9 @@ pub(super) async fn process_result(
         super::hold::first_provisional(ctx, call_ref, reinvite).await;
     }
 
-    // The terminal `RemoveCall` is interpreted LAST — after the buffered
-    // `WriteCdr` enqueue (ADR-0020 X2): propagating the replica delete before
-    // the CDR is enqueued would let a failure in that window erase the call
-    // everywhere (including the backup Element) with no CDR. Deferring only
-    // delays the eviction / txn-cancel by the in-process lanes below; the call
-    // is already unreachable for new work (its state is persisted and terminal).
-    let mut remove_call = false;
+    // The terminal eviction runs LAST, its delete already logged above: the
+    // call is unreachable for new work (its state is persisted and terminal),
+    // and its transactions are torn down once this turn's answers are sent.
     for eff in &result.effects.critical {
         match eff {
             CriticalStateEffect::ScheduleTimer(entry) => {
@@ -169,7 +180,7 @@ pub(super) async fn process_result(
             CriticalStateEffect::CancelAllTimers => {
                 ctx.timers.cancel_all(call_ref.to_string()).await
             }
-            CriticalStateEffect::RemoveCall => remove_call = true,
+            CriticalStateEffect::RemoveCall => {}
             CriticalStateEffect::RelinquishAnsweredInvite { via } => {
                 if let Some(branch) = via.branch() {
                     let key = sip_txn::ServerTxnKey::invite(
@@ -198,6 +209,8 @@ pub(super) async fn process_result(
 
     for eff in &result.effects.buffered {
         match eff {
+            // Enqueued before the call's delete.
+            BufferedObservabilityEffect::WriteCdr if remove_call => {}
             BufferedObservabilityEffect::WriteCdr => ctx.cdr.write(&result.call, now_ms).await,
             BufferedObservabilityEffect::SecondFinalRefused { .. } => {
                 ctx.metrics.bump_second_final_refused()
@@ -216,8 +229,8 @@ pub(super) async fn process_result(
         }
     }
 
-    // Terminal eviction last of all (ADR-0020 X2): the CDR is enqueued before
-    // the call — and its replicated Element — ceases to exist anywhere.
+    // Terminal eviction last of all: the CDR and the delete were written before
+    // the turn's effects left.
     if remove_call {
         ctx.late_pracks.remember(&result.call, now_ms);
         release_call(ctx, call_ref, ReleaseKind::Terminated).await;
@@ -299,6 +312,11 @@ pub(super) async fn process_result(
             }
         }
     }
+}
+
+/// Whether the turn's result enqueues the call's CDR.
+fn has_cdr(result: &HandlerResult) -> bool {
+    result.effects.buffered.iter().any(|e| matches!(e, BufferedObservabilityEffect::WriteCdr))
 }
 
 /// Report the turn of `call_ref` at `point` to the turn-point seam, with the
