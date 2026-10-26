@@ -15,16 +15,15 @@ const LABEL: &[u8] = b"sip-proxy/own-final-to-tag/v1";
 /// label under `cookie_key`. A key HMAC refused (none is) would leave the
 /// tagger keyed by this instance's own secret, drawn from `id_gen`.
 pub fn own_final_tagger(cookie_key: &[u8], id_gen: &IdGen) -> StatelessTagger {
-    derived_secret(cookie_key)
-        .map_or_else(|| StatelessTagger::from_id_gen(id_gen), StatelessTagger::with_secret)
+    derived_key(cookie_key)
+        .and_then(|key| StatelessTagger::keyed(&key))
+        .unwrap_or_else(|| StatelessTagger::from_id_gen(id_gen))
 }
 
-fn derived_secret(cookie_key: &[u8]) -> Option<u64> {
+fn derived_key(cookie_key: &[u8]) -> Option<[u8; 32]> {
     let mut mac = Hmac::<Sha256>::new_from_slice(cookie_key).ok()?;
     mac.update(LABEL);
-    let digest = mac.finalize().into_bytes();
-    let secret: [u8; 8] = digest.get(..8)?.try_into().ok()?;
-    Some(u64::from_le_bytes(secret))
+    Some(mac.finalize().into_bytes().into())
 }
 
 #[cfg(test)]
@@ -32,7 +31,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn one_key_derives_one_tagger_and_another_key_another() {
+    fn one_key_derives_one_pinned_tag_and_another_key_another() {
         let parse = |raw: &str| match sip_message::CustomParser::new().parse(raw.as_bytes()) {
             Ok(sip_message::SipMessage::Request(r)) => r,
             _ => panic!("a request"),
@@ -47,5 +46,9 @@ mod tests {
         let tag = |key: &[u8]| own_final_tagger(key, &id_gen).for_request(&invite).0;
         assert_eq!(tag(b"0123456789abcdef-one"), tag(b"0123456789abcdef-one"));
         assert_ne!(tag(b"0123456789abcdef-one"), tag(b"0123456789abcdef-two"));
+        // Pinned: every proxy of a deployment, whatever its build, derives
+        // this tag, so a change of derivation shows here before a rolling
+        // upgrade stops absorbing the other proxies' ACKs.
+        assert_eq!(tag(b"0123456789abcdef-golden"), "b362222fb49239cb");
     }
 }

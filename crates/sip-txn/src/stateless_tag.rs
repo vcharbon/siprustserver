@@ -2,36 +2,40 @@
 //! roll) derived from the request itself, so every copy of one request draws
 //! the same answer (RFC 3261 §8.2.7).
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::Hasher;
-
+use sip_ids::SigningKey;
 use sip_message::header::{CSeq, CallId, From, Via};
 use sip_message::{Method, RequestPartial, SipRequest};
 
 use crate::rng::IdGen;
 
 /// Derives a transactionless answer's identity from the request, with the
-/// keyed construction of RFC 3261 §19.3: a per-instance `secret` mixed with
-/// the request's identity. Clone shares the secret.
+/// keyed construction of RFC 3261 §19.3: HMAC-SHA256 under a secret key over
+/// the request's identity, so the tags are the same wherever the key is, in
+/// any build, and unguessable elsewhere. Clone shares the key.
 #[derive(Debug, Clone)]
 pub struct StatelessTagger {
-    secret: u64,
+    key: SigningKey,
 }
 
 impl StatelessTagger {
-    /// Draw the instance secret: one tag's worth of entropy from `id_gen`,
-    /// hashed to a `u64` and fixed for this tagger's life, so the derived tags
-    /// are stable here and unguessable elsewhere.
+    /// A tagger keyed by this instance's own secret, 32 bytes of four tags
+    /// drawn from `id_gen`, for an answerer that shares no key.
     pub fn from_id_gen(id_gen: &IdGen) -> Self {
-        let mut h = DefaultHasher::new();
-        h.write(id_gen.new_tag().as_bytes());
-        Self { secret: h.finish() }
+        let mut secret = [0u8; 32];
+        let drawn = (0..4).flat_map(|_| id_gen.new_tag().into_bytes());
+        for (slot, byte) in secret.iter_mut().zip(drawn) {
+            *slot = byte;
+        }
+        #[expect(clippy::expect_used, reason = "32 bytes is inside SigningKey's key range")]
+        let key = SigningKey::new(&secret).expect("a 32-byte key");
+        Self { key }
     }
 
-    /// A tagger keyed by `secret`: every instance given the same secret
-    /// derives the same tags, across restarts and hosts.
-    pub fn with_secret(secret: u64) -> Self {
-        Self { secret }
+    /// A tagger keyed by `secret` (16 to 64 bytes, [`SigningKey::new`]):
+    /// every instance given the same secret derives the same tags, across
+    /// restarts, hosts and builds. `None` for a secret of another length.
+    pub fn keyed(secret: &[u8]) -> Option<Self> {
+        SigningKey::new(secret).map(|key| Self { key })
     }
 
     /// The `(To-tag, roll)` for `req`: a keyed hash over Call-ID, From-tag,
@@ -59,14 +63,18 @@ impl StatelessTagger {
     }
 
     fn derive(&self, call_id: &CallId, from: &From, top_via: &Via, cseq: &CSeq) -> (String, u64) {
-        let mut h = DefaultHasher::new();
-        h.write_u64(self.secret);
-        h.write(call_id.as_str().as_bytes());
-        h.write(from.tag().unwrap_or("").as_bytes());
-        h.write(top_via.branch().unwrap_or("").as_bytes());
-        h.write_u32(cseq.seq());
-        h.write(cseq.method().as_str().as_bytes());
-        let key = h.finish();
+        let signature = self.key.sign(&[
+            call_id.as_str().as_bytes(),
+            from.tag().unwrap_or("").as_bytes(),
+            top_via.branch().unwrap_or("").as_bytes(),
+            &cseq.seq().to_le_bytes(),
+            cseq.method().as_str().as_bytes(),
+        ]);
+        let mut first = [0u8; 8];
+        for (slot, byte) in first.iter_mut().zip(signature) {
+            *slot = byte;
+        }
+        let key = u64::from_le_bytes(first);
         (format!("{key:016x}"), key)
     }
 }
