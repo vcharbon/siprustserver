@@ -1,9 +1,10 @@
 //! The one dispatch pass over a parsed header list.
 //!
 //! Every header the eager field model reads — mandatory and optional alike — is
-//! located in a single walk that dispatches on [`HeaderName`]. Extraction then
-//! reads slots instead of re-scanning the list per header type, so the cost of
-//! a parse is O(headers), not O(header types × headers).
+//! located in a single walk that dispatches on the [`HeaderId`] each line was
+//! classified as. Extraction then reads slots instead of re-scanning the list
+//! per header type, so the cost of a parse is O(headers), not O(header types ×
+//! headers).
 //!
 //! Values are borrowed from the header list and absent headers own nothing, so
 //! indexing a message allocates only for the multi-valued headers it actually
