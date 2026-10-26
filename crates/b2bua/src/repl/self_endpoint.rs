@@ -98,6 +98,9 @@ pub struct SelfObserver {
     own_identity_seen: AtomicBool,
     enabled: AtomicBool,
     state: watch::Sender<SelfEndpoint>,
+    /// Whether the latest synced snapshot shows the endpoint `ready` under
+    /// this worker's identity: the live sighting, not the latch.
+    ready_now: watch::Sender<bool>,
 }
 
 impl SelfObserver {
@@ -108,6 +111,7 @@ impl SelfObserver {
             own_identity_seen: AtomicBool::new(false),
             enabled: AtomicBool::new(false),
             state: watch::channel(SelfEndpoint::Unobserved).0,
+            ready_now: watch::channel(false).0,
         }
     }
 
@@ -115,11 +119,6 @@ impl SelfObserver {
     /// show the worker its own endpoint ([`topology::Membership::observes_self`]).
     pub fn enable(&self) {
         self.enabled.store(true, Ordering::SeqCst);
-    }
-
-    /// Whether [`enable`](Self::enable) was called.
-    pub fn is_enabled(&self) -> bool {
-        self.enabled.load(Ordering::SeqCst)
     }
 
     /// Evaluate one membership `snapshot`. `synced` is the source's
@@ -135,6 +134,10 @@ impl SelfObserver {
         if names_own {
             self.own_identity_seen.store(true, Ordering::SeqCst);
         }
+        self.ready_now.send_if_modified(|ready| {
+            let now = observed == Sighting::Ready;
+            std::mem::replace(ready, now) != now
+        });
         let own_identity_seen = self.own_identity_seen.load(Ordering::SeqCst);
         let mut transition = None;
         self.state.send_if_modified(|state| {
@@ -191,6 +194,14 @@ impl SelfObserver {
     /// A receiver that wakes on every transition; its value is the current state.
     pub fn subscribe(&self) -> watch::Receiver<SelfEndpoint> {
         self.state.subscribe()
+    }
+
+    /// The live sighting, once [`enable`](Self::enable)d: whether the latest
+    /// synced snapshot shows the endpoint `ready` under this worker's
+    /// identity. A readiness flap or a withdrawal reads `false` again. `None`
+    /// before `enable`: the source does not show the worker itself.
+    pub fn ready_now(&self) -> Option<watch::Receiver<bool>> {
+        self.enabled.load(Ordering::SeqCst).then(|| self.ready_now.subscribe())
     }
 }
 
@@ -318,6 +329,21 @@ mod tests {
         assert_eq!(o.observe(&flapping, true), None);
         assert!(!o.is_withdrawn());
         assert_eq!(o.observe(&peers(&["w0", "w1"]), true), None, "and it comes back silently");
+    }
+
+    #[test]
+    fn the_live_sighting_follows_every_snapshot() {
+        let o = named("uid-b");
+        assert!(o.ready_now().is_some_and(|r| !*r.borrow()), "nothing sighted yet");
+        let rx = o.ready_now().expect("enabled");
+        o.observe(&[bound("w0", "uid-a")], true);
+        assert!(!*rx.borrow(), "a predecessor still listed is not this worker ready");
+        o.observe(&[bound("w0", "uid-b")], true);
+        assert!(*rx.borrow());
+        o.observe(&[bound("w0", "uid-b").not_ready()], true);
+        assert!(!*rx.borrow(), "a flap reads not ready, though the latch stays Routable");
+        assert_eq!(o.current(), SelfEndpoint::Routable);
+        assert!(SelfObserver::new("w0", None).ready_now().is_none(), "never enabled");
     }
 
     #[test]

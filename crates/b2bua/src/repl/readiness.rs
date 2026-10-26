@@ -43,7 +43,6 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use super::backend_gate::BackendGate;
-use super::self_endpoint::SelfEndpoint;
 use super::ReplicationSupervisor;
 
 /// The readiness states the OPTIONS responder self-reports.
@@ -152,9 +151,10 @@ pub trait ReadinessSource: Send + Sync {
     fn left_the_slice(&self) -> bool {
         false
     }
-    /// This node's own endpoint as its membership shows it; `None` for a
-    /// source that does not observe the node itself.
-    fn own_endpoint(&self) -> Option<watch::Receiver<SelfEndpoint>> {
+    /// Whether the latest membership snapshot shows this node's own endpoint
+    /// ready, as a watch; `None` for a source that does not observe the node
+    /// itself.
+    fn own_endpoint_ready(&self) -> Option<watch::Receiver<bool>> {
         None
     }
 }
@@ -172,8 +172,8 @@ impl ReadinessSource for ReplicationSupervisor {
     fn left_the_slice(&self) -> bool {
         self.self_endpoint().borrow().left_the_slice()
     }
-    fn own_endpoint(&self) -> Option<watch::Receiver<SelfEndpoint>> {
-        self.observed_self_endpoint()
+    fn own_endpoint_ready(&self) -> Option<watch::Receiver<bool>> {
+        ReplicationSupervisor::own_endpoint_ready(self)
     }
 }
 
@@ -278,10 +278,10 @@ impl Readiness {
         }
     }
 
-    /// This node's own endpoint as its membership shows it
-    /// ([`ReadinessSource::own_endpoint`]).
-    pub fn own_endpoint(&self) -> Option<watch::Receiver<SelfEndpoint>> {
-        self.inner.source.own_endpoint()
+    /// Whether this node's own endpoint reads ready
+    /// ([`ReadinessSource::own_endpoint_ready`]).
+    pub fn own_endpoint_ready(&self) -> Option<watch::Receiver<bool>> {
+        self.inner.source.own_endpoint_ready()
     }
 
     /// Whether this node's own endpoint left the slice

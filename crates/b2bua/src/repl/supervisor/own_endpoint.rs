@@ -31,9 +31,10 @@ impl ReplicationSupervisor {
         self.inner.self_endpoint.subscribe()
     }
 
-    /// [`self_endpoint`](Self::self_endpoint) when the membership shows the
-    /// node itself (set by `start`); `None` on one that never will.
-    pub fn observed_self_endpoint(&self) -> Option<watch::Receiver<SelfEndpoint>> {
-        self.inner.self_endpoint.is_enabled().then(|| self.self_endpoint())
+    /// Whether the latest snapshot shows this node's endpoint ready, as a
+    /// watch; `None` when the membership does not show the node itself (set
+    /// by `start`).
+    pub fn own_endpoint_ready(&self) -> Option<watch::Receiver<bool>> {
+        self.inner.self_endpoint.ready_now()
     }
 }

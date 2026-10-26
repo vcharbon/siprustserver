@@ -157,7 +157,7 @@ impl FailoverHarness {
 
     /// **Publish `ordinal` to its own informer only** — the slice lists its
     /// newest incarnation and the worker has seen it before the proxy and every
-    /// peer: it observes its own endpoint routable while nothing routes to it
+    /// peer: it reads its own endpoint ready while nothing routes to it
     /// and no peer pulls it as rejoined. [`readmit`](Self::readmit) publishes it
     /// to the rest.
     pub fn publish_to_itself(&mut self, ordinal: &str) {

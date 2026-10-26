@@ -33,7 +33,7 @@ impl Puller {
     /// each into the live serving map + re-arm its timers, with the keepalive
     /// backlog smoothed (ADR-0014 §4). Fired by the **Reclaim** flow on bootstrap
     /// completion (first `Noop` or best-effort hard-timer); the router runs it
-    /// once the node's own endpoint is routable. Idempotent
+    /// while the node's own endpoint reads ready. Idempotent
     /// (`materialize_if_absent`), so a partial pass plus a later one self-heal.
     pub(super) fn signal_reclaim_all(&self) {
         if let Some(sink) = &self.repl_tx {

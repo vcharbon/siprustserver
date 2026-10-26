@@ -20,8 +20,8 @@
 //!                   call, then it is judged alive
 //!   +2.1 s    A: SIGKILL · C: dead since t0
 //!   +5 s      B: the drain returns, the endpoint leaves the slice (peers park it),
-//!                the process exits; only then the replacement comes up, reclaims
-//!                the answered copy and is published
+//!                the process exits; only then the replacement comes up, is
+//!                published and reclaims the answered copy
 //!   INVITE+30 s  the ring deadline fires on the reclaimed copy
 //! ```
 //!

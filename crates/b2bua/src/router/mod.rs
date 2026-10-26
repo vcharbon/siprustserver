@@ -15,7 +15,7 @@
 //! takeover copy on its primary's write, `dropped_on_delete` the turn that
 //! drops a live copy of a call its backup discharged, `reclaim`
 //! the replication reclaim/discharge funnels, `readmission` the hold of those
-//! reclaims until the node's own endpoint is routable,
+//! reclaims while the node's own endpoint does not read ready,
 //! `restore_hygiene` the replicated-timer restore seam, `release` the one
 //! per-call teardown executor, `responses` the locally-authored response
 //! builders, `peer_metrics` per-peer failure attribution, `turn` the
@@ -248,20 +248,21 @@ pub enum ReplCommand {
     /// **Bulk reclaim** — materialise every `pri:{self}` call into the
     /// live map + re-arm timers (a rebooted primary re-*serving* its partition,
     /// not just re-storing it). Fired once the supervisor reports bootstrap-complete,
-    /// run once the node's own endpoint is routable ([`ReadmissionGate`]).
+    /// run while the node's own endpoint reads ready (`readmission`).
     /// Keepalive timers are *smoothed* (oldest-overdue first; see
     /// `reclaim::reclaim_all`) so a freshly-rehydrated node is not flooded by a
     /// burst of past-due OPTIONS.
     ReclaimAll,
     /// **Reactive reclaim** of one call a backup just reverse-flushed to us — the
     /// flip-race straggler an acting-backup took over *after* the bulk sweep.
-    /// Held with the bulk reclaim until the node's own endpoint is routable.
+    /// Held with the bulk reclaim while the node's own endpoint does not read ready.
     ReclaimCall(String),
     /// A backup's reverse flush the store did not take — the stored copy
     /// contains it or the two diverged — or one the store already read: the
     /// body is handed up to meet the live copy (`reclaim::meet_refused_flush`,
     /// ADR-0055 §7). `origin_now_ms` is the flushing node's wall clock, for
-    /// timer re-anchoring.
+    /// timer re-anchoring. Held with the reclaim, so it meets the copy the
+    /// reclaim makes live.
     ReverseFlushRefused { call_ref: String, body: Arc<[u8]>, origin_now_ms: i64 },
     /// A primary's forward flush this backup did not take: the body is handed
     /// up on the same terms as the reverse case, and meets only a live
@@ -307,8 +308,9 @@ enum Work {
 /// Run the router loop over the txn-event + timer-fire channels until both close.
 /// `repl_rx` is the fail-back command receiver of a wired node; an unwired node
 /// passes `None` and the loop never polls for one. Its reclaim commands wait
-/// for the node's own endpoint to be routable ([`ReadmissionGate`]). Each turn is stamped on
-/// `ctx.router_pulse` from the instant it takes work until it waits again.
+/// for the node's own endpoint to read ready (`readmission`). Each turn is
+/// stamped on `ctx.router_pulse` from the instant it takes work until it waits
+/// again.
 pub async fn run(
     ctx: Arc<RouterCtx>,
     mut txn_rx: mpsc::Receiver<sip_txn::TransactionEvent>,
@@ -316,7 +318,7 @@ pub async fn run(
     mut reentry_rx: mpsc::UnboundedReceiver<CallEvent>,
     mut repl_rx: Option<mpsc::UnboundedReceiver<ReplCommand>>,
 ) {
-    let mut readmission = ReadmissionGate::new(ctx.readiness.own_endpoint());
+    let mut readmission = ReadmissionGate::new(ctx.readiness.own_endpoint_ready());
     let pulse = ctx.router_pulse.clone();
     // A timer or re-entry channel whose senders are all gone retires its arm
     // instead of resolving `None` on every poll.

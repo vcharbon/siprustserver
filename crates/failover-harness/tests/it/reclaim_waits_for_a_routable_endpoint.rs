@@ -1,20 +1,24 @@
 //! **A returning node re-serves its calls only once its endpoint is routable.**
 //! A node that comes back after a crash and a departure takes back its own
-//! calls only after it has observed its own endpoint routable again. Before
+//! calls only once its own endpoint reads ready in the slice again. Before
 //! that, the proxy cannot route a response to it: a response to a request the
 //! node sent goes to the call's other owner (ADR-0055 §8), and that owner
 //! reads a final above its local CSeq as evidence of a lost write and ends the
 //! call (§4, trigger 1).
 //!
 //! ```text
-//!   P crashes and departs; S keeps the quiet call's copy
-//!   P away past the call's keepalive deadline, reboots at a new address, ready
-//!   P not yet published: nothing reaches either party
-//!   P published: its keepalive OPTIONS reaches both parties, their 200s reach P
+//!   P crashes; S keeps the quiet call's copy
+//!   P away past the call's keepalive deadline, reboots at a new address
+//!   departed   P left the slice; ready, it is not yet published
+//!   flapped    P's first snapshot still lists it ready, then its endpoint
+//!              reads not ready (the restarted container), and P becomes ready
+//!   nothing reaches either party
+//!   P reads ready in the slice: its keepalive OPTIONS reaches both parties,
+//!   their 200s reach P
 //!   the call lives on to the caller's BYE
 //! ```
 //!
-//! The cell ends with the caller's BYE, one CDR and clean memory.
+//! Every cell ends with the caller's BYE, one CDR and clean memory.
 
 use std::time::Duration;
 
@@ -47,12 +51,33 @@ async fn answer_keepalive(agent: &Agent) -> bool {
     }
 }
 
+/// How the returning node's endpoint leaves the slice and comes back.
+#[derive(Clone, Copy)]
+enum Shape {
+    /// The endpoint left the slice; the returned node is published again.
+    Departed,
+    /// The endpoint stays in the slice: listed ready when the node boots, not
+    /// ready from then on, ready again once the node is.
+    Flapped,
+}
+
 /// P crashes, departs, and returns past its call's keepalive deadline. Ready
 /// but unpublished, it sends nothing; once published, its keepalive is
 /// answered at P and the call stays up until the caller hangs up.
 #[tokio::test(start_paused = true)]
 async fn a_returned_node_probes_its_reclaimed_call_only_once_routable() {
-    let name = "reclaim-waits-for-a-routable-endpoint";
+    returns_and_probes("reclaim-waits-for-a-routable-endpoint", Shape::Departed).await;
+}
+
+/// P crashes and restarts with its endpoint in the slice: its first snapshot
+/// still lists it ready, then it reads not ready. Ready itself, it sends
+/// nothing until its endpoint reads ready again.
+#[tokio::test(start_paused = true)]
+async fn a_restarted_node_whose_endpoint_flaps_probes_only_once_ready_again() {
+    returns_and_probes("reclaim-waits-for-a-ready-endpoint", Shape::Flapped).await;
+}
+
+async fn returns_and_probes(name: &str, shape: Shape) {
     let Established {
         mut fh,
         alice,
@@ -69,17 +94,22 @@ async fn a_returned_node_probes_its_reclaimed_call_only_once_routable() {
     } = establish(name).await;
     let (primary, survivor) = if pri == "b1" { (&mut w_b1, &w_b2) } else { (&mut w_b2, &w_b1) };
 
-    // ── the primary crashes; its endpoint leaves the slice ───────────────────
-    fh.mark(&pri, None, "crash", "the primary dies with its endpoint");
+    // ── the primary crashes ──────────────────────────────────────────────────
+    fh.mark(&pri, None, "crash", "the primary dies");
     primary.crash();
     proxy.set_health(&pri, WorkerHealth::Dead);
-    fh.depart(&pri);
+    if let Shape::Departed = shape {
+        fh.depart(&pri);
+    }
     fh.advance(AWAY).await;
 
-    // ── it reboots at a new address, ready, not yet published ────────────────
+    // ── it reboots at a new address and becomes ready, its endpoint not ──────
     fh.mark(&pri, None, "reboot", "restart empty, higher gen, new address");
     let new_addr = primary.reboot().await;
     fh.note_worker_rebound(&pri, new_addr);
+    if let Shape::Flapped = shape {
+        fh.flap_not_ready(&pri);
+    }
     let ready = fh
         .pump_until(Duration::from_millis(100), Duration::from_secs(30), async || {
             primary.is_ready()
@@ -92,7 +122,13 @@ async fn a_returned_node_probes_its_reclaimed_call_only_once_routable() {
     assert!(!survivor.serves(&call_ref), "the call's other owner took nothing over");
 
     // ── published: the reclaimed keepalive probes both parties ───────────────
-    fh.readmit(&pri, new_addr);
+    match shape {
+        Shape::Departed => fh.readmit(&pri, new_addr),
+        Shape::Flapped => {
+            fh.flap_ready(&pri);
+            proxy.set_address(&pri, new_addr);
+        }
+    }
     let mut answered = (false, false);
     for _ in 0..50 {
         fh.advance(Duration::from_millis(100)).await;

@@ -13,8 +13,8 @@ use crate::store::{Enveloped, PartitionRole};
 
 /// **Bulk reclaim** (ADR-0014): re-materialise every `pri:{self}`
 /// call into the live map + re-arm its timers — what makes a rebooted primary
-/// re-*serve* its partition, not just re-*store* it. It runs once the node's
-/// own endpoint is routable (ADR-0055 §8, `router::readmission`). The scan decodes the
+/// re-*serve* its partition, not just re-*store* it. It runs while the node's
+/// own endpoint reads ready (ADR-0055 §8, `router::readmission`). The scan decodes the
 /// partition to size the cohort; each body is then materialised through the
 /// TTL-gated reclaim read, so a body whose TTL ran out is dead and is never
 /// re-served: it counts in `scanned` and not in `materialized`.
