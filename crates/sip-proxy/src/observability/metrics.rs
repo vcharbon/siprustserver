@@ -17,6 +17,7 @@ mod face;
 mod hmac;
 mod intake;
 mod no_target;
+mod overload;
 mod parse;
 mod pool;
 mod slots;
@@ -26,6 +27,7 @@ pub use face::{Face, UntrustedClaim};
 pub use hmac::HmacFailureReason;
 use intake::IntakeCounts;
 pub use no_target::NoTargetDrop;
+use overload::OverloadCounts;
 use parse::ParseCounts;
 use slots::{bump, read};
 pub use udp_shard::UdpShardStats;
@@ -163,23 +165,8 @@ pub struct ProxyMetrics {
     rejects: FixedCounts,
     cancel_lookups: FixedCounts,
     no_target_dropped: FixedCounts,
-    overload_rejections: FixedCounts,
-    /// Coarse (registry-aggregate) count of `WorkerLoadObserver::sweep_stale`
-    /// floor events — an Alive worker whose OPTIONS replies stopped carrying a
-    /// fresh `X-Overload` payload within `payload_stale_ms`, so AIMD halved its
-    /// cap. Non-zero while ELU is healthy means the HealthProbe cycle exceeds the
-    /// stale threshold (config invariant). ProxyMetrics is registry-aggregate, so
-    /// this is the coarse stand-in for a per-`worker_id` counter that keeps a
-    /// silently-floored cap diagnosable.
-    overload_stale_decrease: AtomicU64,
-    /// New-dialog INVITEs that BYPASSED the LB's overload gates because they are
-    /// emergency: they skip the `above_critical` critical-filter (kept as
-    /// candidates even when every alive worker is shedding) AND skip the
-    /// per-worker AIMD token bucket (`try_consume_for`). The visibility series for
-    /// emergency traffic skipping the load-balancer's overload path — non-zero
-    /// under flood means emergency calls are correctly routed while non-emergency
-    /// load is rate-capped. Counted at the LB select site (load_balancer.rs).
-    lb_emergency_bypassed: AtomicU64,
+    /// The load balancer's per-worker overload path.
+    overload: OverloadCounts,
     routing_duration_count: AtomicU64,
     routing_duration_sum_us: AtomicU64,
     record_route_inserted: AtomicU64,
@@ -239,9 +226,7 @@ impl Default for ProxyMetrics {
             rejects: FixedCounts::new(&catalogue::REJECTS),
             cancel_lookups: FixedCounts::new(&catalogue::CANCEL_LOOKUPS),
             no_target_dropped: FixedCounts::new(&catalogue::NO_TARGET_DROPPED),
-            overload_rejections: FixedCounts::new(&catalogue::OVERLOAD_REJECTIONS),
-            overload_stale_decrease: Default::default(),
-            lb_emergency_bypassed: Default::default(),
+            overload: Default::default(),
             routing_duration_count: Default::default(),
             routing_duration_sum_us: Default::default(),
             record_route_inserted: Default::default(),
@@ -323,24 +308,6 @@ impl ProxyMetrics {
         self.cancel_lookups.add(&[outcome.as_str()], 1);
     }
 
-    pub fn record_overload_rejection(&self, reason: &str) {
-        self.overload_rejections.add(&[reason], 1);
-    }
-
-    /// Add `n` `sweep_stale` floor events (one per worker the sweep just
-    /// conservatively decreased) to the coarse aggregate counter. The runner's
-    /// 1 s sweep task calls this with the per-sweep floored count.
-    pub fn record_overload_stale_decrease(&self, n: u64) {
-        self.overload_stale_decrease.fetch_add(n, Ordering::Relaxed);
-    }
-
-    /// Count one emergency new-dialog INVITE that bypassed the LB's overload
-    /// gates (critical-filter + AIMD bucket), for
-    /// `sip_proxy_lb_emergency_bypassed_total`.
-    pub fn record_lb_emergency_bypass(&self) {
-        self.lb_emergency_bypassed.fetch_add(1, Ordering::Relaxed);
-    }
-
     pub fn record_route_inserted(&self) {
         self.record_route_inserted.fetch_add(1, Ordering::Relaxed);
     }
@@ -416,15 +383,6 @@ impl ProxyMetrics {
     pub fn resolver_cache_size(&self) -> u64 {
         self.resolver_cache_size.load(Ordering::Relaxed)
     }
-    pub fn overload_stale_decrease_total(&self) -> u64 {
-        self.overload_stale_decrease.load(Ordering::Relaxed)
-    }
-    pub fn lb_emergency_bypassed_total(&self) -> u64 {
-        self.lb_emergency_bypassed.load(Ordering::Relaxed)
-    }
-    pub fn overload_rejection_count(&self, reason: &str) -> u64 {
-        self.overload_rejections.get(&[reason])
-    }
     pub fn reject_count(&self, reason: &str) -> u64 {
         self.rejects.get(&[reason])
     }
@@ -474,15 +432,7 @@ impl ProxyMetrics {
         c::RECV_SHARDS_STALLED.render_value(&mut s, load(&self.recv_shards_stalled));
         self.pool.render_pool(&mut s);
 
-        // Overload-shed visibility. Without these a
-        // worker that gets silently rate-capped (`bucket_empty`), filtered out
-        // (`no_target_critical_filtered`), or floored on stale telemetry
-        // (`stale_decrease`) leaves no Prometheus trail. `overload_rejections` is
-        // keyed by reason; `stale_decrease` is the coarse (registry-aggregate)
-        // stand-in for a per-`worker_id` counter.
-        self.overload_rejections.render(&mut s);
-        c::WORKER_STALE_DECREASE.render_value(&mut s, load(&self.overload_stale_decrease));
-        c::LB_EMERGENCY_BYPASSED.render_value(&mut s, load(&self.lb_emergency_bypassed));
+        self.overload.render(&mut s);
 
         self.pool.render_health(&mut s);
 

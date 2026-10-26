@@ -58,13 +58,14 @@ pub enum SelectError {
     #[error("no target available: {reason}")]
     NoTarget { reason: String },
 
-    /// A target was selected, but its per-worker AIMD token bucket
-    /// ([`crate::load_observer`]) is empty — the LB is rate-capping this worker
-    /// to let it shed in-flight load. → 503 + `Retry-After: retry_after_sec`.
-    /// Only raised for non-emergency new-dialog requests (emergency + in-dialog
-    /// bypass the bucket); never for an unknown/unobserved worker (bootstrap is
-    /// admit). Port of the TS `selectForNewDialog-overload` `bucket_empty` reject.
-    #[error("worker {worker_id} rate-capped (bucket empty); retry after {retry_after_sec}s")]
+    /// Every candidate's per-worker AIMD token bucket ([`crate::load_observer`])
+    /// is empty — the LB is rate-capping each of them to let it shed in-flight
+    /// load (ADR-0009 X6). `worker_id` is the rendezvous winner,
+    /// `retry_after_sec` the earliest refill among them. → 503 +
+    /// `Retry-After: retry_after_sec`. Only raised for non-emergency new-dialog
+    /// requests (emergency + in-dialog bypass the bucket); never while an
+    /// unknown/unobserved worker is a candidate (bootstrap is admit).
+    #[error("every candidate rate-capped (winner {worker_id}); retry after {retry_after_sec}s")]
     RateCapExhausted { worker_id: String, retry_after_sec: u32 },
 }
 
@@ -74,7 +75,7 @@ pub struct SelectOpts {
     /// Set by the core's cookie-decode fallback path: an in-dialog request
     /// (BYE/CANCEL/re-INVITE) on an emergency call carries no Resource-Priority
     /// on the wire, so the cookie's `e=1` flag is forwarded here to keep the
-    /// request out of the (future) AIMD bucket.
+    /// request out of the AIMD bucket.
     pub emergency_override: bool,
     /// The request names a dialog (a To-tag) no verified cookie backs: the
     /// strategy admits it as a new dialog, under every new-call cap.

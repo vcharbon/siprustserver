@@ -2,7 +2,9 @@
 
 **Status:** accepted (2026-05-31). Amended (2026-10-12): X1, X3, the cookie also rides the
 proxy's Via on a worker's in-dialog INVITE. Amended (2026-10-16): the fresh-pod guard and the
-drain grace are removed; in-dialog routing reads liveness only (ADR-0050).
+drain grace are removed; in-dialog routing reads liveness only (ADR-0050). Amended
+(2026-10-26): X6, the per-worker AIMD bucket is live and a rate-capped winner spills a new
+call to the next rendezvous candidate.
 
 **Source:** sipjsserver @ `fffc4ac69c8aeef26cf48fe73469503145c9732b`,
 `src/sip-front-proxy/` (`ProxyCore.ts`, `RoutingStrategy.ts`, `CancelBranchLru.ts`,
@@ -103,15 +105,24 @@ probe via the `WorkerRegistryControl` seam, a future k8s watcher) write.
 `changes()` is a `tokio::sync::broadcast` of deltas (no backfill). This is the
 Rust expression of the source's D4 non-blocking invariant (`Ref.get` reads).
 
-## Decision X6 — worker overload: band classification only, AIMD bucket deferred
+## Decision X6 — worker overload: band classification and the per-worker AIMD bucket
 
 `WorkerLoadObserver` ports the per-worker ELU-band state machine (with
 hysteresis) fed by the `X-Overload` OPTIONS payload, so `above_critical`
-workers are excluded from non-emergency new-dialog selection. The per-worker
-**AIMD rate-cap token bucket** (`try_consume_for` / cooldown) is **deferred**
-(user scope): `select_for_new_dialog` never raises `RateCapExhausted`. That
-error variant and the request path's 503/`Retry-After` branch are kept (dead)
-so the bucket lands later with no surface change.
+workers are excluded from non-emergency new-dialog selection. Each observed
+worker has an **AIMD rate-cap token bucket** (`try_consume_for` / cooldown); a
+non-emergency new dialog spends one token.
+
+**The spill rule.** The new dialog goes to the first candidate, in rendezvous
+order for its Call-ID, whose bucket has a token: a rate-capped winner hands the
+call to the next alive, non-critical worker (`sip_proxy_lb_rate_cap_spilled_total`).
+The proxy answers `503` with `Retry-After` (`RateCapExhausted`, the earliest
+refill among the candidates) only when no candidate has a token. A bucket caps
+the rate one worker is fed, never the cluster's while another has room.
+Emergency and in-dialog requests take the rendezvous winner and spend no token;
+a retransmission repeats its first selection from the proxy's memo, and a copy
+of a refused INVITE draws the same refusal (ADR-0037), so the spill never moves
+a transaction already placed or refused.
 
 ## Consequences
 

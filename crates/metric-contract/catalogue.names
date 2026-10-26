@@ -280,6 +280,7 @@ sip-proxy-runner sip_proxy_discovery_watch_broken_since_seconds gauge fixed {}
 sip-proxy-runner sip_proxy_overload_rejections_total counter fixed {reason}
 sip-proxy-runner sip_proxy_worker_stale_decrease_total counter fixed {}
 sip-proxy-runner sip_proxy_lb_emergency_bypassed_total counter fixed {}
+sip-proxy-runner sip_proxy_lb_rate_cap_spilled_total counter fixed {}
 sip-proxy-runner sip_worker_health gauge fixed {health}
 sip-proxy-runner sip_worker_acceptance gauge fixed {acceptance}
 sip-proxy-runner sip_proxy_peer_failures_total counter capped:256 {peer,scope,kind}

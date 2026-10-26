@@ -5,13 +5,13 @@
 //! - `select_for_new_dialog`: Call-ID → snapshot the registry → the `Alive`
 //!   workers that accept new calls, or every `Alive` one when none accepts (a
 //!   refusing worker answers the call itself and writes its record, §6) → for
-//!   non-emergency new dialogs, drop `above_critical`-band workers →
-//!   `rendezvous_select` → spend one token from the winner's per-worker AIMD
-//!   bucket → address. `NoTarget` when the candidate set is empty;
-//!   `RateCapExhausted` when the winner's bucket is empty (→ 503 + Retry-After).
-//!   Emergency / in-dialog requests bypass the bucket (they still record the
-//!   admit for the `share` signal); an unobserved worker is admitted
-//!   (bootstrap-friendly). Port of TS LoadBalancer.ts:335-348.
+//!   non-emergency new dialogs, drop `above_critical`-band workers → rank them
+//!   by rendezvous → spend one token from the per-worker AIMD bucket of the
+//!   first in rank that has one (ADR-0009 X6) → address. `NoTarget` when the
+//!   candidate set is empty; `RateCapExhausted` when no candidate's bucket has
+//!   a token (→ 503 + Retry-After). Emergency / in-dialog requests take the
+//!   rendezvous winner and bypass the bucket (they still record the admit for
+//!   the `share` signal); an unobserved worker is admitted (bootstrap-friendly).
 //! - `encode_stickiness`: a call the proxy places. Recover the target's
 //!   `WorkerId` (= `w_pri`) by address, pick the HRW winner among the other
 //!   `Alive` workers that accept new calls, else among the other `Alive` ones
@@ -48,7 +48,7 @@ use crate::registry::{WorkerEntry, WorkerRegistry};
 use crate::security::hmac::{HmacKeyProvider, TRUNCATED_MAC_BYTES};
 use crate::strategy::{DecodeResult, RouteParams, RoutingStrategy, SelectError, SelectOpts};
 
-use super::rendezvous::{rendezvous_select, RendezvousCandidate};
+use super::rendezvous::{rendezvous_rank, rendezvous_select, RendezvousCandidate};
 
 mod cookie;
 
@@ -145,6 +145,30 @@ impl LoadBalancerStrategy {
         params
     }
 
+    /// The first of `ranked` whose bucket yields a token, the token spent and
+    /// the admit recorded; one past the rendezvous winner counts a spill. With
+    /// no token anywhere, `RateCapExhausted` names the winner and the earliest
+    /// refill among them.
+    fn take_token<'w>(&self, ranked: &[&'w WorkerEntry]) -> Result<&'w WorkerEntry, SelectError> {
+        let now_ms = self.clock.now_ms();
+        let mut retry_after_sec = u32::MAX;
+        for (rank, worker) in ranked.iter().enumerate() {
+            match self.observer.try_consume_for(&worker.id, now_ms) {
+                Ok(()) => {
+                    if rank > 0 {
+                        self.metrics.record_lb_rate_cap_spill();
+                    }
+                    self.observer.record_own_admitted(&worker.id);
+                    return Ok(worker);
+                }
+                Err(sec) => retry_after_sec = retry_after_sec.min(sec),
+            }
+        }
+        self.metrics.record_overload_rejection("bucket_empty");
+        let worker_id = ranked.first().map(|w| w.id.clone()).unwrap_or_default();
+        Err(SelectError::RateCapExhausted { worker_id, retry_after_sec })
+    }
+
     /// The address of worker `id` while it is `Alive`.
     fn alive_address(&self, id: &str) -> Option<ProxyAddr> {
         if id.is_empty() {
@@ -184,9 +208,11 @@ impl RoutingStrategy for LoadBalancerStrategy {
         };
 
         let keys: Vec<WorkerKey> = candidates.iter().map(|w| WorkerKey(w.id.clone())).collect();
-        let chosen = rendezvous_select(call_id, &keys)
-            .and_then(|key| candidates.iter().copied().find(|w| w.id == key.0));
-        let Some(winner) = chosen else {
+        let ranked: Vec<&WorkerEntry> = rendezvous_rank(call_id, &keys)
+            .into_iter()
+            .filter_map(|key| candidates.iter().copied().find(|w| w.id == key.0))
+            .collect();
+        let Some(&winner) = ranked.first() else {
             if !is_emergency && !alive.is_empty() {
                 self.metrics.record_overload_rejection("no_target_critical_filtered");
             }
@@ -204,15 +230,11 @@ impl RoutingStrategy for LoadBalancerStrategy {
             return Err(SelectError::NoTarget { reason });
         };
 
-        // Per-worker AIMD token bucket (port of TS LoadBalancer.ts:335-348).
-        // Emergency and in-dialog requests bypass the bucket entirely —
-        // in-dialog: the call is already admitted, AIMD is a new-call knob; the
-        // bypass still records the admit so `own_admitted_rate`/`share` stays
-        // truthful. Otherwise spend a token: an empty bucket is the LB rate-capping
-        // this (alive, non-critical) worker so it can shed in-flight load → 503 +
-        // Retry-After. An unobserved worker has no bucket and is admitted
-        // (`try_consume_for` is bootstrap-friendly).
-        let now_ms = self.clock.now_ms();
+        // Emergency and in-dialog requests bypass the per-worker AIMD bucket
+        // and stay on the rendezvous winner — in-dialog: the call is already
+        // admitted, AIMD is a new-call knob; the bypass still records the admit
+        // so `own_admitted_rate`/`share` stays truthful. A new call takes the
+        // first candidate in rank whose bucket has a token (ADR-0009 X6).
         if is_emergency || in_dialog {
             // Emergency bypasses BOTH the above_critical critical-filter (above)
             // and this AIMD bucket — count emergency new-dialog bypasses so the
@@ -221,18 +243,9 @@ impl RoutingStrategy for LoadBalancerStrategy {
                 self.metrics.record_lb_emergency_bypass();
             }
             self.observer.record_own_admitted(&winner.id);
-        } else if let Err(retry_after_sec) = self.observer.try_consume_for(&winner.id, now_ms) {
-            // The Retry-After is the bucket's own time to a token, read from
-            // the failed take.
-            self.metrics.record_overload_rejection("bucket_empty");
-            return Err(SelectError::RateCapExhausted {
-                worker_id: winner.id.clone(),
-                retry_after_sec,
-            });
-        } else {
-            self.observer.record_own_admitted(&winner.id);
+            return Ok(winner.address.clone());
         }
-        Ok(winner.address.clone())
+        self.take_token(&ranked).map(|placed| placed.address.clone())
     }
 
     async fn decode_stickiness(&self, route_param: &RouteParams, msg: &SipMessage) -> DecodeResult {

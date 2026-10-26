@@ -108,7 +108,6 @@ crates/sip-net-testkit/src/contracts.rs 869
 crates/sip-pcap/src/bin/sipflow.rs 1028
 crates/sip-pcap/src/flow.rs 801
 crates/sip-pcap/src/flow/tests.rs 1000
-crates/sip-proxy/src/observability/metrics.rs 519
 crates/sip-txn/src/layer/client.rs 615
 crates/sip-txn/tests/it/bounded_queue.rs 803
 crates/sip-txn/tests/it/fsm.rs 1415

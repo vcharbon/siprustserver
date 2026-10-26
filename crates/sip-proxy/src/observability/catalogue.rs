@@ -16,8 +16,12 @@ use crate::resolver::{outcome, refresh_outcome};
 use crate::self_gate::ShedReason;
 
 mod intake;
+mod overload;
 mod parse;
 pub use intake::{INTAKE_SHED, INTAKE_UNANSWERABLE};
+pub use overload::{
+    LB_EMERGENCY_BYPASSED, LB_RATE_CAP_SPILLED, OVERLOAD_REJECTIONS, WORKER_STALE_DECREASE,
+};
 pub use parse::{PARSE_ERRORS, PARSE_PANICS, PARSE_REFUSALS_ANSWERED, PARSE_REFUSALS_CAPPED};
 
 /// `direction:result`, every direction then every result.
@@ -329,24 +333,6 @@ pub const DISCOVERY_WATCH_BROKEN_SINCE: Family = Family::gauge(
     "Unix time the worker EndpointSlice watch broke, 0 while it delivers (an event, or 90 s without an error) and with a fixed PROXY_WORKERS pool. The last listed pool stays meanwhile and the OPTIONS probe keeps its health current.",
 );
 
-pub const OVERLOAD_REJECTIONS: Family = Family::counter(
-    "sip_proxy_overload_rejections_total",
-    Labels::Product(&[Dim::new("reason", &["no_target_critical_filtered", "bucket_empty"])]),
-    "New-dialog admissions rejected by the AIMD/band overload path, by reason.",
-);
-
-pub const WORKER_STALE_DECREASE: Family = Family::counter(
-    "sip_proxy_worker_stale_decrease_total",
-    Labels::None,
-    "WorkerLoadObserver sweep_stale floor events (AIMD cap halved — no fresh X-Overload within payload_stale_ms).",
-);
-
-pub const LB_EMERGENCY_BYPASSED: Family = Family::counter(
-    "sip_proxy_lb_emergency_bypassed_total",
-    Labels::None,
-    "Emergency new-dialog INVITEs that bypassed the LB overload gates (above_critical critical-filter + per-worker AIMD bucket). Emergency traffic skipping the load-balancer's overload path under flood.",
-);
-
 pub const WORKER_HEALTH: Family = Family::gauge(
     "sip_worker_health",
     Labels::Product(&[Dim::new("health", &HEALTH_STATES)]),
@@ -477,6 +463,7 @@ pub const PROXY: &[Family] = &[
     OVERLOAD_REJECTIONS,
     WORKER_STALE_DECREASE,
     LB_EMERGENCY_BYPASSED,
+    LB_RATE_CAP_SPILLED,
     WORKER_HEALTH,
     WORKER_ACCEPTANCE,
     PEER_FAILURES,
