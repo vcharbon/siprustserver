@@ -166,11 +166,10 @@ fmt-check:
 
 # Rustdoc of every workspace crate, warnings denied: a broken or private
 # intra-doc link, or unclosed HTML in prose, fails. Every lib and bin is
-# documented; a bin named like its package's lib overwrites the lib's
-# index.html under target/doc. `--examples` (the workspace has none) resolves
-# dev-dependencies, so the checked crates share the test build's features.
+# documented under the test build's features, a bin named like its package's
+# lib in a run of its own (scripts/doc-all.sh).
 doc-check:
-    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --lib --bins --examples --keep-going
+    RUSTDOCFLAGS="-D warnings" scripts/doc-all.sh --keep-going
 
 # Point git at the versioned hooks (pre-commit: staged Rust must be fmt-clean;
 # prepare-commit-msg: no amend on develop). A hooks path already set is left
