@@ -121,7 +121,7 @@ refill among the candidates) only when no candidate has a token. A bucket caps
 the rate one worker is fed, never the cluster's while another has room.
 Emergency and in-dialog requests take the rendezvous winner and spend no token;
 a retransmission repeats its first selection from the proxy's memo, and a copy
-of a refused INVITE draws the same refusal (ADR-0037), so the spill never moves
+of a refused INVITE draws the same refusal (RFC 3261 §8.2.7), so the spill never moves
 a transaction already placed or refused.
 
 ## Consequences

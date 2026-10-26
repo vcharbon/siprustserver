@@ -100,20 +100,23 @@ async fn a_rate_capped_winner_spills_the_new_call_to_the_next_alive_worker() {
 
 #[tokio::test(start_paused = true)]
 async fn the_spill_follows_the_rendezvous_order() {
-    // With three workers and the winner drained, the call lands where it
+    // With three workers and the winner drained, each call lands where it
     // lands once the winner is out of the candidate set: the next HRW rank.
-    let f = fixture(3);
-    let winner = f.winner_of("call-rank@h").await;
-    let second = {
-        let g = fixture(3);
-        // Taken out of the set by an above_critical band: the plain HRW
-        // winner of the remaining two, no spill involved.
-        g.observer.apply_payload(winner, &OverloadPayload { elu: 0.99, gc: 0.0, adm: 0.0 }, 0);
-        g.winner_of("call-rank@h").await
-    };
-    f.drain(winner);
+    for i in 0..16 {
+        let call_id = format!("call-rank-{i}@h");
+        let f = fixture(3);
+        let winner = f.winner_of(&call_id).await;
+        let second = {
+            let g = fixture(3);
+            // Taken out of the set by an above_critical band: the plain HRW
+            // winner of the remaining two, no spill involved.
+            g.observer.apply_payload(winner, &OverloadPayload { elu: 0.99, gc: 0.0, adm: 0.0 }, 0);
+            g.winner_of(&call_id).await
+        };
+        f.drain(winner);
 
-    assert_eq!(id_at(&f.select("call-rank@h", None).await.unwrap()), second);
+        assert_eq!(id_at(&f.select(&call_id, None).await.unwrap()), second, "{call_id}");
+    }
 }
 
 #[tokio::test(start_paused = true)]
