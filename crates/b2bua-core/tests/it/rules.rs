@@ -614,29 +614,6 @@ fn a_2xx_the_cancel_beat_to_the_caller_leaves_her_no_dialog_to_bye() {
     assert_eq!(result.call.a_leg.state(), LegState::Terminated);
 }
 
-#[test]
-fn in_dialog_bye_selects_relay_bye() {
-    let mut call = test_call();
-    // An in-dialog BYE (carries a To-tag) on the established call.
-    confirm_a(&mut call);
-    let bye = in_dialog_request(sip_message::Method::Bye);
-    let event = CallEvent::sip(SipMessage::Request(bye), "127.0.0.1:5060".parse().unwrap());
-    let ctx = RuleContext {
-        call: RuleCall::new(&call),
-        call_ref: &call.call_ref,
-        event: &event,
-        source_leg_id: "a",
-        direction: Direction::FromA,
-        now_ms: 0,
-        config: &B2buaConfig::default(),
-        discharged: None,
-        resolved: &call::helpers::UNRESOLVED,
-    };
-    let rules = default_rules();
-    let ranked = pick_ranked(&rules, &call, &ctx);
-    assert_eq!(ranked.first().map(|r| r.id), Some("relay-bye"));
-}
-
 /// A caller's BYE while its INVITE is still pending (RFC 3261 §15: the early
 /// dialog a tagged provisional opened, the local tag on the a-dialog; the
 /// a-leg itself reads Trying until its answer) selects `early-dialog-bye`, never
@@ -3292,6 +3269,7 @@ mod ack_leg_body {
 
 mod bye_order;
 mod create_leg_admission;
+mod method_match;
 mod subscription_record;
 mod txn_timeouts;
 

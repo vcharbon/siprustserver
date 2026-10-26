@@ -264,9 +264,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_compact_form_map_is_the_full_rfc_3261_table() {
+    fn the_compact_form_map_is_the_rfc_3261_table_and_session_expires() {
         let forms = compact_forms();
-        assert_eq!(forms.len(), 10, "{forms:?}");
+        assert_eq!(forms.len(), 11, "{forms:?}");
         for (compact, canonical) in [
             ("i", "Call-ID"),
             ("m", "Contact"),
@@ -278,6 +278,7 @@ mod tests {
             ("k", "Supported"),
             ("t", "To"),
             ("v", "Via"),
+            ("x", "Session-Expires"),
         ] {
             let found = forms.iter().find(|f| f.compact == compact).expect(compact);
             assert_eq!(found.canonical, canonical);

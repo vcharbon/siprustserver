@@ -6,7 +6,6 @@
 //! name form), restated to the body's length when it disagrees; a later row is
 //! dropped; one is added when none is stated and a body is present.
 
-use crate::header::HeaderName;
 use crate::types::{SipHeader, SipMessage, SipRequest, SipResponse};
 
 /// Serialize a structured SIP message to wire-format bytes.
@@ -57,8 +56,9 @@ fn finish(mut out: Vec<u8>, headers: &[SipHeader], body: &[u8]) -> Vec<u8> {
     use std::io::Write;
 
     let actual_length = body.len();
-    let is_content_length =
-        |h: &SipHeader| HeaderName::known(&h.name) == Some(HeaderName::ContentLength);
+    let is_content_length = |h: &SipHeader| {
+        h.name.eq_ignore_ascii_case("content-length") || h.name.eq_ignore_ascii_case("l")
+    };
     let cl = headers.iter().enumerate().find(|(_, h)| is_content_length(h));
     let cl_index = cl.map(|(i, _)| i);
     let declared_ok = match cl {

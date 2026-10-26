@@ -67,6 +67,31 @@ fn the_other_rules_of_the_section() {
     assert!(!equivalent("sip:a%2541@atlanta.com", "sip:aA@atlanta.com"));
 }
 
+/// An IP-literal host compares as the address it names.
+#[test]
+fn an_ip_literal_host_is_its_address() {
+    assert!(equivalent("sip:a@[::1]", "sip:a@[0:0::1]"));
+    assert!(equivalent("sip:a@[2001:DB8::1]:5070", "sip:a@[2001:db8:0::1]:5070"));
+    assert!(!equivalent("sip:a@[::1]", "sip:a@[::2]"));
+    assert!(!equivalent("sip:a@[::ffff:192.0.2.1]", "sip:a@192.0.2.1"));
+}
+
+/// A parameter repeated on one side compares by its first occurrence.
+#[test]
+fn a_repeated_parameter_compares_by_its_first_occurrence() {
+    let repeated = "sip:a@example.com;transport=tcp;transport=udp";
+    assert!(equivalent(repeated, "sip:a@example.com;transport=tcp"));
+    assert!(!equivalent(repeated, "sip:a@example.com;transport=udp"));
+}
+
+/// Escaped headers compare case-insensitively but for Call-ID (§20.8).
+#[test]
+fn an_escaped_call_id_compares_byte_for_byte() {
+    assert!(equivalent("sip:a@example.com?Subject=Next", "sip:a@example.com?subject=NEXT"));
+    assert!(equivalent("sip:a@example.com?Call-ID=AbC", "sip:a@example.com?call-id=AbC"));
+    assert!(!equivalent("sip:a@example.com?Call-ID=AbC", "sip:a@example.com?Call-ID=abc"));
+}
+
 #[test]
 fn equality_is_the_parts_as_read() {
     let (a, b) =

@@ -67,7 +67,7 @@ pub enum MatchKind {
 #[derive(Clone)]
 pub struct Match {
     pub kind: MatchKind,
-    /// Request method / response cseq-method / timeout method (case-insensitive).
+    /// Request method / response cseq-method / timeout method, as spelled (RFC 3261 §7.1).
     pub methods: Option<Vec<&'static str>>,
     pub status: StatusMatch,
     /// Exact timer-type matching — for a [`TimerType::Service`] entry this is
@@ -236,7 +236,7 @@ impl Match {
                 _ => None,
             };
             match m {
-                Some(m) if methods.iter().any(|x| x.eq_ignore_ascii_case(&m)) => {}
+                Some(m) if methods.iter().any(|x| *x == m) => {}
                 _ => return false,
             }
         }

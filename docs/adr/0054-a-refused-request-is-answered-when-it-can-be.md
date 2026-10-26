@@ -45,7 +45,9 @@ first refused line is the one reported. A limit (the header length) stops the
 split at once and leaves no partial: a message past a limit is not worth
 reading further. A refused line naming Via, From, To, Call-ID or CSeq leaves
 no partial either, since the field it held is not echoed, and so does a refused
-line whose name did not read, which may have been any of them.
+line whose name did not read, which may have been any of them. A line holding
+a byte that is not UTF-8 (RFC 3629) is a refused line: the message is refused
+as not UTF-8, and answered when the five fields read.
 
 ### 3. The answer
 
@@ -70,8 +72,7 @@ absorbs it as the ACK to its own non-2xx final.
 ### 4. What is never answered
 
 A response, an ACK, a request without a partial, a limit refusal, a header
-block holding a bare CR or LF or bytes that are not UTF-8: each is dropped as
-before.
+block holding a bare CR or LF: each is dropped.
 
 ### 5. One cap per ingress
 

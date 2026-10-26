@@ -272,9 +272,6 @@ impl RequestRecord {
             (Some(sent), false) => branch == Some(sent.branch.as_str()),
             _ => true,
         };
-        self.awaits_final()
-            && transaction
-            && self.outbound_cseq == cseq
-            && self.method.eq_ignore_ascii_case(method)
+        self.awaits_final() && transaction && self.outbound_cseq == cseq && self.method == method
     }
 }

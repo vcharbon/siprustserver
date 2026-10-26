@@ -91,8 +91,8 @@ A header line ends with CRLF and nowhere else, in and out: the parser refuses
 a bare CR or LF anywhere in the header block, and no writer puts a CR or LF
 inside a line (`src/write_check.rs`). Any other control byte but HTAB stands in
 a header value only as the escaped byte of a quoted-pair, and nowhere in a
-reason phrase; a header block that is not UTF-8 is refused whole, its bytes
-never replaced (`src/control_bytes.rs`).
+reason phrase (`src/control_bytes.rs`). A header block that is not UTF-8 (RFC
+3629) is refused, its bytes never replaced (`src/parser/custom/mod.rs`).
 
 ### 4. The name-addr
 

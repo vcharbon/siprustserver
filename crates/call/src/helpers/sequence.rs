@@ -66,7 +66,7 @@ fn same_record(a: &RequestRecord, b: &RequestRecord) -> bool {
     a.origin == b.origin
         && a.outbound_cseq == b.outbound_cseq
         && a.inbound_cseq == b.inbound_cseq
-        && a.method.eq_ignore_ascii_case(&b.method)
+        && a.method == b.method
         && a.source_call_id == b.source_call_id
 }
 

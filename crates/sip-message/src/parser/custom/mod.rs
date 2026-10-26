@@ -105,7 +105,10 @@ impl CustomParser {
         if let Some(bare) = block.bare_break {
             return Err(bare.refusal());
         }
-        let text = decode_image(head(raw, block.end)?)?;
+        let (text, not_utf8) = decode_image(head(raw, block.end)?);
+        if let Some(refusal) = not_utf8 {
+            return Err(refusal);
+        }
         let mut s = Scanner::new(text.as_str().as_bytes());
         parse_start_line(&mut s, text.as_str(), &self.limits)?;
         let parsed = headers::parse_headers(&mut s, &text, block.lines, &self.limits)?;
@@ -148,8 +151,7 @@ impl SipParser for CustomParser {
             return Err(bare.refusal());
         }
         let body_at = block.end;
-        // A header block that is not UTF-8 is never answered either.
-        let text = decode_image(head(&raw, body_at)?)?;
+        let (text, not_utf8) = decode_image(head(&raw, body_at)?);
         let image = text.as_str();
 
         let mut s = Scanner::new(image.as_bytes());
@@ -179,7 +181,7 @@ impl SipParser for CustomParser {
             },
             _ => error,
         };
-        if let Some(refusal) = refusal {
+        if let Some(refusal) = not_utf8.or(refusal) {
             return Err(refuse(refusal));
         }
 
@@ -258,15 +260,25 @@ fn head(raw: &[u8], end: usize) -> Result<&[u8], SipParseError> {
         .ok_or_else(|| SipParseError::new(format!("header block end {end} past the datagram")))
 }
 
-/// The header block as one shared text image, its bytes exactly as received.
-/// A block that is not UTF-8 is refused: no element of the RFC 3261 §25.1
-/// grammar holds such a byte, and a replacement character would make the
-/// message's text differ from its bytes.
-fn decode_image(header_block: &[u8]) -> Result<SharedText, SipParseError> {
-    std::str::from_utf8(header_block).map(SharedText::new).map_err(|e| {
-        SipParseError::new(format!(
-            "header block is not UTF-8 at byte {} (RFC 3261 §25.1)",
-            e.valid_up_to()
-        ))
-    })
+/// The header block as one shared text image, and the refusal of a block
+/// that is not UTF-8 (RFC 3629). A UTF-8 block is the image byte for byte.
+/// In a block that is not, each byte that is no UTF-8 stands as a CR in the
+/// image: a CR stands alone in no line of a block whose breaks are all CRLF,
+/// so the line holding one is refused like any line breaking the grammar, and
+/// a field a response echoes reads only from bytes exactly as received.
+fn decode_image(header_block: &[u8]) -> (SharedText, Option<SipParseError>) {
+    let e = match std::str::from_utf8(header_block) {
+        Ok(text) => return (SharedText::new(text), None),
+        Err(e) => e,
+    };
+    let refusal = SipParseError::new(format!(
+        "header block is not UTF-8 (RFC 3629) at byte {}",
+        e.valid_up_to()
+    ));
+    let mut image = String::with_capacity(header_block.len());
+    for chunk in header_block.utf8_chunks() {
+        image.push_str(chunk.valid());
+        image.extend(chunk.invalid().iter().map(|_| '\r'));
+    }
+    (SharedText::from(image), Some(refusal))
 }

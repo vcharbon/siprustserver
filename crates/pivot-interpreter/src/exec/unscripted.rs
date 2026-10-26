@@ -34,7 +34,7 @@ fn scripts_a_bye_final(step: &CompiledStep) -> bool {
     matches!(
         &step.discriminator,
         Discriminator::Response { status, cseq_method: Some(method) }
-            if *status >= 200 && method.eq_ignore_ascii_case("BYE")
+            if *status >= 200 && method == "BYE"
     )
 }
 
@@ -49,7 +49,7 @@ impl<'a, 'p> Runner<'a, 'p> {
     /// divergence the confrontation exists to name.
     pub(super) fn owed_bye_final(&self, leg: &str, inbound: &Inbound) -> bool {
         if !inbound.status.is_some_and(|status| status >= 200)
-            || !inbound.cseq_method.eq_ignore_ascii_case("BYE")
+            || inbound.cseq_method != "BYE"
             || !self.byes_sent.contains(&(leg.to_string(), inbound.cseq))
         {
             return false;
@@ -66,7 +66,7 @@ impl<'a, 'p> Runner<'a, 'p> {
     /// floor holds the run open for, so it is the settle's arrival and never
     /// the late datagram a completed flow reports — a repeat included.
     pub(super) fn owed_final_ack(&self, leg: &str, inbound: &Inbound) -> bool {
-        if !inbound.method.as_deref().is_some_and(|method| method.eq_ignore_ascii_case("ACK")) {
+        if !inbound.method.as_deref().is_some_and(|method| method == "ACK") {
             return false;
         }
         let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();

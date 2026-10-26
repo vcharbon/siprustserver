@@ -448,7 +448,7 @@ fn in_dialog_request_answered_or_relayed(turn: &Turn<'_>) -> Result<(), String> 
         .flat_map(|d| call::helpers::records_of(d).iter().chain(d.sent_invite.iter()))
         .filter(|p| !p.is_own())
         .any(|p| {
-            p.method.eq_ignore_ascii_case(method.as_str())
+            p.method == method.as_str()
                 && p.inbound_cseq == i64::from(cseq)
                 && p.source_call_id == req.call_id().as_str()
         });

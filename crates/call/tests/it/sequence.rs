@@ -107,7 +107,7 @@ fn a_relay_at_the_same_cseq_for_another_request_is_not_the_copys() {
     assert!(!holds_records_of(Some(&other), &copy, &by()), "another originator CSeq");
     let mut other = relaying(held.clone(), "MESSAGE");
     caller_mut(&mut other).requests.last_mut().expect("the relay").method = "info".into();
-    assert!(holds_records_of(Some(&other), &copy, &by()), "methods compare without case");
+    assert!(!holds_records_of(Some(&other), &copy, &by()), "methods compare by spelling");
 }
 
 /// A retired dialog's relays still await their finals (RFC 3261 §8.1.3.3).

@@ -134,9 +134,7 @@ pub fn held_record(
     leg.dialogs.iter().find_map(|d| {
         records_of(d)
             .iter()
-            .find(|r| {
-                r.is_held() && r.inbound_cseq == cseq && r.method.eq_ignore_ascii_case(method)
-            })
+            .find(|r| r.is_held() && r.inbound_cseq == cseq && r.method == method)
             .map(|r| (holder_of(d), r.clone()))
     })
 }

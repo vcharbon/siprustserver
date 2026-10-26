@@ -64,10 +64,10 @@ fn strict_numeric_value(value: &str, rule: &NumericHeaderRule) -> Option<u64> {
     strict_non_negative_decimal(digits, rule.max)
 }
 
-/// The singleton headers the split reads itself, so it refuses their repeat
-/// (RFC 3261 §7.3.1: a header whose grammar is no comma list appears once).
-/// The other singletons are refused where they are read (From, To, Call-ID,
-/// CSeq).
+/// The headers whose repeat the split refuses: Content-Length and
+/// Max-Forwards (RFC 3261 §7.3.1: a header whose grammar is no comma list
+/// appears once). A repeated From, To, Call-ID or CSeq is refused at
+/// extraction (`extract_fields`); the split checks no other repeat.
 #[derive(Default)]
 struct Singletons {
     content_length: Option<u64>,

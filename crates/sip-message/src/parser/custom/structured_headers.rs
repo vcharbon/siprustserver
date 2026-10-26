@@ -479,8 +479,8 @@ fn read_one_param(base: &SipStr, mut i: usize, params: &mut Params) -> usize {
     i
 }
 
-/// Mimic JS `decodeURIComponent`: decode `%XX` as UTF-8 bytes; `Err` on a
-/// malformed escape or invalid UTF-8 (the caller falls back to the raw form).
+/// Percent-decode `s` (each `%XX` one byte) as UTF-8; `Err` on a malformed
+/// escape or bytes that are not UTF-8 (the caller falls back to the raw form).
 pub(crate) fn decode_uri_component(s: &str) -> Result<String, ()> {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());

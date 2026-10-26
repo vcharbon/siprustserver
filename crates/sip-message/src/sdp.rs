@@ -20,7 +20,7 @@ pub(crate) fn split_lines(text: &str) -> Vec<&str> {
 
 /// A leading integer: optional sign, leading digits, stop at the first
 /// non-digit; `None` when no digits are present.
-fn parse_int_js(s: &str) -> Option<i64> {
+fn leading_integer(s: &str) -> Option<i64> {
     let s = s.trim_start();
     let (neg, unsigned) = match s.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -301,7 +301,7 @@ pub fn extract_codec_profile(body: &[u8]) -> Option<CodecProfile> {
         if *kind != "audio" || formats.is_empty() {
             continue;
         }
-        let pts: Vec<i64> = formats.iter().filter_map(|f| parse_int_js(f)).collect();
+        let pts: Vec<i64> = formats.iter().filter_map(|f| leading_integer(f)).collect();
         if pts.is_empty() {
             continue;
         }
@@ -328,7 +328,7 @@ pub fn extract_codec_profile(body: &[u8]) -> Option<CodecProfile> {
         }
         if let Some(rest) = line.strip_prefix("a=rtpmap:") {
             if let Some((pt, _)) = rest.trim().split_once(' ') {
-                if let Some(pt) = parse_int_js(pt) {
+                if let Some(pt) = leading_integer(pt) {
                     if allowed.contains(&pt) {
                         rtpmaps.push((*line).to_string());
                     }
@@ -336,7 +336,7 @@ pub fn extract_codec_profile(body: &[u8]) -> Option<CodecProfile> {
             }
         } else if let Some(rest) = line.strip_prefix("a=fmtp:") {
             if let Some((pt, _)) = rest.trim().split_once(' ') {
-                if let Some(pt) = parse_int_js(pt) {
+                if let Some(pt) = leading_integer(pt) {
                     if allowed.contains(&pt) {
                         fmtp.push((*line).to_string());
                     }

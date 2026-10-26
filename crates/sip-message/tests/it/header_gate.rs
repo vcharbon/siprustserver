@@ -5,6 +5,7 @@
 //! partial a 400 answers with (ADR-0054); a block that is not UTF-8 leaves
 //! none.
 
+use sip_message::generators::generate_invalid_request;
 use sip_message::{CustomParser, SipMessage, SipParseError, SipParser};
 
 const HEAD: &str = "OPTIONS sip:bob@example.com SIP/2.0\r\n\
@@ -53,6 +54,7 @@ fn a_numeric_value_is_its_digits_alone() {
         "Min-Expires: 60 x",
         "Session-Expires: 1800 x;refresher=uac",
         "Min-SE: 90 x",
+        "x: 1800 junk",
     ] {
         let raw = options(&[line.as_bytes(), b"Content-Length: 0"], b"");
         let reason = answered(&raw);
@@ -140,13 +142,47 @@ Content-Length: 0\r\n\r\n";
     assert!(parse(raw).is_err(), "a NUL in the reason phrase is refused");
 }
 
+/// A header block that is not UTF-8 (RFC 3629) is refused, never rewritten;
+/// the line holding the byte is a refused line, so a request whose five
+/// echoed fields read is answered 400, those fields echoed byte for byte.
 #[test]
-fn a_header_block_that_is_not_utf8_is_refused_unanswered() {
+fn a_header_block_that_is_not_utf8_is_refused_and_answered() {
     let raw = options(&[b"Max-Forwards: 70", b"Subject: caf\xe9", b"Content-Length: 0"], b"");
     let Err(err) = parse(&raw) else { panic!("refused, never rewritten") };
-    assert!(err.partial().is_none(), "{}", err.reason);
     assert!(err.reason.contains("UTF-8"), "{}", err.reason);
+    let partial = err.partial().expect("the five read: a partial");
+    let source = ("198.51.100.7".to_string(), 40000);
+    let answer = generate_invalid_request(partial, &err.reason, "192.0.2.1:5060", "t400", &source)
+        .expect("built");
+    let image = String::from_utf8(answer.image().to_vec()).expect("text");
+    assert!(image.starts_with("SIP/2.0 400 Invalid Request\r\n"), "{image}");
+    for line in [
+        "\r\nFrom: <sip:alice@example.com>;tag=a1\r\n",
+        "\r\nTo: <sip:bob@example.com>;tag=t400\r\n",
+        "\r\nCall-ID: gate-1@192.0.2.10\r\n",
+        "\r\nCSeq: 1 OPTIONS\r\n",
+    ] {
+        assert!(image.contains(line), "{line:?} in {image}");
+    }
+    // A byte that is no UTF-8 inside an echoed field leaves no partial.
+    let (before, after) = HEAD.split_once("tag=a1").expect("the From tag");
+    let raw =
+        [before.as_bytes(), b"tag=a\xe91", after.as_bytes(), b"Max-Forwards: 70\r\n\r\n"].concat();
+    let Err(err) = parse(&raw) else { panic!("refused") };
+    assert!(err.partial().is_none(), "{}", err.reason);
     // The body is bytes, never text: a binary body parses.
     let raw = options(&[b"Max-Forwards: 70", b"Content-Length: 2"], b"\xe9\xff");
     assert_eq!(accepted(&raw).body().as_ref(), b"\xe9\xff");
+}
+
+/// A comment carries a quoted-pair only where the header's grammar has one:
+/// Server, User-Agent, Retry-After. Comments nest, and a closed comment
+/// grants nothing after it.
+#[test]
+fn a_comment_grants_a_quoted_pair_only_where_the_grammar_has_one() {
+    let with = |line: &[u8]| options(&[b"Max-Forwards: 70", line, b"Content-Length: 0"], b"");
+    assert!(answered(&with(b"Subject: (a \\\x00 b)")).contains("control byte"));
+    accepted(&with(b"Server: stack/1 (a (b \\\x00) c)"));
+    accepted(&with(b"User-Agent: stack/1 (a (b) \\\x00)"));
+    assert!(answered(&with(b"Server: stack/1 (a) \\\x00")).contains("control byte"));
 }
