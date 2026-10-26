@@ -326,7 +326,7 @@ fn cancels_an_answered_invite(
 /// only a leak check judges (ADR-0055 §11): the stale copy's requests into a
 /// dialog the other copy ended, closed by the 481 they draw; one copy's CANCEL
 /// of an INVITE the other copy saw answered, its retransmissions crossing a
-/// heal included; one copy's non-2xx after the 2xx the other copy sent the
+/// heal included; one copy's non-2xx after the final the other copy sent the
 /// caller, which she discards; one copy's BYE of a caller dialog it holds
 /// early, which the other copy answered. The two copies' duplicate in-dialog
 /// CSeqs are accepted from the split on ([`Cluster::split`]).
@@ -344,8 +344,8 @@ fn accept_two_copies(cluster: &mut Cluster, names: &[String]) {
     );
     cluster.fh.accept_rfc_deviations_from_now_where(
         RULE_UNACKED_NON_2XX,
-        |final_, earlier, _| non_2xx_after_a_2xx(final_, earlier, None, u64::MAX),
-        "ADR-0055 §11: a split: one copy's non-2xx after the 2xx the other copy sent, \
+        |final_, earlier, _| non_2xx_after_another_final(final_, earlier),
+        "ADR-0055 §11: a split: one copy's non-2xx after the final the other copy sent, \
          discarded",
     );
     cluster.fh.accept_rfc_deviations_once_per_dialog(
@@ -400,6 +400,19 @@ fn non_2xx_after_a_2xx(
     resp.status() >= 300
         && resp.cseq().method() == Method::Invite
         && answered_before(earlier, upto, invite, to, answer)
+}
+
+/// Whether `final_` is a non-2xx to an INVITE after another final to it: a
+/// 2xx, or a non-2xx of another status.
+fn non_2xx_after_another_final(final_: &RecordedSipEntry, earlier: &[RecordedSipEntry]) -> bool {
+    let Ok(SipMessage::Response(resp)) = CustomParser::new().parse(&final_.raw) else {
+        return false;
+    };
+    let invite = (resp.call_id().as_str(), resp.cseq().seq());
+    let other = |r: &SipResponse| r.status() >= 200 && r.status() != resp.status();
+    resp.status() >= 300
+        && resp.cseq().method() == Method::Invite
+        && answered_before(earlier, u64::MAX, invite, None, other)
 }
 
 /// Whether an entry of `earlier` captured at or before `upto` is a response

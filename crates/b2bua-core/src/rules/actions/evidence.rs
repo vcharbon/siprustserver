@@ -61,9 +61,10 @@ impl ActionExecutor<'_> {
     /// A final above its dialog's local sequence: the sequence is raised to
     /// it, so no later request re-uses a number the peer saw (RFC 3261
     /// §12.2.1.1); an INVITE final is ACKed, the round becoming the dialog's
-    /// INVITE exchange, and one above the dialled INVITE's number on an early
-    /// dialog proves that dialog confirmed and the dialled INVITE answered, so
-    /// the teardown BYEs it instead of cancelling an answered INVITE; a BYE's
+    /// INVITE exchange, and one above the dialled INVITE's number on a dialog
+    /// awaiting that INVITE's final (early, or its CANCEL out and crossed)
+    /// proves that dialog confirmed and the dialled INVITE answered, so the
+    /// teardown BYEs it instead of cancelling an answered INVITE; a BYE's
     /// final ends its dialog.
     fn take_evidence_final(
         &mut self,
@@ -89,7 +90,7 @@ impl ActionExecutor<'_> {
                 if invite {
                     d.sent_invite = None;
                 }
-                if reinvite && d.state == DialogState::Early {
+                if reinvite && d.awaits_invite_final() {
                     d.state = DialogState::Confirmed;
                 }
             }

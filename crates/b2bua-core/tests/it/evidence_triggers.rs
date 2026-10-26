@@ -448,6 +448,27 @@ fn a_2xx_above_the_dialled_number_on_an_early_dialog_confirms_it_and_byes_it() {
     assert!(to_bob.iter().all(|(m, _)| m != "CANCEL"), "{to_bob:?}");
 }
 
+/// The same 2xx on a call already ending, its CANCEL of the dialled INVITE
+/// out: the CANCEL crossed the answer (RFC 3261 §9.1), so the dialog is
+/// confirmed, ACKed and BYEd, never left ending by a CANCEL its INVITE
+/// outran.
+#[test]
+fn a_2xx_above_the_dialled_number_on_a_dialog_ending_by_cancel_confirms_it_and_byes_it() {
+    let mut call = call::helpers::record_cancel_sent(ringing(), "b-1", Vec::new());
+    call.state = call::CallModelState::Terminating;
+    let event = final_from_bob(200, "INVITE", 2, "z9hG4bKreinvite");
+    let config = B2buaConfig::default();
+    let (rule, result) = turn_on(&call, &event, "b-1", &on_bobs_dialog(), &config);
+    assert_eq!(rule, Some("evidence-final"));
+    let result = result.expect("a turn");
+    let to_bob = requests_to(&result, "b-1");
+    assert_eq!(to_bob.first(), Some(&("ACK".to_string(), 2)), "{to_bob:?}");
+    assert!(to_bob.iter().any(|(m, c)| m == "BYE" && *c == 3), "{to_bob:?}");
+    let leg = result.call.b_legs.iter().find(|l| l.leg_id == "b-1").expect("the callee's leg");
+    let cancelling = DialogState::Ending(call::EndingBy::Cancel);
+    assert!(leg.dialogs.iter().all(|d| d.state != cancelling), "no dialog ends by CANCEL");
+}
+
 /// The transfer target's 2xx at a CSeq above the INVITE that dialled it
 /// answers a later request of its early-held dialog — a re-INVITE another
 /// owner sent after the target's answer: the transfer machine does not read

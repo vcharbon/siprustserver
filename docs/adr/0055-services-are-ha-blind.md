@@ -452,7 +452,7 @@ number of takeovers unshifted.
     acting copies send — the stale copy's requests into a dialog the other
     copy ended, each closed by the 481 it draws; one copy's CANCEL of an
     INVITE the other copy saw answered, and its repeats after the heal; one
-    copy's non-2xx after the 2xx the other copy sent the caller, which she
+    copy's non-2xx after the final the other copy sent the caller, which she
     discards, and its repeats; one copy's BYE of a caller dialog it holds
     early, which the other copy answered; two BYEs of one dialog at one CSeq;
     a CSeq one copy re-uses after the other sent it;
