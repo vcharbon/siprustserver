@@ -69,11 +69,13 @@ parity-oracle:
     cargo nextest run -p sip-message --features rvoip-oracle --no-tests=fail -E 'test(/^rvoip_parity::/)'
 
 # The live ELU under a real one-core cgroup CPU quota (a transient systemd
-# user scope): the one `overload::quota_tests` case no other lane can run.
+# user scope): the one `overload::quota_tests` case no other lane can run,
+# from the workspace's test build.
 test-cpu-quota:
-    cargo test -p b2bua --lib --no-run
+    cargo nextest run --workspace --no-run
     systemd-run --user --wait --pipe --quiet --same-dir -p CPUQuota=100% -E PATH -E HOME \
-        cargo test -p b2bua --lib -- --ignored --exact overload::quota_tests::live_signal_sheds_under_a_real_one_core_quota
+        cargo nextest run --workspace --run-ignored only --no-tests=fail \
+        -E 'package(=b2bua) & test(=overload::quota_tests::live_signal_sheds_under_a_real_one_core_quota)'
 
 # ── review gates ───────────────────────────────────────────────────────
 
@@ -163,22 +165,12 @@ fmt-check:
     cargo fmt --all --check
 
 # Rustdoc of every workspace crate, warnings denied: a broken or private
-# intra-doc link, or unclosed HTML in prose, fails. A bin named like its
-# package's lib is skipped by `cargo doc`, so each one gets its own
-# `cargo rustdoc`; its page overwrites the lib's index.html under target/doc.
+# intra-doc link, or unclosed HTML in prose, fails. Every lib and bin is
+# documented; a bin named like its package's lib overwrites the lib's
+# index.html under target/doc. `--examples` (the workspace has none) resolves
+# dev-dependencies, so the checked crates share the test build's features.
 doc-check:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    export RUSTDOCFLAGS="-D warnings"
-    rc=0
-    cargo doc --no-deps --workspace --keep-going || rc=1
-    while read -r pkg bin; do
-        cargo rustdoc -p "$pkg" --bin "$bin" || rc=1
-    done < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[]
-        | ([.targets[] | select(.kind | index("lib")) | .name]) as $libs
-        | .name as $pkg | .targets[] | select(.kind | index("bin"))
-        | select((.name | gsub("-"; "_")) as $n | $libs | index($n)) | "\($pkg) \(.name)"')
-    exit "$rc"
+    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --lib --bins --examples --keep-going
 
 # Point git at the versioned hooks (pre-commit: staged Rust must be fmt-clean;
 # prepare-commit-msg: no amend on develop). A hooks path already set is left

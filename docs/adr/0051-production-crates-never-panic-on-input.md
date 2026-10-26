@@ -73,7 +73,8 @@ fails, whatever crate unified it in.
 One root `clippy.toml`: clippy reads the nearest one and does not merge. Every member
 inherits `[lints] workspace = true`; a crate with audited `unsafe` restates the workspace
 table with `unsafe_code = "deny"` as its one difference, which the tier check verifies. A
-ratchet pass runs clippy with the set force-warned on `--lib --bins` of every tiered crate and
+ratchet pass runs clippy with the set force-warned on the lib and bin targets of the workspace
+(resolved as the test build resolves them), counts the sites of every tiered crate and
 holds per-file counts in `panic-sites.allow`, so no workspace `-D warnings` gate sees the set
 early and no source attribute hides a site from it. An entry goes down, or up only by sites
 git sees moved into its file from a counted site elsewhere and by sites a rule the base did
