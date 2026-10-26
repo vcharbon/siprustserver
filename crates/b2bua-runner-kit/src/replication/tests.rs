@@ -1,12 +1,29 @@
 use super::*;
 use std::collections::HashMap;
 
-/// `pairs`, a cluster key among them unless they state one.
+/// `pairs`, a cluster key and a pod UID among them unless they state one.
 fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
     let mut map: HashMap<String, String> =
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
     map.entry("B2BUA_CLUSTER_KEY".into()).or_insert_with(|| "0123456789abcdef".into());
+    map.entry("POD_UID".into()).or_insert_with(|| "uid-of-this-pod".into());
     move |k| map.get(k).cloned()
+}
+
+/// A worker that discovers its peers from the EndpointSlices tells its own
+/// endpoint from another worker's on its ordinal by the pod UID: without it,
+/// it could never see itself routable nor superseded, so the boot is refused.
+#[test]
+fn discovery_without_a_pod_uid_refuses_the_boot() {
+    let e = ReplicationSettings::from_lookup(lookup(&[("B2BUA_REPL", "1"), ("POD_UID", "")]))
+        .expect_err("a discovering worker without its pod UID must not start");
+    assert!(e.contains("POD_UID"), "{e}");
+    let listed = ReplicationSettings::from_lookup(lookup(&[
+        ("B2BUA_REPL", "1"),
+        ("B2BUA_PEERS", "w0@10.0.0.1"),
+        ("POD_UID", ""),
+    ]));
+    assert!(matches!(listed, Ok(Some(_))), "a static pool draws a per-boot identity");
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! The other owner's ending of the call, folded into the record that ends it
+//! The other owner's ending of the call, met in the record that ends it
 //! here (ADR-0014 §2, ADR-0020 X3): its terminal body is discharged through
 //! the one enforcement funnel, and every re-INVITE this node relayed draws
 //! one final for its originator.
@@ -18,8 +18,8 @@ use crate::rules::{ActionExecutor, RuleCall, RuleContext};
 use crate::store::Enveloped;
 use crate::turn_scope::TurnScope;
 
-/// Discharge an already-`Terminated` body (a backup's deferred terminal, folded
-/// into our live map or reclaimed on reboot) through the ONE enforcement funnel.
+/// Discharge an already-`Terminated` body (a backup's deferred terminal, met
+/// in our live map or reclaimed on reboot) through the ONE enforcement funnel.
 /// `before` is the live (non-terminal) snapshot so `enforce`'s `became_terminated`
 /// edge fires — `discharge_result`/`discharge_as_own` cannot be reused here because
 /// they synthesise the terminal from a NON-terminal call, whereas this body is

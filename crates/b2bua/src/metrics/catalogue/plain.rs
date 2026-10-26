@@ -250,10 +250,10 @@ plain_counters! {
         "b2bua_unrecoverable_calls_total",
         "calls whose record does not rebuild their caller's INVITE, discharged with nothing on the wire (ADR-0052 §11; ALARM: expected 0)",
     ) => unrecoverable_calls, bump_unrecoverable_call, unrecoverable_calls_total;
-    UNRECOVERABLE_FOLDS = (
-        "b2bua_unrecoverable_folds_total",
+    UNRECOVERABLE_MEETINGS = (
+        "b2bua_unrecoverable_meetings_total",
         "copies of the other owner not taken at a meeting because they do not rebuild the caller's INVITE; the live copy keeps serving (ADR-0052 §11; ALARM: expected 0)",
-    ) => unrecoverable_folds, bump_unrecoverable_fold, unrecoverable_folds_total;
+    ) => unrecoverable_meetings, bump_unrecoverable_meeting, unrecoverable_meetings_total;
     // replication (peer-to-peer HA; separate namespace `b2bua_repl_*`). These
     // localise an HA failure to a layer: `flush_propagated` rising on the PRIMARY
     // proves it is attempting to replicate (the proxy cookie stamped

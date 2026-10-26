@@ -274,7 +274,7 @@ Every entry that makes a body resident checks that its snapshot rebuilds:
   answered as one for a vanished call.
 - **At a fold** the snapshot is written: a whole fold lands the other owner's
   body, its snapshot with it. A fold whose body does not rebuild is refused
-  and counted (`b2bua_unrecoverable_folds_total`); the live copy, which
+  and counted (`b2bua_unrecoverable_meetings_total`); the live copy, which
   rebuilds, keeps serving, and the version the body names is still seen. A
   rounds fold keeps the live copy's snapshot.
 

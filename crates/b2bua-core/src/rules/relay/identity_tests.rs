@@ -38,7 +38,7 @@ fn a_call_with_one_owner_states_none() {
 fn the_marks_of_a_call_name_the_other_owner_its_owners_state() {
     use crate::test_call::{invite, src};
     let config = B2buaConfig { self_ordinal: "w0".into(), ..B2buaConfig::default() };
-    let invite = invite("w0", "w1", "owners");
+    let invite = invite("owners");
     let mut ids = sip_ids::TurnIds::fixed(1);
     let call = crate::initial_invite::build_initial_call(&invite, src(), &config, &mut ids, 0);
     let owners = Owners { other: Some("w1".into()), ..Owners::default() };

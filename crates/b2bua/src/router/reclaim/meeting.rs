@@ -144,7 +144,7 @@ async fn take_whole(
     now_ms: i64,
 ) {
     if let Err(err) = crate::rules::relay::rebuild_a_leg_invite(&taken.call.a_leg_invite) {
-        ctx.metrics.bump_unrecoverable_fold();
+        ctx.metrics.bump_unrecoverable_meeting();
         tracing::error!(%call_ref, error = %err, "a met copy does not rebuild the caller's INVITE: the live copy stays");
         let mut kept = live.clone().merge_exempt(incoming);
         kept.topology.clone_from(&live.topology);

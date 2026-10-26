@@ -48,7 +48,7 @@ pub(super) enum ApplyOutcome {
     Shed,
     /// A reverse flush of a call incarnation other than the Element's: a
     /// takeover copy's view of a call the authority has since replaced on the
-    /// ref. The Element keeps its call and nothing is handed to the fold.
+    /// ref. The Element keeps its call and nothing is handed to the meeting.
     Superseded,
 }
 

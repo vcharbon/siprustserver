@@ -55,6 +55,10 @@ pub enum DialogUsage {
     Subscription { event: String, id: Option<String> },
 }
 
+/// The [`RequestRecord::author`] of the keepalive OPTIONS: the id of the rule
+/// that sends it.
+pub const KEEPALIVE_AUTHOR: &str = "keepalive";
+
 /// The transaction this side put on the wire for a record: what a client
 /// transaction rebuilt from the record retransmits under the same branch
 /// (RFC 3261 §17.1.2.2).

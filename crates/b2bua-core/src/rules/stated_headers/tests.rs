@@ -137,13 +137,8 @@ fn the_wider_set_applies_first_and_the_narrower_against_its_result() {
 fn the_end_of_turn_stamp_rebinds_a_retained_copy_of_what_it_changes() {
     let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let mut ids = sip_ids::TurnIds::fixed(1);
-    let mut call = crate::initial_invite::build_initial_call(
-        &invite("w0", "w1", "stamp"),
-        src(),
-        &config,
-        &mut ids,
-        0,
-    );
+    let mut call =
+        crate::initial_invite::build_initial_call(&invite("stamp"), src(), &config, &mut ids, 0);
     let a_invite = caller_of(&call);
     let ack = a_invite.clone();
     let (emission, _) = call::RetainedEmission::paced(
@@ -195,13 +190,8 @@ fn the_end_of_turn_stamp_rebinds_a_retained_copy_of_what_it_changes() {
 fn the_end_of_turn_stamp_rebinds_the_launched_invites_handle() {
     let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let mut ids = sip_ids::TurnIds::fixed(1);
-    let mut call = crate::initial_invite::build_initial_call(
-        &invite("w0", "w1", "handle"),
-        src(),
-        &config,
-        &mut ids,
-        0,
-    );
+    let mut call =
+        crate::initial_invite::build_initial_call(&invite("handle"), src(), &config, &mut ids, 0);
     let a_invite = caller_of(&call);
     let (leg, effect) = crate::rules::relay::build_b_leg(
         crate::rules::relay::CallMarks::of(&call, crate::owners::Owners::none()),
@@ -252,13 +242,8 @@ fn the_end_of_turn_stamp_rebinds_the_launched_invites_handle() {
 fn an_ended_legs_own_set_stays_with_the_call() {
     let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let mut ids = sip_ids::TurnIds::fixed(1);
-    let mut call = crate::initial_invite::build_initial_call(
-        &invite("w0", "w1", "prune"),
-        src(),
-        &config,
-        &mut ids,
-        0,
-    );
+    let mut call =
+        crate::initial_invite::build_initial_call(&invite("prune"), src(), &config, &mut ids, 0);
     let a_invite = caller_of(&call);
     let (mut leg, effect) = crate::rules::relay::build_b_leg(
         crate::rules::relay::CallMarks::of(&call, crate::owners::Owners::none()),
@@ -309,13 +294,8 @@ fn an_ended_legs_own_set_stays_with_the_call() {
 fn the_charging_arm_reads_the_legs_own_set() {
     let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let mut ids = sip_ids::TurnIds::fixed(1);
-    let mut call = crate::initial_invite::build_initial_call(
-        &invite("w0", "w1", "arm"),
-        src(),
-        &config,
-        &mut ids,
-        0,
-    );
+    let mut call =
+        crate::initial_invite::build_initial_call(&invite("arm"), src(), &config, &mut ids, 0);
     let mut stated = StatedHeaders::default();
     stated.every_message.insert("P-Charging-Vector".into(), HeaderUpdate::line("call"));
     let mut silent = StatedHeaders::default();

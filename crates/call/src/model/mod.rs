@@ -109,7 +109,9 @@ pub use record::{
     ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallModelState, PolicyUpdateBody, SipHeader,
 };
 pub use relay_owner::RelayOwner;
-pub use request_record::{DialogUsage, HostPort, RequestOrigin, RequestRecord, SentRequest};
+pub use request_record::{
+    DialogUsage, HostPort, RequestOrigin, RequestRecord, SentRequest, KEEPALIVE_AUTHOR,
+};
 pub use sdp_session::LegSdpSession;
 pub use services::{
     ExtMap, PromotePemState, RelayFirst18xState, ReleaseEventKind, ReroutePhase, RerouteState,

@@ -104,6 +104,7 @@ impl RefusedReplicas {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.by_ref.len()
     }

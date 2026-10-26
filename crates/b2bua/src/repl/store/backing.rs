@@ -34,6 +34,7 @@ impl ReplicatingCallStore {
     }
 
     /// Standing replica refusals, all primaries.
+    #[cfg(test)]
     pub fn refused_count(&self) -> usize {
         locked(&self.refusals, REPLICA_REFUSALS).replicas.len()
     }

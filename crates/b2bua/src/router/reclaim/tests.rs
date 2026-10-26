@@ -252,7 +252,7 @@ async fn a_copy_that_does_not_rebuild_the_callers_invite_is_never_taken() {
     let after = n.core.router_ctx().state.peek(&live.call.call_ref).expect("the live copy serves");
     assert_eq!(after.a_leg_invite, live.call.a_leg_invite, "the caller's INVITE is the live one");
     assert!(!call::helpers::caller_answered(&after), "nothing compared of the copy landed");
-    assert_eq!(n.metrics.unrecoverable_folds_total(), 1);
+    assert_eq!(n.metrics.unrecoverable_meetings_total(), 1);
     assert_eq!(live_versions(&n, &live.call.call_ref).0, (4, 1), "no vector without its body");
 }
 

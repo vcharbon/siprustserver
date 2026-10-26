@@ -12,21 +12,16 @@ use call::{Call, TimerEntry, TimerType};
 /// Strip a stale `KeepaliveTimeout` from a timer set hydrated off a replica
 /// snapshot (reclaim or reactive takeover).
 ///
-/// A `KeepaliveTimeout` guards an in-flight keepalive OPTIONS *client
-/// transaction* — armed when the OPTIONS is sent (`keepalive` rule) and
-/// cancelled the instant its 200 lands (`absorb-options-200`). It exists on the
-/// wire for only the round-trip, but a flush that catches that window
-/// replicates it, so a `bak:`/`pri:` snapshot can carry an *armed*
-/// `KeepaliveTimeout`. When that snapshot is hydrated onto a different node,
-/// the client transaction it guarded **died with the crashed node** — its 200
-/// can never arrive to cancel it, and its `fire_at` (minted on the dead node's
-/// clock) is typically already past-due, so `restore` would fire it on the next
-/// tick and the `keepalive-timeout` rule would BYE *both* legs of a perfectly
-/// healthy long hold. The hydrated call re-probes safely on its own schedule:
-/// its `Keepalive` timer fires a *fresh* OPTIONS and arms a *fresh*
-/// `KeepaliveTimeout` against the live node's clock — dropping the stale guard
-/// loses nothing. Purely local timer hygiene — no clock/settle, no `(p,b)`
-/// interaction (ADR-0014 untouched).
+/// A `KeepaliveTimeout` guards an in-flight keepalive OPTIONS client
+/// transaction: armed when the OPTIONS is sent (`keepalive` rule), cancelled
+/// when its 200 lands (`absorb-options-200`). A flush inside that round trip
+/// replicates it armed. Hydrated on another node, it guards a transaction that
+/// died with the node that sent it, and its `fire_at`, minted on that node's
+/// clock, is typically past due: `restore` would fire it at once and the
+/// `keepalive-timeout` rule would BYE both legs of a healthy call. The hydrated
+/// call re-probes on its own schedule: its `Keepalive` timer sends a fresh
+/// OPTIONS under a fresh `KeepaliveTimeout` on this node's clock, so dropping
+/// the stale guard loses nothing.
 fn drop_stale_keepalive_timeout(timers: &mut Vec<TimerEntry>) {
     timers.retain(|t| *t.timer_type() != TimerType::KeepaliveTimeout);
 }

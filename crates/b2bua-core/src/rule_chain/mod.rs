@@ -178,8 +178,8 @@ pub fn rule_chain_turn(
             response_facts::record(&mut exec, &mut call, fx, leg, resp, screened);
             // Only the final on this stack's NOTIFY's own transaction ends
             // the wait behind it and speaks for its subscription: a final to
-            // another request reusing its number (a dead owner's) answers
-            // nothing here.
+            // another request at its number, one the record never sent,
+            // answers nothing here.
             if let Some((holder, record)) = resolved.record.as_deref() {
                 if resp.status() >= 200 {
                     let status = Some(resp.status());

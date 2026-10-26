@@ -62,7 +62,7 @@ impl BacklogMarks {
 /// The backlog toward one peer: pending entries (counted up to the high-water
 /// mark) and the age of the oldest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Backlog {
+struct Backlog {
     pub entries: usize,
     pub oldest_age: Duration,
 }
@@ -71,18 +71,6 @@ impl Changelog {
     /// Set the backlog marks.
     pub fn set_backlog_marks(&self, marks: BacklogMarks) {
         locked(&self.inner, REPLICA_CHANGELOG).marks = marks;
-    }
-
-    /// The backlog toward `peer` now.
-    pub fn backlog(&self, peer: &str) -> Backlog {
-        let now = self.clock.now_ms();
-        let inner = locked(&self.inner, REPLICA_CHANGELOG);
-        let cap = inner.marks.high_entries;
-        inner
-            .peers
-            .get(peer)
-            .map(|log| measure(log.sub(Partition::Bak), self.gen, now, cap))
-            .unwrap_or(Backlog { entries: 0, oldest_age: Duration::ZERO })
     }
 
     /// Whether a new call admitted now gets `peer` as its backup: `false` from

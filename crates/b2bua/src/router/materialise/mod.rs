@@ -18,7 +18,7 @@
 //!    `pri:{self}` for a reclaim — each miss a typed [`Reason`] the caller's
 //!    orphan path answers (481 for a request, drop for a response);
 //! 3. the state check — a takeover refuses a `Terminated` replica (the image of
-//!    a call that already ended, kept for its primary to fold or reclaim;
+//!    a call that already ended, kept for its primary to meet or reclaim;
 //!    serving it would re-arm timers and run rules on a released copy) and
 //!    serves a `Terminating` one, which still owes the teardown's end; a
 //!    reclaim discharges a terminal body through the reclaim funnel instead of
@@ -291,8 +291,8 @@ pub(super) enum Offered {
     Turn(Box<Call>),
 }
 
-/// The seeds a fold into the call's record hands the layer: the INVITE server
-/// transactions answered 2xx whose ACK the folded record still awaits, in RFC
+/// The seeds a meeting with the other copy hands the layer: the INVITE server
+/// transactions answered 2xx whose ACK the met record still awaits, in RFC
 /// 6026 Accepted with the 2xx it retains. They are the only transactions of
 /// another node's rounds this node can serve while that node lives: a copy of
 /// the INVITE reaches whichever node the proxy reads alive, and the 2xx that

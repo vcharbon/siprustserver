@@ -431,7 +431,7 @@ impl CallState {
         self.replace_locked(&mut inner, call);
     }
 
-    /// Replace the in-memory call for a quiet turn or a fold: the same
+    /// Replace the in-memory call for a quiet turn or a meeting: the same
     /// replace-only rule as [`update`](Self::update) with no counter moved —
     /// the `(p,b)` the resident copy carries is the last write's, either
     /// owner's, and so is what the next flush publishes.

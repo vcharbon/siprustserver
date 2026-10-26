@@ -84,7 +84,7 @@ pub use model::{
     OutboundInvite, PeerDialog, RelayOwner, RemoteInfo, RetiredDialog, Ring, Unacked2xx,
 };
 // The request records a call's dialogs hold (ADR-0055 §2).
-pub use model::{DialogUsage, RequestOrigin, RequestRecord, SentRequest};
+pub use model::{DialogUsage, RequestOrigin, RequestRecord, SentRequest, KEEPALIVE_AUTHOR};
 // The retained emission every dialog-level retransmission repeats (ADR-0032 X3)
 // and the obligation that discharges its ladder (X4).
 pub use model::{Obligation, Repeat, Repeated, RetainedEmission};

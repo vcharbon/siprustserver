@@ -22,7 +22,24 @@ fn keepalive(cseq: i64) -> RequestRecord {
         image: b"OPTIONS".to_vec(),
         destination: HostPort { host: "192.0.2.10".into(), port: 5060 },
     };
-    RequestRecord::own("OPTIONS", cseq, sent, 32_000, DialogUsage::Session)
+    RequestRecord {
+        author: Some(call::KEEPALIVE_AUTHOR.into()),
+        ..RequestRecord::own("OPTIONS", cseq, sent, 32_000, DialogUsage::Session)
+    }
+}
+
+/// An OPTIONS a service rule `author` sent on its own is the service's
+/// request, compared like any other: only the keepalive's is exempt.
+#[test]
+fn a_service_s_own_options_is_compared() {
+    let before = call();
+    let mut after = before.clone();
+    let d = after.a_leg.dialogs.confirmed_mut().expect("the answered dialog");
+    d.our_cseq += 1;
+    let mut probe = keepalive(d.our_cseq);
+    probe.author = Some("service-probe".into());
+    d.requests.push(probe);
+    assert!(!same_state(&before, &after));
 }
 
 fn entry(seq: u32) -> MessageEntry {

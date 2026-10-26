@@ -16,7 +16,7 @@ const RING_MS: u64 = 2_345;
 fn call(ring: Deadline, state: LegState) -> Call {
     use crate::test_call::{invite, src};
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-    let invite = invite("w0", "w1", "ring-deadline");
+    let invite = invite("ring-deadline");
     let call = crate::initial_invite::build_initial_call(
         &invite,
         src(),

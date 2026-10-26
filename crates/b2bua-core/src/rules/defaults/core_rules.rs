@@ -1355,7 +1355,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         })
         .runs_while_terminating(),
         rule(
-            "keepalive",
+            call::KEEPALIVE_AUTHOR,
             &[],
             Match::timer().timer_type(TimerType::Keepalive).call_state(CallModelState::Active),
             |ctx| {

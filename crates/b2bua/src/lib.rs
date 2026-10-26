@@ -74,7 +74,7 @@ pub mod turn_probe;
 pub mod wire_faults;
 
 #[cfg(test)]
-pub(crate) use ::b2bua_core::test_call;
+pub(crate) mod test_call;
 pub use ::b2bua_core::{
     answer_deadline, attempts, config, decision_log, destination_allowlist, effects,
     failure_terminate, failure_unavailable, initial_invite, landing, message_ring, obligations,

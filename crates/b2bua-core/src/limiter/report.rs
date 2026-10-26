@@ -171,7 +171,7 @@ mod tests {
     fn call_holding_x() -> Call {
         use crate::test_call::{invite, src};
         let config = crate::config::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-        let invite = invite("w0", "w1", "admit");
+        let invite = invite("admit");
         let mut ids = sip_ids::TurnIds::fixed(1);
         let mut call =
             crate::initial_invite::build_initial_call(&invite, src(), &config, &mut ids, 0);

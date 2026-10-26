@@ -91,9 +91,11 @@ pub struct ReplicationSettings {
 
 impl ReplicationSettings {
     /// Reads the grammar through `get`. `Ok(None)` when replication is off;
-    /// `Err` naming the variable when one is malformed, or when replication is
-    /// on with no `B2BUA_CLUSTER_KEY`: the owners of a call trust what each
-    /// states on its requests only under that key (ADR-0055 §12).
+    /// `Err` naming the variable when one is malformed, when replication is
+    /// on with no `B2BUA_CLUSTER_KEY` — the owners of a call trust what each
+    /// states on its requests only under that key (ADR-0055 §12) — or when
+    /// it discovers its peers with no `POD_UID`, the identity its own
+    /// endpoint is bound to (§6).
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
         if !get("B2BUA_REPL").is_some_and(|v| is_truthy(&v)) {
             return Ok(None);
@@ -116,6 +118,12 @@ impl ReplicationSettings {
         };
         let peers = get("B2BUA_PEERS").unwrap_or_default();
         let membership = if peers.trim().is_empty() {
+            if get("POD_UID").is_none_or(|uid| uid.trim().is_empty()) {
+                return Err("B2BUA_REPL discovers its peers from the EndpointSlices but POD_UID \
+                     is unset: the worker tells its own endpoint from another worker's on its \
+                     ordinal by its pod UID (ADR-0055 §6)"
+                    .to_string());
+            }
             MembershipSource::EndpointSlices {
                 service: get("B2BUA_REPL_SERVICE").unwrap_or_else(|| "b2bua-worker".to_string()),
                 namespace: get("B2BUA_NAMESPACE")

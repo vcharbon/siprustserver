@@ -338,8 +338,11 @@ fn exempt_timer(timer: &TimerEntry) -> bool {
     )
 }
 
-/// Whether `record` is a keepalive request record: the in-dialog OPTIONS this
-/// stack sends on its own.
+/// Whether `record` is a keepalive request record: the in-dialog OPTIONS the
+/// keepalive rule sends ([`crate::KEEPALIVE_AUTHOR`]), not one a service sends
+/// on its own.
 fn keepalive_record(record: &RequestRecord) -> bool {
-    record.is_own() && record.method.eq_ignore_ascii_case("OPTIONS")
+    record.is_own()
+        && record.method.eq_ignore_ascii_case("OPTIONS")
+        && record.author.as_deref() == Some(crate::KEEPALIVE_AUTHOR)
 }

@@ -221,13 +221,13 @@ pub(super) fn admission(dialog: Option<&Dialog>, method: &Method) -> Admission {
     }
 }
 
-/// Whether a takeover copy served `call`: this node is that copy, or its
-/// record holds a copy's write it folded (a backup counter above zero). Only
-/// then is an ACK of the caller's unanswered INVITE evidence (ADR-0055 §4);
-/// otherwise the copy that answered it is live and its write is on its way.
+/// Whether a copy served `call` ([`crate::store::CallTopology::copy_served`],
+/// read on this node). Only then is an ACK of the caller's unanswered INVITE
+/// evidence (ADR-0055 §4); otherwise the copy that answered it is live and its
+/// write is on its way.
 fn copy_served(ctx: &RouterCtx, call: &Call) -> bool {
-    ctx.state.is_takeover(&call.call_ref)
-        || ctx.state.topology(&call.call_ref).is_some_and(|t| t.bak_gen > 0)
+    let this = &ctx.relay_owner.ordinal;
+    ctx.state.topology(&call.call_ref).is_some_and(|t| t.copy_served(this))
 }
 
 /// Whether `ack`, an ACK on `leg_id` naming a dialog by its To-tag, names

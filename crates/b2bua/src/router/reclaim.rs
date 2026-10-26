@@ -226,8 +226,7 @@ pub(super) async fn meet_refused_flush(
 /// discharges the CDR + limiter holds, `RemoveCall` rides
 /// `release_call(Terminated)`, and the delete propagates. Reached ONLY by the
 /// reaper `OUTCOME_DISCHARGE` branch — a takeover copy DEFERS its discharge to
-/// the primary instead of discharging here (see the `CallQuiesced` handler and
-/// `process_result`). `discharge_result` forces every leg terminal with NO wire
+/// the primary instead of discharging here (see `process_result`). `discharge_result` forces every leg terminal with NO wire
 /// traffic. The caller MUST hold the per-call lock.
 pub(super) async fn discharge_as_own(ctx: &Arc<RouterCtx>, call_ref: &str, now_ms: i64) {
     let Some(call) = ctx.state.peek(call_ref) else { return };

@@ -42,7 +42,8 @@
 //!   B2BUA_UDP_RCVBUF SO_RCVBUF on the signalling socket, bytes (default 4 MiB;
 //!                   empty = kernel rmem_default; clamped at rmem_max)
 //!   B2BUA_ORDINAL   worker ordinal stamped in callRef  (default w0)
-//!   POD_UID         worker identity, the pod UID (downward API); unset: a per-boot token
+//!   POD_UID         worker identity, the pod UID (downward API); required with
+//!                   discovered peers; unset in a static pool: a per-boot token
 //!   B2BUA_CLUSTER_KEY the key the cluster's workers share to sign the via-extension
 //!                   (16..64 bytes; required with B2BUA_REPL on; unset: none
 //!                   stated, none trusted) — ADR-0055 §12

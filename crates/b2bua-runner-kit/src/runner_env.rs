@@ -59,8 +59,8 @@ pub struct RunnerEnv {
     /// `B2BUA_ORDINAL` — worker ordinal stamped in callRef (default `w0`).
     pub ordinal: String,
     /// `POD_UID` — the worker identity, the orchestrator's pod UID from the
-    /// downward API (ADR-0055 §6). Unset (a static pool): a per-boot token
-    /// drawn from the OS RNG.
+    /// downward API (ADR-0055 §6), required when replication discovers its
+    /// peers. Unset in a static pool: a per-boot token drawn from the OS RNG.
     pub identity: Option<String>,
     /// `B2BUA_CLUSTER_KEY` — the secret every worker of the cluster shares to
     /// sign the via-extension on its own requests (ADR-0055 §12), 16 to 64
