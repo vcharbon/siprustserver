@@ -34,6 +34,10 @@ const PERF_ATTR_SIZE_VER0: u32 = 64;
 const FLAG_DISABLED: u64 = 1 << 0;
 const FLAG_EXCLUDE_KERNEL: u64 = 1 << 5;
 const FLAG_EXCLUDE_HV: u64 = 1 << 6;
+/// `perf_event_attr.read_format` bits: `PERF_FORMAT_TOTAL_TIME_ENABLED`,
+/// `PERF_FORMAT_TOTAL_TIME_RUNNING`. A read then returns the count, the time
+/// the event was enabled and the time it was counting.
+const FORMAT_TIMES: u64 = (1 << 0) | (1 << 1);
 /// `_IO('$', 0)`, `_IO('$', 1)`, `_IO('$', 3)`.
 const PERF_EVENT_IOC_ENABLE: libc::c_ulong = 0x2400;
 const PERF_EVENT_IOC_DISABLE: libc::c_ulong = 0x2401;
@@ -70,7 +74,7 @@ impl InsnCounter {
             config: PERF_COUNT_HW_INSTRUCTIONS,
             sample_period: 0,
             sample_type: 0,
-            read_format: 0,
+            read_format: FORMAT_TIMES,
             flags: FLAG_DISABLED | FLAG_EXCLUDE_KERNEL | FLAG_EXCLUDE_HV,
             wakeup_events: 0,
             bp_type: 0,
@@ -102,15 +106,31 @@ impl InsnCounter {
     }
 
     /// Runs `f` and reports the instructions the calling thread retired in
-    /// user space while it ran, alongside its result.
+    /// user space while it ran, alongside its result. A reading the kernel
+    /// took on a counter shared with other events — counting for part of the
+    /// region only, and scaled — is an error, never a count.
     pub fn measure<T>(&mut self, f: impl FnOnce() -> T) -> io::Result<(T, u64)> {
         self.ioctl(PERF_EVENT_IOC_RESET)?;
         self.ioctl(PERF_EVENT_IOC_ENABLE)?;
         let out = f();
         self.ioctl(PERF_EVENT_IOC_DISABLE)?;
-        let mut count = [0u8; 8];
-        self.file.read_exact(&mut count)?;
-        Ok((out, u64::from_ne_bytes(count)))
+        let mut read = [0u8; 24];
+        self.file.read_exact(&mut read)?;
+        let word = |at: usize| {
+            read.get(at..at + 8)
+                .and_then(|b| <[u8; 8]>::try_from(b).ok())
+                .map_or(0, u64::from_ne_bytes)
+        };
+        let (count, enabled, running) = (word(0), word(8), word(16));
+        if running < enabled {
+            return Err(io::Error::other(format!(
+                "the instruction counter was multiplexed with other events (counted {running} ns \
+                 of {enabled} ns): the count is an estimate, not a measurement; free the \
+                 hardware counters (other perf sessions, the NMI watchdog: \
+                 `sysctl kernel.nmi_watchdog=0`) and run again"
+            )));
+        }
+        Ok((out, count))
     }
 
     fn ioctl(&self, request: libc::c_ulong) -> io::Result<()> {
