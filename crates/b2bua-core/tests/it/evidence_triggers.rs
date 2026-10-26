@@ -58,6 +58,18 @@ fn turn_on(
     resolved: &Resolved,
     config: &B2buaConfig,
 ) -> (Option<&'static str>, Option<HandlerResult>) {
+    turn_on_served(call, event, leg, resolved, config, false)
+}
+
+/// [`turn_on`] on a call a takeover copy served when `copy_served`.
+fn turn_on_served(
+    call: &call::Call,
+    event: &CallEvent,
+    leg: &str,
+    resolved: &Resolved,
+    config: &B2buaConfig,
+    copy_served: bool,
+) -> (Option<&'static str>, Option<HandlerResult>) {
     let direction = if leg == "a" { Direction::FromA } else { Direction::FromB };
     let ctx = RuleContext {
         call: RuleCall::new(call),
@@ -71,7 +83,7 @@ fn turn_on(
         resolved,
     };
     // The evidence stage reads the event before the rule chain does.
-    let evidence = b2bua_core::rules::evidence::evidence_rules(false);
+    let evidence = b2bua_core::rules::evidence::evidence_rules(copy_served);
     let rules = default_rules();
     let first = pick_ranked(&evidence, call, &ctx).into_iter().next();
     let Some(rule) = first.or_else(|| pick_ranked(&rules, call, &ctx).into_iter().next()) else {
@@ -258,6 +270,45 @@ Content-Length: 0\r\n\r\n";
         .expect("the caller's BYE");
     assert_eq!(bye.from().tag(), Some("shown"), "under the tag the ACK names");
     assert_eq!(bye.to().tag(), Some("atag"));
+}
+
+/// The caller's re-INVITE on a dialog the record holds early, on a call a
+/// copy served: a re-INVITE rides a confirmed dialog only, so another owner
+/// answered her 2xx. Her INVITE draws no final here — its transaction is
+/// relinquished — the re-INVITE draws 487, and the call ends: her dialog
+/// BYEd under the re-INVITE's tag, the callee's ringing INVITE CANCELled.
+#[test]
+fn a_reinvite_on_the_callers_early_dialog_is_evidence_on_a_served_call() {
+    let call = ringing();
+    let raw = "INVITE sip:b2bua@10.0.0.9:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bKre\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@host>;tag=atag\r\n\
+To: <sip:bob@host>;tag=shown\r\n\
+Call-ID: c1@alice\r\n\
+CSeq: 2 INVITE\r\n\
+Contact: <sip:alice@127.0.0.1:5060>\r\n\
+Content-Length: 0\r\n\r\n";
+    let event = CallEvent::sip(parse(raw), "127.0.0.1:5060".parse().unwrap());
+    let config = B2buaConfig::default();
+    let (rule, result) = turn_on_served(&call, &event, "a", &Resolved::default(), &config, true);
+    assert_eq!(rule, Some("evidence-reinvite"));
+    let result = result.expect("a turn");
+    assert_eq!(responds_to(&result, "a"), [487], "the re-INVITE draws 487, her INVITE nothing");
+    assert!(
+        result
+            .effects
+            .critical
+            .iter()
+            .any(|e| matches!(e, CriticalStateEffect::RelinquishAnsweredInvite { .. })),
+        "the caller's INVITE transaction is relinquished"
+    );
+    let to_her = requests_to(&result, "a");
+    assert!(to_her.iter().any(|(m, _)| m == "BYE"), "her dialog is BYEd: {to_her:?}");
+    let bob = call::helpers::find_leg(&result.call, "b-1").and_then(|l| l.outbound_invite());
+    assert!(bob.is_some_and(|i| i.cancel_sent), "bob's ringing INVITE is CANCELled");
+    let (single, _) = turn_on(&call, &event, "a", &Resolved::default(), &config);
+    assert_ne!(single, Some("evidence-reinvite"), "on a call one node served, no evidence");
 }
 
 /// An ACK of her INVITE naming no dialog proves no answer: no 2xx draws an

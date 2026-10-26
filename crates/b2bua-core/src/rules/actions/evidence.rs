@@ -41,6 +41,14 @@ impl ActionExecutor<'_> {
             Some(req) if *req.method() == Method::Ack => {
                 self.take_evidence_ack(call, fx, ctx, leg_id, req)
             }
+            // The caller's re-INVITE: another owner answered her INVITE; the
+            // re-INVITE itself ends with the call (RFC 3261 §15.1.2).
+            Some(req) if *req.method() == Method::Invite => {
+                if let Some(tag) = req.to().tag() {
+                    self.take_caller_answered(call, fx, leg_id, tag);
+                }
+                self.respond(call, fx, ctx, 487, "Request Terminated", &[], None, vec![]);
+            }
             // The callee's BYE on an early dialog: it answered that dialog.
             Some(req) if *req.method() == Method::Bye => {
                 let tag = req.from().tag().unwrap_or_default();
@@ -177,6 +185,36 @@ impl ActionExecutor<'_> {
 }
 
 impl ActionExecutor<'_> {
+    /// Another owner answered the caller's INVITE 2xx under `tag`: her INVITE
+    /// is recorded answered and its server transaction here relinquished, so
+    /// no final follows the 2xx, and the dialog `tag` names is confirmed.
+    fn take_caller_answered(
+        &mut self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        tag: &str,
+    ) {
+        if let Some(invite) = self.caller_invite(call) {
+            let via = invite.top_via().clone();
+            fx.critical.push(CriticalStateEffect::RelinquishAnsweredInvite { via });
+        }
+        *call = record_invite_final(call.clone(), leg_id, 200);
+        if caller_dialog(call, tag).is_none() {
+            let own = self.ensure_a_dialog_with(call, Some(tag.to_string()));
+            if own != tag {
+                open_early_a_dialog(call, tag);
+            }
+        }
+        if let Some(d) = call::helpers::caller_dialog_mut(call, tag) {
+            d.state = DialogState::Confirmed;
+            d.shown = true;
+        }
+        // The 2xx ended every other early dialog of the caller's INVITE
+        // (RFC 3261 §13.2.2.4).
+        call::helpers::retire_early_dialogs(&mut call.a_leg);
+    }
+
     /// An ACK naming an INVITE the record holds unanswered: another owner
     /// answered it 2xx. The caller's INVITE is recorded answered and the
     /// dialog the ACK names confirmed under its tags; a re-INVITE's open
@@ -196,25 +234,8 @@ impl ActionExecutor<'_> {
             .to()
             .tag()
             .filter(|_| leg_id == call.a_leg.leg_id && cseq == i64::from(call.a_leg_invite.cseq));
-        if let Some(tag) = caller_ack.map(str::to_string) {
-            if let Some(invite) = self.caller_invite(call) {
-                let via = invite.top_via().clone();
-                fx.critical.push(CriticalStateEffect::RelinquishAnsweredInvite { via });
-            }
-            *call = record_invite_final(call.clone(), leg_id, 200);
-            if caller_dialog(call, &tag).is_none() {
-                let own = self.ensure_a_dialog_with(call, Some(tag.clone()));
-                if own != tag {
-                    open_early_a_dialog(call, &tag);
-                }
-            }
-            if let Some(d) = call::helpers::caller_dialog_mut(call, &tag) {
-                d.state = DialogState::Confirmed;
-                d.shown = true;
-            }
-            // The 2xx ended every other early dialog of the caller's INVITE
-            // (RFC 3261 §13.2.2.4).
-            call::helpers::retire_early_dialogs(&mut call.a_leg);
+        if let Some(tag) = caller_ack {
+            self.take_caller_answered(call, fx, leg_id, tag);
             return;
         }
         // A re-INVITE whose round the record holds open: its 2xx left with

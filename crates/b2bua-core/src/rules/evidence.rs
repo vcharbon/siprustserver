@@ -103,8 +103,29 @@ pub fn evidence_rules(copy_served: bool) -> Vec<RuleDefinition> {
             },
         ),
     ];
-    rules.retain(|r| copy_served || r.id != "evidence-early-bye");
+    rules.push(RuleDefinition::core(
+        "evidence-reinvite",
+        CORE_LAYER,
+        &["reinvite-glare", "relay-reinvite"],
+        Match::request().method("INVITE").filter(reinvite_of_unanswered_caller),
+        end_on_evidence,
+    ));
+    let served_only = ["evidence-early-bye", "evidence-reinvite"];
+    rules.retain(|r| copy_served || !served_only.contains(&r.id));
     rules
+}
+
+/// Trigger 6, on a call another owner may have answered: the caller's
+/// re-INVITE naming a dialog by its To-tag while the record holds her INVITE
+/// unanswered. A re-INVITE rides a confirmed dialog only (RFC 3261 §14.1;
+/// RFC 3311 §1), so it proves her 2xx as her ACK does (trigger 3).
+fn reinvite_of_unanswered_caller(ctx: &RuleContext) -> bool {
+    let Some(req) = ctx.request() else { return false };
+    let a_leg = ctx.call.a_leg();
+    ctx.source_leg_id == a_leg.leg_id
+        && req.to().tag().is_some()
+        && req.cseq().seq() > ctx.call.a_leg_invite().cseq
+        && a_leg.invite_final_sent().is_none()
 }
 
 /// Triggers 1 and 2: a final no request record answers, in a dialog whose
