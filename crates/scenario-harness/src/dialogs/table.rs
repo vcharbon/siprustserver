@@ -289,6 +289,7 @@ impl DialogTable {
                     from_tag: id.local.clone(),
                     to_tag: id.remote.clone(),
                     cseq: response.cseq().seq(),
+                    terminating: false,
                     kind: VerdictKind::EndedAnswered { status, by },
                 });
             }
@@ -393,6 +394,7 @@ impl DialogTable {
             from_tag: remote.clone(),
             to_tag: local.clone(),
             cseq,
+            terminating: method == "NOTIFY" && notify_terminates(request),
             kind,
         };
         let id =

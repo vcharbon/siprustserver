@@ -60,6 +60,7 @@ mod observe;
 mod originate;
 mod prack_rx;
 mod react;
+mod refused_dialog;
 mod replay_record;
 mod response;
 mod runner;
@@ -192,6 +193,8 @@ struct CallController {
 const TORN_DOWN: &str = FailedAt::TORN_DOWN;
 /// The acknowledgement-gated settle barrier.
 const SETTLE: &str = "settle";
+/// How far past the ceiling the teardown barrier waits: two T1.
+const TORN_DOWN_MARGIN: Duration = Duration::from_secs(1);
 
 impl CallController {
     /// The name of the barrier at `index` (see [`Self::pending`]).
@@ -224,9 +227,11 @@ impl CallController {
             }
         }
         // Teardown: every leg terminated. Bounded separately (teardown can take
-        // the whole flow after the last phase barrier).
+        // the whole flow after the last phase barrier), a margin past the
+        // ceiling: a party's own 64·T1 give-up armed as the barrier starts (a
+        // reliable provisional no PRACK answers, RFC 3262 §3) lands inside it.
         self.pending.store(self.plan.len(), Ordering::Relaxed);
-        let deadline = tokio::time::Instant::now() + self.step_timeout;
+        let deadline = tokio::time::Instant::now() + self.step_timeout + TORN_DOWN_MARGIN;
         if let Err(e) = await_pred(&self.obs, TORN_DOWN, |s| s.all_terminated(), deadline).await {
             return CallVerdict::Failed(FailedAt::at_barrier(TORN_DOWN), e);
         }

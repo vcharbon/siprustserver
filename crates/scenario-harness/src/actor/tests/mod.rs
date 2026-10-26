@@ -22,6 +22,7 @@ mod held;
 mod prack_refused;
 mod rang;
 mod reception_observer;
+mod refused_requests;
 mod reinvite_ack_body;
 mod reliable_give_up;
 mod reneg;

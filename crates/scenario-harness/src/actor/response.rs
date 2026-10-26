@@ -232,20 +232,8 @@ pub(super) async fn react_response(
                 },
                 now,
             );
-            if resp.status() == 491 && !st.automatics.suppress_491_retry {
-                // §14.1: the owner of the Call-ID (the dialog's original UAC —
-                // the ORIGINATING actor, keyed on its first goal) waits a random
-                // T in [2.1, 4] s; a non-owner in [0, 2] s. Fixed in-range
-                // values keep the paused-clock test deterministic while
-                // preserving the owner>non-owner ordering that breaks the glare.
-                // A replay plan suppresses the retry: the script carries the
-                // captured one (see [`Automatics::suppress_491_retry`]).
-                let dwell = if st.originates {
-                    Duration::from_millis(2500)
-                } else {
-                    Duration::from_millis(1000)
-                };
-                st.reinvite_retry = Some(Instant::now() + dwell);
+            if !super::refused_dialog::end_refused_dialog(st, &resp, now) {
+                super::originate::schedule_reinvite_retry(st, &resp);
             }
             return Ok(());
         }
@@ -369,11 +357,8 @@ pub(super) async fn react_response(
         let kind = if fork_teardown { ObligationKind::ForkBye } else { kind };
         let key = ObligationKey::new(st.role, kind, resp.cseq().seq());
         st.obs.record(Observation::ResponseObserved { key }, now);
-        // A 481 or 408 to our BYE ends the dialog all the same (RFC 3261
-        // §15.1.1): no peer holds it.
-        if kind == ObligationKind::Bye && matches!(resp.status(), 408 | 481) {
-            st.obs.record(Observation::LegTerminated { leg: st.role }, now);
-            st.scope.mark_terminated();
+        if kind != ObligationKind::ForkBye {
+            super::refused_dialog::end_refused_dialog(st, &resp, now);
         }
         if (200..300).contains(&resp.status()) {
             match kind {

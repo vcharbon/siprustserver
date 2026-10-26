@@ -225,7 +225,8 @@ impl DialogJudge {
 }
 
 /// Whether the waiver `w` opts the verdict `v` of the UA `party` out: the
-/// same rule, naming that party, on the method it names if any. A dialog
+/// same rule, naming that party, on the method it names if any, a request
+/// ending its subscription when it asks for one. A dialog
 /// verdict is a finding against the SUT, so a waiver naming no party covers
 /// none.
 pub fn covers(w: &WaiverScope, party: &str, v: &DialogVerdict) -> bool {
@@ -233,6 +234,7 @@ pub fn covers(w: &WaiverScope, party: &str, v: &DialogVerdict) -> bool {
         && w.position.is_none()
         && w.party.as_deref() == Some(party)
         && w.method.as_deref().is_none_or(|m| m == v.method)
+        && (!w.terminating || v.terminating)
 }
 
 /// [`covers`], for the verdict `v` first recorded at `at`: a waiver that

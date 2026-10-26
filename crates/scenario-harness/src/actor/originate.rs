@@ -4,9 +4,13 @@
 //! requests, and the §14.1 / RFC 3311 §5.2 glare-retry wait arms. What happens
 //! to their RESPONSES lives in [`super::response`].
 
+use std::time::Duration;
+
 use tokio::time::Instant;
 
 use sip_message::generators::InDialogMethod;
+use sip_message::header::{retry_after_seconds, HeaderName};
+use sip_message::{SipResponse, SipStr};
 use sip_template::{EmitOpts, MessageTemplate};
 
 use super::answer::discharge_on_teardown;
@@ -343,4 +347,27 @@ pub(super) async fn ping_options_once(st: &mut ActorState<'_>) -> Result<(), Ste
         st.feed.on_options_ok.stamp(st.ctx);
     }
     Ok(())
+}
+
+/// Schedule the retry a non-2xx final to our re-INVITE asks for (RFC 3261
+/// §14.1): a 500 stating Retry-After after that delay (the peer's own INVITE
+/// had no final yet, §14.2); a 491 after the owner/non-owner dwell — the
+/// owner of the Call-ID (the originating actor) waits a random T in [2.1, 4]
+/// s, a non-owner one in [0, 2] s, fixed in range so the paused-clock test is
+/// deterministic. A replay plan suppresses the retry: the script carries the
+/// captured one ([`Automatics::suppress_491_retry`](super::Automatics)).
+pub(super) fn schedule_reinvite_retry(st: &mut ActorState<'_>, resp: &SipResponse) {
+    if st.automatics.suppress_491_retry {
+        return;
+    }
+    let asked_later = (resp.status() == 500)
+        .then(|| retry_after_seconds(resp.raw(HeaderName::RetryAfter).map(SipStr::owned)))
+        .flatten();
+    let delay = match (asked_later, resp.status()) {
+        (Some(secs), _) => Duration::from_secs(secs.into()),
+        (None, 491) if st.originates => Duration::from_millis(2500),
+        (None, 491) => Duration::from_millis(1000),
+        _ => return,
+    };
+    st.reinvite_retry = Some(Instant::now() + delay);
 }

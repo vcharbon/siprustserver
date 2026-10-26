@@ -61,6 +61,9 @@ pub struct WaiverScope {
     pub since: Option<tokio::time::Instant>,
     /// A dialog-verdict waiver that covers at most one verdict per dialog.
     pub once_per_dialog: bool,
+    /// A dialog-verdict waiver that covers only a request ending its
+    /// subscription (a NOTIFY stating `terminated`).
+    pub terminating: bool,
     /// Human-readable reason (surfaced on registration / in the report).
     pub justification: String,
 }
@@ -77,6 +80,7 @@ impl WaiverScope {
             method: None,
             since: None,
             once_per_dialog: false,
+            terminating: false,
             justification: justification.into(),
         }
     }
@@ -84,6 +88,13 @@ impl WaiverScope {
     /// Narrow a dialog-verdict waiver to the verdicts on `method` requests.
     pub fn on_method(mut self, method: impl Into<String>) -> Self {
         self.method = Some(method.into());
+        self
+    }
+
+    /// Narrow a dialog-verdict waiver to the requests ending their
+    /// subscription.
+    pub fn terminating(mut self) -> Self {
+        self.terminating = true;
         self
     }
 

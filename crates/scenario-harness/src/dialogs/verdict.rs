@@ -89,6 +89,9 @@ pub struct DialogVerdict {
     pub from_tag: String,
     pub to_tag: String,
     pub cseq: u32,
+    /// Whether the request ends its subscription: a NOTIFY stating
+    /// `Subscription-State: terminated` (RFC 6665 §4.1.3).
+    pub terminating: bool,
     pub kind: VerdictKind,
 }
 

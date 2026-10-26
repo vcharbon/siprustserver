@@ -58,10 +58,50 @@ impl TwoXxAcks {
         self.sent.lock().unwrap().insert((call_id, cseq, to_tag), (ack, dst));
     }
 
-    /// The ACK owed to `resp`, if this core already confirmed that dialog.
+    /// The ACK owed to `resp`, a repeat of a 2xx to an INVITE whose dialog
+    /// this core already confirmed. A non-2xx after the 2xx owes none: the
+    /// UAC discards it (RFC 6026 §8.4).
     pub(crate) fn owed_for(&self, resp: &SipResponse) -> Option<(SipRequest, SocketAddr)> {
-        let to_tag = resp.to().tag()?.to_string();
-        let key = (resp.call_id().to_string(), resp.cseq().seq(), to_tag);
+        let key = ack_key_of_final(resp)?;
         self.sent.lock().unwrap().get(&key).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{SipMessage, SipParser};
+
+    use super::*;
+
+    fn message(text: &str) -> SipMessage {
+        CustomParser::new().parse(text.as_bytes()).expect("a test message")
+    }
+
+    fn final_(status: u16) -> SipResponse {
+        let text = format!(
+            "SIP/2.0 {status} Whatever\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-i\r\n\
+             From: <sip:a@x>;tag=a\r\nTo: <sip:b@x>;tag=b\r\nCall-ID: c1\r\n\
+             CSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n"
+        );
+        match message(&text) {
+            SipMessage::Response(r) => r,
+            SipMessage::Request(_) => unreachable!(),
+        }
+    }
+
+    /// A non-2xx after the 2xx this core ACKed draws no ACK: the cached one
+    /// answers a repeat of the 2xx alone.
+    #[test]
+    fn a_non_2xx_after_the_2xx_owes_no_ack() {
+        let ack = "ACK sip:b@x SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-k\r\n\
+                   From: <sip:a@x>;tag=a\r\nTo: <sip:b@x>;tag=b\r\nCall-ID: c1\r\n\
+                   CSeq: 1 ACK\r\nContent-Length: 0\r\n\r\n";
+        let SipMessage::Request(ack) = message(ack) else { unreachable!() };
+        let acks = TwoXxAcks::default();
+        let dst = "127.0.0.1:5080".parse().unwrap();
+        acks.remember("c1".into(), 1, "b".into(), ack, dst);
+        assert!(acks.owed_for(&final_(200)).is_some(), "a repeat of the 2xx is re-ACKed");
+        assert!(acks.owed_for(&final_(487)).is_none(), "a 487 after it is discarded");
     }
 }
