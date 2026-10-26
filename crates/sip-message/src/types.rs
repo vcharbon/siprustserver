@@ -204,6 +204,9 @@ pub(crate) enum ReadRoutes {
 /// The Route entries, then the Record-Route entries, of one message.
 pub(crate) type RouteSets = (Vec<header::RouteEntry>, Vec<header::RecordRouteEntry>);
 
+/// Always equal: the kept sets are derived from the header lines, which the
+/// message compares itself, so a message whose parse kept them equals the same
+/// lines read without them.
 impl PartialEq for ReadRoutes {
     fn eq(&self, _: &Self) -> bool {
         true
