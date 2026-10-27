@@ -472,6 +472,7 @@ dependencies = [
 name = "fuzz-lanes"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "b2bua-core",
  "b2bua-sdk",
  "call",

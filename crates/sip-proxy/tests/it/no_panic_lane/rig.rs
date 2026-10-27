@@ -1,23 +1,27 @@
 //! One case of the proxy lane: a proxy core over the simulated fabric on its
 //! own paused-clock runtime, with the load balancer the runner wires (HMAC
 //! cookies, two alive workers), a caller, the two workers and a callee as
-//! peers. The case replays its seed's unmutated preamble, sends the mutated
+//! peers, and a resolver that names every host the callee's address, so no
+//! name a datagram carries leaves the process. The case replays its seed's unmutated preamble, sends the mutated
 //! datagram twice and the seed's follow-up, and runs past the proxy's sweeps.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use sip_clock::Clock;
 use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
 use sip_net_testkit::SimulatedSignalingNetwork;
 use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
 use sip_proxy::registry::static_reg::StaticWorkerRegistry;
 use sip_proxy::registry::{WorkerEntry, WorkerRegistry};
+use sip_proxy::resolver::HostResolver;
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
 use sip_proxy::{LoadBalancerStrategy, ProxyAddr, ProxyCoreBuilder, ProxyMetrics};
 use sip_txn::IdGen;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 /// Where the proxy listens.
 pub const PROXY: (&str, u16) = ("192.0.2.1", 5060);
@@ -54,6 +58,16 @@ pub enum Failure {
     LoopEnded,
     /// The parse guard caught a parser panic.
     ParserPanicked,
+}
+
+/// Every name resolves to the callee's host, on the port asked.
+struct CalleeResolver;
+
+#[async_trait]
+impl HostResolver for CalleeResolver {
+    async fn resolve(&self, _host: &str, port: u16, _deadline: Instant) -> Vec<SocketAddr> {
+        vec![SocketAddr::new(addr(CALLEE).ip(), port)]
+    }
 }
 
 /// A running proxy and its peers.
@@ -100,6 +114,7 @@ impl Rig {
         let core = ProxyCoreBuilder::new(advertised, strategy, registry, id_gen)
             .clock(clock)
             .metrics(metrics.clone())
+            .resolver(Arc::new(CalleeResolver))
             .build(endpoint);
         Rig { task: tokio::spawn(core.run()), metrics, peers }
     }

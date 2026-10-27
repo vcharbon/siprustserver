@@ -23,7 +23,7 @@ Ordered by what a panic costs (ADR-0051 §5): `just fuzz-list` prints them in th
 |---|---|---|
 | `b2bua_turn` | a turn-lane script over the dialled call, one step's SIP text replaced by the input; two runs agree | tears the call down |
 | `sdp_answer` | every SDP read, answer and restatement of the message lane's probe, over two descriptions | tears the call down (the answer is built in a turn) |
-| `proxy_datagram` | one proxy core on the simulated fabric, the input sent twice from a seed's peer | restarts the recv loop every call shares |
+| `proxy_datagram` | one proxy core on the simulated fabric, every name resolved in-process, the input sent twice from a seed's peer | restarts the recv loop every call shares |
 | `repl_frame` | the replication stream reader and frame decoder; a decoded frame writes back to itself | restarts the replication task |
 | `call_snapshot` | the call body decode; a decoded call writes back to itself | restarts the replication task |
 | `message_roundtrip` | every entry point of the message lane's probe, and parse → render → parse: the rendering reads back to itself and passes the write check | drops one datagram (contained) |
