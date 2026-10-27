@@ -120,7 +120,7 @@ pub fn generate_ack_for_non_2xx_in_dialog(
 /// state: an in-dialog INVITE (tagged To) keeps its Route set — a re-INVITE's
 /// 2xx never changes it (§12.2.1.2) — and its Request-URI, unless the 2xx
 /// refreshes the target with a Contact and the set is loose (or empty), in
-/// which case the Contact is the Request-URI; a dialog-creating 2xx supplies
+/// which case the Contact, without escaped headers, is the Request-URI; a dialog-creating 2xx supplies
 /// the route set (its Record-Route reversed, §12.1.2) and the target (its
 /// Contact). `answer`, the session description answering an offer the 2xx
 /// carried (RFC 3264 §4), is the body as `application/sdp`; without one the
@@ -142,7 +142,7 @@ pub fn generate_ack_for_2xx_from_invite(
             })
             .unwrap_or(true);
         match contact {
-            Some(target) if loose => (target, invite_routes),
+            Some(target) if loose => (target.without_escaped_headers(), invite_routes),
             _ => (original_invite.request_uri().clone(), invite_routes),
         }
     } else {

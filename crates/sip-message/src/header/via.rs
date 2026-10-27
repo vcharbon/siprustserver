@@ -143,8 +143,9 @@ impl Via {
 
     /// The address a response to this hop is actually sent to: `received` (and
     /// an observed `rport`) override the sent-by (RFC 3261 §18.2.2, RFC 3581).
+    /// A `received` that is no IP address (§25.1) is no target.
     pub fn response_target(&self) -> (&str, u16) {
-        let host = self.received().unwrap_or_else(|| self.host());
+        let host = self.received().filter(|r| ip_host(r).is_some()).unwrap_or_else(|| self.host());
         let port = match self.rport() {
             Some(Rport::Observed(p)) => p,
             _ => self.sent_by.port_or_default(),
@@ -297,6 +298,16 @@ mod tests {
     #[test]
     fn a_plain_hop_answers_at_its_sent_by() {
         assert_eq!(via("SIP/2.0/TCP host.example").response_target(), ("host.example", 5060));
+    }
+
+    /// `received` is an address (RFC 3261 §25.1): a name there is no target
+    /// to resolve, and the sent-by stands.
+    #[test]
+    fn a_received_that_is_no_address_leaves_the_sent_by() {
+        let v = via("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK1;received=host.invalid");
+        assert_eq!(v.response_target(), ("10.0.0.1", 5060));
+        let v6 = via("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK1;received=2001:db8::7");
+        assert_eq!(v6.response_target(), ("2001:db8::7", 5060));
     }
 
     #[test]

@@ -24,9 +24,11 @@ use crate::types::{SipHeader, SipRequest};
 ///     route_set)` as-is;
 ///   - strict → `(first route URI, rest of route_set ++ <remote_target>)`.
 ///
-/// A first route no reader accepts is carried through untouched, so an
-/// unreadable entry never redirects the request at itself.
+/// The remote target goes without the escaped headers its Contact may carry
+/// (RFC 3261 §19.1.1). A first route no reader accepts is carried through
+/// untouched, so an unreadable entry never redirects the request at itself.
 pub(super) fn route_for_in_dialog(remote_target: Uri, route_set: &[String]) -> (Uri, Vec<String>) {
+    let remote_target = remote_target.without_escaped_headers();
     let Some(first) = route_set.first() else {
         return (remote_target, Vec::new());
     };
