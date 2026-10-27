@@ -3,7 +3,8 @@
 //! call cleanly (§4) from the copy ranked higher on the call's lifecycle
 //! (`call::helpers::lifecycle_behind`; the primary's on a tie), over the
 //! union of both copies' dialogs by their tags (ADR-0041): each dialog at the
-//! further of its two states, with that copy's INVITE exchange, and at the
+//! further of its two states, with that copy's INVITE exchange and the answer
+//! it owes (RFC 3264 §4), and at the
 //! higher of each of its sequences, so the teardown ACKs and BYEs a 2xx either
 //! copy took (RFC 3261 §13.2.2.4, §15) and the BYE goes at the greater CSeq
 //! plus one; the caller answered when either copy answered her; the CDR events
@@ -133,7 +134,7 @@ fn only_here_to_end(live: &Call, ending: &Call, by: &RelayOwner) -> bool {
 
 /// `base`, in its envelope, with every dialog of `other` it lacks, by the leg
 /// and the two tags; a dialog both hold at the further of its two states with
-/// that copy's INVITE exchange, the higher of each sequence, and the remote
+/// that copy's INVITE exchange and owed answer, the higher of each sequence, and the remote
 /// target and route set of the copy that read the peer's later request (a
 /// target refresh is the peer's request, RFC 3261 §12.2); a leg only `other`
 /// dialled; the caller answered when `other` answered her, and every early
@@ -207,6 +208,7 @@ fn union_dialog(ours: &mut Dialog, theirs: &Dialog) {
     if rank(&theirs.state) > rank(&ours.state) {
         ours.state = theirs.state.clone();
         ours.sent_invite.clone_from(&theirs.sent_invite);
+        ours.owed_answer.clone_from(&theirs.owed_answer);
     }
     if theirs.peer_cseq > ours.peer_cseq {
         ours.remote_target = theirs.remote_target.clone();

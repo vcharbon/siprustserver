@@ -329,3 +329,39 @@ async fn a_callee_destroyed_before_the_callers_ack_is_acked_before_its_bye() {
     b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
+
+/// A service ends an answered callee whose 2xx made the offer (the caller's
+/// INVITE carried none) before the caller ACKed: the callee is BYEd (RFC 5407
+/// §2 keeps the ACK owed past it), and the caller's ACK, still awaited, brings
+/// the answer the callee's ACK owes (RFC 3264 §4) — her answer, never one
+/// rejecting every stream.
+#[tokio::test(start_paused = true)]
+async fn a_delayed_offer_callee_destroyed_before_the_callers_ack_gets_her_answer() {
+    let h = Harness::new("destroy-leg-unacked-delayed-offer-2xx");
+    let alice = h.agent("alice", "127.0.0.1:7456").await;
+    let bob = h.agent("bob", "127.0.0.1:7457").await;
+    let b2bua =
+        B2buaSut::builder(Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 7457)))
+            .services(vec![releaser::service_def()])
+            .tune(|c| c.keepalive_interval_sec = 3_600)
+            .start(&h, "b2bua", "127.0.0.1:7458")
+            .await;
+
+    let mut call = alice.invite(&bob).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+
+    h.advance(Duration::from_secs(releaser::FIRE_SEC as u64 + 1)).await;
+    alice.drain().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    let _dialog = call.ack_with(Some(OFFER)).await;
+    let ack = bob.receive("ACK").await;
+    let body = String::from_utf8_lossy(ack.request().body()).into_owned();
+    assert!(body.contains("m=audio 10000 "), "the caller's answer: {body:?}");
+    alice.receive("BYE").await.respond(200, "OK").await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _report = h.finish().await;
+}

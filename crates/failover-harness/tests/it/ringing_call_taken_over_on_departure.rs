@@ -85,6 +85,23 @@ pub(crate) async fn place(name: &str, callee: Callee) -> Placed {
 
 /// [`place`] with the route's ring deadline at `no_answer`.
 pub(crate) async fn place_ringing_for(name: &str, callee: Callee, no_answer: Duration) -> Placed {
+    place_offering(name, callee, no_answer, Some(OFFER)).await
+}
+
+/// [`place`] with the ringing call's INVITE carrying no offer: the callee's
+/// 2xx makes it, the caller's ACK answers it (RFC 3264 §4).
+pub(crate) async fn place_offerless(name: &str, callee: Callee) -> Placed {
+    place_offering(name, callee, NO_ANSWER, None).await
+}
+
+/// [`place`] with the route's ring deadline at `no_answer` and the ringing
+/// call's INVITE carrying `offer`.
+async fn place_offering(
+    name: &str,
+    callee: Callee,
+    no_answer: Duration,
+    offer: Option<&str>,
+) -> Placed {
     let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -104,13 +121,13 @@ pub(crate) async fn place_ringing_for(name: &str, callee: Callee, no_answer: Dur
     bob.receive("ACK").await;
 
     let ringing_cid = call_id_placed_on("b1", "ringing");
-    let mut ringing = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .identity(ringing_cid, "ringing-tag")
-        .through(proxy.addr())
-        .send()
-        .await;
+    let invite = alice.invite(&bob).identity(ringing_cid, "ringing-tag").through(proxy.addr());
+    let mut ringing = match offer {
+        Some(offer) => invite.with_sdp(offer),
+        None => invite,
+    }
+    .send()
+    .await;
     ringing.expect(100).await;
     let mut at_bob = bob.receive("INVITE").await;
     match callee {

@@ -67,8 +67,8 @@ pub(crate) use option_tags::apply_withheld_option_tags;
 pub use originate::build_b_leg;
 pub(crate) use originate::dialling_invite;
 pub(crate) use owed_answer::{
-    ack_answer_on_leg, bare_ack_owed, invite_carried_offer, offer_deferred_to_ack,
-    offer_owed_in_ack, offered_reliably, owe_answer_in_ack, owes_bare_ack,
+    ack_answer_on_leg, answer_never_comes, bare_ack_owed, invite_carried_offer,
+    offer_deferred_to_ack, offer_owed_in_ack, offered_reliably, owe_answer_in_ack, owes_bare_ack,
 };
 pub(crate) use repeat::retransmitted_2xx;
 pub(crate) use session_timer::{settle_session_timer, TIMER};

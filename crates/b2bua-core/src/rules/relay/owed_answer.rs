@@ -126,3 +126,21 @@ pub(crate) fn offer_owed_in_ack(leg: &Leg) -> Option<&[u8]> {
 pub(crate) fn owes_bare_ack(call: &Call, leg_id: &str) -> bool {
     call::helpers::find_leg(call, leg_id).is_some_and(bare_ack_owed)
 }
+
+/// Whether the answer `leg_id`'s ACK owes ([`OwedAnswer::InAck`]) can no
+/// longer come: the ACK that would carry it acknowledges a 2xx another leg
+/// was given, and no leg holds that 2xx still awaiting its ACK (RFC 3264 §4)
+/// — its ACK went elsewhere, or no such 2xx was given.
+pub(crate) fn answer_never_comes(call: &Call, leg_id: &str) -> bool {
+    let Some(leg) = call::helpers::find_leg(call, leg_id) else { return false };
+    let Some(cseq) = leg.dialogs.confirmed().and_then(call::helpers::awaited_ack_cseq) else {
+        return false;
+    };
+    let awaited = std::iter::once(&call.a_leg)
+        .chain(call.b_legs.iter())
+        .filter(|l| l.leg_id != leg_id)
+        .flat_map(|l| l.dialogs.iter())
+        .filter_map(call::helpers::answered_2xx)
+        .any(|u| u.cseq == cseq);
+    offer_owed_in_ack(leg).is_some() && !awaited
+}

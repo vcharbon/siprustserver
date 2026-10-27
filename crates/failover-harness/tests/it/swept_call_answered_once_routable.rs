@@ -27,6 +27,9 @@
 //!   ending holding the callee's dialog confirmed, so it ends that dialog
 //!   itself: the 2xx ACKed and the dialog BYEd (RFC 3261 §13.2.2.4, §15), and
 //!   its 200 to the caller no longer repeated.
+//! - The same, the caller's INVITE offerless: the callee's 2xx makes the offer
+//!   and the caller's ACK, gone to the backup, carries the answer. The node
+//!   ACKs the 2xx answering every stream rejected (RFC 3264 §6), then BYEs.
 
 use std::time::Duration;
 
@@ -34,7 +37,9 @@ use call::CdrEventType;
 use failover_harness::{total_cdrs_for, WorkerHealth};
 
 use crate::departure_support::{B1, B2};
-use crate::ringing_call_taken_over_on_departure::{depart, place, Callee, Placed, ANSWER};
+use crate::ringing_call_taken_over_on_departure::{
+    depart, place, place_offerless, Callee, Placed, ANSWER, OFFER,
+};
 use crate::swept_call_primary_returns::{answer, hang_up_and_settle, port, reboot, sent};
 
 /// How late the returned node's writes reach the backup: past the 100 ms
@@ -157,6 +162,64 @@ async fn a_swept_call_answered_with_its_answer_write_late_ends_every_dialog_clea
         repeated,
         "the 200 to the caller is not repeated once the call ended"
     );
+    let written =
+        p.fh.pump_until(Duration::from_millis(500), Duration::from_secs(60), async || {
+            total_cdrs_for(&[&p.w_b1, &p.w_b2], &p.ringing_ref) > 0
+        })
+        .await;
+    assert!(written, "the ended call has its CDR");
+    let records = [&p.w_b1, &p.w_b2].map(|w| w.cdr_records());
+    let cdrs = records.iter().flatten().filter(|r| r.call_ref == p.ringing_ref);
+    for cdr in cdrs {
+        let answered =
+            cdr.events.iter().any(|e| e.event_type == CdrEventType::Answer && e.reason.is_none());
+        assert!(answered, "the CDR records the call answered: {:?}", cdr.events);
+    }
+    p.proxy.set_health("b1", WorkerHealth::Alive);
+    crate::swept_call_primary_returns::hang_up_quiet_and_settle(p, &[]).await;
+}
+
+/// The late answer write with the caller's INVITE offerless: the callee's 200
+/// offers, the caller's ACK carrying the answer goes to the backup. The node
+/// meeting the backup's ending ACKs the 2xx with every stream rejected, then
+/// BYEs the callee, both at once rather than at the terminating timeout.
+#[tokio::test(start_paused = true)]
+async fn a_swept_delayed_offer_call_answered_with_its_answer_write_late_acks_rejecting_then_byes() {
+    let mut p = place_offerless("swept-delayed-offer-answer-write-late", Callee::Ringing).await;
+    depart(&mut p).await;
+    return_parked(&mut p).await;
+    routable(&mut p);
+
+    let acks = acks_from_b1(&p);
+    p.at_bob.respond(200, "OK").with_sdp(ANSWER).await;
+    p.ringing.expect(200).await;
+    let _answered = p.ringing.ack_with(Some(OFFER)).await;
+    p.fh.advance(Duration::from_secs(1)).await;
+    let b1 = port(B1);
+    assert_eq!(acks_from_b1(&p), acks + 1, "the node ACKs the callee's 2xx at once");
+    assert_eq!(
+        senders(&p, p.bob.addr(), b"BYE sip:bob@"),
+        [b1],
+        "the node BYEs the callee at once"
+    );
+
+    let bye = p.alice.try_receive_tolerating("BYE", &[]).await;
+    bye.expect("the caller is BYEd").respond(200, "OK").await;
+    let cancel = p.bob.try_receive_tolerating("CANCEL", &[]).await;
+    cancel
+        .expect("the backup CANCELs the INVITE its copy holds unanswered")
+        .respond(200, "OK")
+        .await;
+    let ack = p.bob.try_receive_tolerating("ACK", &["CANCEL"]).await;
+    let ack = ack.expect("the callee's 2xx is ACKed");
+    let answer = String::from_utf8_lossy(ack.request().body()).into_owned();
+    assert!(
+        answer.lines().any(|l| l.starts_with("m=audio 0 ")),
+        "the ACK answers every stream rejected: {answer:?}"
+    );
+    let bye = p.bob.try_receive_tolerating("BYE", &["CANCEL"]).await;
+    bye.expect("the callee is BYEd").respond(200, "OK").await;
+
     let written =
         p.fh.pump_until(Duration::from_millis(500), Duration::from_secs(60), async || {
             total_cdrs_for(&[&p.w_b1, &p.w_b2], &p.ringing_ref) > 0
