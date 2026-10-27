@@ -61,6 +61,9 @@ pub enum Step {
     FailureAnswers { outcome: &'static str, payload: serde_json::Value },
     /// The `/call/refer` consult's answer, `outcome` with `payload`.
     ReferAnswers { outcome: &'static str, payload: serde_json::Value },
+    /// The reaper's verdict on the call, of this outcome
+    /// ([`crate::reaper_verdict`]).
+    Reaper(&'static str),
     /// An internal event of `topic` on the leg, `outcome` with `payload`.
     Internal {
         leg: &'static str,
@@ -150,6 +153,10 @@ pub(super) fn event_of(step: &Step, call: &Call, peers: &mut Peers) -> Option<Ar
         Step::ReferAnswers { outcome, payload } => {
             let event = internal(call, "refer-http-result", outcome, payload.clone());
             Some((event, "b-1".to_string()))
+        }
+        Step::Reaper(outcome) => {
+            let topic = crate::reaper_verdict::REAPER_TOPIC;
+            Some((internal(call, topic, outcome, serde_json::json!({})), "a".to_string()))
         }
         Step::Internal { leg, topic, outcome, payload } => {
             Some((internal(call, topic, outcome, payload.clone()), leg.to_string()))

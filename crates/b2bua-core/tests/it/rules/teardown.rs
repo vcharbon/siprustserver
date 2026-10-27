@@ -2,6 +2,8 @@
 //! dialog's BYE answered with its INVITE's 487, an ended leg's BYE, and a
 //! termination that sends the caller nothing her INVITE's final rules out.
 
+use b2bua_core::turn_driver::{Driver, Step};
+
 use super::fixtures::*;
 use super::*;
 
@@ -12,28 +14,16 @@ use super::*;
 /// (§15: a BYE names a dialog that exists).
 #[test]
 fn a_2xx_the_cancel_beat_to_the_caller_leaves_her_no_dialog_to_bye() {
-    let mut call = call_with_early_a_dialog("a1");
-    confirm_a(&mut call);
-    *call.a_leg.invite_final_sent_mut() = Some(200);
-    let call = call::helpers::record_cancelled_invite(call, "a");
-    assert_eq!(call.a_leg.invite_final_sent(), Some(487), "the wire's final is the layer's 487");
-    let result = execute_on(
-        &call,
-        &[RuleAction::BeginTermination {
-            reason: Some("CANCEL".into()),
-            cause: TerminationCause::RemoteCancel,
-            by_leg: Some("a".into()),
-        }],
-    );
-    let to_a: Vec<String> = result
-        .effects
-        .outbound
-        .iter()
-        .filter(|e| e.leg_id.as_deref() == Some("a"))
-        .map(|e| e.label.clone())
-        .collect();
-    assert!(to_a.is_empty(), "nothing goes to the caller, got {to_a:?}");
-    assert_eq!(result.call.a_leg.state(), LegState::Terminated);
+    let driver = Driver::new();
+    let mut call = crate::calls::ringing(&driver);
+    call.run([Step::Answers("b-1", 200)]);
+    assert_eq!(call.call().a_leg.invite_final_sent(), Some(200), "the record's 2xx");
+    let turn = call.turned(Step::AliceCancels);
+    let to_a = turn.wire_to("a");
+    assert!(to_a.is_empty(), "nothing goes to the caller, got {} messages", to_a.len());
+    let record = call.call();
+    assert_eq!(record.a_leg.invite_final_sent(), Some(487), "the wire's final is the layer's 487");
+    assert_eq!(record.a_leg.state(), LegState::Terminated);
 }
 
 /// A caller's BYE while its INVITE is still pending (RFC 3261 §15: the early
@@ -60,7 +50,7 @@ fn bye_on_the_early_a_dialog_selects_early_dialog_bye_with_487_and_termination()
 
     let mut answered = call.clone();
     *answered.a_leg.invite_final_sent_mut() = Some(487);
-    let ctx = RuleContext { call: RuleCall::new(&answered), ..ctx };
+    let ctx = context(&answered, &event, "a", &config);
     let ranked = pick_ranked(&rules, &answered, &ctx);
     assert_ne!(
         ranked.first().map(|r| r.id),

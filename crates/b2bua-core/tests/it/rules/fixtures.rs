@@ -194,29 +194,6 @@ Contact: <{CALLEE_RINGING_CONTACT}>\r\n\
     CallEvent::sip(SipMessage::Response(resp), "10.0.0.2:5070".parse().unwrap())
 }
 
-/// The actions the first ranked default rule produces for `event` from `leg`.
-pub(super) fn handle_from(
-    call: &call::Call,
-    event: &CallEvent,
-    leg: &str,
-) -> (&'static str, Vec<RuleAction>) {
-    let config = B2buaConfig::default();
-    let ctx = context(call, event, leg, &config);
-    let rules = default_rules();
-    let ranked = pick_ranked(&rules, call, &ctx);
-    let rule = ranked.first().expect("a rule claims the provisional");
-    let out = (rule.handle)(&ctx).expect("the rule handles it");
-    (rule.id, out.actions)
-}
-
-/// The actions the first ranked default rule produces for `event` from `b-1`.
-pub(super) fn handle_from_b1(
-    call: &call::Call,
-    event: &CallEvent,
-) -> (&'static str, Vec<RuleAction>) {
-    handle_from(call, event, "b-1")
-}
-
 /// One executor turn over `call` for `actions`, in the context of `event`
 /// arriving from `b-1`.
 pub(super) fn execute_from_b1(

@@ -16,7 +16,7 @@ use b2bua_core::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::{Body, BodyAuthor, LegEnd};
 use call::{
-    CallModelState, Dialog, DialogState, Direction, EndingBy, Leg, LegKind, LegState, MachineId,
+    CallModelState, Dialog, DialogState, EndingBy, Leg, LegKind, LegState, MachineId,
     OutboundInvite, PeerDialog, RemoteInfo, StateLabel, TerminationCause, TimerKey, TimerType,
 };
 use sip_ids::TurnIds;

@@ -9,18 +9,13 @@ use b2bua_core::rule_fixture::{context, Varied};
 /// The `handle-timeout` rule's output for a b-leg INVITE transaction timeout
 /// naming `leg_id` on `call`.
 fn handle_timeout_result(call: &call::Call, leg_id: &str) -> Vec<RuleAction> {
-    timeout_result(call, leg_id, "INVITE", Direction::FromB)
+    timeout_result(call, leg_id, "INVITE")
 }
 
 /// The `handle-timeout` rule's output for a transaction timeout of `method`
 /// on `leg_id` of `call`.
-fn timeout_result(
-    call: &call::Call,
-    leg_id: &str,
-    method: &str,
-    direction: Direction,
-) -> Vec<RuleAction> {
-    handled(call, leg_id, method, 1, direction, Some("handle-timeout")).1
+fn timeout_result(call: &call::Call, leg_id: &str, method: &str) -> Vec<RuleAction> {
+    handled(call, leg_id, method, 1, Some("handle-timeout")).1
 }
 
 /// The rule that handles a timeout of the request `method` numbered `cseq` on
@@ -31,7 +26,6 @@ fn handled(
     leg_id: &str,
     method: &str,
     cseq: u32,
-    direction: Direction,
     only: Option<&str>,
 ) -> (&'static str, Vec<RuleAction>) {
     let event = CallEvent::Timeout {
@@ -83,7 +77,7 @@ fn invite_timeout_on_a_cancelling_leg_resolves_locally_without_consult() {
 /// The `handle-timeout` rule's output for a transaction timeout of `method`
 /// on the a-leg of `call`.
 fn a_leg_timeout_result(call: &call::Call, method: &str) -> Vec<RuleAction> {
-    timeout_result(call, "a", method, Direction::FromA)
+    timeout_result(call, "a", method)
 }
 
 /// A terminating call's leg awaiting the answer to its BYE (`ByeSent`) is
@@ -206,7 +200,7 @@ fn answered_call(method: &str, cseq: i64, origin: call::RequestOrigin) -> call::
 #[test]
 fn an_own_notify_timeout_leaves_the_call() {
     let call = answered_call("NOTIFY", 8, call::RequestOrigin::Own);
-    let (rule, actions) = handled(&call, "a", "NOTIFY", 8, Direction::FromA, None);
+    let (rule, actions) = handled(&call, "a", "NOTIFY", 8, None);
     assert_eq!(rule, "handle-timeout");
     assert!(actions.is_empty(), "{actions:?}");
 }
@@ -216,11 +210,11 @@ fn an_own_notify_timeout_leaves_the_call() {
 #[test]
 fn an_own_prack_timeout_leaves_the_call() {
     let mut call = answered_call("PRACK", 8, call::RequestOrigin::Own);
-    let (_, actions) = handled(&call, "a", "PRACK", 8, Direction::FromA, None);
+    let (_, actions) = handled(&call, "a", "PRACK", 8, None);
     assert!(actions.is_empty(), "{actions:?}");
     call.state = CallModelState::Terminating;
     end_dialogs(&mut call.a_leg, DialogState::Ending(EndingBy::Bye));
-    let (_, actions) = handled(&call, "a", "PRACK", 8, Direction::FromA, None);
+    let (_, actions) = handled(&call, "a", "PRACK", 8, None);
     assert!(actions.is_empty(), "on a leg going away too: {actions:?}");
 }
 
@@ -228,7 +222,7 @@ fn an_own_prack_timeout_leaves_the_call() {
 #[test]
 fn an_own_info_timeout_ends_the_session() {
     let call = answered_call("INFO", 8, call::RequestOrigin::Own);
-    let (_, actions) = handled(&call, "a", "INFO", 8, Direction::FromA, None);
+    let (_, actions) = handled(&call, "a", "INFO", 8, None);
     assert!(
         matches!(
             actions.as_slice(),
@@ -248,7 +242,7 @@ fn an_own_info_timeout_ends_the_session() {
 fn a_relayed_request_timeout_leaves_the_call() {
     for method in ["NOTIFY", "INFO", "UPDATE", "MESSAGE", "OPTIONS", "REFER", "PRACK"] {
         let call = answered_call(method, 7, call::RequestOrigin::Relayed);
-        let (rule, actions) = handled(&call, "a", method, 7, Direction::FromA, None);
+        let (rule, actions) = handled(&call, "a", method, 7, None);
         assert_eq!(rule, "handle-timeout");
         assert!(actions.is_empty(), "{method}: {actions:?}");
     }
@@ -260,7 +254,7 @@ fn a_relayed_request_timeout_leaves_the_call() {
 fn an_own_notify_timeout_on_an_ended_leg_is_handle_timeouts() {
     let mut call = answered_call("NOTIFY", 8, call::RequestOrigin::Own);
     end_dialogs(&mut call.a_leg, DialogState::Ended(call::DialogEnd::PeerBye));
-    let (rule, actions) = handled(&call, "a", "NOTIFY", 8, Direction::FromA, None);
+    let (rule, actions) = handled(&call, "a", "NOTIFY", 8, None);
     assert_eq!(rule, "handle-timeout");
     assert!(
         matches!(actions.as_slice(), [RuleAction::TerminateLeg { end: LegEnd::Settle, .. }]),

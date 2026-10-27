@@ -1,58 +1,72 @@
 //! A callee's provisional as the rules read it: under an answered caller, on a
 //! confirmed b-leg, and a transfer target's repeat.
 
+use b2bua_core::turn_driver::{callee_tag, Driver, Session, Step};
+
 use super::fixtures::*;
 use super::*;
 
+/// The record route a callee's provisional carries.
+const RINGING_ROUTE: &str = "<sip:10.0.0.7:5060;lr>";
+
+/// A call bridged to bob whose subscribed duration cap fired and whose
+/// release consult rerouted it: the replacement leg `b-2` is dialled.
+fn rerouted(driver: &Driver) -> Session<'_> {
+    let mut call = crate::calls::bridged(driver);
+    let reroute = serde_json::json!({
+        "destination": {"host": "127.0.0.1", "port": 5071},
+        "new_ruri": "sip:carol@127.0.0.1:5071",
+    });
+    call.run([
+        Step::Fires(TimerType::GlobalDuration),
+        Step::Internal {
+            leg: "a",
+            topic: "call-release-result",
+            outcome: "reroute",
+            payload: reroute,
+        },
+    ]);
+    assert!(call.peer("b-2").is_some(), "the replacement leg is dialled");
+    call
+}
+
+/// The caller's INVITE carries its 200; a b-leg dialled later — the release
+/// reroute's replacement leg — rings. The relay rule relays nothing toward
+/// her and still gives the ringing leg its due: its early dialog (a teardown
+/// then CANCELs it) and the CDR event.
 #[test]
 fn a_provisional_under_an_answered_caller_is_absorbed_with_what_the_leg_is_owed() {
-    // The caller's INVITE carries its 200; a b-leg dialled later rings. The
-    // relay rule relays nothing toward her and still gives the ringing leg
-    // its due: its early dialog (a teardown then CANCELs it) and the CDR event.
-    let mut call = call::helpers::record_invite_final(test_call(), "a", 200);
-    confirm_a(&mut call);
-    call = call::helpers::add_b_leg(call, b_leg_pending());
-
-    let (id, actions) = handle_from_b1(&call, &b_leg_ringing_event(false));
-    assert_eq!(id, "relay-provisional");
+    let driver = Driver::new().with_route(|r| {
+        r.subscriptions = vec![call::ReleaseEventKind::MaxCallDuration];
+    });
+    let mut call = rerouted(&driver);
+    let accounted = call.call().cdr_events.len();
+    let ringing = Step::AnswersWith("b-2", 180, vec![("Record-Route", RINGING_ROUTE)]);
+    let turn = call.turned(ringing);
+    assert_eq!(turn.rule, Some("relay-provisional"));
+    assert!(turn.statuses_to("a").is_empty(), "nothing is relayed toward the answered caller");
+    let record = call.call();
+    let events = &record.cdr_events[accounted..];
     assert!(
-        !actions.iter().any(|a| matches!(a, RuleAction::RelayToPeer { .. })),
-        "nothing is relayed toward the answered caller: {actions:?}"
-    );
-    assert!(
-        actions.iter().any(|a| matches!(
-            a,
-            RuleAction::TrackEarlyDialog { leg_id, .. } if leg_id == "b-1"
-        )),
-        "the ringing leg's early dialog is tracked: {actions:?}"
-    );
-    assert!(
-        actions.iter().any(|a| matches!(
-            a,
-            RuleAction::AddCdrEvent { event_type: call::CdrEventType::Provisional, leg_id, status_code: Some(180), .. }
-                if leg_id == "b-1"
-        )),
-        "the provisional is accounted: {actions:?}"
+        events.iter().any(|e| e.event_type == call::CdrEventType::Provisional
+            && e.leg_id == "b-2"
+            && e.status_code == Some(180)),
+        "the provisional is accounted: {events:?}"
     );
     // …and the early dialog the provisional establishes (RFC 3261 §12.1.2):
     // the callee's tag, its Contact as the remote target, the recorded route.
-    let result = execute_from_b1(&call, &b_leg_ringing_event(false), &actions);
-    let dialog = result.call.b_legs[0]
-        .dialogs
-        .by_tags("svc", "bobtag")
-        .expect("the early dialog carries the callee's tag");
+    let leg = call::helpers::find_leg(record, "b-2").expect("the replacement leg");
+    let dialog = leg.dialogs.iter().find(|d| d.peer_tag == callee_tag("b-2"));
+    let dialog = dialog.expect("the early dialog carries the callee's tag");
     assert_eq!(dialog.state, DialogState::Early);
+    let contact = b2bua_core::turn_driver::BOB;
+    assert!(dialog.remote_target.contains(contact), "{}", dialog.remote_target);
     assert!(
-        dialog.remote_target.contains(CALLEE_RINGING_CONTACT),
-        "the remote target is the provisional's Contact: {}",
-        dialog.remote_target
-    );
-    assert!(
-        dialog.route_set.iter().any(|r| r.contains(CALLEE_RINGING_ROUTE)),
+        dialog.route_set.iter().any(|r| r.contains("10.0.0.7:5060")),
         "the route set is the provisional's recorded route: {:?}",
         dialog.route_set
     );
-    assert_eq!(result.call.b_legs[0].state(), LegState::Early);
+    assert_eq!(leg.state(), LegState::Early);
 }
 
 #[test]
@@ -80,48 +94,34 @@ fn a_bare_180_after_the_final_mints_no_mask_state() {
     );
 }
 
+/// The REFER machine's C leg repeats a 180 the referrer was already notified
+/// of: the NOTIFY is deduped and so is the CDR event — the leg's due (Early)
+/// still rides.
 #[test]
 fn a_repeated_transfer_target_provisional_is_accounted_once() {
-    // The REFER machine's C leg repeats a 180 the referrer was already
-    // notified of: the NOTIFY is deduped and so is the CDR event — the leg's
-    // due (Early) still rides.
-    let mut call = call::helpers::record_invite_final(test_call(), "a", 200);
-    confirm_a(&mut call);
-    let mut referrer = b_leg_pending();
-    call::testkit::stage_leg(&mut referrer, LegState::Confirmed);
-    with_dialog(&mut referrer, "reftag");
-    call = call::helpers::add_b_leg(call, referrer);
-    let mut target = b_leg_pending();
-    target.leg_id = "b-2".into();
-    call = call::helpers::add_b_leg(call, target);
-    call.transfer = Some(call::TransferState {
-        phase: call::TransferPhase::CRinging,
-        referrer_leg_id: "b-1".into(),
-        refer_to_uri: "sip:carol@10.0.0.3".into(),
-        effective_refer_to_uri: None,
-        callback_context: None,
-        c_leg_id: Some("b-2".into()),
-        refer_cseq: Some(2),
-        notify_event: "refer".into(),
-        started_at_ms: 0,
-        last_c_leg_provisional_status: Some(180),
-        c_initial_sdp: None,
-    });
-    b2bua_core::rules::refer_transfer::project_cursor(&mut call);
-
-    let (id, actions) = handle_from(&call, &b_leg_ringing_event(false), "b-2");
-    assert_eq!(id, "transfer-c-1xx-absorb");
-    let accounted = actions
-        .iter()
-        .filter(|a| {
-            matches!(a, RuleAction::AddCdrEvent { event_type: call::CdrEventType::Provisional, .. })
-        })
-        .count();
-    assert_eq!(accounted, 0, "a repeat of a status is not accounted again: {actions:?}");
+    let driver = Driver::new();
+    let mut call = crate::calls::bridged(&driver);
+    let target = serde_json::json!({"destination": {"host": "127.0.0.1", "port": 5071}});
+    call.run([
+        Step::Sends("b-1", Method::Refer),
+        Step::ReferAnswers { outcome: "allow", payload: target },
+        Step::Answers("b-2", 180),
+    ]);
+    let accounted = call.call().cdr_events.len();
+    let turn = call.turned(Step::Answers("b-2", 180));
+    assert_eq!(turn.rule, Some("transfer-c-1xx-absorb"));
     assert!(
-        !actions.iter().any(|a| matches!(a, RuleAction::SendNotify { .. })),
-        "the repeat draws no NOTIFY: {actions:?}"
+        turn.request_to("b-1", "NOTIFY").is_none(),
+        "the repeat draws no NOTIFY: {:?}",
+        turn.methods_to("b-1")
     );
+    let repeated = &call.call().cdr_events[accounted..];
+    assert!(
+        !repeated.iter().any(|e| e.event_type == call::CdrEventType::Provisional),
+        "a repeat of a status is not accounted again: {repeated:?}"
+    );
+    let leg = call::helpers::find_leg(call.call(), "b-2").expect("the target's leg");
+    assert_eq!(leg.state(), LegState::Early, "the leg's due still rides");
 }
 
 #[test]
