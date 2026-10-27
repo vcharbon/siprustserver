@@ -79,10 +79,10 @@ pub use dialog::{
 };
 pub use instants::shift_instants;
 pub use invite_records::{
-    ack_ahead, ack_branch, answered_2xx, answered_2xx_mut, awaited_ack_cseq,
-    close_rejected_invite_round, emitted_ack, hold_answered_2xx, invite_image, invite_relay,
-    invite_taken, invite_untaken, open_sent_invite, relayed_invite_pending, retain_ack_branch,
-    retain_emitted_ack, sent_exchange, sent_exchange_mut, sent_invite_image, set_awaited_ack_cseq,
+    answered_2xx, answered_2xx_mut, close_rejected_invite_round, hold_answered_2xx, invite_image,
+    invite_relay, invite_taken, invite_untaken, open_sent_invite, relayed_invite_pending,
+    retain_ack_branch, retain_emitted_ack, sent_exchange, sent_exchange_mut, sent_invite_image,
+    set_awaited_ack_cseq,
 };
 pub use leg::{
     add_b_leg, callee_dialog, callee_dialog_mut, caller_answered, caller_dialog, caller_dialog_mut,
@@ -119,8 +119,8 @@ pub use reliable::{
 };
 pub use request_records::{
     add_record, answered_record, cancel_relay, close_held, close_record, every_record, find_relay,
-    held_record, next_held_deadline, record_with_branch, records_of, remove_relay,
-    take_overdue_held, take_retired_owed, Answers, RecordHolder,
+    held_record, next_held_deadline, record_with_branch, remove_relay, take_overdue_held, Answers,
+    RecordHolder,
 };
 pub use resolved::{response_origin, Resolved, ResponseFacts, ResponseOrigin, UNRESOLVED};
 pub use sequence::{holds_records_of, keep_dialogs, raise_sequences};

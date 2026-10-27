@@ -74,14 +74,17 @@ async fn each_dialog_carries_the_state_its_messages_put_it_in() {
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
     settle_until(|| {
-        live().is_some_and(|c| call::helpers::awaited_ack_cseq(callee_fork(&c, "fork2")).is_none())
+        live().is_some_and(|c| {
+            call::helpers::sent_exchange(callee_fork(&c, "fork2"))
+                .is_none_or(|x| x.awaited_ack_cseq.is_none())
+        })
     })
     .await;
     let answered = live().expect("the call is live");
     assert_eq!(callee_fork(&answered, "fork2").state, DialogState::Confirmed);
-    assert!(callee_fork(&answered, "fork1").retired().is_some(), "the losing fork retires");
+    assert!(callee_fork(&answered, "fork1").is_retired(), "the losing fork retires");
     assert_eq!(caller_face(&answered, &a2).state, DialogState::Confirmed);
-    assert!(caller_face(&answered, &a1).retired().is_some(), "its face retires too");
+    assert!(caller_face(&answered, &a1).is_retired(), "its face retires too");
 
     // ── the caller hangs up: her dialog ended, the callee's ending ──
     let mut bye = dialog.bye().await;
@@ -93,7 +96,7 @@ async fn each_dialog_carries_the_state_its_messages_put_it_in() {
     .await;
     let ending = live().expect("the call is live until bob answers");
     assert_eq!(caller_face(&ending, &a2).state, DialogState::Ended(DialogEnd::PeerBye));
-    assert!(callee_fork(&ending, "fork1").retired().is_some(), "a retired dialog stays retired");
+    assert!(callee_fork(&ending, "fork1").is_retired(), "a retired dialog stays retired");
 
     bye_at_bob.respond(200, "OK").await;
     bye.expect(200).await;

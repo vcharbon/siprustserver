@@ -67,7 +67,9 @@ pub fn ack_b_leg(
     // mint one here. The branch belongs to the dialog's INVITE record, which the
     // next INVITE sent on the dialog replaces, so a `Some(_)` here always
     // belongs to the CSeq echoed just below.
-    let branch = call::helpers::ack_branch(dialog).map_or_else(|| ids.new_branch(), str::to_string);
+    let branch = call::helpers::sent_exchange(dialog)
+        .and_then(|x| x.ack_branch.as_deref())
+        .map_or_else(|| ids.new_branch(), str::to_string);
     // The ACK reuses the CSeq of the INVITE it acknowledges — not the dialog's
     // running `our_cseq`, which an intervening early PRACK/UPDATE (or a later
     // in-dialog request) has advanced past the INVITE. Recover it from the
@@ -108,7 +110,8 @@ pub fn ack_b_leg(
 pub(crate) fn acked_invite_cseq(leg: &Leg, dialog: &Dialog) -> Option<u32> {
     match call::helpers::sent_invite_image(leg, dialog) {
         Some(_) => acked_invite(leg, dialog).map(|r| r.cseq().seq()),
-        None => parse_request(call::helpers::emitted_ack(dialog)?.wire().0).map(|r| r.cseq().seq()),
+        None => parse_request(call::helpers::sent_exchange(dialog)?.emitted_ack.as_ref()?.wire().0)
+            .map(|r| r.cseq().seq()),
     }
 }
 

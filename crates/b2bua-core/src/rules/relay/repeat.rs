@@ -19,7 +19,7 @@ use sip_message::{Method, SipResponse};
 /// but an INVITE — the 200 to a CANCEL carries the INVITE's number — is never
 /// a copy of one, nor is a retired fork's: its release answers each copy.
 pub(crate) fn retransmitted_2xx(leg: &Leg, dialog: &Dialog, resp: &SipResponse) -> bool {
-    let taken = call::helpers::invite_taken(dialog) && dialog.retired().is_none();
+    let taken = call::helpers::invite_taken(dialog) && !dialog.is_retired();
     if !taken || !(200..300).contains(&resp.status()) || resp.cseq().method() != Method::Invite {
         return false;
     }

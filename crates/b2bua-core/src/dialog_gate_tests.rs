@@ -2,7 +2,7 @@
 //! and what a caller-facing dialog the caller was never shown names.
 
 use b2bua_sdk::event::CallEvent;
-use call::{Call, CallModelState, Dialog, DialogEnd, DialogState, EndingBy, RetiredDialog};
+use call::{Call, CallModelState, Dialog, DialogEnd, DialogState, EndingBy};
 use sip_message::{Method, SipMessage, SipRequest};
 
 use super::{admission, note_in_order, request_verdict, Admission, Verdict};
@@ -19,7 +19,7 @@ fn dialog(state: DialogState) -> Dialog {
 
 /// A retired dialog; `Some(settled)`: this stack released it with a BYE,
 /// its record open until that BYE settled.
-fn retired(release: Option<bool>) -> DialogState {
+fn retired(release: Option<bool>) -> Dialog {
     let bye = call::RequestRecord::own(
         "BYE",
         2,
@@ -31,8 +31,11 @@ fn retired(release: Option<bool>) -> DialogState {
         32_000,
         Default::default(),
     );
-    let open_requests = if release == Some(false) { vec![bye] } else { vec![] };
-    DialogState::Retired(RetiredDialog { open_requests })
+    let mut d = dialog(DialogState::Retired);
+    if release == Some(false) {
+        d.requests.push(bye);
+    }
+    d
 }
 
 const METHODS: [Method; 12] = [
@@ -50,51 +53,51 @@ const METHODS: [Method; 12] = [
     Method::Ack,
 ];
 
-/// What `state` makes of each method.
-fn row(state: DialogState) -> Vec<(Method, Admission)> {
-    let d = dialog(state);
+/// What `d` makes of each method.
+fn row(d: &Dialog) -> Vec<(Method, Admission)> {
     METHODS
         .into_iter()
         .map(|m| {
-            let a = admission(Some(&d), &m);
+            let a = admission(Some(d), &m);
             (m, a)
         })
         .collect()
 }
 
-/// The methods `state` makes `admission` of.
-fn methods(state: DialogState, wanted: Admission) -> Vec<Method> {
-    row(state).into_iter().filter(|(_, a)| *a == wanted).map(|(m, _)| m).collect()
+/// The methods `d` makes `admission` of.
+fn methods(d: &Dialog, wanted: Admission) -> Vec<Method> {
+    row(d).into_iter().filter(|(_, a)| *a == wanted).map(|(m, _)| m).collect()
 }
 
 #[test]
 fn a_live_dialog_passes_every_request() {
     for state in [DialogState::Early, DialogState::Confirmed] {
-        assert_eq!(methods(state.clone(), Admission::Pass), METHODS.to_vec(), "{state:?}");
+        assert_eq!(methods(&dialog(state.clone()), Admission::Pass), METHODS.to_vec(), "{state:?}");
     }
 }
 
 #[test]
 fn an_ending_dialog_takes_the_crossing_bye_absorbs_reports_and_terminates_the_rest() {
     let ending = [
-        DialogState::Ending(EndingBy::Bye),
-        DialogState::Ending(EndingBy::Cancel),
+        dialog(DialogState::Ending(EndingBy::Bye)),
+        dialog(DialogState::Ending(EndingBy::Cancel)),
         retired(Some(false)),
     ];
-    for state in ending {
-        let passed: Vec<_> = methods(state.clone(), Admission::Pass);
+    for d in &ending {
+        let state = &d.state;
+        let passed: Vec<_> = methods(d, Admission::Pass);
         assert_eq!(
             passed.iter().filter(|m| **m != Method::Ack).collect::<Vec<_>>(),
             [&Method::Bye, &Method::Prack],
             "{state:?}: the crossing BYE and the PRACK reach their rules"
         );
         assert_eq!(
-            methods(state.clone(), Admission::Absorb),
+            methods(d, Admission::Absorb),
             [Method::Options, Method::Info, Method::Message, Method::Notify],
             "{state:?}: answered 200 by the gate"
         );
         assert_eq!(
-            methods(state.clone(), Admission::Terminate),
+            methods(d, Admission::Terminate),
             [Method::Invite, Method::Update, Method::Refer, Method::Subscribe, Method::Publish],
             "{state:?}: answered 487 (RFC 3261 §21.4.25)"
         );
@@ -103,16 +106,16 @@ fn an_ending_dialog_takes_the_crossing_bye_absorbs_reports_and_terminates_the_re
 
 #[test]
 fn an_ended_or_retired_dialog_refuses_all_but_its_table_exceptions() {
-    let refused_but = |state: DialogState, taken: &[Method]| {
-        for (method, admission) in row(state.clone()) {
+    let refused_but = |d: Dialog, taken: &[Method]| {
+        for (method, admission) in row(&d) {
             let expected =
                 if taken.contains(&method) { Admission::Pass } else { Admission::Refuse };
-            assert_eq!(admission, expected, "{state:?} {method}");
+            assert_eq!(admission, expected, "{:?} {method}", d.state);
         }
     };
-    let by_our_bye = |final_status| DialogState::Ended(DialogEnd::OurBye { final_status });
-    refused_but(DialogState::Ended(DialogEnd::Rejected(487)), &[Method::Prack]);
-    refused_but(DialogState::Ended(DialogEnd::PeerBye), &[Method::Ack]);
+    let by_our_bye = |final_status| dialog(DialogState::Ended(DialogEnd::OurBye { final_status }));
+    refused_but(dialog(DialogState::Ended(DialogEnd::Rejected(487))), &[Method::Prack]);
+    refused_but(dialog(DialogState::Ended(DialogEnd::PeerBye)), &[Method::Ack]);
     refused_but(by_our_bye(Some(200)), &[Method::Ack]);
     refused_but(by_our_bye(None), &[Method::Ack]);
     refused_but(retired(None), &[]);

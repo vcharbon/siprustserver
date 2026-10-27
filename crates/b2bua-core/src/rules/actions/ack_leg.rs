@@ -75,8 +75,10 @@ impl ActionExecutor<'_> {
         // of composing a fresh, answerless datagram. A body-bearing call is a
         // first emission and composes below.
         if body.is_empty() {
-            if let Some(retained) =
-                leg.and_then(|l| l.dialogs.established()).and_then(call::helpers::emitted_ack)
+            if let Some(retained) = leg
+                .and_then(|l| l.dialogs.established())
+                .and_then(call::helpers::sent_exchange)
+                .and_then(|x| x.emitted_ack.as_ref())
             {
                 fx.outbound.push(super::ladder::repeat_of(
                     retained,

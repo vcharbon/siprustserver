@@ -9,10 +9,9 @@ use crate::model::{Call, Dialog, Leg, RelayOwner, RequestRecord};
 
 use super::invite_records::{invite_image, invite_relay};
 use super::leg::{every_leg, find_leg};
-use super::request_records::records_of;
 
 /// Does `held` — a record, or none — hold every request record the worker
-/// `by` keeps open in `other`, a retired dialog's open records included? A
+/// `by` keeps open in `other`, a retired dialog's included? A
 /// final follows the Via to the node that sent the request (RFC 3261
 /// §18.2.2): only `by` sees the final of a relay or an own request it sent,
 /// and only `by` holds the server transaction of a request it holds for a
@@ -31,10 +30,11 @@ pub fn holds_records_of(held: Option<&Call>, other: &Call, by: &RelayOwner) -> b
         let held_leg = held.and_then(|h| find_leg(h, &other_leg.leg_id));
         other_leg.dialogs.iter().all(|o| {
             let ours = held_leg.and_then(|l| l.dialogs.by_tags(&o.our_tag, &o.peer_tag));
-            let records = records_of(o)
+            let records = o
+                .requests
                 .iter()
                 .filter(|p| p.method != "INVITE" && p.relayed_by == *by)
-                .all(|p| ours.is_some_and(|d| records_of(d).iter().any(|h| same_record(h, p))));
+                .all(|p| ours.is_some_and(|d| d.requests.iter().any(|h| same_record(h, p))));
             records && holds_invite_relay(held_leg.zip(ours), other_leg, o, by)
         })
     })

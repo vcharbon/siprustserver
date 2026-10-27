@@ -829,7 +829,7 @@ fn a_restatement_in_a_losing_fork_stays_the_calls() {
         d.state = if d.peer_tag == "f2" {
             call::DialogState::Confirmed
         } else {
-            call::DialogState::Retired(Default::default())
+            call::DialogState::Retired
         };
     }
     call::testkit::stage_leg(&mut c.b_legs[0], LegState::Confirmed);

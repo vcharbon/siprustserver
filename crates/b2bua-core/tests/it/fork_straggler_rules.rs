@@ -6,7 +6,6 @@
 
 use b2bua_core::rules::{Match, RuleAction, RuleDefinition, RuleHandleResult, SERVICE_LAYER};
 use b2bua_core::turn_driver::{Driver, Step};
-use call::helpers::records_of;
 use call::{Call, Dialog, Direction};
 use sip_message::Method;
 
@@ -51,7 +50,7 @@ fn fork(call: &Call, tag: &str) -> Option<Dialog> {
 
 /// The methods of the records `d` holds open.
 fn open_methods(d: &Dialog) -> Vec<&str> {
-    records_of(d).iter().map(|r| r.method.as_str()).collect()
+    d.requests.iter().map(|r| r.method.as_str()).collect()
 }
 
 /// `ReleaseStraggler2xx` sent on an early dialog whose PRACK awaits its final:
@@ -64,9 +63,8 @@ fn a_straggler_released_from_its_early_dialog_keeps_its_open_prack() {
     call.run([Step::AnswersReliably("b-1", 183), Step::Answers("b-1", 200)]);
     assert_eq!(call.sent(), ["b-1 PRACK", "b-1 ACK", "b-1 BYE"], "PRACKed, then released");
     let d = fork(call.call(), "bobtag").expect("the fork's dialog");
-    assert!(d.retired().is_some(), "the release retired the dialog");
+    assert!(d.is_retired(), "the release retired the dialog");
     assert_eq!(open_methods(&d), ["PRACK", "BYE"], "the PRACK stays open beside the BYE");
-    assert!(d.requests.is_empty(), "no record is left where a retired dialog is not read");
 
     call.turned(Step::AnswersLast("b-1", Method::Prack, 200));
     let d = fork(call.call(), "bobtag").expect("the fork's dialog");

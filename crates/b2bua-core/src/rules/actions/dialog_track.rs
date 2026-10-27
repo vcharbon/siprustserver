@@ -5,7 +5,7 @@
 //! [`super::relay_response`] / [`super::relay_request`].
 
 use call::helpers::{callee_dialog, caller_dialog, caller_dialog_mut, fronting_dialog};
-use call::{Call, Dialog, DialogState, EndingBy, LegState, PeerDialog, RetiredDialog};
+use call::{Call, Dialog, DialogState, EndingBy, LegState, PeerDialog};
 use sip_message::draft::HeaderList;
 use sip_message::header::{self, HeaderValue, RecordRouteEntry};
 use sip_message::SipParseError;
@@ -122,12 +122,8 @@ impl ActionExecutor<'_> {
         let mirrors_callee_dialogs = call::helpers::relay_first_18x_strategy(call).is_none();
         let in_setup = !answering && call.a_leg.state() != LegState::Confirmed;
         let already_published = {
-            let mut fronts = call
-                .a_leg
-                .dialogs
-                .iter()
-                .filter(|d| d.retired().is_none())
-                .flat_map(|d| d.fronts.iter());
+            let mut fronts =
+                call.a_leg.dialogs.iter().filter(|d| !d.is_retired()).flat_map(|d| d.fronts.iter());
             if mirrors_callee_dialogs && in_setup {
                 fronts.next().is_some()
             } else {
@@ -410,8 +406,7 @@ pub(super) fn adopt_a_tag(call: &mut Call, tag: &str) {
         if d.our_tag == tag {
             d.state = DialogState::Confirmed;
         } else if matches!(d.state, DialogState::Early | DialogState::Confirmed) {
-            let open_requests = std::mem::take(&mut d.requests);
-            d.state = DialogState::Retired(RetiredDialog { open_requests });
+            d.state = DialogState::Retired;
         }
     }
     call.a_leg.own_tag = Some(tag.to_string());

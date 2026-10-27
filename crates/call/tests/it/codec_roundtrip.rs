@@ -7,7 +7,7 @@
 use crate::common;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use call::helpers::{answered_2xx, emitted_ack, sent_exchange_mut};
+use call::helpers::{answered_2xx, sent_exchange, sent_exchange_mut};
 use call::{
     CallBodyCodec, CallDecodeError, DialogState, LegKind, MachineId, MsgpackCodec,
     PolicyUpdateBody, StateLabel,
@@ -377,7 +377,9 @@ fn the_retained_emitted_ack_round_trips() {
     }
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "the retained ACK survives byte-exact");
-    let ack = emitted_ack(decoded.b_legs[0].dialogs.confirmed().unwrap()).unwrap();
+    let ack = sent_exchange(decoded.b_legs[0].dialogs.confirmed().unwrap())
+        .and_then(|x| x.emitted_ack.as_ref())
+        .unwrap();
     assert_eq!(
         ack.wire(),
         (&datagram[..], ("10.0.0.7", 5060)),

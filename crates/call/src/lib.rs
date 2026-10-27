@@ -81,7 +81,7 @@ pub use model::{
 pub use model::{
     ByeDisposition, Dialog, DialogEnd, DialogId, DialogState, Dialogs, Direction, EndingBy,
     HostPort, InviteExchange, LegDisposition, LegKind, LegSdpSession, LegSpace, LegState,
-    OutboundInvite, PeerDialog, RelayOwner, RemoteInfo, RetiredDialog, Ring, Unacked2xx,
+    OutboundInvite, PeerDialog, RelayOwner, RemoteInfo, Ring, Unacked2xx,
 };
 // The request records a call's dialogs hold (ADR-0055 §2).
 pub use model::{DialogUsage, RequestOrigin, RequestRecord, SentRequest, KEEPALIVE_AUTHOR};

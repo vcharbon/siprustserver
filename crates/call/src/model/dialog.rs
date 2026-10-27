@@ -38,8 +38,11 @@ pub enum DialogState {
     /// The dialog is over; how it ended.
     Ended(DialogEnd),
     /// An early dialog the call let go of without a BYE: a losing callee fork
-    /// or a caller-facing dialog the answer did not take (§12.1.2).
-    Retired(RetiredDialog),
+    /// or a caller-facing dialog the answer did not take (§12.1.2). Its
+    /// request records stay in [`Dialog::requests`] until they settle
+    /// (§8.1.3.3), the BYE releasing a late 2xx of it among them (§13.2.2.4);
+    /// its `our_cseq` stays the sequence such a release continues.
+    Retired,
 }
 
 /// The request this side sent to end a dialog.
@@ -67,24 +70,6 @@ pub enum DialogEnd {
     /// This side's BYE completed: `final_status` is its final, `None` when
     /// its transaction timed out (§15.1.1).
     OurBye { final_status: Option<u16> },
-}
-
-/// What a retired dialog still carries: the request records it holds open
-/// until they settle (§8.1.3.3, ADR-0055 §2) — the BYE this stack released a
-/// late 2xx of it with among them (§13.2.2.4). The dialog's own `our_cseq`
-/// stays the sequence such a release continues.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct RetiredDialog {
-    /// The dialog's request records still open.
-    pub open_requests: Vec<RequestRecord>,
-}
-
-impl RetiredDialog {
-    /// Whether this stack's BYE releasing the dialog awaits its final: the
-    /// dialog then reads as ending (§15.1.2).
-    pub fn release_in_flight(&self) -> bool {
-        self.open_requests.iter().any(|r| r.is_own() && r.method == "BYE")
-    }
 }
 
 /// A callee dialog a caller-facing dialog stands for: `leg_id`'s dialog
@@ -142,7 +127,7 @@ pub struct Dialog {
     pub shows_media: Option<String>,
     /// The requests open on the dialog other than its INVITE exchanges
     /// (ADR-0055 §2): relayed into it, sent by this stack, or received and
-    /// held for a later answer.
+    /// held for a later answer; kept through its retirement until they settle.
     pub requests: Vec<RequestRecord>,
     /// The INVITE this side last sent on the dialog (RFC 3261 §14): a
     /// re-INVITE, relayed or its own, or on a dialog the leg's dialling INVITE
@@ -265,19 +250,14 @@ impl Dialog {
             )
     }
 
-    /// The retired dialog's record; `None` in any other state.
-    pub fn retired(&self) -> Option<&RetiredDialog> {
-        match &self.state {
-            DialogState::Retired(r) => Some(r),
-            _ => None,
-        }
+    /// Whether the call let the early dialog go ([`DialogState::Retired`]).
+    pub fn is_retired(&self) -> bool {
+        self.state == DialogState::Retired
     }
 
-    /// The retired dialog's record, to update; `None` in any other state.
-    pub fn retired_mut(&mut self) -> Option<&mut RetiredDialog> {
-        match &mut self.state {
-            DialogState::Retired(r) => Some(r),
-            _ => None,
-        }
+    /// Whether this stack's BYE releasing the retired dialog awaits its
+    /// final: the dialog then reads as ending (§15.1.2).
+    pub fn release_in_flight(&self) -> bool {
+        self.is_retired() && self.requests.iter().any(|r| r.is_own() && r.method == "BYE")
     }
 }

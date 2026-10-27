@@ -2,9 +2,7 @@
 //! INVITE took, this stack's CANCEL of it, and the early dialogs those end or
 //! retire. The leg's state reads off them ([`crate::model::Leg::state`]).
 
-use crate::model::{
-    Call, DialogEnd, DialogState, EndingBy, Leg, MessageDirection, MessageEntry, RetiredDialog,
-};
+use crate::model::{Call, DialogEnd, DialogState, EndingBy, Leg, MessageDirection, MessageEntry};
 
 use super::lens::update_leg;
 
@@ -12,8 +10,7 @@ use super::lens::update_leg;
 /// (RFC 3261 §8.1.3.3).
 pub fn retire_early_dialogs(leg: &mut Leg) {
     for d in leg.dialogs.iter_mut().filter(|d| d.state == DialogState::Early) {
-        let open_requests = std::mem::take(&mut d.requests);
-        d.state = DialogState::Retired(RetiredDialog { open_requests });
+        d.state = DialogState::Retired;
     }
 }
 
@@ -79,8 +76,7 @@ pub fn abandon_leg(leg: &mut Leg) {
     if let Some(invite) = leg.outbound_invite_mut().filter(|i| i.final_received.is_none()) {
         invite.record_final(408);
         for d in leg.dialogs.iter_mut().filter(|d| d.awaits_invite_final()) {
-            let open_requests = std::mem::take(&mut d.requests);
-            d.state = DialogState::Retired(RetiredDialog { open_requests });
+            d.state = DialogState::Retired;
         }
     }
     for d in leg.dialogs.iter_mut().filter(|d| d.is_confirmed()) {

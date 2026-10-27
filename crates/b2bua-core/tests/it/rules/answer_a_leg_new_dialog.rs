@@ -66,12 +66,7 @@ fn answers_under_a_fresh_tag_superseding_the_early_dialog() {
     let d = result.call.a_leg.dialogs.confirmed().expect("a confirmed a-dialog");
     assert_eq!(d.our_tag, a2, "the confirmed a-dialog is A2's");
     assert!(
-        result
-            .call
-            .a_leg
-            .dialogs
-            .by_tags("A1early", &d.peer_tag)
-            .is_some_and(|e| e.retired().is_some()),
+        result.call.a_leg.dialogs.by_tags("A1early", &d.peer_tag).is_some_and(|e| e.is_retired()),
         "the early-media dialog A1 is retired, not renamed"
     );
     assert_eq!(

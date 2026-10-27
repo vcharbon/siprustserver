@@ -37,7 +37,6 @@
 use std::collections::HashSet;
 
 use b2bua_sdk::event::CallEvent;
-use call::helpers::records_of;
 use call::{Call, Dialog, Leg, RequestRecord, SentRequest, Unacked2xx};
 use sip_message::generators::{generate_cancel, InviteClientTransactionHandle};
 use sip_message::header::{HeaderValue, SentBy, Via};
@@ -59,7 +58,7 @@ pub(super) fn seeds_for(call: &Call, now_ms: i64) -> Vec<TxnSeed> {
             d.sent_invite
                 .iter()
                 .chain(d.answered_invite.iter())
-                .chain(records_of(d).iter())
+                .chain(d.requests.iter())
                 .map(move |r| (Some(d), r))
         });
         for (dialog, record) in leg.invite.iter().map(|r| (None, r)).chain(dialog_records) {
@@ -190,10 +189,12 @@ fn sent_invite_seed(leg: &Leg, dialog: &Dialog, record: &RequestRecord) -> Optio
     let provisional = initial_in_flight && !leg.dialogs.is_empty();
     let mut seed = client_seed(sent, provisional, None)?;
     if let TxnSeed::ClientInvite { ack_ahead, .. } = &mut seed {
-        *ack_ahead = call::helpers::ack_ahead(dialog).and_then(|ack| {
-            let (bytes, (host, port)) = ack.wire();
-            Some((bytes.to_vec(), sip_net::ip_socket_addr(host, port)?))
-        });
+        *ack_ahead = call::helpers::sent_exchange(dialog)
+            .and_then(|x| x.ack_ahead.as_ref())
+            .and_then(|ack| {
+                let (bytes, (host, port)) = ack.wire();
+                Some((bytes.to_vec(), sip_net::ip_socket_addr(host, port)?))
+            });
     }
     Some(seed)
 }
@@ -230,9 +231,6 @@ pub(in crate::router) fn drop_superseded(mut call: Call, branch: &str) -> Call {
     for leg in std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut()) {
         for d in leg.dialogs.iter_mut() {
             d.requests.retain(|r| !superseded(r));
-            if let Some(retired) = d.retired_mut() {
-                retired.open_requests.retain(|r| !superseded(r));
-            }
         }
     }
     call

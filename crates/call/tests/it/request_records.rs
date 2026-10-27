@@ -25,8 +25,8 @@ fn a_retired_dialogs_relay_is_found_by_its_tags_and_closed_in_place() {
         ..RequestRecord::relayed("UPDATE", 3, 3)
     };
     let lost = Dialog {
-        state: DialogState::Retired(RetiredDialog { open_requests: vec![open] }),
-        ..Dialog::new(B_LOCAL_TAG, "lost-fork", DialogState::Early, 3)
+        requests: vec![open],
+        ..Dialog::new(B_LOCAL_TAG, "lost-fork", DialogState::Retired, 3)
     };
     call.b_legs[0].dialogs.insert(lost);
     let (holder, pending) =
@@ -39,7 +39,7 @@ fn a_retired_dialogs_relay_is_found_by_its_tags_and_closed_in_place() {
 
     let call = close_record(call, "b-1", &holder, 3);
     let kept = call.b_legs[0].dialogs.by_tags(&id.our_tag, &id.peer_tag).expect("kept");
-    assert!(kept.retired().is_some_and(|r| r.open_requests.is_empty()));
+    assert!(kept.is_retired() && kept.requests.is_empty());
 }
 
 /// A final settles the sent record its client transaction names: one to

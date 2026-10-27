@@ -18,10 +18,11 @@
 
 use call::helpers::{
     add_record, close_held, close_record, find_leg, get_peer, held_record, next_held_deadline,
-    record_with_branch, records_of, take_overdue_held, take_retired_owed, update_leg, Resolved,
+    record_with_branch, take_overdue_held, update_leg, Resolved,
 };
 use call::{
-    Call, DialogId, HostPort, RequestOrigin, RequestRecord, SentRequest, TimerKey, TimerType,
+    Call, Dialog, DialogId, HostPort, RequestOrigin, RequestRecord, SentRequest, TimerKey,
+    TimerType,
 };
 use sip_message::generators::{self, GenerateError};
 use sip_message::header::{HeaderName, MediaType};
@@ -210,7 +211,7 @@ impl ActionExecutor<'_> {
     ) {
         let held = find_leg(call, leg_id).and_then(|leg| {
             leg.dialogs.iter().find_map(|d| {
-                records_of(d).iter().find(|r| r.is_held() && r.inbound_cseq == cseq).cloned()
+                d.requests.iter().find(|r| r.is_held() && r.inbound_cseq == cseq).cloned()
             })
         });
         let Some(record) = held else { return };
@@ -285,18 +286,22 @@ impl ActionExecutor<'_> {
 pub(crate) fn settle_owed(call: &mut Call, fx: &mut HandlerEffects, leg_id: &str) -> bool {
     let Some(leg) = find_leg(call, leg_id) else { return false };
     let owed = |r: &RequestRecord| (r.is_relay() || r.is_held()) && !r.is_invite();
-    let mut settled: Vec<RequestRecord> =
-        leg.dialogs.iter().flat_map(|d| d.requests.iter().filter(|r| owed(r)).cloned()).collect();
-    let mut retired = Vec::new();
+    // The live dialogs' records are answered first, then the retired ones'.
+    let (retired, live): (Vec<&Dialog>, Vec<&Dialog>) =
+        leg.dialogs.iter().partition(|d| d.is_retired());
+    let settled: Vec<RequestRecord> = live
+        .iter()
+        .chain(&retired)
+        .flat_map(|d| d.requests.iter().filter(|r| owed(r)).cloned())
+        .collect();
     *call = update_leg(call.clone(), leg_id, |l| {
         for d in l.dialogs.iter_mut() {
-            d.requests.retain(|r| !owed(r));
+            // A retired dialog keeps only its own records: a relayed INVITE
+            // it still holds ends with the leg, unanswered here.
+            let retired = d.is_retired();
+            d.requests.retain(|r| if retired { r.is_own() } else { !owed(r) });
         }
-        retired = take_retired_owed(l);
     });
-    // A relayed INVITE a retired dialog still holds ends with the leg,
-    // unanswered here.
-    settled.extend(retired.into_iter().map(|(_, r)| r).filter(|r| owed(r)));
     for record in &settled {
         let (status, reason) =
             if record.is_held() { ENDED_HELD } else { row_of(&record.method).owed_at_leg_end };

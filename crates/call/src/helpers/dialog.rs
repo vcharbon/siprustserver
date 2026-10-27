@@ -4,7 +4,7 @@
 
 use crate::model::{Call, Dialog, DialogId, Leg};
 
-use super::invite_records::{awaited_ack_cseq, invite_untaken, relayed_invite_pending};
+use super::invite_records::{invite_untaken, relayed_invite_pending, sent_exchange};
 use super::leg::find_leg;
 use super::lens::{update_dialog, update_leg};
 use super::peering::relay_peer_dialog;
@@ -40,7 +40,9 @@ pub fn advance_peer_cseq(call: Call, leg_id: &str, id: &DialogId, cseq: i64) -> 
 /// re-INVITE ([`super::close_rejected_invite_round`]); on a leg holding no
 /// confirmed dialog the dialling INVITE stays, and its early dialogs end.
 pub fn invite_transaction_open(dialog: &Dialog) -> bool {
-    invite_untaken(dialog) || dialog.answered_invite.is_some() || awaited_ack_cseq(dialog).is_some()
+    invite_untaken(dialog)
+        || dialog.answered_invite.is_some()
+        || sent_exchange(dialog).is_some_and(|x| x.awaited_ack_cseq.is_some())
 }
 
 /// Whether an INVITE from `source_leg_id`'s peer, on its dialog `source`,

@@ -189,7 +189,7 @@ pub fn admission(dialog: Option<&Dialog>, method: &Method) -> Admission {
             return Admission::Pass
         }
         DialogState::Ending(_) => true,
-        DialogState::Retired(r) => r.release_in_flight(),
+        DialogState::Retired => d.release_in_flight(),
         DialogState::Ended(_) => false,
     };
     if !ending {

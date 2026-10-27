@@ -783,7 +783,7 @@ impl CallState {
                 dialogs += leg.dialogs.len() as u64;
                 for d in &leg.dialogs {
                     rset += d.route_set.len() as u64;
-                    call_pend += call::helpers::records_of(d).len() as u64;
+                    call_pend += d.requests.len() as u64;
                 }
             }
             pend += call_pend;

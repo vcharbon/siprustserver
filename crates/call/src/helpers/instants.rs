@@ -78,11 +78,6 @@ fn shift_leg(leg: &mut Leg, offset_ms: i64) {
         for record in dialog.requests.iter_mut() {
             shift_deadline(record, offset_ms);
         }
-        if let Some(retired) = dialog.retired_mut() {
-            for record in retired.open_requests.iter_mut() {
-                shift_deadline(record, offset_ms);
-            }
-        }
     }
 }
 

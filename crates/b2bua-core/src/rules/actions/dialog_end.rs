@@ -19,7 +19,7 @@ pub(super) fn end_dialogs(call: &mut Call, ctx: &RuleContext, leg_id: &str, bye:
         .request()
         .filter(|r| on_leg && *r.method() == SipMethod::Bye)
         .and_then(|_| ctx.dialog())
-        .filter(|d| d.retired().is_none())
+        .filter(|d| !d.is_retired())
         .map(|d| d.id());
     let bye_final = ctx
         .response()

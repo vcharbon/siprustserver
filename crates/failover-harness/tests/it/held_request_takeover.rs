@@ -81,7 +81,7 @@ mod holdinfo {
                 let cseq = caller
                     .dialogs
                     .iter()
-                    .flat_map(|d| call::helpers::records_of(d).iter())
+                    .flat_map(|d| d.requests.iter())
                     .find(|r| r.is_held())
                     .map(|r| r.inbound_cseq)?;
                 Some(RuleHandleResult::new(vec![RuleAction::AnswerHeld {
@@ -126,13 +126,8 @@ async fn a_held_request_is_answered_by_the_takeover_copy() {
     let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
     assert_taken_over_once(survivor, hydrated_before);
     let copy = survivor.live_call(&call_ref).expect("the survivor serves the call");
-    let held = copy
-        .a_leg
-        .dialogs
-        .iter()
-        .flat_map(|d| call::helpers::records_of(d).iter())
-        .filter(|r| r.is_held())
-        .count();
+    let held =
+        copy.a_leg.dialogs.iter().flat_map(|d| d.requests.iter()).filter(|r| r.is_held()).count();
     assert_eq!(held, 1, "the copy holds the INFO once: its retransmission is absorbed");
 
     info.expect(202).await;
@@ -188,13 +183,8 @@ async fn a_copy_of_a_held_request_the_takeover_answered_draws_its_final_again() 
     fh.advance(Duration::from_millis(100)).await;
     assert_eq!(finals_toward(&fh, alice.addr(), 202), 2, "the copy draws the final again");
     let copy = survivor_of(&pri_ord, &w_b1, &w_b2).live_call(&call_ref).expect("served");
-    let held = copy
-        .a_leg
-        .dialogs
-        .iter()
-        .flat_map(|d| call::helpers::records_of(d).iter())
-        .filter(|r| r.is_held())
-        .count();
+    let held =
+        copy.a_leg.dialogs.iter().flat_map(|d| d.requests.iter()).filter(|r| r.is_held()).count();
     assert_eq!(held, 0, "the copy holds nothing: the INFO's copy never reached the service");
     alice.drain().await;
 

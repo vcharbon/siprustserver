@@ -445,7 +445,7 @@ fn in_dialog_request_answered_or_relayed(turn: &Turn<'_>) -> Result<(), String> 
     });
     let relayed = legs(turn.after)
         .flat_map(|l| l.dialogs.iter())
-        .flat_map(|d| call::helpers::records_of(d).iter().chain(d.sent_invite.iter()))
+        .flat_map(|d| d.requests.iter().chain(d.sent_invite.iter()))
         .filter(|p| !p.is_own())
         .any(|p| {
             p.method == method.as_str()

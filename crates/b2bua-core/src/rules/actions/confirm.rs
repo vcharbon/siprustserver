@@ -5,7 +5,7 @@
 //! caller's dialog be re-identified and the ACK obligation be armed.
 
 use call::helpers::{callee_dialog_mut, fronting_dialog, is_adopted};
-use call::{Call, CallModelState, DialogId, DialogState, LegDisposition, RetiredDialog};
+use call::{Call, CallModelState, DialogId, DialogState, LegDisposition};
 use sip_message::header;
 use sip_message::SipResponse;
 
@@ -89,11 +89,6 @@ impl ActionExecutor<'_> {
                 if !route_set.is_empty() {
                     d.route_set = route_set;
                 }
-                // A fork its leg's end retired answers anyway: the relays
-                // it held open are the confirmed dialog's again.
-                if let DialogState::Retired(r) = &mut d.state {
-                    d.requests.append(&mut r.open_requests);
-                }
                 d.state = DialogState::Confirmed;
                 relay::adopt_confirmed_dialog(leg, &winner);
             }
@@ -162,8 +157,7 @@ fn retire_losers(call: &mut Call, promoted: Promoted) -> Retired {
     if let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) {
         for id in &losers {
             if let Some(lost) = leg.dialogs.by_tags_mut(&id.our_tag, &id.peer_tag) {
-                let open_requests = std::mem::take(&mut lost.requests);
-                lost.state = DialogState::Retired(RetiredDialog { open_requests });
+                lost.state = DialogState::Retired;
             }
         }
     }

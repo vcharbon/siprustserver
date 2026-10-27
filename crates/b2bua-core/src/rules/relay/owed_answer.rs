@@ -85,7 +85,7 @@ pub(crate) fn ack_answer_on_leg(
 /// carries the answer (RFC 3262 §5).
 pub(crate) fn bare_ack_owed(leg: &Leg) -> bool {
     leg.dialogs.confirmed().is_some_and(|d| {
-        call::helpers::awaited_ack_cseq(d).is_some()
+        call::helpers::sent_exchange(d).is_some_and(|x| x.awaited_ack_cseq.is_some())
             && (offer_waits_for_ack(leg) || acked_invite_carries_offer(leg, d))
     })
 }
@@ -115,7 +115,7 @@ pub(crate) fn owe_answer_in_ack(call: &mut Call, leg_id: &str, resp: &SipRespons
 /// ([`OwedAnswer::InAck`]): the ACK owes its answer (RFC 3264 §4).
 pub(crate) fn offer_owed_in_ack(leg: &Leg) -> Option<&[u8]> {
     let d = leg.dialogs.confirmed()?;
-    call::helpers::awaited_ack_cseq(d)?;
+    call::helpers::sent_exchange(d)?.awaited_ack_cseq?;
     match d.owed_answer.as_ref()? {
         OwedAnswer::InAck { offer, .. } => Some(offer),
         _ => None,
@@ -134,7 +134,12 @@ pub(crate) fn owes_bare_ack(call: &Call, leg_id: &str) -> bool {
 /// ended with its leg.
 pub(crate) fn answer_never_comes(call: &Call, leg_id: &str) -> bool {
     let Some(leg) = call::helpers::find_leg(call, leg_id) else { return false };
-    let Some(cseq) = leg.dialogs.confirmed().and_then(call::helpers::awaited_ack_cseq) else {
+    let Some(cseq) = leg
+        .dialogs
+        .confirmed()
+        .and_then(call::helpers::sent_exchange)
+        .and_then(|x| x.awaited_ack_cseq)
+    else {
         return false;
     };
     let awaited = std::iter::once(&call.a_leg)

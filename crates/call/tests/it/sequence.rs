@@ -5,9 +5,7 @@
 
 use crate::common;
 use call::helpers::{holds_records_of, raise_sequences};
-use call::model::{
-    Call, Dialog, DialogState, RelayOwner, RequestOrigin, RequestRecord, RetiredDialog,
-};
+use call::model::{Call, Dialog, DialogState, RelayOwner, RequestOrigin, RequestRecord};
 
 /// The worker that relayed the copy's requests.
 fn by() -> RelayOwner {
@@ -116,8 +114,7 @@ fn a_retired_dialogs_open_relays_are_relays_of_the_copy() {
     let held = common::representative_call();
     let mut copy = relaying(held.clone(), "INFO");
     let d = caller_mut(&mut copy);
-    let open_requests = std::mem::take(&mut d.requests);
-    d.state = DialogState::Retired(RetiredDialog { open_requests });
+    d.state = DialogState::Retired;
     assert!(!holds_records_of(Some(&held), &copy, &by()));
     assert!(holds_records_of(Some(&copy), &copy, &by()));
 }

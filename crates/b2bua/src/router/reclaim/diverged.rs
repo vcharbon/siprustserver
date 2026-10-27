@@ -223,7 +223,7 @@ fn union_dialog(ours: &mut Dialog, theirs: &Dialog) {
 fn rank(state: &DialogState) -> u8 {
     match state {
         DialogState::Early => 0,
-        DialogState::Retired(_)
+        DialogState::Retired
         | DialogState::Ending(EndingBy::Cancel)
         | DialogState::Ended(DialogEnd::Rejected(_)) => 1,
         DialogState::Confirmed => 2,

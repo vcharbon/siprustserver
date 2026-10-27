@@ -92,3 +92,10 @@ async fn a_refused_puller_counts_it_and_pulls_again_after_its_backoff() {
     assert!(metrics.repl_streams_refused_total() >= 2, "each refusal is counted");
     assert!(!status.borrow().current, "a refused stream never reads as current");
 }
+
+/// v6: a retired dialog is a bare state, its open records in the dialog's
+/// requests (ADR-0055 §2), so a v5 peer's records do not decode here.
+#[test]
+fn the_version_names_the_retired_dialog_shape() {
+    assert_eq!(PROTO_VER, 6);
+}

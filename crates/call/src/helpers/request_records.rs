@@ -1,6 +1,6 @@
 //! The request records a call's dialogs hold (ADR-0055 §2): adding one,
-//! finding the one a response or a transaction timeout names, closing it, and
-//! the records a retired dialog still holds. A dialog's INVITE exchanges are
+//! finding the one a response or a transaction timeout names, and closing it.
+//! A dialog's INVITE exchanges are
 //! records of their own ([`super::invite_records`]); a final finds a relayed
 //! INVITE here as it finds any relay.
 
@@ -9,33 +9,34 @@ use crate::model::{Call, Dialog, DialogId, Leg, RequestRecord};
 use super::leg::find_leg;
 use super::lens::update_dialog;
 
-/// Add `record` to `leg_id`'s dialog `id`, among its open requests once it
-/// retired.
+/// Add `record` to `leg_id`'s dialog `id`.
 pub fn add_record(call: Call, leg_id: &str, id: &DialogId, record: RequestRecord) -> Call {
-    update_dialog(call, leg_id, id, |d| match d.retired_mut() {
-        Some(retired) => retired.open_requests.push(record),
-        None => d.requests.push(record),
-    })
+    update_dialog(call, leg_id, id, |d| d.requests.push(record))
 }
 
-/// Where a request record is kept.
+/// The dialog a request record is kept on, and whether it retired.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecordHolder {
-    /// Among the requests of the leg's dialog with this identity.
+    /// The leg's live or ended dialog with this identity.
     Dialog(DialogId),
-    /// Among the open requests of the leg's retired dialog with this identity.
+    /// The leg's retired dialog with this identity.
     Retired(DialogId),
 }
 
-/// The records `d` holds open, live or held by its retirement.
-pub fn records_of(d: &Dialog) -> &[RequestRecord] {
-    d.retired().map_or(d.requests.as_slice(), |r| r.open_requests.as_slice())
+impl RecordHolder {
+    /// The identity of the dialog holding the record.
+    pub fn id(&self) -> &DialogId {
+        match self {
+            RecordHolder::Dialog(id) | RecordHolder::Retired(id) => id,
+        }
+    }
 }
 
 fn holder_of(d: &Dialog) -> RecordHolder {
-    match d.retired() {
-        Some(_) => RecordHolder::Retired(d.id()),
-        None => RecordHolder::Dialog(d.id()),
+    if d.is_retired() {
+        RecordHolder::Retired(d.id())
+    } else {
+        RecordHolder::Dialog(d.id())
     }
 }
 
@@ -50,7 +51,7 @@ pub struct Answers<'a> {
 
 /// The sent record a final arriving on `leg_id` answers (RFC 3261
 /// §8.1.3.3), and where it is kept: on the dialog the response's tags name,
-/// or among that dialog's open requests once it retired. A response with no
+/// retired or not. A response with no
 /// To-tag reads the leg's confirmed dialog. Never another dialog's record: two
 /// dialogs may carry the same CSeq.
 pub fn answered_record(
@@ -65,7 +66,7 @@ pub fn answered_record(
         None => leg.dialogs.confirmed()?,
         Some(_) => leg.dialogs.of_response(to, from)?,
     };
-    records_of(d)
+    d.requests
         .iter()
         .chain(d.sent_invite.iter())
         .find(|r| r.answered_by(answers.method, answers.cseq, answers.branch))
@@ -84,7 +85,7 @@ pub fn record_with_branch(
     }
     let leg = find_leg(call, leg_id)?;
     leg.dialogs.iter().find_map(|d| {
-        records_of(d).iter().find(|r| r.branch() == Some(branch)).map(|r| (holder_of(d), r.clone()))
+        d.requests.iter().find(|r| r.branch() == Some(branch)).map(|r| (holder_of(d), r.clone()))
     })
 }
 
@@ -94,32 +95,14 @@ pub fn record_with_branch(
 /// ([`super::close_rejected_invite_round`]).
 pub fn close_record(call: Call, leg_id: &str, holder: &RecordHolder, cseq: i64) -> Call {
     let sent = |r: &RequestRecord| r.is_sent() && r.outbound_cseq == cseq;
-    match holder {
-        RecordHolder::Dialog(id) => {
-            update_dialog(call, leg_id, id, |d| d.requests.retain(|r| !sent(r)))
-        }
-        RecordHolder::Retired(id) => update_dialog(call, leg_id, id, |d| {
-            if let Some(r) = d.retired_mut() {
-                r.open_requests.retain(|r| !sent(r));
-            }
-        }),
-    }
+    update_dialog(call, leg_id, holder.id(), |d| d.requests.retain(|r| !sent(r)))
 }
 
 /// Close the held record `holder` keeps for the received request numbered
 /// `cseq` on `leg_id`: its final left.
 pub fn close_held(call: Call, leg_id: &str, holder: &RecordHolder, cseq: i64) -> Call {
     let held = |r: &RequestRecord| r.is_held() && r.inbound_cseq == cseq;
-    match holder {
-        RecordHolder::Dialog(id) => {
-            update_dialog(call, leg_id, id, |d| d.requests.retain(|r| !held(r)))
-        }
-        RecordHolder::Retired(id) => update_dialog(call, leg_id, id, |d| {
-            if let Some(r) = d.retired_mut() {
-                r.open_requests.retain(|r| !held(r));
-            }
-        }),
-    }
+    update_dialog(call, leg_id, holder.id(), |d| d.requests.retain(|r| !held(r)))
 }
 
 /// The held record on `leg_id` for the received request `method` numbered
@@ -132,28 +115,11 @@ pub fn held_record(
 ) -> Option<(RecordHolder, RequestRecord)> {
     let leg = find_leg(call, leg_id)?;
     leg.dialogs.iter().find_map(|d| {
-        records_of(d)
+        d.requests
             .iter()
             .find(|r| r.is_held() && r.inbound_cseq == cseq && r.method == method)
             .map(|r| (holder_of(d), r.clone()))
     })
-}
-
-/// Take every relay and held record still open in `leg`'s retired dialogs,
-/// each with its dialog: the leg ends, so no final reaches them but the one
-/// this stack answers (RFC 3261 §8.2.6). Own records stay until they settle.
-pub fn take_retired_owed(leg: &mut Leg) -> Vec<(DialogId, RequestRecord)> {
-    let mut taken = Vec::new();
-    for d in leg.dialogs.iter_mut() {
-        let id = d.id();
-        if let Some(r) = d.retired_mut() {
-            let (owed, own): (Vec<_>, Vec<_>) =
-                std::mem::take(&mut r.open_requests).into_iter().partition(|r| !r.is_own());
-            r.open_requests = own;
-            taken.extend(owed.into_iter().map(|p| (id.clone(), p)));
-        }
-    }
-    taken
 }
 
 /// The relay `dialog` holds with outbound CSeq `outbound_cseq` awaiting its
@@ -191,12 +157,12 @@ pub fn remove_relay(call: Call, leg_id: &str, id: &DialogId, outbound_cseq: i64)
     })
 }
 
-/// Every record of `call`, with its leg: live dialogs' and retired ones'.
+/// Every record of `call`, with its leg and dialog.
 pub fn every_record(call: &Call) -> impl Iterator<Item = (&Leg, &Dialog, &RequestRecord)> {
     std::iter::once(&call.a_leg)
         .chain(call.b_legs.iter())
         .flat_map(|leg| leg.dialogs.iter().map(move |d| (leg, d)))
-        .flat_map(|(leg, d)| records_of(d).iter().map(move |r| (leg, d, r)))
+        .flat_map(|(leg, d)| d.requests.iter().map(move |r| (leg, d, r)))
 }
 
 /// `call` with every held record whose deadline is at or before `now_ms`

@@ -1,11 +1,11 @@
 //! The release of a fork straggler's 2xx (RFC 3261 §13.2.2.4): a 2xx under a
 //! To-tag no live dialog of an already confirmed b-leg carries is ACKed and
 //! its dialog BYEd, once per straggler; a repeat is re-ACKed with the same ACK.
-//! The straggler is a retired dialog of the leg ([`call::RetiredDialog`]): its
+//! The straggler is a retired dialog of the leg ([`call::DialogState::Retired`]): its
 //! INVITE record keeps the ACK's branch and bytes, and the BYE, continuing its own
 //! sequence, is a request record of its own until it settles (ADR-0055 §2).
 
-use call::{Call, Dialog, DialogState, RetainedEmission, RetiredDialog};
+use call::{Call, Dialog, DialogState, RetainedEmission};
 use sip_message::generators::{self, GenerateAckFor2xxOpts};
 use sip_message::header;
 
@@ -53,7 +53,7 @@ impl ActionExecutor<'_> {
                 let mut d = Dialog::new(
                     invite.our_tag,
                     tag.clone(),
-                    DialogState::Retired(RetiredDialog::default()),
+                    DialogState::Retired,
                     i64::from(invite_cseq),
                 );
                 d.sent_invite = dialled;
@@ -67,12 +67,14 @@ impl ActionExecutor<'_> {
         }
         straggler.route_set = self.dialog_route_set(uac_route_set(resp), &call.call_ref, leg_id);
         // Released already: its ACK left, re-passed as it left (§13.2.2.4).
-        if let Some(first) = call::helpers::emitted_ack(&straggler) {
+        if let Some(first) =
+            call::helpers::sent_exchange(&straggler).and_then(|x| x.emitted_ack.as_ref())
+        {
             let label = format!("ACK (fork straggler {tag}, 2xx retransmit) → {leg_id}");
             fx.outbound.push(super::ladder::repeat_of(first, label, leg_id));
             return;
         }
-        let released = call::helpers::ack_branch(&straggler).map(str::to_string);
+        let released = call::helpers::sent_exchange(&straggler).and_then(|x| x.ack_branch.clone());
         let offered_reliably = relay::offered_reliably(call, leg_id, &tag, i64::from(invite_cseq));
         let answer = (!relay::acked_invite_carries_offer(leg, &straggler) && !offered_reliably)
             .then(|| resp.sdp())
@@ -136,10 +138,7 @@ impl ActionExecutor<'_> {
         exchange.emitted_ack = Some(retained);
         // Retired with the requests still open in it, whose finals still reach
         // their originators (§8.1.3.3).
-        if !matches!(straggler.state, DialogState::Retired(_)) {
-            let open_requests = std::mem::take(&mut straggler.requests);
-            straggler.state = DialogState::Retired(RetiredDialog { open_requests });
-        }
+        straggler.state = DialogState::Retired;
         let id = straggler.id();
         *call = call::helpers::update_leg(call.clone(), leg_id, |l| l.dialogs.insert(straggler));
         self.record_own_effect(call, leg_id, &id, &bye);

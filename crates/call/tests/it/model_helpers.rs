@@ -838,7 +838,7 @@ fn a_cancelled_invite_takes_back_the_2xx_that_never_left() {
     assert_eq!(a.state(), LegState::Terminated, "her INVITE's final is the 487");
     assert!(a.dialogs.confirmed().is_none(), "no dialog stands confirmed");
     assert!(a.dialogs.iter().all(|d| answered_2xx(d).is_none()), "no ACK ladder stands");
-    assert!(a.dialogs.iter().all(|d| awaited_ack_cseq(d).is_none()), "no ACK is awaited");
+    assert!(a.dialogs.iter().filter_map(sent_exchange).all(|x| x.awaited_ack_cseq.is_none()));
     let ring: Vec<_> = a.messages.entries.iter().map(|e| e.seq).collect();
     assert_eq!(ring, [1, 2], "the ring holds what reached the wire");
 }
@@ -870,7 +870,7 @@ fn the_carrying_dialog_is_the_confirmed_or_the_only_live_one() {
     let two: Dialogs = vec![early("f1"), early("f2")].into();
     assert!(two.carrying().is_none(), "two early forks name no carrying dialog");
     let answered: Dialogs = vec![
-        Dialog { state: DialogState::Retired(RetiredDialog::default()), ..early("f1") },
+        Dialog { state: DialogState::Retired, ..early("f1") },
         Dialog { state: DialogState::Confirmed, ..early("f2") },
     ]
     .into();

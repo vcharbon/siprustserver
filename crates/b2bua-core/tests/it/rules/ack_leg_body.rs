@@ -163,7 +163,7 @@ fn a_body_bearing_ack_retains_its_exact_datagram_and_destination() {
     let retained = result.call.b_legs[0]
         .dialogs
         .confirmed()
-        .and_then(|d| call::helpers::emitted_ack(d).cloned())
+        .and_then(|d| call::helpers::sent_exchange(d)?.emitted_ack.clone())
         .expect("the emitted ACK datagram is retained on the dialog");
     let (bytes, dest) = retained.wire();
     assert_eq!(bytes, sent.image(), "retained bytes are the wire bytes");
@@ -222,7 +222,7 @@ fn a_bare_first_ack_retains_its_datagram_and_a_re_ack_repeats_it() {
     let retained = first.call.b_legs[0]
         .dialogs
         .confirmed()
-        .and_then(|d| call::helpers::emitted_ack(d).cloned())
+        .and_then(|d| call::helpers::sent_exchange(d)?.emitted_ack.clone())
         .expect("the bare ACK is retained as well");
     assert_eq!(retained.wire().0, sent.image());
     assert!(sent.body().is_empty(), "a minted ACK stays bare");

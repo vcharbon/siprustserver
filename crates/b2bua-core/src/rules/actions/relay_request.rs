@@ -57,10 +57,12 @@ impl ActionExecutor<'_> {
         // 2xx. A repeated 2xx re-ACKs via `re-ack-retransmitted-2xx`, which never
         // consults this obligation.
         if req.method() == Method::Ack {
-            let owed =
-                leg_at(call, target_leg).and_then(|leg| leg.dialogs.established()).is_some_and(
-                    |d| call::helpers::awaited_ack_cseq(d) == Some(req.cseq().seq() as i64),
-                );
+            let owed = leg_at(call, target_leg)
+                .and_then(|leg| leg.dialogs.established())
+                .is_some_and(|d| {
+                    call::helpers::sent_exchange(d).and_then(|x| x.awaited_ack_cseq)
+                        == Some(req.cseq().seq() as i64)
+                });
             if !owed {
                 return;
             }

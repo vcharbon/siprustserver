@@ -108,6 +108,23 @@ fn a_relay_or_a_dialog_state_is_compared() {
     assert!(!same_state(&before, &ending), "a dialog ending");
 }
 
+/// A retired dialog's records are compared as a live dialog's: its keepalive
+/// is exempt, any other record compared.
+#[test]
+fn a_retired_dialogs_records_are_compared_as_a_live_dialogs() {
+    let mut before = call();
+    before.a_leg.dialogs.confirmed_mut().expect("the answered dialog").state = DialogState::Retired;
+    let mut probed = before.clone();
+    let d = probed.a_leg.dialogs.iter_mut().find(|d| d.is_retired()).expect("retired");
+    d.our_cseq += 1;
+    d.requests.push(keepalive(d.our_cseq));
+    assert!(same_state(&before, &probed), "its keepalive");
+    let mut relayed = before.clone();
+    let d = relayed.a_leg.dialogs.iter_mut().find(|d| d.is_retired()).expect("retired");
+    d.requests.push(RequestRecord::relayed("INFO", 8006, 3));
+    assert!(!same_state(&before, &relayed), "a relay");
+}
+
 /// A rung a quiet turn moves is exempt; the 2xx it repeats is compared.
 #[test]
 fn a_ladder_rung_is_exempt_and_its_emission_compared() {

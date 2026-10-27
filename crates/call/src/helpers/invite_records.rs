@@ -34,22 +34,6 @@ pub fn sent_invite_image<'a>(leg: &'a Leg, d: &'a Dialog) -> Option<&'a SentRequ
     invite_image(leg, d.sent_invite.as_ref()?)
 }
 
-/// The Via branch of the ACK the 2xx to `d`'s last INVITE drew.
-pub fn ack_branch(d: &Dialog) -> Option<&str> {
-    sent_exchange(d)?.ack_branch.as_deref()
-}
-
-/// The ACK the 2xx to `d`'s last INVITE drew, as it left.
-pub fn emitted_ack(d: &Dialog) -> Option<&RetainedEmission> {
-    sent_exchange(d)?.emitted_ack.as_ref()
-}
-
-/// The CSeq of the ACK the 2xx to `d`'s last INVITE awaits from the
-/// acknowledging peer, while it is owed.
-pub fn awaited_ack_cseq(d: &Dialog) -> Option<i64> {
-    sent_exchange(d)?.awaited_ack_cseq
-}
-
 /// Whether a 2xx was taken on `d`'s last INVITE: its ACK is owed or left.
 pub fn invite_taken(d: &Dialog) -> bool {
     sent_exchange(d).is_some_and(InviteExchange::taken)
@@ -83,18 +67,13 @@ pub fn open_sent_invite(
     mut record: RequestRecord,
 ) -> Call {
     update_dialog(call, leg_id, id, |d| {
-        let ahead = emitted_ack(d).filter(|_| ack_branch(d).is_some()).cloned();
+        let ahead = sent_exchange(d).filter(|x| x.ack_branch.is_some());
+        let ahead = ahead.and_then(|x| x.emitted_ack.clone());
         if let Some(ahead) = ahead {
             record.invite.get_or_insert_with(InviteExchange::default).ack_ahead = Some(ahead);
         }
         d.sent_invite = Some(record);
     })
-}
-
-/// The ACK `d`'s last INVITE must follow when a node re-sends it from the
-/// record.
-pub fn ack_ahead(d: &Dialog) -> Option<&RetainedEmission> {
-    sent_exchange(d)?.ack_ahead.as_ref()
 }
 
 /// Retain the Via branch of the ACK-for-2xx just sent on `leg_id`'s

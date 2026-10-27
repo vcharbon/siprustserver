@@ -392,7 +392,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     let Some(d) = ctx.dialog() else { return false };
                     let Some(leg) = ctx.source_leg() else { return false };
                     let Some(resp) = ctx.response() else { return false };
-                    call::helpers::ack_branch(d).is_some()
+                    call::helpers::sent_exchange(d).is_some_and(|x| x.ack_branch.is_some())
                         && crate::rules::relay::retransmitted_2xx(leg, d, resp)
                 }),
             |ctx| {
@@ -784,7 +784,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             &["relay-bye", "resolve-cross-bye", "resolve-ended-leg-bye"],
             Match::request()
                 .method("BYE")
-                .filter(|ctx| ctx.dialog().is_some_and(|d| d.retired().is_some())),
+                .filter(|ctx| ctx.dialog().is_some_and(|d| d.is_retired())),
             |_ctx| {
                 ok(vec![RuleAction::Respond {
                     status: 200,

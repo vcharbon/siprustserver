@@ -84,9 +84,7 @@ pub use attempt::{Attempt, AttemptCause, AttemptId, AttemptOutcome};
 pub use cdr::{CdrEvent, CdrEventType};
 pub use deadline::{millis_i64, millis_u64, Deadline};
 pub use decision_log::{DecisionKind, DecisionMark};
-pub use dialog::{
-    Dialog, DialogEnd, DialogId, DialogState, Direction, EndingBy, PeerDialog, RetiredDialog,
-};
+pub use dialog::{Dialog, DialogEnd, DialogId, DialogState, Direction, EndingBy, PeerDialog};
 pub use dialogs::Dialogs;
 pub use emission::{Repeat, Repeated, RetainedEmission};
 pub use invite_exchange::{InviteExchange, Unacked2xx};

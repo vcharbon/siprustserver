@@ -34,7 +34,7 @@ pub(super) fn fork_straggler(ctx: &RuleContext) -> bool {
         return false;
     };
     let Some(established) = leg.dialogs.established() else { return false };
-    ctx.dialog().is_none_or(|d| d.retired().is_some() || d.awaits_invite_final())
+    ctx.dialog().is_none_or(|d| d.is_retired() || d.awaits_invite_final())
         && crate::rules::relay::acked_invite_cseq(leg, established)
             .is_some_and(|acked| resp.cseq().seq() <= acked)
 }

@@ -210,7 +210,7 @@ fn repeated_evidence_failure(ctx: &RuleContext) -> bool {
     };
     resp.status() >= 300
         && call::helpers::sent_invite_image(leg, dialog).is_none()
-        && call::helpers::emitted_ack(dialog).is_some()
+        && call::helpers::sent_exchange(dialog).is_some_and(|x| x.emitted_ack.is_some())
         && crate::rules::relay::acked_invite_cseq(leg, dialog) == Some(resp.cseq().seq())
         && ctx.relayed_pending().is_none()
 }

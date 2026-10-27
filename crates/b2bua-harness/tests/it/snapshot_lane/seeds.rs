@@ -84,9 +84,11 @@ async fn forked_call() -> Vec<Seed> {
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
     let acked = |c: &Call| {
-        c.b_legs
-            .iter()
-            .all(|l| l.dialogs.iter().all(|d| call::helpers::awaited_ack_cseq(d).is_none()))
+        c.b_legs.iter().all(|l| {
+            l.dialogs.iter().all(|d| {
+                call::helpers::sent_exchange(d).is_none_or(|x| x.awaited_ack_cseq.is_none())
+            })
+        })
     };
     settle_until(|| b2bua.live_call(&call_ref).is_some_and(|c| acked(&c))).await;
     seeds.push(Seed::of("forked/answered", live()));

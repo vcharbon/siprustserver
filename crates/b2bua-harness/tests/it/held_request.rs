@@ -71,7 +71,7 @@ mod holdinfo {
                 let cseq = caller
                     .dialogs
                     .iter()
-                    .flat_map(|d| call::helpers::records_of(d).iter())
+                    .flat_map(|d| d.requests.iter())
                     .find(|r| r.is_held())
                     .map(|r| r.inbound_cseq)?;
                 Some(RuleHandleResult::new(vec![RuleAction::AnswerHeld {
