@@ -109,6 +109,7 @@ above) before creating the cluster.
 | **sysctls** | A 6-node kind cluster (`cluster.yaml`) exhausts default inotify/fd limits. Set `fs.inotify.max_user_instances≥512`, `fs.inotify.max_user_watches≥524288`, `fs.file-max≥2097152` (persist in `/etc/sysctl.d/`), plus the kind-standard `net.ipv4.ip_forward=1` and `net.bridge.bridge-nf-call-iptables=1`. `net.core.wmem_max≥4194304` lets the SIP sockets take the 4 MiB `SO_SNDBUF` the charts request (ADR-0033), and `net.core.rmem_max≥4194304` the 4 MiB `SO_RCVBUF`; both are the host's, a kind node cannot raise them. |
 | Kernel modules | `sch_netem` (the latency and loss incidents), `br_netfilter`, `overlay`. |
 | RAM | ~16 GiB. The cluster ceiling alone is 9.5 GiB (`cap-kind-memory.sh`, tunable via `TOTAL_CAP_MB` and the per-tier `*_CAP_MB`). |
+| CPU | On a shared host, `weight-kind-cpu.sh` (run by `up`, re-runnable on a live cluster) weights each node container by tier (app 10000, infra and edge 1000, control plane 100; `*_CPU_WEIGHT`), so the app node's pods get their CPU limit under host contention instead of an equal share with every other node. |
 | Network | `$SIP_SUBNET` (default `172.20.0.0/16`) **must be free** on the host — no vmnet / route / other docker network may overlap it; if it collides, set a free `SIP_SUBNET` (and the kind values with it). |
 
 ## HA acceptance

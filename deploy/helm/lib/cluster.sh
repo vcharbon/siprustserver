@@ -74,6 +74,9 @@ up() {
   log "capping kind node memory"
   CLUSTER="$CLUSTER" "$K8S_DIR/cap-kind-memory.sh" \
     || die "kind node memory caps refused (cap-kind-memory.sh above): the cluster is up but uncapped"
+  log "weighting kind node CPU by tier"
+  CLUSTER="$CLUSTER" "$K8S_DIR/weight-kind-cpu.sh" \
+    || die "kind node CPU weights refused (weight-kind-cpu.sh above): the cluster is up but unweighted"
   sipext_up
 
   log "proxy env (forwarded to docker build): $(proxy_env_summary)"
