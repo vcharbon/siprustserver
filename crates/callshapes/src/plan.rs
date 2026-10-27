@@ -22,7 +22,7 @@ pub use scenario_harness::actor::ForkWinner;
 use scenario_harness::actor::{
     phase, ActorCall, ActorScenario, ActorSpec, Barrier, BarrierPhase, Branch, CtxFeed,
     Disposition, Ending, Expect, Feed, Goal, GoalStep, LegPhase, MediaState, SettleBarrier,
-    StateInner, SubflowState, STEP_TIMEOUT, SUBFLOW_EARLY, SUBFLOW_REALIGN, SUBFLOW_REFER,
+    StateInner, SubflowState, SUBFLOW_EARLY, SUBFLOW_REALIGN, SUBFLOW_REFER,
 };
 use scenario_harness::realcall::{CallEnv, ScenarioId};
 use scenario_harness::{StepError, ANSWER_SDP, OFFER_SDP};
@@ -645,11 +645,6 @@ impl ShapePlan {
             claim: None,
         }];
         actors.extend(b.callees);
-        // A dwell that takes half the barrier wait raises it by the dwell: the
-        // barrier after it still gets the whole protocol bound.
-        let longest =
-            actors.iter().flat_map(|a| a.goals.iter().map(|g| g.delay)).max().unwrap_or_default();
-        let ceiling = (longest * 2 > STEP_TIMEOUT).then(|| STEP_TIMEOUT + longest);
 
         Ok(ActorCall {
             actors,
@@ -659,7 +654,7 @@ impl ShapePlan {
 
             waivers: Vec::new(),
             automatics: Default::default(),
-            ceiling,
+            ceiling: None,
             delta_policy: None,
             reception_observer: None,
         })

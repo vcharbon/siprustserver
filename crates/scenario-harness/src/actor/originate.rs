@@ -15,6 +15,7 @@ use sip_template::{EmitOpts, MessageTemplate};
 
 use super::answer::discharge_on_teardown;
 use super::ledger::{ObligationKey, ObligationKind};
+use super::pacing::Dwell;
 use super::runner::ActorState;
 use super::state::Observation;
 use crate::StepError;
@@ -369,5 +370,5 @@ pub(super) fn schedule_reinvite_retry(st: &mut ActorState<'_>, resp: &SipRespons
         (None, 491) => Duration::from_millis(1000),
         _ => return,
     };
-    st.reinvite_retry = Some(Instant::now() + delay);
+    st.reinvite_retry = Some(st.dwell(Dwell::Retry, delay));
 }

@@ -1,7 +1,8 @@
 //! The [`Barrier`] a goal waits on before it fires: a guard over the observed
-//! multi-endpoint state, and [`await_pred`], the wait on one.
+//! multi-endpoint state, and [`await_pred`] / [`await_paced`], the waits on one.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::time::Instant;
 
@@ -91,6 +92,36 @@ pub async fn await_pred<F>(
 where
     F: Fn(&StateInner) -> bool,
 {
+    await_until(obs, who, pred, || deadline).await
+}
+
+/// [`await_pred`] bounded by `bound` past the later of `from` and the end of
+/// the last dwell still owed ([`super::Pacing`]): a dwell scheduled while it
+/// waits moves the deadline on, a dwell withdrawn moves it back.
+pub async fn await_paced<F>(
+    obs: &ObservedState,
+    who: &'static str,
+    pred: F,
+    from: Instant,
+    bound: Duration,
+) -> Result<(), StepError>
+where
+    F: Fn(&StateInner) -> bool,
+{
+    await_until(obs, who, pred, || obs.pacing.deadline(from, bound)).await
+}
+
+/// [`await_pred`] with its deadline read again on every `tick` (a change of
+/// the pacing ticks too).
+async fn await_until<F>(
+    obs: &ObservedState,
+    who: &'static str,
+    pred: F,
+    deadline: impl Fn() -> Instant,
+) -> Result<(), StepError>
+where
+    F: Fn(&StateInner) -> bool,
+{
     loop {
         let notified = obs.tick.notified();
         tokio::pin!(notified);
@@ -98,6 +129,7 @@ where
         if obs.with_snapshot(&pred) {
             return Ok(());
         }
+        let deadline = deadline();
         if Instant::now() >= deadline {
             return Err(StepError::timeout(who, None, format!("the call state to reach {who}")));
         }

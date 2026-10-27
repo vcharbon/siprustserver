@@ -15,10 +15,10 @@ use sip_message::header::MediaType;
 use sip_message::SipResponse;
 
 use super::endpoint::{SUBFLOW_EARLY, SUBFLOW_REFER, SUBFLOW_RENEG};
-use super::goals::GoalStep;
 use super::ledger::{ObligationKey, ObligationKind};
 use super::runner::{ActorState, HeldAck};
 use super::state::{Observation, SubflowState};
+use super::{Dwell, GoalStep};
 use crate::agent::InviteResponseFate;
 use crate::{ClientInvite, StepError};
 
@@ -301,7 +301,7 @@ pub(super) async fn react_response(
                 if let Some(delay) =
                     st.reinvite_ordinals.get(&cseq).copied().and_then(|o| st.ack_hold_for(o))
                 {
-                    st.held_acks.push(HeldAck { at: Instant::now() + delay, cseq, sdp });
+                    st.held_acks.push(HeldAck { at: st.dwell(Dwell::HeldAck, delay), cseq, sdp });
                     return Ok(());
                 }
             }
@@ -333,7 +333,7 @@ pub(super) async fn react_response(
             } else {
                 Duration::from_millis(1000)
             };
-            st.update_retry = Some(Instant::now() + dwell);
+            st.update_retry = Some(st.dwell(Dwell::Retry, dwell));
         }
         return Ok(());
     }

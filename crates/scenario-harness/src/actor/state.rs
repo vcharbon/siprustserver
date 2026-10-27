@@ -10,10 +10,6 @@
 //!   in either order, yields the same state (phase folds by `max`; the ledger
 //!   is grow-only). So a double-observation is harmless and the fold-order
 //!   determinism gate holds by construction.
-//!
-//! The single wait primitive is [`await_pred`]: register on the tick BEFORE
-//! reading the predicate (the lost-wake hazard), so a fact recorded in the
-//! check→await gap is never lost.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -528,16 +524,20 @@ pub struct ObservedState {
     /// Fired on every mutation: what [`await_pred`](super::barrier::await_pred)
     /// parks on.
     pub(super) tick: Arc<Notify>,
+    /// The call's scheduled dwells, which every wait on it is bounded past.
+    pub(super) pacing: super::pacing::Pacing,
 }
 
 impl ObservedState {
     pub fn new() -> Self {
-        Self { inner: Arc::new(Mutex::new(StateInner::new())), tick: Arc::new(Notify::new()) }
+        let pacing = super::pacing::Pacing::default();
+        Self { inner: Arc::new(Mutex::new(StateInner::new())), tick: pacing.tick(), pacing }
     }
 
     /// Fold one reactor observation into the state and wake every barrier
     /// waiter. `now` is a `tokio::time::Instant` (rides the paused clock).
     pub fn record(&self, o: Observation, now: Instant) {
+        self.pacing.observe(&o);
         self.inner.lock().unwrap().apply(o, now);
         self.tick.notify_waiters();
     }

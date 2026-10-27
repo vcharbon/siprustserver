@@ -14,6 +14,7 @@ use super::originate::{
     originate_early, originate_in_dialog, originate_initial_invite, originate_reinvite,
     originate_update, ping_options_once, send_request_template,
 };
+use super::pacing::Dwell;
 use super::runner::ActorState;
 use super::script::{consume_final_fact, drive_respond, expect_request, expect_response};
 use super::state::Observation;
@@ -153,7 +154,7 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
         GoalStep::EveryOptions { cadence, hold } => {
             let start = Instant::now();
             while start.elapsed() < hold {
-                tokio::time::sleep(cadence).await;
+                tokio::time::sleep_until(st.dwell(Dwell::Keepalive, cadence)).await;
                 ping_options_once(st).await?;
             }
         }

@@ -318,7 +318,7 @@ impl<'c> ActorState<'c> {
             media: spec.media,
             dialogs: DialogTable::default(),
             pending_answer: None,
-            goals: GoalCursor::new(spec.goals),
+            goals: GoalCursor::new(spec.goals, spec.role, obs.pacing.clone()),
             obs,
             scope,
             ctx,

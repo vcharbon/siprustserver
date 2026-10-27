@@ -12,6 +12,7 @@ use tokio::time::Instant;
 
 use super::endpoint::{Disposition, ForkWinner};
 use super::ledger::{ObligationKey, ObligationKind};
+use super::pacing::Dwell;
 use super::runner::{ActorState, ParkedRequest, PendingRejectAck, TimedAnswer};
 use super::script::scripted_wants_initial;
 use super::state::Observation;
@@ -207,7 +208,8 @@ pub(super) async fn apply_disposition(
             uas.respond(180, "Ringing").try_send().await?;
             st.early_provisionals.insert(String::new());
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
-            st.pending_answer = Some(TimedAnswer { at: Instant::now() + ring, uas, fork: None });
+            st.pending_answer =
+                Some(TimedAnswer { at: st.dwell(Dwell::Ring, ring), uas, fork: None });
         }
         // Ring then SILENCE: the 180 goes out, the INVITE server txn is
         // held with NO answer ever scheduled — the SUT's own no-answer timer
@@ -270,8 +272,8 @@ pub(super) async fn apply_disposition(
                 st.fork_answer = Some(fork);
                 st.pending_prack_answer = Some(uas);
             } else {
-                st.pending_answer =
-                    Some(TimedAnswer { at: Instant::now() + ring, uas, fork: Some(fork) });
+                let at = st.dwell(Dwell::Ring, ring);
+                st.pending_answer = Some(TimedAnswer { at, uas, fork: Some(fork) });
             }
         }
         Disposition::Reject(code) => reject_initial(st, uas, code).await?,

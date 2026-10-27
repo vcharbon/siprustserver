@@ -14,9 +14,10 @@ use tokio::time::Instant;
 use sip_message::generators::InDialogMethod;
 use sip_template::{EmitOpts, MessageTemplate};
 
-use super::barrier::await_pred;
 pub use super::barrier::Barrier;
+use super::barrier::{await_paced, await_pred};
 use super::endpoint::ForkWinner;
+use super::pacing::{Dwell, Pacing};
 use super::state::ObservedState;
 use crate::realcall::InvitePlan;
 use crate::StepError;
@@ -374,16 +375,21 @@ pub struct GoalCursor {
     /// goal arm's future is dropped and re-created every time another `select!`
     /// arm wins; without this anchor an inbound message would restart the dwell).
     ready_at: Option<Instant>,
-    /// The pending goal's guard-wait deadline, anchored at its FIRST poll and
+    /// When the pending goal's guard wait began, anchored at its FIRST poll and
     /// kept across re-polls — without the anchor every reactor wake (e.g. the
     /// 2 s recv timeout) would refresh the bound and a stuck guard could dodge
     /// its timeout indefinitely.
-    deadline_at: Option<Instant>,
+    waiting_since: Option<Instant>,
+    /// The role these goals are its, under which their dwells are paced.
+    role: &'static str,
+    /// The call's scheduled dwells: a goal's dwell joins them, and leaves them
+    /// when the goal is abandoned.
+    pacing: Pacing,
 }
 
 impl GoalCursor {
-    pub fn new(goals: Vec<Goal>) -> Self {
-        Self { goals, cursor: 0, ready_at: None, deadline_at: None }
+    pub fn new(goals: Vec<Goal>, role: &'static str, pacing: Pacing) -> Self {
+        Self { goals, cursor: 0, ready_at: None, waiting_since: None, role, pacing }
     }
 
     /// Whether an un-fired goal remains.
@@ -419,7 +425,8 @@ impl GoalCursor {
     pub(super) fn abandon(&mut self) {
         self.cursor = self.goals.len();
         self.ready_at = None;
-        self.deadline_at = None;
+        self.waiting_since = None;
+        self.pacing.withdraw(self.role, Dwell::Goal);
     }
 
     /// The steps of every un-fired goal, in order — the park-or-react match set.
@@ -449,11 +456,15 @@ impl GoalCursor {
         // mutably (the guard is Arc-backed, the clone is cheap).
         let (guard, delay, bound) = (goal.guard.clone(), goal.delay, goal.deadline);
         let unless = goal.unless.clone();
-        let deadline =
-            *self.deadline_at.get_or_insert_with(|| Instant::now() + bound.unwrap_or(timeout));
+        let since = *self.waiting_since.get_or_insert_with(Instant::now);
         let skipped = |s: &super::state::StateInner| unless.as_ref().is_some_and(|b| b.holds(s));
-        await_pred(obs, guard.name(), |s| guard.holds(s) || skipped(s) || moot(s), deadline)
-            .await?;
+        let released = |s: &super::state::StateInner| guard.holds(s) || skipped(s) || moot(s);
+        // A goal's own bound is fixed; the default one runs past the call's
+        // scheduled dwells.
+        match bound {
+            Some(bound) => await_pred(obs, guard.name(), released, since + bound).await?,
+            None => await_paced(obs, guard.name(), released, since, timeout).await?,
+        }
         if obs.with_snapshot(&moot) {
             self.abandon();
             return Ok(None);
@@ -463,6 +474,7 @@ impl GoalCursor {
         }
         if !delay.is_zero() {
             let at = *self.ready_at.get_or_insert(Instant::now() + delay);
+            self.pacing.dwell_until(self.role, Dwell::Goal, at);
             tokio::time::sleep_until(at).await;
         }
         Ok(Some(self.goals[self.cursor].step.clone()))
@@ -473,6 +485,6 @@ impl GoalCursor {
     pub fn advance(&mut self) {
         self.cursor += 1;
         self.ready_at = None;
-        self.deadline_at = None;
+        self.waiting_since = None;
     }
 }

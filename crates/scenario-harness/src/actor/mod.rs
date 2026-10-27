@@ -59,6 +59,7 @@ mod held_acks;
 mod ledger;
 mod observe;
 mod originate;
+mod pacing;
 mod prack_rx;
 mod react;
 mod refused_dialog;
@@ -102,6 +103,7 @@ pub use goals::{
 };
 pub use ledger::{ObligationKey, ObligationKind, ObligationLedger};
 pub use observe::{ReceivedMessage, ReceptionContext, ReceptionObserver};
+pub use pacing::{Dwell, Pacing};
 pub use settle::{SettleBarrier, SettleVerdict, T1};
 pub use spec::{
     originating_role, run_actor_scenario, run_actor_scenario_observed, run_built_actor_call,
@@ -112,6 +114,8 @@ pub use state::{
     ResponseFact, StateInner, SubflowState,
 };
 pub use verdict::{verdict, FailedAt, ScenarioVerdict};
+
+use barrier::await_paced;
 
 /// One phase barrier in the controller's plan — a named predicate over the
 /// observed state that must hold (bounded by the controller's `step_timeout`)
@@ -181,8 +185,9 @@ struct CallController {
     plan: Vec<BarrierPhase>,
     settle: SettleBarrier,
     /// The per-barrier wait bound (the same 32 s ceiling the actors' goal
-    /// guards use — [`spec::STEP_TIMEOUT`]); a barrier that never holds fails
-    /// the call rather than hanging.
+    /// guards use — [`spec::STEP_TIMEOUT`]), counted past the call's scheduled
+    /// dwells ([`Pacing`]); a barrier that never holds fails the call rather
+    /// than hanging.
     step_timeout: Duration,
     /// The barrier being waited on, as an index: a plan phase, then
     /// [`TORN_DOWN`], then [`SETTLE`] ([`Self::barrier_name`]). Written by the
@@ -221,10 +226,11 @@ impl CallController {
     async fn drive_to_verdict(&self) -> CallVerdict {
         for (i, phase) in self.plan.iter().enumerate() {
             self.pending.store(i, Ordering::Relaxed);
-            let deadline = tokio::time::Instant::now() + self.step_timeout;
+            let since = tokio::time::Instant::now();
             let held =
                 |s: &StateInner| (phase.pred)(s) || s.accepted_ending() || s.caller_ended_cleanly();
-            if let Err(e) = await_pred(&self.obs, phase.name, held, deadline).await {
+            if let Err(e) = await_paced(&self.obs, phase.name, held, since, self.step_timeout).await
+            {
                 return CallVerdict::Failed(FailedAt::at_barrier(phase.name), e);
             }
         }
@@ -233,8 +239,10 @@ impl CallController {
         // ceiling: a party's own 64·T1 give-up armed as the barrier starts (a
         // reliable provisional no PRACK answers, RFC 3262 §3) lands inside it.
         self.pending.store(self.plan.len(), Ordering::Relaxed);
-        let deadline = tokio::time::Instant::now() + self.step_timeout + TORN_DOWN_MARGIN;
-        if let Err(e) = await_pred(&self.obs, TORN_DOWN, |s| s.all_terminated(), deadline).await {
+        let since = tokio::time::Instant::now();
+        let bound = self.step_timeout + TORN_DOWN_MARGIN;
+        let torn_down = |s: &StateInner| s.all_terminated();
+        if let Err(e) = await_paced(&self.obs, TORN_DOWN, torn_down, since, bound).await {
             return CallVerdict::Failed(FailedAt::at_barrier(TORN_DOWN), e);
         }
         self.pending.store(self.plan.len() + 1, Ordering::Relaxed);

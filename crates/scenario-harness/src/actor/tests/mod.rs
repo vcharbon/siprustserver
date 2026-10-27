@@ -19,6 +19,7 @@ mod dialog_refusal;
 mod endings;
 mod forking;
 mod held;
+mod long_dwell;
 mod prack_refused;
 mod rang;
 mod reception_observer;
