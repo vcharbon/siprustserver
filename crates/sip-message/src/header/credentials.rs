@@ -20,7 +20,7 @@ use crate::char_class::is_token_char;
 use super::kind::CredentialsKind;
 use super::name::HeaderName;
 use super::params::{ParamValue, Params};
-use super::scan::{byte_at, quoted_close, read_quoted, skip_ws, sub};
+use super::scan::{byte_at, read_quoted, skip_ws, sub};
 use super::value::{Folding, HeaderValue};
 use super::wire::Wire;
 
@@ -93,7 +93,7 @@ impl<K: CredentialsKind> HeaderValue for Credentials<K> {
     }
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
-        let value = raw.trimmed();
+        let value = without_lws(raw);
         let bytes = value.as_bytes();
         let refused =
             |what: &str| SipParseError::new(format!("{} {what}: {:?}", K::name(), value.as_str()));
@@ -107,7 +107,7 @@ impl<K: CredentialsKind> HeaderValue for Credentials<K> {
             Params::new()
         } else if rest == scheme_end {
             return Err(refused("has no space after its auth-scheme"));
-        } else if is_token68(bytes.get(rest..).unwrap_or_default()) {
+        } else if bytes.split_at_checked(rest).is_some_and(|(_, tail)| is_token68(tail)) {
             let mut one = Params::new();
             one.push(sub(&value, rest, bytes.len()), ParamValue::Flag);
             one
@@ -126,9 +126,17 @@ impl<K: CredentialsKind> HeaderValue for Credentials<K> {
     }
 }
 
+/// `raw` without the SP and HTAB around it.
+fn without_lws(raw: &SipStr) -> SipStr {
+    let bytes = raw.as_bytes();
+    let start = skip_ws(bytes, 0);
+    let trailing = bytes.iter().rev().take_while(|&&b| matches!(b, b' ' | b'\t')).count();
+    sub(raw, start, bytes.len().saturating_sub(trailing).max(start))
+}
+
 /// The end of the token starting at byte `i`: `i` itself when none does.
 fn token_end(bytes: &[u8], i: usize) -> usize {
-    i + bytes.get(i..).unwrap_or_default().iter().take_while(|&&b| is_token_char(b)).count()
+    i + bytes.iter().skip(i).take_while(|&&b| is_token_char(b)).count()
 }
 
 /// `token68 = 1*( ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" ) *"="`
@@ -136,7 +144,28 @@ fn token_end(bytes: &[u8], i: usize) -> usize {
 fn is_token68(rest: &[u8]) -> bool {
     let body = rest.iter().take_while(|&&b| b.is_ascii_alphanumeric() || b"-._~+/".contains(&b));
     let body = body.count();
-    body > 0 && rest.get(body..).unwrap_or_default().iter().all(|&b| b == b'=')
+    body > 0 && rest.iter().skip(body).all(|&b| b == b'=')
+}
+
+/// The position after the `"` closing the `quoted-string` opened at byte
+/// `open` (RFC 3261 §25.1): `qdtext` is HTAB, SP or any byte but a control,
+/// `"` and `\`; a `quoted-pair` escapes one ASCII byte but CR and LF. `None`
+/// when a byte breaks it or nothing closes it.
+fn quoted_end(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut i = open + 1;
+    loop {
+        match byte_at(bytes, i)? {
+            b'"' => return Some(i + 1),
+            b'\\' => match byte_at(bytes, i + 1)? {
+                b'\r' | b'\n' => return None,
+                escaped if escaped.is_ascii() => i += 2,
+                _ => return None,
+            },
+            b'\t' => i += 1,
+            b if b < 0x20 || b == 0x7f => return None,
+            _ => i += 1,
+        }
+    }
 }
 
 /// The `auth-param`s from byte `i` to the end of `base`, comma-separated
@@ -156,7 +185,7 @@ fn auth_params(base: &SipStr, mut i: usize) -> Option<Params> {
         }
         i = skip_ws(bytes, i + 1);
         if byte_at(bytes, i) == Some(b'"') {
-            let close = quoted_close(bytes, i)?;
+            let close = quoted_end(bytes, i)?;
             let (text, _) = read_quoted(base, i);
             params.push(name, ParamValue::Quoted(text));
             i = close;
@@ -217,7 +246,8 @@ mod tests {
 
     /// A value off the grammar is refused: a scheme that is no token, a
     /// quoted-string left open, text after a closed one, a parameter with no
-    /// value, an empty list element.
+    /// value, an empty list element, a bare control byte or an escaped
+    /// non-ASCII one in a quoted-string, whitespace other than SP and HTAB.
     #[test]
     fn a_value_off_the_grammar_is_refused() {
         for raw in [
@@ -228,6 +258,10 @@ mod tests {
             r#"Digest realm="atlanta.com",, nonce="ab34""#,
             r#"Digest realm=, nonce="ab34""#,
             "Digest\"realm",
+            "Digest realm=\"a\u{1}b\"",
+            "Digest realm=\"\\é\"",
+            "Digest realm=x\u{a0}",
+            "\u{b}Digest realm=x",
         ] {
             assert!(Authorization::parse(&SipStr::owned(raw)).is_err(), "{raw}");
         }

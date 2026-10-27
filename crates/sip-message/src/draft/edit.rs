@@ -26,10 +26,9 @@ use super::start::StartKind;
 #[derive(Debug, Clone)]
 pub enum IncompleteDraft {
     /// A header RFC 3261 requires on every message of this direction is absent:
-    /// the draft started blank, or thawed from a message that arrived without
-    /// it (a request without Max-Forwards, which RFC 3261 §16.3 lets a
-    /// receiver accept). No operation removes a mandatory header without
-    /// putting one back.
+    /// the draft started blank, an edit removed it, or the draft thawed from a
+    /// message that arrived without it (a request without Max-Forwards, which
+    /// RFC 3261 §16.3 lets a receiver accept).
     Missing(Vec<HeaderName>),
     /// A header is present but does not read as the value its name promises.
     Unreadable(SipParseError),
