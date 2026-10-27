@@ -24,6 +24,7 @@ mod matching;
 mod negative;
 mod retransmissions;
 mod settle_floor;
+mod trying;
 mod unscripted;
 
 use std::collections::BTreeMap;

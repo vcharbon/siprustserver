@@ -67,6 +67,19 @@
       "step": "s7"
     },
     {
+      "after_ms": 2,
+      "arrived": {
+        "cseq": 2,
+        "cseq_method": "INVITE",
+        "kind": "response",
+        "reason": "Request Terminated",
+        "status": 487
+      },
+      "failure": "trying-omitted",
+      "leg": "B",
+      "step": "s13"
+    },
+    {
       "arrived": {
         "cseq": 9,
         "kind": "request",

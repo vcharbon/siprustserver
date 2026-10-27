@@ -43,6 +43,11 @@ export type ShapeKind =
   | { readonly shape: "method-substitution"; readonly expected: string; readonly observed: string }
   | { readonly shape: "serviced-stray"; readonly method: string; readonly action: string }
   | { readonly shape: "alignment-lost"; readonly method: string }
+  /**
+   * The `100` to an INVITE the leg sent, met by that transaction's `final`
+   * first (RFC 3261 §17.2.1); `afterMs` is the final's arrival from the INVITE.
+   */
+  | { readonly shape: "trying-omitted"; readonly final: number; readonly afterMs: number }
   | {
       readonly shape: "retransmission"
       readonly cseqMethod: string
@@ -64,6 +69,8 @@ const shapeText = (kind: ShapeKind): string => {
       return `serviced-stray:${kind.method}:${kind.action}`
     case "alignment-lost":
       return `alignment-lost:${kind.method}`
+    case "trying-omitted":
+      return "trying-omitted"
     case "retransmission":
       return `retransmission:${kind.cseqMethod}:2xx`
   }
@@ -76,6 +83,8 @@ export const shapeSides = (
   switch (kind.shape) {
     case "retransmission":
       return [[String(kind.captured)], [String(kind.replayed)]]
+    case "trying-omitted":
+      return [["100"], [`${kind.final} after ${kind.afterMs} ms`]]
     default:
       return [[shapeText(kind)], []]
   }

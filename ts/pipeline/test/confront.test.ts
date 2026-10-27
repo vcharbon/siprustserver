@@ -459,6 +459,26 @@ describe("shapeProbes", () => {
     expect(signature(probes[0]!.probe)).toBe("shape:missing-message:response-486")
   })
 
+  it("an omitted 100 is one shape record at its own step, scoped on the 100 to INVITE", () => {
+    const probes = shapeProbes(
+      verdictWith([
+        {
+          failure: "trying-omitted",
+          step: "s13",
+          leg: "B",
+          arrived: { kind: "response", status: 487, reason: "Request Terminated", cseq_method: "INVITE", cseq: 2 },
+          after_ms: 2
+        }
+      ]),
+      new Map([["s13", step("s13", { in_dialog: true, msg: { "cseq-method": "INVITE", status: 100, headers: [], "headers-present": [] } })]]),
+      new Map()
+    )
+    expect(probes).toHaveLength(1)
+    expect(probes[0]?.step).toBe("s13")
+    expect(signature(probes[0]!.probe)).toBe("shape:trying-omitted:response:100:INVITE")
+    expect(probes[0]?.probe).toMatchObject({ shapeKind: { shape: "trying-omitted", final: 487, afterMs: 2 } })
+  })
+
   it("a passing verdict produces nothing", () => {
     expect(shapeProbes({ case: "c", lane: "fake", status: "ok" }, new Map(), new Map())).toEqual([])
   })

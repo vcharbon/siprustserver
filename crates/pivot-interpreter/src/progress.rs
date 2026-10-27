@@ -71,6 +71,9 @@ pub struct Unmatched<'a> {
     pub retired: Vec<String>,
     /// The tolerated absences released on the ended transaction.
     pub released: Vec<String>,
+    /// Whether the retired expect is the `100` the INVITE's final stood in for
+    /// (RFC 3261 §17.2.1): the final is still the step behind it's to take.
+    pub omitted: bool,
     /// Whether the script ends here (§11.2).
     pub ends: bool,
 }
@@ -118,6 +121,7 @@ pub fn unmatched<'a>(
             own_transaction: false,
             retired: Vec::new(),
             released: Vec::new(),
+            omitted: false,
             ends: contradicts_every_required(inbound, &steps, leg),
         });
     };
@@ -126,6 +130,7 @@ pub fn unmatched<'a>(
         own_transaction: true,
         retired: Vec::new(),
         released: Vec::new(),
+        omitted: false,
         ends: false,
     };
     let (Some(status), Some(named)) = (inbound.status, names(charged.step)) else {

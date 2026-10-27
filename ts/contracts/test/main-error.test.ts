@@ -234,6 +234,33 @@ describe("mainErrorOf", () => {
         .toBe("died")
     })
 
+    it("never leads with an omitted 100 the accepted shape record at its step answers", () => {
+      const omitted: Bundle.Failure = {
+        failure: "trying-omitted",
+        step: "s13",
+        leg: "B",
+        arrived: { kind: "response", status: 487, reason: "Request Terminated", cseq_method: "INVITE", cseq: 2 },
+        after_ms: 2
+      }
+      const answeredOmission = bodyRow({
+        kind: "shape",
+        step: "s13",
+        signature: "shape:trying-omitted:response:100:INVITE",
+        name: "",
+        scope: "response:100:INVITE",
+        captured: ["100"],
+        replayed: ["487 after 2 ms"],
+        class: "accepted",
+        rule: "a-named-omission"
+      })
+      expect(mainErrorOf({
+        ...failed,
+        verdict: verdict([omitted]),
+        charged: [],
+        records: [answeredOmission, unlistedHeader]
+      })?.step).toBe("s22")
+    })
+
     it("leaves an unanswered death leading over a refusing record", () => {
       const elsewhere = { ...answeredDeath, step: "s9" }
       expect(mainErrorOf({

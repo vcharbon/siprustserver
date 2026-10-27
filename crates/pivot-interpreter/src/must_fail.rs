@@ -135,6 +135,7 @@ fn class(failure: &Failure) -> Class {
         // divergence makes expected.
         Failure::ExpectTimedOut { .. }
         | Failure::UnmatchedDatagram { .. }
+        | Failure::TryingOmitted { .. }
         | Failure::UnexpectedDatagram { .. }
         | Failure::DatagramAfterFlow { .. }
         | Failure::RetransmitCountMismatch { .. }

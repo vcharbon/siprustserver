@@ -72,6 +72,17 @@ export const UnmatchedDatagram = failure("unmatched-datagram", {
   reason: Schema.String,
   arrived: Arrived
 })
+/**
+ * The `100` to an INVITE the leg sent met by that transaction's final first
+ * (RFC 3261 §17.2.1): the step is retired as omitted and the final goes on to
+ * the step behind it. `after_ms` is the final's arrival from the INVITE's emission.
+ */
+export const TryingOmitted = failure("trying-omitted", {
+  step: Schema.String,
+  leg: Schema.String,
+  arrived: Arrived,
+  after_ms: Schema.Int
+})
 /** A datagram arrived on a leg with no armed expect at all. */
 export const UnexpectedDatagram = failure("unexpected-datagram", {
   leg: Schema.String,
@@ -231,6 +242,7 @@ export const Failure = Schema.Union([
   PlanRefused,
   ExpectTimedOut,
   UnmatchedDatagram,
+  TryingOmitted,
   UnexpectedDatagram,
   DatagramAfterFlow,
   FinalUnacknowledged,
