@@ -144,7 +144,7 @@ without its final or a dialog left open still fails the call.
 `just sweep` (nextest profile `sweep`), on the paused clock, one test per
 shape, incident and sync level (`failover_sweep::<shape>::<level>::<incident>`).
 A test past 30 s or a lane adding minutes to `just test` keeps it out of the
-default lane: the upstream sweep alone is about 45 CPU-minutes.
+default lane: the upstream sweep alone is about an hour of CPU.
 
 - **Shapes.** A catalogue of call shapes (`sweep::catalogue`), each a
   `SweepShape`: how the cluster decides the call and what the actor parties
@@ -155,9 +155,12 @@ default lane: the upstream sweep alone is about 45 CPU-minutes.
   replication), `Left` (the turn's effects sent) and `Applied` (the write
   applied at the backup; only for a turn that wrote). The harness holds the
   turn at the armed sub-point until the incident struck (`turn_points`).
-- **Incidents.** `failover_harness::Incident`: primary killed, backup
-  killed, split, split healed, stalled then killed, unbacked then killed. A
-  cell is named `<shape>/<level>/<incident>/t<k>-<point>`.
+- **Incidents.** `failover_harness::Incident`: primary killed, primary
+  killed unannounced (the proxy's probe reads it dead 2 s later, its endpoint
+  reads not ready 40 s later and leaves the slice 5 min later), primary rebooted (restarted at a new address
+  1 s later, readmitted once ready, it reclaims its calls), backup killed,
+  split, split healed, stalled then killed, unbacked then killed. A cell is
+  named `<shape>/<level>/<incident>/t<k>-<point>`.
 - **Verdict.** Every cell requires no leak on any node or in the limiter, an
   RFC-clean call the parties judge as their play declares, and one CDR, or
   two when the primary dies. The cell strikes its incident on the harness and

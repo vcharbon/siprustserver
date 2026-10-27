@@ -16,47 +16,191 @@
 # The Guaranteed cells of each test.
 guaranteed basic/applied/backup-killed 18
 guaranteed basic/applied/primary-killed 18
+guaranteed basic/applied/primary-killed-unannounced 18
+guaranteed basic/applied/primary-rebooted 18
+guaranteed cancel/applied/backup-killed 15
+guaranteed cancel/applied/primary-killed 15
+guaranteed cancel/applied/primary-killed-unannounced 15
+guaranteed cancel/applied/primary-rebooted 15
 guaranteed forked/applied/backup-killed 24
 guaranteed forked/applied/primary-killed 24
+guaranteed forked/applied/primary-killed-unannounced 24
+guaranteed forked/applied/primary-rebooted 24
 guaranteed info-x-bye/applied/backup-killed 18
 guaranteed info-x-bye/applied/primary-killed 18
+guaranteed info-x-bye/applied/primary-killed-unannounced 18
+guaranteed info-x-bye/applied/primary-rebooted 18
 guaranteed info/applied/backup-killed 24
 guaranteed info/applied/primary-killed 24
+guaranteed info/applied/primary-killed-unannounced 24
+guaranteed info/applied/primary-rebooted 24
 guaranteed keepalive/applied/backup-killed 57
 guaranteed keepalive/applied/primary-killed 57
+guaranteed keepalive/applied/primary-killed-unannounced 57
+guaranteed keepalive/applied/primary-rebooted 57
 guaranteed media-leg/applied/backup-killed 27
 guaranteed media-leg/applied/primary-killed 27
+guaranteed media-leg/applied/primary-killed-unannounced 27
+guaranteed media-leg/applied/primary-rebooted 27
 guaranteed prack/applied/backup-killed 24
 guaranteed prack/applied/primary-killed 24
+guaranteed prack/applied/primary-killed-unannounced 24
+guaranteed prack/applied/primary-rebooted 24
 guaranteed refer-x-bye/applied/backup-killed 27
 guaranteed refer-x-bye/applied/primary-killed 27
+guaranteed refer-x-bye/applied/primary-killed-unannounced 27
+guaranteed refer-x-bye/applied/primary-rebooted 27
 guaranteed refer/applied/backup-killed 45
 guaranteed refer/applied/primary-killed 45
+guaranteed refer/applied/primary-killed-unannounced 45
+guaranteed refer/applied/primary-rebooted 45
 guaranteed reinvite-x-bye/applied/backup-killed 18
 guaranteed reinvite-x-bye/applied/primary-killed 18
+guaranteed reinvite-x-bye/applied/primary-killed-unannounced 18
+guaranteed reinvite-x-bye/applied/primary-rebooted 18
 guaranteed reinvite/applied/backup-killed 27
 guaranteed reinvite/applied/primary-killed 27
+guaranteed reinvite/applied/primary-killed-unannounced 27
+guaranteed reinvite/applied/primary-rebooted 27
+guaranteed reject/applied/backup-killed 6
+guaranteed reject/applied/primary-killed 6
+guaranteed reject/applied/primary-killed-unannounced 6
+guaranteed reject/applied/primary-rebooted 6
 guaranteed update-x-bye/applied/backup-killed 18
 guaranteed update-x-bye/applied/primary-killed 18
+guaranteed update-x-bye/applied/primary-killed-unannounced 18
+guaranteed update-x-bye/applied/primary-rebooted 18
 guaranteed update/applied/backup-killed 24
 guaranteed update/applied/primary-killed 24
+guaranteed update/applied/primary-killed-unannounced 24
+guaranteed update/applied/primary-rebooted 24
 
 # applied: the Guaranteed cells that fire a row.
 basic/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+basic/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+cancel/applied/primary-killed-unannounced/t2-applied ADR-0055 §11  # guaranteed: W-kill-effects-lost, the backup holds bob's 180 and no takeover relays it to alice, who never rings and so never CANCELs
+cancel/applied/primary-killed-unannounced/t2-logged ADR-0055 §11  # guaranteed: W-kill-effects-lost, the backup holds bob's 180 and no takeover relays it to alice, who never rings and so never CANCELs
+cancel/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+cancel/applied/primary-killed/t2-applied ADR-0055 §11  # guaranteed: W-kill-effects-lost, the backup holds bob's 180 and no takeover relays it to alice, who never rings and so never CANCELs
+cancel/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+cancel/applied/primary-rebooted/t2-applied ADR-0055 §11  # guaranteed: W-kill-effects-lost, the backup holds bob's 180 and no takeover relays it to alice, who never rings and so never CANCELs
 forked/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+forked/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
 info-x-bye/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+info-x-bye/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
 info/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+info/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
 keepalive/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+keepalive/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
 media-leg/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+media-leg/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+prack/applied/primary-killed-unannounced/t2-applied ADR-0055 §11  # guaranteed: W-kill-effects-lost, unannounced: bob's reliable 183 is lost with the node and the test callee never repeats it (RFC 3262 §3), so nothing takes the call over
+prack/applied/primary-killed-unannounced/t2-logged ADR-0055 §11  # guaranteed: W-kill-effects-lost, unannounced: bob's reliable 183 is lost with the node and the test callee never repeats it (RFC 3262 §3), so nothing takes the call over
 prack/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+prack/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+refer-x-bye/applied/primary-killed-unannounced/t7-applied ADR-0055 §11  # guaranteed: W-kill-teardown-lost, the teardown the dead primary began is lost; a dialog is left to its timer; unannounced, nothing takes the call over
+refer-x-bye/applied/primary-killed-unannounced/t7-logged ADR-0055 §11  # guaranteed: W-kill-teardown-lost, the teardown the dead primary began is lost; a dialog is left to its timer; unannounced, nothing takes the call over
+refer-x-bye/applied/primary-killed-unannounced/t8-applied ADR-0055 §11  # guaranteed: W-kill-teardown-lost, the teardown the dead primary began is lost; a dialog is left to its timer; unannounced, nothing takes the call over
+refer-x-bye/applied/primary-killed-unannounced/t8-logged ADR-0055 §11  # guaranteed: W-kill-teardown-lost, the teardown the dead primary began is lost; a dialog is left to its timer; unannounced, nothing takes the call over
 refer-x-bye/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+refer-x-bye/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+refer/applied/primary-killed-unannounced/t5-applied ADR-0055 §11  # guaranteed: W-kill-answer-lost, an outside answer lost with the node; the parties wait for it; unannounced, nothing takes the call over
+refer/applied/primary-killed-unannounced/t6-applied ADR-0055 §11  # guaranteed: W-kill-effects-lost, the turn's effects lost with the node; the parties wait for them; unannounced, nothing takes the call over
+refer/applied/primary-killed-unannounced/t6-logged ADR-0055 §11  # guaranteed: W-kill-effects-lost, the turn's effects lost with the node; the parties wait for them; unannounced, nothing takes the call over
 refer/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
 refer/applied/primary-killed/t5-applied ADR-0055 §11  # guaranteed: W-kill-answer-lost, the transfer's outside answer lost with the node; alice waits for the merge
 refer/applied/primary-killed/t5-left ADR-0055 §11  # guaranteed: W-kill-answer-lost, the transfer's outside answer lost with the node; alice waits for the merge
 refer/applied/primary-killed/t6-logged ADR-0055 §11  # guaranteed: W-kill-effects-lost, the turn's effects lost with the node; alice waits for the merge
+refer/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+refer/applied/primary-rebooted/t6-logged ADR-0055 §11  # guaranteed: W-kill-effects-lost, the turn's effects lost with the node; alice waits for the merge
 reinvite-x-bye/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+reinvite-x-bye/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
 reinvite/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+reinvite/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+reject/applied/primary-killed-unannounced/t2-applied ADR-0055 §11  # guaranteed: W-kill-effects-lost, the backup holds bob's 486 and no takeover relays it to alice, who waits
+reject/applied/primary-killed-unannounced/t2-logged ADR-0055 §11  # guaranteed: W-kill-effects-lost, the backup holds bob's 486 and no takeover relays it to alice, who waits
+reject/applied/primary-killed/t2-applied ADR-0055 §11  # guaranteed: W-kill-effects-lost, the backup holds bob's 486 and no takeover relays it to alice, who waits
+reject/applied/primary-rebooted/t2-applied ADR-0055 §11  # guaranteed: W-kill-effects-lost, the backup holds bob's 486 and no takeover relays it to alice, who waits
 update-x-bye/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+update-x-bye/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
 update/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+update/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
 
-# off: no cell fails (seeded from the first run at `off`).
+# The cells that fail outright, at either level, with no row to take the
+# finding.
+basic/applied/primary-killed-unannounced/t1-applied ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+basic/applied/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+basic/off/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+cancel/applied/primary-killed-unannounced/t1-applied ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+cancel/applied/primary-killed-unannounced/t1-left ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+cancel/applied/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+cancel/applied/split-healed/t2-logged ADR-0055 §7  # the clean end of two diverged copies leaves leg a's dialogs with no own tag (model invariant own-tag-names-a-dialog)
+cancel/applied/stalled-killed/t2-left ADR-0055 §11  # the stale copy repeats the dead owner's CANCEL minutes later on its branch (§9.1); bob's 481, his CANCEL transaction long ended at Timer J, reads as a second final of one server transaction
+cancel/applied/stalled-killed/t3-logged ADR-0055 §11  # the stale copy repeats the dead owner's CANCEL minutes later on its branch (§9.1); bob's 481, his CANCEL transaction long ended at Timer J, reads as a second final of one server transaction
+cancel/off/primary-killed-unannounced/t1-applied ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+cancel/off/primary-killed-unannounced/t1-left ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+cancel/off/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+cancel/off/split-healed/t2-left ADR-0055 §7  # the clean end of two diverged copies leaves leg a's dialogs with no own tag (model invariant own-tag-names-a-dialog)
+cancel/off/split-healed/t2-logged ADR-0055 §7  # the clean end of two diverged copies leaves leg a's dialogs with no own tag (model invariant own-tag-names-a-dialog)
+cancel/off/stalled-killed/t3-left ADR-0055 §11  # the stale copy repeats the dead owner's CANCEL minutes later on its branch (§9.1); bob's 481, his CANCEL transaction long ended at Timer J, reads as a second final of one server transaction
+cancel/off/stalled-killed/t3-logged ADR-0055 §11  # the stale copy repeats the dead owner's CANCEL minutes later on its branch (§9.1); bob's 481, his CANCEL transaction long ended at Timer J, reads as a second final of one server transaction
+forked/applied/primary-killed-unannounced/t1-applied ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+forked/applied/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+forked/off/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+info-x-bye/applied/primary-killed-unannounced/t1-applied ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+info-x-bye/applied/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+info-x-bye/off/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+info/applied/primary-killed-unannounced/t1-applied ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+info/applied/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+info/off/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+keepalive/applied/primary-killed-unannounced/t1-applied ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+keepalive/applied/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+keepalive/off/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+media-leg/applied/primary-killed-unannounced/t1-applied ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+media-leg/applied/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+media-leg/off/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+prack/applied/primary-killed-unannounced/t1-applied ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+prack/applied/primary-killed-unannounced/t1-left ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+prack/applied/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+prack/off/primary-killed-unannounced/t1-applied ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+prack/off/primary-killed-unannounced/t1-left ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+prack/off/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+refer-x-bye/applied/primary-killed-unannounced/t1-applied ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+refer-x-bye/applied/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+refer-x-bye/applied/primary-killed-unannounced/t6-left ADR-0055 §11  # unannounced: nothing the parties repeat reaches the backup and nothing tells it before the force-delete 5 min later, so what the dead primary began waits and a party's own timer fires first
+refer-x-bye/applied/primary-killed-unannounced/t7-left ADR-0055 §11  # unannounced: nothing the parties repeat reaches the backup and nothing tells it before the force-delete 5 min later, so what the dead primary began waits and a party's own timer fires first
+refer-x-bye/off/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+refer-x-bye/off/primary-killed-unannounced/t5-applied ADR-0055 §11  # unannounced: nothing the parties repeat reaches the backup and nothing tells it before the force-delete 5 min later, so what the dead primary began waits and a party's own timer fires first
+refer-x-bye/off/primary-killed-unannounced/t6-applied ADR-0055 §11  # unannounced: nothing the parties repeat reaches the backup and nothing tells it before the force-delete 5 min later, so what the dead primary began waits and a party's own timer fires first
+refer-x-bye/off/primary-killed-unannounced/t7-applied ADR-0055 §11  # unannounced: nothing the parties repeat reaches the backup and nothing tells it before the force-delete 5 min later, so what the dead primary began waits and a party's own timer fires first
+refer-x-bye/off/primary-rebooted/t5-applied ADR-0055 §11  # the dead primary's teardown of the transfer is lost with the node; a party's own timer fires first and no row takes it
+refer/applied/primary-killed-unannounced/t1-applied ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+refer/applied/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+refer/applied/primary-killed-unannounced/t5-left ADR-0055 §11  # unannounced: nothing the parties repeat reaches the backup and nothing tells it before the force-delete 5 min later, so what the dead primary began waits and a party's own timer fires first
+refer/applied/primary-killed-unannounced/t5-logged ADR-0055 §11  # unannounced: nothing the parties repeat reaches the backup and nothing tells it before the force-delete 5 min later, so what the dead primary began waits and a party's own timer fires first
+refer/applied/primary-rebooted/t5-applied ADR-0055 §11  # the transfer's outside answer lost with the node; alice waits for the merge, and no row's predicate takes it
+refer/applied/primary-rebooted/t5-left ADR-0055 §11  # the transfer's outside answer lost with the node; alice waits for the merge, and no row's predicate takes it
+refer/applied/split-healed/t5-applied ADR-0055 §7  # the test callee answers the split-off copy's NOTIFY retransmission 481 from its dialog table, its dialog ended, instead of repeating the 200 of the completed server transaction (RFC 3261 §17.2.2)
+refer/applied/split-healed/t5-left ADR-0055 §7  # the test callee answers the split-off copy's NOTIFY retransmission 481 from its dialog table, its dialog ended, instead of repeating the 200 of the completed server transaction (RFC 3261 §17.2.2)
+refer/applied/split-healed/t6-logged ADR-0055 §7  # the test callee answers the split-off copy's NOTIFY retransmission 481 from its dialog table, its dialog ended, instead of repeating the 200 of the completed server transaction (RFC 3261 §17.2.2)
+refer/applied/split/t5-applied ADR-0055 §7  # the test callee answers the split-off copy's NOTIFY retransmission 481 from its dialog table, its dialog ended, instead of repeating the 200 of the completed server transaction (RFC 3261 §17.2.2)
+refer/applied/split/t5-left ADR-0055 §7  # the test callee answers the split-off copy's NOTIFY retransmission 481 from its dialog table, its dialog ended, instead of repeating the 200 of the completed server transaction (RFC 3261 §17.2.2)
+refer/applied/split/t6-logged ADR-0055 §7  # the test callee answers the split-off copy's NOTIFY retransmission 481 from its dialog table, its dialog ended, instead of repeating the 200 of the completed server transaction (RFC 3261 §17.2.2)
+refer/off/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+refer/off/primary-killed-unannounced/t5-left ADR-0055 §11  # unannounced: nothing the parties repeat reaches the backup and nothing tells it before the force-delete 5 min later, so what the dead primary began waits and a party's own timer fires first
+refer/off/primary-killed-unannounced/t5-logged ADR-0055 §11  # unannounced: nothing the parties repeat reaches the backup and nothing tells it before the force-delete 5 min later, so what the dead primary began waits and a party's own timer fires first
+reinvite-x-bye/applied/primary-killed-unannounced/t1-applied ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+reinvite-x-bye/applied/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+reinvite-x-bye/off/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+reinvite/applied/primary-killed-unannounced/t1-applied ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+reinvite/applied/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+reinvite/off/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+reject/applied/primary-killed-unannounced/t1-applied ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+reject/applied/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+reject/off/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+update-x-bye/applied/primary-killed-unannounced/t1-applied ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+update-x-bye/applied/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+update-x-bye/off/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+update/applied/primary-killed-unannounced/t1-applied ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+update/applied/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first
+update/off/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message takes the in-flight INVITE over — the caller's repeats reach the backup unanswered, or none follow her 100 — and nothing tells the backup before the force-delete 5 min later; her INVITE gives up first

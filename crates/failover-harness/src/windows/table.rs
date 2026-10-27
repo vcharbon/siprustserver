@@ -13,7 +13,8 @@ use super::unseen_rseq::{from_another_node, RULES as RSEQ_RULES};
 use super::{outcome, Kind, Opens, Row, Tier, Transitional, Witness};
 use crate::incident::Incident;
 use crate::incident::Incident::{
-    BackupKilled, PrimaryKilled, Split, SplitHealed, StalledKilled, UnbackedKilled,
+    BackupKilled, PrimaryKilled, PrimaryKilledUnannounced, PrimaryRebooted, Split, SplitHealed,
+    StalledKilled, UnbackedKilled,
 };
 use crate::turn_points::TurnPoint;
 use crate::{RULE_CSEQ_IN_DIALOG_ORDER, RULE_NO_CANCEL_AFTER_FINAL};
@@ -24,6 +25,17 @@ use b2bua::repl::SyncLevel;
 const TWO_COPIES: &[Incident] = &[Split, SplitHealed, StalledKilled];
 /// The rows of a split, healed or not.
 const SPLITS: &[Incident] = &[Split, SplitHealed];
+/// The rows of a kill of the primary, announced or not, rebooted or not.
+const PRIMARY_KILLS: &[Incident] = &[PrimaryKilled, PrimaryKilledUnannounced, PrimaryRebooted];
+/// The rows of every incident but a split.
+const NO_SPLIT: &[Incident] = &[
+    PrimaryKilled,
+    PrimaryKilledUnannounced,
+    PrimaryRebooted,
+    BackupKilled,
+    StalledKilled,
+    UnbackedKilled,
+];
 
 /// The cell `shape`/`level`/`incident`/t`turn`-`point`.
 const fn witness(
@@ -204,7 +216,7 @@ pub static TABLE: &[Row] = &[
     Row {
         id: "W-clean-end",
         tier: Tier::Degraded,
-        opens: Opens::any(&[PrimaryKilled, BackupKilled, StalledKilled, UnbackedKilled]),
+        opens: Opens::any(NO_SPLIT),
         covers: "a party the system under test ends cleanly drops her remaining goals",
         kind: Kind::GoalDrop,
         closes_when_over: false,
@@ -214,7 +226,7 @@ pub static TABLE: &[Row] = &[
     Row {
         id: "W-kill-cancel-answered",
         tier: Tier::Degraded,
-        opens: Opens::Incidents { always: &[UnbackedKilled], in_window: &[PrimaryKilled] },
+        opens: Opens::Incidents { always: &[UnbackedKilled], in_window: PRIMARY_KILLS },
         covers: "a copy's one CANCEL of a callee's INVITE the dead owner saw finally answered",
         kind: Kind::Rfc {
             rules: &[RULE_NO_CANCEL_AFTER_FINAL],
@@ -229,7 +241,7 @@ pub static TABLE: &[Row] = &[
         tier: Tier::Degraded,
         opens: Opens::Incidents {
             always: &[UnbackedKilled, StalledKilled],
-            in_window: &[PrimaryKilled],
+            in_window: PRIMARY_KILLS,
         },
         covers: "the clean end's BYE, or terminating NOTIFY, into a dialog the other owner \
                  already ended, closed by its 481, once per dialog",
@@ -244,17 +256,23 @@ pub static TABLE: &[Row] = &[
     Row {
         id: "W-kill-teardown-lost",
         tier: Tier::Degraded,
-        opens: Opens::any(&[PrimaryKilled]),
+        opens: Opens::any(PRIMARY_KILLS),
         covers: "a dialog left to its endpoint's own timer when the write of a teardown the dead \
                  primary began was not applied",
         kind: Kind::Outcome(outcome::teardown_lost),
         closes_when_over: false,
-        witness: None,
+        witness: witness(
+            "refer-x-bye",
+            SyncLevel::Off,
+            PrimaryKilledUnannounced,
+            7,
+            TurnPoint::Logged,
+        ),
     },
     Row {
         id: "W-kill-effects-lost",
         tier: Tier::Degraded,
-        opens: Opens::any(&[PrimaryKilled]),
+        opens: Opens::any(PRIMARY_KILLS),
         covers: "the effects of a turn taken on something no peer repeats, lost with the node: \
                  every dialog left to its endpoint's own timers",
         kind: Kind::Outcome(outcome::effects_lost),
@@ -264,7 +282,7 @@ pub static TABLE: &[Row] = &[
     Row {
         id: "W-kill-answer-lost",
         tier: Tier::Degraded,
-        opens: Opens::any(&[PrimaryKilled]),
+        opens: Opens::any(PRIMARY_KILLS),
         covers: "an outside service's answer lost with the dead node: the copy stays reactive and \
                  every dialog is left to its endpoint's own timers",
         kind: Kind::Outcome(outcome::answer_lost),
@@ -274,7 +292,7 @@ pub static TABLE: &[Row] = &[
     Row {
         id: "W-kill-cseq",
         tier: Tier::Degraded,
-        opens: Opens::Incidents { always: &[UnbackedKilled], in_window: &[PrimaryKilled] },
+        opens: Opens::Incidents { always: &[UnbackedKilled], in_window: PRIMARY_KILLS },
         covers: "a CSeq the dead primary sent before the backup applied the write, re-used once \
                  per dialog by a node without its record",
         kind: Kind::Rfc {
@@ -288,7 +306,7 @@ pub static TABLE: &[Row] = &[
     Row {
         id: "W-kill-rseq",
         tier: Tier::Degraded,
-        opens: Opens::Incidents { always: &[SplitHealed], in_window: &[PrimaryKilled] },
+        opens: Opens::Incidents { always: &[SplitHealed], in_window: PRIMARY_KILLS },
         covers: "a copy's reliable provisional under the dialog's derived tag whose RSeq cannot \
                  continue the dead primary's, once per dialog",
         kind: Kind::Rfc {
@@ -302,7 +320,7 @@ pub static TABLE: &[Row] = &[
     Row {
         id: "W-kill-non-2xx-after-2xx",
         tier: Tier::Degraded,
-        opens: Opens::in_window(&[PrimaryKilled]),
+        opens: Opens::in_window(PRIMARY_KILLS),
         covers: "a copy's non-2xx to a caller's INVITE the dead primary answered 2xx, which she \
                  discards",
         kind: Kind::Rfc {
@@ -366,7 +384,6 @@ mod tests {
         "W-cdr-split",
         "W-kill-cancel-answered",
         "W-kill-non-2xx-after-2xx",
-        "W-kill-teardown-lost",
         "W-split-early-bye",
         "W-stall-cancel-reason",
     ];

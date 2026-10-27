@@ -138,6 +138,35 @@ impl Cluster {
         self.node(survivor).simulate_peer_removed(victim);
     }
 
+    /// Kill `victim` unannounced (ADR-0031 case 3a): its process dies with its
+    /// memory, and neither the proxy nor any peer is told.
+    pub fn kill_unannounced(&mut self, victim: &str) {
+        self.fh.mark(victim, None, "crash", "kill (unannounced)");
+        self.node_mut(victim).crash();
+    }
+
+    /// Kill `victim` as the orchestrator deletes its pod (ADR-0031 case 2):
+    /// its process dies with its memory, the proxy reads it dead and its
+    /// endpoint leaves the slice, so its restart is published only once it is
+    /// readmitted.
+    pub fn kill_and_depart(&mut self, victim: &str) {
+        self.fh.mark(victim, None, "crash", "kill (pod deleted)");
+        self.node_mut(victim).crash();
+        self.proxy.set_health(victim, WorkerHealth::Dead);
+        self.fh.depart(victim);
+    }
+
+    /// Restart the killed `ordinal` empty, at a new incarnation and a new
+    /// address, as the orchestrator replaces a pod (ADR-0031 case 2). Nothing
+    /// publishes it yet: [`FailoverHarness::readmit`](crate::FailoverHarness::readmit)
+    /// does once it is ready. Returns its new address.
+    pub async fn reboot(&mut self, ordinal: &str) -> std::net::SocketAddr {
+        self.fh.mark(ordinal, None, "reboot", "restart empty, higher gen, new address");
+        let addr = self.node_mut(ordinal).reboot().await;
+        self.fh.note_worker_rebound(ordinal, addr);
+        addr
+    }
+
     /// Split the two owners of the placed call: the replication between them
     /// is cut and the proxy reads the primary dead, so the backup takes the
     /// call's traffic while the primary runs on (ADR-0055 §8).

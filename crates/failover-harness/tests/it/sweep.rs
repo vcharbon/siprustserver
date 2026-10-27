@@ -8,6 +8,8 @@ use failover_harness::sweep::catalogue::*;
 failover_harness::failover_sweep! {
     ratchet: concat!(env!("CARGO_MANIFEST_DIR"), "/failover-sweep.ratchet");
     basic => Basic,
+    cancel => Cancel,
+    reject => Reject,
     reinvite => Reinvite,
     update => Update,
     info => Info,

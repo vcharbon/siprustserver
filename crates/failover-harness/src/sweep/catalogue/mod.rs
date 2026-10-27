@@ -1,8 +1,8 @@
 //! The base catalogue of the sweep (ADR-0055 §11): the shapes every change to
-//! the HA layer is cut against — a plain call, a re-INVITE, an UPDATE, an INFO,
-//! reliable provisionals and their PRACK, a REFER with its NOTIFYs, a BYE
-//! crossing each in-dialog request, the B2BUA's keepalive, a forked answer and
-//! a media-server leg.
+//! the HA layer is cut against — a plain call, the caller's CANCEL, the
+//! callee's reject, a re-INVITE, an UPDATE, an INFO, reliable provisionals and
+//! their PRACK, a REFER with its NOTIFYs, a BYE crossing each in-dialog
+//! request, the B2BUA's keepalive, a forked answer and a media-server leg.
 
 mod plays;
 
@@ -59,6 +59,34 @@ impl SweepShape for Basic {
 
     fn scenario(&self) -> Box<dyn ActorScenario> {
         Box::new(callshapes::shapes::basic_call(default_binder()))
+    }
+}
+
+/// The caller's CANCEL once the callee rings (RFC 3261 §9.1): the callee's
+/// 487 ends the call unanswered.
+pub struct Cancel;
+
+impl SweepShape for Cancel {
+    fn id(&self) -> &'static str {
+        "cancel"
+    }
+
+    fn scenario(&self) -> Box<dyn ActorScenario> {
+        Box::new(callshapes::shapes::abandon_ringing(default_binder()))
+    }
+}
+
+/// The callee's non-2xx final to the INVITE (486), ACKed hop by hop (RFC 3261
+/// §17.1.1.3).
+pub struct Reject;
+
+impl SweepShape for Reject {
+    fn id(&self) -> &'static str {
+        "reject"
+    }
+
+    fn scenario(&self) -> Box<dyn ActorScenario> {
+        Box::new(callshapes::shapes::invite_reject(default_binder()))
     }
 }
 

@@ -7,6 +7,17 @@
 pub enum Incident {
     /// The primary dies; the proxy and the backup see it gone.
     PrimaryKilled,
+    /// The primary dies and nobody is told (ADR-0031 case 3): the proxy's
+    /// probe reads it dead 2 s later, its endpoint reads not ready but stays
+    /// in the slice 40 s later, and it leaves the slice only when the evicted
+    /// pod is force-deleted, 5 min later. Until then only a message reaching
+    /// the backup takes the call over.
+    PrimaryKilledUnannounced,
+    /// The primary's pod is deleted (ADR-0031 case 2): it dies, the proxy and
+    /// the backup see it gone, and it restarts one second later, empty, at a
+    /// new address. Once ready it is published again, the proxy reads it
+    /// alive, and it reclaims its calls from the backup.
+    PrimaryRebooted,
     /// The backup dies; the proxy and the primary see it gone.
     BackupKilled,
     /// The replication between the two owners is cut and the proxy reads the
@@ -24,8 +35,10 @@ pub enum Incident {
 
 impl Incident {
     /// Every incident, in lane order.
-    pub const ALL: [Incident; 6] = [
+    pub const ALL: [Incident; 8] = [
         Incident::PrimaryKilled,
+        Incident::PrimaryKilledUnannounced,
+        Incident::PrimaryRebooted,
         Incident::BackupKilled,
         Incident::Split,
         Incident::SplitHealed,
@@ -37,6 +50,8 @@ impl Incident {
     pub fn label(self) -> &'static str {
         match self {
             Incident::PrimaryKilled => "primary-killed",
+            Incident::PrimaryKilledUnannounced => "primary-killed-unannounced",
+            Incident::PrimaryRebooted => "primary-rebooted",
             Incident::BackupKilled => "backup-killed",
             Incident::Split => "split",
             Incident::SplitHealed => "split-healed",
@@ -59,16 +74,28 @@ impl Incident {
     /// Whether the incident kills a node of a backed call outright: the only
     /// incidents whose cells may stand in the Guaranteed tier.
     pub fn kills(self) -> bool {
-        matches!(self, Incident::PrimaryKilled | Incident::BackupKilled)
+        self.kills_the_primary() || self == Incident::BackupKilled
+    }
+
+    /// Whether the incident kills the primary of a backed call outright: the
+    /// incidents that open the rows of a primary's kill.
+    pub fn kills_the_primary(self) -> bool {
+        matches!(
+            self,
+            Incident::PrimaryKilled
+                | Incident::PrimaryKilledUnannounced
+                | Incident::PrimaryRebooted
+        )
     }
 
     /// The CDRs the incident leaves a call before any window widens the count
     /// (ADR-0055 §5): one, or one or two when the primary dies, the dead
     /// primary's and the survivor's.
     pub fn cdrs(self) -> std::ops::RangeInclusive<usize> {
-        match self {
-            Incident::PrimaryKilled => 1..=2,
-            _ => 1..=1,
+        if self.kills_the_primary() {
+            1..=2
+        } else {
+            1..=1
         }
     }
 

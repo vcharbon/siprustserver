@@ -18,6 +18,7 @@ use scenario_harness::actor::{
 use scenario_harness::realcall::CallCtx;
 use sip_net_testkit::CaptureIndex;
 
+use super::aftermath::Aftermath;
 use super::parties::Parties;
 use super::SweepShape;
 use crate::cluster::Cluster;
@@ -29,11 +30,6 @@ use crate::windows::{self, CutFacts, Kind, Row, Strike, Tier};
 /// The worker every cell places its call on; the other is its backup.
 pub const PRIMARY: &str = "b1";
 
-/// How long a split lasts before it heals ([`Incident::SplitHealed`]).
-const HEAL_AFTER: Duration = Duration::from_secs(1);
-/// How long the replication stalls before the primary dies
-/// ([`Incident::StalledKilled`]): past the hold's cap, and the §17.2.1 bound.
-const STALL_FOR: Duration = Duration::from_millis(300);
 /// The step the cell's clock moves by once the parties are done, answering
 /// what the cluster still sends between steps.
 const SETTLE_STEP: Duration = Duration::from_millis(200);
@@ -100,15 +96,10 @@ pub async fn run_cell(
     let ctx = CallCtx::new();
     let run = run_actor_scenario_observed(&*scenario, &env, &ctx);
     tokio::pin!(run);
-    let heal = tokio::time::sleep(Duration::MAX);
-    tokio::pin!(heal);
-    let kill = tokio::time::sleep(Duration::MAX);
-    tokio::pin!(kill);
-    let mut kill_pending = false;
 
     let mut verdict = None;
     let mut struck = None;
-    let mut heal_pending = false;
+    let mut aftermath = Aftermath::default();
     let mut call_ref: Option<String> = None;
     let mut settled = Duration::ZERO;
     let mut was_clear = false;
@@ -124,22 +115,10 @@ pub async fn run_cell(
                     ctx.accept_clean_ends();
                 }
                 struck = Some(strike);
-                if cut.incident == Incident::SplitHealed {
-                    heal.as_mut().reset(tokio::time::Instant::now() + HEAL_AFTER);
-                    heal_pending = true;
-                }
-                if cut.incident == Incident::StalledKilled {
-                    kill.as_mut().reset(tokio::time::Instant::now() + STALL_FOR);
-                    kill_pending = true;
-                }
+                aftermath = Aftermath::of(cut.incident);
             }
-            () = &mut kill, if kill_pending => {
-                kill_pending = false;
-                kill_after_the_stall(&mut cluster, &placement);
-            }
-            () = &mut heal, if heal_pending => {
-                heal_pending = false;
-                cluster.heal(&placement);
+            () = tokio::time::sleep_until(aftermath.next_at()), if aftermath.pending() => {
+                aftermath.act(&mut cluster, &placement).await;
             }
             v = &mut run, if verdict.is_none() => {
                 verdict = Some(v);
@@ -149,7 +128,7 @@ pub async fn run_cell(
                 settled += SETTLE_STEP;
                 let call = call_ref.get_or_insert_with(|| first_call(&cluster, name));
                 let clear = cluster.is_clear_of(call).await;
-                let pending = heal_pending || kill_pending;
+                let pending = aftermath.pending();
                 // A cluster clear for a whole step: what a party sent as the
                 // cluster forgot the call (a hop ACK, a stray's answer) has
                 // landed.
@@ -289,6 +268,14 @@ fn strike(cluster: &mut Cluster, placement: &Placement, cut: Cut, held: HeldTurn
             cluster.kill(&placement.primary, &placement.backup);
             Some(placement.primary.as_str())
         }
+        Incident::PrimaryRebooted => {
+            cluster.kill_and_depart(&placement.primary);
+            Some(placement.primary.as_str())
+        }
+        Incident::PrimaryKilledUnannounced => {
+            cluster.kill_unannounced(&placement.primary);
+            Some(placement.primary.as_str())
+        }
         Incident::StalledKilled => {
             cluster.fh.stall(&placement.primary, &placement.backup);
             None
@@ -309,21 +296,15 @@ fn strike(cluster: &mut Cluster, placement: &Placement, cut: Cut, held: HeldTurn
 }
 
 /// The strike of `cut`: inside the replication window, but for a kill of the
-/// primary at an applied sub-point past which the primary wrote no later
+/// primary, announced or not, at an applied sub-point past which the primary wrote no later
 /// turn — the backup then holds everything the dead primary did.
 fn strike_of(cluster: &Cluster, held: &HeldTurn, cut: Cut) -> Strike {
     let applied_and_no_later_write = cut.at.point == TurnPoint::Applied && {
         let turns = cluster.fh.turn_points().turns(&held.call_ref);
         !turns.iter().skip(cut.at.turn).any(|t| t.wrote)
     };
-    let in_window = !(cut.incident == Incident::PrimaryKilled && applied_and_no_later_write);
+    let in_window = !(cut.incident.kills_the_primary() && applied_and_no_later_write);
     Strike::Incident { incident: cut.incident, in_window }
-}
-
-/// The stalled primary dies, inside the replication window its stall opened.
-fn kill_after_the_stall(cluster: &mut Cluster, placement: &Placement) {
-    cluster.fh.strike(Incident::PrimaryKilled);
-    cluster.kill(&placement.primary, &placement.backup);
 }
 
 /// The first outcome row `strike` opens at `level` that accepts the parties'

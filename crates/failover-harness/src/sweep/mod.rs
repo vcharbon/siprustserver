@@ -23,6 +23,7 @@
 //! ratchet. Each test writes what its cells measured to
 //! `target/sweep-report/` ([`report`]).
 
+mod aftermath;
 mod answered;
 pub mod catalogue;
 mod cell;
@@ -265,6 +266,16 @@ macro_rules! failover_sweep {
             #[test]
             fn primary_killed() {
                 run(Incident::PrimaryKilled);
+            }
+
+            #[test]
+            fn primary_killed_unannounced() {
+                run(Incident::PrimaryKilledUnannounced);
+            }
+
+            #[test]
+            fn primary_rebooted() {
+                run(Incident::PrimaryRebooted);
             }
 
             #[test]

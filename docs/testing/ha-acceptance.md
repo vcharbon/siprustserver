@@ -10,7 +10,8 @@ is enforced and how to read a failure against it.
 ADR-0055 §11 states, per incident, what a call may be left with: the CDR count,
 what the parties may be left waiting for, and the **declared windows**, the
 only RFC deviations an incident may cause. Nothing else is accepted. The
-incidents are a primary killed, a backup killed, a split (healed or not), a
+incidents are a primary killed (announced to the peers, unannounced, or
+rebooted to reclaim its calls), a backup killed, a split (healed or not), a
 replication stall then a kill, and a call with no backup then a kill.
 
 Read a failure in this order:

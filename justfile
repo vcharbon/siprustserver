@@ -56,7 +56,7 @@ test-slow *filter:
 # The failover sweep (ADR-0055 §11): every shape of the catalogue cut at every
 # turn point by every incident at both sync levels, one test per shape,
 # incident and level, held to each crate's `failover-sweep.ratchet`. Its own
-# lane, out of `test`: about 45 CPU-minutes. Optional filter: `just sweep
+# lane, out of `test`: about an hour of CPU. Optional filter: `just sweep
 # reinvite`.
 sweep filter='':
     cargo nextest run --workspace -P sweep --no-tests=fail {{ filter }}

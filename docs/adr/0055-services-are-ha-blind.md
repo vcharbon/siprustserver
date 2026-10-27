@@ -489,14 +489,23 @@ the re-anchor deadband of each other.
   word. These words have no SIP or domain meaning there. No allowlist.
 - **A failover sweep** in `failover-harness`, on the paused clock, in a lane
   of its own: one test per shape, incident and sync level. Every shape
-  of a catalogue (re-INVITE, UPDATE, REFER with its NOTIFYs, INFO, PRACK, a
-  BYE crossing each, the keepalive, a forked answer, a media-server leg) is
+  of a catalogue (the caller's CANCEL, the callee's reject, re-INVITE, UPDATE,
+  REFER with its NOTIFYs, INFO, PRACK, a BYE crossing each, the keepalive, a
+  forked answer, a media-server leg) is
   cut at every turn point, each split into write in the change log, effect
   left and write applied at the backup, by these incidents, at `applied` and
   at `off`:
   - primary killed, backup killed: each cell ends with an RFC-clean, fully
     terminated call, one CDR, full cleanup; a cell killing the primary may
     leave two (the dead primary's and the survivor's, §5), never none;
+  - primary killed unannounced (ADR-0031 case 3): the proxy's probe reads it
+    dead 2 s later, its endpoint reads not ready but stays in the slice 40 s
+    later, and leaves it when the evicted pod is force-deleted 5 min later;
+    until then only a message reaching the backup takes the call over; judged
+    as a kill of the primary;
+  - primary killed and rebooted (ADR-0031 case 2): restarted empty at a new
+    address 1 s later, published once ready, it reclaims its calls from the
+    backup; judged as a kill of the primary;
   - split, healed or not: judged like a split that never heals below;
   - replication stalled past the cap of §3, then a kill: judged like a split
     (user ruling), on leaks, cleanup and the CDR count — one or two (the

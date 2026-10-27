@@ -1524,8 +1524,9 @@ _Avoid_: "safe-point" (the transparent matrix's quiescent states, ADR-0013).
 
 **Failover sweep**:
 Every shape of a catalogue cut at every turn point by each sweep incident
-(primary killed, backup killed, split, split then healed, stalled then killed,
-unbacked then killed), at each replication sync level, one test per shape,
+(primary killed, primary killed unannounced, primary killed then rebooted,
+backup killed, split, split then healed, stalled then killed, unbacked then
+killed), at each replication sync level, one test per shape,
 incident and level. Each cell must end with nothing left on any node and an
 RFC-clean, fully terminated call the parties accept, with one CDR or, when the
 primary dies, two; what an incident may cause beyond that is the **window
