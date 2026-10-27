@@ -259,6 +259,15 @@ describe("mainErrorOf", () => {
         charged: [],
         records: [answeredOmission, unlistedHeader]
       })?.step).toBe("s22")
+
+      // Another passing shape record at that step states no omission, and answers none.
+      const otherShape = { ...answeredOmission, signature: "shape:extra-message:487", scope: "", captured: ["extra-message:487"], replayed: [] }
+      expect(mainErrorOf({
+        ...failed,
+        verdict: verdict([omitted]),
+        charged: [],
+        records: [otherShape, unlistedHeader]
+      })?.rule).toBe("trying-omitted")
     })
 
     it("leaves an unanswered death leading over a refusing record", () => {

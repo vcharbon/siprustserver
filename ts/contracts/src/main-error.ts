@@ -257,10 +257,20 @@ const answerStep = (failure: Bundle.Failure): string | undefined => {
   return undefined
 }
 
-/** Whether a passing shape record answers `failure` at its step: a difference a lane rule accepted. */
+/** The signature prefix of the record that states an omitted 100, the one record that answers it. */
+const OMITTED_RECORD = "shape:trying-omitted:"
+
+/**
+ * Whether a passing shape record answers `failure` at its step: a difference a
+ * lane rule accepted. An omitted 100 is answered by its own omission record
+ * alone, as the bless reads it.
+ */
 const answered = (failure: Bundle.Failure, records: ReadonlyArray<Records.ConfrontationRecord>): boolean => {
   const at = answerStep(failure)
-  return at !== undefined && records.some((r) => r.kind === "shape" && r.step === at && Records.recordPasses(r))
+  const states = (r: Records.ConfrontationRecord): boolean =>
+    failure.failure !== "trying-omitted" || r.signature.startsWith(OMITTED_RECORD)
+  return at !== undefined &&
+    records.some((r) => r.kind === "shape" && r.step === at && Records.recordPasses(r) && states(r))
 }
 
 /** A non-body record no rule accepts: its class, its step, the rule naming it and its signature. */

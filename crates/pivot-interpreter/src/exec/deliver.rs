@@ -360,7 +360,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                     closest.discriminator,
                     if retired.is_empty() { "released" } else { "retired" }
                 );
-                self.instance.recording().renote(leg, seq, &note);
+                self.instance.recording().add_note(leg, seq, &note);
             }
             self.settle_blocks(now);
         }

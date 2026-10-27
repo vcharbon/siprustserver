@@ -53,7 +53,6 @@ async fn a_final_sent_at_once_stands_in_for_the_100_and_goes_on_to_its_own_step(
 
     assert_settled_bundle(&outcome, &dir);
     let (reinvite, final_) = reinvite_and_final(&outcome);
-    let after_ms = (final_.at_us - reinvite.at_us) / 1000;
     assert_eq!(
         outcome.verdict.failures,
         [Failure::TryingOmitted {
@@ -65,7 +64,9 @@ async fn a_final_sent_at_once_stands_in_for_the_100_and_goes_on_to_its_own_step(
                 cseq_method: "INVITE".into(),
                 cseq: 1,
             },
-            after_ms,
+            // The demo system answers this re-INVITE 200 ms of virtual time
+            // after it left.
+            after_ms: 200,
         }],
         "the omission is the one difference, named: {:#?}",
         outcome.verdict
@@ -124,6 +125,12 @@ async fn a_final_that_stood_in_for_the_100_is_held_to_the_status_its_step_names(
     );
     assert_eq!(outcome.verdict.retired, ["s13", "s14"], "{:#?}", outcome.verdict);
     assert!(outcome.verdict.abandoned.is_none(), "{:#?}", outcome.verdict.abandoned);
+    let (_, final_) = reinvite_and_final(&outcome);
+    let note = final_.note.as_deref().unwrap_or_default();
+    assert!(
+        note.contains("s13 retired as omitted") && note.contains("s14 retired"),
+        "the final's note keeps the omission beside its own step's refusal: {final_:#?}"
+    );
     let b = &outcome.recording.legs()["B"];
     let ack = b.iter().find(|m| m.dir == Dir::Out && text(m).starts_with("ACK ")).unwrap();
     assert_eq!(ack.step.as_deref(), Some("s15"), "{ack:#?}");

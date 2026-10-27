@@ -3260,11 +3260,12 @@ Its whole job:
    charged ends the transaction and RETIRES the expect (a required one; an
    `optional` is released, and so is every tolerated absence armed on that
    transaction), the verdict listing it under `retired`; a block member is
-   charged but never retired. A final on the leg's own INVITE transaction
-   meeting a required `100` stands in for it (RFC 3261 §17.2.1: the server
-   transaction sends 100 only when its TU does not answer within 200 ms): the
+   charged but never retired. A final that is the first response on the leg's
+   own INVITE transaction and meets a required `100` stands in for it (RFC 3261
+   §17.2.1: the server transaction sends 100 only when its TU does not answer
+   within 200 ms) where retiring the 100 arms an expect of that transaction: the
    step is retired as omitted, the verdict names it `trying-omitted`, and the
-   final is offered to the step behind. The one status an expect takes besides its own:
+   final is offered to that expect. The one status an expect takes besides its own:
    200 for 481 or 481 for 200 on a CANCEL the leg sent after its INVITE's
    non-2xx final reached it (§6.7d), a match and no failure.
 5. **Lane scoping** (§9.1): evaluate every check, and record a CLASSIFIED one as

@@ -317,3 +317,34 @@ fn an_answer_arms_beside_an_armed_alt() {
     cursor.complete("s2");
     assert_eq!(cursor.frontier(), ["s3", "s4", "s5"], "the INVITE's 487 is refused");
 }
+
+/// Retiring a 100 hands its INVITE's final on only where an expect of that
+/// same transaction arms behind it. A CANCEL the leg has still to send stands
+/// between the 100 and the INVITE's 487, and a retired expect holds that 487
+/// back (§6.7c), so nothing of the transaction would take the final.
+#[test]
+fn retiring_a_100_arms_its_transaction_only_where_an_answer_of_it_stands_next() {
+    let p = plan(&format!(
+        "[{},{},{},{},{}]",
+        send("s1", "A", "INVITE"),
+        answer("s2", "A", 100, "INVITE"),
+        send("s3", "A", "CANCEL"),
+        answer("s4", "A", 200, "CANCEL"),
+        answer("s5", "A", 487, "INVITE")
+    ));
+    let mut cursor = Cursor::new(&p);
+    cursor.complete("s1");
+    assert!(!cursor.retiring_arms_its_transaction("s2"), "{:?}", cursor.frontier());
+
+    let p = plan(&format!(
+        "[{},{},{},{}]",
+        send("s1", "A", "INVITE"),
+        answer("s2", "A", 100, "INVITE"),
+        answer("s3", "A", 487, "INVITE"),
+        send("s4", "A", "ACK")
+    ));
+    let mut cursor = Cursor::new(&p);
+    cursor.complete("s1");
+    assert!(cursor.retiring_arms_its_transaction("s2"));
+    assert_eq!(cursor.frontier(), ["s2"], "the probe left the cursor as it was");
+}

@@ -69,6 +69,28 @@ impl<'p> Cursor<'p> {
         Some(opened.id.as_str())
     }
 
+    /// Whether retiring `step`, an expect on a transaction its leg opened, arms
+    /// another expect waiting on that same transaction: whether a final the
+    /// step was charged with can still be taken by a step of its own.
+    pub fn retiring_arms_its_transaction(&self, step: &str) -> bool {
+        let Some(compiled) = self.plan.step(step) else { return false };
+        let Some(opener) = self.opening_send(step) else { return false };
+        let Discriminator::Response { cseq_method: Some(method), .. } = &compiled.discriminator
+        else {
+            return false;
+        };
+        let method = Method::from_wire(method);
+        let mut after = self.clone();
+        if !after.retire(step) {
+            return false;
+        }
+        after.frontier().iter().filter_map(|id| self.plan.step(id)).any(|s| {
+            s.leg == compiled.leg
+                && answers(s, &method).is_some()
+                && after.opening_send(&s.id) == Some(opener)
+        })
+    }
+
     /// The last send of `method` before `step` on its leg, and every step of
     /// the leg standing between the two, in leg order.
     fn opener_along(

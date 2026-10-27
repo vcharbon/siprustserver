@@ -142,6 +142,20 @@ impl Recording {
         }
     }
 
+    /// Add a note to one recorded arrival, after the note it already carries:
+    /// a datagram the run decided two things about keeps both.
+    pub fn add_note(&self, leg: &str, seq: u64, note: &str) {
+        let mut log = self.log.lock().expect("the recording lock outlives its critical sections");
+        if let Some(entry) =
+            log.by_leg.get_mut(leg).and_then(|l| l.iter_mut().find(|m| m.seq == seq))
+        {
+            entry.note = Some(match entry.note.take() {
+                Some(first) => format!("{first}; {note}"),
+                None => note.to_string(),
+            });
+        }
+    }
+
     /// The most recently recorded sequence number on `leg`.
     pub fn last_seq(&self, leg: &str) -> Option<u64> {
         let log = self.log.lock().expect("the recording lock outlives its critical sections");

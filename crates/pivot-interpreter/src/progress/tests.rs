@@ -407,9 +407,10 @@ fn reinvited() -> Vec<RecordedMessage> {
 }
 
 /// RFC 3261 §17.2.1: an INVITE server transaction sends 100 only when its TU
-/// does not answer within 200 ms. A final on the INVITE's own transaction
-/// meeting the armed 100 retires it as OMITTED, and the run goes on: the final
-/// is the step behind's to take, so nothing here ends the script.
+/// does not answer within 200 ms. The first response on the INVITE's own
+/// transaction, a final, meeting the armed 100 retires it as one it may stand
+/// in for; the end stated is a retired provisional's, which the runner does
+/// not take where it hands the final on.
 #[test]
 fn a_final_meeting_the_100_of_its_own_invite_transaction_omits_it() {
     let leg = reinvited();
@@ -423,8 +424,8 @@ fn a_final_meeting_the_100_of_its_own_invite_transaction_omits_it() {
     .expect("armed");
     assert_eq!((u.charged.id.as_str(), u.own_transaction), ("s13", true));
     assert_eq!(ids(&u.retired), ["s13"]);
-    assert!(u.omitted, "the final stood in for the 100");
-    assert!(!u.ends, "the final goes on to the step behind");
+    assert!(u.omitted, "the final may stand in for the 100");
+    assert!(u.ends, "a retired provisional's end, where no omission is taken");
 
     // A 2xx stands in for it exactly as a reject does.
     let u = unmatched(
@@ -434,7 +435,48 @@ fn a_final_meeting_the_100_of_its_own_invite_transaction_omits_it() {
         true,
     )
     .expect("armed");
-    assert!(u.omitted && !u.ends);
+    assert!(u.omitted);
+}
+
+/// A provisional on the transaction ahead of its final means the server
+/// transaction did not answer at once: the 18x was charged on the 100 and the
+/// final omits nothing, so the retired provisional ends the script as before.
+#[test]
+fn a_final_after_a_ringing_provisional_omits_no_100() {
+    let mut leg = reinvited();
+    leg.extend(claimed_ladder(&[(Dir::In, response(180, "2 INVITE"), None)]));
+    let steps = [expects("s13", 100, Some("INVITE"), false)];
+    let u = unmatched(
+        &arrival(&response(200, "2 INVITE")),
+        &opened(&steps, &[Some("s12")]),
+        &leg,
+        true,
+    )
+    .expect("armed");
+    assert_eq!(ids(&u.retired), ["s13"]);
+    assert!(!u.omitted, "the 180 says the server transaction did not answer at once");
+    assert!(u.ends);
+}
+
+/// The delay of an answer is measured from the FIRST emission of its own
+/// request: not a retransmission of it, not another transaction of the
+/// method, not a request the leg received in between.
+#[test]
+fn an_answer_s_delay_is_measured_from_its_request_s_first_emission() {
+    let recording = Recording::new();
+    recording.declare("A");
+    for (dir, at_us, raw) in [
+        (Dir::Out, 100_000, INVITE.to_string()),
+        (Dir::In, 900_000, request("BYE", "3 BYE")),
+        (Dir::Out, 1_000_000, sent("INVITE", 2)),
+        (Dir::Out, 1_020_000, sent("INVITE", 2)),
+    ] {
+        recording.push("A", dir, at_us, raw, None, None);
+    }
+    let leg = recording.legs().remove("A").expect("the leg was recorded");
+    let final_ = arrival(&response(487, "2 INVITE"));
+    assert_eq!(answered_after_ms(&leg, &final_, 1_037_000), Some(37));
+    assert_eq!(answered_after_ms(&leg, &arrival(&response(487, "9 INVITE")), 1_037_000), None);
 }
 
 /// A final for ANOTHER INVITE transaction omits nothing: the 100 the leg waits

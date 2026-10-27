@@ -13,8 +13,11 @@ use crate::progress;
 impl<'a, 'p> Runner<'a, 'p> {
     /// Retire `step`, the `100` the final `inbound` stood in for, release the
     /// tolerated absences armed on its transaction, and name the omission with
-    /// the final's arrival measured from the INVITE's emission. `false`, and
-    /// nothing done, where the step is not retirable.
+    /// the final's arrival measured from the INVITE's first emission.
+    ///
+    /// `false`, and nothing done, unless retiring the step arms another expect
+    /// of that transaction to take the final and the leg's recording holds the
+    /// INVITE: the arrival is then charged as any refused final.
     ///
     /// `ladder` is the leg's recording with the final in it, `seq` the final's
     /// place there.
@@ -28,6 +31,16 @@ impl<'a, 'p> Runner<'a, 'p> {
         released: &[String],
     ) -> bool {
         let now = Instant::now();
+        if !self.instance.cursor().retiring_arms_its_transaction(&step.id) {
+            return false;
+        }
+        let arrived_us = ladder
+            .iter()
+            .find(|recorded| Some(recorded.seq) == seq)
+            .map_or_else(|| self.now_us(), |recorded| recorded.at_us);
+        let Some(after_ms) = progress::answered_after_ms(ladder, inbound, arrived_us) else {
+            return false;
+        };
         if !self.instance.retire_step(&step.id) {
             return false;
         }
@@ -37,16 +50,11 @@ impl<'a, 'p> Runner<'a, 'p> {
                 self.completed_at.insert(id.clone(), now);
             }
         }
-        let arrived_us = ladder
-            .iter()
-            .find(|recorded| Some(recorded.seq) == seq)
-            .map_or_else(|| self.now_us(), |recorded| recorded.at_us);
-        let sent_us = progress::sent_at(ladder, inbound).unwrap_or(arrived_us);
         self.instance.fail(Failure::TryingOmitted {
             step: step.id.clone(),
             leg: leg.to_string(),
             arrived: inbound.arrived(),
-            after_ms: arrived_us.saturating_sub(sent_us) / 1000,
+            after_ms,
         });
         if let Some(seq) = seq {
             let note = format!(
@@ -55,7 +63,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                  omitted",
                 step.id, step.id
             );
-            self.instance.recording().renote(leg, seq, &note);
+            self.instance.recording().add_note(leg, seq, &note);
         }
         self.settle_blocks(now);
         true
