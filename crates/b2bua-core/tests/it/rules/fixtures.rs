@@ -374,3 +374,16 @@ pub(super) fn call_with_retained_answered_2xx() -> call::Call {
 pub(super) fn answered_obligation() -> call::Obligation {
     call::Obligation::AckOf2xx { leg: "a".into(), dialog_tag: "btag".into(), cseq: 1 }
 }
+
+pub(super) fn exec_on<'a>(
+    call: &'a call::Call,
+    event: &'a CallEvent,
+    source_leg_id: &'a str,
+    config: &'a B2buaConfig,
+    id_gen: &'a mut TurnScope,
+    actions: &[RuleAction],
+) -> HandlerResult {
+    let mut exec = executor(config, id_gen);
+    let ctx = context(call, event, source_leg_id, config);
+    exec.execute(actions, call, &ctx)
+}

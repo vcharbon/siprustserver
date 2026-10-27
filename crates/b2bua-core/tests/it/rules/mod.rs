@@ -1,6 +1,8 @@
-//! Rule-engine unit tests: matcher ranking + overrides, invariant enforcement,
-//! and a representative default-rule's action output — pinned at the rule seam
-//! without a full SUT.
+//! The rule tests, one module per concern: outcome tests drive turns through
+//! the turn driver; selection and matcher tests read a call through the one
+//! context builder, action-primitive tests run on the one executor builder,
+//! and the funnel and property tests hold over hand-built records
+//! ([`fixtures`]).
 
 use b2bua_core::config::B2buaConfig;
 use b2bua_core::effects::{BufferedObservabilityEffect, CriticalStateEffect, HandlerResult};

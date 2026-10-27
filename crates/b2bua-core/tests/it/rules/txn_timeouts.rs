@@ -2,6 +2,8 @@
 //! cancelling, ending or ended leg, and the timeout of a non-INVITE request
 //! record read by its origin and the method table (ADR-0055 §2).
 
+use b2bua_core::turn_driver::{Driver, Step};
+
 use super::fixtures::*;
 use super::*;
 use b2bua_core::rule_fixture::{context, Varied};
@@ -53,25 +55,21 @@ fn handled(
         .expect("a rule handles the timeout")
 }
 
+/// A pending b-leg whose CANCEL is in flight owes nothing to its dead INVITE
+/// transaction: the timeout resolves the leg locally — no /call/failure
+/// consult, no BeginTermination re-arm of the safety timer.
 #[test]
 fn invite_timeout_on_a_cancelling_leg_resolves_locally_without_consult() {
-    // A pending b-leg whose CANCEL is in flight owes nothing to its dead
-    // INVITE transaction: the timeout resolves the leg locally — no
-    // /call/failure consult, no BeginTermination re-arm of the safety timer.
-    let mut call = test_call();
-    call.callback_context = Some("cb".into());
-    call.state = CallModelState::Terminating;
-    let mut b = b_leg_pending();
-    cancel_sent(&mut b);
-    call = call::helpers::add_b_leg(call, b);
-    let actions = handle_timeout_result(&call, "b-1");
-    assert!(
-        matches!(
-            actions.as_slice(),
-            [RuleAction::TerminateLeg { leg_id, end: LegEnd::Abandon }] if leg_id == "b-1"
-        ),
-        "going-away leg resolves locally on its timeout, got {actions:?}",
-    );
+    let driver = Driver::new();
+    let mut call = crate::calls::ringing(&driver);
+    call.run([Step::AliceCancels]);
+    let turn = call.turned(Step::TimesOut("b-1", sip_message::Method::Invite));
+    assert_eq!(turn.rule, Some("handle-timeout"));
+    let record = call.call();
+    let consults = |t: &call::TimerEntry| matches!(t.timer_type(), TimerType::FailureAnswer { .. });
+    assert!(!record.timers.iter().any(consults), "no /call/failure consult is awaited");
+    let leg = call::helpers::find_leg(record, "b-1").expect("bob's leg");
+    assert!(call::helpers::leg_is_resolved(leg), "the leg resolves locally on its timeout");
 }
 
 /// The `handle-timeout` rule's output for a transaction timeout of `method`

@@ -46,19 +46,6 @@ fn in_dialog_info() -> SipRequest {
         .expect("an in-dialog INFO of the same dialog is complete")
 }
 
-fn exec_on<'a>(
-    call: &'a call::Call,
-    event: &'a CallEvent,
-    source_leg_id: &'a str,
-    config: &'a B2buaConfig,
-    id_gen: &'a mut TurnScope,
-    actions: &[RuleAction],
-) -> HandlerResult {
-    let mut exec = executor(config, id_gen);
-    let ctx = context(call, event, source_leg_id, config);
-    exec.execute(actions, call, &ctx)
-}
-
 /// The statuses `result` answered with, in order.
 fn answered(result: &HandlerResult) -> Vec<u16> {
     result

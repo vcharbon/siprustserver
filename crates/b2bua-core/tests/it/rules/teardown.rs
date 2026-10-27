@@ -27,43 +27,33 @@ fn a_2xx_the_cancel_beat_to_the_caller_leaves_her_no_dialog_to_bye() {
 }
 
 /// A caller's BYE while its INVITE is still pending (RFC 3261 §15: the early
-/// dialog a tagged provisional opened, the local tag on the a-dialog; the
-/// a-leg itself reads Trying until its answer) selects `early-dialog-bye`, never
-/// `relay-bye`: the BYE is answered 200, the pending INVITE 487 (§15.1.2), and
-/// the call terminates as a caller release. An a-leg whose INVITE already
-/// carries a final is not this rule's.
+/// dialog bob's relayed 180 opened; the a-leg itself reads Trying until its
+/// answer) is `early-dialog-bye`'s, never `relay-bye`'s: the BYE is answered
+/// 200, the pending INVITE 487 (§15.1.2), and the call terminates as a caller
+/// release. A BYE on an answered call is not this rule's.
 #[test]
 fn bye_on_the_early_a_dialog_selects_early_dialog_bye_with_487_and_termination() {
-    let call = call_with_early_a_dialog("btag");
-    let bye = in_dialog_request(sip_message::Method::Bye);
-    let event = CallEvent::sip(SipMessage::Request(bye), "127.0.0.1:5060".parse().unwrap());
-    let config = B2buaConfig::default();
-    let ctx = context(&call, &event, "a", &config);
-    let rules = default_rules();
-    let ranked = pick_ranked(&rules, &call, &ctx);
-    assert_eq!(ranked.first().map(|r| r.id), Some("early-dialog-bye"));
-    let actions = (ranked[0].handle)(&ctx).expect("the rule handles the BYE").actions;
-    let bye_ok = actions.iter().position(|a| matches!(a, RuleAction::Respond { status: 200, .. }));
-    let invite_487 =
-        actions.iter().position(|a| matches!(a, RuleAction::RespondToALeg { status: 487, .. }));
-    assert!(bye_ok < invite_487, "200 to the BYE, then 487 to the INVITE, got {actions:?}");
+    let driver = Driver::new();
+    let mut call = crate::calls::ringing(&driver);
+    let turn = call.turned(Step::Sends("a", sip_message::Method::Bye));
+    assert_eq!(turn.rule, Some("early-dialog-bye"));
+    let answers: Vec<(u16, String)> = turn
+        .responses_to("a")
+        .iter()
+        .map(|r| (r.status(), r.cseq().method().as_str().to_string()))
+        .collect();
+    assert_eq!(
+        answers,
+        [(200, "BYE".to_string()), (487, "INVITE".to_string())],
+        "200 to the BYE, then 487 to the INVITE"
+    );
+    let termination = call.call().termination.clone().expect("the call terminates");
+    assert_eq!(termination.cause, TerminationCause::RemoteBye);
+    assert_eq!(termination.by_leg.as_deref(), Some("a"), "a caller release");
 
-    let mut answered = call.clone();
-    *answered.a_leg.invite_final_sent_mut() = Some(487);
-    let ctx = context(&answered, &event, "a", &config);
-    let ranked = pick_ranked(&rules, &answered, &ctx);
-    assert_ne!(
-        ranked.first().map(|r| r.id),
-        Some("early-dialog-bye"),
-        "an INVITE that carries its final draws no second one"
-    );
-    assert!(
-        actions.iter().any(|a| matches!(
-            a,
-            RuleAction::BeginTermination { cause: TerminationCause::RemoteBye, by_leg: Some(l), .. } if l == "a"
-        )),
-        "a caller release, got {actions:?}",
-    );
+    let mut answered = crate::calls::bridged(&driver);
+    let turn = answered.turned(Step::Sends("a", sip_message::Method::Bye));
+    assert_ne!(turn.rule, Some("early-dialog-bye"), "an INVITE with its final draws no second");
 }
 
 /// The same BYE on a call already terminating (a b-leg's BYE ended it while

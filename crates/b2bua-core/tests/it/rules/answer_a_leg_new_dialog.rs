@@ -20,19 +20,6 @@ fn some_event() -> CallEvent {
     )
 }
 
-fn exec_on<'a>(
-    call: &'a call::Call,
-    event: &'a CallEvent,
-    source_leg_id: &'a str,
-    config: &'a B2buaConfig,
-    id_gen: &'a mut TurnScope,
-    actions: &[RuleAction],
-) -> HandlerResult {
-    let mut exec = executor(config, id_gen);
-    let ctx = context(call, event, source_leg_id, config);
-    exec.execute(actions, call, &ctx)
-}
-
 // The callee 200 answers the a-leg under a FRESH To-tag A2 ≠ the early A1:
 // the a-dialog local_tag is re-stamped to A2, the SDP-B rides the 200, the
 // answer SDP is cached for §13.3.1.4, and the a-leg is confirmed.

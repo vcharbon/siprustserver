@@ -69,17 +69,17 @@ fn a_non_2xx_beyond_the_record_is_acked_on_its_own_branch_and_the_call_ended() {
     assert_eq!(call.call().state, CallModelState::Terminating);
 }
 
-/// A late 488 to a re-INVITE the record holds answered: at the record's own
-/// number, so no evidence, and not the confirmed leg failing either.
+/// bob, a broken peer, sends a 488 to the re-INVITE he already answered 200:
+/// at the record's own number, so no evidence, and not the confirmed leg
+/// failing either — no rule claims it.
 #[test]
 fn a_non_2xx_that_is_no_evidence_is_not_the_confirmed_leg_failing() {
     let driver = Driver::new();
     let mut call = bridged(&driver);
     call.run([Step::Sends("a", Method::Invite), Step::AnswersSent("b-1", 200), Step::AliceAcks]);
-    let late = call.step(Step::AnswersLast("b-1", Method::Invite, 488));
-    let rule = late.turn().and_then(|t| t.rule);
-    assert_ne!(rule, Some("route-failure"), "a confirmed leg is not dialling");
-    assert_ne!(rule, Some("evidence-final"), "at the record's number: no evidence");
+    let late = call.turned(Step::AnswersLast("b-1", Method::Invite, 488));
+    assert_ne!(late.rule, Some("route-failure"), "a confirmed leg is not dialling");
+    assert_eq!(late.rule, None, "no rule claims it");
     assert_eq!(call.call().state, CallModelState::Active, "the call stays up");
 }
 

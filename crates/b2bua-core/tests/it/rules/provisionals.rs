@@ -94,9 +94,9 @@ fn a_bare_180_after_the_final_mints_no_mask_state() {
     );
 }
 
-/// The REFER machine's C leg repeats a 180 the referrer was already notified
-/// of: the NOTIFY is deduped and so is the CDR event — the leg's due (Early)
-/// still rides.
+/// The REFER machine's C leg rings twice with the same status: the referrer
+/// hears of no progress (RFC 3515 §3.10), the CDR accounts the status once,
+/// and the leg's due (Early) still rides.
 #[test]
 fn a_repeated_transfer_target_provisional_is_accounted_once() {
     let driver = Driver::new();
@@ -105,21 +105,17 @@ fn a_repeated_transfer_target_provisional_is_accounted_once() {
     call.run([
         Step::Sends("b-1", Method::Refer),
         Step::ReferAnswers { outcome: "allow", payload: target },
-        Step::Answers("b-2", 180),
     ]);
-    let accounted = call.call().cdr_events.len();
-    let turn = call.turned(Step::Answers("b-2", 180));
-    assert_eq!(turn.rule, Some("transfer-c-1xx-absorb"));
-    assert!(
-        turn.request_to("b-1", "NOTIFY").is_none(),
-        "the repeat draws no NOTIFY: {:?}",
-        turn.methods_to("b-1")
-    );
-    let repeated = &call.call().cdr_events[accounted..];
-    assert!(
-        !repeated.iter().any(|e| e.event_type == call::CdrEventType::Provisional),
-        "a repeat of a status is not accounted again: {repeated:?}"
-    );
+    let provisionals = |c: &call::Call| {
+        c.cdr_events.iter().filter(|e| e.event_type == call::CdrEventType::Provisional).count()
+    };
+    let before = provisionals(call.call());
+    for ring in 0..2 {
+        let turn = call.turned(Step::Answers("b-2", 180));
+        assert_eq!(turn.rule, Some("transfer-c-1xx-absorb"));
+        assert!(turn.request_to("b-1", "NOTIFY").is_none(), "ring {ring}: no NOTIFY of progress");
+    }
+    assert_eq!(provisionals(call.call()) - before, 1, "the status is accounted once");
     let leg = call::helpers::find_leg(call.call(), "b-2").expect("the target's leg");
     assert_eq!(leg.state(), LegState::Early, "the leg's due still rides");
 }
