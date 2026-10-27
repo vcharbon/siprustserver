@@ -6,8 +6,8 @@ use call::{Call, TimerType};
 use sip_message::{Method, SipMessage};
 
 use super::peers::{
-    address_of, callee_tag, line, method_body, method_lines, parsed, reliable, request, response,
-    Peers, ALICE, ALICE_TAG, BOB, CALL_ID,
+    address_of, callee_tag, contact_of, line, method_body, method_lines, parsed, reliable, request,
+    request_on, response, Peers, ALICE, ALICE_TAG, BOB, CALL_ID,
 };
 use crate::answer_deadline::CONSULT_CHANGE;
 
@@ -35,11 +35,20 @@ pub enum Step {
     /// The peer on the leg answers the last request of this method the stack
     /// sent it.
     AnswersLast(&'static str, Method, u16),
+    /// The peer on the leg answers the request of this method the stack sent
+    /// it, counted from its first (0).
+    AnswersHeard(&'static str, Method, usize, u16),
     /// The peer on the leg sends a request of this method on its dialog: an
     /// INVITE or an UPDATE carries an offer, a REFER a target (RFC 3515).
     Sends(&'static str, Method),
+    /// [`Step::Sends`] with no body: an INVITE or an UPDATE that offers
+    /// nothing.
+    SendsBare(&'static str, Method),
     /// alice's ACK of the 2xx to her last INVITE.
     AliceAcks,
+    /// alice's ACK of a non-2xx final to her first INVITE, on its branch
+    /// (RFC 3261 §17.1.1.3).
+    AliceAcksRefusal,
     /// alice's CANCEL of her INVITE, which the transaction layer answered.
     AliceCancels,
     /// A fire of the call's timer of this type, at the generation it holds.
@@ -80,7 +89,7 @@ pub(super) fn event_of(step: &Step, call: &Call, peers: &mut Peers) -> Option<Ar
         Step::AnswersWith(leg, status, lines) => {
             let extra = lines.iter().map(|(name, value)| line(name, value)).collect();
             let invite = peers.on(leg)?.dialled_by.as_ref()?;
-            sip(response(invite, *status, &callee_tag(leg), extra)?, leg)
+            sip(response(invite, leg, *status, &callee_tag(leg), extra)?, leg)
         }
         Step::AnswersReliably(leg, status) => {
             callee_final(peers, leg, *status, &callee_tag(leg), true)
@@ -89,17 +98,27 @@ pub(super) fn event_of(step: &Step, call: &Call, peers: &mut Peers) -> Option<Ar
         Step::ForkAnswersReliably(tag, status) => callee_final(peers, "b-1", *status, tag, true),
         Step::AnswersSent(leg, status) => {
             let req = peers.on(leg)?.last_heard()?;
-            sip(response(req, *status, &callee_tag(leg), Vec::new())?, leg)
+            sip(response(req, leg, *status, &callee_tag(leg), Vec::new())?, leg)
         }
         Step::AnswersLast(leg, method, status) => {
             let req = peers.on(leg)?.last_of(method)?;
-            sip(response(req, *status, &callee_tag(leg), Vec::new())?, leg)
+            sip(response(req, leg, *status, &callee_tag(leg), Vec::new())?, leg)
         }
-        Step::Sends(leg, method) => sends(call, peers, leg, method),
+        Step::AnswersHeard(leg, method, nth, status) => {
+            let req = peers.on(leg)?.heard.iter().filter(|r| r.method() == method).nth(*nth)?;
+            sip(response(req, leg, *status, &callee_tag(leg), Vec::new())?, leg)
+        }
+        Step::Sends(leg, method) => sends(call, peers, leg, method, method_body(method)),
+        Step::SendsBare(leg, method) => sends(call, peers, leg, method, ""),
         Step::AliceAcks => {
             let own = call.a_leg.own_tag.as_deref()?;
             let cseq = peers.on("a")?.invite_cseq;
             sip(request("ACK", cseq, ALICE, &alice_lines(own), ""), "a")
+        }
+        Step::AliceAcksRefusal => {
+            let own = call.a_leg.own_tag.as_deref()?;
+            let ack = request_on("ACK", 1, ALICE, "z9hG4bK-lane", &alice_lines(own), "");
+            sip(ack, "a")
         }
         Step::AliceCancels => {
             let event = CallEvent::Cancelled {
@@ -164,24 +183,31 @@ fn callee_final(
 ) -> Option<Arrival> {
     let invite = peers.on(leg)?.dialled_by.as_ref()?;
     let extra = if reliably { reliable() } else { Vec::new() };
-    sip(response(invite, status, tag, extra)?, leg)
+    sip(response(invite, leg, status, tag, extra)?, leg)
 }
 
 /// A request of `method` from the peer on `leg`, on its dialog.
-fn sends(call: &Call, peers: &mut Peers, leg: &str, method: &Method) -> Option<Arrival> {
-    let (src, contact, lines) = if leg == "a" {
-        let own = call.a_leg.own_tag.as_deref()?;
-        (ALICE, format!("sip:alice@{ALICE}"), alice_lines(own))
+fn sends(
+    call: &Call,
+    peers: &mut Peers,
+    leg: &str,
+    method: &Method,
+    body: &str,
+) -> Option<Arrival> {
+    let (src, lines) = if leg == "a" {
+        (ALICE, alice_lines(call.a_leg.own_tag.as_deref()?))
     } else {
-        (BOB, format!("sip:bob@{BOB}"), callee_lines(peers, leg)?)
+        (BOB, callee_lines(peers, leg)?)
     };
+    let contact = contact_of(leg);
     let peer = peers.on_mut(leg)?;
     peer.cseq += 1;
     if *method == Method::Invite {
         peer.invite_cseq = peer.cseq;
     }
-    let lines = format!("{lines}{}", method_lines(method, &contact));
-    sip(request(method.as_str(), peer.cseq, src, &lines, method_body(method)), leg)
+    let typed = if body.is_empty() { "" } else { "Content-Type: application/sdp\r\n" };
+    let lines = format!("{lines}{}{typed}", method_lines(method, &contact));
+    sip(request(method.as_str(), peer.cseq, src, &lines, body), leg)
 }
 
 /// The dialog lines of alice's requests, the stack's tag `own` toward her.

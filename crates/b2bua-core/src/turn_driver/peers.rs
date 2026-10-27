@@ -121,9 +121,22 @@ pub fn address_of(leg: &str) -> Option<SocketAddr> {
 
 /// A request of `method` from `src`, its lines `lines` before the body.
 pub fn request(method: &str, cseq: u32, src: &str, lines: &str, body: &str) -> Vec<u8> {
+    let branch = format!("z9hG4bK-lane-{method}-{cseq}");
+    request_on(method, cseq, src, &branch, lines, body)
+}
+
+/// [`request`] under the Via branch `branch`.
+pub fn request_on(
+    method: &str,
+    cseq: u32,
+    src: &str,
+    branch: &str,
+    lines: &str,
+    body: &str,
+) -> Vec<u8> {
     format!(
         "{method} sip:svc@10.0.0.1:5060 SIP/2.0\r\n\
-         Via: SIP/2.0/UDP {src};branch=z9hG4bK-lane-{method}-{cseq}\r\n\
+         Via: SIP/2.0/UDP {src};branch={branch}\r\n\
          Max-Forwards: 70\r\n\
          {lines}\
          CSeq: {cseq} {method}\r\n\
@@ -133,13 +146,12 @@ pub fn request(method: &str, cseq: u32, src: &str, lines: &str, body: &str) -> V
     .into_bytes()
 }
 
-/// The lines a request of `method` carries beyond its dialog's, from the
-/// peer reached at `contact`: a target, and what the method requires.
+/// The lines a request of `method` carries beyond its dialog's and its
+/// body's, from the peer reached at `contact`: a target, and what the method
+/// requires.
 pub fn method_lines(method: &Method, contact: &str) -> String {
     match method {
-        Method::Invite | Method::Update => {
-            format!("Contact: <{contact}>\r\nContent-Type: application/sdp\r\n")
-        }
+        Method::Invite | Method::Update => format!("Contact: <{contact}>\r\n"),
         Method::Refer => {
             format!("Contact: <{contact}>\r\nRefer-To: <sip:carol@127.0.0.1:5071>\r\n")
         }
@@ -160,16 +172,26 @@ pub fn method_body(method: &Method) -> &'static str {
     }
 }
 
-/// The response `status` to `req`, under the To-tag `tag` when it has none,
-/// a 2xx or a 1xx to an INVITE or an UPDATE carrying the answer.
+/// The response `status` to `req` from the peer on `leg`, under the To-tag
+/// `tag` when it has none: a 2xx or a 1xx to an INVITE or an UPDATE carries
+/// the answer, and one that creates or refreshes a dialog the peer's Contact
+/// (RFC 3261 §12.1.1, RFC 3311 §5.2, RFC 6665 §4.1.3).
 pub fn response(
     req: &SipRequest,
+    leg: &str,
     status: u16,
     tag: &str,
-    extra: Vec<SipHeader>,
+    mut extra: Vec<SipHeader>,
 ) -> Option<Vec<u8>> {
-    let answers = matches!(req.method(), Method::Invite | Method::Update)
+    let method = req.method();
+    let answers = matches!(method, Method::Invite | Method::Update)
         && ((200..300).contains(&status) || (180..200).contains(&status));
+    let targets =
+        matches!(method, Method::Invite | Method::Update | Method::Subscribe | Method::Refer)
+            && (101..300).contains(&status);
+    if targets {
+        extra.push(line("Contact", &format!("<{}>", contact_of(leg))));
+    }
     let opts = GenerateResponseOpts {
         to_tag: req.to().tag().is_none().then(|| tag.into()),
         body: if answers { SDP.into() } else { Vec::new() },
@@ -178,6 +200,15 @@ pub fn response(
         ..Default::default()
     };
     Some(generate_response(req, status, "Lane", &opts).ok()?.image().to_vec())
+}
+
+/// The Contact of the peer on `leg`.
+pub fn contact_of(leg: &str) -> String {
+    if leg == "a" {
+        format!("sip:alice@{ALICE}")
+    } else {
+        format!("sip:bob@{BOB}")
+    }
 }
 
 /// The lines making a provisional reliable (RFC 3262 §3).

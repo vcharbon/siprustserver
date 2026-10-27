@@ -12,13 +12,14 @@
 //! makes of a step (its answer, or a drop) and what the timer screen refuses
 //! are outcomes a test reads ([`Outcome`]). A lost write is the record falling
 //! back to an earlier landed one while the peers keep what they heard
-//! ([`Session::revert_to`]).
+//! ([`Session::lose`]).
 
 mod dial;
 mod peers;
 mod steps;
 mod turn;
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use b2bua_sdk::event::CallEvent;
@@ -54,6 +55,7 @@ pub struct Driver {
     rules: Vec<RuleDefinition>,
     obligations: ObligationSet,
     route: RouteDecision,
+    caller_offers: bool,
     caller_lines: Vec<(&'static str, &'static str)>,
 }
 
@@ -72,8 +74,15 @@ impl Driver {
             rules: default_rules(),
             obligations: ObligationSet::core(),
             route: route(),
+            caller_offers: true,
             caller_lines: Vec::new(),
         }
+    }
+
+    /// `self`, alice's INVITE carrying no offer.
+    pub fn with_offerless_caller(mut self) -> Self {
+        self.caller_offers = false;
+        self
     }
 
     /// `self`, alice's INVITE carrying the lines `lines` beside its own,
@@ -114,7 +123,7 @@ impl Driver {
 
     /// alice's INVITE, as the wire carries it.
     pub fn invite_text(&self) -> Vec<u8> {
-        alice_invite_text(&self.caller_lines)
+        alice_invite_text(self.caller_offers, &self.caller_lines)
     }
 
     /// alice's call, routed: its b-leg `b-1` dialled toward bob.
@@ -144,6 +153,7 @@ impl Driver {
             steps: 0,
             outcomes: Vec::new(),
             texts: Vec::new(),
+            lost: BTreeSet::new(),
         }))
     }
 }
@@ -160,6 +170,9 @@ pub struct Session<'d> {
     steps: u64,
     outcomes: Vec<Outcome>,
     texts: Vec<(usize, Vec<u8>)>,
+    /// The branches of the requests the lost turns sent: this node's
+    /// transaction layer holds no client transaction for them.
+    lost: BTreeSet<String>,
 }
 
 impl<'d> Session<'d> {
@@ -231,8 +244,26 @@ impl<'d> Session<'d> {
         self
     }
 
-    /// The record falls back to `record`, an earlier one this session landed,
-    /// as a write lost since leaves it; the peers keep what they heard.
+    /// Run `script` strictly on a copy that served the call, whose writes are
+    /// lost: the record falls back to the one it held before, the peers keep
+    /// what they heard, and no client transaction of those turns' requests is
+    /// this node's.
+    pub fn lose(&mut self, script: impl IntoIterator<Item = Step>) -> &mut Self {
+        let record = self.call.clone();
+        let from = self.outcomes.len();
+        self.run(script);
+        let sent = self.outcomes.iter().skip(from).filter_map(Outcome::turn);
+        for e in sent.flat_map(|t| t.result.effects.outbound.iter()) {
+            if let OutboundBody::Request(r) = &e.body {
+                self.lost.extend(r.top_via().branch().map(str::to_string));
+            }
+        }
+        self.call = record;
+        self
+    }
+
+    /// The record replaced by `record`, whatever this session landed: a
+    /// snapshot test's state no event sequence lands.
     pub fn revert_to(&mut self, record: Call) -> &mut Self {
         self.call = record;
         self
@@ -345,8 +376,9 @@ impl<'d> Session<'d> {
             source_leg_id: leg,
             direction: if leg == "a" { Direction::FromA } else { Direction::FromB },
             resolved: resolved.clone(),
-            // Every response a peer sends answers a request the stack sent.
-            matched_client_txn: steps::is_response(&event),
+            // A response matches a client transaction of this node unless
+            // the request it answers left on a lost turn.
+            matched_client_txn: steps::is_response(&event) && !self.lost_branch(&event),
             now_ms: self.now,
             owners: self.owners.clone(),
         };
@@ -356,6 +388,15 @@ impl<'d> Session<'d> {
             self.now,
         );
         Turn { result, rule: scope.handled_by, notes: scope.notes, resolved }
+    }
+}
+
+impl Session<'_> {
+    /// Whether `event` is a response to a request a lost turn sent.
+    fn lost_branch(&self, event: &CallEvent) -> bool {
+        let CallEvent::Sip { message, .. } = event else { return false };
+        let SipMessage::Response(resp) = message.as_ref() else { return false };
+        resp.top_via().branch().is_some_and(|b| self.lost.contains(b))
     }
 }
 
@@ -373,9 +414,10 @@ pub(super) fn landing(config: &B2buaConfig) -> Landing<'_> {
     }
 }
 
-/// alice's INVITE toward bob, with an offer, carrying `lines` after her
-/// Contact.
-fn alice_invite_text(lines: &[(&str, &str)]) -> Vec<u8> {
+/// alice's INVITE toward bob, with an offer when `offers`, carrying `lines`
+/// after her Contact.
+fn alice_invite_text(offers: bool, lines: &[(&str, &str)]) -> Vec<u8> {
+    let (typed, body) = if offers { ("Content-Type: application/sdp\r\n", SDP) } else { ("", "") };
     let stated: String = lines.iter().map(|(name, value)| format!("{name}: {value}\r\n")).collect();
     format!(
         "INVITE sip:bob@example.com SIP/2.0\r\n\
@@ -387,9 +429,8 @@ fn alice_invite_text(lines: &[(&str, &str)]) -> Vec<u8> {
          CSeq: 1 INVITE\r\n\
          Contact: <sip:alice@{ALICE}>\r\n\
          {stated}\
-         Content-Type: application/sdp\r\n\
-         Content-Length: {}\r\n\r\n{SDP}",
-        SDP.len()
+         {typed}Content-Length: {}\r\n\r\n{body}",
+        body.len()
     )
     .into_bytes()
 }

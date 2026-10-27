@@ -5,6 +5,7 @@
 //! `cargo nextest run --workspace -E 'package(=b2bua-core) & binary(it)' <module>::`.
 
 mod caller_tags;
+mod calls;
 mod ended_dialog_2xx_rules;
 mod evidence_rules;
 mod evidence_triggers;
@@ -13,6 +14,7 @@ mod lifecycle_transition_trace;
 mod media_leg_advertisement;
 mod rules;
 mod service_macro;
+mod services;
 mod timer_scope_rules;
 mod turn_lane;
 mod unheld_lane;
