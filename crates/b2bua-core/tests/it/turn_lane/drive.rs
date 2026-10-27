@@ -14,7 +14,7 @@ use b2bua_core::config::B2buaConfig;
 use b2bua_core::decision::route_fold::{self, Admitting};
 use b2bua_core::decision::{default_platform_features, BodyUpdate, RouteDecision, SipDestination};
 use b2bua_core::effects::{HandlerResult, OutboundBody};
-use b2bua_core::initial_invite::build_initial_call;
+use b2bua_core::initial_invite::{build_initial_call, reject_call};
 use b2bua_core::landing::{land, Landing};
 use b2bua_core::obligations::ObligationSet;
 use b2bua_core::rule_chain::{rule_chain_turn, timer_screen, Framework, TurnInput};
@@ -28,11 +28,11 @@ use call::features::{
     ReferFeature, Relay18xMessages, RelayFirst18xStrategy, RelayFirst18xTo180Feature,
 };
 use call::helpers::{response_origin, Resolved, ResponseFacts, ResponseOrigin};
-use call::{Call, CallModelState, Direction, TimerType};
+use call::{Call, CallModelState, Direction, TerminationCause, TimerType};
 use sip_ids::TurnIds;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::parser::custom::CustomParser;
-use sip_message::{Method, SipHeader, SipMessage, SipParser, SipRequest};
+use sip_message::{Method, SipHeader, SipMessage, SipParser, SipRequest, SipResponse};
 use wire_mutations::{mutate, Mutation};
 
 /// The instant every turn runs at.
@@ -213,9 +213,10 @@ pub fn dialled_with(setup: Setup) -> Dialled {
 #[derive(Debug)]
 pub enum Dialling {
     /// The call is never born: its record does not rebuild the INVITE
-    /// (ADR-0052 §11), or the INVITE carries no From tag (RFC 3261 §8.1.1.3).
+    /// (ADR-0052 §11).
     Refused,
-    /// The call's final, as the turn landed it: the route was refused.
+    /// The call's final, as the turn landed it: the INVITE carries no From
+    /// tag (RFC 3261 §8.1.1.3), or the route was refused.
     Final(Box<HandlerResult>),
     /// bob's leg dialled.
     Dialled(Box<Dialled>),
@@ -228,9 +229,11 @@ impl std::fmt::Debug for Dialled {
 }
 
 /// `invite` from alice folded through `route` as the shell's initial turn
-/// folds it: the call built, its record's rebuild of the INVITE, the route
-/// applied up to its admit and admitted, the turn finalized, its obligations
-/// enforced, its lifecycle delivered and the turn landed.
+/// folds it: the call built, its record's rebuild of the INVITE, the call
+/// refused 400 without a From tag or the route applied up to its admit and
+/// admitted, the turn finalized, its obligations enforced, its lifecycle
+/// delivered and the turn landed. The trace intake and the services' seeds
+/// are left out: the lane runs no tracing and no service.
 pub fn dial(invite: &SipRequest, route: RouteDecision) -> Dialling {
     let config = config();
     let rules = default_rules();
@@ -239,15 +242,19 @@ pub fn dial(invite: &SipRequest, route: RouteDecision) -> Dialling {
     let mut turn = TurnScope::of(TurnIds::fixed(0));
     let call = build_initial_call(invite, src, &config, &mut turn.ids, 0);
     let Ok(caller) = rebuild_a_leg_invite(&call.a_leg_invite) else { return Dialling::Refused };
-    if call.a_leg_invite.from_tag.is_empty() {
-        return Dialling::Refused;
-    }
     let born = call.clone();
     let ids = &mut turn.ids;
-    let routed = match route_fold::up_to_admit(call, route, &caller, &config, ids, 0, 0) {
-        Admitting::Final(result) => *result,
-        Admitting::Admit(admitting) => {
-            route_fold::admitted(*admitting, &caller, &config, owners, ids, 0, 0)
+    let routed = if call.a_leg_invite.from_tag.is_empty() {
+        let reason = Some("Bad Request - missing From tag".into());
+        let advertisement = &config.minted_final_advertisement;
+        let cause = TerminationCause::Admission;
+        reject_call(call, &caller, 400, reason, None, &[], advertisement, ids, 0, cause)
+    } else {
+        match route_fold::up_to_admit(call, route, &caller, &config, ids, 0, 0) {
+            Admitting::Final(result) => *result,
+            Admitting::Admit(admitting) => {
+                route_fold::admitted(*admitting, &caller, &config, owners, ids, 0, 0)
+            }
         }
     };
     let obligations = ObligationSet::core();
@@ -641,7 +648,7 @@ fn run_from(
         turns: Vec::new(),
         raws: Vec::new(),
         sent: Vec::new(),
-        answered: Vec::new(),
+        responses: Vec::new(),
         defects: Vec::new(),
         call: call.clone(),
     };
@@ -681,8 +688,8 @@ fn run_from(
             OutboundBody::Request(r) => Some(format!("{} {}", e.leg_id.as_deref()?, r.method())),
             _ => None,
         }));
-        run.answered.extend(result.effects.outbound.iter().filter_map(|e| match &e.body {
-            OutboundBody::Response(r) => Some(format!("{} {}", e.leg_id.as_deref()?, r.status())),
+        run.responses.extend(result.effects.outbound.iter().filter_map(|e| match &e.body {
+            OutboundBody::Response(r) => Some((e.leg_id.clone()?, r.clone())),
             _ => None,
         }));
         run.defects.extend(
@@ -697,13 +704,13 @@ fn run_from(
 
 /// What a script's run left: each turn's result as text, the SIP text each
 /// SIP step reached the call as (by step), the requests the turns sent (`leg
-/// METHOD`) and the responses (`leg STATUS`), the defects its turns noted,
-/// and the call.
+/// METHOD`) and the responses, by leg, the defects its turns noted, and the
+/// call.
 pub struct Run {
     pub turns: Vec<String>,
     pub raws: Vec<(usize, Vec<u8>)>,
     pub sent: Vec<String>,
-    pub answered: Vec<String>,
+    pub responses: Vec<(String, SipResponse)>,
     pub defects: Vec<String>,
     pub call: Call,
 }

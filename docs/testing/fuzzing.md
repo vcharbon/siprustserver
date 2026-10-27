@@ -21,16 +21,16 @@ Ordered by what a panic costs (ADR-0051 §5): `just fuzz-list` prints them in th
 
 | Target | Drives | A panic there |
 |---|---|---|
-| `initial_invite` | the caller's INVITE folded through a decision's route as the shell's initial turn folds it (plain, stated headers, parts attached beside the caller's body, body replaced, a refused destination); the call is refused or its b-leg INVITE reads back and refreezes to itself, then a turn-lane script runs over the call twice and the runs agree | reaches every caller before any dialog exists |
+| `initial_invite` | the caller's INVITE folded through a decision's route as the shell's initial turn folds it (plain, stated headers, parts attached beside the caller's body, body replaced, a refused destination); the call is refused or its b-leg INVITE reads back and refreezes to itself, then a turn-lane script runs over the call twice and the runs agree | tears the call down as it is born; every caller reaches it before any dialog exists |
 | `b2bua_turn` | a turn-lane script over the call dialled under its setup (plain, a session timer, early media masked under each strategy, a transfer that goes through), one step's SIP text replaced by the input; two runs agree | tears the call down |
-| `unheld_response` | a final for a call this node does not hold, its via-extension signed with the cluster key: the ACK, BYE and rejecting answer built from its Contact, Record-Route and SDP; a verified final is answered as it is owed | panics on the worker's ingress, which every call's messages pass |
+| `unheld_response` | a final for a call this node does not hold, its via-extension signed with the cluster key: the ACK, BYE and rejecting answer built from its Contact, Record-Route and SDP; a verified final is answered as it is owed | panics in the per-call queue the response is dispatched to |
 | `sdp_answer` | every SDP read, answer and restatement of the message lane's probe, over two descriptions | tears the call down (the answer is built in a turn) |
+| `worker_probe` | the health probe reading a worker's OPTIONS answer whose status and header lines (`X-Overload`, `X-Readiness`, `X-Incarnation`) are the input, then a caller's INVITE routed on what it read | exits the proxy process: its runner ends when the probe does |
+| `overload_value` | lines read as `X-Overload` and `X-Readiness` values, each payload fed to the load observer a probe interval apart; a payload that reads is in range | exits the proxy process: its runner ends when the probe does |
 | `proxy_datagram` | one proxy core on the simulated fabric, every name resolved in-process, the input sent twice from a seed's peer | restarts the recv loop every call shares |
 | `proxy_variants` | `proxy_datagram` on the rig's variants: the self-gate closed, no worker alive, one worker down, two faces, names that resolve to nothing | restarts the recv loop every call shares |
-| `worker_probe` | the health probe reading a worker's OPTIONS answer whose status and header lines (`X-Overload`, `X-Readiness`, `X-Incarnation`) are the input, then a caller's INVITE routed on what it read | ends the health probe, whose worker view every routing decision reads |
 | `repl_frame` | the replication stream reader and frame decoder; a decoded frame writes back to itself | restarts the replication task |
 | `call_snapshot` | the call body decode; a decoded call writes back to itself | restarts the replication task |
-| `overload_value` | lines read as `X-Overload` and `X-Readiness` values, each payload fed to the load observer a probe interval apart; a payload that reads is in range | ends the health probe |
 | `message_roundtrip` | every entry point of the message lane's probe, and parse → render → parse: the rendering reads back to itself and passes the write check | drops one datagram (contained) |
 | `multipart` | a multipart body under its boundary, read and composed again | drops one datagram |
 | `credentials` | each line as each header of the authentication family; the rendering reads back to itself and passes the write check | drops one datagram |

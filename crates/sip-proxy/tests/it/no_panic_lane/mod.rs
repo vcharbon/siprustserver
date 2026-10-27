@@ -18,8 +18,9 @@
 //!
 //! - [`every_seed_survives_every_variant`] (default lane): every seed,
 //!   unmutated, on every variant;
-//! - [`refusing_variants_answer_the_invite`] (default lane): the proxy
-//!   answers the caller's INVITE itself where no worker may take it;
+//! - [`every_variant_reaches_its_path`] (default lane): each variant reaches
+//!   the path it exists for — the proxy's own refusal, both faces, the
+//!   other owner, a negative entry;
 //! - [`a_probe_answer_feeds_the_observer`] (default lane): each seed answer
 //!   of the probe is read and routed on;
 //!
@@ -48,8 +49,11 @@ mod report;
 mod rig;
 mod seeds;
 
+use std::sync::Arc;
+
 use rig::{Peer, Variant};
 use sip_proxy::load_observer::EluBand;
+use sip_proxy::ProxyMetrics;
 
 /// Cases of the proptest property.
 const CASES: u32 = 1024;
@@ -84,23 +88,75 @@ fn every_seed_survives_every_variant() {
     });
 }
 
-/// Where its self-gate is closed or no worker is alive, the proxy answers the
-/// caller's INVITE itself, and a second face carries it on to a worker.
+/// What the rig of `variant` did with `datagrams`, sent in order: each
+/// datagram a peer received, and the proxy's metrics.
+fn reach(
+    variant: Variant,
+    datagrams: &[(Peer, Vec<u8>)],
+) -> (Vec<(Peer, Vec<u8>)>, Arc<ProxyMetrics>) {
+    rig::runtime().block_on(async {
+        let rig = rig::Rig::with(variant).await;
+        let mut received = Vec::new();
+        for (from, datagram) in datagrams {
+            rig.send(*from, datagram).await;
+            for peer in [Peer::Caller, Peer::WorkerA, Peer::WorkerB, Peer::Callee] {
+                received.extend(rig.drain(peer).into_iter().map(|d| (peer, d)));
+            }
+        }
+        (received, rig.metrics.clone())
+    })
+}
+
+fn seed(variant: Variant, name: &str) -> seeds::Seed {
+    let found = seeds::all_on(variant).into_iter().find(|s| s.name == name);
+    found.unwrap_or_else(|| panic!("seed {name}"))
+}
+
+/// Each variant reaches the path it exists for: the proxy answers the
+/// caller's INVITE itself where its self-gate is closed or no worker is
+/// alive; a dual-face proxy record-routes the INVITE on both faces; a
+/// callee's 200 for a worker that is down reaches the call's other owner;
+/// a name that resolves to nothing is held as a negative entry.
 #[test]
-fn refusing_variants_answer_the_invite() {
+fn every_variant_reaches_its_path() {
     on_lane_stack(|| {
-        for variant in [Variant::GateClosed, Variant::NoWorker, Variant::DualFace] {
-            let reached = rig::runtime().block_on(async {
-                let rig = rig::Rig::with(variant).await;
-                rig.send(Peer::Caller, &seeds::caller_invite()).await;
-                let answered =
-                    rig.drain(Peer::Caller).iter().any(|d| d.starts_with(b"SIP/2.0 503"));
-                let workers = [Peer::WorkerA, Peer::WorkerB];
-                let forwarded = workers.iter().any(|w| !rig.drain(*w).is_empty());
-                (answered, forwarded)
-            });
-            let expected = (variant != Variant::DualFace, variant == Variant::DualFace);
-            assert_eq!(reached, expected, "{variant:?}: (refused, forwarded)");
+        let invite = vec![(Peer::Caller, seeds::caller_invite())];
+        for variant in [Variant::GateClosed, Variant::NoWorker] {
+            let (received, _) = reach(variant, &invite);
+            let refused =
+                received.iter().any(|(p, d)| *p == Peer::Caller && d.starts_with(b"SIP/2.0 503"));
+            let forwarded =
+                received.iter().any(|(p, _)| matches!(p, Peer::WorkerA | Peer::WorkerB));
+            assert!(refused && !forwarded, "{variant:?}: {received:?}");
+        }
+
+        let (received, _) = reach(Variant::DualFace, &invite);
+        let at_worker = received.iter().find(|(p, _)| matches!(p, Peer::WorkerA | Peer::WorkerB));
+        let at_worker = String::from_utf8_lossy(&at_worker.expect("the INVITE reaches a worker").1)
+            .into_owned();
+        let routes: Vec<&str> =
+            at_worker.lines().filter(|l| l.starts_with("Record-Route:")).collect();
+        let faces = [rig::PROXY, rig::PROXY_INTERNAL].map(|(host, port)| format!("{host}:{port}"));
+        assert!(faces.iter().all(|f| routes.iter().any(|r| r.contains(f.as_str()))), "{routes:?}");
+
+        let down = Variant::WorkerDown(Peer::WorkerA);
+        let answered = seed(down, "resp/200-callee");
+        let sent: Vec<(Peer, Vec<u8>)> =
+            answered.before.into_iter().chain([(answered.from, answered.bytes)]).collect();
+        let (received, _) = reach(down, &sent);
+        let to_backup =
+            received.iter().any(|(p, d)| *p == Peer::WorkerB && d.starts_with(b"SIP/2.0 200"));
+        assert!(to_backup, "the 200 reaches the other owner: {received:?}");
+
+        for (variant, name, outcome) in [
+            (Variant::Plain, "req/worker-invite-named", "resolved"),
+            (Variant::ResolverGaps, "req/worker-invite-named", "resolved"),
+            (Variant::ResolverGaps, "req/worker-invite-unnamed", "dropped_negative"),
+        ] {
+            let named = seed(variant, name);
+            let twice = vec![(named.from, named.bytes.clone()), (named.from, named.bytes)];
+            let (_, metrics) = reach(variant, &twice);
+            assert!(metrics.named_send_count(outcome) > 0, "{variant:?} {name}: {outcome}");
         }
     });
 }

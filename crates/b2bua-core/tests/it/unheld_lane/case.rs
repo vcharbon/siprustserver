@@ -1,8 +1,10 @@
 //! One case of the unheld-response lane: a datagram read as a response to a
 //! request of ours for a call this node does not hold, answered as the shell
-//! answers it (ADR-0055 §4, §12). A final to an INVITE whose via-extension
-//! verifies is owed its answer whatever else it carries: a 2xx with a
-//! Contact its ACK and BYE, a non-2xx naming a readable Request-URI its ACK.
+//! answers it (ADR-0055 §4, §12): nothing for one on this node's own Via,
+//! whose request its own transaction absorbed. A final to an INVITE another
+//! node sent, whose via-extension verifies, is owed its answer whatever else
+//! it carries: a 2xx with a Contact its ACK and BYE, a non-2xx naming a
+//! readable Request-URI its ACK.
 
 use b2bua_core::config::B2buaConfig;
 use b2bua_core::effects::OutboundSipEffect;
@@ -35,6 +37,9 @@ pub fn case(raw: &[u8]) -> Vec<OutboundSipEffect> {
         return Vec::new();
     };
     let config = config();
+    if resp.top_via().host_port() == (config.sip_local_ip.as_str(), config.sip_local_port) {
+        return Vec::new();
+    }
     let src = ("10.0.0.5".to_string(), 5080);
     let sent = answer_unheld_response(&config, &resp, src, &mut TurnIds::fixed(1), 0);
     let owed = (resp.cseq().method() == Method::Invite && resp.status() >= 200)

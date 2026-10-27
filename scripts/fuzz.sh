@@ -3,6 +3,8 @@
 # docs/testing/fuzzing.md says when to run it):
 #
 #   fuzz.sh list                                   the targets, in blast-radius order
+#   fuzz.sh build <target>                         build the target and the seed writer,
+#                                                  as `run` and `min` would first
 #   fuzz.sh run <target> [--minutes M] [--jobs J]  fuzz M minutes (default 10) on J
 #                                                  processes (default 1); crashes,
 #                                                  timeouts and OOMs are kept under
@@ -106,6 +108,13 @@ case "$cmd" in
         ;;
       *) usage ;;
     esac
+    ;;
+  build)
+    target="${1:-}"
+    [ -n "$target" ] || usage
+    known "$target"
+    in_fuzz cargo build --quiet --release -p fuzz-seeds
+    built "$target" >/dev/null
     ;;
   run)
     target="${1:-}"

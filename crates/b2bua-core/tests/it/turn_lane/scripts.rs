@@ -26,7 +26,7 @@ const RELIABLE_EARLY_MEDIA: &[(&str, &str)] =
 
 /// bob's 2xx taking part in alice's session timer (RFC 4028 §9).
 const TIMED_ANSWER: &[(&str, &str)] =
-    &[("Require", "timer"), ("Session-Expires", "1800;refresher=uac")];
+    &[("Require", "timer"), ("Session-Expires", "1800;refresher=uac"), ("Min-SE", "90")];
 
 /// The scripts every case starts from.
 pub fn scripts() -> Vec<Script> {

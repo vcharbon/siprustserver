@@ -2,8 +2,9 @@
 //! proxy so they carry what the proxy decodes: a caller's dialog through a
 //! worker (the INVITE, the worker's responses under the proxy's Via and its
 //! branch, the caller's ACK and BYE routed by the cookie the Record-Route
-//! carries, a CANCEL) and a worker-outbound INVITE with the callee's
-//! responses. Each seed names the unmutated datagrams sent before it. A
+//! carries, a CANCEL), a worker-outbound INVITE stating the call's other
+//! owner, with the callee's responses, and worker-outbound INVITEs toward
+//! names the resolver answers. Each seed names the unmutated datagrams sent before it. A
 //! variant's seeds are recorded on the rig its cookies and Record-Routes
 //! belong to ([`Variant::recorded_on`]). Addresses are documentation ranges
 //! (RFC 5737) and private worker ones.
@@ -108,18 +109,28 @@ fn caller_in_dialog(method: &str, seq: u32, route: &str, to_tag: &str) -> Vec<u8
     )
 }
 
-/// A worker's INVITE toward the callee, routed through the proxy at `face`.
-fn worker_invite(face: (&str, u16)) -> Vec<u8> {
+/// The worker owning a call beside worker a, as worker a's Via states it.
+pub const BACKUP: &str = "b2b-b";
+
+/// Callee names the resolver answers: one of even length, one of odd
+/// length, which the variant with gaps resolves to nothing.
+pub const NAMED: [&str; 2] = ["callee.example", "callee1.example"];
+
+/// Worker a's INVITE toward the callee at `host`, routed through the proxy
+/// at `face`, its Via stating worker b as the call's other owner.
+fn worker_invite(face: (&str, u16), host: &str, call: &str) -> Vec<u8> {
     let route = format!("Route: <sip:{}:{};lr>", face.0, face.1);
+    let via = format!("Via: SIP/2.0/UDP 10.0.0.2:5070;branch=z9hG4bK-worker-{call};bak={BACKUP}");
+    let call_id = format!("Call-ID: lane-proxy-{call}@10.0.0.2");
     message(
-        "INVITE sip:carol@192.0.2.30:5060 SIP/2.0",
+        &format!("INVITE sip:carol@{host}:5060 SIP/2.0"),
         &[
-            "Via: SIP/2.0/UDP 10.0.0.2:5070;branch=z9hG4bK-worker-1",
+            &via,
             "Max-Forwards: 70",
             &route,
             "From: <sip:b2b@10.0.0.2:5070>;tag=w1",
             "To: <sip:carol@example.org>",
-            "Call-ID: lane-proxy-out@10.0.0.2",
+            &call_id,
             "CSeq: 1 INVITE",
             "Contact: <sip:b2b@10.0.0.2:5070>",
             "Content-Type: application/sdp",
@@ -188,7 +199,7 @@ async fn record(variant: Variant) -> Vec<Seed> {
     let ack = caller_in_dialog("ACK", 1, &route, "b1");
     let bye = caller_in_dialog("BYE", 2, &route, "b1");
 
-    let outbound = worker_invite(face);
+    let outbound = worker_invite(face, "192.0.2.30", "out");
     rig.send(Peer::WorkerA, &outbound).await;
     let at_callee = rig.drain(Peer::Callee).pop().expect("the proxy forwards the outbound INVITE");
     let forwarded_out = parse_request(&at_callee);
@@ -218,5 +229,7 @@ async fn record(variant: Variant) -> Vec<Seed> {
         },
         Seed { before: after_outbound, ..seed("resp/200-callee", Peer::Callee, out_ok) },
         seed("req/options", Peer::Caller, caller_options()),
+        seed("req/worker-invite-named", Peer::WorkerA, worker_invite(face, NAMED[0], "even")),
+        seed("req/worker-invite-unnamed", Peer::WorkerA, worker_invite(face, NAMED[1], "odd")),
     ]
 }

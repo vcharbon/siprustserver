@@ -22,6 +22,8 @@
 //!   replacement the fuzz target drives replays the script it replaces in;
 //! - [`admit_reports_cross_their_event`] (default lane): an admit result's
 //!   event carries back the report it was built from;
+//! - [`a_session_timer_rides_both_legs`] (default lane): alice's session
+//!   timer reaches bob, and bob's taking part reaches alice;
 //! - [`every_decision_routes_the_caller_invite`] (default lane): alice's
 //!   INVITE under every decision of [`invite::decisions`] dials bob with what
 //!   the decision states, or is refused where its destination is;
@@ -106,7 +108,12 @@ fn every_script_turns_the_same_twice() {
                 );
             }
             if let Some(answers) = answers(name) {
-                assert_eq!(first.answered, answers, "{name}");
+                let answered: Vec<String> = first
+                    .responses
+                    .iter()
+                    .map(|(leg, r)| format!("{leg} {}", r.status()))
+                    .collect();
+                assert_eq!(answered, answers, "{name}");
             }
             let ended = matches!(
                 first.call.state,
@@ -206,6 +213,25 @@ fn structured_corpus_never_panics() {
                 }
             }
         }
+    });
+}
+
+/// alice's session timer rides the INVITE that dials bob, and bob's taking
+/// part reaches alice's 200 (RFC 4028 §8, §9).
+#[test]
+fn a_session_timer_rides_both_legs() {
+    on_lane_stack(|| {
+        let script = scripts().into_iter().find(|s| s.name == "session-timed");
+        let script = script.expect("the session-timed script");
+        let dialled = drive::dialled_with(script.setup);
+        let dialling = String::from_utf8_lossy(dialled.b_invite.image()).into_owned();
+        assert!(dialling.contains("Session-Expires: 1800"), "{dialling}");
+        let run = drive::run(&dialled, &script.steps, usize::MAX, &[]);
+        let answer = run.responses.iter().find(|(leg, r)| leg == "a" && r.status() == 200);
+        let answer = answer.expect("alice's 200");
+        let answer = String::from_utf8_lossy(answer.1.image()).into_owned();
+        assert!(answer.contains("Session-Expires: 1800"), "{answer}");
+        assert!(answer.contains("Require: timer"), "{answer}");
     });
 }
 
