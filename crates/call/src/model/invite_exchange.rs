@@ -43,6 +43,12 @@ pub struct InviteExchange {
     /// the ACK of its non-2xx too, which no transaction here re-sends
     /// (ADR-0047).
     pub emitted_ack: Option<RetainedEmission>,
+    /// Sent: the ACK the 2xx to the INVITE the dialog sent before this one
+    /// drew, as it left. A node re-sending this INVITE from the record sends
+    /// that ACK first: the peer sees no new INVITE while the one before is
+    /// unacknowledged (RFC 3261 §14.1, RFC 6026 §7.1), and a repeated ACK is
+    /// absorbed (§13.2.2.4).
+    pub ack_ahead: Option<RetainedEmission>,
     /// Sent: the CSeq, in the acknowledging peer's own sequence, of the ACK
     /// the INVITE's 2xx awaits from that peer: armed when the 2xx is taken,
     /// discharged by the ACK leaving — the peer's relayed, or one this stack
@@ -62,6 +68,11 @@ pub struct InviteExchange {
     /// here and so does the transaction layer's autonomous 487 to a CANCEL; a
     /// leg carrying one is never sent a second final (§17.2.1).
     pub final_sent: Option<u16>,
+    /// Received, on a leg's dialog-creating INVITE: the non-2xx final this
+    /// stack sent, as it left. A node serving the call from the record sends
+    /// it again until her ACK (RFC 3261 §17.2.1): the record may be ahead of
+    /// the wire.
+    pub rejection: Option<RetainedEmission>,
     /// Received, on a leg's dialog-creating INVITE: the 2xx this stack
     /// recorded that the transaction layer's autonomous 487 (its answer to the
     /// caller's CANCEL) pre-empted before it reached the wire (§9.2).

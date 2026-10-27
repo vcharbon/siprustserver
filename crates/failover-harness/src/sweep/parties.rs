@@ -106,8 +106,9 @@ impl Parties {
     /// holding no dialog does: an ACK takes no answer, a request in a dialog
     /// draws `481` (RFC 3261 §12.2.2, §15.1.2), any other request `200`. A
     /// PRACK naming a reliable provisional the party sent draws `200` (RFC
-    /// 3262 §3).
-    pub async fn answer_strays(&self) {
+    /// 3262 §3). Whether any request was answered.
+    pub async fn answer_strays(&self) -> bool {
+        let mut answered = false;
         for agent in self.all() {
             while let Some(inbound) = agent.take_queued_inbound().await {
                 let Inbound::Request(mut txn) = inbound else {
@@ -117,6 +118,7 @@ impl Parties {
                 if request.method().as_str() == "ACK" {
                     continue;
                 }
+                answered = true;
                 let prack = request.method().as_str() == "PRACK";
                 if prack && agent.prack_names_a_sent_provisional(request) {
                     txn.respond(200, "OK").await;
@@ -129,5 +131,6 @@ impl Parties {
                 }
             }
         }
+        answered
     }
 }

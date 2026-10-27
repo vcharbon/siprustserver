@@ -253,11 +253,13 @@ fn same_exchange(a: &InviteExchange, b: &InviteExchange) -> bool {
     let InviteExchange {
         ack_branch,
         emitted_ack,
+        ack_ahead,
         awaited_ack_cseq,
         answered_2xx,
         bye_behind_ack,
         dialled,
         final_sent,
+        rejection,
         answer_preempted,
     } = a;
     let same_2xx = |x: &Unacked2xx, y: &Unacked2xx| {
@@ -266,11 +268,13 @@ fn same_exchange(a: &InviteExchange, b: &InviteExchange) -> bool {
     };
     *ack_branch == b.ack_branch
         && *emitted_ack == b.emitted_ack
+        && *ack_ahead == b.ack_ahead
         && *awaited_ack_cseq == b.awaited_ack_cseq
         && same_option(answered_2xx, &b.answered_2xx, same_2xx)
         && *bye_behind_ack == b.bye_behind_ack
         && *dialled == b.dialled
         && *final_sent == b.final_sent
+        && *rejection == b.rejection
         && *answer_preempted == b.answer_preempted
 }
 

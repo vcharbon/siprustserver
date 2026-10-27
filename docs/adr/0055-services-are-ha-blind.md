@@ -141,7 +141,12 @@ RFC 5057 §5.1). An INVITE is never held: one a service asks to hold is answered
 
 Takeover seeds a transaction from every request record, any method, client or
 server, through one path. A seeded client transaction retransmits the request
-record's image under its branch (§17.1.2.2).
+record's image under its branch (§17.1.2.2). The record may be ahead of the
+wire (§3), so a seed delivers what it holds as sent: a re-sent INVITE goes
+behind the ACK of the dialog's 2xx before it, which its record carries
+(§14.1), and the caller's INVITE answered non-2xx is seeded Completed on the
+final its record keeps, sent on Timer G from the seed until her ACK
+(§17.2.1).
 
 ### 3. The replication write path
 
@@ -488,9 +493,11 @@ the re-anchor deadband of each other.
     terminated call, one CDR, full cleanup; a cell killing the primary may
     leave two (the dead primary's and the survivor's, §5), never none;
   - split, healed or not: judged like a split that never heals below;
-  - replication stalled past the cap of §3, then a kill: the call leaves one
-    CDR or two (the stalled primary's and the departure sweep's, §5), never
-    none;
+  - replication stalled past the cap of §3, then a kill: judged like a split
+    (user ruling), on leaks, cleanup and the CDR count — one or two (the
+    stalled primary's and the departure sweep's, §5), never none: the stale
+    copy contradicts what the stalled primary released at the cap as a
+    split's other copy would;
   - a backlog over the high-water mark, or a backup at its memory ceiling, then
     a kill: a call with no backup is lost as on a non-HA B2BUA, its cell
     leaving one CDR or none.
@@ -524,14 +531,16 @@ the re-anchor deadband of each other.
   leaked resource (the call ends on every side, full cleanup, the limiter
   released), in a declared degraded mode. These windows are declared, nothing
   else:
-  - a split, healed or not, its cells judging leaks, cleanup and the CDR
-    count only (none to two unhealed, one or two healed), never the parties'
-    verdict (user ruling): what two
-    acting copies send — the stale copy's requests into a dialog the other
-    copy ended, each closed by the 481 it draws; one copy's CANCEL of an
-    INVITE the other copy saw answered, and its repeats after the heal; one
-    copy's non-2xx after the final the other copy sent the caller, which she
-    discards, and its repeats; one copy's BYE of a caller dialog it holds
+  - a split, healed or not, and a stall past the cap then a kill, their
+    cells judging leaks, cleanup and the CDR count only (none to two
+    unhealed, one or two healed or stalled), never the parties' verdict
+    (user ruling): what two acting copies, or a stale copy and what the
+    stalled primary released at the cap, send — the stale copy's requests
+    into a dialog the other copy ended, each closed by the 481 it draws; one
+    copy's CANCEL of an INVITE the other copy saw answered, and its repeats
+    after the heal; one copy's non-2xx after the final the other copy sent
+    the caller, under whatever To-tag, which she discards, and its repeats;
+    one copy's BYE of a caller dialog it holds
     early, which the other copy answered; two BYEs of one dialog at one CSeq;
     a CSeq one copy re-uses after the other sent it;
   - a kill (user ruling): a copy's one CANCEL of a callee's INVITE the dead
@@ -557,11 +566,12 @@ the re-anchor deadband of each other.
     is not in this window: under `applied` the message that stops its sender
     repeating it waits for the write (§3);
   - a kill of the primary once the backup holds the write of a turn that sent
-    a request to an outside service (a routing service, the limiter) and that
-    request left — the applied sub-point under `off`, the left one under
-    `applied` — the primary taking no later turn (user ruling): the answer in
-    flight on the dead node is lost, and the copy stays reactive (§5); every
-    dialog is left to its endpoint's own timers;
+    a request to an outside service (a routing service, the limiter), or
+    after which the call awaited one's answer (its deadline in the ledger,
+    ADR-0039), whether that request left or not, the backup applying no
+    later turn of the primary (user ruling): the answer is lost with the
+    dead node, a turn that took it included, and the copy stays reactive
+    (§5); every dialog is left to its endpoint's own timers;
   - a kill inside the replication window: a copy re-uses a CSeq the dead
     primary sent before the backup applied the write, at most one rejected
     request per dialog; the call still ends or continues cleanly. A call with

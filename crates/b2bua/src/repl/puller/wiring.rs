@@ -60,6 +60,7 @@ impl Puller {
                 removed: matches!(op, Op::Delete),
                 on_request: false,
                 called_out: false,
+                awaits_answer: false,
                 released: None,
             })
             .await;

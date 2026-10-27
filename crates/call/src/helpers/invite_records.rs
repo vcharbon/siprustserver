@@ -74,9 +74,27 @@ pub fn relayed_invite_pending(d: &Dialog) -> bool {
 
 /// `record`, an INVITE this side sends on `leg_id`'s dialog `id`, becomes the
 /// dialog's last: the ACK the previous one's 2xx drew belongs to that
-/// transaction alone (§13.2.2.4).
-pub fn open_sent_invite(call: Call, leg_id: &str, id: &DialogId, record: RequestRecord) -> Call {
-    update_dialog(call, leg_id, id, |d| d.sent_invite = Some(record))
+/// transaction alone (§13.2.2.4), and `record` carries it as the ACK ahead of
+/// it ([`InviteExchange::ack_ahead`]).
+pub fn open_sent_invite(
+    call: Call,
+    leg_id: &str,
+    id: &DialogId,
+    mut record: RequestRecord,
+) -> Call {
+    update_dialog(call, leg_id, id, |d| {
+        let ahead = emitted_ack(d).cloned();
+        if let Some(ahead) = ahead {
+            record.invite.get_or_insert_with(InviteExchange::default).ack_ahead = Some(ahead);
+        }
+        d.sent_invite = Some(record);
+    })
+}
+
+/// The ACK `d`'s last INVITE must follow when a node re-sends it from the
+/// record.
+pub fn ack_ahead(d: &Dialog) -> Option<&RetainedEmission> {
+    sent_exchange(d)?.ack_ahead.as_ref()
 }
 
 /// Retain the Via branch of the ACK-for-2xx just sent on `leg_id`'s

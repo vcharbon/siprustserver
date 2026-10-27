@@ -282,3 +282,15 @@ async fn a_copy_of_an_answered_non_invite_request_draws_its_final_again() {
     let later = INFO.replace("rport=5060", "rport=5062");
     assert_eq!(sight(&a, &later).owner, Owner::Tu, "Timer J ends the transaction");
 }
+
+#[test]
+fn a_repeated_non_2xx_final_to_its_own_invite_draws_its_ack_again() {
+    let a = Absorption::transaction_view();
+    let SipMessage::Response(busy) = parse(BUSY) else { unreachable!() };
+    assert!(a.rejected_ack_for(&busy).is_none(), "nothing to repeat before the ACK left");
+    let dst: SocketAddr = "10.0.0.2:5060".parse().unwrap();
+    a.note_sent(&parse(HOP_ACK), HOP_ACK.as_bytes(), dst, 0);
+    assert_eq!(a.rejected_ack_for(&busy), Some((HOP_ACK.as_bytes().to_vec(), dst)));
+    let SipMessage::Response(ok) = parse(OK) else { unreachable!() };
+    assert!(a.rejected_ack_for(&ok).is_none(), "a 2xx is the UAC core's to re-ACK");
+}

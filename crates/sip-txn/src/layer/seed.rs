@@ -43,14 +43,22 @@ impl Owner {
         let mut seeded = 0usize;
         for seed in seeds {
             let went_in = match seed {
-                TxnSeed::ClientInvite { invite, dest, provisional, cancel } => {
-                    self.seed_client_invite(call_ref, invite, dest, provisional, cancel)
+                TxnSeed::ClientInvite { invite, dest, provisional, cancel, ack_ahead } => {
+                    let went_in =
+                        self.seed_client_invite(call_ref, invite, dest, provisional, cancel);
+                    if let Some((ack, to)) = ack_ahead.filter(|_| went_in && !provisional) {
+                        self.send_buffer(endpoint, &ack, to).await;
+                    }
+                    went_in
                 }
                 TxnSeed::ServerInvite { request, to_tag, leg_id } => {
                     self.seed_server_invite(call_ref, request, to_tag, leg_id)
                 }
                 TxnSeed::ServerAccepted { response, leg_id } => {
                     self.seed_accepted(endpoint, call_ref, response, leg_id).await
+                }
+                TxnSeed::ServerRejected { response, dest, leg_id } => {
+                    self.seed_rejected(endpoint, call_ref, response, dest, leg_id).await
                 }
                 TxnSeed::ClientNonInvite { request, dest, bound_ms } => {
                     self.seed_client_non_invite(endpoint, call_ref, request, dest, bound_ms).await
@@ -145,6 +153,59 @@ impl Owner {
         });
         self.hold_seeded_identity(TxnRef::Server(key.id()));
         self.accept(key.id(), &response);
+        true
+    }
+
+    /// A server INVITE Completed on the non-2xx `response` (RFC 3261 §17.2.1),
+    /// keyed by its top Via, the final sent toward `dest` on Timer G from now
+    /// until the ACK or Timer H. An occupant that has sent no final takes
+    /// `response` as its final and sends it to its INVITE's source now.
+    /// `false` when the response names no branch or its identity holds a
+    /// transaction that has sent its final.
+    async fn seed_rejected(
+        &mut self,
+        endpoint: &dyn UdpEndpoint,
+        call_ref: &str,
+        response: SipResponse,
+        dest: SocketAddr,
+        leg_id: Option<String>,
+    ) -> bool {
+        let Some(key) = ServerTxnId::of_response(&response).map(ServerTxnId::to_key) else {
+            return false;
+        };
+        let occupant = match self.server(key.id()) {
+            Some(occupant) if !occupant.state.is_active() => return false,
+            Some(occupant) => Some(occupant.destination.unwrap_or(dest)),
+            None => {
+                self.open_txn(NewTransaction {
+                    id: TxnId::Server(key.clone()),
+                    kind: TxnKind::Invite,
+                    method: Method::Invite,
+                    cseq: response.cseq().seq(),
+                    call_id: response.call_id().as_str().to_string(),
+                    from_tag: response.from().tag().unwrap_or_default().to_string(),
+                    original_request: None,
+                    call_ref: Some(call_ref.to_string()),
+                    leg_id,
+                    incarnation_mark: None,
+                    state: TxnState::Completed,
+                    destination: Some(dest),
+                });
+                self.hold_seeded_identity(TxnRef::Server(key.id()));
+                None
+            }
+        };
+        self.record_uas_tag(key.id(), &response);
+        if let Some(txn) = self.server_mut(key.id()) {
+            txn.state = TxnState::Completed;
+            txn.last_response = Some(response.image().clone());
+            txn.last_response_status = Some(response.status());
+            txn.original_request = None;
+        }
+        self.arm_final_hold(key.id(), TxnKind::Invite, response.status(), dest);
+        if let Some(source) = occupant {
+            self.send_buffer(endpoint, response.image(), source).await;
+        }
         true
     }
 

@@ -22,11 +22,16 @@ pub enum TxnSeed {
     /// its latest provisional (§17.2.1).
     /// `cancel` is a CANCEL the record says this side sent for it while it had
     /// drawn no provisional: held until its first one (§9.1).
+    /// `ack_ahead` is the ACK, as it left and where, of the 2xx to the INVITE
+    /// the dialog sent before this one: sent once at the seed, ahead of the
+    /// re-sent INVITE, so the peer never sees it while that INVITE is still
+    /// unacknowledged (§14.1, RFC 6026 §7.1); a repeat is absorbed (§13.2.2.4).
     ClientInvite {
         invite: SipRequest,
         dest: SocketAddr,
         provisional: bool,
         cancel: Option<Box<SipRequest>>,
+        ack_ahead: Option<(Vec<u8>, SocketAddr)>,
     },
     /// A server INVITE this side admitted and has not answered: `request`,
     /// rebuilt from the record as far as a response to it reads it — Via
@@ -49,6 +54,16 @@ pub enum TxnSeed {
     /// the one the INVITE's retransmission opened before the record was read —
     /// takes `response` as its final and sends it once.
     ServerAccepted { response: SipResponse, leg_id: Option<String> },
+    /// A server INVITE this side answered with a non-2xx final, its ACK not
+    /// known to have arrived: `response`, the final as it left, keyed by its
+    /// top-Via branch and sent-by (RFC 3261 §17.2.3). It runs in Completed
+    /// from the seed and sends `response` toward `dest` on Timer G until the
+    /// ACK, which it absorbs, or Timer H (§17.2.1): the record may be ahead of
+    /// the wire, so the first copy may never have left, and one that did drew
+    /// its ACK toward the node that sent it. A copy of the INVITE draws
+    /// `response` again. A transaction already on its key that has sent no
+    /// final takes `response` as its final and sends it.
+    ServerRejected { response: SipResponse, dest: SocketAddr, leg_id: Option<String> },
     /// A client non-INVITE this side sent toward `dest`, still awaiting its
     /// final: `request` as it left, keyed by its top-Via branch and attributed
     /// from its Via `cr` / `lg` params. It sends `request`'s image, byte for

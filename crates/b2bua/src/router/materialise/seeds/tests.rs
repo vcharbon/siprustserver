@@ -377,6 +377,57 @@ fn a_self_originated_reinvite_in_flight_seeds_its_client_invite() {
     assert!(seeds_for(&rejected, 0).is_empty(), "a non-2xx final closed the round on the record");
 }
 
+/// A re-INVITE opened on a dialog whose 2xx before it drew an ACK carries
+/// that ACK: its seed sends it ahead of the re-sent INVITE (RFC 3261 §14.1).
+#[test]
+fn a_reinvite_seed_carries_the_ack_of_the_2xx_before_it() {
+    let leg = b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1)));
+    let call = call_with(LegState::Confirmed, leg);
+    let ack = b"ACK sip:bob@10.0.0.9 SIP/2.0\r\n\r\n".to_vec();
+    let retained = call::RetainedEmission::on_trigger(
+        ack.clone(),
+        ("10.0.0.9".to_string(), 5060),
+        call::Repeated::request("ACK"),
+    );
+    let call = call::helpers::retain_emitted_ack(call, "b-1", retained, 1);
+    let id = call.b_legs[0].dialogs.confirmed().expect("the confirmed dialog").id();
+    let reinvite = own_reinvite(2, b_handle(REINVITE_BRANCH, 2));
+    let call = call::helpers::open_sent_invite(call, "b-1", &id, reinvite);
+    let ahead = seeds_for(&call, 0).into_iter().find_map(|s| match s {
+        TxnSeed::ClientInvite { ack_ahead, .. } => ack_ahead,
+        _ => None,
+    });
+    let dest: SocketAddr = "10.0.0.9:5060".parse().expect("an address");
+    assert_eq!(ahead, Some((ack, dest)), "the ACK of the 2xx before the re-INVITE, as it left");
+}
+
+/// The caller's INVITE answered non-2xx seeds Completed on the final the
+/// record keeps, toward where it left; with no final kept, nothing.
+#[test]
+fn a_rejected_a_leg_seeds_its_kept_final() {
+    let leg = b_leg(LegState::Terminated, Some(b_handle(B_BRANCH, 1)));
+    let mut call = call_with(LegState::Terminated, leg);
+    *call.a_leg.invite_final_sent_mut() = Some(486);
+    assert!(seeds_for(&call, 0).iter().all(|s| !matches!(s, TxnSeed::ServerRejected { .. })));
+
+    let final_486 = format!(
+        "SIP/2.0 486 Busy Here\r\nVia: SIP/2.0/UDP 10.0.0.1:5060;branch={A_BRANCH}\r\n\
+         From: <sip:alice@10.0.0.1>;tag=atag\r\nTo: <sip:bob@10.0.0.9>;tag=own\r\n\
+         Call-ID: acid@alice\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n"
+    );
+    *call.a_leg.invite_rejection_mut() = Some(call::RetainedEmission::on_trigger(
+        final_486.into_bytes(),
+        ("10.0.0.1".to_string(), 5060),
+        call::Repeated::response("INVITE", 486),
+    ));
+    let seeded = seeds_for(&call, 0).into_iter().find_map(|s| match s {
+        TxnSeed::ServerRejected { response, dest, .. } => Some((response.status(), dest)),
+        _ => None,
+    });
+    let dest: SocketAddr = "10.0.0.1:5060".parse().expect("an address");
+    assert_eq!(seeded, Some((486, dest)));
+}
+
 /// The initial INVITE's handle is closed by nothing but the leg's state: a
 /// non-2xx final on a still-early leg leaves it for the CANCEL path.
 #[test]

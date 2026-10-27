@@ -115,14 +115,15 @@ pub async fn run_cell(
                 verdict = Some(v);
             }
             () = tokio::time::sleep(SETTLE_STEP), if verdict.is_some() => {
-                parties.answer_strays().await;
+                let answered = parties.answer_strays().await;
                 settled += SETTLE_STEP;
                 let call = call_ref.get_or_insert_with(|| first_call(&cluster, name));
                 let clear = cluster.is_clear_of(call).await;
                 let pending = heal_pending || kill_pending;
                 // A cluster clear for a whole step: what a party sent as the
-                // cluster forgot the call (a hop ACK) has landed.
-                let quiet = clear && reached.is_none() && !pending;
+                // cluster forgot the call (a hop ACK, a stray's answer) has
+                // landed.
+                let quiet = clear && reached.is_none() && !pending && !answered;
                 if (quiet && was_clear) || settled >= SETTLE_BUDGET {
                     break;
                 }
@@ -154,11 +155,16 @@ pub async fn run_cell(
             TurnPoint::Left => turn.is_some_and(|t| t.released == Some(Released::Applied)),
             TurnPoint::Applied => turn.is_some_and(|t| t.released.is_some()),
         };
+        let held = held_and_left || c.at.point == TurnPoint::Applied;
+        // The copy sees no later turn whose write the backup never applied.
+        let later_applied = turns.iter().skip(c.at.turn).any(|t| t.applied);
         super::outcome::CutAt {
             incident: c.incident,
             held_and_left,
+            held,
             on_request: turn.is_none_or(|t| t.on_request),
-            answer_in_flight: turn.is_some_and(|t| t.called_out) && turns.len() == c.at.turn,
+            answer_in_flight: turn.is_some_and(|t| t.called_out || t.awaits_answer)
+                && !later_applied,
             living_answered: super::answered::living_workers_answered(
                 &CaptureIndex::new(cluster.fh.sip_entries()),
                 &living,
@@ -258,6 +264,7 @@ fn strike(
             accept_clean_end_into_ended_dialogs(cluster, names);
             super::stall_repeat::accept_reason_only_cancel_repeat(cluster);
             super::stall_cseq::accept_cseqs_sent_during_the_stall(cluster);
+            accept_two_copies(cluster, names);
             cluster.fh.stall(&placement.primary, &placement.backup);
             None
         }
@@ -339,14 +346,16 @@ fn cancels_an_answered_invite(i: usize, capture: &CaptureIndex, upto: u64) -> bo
     answered_before(capture, i, upto, cancel, None, ours)
 }
 
-/// A split, healed or not, leaves two copies acting, each in a degraded mode
-/// only a leak check judges (ADR-0055 §11): the stale copy's requests into a
-/// dialog the other copy ended, closed by the 481 they draw; one copy's CANCEL
-/// of an INVITE the other copy saw answered, its retransmissions crossing a
-/// heal included; one copy's non-2xx after the final the other copy sent the
-/// caller, which she discards; one copy's BYE of a caller dialog it holds
-/// early, which the other copy answered. The two copies' duplicate in-dialog
-/// CSeqs are accepted from the split on ([`Cluster::split`]).
+/// A split, healed or not, leaves two copies acting, and a stall past the cap
+/// then a kill a stale copy against what the stalled primary released at the
+/// cap, each in a degraded mode only a leak check judges (ADR-0055 §11): the
+/// stale copy's requests into a dialog the other copy ended, closed by the 481
+/// they draw; one copy's CANCEL of an INVITE the other copy saw answered, its
+/// retransmissions crossing a heal included; one copy's non-2xx after the
+/// final the other copy sent the caller, under whatever To-tag, which she
+/// discards; one copy's BYE of a caller dialog it holds early, which the other
+/// copy answered. The two copies' duplicate in-dialog CSeqs are accepted from
+/// the split on ([`Cluster::split`]), the stall's from the stall on.
 fn accept_two_copies(cluster: &mut Cluster, names: &[String]) {
     cluster.fh.accept_dialog_verdicts(
         scenario_harness::dialogs::DIALOG_ENDED,
@@ -364,6 +373,12 @@ fn accept_two_copies(cluster: &mut Cluster, names: &[String]) {
         |i, capture, _| non_2xx_after_another_final(i, capture),
         "ADR-0055 §11: a split: one copy's non-2xx after the final the other copy sent, \
          discarded",
+    );
+    cluster.fh.accept_rfc_deviations_from_now_where(
+        RULE_TAG_CONSISTENCY,
+        |i, capture, _| non_2xx_after_another_final(i, capture),
+        "ADR-0055 §11: a split: one copy's non-2xx after the final the other copy sent, \
+         under its own To-tag, discarded",
     );
     cluster.fh.accept_rfc_deviations_once_per_dialog(
         "no-bye-outside-or-early-dialog",
@@ -386,6 +401,10 @@ fn accept_non_2xx_after_the_dead_owners_2xx(cluster: &mut Cluster) {
 
 /// The audit rule a caller's unACKed non-2xx INVITE final meets.
 const RULE_UNACKED_NON_2XX: &str = "unacked-invite-non-2xx-final";
+
+/// The audit rule a UAS final under a To-tag none of its provisionals carried
+/// meets.
+const RULE_TAG_CONSISTENCY: &str = "tag-consistency";
 
 /// Whether the final at index `i` of `capture` is a non-2xx to the caller's
 /// INVITE after a 2xx to that INVITE sent to her before the kill

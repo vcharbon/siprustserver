@@ -16,6 +16,10 @@
 //!   the originator's top Via, so its retransmission is absorbed, a CANCEL
 //!   draws 200 + 487 and a release answers it. A relay already CANCELled has
 //!   had its 200 + 487 from the node that held it and is not in flight.
+//! - a **server INVITE** this stack answered non-2xx: the a-leg's
+//!   dialog-creating INVITE whose final the record keeps, Completed on it, the
+//!   final repeated on Timer G until her ACK — the record may be ahead of the
+//!   wire.
 //! - a **server INVITE** this stack answered 2xx and still awaits the ACK for:
 //!   a dialog's answered INVITE, seeded in RFC 6026 Accepted with that 2xx, so
 //!   a copy of its INVITE draws the 2xx and never reaches the rules.
@@ -66,6 +70,7 @@ pub(super) fn seeds_for(call: &Call, now_ms: i64) -> Vec<TxnSeed> {
                     TxnSeed::ClientInvite { invite, .. } => (false, invite.top_via()),
                     TxnSeed::ServerInvite { request, .. } => (true, request.top_via()),
                     TxnSeed::ServerAccepted { response, .. } => (true, response.top_via()),
+                    TxnSeed::ServerRejected { response, .. } => (true, response.top_via()),
                     TxnSeed::ClientNonInvite { request, .. } => (false, request.top_via()),
                     TxnSeed::ServerNonInvite { request, .. } => (true, request.top_via()),
                 };
@@ -125,8 +130,11 @@ fn record_seeds(
 /// none.
 fn dialog_creating_seed(call: &Call, leg: &Leg, record: &RequestRecord) -> Option<TxnSeed> {
     let Some(dialled) = leg.outbound_invite() else {
-        if leg.leg_id != call.a_leg.leg_id || leg.invite_final_sent().is_some() {
+        if leg.leg_id != call.a_leg.leg_id {
             return None;
+        }
+        if leg.invite_final_sent().is_some() {
+            return rejected_seed(leg);
         }
         let request = rebuild_a_leg_invite(&call.a_leg_invite).ok()?;
         return Some(TxnSeed::ServerInvite {
@@ -155,10 +163,23 @@ fn dialog_creating_seed(call: &Call, leg: &Leg, record: &RequestRecord) -> Optio
     client_seed(record.sent.as_ref()?, provisional, cancel)
 }
 
+/// The seed of the caller's INVITE answered with the non-2xx final the record
+/// keeps: Completed on it, so the final reaches her even when the record ran
+/// ahead of the wire (RFC 3261 §17.2.1).
+fn rejected_seed(leg: &Leg) -> Option<TxnSeed> {
+    let (bytes, (host, port)) = leg.invite_rejection()?.wire();
+    let response = match CustomParser::new().parse(bytes).ok()? {
+        SipMessage::Response(r) => r,
+        SipMessage::Request(_) => return None,
+    };
+    let dest = sip_net::ip_socket_addr(host, port)?;
+    Some(TxnSeed::ServerRejected { response, dest, leg_id: Some(leg.leg_id.clone()) })
+}
+
 /// The client seed of the INVITE `leg`'s `dialog` last sent, `record`: while
 /// the leg's dialling INVITE has no final, or no 2xx was taken for it and,
 /// for a relay, it was not CANCELled toward its target. A re-INVITE records
-/// no provisional.
+/// no provisional, and carries the ACK of the 2xx before it.
 fn sent_invite_seed(leg: &Leg, dialog: &Dialog, record: &RequestRecord) -> Option<TxnSeed> {
     let sent = call::helpers::invite_image(leg, record)?;
     let initial_in_flight = leg.outbound_invite().is_some_and(|i| i.final_received.is_none());
@@ -167,7 +188,14 @@ fn sent_invite_seed(leg: &Leg, dialog: &Dialog, record: &RequestRecord) -> Optio
         return None;
     }
     let provisional = initial_in_flight && !leg.dialogs.is_empty();
-    client_seed(sent, provisional, None)
+    let mut seed = client_seed(sent, provisional, None)?;
+    if let TxnSeed::ClientInvite { ack_ahead, .. } = &mut seed {
+        *ack_ahead = call::helpers::ack_ahead(dialog).and_then(|ack| {
+            let (bytes, (host, port)) = ack.wire();
+            Some((bytes.to_vec(), sip_net::ip_socket_addr(host, port)?))
+        });
+    }
+    Some(seed)
 }
 
 /// Whether the record is an INVITE's, whose transactions the INVITE seeds
@@ -334,7 +362,7 @@ fn client_seed(
                 "client transaction not seeded: its CANCEL makes no message");
         })
         .ok()?;
-    Some(TxnSeed::ClientInvite { invite, dest, provisional, cancel })
+    Some(TxnSeed::ClientInvite { invite, dest, provisional, cancel, ack_ahead: None })
 }
 
 /// The server seed for a relayed INVITE pending on one of `leg`'s dialogs:

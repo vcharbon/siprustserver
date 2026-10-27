@@ -474,16 +474,13 @@ impl Agent {
     /// **The absorption seam**: classify one arriving datagram once
     /// ([`Absorption::sight`]) and decide whether this pull sees it.
     /// `None` means the transaction layer kept it — a §17.2 duplicate, or a
-    /// retransmitted 2xx this UA's core answered by re-sending the ACK it owes
-    /// (§13.2.2.4), which is the TU acting on a datagram the TU view keeps.
+    /// final this UA re-ACKed ([`Agent::re_ack`]).
     /// A txn-owned hop ACK still SURFACES here: the pull sites claim it, so an
     /// explicit `receive("ACK")` keeps working.
     pub(crate) async fn surface(&self, raw: &[u8], msg: SipMessage) -> Option<SipMessage> {
         let sighting = self.txn.sight(raw, &msg);
         if let SipMessage::Response(r) = &msg {
-            let repeated_2xx = || sighting.repeat.then(|| self.two_xx_acks.owed_for(r)).flatten();
-            if let Some((ack, dst)) = self.txn.abandoned_ack_for(r).or_else(repeated_2xx) {
-                let _ = self.try_send(&SipMessage::Request(ack), dst).await;
+            if self.re_ack(r, sighting.repeat).await {
                 return None;
             }
         }

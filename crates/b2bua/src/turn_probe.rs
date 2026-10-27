@@ -71,6 +71,9 @@ pub struct TurnMark<'a> {
     /// The turn sent a request to an outside service, whose answer a later
     /// turn takes.
     pub called_out: bool,
+    /// After the turn the call awaits the answer of a request sent off its
+    /// turn: an answer deadline is in its ledger (ADR-0039).
+    pub awaits_answer: bool,
     /// Why the turn's last outbox entry left: set on [`Left`](TurnPoint::Left)
     /// only.
     pub released: Option<Released>,
@@ -136,6 +139,7 @@ mod tests {
             removed: false,
             on_request,
             called_out: false,
+            awaits_answer: false,
             released: None,
         }
     }

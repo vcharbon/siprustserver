@@ -5,8 +5,10 @@
 //! an accepted CDR count: one, for the copies of a split that never heals
 //! one each or none, for a split that heals and a killed primary one or two,
 //! never none, for a call with no backup at most one (§5). A split, healed or
-//! not, is judged on that alone: the findings its two acting copies cause are
-//! accepted there ([`Incident::splits`]). Any other cell must also end with an
+//! not, and a stall past the cap then a kill are judged on that alone: the
+//! findings two acting copies, or a stale copy and what the stalled primary
+//! released at the cap, cause are accepted there ([`Incident::judged_on_leaks`]).
+//! Any other cell must also end with an
 //! RFC-clean, fully terminated call the parties judge as their play declares;
 //! once the incident strikes, a clean end is one (§1, §4), and an incident
 //! that loses the call states what the parties are left with instead
@@ -151,6 +153,14 @@ impl Incident {
     /// verdict (ADR-0055 §11).
     pub fn splits(self) -> bool {
         matches!(self, Incident::Split | Incident::SplitHealed)
+    }
+
+    /// Whether the incident's cells judge leaks, cleanup and the CDR count,
+    /// never the parties' verdict (ADR-0055 §11): a split, healed or not, and
+    /// a stall past the cap then a kill, whose stale copy contradicts what the
+    /// stalled primary released at the cap as a split's other copy would.
+    pub fn judged_on_leaks(self) -> bool {
+        self.splits() || self == Incident::StalledKilled
     }
 
     /// Whether the incident is cut at a turn's applied sub-point: a call with

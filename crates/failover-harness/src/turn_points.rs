@@ -35,11 +35,15 @@ pub struct Turn {
     pub on_request: bool,
     /// Whether the turn sent a request to an outside service.
     pub called_out: bool,
+    /// Whether the call awaited an outside answer after the turn (ADR-0039).
+    pub awaits_answer: bool,
     /// Why the turn's outbox entry left, once it did.
     pub released: Option<Released>,
     /// The entry left at the cap while the harness held an applied sub-point
     /// of the call.
     pub capped_by_harness: bool,
+    /// The backup applied a write holding this turn's.
+    pub applied: bool,
 }
 
 impl Turn {
@@ -154,15 +158,17 @@ impl Inner {
                 }
                 let turns = self.calls.entry(mark.call_ref.to_string()).or_default();
                 let (version, wrote, on_request) = (mark.version, mark.wrote, mark.on_request);
-                let called_out = mark.called_out;
-                let (released, capped_by_harness) = (None, false);
+                let (called_out, awaits_answer) = (mark.called_out, mark.awaits_answer);
+                let (released, capped_by_harness, applied) = (None, false, false);
                 turns.push(Turn {
                     version,
                     wrote,
                     on_request,
                     called_out,
+                    awaits_answer,
                     released,
                     capped_by_harness,
+                    applied,
                 });
                 Some(turns.len())
             }
@@ -178,10 +184,17 @@ impl Inner {
                 Some(i + 1)
             }
             (TurnPoint::Applied, false) => {
-                let turns = self.calls.get(mark.call_ref)?;
-                // The earliest written turn this write covers and not yet
-                // applied: the armed turn's own check reads the arm below.
-                turns.iter().position(|t| t.wrote && covers(mark, t)).map(|i| i + 1)
+                let turns = self.calls.get_mut(mark.call_ref)?;
+                let mut first = None;
+                for (i, t) in turns.iter_mut().enumerate().filter(|(_, t)| t.wrote) {
+                    if covers(mark, t) {
+                        t.applied = true;
+                        first.get_or_insert(i + 1);
+                    }
+                }
+                // The earliest written turn this write covers: the armed
+                // turn's own check reads the arm below.
+                first
             }
             _ => None,
         }

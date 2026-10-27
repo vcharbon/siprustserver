@@ -2,6 +2,7 @@
 //! ([`Leg::invite`]): the INVITE this stack dialled and its dialling facts, or
 //! the one it received and the final it sent.
 
+use super::emission::RetainedEmission;
 use super::invite_exchange::InviteExchange;
 use super::leg::Leg;
 use super::outbound_invite::OutboundInvite;
@@ -55,6 +56,17 @@ impl Leg {
     /// recorded first where the record holds none.
     pub fn invite_final_sent_mut(&mut self) -> &mut Option<u16> {
         &mut self.received_exchange_mut().final_sent
+    }
+
+    /// The non-2xx final this stack sent on the dialog-creating INVITE it
+    /// received on the leg, as it left.
+    pub fn invite_rejection(&self) -> Option<&RetainedEmission> {
+        self.received_exchange()?.rejection.as_ref()
+    }
+
+    /// [`Self::invite_rejection`], to write.
+    pub fn invite_rejection_mut(&mut self) -> &mut Option<RetainedEmission> {
+        &mut self.received_exchange_mut().rejection
     }
 
     /// The 2xx this stack recorded on the leg's received INVITE that the

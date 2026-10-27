@@ -90,7 +90,8 @@ pub(super) fn arb_pending_request() -> impl Strategy<Value = RequestRecord> {
         )
 }
 
-/// Any INVITE exchange: the ACK its 2xx drew or awaits, the 2xx it answered,
+/// Any INVITE exchange: the ACK its 2xx drew or awaits, the ACK ahead of it,
+/// the non-2xx it answered, the 2xx it answered,
 /// a BYE held behind that 2xx's ACK, the dialling facts or the final sent.
 fn arb_exchange() -> impl Strategy<Value = InviteExchange> {
     (
@@ -106,14 +107,20 @@ fn arb_exchange() -> impl Strategy<Value = InviteExchange> {
             proptest::option::of(200u16..300),
             proptest::option::of(proptest::option::of(arb_tag())),
         ),
+        (
+            proptest::option::of(arb_retained_emission()),
+            proptest::option::of(arb_retained_emission()),
+        ),
     )
         .prop_map(
             |(
                 (ack_branch, emitted_ack, awaited_ack_cseq, answered_2xx),
                 (dialled, final_sent, answer_preempted, bye_reason),
+                (ack_ahead, rejection),
             )| InviteExchange {
                 ack_branch,
                 emitted_ack,
+                ack_ahead,
                 awaited_ack_cseq,
                 answered_2xx,
                 bye_behind_ack: bye_reason.map(|reason| QueuedRequest::Bye {
@@ -128,6 +135,7 @@ fn arb_exchange() -> impl Strategy<Value = InviteExchange> {
                     ..OutboundInvite::new(tag, sent_at)
                 }),
                 final_sent,
+                rejection,
                 answer_preempted,
             },
         )

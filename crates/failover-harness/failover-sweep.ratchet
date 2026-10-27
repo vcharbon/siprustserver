@@ -9,15 +9,3 @@
 # §4; a deviation no declared window of §11 covers, §11; a PRACK, an owed ACK
 # or an in-dialog request left unanswered §2; a 2xx repeat routed through the
 # other owner §8; and any other finding of a split cell §7.
-
-# The `applied` sync level writes a turn before its effects leave: a kill can
-# leave the backup's record ahead of the wire.
-media-leg/stalled-killed/t4-logged ADR-0055 §11 # a cap release leaves an answer the stalled backup never applies; the copy answers under a fresh To-tag
-refer/primary-killed/t5-left ADR-0055 §3 # an outside service's answer taken by a turn the backup never applied; the copy waits with no answer deadline
-refer/primary-killed/t8-left ADR-0055 §2 # the copy's seeded re-INVITE leaves before the ACK its record holds as sent
-refer/primary-killed/t9-applied ADR-0055 §2 # the copy's seeded re-INVITE leaves before the ACK its record holds as sent
-refer/primary-killed/t5-applied ADR-0055 §3 # an outside service's answer lost with the primary after the backup applied the request; the copy waits with no answer deadline
-refer/primary-killed/t9-left ADR-0055 §11 # a party's 2xx repeat to the copy's re-sent INVITE carries other bytes than its first
-refer/primary-killed/t10-left ADR-0055 §11 # a party's 2xx repeat to the copy's re-sent INVITE carries other bytes than its first
-refer/primary-killed/t11-left ADR-0055 §11 # a party's 2xx repeat to the copy's re-sent INVITE carries other bytes than its first
-reinvite/primary-killed/t5-left ADR-0055 §11 # a party's 2xx repeat to the copy's re-sent INVITE carries other bytes than its first

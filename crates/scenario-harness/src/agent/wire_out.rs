@@ -1,13 +1,13 @@
 //! One datagram out of a UA, and what the transaction layer
 //! ([`Absorption`](crate::absorption::Absorption)) sends again: the finals a
 //! copy of an answered request draws (RFC 3261 §17.2.1, §17.2.2), the finals
-//! to an INVITE until their ACK (§13.3.1.4, §17.2.1) and the requests until
-//! their answer (§17.1.1.2, §17.1.2.2).
+//! to an INVITE until their ACK (§13.3.1.4, §17.2.1), the requests until
+//! their answer (§17.1.1.2, §17.1.2.2), and the ACK a final draws again.
 
 use std::net::SocketAddr;
 
 use sip_message::parser::custom::CustomParser;
-use sip_message::SipParser;
+use sip_message::{SipMessage, SipParser, SipResponse};
 
 use super::step::StepError;
 use super::Agent;
@@ -23,6 +23,30 @@ impl Agent {
             .send_to(wire, dst)
             .await
             .map_err(|e| StepError::Transport { who: self.name.clone(), detail: e.to_string() })
+    }
+
+    /// Re-send the ACK the final `resp` draws, and say whether one left: a
+    /// final to an INVITE given up on (§17.1.1.3), and, when `repeat`, a
+    /// non-2xx final to this UA's INVITE its client transaction already ACKed
+    /// (§17.1.1.2) or a 2xx this UA's core already ACKed (§13.2.2.4) — the TU
+    /// acting on a datagram the TU view keeps.
+    pub(super) async fn re_ack(&self, resp: &SipResponse, repeat: bool) -> bool {
+        if let Some((ack, dst)) = self.txn.abandoned_ack_for(resp) {
+            let _ = self.try_send(&SipMessage::Request(ack), dst).await;
+            return true;
+        }
+        if !repeat {
+            return false;
+        }
+        if let Some((ack, dst)) = self.txn.rejected_ack_for(resp) {
+            let _ = self.send_bytes(&ack, dst).await;
+            return true;
+        }
+        if let Some((ack, dst)) = self.two_xx_acks.owed_for(resp) {
+            let _ = self.try_send(&SipMessage::Request(ack), dst).await;
+            return true;
+        }
+        false
     }
 
     /// Send the finals the copies of completed transactions just sighted

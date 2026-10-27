@@ -3,8 +3,9 @@
 //! may end the call cleanly at any instant (§1, §4): the parties accept a
 //! clean end then, and the verdict says so. Beyond that, only the declared
 //! outcomes pass:
-//! - a split, healed or not, is judged on leaks, cleanup and the CDR count
-//!   alone, never on the parties' verdict;
+//! - a split, healed or not, and a stall past the cap then a kill are judged
+//!   on leaks, cleanup and the CDR count alone, never on the parties'
+//!   verdict;
 //! - a kill of the primary before the backup held the cut turn's write and
 //!   its effects had both left may leave a dialog to its endpoint's own
 //!   timer, after a teardown whose write the backup never applied (§5: a
@@ -13,10 +14,11 @@
 //!   timer, an off-turn answer), may lose that turn's effects: the parties
 //!   wait for them in vain, and every dialog, early or confirmed, is left to
 //!   its endpoint's own timers;
-//! - a kill of the primary once the backup held the write of a turn that sent
-//!   a request to an outside service and that request left, the primary
-//!   taking no later turn: the answer is lost with the node, and the copy
-//!   stays reactive (§5);
+//! - a kill of the primary once the backup held the write of a turn that
+//!   sent a request to an outside service or after which the call awaited
+//!   one's answer, whether that request left or not, the backup applying no
+//!   later turn of the primary: the answer is lost with the node, and the
+//!   copy stays reactive (§5);
 //! - an incident that loses the call (a stall then a kill, a call with no
 //!   backup) may leave every dialog, the caller's included, to its endpoint's
 //!   own timers, so long as every request that reached a living worker drew
@@ -38,10 +40,14 @@ pub(super) struct CutAt {
     /// applied sub-point under `off` or past the cap, the left one under
     /// `applied`.
     pub held_and_left: bool,
+    /// The backup held the cut turn's write, its effects left or not.
+    pub held: bool,
     /// The cut turn handled a SIP request.
     pub on_request: bool,
-    /// The cut turn sent a request to an outside service and the primary
-    /// took no later turn: its answer was in flight on the primary.
+    /// The cut turn sent a request to an outside service, or the call awaited
+    /// one's answer after it, and the backup applied no later turn of the
+    /// primary: as far as the copy can tell, the answer was in flight on the
+    /// primary.
     pub answer_in_flight: bool,
     /// Every request that reached a worker other than the primary drew its
     /// final there.
@@ -52,15 +58,17 @@ pub(super) struct CutAt {
 /// the cut — `None` for the uncut call — accepts.
 pub(super) fn accepted(cut: Option<CutAt>, verdict: &ScenarioVerdict, obs: &ObservedState) -> bool {
     let Some(cut) = cut else { return verdict.is_success() };
-    let CutAt { incident, held_and_left, on_request, answer_in_flight, living_answered } = cut;
-    if incident.splits() || verdict.is_success() {
+    let CutAt { incident, held_and_left, held, on_request, answer_in_flight, living_answered } =
+        cut;
+    if incident.judged_on_leaks() || verdict.is_success() {
         return true;
     }
     let ScenarioVerdict::Failure { at, cause } = verdict else { return false };
     let StepError::Timeout { .. } = cause else { return false };
     let torn_down = at.barrier == FailedAt::TORN_DOWN;
     obs.with_snapshot(|s| match incident {
-        Incident::PrimaryKilled if held_and_left => answer_in_flight,
+        Incident::PrimaryKilled if held && answer_in_flight => true,
+        Incident::PrimaryKilled if held_and_left => false,
         Incident::PrimaryKilled => !on_request || (torn_down && teardown_lost_in_the_window(s)),
         _ if incident.loses_the_call() => living_answered,
         _ => false,

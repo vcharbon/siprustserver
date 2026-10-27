@@ -3,7 +3,7 @@
 //! where a second final, or a provisional after the final, on that
 //! transaction is refused.
 
-use call::Call;
+use call::{Call, Repeated, RetainedEmission};
 use sip_message::generators::{self, response_states_own_contact, GenerateResponseOpts};
 use sip_message::header::{self, MediaType};
 use sip_message::{Method, SipHeader as MsgHeader, SipRequest};
@@ -118,6 +118,15 @@ pub fn response_to_a_leg(
     let hop = a_leg_invite.top_via();
     let (host, port) = hop.sent_by().pair();
     let dest = (host.to_string(), port);
+    if status >= 300 {
+        // A node serving the call from the record re-sends it (§17.2.1); the
+        // end-of-turn stamp rebinds it to the bytes that leave.
+        *call.a_leg.invite_rejection_mut() = Some(RetainedEmission::on_trigger(
+            resp.image().to_vec(),
+            dest.clone(),
+            Repeated::response("INVITE", status),
+        ));
+    }
     Some(OutboundSipEffect {
         body: OutboundBody::Response(resp),
         mode: OutboundTxnMode::ServerResponse,

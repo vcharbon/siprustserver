@@ -106,6 +106,9 @@ async fn react_request(st: &mut ActorState<'_>, uas: ServerTxn) -> Result<(), St
     let method = uas.request().method().as_str().to_string();
     let is_initial_invite = method == "INVITE" && uas.request().to().tag().is_none();
 
+    if method == "INVITE" && !take_invite(st, &uas) {
+        return Ok(());
+    }
     if is_initial_invite {
         return apply_disposition(st, uas).await;
     }
@@ -202,6 +205,22 @@ async fn react_request(st: &mut ActorState<'_>, uas: ServerTxn) -> Result<(), St
         return react_in_dialog_request(st, uas).await;
     }
     react_in_dialog_request(st, uas).await
+}
+
+/// Whether `uas` is an INVITE this actor has not taken yet, noting it taken.
+/// A copy of one it took — the same server transaction by its top Via (RFC
+/// 3261 §17.2.3) and the same request by its Call-ID, From-tag and CSeq,
+/// whatever a proxy stamped below the top Via — is a retransmission its
+/// transaction absorbs (§17.2.1; RFC 6026 §7.1 once answered 2xx), never a
+/// second call or a second offer to answer.
+fn take_invite(st: &mut ActorState<'_>, uas: &ServerTxn) -> bool {
+    let req = uas.request();
+    let via = req.top_via();
+    let (host, port) = via.sent_by().pair();
+    let (branch, from_tag) =
+        (via.branch().unwrap_or_default(), req.from().tag().unwrap_or_default());
+    let key = format!("{branch} {host}:{port} {} {from_tag} {}", req.call_id(), req.cseq().seq());
+    branch.is_empty() || st.taken_invites.insert(key)
 }
 
 /// The reactive in-dialog answer table — shared by the live dispatch and the

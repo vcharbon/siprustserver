@@ -37,6 +37,7 @@ mod abandoned;
 mod answered;
 mod hop_ack;
 mod invited;
+mod rejected_acks;
 mod two_xx_ack;
 mod unacked_finals;
 mod unanswered;
@@ -137,6 +138,9 @@ pub struct Absorption {
     /// The INVITE client transactions whose caller gave up (§9.1) and that
     /// still ACK their non-2xx final (§17.1.1.3).
     abandoned: abandoned::AbandonedInvites,
+    /// The hop ACK each non-2xx final to this endpoint's INVITE drew, which a
+    /// repeat of that final draws again (§17.1.1.2).
+    rejected_acks: rejected_acks::RejectedAcks,
     log: wire_log::WireLog,
 }
 
@@ -156,6 +160,7 @@ impl Absorption {
             retransmits: AtomicBool::new(true),
             repeats: Default::default(),
             abandoned: abandoned::AbandonedInvites::default(),
+            rejected_acks: rejected_acks::RejectedAcks::default(),
             log: wire_log::WireLog::default(),
         }
     }
@@ -175,6 +180,7 @@ impl Absorption {
             retransmits: AtomicBool::new(true),
             repeats: Default::default(),
             abandoned: abandoned::AbandonedInvites::default(),
+            rejected_acks: rejected_acks::RejectedAcks::default(),
             log: wire_log::WireLog::default(),
         }
     }
@@ -246,7 +252,10 @@ impl Absorption {
                 self.invited.note_sent(r, wire, dst, after);
                 self.unacked_finals.note_sent(r, wire, dst);
             }
-            SipMessage::Request(r) => self.unanswered.note_sent(r, wire, dst),
+            SipMessage::Request(r) => {
+                self.unanswered.note_sent(r, wire, dst);
+                self.rejected_acks.note_sent(r, wire, dst);
+            }
         }
     }
 
@@ -330,6 +339,12 @@ impl Absorption {
     /// INVITE draws.
     pub(crate) fn abandoned_ack_for(&self, resp: &SipResponse) -> Option<(SipRequest, SocketAddr)> {
         self.abandoned.ack_for(resp)
+    }
+
+    /// The hop ACK, as it left and where, that a repeat of the non-2xx final
+    /// `resp` to this endpoint's INVITE draws again (§17.1.1.2).
+    pub(crate) fn rejected_ack_for(&self, resp: &SipResponse) -> Option<(Vec<u8>, SocketAddr)> {
+        self.rejected_acks.ack_for(resp)
     }
 
     fn hop_ack_claims_msg(&self, msg: &SipMessage) -> bool {

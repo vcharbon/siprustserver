@@ -205,18 +205,25 @@ fn unacked_2xx_slot_mut<'a>(
 }
 
 /// Rebind every retained copy of a message in `call` whose bytes are `was`
-/// to `now` — the retained emissions ([`RetainedEmission::restate`]) and the
+/// to `now` — the retained emissions ([`RetainedEmission::restate`]), the
+/// caller's non-2xx final included, and the
 /// images of the INVITEs this side sent: the message they copy left restated.
 pub fn restate_retained(call: &mut Call, was: &[u8], now: &[u8]) {
     for leg in std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut()) {
         restate_leg_invite(leg, was, now);
+        if let Some(rejection) = leg.invite.as_mut().and_then(|r| r.invite.as_mut()) {
+            for final_sent in rejection.rejection.iter_mut() {
+                final_sent.restate(was, now);
+            }
+        }
         for dialog in &mut leg.dialogs {
             if let Some(unacked) = crate::helpers::answered_2xx_mut(dialog) {
                 unacked.emission.restate(was, now);
             }
-            let sent = dialog.sent_invite.as_mut().and_then(|r| r.invite.as_mut());
-            if let Some(ack) = sent.and_then(|x| x.emitted_ack.as_mut()) {
-                ack.restate(was, now);
+            if let Some(sent) = dialog.sent_invite.as_mut().and_then(|r| r.invite.as_mut()) {
+                for ack in sent.emitted_ack.iter_mut().chain(sent.ack_ahead.iter_mut()) {
+                    ack.restate(was, now);
+                }
             }
         }
     }

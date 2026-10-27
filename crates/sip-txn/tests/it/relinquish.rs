@@ -20,6 +20,7 @@ fn seeds(client: &str, server: &str) -> Vec<TxnSeed> {
             dest: addr(PEER),
             provisional: true,
             cancel: None,
+            ack_ahead: None,
         },
         TxnSeed::ServerInvite {
             request: request_of(&inbound_request("INVITE", server, CALL_ID, None)),

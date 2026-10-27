@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use call::CallModelState;
+use call::{CallModelState, TimerType};
 use sip_message::{Method, SipRequest};
 
 use super::release::{release_call, ReleaseKind};
@@ -258,6 +258,7 @@ fn has_cdr(result: &HandlerResult) -> bool {
 pub(super) struct TurnKind {
     on_request: bool,
     called_out: bool,
+    awaits_answer: bool,
 }
 
 impl TurnKind {
@@ -267,7 +268,16 @@ impl TurnKind {
             .fire_and_forget
             .iter()
             .any(|e| !matches!(e, FireAndForgetEffect::Reenter(_)));
-        Self { on_request: received.is_some(), called_out }
+        let awaits_answer = result.call.timers.iter().any(|t| {
+            matches!(
+                t.timer_type(),
+                TimerType::ServiceHttpAnswer { .. }
+                    | TimerType::ServiceAdmitAnswer { .. }
+                    | TimerType::FailureAnswer { .. }
+                    | TimerType::ReleaseAnswer { .. }
+            )
+        });
+        Self { on_request: received.is_some(), called_out, awaits_answer }
     }
 }
 
@@ -292,6 +302,7 @@ pub(super) async fn reach(
             removed: false,
             on_request: kind.on_request,
             called_out: kind.called_out,
+            awaits_answer: kind.awaits_answer,
             released,
         })
         .await;

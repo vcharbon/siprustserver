@@ -79,10 +79,10 @@ pub use dialog::{
 };
 pub use instants::shift_instants;
 pub use invite_records::{
-    ack_branch, answered_2xx, answered_2xx_mut, awaited_ack_cseq, close_rejected_invite_round,
-    emitted_ack, hold_answered_2xx, invite_image, invite_relay, invite_taken, invite_untaken,
-    open_sent_invite, relayed_invite_pending, retain_ack_branch, retain_emitted_ack, sent_exchange,
-    sent_exchange_mut, sent_invite_image, set_awaited_ack_cseq,
+    ack_ahead, ack_branch, answered_2xx, answered_2xx_mut, awaited_ack_cseq,
+    close_rejected_invite_round, emitted_ack, hold_answered_2xx, invite_image, invite_relay,
+    invite_taken, invite_untaken, open_sent_invite, relayed_invite_pending, retain_ack_branch,
+    retain_emitted_ack, sent_exchange, sent_exchange_mut, sent_invite_image, set_awaited_ack_cseq,
 };
 pub use leg::{
     add_b_leg, callee_dialog, callee_dialog_mut, caller_answered, caller_dialog, caller_dialog_mut,

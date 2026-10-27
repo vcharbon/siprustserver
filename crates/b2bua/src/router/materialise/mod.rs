@@ -357,8 +357,9 @@ pub(in crate::router) fn answered_invite_seeds(call: &Call) -> Vec<sip_txn::TxnS
 
 /// Whether `call` names an INVITE transaction a live copy must serve — one a
 /// materialisation would seed ([`seeds::seeds_for`]): an INVITE awaiting its
-/// final, whose bound and finals the copy owns, or a 2xx awaiting its ACK,
-/// whose retransmission ladder the copy resumes (RFC 3261 §13.3.1.4).
+/// final, whose bound and finals the copy owns, a 2xx awaiting its ACK, whose
+/// retransmission ladder the copy resumes (RFC 3261 §13.3.1.4), or the
+/// caller's non-2xx, repeated until her ACK (§17.2.1).
 pub(super) fn has_invite_to_serve(call: &Call) -> bool {
     // No instant moves an INVITE seed: the latest one is read.
     seeds::seeds_for(call, i64::MAX).iter().any(|s| {
@@ -367,6 +368,7 @@ pub(super) fn has_invite_to_serve(call: &Call) -> bool {
             sip_txn::TxnSeed::ClientInvite { .. }
                 | sip_txn::TxnSeed::ServerInvite { .. }
                 | sip_txn::TxnSeed::ServerAccepted { .. }
+                | sip_txn::TxnSeed::ServerRejected { .. }
         )
     })
 }
