@@ -227,12 +227,11 @@ async fn a_swept_delayed_offer_call_answered_with_its_answer_write_late_acks_rej
         .await;
     assert!(written, "the ended call has its CDR");
     let records = [&p.w_b1, &p.w_b2].map(|w| w.cdr_records());
-    let cdrs = records.iter().flatten().filter(|r| r.call_ref == p.ringing_ref);
-    for cdr in cdrs {
-        let answered =
-            cdr.events.iter().any(|e| e.event_type == CdrEventType::Answer && e.reason.is_none());
-        assert!(answered, "the CDR records the call answered: {:?}", cdr.events);
-    }
+    let cdrs: Vec<_> = records.iter().flatten().filter(|r| r.call_ref == p.ringing_ref).collect();
+    assert_eq!(cdrs.len(), 1, "one CDR for the call");
+    let answered =
+        cdrs[0].events.iter().any(|e| e.event_type == CdrEventType::Answer && e.reason.is_none());
+    assert!(answered, "the CDR records the call answered: {:?}", cdrs[0].events);
     p.proxy.set_health("b1", WorkerHealth::Alive);
     crate::swept_call_primary_returns::hang_up_quiet_and_settle(p, &[]).await;
 }

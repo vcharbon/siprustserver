@@ -24,10 +24,10 @@ impl ActionExecutor<'_> {
     /// (RFC 3261 §15): the PRACKs the leg's responders are owed leave first,
     /// an offer left to the ACK answered rejecting (RFC 3262 §4, §5), then a
     /// 2xx still unACKed is ACKed (§13.2.2.4) — bare where the ACK owes no
-    /// answer, and where it owes one no ACK will bring (`answer_lost`: the
-    /// teardown answers a peer's BYE or gives up a 2xx's ACK; or no leg awaits
-    /// the ACK that would carry it) answering every stream rejected (RFC 3264
-    /// §6) — then the BYE. The BYE waits for the ACK of the leg's own
+    /// answer; answering every stream rejected (RFC 3264 §6) where it owes an
+    /// answer no ACK will bring: `answer_lost` (the teardown answers a peer's
+    /// BYE or gives up a 2xx's ACK), or no leg awaits the ACK that would carry
+    /// it — then the BYE. The BYE waits for the ACK of the leg's own
     /// 2xx to its dialog-creating INVITE (§15), and behind this stack's NOTIFY
     /// on the dialog awaiting its final.
     #[allow(clippy::too_many_arguments)]
