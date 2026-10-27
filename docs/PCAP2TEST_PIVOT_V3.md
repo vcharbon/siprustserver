@@ -2324,7 +2324,9 @@ that is empty or no session description is one `document:sdp` record with
 both texts whole; a media section on one side only is one `m<i>:section`
 record with that side's lines; two descriptions a verbatim run carried as
 different bytes with the structure equal are one `document:bytes` record
-with both texts whole. A reception carrying NO body where content is asserted is confronted
+with both texts whole, read as order-only where the two differ in the order of
+attribute lines alone and agree in the attribute order a stack writes
+(`sdpform`, the twin of `sip_message::canonical_form`). A reception carrying NO body where content is asserted is confronted
 as the empty text; under `check: assert` the interpreter also refuses it, and
 under `check: record` it fails the run as a body-type finding. A shape-only
 expect is confronted by type: a reception that breaks the shape is one

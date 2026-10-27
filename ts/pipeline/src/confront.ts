@@ -617,7 +617,9 @@ const bodyProbe = (
         section: d.section,
         line: d.line,
         ...(d.mintedOrigin === true ? { mintedOrigin: true as const } : {}),
-        ...(d.originNotContinued === true ? { originNotContinued: true as const } : {})
+        ...(d.originNotContinued === true ? { originNotContinued: true as const } : {}),
+        ...(d.orderOnly === true ? { orderOnly: true as const } : {}),
+        ...(d.versionStepOne === true ? { versionStepOne: true as const } : {})
       }
     }))
   }

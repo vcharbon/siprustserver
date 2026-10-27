@@ -2,7 +2,9 @@
 //! explicit direction a stack writes when it serializes a description itself
 //! instead of forwarding the author's bytes.
 //!
-//! Pure and deterministic: no clocks, no randomness, no I/O.
+//! Pure and deterministic: no clocks, no randomness, no I/O. Its order rules
+//! have a TypeScript twin (`ts/pipeline/src/sdpform.ts`), held alike by
+//! `tests/fixtures/sdp-form-order.txt`.
 
 use crate::sdp_doc::{direction_of, media_line, Sections};
 use lookup_map::LookupMap;

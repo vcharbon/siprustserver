@@ -26,7 +26,8 @@
  * RFC 3264 §8 against its own previous one there — another identity, or a
  * sess-version step that is neither +1 nor 0 over an unchanged description —
  * {@link notContinued} reads it as the replayed endpoint breaking the session
- * it holds toward that peer.
+ * it holds toward that peer. {@link versionStepOne} reads the converse: the
+ * replay steps by one where the capture's version stands higher.
  */
 
 /** One parsed `o=` line: the two numbers apart from the fields every run reproduces. */
@@ -198,17 +199,51 @@ export const notContinued = (sightings: ReadonlyArray<Sighting>): ReadonlyArray<
 }
 
 /**
+ * Whether each sighting is a sess-version the capture skips where the replay
+ * steps by one (RFC 3264 §8): the two origins differ in sess-version alone,
+ * the replayed one is exactly one above the replay's previous description of
+ * that origin identity on the leg (replay order), and the captured one is
+ * above the replayed one. A description with no previous one of its identity
+ * on the leg reads nothing.
+ */
+export const versionStepOne = (sightings: ReadonlyArray<Sighting>): ReadonlyArray<boolean> => {
+  const right = sightings.map((s) => originOf(s.replayed))
+  const before: Array<number | undefined> = sightings.map(() => undefined)
+  const last = new Map<string, number>()
+  for (const at of orderBy(sightings, (s) => s.replayedAt)) {
+    const origin = right[at]
+    if (origin === undefined) continue
+    const key = `${sightings[at]!.leg} ${identityOf(origin)}`
+    before[at] = last.get(key)
+    last.set(key, at)
+  }
+  return sightings.map((s, at) => {
+    const a = originOf(s.captured)
+    const b = right[at]
+    const prior = before[at]
+    if (a === undefined || b === undefined || prior === undefined) return false
+    return identityOf(a) === identityOf(b) &&
+      b.sessVersion === right[prior]!.sessVersion + 1n &&
+      a.sessVersion > b.sessVersion
+  })
+}
+
+/**
  * How one description pair's origins read: an origin the replayed endpoint
  * mints and its counterpart, a session the replay breaks (RFC 3264 §8) on a
- * leg where the capture keeps it, or neither (`undefined`).
+ * leg where the capture keeps it, a sess-version the capture skips where the
+ * replay steps by one, or none of these (`undefined`).
  */
-export type OriginReading = "minted" | "not-continued" | undefined
+export type OriginReading = "minted" | "not-continued" | "version-step-one" | undefined
 
-/** Every sighting's reading, {@link readOrigins} and {@link notContinued} together. */
+/** Every sighting's reading: {@link readOrigins}, else {@link notContinued}, else {@link versionStepOne}. */
 export const readings = (sightings: ReadonlyArray<Sighting>, driven: Driven): ReadonlyArray<OriginReading> => {
   const minted = readOrigins(sightings, driven)
   const broken = notContinued(sightings)
-  return sightings.map((_, at) => (minted[at] ? "minted" : broken[at] ? "not-continued" : undefined))
+  const stepped = versionStepOne(sightings)
+  return sightings.map((_, at) =>
+    minted[at] ? "minted" : broken[at] ? "not-continued" : stepped[at] ? "version-step-one" : undefined
+  )
 }
 
 /**

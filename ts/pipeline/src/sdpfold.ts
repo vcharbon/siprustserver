@@ -30,9 +30,14 @@
  * because the render re-assembles line endings there; on a `verbatim` run the
  * tokens mask nothing and the two texts must be the same BYTES — an attribute
  * reorder, a line ending, trailing whitespace or a blank line the structural
- * pass erases is then one `document:bytes` row with both texts whole.
+ * pass erases is then one `document:bytes` row with both texts whole. The row
+ * reads as ORDER-ONLY where the two texts differ in the order of attribute
+ * lines alone and agree in the order a stack writes them (`./sdpform.ts`):
+ * RFC 4566 §5 fixes the order of every other line, not of attributes among
+ * themselves, and the form keeps the order an attribute's own spec fixes.
  */
 import type { Bundle } from "@sip/contracts"
+import { attributeOrder } from "./sdpform.js"
 import { type OriginReading, withOriginOf } from "./sdporigin.js"
 
 /** Which lane-owned fields the fold sets aside, and whether the bytes must match. */
@@ -79,6 +84,14 @@ export interface SdpDifference {
   readonly mintedOrigin?: true
   /** Set on a `session:o=` row the caller read as a session the replay breaks where the capture keeps it. */
   readonly originNotContinued?: true
+  /** Set on a `document:bytes` row whose texts, the origin swapped, differ in attribute order alone. */
+  readonly orderOnly?: true
+  /**
+   * Set on a `session:o=` row the caller read as a sess-version the capture
+   * skips where the replay steps by one, and on that description's order-only
+   * bytes row.
+   */
+  readonly versionStepOne?: true
 }
 
 const DIRECTIONS: ReadonlySet<string> = new Set(["sendrecv", "sendonly", "recvonly", "inactive"])
@@ -167,8 +180,16 @@ const markOrigin = (d: SdpDifference, origin: OriginReading): SdpDifference => {
   if (!isOriginRow(d)) return d
   if (origin === "minted") return { ...d, mintedOrigin: true }
   if (origin === "not-continued") return { ...d, originNotContinued: true }
+  if (origin === "version-step-one") return { ...d, versionStepOne: true }
   return d
 }
+
+/** A text's lines with every attribute line read as `a=`: where the lines RFC 4566 §5 orders stand. */
+const skeleton = (text: string): string => text.replace(/^a=[^\r\n]*/gm, "a=")
+
+/** Whether two texts differ in the order of attribute lines alone, both in the stack's attribute order. */
+const orderOnly = (captured: string, replayed: string): boolean =>
+  skeleton(captured) === skeleton(replayed) && attributeOrder(captured) === attributeOrder(replayed)
 
 /**
  * Every difference between two texts read as session descriptions under the
@@ -176,7 +197,9 @@ const markOrigin = (d: SdpDifference, origin: OriginReading): SdpDifference => {
  * while the bytes do not — the one `document:bytes` row. On a verbatim run a
  * `session:o=` row carries the caller's reading of its origins (`origin`),
  * and it alone never stands for the bytes: the texts must still be the same
- * bytes once the replayed origin reads as the captured one.
+ * bytes once the replayed origin reads as the captured one, and the bytes row
+ * is order-only where they differ in attribute order alone, carrying a
+ * version-step reading of the origin with it.
  */
 export const diffSdp = (
   mask: SdpMask,
@@ -189,8 +212,12 @@ export const diffSdp = (
   if (!mask.verbatim) return structural
   const rows = structural.map((d) => markOrigin(d, origin))
   if (structural.some((d) => !isOriginRow(d))) return rows
-  if (withOriginOf(replayed, captured) === captured) return rows
-  return [...rows, { section: "document", line: "bytes", captured: [captured], replayed: [replayed] }]
+  const swapped = withOriginOf(replayed, captured)
+  if (swapped === captured) return rows
+  const bytes: SdpDifference = { section: "document", line: "bytes", captured: [captured], replayed: [replayed] }
+  if (!orderOnly(captured, swapped)) return [...rows, bytes]
+  const stepped = origin === "version-step-one" ? { versionStepOne: true as const } : {}
+  return [...rows, { ...bytes, orderOnly: true, ...stepped }]
 }
 
 /** The structural rows: sections by position, lines per section as a masked multiset. */
