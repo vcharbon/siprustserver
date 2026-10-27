@@ -80,9 +80,3 @@ path = "fuzz_targets/credentials.rs"
 test = false
 doc = false
 bench = false
-
-# The release profile cargo-fuzz builds with keeps debug assertions and
-# overflow checks on (its default `--debug-assertions`), so wrapping
-# arithmetic is a finding.
-[profile.release]
-debug = 1

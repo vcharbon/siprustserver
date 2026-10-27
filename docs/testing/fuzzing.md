@@ -55,7 +55,7 @@ What a run checks beside panics:
 
 - **Superlinear time**: an input that runs past `-timeout` (10 s, `FUZZ_TIMEOUT`) is kept as
   a timeout; inputs grow to 64 KiB, so work quadratic in the input crosses it.
-- **Allocations sized from input**: `-rss_limit_mb=2048`, and the targets' own cap on one
+- **Allocations sized from input**: `-rss_limit_mb=1024` per process, and the targets' own cap on one
   allocation (`fuzz/lanes/src/alloc_cap.rs`), in place of `-malloc_limit_mb`, which needs a
   sanitizer's malloc hooks. The build is sanitizer-free: the workspace forbids `unsafe`
   code, and its audited exceptions are socket calls the simulated fabric never makes.
@@ -63,14 +63,18 @@ What a run checks beside panics:
 - **Recursion driven by input**: each case runs on the lanes' small stack.
 
 With `--jobs J` the run forks J processes; a crash, timeout or OOM is kept under
-`fuzz/artifacts/<target>/` and the run goes on.
+`fuzz/artifacts/<target>/` and the run goes on. cargo-fuzz builds the target; the fuzzer runs
+outside cargo, so a cargo wrapper's limits see only the build.
 
 ## A finding
 
-1. Reproduce it: `cd fuzz && cargo fuzz run -s none --fuzz-dir . <target> artifacts/<target>/<file>`;
-   `cargo fuzz tmin -s none --fuzz-dir . <target> <file>` shrinks it.
-2. Write it as a unit test of the owning crate's default lane that fails on the input, in the
-   crate's lane regressions where it has one (`sip-message`'s `no_panic_lane/regressions.rs`).
+1. Reproduce it: `scripts/fuzz.sh repro <target> fuzz/artifacts/<target>/<file>` shows its panic;
+   `scripts/fuzz.sh tmin <target> <file>` shrinks it to `<file>.min`.
+2. Write it as a unit test that fails on the input, in the owning crate's default lane: beside
+   the code it exercises, or in the crate's lane regressions where it has them
+   (`sip-message`'s `no_panic_lane/regressions.rs`). An input grown from real traffic
+   (a `FUZZ_SEEDS` corpus) is restated with synthetic values first: names, numbers and
+   addresses of the documentation ranges, so nothing of the traffic reaches the test.
 3. Fix it in the same change. A finding that needs a design change gets its own ticket, with
    the input attached.
 

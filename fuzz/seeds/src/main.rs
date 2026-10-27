@@ -1,7 +1,8 @@
 //! Writes each fuzz target's seed corpus, one directory per target under
 //! `<out>`, each file one input in the target's layout (`fuzz_lanes::input`):
 //!
-//!   fuzz-seeds <out>                    the no-panic lanes' synthetic seeds
+//!   fuzz-seeds <out> [--target <t>]     the no-panic lanes' synthetic seeds, of
+//!                                       every target or of <t>
 //!   fuzz-seeds <out> --messages <path>  raw SIP messages, into the targets that
 //!                                       take one: every file of a directory, or
 //!                                       a file of NUL-separated messages
@@ -49,6 +50,16 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (out, corpus) = match args.as_slice() {
         [out] => (out, lane_seeds()),
+        [out, flag, target] if flag == "--target" => {
+            let mut all = lane_seeds();
+            match all.remove_entry(target.as_str()) {
+                Some(only) => (out, Corpus::from([only])),
+                None => {
+                    eprintln!("fuzz-seeds: no seeds for target {target}");
+                    return ExitCode::from(2);
+                }
+            }
+        }
         [out, flag, path] if flag == "--messages" => match read_messages(Path::new(path)) {
             Ok(messages) => (out, from_messages(&messages)),
             Err(e) => {
@@ -57,7 +68,7 @@ fn main() -> ExitCode {
             }
         },
         _ => {
-            eprintln!("usage: fuzz-seeds <out> [--messages <dir>]");
+            eprintln!("usage: fuzz-seeds <out> [--target <t> | --messages <path>]");
             return ExitCode::from(2);
         }
     };
