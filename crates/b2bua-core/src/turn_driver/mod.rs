@@ -487,3 +487,7 @@ fn last_request_to(result: &HandlerResult, leg: &str) -> Option<SipRequest> {
         _ => None,
     })
 }
+
+#[cfg(test)]
+#[path = "strict_tests.rs"]
+mod strict_tests;
