@@ -268,7 +268,7 @@ unacked_2xx_reap,unacked_reinvite_2xx_reap,prack_reliable_ladder}.rs`
 `b2bua-harness/tests/unacked_2xx_reap.rs` also holds the X5 floor: a
 non-positive `ack_timeout_sec` still ends the session at Timer L, and a service
 rule that answers the give-up without terminating does not keep it up.
-`b2bua/tests/it/rules.rs` (answering the caller leaves a b-leg's pending re-INVITE
+`b2bua-core/tests/it/rules/` (answering the caller leaves a b-leg's pending re-INVITE
 2xx ladder alone; `settle_give_up` ends a session a service parked), `b2bua-sdk/src/config.rs` (a non-positive
 deadline is refused and falls back to 32 s), `call/tests/it/model_helpers.rs` (the 2xx ladder never runs
 past Timer L; `Scope::Provisionals` names no 2xx),
