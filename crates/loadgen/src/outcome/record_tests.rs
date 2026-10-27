@@ -148,6 +148,27 @@ fn after_answer_the_dialog_facts_name_the_ending() {
     assert_eq!(r["ending"], "cut", "a BYE the caller did not wait for");
 }
 
+/// An RFC audit vote on a call the callee released is a protocol anomaly of an
+/// answered call, never a cut.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn an_audit_vote_on_a_released_call_is_no_cut() {
+    let finding = sip_net_testkit::RfcFinding {
+        rule: "mid-dialog-route".into(),
+        lane: "10.0.0.1:5060".into(),
+        detail: "in-dialog BYE omits Route header".into(),
+        advisory: false,
+        offending: None,
+        charged: None,
+    };
+    let r = record(
+        &WireFacts { bye_received: Some(Some(200)), ..answered() },
+        &CallOutcome::RfcAuditFail(vec![finding]),
+    );
+    assert_eq!(r["ending"], "answered");
+    assert_eq!(r["failures"][0]["detail"], "mid-dialog-route");
+}
+
 /// A step of an answered call that waited in vain is a failure, even when the
 /// generator's teardown released the dialog: the call did not run as its shape
 /// says, so the record never reads as a clean answered call.

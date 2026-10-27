@@ -216,16 +216,18 @@ fn ending_before_answer(wire: &WireFacts, stop: Stop) -> (&'static str, String) 
 /// An answered call's ending and whether it reached `released` (a BYE of the
 /// call drew a 2xx either way). A generator, protocol or transport stop is
 /// `failed` whatever the teardown drew; a call ended on an accepted branch is
-/// `answered`; otherwise a 481 or a BYE the caller did not wait for is `cut`,
+/// `answered`; otherwise a 481, or a BYE the caller did not wait for, is `cut`,
 /// the call's BYE without a final `stranded`, a dialog the call or the
-/// generator's teardown released `answered`.
+/// generator's teardown released `answered`. A flagged call ran its shape, so
+/// a BYE it received is the shape's own and cuts nothing.
 fn ending_after_answer(wire: &WireFacts, stop: Stop) -> (&'static str, bool) {
     let released = matches!(wire.bye, Some(Some(c)) if c < 300)
         || matches!(wire.bye_received, Some(Some(c)) if c < 300);
     let ending = match stop {
         Stop::Generator | Stop::Transport | Stop::Protocol => "failed",
         Stop::Ok => "answered",
-        Stop::Timeout | Stop::Flagged if wire.saw_481 || wire.bye_received.is_some() => "cut",
+        Stop::Timeout | Stop::Flagged if wire.saw_481 => "cut",
+        Stop::Timeout if wire.bye_received.is_some() => "cut",
         Stop::Timeout | Stop::Flagged if wire.bye == Some(None) => "stranded",
         Stop::Timeout | Stop::Flagged if released || wire.teardown_released => "answered",
         Stop::Timeout | Stop::Flagged => "failed",
