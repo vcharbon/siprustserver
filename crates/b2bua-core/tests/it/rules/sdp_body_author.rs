@@ -4,6 +4,7 @@
 
 use super::*;
 use b2bua_core::effects::OutboundBody;
+use b2bua_core::rule_fixture::{context, executor};
 
 const BOB_V5: &str =
     "v=0\r\no=bob 202 5 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\nm=audio 20002 RTP/AVP 0\r\n";
@@ -19,24 +20,9 @@ fn reinvite_body(author: BodyAuthor) -> String {
         ..Default::default()
     };
     let event = CallEvent::sip(SipMessage::Request(invite()), "127.0.0.1:5060".parse().unwrap());
-    let ctx = RuleContext {
-        call: RuleCall::new(&call),
-        call_ref: &call.call_ref,
-        event: &event,
-        source_leg_id: "b-1",
-        direction: Direction::FromB,
-        now_ms: 0,
-        config: &config,
-        discharged: None,
-        resolved: &call::helpers::UNRESOLVED,
-    };
+    let ctx = context(&call, &event, "b-1", &config);
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        owners: b2bua_core::owners::Owners::none(),
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-    };
+    let mut exec = executor(&config, &mut id_gen);
     let reinvite = RuleAction::SendReinvite {
         leg_id: "a".into(),
         body: Some(Body::new(BOB_V5.as_bytes().to_vec(), None, author)),

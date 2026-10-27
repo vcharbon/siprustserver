@@ -3,6 +3,7 @@
 //! in-dialog `invite` is an extension method, which no `INVITE` rule takes.
 
 use super::*;
+use b2bua_core::rule_fixture::context;
 
 /// The in-dialog request of `method`, its CSeq `2 <method>`.
 fn in_dialog(method: Method) -> SipRequest {
@@ -16,17 +17,7 @@ fn accepts(matcher: &Match, request: SipRequest) -> bool {
     confirm_a(&mut call);
     let event = CallEvent::sip(SipMessage::Request(request), "127.0.0.1:5060".parse().unwrap());
     let config = B2buaConfig::default();
-    let ctx = RuleContext {
-        call: RuleCall::new(&call),
-        call_ref: &call.call_ref,
-        event: &event,
-        source_leg_id: "a",
-        direction: Direction::FromA,
-        now_ms: 0,
-        config: &config,
-        discharged: None,
-        resolved: &call::helpers::UNRESOLVED,
-    };
+    let ctx = context(&call, &event, "a", &config);
     matcher.accepts_columns(&ctx)
 }
 
@@ -46,17 +37,8 @@ fn in_dialog_bye_selects_relay_bye() {
     confirm_a(&mut call);
     let bye = in_dialog_request(sip_message::Method::Bye);
     let event = CallEvent::sip(SipMessage::Request(bye), "127.0.0.1:5060".parse().unwrap());
-    let ctx = RuleContext {
-        call: RuleCall::new(&call),
-        call_ref: &call.call_ref,
-        event: &event,
-        source_leg_id: "a",
-        direction: Direction::FromA,
-        now_ms: 0,
-        config: &B2buaConfig::default(),
-        discharged: None,
-        resolved: &call::helpers::UNRESOLVED,
-    };
+    let config = B2buaConfig::default();
+    let ctx = context(&call, &event, "a", &config);
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
     assert_eq!(ranked.first().map(|r| r.id), Some("relay-bye"));

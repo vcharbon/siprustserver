@@ -5,30 +5,17 @@
 
 use super::*;
 use b2bua_core::effects::OutboundBody;
+use b2bua_core::rule_fixture::{context, executor, Varied};
 
 /// One executor turn at `now_ms` over `call` for `actions`, in the context of
 /// an event from the caller's leg.
 fn execute_at(call: &call::Call, now_ms: i64, actions: &[RuleAction]) -> HandlerResult {
     let config = B2buaConfig::default();
     let event = info_event();
-    let ctx = RuleContext {
-        call: RuleCall::new(call),
-        call_ref: &call.call_ref,
-        event: &event,
-        source_leg_id: "a",
-        direction: Direction::FromA,
-        now_ms,
-        config: &config,
-        discharged: None,
-        resolved: &call::helpers::UNRESOLVED,
-    };
+    let ctx = context(call, &event, "a", &config).at(now_ms);
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        owners: b2bua_core::owners::Owners::none(),
-        config: &config,
-        turn: &mut id_gen,
-        now_ms,
-    };
+    let mut exec = executor(&config, &mut id_gen);
+    exec.now_ms = now_ms;
     exec.execute(actions, call, &ctx)
 }
 

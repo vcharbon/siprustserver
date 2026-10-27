@@ -3,6 +3,7 @@
 //! record read by its origin and the method table (ADR-0055 §2).
 
 use super::*;
+use b2bua_core::rule_fixture::{context, Varied};
 
 /// The `handle-timeout` rule's output for a b-leg INVITE transaction timeout
 /// naming `leg_id` on `call`.
@@ -47,17 +48,8 @@ fn handled(
         .filter(|(_, r)| r.outbound_cseq == i64::from(cseq) && r.method == method)
         .map(Box::new);
     let resolved = call::helpers::Resolved { dialog: None, record };
-    let ctx = RuleContext {
-        call: RuleCall::new(call),
-        call_ref: &call.call_ref,
-        event: &event,
-        source_leg_id: leg_id,
-        direction,
-        now_ms: 0,
-        config: &B2buaConfig::default(),
-        discharged: None,
-        resolved: &resolved,
-    };
+    let config = B2buaConfig::default();
+    let ctx = context(call, &event, leg_id, &config).resolving(&resolved);
     let rules = default_rules();
     pick_ranked(&rules, call, &ctx)
         .into_iter()

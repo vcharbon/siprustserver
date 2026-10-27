@@ -3,6 +3,7 @@
 use super::*;
 use b2bua_core::effects::{FireAndForgetEffect, HandlerEffects, SoftBoundedEffect};
 use b2bua_core::obligations::ObligationSet;
+use b2bua_core::rule_fixture::executor;
 use call::CallLimiterState;
 
 /// The releases the turn sends.
@@ -74,12 +75,7 @@ fn turn(call: &call::Call, actions: &[RuleAction]) -> HandlerResult {
     let config = B2buaConfig::default();
     let ctx = ctx_for(call, &event, &config);
     let mut id_gen = scope(1);
-    let mut exec = ActionExecutor {
-        owners: b2bua_core::owners::Owners::none(),
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-    };
+    let mut exec = executor(&config, &mut id_gen);
     let result = exec.execute(actions, call, &ctx);
     invariants::enforce(
         &ObligationSet::core(),
