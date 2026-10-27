@@ -31,7 +31,8 @@ pub(super) struct Dialog {
     /// The route set in the order in-dialog requests must reproduce it.
     pub(super) route_set: Vec<UriFacts>,
     /// The endpoint sent the establishing INVITE, so its route set is the
-    /// dialog-creating RESPONSE's Record-Route stack reversed (§12.1.2).
+    /// dialog-creating RESPONSE's Record-Route stack, without the rows it
+    /// forwarded, reversed (§12.1.2).
     pub(super) is_uac: bool,
     /// Record-Route rows the endpoint itself forwarded on the establishing
     /// INVITE: a record-routing proxy's own hop and those upstream of it, the

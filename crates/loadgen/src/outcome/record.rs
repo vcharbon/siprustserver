@@ -39,29 +39,31 @@ fn failure(at_ms: i64, kind: &str, detail: Option<String>) -> Value {
 /// How loadgen's own result stopped or marked the call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stop {
-    /// It ended on an accepted branch.
+    /// It ran its shape to an accepted branch; a post-call oracle's vote (RFC
+    /// audit, case checks) is a failure of the record, never a stop.
     Ok,
     /// A wait passed with nothing.
     Timeout,
     Transport,
     /// An unexpected or malformed message stopped the call.
     Protocol,
-    /// A post-call oracle (RFC audit, case checks) flagged a call that ran.
-    Flagged,
+    /// A step drew a final other than it expected; the wire states it.
+    WrongStatus,
     /// The generator itself failed.
     Generator,
 }
 
 fn stop_of(outcome: &CallOutcome) -> Stop {
     match outcome {
-        CallOutcome::Ok { .. } => Stop::Ok,
+        CallOutcome::Ok { .. } | CallOutcome::RfcAuditFail(_) | CallOutcome::CheckFail(_) => {
+            Stop::Ok
+        }
         CallOutcome::Panic(_) | CallOutcome::Rejected(_) => Stop::Generator,
-        CallOutcome::RfcAuditFail(_) | CallOutcome::CheckFail(_) => Stop::Flagged,
         CallOutcome::Step { cause, .. } => match cause {
             StepError::Timeout { .. } | StepError::QueueClosed { .. } => Stop::Timeout,
             StepError::Transport { .. } => Stop::Transport,
             // A final other than the step expected: the wire states it.
-            StepError::WrongStatus { .. } => Stop::Flagged,
+            StepError::WrongStatus { .. } => Stop::WrongStatus,
             _ => Stop::Protocol,
         },
     }
@@ -128,7 +130,7 @@ pub fn build(
         {
             failures.push(failure(ended_at_ms, "protocol", Some(format!("step {at} timed out"))));
         }
-        if ending == "failed" && matches!(stop, Stop::Timeout | Stop::Flagged) {
+        if ending == "failed" && matches!(stop, Stop::Timeout | Stop::WrongStatus) {
             failures.push(failure(ended_at_ms, "protocol", Some("never released".into())));
         }
         (ending, None, if released { "released" } else { "answered" })
@@ -209,28 +211,26 @@ fn ending_before_answer(wire: &WireFacts, stop: Stop) -> (&'static str, String) 
     match stop {
         Stop::Transport => ("failed", "transport".into()),
         Stop::Protocol | Stop::Generator => ("failed", "protocol".into()),
-        Stop::Ok | Stop::Timeout | Stop::Flagged => ("timeout", "timeout".into()),
+        Stop::Ok | Stop::Timeout | Stop::WrongStatus => ("timeout", "timeout".into()),
     }
 }
 
 /// An answered call's ending and whether it reached `released` (a BYE of the
 /// call drew a 2xx either way). A generator, protocol or transport stop is
 /// `failed` whatever the teardown drew; a call ended on an accepted branch is
-/// `answered`; otherwise a 481, or a BYE the caller did not wait for, is `cut`,
+/// `answered`; otherwise a 481 or a BYE the caller did not wait for is `cut`,
 /// the call's BYE without a final `stranded`, a dialog the call or the
-/// generator's teardown released `answered`. A flagged call ran its shape, so
-/// a BYE it received is the shape's own and cuts nothing.
+/// generator's teardown released `answered`.
 fn ending_after_answer(wire: &WireFacts, stop: Stop) -> (&'static str, bool) {
     let released = matches!(wire.bye, Some(Some(c)) if c < 300)
         || matches!(wire.bye_received, Some(Some(c)) if c < 300);
     let ending = match stop {
         Stop::Generator | Stop::Transport | Stop::Protocol => "failed",
         Stop::Ok => "answered",
-        Stop::Timeout | Stop::Flagged if wire.saw_481 => "cut",
-        Stop::Timeout if wire.bye_received.is_some() => "cut",
-        Stop::Timeout | Stop::Flagged if wire.bye == Some(None) => "stranded",
-        Stop::Timeout | Stop::Flagged if released || wire.teardown_released => "answered",
-        Stop::Timeout | Stop::Flagged => "failed",
+        Stop::Timeout | Stop::WrongStatus if wire.saw_481 || wire.bye_received.is_some() => "cut",
+        Stop::Timeout | Stop::WrongStatus if wire.bye == Some(None) => "stranded",
+        Stop::Timeout | Stop::WrongStatus if released || wire.teardown_released => "answered",
+        Stop::Timeout | Stop::WrongStatus => "failed",
     };
     (ending, released || ending == "answered")
 }
