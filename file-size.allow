@@ -33,7 +33,7 @@ crates/b2bua/src/decision/test_adapter.rs 818
 crates/b2bua/src/limiter/refresh_batch.rs 517
 crates/b2bua/src/limiter/release_queue.rs 513
 crates/b2bua/src/metrics/limiter.rs 504
-crates/b2bua/src/metrics.rs 828
+crates/b2bua/src/metrics.rs 771
 crates/b2bua/src/node.rs 582
 crates/b2bua/src/repl/puller.rs 665
 crates/b2bua/src/repl/real_transport_tests.rs 1186
@@ -86,7 +86,7 @@ crates/rfc-rules/src/rules/proxy.rs 634
 crates/rfc-rules/src/rules/wellformed.rs 656
 crates/rfc-rules/src/verdict/evidence.rs 1722
 crates/scenario-harness/src/actor/response.rs 510
-crates/scenario-harness/src/actor/runner.rs 570
+crates/scenario-harness/src/actor/runner.rs 558
 crates/scenario-harness/src/actor/scenarios.rs 1086
 crates/scenario-harness/src/actor/script.rs 532
 crates/scenario-harness/src/actor/state.rs 625
