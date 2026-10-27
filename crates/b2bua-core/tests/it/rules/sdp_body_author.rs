@@ -2,6 +2,7 @@
 //! carries continues it as written, the same bytes from this stack are restated
 //! under that session (RFC 3264 §8).
 
+use super::fixtures::*;
 use super::*;
 use b2bua_core::effects::OutboundBody;
 use b2bua_core::rule_fixture::{context, executor};

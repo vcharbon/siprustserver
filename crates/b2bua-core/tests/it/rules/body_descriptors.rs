@@ -3,6 +3,7 @@
 //! RFC 2045): every emitter states them beside the body, and a body keeps the
 //! media type it was given.
 
+use super::fixtures::*;
 use super::*;
 use b2bua_core::effects::OutboundBody;
 use call::HostPort;

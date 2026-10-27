@@ -21,7 +21,7 @@ fn an_unbuildable_relay_answers_its_sender_and_records_nothing() {
     };
     let before = peer(&call);
     let event = CallEvent::sip(
-        SipMessage::Request(super::super::in_dialog_request(Method::Info)),
+        SipMessage::Request(super::super::fixtures::in_dialog_request(Method::Info)),
         "127.0.0.1:5060".parse().unwrap(),
     );
     let (config, mut id_gen) = (B2buaConfig::default(), scope(1));

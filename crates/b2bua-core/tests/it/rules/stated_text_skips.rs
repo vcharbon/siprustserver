@@ -4,6 +4,7 @@
 //! without the line. Each skip is reported for the model-defect count.
 
 use super::body_descriptors::{bridged, sent_request, values};
+use super::fixtures::*;
 use super::*;
 use b2bua_core::effects::OutboundBody;
 

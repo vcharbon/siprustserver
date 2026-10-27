@@ -4,6 +4,7 @@
 //! BYE this stack sends waits for the ACK of its own 2xx on the dialog (§15),
 //! whichever action sends it.
 
+use super::fixtures::*;
 use super::*;
 use b2bua_core::effects::OutboundBody;
 
@@ -135,7 +136,7 @@ fn a_services_bye_ending_the_callers_leg_leaves_on_her_ack() {
     let ladder = TimerKey::obligation(TimerType::RepeatGiveUp, answered_obligation());
     assert!(result.call.timers.iter().any(|t| t.key == ladder), "her 2xx's give-up stays armed");
 
-    let (_, _, fx) = super::discharge_ack(&result.call, "a");
+    let (_, _, fx) = super::fixtures::discharge_ack(&result.call, "a");
     let byes = fx.outbound.iter().filter(
         |e| matches!(&e.body, OutboundBody::Request(r) if *r.method() == sip_message::Method::Bye),
     );

@@ -1,10 +1,10 @@
 //! ADR-0016 — `define_service!` / `sm_rule!` macro + `init` hook.
 //!
 //! A test-only **stub service** (`S0 → S1`, one `init`, one state-gated rule)
-//! exercised end-to-end with no real service: the macro generates the state enum
-//! + machine + rules + init; the call's setup seeds the cursor (S0) and the data
-//! backing; the rule fires in S0, `SetState`s to S1, and declines in S1 — proving
-//! macro + init + selection compose.
+//! exercised end-to-end with no real service: the macro generates the state
+//! enum, the machine, the rules and the init; the call's setup seeds the cursor
+//! (S0) and the data backing; the rule fires in S0, `SetState`s to S1, and
+//! declines in S1 — proving macro, init and selection compose.
 
 use b2bua_core::rules::{
     compose_rules, default_rules, Match, RuleAction, RuleCall, RuleContext, RuleDefinition,

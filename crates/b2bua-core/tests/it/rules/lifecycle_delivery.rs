@@ -2,6 +2,7 @@
 //! events, whichever rule claimed the turn, within what a lifecycle handler
 //! may do; and a guard timer is declared by its type and its scope's kind.
 
+use super::fixtures::*;
 use super::*;
 use b2bua_core::rule_fixture::executor;
 use b2bua_core::rules::lifecycle_delivery::{close_turn, TurnStart};

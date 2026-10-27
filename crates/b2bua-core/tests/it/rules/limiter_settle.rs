@@ -1,5 +1,6 @@
 //! The limiter settle: one release per call that sent an admit.
 
+use super::fixtures::*;
 use super::*;
 use b2bua_core::effects::{FireAndForgetEffect, HandlerEffects, SoftBoundedEffect};
 use b2bua_core::obligations::ObligationSet;

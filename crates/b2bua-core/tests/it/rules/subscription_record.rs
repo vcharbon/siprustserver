@@ -3,6 +3,7 @@
 //! subscription, whoever asks; another subscription of the dialog still
 //! notifies.
 
+use super::fixtures::*;
 use super::*;
 use b2bua_core::effects::OutboundBody;
 use b2bua_core::rule_fixture::{context, executor, Varied};

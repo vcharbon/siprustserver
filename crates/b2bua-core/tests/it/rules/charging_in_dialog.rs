@@ -4,6 +4,7 @@
 //! on its own behalf carries the vector of the leg it travels: the one that
 //! leg's dialog-creating INVITE carried, none where it carried none.
 
+use super::fixtures::*;
 use super::*;
 use call::features::{
     ChargingVectorFeature, FeatureActivations, KeepaliveActivation, PlatformActivations,
@@ -41,13 +42,13 @@ fn features(option: bool, uncharged: bool) -> FeatureActivations {
 
 /// A confirmed originated leg whose dialling INVITE carried `vector`.
 fn confirmed(leg_id: &str, kind: LegKind, vector: &str) -> Leg {
-    let mut leg = super::b_leg_pending();
+    let mut leg = super::fixtures::b_leg_pending();
     leg.leg_id = leg_id.into();
     leg.call_id = format!("{leg_id}@x");
     call::testkit::stage_leg(&mut leg, LegState::Confirmed);
     leg.kind = Some(kind);
     with_dialog(&mut leg, &format!("{leg_id}-tag")).peer_cseq = Some(1);
-    let dialled = super::invite()
+    let dialled = super::fixtures::invite()
         .thaw()
         .push_raw(HeaderName::from("P-Charging-Vector"), vector.to_string())
         .freeze()
@@ -66,14 +67,15 @@ fn confirmed(leg_id: &str, kind: LegKind, vector: &str) -> Leg {
 /// Alice ↔ b-1 bridged, the transfer target b-2 and the media leg m-1
 /// confirmed beside them; alice's INVITE carried `caller` where given.
 fn call(caller: Option<&str>, option: bool, uncharged: bool) -> call::Call {
-    let mut call = super::test_call();
+    let mut call = super::fixtures::test_call();
     if let Some(own) = caller {
         call.a_leg_invite
             .headers
             .push(call::SipHeader { name: "P-Charging-Vector".into(), value: own.into() });
     }
     confirm_a(&mut call);
-    call.a_leg.dialogs = vec![super::a_dialog(&call, "a-svc", DialogState::Confirmed)].into();
+    call.a_leg.dialogs =
+        vec![super::fixtures::a_dialog(&call, "a-svc", DialogState::Confirmed)].into();
     call.a_leg.own_tag = Some("a-svc".into());
     call.b_legs = vec![
         confirmed("b-1", LegKind::Destination, B1),
@@ -92,7 +94,7 @@ fn reinvite(call: &call::Call, leg: &str, author: Option<&str>, add: Vec<Entry>)
         Some(l) => Body::new(b"v=0\r\n".to_vec(), None, BodyAuthor::Leg(l.into())),
         None => Body::own(b"v=0\r\n".to_vec(), None),
     };
-    super::execute_on(
+    super::fixtures::execute_on(
         call,
         &[RuleAction::SendReinvite { leg_id: leg.into(), body: Some(body), add_headers: add }],
     )

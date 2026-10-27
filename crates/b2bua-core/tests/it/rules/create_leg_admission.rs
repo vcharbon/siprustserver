@@ -15,6 +15,7 @@
 //! has no span channel). IP literals and the `["*"]` wildcard admit regardless
 //! of the suffix list.
 
+use super::fixtures::*;
 use super::*;
 use b2bua_core::rule_fixture::{context, executor, Varied};
 use call::{CallModelState, CdrEventType};

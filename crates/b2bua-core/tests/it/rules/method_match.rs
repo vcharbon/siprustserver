@@ -2,6 +2,7 @@
 //! selects `relay-bye`, and the method reads as spelled (RFC 3261 §7.1), so an
 //! in-dialog `invite` is an extension method, which no `INVITE` rule takes.
 
+use super::fixtures::*;
 use super::*;
 use b2bua_core::rule_fixture::context;
 

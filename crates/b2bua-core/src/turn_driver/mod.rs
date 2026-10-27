@@ -299,7 +299,7 @@ impl<'d> Session<'d> {
     /// Run `step`; panics when the call gives it nothing to say.
     #[expect(clippy::panic, reason = "test support: a strict step does something")]
     pub fn step(&mut self, step: Step) -> &Outcome {
-        let state = self.call.state.clone();
+        let state = self.call.state;
         let outcome = self.try_step(step.clone());
         if matches!(outcome, Outcome::Nothing) {
             panic!("{step:?} finds nothing to do on the call in {state:?}");

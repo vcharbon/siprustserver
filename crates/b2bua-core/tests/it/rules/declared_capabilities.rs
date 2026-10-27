@@ -1,5 +1,6 @@
 //! Declared capability advertisement: call model → wire.
 
+use super::fixtures::*;
 use super::*;
 
 /// A call declaring a narrow set toward the originated leg and the full set

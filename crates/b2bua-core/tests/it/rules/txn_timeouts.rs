@@ -2,6 +2,7 @@
 //! cancelling, ending or ended leg, and the timeout of a non-INVITE request
 //! record read by its origin and the method table (ADR-0055 §2).
 
+use super::fixtures::*;
 use super::*;
 use b2bua_core::rule_fixture::{context, Varied};
 
