@@ -72,6 +72,7 @@ async fn a_reinvite_retransmitted_to_the_primary_draws_the_2xx_its_copy_retained
     let cseq = round.sent_invite().expect("the re-INVITE").cseq().seq();
     est.fh.cut_signalling("alice", est.alice.addr());
     let mut at_bob = est.bob.receive("INVITE").await;
+    let round_cseq = at_bob.request().cseq().seq();
     est.fh.advance(SETTLE).await;
     at_bob.respond(200, "OK").with_sdp(ANSWER).await;
     est.fh.advance(SETTLE).await;
@@ -99,7 +100,7 @@ async fn a_reinvite_retransmitted_to_the_primary_draws_the_2xx_its_copy_retained
 
     // ── The caller ACKs through the primary; the callee draws one ACK ───────
     est.dialog.ack_for(cseq, None).await;
-    let acks = re_ack_copies(&est.fh, &est.alice, &mut est.dialog, &est.bob).await;
+    let acks = re_ack_copies(&est.fh, &est.alice, &mut est.dialog, &est.bob, round_cseq).await;
     assert_eq!(acks, 1, "the callee draws exactly one ACK for its 2xx");
     caller_hangs_up(&mut est).await;
 }

@@ -90,6 +90,7 @@ async fn a_reinvite_retransmitted_after_its_2xx_replicated_draws_that_2xx_at_the
     let reinvite = dialog.send_request(InDialogMethod::Invite).with_sdp(REOFFER).send().await;
     fh.cut_signalling("alice", alice.addr());
     let mut at_bob = bob.receive("INVITE").await;
+    let round_cseq = at_bob.request().cseq().seq();
     let cseq = reinvite.sent_invite().expect("the re-INVITE").cseq().seq();
     at_bob.respond(200, "OK").with_sdp(REANSWER).await;
     fh.advance(REPLICATE).await;
@@ -120,7 +121,7 @@ async fn a_reinvite_retransmitted_after_its_2xx_replicated_draws_that_2xx_at_the
 
     // ── The caller ACKs; the callee draws one ACK ───────────────────────────
     dialog.ack_for(cseq, None).await;
-    let acks = re_ack_copies(&fh, &alice, &mut dialog, &bob).await;
+    let acks = re_ack_copies(&fh, &alice, &mut dialog, &bob, round_cseq).await;
     assert_eq!(acks, 1, "the callee draws exactly one ACK for its 2xx");
     drop(reinvite);
 
@@ -149,6 +150,7 @@ async fn a_reinvite_retransmitted_after_another_takeover_draws_its_replicated_2x
     let reinvite = dialog.send_request(InDialogMethod::Invite).with_sdp(REOFFER).send().await;
     fh.cut_signalling("alice", alice.addr());
     let mut at_bob = bob.receive("INVITE").await;
+    let round_cseq = at_bob.request().cseq().seq();
     let cseq = reinvite.sent_invite().expect("the re-INVITE").cseq().seq();
     at_bob.respond(200, "OK").with_sdp(REANSWER).await;
     fh.advance(REPLICATE).await;
@@ -179,7 +181,7 @@ async fn a_reinvite_retransmitted_after_another_takeover_draws_its_replicated_2x
     drop((info, reinvite));
 
     dialog.ack_for(cseq, None).await;
-    let acks = re_ack_copies(&fh, &alice, &mut dialog, &bob).await;
+    let acks = re_ack_copies(&fh, &alice, &mut dialog, &bob, round_cseq).await;
     assert_eq!(acks, 1, "the callee draws exactly one ACK for its 2xx");
 
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
@@ -209,6 +211,7 @@ async fn a_retained_2xx_is_retransmitted_by_the_survivor_after_its_nodes_departu
     let mut reinvite = dialog.reinvite(Some(REOFFER)).await;
     reinvite.expect(100).await;
     let mut at_bob = bob.receive("INVITE").await;
+    let round_cseq = at_bob.request().cseq().seq();
     fh.cut_signalling("alice", alice.addr());
     at_bob.respond(200, "OK").with_sdp(REANSWER).await;
     fh.advance(REPLICATE).await;
@@ -221,7 +224,7 @@ async fn a_retained_2xx_is_retransmitted_by_the_survivor_after_its_nodes_departu
     reinvite.expect(200).await;
     assert_taken_over_once(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before);
     dialog.ack(None).await;
-    let acks = re_ack_copies(&fh, &alice, &mut dialog, &bob).await;
+    let acks = re_ack_copies(&fh, &alice, &mut dialog, &bob, round_cseq).await;
     assert_eq!(acks, 1, "the callee draws exactly one ACK for its 2xx");
 
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;

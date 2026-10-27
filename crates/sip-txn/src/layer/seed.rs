@@ -159,7 +159,8 @@ impl Owner {
     /// A server INVITE Completed on the non-2xx `response` (RFC 3261 §17.2.1),
     /// keyed by its top Via, the final sent toward `dest` on Timer G from now
     /// until the ACK or Timer H. An occupant that has sent no final takes
-    /// `response` as its final and sends it to its INVITE's source now.
+    /// `response` as its final and sends it to its INVITE's source, now and
+    /// on Timer G.
     /// `false` when the response names no branch or its identity holds a
     /// transaction that has sent its final.
     async fn seed_rejected(
@@ -202,7 +203,7 @@ impl Owner {
             txn.last_response_status = Some(response.status());
             txn.original_request = None;
         }
-        self.arm_final_hold(key.id(), TxnKind::Invite, response.status(), dest);
+        self.arm_final_hold(key.id(), TxnKind::Invite, response.status(), occupant.unwrap_or(dest));
         if let Some(source) = occupant {
             self.send_buffer(endpoint, response.image(), source).await;
         }

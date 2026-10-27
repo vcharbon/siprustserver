@@ -495,9 +495,10 @@ the re-anchor deadband of each other.
   - split, healed or not: judged like a split that never heals below;
   - replication stalled past the cap of §3, then a kill: judged like a split
     (user ruling), on leaks, cleanup and the CDR count — one or two (the
-    stalled primary's and the departure sweep's, §5), never none: the stale
-    copy contradicts what the stalled primary released at the cap as a
-    split's other copy would;
+    stalled primary's and the departure sweep's, §5), never none — and on a
+    final for every request that reaches a living worker: the stale copy
+    contradicts what the stalled primary released at the cap as a split's
+    other copy would;
   - a backlog over the high-water mark, or a backup at its memory ceiling, then
     a kill: a call with no backup is lost as on a non-HA B2BUA, its cell
     leaving one CDR or none.
@@ -571,7 +572,9 @@ the re-anchor deadband of each other.
     ADR-0039), whether that request left or not, the backup applying no
     later turn of the primary (user ruling): the answer is lost with the
     dead node, a turn that took it included, and the copy stays reactive
-    (§5); every dialog is left to its endpoint's own timers;
+    (§5); every dialog is left to its endpoint's own timers, and when the
+    turn's effects had not left, every request that reaches a living worker
+    still draws its final there;
   - a kill inside the replication window: a copy re-uses a CSeq the dead
     primary sent before the backup applied the write, at most one rejected
     request per dialog; the call still ends or continues cleanly. A call with

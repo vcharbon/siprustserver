@@ -94,7 +94,7 @@ crates/scenario-harness/src/agent/client_invite.rs 598
 crates/scenario-harness/src/agent/dialog.rs 715
 crates/scenario-harness/src/agent/harness.rs 858
 crates/scenario-harness/src/agent/server_txn.rs 599
-crates/scenario-harness/src/agent/ua.rs 796
+crates/scenario-harness/src/agent/ua.rs 792
 crates/scenario-harness/tests/it/template_emission.rs 1016
 crates/seq-report/src/html.rs 1005
 crates/sip-message/src/generators/relay.rs 504

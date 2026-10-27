@@ -551,7 +551,7 @@ async fn a_reinvite_in_flight_at_the_kill_is_served_on_the_peers_resend() {
     first_at_bob.respond(200, "OK").with_sdp(REANSWER).await;
     let answered = reinvite.expect(200).await;
     dialog.ack_for(answered.cseq().seq(), None).await;
-    bob.receive("ACK").await;
+    bob.receive_ack_of(first_at_bob.request().cseq().seq()).await;
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
@@ -638,7 +638,7 @@ async fn a_reinvite_retransmitted_after_another_takeover_is_absorbed_by_its_seed
     first_at_bob.respond(200, "OK").with_sdp(REANSWER).await;
     let answered = reinvite.expect(200).await;
     dialog.ack_for(answered.cseq().seq(), None).await;
-    bob.receive("ACK").await;
+    bob.receive_ack_of(first_at_bob.request().cseq().seq()).await;
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;

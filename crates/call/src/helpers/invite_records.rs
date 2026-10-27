@@ -75,7 +75,7 @@ pub fn relayed_invite_pending(d: &Dialog) -> bool {
 /// `record`, an INVITE this side sends on `leg_id`'s dialog `id`, becomes the
 /// dialog's last: the ACK the previous one's 2xx drew belongs to that
 /// transaction alone (§13.2.2.4), and `record` carries it as the ACK ahead of
-/// it ([`InviteExchange::ack_ahead`]).
+/// it ([`InviteExchange::ack_ahead`]) when it answered a 2xx.
 pub fn open_sent_invite(
     call: Call,
     leg_id: &str,
@@ -83,7 +83,7 @@ pub fn open_sent_invite(
     mut record: RequestRecord,
 ) -> Call {
     update_dialog(call, leg_id, id, |d| {
-        let ahead = emitted_ack(d).cloned();
+        let ahead = emitted_ack(d).filter(|_| ack_branch(d).is_some()).cloned();
         if let Some(ahead) = ahead {
             record.invite.get_or_insert_with(InviteExchange::default).ack_ahead = Some(ahead);
         }

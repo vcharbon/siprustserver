@@ -86,6 +86,7 @@ async fn reinvite_2xx_acked_through_the_primary(name: &str, write: PrimaryWrite,
     fh.advance(Duration::from_millis(200)).await;
     let mut round = dialog.request(InDialogMethod::Invite, Some(OFFER)).await;
     let mut at_bob = bob.receive("INVITE").await;
+    let round_cseq = at_bob.request().cseq().seq();
     round.expect(100).await;
     fh.advance(Duration::from_millis(300)).await;
     assert!(backup.serves(&call_ref), "the backup's copy serves the round");
@@ -112,7 +113,7 @@ async fn reinvite_2xx_acked_through_the_primary(name: &str, write: PrimaryWrite,
         info_through_the_primary(&alice, &mut bob_dialog).await;
         fh.advance(SETTLE).await;
     }
-    let acks = ack_the_answer(&fh, &alice, &mut dialog, &bob).await;
+    let acks = ack_the_answer(&fh, &alice, &mut dialog, &bob, round_cseq).await;
     assert_eq!(acks, 1, "the callee draws exactly one ACK for its 2xx");
 
     let mut bye = dialog.bye().await;
@@ -153,25 +154,30 @@ async fn info_through_the_primary(alice: &Agent, bob_dialog: &mut Dialog) {
 
 /// The caller ACKs the 2xx — the re-INVITE carried the offer, the 2xx the
 /// answer, so the ACK is bodyless — then re-ACKs its copies
-/// ([`re_ack_copies`]). Returns the ACKs the callee drew meanwhile.
+/// ([`re_ack_copies`]). Returns the ACKs of the round the callee drew
+/// meanwhile.
 pub(crate) async fn ack_the_answer(
     fh: &FailoverHarness,
     alice: &Agent,
     dialog: &mut Dialog,
     bob: &Agent,
+    round_cseq: u32,
 ) -> usize {
     dialog.ack(None).await;
-    re_ack_copies(fh, alice, dialog, bob).await
+    re_ack_copies(fh, alice, dialog, bob, round_cseq).await
 }
 
 /// The caller re-ACKs every copy of the 2xx that reaches her for
-/// [`ACK_WINDOW`] (RFC 3261 §13.2.2.4). Returns the ACKs the callee drew
-/// meanwhile; nothing else reaches either party.
+/// [`ACK_WINDOW`] (RFC 3261 §13.2.2.4). Returns the ACKs of the round the
+/// callee answered at `round_cseq` it drew meanwhile; an ACK of an earlier
+/// 2xx a copy re-sends ahead of its seed is not one, and nothing else reaches
+/// either party.
 pub(crate) async fn re_ack_copies(
     fh: &FailoverHarness,
     alice: &Agent,
     dialog: &mut Dialog,
     bob: &Agent,
+    round_cseq: u32,
 ) -> usize {
     let mut acks = 0;
     let mut waited = Duration::ZERO;
@@ -186,7 +192,9 @@ pub(crate) async fn re_ack_copies(
         }
         while let Some(msg) = bob.take_queued().await {
             match msg {
-                SipMessage::Request(r) if *r.method() == Method::Ack => acks += 1,
+                SipMessage::Request(r) if *r.method() == Method::Ack => {
+                    acks += usize::from(r.cseq().seq() == round_cseq);
+                }
                 other => panic!("unexpected toward the callee: {other:?}"),
             }
         }

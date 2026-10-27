@@ -37,6 +37,7 @@ mod abandoned;
 mod answered;
 mod hop_ack;
 mod invited;
+mod received_acks;
 mod rejected_acks;
 mod two_xx_ack;
 mod unacked_finals;
@@ -141,6 +142,9 @@ pub struct Absorption {
     /// The hop ACK each non-2xx final to this endpoint's INVITE drew, which a
     /// repeat of that final draws again (§17.1.1.2).
     rejected_acks: rejected_acks::RejectedAcks,
+    /// The ACKs this endpoint received: a repeat is the UAS core's to discard
+    /// (§13.3.1.4).
+    received_acks: received_acks::ReceivedAcks,
     log: wire_log::WireLog,
 }
 
@@ -161,6 +165,7 @@ impl Absorption {
             repeats: Default::default(),
             abandoned: abandoned::AbandonedInvites::default(),
             rejected_acks: rejected_acks::RejectedAcks::default(),
+            received_acks: received_acks::ReceivedAcks::default(),
             log: wire_log::WireLog::default(),
         }
     }
@@ -181,6 +186,7 @@ impl Absorption {
             repeats: Default::default(),
             abandoned: abandoned::AbandonedInvites::default(),
             rejected_acks: rejected_acks::RejectedAcks::default(),
+            received_acks: received_acks::ReceivedAcks::default(),
             log: wire_log::WireLog::default(),
         }
     }
@@ -199,7 +205,12 @@ impl Absorption {
         let dedup = self.dedup.load(Ordering::Relaxed);
         let ordinal = self.sighted.fetch_add(1, Ordering::Relaxed);
         match msg {
-            SipMessage::Request(r) => self.unacked_finals.sight(r),
+            SipMessage::Request(r) => {
+                self.unacked_finals.sight(r);
+                if dedup {
+                    self.received_acks.sight(r);
+                }
+            }
             SipMessage::Response(r) => self.unanswered.sight(r),
         }
         let identical = dedup && self.tables.note(raw, msg, ordinal).is_some();
@@ -317,6 +328,12 @@ impl Absorption {
         r.method().as_str() == "ACK"
             && crate::agent::top_via_branch(r)
                 .is_some_and(|b| self.hop_acks.note(r.call_id().as_str(), &b))
+    }
+
+    /// Whether `r` repeats an ACK this endpoint already received: the UAS
+    /// core discards it (§13.3.1.4).
+    pub fn repeats_an_ack(&self, r: &SipRequest) -> bool {
+        self.received_acks.repeats(r)
     }
 
     pub(crate) fn hop_ack_is_fulfilled(&self, call_id: &str, branch: &str) -> bool {

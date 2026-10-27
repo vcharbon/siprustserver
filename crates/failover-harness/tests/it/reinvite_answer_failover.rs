@@ -58,7 +58,7 @@ async fn a_reinvite_answered_after_the_kill_completes_on_the_survivor() {
         "the failed-over 200 took the call over on the survivor",
     );
     dialog.ack(None).await;
-    bob.receive("ACK").await;
+    bob.receive_ack_of(at_bob.request().cseq().seq()).await;
 
     // ── The session lives on, then ends cleanly ─────────────────────────────
     let mut info = dialog.send_request(InDialogMethod::Info).send().await;

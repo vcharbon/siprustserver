@@ -112,7 +112,8 @@ pub fn reject_early_dialogs(leg: &mut Leg, status: u16) {
 /// Record the `487` the transaction layer answered a CANCEL of `leg_id`'s
 /// initial INVITE with (RFC 3261 §9.2): the wire's final, over a 2xx built
 /// too late ([`Leg::answer_preempted`]), whose ring entry and ACK obligation
-/// go; every dialog the INVITE opened ends under the 487 (§12.1).
+/// go, or over a non-2xx the layer dropped, which is no longer kept; every
+/// dialog the INVITE opened ends under the 487 (§12.1).
 pub fn record_cancelled_invite(call: Call, leg_id: &str) -> Call {
     update_leg(call, leg_id, |l| {
         if let Some(answer) = l.invite_final_sent().filter(|s| (200..300).contains(s)) {
@@ -130,6 +131,7 @@ pub fn record_cancelled_invite(call: Call, leg_id: &str) -> Call {
         }
         reject_early_dialogs(l, 487);
         *l.invite_final_sent_mut() = Some(487);
+        *l.invite_rejection_mut() = None;
     })
 }
 

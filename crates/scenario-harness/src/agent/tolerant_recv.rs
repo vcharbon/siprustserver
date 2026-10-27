@@ -1,5 +1,6 @@
 //! Method-filtered receive policies on [`Agent`]: *tolerate* (answer 200 OK
-//! and keep waiting), *absorb* (drop silently and keep waiting), and the two
+//! and keep waiting), *absorb* (drop silently and keep waiting), the ACK of
+//! one CSeq past the ACKs of others, and the two
 //! bounded drain windows — the strict transfer-lane
 //! [`drain_expecting`](Agent::drain_expecting) and the failed-call
 //! [`release_failed_call`](Agent::release_failed_call). The plain asserting
@@ -327,6 +328,23 @@ impl Agent {
                     r.status(),
                     r.reason()
                 ),
+            }
+        }
+    }
+
+    /// Receive the ACK numbered `cseq`, absorbing an ACK of another CSeq ahead
+    /// of it: a node serving the call from its record re-sends the ACK of an
+    /// earlier 2xx ahead of the request it re-sends (RFC 3261 §14.1), which
+    /// the UAS core discards (§13.3.1.4).
+    #[track_caller]
+    pub fn receive_ack_of(&self, cseq: u32) -> impl Future<Output = ServerTxn> + '_ {
+        let site = self.step("receive_ack_of");
+        async move {
+            loop {
+                let ack = unwrap_step_at(self.try_receive("ACK").await, site);
+                if ack.request().cseq().seq() == cseq {
+                    return ack;
+                }
             }
         }
     }

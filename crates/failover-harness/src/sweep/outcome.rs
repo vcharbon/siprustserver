@@ -3,9 +3,10 @@
 //! may end the call cleanly at any instant (§1, §4): the parties accept a
 //! clean end then, and the verdict says so. Beyond that, only the declared
 //! outcomes pass:
-//! - a split, healed or not, and a stall past the cap then a kill are judged
-//!   on leaks, cleanup and the CDR count alone, never on the parties'
-//!   verdict;
+//! - a split, healed or not, is judged on leaks, cleanup and the CDR count
+//!   alone, never on the parties' verdict, and so is a stall past the cap then
+//!   a kill, so long as every request that reached a living worker drew its
+//!   final there;
 //! - a kill of the primary before the backup held the cut turn's write and
 //!   its effects had both left may leave a dialog to its endpoint's own
 //!   timer, after a teardown whose write the backup never applied (§5: a
@@ -16,13 +17,13 @@
 //!   its endpoint's own timers;
 //! - a kill of the primary once the backup held the write of a turn that
 //!   sent a request to an outside service or after which the call awaited
-//!   one's answer, whether that request left or not, the backup applying no
-//!   later turn of the primary: the answer is lost with the node, and the
-//!   copy stays reactive (§5);
-//! - an incident that loses the call (a stall then a kill, a call with no
-//!   backup) may leave every dialog, the caller's included, to its endpoint's
-//!   own timers, so long as every request that reached a living worker drew
-//!   its final there.
+//!   one's answer, the backup applying no later turn of the primary: the
+//!   answer is lost with the node, and the copy stays reactive (§5); when the
+//!   turn's effects had not left, every request that reached a living worker
+//!   still draws its final there;
+//! - a call with no backup, killed with its primary, may leave every dialog,
+//!   the caller's included, to its endpoint's own timers, so long as every
+//!   request that reached a living worker drew its final there.
 //!
 //! Nothing else is accepted: a request left without its final, or a dialog
 //! left open in any other way, fails the cell.
@@ -60,14 +61,17 @@ pub(super) fn accepted(cut: Option<CutAt>, verdict: &ScenarioVerdict, obs: &Obse
     let Some(cut) = cut else { return verdict.is_success() };
     let CutAt { incident, held_and_left, held, on_request, answer_in_flight, living_answered } =
         cut;
-    if incident.judged_on_leaks() || verdict.is_success() {
+    if incident.splits() || verdict.is_success() {
         return true;
+    }
+    if incident == Incident::StalledKilled {
+        return living_answered;
     }
     let ScenarioVerdict::Failure { at, cause } = verdict else { return false };
     let StepError::Timeout { .. } = cause else { return false };
     let torn_down = at.barrier == FailedAt::TORN_DOWN;
     obs.with_snapshot(|s| match incident {
-        Incident::PrimaryKilled if held && answer_in_flight => true,
+        Incident::PrimaryKilled if held && answer_in_flight => held_and_left || living_answered,
         Incident::PrimaryKilled if held_and_left => false,
         Incident::PrimaryKilled => !on_request || (torn_down && teardown_lost_in_the_window(s)),
         _ if incident.loses_the_call() => living_answered,

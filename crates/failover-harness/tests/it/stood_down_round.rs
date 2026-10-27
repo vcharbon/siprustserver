@@ -53,7 +53,7 @@ async fn a_copy_stood_down_mid_round_takes_the_call_over_afresh_on_the_callees_a
     at_bob.respond(200, "OK").with_sdp(ANSWER).await;
     round.expect(200).await;
     dialog.ack(None).await;
-    bob.receive("ACK").await;
+    bob.receive_ack_of(at_bob.request().cseq().seq()).await;
     fh.advance(Duration::from_millis(500)).await;
 
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
