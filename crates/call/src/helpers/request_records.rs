@@ -1,6 +1,6 @@
 //! The request records a call's dialogs hold (ADR-0055 §2): adding one,
-//! finding the one a response or a transaction timeout names, and closing it.
-//! A dialog's INVITE exchanges are
+//! finding the one a response or a transaction timeout names, and closing it,
+//! on a live dialog or a retired one alike. A dialog's INVITE exchanges are
 //! records of their own ([`super::invite_records`]); a final finds a relayed
 //! INVITE here as it finds any relay.
 

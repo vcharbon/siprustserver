@@ -660,3 +660,29 @@ async fn an_ending_ranked_higher_still_ends_a_leg_only_the_record_holds() {
         }
     }
 }
+
+/// `copy` with a caller-facing dialog the answer retired, holding an INFO
+/// worker `by` relayed into it, awaiting its final.
+fn relaying_on_a_retired_dialog(mut copy: Enveloped, by: call::RelayOwner) -> Enveloped {
+    let mut d = call::Dialog::new("retired", "retired-peer", call::DialogState::Retired, 1);
+    let mut record = call::RequestRecord::relayed("INFO", 2, 9);
+    record.relayed_by = by;
+    d.requests.push(record);
+    copy.call.a_leg.dialogs.insert(d);
+    copy
+}
+
+/// **An ending copy ranked higher still ends a relay a retired dialog holds
+/// here.** The record holds an INFO this worker relayed into a dialog the
+/// answer retired, whose final returns here alone (RFC 3261 §18.2.2): as for
+/// a live dialog's relay, the record's own teardown answers it.
+#[tokio::test(start_paused = true)]
+async fn an_ending_ranked_higher_still_ends_a_relay_a_retired_dialog_holds_here() {
+    let n = node("w0").await;
+    let by = n.core.router_ctx().relay_owner.clone();
+    let live = relaying_on_a_retired_dialog(answered(6, 1, CallModelState::Active), by);
+    let ended = answered(4, 2, CallModelState::Terminated);
+    meet(&n, &live, &ended, FlushDirection::Reverse, MaterialiseOrigin::Reclaim).await;
+
+    assert_eq!(n.metrics.repl_copies_diverged_total(), 1, "the record ends the call");
+}
