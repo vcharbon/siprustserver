@@ -24,7 +24,11 @@ use super::reading::Reading;
 /// acknowledgement on the wire carries the same `RSeq`, answers to the same
 /// PRACK, and re-opens nothing. A body is read off the head (`Content-Length`
 /// / `Content-Type`): the presence of a description, which is the
-/// conservative proxy for it being an offer. Charges the UAS.
+/// conservative proxy for it being an offer. The PRACK names the `RSeq` and
+/// the INVITE CSeq on the early dialog, and is either taken at the UAS's
+/// address (it may come straight from a UAC behind a proxy) or sent by the
+/// provisional's taker (it reaches the UAS at its Contact, §4, which need not
+/// be the address it answers from). Charges the UAS.
 pub struct Delay2xxOnUnackedReliable1xxWithSdp;
 
 impl Obligation for Delay2xxOnUnackedReliable1xxWithSdp {
@@ -47,7 +51,8 @@ impl Obligation for Delay2xxOnUnackedReliable1xxWithSdp {
                         continue;
                     }
                     let acked = seen.pracked_between(
-                        (key.uas, key.call_id, a.to_tag, rseq),
+                        (key.uas, q.taker),
+                        (key.call_id, a.to_tag, q.cseq, rseq),
                         q.ts_us,
                         a.ts_us,
                     );

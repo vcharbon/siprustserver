@@ -52,6 +52,68 @@ fn the_2xx_waits_for_the_prack_of_an_offer_sent_reliably() {
     assert_eq!(unacked_rseqs.as_slice(), &[1, 2], "both named on the one finding");
 }
 
+/// A UAS whose Contact is not the address it answers the INVITE from takes
+/// the PRACK at its Contact (RFC 3262 §4: the PRACK is an in-dialog request
+/// to the remote target). That PRACK acknowledges the offer on the early
+/// dialog; one sent after the 2xx, one by another sender, or one naming
+/// another INVITE's `RSeq` space does not.
+#[test]
+fn a_prack_taken_at_the_uas_contact_discharges_the_offer() {
+    let pracked = vec![
+        inv_resp(1_100_000, 183, &reliable_rows(1), true),
+        via_contact(prack_on(1_150_000, "1 1 INVITE", true)),
+        via_contact(prack_answer(1_160_000, 200)),
+        inv_resp(1_200_000, 200, "", false),
+    ];
+    let f = decide(&Delay2xxOnUnackedReliable1xxWithSdp, &pracked);
+    assert_eq!(f.len(), 1, "one occasion, the 2xx: {f:?}");
+    assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
+
+    let late = vec![
+        inv_resp(1_100_000, 183, &reliable_rows(1), true),
+        inv_resp(1_200_000, 200, "", false),
+        via_contact(prack_on(1_250_000, "1 1 INVITE", true)),
+    ];
+    assert!(decide(&Delay2xxOnUnackedReliable1xxWithSdp, &late)[0].violated());
+
+    let mut stranger = via_contact(prack_on(1_150_000, "1 1 INVITE", true));
+    stranger.src = "10.0.0.9:5060".to_string();
+    let other_sender = vec![
+        inv_resp(1_100_000, 183, &reliable_rows(1), true),
+        stranger,
+        inv_resp(1_200_000, 200, "", false),
+    ];
+    assert!(decide(&Delay2xxOnUnackedReliable1xxWithSdp, &other_sender)[0].violated());
+
+    let other_invite = vec![
+        inv_resp(1_100_000, 183, &reliable_rows(1), true),
+        via_contact(prack_on(1_150_000, "1 7 INVITE", true)),
+        inv_resp(1_200_000, 200, "", false),
+    ];
+    assert!(decide(&Delay2xxOnUnackedReliable1xxWithSdp, &other_invite)[0].violated());
+}
+
+/// A proxy that did not record-route leaves the route set empty (RFC 3261
+/// §16.6, §12.1.2): the UAC sends the PRACK straight to the UAS while the
+/// provisional and the 2xx cross the proxy. The PRACK the UAS took
+/// discharges its 2xx, and the one the UAC sent discharges the proxy's copy.
+#[test]
+fn a_prack_sent_past_a_proxy_discharges_the_offer() {
+    let [offer, offer_relayed] = through_proxy(inv_resp(1_100_000, 183, &reliable_rows(1), true));
+    let [ok, ok_relayed] = through_proxy(inv_resp(1_200_000, 200, "", false));
+    let flow = vec![
+        offer,
+        offer_relayed,
+        prack_on(1_150_000, "1 1 INVITE", true),
+        prack_answer(1_160_000, 200),
+        ok,
+        ok_relayed,
+    ];
+    let f = decide(&Delay2xxOnUnackedReliable1xxWithSdp, &flow);
+    assert_eq!(f.len(), 2, "the UAS's 2xx and the proxy's copy: {f:?}");
+    assert!(f.iter().all(|f| matches!(f.decision, Decision::Compliant)), "{f:?}");
+}
+
 /// A retransmission of a PRACKed provisional crossing the acknowledgement
 /// on the wire — RFC 3262 §3 has the UAS repeat until the PRACK reaches it
 /// — carries the same `RSeq` and answers to the same PRACK: the 2xx behind

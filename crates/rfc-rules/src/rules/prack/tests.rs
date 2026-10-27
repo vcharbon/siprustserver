@@ -24,6 +24,11 @@ mod sequence;
 
 const UAC: &str = "10.0.0.1:5060";
 const UAS: &str = "10.0.0.2:5060";
+/// The UAS's Contact where it is not the address the INVITE was sent to
+/// (RFC 3261 §12.1.1): the remote target of every request on the dialog.
+const UAS_CONTACT: &str = "10.0.0.3:5060";
+/// A proxy on the INVITE's path that did not record-route.
+const PROXY: &str = "10.0.0.4:5060";
 
 fn msg(
     at_us: u64,
@@ -239,4 +244,27 @@ fn fork_prack(at_us: u64, rack: &str, to_tag: &str, branch: &str) -> Msg {
     m.cseq_method = "PRACK".to_string();
     m.via_branch = Some(branch.to_string());
     m
+}
+
+/// The same message exchanged with the UAS's Contact instead of the address
+/// the INVITE reached it on: a request addressed to it, a response sent from
+/// it.
+fn via_contact(mut m: Msg) -> Msg {
+    if m.dst == UAS {
+        m.dst = UAS_CONTACT.to_string();
+    } else if m.src == UAS {
+        m.src = UAS_CONTACT.to_string();
+    }
+    m
+}
+
+/// The UAS's response as it crosses a proxy on the INVITE's path: the hop to
+/// the proxy, then the proxy's copy to the UAC.
+fn through_proxy(m: Msg) -> [Msg; 2] {
+    let mut to_proxy = m.clone();
+    to_proxy.dst = PROXY.to_string();
+    let mut relayed = m;
+    relayed.src = PROXY.to_string();
+    relayed.at_us += 10_000;
+    [to_proxy, relayed]
 }
