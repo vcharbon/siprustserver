@@ -66,8 +66,9 @@ fn all_met<'a>(mut left: impl Iterator<Item = &'a GoalStep>, ending: Ending) -> 
     left.next().is_none_or(|step| met_by(step, ending)) && left.all(answer)
 }
 
-/// Whether `step` is the reception of `ending`: a goal the ending meets
-/// rather than drops.
+/// Whether `step` is the reception of `ending`, or a hang-up conditioned on
+/// an answer the 487 to a CANCELled INVITE rules out (RFC 3261 §9.2): a goal
+/// the ending meets rather than drops.
 fn met_by(step: &GoalStep, ending: Ending) -> bool {
     let invite = |method: &Option<String>| method.as_deref().is_none_or(|m| m == "INVITE");
     match (step, ending) {
@@ -81,6 +82,7 @@ fn met_by(step: &GoalStep, ending: Ending) -> bool {
             *s == status && invite(cseq_method)
         }
         (GoalStep::ObserveFinal { cseq_method, .. }, Ending::InviteFinal(_)) => invite(cseq_method),
+        (GoalStep::ByeIfConfirmed, Ending::InviteFinal(status)) => status == 487,
         (GoalStep::ExpectFinal { assert, cseq_method }, Ending::InviteFinal(status)) => {
             let holds = match *assert {
                 FinalAssert::Exact(s) => status == s,
@@ -90,5 +92,20 @@ fn met_by(step: &GoalStep, ending: Ending) -> bool {
             holds && invite(cseq_method)
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A caller whose CANCEL drew its 487 has no dialog to hang up: her
+    /// hang-up conditioned on the answer is met, not dropped.
+    #[test]
+    fn a_non_2xx_final_meets_a_hang_up_conditioned_on_the_answer() {
+        assert!(all_met([GoalStep::ByeIfConfirmed].iter(), Ending::InviteFinal(487)));
+        assert!(!all_met([GoalStep::ByeIfConfirmed].iter(), Ending::Bye));
+        assert!(!all_met([GoalStep::ByeIfConfirmed].iter(), Ending::InviteFinal(500)));
+        assert!(!all_met([GoalStep::Bye].iter(), Ending::InviteFinal(487)));
     }
 }
