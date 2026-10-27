@@ -33,7 +33,9 @@ mod store;
 mod supervisor;
 mod write_path;
 
-pub use changelog::{BacklogMarks, BodySource, Changelog, RefMeta, DEFAULT_DEAD_PEER_TTL_MS};
+pub use changelog::{
+    BacklogMarks, BodySource, Changelog, Reach, RefMeta, DEFAULT_DEAD_PEER_TTL_MS,
+};
 pub use departed::{departed_probe, DepartedProbe};
 pub(crate) use peer_body::decode_peer_body;
 pub use peer_resolver::{AddrResolver, FnPeerResolver, PeerResolver};
@@ -47,7 +49,7 @@ pub use self_endpoint::{SelfEndpoint, WithdrawalCondition};
 pub use server::{ReplServer, ServeConfig};
 pub use store::ReplicatingCallStore;
 pub use supervisor::{PeerLink, ReplicationSupervisor};
-pub use write_path::WritePath;
+pub use write_path::{SyncLevel, WritePath};
 
 #[cfg(test)]
 mod tests;

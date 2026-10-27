@@ -14,7 +14,8 @@ use crate::metrics::RemovalClass;
 pub(super) enum ReleaseKind {
     /// Terminated call: evict from map/index (the `RemoveCall` critical
     /// effect). Its turn logged the delete toward the replica peer before its
-    /// effects left (ADR-0055 §3).
+    /// effects left, and released the call once its outbox drained (ADR-0055
+    /// §3).
     Terminated,
     /// **Acting-backup self-release** (ADR-0014): shed a reactive takeover copy
     /// once the transaction(s) the backup served for it have all reached a
@@ -57,8 +58,10 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
     // through — so the active-trace slot returns exactly when the call's runtime
     // state does (ADR-0026). Idempotent, and a no-op for an unsampled call.
     crate::trace::traces().close(call_ref);
-    // What the call's turns still hold leaves before the call's teardown.
-    super::hold::release(ctx, call_ref).await;
+    // What the call's outbox still holds leaves before the call's teardown:
+    // a terminal turn drained it, and on every other release the copy's write
+    // records it (ADR-0055 §3).
+    ctx.outboxes.release(call_ref).await;
     match kind {
         ReleaseKind::Terminated => {
             ctx.state.drop_local(call_ref);

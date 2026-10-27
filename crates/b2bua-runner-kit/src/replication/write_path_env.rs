@@ -2,9 +2,10 @@
 //! (ADR-0055 §3).
 //!
 //! ```text
-//!   B2BUA_REPL_HOLD_CAP_MS              the longest the ACK and the first
-//!                                       provisional of an INVITE wait for the
-//!                                       backup                             (100)
+//!   B2BUA_REPL_SYNC                     off | applied: when a turn's effects
+//!                                       leave, relative to its write   (applied)
+//!   B2BUA_REPL_SYNC_CAP_MS              the longest an outbox entry waits for
+//!                                       the backup                         (100)
 //!   B2BUA_REPL_BACKLOG_HIGH_ENTRIES     pending writes toward a backup at
 //!                                       which new calls get none           (10000)
 //!   B2BUA_REPL_BACKLOG_LOW_ENTRIES      … under which they get one again    (1000)
@@ -13,13 +14,14 @@
 //!   B2BUA_REPL_BACKLOG_LOW_AGE_MS       … under which they get one again    (1000)
 //! ```
 //!
-//! Unset takes the default. A value that is not a positive integer refuses the
-//! boot naming its variable, and so does a cap not below T1 and the RFC 3261
-//! §17.2.1 bound (200 ms), or a low-water mark not under its high one.
+//! Unset takes the default. A level other than `off` or `applied`, or a value
+//! that is not a positive integer, refuses the boot naming its variable, and
+//! so does a cap not below T1 and the RFC 3261 §17.2.1 bound (200 ms), at
+//! either level, or a low-water mark not under its high one.
 
 use std::time::Duration;
 
-use b2bua::repl::{BacklogMarks, WritePath};
+use b2bua::repl::{BacklogMarks, SyncLevel, WritePath};
 use sip_clock::wall::millis_u64;
 
 use super::link_env::positive;
@@ -34,8 +36,15 @@ pub(crate) fn write_path(get: impl Fn(&str) -> Option<String>) -> Result<WritePa
         let n = positive(&get, key, u64::try_from(default).unwrap_or(u64::MAX))?;
         usize::try_from(n).map_err(|_| format!("{key} is out of range"))
     };
+    let sync = match get("B2BUA_REPL_SYNC") {
+        Some(level) => {
+            level.parse::<SyncLevel>().map_err(|why| format!("B2BUA_REPL_SYNC: {why}"))?
+        }
+        None => d.sync,
+    };
     let path = WritePath {
-        hold_cap: ms("B2BUA_REPL_HOLD_CAP_MS", d.hold_cap)?,
+        sync,
+        sync_cap: ms("B2BUA_REPL_SYNC_CAP_MS", d.sync_cap)?,
         backlog: BacklogMarks {
             high_entries: count("B2BUA_REPL_BACKLOG_HIGH_ENTRIES", d.backlog.high_entries)?,
             low_entries: count("B2BUA_REPL_BACKLOG_LOW_ENTRIES", d.backlog.low_entries)?,
@@ -44,7 +53,7 @@ pub(crate) fn write_path(get: impl Fn(&str) -> Option<String>) -> Result<WritePa
         },
     };
     path.validate()
-        .map_err(|why| format!("B2BUA_REPL_HOLD_CAP_MS / B2BUA_REPL_BACKLOG_*: {why}"))?;
+        .map_err(|why| format!("B2BUA_REPL_SYNC_CAP_MS / B2BUA_REPL_BACKLOG_*: {why}"))?;
     Ok(path)
 }
 
@@ -64,14 +73,16 @@ mod tests {
     #[test]
     fn each_variable_is_read() {
         let path = read(&[
-            ("B2BUA_REPL_HOLD_CAP_MS", "150"),
+            ("B2BUA_REPL_SYNC", "off"),
+            ("B2BUA_REPL_SYNC_CAP_MS", "150"),
             ("B2BUA_REPL_BACKLOG_HIGH_ENTRIES", "50"),
             ("B2BUA_REPL_BACKLOG_LOW_ENTRIES", "5"),
             ("B2BUA_REPL_BACKLOG_HIGH_AGE_MS", "3000"),
             ("B2BUA_REPL_BACKLOG_LOW_AGE_MS", "300"),
         ])
         .unwrap();
-        assert_eq!(path.hold_cap, Duration::from_millis(150));
+        assert_eq!(path.sync, SyncLevel::Off);
+        assert_eq!(path.sync_cap, Duration::from_millis(150));
         assert_eq!(
             path.backlog,
             BacklogMarks {
@@ -85,9 +96,16 @@ mod tests {
 
     #[test]
     fn a_cap_not_below_the_trying_bound_refuses_the_boot() {
-        assert!(read(&[("B2BUA_REPL_HOLD_CAP_MS", "200")]).is_err());
-        assert!(read(&[("B2BUA_REPL_HOLD_CAP_MS", "500")]).is_err());
-        assert!(read(&[("B2BUA_REPL_HOLD_CAP_MS", "0")]).is_err());
+        assert!(read(&[("B2BUA_REPL_SYNC_CAP_MS", "200")]).is_err());
+        assert!(read(&[("B2BUA_REPL_SYNC_CAP_MS", "500")]).is_err());
+        assert!(read(&[("B2BUA_REPL_SYNC_CAP_MS", "0")]).is_err());
+        assert!(read(&[("B2BUA_REPL_SYNC", "off"), ("B2BUA_REPL_SYNC_CAP_MS", "200")]).is_err());
+    }
+
+    #[test]
+    fn a_level_other_than_off_or_applied_refuses_the_boot() {
+        let err = read(&[("B2BUA_REPL_SYNC", "sent")]).unwrap_err();
+        assert!(err.contains("B2BUA_REPL_SYNC"), "{err}");
     }
 
     #[test]

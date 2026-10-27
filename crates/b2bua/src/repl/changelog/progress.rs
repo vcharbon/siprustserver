@@ -23,6 +23,15 @@ use super::Changelog;
 /// twice the server's default idle `Noop` interval.
 pub const DEFAULT_CLAIM_TTL: Duration = Duration::from_secs(10);
 
+/// How a wait for a peer's applied position ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reach {
+    /// The peer reported applying the position.
+    Applied,
+    /// The peer's flow went down, or its log is gone, first.
+    Lost,
+}
+
 /// A puller's report: the position it applied, and when it said so.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Claim {
@@ -93,16 +102,35 @@ impl Changelog {
         })
     }
 
-    /// Resolves once `peer` reported applying `at` or past it on `partition`,
-    /// or once its log is gone: nothing then will ever report it.
-    pub async fn applied_reaches(&self, peer: &str, partition: Partition, at: Watermark) {
+    /// Whether `peer` reported applying `at` or past it on `partition`.
+    pub fn has_applied(&self, peer: &str, partition: Partition, at: Watermark) -> bool {
+        let inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
+        inner.peers.get(peer).is_some_and(|log| *log.sub(partition).acked.borrow() >= at)
+    }
+
+    /// Resolves once `peer` reported applying `at` or past it on `partition`
+    /// ([`Reach::Applied`]), or once its flow is disconnected or its log is
+    /// gone, when nothing will report it ([`Reach::Lost`]).
+    pub async fn applied_reaches(&self, peer: &str, partition: Partition, at: Watermark) -> Reach {
         let acked = {
             let inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
             inner.peers.get(peer).map(|log| log.sub(partition).acked.subscribe())
         };
-        if let Some(mut acked) = acked {
-            let _ = acked.wait_for(|applied| *applied >= at).await;
+        let Some(mut acked) = acked else { return Reach::Lost };
+        loop {
+            if *acked.borrow_and_update() >= at {
+                return Reach::Applied;
+            }
+            if !self.flow_connected(peer, partition) || acked.changed().await.is_err() {
+                return Reach::Lost;
+            }
         }
+    }
+
+    /// Whether a serve task streams `peer`'s flow on `partition`.
+    fn flow_connected(&self, peer: &str, partition: Partition) -> bool {
+        let inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
+        inner.peers.get(peer).is_some_and(|log| log.sub(partition).streams > 0)
     }
 
     /// Whether `peer`'s flow on `partition` is connected AND has reported,

@@ -10,13 +10,14 @@ use b2bua_sdk::event::CallEvent;
 use call::TxnTimeoutKind;
 
 use super::RouterCtx;
-use crate::effects::{HandlerResult, OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode};
 
-/// Account for `eff`, which names no IP-literal next hop.
+/// Account for `eff` of call `incarnation`, which names no IP-literal next
+/// hop.
 pub(super) fn fail_unaddressable(
     ctx: &RouterCtx,
     call_ref: &str,
-    result: &HandlerResult,
+    incarnation: &str,
     eff: &OutboundSipEffect,
 ) {
     let kind = match &eff.body {
@@ -48,5 +49,5 @@ pub(super) fn fail_unaddressable(
         timeout_kind: TxnTimeoutKind::Response,
         incarnation: None,
     };
-    let _ = ctx.reentry_tx.send(failed.stamped(result.call.incarnation()));
+    let _ = ctx.reentry_tx.send(failed.stamped(incarnation));
 }

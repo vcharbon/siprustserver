@@ -4,7 +4,6 @@
 //! tests, `Harness::bind_sut`), then drive SIP at the endpoint's address.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use observe::{spawn_keeping_node, NodeScope};
 use sip_message::parser::custom::CustomParser;
@@ -183,7 +182,8 @@ impl B2buaCore {
         // channel, no receiver for the router to poll.
         let repl_store = replication.as_ref().map(|s| s.store.clone());
         let replica = replication.as_ref().map(|s| s.replica).unwrap_or_default();
-        let hold_cap = replication.as_ref().map_or(Duration::ZERO, |s| s.write_path.hold_cap);
+        let write_path = replication.as_ref().map(|s| s.write_path).unwrap_or_default();
+        let changelog = replication.as_ref().map(|s| s.store.changelog().clone());
         let capacity = capacity.unwrap_or_else(CapacityGate::live);
         capacity.configure(&config.capacity);
         capacity.configure_backup(&replica.backup);
@@ -382,7 +382,7 @@ impl B2buaCore {
             meeting_waves: crate::lifecycle::meeting_waves(),
             unroutable_waves: crate::lifecycle::UnroutableWaves::new(),
             late_pracks: Default::default(),
-            holds: router::Holds::new(hold_cap),
+            outboxes: Arc::new(router::Outboxes::new(&write_path, changelog, metrics.clone())),
             reentry_tx,
             // Arc-shared into every per-call `ctx.clone()`, like `decision`.
             adaptation_http: adaptation_http.map(Arc::new),

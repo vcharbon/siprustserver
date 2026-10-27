@@ -58,7 +58,7 @@ use tokio::sync::watch;
 use crate::store::{locked, REPLICA_CHANGELOG};
 
 pub use backlog::BacklogMarks;
-pub use progress::DEFAULT_CLAIM_TTL;
+pub use progress::{Reach, DEFAULT_CLAIM_TTL};
 pub use source::{BodySource, RefMeta};
 
 /// How long a peer's whole changelog is kept after its last activity before an

@@ -55,22 +55,18 @@ use b2bua_sdk::event::CallEvent;
 pub(super) enum Gate {
     /// The event reaches the rules, its message resolved.
     Pass(Resolved),
-    /// A request answered here, with the answer sent (none for an ACK), and
-    /// the dialog it was taken in order on, if any.
+    /// A request answered here, with its answer (none for an ACK) for the
+    /// caller to send through the call's outbox, and the dialog it was taken
+    /// in order on, if any.
     Answered { answer: Option<Box<SipResponse>>, in_order: Option<Resolved> },
     /// A response that answers nothing of this stack's, dropped unread.
     Dropped,
 }
 
 /// Resolve `event` on `call` (its source leg `res.source_leg_id`), answering a
-/// refused request on the wire.
-pub(super) async fn admit(
-    ctx: &RouterCtx,
-    call: &Call,
-    event: &CallEvent,
-    res: &Resolution,
-) -> Gate {
-    let CallEvent::Sip { message, src, .. } = event else { return Gate::Pass(Resolved::default()) };
+/// refused request.
+pub(super) fn admit(ctx: &RouterCtx, call: &Call, event: &CallEvent, res: &Resolution) -> Gate {
+    let CallEvent::Sip { message, .. } = event else { return Gate::Pass(Resolved::default()) };
     let leg_id = res.source_leg_id.as_str();
     let req = match message.as_ref() {
         SipMessage::Response(resp) => return admit_response(ctx, call, leg_id, resp),
@@ -99,7 +95,6 @@ pub(super) async fn admit(
         let detail = format!("stated header: {skipped}");
         crate::model_invariants::stated_text_skipped(&ctx.metrics, call, &detail);
     }
-    let _ = ctx.txn.send_response(answer.clone(), *src).await;
     Gate::Answered { answer: Some(Box::new(answer)), in_order }
 }
 

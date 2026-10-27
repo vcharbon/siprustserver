@@ -79,7 +79,7 @@ impl ReplWiring {
             puller: PullerConfig::default(),
             serve: ServeConfig::default(),
             replica: self.replica,
-            write_path: Default::default(),
+            write_path: write_path(),
         };
         (setup, store, sim_membership)
     }
@@ -97,4 +97,15 @@ impl ReplWiring {
         }
         panic!("the repl listen address {} stays bound by a live incarnation", self.listen_addr)
     }
+}
+
+/// The write path every worker runs: the default, at the sync level
+/// `B2BUA_REPL_SYNC` names when set (`off` | `applied`), so the sweep runs at
+/// either level.
+fn write_path() -> b2bua::repl::WritePath {
+    let sync = std::env::var("B2BUA_REPL_SYNC")
+        .ok()
+        .map(|level| level.parse().unwrap_or_else(|why| panic!("B2BUA_REPL_SYNC: {why}")));
+    let d = b2bua::repl::WritePath::default();
+    b2bua::repl::WritePath { sync: sync.unwrap_or(d.sync), ..d }
 }

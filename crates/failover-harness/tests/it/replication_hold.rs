@@ -1,13 +1,12 @@
-//! **The ACK of a 2xx, the first provisional of an INVITE and the final to a
-//! non-INVITE request leave once the backup applied the write that records
-//! what they answer, or at the cap** (ADR-0055 §3). They are the messages
-//! that stop a peer retransmitting: the callee retransmits its 2xx until the
-//! ACK reaches it (RFC 3261 §13.3.1.4), the caller its INVITE until a
-//! provisional does (§17.1.1.2), a sender its request until its final
-//! (§17.1.2.2), so a primary
-//! that dies before its backup holds the write leaves the peer a
-//! retransmission for the backup to take. Every other message leaves at once,
-//! and a held ACK leaves before any later message on its dialog (§14.1).
+//! **Every message a turn sends leaves once the backup applied the write that
+//! records it, or at the cap counted from its own enqueue** (ADR-0055 §3, the
+//! `applied` sync level). The call's messages leave in order through its
+//! outbox: a later message never overtakes an earlier one (RFC 3261 §14.1 for
+//! an ACK and the requests behind it). A primary that dies before its backup
+//! holds the write leaves the peer a retransmission for the backup to take:
+//! the callee retransmits its 2xx until the ACK reaches it (§13.3.1.4), the
+//! caller her INVITE until a provisional does (§17.1.1.2), a sender its
+//! request until its final (§17.1.2.2).
 //!
 //! ```text
 //!   replication delayed 20 ms each way   the caller's 100 trails her INVITE by
@@ -15,10 +14,16 @@
 //!   replication delayed 40 ms            the callee's ACK trails the caller's by the delay
 //!   replication stalled                  the ACK leaves at the cap, never later
 //!   stalled, the callee's INFO           its relayed 200 leaves at the cap
-//!   stalled, the caller's BYE            the callee reads the ACK before the BYE,
-//!     right behind her ACK               and the BYE is not held
+//!   stalled, the caller's BYE            the callee reads the ACK, then the BYE
+//!     right behind her ACK               at its own cap
 //!   the primary dies after its backup    the callee's 2xx repeat draws the
 //!     applied, the ACK still held        copy's ACK (§13.2.2.4)
+//!   delayed 20 ms each way, the callee's the dialog gate's in-order 200 trails
+//!     INFO on a dialog it is ending      the round trip of the CSeq it takes
+//!   delayed 20 ms each way, the callee   the turn ending the call relays the
+//!     refuses the call                   486 once the backup applied the
+//!                                        delete, its CDR already written, the
+//!                                        call resident until then
 //! ```
 
 use std::sync::Arc;
@@ -228,10 +233,13 @@ async fn a_held_ack_leaves_before_the_bye_behind_it() {
     let mut dialog = call.ack().await;
     let sent = tokio::time::Instant::now();
     let mut bye = dialog.bye().await;
-    c.bob.receive("ACK").await;
-    assert!(sent.elapsed() < CAP, "the BYE released the held ACK: {:?}", sent.elapsed());
-    c.bob.receive("BYE").await.respond(200, "OK").await;
-    assert!(sent.elapsed() < CAP, "the BYE behind a held ACK is not held: {:?}", sent.elapsed());
+    let (first, _) = bob_reads(&c, Duration::from_secs(1)).await.expect("bob reads the ACK");
+    assert_eq!(first, Method::Ack, "the held ACK leaves first");
+    let mut relayed = c.bob.receive("BYE").await;
+    let after = sent.elapsed();
+    assert!(after >= CAP, "the BYE left before its cap on a stalled backup: {after:?}");
+    assert!(after <= CAP + Duration::from_millis(5), "the BYE outlived its cap: {after:?}");
+    relayed.respond(200, "OK").await;
     bye.expect(200).await;
     c.fh.resume(&primary, &backup);
     let primary_node = if primary == "b1" { &c.w_b1 } else { &c.w_b2 };
@@ -352,6 +360,47 @@ async fn the_gates_in_order_200_trails_the_replication_of_the_cseq_it_takes() {
     c.fh.heal(&backup, &primary);
     relayed_bye.respond(200, "OK").await;
     bye.expect(200).await;
+    let drained =
+        c.fh.settle_terminal(async || c.w_b1.memory_clean() && c.w_b2.memory_clean()).await;
+    assert!(drained, "both nodes release the call");
+    c.fh.linger_peers(&[&c.alice, &c.bob], Duration::from_secs(3)).await;
+    assert_eq!(total_cdrs_for(&[&c.w_b1, &c.w_b2], &call_ref), 1, "exactly one CDR");
+    assert_call_fully_released(&[&c.w_b1, &c.w_b2], &call_ref).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_terminal_turns_final_trails_the_replication_of_the_delete() {
+    let mut c = cluster("held-terminal-delayed").await;
+    let mut call = c.alice.invite(&c.bob).with_sdp(OFFER).through(c._proxy.addr()).send().await;
+    let mut uas = c.bob.receive("INVITE").await;
+    let (primary, backup) = worker_ordinals(uas.request());
+    call.expect(100).await;
+    c.fh.advance(Duration::from_millis(100)).await;
+    let primary_node = if primary == "b1" { &c.w_b1 } else { &c.w_b2 };
+    let call_ref = primary_node.scan_primary(&primary).pop().expect("the primary holds the call");
+
+    // ── bob refuses; the relayed final ends the call at the primary ──────────
+    c.fh.delay(&primary, &backup, 20);
+    c.fh.delay(&backup, &primary, 20);
+    let refused = tokio::time::Instant::now();
+    uas.respond(486, "Busy Here").await;
+    for _ in 0..15 {
+        sip_clock::testkit::advance_settled(STEP).await;
+    }
+    let early = c.alice.take_queued().await;
+    assert!(early.is_none(), "the final waits for the delete: {early:?}");
+    assert!(primary_node.serves(&call_ref), "the call stays resident while its outbox drains");
+    assert_eq!(primary_node.cdr_records().len(), 1, "the CDR is written before the delete");
+    call.expect(486).await;
+    let after = refused.elapsed();
+    assert!(
+        after >= Duration::from_millis(40),
+        "the terminal turn's final left before the backup applied the delete: {after:?}"
+    );
+    assert!(after < CAP, "the final left once the delete was applied, not at the cap: {after:?}");
+
+    c.fh.heal(&primary, &backup);
+    c.fh.heal(&backup, &primary);
     let drained =
         c.fh.settle_terminal(async || c.w_b1.memory_clean() && c.w_b2.memory_clean()).await;
     assert!(drained, "both nodes release the call");

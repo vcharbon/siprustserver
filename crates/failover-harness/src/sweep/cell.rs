@@ -19,7 +19,7 @@ use super::parties::{Parties, ALICE};
 use super::{Incident, SweepShape};
 use crate::cluster::Cluster;
 use crate::roles::Placement;
-use crate::turn_points::{HeldTurn, Turn, TurnAt, TurnPoint};
+use crate::turn_points::{HeldTurn, Released, Turn, TurnAt, TurnPoint};
 
 /// The worker every cell places its call on; the other is its backup.
 pub const PRIMARY: &str = "b1";
@@ -147,9 +147,17 @@ pub async fn run_cell(
         .collect();
     let cut_at = cut.map(|c| {
         let turn = turns.get(c.at.turn - 1);
+        // The sub-points reach the write applied and the effects left in the
+        // order the turn's release says: under `applied` with no cap hit the
+        // write is applied before the effects leave, else after.
+        let held_and_left = match c.at.point {
+            TurnPoint::Logged => false,
+            TurnPoint::Left => turn.is_some_and(|t| t.released == Some(Released::Applied)),
+            TurnPoint::Applied => turn.is_some_and(|t| t.released.is_some()),
+        };
         super::outcome::CutAt {
             incident: c.incident,
-            point: c.at.point,
+            held_and_left,
             on_request: turn.is_none_or(|t| t.on_request),
             answer_in_flight: turn.is_some_and(|t| t.called_out) && turns.len() == c.at.turn,
             living_answered: super::answered::living_workers_answered(

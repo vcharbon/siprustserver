@@ -180,7 +180,10 @@ an incident may cost is ADR-0055 §11 and nothing else: per incident, the CDR
 count, what the parties may be left waiting for, and the declared windows (the
 only RFC deviations accepted). Once an incident strikes the SUT may end a call
 cleanly at any instant (§4); a kill may cost the calls whose state changed in
-the replication window (§3). A deviation no window declares is a SUT defect.
+the replication window (§3). Every effect a turn sends leaves through the
+call's ordered outbox, released by the replication sync level (`applied`, the
+default: once the backup applied the write, at most the cap; `off`: at once).
+A deviation no window declares is a SUT defect.
 The failover sweep (`just sweep`) checks every cell against §11 and holds the
 failing ones to a ratchet that only shrinks. On a real cluster the HA tooling
 judges each impact against its incident window's budget (ADR-0049 §3.5). A

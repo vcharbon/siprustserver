@@ -53,7 +53,7 @@ impl Owner {
                     self.seed_accepted(endpoint, call_ref, response, leg_id).await
                 }
                 TxnSeed::ClientNonInvite { request, dest, bound_ms } => {
-                    self.seed_client_non_invite(call_ref, request, dest, bound_ms)
+                    self.seed_client_non_invite(endpoint, call_ref, request, dest, bound_ms).await
                 }
                 TxnSeed::ServerNonInvite { request, leg_id } => {
                     self.seed_server_non_invite(call_ref, request, leg_id)
@@ -235,12 +235,14 @@ impl Owner {
 
     /// A client non-INVITE keyed by `request`'s branch, attributed from its
     /// Via as `do_send_request` attributes what it sends (falling back to
-    /// `call_ref`), `Trying`, retransmitting `request`'s image on its Timer E
-    /// ladder from now — the first copy T1 after the seed — and giving up
-    /// `bound_ms` from now, at most Timer F. `false` when the request names no
-    /// branch or a client transaction holds it.
-    fn seed_client_non_invite(
+    /// `call_ref`), `Trying`, sending `request`'s image once now, ahead of
+    /// anything sent after the seed, then on its Timer E ladder from now — the
+    /// next copy T1 after the seed — and giving up `bound_ms` from now, at most
+    /// Timer F. `false` when the request names no branch or a client
+    /// transaction holds it.
+    async fn seed_client_non_invite(
         &mut self,
+        endpoint: &dyn UdpEndpoint,
         call_ref: &str,
         request: SipRequest,
         dest: SocketAddr,
@@ -272,7 +274,8 @@ impl Owner {
             state: TxnState::Trying,
             destination: Some(dest),
         });
-        self.start_client_retransmit(&branch, buf, dest, max_ms, timeout_kind);
+        self.start_client_retransmit(&branch, buf.clone(), dest, max_ms, timeout_kind);
+        self.send_buffer(endpoint, &buf, dest).await;
         true
     }
 

@@ -8,13 +8,19 @@
 //! A turn is numbered at the call's primary, the ordinal its `call_ref` names.
 //! [`TurnPoint::Applied`] of turn `k` is the first write of the call the backup
 //! applies that holds turn `k`'s: a later write covers it. A turn that wrote
-//! nothing has no applied sub-point.
+//! nothing has no applied sub-point. [`TurnPoint::Left`] is reported by the
+//! call's outbox, after later turns may have been taken: it names the turn by
+//! the version that turn logged.
+//!
+//! Each turn records why its outbox entry left ([`Released`]). A cap release
+//! while the harness holds an applied sub-point of the call is the harness's
+//! own doing: the backup's position report waits behind that hold.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use b2bua::turn_probe::{Hold, TurnMark, TurnProbe};
-pub use b2bua::TurnPoint;
+pub use b2bua::{Released, TurnPoint};
 use tokio::sync::oneshot;
 
 /// One turn of a call at its primary.
@@ -29,14 +35,19 @@ pub struct Turn {
     pub on_request: bool,
     /// Whether the turn sent a request to an outside service.
     pub called_out: bool,
+    /// Why the turn's outbox entry left, once it did.
+    pub released: Option<Released>,
+    /// The entry left at the cap while the harness held an applied sub-point
+    /// of the call.
+    pub capped_by_harness: bool,
 }
 
 impl Turn {
-    /// The sub-points this turn has: [`TurnPoint::Applied`] only when it
-    /// wrote.
+    /// The sub-points this turn has, in the order the `applied` sync level
+    /// reaches them: [`TurnPoint::Applied`] only when it wrote.
     pub fn points(&self) -> &'static [TurnPoint] {
         if self.wrote {
-            &[TurnPoint::Logged, TurnPoint::Left, TurnPoint::Applied]
+            &[TurnPoint::Logged, TurnPoint::Applied, TurnPoint::Left]
         } else {
             &[TurnPoint::Logged, TurnPoint::Left]
         }
@@ -80,6 +91,9 @@ impl HeldTurn {
 #[derive(Default)]
 pub struct TurnPoints {
     inner: Mutex<Inner>,
+    /// The calls whose applied sub-point the harness holds now, with how many
+    /// holds.
+    applied_held: Arc<Mutex<BTreeMap<String, usize>>>,
 }
 
 #[derive(Default)]
@@ -130,7 +144,7 @@ impl TurnPoints {
 
 impl Inner {
     /// Record `mark` and say which turn of its call it stands at.
-    fn record(&mut self, mark: &TurnMark<'_>) -> Option<usize> {
+    fn record(&mut self, mark: &TurnMark<'_>, applied_held: bool) -> Option<usize> {
         let primary = call::call_ref_primary(mark.call_ref)?;
         let at_primary = primary == mark.node;
         match (mark.point, at_primary) {
@@ -140,10 +154,29 @@ impl Inner {
                 }
                 let turns = self.calls.entry(mark.call_ref.to_string()).or_default();
                 let (version, wrote, on_request) = (mark.version, mark.wrote, mark.on_request);
-                turns.push(Turn { version, wrote, on_request, called_out: mark.called_out });
+                let called_out = mark.called_out;
+                let (released, capped_by_harness) = (None, false);
+                turns.push(Turn {
+                    version,
+                    wrote,
+                    on_request,
+                    called_out,
+                    released,
+                    capped_by_harness,
+                });
                 Some(turns.len())
             }
-            (TurnPoint::Left, true) => self.calls.get(mark.call_ref).map(Vec::len),
+            (TurnPoint::Left, true) => {
+                let turns = self.calls.get_mut(mark.call_ref)?;
+                // The earliest turn at this version not left yet: entries
+                // leave in the order their turns queued them.
+                let i =
+                    turns.iter().position(|t| t.released.is_none() && t.version == mark.version)?;
+                let turn = &mut turns[i];
+                turn.released = mark.released;
+                turn.capped_by_harness = applied_held && mark.released == Some(Released::Capped);
+                Some(i + 1)
+            }
             (TurnPoint::Applied, false) => {
                 let turns = self.calls.get(mark.call_ref)?;
                 // The earliest written turn this write covers and not yet
@@ -182,8 +215,9 @@ fn covers(mark: &TurnMark<'_>, turn: &Turn) -> bool {
 
 impl TurnProbe for TurnPoints {
     fn reached(&self, mark: &TurnMark<'_>) -> Option<Hold> {
+        let applied_held = locked(&self.applied_held).contains_key(mark.call_ref);
         let mut inner = self.lock();
-        let turn = inner.record(mark)?;
+        let turn = inner.record(mark, applied_held)?;
         if !inner.reaches(mark, turn) {
             return None;
         }
@@ -195,10 +229,29 @@ impl TurnProbe for TurnPoints {
         if armed.reached.send(turn).is_err() {
             return None;
         }
+        drop(inner);
+        let applied = (mark.point == TurnPoint::Applied).then(|| mark.call_ref.to_string());
+        if let Some(call_ref) = &applied {
+            *locked(&self.applied_held).entry(call_ref.clone()).or_default() += 1;
+        }
+        let applied_held = self.applied_held.clone();
         Some(Box::pin(async move {
             if held.await.is_err() {
                 std::future::pending::<()>().await;
             }
+            if let Some(call_ref) = applied {
+                let mut held = locked(&applied_held);
+                if let Some(n) = held.get_mut(&call_ref) {
+                    *n -= 1;
+                    if *n == 0 {
+                        held.remove(&call_ref);
+                    }
+                }
+            }
         }))
     }
+}
+
+fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }

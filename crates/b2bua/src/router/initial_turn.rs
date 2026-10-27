@@ -157,14 +157,20 @@ pub(super) async fn initial_invite_turn(
     let owners = crate::store::envelope::owners(&ctx.relay_owner, topology.as_ref());
     let backed = ctx.state.admit_backup(call_ref, topology.as_ref());
     ctx.state.create(call.clone(), topology);
-    // The caller's 100 follows the call's creation write, so the backup holds
-    // the call from before the caller stops retransmitting, not from its
-    // decision (ADR-0047, ADR-0055 §3); this turn's own write supersedes this
-    // one.
+    // The caller's 100 follows the call's creation write through the call's
+    // outbox, so the backup holds the call from before the caller stops
+    // retransmitting, not from its decision (ADR-0047, ADR-0055 §3); the
+    // transaction layer sends it itself at the §17.2.1 bound.
     if backed {
         ctx.state.flush(&call);
     }
-    super::hold::first_provisional(ctx, call_ref, req).await;
+    let (sender, invite) = (ctx.clone(), req.clone());
+    let release: super::outbox::Effects = Box::new(move |_| {
+        Box::pin(async move {
+            let _ = sender.txn.release_trying(&invite).await;
+        })
+    });
+    ctx.outboxes.push(call_ref, ctx.state.hold_target(call_ref), release).await;
     // Born: the call counts as live from here.
     drop(unborn);
     // RFC 3261 §8.1.1.3: a dialog-forming INVITE MUST carry a From tag. The

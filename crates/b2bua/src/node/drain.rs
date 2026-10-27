@@ -76,6 +76,10 @@ impl B2buaCore {
                 }
             }),
             releases_waiting: Arc::new(move || limiter.unsent()),
+            outboxes_waiting: Arc::new({
+                let outboxes = self.ctx.outboxes.clone();
+                move || outboxes.depth()
+            }),
         }
     }
 

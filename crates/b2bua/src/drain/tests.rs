@@ -342,3 +342,32 @@ async fn a_queue_that_never_settles_ends_the_drain_at_its_ceiling() {
     assert_eq!(out.residual, 1);
     assert_eq!(out.elapsed, bounds.grace + bounds.release_flush);
 }
+
+/// A withdrawn node whose backups caught up still exits only once every
+/// outbox entry left (ADR-0055 §3): an entry waits at most the sync cap.
+#[tokio::test(start_paused = true)]
+async fn a_caught_up_exit_waits_for_the_outboxes_to_empty() {
+    let queued = Arc::new(AtomicUsize::new(2));
+    let probe = queued.clone();
+    let inputs = DrainInputs::new(|| 1, || true, || true)
+        .with_outboxes_waiting(move || probe.load(Ordering::SeqCst));
+    let emptied = queued.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        emptied.store(0, Ordering::SeqCst);
+    });
+    let out = drain_until_quiescent(
+        inputs,
+        DrainBounds {
+            grace: Duration::from_secs(5),
+            floor: Duration::ZERO,
+            release_flush: Duration::from_secs(1),
+            cdr_flush: Duration::ZERO,
+        },
+    )
+    .await;
+    assert_eq!(out.exit, DrainExit::CaughtUp);
+    assert_eq!(queued.load(Ordering::SeqCst), 0, "no outbox entry was left behind");
+    assert!(out.elapsed >= Duration::from_millis(250), "it waited for the outboxes");
+    assert!(out.elapsed <= Duration::from_millis(400), "and no longer: {:?}", out.elapsed);
+}

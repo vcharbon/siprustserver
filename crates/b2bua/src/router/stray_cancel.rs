@@ -10,15 +10,15 @@ use super::RouterCtx;
 /// RFC 3261 §9.2 for a CANCEL that matched no INVITE transaction in the layer
 /// and none a call here could rebuild: 481 under `to_tag`, the tag the call's
 /// final to the INVITE carried where a call resolves, and no effect on any
-/// call. The 481 sent when `event` was such a CANCEL.
-pub(super) async fn reject_stray_cancel(
+/// call. The 481 to send when `event` was such a CANCEL.
+pub(super) fn reject_stray_cancel(
     ctx: &RouterCtx,
     call: &Call,
     leg_id: &str,
     to_tag: Option<&str>,
     event: &CallEvent,
 ) -> Option<SipResponse> {
-    let CallEvent::Sip { message, src, .. } = event else { return None };
+    let CallEvent::Sip { message, .. } = event else { return None };
     let SipMessage::Request(req) = message.as_ref() else { return None };
     if req.method() != Method::Cancel {
         return None;
@@ -30,6 +30,5 @@ pub(super) async fn reject_stray_cancel(
         let detail = format!("stated header: {skipped}");
         crate::model_invariants::stated_text_skipped(&ctx.metrics, call, &detail);
     }
-    let _ = ctx.txn.send_response(refusal.clone(), *src).await;
     Some(refusal)
 }

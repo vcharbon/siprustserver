@@ -163,7 +163,7 @@ pub(super) async fn process(
         }
         // The message is resolved to the dialog it names, or refused, before
         // any of the machinery below reads it (RFC 3261 §12.2.2, ADR-0041).
-        let resolved = match super::dialog_gate::admit(ctx, &call, &event, &res).await {
+        let resolved = match super::dialog_gate::admit(ctx, &call, &event, &res) {
             super::dialog_gate::Gate::Pass(resolved) => resolved,
             super::dialog_gate::Gate::Answered { answer, in_order } => {
                 let leg = res.source_leg_id.as_str();
@@ -173,6 +173,7 @@ pub(super) async fn process(
                 };
                 let taken = in_order.is_some();
                 record_refusal(ctx, call, leg, &event, answer.as_deref(), taken, now_ms);
+                answer_after_the_write(ctx, &call_ref, &event, answer).await;
                 return;
             }
             super::dialog_gate::Gate::Dropped => return,
@@ -194,9 +195,10 @@ pub(super) async fn process(
             .and_then(call::helpers::leg_own_tag)
             .map(str::to_string);
         if let Some(answer) =
-            reject_stray_cancel(ctx, &call, &res.source_leg_id, own_tag.as_deref(), &event).await
+            reject_stray_cancel(ctx, &call, &res.source_leg_id, own_tag.as_deref(), &event)
         {
             record_refusal(ctx, call, &res.source_leg_id, &event, Some(&answer), false, now_ms);
+            answer_after_the_write(ctx, &call_ref, &event, Some(Box::new(answer))).await;
             return;
         }
         // The limiter-refresh timer marks the call due on the worker's refresh
@@ -339,7 +341,8 @@ async fn resident_or_materialised(ctx: &Arc<RouterCtx>, call_ref: &str) -> Optio
 /// A request the router answered on a live call's behalf is still a message
 /// of the call's: the ring records it and the answer as a turn of their own,
 /// and the record lands — also without a ring when the answer `changed` the
-/// record (a request taken in order sets its dialog's last CSeq).
+/// record (a request taken in order sets its dialog's last CSeq), which is
+/// then written to the change log for the answer to wait on (ADR-0055 §3).
 fn record_refusal(
     ctx: &RouterCtx,
     call: Call,
@@ -364,5 +367,28 @@ fn record_refusal(
         _ if changed => call,
         _ => return,
     };
-    ctx.state.update(call);
+    if changed {
+        ctx.state.write(&call);
+    } else {
+        ctx.state.update(call);
+    }
+}
+
+/// Send `answer`, the router's answer to `event`'s request, through
+/// `call_ref`'s outbox, after the write that recorded it.
+async fn answer_after_the_write(
+    ctx: &Arc<RouterCtx>,
+    call_ref: &str,
+    event: &CallEvent,
+    answer: Option<Box<sip_message::SipResponse>>,
+) {
+    let (Some(answer), CallEvent::Sip { src, .. }) = (answer, event) else { return };
+    let (sender, dest) = (ctx.clone(), *src);
+    let wait = ctx.state.hold_target(call_ref);
+    let send: super::outbox::Effects = Box::new(move |_| {
+        Box::pin(async move {
+            let _ = sender.txn.send_response(*answer, dest).await;
+        })
+    });
+    ctx.outboxes.push(call_ref, wait, send).await;
 }

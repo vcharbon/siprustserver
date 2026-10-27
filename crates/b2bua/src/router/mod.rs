@@ -38,7 +38,6 @@ mod dropped_on_delete;
 #[cfg(test)]
 mod evidence_gate_tests;
 mod fold_payload;
-mod hold;
 mod incarnation_gate;
 mod ingress;
 mod initial_turn;
@@ -46,6 +45,7 @@ mod interpret;
 pub(crate) mod late_prack;
 mod materialise;
 mod notes;
+mod outbox;
 mod owed;
 mod peer_metrics;
 #[cfg(test)]
@@ -76,6 +76,7 @@ pub(crate) mod topology_cookie;
 #[cfg(test)]
 mod topology_cookie_tests;
 mod turn;
+mod turn_entry;
 mod turn_label;
 pub(crate) mod txn_event;
 mod unaddressable;
@@ -86,7 +87,7 @@ mod unrecoverable;
 mod unrecoverable_tests;
 mod unroutable;
 
-pub(crate) use hold::Holds;
+pub(crate) use outbox::Outboxes;
 use readmission::ReadmissionGate;
 pub(crate) use reclaim::reap_expired_replicas;
 // Consumed by the S7 readiness tests (`repl::s7_tests`) only.
@@ -209,8 +210,8 @@ pub struct RouterCtx {
     pub unroutable_waves: crate::lifecycle::UnroutableWaves,
     /// The PRACKs released calls still answer 200 (RFC 3262 §3).
     pub(crate) late_pracks: late_prack::LatePrackBook,
-    /// The ACKs the call's turns hold for its backup (ADR-0055 §3).
-    pub(crate) holds: Holds,
+    /// Every call's ordered outbox, released by the sync level (ADR-0055 §3).
+    pub(crate) outboxes: Arc<Outboxes>,
     /// Host-injected generic async-HTTP capability (ADR-0016 seam). `Arc`-shared
     /// into every per-call `ctx.clone()` exactly like `decision`/`limiter`;
     /// `None` → the `ServiceHttpRequest` dispatch arm folds an `outcome:"error"`

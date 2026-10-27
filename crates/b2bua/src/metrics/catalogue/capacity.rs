@@ -50,3 +50,9 @@ pub const REPL_CALLS_UNBACKED: Family = Family::gauge(
     Labels::None,
     "live calls of this node with no backup for life: admitted over a backlog high-water mark, or refused by their backup at its ceiling (ADR-0055 §3)",
 );
+
+pub const REPL_OUTBOX_DEPTH: Family = Family::gauge(
+    "b2bua_repl_outbox_depth",
+    Labels::None,
+    "outbox entries queued across every call, waiting for their backup to apply the write that records them (ADR-0055 §3)",
+);

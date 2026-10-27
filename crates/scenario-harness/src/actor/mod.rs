@@ -47,6 +47,7 @@ mod barrier;
 mod clean_end;
 mod client_retransmit;
 mod delta;
+mod dialog_table;
 mod drive;
 mod ending;
 mod endpoint;

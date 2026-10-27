@@ -15,8 +15,14 @@ replication stall then a kill, and a call with no backup then a kill.
 
 Read a failure in this order:
 
-1. **Which incident, which turn point.** A sweep cell is named
+1. **Which incident, which turn point, which sync level.** A sweep cell is named
    `<shape>/<incident>/t<k>-<point>` ([harness-layers](harness-layers.md#the-failover-sweep)).
+   The sweep runs at the replication sync level `B2BUA_REPL_SYNC` names
+   (`applied` when unset). Under `applied` a turn's sub-points run `logged →
+   applied → left`, so a kill at `applied` finds the write at the backup and
+   none of the turn's effects on the wire; under `off`, or past the cap, they
+   run `logged → left → applied` (ADR-0055 §3, §13). The turn's `Left` mark
+   says why its entry left: applied, capped, at once, or its backup lost.
    A hand-written failover test states its incident in its module doc.
 2. **Inside a declared window of that incident?** Then it is accepted, and the
    cell still asserts the outcome: no leak, full cleanup, the CDR count. The

@@ -93,7 +93,7 @@ pub use metrics::{B2buaMetrics, LiveGauge, RemovalClass, UdpTransportMetrics};
 /// The process's identifier generator: the counter stream outside any call's
 /// turn, and the key every turn draws its own identifiers under.
 pub use sip_txn::IdGen;
-pub use turn_probe::{TurnMark, TurnPoint, TurnProbe, TurnProbes};
+pub use turn_probe::{Released, TurnMark, TurnPoint, TurnProbe, TurnProbes};
 pub use wire_faults::{WireFaultPoint, WireFaults};
 // The callflow-service authoring macros live in the public Rule SDK (ADR-0016);
 // re-export them so in-tree services keep using `b2bua::define_service!` /

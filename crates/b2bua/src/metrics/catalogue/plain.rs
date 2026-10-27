@@ -206,6 +206,10 @@ plain_counters! {
         "b2bua_repl_new_calls_unbacked_total",
         "new calls admitted with no backup, for life, while the backlog toward their backup was over its high-water mark (ADR-0055 §3)",
     ) => repl_new_calls_unbacked, bump_repl_new_call_unbacked, repl_new_calls_unbacked_total;
+    REPL_SYNC_CAPPED = (
+        "b2bua_repl_sync_capped_total",
+        "outbox entries released at the sync cap, before their backup applied the write that records them (ADR-0055 §3)",
+    ) => repl_sync_capped, bump_repl_sync_capped, repl_sync_capped_total;
     DEPARTURE_TAKEOVER_PANICS = (
         "b2bua_departure_takeover_panics_total",
         "departed-peer calls whose takeover panicked; the sweep goes on with the next call — expected 0",

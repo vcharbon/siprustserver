@@ -21,6 +21,7 @@ use sip_message::{CseqDeviation, DelayedAutomatic};
 
 use super::answer::{fire_timed_answer, ForkAnswer};
 use super::delta::AcceptedDeltaPolicy;
+use super::dialog_table::DialogTable;
 use super::drive::drive_goal;
 use super::ending::Expect;
 use super::endpoint::{ActorSpec, Automatics, CtxFeed, Disposition, MediaState};
@@ -36,7 +37,7 @@ use super::script::{goal_arm_enabled, requeue_parked};
 use super::shared_endpoint::{EndpointHandle, Inbox};
 use super::state::{Observation, ObservedState};
 use crate::realcall::{CallCtx, CallScope, ChallengeResponder};
-use crate::{shared_cseq_applier, Agent, ClientInvite, Dialog, ServerTxn, StepError};
+use crate::{shared_cseq_applier, Agent, Dialog, ServerTxn, StepError};
 
 /// One inbound request parked on a [`Disposition::Scripted`] actor, awaiting
 /// the reception goal that consumes it (or a requeue-on-advance auto-react).
@@ -82,24 +83,6 @@ pub(super) struct PendingRejectAck {
     pub(super) key: ObligationKey,
     pub(super) call_id: String,
     pub(super) branch: String,
-}
-
-/// The confirmed dialog(s) + pending INVITE transaction an endpoint owns. Deliberately minimal: one
-/// caller INVITE, one confirmed dialog — enough for every current body incl. the realign flows,
-/// which ride the confirmed dialog as in-dialog UAS transactions. (The reliable-183 / `Reject`
-/// pending-UAS holds live as [`ActorState`] fields, not here.)
-#[derive(Default)]
-pub(super) struct DialogTable {
-    /// The caller's outgoing INVITE, awaiting its confirmation (learned from the
-    /// responses the reactor feeds it via [`ClientInvite::absorb_response`]).
-    pub(super) pending_invite: Option<ClientInvite>,
-    /// Our confirmed dialog (caller after ACK, or UAS after answering).
-    pub(super) confirmed: Option<Dialog>,
-    /// The caller's establishing INVITE, RETAINED after confirmation (C1/E3):
-    /// a LOSING fork's late 2xx (§13.2.2.4) arrives after the winner's and must
-    /// be ACK+BYE'd on ITS OWN fork dialog — derived from this transaction
-    /// ([`ClientInvite::fork_dialog`]), never from the confirmed (winner) one.
-    pub(super) won_invite: Option<ClientInvite>,
 }
 
 /// An actor's fatal failure: its role, the goal it failed at as `(kind,
@@ -212,7 +195,7 @@ pub struct ActorState<'c> {
     /// The **deferred-auth adapter** (RFC 3261 §22.2) wired onto this caller's
     /// establishing INVITE. `Some` → a `401`/`407` to that INVITE is ACKed, the
     /// responder is asked for a credential, and the INVITE is resent ONCE
-    /// (bumped CSeq, fresh branch — see [`ClientInvite::ack_and_resend_with_auth`]);
+    /// (bumped CSeq, fresh branch — see [`crate::ClientInvite::ack_and_resend_with_auth`]);
     /// `None` (the default) → a challenge classifies as `status_401/407`
     /// unchanged. Reaches the caller from [`CallEnv::challenge_responder`]
     /// (`crates/loadgen/src/driver.rs` `run_one`).
@@ -268,6 +251,10 @@ pub struct ActorState<'c> {
     /// their own reactor arm — so goal progress (the deviation's point: traffic
     /// DURING the hold) never blocks on the hold.
     pub(super) held_acks: Vec<HeldAck>,
+    /// The initial INVITEs this actor took, by their server transaction's
+    /// top-Via branch and sent-by (RFC 3261 §17.2.3): a copy of one is not a
+    /// new call.
+    pub(super) initial_invites: std::collections::HashSet<(String, String)>,
     /// Whether this actor ORIGINATES the dialog — its first goal is an
     /// `Invite`/`InviteTemplate` (fallback: `Disposition::Caller`). Keys the
     /// §14.1 glare owner dwell and the caller attribution.
@@ -376,6 +363,7 @@ impl<'c> ActorState<'c> {
             originated_invites: 0,
             reinvite_ordinals: HashMap::new(),
             held_acks: Vec::new(),
+            initial_invites: Default::default(),
             originates,
             delta_policy,
             reception_observer,

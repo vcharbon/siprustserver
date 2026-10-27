@@ -8,7 +8,7 @@ write path, the confirm-race trade-off, the INVITE-only seeds, §2–§4), ADR-0
 provisional of an INVITE, §3), ADR-0031 D2 and D4 and its per-axis fold (§3,
 §7, §8), ADR-0037 items 4 and 6 (a replica left out makes the call non-HA, §3),
 ADR-0042 §2 (the business re-check moves into timer scopes, §10), ADR-0045 (the
-hold reads the applied position, §3), ADR-0047 D5 and its residuals (the lost
+outbox reads the applied position, §3), ADR-0047 D5 and its residuals (the lost
 round becomes the rule of §4, any method; the creation write before the first
 provisional, §3).
 
@@ -170,39 +170,72 @@ record's image under its branch (§17.1.2.2).
   backup again once the backlog is under a low-water mark. No call is refused
   for the backlog. A gauge counts the live calls with no backup; such a call
   runs as on a non-HA B2BUA.
-- **No effect waits for the peer, with one bounded exception.** The ACK and the
-  first provisional of every INVITE, initial or re-INVITE, and the final to
-  every non-INVITE request (the messages that stop a peer retransmitting,
-  user ruling) leave once the backup has applied the write that records what
-  they answer, or once a cap expires, whichever comes first.
-  "Applied" means the backup's applied position reached the call's current
-  change-log entry. The cap is a configuration value; its default and the
-  first-provisional bound below are set from the SIP timers, and configuration
-  refuses a cap not below T1 and not below the §17.2.1 bound for the 100. The
-  first provisional is counted from the INVITE's receipt: the turn engine sends
-  it after the call's write, and the transaction layer sends the 100 itself if
-  no turn released one by the §17.2.1 bound. A call with no live, bootstrapped
-  backup skips the hold, and so does the final a call's terminal turn sends: the
-  call is released with it. A held ACK or final leaves before any later effect
-  on its dialog (RFC 3261 §14.1). Every other effect (a final to an INVITE, a
-  relayed request, the dialled INVITE, media) leaves at once. The hold lives in
-  the aware crates; the services stay blind.
+- **The replication sync level: `off` or `applied`.** Every effect a turn
+  sends off the node leaves through the call's one ordered outbox, at either
+  level: entries leave in the order the call's turns queued them, a later
+  entry never overtaking an earlier one, and no turn waits on the outbox. The
+  level decides only when an entry is released. Under `off` the write is
+  logged, then the entry leaves at once. Under `applied` (the default) an
+  entry leaves once the backup applied the write that records it, or once a
+  cap expires, whichever comes first. "Applied" means the backup's applied
+  position reached the call's change-log entry, re-read on every wake: a
+  later write of the call moves the entry, and the wait follows it, while the
+  cap stays counted from the entry's own enqueue, so a later write never makes
+  an earlier entry wait longer than the cap. A call with no live, bootstrapped
+  backup waits for nothing, and an entry whose backup's flow goes down leaves
+  then. No entry waits without a cap: a lost peer would stall every call.
+- **What the outbox carries.** Outbound SIP (a request, a response, a
+  retained datagram, a media-server leg's SIP included; the node sends no
+  RTP), the requests to outside services a turn starts (a routing or service
+  consult, a release consult, the limiter admit), the limiter releases, and
+  the transaction effects a queued send depends on (relinquishing an answered
+  INVITE's server transaction), so they run after the sends ahead of them.
+  Timers, the CDR, metrics and re-entries stay in the turn. An answer
+  deadline (ADR-0039) is armed at the turn with a 2 s margin, which absorbs
+  the cap.
+- **The first provisional, the gate and the end of a call.** The caller's
+  100 is an outbox entry waiting for the call's creation write; the
+  transaction layer sends it itself at the §17.2.1 bound if no entry released
+  one. The answer the dialog gate gives a request on a live call is an entry
+  too: when it took the request in order (the dialog's CSeq advanced), the
+  turn writes that change to the change log and the answer waits for it; a
+  change to the message ring alone is not written. The turn that ends a call
+  enqueues the CDR, then logs the delete, and its entries wait for the
+  delete like any other, which the earlier rule (the final a terminal turn
+  sends skips the hold) did not: a kill then adds a second CDR, never loses
+  one (§5). While its outbox drains, the call stays resident and takes no
+  turn, and neither the reaper nor the departure sweep acts on it; it is
+  released once the outbox is empty. A takeover copy's terminal turn waits
+  for its reverse-flushed write the same way. A stand-down, a self-release
+  and a discharge by the backup send what the outbox still holds at once:
+  the copy's write records those sends. A drain and a shutdown exit only once
+  every outbox is empty, at most the cap after the last entry.
+- **Cap hits are reported.** The turn probe's `Left` mark of a turn whose
+  entry left at the cap says so; one released because its backup's flow went
+  down says that instead. A counter counts the cap hits and a gauge the
+  queued entries. No per-call state outlives the call (ADR-0037), and the
+  outbox needs no admission term: it is bounded by the message rate times the
+  cap. The services stay blind: the outbox lives in the aware crates.
 - **A write is abandoned only with its backup.** It stays in the change log
   until the backup applies it, or until the replication link to that backup is
   down (ADR-0045 link liveness) and the call loses its backup.
-- **Settings.** The cap defaults to half the §17.2.1 bound (100 ms), and the
-  transaction layer's own 100 leaves at the bound itself (200 ms). The backlog
-  marks default to 10 000 entries or 5 s (high) and 1 000 entries and 1 s
-  (low). `B2BUA_REPL_HOLD_CAP_MS` and `B2BUA_REPL_BACKLOG_{HIGH,LOW}_{ENTRIES,AGE_MS}`
-  set them; a boot refuses a cap not above zero and below both bounds, or a
-  low mark not under its high one.
+- **Settings.** The level defaults to `applied` and the cap to half the
+  §17.2.1 bound (100 ms); the transaction layer's own 100 leaves at the bound
+  itself (200 ms). The backlog marks default to 10 000 entries or 5 s (high)
+  and 1 000 entries and 1 s (low). `B2BUA_REPL_SYNC` (`off` | `applied`),
+  `B2BUA_REPL_SYNC_CAP_MS` and `B2BUA_REPL_BACKLOG_{HIGH,LOW}_{ENTRIES,AGE_MS}`
+  set them; a boot refuses another level, a cap not above zero and below T1
+  and the §17.2.1 bound, at either level, or a low mark not under its high
+  one.
 
-A graceful drain is transparent: it exits once the backup has caught up. A
-call with no backup has no peer holding it, so while one lives the drain waits
-for its calls or its grace, as a non-HA B2BUA does. A kill is not transparent:
-a held ACK the kill takes after the backup applied its write is re-sent by the
-copy to the callee's 2xx repeat (RFC 3261 §13.2.2.4), and a final or a relay
-that left inside the replication window is evidence §4 ends the call on. Full
+A graceful drain is transparent: it exits once the backup has caught up and
+every outbox is empty. A call with no backup has no peer holding it, so while
+one lives the drain waits for its calls or its grace, as a non-HA B2BUA does. A
+kill is not transparent: under `applied` the backup holds every write whose
+effects left before the cap, and an ACK the kill takes after the backup applied
+its write is re-sent by the copy to the callee's 2xx repeat (RFC 3261
+§13.2.2.4); what left at the cap, and under `off` a final or a relay that left
+inside the replication window, is evidence §4 ends the call on. Full
 transparency is not the goal; the window is the transport delay.
 
 ### 4. Evidence the call record cannot explain: one rule, any method
@@ -491,21 +524,24 @@ the re-anchor deadband of each other.
     on the dialog during the stall, each closed by the 481 it draws;
   - a kill of the primary, and a split that heals (user ruling): the §4 clean
     end's BYE into a dialog the other owner already ended, closed by its 481;
-  - a kill of the primary at a logged or left sub-point (user ruling): a
-    dialog left to its endpoint's own timer when the write of a teardown the
-    node began was not applied at the kill; a quiet call of a departed primary
-    stays reactive (§5);
-  - a kill of the primary at a logged or left sub-point of a turn taken on
-    something no peer repeats — a response, a timer, an off-turn answer (user
-    ruling): the turn's effects are lost with the node, the parties wait for
-    them in vain, and every dialog, early or confirmed, is left to its
-    endpoint's own timers. A turn taken on a request is not in this window:
-    the message that stops its sender repeating it is held (§3);
-  - a kill of the primary at the applied sub-point of a turn that sent a
-    request to an outside service (a routing service, the limiter), the
-    primary taking no later turn (user ruling): the answer in flight on the
-    dead node is lost, and the copy stays reactive (§5); every dialog is left
-    to its endpoint's own timers;
+  - a kill of the primary before the backup holds the turn's write with its
+    effects left — a logged or left sub-point under `off` or past the cap, a
+    logged or applied one under `applied` (user ruling): a dialog left to its
+    endpoint's own timer when the write of a teardown the node began was not
+    applied at the kill; a quiet call of a departed primary stays reactive
+    (§5);
+  - such a kill at a turn taken on something no peer repeats — a response, a
+    timer, an off-turn answer (user ruling): the turn's effects are lost with
+    the node, the parties wait for them in vain, and every dialog, early or
+    confirmed, is left to its endpoint's own timers. A turn taken on a request
+    is not in this window: under `applied` the message that stops its sender
+    repeating it waits for the write (§3);
+  - a kill of the primary once the backup holds the write of a turn that sent
+    a request to an outside service (a routing service, the limiter) and that
+    request left — the applied sub-point under `off`, the left one under
+    `applied` — the primary taking no later turn (user ruling): the answer in
+    flight on the dead node is lost, and the copy stays reactive (§5); every
+    dialog is left to its endpoint's own timers;
   - a kill inside the replication window: a copy re-uses a CSeq the dead
     primary sent before the backup applied the write, at most one rejected
     request per dialog; the call still ends or continues cleanly. A call with
@@ -552,7 +588,12 @@ picks a Call-ID that lands there); steering of a party's next request or of its
 responses to a named role, carried out through real causes (health, kill,
 partition), never by bypassing the proxy; turn points with their three
 sub-points, so an incident arms at turn k; and views named by role (primary,
-backup, copy).
+backup, copy). Under `applied` with no cap hit the sub-points run `Logged →
+Applied → Left`; under `off`, or past the cap, `Logged → Left → Applied`.
+`Left` is reached when the turn's last outbox entry left, possibly after later
+turns were taken: it carries the version the turn logged and names the turn
+by it, as `Applied` does, and says why the entry left. A cap release while the
+harness holds an applied sub-point of the call is the harness's own doing.
 
 ### 14. A leg states one Contact
 
@@ -568,9 +609,11 @@ naming the node that sends.
 
 ## Considered and rejected
 
-- **Wait for the backup before any effect leaves**, on every changing turn or on
-  lifecycle edges. It puts the peer's latency on call treatment. §3 holds only
-  the ACK and the first provisional, and only up to the cap.
+- **Wait for the backup with no cap** before an effect leaves. A lost or slow
+  peer would stall every call; §3 waits at most the cap, and only for a live,
+  bootstrapped backup.
+- **A `sent` level**, releasing an entry once its write left for the backup.
+  It was discussed and is not part of §3.
 - **Drop a write when the queue is full.** A dropped confirm makes §4 end an
   established call at the next kill. §3 keeps one entry per call and gives new
   calls no backup instead.
@@ -599,8 +642,8 @@ naming the node that sends.
   split, ends cleanly. With replication sent on write the window is the
   transport delay; at a few hundred state-changing turns a second, it is under
   one call per kill.
-- No signalling latency depends on the peer, except the ACK and the first
-  provisional of an INVITE, by at most the cap.
+- Under `applied`, every effect a turn sends waits for the backup, by at most
+  the cap; under `off`, none does.
 - Under a replication backlog or a backup at its memory ceiling, new calls run
   without HA; the gauge shows how many.
 - The call record, `Dialog` and the SDK change shape; no compatibility is kept.

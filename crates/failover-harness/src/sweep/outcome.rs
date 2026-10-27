@@ -5,16 +5,18 @@
 //! outcomes pass:
 //! - a split, healed or not, is judged on leaks, cleanup and the CDR count
 //!   alone, never on the parties' verdict;
-//! - a kill of the primary at a logged or left sub-point may leave a dialog
-//!   to its endpoint's own timer, after a teardown whose write the backup
-//!   never applied (§5: a quiet call of a departed primary stays reactive);
-//! - a kill of the primary at a logged or left sub-point of a turn taken on
-//!   something no peer repeats (a response, a timer, an off-turn answer) may
-//!   lose that turn's effects: the parties wait for them in vain, and every
-//!   dialog, early or confirmed, is left to its endpoint's own timers;
-//! - a kill of the primary at an applied sub-point of a turn that sent a
-//!   request to an outside service, the primary taking no later turn: the
-//!   answer is lost with the node, and the copy stays reactive (§5);
+//! - a kill of the primary before the backup held the cut turn's write and
+//!   its effects had both left may leave a dialog to its endpoint's own
+//!   timer, after a teardown whose write the backup never applied (§5: a
+//!   quiet call of a departed primary stays reactive);
+//! - such a kill, at a turn taken on something no peer repeats (a response, a
+//!   timer, an off-turn answer), may lose that turn's effects: the parties
+//!   wait for them in vain, and every dialog, early or confirmed, is left to
+//!   its endpoint's own timers;
+//! - a kill of the primary once the backup held the write of a turn that sent
+//!   a request to an outside service and that request left, the primary
+//!   taking no later turn: the answer is lost with the node, and the copy
+//!   stays reactive (§5);
 //! - an incident that loses the call (a stall then a kill, a call with no
 //!   backup) may leave every dialog, the caller's included, to its endpoint's
 //!   own timers, so long as every request that reached a living worker drew
@@ -27,13 +29,15 @@ use scenario_harness::actor::{FailedAt, LegPhase, ObservedState, ScenarioVerdict
 use scenario_harness::StepError;
 
 use super::Incident;
-use crate::turn_points::TurnPoint;
 
 /// Where an incident struck.
 #[derive(Clone, Copy)]
 pub(super) struct CutAt {
     pub incident: Incident,
-    pub point: TurnPoint,
+    /// The backup held the cut turn's write and its effects had left: the
+    /// applied sub-point under `off` or past the cap, the left one under
+    /// `applied`.
+    pub held_and_left: bool,
     /// The cut turn handled a SIP request.
     pub on_request: bool,
     /// The cut turn sent a request to an outside service and the primary
@@ -48,7 +52,7 @@ pub(super) struct CutAt {
 /// the cut — `None` for the uncut call — accepts.
 pub(super) fn accepted(cut: Option<CutAt>, verdict: &ScenarioVerdict, obs: &ObservedState) -> bool {
     let Some(cut) = cut else { return verdict.is_success() };
-    let CutAt { incident, point, on_request, answer_in_flight, living_answered } = cut;
+    let CutAt { incident, held_and_left, on_request, answer_in_flight, living_answered } = cut;
     if incident.splits() || verdict.is_success() {
         return true;
     }
@@ -56,12 +60,8 @@ pub(super) fn accepted(cut: Option<CutAt>, verdict: &ScenarioVerdict, obs: &Obse
     let StepError::Timeout { .. } = cause else { return false };
     let torn_down = at.barrier == FailedAt::TORN_DOWN;
     obs.with_snapshot(|s| match incident {
-        Incident::PrimaryKilled => match point {
-            TurnPoint::Logged | TurnPoint::Left => {
-                !on_request || (torn_down && teardown_lost_in_the_window(s))
-            }
-            TurnPoint::Applied => answer_in_flight,
-        },
+        Incident::PrimaryKilled if held_and_left => answer_in_flight,
+        Incident::PrimaryKilled => !on_request || (torn_down && teardown_lost_in_the_window(s)),
         _ if incident.loses_the_call() => living_answered,
         _ => false,
     })

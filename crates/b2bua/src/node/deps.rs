@@ -55,7 +55,7 @@ pub struct ReplicationSetup {
     pub serve: crate::repl::ServeConfig,
     /// The replicas' TTL, the backup ceilings and the keepalive catch-up.
     pub replica: super::replica::ReplicaConfig,
-    /// The hold cap and the backlog marks (ADR-0055 §3).
+    /// The sync level, its cap and the backlog marks (ADR-0055 §3).
     pub write_path: crate::repl::WritePath,
 }
 

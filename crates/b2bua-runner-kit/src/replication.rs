@@ -85,7 +85,7 @@ pub struct ReplicationSettings {
     pub(crate) membership: MembershipSource,
     /// The link bounds, `B2BUA_REPL_*_MS` ([`link_env`]).
     pub(crate) link: LinkSettings,
-    /// The hold cap and backlog marks ([`write_path_env`]).
+    /// The sync level, its cap and the backlog marks ([`write_path_env`]).
     pub(crate) write_path: b2bua::repl::WritePath,
 }
 

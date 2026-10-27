@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use failover_harness::cluster::{Cluster, ClusterRecipe};
 use failover_harness::sweep::{ALICE, BOB};
-use failover_harness::{assert_call_fully_over, Cause, Role, TurnAt, TurnPoint};
+use failover_harness::{assert_call_fully_over, Cause, Released, Role, TurnAt, TurnPoint};
 use scenario_harness::{Agent, ClientInvite, Dialog};
 use sip_message::generators::InDialogMethod;
 
@@ -82,20 +82,45 @@ async fn a_turn_held_where_its_write_is_logged_has_sent_nothing() {
 }
 
 /// The applied sub-point of a turn is reached at the backup, once it holds
-/// the turn's write.
+/// the turn's write; under the `applied` sync level the turn's effects wait
+/// for it, and leave once the backup reported applying (ADR-0055 §3, §13).
 #[tokio::test(start_paused = true)]
 async fn a_turns_applied_sub_point_is_the_backup_holding_its_write() {
     let (cluster, alice, bob) = cluster("held-at-applied").await;
     let placement = cluster.place_next_call(&alice, "b1");
     let reached = cluster.fh.turn_points().arm(TurnAt { turn: 1, point: TurnPoint::Applied });
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(cluster.proxy.addr()).send().await;
-    let mut uas = bob.receive("INVITE").await;
     let held = reached.await.expect("the backup applies the first turn's write");
     assert_eq!(held.node, placement.backup);
     assert!(
         cluster.node(&placement.backup).scan_backed_up(&placement.primary).contains(&held.call_ref),
         "the backup holds the call's replica"
     );
+    assert!(bob.take_queued().await.is_none(), "the turn's INVITE waits for the backup");
+    let call_ref = held.call_ref.clone();
+    held.release();
+    let mut uas = bob.receive("INVITE").await;
+    let turn = cluster.fh.turn_points().turns(&call_ref)[0];
+    assert_eq!(turn.released, Some(Released::Applied), "it left on the backup's report");
+    let (mut dialog, _) = answer(&mut call, &mut uas, &bob).await;
+    hang_up(&cluster, &mut dialog, &bob, &alice).await;
+}
+
+/// Held at its applied sub-point past the cap, the turn's effects leave at the
+/// cap, and the harness's own hold is named as the cause.
+#[tokio::test(start_paused = true)]
+async fn a_cap_release_behind_the_harnesss_applied_hold_is_flagged_as_its_own() {
+    let (cluster, alice, bob) = cluster("capped-at-applied").await;
+    cluster.place_next_call(&alice, "b1");
+    let reached = cluster.fh.turn_points().arm(TurnAt { turn: 1, point: TurnPoint::Applied });
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(cluster.proxy.addr()).send().await;
+    let held = reached.await.expect("the backup applies the first turn's write");
+    let call_ref = held.call_ref.clone();
+    cluster.fh.advance(Duration::from_millis(150)).await;
+    let mut uas = bob.receive("INVITE").await;
+    let turn = cluster.fh.turn_points().turns(&call_ref)[0];
+    assert_eq!(turn.released, Some(Released::Capped), "it left at the cap");
+    assert!(turn.capped_by_harness, "the harness's applied hold caused the cap release");
     held.release();
     let (mut dialog, _) = answer(&mut call, &mut uas, &bob).await;
     hang_up(&cluster, &mut dialog, &bob, &alice).await;

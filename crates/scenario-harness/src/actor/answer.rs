@@ -186,6 +186,16 @@ pub(super) async fn apply_disposition(
     mut uas: ServerTxn,
 ) -> Result<(), StepError> {
     let now = Instant::now();
+    // A copy of an initial INVITE this actor already took — the same server
+    // transaction by its top Via (RFC 3261 §17.2.3), whatever a proxy stamped
+    // below it — is a retransmission its transaction absorbs (§17.2.1), not a
+    // second call to answer under another To-tag.
+    let via = uas.request().top_via();
+    let (host, port) = via.sent_by().pair();
+    let key = (via.branch().unwrap_or_default().to_string(), format!("{host}:{port}"));
+    if !key.0.is_empty() && !st.initial_invites.insert(key) {
+        return Ok(());
+    }
     // A fresh initial INVITE opens a fresh early-dialog space — a stale count
     // from a previous initial (a reroute-retry to this actor) must not leak
     // into the policy snapshot. A retransmit re-inserts the same tags.

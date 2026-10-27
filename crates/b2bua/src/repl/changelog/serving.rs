@@ -60,6 +60,8 @@ impl Drop for ServeGuard {
             sub.streams = sub.streams.saturating_sub(1);
             if sub.streams == 0 {
                 sub.applied = None;
+                // A wait on the flow's position learns the flow is down.
+                sub.acked.send_modify(|_| {});
             }
         }
     }

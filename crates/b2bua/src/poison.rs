@@ -15,13 +15,13 @@ pub(crate) const CDR_MEMORY: &str = "cdr_memory";
 pub(crate) const DISPATCH_BODIES: &str = "dispatch_bodies";
 pub(crate) const DISPATCH_QUEUE: &str = "dispatch_queue";
 pub(crate) const DISPATCH_SLOTS: &str = "dispatch_slots";
-pub(crate) const HELD_ACKS: &str = "held_acks";
 pub(crate) const LATE_PRACKS: &str = "late_pracks";
 pub(crate) const LIMITER_BREAKER: &str = "limiter_breaker";
 pub(crate) const LIMITER_REFRESH_DUE: &str = "limiter_refresh_due";
 pub(crate) const LIMITER_RELEASE_WAITING: &str = "limiter_release_waiting";
 pub(crate) const LIMITER_REPORTS: &str = "limiter_reports";
 pub(crate) const MODEL_VIOLATIONS: &str = "model_violations";
+pub(crate) const OUTBOX: &str = "outbox";
 pub(crate) const OVERLOAD_SAMPLER: &str = "overload_sampler";
 pub(crate) const OVERLOAD_SIGNAL: &str = "overload_signal";
 pub(crate) const PULLER_BOOTSTRAP: &str = "puller_bootstrap";
@@ -42,13 +42,13 @@ pub const LOCKS: [&str; 24] = [
     DISPATCH_BODIES,
     DISPATCH_QUEUE,
     DISPATCH_SLOTS,
-    HELD_ACKS,
     LATE_PRACKS,
     LIMITER_BREAKER,
     LIMITER_REFRESH_DUE,
     LIMITER_RELEASE_WAITING,
     LIMITER_REPORTS,
     MODEL_VIOLATIONS,
+    OUTBOX,
     OVERLOAD_SAMPLER,
     OVERLOAD_SIGNAL,
     PULLER_BOOTSTRAP,

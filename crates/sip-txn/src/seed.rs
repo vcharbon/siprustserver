@@ -51,11 +51,13 @@ pub enum TxnSeed {
     ServerAccepted { response: SipResponse, leg_id: Option<String> },
     /// A client non-INVITE this side sent toward `dest`, still awaiting its
     /// final: `request` as it left, keyed by its top-Via branch and attributed
-    /// from its Via `cr` / `lg` params. It retransmits `request`'s image, byte
-    /// for byte, under that branch on Timer E from the seed, and gives up
-    /// `bound_ms` from the seed: what is left of the Timer F the first copy
-    /// started (RFC 3261 §17.1.2.2). A UAS that answered the first copy
-    /// repeats its final to the retransmission (§17.2.2).
+    /// from its Via `cr` / `lg` params. It sends `request`'s image, byte for
+    /// byte, under that branch once at the seed — the record may be ahead of
+    /// the wire, so the first copy may never have left — then on Timer E from
+    /// the seed, and gives up `bound_ms` from the seed: what is left of the
+    /// Timer F the first copy started (RFC 3261 §17.1.2.2). A UAS that
+    /// answered the first copy repeats its final to the retransmission
+    /// (§17.2.2).
     ClientNonInvite { request: SipRequest, dest: SocketAddr, bound_ms: u64 },
     /// A server non-INVITE this side received and has not answered:
     /// `request`, rebuilt from the record as far as a response to it reads it

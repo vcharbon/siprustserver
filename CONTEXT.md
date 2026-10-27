@@ -411,15 +411,19 @@ reported applying, and the age of the oldest. Over a high-water mark new calls
 are admitted unbacked; under the low-water marks they get a backup again. No
 call is refused for it (ADR-0055 §3).
 
-**Hold** (of a turn's message, `router::hold`):
-The messages that stop a peer retransmitting (the ACK of a 2xx, the first
-provisional of every INVITE, initial or re-INVITE, and the final to every
-non-INVITE request) leave once the call's backup applied the call's current
-change-log entry, or at the **hold cap**, whichever comes first. A call with no
-live, bootstrapped backup holds nothing, nor does the final a call's terminal
-turn sends; a held message leaves before any later effect on its dialog. Every
-other message leaves at once (ADR-0055 §3).
-_Avoid_: "sync replication" (only these messages wait, at most the cap).
+**Replication sync level** (`off` | `applied`, `B2BUA_REPL_SYNC`):
+When a turn's effects leave the node, relative to the write that records them.
+Every effect a call's turns send off the node (SIP, requests to outside
+services, limiter releases) leaves through the call's one ordered **outbox**, a
+later entry never overtaking an earlier one; the level decides only when an
+entry is released. Under `off` at once, the write logged first; under
+`applied` (the default) once the backup applied the write that records it, or
+at the **sync cap** counted from the entry's own enqueue, whichever comes
+first. A call with no live, bootstrapped backup waits for nothing; the turn
+that ends a call waits for its delete, the call resident until then (ADR-0055
+§3).
+_Avoid_: "sync replication" (no entry waits past the cap), "hold" (every
+effect goes through the outbox).
 
 **Silent stream**:
 A replication stream that has delivered nothing for the idle bound (15 s; a
@@ -1511,10 +1515,11 @@ The in-process proof of HA-blind services
 
 **Turn point**:
 One sub-point of one turn a call takes at its primary, the turns numbered from
-1: the turn's write handed to replication (`logged`), its effects left
-(`left`), its write applied at the backup (`applied`, only for a turn that
-wrote). Where a sweep incident arms; the harness holds the turn there until
-the incident struck.
+1: the turn's write handed to replication (`logged`), its write applied at the
+backup (`applied`, only for a turn that wrote), its last outbox entry left
+(`left`), in that order under the `applied` sync level with no cap hit, and
+`logged`, `left`, `applied` under `off` or past the cap. Where a sweep incident
+arms; the harness holds the turn there until the incident struck.
 _Avoid_: "safe-point" (the transparent matrix's quiescent states, ADR-0013).
 
 **Failover sweep**:

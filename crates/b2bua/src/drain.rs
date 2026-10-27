@@ -103,6 +103,9 @@ pub struct DrainInputs {
     /// Releases the worker's queue still has to send (none once it is
     /// stopped): an exit is taken only with none.
     pub releases_waiting: Probe<usize>,
+    /// Entries the calls' outboxes still have to send, each within the sync
+    /// cap (ADR-0055 §3): an exit is taken only with none.
+    pub outboxes_waiting: Probe<usize>,
 }
 
 impl DrainInputs {
@@ -118,7 +121,18 @@ impl DrainInputs {
             withdrawn: Arc::new(withdrawn),
             flush_releases: Arc::new(|_| Box::pin(async { ReleaseFlush::default() })),
             releases_waiting: Arc::new(|| 0),
+            outboxes_waiting: Arc::new(|| 0),
         }
+    }
+
+    /// These inputs with `waiting` as the outbox entries left to send (the
+    /// default reads none).
+    pub fn with_outboxes_waiting(
+        mut self,
+        waiting: impl Fn() -> usize + Send + Sync + 'static,
+    ) -> Self {
+        self.outboxes_waiting = Arc::new(waiting);
+        self
     }
 
     /// These inputs with `waiting` as the release queue's depth (the default
@@ -192,10 +206,11 @@ pub async fn drain_until_quiescent(inputs: DrainInputs, bounds: DrainBounds) -> 
             let now = tokio::time::Instant::now();
             let (exit, live) = exit_at(&inputs, now, floor_at, deadline);
             if let Some(exit) = exit.filter(|e| e.is_clean() || now >= deadline) {
-                if (inputs.releases_waiting)() > 0 {
+                if (inputs.releases_waiting)() > 0 || (inputs.outboxes_waiting)() > 0 {
                     if now < ceiling {
-                        // A release queued after the flush emptied the queue:
-                        // flush again, one poll later at most.
+                        // A release queued after the flush emptied the queue,
+                        // or an outbox entry not yet sent: flush again, one
+                        // poll later at most.
                         tokio::time::sleep(DRAIN_POLL.min(ceiling - now)).await;
                         continue;
                     }

@@ -261,11 +261,12 @@ async fn a_refusal_of_an_earlier_call_on_the_ref_leaves_the_retry_backed() {
     state.remove(&retry.call_ref);
 }
 
-/// **The hold reads the applied position.** A call whose backup flow is live
-/// and bootstrapped holds for its current entry; the hold resolves once the
-/// backup reports applying it.
+/// **An outbox entry waits for the call's current entry.** A call whose
+/// backup flow is live and bootstrapped names its current change-log entry as
+/// what an outbox entry queued now waits for; one with no live flow names
+/// nothing.
 #[tokio::test(start_paused = true)]
-async fn a_hold_waits_for_the_backup_to_apply_the_calls_entry() {
+async fn an_entry_waits_for_the_calls_current_entry_toward_a_live_backup() {
     let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
     let state = wired(&repl);
     let call = backed_call(1);
@@ -277,50 +278,6 @@ async fn a_hold_waits_for_the_backup_to_apply_the_calls_entry() {
     repl.changelog().note_applied("w1", None, Partition::Bak, Watermark::new(1, 0));
     let target = state.hold_target(&call.call_ref).expect("a live, bootstrapped backup");
     assert_eq!(target.at, Watermark::new(1, 1), "the call's current entry");
-    let waiting = held(&state, &call.call_ref);
-    tokio::task::yield_now().await;
-    assert!(!waiting.is_finished(), "not applied yet");
-    repl.changelog().note_applied("w1", None, Partition::Bak, Watermark::new(1, 1));
-    let resolved = tokio::time::timeout(Duration::from_millis(1), waiting).await;
-    assert!(resolved.is_ok(), "applied: the hold resolves");
-}
-
-/// A task waiting for `call_ref`'s backup to apply its current entry.
-fn held(state: &CallState, call_ref: &str) -> tokio::task::JoinHandle<()> {
-    let (state, call_ref) = (state.clone(), call_ref.to_string());
-    tokio::spawn(async move { state.applied_current(&call_ref).await })
-}
-
-/// **Another call's applied write never releases a hold.** A is held at its
-/// entry 1; B writes at 2; A writes again and moves to 3 before the serve task
-/// drains. The backup reports 2 (B applied, A not yet): A's hold stays; it
-/// resolves at 3.
-#[tokio::test(start_paused = true)]
-async fn a_hold_follows_its_calls_entry_past_another_calls_applied_write() {
-    let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
-    let state = wired(&repl);
-    let _serving = repl.changelog().serving("w1", Partition::Bak);
-    repl.changelog().note_applied("w1", None, Partition::Bak, Watermark::new(1, 0));
-    let (a, b) = (backed_call(1), backed_call(2));
-    state.create_placed(a.clone());
-    state.create_placed(b.clone());
-    state.flush(&a);
-    let waiting = held(&state, &a.call_ref);
-    tokio::task::yield_now().await;
-    state.flush(&b);
-    state.flush(&a);
-    assert_eq!(
-        repl.changelog().position_of("w1", Partition::Bak, &a.call_ref),
-        Some(Watermark::new(1, 3))
-    );
-    repl.changelog().note_applied("w1", None, Partition::Bak, Watermark::new(1, 2));
-    for _ in 0..3 {
-        tokio::task::yield_now().await;
-    }
-    assert!(!waiting.is_finished(), "B's applied write does not stand for A's");
-    repl.changelog().note_applied("w1", None, Partition::Bak, Watermark::new(1, 3));
-    let resolved = tokio::time::timeout(Duration::from_millis(1), waiting).await;
-    assert!(resolved.is_ok(), "A's current entry applied: the hold resolves");
 }
 
 /// **A refusal frame reaches the primary's store.** The backup's

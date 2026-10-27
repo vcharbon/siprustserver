@@ -55,10 +55,10 @@ fn client_info(branch: &str, call_id: &str) -> SipRequest {
     request_bytes(info.as_bytes())
 }
 
-/// A seeded client non-INVITE retransmits its request as it left, byte for
-/// byte, under its branch on Timer E from the seed, the first copy T1 after
-/// it (RFC 3261 §17.1.2.2), and hands the final it draws up once, matched,
-/// for its call.
+/// A seeded client non-INVITE sends its request as it left, byte for byte,
+/// under its branch once at the seed — the record may be ahead of the wire —
+/// then on Timer E from the seed, the next copy T1 after it (RFC 3261
+/// §17.1.2.2), and hands the final it draws up once, matched, for its call.
 #[tokio::test(start_paused = true)]
 async fn a_seeded_client_non_invite_retransmits_its_request_and_takes_its_final() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
@@ -68,8 +68,11 @@ async fn a_seeded_client_non_invite_retransmits_its_request_and_takes_its_final(
     let seed = TxnSeed::ClientNonInvite { request, dest: addr(PEER), bound_ms: TIMER_F };
     assert_eq!(stack.txn.seed(CALL_REF, vec![seed]).await.unwrap(), 1);
     assert_eq!(stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(), 1);
-    elapse_ms(400).await;
-    assert!(stack.drain_peer().is_empty(), "nothing leaves before T1");
+    elapse_ms(TRANSIT + 1).await;
+    let at_seed = stack.peer.try_recv().expect("the request leaves at the seed");
+    assert_eq!(at_seed.raw, image, "the recorded image, byte for byte, under its own branch");
+    elapse_ms(400 - TRANSIT - 1).await;
+    assert!(stack.drain_peer().is_empty(), "nothing more leaves before T1");
     elapse_ms(200).await;
     let copy = stack.peer.try_recv().expect("the request leaves again at T1");
     assert_eq!(copy.raw, image, "the recorded image, byte for byte, under its own branch");

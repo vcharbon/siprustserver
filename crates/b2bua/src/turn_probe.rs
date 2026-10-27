@@ -7,16 +7,36 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-/// A sub-point of a turn.
+/// A sub-point of a turn. Under the `applied` sync level a turn whose write
+/// the backup applied before the cap runs `Logged → Applied → Left`; under
+/// `off`, or past the cap, `Logged → Left → Applied` (ADR-0055 §13).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TurnPoint {
     /// The turn persisted the call and handed its write to replication (a turn
     /// that writes nothing stands here too); none of its effects has left.
     Logged,
-    /// The turn handed its outbound messages to the transport.
+    /// The turn's last outbox entry left: its effects are handed to the
+    /// transport and to the outside services.
     Left,
     /// A backup applied a primary's write of the call.
     Applied,
+}
+
+/// Why an outbox entry left (ADR-0055 §3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Released {
+    /// It waited for nothing: the `off` level, or a call with no live,
+    /// bootstrapped backup.
+    AtOnce,
+    /// Its backup applied the write that records it.
+    Applied,
+    /// The cap expired first.
+    Capped,
+    /// The flow to its backup went down first.
+    BackupLost,
+    /// The call was released here (a stand-down, a self-release, a discharge
+    /// by the backup): its copy's write records the effects.
+    CallReleased,
 }
 
 impl TurnPoint {
@@ -51,6 +71,9 @@ pub struct TurnMark<'a> {
     /// The turn sent a request to an outside service, whose answer a later
     /// turn takes.
     pub called_out: bool,
+    /// Why the turn's last outbox entry left: set on [`Left`](TurnPoint::Left)
+    /// only.
+    pub released: Option<Released>,
 }
 
 /// What a probe hands back to hold a turn: the turn goes on once it resolves.
@@ -113,6 +136,7 @@ mod tests {
             removed: false,
             on_request,
             called_out: false,
+            released: None,
         }
     }
 

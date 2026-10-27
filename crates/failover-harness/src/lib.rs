@@ -53,7 +53,7 @@ pub use harness::{
 pub use roles::{Cause, Placement, Role};
 pub use runner::run_cell;
 pub use scenario::{Cell, DialogState, Event, Fault, Party, Recovery};
-pub use turn_points::{HeldTurn, Turn, TurnAt, TurnPoint, TurnPoints};
+pub use turn_points::{HeldTurn, Released, Turn, TurnAt, TurnPoint, TurnPoints};
 pub use views::{Belief, View, ViewLedger};
 
 /// Run one matrix cell as a differential transparency check: drive it clean
