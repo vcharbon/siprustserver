@@ -22,12 +22,28 @@ call = { path = "../crates/call" }
 repl-net = { path = "../crates/repl-net" }
 sip-message = { path = "../crates/sip-message" }
 
-# Ordered by blast radius (ADR-0051 §5): a panic in a call's turn tears the
-# call down; one on the proxy's datagram path or in a replication decode
-# restarts a shared task; a parse panic alone is contained per datagram.
+# Ordered by blast radius (ADR-0051 §5): every caller reaches the initial
+# INVITE before any dialog exists; a panic in a call's turn tears the call
+# down; one on the proxy's datagram path, in its health probe or in a
+# replication decode restarts a shared task; a parse panic alone is contained
+# per datagram.
+[[bin]]
+name = "initial_invite"
+path = "fuzz_targets/initial_invite.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "b2bua_turn"
 path = "fuzz_targets/b2bua_turn.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "unheld_response"
+path = "fuzz_targets/unheld_response.rs"
 test = false
 doc = false
 bench = false
@@ -47,6 +63,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "proxy_variants"
+path = "fuzz_targets/proxy_variants.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "worker_probe"
+path = "fuzz_targets/worker_probe.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "repl_frame"
 path = "fuzz_targets/repl_frame.rs"
 test = false
@@ -56,6 +86,13 @@ bench = false
 [[bin]]
 name = "call_snapshot"
 path = "fuzz_targets/call_snapshot.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "overload_value"
+path = "fuzz_targets/overload_value.rs"
 test = false
 doc = false
 bench = false

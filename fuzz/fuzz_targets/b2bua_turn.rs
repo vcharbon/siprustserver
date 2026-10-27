@@ -1,9 +1,10 @@
 //! A call's turns over any SIP text a peer sends into it (ADR-0051 §5: a
 //! panic in a turn tears the call down). A script of the turn lane runs over
-//! the dialled call, the SIP text of one of its steps replaced by the input;
-//! the texts the scripts carry seed the corpus, so mutations start from
-//! messages that match the call's dialogs. A turn is a function of its
-//! inputs: two runs of a case agree.
+//! the call dialled under its setup (plain, a session timer, early media
+//! masked), the SIP text of one of its steps replaced by the input; the
+//! texts the scripts carry seed the corpus, so mutations start from messages
+//! that match the call's dialogs. A turn is a function of its inputs: two
+//! runs of a case agree.
 
 #![no_main]
 
@@ -17,11 +18,11 @@ fuzz_target!(|data: &[u8]| {
     on_lane_stack(move || {
         let case = turn_case(&data);
         let scripts = scripts::scripts();
-        let (_, script) = &scripts[usize::from(case.script) % scripts.len()];
-        let step = usize::from(case.step) % script.len();
-        let dialled = drive::dialled();
-        let first = drive::run_replacing(&dialled, script, step, case.text);
-        let again = drive::run_replacing(&dialled, script, step, case.text);
+        let script = &scripts[usize::from(case.script) % scripts.len()];
+        let step = usize::from(case.step) % script.steps.len();
+        let dialled = drive::dialled_with(script.setup);
+        let first = drive::run_replacing(&dialled, &script.steps, step, case.text);
+        let again = drive::run_replacing(&dialled, &script.steps, step, case.text);
         assert_eq!(first.turns, again.turns, "a turn is a function of its inputs");
     });
 });

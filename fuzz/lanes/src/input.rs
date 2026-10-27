@@ -49,6 +49,38 @@ pub fn proxy_input(seed: u8, datagram: &[u8]) -> Vec<u8> {
     [&[seed][..], datagram].concat()
 }
 
+/// An INVITE case: byte 0 the decision, byte 1 the script run over the
+/// call it dials, the rest the caller's INVITE.
+pub fn invite_case(data: &[u8]) -> (u8, u8, &[u8]) {
+    let case = turn_case(data);
+    (case.script, case.step, case.text)
+}
+
+pub fn invite_input(decision: u8, script: u8, invite: &[u8]) -> Vec<u8> {
+    turn_input(decision, script, invite)
+}
+
+/// A proxy variant case: byte 0 the variant, byte 1 the seed of that
+/// variant, the rest the datagram.
+pub fn variant_case(data: &[u8]) -> (u8, u8, &[u8]) {
+    let case = turn_case(data);
+    (case.script, case.step, case.text)
+}
+
+pub fn variant_input(variant: u8, seed: u8, datagram: &[u8]) -> Vec<u8> {
+    turn_input(variant, seed, datagram)
+}
+
+/// A probe case: byte 0 the status worker a answers the probe with, the
+/// rest the header lines of its answer.
+pub fn probe_case(data: &[u8]) -> (u8, &[u8]) {
+    proxy_case(data)
+}
+
+pub fn probe_input(status: u8, lines: &[u8]) -> Vec<u8> {
+    proxy_input(status, lines)
+}
+
 /// A multipart case: the boundary up to the first LF, the body after it.
 pub fn multipart_case(data: &[u8]) -> (&[u8], &[u8]) {
     match data.iter().position(|&b| b == b'\n') {

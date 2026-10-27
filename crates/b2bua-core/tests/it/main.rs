@@ -15,6 +15,7 @@ mod rules;
 mod service_macro;
 mod timer_scope_rules;
 mod turn_lane;
+mod unheld_lane;
 mod unheld_response;
 
 /// The caller's INVITE `call`'s record rebuilds.

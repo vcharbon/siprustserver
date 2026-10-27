@@ -16,10 +16,16 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use fuzz_lanes::frame_lane::seeds as frame_seeds;
-use fuzz_lanes::input::{multipart_input, pair_input, proxy_input, turn_input};
+use fuzz_lanes::input::{
+    invite_input, multipart_input, pair_input, probe_input, proxy_input, turn_input, variant_input,
+};
 use fuzz_lanes::message_lane::seeds as message_seeds;
+use fuzz_lanes::proxy_lane::probe;
+use fuzz_lanes::proxy_lane::rig::Variant;
 use fuzz_lanes::proxy_lane::seeds as proxy_seeds;
-use fuzz_lanes::turn_lane::{drive, scripts};
+use fuzz_lanes::turn_lane::drive::{self, Setup};
+use fuzz_lanes::turn_lane::{invite, scripts};
+use fuzz_lanes::unheld_lane::seeds as unheld_seeds;
 use sip_message::header::{HeaderName, MediaType};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
@@ -90,14 +96,47 @@ fn lane_seeds() -> Corpus {
     let mut corpus = from_messages(&messages);
     let add = |corpus: &mut Corpus, target, input| corpus.entry(target).or_default().push(input);
 
-    let dialled = drive::dialled();
-    for (i, (_, script)) in scripts::scripts().iter().enumerate() {
-        let run = drive::run(&dialled, script, usize::MAX, &[]);
+    let scripts = scripts::scripts();
+    for (i, script) in scripts.iter().enumerate() {
+        let dialled = drive::dialled_with(script.setup);
+        let run = drive::run(&dialled, &script.steps, usize::MAX, &[]);
         for (step, raw) in &run.raws {
             let (Ok(i), Ok(step)) = (u8::try_from(i), u8::try_from(*step)) else { continue };
             add(&mut corpus, "b2bua_turn", turn_input(i, step, raw));
         }
     }
+    let plain = scripts.iter().filter(|s| s.setup == Setup::Plain).count();
+    for setup in [Setup::Plain, Setup::SessionTimer] {
+        let invite = drive::alice_invite_text(setup);
+        for d in 0..invite::decisions().len() {
+            for s in 0..plain {
+                let (Ok(d), Ok(s)) = (u8::try_from(d), u8::try_from(s)) else { continue };
+                add(&mut corpus, "initial_invite", invite_input(d, s, &invite));
+            }
+        }
+    }
+    for seed in unheld_seeds::all() {
+        add(&mut corpus, "unheld_response", seed.bytes);
+    }
+    for (v, variant) in Variant::DATAGRAM.iter().enumerate() {
+        for (i, seed) in proxy_seeds::all_on(*variant).iter().enumerate() {
+            let (Ok(v), Ok(i)) = (u8::try_from(v), u8::try_from(i)) else { continue };
+            add(&mut corpus, "proxy_variants", variant_input(v, i, &seed.bytes));
+        }
+    }
+    let mut report = Vec::new();
+    for lines in probe::seed_lines() {
+        for s in 0..probe::STATUSES.len() {
+            let Ok(s) = u8::try_from(s) else { continue };
+            add(&mut corpus, "worker_probe", probe_input(s, lines));
+        }
+        for line in String::from_utf8_lossy(lines).lines() {
+            if let Some((_, value)) = line.split_once(": ") {
+                report.push(value.to_string());
+            }
+        }
+    }
+    add(&mut corpus, "overload_value", report.join("\n").into_bytes());
     let descriptions = message_seeds::descriptions();
     for a in &descriptions {
         for b in &descriptions {
@@ -121,9 +160,10 @@ fn lane_seeds() -> Corpus {
 }
 
 /// Raw SIP messages in the layout of each target that takes one: the
-/// message itself, its SDP beside the lane's offer and answer, its multipart
-/// body under its boundary, its authentication lines, and the datagram the
-/// proxy receives (a request from the caller, a response from the worker).
+/// message itself, an INVITE as the caller's under the plain decision, its
+/// SDP beside the lane's offer and answer, its multipart body under its
+/// boundary, its authentication lines, and the datagram the proxy receives
+/// (a request from the caller, a response from the worker).
 fn from_messages(messages: &[Vec<u8>]) -> Corpus {
     let mut corpus = Corpus::new();
     let mut add = |target, input| corpus.entry(target).or_default().push(input);
@@ -134,6 +174,9 @@ fn from_messages(messages: &[Vec<u8>]) -> Corpus {
     for raw in messages {
         add("message_roundtrip", raw.clone());
         let Ok(msg) = parser.parse(raw) else { continue };
+        if drive::invite_of(raw).is_some() {
+            add("initial_invite", invite_input(0, 0, raw));
+        }
         let (sdp, peer) = match &msg {
             SipMessage::Request(r) => (r.sdp().map(<[u8]>::to_vec), seed_of("req/invite")),
             SipMessage::Response(r) => (r.sdp().map(<[u8]>::to_vec), seed_of("resp/200-worker")),

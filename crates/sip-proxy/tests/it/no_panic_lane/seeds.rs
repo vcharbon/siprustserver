@@ -3,14 +3,16 @@
 //! worker (the INVITE, the worker's responses under the proxy's Via and its
 //! branch, the caller's ACK and BYE routed by the cookie the Record-Route
 //! carries, a CANCEL) and a worker-outbound INVITE with the callee's
-//! responses. Each seed names the unmutated datagrams sent before it.
-//! Addresses are documentation ranges (RFC 5737) and private worker ones.
+//! responses. Each seed names the unmutated datagrams sent before it. A
+//! variant's seeds are recorded on the rig its cookies and Record-Routes
+//! belong to ([`Variant::recorded_on`]). Addresses are documentation ranges
+//! (RFC 5737) and private worker ones.
 
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::types::SipHeader;
 use sip_message::{CustomParser, SipMessage, SipParser, SipRequest};
 
-use super::rig::{Peer, Rig};
+use super::rig::{Peer, Rig, Variant, PROXY, PROXY_INTERNAL};
 
 /// One seed: a stable name, the peer it leaves from, the bytes the lane
 /// mutates, and the unmutated datagrams sent before and after it.
@@ -43,7 +45,8 @@ const CALLER_FROM: &str = "From: \"Alice\" <sip:alice@example.com>;tag=a1";
 const CALLER_TO: &str = "To: <sip:bob@example.net>";
 const CALLER_CALL_ID: &str = "Call-ID: lane-proxy-1@192.0.2.20";
 
-fn caller_invite() -> Vec<u8> {
+/// The caller's INVITE every recording starts from.
+pub fn caller_invite() -> Vec<u8> {
     message(
         "INVITE sip:bob@192.0.2.1:5060 SIP/2.0",
         &[
@@ -61,7 +64,8 @@ fn caller_invite() -> Vec<u8> {
     )
 }
 
-fn caller_cancel() -> Vec<u8> {
+/// The caller's CANCEL of [`caller_invite`].
+pub fn caller_cancel() -> Vec<u8> {
     message(
         "CANCEL sip:bob@192.0.2.1:5060 SIP/2.0",
         &[
@@ -104,13 +108,15 @@ fn caller_in_dialog(method: &str, seq: u32, route: &str, to_tag: &str) -> Vec<u8
     )
 }
 
-fn worker_invite() -> Vec<u8> {
+/// A worker's INVITE toward the callee, routed through the proxy at `face`.
+fn worker_invite(face: (&str, u16)) -> Vec<u8> {
+    let route = format!("Route: <sip:{}:{};lr>", face.0, face.1);
     message(
         "INVITE sip:carol@192.0.2.30:5060 SIP/2.0",
         &[
             "Via: SIP/2.0/UDP 10.0.0.2:5070;branch=z9hG4bK-worker-1",
             "Max-Forwards: 70",
-            "Route: <sip:192.0.2.1:5060;lr>",
+            &route,
             "From: <sip:b2b@10.0.0.2:5070>;tag=w1",
             "To: <sip:carol@example.org>",
             "Call-ID: lane-proxy-out@10.0.0.2",
@@ -150,18 +156,19 @@ fn header_values(raw: &[u8], name: &str) -> Vec<String> {
         .collect()
 }
 
-/// Records the seeds on a fresh proxy.
+/// Records the seeds on a fresh plain proxy.
 pub fn all() -> Vec<Seed> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .start_paused(true)
-        .build()
-        .expect("the recording runtime")
-        .block_on(record())
+    all_on(Variant::Plain)
 }
 
-async fn record() -> Vec<Seed> {
-    let rig = Rig::new().await;
+/// Records the seeds of `variant` on a fresh proxy.
+pub fn all_on(variant: Variant) -> Vec<Seed> {
+    super::rig::runtime().block_on(record(variant.recorded_on()))
+}
+
+async fn record(variant: Variant) -> Vec<Seed> {
+    let rig = Rig::with(variant).await;
+    let face = if variant == Variant::DualFace { PROXY_INTERNAL } else { PROXY };
     let invite = caller_invite();
     rig.send(Peer::Caller, &invite).await;
     let (worker, at_worker) = [Peer::WorkerA, Peer::WorkerB]
@@ -181,7 +188,7 @@ async fn record() -> Vec<Seed> {
     let ack = caller_in_dialog("ACK", 1, &route, "b1");
     let bye = caller_in_dialog("BYE", 2, &route, "b1");
 
-    let outbound = worker_invite();
+    let outbound = worker_invite(face);
     rig.send(Peer::WorkerA, &outbound).await;
     let at_callee = rig.drain(Peer::Callee).pop().expect("the proxy forwards the outbound INVITE");
     let forwarded_out = parse_request(&at_callee);

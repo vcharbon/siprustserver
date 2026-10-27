@@ -22,6 +22,12 @@
 //!   replacement the fuzz target drives replays the script it replaces in;
 //! - [`admit_reports_cross_their_event`] (default lane): an admit result's
 //!   event carries back the report it was built from;
+//! - [`every_decision_routes_the_caller_invite`] (default lane): alice's
+//!   INVITE under every decision of [`invite::decisions`] dials bob with what
+//!   the decision states, or is refused where its destination is;
+//! - [`structured_invites_never_panic`] (slow lane): every deterministic
+//!   mutation of alice's INVITE under every decision is refused or dials a
+//!   b-leg INVITE that reads back and refreezes to itself;
 //! - [`structured_corpus_never_panics`] (slow lane): every deterministic
 //!   mutation of every SIP step of every script;
 //! - [`random_cases_never_panic`] (slow lane): proptest over stacked random
@@ -38,10 +44,11 @@ use b2bua_core::limiter::report::{admit_report_of, LimiterAdmitResult};
 use call::{AdmitOutcome, AdmitReport, CallModelState, LimiterEntry, LimiterHeld};
 
 pub(crate) mod drive;
+pub(crate) mod invite;
 pub(crate) mod scripts;
 
 use drive::Step;
-use scripts::scripts;
+use scripts::{scripts, Script};
 
 /// Cases of the proptest properties.
 const CASES: u32 = 512;
@@ -57,7 +64,24 @@ fn sends(name: &str) -> &'static [&'static str] {
         "reliably-provisioned" => &["b-1 PRACK", "b-1 BYE"],
         "cancelled" => &["b-1 CANCEL"],
         "referred-then-refused" => &["b-1 NOTIFY", "a BYE"],
+        "session-timed" => &["b-1 INVITE", "b-1 BYE"],
+        "early-media-fake-prack" => &["b-1 PRACK", "b-1 BYE"],
+        "referred-then-transferred" => &["b-2 INVITE", "a INVITE", "b-1 BYE", "b-2 BYE"],
         _ => &[],
+    }
+}
+
+/// The responses (`leg STATUS`) a script's run sends, in order, where they
+/// show its service at work: bob's early media shown to alice as a bare 180,
+/// or promoted to her 200; the last answers her BYE.
+fn answers(name: &str) -> Option<&'static [&'static str]> {
+    match name {
+        "early-media-drop-sdp" | "early-media-keep-sdp" => {
+            Some(&["a 180", "a 180", "a 200", "a 200"])
+        }
+        "early-media-fake-prack" => Some(&["a 180", "a 200", "a 200"]),
+        "early-media-promoted" => Some(&["a 200", "a 200"]),
+        _ => None,
     }
 }
 
@@ -67,8 +91,8 @@ fn sends(name: &str) -> &'static [&'static str] {
 #[test]
 fn every_script_turns_the_same_twice() {
     on_lane_stack(|| {
-        let dialled = drive::dialled();
-        for (name, script) in scripts() {
+        for Script { name, setup, steps: script } in scripts() {
+            let dialled = drive::dialled_with(setup);
             let first = drive::run(&dialled, &script, usize::MAX, &[]);
             let again = drive::run(&dialled, &script, usize::MAX, &[]);
             assert_eq!(first.turns.len(), script.len(), "{name}: every step turns");
@@ -80,6 +104,9 @@ fn every_script_turns_the_same_twice() {
                     "{name}: {request}: {:?}",
                     first.sent
                 );
+            }
+            if let Some(answers) = answers(name) {
+                assert_eq!(first.answered, answers, "{name}");
             }
             let ended = matches!(
                 first.call.state,
@@ -98,8 +125,8 @@ fn every_script_turns_the_same_twice() {
 #[test]
 fn a_step_replaced_by_its_own_text_turns_the_same() {
     on_lane_stack(|| {
-        let dialled = drive::dialled();
-        for (name, script) in scripts() {
+        for Script { name, setup, steps: script } in scripts() {
+            let dialled = drive::dialled_with(setup);
             let seed = drive::run(&dialled, &script, usize::MAX, &[]);
             for (at, raw) in &seed.raws {
                 let replaced = drive::run_replacing(&dialled, &script, *at, raw);
@@ -141,8 +168,8 @@ fn edited(script: &[Step], edit: Edit) -> Vec<Step> {
 #[test]
 fn every_edited_script_turns_the_same_twice() {
     on_lane_stack(|| {
-        let dialled = drive::dialled();
-        for (name, script) in scripts() {
+        for Script { name, setup, steps: script } in scripts() {
+            let dialled = drive::dialled_with(setup);
             for i in 0..script.len() {
                 for edit in [Edit::Drop(i), Edit::Repeat(i), Edit::Swap(i, i + 1)] {
                     let steps = edited(&script, edit);
@@ -161,9 +188,9 @@ fn every_edited_script_turns_the_same_twice() {
 #[ignore = "slow lane: no-panic property lane"]
 fn structured_corpus_never_panics() {
     on_lane_stack(|| {
-        let dialled = drive::dialled();
         let mut seen = std::collections::BTreeSet::new();
-        for (name, script) in scripts() {
+        for Script { name, setup, steps: script } in scripts() {
+            let dialled = drive::dialled_with(setup);
             let seed = drive::run(&dialled, &script, usize::MAX, &[]);
             for (at, raw) in seed.raws.iter().filter(|(_, raw)| seen.insert(raw.clone())) {
                 for (family, mutations) in mutate::families(raw) {
@@ -176,6 +203,70 @@ fn structured_corpus_never_panics() {
                             }));
                         assert!(mutated.is_ok(), "{name} step {at} {family} {m:?} panicked");
                     }
+                }
+            }
+        }
+    });
+}
+
+/// What the b-leg INVITE of each dialling decision carries of it.
+fn states(name: &str) -> &'static [&'static str] {
+    match name {
+        "stated-headers" => &[
+            "Subject: routed\r\n",
+            "Organization: lane\r\n",
+            "Call-Info: <http://example.com/i>\r\n",
+            "User-Agent: lane\r\n",
+        ],
+        "attached-parts" => {
+            &["multipart/mixed", "application/pidf+xml", "Content-ID: <lane@example.com>"]
+        }
+        "body-replaced" => &["a=inactive"],
+        _ => &[],
+    }
+}
+
+/// alice's INVITE under every decision dials bob, its b-leg INVITE carrying
+/// what the decision states, and the call answered and ended over it notes
+/// no defect; a destination the admission refuses refuses the call.
+#[test]
+fn every_decision_routes_the_caller_invite() {
+    on_lane_stack(|| {
+        let raw = drive::alice_invite_text(drive::Setup::Plain);
+        let answered = scripts().into_iter().find(|s| s.name == "answered-bob-hangs-up");
+        let answered = answered.expect("the answered script").steps;
+        for decision in invite::decisions() {
+            let name = decision.name;
+            let Some(dialled) = invite::dial_checked(&raw, &decision) else {
+                assert!(!decision.dials, "{name}: alice's INVITE dials bob");
+                continue;
+            };
+            let wire = String::from_utf8_lossy(dialled.b_invite.image()).into_owned();
+            for stated in states(name) {
+                assert!(wire.contains(stated), "{name}: {stated:?} in\n{wire}");
+            }
+            let run = drive::run(&dialled, &answered, usize::MAX, &[]);
+            assert_eq!(run.defects, Vec::<String>::new(), "{name}");
+        }
+    });
+}
+
+/// Every deterministic mutation of alice's INVITE under every decision is
+/// refused or dials a b-leg INVITE that reads back and refreezes to itself.
+#[test]
+#[ignore = "slow lane: no-panic property lane"]
+fn structured_invites_never_panic() {
+    on_lane_stack(|| {
+        let raw = drive::alice_invite_text(drive::Setup::Plain);
+        let decisions = invite::decisions();
+        for (family, mutations) in mutate::families(&raw) {
+            for m in mutations {
+                let input = mutate::apply(&raw, &m);
+                for decision in &decisions {
+                    let dialled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        invite::dial_checked(&input, decision).is_some()
+                    }));
+                    assert!(dialled.is_ok(), "{} {family} {m:?} panicked", decision.name);
                 }
             }
         }
@@ -252,8 +343,9 @@ fn edit() -> impl Strategy<Value = Edit> {
 #[ignore = "slow lane: no-panic property lane"]
 fn random_cases_never_panic() {
     on_lane_stack(|| {
-        let dialled = drive::dialled();
         let scripts = scripts();
+        let dialled: Vec<drive::Dialled> =
+            scripts.iter().map(|s| drive::dialled_with(s.setup)).collect();
         let strategy = (
             0..scripts.len(),
             0..8usize,
@@ -264,7 +356,7 @@ fn random_cases_never_panic() {
         let mut runner = runner("tests/it/turn_lane/proptest-regressions/cases.txt", CASES);
         let result = runner.run(&strategy, |(s, at, mutations, answer, edit)| {
             let script: Vec<Step> = scripts[s]
-                .1
+                .steps
                 .iter()
                 .map(|step| match (step, &answer) {
                     (Step::FailureAnswers { .. }, Some((outcome, payload))) => {
@@ -278,8 +370,8 @@ fn random_cases_never_panic() {
                 .collect();
             let script = edit.map_or(script.clone(), |edit| edited(&script, edit));
             let mutations: &[Mutation] = &mutations;
-            let first = drive::run(&dialled, &script, at, mutations);
-            let again = drive::run(&dialled, &script, at, mutations);
+            let first = drive::run(&dialled[s], &script, at, mutations);
+            let again = drive::run(&dialled[s], &script, at, mutations);
             prop_assert_eq!(first.turns, again.turns);
             Ok(())
         });

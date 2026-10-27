@@ -1,14 +1,116 @@
 //! The scripts the turn lane and its fuzz target start every case from: a
 //! call dialled toward bob, answered, refused, rerouted, re-INVITEd,
-//! updated, reliably provisioned, cancelled and referred.
+//! updated, reliably provisioned, cancelled, referred and transferred; a
+//! call under a session timer; and bob's early media under each masking
+//! strategy.
 
+use call::features::RelayFirst18xStrategy;
 use call::TimerType;
 use sip_message::Method;
 
-use super::drive::Step;
+use super::drive::{Setup, Step};
 
-/// The scripts every case starts from, by name.
-pub fn scripts() -> Vec<(&'static str, Vec<Step>)> {
+/// A script: its name, the setup its call is dialled under, its steps.
+pub struct Script {
+    pub name: &'static str,
+    pub setup: Setup,
+    pub steps: Vec<Step>,
+}
+
+/// bob's early media, as RFC 5009 marks it.
+const EARLY_MEDIA: &[(&str, &str)] = &[("P-Early-Media", "sendrecv")];
+
+/// bob's reliable early media (RFC 3262, RFC 5009).
+const RELIABLE_EARLY_MEDIA: &[(&str, &str)] =
+    &[("Require", "100rel"), ("RSeq", "1"), ("P-Early-Media", "sendrecv")];
+
+/// bob's 2xx taking part in alice's session timer (RFC 4028 §9).
+const TIMED_ANSWER: &[(&str, &str)] =
+    &[("Require", "timer"), ("Session-Expires", "1800;refresher=uac")];
+
+/// The scripts every case starts from.
+pub fn scripts() -> Vec<Script> {
+    let plain = |name, steps| Script { name, setup: Setup::Plain, steps };
+    let mut all: Vec<Script> =
+        plain_scripts().into_iter().map(|(name, steps)| plain(name, steps)).collect();
+    all.push(Script {
+        name: "session-timed",
+        setup: Setup::SessionTimer,
+        steps: vec![
+            Step::BobAnswersWith(200, TIMED_ANSWER),
+            Step::AliceAcks,
+            Step::AliceSends(Method::Invite),
+            Step::BobAnswersSent(200),
+            Step::AliceAcks,
+            Step::AliceByes,
+            Step::BobAnswersSent(200),
+        ],
+    });
+    for (name, strategy) in [
+        ("early-media-drop-sdp", RelayFirst18xStrategy::DropSdp),
+        ("early-media-keep-sdp", RelayFirst18xStrategy::KeepSdp),
+    ] {
+        all.push(Script {
+            name,
+            setup: Setup::EarlyMedia(strategy),
+            steps: vec![
+                Step::BobAnswersWith(183, EARLY_MEDIA),
+                Step::BobAnswers(180),
+                Step::BobAnswers(200),
+                Step::AliceAcks,
+                Step::AliceByes,
+                Step::BobAnswersSent(200),
+            ],
+        });
+    }
+    all.push(Script {
+        name: "early-media-fake-prack",
+        setup: Setup::EarlyMedia(RelayFirst18xStrategy::FakePrack),
+        steps: vec![
+            Step::BobAnswersWith(183, RELIABLE_EARLY_MEDIA),
+            Step::BobAnswersLast(Method::Prack, 200),
+            Step::BobAnswers(200),
+            Step::AliceAcks,
+            Step::AliceByes,
+            Step::BobAnswersSent(200),
+        ],
+    });
+    all.push(Script {
+        name: "early-media-promoted",
+        setup: Setup::EarlyMedia(RelayFirst18xStrategy::PromotePemTo200),
+        steps: vec![
+            Step::BobAnswersWith(183, EARLY_MEDIA),
+            Step::AliceAcks,
+            Step::BobAnswers(200),
+            Step::AliceByes,
+            Step::BobAnswersSent(200),
+        ],
+    });
+    all.push(plain(
+        "referred-then-transferred",
+        vec![
+            Step::BobAnswers(200),
+            Step::AliceAcks,
+            Step::BobRefers,
+            Step::BobAnswersSent(200),
+            Step::ReferAnswers {
+                outcome: "allow",
+                payload: serde_json::json!({"destination": {"host": "127.0.0.1", "port": 5071}}),
+            },
+            Step::CarolAnswers(180),
+            Step::CarolAnswers(200),
+            Step::CarolAnswersSent(200),
+            Step::AliceAnswersSent(200),
+            Step::BobAnswersSent(200),
+            Step::AliceByes,
+            Step::CarolAnswersSent(200),
+        ],
+    ));
+    all
+}
+
+/// The scripts of a plain call, by name.
+fn plain_scripts() -> Vec<(&'static str, Vec<Step>)> {
     let route = serde_json::json!({
         "destination": {"host": "127.0.0.1", "port": 5071},
         "new_ruri": "sip:carol@127.0.0.1:5071",

@@ -1,9 +1,10 @@
-//! A call dialled toward bob and the turns the lane runs over it: each step
-//! of a script built against the call as it stands and against what the
-//! stack last sent each peer, its SIP text mutated when the case says so,
-//! resolved to the dialog it names as the shell's dialog gate resolves it,
-//! then run through the timer screen, the rule chain and the landing pass as
-//! the shell runs them.
+//! A call dialled toward bob and the turns the lane runs over it: the
+//! caller's INVITE folded through the decision's route as the shell folds it,
+//! then each step of a script built against the call as it stands and
+//! against what the stack last sent each peer, its SIP text mutated when the
+//! case says so, resolved to the dialog it names as the shell's dialog gate
+//! resolves it, then run through the timer screen, the rule chain and the
+//! landing pass as the shell runs them.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -17,10 +18,15 @@ use b2bua_core::initial_invite::build_initial_call;
 use b2bua_core::landing::{land, Landing};
 use b2bua_core::obligations::ObligationSet;
 use b2bua_core::rule_chain::{rule_chain_turn, timer_screen, Framework, TurnInput};
-use b2bua_core::rules::{default_rules, RuleDefinition};
+use b2bua_core::rules::invariants::{enforce, finalize, UnansweredCaller};
+use b2bua_core::rules::lifecycle_delivery::{close_turn, TurnStart};
+use b2bua_core::rules::relay::rebuild_a_leg_invite;
+use b2bua_core::rules::{default_rules, ActionExecutor, RuleDefinition};
 use b2bua_core::turn_scope::TurnScope;
 use b2bua_sdk::event::CallEvent;
-use call::features::ReferFeature;
+use call::features::{
+    ReferFeature, Relay18xMessages, RelayFirst18xStrategy, RelayFirst18xTo180Feature,
+};
 use call::helpers::{response_origin, Resolved, ResponseFacts, ResponseOrigin};
 use call::{Call, CallModelState, Direction, TimerType};
 use sip_ids::TurnIds;
@@ -36,12 +42,20 @@ const SDP: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.
 
 const ALICE: &str = "10.0.0.9:5060";
 const BOB: &str = "127.0.0.1:5070";
+const CAROL: &str = "127.0.0.1:5071";
+
+/// The leg the stack dials bob on, and the one a transfer dials carol on.
+const BOB_LEG: &str = "b-1";
+const CAROL_LEG: &str = "b-2";
 
 /// One step of a script: what reaches the call next.
 #[derive(Clone, Debug)]
 pub enum Step {
     /// bob's response to the b-leg INVITE.
     BobAnswers(u16),
+    /// bob's response to the b-leg INVITE carrying these lines: a 2xx or
+    /// 18x carries the answer.
+    BobAnswersWith(u16, &'static [(&'static str, &'static str)]),
     /// bob's reliable provisional to the b-leg INVITE, carrying the answer
     /// (RFC 3262).
     BobAnswersReliably(u16),
@@ -60,6 +74,10 @@ pub enum Step {
     BobRefers,
     /// alice's response to the last request the stack sent her.
     AliceAnswersSent(u16),
+    /// carol's response to the INVITE a transfer dialled her with.
+    CarolAnswers(u16),
+    /// carol's response to the last request the stack sent her.
+    CarolAnswersSent(u16),
     /// alice's request of this method on her dialog: a re-INVITE or an
     /// UPDATE carries an offer.
     AliceSends(Method),
@@ -77,8 +95,20 @@ pub enum Step {
     ReferAnswers { outcome: &'static str, payload: serde_json::Value },
 }
 
-/// The call the lane starts every script from: alice's INVITE routed toward
-/// bob, its b-leg dialled.
+/// What a call is dialled under: alice's INVITE and the route the decision
+/// answers it with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Setup {
+    /// alice's offer routed toward bob, who may refer the call.
+    Plain,
+    /// alice's INVITE asks for a session timer (RFC 4028).
+    SessionTimer,
+    /// bob's early media masked from alice under `strategy`
+    /// (`relay_first_18x_to_180`), every 18x relayed downgraded.
+    EarlyMedia(RelayFirst18xStrategy),
+}
+
+/// A script's call, dialled toward bob.
 pub struct Dialled {
     pub call: Call,
     pub b_invite: SipRequest,
@@ -105,8 +135,15 @@ fn parsed(raw: &[u8]) -> Option<SipMessage> {
     CustomParser::new().parse(raw).ok()
 }
 
-fn alice_invite() -> SipRequest {
-    let raw = format!(
+/// alice's INVITE under `setup`, as the wire carries it.
+pub fn alice_invite_text(setup: Setup) -> Vec<u8> {
+    let timer = match setup {
+        Setup::SessionTimer => {
+            "Supported: timer\r\nSession-Expires: 1800;refresher=uac\r\nMin-SE: 90\r\n"
+        }
+        Setup::Plain | Setup::EarlyMedia(_) => "",
+    };
+    format!(
         "INVITE sip:bob@example.com SIP/2.0\r\n\
          Via: SIP/2.0/UDP {ALICE};branch=z9hG4bK-lane\r\n\
          Max-Forwards: 70\r\n\
@@ -115,19 +152,30 @@ fn alice_invite() -> SipRequest {
          Call-ID: lane@10.0.0.9\r\n\
          CSeq: 1 INVITE\r\n\
          Contact: <sip:alice@{ALICE}>\r\n\
+         {timer}\
          Content-Type: application/sdp\r\n\
          Content-Length: {}\r\n\r\n{SDP}",
         SDP.len()
-    );
-    match parsed(raw.as_bytes()) {
-        Some(SipMessage::Request(r)) => r,
-        other => panic!("alice's INVITE parses: {other:?}"),
+    )
+    .into_bytes()
+}
+
+/// The INVITE request `raw` reads as, if any.
+pub fn invite_of(raw: &[u8]) -> Option<SipRequest> {
+    match parsed(raw)? {
+        SipMessage::Request(r) if *r.method() == Method::Invite => Some(r),
+        _ => None,
     }
 }
 
-fn route() -> RouteDecision {
+/// The route the decision answers alice's call with under `setup`.
+pub fn route(setup: Setup) -> RouteDecision {
     let mut features = default_platform_features();
     features.refer = Some(ReferFeature { max_chain_depth: None });
+    if let Setup::EarlyMedia(strategy) = setup {
+        features.relay_first_18x_to_180 =
+            Some(RelayFirst18xTo180Feature { strategy, messages: Relay18xMessages::All });
+    }
     RouteDecision {
         destination: SipDestination::new("127.0.0.1", 5070),
         new_ruri: Some("sip:bob@127.0.0.1:5070".into()),
@@ -146,35 +194,85 @@ fn route() -> RouteDecision {
     }
 }
 
-/// alice's call, routed toward bob, who may refer it.
+/// alice's plain call, routed toward bob, who may refer it.
 pub fn dialled() -> Dialled {
+    dialled_with(Setup::Plain)
+}
+
+/// alice's call under `setup`, routed toward bob.
+pub fn dialled_with(setup: Setup) -> Dialled {
+    let invite = invite_of(&alice_invite_text(setup)).expect("alice's INVITE parses");
+    match dial(&invite, route(setup)) {
+        Dialling::Dialled(dialled) => *dialled,
+        other => panic!("{setup:?}: the route dials bob: {other:?}"),
+    }
+}
+
+/// What the shell makes of a caller's INVITE the decision answers with a
+/// route.
+#[derive(Debug)]
+pub enum Dialling {
+    /// The call is never born: its record does not rebuild the INVITE
+    /// (ADR-0052 §11), or the INVITE carries no From tag (RFC 3261 §8.1.1.3).
+    Refused,
+    /// The call's final, as the turn landed it: the route was refused.
+    Final(Box<HandlerResult>),
+    /// bob's leg dialled.
+    Dialled(Box<Dialled>),
+}
+
+impl std::fmt::Debug for Dialled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Dialled").field("b_invite", &self.b_invite).finish_non_exhaustive()
+    }
+}
+
+/// `invite` from alice folded through `route` as the shell's initial turn
+/// folds it: the call built, its record's rebuild of the INVITE, the route
+/// applied up to its admit and admitted, the turn finalized, its obligations
+/// enforced, its lifecycle delivered and the turn landed.
+pub fn dial(invite: &SipRequest, route: RouteDecision) -> Dialling {
     let config = config();
-    let invite = alice_invite();
+    let rules = default_rules();
+    let owners = b2bua_core::owners::Owners::none();
     let src: SocketAddr = ALICE.parse().expect("an address");
-    let mut ids = TurnIds::fixed(0);
-    let call = build_initial_call(&invite, src, &config, &mut ids, 0);
-    let caller = crate::caller_of(&call);
-    let Admitting::Admit(admitting) =
-        route_fold::up_to_admit(call, route(), &caller, &config, &mut ids, 0, 0)
-    else {
-        panic!("the route stands");
+    let mut turn = TurnScope::of(TurnIds::fixed(0));
+    let call = build_initial_call(invite, src, &config, &mut turn.ids, 0);
+    let Ok(caller) = rebuild_a_leg_invite(&call.a_leg_invite) else { return Dialling::Refused };
+    if call.a_leg_invite.from_tag.is_empty() {
+        return Dialling::Refused;
+    }
+    let born = call.clone();
+    let ids = &mut turn.ids;
+    let routed = match route_fold::up_to_admit(call, route, &caller, &config, ids, 0, 0) {
+        Admitting::Final(result) => *result,
+        Admitting::Admit(admitting) => {
+            route_fold::admitted(*admitting, &caller, &config, owners, ids, 0, 0)
+        }
     };
-    let routed = route_fold::admitted(
-        *admitting,
-        &caller,
-        &config,
-        b2bua_core::owners::Owners::none(),
-        &mut ids,
-        0,
-        0,
-    );
-    let b_invite = sent_to(&routed, "b-1").expect("the b-leg INVITE");
-    Dialled {
-        call: routed.call,
-        b_invite,
+    let obligations = ObligationSet::core();
+    let unanswered = UnansweredCaller::Answer(&config.minted_final_advertisement);
+    let enforced = enforce(&obligations, &born, finalize(routed), 0, unanswered, &mut turn.notes);
+    let mut exec = ActionExecutor { config: &config, owners, turn: &mut turn, now_ms: 0 };
+    let closed = close_turn(&rules, &TurnStart::unborn(), enforced, &mut exec);
+    let routed = land(closed, &landing(&config), 0);
+    let Some(b_invite) = sent_to(&routed, BOB_LEG) else {
+        return Dialling::Final(Box::new(routed));
+    };
+    Dialling::Dialled(Box::new(Dialled { call: routed.call, b_invite, config, rules, obligations }))
+}
+
+/// The landing pass's values, as the shell computes them.
+fn landing(config: &B2buaConfig) -> Landing<'_> {
+    Landing {
         config,
-        rules: default_rules(),
-        obligations: ObligationSet::core(),
+        budgets: AnswerBudgets {
+            http: Duration::from_secs(5),
+            admit: Duration::from_secs(1),
+            failure: Some(Duration::from_secs(5)),
+            release: Some(Duration::from_secs(5)),
+        },
+        refresh_period: Duration::from_secs(60),
     }
 }
 
@@ -197,9 +295,13 @@ struct Peers {
     alice_invite_cseq: u32,
     /// bob's last CSeq number on his dialog.
     bob_cseq: u32,
-    /// The last request other than an ACK the stack sent alice, and bob.
+    /// The last request other than an ACK the stack sent alice, bob and
+    /// carol.
     to_alice: Option<SipRequest>,
     to_bob: Option<SipRequest>,
+    to_carol: Option<SipRequest>,
+    /// The INVITE that dialled carol.
+    carol_invite: Option<SipRequest>,
     /// Every request other than an ACK the stack sent bob, in order.
     bob_heard: Vec<SipRequest>,
 }
@@ -212,6 +314,8 @@ impl Peers {
             bob_cseq: 1,
             to_alice: None,
             to_bob: Some(dialled.b_invite.clone()),
+            to_carol: None,
+            carol_invite: None,
             bob_heard: vec![dialled.b_invite.clone()],
         }
     }
@@ -219,10 +323,15 @@ impl Peers {
     /// The requests `result` sends, kept as the last each peer was sent.
     fn heard(&mut self, result: &HandlerResult) {
         self.to_alice = sent_to(result, "a").or(self.to_alice.take());
-        self.to_bob = sent_to(result, "b-1").or(self.to_bob.take());
+        self.to_bob = sent_to(result, BOB_LEG).or(self.to_bob.take());
+        let to_carol = sent_to(result, CAROL_LEG);
+        if self.carol_invite.is_none() {
+            self.carol_invite = to_carol.clone().filter(|r| *r.method() == Method::Invite);
+        }
+        self.to_carol = to_carol.or(self.to_carol.take());
         self.bob_heard.extend(result.effects.outbound.iter().filter_map(|e| match &e.body {
             OutboundBody::Request(r)
-                if e.leg_id.as_deref() == Some("b-1") && *r.method() != Method::Ack =>
+                if e.leg_id.as_deref() == Some(BOB_LEG) && *r.method() != Method::Ack =>
             {
                 Some(r.clone())
             }
@@ -275,13 +384,22 @@ fn reliable() -> Vec<SipHeader> {
     vec![line("Require", "100rel"), line("RSeq", "1")]
 }
 
+fn lines(stated: &[(&str, &str)]) -> Vec<SipHeader> {
+    stated.iter().map(|(name, value)| line(name, value)).collect()
+}
+
 fn line(name: &str, value: &str) -> SipHeader {
     SipHeader { name: name.to_string().into(), value: value.to_string().into() }
 }
 
 /// The SIP text `raw` arriving from `leg`'s peer.
 fn sip(raw: Vec<u8>, leg: &'static str) -> Option<(CallEvent, &'static str)> {
-    let src = (if leg == "a" { ALICE } else { BOB }).parse().ok()?;
+    let peer = match leg {
+        "a" => ALICE,
+        CAROL_LEG => CAROL,
+        _ => BOB,
+    };
+    let src = peer.parse().ok()?;
     Some((CallEvent::sip(parsed(&raw)?, src), leg))
 }
 
@@ -312,27 +430,38 @@ fn event_of(
         ))
     };
     match step {
-        Step::BobAnswers(status) => sip(response(b_invite, *status, Vec::new())?, "b-1"),
-        Step::BobAnswersReliably(status) => sip(response(b_invite, *status, reliable())?, "b-1"),
+        Step::BobAnswers(status) => sip(response(b_invite, *status, Vec::new())?, BOB_LEG),
+        Step::BobAnswersWith(status, stated) => {
+            sip(response(b_invite, *status, lines(stated))?, BOB_LEG)
+        }
+        Step::BobAnswersReliably(status) => sip(response(b_invite, *status, reliable())?, BOB_LEG),
         Step::BobAnswersSent(status) => {
-            sip(response(peers.to_bob.as_ref()?, *status, Vec::new())?, "b-1")
+            sip(response(peers.to_bob.as_ref()?, *status, Vec::new())?, BOB_LEG)
         }
         Step::BobAnswersLast(method, status) => {
             let req = peers.bob_heard.iter().rev().find(|r| r.method() == method)?;
-            sip(response(req, *status, Vec::new())?, "b-1")
+            sip(response(req, *status, Vec::new())?, BOB_LEG)
         }
         Step::ForkAnswers(tag, status) => {
-            sip(response_tagged(b_invite, *status, tag, Vec::new())?, "b-1")
+            sip(response_tagged(b_invite, *status, tag, Vec::new())?, BOB_LEG)
         }
         Step::ForkAnswersReliably(tag, status) => {
-            sip(response_tagged(b_invite, *status, tag, reliable())?, "b-1")
+            sip(response_tagged(b_invite, *status, tag, reliable())?, BOB_LEG)
         }
         Step::AliceAnswersSent(status) => {
             sip(response(peers.to_alice.as_ref()?, *status, Vec::new())?, "a")
         }
+        Step::CarolAnswers(status) => {
+            let invite = peers.carol_invite.as_ref()?;
+            sip(response_tagged(invite, *status, "caroltag", Vec::new())?, CAROL_LEG)
+        }
+        Step::CarolAnswersSent(status) => {
+            let req = peers.to_carol.as_ref()?;
+            sip(response_tagged(req, *status, "caroltag", Vec::new())?, CAROL_LEG)
+        }
         Step::BobByes => {
             peers.bob_cseq += 1;
-            sip(request("BYE", peers.bob_cseq, BOB, &bob_lines()?, ""), "b-1")
+            sip(request("BYE", peers.bob_cseq, BOB, &bob_lines()?, ""), BOB_LEG)
         }
         Step::BobRefers => {
             peers.bob_cseq += 1;
@@ -340,7 +469,7 @@ fn event_of(
                 "{}Contact: <sip:bob@{BOB}>\r\nRefer-To: <sip:carol@127.0.0.1:5071>\r\n",
                 bob_lines()?
             );
-            sip(request("REFER", peers.bob_cseq, BOB, &lines, ""), "b-1")
+            sip(request("REFER", peers.bob_cseq, BOB, &lines, ""), BOB_LEG)
         }
         Step::AliceSends(method) => {
             let own = call.a_leg.own_tag.as_deref()?;
@@ -386,7 +515,12 @@ fn event_of(
                 call_ref: call.call_ref.clone(),
                 incarnation: None,
             };
-            Some((event, armed.key.leg_id().map_or("a", |_| "b-1")))
+            let leg = match armed.key.leg_id() {
+                None | Some("a") => "a",
+                Some(CAROL_LEG) => CAROL_LEG,
+                Some(_) => BOB_LEG,
+            };
+            Some((event, leg))
         }
         Step::FailureAnswers { outcome, payload } => {
             let change = call.timers.iter().find_map(|t| match t.timer_type() {
@@ -400,7 +534,7 @@ fn event_of(
             Some((internal(call, "call-failure-result", outcome, payload), "a"))
         }
         Step::ReferAnswers { outcome, payload } => {
-            Some((internal(call, "refer-http-result", outcome, payload.clone()), "b-1"))
+            Some((internal(call, "refer-http-result", outcome, payload.clone()), BOB_LEG))
         }
     }
 }
@@ -501,21 +635,13 @@ fn run_from(
 ) -> Run {
     let config = &dialled.config;
     let fw = Framework { config, rules: &dialled.rules, obligations: &dialled.obligations };
-    let landing = Landing {
-        config,
-        budgets: AnswerBudgets {
-            http: Duration::from_secs(5),
-            admit: Duration::from_secs(1),
-            failure: Some(Duration::from_secs(5)),
-            release: Some(Duration::from_secs(5)),
-        },
-        refresh_period: Duration::from_secs(60),
-    };
+    let landing = landing(config);
     let mut peers = Peers::new(dialled);
     let mut run = Run {
         turns: Vec::new(),
         raws: Vec::new(),
         sent: Vec::new(),
+        answered: Vec::new(),
         defects: Vec::new(),
         call: call.clone(),
     };
@@ -555,6 +681,10 @@ fn run_from(
             OutboundBody::Request(r) => Some(format!("{} {}", e.leg_id.as_deref()?, r.method())),
             _ => None,
         }));
+        run.answered.extend(result.effects.outbound.iter().filter_map(|e| match &e.body {
+            OutboundBody::Response(r) => Some(format!("{} {}", e.leg_id.as_deref()?, r.status())),
+            _ => None,
+        }));
         run.defects.extend(
             turn.notes.defects().iter().map(|d| format!("step {n}: {}: {}", d.name, d.detail)),
         );
@@ -567,11 +697,13 @@ fn run_from(
 
 /// What a script's run left: each turn's result as text, the SIP text each
 /// SIP step reached the call as (by step), the requests the turns sent (`leg
-/// METHOD`), the defects its turns noted, and the call.
+/// METHOD`) and the responses (`leg STATUS`), the defects its turns noted,
+/// and the call.
 pub struct Run {
     pub turns: Vec<String>,
     pub raws: Vec<(usize, Vec<u8>)>,
     pub sent: Vec<String>,
+    pub answered: Vec<String>,
     pub defects: Vec<String>,
     pub call: Call,
 }
