@@ -205,6 +205,11 @@ describe("versionStepOne", () => {
     expect(read([[P(100), P(100)], [P(102), P(101)], [P(103), P(102)], [P(104), P(103)]])).toEqual([false, true, true, true])
   })
 
+  it("reads an unchanged description ours repeats at the version it holds, the capture's above it", () => {
+    expect(readings(sightings([[P(100), P(100)], [P(102), P(101)], [P(102), P(101)]]), peerDriven))
+      .toEqual([undefined, "version-step-one", "version-step-one"])
+  })
+
   it("reads nothing where ours steps by more than one, or stands above the capture's", () => {
     expect(read([[P(100), P(100)], [P(104), P(102)]])).toEqual([false, false])
     expect(read([[P(100), P(101)], [P(101), P(102)]])).toEqual([false, false])

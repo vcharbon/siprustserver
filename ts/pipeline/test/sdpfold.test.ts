@@ -263,6 +263,10 @@ describe("the bytes row of a verbatim run, read for attribute order and a versio
     expect(diffSdp(VERBATIM, crlf(fmtpFirst), crlf(IN_FORM))).toEqual([{ ...bytes(crlf(fmtpFirst), crlf(IN_FORM)), orderOnly: true }])
   })
 
+  it("ours out of the stack's form against an author's description in form stays a plain bytes row", () => {
+    expect(diffSdp(VERBATIM, crlf(IN_FORM), crlf(OFFER))).toEqual([bytes(crlf(IN_FORM), crlf(OFFER))])
+  })
+
   it("two same-name attributes swapped (a=crypto, a preference order) stay a plain bytes row", () => {
     const keys = ["a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "a=crypto:2 AES_CM_128_HMAC_SHA1_32 inline:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"]
     const captured = crlf([...OFFER, ...keys])

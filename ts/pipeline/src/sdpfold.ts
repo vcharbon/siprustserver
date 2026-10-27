@@ -32,7 +32,8 @@
  * reorder, a line ending, trailing whitespace or a blank line the structural
  * pass erases is then one `document:bytes` row with both texts whole. The row
  * reads as ORDER-ONLY where the two texts differ in the order of attribute
- * lines alone and agree in the order a stack writes them (`./sdpform.ts`):
+ * lines alone and the replayed one is the captured one in the order a stack
+ * writes them (`./sdpform.ts`):
  * RFC 4566 §5 fixes the order of every other line, not of attributes among
  * themselves, and the form keeps the order an attribute's own spec fixes.
  */
@@ -187,9 +188,11 @@ const markOrigin = (d: SdpDifference, origin: OriginReading): SdpDifference => {
 /** A text's lines with every attribute line read as `a=`: where the lines RFC 4566 §5 orders stand. */
 const skeleton = (text: string): string => text.replace(/^a=[^\r\n]*/gm, "a=")
 
-/** Whether two texts differ in the order of attribute lines alone, both in the stack's attribute order. */
+/** Whether two texts differ in the order of attribute lines alone, the replayed one written in the stack's attribute order. */
 const orderOnly = (captured: string, replayed: string): boolean =>
-  skeleton(captured) === skeleton(replayed) && attributeOrder(captured) === attributeOrder(replayed)
+  skeleton(captured) === skeleton(replayed) &&
+  attributeOrder(replayed) === replayed &&
+  attributeOrder(captured) === replayed
 
 /**
  * Every difference between two texts read as session descriptions under the

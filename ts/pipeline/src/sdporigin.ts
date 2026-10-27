@@ -27,7 +27,8 @@
  * sess-version step that is neither +1 nor 0 over an unchanged description —
  * {@link notContinued} reads it as the replayed endpoint breaking the session
  * it holds toward that peer. {@link versionStepOne} reads the converse: the
- * replay steps by one where the capture's version stands higher.
+ * replay steps by one, or repeats its version for an unchanged description,
+ * where the capture's version stands higher.
  */
 
 /** One parsed `o=` line: the two numbers apart from the fields every run reproduces. */
@@ -202,8 +203,8 @@ export const notContinued = (sightings: ReadonlyArray<Sighting>): ReadonlyArray<
  * Whether each sighting is a sess-version the capture skips where the replay
  * steps by one (RFC 3264 §8): the two origins differ in sess-version alone,
  * the replayed one is exactly one above the replay's previous description of
- * that origin identity on the leg (replay order), and the captured one is
- * above the replayed one. A description with no previous one of its identity
+ * that origin identity on the leg (replay order), or equal to it over an
+ * unchanged description, and the captured one is above the replayed one. A description with no previous one of its identity
  * on the leg reads nothing.
  */
 export const versionStepOne = (sightings: ReadonlyArray<Sighting>): ReadonlyArray<boolean> => {
@@ -222,8 +223,10 @@ export const versionStepOne = (sightings: ReadonlyArray<Sighting>): ReadonlyArra
     const b = right[at]
     const prior = before[at]
     if (a === undefined || b === undefined || prior === undefined) return false
+    const step = b.sessVersion - right[prior]!.sessVersion
+    const unchanged = withoutOrigin(s.replayed) === withoutOrigin(sightings[prior]!.replayed)
     return identityOf(a) === identityOf(b) &&
-      b.sessVersion === right[prior]!.sessVersion + 1n &&
+      (step === 1n || (step === 0n && unchanged)) &&
       a.sessVersion > b.sessVersion
   })
 }
@@ -232,7 +235,7 @@ export const versionStepOne = (sightings: ReadonlyArray<Sighting>): ReadonlyArra
  * How one description pair's origins read: an origin the replayed endpoint
  * mints and its counterpart, a session the replay breaks (RFC 3264 §8) on a
  * leg where the capture keeps it, a sess-version the capture skips where the
- * replay steps by one, or none of these (`undefined`).
+ * replay steps by one or repeats its version, or none of these (`undefined`).
  */
 export type OriginReading = "minted" | "not-continued" | "version-step-one" | undefined
 
