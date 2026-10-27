@@ -2,30 +2,20 @@
 //!
 //! A test-only **stub service** (`S0 → S1`, one `init`, one state-gated rule)
 //! exercised end-to-end with no real service: the macro generates the state enum
-//! + machine + rules + init; `seed_services` seeds the cursor (S0) and the data
+//! + machine + rules + init; the call's setup seeds the cursor (S0) and the data
 //! backing; the rule fires in S0, `SetState`s to S1, and declines in S1 — proving
 //! macro + init + selection compose.
 
-use std::net::SocketAddr;
-
-use b2bua_core::config::B2buaConfig;
-use b2bua_core::effects::HandlerResult;
-use b2bua_core::initial_invite::build_initial_call;
 use b2bua_core::rules::{
-    execute_rules, pick_ranked, seed_services, ActionExecutor, Match, RuleAction, RuleCall,
-    RuleContext, RuleDefinition, RuleHandleResult, ServiceSeed,
+    compose_rules, default_rules, Match, RuleAction, RuleCall, RuleContext, RuleDefinition,
+    RuleHandleResult, ServiceDef, ServiceSeed,
 };
-use b2bua_core::turn_scope::TurnScope;
-use b2bua_sdk::event::CallEvent;
+use b2bua_core::turn_driver::{Driver, Step};
 use b2bua_sdk::{define_service, sm_rule};
-use call::{Call, Direction, MachineId, StateLabel};
-use sip_ids::TurnIds;
-use sip_message::generators::{
-    generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
-};
-use sip_message::header::{self, Uri, Via};
-use sip_message::SipStr;
-use sip_message::{SipMessage, SipRequest};
+use call::{Call, MachineId, StateLabel};
+use sip_message::Method;
+
+use crate::calls::bridged;
 
 /// The test-only stub service.
 mod stub {
@@ -67,160 +57,38 @@ mod stub {
     }
 }
 
-/// The URI a fixture names as text.
-fn uri_of(text: &str) -> Uri {
-    Uri::parse(&SipStr::owned(text)).expect("readable URI")
-}
-
-fn invite() -> SipRequest {
-    let opts = GenerateOutOfDialogRequestOpts {
-        request_uri: Some(uri_of("sip:bob@127.0.0.1:5070")),
-        call_id: "c1@alice".into(),
-        from: Some(
-            header::From::from_uri(uri_of("sip:alice@host")).with_tag(SipStr::from_static("atag")),
-        ),
-        to: Some(header::To::from_uri(uri_of("sip:bob@host"))),
-        cseq: 1,
-        via: Some(Via::udp("127.0.0.1", 5060).with_branch(SipStr::from_static("z9hG4bKalice"))),
-        contact: Some(header::Contact::from_uri(
-            Uri::sip_user("alice", "127.0.0.1").with_port(5060),
-        )),
-        max_forwards: Some(70),
-        body: b"v=0\r\n".to_vec(),
-        content_type: None,
-        extra_headers: vec![],
-    };
-    generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts).expect("an INVITE")
-}
-
-/// The INVITE re-issued as an in-dialog request of `method`: both dialog tags
-/// present and the CSeq restated, which is what makes it a different
-/// transaction rather than an edited INVITE.
-fn in_dialog_request(method: sip_message::Method) -> sip_message::SipRequest {
-    let inv = invite();
-    let cseq = sip_message::header::CSeq::new(inv.cseq().seq(), method.clone());
-    inv.thaw()
-        .with_method(method)
-        .set(inv.to().clone().with_tag("btag"))
-        .set(cseq)
-        .freeze()
-        .expect("an in-dialog request of the same dialog is complete")
-}
-
-fn test_call() -> Call {
-    let src: SocketAddr = "127.0.0.1:5060".parse().unwrap();
-    build_initial_call(&invite(), src, &B2buaConfig::default(), &mut sip_ids::TurnIds::fixed(1), 0)
-}
-
-fn info_event() -> CallEvent {
-    let info = in_dialog_request(sip_message::Method::Info);
-    CallEvent::sip(SipMessage::Request(info), "127.0.0.1:5060".parse().unwrap())
-}
-
-fn ctx_for<'a>(call: &'a Call, event: &'a CallEvent, config: &'a B2buaConfig) -> RuleContext<'a> {
-    RuleContext {
-        call: RuleCall::new(call),
-        call_ref: &call.call_ref,
-        event,
-        source_leg_id: "a",
-        direction: Direction::FromA,
-        now_ms: 0,
-        config,
-        discharged: None,
-        resolved: &call::helpers::UNRESOLVED,
-    }
-}
-
 #[test]
 fn stub_service_init_seeds_then_rule_advances_then_declines() {
     let machine = MachineId::new("stub");
     let cursor = |c: &Call| c.sm_cursors.get(&machine).map(StateLabel::as_str).map(str::to_string);
-
-    let config = B2buaConfig::default();
-    let mut id_gen = TurnScope::of(TurnIds::fixed(1));
-    let mut exec = ActionExecutor {
-        owners: b2bua_core::owners::Owners::none(),
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-    };
-    let event = info_event();
-    let services = vec![stub::service_def()];
-
-    // ── init: seeds cursor=S0 + data, folded through seed_services ──
-    let seeded = seed_services(
-        HandlerResult::new(test_call()),
-        &services,
-        &mut exec,
-        &event,
-        "a",
-        Direction::FromA,
-    );
-    assert_eq!(cursor(&seeded.call).as_deref(), Some("S0"), "init seeded cursor=S0");
+    let driver = Driver::new().with_service(stub::service_def());
+    let mut call = bridged(&driver);
+    assert_eq!(cursor(call.call()).as_deref(), Some("S0"), "init seeded cursor=S0");
     assert_eq!(
-        seeded.call.callback_context.as_deref(),
+        call.call().callback_context.as_deref(),
         Some("stub-seeded"),
         "init installed the data backing"
     );
 
-    // ── selection + SetState: the rule is a candidate in S0 and advances to S1 ──
-    let rules = stub::rules();
-    let advanced = {
-        let ctx = ctx_for(&seeded.call, &event, &config);
-        assert_eq!(
-            pick_ranked(&rules, &seeded.call, &ctx).first().map(|r| r.id),
-            Some("stub-advance"),
-            "candidate in S0"
-        );
-        execute_rules(
-            &rules,
-            &seeded.call,
-            &ctx,
-            &mut exec,
-            &b2bua_core::obligations::ObligationSet::core(),
-        )
-    };
-    assert_eq!(cursor(&advanced.call).as_deref(), Some("S1"), "SetState moved cursor to S1");
+    let advanced = call.turned(Step::Sends("a", Method::Info));
+    assert_eq!(advanced.rule, Some("stub-advance"), "the rule claims the INFO in S0");
+    assert_eq!(cursor(call.call()).as_deref(), Some("S1"), "SetState moved cursor to S1");
 
-    // ── declines in S1: the S0-gated rule is no longer a candidate ──
-    {
-        let ctx = ctx_for(&advanced.call, &event, &config);
-        assert!(pick_ranked(&rules, &advanced.call, &ctx).is_empty(), "rule declines in S1");
-    }
+    let declined = call.turned(Step::Sends("a", Method::Info));
+    assert_ne!(declined.rule, Some("stub-advance"), "the S0-gated rule declines in S1");
 }
 
 /// A dormant service (`init` → `None`) costs a vanilla call nothing: no cursor,
 /// no data, and `compose_rules` with no services equals the bare core list.
 #[test]
 fn dormant_service_leaves_call_untouched() {
-    use b2bua_core::rules::{compose_rules, default_rules, ServiceDef};
-
-    let config = B2buaConfig::default();
-    let mut id_gen = TurnScope::of(TurnIds::fixed(1));
-    let mut exec = ActionExecutor {
-        owners: b2bua_core::owners::Owners::none(),
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-    };
-    let event = info_event();
-
     fn dormant_init(_: &RuleCall) -> Option<ServiceSeed> {
         None
     }
     let dormant = ServiceDef { id: "dormant", init: dormant_init, rules: Vec::new };
-    let services = vec![dormant];
-
-    let before = test_call();
-    let after = seed_services(
-        HandlerResult::new(before.clone()),
-        &services,
-        &mut exec,
-        &event,
-        "a",
-        Direction::FromA,
-    );
-    assert_eq!(after.call, before, "dormant service touches nothing");
+    let with = Driver::new().with_service(dormant);
+    let without = Driver::new();
+    assert_eq!(with.dial().call(), without.dial().call(), "dormant service touches nothing");
 
     // Empty composition is exactly the core list.
     let composed = compose_rules(&[], default_rules());
@@ -231,8 +99,6 @@ fn dormant_service_leaves_call_untouched() {
 /// write and its actions follow what the composition inserted.
 #[test]
 fn a_configured_seed_reads_the_service_parameters() {
-    use b2bua_core::rules::ServiceDef;
-
     struct Marker(&'static str);
 
     fn configured_init(_: &RuleCall) -> Option<ServiceSeed> {
@@ -247,29 +113,15 @@ fn a_configured_seed_reads_the_service_parameters() {
             }]
         }))
     }
-    let services = vec![ServiceDef { id: "configured", init: configured_init, rules: Vec::new }];
-
-    let mut config = B2buaConfig::default();
-    config.service_params.insert(Marker("from-config"));
-    let mut id_gen = TurnScope::of(TurnIds::fixed(1));
-    let mut exec = ActionExecutor {
-        owners: b2bua_core::owners::Owners::none(),
-        config: &config,
-        turn: &mut id_gen,
-        now_ms: 0,
-    };
-    let event = info_event();
-    let seeded = seed_services(
-        HandlerResult::new(test_call()),
-        &services,
-        &mut exec,
-        &event,
-        "a",
-        Direction::FromA,
-    );
-    assert_eq!(seeded.call.callback_context.as_deref(), Some("from-config"), "the data write");
+    let configured = ServiceDef { id: "configured", init: configured_init, rules: Vec::new };
+    let driver = Driver::new()
+        .with_config(|c| c.service_params.insert(Marker("from-config")))
+        .with_service(configured);
+    let call = driver.dial();
+    let seeded = call.call();
+    assert_eq!(seeded.callback_context.as_deref(), Some("from-config"), "the data write");
     assert_eq!(
-        seeded.call.sm_cursors.get(&MachineId::new("configured")).map(StateLabel::as_str),
+        seeded.sm_cursors.get(&MachineId::new("configured")).map(StateLabel::as_str),
         Some("S1"),
         "the configured action was folded"
     );

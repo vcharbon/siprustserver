@@ -37,7 +37,7 @@ use crate::landing::{land, Landing};
 use crate::obligations::ObligationSet;
 use crate::owners::Owners;
 use crate::rule_chain::{rule_chain_turn, timer_screen, Framework, TurnInput};
-use crate::rules::{default_rules, RuleDefinition};
+use crate::rules::{compose_rules, default_rules, RuleDefinition, ServiceDef};
 use crate::turn_scope::TurnScope;
 
 pub use dial::Dialling;
@@ -57,6 +57,8 @@ pub struct Driver {
     route: RouteDecision,
     caller_offers: bool,
     caller_lines: Vec<(&'static str, &'static str)>,
+    services: Vec<ServiceDef>,
+    sampled: bool,
 }
 
 impl Default for Driver {
@@ -76,6 +78,8 @@ impl Driver {
             route: route(),
             caller_offers: true,
             caller_lines: Vec::new(),
+            services: Vec::new(),
+            sampled: false,
         }
     }
 
@@ -107,6 +111,21 @@ impl Driver {
     /// `self`, its configuration as `edit` leaves it.
     pub fn with_config(mut self, edit: impl FnOnce(&mut B2buaConfig)) -> Self {
         edit(&mut self.config);
+        self
+    }
+
+    /// `self` with the service `def`: its rules lead the chain and its
+    /// `init` seeds the call once routed, as the shell composes and seeds them
+    /// (ADR-0016).
+    pub fn with_service(mut self, def: ServiceDef) -> Self {
+        self.rules = compose_rules(std::slice::from_ref(&def), std::mem::take(&mut self.rules));
+        self.services.push(def);
+        self
+    }
+
+    /// `self`, the shell's trace intake sampling every call it dials.
+    pub fn sampled(mut self) -> Self {
+        self.sampled = true;
         self
     }
 

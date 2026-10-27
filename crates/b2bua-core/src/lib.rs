@@ -57,6 +57,8 @@ pub mod owners;
 pub mod reaper_verdict;
 pub mod ring_deadline;
 pub mod rule_chain;
+#[cfg(any(test, feature = "testkit"))]
+pub mod rule_fixture;
 pub mod rules;
 pub mod stack_identity;
 #[cfg(any(test, feature = "testkit"))]
