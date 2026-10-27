@@ -440,13 +440,13 @@ synthetic/info-mscml splice 46 75250734f137b041
 synthetic/info-mscml extreme 304 251fa29e6d253260 
 synthetic/info-mscml number 165 23962f0d0ae8d618 
 synthetic/info-mscml body 37 d6c8ffe94c250d76 
-synthetic/register-auth truncate 636 f795d01a88d59524 
+synthetic/register-auth truncate 636 d107f0d6c96b6551 
 synthetic/register-auth duplicate 11 5dbb3c5800ed69eb 
 synthetic/register-auth splice 46 3653bac4f0e29fd2 
 synthetic/register-auth extreme 304 3f560952c76940e1 
-synthetic/register-auth number 265 3bc4bca6d1c4bc80 
+synthetic/register-auth number 265 eaded870f578ad25 
 synthetic/register-auth body 37 c9b86ce424b5f020 
-synthetic/401-challenge truncate 507 29ad1639ece95387 
+synthetic/401-challenge truncate 507 c89d4420eec414b1 
 synthetic/401-challenge duplicate 8 c58132a039b38766 
 synthetic/401-challenge splice 46 9dfcb5042407ceb2 
 synthetic/401-challenge extreme 304 4246551edac17626 

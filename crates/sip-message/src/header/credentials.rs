@@ -4,16 +4,23 @@
 //! Its parameters are comma-separated *inside one value*, so this header is
 //! declared [`Folding::Opaque`]: a comma-splitting reader can never tear a
 //! challenge in half.
+//!
+//! A value reads as RFC 3261 §25.1 writes it: an `auth-scheme` token, then
+//! `auth-param`s (`token EQUAL ( token / quoted-string )`, comma-separated)
+//! or one RFC 7235 §2.1 `token68`, kept as a single flag. Anything else is
+//! refused, so a value read renders to text that reads back as itself.
 
 use std::marker::PhantomData;
 
 use crate::error::SipParseError;
 use crate::sip_str::SipStr;
 
+use crate::char_class::is_token_char;
+
 use super::kind::CredentialsKind;
 use super::name::HeaderName;
-use super::params::{parse_comma_params, ParamValue, Params};
-use super::scan::{scan_until, skip_ws, sub};
+use super::params::{ParamValue, Params};
+use super::scan::{byte_at, quoted_close, read_quoted, skip_ws, sub};
 use super::value::{Folding, HeaderValue};
 use super::wire::Wire;
 
@@ -88,17 +95,25 @@ impl<K: CredentialsKind> HeaderValue for Credentials<K> {
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
         let value = raw.trimmed();
         let bytes = value.as_bytes();
-        let start = skip_ws(bytes, 0);
-        let scheme_end = scan_until(bytes, start, b" \t");
-        let scheme = sub(&value, start, scheme_end);
-        if scheme.is_empty() {
-            return Err(SipParseError::new(format!(
-                "{} has no auth-scheme: {:?}",
-                K::name(),
-                value.as_str()
-            )));
+        let refused =
+            |what: &str| SipParseError::new(format!("{} {what}: {:?}", K::name(), value.as_str()));
+        let scheme_end = token_end(bytes, 0);
+        if scheme_end == 0 {
+            return Err(refused("has no auth-scheme"));
         }
-        let params = parse_comma_params(&value, scheme_end);
+        let scheme = sub(&value, 0, scheme_end);
+        let rest = skip_ws(bytes, scheme_end);
+        let params = if rest == bytes.len() {
+            Params::new()
+        } else if rest == scheme_end {
+            return Err(refused("has no space after its auth-scheme"));
+        } else if is_token68(bytes.get(rest..).unwrap_or_default()) {
+            let mut one = Params::new();
+            one.push(sub(&value, rest, bytes.len()), ParamValue::Flag);
+            one
+        } else {
+            auth_params(&value, rest).ok_or_else(|| refused("has a malformed auth-param"))?
+        };
         Ok(Self { scheme, params, kind: PhantomData })
     }
 
@@ -107,6 +122,57 @@ impl<K: CredentialsKind> HeaderValue for Credentials<K> {
         if !self.params.is_empty() {
             out.byte(b' ');
             self.params.render_comma_separated(out);
+        }
+    }
+}
+
+/// The end of the token starting at byte `i`: `i` itself when none does.
+fn token_end(bytes: &[u8], i: usize) -> usize {
+    i + bytes.get(i..).unwrap_or_default().iter().take_while(|&&b| is_token_char(b)).count()
+}
+
+/// `token68 = 1*( ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" ) *"="`
+/// (RFC 7235 §2.1), the whole of `rest`.
+fn is_token68(rest: &[u8]) -> bool {
+    let body = rest.iter().take_while(|&&b| b.is_ascii_alphanumeric() || b"-._~+/".contains(&b));
+    let body = body.count();
+    body > 0 && rest.get(body..).unwrap_or_default().iter().all(|&b| b == b'=')
+}
+
+/// The `auth-param`s from byte `i` to the end of `base`, comma-separated
+/// with optional whitespace; `None` at the first byte off the grammar.
+fn auth_params(base: &SipStr, mut i: usize) -> Option<Params> {
+    let bytes = base.as_bytes();
+    let mut params = Params::new();
+    loop {
+        let name_end = token_end(bytes, i);
+        if name_end == i {
+            return None;
+        }
+        let name = sub(base, i, name_end);
+        i = skip_ws(bytes, name_end);
+        if byte_at(bytes, i) != Some(b'=') {
+            return None;
+        }
+        i = skip_ws(bytes, i + 1);
+        if byte_at(bytes, i) == Some(b'"') {
+            let close = quoted_close(bytes, i)?;
+            let (text, _) = read_quoted(base, i);
+            params.push(name, ParamValue::Quoted(text));
+            i = close;
+        } else {
+            let value_end = token_end(bytes, i);
+            if value_end == i {
+                return None;
+            }
+            params.push(name, ParamValue::Token(sub(base, i, value_end)));
+            i = value_end;
+        }
+        i = skip_ws(bytes, i);
+        match byte_at(bytes, i) {
+            None => return Some(params),
+            Some(b',') => i = skip_ws(bytes, i + 1),
+            Some(_) => return None,
         }
     }
 }
@@ -133,10 +199,54 @@ mod tests {
     }
 
     #[test]
+    fn parameters_split_on_commas_not_semicolons() {
+        let c =
+            Authorization::parse(&SipStr::owned(r#"Digest realm="a;b", nonce=xyz, stale=FALSE"#))
+                .unwrap();
+        assert_eq!(c.params().len(), 3);
+        assert_eq!(c.value("realm"), Some("a;b"));
+        assert_eq!(c.value("nonce"), Some("xyz"));
+    }
+
+    #[test]
     fn the_family_never_comma_splits() {
         assert_eq!(Authorization::folding(), Folding::Opaque);
         let raw = SipStr::owned(r#"Digest realm="a", nonce="b""#);
         assert_eq!(Authorization::parse_line(&raw).unwrap().len(), 1);
+    }
+
+    /// A value off the grammar is refused: a scheme that is no token, a
+    /// quoted-string left open, text after a closed one, a parameter with no
+    /// value, an empty list element.
+    #[test]
+    fn a_value_off_the_grammar_is_refused() {
+        for raw in [
+            r#"ce", realm="atlanta.com""#,
+            r#"Digest realm="atlanta.com"#,
+            r#"Digest cnonce="0a4f113b"49393a0, opaque="5ccc""#,
+            r#"Digest realm="atlanta.com", stale"#,
+            r#"Digest realm="atlanta.com",, nonce="ab34""#,
+            r#"Digest realm=, nonce="ab34""#,
+            "Digest\"realm",
+        ] {
+            assert!(Authorization::parse(&SipStr::owned(raw)).is_err(), "{raw}");
+        }
+    }
+
+    /// A value read renders to text that reads back to the same rendering.
+    #[test]
+    fn a_value_read_renders_to_itself() {
+        for raw in [
+            r#"Digest username="bob", realm="a\"b", nc=00000001 , qop=auth"#,
+            "Bearer dXNlcjpwYXNzd29yZA==",
+            "Negotiate",
+            "Digest realm=\"a\\\u{7}b\"",
+        ] {
+            let read = Authorization::parse(&SipStr::owned(raw)).unwrap();
+            let wire = read.to_wire();
+            let again = Authorization::parse(&SipStr::owned(&wire)).unwrap();
+            assert_eq!(again.to_wire(), wire, "{raw}");
+        }
     }
 
     #[test]
