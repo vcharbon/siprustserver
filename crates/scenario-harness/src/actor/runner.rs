@@ -251,10 +251,10 @@ pub struct ActorState<'c> {
     /// their own reactor arm — so goal progress (the deviation's point: traffic
     /// DURING the hold) never blocks on the hold.
     pub(super) held_acks: Vec<HeldAck>,
-    /// The initial INVITEs this actor took, by their server transaction's
-    /// top-Via branch and sent-by (RFC 3261 §17.2.3): a copy of one is not a
-    /// new call.
-    pub(super) initial_invites: std::collections::HashSet<(String, String)>,
+    /// The initial INVITEs this actor took, by their top-Via branch and
+    /// sent-by (RFC 3261 §17.2.3), Call-ID, From-tag and CSeq: a copy of one is
+    /// not a new call.
+    pub(super) initial_invites: std::collections::HashSet<String>,
     /// Whether this actor ORIGINATES the dialog — its first goal is an
     /// `Invite`/`InviteTemplate` (fallback: `Disposition::Caller`). Keys the
     /// §14.1 glare owner dwell and the caller attribution.

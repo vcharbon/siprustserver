@@ -36,7 +36,8 @@ fn at(sync: SyncLevel) -> Bench {
     log.note_applied(PEER, None, Partition::Bak, Watermark::new(1, 0));
     let metrics = B2buaMetrics::new();
     let path = WritePath { sync, sync_cap: CAP, ..WritePath::default() };
-    let outboxes = Arc::new(Outboxes::new(&path, Some(log.clone()), metrics.clone()));
+    let outboxes =
+        Arc::new(Outboxes::new(Some((path, log.clone())), metrics.clone(), Default::default()));
     Bench { log, outboxes, metrics, sent: Sent::default(), serving: Box::new(serving) }
 }
 

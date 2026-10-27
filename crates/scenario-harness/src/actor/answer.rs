@@ -187,13 +187,17 @@ pub(super) async fn apply_disposition(
 ) -> Result<(), StepError> {
     let now = Instant::now();
     // A copy of an initial INVITE this actor already took — the same server
-    // transaction by its top Via (RFC 3261 §17.2.3), whatever a proxy stamped
-    // below it — is a retransmission its transaction absorbs (§17.2.1), not a
+    // transaction by its top Via (RFC 3261 §17.2.3) and the same request by
+    // its Call-ID, From-tag and CSeq, whatever a proxy stamped below the top
+    // Via — is a retransmission its transaction absorbs (§17.2.1), not a
     // second call to answer under another To-tag.
-    let via = uas.request().top_via();
+    let req = uas.request();
+    let via = req.top_via();
     let (host, port) = via.sent_by().pair();
-    let key = (via.branch().unwrap_or_default().to_string(), format!("{host}:{port}"));
-    if !key.0.is_empty() && !st.initial_invites.insert(key) {
+    let (branch, from_tag) =
+        (via.branch().unwrap_or_default(), req.from().tag().unwrap_or_default());
+    let key = format!("{branch} {host}:{port} {} {from_tag} {}", req.call_id(), req.cseq().seq());
+    if !branch.is_empty() && !st.initial_invites.insert(key) {
         return Ok(());
     }
     // A fresh initial INVITE opens a fresh early-dialog space — a stale count

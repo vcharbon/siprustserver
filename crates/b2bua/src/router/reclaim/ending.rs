@@ -50,8 +50,18 @@ pub(super) async fn discharge_met_ending(
     let Enveloped { call: terminal, topology } = terminal;
     let by = &ctx.relay_owner;
     let (answered_there, ours) = own_open_rounds(before, &terminal, by);
-    for key in answered_there.iter().filter_map(relayed_server_key) {
-        let _ = ctx.txn.relinquish_server(key).await;
+    // Behind the sends the call's outbox still holds (ADR-0055 §3).
+    let keys: Vec<_> = answered_there.iter().filter_map(relayed_server_key).collect();
+    if !keys.is_empty() {
+        let sender = ctx.clone();
+        let relinquish: crate::router::outbox::Effects = Box::new(move |_| {
+            Box::pin(async move {
+                for key in keys {
+                    let _ = sender.txn.relinquish_server(key).await;
+                }
+            })
+        });
+        ctx.outboxes.push(call_ref, ctx.state.hold_target(call_ref), relinquish).await;
     }
     let mut result = HandlerResult::new(keep_dialogs(raise_sequences(terminal, before), before));
     let mut turn = TurnScope::of(ctx.id_gen.turn()).with_faults(ctx.wire_faults.snapshot());
