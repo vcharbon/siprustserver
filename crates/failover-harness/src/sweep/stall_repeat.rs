@@ -2,9 +2,9 @@
 //! the stalled primary sent, the two the same message but for the Reason
 //! header field each node states on its own.
 
-use sip_message::parser::custom::CustomParser;
-use sip_message::{Method, SipMessage, SipParser};
-use sip_net_testkit::RecordedSipEntry;
+use sip_message::sniff::{equal_except, Except};
+use sip_message::Method;
+use sip_net_testkit::CaptureIndex;
 
 use crate::cluster::Cluster;
 
@@ -16,85 +16,34 @@ const RULE_RUNG_BYTE_IDENTICAL: &str = "rung-byte-identical";
 pub(super) fn accept_reason_only_cancel_repeat(cluster: &mut Cluster) {
     cluster.fh.accept_rfc_deviations_from_now_where(
         RULE_RUNG_BYTE_IDENTICAL,
-        |copy, earlier, _| reason_only_cancel_repeat(copy, earlier),
+        |i, capture, _| reason_only_cancel_repeat(i, capture),
         "ADR-0055 §11: a stall: the copy's repeat of a CANCEL differs from the dead owner's \
          only in its Reason",
     );
 }
 
-/// Whether `copy` is a CANCEL whose first copy in `earlier` — same top Via
-/// branch, Call-ID and CSeq number, sent to the same address — differs from
-/// it in the Reason header field and nowhere else.
-fn reason_only_cancel_repeat(copy: &RecordedSipEntry, earlier: &[RecordedSipEntry]) -> bool {
-    let Some(key) = cancel_key_of(&copy.raw) else { return false };
-    let first =
-        earlier.iter().find(|e| e.to == copy.to && cancel_key_of(&e.raw) == Some(key.clone()));
-    let Some(first) = first else { return false };
-    let reason = |raw: &[u8]| without(raw, &["reason"]).map(|rest| unstamped(&rest));
-    let (theirs, ours) = (reason(&first.raw), reason(&copy.raw));
-    theirs.is_some() && theirs == ours && first.raw != copy.raw
-}
-
-/// `head` with the `received` and `rport` values a relaying hop stamps on
-/// every Via below its own taken out: the source each copy came from
-/// (RFC 3261 §18.2.1, RFC 3581 §4), as the retransmission audit reads them.
-fn unstamped(head: &[u8]) -> Vec<u8> {
-    let text = String::from_utf8_lossy(head);
-    let mut vias = 0;
-    let lines: Vec<String> = text
-        .split('\n')
-        .map(|line| {
-            let name = line.split(':').next().unwrap_or_default().trim();
-            if !(name.eq_ignore_ascii_case("via") || name.eq_ignore_ascii_case("v")) {
-                return line.to_string();
-            }
-            vias += 1;
-            if vias == 1 {
-                return line.to_string();
-            }
-            line.trim_end_matches('\r')
-                .split(';')
-                .filter(|p| !p.starts_with("received=") && !p.starts_with("rport="))
-                .collect::<Vec<_>>()
-                .join(";")
-                + if line.ends_with('\r') { "\r" } else { "" }
-        })
-        .collect();
-    lines.join("\n").into_bytes()
-}
-
-/// The top Via branch, Call-ID and CSeq number of a CANCEL.
-fn cancel_key_of(raw: &[u8]) -> Option<(String, String, u32)> {
-    let Ok(SipMessage::Request(req)) = CustomParser::new().parse(raw) else { return None };
-    if *req.method() != Method::Cancel {
-        return None;
-    }
-    let branch = req.top_via().branch()?.to_string();
-    Some((branch, req.call_id().to_string(), req.cseq().seq()))
-}
-
-/// `raw` with every header line named one of `names` (lowercase, long or
-/// compact form) left out; `None` when it holds no header section.
-fn without(raw: &[u8], names: &[&str]) -> Option<Vec<u8>> {
-    let end = raw.windows(4).position(|w| w == b"\r\n\r\n")?;
-    let (head, body) = raw.split_at(end);
-    let named = |line: &[u8]| {
-        let name = line.split(|b| *b == b':').next().unwrap_or_default();
-        let name = String::from_utf8_lossy(name);
-        names.iter().any(|n| name.trim().eq_ignore_ascii_case(n))
+/// Whether the entry at index `i` of `capture` is a CANCEL whose first copy
+/// before it — same transaction, sent to the same address — differs from it
+/// in the Reason header field and nowhere else, the stamps a relaying hop
+/// leaves on the Via below its own (RFC 3261 §18.2.1, RFC 3581 §4) apart.
+fn reason_only_cancel_repeat(i: usize, capture: &CaptureIndex) -> bool {
+    let cancel_txn = |i: usize| {
+        capture
+            .message(i)
+            .filter(|m| m.method() == Some(&Method::Cancel))
+            .and_then(|m| m.txn.as_ref())
     };
-    let lines: Vec<&[u8]> = head.split(|b| *b == b'\n').collect();
-    let mut out: Vec<u8> = Vec::with_capacity(raw.len());
-    for line in lines.iter().filter(|l| !named(l)) {
-        out.extend_from_slice(line);
-        out.push(b'\n');
-    }
-    out.extend_from_slice(body);
-    Some(out)
+    let (Some(copy), Some(key)) = (capture.entry(i), cancel_txn(i)) else { return false };
+    let first = capture.before(i).find(|(j, e, _)| e.to == copy.to && cancel_txn(*j) == Some(key));
+    let Some((_, first, _)) = first else { return false };
+    first.raw != copy.raw
+        && equal_except(&first.raw, &copy.raw, &[Except::Header("Reason"), Except::RelayStamps])
 }
 
 #[cfg(test)]
 mod tests {
+    use sip_net_testkit::RecordedSipEntry;
+
     use super::super::parties::ALICE;
     use super::*;
 
@@ -127,7 +76,7 @@ mod tests {
     fn only_the_reason_of_a_cancel_differs() {
         let first = entry(1, &cancel(None, "b@x"));
         let copy = entry(2, &cancel(Some("Q.850;cause=16"), "b@x"));
-        assert!(reason_only_cancel_repeat(&copy, &[first]));
+        assert!(reason_only_cancel_repeat(1, &CaptureIndex::new(vec![first, copy])));
     }
 
     #[test]
@@ -141,13 +90,13 @@ mod tests {
         };
         let first = entry(1, &relayed("5091", None));
         let copy = entry(2, &relayed("5092", Some("Q.850;cause=16")));
-        assert!(reason_only_cancel_repeat(&copy, &[first]));
+        assert!(reason_only_cancel_repeat(1, &CaptureIndex::new(vec![first, copy])));
     }
 
     #[test]
     fn a_cancel_differing_elsewhere_keeps_the_finding() {
         let first = entry(1, &cancel(None, "b@x"));
         let copy = entry(2, &cancel(Some("Q.850;cause=16"), "c@x"));
-        assert!(!reason_only_cancel_repeat(&copy, &[first]));
+        assert!(!reason_only_cancel_repeat(1, &CaptureIndex::new(vec![first, copy])));
     }
 }

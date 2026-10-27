@@ -6,10 +6,10 @@
 use std::collections::HashSet;
 
 use layer_harness::Stamped;
-use sip_net_testkit::{audit_visible_event, SignalingNetworkEvent};
+use sip_net_testkit::{audit_visible_event, CaptureIndex, SignalingNetworkEvent};
 
 use super::FailoverHarness;
-use crate::rfc_acceptance::{lane_details, Admits, AdmitsWhole, Finding};
+use crate::rfc_acceptance::{lane_details, Admits, Finding};
 
 impl FailoverHarness {
     /// [`accept_rfc_deviations_from_now`](Self::accept_rfc_deviations_from_now),
@@ -46,20 +46,6 @@ impl FailoverHarness {
         debug_assert!(!justification.trim().is_empty(), "acceptance needs a justification");
         let from = self.harness.recording().channel().snapshot().iter().map(|s| s.seq).max();
         self.rfc_acceptance.open_window_where(rule, from.unwrap_or(0), false, Some(admits));
-    }
-
-    /// [`accept_rfc_deviations_from_now_where`](Self::accept_rfc_deviations_from_now_where),
-    /// the test reading what the whole capture holds around the offending
-    /// message.
-    pub fn accept_rfc_deviations_from_now_seeing(
-        &mut self,
-        rule: &str,
-        admits: AdmitsWhole,
-        justification: &str,
-    ) {
-        debug_assert!(!justification.trim().is_empty(), "acceptance needs a justification");
-        let from = self.harness.recording().channel().snapshot().iter().map(|s| s.seq).max();
-        self.rfc_acceptance.open_window_seeing(rule, from.unwrap_or(0), admits);
     }
 
     /// Accept the dialog verdicts of `rule` (a `dialog-…` rule) each UA of
@@ -117,11 +103,11 @@ impl FailoverHarness {
         // same view `evaluate_rfc_findings` hands the rules — so a window must be
         // resolved against `audit_wire_entries`, never the raw snapshot (whose
         // extra ReEmit / invisible-disposition rows shift every later index).
-        let entries = sip_net_testkit::audit_wire_entries(&events);
+        let capture = CaptureIndex::new(sip_net_testkit::audit_wire_entries(&events));
         let findings: Vec<_> = sip_net_testkit::evaluate_rfc_findings(&events)
             .into_iter()
             .filter(|f| !f.advisory && !self.rfc_acceptance.waived(&f.rule))
-            .filter(|f| !self.rfc_acceptance.accepts(&f.rule, f.offending, &entries))
+            .filter(|f| !self.rfc_acceptance.accepts(&f.rule, f.offending, &capture))
             .collect();
         assert!(
             findings.is_empty(),

@@ -22,7 +22,9 @@
 //!
 //! [`msg_reads`] holds the per-message accessors the adapter builds a
 //! `rfc_rules::Msg` from; [`relay_lanes`] classifies which lanes forward rather
-//! than author, the one policy input the adapter needs beyond the rule bodies.
+//! than author, the one policy input the adapter needs beyond the rule bodies;
+//! [`capture_index`] parses a capture once for the predicates that read what
+//! surrounds an offending message.
 //!
 //! SDP grammar is NOT here: a description is read as a document by
 //! [`sip_message::sdp_doc`], the one home for it.
@@ -50,6 +52,7 @@ pub(crate) fn lenient_parser() -> CustomParser {
 }
 
 // Shared helpers.
+pub mod capture_index;
 pub mod msg_reads;
 pub mod relay_lanes;
 

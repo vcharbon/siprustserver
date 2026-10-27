@@ -18,9 +18,8 @@
 use std::collections::{HashMap, HashSet};
 
 use layer_harness::Stamped;
-use sip_message::parser::custom::CustomParser;
-use sip_message::{SipMessage, SipParser};
-use sip_net_testkit::{RecordedSipEntry, SignalingNetworkEvent};
+use sip_message::Method;
+use sip_net_testkit::{CaptureIndex, DialogKey, SignalingNetworkEvent};
 
 /// One RFC-audit rule accepted over a bounded slice of the run, in capture order.
 struct AcceptanceWindow {
@@ -36,27 +35,13 @@ struct AcceptanceWindow {
     once_per_dialog: bool,
     /// What the window admits of an offending message beyond its rule and
     /// span; `None` admits every one.
-    admits: Option<Test>,
+    admits: Option<Admits>,
 }
 
-/// How a window tests an offending message.
-#[derive(Clone, Copy)]
-enum Test {
-    /// On the message and what was captured before it.
-    Earlier(Admits),
-    /// On the message's place in the whole capture.
-    Whole(AdmitsWhole),
-}
-
-/// A window's test of an offending message: the message's entry, every entry
-/// captured before it, and the capture `seq` the window opened after (an
+/// A window's test of an offending message: the message's index in the
+/// capture, the capture, and the capture `seq` the window opened after (an
 /// entry at or below it was captured before the window).
-pub type Admits = fn(&RecordedSipEntry, &[RecordedSipEntry], u64) -> bool;
-
-/// A window's test of an offending message that reads what followed it too:
-/// the message's index in every captured entry, those entries, and the
-/// capture `seq` the window opened after.
-pub type AdmitsWhole = fn(usize, &[RecordedSipEntry], u64) -> bool;
+pub type Admits = fn(usize, &CaptureIndex, u64) -> bool;
 
 impl AcceptanceWindow {
     /// Whether the message captured at `seq` falls inside this window.
@@ -64,15 +49,11 @@ impl AcceptanceWindow {
         seq > self.from_seq && self.until_seq.is_none_or(|until| seq <= until)
     }
 
-    /// Whether the window takes the offending message at `entries[i]`: inside
-    /// its span and admitted by its test.
-    fn takes(&self, i: usize, entries: &[RecordedSipEntry]) -> bool {
-        let Some(entry) = entries.get(i) else { return false };
-        self.covers(entry.seq)
-            && self.admits.is_none_or(|test| match test {
-                Test::Earlier(admits) => admits(entry, &entries[..i], self.from_seq),
-                Test::Whole(admits) => admits(i, entries, self.from_seq),
-            })
+    /// Whether the window takes the offending message at index `i` of
+    /// `capture`: inside its span and admitted by its test.
+    fn takes(&self, i: usize, capture: &CaptureIndex) -> bool {
+        let Some(entry) = capture.entry(i) else { return false };
+        self.covers(entry.seq) && self.admits.is_none_or(|admits| admits(i, capture, self.from_seq))
     }
 }
 
@@ -131,27 +112,12 @@ impl RfcAcceptance {
         once_per_dialog: bool,
         admits: Option<Admits>,
     ) {
-        let admits = admits.map(Test::Earlier);
         let window = AcceptanceWindow {
             rule: rule.to_string(),
             from_seq,
             until_seq: None,
             once_per_dialog,
             admits,
-        };
-        self.windows.push(window);
-    }
-
-    /// An acceptance window for `rule` over every message captured after
-    /// `from_seq`, accepting only the offending messages `admits` passes,
-    /// read against the whole capture.
-    pub fn open_window_seeing(&mut self, rule: &str, from_seq: u64, admits: AdmitsWhole) {
-        let window = AcceptanceWindow {
-            rule: rule.to_string(),
-            from_seq,
-            until_seq: None,
-            once_per_dialog: false,
-            admits: Some(Test::Whole(admits)),
         };
         self.windows.push(window);
     }
@@ -170,19 +136,11 @@ impl RfcAcceptance {
     }
 
     /// Whether an acceptance window for `rule` covers the finding whose offending
-    /// message is the 1-based `offending` index into `entries`. A finding with no
+    /// message is the 1-based `offending` index into `capture`. A finding with no
     /// pinned message is never accepted — it cannot be placed in the run.
-    pub fn accepts(
-        &self,
-        rule: &str,
-        offending: Option<usize>,
-        entries: &[RecordedSipEntry],
-    ) -> bool {
-        let Some(i) = offending.and_then(|i| i.checked_sub(1)).filter(|i| *i < entries.len())
-        else {
-            return false;
-        };
-        self.windows.iter().any(|w| w.rule == rule && w.takes(i, entries))
+    pub fn accepts(&self, rule: &str, offending: Option<usize>, capture: &CaptureIndex) -> bool {
+        let Some(i) = offending.and_then(|i| i.checked_sub(1)) else { return false };
+        self.windows.iter().any(|w| w.rule == rule && w.takes(i, capture))
     }
 
     /// Whether a window for `rule` taking the finding at `offending` is one
@@ -192,13 +150,12 @@ impl RfcAcceptance {
         &self,
         rule: &str,
         offending: Option<usize>,
-        entries: &[RecordedSipEntry],
+        capture: &CaptureIndex,
         once_per_dialog: bool,
     ) -> bool {
-        let i = offending.and_then(|i| i.checked_sub(1)).filter(|i| *i < entries.len());
-        i.is_some_and(|i| {
+        offending.and_then(|i| i.checked_sub(1)).is_some_and(|i| {
             self.windows.iter().any(|w| {
-                w.rule == rule && w.once_per_dialog == once_per_dialog && w.takes(i, entries)
+                w.rule == rule && w.once_per_dialog == once_per_dialog && w.takes(i, capture)
             })
         })
     }
@@ -214,7 +171,7 @@ impl RfcAcceptance {
         events: &[Stamped<SignalingNetworkEvent>],
         scoped_out: &HashSet<String>,
     ) -> (Vec<Finding>, Vec<Finding>) {
-        let entries = sip_net_testkit::audit_wire_entries(events);
+        let capture = CaptureIndex::new(sip_net_testkit::audit_wire_entries(events));
         let mut gating = Vec::new();
         let mut accepted = Vec::new();
         for rule in sip_net_testkit::rfc_cross_message_rules_scoped(scoped_out.clone()) {
@@ -237,9 +194,9 @@ impl RfcAcceptance {
                 // A window taking every request it covers accepts the finding
                 // outright; one taking a request per dialog, its dialog's first.
                 let accepted_here = has_window
-                    && (self.taken_by(rule.name(), offending, &entries, false)
-                        || (self.taken_by(rule.name(), offending, &entries, true)
-                            && per_dialog.first_of_its_dialog(offending, &entries)));
+                    && (self.taken_by(rule.name(), offending, &capture, false)
+                        || (self.taken_by(rule.name(), offending, &capture, true)
+                            && per_dialog.first_of_its_dialog(offending, &capture)));
                 if accepted_here {
                     accepted.push(finding);
                 } else {
@@ -251,31 +208,20 @@ impl RfcAcceptance {
     }
 }
 
-/// The one accepted request of each dialog: `(method, CSeq)` by `(Call-ID,
-/// From-tag, To-tag)`.
+/// The one accepted request of each dialog: its method and CSeq number.
 #[derive(Default)]
-struct DialogRequests(HashMap<(String, String, String), (String, u32)>);
+struct DialogRequests(HashMap<DialogKey, (Method, u32)>);
 
 impl DialogRequests {
     /// Whether the request at `offending` is the first of its dialog accepted,
     /// or a copy of it on another hop; an unreadable entry is not.
-    fn first_of_its_dialog(
-        &mut self,
-        offending: Option<usize>,
-        entries: &[RecordedSipEntry],
-    ) -> bool {
-        let entry = offending.and_then(|i| i.checked_sub(1)).and_then(|i| entries.get(i));
-        let Some(Ok(SipMessage::Request(req))) = entry.map(|e| CustomParser::new().parse(&e.raw))
-        else {
+    fn first_of_its_dialog(&mut self, offending: Option<usize>, capture: &CaptureIndex) -> bool {
+        let message = offending.and_then(|i| i.checked_sub(1)).and_then(|i| capture.message(i));
+        let Some((req, method)) = message.and_then(|m| Some((m, m.method()?))) else {
             return false;
         };
-        let dialog = (
-            req.call_id().as_str().to_string(),
-            req.from().tag().unwrap_or_default().to_string(),
-            req.to().tag().unwrap_or_default().to_string(),
-        );
-        let request = (req.method().as_str().to_string(), req.cseq().seq());
-        let first = self.0.entry(dialog).or_insert_with(|| request.clone());
+        let request = (method.clone(), req.cseq);
+        let first = self.0.entry(req.dialog()).or_insert_with(|| request.clone());
         *first == request
     }
 }

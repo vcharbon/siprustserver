@@ -8,9 +8,11 @@
 //! Strict, allocation-free pre-parse *classifiers* (overload brake, dispatcher fast-path) live
 //! in [`crate::preparse`] and its sibling modules.
 
+mod except;
 mod uri_facts;
 mod via_hops;
 mod via_stamp;
+pub use except::{equal_except, header_row_spans, line_at, Except};
 use std::borrow::Cow;
 pub use uri_facts::UriFacts;
 pub use via_hops::{bottom_via, via_rport, OriginVia, ViaRport};
@@ -379,19 +381,6 @@ fn header_rows_compact(raw: &[u8], name: &str) -> Vec<String> {
 /// it listed. A header written with an empty value is PRESENT.
 pub fn has_header(raw: &[u8], name: &str) -> bool {
     !header_rows_compact(raw, name).is_empty()
-}
-
-/// The line of `raw` that spans byte `offset` — the header row (or, past the
-/// blank line, the body line) a byte-level divergence between two copies of one
-/// message sits in — without its line ending. `None` where `offset` is past the
-/// end of `raw`, which is where a copy that is a strict prefix of another stops.
-pub fn line_at(raw: &[u8], offset: usize) -> Option<String> {
-    if offset >= raw.len() {
-        return None;
-    }
-    let start = raw.get(..offset)?.iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
-    let end = raw.get(offset..)?.iter().position(|&b| b == b'\n').map_or(raw.len(), |p| offset + p);
-    Some(as_str(raw.get(start..end)?).trim_end_matches('\r').to_string())
 }
 
 /// The body length a message declares in `Content-Length` (compact `l`), or

@@ -11,9 +11,8 @@ use std::time::Duration;
 
 use scenario_harness::actor::run_actor_scenario_observed;
 use scenario_harness::realcall::CallCtx;
-use sip_message::parser::custom::CustomParser;
-use sip_message::{Method, SipMessage, SipParser, SipResponse};
-use sip_net_testkit::RecordedSipEntry;
+use sip_message::Method;
+use sip_net_testkit::{CaptureIndex, Captured};
 
 use super::parties::{Parties, ALICE};
 use super::{Incident, SweepShape};
@@ -161,7 +160,7 @@ pub async fn run_cell(
             on_request: turn.is_none_or(|t| t.on_request),
             answer_in_flight: turn.is_some_and(|t| t.called_out) && turns.len() == c.at.turn,
             living_answered: super::answered::living_workers_answered(
-                &cluster.fh.sip_entries(),
+                &CaptureIndex::new(cluster.fh.sip_entries()),
                 &living,
                 cluster.node(&placement.primary).sip_addr(),
             ),
@@ -329,21 +328,15 @@ fn accept_cancel_of_an_unseen_final(cluster: &mut Cluster) {
     );
 }
 
-/// Whether `cancel` names an INVITE an entry of `earlier` captured at or
-/// before `upto` — before the kill, for a window opened at it — answered with
-/// a final.
-fn cancels_an_answered_invite(
-    cancel: &RecordedSipEntry,
-    earlier: &[RecordedSipEntry],
-    upto: u64,
-) -> bool {
-    let Ok(SipMessage::Request(cancel)) = CustomParser::new().parse(&cancel.raw) else {
-        return false;
+/// Whether the CANCEL at index `i` of `capture` names an INVITE an entry
+/// before it captured at or before `upto` — before the kill, for a window
+/// opened at it — answered with a final.
+fn cancels_an_answered_invite(i: usize, capture: &CaptureIndex, upto: u64) -> bool {
+    let Some(cancel) = capture.message(i).filter(|m| m.method().is_some()) else { return false };
+    let ours = |resp: &Captured| {
+        resp.status().is_some_and(|s| s >= 200) && resp.from_tag == cancel.from_tag
     };
-    let key = (cancel.call_id().as_str(), cancel.cseq().seq());
-    let ours =
-        |resp: &SipResponse| resp.status() >= 200 && resp.from().tag() == cancel.from().tag();
-    answered_before(earlier, upto, key, None, ours)
+    answered_before(capture, i, upto, cancel, None, ours)
 }
 
 /// A split, healed or not, leaves two copies acting, each in a degraded mode
@@ -363,12 +356,12 @@ fn accept_two_copies(cluster: &mut Cluster, names: &[String]) {
     );
     cluster.fh.accept_rfc_deviations_once_per_dialog_where(
         crate::RULE_NO_CANCEL_AFTER_FINAL,
-        |cancel, earlier, _| cancels_an_answered_invite(cancel, earlier, u64::MAX),
+        |i, capture, _| cancels_an_answered_invite(i, capture, u64::MAX),
         "ADR-0055 §11: a split: one copy CANCELs an INVITE the other copy saw answered",
     );
     cluster.fh.accept_rfc_deviations_from_now_where(
         RULE_UNACKED_NON_2XX,
-        |final_, earlier, _| non_2xx_after_another_final(final_, earlier),
+        |i, capture, _| non_2xx_after_another_final(i, capture),
         "ADR-0055 §11: a split: one copy's non-2xx after the final the other copy sent, \
          discarded",
     );
@@ -394,69 +387,63 @@ fn accept_non_2xx_after_the_dead_owners_2xx(cluster: &mut Cluster) {
 /// The audit rule a caller's unACKed non-2xx INVITE final meets.
 const RULE_UNACKED_NON_2XX: &str = "unacked-invite-non-2xx-final";
 
-/// Whether `final_` is a non-2xx to the caller's INVITE after a 2xx to that
-/// INVITE sent to her before the kill (`opened_at`).
-fn non_2xx_after_the_dead_owners_2xx(
-    final_: &RecordedSipEntry,
-    earlier: &[RecordedSipEntry],
-    opened_at: u64,
-) -> bool {
-    non_2xx_after_a_2xx(final_, earlier, ALICE.parse().ok(), opened_at)
+/// Whether the final at index `i` of `capture` is a non-2xx to the caller's
+/// INVITE after a 2xx to that INVITE sent to her before the kill
+/// (`opened_at`).
+fn non_2xx_after_the_dead_owners_2xx(i: usize, capture: &CaptureIndex, opened_at: u64) -> bool {
+    non_2xx_after_a_2xx(i, capture, ALICE.parse().ok(), opened_at)
 }
 
-/// Whether `final_` is a non-2xx to an INVITE, sent to `to` when it is
-/// stated, after a 2xx to that INVITE sent there and captured at or before
-/// `upto`.
+/// Whether the final at index `i` of `capture` is a non-2xx to an INVITE,
+/// sent to `to` when it is stated, after a 2xx to that INVITE sent there and
+/// captured at or before `upto`.
 fn non_2xx_after_a_2xx(
-    final_: &RecordedSipEntry,
-    earlier: &[RecordedSipEntry],
+    i: usize,
+    capture: &CaptureIndex,
     to: Option<std::net::SocketAddr>,
     upto: u64,
 ) -> bool {
-    let Ok(SipMessage::Response(resp)) = CustomParser::new().parse(&final_.raw) else {
-        return false;
-    };
-    if to.is_some_and(|to| final_.to != to) {
+    let (Some(entry), Some(resp)) = (capture.entry(i), capture.message(i)) else { return false };
+    if to.is_some_and(|to| entry.to != to) {
         return false;
     }
-    let invite = (resp.call_id().as_str(), resp.cseq().seq());
-    let answer = |r: &SipResponse| (200..300).contains(&r.status());
-    resp.status() >= 300
-        && resp.cseq().method() == Method::Invite
-        && answered_before(earlier, upto, invite, to, answer)
+    let answer = |r: &Captured| r.status().is_some_and(|s| (200..300).contains(&s));
+    is_invite_non_2xx(resp) && answered_before(capture, i, upto, resp, to, answer)
 }
 
-/// Whether `final_` is a non-2xx to an INVITE after another final to it: a
-/// 2xx, or a non-2xx of another status.
-fn non_2xx_after_another_final(final_: &RecordedSipEntry, earlier: &[RecordedSipEntry]) -> bool {
-    let Ok(SipMessage::Response(resp)) = CustomParser::new().parse(&final_.raw) else {
-        return false;
-    };
-    let invite = (resp.call_id().as_str(), resp.cseq().seq());
-    let other = |r: &SipResponse| r.status() >= 200 && r.status() != resp.status();
-    resp.status() >= 300
-        && resp.cseq().method() == Method::Invite
-        && answered_before(earlier, u64::MAX, invite, None, other)
+/// Whether the final at index `i` of `capture` is a non-2xx to an INVITE
+/// after another final to it: a 2xx, or a non-2xx of another status.
+fn non_2xx_after_another_final(i: usize, capture: &CaptureIndex) -> bool {
+    let Some(resp) = capture.message(i) else { return false };
+    let other = |r: &Captured| r.status().is_some_and(|s| s >= 200) && r.status() != resp.status();
+    is_invite_non_2xx(resp) && answered_before(capture, i, u64::MAX, resp, None, other)
 }
 
-/// Whether an entry of `earlier` captured at or before `upto` is a response
-/// to the INVITE `invite` names (its Call-ID and CSeq number), sent to `to`
-/// when it is stated, of which `also` holds.
+/// Whether `resp` is a non-2xx final to an INVITE.
+fn is_invite_non_2xx(resp: &Captured) -> bool {
+    resp.status().is_some_and(|s| s >= 300) && resp.cseq_method == Method::Invite
+}
+
+/// Whether an entry before index `i` of `capture`, captured at or before
+/// `upto`, is a response to the INVITE `of` names (its Call-ID and CSeq
+/// number), sent to `to` when it is stated, of which `also` holds.
 fn answered_before(
-    earlier: &[RecordedSipEntry],
+    capture: &CaptureIndex,
+    i: usize,
     upto: u64,
-    invite: (&str, u32),
+    of: &Captured,
     to: Option<std::net::SocketAddr>,
-    also: impl Fn(&SipResponse) -> bool,
+    also: impl Fn(&Captured) -> bool,
 ) -> bool {
-    let parser = CustomParser::new();
-    earlier.iter().filter(|e| e.seq <= upto && to.is_none_or(|to| e.to == to)).any(|entry| {
-        let Ok(SipMessage::Response(resp)) = parser.parse(&entry.raw) else { return false };
-        resp.cseq().method() == Method::Invite
-            && resp.cseq().seq() == invite.1
-            && resp.call_id().as_str() == invite.0
-            && also(&resp)
-    })
+    capture.before(i).filter(|(_, e, _)| e.seq <= upto && to.is_none_or(|to| e.to == to)).any(
+        |(_, _, resp)| {
+            resp.status().is_some()
+                && resp.cseq_method == Method::Invite
+                && resp.cseq == of.cseq
+                && resp.call_id == of.call_id
+                && also(resp)
+        },
+    )
 }
 
 /// The §4 clean end BYEs every dialog the record or the evidence names, after
