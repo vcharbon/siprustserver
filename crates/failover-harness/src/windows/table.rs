@@ -410,6 +410,22 @@ mod tests {
     }
 
     #[test]
+    fn every_witness_is_a_shape_of_the_upstream_catalogue() {
+        let sweep = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/it/sweep.rs");
+        let sweep = std::fs::read_to_string(sweep).expect("the sweep's test file reads");
+        for row in TABLE {
+            let Some(w) = row.witness else { continue };
+            let module = w.shape.replace('-', "_");
+            assert!(
+                sweep.contains(&format!("    {module} => ")),
+                "{}'s witness shape {} is not in tests/it/sweep.rs",
+                row.id,
+                w.shape
+            );
+        }
+    }
+
+    #[test]
     fn every_row_but_a_transitional_or_unwitnessed_one_names_a_witness_its_incidents_strike() {
         for row in TABLE {
             let unwitnessed = row.id.starts_with("T-") || UNWITNESSED.contains(&row.id);

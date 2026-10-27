@@ -14,7 +14,7 @@
 //! decision that owns them, beside the count of each test's Guaranteed cells;
 //! a test fails on a failing cell the ratchet does not list, on a listed cell
 //! that passes, and on a Guaranteed count other than the listed one. A row's
-//! witness cell, an upstream cell, must fire it ([`witness`]).
+//! witness cell, an upstream cell, must fire it: the dead-window check.
 //!
 //! A consumer adds shapes with nothing but the shape: a [`SweepShape`] states
 //! how the cluster decides the call and what the parties play, and

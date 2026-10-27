@@ -209,14 +209,11 @@ pub async fn run_cell(
         _ if cdrs.len() != 1 => failures.push(format!("the call left {} CDRs", cdrs.len())),
         _ => {}
     }
-    cell.evidence = ended_on_evidence(&cdrs);
+    let every_cdr: Vec<_> = cluster.nodes().iter().flat_map(|n| n.cdr_records()).collect();
+    cell.evidence = ended_on_evidence(&every_cdr);
     *measured.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = cell.clone();
     if let Some(why) = failures.first() {
         panic!("[{name}] {why}");
-    }
-    if cell.tier == Some(Tier::Guaranteed) && (!cell.fired.is_empty() || cell.evidence) {
-        let evidence = if cell.evidence { "; the evidence rule ended the call" } else { "" };
-        panic!("[{name}] guaranteed tier: rows fired: {}{evidence}", cell.fired.join(", "));
     }
     assert_eq!(
         call::call_ref_primary(&call_ref),
@@ -230,6 +227,10 @@ pub async fn run_cell(
         if let Err(why) = shape.check_cdr(cdr) {
             panic!("[{name}] a CDR is wrong: {why}");
         }
+    }
+    if cell.tier == Some(Tier::Guaranteed) && (!cell.fired.is_empty() || cell.evidence) {
+        let evidence = if cell.evidence { "; the evidence rule ended a call" } else { "" };
+        panic!("[{name}] guaranteed tier: rows fired: {}{evidence}", cell.fired.join(", "));
     }
     turns
 }
@@ -360,8 +361,9 @@ fn goal_drop_row(strike: Strike, level: SyncLevel) -> Option<&'static Row> {
     windows::opened_by(strike, level).find(|row| matches!(row.kind, Kind::GoalDrop))
 }
 
-/// Whether the evidence rule ended a call one of `cdrs` records (ADR-0055
-/// §4): it notes `evidence` as the reason of the ending it began.
+/// Whether the evidence rule ended a call one of `cdrs` records, the cell's
+/// or another its cluster held (ADR-0055 §4): it notes `evidence` as the
+/// reason of the ending it began.
 fn ended_on_evidence(cdrs: &[CdrRecord]) -> bool {
     cdrs.iter().flat_map(|c| &c.events).any(|e| e.reason.as_deref() == Some("evidence"))
 }

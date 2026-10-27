@@ -50,7 +50,7 @@ crates/call/tests/it/model_helpers.rs 895
 crates/e2e-core/src/infra.rs 622
 crates/e2e-model/src/registry.rs 575
 crates/e2e-web/src/lib.rs 1280
-crates/failover-harness/src/harness.rs 2004
+crates/failover-harness/src/harness.rs 1994
 crates/failover-harness/src/runner.rs 615
 crates/failover-harness/tests/it/call_terminate_on_backup.rs 986
 crates/failover-harness/tests/it/failover.rs 1566
@@ -89,7 +89,7 @@ crates/scenario-harness/src/actor/response.rs 510
 crates/scenario-harness/src/actor/runner.rs 558
 crates/scenario-harness/src/actor/scenarios.rs 1086
 crates/scenario-harness/src/actor/script.rs 532
-crates/scenario-harness/src/actor/state.rs 625
+crates/scenario-harness/src/actor/state.rs 604
 crates/scenario-harness/src/agent/client_invite.rs 598
 crates/scenario-harness/src/agent/dialog.rs 715
 crates/scenario-harness/src/agent/harness.rs 858

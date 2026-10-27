@@ -4,11 +4,13 @@
 //! call is: its phase barriers are moot, and so are the goals of every party
 //! holding no live dialog.
 
+use sip_message::generators::InDialogMethod;
 use sip_message::header::{Event, SubscriptionState};
 use sip_message::SipRequest;
 use tokio::time::Instant;
 
 use super::endpoint::SUBFLOW_REFER;
+use super::goals::{FinalAssert, GoalStep, RequestKind};
 use super::runner::ActorState;
 use super::state::Observation;
 
@@ -27,19 +29,66 @@ pub(super) fn ends_own_subscription(st: &ActorState<'_>, notify: &SipRequest) ->
     terminated && refer && st.obs.with_snapshot(|s| s.leg(st.role).subflow(SUBFLOW_REFER).is_some())
 }
 
-/// The system under test ended this party cleanly — a non-2xx final to her
-/// establishing INVITE, a BYE she answered 200, a NOTIFY ending her
-/// subscription ([`ends_own_subscription`]). Returns whether the call
-/// accepts it: her goals are then dropped, and an action among them is
-/// recorded dropped.
-pub(super) fn end_cleanly(st: &mut ActorState<'_>, now: Instant) -> bool {
+/// What the system under test ended a party with.
+#[derive(Clone, Copy)]
+pub(super) enum Ending {
+    /// A BYE she answered 200.
+    Bye,
+    /// A NOTIFY ending her subscription.
+    Notify,
+    /// A final of this status to her establishing INVITE.
+    InviteFinal(u16),
+}
+
+/// The system under test ended this party cleanly by `ending` — a non-2xx
+/// final to her establishing INVITE, a BYE she answered 200, a NOTIFY ending
+/// her subscription ([`ends_own_subscription`]). Returns whether the call
+/// accepts it: her goals are then dropped, and recorded dropped unless all
+/// that is left is the reception `ending` itself is and its answer.
+pub(super) fn end_cleanly(st: &mut ActorState<'_>, ending: Ending, now: Instant) -> bool {
     if !st.ctx.clean_ends_accepted() {
         return false;
     }
     st.obs.record(Observation::EndedCleanly { caller: st.originates }, now);
-    if st.goals.remaining_steps().any(|step| !step.is_reception()) {
+    if !all_met(st.goals.remaining_steps(), ending) {
         st.obs.record(Observation::GoalDropped, now);
     }
     st.goals.abandon();
     true
+}
+
+/// Whether the goals `left` are all met by `ending`: none, or the reception
+/// the ending is followed by nothing but its answer.
+fn all_met<'a>(mut left: impl Iterator<Item = &'a GoalStep>, ending: Ending) -> bool {
+    let answer = |step: &GoalStep| {
+        matches!(step, GoalStep::Respond { .. } | GoalStep::RespondTemplate { .. })
+    };
+    left.next().is_none_or(|step| met_by(step, ending)) && left.all(answer)
+}
+
+/// Whether `step` is the reception of `ending`: a goal the ending meets
+/// rather than drops.
+fn met_by(step: &GoalStep, ending: Ending) -> bool {
+    let invite = |method: &Option<String>| method.as_deref().is_none_or(|m| m == "INVITE");
+    match (step, ending) {
+        (GoalStep::ExpectRequest { kind, .. }, Ending::Bye) => {
+            *kind == RequestKind::InDialog(InDialogMethod::Bye)
+        }
+        (GoalStep::ExpectRequest { kind, .. }, Ending::Notify) => {
+            *kind == RequestKind::InDialog(InDialogMethod::Notify)
+        }
+        (GoalStep::ExpectResponse { status: s, cseq_method, .. }, Ending::InviteFinal(status)) => {
+            *s == status && invite(cseq_method)
+        }
+        (GoalStep::ObserveFinal { cseq_method, .. }, Ending::InviteFinal(_)) => invite(cseq_method),
+        (GoalStep::ExpectFinal { assert, cseq_method }, Ending::InviteFinal(status)) => {
+            let holds = match *assert {
+                FinalAssert::Exact(s) => status == s,
+                FinalAssert::Class(c) => status / 100 == c,
+                FinalAssert::NonError => status < 400,
+            };
+            holds && invite(cseq_method)
+        }
+        _ => false,
+    }
 }

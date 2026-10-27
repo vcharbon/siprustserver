@@ -143,32 +143,31 @@ impl RfcAcceptance {
     /// The row whose window takes the finding of `rule` whose offending
     /// message is the 1-based `offending` index into `capture`, the first in
     /// table order. A finding with no pinned message is never accepted — it
-    /// cannot be placed in the run. Every window counts its dialogs anew.
+    /// cannot be placed in the run.
     pub fn accepts(
         &self,
         rule: &str,
         offending: Option<usize>,
         capture: &CaptureIndex,
     ) -> Option<&'static str> {
-        self.taker(rule, offending, capture, &mut HashMap::new())
+        self.taker(rule, offending, capture, &mut DialogRequests::default())
     }
 
-    /// The row whose window takes the finding, the first in table order, a
-    /// window taking one request per dialog taking only its dialog's first
-    /// (`per_dialog` keeps, per window, what it took).
+    /// The row whose window takes the finding, the first in table order. The
+    /// windows of `rule` that take one request per dialog share it: they take
+    /// only the first request of a dialog any of them took (`per_dialog`).
     fn taker(
         &self,
         rule: &str,
         offending: Option<usize>,
         capture: &CaptureIndex,
-        per_dialog: &mut HashMap<usize, DialogRequests>,
+        per_dialog: &mut DialogRequests,
     ) -> Option<&'static str> {
         let i = offending.and_then(|i| i.checked_sub(1))?;
-        self.windows.iter().enumerate().find_map(|(n, w)| {
-            let taken = w.rule == rule
-                && w.takes(i, capture)
-                && (!w.once_per_dialog
-                    || per_dialog.entry(n).or_default().first_of_its_dialog(offending, capture));
+        let mut first = None;
+        self.windows.iter().filter(|w| w.rule == rule && w.takes(i, capture)).find_map(|w| {
+            let taken = !w.once_per_dialog
+                || *first.get_or_insert_with(|| per_dialog.first_of_its_dialog(offending, capture));
             taken.then_some(w.row)
         })
     }
@@ -197,7 +196,7 @@ impl RfcAcceptance {
             if rule.force_advisory() || self.waived(rule.name()) {
                 continue;
             }
-            let mut per_dialog = HashMap::new();
+            let mut per_dialog = DialogRequests::default();
             for (lane, detail, offending, _charged) in rule.check_positioned(events) {
                 let finding = (rule.name().to_string(), lane, detail);
                 match self.taker(rule.name(), offending, &capture, &mut per_dialog) {
@@ -305,11 +304,36 @@ mod tests {
             entry(3, request("UPDATE", 5, "z9hG4bK-c")),
         ]);
         let rule = crate::RULE_CSEQ_IN_DIALOG_ORDER;
-        let mut per_dialog = HashMap::new();
+        let mut per_dialog = DialogRequests::default();
         let mut take = |i| acceptance.taker(rule, Some(i), &capture, &mut per_dialog);
         assert_eq!(take(1), Some("W-kill-cseq"));
         assert_eq!(take(2), Some("W-kill-cseq"), "a copy of the same request");
         assert_eq!(take(3), None, "a second request of the dialog");
+    }
+
+    #[test]
+    fn two_once_per_dialog_rows_of_one_rule_take_one_request_of_a_dialog() {
+        // A stall's split row and its kill's row both take a CANCEL of an
+        // answered INVITE once per dialog: together, still once.
+        let acceptance = opened(&["W-split-cancel-answered", "W-kill-cancel-answered"], 0);
+        let answered = |cseq| {
+            format!(
+                "SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-i{cseq}\r\n\
+                 From: <sip:a@x>;tag=a\r\nTo: <sip:b@x>;tag=b\r\nCall-ID: c1\r\n\
+                 CSeq: {cseq} INVITE\r\nContent-Length: 0\r\n\r\n"
+            )
+        };
+        let capture = CaptureIndex::new(vec![
+            entry(1, answered(2)),
+            entry(2, answered(3)),
+            entry(3, request("CANCEL", 2, "z9hG4bK-c2")),
+            entry(4, request("CANCEL", 3, "z9hG4bK-c3")),
+        ]);
+        let rule = crate::RULE_NO_CANCEL_AFTER_FINAL;
+        let mut per_dialog = DialogRequests::default();
+        let mut take = |i| acceptance.taker(rule, Some(i), &capture, &mut per_dialog);
+        assert_eq!(take(3), Some("W-split-cancel-answered"));
+        assert_eq!(take(4), None, "the dialog's second CANCEL, whichever row would take it");
     }
 
     #[test]

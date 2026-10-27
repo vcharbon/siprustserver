@@ -114,7 +114,7 @@ async fn absorb_establishing_failure(
     );
     st.obs.record(Observation::LegTerminated { leg: st.role }, now);
     st.scope.mark_terminated();
-    if super::clean_end::end_cleanly(st, now) {
+    if super::clean_end::end_cleanly(st, super::clean_end::Ending::InviteFinal(status), now) {
         return Ok(false);
     }
     let reception_pending = st.goals.next_step().is_some_and(GoalStep::is_reception);

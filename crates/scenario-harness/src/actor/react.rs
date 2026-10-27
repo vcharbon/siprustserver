@@ -11,6 +11,7 @@ use super::answer::{
     answer_initial_invite, apply_disposition, arm_reject_final, discharge_on_teardown,
     respond_200_sdp,
 };
+use super::clean_end::Ending;
 use super::endpoint::{Disposition, SUBFLOW_REALIGN};
 use super::facts::record_request;
 use super::ledger::{ObligationKey, ObligationKind};
@@ -323,7 +324,7 @@ pub(super) async fn react_in_dialog_request(
             discharge_on_teardown(st, now);
             st.obs.record(Observation::LegTerminated { leg: st.role }, now);
             st.scope.mark_terminated();
-            super::clean_end::end_cleanly(st, now);
+            super::clean_end::end_cleanly(st, Ending::Bye, now);
         }
         // A CANCEL (RFC 3261 §9.2): always 200 the CANCEL. If the INVITE is
         // still PENDING (a ring not yet answered, or a reliable 183 held for its
@@ -352,7 +353,7 @@ pub(super) async fn react_in_dialog_request(
                 now,
             );
             if method == "NOTIFY" && super::clean_end::ends_own_subscription(st, uas.request()) {
-                super::clean_end::end_cleanly(st, now);
+                super::clean_end::end_cleanly(st, Ending::Notify, now);
             }
         }
         // An in-dialog (re-)INVITE — an offer realign. Answer 200 WITH SDP; a

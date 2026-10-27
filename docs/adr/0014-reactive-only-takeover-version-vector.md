@@ -236,8 +236,8 @@ Timer L from the seed. A non-INVITE clears at Timer J; a failed leg at Timer B/F
   rejected out of order (§12.2.2 — 500 when the number is strictly lower, an
   implementation-defined reject when both owners mint the same value). The
   failover suites encode this as a
-  deviation window scoped to the takeover
-  (`FailoverHarness::accept_rfc_deviations_from_now`) and still assert the accepted
+  deviation window scoped to the takeover (a row of ADR-0055 §11's window
+  table, opened by `FailoverHarness::strike`) and still assert the accepted
   outcome — call fully over, one CDR, limiter released; the same rule gates in full
   on establishment and on every no-fault cell.
 - **Forked-b-leg confirm lost on the kill instant** (the "confirm-race"). When a

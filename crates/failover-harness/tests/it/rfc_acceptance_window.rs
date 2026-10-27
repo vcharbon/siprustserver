@@ -109,13 +109,14 @@ async fn deviation_before_the_strike_still_gates() {
     );
 }
 
-/// A kill of a call whose every turn was backed, with no cap hit, stands in
-/// the Guaranteed tier: the row the kill opened fires there and fails the
-/// run.
+/// A kill at level `applied` with no turn unbacked and no cap hit — here no
+/// turn at all — stands in the Guaranteed tier: the row the kill opened
+/// fires there and fails the run.
 #[tokio::test(start_paused = true)]
 #[should_panic(expected = "W-kill-cseq (closed in the guaranteed tier)")]
 async fn a_row_that_fires_in_the_guaranteed_tier_fails_the_run() {
-    let mut fh = FailoverHarness::new("rfc-window-guaranteed", &["b1"]);
+    let mut fh =
+        FailoverHarness::new("rfc-window-guaranteed", &["b1"]).with_sync_level(SyncLevel::Applied);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
 

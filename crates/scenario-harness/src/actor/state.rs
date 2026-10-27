@@ -190,7 +190,7 @@ pub struct StateInner {
     accepted_ending: bool,
     /// The system under test ended the caller cleanly ([`Observation::EndedCleanly`]).
     caller_ended_cleanly: bool,
-    /// A party the system under test ended cleanly dropped an action goal.
+    /// A party the system under test ended cleanly dropped a goal.
     goal_dropped: bool,
     /// The replay record: observed-vs-expected finals + reactor-serviced strays
     /// (append-only, diagnostic — never gates the verdict).
@@ -239,7 +239,7 @@ impl StateInner {
     }
 
     /// Whether a party the system under test ended cleanly, the caller or
-    /// another, dropped a goal that was still an action of hers to take
+    /// another, dropped a goal the ending did not itself meet
     /// ([`Observation::GoalDropped`]).
     pub fn goal_dropped(&self) -> bool {
         self.goal_dropped
@@ -371,8 +371,8 @@ pub enum Observation {
     /// clean ends ([`CallCtx::accept_clean_ends`](crate::realcall::CallCtx::accept_clean_ends));
     /// `caller` when that party originates the call.
     EndedCleanly { caller: bool },
-    /// A party the system under test ended cleanly dropped a goal that was
-    /// still an action of hers to take, not a reception the end made moot.
+    /// A party the system under test ended cleanly dropped a goal the ending
+    /// did not itself meet.
     GoalDropped,
     /// `leg` sent a CANCEL for its establishing INVITE.
     CancelSent { leg: &'static str },
