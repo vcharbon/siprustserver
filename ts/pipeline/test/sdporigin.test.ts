@@ -7,7 +7,18 @@
  * a version step of another size stay differences.
  */
 import { describe, expect, it } from "vitest"
-import { type Driven, identitiesIn, identityOf, notContinued, originOf, parseOrigin, readOrigins, withOriginOf } from "../src/sdporigin.js"
+import {
+  type Driven,
+  identitiesIn,
+  identityOf,
+  notContinued,
+  originOf,
+  parseOrigin,
+  readings,
+  readOrigins,
+  versionStepOne,
+  withOriginOf
+} from "../src/sdporigin.js"
 
 const sdp = (origin: string, port = 6000): string =>
   `v=0\r\n${origin}\r\ns=-\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio ${port} RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n`
@@ -174,5 +185,47 @@ describe("notContinued", () => {
 
   it("a description with no readable origin breaks nothing and continues nothing", () => {
     expect(read([["v=0\r\n", S(7, 7)], [S(1000, 1001), S(9, 9)]])).toEqual([false, false])
+  })
+})
+
+describe("versionStepOne", () => {
+  // A peer's session the endpoint relays: identity kept, the numbers its own.
+  const P = (version: number, id = 555, user = "peer", address = "198.51.100.7") => sdp(o(id, version, user, address))
+  /** The pairs on legs `legs` (leg 0 by default), one order shared by both sides. */
+  const sightings = (pairs: ReadonlyArray<readonly [string, string]>, legs: ReadonlyArray<number> = []) =>
+    pairs.map(([captured, replayed], at) => ({ captured, replayed, capturedAt: at, replayedAt: at, leg: legs[at] ?? 0 }))
+  const read = (pairs: ReadonlyArray<readonly [string, string]>, legs: ReadonlyArray<number> = []) =>
+    versionStepOne(sightings(pairs, legs))
+
+  it("reads a sess-version ours steps by one where the capture's is above it", () => {
+    expect(read([[P(100), P(100)], [P(102), P(101)]])).toEqual([false, true])
+  })
+
+  it("reads every later description of the session the same distance below the capture's", () => {
+    expect(read([[P(100), P(100)], [P(102), P(101)], [P(103), P(102)], [P(104), P(103)]])).toEqual([false, true, true, true])
+  })
+
+  it("reads nothing where ours steps by more than one, or stands above the capture's", () => {
+    expect(read([[P(100), P(100)], [P(104), P(102)]])).toEqual([false, false])
+    expect(read([[P(100), P(101)], [P(101), P(102)]])).toEqual([false, false])
+    expect(read([[P(100), P(100)], [P(101), P(101)]])).toEqual([false, false])
+  })
+
+  it("reads nothing on the description opening the session on the leg, nor across legs", () => {
+    expect(read([[P(102), P(101)]])).toEqual([false])
+    expect(read([[P(100), P(100)], [P(102), P(101)]], [0, 1])).toEqual([false, false])
+    // Another session on the leg before: no previous description of this one.
+    expect(read([[P(100, 777), P(100, 777)], [P(102), P(101)]])).toEqual([false, false])
+  })
+
+  it("reads nothing where another field of the origin differs too", () => {
+    expect(read([[P(100), P(100)], [P(102, 556), P(101)]])).toEqual([false, false])
+    expect(read([[P(100), P(100)], [P(102, 555, "other"), P(101)]])).toEqual([false, false])
+    expect(read([[P(100), P(100)], [P(102, 555, "peer", "198.51.100.8"), P(101)]])).toEqual([false, false])
+  })
+
+  it("is the reading `version-step-one`, after a minted origin and a session not continued", () => {
+    expect(readings(sightings([[P(100), P(100)], [P(102), P(101)]]), peerDriven)).toEqual([undefined, "version-step-one"])
+    expect(readings(sightings([[P(100), P(100)], [P(101), P(103)]]), peerDriven)).toEqual([undefined, "not-continued"])
   })
 })

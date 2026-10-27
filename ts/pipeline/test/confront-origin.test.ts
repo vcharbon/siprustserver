@@ -275,3 +275,32 @@ describe("a session the endpoint does not continue where the capture did", () =>
     expect(run(sdp(o(7, 7)), sdp(o(9, 8)), undefined, "rebooked")).toEqual([])
   })
 })
+
+describe("a relayed session whose sess-version the capture skips and ours steps by one", () => {
+  const relayed = (version: number, attributes: ReadonlyArray<string>): string =>
+    ["v=0", o(555, version, "peer", "198.51.100.7"), "s=-", "c=IN IP4 198.51.100.7", "t=0 0", "m=audio 6000 RTP/AVP 8", ...attributes, ""]
+      .join("\r\n")
+  const readings = (probes: ReadonlyArray<BodyProbe>) =>
+    probes.map((p) => ({ step: p.step, line: p.sdp?.line, orderOnly: p.sdp?.orderOnly === true, versionStepOne: p.sdp?.versionStepOne === true }))
+
+  it("marks the ACK's `session:o=` row, and its bytes row where the rest differs by attribute order alone", () => {
+    const written = ["a=sendrecv", "a=rtpmap:8 PCMA/8000"]
+    const inForm = ["a=rtpmap:8 PCMA/8000", "a=sendrecv"]
+    const captured = { offer: relayed(555, written), ack: relayed(557, written) }
+    expect(readings(run(relayed(555, written), relayed(556, written), captured))).toEqual([
+      { step: "s3", line: "o=", orderOnly: false, versionStepOne: true }
+    ])
+    expect(readings(run(relayed(555, written), relayed(556, inForm), captured))).toEqual([
+      { step: "s3", line: "o=", orderOnly: false, versionStepOne: true },
+      { step: "s3", line: "bytes", orderOnly: true, versionStepOne: true }
+    ])
+  })
+
+  it("reads no version step where ours jumps too", () => {
+    const written = ["a=sendrecv", "a=rtpmap:8 PCMA/8000"]
+    const captured = { offer: relayed(555, written), ack: relayed(558, written) }
+    expect(readings(run(relayed(555, written), relayed(557, written), captured))).toEqual([
+      { step: "s3", line: "o=", orderOnly: false, versionStepOne: false }
+    ])
+  })
+})

@@ -97,7 +97,7 @@ describe("diffSdp", () => {
       { section: "document", line: "bytes", captured: [crlf(OFFER)], replayed: [replayed] }
     ]
     const cases: ReadonlyArray<readonly [string, string]> = [
-      ["an attribute reorder inside a section", crlf([...OFFER.slice(0, 6), "a=sendrecv", ...OFFER.slice(6, 10), OFFER[11]!])],
+      ["an attribute reorder the stack's form keeps (a=rtcp ahead of a=ptime)", crlf([...OFFER.slice(0, 9), OFFER[11]!, OFFER[9]!, OFFER[10]!])],
       ["a bare-LF line ending", OFFER.join("\n") + "\n"],
       ["trailing whitespace on a line", crlf(swap(OFFER, "a=ptime:20", "a=ptime:20 "))],
       ["an inner blank line", crlf([...OFFER.slice(0, 5), "", ...OFFER.slice(5)])]
@@ -121,7 +121,7 @@ describe("diffSdp", () => {
     })
 
     it("a minted origin never hides another byte: the bytes row follows the marked `o=` row", () => {
-      const reordered = [...OFFER.slice(0, 6), "a=sendrecv", ...OFFER.slice(6, 10), OFFER[11]!]
+      const reordered = [...OFFER.slice(0, 9), OFFER[11]!, OFFER[9]!, OFFER[10]!]
       const replayed = crlf(swap(reordered, OFFER[1]!, MINTED))
       expect(diffSdp(VERBATIM, crlf(OFFER), replayed, "minted")).toEqual([
         { ...originRow, mintedOrigin: true },
@@ -246,6 +246,67 @@ describe("diffSdp", () => {
     expect(diffSdp(REBOOKED, crlf(OFFER), crlf(named))).toEqual([
       { section: "session", line: "s=", captured: ["s=-"], replayed: ["s=call"] }
     ])
+  })
+})
+
+describe("the bytes row of a verbatim run, read for attribute order and a version step", () => {
+  // OFFER in the stack's form: each format's rtpmap then fmtp, the others as written, the direction last.
+  const IN_FORM = [...OFFER.slice(0, 9), OFFER[9]!, OFFER[11]!, OFFER[10]!]
+  const bytes = (captured: string, replayed: string) => ({ section: "document", line: "bytes", captured: [captured], replayed: [replayed] })
+  const STEPPED = "o=- 1234 5677 IN IP4 192.0.2.10"
+  const originRow = { section: "session", line: "o=", captured: [OFFER[1]!], replayed: [STEPPED] }
+
+  it("two texts the stack's form puts in one order are an order-only bytes row", () => {
+    expect(diffSdp(VERBATIM, crlf(OFFER), crlf(IN_FORM))).toEqual([{ ...bytes(crlf(OFFER), crlf(IN_FORM)), orderOnly: true }])
+    // A format's fmtp ahead of its rtpmap, regrouped.
+    const fmtpFirst = [...OFFER.slice(0, 7), OFFER[8]!, OFFER[7]!, ...OFFER.slice(9)]
+    expect(diffSdp(VERBATIM, crlf(fmtpFirst), crlf(IN_FORM))).toEqual([{ ...bytes(crlf(fmtpFirst), crlf(IN_FORM)), orderOnly: true }])
+  })
+
+  it("two same-name attributes swapped (a=crypto, a preference order) stay a plain bytes row", () => {
+    const keys = ["a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "a=crypto:2 AES_CM_128_HMAC_SHA1_32 inline:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"]
+    const captured = crlf([...OFFER, ...keys])
+    const replayed = crlf([...IN_FORM.slice(0, -1), keys[1]!, keys[0]!, IN_FORM[IN_FORM.length - 1]!])
+    expect(diffSdp(VERBATIM, captured, replayed)).toEqual([bytes(captured, replayed)])
+  })
+
+  it("a line ending, a blank line or a non-attribute line among the attributes beside the reorder stays a plain bytes row", () => {
+    const lf = IN_FORM.join("\n") + "\n"
+    expect(diffSdp(VERBATIM, crlf(OFFER), lf)).toEqual([bytes(crlf(OFFER), lf)])
+    const blank = crlf([...IN_FORM.slice(0, 5), "", ...IN_FORM.slice(5)])
+    expect(diffSdp(VERBATIM, crlf(OFFER), blank)).toEqual([bytes(crlf(OFFER), blank)])
+    // RFC 4566 §5 fixes `c=` ahead of the attributes; only attributes may move.
+    const withC = [...OFFER.slice(0, 6), "c=IN IP4 192.0.2.10", ...OFFER.slice(6)]
+    const cLast = [...IN_FORM, "c=IN IP4 192.0.2.10"]
+    expect(diffSdp(VERBATIM, crlf(withC), crlf(cLast))).toEqual([bytes(crlf(withC), crlf(cLast))])
+  })
+
+  it("a direction stated on one side only is its own row, never an order-only one", () => {
+    const implicit = IN_FORM.filter((l) => l !== "a=sendrecv")
+    const rows = diffSdp(VERBATIM, crlf(implicit), crlf(IN_FORM))
+    expect(rows).toEqual([{ section: "m0", line: "a=direction", captured: [], replayed: ["a=sendrecv"] }])
+  })
+
+  it("an order-only bytes row beside an origin row is read once the origin is swapped, and carries a version step read on it", () => {
+    const replayed = crlf(swap(IN_FORM, OFFER[1]!, STEPPED))
+    expect(diffSdp(VERBATIM, crlf(OFFER), replayed)).toEqual([originRow, { ...bytes(crlf(OFFER), replayed), orderOnly: true }])
+    expect(diffSdp(VERBATIM, crlf(OFFER), replayed, "version-step-one")).toEqual([
+      { ...originRow, versionStepOne: true },
+      { ...bytes(crlf(OFFER), replayed), orderOnly: true, versionStepOne: true }
+    ])
+    // A minted origin marks its own row only.
+    expect(diffSdp(VERBATIM, crlf(OFFER), replayed, "minted")).toEqual([
+      { ...originRow, mintedOrigin: true },
+      { ...bytes(crlf(OFFER), replayed), orderOnly: true }
+    ])
+  })
+
+  it("a version step marks the `o=` row alone where the rest is the same bytes, and never a bytes row that is not order-only", () => {
+    const stepped = crlf(swap(OFFER, OFFER[1]!, STEPPED))
+    expect(diffSdp(VERBATIM, crlf(OFFER), stepped, "version-step-one")).toEqual([{ ...originRow, versionStepOne: true }])
+    const lf = swap(OFFER, OFFER[1]!, STEPPED).join("\n") + "\n"
+    expect(diffSdp(VERBATIM, crlf(OFFER), lf, "version-step-one")).toEqual([{ ...originRow, versionStepOne: true }, bytes(crlf(OFFER), lf)])
+    expect(diffSdp(FLOOR, crlf(OFFER), stepped, "version-step-one")).toEqual([])
   })
 })
 

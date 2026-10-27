@@ -181,3 +181,60 @@ fn a_mixed_line_ending_leaves_as_crlf_without_blank_lines() {
         "v=0\r\no=- 10 20 IN IP4 192.0.2.1\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n"
     );
 }
+
+/// One case of the shared order fixture: a description and its form.
+struct OrderCase {
+    name: String,
+    description: String,
+    form: String,
+}
+
+/// The cases of `tests/fixtures/sdp-form-order.txt`, every SDP line ended
+/// with CRLF; `#` lines and blank lines are no SDP line.
+fn order_cases() -> Vec<OrderCase> {
+    let mut cases: Vec<OrderCase> = Vec::new();
+    let mut in_form = false;
+    for line in include_str!("../fixtures/sdp-form-order.txt").lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(name) = line.strip_prefix("=== ") {
+            cases.push(OrderCase {
+                name: name.to_owned(),
+                description: String::new(),
+                form: String::new(),
+            });
+            in_form = false;
+            continue;
+        }
+        let case = cases.last_mut().expect("a line inside a case");
+        if line == "---" {
+            in_form = true;
+            continue;
+        }
+        let side = if in_form { &mut case.form } else { &mut case.description };
+        side.push_str(line);
+        side.push_str("\r\n");
+    }
+    cases
+}
+
+/// The shared fixture's order rules hold here as in the TypeScript twin: each
+/// description's form is the fixture's, and a form is its own form.
+#[test]
+fn the_shared_order_fixture_is_the_form() {
+    let cases = order_cases();
+    assert!(cases.len() >= 8, "the fixture states its cases");
+    for case in cases {
+        let form = canonical_form(case.description.as_bytes())
+            .map(|f| String::from_utf8(f).unwrap())
+            .unwrap_or_else(|| case.description.clone());
+        assert_eq!(form, case.form, "{}", case.name);
+        assert_eq!(
+            canonical_form(case.form.as_bytes()),
+            None,
+            "{}: a form is its own form",
+            case.name
+        );
+    }
+}
