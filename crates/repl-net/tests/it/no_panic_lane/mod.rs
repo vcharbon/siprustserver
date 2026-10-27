@@ -21,32 +21,19 @@ use std::fmt::Write as _;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use proptest::collection::vec;
-use repl_net::{decode_frame, try_read_framed, Frame};
 use wire_mutations::binary::{self, Mutation};
 use wire_mutations::lane::{on_lane_stack, runner, LANE_STACK};
 
+mod case;
 mod seeds;
+
+use case::case;
 
 /// Cases of the proptest property.
 const CASES: u32 = 4096;
 
 /// Threads the corpus is spread over, each on the lane's stack.
 const WORKERS: usize = 4;
-
-/// The frames the stream reader decodes off `wire`, in order, and the frame
-/// the bytes after the first prefix decode to, if any.
-fn case(wire: &[u8]) -> (Vec<Frame>, Option<Frame>) {
-    let mut buf = wire.to_vec();
-    let mut frames = Vec::new();
-    while let Ok(Some(payload)) = try_read_framed(&mut buf) {
-        match decode_frame(&payload) {
-            Ok(frame) => frames.push(frame),
-            Err(_) => break,
-        }
-    }
-    let bare = decode_frame(wire.get(4..).unwrap_or_default()).ok();
-    (frames, bare)
-}
 
 /// Every seed, unmutated, decodes to the frames it was encoded from: the lane
 /// drives the decoder's paths to a frame, not only its refusals.

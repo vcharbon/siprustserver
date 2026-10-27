@@ -18,6 +18,8 @@
 //!   runs agree;
 //! - [`every_edited_script_turns_the_same_twice`] (default lane): every
 //!   script with each step dropped, repeated or swapped with the next;
+//! - [`a_step_replaced_by_its_own_text_turns_the_same`] (default lane): the
+//!   replacement the fuzz target drives replays the script it replaces in;
 //! - [`admit_reports_cross_their_event`] (default lane): an admit result's
 //!   event carries back the report it was built from;
 //! - [`structured_corpus_never_panics`] (slow lane): every deterministic
@@ -33,128 +35,16 @@ use wire_mutations::lane::{on_lane_stack, runner};
 use wire_mutations::{mutate, Mutation};
 
 use b2bua_core::limiter::report::{admit_report_of, LimiterAdmitResult};
-use call::{AdmitOutcome, AdmitReport, CallModelState, LimiterEntry, LimiterHeld, TimerType};
-use sip_message::Method;
+use call::{AdmitOutcome, AdmitReport, CallModelState, LimiterEntry, LimiterHeld};
 
 pub(crate) mod drive;
+pub(crate) mod scripts;
 
 use drive::Step;
+use scripts::scripts;
 
 /// Cases of the proptest properties.
 const CASES: u32 = 512;
-
-/// The scripts every case starts from, by name.
-fn scripts() -> Vec<(&'static str, Vec<Step>)> {
-    let route = serde_json::json!({
-        "destination": {"host": "127.0.0.1", "port": 5071},
-        "new_ruri": "sip:carol@127.0.0.1:5071",
-        "features": serde_json::to_value(b2bua_core::decision::default_platform_features())
-            .unwrap_or_default(),
-    });
-    vec![
-        (
-            "answered-bob-hangs-up",
-            vec![Step::BobAnswers(180), Step::BobAnswers(200), Step::AliceAcks, Step::BobByes],
-        ),
-        (
-            "answered-alice-hangs-up",
-            vec![Step::BobAnswers(183), Step::BobAnswers(200), Step::AliceByes],
-        ),
-        (
-            "refused-then-rejected",
-            vec![
-                Step::BobAnswers(180),
-                Step::BobAnswers(486),
-                Step::FailureAnswers {
-                    outcome: "reject",
-                    payload: serde_json::json!({"code": 480, "reason": "Temporarily Unavailable"}),
-                },
-            ],
-        ),
-        (
-            "refused-then-rerouted",
-            vec![
-                Step::BobAnswers(486),
-                Step::FailureAnswers { outcome: "failover", payload: route },
-            ],
-        ),
-        (
-            "refused-then-redirected",
-            vec![
-                Step::BobAnswers(486),
-                Step::FailureAnswers {
-                    outcome: "redirect",
-                    payload: serde_json::json!({
-                        "code": 302,
-                        "contacts": [{"uri": "sip:carol@127.0.0.1:5071", "q": 0.5}],
-                    }),
-                },
-            ],
-        ),
-        ("ringing-unanswered", vec![Step::BobAnswers(180), Step::Fires(TimerType::NoAnswer)]),
-        ("setup-unanswered", vec![Step::Fires(TimerType::SetupTimeout)]),
-        (
-            "reinvited",
-            vec![
-                Step::BobAnswers(180),
-                Step::BobAnswers(200),
-                Step::AliceAcks,
-                Step::AliceSends(Method::Invite),
-                Step::BobAnswersSent(200),
-                Step::AliceAcks,
-                Step::AliceByes,
-                Step::BobAnswersSent(200),
-            ],
-        ),
-        (
-            "updated",
-            vec![
-                Step::BobAnswers(200),
-                Step::AliceAcks,
-                Step::AliceSends(Method::Update),
-                Step::BobAnswersSent(200),
-                Step::BobByes,
-                Step::AliceAnswersSent(200),
-            ],
-        ),
-        (
-            "reliably-provisioned",
-            vec![
-                Step::BobAnswersReliably(183),
-                Step::BobAnswersSent(200),
-                Step::BobAnswers(200),
-                Step::AliceAcks,
-                Step::AliceByes,
-                Step::BobAnswersSent(200),
-            ],
-        ),
-        (
-            "cancelled",
-            vec![
-                Step::BobAnswers(180),
-                Step::AliceCancels,
-                Step::BobAnswersSent(200),
-                Step::BobAnswers(487),
-            ],
-        ),
-        (
-            "referred-then-refused",
-            vec![
-                Step::BobAnswers(200),
-                Step::AliceAcks,
-                Step::BobRefers,
-                Step::BobAnswersSent(200),
-                Step::ReferAnswers {
-                    outcome: "reject",
-                    payload: serde_json::json!({"reject_code": 603, "reject_reason": "Declined"}),
-                },
-                Step::BobAnswersSent(200),
-                Step::BobByes,
-                Step::AliceAnswersSent(200),
-            ],
-        ),
-    ]
-}
 
 /// The requests (`leg METHOD`) a script's run sends among others: what its
 /// steps ask the stack to carry or answer.
@@ -199,6 +89,22 @@ fn every_script_turns_the_same_twice() {
             // failover, as its route carries a callback context.
             let lives = matches!(name, "refused-then-rerouted" | "ringing-unanswered");
             assert_eq!(ended, !lives, "{name}: {:?}", first.call.state);
+        }
+    });
+}
+
+/// A step's SIP text replaced by the text it carries turns as the script
+/// does: what the fuzz target's seeds hold replays the call they came from.
+#[test]
+fn a_step_replaced_by_its_own_text_turns_the_same() {
+    on_lane_stack(|| {
+        let dialled = drive::dialled();
+        for (name, script) in scripts() {
+            let seed = drive::run(&dialled, &script, usize::MAX, &[]);
+            for (at, raw) in &seed.raws {
+                let replaced = drive::run_replacing(&dialled, &script, *at, raw);
+                assert_eq!(replaced.turns, seed.turns, "{name} step {at}");
+            }
         }
     });
 }

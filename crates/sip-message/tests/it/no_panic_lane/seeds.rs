@@ -19,13 +19,18 @@ const FIXTURE_DIRS: &[&str] =
 
 /// Every message seed: the fixtures, then the synthetic messages.
 pub fn messages() -> Vec<Seed> {
-    let mut seeds = fixtures();
+    messages_under(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"))
+}
+
+/// [`messages`] with the fixture directories read under `root`, for a
+/// reader built outside this crate.
+pub fn messages_under(root: &Path) -> Vec<Seed> {
+    let mut seeds = fixtures(root);
     seeds.extend(synthetic());
     seeds
 }
 
-fn fixtures() -> Vec<Seed> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+fn fixtures(root: &Path) -> Vec<Seed> {
     let mut seeds = Vec::new();
     for dir in FIXTURE_DIRS {
         let mut entries: Vec<_> = fs::read_dir(root.join(dir))

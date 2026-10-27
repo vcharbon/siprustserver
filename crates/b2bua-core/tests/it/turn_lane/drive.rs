@@ -464,14 +464,13 @@ fn resolve(call: Call, leg: &str, event: &CallEvent) -> Option<(Resolved, Call)>
     }
 }
 
-/// The SIP text of `event` with `mutations` applied, read back; `None` when
-/// the parser refuses it, as the shell drops what does not parse.
-fn mutated(event: CallEvent, mutations: &[Mutation]) -> Option<CallEvent> {
+/// The SIP text of `event` rewritten by `edit`, read back; `None` when the
+/// parser refuses it, as the shell drops what does not parse.
+fn edited(event: CallEvent, edit: &dyn Fn(&[u8]) -> Vec<u8>) -> Option<CallEvent> {
     let CallEvent::Sip { message, src } = event else {
         return Some(event);
     };
-    let raw = mutations.iter().fold(message.image().to_vec(), |acc, m| mutate::apply(&acc, m));
-    Some(CallEvent::sip(parsed(&raw)?, src))
+    Some(CallEvent::sip(parsed(&edit(message.image()))?, src))
 }
 
 /// Run `script` over the dialled call, the step `mutated_at` taking
@@ -479,20 +478,26 @@ fn mutated(event: CallEvent, mutations: &[Mutation]) -> Option<CallEvent> {
 /// screen, the dialog gate's resolution, the rule chain, the landing pass.
 /// Each turn's input is fixed, so two runs of one case compare.
 pub fn run(dialled: &Dialled, script: &[Step], mutated_at: usize, mutations: &[Mutation]) -> Run {
-    run_from(dialled, dialled.call.clone(), script, mutated_at, mutations)
+    let edit = |raw: &[u8]| mutations.iter().fold(raw.to_vec(), |acc, m| mutate::apply(&acc, m));
+    run_from(dialled, dialled.call.clone(), script, mutated_at, &edit)
+}
+
+/// [`run`] with the SIP text of step `at` replaced whole by `text`.
+pub fn run_replacing(dialled: &Dialled, script: &[Step], at: usize, text: &[u8]) -> Run {
+    run_from(dialled, dialled.call.clone(), script, at, &|_| text.to_vec())
 }
 
 /// [`run`] over `call`, the dialled call as an earlier script left it.
 pub fn run_on(dialled: &Dialled, call: Call, script: &[Step]) -> Run {
-    run_from(dialled, call, script, usize::MAX, &[])
+    run_from(dialled, call, script, usize::MAX, &|raw| raw.to_vec())
 }
 
 fn run_from(
     dialled: &Dialled,
     mut call: Call,
     script: &[Step],
-    mutated_at: usize,
-    mutations: &[Mutation],
+    edited_at: usize,
+    edit: &dyn Fn(&[u8]) -> Vec<u8>,
 ) -> Run {
     let config = &dialled.config;
     let fw = Framework { config, rules: &dialled.rules, obligations: &dialled.obligations };
@@ -521,7 +526,7 @@ fn run_from(
         let Some((event, leg)) = event_of(step, &call, &dialled.b_invite, &mut peers) else {
             continue;
         };
-        let event = if n == mutated_at { mutated(event, mutations) } else { Some(event) };
+        let event = if n == edited_at { edited(event, edit) } else { Some(event) };
         let Some(event) = event else { continue };
         let mut turn = TurnScope::of(TurnIds::fixed(n as u64 + 1));
         if timer_screen::screen(&mut call, &event, NOW, &mut turn.notes).is_err() {
