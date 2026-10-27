@@ -11,6 +11,23 @@ use sip_message::Method;
 
 use crate::turn_lane::drive::{dialled, run, Step};
 
+/// A service rule tracking the early dialog of every 1xx to the b-leg INVITE
+/// (`TrackEarlyDialog`), whatever the leg's state.
+fn tracks_every_1xx() -> RuleDefinition {
+    RuleDefinition::core(
+        "test-track-every-1xx",
+        SERVICE_LAYER,
+        &[],
+        Match::response().method("INVITE").status_class(1).direction(Direction::FromB),
+        |ctx| {
+            Some(RuleHandleResult::new(vec![RuleAction::TrackEarlyDialog {
+                leg_id: ctx.source_leg_id.to_string(),
+                b_tag: ctx.response()?.to().tag()?.to_string(),
+            }]))
+        },
+    )
+}
+
 /// A service rule releasing every 2xx to the b-leg INVITE as a straggler's
 /// (`ReleaseStraggler2xx`), whatever dialog it names.
 fn releases_every_2xx() -> RuleDefinition {
@@ -68,7 +85,7 @@ fn a_fork_ringing_after_the_winner_answered_opens_no_dialog() {
     dialled.call.sampled = Some(true);
     let answered = [Step::BobAnswers(180), Step::BobAnswers(200), Step::AliceAcks];
     for late in [Step::ForkAnswers("latefork", 180), Step::ForkAnswersReliably("latefork", 183)] {
-        let script = [answered.as_slice(), &[late.clone()]].concat();
+        let script = [answered.as_slice(), std::slice::from_ref(&late)].concat();
         let rang = run(&dialled, &script, usize::MAX, &[]);
         assert_eq!(fork(&rang.call, "latefork"), None, "{late:?} opens no dialog");
         assert_eq!(rang.sent, ["b-1 ACK"], "{late:?} draws nothing");
@@ -84,5 +101,29 @@ fn a_fork_ringing_after_the_winner_answered_opens_no_dialog() {
     assert!(
         last.contains("release-fork-straggler-2xx"),
         "the late fork's 2xx is a straggler's: {last}"
+    );
+}
+
+/// A fork a service tracked from a 1xx heard after the winner's 2xx holds an
+/// early dialog on the confirmed leg: its 2xx is still a straggler's.
+#[test]
+fn a_late_fork_a_service_tracked_is_released_as_a_straggler() {
+    let mut dialled = dialled().with_rule(tracks_every_1xx());
+    dialled.call.sampled = Some(true);
+    let script = [
+        Step::BobAnswers(180),
+        Step::BobAnswers(200),
+        Step::AliceAcks,
+        Step::ForkAnswers("latefork", 180),
+        Step::ForkAnswers("latefork", 200),
+    ];
+    let tracked = run(&dialled, &script[..4], usize::MAX, &[]);
+    let d = fork(&tracked.call, "latefork").expect("the service tracked the late fork");
+    assert!(d.awaits_invite_final(), "an early dialog on the confirmed leg: {:?}", d.state);
+    let answered_late = run(&dialled, &script, usize::MAX, &[]);
+    let last = answered_late.turns.last().expect("the late 2xx takes a turn");
+    assert!(
+        last.contains("release-fork-straggler-2xx"),
+        "the tracked fork's 2xx is a straggler's: {last}"
     );
 }

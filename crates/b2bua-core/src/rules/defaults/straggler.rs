@@ -20,7 +20,8 @@ pub(super) fn straggler_release(resolved: &call::helpers::Resolved) -> bool {
 }
 
 /// Whether the current response is a fork straggler's 2xx on its b-leg: a
-/// To-tag naming no dialog of the leg, or a retired one, on a leg a 2xx
+/// To-tag naming no dialog of the leg, a retired one, or one still awaiting
+/// the INVITE's final (a fork a service tracked late), on a leg a 2xx
 /// established, answering an INVITE no later than the one the established
 /// dialog's ACK acknowledges (every fork of one INVITE answers on its CSeq,
 /// RFC 3261 §12.1.2).
@@ -33,7 +34,7 @@ pub(super) fn fork_straggler(ctx: &RuleContext) -> bool {
         return false;
     };
     let Some(established) = leg.dialogs.established() else { return false };
-    ctx.dialog().is_none_or(|d| d.retired().is_some())
+    ctx.dialog().is_none_or(|d| d.retired().is_some() || d.awaits_invite_final())
         && crate::rules::relay::acked_invite_cseq(leg, established)
             .is_some_and(|acked| resp.cseq().seq() <= acked)
 }
