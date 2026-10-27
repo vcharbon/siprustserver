@@ -134,8 +134,11 @@ impl ActionExecutor<'_> {
             .get_or_insert_with(Default::default);
         exchange.ack_branch = Some(ack_branch);
         exchange.emitted_ack = Some(retained);
+        // Retired with the requests still open in it, whose finals still reach
+        // their originators (§8.1.3.3).
         if !matches!(straggler.state, DialogState::Retired(_)) {
-            straggler.state = DialogState::Retired(RetiredDialog::default());
+            let open_requests = std::mem::take(&mut straggler.requests);
+            straggler.state = DialogState::Retired(RetiredDialog { open_requests });
         }
         let id = straggler.id();
         *call = call::helpers::update_leg(call.clone(), leg_id, |l| l.dialogs.insert(straggler));
