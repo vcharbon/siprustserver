@@ -1,11 +1,62 @@
 # The failover sweep's ratchet (ADR-0055 §11): every cell of the base
-# catalogue that fails today, with the decision section that owns its
-# correction. A change that makes a cell pass removes its line; a new failure
-# is never added without its owner. The list only shrinks.
+# catalogue that fails today, at either sync level, with the decision section
+# that owns its correction and its cause, and each test's count of cells in
+# the Guaranteed tier. A change that makes a cell pass removes its line; a new
+# failure is never added without its owner. The list only shrinks, and a
+# Guaranteed count never falls (a rise is recorded here).
 #
 # The owner is read from the finding: a request or final a copy sends without
 # the record of what the dead owner sent, a request into a dialog the other
 # copy ended, and the non-2xx a copy owes a caller the dead primary answered
-# §4; a deviation no declared window of §11 covers, §11; a PRACK, an owed ACK
-# or an in-dialog request left unanswered §2; a 2xx repeat routed through the
-# other owner §8; and any other finding of a split cell §7.
+# §4; a deviation no row of the window table covers, or a Guaranteed cell
+# that fires a row, §11; a PRACK, an owed ACK or an in-dialog request left
+# unanswered §2; a 2xx repeat routed through the other owner §8; and any
+# other finding of a split cell §7.
+
+# The Guaranteed cells of each test.
+guaranteed basic/applied/backup-killed 18
+guaranteed basic/applied/primary-killed 18
+guaranteed forked/applied/backup-killed 24
+guaranteed forked/applied/primary-killed 24
+guaranteed info-x-bye/applied/backup-killed 18
+guaranteed info-x-bye/applied/primary-killed 18
+guaranteed info/applied/backup-killed 24
+guaranteed info/applied/primary-killed 24
+guaranteed keepalive/applied/backup-killed 57
+guaranteed keepalive/applied/primary-killed 57
+guaranteed media-leg/applied/backup-killed 27
+guaranteed media-leg/applied/primary-killed 27
+guaranteed prack/applied/backup-killed 24
+guaranteed prack/applied/primary-killed 24
+guaranteed refer-x-bye/applied/backup-killed 27
+guaranteed refer-x-bye/applied/primary-killed 27
+guaranteed refer/applied/backup-killed 45
+guaranteed refer/applied/primary-killed 45
+guaranteed reinvite-x-bye/applied/backup-killed 18
+guaranteed reinvite-x-bye/applied/primary-killed 18
+guaranteed reinvite/applied/backup-killed 27
+guaranteed reinvite/applied/primary-killed 27
+guaranteed update-x-bye/applied/backup-killed 18
+guaranteed update-x-bye/applied/primary-killed 18
+guaranteed update/applied/backup-killed 24
+guaranteed update/applied/primary-killed 24
+
+# applied: the Guaranteed cells that fire a row.
+basic/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+forked/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+info-x-bye/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+info/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+keepalive/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+media-leg/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+prack/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+refer-x-bye/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+refer/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+refer/applied/primary-killed/t5-applied ADR-0055 §11  # guaranteed: W-kill-answer-lost, the transfer's outside answer lost with the node; alice waits for the merge
+refer/applied/primary-killed/t5-left ADR-0055 §11  # guaranteed: W-kill-answer-lost, the transfer's outside answer lost with the node; alice waits for the merge
+refer/applied/primary-killed/t6-logged ADR-0055 §11  # guaranteed: W-kill-effects-lost, the turn's effects lost with the node; alice waits for the merge
+reinvite-x-bye/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+reinvite/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+update-x-bye/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+update/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
+
+# off: no cell fails (seeded from the first run at `off`).

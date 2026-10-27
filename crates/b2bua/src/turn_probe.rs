@@ -77,6 +77,10 @@ pub struct TurnMark<'a> {
     /// Why the turn's last outbox entry left: set on [`Left`](TurnPoint::Left)
     /// only.
     pub released: Option<Released>,
+    /// The call had a live, bootstrapped backup holding an entry of it when
+    /// the turn logged its write, the one its outbox entries wait for: set on
+    /// [`Logged`](TurnPoint::Logged) only.
+    pub backed: bool,
 }
 
 /// What a probe hands back to hold a turn: the turn goes on once it resolves.
@@ -141,6 +145,7 @@ mod tests {
             called_out: false,
             awaits_answer: false,
             released: None,
+            backed: true,
         }
     }
 

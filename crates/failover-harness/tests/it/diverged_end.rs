@@ -11,7 +11,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use failover_harness::{assert_call_fully_over, RULE_CSEQ_IN_DIALOG_ORDER};
+use failover_harness::{assert_call_fully_over, Incident};
 use scenario_harness::{Agent, Inbound};
 
 use crate::call_terminate_on_backup::Established;
@@ -22,21 +22,11 @@ const END_WITHIN: Duration = Duration::from_secs(40);
 /// The clock step between two looks at the parties.
 const STEP: Duration = Duration::from_millis(100);
 
-/// Accept, from now, what the clean end of two diverged copies may send the
-/// parties: a BYE into a dialog the other node's BYE already ended, and both
-/// nodes' BYEs at one CSeq (ADR-0055 §8, §11).
+/// Strike, from now, the split that heals the two diverged copies are: the
+/// clean end may send the parties a BYE into a dialog the other node's BYE
+/// already ended, and both nodes' BYEs at one CSeq (ADR-0055 §8, §11).
 pub(crate) fn accept_the_clean_end(est: &mut Established) {
-    let names = [est.alice.name().to_string(), est.bob.name().to_string()];
-    est.fh.accept_clean_end_requests(
-        &names,
-        "ADR-0055 §11: the clean end's BYE into a dialog the other owner ended, closed by \
-         the 481 it draws",
-    );
-    est.fh.accept_rfc_deviations_from_now(
-        RULE_CSEQ_IN_DIALOG_ORDER,
-        "ADR-0055 §8: two copies of a split call mint one in-dialog CSeq, each node's clean \
-         end BYEing at the next CSeq of its own union",
-    );
+    est.fh.strike(Incident::SplitHealed);
 }
 
 /// What the clean end sent a party: the BYEs it took, and the CSeq of the

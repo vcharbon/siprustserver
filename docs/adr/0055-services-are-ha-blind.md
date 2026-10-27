@@ -487,11 +487,13 @@ the re-anchor deadband of each other.
 - **A word net** over the blind crates refuses `takeover`, `reclaim`,
   `tombstone`, `materialise`/`materialize`, `stand-down` and `replica` as a whole
   word. These words have no SIP or domain meaning there. No allowlist.
-- **A failover sweep** in `failover-harness`, on the paused clock, in a lane of
-  its own. Every shape of a catalogue (re-INVITE, UPDATE, REFER with its
-  NOTIFYs, INFO, PRACK, a BYE crossing each, the keepalive, a forked answer, a
-  media-server leg) is cut at every turn point, each split into write in the
-  change log, effect left and write applied at the backup, by these incidents:
+- **A failover sweep** in `failover-harness`, on the paused clock, in a lane
+  of its own: one test per shape, incident and sync level. Every shape
+  of a catalogue (re-INVITE, UPDATE, REFER with its NOTIFYs, INFO, PRACK, a
+  BYE crossing each, the keepalive, a forked answer, a media-server leg) is
+  cut at every turn point, each split into write in the change log, effect
+  left and write applied at the backup, by these incidents, at `applied` and
+  at `off`:
   - primary killed, backup killed: each cell ends with an RFC-clean, fully
     terminated call, one CDR, full cleanup; a cell killing the primary may
     leave two (the dead primary's and the survivor's, §5), never none;
@@ -503,104 +505,152 @@ the re-anchor deadband of each other.
     contradicts what the stalled primary released at the cap as a split's
     other copy would;
   - a backlog over the high-water mark, or a backup at its memory ceiling, then
-    a kill: a call with no backup is lost as on a non-HA B2BUA, its cell
-    leaving one CDR or none.
-
-  Both lose the call (user ruling): every dialog, the caller's included, may
-  be left to its endpoint's own timers. The cell still requires no leak, full
-  cleanup and its CDR count, and a final for every request that reaches a
-  living worker; a transaction the dead primary took is its own, its repeats
-  included wherever they land. A stalled copy answering an UPDATE 500 with
-  Retry-After, its INVITE unanswered, is RFC 3311 §5.2; a re-INVITE of a call
-  with no backup that drew only the dead primary's 100 is a non-HA death.
+    a kill: a call with no backup is lost as on a non-HA B2BUA.
 
   The parties' verdict is checked in every cell (user ruling). The parties
   are RFC 3261 transactions over UDP: every request but ACK goes again on
   Timer A or E until it is answered, and every final to an INVITE until its
   ACK; a party that plays a broken peer opts out by name. The uncut call must
-  succeed. Once the incident strikes, the system under test may end the call
-  cleanly at any instant (§1): a party it ends cleanly — a non-2xx to her
-  INVITE, a BYE she answers 200, a NOTIFY ending her subscription
-  (`Subscription-State: terminated`) — drops her remaining goals, and a caller
-  so ended ends the call cleanly, which the verdict says. The clean end's BYE
-  and terminating NOTIFY are each accepted once per dialog after the incident
-  (user ruling). A party honours a 500's Retry-After on a re-INVITE (RFC 3261
+  succeed. A party honours a 500's Retry-After on a re-INVITE (RFC 3261
   §14.1) and ends a dialog on a 481 or 408 to a request inside it
-  (§12.2.1.2). A request left without
-  its final, or a dialog left open, still fails the cell, except as declared
-  above for a lost call and below.
+  (§12.2.1.2). A request left without its final, or a dialog left open,
+  fails the cell, except as a row of the window table below declares.
+
+  **Tiers** (user ruling). Each cell is placed in a tier by what it measured,
+  strongest first: the tier of the cell is the weakest of any call its
+  cluster held.
+  - **Guaranteed**: level `applied`; every call was backed and bootstrapped
+    at every turn up to the strike (the turn probe reports it at the logged
+    sub-point); no outbox entry hit the cap (a release because the backup
+    left, or one the harness's own hold of an applied sub-point caused, is
+    no cap hit); the test tampered with no replication stream or replica;
+    the incident is a kill. The cell is perfect: no row of any kind opens,
+    every party goal is met, the evidence rule (§4) ends no call, and the CDR
+    count is §5's.
+  - **Degraded**: level `applied`, any other case: every row below opens.
+  - **Off**: level `off`: Degraded's rows, and the off-only rows a user
+    ruling adds.
+
+  **The window table** (`failover-harness`, `windows`). Every deviation an
+  incident may cause is one row: an RFC-rule window, a dialog-verdict waiver,
+  a party outcome, a clean-end goal drop or a CDR count. A row names the
+  strongest tier it opens in (it is open in every weaker one, never in
+  Guaranteed), its incidents and sub-points, what it covers, its scope and
+  its predicate; a predicate that differs by tier is a row of its own. A test
+  never picks a window: it strikes an incident and is given that incident's
+  rows; its measured tier decides which of the rows that fired it accepts.
+  Each accepted finding names its row, and of two rows that could take a
+  finding the first in table order takes it. Each row names an upstream
+  witness cell, which must fire it. A hand-written test whose fault no
+  incident names yet keeps its windows under transitional rows (`T-…`) until
+  the sweep gains the incident. The rows, each with the id the table
+  carries:
+  - `W-clean-end`: once the incident strikes, the system under test may end
+    the call cleanly at any instant (§1): a party it ends cleanly — a non-2xx
+    to her INVITE, a BYE she answers 200, a NOTIFY ending her subscription
+    (`Subscription-State: terminated`) — drops her remaining goals, and a
+    caller so ended ends the call cleanly, which the verdict says. Every
+    incident but a split.
+  - a split, healed or not, and a stall past the cap then a kill (user
+    ruling): what two acting copies, or a stale copy and what the stalled
+    primary released at the cap, send —
+    `W-split-ended-dialog`, the stale copy's requests into a dialog the other
+    copy ended, each closed by the 481 it draws;
+    `W-split-cancel-answered`, one copy's CANCEL of an INVITE the other copy
+    saw answered, and its repeats after the heal;
+    `W-split-non-2xx-after-final`, one copy's non-2xx after the final the
+    other copy sent the caller, under whatever To-tag, which she discards,
+    and its repeats;
+    `W-split-early-bye`, one copy's BYE of a caller dialog it holds early,
+    which the other copy answered;
+    and, for a split only, `W-split-two-byes`, two BYEs of one dialog at one
+    CSeq, and `W-split-cseq`, a CSeq one copy re-uses after the other sent
+    it;
+  - `W-split-outcome`: a split, healed or not, is judged on leaks, cleanup
+    and the CDR count only, never on the parties' verdict (user ruling);
+    `W-cdr-split`: a split that never heals leaves none to two CDRs;
+    `W-cdr-two`: a healed split, or a stall then a kill, one or two;
+  - `W-stall-outcome`: a stall then a kill is judged like a split (user
+    ruling), every request that reaches a living worker drawing its final
+    there, a transaction the dead primary took being its own; a stalled copy
+    answering an UPDATE 500 with Retry-After, its INVITE unanswered, is RFC
+    3311 §5.2;
+  - `W-stall-cancel-reason`, a stall (user ruling): a copy's repeat of a
+    CANCEL that differs from the dead owner's only in its Reason header
+    field; every other difference keeps the finding;
+  - `W-stall-cseq`, a stall (user ruling): a copy's requests at the CSeqs the
+    dead owner sent on the dialog during the stall, each closed by the 481 it
+    draws;
+  - `W-unbacked-lost`, a call with no backup killed with its primary (user
+    ruling): every dialog, the caller's included, may be left to its
+    endpoint's own timers; a final is still owed for every request that
+    reaches a living worker, a transaction the dead primary took being its
+    own, its repeats included wherever they land. A re-INVITE of such a call
+    that drew only the dead primary's 100 is a non-HA death.
+    `W-cdr-unbacked`: it leaves one CDR or none;
+  - `W-kill-cancel-answered`, a kill (user ruling): a copy's one CANCEL of a
+    callee's INVITE the dead owner saw finally answered, 2xx or not; the
+    callee answers it and keeps what its final left it, a dialog its own
+    timers end or none;
+  - `W-clean-end-481`, a kill of the primary inside the replication window, a
+    stall then a kill and a call with no backup (user ruling): the §4 clean
+    end's BYE, or terminating NOTIFY, into a dialog the other owner already
+    ended, closed by its 481, once per dialog. A kill at an applied sub-point
+    past which the primary wrote nothing opens no such window; a healed
+    split's is `W-split-ended-dialog`;
+  - `W-kill-teardown-lost`, a kill of the primary before the backup holds the
+    turn's write with its effects left — a logged or left sub-point under
+    `off` or past the cap, a logged or applied one under `applied` (user
+    ruling): a dialog left to its endpoint's own timer when the write of a
+    teardown the node began was not applied at the kill; a quiet call of a
+    departed primary stays reactive (§5);
+  - `W-kill-effects-lost`, such a kill at a turn taken on something no peer
+    repeats — a response, a timer, an off-turn answer (user ruling): the
+    turn's effects are lost with the node, the parties wait for them in vain,
+    and every dialog, early or confirmed, is left to its endpoint's own
+    timers. A turn taken on a request is not in this window: under `applied`
+    the message that stops its sender repeating it waits for the write (§3);
+  - `W-kill-answer-lost`, a kill of the primary once the backup holds the
+    write of a turn that sent a request to an outside service (a routing
+    service, the limiter), or after which the call awaited one's answer (its
+    deadline in the ledger, ADR-0039), whether that request left or not, the
+    backup applying no later turn of the primary (user ruling): the answer is
+    lost with the dead node, a turn that took it included, and the copy stays
+    reactive (§5); every dialog is left to its endpoint's own timers, and
+    when the turn's effects had not left, every request that reaches a living
+    worker still draws its final there;
+  - `W-kill-cseq`, a kill inside the replication window: a copy re-uses a
+    CSeq the dead primary sent before the backup applied the write, at most
+    one rejected request per dialog; the call still ends or continues
+    cleanly. A call with no backup is inside the window for its whole life:
+    the node answering a response no node holds (§4) re-uses a CSeq the same
+    way. A kill at an applied sub-point is inside the window only when the
+    primary already wrote a later turn;
+  - `W-kill-rseq`, a kill inside the replication window, and a split that
+    heals (user ruling): a copy's reliable provisional under the dialog's
+    derived tag whose RSeq cannot continue the sequence the dead primary sent
+    (RFC 3262 §4), once per dialog; the call still ends cleanly;
+  - `W-kill-non-2xx-after-2xx`, a kill inside the replication window (user
+    ruling, where no 2xx the copy could build would repeat the dead primary's
+    byte for byte): a copy's non-2xx to a caller's INVITE the dead primary
+    answered 2xx before the kill; she discards it (RFC 6026 §8.4) and owes it
+    no ACK.
 
   A split that never heals is not supposed to last: it cuts a representative
   few shapes (the re-INVITE, the REFER), whose cells check the worst case, no
   leaked resource (the call ends on every side, full cleanup, the limiter
-  released), in a declared degraded mode. These windows are declared, nothing
-  else:
-  - a split, healed or not, and a stall past the cap then a kill, their
-    cells judging leaks, cleanup and the CDR count only (none to two
-    unhealed, one or two healed or stalled), never the parties' verdict
-    (user ruling): what two acting copies, or a stale copy and what the
-    stalled primary released at the cap, send — the stale copy's requests
-    into a dialog the other copy ended, each closed by the 481 it draws; one
-    copy's CANCEL of an INVITE the other copy saw answered, and its repeats
-    after the heal; one copy's non-2xx after the final the other copy sent
-    the caller, under whatever To-tag, which she discards, and its repeats;
-    one copy's BYE of a caller dialog it holds
-    early, which the other copy answered; two BYEs of one dialog at one CSeq;
-    a CSeq one copy re-uses after the other sent it;
-  - a kill (user ruling): a copy's one CANCEL of a callee's INVITE the dead
-    owner saw finally answered, 2xx or not; the callee answers it and keeps
-    what its final left it, a dialog its own timers end or none;
-  - a stall (user ruling): a copy's repeat of a CANCEL that differs from the
-    dead owner's only in its Reason header field; every other difference
-    keeps the finding;
-  - a stall (user ruling): a copy's requests at the CSeqs the dead owner sent
-    on the dialog during the stall, each closed by the 481 it draws;
-  - a kill of the primary, and a split that heals (user ruling): the §4 clean
-    end's BYE into a dialog the other owner already ended, closed by its 481;
-  - a kill of the primary before the backup holds the turn's write with its
-    effects left — a logged or left sub-point under `off` or past the cap, a
-    logged or applied one under `applied` (user ruling): a dialog left to its
-    endpoint's own timer when the write of a teardown the node began was not
-    applied at the kill; a quiet call of a departed primary stays reactive
-    (§5);
-  - such a kill at a turn taken on something no peer repeats — a response, a
-    timer, an off-turn answer (user ruling): the turn's effects are lost with
-    the node, the parties wait for them in vain, and every dialog, early or
-    confirmed, is left to its endpoint's own timers. A turn taken on a request
-    is not in this window: under `applied` the message that stops its sender
-    repeating it waits for the write (§3);
-  - a kill of the primary once the backup holds the write of a turn that sent
-    a request to an outside service (a routing service, the limiter), or
-    after which the call awaited one's answer (its deadline in the ledger,
-    ADR-0039), whether that request left or not, the backup applying no
-    later turn of the primary (user ruling): the answer is lost with the
-    dead node, a turn that took it included, and the copy stays reactive
-    (§5); every dialog is left to its endpoint's own timers, and when the
-    turn's effects had not left, every request that reaches a living worker
-    still draws its final there;
-  - a kill inside the replication window: a copy re-uses a CSeq the dead
-    primary sent before the backup applied the write, at most one rejected
-    request per dialog; the call still ends or continues cleanly. A call with
-    no backup is inside the window for its whole life: the node answering a
-    response no node holds (§4) re-uses a CSeq the same way. A kill at an
-    applied sub-point is inside the window only when the primary already wrote
-    a later turn;
-  - a kill inside the replication window, and a split that heals (user
-    ruling): a copy's reliable provisional under the dialog's derived tag whose
-    RSeq cannot continue the sequence the dead primary sent (RFC 3262 §4); the
-    call still ends cleanly;
-  - a kill inside the replication window (user ruling, where no 2xx the copy
-    could build would repeat the dead primary's byte for byte): a copy's
-    non-2xx to a caller's INVITE the dead primary answered 2xx before the
-    kill; she discards it (RFC 6026 §8.4) and owes it no ACK.
-
-  A consumer adds shapes through the plug-in base (ADR-0049) and nothing else;
-  a consumer shape that needs HA code of its own is a defect of this layer.
+  released). A consumer adds shapes through the plug-in base (ADR-0049) and
+  nothing else; its sweep uses the same table and tiers, declares no row and
+  checks no witness. A consumer shape that needs HA code of its own is a
+  defect of this layer.
 - **A ratchet.** A cell that fails before its correction lands is listed with
-  the change that owns it. A new failure fails the lane, so does a listed cell
-  that passes. Each change flips the tests that pin the residual it removes
-  (`new_call_replication_window.rs`, `lost_round_rules.rs`, …) in the same
-  commit. The list only shrinks and is empty when §2–§12 have landed.
+  the change that owns it and its cause, and so is a Guaranteed cell that
+  fires a row; each test's count of Guaranteed cells is listed too and must
+  not fall (a rise is recorded). A new failure fails the test, so does a
+  listed cell that passes. Each change flips the tests that pin the residual
+  it removes (`new_call_replication_window.rs`, `lost_round_rules.rs`, …) in
+  the same commit. The list only shrinks and is empty when §2–§12 have
+  landed.
 
 ### 12. A request the worker originates names its leg
 

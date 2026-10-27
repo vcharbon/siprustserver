@@ -70,8 +70,8 @@ use b2bua::decision::{
 use b2bua::limiter::NoopLimiter;
 use call::{CallModelState, CdrEventType, LegState, MsgpackCodec, TimerType};
 use failover_harness::{
-    worker_ordinals, FailoverHarness, PartitionRole, ProxySut, ReplicatedB2buaSut, WorkerHealth,
-    RULE_NO_CANCEL_AFTER_FINAL,
+    worker_ordinals, FailoverHarness, Incident, PartitionRole, ProxySut, ReplicatedB2buaSut,
+    WorkerHealth,
 };
 use repl_net::frame::{Frame, Op};
 use repl_net_testkit::Direction;
@@ -97,14 +97,6 @@ const REPLICA_TTL_WAIT: Duration = Duration::from_secs(700);
 
 /// The deployed ring deadline: armed at route time on both copies of the call.
 const NO_ANSWER_SEC: i64 = 30;
-
-/// Why `no-cancel-after-final` is accepted from the SIP heal onward: the
-/// partitioned primary's ring-deadline CANCEL outlives the copy it tore down
-/// (ADR-0034) and crosses once the plane heals, on the proxy lane that relayed
-/// the other owner's ACK, answered 481 — a split's declared window (ADR-0055 §11).
-const STALE_CANCEL: &str =
-    "ADR-0055 §11 split window: one copy's CANCEL of an INVITE the other copy saw \
-     answered, and its repeats after the heal";
 
 /// The deployed shape: a failover-capable route (callback context) arming the
 /// per-b-leg `NoAnswer`, whose `no_answer_timeout` failure consult answers with
@@ -582,7 +574,10 @@ async fn run(name: &str, title: &str, pending: Pending, heal_at: HealAt) {
     let mut bye = dialog.bye().await;
     bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
     bye.expect_tolerating(200, &["OPTIONS"]).await;
-    fh.accept_rfc_deviations_from_now(RULE_NO_CANCEL_AFTER_FINAL, STALE_CANCEL);
+    // The partitioned primary's ring-deadline CANCEL outlives the copy it tore
+    // down (ADR-0034) and crosses once the plane heals, answered 481: one
+    // copy's CANCEL of an INVITE the other copy saw answered.
+    fh.strike(Incident::SplitHealed);
     fh.restore_signalling(&pri_ord, pri_sip);
     let nodes: [&ReplicatedB2buaSut; 2] = [&*primary, survivor];
     let lost_before = survivor.metrics().repl_terminal_lost_total();

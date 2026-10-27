@@ -187,8 +187,10 @@ the replication window (§3). Every effect a turn sends leaves through the
 call's ordered outbox, released by the replication sync level (`applied`, the
 default: once the backup applied the write, at most the cap; `off`: at once).
 A deviation no window declares is a SUT defect.
-The failover sweep (`just sweep`) checks every cell against §11 and holds the
-failing ones to a ratchet that only shrinks. On a real cluster the HA tooling
+The failover sweep (`just sweep`) checks every cell against the window table
+of §11 at its measured tier (Guaranteed: no row; Degraded; Off) and holds the
+failing ones, and each test's Guaranteed count, to a ratchet that only
+shrinks. On a real cluster the HA tooling
 judges each impact against its incident window's budget (ADR-0049 §3.5). A
 takeover keepalive firing ~one interval early on an endurance run is a host
 clock-STEP artifact (fix is infra; the SUT re-anchors replicated instants,

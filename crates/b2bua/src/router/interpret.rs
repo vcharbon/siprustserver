@@ -304,6 +304,7 @@ pub(super) async fn reach(
             called_out: kind.called_out,
             awaits_answer: kind.awaits_answer,
             released,
+            backed: point == TurnPoint::Logged && ctx.state.hold_target(call_ref).is_some(),
         })
         .await;
 }

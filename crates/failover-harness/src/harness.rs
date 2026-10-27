@@ -67,8 +67,11 @@ mod repl_wiring;
 mod replacement;
 mod rfc_audit;
 mod settle;
+mod strike;
 pub use proxy_sut::ProxySut;
+pub(crate) use repl_wiring::sync_level_from_env;
 use repl_wiring::ReplWiring;
+pub use strike::Fired;
 
 /// Changelog dead-peer TTL: a peer silent this long loses its log and pulls
 /// again from a bootstrap, reachable in a test budget.
@@ -157,11 +160,14 @@ pub struct ReplicatedB2buaSut {
 /// test task, so the lock is never contended.
 pub struct HarnessHandle {
     inner: std::sync::Mutex<Option<Harness>>,
+    /// The test rewrote what replication carries, through the harness or a
+    /// worker: the run is never Guaranteed.
+    tampered: AtomicBool,
 }
 
 impl HarnessHandle {
     fn new(harness: Harness) -> Self {
-        Self { inner: std::sync::Mutex::new(Some(harness)) }
+        Self { inner: std::sync::Mutex::new(Some(harness)), tampered: AtomicBool::new(false) }
     }
 
     /// Bind a SUT endpoint on the shared fabric (under a brief lock). The future
@@ -402,6 +408,7 @@ impl ReplicatedB2buaSut {
         call_ref: &str,
         fire_at_ms: i64,
     ) -> String {
+        self.harness.tampered.store(true, Ordering::Relaxed);
         let body = self
             .store
             .get_call(role, primary, call_ref)
@@ -446,6 +453,7 @@ impl ReplicatedB2buaSut {
         call_ref: &str,
         body: Vec<u8>,
     ) {
+        self.harness.tampered.store(true, Ordering::Relaxed);
         let (p, b) =
             self.store.current_cv(role, primary, call_ref).expect("replica version vector present");
         self.store
@@ -843,6 +851,12 @@ pub struct FailoverHarness {
     /// windows (see [`crate::rfc_acceptance`]). Everything it does not cover
     /// gates.
     rfc_acceptance: RfcAcceptance,
+    /// The replication sync level every worker spawned runs at.
+    level: b2bua::repl::SyncLevel,
+    /// Every strike of the run, in order ([`Self::strike`]).
+    struck: Vec<strike::Struck>,
+    /// Each dialog-verdict waiver a strike opened, with its row.
+    dialog_rows: Vec<(scenario_harness::WaiverScope, &'static crate::windows::Row)>,
     /// Worker config mutator applied on every node's core spawn AND reboot
     /// (after the parity defaults) — set via
     /// [`with_worker_tune`](Self::with_worker_tune) BEFORE spawning workers.
@@ -894,8 +908,7 @@ struct WorkerSpec {
 }
 
 /// The in-dialog CSeq-ordering audit rule (`rfc_rules::rules::cseq`), named here so
-/// the failover tests can waive it by a symbol rather than a bare string. See
-/// [`FailoverHarness::accept_rfc_deviations_from_now`].
+/// the window table names it by a symbol rather than a bare string.
 pub const RULE_CSEQ_IN_DIALOG_ORDER: &str = "cseq-in-dialog-order";
 
 /// The no-CANCEL-after-final audit rule (`rfc_rules::rules::cancel`), named here
@@ -1020,6 +1033,9 @@ impl FailoverHarness {
             harness: Arc::new(HarnessHandle::new(harness)),
             worker_clock_offsets: HashMap::new(),
             rfc_acceptance: RfcAcceptance::default(),
+            level: sync_level_from_env(),
+            struck: Vec::new(),
+            dialog_rows: Vec::new(),
             worker_tune: Arc::new(|_| {}),
             worker_replica: b2bua::ReplicaConfig::default(),
             worker_services: Vec::new,
@@ -1072,65 +1088,21 @@ impl FailoverHarness {
 
     /// Waive one RFC-audit rule (by its `name()`) on this harness's Drop-time hard
     /// gate for the **whole harness lifetime** — establishment included, before any
-    /// fault exists. It leaves no baseline in this recording: nothing this run
-    /// emits is judged by `rule` again, so a NEW regression in the same rule is
-    /// invisible here. Use it ONLY for a deviation whose cause spans the entire run
-    /// (a peer fixture that is non-compliant by construction); for a deviation that
-    /// exists only after a fault is injected use
-    /// [`accept_rfc_deviations_from_now`](Self::accept_rfc_deviations_from_now),
-    /// which keeps the rule gating everywhere outside the window. Every OTHER rule
-    /// gates either way. `justification` documents WHY at the call site.
+    /// fault exists: a party that plays a broken peer by construction. It leaves no
+    /// baseline in this recording: nothing this run emits is judged by `rule`
+    /// again, so a NEW regression in the same rule is invisible here. A deviation
+    /// an incident causes is never waived: the test strikes the incident
+    /// ([`strike`](Self::strike)). Every OTHER rule gates either way.
+    /// `justification` is recorded with the waiver and listed in the report.
     pub fn allow_rfc_violation(&mut self, rule: &str, justification: &str) {
-        debug_assert!(!justification.trim().is_empty(), "waiver needs a justification");
-        let _ = justification;
-        self.rfc_acceptance.waive_lifetime(rule);
-    }
-
-    /// Accept `rule`'s findings on messages recorded from **now** until
-    /// [`resume_rfc_gate`](Self::resume_rfc_gate) (or the end of the run) — the
-    /// window-scoped counterpart of
-    /// [`allow_rfc_violation`](Self::allow_rfc_violation). Call it at the instant
-    /// the scenario injects its fault: establishment, every message before the
-    /// injection, and every no-fault scenario keep the rule fully gating, so a new
-    /// regression outside the window still fails the test.
-    ///
-    /// The boundary is the recording's **capture order** (`seq`), not a timestamp:
-    /// under a paused clock a whole burst shares one `at_ms`, so a message captured
-    /// before this call is outside the window even when it carries the same
-    /// millisecond.
-    ///
-    /// A finding the rule cannot pin to a wire entry is unattributable and stays
-    /// gated (only [`allow_rfc_violation`](Self::allow_rfc_violation) covers it).
-    ///
-    /// Accepted findings are classified, not masked: they leave the gate but land
-    /// in [`accepted_rfc_deviations`](Self::accepted_rfc_deviations) and in the
-    /// unified report as advisory anomalies, and the scenario still asserts the
-    /// accepted OUTCOME (call fully over, one CDR, limiter released).
-    ///
-    /// The windows it opens are the ones ADR-0055 §11 declares, such as
-    /// [`RULE_CSEQ_IN_DIALOG_ORDER`] across a split (§8): two copies of the call
-    /// each mint `dialog.our_cseq + 1`. The reused number rides a FRESH `branch`,
-    /// so a compliant UAS does not absorb it as a retransmission: it sees a new
-    /// server transaction whose sequence number did not advance and rejects it
-    /// out of order (RFC 3261 §12.2.2).
-    pub fn accept_rfc_deviations_from_now(&mut self, rule: &str, justification: &str) {
-        debug_assert!(!justification.trim().is_empty(), "acceptance needs a justification");
-        let _ = justification;
-        let from = self.recorded_seq_high_water();
-        self.rfc_acceptance.open_window(rule, from);
-    }
-
-    /// Close EVERY open acceptance window for `rule` at this instant — the rule
-    /// gates in full again from here on. No-op when no window for `rule` is open.
-    pub fn resume_rfc_gate(&mut self, rule: &str) {
-        let until = self.recorded_seq_high_water();
-        self.rfc_acceptance.close_windows(rule, until);
+        assert!(!justification.trim().is_empty(), "a waiver needs a justification");
+        self.rfc_acceptance.waive_lifetime(rule, justification);
     }
 
     /// The highest recording `seq` captured on the SIP channel so far — the
     /// capture-order boundary an acceptance window is anchored on. `0` before the
     /// first recorded event.
-    fn recorded_seq_high_water(&self) -> u64 {
+    pub(crate) fn recorded_seq_high_water(&self) -> u64 {
         self.harness.recording().channel().snapshot().iter().map(|s| s.seq).max().unwrap_or(0)
     }
 
@@ -1500,6 +1472,7 @@ impl FailoverHarness {
             peers: peer_list,
             listen_addr,
             replica: self.worker_replica,
+            sync: self.level,
             dead_peer_ttl_ms: DEFAULT_DEAD_PEER_TTL_MS,
         };
 
@@ -1729,10 +1702,10 @@ impl FailoverHarness {
                 rule_sourced: true,
             });
         }
-        for (rule, lane, detail) in accepted {
+        for ((rule, lane, detail), row) in accepted {
             doc.anomalies.push(seq_report::Anomaly {
                 check: rule,
-                detail: format!("ACCEPTED (declared deviation window): {detail}"),
+                detail: format!("ACCEPTED by {row}: {detail}"),
                 lane: Some(lane),
                 endpoint: None,
                 advisory: Some(true),
@@ -1930,6 +1903,11 @@ impl Drop for FailoverHarness {
                     .collect::<Vec<_>>()
                     .join("\n"),
             );
+        }
+        // A row of the window table that fired where the run's measured tier
+        // keeps it closed fails the test as any finding does.
+        if let Some(why) = self.tier_gate_failure() {
+            panic!("{why}");
         }
     }
 }

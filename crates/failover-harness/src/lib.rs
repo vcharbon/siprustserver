@@ -14,8 +14,12 @@
 //!   failover-injected) + strict From/To/CSeq invariants.
 //! - [`cookie`] — the proxy stickiness cookie read back off a forwarded
 //!   request, which names the primary and backup worker of a call.
-//! - [`rfc_acceptance`] — RFC-audit acceptance scoping: which recorded deviations
-//!   gate the run and which a scenario declared accepted for a bounded window.
+//! - [`incident`] — what befalls a call's two owners, struck by a test.
+//! - [`windows`] — the window table: every deviation an incident may cause,
+//!   one named row each, and the tier a run's measured facts place it in
+//!   (ADR-0055 §11).
+//! - [`rfc_acceptance`] — RFC-audit acceptance scoping: which recorded
+//!   deviations gate the run and which a struck row's window accepts.
 //! - [`views`] — the views ledger: what the orchestrator, the proxy and each
 //!   worker incarnation believed about every worker, and where they disagreed.
 //! - [`turn_points`] — every turn of a call at its primary and its three
@@ -33,6 +37,7 @@ pub mod cluster;
 pub mod combine;
 pub mod cookie;
 mod harness;
+pub mod incident;
 pub mod oracle;
 pub mod rfc_acceptance;
 pub mod roles;
@@ -41,20 +46,23 @@ pub mod scenario;
 pub mod sweep;
 pub mod turn_points;
 pub mod views;
+pub mod windows;
 
 pub use b2bua::drain::{DrainBounds, DrainExit, DrainOutcome};
 pub use cluster::{Cluster, ClusterRecipe};
 pub use combine::{combine_doc, WorkerAxis};
 pub use cookie::{cookie_field, worker_ordinals};
 pub use harness::{
-    FailoverHarness, PendingDrain, ProxySut, ReplicatedB2buaSut, RULE_CSEQ_IN_DIALOG_ORDER,
+    FailoverHarness, Fired, PendingDrain, ProxySut, ReplicatedB2buaSut, RULE_CSEQ_IN_DIALOG_ORDER,
     RULE_NO_CANCEL_AFTER_FINAL,
 };
+pub use incident::Incident;
 pub use roles::{Cause, Placement, Role};
 pub use runner::run_cell;
 pub use scenario::{Cell, DialogState, Event, Fault, Party, Recovery};
 pub use turn_points::{HeldTurn, Released, Turn, TurnAt, TurnPoint, TurnPoints};
 pub use views::{Belief, View, ViewLedger};
+pub use windows::{Strike, Tier, Transitional};
 
 /// Run one matrix cell as a differential transparency check: drive it clean
 /// (baseline) and with the failover injected (variant), assert the two external

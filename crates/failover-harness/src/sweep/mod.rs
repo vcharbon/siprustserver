@@ -1,58 +1,51 @@
 //! The failover sweep (ADR-0055 §11): every shape of a catalogue is cut at
 //! every turn point of its call — each turn's write handed to replication,
-//! its effects left, its write applied at the backup — by each [`Incident`].
-//! Every cell must end with nothing left on any node or in the limiter and
-//! an accepted CDR count: one, for the copies of a split that never heals
-//! one each or none, for a split that heals and a killed primary one or two,
-//! never none, for a call with no backup at most one (§5). A split, healed or
-//! not, is judged on that alone, and so is a stall past the cap then a kill,
-//! every request that reached a living worker having drawn its final there:
-//! the findings two acting copies, or a stale copy and what the stalled
-//! primary released at the cap, cause are accepted there. Any other cell must
-//! also end with an
-//! RFC-clean, fully terminated call the parties judge as their play declares;
-//! once the incident strikes, a clean end is one (§1, §4), and an incident
-//! that loses the call states what the parties are left with instead
-//! ([`Incident::loses_the_call`]). A kill inside the replication window
-//! declares its windows: a copy may re-use, once per dialog, an in-dialog
-//! CSeq the dead primary sent before its backup applied the write — so may
-//! the node answering a response of a call that had no backup — and may send
-//! a reliable provisional whose RSeq cannot continue the dead primary's.
-//! After a kill, the copy may CANCEL once a callee INVITE the dead primary saw
-//! finally answered, and every kill of the primary accepts the §4 clean end's
-//! BYE or terminating NOTIFY into a dialog the other owner ended, closed by
-//! its 481.
+//! its effects left, its write applied at the backup — by each [`Incident`],
+//! at each replication sync level. Every cell must end with nothing left on
+//! any node or in the limiter, an RFC-clean, fully terminated call the
+//! parties judge as their play declares, and one CDR, or two when the primary
+//! dies (§5). What an incident may cause beyond that is the window table's
+//! ([`crate::windows`]): the cell strikes its incident on the harness, is
+//! given the incident's rows, and its measured tier decides which of the
+//! rows that fired it accepts — none in the Guaranteed tier.
 //!
-//! A cell is named `<shape>/<incident>/t<k>-<point>`. The cells that fail
-//! before their correction lands are listed in a [`Ratchet`] with the decision
-//! that owns them; a lane fails on a failing cell the ratchet does not list
-//! and on a listed cell that passes.
+//! A cell is named `<shape>/<level>/<incident>/t<k>-<point>`. The cells that
+//! fail before their correction lands are listed in a [`Ratchet`] with the
+//! decision that owns them, beside the count of each test's Guaranteed cells;
+//! a test fails on a failing cell the ratchet does not list, on a listed cell
+//! that passes, and on a Guaranteed count other than the listed one. A row's
+//! witness cell, an upstream cell, must fire it ([`witness`]).
 //!
 //! A consumer adds shapes with nothing but the shape: a [`SweepShape`] states
 //! how the cluster decides the call and what the parties play, and
 //! [`failover_sweep!`](crate::failover_sweep) expands a list of shapes into
-//! the lane's tests against the consumer's own ratchet.
+//! one test per shape, incident and level against the consumer's own
+//! ratchet. Each test writes what its cells measured to
+//! `target/sweep-report/` ([`report`]).
 
 mod answered;
 pub mod catalogue;
 mod cell;
-mod outcome;
 mod parties;
 mod ratchet;
-mod stall_cseq;
-mod stall_repeat;
-mod unseen_rseq;
+pub mod report;
+mod witness;
+
+use std::sync::Mutex;
 
 use b2bua::cdr::CdrRecord;
+pub use b2bua::repl::SyncLevel;
 use scenario_harness::actor::ActorScenario;
 use scenario_harness::realcall::CallEnv;
 
-pub use cell::{run_cell, Cut, PRIMARY};
+pub use cell::{run_cell, CellReport, Cut, PRIMARY};
 pub use parties::{Parties, ALICE, BOB, BOB2, CHARLIE, MEDIA, MEDIA_ROLE};
 pub use ratchet::Ratchet;
 
 use crate::cluster::ClusterRecipe;
+pub use crate::incident::Incident;
 use crate::turn_points::{TurnAt, TurnPoint};
+use crate::windows::Tier;
 
 /// A call shape the sweep cuts.
 pub trait SweepShape: Send + Sync {
@@ -95,124 +88,87 @@ pub trait SweepShape: Send + Sync {
     }
 }
 
-/// What befalls the call's owners at the armed turn point.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Incident {
-    /// The primary dies; the proxy and the backup see it gone.
-    PrimaryKilled,
-    /// The backup dies; the proxy and the primary see it gone.
-    BackupKilled,
-    /// The replication between the two owners is cut and the proxy reads the
-    /// primary dead while it runs on; nothing heals.
-    Split,
-    /// A [`Split`](Self::Split) healed one second later.
-    SplitHealed,
-    /// The replication from the primary to the backup stalls for longer than
-    /// the hold's cap, then the primary dies (ADR-0055 §3).
-    StalledKilled,
-    /// The call's backup refused its replica at its memory ceiling, so the
-    /// call has no backup; the primary dies (ADR-0055 §3).
-    UnbackedKilled,
-}
-
-impl Incident {
-    /// Every incident, in lane order.
-    pub const ALL: [Incident; 6] = [
-        Incident::PrimaryKilled,
-        Incident::BackupKilled,
-        Incident::Split,
-        Incident::SplitHealed,
-        Incident::StalledKilled,
-        Incident::UnbackedKilled,
-    ];
-
-    /// The incident's name in a cell's name.
-    pub fn label(self) -> &'static str {
-        match self {
-            Incident::PrimaryKilled => "primary-killed",
-            Incident::BackupKilled => "backup-killed",
-            Incident::Split => "split",
-            Incident::SplitHealed => "split-healed",
-            Incident::StalledKilled => "stalled-killed",
-            Incident::UnbackedKilled => "unbacked-killed",
-        }
-    }
-
-    /// Whether the incident may lose the call as a non-HA B2BUA loses it
-    /// (ADR-0055 §11): every dialog, the caller's included, may be left to its
-    /// endpoint's own timers, and every request that reaches a living worker
-    /// still draws its final there. A stalled call leaves its primary's
-    /// CDR, the one of the node that ends it after, or both, never none; an
-    /// unbacked one at most one. Nothing is left on any node or in the limiter
-    /// either way.
-    pub fn loses_the_call(self) -> bool {
-        matches!(self, Incident::StalledKilled | Incident::UnbackedKilled)
-    }
-
-    /// Whether the incident splits the call's two owners, healed or not: its
-    /// cells judge leaks, cleanup and the CDR count, never the parties'
-    /// verdict (ADR-0055 §11).
-    pub fn splits(self) -> bool {
-        matches!(self, Incident::Split | Incident::SplitHealed)
-    }
-
-    /// Whether the incident is cut at a turn's applied sub-point: a call with
-    /// no backup has none, and a stall at it is a kill after the write.
-    fn cuts_applied(self) -> bool {
-        !self.loses_the_call()
+/// A sync level's name in a cell's name.
+pub fn level_label(level: SyncLevel) -> &'static str {
+    match level {
+        SyncLevel::Applied => "applied",
+        SyncLevel::Off => "off",
     }
 }
 
-/// The name of a cell: `<shape>/<incident>/t<k>-<point>`.
-pub fn cell_name(shape: &str, incident: Incident, at: TurnAt) -> String {
-    format!("{shape}/{}/{}", incident.label(), at.label())
+/// The name of a cell: `<shape>/<level>/<incident>/t<k>-<point>`.
+pub fn cell_name(shape: &str, level: SyncLevel, incident: Incident, at: TurnAt) -> String {
+    format!("{}{}", test_prefix(shape, level, incident), at.label())
 }
 
-/// Run `shape` with no incident: the call must pass every check and take at
-/// least one turn. Its turns are the sweep's turn points.
-pub fn baseline(shape: &dyn SweepShape) -> Vec<crate::turn_points::Turn> {
-    let name = format!("{}/baseline", shape.id());
-    let turns = in_cell(&name, || run_cell(shape, &name, None, false))
+/// The prefix of the cells one test runs: `<shape>/<level>/<incident>/`.
+pub fn test_prefix(shape: &str, level: SyncLevel, incident: Incident) -> String {
+    format!("{shape}/{}/{}/", level_label(level), incident.label())
+}
+
+/// Run `shape` with no incident at `level`: the call must pass every check
+/// and take at least one turn. Its turns are the sweep's turn points.
+pub fn baseline(shape: &dyn SweepShape, level: SyncLevel) -> Vec<crate::turn_points::Turn> {
+    let name = format!("{}/{}/baseline", shape.id(), level_label(level));
+    let sink = Mutex::default();
+    let turns = in_cell(&name, || run_cell(shape, &name, None, level, false, &sink))
         .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
     assert!(!turns.is_empty(), "[{name}] the call took no turn at its primary");
     turns
 }
 
-/// Cut `shape` at every turn point of its baseline by `incident`, and hold
-/// the failing cells to `ratchet`.
-pub fn sweep(shape: &dyn SweepShape, incident: Incident, ratchet: &Ratchet) {
-    let prefix = format!("{}/{}/", shape.id(), incident.label());
-    let mut ran = Vec::new();
-    let mut failed = std::collections::BTreeMap::new();
-    if incident == Incident::Split && !shape.splits_unhealed() {
-        eprintln!("{prefix}: no cell, the shape is not cut by a split that never heals");
-        ratchet.hold(&prefix, &ran, &failed);
-        return;
-    }
-    let turns = baseline(shape);
-    for (i, turn) in turns.iter().enumerate() {
-        let points =
-            turn.points().iter().filter(|p| incident.cuts_applied() || **p != TurnPoint::Applied);
-        for &point in points {
-            let at = TurnAt { turn: i + 1, point };
-            let name = cell_name(shape.id(), incident, at);
-            let cut = Some(Cut { at, incident });
-            if let Err(payload) = in_cell(&name, || run_cell(shape, &name, cut, false)) {
-                failed.insert(name.clone(), panic_text(payload.as_ref()));
-            }
-            ran.push(name);
-        }
-    }
-    eprintln!("{prefix}: {} cells, {} failing", ran.len(), failed.len());
-    ratchet.hold(&prefix, &ran, &failed);
+/// One cell the sweep ran: its name, what it measured, and its failure.
+pub struct Ran {
+    pub name: String,
+    pub at: TurnAt,
+    pub measured: CellReport,
+    pub failure: Option<String>,
 }
 
-/// Run the one cell of `shape` cut at `at` by `incident`, its unified report
-/// kept under `target/seq-reports/`: the reproduction of a failing cell.
-/// Panics on any finding.
-pub fn replay(shape: &dyn SweepShape, incident: Incident, at: TurnAt) {
-    let name = cell_name(shape.id(), incident, at);
-    in_cell(&name, || run_cell(shape, &name, Some(Cut { at, incident }), true))
+/// Cut `shape` at every turn point of its baseline by `incident` at `level`,
+/// write what the cells measured to the sweep report, check the witness
+/// cells of the rows, and hold the failing cells and the Guaranteed count to
+/// `ratchet`.
+pub fn sweep(shape: &dyn SweepShape, incident: Incident, level: SyncLevel, ratchet: &Ratchet) {
+    let prefix = test_prefix(shape.id(), level, incident);
+    let mut ran: Vec<Ran> = Vec::new();
+    if incident == Incident::Split && !shape.splits_unhealed() {
+        eprintln!("{prefix}: no cell, the shape is not cut by a split that never heals");
+    } else {
+        let turns = baseline(shape, level);
+        for (i, turn) in turns.iter().enumerate() {
+            let points = turn
+                .points()
+                .iter()
+                .filter(|p| incident.cuts_applied() || **p != TurnPoint::Applied);
+            for &point in points {
+                let at = TurnAt { turn: i + 1, point };
+                let name = cell_name(shape.id(), level, incident, at);
+                let cut = Some(Cut { at, incident });
+                let sink = Mutex::default();
+                let outcome = in_cell(&name, || run_cell(shape, &name, cut, level, false, &sink));
+                let failure = outcome.err().map(|payload| panic_text(payload.as_ref()));
+                let measured = sink.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+                ran.push(Ran { name, at, measured, failure });
+            }
+        }
+    }
+    let guaranteed = ran.iter().filter(|r| r.measured.tier == Some(Tier::Guaranteed)).count();
+    let failing = ran.iter().filter(|r| r.failure.is_some()).count();
+    eprintln!("{prefix}: {} cells, {failing} failing, {guaranteed} guaranteed", ran.len());
+    report::write(&prefix, &ran);
+    let dead = witness::dead_windows(shape.id(), incident, level, &ran);
+    ratchet.hold(&prefix, &ran, guaranteed, &dead);
+}
+
+/// Run the one cell of `shape` cut at `at` by `incident` at `level`, its
+/// unified report kept under `target/seq-reports/`: the reproduction of a
+/// failing cell. Panics on any finding.
+pub fn replay(shape: &dyn SweepShape, incident: Incident, level: SyncLevel, at: TurnAt) {
+    let name = cell_name(shape.id(), level, incident, at);
+    let sink = Mutex::default();
+    let cut = Some(Cut { at, incident });
+    in_cell(&name, || run_cell(shape, &name, cut, level, true, &sink))
         .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
 }
 
@@ -259,10 +215,10 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-/// Expand shapes into the sweep lane's tests: per shape, its baseline and one
-/// test per [`Incident`], each holding its failing cells to the ratchet at
-/// `$ratchet` (a path). The tests live under a `failover_sweep` module, the
-/// name the lane selects them by.
+/// Expand shapes into the sweep's tests: per shape and sync level, its
+/// baseline and one test per [`Incident`], each holding its cells to the
+/// ratchet at `$ratchet` (a path). The tests live under a `failover_sweep`
+/// module: `failover_sweep::<shape>::<level>::<incident>`.
 ///
 /// ```ignore
 /// failover_harness::failover_sweep! {
@@ -280,52 +236,61 @@ macro_rules! failover_sweep {
                 mod $name {
                     #[allow(unused_imports)]
                     use super::*;
-                    use $crate::sweep::{Incident, Ratchet, SweepShape};
 
-                    fn shape() -> Box<dyn SweepShape> {
+                    fn shape() -> Box<dyn $crate::sweep::SweepShape> {
                         Box::new($shape)
                     }
 
-                    fn run(incident: Incident) {
-                        $crate::sweep::sweep(&*shape(), incident, &Ratchet::load($ratchet));
-                    }
-
-                    #[test]
-                    fn baseline() {
-                        $crate::sweep::baseline(&*shape());
-                    }
-
-                    #[test]
-                    fn primary_killed() {
-                        run(Incident::PrimaryKilled);
-                    }
-
-                    #[test]
-                    fn backup_killed() {
-                        run(Incident::BackupKilled);
-                    }
-
-                    #[test]
-                    fn split() {
-                        run(Incident::Split);
-                    }
-
-                    #[test]
-                    fn split_healed() {
-                        run(Incident::SplitHealed);
-                    }
-
-                    #[test]
-                    fn stalled_killed() {
-                        run(Incident::StalledKilled);
-                    }
-
-                    #[test]
-                    fn unbacked_killed() {
-                        run(Incident::UnbackedKilled);
-                    }
+                    $crate::failover_sweep!(@level applied, Applied, $ratchet);
+                    $crate::failover_sweep!(@level off, Off, $ratchet);
                 }
             )+
+        }
+    };
+    (@level $level:ident, $variant:ident, $ratchet:expr) => {
+        mod $level {
+            use $crate::sweep::{Incident, Ratchet};
+
+            const LEVEL: $crate::sweep::SyncLevel = $crate::sweep::SyncLevel::$variant;
+
+            fn run(incident: Incident) {
+                $crate::sweep::sweep(&*super::shape(), incident, LEVEL, &Ratchet::load($ratchet));
+            }
+
+            #[test]
+            fn baseline() {
+                $crate::sweep::baseline(&*super::shape(), LEVEL);
+            }
+
+            #[test]
+            fn primary_killed() {
+                run(Incident::PrimaryKilled);
+            }
+
+            #[test]
+            fn backup_killed() {
+                run(Incident::BackupKilled);
+            }
+
+            #[test]
+            fn split() {
+                run(Incident::Split);
+            }
+
+            #[test]
+            fn split_healed() {
+                run(Incident::SplitHealed);
+            }
+
+            #[test]
+            fn stalled_killed() {
+                run(Incident::StalledKilled);
+            }
+
+            #[test]
+            fn unbacked_killed() {
+                run(Incident::UnbackedKilled);
+            }
         }
     };
 }

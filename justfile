@@ -54,10 +54,17 @@ test-slow *filter:
     cargo nextest run --workspace -P slow --run-ignored only --no-tests=warn -E {{ quote(property_lane + if filter == "" { "" } else { " & (" + filter + ")" }) }}
 
 # The failover sweep (ADR-0055 §11): every shape of the catalogue cut at every
-# turn point by every incident, held to each crate's `failover-sweep.ratchet`.
-# Its own lane, out of `test`. Optional filter: `just sweep reinvite`.
+# turn point by every incident at both sync levels, one test per shape,
+# incident and level, held to each crate's `failover-sweep.ratchet`. Its own
+# lane, out of `test`: about 45 CPU-minutes. Optional filter: `just sweep
+# reinvite`.
 sweep filter='':
     cargo nextest run --workspace -P sweep --no-tests=fail {{ filter }}
+
+# The last sweep's cells added together per window-table row and per tier,
+# and its failing Guaranteed cells. Gates nothing.
+sweep-report:
+    scripts/sweep-report.py target/sweep-report
 
 # Both lanes.
 test-all: test test-slow

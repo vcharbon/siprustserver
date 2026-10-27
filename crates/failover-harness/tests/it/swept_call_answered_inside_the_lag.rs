@@ -11,6 +11,7 @@
 
 use std::time::Duration;
 
+use failover_harness::Transitional;
 use scenario_harness::{Agent, Inbound};
 use sip_message::SipMessage;
 
@@ -19,13 +20,6 @@ use crate::ringing_call_taken_over_on_departure::{depart, place, Callee, Placed}
 use crate::swept_call_primary_returns::{
     answer, hang_up_quiet_and_settle, port, ready, reboot, sent,
 };
-
-/// The copy's wire deviations inside the lag, each the copy acting on a call
-/// it never saw answered.
-const LAG_DEVIATIONS: [(&str, &str); 2] = [
-    ("no-cancel-after-final", "the copy CANCELs the callee after its answer"),
-    ("unacked-invite-non-2xx-final", "the copy's 480 follows the caller's 200: no ACK takes it"),
-];
 
 /// Drain what the caller holds past its 200: the backup copy's 480, each copy
 /// a repeat of one final its answered transaction no longer takes.
@@ -71,14 +65,9 @@ async fn answered_inside_the_lag_then_ended(mut p: Placed, stall_after_deadline:
     ready(&mut p).await;
     let _answered = answer(&mut p).await;
     assert!(p.fh.now_ms() < deadline, "the callee answers before the deadline");
-    for (rule, why) in LAG_DEVIATIONS {
-        p.fh.accept_rfc_deviations_from_now(rule, why);
-    }
-    p.fh.accept_clean_end_requests(
-        &[p.alice.name().to_string(), p.bob.name().to_string()],
-        "ADR-0055 §11: the clean end's BYE into a dialog the other owner ended, closed by \
-         the 481 it draws",
-    );
+    // The copy acts on a call it never saw answered: it CANCELs the callee
+    // after its answer and refuses the caller after her 200.
+    p.fh.strike(Transitional::AnsweredInsideTheLag);
     if stall_after_deadline {
         let at = deadline - p.fh.now_ms() + 1_000;
         p.fh.advance(Duration::from_millis(at.max(0) as u64)).await;
@@ -107,9 +96,7 @@ async fn answered_inside_the_lag_then_ended(mut p: Placed, stall_after_deadline:
     answer_the_end(&p.alice).await;
     answer_the_end(&p.bob).await;
     drain_strays(&p).await;
-    for (rule, _) in LAG_DEVIATIONS {
-        p.fh.resume_rfc_gate(rule);
-    }
+    p.fh.incident_over();
     hang_up_quiet_and_settle(p, &[]).await;
 }
 

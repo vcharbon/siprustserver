@@ -4,7 +4,7 @@
 
 use failover_harness::cluster::ClusterRecipe;
 use failover_harness::sweep::catalogue::Basic;
-use failover_harness::sweep::{baseline, SweepShape, BOB};
+use failover_harness::sweep::{baseline, SweepShape, SyncLevel, BOB};
 use scenario_harness::actor::ActorScenario;
 
 /// The basic call, its backup refusing every replica.
@@ -30,7 +30,7 @@ impl SweepShape for Unbacked {
 /// on is past it.
 #[test]
 fn a_call_with_no_backup_writes_nothing_once_refused() {
-    let turns = baseline(&Unbacked);
+    let turns = baseline(&Unbacked, SyncLevel::Applied);
     let wrote: Vec<bool> = turns.iter().map(|t| t.wrote).collect();
     assert!(wrote.len() > 2, "{wrote:?}");
     assert!(wrote[2..].iter().all(|w| !w), "no write after the refusal: {wrote:?}");

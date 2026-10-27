@@ -1,5 +1,5 @@
-//! A declared window of a kill and of a split that heals (ADR-0055 §11): a
-//! copy's reliable provisional under the dialog's derived tag whose RSeq
+//! The predicate of `W-kill-rseq` (ADR-0055 §11), a kill's and a healed
+//! split's: a copy's reliable provisional under the dialog's derived tag whose RSeq
 //! cannot continue the sequence the dead primary sent (RFC 3262 §4), once per
 //! dialog.
 
@@ -7,30 +7,15 @@ use std::net::SocketAddr;
 
 use sip_net_testkit::{CaptureIndex, Captured};
 
-use crate::cluster::Cluster;
-
 /// The audit rules a reliable provisional out of its RSeq sequence meets.
-const RULES: [&str; 2] = ["non-contiguous-rseq", "no-prack-of-out-of-order-rseq"];
-
-/// Declare, from the incident on, the copy's reliable provisional that cannot
-/// continue the dead primary's RSeq, once per dialog.
-pub(super) fn accept_unseen_rseq(cluster: &mut Cluster) {
-    for rule in RULES {
-        cluster.fh.accept_rfc_deviations_once_per_dialog_where(
-            rule,
-            |i, capture, _| from_another_node(i, capture),
-            "ADR-0055 §11: a copy's reliable provisional under the dialog's derived tag cannot \
-             continue the RSeq the dead primary sent",
-        );
-    }
-}
+pub(super) const RULES: [&str; 2] = ["non-contiguous-rseq", "no-prack-of-out-of-order-rseq"];
 
 /// Whether the entry at index `i` of `capture` is a reliable provisional
 /// under a To-tag an earlier reliable provisional carried on that INVITE,
 /// stated by another node — a node derives the dialog's tag as the first
 /// owner did — or the caller's PRACK of such a provisional. The window it
 /// falls in opened at the incident.
-fn from_another_node(i: usize, capture: &CaptureIndex) -> bool {
+pub(super) fn from_another_node(i: usize, capture: &CaptureIndex) -> bool {
     if let Some(j) = acknowledged(i, capture) {
         return from_another_node(j, capture);
     }

@@ -16,21 +16,24 @@ replication stall then a kill, and a call with no backup then a kill.
 Read a failure in this order:
 
 1. **Which incident, which turn point, which sync level.** A sweep cell is named
-   `<shape>/<incident>/t<k>-<point>` ([harness-layers](harness-layers.md#the-failover-sweep)).
-   The sweep runs at the replication sync level `B2BUA_REPL_SYNC` names
-   (`applied` when unset). Under `applied` a turn's sub-points run `logged →
+   `<shape>/<level>/<incident>/t<k>-<point>` ([harness-layers](harness-layers.md#the-failover-sweep)).
+   The sweep runs every cell at both sync levels, `applied` and `off`; a
+   hand-written test runs at the level `B2BUA_REPL_SYNC` names (`applied`
+   when unset) or the one it sets (`with_sync_level`). Under `applied` a turn's sub-points run `logged →
    applied → left`, so a kill at `applied` finds the write at the backup and
    none of the turn's effects on the wire; under `off`, or past the cap, they
    run `logged → left → applied` (ADR-0055 §3, §13). The turn's `Left` mark
    says why its entry left: applied, capped, at once, or its backup lost.
    A hand-written failover test states its incident in its module doc.
-2. **Inside a declared window of that incident?** Then it is accepted, and the
-   cell still asserts the outcome: no leak, full cleanup, the CDR count. The
-   windows are opened in `failover-harness` (`sweep/cell.rs`,
-   `sweep/stall_cseq.rs`, `sweep/stall_repeat.rs`) through the
-   `accept_rfc_deviations_*` family and `accept_clean_end_requests`, each
-   justified by the §11 entry it implements. The parties' verdict per incident
-   is `sweep/outcome.rs`.
+2. **Inside a row of the window table for that incident, open in the cell's
+   tier?** Then it is accepted under the row's id, and the cell still asserts
+   the outcome: no leak, full cleanup, the CDR count. The table is
+   `failover-harness`'s `windows` module, one row per §11 bullet (`W-…`); a
+   test strikes its incident (`FailoverHarness::strike`) and is given its
+   rows. Its tier is measured: a kill of a call backed at every turn with no
+   cap hit, at `applied`, is Guaranteed and opens no row; any other cell at
+   `applied` is Degraded, and every cell at `off` is Off. `just sweep-report`
+   counts the rows and tiers of the last sweep.
 3. **Anything else is a SUT defect.** A call that ends cleanly once the incident
    struck is a pass (ADR-0055 §1, §4); a request left without its final, a
    dialog left open outside a lost call, a leak, or a CDR count outside §5 is

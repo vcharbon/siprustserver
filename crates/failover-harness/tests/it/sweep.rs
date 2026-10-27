@@ -1,6 +1,7 @@
 //! The failover sweep lane (ADR-0055 §11): the base catalogue cut at every
-//! turn point by every incident, held to `failover-sweep.ratchet`. Run by
-//! `just sweep`; the default lane leaves it out.
+//! turn point by every incident at both sync levels, judged by the window
+//! table at each cell's measured tier and held to `failover-sweep.ratchet`.
+//! Run by `just sweep`; the default lane leaves it out.
 
 use failover_harness::sweep::catalogue::*;
 

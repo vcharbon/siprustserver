@@ -1,23 +1,10 @@
-//! A stall's declared CSeq re-use (ADR-0055 §11): the stalled primary sends
+//! The predicate of `W-stall-cseq` (ADR-0055 §11): the stalled primary sends
 //! requests on a dialog its backup never learns of; the copy that serves the
 //! call after the kill sends its own at those CSeqs, each closed by the 481
 //! the dialog's peer answers.
 
 use sip_message::Method;
 use sip_net_testkit::CaptureIndex;
-
-use crate::cluster::Cluster;
-
-/// Declare, from the stall on, the copy's requests at a CSeq the stalled
-/// primary sent on the same dialog during the stall, each answered 481.
-pub(super) fn accept_cseqs_sent_during_the_stall(cluster: &mut Cluster) {
-    cluster.fh.accept_rfc_deviations_from_now_where(
-        crate::RULE_CSEQ_IN_DIALOG_ORDER,
-        reuses_a_stall_cseq,
-        "ADR-0055 §11: a stall: the copy sends at a CSeq the stalled primary used on the \
-         dialog, and the request draws a 481",
-    );
-}
 
 /// The requests a CSeq re-use is not judged on: an ACK and a CANCEL carry
 /// their INVITE's CSeq number.
@@ -26,7 +13,7 @@ const NOT_REUSED: [Method; 2] = [Method::Ack, Method::Cancel];
 /// Whether the request at index `i` of `capture` re-uses the Call-ID and CSeq
 /// number of another transaction's request captured after `opened_at` and
 /// before it, and a 481 to it follows.
-fn reuses_a_stall_cseq(i: usize, capture: &CaptureIndex, opened_at: u64) -> bool {
+pub(super) fn reuses_a_stall_cseq(i: usize, capture: &CaptureIndex, opened_at: u64) -> bool {
     let Some(key) = capture.message(i).and_then(|m| m.request_txn(&NOT_REUSED)) else {
         return false;
     };

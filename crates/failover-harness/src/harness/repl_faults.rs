@@ -28,6 +28,7 @@ impl FailoverHarness {
     /// direction buffers in order and flushes on [`heal`](Self::heal). Names
     /// each ordinal's current incarnation. Marker.
     pub fn partition(&mut self, a: &str, b: &str) {
+        self.tamper();
         let (aa, ba) = (self.repl_listen(a), self.repl_listen(b));
         self.repl_sim.apply_fault(Fault::Partition { a: aa, b: ba });
         self.mark(a, Some(b), "partition", "");
@@ -41,6 +42,7 @@ impl FailoverHarness {
     /// Names each ordinal's current incarnation; lifted by
     /// [`heal`](Self::heal). Marker.
     pub fn delay(&mut self, from: &str, to: &str, ms: u64) {
+        self.tamper();
         let (src, dst) = (self.repl_listen(from), self.repl_listen(to));
         self.repl_sim.apply_fault(Fault::Delay { src, dst, ms });
         self.mark(from, Some(to), "delay", &format!("{ms}ms on {src} → {dst}"));
@@ -52,6 +54,7 @@ impl FailoverHarness {
     /// [`resume`](Self::resume) or [`heal`](Self::heal). Names each ordinal's
     /// current incarnation. Marker.
     pub fn stall(&mut self, from: &str, to: &str) {
+        self.tamper();
         let (src, dst) = (self.repl_listen(from), self.repl_listen(to));
         self.repl_sim.apply_fault(Fault::Stall { src, dst });
         self.mark(from, Some(to), "stall", &format!("{src} → {dst} held"));

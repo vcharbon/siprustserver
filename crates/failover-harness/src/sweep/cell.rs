@@ -1,24 +1,30 @@
 //! One cell of the sweep: the shape's call placed on [`PRIMARY`], cut at one
-//! turn point by one incident, driven until the cluster holds nothing of it,
-//! and judged. Every check panics: the RFC audit and the model invariants when
-//! the harness drops; here, the parties' verdict ([`super::outcome`]), no node
-//! holding anything of the call, no limiter set left, its CDR count — exactly
-//! one, up to two in a split that never heals, one or two in a split that
-//! heals and where a backed primary is killed, at most one where an unbacked
-//! one is — and the shape's check of every CDR.
+//! turn point by one incident struck on the harness, driven until the cluster
+//! holds nothing of it, and judged by the rows of the window table its
+//! measured tier opens (ADR-0055 §11). Every check panics: the RFC audit, the
+//! model invariants and the tier gate when the harness drops; here, the
+//! parties' verdict, no node holding anything of the call, no limiter set
+//! left, its CDR count and the shape's check of every CDR. A Guaranteed cell
+//! fires no row, and the evidence rule ends none of its calls.
 
+use std::sync::Mutex;
 use std::time::Duration;
 
-use scenario_harness::actor::run_actor_scenario_observed;
+use b2bua::cdr::CdrRecord;
+use b2bua::repl::SyncLevel;
+use scenario_harness::actor::{
+    run_actor_scenario_observed, ObservedState, ScenarioVerdict, StateInner,
+};
 use scenario_harness::realcall::CallCtx;
-use sip_message::Method;
-use sip_net_testkit::{CaptureIndex, Captured};
+use sip_net_testkit::CaptureIndex;
 
-use super::parties::{Parties, ALICE};
-use super::{Incident, SweepShape};
+use super::parties::Parties;
+use super::SweepShape;
 use crate::cluster::Cluster;
+use crate::incident::Incident;
 use crate::roles::Placement;
 use crate::turn_points::{HeldTurn, Released, Turn, TurnAt, TurnPoint};
+use crate::windows::{self, CutFacts, Kind, Row, Strike, Tier};
 
 /// The worker every cell places its call on; the other is its backup.
 pub const PRIMARY: &str = "b1";
@@ -43,21 +49,43 @@ pub struct Cut {
     pub incident: Incident,
 }
 
-/// Run one cell named `name`; `None` runs the shape uncut. `report` keeps the
-/// cell's unified report under `target/seq-reports/`. Returns the turns the
-/// call took at its primary. Panics on any finding.
+/// What a cell measured, kept whether it passes or not: its tier and the
+/// rows that fired in it.
+#[derive(Clone, Debug, Default)]
+pub struct CellReport {
+    pub tier: Option<Tier>,
+    /// The ids of the rows that fired, in the order they fired, once each.
+    pub fired: Vec<&'static str>,
+    /// The evidence rule ended a call of the cell.
+    pub evidence: bool,
+}
+
+impl CellReport {
+    fn fire(&mut self, row: &'static Row) {
+        if !self.fired.contains(&row.id) {
+            self.fired.push(row.id);
+        }
+    }
+}
+
+/// Run one cell named `name` at the sync `level`; `None` runs the shape uncut.
+/// `report` keeps the cell's unified report under `target/seq-reports/`.
+/// What it measured lands in `measured` before any check. Returns the turns
+/// the call took at its primary. Panics on any finding.
 pub async fn run_cell(
     shape: &dyn SweepShape,
     name: &str,
     cut: Option<Cut>,
+    level: SyncLevel,
     report: bool,
+    measured: &Mutex<CellReport>,
 ) -> Vec<Turn> {
     let mut recipe = shape.recipe();
     if cut.is_some_and(|c| c.incident == Incident::UnbackedKilled) {
         // Every backup refuses every replica: each call has no backup.
         recipe.replica.backup.calls = Some(0);
     }
-    let mut cluster = Cluster::start(name, &recipe).await;
+    let mut cluster = Cluster::start_at(name, &recipe, level).await;
     if !report {
         cluster.fh.disarm_report_on_drop();
     }
@@ -79,6 +107,7 @@ pub async fn run_cell(
     let mut kill_pending = false;
 
     let mut verdict = None;
+    let mut struck = None;
     let mut heal_pending = false;
     let mut call_ref: Option<String> = None;
     let mut settled = Duration::ZERO;
@@ -90,10 +119,11 @@ pub async fn run_cell(
                 reached = None;
                 let held = held.expect("the turn points keep the arm");
                 let cut = cut.expect("armed");
-                if !cut.incident.splits() {
+                let strike = strike(&mut cluster, &placement, cut, held);
+                if goal_drop_row(strike, level).is_some() {
                     ctx.accept_clean_ends();
                 }
-                strike(&mut cluster, &placement, cut, held, &parties.names());
+                struck = Some(strike);
                 if cut.incident == Incident::SplitHealed {
                     heal.as_mut().reset(tokio::time::Instant::now() + HEAL_AFTER);
                     heal_pending = true;
@@ -105,7 +135,7 @@ pub async fn run_cell(
             }
             () = &mut kill, if kill_pending => {
                 kill_pending = false;
-                kill_inside_the_window(&mut cluster, &placement);
+                kill_after_the_stall(&mut cluster, &placement);
             }
             () = &mut heal, if heal_pending => {
                 heal_pending = false;
@@ -139,41 +169,54 @@ pub async fn run_cell(
     let (verdict, obs) = verdict.expect("the parties finished");
     eprintln!("[{name}] the parties ended: {verdict:?}");
     let turns = turn_points.turns(&call_ref);
-    let living: Vec<_> = cluster
-        .workers
+    let cdrs: Vec<_> = cluster
+        .nodes()
         .iter()
-        .filter(|w| w.ordinal() != placement.primary)
-        .map(|w| w.sip_addr())
+        .flat_map(|n| n.cdr_records())
+        .filter(|r| r.call_ref == call_ref)
         .collect();
-    let cut_at = cut.map(|c| {
-        let turn = turns.get(c.at.turn - 1);
-        // The sub-points reach the write applied and the effects left in the
-        // order the turn's release says: under `applied` with no cap hit the
-        // write is applied before the effects leave, else after.
-        let held_and_left = match c.at.point {
-            TurnPoint::Logged => false,
-            TurnPoint::Left => turn.is_some_and(|t| t.released == Some(Released::Applied)),
-            TurnPoint::Applied => turn.is_some_and(|t| t.released.is_some()),
-        };
-        let held = held_and_left || c.at.point == TurnPoint::Applied;
-        // The copy sees no later turn whose write the backup never applied.
-        let later_applied = turns.iter().skip(c.at.turn).any(|t| t.applied);
-        super::outcome::CutAt {
-            incident: c.incident,
-            held_and_left,
-            held,
-            on_request: turn.is_none_or(|t| t.on_request),
-            answer_in_flight: turn.is_some_and(|t| t.called_out || t.awaits_answer)
-                && !later_applied,
-            living_answered: super::answered::living_workers_answered(
-                &CaptureIndex::new(cluster.fh.sip_entries()),
-                &living,
-                cluster.node(&placement.primary).sip_addr(),
-            ),
+
+    let mut cell = CellReport { tier: cluster.fh.tier(), ..CellReport::default() };
+    for fired in cluster.fh.fired_rows() {
+        cell.fire(fired.row);
+    }
+    let mut failures = Vec::new();
+    match (cut, struck) {
+        (Some(cut), Some(strike)) => {
+            let facts = cut_facts(&cluster, &placement, cut, &turns);
+            if !verdict.is_success() {
+                match outcome_row(strike, level, &facts, &verdict, &obs) {
+                    Some(row) => cell.fire(row),
+                    None => {
+                        failures.push(format!("the parties failed: {verdict:?} {:?}", ctx.notes()))
+                    }
+                }
+            }
+            if obs.with_snapshot(StateInner::goal_dropped) {
+                if let Some(row) = goal_drop_row(strike, level) {
+                    cell.fire(row);
+                }
+            }
+            match cdr_row(strike, level, cdrs.len()) {
+                Ok(Some(row)) => cell.fire(row),
+                Ok(None) => {}
+                Err(()) => failures.push(format!("the call left {} CDRs", cdrs.len())),
+            }
         }
-    });
-    if !super::outcome::accepted(cut_at, &verdict, &obs) {
-        panic!("[{name}] the parties failed: {verdict:?} {:?}", ctx.notes());
+        _ if !verdict.is_success() => {
+            failures.push(format!("the parties failed: {verdict:?} {:?}", ctx.notes()))
+        }
+        _ if cdrs.len() != 1 => failures.push(format!("the call left {} CDRs", cdrs.len())),
+        _ => {}
+    }
+    cell.evidence = ended_on_evidence(&cdrs);
+    *measured.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = cell.clone();
+    if let Some(why) = failures.first() {
+        panic!("[{name}] {why}");
+    }
+    if cell.tier == Some(Tier::Guaranteed) && (!cell.fired.is_empty() || cell.evidence) {
+        let evidence = if cell.evidence { "; the evidence rule ended the call" } else { "" };
+        panic!("[{name}] guaranteed tier: rows fired: {}{evidence}", cell.fired.join(", "));
     }
     assert_eq!(
         call::call_ref_primary(&call_ref),
@@ -183,15 +226,6 @@ pub async fn run_cell(
     crate::assert_call_fully_released(&cluster.nodes(), &call_ref).await;
     let held = cluster.limiter.stats().current_total;
     assert_eq!(held, 0, "[{name}] the limiter still holds {held} set(s) of the call");
-    let cdrs: Vec<_> = cluster
-        .nodes()
-        .iter()
-        .flat_map(|n| n.cdr_records())
-        .filter(|r| r.call_ref == call_ref)
-        .collect();
-    if !cdr_count_accepted(cut.map(|c| c.incident), cdrs.len()) {
-        panic!("[{name}] the call left {} CDRs", cdrs.len());
-    }
     for cdr in &cdrs {
         if let Err(why) = shape.check_cdr(cdr) {
             panic!("[{name}] a CDR is wrong: {why}");
@@ -200,20 +234,36 @@ pub async fn run_cell(
     turns
 }
 
-/// Whether `n` CDRs of the call are what `incident` may leave (ADR-0055 §5):
-/// one, or for the two copies of a split that never heals each one or neither
-/// (no CDR is deduplicated, its loss in a split is accepted), for a split that
-/// heals and a kill of a backed primary one or two — the two copies', the
-/// dead primary's and the survivor's — never none, and for a call with no
-/// backup, lost with its primary as on a non-HA B2BUA, one or none.
-fn cdr_count_accepted(incident: Option<Incident>, n: usize) -> bool {
-    match incident {
-        Some(Incident::Split) => n <= 2,
-        Some(Incident::SplitHealed | Incident::PrimaryKilled | Incident::StalledKilled) => {
-            (1..=2).contains(&n)
-        }
-        Some(Incident::UnbackedKilled) => n <= 1,
-        _ => n == 1,
+/// What the cell measured of its cut turn, read by the outcome rows.
+fn cut_facts(cluster: &Cluster, placement: &Placement, cut: Cut, turns: &[Turn]) -> CutFacts {
+    let turn = turns.get(cut.at.turn - 1);
+    // The sub-points reach the write applied and the effects left in the
+    // order the turn's release says: under `applied` with no cap hit the
+    // write is applied before the effects leave, else after.
+    let held_and_left = match cut.at.point {
+        TurnPoint::Logged => false,
+        TurnPoint::Left => turn.is_some_and(|t| t.released == Some(Released::Applied)),
+        TurnPoint::Applied => turn.is_some_and(|t| t.released.is_some()),
+    };
+    let held = held_and_left || cut.at.point == TurnPoint::Applied;
+    // The copy sees no later turn whose write the backup never applied.
+    let later_applied = turns.iter().skip(cut.at.turn).any(|t| t.applied);
+    let living: Vec<_> = cluster
+        .workers
+        .iter()
+        .filter(|w| w.ordinal() != placement.primary)
+        .map(|w| w.sip_addr())
+        .collect();
+    CutFacts {
+        held_and_left,
+        held,
+        on_request: turn.is_none_or(|t| t.on_request),
+        answer_in_flight: turn.is_some_and(|t| t.called_out || t.awaits_answer) && !later_applied,
+        living_answered: super::answered::living_workers_answered(
+            &CaptureIndex::new(cluster.fh.sip_entries()),
+            &living,
+            cluster.node(&placement.primary).sip_addr(),
+        ),
     }
 }
 
@@ -227,44 +277,18 @@ fn first_call(cluster: &Cluster, name: &str) -> String {
         .unwrap_or_else(|| panic!("[{name}] no call took a turn"))
 }
 
-/// Befall the call's owners with `cut`'s incident while `held` stands at its turn
-/// point. A node the incident kills stays frozen there; any other goes on.
-/// `names` are the parties' UAs, whose dialog verdicts a split that never
-/// heals declares.
-fn strike(
-    cluster: &mut Cluster,
-    placement: &Placement,
-    cut: Cut,
-    held: HeldTurn,
-    names: &[String],
-) {
+/// Befall the call's owners with `cut`'s incident while `held` stands at its
+/// turn point, and strike it on the harness. A node the incident kills stays
+/// frozen there; any other goes on. Returns the strike.
+fn strike(cluster: &mut Cluster, placement: &Placement, cut: Cut, held: HeldTurn) -> Strike {
+    let strike = strike_of(cluster, &held, cut);
+    cluster.fh.strike(strike);
     let victim = match cut.incident {
-        // At an applied sub-point the backup holds the turn's write: the kill is
-        // inside a replication window only when the primary already wrote a
-        // later turn of the call, and declares nothing otherwise.
-        Incident::PrimaryKilled
-            if cut.at.point == TurnPoint::Applied && !wrote_past(cluster, &held, cut) =>
-        {
-            cluster.kill(&placement.primary, &placement.backup);
-            Some(placement.primary.as_str())
-        }
-        Incident::PrimaryKilled => {
-            accept_clean_end_into_ended_dialogs(cluster, names);
-            kill_inside_the_window(cluster, placement);
-            Some(placement.primary.as_str())
-        }
-        Incident::UnbackedKilled => {
-            accept_clean_end_into_ended_dialogs(cluster, names);
-            accept_reused_cseq(cluster);
-            accept_cancel_of_an_unseen_final(cluster);
+        Incident::PrimaryKilled | Incident::UnbackedKilled => {
             cluster.kill(&placement.primary, &placement.backup);
             Some(placement.primary.as_str())
         }
         Incident::StalledKilled => {
-            accept_clean_end_into_ended_dialogs(cluster, names);
-            super::stall_repeat::accept_reason_only_cancel_repeat(cluster);
-            super::stall_cseq::accept_cseqs_sent_during_the_stall(cluster);
-            accept_two_copies(cluster, names);
             cluster.fh.stall(&placement.primary, &placement.backup);
             None
         }
@@ -272,222 +296,100 @@ fn strike(
             cluster.kill(&placement.backup, &placement.primary);
             Some(placement.backup.as_str())
         }
-        Incident::Split => {
+        Incident::Split | Incident::SplitHealed => {
             cluster.split(placement);
-            accept_two_copies(cluster, names);
-            None
-        }
-        Incident::SplitHealed => {
-            cluster.split(placement);
-            accept_two_copies(cluster, names);
-            super::unseen_rseq::accept_unseen_rseq(cluster);
             None
         }
     };
     if victim != Some(held.node.as_str()) {
         held.release();
     }
+    strike
 }
 
-/// Whether the primary wrote a turn of `held`'s call after the cut's turn.
-fn wrote_past(cluster: &Cluster, held: &HeldTurn, cut: Cut) -> bool {
-    let turns = cluster.fh.turn_points().turns(&held.call_ref);
-    turns.iter().skip(cut.at.turn).any(|t| t.wrote)
+/// The strike of `cut`: inside the replication window, but for a kill of the
+/// primary at an applied sub-point past which the primary wrote no later
+/// turn — the backup then holds everything the dead primary did.
+fn strike_of(cluster: &Cluster, held: &HeldTurn, cut: Cut) -> Strike {
+    let applied_and_no_later_write = cut.at.point == TurnPoint::Applied && {
+        let turns = cluster.fh.turn_points().turns(&held.call_ref);
+        !turns.iter().skip(cut.at.turn).any(|t| t.wrote)
+    };
+    let in_window = !(cut.incident == Incident::PrimaryKilled && applied_and_no_later_write);
+    Strike::Incident { incident: cut.incident, in_window }
 }
 
-/// Kill the primary of `placement` inside the replication window: a copy may
-/// re-use, once per dialog, an in-dialog CSeq the dead primary sent before its
-/// backup applied the write, the request drawing its peer's reject, may send
-/// a reliable provisional whose RSeq does not continue the dead primary's, and
-/// may send the caller a non-2xx after the 2xx the dead primary sent her, and
-/// may CANCEL once an INVITE the dead primary saw finally answered
-/// (ADR-0055 §11).
-fn kill_inside_the_window(cluster: &mut Cluster, placement: &Placement) {
-    accept_reused_cseq(cluster);
-    accept_cancel_of_an_unseen_final(cluster);
-    accept_non_2xx_after_the_dead_owners_2xx(cluster);
-    super::unseen_rseq::accept_unseen_rseq(cluster);
+/// The stalled primary dies, inside the replication window its stall opened.
+fn kill_after_the_stall(cluster: &mut Cluster, placement: &Placement) {
+    cluster.fh.strike(Incident::PrimaryKilled);
     cluster.kill(&placement.primary, &placement.backup);
 }
 
-/// A node holding no record of what the dead primary sent — a copy whose
-/// backup never applied the write, or the node answering a response no node
-/// holds of a call that had no backup — re-uses, once per dialog, a CSeq the
-/// dead primary sent, the request drawing its peer's reject (ADR-0055 §11).
-fn accept_reused_cseq(cluster: &mut Cluster) {
-    cluster.fh.accept_rfc_deviations_once_per_dialog(
-        crate::RULE_CSEQ_IN_DIALOG_ORDER,
-        "ADR-0055 §11: a node without the dead primary's record re-uses once per dialog \
-         a CSeq the dead primary sent inside the replication window",
-    );
+/// The first outcome row `strike` opens at `level` that accepts the parties'
+/// failed `verdict`.
+fn outcome_row(
+    strike: Strike,
+    level: SyncLevel,
+    facts: &CutFacts,
+    verdict: &ScenarioVerdict,
+    obs: &ObservedState,
+) -> Option<&'static Row> {
+    windows::opened_by(strike, level).find(|row| match row.kind {
+        Kind::Outcome(accepts) => accepts(facts, verdict, obs),
+        _ => false,
+    })
 }
 
-/// A kill takes the record of a callee's final with it: the copy holds the
-/// callee's INVITE unanswered and CANCELs it once; the callee answers the
-/// CANCEL and keeps what its final left it — a dialog its own timers end, or
-/// none (ADR-0055 §11).
-fn accept_cancel_of_an_unseen_final(cluster: &mut Cluster) {
-    cluster.fh.accept_rfc_deviations_once_per_dialog_where(
-        crate::RULE_NO_CANCEL_AFTER_FINAL,
-        cancels_an_answered_invite,
-        "ADR-0055 §11: a kill: the copy's one CANCEL of an INVITE the dead primary saw finally \
-         answered changes nothing",
-    );
-}
-
-/// Whether the CANCEL at index `i` of `capture` names an INVITE an entry
-/// before it captured at or before `upto` — before the kill, for a window
-/// opened at it — answered with a final.
-fn cancels_an_answered_invite(i: usize, capture: &CaptureIndex, upto: u64) -> bool {
-    let Some(cancel) = capture.message(i).filter(|m| m.method().is_some()) else { return false };
-    let ours = |resp: &Captured| {
-        resp.status().is_some_and(|s| s >= 200) && resp.from_tag == cancel.from_tag
-    };
-    answered_before(capture, i, upto, cancel, None, ours)
-}
-
-/// A split, healed or not, leaves two copies acting, and a stall past the cap
-/// then a kill a stale copy against what the stalled primary released at the
-/// cap, each in a degraded mode only a leak check judges (ADR-0055 §11): the
-/// stale copy's requests into a dialog the other copy ended, closed by the 481
-/// they draw; one copy's CANCEL of an INVITE the other copy saw answered, its
-/// retransmissions crossing a heal included; one copy's non-2xx after the
-/// final the other copy sent the caller, under whatever To-tag, which she
-/// discards; one copy's BYE of a caller dialog it holds early, which the other
-/// copy answered. The two copies' duplicate in-dialog CSeqs are accepted from
-/// the split on ([`Cluster::split`]), the stall's from the stall on.
-fn accept_two_copies(cluster: &mut Cluster, names: &[String]) {
-    cluster.fh.accept_dialog_verdicts(
-        scenario_harness::dialogs::DIALOG_ENDED,
-        names,
-        "ADR-0055 §11: a split sends the stale copy's requests into a dialog the other copy \
-         ended, closed by the 481 they draw",
-    );
-    cluster.fh.accept_rfc_deviations_once_per_dialog_where(
-        crate::RULE_NO_CANCEL_AFTER_FINAL,
-        |i, capture, _| cancels_an_answered_invite(i, capture, u64::MAX),
-        "ADR-0055 §11: a split: one copy CANCELs an INVITE the other copy saw answered",
-    );
-    cluster.fh.accept_rfc_deviations_from_now_where(
-        RULE_UNACKED_NON_2XX,
-        |i, capture, _| non_2xx_after_another_final(i, capture),
-        "ADR-0055 §11: a split: one copy's non-2xx after the final the other copy sent, \
-         discarded",
-    );
-    cluster.fh.accept_rfc_deviations_from_now_where(
-        RULE_TAG_CONSISTENCY,
-        |i, capture, _| non_2xx_after_another_final(i, capture),
-        "ADR-0055 §11: a split: one copy's non-2xx after the final the other copy sent, \
-         under its own To-tag, discarded",
-    );
-    cluster.fh.accept_rfc_deviations_once_per_dialog(
-        "no-bye-outside-or-early-dialog",
-        "ADR-0055 §11: a split: one copy BYEs a caller dialog it holds early, which the other \
-         copy answered",
-    );
-}
-
-/// The non-2xx a node without the dead primary's record sends the caller
-/// after the 2xx the dead primary sent her: the caller discards it (RFC 6026
-/// §8.4) and owes it no ACK (ADR-0055 §11).
-fn accept_non_2xx_after_the_dead_owners_2xx(cluster: &mut Cluster) {
-    cluster.fh.accept_rfc_deviations_from_now_where(
-        RULE_UNACKED_NON_2XX,
-        non_2xx_after_the_dead_owners_2xx,
-        "ADR-0055 §11: a kill inside the replication window: the caller discards the copy's \
-         non-2xx after the 2xx the dead primary sent her",
-    );
-}
-
-/// The audit rule a caller's unACKed non-2xx INVITE final meets.
-const RULE_UNACKED_NON_2XX: &str = "unacked-invite-non-2xx-final";
-
-/// The audit rule a UAS final under a To-tag none of its provisionals carried
-/// meets.
-const RULE_TAG_CONSISTENCY: &str = "tag-consistency";
-
-/// Whether the final at index `i` of `capture` is a non-2xx to the caller's
-/// INVITE after a 2xx to that INVITE sent to her before the kill
-/// (`opened_at`).
-fn non_2xx_after_the_dead_owners_2xx(i: usize, capture: &CaptureIndex, opened_at: u64) -> bool {
-    non_2xx_after_a_2xx(i, capture, ALICE.parse().ok(), opened_at)
-}
-
-/// Whether the final at index `i` of `capture` is a non-2xx to an INVITE,
-/// sent to `to` when it is stated, after a 2xx to that INVITE sent there and
-/// captured at or before `upto`.
-fn non_2xx_after_a_2xx(
-    i: usize,
-    capture: &CaptureIndex,
-    to: Option<std::net::SocketAddr>,
-    upto: u64,
-) -> bool {
-    let (Some(entry), Some(resp)) = (capture.entry(i), capture.message(i)) else { return false };
-    if to.is_some_and(|to| entry.to != to) {
-        return false;
+/// The row `strike` opens at `level` that accepts `n` CDRs beyond the
+/// incident's own count, or `None` when no row is needed; `Err` when no row
+/// accepts them.
+fn cdr_row(strike: Strike, level: SyncLevel, n: usize) -> Result<Option<&'static Row>, ()> {
+    let own = strike.incident().map_or(1..=1, Incident::cdrs);
+    if own.contains(&n) {
+        return Ok(None);
     }
-    let answer = |r: &Captured| r.status().is_some_and(|s| (200..300).contains(&s));
-    is_invite_non_2xx(resp) && answered_before(capture, i, upto, resp, to, answer)
+    let row = windows::opened_by(strike, level).find(|row| match row.kind {
+        Kind::Cdr { min, max } => (min..=max).contains(&n),
+        _ => false,
+    });
+    row.map(Some).ok_or(())
 }
 
-/// Whether the final at index `i` of `capture` is a non-2xx to an INVITE
-/// after another final to it: a 2xx, or a non-2xx of another status.
-fn non_2xx_after_another_final(i: usize, capture: &CaptureIndex) -> bool {
-    let Some(resp) = capture.message(i) else { return false };
-    let other = |r: &Captured| r.status().is_some_and(|s| s >= 200) && r.status() != resp.status();
-    is_invite_non_2xx(resp) && answered_before(capture, i, u64::MAX, resp, None, other)
+/// The row of a goal dropped on a clean end `strike` opens at `level`.
+fn goal_drop_row(strike: Strike, level: SyncLevel) -> Option<&'static Row> {
+    windows::opened_by(strike, level).find(|row| matches!(row.kind, Kind::GoalDrop))
 }
 
-/// Whether `resp` is a non-2xx final to an INVITE.
-fn is_invite_non_2xx(resp: &Captured) -> bool {
-    resp.status().is_some_and(|s| s >= 300) && resp.cseq_method == Method::Invite
-}
-
-/// Whether an entry before index `i` of `capture`, captured at or before
-/// `upto`, is a response to the INVITE `of` names (its Call-ID and CSeq
-/// number), sent to `to` when it is stated, of which `also` holds.
-fn answered_before(
-    capture: &CaptureIndex,
-    i: usize,
-    upto: u64,
-    of: &Captured,
-    to: Option<std::net::SocketAddr>,
-    also: impl Fn(&Captured) -> bool,
-) -> bool {
-    capture.before(i).filter(|(_, e, _)| e.seq <= upto && to.is_none_or(|to| e.to == to)).any(
-        |(_, _, resp)| {
-            resp.status().is_some()
-                && resp.cseq_method == Method::Invite
-                && resp.cseq == of.cseq
-                && resp.call_id == of.call_id
-                && also(resp)
-        },
-    )
-}
-
-/// The §4 clean end BYEs every dialog the record or the evidence names, after
-/// a terminating NOTIFY of a subscription it holds; one the other owner
-/// already ended draws its 481 at the party, once each, from the incident on
-/// (ADR-0055 §11).
-fn accept_clean_end_into_ended_dialogs(cluster: &Cluster, names: &[String]) {
-    cluster.fh.accept_clean_end_requests(
-        names,
-        "ADR-0055 §11: the §4 clean end's BYE into a dialog the other owner ended, \
-         closed by the 481 it draws",
-    );
+/// Whether the evidence rule ended a call one of `cdrs` records (ADR-0055
+/// §4): it notes `evidence` as the reason of the ending it began.
+fn ended_on_evidence(cdrs: &[CdrRecord]) -> bool {
+    cdrs.iter().flat_map(|c| &c.events).any(|e| e.reason.as_deref() == Some("evidence"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn cdrs(incident: Incident, n: usize) -> Result<Option<&'static str>, ()> {
+        cdr_row(Strike::from(incident), SyncLevel::Applied, n).map(|r| r.map(|r| r.id))
+    }
+
     /// A split that heals leaves its call one CDR or two, never none; only a
     /// split that never heals may lose it.
     #[test]
     fn a_healed_split_leaves_one_cdr_or_two() {
-        assert!(!cdr_count_accepted(Some(Incident::SplitHealed), 0));
-        assert!(cdr_count_accepted(Some(Incident::SplitHealed), 1));
-        assert!(cdr_count_accepted(Some(Incident::SplitHealed), 2));
-        assert!(cdr_count_accepted(Some(Incident::Split), 0));
+        assert!(cdrs(Incident::SplitHealed, 0).is_err());
+        assert_eq!(cdrs(Incident::SplitHealed, 1), Ok(None));
+        assert_eq!(cdrs(Incident::SplitHealed, 2), Ok(Some("W-cdr-two")));
+        assert_eq!(cdrs(Incident::Split, 0), Ok(Some("W-cdr-split")));
+    }
+
+    /// A killed primary may leave two CDRs without a row (ADR-0055 §5); a
+    /// killed backup leaves one.
+    #[test]
+    fn a_killed_primary_may_leave_two_cdrs_of_its_own() {
+        assert_eq!(cdrs(Incident::PrimaryKilled, 2), Ok(None));
+        assert!(cdrs(Incident::PrimaryKilled, 0).is_err());
+        assert!(cdrs(Incident::BackupKilled, 2).is_err());
     }
 }

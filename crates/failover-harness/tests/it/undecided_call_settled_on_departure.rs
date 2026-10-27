@@ -26,7 +26,9 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use b2bua::decision::ScriptedDecisionEngine;
-use failover_harness::{assert_call_fully_released, total_cdrs_for, FailoverHarness, WorkerHealth};
+use failover_harness::{
+    assert_call_fully_released, total_cdrs_for, FailoverHarness, Transitional, WorkerHealth,
+};
 use scenario_harness::agent::Agent;
 use sip_message::header::HeaderName;
 
@@ -378,10 +380,8 @@ async fn a_route_applied_before_it_replicated_leaves_the_callee_ringing() {
     // Nothing the node writes from now on reaches its backup.
     fh.stall(&pri_ord, bak_ord);
     let mut uas = bob.receive("INVITE").await;
-    fh.accept_rfc_deviations_from_now(
-        "unacked-invite-non-2xx-final",
-        "the callee's give-up reaches neither the dead node nor the backup",
-    );
+    // The callee's give-up reaches neither the dead node nor the backup.
+    fh.strike(Transitional::UndecidedDeparture);
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
     kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
     call.expect(503).await;
@@ -426,10 +426,9 @@ async fn a_setup_cancelled_during_its_decision_draws_the_backups_503_after_its_4
     call.expect(487).await;
     fh.advance(Duration::from_millis(200)).await;
 
-    fh.accept_rfc_deviations_from_now(
-        "unacked-invite-non-2xx-final",
-        "the backup's 503 reaches a caller whose transaction completed on the 487",
-    );
+    // The backup's 503 reaches a caller whose transaction completed on the
+    // 487.
+    fh.strike(Transitional::UndecidedDeparture);
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
     kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
     fh.advance(Duration::from_secs(5)).await;

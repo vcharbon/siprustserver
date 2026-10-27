@@ -140,20 +140,15 @@ impl Cluster {
 
     /// Split the two owners of the placed call: the replication between them
     /// is cut and the proxy reads the primary dead, so the backup takes the
-    /// call's traffic while the primary runs on. Two copies can then mint one
-    /// in-dialog CSeq: the window is accepted from here (ADR-0055 §8).
+    /// call's traffic while the primary runs on (ADR-0055 §8).
     pub fn split(&mut self, placement: &Placement) {
-        self.fh.accept_rfc_deviations_from_now(
-            crate::RULE_CSEQ_IN_DIALOG_ORDER,
-            "ADR-0055 §8: two copies of a split call mint one in-dialog CSeq",
-        );
         self.fh.partition(&placement.primary, &placement.backup);
         self.proxy.set_health(&placement.primary, WorkerHealth::Dead);
     }
 
     /// Heal a [`split`](Self::split): the replication flows again and the
-    /// proxy reads the primary alive. The duplicate-CSeq window stays open:
-    /// both copies act until they meet, and both may end the call there.
+    /// proxy reads the primary alive. Both copies act until they meet, and
+    /// both may end the call there.
     pub fn heal(&mut self, placement: &Placement) {
         self.fh.heal(&placement.primary, &placement.backup);
         self.proxy.set_health(&placement.primary, WorkerHealth::Alive);

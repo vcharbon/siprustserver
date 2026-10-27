@@ -62,6 +62,7 @@ impl Puller {
                 called_out: false,
                 awaits_answer: false,
                 released: None,
+                backed: false,
             })
             .await;
     }

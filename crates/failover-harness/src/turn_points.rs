@@ -44,6 +44,9 @@ pub struct Turn {
     pub capped_by_harness: bool,
     /// The backup applied a write holding this turn's.
     pub applied: bool,
+    /// The call had a live, bootstrapped backup when the turn logged its
+    /// write.
+    pub backed: bool,
 }
 
 impl Turn {
@@ -55,6 +58,12 @@ impl Turn {
         } else {
             &[TurnPoint::Logged, TurnPoint::Left]
         }
+    }
+
+    /// The turn's outbox entry left at the cap of its own accord: not because
+    /// the backup left, nor while the harness held an applied sub-point.
+    pub fn cap_hit(&self) -> bool {
+        self.released == Some(Released::Capped) && !self.capped_by_harness
     }
 }
 
@@ -125,6 +134,14 @@ impl TurnPoints {
         self.lock().calls.get(call_ref).cloned().unwrap_or_default()
     }
 
+    /// Every call's turns at its primary so far, in the order the calls took
+    /// their first turn.
+    pub fn calls(&self) -> Vec<(String, Vec<Turn>)> {
+        let inner = self.lock();
+        let turns = |c: &String| inner.calls.get(c).cloned().unwrap_or_default();
+        inner.order.iter().map(|c| (c.clone(), turns(c))).collect()
+    }
+
     /// The first call that took a turn, with its turns so far.
     pub fn first_call(&self) -> Option<(String, Vec<Turn>)> {
         let inner = self.lock();
@@ -169,6 +186,7 @@ impl Inner {
                     released,
                     capped_by_harness,
                     applied,
+                    backed: mark.backed,
                 });
                 Some(turns.len())
             }

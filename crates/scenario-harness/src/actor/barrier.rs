@@ -1,9 +1,12 @@
 //! The [`Barrier`] a goal waits on before it fires: a guard over the observed
-//! multi-endpoint state.
+//! multi-endpoint state, and [`await_pred`], the wait on one.
 
 use std::sync::Arc;
 
-use super::state::{LegPhase, StateInner};
+use tokio::time::Instant;
+
+use super::state::{LegPhase, ObservedState, StateInner};
+use crate::StepError;
 
 /// A barrier guard over the observed multi-endpoint state.
 #[derive(Clone)]
@@ -65,6 +68,42 @@ impl std::fmt::Debug for Barrier {
             Barrier::None => f.write_str("Barrier::None"),
             Barrier::AllConfirmed(roles) => write!(f, "Barrier::AllConfirmed({roles:?})"),
             Barrier::Pred { name, .. } => write!(f, "Barrier::Pred({name:?})"),
+        }
+    }
+}
+
+/// Await a predicate over the observed state, re-checked on every `tick`,
+/// bounded by `deadline`. `who` names the barrier for the timeout `StepError`
+/// (a bounded label the case-keyer accepts — never free-form gap text).
+///
+/// **Lost-wake hazard**: `Notify::notified()` only registers the waiter when it
+/// is first polled, not at creation, so a naive `if !pred { notified().await }`
+/// loses a `notify_waiters` fired in the check→await gap. We pin the future and
+/// `enable()` it — registering NOW — *before* reading the predicate, so no tick
+/// between the read and the park is missed. (Under tokio auto-advance a missed
+/// tick would silently leap the clock to `deadline` → a spurious timeout.)
+pub async fn await_pred<F>(
+    obs: &ObservedState,
+    who: &'static str,
+    pred: F,
+    deadline: Instant,
+) -> Result<(), StepError>
+where
+    F: Fn(&StateInner) -> bool,
+{
+    loop {
+        let notified = obs.tick.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable(); // register BEFORE the predicate read
+        if obs.with_snapshot(&pred) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(StepError::timeout(who, None, format!("the call state to reach {who}")));
+        }
+        tokio::select! {
+            _ = &mut notified => {}
+            _ = tokio::time::sleep_until(deadline) => {}
         }
     }
 }

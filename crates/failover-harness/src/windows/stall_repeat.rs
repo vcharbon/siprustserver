@@ -1,32 +1,19 @@
-//! A stall's declared repeat (ADR-0055 §11): the copy sends again a CANCEL
-//! the stalled primary sent, the two the same message but for the Reason
-//! header field each node states on its own.
+//! The predicate of `W-stall-cancel-reason` (ADR-0055 §11): the copy sends
+//! again a CANCEL the stalled primary sent, the two the same message but for
+//! the Reason header field each node states on its own.
 
 use sip_message::sniff::{equal_except, Except};
 use sip_message::Method;
 use sip_net_testkit::CaptureIndex;
 
-use crate::cluster::Cluster;
-
 /// The audit rule a retransmission that is not byte-identical meets.
-const RULE_RUNG_BYTE_IDENTICAL: &str = "rung-byte-identical";
-
-/// Declare, from the stall on, the copy's repeat of a CANCEL that differs
-/// from the dead owner's only in its Reason header field.
-pub(super) fn accept_reason_only_cancel_repeat(cluster: &mut Cluster) {
-    cluster.fh.accept_rfc_deviations_from_now_where(
-        RULE_RUNG_BYTE_IDENTICAL,
-        |i, capture, _| reason_only_cancel_repeat(i, capture),
-        "ADR-0055 §11: a stall: the copy's repeat of a CANCEL differs from the dead owner's \
-         only in its Reason",
-    );
-}
+pub(super) const RULE_RUNG_BYTE_IDENTICAL: &str = "rung-byte-identical";
 
 /// Whether the entry at index `i` of `capture` is a CANCEL whose first copy
 /// before it — same transaction, sent to the same address — differs from it
 /// in the Reason header field and nowhere else, the stamps a relaying hop
 /// leaves on the Via below its own (RFC 3261 §18.2.1, RFC 3581 §4) apart.
-fn reason_only_cancel_repeat(i: usize, capture: &CaptureIndex) -> bool {
+pub(super) fn reason_only_cancel_repeat(i: usize, capture: &CaptureIndex) -> bool {
     let cancel_txn = |i: usize| {
         capture
             .message(i)
@@ -44,8 +31,8 @@ fn reason_only_cancel_repeat(i: usize, capture: &CaptureIndex) -> bool {
 mod tests {
     use sip_net_testkit::RecordedSipEntry;
 
-    use super::super::parties::ALICE;
     use super::*;
+    use crate::sweep::ALICE;
 
     fn entry(seq: u64, raw: &str) -> RecordedSipEntry {
         RecordedSipEntry {

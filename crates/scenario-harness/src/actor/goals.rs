@@ -14,9 +14,10 @@ use tokio::time::Instant;
 use sip_message::generators::InDialogMethod;
 use sip_template::{EmitOpts, MessageTemplate};
 
+use super::barrier::await_pred;
 pub use super::barrier::Barrier;
 use super::endpoint::ForkWinner;
-use super::state::{await_pred, ObservedState};
+use super::state::ObservedState;
 use crate::realcall::InvitePlan;
 use crate::StepError;
 

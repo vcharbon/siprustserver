@@ -35,6 +35,8 @@
 //!   virtual-time advance, `finish()` + the RFC hard gate.
 //! - `dialog_gate` — `finish()`'s gate on the UAs' dialog verdicts
 //!   ([`crate::dialogs`]) and the `dialog-…` waivers that opt one out.
+//! - `dialog_views` — the dialog verdicts a waiver covered, for a wrapping
+//!   harness.
 //! - `run_guards` — the RFC audit hard gate: its findings, its panic text,
 //!   the forgot-to-`finish` backstop.
 //! - `failure_dump` — the panic-time dump of a failing run: the digest line,
@@ -78,6 +80,7 @@ mod client_txn;
 mod cseq_applier;
 mod dialog;
 pub(crate) mod dialog_gate;
+mod dialog_views;
 mod failure_dump;
 mod harness;
 mod ids;

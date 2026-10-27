@@ -17,7 +17,7 @@ no real sockets, no real wall-clock dependence.
 | 3 | `sip-net-testkit` | `SimulatedSignalingNetwork` — in-process datagram fabric keyed by `SocketAddr`, per-hop transit delay (0 is coerced to 1 ms — see the clock guide), `SendFault` + per-bind `PreIngress` hooks for drop/synthetic-reply injection. Plus `rfc_audit`: the RFC 3261/3262/3264 post-call rule suite (~77 rules, subject-dispatched per bind role, advisory/gating lanes) behind the single evaluator `evaluate_rfc_findings` (`evaluate_rfc_audit` adds each rule's population: occasions, decided, hits). |
 | 4 | `scenario-harness` | The fluent dialog DSL. `Harness` owns the recording-wrapped sim net, `Clock::test_at(0)`, and three RAII guards (`CseqGate`: RFC hard gate even if you forget `finish()`; `FailureDump`: the failure dump on panic, see [Reading a failure](#reading-a-failure); `ArtifactDump`: full report artifacts on any drop without `finish()`, gated by `SCENARIO_ARTIFACT_DIR`). `Agent` is a fake UA that auto-fills Via/tags/CSeq/Contact per RFC 3261. `callflow` is the canonical INVITE/180/200/ACK choreography (`establish`, `hangup`, `Call::new(..).no_ring()`). Default transit is **100 ms** (`Harness::new`), so traces show `received = sent + 100`. |
 | 5 | `b2bua-harness` | Binds a **real `B2buaCore`** as the SUT. `B2buaSut` (`route_all_to`, metrics, `cdr_records`), `B2buaScene` (alice :5060 / bob :5070 / b2bua :5080, the first three addresses of its harness's allocator; `establish`/`hangup`/`finish`, which runs the leak oracle), `settle_until` (bounded yield-poll to drain async teardown), and the **`assert_fully_reaped` leak oracle**: creations == removals, `active_calls == 0`, `lock_count == 0`, reaper touched-ledger empty, no setup-CANCEL mark, every limiter hold released once and the limiter store empty. Every `B2buaSut` traces every call (`failure_view::trace_every_call`; `B2buaSutBuilder::untraced` for a cost measurement) and adds its timer ledger and model-invariant record to the failure dump. |
-| 6 | `failover-harness` | The full HA stack under ONE paused clock: a **real LB `ProxyCore`** + N replicating `b2bua` workers over a simulated replication fabric, one shared `EventSequencer` across the SIP + repl planes. Fault primitives: `crash()`, `reboot()` (fresh SIP IP, **hard-asserts pristine**), repl `partition`/`heal`/`delay` (named on two workers, they reach every replication stream between the two nodes, present and future — the fabric attributes a puller's ephemeral local to its node), SIP-plane `cut_signalling`/`restore_signalling`, `set_health`, `with_worker_clock_offset` (deterministic inter-node wall skew — see the clock guide), and `with_worker_tune` (a `B2buaConfig` mutator re-applied on every worker spawn AND reboot). Membership primitives: `withdraw(ord)`/`readmit(ord, addr)` (the orchestrator takes an endpoint out of the proxy's registry AND every peer's membership while the process keeps running), `spawn_replacement(ord)` (a second live incarnation of one ordinal, gen+1, fresh SIP + repl addresses, peers re-pointed at it), `force_delete(ord)` (a replacement plus the ordinal re-bound to its worker identity in one step, the elder still running — every member is bound to its newest incarnation's identity, `b1#g2`), `begin_drain` / `begin_drain_pending` (the drain left in flight, so the timeline runs inside the shutdown window). The **views ledger** records what the orchestrator, the proxy and each incarnation believed about each worker — written by those primitives and by a sampler that reads the live components after every advance chunk — and the report renders it as a views table plus the disagreements it found. Cluster invariants: `assert_single_owner`, `assert_call_fully_over`, `assert_call_fully_released`, the `transparent_matrix!` differential oracle. ADR-0055 §13 verbs: turn points (`turn_points()`: arm one sub-point of one turn, get the turn held there) and the `Cluster` (`place_next_call` on a named primary, `steer` to a role by health, kill or partition, `view` by role). The failover sweep (`failover_sweep!`, ADR-0055 §11) cuts a catalogue of shapes at every turn point by each incident and holds the failing cells to a ratchet, in its own lane (`just sweep`). Transit is 1 ms; its `advance` is `testkit::pump_sampled` (settled 100 ms chunks). |
+| 6 | `failover-harness` | The full HA stack under ONE paused clock: a **real LB `ProxyCore`** + N replicating `b2bua` workers over a simulated replication fabric, one shared `EventSequencer` across the SIP + repl planes. Fault primitives: `crash()`, `reboot()` (fresh SIP IP, **hard-asserts pristine**), repl `partition`/`heal`/`delay` (named on two workers, they reach every replication stream between the two nodes, present and future — the fabric attributes a puller's ephemeral local to its node), SIP-plane `cut_signalling`/`restore_signalling`, `set_health`, `with_worker_clock_offset` (deterministic inter-node wall skew — see the clock guide), and `with_worker_tune` (a `B2buaConfig` mutator re-applied on every worker spawn AND reboot). Membership primitives: `withdraw(ord)`/`readmit(ord, addr)` (the orchestrator takes an endpoint out of the proxy's registry AND every peer's membership while the process keeps running), `spawn_replacement(ord)` (a second live incarnation of one ordinal, gen+1, fresh SIP + repl addresses, peers re-pointed at it), `force_delete(ord)` (a replacement plus the ordinal re-bound to its worker identity in one step, the elder still running — every member is bound to its newest incarnation's identity, `b1#g2`), `begin_drain` / `begin_drain_pending` (the drain left in flight, so the timeline runs inside the shutdown window). The **views ledger** records what the orchestrator, the proxy and each incarnation believed about each worker — written by those primitives and by a sampler that reads the live components after every advance chunk — and the report renders it as a views table plus the disagreements it found. Cluster invariants: `assert_single_owner`, `assert_call_fully_over`, `assert_call_fully_released`, the `transparent_matrix!` differential oracle. ADR-0055 §13 verbs: turn points (`turn_points()`: arm one sub-point of one turn, get the turn held there) and the `Cluster` (`place_next_call` on a named primary, `steer` to a role by health, kill or partition, `view` by role). The failover sweep (`failover_sweep!`, ADR-0055 §11) cuts a catalogue of shapes at every turn point by each incident at each sync level, judges each cell by the window table at its measured tier, and holds the failing cells to a ratchet, in its own lane (`just sweep`). Transit is 1 ms; its `advance` is `testkit::pump_sampled` (settled 100 ms chunks). |
 | 7 | `ha-harness` | The replication engine alone — **no SIP, no router, no rules**. `HaCluster`/`HaNode` with put/delete/crash/reboot/partition, convergence assertions, `ReplReport`. |
 
 Note the crate boundary people trip on: `callflow`/`Harness`/`Agent` live in
@@ -50,19 +50,19 @@ Automatic (you cannot opt out, only waive per-rule):
   every such waived SUT finding. See the default test requirements in
   [CLAUDE.md](../../CLAUDE.md), which forbid waiving a finding the SUT caused
   unless it is an accepted deviation.
-  `failover-harness` adds one narrower scope for a **declared window** of
+  `failover-harness` adds one narrower scope for the **window table** of
   [ADR-0055](../adr/0055-services-are-ha-blind.md) §11, the only SUT-side
-  deviations an incident may cause:
-  `accept_rfc_deviations_from_now(rule, justification)` (and the `_where`,
-  `_seeing` and `accept_rfc_deviations_once_per_dialog*` variants that narrow
-  what it admits) accepts the rule only on messages
-  captured inside the window (armed when the incident strikes), and
-  `resume_rfc_gate(rule)` closes it. What they accepted is listed in
-  `accepted_rfc_deviations()` and in the unified report as advisory; the rule
-  keeps gating on establishment and on every fault-free run. It is not a
-  waiver hatch: a window needs its §11 entry and the test's own assertion on
-  the outcome (no leak, full cleanup, the CDR count). A SUT-side deviation no
-  §11 entry declares is a bug to fix, never a window.
+  deviations an incident may cause: a test strikes the incident it causes
+  (`FailoverHarness::strike(incident)`), and the rows of that incident open
+  their RFC windows and dialog-verdict waivers on the messages captured from
+  then on. The run's measured tier decides, when the harness drops, which of
+  the rows that fired it accepts: none in the Guaranteed tier. What they
+  accepted is listed in `accepted_rfc_deviations()` and `fired_rows()`, each
+  with its row, and in the unified report as advisory; the rule keeps gating
+  on establishment and on every fault-free run. A test never picks a window:
+  a SUT-side deviation no row declares is a bug to fix, never a window. A
+  party that plays a broken peer by construction opts out with
+  `allow_rfc_violation(rule, justification)`, the justification recorded.
 - **Dialog table** — every simulated UA (an `Agent`, the reactive actor's
   agents, the load lane's) keeps an RFC 3261 §12 dialog table
   (`scenario_harness::dialogs`), fed by every message it sends, sights,
@@ -141,7 +141,10 @@ without its final or a dialog left open still fails the call.
 
 `failover-harness::sweep` is the in-process proof of
 [ADR-0055](../adr/0055-services-are-ha-blind.md) §11, in a lane of its own:
-`just sweep` (nextest profile `sweep`), on the paused clock.
+`just sweep` (nextest profile `sweep`), on the paused clock, one test per
+shape, incident and sync level (`failover_sweep::<shape>::<level>::<incident>`).
+A test past 30 s or a lane adding minutes to `just test` keeps it out of the
+default lane: the upstream sweep alone is about 45 CPU-minutes.
 
 - **Shapes.** A catalogue of call shapes (`sweep::catalogue`), each a
   `SweepShape`: how the cluster decides the call and what the actor parties
@@ -152,20 +155,29 @@ without its final or a dialog left open still fails the call.
   replication), `Left` (the turn's effects sent) and `Applied` (the write
   applied at the backup; only for a turn that wrote). The harness holds the
   turn at the armed sub-point until the incident struck (`turn_points`).
-- **Incidents.** `sweep::Incident`: primary killed, backup killed, split,
-  split healed, stalled then killed, unbacked then killed. A cell is named
-  `<shape>/<incident>/t<k>-<point>`.
-- **Verdict.** Every cell requires no leak on any node or in the limiter and
-  its incident's CDR count. A split, healed or not, is judged on that alone;
-  every other cell also requires an RFC-clean call the parties judge as their
-  play declares, a clean end included once the incident struck
-  (`sweep/outcome.rs`). Only the incident's declared windows are accepted
-  (`sweep/cell.rs`).
+- **Incidents.** `failover_harness::Incident`: primary killed, backup
+  killed, split, split healed, stalled then killed, unbacked then killed. A
+  cell is named `<shape>/<level>/<incident>/t<k>-<point>`.
+- **Verdict.** Every cell requires no leak on any node or in the limiter, an
+  RFC-clean call the parties judge as their play declares, and one CDR, or
+  two when the primary dies. The cell strikes its incident on the harness and
+  is given the incident's rows of the window table (`failover_harness::windows`:
+  RFC windows, dialog-verdict waivers, party outcomes, the clean-end goal
+  drop, CDR counts); its measured tier (`windows::tier`) decides which of the
+  rows that fired it accepts. A Guaranteed cell fires none, and the evidence
+  rule ends none of its calls. Each row names an upstream witness cell that
+  must fire it.
 - **Ratchet.** `failover-sweep.ratchet` beside the crate's manifest (and a
   consumer's own) lists the cells that fail today, each with the ADR-0055
-  section that owns its correction (`sweep::Ratchet`). The lane fails on a
-  failing cell the ratchet does not list and on a listed cell that passes, so
-  the list only shrinks. An empty ratchet is the steady state.
+  section that owns its correction and its cause, and each test's count of
+  Guaranteed cells (`sweep::Ratchet`). A test fails on a failing cell the
+  ratchet does not list, on a listed cell that passes and on a Guaranteed
+  count other than the listed one, so the list only shrinks. An empty list of
+  cells is the steady state.
+- **Report.** Each test writes what its cells measured to
+  `target/sweep-report/<test>.json`; `just sweep-report` adds them into counts
+  per row and per tier, and lists the failing Guaranteed cells. It gates
+  nothing.
 
 ## Cookbook
 
@@ -295,7 +307,7 @@ uses.
 | `crates/scenario-harness/src/callflow.rs` module doc | The reusable choreography — "use these; don't re-type the dance" |
 | `crates/b2bua-harness/src/lib.rs` — `B2buaScene` + `assert_fully_reaped` docs | The scene's addresses, the six-check leak oracle |
 | `crates/failover-harness/src/lib.rs` + `src/harness.rs` | Cluster invariants, `transparent_matrix!`, `worker_clock_offsets` design |
-| `crates/failover-harness/src/sweep/mod.rs` + `sweep/outcome.rs` module docs | The failover sweep: cells, CDR counts, the parties' verdict per incident |
+| `crates/failover-harness/src/sweep/mod.rs` + `windows/` module docs | The failover sweep: cells, tiers, the window table and its rows |
 | `crates/ha-harness/src/lib.rs` module doc | Pure repl-plane harness |
 | `crates/http-net-testkit/src/scripted/mod.rs` module doc | The scripted HTTP service: program, continuation token and its codec (ADR-0036), faults, hard-failure rule |
 | `crates/http-net-testkit/src/recording.rs` module doc | HTTP on the `Recorder`: the client and served sides, abandoned exchanges, pairing |

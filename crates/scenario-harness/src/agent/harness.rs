@@ -79,7 +79,7 @@ pub struct Harness {
     /// fixture where a simulated peer intentionally emits non-conforming SIP).
     /// The hard gate drops each finding a waiver covers. Shared (`Rc`) with
     /// [`CseqGate`] so waivers registered before `finish`/Drop are honoured by both.
-    waivers: Rc<RefCell<Vec<WaiverState>>>,
+    pub(super) waivers: Rc<RefCell<Vec<WaiverState>>>,
     /// Per-`recv` wait bound handed to every [`Agent`] this harness binds. Small
     /// under a paused (simulated) clock — a parked `recv` auto-advances virtual
     /// time, so the bound only catches a genuinely stuck flow. A *real*-clock
@@ -95,7 +95,7 @@ pub struct Harness {
     finish_settles: RefCell<Vec<Pin<Box<dyn Future<Output = ()>>>>>,
     /// The dialog judge of every UA this harness bound; [`finish`](Self::finish)
     /// gates their verdicts and the failure dump shows their tables.
-    judges: Judges,
+    pub(super) judges: Judges,
     /// Every UA this harness bound, its socket not held: `finish` sights what
     /// each still has queued, so an unread request meets its dialog table.
     bound: RefCell<Vec<WeakAgent>>,

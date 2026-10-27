@@ -11,6 +11,7 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
 use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
+use b2bua::repl::SyncLevel;
 use b2bua::rules::{ComposeOptions, ServiceDef};
 use call::LimiterEntry;
 use call_limiter::{CallStore, LimiterMetrics, LimiterServer};
@@ -117,6 +118,12 @@ impl Cluster {
     /// proxy runs no health probe: its view of a worker changes only by the
     /// verbs of [`crate::roles`].
     pub async fn start(name: &str, recipe: &ClusterRecipe) -> Cluster {
+        Self::start_at(name, recipe, crate::harness::sync_level_from_env()).await
+    }
+
+    /// [`start`](Self::start), every worker at the replication sync `level`
+    /// rather than the one `B2BUA_REPL_SYNC` names.
+    pub async fn start_at(name: &str, recipe: &ClusterRecipe, level: SyncLevel) -> Cluster {
         let http = SimulatedHttpNetwork::new();
         // The production lease: a set no owner refreshes any more is freed by
         // its lease (ADR-0040).
@@ -134,7 +141,8 @@ impl Cluster {
             .with_worker_services(recipe.services)
             .with_worker_compose(recipe.compose.clone())
             .with_worker_tune(move |c| tune(c))
-            .with_worker_replica(recipe.replica);
+            .with_worker_replica(recipe.replica)
+            .with_sync_level(level);
         if let Some(port) = &recipe.adaptation_http {
             fh = fh.with_worker_adaptation_http(port(&http));
         }

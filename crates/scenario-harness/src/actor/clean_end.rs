@@ -30,12 +30,16 @@ pub(super) fn ends_own_subscription(st: &ActorState<'_>, notify: &SipRequest) ->
 /// The system under test ended this party cleanly — a non-2xx final to her
 /// establishing INVITE, a BYE she answered 200, a NOTIFY ending her
 /// subscription ([`ends_own_subscription`]). Returns whether the call
-/// accepts it: her goals are then dropped.
+/// accepts it: her goals are then dropped, and an action among them is
+/// recorded dropped.
 pub(super) fn end_cleanly(st: &mut ActorState<'_>, now: Instant) -> bool {
     if !st.ctx.clean_ends_accepted() {
         return false;
     }
     st.obs.record(Observation::EndedCleanly { caller: st.originates }, now);
+    if st.goals.remaining_steps().any(|step| !step.is_reception()) {
+        st.obs.record(Observation::GoalDropped, now);
+    }
     st.goals.abandon();
     true
 }

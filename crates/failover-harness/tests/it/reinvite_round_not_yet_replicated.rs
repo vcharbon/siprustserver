@@ -158,16 +158,10 @@ async fn a_round_answered_2xx_before_it_replicated_is_acknowledged_and_the_call_
     lost.ended_on_both_legs().await;
 
     // The callee's §13.3.1.4 ladder, as if the ACK were lost: the call is ended.
-    lost.fh.accept_clean_end_requests(
-        &["bob".to_string()],
-        "ADR-0055 §11: a 2xx repeat no node holds draws a BYE into the dialog the copy \
-         ended, closed by its 481",
-    );
-    lost.fh.accept_rfc_deviations_once_per_dialog(
-        failover_harness::RULE_CSEQ_IN_DIALOG_ORDER,
-        "ADR-0055 §11: the BYE of a 2xx no node holds is numbered from the 2xx, \
-         re-using the copy's BYE number on the dialog it ended",
-    );
+    // A 2xx repeat no node holds draws a BYE into the dialog the copy ended,
+    // closed by its 481, numbered from the 2xx: the copy's BYE number re-used
+    // on that dialog.
+    lost.fh.strike(failover_harness::Incident::PrimaryKilled);
     let mut gap = T1;
     let mut elapsed = Duration::ZERO;
     while elapsed + gap < 64 * T1 {

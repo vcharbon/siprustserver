@@ -27,6 +27,8 @@ pub(super) struct ReplWiring {
     pub(super) dead_peer_ttl_ms: i64,
     /// The node's replication tunables, the same on every incarnation.
     pub(super) replica: b2bua::ReplicaConfig,
+    /// The sync level the node's write path runs at.
+    pub(super) sync: b2bua::repl::SyncLevel,
 }
 
 impl super::FailoverHarness {
@@ -79,7 +81,7 @@ impl ReplWiring {
             puller: PullerConfig::default(),
             serve: ServeConfig::default(),
             replica: self.replica,
-            write_path: write_path(),
+            write_path: b2bua::repl::WritePath { sync: self.sync, ..Default::default() },
         };
         (setup, store, sim_membership)
     }
@@ -99,13 +101,11 @@ impl ReplWiring {
     }
 }
 
-/// The write path every worker runs: the default, at the sync level
-/// `B2BUA_REPL_SYNC` names when set (`off` | `applied`), so the sweep runs at
-/// either level.
-fn write_path() -> b2bua::repl::WritePath {
-    let sync = std::env::var("B2BUA_REPL_SYNC")
+/// The sync level `B2BUA_REPL_SYNC` names (`off` | `applied`), else the write
+/// path's default.
+pub(crate) fn sync_level_from_env() -> b2bua::repl::SyncLevel {
+    std::env::var("B2BUA_REPL_SYNC")
         .ok()
-        .map(|level| level.parse().unwrap_or_else(|why| panic!("B2BUA_REPL_SYNC: {why}")));
-    let d = b2bua::repl::WritePath::default();
-    b2bua::repl::WritePath { sync: sync.unwrap_or(d.sync), ..d }
+        .map(|level| level.parse().unwrap_or_else(|why| panic!("B2BUA_REPL_SYNC: {why}")))
+        .unwrap_or_default()
 }

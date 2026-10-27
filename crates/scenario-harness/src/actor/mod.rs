@@ -91,6 +91,7 @@ pub use endpoint::{
 pub use runner::{run_actor, ActorFailure, ActorState};
 pub use shared_endpoint::{EndpointHandle, EndpointPump, Inbox};
 
+pub use barrier::await_pred;
 pub use delta::{
     AcceptedDelta, AcceptedDeltaPolicy, DeltaContext, DeltaDecision, DeltaReaction, DialogSnapshot,
     ExpectedStimulus, ObservedStimulus,
@@ -107,8 +108,8 @@ pub use spec::{
     ActorCall, ActorScenario, STEP_TIMEOUT,
 };
 pub use state::{
-    await_pred, LegObservation, LegPhase, Observation, ObservedState, RecordedFinal, ReplayEntry,
-    RequestFact, ResponseFact, StateInner, SubflowState,
+    LegObservation, LegPhase, Observation, ObservedState, RecordedFinal, ReplayEntry, RequestFact,
+    ResponseFact, StateInner, SubflowState,
 };
 pub use verdict::{verdict, FailedAt, ScenarioVerdict};
 

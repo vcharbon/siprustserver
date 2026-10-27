@@ -22,7 +22,6 @@ use tokio::sync::Notify;
 use tokio::time::Instant;
 
 use super::ledger::{ObligationKey, ObligationLedger};
-use crate::StepError;
 
 pub use super::facts::{RequestFact, ResponseFact};
 pub use super::replay_record::{RecordedFinal, ReplayEntry};
@@ -191,6 +190,8 @@ pub struct StateInner {
     accepted_ending: bool,
     /// The system under test ended the caller cleanly ([`Observation::EndedCleanly`]).
     caller_ended_cleanly: bool,
+    /// A party the system under test ended cleanly dropped an action goal.
+    goal_dropped: bool,
     /// The replay record: observed-vs-expected finals + reactor-serviced strays
     /// (append-only, diagnostic — never gates the verdict).
     replay: Vec<ReplayEntry>,
@@ -203,6 +204,7 @@ impl StateInner {
             ledger: ObligationLedger::default(),
             accepted_ending: false,
             caller_ended_cleanly: false,
+            goal_dropped: false,
             replay: Vec::new(),
         }
     }
@@ -234,6 +236,13 @@ impl StateInner {
     /// accepts clean ends: every remaining phase barrier is then moot.
     pub fn caller_ended_cleanly(&self) -> bool {
         self.caller_ended_cleanly
+    }
+
+    /// Whether a party the system under test ended cleanly, the caller or
+    /// another, dropped a goal that was still an action of hers to take
+    /// ([`Observation::GoalDropped`]).
+    pub fn goal_dropped(&self) -> bool {
+        self.goal_dropped
     }
 
     /// Whether `role` holds no live dialog: none ever (no early or confirmed
@@ -362,6 +371,9 @@ pub enum Observation {
     /// clean ends ([`CallCtx::accept_clean_ends`](crate::realcall::CallCtx::accept_clean_ends));
     /// `caller` when that party originates the call.
     EndedCleanly { caller: bool },
+    /// A party the system under test ended cleanly dropped a goal that was
+    /// still an action of hers to take, not a reception the end made moot.
+    GoalDropped,
     /// `leg` sent a CANCEL for its establishing INVITE.
     CancelSent { leg: &'static str },
     /// A named sub-flow advanced (re-INVITE realign / refer / early-PRACK tracking).
@@ -444,6 +456,7 @@ impl StateInner {
             }
             Observation::AcceptedEnding => self.accepted_ending = true,
             Observation::EndedCleanly { caller } => self.caller_ended_cleanly |= caller,
+            Observation::GoalDropped => self.goal_dropped = true,
             Observation::CancelSent { leg } => self.leg_mut(leg).cancel_sent = true,
             Observation::Subflow { leg, name, to } => self.leg_mut(leg).advance_subflow(name, to),
             Observation::RenegCompleted { leg, dialog, cseq } => {
@@ -512,7 +525,9 @@ impl StateInner {
 #[derive(Clone)]
 pub struct ObservedState {
     inner: Arc<Mutex<StateInner>>,
-    tick: Arc<Notify>,
+    /// Fired on every mutation: what [`await_pred`](super::barrier::await_pred)
+    /// parks on.
+    pub(super) tick: Arc<Notify>,
 }
 
 impl ObservedState {
@@ -585,41 +600,5 @@ impl ObservedState {
 impl Default for ObservedState {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Await a predicate over the observed state, re-checked on every `tick`,
-/// bounded by `deadline`. `who` names the barrier for the timeout `StepError`
-/// (a bounded label the case-keyer accepts — never free-form gap text).
-///
-/// **Lost-wake hazard**: `Notify::notified()` only registers the waiter when it
-/// is first polled, not at creation, so a naive `if !pred { notified().await }`
-/// loses a `notify_waiters` fired in the check→await gap. We pin the future and
-/// `enable()` it — registering NOW — *before* reading the predicate, so no tick
-/// between the read and the park is missed. (Under tokio auto-advance a missed
-/// tick would silently leap the clock to `deadline` → a spurious timeout.)
-pub async fn await_pred<F>(
-    obs: &ObservedState,
-    who: &'static str,
-    pred: F,
-    deadline: Instant,
-) -> Result<(), StepError>
-where
-    F: Fn(&StateInner) -> bool,
-{
-    loop {
-        let notified = obs.tick.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable(); // register BEFORE the predicate read
-        if obs.with_snapshot(&pred) {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(StepError::timeout(who, None, format!("the call state to reach {who}")));
-        }
-        tokio::select! {
-            _ = &mut notified => {}
-            _ = tokio::time::sleep_until(deadline) => {}
-        }
     }
 }

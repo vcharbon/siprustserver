@@ -98,6 +98,12 @@ impl WaiverScope {
         self
     }
 
+    /// Narrow a dialog-verdict waiver to the verdicts recorded from now on.
+    pub fn from_now(mut self) -> Self {
+        self.since = Some(tokio::time::Instant::now());
+        self
+    }
+
     /// Narrow a dialog-verdict waiver to the verdicts recorded from now on,
     /// at most one per dialog.
     pub fn from_now_once_per_dialog(mut self) -> Self {

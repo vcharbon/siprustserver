@@ -3,7 +3,7 @@
 //! user part, and a shape left out of the split that never heals.
 
 use failover_harness::cluster::{Cluster, ClusterRecipe};
-use failover_harness::sweep::{sweep, Incident, Parties, Ratchet, SweepShape, BOB};
+use failover_harness::sweep::{sweep, Incident, Parties, Ratchet, SweepShape, SyncLevel, BOB};
 use scenario_harness::actor::ActorScenario;
 
 /// A shape left out of the split that never heals, whose call no cell may
@@ -41,5 +41,5 @@ async fn callee_roles_sharing_bob_s_address_are_bound_in_the_call_s_environment(
 #[test]
 fn a_shape_left_out_of_the_unhealed_split_runs_no_cell_of_it() {
     let ratchet = Ratchet::load(concat!(env!("CARGO_MANIFEST_DIR"), "/no-such.ratchet"));
-    sweep(&Unsplit, Incident::Split, &ratchet);
+    sweep(&Unsplit, Incident::Split, SyncLevel::Applied, &ratchet);
 }

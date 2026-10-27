@@ -1,7 +1,7 @@
 //! The RFC audit gates of a [`FailoverHarness`] run: the endpoint-scoped
-//! cross-message audit every cell runs, the full per-bind suite a via-LB test
-//! opts into, and the acceptance windows that keep a declared deviation from
-//! gating.
+//! cross-message audit every cell runs, and the full per-bind suite a via-LB
+//! test opts into. A deviation an incident causes is accepted only by the
+//! window a strike opened ([`FailoverHarness::strike`]).
 
 use std::collections::HashSet;
 
@@ -9,80 +9,9 @@ use layer_harness::Stamped;
 use sip_net_testkit::{audit_visible_event, CaptureIndex, SignalingNetworkEvent};
 
 use super::FailoverHarness;
-use crate::rfc_acceptance::{lane_details, Admits, Finding};
+use crate::rfc_acceptance::{lane_details, Accepted, Finding};
 
 impl FailoverHarness {
-    /// [`accept_rfc_deviations_from_now`](Self::accept_rfc_deviations_from_now),
-    /// accepting at most one offending request per dialog (ADR-0055 §11: a copy
-    /// re-uses once a CSeq the dead primary sent inside the replication
-    /// window).
-    pub fn accept_rfc_deviations_once_per_dialog(&mut self, rule: &str, justification: &str) {
-        debug_assert!(!justification.trim().is_empty(), "acceptance needs a justification");
-        let from = self.harness.recording().channel().snapshot().iter().map(|s| s.seq).max();
-        self.rfc_acceptance.open_window_once_per_dialog(rule, from.unwrap_or(0));
-    }
-
-    /// [`accept_rfc_deviations_once_per_dialog`](Self::accept_rfc_deviations_once_per_dialog),
-    /// accepting only the offending messages `admits` passes.
-    pub fn accept_rfc_deviations_once_per_dialog_where(
-        &mut self,
-        rule: &str,
-        admits: Admits,
-        justification: &str,
-    ) {
-        debug_assert!(!justification.trim().is_empty(), "acceptance needs a justification");
-        let from = self.harness.recording().channel().snapshot().iter().map(|s| s.seq).max();
-        self.rfc_acceptance.open_window_where(rule, from.unwrap_or(0), true, Some(admits));
-    }
-
-    /// [`accept_rfc_deviations_from_now`](Self::accept_rfc_deviations_from_now),
-    /// accepting only the offending messages `admits` passes.
-    pub fn accept_rfc_deviations_from_now_where(
-        &mut self,
-        rule: &str,
-        admits: Admits,
-        justification: &str,
-    ) {
-        debug_assert!(!justification.trim().is_empty(), "acceptance needs a justification");
-        let from = self.harness.recording().channel().snapshot().iter().map(|s| s.seq).max();
-        self.rfc_acceptance.open_window_where(rule, from.unwrap_or(0), false, Some(admits));
-    }
-
-    /// Accept the dialog verdicts of `rule` (a `dialog-…` rule) each UA of
-    /// `parties` records: a declared degraded mode, never a default.
-    pub fn accept_dialog_verdicts(&self, rule: &str, parties: &[String], justification: &str) {
-        if let Ok(guard) = self.harness.inner.lock() {
-            if let Some(harness) = guard.as_ref() {
-                for party in parties {
-                    let scope = scenario_harness::WaiverScope::rule(rule, justification);
-                    harness.waive(scope.on_party(party.as_str()).conditional());
-                }
-            }
-        }
-    }
-
-    /// Accept the §4 clean end's BYE, and its subscription's terminating
-    /// NOTIFY, into a dialog the other owner already ended, closed by the 481
-    /// each draws (ADR-0055 §11): on each UA of `parties`, the `dialog-ended`
-    /// verdicts recorded from now on, one BYE and one such NOTIFY per dialog.
-    pub fn accept_clean_end_requests(&self, parties: &[String], justification: &str) {
-        let Ok(guard) = self.harness.inner.lock() else { return };
-        let Some(harness) = guard.as_ref() else { return };
-        for party in parties {
-            let rule = || {
-                scenario_harness::WaiverScope::rule(
-                    scenario_harness::dialogs::DIALOG_ENDED,
-                    justification,
-                )
-                .on_party(party.as_str())
-                .from_now_once_per_dialog()
-                .conditional()
-            };
-            harness.waive(rule().on_method("BYE"));
-            harness.waive(rule().on_method("NOTIFY").terminating());
-        }
-    }
-
     /// Run the FULL RFC audit suite — the per-bind **peer** rules (Via echo /
     /// response↔transaction correlation, tags, CANCEL/RAck correlation, …) on
     /// top of the cross-message rules — over the recorded trace and panic on
@@ -107,7 +36,7 @@ impl FailoverHarness {
         let findings: Vec<_> = sip_net_testkit::evaluate_rfc_findings(&events)
             .into_iter()
             .filter(|f| !f.advisory && !self.rfc_acceptance.waived(&f.rule))
-            .filter(|f| !self.rfc_acceptance.accepts(&f.rule, f.offending, &capture))
+            .filter(|f| self.rfc_acceptance.accepts(&f.rule, f.offending, &capture).is_none())
             .collect();
         assert!(
             findings.is_empty(),
@@ -155,20 +84,18 @@ impl FailoverHarness {
 
     /// Split the endpoint-scoped cross-message audit into `(gating, accepted)` —
     /// see [`RfcAcceptance::partition`](crate::rfc_acceptance::RfcAcceptance::partition).
-    #[allow(clippy::type_complexity)]
-    pub(super) fn partition_rfc_findings(&self) -> (Vec<Finding>, Vec<Finding>) {
+    pub(super) fn partition_rfc_findings(&self) -> (Vec<Finding>, Vec<Accepted>) {
         let (events, scoped_out) = self.audited_events();
         self.rfc_acceptance.partition(&events, &scoped_out)
     }
 
-    /// The findings an acceptance window covered this run — the deviations the
-    /// scenario declared accepted via
-    /// [`accept_rfc_deviations_from_now`](Self::accept_rfc_deviations_from_now).
-    /// They do not gate, but they are recorded (advisory anomalies in the unified
-    /// report) so an accepted deviation stays visible, and a test can assert on
-    /// them to prove its window matched something.
-    pub fn accepted_rfc_deviations(&self) -> Vec<(String, String)> {
-        lane_details(self.partition_rfc_findings().1)
+    /// The findings a window of a struck row covered this run, each with the
+    /// row that took it. They do not gate, but they are recorded (advisory
+    /// anomalies in the unified report) so an accepted deviation stays
+    /// visible, and a test can assert on them to prove its window matched
+    /// something.
+    pub fn accepted_rfc_deviations(&self) -> Vec<Accepted> {
+        self.partition_rfc_findings().1
     }
 
     /// The recorded SIP events the audit judges — the endpoint-scoped view —
