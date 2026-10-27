@@ -312,3 +312,50 @@ async fn an_ack_the_kill_takes_is_resent_by_the_copy_to_the_2xx_repeat() {
     c.fh.advance(Duration::from_millis(500)).await;
     ends(c, dialog, &call_ref).await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn the_gates_in_order_200_trails_the_replication_of_the_cseq_it_takes() {
+    let mut c = cluster("held-gate-200-delayed").await;
+    let mut call = c.alice.invite(&c.bob).with_sdp(OFFER).through(c._proxy.addr()).send().await;
+    let mut uas = c.bob.receive("INVITE").await;
+    let (primary, backup) = worker_ordinals(uas.request());
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    let mut bob_dialog = uas.dialog();
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    c.bob.receive("ACK").await;
+    c.fh.advance(Duration::from_millis(300)).await;
+    let primary_node = if primary == "b1" { &c.w_b1 } else { &c.w_b2 };
+    let call_ref = primary_node.scan_primary(&primary).pop().expect("the primary holds the call");
+
+    // ── alice hangs up; bob's dialog is ending while he holds the relayed BYE ─
+    let mut bye = dialog.bye().await;
+    let mut relayed_bye = c.bob.receive("BYE").await;
+    c.fh.delay(&primary, &backup, 20);
+    c.fh.delay(&backup, &primary, 20);
+
+    // ── bob's INFO on the ending dialog is answered by the gate, in order ─────
+    let sent = tokio::time::Instant::now();
+    let mut info = bob_dialog.request(sip_message::generators::InDialogMethod::Info, None).await;
+    info.expect(200).await;
+    let after = sent.elapsed();
+    assert!(
+        after >= Duration::from_millis(40),
+        "the gate's 200 left before the backup applied its CSeq: {after:?}"
+    );
+    assert!(
+        after < CAP,
+        "the gate's 200 left once the backup applied it, not at the cap: {after:?}"
+    );
+
+    c.fh.heal(&primary, &backup);
+    c.fh.heal(&backup, &primary);
+    relayed_bye.respond(200, "OK").await;
+    bye.expect(200).await;
+    let drained =
+        c.fh.settle_terminal(async || c.w_b1.memory_clean() && c.w_b2.memory_clean()).await;
+    assert!(drained, "both nodes release the call");
+    c.fh.linger_peers(&[&c.alice, &c.bob], Duration::from_secs(3)).await;
+    assert_eq!(total_cdrs_for(&[&c.w_b1, &c.w_b2], &call_ref), 1, "exactly one CDR");
+    assert_call_fully_released(&[&c.w_b1, &c.w_b2], &call_ref).await;
+}
