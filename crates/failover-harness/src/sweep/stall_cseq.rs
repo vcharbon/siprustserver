@@ -19,8 +19,8 @@ pub(super) fn accept_cseqs_sent_during_the_stall(cluster: &mut Cluster) {
     );
 }
 
-/// The requests whose CSeq a stall's copy re-uses: every one but an ACK or a
-/// CANCEL, which carry their INVITE's.
+/// The requests a CSeq re-use is not judged on: an ACK and a CANCEL carry
+/// their INVITE's CSeq number.
 const NOT_REUSED: [Method; 2] = [Method::Ack, Method::Cancel];
 
 /// Whether the request at index `i` of `capture` re-uses the Call-ID and CSeq

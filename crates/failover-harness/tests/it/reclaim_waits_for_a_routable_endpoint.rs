@@ -37,7 +37,7 @@ const UNPUBLISHED: Duration = Duration::from_secs(5);
 
 /// Every in-dialog OPTIONS the proxy sent to `to`.
 fn options_sent_to(fh: &failover_harness::FailoverHarness, to: &Agent) -> usize {
-    fh.sip_entries().iter().filter(|e| e.to == to.addr() && e.raw.starts_with(b"OPTIONS ")).count()
+    fh.sip_entries().iter().filter(|e| e.to == to.addr() && e.opens_with("OPTIONS ")).count()
 }
 
 /// Answer the keepalive OPTIONS `agent` holds, if any.

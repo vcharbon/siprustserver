@@ -42,7 +42,7 @@ pub(crate) fn sent(p: &Placed, to: SocketAddr, prefix: &[u8]) -> Vec<u16> {
     let proxy = p.proxy.addr();
     p.fh.sip_entries()
         .iter()
-        .filter(|e| e.to == proxy && e.from != to && e.raw.starts_with(prefix))
+        .filter(|e| e.to == proxy && e.from != to && e.start_line().as_bytes().starts_with(prefix))
         .map(|e| e.from.port())
         .collect()
 }

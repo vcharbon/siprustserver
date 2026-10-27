@@ -1,5 +1,6 @@
 //! Generic accessors over a parsed recorded message — the small reads the live
-//! adapter needs to build a `rfc_rules::Msg` and to label a finding.
+//! adapter builds a `rfc_rules::Msg` from and labels a finding with, and the
+//! [`CaptureIndex`](super::capture_index::CaptureIndex) reads a capture with.
 //!
 //! Rule logic does NOT live here: an obligation is a body in `rfc-rules`. SIP
 //! grammar does not either — every read below delegates to `sip_message`.

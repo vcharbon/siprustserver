@@ -222,12 +222,7 @@ fn hops(fh: &FailoverHarness, prefix: &str, method: &str) -> Vec<(SocketAddr, So
     fh.sip_entries()
         .into_iter()
         .filter(|e| {
-            let text = String::from_utf8_lossy(&e.raw);
-            text.starts_with(prefix)
-                && text.lines().any(|l| {
-                    let l = l.to_ascii_lowercase();
-                    l.starts_with("cseq:") && l.ends_with(&method.to_ascii_lowercase())
-                })
+            e.opens_with(prefix) && e.cseq_method().is_some_and(|m| m.eq_ignore_ascii_case(method))
         })
         .map(|e| (e.from, e.to, e.delivered))
         .collect()

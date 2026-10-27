@@ -57,7 +57,7 @@ fn reached(fh: &FailoverHarness, agent: &Agent) -> bool {
 fn finals_to(fh: &FailoverHarness, agent: &Agent, status_line: &[u8]) -> usize {
     fh.sip_entries()
         .iter()
-        .filter(|e| e.to == agent.addr() && e.raw.starts_with(status_line))
+        .filter(|e| e.to == agent.addr() && e.start_line().as_bytes().starts_with(status_line))
         .map(|e| e.raw.clone())
         .collect::<std::collections::HashSet<_>>()
         .len()
@@ -65,10 +65,7 @@ fn finals_to(fh: &FailoverHarness, agent: &Agent, status_line: &[u8]) -> usize {
 
 /// How many 503 responses reached `agent` this run.
 fn rejections_to(fh: &FailoverHarness, agent: &Agent) -> usize {
-    fh.sip_entries()
-        .iter()
-        .filter(|e| e.to == agent.addr() && e.raw.starts_with(b"SIP/2.0 503"))
-        .count()
+    fh.sip_entries().iter().filter(|e| e.to == agent.addr() && e.opens_with("SIP/2.0 503")).count()
 }
 
 #[tokio::test(start_paused = true)]

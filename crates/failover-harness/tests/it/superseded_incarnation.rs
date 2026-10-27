@@ -109,7 +109,7 @@ async fn a_force_deleted_worker_stops_authoring_once_its_ordinal_is_rebound() {
     let authored: Vec<String> = fh.sip_entries()[rebound_at..]
         .iter()
         .filter(|e| e.from == elder_sip)
-        .map(|e| String::from_utf8_lossy(&e.raw).lines().next().unwrap_or_default().to_string())
+        .map(|e| e.start_line())
         .collect();
     assert!(authored.is_empty(), "the superseded elder sent SIP: {authored:?}");
     assert_eq!(

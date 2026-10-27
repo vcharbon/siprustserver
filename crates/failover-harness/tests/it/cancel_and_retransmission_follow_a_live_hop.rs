@@ -128,7 +128,7 @@ async fn a_cancel_after_a_misread_retransmission_goes_to_the_live_primary() {
     let finals: std::collections::HashSet<_> = fh
         .sip_entries()
         .into_iter()
-        .filter(|e| e.to == alice.addr() && e.raw.starts_with(b"SIP/2.0 487"))
+        .filter(|e| e.to == alice.addr() && e.opens_with("SIP/2.0 487"))
         .map(|e| e.raw)
         .collect();
     assert_eq!(finals.len(), 1, "one 487 reaches the caller");

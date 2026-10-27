@@ -73,7 +73,7 @@ fn assert_plane_discipline(fh: &FailoverHarness) {
             "datagram crossed the planes on the wire: {} -> {} ({})",
             e.from,
             e.to,
-            String::from_utf8_lossy(&e.raw).lines().next().unwrap_or(""),
+            e.start_line(),
         );
     }
     // And the caller-plane half really is the proxy's EXTERNAL bind (not some

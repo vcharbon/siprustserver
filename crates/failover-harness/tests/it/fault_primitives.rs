@@ -646,7 +646,7 @@ async fn cut_signalling_delivers_no_datagram_to_or_from_the_node() {
         crossed.len(),
         crossed[0].from,
         crossed[0].to,
-        String::from_utf8_lossy(&crossed[0].raw).lines().next().unwrap_or(""),
+        crossed[0].start_line(),
     );
     assert!(alice.take_queued().await.is_none(), "nothing reached the caller through the cut");
     assert!(primary.is_ready(), "the cut worker's process is still running");
@@ -675,7 +675,7 @@ async fn cut_signalling_delivers_no_datagram_to_or_from_the_node() {
         inside.len(),
         inside[0].from,
         inside[0].to,
-        String::from_utf8_lossy(&inside[0].raw).lines().next().unwrap_or(""),
+        inside[0].start_line(),
     );
 
     // ── the callee answers the one INVITE it holds; the call completes ───────
@@ -753,7 +753,7 @@ async fn crash_stops_every_frame_and_datagram_from_the_node() {
         sip_from_dead.is_empty(),
         "the crashed {pri_ord} sent {} datagram(s) after the crash; the first: {}",
         sip_from_dead.len(),
-        String::from_utf8_lossy(&sip_from_dead[0].raw).lines().next().unwrap_or(""),
+        sip_from_dead[0].start_line(),
     );
     assert!(!primary.serves(&call_ref), "a crashed node serves nothing");
     assert!(!primary.is_ready(), "a crashed node is not ready");

@@ -1052,7 +1052,7 @@ async fn matrix_backup_crash_between_timer_a_copies_of_one_invite() {
     let invite = fh
         .sip_entries()
         .into_iter()
-        .find(|e| e.from == alice.addr() && e.to == proxy.addr() && e.raw.starts_with(b"INVITE "))
+        .find(|e| e.from == alice.addr() && e.to == proxy.addr() && e.opens_with("INVITE "))
         .map(|e| e.raw)
         .expect("the caller's INVITE is on the wire");
     alice.try_send_datagram(&invite, proxy.addr()).await.unwrap();
@@ -1063,7 +1063,7 @@ async fn matrix_backup_crash_between_timer_a_copies_of_one_invite() {
     let forwarded: Vec<Vec<u8>> = fh
         .sip_entries()
         .into_iter()
-        .filter(|e| e.from == proxy.addr() && e.to == primary && e.raw.starts_with(b"INVITE "))
+        .filter(|e| e.from == proxy.addr() && e.to == primary && e.opens_with("INVITE "))
         .map(|e| e.raw)
         .collect();
     assert_eq!(forwarded.len(), 2, "two copies of the one INVITE forwarded to {pri_ord}");
@@ -1088,7 +1088,7 @@ async fn matrix_backup_crash_between_timer_a_copies_of_one_invite() {
     let to_bob = fh
         .sip_entries()
         .into_iter()
-        .filter(|e| e.from == proxy.addr() && e.to == bob.addr() && e.raw.starts_with(b"INVITE "))
+        .filter(|e| e.from == proxy.addr() && e.to == bob.addr() && e.opens_with("INVITE "))
         .count();
     assert_eq!(to_bob, 2, "the primary's Timer A re-sent its b-leg INVITE through the proxy");
 

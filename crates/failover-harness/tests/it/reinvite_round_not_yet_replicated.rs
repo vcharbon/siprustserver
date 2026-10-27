@@ -145,7 +145,7 @@ async fn a_round_answered_2xx_before_it_replicated_is_acknowledged_and_the_call_
         .fh
         .sip_entries()
         .into_iter()
-        .rfind(|e| e.from == lost.bob.addr() && e.raw.starts_with(b"SIP/2.0 200"))
+        .rfind(|e| e.from == lost.bob.addr() && e.opens_with("SIP/2.0 200"))
         .map(|e| (e.raw, e.to))
         .expect("the callee's 200 is on the wire");
     let ack = lost.bob.receive("ACK").await;

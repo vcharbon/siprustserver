@@ -225,7 +225,7 @@ async fn a_repeat_after_takeover_draws_no_second_prack_from_the_survivor() {
     let at_survivor = fh
         .sip_entries()
         .iter()
-        .filter(|e| e.to == survivor_addr && e.raw.starts_with(b"SIP/2.0 183 "))
+        .filter(|e| e.to == survivor_addr && e.opens_with("SIP/2.0 183 "))
         .count();
     assert_eq!(at_survivor, 1, "bob's repeat reached the survivor's bind");
     assert!(

@@ -668,7 +668,7 @@ async fn the_callers_ack_for_a_post_takeover_reject_reaches_the_survivor_that_se
     let a_leg_acks: Vec<_> = fh
         .sip_entries()
         .into_iter()
-        .filter(|e| e.from == proxy_addr && e.to != bob_addr && e.raw.starts_with(b"ACK "))
+        .filter(|e| e.from == proxy_addr && e.to != bob_addr && e.opens_with("ACK "))
         .collect();
     assert_eq!(
         a_leg_acks.len(),
