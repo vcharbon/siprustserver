@@ -266,6 +266,33 @@ async fn reclaim_serves_an_own_replica_once_then_finds_it_resident() {
     assert_eq!(n.metrics.timer_queue_len(), 1, "a resident call re-arms nothing");
 }
 
+/// A parking reclaim makes a `pri:` body resident with nothing armed, and a
+/// second parking pass — another peer's bootstrap, or the same one completing
+/// twice — leaves it parked; a message reaching it arms it (ADR-0055 §8).
+#[tokio::test(start_paused = true)]
+async fn a_parked_call_stays_unarmed_across_a_second_pass_and_a_message_arms_it() {
+    let n = node("w1").await;
+    let ctx = n.core.router_ctx();
+    let call = call_in("w1", "w0", "cid-parked", CallModelState::Active, &n.clock);
+    let r = call.call_ref.clone();
+    put(&n.store, PRI, "w1", &call).await;
+
+    let _guard = ctx.state.lock(&r).await;
+    let parked = materialise(ctx, &r, Origin::Park).await;
+    assert!(matches!(parked, Materialised::Parked(_)), "parked: {parked:?}");
+    let again = materialise(ctx, &r, Origin::Park).await;
+    assert!(matches!(again, Materialised::Resident(_)), "a second pass: {again:?}");
+    assert!(ctx.state.is_parked(&r), "still parked after a second pass");
+    sip_clock::testkit::settle().await;
+    assert_eq!(n.metrics.timer_queue_len(), 0, "a parked call arms nothing");
+
+    let armed = served(materialise(ctx, &r, Origin::Takeover).await);
+    assert_eq!(armed.call_ref, r);
+    assert!(!ctx.state.is_parked(&r), "a message's turn arms the parked call");
+    sip_clock::testkit::settle().await;
+    assert_eq!(n.metrics.timer_queue_len(), 1, "its keepalive is armed");
+}
+
 /// A terminal `pri:` body is a backup's deferred terminal (ADR-0020 X3): it is
 /// discharged through the funnel — one CDR, the body gone from the live map —
 /// never re-served. `Terminating` is forced terminal and discharged too.

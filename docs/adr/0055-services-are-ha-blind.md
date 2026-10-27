@@ -370,9 +370,9 @@ component by component.
 - Neither: the node that meets the other copy ends the call cleanly (§4), from
   the copy ranked higher by `lifecycle_behind` (the primary's on a tie), over
   the union of both copies' dialogs by tags (ADR-0041): each dialog's state is
-  the further of the two with that copy's INVITE exchange, so a 2xx either copy
-  took is ACKed and BYEd, never CANCELled (RFC 3261 §13.2.2.4, §15), the BYE
-  goes at the greater CSeq plus one, answered is the OR of both, CDR events
+  the further of the two with that copy's INVITE exchange, so the ending's
+  teardown ACKs and BYEs a 2xx either copy took (RFC 3261 §13.2.2.4, §15), the
+  BYE goes at the greater CSeq plus one, answered is the OR of both, CDR events
   are the union.
 
 A leg id names one leg in both copies: the record holds two leg-id spaces,
@@ -436,10 +436,11 @@ few milliseconds apart; a message reaching a parked call arms it first.
 A call answered at the returned worker while a proxy still reads it `Unknown`
 sends the caller's ACK to the backup (ADR-0050 §4). When the answer's write
 reaches the backup past the cap of §3, the backup reads that ACK as evidence
-(§4, trigger 3) and ends the call from the copy it holds, and the worker,
-meeting that ending with the callee's dialog confirmed, ACKs and BYEs it (§7):
-the call ends cleanly (§1; `swept_call_answered_once_routable.rs`, the cell
-whose answer write is late).
+(§4, trigger 3) and ends the call from the copy it holds, CANCELling the
+callee's INVITE it holds unanswered, and the worker, meeting that ending with
+the callee's dialog confirmed, ACKs and BYEs it (§7): the call ends cleanly
+(§1; `swept_call_answered_once_routable.rs`, the cell whose answer write is
+late).
 
 ### 9. Every instant in the call record carries its own anchor
 

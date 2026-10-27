@@ -47,9 +47,9 @@ impl CallState {
     /// Paired with the router poisoning the dispatch queue (so the worker exits and
     /// `removals` balances `creations`), this is what stops an **orphan storm** —
     /// the thousands of failed-over BYEs that hit a rebooted worker — from leaking
-    /// the `locks` map and the `active_calls` (creations−removals) count. Without
-    /// it each orphan stranded one lock entry + one idle worker task + one unmatched
-    /// creation permanently (the ~3150-per-worker ratchet the leak-detector caught).
+    /// the `locks` map and the `active_calls` (creations−removals) count: each
+    /// orphan would otherwise strand one lock entry, one idle worker task and
+    /// one unmatched creation for good.
     ///
     /// [`process`]: crate::router
     pub fn discard_orphan(&self, call_ref: &str) {

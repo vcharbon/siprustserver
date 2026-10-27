@@ -4,10 +4,10 @@
 //! (`call::helpers::lifecycle_behind`; the primary's on a tie), over the
 //! union of both copies' dialogs by their tags (ADR-0041): each dialog at the
 //! further of its two states, with that copy's INVITE exchange, and at the
-//! higher of each of its sequences, so a 2xx either copy took is ACKed and
-//! BYEd, never CANCELled (RFC 3261 §13.2.2.4, §15), and the BYE goes at the
-//! greater CSeq plus one; the caller answered when either copy answered her;
-//! the CDR events of both. The union holds only the
+//! higher of each of its sequences, so the teardown ACKs and BYEs a 2xx either
+//! copy took (RFC 3261 §13.2.2.4, §15) and the BYE goes at the greater CSeq
+//! plus one; the caller answered when either copy answered her; the CDR events
+//! of both. The union holds only the
 //! request records whose transactions this node holds, so its teardown
 //! answers them (RFC 3261 §15.1.2); the other node's teardown answers its
 //! own.
@@ -27,7 +27,6 @@ use super::super::interpret::process_result;
 use super::super::RouterCtx;
 use super::meeting::resync_timers;
 use super::FlushDirection;
-use crate::rules::defaults::still_owed_bare_ack;
 use crate::rules::{ActionExecutor, RuleCall, RuleContext};
 use crate::store::Enveloped;
 use crate::turn_scope::TurnScope;
@@ -134,14 +133,15 @@ fn only_here_to_end(live: &Call, ending: &Call, by: &RelayOwner) -> bool {
 
 /// `base`, in its envelope, with every dialog of `other` it lacks, by the leg
 /// and the two tags; a dialog both hold at the further of its two states with
-/// that copy's INVITE exchange, the higher of each sequence, and the remote target and route set of the copy
-/// that read the peer's later request (a target refresh is the peer's
-/// request, RFC 3261 §12.2); a leg only `other` dialled; the caller answered
-/// when `other` answered her, and every early dialog of hers ended once she
-/// took a final. A leg id names one leg in both copies: two copies acting at
-/// once mint from distinct leg-id spaces (`call::LegSpace`). The request records of the union
-/// are those of `live` the worker `by` made: this node's teardown answers its
-/// own transactions, the other node's teardown its own.
+/// that copy's INVITE exchange, the higher of each sequence, and the remote
+/// target and route set of the copy that read the peer's later request (a
+/// target refresh is the peer's request, RFC 3261 §12.2); a leg only `other`
+/// dialled; the caller answered when `other` answered her, and every early
+/// dialog of hers ended once she took a final. A leg id names one leg in both
+/// copies: two copies acting at once mint from distinct leg-id spaces
+/// (`call::LegSpace`). The request records of the union are those of `live`
+/// the worker `by` made: this node's teardown answers its own transactions,
+/// the other node's teardown its own.
 fn union_of(base: Enveloped, other: &Call, live: &Call, by: &RelayOwner) -> Enveloped {
     let Enveloped { call: mut base, topology } = base;
     union_leg(&mut base.a_leg, &other.a_leg);
@@ -231,8 +231,7 @@ fn rank(state: &DialogState) -> u8 {
     }
 }
 
-/// The teardown of `call` as a turn of its own: every 2xx this node can ACK
-/// alone ACKed first (RFC 3261 §13.2.2.4), then the closing CDR event and the
+/// The teardown of `call` as a turn of its own: the closing CDR event and the
 /// termination, through the one enforcement funnel, the caller answered if
 /// she still waits on this node.
 async fn end_cleanly(
@@ -242,10 +241,7 @@ async fn end_cleanly(
     owners: &crate::owners::Owners,
     now_ms: i64,
 ) {
-    let mut actions: Vec<RuleAction> = still_owed_bare_ack(&RuleCall::new(call))
-        .map(|leg_id| RuleAction::AckLeg { leg_id, body: None })
-        .collect();
-    actions.extend([
+    let actions = [
         RuleAction::AddCdrEvent {
             event_type: CdrEventType::Bye,
             leg_id: call.a_leg.leg_id.clone(),
@@ -257,7 +253,7 @@ async fn end_cleanly(
             cause: TerminationCause::Supervisor,
             by_leg: None,
         },
-    ]);
+    ];
     let event = CallEvent::InternalEvent {
         call_ref: call_ref.to_string(),
         topic: DIVERGED.into(),

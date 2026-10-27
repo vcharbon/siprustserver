@@ -14,7 +14,8 @@
 //! The caller holds the per-call lock. In order:
 //! 1. residency — a call already live is handed back untouched
 //!    ([`Materialised::Resident`]); its timers are live and never re-armed. A
-//!    parked one is armed first ([`arm`]) and handed back as served;
+//!    parked one is armed first ([`arm`]) and handed back as served, except
+//!    to a parking reclaim, which leaves it parked;
 //! 2. the store read the origin names — `bak:{primary}` for a takeover,
 //!    `pri:{self}` for a reclaim — each miss a typed [`Reason`] the caller's
 //!    orphan path answers (481 for a request, drop for a response);
@@ -140,6 +141,9 @@ pub(super) async fn materialise(
     origin: Origin,
 ) -> Materialised {
     if let Some(live) = ctx.state.peek(call_ref) {
+        if let Origin::Park = origin {
+            return Materialised::Resident(live);
+        }
         return match arm(ctx, call_ref, None).await {
             Some((call, seeded)) => Materialised::Served { call, seeded },
             None => Materialised::Resident(live),

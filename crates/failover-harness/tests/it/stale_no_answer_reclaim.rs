@@ -11,8 +11,9 @@
 //! entry via a probe service on a live call), this test drives the REAL
 //! hydration path: the stale entry is implanted into the surviving backup's
 //! replica body, the primary reboots empty, bootstrap re-hydrates `pri:{self}`
-//! from the peer and the bulk reclaim (`router::reclaim::park_all`, then `arm_parked`) materialises the call +
-//! re-arms its timers (`sanitize_restored_timers` + `TimerService::restore`).
+//! from the peer and the bulk reclaim (`router::reclaim::park_all`, then
+//! `arm_parked`) materialises the call + re-arms its timers
+//! (`sanitize_restored_timers` + `TimerService::restore`).
 //! The fire then reaches the `no-answer` rule exactly as it did on the cluster.
 
 use b2bua::store::envelope;
