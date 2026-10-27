@@ -370,8 +370,10 @@ component by component.
 - Neither: the node that meets the other copy ends the call cleanly (§4), from
   the copy ranked higher by `lifecycle_behind` (the primary's on a tie), over
   the union of both copies' dialogs by tags (ADR-0041): each dialog's state is
-  the further of the two, the BYE goes at the greater CSeq plus one, answered is
-  the OR of both, CDR events are the union.
+  the further of the two with that copy's INVITE exchange, so a 2xx either copy
+  took is ACKed and BYEd, never CANCELled (RFC 3261 §13.2.2.4, §15), the BYE
+  goes at the greater CSeq plus one, answered is the OR of both, CDR events
+  are the union.
 
 A leg id names one leg in both copies: the record holds two leg-id spaces,
 the node the call was created on mints `b-{n}` and any other node acting on
@@ -395,8 +397,10 @@ field fails safe:
   space a node mints from.
 
 A node that meets the other copy's ending discharges it keeping every dialog
-either copy opened, at the higher of the two sequences. There is no per-axis
-fold.
+either copy opened, at the higher of the two sequences. A dialog it holds
+further along than the ending does (confirmed where the ending holds it
+early) is its own to end: it ACKs the 2xx and BYEs the dialog. There is no
+per-axis fold.
 
 ### 8. The proxy routes on one rule
 
@@ -413,14 +417,29 @@ split, or the moment before an owner learns the other took a dialog), both can
 mint one CSeq on a dialog; §11's split cells declare that window as an RFC
 deviation, and §7 ends a call whose copies diverged.
 
-A worker reclaims its own calls only while its own endpoint reads ready in
-the slice the proxy routes from. While it does not, the proxy holds no address
-for it, so the response to a request it sends goes to the call's other owner,
-which reads it as evidence (§4) and ends the call. The reclaim waits; the
-evidence rule stays as it is, every method alike
-(`reclaim_waits_for_a_routable_endpoint.rs`). The worker and the proxy read the
+A worker reclaims its own calls in two steps. Once recovered, whether or not
+its own endpoint reads ready, it makes every call of its partition resident
+and parks it: no timer armed, no transaction seeded, nothing sent. A call with
+an INVITE to serve is written once (ADR-0047 D7), so the backup's takeover
+copy stands down on that write, and the burst of those writes drains, before
+the proxy routes anything to the worker. The worker arms the parked calls —
+their timers, their transactions, the refusal of an undecided call — only
+while its own endpoint reads ready in the slice the proxy routes from. While
+it does not, the proxy holds no address for it, so the response to a request
+it sends goes to the call's other owner, which reads it as evidence (§4) and
+ends the call. The evidence rule stays as it is, every method alike
+(`reclaim_waits_for_a_routable_endpoint.rs`,
+`swept_call_answered_once_routable.rs`). The worker and the proxy read the
 slice through informers of their own, so the two can see the endpoint ready a
-few milliseconds apart.
+few milliseconds apart; a message reaching a parked call arms it first.
+
+A call answered at the returned worker while a proxy still reads it `Unknown`
+sends the caller's ACK to the backup (ADR-0050 §4). When the answer's write
+reaches the backup past the cap of §3, the backup reads that ACK as evidence
+(§4, trigger 3) and ends the call from the copy it holds, and the worker,
+meeting that ending with the callee's dialog confirmed, ACKs and BYEs it (§7):
+the call ends cleanly (§1; `swept_call_answered_once_routable.rs`, the cell
+whose answer write is late).
 
 ### 9. Every instant in the call record carries its own anchor
 
@@ -635,6 +654,17 @@ naming the node that sends.
   "backup" carry non-HA meanings in the blind crates. §11 makes the boundary a
   dependency rule.
 - **Exactly-once CDR.** No design without consensus delivers it across a split.
+- **A returned worker holding a call's messages until its copy met the
+  backup's takeover copy.** A stand-down writes nothing, so the hold needs a
+  new replicated fact, and a copy that plays on (ADR-0047 D7) keeps it for a
+  transaction's lifetime. It would not cover the caller's ACK either, which
+  the proxy routes to the backup while it reads the worker `Unknown`. §8's
+  parking makes the meeting precede routability instead.
+- **The proxy routing a response to a takeover copy's transaction, or keeping
+  a returned worker's calls on the backup until it declares its reclaim
+  met.** The proxy holds no call state, its replicas flip apart, a backup
+  write between the declaration and the flip still diverges, and neither
+  covers the caller's ACK.
 
 ## Consequences
 

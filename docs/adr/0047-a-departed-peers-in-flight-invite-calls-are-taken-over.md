@@ -167,7 +167,8 @@ stands down when:
   `relay_the_primary_never_read.rs`, `ending_crossing_a_round.rs`;
   `router/stand_down/tests.rs`). A copy that wrote
   nothing is covered by any write of its primary. The returning node's recovery pulls
-  the copy's writes before it reclaims, so its reclaim write covers them; or
+  the copy's writes before it reclaims, so its reclaim write covers them; it makes that
+  write before it is routable, its calls parked until then (ADR-0055 §8); or
 - the primary deleted the call (the same incarnation, or one the delete does not name),
   and the copy holds no request whose final only it sees.
 

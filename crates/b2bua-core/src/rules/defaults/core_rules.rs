@@ -93,7 +93,7 @@ pub(crate) fn unacked_2xx_give_up_actions(
 /// re-INVITE. Absent: a delayed-offer 2xx, whose ACK the teardown composes
 /// rejecting every stream (RFC 3264 §6), and the a-leg's initial round, where
 /// this stack sent no INVITE and owes no ACK.
-pub(crate) fn still_owed_bare_ack<'a>(call: &'a RuleCall) -> impl Iterator<Item = String> + 'a {
+pub fn still_owed_bare_ack<'a>(call: &'a RuleCall) -> impl Iterator<Item = String> + 'a {
     std::iter::once(call.a_leg())
         .chain(call.b_legs().iter())
         .filter(|leg| crate::rules::relay::bare_ack_owed(leg))

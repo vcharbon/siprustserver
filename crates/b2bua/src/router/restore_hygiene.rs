@@ -50,7 +50,7 @@ fn jitter_within(seed: u64, span: i64) -> i64 {
 }
 
 /// Re-spread a reclaimed call's `Keepalive` deadlines for the bulk reboot sweep
-/// (`reclaim::reclaim_all`) — load management only, never correctness (`(p,b)`
+/// (`reclaim::arm_parked`) — load management only, never correctness (`(p,b)`
 /// reconciliation makes any incidental keepalive overlap non-corrupting; ADR-0014).
 /// Two cohorts, both de-synchronised so a rehydrated partition does not re-probe in
 /// a single burst that overruns the single-task front proxy:

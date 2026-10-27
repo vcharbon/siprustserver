@@ -100,10 +100,10 @@ struct Inner {
     // held count, re-hydration is whole.
     repl_bootstrap_last_applied: AtomicU64,
     // Reboot-reclaim completeness. Per the MOST RECENT bulk reclaim pass
-    // (`router::reclaim_all`): `scanned` = bodies found in `pri:{self}` (the
+    // (`router::reclaim::park_all`): `scanned` = bodies found in `pri:{self}` (the
     // denominator — everything the bootstrap import made reclaimable on this
     // node) and `materialized` = how many of those this pass freshly inserted
-    // into the live serving map + re-armed timers. The per-reboot chain localises
+    // into the live serving map, parked until armed. The per-reboot chain localises
     // exactly where a rebooted primary's quiescent dialogs are lost: `(peer)
     // repl_meta_backup` → `repl_bootstrap_last_applied` → `repl_reclaim_scanned`
     // → `repl_reclaim_materialized`. `scanned ≪ peer meta_backup` ⇒ a

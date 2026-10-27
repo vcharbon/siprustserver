@@ -155,7 +155,7 @@ fn restored_keepalive_is_capped_at_one_interval() {
     let deadline = now + interval + interval / 2;
     let smoothing = Smoothing { now_ms: now, l_max: 0, speedup: 10, cap_ms: None };
 
-    // Bulk reboot sweep (`reclaim_all`): offset already applied + smoothing.
+    // Bulk reboot sweep (`arm_parked`): offset already applied + smoothing.
     let mut late = 0;
     let mut fire_ats = std::collections::HashSet::new();
     for i in 0..1000 {
@@ -315,7 +315,7 @@ fn seam_reanchor_keeps_future_cohort_out_of_the_catchup_band() {
                                             // flip it: origin minted it only 30 s out.
     let raw_fire_at_flip = now - skew + 30_000; // = now - 15_000 → PAST-DUE raw!
     let mut timers = reanchored(vec![keepalive(raw_fire_at_flip)], skew);
-    // l_max computed over the CORRECTED deadline (as reclaim_all does):
+    // l_max computed over the CORRECTED deadline (as arm_parked does):
     // corrected = raw + skew = now + 30_000 (future) → not past-due → l_max 0.
     let smoothing = Some(Smoothing { now_ms: now, l_max: 0, speedup: 10, cap_ms: None });
     sanitize_restored_timers(&mut timers, "w1|c|c", now, 300_000, smoothing);

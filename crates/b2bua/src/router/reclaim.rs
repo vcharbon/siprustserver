@@ -19,8 +19,8 @@ mod diverged;
 mod ending;
 mod meeting;
 mod reap;
-pub(super) use bulk::reclaim_all;
 use bulk::reclaim_into_live;
+pub(super) use bulk::{announce_reclaim, arm_parked, park_all};
 pub(super) use meeting::meet_live;
 pub(crate) use reap::reap_expired_replicas;
 
@@ -45,7 +45,7 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
     // its own per-call lock, so route it BEFORE taking the lock here (the guard is
     // not reentrant).
     if ctx.state.peek(call_ref).is_none() && first.state != CallModelState::Terminated {
-        reclaim_into_live(ctx, call_ref, None).await;
+        reclaim_into_live(ctx, call_ref).await;
         return;
     }
     let guard = ctx.state.lock(call_ref).await;

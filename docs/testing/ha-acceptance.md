@@ -78,7 +78,7 @@ is the endurance twin). It cannot reproduce a host clock stepping mid-run.
   `CallQuiesced`, `router::quiesced`) or stands down on a write of its primary
   that contains it (`router::stand_down`), never on a clock.
 - **Keepalive smoothing lives in the bulk reclaim**
-  (`router::reclaim::bulk::reclaim_all` passes `Smoothing` to
+  (`router::reclaim::bulk::arm_parked` passes `Smoothing` to
   `sanitize_restored_timers`), never in the timer driver (ADR-0014, "Keepalive
   smoothing under the two-stream model"). Performance only: no correctness
   role, no timing assumption.

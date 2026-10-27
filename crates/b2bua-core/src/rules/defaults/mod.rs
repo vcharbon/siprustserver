@@ -29,7 +29,8 @@ mod route_fold;
 mod straggler;
 
 pub use compose::{default_rules, default_rules_with, ComposeOptions};
-pub(crate) use core_rules::{still_owed_bare_ack, unacked_2xx_give_up_actions};
+pub use core_rules::still_owed_bare_ack;
+pub(crate) use core_rules::unacked_2xx_give_up_actions;
 pub use route_fold::{
     fold_lands_on_going_away_call, parse_header_updates, parse_label, parse_route_fold,
     parse_service_ext, route_fold_parity_actions,

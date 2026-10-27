@@ -49,7 +49,7 @@ async fn a_live_own_call_is_dropped_on_its_backups_delete_of_it_alone() {
     let ctx = n.core.router_ctx();
     let call = ringing("w0", "w1", "own");
     let r = call.call_ref.clone();
-    live(&n, &call, PartitionRole::Primary, "w0", Origin::Reclaim(None)).await;
+    live(&n, &call, PartitionRole::Primary, "w0", Origin::Reclaim).await;
 
     let mut other = ringing("w0", "w1", "reborn");
     other.call_ref = r.clone();

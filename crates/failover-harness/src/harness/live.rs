@@ -12,6 +12,12 @@ impl ReplicatedB2buaSut {
         self.core.as_ref().map(|c| c.serves(call_ref)).unwrap_or(false)
     }
 
+    /// Does this node hold `call_ref` reclaimed and parked, not armed until its
+    /// own endpoint reads ready (ADR-0055 §8)? `false` while crashed.
+    pub fn parks(&self, call_ref: &str) -> bool {
+        self.core.as_ref().is_some_and(|c| c.parks(call_ref))
+    }
+
     /// The live copy this worker serves for `call_ref`, if any — what its rules
     /// read at the next event.
     pub fn live_call(&self, call_ref: &str) -> Option<call::Call> {

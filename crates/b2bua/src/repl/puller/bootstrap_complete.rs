@@ -30,10 +30,11 @@ impl Puller {
     }
 
     /// Signal the router to **bulk-reclaim** every `pri:{self}` body — materialise
-    /// each into the live serving map + re-arm its timers, with the keepalive
-    /// backlog smoothed (ADR-0014 §4). Fired by the **Reclaim** flow on bootstrap
-    /// completion (first `Noop` or best-effort hard-timer); the router runs it
-    /// while the node's own endpoint reads ready. Idempotent
+    /// each into the live serving map, parked, then re-arm its timers with the
+    /// keepalive backlog smoothed (ADR-0014 §4). Fired by the **Reclaim** flow on
+    /// bootstrap completion (first `Noop` or best-effort hard-timer); the router
+    /// parks at once and arms while the node's own endpoint reads ready
+    /// (ADR-0055 §8). Idempotent
     /// (`materialize_if_absent`), so a partial pass plus a later one self-heal.
     pub(super) fn signal_reclaim_all(&self) {
         if let Some(sink) = &self.repl_tx {

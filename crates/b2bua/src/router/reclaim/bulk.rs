@@ -5,56 +5,46 @@ use std::sync::Arc;
 
 use call::{Call, TimerType};
 
-use super::super::materialise::{has_invite_to_serve, materialise, Materialised, Origin, Reason};
-use super::super::restore_hygiene::{reanchor, Smoothing};
+use super::super::materialise::{
+    arm, has_invite_to_serve, materialise, Materialised, Origin, Reason,
+};
+use super::super::restore_hygiene::Smoothing;
 use super::super::undecided::{is_undecided, settle_undecided};
 use super::super::RouterCtx;
-use crate::store::{Enveloped, PartitionRole};
+use crate::store::PartitionRole;
 
-/// **Bulk reclaim** (ADR-0014): re-materialise every `pri:{self}`
-/// call into the live map + re-arm its timers — what makes a rebooted primary
-/// re-*serve* its partition, not just re-*store* it. It runs while the node's
-/// own endpoint reads ready (ADR-0055 §8, `router::readmission`). The scan decodes the
-/// partition to size the cohort; each body is then materialised through the
-/// TTL-gated reclaim read, so a body whose TTL ran out is dead and is never
-/// re-served: it counts in `scanned` and not in `materialized`.
-///
-/// **Keepalive smoothing (ADR-0014, performance-only).** Many keepalive timers in
-/// a just-rehydrated partition are past-due; firing them all at once floods the
-/// node with a synchronized OPTIONS burst. So we stagger the past-due keepalives
-/// oldest-first: with `L = now - fire_at` the overdue gap and `L_max` the largest
-/// over the batch, a keepalive's new `fire_at` is `now + (L_max - L)/speedup`, so
-/// the most-overdue (most at-risk of a UAC keepalive timeout) fires first and the
-/// backlog drains over `L_max/speedup`, bounded to `speedup`× the normal cadence
-/// (optionally capped by `max_catchup_window_sec`). After the burst each call
-/// re-arms `+interval`, naturally re-spreading load. This is **load management
-/// only** — `(p,b)` reconciliation makes any incidental keepalive overlap
-/// non-corrupting, so there is no settle/handback floor. `fire_at` is pre-computed
-/// here, in the reclaim handler — never inside the timer driver (CLAUDE.md).
-pub(in crate::router) async fn reclaim_all(ctx: &Arc<RouterCtx>) {
+/// **Bulk reclaim, first pass** (ADR-0014, ADR-0055 §8): make every
+/// `pri:{self}` call resident and park it, nothing armed, so nothing of it
+/// leaves the node; a call with an INVITE to serve is written once
+/// ([`announce_reclaim`]), so the backup's takeover copy of it meets that
+/// write before the proxy routes anything to this node. It runs on bootstrap
+/// completion, whether or not the node's own endpoint reads ready; the
+/// parked calls are armed once it does ([`arm_parked`]). Each body is read
+/// through the TTL-gated reclaim read, so a body whose TTL ran out is dead and
+/// is never re-served: it counts in `scanned` and not in `materialized`.
+pub(in crate::router) async fn park_all(ctx: &Arc<RouterCtx>) {
     let start_ms = ctx.clock.now_ms();
-    let now_ms = start_ms;
     let active_before = ctx.state.active_count() as u64;
     let own = &ctx.config.self_ordinal;
     // The whole turn works through the partition, one call at a time: each
-    // call read, re-anchored or reclaimed is a piece of work of its own, so
-    // the router's pulse shows the turn making progress, however large the
-    // partition.
+    // call read or parked is a piece of work of its own, so the router's
+    // pulse shows the turn making progress, however large the partition.
     let beat = || ctx.router_pulse.turning();
-    let mut calls = ctx.state.scan_partition(PartitionRole::Primary, own, &beat).await;
+    let calls = ctx.state.scan_partition(PartitionRole::Primary, own, &beat).await;
     let scanned = calls.len() as u64;
-    let l_max = largest_keepalive_gap(&mut calls, now_ms, &beat);
-    let smoothing = Smoothing {
-        now_ms,
-        l_max,
-        speedup: ctx.replica.keepalive_catchup_speedup.max(1),
-        cap_ms: ctx.replica.max_catchup_window_sec.map(|s| s * 1000),
-    };
     let mut materialized = 0u64;
+    let mut announced = 0u64;
     for (copy, _skew) in calls {
         beat();
-        if reclaim_into_live(ctx, &copy.call.call_ref, Some(smoothing)).await {
-            materialized += 1;
+        let call_ref = &copy.call.call_ref;
+        let _guard = ctx.state.lock(call_ref).await;
+        match materialise(ctx, call_ref, Origin::Park).await {
+            Materialised::Parked(call) => {
+                materialized += 1;
+                announced += u64::from(announce_reclaim(ctx, call));
+            }
+            Materialised::Refused(Reason::Terminated | Reason::Unrecoverable) => materialized += 1,
+            _ => {}
         }
     }
     // Per-reboot completeness telemetry. The gauges expose the pass's
@@ -68,23 +58,72 @@ pub(in crate::router) async fn reclaim_all(ctx: &Arc<RouterCtx>) {
         active_before,
         scanned,
         materialized,
+        announced,
         active_after,
-        l_max_ms = l_max,
         duration_ms,
         "reboot reclaim"
     );
 }
 
-/// `L_max`: the largest past-due keepalive gap across the scanned partition,
-/// read on SKEW-CORRECTED deadlines — each copy is re-anchored by its own
-/// persisted offset first. The copies are then only named; `materialise`
-/// re-reads each body and re-anchors it once itself. `beat` runs once per call.
-fn largest_keepalive_gap(calls: &mut [(Enveloped, i64)], now_ms: i64, beat: &dyn Fn()) -> i64 {
-    let mut l_max = 0;
-    for (copy, skew) in calls.iter_mut() {
+/// **Bulk reclaim, second pass**: arm every parked call once the node's own
+/// endpoint reads ready (ADR-0055 §8, `router::readmission`) — its timers
+/// re-armed, its transactions seeded, an undecided call refused (ADR-0047 D4).
+///
+/// **Keepalive smoothing (ADR-0014, performance-only).** Many keepalive timers in
+/// a just-rehydrated partition are past-due; firing them all at once floods the
+/// node with a synchronized OPTIONS burst. So we stagger the past-due keepalives
+/// oldest-first: with `L = now - fire_at` the overdue gap and `L_max` the largest
+/// over the batch, a keepalive's new `fire_at` is `now + (L_max - L)/speedup`, so
+/// the most-overdue (most at-risk of a UAC keepalive timeout) fires first and the
+/// backlog drains over `L_max/speedup`, bounded to `speedup`× the normal cadence
+/// (optionally capped by `max_catchup_window_sec`). After the burst each call
+/// re-arms `+interval`, naturally re-spreading load. This is **load management
+/// only** — `(p,b)` reconciliation makes any incidental keepalive overlap
+/// non-corrupting, so there is no settle/handback floor. `fire_at` is pre-computed
+/// here, in the reclaim handler — never inside the timer driver (CLAUDE.md).
+pub(in crate::router) async fn arm_parked(ctx: &Arc<RouterCtx>) {
+    let start_ms = ctx.clock.now_ms();
+    let beat = || ctx.router_pulse.turning();
+    let parked = ctx.state.parked();
+    let calls: Vec<Call> = parked.iter().filter_map(|call_ref| ctx.state.peek(call_ref)).collect();
+    let l_max = largest_keepalive_gap(&calls, start_ms, &beat);
+    let smoothing = Smoothing {
+        now_ms: start_ms,
+        l_max,
+        speedup: ctx.replica.keepalive_catchup_speedup.max(1),
+        cap_ms: ctx.replica.max_catchup_window_sec.map(|s| s * 1000),
+    };
+    let mut armed = 0u64;
+    for call_ref in &parked {
         beat();
-        let call = &mut copy.call;
-        reanchor(call, *skew);
+        let _guard = ctx.state.lock(call_ref).await;
+        let Some((call, seeded)) = arm(ctx, call_ref, Some(smoothing)).await else { continue };
+        armed += 1;
+        if let Some(seeded) = seeded.filter(|_| is_undecided(&call)) {
+            settle_undecided(ctx, call_ref, call, seeded).await;
+        }
+    }
+    let duration_ms = ctx.clock.now_ms() - start_ms;
+    tracing::info!(
+        node = observe::node(),
+        armed,
+        l_max_ms = l_max,
+        duration_ms,
+        "reclaimed calls armed"
+    );
+}
+
+/// `L_max`: the largest past-due keepalive gap across `calls`, read on
+/// deadlines already in this node's clock frame (each was re-anchored when it
+/// was parked). `beat` runs once per call.
+fn largest_keepalive_gap<'a>(
+    calls: impl IntoIterator<Item = &'a Call>,
+    now_ms: i64,
+    beat: &dyn Fn(),
+) -> i64 {
+    let mut l_max = 0;
+    for call in calls {
+        beat();
         let gap = call
             .timers
             .iter()
@@ -98,27 +137,23 @@ fn largest_keepalive_gap(calls: &mut [(Enveloped, i64)], now_ms: i64, beat: &dyn
 }
 
 /// Reclaim one call of this node's `pri:{self}` partition into the live map
-/// under its per-call lock (ADR-0011 X11). `smoothing = Some(_)` is the bulk
-/// reboot sweep ([`reclaim_all`]); `None` a single straggler. Neither has a
-/// message to serve, so a call still undecided is settled (ADR-0047), and a
-/// call with an INVITE transaction to serve is announced ([`announce_reclaim`]). Returns
-/// `true` iff this pass did the work — freshly materialised, or a deferred
-/// terminal discharged — so the caller meters per-pass reclaim completeness;
-/// `false` for a call already resident (idempotent re-pass) or gone from the store.
-pub(super) async fn reclaim_into_live(
-    ctx: &Arc<RouterCtx>,
-    call_ref: &str,
-    smoothing: Option<Smoothing>,
-) -> bool {
+/// under its per-call lock (ADR-0011 X11), armed at once: a straggler. It has
+/// no message to serve, so a call still undecided is settled (ADR-0047), and a
+/// call with an INVITE transaction to serve is announced ([`announce_reclaim`]).
+/// Returns `true` iff this pass did the work — freshly materialised, or a
+/// deferred terminal discharged; `false` for a call already resident
+/// (idempotent re-pass) or gone from the store.
+pub(super) async fn reclaim_into_live(ctx: &Arc<RouterCtx>, call_ref: &str) -> bool {
     let _guard = ctx.state.lock(call_ref).await;
-    match materialise(ctx, call_ref, Origin::Reclaim(smoothing)).await {
+    match materialise(ctx, call_ref, Origin::Reclaim).await {
         Materialised::Served { call, seeded } => {
             match seeded {
                 Some(seeded) if is_undecided(&call) => {
                     settle_undecided(ctx, call_ref, call, seeded).await;
                 }
-                _ if has_invite_to_serve(&call) => announce_reclaim(ctx, call),
-                _ => {}
+                _ => {
+                    announce_reclaim(ctx, call);
+                }
             }
             true
         }
@@ -127,16 +162,21 @@ pub(super) async fn reclaim_into_live(
     }
 }
 
-/// Write the reclaimed `call` once: this node serving the call again is the
-/// change the write records, one `p` increment, and it reaches the backup's
-/// Element as the primary's write, where a takeover copy of the call the
-/// backup's departure sweep made stands down on it (ADR-0047 D7). Only a call
-/// with an INVITE transaction to serve is written — a quiet call has no sweep
-/// copy — so
-/// the reclaim of a large partition stays write-free for those.
-fn announce_reclaim(ctx: &Arc<RouterCtx>, call: Call) {
-    ctx.state.update(call.clone());
-    ctx.state.flush(&call);
+/// Write the reclaimed `call` once when it has an INVITE transaction to serve:
+/// this node serving the call again is the change the write records, one `p`
+/// increment, and it reaches the backup's Element as the primary's write, where
+/// a takeover copy of the call the backup's departure sweep made stands down on
+/// it (ADR-0047 D7). Every reclaim path writes it, the bulk pass, a straggler
+/// and an on-demand reclaim alike. A quiet call has no sweep copy and is not
+/// written, so the reclaim of a large partition stays write-free for those.
+/// Whether it wrote.
+pub(in crate::router) fn announce_reclaim(ctx: &Arc<RouterCtx>, call: Call) -> bool {
+    let serves_an_invite = has_invite_to_serve(&call);
+    if serves_an_invite {
+        ctx.state.update(call.clone());
+        ctx.state.flush(&call);
+    }
+    serves_an_invite
 }
 
 #[cfg(test)]

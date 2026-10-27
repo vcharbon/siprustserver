@@ -87,6 +87,7 @@ mod superseded_incarnation;
 mod sweep;
 mod sweep_shape_seam;
 mod swept_call_answered_inside_the_lag;
+mod swept_call_answered_once_routable;
 mod swept_call_primary_returns;
 mod takeover_request_uri_rewritten;
 mod timer_generation_takeover;

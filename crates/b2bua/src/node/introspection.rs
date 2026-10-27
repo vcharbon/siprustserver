@@ -21,11 +21,18 @@ impl B2buaCore {
     }
 
     /// Does this worker currently **serve** `call_ref` (hold it live in its call
-    /// map — i.e. it would emit the call's keepalive and answer in-dialog traffic)?
-    /// The cluster-level invariant the failover tests assert is "exactly one node
-    /// serves a given call". Test/observability.
+    /// map, armed — i.e. it would emit the call's keepalive and answer in-dialog
+    /// traffic)? A parked call is not served. The cluster-level invariant the
+    /// failover tests assert is "exactly one node serves a given call".
+    /// Test/observability.
     pub fn serves(&self, call_ref: &str) -> bool {
-        self.ctx.state.peek(call_ref).is_some()
+        self.ctx.state.peek(call_ref).is_some() && !self.ctx.state.is_parked(call_ref)
+    }
+
+    /// Does this worker hold `call_ref` reclaimed and parked, resident and not
+    /// armed until its own endpoint reads ready (ADR-0055 §8)? Test/observability.
+    pub fn parks(&self, call_ref: &str) -> bool {
+        self.ctx.state.is_parked(call_ref)
     }
 
     /// Cancel a timer in this node's driver, the record untouched: a test's

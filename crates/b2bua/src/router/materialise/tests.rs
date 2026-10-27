@@ -249,7 +249,7 @@ async fn reclaim_serves_an_own_replica_once_then_finds_it_resident() {
     put(&n.store, PRI, "w1", &call).await;
 
     let _guard = ctx.state.lock(&r).await;
-    let live = served(materialise(ctx, &r, Origin::Reclaim(None)).await);
+    let live = served(materialise(ctx, &r, Origin::Reclaim).await);
     assert_eq!(live.call_ref, r);
     assert!(!ctx.state.is_takeover(&r), "an own call is no takeover copy");
     assert!(ctx.state.peek(&r).is_some(), "the call is live");
@@ -259,7 +259,7 @@ async fn reclaim_serves_an_own_replica_once_then_finds_it_resident() {
     assert_eq!(n.metrics.timer_queue_len(), 1, "the replicated keepalive is re-armed here");
     assert_eq!(log.matching("straggler reclaim").len(), 1, "{:?}", log.lines());
 
-    let again = resident(materialise(ctx, &r, Origin::Reclaim(None)).await);
+    let again = resident(materialise(ctx, &r, Origin::Reclaim).await);
     assert_eq!(again.call_ref, r);
     assert_eq!(n.metrics.repl_reclaimed_total(), 1, "a resident call is no reclaim");
     sip_clock::testkit::settle().await;
@@ -279,7 +279,7 @@ async fn reclaim_discharges_a_terminal_body_instead_of_serving_it() {
 
     let _guard = ctx.state.lock(&r_ended).await;
     assert!(matches!(
-        materialise(ctx, &r_ended, Origin::Reclaim(None)).await,
+        materialise(ctx, &r_ended, Origin::Reclaim).await,
         Materialised::Refused(Reason::Terminated)
     ));
     sip_clock::testkit::settle().await;
@@ -293,7 +293,7 @@ async fn reclaim_discharges_a_terminal_body_instead_of_serving_it() {
     put(&n.store, PRI, "w1", &dying).await;
     let _guard = ctx.state.lock(&r_dying).await;
     assert!(matches!(
-        materialise(ctx, &r_dying, Origin::Reclaim(None)).await,
+        materialise(ctx, &r_dying, Origin::Reclaim).await,
         Materialised::Refused(Reason::Terminated)
     ));
     sip_clock::testkit::settle().await;
@@ -319,7 +319,7 @@ async fn a_body_whose_caller_invite_does_not_rebuild_is_discharged_not_served() 
     put(&n.store, BAK, "w0", &theirs).await;
     put(&n.store, PRI, "w1", &ours).await;
 
-    for (call, origin) in [(&theirs, Origin::Takeover), (&ours, Origin::Reclaim(None))] {
+    for (call, origin) in [(&theirs, Origin::Takeover), (&ours, Origin::Reclaim)] {
         let _guard = ctx.state.lock(&call.call_ref).await;
         let disposition = materialise(ctx, &call.call_ref, origin).await;
         assert!(
@@ -346,12 +346,12 @@ async fn reclaim_misses_are_typed() {
     let theirs = call_in("w0", "w1", "cid-theirs", CallModelState::Active, &n.clock);
     put(&n.store, BAK, "w0", &theirs).await;
     assert!(matches!(
-        materialise(ctx, &theirs.call_ref, Origin::Reclaim(None)).await,
+        materialise(ctx, &theirs.call_ref, Origin::Reclaim).await,
         Materialised::Refused(Reason::NotPrimaryRole)
     ));
 
     assert!(matches!(
-        materialise(ctx, "w1|nobody|t", Origin::Reclaim(None)).await,
+        materialise(ctx, "w1|nobody|t", Origin::Reclaim).await,
         Materialised::Refused(Reason::NoReplica)
     ));
 

@@ -3,9 +3,11 @@
 //! call cleanly (§4) from the copy ranked higher on the call's lifecycle
 //! (`call::helpers::lifecycle_behind`; the primary's on a tie), over the
 //! union of both copies' dialogs by their tags (ADR-0041): each dialog at the
-//! further of its two states and at the higher of each of its sequences, so
-//! the BYE goes at the greater CSeq plus one; the caller answered when either
-//! copy answered her; the CDR events of both. The union holds only the
+//! further of its two states, with that copy's INVITE exchange, and at the
+//! higher of each of its sequences, so a 2xx either copy took is ACKed and
+//! BYEd, never CANCELled (RFC 3261 §13.2.2.4, §15), and the BYE goes at the
+//! greater CSeq plus one; the caller answered when either copy answered her;
+//! the CDR events of both. The union holds only the
 //! request records whose transactions this node holds, so its teardown
 //! answers them (RFC 3261 §15.1.2); the other node's teardown answers its
 //! own.
@@ -25,6 +27,7 @@ use super::super::interpret::process_result;
 use super::super::RouterCtx;
 use super::meeting::resync_timers;
 use super::FlushDirection;
+use crate::rules::defaults::still_owed_bare_ack;
 use crate::rules::{ActionExecutor, RuleCall, RuleContext};
 use crate::store::Enveloped;
 use crate::turn_scope::TurnScope;
@@ -64,9 +67,10 @@ pub(super) async fn end_diverged(
 
 /// The other owner's ending copy `ending`, ranked higher than the `live`
 /// copy it diverged from, ends the call over the union of both: when a
-/// callee dialog only this node holds is still up, or a request only this
-/// node relays or holds is still open, this node's teardown ends it and
-/// the call discharges once it has; otherwise the ending stands alone.
+/// callee dialog only this node holds is still up — one `ending` lacks, or
+/// holds less far along — or a request only this node relays or holds is
+/// still open, this node's teardown ends it and the call discharges once it
+/// has; otherwise the ending stands alone.
 /// Returns whether a teardown ran here.
 pub(super) async fn end_over_an_ending(
     ctx: &Arc<RouterCtx>,
@@ -101,8 +105,9 @@ async fn end_from(
 }
 
 /// Whether `live` holds what `ending` cannot end: an early or confirmed
-/// callee dialog `ending` does not hold, or a relayed or held request the
-/// worker `by` keeps open. A dialled INVITE no dialog answered yet is left
+/// callee dialog `ending` does not hold as far along (a 2xx only `live`
+/// took is ACKed and BYEd here), or a relayed or held request the worker
+/// `by` keeps open. A dialled INVITE no dialog answered yet is left
 /// to its own transaction (RFC 3261 §9.1: no CANCEL before a provisional).
 fn only_here_to_end(live: &Call, ending: &Call, by: &RelayOwner) -> bool {
     let up = |d: &Dialog| matches!(d.state, DialogState::Early | DialogState::Confirmed);
@@ -110,7 +115,11 @@ fn only_here_to_end(live: &Call, ending: &Call, by: &RelayOwner) -> bool {
         let theirs =
             ending.b_legs.iter().find(|l| l.leg_id == leg.leg_id && l.call_id == leg.call_id);
         let held_there = |d: &Dialog| {
-            theirs.is_some_and(|t| t.dialogs.by_tags(&d.our_tag, &d.peer_tag).is_some())
+            theirs.is_some_and(|t| {
+                t.dialogs
+                    .by_tags(&d.our_tag, &d.peer_tag)
+                    .is_some_and(|t| rank(&t.state) >= rank(&d.state))
+            })
         };
         leg.dialogs.iter().any(|d| up(d) && !held_there(d))
     });
@@ -124,8 +133,8 @@ fn only_here_to_end(live: &Call, ending: &Call, by: &RelayOwner) -> bool {
 }
 
 /// `base`, in its envelope, with every dialog of `other` it lacks, by the leg
-/// and the two tags; a dialog both hold at the further of its two states, the
-/// higher of each sequence, and the remote target and route set of the copy
+/// and the two tags; a dialog both hold at the further of its two states with
+/// that copy's INVITE exchange, the higher of each sequence, and the remote target and route set of the copy
 /// that read the peer's later request (a target refresh is the peer's
 /// request, RFC 3261 §12.2); a leg only `other` dialled; the caller answered
 /// when `other` answered her, and every early dialog of hers ended once she
@@ -197,6 +206,7 @@ fn union_leg(ours: &mut Leg, theirs: &Leg) {
 fn union_dialog(ours: &mut Dialog, theirs: &Dialog) {
     if rank(&theirs.state) > rank(&ours.state) {
         ours.state = theirs.state.clone();
+        ours.sent_invite.clone_from(&theirs.sent_invite);
     }
     if theirs.peer_cseq > ours.peer_cseq {
         ours.remote_target = theirs.remote_target.clone();
@@ -221,7 +231,8 @@ fn rank(state: &DialogState) -> u8 {
     }
 }
 
-/// The teardown of `call` as a turn of its own: the closing CDR event and the
+/// The teardown of `call` as a turn of its own: every 2xx this node can ACK
+/// alone ACKed first (RFC 3261 §13.2.2.4), then the closing CDR event and the
 /// termination, through the one enforcement funnel, the caller answered if
 /// she still waits on this node.
 async fn end_cleanly(
@@ -231,7 +242,10 @@ async fn end_cleanly(
     owners: &crate::owners::Owners,
     now_ms: i64,
 ) {
-    let actions = [
+    let mut actions: Vec<RuleAction> = still_owed_bare_ack(&RuleCall::new(call))
+        .map(|leg_id| RuleAction::AckLeg { leg_id, body: None })
+        .collect();
+    actions.extend([
         RuleAction::AddCdrEvent {
             event_type: CdrEventType::Bye,
             leg_id: call.a_leg.leg_id.clone(),
@@ -243,7 +257,7 @@ async fn end_cleanly(
             cause: TerminationCause::Supervisor,
             by_leg: None,
         },
-    ];
+    ]);
     let event = CallEvent::InternalEvent {
         call_ref: call_ref.to_string(),
         topic: DIVERGED.into(),

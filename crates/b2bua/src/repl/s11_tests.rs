@@ -431,7 +431,7 @@ async fn reclaim_scan_materialises_pri_partition_idempotently() {
 // ===========================================================================
 
 /// CASE A — the body WAS pulled into `pri:{self}` but never materialised (the
-/// flip-race straggler: the one-shot `reclaim_all` already swept before the
+/// flip-race straggler: the one-shot bulk reclaim already swept before the
 /// import landed, and only a backup reverse-flush `ReclaimCall` — never an
 /// arriving in-dialog request — re-materialised a post-sweep straggler).
 ///
@@ -591,7 +591,7 @@ async fn reclaimed_call_is_visible_to_backup_bootstrap() {
         "pre-materialise: the peerless hydration left backup=None → invisible"
     );
 
-    // Materialise the reclaimed call into the live serving map (what `reclaim_all`
+    // Materialise the reclaimed call into the live serving map (what the bulk reclaim
     // / the reactive `ReclaimCall` do on reboot) — this must re-establish the
     // denormalised backup from `topology.bak`.
     let scanned = state.scan_partition(PRI, "w0", &|| {}).await;
@@ -646,7 +646,7 @@ async fn churn_during_reclaim_keeps_state_consistent() {
     }
 
     let started = std::time::Instant::now();
-    // Reclaim task: the state-level core of `router::reclaim_all` — scan pri:w0,
+    // Reclaim task: the state-level core of the bulk reclaim (`router::reclaim::park_all`) — scan pri:w0,
     // then per-call lock + materialise each into the live serving map.
     let reclaim = {
         let state = state.clone();

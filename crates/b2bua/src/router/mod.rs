@@ -248,10 +248,11 @@ impl RouterCtx {
 pub enum ReplCommand {
     /// **Bulk reclaim** — materialise every `pri:{self}` call into the
     /// live map + re-arm timers (a rebooted primary re-*serving* its partition,
-    /// not just re-storing it). Fired once the supervisor reports bootstrap-complete,
-    /// run while the node's own endpoint reads ready (`readmission`).
+    /// not just re-storing it). Fired once the supervisor reports
+    /// bootstrap-complete: the calls are parked at once, and armed while the
+    /// node's own endpoint reads ready (`readmission`, ADR-0055 §8).
     /// Keepalive timers are *smoothed* (oldest-overdue first; see
-    /// `reclaim::reclaim_all`) so a freshly-rehydrated node is not flooded by a
+    /// `reclaim::arm_parked`) so a freshly-rehydrated node is not flooded by a
     /// burst of past-due OPTIONS.
     ReclaimAll,
     /// **Reactive reclaim** of one call a backup just reverse-flushed to us — the
@@ -302,8 +303,9 @@ pub enum PrimaryWrite {
 enum Work {
     Event(CallEvent, bool),
     Repl(ReplCommand),
-    /// The reclaim commands `readmission` held, released in arrival order.
-    Released(Vec<ReplCommand>),
+    /// What `readmission` held: the arming of parked calls, then the reclaim
+    /// commands in arrival order.
+    Released(readmission::Released),
 }
 
 /// Run the router loop over the txn-event + timer-fire channels until both close.
@@ -366,12 +368,15 @@ pub async fn run(
             }
             Work::Repl(cmd) => {
                 if let Some(cmd) = readmission.admit(cmd) {
-                    on_repl_command(&ctx, cmd).await
+                    on_repl_command(&ctx, cmd, &mut readmission).await
                 }
             }
-            Work::Released(cmds) => {
-                for cmd in cmds {
-                    on_repl_command(&ctx, cmd).await
+            Work::Released(released) => {
+                if released.arm {
+                    reclaim::arm_parked(&ctx).await;
+                }
+                for cmd in released.cmds {
+                    on_repl_command(&ctx, cmd, &mut readmission).await
                 }
             }
         }
@@ -389,10 +394,20 @@ async fn next_fail_back(
     }
 }
 
-/// Interpret a replication-driven [`ReplCommand`] (ADR-0011 X11 / ADR-0014).
-async fn on_repl_command(ctx: &Arc<RouterCtx>, cmd: ReplCommand) {
+/// Interpret a replication-driven [`ReplCommand`] (ADR-0011 X11 / ADR-0014);
+/// the bulk reclaim's arming waits on `readmission`.
+async fn on_repl_command(
+    ctx: &Arc<RouterCtx>,
+    cmd: ReplCommand,
+    readmission: &mut ReadmissionGate,
+) {
     match cmd {
-        ReplCommand::ReclaimAll => reclaim::reclaim_all(ctx).await,
+        ReplCommand::ReclaimAll => {
+            reclaim::park_all(ctx).await;
+            if readmission.arm_now() {
+                reclaim::arm_parked(ctx).await;
+            }
+        }
         ReplCommand::ReclaimCall(call_ref) => {
             reclaim::reconcile_reverse_flush(ctx, &call_ref).await
         }

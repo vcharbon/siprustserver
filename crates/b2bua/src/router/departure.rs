@@ -141,7 +141,7 @@ async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str) -> Swept {
             }
             _ => Swept::Taken,
         },
-        Materialised::Resident(_) => Swept::Left,
+        Materialised::Resident(_) | Materialised::Parked(_) => Swept::Left,
         // Gone from the partition since it was read: the lock entry this pass
         // made is the only trace, and no release will clear it. The guard
         // goes first, as it is held on that entry.

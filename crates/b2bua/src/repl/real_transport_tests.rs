@@ -124,9 +124,9 @@ fn reclaim_body(primary: &str, backup: &str, cid: &str, clock: &Clock) -> (Strin
 /// Spawn a FULL rebooting `B2buaCore` reclaimer (`self_ordinal`, incarnation 2)
 /// on a real SIP UDP endpoint, replicating over `repl_net`, pulling its single
 /// peer (`peer_ordinal` @ `peer_addr`). Returns the core + its repl store handle.
-/// Its supervisor bootstraps the peer and signals the REAL `router::reclaim_all`
-/// — so a `serves()` true means the call went all the way through materialise +
-/// timer re-arm, not just store-landing.
+/// Its supervisor bootstraps the peer and signals the REAL bulk reclaim
+/// — so a `serves()` true means the call went all the way through materialise,
+/// not just store-landing.
 async fn spawn_reclaimer_core(
     self_ordinal: &str,
     peer_ordinal: &str,
@@ -599,12 +599,12 @@ async fn bootstrap_synchronises_above_5k_contexts_per_second_over_real_tcp() {
 }
 
 // ---------------------------------------------------------------------------
-// MATERIALISATION gate (real `reclaim_all`, end-to-end, under serving load).
+// MATERIALISATION gate (real bulk reclaim, end-to-end, under serving load).
 //
 // The stream gates above stop one stage too early: they assert the body LANDED
 // in the store (`scan_call_refs` / `repl_pull_applied`). A call only becomes
 // LIVE + routable + keepalive-armed after the SECOND stage —
-// `ReclaimAll → reclaim_into_live → materialize_if_absent + timers.restore`
+// `ReclaimAll → park_all → materialize_if_absent`, then `arm_parked → timers.restore`
 // (`router.rs`), which a bare `ReplicatingCallStore` can't reach. That second
 // stage is exactly what was slow on the live cluster (`repl_reclaimed_total`
 // trickled 203→433 over 15 min at ~30% CPU — wait-bound, not compute-bound), so
@@ -651,7 +651,7 @@ async fn reclaim_materialises_into_live_map_under_serving_load() {
 
     // w1: a FULL rebooting B2buaCore reclaimer pointed at w0. Start the clock the
     // instant it comes up — the measured interval is connect → bootstrap → the
-    // real reclaim_all materialising every call.
+    // real bulk reclaim materialising every call.
     let started = tokio::time::Instant::now();
     let (w1, w1_store) = spawn_reclaimer_core("w1", "w0", w0_addr, &net, &clock).await;
 
@@ -712,7 +712,7 @@ async fn reclaim_materialises_into_live_map_under_serving_load() {
     assert_eq!(
         w1.metrics().repl_reclaimed_total(),
         N as u64,
-        "the bulk reclaim_all materialised all {N} (no reactive trickle, no truncation)",
+        "the bulk reclaim materialised all {N} (no reactive trickle, no truncation)",
     );
 
     // (b) Materialisation throughput floor under serving load — comfortably met
