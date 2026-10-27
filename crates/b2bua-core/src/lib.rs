@@ -10,6 +10,8 @@
 //! - [`rules`] — the rule engine and every rule family, the action executor
 //!   and vocabulary, the invariants, relay construction;
 //! - [`rule_chain`] — the per-turn framework around the rules;
+//! - [`dialog_gate`] — what the dialog gate makes of a message before any
+//!   rule reads it;
 //! - [`landing`] — the pass a turn's result takes before the shell persists it;
 //! - [`initial_invite`], [`decision`] — the initial INVITE's folds and the
 //!   decision DTOs;
@@ -42,6 +44,7 @@ pub mod config;
 pub mod decision;
 pub mod decision_log;
 pub mod destination_allowlist;
+pub mod dialog_gate;
 pub mod effects;
 pub mod failure_terminate;
 pub mod failure_unavailable;
@@ -59,6 +62,8 @@ pub mod stack_identity;
 #[cfg(any(test, feature = "testkit"))]
 pub mod test_call;
 pub mod timer_arm;
+#[cfg(any(test, feature = "testkit"))]
+pub mod turn_driver;
 pub mod turn_notes;
 pub mod turn_scope;
 pub mod unheld_response;

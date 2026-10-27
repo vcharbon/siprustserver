@@ -22,13 +22,22 @@ pub struct TurnScope {
     pub faults: WireFaultSet,
     /// The rule whose actions run now, by its id; `None` outside them.
     pub rule: Option<&'static str>,
+    /// The rule that handled the turn's event, by its id; `None` while no
+    /// rule has, and on a turn the framework takes before the rules.
+    pub handled_by: Option<&'static str>,
 }
 
 impl TurnScope {
     /// The scope of the turn `ids` draws for, nothing reported yet, no wire
     /// fault armed.
     pub fn of(ids: TurnIds) -> Self {
-        Self { ids, notes: TurnNotes::default(), faults: WireFaultSet::none(), rule: None }
+        Self {
+            ids,
+            notes: TurnNotes::default(),
+            faults: WireFaultSet::none(),
+            rule: None,
+            handled_by: None,
+        }
     }
 
     /// `self`, emitting the wire faults `faults`.

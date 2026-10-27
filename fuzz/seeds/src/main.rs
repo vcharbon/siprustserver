@@ -98,7 +98,8 @@ fn lane_seeds() -> Corpus {
 
     let scripts = scripts::scripts();
     for (i, script) in scripts.iter().enumerate() {
-        let dialled = drive::dialled_with(script.setup);
+        let driver = drive::driver(script.setup);
+        let dialled = driver.dial();
         let run = drive::run(&dialled, &script.steps, usize::MAX, &[]);
         for (step, raw) in &run.raws {
             let (Ok(i), Ok(step)) = (u8::try_from(i), u8::try_from(*step)) else { continue };

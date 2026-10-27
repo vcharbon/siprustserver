@@ -20,7 +20,8 @@ fuzz_target!(|data: &[u8]| {
         let scripts = scripts::scripts();
         let script = &scripts[usize::from(case.script) % scripts.len()];
         let step = usize::from(case.step) % script.steps.len();
-        let dialled = drive::dialled_with(script.setup);
+        let driver = drive::driver(script.setup);
+        let dialled = driver.dial();
         let first = drive::run_replacing(&dialled, &script.steps, step, case.text);
         let again = drive::run_replacing(&dialled, &script.steps, step, case.text);
         assert_eq!(first.turns, again.turns, "a turn is a function of its inputs");

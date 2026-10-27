@@ -5,11 +5,10 @@
 //! 2xx is a straggler's.
 
 use b2bua_core::rules::{Match, RuleAction, RuleDefinition, RuleHandleResult, SERVICE_LAYER};
+use b2bua_core::turn_driver::{Driver, Step};
 use call::helpers::records_of;
 use call::{Call, Dialog, Direction};
 use sip_message::Method;
-
-use crate::turn_lane::drive::{dialled, run, Step};
 
 /// A service rule tracking the early dialog of every 1xx to the b-leg INVITE
 /// (`TrackEarlyDialog`), whatever the leg's state.
@@ -60,18 +59,17 @@ fn open_methods(d: &Dialog) -> Vec<&str> {
 /// and bob's 200 settles it.
 #[test]
 fn a_straggler_released_from_its_early_dialog_keeps_its_open_prack() {
-    let dialled = dialled().with_rule(releases_every_2xx());
-    let script = [Step::BobAnswersReliably(183), Step::BobAnswers(200)];
-    let released = run(&dialled, &script, usize::MAX, &[]);
-    assert_eq!(released.sent, ["b-1 PRACK", "b-1 ACK", "b-1 BYE"], "PRACKed, then released");
-    let d = fork(&released.call, "bobtag").expect("the fork's dialog");
+    let driver = Driver::new().with_rule(releases_every_2xx());
+    let mut call = driver.dial();
+    call.run([Step::AnswersReliably("b-1", 183), Step::Answers("b-1", 200)]);
+    assert_eq!(call.sent(), ["b-1 PRACK", "b-1 ACK", "b-1 BYE"], "PRACKed, then released");
+    let d = fork(call.call(), "bobtag").expect("the fork's dialog");
     assert!(d.retired().is_some(), "the release retired the dialog");
     assert_eq!(open_methods(&d), ["PRACK", "BYE"], "the PRACK stays open beside the BYE");
     assert!(d.requests.is_empty(), "no record is left where a retired dialog is not read");
 
-    let script = [script.as_slice(), &[Step::BobAnswersLast(Method::Prack, 200)]].concat();
-    let settled = run(&dialled, &script, usize::MAX, &[]);
-    let d = fork(&settled.call, "bobtag").expect("the fork's dialog");
+    call.turned(Step::AnswersLast("b-1", Method::Prack, 200));
+    let d = fork(call.call(), "bobtag").expect("the fork's dialog");
     assert_eq!(open_methods(&d), ["BYE"], "bob's 200 settled the PRACK");
 }
 
@@ -81,26 +79,23 @@ fn a_straggler_released_from_its_early_dialog_keeps_its_open_prack() {
 /// none and is released as a straggler's.
 #[test]
 fn a_fork_ringing_after_the_winner_answered_opens_no_dialog() {
-    let mut dialled = dialled();
-    dialled.call.sampled = Some(true);
-    let answered = [Step::BobAnswers(180), Step::BobAnswers(200), Step::AliceAcks];
+    let driver = Driver::new();
+    let answered = [Step::Answers("b-1", 180), Step::Answers("b-1", 200), Step::AliceAcks];
     for late in [Step::ForkAnswers("latefork", 180), Step::ForkAnswersReliably("latefork", 183)] {
-        let script = [answered.as_slice(), std::slice::from_ref(&late)].concat();
-        let rang = run(&dialled, &script, usize::MAX, &[]);
-        assert_eq!(fork(&rang.call, "latefork"), None, "{late:?} opens no dialog");
-        assert_eq!(rang.sent, ["b-1 ACK"], "{late:?} draws nothing");
+        let mut call = driver.dial();
+        call.run(answered.clone());
+        call.turned(late.clone());
+        assert_eq!(fork(call.call(), "latefork"), None, "{late:?} opens no dialog");
+        assert_eq!(call.sent(), ["b-1 ACK"], "{late:?} draws nothing");
     }
 
-    let script = [
-        answered.as_slice(),
-        &[Step::ForkAnswers("latefork", 180), Step::ForkAnswers("latefork", 200)],
-    ]
-    .concat();
-    let answered_late = run(&dialled, &script, usize::MAX, &[]);
-    let last = answered_late.turns.last().expect("the late 2xx takes a turn");
-    assert!(
-        last.contains("release-fork-straggler-2xx"),
-        "the late fork's 2xx is a straggler's: {last}"
+    let mut call = driver.dial();
+    call.run(answered).run([Step::ForkAnswers("latefork", 180)]);
+    let late = call.turned(Step::ForkAnswers("latefork", 200));
+    assert_eq!(
+        late.rule,
+        Some("release-fork-straggler-2xx"),
+        "the late fork's 2xx is a straggler's"
     );
 }
 
@@ -108,22 +103,20 @@ fn a_fork_ringing_after_the_winner_answered_opens_no_dialog() {
 /// early dialog on the confirmed leg: its 2xx is still a straggler's.
 #[test]
 fn a_late_fork_a_service_tracked_is_released_as_a_straggler() {
-    let mut dialled = dialled().with_rule(tracks_every_1xx());
-    dialled.call.sampled = Some(true);
-    let script = [
-        Step::BobAnswers(180),
-        Step::BobAnswers(200),
+    let driver = Driver::new().with_rule(tracks_every_1xx());
+    let mut call = driver.dial();
+    call.run([
+        Step::Answers("b-1", 180),
+        Step::Answers("b-1", 200),
         Step::AliceAcks,
         Step::ForkAnswers("latefork", 180),
-        Step::ForkAnswers("latefork", 200),
-    ];
-    let tracked = run(&dialled, &script[..4], usize::MAX, &[]);
-    let d = fork(&tracked.call, "latefork").expect("the service tracked the late fork");
+    ]);
+    let d = fork(call.call(), "latefork").expect("the service tracked the late fork");
     assert!(d.awaits_invite_final(), "an early dialog on the confirmed leg: {:?}", d.state);
-    let answered_late = run(&dialled, &script, usize::MAX, &[]);
-    let last = answered_late.turns.last().expect("the late 2xx takes a turn");
-    assert!(
-        last.contains("release-fork-straggler-2xx"),
-        "the tracked fork's 2xx is a straggler's: {last}"
+    let late = call.turned(Step::ForkAnswers("latefork", 200));
+    assert_eq!(
+        late.rule,
+        Some("release-fork-straggler-2xx"),
+        "the tracked fork's 2xx is a straggler's"
     );
 }

@@ -5,10 +5,10 @@ use b2bua_sdk::event::CallEvent;
 use call::{Call, CallModelState, Dialog, DialogEnd, DialogState, EndingBy, RetiredDialog};
 use sip_message::{Method, SipMessage, SipRequest};
 
-use super::dialog_gate::{admission, note_in_order, request_verdict, Admission, Verdict};
-use super::test_support::{invite, src};
+use super::{admission, note_in_order, request_verdict, Admission, Verdict};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
+use crate::test_call::{invite, src};
 
 /// The caller's tag for the in-dialog requests below: the From-tag of `invite`.
 const CALLER_TAG: &str = "alicetag";
@@ -124,7 +124,7 @@ fn an_ended_or_retired_dialog_refuses_all_but_its_table_exceptions() {
 /// or not.
 fn call_with_caller_dialog(shown: bool) -> Call {
     let mut call = build_initial_call(
-        &invite("w0", "w1", "gate"),
+        &invite("gate"),
         src(),
         &B2buaConfig::default(),
         &mut sip_ids::TurnIds::fixed(1),
@@ -140,7 +140,7 @@ fn call_with_caller_dialog(shown: bool) -> Call {
 
 /// The caller's request of `method` and CSeq `cseq` naming the dialog `ours`.
 fn caller_request(method: Method, cseq: u32) -> SipRequest {
-    let inv = invite("w0", "w1", "gate");
+    let inv = invite("gate");
     inv.thaw()
         .with_method(method.clone())
         .set(inv.to().clone().with_tag("ours"))

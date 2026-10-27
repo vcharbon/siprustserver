@@ -147,6 +147,7 @@ fn first_handling(
         let Some(outcome) = (rule.handle)(ctx) else {
             continue;
         };
+        exec.turn.handled_by = Some(rule.id);
         if outcome.unrecoverable {
             let why = format!("read by rule {}", rule.id);
             crate::rules::relay::note_unrebuilt(call, &mut exec.turn.notes, &why);

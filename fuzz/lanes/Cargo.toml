@@ -8,7 +8,7 @@ description = "What the fuzz targets share: the no-panic lanes' drivers and seed
 
 [dependencies]
 async-trait = "0.1"
-b2bua-core = { path = "../../crates/b2bua-core" }
+b2bua-core = { path = "../../crates/b2bua-core", features = ["testkit"] }
 b2bua-sdk = { path = "../../crates/b2bua-sdk" }
 call = { path = "../../crates/call", features = ["testkit"] }
 repl-net = { path = "../../crates/repl-net" }

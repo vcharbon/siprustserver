@@ -32,8 +32,6 @@ mod callouts;
 mod cancel_crossing_tests;
 mod departure;
 mod dialog_gate;
-#[cfg(test)]
-mod dialog_gate_tests;
 mod dropped_on_delete;
 #[cfg(test)]
 mod evidence_gate_tests;

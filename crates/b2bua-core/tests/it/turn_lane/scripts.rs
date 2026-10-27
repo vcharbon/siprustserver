@@ -8,7 +8,9 @@ use call::features::RelayFirst18xStrategy;
 use call::TimerType;
 use sip_message::Method;
 
-use super::drive::{Setup, Step};
+use b2bua_core::turn_driver::Step;
+
+use super::drive::Setup;
 
 /// A script: its name, the setup its call is dialled under, its steps.
 pub struct Script {
@@ -37,13 +39,13 @@ pub fn scripts() -> Vec<Script> {
         name: "session-timed",
         setup: Setup::SessionTimer,
         steps: vec![
-            Step::BobAnswersWith(200, TIMED_ANSWER),
+            Step::AnswersWith("b-1", 200, TIMED_ANSWER.to_vec()),
             Step::AliceAcks,
-            Step::AliceSends(Method::Invite),
-            Step::BobAnswersSent(200),
+            Step::Sends("a", Method::Invite),
+            Step::AnswersSent("b-1", 200),
             Step::AliceAcks,
-            Step::AliceByes,
-            Step::BobAnswersSent(200),
+            Step::Sends("a", Method::Bye),
+            Step::AnswersSent("b-1", 200),
         ],
     });
     for (name, strategy) in [
@@ -54,12 +56,12 @@ pub fn scripts() -> Vec<Script> {
             name,
             setup: Setup::EarlyMedia(strategy),
             steps: vec![
-                Step::BobAnswersWith(183, EARLY_MEDIA),
-                Step::BobAnswers(180),
-                Step::BobAnswers(200),
+                Step::AnswersWith("b-1", 183, EARLY_MEDIA.to_vec()),
+                Step::Answers("b-1", 180),
+                Step::Answers("b-1", 200),
                 Step::AliceAcks,
-                Step::AliceByes,
-                Step::BobAnswersSent(200),
+                Step::Sends("a", Method::Bye),
+                Step::AnswersSent("b-1", 200),
             ],
         });
     }
@@ -67,43 +69,43 @@ pub fn scripts() -> Vec<Script> {
         name: "early-media-fake-prack",
         setup: Setup::EarlyMedia(RelayFirst18xStrategy::FakePrack),
         steps: vec![
-            Step::BobAnswersWith(183, RELIABLE_EARLY_MEDIA),
-            Step::BobAnswersLast(Method::Prack, 200),
-            Step::BobAnswers(200),
+            Step::AnswersWith("b-1", 183, RELIABLE_EARLY_MEDIA.to_vec()),
+            Step::AnswersLast("b-1", Method::Prack, 200),
+            Step::Answers("b-1", 200),
             Step::AliceAcks,
-            Step::AliceByes,
-            Step::BobAnswersSent(200),
+            Step::Sends("a", Method::Bye),
+            Step::AnswersSent("b-1", 200),
         ],
     });
     all.push(Script {
         name: "early-media-promoted",
         setup: Setup::EarlyMedia(RelayFirst18xStrategy::PromotePemTo200),
         steps: vec![
-            Step::BobAnswersWith(183, EARLY_MEDIA),
+            Step::AnswersWith("b-1", 183, EARLY_MEDIA.to_vec()),
             Step::AliceAcks,
-            Step::BobAnswers(200),
-            Step::AliceByes,
-            Step::BobAnswersSent(200),
+            Step::Answers("b-1", 200),
+            Step::Sends("a", Method::Bye),
+            Step::AnswersSent("b-1", 200),
         ],
     });
     all.push(plain(
         "referred-then-transferred",
         vec![
-            Step::BobAnswers(200),
+            Step::Answers("b-1", 200),
             Step::AliceAcks,
-            Step::BobRefers,
-            Step::BobAnswersSent(200),
+            Step::Sends("b-1", Method::Refer),
+            Step::AnswersSent("b-1", 200),
             Step::ReferAnswers {
                 outcome: "allow",
                 payload: serde_json::json!({"destination": {"host": "127.0.0.1", "port": 5071}}),
             },
-            Step::CarolAnswers(180),
-            Step::CarolAnswers(200),
-            Step::CarolAnswersSent(200),
-            Step::AliceAnswersSent(200),
-            Step::BobAnswersSent(200),
-            Step::AliceByes,
-            Step::CarolAnswersSent(200),
+            Step::Answers("b-2", 180),
+            Step::Answers("b-2", 200),
+            Step::AnswersSent("b-2", 200),
+            Step::AnswersSent("a", 200),
+            Step::AnswersSent("b-1", 200),
+            Step::Sends("a", Method::Bye),
+            Step::AnswersSent("b-2", 200),
         ],
     ));
     all
@@ -120,17 +122,26 @@ fn plain_scripts() -> Vec<(&'static str, Vec<Step>)> {
     vec![
         (
             "answered-bob-hangs-up",
-            vec![Step::BobAnswers(180), Step::BobAnswers(200), Step::AliceAcks, Step::BobByes],
+            vec![
+                Step::Answers("b-1", 180),
+                Step::Answers("b-1", 200),
+                Step::AliceAcks,
+                Step::Sends("b-1", Method::Bye),
+            ],
         ),
         (
             "answered-alice-hangs-up",
-            vec![Step::BobAnswers(183), Step::BobAnswers(200), Step::AliceByes],
+            vec![
+                Step::Answers("b-1", 183),
+                Step::Answers("b-1", 200),
+                Step::Sends("a", Method::Bye),
+            ],
         ),
         (
             "refused-then-rejected",
             vec![
-                Step::BobAnswers(180),
-                Step::BobAnswers(486),
+                Step::Answers("b-1", 180),
+                Step::Answers("b-1", 486),
                 Step::FailureAnswers {
                     outcome: "reject",
                     payload: serde_json::json!({"code": 480, "reason": "Temporarily Unavailable"}),
@@ -140,14 +151,14 @@ fn plain_scripts() -> Vec<(&'static str, Vec<Step>)> {
         (
             "refused-then-rerouted",
             vec![
-                Step::BobAnswers(486),
+                Step::Answers("b-1", 486),
                 Step::FailureAnswers { outcome: "failover", payload: route },
             ],
         ),
         (
             "refused-then-redirected",
             vec![
-                Step::BobAnswers(486),
+                Step::Answers("b-1", 486),
                 Step::FailureAnswers {
                     outcome: "redirect",
                     payload: serde_json::json!({
@@ -157,66 +168,66 @@ fn plain_scripts() -> Vec<(&'static str, Vec<Step>)> {
                 },
             ],
         ),
-        ("ringing-unanswered", vec![Step::BobAnswers(180), Step::Fires(TimerType::NoAnswer)]),
+        ("ringing-unanswered", vec![Step::Answers("b-1", 180), Step::Fires(TimerType::NoAnswer)]),
         ("setup-unanswered", vec![Step::Fires(TimerType::SetupTimeout)]),
         (
             "reinvited",
             vec![
-                Step::BobAnswers(180),
-                Step::BobAnswers(200),
+                Step::Answers("b-1", 180),
+                Step::Answers("b-1", 200),
                 Step::AliceAcks,
-                Step::AliceSends(Method::Invite),
-                Step::BobAnswersSent(200),
+                Step::Sends("a", Method::Invite),
+                Step::AnswersSent("b-1", 200),
                 Step::AliceAcks,
-                Step::AliceByes,
-                Step::BobAnswersSent(200),
+                Step::Sends("a", Method::Bye),
+                Step::AnswersSent("b-1", 200),
             ],
         ),
         (
             "updated",
             vec![
-                Step::BobAnswers(200),
+                Step::Answers("b-1", 200),
                 Step::AliceAcks,
-                Step::AliceSends(Method::Update),
-                Step::BobAnswersSent(200),
-                Step::BobByes,
-                Step::AliceAnswersSent(200),
+                Step::Sends("a", Method::Update),
+                Step::AnswersSent("b-1", 200),
+                Step::Sends("b-1", Method::Bye),
+                Step::AnswersSent("a", 200),
             ],
         ),
         (
             "reliably-provisioned",
             vec![
-                Step::BobAnswersReliably(183),
-                Step::BobAnswersSent(200),
-                Step::BobAnswers(200),
+                Step::AnswersReliably("b-1", 183),
+                Step::AnswersSent("b-1", 200),
+                Step::Answers("b-1", 200),
                 Step::AliceAcks,
-                Step::AliceByes,
-                Step::BobAnswersSent(200),
+                Step::Sends("a", Method::Bye),
+                Step::AnswersSent("b-1", 200),
             ],
         ),
         (
             "cancelled",
             vec![
-                Step::BobAnswers(180),
+                Step::Answers("b-1", 180),
                 Step::AliceCancels,
-                Step::BobAnswersSent(200),
-                Step::BobAnswers(487),
+                Step::AnswersSent("b-1", 200),
+                Step::Answers("b-1", 487),
             ],
         ),
         (
             "referred-then-refused",
             vec![
-                Step::BobAnswers(200),
+                Step::Answers("b-1", 200),
                 Step::AliceAcks,
-                Step::BobRefers,
-                Step::BobAnswersSent(200),
+                Step::Sends("b-1", Method::Refer),
+                Step::AnswersSent("b-1", 200),
                 Step::ReferAnswers {
                     outcome: "reject",
                     payload: serde_json::json!({"reject_code": 603, "reject_reason": "Declined"}),
                 },
-                Step::BobAnswersSent(200),
-                Step::BobByes,
-                Step::AliceAnswersSent(200),
+                Step::AnswersSent("b-1", 200),
+                Step::Sends("b-1", Method::Bye),
+                Step::AnswersSent("a", 200),
             ],
         ),
     ]

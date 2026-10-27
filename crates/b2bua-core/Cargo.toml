@@ -17,7 +17,8 @@ workspace = true
 
 [features]
 # Test support: the test caller a shell's tests build their calls from
-# (`test_call`). No production binary turns it on (ADR-0051 §1).
+# (`test_call`) and the turn driver (`turn_driver`). No production binary
+# turns it on (ADR-0051 §1).
 testkit = ["sip-ids/testkit"]
 
 [dependencies]
@@ -37,6 +38,8 @@ sip-retransmit = { path = "../sip-retransmit" }
 lookup-map = { path = "../lookup-map" }
 
 [dev-dependencies]
+# The tests drive turns through the shared turn driver (`turn_driver`).
+b2bua-core = { path = ".", features = ["testkit"] }
 # Tests that stage a call's derived state (`call::testkit`).
 call = { path = "../call", features = ["testkit"] }
 # The fixed-key turns the rule-engine `ActionExecutor` draws from in tests.

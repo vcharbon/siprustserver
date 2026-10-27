@@ -4,14 +4,15 @@
 //! the turn returns a result, the same one for the same inputs, and never
 //! panics.
 //!
-//! A case runs a script ([`drive::Step`]) over a call dialled toward bob —
+//! A case runs a script ([`Step`]) over a call dialled toward bob —
 //! answers, hang-ups, a re-INVITE, an UPDATE, a reliable provisional and its
 //! PRACK, a CANCEL, a REFER, the decision consults — each step's SIP text
 //! built against the call as it stands, its sequence edited (a step dropped,
 //! repeated or swapped), one step's text mutated ([`wire_mutations::mutate`]),
-//! the decision answers' payloads generated; each turn goes through the timer
-//! screen, the dialog gate's resolution, the rule chain and the landing pass
-//! as the shell runs them.
+//! the decision answers' payloads generated; each turn goes through the
+//! shared turn driver ([`b2bua_core::turn_driver`]): the timer screen, the
+//! dialog gate's verdict, the rule chain and the landing pass as the shell
+//! runs them.
 //!
 //! - [`every_script_turns_the_same_twice`] (default lane): every script,
 //!   unmutated, ends its call where it should with no defect noted, and two
@@ -49,7 +50,7 @@ pub(crate) mod drive;
 pub(crate) mod invite;
 pub(crate) mod scripts;
 
-use drive::Step;
+use b2bua_core::turn_driver::{Driver, Session, Step};
 use scripts::{scripts, Script};
 
 /// Cases of the proptest properties.
@@ -94,7 +95,8 @@ fn answers(name: &str) -> Option<&'static [&'static str]> {
 fn every_script_turns_the_same_twice() {
     on_lane_stack(|| {
         for Script { name, setup, steps: script } in scripts() {
-            let dialled = drive::dialled_with(setup);
+            let driver = drive::driver(setup);
+            let dialled = driver.dial();
             let first = drive::run(&dialled, &script, usize::MAX, &[]);
             let again = drive::run(&dialled, &script, usize::MAX, &[]);
             assert_eq!(first.turns.len(), script.len(), "{name}: every step turns");
@@ -133,7 +135,8 @@ fn every_script_turns_the_same_twice() {
 fn a_step_replaced_by_its_own_text_turns_the_same() {
     on_lane_stack(|| {
         for Script { name, setup, steps: script } in scripts() {
-            let dialled = drive::dialled_with(setup);
+            let driver = drive::driver(setup);
+            let dialled = driver.dial();
             let seed = drive::run(&dialled, &script, usize::MAX, &[]);
             for (at, raw) in &seed.raws {
                 let replaced = drive::run_replacing(&dialled, &script, *at, raw);
@@ -176,7 +179,8 @@ fn edited(script: &[Step], edit: Edit) -> Vec<Step> {
 fn every_edited_script_turns_the_same_twice() {
     on_lane_stack(|| {
         for Script { name, setup, steps: script } in scripts() {
-            let dialled = drive::dialled_with(setup);
+            let driver = drive::driver(setup);
+            let dialled = driver.dial();
             for i in 0..script.len() {
                 for edit in [Edit::Drop(i), Edit::Repeat(i), Edit::Swap(i, i + 1)] {
                     let steps = edited(&script, edit);
@@ -197,7 +201,8 @@ fn structured_corpus_never_panics() {
     on_lane_stack(|| {
         let mut seen = std::collections::BTreeSet::new();
         for Script { name, setup, steps: script } in scripts() {
-            let dialled = drive::dialled_with(setup);
+            let driver = drive::driver(setup);
+            let dialled = driver.dial();
             let seed = drive::run(&dialled, &script, usize::MAX, &[]);
             for (at, raw) in seed.raws.iter().filter(|(_, raw)| seen.insert(raw.clone())) {
                 for (family, mutations) in mutate::families(raw) {
@@ -223,8 +228,9 @@ fn a_session_timer_rides_both_legs() {
     on_lane_stack(|| {
         let script = scripts().into_iter().find(|s| s.name == "session-timed");
         let script = script.expect("the session-timed script");
-        let dialled = drive::dialled_with(script.setup);
-        let dialling = String::from_utf8_lossy(dialled.b_invite.image()).into_owned();
+        let driver = drive::driver(script.setup);
+        let dialled = driver.dial();
+        let dialling = String::from_utf8_lossy(drive::bob_invite(&dialled).image()).into_owned();
         assert!(dialling.contains("Session-Expires: 1800"), "{dialling}");
         let run = drive::run(&dialled, &script.steps, usize::MAX, &[]);
         let answer = run.responses.iter().find(|(leg, r)| leg == "a" && r.status() == 200);
@@ -267,7 +273,7 @@ fn every_decision_routes_the_caller_invite() {
                 assert!(!decision.dials, "{name}: alice's INVITE dials bob");
                 continue;
             };
-            let wire = String::from_utf8_lossy(dialled.b_invite.image()).into_owned();
+            let wire = String::from_utf8_lossy(drive::bob_invite(&dialled).image()).into_owned();
             for stated in states(name) {
                 assert!(wire.contains(stated), "{name}: {stated:?} in\n{wire}");
             }
@@ -370,8 +376,8 @@ fn edit() -> impl Strategy<Value = Edit> {
 fn random_cases_never_panic() {
     on_lane_stack(|| {
         let scripts = scripts();
-        let dialled: Vec<drive::Dialled> =
-            scripts.iter().map(|s| drive::dialled_with(s.setup)).collect();
+        let drivers: Vec<Driver> = scripts.iter().map(|s| drive::driver(s.setup)).collect();
+        let dialled: Vec<Session> = drivers.iter().map(Driver::dial).collect();
         let strategy = (
             0..scripts.len(),
             0..8usize,

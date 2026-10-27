@@ -533,6 +533,7 @@ dependencies = [
 name = "b2bua-core"
 version = "0.1.0"
 dependencies = [
+ "b2bua-core",
  "b2bua-sdk",
  "call",
  "lookup-map",
