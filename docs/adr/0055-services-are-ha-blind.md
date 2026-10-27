@@ -375,7 +375,8 @@ component by component.
 - Neither: the node that meets the other copy ends the call cleanly (§4), from
   the copy ranked higher by `lifecycle_behind` (the primary's on a tie), over
   the union of both copies' dialogs by tags (ADR-0041): each dialog's state is
-  the further of the two with that copy's INVITE exchange, so the ending's
+  the further of the two with that copy's INVITE exchange and the answer it
+  owes (RFC 3264 §4), so the ending's
   teardown ACKs and BYEs a 2xx either copy took (RFC 3261 §13.2.2.4, §15), the
   BYE goes at the greater CSeq plus one, answered is the OR of both, CDR events
   are the union.
@@ -404,8 +405,10 @@ field fails safe:
 A node that meets the other copy's ending discharges it keeping every dialog
 either copy opened, at the higher of the two sequences. A dialog it holds
 further along than the ending does (confirmed where the ending holds it
-early) is its own to end: it ACKs the 2xx and BYEs the dialog. There is no
-per-axis fold.
+early) is its own to end: it ACKs the 2xx and BYEs the dialog. An answer
+that ACK owes rode the caller's ACK, which the other copy took: no ACK this
+node awaits brings it, so the 2xx is ACKed with every stream rejected (RFC
+3264 §6). There is no per-axis fold.
 
 ### 8. The proxy routes on one rule
 

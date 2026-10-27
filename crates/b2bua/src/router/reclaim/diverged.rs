@@ -4,11 +4,10 @@
 //! (`call::helpers::lifecycle_behind`; the primary's on a tie), over the
 //! union of both copies' dialogs by their tags (ADR-0041): each dialog at the
 //! further of its two states, with that copy's INVITE exchange and the answer
-//! it owes (RFC 3264 §4), and at the
-//! higher of each of its sequences, so the teardown ACKs and BYEs a 2xx either
-//! copy took (RFC 3261 §13.2.2.4, §15) and the BYE goes at the greater CSeq
-//! plus one; the caller answered when either copy answered her; the CDR events
-//! of both. The union holds only the
+//! it owes (RFC 3264 §4), and at the higher of each of its sequences, so the
+//! teardown ACKs and BYEs a 2xx either copy took (RFC 3261 §13.2.2.4, §15) and
+//! the BYE goes at the greater CSeq plus one; the caller answered when either
+//! copy answered her; the CDR events of both. The union holds only the
 //! request records whose transactions this node holds, so its teardown
 //! answers them (RFC 3261 §15.1.2); the other node's teardown answers its
 //! own.
@@ -134,8 +133,8 @@ fn only_here_to_end(live: &Call, ending: &Call, by: &RelayOwner) -> bool {
 
 /// `base`, in its envelope, with every dialog of `other` it lacks, by the leg
 /// and the two tags; a dialog both hold at the further of its two states with
-/// that copy's INVITE exchange and owed answer, the higher of each sequence, and the remote
-/// target and route set of the copy that read the peer's later request (a
+/// that copy's INVITE exchange and owed answer, the higher of each sequence,
+/// and the remote target and route set of the copy that read the peer's later request (a
 /// target refresh is the peer's request, RFC 3261 §12.2); a leg only `other`
 /// dialled; the caller answered when `other` answered her, and every early
 /// dialog of hers ended once she took a final. A leg id names one leg in both
