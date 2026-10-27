@@ -76,8 +76,8 @@ impl Inbox {
         }
     }
 
-    /// [`Self::recv`] on the heap: a reactor idling on it holds a pointer, and
-    /// the message rides a box until its reaction takes it.
+    /// [`Self::recv`] on the heap, the message boxed until its reaction takes
+    /// it. The wait's heap block is held for as long as the reactor idles on it.
     pub(super) fn recv_boxed(&mut self) -> BoxFuture<'_, Result<Box<Inbound>, StepError>> {
         async move { self.recv().await.map(Box::new) }.boxed()
     }

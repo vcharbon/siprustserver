@@ -418,7 +418,7 @@ impl Agent {
                 Ok(msg) => msg,
                 Err(e) => return Err(e),
             };
-            if let Some(msg) = self.surface(&pkt.raw, msg).await {
+            if let Some(msg) = Box::pin(self.surface(&pkt.raw, msg)).await {
                 return Ok(msg);
             }
         }

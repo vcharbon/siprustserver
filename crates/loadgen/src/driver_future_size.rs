@@ -1,6 +1,6 @@
 //! A placed call's task lives as long as the call, so its future's size is
 //! memory held per in-flight call: the task holds the call once, and the call
-//! holds no step's future beyond the step.
+//! future stays within a bound with its awaited steps inline.
 
 use std::future::Future;
 use std::mem::size_of;
@@ -27,13 +27,13 @@ fn task_size<A, B, C, D, E, F, G, H, I, J, R: Future<Output = ()>>(
     ret_size(call_task::<R>)
 }
 
-/// One placed call's future, held for the whole call.
+/// One placed call's future, held for the whole call, its awaited steps inline.
 const RUN_ONE_MAX: usize = 6 * 1024;
 /// The spawned task around it: the call once, plus its panic boundary.
 const CALL_TASK_MAX: usize = 6 * 1024;
 
 #[test]
-fn the_call_future_holds_no_step_inline() {
+fn the_call_future_stays_within_its_bound() {
     let size = future_size(run_one);
     assert!(size <= RUN_ONE_MAX, "the run_one future is {size} B, bound {RUN_ONE_MAX} B");
 }

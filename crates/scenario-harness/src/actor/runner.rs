@@ -430,8 +430,8 @@ pub async fn run_actor(mut st: Box<ActorState<'_>>) -> Result<(), ActorFailure> 
 }
 
 /// [`run_actor`]'s loop over a borrowed state, so the state is still readable
-/// when the loop fails. It idles in its `select!` for most of the call, so every
-/// reaction an arm runs is boxed: allocated while it runs, never part of this future.
+/// when the loop fails. Its reactions and inbox wait run boxed: a reaction's block
+/// is held while it runs, the inbox wait's for as long as the loop idles.
 pub(super) async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), StepError> {
     // Clone the Arc-backed handles the reactor arm needs, so the goal / timed
     // arms can borrow disjoint fields of `st` in the same `select!`.
