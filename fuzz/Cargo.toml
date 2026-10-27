@@ -1,0 +1,88 @@
+# Coverage-guided fuzzing (ADR-0051 §8): discovery only, never a gate. Its own
+# workspace on a pinned nightly, so the main workspace's stable builds, lanes
+# and lockfile never see it. `just fuzz <target>` runs a target;
+# docs/testing/fuzzing.md says when.
+[package]
+name = "siprustserver-fuzz"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = [".", "lanes", "seeds"]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+fuzz-lanes = { path = "lanes" }
+call = { path = "../crates/call" }
+repl-net = { path = "../crates/repl-net" }
+sip-message = { path = "../crates/sip-message" }
+
+# Ordered by blast radius (ADR-0051 §5): a panic in a call's turn tears the
+# call down; one on the proxy's datagram path or in a replication decode
+# restarts a shared task; a parse panic alone is contained per datagram.
+[[bin]]
+name = "b2bua_turn"
+path = "fuzz_targets/b2bua_turn.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sdp_answer"
+path = "fuzz_targets/sdp_answer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proxy_datagram"
+path = "fuzz_targets/proxy_datagram.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "repl_frame"
+path = "fuzz_targets/repl_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "call_snapshot"
+path = "fuzz_targets/call_snapshot.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "message_roundtrip"
+path = "fuzz_targets/message_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "multipart"
+path = "fuzz_targets/multipart.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "credentials"
+path = "fuzz_targets/credentials.rs"
+test = false
+doc = false
+bench = false
+
+# The release profile cargo-fuzz builds with keeps debug assertions and
+# overflow checks on (its default `--debug-assertions`), so wrapping
+# arithmetic is a finding.
+[profile.release]
+debug = 1

@@ -1,0 +1,23 @@
+[package]
+name = "fuzz-lanes"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "What the fuzz targets share: the no-panic lanes' drivers and seeds compiled in from the crates' test trees, each target's input layout, and the allocation cap."
+
+[dependencies]
+b2bua-core = { path = "../../crates/b2bua-core" }
+b2bua-sdk = { path = "../../crates/b2bua-sdk" }
+call = { path = "../../crates/call", features = ["testkit"] }
+repl-net = { path = "../../crates/repl-net" }
+serde_json = "1"
+sip-clock = { path = "../../crates/sip-clock" }
+sip-ids = { path = "../../crates/sip-ids", features = ["testkit"] }
+sip-message = { path = "../../crates/sip-message", features = ["sniff"] }
+sip-net = { path = "../../crates/sip-net" }
+sip-net-testkit = { path = "../../crates/sip-net-testkit" }
+sip-proxy = { path = "../../crates/sip-proxy" }
+sip-txn = { path = "../../crates/sip-txn" }
+tokio = { version = "1", features = ["full", "test-util"] }
+wire-mutations = { path = "../../crates/wire-mutations" }

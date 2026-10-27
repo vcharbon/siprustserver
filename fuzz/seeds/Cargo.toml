@@ -1,0 +1,18 @@
+[package]
+name = "fuzz-seeds"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Writes each fuzz target's seed corpus: the no-panic lanes' synthetic seeds, and any directory of raw SIP messages, in the target's input layout."
+
+[dependencies]
+b2bua-harness = { path = "../../crates/b2bua-harness" }
+call = { path = "../../crates/call" }
+callshapes = { path = "../../crates/callshapes" }
+fuzz-lanes = { path = "../lanes" }
+repl-net = { path = "../../crates/repl-net" }
+scenario-harness = { path = "../../crates/scenario-harness" }
+serde_json = "1"
+sip-message = { path = "../../crates/sip-message", features = ["sniff"] }
+tokio = { version = "1", features = ["full", "test-util"] }

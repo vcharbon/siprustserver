@@ -1,0 +1,7 @@
+# The fuzz workspace's toolchain: libFuzzer's coverage instrumentation needs a
+# nightly compiler. Pinned, so a campaign and its regressions rebuild the same
+# way; the main workspace stays on stable (../rust-toolchain.toml).
+[toolchain]
+channel = "nightly-2026-10-20"
+profile = "minimal"
+components = ["llvm-tools-preview"]

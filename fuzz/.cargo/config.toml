@@ -1,0 +1,5 @@
+# The instrumented builds live under fuzz/target, apart from the main
+# workspace's target (a checkout that sets `target-dir` higher up is overridden
+# here).
+[build]
+target-dir = "target"

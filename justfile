@@ -62,6 +62,26 @@ sweep filter='':
 # Both lanes.
 test-all: test test-slow
 
+# Coverage-guided fuzzing (ADR-0051 §8): discovery only, never a gate; its own
+# workspace on a pinned nightly (fuzz/), cargo-fuzz installed
+# (`cargo install cargo-fuzz`). When to run it: docs/testing/fuzzing.md.
+#
+# Fuzz one target: `just fuzz b2bua_turn --minutes 60 --jobs 8`.
+fuzz target *args:
+    scripts/fuzz.sh run {{ target }} {{ args }}
+
+# The fuzz targets, in blast-radius order.
+fuzz-list:
+    @scripts/fuzz.sh list
+
+# Minimise one target's corpus to the inputs that keep its coverage.
+fuzz-min target:
+    scripts/fuzz.sh min {{ target }}
+
+# Line coverage one target's corpus reaches, per file.
+fuzz-cov target:
+    scripts/fuzz.sh cov {{ target }}
+
 # The parity oracle (ADR-0001): sip-message's test targets built under its
 # `rvoip-oracle` feature, which no workspace build turns on, and its
 # differential tests run. A branch touching sip-message passes it.
@@ -235,7 +255,7 @@ doctor:
 
 # What the build tree currently costs.
 disk:
-    @du -sh target/* 2>/dev/null | sort -rh
+    @du -sh target/* fuzz/target 2>/dev/null | sort -rh
 
 # Drop incremental state, keep compiled artifacts — cheapest GB back mid-session.
 clean-incremental:

@@ -35,6 +35,9 @@ summaries + hard directives only.
 - [docs/testing/ha-acceptance.md](docs/testing/ha-acceptance.md) — HA/chaos/
   endurance triage: SUT bug vs a declared window (ADR-0055 §11) vs infra
   artifact, and the HA design invariants that must never be reintroduced.
+- [docs/testing/fuzzing.md](docs/testing/fuzzing.md) — coverage-guided
+  fuzzing (`fuzz/`, `just fuzz`): when to run it after a change to a reader,
+  and how a finding becomes a regression test.
 - [docs/observability.md](docs/observability.md) — **read before adding any
   `info!` or any per-call trace emission**: operating the lab trace stack, plus
   the directive guidelines for new code.
