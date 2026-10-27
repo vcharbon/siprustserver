@@ -24,10 +24,16 @@ export const url = Config.redacted("DATABASE_URL").pipe(
   Config.withDefault(Redacted.make(DEFAULT_URL))
 )
 
-export const layerFromUrl = (value: string) => PgClient.layer({ url: Redacted.make(value) })
+/** How long a connect may take: a loaded box answers slowly, never a reason to fail. */
+export const CONNECT_TIMEOUT = "60 seconds"
+
+export const layerFromUrl = (value: string) =>
+  PgClient.layer({ url: Redacted.make(value), connectTimeout: CONNECT_TIMEOUT })
 
 /** The default wiring: `DATABASE_URL`, else {@link DEFAULT_URL}. */
-export const layer = Layer.unwrap(Effect.map(url, (value) => PgClient.layer({ url: value })))
+export const layer = Layer.unwrap(
+  Effect.map(url, (value) => PgClient.layer({ url: value, connectTimeout: CONNECT_TIMEOUT }))
+)
 
 /** The same server's database `database`: `url` with its database name replaced. */
 export const atDatabase = (value: string, database: string): string => {
@@ -77,7 +83,7 @@ export const inUse = (error: SqlError): boolean => sqlState(error) === "55006"
 /**
  * `database` gone: this role's sessions on it ended, then a plain drop (never
  * `FORCE`, which a superuser-owned autovacuum worker refuses with 42501). A drop
- * still in use (55006) is retried every 250 ms, failing after at most 5 s.
+ * still in use (55006) is retried every 250 ms, failing after at most 60 s.
  */
 export const dropDatabase = (database: string): Effect.Effect<void, SqlError, SqlClient> =>
   Effect.flatMap(SqlClient, (sql) =>
@@ -86,5 +92,5 @@ export const dropDatabase = (database: string): Effect.Effect<void, SqlError, Sq
         WHERE datname = ${database} AND pid <> pg_backend_pid() AND usename = current_user`
       yield* sql.unsafe(`DROP DATABASE IF EXISTS ${database}`)
     })).pipe(
-      Effect.retry({ schedule: Schedule.spaced("250 millis"), times: 20, while: inUse })
+      Effect.retry({ schedule: Schedule.spaced("250 millis"), times: 240, while: inUse })
     )
