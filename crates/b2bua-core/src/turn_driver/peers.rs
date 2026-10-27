@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::parser::custom::CustomParser;
-use sip_message::{Method, SipHeader, SipMessage, SipParser, SipRequest};
+use sip_message::{Method, SipHeader, SipMessage, SipParser, SipRequest, SipResponse};
 
 use crate::effects::{HandlerResult, OutboundBody};
 
@@ -43,6 +43,9 @@ pub struct Peer {
     pub heard: Vec<SipRequest>,
     /// The INVITE that dialled the peer's leg (a callee's).
     pub dialled_by: Option<SipRequest>,
+    /// The tag the stack answered the caller's INVITE under: the To-tag of
+    /// its last 2xx to her, else of its first provisional (the caller's).
+    pub shown_tag: Option<String>,
 }
 
 impl Peer {
@@ -86,6 +89,9 @@ impl Peers {
     /// on a leg no peer is reached on yet dials a callee there.
     pub fn heard(&mut self, result: &HandlerResult) {
         for e in &result.effects.outbound {
+            if let (OutboundBody::Response(r), Some("a")) = (&e.body, e.leg_id.as_deref()) {
+                self.shown(r);
+            }
             let (OutboundBody::Request(r), Some(leg)) = (&e.body, e.leg_id.as_deref()) else {
                 continue;
             };
@@ -103,9 +109,24 @@ impl Peers {
     }
 }
 
+impl Peers {
+    /// The caller hears `resp`: a 2xx to her INVITE shows her its tag, and
+    /// so does a provisional while she holds none.
+    fn shown(&mut self, resp: &SipResponse) {
+        let (Some(alice), Some(tag)) = (self.by_leg.get_mut("a"), resp.to().tag()) else { return };
+        if resp.cseq().method() != Method::Invite || resp.status() == 100 {
+            return;
+        }
+        if (200..300).contains(&resp.status()) || alice.shown_tag.is_none() && resp.status() < 200 {
+            alice.shown_tag = Some(tag.to_string());
+        }
+    }
+}
+
 /// The callee `invite` dialled.
 fn dialled(invite: &SipRequest) -> Peer {
-    Peer { cseq: 1, invite_cseq: 1, heard: vec![invite.clone()], dialled_by: Some(invite.clone()) }
+    let heard = vec![invite.clone()];
+    Peer { cseq: 1, invite_cseq: 1, heard, dialled_by: Some(invite.clone()), shown_tag: None }
 }
 
 /// `raw` read back; `None` when the parser refuses it, as the shell drops

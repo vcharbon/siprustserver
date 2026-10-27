@@ -51,7 +51,9 @@ pub enum Step {
     AliceAcksRefusal,
     /// alice's CANCEL of her INVITE, which the transaction layer answered.
     AliceCancels,
-    /// A fire of the call's timer of this type, at the generation it holds.
+    /// A fire of the call's timer of this type, at the generation it holds;
+    /// the clock moves on to its deadline. A limiter refresh is the shell's,
+    /// outside any turn: no fire of it reaches the call here.
     Fires(TimerType),
     /// A fire of the call's timer of this type on this leg.
     FiresOn(TimerType, &'static str),
@@ -111,16 +113,16 @@ pub(super) fn event_of(step: &Step, call: &Call, peers: &mut Peers) -> Option<Ar
             let req = peers.on(leg)?.heard.iter().filter(|r| r.method() == method).nth(*nth)?;
             sip(response(req, leg, *status, &callee_tag(leg), Vec::new())?, leg)
         }
-        Step::Sends(leg, method) => sends(call, peers, leg, method, method_body(method)),
-        Step::SendsBare(leg, method) => sends(call, peers, leg, method, ""),
+        Step::Sends(leg, method) => sends(peers, leg, method, method_body(method)),
+        Step::SendsBare(leg, method) => sends(peers, leg, method, ""),
         Step::AliceAcks => {
-            let own = call.a_leg.own_tag.as_deref()?;
-            let cseq = peers.on("a")?.invite_cseq;
-            sip(request("ACK", cseq, ALICE, &alice_lines(own), ""), "a")
+            let alice = peers.on("a")?;
+            let lines = alice_lines(alice.shown_tag.as_deref()?);
+            sip(request("ACK", alice.invite_cseq, ALICE, &lines, ""), "a")
         }
         Step::AliceAcksRefusal => {
-            let own = call.a_leg.own_tag.as_deref()?;
-            let ack = request_on("ACK", 1, ALICE, "z9hG4bK-lane", &alice_lines(own), "");
+            let lines = alice_lines(peers.on("a")?.shown_tag.as_deref()?);
+            let ack = request_on("ACK", 1, ALICE, "z9hG4bK-lane", &lines, "");
             sip(ack, "a")
         }
         Step::AliceCancels => {
@@ -130,7 +132,7 @@ pub(super) fn event_of(step: &Step, call: &Call, peers: &mut Peers) -> Option<Ar
                 invite_cseq: Some(1),
                 in_dialog: false,
                 headers: Vec::new(),
-                to_tag: call.a_leg.own_tag.clone(),
+                to_tag: peers.on("a").and_then(|alice| alice.shown_tag.clone()),
             };
             Some((event, "a".to_string()))
         }
@@ -194,15 +196,9 @@ fn callee_final(
 }
 
 /// A request of `method` from the peer on `leg`, on its dialog.
-fn sends(
-    call: &Call,
-    peers: &mut Peers,
-    leg: &str,
-    method: &Method,
-    body: &str,
-) -> Option<Arrival> {
+fn sends(peers: &mut Peers, leg: &str, method: &Method, body: &str) -> Option<Arrival> {
     let (src, lines) = if leg == "a" {
-        (ALICE, alice_lines(call.a_leg.own_tag.as_deref()?))
+        (ALICE, alice_lines(peers.on("a")?.shown_tag.as_deref()?))
     } else {
         (BOB, callee_lines(peers, leg)?)
     };
@@ -217,7 +213,8 @@ fn sends(
     sip(request(method.as_str(), peer.cseq, src, &lines, body), leg)
 }
 
-/// The dialog lines of alice's requests, the stack's tag `own` toward her.
+/// The dialog lines of alice's requests, under the tag `own` the stack
+/// showed her.
 fn alice_lines(own: &str) -> String {
     format!(
         "From: <sip:alice@example.com>;tag={ALICE_TAG}\r\n\
@@ -241,7 +238,8 @@ fn callee_lines(peers: &Peers, leg: &str) -> Option<String> {
 
 /// A fire of the first timer of `call`'s ledger `which` picks, on its leg.
 fn fire(call: &Call, which: impl Fn(&call::TimerEntry) -> bool) -> Option<Arrival> {
-    let armed = call.timers.iter().find(|t| which(t))?;
+    let turns = |t: &&call::TimerEntry| *t.timer_type() != TimerType::LimiterRefresh;
+    let armed = call.timers.iter().filter(turns).find(|t| which(t))?;
     let event = CallEvent::Timer {
         key: armed.key.clone(),
         generation: armed.generation,
@@ -285,7 +283,9 @@ pub(super) fn text_of(event: &CallEvent) -> Option<Vec<u8>> {
     }
 }
 
-/// Whether `event` is a response.
-pub(super) fn is_response(event: &CallEvent) -> bool {
-    matches!(event, CallEvent::Sip { message, .. } if matches!(message.as_ref(), SipMessage::Response(_)))
+/// Whether `event` is a CANCEL request: one the transaction layer matched
+/// reaches the call as [`CallEvent::Cancelled`].
+pub(super) fn is_cancel(event: &CallEvent) -> bool {
+    matches!(event, CallEvent::Sip { message, .. }
+        if matches!(message.as_ref(), SipMessage::Request(r) if *r.method() == Method::Cancel))
 }

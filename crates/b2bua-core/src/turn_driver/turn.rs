@@ -15,10 +15,17 @@ pub enum Outcome {
     /// The event took a turn.
     Turned(Box<Turn>),
     /// The dialog gate kept the event from the rules: answered (481, 500,
-    /// 200 or 487, [`Verdict::status`]) or dropped.
+    /// 200 or 487, [`Verdict::status`]) or dropped. The record keeps the
+    /// gate's in-order note.
     Gated(Verdict),
     /// The timer screen refused the fire: its instance is not the ledger's.
     Screened,
+    /// A completed client transaction absorbed a repeat of its final (RFC
+    /// 3261 §17.1.1.2, §17.1.2.2): nothing reaches the call.
+    Absorbed,
+    /// A CANCEL no transaction matched, answered 481 before any rule reads
+    /// it (RFC 3261 §9.2).
+    StrayCancel,
     /// The step's SIP text, as edited, does not parse: the shell drops it.
     Unparsed,
     /// The call gives the step nothing to say, or ended before it.

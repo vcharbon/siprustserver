@@ -15,6 +15,7 @@ use b2bua_core::rules::{Match, RuleAction, RuleDefinition, RuleHandleResult, SER
 use b2bua_core::turn_driver::{callee_tag, Driver, Session, Step, Turn};
 use call::{CallModelState, DialogState, Direction};
 use sip_ids::SigningKey;
+use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::Method;
 
 use crate::calls::{bridged, ringing};
@@ -101,35 +102,44 @@ fn the_ack_of_a_2xx_at_a_reused_number_takes_that_number() {
 }
 
 /// A final at or below the sequence that answers no request held open at its
-/// number is a stray, not evidence.
+/// number is a stray, not evidence: a 200 at the number of an INFO the record
+/// holds answered, under a branch no request of this stack's carried.
 #[test]
 fn a_stray_final_at_or_below_the_sequence_is_no_evidence() {
     let driver = Driver::new();
     let mut call = bridged(&driver);
     call.run([Step::Sends("a", Method::Info), Step::AnswersSent("b-1", 200)]);
-    let stray = call.step(Step::AnswersLast("b-1", Method::Info, 200));
-    assert_ne!(stray.turn().and_then(|t| t.rule), Some("evidence-final"));
+    let info = call.peer("b-1").and_then(|p| p.last_of(&Method::Info).cloned()).expect("INFO");
+    let branch = info.top_via().branch().expect("the INFO's branch").to_string();
+    let answer = generate_response(&info, 200, "OK", &GenerateResponseOpts::default());
+    let stray =
+        String::from_utf8_lossy(answer.expect("a 200").image()).replace(&branch, "z9hG4bK-stray");
+    let outcome = call.step(Step::Raw("b-1", stray));
+    let turn = outcome.turn().expect("an unmatched final reaches the rules");
+    assert_ne!(turn.rule, Some("evidence-final"));
 }
 
 /// The caller ACKs a 2xx the record never saw sent, on a call another owner
-/// served: her INVITE was answered, so it draws no final here — its
+/// served — a fork of bob's answered, under a tag fronting it the record
+/// never minted: her INVITE was answered, so it draws no final here — its
 /// transaction is relinquished — and the dialog the ACK names is BYEd under
 /// the ACK's tags.
 #[test]
 fn an_ack_of_the_unanswered_caller_invite_byes_her_dialog_under_its_tags() {
     let driver = Driver::new();
-    let mut call = losing(ringing(&driver), [Step::Answers("b-1", 200)]);
-    let shown = call.call().a_leg.own_tag.clone().expect("the tag her 180 showed");
+    let mut call = losing(ringing(&driver), [Step::ForkAnswers("fork2", 200)]);
+    let own = call.call().a_leg.own_tag.clone().expect("the tag her 180 showed");
+    let shown = call.peer("a").and_then(|a| a.shown_tag.clone()).expect("the lost 2xx's tag");
+    assert_ne!(shown, own, "the fork's 2xx fronted it under a tag of its own");
     call.copy_served(true);
     let turn = call.turned(Step::AliceAcks);
     assert_eq!(turn.rule, Some("evidence-ack"));
-    assert_eq!(call.call().a_leg.invite_final_sent(), Some(200), "answered elsewhere");
-    let turn = call.turns().last().expect("the ACK's turn");
     assert!(turn.statuses_to("a").is_empty(), "no final follows the 2xx");
     assert!(relinquishes(turn), "the caller's INVITE transaction is relinquished");
     let bye = turn.request_to("a", "BYE").expect("the caller's BYE");
     assert_eq!(bye.from().tag(), Some(shown.as_str()), "under the tag the ACK names");
     assert_eq!(bye.to().tag(), Some(b2bua_core::turn_driver::ALICE_TAG));
+    assert_eq!(call.call().a_leg.invite_final_sent(), Some(200), "answered elsewhere");
 }
 
 /// The caller ACKs a non-2xx the record never saw sent: the ACK rides her

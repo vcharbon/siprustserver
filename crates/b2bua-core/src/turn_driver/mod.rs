@@ -18,8 +18,8 @@ mod dial;
 mod peers;
 mod steps;
 mod turn;
+mod txns;
 
-use std::collections::BTreeSet;
 use std::time::Duration;
 
 use b2bua_sdk::event::CallEvent;
@@ -98,7 +98,9 @@ impl Driver {
 
     /// `self`, its rule chain led by `rule`.
     pub fn with_rule(mut self, rule: RuleDefinition) -> Self {
-        self.rules.insert(0, rule);
+        let mut rules = vec![rule];
+        rules.append(&mut self.rules);
+        self.rules = rules;
         self
     }
 
@@ -172,7 +174,7 @@ impl Driver {
             steps: 0,
             outcomes: Vec::new(),
             texts: Vec::new(),
-            lost: BTreeSet::new(),
+            txns: txns::ClientTxns::of(&b_invite),
         }))
     }
 }
@@ -189,9 +191,8 @@ pub struct Session<'d> {
     steps: u64,
     outcomes: Vec<Outcome>,
     texts: Vec<(usize, Vec<u8>)>,
-    /// The branches of the requests the lost turns sent: this node's
-    /// transaction layer holds no client transaction for them.
-    lost: BTreeSet<String>,
+    /// What this node's transaction layer holds of the requests sent.
+    txns: txns::ClientTxns,
 }
 
 impl<'d> Session<'d> {
@@ -271,11 +272,8 @@ impl<'d> Session<'d> {
         let record = self.call.clone();
         let from = self.outcomes.len();
         self.run(script);
-        let sent = self.outcomes.iter().skip(from).filter_map(Outcome::turn);
-        for e in sent.flat_map(|t| t.result.effects.outbound.iter()) {
-            if let OutboundBody::Request(r) = &e.body {
-                self.lost.extend(r.top_via().branch().map(str::to_string));
-            }
+        for turn in self.outcomes.iter().skip(from).filter_map(Outcome::turn) {
+            self.txns.lost(&turn.result);
         }
         self.call = record;
         self
@@ -350,6 +348,11 @@ impl<'d> Session<'d> {
             return Outcome::Nothing;
         };
         let Some(event) = steps::edited(event, edit) else { return Outcome::Unparsed };
+        if self.txns.absorbs(&event) {
+            return Outcome::Absorbed;
+        }
+        self.txns.received(&event);
+        self.now = self.now.max(deadline(&self.call, &event));
         let mut turn = TurnScope::of(TurnIds::fixed(seq + 1));
         if timer_screen::screen(&mut self.call, &event, self.now, &mut turn.notes).is_err() {
             return Outcome::Screened;
@@ -367,9 +370,13 @@ impl<'d> Session<'d> {
                 return Outcome::Gated(refused);
             }
         };
+        if steps::is_cancel(&event) {
+            return Outcome::StrayCancel;
+        }
         let turn = self.turn(event, &leg, resolved, turn);
         self.call = turn.result.call.clone();
         self.peers.heard(&turn.result);
+        self.txns.sent(&turn.result);
         Outcome::Turned(Box::new(turn))
     }
 
@@ -395,9 +402,7 @@ impl<'d> Session<'d> {
             source_leg_id: leg,
             direction: if leg == "a" { Direction::FromA } else { Direction::FromB },
             resolved: resolved.clone(),
-            // A response matches a client transaction of this node unless
-            // the request it answers left on a lost turn.
-            matched_client_txn: steps::is_response(&event) && !self.lost_branch(&event),
+            matched_client_txn: self.txns.matches(&event),
             now_ms: self.now,
             owners: self.owners.clone(),
         };
@@ -410,13 +415,12 @@ impl<'d> Session<'d> {
     }
 }
 
-impl Session<'_> {
-    /// Whether `event` is a response to a request a lost turn sent.
-    fn lost_branch(&self, event: &CallEvent) -> bool {
-        let CallEvent::Sip { message, .. } = event else { return false };
-        let SipMessage::Response(resp) = message.as_ref() else { return false };
-        resp.top_via().branch().is_some_and(|b| self.lost.contains(b))
-    }
+/// The deadline of the ledger entry `event` fires, or the dawn of time for
+/// any other event: a fire happens at its deadline.
+fn deadline(call: &Call, event: &CallEvent) -> i64 {
+    let CallEvent::Timer { key, generation, .. } = event else { return i64::MIN };
+    let entry = call.timers.iter().find(|t| t.key == *key && t.generation == *generation);
+    entry.map_or(i64::MIN, |t| t.fire_at)
 }
 
 /// The landing pass every driven turn takes.
