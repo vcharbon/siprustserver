@@ -23,7 +23,8 @@
  *   replayed endpoint mints marked on its `o=` row (`./sdporigin.ts`).
  * - **shape** — the verdict's structural failures, restated in the delta-record
  *   vocabulary (a final answered with another status, a datagram nothing
- *   expected — serviced by the leg or not — an expectation nothing satisfied).
+ *   expected — serviced by the leg or not — an expectation nothing satisfied,
+ *   a 100 an INVITE's final stood in for).
  * - **retransmission** — a declared ACK-hold's evidenced re-pass count against
  *   the re-passed un-ACKed 2xx finals the recording actually shows.
  *
@@ -935,6 +936,19 @@ export const shapeProbes = (
           break
         }
         out.push(strayProbe(failure.step, failure.leg, failure.arrived, answered))
+        break
+      }
+      case "trying-omitted": {
+        if (failure.arrived.kind !== "response") break
+        out.push({
+          step: failure.step,
+          probe: {
+            kind: "shape",
+            step: failure.step,
+            shapeKind: { shape: "trying-omitted", final: failure.arrived.status, afterMs: failure.after_ms },
+            scope: { kind: "response", status: 100, cseqMethod: failure.arrived.cseq_method }
+          }
+        })
         break
       }
       case "unexpected-datagram":

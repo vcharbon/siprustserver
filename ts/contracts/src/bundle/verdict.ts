@@ -277,6 +277,7 @@ export const failureStep = (value: Failure): string | undefined => {
   switch (value.failure) {
     case "expect-timed-out":
     case "unmatched-datagram":
+    case "trying-omitted":
     case "send-failed":
     case "retransmit-count-mismatch":
     case "timing-out-of-tolerance":

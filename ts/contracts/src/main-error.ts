@@ -241,12 +241,18 @@ export const mainErrorOf = (input: Input): MainError | null => {
 }
 
 /**
- * The step a passing shape record answers a failure at: a refused datagram or
- * an absence at the failure's own step, a stray at none; undefined for a
- * failure no record answers.
+ * The step a passing shape record answers a failure at: a refused datagram, an
+ * absence or an omitted 100 at the failure's own step, a stray at none;
+ * undefined for a failure no record answers.
  */
 const answerStep = (failure: Bundle.Failure): string | undefined => {
-  if (failure.failure === "unmatched-datagram" || failure.failure === "expect-timed-out") return failure.step
+  if (
+    failure.failure === "unmatched-datagram" ||
+    failure.failure === "expect-timed-out" ||
+    failure.failure === "trying-omitted"
+  ) {
+    return failure.step
+  }
   if (failure.failure === "unexpected-datagram" || failure.failure === "datagram-after-flow") return ""
   return undefined
 }

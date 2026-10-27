@@ -3260,7 +3260,11 @@ Its whole job:
    charged ends the transaction and RETIRES the expect (a required one; an
    `optional` is released, and so is every tolerated absence armed on that
    transaction), the verdict listing it under `retired`; a block member is
-   charged but never retired. The one status an expect takes besides its own:
+   charged but never retired. A final on the leg's own INVITE transaction
+   meeting a required `100` stands in for it (RFC 3261 §17.2.1: the server
+   transaction sends 100 only when its TU does not answer within 200 ms): the
+   step is retired as omitted, the verdict names it `trying-omitted`, and the
+   final is offered to the step behind. The one status an expect takes besides its own:
    200 for 481 or 481 for 200 on a CANCEL the leg sent after its INVITE's
    non-2xx final reached it (§6.7d), a match and no failure.
 5. **Lane scoping** (§9.1): evaluate every check, and record a CLASSIFIED one as
@@ -3326,7 +3330,8 @@ that leaves the run nothing to compose, and there are two:
   RFC 3261 §17.1 ends a client transaction at its final, so no response of
   another status rides it again and the expect is retired (item 4). Whether the
   run goes on is then a DIALOG fact: it ends where the retired step named a
-  PROVISIONAL (the tail was scripted for a transaction still open), or where an
+  PROVISIONAL (the tail was scripted for a transaction still open; a `100` an
+  INVITE final stood in for goes on, item 4), or where an
   INVITE final is of the other class than the one named (2xx against non-2xx)
   on a leg whose dialog no INVITE 2xx has yet confirmed — the initial INVITE's
   final decides whether the dialog the tail was scripted for exists (§12.1,

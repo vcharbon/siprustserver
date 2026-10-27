@@ -91,85 +91,95 @@ impl<'a, 'p> Runner<'a, 'p> {
         }
         self.sync_leg_state(&leg);
 
-        // The leg's live expects, budget open or not: what a datagram may match
-        // is the frontier, and a budget that has not opened yet withholds
-        // nothing (§6.8).
-        let gated: Vec<CompiledStep> = self
-            .instance
-            .cursor()
-            .frontier()
-            .iter()
-            .filter_map(|id| self.instance.plan().step(id))
-            .filter(|s| s.is_expect() && s.leg == leg)
-            .cloned()
-            .collect();
-        if gated.is_empty() {
-            // Nothing on this leg was waiting for anything, so nothing about it
-            // became unreachable: the failure stands and the flow goes on
-            // (§11.2).
-            self.instance.fail(Failure::UnexpectedDatagram {
-                leg: leg.clone(),
-                arrived: inbound.arrived(),
-                detail: None,
-            });
-            self.answer_unscripted(&leg, &message).await;
-            return true;
-        }
-        let scope = self.instance.scope();
-        let resolver = Resolver::new(self.instance.state(), &self.instance.config().identities);
-        // The whole assertion first, over every armed step: a datagram that
-        // satisfies it is that step's beyond doubt, so a step whose headers hold
-        // always wins one whose headers merely could. Only then the reading that
-        // takes a datagram whose HEADER SET diverges (`gate::body_content_holds`)
-        // — the step names each difference and fails, rather than refusing the
-        // message and abandoning the call several steps past the cause.
-        // A late CANCEL's other final answers the step as its own status would
-        // (§6.7d): read off this leg's wire, beside the structural gate.
-        let ladder = if inbound.status.is_some()
-            && Method::from_wire(&inbound.cseq_method) == Method::Cancel
-        {
-            self.instance.recording().legs().remove(&leg).unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        let late_cancel = |step: &CompiledStep| {
-            let opener = self.instance.cursor().opening_send(&step.id);
-            cancel::answers_late_cancel(step, &inbound, &ladder, opener)
-        };
-        let gates = |step: &CompiledStep| {
-            gate::discriminates(step, &inbound).matches() || late_cancel(step)
-        };
-        let holds = |step: &CompiledStep| {
-            gates(step)
-                && self.rides_fork(step, &inbound).matches()
-                && gate::content_holds(step, &inbound, &scope, &resolver).matches()
-        };
-        // Among those, the step whose stated body TYPE the datagram carries
-        // first: under `record` the content is no evidence, the type is.
-        let matched = gated
-            .iter()
-            .find(|step| holds(step) && gate::body_type_holds(step, &inbound))
-            .or_else(|| gated.iter().find(|step| holds(step)))
-            .or_else(|| {
-                gated.iter().find(|step| {
-                    gates(step)
-                        && self.rides_fork(step, &inbound).matches()
-                        && gate::body_content_holds(step, &inbound, &scope).matches()
-                        && self.takes_header_divergent(step, &inbound, actor, &leg)
-                })
-            });
-        let tolerated = matched
-            .filter(|step| !gate::discriminates(step, &inbound).matches())
-            .and_then(|step| match (&step.discriminator, inbound.status) {
-                (Discriminator::Response { status, .. }, Some(arrived)) => {
-                    Some(cancel::note(*status, arrived))
-                }
-                _ => None,
-            });
-        let Some(step) = matched.cloned() else {
-            return self
-                .charge_unmatched(&leg, &inbound, &message, &gated, confirmed_before, seq)
-                .await;
+        // A charge that retires the 100 a final stood in for offers the final
+        // again, to the frontier that retirement opened (`progress`).
+        let (step, tolerated) = loop {
+            // The leg's live expects, budget open or not: what a datagram may match
+            // is the frontier, and a budget that has not opened yet withholds
+            // nothing (§6.8).
+            let gated: Vec<CompiledStep> = self
+                .instance
+                .cursor()
+                .frontier()
+                .iter()
+                .filter_map(|id| self.instance.plan().step(id))
+                .filter(|s| s.is_expect() && s.leg == leg)
+                .cloned()
+                .collect();
+            if gated.is_empty() {
+                // Nothing on this leg was waiting for anything, so nothing about it
+                // became unreachable: the failure stands and the flow goes on
+                // (§11.2).
+                self.instance.fail(Failure::UnexpectedDatagram {
+                    leg: leg.clone(),
+                    arrived: inbound.arrived(),
+                    detail: None,
+                });
+                self.answer_unscripted(&leg, &message).await;
+                return true;
+            }
+            let scope = self.instance.scope();
+            let resolver = Resolver::new(self.instance.state(), &self.instance.config().identities);
+            // The whole assertion first, over every armed step: a datagram that
+            // satisfies it is that step's beyond doubt, so a step whose headers hold
+            // always wins one whose headers merely could. Only then the reading that
+            // takes a datagram whose HEADER SET diverges (`gate::body_content_holds`)
+            // — the step names each difference and fails, rather than refusing the
+            // message and abandoning the call several steps past the cause.
+            // A late CANCEL's other final answers the step as its own status would
+            // (§6.7d): read off this leg's wire, beside the structural gate.
+            let ladder = if inbound.status.is_some()
+                && Method::from_wire(&inbound.cseq_method) == Method::Cancel
+            {
+                self.instance.recording().legs().remove(&leg).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let late_cancel = |step: &CompiledStep| {
+                let opener = self.instance.cursor().opening_send(&step.id);
+                cancel::answers_late_cancel(step, &inbound, &ladder, opener)
+            };
+            let gates = |step: &CompiledStep| {
+                gate::discriminates(step, &inbound).matches() || late_cancel(step)
+            };
+            let holds = |step: &CompiledStep| {
+                gates(step)
+                    && self.rides_fork(step, &inbound).matches()
+                    && gate::content_holds(step, &inbound, &scope, &resolver).matches()
+            };
+            // Among those, the step whose stated body TYPE the datagram carries
+            // first: under `record` the content is no evidence, the type is.
+            let matched = gated
+                .iter()
+                .find(|step| holds(step) && gate::body_type_holds(step, &inbound))
+                .or_else(|| gated.iter().find(|step| holds(step)))
+                .or_else(|| {
+                    gated.iter().find(|step| {
+                        gates(step)
+                            && self.rides_fork(step, &inbound).matches()
+                            && gate::body_content_holds(step, &inbound, &scope).matches()
+                            && self.takes_header_divergent(step, &inbound, actor, &leg)
+                    })
+                });
+            let tolerated = matched
+                .filter(|step| !gate::discriminates(step, &inbound).matches())
+                .and_then(|step| match (&step.discriminator, inbound.status) {
+                    (Discriminator::Response { status, .. }, Some(arrived)) => {
+                        Some(cancel::note(*status, arrived))
+                    }
+                    _ => None,
+                });
+            match matched.cloned() {
+                Some(step) => break (step, tolerated),
+                None => match self
+                    .charge_unmatched(&leg, &inbound, &message, &gated, confirmed_before, seq)
+                    .await
+                {
+                    Charged::Reoffered => continue,
+                    Charged::GoesOn => return true,
+                    Charged::Ended => return false,
+                },
+            }
         };
 
         // A better candidate for the step that was holding one out: the held
@@ -246,8 +256,10 @@ impl<'a, 'p> Runner<'a, 'p> {
     /// what is wrong, where an unordered group's first member would describe a
     /// step the datagram was never for (`progress`).
     ///
-    /// `false` when the arrival leaves the leg nothing it can still be satisfied
-    /// by: the script is ended here (§11.2) and the run goes on to its close.
+    /// [`Charged::Ended`] when the arrival leaves the leg nothing it can still
+    /// be satisfied by: the script is ended here (§11.2) and the run goes on to
+    /// its close. [`Charged::Reoffered`] when the final retired the 100 it
+    /// stood in for: no refusal is stated, and the final is the step behind's.
     async fn charge_unmatched(
         &mut self,
         leg: &str,
@@ -256,11 +268,9 @@ impl<'a, 'p> Runner<'a, 'p> {
         gated: &[CompiledStep],
         confirmed_before: bool,
         seq: Option<u64>,
-    ) -> bool {
-        let scope = self.instance.scope();
-        let resolver = Resolver::new(self.instance.state(), &self.instance.config().identities);
+    ) -> Charged {
         let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();
-        let (closest, own_transaction, retired, released, ends) = {
+        let (closest, own_transaction, retired, released, omitted, ends) = {
             let cursor = self.instance.cursor();
             let items = &self.instance.plan().program().items;
             let armed: Vec<progress::Armed<'_>> = gated
@@ -278,9 +288,15 @@ impl<'a, 'p> Runner<'a, 'p> {
                 unmatched.own_transaction,
                 unmatched.retired,
                 unmatched.released,
+                unmatched.omitted,
                 unmatched.ends,
             )
         };
+        if omitted && self.omit_trying(leg, &closest, inbound, seq, &ladder, &released) {
+            return Charged::Reoffered;
+        }
+        let scope = self.instance.scope();
+        let resolver = Resolver::new(self.instance.state(), &self.instance.config().identities);
         let reason = match gate::discriminates(&closest, inbound) {
             GateVerdict::Rejects(why) => why,
             GateVerdict::Matches => match self.rides_fork(&closest, inbound) {
@@ -351,9 +367,19 @@ impl<'a, 'p> Runner<'a, 'p> {
         // The run goes on unless this arrival left the leg with nothing it
         // can still be satisfied by (§11.2).
         if !ends {
-            return true;
+            return Charged::GoesOn;
         }
         self.end_script(Some(leg), Some(&step));
-        false
+        Charged::Ended
     }
+}
+
+/// What charging an arrival no armed expect matched left the run with.
+enum Charged {
+    /// The failure stands and the flow goes on.
+    GoesOn,
+    /// The leg has nothing left it can be satisfied by; the script ended.
+    Ended,
+    /// The final retired the 100 it stood in for, and is offered again.
+    Reoffered,
 }

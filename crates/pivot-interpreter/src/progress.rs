@@ -33,6 +33,12 @@
 //! where the retired step named a PROVISIONAL, the tail having been scripted
 //! for a transaction still open. Every other retirement goes on.
 //!
+//! **A final stands in for the 100 of its own INVITE transaction.** An INVITE
+//! server transaction sends 100 only when its TU does not answer within 200 ms
+//! (RFC 3261 §17.2.1), so a required `100` expect retired by a final on the
+//! leg's own INVITE transaction is OMITTED: the script goes on, and the final
+//! is the step behind's to take.
+//!
 //! **Where nothing is retired, all the alternatives or none.** `alt` branches
 //! and `unordered` members arm several expects on one leg at once, and the run
 //! can still go on while any one of them can still be satisfied — so such a
@@ -154,6 +160,10 @@ pub fn unmatched<'a>(
         return Some(out);
     }
     out.retired.push(charged.step.id.clone());
+    if named == 100 && method == Method::Invite {
+        out.omitted = true;
+        return Some(out);
+    }
     let class_changed = method == Method::Invite && (named >= 300) != (status >= 300);
     out.ends = named < 200 || (class_changed && !confirmed);
     Some(out)
@@ -181,6 +191,22 @@ fn awaited(armed: &Armed<'_>, leg: &[RecordedMessage]) -> Option<(Method, u32)> 
         None => last_sent(leg, &method),
     }?;
     Some((method, cseq))
+}
+
+/// When this leg sent the request of the transaction `inbound` answers — its
+/// CSeq method and number — where the leg's recording holds it.
+pub fn sent_at(leg: &[RecordedMessage], inbound: &Inbound) -> Option<u64> {
+    let method = Method::from_wire(&inbound.cseq_method);
+    leg.iter().filter(|recorded| recorded.dir == Dir::Out).find_map(|recorded| {
+        match CustomParser::new().parse(recorded.wire()).ok()? {
+            SipMessage::Request(request)
+                if *request.method() == method && request.cseq().seq() == inbound.cseq =>
+            {
+                Some(recorded.at_us)
+            }
+            _ => None,
+        }
+    })
 }
 
 /// The CSeq of the request this leg sent under `step`, where it is recorded.
