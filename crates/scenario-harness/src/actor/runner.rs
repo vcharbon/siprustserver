@@ -32,7 +32,7 @@ use super::observe::ReceptionObserver;
 use super::originate::{
     originate_reinvite, originate_update, wait_reinvite_retry, wait_update_retry,
 };
-use super::react::default_react;
+use super::react::{default_react, react_queued};
 use super::script::{goal_arm_enabled, requeue_parked};
 use super::shared_endpoint::{EndpointHandle, Inbox};
 use super::state::{Observation, ObservedState};
@@ -96,14 +96,15 @@ pub struct ActorFailure {
     pub cause: StepError,
 }
 
-/// The live per-endpoint state driven by [`run_actor`].
+/// The live per-endpoint state driven by [`run_actor`]. Its transaction and
+/// dialog slots are boxed: an endpoint holds only the ones it has.
 pub struct ActorState<'c> {
     pub(super) role: &'static str,
     pub(super) agent: Agent,
     pub(super) disposition: Disposition,
     pub(super) media: MediaState,
     pub(super) dialogs: DialogTable,
-    pub(super) pending_answer: Option<TimedAnswer>,
+    pub(super) pending_answer: Option<Box<TimedAnswer>>,
     pub(super) goals: GoalCursor,
     pub(super) obs: ObservedState,
     pub(super) scope: Arc<CallScope>,
@@ -120,14 +121,14 @@ pub struct ActorState<'c> {
     /// A reliable-`183` answer (RFC 3262) awaiting the caller's PRACK: the held UAS INVITE
     /// transaction, answered `200` only once the PRACK arrives (MUST-014). `Some` for a
     /// [`Disposition::ReliableAnswer`] leg between its 183 and the PRACK.
-    pub(super) pending_prack_answer: Option<ServerTxn>,
+    pub(super) pending_prack_answer: Option<Box<ServerTxn>>,
     /// A [`Disposition::RingThenSilent`] leg's held INVITE server transaction
     /// (180 sent, no final EVER originated by this leg): released only by an
     /// inbound CANCEL — the SUT's no-answer timer firing — which 487s it.
-    pub(super) held_silent: Option<ServerTxn>,
+    pub(super) held_silent: Option<Box<ServerTxn>>,
     /// A [`Disposition::Held`] callee's initial INVITE server transaction,
     /// rung, used for early-dialog requests and answered by its goals.
-    pub(super) held: Option<ServerTxn>,
+    pub(super) held: Option<Box<ServerTxn>>,
     /// The To-tags of reliable provisionals no PRACK has acknowledged yet,
     /// each with when it was first sent (RFC 3262 §3, [`super::give_up`]).
     pub(super) unpracked: HashMap<String, Instant>,
@@ -215,7 +216,7 @@ pub struct ActorState<'c> {
     pub(super) parked_initial_consumed: Option<&'static str>,
     /// The server transaction the nearest preceding `ExpectRequest` consumed —
     /// what a `RespondTemplate`/`Respond` goal answers.
-    pub(super) bound: Option<ServerTxn>,
+    pub(super) bound: Option<Box<ServerTxn>>,
     /// This actor's cursor into its leg's ordered response-fact log — the
     /// consumption point of the reception goals.
     pub(super) resp_seen: usize,
@@ -416,8 +417,9 @@ impl<'c> ActorState<'c> {
 /// a goal parked on a barrier NEVER blocks the reactor (the structural fix for
 /// the cascade). Resolves `Ok(())` when the call is fully torn down and this
 /// endpoint's goals are exhausted, or `Err` on a fatal step, naming the goal
-/// pending when it failed.
-pub async fn run_actor(mut st: ActorState<'_>) -> Result<(), ActorFailure> {
+/// pending when it failed. The state rides boxed: the future lives as long as
+/// the call, so it holds a pointer, never the state itself.
+pub async fn run_actor(mut st: Box<ActorState<'_>>) -> Result<(), ActorFailure> {
     match react_until_done(&mut st).await {
         Ok(()) => Ok(()),
         Err(cause) => {
@@ -428,8 +430,9 @@ pub async fn run_actor(mut st: ActorState<'_>) -> Result<(), ActorFailure> {
 }
 
 /// [`run_actor`]'s loop over a borrowed state, so the state is still readable
-/// when the loop fails.
-async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), StepError> {
+/// when the loop fails. It idles in its `select!` for most of the call, so every
+/// reaction an arm runs is boxed: allocated while it runs, never part of this future.
+pub(super) async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), StepError> {
     // Clone the Arc-backed handles the reactor arm needs, so the goal / timed
     // arms can borrow disjoint fields of `st` in the same `select!`.
     let agent = st.agent.clone();
@@ -443,9 +446,9 @@ async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), StepError> {
         let give_up_at = give_up::due(st);
         let retransmit_at = st.retransmit_due(); // a request awaiting its answer, or a final its ACK
         tokio::select! {
-            inbound = inbox.recv() => {
+            inbound = inbox.recv_boxed() => {
                 match inbound {
-                    Ok(m) => default_react(st, m).await?,
+                    Ok(m) => Box::pin(default_react(st, *m)).await?,
                     // A reactor recv deadline is NOT fatal — loop again (a
                     // long_call / options_hold / the 32 s settle silence must
                     // not kill the actor). Only a closed queue is fatal.
@@ -467,32 +470,26 @@ async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), StepError> {
                     }
                     // A final already delivered is handled before the CANCEL (RFC 3261 §9.1).
                     if matches!(step, GoalStep::Cancel { .. }) {
-                        while st.dialogs.pending_invite.is_some() {
-                            let Some(m) = inbox.try_take().await else { break };
-                            default_react(st, m).await?;
-                        }
+                        Box::pin(react_queued(st, &mut inbox, |st| st.dialogs.pending_invite.is_some())).await?;
                     }
-                    drive_goal(st, step).await?;
+                    Box::pin(drive_goal(st, step)).await?;
                 }
                 st.goals.advance();
                 // Requeue on advance: auto-react any parked request no
                 // remaining goal can consume, so it never starves.
-                requeue_parked(st).await?;
+                Box::pin(requeue_parked(st)).await?;
             }
             // The answer is due: first react to whatever landed with it, so a
             // CANCEL that arrived at the same instant 487s the INVITE and the
             // dropped answer never sends a 2xx after it (RFC 3261 §9.2).
-            _ = wait_timed_answer(&st.pending_answer), if st.pending_answer.is_some() => {
+            _ = wait_timed_answer(st.pending_answer.as_deref()), if st.pending_answer.is_some() => {
                 tokio::task::yield_now().await;
-                while st.pending_answer.is_some() {
-                    let Some(m) = inbox.try_take().await else { break };
-                    default_react(st, m).await?;
-                }
-                fire_timed_answer(st).await?;
+                Box::pin(react_queued(st, &mut inbox, |st| st.pending_answer.is_some())).await?;
+                Box::pin(fire_timed_answer(st)).await?;
             }
             // A reliable provisional went 64·T1 without its PRACK.
             _ = give_up::sleep(give_up_at), if give_up_at.is_some() => {
-                give_up::fire(st, &mut inbox).await?;
+                Box::pin(give_up::fire(st, &mut inbox)).await?;
             }
             // Our non-2xx final's hop-ACK was sighted (the receive core claims
             // it below `recv_any`, so it never surfaces as an inbound) — close
@@ -509,19 +506,19 @@ async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), StepError> {
             // 200'd and the round completes.
             _ = wait_reinvite_retry(&st.reinvite_retry), if st.reinvite_retry.is_some() => {
                 st.reinvite_retry = None;
-                originate_reinvite(st).await?;
+                Box::pin(originate_reinvite(st)).await?;
             }
             // The S6 UPDATE-collision retry deadline (C4/S6): re-originate the
             // UPDATE now the peer's colliding offer has cleared.
             _ = wait_update_retry(&st.update_retry), if st.update_retry.is_some() => {
                 st.update_retry = None;
-                originate_update(st).await?;
+                Box::pin(originate_update(st)).await?;
             }
             // A held ACK-to-2xx (a declared delayed automatic) coming due: send
             // it and complete the bookkeeping the hold deferred — the eventual
             // send is THIS arm's obligation, so no call finishes un-ACKed.
             _ = super::held_acks::wait_held_ack(&st.held_acks), if !st.held_acks.is_empty() => {
-                super::held_acks::fire_due_held_ack(st).await?;
+                Box::pin(super::held_acks::fire_due_held_ack(st)).await?;
             }
             _ = super::client_retransmit::wait(retransmit_at), if retransmit_at.is_some() => {
                 super::client_retransmit::fire(st).await?;
@@ -541,7 +538,7 @@ async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), StepError> {
 
 /// Park until the scheduled timed answer is due (or forever if none) — the
 /// interruptible ring→answer arm.
-async fn wait_timed_answer(pending: &Option<TimedAnswer>) {
+async fn wait_timed_answer(pending: Option<&TimedAnswer>) {
     match pending {
         Some(ta) => tokio::time::sleep_until(ta.at).await,
         None => std::future::pending().await,

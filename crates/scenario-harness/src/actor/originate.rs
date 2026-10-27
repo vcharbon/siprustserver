@@ -130,7 +130,7 @@ pub(super) async fn originate_initial_invite(
     if let Some(ep) = &st.endpoint {
         ep.own_dialog(call.call_id());
     }
-    st.dialogs.pending_invite = Some(call);
+    st.dialogs.pending_invite = Some(Box::new(call));
     // The caller APPEARS the moment she originates — so `all_terminated`
     // cannot fire (and the runner exit) before she has processed her own
     // INVITE's final. Without this, a callee that terminates immediately

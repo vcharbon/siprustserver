@@ -18,6 +18,7 @@ use super::ledger::{ObligationKey, ObligationKind};
 use super::response::react_response;
 use super::runner::{ActorState, ParkedRequest};
 use super::script::{scripted_wants_cancel, scripted_wants_in_dialog};
+use super::shared_endpoint::Inbox;
 use super::state::{LegPhase, Observation, SubflowState};
 use crate::{Inbound, ServerTxn, StepError};
 
@@ -42,9 +43,9 @@ pub(super) async fn cancel_pending_initial(
         .pending_answer
         .take()
         .map(|ta| ta.uas)
-        .or_else(|| st.pending_prack_answer.take())
-        .or_else(|| st.held_silent.take())
-        .or_else(|| st.held.take())
+        .or_else(|| st.pending_prack_answer.take().map(|t| *t))
+        .or_else(|| st.held_silent.take().map(|t| *t))
+        .or_else(|| st.held.take().map(|t| *t))
         // A script-BOUND initial INVITE (claimed by `ExpectRequest{Initial}`,
         // provisionals already sent on the bound txn) with no scripted CANCEL
         // claim: the automatic mirrors the parked path so the peer never
@@ -58,7 +59,7 @@ pub(super) async fn cancel_pending_initial(
                 return None;
             }
             consumed = Some("200 + 487 on the bound INVITE");
-            st.bound.take()
+            st.bound.take().map(|t| *t)
         })
         .or_else(|| {
             let i = st.parked.iter().position(|p| p.initial)?;
@@ -469,8 +470,22 @@ pub(super) async fn react_in_dialog_request(
 pub(super) async fn maybe_answer_held_invite(st: &mut ActorState<'_>) -> Result<(), StepError> {
     if st.hold_for_early_update && st.early_pracked && st.early_updated {
         if let Some(inv_txn) = st.pending_prack_answer.take() {
-            answer_initial_invite(st, inv_txn, None).await?;
+            answer_initial_invite(st, *inv_txn, None).await?;
         }
+    }
+    Ok(())
+}
+
+/// React to the inbound already queued while `pending` holds, so what landed
+/// before a step (a final, a CANCEL) is handled before it.
+pub(super) async fn react_queued(
+    st: &mut ActorState<'_>,
+    inbox: &mut Inbox,
+    pending: fn(&ActorState<'_>) -> bool,
+) -> Result<(), StepError> {
+    while pending(st) {
+        let Some(m) = inbox.try_take().await else { break };
+        default_react(st, m).await?;
     }
     Ok(())
 }

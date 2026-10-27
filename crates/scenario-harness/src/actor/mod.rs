@@ -342,7 +342,7 @@ pub(crate) async fn run_call_accepting(
         if let Some((inbox, handle)) = seat {
             state = state.on_shared_endpoint(inbox, handle);
         }
-        states.push(state);
+        states.push(Box::new(state));
         scopes.push(scope);
     }
 
@@ -381,9 +381,10 @@ pub(crate) async fn run_call_accepting(
 
     // The loser future is dropped; teardown acts on whatever each scope last
     // registered (Terminated → no-op on the happy path) — including after a
-    // caught panic, so a panicking actor never leaks SUT state.
+    // caught panic, so a panicking actor never leaks SUT state. Each teardown
+    // runs boxed, so this call-long future never holds its state inline.
     for scope in &scopes {
-        scope.teardown().await;
+        Box::pin(scope.teardown()).await;
     }
     match result {
         Ok(verdict) => verdict,

@@ -86,7 +86,7 @@ async fn a_callee_rejects_5xx_when_its_reliable_183_is_never_pracked() {
 
     let (status, after) = tokio::select! {
         r = caller => r.expect("the caller's side of the call"),
-        f = Box::pin(run_actor(bob_actor)) => panic!("bob's actor ended before any final: {f:?}"),
+        f = Box::pin(run_actor(Box::new(bob_actor))) => panic!("bob's actor ended before any final: {f:?}"),
     };
     assert!((500..600).contains(&status), "the give-up final is a 5xx, got {status}");
     assert!(

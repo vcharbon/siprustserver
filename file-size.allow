@@ -60,7 +60,7 @@ crates/failover-harness/tests/it/limiter_ha.rs 862
 crates/failover-harness/tests/it/limiter_release_by_call.rs 939
 crates/failover-harness/tests/it/prack_takeover.rs 901
 crates/http-net-testkit/tests/it/scripted.rs 921
-crates/loadgen/src/driver.rs 721
+crates/loadgen/src/driver.rs 710
 crates/loadgen/src/report.rs 683
 crates/loadgen/tests/it/fake_net.rs 932
 crates/loadgen/tests/it/smoke.rs 2695
@@ -86,7 +86,7 @@ crates/rfc-rules/src/rules/proxy.rs 634
 crates/rfc-rules/src/rules/wellformed.rs 656
 crates/rfc-rules/src/verdict/evidence.rs 1722
 crates/scenario-harness/src/actor/response.rs 510
-crates/scenario-harness/src/actor/runner.rs 558
+crates/scenario-harness/src/actor/runner.rs 555
 crates/scenario-harness/src/actor/scenarios.rs 1086
 crates/scenario-harness/src/actor/script.rs 532
 crates/scenario-harness/src/actor/state.rs 604

@@ -34,7 +34,7 @@ use crate::outcome::{CallWire, OutcomeSink};
 use crate::rate::{Governor, RateHandle};
 use crate::report::{RenderedSample, Reporter};
 use crate::scenarios::ScenarioId;
-use crate::{call_rtt::CallRtts, failed_call};
+use crate::{call_rtt::CallRtts, call_task::call_task, failed_call};
 use scenario_harness::actor::ScenarioVerdict;
 
 /// The mux transport the driver binds calls on.
@@ -284,18 +284,7 @@ impl Driver {
                 permit,
                 self.tails.clone(),
             );
-            // A panic outside the scenario's own boundary (checks, sample
-            // rendering, the bookkeeping) still closes the call's in-flight
-            // count and is counted as a generator failure: the call wrote no
-            // record.
-            tokio::spawn(async move {
-                if AssertUnwindSafe(call).catch_unwind().await.is_err() {
-                    reporter.dec_inflight();
-                    if let Some(sink) = outcomes {
-                        sink.generator_failure(id, "panic");
-                    }
-                }
-            });
+            tokio::spawn(call_task(call, id, reporter, outcomes));
         }
 
         // Drain: every permit (in-flight calls), then the lock (release tails).
@@ -307,7 +296,7 @@ impl Driver {
 /// One call, start to finish. `Send + 'static`, so it runs on the shared
 /// multi-threaded runtime.
 #[allow(clippy::too_many_arguments)] // per-call context threaded explicitly (no shared struct)
-async fn run_one(
+pub(crate) async fn run_one(
     entry: MixEntry,
     reporter: Arc<Reporter>,
     transport: Arc<MuxTransport>,

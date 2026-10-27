@@ -51,11 +51,14 @@
 
 pub mod app;
 mod call_rtt;
+mod call_task;
 pub mod case;
 pub mod catalogue;
 pub mod class;
 pub mod ctx;
 pub mod driver;
+#[cfg(test)]
+mod driver_future_size;
 mod failed_call;
 mod hist;
 mod metrics_server;

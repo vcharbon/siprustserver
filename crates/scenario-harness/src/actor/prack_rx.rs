@@ -64,7 +64,7 @@ pub(super) async fn react_prack(
     if releases_answer {
         if let Some(inv_txn) = st.pending_prack_answer.take() {
             let fork = st.fork_answer.take();
-            answer_initial_invite(st, inv_txn, fork).await?;
+            answer_initial_invite(st, *inv_txn, fork).await?;
         }
     }
     Ok(())

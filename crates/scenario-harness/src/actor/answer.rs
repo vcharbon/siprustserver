@@ -209,7 +209,7 @@ pub(super) async fn apply_disposition(
             st.early_provisionals.insert(String::new());
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
             st.pending_answer =
-                Some(TimedAnswer { at: st.dwell(Dwell::Ring, ring), uas, fork: None });
+                Some(Box::new(TimedAnswer { at: st.dwell(Dwell::Ring, ring), uas, fork: None }));
         }
         // Ring then SILENCE: the 180 goes out, the INVITE server txn is
         // held with NO answer ever scheduled — the SUT's own no-answer timer
@@ -220,7 +220,7 @@ pub(super) async fn apply_disposition(
             uas.respond(180, "Ringing").try_send().await?;
             st.early_provisionals.insert(String::new());
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
-            st.held_silent = Some(uas);
+            st.held_silent = Some(Box::new(uas));
         }
         // C1/E3 forking UAS: one 18x per DISTINCT explicit To-tag on the ONE
         // retained INVITE server txn (as if a downstream proxy forked), then the
@@ -270,10 +270,10 @@ pub(super) async fn apply_disposition(
             if reliable {
                 // The 200 waits for the WINNER fork's PRACK (see the PRACK arm).
                 st.fork_answer = Some(fork);
-                st.pending_prack_answer = Some(uas);
+                st.pending_prack_answer = Some(Box::new(uas));
             } else {
                 let at = st.dwell(Dwell::Ring, ring);
-                st.pending_answer = Some(TimedAnswer { at, uas, fork: Some(fork) });
+                st.pending_answer = Some(Box::new(TimedAnswer { at, uas, fork: Some(fork) }));
             }
         }
         Disposition::Reject(code) => reject_initial(st, uas, code).await?,
@@ -290,7 +290,7 @@ pub(super) async fn apply_disposition(
             st.unpracked.insert(uas.dialog().local_tag().to_string(), now);
             st.early_provisionals.insert(String::new());
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
-            st.pending_prack_answer = Some(uas);
+            st.pending_prack_answer = Some(Box::new(uas));
         }
         // The goals ring and answer the held INVITE (`super::held`).
         Disposition::Held => super::held::hold_initial(st, uas).await?,

@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures::future::{BoxFuture, FutureExt};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
@@ -73,6 +74,12 @@ impl Inbox {
                 }
             }
         }
+    }
+
+    /// [`Self::recv`] on the heap: a reactor idling on it holds a pointer, and
+    /// the message rides a box until its reaction takes it.
+    pub(super) fn recv_boxed(&mut self) -> BoxFuture<'_, Result<Box<Inbound>, StepError>> {
+        async move { self.recv().await.map(Box::new) }.boxed()
     }
 
     /// The next inbound already waiting, without waiting — `None` when

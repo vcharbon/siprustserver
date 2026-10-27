@@ -10,12 +10,12 @@ use crate::{ClientInvite, Dialog};
 pub(super) struct DialogTable {
     /// The caller's outgoing INVITE, awaiting its confirmation (learned from the
     /// responses the reactor feeds it via [`ClientInvite::absorb_response`]).
-    pub(super) pending_invite: Option<ClientInvite>,
+    pub(super) pending_invite: Option<Box<ClientInvite>>,
     /// Our confirmed dialog (caller after ACK, or UAS after answering).
     pub(super) confirmed: Option<Dialog>,
     /// The caller's establishing INVITE, RETAINED after confirmation (C1/E3):
     /// a LOSING fork's late 2xx (§13.2.2.4) arrives after the winner's and must
     /// be ACK+BYE'd on ITS OWN fork dialog — derived from this transaction
     /// ([`ClientInvite::fork_dialog`]), never from the confirmed (winner) one.
-    pub(super) won_invite: Option<ClientInvite>,
+    pub(super) won_invite: Option<Box<ClientInvite>>,
 }
