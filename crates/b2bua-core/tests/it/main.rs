@@ -8,6 +8,7 @@ mod caller_tags;
 mod ended_dialog_2xx_rules;
 mod evidence_rules;
 mod evidence_triggers;
+mod fork_straggler_rules;
 mod lifecycle_transition_trace;
 mod media_leg_advertisement;
 mod rules;

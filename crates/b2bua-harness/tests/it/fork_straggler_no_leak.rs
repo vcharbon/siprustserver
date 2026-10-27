@@ -552,6 +552,106 @@ async fn the_straggler_bye_continues_its_forks_own_sequence() {
     let _report = h.finish().await;
 }
 
+/// RFC 3262 §3 asks only that the PRACK reached the UAS before its final: a
+/// losing fork answers the caller's PRACK after the winner's 2xx retired its
+/// dialog, and that 200 still reaches the caller, its record settling with
+/// the retired dialog (RFC 3261 §8.1.3.3).
+#[tokio::test(start_paused = true)]
+async fn a_prack_answered_after_its_fork_lost_still_reaches_the_caller() {
+    let h = Harness::new("b2bua-fork-straggler-late-prack-200");
+    let alice = h.agent("alice", "127.0.0.1:6111").await;
+    let bob = h.agent("bob", "127.0.0.1:6112").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 6112).start(&h, "b2bua", "127.0.0.1:6113").await;
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(183, "Session Progress")
+        .with_to_tag(STRAGGLER)
+        .reliable(1)
+        .with_sdp(ANSWER_STRAGGLER)
+        .await;
+    let p1 = call.expect(183).await;
+    let fork1 = p1.to().tag().expect("fork1 a-facing tag").to_string();
+    let rseq = p1.header::<RSeq>().expect("an RSeq").expect("readable RSeq").value();
+    let mut prack = call
+        .send_request(InDialogMethod::Prack)
+        .with_to_tag(&fork1)
+        .with_rack(&format!("{rseq} {} INVITE", Party::Caller.first_cseq()))
+        .send()
+        .await;
+    let mut prack_at_bob = bob.receive("PRACK").await;
+    // The other fork answers while fork 1 still holds the PRACK.
+    uas.adopt_to_tag(WINNER);
+    uas.respond(200, "OK").with_sdp(ANSWER_WINNER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    prack_at_bob.respond(200, "OK").await;
+    prack.expect(200).await;
+
+    let mut bye = dialog.bye().await;
+    let mut b_bye = bob.receive("BYE").await;
+    assert_eq!(b_bye.request().to().tag(), Some(WINNER), "the hangup ends the winner");
+    b_bye.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    alice.drain().await;
+    bob.drain().await;
+    let _report = h.finish().await;
+}
+
+/// A fork never heard before that answers after the winner is still a fork
+/// of the INVITE: its 2xx names no dialog of the leg and is a straggler's,
+/// ACKed and BYEd (RFC 3261 §13.2.2.4), the call untouched.
+#[tokio::test(start_paused = true)]
+async fn a_fork_unheard_until_after_the_winner_answered_is_released_as_a_straggler() {
+    let h = Harness::new("b2bua-fork-straggler-late-ring");
+    let alice = h.agent("alice", "127.0.0.1:6121").await;
+    let bob = h.agent("bob", "127.0.0.1:6122").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 6122).start(&h, "b2bua", "127.0.0.1:6123").await;
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").with_to_tag(WINNER).await;
+    call.expect(180).await;
+    uas.adopt_to_tag(WINNER);
+    uas.respond(200, "OK").with_sdp(ANSWER_WINNER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    uas.respond(200, "OK").with_to_tag(STRAGGLER).with_sdp(ANSWER_STRAGGLER).await;
+    let ack = bob.receive("ACK").await;
+    assert_eq!(ack.request().to().tag(), Some(STRAGGLER), "the ACK names the late fork");
+    let mut late_bye = bob.receive("BYE").await;
+    assert_eq!(late_bye.request().to().tag(), Some(STRAGGLER), "the BYE ends the late fork");
+    late_bye.respond(200, "OK").await;
+    for _ in 0..5 {
+        h.advance(Duration::from_millis(100)).await;
+    }
+
+    let mut bye = dialog.bye().await;
+    let mut b_bye = bob.receive("BYE").await;
+    assert_eq!(b_bye.request().to().tag(), Some(WINNER), "the hangup ends the winner");
+    b_bye.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    assert_eq!(b2bua.cdr_records().len(), 1, "one CDR for the one call");
+    alice.drain().await;
+    bob.drain().await;
+    let _report = h.finish().await;
+}
+
 /// A fork that answers after the call ended and its record was released is
 /// still a 2xx our INVITE drew: the INVITE's transaction, orphaned by the
 /// release (ADR-0034), ACKs it and BYEs its dialog (RFC 3261 §13.2.2.4).

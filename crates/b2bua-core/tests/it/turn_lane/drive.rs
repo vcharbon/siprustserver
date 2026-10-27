@@ -47,6 +47,13 @@ pub enum Step {
     BobAnswersReliably(u16),
     /// bob's response to the last request the stack sent him.
     BobAnswersSent(u16),
+    /// bob's response to the last request of this method the stack sent him.
+    BobAnswersLast(Method, u16),
+    /// A fork's response to the b-leg INVITE, under the fork's own To-tag
+    /// (RFC 3261 §12.1.2).
+    ForkAnswers(&'static str, u16),
+    /// That fork's reliable provisional (RFC 3262).
+    ForkAnswersReliably(&'static str, u16),
     /// bob's BYE on the dialog his 2xx confirmed.
     BobByes,
     /// bob's REFER on that dialog (RFC 3515).
@@ -79,6 +86,14 @@ pub struct Dialled {
     config: B2buaConfig,
     rules: Vec<RuleDefinition>,
     obligations: ObligationSet,
+}
+
+impl Dialled {
+    /// The dialled call, its rule chain led by `rule`.
+    pub fn with_rule(mut self, rule: RuleDefinition) -> Self {
+        self.rules.insert(0, rule);
+        self
+    }
 }
 
 /// The worker's configuration.
@@ -185,6 +200,8 @@ struct Peers {
     /// The last request other than an ACK the stack sent alice, and bob.
     to_alice: Option<SipRequest>,
     to_bob: Option<SipRequest>,
+    /// Every request other than an ACK the stack sent bob, in order.
+    bob_heard: Vec<SipRequest>,
 }
 
 impl Peers {
@@ -195,6 +212,7 @@ impl Peers {
             bob_cseq: 1,
             to_alice: None,
             to_bob: Some(dialled.b_invite.clone()),
+            bob_heard: vec![dialled.b_invite.clone()],
         }
     }
 
@@ -202,6 +220,14 @@ impl Peers {
     fn heard(&mut self, result: &HandlerResult) {
         self.to_alice = sent_to(result, "a").or(self.to_alice.take());
         self.to_bob = sent_to(result, "b-1").or(self.to_bob.take());
+        self.bob_heard.extend(result.effects.outbound.iter().filter_map(|e| match &e.body {
+            OutboundBody::Request(r)
+                if e.leg_id.as_deref() == Some("b-1") && *r.method() != Method::Ack =>
+            {
+                Some(r.clone())
+            }
+            _ => None,
+        }));
     }
 }
 
@@ -222,16 +248,31 @@ fn request(method: &str, cseq: u32, src: &str, lines: &str, body: &str) -> Vec<u
 /// The response `status` to `req`, its To-tag `bobtag` when it has none,
 /// a 2xx to an INVITE or an UPDATE carrying the answer.
 fn response(req: &SipRequest, status: u16, extra: Vec<SipHeader>) -> Option<Vec<u8>> {
+    response_tagged(req, status, "bobtag", extra)
+}
+
+/// [`response`] under the To-tag `tag` when `req` has none.
+fn response_tagged(
+    req: &SipRequest,
+    status: u16,
+    tag: &str,
+    extra: Vec<SipHeader>,
+) -> Option<Vec<u8>> {
     let answers = matches!(req.method(), Method::Invite | Method::Update)
         && ((200..300).contains(&status) || (180..200).contains(&status));
     let opts = GenerateResponseOpts {
-        to_tag: req.to().tag().is_none().then(|| "bobtag".into()),
+        to_tag: req.to().tag().is_none().then(|| tag.into()),
         body: if answers { SDP.into() } else { Vec::new() },
         content_type: answers.then(b2bua_core::rules::relay::sdp),
         extra_headers: extra,
         ..Default::default()
     };
     Some(generate_response(req, status, "Lane", &opts).ok()?.image().to_vec())
+}
+
+/// The lines making a provisional reliable (RFC 3262 §3).
+fn reliable() -> Vec<SipHeader> {
+    vec![line("Require", "100rel"), line("RSeq", "1")]
 }
 
 fn line(name: &str, value: &str) -> SipHeader {
@@ -272,12 +313,19 @@ fn event_of(
     };
     match step {
         Step::BobAnswers(status) => sip(response(b_invite, *status, Vec::new())?, "b-1"),
-        Step::BobAnswersReliably(status) => {
-            let reliable = vec![line("Require", "100rel"), line("RSeq", "1")];
-            sip(response(b_invite, *status, reliable)?, "b-1")
-        }
+        Step::BobAnswersReliably(status) => sip(response(b_invite, *status, reliable())?, "b-1"),
         Step::BobAnswersSent(status) => {
             sip(response(peers.to_bob.as_ref()?, *status, Vec::new())?, "b-1")
+        }
+        Step::BobAnswersLast(method, status) => {
+            let req = peers.bob_heard.iter().rev().find(|r| r.method() == method)?;
+            sip(response(req, *status, Vec::new())?, "b-1")
+        }
+        Step::ForkAnswers(tag, status) => {
+            sip(response_tagged(b_invite, *status, tag, Vec::new())?, "b-1")
+        }
+        Step::ForkAnswersReliably(tag, status) => {
+            sip(response_tagged(b_invite, *status, tag, reliable())?, "b-1")
         }
         Step::AliceAnswersSent(status) => {
             sip(response(peers.to_alice.as_ref()?, *status, Vec::new())?, "a")
