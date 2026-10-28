@@ -5,15 +5,18 @@ use std::net::SocketAddr;
 
 use call::TimerKey;
 use call::TxnTimeoutKind;
-use sip_message::{SipHeader, SipMessage};
+use sip_message::{Bytes, SipHeader, SipMessage};
 
 /// One thing that happens to a call: an inbound SIP message, a fired timer, a
 /// CANCEL the txn layer already answered, a client-transaction timeout, or a
 /// re-entrant internal event (e.g. an async decision result).
 #[derive(Debug, Clone)]
 pub enum CallEvent {
-    /// A SIP request/response that survived the transaction layer.
-    Sip { message: Box<SipMessage>, src: SocketAddr },
+    /// A SIP request/response that survived the transaction layer. A
+    /// request's `message` carries the top Via the server transport stamped
+    /// on receipt (RFC 3261 §18.2.1); `datagram` is the message as it arrived,
+    /// byte for byte, what a trace records (ADR-0026).
+    Sip { message: Box<SipMessage>, src: SocketAddr, datagram: Bytes },
     /// A B2BUA timer fired (keepalive, no-answer, max-duration, …): its key
     /// and the generation it was armed under. The router delivers it only
     /// while the call's ledger holds that key under that generation.
@@ -89,9 +92,10 @@ pub enum CallEvent {
 }
 
 impl CallEvent {
-    /// `message`, received from `src`.
+    /// `message`, received from `src` as the datagram it is.
     pub fn sip(message: SipMessage, src: SocketAddr) -> Self {
-        CallEvent::Sip { message: Box::new(message), src }
+        let datagram = message.image().clone();
+        CallEvent::Sip { message: Box::new(message), src, datagram }
     }
 
     /// The incarnation of the call this event belongs to

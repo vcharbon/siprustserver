@@ -16,7 +16,7 @@ use crate::rules::relay;
 
 use super::relay_response::Relaying;
 use super::show_provisional::shown_tag_of;
-use super::snapshot_answer::{snapshot_response_opts, via_sent_by};
+use super::snapshot_answer::{snapshot_response_opts, via_response_target};
 use super::{ActionExecutor, Owed, Settle};
 
 impl ActionExecutor<'_> {
@@ -34,13 +34,14 @@ impl ActionExecutor<'_> {
         let (status, target_leg, source_leg_id) =
             (r.status, r.target_leg, r.source_leg_id.as_str());
         // §18.2.2: a relayed response goes to the originator's top Via
-        // sent-by, and the snapshot holds that Via verbatim. A Via no
+        // response target, and the snapshot holds that Via as stamped on
+        // receipt (§18.2.1, RFC 3581 §4). A Via no
         // reader accepts names no address — drop the relay and say so
         // (the originator retransmits, then times out its own request).
         // Answering it toward a fabricated destination would post the
         // caller's response to whatever that address happens to be; a
         // loopback fallback would swallow it silently.
-        let Some(dest) = pending.source_vias.first().and_then(|v| via_sent_by(v)) else {
+        let Some(dest) = pending.source_vias.first().and_then(|v| via_response_target(v)) else {
             tracing::warn!(
                 call_ref = %call.call_ref,
                 leg_id = %source_leg_id,

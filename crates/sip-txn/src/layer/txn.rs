@@ -318,6 +318,9 @@ pub(super) struct Transaction {
     /// read off its Via beside `cr` / `lg`; `None` for a server transaction.
     pub(super) incarnation_mark: Option<String>,
     pub(super) state: TxnState,
+    /// Where it sends: a client transaction's request; every response of a
+    /// server transaction, its request's response target (RFC 3261 §18.2.2)
+    /// fixed when it opened.
     pub(super) destination: Option<SocketAddr>,
     /// The instant this transaction entered the map — its first send, its
     /// admission or its seed: the origin the client INVITE bound is measured

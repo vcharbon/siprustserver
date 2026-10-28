@@ -91,9 +91,9 @@ crates/scenario-harness/src/actor/script.rs 532
 crates/scenario-harness/src/actor/state.rs 604
 crates/scenario-harness/src/agent/client_invite.rs 598
 crates/scenario-harness/src/agent/dialog.rs 715
-crates/scenario-harness/src/agent/harness.rs 858
+crates/scenario-harness/src/agent/harness.rs 855
 crates/scenario-harness/src/agent/server_txn.rs 599
-crates/scenario-harness/src/agent/ua.rs 792
+crates/scenario-harness/src/agent/ua.rs 781
 crates/scenario-harness/tests/it/template_emission.rs 1016
 crates/seq-report/src/html.rs 1005
 crates/sip-message/src/generators/relay.rs 504
@@ -105,6 +105,6 @@ crates/sip-net-testkit/src/contracts.rs 869
 crates/sip-pcap/src/bin/sipflow.rs 1028
 crates/sip-pcap/src/flow.rs 801
 crates/sip-pcap/src/flow/tests.rs 1000
-crates/sip-txn/src/layer/client.rs 615
+crates/sip-txn/src/layer/client.rs 595
 crates/sip-txn/tests/it/bounded_queue.rs 803
 crates/sip-txn/tests/it/fsm.rs 1415

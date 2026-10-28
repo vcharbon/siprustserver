@@ -10,8 +10,8 @@ use sip_txn::TransactionEvent;
 /// ([`super::quiesced::notice`]).
 pub(crate) fn call_event(event: TransactionEvent) -> (CallEvent, bool) {
     let event = match event {
-        TransactionEvent::Message { message, src, matched_client_txn } => {
-            return (CallEvent::Sip { message, src }, matched_client_txn);
+        TransactionEvent::Message { message, src, matched_client_txn, datagram } => {
+            return (CallEvent::Sip { message, src, datagram }, matched_client_txn);
         }
         TransactionEvent::Cancelled {
             call_id,

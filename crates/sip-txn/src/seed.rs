@@ -57,7 +57,8 @@ pub enum TxnSeed {
     /// A server INVITE this side answered with a non-2xx final, its ACK not
     /// known to have arrived: `response`, the final as it left, keyed by its
     /// top-Via branch and sent-by (RFC 3261 §17.2.3). It runs in Completed
-    /// from the seed and sends `response` toward `dest` on Timer G until the
+    /// from the seed and sends `response` toward its top Via's response target
+    /// (RFC 3261 §18.2.2; `dest` where that names no IP) on Timer G until the
     /// ACK, which it absorbs, or Timer H (§17.2.1): the record may be ahead of
     /// the wire, so the first copy may never have left, and one that did drew
     /// its ACK toward the node that sent it. A copy of the INVITE draws

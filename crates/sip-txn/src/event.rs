@@ -3,6 +3,7 @@
 
 use std::net::SocketAddr;
 
+use bytes::Bytes;
 use call::TxnTimeoutKind;
 use sip_message::{Method, SipHeader, SipMessage};
 
@@ -20,6 +21,10 @@ pub enum TransactionEvent {
         /// (it shares its INVITE's branch and is never handed to that
         /// transaction); always `false` for a request.
         matched_client_txn: bool,
+        /// The datagram the message arrived as, byte for byte. A request's
+        /// `message` carries the top Via the server transport stamped on
+        /// receipt (RFC 3261 §18.2.1); this is what the peer sent.
+        datagram: Bytes,
     },
     /// A CANCEL matched a server INVITE txn; the 200/487 were sent by this
     /// layer. RFC 3261 §9 scopes a CANCEL to the one INVITE *transaction* it
@@ -81,6 +86,23 @@ pub enum TransactionEvent {
     /// B2BUA's acting-backup self-release (ADR-0014) keys on it to shed its live
     /// takeover copy without polling.
     CallQuiesced { call_ref: String },
+}
+
+impl TransactionEvent {
+    /// The response `resp` received from `src`, its datagram its own image.
+    pub(crate) fn response(
+        resp: sip_message::SipResponse,
+        src: SocketAddr,
+        matched_client_txn: bool,
+    ) -> Self {
+        let datagram = resp.image().clone();
+        TransactionEvent::Message {
+            message: Box::new(SipMessage::Response(resp)),
+            src,
+            matched_client_txn,
+            datagram,
+        }
+    }
 }
 
 /// The class of an event the full output queue refused: the `reason` label of

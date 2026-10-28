@@ -269,7 +269,7 @@ fn internal(call: &Call, topic: &str, outcome: &str, payload: serde_json::Value)
 /// The SIP text of `event` rewritten by `edit`, read back; `None` when the
 /// parser refuses it.
 pub(super) fn edited(event: CallEvent, edit: &dyn Fn(&[u8]) -> Vec<u8>) -> Option<CallEvent> {
-    let CallEvent::Sip { message, src } = event else {
+    let CallEvent::Sip { message, src, .. } = event else {
         return Some(event);
     };
     Some(CallEvent::sip(parsed(&edit(message.image()))?, src))

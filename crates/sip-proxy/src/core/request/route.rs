@@ -13,7 +13,7 @@ use sip_message::emergency::is_emergency_request;
 use sip_message::header::{MaxForwards, ProxyRequire, Unsupported, Via};
 use sip_message::{Method, SipMessage};
 
-use crate::addr::{observed_source, ProxyAddr};
+use crate::addr::ProxyAddr;
 use crate::branch::stateless_branch;
 use crate::cancel_lru::{invite_txn_key, retransmit_key, CancelEntry, Lifetime};
 use crate::headers::via_with_cookie;
@@ -22,6 +22,7 @@ use crate::observability::metrics::{
 };
 use crate::self_gate::BypassKind;
 use crate::strategy::SelectOpts;
+use sip_message::received::observed_source;
 
 use super::super::ProxyCore;
 use super::reply::extra_header;

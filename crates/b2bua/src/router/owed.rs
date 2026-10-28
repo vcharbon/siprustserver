@@ -11,6 +11,7 @@ use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 use sip_txn::{IdGen, ServerTxnKey, TransactionLayer};
 
 use super::admit;
+use super::reply_to::reply_to;
 use super::responses::{build_200, build_481, build_retry_later_500};
 use super::RouterCtx;
 use crate::admission::{class_of, Refusals, Refused};
@@ -78,15 +79,15 @@ impl<'a> OwedAnswer<'a> {
             }
             Owed::RetryLater => {
                 let resp = build_retry_later_500(req, None, self.jittered_retry_after());
-                self.send(resp, *src).await;
+                self.send(resp, reply_to(req, *src)).await;
                 self.metrics.bump_invite_discard_answered(why);
             }
             Owed::DialogGone => {
-                self.send(build_481(req, None), *src).await;
+                self.send(build_481(req, None), reply_to(req, *src)).await;
                 self.metrics.bump_invite_discard_answered(why);
             }
             Owed::CappedRefusal => {
-                self.send(self.capped_refusal(req), *src).await;
+                self.send(self.capped_refusal(req), reply_to(req, *src)).await;
                 self.metrics.bump_capped_request_answered();
             }
         }

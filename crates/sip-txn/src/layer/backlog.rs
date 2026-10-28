@@ -67,12 +67,13 @@ impl Owner {
     /// the backlog holds now — the caller has its final, or will have it from
     /// this copy, and a call admitted behind it would ring for no one; past its
     /// class's ceiling it is refused now, counted once. A refusal goes to
-    /// `src`, before any 100 Trying.
+    /// `dest`, the INVITE's response target (RFC 3261 §18.2.2), before any
+    /// 100 Trying.
     pub(super) async fn judge_new_invite(
         &mut self,
         endpoint: &dyn UdpEndpoint,
         req: &SipRequest,
-        src: SocketAddr,
+        dest: SocketAddr,
     ) -> NewInvite {
         let Some(refusals) = self.refusals.clone() else {
             return NewInvite::Admitted { held: false };
@@ -90,7 +91,7 @@ impl Owner {
             }
         }
         match refusals.answer(req) {
-            Ok(refusal) => self.send_buffer(endpoint, refusal.image(), src).await,
+            Ok(refusal) => self.send_buffer(endpoint, refusal.image(), dest).await,
             Err(e) => tracing::warn!(error = %e, "INVITE refusal not sent: its lines make none"),
         }
         NewInvite::Refused

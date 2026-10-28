@@ -104,7 +104,7 @@ pub(super) async fn refuse_on_store_fault(
                 crate::model_invariants::stated_text_skipped(&ctx.metrics, call, &detail);
             }
         }
-        let _ = ctx.txn.send_response(resp, src).await;
+        let _ = ctx.txn.send_response(resp, super::reply_to::reply_to(req, src)).await;
     }
     ctx.metrics.bump_store_fault_rejected();
 }

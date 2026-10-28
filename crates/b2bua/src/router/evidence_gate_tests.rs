@@ -70,7 +70,7 @@ fn kind(gate: &Gate) -> &'static str {
 }
 
 fn event(message: SipMessage) -> CallEvent {
-    CallEvent::Sip { message: Box::new(message), src: src() }
+    CallEvent::sip(message, src())
 }
 
 #[tokio::test(start_paused = true)]

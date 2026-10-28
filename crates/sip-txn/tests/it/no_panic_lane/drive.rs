@@ -180,7 +180,7 @@ async fn answer_requests(
 ) {
     while let Some(event) = events.recv().await {
         let (message, src, matched) = match event {
-            TransactionEvent::Message { message, src, matched_client_txn } => {
+            TransactionEvent::Message { message, src, matched_client_txn, .. } => {
                 (message, src, matched_client_txn)
             }
             TransactionEvent::Cancelled { .. } => {

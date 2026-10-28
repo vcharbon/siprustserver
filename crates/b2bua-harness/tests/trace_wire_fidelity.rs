@@ -10,7 +10,10 @@
 //! carry the received datagram, not a re-serialization of the parse. The probe
 //! is a header value with padding after the colon: it survives on the wire and
 //! is trimmed by any round trip through the parser, so a byte-exact record is
-//! the only way it shows up.
+//! the only way it shows up. The caller sits behind a NAT and asks for
+//! `rport`: the transaction layer stamps `received`/`rport` on the top Via of
+//! what the call handles (RFC 3261 §18.2.1, RFC 3581 §4), and the record still
+//! holds the bare `;rport` she sent.
 //!
 //! **Round-trip timing.** The `/call/new` child span's request and response are
 //! separate facts at separate times. Stamping both with the handler's entry
@@ -100,7 +103,7 @@ async fn a_traced_call_records_the_datagram_and_the_length_of_its_decision() {
     let (_log_guard, log) = observe_testkit::test_buffer();
 
     let h = Harness::new("b2bua-trace-wire-fidelity");
-    let alice = h.agent("alice", "127.0.0.1:5062").await;
+    let alice = h.agent("alice", "127.0.0.1:5062").await.behind_nat(h.next_addr());
     let bob = h.agent("bob", "127.0.0.1:5072").await;
     let decision = Arc::new(SlowDecisionEngine {
         inner: Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5072)),
@@ -155,6 +158,14 @@ async fn a_traced_call_records_the_datagram_and_the_length_of_its_decision() {
     assert!(
         recorded.iter().any(|b| b.starts_with("BYE ") && b.contains(&padded_bye)),
         "…and so is an in-dialog request: {recorded:?}"
+    );
+    let theirs = |b: &&String| b.starts_with("INVITE ") || b.starts_with("BYE ");
+    assert!(
+        recorded
+            .iter()
+            .filter(theirs)
+            .all(|b| b.contains(";rport") && !b.contains("rport=") && !b.contains("received=")),
+        "the records hold the Via as she sent it, before the transport's stamp: {recorded:?}"
     );
 
     // ── The decision round trip has a length ────────────────────────────────

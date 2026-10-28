@@ -30,8 +30,8 @@ use sip_message::{Method, SipRequest, SipResponse};
 use sip_txn::timers::TIMER_B;
 use sip_txn::{IdGen, StatelessTagger};
 
-use crate::addr::observed_source;
 use crate::cancel_lru::retransmit_key;
+use sip_message::received::observed_source;
 
 /// The most refused requests a memo holds by default; past it the oldest is
 /// forgotten first. At 64·T1 it covers refusals up to 2 048 a second.

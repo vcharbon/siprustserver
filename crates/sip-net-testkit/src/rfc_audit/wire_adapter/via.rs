@@ -2,8 +2,10 @@
 
 use super::*;
 
-pub(super) const LIVE: &[Live] =
-    &[Live::taker(RuleId::RportEcho, rport_echo).advisory().skip(Skip::RelayLanes)];
+pub(super) const LIVE: &[Live] = &[Live::taker(RuleId::RportEcho, rport_echo)
+    .advisory()
+    .gating_the_sut()
+    .skip(Skip::RelayLanes)];
 
 fn rport_echo(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::RportNotEchoed {

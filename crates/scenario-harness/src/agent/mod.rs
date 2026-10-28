@@ -83,6 +83,7 @@ pub(crate) mod dialog_gate;
 mod dialog_views;
 mod failure_dump;
 mod harness;
+mod identity;
 mod ids;
 mod invite;
 mod ladder;

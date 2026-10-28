@@ -113,10 +113,9 @@ pub fn response_to_a_leg(
             return None;
         }
     };
-    // Routed by the txn layer to the a-leg server transaction; dest is alice
-    // (top Via sent-by of her INVITE, RFC 3261 §18.2.2).
-    let hop = a_leg_invite.top_via();
-    let (host, port) = hop.sent_by().pair();
+    // Routed by the txn layer to the a-leg server transaction; dest is the
+    // response target of her INVITE's stamped top Via (RFC 3261 §18.2.2).
+    let (host, port) = a_leg_invite.top_via().response_target();
     let dest = (host.to_string(), port);
     if status >= 300 {
         // A node serving the call from the record re-sends it (§17.2.1); the

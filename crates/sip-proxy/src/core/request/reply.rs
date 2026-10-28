@@ -13,10 +13,10 @@ use sip_message::header::HeaderValue;
 use sip_message::types::SipHeader;
 use sip_message::{Method, SipRequest, SipResponse};
 
-use crate::addr::observed_source;
 use crate::observability::metrics::{Direction, MessageResult, NoTargetDrop, RoutingDecisionKind};
 use crate::strategy::SelectError;
 use crate::trace::emit;
+use sip_message::received::observed_source;
 
 use super::super::ProxyCore;
 use super::RouteOutcome;

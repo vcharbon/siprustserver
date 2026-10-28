@@ -84,7 +84,10 @@ impl GatedFinding {
 /// fail the test. Runs over the full default suite (per-message peer rules +
 /// cross-message rules), skipping:
 ///   - any `force_advisory()` rule (architectural divergences recorded but not
-///     gated — they still reach the report via the layer-close `close()`);
+///     gated — they still reach the report via the layer-close `close()`),
+///     except the finding of a rule that gates the SUT
+///     ([`rfc_rule_gates_sut`](sip_net_testkit::rfc_rule_gates_sut)) charged
+///     to a lane bound as SUT;
 ///   - any finding whose rule `subject()` does not intersect the originating
 ///     bind's declared roles (default = all roles, so this only narrows when a
 ///     test sets roles);

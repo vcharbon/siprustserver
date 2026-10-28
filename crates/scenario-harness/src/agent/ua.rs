@@ -1,7 +1,7 @@
-//! [`Agent`] — the stateful fake UA: identity minting (branch/tag/Via/
-//! Contact), the ONE fallible send/receive core (threaded through the §17.2
-//! receive view), and the basic receive/dispatch primitives. The tolerant /
-//! absorbing receive policies live in [`super::tolerant_recv`].
+//! [`Agent`] — the stateful fake UA: the ONE fallible send/receive core
+//! (threaded through the §17.2 receive view) and the basic receive/dispatch
+//! primitives. What it mints on what it sends lives in `super::identity`, the
+//! tolerant / absorbing receive policies in [`super::tolerant_recv`].
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -13,7 +13,7 @@ use sip_message::generators::{
     generate_in_dialog_request, generate_out_of_dialog_request, GenerateInDialogRequestOpts,
     GenerateOutOfDialogRequestOpts, InDialogMethod, OutOfDialogMethod, StackDialog,
 };
-use sip_message::header::{self, HeaderValue, NameAddr, Uri, Via};
+use sip_message::header::{self, HeaderValue, NameAddr, Uri};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{serialize, SipHeader, SipMessage, SipParser, SipRequest, SipResponse, SipStr};
 use sip_net::UdpEndpoint;
@@ -113,6 +113,9 @@ pub struct Agent {
     /// The side this UA stands on when it answers an INVITE: its own CSeq
     /// sequence in that dialog starts at [`Party::first_cseq`].
     pub(crate) answers_as: Party,
+    /// The sent-by this UA's requests name in their Via when it is not
+    /// its socket ([`behind_nat`](Agent::behind_nat)).
+    pub(crate) advertised: Option<SocketAddr>,
 }
 
 /// An [`Agent`] that does not keep its socket bound: what a harness holds so
@@ -131,6 +134,7 @@ pub(crate) struct WeakAgent {
     dialogs: Arc<DialogJudge>,
     steps: StepCounter,
     answers_as: Party,
+    advertised: Option<SocketAddr>,
 }
 
 impl WeakAgent {
@@ -150,6 +154,7 @@ impl WeakAgent {
             dialogs: self.dialogs.clone(),
             steps: self.steps.clone(),
             answers_as: self.answers_as,
+            advertised: self.advertised,
         })
     }
 }
@@ -171,6 +176,7 @@ impl Agent {
             dialogs: self.dialogs.clone(),
             steps: self.steps.clone(),
             answers_as: self.answers_as,
+            advertised: self.advertised,
         }
     }
 
@@ -281,23 +287,6 @@ impl Agent {
     /// Affects every clone of this UA.
     pub fn drop_to_raw_wire(&self) {
         self.txn.disable_dedup();
-    }
-
-    pub(super) fn branch(&self) -> String {
-        format!("z9hG4bK-{}-{}", self.name, self.ids.next())
-    }
-    pub(super) fn tag(&self) -> String {
-        format!("{}-tag-{}", self.name, self.ids.next())
-    }
-    pub(super) fn via(&self) -> Via {
-        Via::udp(SipStr::owned(&self.addr.ip().to_string()), self.addr.port())
-            .with_branch(SipStr::owned(&self.branch()))
-    }
-    pub(super) fn contact(&self) -> header::Contact {
-        header::Contact::from_uri(
-            Uri::sip_user(SipStr::owned(&self.name), SipStr::owned(&self.addr.ip().to_string()))
-                .with_port(self.addr.port()),
-        )
     }
 
     /// Panicking veneer over [`try_send`](Agent::try_send).

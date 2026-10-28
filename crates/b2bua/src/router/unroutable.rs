@@ -23,6 +23,7 @@ use std::net::SocketAddr;
 use sip_ids::TurnIds;
 use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 
+use super::reply_to::reply_to;
 use super::responses::{build_405, build_481};
 use super::store_fault_gate::refuse_on_store_fault;
 use super::RouterCtx;
@@ -113,7 +114,7 @@ pub(super) async fn answer_vanished(ctx: &RouterCtx, event: &CallEvent, ids: &mu
                 let answer = super::late_prack::answer(ctx, req)
                     .or_else(|| refusal(ctx, req, || ids.new_tag()));
                 if let Some(answer) = answer {
-                    let _ = ctx.txn.send_response(answer, *src).await;
+                    let _ = ctx.txn.send_response(answer, reply_to(req, *src)).await;
                 }
             }
             SipMessage::Response(resp) => super::unheld::answer(ctx, resp, *src, ids).await,
@@ -123,7 +124,7 @@ pub(super) async fn answer_vanished(ctx: &RouterCtx, event: &CallEvent, ids: &mu
 
 async fn on_request(ctx: &RouterCtx, req: &SipRequest, src: SocketAddr) {
     if let Some(answer) = super::late_prack::answer(ctx, req) {
-        let _ = ctx.txn.send_response(answer, src).await;
+        let _ = ctx.txn.send_response(answer, reply_to(req, src)).await;
         return;
     }
     let method = req.method().as_str();
@@ -132,7 +133,7 @@ async fn on_request(ctx: &RouterCtx, req: &SipRequest, src: SocketAddr) {
     match refusal(ctx, req, || ctx.id_gen.new_tag()) {
         Some(answer) => {
             let code = answer.status();
-            let _ = ctx.txn.send_response(answer, src).await;
+            let _ = ctx.txn.send_response(answer, reply_to(req, src)).await;
             ctx.metrics.record_unroutable_refused(method, code);
             ctx.unroutable_waves.record(&format!("wire:{class}:{code}"), REQUEST_REASON, sample);
         }

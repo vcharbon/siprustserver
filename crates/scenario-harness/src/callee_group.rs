@@ -351,6 +351,7 @@ impl<'h> CalleeGroupBuilder<'h> {
                 dialogs: self.harness.dialog_judge(name),
                 steps: self.harness.steps(),
                 answers_as: crate::Party::Callee,
+                advertised: None,
             };
             self.harness.keep_bound(&agent);
             agents.insert(name.clone(), agent);

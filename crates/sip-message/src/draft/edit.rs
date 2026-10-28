@@ -326,8 +326,21 @@ impl<S: StartKind> Draft<S> {
     /// header present on the draft cannot be read as the value its name
     /// promises, or when a line cannot be written whole.
     pub fn freeze(self) -> Result<S::Message, IncompleteDraft> {
-        let draft = self.complete()?;
+        self.complete()?.rendered()
+    }
 
+    /// The message a draft thawed from a RECEIVED message is once edited: it
+    /// keeps the header lines the peer sent, so the mandatory set of a message
+    /// this stack mints is not asked of it, and its body is the one received.
+    /// Fails, as [`freeze`](Self::freeze), on a header that cannot be read
+    /// as its name promises or a line that cannot be written whole.
+    pub(crate) fn refreeze_received(self) -> Result<S::Message, IncompleteDraft> {
+        self.rendered()
+    }
+
+    /// The single render of a draft and the typed message read back from it.
+    fn rendered(self) -> Result<S::Message, IncompleteDraft> {
+        let draft = self;
         let rendered = render::<S>(&draft.start, &draft.entries, &draft.body);
         if let Some(refusal) = rendered.refusal {
             return Err(IncompleteDraft::Unwritable(refusal));

@@ -48,12 +48,6 @@ impl std::fmt::Display for ProxyAddr {
     }
 }
 
-/// The host and port a Via records for a packet from `src` (RFC 3261
-/// §18.2.1, RFC 3581 §4): an IPv4-mapped IPv6 address is its IPv4 address.
-pub fn observed_source(src: SocketAddr) -> (String, u16) {
-    (src.ip().to_canonical().to_string(), src.port())
-}
-
 impl From<SocketAddr> for ProxyAddr {
     fn from(a: SocketAddr) -> Self {
         Self { host: a.ip().to_string(), port: a.port() }
@@ -69,14 +63,6 @@ mod tests {
         let a = ProxyAddr::parse("10.0.0.2:5070").unwrap();
         assert_eq!(a, ProxyAddr::new("10.0.0.2", 5070));
         assert_eq!(a.to_string(), "10.0.0.2:5070");
-    }
-
-    #[test]
-    fn a_v4_mapped_source_is_recorded_as_its_v4_address() {
-        let mapped: SocketAddr = "[::ffff:192.0.2.7]:5070".parse().unwrap();
-        assert_eq!(observed_source(mapped), ("192.0.2.7".to_string(), 5070));
-        let v6: SocketAddr = "[2001:db8::1]:5070".parse().unwrap();
-        assert_eq!(observed_source(v6), ("2001:db8::1".to_string(), 5070));
     }
 
     #[test]

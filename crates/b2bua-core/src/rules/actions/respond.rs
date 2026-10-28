@@ -30,8 +30,8 @@ const GLARE_500_RETRY_AFTER: RetryAfterRange = RetryAfterRange { min_sec: 0, max
 
 impl ActionExecutor<'_> {
     /// Answer the current request event in place with `status` (no relay) —
-    /// the response goes back to the request's top-Via sent-by on the source
-    /// leg's server transaction, under the source face's Contact where
+    /// the response goes to the request's top-Via response target on the
+    /// source leg's server transaction, under the source face's Contact where
     /// [`generators::response_states_own_contact`] states one (the 2xx to
     /// UPDATE, the 202 to REFER). `extra_headers` ride the response as given; on a failure final to the
     /// initial INVITE the deployment's minted-final advertisement fills a half
@@ -105,8 +105,8 @@ impl ActionExecutor<'_> {
                 Ok(resp) => resp,
                 Err(e) => return relay::unbuilt(&call.call_ref, ctx.source_leg_id, "response", &e),
             };
-            // RFC 3261 §18.2.2: a response goes back to the request's top-Via sent-by.
-            let (host, port) = req.top_via().sent_by().pair();
+            // RFC 3261 §18.2.2: to the request's top-Via response target.
+            let (host, port) = req.top_via().response_target();
             fx.outbound.push(OutboundSipEffect {
                 body: OutboundBody::Response(resp),
                 mode: OutboundTxnMode::ServerResponse,

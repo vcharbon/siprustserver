@@ -49,11 +49,12 @@ pub(super) fn stack_answer(
     generators::generate_relayed_response(status, reason, &opts)
 }
 
-/// The sent-by a response to this hop is routed to (RFC 3261 §18.2.2). The
-/// snapshot the pending-request correlation holds is text (the `call` crate has
-/// no sip-message dependency), so reading one back is a parse.
-pub(super) fn via_sent_by(via: &str) -> Option<(String, u16)> {
+/// The address a response to this hop is routed to: its response target
+/// (RFC 3261 §18.2.2, RFC 3581 §4). The snapshot the pending-request
+/// correlation holds is text (the `call` crate has no sip-message dependency),
+/// so reading one back is a parse.
+pub(super) fn via_response_target(via: &str) -> Option<(String, u16)> {
     let hop = Via::parse(&SipStr::owned(via)).ok()?;
-    let (host, port) = hop.sent_by().pair();
+    let (host, port) = hop.response_target();
     Some((host.to_string(), port))
 }

@@ -411,12 +411,8 @@ impl Harness {
     /// 100-within-200ms, strict-route rewrite, PRACK forwarding) do not judge
     /// its lane. Use [`agent_with_roles`](Self::agent_with_roles) to override.
     pub async fn agent(&self, name: impl Into<String>, addr: &str) -> Agent {
-        self.agent_with_roles(
-            name,
-            addr,
-            HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]),
-        )
-        .await
+        let roles = HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]);
+        self.agent_with_roles(name, addr, roles).await
     }
 
     /// [`agent`](Self::agent) with explicit bind roles for RFC-rule subject
@@ -495,6 +491,7 @@ impl Harness {
             dialogs,
             steps: self.steps.clone(),
             answers_as: Party::Callee,
+            advertised: None,
         };
         self.keep_bound(&agent);
         agent

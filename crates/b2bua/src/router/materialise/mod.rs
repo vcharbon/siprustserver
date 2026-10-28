@@ -296,7 +296,7 @@ pub(super) async fn reoffer_trigger(
     event: &CallEvent,
     matched_client_txn: bool,
 ) -> Offered {
-    let CallEvent::Sip { message, src } = event else {
+    let CallEvent::Sip { message, src, .. } = event else {
         return Offered::Turn(Box::new(call));
     };
     let offer = match message.as_ref() {

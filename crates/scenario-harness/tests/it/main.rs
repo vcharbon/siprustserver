@@ -20,6 +20,7 @@ mod fluent_dialog;
 mod harness_log_capture;
 mod http_exchanges;
 mod proxy_record_route;
+mod rport_echo_gate;
 mod scenario_verdict;
 mod shared_endpoint;
 mod snapshot_report;

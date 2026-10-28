@@ -60,15 +60,15 @@ pub(super) async fn process(
     }
 
     let result = if res.initial_invite {
-        let (req, src) = match &event {
-            CallEvent::Sip { message, src, .. } => match message.as_ref() {
-                SipMessage::Request(r) => (r.clone(), *src),
+        let (req, src, datagram) = match &event {
+            CallEvent::Sip { message, src, datagram } => match message.as_ref() {
+                SipMessage::Request(r) => (r.clone(), *src, datagram),
                 _ => return,
             },
             _ => return,
         };
         let initial = super::initial_turn::initial_invite_turn(
-            ctx, &call_ref, &req, src, now_ms, unborn, &mut turn,
+            ctx, &call_ref, &req, src, datagram, now_ms, unborn, &mut turn,
         );
         match initial.await {
             super::initial_turn::Turn::Consumed => return,
@@ -151,14 +151,14 @@ pub(super) async fn process(
         }
         // Traced call: the message as it arrived, raw (ADR-0026), before any
         // answer to it — the re-offer's or the stray-CANCEL 481 — so the
-        // datagram that triggered a takeover is in the trace. `image()` is the
-        // received datagram itself, so a lenient-parser normalization — a
-        // folded header, an odd-cased name, a rewritten URI — stays visible in
-        // the very artifact that exists to diagnose it; re-serializing the
-        // parse would hide it. Guarded, and it borrows: no copy either way.
-        if let CallEvent::Sip { message, src, .. } = &event {
+        // datagram that triggered a takeover is in the trace. `datagram` is the
+        // received datagram itself, before the transport's Via stamp, so a
+        // lenient-parser normalization — a folded header, an odd-cased name, a
+        // rewritten URI — stays visible in the very artifact that exists to
+        // diagnose it. Guarded, and it borrows: no copy either way.
+        if let CallEvent::Sip { src, datagram, .. } = &event {
             if crate::trace::sampled(&call) {
-                crate::trace::emit::sip_in(&call, now_ms, *src, message.image());
+                crate::trace::emit::sip_in(&call, now_ms, *src, datagram);
             }
         }
         // The message is resolved to the dialog it names, or refused, before
@@ -389,8 +389,12 @@ async fn answer_after_the_write(
     event: &CallEvent,
     answer: Option<Box<sip_message::SipResponse>>,
 ) {
-    let (Some(answer), CallEvent::Sip { src, .. }) = (answer, event) else { return };
-    let (sender, dest) = (ctx.clone(), *src);
+    let (Some(answer), CallEvent::Sip { message, src, .. }) = (answer, event) else { return };
+    let dest = match message.as_ref() {
+        SipMessage::Request(req) => super::reply_to::reply_to(req, *src),
+        SipMessage::Response(_) => *src,
+    };
+    let sender = ctx.clone();
     let wait = ctx.state.hold_target(call_ref);
     let send: super::outbox::Effects = Box::new(move |_| {
         Box::pin(async move {

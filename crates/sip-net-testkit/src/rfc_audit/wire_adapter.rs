@@ -271,6 +271,8 @@ struct Live {
     skip: Skip,
     subject: &'static [UaRole],
     advisory: bool,
+    /// An advisory row that gates a finding charged to a system under test.
+    gates_sut: bool,
     admits: fn(&rfc_rules::Finding) -> bool,
     detail: Detail,
 }
@@ -301,6 +303,7 @@ impl Live {
             skip: Skip::None,
             subject: &[],
             advisory: false,
+            gates_sut: false,
             admits: |_| true,
             detail,
         }
@@ -315,6 +318,14 @@ impl Live {
     /// Reported, never gating.
     const fn advisory(mut self) -> Live {
         self.advisory = true;
+        self
+    }
+
+    /// Advisory for the simulated parties, gating for a system under test:
+    /// a harness that knows which recorded parties are under test fails the
+    /// run on a finding charged to one ([`rfc_rule_gates_sut`]).
+    const fn gating_the_sut(mut self) -> Live {
+        self.gates_sut = true;
         self
     }
 
@@ -458,6 +469,16 @@ const FAMILIES: &[&[Live]] = &[
 /// The live rows of `id`.
 fn rows_of(id: RuleId) -> Vec<Live> {
     FAMILIES.iter().flat_map(|f| f.iter()).filter(|l| l.id == id).copied().collect()
+}
+
+/// Whether the advisory rule `token` gates a finding charged to a system under
+/// test: a fake stack may omit what it asks, the stack under test may not.
+pub fn rfc_rule_gates_sut(token: &str) -> bool {
+    RuleId::ALL
+        .iter()
+        .filter(|id| id.token() == token)
+        .flat_map(|&id| rows_of(id))
+        .any(|live| live.gates_sut)
 }
 
 /// The merged-rule cross checks this adapter contributes to the default suite:

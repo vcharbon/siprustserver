@@ -36,7 +36,7 @@ use crate::rules::relay;
 use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::RuleContext;
 
-use super::snapshot_answer::{snapshot_response_opts, stack_answer, via_sent_by};
+use super::snapshot_answer::{snapshot_response_opts, stack_answer, via_response_target};
 use super::ActionExecutor;
 
 /// The final the platform gives a held request no service answered by its
@@ -311,8 +311,8 @@ pub(crate) fn settle_owed(call: &mut Call, fx: &mut HandlerEffects, leg_id: &str
 }
 
 /// The final `status` to the received half of `record`, held on (or
-/// relayed toward) `leg_id`, sent to its originator's top Via sent-by
-/// (RFC 3261 §18.2.2).
+/// relayed toward) `leg_id`, sent to its originator's top Via response
+/// target (RFC 3261 §18.2.2).
 #[allow(clippy::too_many_arguments)]
 fn answer_received(
     call: &Call,
@@ -331,7 +331,7 @@ fn answer_received(
     } else {
         get_peer(call, leg_id).unwrap_or(call.a_leg.leg_id.as_str()).to_string()
     };
-    let Some(dest) = record.source_vias.first().and_then(|v| via_sent_by(v)) else {
+    let Some(dest) = record.source_vias.first().and_then(|v| via_response_target(v)) else {
         tracing::warn!(
             call_ref = %call.call_ref,
             leg_id = %leg_id,

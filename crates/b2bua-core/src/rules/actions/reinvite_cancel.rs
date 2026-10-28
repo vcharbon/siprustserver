@@ -103,10 +103,13 @@ impl ActionExecutor<'_> {
                 "re-INVITE reject dropped — {what}"
             );
         };
-        // §18.2.2: the final goes to the originator's top Via sent-by; one no
-        // reader accepts names no destination (see `relay_response`).
-        let Some(dest) =
-            pending.source_vias.first().and_then(|v| super::snapshot_answer::via_sent_by(v))
+        // §18.2.2: the final goes to the originator's top Via response
+        // target; one no reader accepts names no destination (see
+        // `relay_response`).
+        let Some(dest) = pending
+            .source_vias
+            .first()
+            .and_then(|v| super::snapshot_answer::via_response_target(v))
         else {
             refused("the originator's top Via does not read, so it names no destination");
             return;

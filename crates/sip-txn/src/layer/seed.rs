@@ -5,6 +5,7 @@
 
 use std::net::SocketAddr;
 
+use sip_message::received::response_destination;
 use sip_message::{serialize, Method, SipMessage, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
@@ -79,7 +80,8 @@ impl Owner {
 
     /// A server INVITE holding `request`, keyed by its top Via, `Proceeding`
     /// with no response cached: a retransmission draws a 100 Trying
-    /// (`replay_cached`). `false` when the request names no branch or its
+    /// (`replay_cached`). Its responses go to the top Via's response target
+    /// (RFC 3261 §18.2.2). `false` when the request names no branch or its
     /// identity is occupied.
     fn seed_server_invite(
         &mut self,
@@ -92,6 +94,7 @@ impl Owner {
         if self.server(key.id()).is_some() {
             return false;
         }
+        let destination = response_destination(request.top_via());
         let head = NewTransaction {
             id: TxnId::Server(key.clone()),
             kind: TxnKind::Invite,
@@ -104,7 +107,7 @@ impl Owner {
             leg_id,
             incarnation_mark: None,
             state: TxnState::Proceeding,
-            destination: None,
+            destination,
         };
         self.open_txn_with(head, |txn| txn.uas_to_tag = to_tag.filter(|t| !t.is_empty()));
         self.hold_seeded_identity(TxnRef::Server(key.id()));
@@ -149,7 +152,7 @@ impl Owner {
             leg_id,
             incarnation_mark: None,
             state: TxnState::Accepted,
-            destination: None,
+            destination: response_destination(response.top_via()),
         });
         self.hold_seeded_identity(TxnRef::Server(key.id()));
         self.accept(key.id(), &response);
@@ -157,9 +160,10 @@ impl Owner {
     }
 
     /// A server INVITE Completed on the non-2xx `response` (RFC 3261 §17.2.1),
-    /// keyed by its top Via, the final sent toward `dest` on Timer G from now
+    /// keyed by its top Via, the final sent toward that Via's response target
+    /// (RFC 3261 §18.2.2; `dest` where it names none) on Timer G from now
     /// until the ACK or Timer H. An occupant that has sent no final takes
-    /// `response` as its final and sends it to its INVITE's source, now and
+    /// `response` as its final and sends it to its own destination, now and
     /// on Timer G.
     /// `false` when the response names no branch or its identity holds a
     /// transaction that has sent its final.
@@ -178,6 +182,7 @@ impl Owner {
             Some(occupant) if !occupant.state.is_active() => return false,
             Some(occupant) => Some(occupant.destination.unwrap_or(dest)),
             None => {
+                let dest = response_destination(response.top_via()).unwrap_or(dest);
                 self.open_txn(NewTransaction {
                     id: TxnId::Server(key.clone()),
                     kind: TxnKind::Invite,
@@ -203,7 +208,10 @@ impl Owner {
             txn.last_response_status = Some(response.status());
             txn.original_request = None;
         }
-        self.arm_final_hold(key.id(), TxnKind::Invite, response.status(), occupant.unwrap_or(dest));
+        if let (Some(source), Some(txn)) = (occupant, self.server_mut(key.id())) {
+            txn.destination = Some(source);
+        }
+        self.arm_final_hold(key.id(), TxnKind::Invite, response.status());
         if let Some(source) = occupant {
             self.send_buffer(endpoint, response.image(), source).await;
         }
@@ -343,7 +351,8 @@ impl Owner {
 
     /// A server non-INVITE holding no response, keyed by `request`'s top Via
     /// and method, `Trying`: a retransmission is absorbed with nothing sent
-    /// until the consumer's final leaves on it (RFC 3261 §17.2.2). `false`
+    /// until the consumer's final leaves on it (RFC 3261 §17.2.2), to the top
+    /// Via's response target (§18.2.2). `false`
     /// when the request names no branch or its identity is occupied — the
     /// occupant is the copy that triggered the materialisation.
     fn seed_server_non_invite(
@@ -368,7 +377,7 @@ impl Owner {
             leg_id,
             incarnation_mark: None,
             state: TxnState::Trying,
-            destination: None,
+            destination: response_destination(request.top_via()),
         });
         true
     }
@@ -422,7 +431,7 @@ impl Owner {
         let matched = match message {
             SipMessage::Response(resp) => self.inbound_response(endpoint, resp, src, true).await,
             SipMessage::Request(req) if req.method() == Method::Cancel => {
-                self.handle_cancel(endpoint, req, src, true).await
+                self.handle_cancel(endpoint, req, src, None).await
             }
             SipMessage::Request(req) => {
                 ServerTxnId::of_request(&req).is_some_and(|id| self.server(id).is_some())

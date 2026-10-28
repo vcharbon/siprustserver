@@ -18,7 +18,7 @@ use call::{TxnKind, TxnTimeoutKind};
 use sip_clock::delay_queue;
 use sip_message::generators::generate_ack_for_non_2xx;
 use sip_message::serializer::{render, write_request_line};
-use sip_message::{Method, SipMessage, SipRequest, SipResponse};
+use sip_message::{Method, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
 use crate::event::{ClientTransactionHandle, TransactionEvent};
@@ -475,11 +475,7 @@ impl Owner {
                 };
                 self.cancel_timer(key);
                 if !reoffer {
-                    self.emit(TransactionEvent::Message {
-                        message: Box::new(SipMessage::Response(resp)),
-                        src,
-                        matched_client_txn: false,
-                    });
+                    self.emit(TransactionEvent::response(resp, src, false));
                 }
                 return false;
             }
@@ -559,11 +555,7 @@ impl Owner {
                     self.complete_non_2xx(branch);
                     // Critical: we auto-ACKed (silenced the UAS's resend), so this is
                     // the app's only delivery of the final.
-                    self.emit_critical(TransactionEvent::Message {
-                        message: Box::new(SipMessage::Response(resp)),
-                        src,
-                        matched_client_txn: true,
-                    });
+                    self.emit_critical(TransactionEvent::response(resp, src, true));
                     return true;
                 } else if kind == TxnKind::Invite {
                     // A 2xx INVITE final: Accepted until Timer M (RFC 6026
@@ -575,11 +567,7 @@ impl Owner {
                     }
                     self.accept_2xx(branch, &resp);
                     // Critical: the transaction's only delivery of its final.
-                    self.emit_critical(TransactionEvent::Message {
-                        message: Box::new(SipMessage::Response(resp)),
-                        src,
-                        matched_client_txn: true,
-                    });
+                    self.emit_critical(TransactionEvent::response(resp, src, true));
                     return true;
                 } else {
                     // Any non-INVITE final: terminate the client txn; an
@@ -588,11 +576,7 @@ impl Owner {
                     if orphaned {
                         return true;
                     }
-                    self.emit_critical(TransactionEvent::Message {
-                        message: Box::new(SipMessage::Response(resp)),
-                        src,
-                        matched_client_txn: true,
-                    });
+                    self.emit_critical(TransactionEvent::response(resp, src, true));
                     return true;
                 }
             }
@@ -604,11 +588,7 @@ impl Owner {
         // transaction's provisional has no consumer at all.
         let orphaned = self.clients.get(branch).is_some_and(|t| t.orphaned);
         if (matched_client_txn && !orphaned) || !reoffer {
-            self.emit(TransactionEvent::Message {
-                message: Box::new(SipMessage::Response(resp)),
-                src,
-                matched_client_txn,
-            });
+            self.emit(TransactionEvent::response(resp, src, matched_client_txn));
         }
         matched_client_txn
     }

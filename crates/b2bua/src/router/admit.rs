@@ -212,7 +212,8 @@ pub(super) fn queued(ctx: &RouterCtx) {
 }
 
 /// Answer the new INVITE `req` from `src`, refused for `refused`, through its
-/// server transaction. The caller counts it. A request whose lines no
+/// server transaction ([`reply_to`](super::reply_to::reply_to)). The caller
+/// counts it. A request whose lines no
 /// response can echo is left to its transaction's lifetime.
 pub(super) async fn answer(
     txn: &TransactionLayer,
@@ -222,7 +223,7 @@ pub(super) async fn answer(
     refused: Refused,
 ) {
     if let Ok(resp) = refusals.answer(req, refused) {
-        let _ = txn.send_response(resp, src).await;
+        let _ = txn.send_response(resp, super::reply_to::reply_to(req, src)).await;
     }
 }
 

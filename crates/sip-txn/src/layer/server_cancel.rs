@@ -6,8 +6,10 @@
 
 use std::net::SocketAddr;
 
+use bytes::Bytes;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::header::Via;
+use sip_message::received::response_destination;
 use sip_message::{SipMessage, SipRequest};
 use sip_net::UdpEndpoint;
 
@@ -24,15 +26,18 @@ impl Owner {
     /// emitted; `true`. One matching nothing here is the TU's to answer — a
     /// call it holds for a peer may hold the INVITE the CANCEL names, and only
     /// the TU can rebuild that transaction and re-offer the CANCEL — so it is
-    /// handed up unanswered as a `Message` (`false`); re-offered and still
-    /// unmatched, it is handed nowhere.
+    /// handed up unanswered as a `Message` carrying `datagram` (`false`); a
+    /// re-offer (`datagram` `None`) still unmatched is handed nowhere. The 200
+    /// goes to the CANCEL's response target, the 487 to the INVITE
+    /// transaction's destination (§18.2.2).
     pub(super) async fn handle_cancel(
         &mut self,
         endpoint: &dyn UdpEndpoint,
         req: SipRequest,
         src: SocketAddr,
-        reoffer: bool,
+        datagram: Option<Bytes>,
     ) -> bool {
+        let cancel_dest = response_destination(req.top_via()).unwrap_or(src);
         let call_id = req.call_id();
         let from = req.from();
         let from_tag = from.tag().unwrap_or_default();
@@ -69,7 +74,7 @@ impl Owner {
                 let to_tag = self.uas_to_tag_of(key.id());
                 let opts = GenerateResponseOpts { to_tag, ..Default::default() };
                 if let Ok(cancel_ok) = generate_response(&req, 200, "OK", &opts) {
-                    self.send_buffer(endpoint, cancel_ok.image(), src).await;
+                    self.send_buffer(endpoint, cancel_ok.image(), cancel_dest).await;
                 }
                 return true;
             }
@@ -81,11 +86,12 @@ impl Owner {
         let key = match matched {
             Some(key) => key,
             None => {
-                if !reoffer {
+                if let Some(datagram) = datagram {
                     self.emit(TransactionEvent::Message {
                         message: Box::new(SipMessage::Request(req)),
                         src,
                         matched_client_txn: false,
+                        datagram,
                     });
                 }
                 return false;
@@ -114,16 +120,17 @@ impl Owner {
         // A request whose lines no response can echo draws none.
         let opts = GenerateResponseOpts { to_tag: uas_to_tag.clone(), ..Default::default() };
         if let Ok(cancel_ok) = generate_response(&req, 200, "OK", &opts) {
-            self.send_buffer(endpoint, cancel_ok.image(), src).await;
+            self.send_buffer(endpoint, cancel_ok.image(), cancel_dest).await;
         }
 
         // 487 Request Terminated on the matched INVITE.
+        let invite_dest = self.server(id).and_then(|t| t.destination).unwrap_or(cancel_dest);
         let original = self.server(id).and_then(|t| t.original_request.clone());
         let terminated =
             original.and_then(|o| generate_response(&o, 487, "Request Terminated", &opts).ok());
         if let Some(terminated) = terminated {
             let terminated_buf = terminated.image().clone();
-            self.send_buffer(endpoint, &terminated_buf, src).await;
+            self.send_buffer(endpoint, &terminated_buf, invite_dest).await;
             self.record_uas_tag(id, &terminated);
             if let Some(txn) = self.server_mut(id) {
                 txn.state = TxnState::Completed;
@@ -133,7 +140,7 @@ impl Owner {
             }
             // The layer's own final holds the transaction like a TU's: Timer G
             // repeats the 487 until the ACK, Timer H bounds it (§17.2.1).
-            self.arm_final_hold(id, TxnKind::Invite, 487, src);
+            self.arm_final_hold(id, TxnKind::Invite, 487);
         }
 
         // Critical: we already answered 200 + 487 on the wire; a dropped Cancelled

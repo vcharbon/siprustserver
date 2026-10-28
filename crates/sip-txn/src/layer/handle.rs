@@ -241,7 +241,9 @@ impl TransactionLayer {
     /// return the datagram that left. The bytes are `msg.image()` verbatim
     /// unless the To-tag had to be bound to the transaction's (`bind_to_tag`),
     /// so a TU that retains an image for a repeat retains what is returned
-    /// here (ADR-0032 X3).
+    /// here (ADR-0032 X3). A response a server transaction here holds leaves
+    /// to that transaction's destination, its request's response target
+    /// (RFC 3261 §18.2.2); `dest` addresses any other.
     pub async fn send_response(
         &self,
         msg: SipResponse,

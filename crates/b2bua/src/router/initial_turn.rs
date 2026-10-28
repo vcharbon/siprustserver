@@ -9,6 +9,7 @@ use sip_ids::TurnIds;
 use sip_message::SipRequest;
 
 use super::admit::UnbornCall;
+use super::reply_to::reply_to;
 use super::responses::{build_merged_482, build_retry_later_500, build_unborn_500};
 use super::topology_cookie::topology_from_cookie;
 use super::RouterCtx;
@@ -41,12 +42,15 @@ pub(super) enum Turn {
 /// limiter admit. The probe's 500, the identity guard's 500, the cancelled
 /// setup, the cordon's 503 or the accept counts the INVITE's outcome once
 /// ([`crate::new_calls`]); a copy is answered 482 and refused as a copy.
-/// Every identifier the turn mints is drawn from `turn`.
+/// Every identifier the turn mints is drawn from `turn`; `datagram` is the
+/// INVITE as it arrived, what a trace activation backfills its `sip.in` from.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn initial_invite_turn(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
     req: &sip_message::SipRequest,
     src: SocketAddr,
+    datagram: &sip_message::Bytes,
     now_ms: i64,
     unborn: Option<UnbornCall>,
     turn: &mut TurnScope,
@@ -67,7 +71,7 @@ pub(super) async fn initial_invite_turn(
     if ctx.store_faults.check(StoreFaultPoint::LiveInitialInvite).is_err() {
         let resp = build_unborn_500(&mut turn.ids, req, &ctx.config.minted_final_advertisement);
         if let Ok(resp) = resp {
-            let _ = ctx.txn.send_response(resp, src).await;
+            let _ = ctx.txn.send_response(resp, reply_to(req, src)).await;
         }
         ctx.metrics.bump_store_fault_rejected();
         if copy {
@@ -93,7 +97,7 @@ pub(super) async fn initial_invite_turn(
     if copy {
         let merged = build_merged_482(&mut turn.ids, req, &ctx.config.minted_final_advertisement);
         if let Ok(merged) = merged {
-            let _ = ctx.txn.send_response(merged, src).await;
+            let _ = ctx.txn.send_response(merged, reply_to(req, src)).await;
         }
         ctx.metrics.new_calls().refuse_copy();
         return if resident { Turn::Consumed } else { Turn::Shed };
@@ -104,7 +108,7 @@ pub(super) async fn initial_invite_turn(
         let retry_after = super::owed::OwedAnswer::of(ctx).jittered_retry_after_in(&mut turn.ids);
         let resp = build_retry_later_500(req, Some(turn.ids.new_tag()), retry_after);
         if let Ok(resp) = resp {
-            let _ = ctx.txn.send_response(resp, src).await;
+            let _ = ctx.txn.send_response(resp, reply_to(req, src)).await;
         }
         ctx.metrics.new_calls().reject(Refusal::IdentityInUse, class);
         // Its mark, unread, is its own: a copy's would be the live call's.
@@ -119,7 +123,7 @@ pub(super) async fn initial_invite_turn(
     let Ok(caller) = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite) else {
         let resp = build_unborn_500(&mut turn.ids, req, &ctx.config.minted_final_advertisement);
         if let Ok(resp) = resp {
-            let _ = ctx.txn.send_response(resp, src).await;
+            let _ = ctx.txn.send_response(resp, reply_to(req, src)).await;
         }
         ctx.metrics.new_calls().reject(Refusal::Unrecoverable, class);
         ctx.state.clear_setup_cancelled(call_ref, cseq);
@@ -182,7 +186,7 @@ pub(super) async fn initial_invite_turn(
     // Created-then-rejected mirrors the decision-reject path so the Terminated
     // invariant reaps the call + propagates the delete.
     let mut handled = if cancelled {
-        cancelled_setup(call.clone(), &caller, req.image(), now_ms)
+        cancelled_setup(call.clone(), &caller, datagram, now_ms)
     } else if cordoned {
         refused_unavailable(ctx, call.clone(), &caller, now_ms, &mut turn.ids)
     } else if call.a_leg_invite.from_tag.is_empty() {
@@ -199,9 +203,8 @@ pub(super) async fn initial_invite_turn(
             TerminationCause::Admission,
         )
     } else {
-        // `req.image()` is the datagram this INVITE arrived as — the only place
-        // it exists (the call carries a header snapshot, not bytes), and what a
-        // trace activation backfills its `sip.in` from.
+        // `datagram` is the only place the INVITE as it arrived exists (the
+        // call carries a header snapshot, not bytes).
         handle_initial_invite(
             call.clone(),
             &caller,
@@ -211,7 +214,7 @@ pub(super) async fn initial_invite_turn(
             &owners,
             turn,
             &ctx.services,
-            req.image(),
+            datagram,
             &ctx.clock,
             now_ms,
         )

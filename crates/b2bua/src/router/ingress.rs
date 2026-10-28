@@ -81,7 +81,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, matched_cli
                     &ctx.config.node_capabilities,
                 );
                 if let Ok(resp) = resp {
-                    let _ = ctx.txn.send_response(resp, *src).await;
+                    let _ = ctx.txn.send_response(resp, super::reply_to::reply_to(req, *src)).await;
                 }
                 return;
             }
