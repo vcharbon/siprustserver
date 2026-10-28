@@ -11,7 +11,9 @@
 //!   awaits a final only the dead node's Via can carry.
 //! - a **server INVITE** this stack admitted: the a-leg's dialog-creating
 //!   INVITE while it has no final, rebuilt whole so a CANCEL draws its 487
-//!   under the To-tag the caller's early dialog holds, and every relayed
+//!   under the To-tag the caller's early dialog holds, carrying the latest
+//!   non-reliable provisional the record holds as sent on it, which a takeover
+//!   sends once at the seed — the record may be ahead of the wire — and every relayed
 //!   INVITE still pending on a dialog, rebuilt from its record and keyed by
 //!   the originator's top Via, so its retransmission is absorbed, a CANCEL
 //!   draws 200 + 487 and a release answers it. A relay already CANCELled has
@@ -37,7 +39,7 @@
 use std::collections::HashSet;
 
 use b2bua_sdk::event::CallEvent;
-use call::{Call, Dialog, Leg, RequestRecord, SentRequest, Unacked2xx};
+use call::{Call, Dialog, Leg, RequestRecord, RetainedEmission, SentRequest, Unacked2xx};
 use sip_message::generators::{generate_cancel, InviteClientTransactionHandle};
 use sip_message::header::{HeaderValue, SentBy, Via};
 use sip_message::parser::custom::CustomParser;
@@ -81,6 +83,22 @@ pub(super) fn seeds_for(call: &Call, now_ms: i64) -> Vec<TxnSeed> {
         }
     }
     seeds
+}
+
+/// `seeds` without the provisional a caller's server INVITE seed carries: a
+/// reclaim restores the node's own record, which may be behind what the
+/// backup's takeover copy sent the caller (ADR-0055 §8), so a provisional from
+/// it could follow her final.
+pub(super) fn without_provisional(seeds: Vec<TxnSeed>) -> Vec<TxnSeed> {
+    seeds
+        .into_iter()
+        .map(|seed| match seed {
+            TxnSeed::ServerInvite { request, to_tag, leg_id, .. } => {
+                TxnSeed::ServerInvite { request, to_tag, provisional: None, leg_id }
+            }
+            other => other,
+        })
+        .collect()
 }
 
 /// The seeds of one request record `leg` holds — on the leg for its
@@ -147,6 +165,7 @@ fn dialog_creating_seed(call: &Call, leg: &Leg, record: &RequestRecord) -> Optio
                     .filter(|t| !t.is_empty())
                     .unwrap_or_else(|| b2bua_core::caller_tags::own(call)),
             ),
+            provisional: leg.invite_provisional().and_then(parse_emitted_response).map(Box::new),
             leg_id: Some(leg.leg_id.clone()),
         });
     };
@@ -388,7 +407,7 @@ fn relayed_server_seed(call: &Call, leg: &Leg, pending: &RequestRecord) -> Optio
     let originator = call::helpers::get_peer(call, &leg.leg_id)
         .map(str::to_string)
         .unwrap_or_else(|| call.a_leg.leg_id.clone());
-    Some(TxnSeed::ServerInvite { request, to_tag, leg_id: Some(originator) })
+    Some(TxnSeed::ServerInvite { request, to_tag, provisional: None, leg_id: Some(originator) })
 }
 
 /// A request re-parsed from the bytes a record keeps it as.
@@ -401,7 +420,12 @@ fn parse_request(bytes: &[u8]) -> Option<SipRequest> {
 
 /// The retained 2xx re-parsed from the datagram it left as.
 fn parse_response(retained: &Unacked2xx) -> Option<SipResponse> {
-    match CustomParser::new().parse(retained.emission.wire().0).ok()? {
+    parse_emitted_response(&retained.emission)
+}
+
+/// A retained response re-parsed from the datagram it left as.
+fn parse_emitted_response(emission: &RetainedEmission) -> Option<SipResponse> {
+    match CustomParser::new().parse(emission.wire().0).ok()? {
         SipMessage::Response(r) => Some(r),
         SipMessage::Request(_) => None,
     }

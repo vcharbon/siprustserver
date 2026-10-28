@@ -144,9 +144,13 @@ server, through one path. A seeded client transaction retransmits the request
 record's image under its branch (§17.1.2.2). The record may be ahead of the
 wire (§3), so a seed delivers what it holds as sent: a re-sent INVITE goes
 behind the ACK of the dialog's 2xx before it, which its record carries
-(§14.1), and the caller's INVITE answered non-2xx is seeded Completed on the
+(§14.1), the caller's INVITE answered non-2xx is seeded Completed on the
 final its record keeps, sent on Timer G from the seed until her ACK
-(§17.2.1).
+(§17.2.1), and on a takeover her unanswered INVITE re-sends once at the seed
+the latest provisional its record keeps, which a copy of her INVITE draws
+again (§13.3.1.1); a reliable one is left to its own ladder (RFC 3262 §3). A
+reclaim re-sends none: its record may be behind what the takeover copy sent
+her (§8).
 
 ### 3. The replication write path
 
@@ -628,6 +632,13 @@ the re-anchor deadband of each other.
     reactive (§5); every dialog is left to its endpoint's own timers, and
     when the turn's effects had not left, every request that reaches a living
     worker still draws its final there;
+  - `W-off-answer-lost`, off only: a kill of the primary after a turn's
+    request to an outside service left and before the backup applied the
+    turn's write (user ruling): the answer returns to the dead node and is
+    lost, a consequence of not waiting for the write; the parties wait for
+    its outcome in vain, never for the teardown, every dialog is ended
+    cleanly or left to its endpoint's own timer, and every request that
+    reaches a living worker still draws its final there;
   - `W-kill-cseq`, a kill inside the replication window: a copy re-uses a
     CSeq the dead primary sent before the backup applied the write, at most
     one rejected request per dialog; the call still ends or continues

@@ -239,6 +239,9 @@ fn cut_facts(cluster: &Cluster, placement: &Placement, cut: Cut, turns: &[Turn])
         held,
         on_request: turn.is_none_or(|t| t.on_request),
         answer_in_flight: turn.is_some_and(|t| t.called_out || t.awaits_answer) && !later_applied,
+        unapplied_call_out_left: turns
+            .iter()
+            .any(|t| t.called_out && t.released.is_some() && !t.applied),
         living_answered: super::answered::living_workers_answered(
             &CaptureIndex::new(cluster.fh.sip_entries()),
             &living,

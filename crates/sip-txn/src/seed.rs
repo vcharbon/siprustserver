@@ -39,10 +39,19 @@ pub enum TxnSeed {
     /// (RFC 3261 §17.2.3). `to_tag` is the To-tag the node that held it
     /// already put on a provisional, so every response this layer sends on the
     /// transaction carries the tag the peer's early dialog holds (RFC 3261
-    /// §17.2.1); `None` when none went out yet. It runs as an INVITE this
-    /// layer admitted itself: a retransmission draws its latest provisional, a
+    /// §17.2.1); `None` when none went out yet. `provisional` is the latest
+    /// provisional the record holds as sent on it, as it left: sent once at
+    /// the seed toward the top Via's response target — the record may be
+    /// ahead of the wire, and a repeat is harmless (§13.3.1.1) — and the
+    /// response a copy of the INVITE draws. It runs as an INVITE this layer
+    /// admitted itself: a retransmission draws its latest provisional, a
     /// CANCEL 200 + 487 and `Cancelled`, a release its final.
-    ServerInvite { request: SipRequest, to_tag: Option<String>, leg_id: Option<String> },
+    ServerInvite {
+        request: SipRequest,
+        to_tag: Option<String>,
+        provisional: Option<Box<SipResponse>>,
+        leg_id: Option<String>,
+    },
     /// A server INVITE this side answered 2xx and still awaits the ACK for:
     /// `response`, the 2xx as it left, keyed by its top-Via branch and sent-by
     /// (RFC 3261 §17.2.3). It runs in RFC 6026 Accepted for Timer L from the

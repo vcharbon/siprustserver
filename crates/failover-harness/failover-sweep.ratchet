@@ -78,12 +78,8 @@ guaranteed update/applied/primary-rebooted 24
 # applied: the Guaranteed cells that fire a row.
 basic/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
 basic/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
-cancel/applied/primary-killed-unannounced/t2-applied ADR-0055 §11  # guaranteed: W-kill-effects-lost, the backup holds bob's 180 and no takeover relays it to alice, who never rings and so never CANCELs
-cancel/applied/primary-killed-unannounced/t2-logged ADR-0055 §11  # guaranteed: W-kill-effects-lost, the backup holds bob's 180 and no takeover relays it to alice, who never rings and so never CANCELs
 cancel/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
-cancel/applied/primary-killed/t2-applied ADR-0055 §11  # guaranteed: W-kill-effects-lost, the backup holds bob's 180 and no takeover relays it to alice, who never rings and so never CANCELs
 cancel/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
-cancel/applied/primary-rebooted/t2-applied ADR-0055 §11  # guaranteed: W-kill-effects-lost, the backup holds bob's 180 and no takeover relays it to alice, who never rings and so never CANCELs
 forked/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
 forked/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call
 info-x-bye/applied/primary-killed/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, the caller ended cleanly: killed at the creation turn's logged sub-point, the backup never held the call

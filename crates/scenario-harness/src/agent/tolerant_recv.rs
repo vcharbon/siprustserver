@@ -170,6 +170,7 @@ impl Agent {
             };
             let r = match msg {
                 SipMessage::Request(r) => r,
+                SipMessage::Response(r) if self.repeated_provisional(&r) => continue,
                 SipMessage::Response(r) => panic!(
                     "{} expected a {method} request, got a {} {} response",
                     self.name,
@@ -227,6 +228,7 @@ impl Agent {
                 self.try_recv().await.map_err(|e| e.awaiting(|| self.awaited_request(method)));
             let r = match next? {
                 SipMessage::Request(r) => r,
+                SipMessage::Response(r) if self.repeated_provisional(&r) => continue,
                 SipMessage::Response(r) => {
                     return Err(StepError::UnexpectedKind {
                         who: self.name.clone(),
@@ -322,6 +324,7 @@ impl Agent {
                         r.method()
                     );
                 }
+                SipMessage::Response(r) if self.repeated_provisional(&r) => continue,
                 SipMessage::Response(r) => panic!(
                     "{} expected a {method} request, got a {} {} response at {site}",
                     self.name,
@@ -407,6 +410,7 @@ impl Agent {
                         r.method()
                     );
                 }
+                SipMessage::Response(r) if self.repeated_provisional(&r) => continue,
                 SipMessage::Response(r) => panic!(
                     "{} expected a {method} request, got a {} {} response at {site}",
                     self.name,

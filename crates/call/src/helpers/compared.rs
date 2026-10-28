@@ -261,6 +261,7 @@ fn same_exchange(a: &InviteExchange, b: &InviteExchange) -> bool {
         dialled,
         final_sent,
         rejection,
+        provisional,
         answer_preempted,
     } = a;
     let same_2xx = |x: &Unacked2xx, y: &Unacked2xx| {
@@ -275,6 +276,7 @@ fn same_exchange(a: &InviteExchange, b: &InviteExchange) -> bool {
         && *dialled == b.dialled
         && *final_sent == b.final_sent
         && *rejection == b.rejection
+        && *provisional == b.provisional
         && *answer_preempted == b.answer_preempted
 }
 

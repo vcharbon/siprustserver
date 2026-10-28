@@ -69,6 +69,17 @@ impl Leg {
         &mut self.received_exchange_mut().rejection
     }
 
+    /// The latest provisional this stack sent on the dialog-creating INVITE it
+    /// received on the leg, as it left, when that one is not reliable.
+    pub fn invite_provisional(&self) -> Option<&RetainedEmission> {
+        self.received_exchange()?.provisional.as_ref()
+    }
+
+    /// [`Self::invite_provisional`], to write.
+    pub fn invite_provisional_mut(&mut self) -> &mut Option<RetainedEmission> {
+        &mut self.received_exchange_mut().provisional
+    }
+
     /// The 2xx this stack recorded on the leg's received INVITE that the
     /// transaction layer's autonomous 487 pre-empted (RFC 3261 §9.2).
     pub fn answer_preempted(&self) -> Option<u16> {

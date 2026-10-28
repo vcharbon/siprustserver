@@ -5,7 +5,7 @@
 
 use call::{Call, Repeated, RetainedEmission};
 use sip_message::generators::{self, response_states_own_contact, GenerateResponseOpts};
-use sip_message::header::{self, MediaType};
+use sip_message::header::{self, HeaderName, MediaType};
 use sip_message::{Method, SipHeader as MsgHeader, SipRequest};
 
 use crate::effects::{
@@ -116,14 +116,25 @@ pub fn response_to_a_leg(
     // response target of her INVITE's stamped top Via (RFC 3261 §18.2.2).
     let (host, port) = a_leg_invite.top_via().response_target();
     let dest = (host.to_string(), port);
-    if status >= 300 {
-        // A node serving the call from the record re-sends it (§17.2.1); the
-        // end-of-turn stamp rebinds it to the bytes that leave.
-        *call.a_leg.invite_rejection_mut() = Some(RetainedEmission::on_trigger(
+    // A node serving the call from the record re-sends the non-2xx final
+    // (§17.2.1), and once the latest provisional unless reliable, which its
+    // own ladder repeats (RFC 3262 §3); the end-of-turn stamp rebinds either
+    // to the bytes that leave.
+    let retained = || {
+        RetainedEmission::on_trigger(
             resp.image().to_vec(),
             dest.clone(),
             Repeated::response("INVITE", status),
-        ));
+        )
+    };
+    if status >= 300 {
+        *call.a_leg.invite_rejection_mut() = Some(retained());
+    }
+    if status >= 200 {
+        *call.a_leg.invite_provisional_mut() = None;
+    } else if status > 100 {
+        let reliable = resp.has(&HeaderName::RSeq);
+        *call.a_leg.invite_provisional_mut() = (!reliable).then(retained);
     }
     Some(OutboundSipEffect {
         body: OutboundBody::Response(resp),

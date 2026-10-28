@@ -68,6 +68,13 @@ pub struct InviteExchange {
     /// it again until her ACK (RFC 3261 §17.2.1): the record may be ahead of
     /// the wire.
     pub rejection: Option<RetainedEmission>,
+    /// Received, on a leg's dialog-creating INVITE without a final: the
+    /// latest provisional this stack sent on it, as it left, when that one is
+    /// not reliable. A node serving the call from the record sends it again
+    /// once (RFC 3261 §13.3.1.1): the record may be ahead of the wire. A
+    /// reliable one is repeated by its own ladder (RFC 3262 §3).
+    #[serde(default)]
+    pub provisional: Option<RetainedEmission>,
     /// Received, on a leg's dialog-creating INVITE: the 2xx this stack
     /// recorded that the transaction layer's autonomous 487 (its answer to the
     /// caller's CANCEL) pre-empted before it reached the wire (§9.2).

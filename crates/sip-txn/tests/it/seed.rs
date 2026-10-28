@@ -91,6 +91,7 @@ fn server_seed(branch: &str, call_id: &str) -> TxnSeed {
     TxnSeed::ServerInvite {
         request: request_bytes(&inbound_request("INVITE", branch, call_id, None)),
         to_tag: Some(SEED_TO_TAG.to_string()),
+        provisional: None,
         leg_id: Some("a".to_string()),
     }
 }
@@ -274,6 +275,7 @@ async fn a_seeded_reinvite_is_answered_at_its_calls_release() {
     let seed = TxnSeed::ServerInvite {
         request: request_bytes(&inbound_request("INVITE", branch, call_id, Some("dlg-tag"))),
         to_tag: None,
+        provisional: None,
         leg_id: Some("a".to_string()),
     };
     stack.txn.seed(CALL_REF, vec![seed]).await.unwrap();

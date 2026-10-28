@@ -290,6 +290,17 @@ pub static TABLE: &[Row] = &[
         witness: witness("refer-x-bye", SyncLevel::Off, PrimaryKilled, 5, TurnPoint::Applied),
     },
     Row {
+        id: "W-off-answer-lost",
+        tier: Tier::Off,
+        opens: Opens::any(PRIMARY_KILLS),
+        covers: "an outside service's answer to a request that left before the backup applied \
+                 its turn's write, lost with the dead node: the parties wait for its outcome \
+                 in vain, every dialog ended cleanly or left to its endpoint's own timer",
+        kind: Kind::Outcome(outcome::off_answer_lost),
+        closes_when_over: false,
+        witness: None,
+    },
+    Row {
         id: "W-kill-cseq",
         tier: Tier::Degraded,
         opens: Opens::Incidents { always: &[UnbackedKilled], in_window: PRIMARY_KILLS },
@@ -384,6 +395,7 @@ mod tests {
         "W-cdr-split",
         "W-kill-cancel-answered",
         "W-kill-non-2xx-after-2xx",
+        "W-off-answer-lost",
         "W-split-early-bye",
         "W-stall-cancel-reason",
     ];

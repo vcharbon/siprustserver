@@ -227,7 +227,7 @@ fn accepted_branches(seeds: &[TxnSeed]) -> Vec<String> {
 /// From-tag, To-tag, leg.
 fn server_identity(seed: &TxnSeed) -> Option<(&str, &str, Option<&str>, Option<&str>)> {
     match seed {
-        TxnSeed::ServerInvite { request, to_tag, leg_id } => Some((
+        TxnSeed::ServerInvite { request, to_tag, leg_id, .. } => Some((
             request.call_id().as_str(),
             request.from().tag().unwrap_or_default(),
             to_tag.as_deref(),
@@ -428,6 +428,34 @@ fn a_rejected_a_leg_seeds_its_kept_final() {
     });
     let dest: SocketAddr = "10.0.0.1:5060".parse().expect("an address");
     assert_eq!(seeded, Some((486, dest)));
+}
+
+/// A ringing caller's INVITE seeds the latest non-reliable provisional the
+/// record holds as sent on it, so it leaves once at the seed; with none held,
+/// the seed carries none.
+#[test]
+fn a_ringing_a_leg_seeds_the_provisional_it_holds() {
+    let mut call = call_with(LegState::Early, b_leg(LegState::Early, Some(b_handle(B_BRANCH, 1))));
+    ring_a_leg(&mut call, "svca");
+    let seeded = |call: &Call| {
+        seeds_for(call, 0).into_iter().find_map(|s| match s {
+            TxnSeed::ServerInvite { provisional, .. } => Some(provisional.map(|r| r.status())),
+            _ => None,
+        })
+    };
+    assert_eq!(seeded(&call), Some(None), "no provisional held, none seeded");
+
+    let ringing = format!(
+        "SIP/2.0 180 Ringing\r\nVia: SIP/2.0/UDP 10.0.0.1:5060;branch={A_BRANCH}\r\n\
+         From: <sip:alice@10.0.0.1>;tag=atag\r\nTo: <sip:bob@10.0.0.9>;tag=svca\r\n\
+         Call-ID: acid@alice\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n"
+    );
+    *call.a_leg.invite_provisional_mut() = Some(call::RetainedEmission::on_trigger(
+        ringing.into_bytes(),
+        ("10.0.0.1".to_string(), 5060),
+        call::Repeated::response("INVITE", 180),
+    ));
+    assert_eq!(seeded(&call), Some(Some(180)), "the 180 rides the caller's seed");
 }
 
 /// The initial INVITE's handle is closed by nothing but the leg's state: a

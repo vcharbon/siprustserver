@@ -154,6 +154,26 @@ fn a_provisional_is_never_deduped_because_ring_again_is_observable() {
     assert_eq!(a.tu_view().len(), 2);
 }
 
+/// A provisional still surfaces each time (ring again is observable), and
+/// one byte-identical to an earlier arrival is known as a repeat the UAC core
+/// learns nothing from (RFC 3261 §13.2.2.1); another To-tag is a new one.
+#[test]
+fn a_byte_identical_provisional_is_known_as_a_repeat() {
+    let a = Absorption::transaction_view();
+    let ringing = OK.replace("SIP/2.0 200 OK", "SIP/2.0 180 Ringing");
+    let provisional = |raw: &str| match parse(raw) {
+        SipMessage::Response(r) => r,
+        SipMessage::Request(_) => panic!("a response"),
+    };
+    sight(&a, &ringing);
+    assert!(!a.repeats_a_provisional(&provisional(&ringing)), "the first 180 is news");
+    assert_eq!(sight(&a, &ringing).seen_by(), SeenBy::Both, "a repeat still surfaces");
+    assert!(a.repeats_a_provisional(&provisional(&ringing)));
+    let other_fork = ringing.replace("tag=b1", "tag=b2");
+    sight(&a, &other_fork);
+    assert!(!a.repeats_a_provisional(&provisional(&other_fork)), "another fork is news");
+}
+
 #[test]
 fn dedup_off_puts_every_repeat_back_in_the_tu_view() {
     let a = Absorption::transaction_view();

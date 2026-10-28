@@ -474,14 +474,6 @@ impl Agent {
         Some(msg)
     }
 
-    /// Whether `r` is the hop ACK of an armed §17.1.1.3 obligation on this UA,
-    /// marking it fulfilled (idempotent), or a repeat of an ACK it received
-    /// (§13.3.1.4). A receive path that would otherwise ERROR on an unexpected
-    /// ACK calls this and absorbs instead: neither trips a body.
-    pub(crate) fn ack_obligation_claims(&self, r: &SipRequest) -> bool {
-        self.txn.hop_ack_claims(r) || self.txn.repeats_an_ack(r)
-    }
-
     /// THE request-receive core: receive the next request and check its method,
     /// returning a UAS-side transaction. A wrong method, an unexpected
     /// response, a timeout — all become a [`StepError`]; the functional lane
@@ -509,6 +501,7 @@ impl Agent {
                     }
                     return Ok(ServerTxn::from_request(self.clone(), r));
                 }
+                SipMessage::Response(r) if self.repeated_provisional(&r) => continue,
                 SipMessage::Response(r) => {
                     return Err(StepError::UnexpectedKind {
                         who: self.name.clone(),

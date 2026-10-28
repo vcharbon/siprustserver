@@ -97,6 +97,7 @@ mod rule_coverage;
 mod run_guards;
 mod server_txn;
 mod step;
+mod stepped_over;
 #[cfg(test)]
 mod tests;
 mod tolerant_recv;

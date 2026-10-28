@@ -131,6 +131,7 @@ async fn a_seeded_server_invite_is_held() {
             vec![TxnSeed::ServerInvite {
                 request: invite(),
                 to_tag: Some("uas-early".into()),
+                provisional: None,
                 leg_id: Some("a".into()),
             }],
         )
@@ -155,6 +156,7 @@ async fn a_seed_clears_a_refusal_of_its_invite() {
             vec![TxnSeed::ServerInvite {
                 request: invite(),
                 to_tag: Some("uas-early".into()),
+                provisional: None,
                 leg_id: Some("a".into()),
             }],
         )

@@ -205,7 +205,7 @@ pub(super) async fn materialise(
         ctx.metrics.bump_repl_reclaimed();
         return Materialised::Parked(call);
     }
-    let seeded = serve(ctx, call_ref, &call, now_ms).await;
+    let seeded = serve(ctx, call_ref, &call, now_ms, origin).await;
     match origin {
         Origin::Takeover => {
             ctx.state.mark_takeover(call_ref);
@@ -236,11 +236,22 @@ pub(super) async fn materialise(
 
 /// Arm the resident `call` this node now serves: its ledger re-armed in the
 /// timer service, its transactions seeded, a sent request past its deadline
-/// settled as the timeout it drew. What the layer seeded, `None` when it could
-/// not be asked.
-async fn serve(ctx: &Arc<RouterCtx>, call_ref: &str, call: &Call, now_ms: i64) -> Option<usize> {
+/// settled as the timeout it drew. A reclaim's seeds re-send no provisional
+/// ([`seeds::without_provisional`]). What the layer seeded, `None` when it
+/// could not be asked.
+async fn serve(
+    ctx: &Arc<RouterCtx>,
+    call_ref: &str,
+    call: &Call,
+    now_ms: i64,
+    origin: Origin,
+) -> Option<usize> {
     ctx.timers.restore(call.timers.clone(), call_ref.to_string(), call.incarnation()).await;
-    let seeded = ctx.txn.seed(call_ref, seeds::seeds_for(call, now_ms)).await.ok();
+    let mut seeds = seeds::seeds_for(call, now_ms);
+    if !matches!(origin, Origin::Takeover) {
+        seeds = seeds::without_provisional(seeds);
+    }
+    let seeded = ctx.txn.seed(call_ref, seeds).await.ok();
     for timeout in seeds::overdue_sent(call, now_ms) {
         let _ = ctx.reentry_tx.send(timeout);
     }
@@ -271,7 +282,7 @@ pub(super) async fn arm(
         );
         ctx.state.update_quiet(call.clone());
     }
-    let seeded = serve(ctx, call_ref, &call, now_ms).await;
+    let seeded = serve(ctx, call_ref, &call, now_ms, Origin::Reclaim).await;
     Some((call, seeded))
 }
 

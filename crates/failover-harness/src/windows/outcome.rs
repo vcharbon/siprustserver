@@ -25,6 +25,10 @@ pub struct CutFacts {
     /// Every request that reached a worker other than the primary drew its
     /// final there.
     pub living_answered: bool,
+    /// A turn of the primary sent a request to an outside service, its
+    /// effects left, and the backup never applied its write: the answer comes
+    /// back to the dead node, and the copy never learns the request left.
+    pub unapplied_call_out_left: bool,
 }
 
 /// An outcome row's predicate: whether it accepts `verdict`, a failure, with
@@ -62,6 +66,21 @@ pub(super) fn answer_lost(cut: &CutFacts, verdict: &ScenarioVerdict, _: &Observe
         && cut.held
         && cut.answer_in_flight
         && (cut.held_and_left || cut.living_answered)
+}
+
+/// `W-off-answer-lost`: a turn's request to an outside service left before
+/// the backup applied its write; the parties timed out waiting for an outcome
+/// that answer brings, never for the teardown, every request that reached a
+/// living worker having drawn its final there.
+pub(super) fn off_answer_lost(
+    cut: &CutFacts,
+    verdict: &ScenarioVerdict,
+    _: &ObservedState,
+) -> bool {
+    let ScenarioVerdict::Failure { at, cause: StepError::Timeout { .. } } = verdict else {
+        return false;
+    };
+    at.barrier != FailedAt::TORN_DOWN && cut.unapplied_call_out_left && cut.living_answered
 }
 
 /// `W-kill-effects-lost`: the backup did not hold the write of a turn taken

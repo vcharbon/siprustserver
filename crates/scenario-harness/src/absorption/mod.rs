@@ -38,6 +38,7 @@ mod answered;
 mod hop_ack;
 mod invited;
 mod received_acks;
+mod received_provisionals;
 mod rejected_acks;
 mod two_xx_ack;
 mod unacked_finals;
@@ -145,6 +146,9 @@ pub struct Absorption {
     /// The ACKs this endpoint received: a repeat is the UAS core's to discard
     /// (§13.3.1.4).
     received_acks: received_acks::ReceivedAcks,
+    /// The provisionals this endpoint received: a byte-identical repeat tells
+    /// the UAC core nothing new (§13.2.2.1).
+    received_provisionals: received_provisionals::ReceivedProvisionals,
     log: wire_log::WireLog,
 }
 
@@ -166,6 +170,7 @@ impl Absorption {
             abandoned: abandoned::AbandonedInvites::default(),
             rejected_acks: rejected_acks::RejectedAcks::default(),
             received_acks: received_acks::ReceivedAcks::default(),
+            received_provisionals: Default::default(),
             log: wire_log::WireLog::default(),
         }
     }
@@ -187,6 +192,7 @@ impl Absorption {
             abandoned: abandoned::AbandonedInvites::default(),
             rejected_acks: rejected_acks::RejectedAcks::default(),
             received_acks: received_acks::ReceivedAcks::default(),
+            received_provisionals: Default::default(),
             log: wire_log::WireLog::default(),
         }
     }
@@ -211,7 +217,12 @@ impl Absorption {
                     self.received_acks.sight(r);
                 }
             }
-            SipMessage::Response(r) => self.unanswered.sight(r),
+            SipMessage::Response(r) => {
+                self.unanswered.sight(r);
+                if dedup {
+                    self.received_provisionals.sight(raw, r);
+                }
+            }
         }
         let identical = dedup && self.tables.note(raw, msg, ordinal).is_some();
         let copy = match msg {
@@ -334,6 +345,12 @@ impl Absorption {
     /// core discards it (§13.3.1.4).
     pub fn repeats_an_ack(&self, r: &SipRequest) -> bool {
         self.received_acks.repeats(r)
+    }
+
+    /// Whether `r` is a provisional byte-identical to one this endpoint
+    /// already received: the UAC core learns nothing new from it (§13.2.2.1).
+    pub fn repeats_a_provisional(&self, r: &SipResponse) -> bool {
+        self.received_provisionals.repeats(r)
     }
 
     pub(crate) fn hop_ack_is_fulfilled(&self, call_id: &str, branch: &str) -> bool {

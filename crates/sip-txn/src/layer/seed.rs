@@ -52,8 +52,16 @@ impl Owner {
                     }
                     went_in
                 }
-                TxnSeed::ServerInvite { request, to_tag, leg_id } => {
-                    self.seed_server_invite(call_ref, request, to_tag, leg_id)
+                TxnSeed::ServerInvite { request, to_tag, provisional, leg_id } => {
+                    self.seed_server_invite(
+                        endpoint,
+                        call_ref,
+                        request,
+                        to_tag,
+                        provisional,
+                        leg_id,
+                    )
+                    .await
                 }
                 TxnSeed::ServerAccepted { response, leg_id } => {
                     self.seed_accepted(endpoint, call_ref, response, leg_id).await
@@ -78,16 +86,19 @@ impl Owner {
         seeded
     }
 
-    /// A server INVITE holding `request`, keyed by its top Via, `Proceeding`
-    /// with no response cached: a retransmission draws a 100 Trying
-    /// (`replay_cached`). Its responses go to the top Via's response target
-    /// (RFC 3261 §18.2.2). `false` when the request names no branch or its
-    /// identity is occupied.
-    fn seed_server_invite(
+    /// A server INVITE holding `request`, keyed by its top Via, `Proceeding`.
+    /// Its responses go to the top Via's response target (RFC 3261 §18.2.2).
+    /// `provisional` is cached and sent there once now, so a retransmission
+    /// draws it again (§17.2.1); with none cached a retransmission draws a 100
+    /// Trying (`replay_cached`). `false` when the request names no branch or
+    /// its identity is occupied.
+    async fn seed_server_invite(
         &mut self,
+        endpoint: &dyn UdpEndpoint,
         call_ref: &str,
         request: SipRequest,
         to_tag: Option<String>,
+        provisional: Option<Box<SipResponse>>,
         leg_id: Option<String>,
     ) -> bool {
         let Some(key) = ServerTxnKey::of(&request) else { return false };
@@ -111,6 +122,14 @@ impl Owner {
         };
         self.open_txn_with(head, |txn| txn.uas_to_tag = to_tag.filter(|t| !t.is_empty()));
         self.hold_seeded_identity(TxnRef::Server(key.id()));
+        let Some(provisional) = provisional else { return true };
+        if let Some(txn) = self.server_mut(key.id()) {
+            txn.last_response = Some(provisional.image().clone());
+            txn.last_response_status = Some(provisional.status());
+        }
+        if let Some(dest) = destination {
+            self.send_buffer(endpoint, provisional.image(), dest).await;
+        }
         true
     }
 

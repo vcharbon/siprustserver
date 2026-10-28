@@ -25,6 +25,7 @@ fn seeds(client: &str, server: &str) -> Vec<TxnSeed> {
         TxnSeed::ServerInvite {
             request: request_of(&inbound_request("INVITE", server, CALL_ID, None)),
             to_tag: Some("early-tag".to_string()),
+            provisional: None,
             leg_id: Some("a".to_string()),
         },
     ]
