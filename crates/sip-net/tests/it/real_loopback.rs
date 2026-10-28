@@ -39,9 +39,9 @@ async fn loopback_send_recv() {
 #[tokio::test]
 async fn pre_ingress_reply_round_trips() {
     let net = RealSignalingNetwork::new();
-    let hook: PreIngressHook = Arc::new(|arrival: &mut Arrival, _src, _depth| {
+    let hook: PreIngressHook = Arc::new(|arrival: &mut Arrival, src, _depth| {
         if arrival.raw() == b"PING" {
-            PreIngressAction::Reply(b"PONG".to_vec())
+            PreIngressAction::Reply { datagram: b"PONG".to_vec(), to: src }
         } else {
             PreIngressAction::Accept
         }

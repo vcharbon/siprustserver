@@ -3,7 +3,7 @@
 //! under test that drops the ask fails the run; a simulated party that drops
 //! it is reported, never gated.
 
-use scenario_harness::Harness;
+use scenario_harness::{report, Harness, RunReport};
 use sip_message::generators::{generate_response, GenerateResponseOpts, OutOfDialogMethod};
 use sip_message::received::observed_source;
 use sip_message::{CustomParser, SipMessage, SipParser};
@@ -30,6 +30,26 @@ async fn sut_answers_an_rport_ask(h: &Harness, stamps: bool) {
         generate_response(&req, 480, "Temporarily Unavailable", &opts).expect("the SUT's answer");
     sut.send_to(answer.image(), packet.src).await.expect("the answer leaves");
     options.expect(480).await;
+}
+
+/// The report's severity of the rport-echo finding the run recorded.
+fn rport_echo_advisory(run: &RunReport) -> Option<bool> {
+    let doc = report::seq_doc(run);
+    let finding = doc.anomalies.iter().find(|a| a.check == "rport-echo");
+    finding.unwrap_or_else(|| panic!("an rport-echo finding: {:?}", doc.anomalies)).advisory
+}
+
+/// The report reads the SUT's finding as gating, as the gate does.
+#[tokio::test(start_paused = true)]
+async fn the_report_reads_a_sut_finding_as_gating() {
+    let h = Harness::new("rport-echo-sut-report");
+    sut_answers_an_rport_ask(&h, false).await;
+    assert_eq!(rport_echo_advisory(&h.snapshot_report()), Some(false));
+    h.waive(
+        scenario_harness::WaiverScope::rule("rport-echo", "the report is the subject")
+            .on_party("sut"),
+    );
+    h.finish().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -65,5 +85,6 @@ Content-Length: 0\r\n\r\n";
     sut.send_to(OPTIONS.as_bytes(), bob.addr()).await.expect("the OPTIONS leaves");
     bob.receive("OPTIONS").await.respond(200, "OK").await;
     sut.recv().await.expect("the 200 reaches the SUT");
-    h.finish().await;
+    let run = h.finish().await;
+    assert_eq!(rport_echo_advisory(&run), Some(true), "a simulated party's finding advises");
 }

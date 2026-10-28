@@ -149,6 +149,7 @@ b2bua-runner b2bua_txn_active_transactions gauge fixed {}
 b2bua-runner b2bua_txn_timer_queue_len gauge fixed {}
 b2bua-runner b2bua_txn_retransmit_buf_bytes gauge fixed {}
 b2bua-runner b2bua_txn_server_final_unseen_branch_total counter fixed {}
+b2bua-runner b2bua_txn_via_stamps_unwritten_total counter fixed {}
 b2bua-runner b2bua_txn_parse_errors_total counter fixed {}
 b2bua-runner b2bua_txn_parse_refusals_answered_total counter fixed {}
 b2bua-runner b2bua_txn_parse_refusals_capped_total counter fixed {}

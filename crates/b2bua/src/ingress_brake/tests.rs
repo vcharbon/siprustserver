@@ -144,7 +144,7 @@ fn new_non_emergency_invites_past_the_threshold_are_rejected() {
         // Undrained queue: depth equals the count already accepted (0,1,2,2…).
         let depth = i.min(2);
         match hook(&new_invite(i as u32), src(), depth) {
-            PreIngressAction::Reply(resp) => {
+            PreIngressAction::Reply { datagram: resp, .. } => {
                 rejects += 1;
                 assert_eq!(status_line(&resp), b"SIP/2.0 503 Service Unavailable");
                 // jitter==0 → Retry-After is exactly the base (5).
@@ -176,9 +176,9 @@ fn new_non_emergency_invites_past_the_threshold_are_rejected() {
 fn a_retransmitted_invite_is_one_new_call_shed() {
     let (hook, counters) = brake();
     for _ in 0..3 {
-        assert!(matches!(hook(&new_invite(7), src(), 2), PreIngressAction::Reply(_)));
+        assert!(matches!(hook(&new_invite(7), src(), 2), PreIngressAction::Reply { .. }));
     }
-    assert!(matches!(hook(&new_invite(8), src(), 2), PreIngressAction::Reply(_)));
+    assert!(matches!(hook(&new_invite(8), src(), 2), PreIngressAction::Reply { .. }));
     assert_eq!(answered(&counters), 4);
     assert_eq!(counters.refused(Class::Normal), 2);
     assert_eq!(counters.refused_copies(), 2, "each retransmission is a copy");
@@ -189,10 +189,10 @@ fn a_retransmitted_invite_is_one_new_call_shed() {
 #[test]
 fn a_shed_invite_copy_below_the_threshold_is_shed_again() {
     let (hook, counters) = brake();
-    let PreIngressAction::Reply(first) = hook(&new_invite(7), src(), 2) else {
+    let PreIngressAction::Reply { datagram: first, .. } = hook(&new_invite(7), src(), 2) else {
         panic!("above the threshold a new INVITE is shed");
     };
-    let PreIngressAction::Reply(again) = hook(&new_invite(7), src(), 0) else {
+    let PreIngressAction::Reply { datagram: again, .. } = hook(&new_invite(7), src(), 0) else {
         panic!("a copy of a shed INVITE is shed below the threshold too");
     };
     assert_eq!(first, again, "the same request draws the same 503 (RFC 3261 §8.2.7)");
@@ -207,7 +207,7 @@ fn a_shed_invite_copy_below_the_threshold_is_shed_again() {
 #[test]
 fn the_reject_carries_a_to_tag() {
     let (hook, _counters) = brake();
-    let PreIngressAction::Reply(resp) = hook(&new_invite(0), src(), 2) else {
+    let PreIngressAction::Reply { datagram: resp, .. } = hook(&new_invite(0), src(), 2) else {
         panic!("a new non-emergency INVITE above threshold must be rejected");
     };
     let text = String::from_utf8(resp).expect("utf-8 reject");
@@ -222,10 +222,10 @@ fn the_reject_carries_a_to_tag() {
 fn a_retransmitted_invite_draws_the_identical_reject() {
     let (hook, counters) = brake_with_jitter(30);
     let invite = new_invite(4);
-    let PreIngressAction::Reply(first) = hook(&invite, src(), 2) else {
+    let PreIngressAction::Reply { datagram: first, .. } = hook(&invite, src(), 2) else {
         panic!("a new non-emergency INVITE above threshold must be rejected");
     };
-    let PreIngressAction::Reply(again) = hook(&invite, src(), 2) else {
+    let PreIngressAction::Reply { datagram: again, .. } = hook(&invite, src(), 2) else {
         panic!("the retransmission must be rejected too");
     };
     assert_eq!(first, again, "a retransmission must draw a byte-identical 503");
@@ -247,7 +247,7 @@ fn emergency_invites_bypass_the_brake_even_above_the_threshold() {
     assert_eq!(hook(&new_invite(0), src(), 0), PreIngressAction::Accept);
     assert_eq!(hook(&new_invite(1), src(), 1), PreIngressAction::Accept);
     // A non-emergency INVITE at depth 2 WOULD be rejected...
-    assert!(matches!(hook(&new_invite(99), src(), 2), PreIngressAction::Reply(_)));
+    assert!(matches!(hook(&new_invite(99), src(), 2), PreIngressAction::Reply { .. }));
     // ...but the emergency INVITE at the same depth is admitted.
     assert_eq!(
         hook(&invite_buf(2, true, None), src(), 2),
@@ -277,7 +277,7 @@ fn in_dialog_reinvites_are_never_braked() {
 fn non_invite_requests_are_not_rejected_by_the_brake() {
     let (hook, counters) = brake();
     for i in 2..5u32 {
-        assert!(matches!(hook(&new_invite(i), src(), 2), PreIngressAction::Reply(_)));
+        assert!(matches!(hook(&new_invite(i), src(), 2), PreIngressAction::Reply { .. }));
     }
     assert_eq!(answered(&counters), 3);
     assert_eq!(
@@ -333,8 +333,11 @@ fn a_copy_refused_by_another_stage_draws_its_refusal() {
     let expected = serialize(&SipMessage::Response(
         refusals.memo().answer(&parsed(&invite)).expect("a refusal"),
     ));
-    assert_eq!(hook(&invite, src(), 0), PreIngressAction::Reply(expected.clone()));
-    assert_eq!(hook(&invite, src(), 2), PreIngressAction::Reply(expected));
+    assert_eq!(
+        hook(&invite, src(), 0),
+        PreIngressAction::Reply { datagram: expected.clone(), to: src() }
+    );
+    assert_eq!(hook(&invite, src(), 2), PreIngressAction::Reply { datagram: expected, to: src() });
     assert_eq!(answered(&counters), 2);
     assert_eq!(counters.refused(Class::Normal), 0);
 }
@@ -347,7 +350,62 @@ fn a_copy_of_a_refused_emergency_invite_is_repeated_not_bypassed() {
     let (hook, counters) = brake_over(refusals.clone());
     let invite = invite_buf(3, true, None);
     assert!(matches!(refusals.memo().refuse(&parsed(&invite)), Memo::Refused { first: true }));
-    assert!(matches!(hook(&invite, src(), 2), PreIngressAction::Reply(_)));
+    assert!(matches!(hook(&invite, src(), 2), PreIngressAction::Reply { .. }));
     assert_eq!(counters.emergency_bypassed(), 0);
     assert_eq!(counters.refused(Class::Normal), 0);
+}
+
+// ---- a caller behind a NAT (RFC 3261 §18.2.1/§18.2.2, RFC 3581 §4) ----
+
+/// The datagram source of a caller whose Via names `10.0.0.5:5060`.
+fn nat_source() -> std::net::SocketAddr {
+    "192.0.2.2:40000".parse().unwrap()
+}
+
+/// INVITE `i` from behind the NAT, its Via carrying `via_tail`.
+fn nat_invite(i: u32, via_tail: &str) -> Vec<u8> {
+    String::from_utf8(new_invite(i))
+        .expect("utf-8 fixture")
+        .replace(
+            &format!("Via: SIP/2.0/UDP {FLOODER_IP}:{FLOODER_PORT};branch=z9hG4bK-brake-{i}"),
+            &format!("Via: SIP/2.0/UDP 10.0.0.5:5060;branch=z9hG4bK-brake-{i}{via_tail}"),
+        )
+        .into_bytes()
+}
+
+/// Above the threshold, an INVITE asking `rport` draws a 503 that echoes
+/// `rport=<source port>` and `received`, sent to the source.
+#[test]
+fn a_shed_invite_asking_rport_is_answered_at_its_source_echoing_it() {
+    let (hook, _counters) = brake();
+    let PreIngressAction::Reply { datagram, to } = hook(&nat_invite(1, ";rport"), nat_source(), 2)
+    else {
+        panic!("a new INVITE above the threshold is shed");
+    };
+    assert_eq!(to, nat_source(), "§18.2.2 with RFC 3581 §4: the source");
+    assert!(
+        find(&datagram, b"branch=z9hG4bK-brake-1;rport=40000;received=192.0.2.2\r\n").is_some(),
+        "the 503 echoes the stamp: {}",
+        String::from_utf8_lossy(&datagram)
+    );
+}
+
+/// A copy of an INVITE the transaction layer refused, from a host other
+/// than its sent-by and without `rport`, draws from the brake the very
+/// refusal the transaction layer composes from the stamped request, sent
+/// where the transaction layer sends it: `received` at the sent-by port.
+#[test]
+fn a_refused_copy_is_answered_where_and_as_the_transaction_layer_answers_it() {
+    let refusals = refusals_with_jitter(30);
+    let (hook, _counters) = brake_over(refusals.clone());
+    let invite = nat_invite(2, "");
+    let stamped = sip_message::received::stamp_received(parsed(&invite), nat_source());
+    assert!(matches!(refusals.memo().refuse(&stamped.request), Memo::Refused { first: true }));
+    let expected = serialize(&SipMessage::Response(
+        refusals.memo().answer(&stamped.request).expect("a refusal"),
+    ));
+    let reply = hook(&invite, nat_source(), 0);
+    let at = "192.0.2.2:5060".parse().unwrap();
+    assert_eq!(stamped.destination, at);
+    assert_eq!(reply, PreIngressAction::Reply { datagram: expected, to: at });
 }

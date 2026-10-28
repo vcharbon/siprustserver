@@ -197,14 +197,14 @@ fn deliver(shared: Arc<SimShared>, raw: Vec<u8>, src: SocketAddr, dst: SocketAdd
             PreIngressAction::Drop => {
                 counters.pre_ingress_dropped.fetch_add(1, Ordering::Relaxed);
             }
-            PreIngressAction::Reply(bytes) => {
+            PreIngressAction::Reply { datagram, to } => {
                 counters.pre_ingress_replies.fetch_add(1, Ordering::Relaxed);
                 shared.in_flight.fetch_add(1, Ordering::Relaxed);
                 let shared2 = shared.clone();
                 let delay = shared.transit_delay_ms;
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(delay)).await;
-                    deliver(shared2.clone(), bytes, dst, src).await;
+                    deliver(shared2.clone(), datagram, dst, to).await;
                     shared2.in_flight.fetch_sub(1, Ordering::Relaxed);
                 });
             }

@@ -94,6 +94,11 @@ pub(crate) struct MetricsInner {
     /// run its Timer G ladder). A materialisation that answered an INVITE it
     /// never seeded shows here; a healthy node holds it at zero.
     pub server_final_unseen_branch: AtomicU64,
+    /// Requests whose top-Via stamp (RFC 3261 §18.2.1, RFC 3581 §4) the
+    /// render could not write: handed on as received, their responses still
+    /// sent to the stamp's response target. A healthy peer set holds it at
+    /// zero.
+    pub via_stamps_unwritten: AtomicU64,
     /// Responses the TU handed over under a To-tag other than the one this
     /// layer had bound to the transaction or dialog, re-rendered under the
     /// bound tag before they left (RFC 3261 §9.2, §12.1.1). A climb is a TU
@@ -157,6 +162,7 @@ impl MetricsInner {
             txn_seeded: AtomicU64::new(0),
             txn_seed_skipped: AtomicU64::new(0),
             server_final_unseen_branch: AtomicU64::new(0),
+            via_stamps_unwritten: AtomicU64::new(0),
             to_tag_coerced: AtomicU64::new(0),
             to_tag_filled: AtomicU64::new(0),
             fallback_to_tag_used: AtomicU64::new(0),
@@ -351,6 +357,12 @@ impl TransactionMetrics {
     /// Non-2xx INVITE finals dropped on an unseen branch (counter, expected 0).
     pub fn server_final_unseen_branch(&self) -> u64 {
         self.inner.server_final_unseen_branch.load(Ordering::Relaxed)
+    }
+
+    /// Requests handed on with a top-Via stamp the render could not write
+    /// (counter, expected 0).
+    pub fn via_stamps_unwritten(&self) -> u64 {
+        self.inner.via_stamps_unwritten.load(Ordering::Relaxed)
     }
 
     /// Counts one non-2xx INVITE final dropped on an unseen branch, as the

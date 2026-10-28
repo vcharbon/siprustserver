@@ -211,13 +211,13 @@ async fn recv_loop(
             PreIngressAction::Drop => {
                 counters.pre_ingress_dropped.fetch_add(1, Ordering::Relaxed);
             }
-            PreIngressAction::Reply(bytes) => {
+            PreIngressAction::Reply { datagram, to } => {
                 counters.pre_ingress_replies.fetch_add(1, Ordering::Relaxed);
                 // The reply is best-effort — the pump must keep receiving — and
                 // a failure is COUNTED, never printed: this crate reports
                 // through counters alone, and a peer that rejects every reply
                 // would otherwise print once per datagram on the receive path.
-                if send_now(&socket, &counters, &bytes, src).is_err() {
+                if send_now(&socket, &counters, &datagram, to).is_err() {
                     counters.pre_ingress_reply_failures.fetch_add(1, Ordering::Relaxed);
                 }
             }

@@ -195,7 +195,6 @@ pub(crate) fn answer_unanswered_caller(
         None,
         vec![],
         None,
-        None,
         own,
         crate::effects::Provenance::Authored,
         super::relay::Author::Stack,

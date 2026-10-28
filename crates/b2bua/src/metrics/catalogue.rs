@@ -250,6 +250,7 @@ pub const TXN: &[Family] = &[
     txn::TIMER_QUEUE_LEN,
     txn::RETRANSMIT_BUF_BYTES,
     txn::SERVER_FINAL_UNSEEN_BRANCH,
+    txn::VIA_STAMPS_UNWRITTEN,
     txn::PARSE_ERRORS,
     txn::PARSE_REFUSALS_ANSWERED,
     txn::PARSE_REFUSALS_CAPPED,

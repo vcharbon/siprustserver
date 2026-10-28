@@ -13,7 +13,7 @@ use bytes::Bytes;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::header::ParamValue;
 use sip_message::param_codec::decode_param;
-use sip_message::received::{response_destination, stamp_received};
+use sip_message::received::{stamp_received, stamped_destination, Received, Stamp};
 use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
@@ -206,11 +206,13 @@ impl Owner {
         }
     }
 
-    /// Admit a request received from `src`. The server transport first
-    /// stamps its top Via with what it observed (RFC 3261 §18.2.1, RFC 3581
-    /// §4), so the TU, every transaction and every response composed from the
-    /// request read the stamped hop; the event still carries the datagram as
-    /// it arrived.
+    /// Admit a request received from `src`. A copy a transaction absorbs is
+    /// matched as it arrived (§17.2.3 reads no `received`/`rport`); a request
+    /// that goes on — handed to the TU, opening a transaction, a CANCEL, a
+    /// refused INVITE — is first stamped with what the transport observed
+    /// (RFC 3261 §18.2.1, RFC 3581 §4), once, so the TU, the transaction and
+    /// every response composed from it read the stamped hop. The event still
+    /// carries the datagram as it arrived.
     pub(super) async fn handle_inbound_request(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -218,15 +220,9 @@ impl Owner {
         src: SocketAddr,
     ) {
         let datagram = req.image().clone();
-        let req = stamp_received(req, src);
         let Some(id) = ServerTxnId::of_request(&req) else {
             // No branch — pass through (pre-RFC 3261 UA).
-            self.emit(TransactionEvent::Message {
-                message: Box::new(SipMessage::Request(req)),
-                src,
-                matched_client_txn: false,
-                datagram,
-            });
+            self.hand_up(req, src, datagram);
             return;
         };
 
@@ -246,12 +242,7 @@ impl Owner {
                         // copy; the transaction stays Accepted for Timer L.
                         (TxnState::Accepted, _) => {
                             self.detach_from_call(TxnRef::Server(id));
-                            self.emit(TransactionEvent::Message {
-                                message: Box::new(SipMessage::Request(req)),
-                                src,
-                                matched_client_txn: false,
-                                datagram,
-                            });
+                            self.hand_up(req, src, datagram);
                             return;
                         }
                         _ => {}
@@ -268,18 +259,14 @@ impl Owner {
             {
                 return;
             }
-            self.emit(TransactionEvent::Message {
-                message: Box::new(SipMessage::Request(req)),
-                src,
-                matched_client_txn: false,
-                datagram,
-            });
+            self.hand_up(req, src, datagram);
             return;
         }
 
         // ── CANCEL ─────────────────────────────────────────────────────────────
         if req.method() == Method::Cancel {
-            self.handle_cancel(endpoint, req, src, Some(datagram)).await;
+            let cancel = self.stamp(req, src).request;
+            self.handle_cancel(endpoint, cancel, src, Some(datagram)).await;
             return;
         }
 
@@ -291,12 +278,7 @@ impl Owner {
         // ── Out-of-dialog OPTIONS, stateless (RFC 3261 §8.2.7) ─────────────────
         // No transaction: every copy reaches the TU, whose answer leaves raw.
         if self.stateless_options && req.method() == Method::Options && req.to().tag().is_none() {
-            self.emit(TransactionEvent::Message {
-                message: Box::new(SipMessage::Request(req)),
-                src,
-                matched_client_txn: false,
-                datagram,
-            });
+            self.hand_up(req, src, datagram);
             return;
         }
 
@@ -309,8 +291,9 @@ impl Owner {
             if req.method() == Method::Invite { TxnKind::Invite } else { TxnKind::NonInvite };
         let is_invite = matches!(kind, TxnKind::Invite);
         // Every response of the transaction leaves to one address: its
-        // request's response target (§18.2.2), fixed now.
-        let destination = response_destination(req.top_via()).unwrap_or(src);
+        // request's stamped response target (§18.2.2), fixed now.
+        let Received { request: req, destination, .. } = self.stamp(req, src);
+        let Some(id) = ServerTxnId::of_request(&req) else { return };
         let held = if is_invite {
             match self.judge_new_invite(endpoint, &req, destination).await {
                 NewInvite::Refused => return,
@@ -378,6 +361,29 @@ impl Owner {
         }
     }
 
+    /// `req`, received from `src`, stamped on receipt ([`stamp_received`]);
+    /// a stamp the render cannot write is counted.
+    fn stamp(&self, req: SipRequest, src: SocketAddr) -> Received {
+        let received = stamp_received(req, src);
+        if received.stamp == Stamp::Unwritten {
+            self.metrics.via_stamps_unwritten.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        received
+    }
+
+    /// Hand `req`, received from `src` as `datagram`, to the TU with no
+    /// transaction, stamped on receipt. `false` when the event queue dropped
+    /// it.
+    fn hand_up(&mut self, req: SipRequest, src: SocketAddr, datagram: Bytes) -> bool {
+        let req = self.stamp(req, src).request;
+        self.emit(TransactionEvent::Message {
+            message: Box::new(SipMessage::Request(req)),
+            src,
+            matched_client_txn: false,
+            datagram,
+        })
+    }
+
     /// The retransmission path (RFC 3261 §17.2.1): a request a server
     /// transaction matches (§17.2.3) draws that transaction's cached
     /// response — a repeat no timer paced, counted as `trigger` under the
@@ -408,17 +414,18 @@ impl Owner {
             .map(|(cached, status)| (cached, status, existing.method.clone()));
         let owes_trying =
             existing.kind == TxnKind::Invite && existing.state == TxnState::Proceeding;
-        let dest =
-            existing.destination.or_else(|| response_destination(req.top_via())).unwrap_or(src);
+        let dest = existing.destination.unwrap_or_else(|| stamped_destination(req.top_via(), src));
         match replay {
             Some((cached, status, method)) => {
                 self.send_buffer(endpoint, &cached, dest).await;
                 self.metrics.retransmits.record_trigger(&method, status);
             }
             None if owes_trying => {
-                let Ok(trying) =
-                    generate_response(req, 100, "Trying", &GenerateResponseOpts::default())
-                else {
+                // The 100 answers the copy (its Timestamp, §8.2.6.1), stamped
+                // on receipt.
+                let request = self.stamp(req.clone(), src).request;
+                let opts = GenerateResponseOpts::default();
+                let Ok(trying) = generate_response(&request, 100, "Trying", &opts) else {
                     return true;
                 };
                 let trying_buf = trying.image().clone();

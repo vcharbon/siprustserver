@@ -187,9 +187,10 @@ pub enum PreIngressAction {
     Accept,
     /// Silently drop (counted as `pre_ingress_dropped`).
     Drop,
-    /// Don't enqueue; send these bytes back to the source (counted as
-    /// `pre_ingress_replies`). The ingress brake's stateless 503 path.
-    Reply(Vec<u8>),
+    /// Don't enqueue; send `datagram` to `to` (counted as
+    /// `pre_ingress_replies`). The ingress brake's stateless 503 path, whose
+    /// `to` is the request's response target (RFC 3261 §18.2.2).
+    Reply { datagram: Vec<u8>, to: SocketAddr },
 }
 
 /// Arrival-time filter installed at `bind_udp`. Receives the datagram (its

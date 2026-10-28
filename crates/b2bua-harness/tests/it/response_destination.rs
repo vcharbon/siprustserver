@@ -196,3 +196,42 @@ async fn in_dialog_answers_reach_the_callers_socket() {
 
     let _report = s.finish().await;
 }
+
+/// The 2xx repeats of RFC 3261 §13.3.1.4 leave as retained datagrams, past
+/// the transaction layer: with her ACK held past T1, every copy of the 2xx
+/// reaches her socket and echoes the stamp, then her ACK confirms the call.
+#[tokio::test(start_paused = true)]
+async fn every_2xx_repeat_reaches_the_callers_socket() {
+    let (s, alice) =
+        behind_nat("nat-2xx-repeats", |bob_port| B2buaSut::route_all_to("127.0.0.1", bob_port))
+            .await;
+
+    let held = Duration::from_millis(700);
+    let mut call =
+        alice.invite(&s.bob).with_sdp(OFFER).delayed_ack(held).through(s.b2bua.addr).send().await;
+    let mut uas = s.bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    echoes_her_socket(&call.expect(200).await, &alice);
+    let mut dialog = call.ack_delayed().await;
+    s.bob.receive("ACK").await;
+    alice.drain().await;
+
+    let mut bye = dialog.bye().await;
+    s.bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    let (b2bua, her) = (s.b2bua.addr, alice.addr());
+    let report = s.finish().await;
+
+    let twos: Vec<_> = report
+        .entries()
+        .into_iter()
+        .filter(|e| e.from == b2bua && e.raw.starts_with(b"SIP/2.0 200 "))
+        .filter(|e| String::from_utf8_lossy(&e.raw).contains(" INVITE\r\n"))
+        .collect();
+    assert!(twos.len() >= 2, "the held ACK makes the ladder repeat the 2xx: {}", twos.len());
+    let stamp = format!(";rport={};received={}", her.port(), her.ip());
+    for e in &twos {
+        assert_eq!(e.to, her, "every 2xx copy reaches her socket");
+        assert!(String::from_utf8_lossy(&e.raw).contains(&stamp), "and echoes {stamp}");
+    }
+}

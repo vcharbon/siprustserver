@@ -351,7 +351,6 @@ pub fn reject_call(
         None,
         vec![],
         None,
-        None,
         extra_headers,
         crate::effects::Provenance::Authored,
         crate::rules::relay::Author::Stack,

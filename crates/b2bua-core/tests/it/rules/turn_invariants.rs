@@ -126,7 +126,6 @@ fn no_synthesized_final_when_the_turn_already_answered() {
         None,
         vec![],
         None,
-        None,
         vec![],
         b2bua_core::effects::Provenance::Authored,
         b2bua_core::rules::relay::Author::Stack,

@@ -59,6 +59,12 @@ pub const SERVER_FINAL_UNSEEN_BRANCH: Family = Family::counter(
     "Non-2xx INVITE finals dropped because no server transaction held their branch (RFC 3261 section 17.2.1, one final per transaction); expected 0.",
 );
 
+pub const VIA_STAMPS_UNWRITTEN: Family = Family::counter(
+    "b2bua_txn_via_stamps_unwritten_total",
+    Labels::None,
+    "Inbound requests whose top-Via received/rport stamp (RFC 3261 section 18.2.1, RFC 3581 section 4) could not be rendered: handed on as received, their responses still sent to the stamped target; expected 0.",
+);
+
 pub const PARSE_ERRORS: Family = Family::counter(
     "b2bua_txn_parse_errors_total",
     Labels::None,

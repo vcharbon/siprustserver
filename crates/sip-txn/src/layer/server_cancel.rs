@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use bytes::Bytes;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::header::Via;
-use sip_message::received::response_destination;
+use sip_message::received::stamped_destination;
 use sip_message::{SipMessage, SipRequest};
 use sip_net::UdpEndpoint;
 
@@ -37,7 +37,7 @@ impl Owner {
         src: SocketAddr,
         datagram: Option<Bytes>,
     ) -> bool {
-        let cancel_dest = response_destination(req.top_via()).unwrap_or(src);
+        let cancel_dest = stamped_destination(req.top_via(), src);
         let call_id = req.call_id();
         let from = req.from();
         let from_tag = from.tag().unwrap_or_default();

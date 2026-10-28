@@ -38,7 +38,6 @@ pub fn response_to_a_leg(
     contact: Option<header::Contact>,
     body: Vec<u8>,
     content_type: Option<MediaType>,
-    incoming_source: Option<(String, u16)>,
     extra_headers: Vec<MsgHeader>,
     provenance: Provenance,
     author: super::sdp_session::Author<'_>,
@@ -103,7 +102,7 @@ pub fn response_to_a_leg(
         body,
         content_type,
         extra_headers,
-        incoming_source,
+        ..Default::default()
     };
     let resp = match generators::generate_response(a_leg_invite, status, &reason, &opts) {
         Ok(resp) => resp,

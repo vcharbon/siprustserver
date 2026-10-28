@@ -42,10 +42,12 @@
 //! `/metrics` scrape. The memo's lock is taken only on an INVITE above the
 //! threshold or, while a refusal is remembered, on an INVITE below it.
 
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use sip_message::{serialize, CustomParser, Method, SipMessage};
+use sip_message::received::{stamp_received, Received};
+use sip_message::{serialize, CustomParser, Method, SipMessage, SipRequest};
 use sip_net::types::{PreIngressAction, PreIngressHook};
 use sip_net::Arrival;
 use sip_txn::{InviteRefusals, Verdict as Memo};
@@ -162,7 +164,7 @@ pub fn build_ingress_brake_hook(
     let threshold = config.threshold();
     let parser = CustomParser::new();
     let memo = refusals.memo().clone();
-    Arc::new(move |arrival: &mut Arrival, _src, depth: usize| {
+    Arc::new(move |arrival: &mut Arrival, src: SocketAddr, depth: usize| {
         let above = depth >= threshold;
         if !above && !memo.remembers() {
             return PreIngressAction::Accept;
@@ -181,7 +183,7 @@ pub fn build_ingress_brake_hook(
         // is never refused (see `InviteRefusals`), so a live call is spared.
         if class != Class::InDialog && memo.remembers() && memo.refused(req) {
             counters.record_copy();
-            return reply(&memo, req);
+            return reply(&memo, req, src);
         }
         match judge(Rung::Brake { depth, threshold }, class) {
             Verdict::Admit => {
@@ -194,7 +196,7 @@ pub fn build_ingress_brake_hook(
             // that cannot be built leaves no memo entry the transaction
             // layer would rebuild that same answer from.
             Verdict::Refuse(_) => {
-                let reply = reply(&memo, req);
+                let reply = reply(&memo, req, src);
                 match memo.refuse(req) {
                     Memo::Held => PreIngressAction::Accept,
                     Memo::Refused { first } => {
@@ -211,11 +213,18 @@ pub fn build_ingress_brake_hook(
     })
 }
 
-/// The worker's refusal of `req`, as the datagram the hook sends back; a
-/// refused INVITE whose lines no response can echo is dropped.
-fn reply(memo: &InviteRefusals, req: &sip_message::SipRequest) -> PreIngressAction {
-    match memo.answer(req) {
-        Ok(refusal) => PreIngressAction::Reply(serialize(&SipMessage::Response(refusal))),
+/// The worker's refusal of `req`, received from `src`, as the datagram the
+/// hook sends back: composed from the request as the transaction layer reads
+/// it, its top Via stamped on receipt (RFC 3261 §18.2.1, RFC 3581 §4), and
+/// sent to that Via's response target (§18.2.2), as the transaction layer
+/// sends the refusal of any copy it meets. A refused INVITE whose lines no
+/// response can echo is dropped.
+fn reply(memo: &InviteRefusals, req: &SipRequest, src: SocketAddr) -> PreIngressAction {
+    let Received { request, destination: to, .. } = stamp_received(req.clone(), src);
+    match memo.answer(&request) {
+        Ok(refusal) => {
+            PreIngressAction::Reply { datagram: serialize(&SipMessage::Response(refusal)), to }
+        }
         Err(_) => PreIngressAction::Drop,
     }
 }
