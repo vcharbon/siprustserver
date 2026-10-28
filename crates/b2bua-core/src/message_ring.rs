@@ -64,7 +64,8 @@ impl Ring {
     /// message, or a CANCEL it answered itself — with the messages it sent
     /// autonomously for it: the 100 Trying every INVITE server transaction
     /// answers with, the hop-by-hop ACK of a non-2xx INVITE final on a client
-    /// transaction it holds, the 200 and 487 a matched CANCEL draws.
+    /// transaction it holds, the 200 and 487 a matched CANCEL draws (all three
+    /// at the instant the event states, [`CallEvent::Cancelled::at_ms`]).
     pub fn received(&self, call: Call, leg_id: &str, received: Received<'_>, now_ms: i64) -> Call {
         let Received { event, matched_client_txn, repeat, discharged, dialog } = received;
         match event {
@@ -105,7 +106,7 @@ impl Ring {
                     }
                 }
             }
-            CallEvent::Cancelled { invite_cseq, in_dialog, headers, to_tag, .. } => {
+            CallEvent::Cancelled { invite_cseq, in_dialog, headers, to_tag, at_ms, .. } => {
                 let cseq = invite_cseq.unwrap_or(0);
                 // The CANCEL names the INVITE's dialog: the tag the INVITE
                 // carried when it was in one, none when it was not; both
@@ -113,7 +114,7 @@ impl Ring {
                 let cancel_tag = if *in_dialog { to_tag.clone() } else { None };
                 let cancel = MessageEntry {
                     seq: 0,
-                    at_ms: now_ms,
+                    at_ms: *at_ms,
                     direction: MessageDirection::Received,
                     method: Method::Cancel.to_string(),
                     cseq,

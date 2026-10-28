@@ -2,7 +2,8 @@
 //! round trip with the clock readings around it, and the route applied with
 //! its admit, each step between two awaits a fold of
 //! [`crate::initial_invite`]. A setup its caller CANCELed before its turn ran
-//! asks the decision engine nothing ([`cancelled_setup`]).
+//! asks the decision engine nothing ([`cancelled_setup`]); one CANCELed during
+//! the round trip keeps the decision unapplied ([`Consulted::Cancelled`]).
 
 use call::{Call, Direction};
 use sip_clock::Clock;
@@ -33,13 +34,25 @@ pub fn cancelled_setup(
     HandlerResult { call, effects: HandlerEffects::new() }
 }
 
+/// What the initial consult resolved.
+pub enum Consulted {
+    /// The decision applied and the services seeded: the turn's result.
+    Applied(Box<HandlerResult>),
+    /// The caller CANCELed while the consult ran (the transaction layer
+    /// already answered 487): the call as the decision left it, before any
+    /// service's `init`, its effects never sent.
+    Cancelled(Box<Call>),
+}
+
 /// Run the initial-INVITE decision + route/reject. `call` must already carry the
 /// a-leg (from [`crate::initial_invite::build_initial_call`]), and `a_invite` is
 /// its snapshot rebuilt; `invite_wire` is the datagram it arrived as, which only
 /// the router holds (the call carries a header snapshot, not bytes). `now_ms` is
 /// the turn's timestamp — every CDR entry and timer deadline this handler mints
 /// reads it, so it is taken once; `clock` measures the decision round trip,
-/// whose two ends are by definition not the same instant.
+/// whose two ends are by definition not the same instant. `cancelled` reads
+/// whether the caller CANCELed the setup; it is read once, after the consult's
+/// last await.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_initial_invite(
     mut call: Call,
@@ -53,7 +66,8 @@ pub async fn handle_initial_invite(
     invite_wire: &[u8],
     clock: &Clock,
     now_ms: i64,
-) -> HandlerResult {
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Consulted {
     let req = build_request(a_invite);
 
     // ── Trace intake (ADR-0026) ────────────────────────────────────────────
@@ -77,13 +91,9 @@ pub async fn handle_initial_invite(
     }
     trace::intake::record_new_call(&call, request_json, &response, sent_at_ms, received_at_ms);
 
-    match treatment(call, response, a_invite, config, &mut turn.ids, now_ms) {
+    let (result, routed) = match treatment(call, response, a_invite, config, &mut turn.ids, now_ms)
+    {
         Initial::Route { call, route } => {
-            // The route built the Call; now run each service's `init` (ADR-0016
-            // X8), folding any seed (cursor + data + initial actions) through the
-            // normal executor.
-            // A dormant service (`init` → `None`) and the empty-service list
-            // both leave the result untouched.
             let result = apply_route(
                 *call,
                 *route,
@@ -99,10 +109,22 @@ pub async fn handle_initial_invite(
                 0,
             )
             .await;
-            let mut exec = ActionExecutor { config, owners, turn, now_ms };
-            let setup_event = setup_event(&result.call, a_invite);
-            seed_services(result, services, &mut exec, &setup_event, "a", Direction::FromA)
+            (result, true)
         }
-        Initial::Final(result) => *result,
+        Initial::Final(result) => (*result, false),
+    };
+    if cancelled() {
+        return Consulted::Cancelled(Box::new(result.call));
     }
+    if !routed {
+        return Consulted::Applied(Box::new(result));
+    }
+    // The route built the Call; now run each service's `init` (ADR-0016 X8),
+    // folding any seed (cursor + data + initial actions) through the normal
+    // executor. A dormant service (`init` → `None`) and the empty-service list
+    // both leave the result untouched.
+    let mut exec = ActionExecutor { config, owners, turn, now_ms };
+    let setup_event = setup_event(&result.call, a_invite);
+    let seeded = seed_services(result, services, &mut exec, &setup_event, "a", Direction::FromA);
+    Consulted::Applied(Box::new(seeded))
 }

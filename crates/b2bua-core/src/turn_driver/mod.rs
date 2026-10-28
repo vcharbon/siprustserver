@@ -344,7 +344,8 @@ impl<'d> Session<'d> {
         if self.call.state == CallModelState::Terminated {
             return Outcome::Nothing;
         }
-        let Some((event, leg)) = steps::event_of(step, &self.call, &mut self.peers) else {
+        let Some((event, leg)) = steps::event_of(step, &self.call, &mut self.peers, self.now)
+        else {
             return Outcome::Nothing;
         };
         let Some(event) = steps::edited(event, edit) else { return Outcome::Unparsed };

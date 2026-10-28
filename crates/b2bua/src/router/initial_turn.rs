@@ -15,7 +15,7 @@ use super::topology_cookie::topology_from_cookie;
 use super::RouterCtx;
 use crate::admission::{class_of, Class};
 use crate::effects::{HandlerEffects, HandlerResult};
-use crate::initial_consult::{cancelled_setup, handle_initial_invite};
+use crate::initial_consult::{cancelled_setup, handle_initial_invite, Consulted};
 use crate::initial_invite::build_initial_call;
 use crate::new_calls::Refusal;
 use crate::repl::ReadinessState;
@@ -185,6 +185,9 @@ pub(super) async fn initial_invite_turn(
     // round-trips through HA hydration. Reject malformed at ingest instead.
     // Created-then-rejected mirrors the decision-reject path so the Terminated
     // invariant reaps the call + propagates the delete.
+    // The consult reads the setup-CANCEL mark itself, after its last await;
+    // the other arms await nothing and leave it to the drop guard below.
+    let (mut consulted, mut recorded) = (false, false);
     let mut handled = if cancelled {
         cancelled_setup(call.clone(), &caller, datagram, now_ms)
     } else if cordoned {
@@ -203,9 +206,11 @@ pub(super) async fn initial_invite_turn(
             TerminationCause::Admission,
         )
     } else {
+        consulted = true;
         // `datagram` is the only place the INVITE as it arrived exists (the
         // call carries a header snapshot, not bytes).
-        handle_initial_invite(
+        let setup_cancelled = || ctx.state.is_setup_cancelled(call_ref, cseq);
+        let consult = handle_initial_invite(
             call.clone(),
             &caller,
             ctx.decision.as_ref(),
@@ -217,31 +222,43 @@ pub(super) async fn initial_invite_turn(
             datagram,
             &ctx.clock,
             now_ms,
+            &setup_cancelled,
         )
-        .await
+        .await;
+        match consult {
+            Consulted::Applied(result) => *result,
+            // The caller CANCELed during the round trip: the txn layer already
+            // finalized the a-leg INVITE (200 + 487, the transaction's ONE
+            // final, RFC 3261 §17.2.1) and the `Cancelled` event is queued
+            // right behind this turn. The decision is recorded, never applied:
+            // no b-leg launch, no authored final; the queued `handle-cancel`
+            // turn owns the termination (its Cancel CDR keeps the ADR-0022 X2
+            // synthesis silent).
+            Consulted::Cancelled(decided) => {
+                recorded = true;
+                ctx.metrics.bump_decision_dropped_cancelled();
+                tracing::debug!(
+                    %call_ref,
+                    "decision recorded, not applied: caller CANCELed during the decision round trip"
+                );
+                HandlerResult {
+                    call: recorded_turn(&call, *decided),
+                    effects: HandlerEffects::new(),
+                }
+            }
+        }
     };
-    // ── Decision-application drop guard ───────────────────────────────
-    // The caller CANCELed while this turn was parked on its decision
-    // round trip: the txn layer already finalized the a-leg INVITE (200 + 487 —
-    // the transaction's ONE final, RFC 3261 §17.2.1) and the `Cancelled` event
-    // is queued right behind this turn. Whatever this turn resolved — route,
-    // reject (decision-authored OR the malformed-INVITE 400 above), redirect,
-    // relay, error — is moot: drop the result whole. No b-leg launch, no
-    // authored final; the queued `handle-cancel` turn owns the termination (its
-    // Cancel CDR is what keeps the ADR-0022 X2 synthesis silent). The mark
-    // write (ingress run loop) and this read are not ordered by the per-call
-    // lock, so a marking that lands after this check reverts to the pre-drop
-    // path for that scheduler sliver — the b-leg is launched then CANCELed
-    // (§9.1-held until a provisional), indistinguishable from the unavoidable
-    // wire race.
-    if !cancelled && ctx.state.is_setup_cancelled(call_ref, cseq) {
-        ctx.metrics.bump_decision_dropped_cancelled();
-        tracing::debug!(
-            %call_ref,
-            "decision result dropped: caller CANCELed during the decision round trip"
-        );
+    // ── Drop guard ────────────────────────────────────────────────────
+    // The caller CANCELed while an arm that consults nothing ran (the
+    // malformed-INVITE 400, the cordon's 503): its result is moot, dropped
+    // whole. The mark write (ingress run loop) and the reads here and in the
+    // consult are not ordered by the per-call lock, so a marking that lands
+    // after them reverts to the pre-drop path for that scheduler sliver — the
+    // b-leg is launched then CANCELed (§9.1-held until a provisional),
+    // indistinguishable from the unavoidable wire race.
+    if !cancelled && !consulted && ctx.state.is_setup_cancelled(call_ref, cseq) {
         handled = dropped_on_setup_cancel(&call, handled);
-    } else if !cancelled && ctx.readiness.left_the_slice() {
+    } else if !cancelled && !recorded && ctx.readiness.left_the_slice() {
         // This node's endpoint left the slice while the decision was in
         // flight, so the decision is not applied: the callee is never dialled
         // for a call its backups took over (ADR-0047). The caller is refused
@@ -271,7 +288,7 @@ fn refused_after_leaving_the_slice(
     now_ms: i64,
     ids: &mut TurnIds,
 ) -> HandlerResult {
-    refused_unavailable(ctx, discarded_turn(pre, handled), caller, now_ms, ids)
+    refused_unavailable(ctx, discarded_turn(pre, handled.call), caller, now_ms, ids)
 }
 
 /// `call`, whose caller's INVITE is `caller`, refused 503 with no
@@ -300,7 +317,24 @@ fn refused_unavailable(
 
 /// The drop-guard result: the pre-handler call — no b-leg, no wire effects.
 fn dropped_on_setup_cancel(pre: &Call, handled: HandlerResult) -> HandlerResult {
-    HandlerResult { call: discarded_turn(pre, handled), effects: HandlerEffects::new() }
+    HandlerResult { call: discarded_turn(pre, handled.call), effects: HandlerEffects::new() }
+}
+
+/// The pre-handler call carrying the decision `decided` holds, recorded and
+/// not applied: its decision log, its callback context and the call ext the
+/// decision seeded, beside what [`discarded_turn`] keeps. No b-leg, no service
+/// cursor: no service ran its `init` on it.
+fn recorded_turn(pre: &Call, decided: Call) -> Call {
+    let decision_log = decided.decision_log.clone();
+    let decision_ordinal = decided.decision_ordinal;
+    let callback_context = decided.callback_context.clone();
+    let ext = decided.ext.clone();
+    let mut call = discarded_turn(pre, decided);
+    call.decision_log = decision_log;
+    call.decision_ordinal = decision_ordinal;
+    call.callback_context = callback_context;
+    call.ext = ext;
+    call
 }
 
 /// The pre-handler call carrying ONLY what a discarded turn already committed
@@ -309,11 +343,11 @@ fn dropped_on_setup_cancel(pre: &Call, handled: HandlerResult) -> HandlerResult 
 /// (the admit↔release pairing survives the drop), and the trace stamp rides over
 /// so a sampled call's later turns (the CANCEL, the 487, the termination that
 /// closes its registry entry) still emit into its trace.
-fn discarded_turn(pre: &Call, handled: HandlerResult) -> Call {
+fn discarded_turn(pre: &Call, turn: Call) -> Call {
     let mut call = pre.clone();
-    call.limiter = handled.call.limiter;
-    call.trace_id = handled.call.trace_id;
-    call.root_span_id = handled.call.root_span_id;
-    call.sampled = handled.call.sampled;
+    call.limiter = turn.limiter;
+    call.trace_id = turn.trace_id;
+    call.root_span_id = turn.root_span_id;
+    call.sampled = turn.sampled;
     call
 }

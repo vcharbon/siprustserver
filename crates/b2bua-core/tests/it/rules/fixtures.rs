@@ -115,6 +115,7 @@ pub(super) fn execute_with(
         in_dialog: false,
         headers: vec![],
         to_tag: None,
+        at_ms: 0,
     };
     let ctx = context(call, &event, "a", config);
     let mut id_gen = scope(1);

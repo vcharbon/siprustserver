@@ -88,7 +88,12 @@ pub(super) type Arrival = (CallEvent, String);
 /// call gives the step nothing to say (no dialog to say it on, nothing sent
 /// to answer, no timer of the type armed). A step that sends a request
 /// numbers it on its peer.
-pub(super) fn event_of(step: &Step, call: &Call, peers: &mut Peers) -> Option<Arrival> {
+pub(super) fn event_of(
+    step: &Step,
+    call: &Call,
+    peers: &mut Peers,
+    now_ms: i64,
+) -> Option<Arrival> {
     match step {
         Step::Answers(leg, status) => callee_final(peers, leg, *status, &callee_tag(leg), false),
         Step::AnswersWith(leg, status, lines) => {
@@ -133,6 +138,7 @@ pub(super) fn event_of(step: &Step, call: &Call, peers: &mut Peers) -> Option<Ar
                 in_dialog: false,
                 headers: Vec::new(),
                 to_tag: peers.on("a").and_then(|alice| alice.shown_tag.clone()),
+                at_ms: now_ms,
             };
             Some((event, "a".to_string()))
         }

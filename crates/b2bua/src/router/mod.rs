@@ -329,7 +329,7 @@ pub async fn run(
         let work = tokio::select! {
             ev = txn_rx.recv() => match ev {
                 Some(ev) => {
-                    let (ev, matched_client_txn) = txn_event::call_event(ev);
+                    let (ev, matched_client_txn) = txn_event::call_event(ev, ctx.clock.now_ms());
                     Work::Event(ev, matched_client_txn)
                 }
                 None => break,

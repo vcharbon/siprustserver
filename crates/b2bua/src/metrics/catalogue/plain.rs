@@ -103,14 +103,14 @@ plain_counters! {
         "b2bua_cdr_dropped_total",
         "CDRs dropped (submit-queue overflow, or a record the sink did not deliver)",
     ) => cdr_dropped, bump_cdr_dropped, cdr_dropped_total;
-    // Decision-application drop guard: a `/call/new` decision result (route
-    // or reject) that landed on a call whose initial INVITE the caller already
-    // CANCELed — dropped whole: no b-leg launch, no second final on the a-leg's
-    // completed transaction. A non-zero rate measures the caller-gives-up-
+    // A `/call/new` decision result (route or reject) that landed on a call
+    // whose initial INVITE the caller already CANCELed — recorded on the call,
+    // never applied: no b-leg launch, no second final on the a-leg's completed
+    // transaction. A non-zero rate measures the caller-gives-up-
     // during-routing race, not a fault.
     DECISION_DROPPED_CANCELLED = (
         "b2bua_decision_dropped_cancelled_total",
-        "decision results (route/reject) dropped whole because the caller CANCELed the initial INVITE while the decision was in flight (the 487 is the transaction's one final; no b-leg is launched)",
+        "decision results (route/reject) recorded and not applied because the caller CANCELed the initial INVITE while the decision was in flight (the 487 is the transaction's one final; no b-leg is launched)",
     ) => decision_dropped_cancelled, bump_decision_dropped_cancelled, decision_dropped_cancelled_total;
     TERMINATION_UNRECORDED = (
         "b2bua_termination_unrecorded_total",

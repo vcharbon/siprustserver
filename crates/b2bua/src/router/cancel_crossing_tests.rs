@@ -78,6 +78,7 @@ async fn a_cancel_that_beat_the_relayed_2xx_byes_the_callee_only() {
         in_dialog: false,
         headers: vec![],
         to_tag: Some("a1".into()),
+        at_ms: 0,
     };
     let (call_ref, source_leg_id) = (call.call_ref.clone(), call.a_leg.leg_id.clone());
     let input = TurnInput {

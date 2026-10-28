@@ -7,8 +7,9 @@ use sip_txn::TransactionEvent;
 /// response it carries answered a client transaction the layer holds: a
 /// timeout names the incarnation its Via marked, and the notice that a
 /// watched call's last transaction cleared is the self-release notice
-/// ([`super::quiesced::notice`]).
-pub(crate) fn call_event(event: TransactionEvent) -> (CallEvent, bool) {
+/// ([`super::quiesced::notice`]). A CANCEL the layer answered is stamped
+/// `now_ms`, the instant its event reached the run loop.
+pub(crate) fn call_event(event: TransactionEvent, now_ms: i64) -> (CallEvent, bool) {
     let event = match event {
         TransactionEvent::Message { message, src, matched_client_txn, datagram } => {
             return (CallEvent::Sip { message, src, datagram }, matched_client_txn);
@@ -20,7 +21,15 @@ pub(crate) fn call_event(event: TransactionEvent) -> (CallEvent, bool) {
             in_dialog,
             headers,
             to_tag,
-        } => CallEvent::Cancelled { call_id, from_tag, invite_cseq, in_dialog, headers, to_tag },
+        } => CallEvent::Cancelled {
+            call_id,
+            from_tag,
+            invite_cseq,
+            in_dialog,
+            headers,
+            to_tag,
+            at_ms: now_ms,
+        },
         TransactionEvent::Timeout {
             branch,
             call_ref,
@@ -58,16 +67,19 @@ mod tests {
     use super::*;
 
     fn timeout(call_ref: Option<&str>, mark: Option<&str>) -> CallEvent {
-        let (event, _) = call_event(TransactionEvent::Timeout {
-            branch: "z9hG4bK-t".into(),
-            call_ref: call_ref.map(str::to_string),
-            leg_id: Some("b-1".into()),
-            incarnation_mark: mark.map(str::to_string),
-            method: Some("INVITE".into()),
-            cseq: 1,
-            destination: None,
-            kind: TxnTimeoutKind::Response,
-        });
+        let (event, _) = call_event(
+            TransactionEvent::Timeout {
+                branch: "z9hG4bK-t".into(),
+                call_ref: call_ref.map(str::to_string),
+                leg_id: Some("b-1".into()),
+                incarnation_mark: mark.map(str::to_string),
+                method: Some("INVITE".into()),
+                cseq: 1,
+                destination: None,
+                kind: TxnTimeoutKind::Response,
+            },
+            0,
+        );
         event
     }
 

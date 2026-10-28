@@ -97,6 +97,7 @@ fn executed(call: &call::Call, actions: &[RuleAction]) -> HandlerResult {
         in_dialog: false,
         headers: vec![],
         to_tag: None,
+        at_ms: 0,
     };
     let config = B2buaConfig::default();
     let ctx = context(call, &event, "a", &config);
@@ -197,6 +198,7 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
         in_dialog: false,
         headers: vec![],
         to_tag: None,
+        at_ms: 0,
     };
     let config = B2buaConfig::default();
     let ctx = context(&call, &event, "a", &config);

@@ -42,6 +42,10 @@ pub enum CallEvent {
         headers: Vec<SipHeader>,
         /// The To-tag the layer's 200 and 487 carried.
         to_tag: Option<String>,
+        /// The instant the CANCEL reached the call's worker, its 200 and 487
+        /// already sent: what the call records them at, however long the
+        /// event waits behind the call's running turn.
+        at_ms: i64,
     },
     /// A client transaction (b-leg INVITE, BYE, …) timed out with no final.
     Timeout {

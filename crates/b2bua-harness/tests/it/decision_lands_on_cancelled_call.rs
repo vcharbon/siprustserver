@@ -3,12 +3,16 @@
 //! The caller gives up while the routing decision is still in flight: the txn
 //! layer finalizes the initial-INVITE transaction at once (200 to the CANCEL,
 //! 487 to the INVITE, ACKed), and the decision lands afterwards. Whatever it
-//! decides is moot and must be DROPPED whole:
+//! decides is never applied:
 //!
 //!  - a ROUTE must not launch a b-leg — the callee would be rung (and start
 //!    billing) for a call that no longer has a caller;
 //!  - a REJECT/REDIRECT must not author a second final on the a-leg's
 //!    completed transaction (RFC 3261 §17.2.1 — the 487 is the one final).
+//!
+//! An initial decision that answered is still recorded on the call: its
+//! decision mark, its callback context and the service slices it stated
+//! ride to the call's record, as the decision the call was handled under.
 //!
 //! Two seams carry the guarantee: the initial-INVITE decision application
 //! (`new_call` parks the per-call FIFO, so the queued `Cancelled` event cannot
@@ -17,13 +21,14 @@
 //! land through the rule chain and read the call's own
 //! `Terminating`/`Terminated` state.
 
-use call::LimiterEntry;
+use call::{Call, DecisionKind, LimiterEntry, MessageDirection};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use b2bua::config::CdrConfig;
 use b2bua::decision::test_adapter::{reject, route_to};
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
@@ -96,9 +101,62 @@ fn distinct_invite_call_ids(report: &RunReport, to: SocketAddr) -> usize {
     ids.len()
 }
 
-/// ROUTE variant: the delayed route lands on the CANCELed call and is dropped
-/// whole — bob is never dialed, alice hears nothing after her 487, and the
-/// queued `handle-cancel` terminates the call at once.
+/// The service slice every scripted decision of this file states.
+fn stated_slice() -> serde_json::Value {
+    serde_json::json!({"context": "stated-by-the-decision"})
+}
+
+/// The one terminated call, its ring on.
+fn the_terminated_call(b2bua: &B2buaSut) -> Call {
+    let calls = b2bua.terminated_calls();
+    assert_eq!(calls.len(), 1, "one terminated call");
+    calls.into_iter().next().unwrap()
+}
+
+/// The decision the call records: the one mark, under `kind` and the label,
+/// and the slice the decision stated.
+fn assert_recorded(call: &Call, kind: DecisionKind) {
+    let marks: Vec<_> =
+        call.decision_log.iter().map(|m| (m.kind, m.label.as_deref(), m.ordinal)).collect();
+    assert_eq!(marks, [(kind, Some("rk-decided"), 1)], "the decision is recorded");
+    assert_eq!(call.decision_ordinal, 1);
+    let slice = call.ext.as_ref().and_then(|ext| ext.get("svc"));
+    assert_eq!(slice, Some(&stated_slice()), "the slice the decision stated rides the call");
+}
+
+/// The caller's CANCEL, its 200 and the INVITE's 487 in the a-leg ring:
+/// recorded at the instant the CANCEL reached the worker, before the decision
+/// landed, and under the recorded decision.
+fn assert_cancel_rows_at_the_wire_instant(call: &Call) {
+    let rows: Vec<_> = call
+        .a_leg
+        .messages
+        .entries
+        .iter()
+        .filter(|e| e.code != Some(100))
+        .map(|e| (e.method.as_str(), e.code, e.direction, e.decision_ordinal))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("INVITE", None, MessageDirection::Received, 0),
+            ("CANCEL", None, MessageDirection::Received, 1),
+            ("CANCEL", Some(200), MessageDirection::Authored, 1),
+            ("INVITE", Some(487), MessageDirection::Authored, 1),
+        ],
+    );
+    let at: Vec<i64> = call.a_leg.messages.entries.iter().map(|e| e.at_ms).collect();
+    let cancel_at = at[at.len() - 3];
+    assert!(
+        cancel_at < DECISION_DELAY.as_millis() as i64,
+        "the CANCEL is recorded when it arrived, not when the decision landed: {at:?}",
+    );
+    assert_eq!(&at[at.len() - 3..], [cancel_at; 3], "the 200 and 487 with it: {at:?}");
+}
+
+/// ROUTE variant: the delayed route lands on the CANCELed call and is
+/// recorded, never applied — bob is never dialed, alice hears nothing after
+/// her 487, and the queued `handle-cancel` terminates the call at once.
 #[tokio::test(start_paused = true)]
 async fn route_decision_landing_after_the_callers_cancel_is_dropped() {
     let h = Harness::new("route-lands-on-cancelled-call");
@@ -107,9 +165,23 @@ async fn route_decision_landing_after_the_callers_cancel_is_dropped() {
     let decision = Arc::new(DelayedDecisionEngine {
         new_call_delay: DECISION_DELAY,
         failure_delay: Duration::ZERO,
-        inner: Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070)),
+        inner: Arc::new(
+            ScriptedDecisionEngine::builder()
+                .fallback(|_req| {
+                    let mut r = route_to("127.0.0.1", 5070);
+                    r.label = Some("rk-decided".into());
+                    r.callback_context = Some("ctx-decided".into());
+                    r.service_ext.insert("svc".into(), stated_slice());
+                    NewCallResponse::Route(r)
+                })
+                .build(),
+        ),
     });
-    let b2bua = B2buaSut::builder(decision).start(&h, "b2bua", "127.0.0.1:5080").await;
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| c.cdr = CdrConfig { message_ring: 32, captured_headers: Vec::new() })
+        .keep_terminated_calls()
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     // The INVITE is at the SUT (auto-100 sent), the route still in flight.
@@ -155,6 +227,12 @@ async fn route_decision_landing_after_the_callers_cancel_is_dropped() {
         "no b-leg was ever dialed: {:?}",
         cdrs[0].events,
     );
+    assert_eq!(cdrs[0].decision_log.len(), 1, "the record names the decision");
+    let call = the_terminated_call(&b2bua);
+    assert_recorded(&call, DecisionKind::Route);
+    assert_eq!(call.callback_context.as_deref(), Some("ctx-decided"));
+    assert!(call.b_legs.is_empty(), "no b-leg");
+    assert_cancel_rows_at_the_wire_instant(&call);
 
     let report = h.finish().await;
     assert_eq!(
@@ -177,11 +255,23 @@ async fn reject_decision_landing_after_the_callers_cancel_is_dropped() {
         failure_delay: Duration::ZERO,
         inner: Arc::new(
             ScriptedDecisionEngine::builder()
-                .fallback(|_req| reject(484, "Address Incomplete"))
+                .fallback(|_req| {
+                    NewCallResponse::Reject(RejectDecision {
+                        reject_code: 484,
+                        reject_reason: Some("Address Incomplete".into()),
+                        update_headers: None,
+                        service_ext: [("svc".to_string(), stated_slice())].into(),
+                        label: Some("rk-decided".into()),
+                    })
+                })
                 .build(),
         ),
     });
-    let b2bua = B2buaSut::builder(decision).start(&h, "b2bua", "127.0.0.1:5080").await;
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| c.cdr = CdrConfig { message_ring: 32, captured_headers: Vec::new() })
+        .keep_terminated_calls()
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     h.advance(Duration::from_millis(200)).await;
@@ -216,6 +306,9 @@ async fn reject_decision_landing_after_the_callers_cancel_is_dropped() {
         "the dropped 484 leaves no reject on the CDR: {:?}",
         cdrs[0].events,
     );
+    let call = the_terminated_call(&b2bua);
+    assert_recorded(&call, DecisionKind::Reject);
+    assert_cancel_rows_at_the_wire_instant(&call);
 
     let report = h.finish().await;
     assert_eq!(

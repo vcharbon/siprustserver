@@ -199,6 +199,7 @@ fn begin_termination_disarms_service_watchdogs_and_deactivates_machines() {
         in_dialog: false,
         headers: vec![],
         to_tag: None,
+        at_ms: 0,
     };
     let config = B2buaConfig::default();
     let ctx = ctx_for(&call, &event, &config);
