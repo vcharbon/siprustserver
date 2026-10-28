@@ -69,13 +69,19 @@ pub(super) fn take_over_departed(ctx: &Arc<RouterCtx>, ordinal: &str) {
 }
 
 /// Start the takeover half of the sweep of `ordinal`'s backup partition, on a
-/// proxy's dead verdict, and return at once.
-pub(super) fn take_over_read_dead(ctx: &Arc<RouterCtx>, ordinal: &str) {
-    start(ctx, ordinal, Cause::ReadDead);
+/// proxy's dead verdict, and return at once; whether this node backs any call
+/// for `ordinal`, and so swept anything.
+pub(super) fn take_over_read_dead(ctx: &Arc<RouterCtx>, ordinal: &str) -> bool {
+    start(ctx, ordinal, Cause::ReadDead)
 }
 
-fn start(ctx: &Arc<RouterCtx>, ordinal: &str, cause: Cause) {
+/// Start the sweep for `cause` unless `ordinal`'s backup partition is empty;
+/// whether it started.
+fn start(ctx: &Arc<RouterCtx>, ordinal: &str, cause: Cause) -> bool {
     let refs = ctx.state.partition_refs(PartitionRole::Backup, ordinal);
+    if refs.is_empty() && cause == Cause::ReadDead {
+        return false;
+    }
     let (task_ctx, ordinal) = (ctx.clone(), ordinal.to_string());
     let task = observe::spawn_keeping_node(async move {
         sweep(&task_ctx, &ordinal, cause, refs, move |ctx, call_ref| async move {
@@ -84,6 +90,7 @@ fn start(ctx: &Arc<RouterCtx>, ordinal: &str, cause: Cause) {
         .await;
     });
     ctx.dispatcher.track(task.abort_handle());
+    true
 }
 
 /// What the sweep did with one call.
@@ -136,17 +143,27 @@ async fn sweep<F, Fut>(
             Err(_) => {}
         }
     }
-    tracing::info!(
-        node = observe::node(),
-        peer = ordinal,
-        ?cause,
-        scanned,
-        taken,
-        settled,
-        discharged,
-        panicked,
-        "departed peer's in-flight calls taken over"
-    );
+    match cause {
+        Cause::Departed => tracing::info!(
+            node = observe::node(),
+            peer = ordinal,
+            scanned,
+            taken,
+            settled,
+            discharged,
+            panicked,
+            "departed peer's in-flight calls taken over"
+        ),
+        Cause::ReadDead => tracing::info!(
+            node = observe::node(),
+            peer = ordinal,
+            scanned,
+            taken,
+            settled,
+            panicked,
+            "read-dead peer's in-flight calls taken over"
+        ),
+    }
 }
 
 /// Discharge `call_ref` when its body is ended, or ending with nothing left to

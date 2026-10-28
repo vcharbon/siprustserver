@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use sip_message::dead_notice::dead_notices;
+use sip_message::dead_notice::dead_notice;
 use sip_message::{SipMessage, SipParser};
 use sip_net::types::BindUdpOpts;
 use sip_net::SignalingNetwork;
@@ -66,9 +66,7 @@ async fn a_dead_verdict_reaches_every_other_alive_worker_signed() {
 
     let req = received(f.workers[1].as_ref()).await.expect("w2 is told");
     assert_eq!(req.method(), "OPTIONS");
-    let notices = dead_notices(&req);
-    assert_eq!(notices.len(), 1);
-    let notice = &notices[0];
+    let notice = &dead_notice(&req).expect("a notice");
     assert_eq!(notice.notice.ordinal, "w1");
     assert_eq!(notice.notice.at_ms, 1_000, "the verdict's instant");
     let fields = notice.notice.signed_fields();
@@ -98,6 +96,10 @@ async fn a_worker_already_dead_is_no_new_verdict() {
     f.registry.set_health("w1", WorkerHealth::Dead);
     // The first notice's Timer E repeats carry its own instant.
     let repeat = received(f.workers[1].as_ref()).await.expect("Timer E repeats the notice");
-    assert_eq!(dead_notices(&repeat)[0].notice.at_ms, 1_000, "a repeat, not a second verdict");
+    assert_eq!(
+        dead_notice(&repeat).expect("a notice").notice.at_ms,
+        1_000,
+        "a repeat, not a second verdict"
+    );
     f.task.abort();
 }

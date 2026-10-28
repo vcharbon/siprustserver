@@ -49,17 +49,20 @@ fn a_node_with_no_cluster_key_trusts_no_notice() {
 #[test]
 fn each_verdict_is_taken_once_and_a_later_one_again() {
     let book = VerdictBook::default();
-    assert!(book.take("w0", 1_000, 1_000), "the first copy");
-    assert!(!book.take("w0", 1_000, 1_500), "a repeat of the same verdict");
-    assert!(book.take("w1", 1_000, 1_500), "another worker's verdict");
-    assert!(book.take("w0", 4_000, 4_000), "a later verdict on the same worker");
+    assert!(!book.holds("w0", 1_000, 1_000));
+    assert!(book.take("w0", 1_000), "the first copy");
+    assert!(book.holds("w0", 1_000, 1_500), "a repeat of the same verdict is held");
+    assert!(!book.take("w0", 1_000), "and is no new verdict");
+    assert!(!book.holds("w1", 1_000, 1_500), "another worker's verdict is not held");
+    assert!(!book.holds("w0", 4_000, 4_000), "a later verdict on the same worker is not held");
 }
 
 #[test]
-fn a_verdict_is_forgotten_once_stale() {
+fn a_verdict_is_held_through_its_notices_last_repeat() {
     let book = VerdictBook::default();
-    assert!(book.take("w0", 1_000, 1_000));
-    assert!(!book.take("w0", 1_000, 1_000 + FRESH_MS));
-    assert!(book.take("w0", 1_000, 1_000 + FRESH_MS + 1), "past the window it is no longer held");
-    assert_eq!(locked(&book.taken, DEAD_VERDICTS).get("w0").map(BTreeSet::len), Some(1));
+    assert!(book.take("w0", 1_000));
+    assert!(book.holds("w0", 1_000, 1_000 + FRESH_MS + 1), "a repeat past freshness is held");
+    assert!(book.holds("w0", 1_000, 1_000 + HELD_MS));
+    assert!(!book.holds("w0", 1_000, 1_000 + HELD_MS + 1), "dropped past the hold");
+    assert!(locked(&book.taken, DEAD_VERDICTS).is_empty());
 }

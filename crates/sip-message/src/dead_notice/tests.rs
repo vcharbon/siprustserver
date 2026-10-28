@@ -37,9 +37,16 @@ fn a_written_notice_reads_back_with_its_signature() {
 fn a_notice_rides_an_options_request() {
     let value = notice().header_value(&[1u8; 16]).expect("fits");
     let req = options(&format!("{X_WORKER_DEAD}: {value}\r\n"));
-    let read = dead_notices(&req);
-    assert_eq!(read.len(), 1);
-    assert_eq!(read[0].notice, notice());
+    assert_eq!(dead_notice(&req).expect("read").notice, notice());
+}
+
+#[test]
+fn only_the_first_notice_of_a_request_is_read() {
+    let value = notice().header_value(&[1u8; 16]).expect("fits");
+    let req = options(&format!("{X_WORKER_DEAD}: {value}\r\n{X_WORKER_DEAD}: b9; at=7\r\n"));
+    assert_eq!(dead_notice(&req).expect("read").notice, notice());
+    let req = options(&format!("{X_WORKER_DEAD}: ;\r\n{X_WORKER_DEAD}: {value}\r\n"));
+    assert!(dead_notice(&req).is_none(), "an unreadable first notice is not passed over");
 }
 
 #[test]

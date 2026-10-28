@@ -94,9 +94,11 @@ fn is_ordinal(ordinal: &str) -> bool {
     !ordinal.is_empty() && ordinal.bytes().all(is_token_char)
 }
 
-/// Every readable `X-Worker-Dead` notice `req` carries, in wire order.
-pub fn dead_notices(req: &SipRequest) -> Vec<ReceivedNotice> {
-    req.raw(HeaderName::from(X_WORKER_DEAD)).filter_map(DeadNotice::parse).collect()
+/// The notice the first `X-Worker-Dead` of `req` carries; `None` when absent
+/// or unreadable. A later instance is never read: a request states one
+/// verdict.
+pub fn dead_notice(req: &SipRequest) -> Option<ReceivedNotice> {
+    req.raw(HeaderName::from(X_WORKER_DEAD)).next().and_then(DeadNotice::parse)
 }
 
 #[cfg(test)]
