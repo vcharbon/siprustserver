@@ -54,6 +54,9 @@ pub struct ProxyConfig {
     pub bind_retry_deadline: Duration,
     pub hmac_kid: String,
     pub hmac_key: String,
+    /// The workers' shared key the dead notice is signed with (ADR-0050 §3);
+    /// `None` sends no notice.
+    pub cluster_key: Option<sip_ids::SigningKey>,
     pub probe: HealthProbeConfig,
     pub observer: LoadObserverConfig,
     /// The intake-shed watermark, percent of `queue_max`.
@@ -101,6 +104,7 @@ impl ProxyConfig {
             Duration::from_millis(env.int("PROXY_BIND_RETRY_DEADLINE_MS", 10_000, 1, MAX_MS));
         let hmac_kid = env.text("PROXY_HMAC_KID", "k0");
         let hmac_key = hmac_key(&mut env);
+        let cluster_key = cluster_key(&mut env);
         let probe = HealthProbeConfig {
             interval_ms: env.int("HEALTH_INTERVAL_MS", 1000, 1, MAX_MS),
             timeout_ms: env.int("HEALTH_TIMEOUT_MS", 1500, 1, MAX_MS),
@@ -139,6 +143,7 @@ impl ProxyConfig {
             bind_retry_deadline,
             hmac_kid,
             hmac_key,
+            cluster_key,
             probe,
             observer,
             intake_shed_pct,
@@ -290,6 +295,22 @@ fn hmac_key(env: &mut EnvReader) -> String {
             String::new()
         }
     }
+}
+
+/// `PROXY_CLUSTER_KEY`, the workers' shared key: unset is none, a value out
+/// of the key's bounds refuses the boot.
+fn cluster_key(env: &mut EnvReader) -> Option<sip_ids::SigningKey> {
+    let value = env.present("PROXY_CLUSTER_KEY")?;
+    let key = sip_ids::SigningKey::new(value.as_bytes());
+    if key.is_none() {
+        env.refuse(format!(
+            "PROXY_CLUSTER_KEY must hold {} to {} bytes, got {}",
+            sip_ids::MIN_KEY_BYTES,
+            sip_ids::MAX_KEY_BYTES,
+            value.len()
+        ));
+    }
+    key
 }
 
 /// A `PROXY_UDP_*BUF` request in bytes: 4 MiB when unset, the kernel default

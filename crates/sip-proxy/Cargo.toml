@@ -21,6 +21,7 @@ metric-values = { path = "../metric-values" }
 # the parsed message shares it rather than copying the datagram.
 bytes.workspace = true
 sip-message = { path = "../sip-message" }
+sip-ids = { path = "../sip-ids" } # the cluster key the dead notice is signed with
 # The transaction kind the health prober opens its client transactions as.
 call = { path = "../call" }
 sip-net = { path = "../sip-net" }

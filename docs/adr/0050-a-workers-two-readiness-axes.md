@@ -1,6 +1,7 @@
 # A worker's two readiness axes: serving dialogs, accepting new calls
 
-**Status:** accepted (2026-10-16)
+**Status:** accepted (2026-10-16). Amended (2026-10-28): §3, the proxy tells
+each dead verdict to the workers; §5, the undecided call's residual.
 
 **Owner:** `crates/sip-message` (the `X-Readiness` and `X-Incarnation` headers),
 `crates/b2bua/src/repl/readiness.rs` and `router/responses.rs` (the worker's
@@ -8,6 +9,9 @@ state and its OPTIONS answer), `crates/b2bua-runner-kit/src/probe.rs` (the
 admin routes), `crates/sip-proxy/src/registry/` and `health/probe.rs` (the
 proxy's view of a worker), `strategies/load_balancer.rs` (target selection,
 the cookie's `w_bak`), `load_observer/observer.rs` (the stale-payload sweep),
+`crates/sip-proxy/src/health/dead_notice.rs`, `crates/sip-message`'s
+`dead_notice.rs` and `crates/b2bua/src/router/dead_verdict.rs` (the dead
+notice),
 `crates/sip-proxy-runner/src/readiness.rs` and `main.rs` (`/readyz`, the boot
 probe), the proxy chart's VRRP check.
 
@@ -78,6 +82,25 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    keeps acceptance. Missed probes (`HEALTH_THRESHOLD`) and the departed
    address tombstone (ADR-0031 D4) make it `Dead`. The proxy's `Draining`
    health, its grace, and the `503` Reason-text split are gone.
+
+   A turn of a worker's health to `Dead` from another health is a **dead
+   verdict**. The proxy tells it to every other `Alive` worker on an
+   out-of-dialog OPTIONS carrying the notice, signed with the cluster key the
+   workers share (ADR-0055 §12) over the ordinal and the verdict's instant:
+
+   ```
+   X-Worker-Dead: worker-0; at=1792155573698; sig=<base64url>
+   ```
+
+   A departure is no verdict: the ordinal leaves the projection and its
+   address is tombstoned. A worker takes a notice only when it verifies and
+   its instant stands within 10 s of the worker's own clock, either way; it
+   refuses and counts any other (`b2bua_dead_notices_refused_total`). A proxy
+   with no cluster key tells nothing and a worker with none trusts nothing.
+   A worker takes each verdict once, however many copies reach it, and runs
+   on it the takeover half of the departure sweep over the calls it backs for
+   the dead worker (ADR-0047 D1, D2): the proxy now routes their traffic to
+   it, so the proxy's verdict is the one it acts on.
 4. **In-dialog routing reads liveness only.** A request carrying a verified
    cookie goes to `w_pri` while `w_pri` is `Alive`, whatever its acceptance;
    otherwise to `w_bak` while `w_bak` is `Alive`. It never runs a fresh
@@ -107,8 +130,8 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    Trying has already gone out): the primary still owns that transaction, and
    a final from this worker would end the caller's.
    Accepted residuals:
-   - a copy of an undecided call whose primary really died gets no final: the
-     departure sweep refuses the call `503`;
+   - a copy of an undecided call gets no final: the sweep at the proxy's dead
+     verdict (§3) refuses the call `503`, a live primary's included;
    - an INVITE that never replicated, from a primary that really died, gets
      no final from the backup; the caller's transaction timers end it;
    - a discovered pool whose watch never delivers a listing never has a first

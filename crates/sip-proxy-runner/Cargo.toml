@@ -24,6 +24,7 @@ path = "src/main.rs"
 
 [dependencies]
 sip-proxy = { path = "../sip-proxy" }
+sip-ids = { path = "../sip-ids" } # the cluster key the dead notice is signed with
 metric-catalogue = { path = "../metric-catalogue" }
 metric-values = { path = "../metric-values" }
 # The allocator families of the /metrics catalogue (the reads are the

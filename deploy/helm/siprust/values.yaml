@@ -72,7 +72,8 @@ worker:
   # (workers never resolve an external name). Empty leaves the runner default.
   dest: ""
   # The Secret holding the key the workers share to sign the via-extension
-  # on their own requests (ADR-0055 §12), key `key` (16 to 64 bytes).
+  # on their own requests (ADR-0055 §12), key `key` (16 to 64 bytes). The
+  # front proxy signs its dead notices to the workers with it (ADR-0050 §3).
   # Required with `replication.enabled`: the chart never draws it, so every
   # render (helm template, GitOps) yields the same pods on the same key.
   clusterKey:

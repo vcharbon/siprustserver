@@ -184,6 +184,9 @@ impl WorkerRegistry for SimulatedWorkerRegistry {
     fn synced(&self) -> bool {
         self.set.synced()
     }
+    fn read_dead(&self) -> tokio::sync::broadcast::Receiver<super::WorkerId> {
+        self.set.read_dead()
+    }
 }
 
 #[cfg(test)]

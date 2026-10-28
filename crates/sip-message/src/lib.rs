@@ -43,6 +43,7 @@ pub mod sip_str;
 pub mod status;
 pub mod types;
 
+pub mod dead_notice;
 pub mod deviation;
 pub mod emergency;
 pub mod generators;

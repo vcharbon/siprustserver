@@ -25,6 +25,8 @@ pub struct Sockets {
     pub shards: Vec<ShardSockets>,
     /// The OPTIONS health probe's own source socket.
     pub probe: Box<dyn UdpEndpoint>,
+    /// The dead notifier's own source socket (ADR-0050 §3).
+    pub notice: Box<dyn UdpEndpoint>,
 }
 
 /// One recv shard's signalling endpoints.
@@ -166,10 +168,24 @@ pub async fn bind_sockets(
     )
     .await?;
 
+    // The dead notifier's endpoint, ephemeral like the probe's.
+    let notice = bind_with_retry(
+        "notice socket",
+        probe_sa,
+        bind_interval,
+        bind_deadline,
+        is_udp_in_use,
+        || {
+            let opts = with_buffers(BindUdpOpts::new(probe_sa, 1024).with_clock(clock.clone()));
+            async move { net.bind_udp(opts).await }
+        },
+    )
+    .await?;
+
     let mut external = external.into_iter();
     let shards =
         internal.into_iter().map(|internal| ShardSockets { internal, external: external.next() });
-    Ok(Sockets { metrics, shards: shards.collect(), probe })
+    Ok(Sockets { metrics, shards: shards.collect(), probe, notice })
 }
 
 /// Log the buffer sizes the kernel granted one face's signalling socket,

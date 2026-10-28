@@ -208,3 +208,16 @@ fn a_dual_face_wildcard_bind_refuses_the_boot() {
     ];
     refused(&external, "PROXY_LISTEN_EXT 0.0.0.0:5060");
 }
+
+#[test]
+fn a_cluster_key_out_of_its_bounds_refuses_the_boot() {
+    refused(&[("PROXY_CLUSTER_KEY", "short")], "PROXY_CLUSTER_KEY");
+}
+
+#[test]
+fn the_cluster_key_is_optional() {
+    let cfg = boot(&[]).expect("boots");
+    assert!(cfg.cluster_key.is_none(), "no key: no dead notice");
+    let cfg = boot(&[("PROXY_CLUSTER_KEY", "0123456789abcdef0123456789abcdef")]).expect("boots");
+    assert!(cfg.cluster_key.is_some());
+}

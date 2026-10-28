@@ -37,6 +37,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use sip_clock::Clock;
+use tokio::sync::broadcast;
 use topology::{Membership, Peer};
 
 use crate::addr::ProxyAddr;
@@ -164,17 +165,21 @@ impl WorkerAnnotations {
         departed
     }
 
-    /// Annotate health (the OPTIONS probe write / `WorkerRegistryControl`). No-op
-    /// if the worker is unknown or unchanged.
     /// Annotate health and acceptance of new calls in one write, `None`
     /// leaving that one as it is. No-op if the worker is unknown or unchanged.
-    fn set_view(&self, id: &str, health: Option<WorkerHealth>, acceptance: Option<Acceptance>) {
+    /// Returns whether the write turned the worker's health `Dead`.
+    fn set_view(
+        &self,
+        id: &str,
+        health: Option<WorkerHealth>,
+        acceptance: Option<Acceptance>,
+    ) -> bool {
         let Some(previous) = self.snapshot().get(id).map(|r| (r.health, r.acceptance)) else {
-            return;
+            return false;
         };
         let next = (health.unwrap_or(previous.0), acceptance.unwrap_or(previous.1));
         if next == previous {
-            return;
+            return false;
         }
         if next.0 != previous.0 {
             let (from, to) = (previous.0, next.0);
@@ -195,6 +200,7 @@ impl WorkerAnnotations {
                 (rec.health, rec.acceptance) = next;
             }
         });
+        next.0 == WorkerHealth::Dead && previous.0 != WorkerHealth::Dead
     }
 }
 
@@ -240,12 +246,20 @@ pub(crate) struct WorkerSet {
     listed: AtomicBool,
     default_port: u16,
     clock: Clock,
+    /// Each worker the health view turns `Dead` (ADR-0050 §3).
+    read_dead: broadcast::Sender<WorkerId>,
 }
+
+/// How many dead verdicts a slow reader of [`WorkerSet::read_dead`] may fall
+/// behind before it reads a lag.
+const READ_DEAD_BACKLOG: usize = 64;
 
 impl WorkerSet {
     /// Build over `membership` with an empty annotation overlay; the projection is
     /// computed once so reads are valid immediately.
     pub(crate) fn new(membership: Arc<dyn Membership>, default_port: u16, clock: Clock) -> Self {
+        #[expect(clippy::disallowed_methods, reason = "READ_DEAD_BACKLOG is non-zero")]
+        let (read_dead, _) = broadcast::channel(READ_DEAD_BACKLOG);
         let set = Self {
             membership,
             annotations: WorkerAnnotations::default(),
@@ -254,6 +268,7 @@ impl WorkerSet {
             listed: AtomicBool::new(false),
             default_port,
             clock,
+            read_dead,
         };
         set.recompose();
         set
@@ -304,15 +319,27 @@ impl WorkerSet {
     }
 
     /// Annotate a worker's health and acceptance at once (`None` keeps that
-    /// one) and recompose once: no read sees one without the other.
+    /// one) and recompose once: no read sees one without the other. A write
+    /// that turns the worker `Dead` is a dead verdict, told to every
+    /// [`read_dead`](Self::read_dead) reader once the projection holds it.
     pub(crate) fn set_view(
         &self,
         id: &str,
         health: Option<WorkerHealth>,
         acceptance: Option<Acceptance>,
     ) {
-        self.annotations.set_view(id, health, acceptance);
+        let turned_dead = self.annotations.set_view(id, health, acceptance);
         self.recompose();
+        if turned_dead {
+            let _ = self.read_dead.send(id.to_string());
+        }
+    }
+
+    /// Every later dead verdict: a worker whose health the view turns `Dead`
+    /// from another health. A membership departure is no verdict: its address
+    /// is tombstoned and its ordinal leaves the projection.
+    pub(crate) fn read_dead(&self) -> broadcast::Receiver<WorkerId> {
+        self.read_dead.subscribe()
     }
 
     /// Pin a per-worker `port_override` for `id` (the `static`/`simulated` per-worker

@@ -79,6 +79,7 @@
 //!   PROXY_HMAC_KEY   stickiness cookie secret, ≥ 16 bytes  (REQUIRED, no
 //!                    default; every proxy of a cluster shares it); a key
 //!                    derived from it keys the To-tags of the proxy's own finals
+//!   PROXY_CLUSTER_KEY  the workers' shared key, signing dead notices (none)
 //!   HEALTH_INTERVAL_MS / HEALTH_TIMEOUT_MS  OPTIONS probe tick and reply
 //!                    window, ms ≥ 1                  (default 1000 / 1500)
 //!   HEALTH_THRESHOLD  consecutive misses that mark a worker Dead, ≥ 1
@@ -252,7 +253,7 @@ async fn run() -> Result<i32, String> {
     // readings of a SINGLE monotonic-anchored timeline.
     let clock = Clock::checked_system().map_err(|e| e.to_string())?;
     let metrics = Arc::new(ProxyMetrics::new());
-    let Sockets { metrics: metrics_listener, shards, probe: probe_ep } =
+    let Sockets { metrics: metrics_listener, shards, probe: probe_ep, notice: notice_ep } =
         bind_sockets(&cfg, &clock, &metrics).await?;
 
     let hmac = Arc::new(
@@ -449,7 +450,7 @@ async fn run() -> Result<i32, String> {
             .map_err(|e| format!("metrics server on {metrics_sa} failed to start: {e}"))?;
     tracing::info!(addr = %_metrics_server.addr(), "metrics server listening (/metrics, readiness /readyz, VRRP check /vrrp)");
 
-    let probe_task = tokio::spawn(probe.run());
+    let probe_task = tokio::spawn(shared.health(probe, notice_ep, cfg.cluster_key.clone()));
     let mut core_tasks = tokio::task::JoinSet::new();
     for core in cores {
         core_tasks.spawn(core.run());
@@ -489,7 +490,7 @@ async fn run() -> Result<i32, String> {
             1
         }
         res = probe_task => {
-            tracing::error!(outcome = ?res, "FATAL: health probe exited — exiting for restart");
+            tracing::error!(outcome = ?res, "FATAL: health probe or dead notifier exited — exiting for restart");
             1
         }
     };

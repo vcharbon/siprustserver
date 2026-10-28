@@ -420,6 +420,11 @@ spec:
             secretKeyRef:
               key: key
               name: sip-front-proxy-hmac
+        - name: PROXY_CLUSTER_KEY
+          valueFrom:
+            secretKeyRef:
+              key: key
+              name: b2bua-worker-cluster-key
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: http://172.20.0.1:10428/insert/opentelemetry
         - name: PROXY_ADVERTISE

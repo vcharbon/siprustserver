@@ -37,6 +37,10 @@ of the headless b2bua-worker Service (ADR-0012 D4).
 {{- end }}
 {{- include "siprust.overlayEnv" (dict "into" $env "from" $p.env) }}
 {{- $hmacSecret := $p.hmac.existingSecret | default "sip-front-proxy-hmac" }}
+{{- $clusterKeySecret := "" }}
+{{- if .Values.worker.replication.enabled }}
+{{- $clusterKeySecret = required "worker.clusterKey.existingSecret: replication needs the Secret of the workers' shared key (ADR-0055 §12)" .Values.worker.clusterKey.existingSecret }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -107,6 +111,11 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ $hmacSecret }}, key: kid } }
             - name: PROXY_HMAC_KEY
               valueFrom: { secretKeyRef: { name: {{ $hmacSecret }}, key: key } }
+            {{- with $clusterKeySecret }}
+            # The workers' shared key the dead notice is signed with (ADR-0050 §3).
+            - name: PROXY_CLUSTER_KEY
+              valueFrom: { secretKeyRef: { name: {{ . }}, key: key } }
+            {{- end }}
             {{- with include "siprust.envMap" (dict "root" $ "env" $env) | trim }}{{ . | nindent 12 }}{{- end }}
             {{- with $p.extraEnv }}
             {{- toYaml . | nindent 12 }}

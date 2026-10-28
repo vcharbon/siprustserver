@@ -1,14 +1,15 @@
 //! The recv shards' shared routing state, and what is built over it: each
-//! shard's core, the health probe and the probe routes, all on ONE first
-//! worker view (ADR-0050 §11).
+//! shard's core, the health probe with the dead notifier, and the probe
+//! routes, all on ONE first worker view (ADR-0050 §3, §11).
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use sip_clock::Clock;
+use sip_ids::SigningKey;
 use sip_net::UdpEndpoint;
 use sip_proxy::cancel_lru::CancelBranchLru;
-use sip_proxy::health::{FirstView, HealthProbe, HealthProbeConfig};
+use sip_proxy::health::{DeadNotifier, FirstView, HealthProbe, HealthProbeConfig};
 use sip_proxy::liveness::ShardPulse;
 use sip_proxy::load_observer::WorkerLoadObserver;
 use sip_proxy::parse_refusals::ParseRefusals;
@@ -89,6 +90,33 @@ impl SharedRouting {
         )
         .with_metrics(self.metrics.clone())
         .with_first_view(self.first_view.clone())
+    }
+
+    /// `probe` and the dead notifier on `notice` (ADR-0050 §3), signing with
+    /// `key`, run until either ends. With no key no dead verdict is told, and
+    /// the backups take a dead worker's calls over on the next message that
+    /// reaches them.
+    pub fn health(
+        &self,
+        probe: HealthProbe,
+        notice: Box<dyn UdpEndpoint>,
+        key: Option<SigningKey>,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let (registry, clock, id_gen) =
+            (self.registry.clone(), self.clock.clone(), self.id_gen.clone());
+        let notifier = key.map(|key| DeadNotifier::new(notice, registry, key, clock, id_gen));
+        if notifier.is_none() {
+            tracing::warn!("PROXY_CLUSTER_KEY unset: no dead verdict is told to the workers");
+        }
+        async move {
+            match notifier {
+                Some(notifier) => tokio::select! {
+                    () = probe.run() => {}
+                    () = notifier.run() => {}
+                },
+                None => probe.run().await,
+            }
+        }
     }
 
     /// The probe routes, read from the shards' pulse and the first view; a

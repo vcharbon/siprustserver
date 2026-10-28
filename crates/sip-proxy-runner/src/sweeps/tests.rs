@@ -32,6 +32,9 @@ impl WorkerRegistry for PanicsOnce {
     fn synced(&self) -> bool {
         true
     }
+    fn read_dead(&self) -> tokio::sync::broadcast::Receiver<String> {
+        tokio::sync::broadcast::channel(1).1
+    }
 }
 
 #[tokio::test(start_paused = true)]
