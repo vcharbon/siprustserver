@@ -686,3 +686,47 @@ async fn an_ending_ranked_higher_still_ends_a_relay_a_retired_dialog_holds_here(
 
     assert_eq!(n.metrics.repl_copies_diverged_total(), 1, "the record ends the call");
 }
+
+/// `copy` ringing the caller from this node: the 180 it relayed opened the
+/// caller's early dialog under its own tag, fronting callee leg `b-1`'s early
+/// dialog.
+fn ringing_here(mut copy: Enveloped) -> Enveloped {
+    let mut leg = call::testkit::dialled_leg("b-1", "dialled-tag");
+    leg.dialogs.insert(call::Dialog::new("dialled-tag", "callee-tag", call::DialogState::Early, 1));
+    copy.call.b_legs.push(leg);
+    copy.call.a_leg.own_tag = Some("ringing-tag".into());
+    let d = call::Dialog::new("ringing-tag", "caller-tag", call::DialogState::Early, 0);
+    copy.call.a_leg.dialogs.insert(d);
+    copy
+}
+
+/// `copy` ended by the caller's CANCEL before any 1xx reached her from it:
+/// she took a 487, and leg `b-1`'s INVITE was CANCELled and took its 487, no
+/// dialog of either kept.
+fn cancelled_before_any_ringing(mut copy: Enveloped) -> Enveloped {
+    *copy.call.a_leg.invite_final_sent_mut() = Some(487);
+    let mut leg = call::testkit::dialled_leg("b-1", "dialled-tag");
+    let invite = leg.outbound_invite_mut().expect("the dialled INVITE");
+    invite.cancel_sent = true;
+    invite.record_final(487);
+    copy.call.b_legs.push(leg);
+    copy
+}
+
+/// **The end over two diverged copies keeps the model whole.** The record
+/// rang the caller from the callee's early dialog; the backup, behind the
+/// split, took her CANCEL and both INVITEs' 487s. The union keeps the
+/// record's dialogs: the caller's under her leg's own tag, and every early
+/// dialog of a leg whose INVITE took a final ended by it (RFC 3261 §12.1).
+#[tokio::test(start_paused = true)]
+async fn the_end_over_a_cancelled_copy_ends_the_early_dialogs_the_record_holds() {
+    let mut n = node("w0").await;
+    let live = ringing_here(base(6, 1));
+    let ended = cancelled_before_any_ringing(unanswered(4, 2, CallModelState::Terminated));
+    meet(&n, &live, &ended, FlushDirection::Reverse, MaterialiseOrigin::Reclaim).await;
+
+    assert_eq!(n.metrics.repl_copies_diverged_total(), 1, "the record ends the call");
+    let violated: Vec<String> =
+        n.take_violations().iter().filter_map(|v| v.lines().next().map(String::from)).collect();
+    assert_eq!(violated, Vec::<String>::new(), "the union states the model");
+}

@@ -126,12 +126,9 @@ update/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: W-clean-e
 # finding.
 basic/off/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message reaches the backup before the caller gives up: her 100 arrived, so she sends no copy, and the INVITE never reached the callee
 cancel/applied/primary-killed-unannounced/t1-left ADR-0055 §11  # unannounced: the callee's 180 is lost with the node, so the caller never rings and never CANCELs; the callee's 200 then takes the call over and answers it
-cancel/applied/split-healed/t2-logged ADR-0055 §7  # the clean end of two diverged copies leaves leg a's dialogs with no own tag (model invariant own-tag-names-a-dialog)
 cancel/off/primary-killed-unannounced/t1-applied ADR-0055 §11  # unannounced: the callee's 180 is lost with the node, so the caller never rings and never CANCELs; the callee's 200 then takes the call over and answers it
 cancel/off/primary-killed-unannounced/t1-left ADR-0055 §11  # unannounced: the callee's 180 is lost with the node, so the caller never rings and never CANCELs; the callee's 200 then takes the call over and answers it
 cancel/off/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message reaches the backup before the caller gives up: her 100 arrived, so she sends no copy, and the INVITE never reached the callee
-cancel/off/split-healed/t2-left ADR-0055 §7  # the clean end of two diverged copies leaves leg a's dialogs with no own tag (model invariant own-tag-names-a-dialog)
-cancel/off/split-healed/t2-logged ADR-0055 §7  # the clean end of two diverged copies leaves leg a's dialogs with no own tag (model invariant own-tag-names-a-dialog)
 forked/off/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message reaches the backup before the caller gives up: her 100 arrived, so she sends no copy, and the INVITE never reached the callee
 info-x-bye/off/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message reaches the backup before the caller gives up: her 100 arrived, so she sends no copy, and the INVITE never reached the callee
 info/off/primary-killed-unannounced/t1-logged ADR-0055 §11  # unannounced: no message reaches the backup before the caller gives up: her 100 arrived, so she sends no copy, and the INVITE never reached the callee

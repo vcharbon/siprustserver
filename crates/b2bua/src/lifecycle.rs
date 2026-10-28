@@ -17,9 +17,10 @@ use observe::{WaveReport, WaveSet};
 /// Acting-backup takeover, keyed by the dead peer whose partition we are
 /// serving: `hydrated` (calls loaded off the replica), `resolved` (in-dialog
 /// requests re-keyed through the replica index), `self_released` (takeover
-/// copies shed once their transactions cleared) and `refused_terminated` (a
-/// released copy's `Terminated` replica refused, the datagram falling to the
-/// orphan path) fold into ONE episode per peer.
+/// copies shed once their transactions cleared), `stood_down` (copies a
+/// returning primary stood down) and `refused_terminated` (a released
+/// copy's `Terminated` replica refused, the datagram falling to the orphan
+/// path) fold into ONE episode per peer.
 pub fn takeover_waves() -> Arc<WaveSet> {
     WaveSet::new(|peer: &str, r: &WaveReport| {
         tracing::info!(
@@ -226,6 +227,8 @@ mod tests {
         for _ in 0..5_000 {
             waves.record("w-3", "self_released", 1);
         }
+        waves.record("w-3", "stood_down", 1);
+        waves.record("w-3", "refused_terminated", 1);
         // Let the episode's driver task arm its timer before moving the clock,
         // then advance exactly to the idle window that closes the episode.
         tokio::task::yield_now().await;
@@ -233,12 +236,15 @@ mod tests {
         tokio::task::yield_now().await;
 
         let lines = log.matching("acting-backup takeover");
-        assert!(lines.len() <= 4, "15000 events must not print 15000 lines: {lines:?}");
+        assert!(lines.len() <= 4, "15002 events must not print 15002 lines: {lines:?}");
         assert!(lines[0].contains("edge=rising"), "{:?}", lines[0].line());
         let last = lines.last().expect("the episode closes");
         assert!(last.contains("edge=falling"), "{}", last.line());
         assert!(
-            last.contains("totals=hydrated=5000 resolved=5000 self_released=5000"),
+            last.contains(
+                "totals=hydrated=5000 resolved=5000 self_released=5000 stood_down=1 \
+                 refused_terminated=1"
+            ),
             "the falling edge carries the episode totals: {}",
             last.line(),
         );

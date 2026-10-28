@@ -136,8 +136,9 @@ fn only_here_to_end(live: &Call, ending: &Call, by: &RelayOwner) -> bool {
 /// that copy's INVITE exchange and owed answer, the higher of each sequence,
 /// and the remote target and route set of the copy that read the peer's later request (a
 /// target refresh is the peer's request, RFC 3261 §12.2); a leg only `other`
-/// dialled; the caller answered when `other` answered her, and every early
-/// dialog of hers ended once she took a final. A leg id names one leg in both
+/// dialled; a leg's own tag where `base` holds none; the caller answered, under
+/// `other`'s own tag, when `other` answered her; and every early dialog of a
+/// leg whose INVITE took a final ended by it. A leg id names one leg in both
 /// copies: two copies acting at once mint from distinct leg-id spaces
 /// (`call::LegSpace`). The request records of the union are those of `live`
 /// the worker `by` made: this node's teardown answers its own transactions,
@@ -153,15 +154,16 @@ fn union_of(base: Enveloped, other: &Call, live: &Call, by: &RelayOwner) -> Enve
     }
     if caller_answered(other) && !caller_answered(&base) {
         *base.a_leg.invite_final_sent_mut() = other.a_leg.invite_final_sent();
+        base.a_leg.own_tag.clone_from(&other.a_leg.own_tag);
     }
-    // The caller's final ends every early dialog of her INVITE (RFC 3261
+    // A leg's INVITE final ends every early dialog of that INVITE (RFC 3261
     // §12.1, §13.2.2.4), the other copy's included.
-    match base.a_leg.invite_final_sent() {
-        Some(status) if status >= 300 => {
-            call::helpers::reject_early_dialogs(&mut base.a_leg, status)
+    for leg in std::iter::once(&mut base.a_leg).chain(base.b_legs.iter_mut()) {
+        match leg.invite_final() {
+            Some(status) if status >= 300 => call::helpers::reject_early_dialogs(leg, status),
+            Some(_) => call::helpers::retire_early_dialogs(leg),
+            None => {}
         }
-        Some(_) => call::helpers::retire_early_dialogs(&mut base.a_leg),
-        None => {}
     }
     Enveloped::new(own_records(base, live, by), topology)
 }
@@ -194,6 +196,9 @@ pub(super) fn own_records(mut call: Call, live: &Call, by: &RelayOwner) -> Call 
 fn union_leg(ours: &mut Leg, theirs: &Leg) {
     if ours.call_id != theirs.call_id {
         return;
+    }
+    if ours.own_tag.is_none() {
+        ours.own_tag.clone_from(&theirs.own_tag);
     }
     for d in theirs.dialogs.iter() {
         match ours.dialogs.by_tags_mut(&d.our_tag, &d.peer_tag) {

@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use b2bua::config::CdrConfig;
-use b2bua::decision::test_adapter::{reject, route_to};
+use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
     CallReferRequest, CallReferResponse, CallTreatment, NewCallRequest, NewCallResponse,
