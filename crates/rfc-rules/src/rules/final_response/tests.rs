@@ -197,23 +197,41 @@ const T1_64_US: u64 = 32_000_000;
 /// T4 over UDP, in µs: Timer I.
 const T4_US: u64 = 5_000_000;
 
-/// §17.2.2: a non-INVITE server transaction ends at Timer J, 64·T1 after its
-/// final. A final sent later on its branch answers a request that opened a
-/// new transaction, and is that transaction's one final.
+/// A request the UAC sent the UAS on `branch` for a `method` transaction:
+/// the arrival that opens a server transaction (§17.2.3).
+fn req(at_us: u64, branch: &str, method: &str) -> Msg {
+    let mut m = rsp(at_us, 0, branch, method);
+    std::mem::swap(&mut m.src, &mut m.dst);
+    m.kind = Kind::Request { method: method.to_string() };
+    m
+}
+
+/// §17.2.2, §17.2.3: a non-INVITE server transaction ends at Timer J, 64·T1
+/// after its final, and a new one exists only once a request on its key
+/// arrives after that end. A final past Timer J with no such request is the
+/// old transaction's second final; one after such a request is the new
+/// transaction's one final.
 #[test]
 fn a_non_invite_server_transaction_ends_at_timer_j() {
     let cancel = |at_us, status| rsp(at_us, status, "z9hG4bK-c", "CANCEL");
-    let inside = eval(&[cancel(1_000, 200), cancel(1_000 + T1_64_US - 1, 481)]);
-    assert_eq!(inside.len(), 1, "{inside:?}");
-    assert!(inside[0].violated(), "inside Timer J: {:?}", inside[0].decision);
+    let copy = |at_us| req(at_us, "z9hG4bK-c", "CANCEL");
+    let ends = 1_000 + T1_64_US;
+    let inside = eval(&[cancel(1_000, 200), cancel(ends - 1, 481)]);
+    assert!(inside.len() == 1 && inside[0].violated(), "inside Timer J: {inside:?}");
 
-    let past = eval(&[cancel(1_000, 200), cancel(1_000 + T1_64_US, 481)]);
-    assert!(past.is_empty(), "two transactions, each answered once: {past:?}");
+    let unasked = eval(&[cancel(1_000, 200), cancel(ends + 1_000, 481)]);
+    assert!(unasked.len() == 1 && unasked[0].violated(), "no request opened one: {unasked:?}");
+
+    let early_copy = eval(&[cancel(1_000, 200), copy(ends - 1), cancel(ends + 1_000, 481)]);
+    assert!(early_copy.len() == 1 && early_copy[0].violated(), "inside J: {early_copy:?}");
+
+    let asked = eval(&[cancel(1_000, 200), copy(ends), cancel(ends + 1_000, 481)]);
+    assert!(asked.is_empty(), "two transactions, each answered once: {asked:?}");
 
     // The new transaction is judged on its own: its own second final, of
     // another status, is its own violation.
-    let later = 1_000 + T1_64_US;
-    let f = eval(&[cancel(1_000, 200), cancel(later, 481), cancel(later + 1_000, 500)]);
+    let later = ends + 1_000;
+    let f = eval(&[cancel(1_000, 200), copy(ends), cancel(later, 481), cancel(later + 1_000, 500)]);
     assert_eq!(f.len(), 1, "{f:?}");
     let Decision::Violated(Evidence::MultipleFinals { first_status, second_status, .. }) =
         &f[0].decision
@@ -225,18 +243,24 @@ fn a_non_invite_server_transaction_ends_at_timer_j() {
 
 /// §17.2.1: an INVITE server transaction answered non-2xx ends at Timer H
 /// then Timer I, 64·T1 + T4 after its final at the latest; one answered 2xx
-/// at 64·T1, the end of the 2xx's retransmission (§13.3.1.4).
+/// at 64·T1, the end of the 2xx's retransmission (§13.3.1.4). A later final
+/// with no INVITE copy arrived after that end is still its second final.
 #[test]
 fn an_invite_server_transaction_ends_with_its_own_timers() {
-    let inside = eval(&[inv(1_000, 486), inv(1_000 + T1_64_US + T4_US - 1, 480)]);
+    let copy = |at_us| req(at_us, "z9hG4bK-1", "INVITE");
+    let ends = 1_000 + T1_64_US + T4_US;
+    let inside = eval(&[inv(1_000, 486), copy(ends - 1), inv(ends, 480)]);
     assert!(inside.len() == 1 && inside[0].violated(), "inside Timer I: {inside:?}");
-    let past = eval(&[inv(1_000, 486), inv(1_000 + T1_64_US + T4_US, 480)]);
-    assert!(past.is_empty(), "past Timer I: {past:?}");
+    let past = eval(&[inv(1_000, 486), copy(ends), inv(ends + 1_000, 480)]);
+    assert!(past.is_empty(), "past Timer I, a new INVITE: {past:?}");
 
-    let inside = eval(&[inv(1_000, 200), inv(1_000 + T1_64_US - 1, 481)]);
+    let ends = 1_000 + T1_64_US;
+    let unasked = eval(&[inv(1_000, 200), inv(ends + 1_000, 408)]);
+    assert!(unasked.len() == 1 && unasked[0].violated(), "a 2xx then a 408: {unasked:?}");
+    let inside = eval(&[inv(1_000, 200), copy(ends - 1), inv(ends, 481)]);
     assert!(inside.len() == 1 && inside[0].violated(), "inside 64·T1: {inside:?}");
-    let past = eval(&[inv(1_000, 200), inv(1_000 + T1_64_US, 481)]);
-    assert!(past.is_empty(), "past 64·T1: {past:?}");
+    let past = eval(&[inv(1_000, 200), copy(ends), inv(ends + 1_000, 481)]);
+    assert!(past.is_empty(), "past 64·T1, a new INVITE: {past:?}");
 }
 
 /// Without a branch the finals cannot be split into transactions, so an

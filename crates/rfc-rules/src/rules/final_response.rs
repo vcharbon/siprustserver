@@ -17,13 +17,15 @@
 //! along so a view carrying many calls, or a fixture reusing one hard-coded
 //! branch, cannot fold two transactions into one key.
 //!
-//! **A transaction ends with its timers.** A final sent on the key after the
-//! transaction it answered has ended answers a request that opened a new one
-//! (§17.2.3 matches no ended transaction), and opens that one's own occasion:
-//! a non-INVITE transaction ends at Timer J, 64·T1 after its first final
+//! **A transaction ends with its timers, and a new one needs a request.** A
+//! non-INVITE transaction ends at Timer J, 64·T1 after its first final
 //! (§17.2.2); an INVITE one answered non-2xx at Timer H then Timer I, 64·T1 +
 //! T4 at the latest (§17.2.1); one answered 2xx when its 2xx is no longer
-//! retransmitted, 64·T1 (§13.3.1.4). Each bound is the latest end over UDP.
+//! retransmitted, 64·T1 (§13.3.1.4). Each bound is the latest end over UDP. A
+//! request on the key arriving at the emitter after that end opens a new
+//! transaction (§17.2.3 matches no ended one), and the next final is that
+//! transaction's own occasion. A final with no such request before it is
+//! still the old transaction's, however late.
 //!
 //! **Every divergent status is reported exactly once, all on ONE finding.** The
 //! evidence carries them in emission order, so a transaction answered 487 then
@@ -85,7 +87,9 @@ impl Obligation for SingleFinalPerServerTxn {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
         for (key, finals) in &seen.txns {
-            out.extend(transactions(&key.method, finals).filter_map(|txn| judge(key, txn)));
+            let arrivals = seen.arrivals.get(key).map_or(&[][..], Vec::as_slice);
+            let txns = transactions(&key.method, finals, arrivals);
+            out.extend(txns.filter_map(|txn| judge(key, txn)));
         }
         // Observation order, so a ladder and the report read the same way.
         out.sort_by_key(|f| f.anchor);
@@ -93,18 +97,21 @@ impl Obligation for SingleFinalPerServerTxn {
     }
 }
 
-/// The finals on one key split into the transactions they answered: a final at
-/// or past the end of the transaction the run's first final completed opens
-/// the next one.
+/// The finals on one key split into the transactions they answered: a final
+/// opens the next transaction when a request on the key, one of `arrivals`,
+/// reached the emitter between the end of the transaction the run's first
+/// final completed and that final.
 fn transactions<'a>(
     method: &'a str,
     finals: &'a [Final<'a>],
+    arrivals: &'a [u64],
 ) -> impl Iterator<Item = &'a [Final<'a>]> {
     let mut rest = finals;
     std::iter::from_fn(move || {
         let first = rest.first()?;
         let ends_us = first.ts_us.saturating_add(lifetime_us(method, first.status));
-        let len = rest.iter().position(|f| f.ts_us >= ends_us).unwrap_or(rest.len());
+        let opens = |f: &Final<'_>| arrivals.iter().any(|at| (ends_us..=f.ts_us).contains(at));
+        let len = rest.iter().position(opens).unwrap_or(rest.len());
         let (txn, next) = rest.split_at(len);
         rest = next;
         Some(txn)
@@ -273,10 +280,11 @@ impl Obligation for No1xxAfterFinal {
 }
 
 /// Every final each endpoint sent on each server transaction, in emission
-/// order.
+/// order, and when each request on that key reached it, repeats included.
 #[derive(Debug, Default)]
 struct Reading<'a> {
     txns: BTreeMap<TxnKey<'a>, Vec<Final<'a>>>,
+    arrivals: BTreeMap<TxnKey<'a>, Vec<u64>>,
 }
 
 impl<'a> Reading<'a> {
@@ -288,8 +296,13 @@ impl<'a> Reading<'a> {
         seen
     }
 
-    /// Absorb one message: a fresh final response the message's SENDER emitted.
+    /// Absorb one message: a request reaching its receiver, or a fresh final
+    /// response the message's SENDER emitted.
     fn absorb(&mut self, mi: usize, msg: &'a Msg) {
+        if msg.status().is_none() {
+            self.arrivals.entry(TxnKey::received_by(msg)).or_default().push(msg.at_us);
+            return;
+        }
         if msg.repeat {
             return;
         }
@@ -321,6 +334,11 @@ struct TxnKey<'a> {
 }
 
 impl<'a> TxnKey<'a> {
+    /// The transaction `msg`'s RECEIVER is the UAS side of — a request coming in.
+    fn received_by(msg: &'a Msg) -> Self {
+        TxnKey { emitter: msg.dst.as_str(), ..Self::emitted_by(msg) }
+    }
+
     /// The transaction `msg`'s SENDER is the UAS side of — a response going out.
     fn emitted_by(msg: &'a Msg) -> Self {
         TxnKey {
