@@ -41,7 +41,7 @@ pub mod witness;
 pub use limiter::{LimiterCount, LimiterLeak, LimiterProbe, DEFAULT_LIMITER_ID};
 pub use proxy_core::{spawn_proxy_core, spawn_proxy_core_with, ExternalProxyFace, ProxyCoreParts};
 pub use scene::{B2buaScene, ALICE_PORT, B2BUA_PORT, BOB_PORT};
-pub use spawn_params::B2buaSpawnParams;
+pub use spawn_params::{cluster_key, B2buaSpawnParams};
 use terminated::{TerminatedCalls, TerminatedCallsWriter};
 pub use witness::{WitnessRig, WITNESS_IDS, WITNESS_LIMITER_ADDR};
 
@@ -105,7 +105,7 @@ pub fn spawn_b2bua_core(
         // Every harness B2BUA checks the model invariants after each turn, and
         // shares one cluster key with every other (ADR-0055 §12).
         model_invariants: true,
-        cluster_key: sip_ids::SigningKey::new(b"harness-cluster-key-000000000000"),
+        cluster_key: Some(cluster_key()),
         ..Default::default()
     };
     tune(&mut config);

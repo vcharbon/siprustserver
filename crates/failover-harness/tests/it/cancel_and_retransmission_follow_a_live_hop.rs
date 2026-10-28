@@ -23,7 +23,7 @@ use b2bua::decision::ScriptedDecisionEngine;
 use failover_harness::{worker_ordinals, FailoverHarness, WorkerHealth};
 use sip_message::Method;
 
-use crate::departure_support::{bring_up_deciding, placed, CountedDecision};
+use crate::departure_support::{bring_up_deciding, bring_up_reactive, placed, CountedDecision};
 use crate::inflight_resend::{
     assert_not_taken_over, assert_taken_over_once, bring_up, establish, kill_serving_node,
     last_request_sent, reboot_and_reclaim, round_invites_sent_to, settle_to_one_cdr, split_mut,
@@ -49,7 +49,9 @@ async fn a_retransmission_sent_to_the_backup_of_a_live_primary_dials_no_second_c
     let bob = fh.agent("bob", BOB).await;
     let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
     let (decision, _consults) = CountedDecision::counting(route, Duration::from_secs(3));
-    let (proxy, w_b1, w_b2) = bring_up_deciding(&mut fh, decision).await;
+    let (mut proxy, w_b1, w_b2) = bring_up_deciding(&mut fh, decision).await;
+    // The reactive path: the proxy tells no dead verdict (ADR-0050 §3).
+    proxy.tell_no_dead_verdict();
 
     // ── the caller hears nothing; the primary holds the INVITE undecided ────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
@@ -99,7 +101,9 @@ async fn a_cancel_after_a_misread_retransmission_goes_to_the_live_primary() {
     let bob = fh.agent("bob", BOB).await;
     let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
     let (decision, _consults) = CountedDecision::counting(route, Duration::from_secs(3));
-    let (proxy, w_b1, w_b2) = bring_up_deciding(&mut fh, decision).await;
+    let (mut proxy, w_b1, w_b2) = bring_up_deciding(&mut fh, decision).await;
+    // The reactive path: the proxy tells no dead verdict (ADR-0050 §3).
+    proxy.tell_no_dead_verdict();
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     fh.cut_signalling("alice", alice.addr());
@@ -157,7 +161,7 @@ async fn a_retransmission_placed_afresh_on_the_backup_draws_the_replicated_2xx()
     let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
-    let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
+    let (proxy, mut w_b1, mut w_b2) = bring_up_reactive(&mut fh).await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     fh.cut_signalling("alice", alice.addr());
@@ -247,7 +251,7 @@ async fn an_initial_invite_retransmitted_after_an_unannounced_kill_draws_the_rep
     let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
-    let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
+    let (proxy, mut w_b1, mut w_b2) = bring_up_reactive(&mut fh).await;
 
     // ── the caller hears nothing: her 100 and her 2xx are lost ───────────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;

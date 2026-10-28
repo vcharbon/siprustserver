@@ -32,6 +32,7 @@ use std::sync::atomic::{AtomicUsize, Ordering, Ordering::SeqCst};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::departure_support::spawn_reactive_proxy;
 use call::{Ladder, MsgpackCodec, Provisional, Repeat};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
@@ -108,8 +109,7 @@ async fn prack_after_takeover_translates_the_rack_and_relays_the_answer() {
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
 
-    let proxy =
-        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let proxy = spawn_reactive_proxy(&fh).await;
     let mut w_b1 =
         fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     let mut w_b2 =
@@ -278,8 +278,7 @@ async fn prack_naming_an_unshown_rseq_after_takeover_draws_481() {
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
 
-    let proxy =
-        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let proxy = spawn_reactive_proxy(&fh).await;
     let mut w_b1 =
         fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     let mut w_b2 =
@@ -418,8 +417,7 @@ async fn non_2xx_b_leg_final_after_a_takeover_reaches_the_caller_and_acks_the_ca
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
 
-    let proxy =
-        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let proxy = spawn_reactive_proxy(&fh).await;
     let mut w_b1 =
         fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     let mut w_b2 =
@@ -562,8 +560,7 @@ async fn the_callers_ack_for_a_post_takeover_reject_reaches_the_survivor_that_se
         .await;
     let bob = fh.agent("bob", BOB).await;
 
-    let proxy =
-        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let proxy = spawn_reactive_proxy(&fh).await;
     let mut w_b1 =
         fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     let mut w_b2 =
@@ -752,8 +749,7 @@ async fn a_lost_takeover_ack_is_resent_when_the_callee_retransmits_its_final() {
         )
         .await;
 
-    let proxy =
-        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let proxy = spawn_reactive_proxy(&fh).await;
     let mut w_b1 =
         fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     let mut w_b2 =

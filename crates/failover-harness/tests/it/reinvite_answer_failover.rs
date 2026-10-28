@@ -20,7 +20,7 @@ use std::time::Duration;
 use failover_harness::FailoverHarness;
 use sip_message::generators::InDialogMethod;
 
-use crate::departure_support::kill_announced;
+use crate::departure_support::{bring_up_reactive, kill_announced};
 use crate::inflight_resend::{
     bring_up, establish, kill_serving_node, reboot_and_reclaim, settle_to_one_cdr, split_mut,
     survivor_of, synchronized_call_ref, REANSWER, REOFFER, REPLICATE,
@@ -34,7 +34,7 @@ async fn a_reinvite_answered_after_the_kill_completes_on_the_survivor() {
     let mut fh = FailoverHarness::new("reinvite-answer-failover", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
-    let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
+    let (proxy, mut w_b1, mut w_b2) = bring_up_reactive(&mut fh).await;
 
     let (mut dialog, pri_ord) = establish(&fh, &alice, &bob, &proxy).await;
     let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;

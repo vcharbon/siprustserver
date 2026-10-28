@@ -32,6 +32,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::departure_support::spawn_reactive_proxy;
 use b2bua::decision::test_adapter::route_to_with_18x;
 use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
 use b2bua::limiter::NoopLimiter;
@@ -49,7 +50,6 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 
 const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
-const PROXY: &str = "127.0.0.1:5080";
 const B1: &str = "127.0.0.1:5091";
 const B2: &str = "127.0.0.1:5092";
 
@@ -127,8 +127,7 @@ async fn a_repeat_after_takeover_draws_no_second_prack_from_the_survivor() {
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
 
-    let proxy =
-        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let proxy = spawn_reactive_proxy(&fh).await;
     let decision = decision_masking_the_first_18x();
     let mut w_b1 = fh
         .spawn_worker_limited(

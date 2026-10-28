@@ -14,6 +14,7 @@
 
 use std::time::Duration;
 
+use crate::departure_support::spawn_reactive_proxy;
 use call::parse_call_ref;
 use call::CdrEventType;
 use failover_harness::{
@@ -965,8 +966,7 @@ async fn matrix_crash_mid_invite() {
     let mut fh = FailoverHarness::new("s10b-crash-mid-invite", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
-    let proxy =
-        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let proxy = spawn_reactive_proxy(&fh).await;
     let mut w_b1 =
         fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     let mut w_b2 =

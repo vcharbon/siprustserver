@@ -17,10 +17,9 @@
 
 use failover_harness::FailoverHarness;
 
-use crate::departure_support::placed;
+use crate::departure_support::{bring_up_reactive, placed};
 use crate::inflight_resend::{
-    bring_up, kill_serving_node, reboot_and_reclaim, settle_to_one_cdr, split_mut, survivor_of,
-    REPLICATE,
+    kill_serving_node, reboot_and_reclaim, settle_to_one_cdr, split_mut, survivor_of, REPLICATE,
 };
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -32,7 +31,7 @@ async fn the_callers_copy_of_a_routed_unanswered_invite_takes_the_call_over() {
     let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
     let alice = fh.agent("alice", "127.0.0.1:5060").await;
     let bob = fh.agent("bob", "127.0.0.1:5070").await;
-    let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
+    let (proxy, mut w_b1, mut w_b2) = bring_up_reactive(&mut fh).await;
 
     fh.cut_signalling("bob", bob.addr());
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;

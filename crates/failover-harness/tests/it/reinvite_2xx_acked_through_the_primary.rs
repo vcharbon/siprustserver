@@ -69,7 +69,7 @@ async fn reinvite_2xx_acked_through_the_primary(name: &str, write: PrimaryWrite,
         fh,
         alice,
         bob,
-        proxy,
+        mut proxy,
         store,
         lh: _lh,
         w_b1,
@@ -80,6 +80,8 @@ async fn reinvite_2xx_acked_through_the_primary(name: &str, write: PrimaryWrite,
         mut bob_dialog,
         ..
     } = establish(name).await;
+    // The reactive path: the proxy tells no dead verdict (ADR-0050 §3).
+    proxy.tell_no_dead_verdict();
     let backup = if primary_ord == "b1" { &w_b2 } else { &w_b1 };
 
     proxy.set_health(&primary_ord, WorkerHealth::Dead);

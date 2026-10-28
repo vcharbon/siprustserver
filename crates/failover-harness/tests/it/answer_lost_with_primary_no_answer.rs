@@ -387,8 +387,10 @@ async fn an_answer_the_primary_never_replicated_draws_no_second_final_from_no_an
 /// re-answer the call the survivor established.
 #[tokio::test(start_paused = true)]
 async fn an_answer_served_by_the_takeover_copy_draws_no_second_final_from_no_answer() {
-    let Cluster { mut fh, alice, bob, proxy, mut w_b1, mut w_b2 } =
+    let Cluster { mut fh, alice, bob, mut proxy, mut w_b1, mut w_b2 } =
         spawn_cluster("078-answered-on-backup-then-reclaim").await;
+    // The reactive path: the proxy tells no dead verdict (ADR-0050 §3).
+    proxy.tell_no_dead_verdict();
 
     // ── ring: the route arms NoAnswer and the ringing version reaches the backup
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;

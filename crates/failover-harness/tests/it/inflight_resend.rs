@@ -515,7 +515,7 @@ async fn a_reinvite_in_flight_at_the_kill_is_served_on_the_peers_resend() {
     let mut fh = FailoverHarness::new("inflight-resend-reinvite", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
-    let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
+    let (proxy, mut w_b1, mut w_b2) = crate::departure_support::bring_up_reactive(&mut fh).await;
 
     let (mut dialog, pri_ord) = establish(&fh, &alice, &bob, &proxy).await;
     let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
@@ -589,7 +589,7 @@ async fn a_reinvite_retransmitted_after_another_takeover_is_absorbed_by_its_seed
     let mut fh = FailoverHarness::new("inflight-resend-reinvite-seed", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
-    let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
+    let (proxy, mut w_b1, mut w_b2) = crate::departure_support::bring_up_reactive(&mut fh).await;
 
     let (mut dialog, pri_ord) = establish(&fh, &alice, &bob, &proxy).await;
     let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
@@ -660,7 +660,7 @@ async fn a_cancel_in_flight_at_the_kill_is_served_on_the_peers_resend() {
     let mut fh = FailoverHarness::new("inflight-resend-cancel", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
-    let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
+    let (proxy, mut w_b1, mut w_b2) = crate::departure_support::bring_up_reactive(&mut fh).await;
 
     // ── A ringing call: the primary serves it, the backup is synchronized ────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;

@@ -492,12 +492,12 @@ impl<'a> Respond<'a> {
             }
         }
         // An explicit per-fork To-tag overrides (and does not disturb) the txn's
-        // sticky auto-minted tag, so distinct early dialogs keep distinct tags.
+        // sticky tag, the first fork's if any (RFC 3261 §12.1.1): each early dialog keeps its own.
         let to_tag = if let Some(t) = self.to_tag {
             Some(t)
         } else {
             if self.status > 100 && txn.to_tag.is_none() {
-                txn.to_tag = Some(txn.agent.tag());
+                txn.to_tag = txn.provisional_tag.clone().or_else(|| Some(txn.agent.tag()));
             }
             txn.to_tag.clone()
         };

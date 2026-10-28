@@ -119,7 +119,9 @@ async fn a_cancel_of_an_undecided_call_whose_node_died_is_answered_by_its_backup
     let bob = fh.agent("bob", BOB).await;
     let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
     let (decision, consults) = CountedDecision::counting(route, DECISION_DELAY);
-    let (proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
+    let (mut proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
+    // The reactive path: the proxy tells no dead verdict (ADR-0050 §3).
+    proxy.tell_no_dead_verdict();
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     call.expect(100).await;
@@ -152,7 +154,9 @@ async fn an_undecided_call_reclaimed_by_its_restarted_node_is_answered_503() {
     let bob = fh.agent("bob", BOB).await;
     let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
     let (decision, consults) = CountedDecision::counting(route, DECISION_DELAY);
-    let (proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
+    let (mut proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
+    // The reactive path: the proxy tells no dead verdict (ADR-0050 §3).
+    proxy.tell_no_dead_verdict();
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     call.expect(100).await;
@@ -197,7 +201,9 @@ async fn a_retransmission_placed_on_the_survivor_is_not_answered_for_the_departe
     let bob = fh.agent("bob", BOB).await;
     let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
     let (decision, consults) = CountedDecision::counting(route, DECISION_DELAY);
-    let (proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
+    let (mut proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
+    // The reactive path: the proxy tells no dead verdict (ADR-0050 §3).
+    proxy.tell_no_dead_verdict();
 
     // The node's 100 never reaches the caller, so it retransmits (§17.1.1.2).
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
@@ -209,7 +215,8 @@ async fn a_retransmission_placed_on_the_survivor_is_not_answered_for_the_departe
     fh.mark("proxy", None, "restart", "the front proxy restarts in place, its memo lost");
     drop(proxy);
     fh.advance(Duration::from_millis(10)).await;
-    let proxy = spawn_front_proxy(&fh).await;
+    let mut proxy = spawn_front_proxy(&fh).await;
+    proxy.tell_no_dead_verdict();
     proxy.set_health(&pri_ord, WorkerHealth::Dead);
     fh.restore_signalling("alice", alice.addr());
     fh.advance(Duration::from_millis(400)).await;

@@ -79,3 +79,10 @@ pub struct B2buaSpawnParams {
     /// and per-call trace facts name in a failure dump. `None` → `ordinal`.
     pub node: Option<String>,
 }
+
+/// The key every harness worker and front proxy shares (ADR-0055 §12,
+/// ADR-0050 §3).
+pub fn cluster_key() -> sip_ids::SigningKey {
+    #[expect(clippy::expect_used, reason = "a fixed 32-byte key")]
+    sip_ids::SigningKey::new(b"harness-cluster-key-000000000000").expect("a 32-byte key")
+}

@@ -20,7 +20,7 @@ async fn a_copy_stood_down_mid_round_takes_the_call_over_afresh_on_the_callees_a
         fh,
         alice,
         bob,
-        proxy,
+        mut proxy,
         store,
         lh: _lh,
         w_b1,
@@ -31,6 +31,8 @@ async fn a_copy_stood_down_mid_round_takes_the_call_over_afresh_on_the_callees_a
         mut bob_dialog,
         ..
     } = establish("copy-stood-down-mid-round").await;
+    // The reactive path: the proxy tells no dead verdict (ADR-0050 §3).
+    proxy.tell_no_dead_verdict();
     let backup = if primary_ord == "b1" { &w_b2 } else { &w_b1 };
 
     proxy.set_health(&primary_ord, WorkerHealth::Dead);

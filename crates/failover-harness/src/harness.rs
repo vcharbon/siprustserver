@@ -47,8 +47,6 @@ use repl_net::transport::ReplicationNetwork;
 use repl_net_testkit::{RecordingReplicationNetwork, SimulatedReplicationNetwork};
 use scenario_harness::{Agent, Harness};
 use sip_clock::Clock;
-use sip_proxy::health::{HealthProbe, HealthProbeConfig};
-use sip_proxy::registry::WorkerRegistry;
 use sip_txn::IdGen;
 use topology::{Peer, SimulatedMembership};
 
@@ -61,6 +59,7 @@ mod live;
 mod membership;
 mod peer_view;
 mod proxy_sut;
+mod proxy_tasks;
 mod release_all;
 mod repl_faults;
 mod repl_wiring;
@@ -1228,41 +1227,16 @@ impl FailoverHarness {
         let parts = node.enter(|| spawn_proxy_core(ep, sock, workers, self.clock.clone()));
         let b2bua_harness::ProxyCoreParts { addr: sock, registry, metrics, observer, task } = parts;
 
-        // Optional REAL health probe: its own bound endpoint on the fabric, the
-        // registry's control seam. Cadence is 10 s / 1.5 s — NOT the production
-        // 1 s tick. Every tick fans a real sip-txn OPTIONS to every worker, and
-        // under the paused clock that churn is pure CPU (each probe = client txn
-        // + worker server txn + Timer E/F/J entries + recorded-trace events the
-        // Drop-time RFC audit must scan): at the production cadence the long
-        // keepalive cell (≈700 sim-seconds pumped in 100 ms chunks) ran ~420 s
-        // wall, ~10 s at this cadence (super-linear: trace-scanning costs grow
-        // with probe-event count). Nothing under test depends on the tick period
-        // — cells pump until a health transition is observed (`reboot_and_reclaim` waits for
-        // Alive, kill/drain set health directly) — so a slower tick is
-        // semantics-preserving. Keep both values multiples of the 100 ms advance
-        // chunk so there is no paused-clock reply race.
-        let probe_task = if let Some(paddr) = probe_addr {
-            let (probe_ep, _psock) = self.harness.bind_sut("proxy-probe", paddr).await;
-            let registry_dyn: Arc<dyn WorkerRegistry> = Arc::new(registry.clone());
-            let control = registry.control();
-            let probe = HealthProbe::new(
-                probe_ep,
-                registry_dyn,
-                control,
-                observer,
-                self.clock.clone(),
-                Arc::new(IdGen::seeded(0x9809BE)),
-                HealthProbeConfig { interval_ms: 10_000, timeout_ms: 1_500, threshold: 2 },
-            );
-            Some(tokio::spawn(node.scope(probe.run())))
-        } else {
-            None
+        let probe_task = match probe_addr {
+            Some(at) => Some(self.spawn_health_probe(&node, at, &registry, observer).await),
+            None => None,
         };
 
+        let notices = self.spawn_dead_notifier(&node, sock, &registry).await;
         // The registry is the `proxy` observer's source — the ledger samples it
         // for presence ⊕ health after every advance chunk.
         self.views.attach_proxy(registry.clone());
-        ProxySut { addr: sock, ext_addr: None, registry, metrics, task, probe_task, node }
+        ProxySut { addr: sock, ext_addr: None, registry, metrics, task, probe_task, notices, node }
     }
 
     /// Stand up a **dual-face** load-balancing proxy SUT: the internal face at
@@ -1318,6 +1292,7 @@ impl FailoverHarness {
         });
         let b2bua_harness::ProxyCoreParts { addr: sock, registry, metrics, observer: _, task } =
             parts;
+        let notices = self.spawn_dead_notifier(&node, sock, &registry).await;
         ProxySut {
             addr: sock,
             ext_addr: Some(ext_sock),
@@ -1325,6 +1300,7 @@ impl FailoverHarness {
             metrics,
             task,
             probe_task: None,
+            notices,
             node,
         }
     }

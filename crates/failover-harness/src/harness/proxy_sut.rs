@@ -30,6 +30,10 @@ pub struct ProxySut {
     ///
     /// [`FailoverHarness::spawn_proxy_with_health_probe`]: super::FailoverHarness::spawn_proxy_with_health_probe
     pub(super) probe_task: Option<JoinHandle<()>>,
+    /// The dead notifier (ADR-0050 §3): each dead verdict a health write
+    /// makes is told to the other alive workers; `None` for a proxy that tells
+    /// none. Aborted on drop.
+    pub(super) notices: Option<JoinHandle<()>>,
     /// The node the proxy serves: its tasks run under it, and every registry
     /// change the scenario drives is lined as it.
     pub(super) node: NodeScope,
@@ -52,6 +56,15 @@ impl ProxySut {
     /// The proxy's metrics.
     pub fn metrics(&self) -> &Arc<ProxyMetrics> {
         &self.metrics
+    }
+
+    /// From now on tell no dead verdict, as a proxy with no cluster key: a
+    /// dead worker's calls are taken over only by a message that reaches
+    /// their backup (the reactive path, ADR-0047 D1).
+    pub fn tell_no_dead_verdict(&mut self) {
+        if let Some(n) = self.notices.take() {
+            n.abort();
+        }
     }
 
     /// Mark a worker's health (e.g. `Dead` on crash, `Alive` on recovery).
@@ -150,6 +163,9 @@ impl RendezvousCandidate for Key {
 impl Drop for ProxySut {
     fn drop(&mut self) {
         self.task.abort();
+        if let Some(n) = self.notices.take() {
+            n.abort();
+        }
         if let Some(p) = self.probe_task.take() {
             p.abort();
         }
