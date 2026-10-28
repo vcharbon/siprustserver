@@ -328,8 +328,9 @@ async fn a_body_that_does_not_encode_leaves_the_call_without_a_backup() {
     let call = backed_call(1);
     state.create_placed(call.clone());
     state.flush(&call);
-    let deep = (0..200).fold(serde_json::Value::Null, |v, _| serde_json::json!([v]));
-    let deep = call::helpers::set_call_ext(call.clone(), "svc", Some(deep));
+    let nested = (0..200).fold(serde_json::Value::Null, |v, _| serde_json::json!([v]));
+    let mut deep = call.clone();
+    call::helpers::set_call_ext(&mut deep, "svc", Some(nested));
     state.update(deep.clone());
     state.flush(&deep);
     assert!(repl.unbacked(&call.call_ref), "the call has no backup");

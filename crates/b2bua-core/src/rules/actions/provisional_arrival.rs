@@ -114,7 +114,7 @@ fn dials_the_leg(call: &Call, id: &ProvisionalId) -> bool {
 /// The responder's dialog of `id` owes the answer to `offer` in the PRACK of
 /// `id` (RFC 3262 §5), unless it already owes one.
 fn owe_answer_in_prack(call: &mut Call, id: &ProvisionalId, offer: &[u8]) {
-    *call = call::helpers::update_leg(call.clone(), &id.leg, |leg| {
+    call::helpers::update_leg(call, &id.leg, |leg| {
         if let Some(d) = call::helpers::dialog_with_peer_mut(leg, &id.responder_tag) {
             if d.owed_answer.is_none() {
                 d.owed_answer = Some(OwedAnswer::InPrack { rseq: id.rseq, offer: offer.to_vec() });

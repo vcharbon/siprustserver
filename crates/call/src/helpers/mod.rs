@@ -1,8 +1,8 @@
 //! Pure lens / accessor / timer helpers over the [`Call`](crate::model::Call)
-//! tree. Helpers take
-//! the `Call`/`Leg` by value, mutate in place, and return it — value semantics
-//! from the caller's view, without deep clones. The data types themselves live
-//! in [`crate::model`].
+//! tree. A helper that changes one call takes it as `&mut Call`; the helpers
+//! that fold two copies of a call into one (`merge_exempt`, `with_own_running`,
+//! `raise_sequences`, `keep_dialogs`) take the copy they keep by value. The
+//! data types themselves live in [`crate::model`].
 //!
 //! Concern map:
 //!   - [`lens`] — the base `update_leg` / `update_dialog` lenses

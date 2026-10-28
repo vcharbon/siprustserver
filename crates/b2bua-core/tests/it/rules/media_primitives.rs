@@ -71,8 +71,8 @@ fn a_request_toward_an_ending_peer_takes_its_methods_final() {
     for d in b.dialogs.iter_mut() {
         d.state = DialogState::Ending(call::EndingBy::Bye);
     }
-    call = call::helpers::add_b_leg(call, b);
-    call = call::helpers::merge_leg(call, "a", "b-1");
+    call::helpers::add_b_leg(&mut call, b);
+    call::helpers::merge_leg(&mut call, "a", "b-1");
     let config = B2buaConfig::default();
     let mut id_gen = scope(1);
     for (method, status) in
@@ -100,7 +100,7 @@ fn a_request_toward_an_ending_peer_takes_its_methods_final() {
 fn relay_to_peer_is_gated_for_unadopted_media_leg() {
     let mut call = test_call();
     give_a_leg_dialog(&mut call);
-    call = call::helpers::add_b_leg(call, confirmed_b_leg("b-1", LegKind::Media));
+    call::helpers::add_b_leg(&mut call, confirmed_b_leg("b-1", LegKind::Media));
     let event =
         CallEvent::sip(SipMessage::Request(in_dialog_info()), "10.0.0.2:5070".parse().unwrap());
     let config = B2buaConfig::default();
@@ -135,7 +135,7 @@ fn relay_to_peer_is_gated_for_unadopted_media_leg() {
 fn relay_to_peer_falls_back_to_a_for_adopted_destination_leg() {
     let mut call = test_call();
     give_a_leg_dialog(&mut call);
-    call = call::helpers::add_b_leg(call, confirmed_b_leg("b-1", LegKind::Destination));
+    call::helpers::add_b_leg(&mut call, confirmed_b_leg("b-1", LegKind::Destination));
     let event =
         CallEvent::sip(SipMessage::Request(in_dialog_info()), "10.0.0.2:5070".parse().unwrap());
     let config = B2buaConfig::default();
@@ -161,7 +161,7 @@ fn relay_to_peer_falls_back_to_a_for_adopted_destination_leg() {
 #[test]
 fn send_request_to_leg_emits_info_with_mscml_body() {
     let mut call = test_call();
-    call = call::helpers::add_b_leg(call, confirmed_b_leg("b-1", LegKind::Media));
+    call::helpers::add_b_leg(&mut call, confirmed_b_leg("b-1", LegKind::Media));
     let event =
         CallEvent::sip(SipMessage::Request(in_dialog_info()), "10.0.0.2:5070".parse().unwrap());
     let config = B2buaConfig::default();
@@ -208,7 +208,7 @@ fn send_request_to_leg_emits_info_with_mscml_body() {
 #[test]
 fn send_request_to_leg_forwards_arbitrary_headers() {
     let mut call = test_call();
-    call = call::helpers::add_b_leg(call, confirmed_b_leg("b-1", LegKind::Media));
+    call::helpers::add_b_leg(&mut call, confirmed_b_leg("b-1", LegKind::Media));
     let event =
         CallEvent::sip(SipMessage::Request(in_dialog_info()), "10.0.0.2:5070".parse().unwrap());
     let config = B2buaConfig::default();

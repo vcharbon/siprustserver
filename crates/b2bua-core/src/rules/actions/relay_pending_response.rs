@@ -187,11 +187,7 @@ impl ActionExecutor<'_> {
             // 2xx is re-ACKed on. The ladder below is discharged by
             // RECEIVING that ACK (the engine matches it on the
             // originator's dialog), never by relaying it.
-            *call = call::helpers::set_awaited_ack_cseq(
-                call.clone(),
-                source_leg_id,
-                Some(pending.inbound_cseq),
-            );
+            call::helpers::set_awaited_ack_cseq(call, source_leg_id, Some(pending.inbound_cseq));
             relay::owe_answer_in_ack(call, source_leg_id, r.resp, pending.inbound_cseq);
             self.retain_reinvite_2xx(call, fx, &mut relayed, dest.clone(), target_leg);
         }
@@ -240,6 +236,6 @@ impl ActionExecutor<'_> {
             );
             self.retire(call, fx, Scope::Transaction { leg_id: source_leg_id, cseq: r.cseq_num });
         }
-        *call = call::helpers::close_record(call.clone(), source_leg_id, holder, r.cseq_num);
+        call::helpers::close_record(call, source_leg_id, holder, r.cseq_num);
     }
 }

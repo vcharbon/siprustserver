@@ -1,6 +1,8 @@
 //! The store envelope a resident call keeps beside it (ADR-0055 §7, §11):
 //! written as the call enters the map and by a meeting, read by the shell.
 
+use std::sync::Arc;
+
 use super::{CallState, CallTopology, Enveloped, Inner};
 
 impl CallState {
@@ -32,20 +34,25 @@ impl CallState {
 
     /// The resident call `call_ref` in its envelope (clone), if present.
     pub fn peek_enveloped(&self, call_ref: &str) -> Option<Enveloped> {
-        let inner = self.locked();
-        let call = inner.calls.get(call_ref).map(|c| (**c).clone())?;
-        Some(Enveloped::new(call, inner.topologies.get(call_ref).cloned()))
+        let (call, topology) = {
+            let inner = self.locked();
+            (inner.calls.get(call_ref).cloned()?, inner.topologies.get(call_ref).cloned())
+        };
+        Some(Enveloped::new(Arc::unwrap_or_clone(call), topology))
     }
 
     /// Replace the in-memory call and its envelope with `copy`, a meeting's
     /// outcome: the replace-only rule of [`update_quiet`](Self::update_quiet),
     /// the envelope written as `copy` holds it.
     pub fn update_enveloped(&self, copy: Enveloped) {
+        let keys = call::call_index_keys(&copy.call);
         let mut inner = self.locked();
         if !inner.calls.contains_key(&copy.call.call_ref) {
             return;
         }
         Self::place(&mut inner, &copy.call.call_ref, copy.topology);
-        self.replace_locked(&mut inner, copy.call);
+        let released = self.replace_locked(&mut inner, Arc::new(copy.call), keys);
+        drop(inner);
+        drop(released);
     }
 }

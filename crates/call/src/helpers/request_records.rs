@@ -10,7 +10,7 @@ use super::leg::find_leg;
 use super::lens::update_dialog;
 
 /// Add `record` to `leg_id`'s dialog `id`.
-pub fn add_record(call: Call, leg_id: &str, id: &DialogId, record: RequestRecord) -> Call {
+pub fn add_record(call: &mut Call, leg_id: &str, id: &DialogId, record: RequestRecord) {
     update_dialog(call, leg_id, id, |d| d.requests.push(record))
 }
 
@@ -93,14 +93,14 @@ pub fn record_with_branch(
 /// on `leg_id`: its transaction settled. An INVITE's record stays for the
 /// ACK its 2xx owes; a non-2xx closes it
 /// ([`super::close_rejected_invite_round`]).
-pub fn close_record(call: Call, leg_id: &str, holder: &RecordHolder, cseq: i64) -> Call {
+pub fn close_record(call: &mut Call, leg_id: &str, holder: &RecordHolder, cseq: i64) {
     let sent = |r: &RequestRecord| r.is_sent() && r.outbound_cseq == cseq;
     update_dialog(call, leg_id, holder.id(), |d| d.requests.retain(|r| !sent(r)))
 }
 
 /// Close the held record `holder` keeps for the received request numbered
 /// `cseq` on `leg_id`: its final left.
-pub fn close_held(call: Call, leg_id: &str, holder: &RecordHolder, cseq: i64) -> Call {
+pub fn close_held(call: &mut Call, leg_id: &str, holder: &RecordHolder, cseq: i64) {
     let held = |r: &RequestRecord| r.is_held() && r.inbound_cseq == cseq;
     update_dialog(call, leg_id, holder.id(), |d| d.requests.retain(|r| !held(r)))
 }
@@ -135,7 +135,7 @@ pub fn find_relay(dialog: &Dialog, outbound_cseq: i64) -> Option<&RequestRecord>
 /// Mark a relayed INVITE CANCELled (RFC 3261 §9): it has been CANCELled
 /// toward its target, so the eventual final response resolves locally instead
 /// of being relayed back.
-pub fn cancel_relay(call: Call, leg_id: &str, id: &DialogId, outbound_cseq: i64) -> Call {
+pub fn cancel_relay(call: &mut Call, leg_id: &str, id: &DialogId, outbound_cseq: i64) {
     update_dialog(call, leg_id, id, |d| {
         let relay = d.sent_invite.as_mut().filter(|p| p.is_relay());
         if let Some(p) = relay.filter(|p| p.outbound_cseq == outbound_cseq) {
@@ -147,7 +147,7 @@ pub fn cancel_relay(call: Call, leg_id: &str, id: &DialogId, outbound_cseq: i64)
 /// Close the relay `leg_id`'s dialog `id` holds with outbound CSeq
 /// `outbound_cseq`: a relayed INVITE no 2xx was taken for is closed, one taken
 /// stays for the ACK and its re-ACKs.
-pub fn remove_relay(call: Call, leg_id: &str, id: &DialogId, outbound_cseq: i64) -> Call {
+pub fn remove_relay(call: &mut Call, leg_id: &str, id: &DialogId, outbound_cseq: i64) {
     update_dialog(call, leg_id, id, |d| {
         d.requests.retain(|p| !(p.is_relay() && p.outbound_cseq == outbound_cseq));
         if super::invite_records::invite_relay(d).is_some_and(|p| p.outbound_cseq == outbound_cseq)
@@ -165,20 +165,21 @@ pub fn every_record(call: &Call) -> impl Iterator<Item = (&Leg, &Dialog, &Reques
         .flat_map(|(leg, d)| d.requests.iter().map(move |r| (leg, d, r)))
 }
 
-/// `call` with every held record whose deadline is at or before `now_ms`
-/// taken out, each with its leg and dialog: the platform answers them.
+/// Take every held record whose deadline is at or before `now_ms` out of
+/// `call` and return them, each with its leg and dialog: the platform
+/// answers them.
 pub fn take_overdue_held(
-    mut call: Call,
+    call: &mut Call,
     now_ms: i64,
-) -> (Call, Vec<(String, RecordHolder, RequestRecord)>) {
-    let overdue: Vec<(String, RecordHolder, RequestRecord)> = every_record(&call)
+) -> Vec<(String, RecordHolder, RequestRecord)> {
+    let overdue: Vec<(String, RecordHolder, RequestRecord)> = every_record(call)
         .filter(|(_, _, r)| r.is_held() && r.deadline_ms.is_some_and(|at| at <= now_ms))
         .map(|(leg, d, r)| (leg.leg_id.clone(), holder_of(d), r.clone()))
         .collect();
     for (leg_id, holder, r) in &overdue {
-        call = close_held(call, leg_id, holder, r.inbound_cseq);
+        close_held(call, leg_id, holder, r.inbound_cseq);
     }
-    (call, overdue)
+    overdue
 }
 
 /// The earliest deadline of a held record of `call`.

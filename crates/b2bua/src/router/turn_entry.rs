@@ -20,8 +20,9 @@ use crate::turn_probe::{Released, TurnPoint};
 pub(super) struct TurnEntry {
     pub ctx: Arc<RouterCtx>,
     pub call_ref: String,
-    /// The record the turn landed: what a traced send and a callout read.
-    pub call: Call,
+    /// The record the turn landed, shared with the store: what a traced
+    /// send and a callout read.
+    pub call: Arc<Call>,
     pub now_ms: i64,
     /// The re-INVITE whose first provisional the turn's write records.
     pub trying: Option<SipRequest>,
@@ -43,7 +44,7 @@ impl TurnEntry {
     pub fn sending(
         ctx: &Arc<RouterCtx>,
         call_ref: &str,
-        call: Call,
+        call: Arc<Call>,
         now_ms: i64,
         outbound: Vec<OutboundSipEffect>,
     ) -> Self {

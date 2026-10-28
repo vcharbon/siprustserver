@@ -21,8 +21,8 @@ fn an_update_offer_answered_on_the_caller_face_waits_on_the_current_peer() {
     bob.leg_id = "b-2".into();
     call::testkit::stage_leg(&mut bob, LegState::Early);
     with_dialog(&mut bob, "b2");
-    call = call::helpers::add_b_leg(call, carol);
-    call = call::helpers::add_b_leg(call, bob);
+    call::helpers::add_b_leg(&mut call, carol);
+    call::helpers::add_b_leg(&mut call, bob);
     call.a_leg.dialogs.by_tags_mut("a1", &call.a_leg_invite.from_tag.clone()).unwrap().fronts =
         vec![PeerDialog { leg_id: "b-2".into(), peer_tag: "b2".into() }];
     let shown = |b_leg_id: &str, b_tag: &str| {

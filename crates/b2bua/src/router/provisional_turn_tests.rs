@@ -42,7 +42,8 @@ fn call_with_a_ringing_callee(answered: bool) -> Call {
     }
     let mut b = call::testkit::dialled_leg("b-1", "svc");
     b.call_id = "bcid@x".into();
-    call::helpers::add_b_leg(call, b)
+    call::helpers::add_b_leg(&mut call, b);
+    call
 }
 
 /// A reliable `status` from the callee `bobtag` on `b-1` stating `rseq`.

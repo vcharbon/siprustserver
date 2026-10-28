@@ -56,7 +56,8 @@ fn call() -> Call {
     b.own_tag = None;
     b.invite = Some(call::RequestRecord::dialled(1, None, OutboundInvite::new("own", 0)));
     b.dialogs = vec![dialog("own", "b1")].into();
-    call::helpers::add_b_leg(call, b)
+    call::helpers::add_b_leg(&mut call, b);
+    call
 }
 
 fn dialog(local: &str, remote: &str) -> Dialog {

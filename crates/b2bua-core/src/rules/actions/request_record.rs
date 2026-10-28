@@ -82,7 +82,7 @@ impl ActionExecutor<'_> {
                 usage_of(req),
             )
         };
-        *call = add_record(call.clone(), leg_id, id, record);
+        add_record(call, leg_id, id, record);
     }
 
     /// Record this stack's own non-INVITE request `effect` carries, leaving on
@@ -134,14 +134,14 @@ impl ActionExecutor<'_> {
                 }
                 let Some((holder, record)) = resolved.record.as_deref() else { return };
                 if record.is_own() {
-                    *call = close_record(call.clone(), leg_id, holder, record.outbound_cseq);
+                    close_record(call, leg_id, holder, record.outbound_cseq);
                 }
             }
             CallEvent::Timeout { branch, .. } => {
                 let Some((holder, record)) = record_with_branch(call, leg_id, branch) else {
                     return;
                 };
-                *call = close_record(call.clone(), leg_id, &holder, record.outbound_cseq);
+                close_record(call, leg_id, &holder, record.outbound_cseq);
                 resolved.record = Some(Box::new((holder, record)));
             }
             _ => {}
@@ -151,8 +151,7 @@ impl ActionExecutor<'_> {
     /// The [`TimerType::HeldAnswer`] fired: every held request whose
     /// deadline passed is answered by the platform.
     pub(crate) fn answer_overdue_held(&mut self, call: &mut Call, fx: &mut HandlerEffects) {
-        let (settled, overdue) = take_overdue_held(call.clone(), self.now_ms);
-        *call = settled;
+        let overdue = take_overdue_held(call, self.now_ms);
         for (leg_id, _, record) in overdue {
             let (status, reason) = UNANSWERED_HELD;
             answer_received(call, fx, &leg_id, &record, status, reason, Vec::new(), None);
@@ -190,7 +189,7 @@ impl ActionExecutor<'_> {
             relayed_by: self.owners.this.clone(),
             ..RequestRecord::relayed(req.method().as_str(), 0, i64::from(req.cseq().seq()))
         };
-        *call = add_record(call.clone(), ctx.source_leg_id, &id, record);
+        add_record(call, ctx.source_leg_id, &id, record);
         self.arm_held_answer(call, fx);
     }
 
@@ -216,7 +215,7 @@ impl ActionExecutor<'_> {
         });
         let Some(record) = held else { return };
         let Some((holder, _)) = held_record(call, leg_id, &record.method, cseq) else { return };
-        *call = close_held(call.clone(), leg_id, &holder, cseq);
+        close_held(call, leg_id, &holder, cseq);
         let content_type = content_type.and_then(relay::media_type);
         answer_received(call, fx, leg_id, &record, status, reason, body.to_vec(), content_type);
         self.arm_held_answer(call, fx);
@@ -262,7 +261,7 @@ impl ActionExecutor<'_> {
             if let Some((holder, _)) =
                 held_record(call, &leg_id, &record.method, record.inbound_cseq)
             {
-                *call = close_held(call.clone(), &leg_id, &holder, record.inbound_cseq);
+                close_held(call, &leg_id, &holder, record.inbound_cseq);
             }
             let (status, reason) = ENDED_HELD;
             answer_received(call, fx, &leg_id, &record, status, reason, Vec::new(), None);
@@ -294,7 +293,7 @@ pub(crate) fn settle_owed(call: &mut Call, fx: &mut HandlerEffects, leg_id: &str
         .chain(&retired)
         .flat_map(|d| d.requests.iter().filter(|r| owed(r)).cloned())
         .collect();
-    *call = update_leg(call.clone(), leg_id, |l| {
+    update_leg(call, leg_id, |l| {
         for d in l.dialogs.iter_mut() {
             // A retired dialog keeps only its own records: a relayed INVITE
             // it still holds ends with the leg, unanswered here.

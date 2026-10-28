@@ -28,7 +28,7 @@ pub const REFER_TOPIC: &str = "refer-http-result";
 /// Mark the decision a fold carries, if it is one the stack applies: the kind
 /// from the topic and outcome, the label from the payload, the leg from the
 /// payload's failed leg (a failover) or the transfer's referrer (a refer).
-pub fn fold_decided(call: Call, event: &CallEvent, now_ms: i64) -> Call {
+pub fn fold_decided(mut call: Call, event: &CallEvent, now_ms: i64) -> Call {
     let CallEvent::InternalEvent { topic, outcome, payload, .. } = event else {
         return call;
     };
@@ -61,5 +61,6 @@ pub fn fold_decided(call: Call, event: &CallEvent, now_ms: i64) -> Call {
         }
         _ => return call,
     };
-    mark_decision(call, now_ms, kind, leg_id, parse_label(payload))
+    mark_decision(&mut call, now_ms, kind, leg_id, parse_label(payload));
+    call
 }

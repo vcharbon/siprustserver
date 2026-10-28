@@ -83,7 +83,7 @@ pub enum Failover {
 
 /// The treatment `response` states for the limiter-refused `call`.
 pub fn treatment(
-    call: Call,
+    mut call: Call,
     response: Result<CallTreatment, CallDecisionError>,
     a_invite: &SipRequest,
     config: &B2buaConfig,
@@ -119,7 +119,7 @@ pub fn treatment(
         // Relay with no captured failure (a limiter reject is pre-leg) → 480
         // fallback (ADR-0017 X5).
         Ok(CallTreatment::Relay { label }) => {
-            let call = mark_decision(call, now_ms, DecisionKind::FailoverTerminate, None, label);
+            mark_decision(&mut call, now_ms, DecisionKind::FailoverTerminate, None, label);
             crate::initial_invite::reject_call(
                 call,
                 a_invite,

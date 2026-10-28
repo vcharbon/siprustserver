@@ -51,7 +51,7 @@ pub(super) async fn self_release_turn(ctx: &Arc<RouterCtx>, call_ref: &str) {
     if !ctx.state.is_takeover(call_ref) {
         // Shed between the notice and its turn: what this turn's queue and
         // lock entry are is all that is left of the call here.
-        if ctx.state.peek(call_ref).is_none() {
+        if !ctx.state.contains(call_ref) {
             drop(guard);
             release_call(ctx, call_ref, ReleaseKind::Orphan).await;
         }
@@ -98,7 +98,7 @@ fn ends_for_departed_primary(ctx: &RouterCtx, call_ref: &str) -> bool {
         c.state == call::CallModelState::Terminating
             || c.timers.iter().any(|t| *t.timer_type() == call::TimerType::RepeatGiveUp)
     };
-    ctx.state.peek(call_ref).is_some_and(|c| ends(&c)) && primary_departed(ctx, call_ref)
+    ctx.state.resident(call_ref).is_some_and(|c| ends(&c)) && primary_departed(ctx, call_ref)
 }
 
 /// Shed the takeover copy of `call_ref`, under its per-call lock. A takeover

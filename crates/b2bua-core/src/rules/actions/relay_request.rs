@@ -148,7 +148,7 @@ impl ActionExecutor<'_> {
         // The call as it stands before the relay records anything: a request
         // that is not built leaves it so.
         let unrelayed = call.clone();
-        *call = bump_our_cseq(call.clone(), target_leg, &t_id, 1);
+        bump_our_cseq(call, target_leg, &t_id, 1);
 
         // RFC 3262 §7.2: RAck names the reliable 1xx and the INVITE that drew it
         // *on the target leg* — the CSeq token becomes the target's INVITE CSeq
@@ -274,19 +274,19 @@ impl ActionExecutor<'_> {
                 relayed_by: self.owners.this.clone(),
                 ..RequestRecord::relayed(req.method().as_str(), outbound_cseq, inbound_cseq)
             };
-            *call = match method {
+            match method {
                 InDialogMethod::Invite => {
                     let record = RequestRecord {
                         sent: Some(super::request_record::sent_request(&out_req, &dest)),
                         ..received
                     };
-                    call::helpers::open_sent_invite(call.clone(), target_leg, &t_id, record)
+                    call::helpers::open_sent_invite(call, target_leg, &t_id, record)
                 }
                 _ => {
                     let record = self.relayed_sent_half(received, &out_req, &dest);
-                    add_record(call.clone(), target_leg, &t_id, record)
+                    add_record(call, target_leg, &t_id, record)
                 }
-            };
+            }
         }
 
         fx.outbound.push(OutboundSipEffect {

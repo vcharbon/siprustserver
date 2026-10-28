@@ -44,7 +44,8 @@ fn ended(cid: &str) -> Call {
     *call.a_leg.invite_final_sent_mut() = Some(486);
     call::testkit::stage_leg(&mut call.a_leg, LegState::Terminated);
     call.state = CallModelState::Terminated;
-    call::helpers::record_termination(call, 0, call::TerminationCause::RemoteFinal, None)
+    call::helpers::record_termination(&mut call, 0, call::TerminationCause::RemoteFinal, None);
+    call
 }
 
 async fn put(store: &ReplicatingCallStore, call: &Call) {

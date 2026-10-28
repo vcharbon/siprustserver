@@ -25,7 +25,8 @@ fn b_leg_confirmed() -> Leg {
 /// carrying a confirmed `b-1`, and return the emitted ACK. `AckLeg` reads only
 /// the call + the action fields (not the event), so any event serves.
 fn ack_request(body: Vec<u8>, content_type: Option<String>) -> SipRequest {
-    let call = call::helpers::add_b_leg(test_call(), b_leg_confirmed());
+    let mut call = test_call();
+    call::helpers::add_b_leg(&mut call, b_leg_confirmed());
     let config = B2buaConfig::default();
     let event = CallEvent::Timer {
         key: TimerKey::leg(TimerType::NoAnswer, "b-1"),
@@ -156,7 +157,8 @@ fn re_ack_effect(result: &HandlerResult) -> &b2bua_core::effects::OutboundSipEff
 // THE ACK instead of composing an answerless one.
 #[test]
 fn a_body_bearing_ack_retains_its_exact_datagram_and_destination() {
-    let call = call::helpers::add_b_leg(test_call(), b_leg_confirmed());
+    let mut call = test_call();
+    call::helpers::add_b_leg(&mut call, b_leg_confirmed());
     let result = ack_exec(&call, b"answer-sdp".to_vec(), None);
     let effect = ack_effect(&result);
     let OutboundBody::Request(sent) = &effect.body else { unreachable!() };
@@ -184,7 +186,8 @@ fn a_body_bearing_ack_retains_its_exact_datagram_and_destination() {
 // answer included, at the retained destination — never a fresh bodyless one.
 #[test]
 fn a_bodyless_ack_re_passes_the_retained_datagram_byte_identical() {
-    let call = call::helpers::add_b_leg(test_call(), b_leg_confirmed());
+    let mut call = test_call();
+    call::helpers::add_b_leg(&mut call, b_leg_confirmed());
     let first = ack_exec(&call, b"answer-sdp".to_vec(), None);
     let first_effect = ack_effect(&first);
     let OutboundBody::Request(sent) = &first_effect.body else { unreachable!() };
@@ -216,7 +219,8 @@ fn a_bodyless_ack_re_passes_the_retained_datagram_byte_identical() {
 // same bare bytes back.
 #[test]
 fn a_bare_first_ack_retains_its_datagram_and_a_re_ack_repeats_it() {
-    let call = call::helpers::add_b_leg(test_call(), b_leg_confirmed());
+    let mut call = test_call();
+    call::helpers::add_b_leg(&mut call, b_leg_confirmed());
     let first = ack_exec(&call, Vec::new(), None);
     let OutboundBody::Request(sent) = &ack_effect(&first).body else { unreachable!() };
     let retained = first.call.b_legs[0]

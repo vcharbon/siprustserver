@@ -30,7 +30,7 @@ fn call_in(pri: &str, bak: &str, cid: &str, state: CallModelState, clock: &Clock
     call.state = state;
     if state != CallModelState::Active {
         // A synthetic terminal states its cause as every live path does.
-        call = call::helpers::record_termination(call, 0, call::TerminationCause::Supervisor, None);
+        call::helpers::record_termination(&mut call, 0, call::TerminationCause::Supervisor, None);
     }
     call.timers.push(TimerEntry {
         key: TimerKey::call(TimerType::Keepalive),

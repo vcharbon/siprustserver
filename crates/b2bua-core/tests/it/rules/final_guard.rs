@@ -51,7 +51,8 @@ fn a_second_final_to_the_a_leg_is_refused_and_reported() {
 fn a_final_after_the_autonomous_487_is_refused() {
     // The `Cancelled` turn recorded sip-txn's 487; a later rule answering the
     // cancelled call (a service timer, a relayed callee failure) is refused.
-    let call = call::helpers::record_invite_final(test_call(), "a", 487);
+    let mut call = test_call();
+    call::helpers::record_invite_final(&mut call, "a", 487);
     let result = execute_on(
         &call,
         &[RuleAction::RespondToALeg {
@@ -102,7 +103,8 @@ fn a_provisional_after_the_final_is_refused() {
     // toward it afterwards is refused at the seam — never built, never on the
     // wire (RFC 3261 §13.3.1.1 / §17.2.1) — and the answered dialog keeps its
     // tag.
-    let call = call::helpers::record_invite_final(test_call(), "a", 200);
+    let mut call = test_call();
+    call::helpers::record_invite_final(&mut call, "a", 200);
     let result = execute_on(
         &call,
         &[RuleAction::SendProvisionalToLeg {

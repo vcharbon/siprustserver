@@ -81,7 +81,7 @@ impl ActionExecutor<'_> {
             Ok(res) => res,
             Err(e) => return relay::unbuilt(&call.call_ref, leg_id, "NOTIFY", &e),
         };
-        *call = bump_our_cseq(call.clone(), leg_id, id, 1);
+        bump_our_cseq(call, leg_id, id, 1);
         let dest = relay::target_dest(&gen_dialog.remote_target);
         let (out_req, dest) = relay::apply_b_leg_egress(
             self.config,
@@ -138,7 +138,7 @@ impl ActionExecutor<'_> {
         // The call as it stands before the re-INVITE records anything: one
         // that is not built leaves it so.
         let unsent = call.clone();
-        *call = bump_our_cseq(call.clone(), leg_id, &t_id, 1);
+        bump_our_cseq(call, leg_id, &t_id, 1);
 
         let branch = self.turn.ids.new_branch();
         let Some(leg) = leg_at(call, leg_id) else {
@@ -227,7 +227,7 @@ impl ActionExecutor<'_> {
             author: self.turn.rule.map(str::to_string),
             ..call::RequestRecord::relayed("INVITE", i64::from(out_req.cseq().seq()), 0)
         };
-        *call = call::helpers::open_sent_invite(call.clone(), leg_id, &t_id, record);
+        call::helpers::open_sent_invite(call, leg_id, &t_id, record);
 
         fx.outbound.push(OutboundSipEffect {
             body: OutboundBody::Request(out_req),
@@ -307,7 +307,7 @@ impl ActionExecutor<'_> {
         // is not built leaves it so.
         let unsent = call.clone();
         if !reuse {
-            *call = bump_our_cseq(call.clone(), leg_id, &t_id, 1);
+            bump_our_cseq(call, leg_id, &t_id, 1);
         }
 
         // Opaque body carrier (MSCML INFO rides here): default the content type

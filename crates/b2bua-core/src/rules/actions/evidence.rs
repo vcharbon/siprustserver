@@ -83,7 +83,7 @@ impl ActionExecutor<'_> {
         let Some(id) = ctx.dialog().map(call::Dialog::id) else { return };
         let cseq = i64::from(resp.cseq().seq());
         let invite = resp.cseq().method() == Method::Invite;
-        *call = update_leg(call.clone(), leg_id, |leg| {
+        update_leg(call, leg_id, |leg| {
             // A re-INVITE rides a confirmed dialog (RFC 3261 §14).
             let reinvite = invite && leg.dialled_cseq().is_some_and(|dialled| cseq > dialled);
             if reinvite && leg.outbound_invite().is_some_and(|i| i.our_tag == id.our_tag) {
@@ -162,7 +162,7 @@ impl ActionExecutor<'_> {
                 ack.destination.clone(),
                 Repeated::request("ACK"),
             );
-            *call = call::helpers::retain_emitted_ack(call.clone(), leg_id, kept, cseq);
+            call::helpers::retain_emitted_ack(call, leg_id, kept, cseq);
         }
         fx.outbound.push(ack);
     }
@@ -207,7 +207,7 @@ impl ActionExecutor<'_> {
             let via = invite.top_via().clone();
             fx.critical.push(CriticalStateEffect::RelinquishAnsweredInvite { via });
         }
-        *call = record_invite_final(call.clone(), leg_id, 200);
+        record_invite_final(call, leg_id, 200);
         if caller_dialog(call, tag).is_none() {
             let own = self.ensure_a_dialog_with(call, Some(tag.to_string()));
             if own != tag {
@@ -236,7 +236,7 @@ impl ActionExecutor<'_> {
     ) {
         let via = invite.top_via().clone();
         fx.critical.push(CriticalStateEffect::RelinquishAnsweredInvite { via });
-        *call = record_invite_final(call.clone(), leg_id, UNSEEN_REFUSAL);
+        record_invite_final(call, leg_id, UNSEEN_REFUSAL);
     }
 
     /// An ACK naming an INVITE the record holds unanswered: another owner

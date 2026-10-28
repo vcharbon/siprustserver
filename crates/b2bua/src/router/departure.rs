@@ -182,7 +182,7 @@ async fn discharge_finished(ctx: &Arc<RouterCtx>, call_ref: &str) -> Swept {
             reanchor(&mut ended.call, skew);
             ended
         }
-        _ if ctx.state.peek(call_ref).is_some() => return Swept::Left,
+        _ if ctx.state.contains(call_ref) => return Swept::Left,
         Ok(_) => return Swept::Left,
         Err(_) => {
             drop(guard);

@@ -72,7 +72,8 @@ pub(super) async fn settle_undecided(
         } else {
             (TerminationCause::Admission, None)
         };
-        let mut ended = call::helpers::record_termination(call, now_ms, cause, by_leg);
+        let mut ended = call;
+        call::helpers::record_termination(&mut ended, now_ms, cause, by_leg);
         ended.state = CallModelState::Terminated;
         (HandlerResult::new(ended), UnansweredCaller::Leave)
     };

@@ -153,7 +153,7 @@ fn first_handling(
             crate::rules::relay::note_unrebuilt(call, &mut exec.turn.notes, &why);
             return Some(HandlerResult::new(call.clone()));
         }
-        let before = call.clone();
+        let before = call;
         report_diagnostics(rule, call, &outcome);
         check_declared_effects(rule, &outcome.actions, call, &mut exec.turn.notes);
         exec.turn.rule = Some(rule.id);
@@ -169,11 +169,11 @@ fn first_handling(
                 CallModelState::Terminating | CallModelState::Terminated
             );
         let after = &result.call.sm_cursors;
-        check_declared_transition(rule, &before, after, torn_down, &mut exec.turn.notes);
+        check_declared_transition(rule, before, after, torn_down, &mut exec.turn.notes);
         let result = invariants::finalize(result);
         let mut enforced = invariants::enforce(
             obligations,
-            &before,
+            before,
             result,
             exec.now_ms,
             invariants::UnansweredCaller::Answer(&exec.config.minted_final_advertisement),
@@ -183,7 +183,7 @@ fn first_handling(
         // and enforce synthesized too — the ADR-0022 unanswered-a-leg 503
         // otherwise shows on a traced call as a `sip.out` with no matching
         // `call.transition`.
-        record_transitions(rule, &before, &enforced.call, exec.now_ms, &mut exec.turn.notes);
+        record_transitions(rule, before, &enforced.call, exec.now_ms, &mut exec.turn.notes);
         note_absorbed(&mut enforced.effects, call, ctx, &selection.absorbed);
         return Some(enforced);
     }

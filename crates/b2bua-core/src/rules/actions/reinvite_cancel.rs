@@ -60,7 +60,7 @@ impl ActionExecutor<'_> {
             Settle::Ending,
         );
         fx.outbound.push(cancel.effect);
-        *call = call::helpers::cancel_relay(call.clone(), leg_id, &cancel.t_id, outbound_cseq);
+        call::helpers::cancel_relay(call, leg_id, &cancel.t_id, outbound_cseq);
         self.retire(call, fx, Scope::Transaction { leg_id, cseq: outbound_cseq });
     }
 

@@ -9,7 +9,7 @@ use super::*;
 #[test]
 fn confirm_dialog_captures_b_leg_route_set_from_2xx_record_route_reversed() {
     let mut call = test_call();
-    call = call::helpers::add_b_leg(call, b_leg_pending());
+    call::helpers::add_b_leg(&mut call, b_leg_pending());
 
     // 2xx with two Record-Routes (top-to-bottom: proxy-b then proxy-a). §12.1.2:
     // the UAC route set is this list *reversed* → [proxy-a, proxy-b].
@@ -59,7 +59,7 @@ Content-Length: 0\r\n\r\n";
 #[test]
 fn confirm_dialog_splits_combined_record_route_and_puts_outbound_first() {
     let mut call = test_call();
-    call = call::helpers::add_b_leg(call, b_leg_pending());
+    call::helpers::add_b_leg(&mut call, b_leg_pending());
 
     // Worker-outbound b-leg INVITE → the proxy inserts [cookie, outbound]; the 2xx
     // echoes them comma-COMBINED in one header. §12.1.2 reverse of the individual
@@ -100,7 +100,7 @@ fn confirm_dialog_without_record_route_leaves_route_set_empty() {
     // b-leg route set stays empty and in-dialog egress uses the remote target /
     // outbound-proxy fallback. Guards against clobbering with a bogus entry.
     let mut call = test_call();
-    call = call::helpers::add_b_leg(call, b_leg_pending());
+    call::helpers::add_b_leg(&mut call, b_leg_pending());
 
     let raw = "SIP/2.0 200 OK\r\n\
 Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bKb\r\n\
@@ -151,7 +151,7 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         ..B2buaConfig::default()
     };
 
-    let call = test_call();
+    let mut call = test_call();
     let a_invite = crate::caller_of(&call);
     let mut id_gen = scope(7);
     // The callee's own address — what `leg.source` becomes; the CANCEL must NOT
@@ -192,7 +192,7 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         _ => panic!("INVITE is a request"),
     };
 
-    let call = call::helpers::add_b_leg(call, leg);
+    call::helpers::add_b_leg(&mut call, leg);
 
     // CancelLeg is action-driven and does not read the event; any event works.
     let event = CallEvent::Timer {

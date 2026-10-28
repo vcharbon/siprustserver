@@ -25,7 +25,7 @@ pub(super) fn end_dialogs(call: &mut Call, ctx: &RuleContext, leg_id: &str, bye:
         .response()
         .filter(|r| on_leg && r.cseq().method() == SipMethod::Bye && r.status() >= 200)
         .map(|r| r.status());
-    *call = call::helpers::update_leg(call.clone(), leg_id, |leg| match bye {
+    call::helpers::update_leg(call, leg_id, |leg| match bye {
         LegEnd::OurByeSent => {
             if let Some(d) = leg.dialogs.confirmed_mut() {
                 d.state = DialogState::Ending(EndingBy::Bye);

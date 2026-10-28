@@ -74,7 +74,7 @@ impl ActionExecutor<'_> {
         let (unacked, obligation, first) = unacked_2xx_of(resp, dest, target_leg);
         let (ours, peer) =
             (resp.to().tag().map(str::to_string), resp.from().tag().map(str::to_string));
-        *call = call::helpers::update_leg(call.clone(), target_leg, |leg| {
+        call::helpers::update_leg(call, target_leg, |leg| {
             if let Some(d) = ours.zip(peer).and_then(|(o, p)| leg.dialogs.by_tags_mut(&o, &p)) {
                 call::helpers::hold_answered_2xx(d, unacked.cseq, unacked);
             }
@@ -175,9 +175,7 @@ impl ActionExecutor<'_> {
             Obligation::AckOf2xx { .. } => Some(self.ack_ladder_bound()),
             Obligation::AwaitPrack { .. } => None,
         };
-        let (updated, next) = call::helpers::advance_ladder(call.clone(), obligation, give_up);
-        *call = updated;
-        match next {
+        match call::helpers::advance_ladder(call, obligation, give_up) {
             Some(next) => self.schedule(call, fx, rung, ::call::millis_i64(next)),
             None => {
                 // The last rung inside the bound has been sent: re-asking stops
@@ -221,7 +219,7 @@ impl ActionExecutor<'_> {
         self.release_bye_at_give_up(&mut call, &mut effects, obligation);
         let forced = (call.state == CallModelState::Active)
             .then(|| unacked_2xx_give_up_actions(&RuleCall::new(&call), obligation));
-        let call = call::helpers::clear_retained(call, obligation);
+        call::helpers::clear_retained(&mut call, obligation);
         let Some(actions) = forced else {
             return HandlerResult { call, effects };
         };

@@ -17,7 +17,7 @@ fn call(ring: Deadline, state: LegState) -> Call {
     use crate::test_call::{invite, src};
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let invite = invite("ring-deadline");
-    let call = crate::initial_invite::build_initial_call(
+    let mut call = crate::initial_invite::build_initial_call(
         &invite,
         src(),
         &config,
@@ -26,7 +26,7 @@ fn call(ring: Deadline, state: LegState) -> Call {
     );
     let mut leg = dialled_leg("b-1", "own");
     stage_leg(&mut leg, state);
-    let mut call = call::helpers::add_originated_b_leg(call, leg, 0);
+    call::helpers::add_originated_b_leg(&mut call, leg, 0);
     let (attempt, _) = open_attempt(&mut call, AttemptCause::Route, ring);
     join_attempt(&mut call, attempt, "b-1");
     call

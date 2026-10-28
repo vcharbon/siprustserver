@@ -37,7 +37,7 @@ fn a_retired_dialogs_relay_is_found_by_its_tags_and_closed_in_place() {
     assert_eq!(pending.method, "UPDATE");
     assert!(answered_record(&call, "b-1", Some(B_TAG), Some(B_LOCAL_TAG), update(3)).is_none());
 
-    let call = close_record(call, "b-1", &holder, 3);
+    close_record(&mut call, "b-1", &holder, 3);
     let kept = call.b_legs[0].dialogs.by_tags(&id.our_tag, &id.peer_tag).expect("kept");
     assert!(kept.is_retired() && kept.requests.is_empty());
 }

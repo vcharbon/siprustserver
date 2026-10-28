@@ -44,7 +44,7 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
     // Not-live + non-terminal is the reactive-straggler path; it manages
     // its own per-call lock, so route it BEFORE taking the lock here (the guard is
     // not reentrant).
-    if ctx.state.peek(call_ref).is_none() && first.state != CallModelState::Terminated {
+    if !ctx.state.contains(call_ref) && first.state != CallModelState::Terminated {
         reclaim_into_live(ctx, call_ref).await;
         return;
     }
@@ -52,7 +52,7 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
     // Read again under the lock: a turn that held it may have ended the call
     // and deleted the body, its CDR written; the body read before is stale.
     let Some((mut replica, skew_offset_ms)) = ctx.state.peek_reclaimable_raw(call_ref).await else {
-        if ctx.state.peek(call_ref).is_none() {
+        if !ctx.state.contains(call_ref) {
             drop(guard);
             ctx.state.discard_orphan(call_ref);
         }
@@ -200,7 +200,7 @@ pub(super) async fn meet_refused_flush(
     // because locking a call this node does not serve inserts a `locks` entry
     // only a release clears, and an Element with no live copy is the common
     // case.
-    if ctx.state.peek(call_ref).is_none() {
+    if !ctx.state.contains(call_ref) {
         return;
     }
     let guard = ctx.state.lock(call_ref).await;

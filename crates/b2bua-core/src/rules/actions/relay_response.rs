@@ -376,9 +376,9 @@ impl ActionExecutor<'_> {
         let stored = call::helpers::relay_first_18x_stored_a_tag(call).map(str::to_string);
         let a_facing_tag = self.ensure_a_dialog_with(call, stored);
         self.map_a_face(call, &a_facing_tag, leg_id, b_tag);
-        *call = call::helpers::set_relay_first_18x_relayed(call.clone(), &a_facing_tag);
+        call::helpers::set_relay_first_18x_relayed(call, &a_facing_tag);
         if let Some(resp) = ctx.response() {
-            *call = call::helpers::record_relay_first_18x_value(call.clone(), resp.status());
+            call::helpers::record_relay_first_18x_value(call, resp.status());
         }
         // A bare 180 states ringing and nothing else: the reliable-provisional
         // negotiation goes with the reliability the downgrade removes (RFC

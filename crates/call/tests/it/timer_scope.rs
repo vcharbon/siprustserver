@@ -29,7 +29,8 @@ fn an_answered_media_server_leg_ends_the_setup() {
     let mut media = dialled_leg("b-1", "mrf-tag");
     media.kind = Some(LegKind::Media);
     stage_leg(&mut media, LegState::Early);
-    let mut call = add_b_leg(call(), media);
+    let mut call = call();
+    add_b_leg(&mut call, media);
     assert!(!setup_over(&call), "the media server rings");
     stage_leg(&mut call.b_legs[0], LegState::Confirmed);
     assert!(setup_over(&call), "the media server answered");

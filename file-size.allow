@@ -41,11 +41,11 @@ crates/b2bua/src/repl/store.rs 526
 crates/b2bua/src/repl/supervisor.rs 747
 crates/b2bua/src/repl/tests.rs 823
 crates/b2bua/src/router/callouts.rs 615
-crates/b2bua/src/store/mod.rs 808
+crates/b2bua/src/store/mod.rs 784
 crates/call-limiter/src/store.rs 578
 crates/call-limiter/tests/it/keyed_by_call.rs 877
 crates/callshapes/src/plan.rs 1132
-crates/call/tests/it/model_helpers.rs 895
+crates/call/tests/it/model_helpers.rs 893
 crates/e2e-core/src/infra.rs 622
 crates/e2e-model/src/registry.rs 575
 crates/e2e-web/src/lib.rs 1280

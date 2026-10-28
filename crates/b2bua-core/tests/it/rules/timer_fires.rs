@@ -46,7 +46,7 @@ fn no_answer_fire_on_an_answered_caller_is_absorbed() {
     confirm_a(&mut call);
     let mut b = b_leg_pending();
     call::testkit::stage_leg(&mut b, LegState::Confirmed);
-    call = call::helpers::add_b_leg(call, b);
+    call::helpers::add_b_leg(&mut call, b);
     let actions = no_answer_result(&call, "b-1");
     assert!(actions.is_empty(), "absorbed, got {actions:?}");
 }
@@ -59,7 +59,7 @@ fn no_answer_fire_naming_an_absent_leg_on_an_answered_caller_is_absorbed() {
     confirm_a(&mut call);
     let mut b = b_leg_pending();
     call::testkit::stage_leg(&mut b, LegState::Confirmed);
-    call = call::helpers::add_b_leg(call, b);
+    call::helpers::add_b_leg(&mut call, b);
     let actions = no_answer_result(&call, "b-ghost");
     assert!(actions.is_empty(), "absorbed, got {actions:?}");
 }
@@ -72,11 +72,11 @@ fn no_answer_fire_on_own_pending_leg_fires_despite_other_leg_confirmed() {
     let mut call = test_call();
     let mut confirmed = b_leg_pending();
     call::testkit::stage_leg(&mut confirmed, LegState::Confirmed);
-    call = call::helpers::add_b_leg(call, confirmed);
+    call::helpers::add_b_leg(&mut call, confirmed);
     let mut pending = b_leg_pending();
     pending.leg_id = "b-2".into();
     call::testkit::stage_leg(&mut pending, LegState::Trying);
-    call = call::helpers::add_b_leg(call, pending);
+    call::helpers::add_b_leg(&mut call, pending);
     let actions = no_answer_result(&call, "b-2");
     // No consult here: the caller's 480 and the teardown follow the destroy.
     match actions.as_slice() {
@@ -112,7 +112,7 @@ fn cancelling_a_leg_retires_its_timers() {
     // timer it guards leave the ledger and the driver with the CANCEL, and
     // the call's own timers stay.
     let mut call = test_call();
-    call = call::helpers::add_b_leg(call, b_leg_pending());
+    call::helpers::add_b_leg(&mut call, b_leg_pending());
     let no_answer = TimerKey::leg(TimerType::NoAnswer, "b-1");
     let duration = TimerKey::call(TimerType::GlobalDuration);
     call::helpers::arm_timer(&mut call, no_answer.clone(), 5_000);
@@ -188,7 +188,7 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
     let mut call = test_call();
     let mut b = b_leg_pending();
     cancel_sent(&mut b);
-    call = call::helpers::add_b_leg(call, b);
+    call::helpers::add_b_leg(&mut call, b);
     let no_answer = TimerKey::leg(TimerType::NoAnswer, "b-1");
     call::helpers::arm_timer(&mut call, no_answer.clone(), 5_000);
     let event = CallEvent::Cancelled {

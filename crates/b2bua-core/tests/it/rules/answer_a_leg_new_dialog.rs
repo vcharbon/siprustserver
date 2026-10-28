@@ -99,7 +99,7 @@ fn answering_the_caller_leaves_a_b_legs_reinvite_2xx_ladder_alone() {
         .0,
     };
     call::helpers::hold_answered_2xx(with_dialog(&mut b, "bobtag"), 7, reinvite_2xx);
-    call = call::helpers::add_b_leg(call, b);
+    call::helpers::add_b_leg(&mut call, b);
     let reinvite_2xx =
         call::Obligation::AckOf2xx { leg: "b-1".into(), dialog_tag: "svc".into(), cseq: 7 };
     call.provisionals.push(call::testkit::shown_provisional(

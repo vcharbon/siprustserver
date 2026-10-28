@@ -60,7 +60,7 @@ impl ActionExecutor<'_> {
             }
             let bye = bye_behind(call, &obligation);
             self.scrub_timers(call, fx, &obligation);
-            *call = call::helpers::clear_retained(call.clone(), &obligation);
+            call::helpers::clear_retained(call, &obligation);
             // Discharged — its ACK arrived — the BYE behind it leaves; with its
             // leg the dialog it would end is gone.
             if let (Scope::Obligation(_), Some((leg_id, id, bye))) = (&scope, bye) {
@@ -93,7 +93,7 @@ impl ActionExecutor<'_> {
         obligation: &Obligation,
     ) {
         if let Some((leg_id, id, bye)) = bye_behind(call, obligation) {
-            *call = call::helpers::clear_retained(call.clone(), obligation);
+            call::helpers::clear_retained(call, obligation);
             self.send_queued_bye(call, fx, &leg_id, &id, bye);
         }
     }

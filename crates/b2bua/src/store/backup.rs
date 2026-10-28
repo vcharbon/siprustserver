@@ -5,6 +5,8 @@
 //! the `applied` sync level an outbox entry waits for the backup to apply the
 //! call's change-log entry, when it has a live one.
 
+use std::sync::Arc;
+
 use repl_net::frame::{Partition, Watermark};
 
 use call::Call;
@@ -24,11 +26,12 @@ impl CallState {
     /// then, when the call has a backup, [`flush`](Self::flush) into the change
     /// log before any effect of the turn leaves (ADR-0055 §3). `true` when the
     /// write was logged.
-    pub fn write(&self, call: &Call) -> bool {
-        self.update(call.clone());
+    pub fn write(&self, call: impl Into<Arc<Call>>) -> bool {
+        let call = call.into();
+        self.update(Arc::clone(&call));
         let backed = self.backup_of(&call.call_ref).is_some();
         if backed {
-            self.flush(call);
+            self.flush(&call);
         }
         backed
     }

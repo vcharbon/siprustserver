@@ -111,7 +111,7 @@ fn create_leg_refused_mid_call_ends_every_leg_on_the_wire() {
         let mut b = b_leg_pending();
         call::testkit::stage_leg(&mut b, LegState::Confirmed);
         with_dialog(&mut b, "btag");
-        call = call::helpers::add_b_leg(call, b);
+        call::helpers::add_b_leg(&mut call, b);
         let mut ringing =
             Leg { leg_id: "b-2".into(), call_id: "b2cid@x".into(), ..b_leg_pending() };
         // The INVITE `b-2` rings on, which its CANCEL names (RFC 3261 §9.1).
@@ -122,7 +122,7 @@ fn create_leg_refused_mid_call_ends_every_leg_on_the_wire() {
             destination: dest,
         };
         call::testkit::dial_with(&mut ringing, handle);
-        call = call::helpers::add_b_leg(call, ringing);
+        call::helpers::add_b_leg(&mut call, ringing);
         let guard = TimerKey::call(TimerType::ReferOverallSafety);
         let result =
             execute_on(&call, &[action, RuleAction::arm(guard.clone(), TimerDelay::millis(5_000))]);

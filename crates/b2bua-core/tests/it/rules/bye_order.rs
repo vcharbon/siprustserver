@@ -35,7 +35,8 @@ fn bob_owed_a_bare_ack() -> call::Call {
         x.awaited_ack_cseq = Some(2);
     }
     with_dialog(&mut b, "bobtag").sent_invite = Some(reinvite);
-    call::helpers::add_b_leg(call, b)
+    call::helpers::add_b_leg(&mut call, b);
+    call
 }
 
 /// bob's BYE answered 200 by a rule ending his leg — not `relay-bye`'s own

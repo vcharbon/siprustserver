@@ -180,7 +180,7 @@ pub enum Initial {
 /// The treatment the initial consult's `response` states for `call`, whose
 /// caller's INVITE is `a_invite`: a route to apply, or the call's final.
 pub fn treatment(
-    call: Call,
+    mut call: Call,
     response: Result<NewCallResponse, CallDecisionError>,
     a_invite: &SipRequest,
     config: &B2buaConfig,
@@ -215,7 +215,7 @@ pub fn treatment(
         // `Relay` is a failover-only treatment; with no captured downstream
         // failure at new-call time it falls back to 480 (ADR-0017 X5).
         Ok(NewCallResponse::Relay { label }) => {
-            let call = mark_decision(call, now_ms, DecisionKind::Relay, Some("a".into()), label);
+            mark_decision(&mut call, now_ms, DecisionKind::Relay, Some("a".into()), label);
             reject_call(
                 call,
                 a_invite,
@@ -363,8 +363,8 @@ pub fn reject_call(
                 crate::rules::stated_headers::response_with_adds(resp.clone(), &adds, &mut skipped);
         }
         effects.outbound.push(effect);
-        call = add_cdr_event(
-            call,
+        add_cdr_event(
+            &mut call,
             CdrEvent {
                 event_type: CdrEventType::Reject,
                 timestamp: now_ms,
@@ -376,7 +376,7 @@ pub fn reject_call(
         );
     }
     effects.buffered.extend(BufferedObservabilityEffect::skipped("rejecting final", skipped));
-    call = record_termination(call, now_ms, cause, None);
+    record_termination(&mut call, now_ms, cause, None);
     call.state = CallModelState::Terminated;
     HandlerResult { call, effects }
 }

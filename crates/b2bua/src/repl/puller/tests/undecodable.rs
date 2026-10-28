@@ -13,7 +13,8 @@ fn nested_body(depth: usize) -> Arc<[u8]> {
     let codec = call::MsgpackCodec::new();
     let body = body_at(Some(200), call::CallModelState::Active, (1, 0), (1, 0));
     let copy = crate::store::envelope::decode(&codec, &body).expect("decodes");
-    let call = call::helpers::set_call_ext(copy.call, "svc", Some(1.into()));
+    let mut call = copy.call;
+    call::helpers::set_call_ext(&mut call, "svc", Some(1.into()));
     let mut inner = codec.encode(&call).expect("encodes");
     let key = b"\xa3svc";
     let at = inner.windows(key.len()).position(|w| w == key).expect("the service key") + key.len();

@@ -353,7 +353,7 @@ pub(super) fn call_with_retained_answered_2xx() -> call::Call {
     let mut call = test_call();
     let mut b = b_leg_pending();
     call::testkit::stage_leg(&mut b, LegState::Confirmed);
-    call = call::helpers::add_b_leg(call, b);
+    call::helpers::add_b_leg(&mut call, b);
     // The confirmed a-leg UAS dialog the answer seam retained the 2xx on.
     let mut answered = a_dialog(&call, "btag", DialogState::Confirmed);
     call::helpers::hold_answered_2xx(&mut answered, 1, retained_2xx("btag", 1, 5060));

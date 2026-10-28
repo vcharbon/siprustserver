@@ -43,10 +43,12 @@ mod tests {
         let mut ids = sip_ids::TurnIds::fixed(1);
         let base = crate::initial_invite::build_initial_call(&invite, src, &config, &mut ids, 0);
         let deep = (0..200).fold(serde_json::Value::Null, |v, _| serde_json::json!([v]));
-        let call = call::helpers::set_call_ext(base.clone(), "svc", Some(deep));
+        let mut call = base.clone();
+        call::helpers::set_call_ext(&mut call, "svc", Some(deep));
         assert_eq!(encode(&codec, &metrics, &call, &None), None);
         assert_eq!(metrics.repl_flush_unencodable_total(), 1);
-        let shallow = call::helpers::set_call_ext(base, "svc", Some(1.into()));
+        let mut shallow = base;
+        call::helpers::set_call_ext(&mut shallow, "svc", Some(1.into()));
         assert!(encode(&codec, &metrics, &shallow, &None).is_some());
         assert_eq!(metrics.repl_flush_unencodable_total(), 1);
     }

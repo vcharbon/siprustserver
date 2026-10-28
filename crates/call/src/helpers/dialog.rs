@@ -14,7 +14,7 @@ use super::peering::relay_peer_dialog;
 /// Bump a dialog's own CSeq by `delta` (CSeq is dialog-scoped — §12.2.1.1).
 /// Each dialog (including each forked early dialog) owns an independent
 /// sequence, so a sibling fork's CSeq never constrains this one.
-pub fn bump_our_cseq(call: Call, leg_id: &str, id: &DialogId, delta: i64) -> Call {
+pub fn bump_our_cseq(call: &mut Call, leg_id: &str, id: &DialogId, delta: i64) {
     update_dialog(call, leg_id, id, |d| d.our_cseq += delta)
 }
 
@@ -22,7 +22,7 @@ pub fn bump_our_cseq(call: Call, leg_id: &str, id: &DialogId, delta: i64) -> Cal
 /// the dialog's remote sequence number unless that already stands higher
 /// (RFC 3261 §12.2.2). The one writer of `peer_cseq` past the dialog's
 /// creation.
-pub fn advance_peer_cseq(call: Call, leg_id: &str, id: &DialogId, cseq: i64) -> Call {
+pub fn advance_peer_cseq(call: &mut Call, leg_id: &str, id: &DialogId, cseq: i64) {
     update_dialog(call, leg_id, id, |d| {
         d.peer_cseq = Some(d.peer_cseq.map_or(cseq, |c| c.max(cseq)))
     })
@@ -121,7 +121,7 @@ pub fn peer_update_pending(call: &Call, source_leg_id: &str, source: Option<&Dia
 /// `b_tag`, and on no other: under downstream forking each early dialog
 /// carries its own answer (RFC 3264 §4). A miss is a no-op — the executor
 /// ensures the dialog exists before caching.
-pub fn cache_sdp_on_leg_dialog(call: Call, leg_id: &str, b_tag: &str, body: Vec<u8>) -> Call {
+pub fn cache_sdp_on_leg_dialog(call: &mut Call, leg_id: &str, b_tag: &str, body: Vec<u8>) {
     update_leg(call, leg_id, |leg| {
         if let Some(d) = super::leg::callee_dialog_mut(leg, b_tag) {
             d.cached_sdp = Some(body);

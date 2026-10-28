@@ -36,12 +36,11 @@ pub fn relay_first_18x_value_relayed(call: &Call, status: u16) -> bool {
 
 /// Record an *upstream* 18x status value as relayed (the `ONE_PER_VALUE`
 /// dedupe ledger; bounded — one entry per distinct 18x value).
-pub fn record_relay_first_18x_value(mut call: Call, status: u16) -> Call {
+pub fn record_relay_first_18x_value(call: &mut Call, status: u16) {
     let s = call.relay_first_18x.get_or_insert_with(Default::default);
     if !s.relayed_values.contains(&status) {
         s.relayed_values.push(status);
     }
-    call
 }
 
 /// The a-facing To-tag minted on the first 18x (reused on the 200 OK).
@@ -52,11 +51,10 @@ pub fn relay_first_18x_stored_a_tag(call: &Call) -> Option<&str> {
 /// Mark the first 18x relayed and record the minted a-facing tag. Preserves the
 /// `ONE_PER_VALUE` dedupe ledger (a later relayed 18x re-runs this with the
 /// same stored tag).
-pub fn set_relay_first_18x_relayed(mut call: Call, stored_a_tag: &str) -> Call {
+pub fn set_relay_first_18x_relayed(call: &mut Call, stored_a_tag: &str) {
     let s = call.relay_first_18x.get_or_insert_with(Default::default);
     s.first_relayed = true;
     s.stored_a_tag = Some(stored_a_tag.to_string());
-    call
 }
 
 // ── promote18xPemTo200 ──────────────────────────────────────────────────────
@@ -77,9 +75,8 @@ pub fn promote_pem_window_open(call: &Call) -> bool {
 }
 
 /// Overwrite the PEM runtime slice (`None` resets to the pre-promotion state).
-pub fn set_promote_pem(mut call: Call, state: Option<crate::model::PromotePemState>) -> Call {
+pub fn set_promote_pem(call: &mut Call, state: Option<crate::model::PromotePemState>) {
     call.promote_pem = state;
-    call
 }
 
 // ── REFER transfer ──────────────────────────────────────────────────────────
@@ -102,24 +99,22 @@ pub fn transfer_active(call: &Call) -> bool {
 }
 
 /// Overwrite the transfer runtime slice (`None` clears it — the terminal path).
-pub fn set_transfer(mut call: Call, state: Option<crate::model::TransferState>) -> Call {
+pub fn set_transfer(call: &mut Call, state: Option<crate::model::TransferState>) {
     call.transfer = state;
-    call
 }
 
 // ── Established-call reroute ────────────────────────────────────────────────
 
 /// Overwrite the established-call reroute slice (`None` clears it — the
 /// completion / rollback path). Mirrors [`set_transfer`].
-pub fn set_reroute(mut call: Call, state: Option<crate::model::RerouteState>) -> Call {
+pub fn set_reroute(call: &mut Call, state: Option<crate::model::RerouteState>) {
     call.reroute = state;
-    call
 }
 
 // ── Opaque ext slots (ADR-0016) ─────────────────────────────────────────────
 
 /// Write an encoded ext slice into `call.ext[serviceId]`; `None` drops the key.
-pub fn set_call_ext(mut call: Call, service_id: &str, value: Option<serde_json::Value>) -> Call {
+pub fn set_call_ext(call: &mut Call, service_id: &str, value: Option<serde_json::Value>) {
     match value {
         None => {
             if let Some(ext) = &mut call.ext {
@@ -130,11 +125,10 @@ pub fn set_call_ext(mut call: Call, service_id: &str, value: Option<serde_json::
             call.ext.get_or_insert_with(ExtMap::new).insert(service_id.to_string(), v);
         }
     }
-    call
 }
 
 /// Write an encoded ext slice into the named leg's `ext[serviceId]`.
-pub fn set_leg_ext(call: Call, leg_id: &str, service_id: &str, value: serde_json::Value) -> Call {
+pub fn set_leg_ext(call: &mut Call, leg_id: &str, service_id: &str, value: serde_json::Value) {
     update_leg(call, leg_id, |leg| {
         leg.ext.get_or_insert_with(ExtMap::new).insert(service_id.to_string(), value);
     })

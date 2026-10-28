@@ -77,7 +77,7 @@ fn armed_call(state: CallModelState) -> call::Call {
     // A ringing callee holds a terminating call until it is settled.
     let mut ringing = b_leg_pending();
     call::testkit::stage_leg(&mut ringing, LegState::Early);
-    call = call::helpers::add_b_leg(call, ringing);
+    call::helpers::add_b_leg(&mut call, ringing);
     call.sm_cursors.insert(SVC, StateLabel::new("Armed"));
     call
 }

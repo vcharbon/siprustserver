@@ -179,7 +179,7 @@ fn call_with(a_state: LegState, b: Leg) -> Call {
         LegState::Confirmed => Some(200),
         LegState::Terminated => Some(487),
     };
-    call = call::helpers::add_b_leg(call, b);
+    call::helpers::add_b_leg(&mut call, b);
     call.active_peer = Some(call::ActivePeer { leg_a: "a".into(), leg_b: "b-1".into() });
     call
 }
@@ -373,7 +373,8 @@ fn a_self_originated_reinvite_in_flight_seeds_its_client_invite() {
         "a 2xx taken closes the round"
     );
 
-    let rejected = call::helpers::close_rejected_invite_round(open, "b-1", REINVITE_BRANCH);
+    let mut rejected = open;
+    call::helpers::close_rejected_invite_round(&mut rejected, "b-1", REINVITE_BRANCH);
     assert!(seeds_for(&rejected, 0).is_empty(), "a non-2xx final closed the round on the record");
 }
 
@@ -382,17 +383,17 @@ fn a_self_originated_reinvite_in_flight_seeds_its_client_invite() {
 #[test]
 fn a_reinvite_seed_carries_the_ack_of_the_2xx_before_it() {
     let leg = b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1)));
-    let call = call_with(LegState::Confirmed, leg);
+    let mut call = call_with(LegState::Confirmed, leg);
     let ack = b"ACK sip:bob@10.0.0.9 SIP/2.0\r\n\r\n".to_vec();
     let retained = call::RetainedEmission::on_trigger(
         ack.clone(),
         ("10.0.0.9".to_string(), 5060),
         call::Repeated::request("ACK"),
     );
-    let call = call::helpers::retain_emitted_ack(call, "b-1", retained, 1);
+    call::helpers::retain_emitted_ack(&mut call, "b-1", retained, 1);
     let id = call.b_legs[0].dialogs.confirmed().expect("the confirmed dialog").id();
     let reinvite = own_reinvite(2, b_handle(REINVITE_BRANCH, 2));
-    let call = call::helpers::open_sent_invite(call, "b-1", &id, reinvite);
+    call::helpers::open_sent_invite(&mut call, "b-1", &id, reinvite);
     let ahead = seeds_for(&call, 0).into_iter().find_map(|s| match s {
         TxnSeed::ClientInvite { ack_ahead, .. } => ack_ahead,
         _ => None,
@@ -432,8 +433,8 @@ fn a_rejected_a_leg_seeds_its_kept_final() {
 /// non-2xx final on a still-early leg leaves it for the CANCEL path.
 #[test]
 fn closing_a_round_touches_only_a_confirmed_leg() {
-    let call = call_with(LegState::Early, b_leg(LegState::Early, Some(b_handle(B_BRANCH, 1))));
-    let call = call::helpers::close_rejected_invite_round(call, "b-1", B_BRANCH);
+    let mut call = call_with(LegState::Early, b_leg(LegState::Early, Some(b_handle(B_BRANCH, 1))));
+    call::helpers::close_rejected_invite_round(&mut call, "b-1", B_BRANCH);
     let fork = call.b_legs[0].dialogs.by_tags("svc", "btag").expect("the fork that rang");
     assert!(fork.sent_invite.is_some());
 }
@@ -546,15 +547,16 @@ fn an_early_b_leg_seeds_its_invite_with_a_provisional() {
 #[test]
 fn a_cancelled_b_leg_seeds_its_held_cancel_with_the_stated_reason() {
     let reason = vec![("Reason".to_string(), "Q.850;cause=16".to_string())];
-    let call = call_with(LegState::Trying, b_leg(LegState::Trying, Some(b_handle(B_BRANCH, 1))));
-    let call = call::helpers::record_cancel_sent(call, "b-1", reason.clone());
+    let mut call =
+        call_with(LegState::Trying, b_leg(LegState::Trying, Some(b_handle(B_BRANCH, 1))));
+    call::helpers::record_cancel_sent(&mut call, "b-1", reason.clone());
     assert_eq!(
         client_cancel(&seeds_for(&call, 0)),
         (false, Some(vec!["Q.850;cause=16".to_string()]))
     );
 
-    let call = call_with(LegState::Early, b_leg(LegState::Early, Some(b_handle(B_BRANCH, 1))));
-    let call = call::helpers::record_cancel_sent(call, "b-1", reason);
+    let mut call = call_with(LegState::Early, b_leg(LegState::Early, Some(b_handle(B_BRANCH, 1))));
+    call::helpers::record_cancel_sent(&mut call, "b-1", reason);
     assert_eq!(client_cancel(&seeds_for(&call, 0)), (true, None));
 }
 

@@ -18,7 +18,7 @@ impl CallState {
         let was = inner.calls.remove(call_ref);
         inner.topologies.remove(call_ref);
         let present = was.is_some();
-        if let Some(was) = was {
+        if let Some(was) = &was {
             inner.restate_uncounted(was.limiter.runs_uncounted(), false);
             self.publish_uncounted(&inner);
         }
@@ -30,6 +30,8 @@ impl CallState {
         inner.parked.remove(call_ref);
         inner.touched.remove(call_ref);
         inner.shrink_idle();
+        drop(inner);
+        drop(was);
         present
     }
 

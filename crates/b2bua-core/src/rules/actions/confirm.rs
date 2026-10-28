@@ -174,7 +174,7 @@ fn arm_ack_obligation(call: &mut Call, resp: &SipResponse, retired: Retired) {
     let Retired { leg_id, .. } = retired;
     let awaited_ack_cseq = i64::from(call.a_leg_invite.cseq);
     let invite_cseq = i64::from(resp.cseq().seq());
-    *call = call::helpers::update_leg(call.clone(), &leg_id, |leg| {
+    call::helpers::update_leg(call, &leg_id, |leg| {
         let Some(d) = leg.dialogs.confirmed_mut() else { return };
         let exchange = d
             .sent_invite

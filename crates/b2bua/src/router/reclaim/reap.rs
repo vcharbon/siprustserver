@@ -37,7 +37,7 @@ pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
             continue;
         }
         let guard = ctx.state.lock(&call_ref).await;
-        if ctx.state.peek(&call_ref).is_none() {
+        if !ctx.state.contains(&call_ref) {
             super::discharge_materialized_terminal(ctx, &call_ref, ghost, now_ms, true).await;
         }
         drop(guard);

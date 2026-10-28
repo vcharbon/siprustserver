@@ -103,7 +103,7 @@ pub(crate) fn owe_answer_in_ack(call: &mut Call, leg_id: &str, resp: &SipRespons
         return;
     }
     let offer = offer.to_vec();
-    *call = call::helpers::update_leg(call.clone(), leg_id, |leg| {
+    call::helpers::update_leg(call, leg_id, |leg| {
         let carries = leg.dialogs.confirmed().is_none_or(|d| acked_invite_carries_offer(leg, d));
         if let Some(d) = leg.dialogs.confirmed_mut().filter(|_| !carries) {
             d.owed_answer = Some(OwedAnswer::InAck { ack_cseq, offer });

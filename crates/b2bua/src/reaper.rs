@@ -350,8 +350,8 @@ pub fn discharge_result(mut call: Call, now_ms: i64) -> HandlerResult {
             call::helpers::abandon_leg(leg);
         }
     }
-    let call = call::helpers::add_cdr_event(
-        call,
+    call::helpers::add_cdr_event(
+        &mut call,
         CdrEvent {
             event_type: CdrEventType::Bye,
             timestamp: now_ms,
@@ -361,7 +361,7 @@ pub fn discharge_result(mut call: Call, now_ms: i64) -> HandlerResult {
             decision_ordinal: 0,
         },
     );
-    let mut call = record_termination(call, now_ms, TerminationCause::Supervisor, None);
+    record_termination(&mut call, now_ms, TerminationCause::Supervisor, None);
     call.state = CallModelState::Terminated;
     HandlerResult::new(call)
 }

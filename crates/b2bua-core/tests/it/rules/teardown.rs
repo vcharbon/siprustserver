@@ -94,7 +94,7 @@ fn bye_from_an_ended_leg_selects_resolve_ended_leg_bye_without_termination() {
     let mut ended = b_leg_pending();
     call::testkit::stage_leg(&mut ended, LegState::Confirmed);
     end_dialogs(&mut ended, DialogState::Ending(EndingBy::Bye));
-    call = call::helpers::add_b_leg(call, ended);
+    call::helpers::add_b_leg(&mut call, ended);
     assert_eq!(call.state, CallModelState::Active, "only one leg was released");
 
     let bye = in_dialog_request(sip_message::Method::Bye);
@@ -122,7 +122,7 @@ fn bye_481_on_a_bye_received_leg_selects_no_teardown() {
     let mut ended = b_leg_pending();
     call::testkit::stage_leg(&mut ended, LegState::Confirmed);
     end_dialogs(&mut ended, DialogState::Ended(call::DialogEnd::PeerBye));
-    call = call::helpers::add_b_leg(call, ended);
+    call::helpers::add_b_leg(&mut call, ended);
     assert_eq!(call.state, CallModelState::Active, "only one leg was released");
 
     let raw = "SIP/2.0 481 Call/Transaction Does Not Exist\r\n\
@@ -165,7 +165,7 @@ fn begin_termination_resolves_an_a_leg_whose_invite_carries_its_final() {
     // and `BeginTermination` leaves it so.
     let mut call = test_call();
     call::testkit::stage_leg(&mut call.a_leg, LegState::Early);
-    let call = call::helpers::record_invite_final(call, "a", 487);
+    call::helpers::record_invite_final(&mut call, "a", 487);
     assert_eq!(call.a_leg.state(), LegState::Terminated);
     let result = execute_on(
         &call,

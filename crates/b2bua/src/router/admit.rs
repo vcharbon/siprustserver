@@ -129,7 +129,7 @@ pub(super) fn invite_here(ctx: &RouterCtx, call_ref: &str, cseq: u32) -> bool {
     // The hold is read first: a turn creates its call before dropping its
     // hold, so a birth between the two reads is still seen.
     ctx.unborn.holds(call_ref, cseq)
-        || ctx.state.peek(call_ref).is_some_and(|call| copies(&call, cseq))
+        || ctx.state.resident(call_ref).is_some_and(|call| copies(&call, cseq))
 }
 
 /// Whether an INVITE carrying CSeq `cseq` on `call`'s identity is a copy of

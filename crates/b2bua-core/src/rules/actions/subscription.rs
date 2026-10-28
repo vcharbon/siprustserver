@@ -117,7 +117,7 @@ impl ActionExecutor<'_> {
             return;
         }
         let state = reported(subscription_state);
-        *call = call::helpers::update_dialog(call.clone(), leg_id, &id, |d| {
+        call::helpers::update_dialog(call, leg_id, &id, |d| {
             match d.subscriptions.iter_mut().find(|s| s.is_named(&package, sub_id.as_deref())) {
                 Some(s) => s.report(state),
                 None => {
@@ -161,7 +161,7 @@ impl ActionExecutor<'_> {
         request: QueuedRequest,
     ) {
         let queued = Queued { behind: Behind::OwnNotify, request };
-        *call = call::helpers::update_dialog(call.clone(), leg_id, id, |d| d.queued.push(queued));
+        call::helpers::update_dialog(call, leg_id, id, |d| d.queued.push(queued));
         self.arm_answer_cap(call, fx);
     }
 
@@ -178,7 +178,7 @@ impl ActionExecutor<'_> {
     ) {
         let (package, sub_id) = named(event);
         let left = NotifyInFlight { cseq, sent_at_ms: self.now_ms };
-        *call = call::helpers::update_dialog(call.clone(), leg_id, id, |d| {
+        call::helpers::update_dialog(call, leg_id, id, |d| {
             if let Some(s) =
                 d.subscriptions.iter_mut().find(|s| s.is_named(&package, sub_id.as_deref()))
             {
@@ -211,7 +211,7 @@ impl ActionExecutor<'_> {
         }
         let ends = status.is_none_or(|s| SUBSCRIPTION_ENDING.contains(&s));
         let cseq = record.outbound_cseq;
-        *call = call::helpers::update_dialog(call.clone(), leg_id, id, |d| {
+        call::helpers::update_dialog(call, leg_id, id, |d| {
             let Some(s) = d.subscriptions.iter_mut().find(|s| s.is_named(event, sub_id.as_deref()))
             else {
                 return;
@@ -276,7 +276,7 @@ impl ActionExecutor<'_> {
             }
             let ended = matches!(d.state, DialogState::Ended(_));
             let mut next = None;
-            *call = call::helpers::update_dialog(call.clone(), leg_id, id, |d| {
+            call::helpers::update_dialog(call, leg_id, id, |d| {
                 let mut rest = Vec::with_capacity(d.queued.len());
                 for q in std::mem::take(&mut d.queued) {
                     if next.is_none() && q.behind == Behind::OwnNotify {

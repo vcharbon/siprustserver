@@ -202,7 +202,7 @@ pub fn rule_chain_turn(
     // carries that transaction's one final before the rules read it, over a
     // 2xx this stack built too late for the completed transaction to send.
     if let CallEvent::Cancelled { in_dialog: false, .. } = event {
-        call = call::helpers::record_cancelled_invite(call, source_leg_id);
+        call::helpers::record_cancelled_invite(&mut call, source_leg_id);
     }
     if let Some(obligation) = fired_obligation(event, &TimerType::RepeatGiveUp) {
         exec.turn.notes.repeat_give_up(obligation.kind());
@@ -267,8 +267,8 @@ pub fn rule_chain_turn(
     if let CallEvent::Sip { message, .. } = event {
         if let SipMessage::Response(resp) = message.as_ref() {
             if resp.status() >= 200 && resp.cseq().method() == Method::Invite {
-                result.call = call::helpers::record_dialled_invite_final(
-                    result.call,
+                call::helpers::record_dialled_invite_final(
+                    &mut result.call,
                     source_leg_id,
                     i64::from(resp.cseq().seq()),
                     resp.status(),

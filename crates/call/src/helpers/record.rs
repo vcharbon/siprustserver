@@ -8,20 +8,20 @@ use super::leg::add_b_leg;
 
 /// Append a CDR event, stamped with the count of decisions applied so far
 /// (`Call::decision_ordinal`).
-pub fn add_cdr_event(mut call: Call, mut event: CdrEvent) -> Call {
+pub fn add_cdr_event(call: &mut Call, mut event: CdrEvent) {
     event.decision_ordinal = call.decision_ordinal;
     call.cdr_events.push(event);
-    call
 }
 
 /// Attach a b-leg this element originates and record its INVITE as sent: one
 /// `InviteSent` per originated leg, at `now_ms`, under the current decision
 /// ordinal. The one `InviteSent` writer — reached when the leg's INVITE is
 /// emitted, so a leg refused before its mint holds no such event.
-pub fn add_originated_b_leg(call: Call, leg: Leg, now_ms: i64) -> Call {
+pub fn add_originated_b_leg(call: &mut Call, leg: Leg, now_ms: i64) {
     let leg_id = leg.leg_id.clone();
+    add_b_leg(call, leg);
     add_cdr_event(
-        add_b_leg(call, leg),
+        call,
         CdrEvent {
             event_type: CdrEventType::InviteSent,
             timestamp: now_ms,
@@ -30,11 +30,11 @@ pub fn add_originated_b_leg(call: Call, leg: Leg, now_ms: i64) -> Call {
             reason: None,
             decision_ordinal: 0,
         },
-    )
+    );
 }
 
 /// Deactivate a rule (set `active = false`); preserves the entry for tracing.
-pub fn deactivate_rule(mut call: Call, rule_id: &str) -> Call {
+pub fn deactivate_rule(call: &mut Call, rule_id: &str) {
     let mut rules = call.active_rules.take().unwrap_or_default();
     for r in &mut rules {
         if r.id == rule_id {
@@ -42,7 +42,6 @@ pub fn deactivate_rule(mut call: Call, rule_id: &str) -> Call {
         }
     }
     call.active_rules = Some(rules);
-    call
 }
 
 /// Render a call's live state-machine cursors as one compact, deterministic

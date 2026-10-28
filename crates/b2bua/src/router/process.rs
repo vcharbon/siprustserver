@@ -167,10 +167,9 @@ pub(super) async fn process(
             super::dialog_gate::Gate::Pass(resolved) => resolved,
             super::dialog_gate::Gate::Answered { answer, in_order } => {
                 let leg = res.source_leg_id.as_str();
-                let call = match &in_order {
-                    Some(r) => super::dialog_gate::note_in_order(call, leg, r, &event),
-                    None => call,
-                };
+                if let Some(r) = &in_order {
+                    super::dialog_gate::note_in_order(&mut call, leg, r, &event);
+                }
                 let taken = in_order.is_some();
                 record_refusal(ctx, call, leg, &event, answer.as_deref(), taken, now_ms);
                 answer_after_the_write(ctx, &call_ref, &event, answer).await;
@@ -178,7 +177,7 @@ pub(super) async fn process(
             }
             super::dialog_gate::Gate::Dropped => return,
         };
-        let call = super::dialog_gate::note_in_order(call, &res.source_leg_id, &resolved, &event);
+        super::dialog_gate::note_in_order(&mut call, &res.source_leg_id, &resolved, &event);
         // The layer emitted this datagram with no transaction to match it; a
         // materialisation — this turn's or an earlier one's, whose seeds went in
         // after the datagram was emitted — may hold one now. Re-offered, a match
@@ -277,7 +276,7 @@ async fn reaper_verdict_gate(
             let watermark = payload.get("watermark").and_then(|v| v.as_i64());
             let current = ctx.state.last_touched(call_ref);
             if !crate::reaper::verdict_confirmed(outcome, watermark, current) {
-                if current.is_none() && ctx.state.peek(call_ref).is_none() {
+                if current.is_none() && !ctx.state.contains(call_ref) {
                     // The call is gone — but this verdict's dispatch may have
                     // spun up a fresh per-call queue (+ lock entry). Tear the
                     // ephemera down via the orphan path so nothing ratchets.
@@ -291,7 +290,7 @@ async fn reaper_verdict_gate(
                 // finalize → enforce → process_result — the ObligationSet
                 // discharges the CDR + limiter holds, RemoveCall logs the
                 // delete and rides release_call(Terminated) (X6).
-                if ctx.state.peek(call_ref).is_none() {
+                if !ctx.state.contains(call_ref) {
                     return Gate::Consumed;
                 }
                 ctx.metrics.bump_reaper_discharged();
@@ -369,13 +368,15 @@ fn record_refusal(
     };
     let call = match (ring, req) {
         (Some(ring), Some(req)) => {
-            call::helpers::seal_turn(ring.refused(call, leg_id, req, answer, now_ms))
+            let mut call = ring.refused(call, leg_id, req, answer, now_ms);
+            call::helpers::seal_turn(&mut call);
+            call
         }
         _ if changed => call,
         _ => return,
     };
     if changed {
-        ctx.state.write(&call);
+        ctx.state.write(call);
     } else {
         ctx.state.update(call);
     }

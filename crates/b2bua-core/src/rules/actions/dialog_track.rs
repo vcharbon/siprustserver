@@ -78,7 +78,7 @@ impl ActionExecutor<'_> {
         } else {
             DialogState::Early
         };
-        *call = call::helpers::update_leg(call.clone(), source_leg_id, |leg| {
+        call::helpers::update_leg(call, source_leg_id, |leg| {
             let mut d = Dialog::new(invite.our_tag, to_tag, state, cseq);
             d.sent_invite = sent_invite;
             d.remote_target = contact;

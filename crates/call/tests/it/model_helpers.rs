@@ -55,12 +55,12 @@ fn leg_kind_and_adoption_defaults() {
 
 #[test]
 fn cseq_lens_helpers() {
-    let call = representative_call();
+    let mut call = representative_call();
     let before = a_dialog(&call).our_cseq;
-    let call = bump_our_cseq(call, "a", &a_id(), 5);
+    bump_our_cseq(&mut call, "a", &a_id(), 5);
     assert_eq!(a_dialog(&call).our_cseq, before + 5);
 
-    let call = advance_peer_cseq(call, "b-1", &b_id(), 9999);
+    advance_peer_cseq(&mut call, "b-1", &b_id(), 9999);
     assert_eq!(b_dialog(&call).peer_cseq, Some(9999));
 }
 
@@ -68,29 +68,29 @@ fn cseq_lens_helpers() {
 /// never decreases.
 #[test]
 fn the_peer_sequence_never_decreases() {
-    let mut unseen = representative_call();
-    unseen.b_legs[0].dialogs.by_tags_mut(B_LOCAL_TAG, B_TAG).unwrap().peer_cseq = None;
-    let call = advance_peer_cseq(unseen, "b-1", &b_id(), 7);
+    let mut call = representative_call();
+    call.b_legs[0].dialogs.by_tags_mut(B_LOCAL_TAG, B_TAG).unwrap().peer_cseq = None;
+    advance_peer_cseq(&mut call, "b-1", &b_id(), 7);
     assert_eq!(b_dialog(&call).peer_cseq, Some(7), "the first request sets it");
-    let call = advance_peer_cseq(call, "b-1", &b_id(), 12);
+    advance_peer_cseq(&mut call, "b-1", &b_id(), 12);
     assert_eq!(b_dialog(&call).peer_cseq, Some(12), "a gap is in order");
-    let call = advance_peer_cseq(call, "b-1", &b_id(), 9);
+    advance_peer_cseq(&mut call, "b-1", &b_id(), 9);
     assert_eq!(b_dialog(&call).peer_cseq, Some(12), "a lower number leaves it");
 }
 
 #[test]
 fn pending_request_lifecycle() {
-    let call = representative_call();
+    let mut call = representative_call();
     let entry = RequestRecord {
         source_call_id: "cid".into(),
         source_from: "f".into(),
         source_to: "t".into(),
         ..RequestRecord::relayed("OPTIONS", 42, 42)
     };
-    let call = add_record(call, "b-1", &b_id(), entry);
+    add_record(&mut call, "b-1", &b_id(), entry);
     assert!(find_relay(b_dialog(&call), 42).is_some());
 
-    let call = remove_relay(call, "b-1", &b_id(), 42);
+    remove_relay(&mut call, "b-1", &b_id(), 42);
     assert!(find_relay(b_dialog(&call), 42).is_none());
 }
 
@@ -117,25 +117,22 @@ fn tag_accessors_and_fronts() {
 
 #[test]
 fn peering_split_merge() {
-    let call = representative_call();
+    let mut call = representative_call();
     assert_eq!(get_peer(&call, "a"), Some("b-1"));
     assert_eq!(get_peer(&call, "b-1"), Some("a"));
     assert_eq!(all_peered_legs(&call).len(), 2);
 
-    let call = split_leg(call, "a");
+    split_leg(&mut call, "a");
     assert_eq!(get_peer(&call, "a"), None);
     assert!(all_peered_legs(&call).is_empty());
 
-    let call = merge_leg(call, "a", "b-1");
+    merge_leg(&mut call, "a", "b-1");
     assert_eq!(get_peer(&call, "b-1"), Some("a"));
 }
 
-fn end_dialog(call: Call, leg_id: &str, state: DialogState) -> Call {
-    update_leg(call, leg_id, |l| {
-        for d in l.dialogs.iter_mut() {
-            d.state = state.clone();
-        }
-    })
+fn end_dialog(mut call: Call, leg_id: &str, state: DialogState) -> Call {
+    update_leg(&mut call, leg_id, |l| l.dialogs.iter_mut().for_each(|d| d.state = state.clone()));
+    call
 }
 
 #[test]
@@ -223,16 +220,16 @@ fn the_callers_leg_reads_the_final_it_was_sent() {
 
 #[test]
 fn ext_and_rule_helpers() {
-    let call = representative_call();
-    let call = set_call_ext(call, "transfer", Some(serde_json::json!({ "phase": "ringing" })));
+    let mut call = representative_call();
+    set_call_ext(&mut call, "transfer", Some(serde_json::json!({ "phase": "ringing" })));
     assert!(call.ext.as_ref().unwrap().contains_key("transfer"));
-    let call = set_call_ext(call, "transfer", None);
+    set_call_ext(&mut call, "transfer", None);
     assert!(!call.ext.as_ref().unwrap().contains_key("transfer"));
 
-    let call = set_leg_ext(call, "b-1", "media", serde_json::json!({ "role": "mrf" }));
+    set_leg_ext(&mut call, "b-1", "media", serde_json::json!({ "role": "mrf" }));
     assert!(call.b_legs[0].ext.as_ref().unwrap().contains_key("media"));
 
-    let call = deactivate_rule(call, "limit-by-subscriber");
+    deactivate_rule(&mut call, "limit-by-subscriber");
     let r =
         call.active_rules.as_ref().unwrap().iter().find(|r| r.id == "limit-by-subscriber").unwrap();
     assert!(!r.active);
@@ -611,14 +608,14 @@ fn marks_number_the_decisions_and_stamp_what_follows() {
         decision_ordinal: 99,
     };
 
-    let call = record_message(call, "b-1", 8, entry());
-    let call = add_cdr_event(call, cdr());
-    let call = mark_decision(call, 10, DecisionKind::Route, Some("a".into()), Some("first".into()));
-    let call = record_message(call, "b-1", 8, entry());
-    let call = add_cdr_event(call, cdr());
-    let call = mark_decision(call, 20, DecisionKind::FailoverRoute, Some("b-1".into()), None);
-    let call = record_message(call, "b-1", 8, entry());
-    let call = add_cdr_event(call, cdr());
+    record_message(&mut call, "b-1", 8, entry());
+    add_cdr_event(&mut call, cdr());
+    mark_decision(&mut call, 10, DecisionKind::Route, Some("a".into()), Some("first".into()));
+    record_message(&mut call, "b-1", 8, entry());
+    add_cdr_event(&mut call, cdr());
+    mark_decision(&mut call, 20, DecisionKind::FailoverRoute, Some("b-1".into()), None);
+    record_message(&mut call, "b-1", 8, entry());
+    add_cdr_event(&mut call, cdr());
 
     assert_eq!(call.decision_ordinal, 2);
     assert_eq!(
@@ -671,14 +668,14 @@ fn a_turn_numbers_its_entries_and_the_seal_moves_past_it() {
         turn: 99,
     };
 
-    let call = record_message(call, "a", 8, entry());
-    let call = record_message(call, "b-1", 8, entry());
-    let call = seal_turn(call);
+    record_message(&mut call, "a", 8, entry());
+    record_message(&mut call, "b-1", 8, entry());
+    seal_turn(&mut call);
     assert_eq!(call.message_turn, 2, "past the turn that recorded two entries");
-    let call = seal_turn(call);
+    seal_turn(&mut call);
     assert_eq!(call.message_turn, 3, "a turn that recorded nothing takes a number too");
-    let call = record_message(call, "a", 8, entry());
-    let call = seal_turn(call);
+    record_message(&mut call, "a", 8, entry());
+    seal_turn(&mut call);
     assert_eq!(call.message_turn, 4);
 
     let turns = |leg: &Leg| leg.messages.entries.iter().map(|e| e.turn).collect::<Vec<u32>>();
@@ -694,10 +691,11 @@ fn the_first_termination_is_recorded_once_and_cut_once() {
     let mut call = representative_call();
     call.termination = None;
     call.message_seq = 4;
-    assert_eq!(seal_termination_seq(call.clone()).termination, None, "nothing to cut");
+    seal_termination_seq(&mut call);
+    assert_eq!(call.termination, None, "nothing to cut");
 
-    let call = record_termination(call, 10, TerminationCause::RemoteCancel, Some("a".into()));
-    let call = record_termination(call, 20, TerminationCause::Supervisor, None);
+    record_termination(&mut call, 10, TerminationCause::RemoteCancel, Some("a".into()));
+    record_termination(&mut call, 20, TerminationCause::Supervisor, None);
     assert_eq!(
         call.termination,
         Some(Termination {
@@ -707,10 +705,10 @@ fn the_first_termination_is_recorded_once_and_cut_once() {
             last_seq: 0,
         })
     );
-    let mut call = seal_termination_seq(call);
+    seal_termination_seq(&mut call);
     assert_eq!(call.termination.as_ref().unwrap().last_seq, 4, "cut at the seal");
     call.message_seq = 7;
-    let call = seal_termination_seq(call);
+    seal_termination_seq(&mut call);
     assert_eq!(call.termination.as_ref().unwrap().last_seq, 4, "a later seal moves nothing");
 }
 
@@ -830,7 +828,7 @@ fn a_cancelled_invite_takes_back_the_2xx_that_never_left() {
         entry(3, MessageDirection::Relayed, Some(200)),
     ];
 
-    let call = record_cancelled_invite(call, "a");
+    record_cancelled_invite(&mut call, "a");
 
     let a = &call.a_leg;
     assert_eq!(a.invite_final_sent(), Some(487));

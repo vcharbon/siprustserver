@@ -137,7 +137,7 @@ fn a_timeout_on_an_ended_leg_keeps_its_disposition() {
     call.state = CallModelState::Terminating;
     let mut b = b_leg_pending();
     cancel_sent(&mut b);
-    call = call::helpers::add_b_leg(call, b);
+    call::helpers::add_b_leg(&mut call, b);
     let actions = handle_timeout_result(&call, "b-1");
     assert!(
         matches!(actions.as_slice(), [RuleAction::TerminateLeg { end: LegEnd::Abandon, .. }]),
@@ -145,7 +145,7 @@ fn a_timeout_on_an_ended_leg_keeps_its_disposition() {
     );
     let mut call = test_call();
     call.state = CallModelState::Terminating;
-    call = call::helpers::add_b_leg(call, b_leg_pending());
+    call::helpers::add_b_leg(&mut call, b_leg_pending());
     let actions = handle_timeout_result(&call, "b-1");
     assert!(
         matches!(
@@ -162,7 +162,7 @@ fn invite_timeout_on_a_live_pending_leg_still_consults() {
     // timeout keeps the failover consult.
     let mut call = test_call();
     call.callback_context = Some("cb".into());
-    call = call::helpers::add_b_leg(call, b_leg_pending());
+    call::helpers::add_b_leg(&mut call, b_leg_pending());
     let actions = handle_timeout_result(&call, "b-1");
     assert!(
         actions.iter().any(|a| matches!(a, RuleAction::FailureAsyncHttp { .. })),

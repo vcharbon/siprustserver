@@ -28,7 +28,7 @@ fn invariants_append_cleanup_on_terminated() {
     let before = call.clone();
     call.state = CallModelState::Terminated;
     // A synthetic terminal states its cause as every live path does.
-    call = call::helpers::record_termination(call, 0, TerminationCause::Supervisor, None);
+    call::helpers::record_termination(&mut call, 0, TerminationCause::Supervisor, None);
     let result = invariants::enforce(
         &ObligationSet::core(),
         &before,
@@ -76,7 +76,7 @@ fn the_unanswered_callers_503_carries_the_deployment_advertisement() {
     let mut call = test_call();
     let before = call.clone();
     call.state = CallModelState::Terminated;
-    call = call::helpers::record_termination(call, 0, TerminationCause::Supervisor, None);
+    call::helpers::record_termination(&mut call, 0, TerminationCause::Supervisor, None);
     let policy = CapabilitySet::stating(
         None,
         None,
@@ -113,7 +113,7 @@ fn no_synthesized_final_when_the_turn_already_answered() {
     let before = call.clone();
     call.state = CallModelState::Terminated;
     // A synthetic terminal states its cause as every live path does.
-    call = call::helpers::record_termination(call, 0, TerminationCause::Supervisor, None);
+    call::helpers::record_termination(&mut call, 0, TerminationCause::Supervisor, None);
     let a_invite = crate::caller_of(&call);
     let mut result = HandlerResult::new(call);
     let effect = b2bua_core::rules::relay::response_to_a_leg(
@@ -164,8 +164,8 @@ fn no_synthesized_final_when_the_txn_layer_answered_the_cancel() {
     let before = call.clone();
     call.state = CallModelState::Terminated;
     // A synthetic terminal states its cause as every live path does.
-    call = call::helpers::record_termination(call, 0, TerminationCause::Supervisor, None);
-    call = call::helpers::record_invite_final(call, "a", 487);
+    call::helpers::record_termination(&mut call, 0, TerminationCause::Supervisor, None);
+    call::helpers::record_invite_final(&mut call, "a", 487);
     let result = invariants::enforce(
         &ObligationSet::core(),
         &before,

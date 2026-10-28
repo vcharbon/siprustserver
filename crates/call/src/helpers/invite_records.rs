@@ -60,12 +60,7 @@ pub fn relayed_invite_pending(d: &Dialog) -> bool {
 /// dialog's last: the ACK the previous one's 2xx drew belongs to that
 /// transaction alone (§13.2.2.4), and `record` carries it as the ACK ahead of
 /// it ([`InviteExchange::ack_ahead`]) when it answered a 2xx.
-pub fn open_sent_invite(
-    call: Call,
-    leg_id: &str,
-    id: &DialogId,
-    mut record: RequestRecord,
-) -> Call {
+pub fn open_sent_invite(call: &mut Call, leg_id: &str, id: &DialogId, mut record: RequestRecord) {
     update_dialog(call, leg_id, id, |d| {
         let ahead = sent_exchange(d).filter(|x| x.ack_branch.is_some());
         let ahead = ahead.and_then(|x| x.emitted_ack.clone());
@@ -82,7 +77,7 @@ pub fn open_sent_invite(
 /// transaction and never quiesce the answerer's INVITE server transaction.
 /// The first write stands. A dialog holding no INVITE of its own takes a
 /// record numbered `cseq`, the ACK's: a round the record never held.
-pub fn retain_ack_branch(call: Call, leg_id: &str, branch: &str, cseq: i64) -> Call {
+pub fn retain_ack_branch(call: &mut Call, leg_id: &str, branch: &str, cseq: i64) {
     update_leg(call, leg_id, |leg| {
         if let Some(x) = leg.dialogs.established_mut().map(|d| ensure_sent(d, cseq)) {
             x.ack_branch.get_or_insert_with(|| branch.to_string());
@@ -96,7 +91,7 @@ pub fn retain_ack_branch(call: Call, leg_id: &str, branch: &str, cseq: i64) -> C
 /// offer the retained bytes carry the answer a fresh composition would drop
 /// (RFC 3264 §4). The first write stands; a dialog holding no INVITE of its
 /// own takes a record numbered `cseq`, the ACK's.
-pub fn retain_emitted_ack(call: Call, leg_id: &str, ack: RetainedEmission, cseq: i64) -> Call {
+pub fn retain_emitted_ack(call: &mut Call, leg_id: &str, ack: RetainedEmission, cseq: i64) {
     update_leg(call, leg_id, |leg| {
         if let Some(x) = leg.dialogs.established_mut().map(|d| ensure_sent(d, cseq)) {
             x.emitted_ack.get_or_insert(ack);
@@ -119,7 +114,7 @@ fn ensure_sent(d: &mut Dialog, cseq: i64) -> &mut InviteExchange {
 /// Arm (`Some`) or discharge (`None`) the §13.2.2.4 relay-ACK obligation on
 /// `leg_id`'s established dialog. `cseq` is the number the acknowledging
 /// peer's ACK will carry — the peer's own INVITE CSeq, not this dialog's.
-pub fn set_awaited_ack_cseq(call: Call, leg_id: &str, cseq: Option<i64>) -> Call {
+pub fn set_awaited_ack_cseq(call: &mut Call, leg_id: &str, cseq: Option<i64>) {
     update_leg(call, leg_id, |leg| {
         if let Some(x) = leg.dialogs.established_mut().and_then(sent_exchange_mut) {
             x.awaited_ack_cseq = cseq;
@@ -134,7 +129,7 @@ pub fn set_awaited_ack_cseq(call: Call, leg_id: &str, cseq: Option<i64>) -> Call
 /// closed: one taken stays for the ACK and its re-ACKs, whatever a later
 /// final on the same branch says; the dialling INVITE of a leg holding no
 /// confirmed dialog stays for the CANCEL.
-pub fn close_rejected_invite_round(call: Call, leg_id: &str, branch: &str) -> Call {
+pub fn close_rejected_invite_round(call: &mut Call, leg_id: &str, branch: &str) {
     update_leg(call, leg_id, |leg| {
         if leg.dialogs.confirmed().is_none() {
             return;

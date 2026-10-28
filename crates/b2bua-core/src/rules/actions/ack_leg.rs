@@ -113,19 +113,19 @@ impl ActionExecutor<'_> {
                 e.destination.clone(),
                 call::Repeated::request(r.method().as_str()),
             );
-            *call = call::helpers::retain_emitted_ack(call.clone(), leg_id, retained, cseq);
+            call::helpers::retain_emitted_ack(call, leg_id, retained, cseq);
             fx.outbound.push(e);
             // Retain the ACK branch so a retransmitted 2xx is re-ACKed on the
             // SAME transaction (§13.2.2.4 — `re-ack-retransmitted-2xx`).
-            *call = call::helpers::retain_ack_branch(call.clone(), leg_id, &branch, cseq);
+            call::helpers::retain_ack_branch(call, leg_id, &branch, cseq);
             // The ACK this dialog owed is on the wire, so the §13.2.2.4
             // obligation is discharged HERE — by the emission, whoever composed
             // it. A peer ACK for the same 2xx is then absorbed rather than
             // relayed on top of it (`relay_request`'s `owed` gate). A dialog
             // whose ACK nobody composes keeps the obligation and gets the peer's.
-            *call = call::helpers::set_awaited_ack_cseq(call.clone(), leg_id, None);
+            call::helpers::set_awaited_ack_cseq(call, leg_id, None);
             // A delayed offer's answer rode this ACK (RFC 3264 §4).
-            *call = call::helpers::update_leg(call.clone(), leg_id, |l| {
+            call::helpers::update_leg(call, leg_id, |l| {
                 if let Some(d) = l.dialogs.established_mut() {
                     if matches!(d.owed_answer, Some(call::OwedAnswer::InAck { .. })) {
                         d.owed_answer = None;

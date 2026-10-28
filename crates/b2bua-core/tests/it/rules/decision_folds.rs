@@ -8,10 +8,10 @@ use super::*;
 /// decision touched, then the count of applied decisions.
 #[test]
 fn rule_call_reads_the_current_decision_ordinal() {
-    let call = test_call();
+    let mut call = test_call();
     assert_eq!(RuleCall::new(&call).decision_ordinal(), 0, "no decision yet");
-    let call = call::helpers::mark_decision(
-        call,
+    call::helpers::mark_decision(
+        &mut call,
         1_000,
         call::DecisionKind::Route,
         Some("a".to_string()),
@@ -62,7 +62,7 @@ fn decision_folds_on_a_terminating_call_are_dropped_whole() {
     let mut call = test_call();
     call.state = CallModelState::Terminating;
     call.callback_context = Some("cb".into());
-    call = call::helpers::add_b_leg(call, b_leg_pending());
+    call::helpers::add_b_leg(&mut call, b_leg_pending());
     for (rule_id, topic, outcome, payload) in [
         ("failover-create-leg", "call-failure-result", "failover", route_fold_payload()),
         (
@@ -108,7 +108,7 @@ fn decision_folds_on_a_live_call_still_apply() {
     // their normal bodies.
     let mut call = test_call();
     call.callback_context = Some("cb".into());
-    call = call::helpers::add_b_leg(call, b_leg_pending());
+    call::helpers::add_b_leg(&mut call, b_leg_pending());
 
     let actions = fold_result(
         &call,

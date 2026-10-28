@@ -8,12 +8,12 @@ use crate::model::{Call, DecisionKind, DecisionMark};
 /// bumps `Call::decision_ordinal` and appends the mark carrying it, so the
 /// next message or event written reads the new count.
 pub fn mark_decision(
-    mut call: Call,
+    call: &mut Call,
     at_ms: i64,
     kind: DecisionKind,
     leg_id: Option<String>,
     label: Option<String>,
-) -> Call {
+) {
     call.decision_ordinal += 1;
     call.decision_log.push(DecisionMark {
         ordinal: call.decision_ordinal,
@@ -22,5 +22,4 @@ pub fn mark_decision(
         leg_id,
         label,
     });
-    call
 }

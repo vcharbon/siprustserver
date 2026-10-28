@@ -283,10 +283,7 @@ pub(super) async fn initial_invite_copy(
     let CallEvent::Sip { message, .. } = event else { return InitialInvite::Own };
     let SipMessage::Request(req) = message.as_ref() else { return InitialInvite::Own };
     let cseq = req.cseq().seq();
-    if !ctx.state.replicates()
-        || ctx.unborn.holds(derived, cseq)
-        || ctx.state.peek(derived).is_some()
-    {
+    if !ctx.state.replicates() || ctx.unborn.holds(derived, cseq) || ctx.state.contains(derived) {
         return InitialInvite::Own;
     }
     if let Some(hit) = replicated_call_copied(ctx, req).await {

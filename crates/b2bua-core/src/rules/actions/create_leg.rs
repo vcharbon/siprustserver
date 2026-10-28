@@ -48,8 +48,8 @@ impl ActionExecutor<'_> {
             &self.config.worker_allowed_target_suffixes,
         ) == crate::destination_allowlist::AdmissionVerdict::Reject
         {
-            *call = add_cdr_event(
-                call.clone(),
+            add_cdr_event(
+                call,
                 CdrEvent {
                     event_type: call::CdrEventType::Reject,
                     timestamp: self.now_ms,
@@ -110,8 +110,8 @@ impl ActionExecutor<'_> {
                     detail = %err.detail(),
                     "leg not created"
                 );
-                *call = add_cdr_event(
-                    call.clone(),
+                add_cdr_event(
+                    call,
                     CdrEvent {
                         event_type: call::CdrEventType::Reject,
                         timestamp: self.now_ms,
@@ -145,7 +145,7 @@ impl ActionExecutor<'_> {
         if let Some(ctx_str) = callback_context {
             call.callback_context = Some(ctx_str.to_string());
         }
-        *call = add_originated_b_leg(call.clone(), leg, self.now_ms);
+        add_originated_b_leg(call, leg, self.now_ms);
         fx.outbound.push(effect);
         // The leg rings for its attempt's deadline from its first 18x
         // (`ring_deadline`); a leg that opens no attempt rings under none.

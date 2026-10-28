@@ -131,19 +131,18 @@ pub fn retained_for<'a>(call: &'a Call, obligation: &Obligation) -> Option<&'a R
 /// would land at or past the bound (`give_up` where the owner states its own,
 /// the class's otherwise). The caller arms the rung's timer, or ceases.
 pub fn advance_ladder(
-    mut call: Call,
+    call: &mut Call,
     obligation: &Obligation,
     give_up: Option<Duration>,
-) -> (Call, Option<Duration>) {
-    let next = match obligation {
+) -> Option<Duration> {
+    match obligation {
         Obligation::AckOf2xx { .. } => {
-            unacked_2xx_slot_mut(&mut call, obligation).and_then(|u| u.emission.advance(give_up))
+            unacked_2xx_slot_mut(call, obligation).and_then(|u| u.emission.advance(give_up))
         }
         Obligation::AwaitPrack { tag, rseq } => {
-            crate::helpers::advance_shown_ladder(&mut call, tag, *rseq, give_up)
+            crate::helpers::advance_shown_ladder(call, tag, *rseq, give_up)
         }
-    };
-    (call, next)
+    }
 }
 
 /// Drop what `obligation`'s ladder repeats: the ladder is over — discharged,
@@ -153,7 +152,7 @@ pub fn advance_ladder(
 /// behind its ACK leaves the dialog's queue (its releaser sends it); a reliable
 /// provisional's ladder ceases with the final it was shown before, an
 /// acknowledged one standing.
-pub fn clear_retained(mut call: Call, obligation: &Obligation) -> Call {
+pub fn clear_retained(call: &mut Call, obligation: &Obligation) {
     match obligation {
         Obligation::AckOf2xx { leg, dialog_tag, cseq } => {
             let matches = |u: &Option<Unacked2xx>| {
@@ -168,11 +167,9 @@ pub fn clear_retained(mut call: Call, obligation: &Obligation) -> Call {
                     d.drop_answered_invite();
                 }
             }
-            call
         }
         Obligation::AwaitPrack { tag, rseq } => {
-            crate::helpers::cease_shown_ladder(&mut call, tag, *rseq, Ceased::Final);
-            call
+            crate::helpers::cease_shown_ladder(call, tag, *rseq, Ceased::Final);
         }
     }
 }

@@ -74,9 +74,10 @@ fn a_bare_180_after_the_final_mints_no_mask_state() {
     // The bare-180 downgrade asked to ring an answered caller: refused at the
     // seam before the mask's own bookkeeping — no a-facing tag mapping, the
     // mask still unrelayed.
-    let mut call = call::helpers::record_invite_final(test_call(), "a", 200);
+    let mut call = test_call();
+    call::helpers::record_invite_final(&mut call, "a", 200);
     confirm_a(&mut call);
-    call = call::helpers::add_b_leg(call, b_leg_pending());
+    call::helpers::add_b_leg(&mut call, b_leg_pending());
     let event = b_leg_ringing_event(false);
 
     let result = execute_from_b1(
@@ -126,12 +127,13 @@ fn a_provisional_on_a_confirmed_b_leg_selects_no_relay_rule() {
     // proxy failed to cancel, a retransmission) answers a transaction that
     // took its final: no relay rule claims it, so nothing moves the leg back
     // to Early or rings the caller.
-    let mut call = call::helpers::record_invite_final(test_call(), "a", 200);
+    let mut call = test_call();
+    call::helpers::record_invite_final(&mut call, "a", 200);
     confirm_a(&mut call);
     let mut confirmed = b_leg_pending();
     call::testkit::stage_leg(&mut confirmed, LegState::Confirmed);
     with_dialog(&mut confirmed, "bobtag");
-    call = call::helpers::add_b_leg(call, confirmed);
+    call::helpers::add_b_leg(&mut call, confirmed);
 
     let event = b_leg_ringing_event(false);
     let config = B2buaConfig::default();

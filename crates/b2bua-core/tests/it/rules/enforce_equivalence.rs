@@ -105,8 +105,7 @@ proptest! {
         after.state = after_state;
         if after_state != CallModelState::Active {
             // A synthetic terminal states its cause as every live path does.
-            after = call::helpers::record_termination(
-                after,
+            call::helpers::record_termination(&mut after,
                 0,
                 TerminationCause::Supervisor,
                 None,

@@ -206,12 +206,7 @@ impl ActionExecutor<'_> {
                 // is keyed strictly on `(leg, b_tag)` — a fallback write would
                 // overwrite a different fork's cached answer.
                 self.ensure_b_early_dialog(call, ctx, leg_id, b_tag);
-                *call = call::helpers::cache_sdp_on_leg_dialog(
-                    call.clone(),
-                    leg_id,
-                    b_tag,
-                    body.clone(),
-                );
+                call::helpers::cache_sdp_on_leg_dialog(call, leg_id, b_tag, body.clone());
             }
             RuleAction::RelayFirstBare180 { leg_id, b_tag } => {
                 self.relay_first_bare_180(call, fx, ctx, leg_id, b_tag);

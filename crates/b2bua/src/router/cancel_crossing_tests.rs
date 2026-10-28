@@ -64,7 +64,8 @@ fn relayed_answer_call() -> Call {
     let mut bob = Dialog::new("b2bua-b-tag", "bob-tag", DialogState::Confirmed, 1);
     bob.remote_target = "sip:bob@10.0.0.2:5060".into();
     b.dialogs = vec![bob].into();
-    call::helpers::add_b_leg(call, b)
+    call::helpers::add_b_leg(&mut call, b);
+    call
 }
 
 #[tokio::test(start_paused = true)]

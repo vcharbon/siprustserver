@@ -42,11 +42,12 @@ pub fn land(result: HandlerResult, landing: &Landing<'_>, now_ms: i64) -> Handle
     // cut stays `0`.
     match crate::message_ring::Ring::of(landing.config) {
         Some(ring) => HandlerResult {
-            call: seal_turn(seal_termination_seq(ring.sent(
-                result.call,
-                &result.effects.outbound,
-                now_ms,
-            ))),
+            call: {
+                let mut call = ring.sent(result.call, &result.effects.outbound, now_ms);
+                seal_termination_seq(&mut call);
+                seal_turn(&mut call);
+                call
+            },
             effects: result.effects,
         },
         None => result,

@@ -12,6 +12,7 @@ pub mod containment;
 pub mod envelope;
 mod faults;
 mod flush_body;
+mod index;
 mod local_release;
 mod materialise;
 mod memory;
@@ -48,7 +49,7 @@ pub use takeover::TakeoverProbe;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-use call::{call_index_keys, Call, CallModelState, IndexHit, IndexLookup, MsgpackCodec, Probe};
+use call::{call_index_keys, Call, CallModelState, MsgpackCodec};
 
 use crate::metrics::B2buaMetrics;
 use crate::repl::{ReplicatingCallStore, ReplicationPlan};
@@ -162,15 +163,6 @@ impl Inner {
             (false, true) => self.uncounted += 1,
             (true, false) => self.uncounted = self.uncounted.saturating_sub(1),
             _ => {}
-        }
-    }
-
-    /// Drop `call_ref`'s index `keys`, leaving any key another call now holds.
-    fn unindex(&mut self, call_ref: &str, keys: &[String]) {
-        for k in keys {
-            if self.sip_index.get(k).is_some_and(|owner| owner == call_ref) {
-                self.sip_index.remove(k);
-            }
         }
     }
 
@@ -299,14 +291,17 @@ impl CallState {
         let call_ref = call.call_ref.clone();
         let now_ms = self.clock.now_ms();
         let is = call.limiter.runs_uncounted();
+        let keys = call_index_keys(&call);
         let mut inner = self.locked();
         let was = inner.calls.get(&call_ref).is_some_and(|c| c.limiter.runs_uncounted());
-        Self::reindex(&mut inner, &call);
+        Self::reindex(&mut inner, &call_ref, keys);
         inner.touched.insert(call_ref.clone(), now_ms);
         Self::place(&mut inner, &call_ref, topology);
         inner.restate_uncounted(was, is);
         self.publish_uncounted(&inner);
-        inner.calls.insert(call_ref.clone(), Arc::new(call));
+        let replaced = inner.calls.insert(call_ref.clone(), Arc::new(call));
+        drop(inner);
+        drop(replaced);
         call_ref
     }
 
@@ -331,7 +326,7 @@ impl CallState {
         self.locked().touched.get(call_ref).copied()
     }
 
-    /// Cheap residency check (no `Call` clone) — sweep-side strike pruning.
+    /// Whether `call_ref` is resident, read without cloning it.
     pub fn contains(&self, call_ref: &str) -> bool {
         self.locked().calls.contains_key(call_ref)
     }
@@ -355,9 +350,15 @@ impl CallState {
             .collect()
     }
 
-    /// Snapshot a call (clone) from memory, if present.
+    /// Snapshot a call (clone) from memory, if present. The copy is made
+    /// after the map lock is released.
     pub fn peek(&self, call_ref: &str) -> Option<Call> {
-        self.locked().calls.get(call_ref).map(|c| (**c).clone())
+        self.resident(call_ref).map(Arc::unwrap_or_clone)
+    }
+
+    /// The resident call `call_ref`, shared with the map: no copy.
+    pub fn resident(&self, call_ref: &str) -> Option<Arc<Call>> {
+        self.locked().calls.get(call_ref).cloned()
     }
 
     /// Whether the resident call `call_ref` is the incarnation `incarnation`
@@ -418,11 +419,13 @@ impl CallState {
     /// ([`call::helpers::same_state`]) stamps the vector it bumps; a write that
     /// changes only exempt fields leaves the stamp ([`containment`]). It runs
     /// outside the map lock: the caller holds the call's own.
-    pub fn update(&self, call: Call) {
-        let Some(resident) = self.locked().calls.get(&call.call_ref).cloned() else {
+    pub fn update(&self, call: impl Into<Arc<Call>>) {
+        let call = call.into();
+        let Some(resident) = self.resident(&call.call_ref) else {
             return;
         };
         let changed = !call::helpers::same_state(&resident, &call);
+        let keys = call_index_keys(&call);
         let mut inner = self.locked();
         if let Some(t) = inner.topologies.get_mut(&call.call_ref) {
             match role_of(&self.self_ordinal, &call.call_ref) {
@@ -433,31 +436,43 @@ impl CallState {
                 t.stamp_vector();
             }
         }
-        self.replace_locked(&mut inner, call);
+        let released = self.replace_locked(&mut inner, call, keys);
+        drop(inner);
+        drop(released);
     }
 
     /// Replace the in-memory call for a quiet turn or a meeting: the same
     /// replace-only rule as [`update`](Self::update) with no counter moved —
     /// the `(p,b)` the resident copy carries is the last write's, either
     /// owner's, and so is what the next flush publishes.
-    pub fn update_quiet(&self, call: Call) {
+    pub fn update_quiet(&self, call: impl Into<Arc<Call>>) {
+        let call = call.into();
+        let keys = call_index_keys(&call);
         let mut inner = self.locked();
-        self.replace_locked(&mut inner, call);
+        let released = self.replace_locked(&mut inner, call, keys);
+        drop(inner);
+        drop(released);
     }
 
-    fn replace_locked(&self, inner: &mut Inner, call: Call) {
-        if !inner.calls.contains_key(&call.call_ref) {
-            return;
-        }
-        Self::reindex(inner, &call);
-        let was = inner.calls.get(&call.call_ref).is_some_and(|c| c.limiter.runs_uncounted());
+    /// Put `call`, indexed under `keys`, in place of its resident copy.
+    /// Returns what leaves the map, the replaced copy or `call` itself when
+    /// none is resident, for the caller to drop once the lock is released.
+    fn replace_locked(
+        &self,
+        inner: &mut Inner,
+        call: Arc<Call>,
+        keys: Vec<String>,
+    ) -> Option<Arc<Call>> {
+        let Some(was) = inner.calls.get(&call.call_ref).map(|c| c.limiter.runs_uncounted()) else {
+            return Some(call);
+        };
+        Self::reindex(inner, &call.call_ref, keys);
         if was != call.limiter.runs_uncounted() {
             inner.restate_uncounted(was, call.limiter.runs_uncounted());
             self.publish_uncounted(inner);
         }
-        if let Some(slot) = inner.calls.get_mut(&call.call_ref) {
-            *slot = Arc::new(call);
-        }
+        let slot = inner.calls.get_mut(&call.call_ref)?;
+        Some(std::mem::replace(slot, call))
     }
 
     /// Publish the resident calls that run uncounted.
@@ -665,32 +680,6 @@ impl CallState {
         );
     }
 
-    /// Resolve a message that carries no `callRef` of ours to a call from
-    /// the in-memory index only (the sync path the dispatcher's route key
-    /// needs), probing in [`IndexLookup::probes`] order. The hit names the
-    /// namespace that matched.
-    pub fn resolve_from_sip_key_sync(&self, lookup: IndexLookup<'_>) -> Option<IndexHit> {
-        let mut key = lookup.key_buffer();
-        let inner = self.locked();
-        for probe in lookup.probes() {
-            match *probe {
-                Probe::Resolve(kind) => {
-                    lookup.write_key(kind, &mut key);
-                    if let Some(r) = inner.sip_index.get(key.as_str()) {
-                        return Some(IndexHit { call_ref: r.clone(), kind });
-                    }
-                }
-                Probe::Refuse(kind) => {
-                    lookup.write_key(kind, &mut key);
-                    if inner.sip_index.contains_key(key.as_str()) {
-                        return None;
-                    }
-                }
-            }
-        }
-        None
-    }
-
     /// Acquire the per-callRef serialization lock (held across a handler run).
     pub async fn lock(&self, call_ref: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let lock = {
@@ -791,18 +780,5 @@ impl CallState {
         }
         self.metrics.set_sm_cursor_census(census);
         self.metrics.set_call_census(cdr, pend, pend_max, dialogs, rset, timers, tagmap, blegs);
-    }
-
-    /// Recompute and apply a call's routing index, dropping any stale keys.
-    fn reindex(inner: &mut Inner, call: &Call) {
-        let call_ref = &call.call_ref;
-        if let Some(old) = inner.indexed.remove(call_ref) {
-            inner.unindex(call_ref, &old);
-        }
-        let keys = call_index_keys(call);
-        for k in &keys {
-            inner.sip_index.insert(k.clone(), call_ref.clone());
-        }
-        inner.indexed.insert(call_ref.clone(), keys);
     }
 }

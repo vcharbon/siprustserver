@@ -69,7 +69,7 @@ impl ActionExecutor<'_> {
         reason: Option<&str>,
         ended: (TerminationCause, Option<String>),
     ) {
-        *call = record_termination(call.clone(), self.now_ms, ended.0, ended.1);
+        record_termination(call, self.now_ms, ended.0, ended.1);
         crate::rules::stated_headers::withdraw_tentative(call);
         let pending_invites: Vec<(String, i64)> = std::iter::once(&call.a_leg)
             .chain(call.b_legs.iter())
@@ -221,7 +221,7 @@ impl ActionExecutor<'_> {
         // behind (RFC 3261 §15).
         self.retire_byed_leg(call, fx, leg_id);
         self.settle_at_leg_end(call, fx, leg_id);
-        *call = call::helpers::update_leg(call.clone(), leg_id, settle_ended_leg);
+        call::helpers::update_leg(call, leg_id, settle_ended_leg);
     }
 
     /// CANCEL a ringing b-leg, which then reads `Cancelling`
@@ -262,18 +262,18 @@ impl ActionExecutor<'_> {
         match end {
             LegEnd::InviteRejected => match rejecting_final(ctx, leg_id) {
                 Some((cseq, status)) => {
-                    *call = record_dialled_invite_final(call.clone(), leg_id, cseq, status);
+                    record_dialled_invite_final(call, leg_id, cseq, status);
                 }
-                None => *call = call::helpers::update_leg(call.clone(), leg_id, abandon_leg),
+                None => call::helpers::update_leg(call, leg_id, abandon_leg),
             },
-            LegEnd::Abandon => *call = call::helpers::update_leg(call.clone(), leg_id, abandon_leg),
+            LegEnd::Abandon => call::helpers::update_leg(call, leg_id, abandon_leg),
             LegEnd::Settle => {}
             LegEnd::PeerByeAnswered
             | LegEnd::OurByeSent
             | LegEnd::OurByeAnswered
             | LegEnd::OurByeTimedOut => super::dialog_end::end_dialogs(call, ctx, leg_id, end),
         }
-        *call = call::helpers::update_leg(call.clone(), leg_id, settle_ended_leg);
+        call::helpers::update_leg(call, leg_id, settle_ended_leg);
     }
 
     /// CANCEL `leg_id`'s INVITE carrying `relayed` (RFC 3261 §9.1): the PRACKs
@@ -295,7 +295,7 @@ impl ActionExecutor<'_> {
         let stated = if media { without_reason(relayed) } else { relayed.to_vec() };
         fx.outbound.extend(self.cancel_to_leg(call, leg_id, &stated));
         let stated = stated.iter().map(|h| (h.name.as_str().into(), h.value.as_str().into()));
-        *call = call::helpers::record_cancel_sent(call.clone(), leg_id, stated.collect());
+        call::helpers::record_cancel_sent(call, leg_id, stated.collect());
     }
 
     fn cancel_to_leg(
@@ -372,7 +372,7 @@ pub(super) fn terminate_all(
     cause: TerminationCause,
     by_leg: Option<String>,
 ) {
-    *call = record_termination(call.clone(), now_ms, cause, by_leg);
+    record_termination(call, now_ms, cause, by_leg);
     for leg in std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut()) {
         abandon_leg(leg);
         settle_ended_leg(leg);

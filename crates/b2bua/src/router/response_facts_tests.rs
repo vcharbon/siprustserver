@@ -24,7 +24,7 @@ const NOW_MS: i64 = 1_000;
 /// under [`RING_MS`].
 fn ringing_call() -> Call {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-    let call = build_initial_call(
+    let mut call = build_initial_call(
         &invite("w0", "w1", "response-facts"),
         src(),
         &config,
@@ -33,7 +33,7 @@ fn ringing_call() -> Call {
     );
     let mut b = call::testkit::dialled_leg("b-1", "svc");
     b.call_id = "bcid@x".into();
-    let mut call = call::helpers::add_b_leg(call, b);
+    call::helpers::add_b_leg(&mut call, b);
     let ring = Deadline::After(Duration::from_millis(RING_MS as u64));
     let (attempt, _) = call::helpers::open_attempt(&mut call, AttemptCause::Route, ring);
     call::helpers::join_attempt(&mut call, attempt, "b-1");

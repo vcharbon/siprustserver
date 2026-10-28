@@ -147,15 +147,15 @@ pub fn request_verdict(call: &Call, leg_id: &str, req: &SipRequest) -> Verdict {
 /// Note the request the gate passed or answered in order on the dialog it
 /// names: its CSeq becomes that dialog's remote sequence number (RFC 3261
 /// §12.2.2). An ACK numbers nothing (§13.2.2.4).
-pub fn note_in_order(call: Call, leg_id: &str, resolved: &Resolved, event: &CallEvent) -> Call {
-    let CallEvent::Sip { message, .. } = event else { return call };
+pub fn note_in_order(call: &mut Call, leg_id: &str, resolved: &Resolved, event: &CallEvent) {
+    let CallEvent::Sip { message, .. } = event else { return };
     let (SipMessage::Request(req), Some(dialog)) = (message.as_ref(), &resolved.dialog) else {
-        return call;
+        return;
     };
     if *req.method() == Method::Ack {
-        return call;
+        return;
     }
-    call::helpers::advance_peer_cseq(call, leg_id, dialog, i64::from(req.cseq().seq()))
+    call::helpers::advance_peer_cseq(call, leg_id, dialog, i64::from(req.cseq().seq()));
 }
 
 /// What a dialog makes of a request.

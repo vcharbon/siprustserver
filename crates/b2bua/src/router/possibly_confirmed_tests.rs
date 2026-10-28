@@ -21,7 +21,7 @@ use crate::rule_chain::{rule_chain_turn, TurnInput};
 /// callee's early dialog `b2bua-b-tag`/`bob-tag`, the caller unanswered.
 fn ringing() -> Call {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-    let call = build_initial_call(
+    let mut call = build_initial_call(
         &invite("w0", "w1", "possibly-confirmed"),
         src(),
         &config,
@@ -37,7 +37,8 @@ fn ringing() -> Call {
     let mut bob = Dialog::new("b2bua-b-tag", "bob-tag", DialogState::Early, 1);
     bob.remote_target = "sip:bob@10.0.0.2:5060".into();
     b.dialogs = vec![bob].into();
-    call::helpers::add_b_leg(call, b)
+    call::helpers::add_b_leg(&mut call, b);
+    call
 }
 
 fn parse(raw: &str) -> SipMessage {

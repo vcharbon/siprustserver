@@ -26,7 +26,7 @@ impl B2buaCore {
     /// failover tests assert is "exactly one node serves a given call".
     /// Test/observability.
     pub fn serves(&self, call_ref: &str) -> bool {
-        self.ctx.state.peek(call_ref).is_some() && !self.ctx.state.is_parked(call_ref)
+        self.ctx.state.contains(call_ref) && !self.ctx.state.is_parked(call_ref)
     }
 
     /// Does this worker hold `call_ref` reclaimed and parked, resident and not

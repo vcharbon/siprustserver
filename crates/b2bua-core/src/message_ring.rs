@@ -210,8 +210,9 @@ impl Ring {
         })
     }
 
-    fn record(&self, call: Call, leg_id: &str, entry: MessageEntry) -> Call {
-        record_message(call, leg_id, self.cap, entry)
+    fn record(&self, mut call: Call, leg_id: &str, entry: MessageEntry) -> Call {
+        record_message(&mut call, leg_id, self.cap, entry);
+        call
     }
 
     /// A received request's entry; `seq` is assigned at the append.

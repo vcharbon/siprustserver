@@ -192,7 +192,7 @@ pub fn admitted(
     // route answers no failed leg.
     let kind = if depth == 0 { DecisionKind::Route } else { DecisionKind::FailoverRoute };
     let leg_id = (depth == 0).then(|| "a".to_string());
-    call = mark_decision(call, now_ms, kind, leg_id, route.label.clone());
+    mark_decision(&mut call, now_ms, kind, leg_id, route.label.clone());
 
     // Announcement / deferred-routing services (ADR-0016): when the decision
     // attaches a `service_ext` slice that defers routing (it set
@@ -343,7 +343,7 @@ pub fn admitted(
     if let Some(invite) = leg.outbound_invite_mut() {
         invite.sent_at_ms = sent_ms;
     }
-    call = add_originated_b_leg(call, leg, now_ms);
+    add_originated_b_leg(&mut call, leg, now_ms);
     fx.outbound.push(effect);
     // The leg rings for the attempt's deadline from its first 18x
     // (`ring_deadline`).

@@ -81,7 +81,7 @@ pub(super) async fn initial_invite_turn(
         }
         // A call resident on the identity (this INVITE a copy of it, or a new
         // request on it) owns the queue and keeps it.
-        if ctx.state.peek(call_ref).is_none() {
+        if !ctx.state.contains(call_ref) {
             return Turn::Shed;
         }
         if !copy {
@@ -93,7 +93,7 @@ pub(super) async fn initial_invite_turn(
     // A copy is a request merged with the INVITE it copies (RFC 3261
     // §8.2.2.2): answered 482, it creates no call, as no call is born past
     // the admission ladder.
-    let resident = ctx.state.peek(call_ref).is_some();
+    let resident = ctx.state.contains(call_ref);
     if copy {
         let merged = build_merged_482(&mut turn.ids, req, &ctx.config.minted_final_advertisement);
         if let Ok(merged) = merged {

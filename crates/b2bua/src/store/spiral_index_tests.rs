@@ -70,7 +70,7 @@ fn call_with_b_leg(
 ) -> Call {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let src = SocketAddr::from(([10, 0, 0, 9], 5060));
-    let call = build_initial_call(
+    let mut call = build_initial_call(
         &invite(call_id, from_tag),
         src,
         &config,
@@ -84,7 +84,8 @@ fn call_with_b_leg(
     if !b_peer_tag.is_empty() {
         b.dialogs = vec![Dialog::new(b_tag, b_peer_tag, DialogState::Early, 1)].into();
     }
-    call::helpers::add_b_leg(call, b)
+    call::helpers::add_b_leg(&mut call, b);
+    call
 }
 
 /// Call 1 (alice's), its outgoing leg on `(X, F1)` ringing on dialog `T2`.

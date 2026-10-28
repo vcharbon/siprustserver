@@ -110,11 +110,10 @@ fn the_decision_log_round_trips() {
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "no decision yet");
 
-    let call =
-        mark_decision(call, 1_000, DecisionKind::Route, Some("a".into()), Some("first".into()));
-    let call = mark_decision(call, 2_000, DecisionKind::FailoverRoute, Some("b-1".into()), None);
-    let call = add_cdr_event(
-        call,
+    mark_decision(&mut call, 1_000, DecisionKind::Route, Some("a".into()), Some("first".into()));
+    mark_decision(&mut call, 2_000, DecisionKind::FailoverRoute, Some("b-1".into()), None);
+    add_cdr_event(
+        &mut call,
         CdrEvent {
             event_type: CdrEventType::InviteSent,
             timestamp: 2_000,
@@ -146,10 +145,9 @@ fn an_in_dialog_info_decision_round_trips_under_its_own_kind() {
     assert_eq!(serde_json::to_value(DecisionKind::InfoAcknowledge).unwrap(), "info_acknowledge");
 
     let codec = MsgpackCodec::new();
-    let call = representative_call();
-    let call =
-        mark_decision(call, 1_000, DecisionKind::InfoRelay, Some("b-1".into()), Some("k1".into()));
-    let call = mark_decision(call, 2_000, DecisionKind::InfoAcknowledge, Some("b-1".into()), None);
+    let mut call = representative_call();
+    mark_decision(&mut call, 1_000, DecisionKind::InfoRelay, Some("b-1".into()), Some("k1".into()));
+    mark_decision(&mut call, 2_000, DecisionKind::InfoAcknowledge, Some("b-1".into()), None);
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call);
     let kinds: Vec<DecisionKind> =
@@ -173,7 +171,7 @@ fn the_termination_record_round_trips() {
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "a live call");
 
-    let call = record_termination(call, 3_000, TerminationCause::RemoteBye, Some("b-1".into()));
+    record_termination(&mut call, 3_000, TerminationCause::RemoteBye, Some("b-1".into()));
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "the callee's BYE, not yet cut");
     let t = decoded.termination.as_ref().unwrap();
@@ -182,16 +180,15 @@ fn the_termination_record_round_trips() {
         (3_000, TerminationCause::RemoteBye, Some("b-1"), 0)
     );
 
-    let mut call = call;
     call.termination = None;
     call.message_seq = 9;
-    let call = record_termination(
-        call,
+    record_termination(
+        &mut call,
         4_000,
         TerminationCause::Timeout(TimeoutKind::Keepalive),
         Some("a".into()),
     );
-    let call = seal_termination_seq(call);
+    seal_termination_seq(&mut call);
     let decoded = codec.decode(&codec.encode(&call).unwrap()).unwrap();
     assert_eq!(decoded, call, "a deadline, cut");
     let t = decoded.termination.as_ref().unwrap();
@@ -219,9 +216,9 @@ fn the_invite_final_sent_fact_round_trips() {
     assert_eq!(decoded.a_leg.invite_final_sent(), Some(487));
 
     // The helper records the first final only.
-    let call = call::helpers::record_invite_final(call, "a", 480);
+    call::helpers::record_invite_final(&mut call, "a", 480);
     assert_eq!(call.a_leg.invite_final_sent(), Some(487), "the first final stands");
-    let call = call::helpers::record_invite_final(call, "b-1", 200);
+    call::helpers::record_invite_final(&mut call, "b-1", 200);
     assert_eq!(call.b_legs[0].invite_final_sent(), Some(200));
 }
 

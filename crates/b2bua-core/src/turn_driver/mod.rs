@@ -366,7 +366,7 @@ impl<'d> Session<'d> {
             Verdict::Pass(resolved) => resolved,
             refused => {
                 if let Some(in_order) = refused.in_order() {
-                    self.call = note_in_order(self.call.clone(), &leg, in_order, &event);
+                    note_in_order(&mut self.call, &leg, in_order, &event);
                 }
                 return Outcome::Gated(refused);
             }
@@ -395,7 +395,8 @@ impl<'d> Session<'d> {
             rules: &driver.rules,
             obligations: &driver.obligations,
         };
-        let gated = note_in_order(self.call.clone(), leg, &resolved, &event);
+        let mut gated = self.call.clone();
+        note_in_order(&mut gated, leg, &resolved, &event);
         let call_ref = gated.call_ref.clone();
         let input = TurnInput {
             event: &event,

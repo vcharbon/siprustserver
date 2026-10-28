@@ -111,7 +111,7 @@ impl ActionExecutor<'_> {
         let Some(d) = leg.dialogs.by_tags(&id.our_tag, &id.peer_tag) else { return };
         let marks = self.marks(call);
         let Some(bye) = self.bye_on_dialog(marks, leg, d, reason, relayed, hops) else { return };
-        *call = call::helpers::bump_our_cseq(call.clone(), leg_id, id, 1);
+        call::helpers::bump_our_cseq(call, leg_id, id, 1);
         self.record_own_effect(call, leg_id, id, &bye);
         fx.outbound.push(bye);
     }
@@ -205,7 +205,7 @@ fn answer_unacked(call: &Call, leg_id: &str) -> bool {
 /// the leg's dialog-creating INVITE with (RFC 3261 §15): the dialog holds
 /// one such BYE, the latest asked for.
 fn hold_behind_ack(call: &mut Call, leg_id: &str, id: &DialogId, bye: QueuedRequest) {
-    *call = call::helpers::update_dialog(call.clone(), leg_id, id, |d| {
+    call::helpers::update_dialog(call, leg_id, id, |d| {
         d.queued.retain(|q| q.behind != Behind::AnswerAck);
         d.queued.push(Queued { behind: Behind::AnswerAck, request: bye });
     });

@@ -3,6 +3,8 @@
 
 use std::sync::Arc;
 
+use call::call_index_keys;
+
 use super::{CallState, Enveloped, MaterialiseOrigin};
 
 impl CallState {
@@ -41,12 +43,13 @@ impl CallState {
         // Outside the store lock: the trace registry takes its own.
         crate::trace::adopt_replicated(&mut call, now_ms);
         call.limiter.enter_epoch();
+        let keys = call_index_keys(&call);
         {
             let mut inner = self.locked();
             if inner.calls.contains_key(&call_ref) {
                 return false;
             }
-            Self::reindex(&mut inner, &call);
+            Self::reindex(&mut inner, &call_ref, keys);
             inner.touched.insert(call_ref.clone(), now_ms);
             Self::place(&mut inner, &call_ref, topology);
             inner.restate_uncounted(false, call.limiter.runs_uncounted());

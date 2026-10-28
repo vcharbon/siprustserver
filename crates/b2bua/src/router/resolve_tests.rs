@@ -26,7 +26,7 @@ const BOB_TAG: &str = "bob-tag";
 /// with bob.
 fn answered_call(pri: &str, bak: &str, cid: &str) -> Call {
     let config = B2buaConfig { self_ordinal: pri.into(), ..Default::default() };
-    let call = build_initial_call(
+    let mut call = build_initial_call(
         &invite(pri, bak, cid),
         src(),
         &config,
@@ -38,7 +38,8 @@ fn answered_call(pri: &str, bak: &str, cid: &str) -> Call {
     b.call_id = B_CALL_ID.into();
     b.invite = Some(call::RequestRecord::dialled(1, None, OutboundInvite::new(B_LOCAL_TAG, 0)));
     b.dialogs = vec![Dialog::new(B_LOCAL_TAG, BOB_TAG, DialogState::Confirmed, 1)].into();
-    call::helpers::add_b_leg(call, b)
+    call::helpers::add_b_leg(&mut call, b);
+    call
 }
 
 /// A BYE on `(call_id, from_tag → to_tag)` aimed at the node's bare address.

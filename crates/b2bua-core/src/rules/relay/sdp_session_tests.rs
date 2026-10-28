@@ -315,7 +315,7 @@ fn peer_relays(call: &mut Call, leg: &str, method: &str, with_sdp: bool) {
         offered: with_sdp,
         ..call::RequestRecord::relayed(method, 7, 7)
     };
-    *call = call::helpers::update_leg(call.clone(), &target, |target| {
+    call::helpers::update_leg(call, &target, |target| {
         if target.dialogs.confirmed().is_none() {
             target.dialogs.insert(call::Dialog::new("as", "bob", call::DialogState::Confirmed, 1));
         }

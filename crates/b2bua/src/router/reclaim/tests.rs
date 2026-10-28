@@ -58,7 +58,7 @@ fn answered(p: i64, b: i64, state: CallModelState) -> Enveloped {
     call.a_leg.own_tag = Some("staged".into());
     if state != CallModelState::Active {
         call::testkit::stage_leg(&mut call.a_leg, LegState::Terminated);
-        call = call::helpers::record_termination(call, 0, TerminationCause::RemoteBye, None);
+        call::helpers::record_termination(&mut call, 0, TerminationCause::RemoteBye, None);
     }
     Enveloped::new(call, topology)
 }

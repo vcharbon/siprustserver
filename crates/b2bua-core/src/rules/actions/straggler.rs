@@ -140,7 +140,7 @@ impl ActionExecutor<'_> {
         // their originators (§8.1.3.3).
         straggler.state = DialogState::Retired;
         let id = straggler.id();
-        *call = call::helpers::update_leg(call.clone(), leg_id, |l| l.dialogs.insert(straggler));
+        call::helpers::update_leg(call, leg_id, |l| l.dialogs.insert(straggler));
         self.record_own_effect(call, leg_id, &id, &bye);
         fx.outbound.push(bye);
     }

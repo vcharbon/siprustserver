@@ -154,7 +154,8 @@ fn with_service_json(call: &Call) -> Seed {
         "limits": {"max": 3, "per": {"minute": 2}},
     });
     let a_leg = call.a_leg.leg_id.clone();
-    let call = call::helpers::set_call_ext(call.clone(), "lane-service", Some(state.clone()));
-    let call = call::helpers::set_leg_ext(call, &a_leg, "lane-service", state);
+    let mut call = call.clone();
+    call::helpers::set_call_ext(&mut call, "lane-service", Some(state.clone()));
+    call::helpers::set_leg_ext(&mut call, &a_leg, "lane-service", state);
     Seed::of("forked/answered+service-json", call)
 }

@@ -180,7 +180,7 @@ impl ActionExecutor<'_> {
                     return;
                 }
             };
-        *call = bump_our_cseq(call.clone(), &id.leg, &t_id, 1);
+        bump_our_cseq(call, &id.leg, &t_id, 1);
         call::helpers::note_responder_ack(call, id, ResponderAck::OwnPrack);
         clear_owed_offer(call, id);
         let dest = relay::target_dest(&gen_dialog.remote_target);
@@ -252,7 +252,7 @@ fn defer_to_ack(call: &mut Call, id: &ProvisionalId, confirmed: &str) -> bool {
         return false;
     }
     let mut deferred = false;
-    *call = call::helpers::update_leg(call.clone(), &id.leg, |leg| {
+    call::helpers::update_leg(call, &id.leg, |leg| {
         let Some(d) = call::helpers::dialog_with_peer_mut(leg, &id.responder_tag) else {
             return;
         };
@@ -294,7 +294,7 @@ fn deferred_offer(call: &Call, leg_id: &str) -> Option<(String, call::RSeq, Vec<
 /// The offer the provisional `id` carried is no longer owed by its dialog: a
 /// PRACK naming it has left, or its dialog is gone.
 pub(super) fn clear_owed_offer(call: &mut Call, id: &ProvisionalId) {
-    *call = call::helpers::update_leg(call.clone(), &id.leg, |leg| {
+    call::helpers::update_leg(call, &id.leg, |leg| {
         if let Some(d) = call::helpers::dialog_with_peer_mut(leg, &id.responder_tag) {
             if d.owed_answer.as_ref().is_some_and(|o| o.prack_offer(id.rseq).is_some()) {
                 d.owed_answer = None;

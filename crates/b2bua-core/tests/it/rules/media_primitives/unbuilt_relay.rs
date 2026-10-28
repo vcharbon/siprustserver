@@ -13,8 +13,8 @@ fn an_unbuildable_relay_answers_its_sender_and_records_nothing() {
     for d in b.dialogs.iter_mut() {
         d.remote_target = "sip:bob@10.0.0.2:5070x".into();
     }
-    call = call::helpers::add_b_leg(call, b);
-    call = call::helpers::merge_leg(call, "a", "b-1");
+    call::helpers::add_b_leg(&mut call, b);
+    call::helpers::merge_leg(&mut call, "a", "b-1");
     let peer = |c: &call::Call| {
         let dialogs = c.b_legs[0].dialogs.iter();
         dialogs.map(|d| (d.our_cseq, d.requests.len())).collect::<Vec<_>>()

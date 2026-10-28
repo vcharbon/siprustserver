@@ -69,9 +69,9 @@ pub(super) async fn process_result(
     // The record this turn lands states the model invariants, against the
     // one the previous turn landed.
     if ctx.config.model_invariants {
-        let before = ctx.state.peek(call_ref);
+        let before = ctx.state.resident(call_ref);
         let turn_record = crate::model_invariants::Turn {
-            before: before.as_ref(),
+            before: before.as_deref(),
             after: &result.call,
             received,
             sent: &result.effects.outbound,
@@ -103,31 +103,33 @@ pub(super) async fn process_result(
         && !primary_departed(ctx, call_ref);
     let remove_call = !takeover_end
         && result.effects.critical.iter().any(|e| matches!(e, CriticalStateEffect::RemoveCall));
+    let cdr = has_cdr(&result);
+    // The landed record is shared with the store from here on: what follows
+    // only reads it.
+    let HandlerResult { call, effects } = result;
+    let call = Arc::new(call);
     let wrote = match quiet {
         Some(kind) => {
-            ctx.state.update_quiet(result.call.clone());
+            ctx.state.update_quiet(Arc::clone(&call));
             ctx.metrics.record_quiet_turn(kind.kind());
             false
         }
         None if remove_call => {
-            ctx.state.update(result.call.clone());
+            ctx.state.update(Arc::clone(&call));
             let backed = ctx.state.backup_of(call_ref).is_some();
-            if has_cdr(&result) {
-                ctx.cdr.write(&result.call, now_ms).await;
+            if cdr {
+                ctx.cdr.write(&call, now_ms).await;
             }
             ctx.state.log_delete(call_ref);
             backed
         }
         None if takeover_end
-            || matches!(
-                result.call.state,
-                CallModelState::Active | CallModelState::Terminating
-            ) =>
+            || matches!(call.state, CallModelState::Active | CallModelState::Terminating) =>
         {
-            ctx.state.write(&result.call)
+            ctx.state.write(Arc::clone(&call))
         }
         None => {
-            ctx.state.update(result.call.clone());
+            ctx.state.update(Arc::clone(&call));
             false
         }
     };
@@ -137,7 +139,6 @@ pub(super) async fn process_result(
     // Timers are armed in the turn; what the turn sends off the node leaves
     // through the call's outbox once the write that records it is applied
     // (ADR-0055 §3). ADR-0039 deadlines carry a margin over the cap.
-    let HandlerResult { call, effects } = result;
     if takeover_end {
         // What the copy owes the WIRE is not deferred: the final that ends the
         // caller's INVITE and the hop-by-hop ACK toward the callee leave from
