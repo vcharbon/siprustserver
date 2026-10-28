@@ -520,6 +520,35 @@ mod two_view_ladders {
         let _ = h.finish().await;
     }
 
+    /// A repeat of a 2xx the core ACKed more than 64·T1 ago owes no ACK: it is
+    /// discarded, neither re-ACKed nor handed to the body.
+    #[tokio::test(start_paused = true)]
+    async fn a_2xx_repeat_past_64_t1_after_its_ack_is_discarded() {
+        let h = Harness::new("late-2xx-repeat");
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let server = h.agent("server", "127.0.0.1:5070").await;
+
+        let mut call = alice.invite(&server).with_sdp(OFFER).send().await;
+        let mut uas = server.receive("INVITE").await;
+        uas.respond(200, "OK").with_sdp(OFFER).send().await;
+        call.expect(200).await;
+        let mut dialog = call.ack().await;
+        server.receive("ACK").await;
+
+        h.advance(64 * T1).await;
+        uas.respond(200, "OK").with_sdp(OFFER).send().await;
+        h.advance(T1).await;
+        assert!(alice.take_held_or_queued().await.is_none(), "the late repeat is not surfaced");
+        assert_eq!(count(&alice.wire_view(), "SIP/2.0 200"), 2, "the repeat arrived");
+
+        let mut bye = dialog.bye().await;
+        server.receive("BYE").await.respond(200, "OK").send().await;
+        bye.expect(200).await;
+        server.sight_queued().await;
+        assert_eq!(count(&server.wire_view(), "ACK"), 1, "the late repeat is not re-ACKed");
+        let _ = h.finish().await;
+    }
+
     /// Row 4 on its own, the normal path: one 2xx, one ACK, and both views
     /// agree on the whole exchange because nothing was absorbed.
     #[tokio::test(start_paused = true)]

@@ -6,7 +6,9 @@
 //! So a retransmitted 2xx stays in the TU view (see the table in
 //! [`super`]) and the core answers it with the same ACK again, byte for byte,
 //! for 64·T1 after it sent the ACK: the UAS gives up retransmitting its 2xx
-//! 64·T1 after the first one (§13.3.1.4), which the ACK follows. Keyed
+//! 64·T1 after the first one (§13.3.1.4), which the ACK follows. Past that the
+//! ACK's bytes go and its key stays: a later repeat of that 2xx matches nothing
+//! owed and is discarded (RFC 6026 §8.4, §18.1.2), never surfaced. Keyed
 //! `(Call-ID, INVITE CSeq number, To-tag)`: the To-tag is in the key because a
 //! forked 2xx confirms its own dialog and carries its own ACK.
 
@@ -46,16 +48,24 @@ pub fn ack_key_of_ack(req: &SipRequest) -> Option<AckKey> {
     Some((req.call_id().to_string(), req.cseq().seq(), req.to().tag()?.to_string()))
 }
 
-/// One ACK sent to a 2xx: its wire image, where it went, and until when a
-/// repeat of the 2xx draws it again.
+/// One ACK sent to a 2xx: its wire image and where it went while a repeat of
+/// the 2xx draws it again (`None` past that), and until when.
 struct SentAck {
-    wire: Box<[u8]>,
-    dst: SocketAddr,
+    wire: Option<(Box<[u8]>, SocketAddr)>,
     until: Instant,
 }
 
-/// The per-endpoint cache of ACKs sent to 2xx finals. An entry past its
-/// 64·T1 is let go at the next use of the cache.
+/// What a repeat of a 2xx this core ACKed draws.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Owed {
+    /// The ACK again: its wire image and where it went.
+    Resend(Vec<u8>, SocketAddr),
+    /// Nothing: the repeat came past 64·T1 and is discarded.
+    Discard,
+}
+
+/// The per-endpoint cache of ACKs sent to 2xx finals. An entry's bytes past
+/// its 64·T1 are let go at the next use of the cache; its key stays.
 #[derive(Default)]
 pub(crate) struct TwoXxAcks {
     sent: Mutex<HashMap<AckKey, SentAck>>,
@@ -68,26 +78,35 @@ impl TwoXxAcks {
         let Some(key) = ack_key_of_ack(ack) else { return };
         let now = Instant::now();
         let mut sent = self.sent.lock().unwrap();
-        sent.retain(|_, a| a.until > now);
-        sent.insert(key, SentAck { wire: wire.into(), dst, until: now + OWED_FOR });
+        release_expired(&mut sent, now);
+        sent.insert(key, SentAck { wire: Some((wire.into(), dst)), until: now + OWED_FOR });
     }
 
-    /// The ACK owed to `resp`, a repeat of a 2xx to an INVITE whose dialog
-    /// this core confirmed within the last 64·T1: its wire image and where it
-    /// went. A non-2xx after the 2xx owes none: the UAC discards it (RFC 6026
-    /// §8.4).
-    pub(crate) fn owed_for(&self, resp: &SipResponse) -> Option<(Vec<u8>, SocketAddr)> {
+    /// What `resp` draws when it is a 2xx to an INVITE whose dialog this core
+    /// confirmed: the ACK again within 64·T1 of it, nothing past that. `None`
+    /// for any other response: a non-2xx after the 2xx owes no ACK, the UAC
+    /// discards it (RFC 6026 §8.4).
+    pub(crate) fn owed_for(&self, resp: &SipResponse) -> Option<Owed> {
         let key = ack_key_of_final(resp)?;
-        let now = Instant::now();
         let mut sent = self.sent.lock().unwrap();
-        sent.retain(|_, a| a.until > now);
-        sent.get(&key).map(|a| (a.wire.to_vec(), a.dst))
+        release_expired(&mut sent, Instant::now());
+        sent.get(&key).map(|a| match &a.wire {
+            Some((wire, dst)) => Owed::Resend(wire.to_vec(), *dst),
+            None => Owed::Discard,
+        })
     }
 
-    /// How many ACKs the cache holds.
+    /// How many ACKs the cache holds the bytes of.
     #[cfg(test)]
     fn held(&self) -> usize {
-        self.sent.lock().unwrap().len()
+        self.sent.lock().unwrap().values().filter(|a| a.wire.is_some()).count()
+    }
+}
+
+/// Let go of the bytes of every ACK past its 64·T1.
+fn release_expired(sent: &mut HashMap<AckKey, SentAck>, now: Instant) {
+    for a in sent.values_mut().filter(|a| a.until <= now) {
+        a.wire = None;
     }
 }
 
@@ -130,7 +149,7 @@ mod tests {
     }
 
     /// A repeat of the 2xx draws the ACK's own bytes, to where it went, for
-    /// 64·T1 after it left; past that the entry is let go.
+    /// 64·T1 after it left; past that the bytes go and the repeat is discarded.
     #[tokio::test(start_paused = true)]
     async fn the_cached_ack_is_its_sent_bytes_until_64_t1() {
         let wire = "ACK sip:b@x SIP/2.0\r\nv: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-k\r\n\
@@ -143,10 +162,11 @@ mod tests {
 
         tokio::time::advance(std::time::Duration::from_millis(64 * 500 - 1)).await;
         let owed = acks.owed_for(&final_(200));
-        assert_eq!(owed, Some((wire.as_bytes().to_vec(), dst)), "the sent bytes, byte for byte");
+        let sent = Owed::Resend(wire.as_bytes().to_vec(), dst);
+        assert_eq!(owed, Some(sent), "the sent bytes, byte for byte");
 
         tokio::time::advance(std::time::Duration::from_millis(1)).await;
-        assert_eq!(acks.owed_for(&final_(200)), None, "no ACK is owed past 64·T1");
-        assert_eq!(acks.held(), 0, "the entry is let go");
+        assert_eq!(acks.owed_for(&final_(200)), Some(Owed::Discard), "past 64·T1 it is discarded");
+        assert_eq!(acks.held(), 0, "the bytes are let go");
     }
 }

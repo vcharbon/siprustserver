@@ -61,8 +61,9 @@ pub struct RenderedSample {
 pub struct ReporterCfg {
     /// Max stored callflow samples per `(scenario, class)` bucket.
     pub sample_cap: u32,
-    /// Record 1 call in `background_record_every`, from the first call to the
-    /// last, so a late-appearing error class still gets a sample. 0 disables.
+    /// Record 1 call of each scenario in `background_record_every`, from its
+    /// first call to its last, so a late-appearing error class still gets a
+    /// sample. 0 disables.
     pub background_record_every: u64,
 }
 
@@ -141,7 +142,6 @@ pub struct Reporter {
     inner: Mutex<Inner>,
     inflight: AtomicU64,
     started: AtomicU64,
-    record_counter: AtomicU64,
     /// Calls that reached the ring→answer step (the 18x-delivery denominator).
     ringing_expected: AtomicU64,
     /// Of those, how many saw their `18x` ringing provisional (numerator). A
@@ -157,7 +157,6 @@ impl Reporter {
             inner: Mutex::new(Inner::default()),
             inflight: AtomicU64::new(0),
             started: AtomicU64::new(0),
-            record_counter: AtomicU64::new(0),
             ringing_expected: AtomicU64::new(0),
             ringing_received: AtomicU64::new(0),
         }
@@ -244,18 +243,17 @@ impl Reporter {
     }
 
     /// The sampling-gate decision at call start: should this call record its
-    /// trace? True for 1 call in `background_record_every` (0: none), for a
-    /// call that chases the next sample of a bucket of its scenario still under
-    /// cap (at most `CHASE_CALLS` calls after the bucket's last sample), and for
-    /// the first `sample_cap` calls of its scenario. Before any call of the
-    /// scenario has ended, the last two give at most `sample_cap` calls.
+    /// trace? True for 1 call of its scenario in `background_record_every` (0:
+    /// none), for a call that chases the next sample of a bucket of its
+    /// scenario still under cap (at most `CHASE_CALLS` calls after the bucket's
+    /// last sample), and for the first `sample_cap` calls of its scenario.
+    /// Before any call of the scenario has ended, the last two give at most
+    /// `sample_cap` calls.
     pub fn should_record(&self, scenario: ScenarioId) -> bool {
-        let n = self.record_counter.fetch_add(1, Ordering::Relaxed);
-        let background = self.cfg.background_record_every != 0
-            && n.is_multiple_of(self.cfg.background_record_every);
+        let every = self.cfg.background_record_every;
         let mut g = self.inner.lock().unwrap();
         let nth = *g.placed.entry(scenario).and_modify(|n| *n += 1).or_insert(1) - 1;
-        if background {
+        if every != 0 && nth.is_multiple_of(every) {
             return true;
         }
         for ((s, _, _), tally) in g.sample_taken.iter_mut() {

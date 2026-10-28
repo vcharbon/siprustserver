@@ -152,7 +152,7 @@ fn round_trips_render_as_a_fine_histogram_per_exchange() {
 #[ignore = "slow lane: loadgen"]
 fn a_bucket_under_cap_chases_its_next_sample_for_a_bounded_run() {
     let r = Reporter::new(ReporterCfg { sample_cap: 2, background_record_every: 0 });
-    assert!(r.should_record("s"), "nothing recorded yet");
+    assert!(r.should_record("s"), "one of the first sample_cap calls");
     let failed = || CallOutcome::Step {
         at: FailedAt::at_barrier("established"),
         cause: scenario_harness::StepError::timeout("established", None, "a datagram"),

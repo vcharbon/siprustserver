@@ -11,6 +11,7 @@ use sip_message::{SipMessage, SipParser, SipResponse};
 
 use super::step::StepError;
 use super::Agent;
+use crate::absorption::Owed;
 
 impl Agent {
     /// One datagram out, nothing fed but its record in the transaction layer
@@ -25,11 +26,12 @@ impl Agent {
             .map_err(|e| StepError::Transport { who: self.name.clone(), detail: e.to_string() })
     }
 
-    /// Re-send the ACK the final `resp` draws, and say whether one left: a
-    /// final to an INVITE given up on (§17.1.1.3), and, when `repeat`, a
-    /// non-2xx final to this UA's INVITE its client transaction already ACKed
-    /// (§17.1.1.2) or a 2xx this UA's core already ACKed (§13.2.2.4) — the TU
-    /// acting on a datagram the TU view keeps.
+    /// Re-send the ACK the final `resp` draws, and say whether `resp` is
+    /// consumed: a final to an INVITE given up on (§17.1.1.3), and, when
+    /// `repeat`, a non-2xx final to this UA's INVITE its client transaction
+    /// already ACKed (§17.1.1.2) or a 2xx this UA's core already ACKed
+    /// (§13.2.2.4), re-ACKed within 64·T1 of the ACK and discarded past it —
+    /// the TU acting on a datagram the TU view keeps.
     pub(super) async fn re_ack(&self, resp: &SipResponse, repeat: bool) -> bool {
         if let Some((ack, dst)) = self.txn.abandoned_ack_for(resp) {
             let _ = self.try_send(&SipMessage::Request(ack), dst).await;
@@ -42,11 +44,14 @@ impl Agent {
             let _ = self.send_bytes(&ack, dst).await;
             return true;
         }
-        if let Some((ack, dst)) = self.two_xx_acks.owed_for(resp) {
-            let _ = self.send_bytes(&ack, dst).await;
-            return true;
+        match self.two_xx_acks.owed_for(resp) {
+            Some(Owed::Resend(ack, dst)) => {
+                let _ = self.send_bytes(&ack, dst).await;
+                true
+            }
+            Some(Owed::Discard) => true,
+            None => false,
         }
-        false
     }
 
     /// Send the finals the copies of completed transactions just sighted

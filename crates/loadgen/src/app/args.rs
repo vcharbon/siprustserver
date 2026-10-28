@@ -168,8 +168,8 @@ pub struct Args {
     /// the transfer target resolves through the egress seam).
     #[arg(long, default_value = "refer-allow-c")]
     pub refer_key: String,
-    /// Record 1 call in N's flow, from the first call to the last (the
-    /// sampling-gate background share). `1` = full recording (every call);
+    /// Record 1 call in N of each scenario, from the first call to the last
+    /// (the sampling-gate background share). `1` = full recording (every call);
     /// higher values record less. Stored
     /// samples stay bounded by `--sample-cap` per bucket; the cost of full
     /// recording is per-call recording memory, so watch `loadgen_process_*` /

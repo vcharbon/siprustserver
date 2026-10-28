@@ -536,8 +536,8 @@ attributes it to the incident window it fell in, against that window's budget
 
 Sampling is bounded: a small fraction of calls record their trace (`--sample-cap`
 per bucket); the rest are counted only. A non-sampled failure still gets a stub
-page with its one-line reason. A call records when it falls in the fixed share
-of 1 in `--background-record-every` (from the first call to the last), when it
+page with its one-line reason. A call records when it falls in its scenario's
+fixed share of 1 in `--background-record-every` (from the first call on), when it
 is one of the first `--sample-cap` calls of its scenario, or when a bucket of
 its scenario still under its cap chases its next sample (for 64 calls after
 the bucket's last sample). The recorded calls are thus a steady share whatever

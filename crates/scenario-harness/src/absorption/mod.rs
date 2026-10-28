@@ -52,8 +52,8 @@ use std::net::SocketAddr;
 
 use sip_message::{SipMessage, SipRequest, SipResponse};
 
-pub(crate) use two_xx_ack::TwoXxAcks;
 pub use two_xx_ack::{ack_key_of_ack, ack_key_of_final, AckKey};
+pub(crate) use two_xx_ack::{Owed, TwoXxAcks};
 pub use wire_log::WireEntry;
 
 /// Which view of the stream a datagram belongs to — the per-datagram tag the
