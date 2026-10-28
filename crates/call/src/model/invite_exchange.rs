@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 
 use super::emission::RetainedEmission;
 use super::outbound_invite::OutboundInvite;
-use super::queued_request::QueuedRequest;
 
 /// A 2xx to an INVITE this side received that still awaits the ACK for it
 /// (RFC 3261 §13.3.1.4): the retained emission its ladder repeats, with the
@@ -56,10 +55,6 @@ pub struct InviteExchange {
     pub awaited_ack_cseq: Option<i64>,
     /// Received: the 2xx this side answered the INVITE with, awaiting its ACK.
     pub answered_2xx: Option<Unacked2xx>,
-    /// Received: a BYE of this stack held until that ACK arrives or the 2xx
-    /// is given up on (§15: the dialog's UAS sends no BYE before the ACK of
-    /// its 2xx), composed when it leaves.
-    pub bye_behind_ack: Option<QueuedRequest>,
     /// Sent, on a leg's dialling INVITE: what each dialog it creates starts
     /// from and how the INVITE ended (§12.1.2, §9.1).
     pub dialled: Option<OutboundInvite>,

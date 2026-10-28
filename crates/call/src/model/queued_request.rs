@@ -1,7 +1,27 @@
-//! A request of this stack waiting on a dialog ([`QueuedRequest`]): queued
-//! behind its own NOTIFY in flight there, or a BYE behind the ACK of its 2xx.
+//! A request of this stack waiting on a dialog ([`Queued`]): what it says
+//! ([`QueuedRequest`]) and what it waits behind ([`Behind`]), this stack's
+//! own NOTIFY in flight there or the ACK of its 2xx.
 
 use serde::{Deserialize, Serialize};
+
+/// What a queued request waits behind on its dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Behind {
+    /// The ACK of this stack's 2xx to the dialog's creating INVITE, or that
+    /// 2xx's give-up (RFC 3261 §15): a BYE, held while the 2xx is.
+    AnswerAck,
+    /// This stack's own NOTIFY in flight on the dialog, so loss never
+    /// delivers its requests out of CSeq order (RFC 3261 §12.2.2).
+    OwnNotify,
+}
+
+/// A request of this stack on a dialog's queue and what it waits behind.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Queued {
+    pub behind: Behind,
+    pub request: QueuedRequest,
+}
 
 /// A request of this stack asked for while something ahead of it on its
 /// dialog has to settle first, as what it says: it is composed when it

@@ -149,7 +149,8 @@ pub fn advance_ladder(
 /// Drop what `obligation`'s ladder repeats: the ladder is over — discharged,
 /// or retired with its leg, transaction or call — so the bytes can never be
 /// sent again and stop riding the replicated body. For a 2xx this is also the
-/// end of the RFC 6026 *Accepted* interval the marker held; a reliable
+/// end of the RFC 6026 *Accepted* interval the marker held, and the BYE held
+/// behind its ACK leaves the dialog's queue (its releaser sends it); a reliable
 /// provisional's ladder ceases with the final it was shown before, an
 /// acknowledged one standing.
 pub fn clear_retained(mut call: Call, obligation: &Obligation) -> Call {
@@ -164,7 +165,7 @@ pub fn clear_retained(mut call: Call, obligation: &Obligation) -> Call {
                 .flat_map(|l| l.dialogs.iter_mut())
             {
                 if matches(&crate::helpers::answered_2xx(d).cloned()) {
-                    d.answered_invite = None;
+                    d.drop_answered_invite();
                 }
             }
             call

@@ -11,14 +11,14 @@
 
 use std::sync::Arc;
 
-/// The protocol version a [`Frame::PullRequest`] announces: **v6**, the seven
+/// The protocol version a [`Frame::PullRequest`] announces: **v7**, the seven
 /// frames `{PullRequest, Data, Noop, ResetToBootstrap, Position,
 /// ReplicaRefused, StreamRefused}`, one socket = one flow, scan-then-tail,
 /// `Op` = `{Put, Delete}`. Bumped on every change to a frame's shape, to the
 /// frame set or to the shape of the call record the frames carry; a server
 /// refuses a stream announcing another version ([`Frame::StreamRefused`]), and
 /// no upgrade compatibility is kept.
-pub const PROTO_VER: u16 = 6;
+pub const PROTO_VER: u16 = 7;
 
 /// Discriminant outside the accepted range for an enum-coded byte field.
 ///

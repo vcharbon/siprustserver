@@ -7,6 +7,7 @@
 use super::fixtures::*;
 use super::*;
 use b2bua_core::effects::OutboundBody;
+use call::Behind;
 
 /// A re-INVITE this stack relayed to bob carrying an offer, CSeq 2.
 const REINVITE: &str = "INVITE sip:bob@10.0.0.2:5070 SIP/2.0\r\n\
@@ -75,9 +76,9 @@ fn a_destroyed_callers_leg_byes_her_after_her_ack() {
         |e| matches!(&e.body, OutboundBody::Request(r) if *r.method() == sip_message::Method::Bye),
     );
     assert_eq!(byes.count(), 0, "no BYE reaches her before her ACK");
-    let held = result.call.a_leg.dialogs.iter().find_map(|d| d.answered_invite.as_ref());
-    let held = held.and_then(|r| r.invite.as_ref()).and_then(|x| x.bye_behind_ack.as_ref());
-    assert!(held.is_some(), "the BYE waits on her 2xx's record");
+    let held =
+        result.call.a_leg.dialogs.iter().find_map(|d| d.queued_behind(Behind::AnswerAck).next());
+    assert!(held.is_some(), "the BYE waits behind her 2xx's ACK");
     let ladder = TimerKey::obligation(TimerType::RepeatGiveUp, answered_obligation());
     assert!(result.call.timers.iter().any(|t| t.key == ladder), "her 2xx's give-up stays armed");
 }
@@ -101,10 +102,10 @@ fn a_services_bye_to_the_caller_waits_for_her_ack() {
         |e| matches!(&e.body, OutboundBody::Request(r) if *r.method() == sip_message::Method::Bye),
     );
     assert_eq!(byes.count(), 0, "no BYE reaches her before her ACK");
-    let held = result.call.a_leg.dialogs.iter().find_map(|d| d.answered_invite.as_ref());
-    let held = held.and_then(|r| r.invite.as_ref()).and_then(|x| x.bye_behind_ack.as_ref());
+    let held =
+        result.call.a_leg.dialogs.iter().find_map(|d| d.queued_behind(Behind::AnswerAck).next());
     let Some(call::QueuedRequest::Bye { headers, .. }) = held else {
-        panic!("the BYE waits on her 2xx's record: {held:?}");
+        panic!("the BYE waits behind her 2xx's ACK: {held:?}");
     };
     assert!(
         headers.iter().any(|(name, value)| name == "Reason" && value == "Q.850;cause=16"),
@@ -130,9 +131,9 @@ fn a_services_bye_ending_the_callers_leg_leaves_on_her_ack() {
         RuleAction::TerminateLeg { leg_id: "a".into(), end: LegEnd::OurByeSent },
     ];
     let result = execute_on(&call, &actions);
-    let held = result.call.a_leg.dialogs.iter().find_map(|d| d.answered_invite.as_ref());
-    let held = held.and_then(|r| r.invite.as_ref()).and_then(|x| x.bye_behind_ack.as_ref());
-    assert!(held.is_some(), "the BYE waits on her 2xx's record");
+    let held =
+        result.call.a_leg.dialogs.iter().find_map(|d| d.queued_behind(Behind::AnswerAck).next());
+    assert!(held.is_some(), "the BYE waits behind her 2xx's ACK");
     let ladder = TimerKey::obligation(TimerType::RepeatGiveUp, answered_obligation());
     assert!(result.call.timers.iter().any(|t| t.key == ladder), "her 2xx's give-up stays armed");
 

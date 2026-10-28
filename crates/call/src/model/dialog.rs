@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::owed_answer::OwedAnswer;
-use super::queued_request::QueuedRequest;
+use super::queued_request::{Behind, Queued, QueuedRequest};
 use super::request_record::RequestRecord;
 use super::sdp_session::LegSdpSession;
 use super::subscription::Subscription;
@@ -161,11 +161,13 @@ pub struct Dialog {
     /// 5057 §3), each opened by its first NOTIFY and kept once terminated.
     #[serde(default)]
     pub subscriptions: Vec<Subscription>,
-    /// This stack's NOTIFYs and BYE asked for while one of its NOTIFYs on the
-    /// dialog awaits its final, oldest first: each leaves in turn once nothing
-    /// ahead of it is in flight (RFC 3261 §12.2.2).
+    /// This stack's requests on the dialog not yet sent, oldest first, each
+    /// with what it waits behind: the NOTIFYs and BYE asked for while one of
+    /// its NOTIFYs there awaits its final leave in turn once nothing ahead of
+    /// them is in flight (RFC 3261 §12.2.2); a BYE behind the ACK of this
+    /// stack's 2xx leaves on that ACK or the 2xx's give-up (§15).
     #[serde(default)]
-    pub queued: Vec<QueuedRequest>,
+    pub queued: Vec<Queued>,
 }
 
 impl Dialog {
@@ -202,6 +204,18 @@ impl Dialog {
     /// The subscription of the dialog `event` and `id` name.
     pub fn subscription(&self, event: &str, id: Option<&str>) -> Option<&Subscription> {
         self.subscriptions.iter().find(|s| s.is_named(event, id))
+    }
+
+    /// The requests queued on the dialog behind `behind`, oldest first.
+    pub fn queued_behind(&self, behind: Behind) -> impl Iterator<Item = &QueuedRequest> {
+        self.queued.iter().filter(move |q| q.behind == behind).map(|q| &q.request)
+    }
+
+    /// Drop the INVITE the dialog answered: the BYE held behind the ACK of
+    /// its 2xx goes with it.
+    pub fn drop_answered_invite(&mut self) {
+        self.answered_invite = None;
+        self.queued.retain(|q| q.behind != Behind::AnswerAck);
     }
 
     /// When this stack's next request on the dialog may leave though its

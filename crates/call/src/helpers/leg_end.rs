@@ -116,7 +116,7 @@ pub fn record_cancelled_invite(call: Call, leg_id: &str) -> Call {
             *l.answer_preempted_mut() = Some(answer);
             l.messages.entries.retain(|e| !is_sent_invite_2xx(e));
             for d in l.dialogs.iter_mut() {
-                d.answered_invite = None;
+                d.drop_answered_invite();
                 if let Some(x) = d.sent_invite.as_mut().and_then(|r| r.invite.as_mut()) {
                     x.awaited_ack_cseq = None;
                 }

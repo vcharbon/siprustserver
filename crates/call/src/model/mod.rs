@@ -102,7 +102,7 @@ pub use owed_answer::OwedAnswer;
 pub use provisional::{
     CSeq, Ceased, Ladder, Provisional, ProvisionalId, RSeq, ResponderAck, Shown,
 };
-pub use queued_request::QueuedRequest;
+pub use queued_request::{Behind, Queued, QueuedRequest};
 pub use record::{
     ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallModelState, PolicyUpdateBody, SipHeader,
 };

@@ -18,14 +18,14 @@
 
 use call::helpers::{find_leg, RecordHolder};
 use call::{
-    Call, DialogId, DialogState, DialogUsage, NotifyInFlight, QueuedRequest, RequestRecord,
-    Subscription, SubscriptionState, TimerKey, TimerType,
+    Behind, Call, DialogId, DialogState, DialogUsage, NotifyInFlight, Queued, QueuedRequest,
+    RequestRecord, Subscription, SubscriptionState, TimerKey, TimerType,
 };
 use sip_message::header::{Event, HeaderValue, SubscriptionState as SubscriptionStateLine};
-use sip_message::{Method, SipStr};
+use sip_message::SipStr;
 
 use crate::effects::HandlerEffects;
-use crate::rules::method_table::{row, subscription_key};
+use crate::rules::method_table::subscription_key;
 
 use super::select::leg_at;
 use super::ActionExecutor;
@@ -63,13 +63,14 @@ fn dialog_of<'a>(call: &'a Call, leg_id: &str, id: &DialogId) -> Option<&'a call
     find_leg(call, leg_id)?.dialogs.by_tags(&id.our_tag, &id.peer_tag)
 }
 
-/// Every dialog with requests queued: its leg, its tags and when its wait
-/// ends (`None`: nothing is in flight ahead of them).
+/// Every dialog with requests queued behind this stack's NOTIFY: its leg,
+/// its tags and when its wait ends (`None`: nothing is in flight ahead of
+/// them).
 fn waits(call: &Call) -> Vec<(String, DialogId, Option<i64>)> {
     std::iter::once(&call.a_leg)
         .chain(call.b_legs.iter())
         .flat_map(|leg| leg.dialogs.iter().map(move |d| (leg, d)))
-        .filter(|(_, d)| !d.queued.is_empty())
+        .filter(|(_, d)| d.queued_behind(Behind::OwnNotify).next().is_some())
         .map(|(leg, d)| (leg.leg_id.clone(), d.id(), d.notify_wait_ends_at_ms()))
         .collect()
 }
@@ -126,9 +127,7 @@ impl ActionExecutor<'_> {
                 }
             }
         });
-        if row(&Method::Notify).waits_behind_own_notify
-            && self.waits_behind_notify(call, leg_id, &id)
-        {
+        if self.waits_behind_notify(call, leg_id, &id) {
             let notify = QueuedRequest::Notify {
                 event: event.to_string(),
                 subscription_state: subscription_state.to_string(),
@@ -142,11 +141,13 @@ impl ActionExecutor<'_> {
     }
 
     /// Whether a NOTIFY or BYE of this stack asked for now on `leg_id`'s
-    /// dialog `id` waits: requests are already queued there, or a NOTIFY of
-    /// this stack there awaits its final, its wait not ended.
+    /// dialog `id` waits: requests are already queued behind this stack's
+    /// NOTIFY there, or a NOTIFY of this stack there awaits its final, its
+    /// wait not ended.
     pub(super) fn waits_behind_notify(&mut self, call: &Call, leg_id: &str, id: &DialogId) -> bool {
         dialog_of(call, leg_id, id).is_some_and(|d| {
-            !d.queued.is_empty() || d.notify_wait_ends_at_ms().is_some_and(|end| self.now_ms < end)
+            d.queued_behind(Behind::OwnNotify).next().is_some()
+                || d.notify_wait_ends_at_ms().is_some_and(|end| self.now_ms < end)
         })
     }
 
@@ -159,7 +160,8 @@ impl ActionExecutor<'_> {
         id: &DialogId,
         request: QueuedRequest,
     ) {
-        *call = call::helpers::update_dialog(call.clone(), leg_id, id, |d| d.queued.push(request));
+        let queued = Queued { behind: Behind::OwnNotify, request };
+        *call = call::helpers::update_dialog(call.clone(), leg_id, id, |d| d.queued.push(queued));
         self.arm_answer_cap(call, fx);
     }
 
@@ -219,7 +221,7 @@ impl ActionExecutor<'_> {
             }
             if ends {
                 s.state = SubscriptionState::Terminated;
-                d.queued.retain(|q| match q {
+                d.queued.retain(|q| match &q.request {
                     QueuedRequest::Notify { event: e, .. } => {
                         let (package, named_id) = named(e);
                         !(package == *event && named_id == *sub_id)
@@ -253,9 +255,10 @@ impl ActionExecutor<'_> {
         }
     }
 
-    /// The queue on `leg_id`'s dialog `id` leaves in order while nothing of
-    /// this stack is in flight ahead of it: up to and including the next
-    /// NOTIFY, which then awaits its final with the rest behind it. A BYE
+    /// The requests queued behind this stack's NOTIFY on `leg_id`'s dialog
+    /// `id` leave in order while nothing of this stack is in flight ahead of
+    /// them: up to and including the next NOTIFY, which then awaits its final
+    /// with the rest behind it. A BYE
     /// queued on a dialog that ended is dropped; a NOTIFY still leaves, its
     /// subscription outliving the dialog's INVITE usage (RFC 5057 §5.2).
     fn release_queued(
@@ -268,15 +271,21 @@ impl ActionExecutor<'_> {
         loop {
             let Some(d) = dialog_of(call, leg_id, id) else { return };
             let in_flight = d.notify_wait_ends_at_ms().is_some_and(|end| self.now_ms < end);
-            if d.queued.is_empty() || in_flight {
+            if d.queued_behind(Behind::OwnNotify).next().is_none() || in_flight {
                 return;
             }
             let ended = matches!(d.state, DialogState::Ended(_));
             let mut next = None;
             *call = call::helpers::update_dialog(call.clone(), leg_id, id, |d| {
-                let mut queued = std::mem::take(&mut d.queued).into_iter();
-                next = queued.next();
-                d.queued = queued.collect();
+                let mut rest = Vec::with_capacity(d.queued.len());
+                for q in std::mem::take(&mut d.queued) {
+                    if next.is_none() && q.behind == Behind::OwnNotify {
+                        next = Some(q.request);
+                    } else {
+                        rest.push(q);
+                    }
+                }
+                d.queued = rest;
             });
             match next {
                 Some(QueuedRequest::Notify { event, subscription_state, content_type, body }) => {

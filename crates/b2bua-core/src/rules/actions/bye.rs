@@ -5,15 +5,16 @@
 
 use call::helpers::TERMINATING_TIMEOUT_MS;
 use call::TxnKind;
-use call::{Call, Dialog, DialogId, Leg, Obligation, QueuedRequest, TimerKey, TimerType};
+use call::{
+    Behind, Call, Dialog, DialogId, Leg, Obligation, Queued, QueuedRequest, TimerKey, TimerType,
+};
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
 use sip_message::header::HeaderName;
-use sip_message::{Method, SipHeader};
+use sip_message::SipHeader;
 
 use crate::effects::{
     HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
 };
-use crate::rules::method_table::row;
 use crate::rules::relay;
 
 use super::teardown::{is_media, without_reason, Relayed};
@@ -55,12 +56,11 @@ impl ActionExecutor<'_> {
             (reason, relayed)
         };
         let Some(id) = leg.dialogs.confirmed().map(|d| d.id()) else { return };
-        let row = row(&Method::Bye);
-        if row.waits_behind_unacked_answer && answer_unacked(call, leg_id) {
+        if answer_unacked(call, leg_id) {
             hold_behind_ack(call, leg_id, &id, relayed.queued_bye(reason, hops));
             return;
         }
-        if row.waits_behind_own_notify && self.waits_behind_notify(call, leg_id, &id) {
+        if self.waits_behind_notify(call, leg_id, &id) {
             self.queue(call, fx, leg_id, &id, relayed.queued_bye(reason, hops));
             return;
         }
@@ -202,11 +202,11 @@ fn answer_unacked(call: &Call, leg_id: &str) -> bool {
 }
 
 /// Hold `bye` behind the ACK of the 2xx `leg_id`'s dialog `id` answered
-/// the leg's dialog-creating INVITE with (RFC 3261 §15).
+/// the leg's dialog-creating INVITE with (RFC 3261 §15): the dialog holds
+/// one such BYE, the latest asked for.
 fn hold_behind_ack(call: &mut Call, leg_id: &str, id: &DialogId, bye: QueuedRequest) {
     *call = call::helpers::update_dialog(call.clone(), leg_id, id, |d| {
-        if let Some(x) = d.answered_invite.as_mut().and_then(|r| r.invite.as_mut()) {
-            x.bye_behind_ack = Some(bye);
-        }
+        d.queued.retain(|q| q.behind != Behind::AnswerAck);
+        d.queued.push(Queued { behind: Behind::AnswerAck, request: bye });
     });
 }

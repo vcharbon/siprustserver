@@ -9,7 +9,7 @@
 //! that BYE.
 
 use call::helpers::Scope;
-use call::{Call, DialogId, Obligation, QueuedRequest, TimerType};
+use call::{Behind, Call, DialogId, Obligation, QueuedRequest, TimerType};
 
 use crate::effects::HandlerEffects;
 
@@ -110,7 +110,7 @@ pub(super) fn bye_behind(
         call::helpers::answered_2xx(d)
             .is_some_and(|u| u.dialog_tag == *dialog_tag && u.cseq == *cseq)
     })?;
-    let bye = d.answered_invite.as_ref()?.invite.as_ref()?.bye_behind_ack.clone()?;
+    let bye = d.queued_behind(Behind::AnswerAck).next()?.clone();
     Some((leg.clone(), d.id(), bye))
 }
 

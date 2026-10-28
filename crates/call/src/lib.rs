@@ -90,7 +90,7 @@ pub use model::{DialogUsage, RequestOrigin, RequestRecord, SentRequest, KEEPALIV
 pub use model::{Obligation, Repeat, Repeated, RetainedEmission};
 // The subscriptions this stack notifies on a dialog (RFC 6665) and its
 // requests waiting there.
-pub use model::{NotifyInFlight, QueuedRequest, Subscription, SubscriptionState};
+pub use model::{Behind, NotifyInFlight, Queued, QueuedRequest, Subscription, SubscriptionState};
 // Timers, CDR events, the message ring, the decision log and the termination
 // record on the replicated body.
 pub use model::{millis_i64, millis_u64, Deadline};

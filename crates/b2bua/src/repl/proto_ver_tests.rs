@@ -93,9 +93,10 @@ async fn a_refused_puller_counts_it_and_pulls_again_after_its_backoff() {
     assert!(!status.borrow().current, "a refused stream never reads as current");
 }
 
-/// v6: a retired dialog is a bare state, its open records in the dialog's
-/// requests (ADR-0055 §2), so a v5 peer's records do not decode here.
+/// v7: a dialog holds one queue of the requests this stack has not sent
+/// yet, each with what it waits behind (ADR-0055 §2), so a v6 peer's records
+/// do not decode here.
 #[test]
-fn the_version_names_the_retired_dialog_shape() {
-    assert_eq!(PROTO_VER, 6);
+fn the_version_names_the_one_queue_dialog_shape() {
+    assert_eq!(PROTO_VER, 7);
 }

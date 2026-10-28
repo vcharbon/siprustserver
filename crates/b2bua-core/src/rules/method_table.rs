@@ -8,9 +8,9 @@
 //!
 //! | method | usage | on a dialog this side is ending | a relay toward a leg that ended |
 //! |---|---|---|---|
-//! | BYE | ends the dialog; leaves behind the ACK of this stack's 2xx to the dialog's creating INVITE (§15) and behind this stack's NOTIFY in flight | passes | — |
+//! | BYE | ends the dialog | passes | — |
 //! | PRACK | the session | passes | 200 (RFC 3262 §3) |
-//! | NOTIFY | carries a subscription's state; this stack's leaves behind its NOTIFY in flight, and never on a subscription that is terminated (RFC 6665 §4.2.2) | 200 | 481 |
+//! | NOTIFY | carries a subscription's state; never on a subscription that is terminated (RFC 6665 §4.2.2) | 200 | 481 |
 //! | REFER | opens an implicit subscription (RFC 3515 §2.4.4) | 487 | 481 |
 //! | INFO, MESSAGE, OPTIONS | the session | 200 | 481 |
 //! | UPDATE, SUBSCRIBE, any other | the session | 487 (§21.4.25) | 481 |
@@ -44,39 +44,19 @@ pub struct MethodRow {
     /// The final this stack owes the originator of a relay toward a leg that
     /// ended (RFC 3261 §8.2.6): its target's answer relays no further.
     pub owed_at_leg_end: (u16, &'static str),
-    /// This stack's request of the method waits behind its own NOTIFY in
-    /// flight on the dialog, so loss never delivers its requests out of CSeq
-    /// order (RFC 3261 §12.2.2).
-    pub waits_behind_own_notify: bool,
-    /// This stack's request of the method waits for the ACK of its 2xx to
-    /// the dialog's creating INVITE, or that 2xx's give-up (RFC 3261 §15).
-    pub waits_behind_unacked_answer: bool,
 }
 
 const DOES_NOT_EXIST: (u16, &str) = (481, "Call/Transaction Does Not Exist");
 
 /// The row of `method`.
 pub fn row(method: &Method) -> MethodRow {
-    let ordinary = MethodRow {
-        on_ending: OnEnding::Terminate,
-        owed_at_leg_end: DOES_NOT_EXIST,
-        waits_behind_own_notify: false,
-        waits_behind_unacked_answer: false,
-    };
+    let ordinary = MethodRow { on_ending: OnEnding::Terminate, owed_at_leg_end: DOES_NOT_EXIST };
     match method {
-        Method::Bye => MethodRow {
-            on_ending: OnEnding::Pass,
-            waits_behind_own_notify: true,
-            waits_behind_unacked_answer: true,
-            ..ordinary
-        },
+        Method::Bye => MethodRow { on_ending: OnEnding::Pass, ..ordinary },
         Method::Prack => {
             MethodRow { on_ending: OnEnding::Pass, owed_at_leg_end: (200, "OK"), ..ordinary }
         }
-        Method::Notify => {
-            MethodRow { on_ending: OnEnding::Absorb, waits_behind_own_notify: true, ..ordinary }
-        }
-        Method::Info | Method::Message | Method::Options => {
+        Method::Notify | Method::Info | Method::Message | Method::Options => {
             MethodRow { on_ending: OnEnding::Absorb, ..ordinary }
         }
         _ => ordinary,

@@ -258,7 +258,6 @@ fn same_exchange(a: &InviteExchange, b: &InviteExchange) -> bool {
         ack_ahead,
         awaited_ack_cseq,
         answered_2xx,
-        bye_behind_ack,
         dialled,
         final_sent,
         rejection,
@@ -273,7 +272,6 @@ fn same_exchange(a: &InviteExchange, b: &InviteExchange) -> bool {
         && *ack_ahead == b.ack_ahead
         && *awaited_ack_cseq == b.awaited_ack_cseq
         && same_option(answered_2xx, &b.answered_2xx, same_2xx)
-        && *bye_behind_ack == b.bye_behind_ack
         && *dialled == b.dialled
         && *final_sent == b.final_sent
         && *rejection == b.rejection

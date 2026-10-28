@@ -6,8 +6,14 @@ use proptest::prelude::*;
 
 use super::{arb_bytes, arb_tag};
 
-/// Any request of this stack waiting on a dialog.
-pub(super) fn arb_queued_request() -> impl Strategy<Value = QueuedRequest> {
+/// Any request of this stack waiting on a dialog, behind what it waits.
+pub(super) fn arb_queued() -> impl Strategy<Value = Queued> {
+    let behind = prop_oneof![Just(Behind::AnswerAck), Just(Behind::OwnNotify)];
+    (behind, arb_queued_request()).prop_map(|(behind, request)| Queued { behind, request })
+}
+
+/// Any request of this stack queued on a dialog.
+fn arb_queued_request() -> impl Strategy<Value = QueuedRequest> {
     let headers = proptest::collection::vec((arb_tag(), arb_tag()), 0..3);
     prop_oneof![
         (arb_tag(), arb_tag(), proptest::option::of(arb_tag()), arb_bytes(80)).prop_map(

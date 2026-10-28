@@ -7,7 +7,7 @@ use proptest::prelude::*;
 use super::provisional::arb_owed_answer;
 use super::request_record::{arb_invite_record, arb_pending_request};
 use super::sdp_session::arb_sdp_session;
-use super::subscription::{arb_queued_request, arb_subscription};
+use super::subscription::{arb_queued, arb_subscription};
 use super::{arb_bytes, arb_tag, arb_uri};
 
 /// Boxed, as `arb_leg` is: a debug build otherwise holds the whole value tree
@@ -36,7 +36,7 @@ pub(super) fn arb_dialog() -> BoxedStrategy<Dialog> {
             proptest::option::of(arb_sdp_session()),
             proptest::option::of(arb_owed_answer()),
             proptest::collection::vec(arb_subscription(), 0..2),
-            proptest::collection::vec(arb_queued_request(), 0..3),
+            proptest::collection::vec(arb_queued(), 0..3),
         ),
         (any::<bool>(), proptest::option::of(arb_tag())),
     );
