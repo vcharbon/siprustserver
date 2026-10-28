@@ -22,13 +22,18 @@ pub use scenario_harness::actor::ForkWinner;
 use scenario_harness::actor::{
     phase, ActorCall, ActorScenario, ActorSpec, Barrier, BarrierPhase, Branch, CtxFeed,
     Disposition, Ending, Expect, Feed, Goal, GoalStep, LegPhase, MediaState, SettleBarrier,
-    StateInner, SubflowState, SUBFLOW_EARLY, SUBFLOW_REALIGN, SUBFLOW_REFER,
+    StateInner, SubflowState, SUBFLOW_EARLY, SUBFLOW_REFER,
 };
 use scenario_harness::realcall::{CallEnv, ScenarioId};
 use scenario_harness::{StepError, ANSWER_SDP, OFFER_SDP};
 use sip_message::generators::InDialogMethod;
 
 use crate::binder::{RouteBinder, RouteIntent};
+
+mod barriers;
+
+pub(crate) use barriers::{answered, established_pred};
+use barriers::{declined, merged, renegs_reached};
 
 /// How the call is established — the first pipeline stage, which mints the
 /// initial dialog (or a terminal outcome for the deliberately-failing shapes).
@@ -180,8 +185,9 @@ pub enum Script {
     /// `validate()` rejects it on any other establishment. Gate unchanged (the
     /// call still confirms via the establishment's `established` gate).
     UpdateEarly,
-    /// ONE in-dialog OPTIONS keepalive ping, its 200 read inline. Gate
-    /// unchanged.
+    /// ONE in-dialog OPTIONS keepalive ping, whose 200 the reactor observes.
+    /// Replaces the gate with `pinged`, so what follows never overtakes a ping
+    /// still being resent (RFC 3261 §17.1.2.2).
     KeepaliveOnce,
     /// OPTIONS keepalive pings every `options_cadence` until `options_hold`
     /// elapses (both env knobs). Gate unchanged; the goal cursor advances only
@@ -377,50 +383,6 @@ fn bump(counts: &mut Vec<(&'static str, u32)>, role: &'static str, n: u32) -> u3
             n
         }
     }
-}
-
-/// The renegotiation count of `role` reached `n` — the `reinvited` /
-/// `updated` gate.
-fn renegs_reached(name: &'static str, role: &'static str, n: u32) -> Barrier {
-    Barrier::pred(name, move |s| s.leg(role).reneg_count() >= n)
-}
-
-/// `role` received `n` 2xx to its `method` requests.
-pub(crate) fn answered(
-    name: &'static str,
-    role: &'static str,
-    method: &'static str,
-    n: u32,
-) -> Barrier {
-    Barrier::pred(name, move |s| {
-        let ok = |f: &&scenario_harness::actor::ResponseFact| {
-            (200..300).contains(&f.status) && f.cseq_method == method
-        };
-        s.leg(role).responses().iter().filter(ok).count() >= n as usize
-    })
-}
-
-/// `alice` + `winner` both confirmed — the `established` gate/phase, with the
-/// winning callee role captured (bob, or bob2 after a reroute).
-pub(crate) fn established_pred(
-    winner: &'static str,
-) -> impl Fn(&StateInner) -> bool + Send + Sync + Clone {
-    move |s: &StateInner| {
-        s.leg_at_least("alice", LegPhase::Confirmed) && s.leg_at_least(winner, LegPhase::Confirmed)
-    }
-}
-
-/// The post-transfer media merge completed on BOTH realign legs.
-fn merged(s: &StateInner) -> bool {
-    let confirmed = |leg: &str| {
-        s.leg(leg).subflow(SUBFLOW_REALIGN).is_some_and(|f| f >= SubflowState::Confirmed)
-    };
-    confirmed("alice") && confirmed("charlie")
-}
-
-/// The transfer target declined (its leg terminated without confirming).
-fn declined(s: &StateInner) -> bool {
-    s.leg_at_least("charlie", LegPhase::Terminated)
 }
 
 /// The declined transfer's accepted ending: the target refused, and the
@@ -1052,6 +1014,7 @@ impl ShapePlan {
                     b.caller_feed.on_options_ok =
                         Feed::new(Some("time_to_options_200"), Some("keepalive_ack"));
                 }
+                b.gate = answered("pinged", role, "OPTIONS", b.add_ping(role));
             }
             Script::KeepaliveLoop => {
                 let step =

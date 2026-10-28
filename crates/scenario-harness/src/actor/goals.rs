@@ -150,9 +150,10 @@ pub enum GoalStep {
     /// provisional the INVITE drew is PRACKed, so no PRACK crosses the final.
     /// The final then awaits its hop-ACK (RFC 3261 §17.2.1).
     Reject { status: u16 },
-    /// Send ONE in-dialog OPTIONS keepalive ping on the confirmed dialog and
-    /// read its 200 inline — the `long_call` single ping. The first ping stamps
-    /// the `keepalive_ack` feed.
+    /// Send ONE in-dialog OPTIONS keepalive ping on the confirmed dialog — the
+    /// `long_call` single ping. The goal ends once the ping is sent; its final
+    /// arrives through the reactor, and the first 200 stamps the
+    /// `keepalive_ack` feed.
     Options,
     /// Loop an in-dialog OPTIONS keepalive ping every `cadence` until `hold`
     /// elapses (the `options_hold` keepalive loop) — each 200 read inline; the

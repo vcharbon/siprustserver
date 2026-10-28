@@ -100,6 +100,7 @@ mod limiter_refresh_batch;
 mod limiter_release_queue;
 mod load_refusal_ahead_of_permits;
 mod local_answer_contact;
+mod long_call_lost_ping;
 mod long_ring;
 mod lower_via_hops;
 mod masked_face_last_shown;

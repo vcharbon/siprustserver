@@ -20,6 +20,7 @@ mod endings;
 mod forking;
 mod future_size;
 mod held;
+mod long_call_ping;
 mod long_dwell;
 mod prack_refused;
 mod rang;
