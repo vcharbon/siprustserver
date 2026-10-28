@@ -46,6 +46,7 @@ mod limiter_ha;
 mod limiter_refresh_batch;
 mod limiter_release_by_call;
 mod limiter_uncounted_calls;
+mod live_primary_read_dead;
 mod long_ring_ha;
 mod message_ring_takeover;
 mod new_call_acceptance;

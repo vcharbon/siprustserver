@@ -295,7 +295,9 @@ the call has one CDR.
 - **A primary read dead while it lives.** A flap or a partition between the proxy and
   the primary alone: the backup takes over the primary's in-flight calls while the
   primary serves them, so the callee may get the dialled INVITE twice and an undecided
-  call is refused (user ruling); the split rows of ADR-0055 §11 judge it.
+  call is refused (user ruling). `live_primary_read_dead.rs` pins a flap: the second
+  verdict takes over afresh the re-INVITE round a stood-down copy left open, and the
+  callee absorbs the re-sent INVITE.
 - **The creation write lands one stream hop after the 100.** A death inside that
   hop leaves no replica (`new_call_replication_window.rs` measures it).
 - **A route applied before its write replicated.** A node that dies after dialling

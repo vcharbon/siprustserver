@@ -4,6 +4,7 @@
 //! workers' cluster key (ADR-0050 §3).
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 
 use observe::NodeScope;
@@ -16,8 +17,14 @@ use tokio::task::JoinHandle;
 
 use super::FailoverHarness;
 
-/// How many ports above a front proxy its dead notifier binds.
+/// How many ports above a front proxy its first dead notifier binds; each
+/// later one binds one port further, cycling within this span, so a proxy
+/// restarted at the same address never meets the endpoint its predecessor
+/// still holds.
 const NOTICE_PORT_OFFSET: u16 = 1000;
+
+/// The dead notifiers bound so far in this process.
+static NOTIFIERS: AtomicU16 = AtomicU16::new(0);
 
 impl FailoverHarness {
     /// The REAL health probe of a proxy over `registry`, on its own endpoint
@@ -58,14 +65,15 @@ impl FailoverHarness {
     }
 
     /// The dead notifier of the proxy at `proxy` over `registry`, on an
-    /// endpoint of its own [`NOTICE_PORT_OFFSET`] ports up, run as `node`.
+    /// endpoint of its own above [`NOTICE_PORT_OFFSET`] ports up, run as `node`.
     pub(super) async fn spawn_dead_notifier(
         &self,
         node: &NodeScope,
         proxy: SocketAddr,
         registry: &SimulatedWorkerRegistry,
     ) -> Option<JoinHandle<()>> {
-        let at = SocketAddr::new(proxy.ip(), proxy.port() + NOTICE_PORT_OFFSET);
+        let nth = NOTIFIERS.fetch_add(1, Ordering::Relaxed) % NOTICE_PORT_OFFSET;
+        let at = SocketAddr::new(proxy.ip(), proxy.port() + NOTICE_PORT_OFFSET + nth);
         let (ep, _) = self.harness.bind_sut("proxy-notice", &at.to_string()).await;
         let registry: Arc<dyn WorkerRegistry> = Arc::new(registry.clone());
         let id_gen = Arc::new(IdGen::seeded(0x0D0E_AD00 ^ u64::from(proxy.port())));

@@ -492,7 +492,7 @@ impl<'a> Respond<'a> {
             }
         }
         // An explicit per-fork To-tag overrides (and does not disturb) the txn's
-        // sticky tag, the first fork's if any (RFC 3261 §12.1.1): each early dialog keeps its own.
+        // sticky tag, the first fork's if any (RFC 3261 §8.2.6.2): each early dialog keeps its own.
         let to_tag = if let Some(t) = self.to_tag {
             Some(t)
         } else {
