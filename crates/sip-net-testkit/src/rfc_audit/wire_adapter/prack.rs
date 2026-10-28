@@ -3,7 +3,7 @@
 use super::*;
 
 pub(super) const LIVE: &[Live] = &[
-    Live::emitter(RuleId::UnackedReliableProvisional, unacked_reliable_provisional),
+    Live::emitter_only(RuleId::UnackedReliableProvisional, unacked_reliable_provisional),
     Live::emitter(RuleId::RackWithoutKnownInvite, rack_without_known_invite),
     Live::emitter(RuleId::NoOverlappingReliableProvisionals, no_overlapping_reliable_provisionals),
     Live::emitter(RuleId::NonContiguousRseq, non_contiguous_rseq),

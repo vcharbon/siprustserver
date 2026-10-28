@@ -5,7 +5,7 @@ use super::*;
 pub(super) const LIVE: &[Live] = &[
     // Live stamps are strictly monotonic, so a 2xx sent before the CANCEL arrived is a race the
     // rule clears.
-    Live::emitter(RuleId::No200AfterCancel, no_200_after_cancel),
+    Live::emitter_only(RuleId::No200AfterCancel, no_200_after_cancel),
     Live::emitter(RuleId::CancelRouteEchoesInvite, cancel_route_echoes_invite)
         .skip(Skip::RelayLanes),
     // A `{Proxy}`-only lane forwards its upstream's CANCEL at the upstream's timing; a B2BUA

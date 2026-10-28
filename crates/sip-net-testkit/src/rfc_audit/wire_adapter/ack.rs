@@ -3,8 +3,8 @@
 use super::*;
 
 pub(super) const LIVE: &[Live] = &[
-    Live::emitter(RuleId::NoAckToDialogCreating2xx, no_ack_to_dialog_creating_2xx),
-    Live::emitter(RuleId::Unacked2xxNotCleared, unacked_2xx_not_cleared),
+    Live::emitter_only(RuleId::NoAckToDialogCreating2xx, no_ack_to_dialog_creating_2xx),
+    Live::emitter_only(RuleId::Unacked2xxNotCleared, unacked_2xx_not_cleared),
     Live::emitter(RuleId::AckRequireSubsetOfInvite, ack_require_subset_of_invite)
         .skip(Skip::RelayLanes),
     Live::emitter(RuleId::AckPreservesInviteRoute, ack_preserves_invite_route)

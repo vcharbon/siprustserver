@@ -121,3 +121,30 @@ fn an_unacked_reject_gates_at_the_uas_lane() {
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!((out[0].0.as_str(), out[0].3.as_deref()), (BOB, Some(ALICE)));
 }
+
+/// What the loss model dropped is out of the audit view, so a taker's lane
+/// does not show every ACK its peer sent: a caller that is no recorded bind is
+/// not charged at the callee's lane for an ACK it sent and the network lost
+/// (RFC 3261 §13.2.2.4), nor for the re-INVITE that followed it (§14.1).
+#[test]
+fn an_ack_the_loss_model_dropped_is_not_charged_to_its_unrecorded_sender() {
+    use crate::types::RecvDisposition::{Delivered, LossModel};
+    let evs = vec![
+        arrival(BOB, req("INVITE", "z9hG4bK-i", 1, None), ALICE, 0, Delivered, None),
+        sent(BOB, resp(200, 1, "INVITE", "bt", "z9hG4bK-i"), ALICE, 1),
+        arrival(BOB, req("ACK", "z9hG4bK-a1", 1, Some("bt")), ALICE, 2, LossModel, None),
+        arrival(BOB, req("INVITE", "z9hG4bK-r", 2, Some("bt")), ALICE, 3, Delivered, None),
+        sent(BOB, resp(200, 2, "INVITE", "bt", "z9hG4bK-r"), ALICE, 4),
+        arrival(BOB, req("ACK", "z9hG4bK-a2", 2, Some("bt")), ALICE, 5, Delivered, None),
+        arrival(BOB, req("BYE", "z9hG4bK-b", 3, Some("bt")), ALICE, 6, Delivered, None),
+        sent(BOB, resp(200, 3, "BYE", "bt", "z9hG4bK-b"), ALICE, 7),
+    ];
+    let charged: Vec<RfcFinding> = evaluate_rfc_findings(&evs)
+        .into_iter()
+        .filter(|f| {
+            f.rule == RuleId::NoAckToDialogCreating2xx.token()
+                || f.rule == RuleId::NoReInviteWhileInviteInProgress.token()
+        })
+        .collect();
+    assert!(charged.is_empty(), "{charged:?}");
+}
