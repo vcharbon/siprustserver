@@ -258,9 +258,9 @@ impl ActionExecutor<'_> {
     /// The requests queued behind this stack's NOTIFY on `leg_id`'s dialog
     /// `id` leave in order while nothing of this stack is in flight ahead of
     /// them: up to and including the next NOTIFY, which then awaits its final
-    /// with the rest behind it. A BYE
-    /// queued on a dialog that ended is dropped; a NOTIFY still leaves, its
-    /// subscription outliving the dialog's INVITE usage (RFC 5057 §5.2).
+    /// with the rest behind it. A BYE queued on a dialog that ended is
+    /// dropped; a NOTIFY still leaves, its subscription outliving the
+    /// dialog's INVITE usage (RFC 5057 §5.2).
     fn release_queued(
         &mut self,
         call: &mut Call,

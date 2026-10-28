@@ -167,11 +167,13 @@ pub fn answered_2xx_mut(d: &mut Dialog) -> Option<&mut crate::model::Unacked2xx>
 }
 
 /// Record on `d` the INVITE numbered `cseq` it received and answered with
-/// `answer`, a 2xx awaiting its ACK.
+/// `answer`, a 2xx awaiting its ACK: it replaces the INVITE the dialog
+/// answered before, and the BYE held behind that one's ACK.
 pub fn hold_answered_2xx(d: &mut Dialog, cseq: i64, answer: crate::model::Unacked2xx) {
     let mut record = RequestRecord::received_invite(cseq);
     if let Some(x) = record.invite.as_mut() {
         x.answered_2xx = Some(answer);
     }
+    d.drop_answered_invite();
     d.answered_invite = Some(record);
 }
