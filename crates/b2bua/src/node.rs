@@ -345,7 +345,6 @@ impl B2buaCore {
             reentry_tx.clone(),
         );
         tasks.extend(limiter_tasks);
-        let options_tagger = sip_txn::StatelessTagger::from_id_gen(&id_gen);
         let ctx = Arc::new(RouterCtx {
             outbound_proxy: crate::router::outbound_proxy_target(&config),
             relay_owner: call::RelayOwner::new(config.self_ordinal.clone(), identity),
@@ -363,6 +362,7 @@ impl B2buaCore {
             decision,
             limiter,
             cdr: cdr.clone(),
+            options_tagger: sip_txn::StatelessTagger::from_id_gen(&id_gen),
             id_gen,
             clock,
             rules: Arc::new(rules),
@@ -372,7 +372,6 @@ impl B2buaCore {
             // contributed kind registers here via `.with(...)` (ADR-0020 X7).
             obligations: Arc::new(crate::obligations::ObligationSet::core()),
             readiness: readiness.clone(),
-            options_tagger,
             departed: supervisor.as_ref().map(crate::repl::departed_probe),
             overload: overload.clone(),
             capacity: capacity.clone(),
@@ -382,6 +381,7 @@ impl B2buaCore {
             meeting_waves: crate::lifecycle::meeting_waves(),
             unroutable_waves: crate::lifecycle::UnroutableWaves::new(),
             late_pracks: Default::default(),
+            dead_verdicts: Default::default(),
             outboxes: Arc::new(outboxes),
             reentry_tx,
             // Arc-shared into every per-call `ctx.clone()`, like `decision`.

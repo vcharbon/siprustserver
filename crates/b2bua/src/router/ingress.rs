@@ -69,7 +69,8 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, matched_cli
     }
 
     // Out-of-dialog OPTIONS keepalive: self-report readiness (ADR-0011 X6) on
-    // its two axes (ADR-0050 §2), read by the front proxy's health probe.
+    // its two axes (ADR-0050 §2), read by the front proxy's health probe, and
+    // take the proxy's dead verdicts it carries (ADR-0050 §3).
     if let CallEvent::Sip { message, src, .. } = &event {
         if let SipMessage::Request(req) = message.as_ref() {
             if req.method() == "OPTIONS" && req.to().tag().is_none() {
@@ -83,6 +84,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, matched_cli
                 if let Ok(resp) = resp {
                     let _ = ctx.txn.send_response(resp, super::reply_to::reply_to(req, *src)).await;
                 }
+                super::dead_verdict::on_options(ctx, req);
                 return;
             }
         }

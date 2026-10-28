@@ -15,7 +15,7 @@ use sip_net_testkit::SimulatedSignalingNetwork;
 
 use b2bua_sdk::event::CallEvent;
 
-use super::{sweep, take_over_departed, take_over_one, Swept};
+use super::{sweep, take_over_departed, take_over_one, Cause, Swept};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::repl::ReplicatingCallStore;
@@ -331,11 +331,11 @@ async fn a_takeover_that_panics_costs_its_call_only_and_is_counted() {
     let task = tokio::spawn({
         let ctx = ctx.clone();
         async move {
-            sweep(&ctx, "w0", refs, move |ctx, call_ref| {
+            sweep(&ctx, "w0", Cause::Departed, refs, move |ctx, call_ref| {
                 let bad = call_ref == bad_ref;
                 async move {
                     assert!(!bad, "the takeover of this call panics");
-                    take_over_one(&ctx, &call_ref).await
+                    take_over_one(&ctx, &call_ref, Cause::Departed).await
                 }
             })
             .await;

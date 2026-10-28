@@ -4,7 +4,9 @@
 the worker's calls with an INVITE in flight (ADR-0047). Amended (2026-10-16): D4, the proxy's
 `Draining` grace is removed; Draining reports `new=refuse` on an OPTIONS `200` (ADR-0050).
 Amended (2026-10-23): D2, D4 and the per-axis fold, replaced by containment and one
-routing rule (ADR-0055 §3, §7, §8).
+routing rule (ADR-0055 §3, §7, §8). Amended (2026-10-28): case 3a, the proxy tells its
+dead verdict to the workers and the backups take over the calls with work in flight at
+it (ADR-0050 §3, ADR-0047 D1).
 
 **Source:** this codebase. Triggered by the failover-harness scenario
 `crates/failover-harness/tests/it/withdrawn_primary_answers_in_its_window.rs` and its views
@@ -32,7 +34,10 @@ Leaving the slice is also when a worker's backups take over its calls with an IN
 in flight (ADR-0047): at the end of case 1, the pod gone after its drain; at +0 in
 case 2, overlapping the process's last 2 s; and in case 3b when the pod on an
 unreachable node is force-deleted, while its process may still live behind the
-partition. Case 3a and case 4 never leave the slice, and their calls stay reactive.
+partition. Case 3a and case 4 never leave the slice. In case 3a the proxy's probe reads
+the worker dead and tells the workers that verdict: the backups take over the calls
+with work in flight at once, and the force-delete of case 3b discharges what is left
+(ADR-0047 D1, D2). Case 4 is read by the tombstone and stays reactive.
 
 What each element believed about the leaving worker, per case, from the harness's views
 ledger and the kind cluster's logs:
@@ -149,7 +154,9 @@ writes its own (residual as amended below). (Amends ADR-0014 §3.)
 **D4 — Routing around a leaving worker has two signals, one branch.** Membership
 (cases 1, 2 and 4: the address is tombstoned `Dead`) and the OPTIONS probe (case 3a: `Dead`
 after the miss threshold) both land on the same `Dead` health, and the request and response
-paths already take the backup on it. The response path takes the backup for
+paths already take the backup on it. The probe's verdict is also told to the other workers,
+signed (ADR-0050 §3), so the backups take over at once what the proxy now routes to them;
+the tombstone's is not, as a draining worker still serves its calls. The response path takes the backup for
 **INVITE responses only**: a non-INVITE response answers a client transaction
 only its sender holds (RFC 3261 §17.1.2), so it follows the Via to its sender
 whatever that sender's health. A dialog-creating request a leaving worker sends after
@@ -279,6 +286,8 @@ sequenceDiagram
     Note over E: 3a: node crash or partition — the slice is unchanged
     P--xE: OPTIONS probe misses ×2
     Note over P: health Dead after ~2–3.5 s (D4) — requests and responses take w_bak
+    P->>S: OPTIONS with the signed dead verdict
+    Note over S: takes over the primary's calls with work in flight (ADR-0047 D1)
     S--xE: pull stream breaks — backoff 100 ms → 30 s, retried
     C->>P: 200 OK
     P->>S: reverse-fails to w_bak

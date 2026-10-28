@@ -30,6 +30,7 @@ mod callout_requests;
 mod callouts;
 #[cfg(test)]
 mod cancel_crossing_tests;
+mod dead_verdict;
 mod departure;
 mod dialog_gate;
 mod dropped_on_delete;
@@ -209,6 +210,8 @@ pub struct RouterCtx {
     pub unroutable_waves: crate::lifecycle::UnroutableWaves,
     /// The PRACKs released calls still answer 200 (RFC 3262 §3).
     pub(crate) late_pracks: late_prack::LatePrackBook,
+    /// The proxies' dead verdicts this node took (ADR-0050 §3).
+    pub(crate) dead_verdicts: dead_verdict::VerdictBook,
     /// Every call's ordered outbox, released by the sync level (ADR-0055 §3).
     pub(crate) outboxes: Arc<Outboxes>,
     /// Host-injected generic async-HTTP capability (ADR-0016 seam). `Arc`-shared

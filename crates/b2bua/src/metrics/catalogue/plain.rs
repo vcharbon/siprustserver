@@ -214,6 +214,14 @@ plain_counters! {
         "b2bua_departure_takeover_panics_total",
         "departed-peer calls whose takeover panicked; the sweep goes on with the next call — expected 0",
     ) => departure_takeover_panics, bump_departure_takeover_panic, departure_takeover_panics_total;
+    DEAD_NOTICES_REFUSED = (
+        "b2bua_dead_notices_refused_total",
+        "a front proxy's dead notices (X-Worker-Dead) refused unsigned, badly signed, stale, or with no cluster key to check them (ADR-0050 §3) — expected 0",
+    ) => dead_notices_refused, bump_dead_notice_refused, dead_notices_refused_total;
+    DEAD_VERDICTS_TAKEN = (
+        "b2bua_dead_verdicts_taken_total",
+        "a front proxy's dead verdicts on another worker taken: each runs the takeover of the calls this node backs for it with work in flight (ADR-0047 D1)",
+    ) => dead_verdicts_taken, bump_dead_verdict_taken, dead_verdicts_taken_total;
     STORE_RECONCILED_ORPHAN_STAMPS = (
         "b2bua_store_reconciled_orphan_stamps_total",
         "last-touched stamps of no resident call the reaper sweep dropped; each is a store write a panic cut short — expected 0",

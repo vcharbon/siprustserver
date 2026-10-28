@@ -12,6 +12,7 @@ pub(crate) const ADMIT_BY_CALL: &str = "admit_by_call";
 pub(crate) const BACKEND_GATE: &str = "backend_gate";
 pub(crate) const CAPACITY_LIMITS: &str = "capacity_limits";
 pub(crate) const CDR_MEMORY: &str = "cdr_memory";
+pub(crate) const DEAD_VERDICTS: &str = "dead_verdicts";
 pub(crate) const DISPATCH_BODIES: &str = "dispatch_bodies";
 pub(crate) const DISPATCH_QUEUE: &str = "dispatch_queue";
 pub(crate) const DISPATCH_SLOTS: &str = "dispatch_slots";
@@ -34,11 +35,12 @@ pub(crate) const TRACE_PROCESS: &str = "trace_process";
 pub(crate) const TRACE_SPANS: &str = "trace_spans";
 
 /// Every lock name, in counter order: the `lock` label's values.
-pub const LOCKS: [&str; 24] = [
+pub const LOCKS: [&str; 25] = [
     ADMIT_BY_CALL,
     BACKEND_GATE,
     CAPACITY_LIMITS,
     CDR_MEMORY,
+    DEAD_VERDICTS,
     DISPATCH_BODIES,
     DISPATCH_QUEUE,
     DISPATCH_SLOTS,

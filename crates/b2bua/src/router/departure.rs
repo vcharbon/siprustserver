@@ -20,6 +20,11 @@
 //! it, is discharged — CDR, limiter release, delete — since no node is left
 //! to (ADR-0047 D8).
 //!
+//! A proxy's dead verdict on the peer (ADR-0050 §3) runs the takeover half
+//! alone: the same calls are taken over and an undecided one answered, while
+//! a finished call and a deferred end are left to the peer, which may live
+//! behind a partition and discharge them itself, or to its departure.
+//!
 //! The sweep is a task of its own, never the router loop's: a departed
 //! partition holds every call the peer served, read one body at a time, and
 //! the router serves its own calls meanwhile. The dispatcher tracks it, so a
@@ -47,13 +52,34 @@ use crate::store::PartitionRole;
 /// How many calls the sweep reads between two yields to the runtime.
 const YIELD_EVERY: usize = 32;
 
+/// Why the peer's calls are swept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Cause {
+    /// The peer left the membership set: its calls are taken over and its
+    /// finished ones discharged.
+    Departed,
+    /// A proxy read the peer dead: its calls are taken over, nothing is
+    /// discharged.
+    ReadDead,
+}
+
 /// Start the sweep of `ordinal`'s backup partition and return at once.
 pub(super) fn take_over_departed(ctx: &Arc<RouterCtx>, ordinal: &str) {
+    start(ctx, ordinal, Cause::Departed);
+}
+
+/// Start the takeover half of the sweep of `ordinal`'s backup partition, on a
+/// proxy's dead verdict, and return at once.
+pub(super) fn take_over_read_dead(ctx: &Arc<RouterCtx>, ordinal: &str) {
+    start(ctx, ordinal, Cause::ReadDead);
+}
+
+fn start(ctx: &Arc<RouterCtx>, ordinal: &str, cause: Cause) {
     let refs = ctx.state.partition_refs(PartitionRole::Backup, ordinal);
     let (task_ctx, ordinal) = (ctx.clone(), ordinal.to_string());
     let task = observe::spawn_keeping_node(async move {
-        sweep(&task_ctx, &ordinal, refs, |ctx, call_ref| async move {
-            take_over_one(&ctx, &call_ref).await
+        sweep(&task_ctx, &ordinal, cause, refs, move |ctx, call_ref| async move {
+            take_over_one(&ctx, &call_ref, cause).await
         })
         .await;
     });
@@ -73,8 +99,13 @@ enum Swept {
 /// Run `step` over every call of `refs`, one at a time, each in a subtask of
 /// its own: a step that panics is counted and logged, and the next call is
 /// taken.
-async fn sweep<F, Fut>(ctx: &Arc<RouterCtx>, ordinal: &str, refs: Vec<String>, step: F)
-where
+async fn sweep<F, Fut>(
+    ctx: &Arc<RouterCtx>,
+    ordinal: &str,
+    cause: Cause,
+    refs: Vec<String>,
+    step: F,
+) where
     F: Fn(Arc<RouterCtx>, String) -> Fut,
     Fut: Future<Output = Swept> + Send + 'static,
 {
@@ -108,6 +139,7 @@ where
     tracing::info!(
         node = observe::node(),
         peer = ordinal,
+        ?cause,
         scanned,
         taken,
         settled,
@@ -118,15 +150,18 @@ where
 }
 
 /// Discharge `call_ref` when its body is ended, or ending with nothing left to
-/// serve, else take it over when it names an INVITE transaction to serve
-/// ([`has_invite_to_serve`]), or is ending with work left ([`ending_work`]).
-/// The body is read once without the lock to leave a
-/// quiet call untouched; a call already live here is left as it is.
-async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str) -> Swept {
+/// serve, and the peer departed; else take it over when it names an INVITE
+/// transaction to serve ([`has_invite_to_serve`]), or is ending with work left
+/// ([`ending_work`]). The body is read once without the lock to leave a quiet
+/// call untouched; a call already live here is left as it is.
+async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Swept {
     let Ok((copy, _skew)) = ctx.state.peek_replica(call_ref).await else { return Swept::Left };
     let call = copy.call;
     if finished(&call) {
-        return discharge_finished(ctx, call_ref).await;
+        return match cause {
+            Cause::Departed => discharge_finished(ctx, call_ref).await,
+            Cause::ReadDead => Swept::Left,
+        };
     }
     let ending = call.state == CallModelState::Terminating;
     if !has_invite_to_serve(&call) && !(ending && ending_work(&call)) {
