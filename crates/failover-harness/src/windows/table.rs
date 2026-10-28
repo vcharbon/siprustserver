@@ -261,13 +261,7 @@ pub static TABLE: &[Row] = &[
                  primary began was not applied",
         kind: Kind::Outcome(outcome::teardown_lost),
         closes_when_over: false,
-        witness: witness(
-            "refer-x-bye",
-            SyncLevel::Off,
-            PrimaryKilledUnannounced,
-            7,
-            TurnPoint::Logged,
-        ),
+        witness: None,
     },
     Row {
         id: "W-kill-effects-lost",
@@ -395,6 +389,7 @@ mod tests {
         "W-cdr-split",
         "W-kill-cancel-answered",
         "W-kill-non-2xx-after-2xx",
+        "W-kill-teardown-lost",
         "W-off-answer-lost",
         "W-split-early-bye",
         "W-stall-cancel-reason",
