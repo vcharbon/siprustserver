@@ -24,6 +24,22 @@ pub(crate) fn answered(
     })
 }
 
+/// `role` received `n` finals to its `method` requests, whatever their status:
+/// a 481 or 408 has ended the dialog by then (RFC 3261 §12.2.1.2), and any
+/// other final leaves it to what follows.
+pub(super) fn finalled(
+    name: &'static str,
+    role: &'static str,
+    method: &'static str,
+    n: u32,
+) -> Barrier {
+    Barrier::pred(name, move |s| {
+        let fin =
+            |f: &&scenario_harness::actor::ResponseFact| f.status >= 200 && f.cseq_method == method;
+        s.leg(role).responses().iter().filter(fin).count() >= n as usize
+    })
+}
+
 /// `alice` + `winner` both confirmed — the `established` gate/phase, with the
 /// winning callee role captured (bob, or bob2 after a reroute).
 pub(crate) fn established_pred(

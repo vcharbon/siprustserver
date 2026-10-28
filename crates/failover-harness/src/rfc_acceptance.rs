@@ -172,7 +172,7 @@ impl RfcAcceptance {
         })
     }
 
-    /// Run the cross-message audit over `events` (already the audit-visible,
+    /// Run the cross-message audit over `events` (already the cross-audit
     /// endpoint-scoped view, the binds of `scoped_out` taken out of it) and
     /// split its non-advisory findings into `(gating, accepted)`: a finding is
     /// accepted, by the row of the first window taking it, when its OFFENDING

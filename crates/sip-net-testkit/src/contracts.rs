@@ -167,23 +167,7 @@ impl SignalingNetworkEvent {
     }
 }
 
-/// Whether the RFC audit sees this event. `RecvConsumed` is a projection-only
-/// consumption marker; a `RecvItem` is included per its disposition's
-/// [`RecvDisposition::audit_visible`] (modeled loss / infra-absorbed duplicates
-/// are deliberately invisible to the rules). EVERY rule invocation — the
-/// per-bind Drop pass, the layer-close cross pass, and any external harness
-/// running `rfc_*_rules` over a channel snapshot — must filter through this, so
-/// the rules keep one view of the wire.
-pub fn audit_visible_event(event: &SignalingNetworkEvent) -> bool {
-    match event {
-        SignalingNetworkEvent::RecvConsumed { .. } => false,
-        // A re-emit is a byte-identical retransmission — projection-only, so the
-        // rules keep one un-duplicated view of the wire.
-        SignalingNetworkEvent::ReEmit { .. } => false,
-        SignalingNetworkEvent::RecvItem { disposition, .. } => disposition.audit_visible(),
-        _ => true,
-    }
-}
+pub use crate::audit_view::{audit_visible_event, cross_audit_event};
 
 /// The audit anomaly kinds this layer owns; the layer-close failure decision
 /// fails on any of these whose severity is non-advisory.
@@ -382,15 +366,15 @@ impl RecordingSignalingNetwork {
             }
         }
 
-        // Cross-message rules — one pass over the whole channel (audit view:
-        // consumption markers + modeled-loss arrivals filtered out).
+        // Cross-message rules — one pass over the whole channel (consumption
+        // markers out; modeled-loss arrivals in as evidence only).
         if !self.0.cross_rules.is_empty() {
             let snapshot: Vec<Stamped<SignalingNetworkEvent>> = self
                 .0
                 .channel
                 .snapshot()
                 .into_iter()
-                .filter(|s| audit_visible_event(&s.event))
+                .filter(|s| cross_audit_event(&s.event))
                 .collect();
             let bind_roles = self.0.bind_roles.lock().unwrap().clone();
             for rule in self.0.cross_rules.iter() {

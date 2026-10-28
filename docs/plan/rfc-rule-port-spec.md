@@ -73,7 +73,11 @@ A `Finding` names the charged `emitter`, the `taker`, whether the emission was
   non-`relayed` findings at the vantage a rule's `Live` row names — the emitter,
   the taker (the bind whose PEER is judged), either end (a two-party
   negotiation), or the taker else the emitter (an omission the taker is owed) —
-  with its skipped lanes, roles, severity and detail line. A family's rows sit in
+  with its skipped lanes, roles, severity and detail line. An emitter that is no
+  recorded bind is judged at the taker, except on an emitter-only row (an
+  ordering of what it took and sent, which the taker's clock cannot show) and,
+  on an emitter-unless-lost row (a message it never sent), where the taker
+  recorded the loss model dropping its datagrams on that call. A family's rows sit in
   `wire_adapter/<family>.rs`, and every rule has one.
   Lane classification comes from `rfc_audit::relay_lanes`; per-message reads
   from `rfc_audit::msg_reads`.

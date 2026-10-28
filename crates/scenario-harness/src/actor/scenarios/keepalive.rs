@@ -10,15 +10,14 @@ use crate::actor::{phase, ActorSpec, SettleBarrier};
 use crate::realcall::{CallEnv, ScenarioId};
 use crate::{StepError, ANSWER_SDP, OFFER_SDP};
 
-/// Both legs established and the caller's OPTIONS ping answered 2xx: the
-/// `long_call` hold starts there, so its BYE never overtakes a ping her Timer E
-/// is still resending (RFC 3261 §17.1.2.2).
+/// Both legs established and the caller's OPTIONS ping answered with a final:
+/// the `long_call` hold starts there, so its BYE never overtakes a ping her
+/// Timer E is still resending (RFC 3261 §17.1.2.2). A 481 or 408 has ended the
+/// dialog by then (§12.2.1.2); any other final leaves it to the BYE.
 fn pinged(s: &StateInner) -> bool {
     established(s)
         && s.leg_ref("alice").is_some_and(|l| {
-            l.responses()
-                .iter()
-                .any(|f| (200..300).contains(&f.status) && f.cseq_method == "OPTIONS")
+            l.responses().iter().any(|f| f.status >= 200 && f.cseq_method == "OPTIONS")
         })
 }
 

@@ -22,6 +22,7 @@
 //! Every rule has a row: `every_merged_rule_has_a_live_adapter` names one
 //! without.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use layer_harness::{LaneKey, Stamped};
@@ -29,8 +30,9 @@ use layer_harness::{LaneKey, Stamped};
 use rfc_rules::rules::Obligation;
 use rfc_rules::{Decision, RuleId, WireView};
 
-use crate::contracts::{CrossMessageAuditRule, SignalingNetworkEvent};
+use crate::contracts::{audit_visible_event, CrossMessageAuditRule, SignalingNetworkEvent};
 use crate::report::wire_positions_by_stamp;
+use crate::rfc_audit::dropped::Dropped;
 use crate::rfc_audit::recorded::Recorded;
 use crate::rfc_audit::relay_lanes::relay_lanes;
 use crate::types::UaRole;
@@ -62,7 +64,7 @@ use view::{bind_views, observation};
 fn at_vantage(
     events: &[Stamped<SignalingNetworkEvent>],
     rule: &dyn Obligation,
-    vantage: impl Fn(&rfc_rules::Finding, &LaneKey) -> bool,
+    vantage: impl Fn(&rfc_rules::Finding, &LaneKey, &str) -> bool,
     detail: impl Fn(&rfc_rules::Finding, &str) -> String,
 ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
     let positions = wire_positions_by_stamp(events);
@@ -70,14 +72,14 @@ fn at_vantage(
     for view in bind_views(events) {
         let obs = observation(&view.msgs);
         for f in rule.eval(&WireView { msgs: &view.msgs, obs: &obs }) {
-            if f.relayed || !vantage(&f, &view.bind) {
+            let (seq, cid) = &view.meta[f.anchor];
+            if f.relayed || !vantage(&f, &view.bind, cid) {
                 continue;
             }
             crate::rfc_audit::occasions::note(&view.bind, &f);
             if !f.violated() {
                 continue;
             }
-            let (seq, cid) = &view.meta[f.anchor];
             // The charged party is the rule's own `emitter` — the bind that
             // emitted the offending message or owed the missing one — whatever
             // vantage this finding is reported at.
@@ -104,11 +106,15 @@ enum Vantage {
     /// A row scoped to proxies alone judges how a proxy handles what it took,
     /// which no taker shows of a party it cannot tell is one: it never falls back.
     Emitter,
+    /// As [`Emitter`](Self::Emitter), for a verdict that rests on a message
+    /// the emitter never sent: the taker's audit view holds none the loss model
+    /// dropped, so an emitter that is no recorded bind is not judged at a taker
+    /// that recorded such a drop from it on the call.
+    EmitterUnlessLost,
     /// The emitter's own lane and no other: a verdict that orders what the
-    /// emitter sent after what it took, or rests on a message it never sent. A
-    /// taker's lane times its own sends at sending and the emitter's at arrival,
-    /// and holds none the loss model dropped, so it shows neither: an emitter
-    /// that is no recorded bind is not judged.
+    /// emitter sent after what it took. A taker's lane times its own sends at
+    /// sending and the emitter's at arrival, so it cannot order them: an
+    /// emitter that is no recorded bind is not judged.
     EmitterOnly,
     /// The taker's lane: a rule that audits what a bind's PEER sent it. The
     /// recording is the only place that stream is checked, so it is reported on
@@ -173,6 +179,10 @@ type Detail = fn(&rfc_rules::Finding, &str) -> String;
 impl Live {
     const fn emitter(id: RuleId, detail: Detail) -> Live {
         Live::at(Vantage::Emitter, id, detail)
+    }
+
+    const fn emitter_unless_lost(id: RuleId, detail: Detail) -> Live {
+        Live::at(Vantage::EmitterUnlessLost, id, detail)
     }
 
     const fn emitter_only(id: RuleId, detail: Detail) -> Live {
@@ -272,12 +282,25 @@ impl CrossMessageAuditRule for Live {
 }
 
 impl Live {
-    /// The row's findings over `events`, the binds of `scoped_out` taken out of it.
+    /// The row's findings over `events`, the binds of `scoped_out` taken out of
+    /// it. The rules judge the audit-visible events; the arrivals the loss model
+    /// dropped only tell [`Vantage::EmitterUnlessLost`] where a sender's
+    /// traffic is incomplete.
     fn found(
         &self,
         events: &[Stamped<SignalingNetworkEvent>],
         scoped_out: &HashSet<LaneKey>,
     ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+        let visible: Cow<'_, [Stamped<SignalingNetworkEvent>]> = if events
+            .iter()
+            .all(|s| audit_visible_event(&s.event))
+        {
+            Cow::Borrowed(events)
+        } else {
+            Cow::Owned(events.iter().filter(|s| audit_visible_event(&s.event)).cloned().collect())
+        };
+        let all = events;
+        let events = &*visible;
         let body = self.id.rule().body;
         let admits = self.admits;
         let found = match self.vantage {
@@ -287,7 +310,7 @@ impl Live {
                 at_vantage(
                     events,
                     body,
-                    |f, b| {
+                    |f, b, _| {
                         let own = !falls_back || recorded.holds(&f.emitter);
                         let at = if own { &f.emitter } else { &f.taker };
                         at == b && admits(f)
@@ -295,16 +318,31 @@ impl Live {
                     self.detail,
                 )
             }
+            Vantage::EmitterUnlessLost => {
+                let recorded = Recorded::of(events, scoped_out);
+                let dropped = Dropped::of(all);
+                at_vantage(
+                    events,
+                    body,
+                    |f, b, cid| {
+                        if recorded.holds(&f.emitter) {
+                            return f.emitter == *b && admits(f);
+                        }
+                        f.taker == *b && admits(f) && !dropped.holds(b, &f.emitter, cid)
+                    },
+                    self.detail,
+                )
+            }
             Vantage::EmitterOnly => {
-                at_vantage(events, body, |f, b| f.emitter == *b && admits(f), self.detail)
+                at_vantage(events, body, |f, b, _| f.emitter == *b && admits(f), self.detail)
             }
             Vantage::Taker => {
-                at_vantage(events, body, |f, b| f.taker == *b && admits(f), self.detail)
+                at_vantage(events, body, |f, b, _| f.taker == *b && admits(f), self.detail)
             }
             Vantage::EitherEnd => at_vantage(
                 events,
                 body,
-                |f, b| (f.emitter == *b || f.taker == *b) && admits(f),
+                |f, b, _| (f.emitter == *b || f.taker == *b) && admits(f),
                 self.detail,
             ),
             Vantage::TakerElseEmitter => {
@@ -313,7 +351,7 @@ impl Live {
                 at_vantage(
                     events,
                     body,
-                    |f, b| {
+                    |f, b, _| {
                         let at = if recorded.holds(&f.taker) { &f.taker } else { &f.emitter };
                         at == b && admits(f)
                     },

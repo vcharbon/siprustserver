@@ -10,6 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua_harness::{B2buaScene, B2buaSut};
+use scenario_harness::actor::{
+    ActorCall, ActorScenario, GoalStep, Observation, ObservedState, ResponseFact,
+};
 use scenario_harness::realcall::{run_actor_asserting, CallEnv};
 use scenario_harness::Harness;
 use sip_net::{Arrival, PreIngressAction};
@@ -55,4 +58,44 @@ async fn a_lost_relayed_ping_is_answered_before_the_bye() {
 
     let report = scene.finish().await;
     assert!(report.passed(), "the RFC audit failed");
+}
+
+/// Whether the caller's BYE goal of `call` opens once both legs are confirmed
+/// and her OPTIONS ping drew `status` (`None`: no answer yet).
+fn bye_opens(call: &ActorCall, status: Option<u16>) -> bool {
+    let obs = ObservedState::new();
+    let now = tokio::time::Instant::now();
+    obs.record(Observation::LegConfirmed { leg: "alice" }, now);
+    obs.record(Observation::LegConfirmed { leg: "bob" }, now);
+    if let Some(status) = status {
+        let fact = ResponseFact {
+            status,
+            reason: String::new(),
+            cseq_method: "OPTIONS".to_string(),
+            body_len: 0,
+            body_is_sdp: false,
+            early_tag: None,
+            typed: None,
+        };
+        obs.record(Observation::LegResponse { leg: "alice", fact }, now);
+    }
+    let alice = call.actors.iter().find(|a| a.role == "alice").expect("alice");
+    let bye = alice.goals.iter().find(|g| matches!(g.step, GoalStep::Bye)).expect("her BYE");
+    obs.with_snapshot(|s| bye.guard.holds(s))
+}
+
+/// Any final to the ping opens the shape's hold: a 405 leaves the dialog to
+/// the BYE, where waiting for a 2xx would hold the call to the step timeout.
+#[tokio::test(start_paused = true)]
+async fn any_final_to_the_ping_starts_the_hold() {
+    let h = Harness::new("long-call-ping-final");
+    let alice = h.agent_auto("alice").await;
+    let bob = h.agent_auto("bob").await;
+    let env = CallEnv::for_functional(&alice, &bob, None, bob.addr(), "X-Loadgen-Id", "t");
+    let shape = callshapes::shapes::long_call(callshapes::shapes::default_binder());
+    let call = shape.build(&env).expect("built");
+    assert!(!bye_opens(&call, None), "the hold waits for the ping's final");
+    assert!(bye_opens(&call, Some(200)));
+    assert!(bye_opens(&call, Some(405)), "a non-2xx final opens the hold too");
+    h.finish().await;
 }

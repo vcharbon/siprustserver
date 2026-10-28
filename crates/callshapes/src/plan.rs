@@ -33,7 +33,7 @@ use crate::binder::{RouteBinder, RouteIntent};
 mod barriers;
 
 pub(crate) use barriers::{answered, established_pred};
-use barriers::{declined, merged, renegs_reached};
+use barriers::{declined, finalled, merged, renegs_reached};
 
 /// How the call is established — the first pipeline stage, which mints the
 /// initial dialog (or a terminal outcome for the deliberately-failing shapes).
@@ -185,7 +185,7 @@ pub enum Script {
     /// `validate()` rejects it on any other establishment. Gate unchanged (the
     /// call still confirms via the establishment's `established` gate).
     UpdateEarly,
-    /// ONE in-dialog OPTIONS keepalive ping, whose 200 the reactor observes.
+    /// ONE in-dialog OPTIONS keepalive ping, whose final the reactor observes.
     /// Replaces the gate with `pinged`, so what follows never overtakes a ping
     /// still being resent (RFC 3261 §17.1.2.2).
     KeepaliveOnce,
@@ -193,8 +193,8 @@ pub enum Script {
     /// elapses (both env knobs). Gate unchanged; the goal cursor advances only
     /// after the hold, so a following teardown is naturally held back.
     KeepaliveLoop,
-    /// ONE in-dialog OPTIONS whose 200 the reactor observes. Replaces the gate
-    /// with `pinged`.
+    /// ONE in-dialog OPTIONS whose final the reactor observes. Replaces the
+    /// gate with `pinged`.
     Ping,
 }
 
@@ -1014,7 +1014,7 @@ impl ShapePlan {
                     b.caller_feed.on_options_ok =
                         Feed::new(Some("time_to_options_200"), Some("keepalive_ack"));
                 }
-                b.gate = answered("pinged", role, "OPTIONS", b.add_ping(role));
+                b.gate = finalled("pinged", role, "OPTIONS", b.add_ping(role));
             }
             Script::KeepaliveLoop => {
                 let step =
@@ -1035,7 +1035,7 @@ impl ShapePlan {
                 };
                 let goal = Goal::new(b.gate.clone(), step).after(env.reinvite_gap);
                 b.goals_mut(role).push(goal);
-                b.gate = answered("pinged", role, "OPTIONS", b.add_ping(role));
+                b.gate = finalled("pinged", role, "OPTIONS", b.add_ping(role));
             }
         }
     }

@@ -16,6 +16,7 @@
 //! The crate declares no purity tier (ADR-0051 §1): a production binary that
 //! links it fails the closure check.
 
+mod audit_view;
 pub mod contracts;
 pub mod loss;
 pub mod repeat;
@@ -27,9 +28,10 @@ pub mod simulated;
 use sip_net::{net, pre_ingress, queue, types};
 
 pub use contracts::{
-    audit_visible_event, with_all_contracts, CrossMessageAuditRule, ParanoidSignalingNetwork,
-    PeerAuditRule, RecordingSignalingNetwork, ScopedAuditOptions, SendOutcome,
-    SignalingAuditViolation, SignalingNetworkEvent, WireStamp, WrappedNetwork, SIGNALING_TAG,
+    audit_visible_event, cross_audit_event, with_all_contracts, CrossMessageAuditRule,
+    ParanoidSignalingNetwork, PeerAuditRule, RecordingSignalingNetwork, ScopedAuditOptions,
+    SendOutcome, SignalingAuditViolation, SignalingNetworkEvent, WireStamp, WrappedNetwork,
+    SIGNALING_TAG,
 };
 pub use loss::RandomLoss;
 pub use report::{to_sip_entries, wire_positions_by_stamp, RecordedSipEntry, RecvNote};

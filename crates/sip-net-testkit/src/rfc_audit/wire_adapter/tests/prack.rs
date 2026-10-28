@@ -159,6 +159,39 @@ fn a_reliable_provisional_the_uac_never_pracked_is_flagged() {
     assert!(live(RuleId::UnackedReliableProvisional).check(&unwitnessed).is_empty());
 }
 
+/// RFC 3262 §4 at the UAS lane, the UAC no recorded bind: a PRACK the loss
+/// model dropped was still sent, so it is not charged there; a PRACK never
+/// sent on a lossless call is.
+#[test]
+fn a_prack_the_loss_model_dropped_is_not_charged_to_its_unrecorded_sender() {
+    use crate::types::RecvDisposition::{Delivered, LossModel};
+    let call = |prack: Option<crate::types::RecvDisposition>| {
+        let invite = invite_3262("z9hG4bK-i", "Supported: 100rel\r\n", None, false);
+        let mut evs = vec![
+            arrival(BOB, invite, ALICE, 0, Delivered, None),
+            sent(BOB, inv_resp_3262(183, "z9hG4bK-i", &reliable_rows(1), false), ALICE, 1),
+        ];
+        if let Some(disposition) = prack {
+            let raw = prack_3262("z9hG4bK-p", "1 1 INVITE", false);
+            evs.push(arrival(BOB, raw, ALICE, 2, disposition, None));
+        }
+        evs.extend([
+            sent(BOB, inv_resp_3262(200, "z9hG4bK-i", "", false), ALICE, 3),
+            arrival(BOB, req("ACK", "z9hG4bK-a", 1, Some("bt")), ALICE, 4, Delivered, None),
+            arrival(BOB, req("BYE", "z9hG4bK-b", 3, Some("bt")), ALICE, 5, Delivered, None),
+            sent(BOB, resp(200, 3, "BYE", "bt", "z9hG4bK-b"), ALICE, 6),
+        ]);
+        evaluate_rfc_findings(&evs)
+            .into_iter()
+            .filter(|f| f.rule == RuleId::UnackedReliableProvisional.token())
+            .collect::<Vec<_>>()
+    };
+    assert!(call(Some(LossModel)).is_empty(), "{:?}", call(Some(LossModel)));
+    let never = call(None);
+    assert_eq!(never.len(), 1, "{never:?}");
+    assert_eq!((never[0].lane.as_str(), never[0].charged.as_deref()), (BOB, Some(ALICE)));
+}
+
 /// RFC 3262 §4 live: a reliable 180 the SUT takes after its own CANCEL,
 /// the 487 two seconds later, is owed its PRACK — the CANCEL ends nothing.
 #[test]

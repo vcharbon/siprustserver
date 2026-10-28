@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use layer_harness::Stamped;
-use sip_net_testkit::{audit_visible_event, CaptureIndex, SignalingNetworkEvent};
+use sip_net_testkit::{cross_audit_event, CaptureIndex, SignalingNetworkEvent};
 
 use super::FailoverHarness;
 use crate::rfc_acceptance::{lane_details, Accepted, Finding};
@@ -128,7 +128,7 @@ impl FailoverHarness {
         let snapshot = self.harness.recording().channel().snapshot();
         let events = snapshot
             .into_iter()
-            .filter(|s| !worker_binds.contains(s.event.bind_key()) && audit_visible_event(&s.event))
+            .filter(|s| !worker_binds.contains(s.event.bind_key()) && cross_audit_event(&s.event))
             .collect();
         (events, worker_binds)
     }

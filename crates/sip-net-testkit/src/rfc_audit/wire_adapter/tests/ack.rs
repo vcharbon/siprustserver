@@ -148,3 +148,26 @@ fn an_ack_the_loss_model_dropped_is_not_charged_to_its_unrecorded_sender() {
         .collect();
     assert!(charged.is_empty(), "{charged:?}");
 }
+
+/// Without loss, the taker's lane holds every datagram its unrecorded peer
+/// sent it, so a missing ACK (RFC 3261 §13.2.2.4) and the re-INVITE that
+/// overtook it (§14.1) are charged to that peer there.
+#[test]
+fn a_missing_ack_on_a_lossless_call_is_charged_to_its_unrecorded_sender() {
+    let evs = vec![
+        recv(BOB, req("INVITE", "z9hG4bK-i", 1, None), ALICE, 0),
+        sent(BOB, resp(200, 1, "INVITE", "bt", "z9hG4bK-i"), ALICE, 1),
+        recv(BOB, req("INVITE", "z9hG4bK-r", 2, Some("bt")), ALICE, 3),
+        sent(BOB, resp(200, 2, "INVITE", "bt", "z9hG4bK-r"), ALICE, 4),
+        recv(BOB, req("ACK", "z9hG4bK-a2", 2, Some("bt")), ALICE, 5),
+        recv(BOB, req("BYE", "z9hG4bK-b", 3, Some("bt")), ALICE, 6),
+        sent(BOB, resp(200, 3, "BYE", "bt", "z9hG4bK-b"), ALICE, 7),
+    ];
+    let findings = evaluate_rfc_findings(&evs);
+    for rule in [RuleId::NoAckToDialogCreating2xx, RuleId::NoReInviteWhileInviteInProgress] {
+        let charged: Vec<&RfcFinding> =
+            findings.iter().filter(|f| f.rule == rule.token()).collect();
+        assert_eq!(charged.len(), 1, "{rule}: {findings:?}");
+        assert_eq!((charged[0].lane.as_str(), charged[0].charged.as_deref()), (BOB, Some(ALICE)));
+    }
+}

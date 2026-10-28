@@ -66,6 +66,9 @@ mod occasions;
 // The parties the recording holds a lane for.
 mod recorded;
 
+// The datagrams the loss model dropped before their taker.
+mod dropped;
+
 /// A list of cross-message rules, shared: the rules are stateless, so one list
 /// serves every recorded network that audits with it.
 pub type CrossMessageRules = Arc<[Arc<dyn CrossMessageAuditRule>]>;
@@ -180,15 +183,12 @@ pub struct RfcAudit {
 
 /// [`evaluate_rfc_findings`] with the rule population of the same pass.
 pub fn evaluate_rfc_audit(events: &[Stamped<SignalingNetworkEvent>]) -> RfcAudit {
-    // Audit view: consumption markers and modeled-loss /
-    // infra-absorbed arrivals are projection-only — filtered here so EVERY
-    // caller (harness hard gate, e2e collector, report projection) hands the
-    // rules the same view of the wire.
-    let events: Vec<Stamped<SignalingNetworkEvent>> = events
-        .iter()
-        .filter(|s| crate::contracts::audit_visible_event(&s.event))
-        .cloned()
-        .collect();
+    // Audit view: consumption markers and infra-absorbed arrivals are
+    // projection-only, filtered here so EVERY caller (harness hard gate, e2e
+    // collector, report projection) hands the rules the same view of the wire;
+    // modeled-loss arrivals stay as evidence the rules never judge.
+    let events: Vec<Stamped<SignalingNetworkEvent>> =
+        events.iter().filter(|s| crate::contracts::cross_audit_event(&s.event)).cloned().collect();
     let events = events.as_slice();
     let roles = bind_roles_of(events);
     let roles_of = |party: &str| -> HashSet<UaRole> {

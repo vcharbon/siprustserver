@@ -75,3 +75,42 @@ async fn the_bye_waits_for_the_answer_to_a_lost_ping() {
     );
     h.finish().await;
 }
+
+/// Whether the caller's BYE goal of `call` opens once both legs are confirmed
+/// and her OPTIONS ping drew `status` (`None`: no answer yet).
+fn bye_opens(call: &ActorCall, status: Option<u16>) -> bool {
+    let obs = ObservedState::new();
+    let now = tokio::time::Instant::now();
+    obs.record(Observation::LegConfirmed { leg: "alice" }, now);
+    obs.record(Observation::LegConfirmed { leg: "bob" }, now);
+    if let Some(status) = status {
+        let fact = ResponseFact {
+            status,
+            reason: String::new(),
+            cseq_method: "OPTIONS".to_string(),
+            body_len: 0,
+            body_is_sdp: false,
+            early_tag: None,
+            typed: None,
+        };
+        obs.record(Observation::LegResponse { leg: "alice", fact }, now);
+    }
+    let alice = call.actors.iter().find(|a| a.role == "alice").expect("alice");
+    let bye = alice.goals.iter().find(|g| matches!(g.step, GoalStep::Bye)).expect("her BYE");
+    obs.with_snapshot(|s| bye.guard.holds(s))
+}
+
+/// Any final to the ping opens the hold: a 405 leaves the dialog to the BYE,
+/// where waiting for a 2xx would hold the call to the step timeout.
+#[tokio::test(start_paused = true)]
+async fn any_final_to_the_ping_starts_the_hold() {
+    let h = Harness::new("actor-long-call-ping-final");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let env = CallEnv::for_functional(&alice, &bob, None, bob.addr(), "X-Corr", "t");
+    let call = LongCall.build(&env).expect("built");
+    assert!(!bye_opens(&call, None), "the hold waits for the ping's final");
+    assert!(bye_opens(&call, Some(200)));
+    assert!(bye_opens(&call, Some(405)), "a non-2xx final opens the hold too");
+    h.finish().await;
+}

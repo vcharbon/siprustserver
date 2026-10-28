@@ -5,15 +5,15 @@ use super::*;
 pub(super) const LIVE: &[Live] = &[
     // No relay skip: a face passing two racing re-INVITEs on is the UAS of two server transactions
     // it never serialised.
-    Live::emitter_only(RuleId::ConcurrentReInvite500Or491, concurrent_re_invite_500_or_491),
+    Live::emitter(RuleId::ConcurrentReInvite500Or491, concurrent_re_invite_500_or_491),
     // No relay skip: the ordered dialog key spares a lane relaying both parties' crossing re-
     // INVITEs (glare).
-    Live::emitter_only(
+    Live::emitter_unless_lost(
         RuleId::NoReInviteWhileInviteInProgress,
         no_re_invite_while_invite_in_progress,
     ),
     // No relay skip: a relaying lane opens its own client transaction on its own branch.
-    Live::emitter_only(RuleId::FailedReinviteTearsDownDialog, failed_reinvite_tears_down_dialog),
+    Live::emitter(RuleId::FailedReinviteTearsDownDialog, failed_reinvite_tears_down_dialog),
 ];
 
 fn concurrent_re_invite_500_or_491(f: &rfc_rules::Finding, cid: &str) -> String {
