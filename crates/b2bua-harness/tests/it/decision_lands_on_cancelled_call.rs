@@ -158,7 +158,7 @@ fn assert_cancel_rows_at_the_wire_instant(call: &Call) {
 /// recorded, never applied — bob is never dialed, alice hears nothing after
 /// her 487, and the queued `handle-cancel` terminates the call at once.
 #[tokio::test(start_paused = true)]
-async fn route_decision_landing_after_the_callers_cancel_is_dropped() {
+async fn route_decision_landing_after_the_callers_cancel_is_recorded_not_applied() {
     let h = Harness::new("route-lands-on-cancelled-call");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -213,7 +213,7 @@ async fn route_decision_landing_after_the_callers_cancel_is_dropped() {
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
-    // The CDR records the CANCEL and no trace of the dropped route.
+    // The CDR records the CANCEL and the route, never dialled.
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "exactly one CDR");
@@ -244,9 +244,10 @@ async fn route_decision_landing_after_the_callers_cancel_is_dropped() {
 }
 
 /// Terminal-REJECT variant: the delayed 484 lands on the CANCELed call and is
-/// dropped — the completed a-leg transaction never carries a second final.
+/// recorded, never applied — the completed a-leg transaction never carries a
+/// second final.
 #[tokio::test(start_paused = true)]
-async fn reject_decision_landing_after_the_callers_cancel_is_dropped() {
+async fn reject_decision_landing_after_the_callers_cancel_is_recorded_not_applied() {
     let h = Harness::new("reject-lands-on-cancelled-call");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -317,6 +318,75 @@ async fn reject_decision_landing_after_the_callers_cancel_is_dropped() {
         "the a-leg INVITE transaction carries exactly one final: the 487",
     );
     assert_eq!(distinct_invite_call_ids(&report, bob.addr()), 0, "bob was never dialed");
+}
+
+/// A decision engine that answers no decision: unavailable after `delay`.
+struct UnavailableAfter {
+    delay: Duration,
+}
+
+#[async_trait]
+impl CallDecisionEngine for UnavailableAfter {
+    async fn new_call(&self, _req: NewCallRequest) -> Result<NewCallResponse, CallDecisionError> {
+        tokio::time::sleep(self.delay).await;
+        Err(CallDecisionError::Unavailable("backend down".into()))
+    }
+    async fn call_failure(
+        &self,
+        _req: CallFailureRequest,
+    ) -> Result<CallFailureResponse, CallDecisionError> {
+        Err(CallDecisionError::Unavailable("backend down".into()))
+    }
+    async fn call_refer(
+        &self,
+        _req: CallReferRequest,
+    ) -> Result<CallReferResponse, CallDecisionError> {
+        Err(CallDecisionError::Unavailable("backend down".into()))
+    }
+}
+
+/// A consult that answers no decision after the caller's CANCEL records
+/// nothing: no decision mark, no slice, no callback context, and the 503 the
+/// failure would author never reaches the caller.
+#[tokio::test(start_paused = true)]
+async fn a_consult_answering_no_decision_after_the_callers_cancel_records_nothing() {
+    let h = Harness::new("no-decision-lands-on-cancelled-call");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let decision = Arc::new(UnavailableAfter { delay: DECISION_DELAY });
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| c.cdr = CdrConfig { message_ring: 32, captured_headers: Vec::new() })
+        .keep_terminated_calls()
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    h.advance(Duration::from_millis(200)).await;
+    let mut cxl = call.cancel().await;
+    cxl.expect(200).await;
+    call.expect(487).await;
+
+    h.advance(Duration::from_secs(2)).await;
+    assert!(
+        alice.try_receive_tolerating("CANCEL", &[]).await.is_none(),
+        "nothing may reach the caller after the 487",
+    );
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+
+    let call = the_terminated_call(&b2bua);
+    assert!(call.decision_log.is_empty(), "no decision: {:?}", call.decision_log);
+    assert_eq!(call.decision_ordinal, 0);
+    assert_eq!(call.callback_context, None);
+    assert!(call.ext.as_ref().is_none_or(|ext| ext.is_empty()), "no slice: {:?}", call.ext);
+    assert!(call.b_legs.is_empty(), "no b-leg");
+
+    let report = h.finish().await;
+    assert_eq!(
+        invite_final_statuses(&report, alice.addr()),
+        vec![487],
+        "the a-leg INVITE transaction carries exactly one final: the 487",
+    );
 }
 
 /// Limiter variant: `apply_route` admits the route's `call_limiter` set

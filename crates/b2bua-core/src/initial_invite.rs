@@ -160,6 +160,7 @@ pub fn build_initial_call(
         message_seq: 0,
         decision_log: Vec::new(),
         decision_ordinal: 0,
+        setup_cancelled: false,
         termination: None,
         message_turn: 1,
         sm_cursors: std::collections::BTreeMap::new(),

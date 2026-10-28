@@ -65,6 +65,7 @@ pub fn same_state(a: &Call, b: &Call) -> bool {
         message_seq: _,
         decision_log,
         decision_ordinal,
+        setup_cancelled,
         termination,
         message_turn: _,
         sm_cursors,
@@ -102,6 +103,7 @@ pub fn same_state(a: &Call, b: &Call) -> bool {
         && all_pairs(provisionals, &b.provisionals, same_provisional)
         && *decision_log == b.decision_log
         && *decision_ordinal == b.decision_ordinal
+        && *setup_cancelled == b.setup_cancelled
         && *termination == b.termination
         && *sm_cursors == b.sm_cursors
         && *tag_seed == b.tag_seed

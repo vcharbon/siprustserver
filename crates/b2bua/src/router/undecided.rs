@@ -6,7 +6,10 @@
 //! INVITE server transaction the materialisation rebuilt, with no Retry-After:
 //! the caller takes it as a 500 (RFC 3261 §21.5.4), whether to retry its own
 //! or its upstream's call. The decision is never asked again, so nothing it
-//! causes happens twice (ADR-0047).
+//! causes happens twice (ADR-0047). A call whose caller CANCELed the setup
+//! during its consult ([`Call::setup_cancelled`]) holds a decision never
+//! applied and a caller already answered 487: it ends under the caller's
+//! cancel with nothing on the wire.
 
 use std::sync::Arc;
 
@@ -22,7 +25,7 @@ use crate::rules::invariants::{enforce, finalize, UnansweredCaller};
 pub(super) fn is_undecided(call: &Call) -> bool {
     call.state == CallModelState::Active
         && call.a_leg.invite_final_sent().is_none()
-        && call.decision_ordinal == 0
+        && (call.decision_ordinal == 0 || call.setup_cancelled)
         && call.attempts.is_empty()
         && call.b_legs.is_empty()
 }
@@ -46,8 +49,9 @@ pub(super) async fn settle_undecided(
     let mut turn = turn.with_faults(ctx.wire_faults.snapshot());
     let before = call.clone();
     let advertisement = &ctx.config.minted_final_advertisement;
+    let answer = seeded > 0 && !call.setup_cancelled;
     let caller =
-        (seeded > 0).then(|| crate::rules::relay::caller_invite(&call, &mut turn.notes)).flatten();
+        answer.then(|| crate::rules::relay::caller_invite(&call, &mut turn.notes)).flatten();
     let (handled, unanswered) = if let Some(a_invite) = caller.as_ref() {
         let refused = crate::initial_invite::reject_call(
             call,
@@ -63,8 +67,12 @@ pub(super) async fn settle_undecided(
         );
         (refused, UnansweredCaller::Answer(advertisement))
     } else {
-        let mut ended =
-            call::helpers::record_termination(call, now_ms, TerminationCause::Admission, None);
+        let (cause, by_leg) = if call.setup_cancelled {
+            (TerminationCause::RemoteCancel, Some(call.a_leg.leg_id.clone()))
+        } else {
+            (TerminationCause::Admission, None)
+        };
+        let mut ended = call::helpers::record_termination(call, now_ms, cause, by_leg);
         ended.state = CallModelState::Terminated;
         (HandlerResult::new(ended), UnansweredCaller::Leave)
     };
@@ -72,7 +80,7 @@ pub(super) async fn settle_undecided(
         node = observe::node(),
         call_ref,
         call_id = %before.a_leg.call_id,
-        answered = seeded > 0,
+        answered = caller.is_some(),
         "undecided call settled"
     );
     let notes = &mut turn.notes;

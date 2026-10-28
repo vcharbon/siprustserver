@@ -32,6 +32,14 @@ fn a_call_with_an_applied_decision_is_decided() {
 }
 
 #[test]
+fn a_decision_recorded_on_a_cancelled_setup_leaves_the_call_undecided() {
+    let mut call =
+        call::helpers::mark_decision(born(), 5, DecisionKind::Route, Some("a".into()), None);
+    call.setup_cancelled = true;
+    assert!(is_undecided(&call), "the recorded decision was never applied");
+}
+
+#[test]
 fn a_call_whose_caller_was_answered_is_decided() {
     let mut call = born();
     *call.a_leg.invite_final_sent_mut() = Some(503);

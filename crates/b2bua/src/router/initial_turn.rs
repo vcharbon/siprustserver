@@ -322,8 +322,9 @@ fn dropped_on_setup_cancel(pre: &Call, handled: HandlerResult) -> HandlerResult 
 
 /// The pre-handler call carrying the decision `decided` holds, recorded and
 /// not applied: its decision log, its callback context and the call ext the
-/// decision seeded, beside what [`discarded_turn`] keeps. No b-leg, no service
-/// cursor: no service ran its `init` on it.
+/// decision seeded, beside what [`discarded_turn`] keeps, the call marked
+/// [`Call::setup_cancelled`]. No b-leg, no service cursor: no service ran its
+/// `init` on it.
 fn recorded_turn(pre: &Call, decided: Call) -> Call {
     let decision_log = decided.decision_log.clone();
     let decision_ordinal = decided.decision_ordinal;
@@ -334,6 +335,7 @@ fn recorded_turn(pre: &Call, decided: Call) -> Call {
     call.decision_ordinal = decision_ordinal;
     call.callback_context = callback_context;
     call.ext = ext;
+    call.setup_cancelled = true;
     call
 }
 

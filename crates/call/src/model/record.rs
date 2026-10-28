@@ -174,11 +174,17 @@ pub struct Call {
     pub message_seq: u32,
     /// The decisions applied to the call, in order
     /// ([`crate::helpers::mark_decision`] is the one writer); empty until the
-    /// first decision.
+    /// first decision. On a [`setup_cancelled`](Self::setup_cancelled) call,
+    /// the decisions that answered, none of them applied.
     pub decision_log: Vec<DecisionMark>,
     /// The count of applied decisions — `decision_log.len()`, kept as a field
     /// so a stamp reads it without a length; `0` before the first decision.
     pub decision_ordinal: u32,
+    /// The caller CANCELed the setup while its initial decision was in
+    /// flight: the caller holds the transaction layer's 487, and nothing the
+    /// decision stated was applied.
+    #[serde(default)]
+    pub setup_cancelled: bool,
     /// Who ended the call and why ([`crate::helpers::record_termination`] is
     /// the one writer, the first termination's record stands); `None` while
     /// the call is live.
