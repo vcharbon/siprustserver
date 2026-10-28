@@ -293,14 +293,16 @@ fn server_non_invite_seed(call: &Call, leg: &Leg, record: &RequestRecord) -> Opt
     Some(TxnSeed::ServerNonInvite { request, leg_id: Some(arrived_on) })
 }
 
-/// Whether `branch` names a server seed an INVITE can be a copy of: a relayed
-/// INVITE still pending on one of `call`'s dialogs, or an INVITE a dialog
-/// answered 2xx, the answered initial INVITE's included. The a-leg's
-/// unanswered initial INVITE is not named: on the node serving the call the
-/// layer's own transaction absorbs its retransmission below the router.
+/// Whether `branch` names a server seed an INVITE can be a copy of: the
+/// caller's unanswered initial INVITE ([`names_unanswered_caller_invite`]), a
+/// relayed INVITE still pending on one of `call`'s dialogs, or an INVITE a
+/// dialog answered 2xx, the answered initial INVITE's included.
 pub(in crate::router) fn names_server_branch(call: &Call, branch: &str) -> bool {
     if branch.is_empty() {
         return false;
+    }
+    if names_unanswered_caller_invite(call, branch) {
+        return true;
     }
     let dialogs =
         || std::iter::once(&call.a_leg).chain(&call.b_legs).flat_map(|l| l.dialogs.iter());
@@ -314,6 +316,19 @@ pub(in crate::router) fn names_server_branch(call: &Call, branch: &str) -> bool 
             .filter_map(call::helpers::answered_2xx)
             .filter_map(parse_response)
             .any(|r| r.top_via().branch() == Some(branch))
+}
+
+/// Whether `branch` names the caller's dialog-creating INVITE while it has no
+/// final: the server INVITE the seeds rebuild whole from the call's snapshot
+/// of it, so a copy of it is absorbed there.
+pub(in crate::router) fn names_unanswered_caller_invite(call: &Call, branch: &str) -> bool {
+    let a_leg = &call.a_leg;
+    if branch.is_empty() || a_leg.invite_final_sent().is_some() {
+        return false;
+    }
+    let seed = a_leg.invite.as_ref().and_then(|r| dialog_creating_seed(call, a_leg, r));
+    matches!(seed, Some(TxnSeed::ServerInvite { request, .. })
+        if request.top_via().branch() == Some(branch))
 }
 
 /// The INVITE server transaction the originator's request of the pending

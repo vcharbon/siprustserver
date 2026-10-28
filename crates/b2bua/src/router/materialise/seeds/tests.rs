@@ -251,16 +251,16 @@ fn client_branches(seeds: &[TxnSeed]) -> Vec<String> {
 
 /// A ringing call: the a-leg INVITE is seeded whole as a server INVITE under
 /// the To-tag the 180 pinned, and the b-leg INVITE once as a client INVITE,
-/// though the handle sits on the leg and on its dialog. Nothing names the
-/// a-leg branch for an in-dialog re-offer.
+/// though the handle sits on the leg and on its dialog. The a-leg branch names
+/// the caller's unanswered INVITE, so a copy of it is re-offered; the b-leg
+/// branch names no server INVITE.
 #[test]
 fn a_ringing_call_seeds_the_a_leg_server_invite_and_the_b_leg_client_invite_once() {
     let mut call = call_with(LegState::Early, b_leg(LegState::Early, Some(b_handle(B_BRANCH, 1))));
     ring_a_leg(&mut call, "svca");
-    assert!(
-        !names_server_branch(&call, A_BRANCH),
-        "the caller's INVITE is no in-dialog re-offer target"
-    );
+    assert!(names_unanswered_caller_invite(&call, A_BRANCH), "the caller's unanswered INVITE");
+    assert!(names_server_branch(&call, A_BRANCH), "a copy of the caller's INVITE is re-offered");
+    assert!(!names_unanswered_caller_invite(&call, B_BRANCH));
     assert!(!names_server_branch(&call, B_BRANCH));
     let seeds = seeds_for(&call, 0);
     assert_eq!(seeds.len(), 2, "{seeds:?}");
@@ -349,6 +349,7 @@ fn a_relayed_reinvite_in_flight_seeds_both_halves_of_the_round() {
     );
     assert!(!names_server_branch(&call, REINVITE_BRANCH), "the client half is no server seed");
     assert!(!names_server_branch(&call, A_BRANCH), "an answered a-leg names no server INVITE");
+    assert!(!names_unanswered_caller_invite(&call, A_BRANCH), "the caller's INVITE is answered");
 }
 
 /// A re-INVITE this stack originated itself (no relayed snapshot) is in

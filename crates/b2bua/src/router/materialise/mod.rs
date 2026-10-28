@@ -58,7 +58,9 @@
 
 mod received_request;
 mod seeds;
-pub(in crate::router) use seeds::{names_server_branch, relayed_server_key};
+pub(in crate::router) use seeds::{
+    names_server_branch, names_unanswered_caller_invite, relayed_server_key,
+};
 #[cfg(test)]
 mod tests;
 
@@ -277,11 +279,12 @@ pub(super) async fn arm(
 /// match it — against the transactions `call`'s materialisation seeded. A
 /// response no client transaction matched and a CANCEL are always re-offered:
 /// a seeded client INVITE ACKs the final it was waiting for, a seeded server
-/// INVITE answers the CANCEL 200 + 487. An in-dialog INVITE is re-offered only
-/// when the record names its branch as a relayed INVITE a peer already admitted
-/// or an INVITE whose 2xx it retains ([`seeds::names_server_branch`]: a
-/// retransmission the layer's own transaction absorbs, so the rules never mint
-/// a second relay for the round nor refuse its copy as glare); a non-INVITE
+/// INVITE answers the CANCEL 200 + 487. An INVITE is re-offered only when the
+/// record names its branch as the caller's unanswered initial INVITE, a relayed
+/// INVITE a peer already admitted or an INVITE whose 2xx it retains
+/// ([`seeds::names_server_branch`]: a copy the seeded transaction absorbs, so
+/// the rules never take it for a new request, never mint a second relay for
+/// the round nor refuse its copy as glare); a non-INVITE
 /// request only when the record names its branch as a request it relayed or
 /// holds ([`seeds::names_received_branch`]: a copy of it is absorbed, never
 /// relayed a second time) — a relay whose client transaction this node does

@@ -94,15 +94,21 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    (`sip_proxy_no_target_dropped_total{kind}`), never answered `503`: the
    sender's retransmission reaches the next view. A worker that receives a
    copy of a replicated call's initial INVITE (the call's CSeq, and a branch
-   naming the call's server transaction whose 2xx the record holds) answers
-   it from the replica, whichever worker the cookie names. An initial INVITE
-   whose cookie names another primary and that copies no such record gets no
-   final (`b2bua_foreign_invite_copies_dropped_total`; the transaction
-   layer's 100 Trying has already gone out): the primary still owns that
-   transaction, and a final from this worker would end the caller's.
+   naming the call's server transaction, unanswered or answered 2xx in the
+   record) takes the call over, whichever worker the cookie names: the copy is
+   absorbed by the transaction the record rebuilds, which repeats the 2xx the
+   record holds. The worker holding the record serves the call; when the
+   primary still lives, the callee may get the dialled INVITE twice under one
+   branch. A call whose routing decision the record does not hold is no
+   copy's: the decision may be in flight at a primary the proxy misread dead,
+   and is never asked twice (ADR-0047 D4). An initial INVITE whose cookie
+   names another primary and that copies no such record gets no final
+   (`b2bua_foreign_invite_copies_dropped_total`; the transaction layer's 100
+   Trying has already gone out): the primary still owns that transaction, and
+   a final from this worker would end the caller's.
    Accepted residuals:
-   - a copy of a routed but unanswered call is dropped, not taken over: the
-     departure sweep or the callee's next response hands the call over;
+   - a copy of an undecided call whose primary really died gets no final: the
+     departure sweep refuses the call `503`;
    - an INVITE that never replicated, from a primary that really died, gets
      no final from the backup; the caller's transaction timers end it;
    - a discovered pool whose watch never delivers a listing never has a first

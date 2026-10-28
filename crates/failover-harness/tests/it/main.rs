@@ -17,6 +17,7 @@ mod answer_lost;
 mod answer_lost_with_primary_no_answer;
 mod backup_capacity;
 mod call_terminate_on_backup;
+mod caller_copy_takes_over;
 mod cancel_and_retransmission_follow_a_live_hop;
 mod consult_answer_deadline;
 mod cordoned_worker;

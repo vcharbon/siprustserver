@@ -6,8 +6,9 @@ use call::{Call, Direction, IndexHit, IndexLookup, KeyKind};
 use sip_message::header::{ParamValue, Via};
 use sip_message::{Method, SipMessage};
 
-use super::materialise::names_server_branch;
+use super::materialise::{names_server_branch, names_unanswered_caller_invite};
 use super::topology_cookie::foreign_primary;
+use super::undecided::is_undecided;
 use super::RouterCtx;
 use crate::store::StoreError;
 use b2bua_sdk::event::CallEvent;
@@ -253,11 +254,14 @@ pub(super) async fn replica_takeover(
 pub(super) enum InitialInvite {
     /// A call of this node's own, new or a copy of one here.
     Own,
-    /// A copy of the replicated call the hit names: taken over, it is answered
-    /// from the record.
-    CopyOf(IndexHit),
-    /// Another primary's INVITE this node holds no answered record of: the
-    /// primary owns its transaction, and placing it would dial a second call.
+    /// A copy of the replicated call the hit names: taken over, it is absorbed
+    /// by the transaction the record rebuilds for it. `unanswered`: it copies
+    /// the caller's unanswered initial INVITE, whose transaction the record
+    /// rebuilds whole, so the layer's transaction for the copy gives way to it.
+    CopyOf { hit: IndexHit, unanswered: bool },
+    /// Another primary's INVITE that copies no transaction of a record this
+    /// node holds: the primary owns its transaction, and placing it would
+    /// dial a second call.
     Foreign,
 }
 
@@ -266,9 +270,10 @@ pub(super) enum InitialInvite {
 /// replicates, is a copy (RFC 3261 §17.2.3) of the replicated call whose
 /// incoming leg it names when it carries that call's INVITE CSeq and its
 /// top-Via branch names that call's own server transaction
-/// ([`names_server_branch`]) — the caller retransmitting to the backup of a
-/// dead primary, through the cookie or through a fresh selection — whatever
-/// worker the cookie names. Failing that, an INVITE whose cookie names
+/// ([`names_server_branch`]), answered or not — the caller retransmitting to
+/// the backup of a dead primary, through the cookie or through a fresh
+/// selection — whatever worker the cookie names: the node holding the record
+/// of a decided call serves it. Failing that, an INVITE whose cookie names
 /// another primary is that primary's (the proxy re-placed its
 /// retransmission): foreign. Any other is this node's own, as is every
 /// INVITE of a node that does not replicate: it backs up no primary.
@@ -286,9 +291,9 @@ pub(super) async fn initial_invite_copy(
     if !ctx.state.replicates() || ctx.unborn.holds(derived, cseq) || ctx.state.contains(derived) {
         return InitialInvite::Own;
     }
-    if let Some(hit) = replicated_call_copied(ctx, req).await {
+    if let Some((hit, unanswered)) = replicated_call_copied(ctx, req).await {
         ctx.state.note_takeover_resolved(&hit);
-        return InitialInvite::CopyOf(hit);
+        return InitialInvite::CopyOf { hit, unanswered };
     }
     match foreign_primary(req, &ctx.config.self_ordinal) {
         Some(_) => InitialInvite::Foreign,
@@ -298,11 +303,14 @@ pub(super) async fn initial_invite_copy(
 
 /// The replicated call `req` is a copy of the initial INVITE of: its
 /// incoming leg is `req`'s, its INVITE CSeq `req`'s, and `req`'s top-Via
-/// branch names its own server transaction.
+/// branch names its own server transaction; with whether that transaction is
+/// the caller's unanswered initial INVITE. An undecided call is no copy's: its
+/// decision may still be in flight at a live primary, and it is never asked
+/// twice (ADR-0047 D4).
 async fn replicated_call_copied(
     ctx: &RouterCtx,
     req: &sip_message::SipRequest,
-) -> Option<IndexHit> {
+) -> Option<(IndexHit, bool)> {
     let call_id = req.call_id().as_str();
     let from_tag = req.from().tag().unwrap_or("");
     let lookup = IndexLookup::Invite { call_id, from_tag };
@@ -310,8 +318,8 @@ async fn replicated_call_copied(
     let (copy, _) = ctx.state.peek_replica(&hit.call_ref).await.ok()?;
     let call = copy.call;
     let branch = req.top_via().branch().unwrap_or_default();
-    (call.a_leg_invite.cseq == req.cseq().seq() && names_server_branch(&call, branch))
-        .then_some(hit)
+    let copied = call.a_leg_invite.cseq == req.cseq().seq() && names_server_branch(&call, branch);
+    (copied && !is_undecided(&call)).then(|| (hit, names_unanswered_caller_invite(&call, branch)))
 }
 
 /// The index lookup for a request that carries no `callRef` of ours: a CANCEL

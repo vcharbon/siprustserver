@@ -90,23 +90,24 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, matched_cli
 
     let mut res = resolve(ctx, &event);
     let mut lookup = Lookup::Answered;
-    // An initial INVITE copying a call this node holds the answered record of
-    // is that call's, answered from the record; one placed here as another
-    // primary's backup and copying none belongs to that primary and gets no
-    // final (its 100 Trying went out on receipt), its transaction
-    // relinquished — never a second call.
+    // An initial INVITE copying a transaction of a decided call this node
+    // holds the record of is that call's: the call is taken over and the copy
+    // absorbed by the transaction the record rebuilds, which for the caller's
+    // unanswered INVITE replaces the one the layer opened for the copy. One
+    // placed here as another primary's backup and copying none belongs to
+    // that primary and gets no final (its 100 Trying went out on receipt),
+    // its transaction relinquished — never a second call.
     match initial_invite_copy(ctx, &event, &res).await {
         InitialInvite::Own => {}
-        InitialInvite::CopyOf(hit) => res.copy_of(hit, &event),
+        InitialInvite::CopyOf { hit, unanswered } => {
+            if unanswered {
+                relinquish_arrival(ctx, &event).await;
+            }
+            res.copy_of(hit, &event);
+        }
         InitialInvite::Foreign => {
             ctx.metrics.bump_foreign_invite_copy_dropped();
-            if let CallEvent::Sip { message, .. } = &event {
-                if let SipMessage::Request(req) = message.as_ref() {
-                    if let Some(key) = sip_txn::ServerTxnKey::of(req) {
-                        let _ = ctx.txn.relinquish_server(key).await;
-                    }
-                }
-            }
+            relinquish_arrival(ctx, &event).await;
             return;
         }
     }
@@ -196,5 +197,15 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, matched_cli
         let Discarded { item, why, owed } = discarded;
         let admitted = item.unborn.is_some();
         OwedAnswer::of(ctx).render(&item.event, why, owed, admitted).await;
+    }
+}
+
+/// Relinquish the server transaction the layer opened for the initial INVITE
+/// `event` carries, sending nothing: another transaction answers it.
+async fn relinquish_arrival(ctx: &RouterCtx, event: &CallEvent) {
+    let CallEvent::Sip { message, .. } = event else { return };
+    let SipMessage::Request(req) = message.as_ref() else { return };
+    if let Some(key) = sip_txn::ServerTxnKey::of(req) {
+        let _ = ctx.txn.relinquish_server(key).await;
     }
 }
