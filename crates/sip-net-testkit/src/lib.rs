@@ -37,6 +37,7 @@ pub use rfc_audit::capture_index::{CaptureIndex, Captured, DialogKey, Kind, Tran
 pub use rfc_audit::wire_adapter::rfc_rule_gates_sut;
 pub use rfc_audit::{
     audit_wire_entries, bind_roles_of, evaluate_rfc_audit, evaluate_rfc_findings,
-    rfc_cross_message_rules, rfc_cross_message_rules_scoped, RfcAudit, RfcFinding,
+    rfc_cross_message_rules, rfc_cross_message_rules_scoped, CrossMessageRules, RfcAudit,
+    RfcFinding,
 };
 pub use simulated::{SendFault, SimulatedSignalingNetwork};

@@ -30,7 +30,7 @@
 //! [`sip_message::sdp_doc`], the one home for it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use layer_harness::Stamped;
 use sip_message::parser::custom::CustomParser;
@@ -66,12 +66,20 @@ mod occasions;
 // The parties the recording holds a lane for.
 mod recorded;
 
+/// A list of cross-message rules, shared: the rules are stateless, so one list
+/// serves every recorded network that audits with it.
+pub type CrossMessageRules = Arc<[Arc<dyn CrossMessageAuditRule>]>;
+
+/// The default cross-message rule list, built once per process.
+static CROSS_MESSAGE_RULES: LazyLock<CrossMessageRules> =
+    LazyLock::new(|| wire_adapter::cross_rules().into());
+
 /// The full default set of **cross-message** RFC rules every test harness
-/// installs by default. One pass over the whole recorded channel at layer
-/// close; each finding carries its originating bind so subject dispatch and the
-/// hard gate can filter it.
-pub fn rfc_cross_message_rules() -> Vec<Arc<dyn CrossMessageAuditRule>> {
-    wire_adapter::cross_rules()
+/// installs by default, one list shared by every caller. One pass over the
+/// whole recorded channel at layer close; each finding carries its originating
+/// bind so subject dispatch and the hard gate can filter it.
+pub fn rfc_cross_message_rules() -> CrossMessageRules {
+    CROSS_MESSAGE_RULES.clone()
 }
 
 /// [`rfc_cross_message_rules`] over a view a consumer took the binds of
@@ -208,7 +216,7 @@ pub fn evaluate_rfc_audit(events: &[Stamped<SignalingNetworkEvent>]) -> RfcAudit
     let mut population: BTreeMap<&'static str, rfc_rules::Population> = BTreeMap::new();
 
     // Cross-message rules — one pass over the whole channel each.
-    for rule in rfc_cross_message_rules() {
+    for rule in rfc_cross_message_rules().iter() {
         let subject = rule.subject();
         let (positioned, tally) = occasions::tallied(|| rule.check_positioned(events));
         for ((token, bind), noted) in tally {

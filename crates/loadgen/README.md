@@ -536,11 +536,13 @@ attributes it to the incident window it fell in, against that window's budget
 
 Sampling is bounded: a small fraction of calls record their trace (`--sample-cap`
 per bucket); the rest are counted only. A non-sampled failure still gets a stub
-page with its one-line reason. A bucket still under its cap keeps its scenario
-recording for 64 calls after its last sample, then leaves it to
-`--background-record-every`. So after warm-up the RFC audit and the case
-checks, which run on recorded calls only, cover fewer calls: a rare outcome
-may go without its second sample. Lower `--background-record-every`
+page with its one-line reason. A call records when it falls in the fixed share
+of 1 in `--background-record-every` (from the first call to the last), when it
+is one of the first `--sample-cap` calls of its scenario, or when a bucket of
+its scenario still under its cap chases its next sample (for 64 calls after
+the bucket's last sample). The recorded calls are thus a steady share whatever
+the call hold time. The RFC audit and the case checks run on recorded calls
+only: a rare outcome may go without its second sample. Lower `--background-record-every`
 (`1` records every call) when the audit's reach matters more than CPU.
 
 ### Call-outcome records

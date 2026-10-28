@@ -6,4 +6,5 @@
 //! `cargo nextest run --workspace -E 'package(=sip-net-testkit) & binary(it)' <module>::`.
 
 mod contracts;
+mod cross_rules;
 mod simulated;

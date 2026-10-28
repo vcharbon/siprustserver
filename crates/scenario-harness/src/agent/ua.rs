@@ -320,20 +320,11 @@ impl Agent {
         // to a non-2xx is cached too and never read — its final is absorbed as a
         // transaction-layer duplicate before the cache is ever consulted.
         self.dialogs.note_sent(msg);
+        let wire = serialize(msg);
         if let SipMessage::Request(r) = msg {
-            if r.method().as_str() == "ACK" {
-                if let Some(tag) = r.to().tag() {
-                    self.two_xx_acks.remember(
-                        r.call_id().to_string(),
-                        r.cseq().seq(),
-                        tag.to_string(),
-                        r.clone(),
-                        dst,
-                    );
-                }
-            }
+            self.two_xx_acks.remember(r, &wire, dst);
         }
-        self.send_bytes(&serialize(msg), dst).await
+        self.send_bytes(&wire, dst).await
     }
 
     /// Send `wire`, the emitted form of `msg` (its header names and layout as

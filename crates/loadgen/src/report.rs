@@ -8,11 +8,10 @@
 //!
 //! The memory ceiling is structural: counters and histograms are fixed-size;
 //! samples are capped per bucket; and the sampling gate
-//! ([`Reporter::should_record`]) decides at call start
-//! whether to record at all, converging to ~zero recording once every bucket is
-//! full or has chased its next sample long enough (with a small background
-//! fraction so a late-appearing error class still gets captured). Recording itself is per-call (freed when the call's binder
-//! drops), so nothing accumulates across calls.
+//! ([`Reporter::should_record`]) records a fixed share of the calls from the
+//! first call on, the first `sample_cap` calls of each scenario and a bounded
+//! chase of each bucket under cap, whatever the call hold time. Recording is
+//! per-call (freed when the call's binder drops): nothing accumulates.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -62,8 +61,8 @@ pub struct RenderedSample {
 pub struct ReporterCfg {
     /// Max stored callflow samples per `(scenario, class)` bucket.
     pub sample_cap: u32,
-    /// Record roughly 1 call in `background_record_every` even once all buckets
-    /// are full, so a late-appearing error class still gets a sample. 0 disables.
+    /// Record 1 call in `background_record_every`, from the first call to the
+    /// last, so a late-appearing error class still gets a sample. 0 disables.
     pub background_record_every: u64,
 }
 
@@ -123,6 +122,8 @@ struct Inner {
     /// SIP round trips per scenario and exchange (`Hist::round_trip` bounds).
     rtt: BTreeMap<(ScenarioId, Exchange), Hist>,
     sample_taken: BTreeMap<Bucket, BucketTally>,
+    /// Calls placed per scenario, counted by the sampling gate.
+    placed: BTreeMap<ScenarioId, u64>,
     samples: BTreeMap<Bucket, Vec<RenderedSample>>,
     /// Per-scenario Test-case check-verdict tally over the SAMPLED calls:
     /// `(passed_all, failed_any)`. Fed only for calls whose attached case had
@@ -243,29 +244,27 @@ impl Reporter {
     }
 
     /// The sampling-gate decision at call start: should this call record its
-    /// trace? True while a bucket for the scenario is still under cap and has
-    /// chased its next sample for fewer than `CHASE_CALLS` (64) calls (or none is
-    /// recorded yet), plus a small background fraction so a late error class is
-    /// eventually captured. Converges to (background-only) once full.
+    /// trace? True for 1 call in `background_record_every` (0: none), for a
+    /// call that chases the next sample of a bucket of its scenario still under
+    /// cap (at most `CHASE_CALLS` calls after the bucket's last sample), and for
+    /// the first `sample_cap` calls of its scenario. Before any call of the
+    /// scenario has ended, the last two give at most `sample_cap` calls.
     pub fn should_record(&self, scenario: ScenarioId) -> bool {
         let n = self.record_counter.fetch_add(1, Ordering::Relaxed);
-        if self.cfg.background_record_every != 0
-            && n.is_multiple_of(self.cfg.background_record_every)
-        {
+        let background = self.cfg.background_record_every != 0
+            && n.is_multiple_of(self.cfg.background_record_every);
+        let mut g = self.inner.lock().unwrap();
+        let nth = *g.placed.entry(scenario).and_modify(|n| *n += 1).or_insert(1) - 1;
+        if background {
             return true;
         }
-        let mut g = self.inner.lock().unwrap();
-        let mut saw_bucket = false;
         for ((s, _, _), tally) in g.sample_taken.iter_mut() {
-            if *s == scenario {
-                saw_bucket = true;
-                if tally.taken < self.cfg.sample_cap && tally.chased < CHASE_CALLS {
-                    tally.chased += 1;
-                    return true;
-                }
+            if *s == scenario && tally.taken < self.cfg.sample_cap && tally.chased < CHASE_CALLS {
+                tally.chased += 1;
+                return true;
             }
         }
-        !saw_bucket // nothing recorded for this scenario yet → record
+        nth < u64::from(self.cfg.sample_cap)
     }
 
     /// Whether a sample is still wanted for `(scenario, class, case)`

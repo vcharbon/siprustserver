@@ -43,7 +43,7 @@ impl Agent {
             return true;
         }
         if let Some((ack, dst)) = self.two_xx_acks.owed_for(resp) {
-            let _ = self.try_send(&SipMessage::Request(ack), dst).await;
+            let _ = self.send_bytes(&ack, dst).await;
             return true;
         }
         false

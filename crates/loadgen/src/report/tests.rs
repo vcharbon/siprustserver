@@ -173,6 +173,27 @@ fn a_bucket_under_cap_chases_its_next_sample_for_a_bounded_run() {
     assert!(r.should_record("s"), "a new bucket re-arms the chase");
 }
 
+/// Before any call of a scenario has ended, the gate records the first
+/// `sample_cap` calls of the scenario and the background share, whatever the
+/// number of calls placed: long holds never record a whole hold time of calls.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn before_any_outcome_the_gate_records_the_first_samples_and_the_share() {
+    let (sample_cap, every, placed) = (3u32, 16u64, 1_000u64);
+    let r = Reporter::new(ReporterCfg { sample_cap, background_record_every: every });
+    let recorded = (0..placed).filter(|_| r.should_record("s")).count() as u64;
+    let bound = u64::from(sample_cap) + placed.div_ceil(every);
+    assert!(recorded <= bound, "{recorded} of {placed} calls recorded, bound {bound}");
+    assert!(recorded >= placed.div_ceil(every), "the background share records");
+
+    let first = Reporter::new(ReporterCfg { sample_cap, background_record_every: 0 });
+    let firsts: Vec<bool> = (0..6).map(|_| first.should_record("s")).collect();
+    assert_eq!(firsts, [true, true, true, false, false, false], "the first sample_cap calls");
+
+    let never = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
+    assert!((0..100).all(|_| !never.should_record("s")), "no cap and no share records nothing");
+}
+
 /// The index counts an accepted reject as ok: it is no failed call.
 #[test]
 #[ignore = "slow lane: loadgen"]

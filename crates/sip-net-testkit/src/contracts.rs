@@ -271,7 +271,7 @@ pub struct ScopedAuditOptions {
     /// Per-bind rules, evaluated at bind drop. The default RFC suite fills none
     /// of these — see [`PeerAuditRule`].
     pub rules: Vec<Arc<dyn PeerAuditRule>>,
-    pub cross_message_rules: Vec<Arc<dyn CrossMessageAuditRule>>,
+    pub cross_message_rules: crate::rfc_audit::CrossMessageRules,
     pub should_audit_bind: Option<ShouldAuditBind>,
 }
 
@@ -289,7 +289,7 @@ struct RecordingInner {
     ctx: RunContext,
     channel: Channel<SignalingNetworkEvent>,
     rules: Arc<Vec<Arc<dyn PeerAuditRule>>>,
-    cross_rules: Arc<Vec<Arc<dyn CrossMessageAuditRule>>>,
+    cross_rules: crate::rfc_audit::CrossMessageRules,
     should_audit: ShouldAuditBind,
     bind_roles: Mutex<HashMap<LaneKey, HashSet<UaRole>>>,
     closed: AtomicBool,
@@ -316,7 +316,7 @@ impl RecordingSignalingNetwork {
             ctx,
             channel,
             rules: Arc::new(opts.rules),
-            cross_rules: Arc::new(opts.cross_message_rules),
+            cross_rules: opts.cross_message_rules,
             should_audit,
             bind_roles: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),

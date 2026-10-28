@@ -110,7 +110,8 @@ pub struct Args {
     /// Shorthand: per-recv wall-clock timeout (ms).
     #[arg(long, default_value_t = 5000)]
     pub recv_timeout_ms: u64,
-    /// Max stored callflow samples per (scenario, result-class).
+    /// Max stored callflow samples per (scenario, result-class); the first N
+    /// calls of each scenario record their flow.
     #[arg(long, default_value_t = 10)]
     pub sample_cap: u32,
     /// Output directory for the on-disk report.
@@ -167,8 +168,9 @@ pub struct Args {
     /// the transfer target resolves through the egress seam).
     #[arg(long, default_value = "refer-allow-c")]
     pub refer_key: String,
-    /// Record roughly 1 call in N's flow (the sampling-gate background fraction).
-    /// `1` = full recording (every call); higher values record less. Stored
+    /// Record 1 call in N's flow, from the first call to the last (the
+    /// sampling-gate background share). `1` = full recording (every call);
+    /// higher values record less. Stored
     /// samples stay bounded by `--sample-cap` per bucket; the cost of full
     /// recording is per-call recording memory, so watch `loadgen_process_*` /
     /// `loadgen_inflight` when it is on.
