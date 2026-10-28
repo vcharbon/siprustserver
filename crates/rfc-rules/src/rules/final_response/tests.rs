@@ -192,6 +192,53 @@ fn a_non_invite_server_transaction_is_judged() {
     assert!(f[0].violated(), "{:?}", f[0].decision);
 }
 
+/// 64·T1 over UDP, in µs: Timer J, Timer H and Timer L.
+const T1_64_US: u64 = 32_000_000;
+/// T4 over UDP, in µs: Timer I.
+const T4_US: u64 = 5_000_000;
+
+/// §17.2.2: a non-INVITE server transaction ends at Timer J, 64·T1 after its
+/// final. A final sent later on its branch answers a request that opened a
+/// new transaction, and is that transaction's one final.
+#[test]
+fn a_non_invite_server_transaction_ends_at_timer_j() {
+    let cancel = |at_us, status| rsp(at_us, status, "z9hG4bK-c", "CANCEL");
+    let inside = eval(&[cancel(1_000, 200), cancel(1_000 + T1_64_US - 1, 481)]);
+    assert_eq!(inside.len(), 1, "{inside:?}");
+    assert!(inside[0].violated(), "inside Timer J: {:?}", inside[0].decision);
+
+    let past = eval(&[cancel(1_000, 200), cancel(1_000 + T1_64_US, 481)]);
+    assert!(past.is_empty(), "two transactions, each answered once: {past:?}");
+
+    // The new transaction is judged on its own: its own second final, of
+    // another status, is its own violation.
+    let later = 1_000 + T1_64_US;
+    let f = eval(&[cancel(1_000, 200), cancel(later, 481), cancel(later + 1_000, 500)]);
+    assert_eq!(f.len(), 1, "{f:?}");
+    let Decision::Violated(Evidence::MultipleFinals { first_status, second_status, .. }) =
+        &f[0].decision
+    else {
+        panic!("multiple-finals evidence: {:?}", f[0].decision)
+    };
+    assert_eq!((*first_status, *second_status), (481, 500));
+}
+
+/// §17.2.1: an INVITE server transaction answered non-2xx ends at Timer H
+/// then Timer I, 64·T1 + T4 after its final at the latest; one answered 2xx
+/// at 64·T1, the end of the 2xx's retransmission (§13.3.1.4).
+#[test]
+fn an_invite_server_transaction_ends_with_its_own_timers() {
+    let inside = eval(&[inv(1_000, 486), inv(1_000 + T1_64_US + T4_US - 1, 480)]);
+    assert!(inside.len() == 1 && inside[0].violated(), "inside Timer I: {inside:?}");
+    let past = eval(&[inv(1_000, 486), inv(1_000 + T1_64_US + T4_US, 480)]);
+    assert!(past.is_empty(), "past Timer I: {past:?}");
+
+    let inside = eval(&[inv(1_000, 200), inv(1_000 + T1_64_US - 1, 481)]);
+    assert!(inside.len() == 1 && inside[0].violated(), "inside 64·T1: {inside:?}");
+    let past = eval(&[inv(1_000, 200), inv(1_000 + T1_64_US, 481)]);
+    assert!(past.is_empty(), "past 64·T1: {past:?}");
+}
+
 /// Without a branch the finals cannot be split into transactions, so an
 /// endpoint that answered more than once at this vantage is UNDECIDABLE —
 /// the rule never guesses which answers belonged together.

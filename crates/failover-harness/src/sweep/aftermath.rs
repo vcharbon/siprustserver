@@ -14,6 +14,7 @@ use tokio::time::Instant;
 use crate::cluster::Cluster;
 use crate::incident::Incident;
 use crate::roles::Placement;
+use crate::turn_points::Turn;
 use crate::WorkerHealth;
 
 /// How long a split lasts before it heals ([`Incident::SplitHealed`]).
@@ -56,6 +57,10 @@ pub(super) struct Aftermath {
     /// A restarted primary not yet ready: its new address, when it is next
     /// looked at, and when it must be ready by.
     rebooted: Option<Rebooted>,
+    /// The call's turns as they stood when its primary restarted: the dead
+    /// incarnation's, each applied or not by then. A later turn, or a later
+    /// write that holds one of these by its version, is the new incarnation's.
+    dead_turns: Option<Vec<Turn>>,
 }
 
 #[derive(Clone, Copy)]
@@ -88,7 +93,14 @@ impl Aftermath {
         Self {
             steps: steps.into_iter().map(|(after, s)| (now + after, s)).collect(),
             rebooted: None,
+            dead_turns: None,
         }
+    }
+
+    /// The call's turns as they stood when its primary restarted, once it
+    /// did: the dead incarnation's.
+    pub(super) fn dead_turns(&self) -> Option<&[Turn]> {
+        self.dead_turns.as_deref()
     }
 
     /// Whether a step is still owed.
@@ -130,6 +142,8 @@ impl Aftermath {
                 Step::NotReady => cluster.fh.flap_not_ready(primary),
                 Step::Depart => cluster.fh.depart(primary),
                 Step::Reboot => {
+                    let taken = cluster.fh.turn_points().first_call().map(|(_, t)| t);
+                    self.dead_turns = Some(taken.unwrap_or_default());
                     let addr = cluster.reboot(primary).await;
                     let now = Instant::now();
                     self.rebooted =

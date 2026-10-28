@@ -162,7 +162,8 @@ pub async fn run_cell(
     let mut failures = Vec::new();
     match (cut, struck) {
         (Some(cut), Some(strike)) => {
-            let facts = cut_facts(&cluster, &placement, cut, &turns);
+            let dead = aftermath.dead_turns().unwrap_or(&turns);
+            let facts = cut_facts(&cluster, &placement, cut, &turns, dead);
             if !verdict.is_success() {
                 match outcome_row(strike, level, &facts, &verdict, &obs) {
                     Some(row) => cell.fire(row),
@@ -214,8 +215,16 @@ pub async fn run_cell(
     turns
 }
 
-/// What the cell measured of its cut turn, read by the outcome rows.
-fn cut_facts(cluster: &Cluster, placement: &Placement, cut: Cut, turns: &[Turn]) -> CutFacts {
+/// What the cell measured of its cut turn, read by the outcome rows. `dead`
+/// is the dead primary's turns: `turns`, or those as they stood when the
+/// primary restarted.
+fn cut_facts(
+    cluster: &Cluster,
+    placement: &Placement,
+    cut: Cut,
+    turns: &[Turn],
+    dead: &[Turn],
+) -> CutFacts {
     let turn = turns.get(cut.at.turn - 1);
     // The sub-points reach the write applied and the effects left in the
     // order the turn's release says: under `applied` with no cap hit the
@@ -226,8 +235,9 @@ fn cut_facts(cluster: &Cluster, placement: &Placement, cut: Cut, turns: &[Turn])
         TurnPoint::Applied => turn.is_some_and(|t| t.released.is_some()),
     };
     let held = held_and_left || cut.at.point == TurnPoint::Applied;
-    // The copy sees no later turn whose write the backup never applied.
-    let later_applied = turns.iter().skip(cut.at.turn).any(|t| t.applied);
+    // The copy sees no later turn of the dead primary whose write the
+    // backup never applied.
+    let later_applied = dead.iter().skip(cut.at.turn).any(|t| t.applied);
     let living: Vec<_> = cluster
         .workers
         .iter()
@@ -239,7 +249,7 @@ fn cut_facts(cluster: &Cluster, placement: &Placement, cut: Cut, turns: &[Turn])
         held,
         on_request: turn.is_none_or(|t| t.on_request),
         answer_in_flight: turn.is_some_and(|t| t.called_out || t.awaits_answer) && !later_applied,
-        unapplied_call_out_left: turns
+        unapplied_call_out_left: dead
             .iter()
             .any(|t| t.called_out && t.released.is_some() && !t.applied),
         living_answered: super::answered::living_workers_answered(

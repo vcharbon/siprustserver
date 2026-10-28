@@ -3,8 +3,9 @@
 //! §17.2.3, its top-Via branch, sent-by and method, whatever else a proxy
 //! stamped on the copy — is absorbed below the transaction user: with nothing
 //! sent while no final has left (Trying, Proceeding), with that final again,
-//! byte for byte, once one has, until Timer J (64·T1 over UDP). A copy still
-//! queued when the final left arrived before it.
+//! byte for byte, once one has, until Timer J (64·T1 over UDP). A copy is
+//! judged at its arrival, however late it is read: one still queued when the
+//! final left arrived before it, one arrived inside Timer J draws the final.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -71,11 +72,11 @@ pub(super) struct Answered {
 }
 
 impl Answered {
-    /// What `r`, the `ordinal`-th arrival, is: a copy of a request whose
-    /// transaction this endpoint holds — `None` for the first copy of one,
-    /// which opens the transaction, and for any request no transaction takes
-    /// (an INVITE, an ACK, one past Timer J).
-    pub(super) fn sight(&self, r: &SipRequest, ordinal: u64) -> Option<Copy> {
+    /// What `r`, the `ordinal`-th arrival, arrived at `arrived`, is: a copy
+    /// of a request whose transaction this endpoint holds — `None` for the
+    /// first copy of one, which opens the transaction, and for any request no
+    /// transaction takes (an INVITE, an ACK, one arrived past Timer J).
+    pub(super) fn sight(&self, r: &SipRequest, ordinal: u64, arrived: Instant) -> Option<Copy> {
         if matches!(r.method().as_str(), "INVITE" | "ACK") {
             return None;
         }
@@ -87,7 +88,7 @@ impl Answered {
                 None
             }
             Some(State::Open) => Some(Copy::Absorbed),
-            Some(State::Completed { until, .. }) if Instant::now() >= *until => {
+            Some(State::Completed { until, .. }) if arrived >= *until => {
                 txns.insert(key, State::Open);
                 None
             }

@@ -298,10 +298,12 @@ impl<'h> CalleeGroupBuilder<'h> {
         // as one peer, exactly as they land on the wire.
         self.harness.register_lane(self.addr, lane_name.clone(), NetworkTag::Ext);
 
+        let arrivals = sip_clock::Clock::system();
+        let opts = BindUdpOpts::new(self.addr, self.queue_max).with_roles(self.roles);
         let ep = self
             .harness
             .network()
-            .bind_udp(BindUdpOpts::new(self.addr, self.queue_max).with_roles(self.roles))
+            .bind_udp(opts.with_clock(arrivals.clone()))
             .await
             .unwrap_or_else(|e| panic!("callee-group bind {} failed: {e}", self.addr));
         let shared: Arc<dyn UdpEndpoint> = Arc::from(ep);
@@ -352,6 +354,7 @@ impl<'h> CalleeGroupBuilder<'h> {
                 steps: self.harness.steps(),
                 answers_as: crate::Party::Callee,
                 advertised: None,
+                arrivals: Some(arrivals.clone()),
             };
             self.harness.keep_bound(&agent);
             agents.insert(name.clone(), agent);

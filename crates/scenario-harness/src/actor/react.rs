@@ -99,8 +99,8 @@ pub(super) async fn cancel_pending_initial(
 /// bodyless 200 to an offer (RFC 3264 §5).
 pub(super) async fn default_react(st: &mut ActorState<'_>, msg: Inbound) -> Result<(), StepError> {
     match msg {
-        Inbound::Request(txn) => react_request(st, txn).await,
-        Inbound::Response(resp) => react_response(st, resp).await,
+        Inbound::Request(txn) => react_request(st, *txn).await,
+        Inbound::Response(resp) => react_response(st, *resp).await,
     }
 }
 

@@ -247,7 +247,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                 },
                 Ok(HarnessInbound::Response(response)) => Wake::Message {
                     actor,
-                    message: Box::new(SipMessage::Response(response)),
+                    message: Box::new(SipMessage::Response(*response)),
                 },
                 // A per-recv timeout is "nothing arrived yet", not an error: the
                 // loop's own deadlines decide when waiting has gone on too long.

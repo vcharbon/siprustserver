@@ -43,7 +43,7 @@ fn parse(raw: &str) -> SipMessage {
 }
 
 fn sight(a: &Absorption, raw: &str) -> Sighting {
-    a.sight(raw.as_bytes(), &parse(raw))
+    a.sight(raw.as_bytes(), &parse(raw), tokio::time::Instant::now())
 }
 
 #[test]

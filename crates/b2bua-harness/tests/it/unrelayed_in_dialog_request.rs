@@ -72,7 +72,7 @@ async fn answered_in_dialog(name: &str, method: OutOfDialogMethod) -> SipRespons
     let wire = sip_message::serializer::serialize(&SipMessage::Request(request));
     alice.try_send_datagram(&wire, b2bua.addr).await.expect("the request leaves");
     let answer = match alice.recv_any().await.expect("the request draws its final") {
-        Inbound::Response(r) => r,
+        Inbound::Response(r) => *r,
         Inbound::Request(r) => panic!("alice expected a final, got {}", r.request().method()),
     };
     h.advance(Duration::from_millis(500)).await;

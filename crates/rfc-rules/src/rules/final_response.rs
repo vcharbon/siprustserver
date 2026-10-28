@@ -17,6 +17,14 @@
 //! along so a view carrying many calls, or a fixture reusing one hard-coded
 //! branch, cannot fold two transactions into one key.
 //!
+//! **A transaction ends with its timers.** A final sent on the key after the
+//! transaction it answered has ended answers a request that opened a new one
+//! (§17.2.3 matches no ended transaction), and opens that one's own occasion:
+//! a non-INVITE transaction ends at Timer J, 64·T1 after its first final
+//! (§17.2.2); an INVITE one answered non-2xx at Timer H then Timer I, 64·T1 +
+//! T4 at the latest (§17.2.1); one answered 2xx when its 2xx is no longer
+//! retransmitted, 64·T1 (§13.3.1.4). Each bound is the latest end over UDP.
+//!
 //! **Every divergent status is reported exactly once, all on ONE finding.** The
 //! evidence carries them in emission order, so a transaction answered 487 then
 //! 480 then 486 is one occasion naming both offences — and a Timer-G
@@ -49,6 +57,12 @@ use crate::wire::{Msg, WireView};
 
 use super::Obligation;
 
+/// 64·T1 over UDP (RFC 3261 §17): Timer J, Timer H, and the 2xx's
+/// retransmission envelope (§13.3.1.4).
+const T1_64_US: u64 = 32_000_000;
+/// T4 over UDP (RFC 3261 §17.2.1): Timer I.
+const T4_US: u64 = 5_000_000;
+
 crate::registry::rules! {
     /// RFC 3261 §17.2.1: a server transaction emits exactly one final response — after the first,
     /// only a same-status retransmission is legal (§13.3.1.4 for a 2xx). Charges the transaction's
@@ -71,68 +85,98 @@ impl Obligation for SingleFinalPerServerTxn {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
         for (key, finals) in &seen.txns {
-            // One answer is no disagreement: the obligation is only ever tested
-            // by a SECOND final.
-            let [first, second, ..] = &finals[..] else { continue };
-            let head = |anchor: usize, taker: &str, decision| Finding {
-                rule: RuleId::SingleFinalPerServerTxn,
-                emitter: key.emitter.to_string(),
-                taker: taker.to_string(),
-                cseq: key.cseq,
-                relayed: false,
-                anchor,
-                decision,
-            };
-            // Without a branch the finals cannot be split into transactions, so
-            // this endpoint's several answers may be several transactions'.
-            let Some(branch) = key.branch else {
-                out.push(head(
-                    second.msg,
-                    second.taker,
-                    Decision::Undecidable("no via branch at this vantage"),
-                ));
-                continue;
-            };
-            // Every status that disagreed with the first, in emission order and
-            // each recorded once: a retransmitted offence is the same offence.
-            let mut divergent: Vec<u16> = Vec::new();
-            let mut offence: Option<&Final<'_>> = None;
-            for f in &finals[1..] {
-                if f.status == first.status {
-                    continue;
-                }
-                if !divergent.contains(&f.status) {
-                    divergent.push(f.status);
-                }
-                offence.get_or_insert(f);
-            }
-            let Some(offence) = offence else {
-                out.push(head(second.msg, second.taker, Decision::Compliant));
-                continue;
-            };
-            out.push(head(
-                offence.msg,
-                offence.taker,
-                Decision::Violated(Evidence::MultipleFinals {
-                    first_msg: first.msg,
-                    first_hop: first.hop,
-                    first_ts_us: first.ts_us,
-                    first_status: first.status,
-                    second_msg: offence.msg,
-                    second_hop: offence.hop,
-                    second_ts_us: offence.ts_us,
-                    second_status: offence.status,
-                    divergent,
-                    gap_us: offence.ts_us.saturating_sub(first.ts_us),
-                    method: key.method.clone(),
-                    branch: branch.to_string(),
-                }),
-            ));
+            out.extend(transactions(&key.method, finals).filter_map(|txn| judge(key, txn)));
         }
         // Observation order, so a ladder and the report read the same way.
         out.sort_by_key(|f| f.anchor);
         out
     }
+}
+
+/// The finals on one key split into the transactions they answered: a final at
+/// or past the end of the transaction the run's first final completed opens
+/// the next one.
+fn transactions<'a>(
+    method: &'a str,
+    finals: &'a [Final<'a>],
+) -> impl Iterator<Item = &'a [Final<'a>]> {
+    let mut rest = finals;
+    std::iter::from_fn(move || {
+        let first = rest.first()?;
+        let ends_us = first.ts_us.saturating_add(lifetime_us(method, first.status));
+        let len = rest.iter().position(|f| f.ts_us >= ends_us).unwrap_or(rest.len());
+        let (txn, next) = rest.split_at(len);
+        rest = next;
+        Some(txn)
+    })
+}
+
+/// How long a server transaction of `method` lives after its first final,
+/// `status`, at the latest over UDP (see the module doc).
+fn lifetime_us(method: &str, status: u16) -> u64 {
+    match method {
+        "INVITE" if status >= 300 => T1_64_US + T4_US,
+        _ => T1_64_US,
+    }
+}
+
+/// The finding on one transaction's finals, `None` when it has only one.
+fn judge(key: &TxnKey<'_>, finals: &[Final<'_>]) -> Option<Finding> {
+    // One answer is no disagreement: the obligation is only ever tested
+    // by a SECOND final.
+    let [first, second, ..] = finals else { return None };
+    let head = |anchor: usize, taker: &str, decision| Finding {
+        rule: RuleId::SingleFinalPerServerTxn,
+        emitter: key.emitter.to_string(),
+        taker: taker.to_string(),
+        cseq: key.cseq,
+        relayed: false,
+        anchor,
+        decision,
+    };
+    // Without a branch the finals cannot be split into transactions, so
+    // this endpoint's several answers may be several transactions'.
+    let Some(branch) = key.branch else {
+        return Some(head(
+            second.msg,
+            second.taker,
+            Decision::Undecidable("no via branch at this vantage"),
+        ));
+    };
+    // Every status that disagreed with the first, in emission order and
+    // each recorded once: a retransmitted offence is the same offence.
+    let mut divergent: Vec<u16> = Vec::new();
+    let mut offence: Option<&Final<'_>> = None;
+    for f in &finals[1..] {
+        if f.status == first.status {
+            continue;
+        }
+        if !divergent.contains(&f.status) {
+            divergent.push(f.status);
+        }
+        offence.get_or_insert(f);
+    }
+    let Some(offence) = offence else {
+        return Some(head(second.msg, second.taker, Decision::Compliant));
+    };
+    Some(head(
+        offence.msg,
+        offence.taker,
+        Decision::Violated(Evidence::MultipleFinals {
+            first_msg: first.msg,
+            first_hop: first.hop,
+            first_ts_us: first.ts_us,
+            first_status: first.status,
+            second_msg: offence.msg,
+            second_hop: offence.hop,
+            second_ts_us: offence.ts_us,
+            second_status: offence.status,
+            divergent,
+            gap_us: offence.ts_us.saturating_sub(first.ts_us),
+            method: key.method.clone(),
+            branch: branch.to_string(),
+        }),
+    ))
 }
 
 /// **RFC 3261 §13.3.1.1 / §17.2.1 — a completed transaction emits no further

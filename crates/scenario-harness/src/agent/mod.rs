@@ -57,6 +57,8 @@
 //!   method-filtered receive policies. The §17.2 receive view itself is NOT
 //!   here: it lives once for the whole tree in [`crate::absorption`], which
 //!   every agent mode reads.
+//! - `weak_agent` — [`Agent`] without a hold on its socket, what the harness
+//!   keeps to sight what a UA left unread.
 //! - `invite` / `client_invite` / `out_of_dialog` / `dialog` —
 //!   client-side builders and transactions (initial INVITE, any out-of-dialog
 //!   method, in-dialog).
@@ -103,6 +105,7 @@ mod tests;
 mod tolerant_recv;
 mod ua;
 pub(crate) mod waiver;
+mod weak_agent;
 mod wire_out;
 
 pub use client_invite::{CancelHandle, ClientInvite};

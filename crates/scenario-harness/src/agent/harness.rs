@@ -30,8 +30,8 @@ use super::run_guards::{
     render_rfc_panic, rfc_hard_gate_findings, waived_sut_line, CseqGate, HardGate,
 };
 use super::step::StepCounter;
-use super::ua::WeakAgent;
 use super::waiver::{unused_waivers, WaiverScope, WaiverState};
+use super::weak_agent::WeakAgent;
 use super::{Agent, Proxy};
 use crate::absorption::Absorption;
 use crate::dialogs::{DialogJudge, DialogJudging, DialogOptIns};
@@ -462,10 +462,9 @@ impl Harness {
         // A proxy relays requests it is not a party to: it holds no dialogs.
         let holds_dialogs =
             roles.contains(&sip_net::UaRole::Uac) || roles.contains(&sip_net::UaRole::Uas);
-        let mut opts = BindUdpOpts::new(addr, 64).with_roles(roles);
-        if let Some(hook) = pre_ingress {
-            opts = opts.with_pre_ingress(hook);
-        }
+        let arrivals = sip_clock::Clock::system();
+        let opts = BindUdpOpts::new(addr, 64).with_roles(roles).with_clock(arrivals.clone());
+        let opts = BindUdpOpts { pre_ingress, ..opts };
         let ep =
             self.network.bind_udp(opts).await.unwrap_or_else(|e| panic!("bind {addr} failed: {e}"));
         let rr_fold = decide_rr_fold(&name);
@@ -492,6 +491,7 @@ impl Harness {
             steps: self.steps.clone(),
             answers_as: Party::Callee,
             advertised: None,
+            arrivals: Some(arrivals),
         };
         self.keep_bound(&agent);
         agent

@@ -204,10 +204,11 @@ impl Absorption {
         self.dedup.store(false, Ordering::Relaxed);
     }
 
-    /// Classify one arriving datagram and record it in the wire log. Called
-    /// exactly once per datagram, by the receive core of whichever mode owns
-    /// the socket.
-    pub fn sight(&self, raw: &[u8], msg: &SipMessage) -> Sighting {
+    /// Classify one datagram that arrived at `arrived` and record it in the
+    /// wire log. Called exactly once per datagram, by the receive core of
+    /// whichever mode owns the socket; a server transaction's timers judge it
+    /// at its arrival, however late it is read.
+    pub fn sight(&self, raw: &[u8], msg: &SipMessage, arrived: tokio::time::Instant) -> Sighting {
         let dedup = self.dedup.load(Ordering::Relaxed);
         let ordinal = self.sighted.fetch_add(1, Ordering::Relaxed);
         match msg {
@@ -226,7 +227,7 @@ impl Absorption {
         }
         let identical = dedup && self.tables.note(raw, msg, ordinal).is_some();
         let copy = match msg {
-            SipMessage::Request(r) if dedup => self.answered.sight(r, ordinal),
+            SipMessage::Request(r) if dedup => self.answered.sight(r, ordinal, arrived),
             _ => None,
         };
         let invite = match msg {

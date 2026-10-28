@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use sip_clock::Clock;
 use sip_message::generators::{
     generate_in_dialog_request, generate_out_of_dialog_request, GenerateInDialogRequestOpts,
     GenerateOutOfDialogRequestOpts, InDialogMethod, OutOfDialogMethod, StackDialog,
@@ -16,7 +17,7 @@ use sip_message::generators::{
 use sip_message::header::{self, HeaderValue, NameAddr, Uri};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{serialize, SipHeader, SipMessage, SipParser, SipRequest, SipResponse, SipStr};
-use sip_net::UdpEndpoint;
+use sip_net::{UdpEndpoint, UdpPacket};
 
 use super::client_txn::{expect_response, request_label};
 use super::dialog::InDialogTxn;
@@ -67,9 +68,9 @@ pub(super) fn to_of(uri: &str) -> header::To {
 /// The reactive per-endpoint actor ([`crate::actor`]) dispatches on this via [`Agent::recv_any`].
 pub enum Inbound {
     /// A received request, wrapped in its UAS-side transaction.
-    Request(ServerTxn),
+    Request(Box<ServerTxn>),
     /// A received response (to one of our client transactions).
-    Response(SipResponse),
+    Response(Box<SipResponse>),
 }
 
 /// A stateful fake UA. Cheap to clone (shares the endpoint, the id source, the transaction layer
@@ -116,70 +117,14 @@ pub struct Agent {
     /// The sent-by this UA's requests name in their Via when it is not
     /// its socket ([`behind_nat`](Agent::behind_nat)).
     pub(crate) advertised: Option<SocketAddr>,
-}
-
-/// An [`Agent`] that does not keep its socket bound: what a harness holds so
-/// that, at its end, it sights what is still queued on each UA it bound.
-pub(crate) struct WeakAgent {
-    name: String,
-    addr: SocketAddr,
-    uri: String,
-    ep: std::sync::Weak<dyn UdpEndpoint>,
-    ids: Arc<Ids>,
-    rr_fold: RecordRouteFold,
-    recv_timeout: Duration,
-    txn: Arc<Absorption>,
-    two_xx_acks: Arc<TwoXxAcks>,
-    holdback: Arc<Mutex<VecDeque<Result<SipMessage, StepError>>>>,
-    dialogs: Arc<DialogJudge>,
-    steps: StepCounter,
-    answers_as: Party,
-    advertised: Option<SocketAddr>,
-}
-
-impl WeakAgent {
-    /// The agent, while its socket is still bound by someone.
-    pub(crate) fn upgrade(&self) -> Option<Agent> {
-        Some(Agent {
-            name: self.name.clone(),
-            addr: self.addr,
-            uri: self.uri.clone(),
-            ep: self.ep.upgrade()?,
-            ids: self.ids.clone(),
-            rr_fold: self.rr_fold,
-            recv_timeout: self.recv_timeout,
-            txn: self.txn.clone(),
-            two_xx_acks: self.two_xx_acks.clone(),
-            holdback: self.holdback.clone(),
-            dialogs: self.dialogs.clone(),
-            steps: self.steps.clone(),
-            answers_as: self.answers_as,
-            advertised: self.advertised,
-        })
-    }
+    /// The timeline this UA's endpoint stamps arrivals on, when the UA chose
+    /// it at its bind: the receive view judges a datagram at its arrival.
+    /// `None` where the network keeps its own (a load mux): a datagram is
+    /// then judged when it is read.
+    pub(crate) arrivals: Option<Clock>,
 }
 
 impl Agent {
-    /// This agent without a hold on its socket.
-    pub(crate) fn downgrade(&self) -> WeakAgent {
-        WeakAgent {
-            name: self.name.clone(),
-            addr: self.addr,
-            uri: self.uri.clone(),
-            ep: Arc::downgrade(&self.ep),
-            ids: self.ids.clone(),
-            rr_fold: self.rr_fold,
-            recv_timeout: self.recv_timeout,
-            txn: self.txn.clone(),
-            two_xx_acks: self.two_xx_acks.clone(),
-            holdback: self.holdback.clone(),
-            dialogs: self.dialogs.clone(),
-            steps: self.steps.clone(),
-            answers_as: self.answers_as,
-            advertised: self.advertised,
-        }
-    }
-
     /// Let this UA's dialog table judge what is still queued on its socket,
     /// left unread: what a run never pulled still meets the table, and the
     /// ladder still shows it unconsumed.
@@ -398,7 +343,7 @@ impl Agent {
                 Ok(msg) => msg,
                 Err(e) => return Err(e),
             };
-            if let Some(msg) = Box::pin(self.surface(&pkt.raw, msg)).await {
+            if let Some(msg) = Box::pin(self.surface(&pkt, msg)).await {
                 return Ok(msg);
             }
         }
@@ -412,7 +357,7 @@ impl Agent {
         while let Some(pkt) = self.ep.try_recv() {
             let held = match self.parse(&pkt.raw) {
                 Err(e) => Some(Err(e)),
-                Ok(msg) => self.surface(&pkt.raw, msg).await.map(Ok),
+                Ok(msg) => self.surface(&pkt, msg).await.map(Ok),
             };
             if let Some(held) = held {
                 self.holdback.lock().unwrap().push_back(held);
@@ -437,7 +382,7 @@ impl Agent {
             match self.parse(&pkt.raw) {
                 Err(e) => return Some(Err(e)),
                 Ok(msg) => {
-                    if let Some(msg) = self.surface(&pkt.raw, msg).await {
+                    if let Some(msg) = self.surface(&pkt, msg).await {
                         return Some(Ok(msg));
                     }
                 }
@@ -457,8 +402,8 @@ impl Agent {
     /// final this UA re-ACKed ([`Agent::re_ack`]).
     /// A txn-owned hop ACK still SURFACES here: the pull sites claim it, so an
     /// explicit `receive("ACK")` keeps working.
-    pub(crate) async fn surface(&self, raw: &[u8], msg: SipMessage) -> Option<SipMessage> {
-        let sighting = self.txn.sight(raw, &msg);
+    pub(crate) async fn surface(&self, pkt: &UdpPacket, msg: SipMessage) -> Option<SipMessage> {
+        let sighting = self.txn.sight(&pkt.raw, &msg, self.arrived(pkt));
         if let SipMessage::Response(r) = &msg {
             if self.re_ack(r, sighting.repeat).await {
                 return None;
@@ -472,6 +417,16 @@ impl Agent {
             self.dialogs.sight(&msg);
         }
         Some(msg)
+    }
+
+    /// When `pkt` arrived, on the runtime's clock: read off its arrival stamp
+    /// where this UA knows the timeline, else now.
+    fn arrived(&self, pkt: &UdpPacket) -> tokio::time::Instant {
+        let now = tokio::time::Instant::now();
+        let Some(clock) = &self.arrivals else { return now };
+        let stamped = i64::try_from(pkt.arrival_ms).unwrap_or(i64::MAX);
+        let age = u64::try_from(clock.now_ms().saturating_sub(stamped)).unwrap_or(0);
+        now.checked_sub(Duration::from_millis(age)).unwrap_or(now)
     }
 
     /// THE request-receive core: receive the next request and check its method,
@@ -540,9 +495,12 @@ impl Agent {
                     if self.ack_obligation_claims(&r) {
                         continue;
                     }
-                    return Ok(Inbound::Request(ServerTxn::from_request(self.clone(), r)));
+                    return Ok(Inbound::Request(Box::new(ServerTxn::from_request(
+                        self.clone(),
+                        r,
+                    ))));
                 }
-                SipMessage::Response(r) => return Ok(Inbound::Response(r)),
+                SipMessage::Response(r) => return Ok(Inbound::Response(Box::new(r))),
             }
         }
     }
@@ -670,9 +628,12 @@ impl Agent {
                     if self.ack_obligation_claims(&r) {
                         continue;
                     }
-                    return Some(Inbound::Request(ServerTxn::from_request(self.clone(), r)));
+                    return Some(Inbound::Request(Box::new(ServerTxn::from_request(
+                        self.clone(),
+                        r,
+                    ))));
                 }
-                SipMessage::Response(r) => return Some(Inbound::Response(r)),
+                SipMessage::Response(r) => return Some(Inbound::Response(Box::new(r))),
             }
         }
     }

@@ -335,7 +335,7 @@ impl Proxy {
         loop {
             match self.agent().recv_any().await {
                 Ok(Inbound::Request(txn)) => self.on_request(txn.request().clone()).await,
-                Ok(Inbound::Response(resp)) => self.on_response(resp).await,
+                Ok(Inbound::Response(resp)) => self.on_response(*resp).await,
                 Err(StepError::Timeout { .. }) => continue,
                 Err(_) => return,
             }

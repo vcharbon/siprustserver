@@ -276,6 +276,7 @@ impl AgentBinder {
             steps: Arc::default(),
             answers_as: crate::Party::Callee,
             advertised: None,
+            arrivals: None,
         })
     }
 

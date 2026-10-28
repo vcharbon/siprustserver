@@ -48,7 +48,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         let leg =
             self.leg_by_call_id(&inbound.call_id).unwrap_or_else(|| "unattributed".to_string());
 
-        let sighting = self.absorption.sight(&bytes, &message);
+        let sighting = self.absorption.sight(&bytes, &message, tokio::time::Instant::now());
         let repeat = sighting.repeat;
         if sighting.owner == Owner::TxnDuplicate {
             self.repeats.note(&leg, &bytes, self.now_us());
