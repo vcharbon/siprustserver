@@ -34,14 +34,6 @@ use scenario_harness::actor::FailedAt;
 // A rendered sample (a captured callflow for one (scenario, class) bucket)
 // ---------------------------------------------------------------------------
 
-/// The on-disk report rendered under the reporter's lock, written after it.
-struct ReportFiles {
-    /// Every sample page, by run-dir-relative path.
-    pages: Vec<(String, Arc<str>)>,
-    index: String,
-    summary: String,
-}
-
 /// One captured call: its rendered callflow HTML (`None` only for a call that
 /// never ran, which has no flow) plus a one-line detail and its end-to-end
 /// time. Stored bounded per `(scenario, class)`; the page is shared, so a
@@ -126,11 +118,15 @@ struct Inner {
     sample_taken: BTreeMap<Bucket, BucketTally>,
     /// Calls placed per scenario, counted by the sampling gate.
     placed: BTreeMap<ScenarioId, u64>,
+    /// Calls the sampling gate recorded, per scenario.
+    recorded: BTreeMap<ScenarioId, u64>,
     samples: BTreeMap<Bucket, Vec<RenderedSample>>,
     /// Per-scenario Test-case check-verdict tally over the SAMPLED calls:
     /// `(passed_all, failed_any)`. Fed only for calls whose attached case had
     /// checks that were actually evaluated (sampled OK/check-fail calls).
     check_verdicts: BTreeMap<ScenarioId, (u64, u64)>,
+    /// Recorded calls the RFC audit judged, per scenario.
+    audited: BTreeMap<ScenarioId, u64>,
     /// Per-scenario structural-waiver campaign tally (ADR-0024 §6): a waiver's
     /// "was ever used" OR-aggregated across the scenario's sampled calls, so the
     /// unused-waiver gate is per CAMPAIGN, never per call.
@@ -187,6 +183,12 @@ impl Reporter {
         } else {
             e.1 += 1;
         }
+    }
+
+    /// Count one call the RFC audit judged: a recorded call that ended on an
+    /// accepted branch.
+    pub fn record_audited(&self, scenario: ScenarioId) {
+        *self.inner.lock().unwrap().audited.entry(scenario).or_default() += 1;
     }
 
     /// Fold one sampled call's per-waiver used mask into its scenario's CAMPAIGN
@@ -252,8 +254,18 @@ impl Reporter {
     /// Before any call of the scenario has ended, the last two give at most
     /// `sample_cap` calls.
     pub fn should_record(&self, scenario: ScenarioId) -> bool {
-        let every = self.cfg.background_record_every;
         let mut g = self.inner.lock().unwrap();
+        let record = self.gate(&mut g, scenario);
+        if record {
+            *g.recorded.entry(scenario).or_default() += 1;
+        }
+        record
+    }
+
+    /// The decision of [`should_record`](Self::should_record) for the next
+    /// call of `scenario`, counted as placed.
+    fn gate(&self, g: &mut Inner, scenario: ScenarioId) -> bool {
+        let every = self.cfg.background_record_every;
         let nth = *g.placed.entry(scenario).and_modify(|n| *n += 1).or_insert(1) - 1;
         if every != 0 && nth.is_multiple_of(every) {
             return true;
@@ -380,121 +392,6 @@ impl Reporter {
         }
         std::fs::write(out_dir.join("index.html"), index)?;
         std::fs::write(out_dir.join("summary.md"), summary)
-    }
-
-    /// The on-disk report as text: every sample page (by run-dir-relative
-    /// path), `index.html` and `summary.md`.
-    fn render_report(&self) -> ReportFiles {
-        use std::fmt::Write as _;
-        let g = self.inner.lock().unwrap();
-
-        // Each sample's callflow HTML, split by case (which failure mode).
-        let mut pages: Vec<(String, Arc<str>)> = Vec::new();
-        let mut links: BTreeMap<Bucket, Vec<String>> = BTreeMap::new();
-        for ((scenario, class, case), samples) in &g.samples {
-            for (i, s) in samples.iter().enumerate() {
-                let rel = sample_rel(scenario, class, case, i);
-                let html = match &s.html {
-                    Some(html) => html.clone(),
-                    // A call that never ran has no flow: a stub so its detail
-                    // is still linked.
-                    None => Arc::from(format!(
-                        "<html><body><h3>{scenario} / {class} / {case} #{i}</h3><p>{}</p>\
-                         <p>e2e: {:.1} ms</p></body></html>",
-                        s.detail.as_deref().unwrap_or("(no detail)"),
-                        s.e2e_ms
-                    )),
-                };
-                pages.push((rel.clone(), html));
-                links.entry((scenario, class.clone(), case.clone())).or_default().push(rel);
-            }
-        }
-
-        // index.html
-        let mut idx = String::new();
-        idx.push_str(
-            "<html><head><meta charset=\"utf-8\"><title>loadgen report</title>\
-            <style>body{font-family:sans-serif}table{border-collapse:collapse}\
-            td,th{border:1px solid #ccc;padding:4px 8px}.ok{color:#070}.nok{color:#a00}</style>\
-            </head><body><h1>loadgen report</h1>",
-        );
-        idx.push_str(
-            "<h2>Results by scenario × class × case</h2>\
-            <p>The <b>case</b> column splits a class into its distinct failure modes (RFC rule id, \
-            failed check, failed step) — each keeps its own first-N samples.</p>\
-            <table>\
-            <tr><th>scenario</th><th>class</th><th>case</th><th>count</th><th>samples</th></tr>",
-        );
-        let none_recorded = match (self.cfg.sample_cap, self.cfg.background_record_every) {
-            (0, _) => String::new(),
-            (_, 0) => "none recorded".to_string(),
-            (_, every) => format!("none recorded (1 in {every} calls is recorded)"),
-        };
-        for ((scenario, class, case), n) in &g.counts {
-            let cls = if ResultClass::label_is_ok(class) { "ok" } else { "nok" };
-            let sample_links = links
-                .get(&(scenario, class.clone(), case.clone()))
-                .map(|ls| {
-                    ls.iter()
-                        .enumerate()
-                        .map(|(i, l)| format!("<a href=\"{l}\">{i}</a>"))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                })
-                .unwrap_or_else(|| none_recorded.clone());
-            idx.push_str(&format!(
-                "<tr><td>{scenario}</td><td class=\"{cls}\">{class}</td><td>{case}</td>\
-                 <td>{n}</td><td>{sample_links}</td></tr>"
-            ));
-        }
-        idx.push_str("</table><h2>Latency (ms)</h2><table>\
-            <tr><th>scenario</th><th>n</th><th>mean</th><th>p50</th><th>p90</th><th>p99</th><th>max</th></tr>");
-        for (scenario, h) in &g.e2e {
-            idx.push_str(&format!(
-                "<tr><td>{scenario}</td><td>{}</td><td>{:.1}</td><td>{:.1}</td><td>{:.1}</td><td>{:.1}</td><td>{:.1}</td></tr>",
-                h.total, h.mean_ms(), h.quantile_ms(0.5), h.quantile_ms(0.9), h.quantile_ms(0.99), h.max
-            ));
-        }
-        idx.push_str("</table>");
-        if !g.checkpoints.is_empty() {
-            idx.push_str("<h2>Checkpoints (ms)</h2><table>\
-                <tr><th>scenario</th><th>checkpoint</th><th>n</th><th>p50</th><th>p90</th><th>p99</th></tr>");
-            for ((scenario, name), h) in &g.checkpoints {
-                idx.push_str(&format!(
-                    "<tr><td>{scenario}</td><td>{name}</td><td>{}</td><td>{:.1}</td><td>{:.1}</td><td>{:.1}</td></tr>",
-                    h.total, h.quantile_ms(0.5), h.quantile_ms(0.9), h.quantile_ms(0.99)
-                ));
-            }
-            idx.push_str("</table>");
-        }
-        idx.push_str("</body></html>");
-
-        // summary.md (writing into a String cannot fail).
-        let mut md = String::new();
-        let _ = writeln!(md, "# loadgen summary\n");
-        let _ = writeln!(md, "## Results by scenario × class × case\n");
-        let _ = writeln!(md, "(case = the class's distinct failure mode)\n");
-        let _ = writeln!(md, "| scenario | class | case | count |");
-        let _ = writeln!(md, "|---|---|---|---|");
-        for ((scenario, class, case), n) in &g.counts {
-            let _ = writeln!(md, "| {scenario} | {class} | {case} | {n} |");
-        }
-        let _ = writeln!(md, "\n## Latency (ms)\n");
-        let _ = writeln!(md, "| scenario | n | mean | p50 | p90 | p99 | max |");
-        let _ = writeln!(md, "|---|---|---|---|---|---|---|");
-        for (scenario, h) in &g.e2e {
-            let _ = writeln!(
-                md,
-                "| {scenario} | {} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} |",
-                h.total,
-                h.mean_ms(),
-                h.quantile_ms(0.5),
-                h.quantile_ms(0.9),
-                h.quantile_ms(0.99),
-                h.max
-            );
-        }
-        ReportFiles { pages, index: idx, summary: md }
     }
 
     // -- Machine-readable index (load-result.json) -------------------------
@@ -650,6 +547,8 @@ impl Reporter {
 
 mod inspect;
 mod prometheus;
+mod render;
+use render::ReportFiles;
 
 #[cfg(test)]
 mod tests;

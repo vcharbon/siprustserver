@@ -52,4 +52,9 @@ impl Reporter {
     pub fn total_calls(&self) -> u64 {
         self.inner.lock().unwrap().counts.values().sum()
     }
+
+    /// Recorded calls of `scenario` the RFC audit judged.
+    pub fn audited_count(&self, scenario: ScenarioId) -> u64 {
+        self.inner.lock().unwrap().audited.get(scenario).copied().unwrap_or(0)
+    }
 }

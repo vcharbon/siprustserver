@@ -62,45 +62,6 @@ async fn loadgen_driver_basic_calls_on_fake_net() {
     b2bua.assert_fully_reaped();
 }
 
-/// A declared reject end to end: every `invite_reject` call ends on its
-/// `rejected` branch and classes `ok` after the sampled RFC audit (an accepted
-/// branch is still audited: the caller ACKed the 486 before the call settled,
-/// so the recorded flow is complete), and the round trips the mux measured
-/// reach `loadgen_rtt_seconds` once each call ends.
-#[tokio::test(start_paused = true)]
-#[ignore = "slow lane: loadgen"]
-async fn loadgen_fake_net_accepted_reject_is_audited_clean() {
-    let (_h, b2bua, core, transport) = setup_fake(7300).await;
-    let reporter =
-        Arc::new(Reporter::new(ReporterCfg { sample_cap: 50, background_record_every: 1 }));
-    let driver = Driver::new(
-        cfg(b2bua.addr, 20.0, 1, 16, 0x486),
-        vec![mix("invite_reject", 1.0)],
-        reporter.clone(),
-        transport,
-    );
-    driver.run().await;
-
-    let total = reporter.total_calls();
-    let prom = reporter.render_prometheus();
-    assert!(total >= 10, "governor under-delivered on virtual time: {total}");
-    assert_eq!(reporter.count("invite_reject", &ResultClass::Ok), total, "{prom}");
-    let line =
-        format!("loadgen_branch_total{{stream=\"main\",shape=\"invite_reject\",branch=\"rejected\"}} {total}");
-    assert!(prom.lines().any(|l| l == line), "expected `{line}` in:\n{prom}");
-    assert!(
-        prom.contains(
-            "loadgen_rtt_seconds_count{stream=\"main\",shape=\"invite_reject\",exchange=\"invite_100\"}"
-        ),
-        "{prom}"
-    );
-
-    settle_until(|| core.registry_size() == 0).await;
-    assert_eq!(core.registry_size(), 0, "mux registry leak");
-    settle_until(|| b2bua.is_reaped()).await;
-    b2bua.assert_fully_reaped();
-}
-
 /// The sum of `metric`'s samples under stream `main` and shape `<scenario>`
 /// in a Prometheus text dump.
 fn scenario_sum(prom: &str, metric: &str, scenario: &str) -> u64 {

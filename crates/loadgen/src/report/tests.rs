@@ -474,3 +474,29 @@ fn the_index_names_a_bucket_with_no_recorded_call() {
     let idx = r.render_report().index;
     assert!(idx.contains("none recorded (1 in 64 calls is recorded)"), "{idx}");
 }
+
+/// An `rfc_audit_fail` row shows its share of the audited calls and the
+/// estimate over the scenario's calls that ended on an accepted branch; the
+/// scenario line says how many calls were recorded and judged.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn the_index_shows_the_audited_share_of_an_audit_failure() {
+    let r = Reporter::new(ReporterCfg { sample_cap: 2, background_record_every: 50 });
+    let recorded = (0..100).filter(|_| r.should_record("s")).count();
+    assert_eq!(recorded, 3, "calls 0 and 1 (the first two), call 50 (1 in 50)");
+    let ok = CallOutcome::Ok { branch: "answered" };
+    let failed = rfc_fail("rule", "detail");
+    for _ in 0..3 {
+        r.record_audited("s");
+    }
+    for _ in 0..98 {
+        r.record("s", &ok, "", Duration::ZERO, &[], None);
+    }
+    r.record("s", &failed, &failed.case(None), Duration::ZERO, &[], None);
+    let idx = r.render_report().index;
+    assert!(idx.contains("1 of 3 audited (33.3 %), ≈ 33 of 99"), "{idx}");
+    assert!(idx.contains("100 calls placed, 3 recorded"), "{idx}");
+    assert!(idx.contains("judged 3 recorded calls"), "{idx}");
+    let md = r.render_report().summary;
+    assert!(md.contains("1 of 3 audited (33.3 %), ≈ 33 of 99"), "{md}");
+}
