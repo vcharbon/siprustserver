@@ -18,7 +18,7 @@ use loadgen::{
 use scenario_harness::Harness;
 use serde_json::Value;
 
-use crate::fake_rig::{addr, cfg, mix, setup_fake, setup_fake_faulty};
+use crate::fake_rig::{addr, cfg, mix, setup_fake, setup_fake_faulty, setup_fake_tuned};
 
 type Rig = (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>);
 
@@ -129,11 +129,18 @@ async fn every_placed_call_writes_the_record_of_its_wire() {
 /// The SUT stalls after its 100 (the callee never gets the INVITE): the
 /// caller's wait for the 180 times out, its teardown CANCELs, and the 487
 /// that draws comes after the verdict. The record is `timeout`, never the
-/// `abandoned` a CANCELing shape declares, never a 487.
+/// `abandoned` a CANCELing shape declares, never a 487. The SUT's
+/// first-response deadline sits past the caller's wait, so the caller gives up
+/// first.
 #[tokio::test(start_paused = true)]
 #[ignore = "slow lane: loadgen"]
 async fn a_stalled_setup_is_a_timeout_whatever_its_teardown_draws() {
-    let records = run(setup_fake(7810).await, &["basic_call", "abandon_ringing"], |c| {
+    let rig = setup_fake_tuned(7810, |c| {
+        c.invite_first_response_timeout_sec =
+            b2bua_sdk::B2buaConfig::MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC;
+    })
+    .await;
+    let records = run(rig, &["basic_call", "abandon_ringing"], |c| {
         c.default_tuning = CallTuning {
             drop_nth: Some(TargetedDrop {
                 method: "INVITE",
