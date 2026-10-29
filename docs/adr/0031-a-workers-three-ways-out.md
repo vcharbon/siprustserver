@@ -36,8 +36,8 @@ case 2, overlapping the process's last 2 s; and in case 3b when the pod on an
 unreachable node is force-deleted, while its process may still live behind the
 partition. Case 3a and case 4 never leave the slice. In case 3a the proxy's probe reads
 the worker dead and tells the workers that verdict: the backups take over the calls
-with work in flight at once, and the force-delete of case 3b discharges what is left
-(ADR-0047 D1, D2). Case 4 is read by the tombstone and stays reactive.
+with work in flight at once, an undecided call excepted, and the force-delete of case
+3b settles and discharges what is left (ADR-0047 D1, D2, D4). Case 4 is read by the tombstone and stays reactive.
 
 What each element believed about the leaving worker, per case, from the harness's views
 ledger and the kind cluster's logs:

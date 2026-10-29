@@ -21,9 +21,9 @@
 //! to (ADR-0047 D8).
 //!
 //! A proxy's dead verdict on the peer (ADR-0050 §3) runs the takeover half
-//! alone: the same calls are taken over and an undecided one answered, while
-//! a finished call and a deferred end are left to the peer, which may live
-//! behind a partition and discharge them itself, or to its departure.
+//! alone: the same calls are taken over, while an undecided call, a finished
+//! call and a deferred end are left to the peer, which may live behind a
+//! partition and decide or discharge them itself, or to its departure.
 //!
 //! The sweep is a task of its own, never the router loop's: a departed
 //! partition holds every call the peer served, read one body at a time, and
@@ -169,8 +169,10 @@ async fn sweep<F, Fut>(
 /// Discharge `call_ref` when its body is ended, or ending with nothing left to
 /// serve, and the peer departed; else take it over when it names an INVITE
 /// transaction to serve ([`has_invite_to_serve`]), or is ending with work left
-/// ([`ending_work`]). The body is read once without the lock to leave a quiet
-/// call untouched; a call already live here is left as it is.
+/// ([`ending_work`]). On a dead verdict an undecided call is left to the
+/// departure: its decision may be in flight at a primary the proxy misread
+/// dead. The body is read once without the lock to leave a quiet call
+/// untouched; a call already live here is left as it is.
 async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Swept {
     let Ok((copy, _skew)) = ctx.state.peek_replica(call_ref).await else { return Swept::Left };
     let call = copy.call;
@@ -182,6 +184,9 @@ async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Sw
     }
     let ending = call.state == CallModelState::Terminating;
     if !has_invite_to_serve(&call) && !(ending && ending_work(&call)) {
+        return Swept::Left;
+    }
+    if cause == Cause::ReadDead && is_undecided(&call) {
         return Swept::Left;
     }
     let guard = ctx.state.lock(call_ref).await;

@@ -100,7 +100,8 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    A worker takes each verdict once, however many copies reach it, and runs
    on it the takeover half of the departure sweep over the calls it backs for
    the dead worker (ADR-0047 D1, D2): the proxy now routes their traffic to
-   it, so the proxy's verdict is the one it acts on.
+   it, so the proxy's verdict is the one it acts on. An undecided call is left
+   to the departure.
 4. **In-dialog routing reads liveness only.** A request carrying a verified
    cookie goes to `w_pri` while `w_pri` is `Alive`, whatever its acceptance;
    otherwise to `w_bak` while `w_bak` is `Alive`. It never runs a fresh
@@ -130,8 +131,9 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    Trying has already gone out): the primary still owns that transaction, and
    a final from this worker would end the caller's.
    Accepted residuals:
-   - a copy of an undecided call gets no final: the sweep at the proxy's dead
-     verdict (§3) refuses the call `503`, a live primary's included;
+   - a copy of an undecided call whose primary really died gets no final: a
+     dead verdict (§3) leaves the call to the departure sweep, which refuses
+     it `503`;
    - an INVITE that never replicated, from a primary that really died, gets
      no final from the backup; the caller's transaction timers end it;
    - a discovered pool whose watch never delivers a listing never has a first

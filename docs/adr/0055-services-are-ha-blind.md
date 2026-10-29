@@ -504,10 +504,10 @@ the re-anchor deadband of each other.
     leave two (the dead primary's and the survivor's, §5), never none;
   - primary killed unannounced (ADR-0031 case 3): the proxy's probe reads it
     dead 2 s later and tells the backup, which takes over the calls with work
-    in flight (ADR-0047 D1); its endpoint reads not ready but stays in the
-    slice 40 s later, and leaves it when the evicted pod is force-deleted 5
-    min later, when the backup discharges what is left; judged as a kill of
-    the primary;
+    in flight but an undecided one (ADR-0047 D1); its endpoint reads not ready
+    but stays in the slice 40 s later, and leaves it when the evicted pod is
+    force-deleted 5 min later, when the backup settles and discharges what is
+    left; judged as a kill of the primary;
   - primary killed and rebooted (ADR-0031 case 2): restarted empty at a new
     address 1 s later, published once ready, it reclaims its calls from the
     backup; judged as a kill of the primary;

@@ -15,7 +15,7 @@ use sip_net_testkit::SimulatedSignalingNetwork;
 
 use b2bua_sdk::event::CallEvent;
 
-use super::{sweep, take_over_departed, take_over_one, Cause, Swept};
+use super::{sweep, take_over_departed, take_over_one, take_over_read_dead, Cause, Swept};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::repl::ReplicatingCallStore;
@@ -106,6 +106,32 @@ async fn a_departed_peers_in_flight_calls_are_taken_over_and_its_ended_calls_dis
     let held = n.store.get_call(BAK, "w0", &ended.call_ref).await.unwrap();
     assert!(held.is_none(), "the discharged call is deleted");
     assert_eq!(ctx.state.lock_count(), 0, "no lock entry is left behind");
+}
+
+/// On a proxy's dead verdict the peer may live behind a partition with the
+/// decision in flight: an undecided call is left to the departure, untouched,
+/// and an ended call is left to the peer; nothing is on the wire.
+#[tokio::test(start_paused = true)]
+async fn a_dead_verdict_leaves_an_undecided_call_and_an_ended_one_alone() {
+    let net = SimulatedSignalingNetwork::new(1);
+    let n = node_on(&net, "w1", |_| {}, Vec::new()).await;
+    let caller = net.bind_udp(BindUdpOpts::new(src(), 64)).await.unwrap();
+    let ctx = n.core.router_ctx();
+    let (undecided, ended) = (born("undecided"), ended("ended"));
+    for call in [&undecided, &ended] {
+        put(&n.store, call).await;
+    }
+
+    assert!(take_over_read_dead(ctx, "w0"), "this node backs calls of w0");
+
+    let lines = heard(caller.as_ref(), Duration::from_millis(200)).await;
+    assert!(lines.is_empty(), "nothing on the wire: {lines:?}");
+    assert_eq!(n.metrics.repl_takeover_hydrated_total(), 0, "nothing taken over");
+    assert!(ctx.state.peek(&undecided.call_ref).is_none(), "the undecided call is left");
+    assert!(n.cdr.snapshot().is_empty(), "nothing discharged");
+    assert_eq!(element(&n.store, &undecided.call_ref).await.state, CallModelState::Active);
+    assert_eq!(ctx.state.lock_count(), 0, "no lock entry is left behind");
+    assert!(!take_over_read_dead(ctx, "w9"), "no call of w9 is backed here");
 }
 
 /// A call whose ending the departed peer finished with its last write lost:
