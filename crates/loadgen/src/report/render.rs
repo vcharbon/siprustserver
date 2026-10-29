@@ -181,26 +181,35 @@ impl Reporter {
 }
 
 /// A row's share of the recorded calls its class judges on their recording,
-/// and the estimate over every call that ended on an accepted branch: an
-/// `rfc_audit_fail` row counts its audited recorded calls over the audited
-/// ones, a `check_fail` row its calls over the checked ones. Empty for a row
-/// with no such call: every other class, a refused in-dialog request, and a
-/// dialog verdict on unrecorded calls are judged on every call.
+/// and the estimate over every call that class judges: an `rfc_audit_fail`
+/// row counts its audited recorded calls over the audited ones, estimated
+/// over the calls that ended on an accepted branch; a `check_fail` row counts
+/// its calls over the checked ones, estimated over the accepted calls clean of
+/// the audit. Every other row is judged on every call and shows no share, and
+/// so does an `rfc_audit_fail` row with no audited recorded call.
 fn judged_share(g: &Inner, bucket: &Bucket, n: u64) -> String {
     let (scenario, class, _) = bucket;
     let tally = |m: &BTreeMap<ScenarioId, u64>| m.get(scenario).copied().unwrap_or(0);
-    let (k, judged, noun) = if *class == ResultClass::RfcAuditFail.label() {
-        (g.audited_failed.get(bucket).copied().unwrap_or(0), tally(&g.audited), "audited")
+    let (k, judged, base, noun) = if *class == ResultClass::RfcAuditFail.label() {
+        let k = g.audited_failed.get(bucket).copied().unwrap_or(0);
+        (k, tally(&g.audited), tally(&g.accepted), "audited")
     } else if *class == ResultClass::CheckFail.label() {
         let (passed, failed) = g.check_verdicts.get(scenario).copied().unwrap_or((0, 0));
-        (n, passed + failed, "checked")
+        let count = |label: String| -> u64 {
+            g.counts
+                .iter()
+                .filter(|((s, c, _), _)| s == scenario && *c == label)
+                .map(|(_, n)| n)
+                .sum()
+        };
+        let base = count(ResultClass::Ok.label()) + count(ResultClass::CheckFail.label());
+        (n, passed + failed, base, "checked")
     } else {
         return String::new();
     };
     if k == 0 || judged == 0 {
         return String::new();
     }
-    let base = tally(&g.accepted);
     let share = k as f64 / judged as f64;
     let estimate = (share * base as f64).round();
     format!("{k} of {judged} {noun} ({:.1} %), ≈ {estimate} of {base}", share * 100.0)
