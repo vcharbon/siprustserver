@@ -332,7 +332,8 @@ impl Reporter {
                 page = Some(sample_rel(scenario, &key.1, case, stored.len() - 1));
             }
         }
-        if !class.is_ok() {
+        // A refused key is no SUT failure: it never pushes one out of the list.
+        if !class.is_ok() && class != ResultClass::Rejected {
             let at_ms = self.ms_since_start(Instant::now());
             g.live.note_failure(at_ms, &key, page);
         }

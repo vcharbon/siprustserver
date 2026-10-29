@@ -49,8 +49,8 @@
         "failed": 0,
         "generatorFailures": 0,
         "inFlight": 0,
-        "notPlaced": 0,
         "offered": 0,
+        "offeringMs": 0,
         "ok": 0,
         "placed": 0,
         "rejected": 0,
@@ -524,14 +524,14 @@
           "format": "uint64",
           "minimum": 0
         },
-        "notPlaced": {
-          "description": "Calls never placed (shed at the cap, or their key refused), as the\ncall-outcome records count them.",
+        "offered": {
+          "description": "Calls offered: every slot of the rate, placed or not.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
         },
-        "offered": {
-          "description": "Calls offered: every slot of the rate, placed or not.",
+        "offeringMs": {
+          "description": "Time the run offered calls so far: the elapsed time up to the run's\nduration or its drain, whichever came first.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
@@ -562,6 +562,7 @@
       },
       "required": [
         "elapsedMs",
+        "offeringMs",
         "targetCps",
         "draining",
         "offered",
@@ -570,7 +571,6 @@
         "ok",
         "failed",
         "rejected",
-        "notPlaced",
         "generatorFailures"
       ]
     },
@@ -773,7 +773,7 @@
           "minimum": 0
         },
         "p50Ms": {
-          "description": "End-to-end latency median of the calls ended in the window (`0` when none).",
+          "description": "End-to-end latency median of the calls ended in the window (`0` when\nnone, see [`Self::has_latency`]).",
           "type": "number",
           "format": "double"
         },

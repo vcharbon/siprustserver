@@ -172,6 +172,28 @@ mod tests {
 
     #[test]
     #[ignore = "slow lane: loadgen"]
+    fn a_merged_window_keeps_the_latency_of_both_halves() {
+        let mut ring = SeriesRing::new();
+        let mut latency = Hist::call();
+        ring.tick(5_000, totals(0), &latency);
+        for _ in 0..100 {
+            latency.record(500.0);
+        }
+        ring.tick(10_000, totals(100), &latency);
+        for i in 3..=SERIES_CAP as u64 + 1 {
+            ring.tick(i * 5_000, totals(100), &latency);
+        }
+        let first = &ring.points()[0];
+        assert_eq!(
+            (first.start_ms, first.span_ms, first.ok),
+            (0, 10_000, 100),
+            "merged: {first:?}"
+        );
+        assert!(first.p50_ms > 400.0, "the second half's calls kept: {first:?}");
+    }
+
+    #[test]
+    #[ignore = "slow lane: loadgen"]
     fn a_window_holds_the_latency_of_the_calls_that_ended_in_it() {
         let mut ring = SeriesRing::new();
         let mut latency = Hist::call();

@@ -357,9 +357,9 @@ fn fixture_load_result() -> serde_json::Value {
             "commandLine": ["loadgen", "--cps", "20", "--duration", "60"]
         },
         "progress": {
-            "elapsedMs": 60_000, "targetCps": 20.0, "draining": false, "offered": 1185,
+            "elapsedMs": 60_000, "offeringMs": 60_000, "targetCps": 20.0, "draining": false, "offered": 1185,
             "placed": 1181, "inFlight": 0, "ok": 1180, "failed": 1, "rejected": 0,
-            "notPlaced": 4, "generatorFailures": 0
+            "generatorFailures": 0
         },
         "counts": [
             { "scenario": "basic_call", "class": "ok", "case": "", "count": 1180, "ok": true },

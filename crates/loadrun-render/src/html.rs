@@ -35,13 +35,9 @@ pub(crate) fn clock(ms: u64) -> String {
     }
 }
 
-/// A rate in calls per second, without trailing zeros past one decimal.
+/// A rate in calls per second, exactly as held (no trailing zeros).
 pub(crate) fn cps(v: f64) -> String {
-    if v.fract() == 0.0 {
-        format!("{v:.0}")
-    } else {
-        format!("{v:.1}")
-    }
+    format!("{v}")
 }
 
 /// Format a Unix epoch-ms timestamp as `YYYY-MM-DD HH:MM:SSZ` (UTC).

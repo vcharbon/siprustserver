@@ -96,7 +96,7 @@ struct Reply {
     status: &'static str,
     ctype: &'static str,
     body: Vec<u8>,
-    location: Option<&'static str>,
+    location: Option<String>,
 }
 
 const TEXT: &str = "text/plain; version=0.0.4";
@@ -107,10 +107,15 @@ fn text(status: &'static str, body: String) -> Reply {
 }
 
 /// A rate or drain request's answer: the text for a client, a redirect back
-/// to the page for a browser form.
+/// to the page (relative, so it holds behind a path proxy, with the page's
+/// refresh period) for a browser form.
 fn acted(req: &Request, body: String) -> Reply {
     if req.is_form() {
-        Reply { location: Some("/"), ..text("303 See Other", body) }
+        let location = match req.param("refresh").and_then(|v| v.parse::<u32>().ok()) {
+            Some(n) => format!("./?refresh={n}"),
+            None => "./".to_string(),
+        };
+        Reply { location: Some(location), ..text("303 See Other", body) }
     } else {
         text("200 OK", body)
     }

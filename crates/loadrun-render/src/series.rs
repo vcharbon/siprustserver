@@ -48,12 +48,18 @@ pub(crate) fn series(out: &mut String, idx: &LoadRunIndex) {
         "<table><tr><th>window</th><th>placed</th><th>ok</th><th>failed</th><th>rejected</th>\
          <th>error %</th><th>p50 ms</th><th>p99 ms</th><th>events</th></tr>",
     );
-    for p in points.iter().rev().take(TABLE_WINDOWS) {
+    for (i, p) in points.iter().rev().take(TABLE_WINDOWS).enumerate() {
         let err = p.error_pct().map_or("–".to_string(), |e| format!("{e:.1}"));
+        let (p50, p99) = if p.has_latency() {
+            (format!("{:.1}", p.p50_ms), format!("{:.1}", p.p99_ms))
+        } else {
+            ("–".to_string(), "–".to_string())
+        };
+        // The newest window also holds an event at its very end.
         let marks = idx
             .rate_events
             .iter()
-            .filter(|e| p.holds(e.at_ms))
+            .filter(|e| p.holds(e.at_ms) || (i == 0 && e.at_ms == p.end_ms()))
             .map(event_label)
             .collect::<Vec<_>>()
             .join(", ");
@@ -65,14 +71,12 @@ pub(crate) fn series(out: &mut String, idx: &LoadRunIndex) {
         let _ = write!(
             out,
             "<tr><td>{}–{}</td><td>{}</td><td>{}</td><td>{failed}</td><td>{}</td><td>{err}</td>\
-             <td>{:.1}</td><td>{:.1}</td><td>{}</td></tr>",
+             <td>{p50}</td><td>{p99}</td><td>{}</td></tr>",
             clock(p.start_ms),
             clock(p.end_ms()),
             p.placed,
             p.ok,
             p.rejected,
-            p.p50_ms,
-            p.p99_ms,
             esc(&marks)
         );
     }
@@ -112,7 +116,7 @@ fn sparkline(
         "<span class=\"spark\">{label} <svg width=\"{SPARK_W}\" height=\"{SPARK_H}\" \
          viewBox=\"0 0 {SPARK_W} {SPARK_H}\"><title>{label}: max {max:.1}</title>"
     );
-    for e in events {
+    for e in events.iter().filter(|e| e.at_ms <= span_ms) {
         let ex = x(e.at_ms);
         let _ = write!(
             out,

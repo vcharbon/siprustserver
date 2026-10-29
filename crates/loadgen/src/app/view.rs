@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use e2e_model::RateEventKind;
 use sip_clock::Clock;
 
 use crate::outcome::OutcomeSink;
@@ -42,13 +43,17 @@ impl RunView {
         progress
     }
 
-    /// Fill the figures the reporter does not hold: the rate and the
-    /// call-outcome counts.
+    /// Fill the figures the reporter does not hold: the rate, the offering
+    /// time (cut at the run's duration or its drain) and the call-outcome
+    /// counts.
     fn complete(&self, p: &mut Progress) {
         p.target_cps = self.rate.cps();
         p.draining = self.rate.is_draining();
+        let (events, _) = self.rate.events_since(self.reporter.started_at());
+        let drained = events.iter().find(|e| e.kind == RateEventKind::Drain).map(|e| e.at_ms);
+        let duration_ms = self.meta.duration_secs.saturating_mul(1000);
+        p.offering_ms = p.elapsed_ms.min(duration_ms).min(drained.unwrap_or(u64::MAX));
         p.offered = self.outcomes.offered_total();
-        p.not_placed = self.outcomes.not_placed_total();
         p.generator_failures = self.outcomes.generator_failures_total();
     }
 

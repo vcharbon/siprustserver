@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 pub struct Progress {
     /// Time since the run started.
     pub elapsed_ms: u64,
+    /// Time the run offered calls so far: the elapsed time up to the run's
+    /// duration or its drain, whichever came first.
+    pub offering_ms: u64,
     /// The offered-rate target (calls/s) as of the doc: the configured rate
     /// until a rate change moves it, `0` while paused.
     pub target_cps: f64,
@@ -28,20 +31,18 @@ pub struct Progress {
     pub failed: u64,
     /// Calls of the `rejected` class: refused before any datagram.
     pub rejected: u64,
-    /// Calls never placed (shed at the cap, or their key refused), as the
-    /// call-outcome records count them.
-    pub not_placed: u64,
     /// Calls the generator itself failed: a run with one is invalid.
     pub generator_failures: u64,
 }
 
 impl Progress {
-    /// Calls placed per second of the run so far (`0` before any time elapsed).
+    /// Calls placed per second of the time the run offered calls (`0` before
+    /// any).
     pub fn achieved_cps(&self) -> f64 {
-        if self.elapsed_ms == 0 {
+        if self.offering_ms == 0 {
             0.0
         } else {
-            self.placed as f64 * 1000.0 / self.elapsed_ms as f64
+            self.placed as f64 * 1000.0 / self.offering_ms as f64
         }
     }
 }
@@ -63,7 +64,8 @@ pub struct SeriesPoint {
     pub failed: u64,
     /// Calls refused before any datagram or shed at the cap in the window.
     pub rejected: u64,
-    /// End-to-end latency median of the calls ended in the window (`0` when none).
+    /// End-to-end latency median of the calls ended in the window (`0` when
+    /// none, see [`Self::has_latency`]).
     pub p50_ms: f64,
     /// End-to-end latency 99th percentile of the calls ended in the window.
     pub p99_ms: f64,
@@ -85,6 +87,12 @@ impl SeriesPoint {
     /// Whether `at_ms` falls in the window.
     pub fn holds(&self, at_ms: u64) -> bool {
         (self.start_ms..self.end_ms()).contains(&at_ms)
+    }
+
+    /// Whether the window holds a call's end-to-end latency: some call that
+    /// ran ended in it.
+    pub fn has_latency(&self) -> bool {
+        self.ok + self.failed > 0
     }
 }
 

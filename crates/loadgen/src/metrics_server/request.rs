@@ -1,8 +1,14 @@
 //! One HTTP/1.1 request as the metrics socket reads it: the request line, the
 //! form body of a browser's POST, and the query and form values.
 
-use tokio::io::AsyncReadExt;
+use std::time::Duration;
 
+use tokio::io::AsyncReadExt;
+use tokio::time::{timeout_at, Instant};
+
+/// How long a client has to send its whole request; past it the request is
+/// taken as it stands, so an idle or short-body client holds no task.
+const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// The most header bytes read before the request is taken as it stands.
 const MAX_HEAD: usize = 8 * 1024;
 /// The most body bytes read.
@@ -32,8 +38,9 @@ impl Request {
 }
 
 /// Read one request off `sock`: the head up to its blank line, then the body
-/// its `Content-Length` announces (both bounded).
+/// its `Content-Length` announces (both bounded in size and in time).
 pub(super) async fn read_request<S: AsyncReadExt + Unpin>(sock: &mut S) -> Request {
+    let deadline = Instant::now() + READ_TIMEOUT;
     let mut buf = Vec::with_capacity(2048);
     let mut chunk = [0u8; 2048];
     let head_end = loop {
@@ -43,9 +50,9 @@ pub(super) async fn read_request<S: AsyncReadExt + Unpin>(sock: &mut S) -> Reque
         if buf.len() >= MAX_HEAD {
             break None;
         }
-        match sock.read(&mut chunk).await {
-            Ok(0) | Err(_) => break None,
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        match timeout_at(deadline, sock.read(&mut chunk)).await {
+            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break None,
+            Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
         }
     };
     let head_len = head_end.unwrap_or(buf.len());
@@ -58,9 +65,9 @@ pub(super) async fn read_request<S: AsyncReadExt + Unpin>(sock: &mut S) -> Reque
         let want = length.min(MAX_BODY);
         let mut body = buf[start..].to_vec();
         while body.len() < want {
-            match sock.read(&mut chunk).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => body.extend_from_slice(&chunk[..n]),
+            match timeout_at(deadline, sock.read(&mut chunk)).await {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                Ok(Ok(n)) => body.extend_from_slice(&chunk[..n]),
             }
         }
         body.truncate(want);
@@ -128,21 +135,43 @@ fn value_of(pairs: &str, key: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     #[ignore = "slow lane: loadgen"]
     async fn a_form_post_split_across_reads_yields_its_body() {
-        let (mut client, mut server) = tokio::io::duplex(64);
+        let (mut client, mut server) = tokio::io::duplex(1024);
         tokio::spawn(async move {
             use tokio::io::AsyncWriteExt;
-            let head = "POST /rate HTTP/1.1\r\nHost: x\r\nContent-Type: \
-                        application/x-www-form-urlencoded\r\nContent-Length: 6\r\n\r\n";
-            client.write_all(head.as_bytes()).await.unwrap();
+            client.write_all(FORM_HEAD.as_bytes()).await.unwrap();
+            // The reader has taken the head and waits on the body.
+            tokio::time::sleep(Duration::from_millis(50)).await;
             client.write_all(b"cps=40").await.unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
         });
+        let start = Instant::now();
         let req = read_request(&mut server).await;
+        assert_eq!(start.elapsed(), Duration::from_millis(50), "read on the body's arrival");
         assert_eq!((req.method.as_str(), req.path.as_str()), ("POST", "/rate"));
         assert!(req.is_form());
         assert_eq!(req.param("cps").as_deref(), Some("40"));
+    }
+
+    const FORM_HEAD: &str = "POST /rate HTTP/1.1\r\nHost: x\r\nContent-Type: \
+                             application/x-www-form-urlencoded\r\nContent-Length: 6\r\n\r\n";
+
+    #[tokio::test(start_paused = true)]
+    #[ignore = "slow lane: loadgen"]
+    async fn a_client_that_stops_short_is_answered_at_the_timeout() {
+        let (mut client, mut server) = tokio::io::duplex(1024);
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            client.write_all(FORM_HEAD.as_bytes()).await.unwrap();
+            client.write_all(b"cps").await.unwrap();
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        let start = Instant::now();
+        let req = read_request(&mut server).await;
+        assert_eq!(start.elapsed(), READ_TIMEOUT, "taken as it stands at the timeout");
+        assert_eq!(req.form.as_deref(), Some("cps"));
     }
 
     #[test]

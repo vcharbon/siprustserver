@@ -21,12 +21,17 @@ mod tables;
 pub use html::fmt_epoch_ms;
 pub use status::status_line;
 
-/// The page's minimal style sheet, for a host page that embeds the body.
-pub const CSS: &str = "body{font-family:sans-serif}table{border-collapse:collapse;margin:.5em 0}\
-td,th{border:1px solid #ccc;padding:4px 8px;text-align:left}.ok{color:#070}.nok{color:#a00}\
-.muted{color:#666}pre.cmd{background:#f4f4f4;padding:6px;white-space:pre-wrap}\
-.spark{display:inline-block;margin:0 1.5em .5em 0}.spark svg{vertical-align:middle;border:1px solid #ddd}\
-form.inline{display:inline;margin-right:1em}";
+/// The page's minimal style sheet, for a host page that embeds the body. Every
+/// rule is scoped to the body's `loadrun` wrapper, so it restyles nothing of
+/// the host page.
+pub const CSS: &str =
+    ".loadrun{font-family:sans-serif}.loadrun table{border-collapse:collapse;margin:.5em 0}\
+.loadrun td,.loadrun th{border:1px solid #ccc;padding:4px 8px;text-align:left}\
+.loadrun .ok{color:#070}.loadrun .nok{color:#a00}.loadrun .muted{color:#666}\
+.loadrun pre.cmd{background:#f4f4f4;padding:6px;white-space:pre-wrap}\
+.loadrun .spark{display:inline-block;margin:0 1.5em .5em 0}\
+.loadrun .spark svg{vertical-align:middle;border:1px solid #ddd}\
+.loadrun form.inline{display:inline;margin-right:1em}";
 
 /// How a page is rendered.
 #[derive(Debug, Clone, Default)]
@@ -57,11 +62,11 @@ impl RenderOpts {
     }
 }
 
-/// The report as an HTML fragment, for a host page that brings its own
-/// document and style ([`CSS`]).
+/// The report as an HTML fragment, one `<div class="loadrun">`, for a host
+/// page that brings its own document and style ([`CSS`]).
 pub fn render_body(idx: &LoadRunIndex, opts: &RenderOpts) -> String {
     let live = opts.live_for(idx);
-    let mut out = String::new();
+    let mut out = String::from("<div class=\"loadrun\">");
     headline::command(&mut out, idx);
     headline::headline(&mut out, idx, live);
     series::series(&mut out, idx);
@@ -73,6 +78,7 @@ pub fn render_body(idx: &LoadRunIndex, opts: &RenderOpts) -> String {
     tables::checks(&mut out, idx);
     tables::rate_events(&mut out, idx);
     tables::settings(&mut out, idx);
+    out.push_str("</div>");
     out
 }
 

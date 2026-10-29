@@ -64,10 +64,9 @@ pub(crate) fn headline(out: &mut String, idx: &LoadRunIndex, live: Option<Live>)
         (
             "rejected",
             format!(
-                "{} · shed at max-in-flight {} · not placed {} · {}",
+                "{} · shed at max-in-flight {} · {}",
                 flagged("rejected class", p.rejected),
                 c.shed,
-                p.not_placed,
                 flagged("generator failures", p.generator_failures)
             ),
         ),
@@ -113,21 +112,23 @@ fn flagged(label: &str, n: u64) -> String {
     }
 }
 
-/// The rate and drain forms (posting to the load generator's `/rate` and
-/// `/drain`) and the refresh links.
+/// The rate and drain forms (posting to the load generator's `rate` and
+/// `drain`, relative to the page, with the page's refresh period) and the
+/// refresh links.
 fn controls(out: &mut String, idx: &LoadRunIndex, live: Live) {
-    let p = &idx.progress;
+    let (p, n) = (&idx.progress, live.refresh_secs);
     let _ = write!(
         out,
-        "<div class=\"controls\"><form class=\"inline\" method=\"post\" action=\"/rate\">\
+        "<div class=\"controls\"><form class=\"inline\" method=\"post\" action=\"rate?refresh={n}\">\
          <input name=\"cps\" type=\"number\" min=\"0\" step=\"any\" value=\"{}\"> \
          <button type=\"submit\">set rate (cps)</button></form>",
         cps(p.target_cps)
     );
     if !p.draining {
-        out.push_str(
-            "<form class=\"inline\" method=\"post\" action=\"/drain\">\
-             <button type=\"submit\">drain</button></form>",
+        let _ = write!(
+            out,
+            "<form class=\"inline\" method=\"post\" action=\"drain?refresh={n}\">\
+             <button type=\"submit\">drain</button></form>"
         );
     }
     if live.refresh_secs > 0 {

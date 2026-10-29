@@ -18,8 +18,9 @@ impl Reporter {
     /// the caller-supplied run `meta` (timing and echoed knobs; the reporter
     /// sets its sampling bounds) and the external `canaries` (the mux's
     /// orphans and drops; the reporter fills shed and ringing). Its progress
-    /// holds the reporter's figures, with the configured rate as target; the
-    /// caller fills the rate and call-outcome figures it owns. The sample-page
+    /// holds the reporter's figures, with the configured rate as target and
+    /// the offering time cut at the configured duration; the caller fills the
+    /// rate, drain and call-outcome figures it owns. The sample-page
     /// paths it lists are the run-dir-relative paths
     /// [`write_report`](Self::write_report) writes and the live surface serves.
     pub fn build_index(&self, mut meta: LoadRunMeta, mut canaries: Canaries) -> LoadRunIndex {
@@ -31,6 +32,9 @@ impl Reporter {
         });
         let mut progress = self.progress_of(&g);
         progress.target_cps = meta.cps;
+        if meta.duration_secs > 0 {
+            progress.offering_ms = progress.elapsed_ms.min(meta.duration_secs * 1000);
+        }
 
         let counts = g
             .counts

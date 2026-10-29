@@ -43,6 +43,7 @@ fn index(finished: bool) -> LoadRunIndex {
         },
         progress: Progress {
             elapsed_ms: 35_000,
+            offering_ms: 35_000,
             target_cps: 10.0,
             draining: false,
             offered: 700,
@@ -51,7 +52,6 @@ fn index(finished: bool) -> LoadRunIndex {
             ok: 640,
             failed: 9,
             rejected: 3,
-            not_placed: 7,
             generator_failures: 0,
         },
         // 25 windows, the oldest two merged to 10 s; a rate event in the
@@ -158,8 +158,12 @@ fn live() -> RenderOpts {
 #[test]
 fn the_command_line_comes_first_quoted_as_typed() {
     let page = render_body(&index(false), &RenderOpts::default());
-    let cmd = page.find("<pre class=\"cmd\">loadgen --cps 20 --case &#39;a b&#39;</pre>");
-    assert_eq!(cmd, Some(0), "the command line opens the page: {page}");
+    assert!(
+        page.starts_with(
+            "<div class=\"loadrun\"><pre class=\"cmd\">loadgen --cps 20 --case &#39;a b&#39;</pre>"
+        ),
+        "the command line opens the page: {page}"
+    );
     assert!(page.contains("target <code>192.0.2.10:5060</code>"));
 }
 
@@ -175,7 +179,6 @@ fn the_headline_states_rate_flight_and_every_rejection_source() {
         "failed 9",
         "rejected class 3",
         "shed at max-in-flight 4",
-        "not placed 7",
         "generator failures 0",
         "in 11 · out 13",
         "orphans 2",
@@ -191,14 +194,15 @@ fn a_live_page_carries_the_controls_and_reloads() {
     let idx = index(false);
     let page = render_page(&idx, &live());
     assert!(page.contains("<meta http-equiv=\"refresh\" content=\"60\">"));
-    assert!(page.contains("action=\"/rate\"") && page.contains("name=\"cps\""));
-    assert!(page.contains("action=\"/drain\""));
+    assert!(page.contains("action=\"rate?refresh=60\"") && page.contains("name=\"cps\""));
+    assert!(page.contains("action=\"drain?refresh=60\""), "relative, keeping the period");
+    assert!(page.contains("value=\"10\""), "the rate field holds the target");
     assert!(page.contains("href=\"?refresh=0\""), "a freeze link");
 
     let frozen = render_page(&idx, &RenderOpts { live: Some(Live { refresh_secs: 0 }), ..live() });
     assert!(!frozen.contains("http-equiv=\"refresh\""), "a frozen page does not reload");
     assert!(frozen.contains("href=\"?refresh=60\""), "a link to reload again");
-    assert!(frozen.contains("action=\"/rate\""), "frozen keeps the controls");
+    assert!(frozen.contains("action=\"rate?refresh=0\""), "frozen keeps the controls");
 }
 
 #[test]
@@ -228,7 +232,7 @@ fn a_drained_run_offers_no_drain() {
     idx.progress.draining = true;
     let page = render_body(&idx, &live());
     assert!(page.contains("(draining)"));
-    assert!(!page.contains("action=\"/drain\""));
+    assert!(!page.contains("action=\"drain"));
 }
 
 #[test]
@@ -247,12 +251,49 @@ fn the_series_lists_the_last_windows_newest_first_with_their_events() {
 }
 
 #[test]
-fn a_merged_window_shows_its_whole_span() {
+fn a_ten_second_window_shows_its_span_and_its_event() {
     let mut idx = index(false);
     idx.series.truncate(3);
     let page = render_body(&idx, &RenderOpts::default());
-    assert!(page.contains("<td>0:00–0:10</td>"), "the merged 10 s window: {page}");
+    assert!(page.contains("<td>0:00–0:10</td>"), "the 10 s window: {page}");
     assert!(page.contains("rate 20 → 15"), "its event is marked");
+}
+
+#[test]
+fn an_event_at_the_last_window_end_is_marked_on_it() {
+    let mut idx = index(false);
+    idx.rate_events.push(RateEvent {
+        at_ms: 130_000,
+        kind: RateEventKind::Rate,
+        from_cps: 10.0,
+        to_cps: 12.345,
+    });
+    let page = render_body(&idx, &RenderOpts::default());
+    let newest = &page[page.find("<td>2:05–2:10</td>").unwrap()..];
+    let newest = &newest[..newest.find("</tr>").unwrap()];
+    assert!(newest.contains("rate 10 → 12.345"), "marked, at full precision: {newest}");
+}
+
+#[test]
+fn a_window_without_an_ended_call_shows_no_latency() {
+    let mut idx = index(false);
+    idx.series =
+        vec![SeriesPoint { start_ms: 0, span_ms: 5_000, placed: 3, ..SeriesPoint::default() }];
+    idx.rate_events.clear();
+    let page = render_body(&idx, &RenderOpts::default());
+    assert!(
+        page.contains("<td>0</td><td>–</td><td>–</td><td>–</td><td></td></tr>"),
+        "error %, p50 and p99 unknown: {page}"
+    );
+}
+
+#[test]
+fn the_style_sheet_only_reaches_the_report() {
+    for rule in CSS.split('}').filter(|r| !r.is_empty()) {
+        for selector in rule.split('{').next().unwrap().split(',') {
+            assert!(selector.starts_with(".loadrun"), "unscoped selector {selector:?}");
+        }
+    }
 }
 
 #[test]

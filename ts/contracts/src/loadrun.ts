@@ -36,6 +36,7 @@ export interface JudgedShare extends Schema.Schema.Type<typeof JudgedShare> {}
 /** The run's headline figures as of the doc. */
 export const Progress = Schema.Struct({
   elapsedMs: Schema.Int,
+  offeringMs: Schema.Int,
   targetCps: Schema.Number,
   draining: Schema.Boolean,
   offered: Schema.Int,
@@ -44,13 +45,13 @@ export const Progress = Schema.Struct({
   ok: Schema.Int,
   failed: Schema.Int,
   rejected: Schema.Int,
-  notPlaced: Schema.Int,
   generatorFailures: Schema.Int
 })
 export interface Progress extends Schema.Schema.Type<typeof Progress> {}
 
 const NO_PROGRESS = {
   elapsedMs: 0,
+  offeringMs: 0,
   targetCps: 0,
   draining: false,
   offered: 0,
@@ -59,7 +60,6 @@ const NO_PROGRESS = {
   ok: 0,
   failed: 0,
   rejected: 0,
-  notPlaced: 0,
   generatorFailures: 0
 }
 
@@ -277,6 +277,7 @@ export const loadRunIndexJson = (index: LoadRunIndex): Record<string, unknown> =
     }),
     progress: {
       elapsedMs: index.progress.elapsedMs,
+      offeringMs: index.progress.offeringMs,
       targetCps: index.progress.targetCps,
       draining: index.progress.draining,
       offered: index.progress.offered,
@@ -285,7 +286,6 @@ export const loadRunIndexJson = (index: LoadRunIndex): Record<string, unknown> =
       ok: index.progress.ok,
       failed: index.progress.failed,
       rejected: index.progress.rejected,
-      notPlaced: index.progress.notPlaced,
       generatorFailures: index.progress.generatorFailures
     },
     series: index.series?.map((p) => ({

@@ -81,8 +81,10 @@ impl Reporter {
 
     pub(super) fn progress_of(&self, g: &Inner) -> Progress {
         let (ok, failed, rejected) = ended(g);
+        let elapsed_ms = self.ms_since_start(Instant::now());
         Progress {
-            elapsed_ms: self.ms_since_start(Instant::now()),
+            elapsed_ms,
+            offering_ms: elapsed_ms,
             placed: self.started.load(std::sync::atomic::Ordering::Relaxed),
             in_flight: self.inflight.load(std::sync::atomic::Ordering::Relaxed),
             ok,

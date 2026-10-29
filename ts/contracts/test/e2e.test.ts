@@ -230,6 +230,7 @@ describe("a load-run index", () => {
     },
     progress: {
       elapsedMs: 60000,
+      offeringMs: 60000,
       targetCps: 20,
       draining: false,
       offered: 1190,
@@ -238,7 +239,6 @@ describe("a load-run index", () => {
       ok: 1180,
       failed: 5,
       rejected: 0,
-      notPlaced: 5,
       generatorFailures: 0
     },
     series: [{ startMs: 0, spanMs: 5000, placed: 100, ok: 98, failed: 2, rejected: 0, p50Ms: 10, p99Ms: 40 }],
