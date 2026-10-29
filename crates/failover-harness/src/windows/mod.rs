@@ -17,6 +17,7 @@ pub(crate) mod stall_cseq;
 pub(crate) mod stall_repeat;
 mod table;
 pub mod tier;
+pub(crate) mod two_servers;
 pub(crate) mod unseen_rseq;
 
 use b2bua::repl::SyncLevel;
@@ -201,6 +202,13 @@ impl Row {
     /// (`W-stale-resend…`): it stays closed in a run where none was.
     pub fn needs_resend(&self) -> bool {
         table::RESEND_ROWS.contains(&self.id)
+    }
+
+    /// Whether the row accepts only a dialog two workers each ended
+    /// (`W-off-reboot-two-servers`): it stays closed in a run where no dialog
+    /// took a BYE from two workers.
+    pub fn needs_two_servers(&self) -> bool {
+        table::TWO_SERVER_ROWS.contains(&self.id)
     }
 
     /// Whether `strike` opens this row in a cell at `level`, its tier not yet

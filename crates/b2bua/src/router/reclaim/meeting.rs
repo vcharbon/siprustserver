@@ -4,7 +4,10 @@
 //! cleanly ([`super::diverged`]). A meeting is not this node's write: the
 //! live copy is replaced without a bump of this node's axis
 //! ([`CallState::update_quiet`](crate::store::CallState::update_quiet)) and
-//! without a flush.
+//! without a flush. The one exception is a taken copy that carries the
+//! final of an INVITE its node dialled. That INVITE pinned the node's
+//! takeover copy, and the primary then writes once so the copy stands down
+//! (ADR-0047 D7).
 
 use std::sync::Arc;
 
@@ -16,6 +19,7 @@ use super::super::release::{release_call, ReleaseKind};
 use super::super::restore_hygiene::sanitize_restored_timers;
 use super::super::stand_down::covers;
 use super::super::RouterCtx;
+use super::bulk::announce_reclaim;
 use super::carried_cancel::send_carried_cancels;
 use super::diverged::{end_diverged, end_over_an_ending, own_records};
 use super::ending::discharge_met_ending;
@@ -137,7 +141,9 @@ fn keep(ctx: &Arc<RouterCtx>, live: &Enveloped, kept: Enveloped) {
 /// body it counts — with the other's exempt fields. The live timer service
 /// follows the ledger taken, and every INVITE it holds answered 2xx and
 /// awaiting its ACK is seeded in the layer, so a copy of that INVITE draws
-/// the 2xx (an identity already held is left as it is).
+/// the 2xx (an identity already held is left as it is). A taken copy that
+/// carries the final of an INVITE the other owner dialled draws one write
+/// ([`announce_reclaim`]): the copy that INVITE pinned stands down on it.
 async fn take_whole(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
@@ -157,10 +163,32 @@ async fn take_whole(
     let Enveloped { call: mut taken, topology } = taken;
     resync_timers(ctx, call_ref, &live.call, &mut taken, now_ms).await;
     let seeds = answered_invite_seeds(&taken);
-    ctx.state.update_enveloped(Enveloped::new(taken, topology));
+    let released = releases_a_pinned_copy(&live.call, &taken, &ctx.relay_owner);
+    ctx.state.update_enveloped(Enveloped::new(taken.clone(), topology));
     if !seeds.is_empty() {
         let _ = ctx.txn.seed(call_ref, seeds).await;
     }
+    if released {
+        announce_reclaim(ctx, taken);
+    }
+}
+
+/// Whether `taken`, the other owner's copy, carries the final of a leg's
+/// dialling INVITE that node sent and `live` still awaits. That INVITE pinned
+/// the other owner's takeover copy (ADR-0047 D7); with its final in, this
+/// node writes the call once, and the copy stands down on that write.
+fn releases_a_pinned_copy(live: &Call, taken: &Call, this: &call::RelayOwner) -> bool {
+    live.b_legs.iter().any(|leg| {
+        let pinned = leg.invite.as_ref().is_some_and(|r| r.relayed_by != *this)
+            && leg.outbound_invite().is_some_and(|i| i.final_received.is_none());
+        let answered = taken
+            .b_legs
+            .iter()
+            .find(|t| t.leg_id == leg.leg_id)
+            .and_then(call::Leg::outbound_invite)
+            .is_some_and(|i| i.final_received.is_some());
+        pinned && answered
+    })
 }
 
 /// The live timer service follows the ledger `taken` holds: every entry it

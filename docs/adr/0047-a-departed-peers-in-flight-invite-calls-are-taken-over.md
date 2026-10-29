@@ -196,7 +196,9 @@ stands down when:
   primary's own returns its final to the primary and pins nothing. A leg's dialling
   INVITE the copy sent and that awaits its final pins the copy whatever the primary's
   record holds: the proxy's cookie on that INVITE names the copy, so its responses
-  return to the copy alone (ADR-0055 §8). One increment
+  return to the copy alone (ADR-0055 §8). When the final reaches the copy, the
+  primary that takes the copy's write carrying it writes the call once, and the
+  copy stands down on that write. One increment
   of a copy's `b` is one write this node made as the call's acting backup; a quiet
   turn, a fold or an adopted version moves nothing. A primary reaches a `b` only by
   reading the copy's write that carries it — applied or folded into its record, or
@@ -228,8 +230,7 @@ it, but a CANCEL goes on its INVITE's transaction (RFC 3261 §9.1), and only the
 holds that one (`router/reclaim/carried_cancel.rs`).
 
 One owner acts on an outside service's answer. A copy awaiting the answer to a request
-the primary's reclaim write awaits too, the call's routing decision asked again
-included, is covered by that write on that request: it stands down, an answer reaching
+the primary's reclaim write awaits too is covered by that write on that request: it stands down, an answer reaching
 it afterwards takes nothing over (ADR-0039 decision 5), and the primary alone acts on
 the answer, the backend possibly asked twice.
 

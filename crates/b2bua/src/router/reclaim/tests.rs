@@ -730,3 +730,39 @@ async fn the_end_over_a_cancelled_copy_ends_the_early_dialogs_the_record_holds()
         n.take_violations().iter().filter_map(|v| v.lines().next().map(String::from)).collect();
     assert_eq!(violated, Vec::<String>::new(), "the union states the model");
 }
+
+/// `copy` with a callee leg `c-1` worker `by` dialled, its INVITE's final
+/// `final_received`.
+fn dialled_by(mut copy: Enveloped, by: call::RelayOwner, final_received: Option<u16>) -> Enveloped {
+    let mut leg = call::testkit::dialled_leg("c-1", "dialled-tag");
+    if let Some(record) = leg.invite.as_mut() {
+        record.relayed_by = by;
+    }
+    if let Some(status) = final_received {
+        leg.outbound_invite_mut().expect("the dialled INVITE").record_final(status);
+    }
+    copy.call.b_legs.push(leg);
+    copy
+}
+
+/// **The primary writes once when the copy's own INVITE takes its final.**
+/// The backup's copy played on while it awaited the final of an INVITE it
+/// dialled; its write that carries the final is taken whole here, and the
+/// primary writes the call once, the covering write the copy stands down on
+/// (ADR-0047 D7). A taken copy whose dialled INVITE was final already is no
+/// write of this node's.
+#[tokio::test(start_paused = true)]
+async fn a_taken_final_of_the_copys_own_invite_draws_one_covering_write() {
+    let n = node("w0").await;
+    let copy_worker = call::RelayOwner::new("w1", "w1-boot-1");
+    let live = dialled_by(answered(4, 1, CallModelState::Active), copy_worker.clone(), None);
+    let copy = dialled_by(answered(4, 2, CallModelState::Active), copy_worker.clone(), Some(200));
+    meet(&n, &live, &copy, FlushDirection::Reverse, MaterialiseOrigin::Reclaim).await;
+    assert_eq!(live_versions(&n, &live.call.call_ref).0, (5, 2), "one write of the primary's");
+
+    let n = node("w0").await;
+    let live = dialled_by(answered(4, 1, CallModelState::Active), copy_worker.clone(), Some(200));
+    let copy = dialled_by(answered(4, 2, CallModelState::Active), copy_worker, Some(200));
+    meet(&n, &live, &copy, FlushDirection::Reverse, MaterialiseOrigin::Reclaim).await;
+    assert_eq!(live_versions(&n, &live.call.call_ref).0, (4, 2), "no write: nothing changed hands");
+}

@@ -9,34 +9,36 @@
 
 use std::sync::Arc;
 
-use call::{Call, Leg, TxnKind};
+use call::{Call, Leg, RelayOwner, TxnKind};
 use sip_message::generators::{generate_cancel, InviteClientTransactionHandle};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipHeader, SipMessage, SipParser, SipRequest};
 
 use super::super::RouterCtx;
 
-/// Send each CANCEL `taken` records on a dialled INVITE that `live`, the
-/// copy this node ran until the meeting, had not sent and the INVITE has no
-/// final.
+/// Send each CANCEL `taken` records on a dialled INVITE this node sent that
+/// `live`, the copy this node ran until the meeting, had not sent and the
+/// INVITE has no final.
 pub(super) async fn send_carried_cancels(ctx: &Arc<RouterCtx>, live: &Call, taken: &Call) {
-    for leg in taken.b_legs.iter().filter(|leg| carried(live, leg)) {
+    let by = &ctx.relay_owner;
+    for leg in taken.b_legs.iter().filter(|leg| carried(live, leg, by)) {
         let Some((cancel, dest)) = rebuilt_cancel(leg) else { continue };
         let _ = ctx.txn.send_request(cancel, dest, TxnKind::Invite).await;
     }
 }
 
-/// Whether `leg`'s INVITE, still without a final, is CANCELled in the taken
-/// copy and not in `live`.
-fn carried(live: &Call, leg: &Leg) -> bool {
+/// Whether `leg`'s INVITE, sent by worker `by` and still without a final, is
+/// CANCELled in the taken copy and not in `live`.
+fn carried(live: &Call, leg: &Leg, by: &RelayOwner) -> bool {
     let Some(invite) = leg.outbound_invite() else { return false };
+    let sent_by_us = leg.invite.as_ref().is_some_and(|record| record.relayed_by == *by);
     let sent_here = live
         .b_legs
         .iter()
         .find(|l| l.leg_id == leg.leg_id)
         .and_then(Leg::outbound_invite)
         .is_some_and(|i| i.cancel_sent);
-    invite.cancel_sent && invite.final_received.is_none() && !sent_here
+    sent_by_us && invite.cancel_sent && invite.final_received.is_none() && !sent_here
 }
 
 /// The CANCEL of `leg`'s dialled INVITE, stating the headers the record

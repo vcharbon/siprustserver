@@ -15,9 +15,10 @@ use crate::store::PartitionRole;
 
 /// **Bulk reclaim, first pass** (ADR-0014, ADR-0055 §8): make every
 /// `pri:{self}` call resident and park it, nothing armed, so nothing of it
-/// leaves the node; a call with an INVITE to serve is written once
-/// ([`announce_reclaim`]), so the backup's takeover copy of it meets that
-/// write before the proxy routes anything to this node. It runs on bootstrap
+/// leaves the node; a call with an INVITE to serve, or one its backup wrote,
+/// is written once ([`announce_reclaim`]), so the backup's takeover copy of
+/// it meets that write before the proxy routes anything to this node, and a
+/// copy holding an INVITE it dialled plays on (ADR-0047 D7). It runs on bootstrap
 /// completion, whether or not the node's own endpoint reads ready; the
 /// parked calls are armed once it does ([`arm_parked`]). Each body is read
 /// through the TTL-gated reclaim read, so a body whose TTL ran out is dead and
@@ -139,7 +140,8 @@ fn largest_keepalive_gap<'a>(
 /// Reclaim one call of this node's `pri:{self}` partition into the live map
 /// under its per-call lock (ADR-0011 X11), armed at once: a straggler. It has
 /// no message to serve, so a call still undecided is settled (ADR-0047), and a
-/// call with an INVITE transaction to serve is announced ([`announce_reclaim`]).
+/// call with an INVITE transaction to serve, or one its backup wrote, is
+/// announced ([`announce_reclaim`]).
 /// Returns `true` iff this pass did the work — freshly materialised, or a
 /// deferred terminal discharged; `false` for a call already resident
 /// (idempotent re-pass) or gone from the store.

@@ -110,19 +110,27 @@ impl FailoverHarness {
     }
 
     /// The rows that fired this run although its measured tier keeps them
-    /// closed, or that follow a re-sent request in a run where no node sent
-    /// one again, rendered one per line, or `None`.
+    /// closed, that follow a re-sent request in a run where no node sent one
+    /// again, or that need two serving workers in a run where no dialog took
+    /// a BYE from two, rendered one per line, or `None`.
     pub(super) fn tier_gate_failure(&self) -> Option<String> {
         let tier = self.tier()?;
         let resent = self.turn_points.resent();
-        let closed: Vec<String> = self
-            .fired_rows()
+        let fired = self.fired_rows();
+        let two_servers = fired.iter().any(|f| f.row.needs_two_servers())
+            && windows::two_servers::byes_from_two_workers(
+                &self.sip_entries(),
+                &self.all_worker_sip_addrs,
+            );
+        let closed: Vec<String> = fired
             .into_iter()
             .filter_map(|f| {
                 let why = if !tier.opens(f.row) {
                     format!("closed in the {} tier", tier.label())
                 } else if f.row.needs_resend() && !resent {
                     "closed: no node sent a request again".to_string()
+                } else if f.row.needs_two_servers() && !two_servers {
+                    "closed: no dialog took a BYE from two workers".to_string()
                 } else {
                     return None;
                 };

@@ -5,6 +5,7 @@
 use std::time::Duration;
 
 use call::{Call, MsgpackCodec};
+use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
 use sip_net_testkit::SimulatedSignalingNetwork;
@@ -13,7 +14,7 @@ use sip_txn::TxnSeed;
 use super::super::{meet_refused_flush, FlushDirection};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
-use crate::router::test_support::{invite, node_on, src};
+use crate::router::test_support::{invite, node_on, src, Node};
 use crate::store::{envelope, CallTopology, Enveloped, MaterialiseOrigin};
 
 /// The callee the copy dialled.
@@ -69,22 +70,23 @@ async fn heard(peer: &dyn UdpEndpoint, within: Duration) -> Vec<String> {
     lines
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_copy_playing_on_sends_the_cancel_its_primary_recorded_on_its_invite() {
-    let net = SimulatedSignalingNetwork::new(1);
-    let n = node_on(&net, "w1", |_| {}, Vec::new()).await;
+/// A node `w1` serving `ringing_callee` as a takeover copy that holds the
+/// dialled INVITE's transaction, Proceeding, and the callee listening.
+async fn copy_holding_the_invite(
+    net: &SimulatedSignalingNetwork,
+    cid: &str,
+) -> (Node, Box<dyn UdpEndpoint>, String) {
+    let n = node_on(net, "w1", |_| {}, Vec::new()).await;
     let callee = net.bind_udp(BindUdpOpts::new(CALLEE.parse().unwrap(), 64)).await.unwrap();
     let ctx = n.core.router_ctx();
-    let by = ctx.relay_owner.clone();
-    let copy = ringing_callee("carried", &by, 4, 2);
+    let copy = ringing_callee(cid, &ctx.relay_owner, 4, 2);
     let call_ref = copy.call.call_ref.clone();
-    assert!(ctx.state.materialize_if_absent(copy.clone(), MaterialiseOrigin::Takeover));
+    assert!(ctx.state.materialize_if_absent(copy, MaterialiseOrigin::Takeover));
     ctx.state.mark_takeover(&call_ref);
-    let SipMessage::Request(sent) = sip_message::parser::custom::CustomParser::new()
-        .parse(dialled_invite("carried").as_bytes())
-        .unwrap()
+    let SipMessage::Request(sent) =
+        CustomParser::new().parse(dialled_invite(cid).as_bytes()).expect("the INVITE parses")
     else {
-        panic!("the dialled INVITE parses")
+        panic!("the dialled INVITE is a request")
     };
     let seed = TxnSeed::ClientInvite {
         invite: sent,
@@ -94,18 +96,51 @@ async fn a_copy_playing_on_sends_the_cancel_its_primary_recorded_on_its_invite()
         ack_ahead: None,
     };
     assert_eq!(ctx.txn.seed(&call_ref, vec![seed]).await.unwrap(), 1, "the copy holds the INVITE");
+    (n, callee, call_ref)
+}
 
-    let mut primary = ringing_callee("carried", &by, 5, 2);
+/// The primary's copy of `cid`, its `c-1` INVITE CANCELled, and that INVITE
+/// answered `final_received` when stated, as a replicated body.
+fn primarys_cancel(n: &Node, cid: &str, final_received: Option<u16>) -> Vec<u8> {
+    let mut primary = ringing_callee(cid, &n.core.router_ctx().relay_owner, 5, 2);
     call::helpers::record_cancel_sent(&mut primary.call, "c-1", Vec::new());
-    let body =
-        envelope::encode(&MsgpackCodec::new(), primary.topology.as_ref(), &primary.call).unwrap();
+    if let Some(status) = final_received {
+        let leg = primary.call.b_legs.iter_mut().find(|l| l.leg_id == "c-1").expect("the leg");
+        leg.outbound_invite_mut().expect("the dialled INVITE").record_final(status);
+    }
+    envelope::encode(&MsgpackCodec::new(), primary.topology.as_ref(), &primary.call).unwrap()
+}
+
+/// The CANCELs `callee` receives within `within`.
+async fn cancels(callee: &dyn UdpEndpoint, within: Duration) -> usize {
+    heard(callee, within).await.iter().filter(|l| l.starts_with("CANCEL ")).count()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_copy_playing_on_sends_the_cancel_its_primary_recorded_on_its_invite() {
+    let net = SimulatedSignalingNetwork::new(1);
+    let (n, callee, call_ref) = copy_holding_the_invite(&net, "carried").await;
+    let ctx = n.core.router_ctx();
+    let body = primarys_cancel(&n, "carried", None);
     meet_refused_flush(ctx, FlushDirection::Forward, &call_ref, &body, 0).await;
     sip_clock::testkit::settle().await;
 
     assert!(ctx.state.is_takeover(&call_ref), "the copy plays on: the INVITE's final comes to it");
-    let lines = heard(callee.as_ref(), Duration::from_millis(200)).await;
-    assert!(
-        lines.iter().any(|l| l.starts_with("CANCEL ")),
-        "the copy sends the primary's CANCEL: {lines:?}"
-    );
+    assert_eq!(cancels(callee.as_ref(), Duration::from_millis(100)).await, 1, "the copy CANCELs");
+
+    meet_refused_flush(ctx, FlushDirection::Forward, &call_ref, &body, 0).await;
+    sip_clock::testkit::settle().await;
+    assert_eq!(cancels(callee.as_ref(), Duration::from_millis(100)).await, 0, "once, not again");
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_cancel_is_carried_for_an_invite_that_has_its_final() {
+    let net = SimulatedSignalingNetwork::new(1);
+    let (n, callee, call_ref) = copy_holding_the_invite(&net, "final-in").await;
+    let ctx = n.core.router_ctx();
+    let body = primarys_cancel(&n, "final-in", Some(200));
+    meet_refused_flush(ctx, FlushDirection::Forward, &call_ref, &body, 0).await;
+    sip_clock::testkit::settle().await;
+
+    assert_eq!(cancels(callee.as_ref(), Duration::from_millis(100)).await, 0, "a final is in");
 }

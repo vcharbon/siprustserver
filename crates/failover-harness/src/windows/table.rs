@@ -39,6 +39,8 @@ pub(super) const RESEND_ROWS: &[&str] = &[
     "W-stale-resend-cseq-reuse",
     "W-stale-resend-reinvite",
 ];
+/// The rows that accept only a dialog two workers each ended with a BYE.
+pub(super) const TWO_SERVER_ROWS: &[&str] = &["W-off-reboot-two-servers"];
 /// The re-INVITE rule of RFC 3261 §14.1: no re-INVITE while one is in progress.
 const RULE_REINVITE_IN_PROGRESS: &str = "no-re-invite-while-invite-in-progress";
 /// The rows of every incident but a split.
