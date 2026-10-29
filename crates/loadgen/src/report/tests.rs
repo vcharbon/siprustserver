@@ -435,7 +435,8 @@ async fn final_write_is_not_overwritten_by_snapshot_task() {
 }
 
 /// The first unrecorded occurrence of a bucket arms its chase; later
-/// unrecorded occurrences never re-arm it, a recorded sample does.
+/// unrecorded occurrences and never-ran stubs never re-arm it, a stored
+/// callflow does.
 #[test]
 #[ignore = "slow lane: loadgen"]
 fn an_unrecorded_occurrence_arms_the_chase_once() {
@@ -451,9 +452,16 @@ fn an_unrecorded_occurrence_arms_the_chase_once() {
     assert_eq!(chased, CHASE_CALLS as usize, "an unrecorded occurrence arms a bounded chase");
     r.record("s", &failed, &case, Duration::ZERO, &[], None);
     assert!(!r.should_record("s"), "a later unrecorded occurrence does not re-arm it");
-    let flow = RenderedSample { html: Some(Arc::from("<html/>")), detail: None, e2e_ms: 1.0 };
-    r.record("s", &failed, &case, Duration::ZERO, &[], Some(flow));
-    assert!(r.should_record("s"), "a recorded sample under cap re-arms it");
+    let stub = RenderedSample { html: None, detail: None, e2e_ms: 0.0 };
+    r.record("s", &failed, &case, Duration::ZERO, &[], Some(stub));
+    assert!(!r.should_record("s"), "the stub of a call that never ran does not re-arm it");
+    let r = Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 0 });
+    let flow = || RenderedSample { html: Some(Arc::from("<html/>")), detail: None, e2e_ms: 1.0 };
+    r.record("s", &failed, &case, Duration::ZERO, &[], Some(flow()));
+    let chased = (0..CHASE_CALLS + 10).filter(|_| r.should_record("s")).count();
+    assert_eq!(chased, CHASE_CALLS as usize, "a stored callflow arms the chase");
+    r.record("s", &failed, &case, Duration::ZERO, &[], Some(flow()));
+    assert!(r.should_record("s"), "a stored callflow under cap re-arms it");
 }
 
 /// A bucket counted with no stored sample says so in the index.

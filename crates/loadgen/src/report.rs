@@ -281,7 +281,7 @@ impl Reporter {
     /// its accepted-branch or failed-step count, fold its end-to-end time and
     /// checkpoints into the histograms, and store its sample if the bucket
     /// still has room. The bucket's first call arms its chase, recorded or
-    /// not; only a stored sample re-arms it. `case` is the outcome's bounded
+    /// not; only a stored callflow re-arms it. `case` is the outcome's bounded
     /// discriminator ([`CallOutcome::case`] — the driver computes it once, with
     /// the call's phase trail).
     pub fn record(
@@ -318,7 +318,8 @@ impl Reporter {
         let tally = g.sample_taken.entry(key.clone()).or_default();
         if let Some(sample) = sample {
             if tally.taken < self.cfg.sample_cap {
-                *tally = BucketTally { taken: tally.taken + 1, chased: 0 };
+                let chased = if sample.html.is_some() { 0 } else { tally.chased };
+                *tally = BucketTally { taken: tally.taken + 1, chased };
                 g.samples.entry(key).or_default().push(sample);
             }
         }
@@ -424,9 +425,10 @@ impl Reporter {
             <table>\
             <tr><th>scenario</th><th>class</th><th>case</th><th>count</th><th>samples</th></tr>",
         );
-        let none_recorded = match self.cfg.background_record_every {
-            0 => "none recorded".to_string(),
-            every => format!("none recorded (1 in {every} calls is recorded)"),
+        let none_recorded = match (self.cfg.sample_cap, self.cfg.background_record_every) {
+            (0, _) => String::new(),
+            (_, 0) => "none recorded".to_string(),
+            (_, every) => format!("none recorded (1 in {every} calls is recorded)"),
         };
         for ((scenario, class, case), n) in &g.counts {
             let cls = if ResultClass::label_is_ok(class) { "ok" } else { "nok" };
