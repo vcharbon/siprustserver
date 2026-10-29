@@ -46,10 +46,12 @@ const B1: &str = "127.0.0.1:5091";
 /// far below the configured initial-INVITE bound (default 158 s).
 const ABANDON_SEC: u64 = 5;
 
-/// The worker's setup deadline at [`ABANDON_SEC`]: what abandons a callee
-/// that never rings, the caller answered 408.
+/// The worker's setup deadline at [`ABANDON_SEC`], its first-response
+/// deadline at Timer B past it: what abandons a callee that never rings, the
+/// caller answered 408.
 fn setup_deadline(c: &mut b2bua::B2buaConfig) {
     c.setup_timeout_ms = ABANDON_SEC as i64 * 1000;
+    c.invite_first_response_timeout_sec = b2bua::B2buaConfig::MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC;
 }
 
 /// The worker's first-response deadline at [`ABANDON_SEC`] (ADR-0044): what
@@ -248,9 +250,9 @@ async fn silent_callee_abandoned_via_lb__reject__reaps_crossing_200() {
 
     // The caller holds its final (authored in the terminating turn) — NOT
     // dropped on a removed call.
-    let failed = call.expect(480).await;
-    assert_eq!(failed.status(), 480, "a silent hop let stand is a 480");
-    // Flush alice's §17.1.1.3 ACK for the 480 (sent by the receive above) the
+    let failed = call.expect(408).await;
+    assert_eq!(failed.status(), 408, "caller's INVITE resolves with a final failure");
+    // Flush alice's §17.1.1.3 ACK for the 408 (sent by the receive above) the
     // one hop to the proxy before the Drop-time RFC gate snapshots the trace.
     fh.advance(Duration::from_millis(10)).await;
 
@@ -297,9 +299,13 @@ async fn silent_callee_abandoned_via_lb__reject__delayed_crossing_200_still_reap
     let mut bye = bob.receive_absorbing("BYE", &["INVITE"]).await;
     bye.respond(200, "OK").await;
 
-    let failed = call.expect(480).await;
-    assert_eq!(failed.status(), 480, "a silent hop let stand is a 480, after a late reap");
-    // Flush alice's §17.1.1.3 ACK for the 480 the one hop to the proxy before
+    let failed = call.expect(408).await;
+    assert_eq!(
+        failed.status(),
+        408,
+        "caller's INVITE resolves with a final failure after a late reap"
+    );
+    // Flush alice's §17.1.1.3 ACK for the 408 the one hop to the proxy before
     // the Drop-time RFC gate snapshots the trace.
     fh.advance(Duration::from_millis(10)).await;
 
