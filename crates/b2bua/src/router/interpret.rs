@@ -279,6 +279,22 @@ async fn push(ctx: &Arc<RouterCtx>, call_ref: &str, entry: TurnEntry) {
     ctx.outboxes.push(call_ref, wait, Box::new(|released| Box::pin(entry.run(released)))).await;
 }
 
+/// Release what the layer holds for `event`'s turn — the ACK of a non-2xx
+/// final, the answers to a CANCEL — when no turn's outbox entry took it: no
+/// write records it, so nothing is waited for.
+pub(super) async fn release_untaken(ctx: &RouterCtx, event: &CallEvent) {
+    let held_ack = match event {
+        CallEvent::Sip { message, .. } => held_ack_branch(message),
+        _ => None,
+    };
+    if let Some(branch) = held_ack {
+        let _ = ctx.txn.release_ack(&branch).await;
+    }
+    if let Some(held) = held_cancel_answers(event) {
+        let _ = ctx.txn.release_cancel(&held.call_id, &held.from_tag, held.cseq).await;
+    }
+}
+
 /// The branch of the client INVITE transaction whose non-2xx final `trigger`
 /// is: the layer holds its ACK until the turn's entry releases it.
 fn held_ack_branch(trigger: &SipMessage) -> Option<String> {

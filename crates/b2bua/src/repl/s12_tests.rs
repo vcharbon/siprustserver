@@ -230,7 +230,7 @@ async fn forward_put_of_a_cancel_that_preempted_the_answer_applies() {
     let answered = call_in("A", "B", "s12-preempt", LegState::Confirmed, CallModelState::Active);
     element(&b.store, &answered, 1, 1).await;
     let mut cancelled = answered;
-    call::helpers::record_cancelled_invite(&mut cancelled, "a");
+    call::helpers::record_cancelled_invite(&mut cancelled, "a", None);
     call::testkit::stage_leg(&mut cancelled.a_leg, LegState::Terminated);
     cancelled.state = CallModelState::Terminating;
     forward(&a.store, &cancelled, 2, 1).await;

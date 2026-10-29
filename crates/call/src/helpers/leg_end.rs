@@ -116,8 +116,13 @@ pub fn reject_early_dialogs(leg: &mut Leg, status: u16) {
 /// too late ([`Leg::answer_preempted`]), whose ring entry and ACK obligation
 /// go, or over a non-2xx the layer dropped, which is no longer kept, nor is
 /// its latest provisional; every dialog the INVITE opened ends under the 487
-/// (§12.1).
-pub fn record_cancelled_invite(call: &mut Call, leg_id: &str) {
+/// (§12.1). `terminated` is that 487 as it leaves, retained as the INVITE's
+/// rejection when it could be built.
+pub fn record_cancelled_invite(
+    call: &mut Call,
+    leg_id: &str,
+    terminated: Option<crate::model::RetainedEmission>,
+) {
     update_leg(call, leg_id, |l| {
         if let Some(answer) = l.invite_final_sent().filter(|s| (200..300).contains(s)) {
             *l.answer_preempted_mut() = Some(answer);
@@ -134,7 +139,7 @@ pub fn record_cancelled_invite(call: &mut Call, leg_id: &str) {
         }
         reject_early_dialogs(l, 487);
         *l.invite_final_sent_mut() = Some(487);
-        *l.invite_rejection_mut() = None;
+        *l.invite_rejection_mut() = terminated;
         *l.invite_provisional_mut() = None;
     })
 }

@@ -5,8 +5,8 @@ use scenario_harness::dialogs::{DIALOG_CSEQ_BACKWARDS, DIALOG_ENDED};
 
 use super::copies::{
     cancels_an_answered_invite, non_2xx_after_another_final, non_2xx_after_the_dead_owners_2xx,
-    second_bye_at_one_cseq, two_xx_after_a_487, RULE_EARLY_BYE, RULE_NO_200_AFTER_CANCEL,
-    RULE_TAG_CONSISTENCY, RULE_TAKEN_FINAL, RULE_UNACKED_NON_2XX,
+    provisional_after_a_final, second_bye_at_one_cseq, two_xx_after_a_487, RULE_EARLY_BYE,
+    RULE_NO_200_AFTER_CANCEL, RULE_TAG_CONSISTENCY, RULE_TAKEN_FINAL, RULE_UNACKED_NON_2XX,
 };
 use super::stall_cseq::reuses_a_stall_cseq;
 use super::stall_repeat::{reason_only_cancel_repeat, RULE_RUNG_BYTE_IDENTICAL};
@@ -14,25 +14,14 @@ use super::unseen_rseq::{from_another_node, RULES as RSEQ_RULES};
 use super::{outcome, Kind, Opens, Row, Tier, Transitional, Witness};
 use crate::incident::Incident;
 use crate::incident::Incident::{
-    BackupKilled, PrimaryKilled, PrimaryKilledUnannounced, PrimaryRebooted, Split, SplitHealed,
-    StalledKilled, UnbackedKilled,
+    PrimaryKilled, PrimaryRebooted, Split, SplitHealed, StalledKilled, UnbackedKilled,
 };
 use crate::turn_points::TurnPoint;
 use crate::{RULE_CSEQ_IN_DIALOG_ORDER, RULE_NO_CANCEL_AFTER_FINAL};
 use b2bua::repl::SyncLevel;
 
-/// The rows of a split, healed or not, and of a stall past the cap then a
-/// kill: two acting copies.
-const TWO_COPIES: &[Incident] = &[Split, SplitHealed, StalledKilled];
-/// The rows of a split, healed or not.
-const SPLITS: &[Incident] = &[Split, SplitHealed];
-/// The rows of a kill of the primary, announced or not, rebooted or not.
-const PRIMARY_KILLS: &[Incident] = &[PrimaryKilled, PrimaryKilledUnannounced, PrimaryRebooted];
-/// The rows of a copy whose record may be behind the wire, the requests it
-/// awaited answers to sent again: a kill of the primary under `off` or past
-/// the cap, and a stall past the cap then a kill.
-const STALE_COPY: &[Incident] =
-    &[PrimaryKilled, PrimaryKilledUnannounced, PrimaryRebooted, StalledKilled];
+mod sets;
+use sets::{NO_SPLIT, PRIMARY_KILLS, SPLITS, STALE_COPY, STALE_OR_TWO_COPIES, TWO_COPIES};
 /// The rows that accept only what follows a request a node sent again.
 pub(super) const RESEND_ROWS: &[&str] = &[
     "W-stale-resend",
@@ -47,15 +36,6 @@ pub(super) const REASK_ROWS: &[&str] = &["W-off-stale-reask", "W-kill-reask-afte
 pub(super) const TWO_SERVER_ROWS: &[&str] = &["W-off-reboot-two-servers"];
 /// The re-INVITE rule of RFC 3261 §14.1: no re-INVITE while one is in progress.
 const RULE_REINVITE_IN_PROGRESS: &str = "no-re-invite-while-invite-in-progress";
-/// The rows of every incident but a split.
-const NO_SPLIT: &[Incident] = &[
-    PrimaryKilled,
-    PrimaryKilledUnannounced,
-    PrimaryRebooted,
-    BackupKilled,
-    StalledKilled,
-    UnbackedKilled,
-];
 
 /// The cell `shape`/`level`/`incident`/t`turn`-`point`.
 const fn witness(
@@ -108,6 +88,22 @@ pub static TABLE: &[Row] = &[
         },
         closes_when_over: false,
         witness: witness("refer", SyncLevel::Applied, Split, 1, TurnPoint::Applied),
+    },
+    Row {
+        id: "W-stale-after-final",
+        tier: Tier::Degraded,
+        opens: Opens::any(STALE_OR_TWO_COPIES),
+        covers: "a copy's provisional, or its non-2xx, from a record behind the wire, after the \
+                 final the other owner sent the caller, which her completed INVITE discards",
+        kind: Kind::Rfc {
+            rules: &[RULE_TAKEN_FINAL],
+            once_per_dialog: false,
+            admits: Some(|i, capture, _| {
+                provisional_after_a_final(i, capture) || non_2xx_after_another_final(i, capture)
+            }),
+        },
+        closes_when_over: false,
+        witness: witness("prack", SyncLevel::Applied, SplitHealed, 2, TurnPoint::Logged),
     },
     Row {
         id: "W-split-early-bye",

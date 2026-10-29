@@ -46,6 +46,16 @@ pub(super) fn non_2xx_after_the_dead_owners_2xx(
     taker.is_some() && non_2xx_after_a_2xx(i, capture, taker, opened_at)
 }
 
+/// Whether the response at index `i` of `capture` is a provisional to an
+/// INVITE after a final to it sent to the same taker.
+pub(super) fn provisional_after_a_final(i: usize, capture: &CaptureIndex) -> bool {
+    let (Some(entry), Some(resp)) = (capture.entry(i), capture.message(i)) else { return false };
+    let finished = |r: &Captured| r.status().is_some_and(|s| s >= 200);
+    resp.status().is_some_and(|s| (101..200).contains(&s))
+        && resp.cseq_method == Method::Invite
+        && answered_before(capture, i, u64::MAX, resp, Some(entry.to), finished)
+}
+
 /// Whether the response at index `i` of `capture` is a 2xx to an INVITE a
 /// 487 to it, sent to the same taker, came before: the callee's answer to a
 /// call asked again after the caller's CANCEL.

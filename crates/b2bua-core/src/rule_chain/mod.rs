@@ -206,8 +206,12 @@ pub fn rule_chain_turn(
     // the CANCEL, 487 to the initial INVITE (RFC 3261 §9.2): the record
     // carries that transaction's one final before the rules read it, over a
     // 2xx this stack built too late for the completed transaction to send.
-    if let CallEvent::Cancelled { in_dialog: false, .. } = event {
-        call::helpers::record_cancelled_invite(&mut call, source_leg_id);
+    if let CallEvent::Cancelled { in_dialog: false, to_tag, .. } = event {
+        let caller = call.a_leg.leg_id == source_leg_id;
+        let notes = &mut exec.turn.notes;
+        let sent =
+            caller.then(|| crate::rules::relay::cancelled_final(&call, to_tag.clone(), notes));
+        call::helpers::record_cancelled_invite(&mut call, source_leg_id, sent.flatten());
     }
     if let Some(obligation) = fired_obligation(event, &TimerType::RepeatGiveUp) {
         exec.turn.notes.repeat_give_up(obligation.kind());

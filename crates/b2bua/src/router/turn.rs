@@ -68,7 +68,9 @@ impl Runnable for Turn {
                 _ => {}
             }
             let matched = self.matched_client_txn;
-            process(&self.ctx, self.event, matched, self.res, self.unborn).await;
+            if !process(&self.ctx, &self.event, matched, self.res, self.unborn).await {
+                super::interpret::release_untaken(&self.ctx, &self.event).await;
+            }
         })
     }
 }

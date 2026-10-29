@@ -719,6 +719,12 @@ the re-anchor deadband of each other.
     (`undecided_call_settled_on_departure.rs`, the CANCEL-during-decision
     cell). A layer that sends what it held at its bound places the run in
     Degraded, as a cap hit does;
+  - `W-stale-after-final`, a kill of the primary, a stall past the cap then
+    a kill, and a split, healed or not, in the Degraded tier: a copy's
+    provisional or non-2xx after the final the other owner sent the caller,
+    its record behind the wire — the latest provisional its seed re-sends, a
+    reliable one its ladder repeats, a refusal of a call it holds unanswered
+    — which her completed INVITE discards (RFC 3261 §17.1.1.2);
   - `W-kill-reask-after-cancel-answer`, the same window: that callee's 2xx,
     relayed to the caller after her 487, which her completed INVITE
     discards (she ACKs and BYEs the dialog it confirms);

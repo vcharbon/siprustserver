@@ -23,13 +23,24 @@ use crate::inflight_resend::{last_request_sent, split_mut, survivor_of};
 
 #[tokio::test(start_paused = true)]
 async fn a_cancel_lost_with_its_node_is_answered_by_the_backup_and_cancels_the_callee() {
-    let name = "cancel-answers-after-the-kill";
+    cancel_lost_with_its_node("cancel-answers-after-the-kill", TurnPoint::Logged).await;
+}
+
+/// The same with the CANCEL's turn applied at the backup: its copy holds
+/// the call cancelled, the 487 recorded and never sent; it sends that 487
+/// and answers the caller's repeated CANCEL 200.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_whose_write_the_backup_applied_is_answered_by_the_backup() {
+    cancel_lost_with_its_node("cancel-applied-answers-after-the-kill", TurnPoint::Applied).await;
+}
+
+async fn cancel_lost_with_its_node(name: &str, point: TurnPoint) {
     let recipe = ClusterRecipe::routing_to(BOB.parse().unwrap());
     let mut cluster = Cluster::start(name, &recipe).await;
     let alice = cluster.fh.agent("alice", ALICE).await;
     let bob = cluster.fh.agent("bob", BOB).await;
     let placement = cluster.place_next_call(&alice, "b1");
-    let reached = cluster.fh.turn_points().arm(TurnAt { turn: 3, point: TurnPoint::Logged });
+    let reached = cluster.fh.turn_points().arm(TurnAt { turn: 3, point });
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(cluster.proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -38,16 +49,25 @@ async fn a_cancel_lost_with_its_node_is_answered_by_the_backup_and_cancels_the_c
     cluster.fh.advance(Duration::from_millis(100)).await;
     let mut cancel = call.cancel().await;
     let held = reached.await.expect("the CANCEL's turn logs its write");
-    assert_eq!(held.node, placement.primary, "the turn is held at the primary");
+    // A write is applied at the backup; the turn's other points are the primary's.
+    let at = if point == TurnPoint::Applied { &placement.backup } else { &placement.primary };
+    assert_eq!(&held.node, at, "the turn is held where its point is");
     cluster.kill(&placement.primary, &placement.backup);
     held.release();
 
-    // The caller hears nothing and repeats her CANCEL on Timer E.
+    // The copy holding the 487 recorded sends it; the caller repeats her
+    // unanswered CANCEL on Timer E either way.
+    let recorded = point == TurnPoint::Applied;
+    if recorded {
+        call.expect(487).await;
+    }
     cluster.fh.advance(Duration::from_millis(500)).await;
     let (wire, dst) = last_request_sent(&cluster.fh, alice.addr(), &Method::Cancel);
     alice.try_send_datagram(&wire, dst).await.expect("the caller's repeat leaves");
     cancel.expect(200).await;
-    call.expect(487).await;
+    if !recorded {
+        call.expect(487).await;
+    }
     let mut callee_cancel = bob.receive("CANCEL").await;
     callee_cancel.respond(200, "OK").await;
     uas.respond(487, "Request Terminated").await;

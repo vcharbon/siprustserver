@@ -828,7 +828,7 @@ fn a_cancelled_invite_takes_back_the_2xx_that_never_left() {
         entry(3, MessageDirection::Relayed, Some(200)),
     ];
 
-    record_cancelled_invite(&mut call, "a");
+    record_cancelled_invite(&mut call, "a", None);
 
     let a = &call.a_leg;
     assert_eq!(a.invite_final_sent(), Some(487));
