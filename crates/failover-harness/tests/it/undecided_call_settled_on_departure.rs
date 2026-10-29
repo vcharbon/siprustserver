@@ -119,9 +119,7 @@ async fn a_cancel_of_an_undecided_call_whose_node_died_is_answered_by_its_backup
     let bob = fh.agent("bob", BOB).await;
     let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
     let (decision, consults) = CountedDecision::counting(route, DECISION_DELAY);
-    let (mut proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
-    // The reactive path: the proxy tells no dead verdict (ADR-0050 §3).
-    proxy.tell_no_dead_verdict();
+    let (proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     call.expect(100).await;
@@ -154,9 +152,7 @@ async fn an_undecided_call_reclaimed_by_its_restarted_node_is_answered_503() {
     let bob = fh.agent("bob", BOB).await;
     let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
     let (decision, consults) = CountedDecision::counting(route, DECISION_DELAY);
-    let (mut proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
-    // The reactive path: the proxy tells no dead verdict (ADR-0050 §3).
-    proxy.tell_no_dead_verdict();
+    let (proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     call.expect(100).await;

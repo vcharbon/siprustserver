@@ -40,18 +40,32 @@ const BOB: &str = "127.0.0.1:5070";
 /// undecided; the caller's retransmission then follows the cookie to the
 /// backup, which holds no answered record of the call and drops the copy
 /// rather than dial a second call. The primary decides, dials the callee
-/// once and answers the caller: one b-leg INVITE, one CDR.
+/// once and answers the caller: one b-leg INVITE, one CDR. Told or not, the
+/// false dead verdict leaves the undecided call alone (ADR-0047 D4).
 #[tokio::test(start_paused = true)]
 async fn a_retransmission_sent_to_the_backup_of_a_live_primary_dials_no_second_call() {
-    let name = "retransmission-to-the-backup-of-a-live-primary";
+    retransmission_to_the_backup_of_a_live_primary(
+        "retransmission-to-the-backup-of-a-live-primary",
+        false,
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_dead_verdict_on_a_live_primary_leaves_its_undecided_call_alone() {
+    retransmission_to_the_backup_of_a_live_primary("live-primary-read-dead-undecided", true).await;
+}
+
+async fn retransmission_to_the_backup_of_a_live_primary(name: &str, told: bool) {
     let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
     let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
     let (decision, _consults) = CountedDecision::counting(route, Duration::from_secs(3));
     let (mut proxy, w_b1, w_b2) = bring_up_deciding(&mut fh, decision).await;
-    // The reactive path: the proxy tells no dead verdict (ADR-0050 §3).
-    proxy.tell_no_dead_verdict();
+    if !told {
+        proxy.tell_no_dead_verdict();
+    }
 
     // ── the caller hears nothing; the primary holds the INVITE undecided ────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
@@ -80,30 +94,43 @@ async fn a_retransmission_sent_to_the_backup_of_a_live_primary_dials_no_second_c
         survivor.metrics().foreign_invite_copies_dropped_total() >= 1,
         "the backup dropped the copy"
     );
+    assert_eq!(survivor.metrics().dead_verdicts_taken_total(), u64::from(told));
+    assert_eq!(survivor.metrics().repl_takeover_hydrated_total(), 0, "the backup took nothing");
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     let drained = fh.settle_terminal(async || w_b1.memory_clean() && w_b2.memory_clean()).await;
     assert!(drained, "the cluster drains the call");
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     let cdrs: usize = [&w_b1, &w_b2].iter().map(|n| n.cdr_records().len()).sum();
     assert_eq!(cdrs, 1, "one CDR");
+    fh.assert_sip_rfc_clean(name);
     drop(proxy);
 }
 
 /// After the misread above, the primary reads alive again and relays the
 /// callee's 180; the caller's CANCEL goes where its INVITE went, the live
 /// primary, not to the backup the dropped retransmission was sent to. One
-/// 487 reaches the caller and is ACKed; the backup takes nothing over.
+/// 487 reaches the caller and is ACKed; the backup takes nothing over, told
+/// the false dead verdict or not.
 #[tokio::test(start_paused = true)]
 async fn a_cancel_after_a_misread_retransmission_goes_to_the_live_primary() {
-    let name = "cancel-after-a-misread-retransmission";
+    cancel_after_a_misread_retransmission("cancel-after-a-misread-retransmission", false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cancel_after_a_told_misread_goes_to_the_live_primary() {
+    cancel_after_a_misread_retransmission("cancel-after-a-told-misread", true).await;
+}
+
+async fn cancel_after_a_misread_retransmission(name: &str, told: bool) {
     let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
     let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
     let (decision, _consults) = CountedDecision::counting(route, Duration::from_secs(3));
     let (mut proxy, w_b1, w_b2) = bring_up_deciding(&mut fh, decision).await;
-    // The reactive path: the proxy tells no dead verdict (ADR-0050 §3).
-    proxy.tell_no_dead_verdict();
+    if !told {
+        proxy.tell_no_dead_verdict();
+    }
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     fh.cut_signalling("alice", alice.addr());
@@ -141,6 +168,7 @@ async fn a_cancel_after_a_misread_retransmission_goes_to_the_live_primary() {
         hydrated,
         "the backup took nothing over"
     );
+    assert_eq!(survivor.metrics().dead_verdicts_taken_total(), u64::from(told));
     let drained = fh.settle_terminal(async || w_b1.memory_clean() && w_b2.memory_clean()).await;
     assert!(drained, "the cluster drains the call");
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
