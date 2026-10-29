@@ -27,6 +27,9 @@ pub struct CutFacts {
     /// effects left, and the backup never applied its write: the answer comes
     /// back to the dead node, and the copy never learns the request left.
     pub unapplied_call_out_left: bool,
+    /// The caller's CANCEL was answered while her call had dialled nobody,
+    /// and a callee was dialled after her 487.
+    pub dialled_after_cancel: bool,
 }
 
 /// An outcome row's predicate: whether it accepts `verdict`, a failure, with
@@ -93,6 +96,13 @@ pub(super) fn teardown_lost(
     before_the_write(cut)
         && at.barrier == FailedAt::TORN_DOWN
         && obs.with_snapshot(teardown_lost_in_the_window)
+}
+
+/// `W-kill-reask-after-cancel`: the caller's CANCEL was answered while her
+/// call was undecided and a callee was dialled after her 487: the backup
+/// asked again a decision whose CANCEL the dead primary never wrote.
+pub(super) fn reask_after_cancel(cut: &CutFacts, _: &ScenarioVerdict, _: &ObservedState) -> bool {
+    cut.dialled_after_cancel
 }
 
 /// The parties gave up waiting.

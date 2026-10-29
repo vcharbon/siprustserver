@@ -284,8 +284,8 @@ pub struct HandlerEffects {
     /// turn, or on its deadline's expiry (ADR-0039). Turn-local, never
     /// replicated.
     pub took_answer: bool,
-    /// The turn sent again requests another node had sent off the call's
-    /// turn. Turn-local, never replicated.
+    /// The turn sent again requests another node had sent: off the call's
+    /// turn, or its routing decision. Turn-local, never replicated.
     pub resent: bool,
 }
 

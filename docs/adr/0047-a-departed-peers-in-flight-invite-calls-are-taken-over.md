@@ -15,7 +15,9 @@ Amended (2026-10-29): D2, the sweep also takes over a call with an in-dialog req
 flight, and one that awaits the answer to a request sent off its turn, which the copy
 sends again (ADR-0039 decision 5).
 Amended (2026-10-29): D1, a dead verdict acts once this node's replication stream from
-the peer is down; D2, the takeover half then takes every such call over at once.
+the peer is down; D2, the takeover half then takes every such call over at once; D4, an
+undecided call's decision is asked again, on a verdict too, and a copy written over by
+its returning primary applies no answer (D7).
 
 **Amends:** ADR-0014 D1 (takeover is reactive only), ADR-0022 X4 and X5, ADR-0031's
 case table and its D3 split rule (the lifecycle order the forward and reverse gates read),
@@ -115,11 +117,11 @@ keeps — the give-up of a 2xx ladder the primary's copy discharged — is not k
 (`answer_lost_with_primary_no_answer.rs`, the cell where the ACK reaches the reclaimed
 copy first).
 
-The sweep has two halves. The **takeover half** (the calls above) runs on either
-trigger. The **discharge half** (D8's discharge of an ended Element and of a
-`Terminating` call with nothing left to serve, ADR-0055 §5) and D4's refusal of an
-undecided call run on a departure only: a peer read dead may live behind a partition
-and decide or discharge those calls itself (user ruling). A copy taken over on a verdict that ends while its peer is still a member
+The sweep has two halves. The **takeover half** (the calls above, an undecided one
+included, D4) runs on either trigger. The **discharge half** (D8's discharge of an
+ended Element and of a `Terminating` call with nothing left to serve, ADR-0055 §5) runs
+on a departure only: a peer read dead may live behind a partition and discharge those
+calls itself (user ruling). A copy taken over on a verdict that ends while its peer is still a member
 defers its CDR (ADR-0020 X3), and the departure's sweep discharges it. A call already
 live here when the departure's sweep runs is left as it is. A primary that comes back
 from the partition meets the copies through D3's forward guard, D7's stand-down and
@@ -133,22 +135,26 @@ entry, as every write of one call does (`repl/tests.rs`,
 `update_compacts_and_moves_counter_forward`). The replica lands one stream hop after
 the caller's 100, before the decision answers (`new_call_replication_window.rs`).
 
-**D4 — An undecided call materialised with no message is refused 503.** A call the
-departure sweep takes over on a departure, or that its own node reclaims after a
-restart (the bulk reclaim and the straggler reclaim), carries no message to serve. A
-proxy's dead verdict leaves an undecided call to the departure: its decision may be in
-flight at a primary that lives behind a partition (user ruling). One still waiting on
-its first routing decision — live, the caller unanswered, no decision applied, no
-attempt, no leg dialled — is refused as a decision the backend could not give
-(503 Service Unavailable, ADR-0022 X3) through the INVITE server transaction the
-materialisation rebuilt, with **no Retry-After**: the caller takes it as a 500
-(§21.5.4), and whether to retry is its own or its upstream's call — nothing behind the
-stateless front proxy holds state that a delay would wait out. The decision is never
-asked again, so nothing it causes happens twice. The copy's primary has departed, so
-the copy writes the CDR (D8). When the caller's INVITE branch is
+**D4 — An undecided call materialised with no message has its decision asked again.**
+A call the departure sweep or a confirmed dead verdict takes over, or that its own node
+reclaims after a restart (the bulk reclaim and the straggler reclaim), carries no
+message to serve. One still waiting on its first routing decision — live, the caller
+unanswered, no decision applied, no attempt, no leg dialled — has that decision asked
+again on a turn of the call's own (user ruling): the initial consult runs on the
+materialised call, its caller's INVITE rebuilt from the record, and the caller is
+answered through the INVITE server transaction the materialisation seeded. The
+backend may be asked twice and the callee dialled twice; the backend is stateless
+(ADR-0055 §1). One owner acts on the answer (D7): a takeover copy whose primary wrote
+the call since the copy was made — a returning primary's reclaim, which asks the
+decision itself — asks nothing, and applies no answer that returns after that write.
+A call whose caller CANCELed the setup during its consult (`Call::setup_cancelled`)
+ends under her cancel with nothing on the wire; a CANCEL whose turn never ran, waiting
+for the decision when the node died, is in no record, and the copy asks the decision
+again (ADR-0055 §11, `W-kill-reask-after-cancel`). When the caller's INVITE branch is
 already another call's transaction on this node — its retransmission placed here as a
-call of its own — the undecided call ends with nothing on the wire, as the 503 would
-answer that other call; when the transaction layer cannot be asked, nothing is settled
+call of its own — the undecided call ends with nothing on the wire; when the
+transaction layer cannot be asked, nothing is settled. A node whose endpoint left the
+slice asks nothing and refuses the caller 503, with no Retry-After (D6)
 (`undecided_call_settled_on_departure.rs`, `router/departure/tests.rs`).
 
 **D5 — A final for a round the record lost is acknowledged and ends the call.** An
@@ -323,9 +329,9 @@ the call has one CDR.
   4) never leaves the membership set and is read by the tombstone, not the probe, and
   a proxy with no cluster key tells no verdict: a message takes the call over
   (`inflight_resend.rs`, `prack_takeover.rs`, each on a proxy that tells no verdict).
-  An undecided call stays reactive under a verdict too: a CANCEL takes it over (the
-  CANCEL cell of `undecided_call_settled_on_departure.rs`), and a restarted node
-  answers its own undecided calls on its reclaim (the restart cell there).
+  An undecided call there is taken over by a message (the CANCEL cell of
+  `undecided_call_settled_on_departure.rs`), and a restarted node asks its own
+  undecided calls' decisions again on its reclaim (the restart cell there).
 - **A primary read dead while it lives.** A flap or a partition between the proxy and
   the primary alone leaves the replication stream open, so the verdict takes nothing
   over: nothing is dialled, asked or relayed twice
@@ -341,18 +347,22 @@ the call has one CDR.
   hop leaves no replica (`new_call_replication_window.rs` measures it).
 - **A route applied before its write replicated.** A node that dies after dialling
   the callee and before the routed call reached its backup leaves the backup an
-  undecided call: the caller is refused 503 and the callee rings on, CANCELled by no
-  one (`undecided_call_settled_on_departure.rs`, the route-not-replicated cell).
+  undecided call: the backup asks the decision again and dials the callee a second
+  time, while the INVITE the dead node sent rings on, CANCELled by no one
+  (`undecided_call_settled_on_departure.rs`, the route-not-replicated cell).
 - **The caller's re-INVITE of a lost round gets no final.** Its transaction existed
   only on the dead node (§17.1.3); the BYE ends its dialog instead
   (`reinvite_round_not_yet_replicated.rs`). Answering it would need the 100 held on
   a synchronous replication, which ADR-0014 rejects.
-- **A caller answered twice.** A CANCEL during the decision round trip: the backup
-  holds the call as born and refuses it 503 after the caller's 487, on the branch the
-  caller's transaction completed on (`undecided_call_settled_on_departure.rs`, the
-  CANCEL-during-decision cell). A removed node whose ordinal is bound to its
-  replacement is superseded and answers nothing, nor writes a CDR (ADR-0055 §6, the
-  replacement-decision cell).
+- **A callee dialled after the caller's 487.** A CANCEL during the decision round
+  trip, and a kill before the decision returns: the backup holds the call undecided
+  and asks the decision again (D4, ADR-0055 §11 `W-kill-reask-after-cancel`;
+  `undecided_call_settled_on_departure.rs`, the CANCEL-during-decision cell). A removed
+  node whose ordinal is bound to its replacement is superseded and answers nothing,
+  nor writes a CDR (ADR-0055 §6, the replacement-decision cell).
+- **A returning primary's reclaim inside the copy's decision.** The copy's answer can
+  return and apply before the returning primary's reclaim write reaches it; both then
+  dial the callee.
 - **A returning node's answer inside the replication lag of the deadline.** The
   copy's ring deadline fires before the returned node's reclaim and answer reach the
   backup: the copy CANCELs the callee after its answer and refuses the caller 480

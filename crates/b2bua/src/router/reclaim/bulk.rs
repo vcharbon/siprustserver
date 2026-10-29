@@ -68,7 +68,7 @@ pub(in crate::router) async fn park_all(ctx: &Arc<RouterCtx>) {
 
 /// **Bulk reclaim, second pass**: arm every parked call once the node's own
 /// endpoint reads ready (ADR-0055 §8, `router::readmission`) — its timers
-/// re-armed, its transactions seeded, an undecided call refused (ADR-0047 D4).
+/// re-armed, its transactions seeded, an undecided call asked again (ADR-0047 D4).
 ///
 /// **Keepalive smoothing (ADR-0014, performance-only).** Many keepalive timers in
 /// a just-rehydrated partition are past-due; firing them all at once floods the

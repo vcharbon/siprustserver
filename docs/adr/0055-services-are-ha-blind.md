@@ -459,7 +459,7 @@ the backup's takeover copy stands down on that write (a copy holding an INVITE
 it dialled plays on until its final, and the primary's write that takes the
 final releases it), and the burst of those writes drains, before
 the proxy routes anything to the worker. The worker arms the parked calls —
-their timers, their transactions, the refusal of an undecided call — only
+their timers, their transactions, the re-ask of an undecided call — only
 while its own endpoint reads ready in the slice the proxy routes from. While
 it does not, the proxy holds no address for it, so the response to a request
 it sends goes to the call's other owner, which reads it as evidence (§4) and
@@ -528,8 +528,8 @@ the re-anchor deadband of each other.
     leave two (the dead primary's and the survivor's, §5), never none;
   - primary killed unannounced (ADR-0031 case 3): the proxy's probe reads it
     dead 2 s later and tells the backup, which takes over the calls with work
-    in flight, an awaited outside answer included (ADR-0039 decision 5), but
-    an undecided one (ADR-0047 D1); its endpoint reads not ready
+    in flight, an awaited outside answer and an undecided call's decision
+    included (ADR-0039 decision 5, ADR-0047 D4); its endpoint reads not ready
     but stays in the slice 40 s later, and leaves it when the evicted pod is
     force-deleted 5 min later, when the backup settles and discharges what is
     left; judged as a kill of the primary;
@@ -687,6 +687,23 @@ the re-anchor deadband of each other.
     primary sent on the dialog, or at ones it already sent;
     a re-INVITE while one the dead primary sent on the dialog awaits its ACK
     (a second transfer over the first);
+  - `W-off-stale-reask`, off only, a kill of the primary or a stall past the
+    cap then a kill, in a run where a node sent a request again: the copy's
+    record lacks the routing decision the dead primary had acted on, so it
+    asks the decision again (ADR-0047 D4) and dials the callee a second time;
+    that second leg's 2xx crossing the CANCEL the copy sends it, and the BYE
+    the copy's evidence rule sends on a caller dialog it holds possibly
+    confirmed;
+  - `W-kill-reask-after-cancel`, a kill of the primary (user ruling): the
+    caller's CANCEL is answered by the dead node's transaction layer while
+    her call is undecided, and the turn that would record it waits for the
+    decision; the backup holds the call undecided, asks the decision again
+    and dials the callee after her 487. Rare: a CANCEL and a kill inside one
+    decision round trip. The record says nothing of the CANCEL, so the copy
+    cannot tell it apart from an undecided call; when it does say so the
+    copy ends the call with nothing on the wire
+    (`undecided_call_settled_on_departure.rs`, the CANCEL-during-decision
+    cell);
   - `W-kill-rseq`, a kill inside the replication window, and a split that
     heals (user ruling): a copy's reliable provisional under the dialog's
     derived tag whose RSeq cannot continue the sequence the dead primary sent

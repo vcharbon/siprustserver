@@ -27,10 +27,12 @@ use std::time::Duration;
 
 use b2bua::decision::ScriptedDecisionEngine;
 use failover_harness::{
-    assert_call_fully_released, total_cdrs_for, FailoverHarness, Transitional, WorkerHealth,
+    assert_call_fully_released, total_cdrs_for, FailoverHarness, Incident, Transitional,
+    WorkerHealth,
 };
 use scenario_harness::agent::Agent;
 use sip_message::header::HeaderName;
+use sip_message::SipParser;
 
 use crate::departure_support::{
     bring_up_deciding, call_id_placed_on, kill_announced, placed, spawn_front_proxy,
@@ -54,15 +56,32 @@ fn reached(fh: &FailoverHarness, agent: &Agent) -> bool {
     fh.sip_entries().iter().any(|e| e.to == agent.addr())
 }
 
-/// How many distinct finals starting `status_line` reached `agent` this run:
-/// a retransmission, byte for byte the same, counts once.
-fn finals_to(fh: &FailoverHarness, agent: &Agent, status_line: &[u8]) -> usize {
+/// How many INVITEs reached `agent` this run, a retransmission counted once.
+fn dialled(fh: &FailoverHarness, agent: &Agent) -> usize {
     fh.sip_entries()
         .iter()
-        .filter(|e| e.to == agent.addr() && e.start_line().as_bytes().starts_with(status_line))
-        .map(|e| e.raw.clone())
+        .filter(|e| e.to == agent.addr() && e.opens_with("INVITE "))
+        .filter_map(|e| sip_message::parser::custom::CustomParser::new().parse(&e.raw).ok())
+        .map(|m| match m {
+            sip_message::SipMessage::Request(r) => {
+                r.top_via().branch().unwrap_or_default().to_string()
+            }
+            sip_message::SipMessage::Response(_) => String::new(),
+        })
         .collect::<std::collections::HashSet<_>>()
         .len()
+}
+
+/// The callee answers the INVITE the backup dials, the caller takes the 2xx,
+/// ACKs it and hangs up.
+async fn answer_and_hang_up(call: &mut scenario_harness::ClientInvite, bob: &Agent) {
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(OFFER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    // A callee read late absorbs the INVITE's retransmissions first.
+    bob.receive_absorbing("ACK", &["INVITE"]).await;
+    scenario_harness::callflow::hangup(&mut dialog, bob).await;
 }
 
 /// How many 503 responses reached `agent` this run.
@@ -71,7 +90,7 @@ fn rejections_to(fh: &FailoverHarness, agent: &Agent) -> usize {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_undecided_call_whose_node_departs_is_answered_503_by_its_backup() {
+async fn an_undecided_call_whose_node_departs_is_asked_again_by_its_backup() {
     let mut fh = FailoverHarness::new("undecided-call-departure", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -86,29 +105,31 @@ async fn an_undecided_call_whose_node_departs_is_answered_503_by_its_backup() {
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
     let killed_at = fh.now_ms();
     let hydrated_before = kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
-    let rejected = call.expect(503).await;
+    let mut uas = bob.receive("INVITE").await;
     assert!(
-        fh.now_ms() - killed_at <= ANSWER_BOUND.as_millis() as i64,
-        "the caller's final follows the departure at once",
+        fh.now_ms() - killed_at <= (DECISION_DELAY + ANSWER_BOUND).as_millis() as i64,
+        "the callee is dialled once the decision asked again answers",
     );
-    assert!(!rejected.has(&HeaderName::RetryAfter), "no Retry-After: the proxy places a retry");
     let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
     assert_eq!(
         survivor.metrics().repl_takeover_hydrated_total(),
         hydrated_before + 1,
         "the backup took the call over",
     );
+    assert_eq!(consults.load(Ordering::SeqCst), 2, "the decision is asked again, once");
 
-    // The caller's ACK completes the transaction: no 503 is repeated.
-    fh.advance(Duration::from_secs(5)).await;
-    assert_eq!(rejections_to(&fh, &alice), 1, "the caller's ACK is absorbed, nothing repeats");
-    assert!(!reached(&fh, &bob), "the callee is never dialled");
-    assert_eq!(consults.load(Ordering::SeqCst), 1, "the decision is asked once");
+    uas.respond(200, "OK").with_sdp(OFFER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    assert_eq!(rejections_to(&fh, &alice), 0, "the caller is not refused");
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
 
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
     reboot_and_reclaim(&mut fh, primary, survivor, &pri_ord, &proxy).await;
-    assert_eq!(consults.load(Ordering::SeqCst), 1, "the reclaim asks no decision");
+    assert_eq!(consults.load(Ordering::SeqCst), 2, "the reclaim asks no decision");
     settle_to_one_cdr(&fh, &[&alice, &bob], &[&w_b1, &w_b2], &call_ref).await;
+    fh.assert_sip_rfc_clean("undecided-call-departure");
     drop(proxy);
 }
 
@@ -119,7 +140,9 @@ async fn a_cancel_of_an_undecided_call_whose_node_died_is_answered_by_its_backup
     let bob = fh.agent("bob", BOB).await;
     let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
     let (decision, consults) = CountedDecision::counting(route, DECISION_DELAY);
-    let (proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
+    let (mut proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
+    // The reactive path: the proxy tells no dead verdict (ADR-0050 §3).
+    proxy.tell_no_dead_verdict();
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     call.expect(100).await;
@@ -146,13 +169,16 @@ async fn a_cancel_of_an_undecided_call_whose_node_died_is_answered_by_its_backup
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_undecided_call_reclaimed_by_its_restarted_node_is_answered_503() {
+async fn an_undecided_call_reclaimed_by_its_restarted_node_is_asked_again() {
     let mut fh = FailoverHarness::new("undecided-call-restart-in-place", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
     let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
     let (decision, consults) = CountedDecision::counting(route, DECISION_DELAY);
-    let (proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
+    let (mut proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
+    // A restart in place is read by the tombstone, not the probe (ADR-0031
+    // case 4): the proxy tells no dead verdict.
+    proxy.tell_no_dead_verdict();
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     call.expect(100).await;
@@ -165,22 +191,34 @@ async fn an_undecided_call_reclaimed_by_its_restarted_node_is_answered_503() {
     primary.crash();
     proxy.set_health(&pri_ord, WorkerHealth::Dead);
     let hydrated_before = survivor.metrics().repl_takeover_hydrated_total();
-    reboot_and_reclaim(&mut fh, primary, survivor, &pri_ord, &proxy).await;
-    // The harness reads the caller's queue only now, so the 503 has repeated on
-    // the §17.2.1 ladder meanwhile; the caller's ACK ends the repeats.
-    let rejected = call.expect(503).await;
-    assert!(!rejected.has(&HeaderName::RetryAfter), "no Retry-After: the proxy places a retry");
+    fh.mark(&pri_ord, None, "reboot", "restart empty, higher gen, new pod IP");
+    let new_addr = primary.reboot().await;
+    proxy.set_address(&pri_ord, new_addr);
+    fh.note_worker_rebound(&pri_ord, new_addr);
+    survivor.simulate_peer_added(&pri_ord);
+    for _ in 0..120 {
+        fh.advance(Duration::from_millis(500)).await;
+        if primary.is_ready() {
+            break;
+        }
+    }
+    assert!(primary.is_ready(), "the restarted node became ready");
+    proxy.set_health(&pri_ord, WorkerHealth::Alive);
+    let mut uas = bob.receive("INVITE").await;
     assert_eq!(
         survivor_of(&pri_ord, &w_b1, &w_b2).metrics().repl_takeover_hydrated_total(),
         hydrated_before,
         "the backup took nothing over",
     );
-    let heard = rejections_to(&fh, &alice);
-    fh.advance(Duration::from_secs(5)).await;
-    assert_eq!(rejections_to(&fh, &alice), heard, "the caller's ACK is absorbed, nothing repeats");
-    assert!(!reached(&fh, &bob), "the callee is never dialled");
-    assert_eq!(consults.load(Ordering::SeqCst), 1, "the restarted node asks no decision");
+    assert_eq!(consults.load(Ordering::SeqCst), 2, "the restarted node asks the decision again");
+    uas.respond(200, "OK").with_sdp(OFFER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    assert_eq!(rejections_to(&fh, &alice), 0, "the caller is not refused");
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     settle_to_one_cdr(&fh, &[&alice, &bob], &[&w_b1, &w_b2], &call_ref).await;
+    fh.assert_sip_rfc_clean("undecided-call-restart-in-place");
     drop(proxy);
 }
 
@@ -243,12 +281,13 @@ async fn a_retransmission_placed_on_the_survivor_is_not_answered_for_the_departe
 
 /// The abrupt removal (ADR-0031 case 2): the endpoint leaves the membership
 /// at once while the process lives two more seconds, and a replacement of the
-/// same ordinal comes up beside it. The survivor's departure sweep answers the
-/// caller and writes the ended call's one CDR; the old process dies before its
-/// decision returns. One final, one CDR, one
-/// consult.
+/// same ordinal comes up beside it. The survivor's departure sweep asks the
+/// decision again; the replacement reclaims the call, writes it and asks too,
+/// and the copy, written over, applies nothing and stands down (ADR-0047 D7).
+/// The old process dies before its own decision returns. One final, one
+/// dialled INVITE, one CDR.
 #[tokio::test(start_paused = true)]
-async fn an_undecided_call_of_a_node_replaced_at_once_is_answered_once() {
+async fn an_undecided_call_of_a_node_replaced_at_once_is_asked_again_once() {
     let mut fh = FailoverHarness::new("undecided-call-abrupt-replacement", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -261,8 +300,6 @@ async fn an_undecided_call_of_a_node_replaced_at_once_is_answered_once() {
     let (pri_ord, call_ref) = placed(&fh, &w_b1, &w_b2).await;
 
     fh.withdraw(&pri_ord);
-    let rejected = call.expect(503).await;
-    assert!(!rejected.has(&HeaderName::RetryAfter), "no Retry-After: the proxy places a retry");
     fh.advance(Duration::from_millis(400)).await;
     let replacement = fh.spawn_replacement(&pri_ord).await;
     fh.readmit(&pri_ord, replacement.sip_addr());
@@ -278,11 +315,12 @@ async fn an_undecided_call_of_a_node_replaced_at_once_is_answered_once() {
     }
     assert!(replacement.is_ready(), "the replacement re-hydrated and became ready");
     proxy.set_health(&pri_ord, WorkerHealth::Alive);
+    answer_and_hang_up(&mut call, &bob).await;
     fh.advance(Duration::from_secs(10)).await;
 
-    assert_eq!(rejections_to(&fh, &alice), 1, "one final reaches the caller");
-    assert!(!reached(&fh, &bob), "the callee is never dialled");
-    assert_eq!(consults.load(Ordering::SeqCst), 1, "the decision is asked once");
+    assert_eq!(rejections_to(&fh, &alice), 0, "the caller is not refused");
+    assert_eq!(dialled(&fh, &bob), 1, "the callee is dialled once");
+    assert_eq!(consults.load(Ordering::SeqCst), 3, "asked by the copy and the replacement");
     let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
     let nodes = [&replacement, survivor];
     let drained = fh
@@ -303,9 +341,11 @@ async fn an_undecided_call_of_a_node_replaced_at_once_is_answered_once() {
 /// The same removal with a decision that returns inside the process's last
 /// seconds, after a replacement came up: the removed process saw its ordinal
 /// bound to the replacement's worker identity and stopped authoring
-/// (ADR-0055 §6), so it neither applies the decision nor answers the caller:
-/// the callee is never dialled, the caller hears the backup's 503 alone, and
-/// the backup, which ended the call of a departed primary, writes its one CDR.
+/// (ADR-0055 §6), so it neither applies the decision nor answers the caller.
+/// The backup asks the decision again on the departure; the replacement
+/// reclaims the call undecided, writes it and asks again too, and the copy,
+/// written over, applies nothing and stands down (ADR-0047 D7). The
+/// replacement alone dials the callee and answers the caller. One CDR.
 #[tokio::test(start_paused = true)]
 async fn a_decision_returning_to_a_removed_process_is_not_applied() {
     let mut fh = FailoverHarness::new("undecided-call-abrupt-replacement-decision", &["b1", "b2"]);
@@ -319,7 +359,6 @@ async fn a_decision_returning_to_a_removed_process_is_not_applied() {
     let (pri_ord, call_ref) = placed(&fh, &w_b1, &w_b2).await;
 
     fh.withdraw(&pri_ord);
-    call.expect(503).await;
     fh.advance(Duration::from_millis(400)).await;
     let replacement = fh.spawn_replacement(&pri_ord).await;
     fh.readmit(&pri_ord, replacement.sip_addr());
@@ -337,12 +376,13 @@ async fn a_decision_returning_to_a_removed_process_is_not_applied() {
     }
     assert!(replacement.is_ready(), "the replacement re-hydrated and became ready");
     proxy.set_health(&pri_ord, WorkerHealth::Alive);
+    answer_and_hang_up(&mut call, &bob).await;
     fh.advance(Duration::from_secs(10)).await;
 
-    assert!(!reached(&fh, &bob), "the callee is never dialled");
+    assert_eq!(dialled(&fh, &bob), 1, "the replacement's INVITE alone");
     assert!(elder_superseded, "the removed process read its ordinal bound to its replacement");
-    assert_eq!(finals_to(&fh, &alice, b"SIP/2.0 503"), 1, "the backup's 503 alone");
-    assert_eq!(consults.load(Ordering::SeqCst), 1, "the decision was asked once");
+    assert_eq!(rejections_to(&fh, &alice), 0, "the caller is not refused");
+    assert_eq!(consults.load(Ordering::SeqCst), 3, "asked by the copy and the replacement");
     let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
     let nodes = [&replacement, survivor];
     let drained = fh
@@ -358,17 +398,18 @@ async fn a_decision_returning_to_a_removed_process_is_not_applied() {
     assert_eq!(elder_cdrs, 0, "the superseded process wrote no CDR");
     assert_eq!(total_cdrs_for(&nodes, &call_ref), 1, "one CDR across the cluster");
     assert_call_fully_released(&nodes, &call_ref).await;
-    drop((call, replacement, proxy));
+    drop((replacement, proxy));
 }
 
 /// A plain crash after the decision was applied, before the routed call's
-/// write reached the backup: the backup holds the call as born, undecided, and
-/// refuses it 503 on the departure, while the callee the dead node dialled is
-/// CANCELled by no one (ADR-0047, residual). The callee gives up on its own;
-/// its final reaches no node and runs to its Timer H. The node never returns;
-/// the backup writes the ended call's one CDR (ADR-0047 D8).
+/// write reached the backup: the backup holds the call as born, undecided,
+/// asks the decision again on the departure and dials the callee a second
+/// time, while the INVITE the dead node sent is CANCELled by no one (ADR-0047,
+/// residual). The callee answers the backup's and gives up on the other on its
+/// own; that final reaches no node and runs to its Timer H. The node never
+/// returns; the backup writes the call's one CDR (ADR-0047 D8).
 #[tokio::test(start_paused = true)]
-async fn a_route_applied_before_it_replicated_leaves_the_callee_ringing() {
+async fn a_route_applied_before_it_replicated_is_dialled_again_by_the_backup() {
     let mut fh = FailoverHarness::new("undecided-call-route-not-replicated", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -387,7 +428,8 @@ async fn a_route_applied_before_it_replicated_leaves_the_callee_ringing() {
     fh.strike(Transitional::UndecidedDeparture);
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
     kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
-    call.expect(503).await;
+    answer_and_hang_up(&mut call, &bob).await;
+    assert_eq!(dialled(&fh, &bob), 2, "the dead node's INVITE and the backup's");
     fh.advance(Duration::from_secs(30)).await;
     assert!(
         bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_none(),
@@ -397,7 +439,7 @@ async fn a_route_applied_before_it_replicated_leaves_the_callee_ringing() {
 
     let budget = b2bua::ReplicaConfig::default().reboot_budget_sec as u64;
     fh.advance(Duration::from_secs(budget + 120)).await;
-    assert_eq!(rejections_to(&fh, &alice), 1, "the caller's one final is the backup's");
+    assert_eq!(rejections_to(&fh, &alice), 0, "the caller is not refused");
     let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
     assert_eq!(survivor.metrics().repl_terminal_lost_total(), 0, "no ended call is lost");
     assert_eq!(total_cdrs_for(&[survivor], &call_ref), 1, "the backup writes the one CDR");
@@ -407,18 +449,20 @@ async fn a_route_applied_before_it_replicated_leaves_the_callee_ringing() {
 }
 
 /// The caller CANCELs while the decision is in flight (RFC 3261 §9.2: 200 and
-/// 487 from the node's transaction layer), then the node departs. Its backup
-/// holds the call as born, undecided, and refuses it 503: the caller hears that
-/// final after its 487, on a transaction already completed (ADR-0047,
-/// residual), and writes the ended call's one CDR; the node restarts, and the
-/// call is fully released.
+/// 487 from the node's transaction layer), and the node dies before the
+/// decision returns: the turn that records the CANCEL never ran, so the
+/// backup holds the call undecided, not cancelled. It asks the decision again
+/// and dials the callee after the caller's 487 (ADR-0055 §11,
+/// `W-kill-reask-after-cancel`); the callee's answer reaches a caller whose
+/// transaction completed on the 487.
 #[tokio::test(start_paused = true)]
-async fn a_setup_cancelled_during_its_decision_draws_the_backups_503_after_its_487() {
-    let mut fh = FailoverHarness::new("undecided-call-cancelled-then-departed", &["b1", "b2"]);
+async fn a_setup_cancelled_during_its_decision_is_asked_again_by_its_backup() {
+    let name = "undecided-call-cancelled-then-departed";
+    let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
     let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
-    let (decision, _consults) = CountedDecision::counting(route, DECISION_DELAY);
+    let (decision, consults) = CountedDecision::counting(route, DECISION_DELAY);
     let (proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
@@ -429,24 +473,30 @@ async fn a_setup_cancelled_during_its_decision_draws_the_backups_503_after_its_4
     call.expect(487).await;
     fh.advance(Duration::from_millis(200)).await;
 
-    // The backup's 503 reaches a caller whose transaction completed on the
-    // 487.
-    fh.strike(Transitional::UndecidedDeparture);
+    fh.strike(Incident::PrimaryKilled);
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
     kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
-    fh.advance(Duration::from_secs(5)).await;
-    assert_eq!(finals_to(&fh, &alice, b"SIP/2.0 503"), 1, "the backup's 503 follows the 487");
-    assert!(!reached(&fh, &bob), "the callee is never dialled");
+    let mut uas = bob.receive("INVITE").await;
+    assert_eq!(consults.load(Ordering::SeqCst), 2, "the backup asks the decision again");
+    uas.respond(200, "OK").with_sdp(OFFER).await;
+    // The caller ACKs the 2xx her completed INVITE draws and ends the
+    // dialog it confirms (RFC 3261 §13.2.2.4, §15).
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
 
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
     reboot_and_reclaim(&mut fh, primary, survivor, &pri_ord, &proxy).await;
     settle_to_one_cdr(&fh, &[&alice, &bob], &[&w_b1, &w_b2], &call_ref).await;
+    fh.assert_sip_rfc_clean(name);
     drop(proxy);
 }
 
-/// Scale-down: the departed node never returns. Its backup answered the
-/// undecided call; with no primary to defer to, it writes the call's one CDR
-/// and deletes it (ADR-0047 D8), well inside the replica TTL.
+/// Scale-down: the departed node never returns. Its backup asked the
+/// undecided call's decision again and served the call to its end; with no
+/// primary to defer to, it writes the call's one CDR and deletes it
+/// (ADR-0047 D8), well inside the replica TTL.
 #[tokio::test(start_paused = true)]
 async fn an_undecided_call_of_a_node_that_never_returns_is_discharged_by_its_backup() {
     let mut fh = FailoverHarness::new("undecided-call-scale-down", &["b1", "b2"]);
@@ -461,7 +511,7 @@ async fn an_undecided_call_of_a_node_that_never_returns_is_discharged_by_its_bac
     let (pri_ord, call_ref) = placed(&fh, &w_b1, &w_b2).await;
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
     kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
-    call.expect(503).await;
+    answer_and_hang_up(&mut call, &bob).await;
 
     let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
     let released = fh

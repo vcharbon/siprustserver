@@ -19,6 +19,9 @@ pub(super) const RULE_TAG_CONSISTENCY: &str = "tag-consistency";
 /// The audit rule a BYE outside a confirmed dialog meets.
 pub(super) const RULE_EARLY_BYE: &str = "no-bye-outside-or-early-dialog";
 
+/// The audit rule a UAS answering 2xx an INVITE it took a CANCEL for meets.
+pub(super) const RULE_NO_200_AFTER_CANCEL: &str = "no-200-after-cancel";
+
 /// Whether the CANCEL at index `i` of `capture` names an INVITE an entry
 /// before it, captured at or before `upto`, answered with a final.
 pub(super) fn cancels_an_answered_invite(i: usize, capture: &CaptureIndex, upto: u64) -> bool {

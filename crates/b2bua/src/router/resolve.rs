@@ -305,8 +305,9 @@ pub(super) async fn initial_invite_copy(
 /// incoming leg is `req`'s, its INVITE CSeq `req`'s, and `req`'s top-Via
 /// branch names its own server transaction; with whether that transaction is
 /// the caller's unanswered initial INVITE. An undecided call is no copy's: its
-/// decision may still be in flight at a live primary, and it is never asked
-/// twice (ADR-0047 D4).
+/// decision may still be in flight at a live primary; the proxy's dead
+/// verdict, the departure or a reclaim takes it over and asks its decision
+/// again (ADR-0047 D4).
 async fn replicated_call_copied(
     ctx: &RouterCtx,
     req: &sip_message::SipRequest,

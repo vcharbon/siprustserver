@@ -5,7 +5,8 @@ use scenario_harness::dialogs::{DIALOG_CSEQ_BACKWARDS, DIALOG_ENDED};
 
 use super::copies::{
     cancels_an_answered_invite, non_2xx_after_another_final, non_2xx_after_the_dead_owners_2xx,
-    second_bye_at_one_cseq, RULE_EARLY_BYE, RULE_TAG_CONSISTENCY, RULE_UNACKED_NON_2XX,
+    second_bye_at_one_cseq, RULE_EARLY_BYE, RULE_NO_200_AFTER_CANCEL, RULE_TAG_CONSISTENCY,
+    RULE_UNACKED_NON_2XX,
 };
 use super::stall_cseq::reuses_a_stall_cseq;
 use super::stall_repeat::{reason_only_cancel_repeat, RULE_RUNG_BYTE_IDENTICAL};
@@ -34,6 +35,7 @@ const STALE_COPY: &[Incident] =
     &[PrimaryKilled, PrimaryKilledUnannounced, PrimaryRebooted, StalledKilled];
 /// The rows that accept only what follows a request a node sent again.
 pub(super) const RESEND_ROWS: &[&str] = &[
+    "W-off-stale-reask",
     "W-stale-resend",
     "W-stale-resend-cseq",
     "W-stale-resend-cseq-reuse",
@@ -236,7 +238,7 @@ pub static TABLE: &[Row] = &[
         covers: "a party the system under test ends cleanly drops her remaining goals",
         kind: Kind::GoalDrop,
         closes_when_over: false,
-        witness: witness("basic", SyncLevel::Applied, StalledKilled, 1, TurnPoint::Logged),
+        witness: witness("refer", SyncLevel::Applied, StalledKilled, 5, TurnPoint::Logged),
     },
     // A kill of the primary.
     Row {
@@ -336,6 +338,33 @@ pub static TABLE: &[Row] = &[
         kind: Kind::Dialog { rule: DIALOG_ENDED, methods: &[], once_per_dialog: false },
         closes_when_over: false,
         witness: witness("refer-x-bye", SyncLevel::Off, PrimaryKilled, 5, TurnPoint::Applied),
+    },
+    Row {
+        id: "W-off-stale-reask",
+        tier: Tier::Off,
+        opens: Opens::any(STALE_COPY),
+        covers: "a copy whose record is behind the wire asks again the routing decision the \
+                 dead primary had acted on and dials the callee a second time: that leg's 2xx \
+                 crossing its CANCEL, and the BYE the copy's evidence rule sends on a caller \
+                 dialog it holds possibly confirmed",
+        kind: Kind::Rfc {
+            rules: &[RULE_EARLY_BYE, RULE_NO_200_AFTER_CANCEL],
+            once_per_dialog: false,
+            admits: None,
+        },
+        closes_when_over: false,
+        witness: witness("prack", SyncLevel::Off, StalledKilled, 1, TurnPoint::Left),
+    },
+    Row {
+        id: "W-kill-reask-after-cancel",
+        tier: Tier::Degraded,
+        opens: Opens::any(PRIMARY_KILLS),
+        covers: "the caller's CANCEL answered while her call was undecided, its record lost \
+                 with the primary: the backup asks the decision again and dials the callee \
+                 after her 487",
+        kind: Kind::Outcome(outcome::reask_after_cancel),
+        closes_when_over: false,
+        witness: None,
     },
     Row {
         id: "W-stale-resend-cseq",

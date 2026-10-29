@@ -42,6 +42,10 @@ impl Runnable for Turn {
                 super::resend::resend_turn(&self.ctx, call_ref).await;
                 return;
             }
+            if let Some(call_ref) = super::undecided::notice_of(&self.event) {
+                super::undecided::reask_turn(&self.ctx, call_ref).await;
+                return;
+            }
             match (&self.event, self.res.call_ref.as_deref()) {
                 (CallEvent::InternalEvent { call_ref, topic, outcome, payload, body, .. }, _)
                     if topic == super::stand_down::TOPIC =>

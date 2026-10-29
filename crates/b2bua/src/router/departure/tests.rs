@@ -2,9 +2,9 @@
 //! partition it takes over exactly the calls with an INVITE transaction to
 //! serve, and the ending ones with any transaction to serve, and discharges
 //! the ended ones and the ending ones with nothing left to serve; an
-//! undecided one among them is answered 503 through the caller's INVITE
-//! transaction, or settled with nothing on the wire when that transaction's
-//! branch is already another call's here.
+//! undecided one among them has its decision asked again, or is settled with
+//! nothing on the wire when its caller CANCELed the setup or its INVITE
+//! transaction's branch is already another call's here.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -87,32 +87,23 @@ async fn a_departed_peers_in_flight_calls_are_taken_over_and_its_ended_calls_dis
     take_over_departed(ctx, "w0");
 
     let lines = heard(caller.as_ref(), Duration::from_millis(200)).await;
-    assert_eq!(lines, ["SIP/2.0 503 Service Unavailable"], "the undecided caller's final");
+    assert!(lines.is_empty(), "the undecided caller is refused nothing: {lines:?}");
     assert_eq!(n.metrics.repl_takeover_hydrated_total(), 1, "one call taken over");
     assert_eq!(n.metrics.repl_takeover_refused_terminated_total(), 0, "an ended call unread");
     assert!(ctx.state.peek(&quiet.call_ref).is_none(), "the quiet call stays reactive");
-    assert!(ctx.state.peek(&undecided.call_ref).is_none(), "the settled copy released itself");
-    assert_eq!(
-        element(&n.store, &undecided.call_ref).await.state,
-        CallModelState::Terminated,
-        "the settled call's end is kept for its primary",
-    );
+    let copy = ctx.state.peek(&undecided.call_ref).expect("the undecided call's copy serves it");
+    assert!(!copy.b_legs.is_empty(), "its decision was asked again and the callee dialled");
     let cdrs: Vec<String> = n.cdr.snapshot().into_iter().map(|r| r.call_ref).collect();
-    assert_eq!(
-        cdrs,
-        [ended.call_ref.clone()],
-        "the ended call is discharged; the settled copy defers"
-    );
+    assert_eq!(cdrs, [ended.call_ref.clone()], "the ended call is discharged");
     let held = n.store.get_call(BAK, "w0", &ended.call_ref).await.unwrap();
     assert!(held.is_none(), "the discharged call is deleted");
-    assert_eq!(ctx.state.lock_count(), 0, "no lock entry is left behind");
 }
 
-/// On a proxy's dead verdict the peer may live behind a partition with the
-/// decision in flight: an undecided call is left to the departure, untouched,
-/// and an ended call is left to the peer; nothing is on the wire.
+/// On a proxy's dead verdict an undecided call is taken over and its decision
+/// asked again, while an ended call is left to the peer, which may live
+/// behind a partition; nothing is refused.
 #[tokio::test(start_paused = true)]
-async fn a_dead_verdict_leaves_an_undecided_call_and_an_ended_one_alone() {
+async fn a_dead_verdict_asks_an_undecided_calls_decision_again_and_leaves_an_ended_one() {
     let net = SimulatedSignalingNetwork::new(1);
     let n = node_on(&net, "w1", |_| {}, Vec::new()).await;
     let caller = net.bind_udp(BindUdpOpts::new(src(), 64)).await.unwrap();
@@ -125,12 +116,12 @@ async fn a_dead_verdict_leaves_an_undecided_call_and_an_ended_one_alone() {
     assert!(take_over_read_dead(ctx, "w0"), "this node backs calls of w0");
 
     let lines = heard(caller.as_ref(), Duration::from_millis(200)).await;
-    assert!(lines.is_empty(), "nothing on the wire: {lines:?}");
-    assert_eq!(n.metrics.repl_takeover_hydrated_total(), 0, "nothing taken over");
-    assert!(ctx.state.peek(&undecided.call_ref).is_none(), "the undecided call is left");
+    assert!(lines.is_empty(), "nothing reaches the caller: {lines:?}");
+    assert_eq!(n.metrics.repl_takeover_hydrated_total(), 1, "the undecided call taken over");
+    let copy = ctx.state.peek(&undecided.call_ref).expect("the undecided call's copy serves it");
+    assert!(!copy.b_legs.is_empty(), "its decision was asked again and the callee dialled");
     assert!(n.cdr.snapshot().is_empty(), "nothing discharged");
-    assert_eq!(element(&n.store, &undecided.call_ref).await.state, CallModelState::Active);
-    assert_eq!(ctx.state.lock_count(), 0, "no lock entry is left behind");
+    assert_eq!(element(&n.store, &ended.call_ref).await.state, CallModelState::Terminated);
     assert!(!take_over_read_dead(ctx, "w9"), "no call of w9 is backed here");
 }
 
@@ -199,13 +190,16 @@ async fn an_ending_call_whose_bye_is_in_flight_is_taken_over_not_discharged() {
 
 /// A call its copy ends while its primary is out of the membership set has no
 /// primary to discharge it: the copy writes the one CDR and deletes the call.
+/// The copy ends an undecided call whose caller CANCELed the setup, with
+/// nothing on the wire.
 #[tokio::test(start_paused = true)]
 async fn a_call_ended_while_its_primary_is_departed_is_discharged_by_its_copy() {
     let net = SimulatedSignalingNetwork::new(1);
     let n = node_on(&net, "w1", |_| {}, Vec::new()).await;
     let caller = net.bind_udp(BindUdpOpts::new(src(), 64)).await.unwrap();
     let ctx = n.core.router_ctx();
-    let undecided = born("departed-primary");
+    let mut undecided = born("departed-primary");
+    undecided.setup_cancelled = true;
     put(&n.store, &undecided).await;
     n.membership.add(topology::Peer::new("w0", "w0"));
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -213,7 +207,7 @@ async fn a_call_ended_while_its_primary_is_departed_is_discharged_by_its_copy() 
     n.membership.remove("w0");
 
     let lines = heard(caller.as_ref(), Duration::from_millis(500)).await;
-    assert_eq!(lines, ["SIP/2.0 503 Service Unavailable"], "the undecided caller's final");
+    assert!(lines.is_empty(), "the cancelled setup ends with nothing sent: {lines:?}");
     let cdrs = n.cdr.snapshot();
     assert_eq!(cdrs.len(), 1, "the copy writes the call's CDR");
     assert_eq!(cdrs[0].call_ref, undecided.call_ref);
@@ -369,8 +363,7 @@ async fn a_takeover_that_panics_costs_its_call_only_and_is_counted() {
     });
 
     let lines = heard(caller.as_ref(), Duration::from_millis(200)).await;
-    let answered = ["SIP/2.0 503 Service Unavailable", "SIP/2.0 503 Service Unavailable"];
-    assert_eq!(lines, answered, "both other undecided callers are answered");
+    assert!(lines.is_empty(), "no undecided caller is refused: {lines:?}");
     assert_eq!(n.metrics.repl_takeover_hydrated_total(), 2, "the other two calls taken over");
     assert_eq!(n.metrics.departure_takeover_panics_total(), 1, "the panic is counted");
     assert!(task.await.is_ok(), "the sweep itself ran to its end");

@@ -23,6 +23,7 @@
 //! ratchet. Each test writes what its cells measured to
 //! `target/sweep-report/` ([`report`]).
 
+mod after_cancel;
 mod aftermath;
 mod answered;
 pub mod catalogue;

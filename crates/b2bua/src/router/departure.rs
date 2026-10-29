@@ -11,7 +11,7 @@
 //! or a caller dialog held possibly confirmed (ADR-0055 §4), is taken over at
 //! once: its timers run
 //! at their replicated deadlines, its transactions are rebuilt, its awaited
-//! requests are sent again, and an undecided call is answered. A `Terminating` call with nothing left to serve
+//! requests are sent again, and an undecided call's decision is asked again. A `Terminating` call with nothing left to serve
 //! finished its ending on the peer, whose last write was lost: it is
 //! discharged, its legs forced terminal, with its CDR, which may be the
 //! second (ADR-0055 §5). Any other call is left to the reactive path by user
@@ -25,11 +25,11 @@
 //!
 //! A proxy's dead verdict on the peer (ADR-0050 §3), once the replication
 //! stream from the peer confirms it ([`super::dead_verdict`]), runs the
-//! takeover half alone: the same calls are taken over at once, while an
-//! undecided call, a finished call and a deferred end are left to the peer,
-//! which may live behind a partition and decide or discharge them itself, or
-//! to its departure; the final a finished call may still owe its caller is
-//! sent at once.
+//! takeover half alone: the same calls are taken over at once, an undecided
+//! one included, while a finished call and a deferred end are left to the
+//! peer, which may live behind a partition and discharge them itself, or to
+//! its departure; the final a finished call may still owe its caller is sent
+//! at once.
 //!
 //! The sweep is a task of its own, never the router loop's: a departed
 //! partition holds every call the peer served, read one body at a time, and
@@ -183,11 +183,11 @@ async fn sweep<F, Fut>(
 /// transaction to serve ([`has_invite_to_serve`]) or an in-dialog request in
 /// flight ([`names_request_in_flight`]), is ending with work left
 /// ([`ending_work`]), or awaits the answer to a request it sent off its turn,
-/// which the copy sends again. On a dead verdict an undecided call is left to
-/// the departure: its decision may be in flight at a primary behind a
-/// partition; a finished one too, the final it may still owe its caller sent
-/// ([`super::owed_final`]). The body is read once without the lock to leave a quiet call
-/// untouched; a call already live here is left as it is.
+/// which the copy sends again; an undecided call's decision is asked again
+/// ([`settle_undecided`]). On a dead verdict a finished call is left to the
+/// departure, the final it may still owe its caller sent
+/// ([`super::owed_final`]). The body is read once without the lock to leave a
+/// quiet call untouched; a call already live here is left as it is.
 async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Swept {
     let Ok((copy, skew)) = ctx.state.peek_replica(call_ref).await else { return Swept::Left };
     let mut call = copy.call;
@@ -205,9 +205,6 @@ async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Sw
     let at_once = has_invite_to_serve(&call) || (ending && ending_work(&call));
     let awaited = call.state == CallModelState::Active && !call.awaited.is_empty();
     if !at_once && !names_request_in_flight(&call) && !awaited {
-        return Swept::Left;
-    }
-    if cause == Cause::ReadDead && is_undecided(&call) {
         return Swept::Left;
     }
     let guard = ctx.state.lock(call_ref).await;

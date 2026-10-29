@@ -101,8 +101,8 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    on it the takeover half of the departure sweep over the calls it backs for
    the dead worker (ADR-0047 D1, D2) once its own replication stream from that
    worker is down: the proxy now routes their traffic to it, and the stream
-   tells a dead worker from a live one the proxy misread. An undecided call is
-   left to the departure.
+   tells a dead worker from a live one the proxy misread. An undecided call's
+   decision is asked again there (ADR-0047 D4).
 4. **In-dialog routing reads liveness only.** A request carrying a verified
    cookie goes to `w_pri` while `w_pri` is `Alive`, whatever its acceptance;
    otherwise to `w_bak` while `w_bak` is `Alive`. It never runs a fresh
@@ -125,16 +125,16 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    record holds. The worker holding the record serves the call; when the
    primary still lives, the callee may get the dialled INVITE twice under one
    branch. A call whose routing decision the record does not hold is no
-   copy's: the decision may be in flight at a primary the proxy misread dead,
-   and is never asked twice (ADR-0047 D4). An initial INVITE whose cookie
+   copy's: the decision may be in flight at a primary the proxy misread dead;
+   a confirmed verdict, the departure or a reclaim asks it again (ADR-0047 D4). An initial INVITE whose cookie
    names another primary and that copies no such record gets no final
    (`b2bua_foreign_invite_copies_dropped_total`; the transaction layer's 100
    Trying has already gone out): the primary still owns that transaction, and
    a final from this worker would end the caller's.
    Accepted residuals:
-   - a copy of an undecided call whose primary really died gets no final: a
-     dead verdict (§3) leaves the call to the departure sweep, which refuses
-     it `503`;
+   - a copy of an undecided call whose primary really died is dropped: the
+     confirmed dead verdict (§3) takes the call over and asks its decision
+     again;
    - an INVITE that never replicated, from a primary that really died, gets
      no final from the backup; the caller's transaction timers end it;
    - a discovered pool whose watch never delivers a listing never has a first
