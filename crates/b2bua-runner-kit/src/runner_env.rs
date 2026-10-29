@@ -91,7 +91,7 @@ pub struct RunnerEnv {
     /// `B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC` — how long the worker waits
     /// for a response of ANY kind to a b-leg initial INVITE before it gives up
     /// on the hop and the `call_failure` consult carries `timeout_kind:
-    /// "response"` (ADR-0044). Default 32 (RFC 3261 Timer B); supported range
+    /// "response"` (ADR-0044). Default 5; supported range
     /// 2..=32. In-dialog INVITE and non-INVITE never read it.
     pub invite_first_response_timeout_sec: i64,
     /// `B2BUA_CALL_CONTROL_TIMEOUT_MS` — decision-backend deadline per
@@ -277,7 +277,7 @@ impl RunnerEnv {
             invite_txn_timeout_sec: knob("B2BUA_INVITE_TXN_TIMEOUT_SEC", "158")?,
             invite_first_response_timeout_sec: knob(
                 "B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC",
-                "32",
+                "5",
             )?,
             call_control_timeout_ms,
             ack_timeout_sec: knob("B2BUA_ACK_TIMEOUT_SEC", "32")?,

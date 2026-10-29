@@ -2,8 +2,9 @@
 //! Record-Route URI the grammar refuses (a port with trailing garbage, no
 //! host, a control byte). The parser refuses the 2xx (RFC 3261 §20.30, §25.1),
 //! so it matches no client transaction (§17.1.3): the INVITE retransmits under
-//! Timer A and Timer B ends the call as a timeout (§17.1.1.2), its CDR written
-//! and its state reaped. No such route ever becomes a dialog's route set.
+//! Timer A and the first-response deadline (ADR-0044) gives the hop up, its
+//! CDR written and its state reaped. No such route ever becomes a dialog's
+//! route set.
 
 use std::time::Duration;
 
@@ -25,7 +26,7 @@ enum Audit {
 }
 
 /// Alice calls bob, bob's 200 records `route`: the B2BUA drops it and fails
-/// the call at Timer B.
+/// the call at the first-response deadline.
 async fn call_recording(name: &str, route: &str, audit: Audit) {
     let s = B2buaScene::new(name).await;
     // A 2xx the audit reads is the input under test (wire entry 4): its ACK
@@ -71,12 +72,13 @@ async fn call_recording(name: &str, route: &str, audit: Audit) {
     );
     s.bob.try_send_datagram(wire.as_bytes(), s.b2bua.addr).await.expect("the 200 leaves");
 
-    // Timer B is 64·T1 = 32 s; past it the client transaction has timed out.
-    s.h.advance(Duration::from_secs(33)).await;
-    call.expect(408).await;
+    // Past the 5 s first-response deadline the hop that answered nothing
+    // usable is given up.
+    s.h.advance(Duration::from_secs(6)).await;
+    call.expect(480).await;
 
     // The Trying b-leg is CANCELed and stays unresolved, so the terminating
-    // call waits on its safety timeout and is reaped at about 64 s.
+    // call waits on its safety timeout and is reaped at about 37 s.
     s.h.advance(Duration::from_secs(35)).await;
     s.bob.drain().await;
     settle_until(|| s.b2bua.is_reaped()).await;

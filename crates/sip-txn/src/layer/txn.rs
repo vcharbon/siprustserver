@@ -236,6 +236,7 @@ impl Transaction {
             ladder: None,
             timeout_kind: TxnTimeoutKind::Response,
             dead_hop_reported: false,
+            past_trying: false,
             dialogs: Vec::new(),
             reliable_offers: Vec::new(),
             lifetime,
@@ -372,6 +373,9 @@ pub(super) struct Transaction {
     /// INVITE's hop is dead (ADR-0044): no later timeout of the transaction is
     /// reported again.
     pub(super) dead_hop_reported: bool,
+    /// On an INVITE client txn: a provisional above 100 answered it, so the
+    /// TU holds a response and is never told the hop is alive.
+    pub(super) past_trying: bool,
     /// On an INVITE client txn: the dialogs it opened that a request this
     /// layer sent (a PRACK, an UPDATE, a BYE) or a 2xx named, at most
     /// [`MAX_DIALOGS`]; a 2xx under another To-tag is a forked dialog of its

@@ -190,8 +190,7 @@ pub struct B2buaConfig {
     /// [`validate`](Self::validate) range-checks
     /// [`MIN_INVITE_FIRST_RESPONSE_TIMEOUT_SEC`](Self::MIN_INVITE_FIRST_RESPONSE_TIMEOUT_SEC)
     /// `..=` [`MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC`](Self::MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC).
-    /// Default **32 s** (Timer B: no deviation until a deployment asks).
-    /// Overridable via
+    /// Default **5 s**: a silent next hop is given up fast. Overridable via
     /// `B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC`.
     pub invite_first_response_timeout_sec: i64,
     /// **Un-ACKed 2xx give-up deadline**, seconds (RFC 3261 §13.3.1.4; the
@@ -458,8 +457,8 @@ impl B2buaConfig {
     pub const MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC: i64 = 32;
     /// Default
     /// [`invite_first_response_timeout_sec`](Self::invite_first_response_timeout_sec)
-    /// (s): Timer B, the RFC value.
-    pub const DEFAULT_INVITE_FIRST_RESPONSE_TIMEOUT_SEC: i64 = 32;
+    /// (s): three Timer A re-sends (0.5 s, 1.5 s, 3.5 s) precede it.
+    pub const DEFAULT_INVITE_FIRST_RESPONSE_TIMEOUT_SEC: i64 = 5;
     /// Margin (s) a route-supplied `NoAnswer` deadline must keep under
     /// [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec): the room the
     /// CANCEL→487 exchange needs to complete inside the still-live b-leg client
@@ -481,8 +480,8 @@ impl B2buaConfig {
 
     /// The configured initial-INVITE first-response deadline in ms — the value
     /// wired into `TransactionConfig::invite_first_response_timeout_ms`. `<= 0`
-    /// is NOT "disabled": a non-positive value falls back to the 32 s Timer B
-    /// default rather than arming a degenerate deadline.
+    /// is NOT "disabled": a non-positive value falls back to the 5 s default
+    /// rather than arming a degenerate deadline.
     pub fn invite_first_response_timeout_ms(&self) -> u64 {
         let sec = if self.invite_first_response_timeout_sec > 0 {
             self.invite_first_response_timeout_sec

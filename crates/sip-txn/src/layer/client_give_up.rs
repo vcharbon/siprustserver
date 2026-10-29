@@ -27,12 +27,30 @@ impl Owner {
 
     /// The TU's first-response deadline on an initial INVITE (ADR-0044): a
     /// branch still unanswered is reported dead to the TU, once, and the
-    /// transaction keeps Timer A to Timer B, where it gives up unreported.
+    /// transaction keeps Timer A to Timer B, where it gives up unreported. A
+    /// branch a `100 Trying` alone answered is reported alive
+    /// ([`TransactionEvent::HopAlive`]).
     pub(super) fn fire_first_response(&mut self, branch: &str) {
-        let unanswered = self.clients.get(branch).is_some_and(|t| {
-            t.kind == TxnKind::Invite && t.state == TxnState::Trying && !t.dead_hop_reported
-        });
-        if !unanswered {
+        let Some(t) = self
+            .clients
+            .get(branch)
+            .filter(|t| t.kind == TxnKind::Invite && t.state.is_active() && !t.dead_hop_reported)
+        else {
+            return;
+        };
+        if t.state == TxnState::Proceeding {
+            if let (false, Some(call_ref), Some(leg_id)) =
+                (t.past_trying, t.call_ref.clone(), t.leg_id.clone())
+            {
+                // Ordinary: a lost notice leaves the TU on its own deadlines.
+                let incarnation_mark = t.incarnation_mark.clone();
+                self.emit(TransactionEvent::HopAlive {
+                    branch: branch.to_string(),
+                    call_ref,
+                    leg_id,
+                    incarnation_mark,
+                });
+            }
             return;
         }
         let Some(event) = self.timeout_event(branch) else { return };

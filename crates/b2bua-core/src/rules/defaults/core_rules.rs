@@ -1174,17 +1174,14 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     ]);
                 }
             }
-            // A caller whose callee's INVITE gave up is answered 408 in this
+            // A caller whose callee's INVITE gave up is answered in this
             // turn, before the CANCELed leg resolves (RFC 3261 §9.1 lets that
             // wait 64·T1), as the failure consult's let-stand path answers it.
             let mut actions = Vec::new();
             if timed_out_invite && pending_b_leg && !originator_final_sent(&ctx.call) {
-                actions.push(RuleAction::RespondToALeg {
-                    status: 408,
-                    reason: "Request Timeout".into(),
-                    header_updates: vec![],
-                    contacts: vec![],
-                });
+                actions.push(super::failover_rules::timeout_final(
+                    ctx.timeout_kind() == Some(TxnTimeoutKind::Response),
+                ));
             }
             actions.push(RuleAction::BeginTermination {
                 reason: Some("timeout".into()),

@@ -1,13 +1,14 @@
 //! A transaction-layer event as the call sees it ([`call_event`]).
 
-use b2bua_sdk::event::CallEvent;
+use b2bua_sdk::event::{CallEvent, HOP_ALIVE_TOPIC};
 use sip_txn::TransactionEvent;
 
 /// `event`, the transaction layer's, as a [`CallEvent`], with whether a
 /// response it carries answered a client transaction the layer holds: a
 /// timeout names the incarnation its Via marked, and the notice that a
 /// watched call's last transaction cleared is the self-release notice
-/// ([`super::quiesced::notice`]). A CANCEL the layer answered is stamped
+/// ([`super::quiesced::notice`]); a hop reported alive is the
+/// [`HOP_ALIVE_TOPIC`] internal event of its call. A CANCEL the layer answered is stamped
 /// `now_ms`, the instant its event reached the run loop.
 pub(crate) fn call_event(event: TransactionEvent, now_ms: i64) -> (CallEvent, bool) {
     let event = match event {
@@ -55,6 +56,18 @@ pub(crate) fn call_event(event: TransactionEvent, now_ms: i64) -> (CallEvent, bo
                 incarnation,
             }
         }
+        TransactionEvent::HopAlive { branch, call_ref, leg_id, incarnation_mark } => {
+            let incarnation =
+                incarnation_mark.map(|mark| call::derive_incarnation(&call_ref, &mark));
+            CallEvent::InternalEvent {
+                call_ref,
+                topic: HOP_ALIVE_TOPIC.to_string(),
+                outcome: String::new(),
+                payload: serde_json::json!({ "leg_id": leg_id, "branch": branch }),
+                body: Vec::new(),
+                incarnation,
+            }
+        }
         TransactionEvent::CallQuiesced { call_ref } => super::quiesced::notice(call_ref),
     };
     (event, false)
@@ -88,5 +101,27 @@ mod tests {
         assert_eq!(timeout(Some("w0|cid|tag"), Some("k3")).incarnation(), Some("w0|cid|tag#k3"));
         assert_eq!(timeout(Some("w0|cid|tag"), None).incarnation(), None, "unmarked");
         assert_eq!(timeout(None, Some("k3")).incarnation(), None, "attributed to no call");
+    }
+
+    #[test]
+    fn a_hop_reported_alive_is_its_calls_internal_event() {
+        let (event, matched) = call_event(
+            TransactionEvent::HopAlive {
+                branch: "z9hG4bK-a".into(),
+                call_ref: "w0|cid|tag".into(),
+                leg_id: "b-1".into(),
+                incarnation_mark: Some("k3".into()),
+            },
+            0,
+        );
+        assert!(!matched);
+        let CallEvent::InternalEvent { call_ref, topic, payload, .. } = &event else {
+            panic!("an internal event: {event:?}");
+        };
+        assert_eq!(call_ref, "w0|cid|tag");
+        assert_eq!(topic, HOP_ALIVE_TOPIC);
+        assert_eq!(payload["leg_id"], "b-1");
+        assert_eq!(payload["branch"], "z9hG4bK-a");
+        assert_eq!(event.incarnation(), Some("w0|cid|tag#k3"));
     }
 }

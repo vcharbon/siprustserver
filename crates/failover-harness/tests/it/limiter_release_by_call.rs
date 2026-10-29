@@ -849,14 +849,13 @@ async fn a_fold_set_of_an_uncounted_call_lost_with_the_primary_lapses_with_its_l
     fh.partition(&primary_ord, backup_ord);
 
     // ── the duration cap reroutes the uncounted call: the fold admits [y, z]
-    for _ in 0..61 {
+    let mut waited = 0;
+    while media.try_receive_tolerating("INVITE", &[]).await.is_none() {
+        assert!(waited < 61, "the reroute dials the new target");
         fh.advance(Duration::from_secs(1)).await;
         rig.refresh_witnesses();
+        waited += 1;
     }
-    assert!(
-        media.try_receive_tolerating("INVITE", &[]).await.is_some(),
-        "the reroute dials the new target",
-    );
     assert_eq!(rig.holds(), [0, 1, 1], "the fold's set is on the limiter");
 
     // ── the primary crashes with the fold's flush unlanded ───────────────

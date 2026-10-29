@@ -12,7 +12,7 @@ use scenario_harness::callflow::OFFER_SDP;
 /// Admitted by the default allow-list (`.svc.cluster.local`), never resolved.
 const NAMED_CALLEE: &str = "callee.ns.svc.cluster.local";
 
-/// alice is answered 408 in the turn right after the INVITE's; nothing
+/// alice is answered 480 in the turn right after the INVITE's; nothing
 /// reaches bob. The
 /// CANCELed Trying b-leg stays unresolved, as on a Timer B give-up, so the
 /// call is reaped at its terminating safety timeout (32 s).
@@ -25,7 +25,7 @@ async fn a_b_leg_invite_to_a_name_fails_the_attempt_at_once() {
     let started = tokio::time::Instant::now();
 
     let mut call = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
-    call.expect(408).await;
+    call.expect(480).await;
     let elapsed = started.elapsed();
     assert!(
         elapsed < Duration::from_secs(1),

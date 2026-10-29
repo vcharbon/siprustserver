@@ -95,6 +95,12 @@ pub enum CallEvent {
     Lifecycle(crate::lifecycle::LifecycleEvent),
 }
 
+/// The [`CallEvent::InternalEvent`] topic of the transaction layer's notice
+/// that an initial INVITE's first-response deadline passed with a `100 Trying`
+/// as its only response (ADR-0044): the next hop is alive, nothing past it has
+/// answered. Its payload names the leg (`leg_id`) and the branch (`branch`).
+pub const HOP_ALIVE_TOPIC: &str = "hop-alive";
+
 impl CallEvent {
     /// `message`, received from `src` as the datagram it is.
     pub fn sip(message: SipMessage, src: SocketAddr) -> Self {

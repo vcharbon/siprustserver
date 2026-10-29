@@ -407,11 +407,16 @@ async fn release_consult_in_flight_is_the_only_one_of_the_call() {
     rig.expect_holds([1, 1, 0], "the call still holds x and y").await;
 
     // ── the consult answers; the reroute is applied ─────────────────────────
+    let mut reroute = None;
     for _ in 0..30 {
         h.advance(Duration::from_secs(1)).await;
         rig.refresh_witnesses();
+        reroute = media.try_receive_tolerating("INVITE", &[]).await;
+        if reroute.is_some() {
+            break;
+        }
     }
-    let mut media_uas = media.receive("INVITE").await;
+    let mut media_uas = reroute.expect("the reroute dials the media peer");
     media_uas.respond(200, "OK").with_sdp(MEDIA_ANSWER).await;
     let tag = media_uas.dialog().local_tag().to_string();
     while let Some(mut retrans) = media.try_receive_tolerating("INVITE", &[]).await {

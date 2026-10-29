@@ -187,7 +187,7 @@ impl Owner {
         self.start_client_retransmit(&branch, buf, dest, max_ms, timeout_kind);
         if txn_type == TxnKind::Invite
             && msg.to().tag().is_none()
-            && self.invite_first_response_timeout_ms < max_ms
+            && self.invite_first_response_timeout_ms <= max_ms
         {
             self.arm(
                 Timer::FirstResponse(branch.clone()),
@@ -506,13 +506,13 @@ impl Owner {
                 if resp.status() < 200 {
                     // Provisional 1xx>100 — Proceeding. Ignore once Completed or
                     // Accepted (a late provisional must not downgrade a txn that
-                    // already took its final). INVITE stops retransmitting
-                    // (§17.1.1.2); non-INVITE continues at T2 (§17.1.2.2), so only
-                    // cancel retransmit for INVITE.
+                    // took its final). INVITE stops retransmitting (§17.1.1.2);
+                    // non-INVITE continues at T2 (§17.1.2.2).
                     if state.is_active() {
                         let key = match self.clients.get_mut(branch) {
                             Some(txn) => {
                                 txn.state = TxnState::Proceeding;
+                                txn.past_trying = true;
                                 (kind == TxnKind::Invite)
                                     .then(|| txn.retransmit_key.take())
                                     .flatten()

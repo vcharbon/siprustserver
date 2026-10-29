@@ -120,10 +120,9 @@ fn rejects_txn_bound_outside_the_supported_range() {
 
 #[test]
 fn first_response_bound_is_a_deadline_between_two_rungs_and_timer_b() {
-    // Default is Timer B itself: no deviation until a deployment asks for
-    // one.
-    assert_eq!(B2buaConfig::default().invite_first_response_timeout_sec, 32);
-    assert_eq!(B2buaConfig::default().invite_first_response_timeout_ms(), 32_000);
+    // Default: three re-sends, then the hop is given up.
+    assert_eq!(B2buaConfig::default().invite_first_response_timeout_sec, 5);
+    assert_eq!(B2buaConfig::default().invite_first_response_timeout_ms(), 5_000);
     // 1 s would send the INVITE effectively once; 33 s is above the RFC
     // value the class already gives up at.
     for bad in [1, 33, 0, -5] {
@@ -140,9 +139,9 @@ fn first_response_bound_is_a_deadline_between_two_rungs_and_timer_b() {
         assert_eq!(c.invite_first_response_timeout_ms(), ok as u64 * 1000);
     }
     // A harness config that writes a non-positive value anyway arms the
-    // Timer B default, never a degenerate bound.
+    // default, never a degenerate bound.
     let c = B2buaConfig { invite_first_response_timeout_sec: 0, ..Default::default() };
-    assert_eq!(c.invite_first_response_timeout_ms(), 32_000);
+    assert_eq!(c.invite_first_response_timeout_ms(), 5_000);
 }
 
 #[test]

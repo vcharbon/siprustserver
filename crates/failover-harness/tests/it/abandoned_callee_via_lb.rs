@@ -248,9 +248,9 @@ async fn silent_callee_abandoned_via_lb__reject__reaps_crossing_200() {
 
     // The caller holds its final (authored in the terminating turn) — NOT
     // dropped on a removed call.
-    let failed = call.expect(408).await;
-    assert_eq!(failed.status(), 408, "caller's INVITE resolves with a final failure");
-    // Flush alice's §17.1.1.3 ACK for the 408 (sent by the receive above) the
+    let failed = call.expect(480).await;
+    assert_eq!(failed.status(), 480, "a silent hop let stand is a 480");
+    // Flush alice's §17.1.1.3 ACK for the 480 (sent by the receive above) the
     // one hop to the proxy before the Drop-time RFC gate snapshots the trace.
     fh.advance(Duration::from_millis(10)).await;
 
@@ -297,13 +297,9 @@ async fn silent_callee_abandoned_via_lb__reject__delayed_crossing_200_still_reap
     let mut bye = bob.receive_absorbing("BYE", &["INVITE"]).await;
     bye.respond(200, "OK").await;
 
-    let failed = call.expect(408).await;
-    assert_eq!(
-        failed.status(),
-        408,
-        "caller's INVITE resolves with a final failure after a late reap"
-    );
-    // Flush alice's §17.1.1.3 ACK for the 408 the one hop to the proxy before
+    let failed = call.expect(480).await;
+    assert_eq!(failed.status(), 480, "a silent hop let stand is a 480, after a late reap");
+    // Flush alice's §17.1.1.3 ACK for the 480 the one hop to the proxy before
     // the Drop-time RFC gate snapshots the trace.
     fh.advance(Duration::from_millis(10)).await;
 

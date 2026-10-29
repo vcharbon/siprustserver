@@ -4,9 +4,9 @@
 //!   is dropped and the final relayed at once (RFC 3261 §12.1.1 governs only
 //!   the 1xx / 2xx that establish a dialog).
 //! - A final the parser still refuses is discarded: it matches no client
-//!   transaction (§17.1.3), the INVITE retransmits under Timer A, and Timer B
-//!   ends the transaction as a timeout (§17.1.1.2). The call then fails over
-//!   the ordinary timeout path, its CDR written and its state reaped.
+//!   transaction (§17.1.3), the INVITE retransmits under Timer A, and the
+//!   first-response deadline (ADR-0044) gives the hop up. The call then fails
+//!   over the ordinary timeout path, its CDR written and its state reaped.
 
 use std::time::Duration;
 
@@ -38,10 +38,11 @@ async fn a_failure_final_with_an_extra_contact_is_relayed() {
 }
 
 /// Bob's 486 repeats its To header, which no reader accepts: the B2BUA drops
-/// it, retransmits the INVITE, and at Timer B (64·T1) fails the call over the
-/// timeout path. Alice gets a final, the call is reaped, and nothing hangs.
+/// it, retransmits the INVITE, and at the first-response deadline fails the
+/// call over the timeout path. Alice gets a final, the call is reaped, and
+/// nothing hangs.
 #[tokio::test(start_paused = true)]
-async fn an_unparseable_failure_final_ends_the_call_at_timer_b() {
+async fn an_unparseable_failure_final_ends_the_call_at_the_first_response_deadline() {
     let s = B2buaScene::new("unparseable-failure-final").await;
 
     let mut call = s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
@@ -64,13 +65,14 @@ async fn an_unparseable_failure_final_ends_the_call_at_timer_b() {
     );
     s.bob.try_send_datagram(wire.as_bytes(), s.b2bua.addr).await.expect("the 486 leaves");
 
-    // Timer B is 64·T1 = 32 s; past it the client transaction has timed out.
-    s.h.advance(Duration::from_secs(33)).await;
-    call.expect(408).await;
+    // Past the 5 s first-response deadline the hop that answered nothing
+    // usable is given up.
+    s.h.advance(Duration::from_secs(6)).await;
+    call.expect(480).await;
 
     // The Trying b-leg is CANCELed and stays unresolved, so the terminating
     // call waits on its safety timeout (32 s after the teardown began) and is
-    // reaped at about 64 s; 35 s past the 408 leaves slack over that instant.
+    // reaped at about 37 s; 35 s past the 480 leaves slack over that instant.
     s.h.advance(Duration::from_secs(35)).await;
     s.bob.drain().await;
     settle_until(|| s.b2bua.is_reaped()).await;

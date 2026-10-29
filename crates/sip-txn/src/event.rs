@@ -78,6 +78,18 @@ pub enum TransactionEvent {
         /// consumers split `response_timeout` from `transaction_timeout`.
         kind: TxnTimeoutKind,
     },
+    /// An initial INVITE's first-response deadline
+    /// (`TransactionConfig::invite_first_response_timeout_ms`, ADR-0044) passed
+    /// with a `100 Trying` as the only response: the next hop is alive and
+    /// nothing past it has answered. Told once per transaction, never on a
+    /// branch a 1xx above 100 answered (the TU received that one).
+    HopAlive {
+        branch: String,
+        call_ref: String,
+        leg_id: String,
+        /// The `ci` mark of the call incarnation that sent the INVITE.
+        incarnation_mark: Option<String>,
+    },
     /// **The last transaction for a *watched* call reached a terminal state** —
     /// every transaction attributed to `call_ref` has left the map (final response
     /// and ACK→Timer H for an INVITE, Timer J for a non-INVITE, or Timer B/F on
@@ -122,7 +134,7 @@ impl EventQueueClass {
     pub(crate) fn of(event: &TransactionEvent) -> Self {
         match event {
             TransactionEvent::Cancelled { .. } => Self::Cancelled,
-            TransactionEvent::Timeout { .. } => Self::Timeout,
+            TransactionEvent::Timeout { .. } | TransactionEvent::HopAlive { .. } => Self::Timeout,
             TransactionEvent::CallQuiesced { .. } => Self::CallQuiesced,
             TransactionEvent::Message { message, .. } => match message.as_ref() {
                 SipMessage::Response(_) => Self::Response,
