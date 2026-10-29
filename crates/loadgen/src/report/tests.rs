@@ -433,3 +433,36 @@ async fn final_write_is_not_overwritten_by_snapshot_task() {
     assert!(read_finished(&out), "no snapshot tick may land after shutdown");
     let _ = std::fs::remove_dir_all(&out);
 }
+
+/// The first unrecorded occurrence of a bucket arms its chase; later
+/// unrecorded occurrences never re-arm it, a recorded sample does.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn an_unrecorded_occurrence_arms_the_chase_once() {
+    let r = Reporter::new(ReporterCfg { sample_cap: 2, background_record_every: 0 });
+    assert!(r.should_record("s") && r.should_record("s"), "the first sample_cap calls");
+    let failed = CallOutcome::Step {
+        at: FailedAt::at_barrier("established"),
+        cause: scenario_harness::StepError::timeout("established", None, "a datagram"),
+    };
+    let case = failed.case(None);
+    r.record("s", &failed, &case, Duration::ZERO, &[], None);
+    let chased = (0..CHASE_CALLS + 10).filter(|_| r.should_record("s")).count();
+    assert_eq!(chased, CHASE_CALLS as usize, "an unrecorded occurrence arms a bounded chase");
+    r.record("s", &failed, &case, Duration::ZERO, &[], None);
+    assert!(!r.should_record("s"), "a later unrecorded occurrence does not re-arm it");
+    let flow = RenderedSample { html: Some(Arc::from("<html/>")), detail: None, e2e_ms: 1.0 };
+    r.record("s", &failed, &case, Duration::ZERO, &[], Some(flow));
+    assert!(r.should_record("s"), "a recorded sample under cap re-arms it");
+}
+
+/// A bucket counted with no stored sample says so in the index.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn the_index_names_a_bucket_with_no_recorded_call() {
+    let r = Reporter::new(ReporterCfg { sample_cap: 2, background_record_every: 64 });
+    let failed = rfc_fail("rule", "detail");
+    r.record("s", &failed, &failed.case(None), Duration::ZERO, &[], None);
+    let idx = r.render_report().index;
+    assert!(idx.contains("none recorded (1 in 64 calls is recorded)"), "{idx}");
+}

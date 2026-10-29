@@ -17,5 +17,6 @@ mod late_final;
 mod mux_claims;
 mod mux_from_user;
 mod outcome_records;
+mod samples;
 mod smoke;
 mod waiver_lane;

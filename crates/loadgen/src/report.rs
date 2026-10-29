@@ -42,10 +42,10 @@ struct ReportFiles {
     summary: String,
 }
 
-/// One captured call: the rendered callflow HTML (if the call was sampled and
-/// rendered) plus a one-line detail and its end-to-end time. Stored bounded
-/// per `(scenario, class)`; the page is shared, so a report snapshot takes it
-/// without copying.
+/// One captured call: its rendered callflow HTML (`None` only for a call that
+/// never ran, which has no flow) plus a one-line detail and its end-to-end
+/// time. Stored bounded per `(scenario, class)`; the page is shared, so a
+/// report snapshot takes it without copying.
 pub struct RenderedSample {
     pub html: Option<Arc<str>>,
     pub detail: Option<String>,
@@ -81,13 +81,14 @@ impl Default for ReporterCfg {
 type Bucket = (ScenarioId, String, String);
 
 /// How many calls of its scenario a bucket under cap keeps recording after its
-/// last sample: the sampling gate chases the bucket's next occurrence that
-/// long, then leaves it to the background fraction, so a rare failure mode
-/// never keeps a whole scenario recording.
+/// first call or its last sample: the sampling gate chases the bucket's next
+/// occurrence that long, then leaves it to the background fraction, so a rare
+/// failure mode never keeps a whole scenario recording.
 const CHASE_CALLS: u32 = 64;
 
-/// One sample bucket's tally: the samples it holds, and the calls recorded to
-/// chase its next sample since the last one ([`CHASE_CALLS`]).
+/// One sample bucket's tally, from the bucket's first call: the samples it
+/// holds, and the calls recorded to chase its next sample since its first call
+/// or its last sample ([`CHASE_CALLS`]).
 #[derive(Default, Clone, Copy)]
 struct BucketTally {
     taken: u32,
@@ -246,7 +247,8 @@ impl Reporter {
     /// trace? True for 1 call of its scenario in `background_record_every` (0:
     /// none), for a call that chases the next sample of a bucket of its
     /// scenario still under cap (at most `CHASE_CALLS` calls after the bucket's
-    /// last sample), and for the first `sample_cap` calls of its scenario.
+    /// first call or last sample), and for the first `sample_cap` calls of its
+    /// scenario.
     /// Before any call of the scenario has ended, the last two give at most
     /// `sample_cap` calls.
     pub fn should_record(&self, scenario: ScenarioId) -> bool {
@@ -278,7 +280,8 @@ impl Reporter {
     /// Record one completed call: bump its `(scenario, class, case)` count and
     /// its accepted-branch or failed-step count, fold its end-to-end time and
     /// checkpoints into the histograms, and store its sample if the bucket
-    /// still has room. `case` is the outcome's bounded
+    /// still has room. The bucket's first call arms its chase, recorded or
+    /// not; only a stored sample re-arms it. `case` is the outcome's bounded
     /// discriminator ([`CallOutcome::case`] — the driver computes it once, with
     /// the call's phase trail).
     pub fn record(
@@ -311,9 +314,9 @@ impl Reporter {
                 .or_insert_with(Hist::call)
                 .record(d.as_secs_f64() * 1000.0);
         }
+        let key = (scenario, label, case.to_string());
+        let tally = g.sample_taken.entry(key.clone()).or_default();
         if let Some(sample) = sample {
-            let key = (scenario, label, case.to_string());
-            let tally = g.sample_taken.entry(key.clone()).or_default();
             if tally.taken < self.cfg.sample_cap {
                 *tally = BucketTally { taken: tally.taken + 1, chased: 0 };
                 g.samples.entry(key).or_default().push(sample);
@@ -392,8 +395,8 @@ impl Reporter {
                 let rel = sample_rel(scenario, class, case, i);
                 let html = match &s.html {
                     Some(html) => html.clone(),
-                    // No rendered flow (sample taken on a non-recording call) —
-                    // a stub so the detail is still linked.
+                    // A call that never ran has no flow: a stub so its detail
+                    // is still linked.
                     None => Arc::from(format!(
                         "<html><body><h3>{scenario} / {class} / {case} #{i}</h3><p>{}</p>\
                          <p>e2e: {:.1} ms</p></body></html>",
@@ -421,6 +424,10 @@ impl Reporter {
             <table>\
             <tr><th>scenario</th><th>class</th><th>case</th><th>count</th><th>samples</th></tr>",
         );
+        let none_recorded = match self.cfg.background_record_every {
+            0 => "none recorded".to_string(),
+            every => format!("none recorded (1 in {every} calls is recorded)"),
+        };
         for ((scenario, class, case), n) in &g.counts {
             let cls = if ResultClass::label_is_ok(class) { "ok" } else { "nok" };
             let sample_links = links
@@ -432,7 +439,7 @@ impl Reporter {
                         .collect::<Vec<_>>()
                         .join(" ")
                 })
-                .unwrap_or_default();
+                .unwrap_or_else(|| none_recorded.clone());
             idx.push_str(&format!(
                 "<tr><td>{scenario}</td><td class=\"{cls}\">{class}</td><td>{case}</td>\
                  <td>{n}</td><td>{sample_links}</td></tr>"
@@ -637,43 +644,9 @@ impl Reporter {
             }
         })
     }
-
-    // -- Test/inspection accessors -----------------------------------------
-
-    /// Total count for a `(scenario, class)` bucket, summed across all case
-    /// sub-buckets (for tests / summaries).
-    pub fn count(&self, scenario: ScenarioId, class: &ResultClass) -> u64 {
-        let label = class.label();
-        self.inner
-            .lock()
-            .unwrap()
-            .counts
-            .iter()
-            .filter(|((s, c, _), _)| *s == scenario && *c == label)
-            .map(|(_, n)| *n)
-            .sum()
-    }
-
-    /// Number of stored samples for a `(scenario, class)` bucket, across all
-    /// case sub-buckets.
-    pub fn sample_count(&self, scenario: ScenarioId, class: &ResultClass) -> u32 {
-        let label = class.label();
-        self.inner
-            .lock()
-            .unwrap()
-            .sample_taken
-            .iter()
-            .filter(|((s, c, _), _)| *s == scenario && *c == label)
-            .map(|(_, t)| t.taken)
-            .sum()
-    }
-
-    /// Total completed calls across all buckets.
-    pub fn total_calls(&self) -> u64 {
-        self.inner.lock().unwrap().counts.values().sum()
-    }
 }
 
+mod inspect;
 mod prometheus;
 
 #[cfg(test)]

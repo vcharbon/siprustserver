@@ -532,34 +532,23 @@ pub(crate) async fn run_one(
     // split.
     let case = outcome.case(ctx.phases().last().map(|(name, _)| *name));
 
-    let sample = if reporter.wants_sample(id, &class, &case) {
+    // Only a recorded call is a sample: an unrecorded one never takes a slot
+    // a later recorded call of its bucket would fill with a full callflow.
+    let sample = if binder.is_recording() && reporter.wants_sample(id, &class, &case) {
         let detail = phase_annotated_detail(outcome.detail(), &ctx);
         // Thread the failure reason into the rendered callflow so a sampled NOK
         // page explains WHY (header banner + an explicit anomaly), not just "FAIL".
-        let html = if binder.is_recording() {
-            // The banner (the resolved binding — the actual From/To used) shows
-            // in the page header on PASS and FAIL alike; the failure detail
-            // stays FAIL-only; the case's check verdicts render pass AND fail.
-            // Metrics labels stay scenario-keyed.
-            binder.render_html(
-                id,
-                class.is_ok(),
-                banner.as_deref(),
-                detail.as_deref(),
-                &check_notes,
-            )
-        } else {
-            None
-        };
-        if html.is_some() || !class.is_ok() {
-            Some(RenderedSample {
-                html: html.map(Arc::from),
+        // The banner (the resolved binding — the actual From/To used) shows
+        // in the page header on PASS and FAIL alike; the failure detail
+        // stays FAIL-only; the case's check verdicts render pass AND fail.
+        // Metrics labels stay scenario-keyed.
+        binder
+            .render_html(id, class.is_ok(), banner.as_deref(), detail.as_deref(), &check_notes)
+            .map(|html| RenderedSample {
+                html: Some(Arc::from(html)),
                 detail,
                 e2e_ms: e2e.as_secs_f64() * 1000.0,
             })
-        } else {
-            None
-        }
     } else {
         None
     };
