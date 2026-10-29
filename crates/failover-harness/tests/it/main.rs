@@ -59,6 +59,7 @@ mod outbound_invite_after_the_departure;
 mod prack_repeat_takeover;
 mod prack_takeover;
 mod read_dead_primary_taken_over;
+mod reclaim_takes_the_copys_consult;
 mod reclaim_waits_for_a_routable_endpoint;
 mod reinvite_2xx_acked_through_the_primary;
 mod reinvite_answer_failover;

@@ -80,9 +80,11 @@ node is ignored (`router/dead_verdict/tests.rs`;
 The replication stream confirms the verdict (user ruling). A backup acts on it only
 once its own Backup flow from that peer holds no open stream: at once when the stream is
 already down, as when the peer's process died and its connections closed, or when the
-stream ends within the pullers' idle bound (ADR-0045), as when the peer went silent.
-A stream that stays open through that bound speaks for a live peer the proxy misread,
-and the verdict takes nothing over (`b2bua_dead_verdicts_unconfirmed_total`). Two
+stream ends within the pullers' idle bound (ADR-0045) with no frame from the peer since
+the verdict, as when the peer went silent. A frame after the verdict — a stream that
+lives, or one that reconnects — or a stream open through that bound speaks for a live
+peer the proxy misread, and the verdict takes nothing over
+(`b2bua_dead_verdicts_unconfirmed_total`, one wait per peer however many verdicts). Two
 independent signals must agree, so a flap or a partition between the proxy and a live
 peer never moves its calls.
 
@@ -247,7 +249,10 @@ holds that one (`router/reclaim/carried_cancel.rs`).
 One owner acts on an outside service's answer. A copy awaiting the answer to a request
 the primary's reclaim write awaits too is covered by that write on that request: it stands down, an answer reaching
 it afterwards takes nothing over (ADR-0039 decision 5), and the primary alone acts on
-the answer, the backend possibly asked twice.
+the answer, the backend possibly asked twice. A primary that takes the copy's write releasing a pinned copy
+sends again each request that write awaits and its own record did not: the copy stands
+down on the primary's write, and the primary is the one owner of those answers
+(`reclaim_takes_the_copys_consult.rs`).
 
 **An unanswered teardown never ends an answered call.** Both replication gates order
 two bodies of one call the same way (`call::helpers::lifecycle_behind`): the answer
@@ -360,9 +365,10 @@ the call has one CDR.
   `undecided_call_settled_on_departure.rs`, the CANCEL-during-decision cell). A removed
   node whose ordinal is bound to its replacement is superseded and answers nothing,
   nor writes a CDR (ADR-0055 §6, the replacement-decision cell).
-- **A returning primary's reclaim inside the copy's decision.** The copy's answer can
-  return and apply before the returning primary's reclaim write reaches it; both then
-  dial the callee.
+- **A returning primary's reclaim inside the copy's decision.** At `applied`, the
+  copy's re-asked answer can apply in the one replication hop between the returning
+  primary's reclaim write and its arrival at the copy; both nodes then dial the
+  callee, and the copy plays its dialled INVITE on to its final (D7).
 - **A returning node's answer inside the replication lag of the deadline.** The
   copy's ring deadline fires before the returned node's reclaim and answer reach the
   backup: the copy CANCELs the callee after its answer and refuses the caller 480

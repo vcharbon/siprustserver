@@ -139,9 +139,9 @@ fn largest_keepalive_gap<'a>(
 
 /// Reclaim one call of this node's `pri:{self}` partition into the live map
 /// under its per-call lock (ADR-0011 X11), armed at once: a straggler. It has
-/// no message to serve, so a call still undecided is settled (ADR-0047), and a
-/// call with an INVITE transaction to serve, or one its backup wrote, is
-/// announced ([`announce_reclaim`]).
+/// no message to serve: a call with an INVITE transaction to serve, or one its
+/// backup wrote, is announced ([`announce_reclaim`]), and a call still
+/// undecided then has its decision asked again (ADR-0047 D4).
 /// Returns `true` iff this pass did the work — freshly materialised, or a
 /// deferred terminal discharged; `false` for a call already resident
 /// (idempotent re-pass) or gone from the store.
@@ -149,13 +149,11 @@ pub(super) async fn reclaim_into_live(ctx: &Arc<RouterCtx>, call_ref: &str) -> b
     let _guard = ctx.state.lock(call_ref).await;
     match materialise(ctx, call_ref, Origin::Reclaim).await {
         Materialised::Served { call, seeded } => {
-            match seeded {
-                Some(seeded) if is_undecided(&call) => {
-                    settle_undecided(ctx, call_ref, call, seeded).await;
-                }
-                _ => {
-                    announce_reclaim(ctx, call);
-                }
+            // The write goes first: a takeover copy asking the same decision
+            // stands down on it (ADR-0047 D7).
+            announce_reclaim(ctx, call.clone());
+            if let Some(seeded) = seeded.filter(|_| is_undecided(&call)) {
+                settle_undecided(ctx, call_ref, call, seeded).await;
             }
             true
         }

@@ -34,7 +34,9 @@ impl Owner {
                 self.do_cancel_txns_for_call(&call_ref);
                 let _ = reply.send(());
             }
-            Command::RelinquishCall { call_ref, reply } => self.relinquish_call(&call_ref, reply),
+            Command::RelinquishCall { call_ref, reply } => {
+                self.relinquish_call(endpoint, &call_ref, reply).await
+            }
             Command::RelinquishServer { key, reply } => self.relinquish_server(&key, reply),
             Command::RelinquishAccepted { call_ref, reply } => {
                 let _ = reply.send(self.relinquish_accepted_of_call(&call_ref));

@@ -31,4 +31,7 @@ pub struct PullerStatus {
     /// Whether a stream to the peer is open now: set once a connect succeeds,
     /// cleared when that stream ends, by a cut, a failed send or the idle bound.
     pub streaming: bool,
+    /// When the last frame from the peer arrived, on any stream; `None`
+    /// before the first.
+    pub last_frame_at: Option<tokio::time::Instant>,
 }

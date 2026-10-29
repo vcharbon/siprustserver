@@ -99,3 +99,22 @@ async fn a_rejected_invite_seed_acks_each_repeat_of_the_final_and_hands_none_up(
     elapse_ms(1_000).await;
     assert_eq!(stack.txn.metrics().active_transactions(), 0, "held for its bound alone");
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_held_ack_leaves_when_its_call_is_relinquished() {
+    let stack = holding().await;
+    let branch = "z9hG4bK-held-relinquish";
+    let invite = invite_with_cr_lg("call-r", "held-relinquish", branch, "b-1");
+    stack.txn.send_request(invite, addr(PEER), TxnKind::Invite).await.unwrap();
+    elapse_ms(20).await;
+    let _ = stack.drain_peer();
+    stack
+        .inject(&response_bytes(486, "Busy Here", "INVITE", branch, "held-relinquish", true))
+        .await;
+    elapse_ms(20).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 0, "the ACK is held");
+
+    assert_eq!(stack.txn.relinquish_call("call-r").await.unwrap(), 1, "the transaction goes");
+    elapse_ms(20).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1, "its held ACK leaves with it");
+}

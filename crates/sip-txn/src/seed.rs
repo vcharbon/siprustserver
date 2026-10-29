@@ -81,8 +81,15 @@ pub enum TxnSeed {
     /// the wire, so the first copy may never have left, and one that did drew
     /// its ACK toward the node that sent it. A copy of the INVITE draws
     /// `response` again. A transaction already on its key that has sent no
-    /// final takes `response` as its final and sends it.
-    ServerRejected { response: SipResponse, dest: SocketAddr, leg_id: Option<String> },
+    /// final takes `response` as its final and sends it. `bound_ms` is what
+    /// is left of the Timer H the final started when the seeding node knows
+    /// it; `None` holds a whole Timer H from the seed.
+    ServerRejected {
+        response: SipResponse,
+        dest: SocketAddr,
+        leg_id: Option<String>,
+        bound_ms: Option<u64>,
+    },
     /// A client non-INVITE this side sent toward `dest`, still awaiting its
     /// final: `request` as it left, keyed by its top-Via branch and attributed
     /// from its Via `cr` / `lg` params. It sends `request`'s image, byte for

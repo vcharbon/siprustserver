@@ -204,6 +204,13 @@ impl Row {
         table::RESEND_ROWS.contains(&self.id)
     }
 
+    /// Whether the row accepts only what follows a routing decision a node
+    /// asked again (`W-off-stale-reask`): it stays closed in a run where none
+    /// was.
+    pub fn needs_reask(&self) -> bool {
+        table::REASK_ROWS.contains(&self.id)
+    }
+
     /// Whether the row accepts only a dialog two workers each ended
     /// (`W-off-reboot-two-servers`): it stays closed in a run where no dialog
     /// took a BYE from two workers.

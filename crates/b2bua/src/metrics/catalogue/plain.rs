@@ -224,7 +224,7 @@ plain_counters! {
     ) => dead_verdicts_taken, bump_dead_verdict_taken, dead_verdicts_taken_total;
     DEAD_VERDICTS_UNCONFIRMED = (
         "b2bua_dead_verdicts_unconfirmed_total",
-        "taken dead verdicts the replication stream from that worker stayed open through, within its silence bound: the proxy misread a live worker, and nothing was taken over (ADR-0047 D1)",
+        "taken dead verdicts the replication stream from that worker spoke against, a frame from it arriving after the verdict or the stream open through its silence bound: the proxy misread a live worker, and nothing was taken over; one per pending wait (ADR-0047 D1)",
     ) => dead_verdicts_unconfirmed, bump_dead_verdict_unconfirmed, dead_verdicts_unconfirmed_total;
     STORE_RECONCILED_ORPHAN_STAMPS = (
         "b2bua_store_reconciled_orphan_stamps_total",

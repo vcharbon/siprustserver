@@ -254,6 +254,8 @@ async fn a_puller_reads_streaming_while_its_stream_is_open_and_not_once_it_ends(
     tick(100).await;
     assert!(status.borrow().streaming, "the stream is open");
     let last_frame = peer.noop_sent();
+    let heard = status.borrow().last_frame_at.expect("the catch-up Noop was read");
+    assert!(heard >= last_frame, "the last frame's arrival is published");
     tick_until(last_frame + IDLE - Duration::from_millis(100)).await;
     assert!(status.borrow().streaming, "a stream quiet for less than the idle bound is open");
     tick_until(last_frame + IDLE + Duration::from_millis(20)).await;

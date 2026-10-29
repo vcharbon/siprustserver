@@ -16,6 +16,7 @@ use call::{Call, CallModelState};
 
 use super::super::materialise::answered_invite_seeds;
 use super::super::release::{release_call, ReleaseKind};
+use super::super::resend;
 use super::super::restore_hygiene::sanitize_restored_timers;
 use super::super::stand_down::covers;
 use super::super::RouterCtx;
@@ -143,7 +144,9 @@ fn keep(ctx: &Arc<RouterCtx>, live: &Enveloped, kept: Enveloped) {
 /// awaiting its ACK is seeded in the layer, so a copy of that INVITE draws
 /// the 2xx (an identity already held is left as it is). A taken copy that
 /// carries the final of an INVITE the other owner dialled draws one write
-/// ([`announce_reclaim`]): the copy that INVITE pinned stands down on it.
+/// ([`announce_reclaim`]): the copy that INVITE pinned stands down on it, and
+/// the requests it awaited that the live copy did not are sent again here,
+/// the only owner of their answers now (ADR-0047 D7, ADR-0039 decision 5).
 async fn take_whole(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
@@ -169,7 +172,15 @@ async fn take_whole(
         let _ = ctx.txn.seed(call_ref, seeds).await;
     }
     if released {
+        let adopted: Vec<_> =
+            taken.awaited.iter().filter(|r| !live.call.awaited.contains(r)).cloned().collect();
+        let active = taken.state == CallModelState::Active;
+        let notice =
+            (active && !adopted.is_empty()).then(|| resend::notice_of_only(&taken, &adopted));
         announce_reclaim(ctx, taken);
+        if let Some(notice) = notice {
+            let _ = ctx.reentry_tx.send(notice);
+        }
     }
 }
 

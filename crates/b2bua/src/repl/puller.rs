@@ -396,8 +396,7 @@ impl Puller {
             Some(c) => c,
             None => return RunOutcome::ConnectFailed,
         };
-        // The peer is reached, so readiness no longer treats it as unreachable,
-        // and a stream to it is open.
+        // The peer is reached (readiness no longer reads it unreachable), streaming.
         self.status_tx.send_modify(|s| {
             s.ever_connected = true;
             s.streaming = true;
@@ -491,6 +490,7 @@ impl Puller {
             };
             if frame.is_some() {
                 quiet_until = sip_clock::deadline::from_now(idle);
+                self.status_tx.send_modify(|s| s.last_frame_at = Some(tokio::time::Instant::now()));
             }
             match frame {
                 Some(Frame::Data {

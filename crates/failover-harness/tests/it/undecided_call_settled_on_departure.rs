@@ -530,6 +530,47 @@ async fn an_undecided_call_of_a_node_that_never_returns_is_discharged_by_its_bac
     drop(proxy);
 }
 
+/// The backup asks a departed node's undecided call's decision again and the
+/// caller CANCELs during that round trip: her CANCEL draws 200 and 487 from
+/// the INVITE transaction the takeover seeded, the decision is recorded and
+/// never applied, and the callee is never dialled; the backup writes the
+/// call's one CDR.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_during_the_backups_asked_again_decision_dials_nobody() {
+    let name = "undecided-call-cancel-during-the-reask";
+    let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
+    let (decision, consults) = CountedDecision::counting(route, DECISION_DELAY);
+    let (proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    call.expect(100).await;
+    let (pri_ord, call_ref) = placed(&fh, &w_b1, &w_b2).await;
+    let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+    assert_eq!(consults.load(Ordering::SeqCst), 2, "the backup asks the decision again");
+
+    let mut cancel = call.cancel().await;
+    cancel.expect(200).await;
+    call.expect(487).await;
+    fh.advance(DECISION_DELAY + Duration::from_secs(5)).await;
+    assert!(!reached(&fh, &bob), "the callee is never dialled");
+
+    let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
+    let released = fh
+        .settle_terminal(async || {
+            survivor.memory_clean() && !survivor.holds_any_trace(&call_ref).await
+        })
+        .await;
+    assert!(released, "nothing of the call is left live or stored");
+    assert_eq!(total_cdrs_for(&[survivor], &call_ref), 1, "the backup writes the one CDR");
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    fh.assert_sip_rfc_clean(name);
+    drop(proxy);
+}
+
 /// A removed process whose backup never received the call — its creation
 /// write held on the stream — refuses the caller 503 when its decision
 /// returns: the departure sweep found nothing to answer, and the caller has

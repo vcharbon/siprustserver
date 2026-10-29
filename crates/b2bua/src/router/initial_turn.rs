@@ -280,7 +280,7 @@ pub(super) async fn initial_invite_turn(
 
 /// [`refused_unavailable`] from the pre-handler call ([`discarded_turn`]), so
 /// the termination releases what the route admitted.
-fn refused_after_leaving_the_slice(
+pub(super) fn refused_after_leaving_the_slice(
     ctx: &RouterCtx,
     pre: &Call,
     caller: &SipRequest,
@@ -325,7 +325,7 @@ fn dropped_on_setup_cancel(pre: &Call, handled: HandlerResult) -> HandlerResult 
 /// decision seeded, beside what [`discarded_turn`] keeps, the call marked
 /// [`Call::setup_cancelled`]. No b-leg, no service cursor: no service ran its
 /// `init` on it.
-fn recorded_turn(pre: &Call, decided: Call) -> Call {
+pub(super) fn recorded_turn(pre: &Call, decided: Call) -> Call {
     let decision_log = decided.decision_log.clone();
     let decision_ordinal = decided.decision_ordinal;
     let callback_context = decided.callback_context.clone();

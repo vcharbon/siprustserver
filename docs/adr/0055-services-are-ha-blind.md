@@ -688,7 +688,8 @@ the re-anchor deadband of each other.
     a re-INVITE while one the dead primary sent on the dialog awaits its ACK
     (a second transfer over the first);
   - `W-off-stale-reask`, off only, a kill of the primary or a stall past the
-    cap then a kill, in a run where a node sent a request again: the copy's
+    cap then a kill, in a run where a node asked a routing decision again (a
+    turn mark says so): the copy's
     record lacks the routing decision the dead primary had acted on, so it
     asks the decision again (ADR-0047 D4) and dials the callee a second time;
     that second leg's 2xx crossing the CANCEL the copy sends it, and the BYE

@@ -71,8 +71,9 @@ impl Owner {
                 TxnSeed::ServerAccepted { response, leg_id } => {
                     self.seed_accepted(endpoint, call_ref, response, leg_id).await
                 }
-                TxnSeed::ServerRejected { response, dest, leg_id } => {
-                    self.seed_rejected(endpoint, call_ref, response, dest, leg_id).await
+                TxnSeed::ServerRejected { response, dest, leg_id, bound_ms } => {
+                    let seed = (response, dest, leg_id, bound_ms);
+                    self.seed_rejected(endpoint, call_ref, seed).await
                 }
                 TxnSeed::ClientNonInvite { request, dest, bound_ms } => {
                     self.seed_client_non_invite(endpoint, call_ref, request, dest, bound_ms).await
@@ -199,9 +200,7 @@ impl Owner {
         &mut self,
         endpoint: &dyn UdpEndpoint,
         call_ref: &str,
-        response: SipResponse,
-        dest: SocketAddr,
-        leg_id: Option<String>,
+        (response, dest, leg_id, bound_ms): (SipResponse, SocketAddr, Option<String>, Option<u64>),
     ) -> bool {
         let Some(key) = ServerTxnId::of_response(&response).map(ServerTxnId::to_key) else {
             return false;
@@ -240,6 +239,9 @@ impl Owner {
             txn.destination = Some(source);
         }
         self.arm_final_hold(key.id(), TxnKind::Invite, response.status());
+        if let Some(left) = bound_ms {
+            self.hold_for(TxnRef::Server(key.id()), Hold::TimerH, ms(left));
+        }
         if let Some(source) = occupant {
             self.send_buffer(endpoint, response.image(), source).await;
         }

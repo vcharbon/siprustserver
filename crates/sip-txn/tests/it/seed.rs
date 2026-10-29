@@ -342,8 +342,12 @@ async fn a_rejected_seed_sends_its_final_until_the_ack() {
     let (branch, call_id) = ("z9hG4bK-seed-rejected", "seed-rejected");
     let response =
         parse_response(&response_bytes(486, "Busy Here", "INVITE", branch, call_id, true));
-    let seed =
-        TxnSeed::ServerRejected { response, dest: addr(PEER), leg_id: Some("a".to_string()) };
+    let seed = TxnSeed::ServerRejected {
+        response,
+        dest: addr(PEER),
+        leg_id: Some("a".to_string()),
+        bound_ms: None,
+    };
     assert_eq!(stack.txn.seed(CALL_REF, vec![seed]).await.unwrap(), 1);
     elapse_ms(20).await;
     assert!(stack.drain_peer().is_empty(), "nothing at the seed");

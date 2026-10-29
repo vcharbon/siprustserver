@@ -201,7 +201,12 @@ pub(in crate::router) fn rejected_seed(leg: &Leg) -> Option<TxnSeed> {
         SipMessage::Request(_) => return None,
     };
     let dest = sip_net::ip_socket_addr(host, port)?;
-    Some(TxnSeed::ServerRejected { response, dest, leg_id: Some(leg.leg_id.clone()) })
+    Some(TxnSeed::ServerRejected {
+        response,
+        dest,
+        leg_id: Some(leg.leg_id.clone()),
+        bound_ms: None,
+    })
 }
 
 /// The client seed of the INVITE `leg`'s `dialog` last sent, `record`: while

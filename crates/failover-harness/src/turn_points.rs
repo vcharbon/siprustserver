@@ -119,6 +119,8 @@ struct Inner {
     armed: Option<Armed>,
     /// A node sent again requests another had sent off a call's turn.
     resent: bool,
+    /// A node asked again a call's routing decision another had asked.
+    reasked: bool,
 }
 
 /// An arm on the first call that takes a turn.
@@ -159,6 +161,12 @@ impl TurnPoints {
         self.lock().resent
     }
 
+    /// Whether a node asked again, this run, a call's routing decision another
+    /// node had asked (ADR-0047 D4).
+    pub fn reasked(&self) -> bool {
+        self.lock().reasked
+    }
+
     /// Arm `at` on the first call that takes a turn; the returned receiver
     /// yields the turn held there once it is reached. Replaces any arm.
     pub fn arm(&self, at: TurnAt) -> oneshot::Receiver<HeldTurn> {
@@ -176,6 +184,7 @@ impl Inner {
     /// Record `mark` and say which turn of its call it stands at.
     fn record(&mut self, mark: &TurnMark<'_>, applied_held: bool) -> Option<usize> {
         self.resent |= mark.resent;
+        self.reasked |= mark.reasked;
         let primary = call::call_ref_primary(mark.call_ref)?;
         let at_primary = primary == mark.node;
         match (mark.point, at_primary) {

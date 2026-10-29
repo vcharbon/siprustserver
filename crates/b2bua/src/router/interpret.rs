@@ -294,6 +294,7 @@ pub(super) struct TurnKind {
     on_answer: bool,
     called_out: bool,
     resent: bool,
+    reasked: bool,
 }
 
 impl TurnKind {
@@ -304,8 +305,8 @@ impl TurnKind {
             .iter()
             .any(|e| !matches!(e, FireAndForgetEffect::Reenter(_)));
         let on_answer = result.effects.took_answer;
-        let resent = result.effects.resent;
-        Self { on_request: received.is_some(), on_answer, called_out, resent }
+        let (resent, reasked) = (result.effects.resent, result.effects.reasked);
+        Self { on_request: received.is_some(), on_answer, called_out, resent, reasked }
     }
 }
 
@@ -332,6 +333,7 @@ pub(super) async fn reach(
             on_answer: kind.on_answer,
             called_out: kind.called_out,
             resent: kind.resent,
+            reasked: kind.reasked,
             released,
             backed: point == TurnPoint::Logged && ctx.state.hold_target(call_ref).is_some(),
         })

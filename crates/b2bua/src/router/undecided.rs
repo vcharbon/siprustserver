@@ -146,7 +146,10 @@ pub(super) fn notice_of(event: &CallEvent) -> Option<&str> {
 pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str) {
     let _guard = ctx.state.lock(call_ref).await;
     let Some(call) = ctx.state.peek(call_ref) else { return };
-    if !is_undecided(&call) || call.setup_cancelled || primary_wrote_since(ctx, call_ref).await {
+    let cseq = call.a_leg_invite.cseq;
+    let cancelled = || ctx.state.is_setup_cancelled(call_ref, cseq);
+    let asks_nothing = !is_undecided(&call) || call.setup_cancelled || cancelled();
+    if asks_nothing || primary_wrote_since(ctx, call_ref).await {
         return;
     }
     let Ok(caller) = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite) else {
@@ -171,11 +174,28 @@ pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str) {
         &wire,
         &ctx.clock,
         now_ms,
-        &|| false,
+        &cancelled,
     )
     .await;
-    // The caller's CANCEL is a turn of this call's queue, behind this one.
-    let Consulted::Applied(handled) = consult else { return };
+    let (handled, recorded) = match consult {
+        Consulted::Applied(handled) => (*handled, false),
+        // The caller CANCELed during the round trip: the decision is recorded,
+        // never applied, and her CANCEL's turn, queued behind this one, ends
+        // the call and releases what the decision admitted.
+        Consulted::Cancelled(decided) => {
+            ctx.metrics.bump_decision_dropped_cancelled();
+            let call = super::initial_turn::recorded_turn(&call, *decided);
+            (HandlerResult { call, effects: crate::effects::HandlerEffects::new() }, true)
+        }
+    };
+    let handled = if !recorded && ctx.readiness.left_the_slice() {
+        let ids = &mut turn.ids;
+        super::initial_turn::refused_after_leaving_the_slice(
+            ctx, &call, &caller, handled, now_ms, ids,
+        )
+    } else {
+        handled
+    };
     if primary_wrote_since(ctx, call_ref).await {
         tracing::info!(
             node = observe::node(),
@@ -185,21 +205,15 @@ pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str) {
         return;
     }
     let advertisement = UnansweredCaller::Answer(&ctx.config.minted_final_advertisement);
-    let enforced = enforce(
-        &ctx.obligations,
-        &call,
-        finalize(*handled),
-        now_ms,
-        advertisement,
-        &mut turn.notes,
-    );
+    let enforced =
+        enforce(&ctx.obligations, &call, finalize(handled), now_ms, advertisement, &mut turn.notes);
     let mut result = {
         let mut exec =
             ActionExecutor { config: &ctx.config, owners: &owners, turn: &mut turn, now_ms };
         close_turn(&ctx.rules, &TurnStart::unborn(), enforced, &mut exec)
     };
-    // A decision another node may have asked: a request sent again.
-    result.effects.resent = true;
+    // A decision another node may have asked.
+    result.effects.reasked = true;
     super::notes::drain(ctx, call_ref, &mut turn);
     let turn_label = &"the re-ask of an undecided call's decision";
     process_result(ctx, call_ref, result, now_ms, turn_label, None).await;

@@ -38,8 +38,8 @@ impl Runnable for Turn {
                 super::quiesced::self_release_turn(&self.ctx, call_ref).await;
                 return;
             }
-            if let Some(call_ref) = super::resend::notice_of(&self.event) {
-                super::resend::resend_turn(&self.ctx, call_ref).await;
+            if let Some((call_ref, only)) = super::resend::notice_of(&self.event) {
+                super::resend::resend_turn(&self.ctx, call_ref, only).await;
                 return;
             }
             if let Some(call_ref) = super::undecided::notice_of(&self.event) {

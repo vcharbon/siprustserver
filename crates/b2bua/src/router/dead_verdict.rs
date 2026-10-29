@@ -16,10 +16,12 @@
 //!
 //! A taken verdict acts once this node's replication stream from that worker
 //! is down: at once when it already is, else when it ends within the stream's
-//! silence bound. A stream that stays open through that bound speaks for a
-//! live worker the proxy misread, and nothing is taken over (ADR-0047 D1).
+//! silence bound with no frame from the worker since the verdict. A frame
+//! after the verdict, or a stream open through that bound, speaks for a live
+//! worker the proxy misread, and nothing is taken over (ADR-0047 D1); one wait
+//! runs per worker.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use sip_ids::SigningKey;
@@ -42,6 +44,9 @@ pub(crate) const HELD_MS: i64 = FRESH_MS + 32_000;
 #[derive(Default)]
 pub(crate) struct VerdictBook {
     taken: Mutex<HashMap<String, BTreeSet<i64>>>,
+    /// The workers whose verdict waits on the stream's confirmation: one
+    /// wait per worker, however many verdicts on it arrive meanwhile.
+    pending: Mutex<HashSet<String>>,
 }
 
 impl VerdictBook {
@@ -54,6 +59,16 @@ impl VerdictBook {
             !ats.is_empty()
         });
         taken.get(ordinal).is_some_and(|ats| ats.contains(&at_ms))
+    }
+
+    /// Mark a confirmation pending for `ordinal`; whether none was.
+    fn start_pending(&self, ordinal: &str) -> bool {
+        locked(&self.pending, DEAD_VERDICTS).insert(ordinal.to_string())
+    }
+
+    /// The confirmation pending for `ordinal` ended.
+    fn end_pending(&self, ordinal: &str) {
+        locked(&self.pending, DEAD_VERDICTS).remove(ordinal);
     }
 
     /// Hold the verdict on `ordinal` at `at_ms`; whether it was not held.
@@ -107,7 +122,9 @@ fn take(ctx: &Arc<RouterCtx>, received: &ReceivedNotice) {
     ctx.metrics.bump_dead_verdict_taken();
     match &ctx.peer_streams {
         Some(streams) if streams.streams_from(&notice.ordinal) => {
-            confirm_on_the_stream(ctx, streams.clone(), notice.ordinal.clone(), notice.at_ms);
+            if ctx.dead_verdicts.start_pending(&notice.ordinal) {
+                confirm_on_the_stream(ctx, streams.clone(), notice.ordinal.clone(), notice.at_ms);
+            }
         }
         _ => act(ctx, &notice.ordinal, notice.at_ms),
     }
@@ -127,7 +144,9 @@ fn act(ctx: &Arc<RouterCtx>, ordinal: &str, at_ms: i64) {
 }
 
 /// Act on the verdict on `ordinal` once the replication stream from it ends,
-/// within its silence bound; past that bound the verdict is a misread.
+/// within its silence bound, with no frame from it since the verdict; a frame
+/// from it after the verdict, or the stream open past that bound, makes the
+/// verdict a misread.
 fn confirm_on_the_stream(
     ctx: &Arc<RouterCtx>,
     streams: ReplicationSupervisor,
@@ -138,7 +157,11 @@ fn confirm_on_the_stream(
     let confirm: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> = Box::pin(
         async move {
             let bound = streams.silence_bound();
-            if tokio::time::timeout(bound, streams.stream_from_ends(&ordinal)).await.is_ok() {
+            let since = tokio::time::Instant::now();
+            let ends = streams.stream_from_ends_unheard_since(&ordinal, since);
+            let confirmed = tokio::time::timeout(bound, ends).await.unwrap_or(false);
+            task_ctx.dead_verdicts.end_pending(&ordinal);
+            if confirmed {
                 act(&task_ctx, &ordinal, at_ms);
                 return;
             }
@@ -147,7 +170,7 @@ fn confirm_on_the_stream(
                 node = observe::node(),
                 worker = %ordinal,
                 at_ms,
-                "a proxy reads the worker dead while its replication stream stays open: nothing is taken over"
+                "a proxy reads the worker dead while its replication stream lives: nothing is taken over"
             );
         },
     );

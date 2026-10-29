@@ -38,26 +38,48 @@ pub(super) fn notice(call: &Call) -> CallEvent {
     }
 }
 
-/// Whether `event` is the re-send notice ([`notice`]), and of which call.
-pub(super) fn notice_of(event: &CallEvent) -> Option<&str> {
+/// The re-send notice of `call` for the requests of `only` alone, which this
+/// node took over from another owner's record while it awaits the rest itself.
+pub(super) fn notice_of_only(call: &Call, only: &[OffTurnRequest]) -> CallEvent {
+    let mut event = notice(call);
+    if let CallEvent::InternalEvent { payload, .. } = &mut event {
+        *payload = serde_json::to_value(only).unwrap_or(serde_json::Value::Null);
+    }
+    event
+}
+
+/// Whether `event` is the re-send notice ([`notice`]), of which call, and the
+/// requests it sends again alone, if it names them ([`notice_of_only`]).
+pub(super) fn notice_of(event: &CallEvent) -> Option<(&str, Option<Vec<OffTurnRequest>>)> {
     match event {
-        CallEvent::InternalEvent { call_ref, topic, .. } if topic == TOPIC => Some(call_ref),
+        CallEvent::InternalEvent { call_ref, topic, payload, .. } if topic == TOPIC => {
+            Some((call_ref, serde_json::from_value(payload.clone()).ok()))
+        }
         _ => None,
     }
 }
 
 /// The re-send turn of `call_ref`, under its per-call lock: every request the
-/// resident call awaits is sent again, the deadline its sender armed retired.
-/// A call gone, ending or awaiting nothing sends nothing.
-pub(super) async fn resend_turn(ctx: &Arc<RouterCtx>, call_ref: &str) {
+/// resident call awaits, or those of `only` among them, is sent again, the
+/// deadline its sender armed retired. A call gone, ending or awaiting none of
+/// them sends nothing.
+pub(super) async fn resend_turn(
+    ctx: &Arc<RouterCtx>,
+    call_ref: &str,
+    only: Option<Vec<OffTurnRequest>>,
+) {
     let _guard = ctx.state.lock(call_ref).await;
     let Some(mut call) = ctx.state.peek(call_ref) else { return };
-    if call.awaited.is_empty() || call.state != CallModelState::Active {
+    let (again, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut call.awaited)
+        .into_iter()
+        .partition(|r| only.as_ref().is_none_or(|o| o.contains(r)));
+    call.awaited = kept;
+    if again.is_empty() || call.state != CallModelState::Active {
         return;
     }
     let now_ms = ctx.clock.now_ms();
     let mut effects = HandlerEffects { resent: true, ..HandlerEffects::new() };
-    for request in std::mem::take(&mut call.awaited) {
+    for request in again {
         let retired =
             call::helpers::retire_timers(&mut call, |t| answers(&request, t.timer_type()));
         for entry in retired {

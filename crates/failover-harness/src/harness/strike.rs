@@ -116,6 +116,7 @@ impl FailoverHarness {
     pub(super) fn tier_gate_failure(&self) -> Option<String> {
         let tier = self.tier()?;
         let resent = self.turn_points.resent();
+        let reasked = self.turn_points.reasked();
         let fired = self.fired_rows();
         let two_servers = fired.iter().any(|f| f.row.needs_two_servers())
             && windows::two_servers::byes_from_two_workers(
@@ -129,6 +130,8 @@ impl FailoverHarness {
                     format!("closed in the {} tier", tier.label())
                 } else if f.row.needs_resend() && !resent {
                     "closed: no node sent a request again".to_string()
+                } else if f.row.needs_reask() && !reasked {
+                    "closed: no node asked a routing decision again".to_string()
                 } else if f.row.needs_two_servers() && !two_servers {
                     "closed: no dialog took a BYE from two workers".to_string()
                 } else {

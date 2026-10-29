@@ -30,11 +30,22 @@ pub(super) async fn deliver(ctx: &Arc<RouterCtx>, call_ref: &str, call: &Call) {
 /// and the ACKs it may still owe a callee's non-2xx.
 fn owed_finals(call: &Call, now_ms: i64) -> Vec<TxnSeed> {
     let timer_h = i64::try_from(sip_txn::timers::TIMER_H).unwrap_or(i64::MAX);
-    let ended_at = call.termination.as_ref().map(|t| t.at_ms);
-    if ended_at.is_none_or(|at| now_ms >= at.saturating_add(timer_h)) {
+    let Some(ended_at) = call.termination.as_ref().map(|t| t.at_ms) else { return Vec::new() };
+    let Some(left) = u64::try_from(ended_at.saturating_add(timer_h).saturating_sub(now_ms))
+        .ok()
+        .filter(|ms| *ms > 0)
+    else {
         return Vec::new();
-    }
-    let mut seeds: Vec<TxnSeed> = rejected_seed(&call.a_leg).into_iter().collect();
+    };
+    let mut seeds: Vec<TxnSeed> = rejected_seed(&call.a_leg)
+        .map(|seed| match seed {
+            TxnSeed::ServerRejected { response, dest, leg_id, .. } => {
+                TxnSeed::ServerRejected { response, dest, leg_id, bound_ms: Some(left) }
+            }
+            other => other,
+        })
+        .into_iter()
+        .collect();
     seeds.extend(rejected_dialled_seeds(call, now_ms));
     seeds
 }

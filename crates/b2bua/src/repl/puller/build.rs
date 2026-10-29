@@ -40,6 +40,7 @@ impl Puller {
             reset_gen: 0,
             ever_connected: false,
             streaming: false,
+            last_frame_at: None,
         });
         (
             Self {
