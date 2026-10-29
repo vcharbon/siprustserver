@@ -31,11 +31,12 @@ impl Owner {
     /// branch a `100 Trying` alone answered is reported alive
     /// ([`TransactionEvent::HopAlive`]).
     pub(super) fn fire_first_response(&mut self, branch: &str) {
-        let Some(t) = self
-            .clients
-            .get(branch)
-            .filter(|t| t.kind == TxnKind::Invite && t.state.is_active() && !t.dead_hop_reported)
-        else {
+        let Some(t) = self.clients.get(branch).filter(|t| {
+            t.kind == TxnKind::Invite
+                && t.state.is_active()
+                && !t.lifetime.gave_up()
+                && !t.dead_hop_reported
+        }) else {
             return;
         };
         if t.state == TxnState::Proceeding {
