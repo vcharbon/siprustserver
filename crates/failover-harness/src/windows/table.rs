@@ -1,7 +1,7 @@
 //! The rows of the window table, in the order they take a finding. Each `W-…`
 //! id is the backticked id of its ADR-0055 §11 bullet.
 
-use scenario_harness::dialogs::DIALOG_ENDED;
+use scenario_harness::dialogs::{DIALOG_CSEQ_BACKWARDS, DIALOG_ENDED};
 
 use super::copies::{
     cancels_an_answered_invite, non_2xx_after_another_final, non_2xx_after_the_dead_owners_2xx,
@@ -27,6 +27,13 @@ const TWO_COPIES: &[Incident] = &[Split, SplitHealed, StalledKilled];
 const SPLITS: &[Incident] = &[Split, SplitHealed];
 /// The rows of a kill of the primary, announced or not, rebooted or not.
 const PRIMARY_KILLS: &[Incident] = &[PrimaryKilled, PrimaryKilledUnannounced, PrimaryRebooted];
+/// The rows of a copy whose record may be behind the wire, the requests it
+/// awaited answers to sent again: a kill of the primary under `off` or past
+/// the cap, and a stall past the cap then a kill.
+const STALE_COPY: &[Incident] =
+    &[PrimaryKilled, PrimaryKilledUnannounced, PrimaryRebooted, StalledKilled];
+/// The re-INVITE rule of RFC 3261 §14.1: no re-INVITE while one is in progress.
+const RULE_REINVITE_IN_PROGRESS: &str = "no-re-invite-while-invite-in-progress";
 /// The rows of every incident but a split.
 const NO_SPLIT: &[Incident] = &[
     PrimaryKilled,
@@ -285,6 +292,53 @@ pub static TABLE: &[Row] = &[
         witness: None,
     },
     Row {
+        id: "W-stale-resend",
+        tier: Tier::Degraded,
+        opens: Opens::any(STALE_COPY),
+        covers: "a copy whose record is behind the wire sends again an awaited request the dead \
+                 primary had acted on, and acts on its answer: its requests into a dialog the \
+                 dead primary ended, each closed by the 481 it draws",
+        kind: Kind::Dialog { rule: DIALOG_ENDED, methods: &[], once_per_dialog: false },
+        closes_when_over: false,
+        witness: witness("refer-x-bye", SyncLevel::Off, PrimaryKilled, 5, TurnPoint::Applied),
+    },
+    Row {
+        id: "W-stale-resend-cseq",
+        tier: Tier::Degraded,
+        opens: Opens::any(STALE_COPY),
+        covers: "the same copy's request at a CSeq below one the dead primary sent on the dialog",
+        kind: Kind::Dialog { rule: DIALOG_CSEQ_BACKWARDS, methods: &[], once_per_dialog: false },
+        closes_when_over: false,
+        witness: None,
+    },
+    Row {
+        id: "W-stale-resend-cseq-reuse",
+        tier: Tier::Degraded,
+        opens: Opens::any(STALE_COPY),
+        covers: "the same copy's requests at CSeqs the dead primary already sent on the dialog",
+        kind: Kind::Rfc {
+            rules: &[RULE_CSEQ_IN_DIALOG_ORDER],
+            once_per_dialog: false,
+            admits: None,
+        },
+        closes_when_over: false,
+        witness: None,
+    },
+    Row {
+        id: "W-stale-resend-reinvite",
+        tier: Tier::Degraded,
+        opens: Opens::any(STALE_COPY),
+        covers: "the same copy's re-INVITE while one the dead primary sent on the dialog awaits \
+                 its ACK",
+        kind: Kind::Rfc {
+            rules: &[RULE_REINVITE_IN_PROGRESS],
+            once_per_dialog: false,
+            admits: None,
+        },
+        closes_when_over: false,
+        witness: None,
+    },
+    Row {
         id: "W-kill-cseq",
         tier: Tier::Degraded,
         opens: Opens::Incidents { always: &[UnbackedKilled], in_window: PRIMARY_KILLS },
@@ -368,92 +422,4 @@ pub static TABLE: &[Row] = &[
 ];
 
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeSet;
-
-    use super::*;
-
-    /// The rows no upstream sweep cell fires today, at either level: kept, as
-    /// Degraded keeps every §11 window, until a shape or incident exercises them.
-    const UNWITNESSED: &[&str] = &[
-        "W-cdr-split",
-        "W-kill-cancel-answered",
-        "W-kill-non-2xx-after-2xx",
-        "W-kill-teardown-lost",
-        "W-off-answer-lost",
-        "W-split-early-bye",
-        "W-stall-cancel-reason",
-    ];
-
-    /// The backticked `W-…` ids of ADR-0055 §11.
-    fn adr_ids() -> BTreeSet<String> {
-        let path =
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/adr/0055-services-are-ha-blind.md");
-        let adr = std::fs::read_to_string(path).expect("ADR-0055 reads");
-        let start = adr.find("### 11. The proof").expect("ADR-0055 has §11");
-        let end = adr[start..].find("\n### 12.").map_or(adr.len(), |e| start + e);
-        adr[start..end]
-            .split('`')
-            .skip(1)
-            .step_by(2)
-            .filter(|s| s.starts_with("W-"))
-            .map(str::to_string)
-            .collect()
-    }
-
-    #[test]
-    fn every_section_11_bullet_and_every_row_share_one_id() {
-        let rows: BTreeSet<String> =
-            TABLE.iter().filter(|r| r.id.starts_with("W-")).map(|r| r.id.to_string()).collect();
-        let adr = adr_ids();
-        assert!(UNWITNESSED.iter().all(|id| rows.contains(*id)), "{UNWITNESSED:?}");
-        let unstated: Vec<_> = rows.difference(&adr).collect();
-        let rowless: Vec<_> = adr.difference(&rows).collect();
-        assert!(unstated.is_empty(), "rows ADR-0055 §11 does not state: {unstated:?}");
-        assert!(rowless.is_empty(), "ADR-0055 §11 ids no row carries: {rowless:?}");
-    }
-
-    #[test]
-    fn ids_are_unique_and_no_row_opens_in_the_guaranteed_tier() {
-        let mut seen = BTreeSet::new();
-        for row in TABLE {
-            assert!(seen.insert(row.id), "{} is twice in the table", row.id);
-            assert!(row.id.starts_with("W-") || row.id.starts_with("T-"), "{}", row.id);
-            assert_ne!(row.tier, Tier::Guaranteed, "{} opens in the Guaranteed tier", row.id);
-        }
-    }
-
-    #[test]
-    fn every_witness_is_a_shape_of_the_upstream_catalogue() {
-        let sweep = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/it/sweep.rs");
-        let sweep = std::fs::read_to_string(sweep).expect("the sweep's test file reads");
-        for row in TABLE {
-            let Some(w) = row.witness else { continue };
-            let module = w.shape.replace('-', "_");
-            assert!(
-                sweep.contains(&format!("    {module} => ")),
-                "{}'s witness shape {} is not in tests/it/sweep.rs",
-                row.id,
-                w.shape
-            );
-        }
-    }
-
-    #[test]
-    fn every_row_but_a_transitional_or_unwitnessed_one_names_a_witness_its_incidents_strike() {
-        for row in TABLE {
-            let unwitnessed = row.id.starts_with("T-") || UNWITNESSED.contains(&row.id);
-            match (unwitnessed, row.witness) {
-                (true, None) => {}
-                (true, Some(_)) => panic!("{} names a witness: off the unwitnessed list", row.id),
-                (false, None) => panic!("{} names no witness cell", row.id),
-                (false, Some(w)) => assert!(
-                    row.opens.incidents().any(|i| i == w.incident),
-                    "{}'s witness is cut by {:?}, which does not open it",
-                    row.id,
-                    w.incident
-                ),
-            }
-        }
-    }
-}
+mod tests;

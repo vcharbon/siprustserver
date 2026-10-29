@@ -645,6 +645,17 @@ the re-anchor deadband of each other.
     its outcome in vain, never for the teardown, every dialog is ended
     cleanly or left to its endpoint's own timer, and every request that
     reaches a living worker still draws its final there;
+  - `W-stale-resend`, `W-stale-resend-cseq`, `W-stale-resend-cseq-reuse` and
+    `W-stale-resend-reinvite`, a
+    kill of the primary or a stall past the cap then a kill, where the copy's
+    record is behind the wire — under `off`, or past the cap (user ruling):
+    the copy sends again a request the call awaited an answer to (ADR-0039
+    decision 5) though the dead primary had already acted on that answer, and
+    acts on its own: its requests into a dialog the dead primary ended, each
+    closed by the 481 it draws; a request at a CSeq below one the dead
+    primary sent on the dialog, or at ones it already sent;
+    a re-INVITE while one the dead primary sent on the dialog awaits its ACK
+    (a second transfer over the first);
   - `W-kill-cseq`, a kill inside the replication window: a copy re-uses a
     CSeq the dead primary sent before the backup applied the write, at most
     one rejected request per dialog; the call still ends or continues
