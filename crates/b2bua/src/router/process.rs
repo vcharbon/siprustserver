@@ -53,7 +53,7 @@ pub(super) async fn process(
     // The turn opens before its gates: their refusals draw identifiers too.
     let mut turn = TurnScope::of(ctx.id_gen.turn()).with_faults(ctx.wire_faults.snapshot());
 
-    match reaper_verdict_gate(ctx, &event, &call_ref, now_ms).await {
+    match reaper_verdict_gate(ctx, event, &call_ref, now_ms).await {
         Gate::Consumed => return false,
         Gate::Shed => {
             drop(_guard);
@@ -64,7 +64,7 @@ pub(super) async fn process(
     }
 
     let result = if res.initial_invite {
-        let (req, src, datagram) = match &event {
+        let (req, src, datagram) = match event {
             CallEvent::Sip { message, src, datagram } => match message.as_ref() {
                 SipMessage::Request(r) => (r.clone(), *src, datagram),
                 _ => return false,
@@ -89,19 +89,19 @@ pub(super) async fn process(
             }
             super::initial_turn::Turn::Result(r) => *r,
         }
-    } else if crate::off_turn::is_answer(&event) && !ctx.state.contains(&call_ref) {
+    } else if crate::off_turn::is_answer(event) && !ctx.state.contains(&call_ref) {
         // The answer to a request this node sent while it held the call: a
         // call no longer here — a copy stood down or shed, an ended call —
         // takes it nowhere, and it never takes one over: the node serving the
         // call sends its own (ADR-0039). The key its admit may have counted is
         // released only when no node holds the call.
         if !holds_a_record(ctx, &call_ref).await {
-            super::callouts::release_admit_fold_call(&ctx.limiter, &event);
+            super::callouts::release_admit_fold_call(&ctx.limiter, event);
         }
         drop(_guard);
         release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
         return false;
-    } else if let Some(answer) = RefreshAnswered::of(&event) {
+    } else if let Some(answer) = RefreshAnswered::of(event) {
         // A refresh answer applies to the resident call and never
         // materialises one: an ended call (or one that left this worker)
         // takes no answer, and the dispatch's per-call ephemera go.
@@ -119,22 +119,22 @@ pub(super) async fn process(
         };
         enforced(&ctx.framework(), &before, res, now_ms, &mut turn.notes)
     } else {
-        if of_another_incarnation(ctx, &event, &res, |stamp| {
+        if of_another_incarnation(ctx, event, &res, |stamp| {
             ctx.state.is_incarnation(&call_ref, stamp) == Some(false)
         }) {
-            answer_vanished(ctx, &event, &mut turn.ids).await;
+            answer_vanished(ctx, event, &mut turn.ids).await;
             return false;
         }
-        if super::store_fault_gate::in_dialog_store_fault_gate(ctx, &event, &call_ref, now_ms).await
+        if super::store_fault_gate::in_dialog_store_fault_gate(ctx, event, &call_ref, now_ms).await
         {
             return false;
         }
-        let Some(call) = resident_or_materialised(ctx, &call_ref, answered(&event)).await else {
-            answer_vanished(ctx, &event, &mut turn.ids).await;
+        let Some(call) = resident_or_materialised(ctx, &call_ref, answered(event)).await else {
+            answer_vanished(ctx, event, &mut turn.ids).await;
             // An admit report for a vanished call (a route fold, a service's
             // admit result): no call is left to own the set its admit may
             // have counted.
-            super::callouts::release_admit_fold_call(&ctx.limiter, &event);
+            super::callouts::release_admit_fold_call(&ctx.limiter, event);
             // This event was dispatched into a fresh per-call queue (one
             // `bump_creation`) and took the per-call lock, but resolved to NO
             // live call — nothing will ever emit `RemoveCall`, and a per-call
@@ -150,17 +150,17 @@ pub(super) async fn process(
             release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
             return false;
         };
-        res.bind_indexed_leg(&call, &event);
+        res.bind_indexed_leg(&call, event);
         // A copy this event materialised is checked as a resident one was.
-        if of_another_incarnation(ctx, &event, &res, |stamp| call.incarnation() != stamp) {
-            answer_vanished(ctx, &event, &mut turn.ids).await;
+        if of_another_incarnation(ctx, event, &res, |stamp| call.incarnation() != stamp) {
+            answer_vanished(ctx, event, &mut turn.ids).await;
             return false;
         }
         // A timer fire reaches the call only while its ledger holds the fired
         // instance, which leaves the ledger as it is delivered.
         let mut call = call;
         let screened =
-            crate::rule_chain::timer_screen::screen(&mut call, &event, now_ms, &mut turn.notes);
+            crate::rule_chain::timer_screen::screen(&mut call, event, now_ms, &mut turn.notes);
         super::notes::drain(ctx, &call_ref, &mut turn);
         if screened.is_err() {
             return false;
@@ -172,33 +172,33 @@ pub(super) async fn process(
         // lenient-parser normalization — a folded header, an odd-cased name, a
         // rewritten URI — stays visible in the very artifact that exists to
         // diagnose it. Guarded, and it borrows: no copy either way.
-        if let CallEvent::Sip { src, datagram, .. } = &event {
+        if let CallEvent::Sip { src, datagram, .. } = event {
             if crate::trace::sampled(&call) {
                 crate::trace::emit::sip_in(&call, now_ms, *src, datagram);
             }
         }
         // The message is resolved to the dialog it names, or refused, before
         // any of the machinery below reads it (RFC 3261 §12.2.2, ADR-0041).
-        let resolved = match super::dialog_gate::admit(ctx, &call, &event, &res) {
+        let resolved = match super::dialog_gate::admit(ctx, &call, event, &res) {
             super::dialog_gate::Gate::Pass(resolved) => resolved,
             super::dialog_gate::Gate::Answered { answer, in_order } => {
                 let leg = res.source_leg_id.as_str();
                 if let Some(r) = &in_order {
-                    super::dialog_gate::note_in_order(&mut call, leg, r, &event);
+                    super::dialog_gate::note_in_order(&mut call, leg, r, event);
                 }
                 let taken = in_order.is_some();
-                record_refusal(ctx, call, leg, &event, answer.as_deref(), taken, now_ms);
-                answer_after_the_write(ctx, &call_ref, &event, answer).await;
+                record_refusal(ctx, call, leg, event, answer.as_deref(), taken, now_ms);
+                answer_after_the_write(ctx, &call_ref, event, answer).await;
                 return false;
             }
             super::dialog_gate::Gate::Dropped => return false,
         };
-        super::dialog_gate::note_in_order(&mut call, &res.source_leg_id, &resolved, &event);
+        super::dialog_gate::note_in_order(&mut call, &res.source_leg_id, &resolved, event);
         // The layer emitted this datagram with no transaction to match it; a
         // materialisation — this turn's or an earlier one's, whose seeds went in
         // after the datagram was emitted — may hold one now. Re-offered, a match
         // is the layer's to answer and re-emit; this turn ends.
-        let call = match reoffer_trigger(ctx, call, &event, matched_client_txn).await {
+        let call = match reoffer_trigger(ctx, call, event, matched_client_txn).await {
             Offered::Matched => return false,
             Offered::Turn(call) => *call,
         };
@@ -210,15 +210,15 @@ pub(super) async fn process(
             .and_then(call::helpers::leg_own_tag)
             .map(str::to_string);
         if let Some(answer) =
-            reject_stray_cancel(ctx, &call, &res.source_leg_id, own_tag.as_deref(), &event)
+            reject_stray_cancel(ctx, &call, &res.source_leg_id, own_tag.as_deref(), event)
         {
-            record_refusal(ctx, call, &res.source_leg_id, &event, Some(&answer), false, now_ms);
-            answer_after_the_write(ctx, &call_ref, &event, Some(Box::new(answer))).await;
+            record_refusal(ctx, call, &res.source_leg_id, event, Some(&answer), false, now_ms);
+            answer_after_the_write(ctx, &call_ref, event, Some(Box::new(answer))).await;
             return false;
         }
         // The limiter-refresh timer marks the call due on the worker's refresh
         // batch outside the rule chain; the call never waits on the limiter.
-        if fired(&event, &TimerType::LimiterRefresh) {
+        if fired(event, &TimerType::LimiterRefresh) {
             let before = call.clone();
             let limiter = &ctx.limiter;
             let res =
@@ -226,7 +226,7 @@ pub(super) async fn process(
             enforced(&ctx.framework(), &before, res, now_ms, &mut turn.notes)
         } else {
             let input = TurnInput {
-                event: &event,
+                event,
                 call_ref: &call_ref,
                 source_leg_id: &res.source_leg_id,
                 direction: res.direction,
@@ -242,16 +242,16 @@ pub(super) async fn process(
     super::notes::drain(ctx, &call_ref, &mut turn);
     if unrecoverable {
         let ids = &mut turn.ids;
-        if !discharge_after_turn(ctx, &call_ref, &event, now_ms, ids).await {
+        if !discharge_after_turn(ctx, &call_ref, event, now_ms, ids).await {
             drop(_guard);
             release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
         }
         return false;
     }
 
-    record_keepalive_timeout_peer(ctx, &event, &result.call);
+    record_keepalive_timeout_peer(ctx, event, &result.call);
 
-    let turn = super::turn_label::EventSummary { call_ref: &call_ref, event: &event };
+    let turn = super::turn_label::EventSummary { call_ref: &call_ref, event };
     process_result(ctx, &call_ref, result, now_ms, &turn, Some(event)).await;
     true
 }
