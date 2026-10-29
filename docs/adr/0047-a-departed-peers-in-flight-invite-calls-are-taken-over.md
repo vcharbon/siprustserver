@@ -168,10 +168,14 @@ replacement-decision cell). A node still in the slice — draining in ADR-0031 c
 applies its decisions.
 
 **D7 — A returning primary takes its swept calls back.** A node that reclaims one of
-its own calls with an INVITE in flight, in the bulk reclaim or a straggler reclaim,
-writes it once: one `p` increment, recording that the node serves the call again. A
-quiet call is not written, so the reclaim of a large partition stays write-free for
-it. On the backup that write is a forward flush. Applied to the Element of a call the
+its own calls with an INVITE in flight, or one its backup wrote as the call's acting
+owner (its `b` past zero), in the bulk reclaim or a straggler reclaim, writes it once:
+one `p` increment, recording that the node serves the call again. A copy taken over on
+a verdict or by a message stays resident while its transactions last, timers armed,
+after the call went quiet, so the write reaches it too
+(`swept_call_primary_returns.rs`, the node-down cell). A quiet call the backup never
+wrote has no copy and is not written, so the reclaim of a large partition stays
+write-free for it. On the backup that write is a forward flush. Applied to the Element of a call the
 backup serves as a takeover copy, on the stream's tail or inside a bootstrap scan of
 the returned node, it is handed to the router with its body; so is an applied forward
 delete of the call, with the incarnation it names. The puller reads the router's live
@@ -189,7 +193,10 @@ stands down when:
   the transactions, never from a sequence a refusal raised), and each other request the
   copy relayed itself, as the same relay (`call::helpers::holds_relays_of`;
   `PendingRequest::relayed_by` names the relaying node). A relay the copy holds as the
-  primary's own returns its final to the primary and pins nothing. One increment
+  primary's own returns its final to the primary and pins nothing. A leg's dialling
+  INVITE the copy sent and that awaits its final pins the copy whatever the primary's
+  record holds: the proxy's cookie on that INVITE names the copy, so its responses
+  return to the copy alone (ADR-0055 §8). One increment
   of a copy's `b` is one write this node made as the call's acting backup; a quiet
   turn, a fold or an adopted version moves nothing. A primary reaches a `b` only by
   reading the copy's write that carries it — applied or folded into its record, or
@@ -215,7 +222,16 @@ primary once the proxy reads it alive; one that still reaches the backup takes t
 call over afresh (`stood_down_round.rs`: a copy stood down in the middle of a re-INVITE
 round it relayed; the callee's 200 takes the call over afresh and the round completes).
 Any other copy plays on and self-releases at quiescence, and a refused flush folds as
-before (ADR-0031 D3).
+before (ADR-0031 D3). A copy that plays on from the primary's copy sends each CANCEL
+that copy records on an INVITE whose transaction the copy holds: the primary decided
+it, but a CANCEL goes on its INVITE's transaction (RFC 3261 §9.1), and only the copy
+holds that one (`router/reclaim/carried_cancel.rs`).
+
+One owner acts on an outside service's answer. A copy awaiting the answer to a request
+the primary's reclaim write awaits too, the call's routing decision asked again
+included, is covered by that write on that request: it stands down, an answer reaching
+it afterwards takes nothing over (ADR-0039 decision 5), and the primary alone acts on
+the answer, the backend possibly asked twice.
 
 **An unanswered teardown never ends an answered call.** Both replication gates order
 two bodies of one call the same way (`call::helpers::lifecycle_behind`): the answer

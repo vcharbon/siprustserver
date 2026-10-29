@@ -184,6 +184,39 @@ fn a_relay_a_former_boot_of_the_copys_ordinal_made_never_pins_the_copy() {
     );
 }
 
+/// `call` with a callee leg whose dialling INVITE worker `by` sent, final
+/// `final_received`.
+fn dialling(mut copy: Enveloped, by: RelayOwner, final_received: Option<u16>) -> Enveloped {
+    let mut leg = call::testkit::dialled_leg("c-1", "dialled-tag");
+    if let Some(record) = leg.invite.as_mut() {
+        record.relayed_by = by;
+    }
+    if let Some(status) = final_received {
+        leg.outbound_invite_mut().expect("the dialled INVITE").record_final(status);
+    }
+    copy.call.b_legs.push(leg);
+    copy
+}
+
+/// An INVITE the copy dialled and that awaits its final pins the copy, even
+/// when the primary's record holds it: the proxy's cookie on that INVITE
+/// names the copy, so its responses come back to the copy alone.
+#[test]
+fn an_invite_the_copy_dialled_awaiting_its_final_pins_the_copy() {
+    let copy = dialling(in_round(2, None), copy_worker(), None);
+    assert!(!covers(&copy, &copy), "the callee's final comes back to the copy");
+}
+
+/// The dialled INVITE pins nothing once it took its final, nor when another
+/// node sent it.
+#[test]
+fn an_answered_dialled_invite_or_one_another_node_sent_never_pins_the_copy() {
+    let answered = dialling(in_round(2, None), copy_worker(), Some(200));
+    assert!(covers(&answered, &answered), "its final is in");
+    let theirs = dialling(in_round(2, None), RelayOwner::new("w0", "w0-boot-1"), None);
+    assert!(covers(&theirs, &theirs), "the primary sent it");
+}
+
 /// The primary's delete releases a copy that holds nothing only it can
 /// finish; a copy holding its own relay, or a round it relayed, plays on.
 #[test]

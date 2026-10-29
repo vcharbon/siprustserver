@@ -299,6 +299,18 @@ pub static TABLE: &[Row] = &[
         witness: None,
     },
     Row {
+        id: "W-off-reboot-two-servers",
+        tier: Tier::Off,
+        opens: Opens::any(&[PrimaryRebooted]),
+        covers: "the restarted primary and the backup's takeover copy, which holds an INVITE \
+                 it dialled, serving the call's legs at once: their writes diverge and each \
+                 ends the call cleanly, its BYE into a dialog the other already ended closed \
+                 by its 481, once per dialog",
+        kind: Kind::Dialog { rule: DIALOG_ENDED, methods: &["BYE"], once_per_dialog: true },
+        closes_when_over: false,
+        witness: None,
+    },
+    Row {
         id: "W-kill-cseq",
         tier: Tier::Degraded,
         opens: Opens::Incidents { always: &[UnbackedKilled], in_window: PRIMARY_KILLS },

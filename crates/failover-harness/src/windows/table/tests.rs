@@ -10,6 +10,7 @@ const UNWITNESSED: &[&str] = &[
     "W-kill-non-2xx-after-2xx",
     "W-kill-teardown-lost",
     "W-off-answer-lost",
+    "W-off-reboot-two-servers",
     "W-split-early-bye",
     "W-stale-resend-cseq",
     "W-stale-resend-cseq-reuse",

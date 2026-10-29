@@ -16,6 +16,7 @@ use super::super::release::{release_call, ReleaseKind};
 use super::super::restore_hygiene::sanitize_restored_timers;
 use super::super::stand_down::covers;
 use super::super::RouterCtx;
+use super::carried_cancel::send_carried_cancels;
 use super::diverged::{end_diverged, end_over_an_ending, own_records};
 use super::ending::discharge_met_ending;
 use super::{format_pb, FlushDirection};
@@ -39,7 +40,8 @@ use crate::store::Enveloped;
 ///   each containing the other included, plays on from the primary's copy
 ///   taken whole, its own open request records, leg-id space and exempt
 ///   ledger entries carried into it — a vector is never taken without the
-///   body it counts.
+///   body it counts — and sends each CANCEL the primary's copy records on
+///   an INVITE whose transaction it holds ([`send_carried_cancels`]).
 ///
 /// Copies that diverged end the call cleanly from here ([`end_diverged`]).
 pub(in crate::router) async fn meet_live(
@@ -110,6 +112,7 @@ pub(in crate::router) async fn meet_live(
                 let taken = own_records(taken, &live.call, by);
                 let mut taken = with_own_running(taken, &live.call);
                 resync_timers(ctx, call_ref, &live.call, &mut taken, now_ms).await;
+                send_carried_cancels(ctx, &live.call, &taken).await;
                 ctx.state.update_enveloped(Enveloped::new(taken, topology));
             }
         },

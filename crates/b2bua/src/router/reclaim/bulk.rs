@@ -162,21 +162,27 @@ pub(super) async fn reclaim_into_live(ctx: &Arc<RouterCtx>, call_ref: &str) -> b
     }
 }
 
-/// Write the reclaimed `call` once when it has an INVITE transaction to serve:
-/// this node serving the call again is the change the write records, one `p`
-/// increment, and it reaches the backup's Element as the primary's write, where
-/// a takeover copy of the call the backup's departure sweep made stands down on
-/// it (ADR-0047 D7). Every reclaim path writes it, the bulk pass, a straggler
-/// and an on-demand reclaim alike. A quiet call has no sweep copy and is not
-/// written, so the reclaim of a large partition stays write-free for those.
-/// Whether it wrote.
+/// Write the reclaimed `call` once when the backup may hold a takeover copy of
+/// it: the call has an INVITE transaction to serve, or the backup wrote it as
+/// its acting owner (its `b` is past zero). This node serving the call again is
+/// the change the write records, one `p` increment, and it reaches the
+/// backup's Element as the primary's write, where a takeover copy of the call
+/// stands down on it (ADR-0047 D7). Every reclaim path writes it, the bulk
+/// pass, a straggler and an on-demand reclaim alike. A quiet call the backup
+/// never wrote has no copy and is not written, so the reclaim of a large
+/// partition stays write-free for those. Whether it wrote.
 pub(in crate::router) fn announce_reclaim(ctx: &Arc<RouterCtx>, call: Call) -> bool {
-    let serves_an_invite = has_invite_to_serve(&call);
-    if serves_an_invite {
+    let backup_wrote = ctx
+        .state
+        .peek_enveloped(&call.call_ref)
+        .and_then(|held| held.topology)
+        .is_some_and(|topology| topology.bak_gen > 0);
+    let written = backup_wrote || has_invite_to_serve(&call);
+    if written {
         ctx.state.update(call.clone());
         ctx.state.flush(&call);
     }
-    serves_an_invite
+    written
 }
 
 #[cfg(test)]

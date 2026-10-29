@@ -103,9 +103,10 @@ pub(super) async fn stand_down_turn(
 /// Whether the primary's body `primary` covers the takeover `copy` on worker
 /// `by`: the same call (one incarnation), the primary's copy containing the
 /// copy (ADR-0055 §7: the copy's state stamp at or below the primary's
-/// vector, so the primary read every compared write the copy made), and
-/// every request record the copy keeps open held in the primary's record
-/// ([`finishes_nothing_alone`]).
+/// vector, so the primary read every compared write the copy made), every
+/// request record the copy keeps open held in the primary's record
+/// ([`finishes_nothing_alone`]), and no INVITE the copy dialled awaiting its
+/// final ([`dials_alone`]).
 pub(super) fn covers(primary: &Enveloped, copy: &Enveloped, by: &RelayOwner) -> bool {
     let contained = match (primary.topology.as_ref(), copy.topology.as_ref()) {
         (Some(p), Some(c)) => contains(p, c),
@@ -114,6 +115,18 @@ pub(super) fn covers(primary: &Enveloped, copy: &Enveloped, by: &RelayOwner) -> 
     primary.call.incarnation() == copy.call.incarnation()
         && contained
         && finishes_nothing_alone(Some(&primary.call), &copy.call, by)
+        && !dials_alone(&copy.call, by)
+}
+
+/// Whether `copy` on worker `by` holds a leg's dialling INVITE it sent that
+/// has no final yet. The proxy's cookie on that INVITE names its sender, so
+/// its responses come back to the copy alone (ADR-0055 §8), and the copy
+/// plays on until the final.
+fn dials_alone(copy: &Call, by: &RelayOwner) -> bool {
+    copy.b_legs.iter().any(|leg| {
+        leg.invite.as_ref().is_some_and(|record| record.relayed_by == *by)
+            && leg.outbound_invite().is_some_and(|invite| invite.final_received.is_none())
+    })
 }
 
 /// Whether `copy` on worker `by` holds no request whose final only it sees

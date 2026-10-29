@@ -173,7 +173,9 @@ async fn a_ringing_call_whose_node_returns_and_is_then_answered_gets_no_final_bu
 
 /// The callee answers while the departed node is down: its 200 fails over to
 /// the backup, whose takeover copy relays it and the caller's ACK. The node then
-/// returns and reclaims the answered call: the caller gets the 200 alone.
+/// returns and reclaims the answered call with a write, as the copy wrote it,
+/// and the copy stands down on that write: the caller gets the 200 alone, and
+/// one node runs the call's timers.
 #[tokio::test(start_paused = true)]
 async fn a_swept_call_answered_while_its_node_is_down_gets_no_final_but_its_200() {
     let mut p = place("swept-call-answered-node-down", Callee::Ringing).await;
@@ -182,6 +184,10 @@ async fn a_swept_call_answered_while_its_node_is_down_gets_no_final_but_its_200(
     let answered = answer(&mut p).await;
     assert_eq!(sent(&p, p.bob.addr(), b"ACK").last(), Some(&port(B2)), "the backup relays the ACK");
     return_before_deadline(&mut p).await;
+    assert!(
+        !p.w_b2.serves(&p.ringing_ref),
+        "the copy stands down on the reclaim of a call it wrote"
+    );
 
     answered_alone_past(&p, deadline).await;
     hang_up_and_settle(p, answered, &[]).await;

@@ -442,8 +442,8 @@ deviation, and §7 ends a call whose copies diverged.
 A worker reclaims its own calls in two steps. Once recovered, whether or not
 its own endpoint reads ready, it makes every call of its partition resident
 and parks it: no timer armed, no transaction seeded, nothing sent. A call with
-an INVITE to serve is written once (ADR-0047 D7), so the backup's takeover
-copy stands down on that write, and the burst of those writes drains, before
+an INVITE to serve, or one the backup wrote, is written once (ADR-0047 D7), so
+the backup's takeover copy stands down on that write, and the burst of those writes drains, before
 the proxy routes anything to the worker. The worker arms the parked calls —
 their timers, their transactions, the refusal of an undecided call — only
 while its own endpoint reads ready in the slice the proxy routes from. While
@@ -645,6 +645,13 @@ the re-anchor deadband of each other.
     its outcome in vain, never for the teardown, every dialog is ended
     cleanly or left to its endpoint's own timer, and every request that
     reaches a living worker still draws its final there;
+  - `W-off-reboot-two-servers`, off only, a restart of the primary (user
+    ruling): the restarted primary reclaims a call while the backup's takeover
+    copy holds an INVITE it dialled. The proxy routes each leg to the worker
+    that sent its dialog-creating request (§8), so the caller's leg reaches the
+    primary and the copy's legs the copy, and both serve the call at once;
+    their writes diverge and each node ends the call cleanly (§7), its BYE into
+    a dialog the other already ended closed by its 481, once per dialog;
   - `W-kill-cseq`, a kill inside the replication window: a copy re-uses a
     CSeq the dead primary sent before the backup applied the write, at most
     one rejected request per dialog; the call still ends or continues
