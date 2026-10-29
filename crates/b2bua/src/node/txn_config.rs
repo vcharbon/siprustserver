@@ -18,6 +18,7 @@ pub(super) fn txn_config(
     id_gen: &Arc<IdGen>,
     refusals: &Refusals,
     ceilings: Option<DeferredBound>,
+    ack_bound: std::time::Duration,
 ) -> TransactionConfig {
     let mut txn_config = TransactionConfig {
         // Sizes the events channel at 4096: room for a new-INVITE burst
@@ -38,8 +39,8 @@ pub(super) fn txn_config(
         trying_bound_ms: sip_txn::timers::TRYING_BOUND,
         // The ACK of a callee's non-2xx final is the router's to release with
         // the turn that took the final (ADR-0055 §3); the layer sends it at
-        // the same bound otherwise.
-        ack_bound_ms: sip_txn::timers::TRYING_BOUND,
+        // the write path's ACK bound otherwise.
+        ack_bound_ms: u64::try_from(ack_bound.as_millis()).unwrap_or(u64::MAX),
         strict_to_tag: true,
         deferred_bound: None,
         invite_refusals: Some(refusals.memo().clone()),

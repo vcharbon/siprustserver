@@ -31,8 +31,13 @@ use ha_harness::{
 const BAK: PartitionRole = PartitionRole::Backup;
 
 /// The delay the delay cell applies, in ms — chunks above the 100 ms pump
-/// granularity, so "early" and "on time" cannot be confused.
-const DELAY_MS: u64 = 3_000;
+/// granularity, so "early" and "on time" cannot be confused, and under the
+/// pullers' 2 s idle bound, so the delayed stream is kept.
+const DELAY_MS: u64 = 1_500;
+
+/// How long a cell holds a cut or a stall: under the pullers' 2 s idle bound,
+/// so the stream it holds is the one the heal releases.
+const HOLD: Duration = Duration::from_millis(1_500);
 
 fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
@@ -165,7 +170,7 @@ async fn partition_after_connect_delivers_nothing_until_heal() {
     let since = cl.report().frames.len();
     cl.partition("A", "B");
     cl.put("A", &c, b"during".to_vec(), 2, 0, &backup_is("B")).await;
-    cl.advance(secs(2)).await;
+    cl.advance(HOLD).await;
 
     let report = cl.report();
     let staged = data_sent_by(&report, a, since);
@@ -323,7 +328,7 @@ async fn stall_then_resume_delivers_everything_in_order() {
     for (i, c) in refs.iter().enumerate() {
         cl.put("A", c, format!("v{i}").into_bytes(), 1, 0, &backup_is("B")).await;
     }
-    cl.advance(secs(2)).await;
+    cl.advance(HOLD).await;
 
     let report = cl.report();
     let staged = data_sent_by(&report, a, since);

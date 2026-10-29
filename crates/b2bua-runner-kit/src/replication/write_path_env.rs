@@ -6,6 +6,9 @@
 //!                                       leave, relative to its write   (applied)
 //!   B2BUA_REPL_SYNC_CAP_MS              the longest an outbox entry waits for
 //!                                       the backup                         (100)
+//!   B2BUA_REPL_ACK_BOUND_MS             the longest the ACK of a callee's
+//!                                       non-2xx final waits for the turn
+//!                                       that took it                       (200)
 //!   B2BUA_REPL_BACKLOG_HIGH_ENTRIES     pending writes toward a backup at
 //!                                       which new calls get none           (10000)
 //!   B2BUA_REPL_BACKLOG_LOW_ENTRIES      … under which they get one again    (1000)
@@ -17,7 +20,10 @@
 //! Unset takes the default. A level other than `off` or `applied`, or a value
 //! that is not a positive integer, refuses the boot naming its variable, and
 //! so does a cap not below T1 and the RFC 3261 §17.2.1 bound (200 ms), at
-//! either level, or a low-water mark not under its high one.
+//! either level, an ACK bound not above the cap and below T1 (500 ms) — above
+//! the cap, so the turn's release beats it while the backup keeps up; below
+//! T1, so the ACK leaves before the callee repeats its final — or a low-water
+//! mark not under its high one.
 
 use std::time::Duration;
 
@@ -45,6 +51,7 @@ pub(crate) fn write_path(get: impl Fn(&str) -> Option<String>) -> Result<WritePa
     let path = WritePath {
         sync,
         sync_cap: ms("B2BUA_REPL_SYNC_CAP_MS", d.sync_cap)?,
+        ack_bound: ms("B2BUA_REPL_ACK_BOUND_MS", d.ack_bound)?,
         backlog: BacklogMarks {
             high_entries: count("B2BUA_REPL_BACKLOG_HIGH_ENTRIES", d.backlog.high_entries)?,
             low_entries: count("B2BUA_REPL_BACKLOG_LOW_ENTRIES", d.backlog.low_entries)?,
@@ -52,8 +59,9 @@ pub(crate) fn write_path(get: impl Fn(&str) -> Option<String>) -> Result<WritePa
             low_age: ms("B2BUA_REPL_BACKLOG_LOW_AGE_MS", d.backlog.low_age)?,
         },
     };
-    path.validate()
-        .map_err(|why| format!("B2BUA_REPL_SYNC_CAP_MS / B2BUA_REPL_BACKLOG_*: {why}"))?;
+    path.validate().map_err(|why| {
+        format!("B2BUA_REPL_SYNC_CAP_MS / B2BUA_REPL_ACK_BOUND_MS / B2BUA_REPL_BACKLOG_*: {why}")
+    })?;
     Ok(path)
 }
 
@@ -75,6 +83,7 @@ mod tests {
         let path = read(&[
             ("B2BUA_REPL_SYNC", "off"),
             ("B2BUA_REPL_SYNC_CAP_MS", "150"),
+            ("B2BUA_REPL_ACK_BOUND_MS", "300"),
             ("B2BUA_REPL_BACKLOG_HIGH_ENTRIES", "50"),
             ("B2BUA_REPL_BACKLOG_LOW_ENTRIES", "5"),
             ("B2BUA_REPL_BACKLOG_HIGH_AGE_MS", "3000"),
@@ -83,6 +92,7 @@ mod tests {
         .unwrap();
         assert_eq!(path.sync, SyncLevel::Off);
         assert_eq!(path.sync_cap, Duration::from_millis(150));
+        assert_eq!(path.ack_bound, Duration::from_millis(300));
         assert_eq!(
             path.backlog,
             BacklogMarks {
@@ -100,6 +110,21 @@ mod tests {
         assert!(read(&[("B2BUA_REPL_SYNC_CAP_MS", "500")]).is_err());
         assert!(read(&[("B2BUA_REPL_SYNC_CAP_MS", "0")]).is_err());
         assert!(read(&[("B2BUA_REPL_SYNC", "off"), ("B2BUA_REPL_SYNC_CAP_MS", "200")]).is_err());
+    }
+
+    #[test]
+    fn an_ack_bound_not_above_the_cap_and_below_t1_refuses_the_boot_naming_both() {
+        for pairs in [
+            &[("B2BUA_REPL_ACK_BOUND_MS", "100")][..],
+            &[("B2BUA_REPL_SYNC_CAP_MS", "150"), ("B2BUA_REPL_ACK_BOUND_MS", "120")][..],
+            &[("B2BUA_REPL_ACK_BOUND_MS", "500")][..],
+        ] {
+            let err = read(pairs).unwrap_err();
+            assert!(
+                err.contains("B2BUA_REPL_ACK_BOUND_MS") && err.contains("B2BUA_REPL_SYNC_CAP_MS"),
+                "{err}"
+            );
+        }
     }
 
     #[test]

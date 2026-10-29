@@ -161,7 +161,9 @@ impl B2buaCore {
             )
         });
         refusals.advertise(&config.minted_final_advertisement);
-        let txn_config = txn_config(&config, &id_gen, &refusals, deferred_ceilings);
+        let ack_bound = replication.as_ref().map(|s| s.write_path).unwrap_or_default().ack_bound;
+        let verdict_bounds = replication.as_ref().map(|s| s.verdict).unwrap_or_default();
+        let txn_config = txn_config(&config, &id_gen, &refusals, deferred_ceilings, ack_bound);
         let (txn, txn_rx) = TransactionLayer::spawn(endpoint, parser, txn_config);
         let (timers, timer_rx) = TimerService::spawn_with_metrics(clock.clone(), metrics.clone());
 
@@ -382,6 +384,7 @@ impl B2buaCore {
             unroutable_waves: crate::lifecycle::UnroutableWaves::new(),
             late_pracks: Default::default(),
             dead_verdicts: Default::default(),
+            verdict_bounds,
             outboxes: Arc::new(outboxes),
             reentry_tx,
             // Arc-shared into every per-call `ctx.clone()`, like `decision`.
@@ -560,21 +563,6 @@ impl B2buaCore {
 
     pub fn cdr(&self) -> &Arc<dyn CdrWriter> {
         &self.cdr
-    }
-
-    /// Sample the store + replication map sizes into the memory-attribution
-    /// gauges (`b2bua_store_*`, `b2bua_repl_meta_*`, `b2bua_repl_changelog_*`).
-    /// Called on a slow cadence by the runner so a RSS climb can be pinned to a
-    /// specific map even when `active_calls` is flat. Cheap: a couple of brief
-    /// locks, off the hot path.
-    pub fn sample_gauges(&self) {
-        self.ctx.state.sample_store_gauges();
-        if let Some(repl) = &self.repl_store {
-            let (meta_total, meta_backup) = repl.meta_counts();
-            let (entries, peers) = repl.changelog().depth();
-            let unbacked = repl.unbacked_count() as u64;
-            self.metrics.set_repl_store_gauges(meta_total, meta_backup, unbacked, entries, peers);
-        }
     }
 }
 

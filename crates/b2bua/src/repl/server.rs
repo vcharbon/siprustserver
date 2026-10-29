@@ -82,7 +82,7 @@ pub struct ServeConfig {
 
 impl Default for ServeConfig {
     fn default() -> Self {
-        Self { noop_interval: Duration::from_secs(5), send_stall: Duration::from_secs(15) }
+        Self { noop_interval: Duration::from_millis(500), send_stall: Duration::from_secs(15) }
     }
 }
 

@@ -4,7 +4,7 @@
 //! stood.
 //!
 //! ```text
-//!   puller   silence ≥ 15 s after the last frame   → reconnect, since = W
+//!   puller   silence ≥ 2 s after the last frame    → reconnect, since = W
 //!   puller   connect with no answer                → given up at 2 s, backoff
 //!   puller   one send blocked 15 s                 → stream left, backoff
 //!   puller   a stream that lasted the idle bound   → backoff from its floor
@@ -205,7 +205,7 @@ async fn tick_until(at: Instant) {
     }
 }
 
-const IDLE: Duration = Duration::from_secs(15);
+const IDLE: Duration = Duration::from_secs(2);
 /// The default bound on one blocked send.
 const SEND_STALL: Duration = Duration::from_secs(15);
 const CONNECT_BOUND: Duration = Duration::from_secs(2);
@@ -213,7 +213,7 @@ const CONNECT_BOUND: Duration = Duration::from_secs(2);
 const BACKOFF_FLOOR: Duration = Duration::from_millis(100);
 
 #[tokio::test(start_paused = true)]
-async fn a_peer_silent_after_bootstrap_is_left_after_15_s_and_pulled_again_from_its_watermark() {
+async fn a_peer_silent_after_bootstrap_is_left_after_2_s_and_pulled_again_from_its_watermark() {
     let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
     let b = addr(1);
     let peer = ScriptedPeer::listen(&net, b).await;
@@ -226,14 +226,14 @@ async fn a_peer_silent_after_bootstrap_is_left_after_15_s_and_pulled_again_from_
     let last_frame = peer.noop_sent();
 
     tick_until(last_frame + IDLE - Duration::from_millis(100)).await;
-    assert_eq!(peer.pulls().len(), 1, "a stream quiet for less than 15 s is kept");
+    assert_eq!(peer.pulls().len(), 1, "a stream quiet for less than 2 s is kept");
 
     tick_until(last_frame + IDLE + BACKOFF_FLOOR + Duration::from_millis(100)).await;
     let pulls = peer.pulls();
     assert_eq!(
         pulls.len(),
         2,
-        "the puller leaves a stream silent for 15 s and opens another after one backoff step"
+        "the puller leaves a stream silent for 2 s and opens another after one backoff step"
     );
     let gap = pulls[1].at - last_frame;
     assert!(

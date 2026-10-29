@@ -31,6 +31,7 @@ mod self_endpoint;
 mod server;
 mod store;
 mod supervisor;
+mod verdict_bounds;
 mod write_path;
 
 pub use changelog::{
@@ -49,6 +50,10 @@ pub use self_endpoint::{SelfEndpoint, WithdrawalCondition};
 pub use server::{ReplServer, ServeConfig};
 pub use store::ReplicatingCallStore;
 pub use supervisor::{PeerLink, ReplicationSupervisor};
+pub use verdict_bounds::{
+    VerdictBounds, DEFAULT_FRESH_MS as DEFAULT_VERDICT_FRESH_MS,
+    DEFAULT_HOLD_MS as DEFAULT_VERDICT_HOLD_MS,
+};
 pub use write_path::{SyncLevel, WritePath};
 
 #[cfg(test)]

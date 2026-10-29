@@ -5,7 +5,8 @@
 //! the discharge ([`super::departure`]).
 //!
 //! A notice is taken only when it verifies under the cluster key and its
-//! verdict is fresh: within [`FRESH_MS`] of this node's clock either way, so a
+//! verdict is fresh: within the freshness window of this node's clock either
+//! way ([`VerdictBounds`](crate::repl::VerdictBounds)), so a
 //! replayed notice is refused once that window passes. A node with no cluster
 //! key trusts none. Each verdict is taken once: a copy of one already taken
 //! (a Timer E repeat, up to Timer F, or a second proxy's own verdict at the
@@ -33,14 +34,8 @@ use super::RouterCtx;
 use crate::poison::{locked, DEAD_VERDICTS};
 use crate::repl::ReplicationSupervisor;
 
-/// How far a verdict's instant may stand from this node's clock, either way.
-pub(crate) const FRESH_MS: i64 = 10_000;
-
-/// How long a taken verdict is held: past the freshness window by Timer F
-/// (64·T1), the last a copy of its notice can arrive.
-pub(crate) const HELD_MS: i64 = FRESH_MS + 32_000;
-
-/// The verdicts this node took, by worker: each instant, held [`HELD_MS`].
+/// The verdicts this node took, by worker: each instant, held for the hold
+/// of [`VerdictBounds`](crate::repl::VerdictBounds).
 #[derive(Default)]
 pub(crate) struct VerdictBook {
     taken: Mutex<HashMap<String, BTreeSet<i64>>>,
@@ -51,11 +46,11 @@ pub(crate) struct VerdictBook {
 
 impl VerdictBook {
     /// Whether the verdict on `ordinal` at `at_ms` is held, dropping every
-    /// one past [`HELD_MS`] at `now_ms`.
-    fn holds(&self, ordinal: &str, at_ms: i64, now_ms: i64) -> bool {
+    /// one past `hold_ms` at `now_ms`.
+    fn holds(&self, ordinal: &str, at_ms: i64, now_ms: i64, hold_ms: i64) -> bool {
         let mut taken = locked(&self.taken, DEAD_VERDICTS);
         taken.retain(|_, ats| {
-            ats.retain(|at| now_ms.saturating_sub(*at) <= HELD_MS);
+            ats.retain(|at| now_ms.saturating_sub(*at) <= hold_ms);
             !ats.is_empty()
         });
         taken.get(ordinal).is_some_and(|ats| ats.contains(&at_ms))
@@ -96,10 +91,12 @@ pub(super) fn on_options(ctx: &Arc<RouterCtx>, req: &SipRequest) {
 fn take(ctx: &Arc<RouterCtx>, received: &ReceivedNotice) {
     let now_ms = ctx.clock.now_ms();
     let notice = &received.notice;
-    if ctx.dead_verdicts.holds(&notice.ordinal, notice.at_ms, now_ms) {
+    let bounds = ctx.verdict_bounds;
+    if ctx.dead_verdicts.holds(&notice.ordinal, notice.at_ms, now_ms, bounds.hold_ms) {
         return;
     }
-    if let Err(refusal) = verify(ctx.config.cluster_key.as_ref(), received, now_ms) {
+    if let Err(refusal) = verify(ctx.config.cluster_key.as_ref(), received, now_ms, bounds.fresh_ms)
+    {
         ctx.metrics.bump_dead_notice_refused();
         tracing::debug!(
             node = observe::node(),
@@ -178,15 +175,21 @@ fn confirm_on_the_stream(
     ctx.dispatcher.track(task.abort_handle());
 }
 
-/// Whether `received` verifies under `key` and is fresh at `now_ms`.
-fn verify(key: Option<&SigningKey>, received: &ReceivedNotice, now_ms: i64) -> Result<(), Refusal> {
+/// Whether `received` verifies under `key` and is fresh at `now_ms`, within
+/// `fresh_ms` either way.
+fn verify(
+    key: Option<&SigningKey>,
+    received: &ReceivedNotice,
+    now_ms: i64,
+    fresh_ms: i64,
+) -> Result<(), Refusal> {
     let key = key.ok_or(Refusal::NoKey)?;
     let signature = received.signature.as_deref().ok_or(Refusal::Unsigned)?;
     let fields = received.notice.signed_fields();
     if !key.verify(&fields.each_ref().map(Vec::as_slice), signature) {
         return Err(Refusal::BadSignature);
     }
-    if now_ms.saturating_sub(received.notice.at_ms).saturating_abs() > FRESH_MS {
+    if now_ms.saturating_sub(received.notice.at_ms).saturating_abs() > fresh_ms {
         return Err(Refusal::Stale);
     }
     Ok(())

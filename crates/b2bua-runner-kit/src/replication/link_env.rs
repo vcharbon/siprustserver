@@ -4,9 +4,9 @@
 //! ```text
 //!   B2BUA_REPL_CONNECT_TIMEOUT_MS     one connect to a peer              (2000)
 //!   B2BUA_REPL_BACKOFF_MAX_MS         the reconnect backoff's ceiling    (2000)
-//!   B2BUA_REPL_IDLE_TIMEOUT_MS        a stream delivering nothing is left (15000)
+//!   B2BUA_REPL_IDLE_TIMEOUT_MS        a stream delivering nothing is left (2000)
 //!   B2BUA_REPL_NOOP_INTERVAL_MS       the longest a served stream goes
-//!                                     without a Noop                     (5000)
+//!                                     without a Noop, the heartbeat       (500)
 //!   B2BUA_REPL_SEND_STALL_MS          a send blocked this long leaves the
 //!                                     stream, either end                 (15000)
 //!   B2BUA_REPL_KEEPALIVE_IDLE_MS      TCP keepalive: idle before probing (5000)
@@ -23,6 +23,16 @@
 //! timeout under twice the `Noop` interval: a healthy quiet stream could be
 //! left between two `Noop`s. The two span nodes (one node's pullers, its
 //! peers' servers): raise the idle timeout first, the interval after.
+//!
+//! The `Noop` interval is one setting of the serve loop, applied to every
+//! stream it serves, each flow's alike; it is the heartbeat a quiet stream
+//! carries, and a position claim vouches for twice it. The idle timeout is
+//! how long after a peer's last frame its stream reads down: a proxy's dead
+//! verdict on a peer that went silent with its sockets open is confirmed that
+//! long after its last frame (ADR-0047 D1), so it stays far below the
+//! orchestrator's force-delete of an unreachable node's pod (minutes), and a
+//! stall of a live peer longer than it makes the puller pull again from its
+//! watermark.
 
 use std::time::Duration;
 

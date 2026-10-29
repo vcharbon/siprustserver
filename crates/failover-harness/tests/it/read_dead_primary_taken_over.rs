@@ -94,3 +94,69 @@ async fn the_backup_dials_the_callee_of_a_primary_the_proxy_reads_dead() {
     fh.assert_sip_rfc_clean(name);
     drop(proxy);
 }
+
+/// How long a silent replication stream stays open: the pullers' idle bound
+/// (ADR-0045).
+const IDLE_BOUND: Duration = Duration::from_secs(2);
+
+/// **A host that goes silent with its sockets open.** The primary stops
+/// answering on every plane at once, its replication stream still connected
+/// but carrying nothing, as a host lost to the network does. The proxy's
+/// probe reads it dead and tells the backup while that stream still reads
+/// open; the stream is left at the idle bound with no frame since the
+/// verdict, which confirms it, and the backup dials the callee from its
+/// record (ADR-0047 D1).
+#[tokio::test(start_paused = true)]
+async fn a_silent_primary_is_confirmed_dead_at_the_idle_bound_and_taken_over() {
+    let name = "silent-primary-taken-over";
+    let mut fh = failover_harness::FailoverHarness::new(name, &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
+    let (decision, _consults) = CountedDecision::counting(route, DECISION_DELAY);
+    let (proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
+
+    fh.cut_signalling("bob", bob.addr());
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    call.expect(100).await;
+    let (pri_ord, call_ref) = placed(&fh, &w_b1, &w_b2).await;
+    fh.advance(DECISION_DELAY + REPLICATE).await;
+
+    // The primary's host goes silent: nothing it sends reaches anyone, and
+    // its replication stream stays connected, carrying nothing.
+    let bak_ord = if pri_ord == "b1" { "b2" } else { "b1" };
+    let (primary, _) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    let primary_sip = primary.sip_addr();
+    fh.partition(&pri_ord, bak_ord);
+    fh.cut_signalling(&pri_ord, primary_sip);
+    fh.restore_signalling("bob", bob.addr());
+    fh.advance(PROBE_READS_DEAD_AFTER).await;
+
+    fh.mark(&pri_ord, None, "health", "the proxy's probe reads it dead");
+    proxy.set_health(&pri_ord, WorkerHealth::Dead);
+    let verdict_at = fh.now_ms();
+    let mut uas = bob.receive("INVITE").await;
+    let dialled_after = fh.now_ms() - verdict_at;
+    assert!(
+        dialled_after <= (IDLE_BOUND + TAKEOVER_BOUND).as_millis() as i64,
+        "the callee is dialled within the idle bound of the verdict ({dialled_after} ms)",
+    );
+    let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
+    assert_eq!(survivor.metrics().dead_verdicts_unconfirmed_total(), 0, "the verdict confirmed");
+
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
+
+    // The silent host is gone for good: its process ends and its endpoint
+    // leaves the slice, and the backup discharges the call (ADR-0047 D8).
+    let (primary, _) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    primary.crash();
+    let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
+    survivor.simulate_peer_removed(&pri_ord);
+    settle_to_one_cdr(&fh, &[&alice, &bob], &[&w_b1, &w_b2], &call_ref).await;
+    fh.assert_sip_rfc_clean(name);
+    drop(proxy);
+}

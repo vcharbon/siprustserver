@@ -257,7 +257,11 @@ ends the transaction with the CANCEL unsent (§9.1, §17.2.1).
   `B2BUA_REPL_SYNC_CAP_MS` and `B2BUA_REPL_BACKLOG_{HIGH,LOW}_{ENTRIES,AGE_MS}`
   set them; a boot refuses another level, a cap not above zero and below T1
   and the §17.2.1 bound, at either level, or a low mark not under its high
-  one.
+  one. The held ACK of a callee's non-2xx final leaves at the latest at
+  `B2BUA_REPL_ACK_BOUND_MS` (200 ms) past the final: above the cap, so the
+  turn's release beats it while the backup keeps up, and below T1, so it
+  leaves before the callee repeats its final; a boot refuses a bound off that
+  range, naming it and the cap.
 
 A graceful drain is transparent: it exits once the backup has caught up and
 every outbox is empty. A call with no backup has no peer holding it, so while

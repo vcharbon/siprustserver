@@ -218,6 +218,8 @@ pub struct RouterCtx {
     pub(crate) late_pracks: late_prack::LatePrackBook,
     /// The proxies' dead verdicts this node took (ADR-0050 §3).
     pub(crate) dead_verdicts: dead_verdict::VerdictBook,
+    /// How those verdicts are read: their freshness window and hold.
+    pub(crate) verdict_bounds: crate::repl::VerdictBounds,
     /// Every call's ordered outbox, released by the sync level (ADR-0055 §3).
     pub(crate) outboxes: Arc<Outboxes>,
     /// Host-injected generic async-HTTP capability (ADR-0016 seam). `Arc`-shared

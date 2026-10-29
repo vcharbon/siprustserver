@@ -55,8 +55,8 @@ const BAK: PartitionRole = PartitionRole::Backup;
 const PRI: PartitionRole = PartitionRole::Primary;
 
 /// The delay every delay cell applies, in ms — well above the 100 ms pump
-/// chunk, so "landed early" and "landed on time" are chunks apart.
-const DELAY_MS: u64 = 3_000;
+/// chunk, and under the pullers' 2 s idle bound, which keeps the stream.
+const DELAY_MS: u64 = 1_500;
 
 struct Cluster {
     fh: FailoverHarness,
@@ -345,7 +345,7 @@ async fn partition_delivers_nothing_across_the_cut() {
     call.expect(200).await;
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
-    fh.advance(Duration::from_secs(2)).await;
+    fh.advance(Duration::from_millis(1_000)).await; // under the 2 s idle bound
     let live = primary.live_call(&call_ref).expect("the primary serves the call");
     assert_eq!(live.a_leg.state(), LegState::Confirmed, "the primary answered the caller");
 

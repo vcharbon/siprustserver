@@ -13,8 +13,8 @@ fn unset_variables_take_the_stated_defaults() {
     let s = LinkSettings::from_lookup(lookup(&[])).expect("defaults are valid");
     assert_eq!(s.connect_timeout, Duration::from_secs(2));
     assert_eq!(s.backoff_max, Duration::from_secs(2));
-    assert_eq!(s.idle_timeout, Duration::from_secs(15));
-    assert_eq!(s.noop_interval, Duration::from_secs(5));
+    assert_eq!(s.idle_timeout, Duration::from_secs(2));
+    assert_eq!(s.noop_interval, Duration::from_millis(500));
     assert_eq!(s.send_stall, Duration::from_secs(15));
     assert_eq!(s.socket.keepalive_idle, Duration::from_secs(5));
     assert_eq!(s.socket.keepalive_interval, Duration::from_secs(2));

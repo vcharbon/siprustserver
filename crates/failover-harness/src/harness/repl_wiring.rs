@@ -82,6 +82,7 @@ impl ReplWiring {
             serve: ServeConfig::default(),
             replica: self.replica,
             write_path: b2bua::repl::WritePath { sync: self.sync, ..Default::default() },
+            verdict: Default::default(),
         };
         (setup, store, sim_membership)
     }

@@ -82,6 +82,7 @@ fn a_static_peer_list_selects_static_addressing() {
             ]),
             link: LinkSettings::default(),
             write_path: Default::default(),
+            verdict: Default::default(),
         }
     );
     assert_eq!(s.addressing(), ReplAddressing::Static);

@@ -94,8 +94,12 @@ take a new call, and may an in-dialog request of a call it owns reach it.
 
    A departure is no verdict: the ordinal leaves the projection and its
    address is tombstoned. A worker takes a notice only when it verifies and
-   its instant stands within 10 s of the worker's own clock, either way; it
-   refuses and counts any other (`b2bua_dead_notices_refused_total`). A proxy
+   its instant stands within the freshness window of the worker's own clock,
+   either way (`B2BUA_DEAD_NOTICE_FRESH_MS`, 10 s); it refuses and counts any
+   other (`b2bua_dead_notices_refused_total`). A taken verdict is held for
+   `B2BUA_DEAD_VERDICT_HOLD_MS` (42 s), at least the window plus Timer F, the
+   last a repeat of its notice arrives, so a repeat is the same verdict; a
+   boot refuses a shorter hold, naming both variables. A proxy
    with no cluster key tells nothing and a worker with none trusts nothing.
    A worker takes each verdict once, however many copies reach it, and runs
    on it the takeover half of the departure sweep over the calls it backs for

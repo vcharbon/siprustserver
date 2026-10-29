@@ -147,6 +147,7 @@ async fn worker_with_cdr(cdr: impl FnOnce(&B2buaMetrics) -> Arc<dyn CdrWriter>) 
         serve: ServeConfig::default(),
         replica: b2bua::ReplicaConfig::default(),
         write_path: Default::default(),
+        verdict: Default::default(),
     };
     let deps = B2buaDeps {
         identity: OWN_IDENTITY.into(),

@@ -2,13 +2,13 @@
 //! notice.**
 //!
 //! The primary's stream to its backup stops delivering without closing (a
-//! peer gone silent, no reset). The backup's pullers leave it after 15 s with
+//! peer gone silent, no reset). The backup's pullers leave it after 2 s with
 //! nothing received and pull again from their watermark, through the ordinary
 //! backoff; the SIP plane never depends on it.
 //!
 //! ```text
 //!   call 1 answered · primary → backup replication held (no close)
-//!   ≤ 15 s + backoff   the backup re-pulls the primary from its watermark
+//!   ≤ 2 s + backoff    the backup re-pulls the primary from its watermark
 //!   during the hold    call 2 is set up, answered and hung up
 //!   20 s               call 1 hung up
 //!   25 s               the hold is lifted: the backup catches up
@@ -36,11 +36,11 @@ const B1: &str = "127.0.0.1:5091";
 const B2: &str = "127.0.0.1:5092";
 
 /// The puller's idle bound and the fast tier's first backoff step.
-const IDLE_MS: i64 = 15_000;
+const IDLE_MS: i64 = 2_000;
 const BACKOFF_FLOOR_MS: i64 = 100;
 /// The server's `Noop` interval: each stream carried a frame at most this long
 /// before the hold.
-const NOOP_MS: i64 = 5_000;
+const NOOP_MS: i64 = 500;
 
 fn report_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

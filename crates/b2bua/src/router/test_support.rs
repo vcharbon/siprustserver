@@ -118,6 +118,7 @@ pub async fn node_on(
         serve: ServeConfig::default(),
         replica: crate::node::replica::ReplicaConfig::default(),
         write_path: Default::default(),
+        verdict: Default::default(),
     };
     let config = B2buaConfig {
         self_ordinal: ordinal.into(),

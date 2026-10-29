@@ -139,10 +139,8 @@ async fn spawn_reclaimer_core(
     let sip_port = endpoint.local_addr().port();
 
     // Fresh empty store at a higher incarnation gen (the rebooted node).
-    let store = Arc::new(ReplicatingCallStore::with_changelog(
-        Changelog::new(2, clock.clone()),
-        clock.clone(),
-    ));
+    let changelog = Changelog::new(2, clock.clone());
+    let store = Arc::new(ReplicatingCallStore::with_changelog(changelog, clock.clone()));
     let addr_map: HashMap<String, SocketAddr> =
         [(peer_ordinal.to_string(), peer_addr)].into_iter().collect();
     let addr_resolver: crate::repl::AddrResolver =
@@ -162,6 +160,7 @@ async fn spawn_reclaimer_core(
         serve: ServeConfig::default(),
         replica: crate::node::replica::ReplicaConfig::default(),
         write_path: Default::default(),
+        verdict: Default::default(),
     };
     let deps = B2buaDeps {
         config: B2buaConfig {

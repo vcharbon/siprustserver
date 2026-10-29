@@ -13,7 +13,9 @@
 //!   B2BUA_REPL_SERVICE  headless Service whose EndpointSlices name the peers
 //!                       (default b2bua-worker)
 //!   B2BUA_NAMESPACE     namespace of that Service          (default $POD_NAMESPACE, then sip-test)
-//!   B2BUA_REPL_*_MS …   the link bounds ([`link_env`], ADR-0045)
+//!   B2BUA_REPL_*_MS …   the link bounds ([`link_env`], ADR-0045) and the write
+//!                       path's ([`write_path_env`], ADR-0055 §3)
+//!   B2BUA_DEAD_*_MS …   the dead-verdict bounds ([`verdict_env`], ADR-0050 §3)
 //!
 //! A malformed `B2BUA_REPL_LISTEN`, `B2BUA_REPL_PORT`, `B2BUA_PEERS` or link
 //! bound, or a listen address that cannot be bound, refuses the boot. A kube
@@ -50,6 +52,7 @@ use crate::is_truthy;
 
 mod link_env;
 mod repl_resolver;
+mod verdict_env;
 mod write_path_env;
 use link_env::LinkSettings;
 use repl_resolver::ReplResolver;
@@ -87,6 +90,8 @@ pub struct ReplicationSettings {
     pub(crate) link: LinkSettings,
     /// The sync level, its cap and the backlog marks ([`write_path_env`]).
     pub(crate) write_path: b2bua::repl::WritePath,
+    /// The dead-verdict bounds ([`verdict_env`]).
+    pub(crate) verdict: b2bua::repl::VerdictBounds,
 }
 
 impl ReplicationSettings {
@@ -137,7 +142,8 @@ impl ReplicationSettings {
         };
         let link = LinkSettings::from_lookup(&get)?;
         let write_path = write_path_env::write_path(&get)?;
-        Ok(Some(Self { listen, peer_port, membership, link, write_path }))
+        let verdict = verdict_env::verdict_bounds(&get)?;
+        Ok(Some(Self { listen, peer_port, membership, link, write_path, verdict }))
     }
 
     /// How the membership these settings select is addressed.
@@ -189,6 +195,7 @@ impl ReplicationSettings {
             serve: self.link.serve(),
             replica: b2bua::ReplicaConfig::default(),
             write_path: self.write_path,
+            verdict: self.verdict,
         })
     }
 }

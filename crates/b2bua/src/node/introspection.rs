@@ -7,6 +7,21 @@ use std::sync::Arc;
 use super::B2buaCore;
 
 impl B2buaCore {
+    /// Sample the store + replication map sizes into the memory-attribution
+    /// gauges (`b2bua_store_*`, `b2bua_repl_meta_*`, `b2bua_repl_changelog_*`).
+    /// Called on a slow cadence by the runner so a RSS climb can be pinned to a
+    /// specific map even when `active_calls` is flat. Cheap: a couple of brief
+    /// locks, off the hot path.
+    pub fn sample_gauges(&self) {
+        self.ctx.state.sample_store_gauges();
+        if let Some(repl) = &self.repl_store {
+            let (meta_total, meta_backup) = repl.meta_counts();
+            let (entries, peers) = repl.changelog().depth();
+            let unbacked = repl.unbacked_count() as u64;
+            self.metrics.set_repl_store_gauges(meta_total, meta_backup, unbacked, entries, peers);
+        }
+    }
+
     /// Active call count (test/observability).
     pub fn active_calls(&self) -> usize {
         self.ctx.state.active_count()

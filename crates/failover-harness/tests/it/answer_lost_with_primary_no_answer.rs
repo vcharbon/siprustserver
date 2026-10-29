@@ -595,8 +595,9 @@ async fn an_answer_the_reclaimed_copy_saw_the_ack_of_first_draws_no_second_final
     let new_addr = reboot_and_reclaim(&mut fh, b1, b2, &primary_ord, &proxy, false).await;
     assert!(b1.serves(&call_ref), "the rebooted primary reclaimed the ringing call");
 
-    // ── the survivor's flushes toward the primary now take 3 s to land ──────
-    fh.delay(&bak_ord, &primary_ord, 3_000);
+    // ── the survivor's flushes toward the primary now take 1.5 s to land,
+    //    under the pullers' 2 s idle bound so the lagging stream is kept ─────
+    fh.delay(&bak_ord, &primary_ord, 1_500);
 
     // ── the callee answers: the proxy still routes to the survivor, whose
     //    takeover copy answers alice ────────────────────────────────────────────

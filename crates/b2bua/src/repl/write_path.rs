@@ -1,7 +1,8 @@
 //! The write path's settings (ADR-0055 §3): the replication sync level, how
-//! long an outbox entry waits for its backup at most, and the backlog marks
-//! past which new calls get no backup. The cap and the marks derive from the
-//! SIP timers.
+//! long an outbox entry waits for its backup at most, how long the
+//! transaction layer holds the ACK of a callee's non-2xx final for the turn
+//! that releases it, and the backlog marks past which new calls get no
+//! backup. The cap, the ACK bound and the marks derive from the SIP timers.
 
 use std::time::Duration;
 
@@ -45,6 +46,12 @@ pub struct WritePath {
     /// so a released 100 leaves before the transaction layer's own. Checked
     /// at both levels, so a level change never makes a refused setting valid.
     pub sync_cap: Duration,
+    /// The longest the transaction layer holds the hop-by-hop ACK of a
+    /// callee's first non-2xx final for the turn that took it to release
+    /// through the outbox, then sends it itself. Above the cap, so the turn's
+    /// release beats it whenever the backup applies the write in time, and
+    /// below T1, so the ACK leaves before the callee repeats its final.
+    pub ack_bound: Duration,
     /// When the backlog toward a backup gives new calls no backup.
     pub backlog: BacklogMarks,
 }
@@ -56,6 +63,7 @@ impl Default for WritePath {
         Self {
             sync: SyncLevel::default(),
             sync_cap: Duration::from_millis(TRYING_BOUND / 2),
+            ack_bound: Duration::from_millis(TRYING_BOUND),
             backlog: BacklogMarks::default(),
         }
     }
@@ -63,7 +71,8 @@ impl Default for WritePath {
 
 impl WritePath {
     /// `Err` naming the setting out of range: a cap not above zero, not below
-    /// T1 or not below the §17.2.1 bound, or backlog marks out of order.
+    /// T1 or not below the §17.2.1 bound, an ACK bound not above the cap or
+    /// not below T1, or backlog marks out of order.
     pub fn validate(&self) -> Result<(), String> {
         let cap = self.sync_cap;
         let below = Duration::from_millis(T1.min(TRYING_BOUND));
@@ -71,6 +80,14 @@ impl WritePath {
             return Err(format!(
                 "replication sync cap {cap:?} is not above zero and below T1 and the \
                  RFC 3261 §17.2.1 bound ({below:?})"
+            ));
+        }
+        let t1 = Duration::from_millis(T1);
+        if self.ack_bound <= cap || self.ack_bound >= t1 {
+            return Err(format!(
+                "ACK bound {:?} is not above the replication sync cap {cap:?} and below T1 \
+                 ({t1:?})",
+                self.ack_bound
             ));
         }
         self.backlog.validate()
@@ -86,6 +103,18 @@ mod tests {
         assert_eq!(WritePath::default().validate(), Ok(()));
         assert_eq!(WritePath::default().sync, SyncLevel::Applied);
         assert_eq!(WritePath::default().sync_cap, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn the_ack_bound_sits_above_the_cap_and_below_t1() {
+        assert_eq!(WritePath::default().ack_bound, Duration::from_millis(200));
+        for ms in [100, 50, 500, 900] {
+            let path = WritePath { ack_bound: Duration::from_millis(ms), ..WritePath::default() };
+            let err = path.validate().expect_err("an ACK bound off its range is refused");
+            assert!(err.contains("ACK bound") && err.contains("sync cap"), "{err}");
+        }
+        let path = WritePath { ack_bound: Duration::from_millis(499), ..WritePath::default() };
+        assert_eq!(path.validate(), Ok(()));
     }
 
     #[test]

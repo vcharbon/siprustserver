@@ -130,12 +130,12 @@ async fn a_claim_no_noop_answer_refreshed_goes_stale() {
     let _guard = cl.serving("A", Partition::Bak);
     cl.bump_put("A", "call-1", Partition::Bak);
     cl.note_applied("A", None, Partition::Bak, Watermark::new(7, 1));
-    tokio::time::advance(Duration::from_secs(9)).await;
+    tokio::time::advance(Duration::from_millis(900)).await;
     assert!(cl.flow_caught_up("A", Partition::Bak), "fresh inside two intervals");
     cl.note_applied("A", None, Partition::Bak, Watermark::new(7, 1));
-    tokio::time::advance(Duration::from_secs(9)).await;
+    tokio::time::advance(Duration::from_millis(900)).await;
     assert!(cl.flow_caught_up("A", Partition::Bak), "the same position, re-stated");
-    tokio::time::advance(Duration::from_secs(2)).await;
+    tokio::time::advance(Duration::from_millis(200)).await;
     assert!(!cl.flow_caught_up("A", Partition::Bak), "past two intervals: unknown");
 }
 

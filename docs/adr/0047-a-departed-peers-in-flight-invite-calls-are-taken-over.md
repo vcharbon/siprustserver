@@ -345,9 +345,11 @@ the call has one CDR.
   reason, a partition between the two workers too, takes over the calls with work in
   flight while the primary serves them, so the callee may get the dialled INVITE twice
   and an outside service the request twice.
-- **A peer that goes silent with its streams open** is confirmed only at the pullers'
-  idle bound (ADR-0045), past the proxy's verdict: its calls with work in flight are
-  taken over that much later.
+- **A peer that goes silent with its streams open** is confirmed at the pullers'
+  idle bound (2 s after its last frame, `B2BUA_REPL_IDLE_TIMEOUT_MS`; ADR-0045), so
+  about 2 s after the proxy's verdict at most: its calls with work in flight are taken
+  over then (`read_dead_primary_taken_over.rs`, the silent-host cell). A live peer
+  whose stream stalls longer than that bound is pulled again from its watermark.
 - **The creation write lands one stream hop after the 100.** A death inside that
   hop leaves no replica (`new_call_replication_window.rs` measures it).
 - **A route applied before its write replicated.** A node that dies after dialling

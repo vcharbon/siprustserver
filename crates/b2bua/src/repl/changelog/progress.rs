@@ -21,7 +21,7 @@ use super::Changelog;
 
 /// How long a claim vouches for its flow unless the server says otherwise:
 /// twice the server's default idle `Noop` interval.
-pub const DEFAULT_CLAIM_TTL: Duration = Duration::from_secs(10);
+pub const DEFAULT_CLAIM_TTL: Duration = Duration::from_secs(1);
 
 /// How a wait for a peer's applied position ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

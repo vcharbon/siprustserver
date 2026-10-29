@@ -3,6 +3,8 @@
 **Status:** accepted (2026-10-11)
 Amended (2026-10-23): the hold of the ACK and the first provisional reads the applied
 position (ADR-0055 §3).
+Amended (2026-10-29): the `Noop` is a 500 ms heartbeat and the idle bound 2 s, so the
+stream confirms a dead verdict on a silent peer within 2 s (ADR-0047 D1) (user ruling).
 
 **Owner:** `crates/b2bua/src/repl/puller.rs` (connect, idle and send bounds,
 the backoff), `repl/server.rs` (the `Noop` interval, the blocked-send bound,
@@ -36,8 +38,9 @@ life of the process, silently.
    one connect bound, so the low ceiling is cheap, and it bounds how long a
    healed link waits for its next reconnect.
 2. **Idle bound.** The server sends a `Noop` at least every `noop_interval`
-   (5 s) on a caught-up stream. A puller that receives nothing for
-   `idle_timeout_ms` (15 s) leaves the stream and pulls again from its
+   (500 ms, the heartbeat) on a caught-up stream, every stream alike. A
+   puller that receives nothing for `idle_timeout_ms` (2 s) leaves the stream
+   and pulls again from its
    retained watermark through the ordinary backoff. A stream that stayed
    connected for the idle bound resets the backoff to its floor; a shorter
    one does not, so a peer that closes every stream at once is redialled with
@@ -93,8 +96,8 @@ interval after.
 |---|---|---|
 | `B2BUA_REPL_CONNECT_TIMEOUT_MS` | one connect to a peer | 2000 |
 | `B2BUA_REPL_BACKOFF_MAX_MS` | the reconnect backoff's ceiling (its floor is 100 ms) | 2000 |
-| `B2BUA_REPL_IDLE_TIMEOUT_MS` | a stream delivering nothing is left | 15000 |
-| `B2BUA_REPL_NOOP_INTERVAL_MS` | the longest a served stream goes without a `Noop` | 5000 |
+| `B2BUA_REPL_IDLE_TIMEOUT_MS` | a stream delivering nothing is left; a dead verdict on a silent peer is confirmed this long after its last frame (ADR-0047 D1); at least twice the `Noop` interval, far below a pod's force-delete | 2000 |
+| `B2BUA_REPL_NOOP_INTERVAL_MS` | the longest a served stream goes without a `Noop`, on every stream, each flow alike: the heartbeat; a position claim vouches for twice it | 500 |
 | `B2BUA_REPL_SEND_STALL_MS` | a send blocked this long leaves the stream, either end | 15000 |
 | `B2BUA_REPL_KEEPALIVE_IDLE_MS` / `_INTERVAL_MS` / `_RETRIES` | TCP keepalive | 5000 / 2000 / 3 |
 | `B2BUA_REPL_USER_TIMEOUT_MS` | `TCP_USER_TIMEOUT` | 15000 |

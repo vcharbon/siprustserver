@@ -57,6 +57,8 @@ pub struct ReplicationSetup {
     pub replica: super::replica::ReplicaConfig,
     /// The sync level, its cap and the backlog marks (ADR-0055 §3).
     pub write_path: crate::repl::WritePath,
+    /// How a proxy's dead verdicts are read (ADR-0050 §3).
+    pub verdict: crate::repl::VerdictBounds,
 }
 
 /// Wiring inputs for [`B2buaCore::spawn`](super::B2buaCore::spawn).

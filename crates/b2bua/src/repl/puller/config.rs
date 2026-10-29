@@ -12,9 +12,10 @@ const DEFAULT_BACKOFF_MAX_MS: u64 = 2_000;
 const DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS: u64 = 10_000;
 /// Default bound on one connect (ms).
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 2_000;
-/// Default bound on a stream delivering nothing (ms), above the server's
-/// `Noop` interval.
-const DEFAULT_IDLE_TIMEOUT_MS: u64 = 15_000;
+/// Default bound on a stream delivering nothing (ms): four of the server's
+/// default `Noop` intervals (500 ms), so a peer that went silent is read down
+/// about 2 s after its last frame.
+const DEFAULT_IDLE_TIMEOUT_MS: u64 = 2_000;
 /// Default bound on one blocked send (ms).
 const DEFAULT_SEND_STALL_MS: u64 = 15_000;
 
