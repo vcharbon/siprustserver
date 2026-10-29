@@ -70,7 +70,9 @@ mod registry;
 mod retransmit;
 mod routing;
 mod rtt;
+mod sniffed;
 mod stats;
+mod tally;
 mod taps;
 
 pub use correlation::Correlation;
@@ -84,6 +86,7 @@ pub use rtt::{Exchange, RttSink};
 pub use scenario_harness::claim::ClaimRule;
 pub use stats::MuxStats;
 pub(crate) use stats::OrphanReason;
+pub use tally::{ArrowKey, ArrowStat, CallMessages, CallTally, SUT_LANE};
 pub use taps::{Dir, Side, WireTap};
 
 use late_final::SentInvites;
@@ -478,6 +481,7 @@ impl MuxCore {
             drop_seed: AtomicU64::new(seed | 1),
             drop_nth,
             rtt_sink: None,
+            tally: None,
             wire_tap: None,
             engines: Mutex::new(Vec::new()),
         }

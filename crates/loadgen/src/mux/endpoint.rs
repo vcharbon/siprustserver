@@ -26,6 +26,7 @@ use super::loss::{DropDir, DropModel, TargetedDrop};
 use super::retransmit::CallTxns;
 use super::routing::BindDecl;
 use super::rtt::RttSink;
+use super::tally::CallTally;
 use super::taps::{Taps, WireTap};
 use super::{
     CallGate, CallSlot, Delivery, Key, MuxCore, MuxSocket, ReceiverEntry, Role, RELEASE_HOLD,
@@ -57,6 +58,8 @@ pub struct MuxNetwork {
     /// Where each bound endpoint's measured SIP round trips go; `None` = not
     /// measured.
     pub(super) rtt_sink: Option<RttSink>,
+    /// The call's message tally; `None` = not tallied.
+    pub(super) tally: Option<Arc<CallTally>>,
     /// The call's wire tap; `None` = not watched.
     pub(super) wire_tap: Option<WireTap>,
     /// The retransmit engine of every endpoint bound on this network.
@@ -68,6 +71,13 @@ impl MuxNetwork {
     /// into `sink`.
     pub fn with_rtt_sink(mut self, sink: RttSink) -> Self {
         self.rtt_sink = Some(sink);
+        self
+    }
+
+    /// Tally every datagram this network's endpoints send, re-send or have
+    /// delivered into `tally`.
+    pub fn with_tally(mut self, tally: Arc<CallTally>) -> Self {
+        self.tally = Some(tally);
         self
     }
 
@@ -156,14 +166,19 @@ impl SignalingNetwork for MuxNetwork {
             Some(leg) => uas.as_ref().map(|(l, _)| l.as_str()) == Some(leg),
         });
         let drop = Arc::new(DropModel::new(self.drop_rate, self.next_drop_seed(), drop_nth));
+        let leg = uas.as_ref().map(|(label, _)| label.as_str());
+        let taps = Taps::new(self.rtt_sink.clone(), self.tally.clone(), self.wire_tap.clone(), leg);
         let txns = self.retransmit.then(|| {
-            Arc::new(CallTxns::new(mux.endpoint.clone(), drop.clone(), mux.stats.clone()))
+            Arc::new(CallTxns::new(
+                mux.endpoint.clone(),
+                drop.clone(),
+                mux.stats.clone(),
+                taps.clone(),
+            ))
         });
         if let Some(txns) = &txns {
             self.engines.lock().unwrap().push(txns.clone());
         }
-        let leg = uas.as_ref().map(|(label, _)| label.as_str());
-        let taps = Taps::new(self.rtt_sink.clone(), self.wire_tap.clone(), leg);
 
         if let Some((label, claim)) = uas {
             let claim_mode = claim.is_some();

@@ -20,8 +20,10 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+mod ladder;
 mod progress;
 mod sampling;
+pub use ladder::{ClassCount, Ladder, LadderArrow};
 pub use progress::{FailureRow, Progress, RateEvent, RateEventKind, SeriesPoint};
 pub use sampling::{JudgedBasis, JudgedShare, Sampling, ScenarioRecording};
 
@@ -50,6 +52,9 @@ pub struct LoadRunIndex {
     /// Per scenario: the calls placed, recorded and judged on their recording.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recording: Vec<ScenarioRecording>,
+    /// Per scenario, the message ladder of its calls.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ladders: Vec<Ladder>,
     /// Per-`(scenario, class, case)` completed-call counts (the report's main
     /// table). A row's `ok` marks its class as no failure (`ok`: the call ended
     /// on an accepted branch).
@@ -287,6 +292,8 @@ mod tests {
                 ok: 98,
                 failed: 2,
                 rejected: 0,
+                retransmissions_received: 4,
+                retransmissions_resent: 1,
                 p50_ms: 10.0,
                 p99_ms: 40.0,
             }],
@@ -303,6 +310,26 @@ mod tests {
                 class: "timeout".into(),
                 case: "bob@connected".into(),
                 page: None,
+            }],
+            ladders: vec![Ladder {
+                scenario: "reinvite".into(),
+                calls: 5,
+                engine: true,
+                lanes: vec!["alice".into(), "SUT".into()],
+                arrows: vec![LadderArrow {
+                    from: "SUT".into(),
+                    to: "alice".into(),
+                    label: "180 (INVITE)".into(),
+                    nth: 1,
+                    count: 5,
+                    retransmissions: 1,
+                    resent: 0,
+                    mean_offset_ms: 20.0,
+                    errors: vec![ClassCount { class: "timeout".into(), count: 2 }],
+                }],
+                other: None,
+                after_call: vec![ClassCount { class: "check_fail".into(), count: 3 }],
+                before_reply: vec![],
             }],
             recording: vec![ScenarioRecording {
                 scenario: "reinvite".into(),

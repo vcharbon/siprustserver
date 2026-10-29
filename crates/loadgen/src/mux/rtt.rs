@@ -17,8 +17,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sip_message::method::Method;
-use sip_message::sniff::{call_id, cseq_method_token, cseq_number, req_method, resp_status};
 use tokio::time::Instant;
+
+use super::sniffed::Sniffed;
 
 /// One measured exchange: the bounded `exchange` label of
 /// `loadgen_rtt_seconds`.
@@ -175,19 +176,19 @@ impl RttTracker {
 
     /// A datagram this endpoint sends at `now`: a request (not an ACK) or a
     /// 2xx to an INVITE opens its exchange, unless it is already open.
-    pub(super) fn on_outbound(&self, raw: &[u8], now: Instant) {
-        let Some(cid) = call_id(raw) else { return };
-        let Some(cseq) = cseq_number(raw) else { return };
+    pub(super) fn on_outbound(&self, sniffed: &Sniffed, now: Instant) {
+        let Some(cid) = sniffed.call_id.clone() else { return };
+        let Some(cseq) = sniffed.cseq else { return };
         let mut g = self.state.lock().unwrap();
-        match resp_status(raw) {
+        match sniffed.status {
             Some(status) => {
-                let invite = cseq_method_token(raw).is_some_and(|m| m == "INVITE");
+                let invite = sniffed.cseq_method.as_deref() == Some("INVITE");
                 if invite && (200..300).contains(&status) && g.answers.len() < MAX_PENDING {
                     g.answers.entry((cid, cseq)).or_insert(now);
                 }
             }
             None => {
-                let Some(method) = req_method(raw).map(Method::from) else { return };
+                let Some(method) = sniffed.method.clone().map(Method::from) else { return };
                 if method == Method::Ack || g.requests.len() >= MAX_PENDING {
                     return;
                 }
@@ -202,17 +203,19 @@ impl RttTracker {
 
     /// A datagram delivered to this endpoint at `now`: a response to one of
     /// its open requests, or the ACK of one of its open 2xx.
-    pub(super) fn on_inbound(&self, raw: &[u8], now: Instant) {
-        let Some(cid) = call_id(raw) else { return };
-        let Some(cseq) = cseq_number(raw) else { return };
+    pub(super) fn on_inbound(&self, sniffed: &Sniffed, now: Instant) {
+        let Some(cid) = sniffed.call_id.clone() else { return };
+        let Some(cseq) = sniffed.cseq else { return };
         let done = {
             let mut g = self.state.lock().unwrap();
-            match resp_status(raw) {
+            match sniffed.status {
                 Some(status) => {
-                    let Some(method) = cseq_method_token(raw).map(Method::from) else { return };
+                    let Some(method) = sniffed.cseq_method.clone().map(Method::from) else {
+                        return;
+                    };
                     response_rtt(&mut g, (cid, cseq, method), status, now)
                 }
-                None => match req_method(raw).map(Method::from) {
+                None => match sniffed.method.clone().map(Method::from) {
                     Some(Method::Ack) => g
                         .answers
                         .remove(&(cid, cseq))
@@ -271,20 +274,22 @@ mod tests {
         (RttTracker::new(Arc::new(move |e, d| sink.lock().unwrap().push((e, d)))), seen)
     }
 
-    fn req(method: &str, cseq: u32, cid: &str) -> Vec<u8> {
-        format!(
+    fn req(method: &str, cseq: u32, cid: &str) -> Sniffed {
+        Sniffed::of(&format!(
             "{method} sip:bob@192.0.2.2 SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK{cseq}\r\n\
              Call-ID: {cid}\r\nCSeq: {cseq} {method}\r\nContent-Length: 0\r\n\r\n"
         )
-        .into_bytes()
+        .into_bytes())
     }
 
-    fn resp(status: u16, method: &str, cseq: u32, cid: &str) -> Vec<u8> {
-        format!(
-            "SIP/2.0 {status} Reason\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK{cseq}\r\n\
+    fn resp(status: u16, method: &str, cseq: u32, cid: &str) -> Sniffed {
+        Sniffed::of(
+            &format!(
+                "SIP/2.0 {status} Reason\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK{cseq}\r\n\
              Call-ID: {cid}\r\nCSeq: {cseq} {method}\r\nContent-Length: 0\r\n\r\n"
+            )
+            .into_bytes(),
         )
-        .into_bytes()
     }
 
     fn ms(n: u64) -> Duration {

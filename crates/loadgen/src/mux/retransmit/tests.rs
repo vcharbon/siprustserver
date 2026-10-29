@@ -18,6 +18,7 @@ async fn txn_rig() -> (Arc<CallTxns>, TokioUdp, SocketAddr) {
         endpoint,
         Arc::new(DropModel::new(0.0, 1, None)),
         Arc::new(MuxStats::new(4)),
+        None,
     ));
     (txns, peer, peer_addr)
 }

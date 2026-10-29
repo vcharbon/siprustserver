@@ -359,7 +359,8 @@ fn fixture_load_result() -> serde_json::Value {
         "progress": {
             "elapsedMs": 60_000, "offeringMs": 60_000, "targetCps": 20.0, "draining": false, "offered": 1185,
             "placed": 1181, "inFlight": 0, "ok": 1180, "failed": 1, "rejected": 0,
-            "generatorFailures": 0
+            "generatorFailures": 0,
+            "retransmissionsReceived": 0, "retransmissionsResent": 0, "retransmitEngine": false
         },
         "counts": [
             { "scenario": "basic_call", "class": "ok", "case": "", "count": 1180, "ok": true },

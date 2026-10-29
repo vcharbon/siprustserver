@@ -45,7 +45,10 @@ export const Progress = Schema.Struct({
   ok: Schema.Int,
   failed: Schema.Int,
   rejected: Schema.Int,
-  generatorFailures: Schema.Int
+  generatorFailures: Schema.Int,
+  retransmissionsReceived: Schema.Int,
+  retransmissionsResent: Schema.Int,
+  retransmitEngine: Schema.Boolean
 })
 export interface Progress extends Schema.Schema.Type<typeof Progress> {}
 
@@ -60,7 +63,10 @@ const NO_PROGRESS = {
   ok: 0,
   failed: 0,
   rejected: 0,
-  generatorFailures: 0
+  generatorFailures: 0,
+  retransmissionsReceived: 0,
+  retransmissionsResent: 0,
+  retransmitEngine: false
 }
 
 /** One window of the run's time series (milliseconds since the run started). */
@@ -71,6 +77,8 @@ export const SeriesPoint = Schema.Struct({
   ok: Schema.Int,
   failed: Schema.Int,
   rejected: Schema.Int,
+  retransmissionsReceived: Schema.Int,
+  retransmissionsResent: Schema.Int,
   p50Ms: Schema.Number,
   p99Ms: Schema.Number
 })
@@ -94,6 +102,37 @@ export const FailureRow = Schema.Struct({
   page: Schema.optionalKey(Schema.String)
 })
 export interface FailureRow extends Schema.Schema.Type<typeof FailureRow> {}
+
+/** A result class and how many calls ended in it. */
+export const ClassCount = Schema.Struct({ class: Schema.String, count: Schema.Int })
+export interface ClassCount extends Schema.Schema.Type<typeof ClassCount> {}
+
+/** One arrow of a message ladder, merged over the calls. */
+export const LadderArrow = Schema.Struct({
+  from: Schema.String,
+  to: Schema.String,
+  label: Schema.String,
+  nth: Schema.Int,
+  count: Schema.Int,
+  retransmissions: Schema.Int,
+  resent: Schema.Int,
+  meanOffsetMs: Schema.Number,
+  errors: Schema.optionalKey(Schema.Array(ClassCount))
+})
+export interface LadderArrow extends Schema.Schema.Type<typeof LadderArrow> {}
+
+/** One scenario's message ladder. */
+export const Ladder = Schema.Struct({
+  scenario: Schema.String,
+  calls: Schema.Int,
+  engine: Schema.Boolean,
+  lanes: Schema.Array(Schema.String),
+  arrows: Schema.Array(LadderArrow),
+  other: Schema.optionalKey(LadderArrow),
+  afterCall: Schema.optionalKey(Schema.Array(ClassCount)),
+  beforeReply: Schema.optionalKey(Schema.Array(ClassCount))
+})
+export interface Ladder extends Schema.Schema.Type<typeof Ladder> {}
 
 /** Per scenario: the calls placed, recorded and judged on their recording. */
 export const ScenarioRecording = Schema.Struct({
@@ -231,6 +270,7 @@ export const LoadRunIndex = Schema.Struct({
   rateEventsDropped: Schema.optionalKey(Schema.Int),
   recentFailures: Schema.optionalKey(Schema.Array(FailureRow)),
   recording: Schema.optionalKey(Schema.Array(ScenarioRecording)),
+  ladders: Schema.optionalKey(Schema.Array(Ladder)),
   counts: Schema.Array(CountRow),
   latency: Schema.Array(LatencyRow),
   checkpoints: Schema.optionalKey(Schema.Array(CheckpointRow)),
@@ -255,6 +295,21 @@ export const failedCalls = (index: LoadRunIndex): number =>
 
 const pruned = (value: Record<string, unknown>): Record<string, unknown> =>
   Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined))
+
+const classCountJson = (c: ClassCount) => ({ class: c.class, count: c.count })
+
+const arrowJson = (a: LadderArrow): Record<string, unknown> =>
+  pruned({
+    from: a.from,
+    to: a.to,
+    label: a.label,
+    nth: a.nth,
+    count: a.count,
+    retransmissions: a.retransmissions,
+    resent: a.resent,
+    meanOffsetMs: a.meanOffsetMs,
+    errors: a.errors?.map(classCountJson)
+  })
 
 export const loadRunIndexJson = (index: LoadRunIndex): Record<string, unknown> =>
   pruned({
@@ -286,7 +341,10 @@ export const loadRunIndexJson = (index: LoadRunIndex): Record<string, unknown> =
       ok: index.progress.ok,
       failed: index.progress.failed,
       rejected: index.progress.rejected,
-      generatorFailures: index.progress.generatorFailures
+      generatorFailures: index.progress.generatorFailures,
+      retransmissionsReceived: index.progress.retransmissionsReceived,
+      retransmissionsResent: index.progress.retransmissionsResent,
+      retransmitEngine: index.progress.retransmitEngine
     },
     series: index.series?.map((p) => ({
       startMs: p.startMs,
@@ -295,6 +353,8 @@ export const loadRunIndexJson = (index: LoadRunIndex): Record<string, unknown> =
       ok: p.ok,
       failed: p.failed,
       rejected: p.rejected,
+      retransmissionsReceived: p.retransmissionsReceived,
+      retransmissionsResent: p.retransmissionsResent,
       p50Ms: p.p50Ms,
       p99Ms: p.p99Ms
     })),
@@ -310,6 +370,18 @@ export const loadRunIndexJson = (index: LoadRunIndex): Record<string, unknown> =
       accepted: r.accepted,
       audited: r.audited
     })),
+    ladders: index.ladders?.map((l) =>
+      pruned({
+        scenario: l.scenario,
+        calls: l.calls,
+        engine: l.engine,
+        lanes: l.lanes,
+        arrows: l.arrows.map(arrowJson),
+        other: l.other && arrowJson(l.other),
+        afterCall: l.afterCall?.map(classCountJson),
+        beforeReply: l.beforeReply?.map(classCountJson)
+      })
+    ),
     counts: index.counts.map((row) =>
       pruned({
         scenario: row.scenario,

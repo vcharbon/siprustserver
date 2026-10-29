@@ -33,6 +33,12 @@ pub struct Progress {
     pub rejected: u64,
     /// Calls the generator itself failed: a run with one is invalid.
     pub generator_failures: u64,
+    /// Datagram copies received after the first, over every call.
+    pub retransmissions_received: u64,
+    /// Datagram copies sent after the first, over every call.
+    pub retransmissions_resent: u64,
+    /// Some call ran the retransmit engine (re-sends are counted only then).
+    pub retransmit_engine: bool,
 }
 
 impl Progress {
@@ -64,6 +70,10 @@ pub struct SeriesPoint {
     pub failed: u64,
     /// Calls refused before any datagram or shed at the cap in the window.
     pub rejected: u64,
+    /// Retransmissions received by the calls ended in the window.
+    pub retransmissions_received: u64,
+    /// Re-sends by the calls ended in the window.
+    pub retransmissions_resent: u64,
     /// End-to-end latency median of the calls ended in the window (`0` when
     /// none, see [`Self::has_latency`]).
     pub p50_ms: f64,
@@ -87,6 +97,14 @@ impl SeriesPoint {
     /// Whether `at_ms` falls in the window.
     pub fn holds(&self, at_ms: u64) -> bool {
         (self.start_ms..self.end_ms()).contains(&at_ms)
+    }
+
+    /// Retransmissions received and re-sent per call that ran and ended in the
+    /// window; `None` when none ended.
+    pub fn retransmissions_per_call(&self) -> Option<f64> {
+        let ended = self.ok + self.failed;
+        let retr = self.retransmissions_received + self.retransmissions_resent;
+        (ended > 0).then(|| retr as f64 / ended as f64)
     }
 
     /// Whether the window holds a call's end-to-end latency: some call that

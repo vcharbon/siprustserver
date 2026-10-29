@@ -536,9 +536,10 @@ fn the_index_shows_the_audited_share_of_an_audit_failure() {
     let ok = CallOutcome::Ok { branch: "answered" };
     let failed = rfc_fail("rule", "detail");
     let case = failed.case(None);
-    let audited = || CallEvidence { recorded: true, accepted: true, sample: None };
-    let unrecorded = || CallEvidence { recorded: false, accepted: true, sample: None };
-    let unjudged = CallEvidence { recorded: true, accepted: false, sample: None };
+    let audited = || CallEvidence { recorded: true, accepted: true, sample: None, messages: None };
+    let unrecorded =
+        || CallEvidence { recorded: false, accepted: true, sample: None, messages: None };
+    let unjudged = CallEvidence { recorded: true, accepted: false, sample: None, messages: None };
     for _ in 0..2 {
         r.record("s", &ok, "", Duration::ZERO, &[], audited());
     }

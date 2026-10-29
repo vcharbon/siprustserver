@@ -5,7 +5,8 @@
 //!
 //! The page, in order: the command line and target, the headline figures
 //! (with the rate and drain controls on a live page), the time series, the
-//! last failures, the results by scenario × class × case, the latency,
+//! last failures, the results by scenario × class × case, the message
+//! ladders, the latency,
 //! checkpoint, round-trip and check tables, the rate events and the run's
 //! settings. Plain HTML and inline SVG: no script.
 
@@ -13,6 +14,7 @@ use e2e_model::LoadRunIndex;
 
 mod headline;
 mod html;
+mod ladder;
 mod results;
 mod series;
 mod status;
@@ -72,6 +74,7 @@ pub fn render_body(idx: &LoadRunIndex, opts: &RenderOpts) -> String {
     series::series(&mut out, idx);
     results::failures(&mut out, idx, &opts.sample_prefix);
     results::results(&mut out, idx, &opts.sample_prefix);
+    ladder::ladders(&mut out, idx);
     tables::latency(&mut out, idx);
     tables::checkpoints(&mut out, idx);
     tables::rtt(&mut out, idx);

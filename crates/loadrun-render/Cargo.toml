@@ -14,3 +14,5 @@ workspace = true
 
 [dependencies]
 e2e-model = { path = "../e2e-model" }
+# The message ladders are drawn through the shared sequence-diagram renderer.
+seq-report = { path = "../seq-report" }

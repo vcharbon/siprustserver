@@ -29,6 +29,13 @@
         "$ref": "#/$defs/CountRow"
       }
     },
+    "ladders": {
+      "description": "Per scenario, the message ladder of its calls.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Ladder"
+      }
+    },
     "latency": {
       "description": "Per-scenario end-to-end latency summary (ms).",
       "type": "array",
@@ -54,6 +61,9 @@
         "ok": 0,
         "placed": 0,
         "rejected": 0,
+        "retransmissionsReceived": 0,
+        "retransmissionsResent": 0,
+        "retransmitEngine": false,
         "targetCps": 0.0
       }
     },
@@ -233,6 +243,24 @@
         "p99Ms"
       ]
     },
+    "ClassCount": {
+      "description": "A result class and how many calls ended in it.",
+      "type": "object",
+      "properties": {
+        "class": {
+          "type": "string"
+        },
+        "count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "class",
+        "count"
+      ]
+    },
     "CountRow": {
       "description": "One `(scenario, class, case)` completed-call count.",
       "type": "object",
@@ -365,6 +393,133 @@
         "judged",
         "base",
         "basis"
+      ]
+    },
+    "Ladder": {
+      "description": "One scenario's ladder.",
+      "type": "object",
+      "properties": {
+        "afterCall": {
+          "description": "Failures judged after the call, on no arrow (`rfc_audit_fail`,\n`check_fail`).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClassCount"
+          }
+        },
+        "arrows": {
+          "description": "The arrows, by mean offset from call start (bounded).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LadderArrow"
+          }
+        },
+        "beforeReply": {
+          "description": "Failures decided before any message came in.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClassCount"
+          }
+        },
+        "calls": {
+          "description": "Calls folded in.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "engine": {
+          "description": "Some call of the scenario ran the retransmit engine (re-sends are\ncounted only then).",
+          "type": "boolean"
+        },
+        "lanes": {
+          "description": "The lanes, in display order: the caller, the SUT, the callee roles.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "other": {
+          "description": "Every arrow past the bound, merged (`from`, `to` and `label` empty).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LadderArrow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scenario": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "scenario",
+        "calls",
+        "engine",
+        "lanes",
+        "arrows"
+      ]
+    },
+    "LadderArrow": {
+      "description": "One arrow of a ladder, merged over the calls.",
+      "type": "object",
+      "properties": {
+        "count": {
+          "description": "Calls that carried it.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "errors": {
+          "description": "Failed calls whose failure was detected here: the last message in\nbefore the outcome.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClassCount"
+          }
+        },
+        "from": {
+          "type": "string"
+        },
+        "label": {
+          "description": "`INVITE`, or the status and its CSeq method: `180 (INVITE)`.",
+          "type": "string"
+        },
+        "meanOffsetMs": {
+          "description": "Mean offset of its first copy from call start (ms).",
+          "type": "number",
+          "format": "double"
+        },
+        "nth": {
+          "description": "Which distinct occurrence of `(from, to, label)` in its call (from 1).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "resent": {
+          "description": "Copies sent after the first.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "retransmissions": {
+          "description": "Copies received after the first.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "label",
+        "nth",
+        "count",
+        "retransmissions",
+        "resent",
+        "meanOffsetMs"
       ]
     },
     "LatencyRow": {
@@ -554,6 +709,22 @@
           "format": "uint64",
           "minimum": 0
         },
+        "retransmissionsReceived": {
+          "description": "Datagram copies received after the first, over every call.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "retransmissionsResent": {
+          "description": "Datagram copies sent after the first, over every call.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "retransmitEngine": {
+          "description": "Some call ran the retransmit engine (re-sends are counted only then).",
+          "type": "boolean"
+        },
         "targetCps": {
           "description": "The offered-rate target (calls/s) as of the doc: the configured rate\nuntil a rate change moves it, `0` while paused.",
           "type": "number",
@@ -571,7 +742,10 @@
         "ok",
         "failed",
         "rejected",
-        "generatorFailures"
+        "generatorFailures",
+        "retransmissionsReceived",
+        "retransmissionsResent",
+        "retransmitEngine"
       ]
     },
     "RateEvent": {
@@ -794,6 +968,18 @@
           "format": "uint64",
           "minimum": 0
         },
+        "retransmissionsReceived": {
+          "description": "Retransmissions received by the calls ended in the window.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "retransmissionsResent": {
+          "description": "Re-sends by the calls ended in the window.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
         "spanMs": {
           "description": "Window length.",
           "type": "integer",
@@ -814,6 +1000,8 @@
         "ok",
         "failed",
         "rejected",
+        "retransmissionsReceived",
+        "retransmissionsResent",
         "p50Ms",
         "p99Ms"
       ]

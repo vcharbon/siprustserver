@@ -121,6 +121,8 @@ struct Inner {
     waivers: BTreeMap<ScenarioId, crate::waiver::CampaignWaivers>,
     /// The time series, the run-wide latency it windows and the last failures.
     live: live::Live,
+    /// Per scenario, the message ladder of its calls.
+    ladders: BTreeMap<ScenarioId, ladder::LadderAgg>,
 }
 
 /// The bounded-memory load-test reporter. Cloneable handle via `Arc`.
@@ -283,7 +285,7 @@ impl Reporter {
         checkpoints: &[(&'static str, Duration)],
         evidence: CallEvidence,
     ) {
-        let CallEvidence { recorded, accepted, sample } = evidence;
+        let CallEvidence { recorded, accepted, sample, messages } = evidence;
         let class = ResultClass::from(outcome);
         let label = class.label();
         let mut g = self.inner.lock().unwrap();
@@ -337,6 +339,9 @@ impl Reporter {
             let at_ms = self.ms_since_start(Instant::now());
             g.live.note_failure(at_ms, &key, page);
         }
+        if let Some(messages) = messages {
+            g.ladders.entry(scenario).or_default().fold(messages, &class);
+        }
     }
 
     /// Fold the measured SIP round trips of one finished `scenario` call into
@@ -380,6 +385,7 @@ mod disk;
 mod evidence;
 mod index;
 mod inspect;
+mod ladder;
 mod live;
 mod pages;
 mod prometheus;

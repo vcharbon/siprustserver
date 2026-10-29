@@ -60,6 +60,11 @@ fn ended(g: &Inner) -> (u64, u64, u64) {
     })
 }
 
+/// The retransmissions received and re-sent over every call folded so far.
+fn retransmissions(g: &Inner) -> (u64, u64) {
+    g.ladders.values().fold((0, 0), |(r, s), l| (r + l.received, s + l.resent))
+}
+
 impl Reporter {
     /// Milliseconds from the run's start to `at`.
     pub fn ms_since_start(&self, at: Instant) -> u64 {
@@ -81,6 +86,7 @@ impl Reporter {
 
     pub(super) fn progress_of(&self, g: &Inner) -> Progress {
         let (ok, failed, rejected) = ended(g);
+        let (received, resent) = retransmissions(g);
         let elapsed_ms = self.ms_since_start(Instant::now());
         Progress {
             elapsed_ms,
@@ -90,6 +96,9 @@ impl Reporter {
             ok,
             failed,
             rejected,
+            retransmissions_received: received,
+            retransmissions_resent: resent,
+            retransmit_engine: g.ladders.values().any(|l| l.engine),
             ..Progress::default()
         }
     }
@@ -106,6 +115,8 @@ impl Reporter {
             ok,
             failed,
             rejected: rejected + g.shed.values().sum::<u64>(),
+            received: retransmissions(&g).0,
+            resent: retransmissions(&g).1,
         };
         let Live { series, latency, .. } = &mut g.live;
         series.tick(now_ms, totals, latency)

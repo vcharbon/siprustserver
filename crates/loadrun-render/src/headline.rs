@@ -72,6 +72,20 @@ pub(crate) fn headline(out: &mut String, idx: &LoadRunIndex, live: Option<Live>)
         ),
         ("injected drops", format!("in {} · out {}", c.drops_in, c.drops_out)),
         (
+            "retransmissions",
+            if p.retransmit_engine {
+                format!(
+                    "received {} · re-sent {}",
+                    p.retransmissions_received, p.retransmissions_resent
+                )
+            } else {
+                format!(
+                    "received {} · re-sent {} (retransmit engine off)",
+                    p.retransmissions_received, p.retransmissions_resent
+                )
+            },
+        ),
+        (
             "mux",
             format!(
                 "{} · {}",

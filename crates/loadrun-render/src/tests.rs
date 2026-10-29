@@ -1,7 +1,7 @@
 use e2e_model::{
-    Canaries, CountRow, FailureRow, JudgedBasis, JudgedShare, LatencyRow, LoadRunIndex,
-    LoadRunMeta, Progress, RateEvent, RateEventKind, SampleGroup, Sampling, ScenarioRecording,
-    SeriesPoint,
+    Canaries, ClassCount, CountRow, FailureRow, JudgedBasis, JudgedShare, Ladder, LadderArrow,
+    LatencyRow, LoadRunIndex, LoadRunMeta, Progress, RateEvent, RateEventKind, SampleGroup,
+    Sampling, ScenarioRecording, SeriesPoint,
 };
 
 use super::*;
@@ -14,6 +14,8 @@ fn window(start_s: u64, span_s: u64, ok: u64, failed: u64) -> SeriesPoint {
         ok,
         failed,
         rejected: 0,
+        retransmissions_received: failed,
+        retransmissions_resent: 0,
         p50_ms: 12.0,
         p99_ms: 80.0,
     }
@@ -53,6 +55,9 @@ fn index(finished: bool) -> LoadRunIndex {
             failed: 9,
             rejected: 3,
             generator_failures: 0,
+            retransmissions_received: 12,
+            retransmissions_resent: 0,
+            retransmit_engine: false,
         },
         // 25 windows, the oldest two merged to 10 s; a rate event in the
         // window 30–35 s... and one in the oldest window.
@@ -80,6 +85,7 @@ fn index(finished: bool) -> LoadRunIndex {
                 page: Some("callflows/basic_call/status_486/alice@answered/0.html".into()),
             },
         ],
+        ladders: vec![],
         recording: vec![ScenarioRecording {
             scenario: "basic_call".into(),
             placed: 693,
@@ -246,7 +252,7 @@ fn the_series_lists_the_last_windows_newest_first_with_their_events() {
     assert!(rows[19].starts_with("<td>0:30–0:35</td>"), "oldest listed: {}", rows[19]);
     let marked = rows.iter().find(|r| r.contains("rate 15 → 10")).expect("event marked");
     assert!(marked.starts_with("<td>1:50–1:55</td>"), "on the window holding it: {marked}");
-    assert_eq!(page.matches("<svg").count(), 7, "one sparkline per series");
+    assert_eq!(page.matches("<svg").count(), 8, "one sparkline per series");
     assert!(page.contains("25 window(s) over 2:10"), "the whole run is covered");
 }
 
@@ -282,7 +288,7 @@ fn a_window_without_an_ended_call_shows_no_latency() {
     idx.rate_events.clear();
     let page = render_body(&idx, &RenderOpts::default());
     assert!(
-        page.contains("<td>0</td><td>–</td><td>–</td><td>–</td><td></td></tr>"),
+        page.contains("<td>0</td><td>–</td><td>–</td><td>–</td><td>–</td><td></td></tr>"),
         "error %, p50 and p99 unknown: {page}"
     );
 }
@@ -350,4 +356,59 @@ fn the_status_line_reads_the_window_just_closed() {
         "elapsed 0:35 / 1:00 · 19.8 cps (target 10) · in flight 41 · ok 640 fail 9 rej 3 · \
          error 3.0 % (last 5 s)"
     );
+}
+
+fn arrow(
+    from: &str,
+    to: &str,
+    label: &str,
+    nth: u32,
+    offset: f64,
+    errors: &[(&str, u64)],
+) -> LadderArrow {
+    LadderArrow {
+        from: from.into(),
+        to: to.into(),
+        label: label.into(),
+        nth,
+        count: 100,
+        retransmissions: 3,
+        resent: 0,
+        mean_offset_ms: offset,
+        errors: errors.iter().map(|(c, n)| ClassCount { class: (*c).into(), count: *n }).collect(),
+    }
+}
+
+#[test]
+fn a_ladder_draws_its_arrows_with_their_counts_and_errors() {
+    let mut idx = index(false);
+    idx.ladders = vec![Ladder {
+        scenario: "basic_call".into(),
+        calls: 100,
+        engine: false,
+        lanes: vec!["alice".into(), "SUT".into(), "bob".into()],
+        arrows: vec![
+            arrow("alice", "SUT", "INVITE", 1, 0.0, &[]),
+            arrow("SUT", "bob", "INVITE", 1, 2.0, &[]),
+            arrow("SUT", "alice", "486 (INVITE)", 1, 40.0, &[("status_486", 7)]),
+            arrow("alice", "SUT", "INVITE", 2, 900.0, &[]),
+        ],
+        other: None,
+        after_call: vec![ClassCount { class: "rfc_audit_fail".into(), count: 2 }],
+        before_reply: vec![ClassCount { class: "timeout".into(), count: 1 }],
+    }];
+    let page = render_body(&idx, &RenderOpts::default());
+    let ladder = &page[page.find("<h2>Message ladders</h2>").expect("the section")..];
+    assert!(page.find("Message ladders") > page.find("Results by"), "after the class table");
+    assert!(page.find("Message ladders") < page.find("<h2>Latency"), "before the latency");
+    assert!(ladder.contains("<h3>basic_call (100 calls · retransmit engine off)</h3>"));
+    assert!(ladder.contains("class=\"seq-embed\""), "drawn through seq-report");
+    assert!(ladder.contains("486 (INVITE) ×100 · retr 3 · status_486 7"), "the arrow caption");
+    assert!(ladder.contains("INVITE #2 ×100"), "a second occurrence is numbered");
+    assert!(ladder.contains(
+        "<tr><td>SUT → alice</td><td>486 (INVITE)</td><td>100</td><td>40 ms</td><td>3</td>\
+         <td>0</td><td class=\"nok\">status_486 7</td></tr>"
+    ));
+    assert!(ladder.contains("before any message in: timeout 1; after the call: rfc_audit_fail 2"));
+    assert!(page.contains("received 12 · re-sent 0 (retransmit engine off)"), "the headline");
 }

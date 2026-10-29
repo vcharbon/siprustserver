@@ -17,6 +17,7 @@ use sip_net::{ReEmitKind, SendTap, UdpEndpoint};
 
 use super::loss::DropModel;
 use super::stats::MuxStats;
+use super::taps::Taps;
 
 /// RFC 3261 default transaction timers driving the engine.
 const T1: Duration = Duration::from_millis(500); // first retransmit interval
@@ -84,6 +85,7 @@ fn spawn_resender(
     dst: SocketAddr,
     invite: bool,
     sendtap: Arc<OnceLock<SendTap>>,
+    taps: Option<Arc<Taps>>,
 ) {
     tokio::spawn(async move {
         let mut interval = T1;
@@ -95,6 +97,11 @@ fn spawn_resender(
             }
             if ctl.stopped() || tokio::time::Instant::now() >= deadline {
                 return;
+            }
+            // A re-send counts whether or not the loss model then drops it, as
+            // a first transmission does.
+            if let Some(taps) = &taps {
+                taps.on_resend(&bytes);
             }
             if drop.drops() {
                 stats.dropped_out.fetch_add(1, Ordering::Relaxed);
@@ -147,6 +154,8 @@ pub(super) struct CallTxns {
     /// time — recovery frames go on the wire below the recording layer, so this
     /// is the only way they reach the ladder.
     sendtap: Arc<OnceLock<SendTap>>,
+    /// The endpoint's taps, told of every re-send.
+    taps: Option<Arc<Taps>>,
 }
 
 #[derive(Default)]
@@ -184,6 +193,7 @@ impl CallTxns {
         endpoint: Arc<dyn UdpEndpoint>,
         drop: Arc<DropModel>,
         stats: Arc<MuxStats>,
+        taps: Option<Arc<Taps>>,
     ) -> Self {
         Self {
             endpoint,
@@ -191,6 +201,7 @@ impl CallTxns {
             stats,
             inner: Mutex::new(TxnInner::default()),
             sendtap: Arc::new(OnceLock::new()),
+            taps,
         }
     }
 
@@ -207,6 +218,9 @@ impl CallTxns {
     /// frame that passed the loss model is reported to the send tap (a dropped
     /// one is invisible, like a dropped first transmission).
     fn send(&self, bytes: &[u8], dst: SocketAddr, kind: ReEmitKind) {
+        if let Some(taps) = &self.taps {
+            taps.on_resend(bytes);
+        }
         if self.drop.drops() {
             self.stats.dropped_out.fetch_add(1, Ordering::Relaxed);
             return;
@@ -305,6 +319,7 @@ impl CallTxns {
             dst,
             invite,
             self.sendtap.clone(),
+            self.taps.clone(),
         );
     }
 
@@ -321,6 +336,7 @@ impl CallTxns {
             dst,
             false,
             self.sendtap.clone(),
+            self.taps.clone(),
         );
         ctl
     }

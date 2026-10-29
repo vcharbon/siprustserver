@@ -141,6 +141,11 @@ impl Reporter {
             rate_events: Vec::new(),
             rate_events_dropped: 0,
             recent_failures: g.live.failures.iter().cloned().collect(),
+            ladders: g
+                .ladders
+                .iter()
+                .map(|(scenario, l)| l.project(scenario, crate::driver::CALLER))
+                .collect(),
             recording,
             counts,
             latency,

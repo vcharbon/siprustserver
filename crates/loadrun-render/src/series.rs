@@ -22,12 +22,13 @@ pub(crate) fn series(out: &mut String, idx: &LoadRunIndex) {
     }
     let span = points.last().map_or(0, SeriesPoint::end_ms);
     type Pick = fn(&SeriesPoint) -> f64;
-    let lines: [(&str, Pick); 7] = [
+    let lines: [(&str, Pick); 8] = [
         ("placed", |p| p.placed as f64),
         ("ok", |p| p.ok as f64),
         ("failed", |p| p.failed as f64),
         ("rejected", |p| p.rejected as f64),
         ("error %", |p| p.error_pct().unwrap_or(0.0)),
+        ("retr/call", |p| p.retransmissions_per_call().unwrap_or(0.0)),
         ("p50 ms", |p| p.p50_ms),
         ("p99 ms", |p| p.p99_ms),
     ];
@@ -40,16 +41,18 @@ pub(crate) fn series(out: &mut String, idx: &LoadRunIndex) {
     let _ = write!(
         out,
         "<p class=\"muted\">{} window(s) over {}; the last {TABLE_WINDOWS}, newest first. \
-         Error % is the failed share of the calls that ended in the window.</p>",
+         Error % is the failed share of the calls that ended in the window; retr/call the \
+         retransmissions received and re-sent per call ended in it.</p>",
         points.len(),
         clock(span)
     );
     out.push_str(
         "<table><tr><th>window</th><th>placed</th><th>ok</th><th>failed</th><th>rejected</th>\
-         <th>error %</th><th>p50 ms</th><th>p99 ms</th><th>events</th></tr>",
+         <th>error %</th><th>retr/call</th><th>p50 ms</th><th>p99 ms</th><th>events</th></tr>",
     );
     for (i, p) in points.iter().rev().take(TABLE_WINDOWS).enumerate() {
         let err = p.error_pct().map_or("–".to_string(), |e| format!("{e:.1}"));
+        let retr = p.retransmissions_per_call().map_or("–".to_string(), |r| format!("{r:.2}"));
         let (p50, p99) = if p.has_latency() {
             (format!("{:.1}", p.p50_ms), format!("{:.1}", p.p99_ms))
         } else {
@@ -71,7 +74,7 @@ pub(crate) fn series(out: &mut String, idx: &LoadRunIndex) {
         let _ = write!(
             out,
             "<tr><td>{}–{}</td><td>{}</td><td>{}</td><td>{failed}</td><td>{}</td><td>{err}</td>\
-             <td>{p50}</td><td>{p99}</td><td>{}</td></tr>",
+             <td>{retr}</td><td>{p50}</td><td>{p99}</td><td>{}</td></tr>",
             clock(p.start_ms),
             clock(p.end_ms()),
             p.placed,

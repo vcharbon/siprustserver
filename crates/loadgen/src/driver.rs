@@ -16,7 +16,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,7 +27,7 @@ use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 use crate::class::{CallOutcome, ResultClass};
 use crate::ctx::{CallCtx, CallEnv};
 use crate::mix_entry::{LoadBody, MixEntry};
-use crate::mux::{Correlation, MuxCore};
+use crate::mux::{CallTally, Correlation, MuxCore};
 use crate::outcome::{CallWire, OutcomeSink};
 use crate::rate::{Governor, RateHandle};
 use crate::report::{CallEvidence, RenderedSample, Reporter};
@@ -37,8 +36,10 @@ use scenario_harness::actor::ScenarioVerdict;
 
 mod binding;
 mod record;
+mod seeds;
 use binding::{bind_agents, bind_refusal, call_routing, from_user_key};
 use record::{phase_annotated_detail, record_unrun};
+use seeds::{mint_token, next_seed, panic_msg, xorshift};
 
 /// The mux transport the driver binds calls on.
 pub struct MuxTransport {
@@ -146,38 +147,6 @@ pub struct Driver {
     outcomes: Option<Arc<OutcomeSink>>,
     /// Read-held by each failed call's release tail; the drain write-locks it.
     tails: Arc<RwLock<()>>,
-}
-
-/// Process-wide per-call id-seed source: a unique 100k-wide window per call so a
-/// fresh binder (whose `Ids` restart at 1) never mints Call-IDs colliding with
-/// another in-flight or prior call against the same stateful SUT.
-fn next_seed(base: u64) -> u64 {
-    static SERIAL: AtomicU64 = AtomicU64::new(0);
-    base.wrapping_add(SERIAL.fetch_add(1, Ordering::Relaxed).wrapping_mul(100_000)).max(1)
-}
-
-/// A random per-call correlation token, formatted as a valid SIP user-part.
-fn mint_token() -> String {
-    format!("lg{}", uuid::Uuid::new_v4().simple())
-}
-
-fn xorshift(state: &mut u64) -> u64 {
-    let mut x = *state;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    *state = x;
-    x
-}
-
-fn panic_msg(payload: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "non-string panic payload".to_string()
-    }
 }
 
 impl Driver {
@@ -323,6 +292,7 @@ pub(crate) async fn run_one(
     let draws = if from_user && case.is_some() { KEY_DRAWS } else { 1 };
     let mut draw = 0;
     let rtts = CallRtts::new(reporter.clone(), id);
+    let tally = Arc::new(CallTally::new(CALLER, tuning.retransmit));
     let (core, dwells, banner, resolved_input, token, net, binder, alice, callee_agents) = loop {
         draw += 1;
         // Resolve THIS call's binding from the attached Test case (pool walk +
@@ -362,7 +332,8 @@ pub(crate) async fn run_one(
                 next_seed(seed_base),
                 tuning.drop_nth,
             )
-            .with_rtt_sink(rtts.sink());
+            .with_rtt_sink(rtts.sink())
+            .with_tally(tally.clone());
         let net = Arc::new(match &wire {
             Some(w) => mux_net.with_wire_tap(w.tap()),
             None => mux_net,
@@ -459,6 +430,9 @@ pub(crate) async fn run_one(
         }
     };
 
+    // The outcome is decided: its error is charged to the last message in,
+    // before the teardown below adds its own.
+    tally.mark_outcome();
     let failed = !matches!(result, Ok(ScenarioVerdict::Success { .. }));
     if failed {
         failed_call::release(tails, net, &alice, &callee_agents, call.teardown_quiesce).await;
@@ -557,7 +531,8 @@ pub(crate) async fn run_one(
         None
     };
 
-    let evidence = CallEvidence { recorded: binder.is_recording(), accepted, sample };
+    let recorded = binder.is_recording();
+    let evidence = CallEvidence { recorded, accepted, sample, messages: Some(tally.finish()) };
     reporter.record(id, &outcome, &case, e2e, &checkpoints, evidence);
     rtts.finish();
     if let (Some(sink), Some(wire)) = (&outcomes, &wire) {
@@ -567,7 +542,7 @@ pub(crate) async fn run_one(
 }
 
 /// The caller agent's name: the agent that originates every call.
-const CALLER: &str = "alice";
+pub(crate) const CALLER: &str = "alice";
 
 /// How many numbers a from-user call draws from its case's pool before it is
 /// rejected for contention (every draw held or cooling).

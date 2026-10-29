@@ -58,7 +58,10 @@ describe("the load-run index against its committed schema", () => {
     ["ScenarioRecording", defs.ScenarioRecording, LoadRun.ScenarioRecording],
     ["Sampling", defs.Sampling, LoadRun.Sampling],
     ["JudgedShare", defs.JudgedShare, LoadRun.JudgedShare],
-    ["RttRow", defs.RttRow, LoadRun.RttRow]
+    ["RttRow", defs.RttRow, LoadRun.RttRow],
+    ["Ladder", defs.Ladder, LoadRun.Ladder],
+    ["LadderArrow", defs.LadderArrow, LoadRun.LadderArrow],
+    ["ClassCount", defs.ClassCount, LoadRun.ClassCount]
   ]
 
   it.each(pairs)("%s states the same keys, and the same ones required", (_name, committedNode, schema) => {
@@ -239,9 +242,25 @@ describe("a load-run index", () => {
       ok: 1180,
       failed: 5,
       rejected: 0,
-      generatorFailures: 0
+      generatorFailures: 0,
+      retransmissionsReceived: 4,
+      retransmissionsResent: 1,
+      retransmitEngine: true
     },
-    series: [{ startMs: 0, spanMs: 5000, placed: 100, ok: 98, failed: 2, rejected: 0, p50Ms: 10, p99Ms: 40 }],
+    series: [
+      {
+        startMs: 0,
+        spanMs: 5000,
+        placed: 100,
+        ok: 98,
+        failed: 2,
+        rejected: 0,
+        retransmissionsReceived: 4,
+        retransmissionsResent: 1,
+        p50Ms: 10,
+        p99Ms: 40
+      }
+    ],
     rateEvents: [{ atMs: 30000, kind: "rate", fromCps: 20, toCps: 10 }],
     rateEventsDropped: 2,
     recentFailures: [
@@ -249,6 +268,28 @@ describe("a load-run index", () => {
       { atMs: 13000, scenario: "reinvite", class: "check_fail", case: "alice.invite", page: "callflows/0.html" }
     ],
     recording: [{ scenario: "reinvite", placed: 5, recorded: 5, accepted: 3, audited: 3 }],
+    ladders: [
+      {
+        scenario: "reinvite",
+        calls: 5,
+        engine: true,
+        lanes: ["alice", "SUT"],
+        arrows: [
+          {
+            from: "SUT",
+            to: "alice",
+            label: "180 (INVITE)",
+            nth: 1,
+            count: 5,
+            retransmissions: 1,
+            resent: 0,
+            meanOffsetMs: 20,
+            errors: [{ class: "timeout", count: 2 }]
+          }
+        ],
+        afterCall: [{ class: "check_fail", count: 3 }]
+      }
+    ],
     counts: [
       { scenario: "basic_call", class: "ok", case: "", count: 1180, ok: true },
       { scenario: "reinvite", class: "timeout", case: "bob@connected", count: 2, ok: false },

@@ -36,9 +36,9 @@ pub use egress::{
 pub use endpoint::{EgressPolicySpec, EndpointConfig};
 pub use loadprofile::{LoadProfile, MixSpec, Robustness};
 pub use loadrun::{
-    Canaries, CheckSummaryRow, CheckpointRow, CountRow, FailureRow, JudgedBasis, JudgedShare,
-    LatencyRow, LoadRunIndex, LoadRunMeta, Progress, RateEvent, RateEventKind, RttRow, SampleGroup,
-    Sampling, ScenarioRecording, SeriesPoint,
+    Canaries, CheckSummaryRow, CheckpointRow, ClassCount, CountRow, FailureRow, JudgedBasis,
+    JudgedShare, Ladder, LadderArrow, LatencyRow, LoadRunIndex, LoadRunMeta, Progress, RateEvent,
+    RateEventKind, RttRow, SampleGroup, Sampling, ScenarioRecording, SeriesPoint,
 };
 pub use model::{
     collect_case_blocks, load_campaign, load_check_set, load_check_sets, load_endpoint_config,

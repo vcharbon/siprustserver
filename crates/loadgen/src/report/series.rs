@@ -22,6 +22,8 @@ pub(crate) struct Totals {
     pub(crate) ok: u64,
     pub(crate) failed: u64,
     pub(crate) rejected: u64,
+    pub(crate) received: u64,
+    pub(crate) resent: u64,
 }
 
 impl Totals {
@@ -31,6 +33,8 @@ impl Totals {
             ok: self.ok.saturating_sub(earlier.ok),
             failed: self.failed.saturating_sub(earlier.failed),
             rejected: self.rejected.saturating_sub(earlier.rejected),
+            received: self.received.saturating_sub(earlier.received),
+            resent: self.resent.saturating_sub(earlier.resent),
         }
     }
 
@@ -39,6 +43,8 @@ impl Totals {
         self.ok += other.ok;
         self.failed += other.failed;
         self.rejected += other.rejected;
+        self.received += other.received;
+        self.resent += other.resent;
     }
 }
 
@@ -69,6 +75,8 @@ impl Window {
             ok: self.totals.ok,
             failed: self.totals.failed,
             rejected: self.totals.rejected,
+            retransmissions_received: self.totals.received,
+            retransmissions_resent: self.totals.resent,
             p50_ms: self.latency.quantile_ms(0.5),
             p99_ms: self.latency.quantile_ms(0.99),
         }
@@ -146,7 +154,7 @@ mod tests {
     use super::*;
 
     fn totals(n: u64) -> Totals {
-        Totals { placed: n, ok: n, failed: 0, rejected: 0 }
+        Totals { placed: n, ok: n, ..Totals::default() }
     }
 
     #[test]

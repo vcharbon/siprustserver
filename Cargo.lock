@@ -2776,6 +2776,7 @@ name = "loadrun-render"
 version = "0.1.0"
 dependencies = [
  "e2e-model",
+ "seq-report",
 ]
 
 [[package]]

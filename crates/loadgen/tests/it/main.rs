@@ -13,6 +13,7 @@ mod fake_net;
 mod fake_rig;
 mod from_user_net;
 mod governor;
+mod ladder_net;
 mod late_final;
 mod live_report;
 mod mux_claims;
