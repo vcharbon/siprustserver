@@ -1,18 +1,23 @@
-//! A server transaction outlives the call that answered it (RFC 3261 §17.2.2
-//! Timer J, §17.2.1 for an INVITE's non-2xx final): each endpoint keeps the
-//! finals its agent sent, hands them to the socket registry when it drops, and
-//! a retransmission of an answered request arriving after the call has gone
-//! draws the same final from the mux instead of being a stray.
+//! The answers of an ended call stay answerable (RFC 3261 §17.2.2, Timer J):
+//! each endpoint keeps the finals its agent sent and hands them to the socket
+//! registry when it drops; a retransmission of an answered request arriving
+//! after the call has gone draws the same final from the mux instead of being
+//! a stray. Only a retransmitted request triggers the repair: a final whose
+//! request the peer no longer retransmits (an INVITE past its first
+//! provisional, in Proceeding) is not repaired when lost.
 //!
 //! Held: every final to a non-INVITE request, and an INVITE's non-2xx final
 //! (whose ACK the hold then absorbs). An INVITE's 2xx is the dialog's own
 //! (§13.3.1.4) and is not held.
 //!
 //! Bounds: per dialog the last [`ANSWERS_HELD`] answers, each the response
-//! datagram as sent (one UDP datagram, a few hundred bytes typically, under
-//! 64 KiB) with its transaction key and its request's ladder arrow; dropped
-//! with the endpoint, or for a released dialog when its hold
-//! ([`RELEASE_HOLD`](super::RELEASE_HOLD), 64·T1) expires.
+//! datagram as sent with its transaction key and its request's ladder arrow;
+//! dropped with the endpoint, or for a released dialog when its hold
+//! ([`RELEASE_HOLD`](super::RELEASE_HOLD), 64·T1 = 32 s) expires. In
+//! aggregate the mux holds the calls released in the last 32 s (cps × 32), a
+//! call typically 1 to 3 answers (the BYE's 200; a CANCEL's 200 and the 487)
+//! of about 0.5 KiB plus 0.2 KiB of key and arrow, so 1 to 2 KiB a call:
+//! about 13 MiB at 200 cps, 130 MiB at 2000 cps; at worst 8 × 64 KiB a dialog.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -95,8 +100,7 @@ impl SentAnswers {
         else {
             return;
         };
-        let held = if method == "INVITE" { status >= 300 } else { status >= 200 };
-        if !held {
+        if method == "INVITE" && status < 300 {
             return;
         }
         let Some(branch) = via_branch(raw) else { return };

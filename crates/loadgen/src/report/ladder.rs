@@ -57,8 +57,6 @@ pub(super) struct LadderAgg {
     pub(super) received: u64,
     /// Copies sent after the first, over the calls.
     pub(super) resent: u64,
-    /// Requests answered again after their call ended, over the calls.
-    pub(super) late: u64,
 }
 
 impl LadderAgg {
@@ -124,9 +122,11 @@ impl LadderAgg {
     }
 
     /// A retransmission of the request on `arrow`, answered again by the mux
-    /// after its call ended (the call may not be folded yet).
+    /// after its call ended (the call may not be folded yet); an arrow past
+    /// the ladder's bound counts on "other". A repair whose request has no
+    /// arrow (no tally, or its arrow past the call's bound) is on no ladder:
+    /// the run's count is the mux's.
     pub(super) fn late(&mut self, arrow: &ArrowKey) {
-        self.late += 1;
         match self.slot(arrow.clone()) {
             Some(slot) => slot.late += 1,
             None => {

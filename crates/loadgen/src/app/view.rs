@@ -80,7 +80,9 @@ impl RunView {
             tick.tick().await;
             loop {
                 tick.tick().await;
-                let window = view.reporter.tick();
+                let late =
+                    view.core.stats().late_answered.load(std::sync::atomic::Ordering::Relaxed);
+                let window = view.reporter.tick(late);
                 let line =
                     loadrun_render::status_line(&view.progress(), view.meta.duration_secs, &window);
                 eprintln!("[{name}] {line}");

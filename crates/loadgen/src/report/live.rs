@@ -65,11 +65,6 @@ fn retransmissions(g: &Inner) -> (u64, u64) {
     g.ladders.values().fold((0, 0), |(r, s), l| (r + l.received, s + l.resent))
 }
 
-/// The requests answered again after their call ended, so far.
-fn late_answered(g: &Inner) -> u64 {
-    g.ladders.values().map(|l| l.late).sum()
-}
-
 impl Reporter {
     /// Milliseconds from the run's start to `at`.
     pub fn ms_since_start(&self, at: Instant) -> u64 {
@@ -109,9 +104,11 @@ impl Reporter {
     }
 
     /// Close the time series' current window at now and return it: the calls
-    /// placed, ended ok, failed, and rejected or shed since the last tick, and
-    /// the end-to-end latency of the calls ended since.
-    pub fn tick(&self) -> SeriesPoint {
+    /// placed, ended ok, failed, and rejected or shed since the last tick, the
+    /// end-to-end latency of the calls ended since, and the late re-answers
+    /// since, from `late_answered`: the mux's count so far, the headline's
+    /// figure, so the windows sum to it.
+    pub fn tick(&self, late_answered: u64) -> SeriesPoint {
         let now_ms = self.ms_since_start(Instant::now());
         let mut g = self.inner.lock().unwrap();
         let (ok, failed, rejected) = ended(&g);
@@ -122,7 +119,7 @@ impl Reporter {
             rejected: rejected + g.shed.values().sum::<u64>(),
             received: retransmissions(&g).0,
             resent: retransmissions(&g).1,
-            late: late_answered(&g),
+            late: late_answered,
         };
         let Live { series, latency, .. } = &mut g.live;
         series.tick(now_ms, totals, latency)

@@ -636,7 +636,7 @@ async fn a_tick_closes_a_window_of_deltas() {
         r.dec_inflight();
     }
     tokio::time::advance(SERIES_TICK).await;
-    let first = r.tick();
+    let first = r.tick(0);
     assert_eq!((first.start_ms, first.span_ms, first.placed, first.ok), (0, 5_000, 3, 3));
     r.inc_inflight();
     r.record(
@@ -650,11 +650,12 @@ async fn a_tick_closes_a_window_of_deltas() {
     r.record("s", &rejected, &rejected.case(None), Duration::ZERO, &[], CallEvidence::default());
     r.inc_shed("s");
     tokio::time::advance(SERIES_TICK).await;
-    let second = r.tick();
+    let second = r.tick(2);
     assert_eq!(
         (second.start_ms, second.placed, second.ok, second.failed, second.rejected),
         (5_000, 1, 0, 1, 2)
     );
+    assert_eq!((first.late_answered, second.late_answered), (0, 2), "the mux count's delta");
     assert_eq!(second.error_pct(), Some(100.0));
     let p = r.progress();
     assert_eq!(

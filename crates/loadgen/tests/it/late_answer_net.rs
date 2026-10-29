@@ -59,7 +59,8 @@ async fn bob_bye_answer_lost(base: u16, retransmit: bool) {
     assert_eq!(bye.late_answered, total, "on the BYE's arrow: {ladder:#?}");
     let elsewhere: u64 = ladder.arrows.iter().map(|a| a.late_answered).sum();
     assert_eq!(elsewhere, total, "and nowhere else");
-    assert_eq!(reporter.tick().late_answered, total, "in the run's first window");
+    let window = reporter.tick(s.late_answered.load(Relaxed));
+    assert_eq!(window.late_answered, total, "the headline's count, in the run's first window");
 
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
@@ -75,4 +76,72 @@ async fn a_bye_retransmitted_after_the_call_is_answered_again() {
 #[ignore = "slow lane: loadgen"]
 async fn a_bye_retransmitted_after_the_call_is_answered_again_with_the_engine() {
     bob_bye_answer_lost(7710, true).await;
+}
+
+/// A raw SUT's initial INVITE to a callee endpoint, branch `z9hG4bK-rej`.
+fn rejected_invite(method: &str, cseq: &str, branch: &str) -> Vec<u8> {
+    format!(
+        "{method} sip:bob@127.0.0.1:46401 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:46409;branch={branch}\r\n\
+         Max-Forwards: 70\r\nCall-ID: cid-rej\r\nX-Loadgen-Id: tok-rej\r\n\
+         From: <sip:sut@h>;tag=s1\r\nTo: <sip:bob@h>{}\r\nCSeq: {cseq}\r\n\
+         Contact: <sip:sut@127.0.0.1:46409>\r\nContent-Length: 0\r\n\r\n",
+        if method == "ACK" { ";tag=b1" } else { "" }
+    )
+    .into_bytes()
+}
+
+/// The callee rejects an initial INVITE with 486 and its call ends; the SUT
+/// then retransmits the INVITE (the 486 lost): the mux answers it with the
+/// same 486, not as a `released` orphan, and absorbs its ACK; an INVITE of
+/// another transaction on the Call-ID stays `released`.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_retransmitted_rejected_invite_draws_its_486_and_its_ack_is_absorbed() {
+    use loadgen::{CallRouting, Correlation, EndpointSpec, MuxCore, Role};
+    use sip_net::{BindUdpOpts, SignalingNetwork};
+
+    let sim = Arc::new(sip_net_testkit::SimulatedSignalingNetwork::new(1));
+    let core = MuxCore::bind_on(
+        sim.as_ref(),
+        vec![EndpointSpec { addr: addr(46401), role: Role::Callee }],
+        Correlation::header("X-Loadgen-Id"),
+        64,
+        8,
+        RECV,
+        sip_clock::Clock::test_at(0),
+    )
+    .await
+    .unwrap();
+    let sut = sim.bind_udp(BindUdpOpts::new(addr(46409), 64)).await.unwrap();
+    let recv = || async {
+        let p = tokio::time::timeout(Duration::from_secs(2), sut.recv()).await.ok().flatten();
+        p.map(|p| p.raw.to_vec())
+    };
+    let invite = rejected_invite("INVITE", "1 INVITE", "z9hG4bK-rej");
+
+    let net = core.network(CallRouting::new("tok-rej").leg(addr(46401), "bob"));
+    let bob = net.bind_udp(BindUdpOpts::new(addr(46401), 16)).await.unwrap();
+    sut.send_to(&invite, addr(46401)).await.unwrap();
+    let got = tokio::time::timeout(RECV, bob.recv()).await.unwrap().unwrap();
+    assert!(got.raw.starts_with(b"INVITE "));
+    let busy = b"SIP/2.0 486 Busy Here\r\nVia: SIP/2.0/UDP 127.0.0.1:46409;branch=z9hG4bK-rej\r\n\
+        Call-ID: cid-rej\r\nFrom: <sip:sut@h>;tag=s1\r\nTo: <sip:bob@h>;tag=b1\r\n\
+        CSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n"
+        .to_vec();
+    bob.send_to(&busy, addr(46409)).await.unwrap();
+    assert_eq!(recv().await, Some(busy.clone()), "the live 486");
+    drop(bob);
+    drop(net);
+
+    sut.send_to(&invite, addr(46401)).await.unwrap();
+    assert_eq!(recv().await, Some(busy), "the retransmitted INVITE draws the same 486");
+    sut.send_to(&rejected_invite("ACK", "1 ACK", "z9hG4bK-rej"), addr(46401)).await.unwrap();
+    assert_eq!(recv().await, None, "its ACK draws nothing");
+    let s = core.stats();
+    assert_eq!(s.late_answered.load(Relaxed), 1);
+    assert_eq!(s.orphans_total(), 0, "neither is an orphan: {:?}", s.samples());
+
+    sut.send_to(&rejected_invite("INVITE", "2 INVITE", "z9hG4bK-new"), addr(46401)).await.unwrap();
+    assert_eq!(recv().await, None);
+    assert_eq!(s.orphan_released.load(Relaxed), 1, "another transaction stays released");
 }

@@ -142,5 +142,4 @@ fn a_late_reanswer_counts_on_its_arrow_folded_before_or_after() {
     assert_eq!(late("486 (INVITE)", "alice"), Some(1));
     assert_eq!(late("INVITE", "SUT"), Some(0));
     assert_eq!(l.arrows.iter().find(|a| a.to == "bob").map(|a| a.count), Some(1), "one call");
-    assert_eq!(agg.late, 3, "the run's total");
 }

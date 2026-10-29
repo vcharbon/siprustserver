@@ -269,7 +269,7 @@ pub async fn run<P: Product>(product: &P, flags: &P::Flags, args: Args) -> std::
     }
     ticker.abort();
     let _ = ticker.await;
-    reporter.tick();
+    reporter.tick(core.stats().late_answered.load(std::sync::atomic::Ordering::Relaxed));
     reporter.write_report(&args.out_dir, &view.index(true))?;
     outcomes.close();
     // The final `/metrics` body, for whoever reads the run's counters once the

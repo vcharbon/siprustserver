@@ -64,7 +64,11 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Vec<(Vec<u8>, SocketAd
             return Vec::new();
         }
     }
-    // 2. A retransmission of a request a released dialog's agent answered.
+    // 2. A retransmission of a request a released dialog's agent answered,
+    //    re-answered to its source: the address the SUT sent from, as a UAS
+    //    answers to the request's received/rport (RFC 3261 §18.2.2). The call's
+    //    loss model went with its endpoints: neither the request nor the
+    //    re-answer is dropped.
     if let Some(cid) = cid.as_deref().filter(|_| !is_response(raw)) {
         match g.released_answer(cid, raw, Instant::now()) {
             LateReply::Reanswer(answer, repair) => {
