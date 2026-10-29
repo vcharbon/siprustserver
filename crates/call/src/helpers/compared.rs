@@ -73,6 +73,7 @@ pub fn same_state(a: &Call, b: &Call) -> bool {
         tag_seed,
         leg_space: _,
         answered: _,
+        awaited,
     } = a;
     *call_ref == b.call_ref
         && same_leg(a_leg, &b.a_leg)
@@ -109,6 +110,7 @@ pub fn same_state(a: &Call, b: &Call) -> bool {
         && *termination == b.termination
         && *sm_cursors == b.sm_cursors
         && *tag_seed == b.tag_seed
+        && *awaited == b.awaited
 }
 
 /// Whether `a` and `b` hold as many items, pairwise `same`.

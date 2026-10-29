@@ -59,8 +59,8 @@ impl Puller {
                 wrote: true,
                 removed: matches!(op, Op::Delete),
                 on_request: false,
+                on_answer: false,
                 called_out: false,
-                awaits_answer: false,
                 released: None,
                 backed: false,
             })

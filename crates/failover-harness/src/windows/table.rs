@@ -267,21 +267,11 @@ pub static TABLE: &[Row] = &[
         id: "W-kill-effects-lost",
         tier: Tier::Degraded,
         opens: Opens::any(PRIMARY_KILLS),
-        covers: "the effects of a turn taken on something no peer repeats, lost with the node: \
-                 every dialog left to its endpoint's own timers",
+        covers: "the effects of a turn taken on something no peer repeats — a response, a \
+                 timer — lost with the node: every dialog left to its endpoint's own timers",
         kind: Kind::Outcome(outcome::effects_lost),
         closes_when_over: false,
         witness: witness("media-leg", SyncLevel::Off, PrimaryKilled, 2, TurnPoint::Left),
-    },
-    Row {
-        id: "W-kill-answer-lost",
-        tier: Tier::Degraded,
-        opens: Opens::any(PRIMARY_KILLS),
-        covers: "an outside service's answer lost with the dead node: the copy stays reactive and \
-                 every dialog is left to its endpoint's own timers",
-        kind: Kind::Outcome(outcome::answer_lost),
-        closes_when_over: false,
-        witness: witness("refer-x-bye", SyncLevel::Off, PrimaryKilled, 5, TurnPoint::Applied),
     },
     Row {
         id: "W-off-answer-lost",

@@ -2,7 +2,9 @@
 
 **Status:** accepted (2026-10-01); **superseded in part by
 [ADR-0043](0043-outbound-backend-client-policy.md)** (the fold of an unanswered
-`/call/failure` consult is the stack's own bare `503`)
+`/call/failure` consult is the stack's own bare `503`). Amended (2026-10-29):
+decision 5, a node serving the call from its record sends every awaited
+request again; the deadline bounds the answer of the request as last sent.
 
 ## Context
 
@@ -69,6 +71,21 @@ deadline.
    armed and its fold names none. The turn that arms the deadline names it on
    the consult it sends, so the fold states exactly the deadline armed.
 
+5. **A node serving the call from its record sends every awaited request
+   again.** The turn that sends a request also writes its image into the
+   record (`Call::awaited`), so under the `applied` sync level the backup holds
+   it before it leaves (ADR-0055 §3); its answer or its deadline's expiry takes
+   it off. Every materialisation that serves the call — a takeover, a reclaim,
+   the arming of a parked reclaim — queues one turn of the call's own that
+   sends each awaited request again and arms its deadline afresh from that
+   turn, the deadline its sender armed retired: an outside answer is not lost
+   with the node that awaited it (user ruling). An admit the request carries
+   is numbered above every change the call reserved before, so the limiter
+   checks it net of the set the key holds and counts nothing twice (ADR-0040).
+   The backend may see the request twice: delivery is at least once
+   (ADR-0055 §1). A takeover copy that awaits an answer is not shed before
+   its turn took it.
+
 A correlation id names one request in flight: a service reusing one for a
 second request while the first is awaited merges their deadlines.
 
@@ -77,31 +94,30 @@ second request while the first is awaited merges their deadlines.
 - A service needs no watchdog of its own for a request's answer; every
   waiting state it has on one is bounded by the request's budget plus the
   margin, on whichever node serves the call.
-- A deadline shares the misroute window of every replicated timer
-  (ADR-0014): a takeover copy made while the primary still lives (an LB
-  misroute) keeps its own deadline and may act on a lost answer while the
-  primary acts on the real one. The deadline still fires wherever the call is
-  served: firing only on the sending node would leave the takeover case
-  stranded.
+- A takeover copy made while the primary still lives (an LB misroute, a
+  primary read dead while it lives) sends the awaited requests again and acts
+  on its own answers while the primary acts on its; the deadline still fires
+  wherever the call is served, bounding the request as last sent.
 - A release event's consult (`ReleaseAsyncHttp`, the subscribed maximum
   duration) has a deadline of its own (`ReleaseAnswer`), named by the change
   its turn reserved: the decision deadline plus the admit budget of the route
   it may answer, plus the margin. Its fold names it and, like a failure fold,
   reaches the rules only while the deadline is in the ledger: a second answer
-  of the consult reaches none. The deadline's expiry is the release event
-  again, wherever the call is then served — the primary that sent the consult
-  as much as a copy — so the consult is re-sent, and ends within its own
-  decision deadline (unanswered: the local teardown). The consult is at least
+  of the consult reaches none. A node serving the call from its record sends
+  the consult again at once (decision 5); the deadline's expiry is the
+  release event again, wherever the call is then served, so the consult is
+  re-sent, and ends within its own decision deadline (unanswered: the local
+  teardown). The consult is at least
   once: after a node loss, or an answer past its deadline, the decision layer
   may see the same release event twice; one answer applies — a fold no
   consult awaits writes no decision mark and moves no route onto the call,
   its admit report applied as an admit. With the decision deadline off
-  (`call_control_timeout_ms` 0) the consult has no deadline and is never
-  re-sent: a takeover while it is in flight leaves the call without its
-  cap.
+  (`call_control_timeout_ms` 0) the consult has no deadline: only a
+  materialisation sends it again (decision 5).
 - The core's REFER authorization needs no deadline; something already in the
   call's replicated timer list bounds it:
-  - a REFER's authorization (`ReferAsyncHttp`): its subscription's expiry
+  - a REFER's authorization (`ReferAsyncHttp`): a node serving the call from
+    its record sends it again (decision 5); its subscription's expiry
     (`ReferSubscriptionExpiry`) ends the wait and tells the referrer the
     transfer failed (NOTIFY `terminated`, 500).
 - Tests: `b2bua/src/answer_deadline.rs` (arming, screening, the lost answers),
@@ -118,13 +134,15 @@ second request while the first is awaited merges their deadlines.
   (`an_admit_the_limiter_never_answers_counts_as_a_timeout`),
   `failover-harness/tests/it/service_answer_deadline.rs` (a node crashing with
   each kind of request in flight; the call reclaimed by the rebooted primary,
-  or taken over by the backup, reads the lost answer at the deadline and ends
-  with one CDR and the limiter drained),
+  taken over by the backup on a message or at the proxy's dead verdict, sends
+  the request again and reads its outside answer, ending with one CDR and the
+  limiter drained),
   `failover-harness/tests/it/consult_answer_deadline.rs` (a node crashing with
-  each core consult in flight: a `/call/failure` consult's final relayed at
-  its deadline on reclaim and takeover; the release consult re-sent by the
-  copy at its answer deadline; the REFER's authorization ended at the
-  subscription's expiry),
+  each core consult in flight, the engine answering none: the consult sent
+  again on reclaim and takeover, a `/call/failure` consult's 503 and the
+  release consult's teardown at the re-sent consult's decision deadline; the
+  REFER's authorization sent again and ended at the subscription's expiry),
+  `b2bua-core/src/off_turn.rs` (the record of the awaited requests),
   `b2bua-harness/tests/it/release_consult_answer.rs` (a reroute whose admit
   runs long answers by the consult's deadline; the deadline's expiry
   re-sends the consult on the node serving the call; a release fold whose

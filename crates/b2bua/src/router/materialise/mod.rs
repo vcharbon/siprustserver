@@ -38,7 +38,8 @@
 //!    and server halves ([`seeds::seeds_for`]) and every answered non-INVITE
 //!    request still Completed ([`seeds::answered_seeds`]), are rebuilt in the
 //!    transaction layer, on every origin, so the layer owns their ACKs, their
-//!    Timer D / E / G / L and the copies of their requests;
+//!    Timer D / E / G / L and the copies of their requests; the requests the
+//!    call awaits answers to are queued to be sent again ([`super::resend`]);
 //! 8. takeover only: `mark_takeover` + `watch_self_release`, so the copy is
 //!    shed once the transactions it serves — the seeds among them — clear
 //!    (ADR-0014); the watch is armed after the seeds so it cannot fire on a
@@ -60,7 +61,8 @@
 mod received_request;
 mod seeds;
 pub(in crate::router) use seeds::{
-    names_server_branch, names_unanswered_caller_invite, relayed_server_key,
+    names_request_in_flight, names_server_branch, names_unanswered_caller_invite,
+    relayed_server_key,
 };
 #[cfg(test)]
 mod tests;
@@ -237,7 +239,8 @@ pub(super) async fn materialise(
 
 /// Arm the resident `call` this node now serves: its ledger re-armed in the
 /// timer service, its transactions seeded, a sent request past its deadline
-/// settled as the timeout it drew. A reclaim's seeds re-send no provisional
+/// settled as the timeout it drew, the requests it awaits answers to sent
+/// again on a turn of its own ([`super::resend`]). A reclaim's seeds re-send no provisional
 /// ([`seeds::without_provisional`]). What the layer seeded, `None` when it
 /// could not be asked.
 async fn serve(
@@ -256,6 +259,9 @@ async fn serve(
     let seeded = ctx.txn.seed(call_ref, seeds).await.ok();
     for timeout in seeds::overdue_sent(call, now_ms) {
         let _ = ctx.reentry_tx.send(timeout);
+    }
+    if !call.awaited.is_empty() {
+        let _ = ctx.reentry_tx.send(super::resend::notice(call));
     }
     seeded
 }

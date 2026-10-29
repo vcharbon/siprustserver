@@ -11,6 +11,9 @@ Amended (2026-10-28): D1, a proxy's dead verdict is a second trigger; D2, the sw
 takeover half runs on either trigger, and its discharge half and the refusal of an
 undecided call on a departure only; the residual of a death the peers are not told of
 (ADR-0050 §3).
+Amended (2026-10-29): D2, the sweep also takes over a call with an in-dialog request in
+flight, and one that awaits the answer to a request sent off its turn, which the copy
+sends again (ADR-0039 decision 5).
 
 **Amends:** ADR-0014 D1 (takeover is reactive only), ADR-0022 X4 and X5, ADR-0031's
 case table and its D3 split rule (the lifecycle order the forward and reverse gates read),
@@ -75,8 +78,10 @@ router starts a task of its own over the departed peer's backup partition — ne
 router loop's, which serves its own calls meanwhile — tracked by the dispatcher, so a
 crash of the node stops it (`router/departure/tests.rs`). It
 reads the bodies one at a time, yielding as it goes, and for every call that names an
-INVITE transaction in flight — exactly the calls a materialisation would seed — takes
-the call lock and materialises the call as a takeover: its timers re-arm at their
+INVITE transaction in flight — exactly the calls a materialisation would seed — or an
+in-dialog request in flight but the keepalive (a relay, a request of its own or one it
+holds), or awaits the answer to a request it sent off its turn, whose task died with the
+peer (ADR-0039 decision 5), takes the call lock and materialises the call as a takeover: its timers re-arm at their
 replicated deadlines, its INVITE transactions are rebuilt, the self-release watch is
 armed. A call already live here is left as it is. A call with nothing in flight is
 not touched: it stays reactive, for the reason ADR-0014 D1 removed the eager takeover

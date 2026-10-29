@@ -33,10 +33,11 @@ pub struct Turn {
     /// Whether the turn handled a SIP request rather than a response, a timer
     /// or an off-turn answer.
     pub on_request: bool,
+    /// Whether the turn was taken on an outside service's answer, or on its
+    /// deadline's expiry (ADR-0039).
+    pub on_answer: bool,
     /// Whether the turn sent a request to an outside service.
     pub called_out: bool,
-    /// Whether the call awaited an outside answer after the turn (ADR-0039).
-    pub awaits_answer: bool,
     /// Why the turn's outbox entry left, once it did.
     pub released: Option<Released>,
     /// The entry left at the cap while the harness held an applied sub-point
@@ -175,14 +176,14 @@ impl Inner {
                 }
                 let turns = self.calls.entry(mark.call_ref.to_string()).or_default();
                 let (version, wrote, on_request) = (mark.version, mark.wrote, mark.on_request);
-                let (called_out, awaits_answer) = (mark.called_out, mark.awaits_answer);
+                let (on_answer, called_out) = (mark.on_answer, mark.called_out);
                 let (released, capped_by_harness, applied) = (None, false, false);
                 turns.push(Turn {
                     version,
                     wrote,
                     on_request,
+                    on_answer,
                     called_out,
-                    awaits_answer,
                     released,
                     capped_by_harness,
                     applied,

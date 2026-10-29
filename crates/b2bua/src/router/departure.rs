@@ -4,11 +4,14 @@
 //! §17.1.1.2), a silent callee stays silent, nobody else repeats a 2xx the
 //! caller lost (§13.3.1.4), and nobody else ends a call the peer was ending.
 //! Every call this node backs up for the peer with an INVITE transaction to
-//! serve, and every `Terminating` one with any request record open — its own
-//! BYE in flight, a request it held — or a caller dialog held possibly
-//! confirmed (ADR-0055 §4), is taken over at once: its timers run
-//! at their replicated deadlines, its transactions are rebuilt, and an
-//! undecided call is answered. A `Terminating` call with nothing left to serve
+//! serve or an in-dialog request in flight but the keepalive, every one
+//! awaiting the answer to a request it sent off its turn,
+//! which died with the peer's task (ADR-0039), and every `Terminating` one
+//! with any request record open — its own BYE in flight, a request it held —
+//! or a caller dialog held possibly confirmed (ADR-0055 §4), is taken over at
+//! once: its timers run
+//! at their replicated deadlines, its transactions are rebuilt, its awaited
+//! requests are sent again, and an undecided call is answered. A `Terminating` call with nothing left to serve
 //! finished its ending on the peer, whose last write was lost: it is
 //! discharged, its legs forced terminal, with its CDR, which may be the
 //! second (ADR-0055 §5). Any other call is left to the reactive path by user
@@ -39,7 +42,8 @@ use std::sync::Arc;
 use call::{Call, CallModelState};
 
 use super::materialise::{
-    has_invite_to_serve, has_work_to_serve, materialise, Materialised, Origin,
+    has_invite_to_serve, has_work_to_serve, materialise, names_request_in_flight, Materialised,
+    Origin,
 };
 use super::reclaim::discharge_materialized_terminal;
 use super::restore_hygiene::reanchor;
@@ -168,9 +172,11 @@ async fn sweep<F, Fut>(
 
 /// Discharge `call_ref` when its body is ended, or ending with nothing left to
 /// serve, and the peer departed; else take it over when it names an INVITE
-/// transaction to serve ([`has_invite_to_serve`]), or is ending with work left
-/// ([`ending_work`]). On a dead verdict an undecided call is left to the
-/// departure: its decision may be in flight at a primary the proxy misread
+/// transaction to serve ([`has_invite_to_serve`]) or an in-dialog request in
+/// flight ([`names_request_in_flight`]), is ending with work left
+/// ([`ending_work`]), or awaits the answer to a request it sent off its turn,
+/// which the copy sends again. On a dead verdict an undecided call is left to
+/// the departure: its decision may be in flight at a primary the proxy misread
 /// dead. The body is read once without the lock to leave a quiet call
 /// untouched; a call already live here is left as it is.
 async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Swept {
@@ -183,7 +189,9 @@ async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Sw
         };
     }
     let ending = call.state == CallModelState::Terminating;
-    if !has_invite_to_serve(&call) && !(ending && ending_work(&call)) {
+    let in_flight =
+        has_invite_to_serve(&call) || names_request_in_flight(&call) || !call.awaited.is_empty();
+    if !in_flight && !(ending && ending_work(&call)) {
         return Swept::Left;
     }
     if cause == Cause::ReadDead && is_undecided(&call) {

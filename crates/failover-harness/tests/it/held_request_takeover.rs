@@ -22,10 +22,11 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::Method;
 use sip_message::{SipMessage, SipParser};
 
+use crate::departure_support::bring_up_reactive;
 use crate::inflight_resend::{
-    assert_not_taken_over, assert_taken_over_once, bring_up, establish, kill_serving_node,
-    last_request_sent, reboot_and_reclaim, settle_to_one_cdr, split_mut, survivor_of,
-    synchronized_call_ref, REPLICATE,
+    assert_not_taken_over, assert_taken_over_once, establish, kill_serving_node, last_request_sent,
+    reboot_and_reclaim, settle_to_one_cdr, split_mut, survivor_of, synchronized_call_ref,
+    REPLICATE,
 };
 
 /// The caller's INFO is held; the service's own timer answers it `202`
@@ -109,7 +110,7 @@ async fn a_held_request_is_answered_by_the_takeover_copy() {
         FailoverHarness::new("held-request-takeover", &["b1", "b2"]).with_worker_services(services);
     let alice = fh.agent("alice", "127.0.0.1:5060").await;
     let bob = fh.agent("bob", "127.0.0.1:5070").await;
-    let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
+    let (proxy, mut w_b1, mut w_b2) = bring_up_reactive(&mut fh).await;
     let (mut dialog, pri_ord) = establish(&fh, &alice, &bob, &proxy).await;
     let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
 
@@ -163,7 +164,7 @@ async fn a_copy_of_a_held_request_the_takeover_answered_draws_its_final_again() 
         .with_worker_services(services);
     let alice = fh.agent("alice", "127.0.0.1:5060").await;
     let bob = fh.agent("bob", "127.0.0.1:5070").await;
-    let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
+    let (proxy, mut w_b1, mut w_b2) = bring_up_reactive(&mut fh).await;
     let (mut dialog, pri_ord) = establish(&fh, &alice, &bob, &proxy).await;
     let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
 

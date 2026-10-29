@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use call::{CallModelState, TimerType};
+use call::CallModelState;
 use sip_message::{Method, SipRequest};
 
 use super::release::{release_call, ReleaseKind};
@@ -59,6 +59,7 @@ pub(super) async fn process_result(
     };
     let result = crate::landing::land(result, &landing, now_ms);
     let kind = TurnKind::of(&result, received);
+    let awaited_before = ctx.state.resident(call_ref).is_some_and(|c| !c.awaited.is_empty());
     // Stated text the turn's messages left out is a defect of the model that
     // stated it, reported whichever node sends them.
     for eff in &result.effects.buffered {
@@ -135,6 +136,7 @@ pub(super) async fn process_result(
     };
     let version = ctx.state.topology(call_ref).map_or((0, 0), |t| (t.gen, t.bak_gen));
     reach(ctx, call_ref, TurnPoint::Logged, version, wrote, kind, None).await;
+    super::quiesced::rearm_after_answer(ctx, call_ref, awaited_before, &call).await;
 
     // Timers are armed in the turn; what the turn sends off the node leaves
     // through the call's outbox once the write that records it is applied
@@ -258,8 +260,8 @@ fn has_cdr(result: &HandlerResult) -> bool {
 #[derive(Clone, Copy, Default)]
 pub(super) struct TurnKind {
     on_request: bool,
+    on_answer: bool,
     called_out: bool,
-    awaits_answer: bool,
 }
 
 impl TurnKind {
@@ -269,16 +271,8 @@ impl TurnKind {
             .fire_and_forget
             .iter()
             .any(|e| !matches!(e, FireAndForgetEffect::Reenter(_)));
-        let awaits_answer = result.call.timers.iter().any(|t| {
-            matches!(
-                t.timer_type(),
-                TimerType::ServiceHttpAnswer { .. }
-                    | TimerType::ServiceAdmitAnswer { .. }
-                    | TimerType::FailureAnswer { .. }
-                    | TimerType::ReleaseAnswer { .. }
-            )
-        });
-        Self { on_request: received.is_some(), called_out, awaits_answer }
+        let on_answer = result.effects.took_answer;
+        Self { on_request: received.is_some(), on_answer, called_out }
     }
 }
 
@@ -302,8 +296,8 @@ pub(super) async fn reach(
             wrote,
             removed: false,
             on_request: kind.on_request,
+            on_answer: kind.on_answer,
             called_out: kind.called_out,
-            awaits_answer: kind.awaits_answer,
             released,
             backed: point == TurnPoint::Logged && ctx.state.hold_target(call_ref).is_some(),
         })

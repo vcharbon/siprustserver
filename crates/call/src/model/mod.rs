@@ -67,6 +67,7 @@ pub mod leg_state;
 pub mod limiter;
 pub mod message_ring;
 pub mod obligation;
+pub mod off_turn;
 pub mod outbound_invite;
 pub mod owed_answer;
 pub mod provisional;
@@ -99,6 +100,7 @@ pub use limiter::{
 };
 pub use message_ring::{MessageDirection, MessageEntry, MessageRing};
 pub use obligation::{Obligation, ObligationKind};
+pub use off_turn::OffTurnRequest;
 pub use outbound_invite::OutboundInvite;
 pub use owed_answer::OwedAnswer;
 pub use provisional::{

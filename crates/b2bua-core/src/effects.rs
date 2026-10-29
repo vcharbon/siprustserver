@@ -280,6 +280,10 @@ pub struct HandlerEffects {
     /// what the turn's `AttemptStarted` deliveries carry
     /// (`rules::lifecycle`). Turn-local, never replicated.
     pub opened_attempts: Vec<(call::AttemptId, b2bua_sdk::lifecycle::RouteAnswer)>,
+    /// The turn was taken on the answer to a request the call sent off its
+    /// turn, or on its deadline's expiry (ADR-0039). Turn-local, never
+    /// replicated.
+    pub took_answer: bool,
 }
 
 impl HandlerEffects {
@@ -292,6 +296,7 @@ impl HandlerEffects {
     /// merged effect set is what the router classifies.
     pub fn extend(&mut self, other: HandlerEffects) {
         self.quiet = self.quiet.or(other.quiet);
+        self.took_answer |= other.took_answer;
         self.critical.extend(other.critical);
         self.outbound.extend(other.outbound);
         self.soft.extend(other.soft);

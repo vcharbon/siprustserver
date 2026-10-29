@@ -17,11 +17,9 @@ pub struct CutFacts {
     pub held: bool,
     /// The cut turn handled a SIP request.
     pub on_request: bool,
-    /// The cut turn sent a request to an outside service, or the call awaited
-    /// one's answer after it, and the backup applied no later turn of the
-    /// primary: as far as the copy can tell, the answer was in flight on the
-    /// primary.
-    pub answer_in_flight: bool,
+    /// The cut turn was taken on an outside service's answer, which the copy
+    /// asks for again while its record awaits it (ADR-0039 decision 5).
+    pub on_answer: bool,
     /// Every request that reached a worker other than the primary drew its
     /// final there.
     pub living_answered: bool,
@@ -57,17 +55,6 @@ pub(super) fn lost_like_a_non_ha_call(
     timed_out(verdict) && cut.living_answered
 }
 
-/// `W-kill-answer-lost`: the backup held the write of a turn whose outside
-/// answer was in flight; the parties timed out waiting, and when the turn's
-/// effects had not left, every request that reached a living worker drew its
-/// final there.
-pub(super) fn answer_lost(cut: &CutFacts, verdict: &ScenarioVerdict, _: &ObservedState) -> bool {
-    timed_out(verdict)
-        && cut.held
-        && cut.answer_in_flight
-        && (cut.held_and_left || cut.living_answered)
-}
-
 /// `W-off-answer-lost`: a turn's request to an outside service left before
 /// the backup applied its write; the parties timed out waiting for an outcome
 /// that answer brings, never for the teardown, every request that reached a
@@ -84,10 +71,12 @@ pub(super) fn off_answer_lost(
 }
 
 /// `W-kill-effects-lost`: the backup did not hold the write of a turn taken
-/// on something no peer repeats with its effects left; the parties timed out
-/// waiting for them.
+/// on something no peer repeats with its effects left — a response, a timer —
+/// and the parties timed out waiting for them. A turn taken on an outside
+/// answer is not in this window: the copy's record still awaits that answer
+/// and asks for it again.
 pub(super) fn effects_lost(cut: &CutFacts, verdict: &ScenarioVerdict, _: &ObservedState) -> bool {
-    timed_out(verdict) && before_the_write(cut) && !cut.on_request
+    timed_out(verdict) && before_the_write(cut) && !cut.on_request && !cut.on_answer
 }
 
 /// `W-kill-teardown-lost`: the backup did not hold the write of a teardown
@@ -112,9 +101,9 @@ fn timed_out(verdict: &ScenarioVerdict) -> bool {
 }
 
 /// The kill came before the backup held the cut turn's write with its effects
-/// left, and no outside answer of a turn it held was in flight.
+/// left.
 fn before_the_write(cut: &CutFacts) -> bool {
-    !cut.held_and_left && !(cut.held && cut.answer_in_flight)
+    !cut.held_and_left
 }
 
 /// A teardown began — a leg ended — and every leg still up holds a confirmed

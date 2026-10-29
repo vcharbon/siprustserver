@@ -215,6 +215,10 @@ pub struct Call {
     /// again (RFC 3261 §17.2.2).
     #[serde(default)]
     pub answered: Vec<super::answered_request::AnsweredRequest>,
+    /// The requests sent off the call's turn whose answers it awaits, in
+    /// sending order: what a node serving the call sends again.
+    #[serde(default)]
+    pub awaited: Vec<super::off_turn::OffTurnRequest>,
 }
 
 impl Call {

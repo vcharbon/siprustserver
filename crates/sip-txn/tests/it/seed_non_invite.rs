@@ -138,9 +138,10 @@ async fn a_seeded_server_non_invite_absorbs_copies_until_its_final() {
     assert!(stack.drain_events().is_empty());
 }
 
-/// A seeded answered server non-INVITE sends nothing at the seed, answers
-/// each copy of its request with the final it holds and hands none up, and
-/// leaves the map at Timer J from the seed (RFC 3261 §17.2.2).
+/// A seeded answered server non-INVITE sends its final once at the seed —
+/// the record may be ahead of the wire — answers each copy of its request
+/// with it and hands none up, and leaves the map at Timer J from the seed
+/// (RFC 3261 §17.2.2).
 #[tokio::test(start_paused = true)]
 async fn a_seeded_answered_server_non_invite_repeats_its_final_until_timer_j() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
@@ -154,7 +155,7 @@ async fn a_seeded_answered_server_non_invite_repeats_its_final_until_timer_j() {
     };
     assert_eq!(stack.txn.seed(CALL_REF, vec![seed]).await.unwrap(), 1);
     elapse_ms(60).await;
-    assert!(stack.drain_peer().is_empty(), "nothing leaves at the seed");
+    assert_eq!(count_responses(&stack.drain_peer(), 200), 1, "the final leaves at the seed");
 
     stack.inject(&raw).await;
     elapse_ms(60).await;

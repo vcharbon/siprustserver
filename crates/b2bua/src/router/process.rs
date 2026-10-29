@@ -85,6 +85,18 @@ pub(super) async fn process(
             }
             super::initial_turn::Turn::Result(r) => *r,
         }
+    } else if crate::off_turn::is_answer(&event) && !ctx.state.contains(&call_ref) {
+        // The answer to a request this node sent while it held the call: a
+        // call no longer here — a copy stood down or shed, an ended call —
+        // takes it nowhere, and it never takes one over: the node serving the
+        // call sends its own (ADR-0039). The key its admit may have counted is
+        // released only when no node holds the call.
+        if !holds_a_record(ctx, &call_ref).await {
+            super::callouts::release_admit_fold_call(&ctx.limiter, &event);
+        }
+        drop(_guard);
+        release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
+        return;
     } else if let Some(answer) = RefreshAnswered::of(&event) {
         // A refresh answer applies to the resident call and never
         // materialises one: an ended call (or one that left this worker)
@@ -324,6 +336,13 @@ async fn reaper_verdict_gate(
 /// reclaim is (ADR-0047 D7). `None` = a genuine orphan, or a deferred
 /// terminal this call just discharged through the reclaim funnel (CDR written,
 /// delete propagated); the request then draws the orphan 481 (ADR-0020 X3).
+/// Whether this node's store holds a body of `call_ref`, as its backup or as
+/// its primary: the call lives on, here or elsewhere.
+async fn holds_a_record(ctx: &RouterCtx, call_ref: &str) -> bool {
+    ctx.state.peek_replica(call_ref).await.is_ok()
+        || ctx.state.peek_reclaimable(call_ref).await.is_ok()
+}
+
 async fn resident_or_materialised(ctx: &Arc<RouterCtx>, call_ref: &str) -> Option<Call> {
     let first = materialise(ctx, call_ref, Origin::Takeover).await;
     let disposition = match first {

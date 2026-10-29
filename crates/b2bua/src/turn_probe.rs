@@ -68,12 +68,12 @@ pub struct TurnMark<'a> {
     /// The turn handled a SIP request, not a response, a timer or an
     /// off-turn answer.
     pub on_request: bool,
+    /// The turn was taken on the answer to a request sent off the call's
+    /// turn, or on its deadline's expiry (ADR-0039).
+    pub on_answer: bool,
     /// The turn sent a request to an outside service, whose answer a later
     /// turn takes.
     pub called_out: bool,
-    /// After the turn the call awaits the answer of a request sent off its
-    /// turn: an answer deadline is in its ledger (ADR-0039).
-    pub awaits_answer: bool,
     /// Why the turn's last outbox entry left: set on [`Left`](TurnPoint::Left)
     /// only.
     pub released: Option<Released>,
@@ -142,8 +142,8 @@ mod tests {
             wrote: true,
             removed: false,
             on_request,
+            on_answer: false,
             called_out: false,
-            awaits_answer: false,
             released: None,
             backed: true,
         }

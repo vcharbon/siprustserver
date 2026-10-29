@@ -36,8 +36,9 @@
 //!   it (§17.2.2). A relay past its deadline has none: it settles as its
 //!   timeout, which answers its originator nothing.
 //! - a **server non-INVITE** this stack answered, while its Completed state
-//!   lasts ([`answered_seeds`]): the final as it left, which a copy of the
-//!   request draws again (§17.2.2) — the record may be ahead of the wire.
+//!   lasts ([`answered_seeds`]): the final as it left, sent once at the seed —
+//!   the record may be ahead of the wire — and drawn again by a copy of the
+//!   request (§17.2.2).
 
 use std::collections::HashSet;
 
@@ -177,11 +178,15 @@ fn dialog_creating_seed(call: &Call, leg: &Leg, record: &RequestRecord) -> Optio
         return None;
     }
     // A dialog of the leg is the record of a provisional — early, or ending
-    // on a CANCEL — and a 100 leaves none. A CANCEL sent with a provisional on
-    // record is on the wire already; one sent with none is still held, and
-    // rides the seed (RFC 3261 §9.1).
-    let provisional = !leg.dialogs.is_empty();
-    let cancel = (dialled.cancel_sent && !provisional).then_some(dialled.cancel_headers.as_slice());
+    // on a CANCEL — and a 100 leaves none. A CANCEL the record says was sent
+    // rides the seed, held until a provisional (RFC 3261 §9.1): the record may
+    // be ahead of the wire, so the CANCEL may never have left, or behind it,
+    // so the INVITE may have its final. The seed opens as an INVITE that drew
+    // no provisional and sends the INVITE once, which the callee answers with
+    // its latest provisional, releasing the CANCEL, or with its final, which
+    // ends the transaction with the CANCEL unsent (§17.2.1).
+    let cancel = dialled.cancel_sent.then_some(dialled.cancel_headers.as_slice());
+    let provisional = !leg.dialogs.is_empty() && cancel.is_none();
     client_seed(record.sent.as_ref()?, provisional, cancel)
 }
 
@@ -228,6 +233,17 @@ fn invite_record(record: &RequestRecord) -> bool {
     record.method == "INVITE"
 }
 
+/// Whether `call` holds a non-INVITE request in flight on a dialog, other
+/// than the keepalive: a relay or a request of its own awaiting its final, or
+/// a request received and owed one — a transaction a copy serves, which the
+/// party that began it may never repeat. The keepalive is left out: every
+/// quiet dialog sends one, and taking each over is the stale-CSeq storm
+/// ADR-0014 D1 avoids.
+pub(in crate::router) fn names_request_in_flight(call: &Call) -> bool {
+    call::helpers::every_record(call)
+        .any(|(_, _, r)| !invite_record(r) && r.author.as_deref() != Some(call::KEEPALIVE_AUTHOR))
+}
+
 /// The non-INVITE record of `call` whose received half `branch` names: a
 /// request a relay was made for, or one held for a later final. A copy of it
 /// is no new request.
@@ -262,8 +278,8 @@ pub(in crate::router) fn names_answered_branch(
 
 /// The seeds of the received non-INVITE requests `call` answered whose
 /// server transactions are Completed at `now_ms`: each final, as it left,
-/// which a copy of its request draws (RFC 3261 §17.2.2) — the record may
-/// hold the final before the wire saw it.
+/// sent once at the seed — the record may hold it before the wire saw it —
+/// and drawn by each copy of its request (RFC 3261 §17.2.2).
 pub(super) fn answered_seeds(call: &Call, now_ms: i64) -> Vec<TxnSeed> {
     call.answered
         .iter()

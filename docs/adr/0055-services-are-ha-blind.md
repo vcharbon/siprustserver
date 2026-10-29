@@ -88,10 +88,11 @@ What a service may rely on, and all it must know:
 - every per-call fact lives in the call record (`ext`, a typed slice, the
   ledger);
 - an off-turn request is delivered at least once: the backend may receive it
-  more than once, and its answer may come back as "no answer" at the deadline
-  though the backend acted (ADR-0039); only the first answer the call awaits
-  reaches the service. No idempotency key rides the request while no backend
-  reads one;
+  more than once — a node serving the call from its record sends every
+  request the call awaits again (ADR-0039 decision 5) — and its answer may
+  come back as "no answer" at the deadline though the backend acted
+  (ADR-0039); only the first answer the call awaits reaches the service. No
+  idempotency key rides the request while no backend reads one;
 - a call may end cleanly at any instant (§4);
 - it keeps durations or timers in its own state, never absolute times (§9
   re-anchors the platform's instants only).
@@ -152,10 +153,14 @@ again (§13.3.1.1); a reliable one is left to its own ladder (RFC 3262 §3). A
 reclaim re-sends none: its record may be behind what the takeover copy sent
 her (§8). The final of a received non-INVITE request is kept on the record
 while its server transaction is Completed, Timer J from the final
-(§17.2.2), and seeded Completed on it: a copy of the request that reaches the
-node serving the call draws that final, which the record may hold before the
-wire saw it, and the rules never read it as a new request (a second relay, a
-REFER read as glare).
+(§17.2.2), and seeded Completed on it, the final sent once at the seed: the
+record may hold it before the wire saw it, and a copy of the request that
+reaches the node serving the call draws it again, so the rules never read the
+copy as a new request (a second relay, a REFER read as glare). A CANCEL the
+record holds as sent for a dialled INVITE rides that INVITE's seed, held
+until a provisional: the seed sends the INVITE once, which the callee answers
+with its latest provisional, releasing the CANCEL, or with its final, which
+ends the transaction with the CANCEL unsent (§9.1, §17.2.1).
 
 ### 3. The replication write path
 
@@ -509,7 +514,8 @@ the re-anchor deadband of each other.
     leave two (the dead primary's and the survivor's, §5), never none;
   - primary killed unannounced (ADR-0031 case 3): the proxy's probe reads it
     dead 2 s later and tells the backup, which takes over the calls with work
-    in flight but an undecided one (ADR-0047 D1); its endpoint reads not ready
+    in flight, an awaited outside answer included (ADR-0039 decision 5), but
+    an undecided one (ADR-0047 D1); its endpoint reads not ready
     but stays in the slice 40 s later, and leaves it when the evicted pod is
     force-deleted 5 min later, when the backup settles and discharges what is
     left; judged as a kill of the primary;
@@ -624,20 +630,14 @@ the re-anchor deadband of each other.
     teardown the node began was not applied at the kill; a quiet call of a
     departed primary stays reactive (§5);
   - `W-kill-effects-lost`, such a kill at a turn taken on something no peer
-    repeats — a response, a timer, an off-turn answer (user ruling): the
-    turn's effects are lost with the node, the parties wait for them in vain,
-    and every dialog, early or confirmed, is left to its endpoint's own
-    timers. A turn taken on a request is not in this window: under `applied`
-    the message that stops its sender repeating it waits for the write (§3);
-  - `W-kill-answer-lost`, a kill of the primary once the backup holds the
-    write of a turn that sent a request to an outside service (a routing
-    service, the limiter), or after which the call awaited one's answer (its
-    deadline in the ledger, ADR-0039), whether that request left or not, the
-    backup applying no later turn of the primary (user ruling): the answer is
-    lost with the dead node, a turn that took it included, and the copy stays
-    reactive (§5); every dialog is left to its endpoint's own timers, and
-    when the turn's effects had not left, every request that reaches a living
-    worker still draws its final there;
+    repeats — a response, a timer (user ruling): the turn's effects are lost
+    with the node, the parties wait for them in vain, and every dialog, early
+    or confirmed, is left to its endpoint's own timers. A turn taken on a
+    request is not in this window: under `applied` the message that stops its
+    sender repeating it waits for the write (§3); nor is one taken on an
+    outside service's answer: the backup's record still awaits it, and the
+    copy sends the request again (ADR-0039 decision 5), so no answer a backup
+    holds the request of is lost with the node;
   - `W-off-answer-lost`, off only: a kill of the primary after a turn's
     request to an outside service left and before the backup applied the
     turn's write (user ruling): the answer returns to the dead node and is

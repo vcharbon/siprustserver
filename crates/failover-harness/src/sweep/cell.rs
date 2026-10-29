@@ -125,14 +125,15 @@ pub async fn run_cell(
             }
             () = tokio::time::sleep(SETTLE_STEP), if verdict.is_some() => {
                 let answered = parties.answer_strays().await;
+                let awaiting_ack = parties.repeat_unacked_finals().await;
                 settled += SETTLE_STEP;
                 let call = call_ref.get_or_insert_with(|| first_call(&cluster, name));
                 let clear = cluster.is_clear_of(call).await;
                 let pending = aftermath.pending();
                 // A cluster clear for a whole step: what a party sent as the
                 // cluster forgot the call (a hop ACK, a stray's answer) has
-                // landed.
-                let quiet = clear && reached.is_none() && !pending && !answered;
+                // landed, and no party's final awaits its ACK.
+                let quiet = clear && reached.is_none() && !pending && !answered && !awaiting_ack;
                 if (quiet && was_clear) || settled >= SETTLE_BUDGET {
                     break;
                 }
@@ -235,9 +236,6 @@ fn cut_facts(
         TurnPoint::Applied => turn.is_some_and(|t| t.released.is_some()),
     };
     let held = held_and_left || cut.at.point == TurnPoint::Applied;
-    // The copy sees no later turn of the dead primary whose write the
-    // backup never applied.
-    let later_applied = dead.iter().skip(cut.at.turn).any(|t| t.applied);
     let living: Vec<_> = cluster
         .workers
         .iter()
@@ -248,7 +246,7 @@ fn cut_facts(
         held_and_left,
         held,
         on_request: turn.is_none_or(|t| t.on_request),
-        answer_in_flight: turn.is_some_and(|t| t.called_out || t.awaits_answer) && !later_applied,
+        on_answer: turn.is_some_and(|t| t.on_answer),
         unapplied_call_out_left: dead
             .iter()
             .any(|t| t.called_out && t.released.is_some() && !t.applied),

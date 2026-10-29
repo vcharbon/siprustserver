@@ -51,14 +51,36 @@ impl UnackedFinals {
         });
     }
 
-    /// The ACK `r` ends the ladder of the final it acknowledges.
+    /// The ACK `r` ends the ladder of the final it acknowledges; a BYE ends
+    /// every ladder of the dialog it ends, whose session no ACK can still
+    /// confirm (RFC 3261 §15).
     pub(super) fn sight(&self, r: &SipRequest) {
-        if r.method().as_str() != "ACK" {
-            return;
-        }
         let Some(tag) = r.to().tag() else { return };
-        let key = (r.call_id().to_string(), tag.to_string(), r.cseq().seq());
-        self.pending.lock().unwrap().remove(&key);
+        let call_id = r.call_id().to_string();
+        match r.method().as_str() {
+            "ACK" => {
+                let key = (call_id, tag.to_string(), r.cseq().seq());
+                self.pending.lock().unwrap().remove(&key);
+            }
+            "BYE" => self.end_dialog(&call_id, tag),
+            _ => {}
+        }
+    }
+
+    /// This endpoint sent `r`: a BYE ends every ladder of its dialog, this
+    /// endpoint's tag being its From-tag.
+    pub(super) fn note_request_sent(&self, r: &SipRequest) {
+        if r.method().as_str() == "BYE" {
+            if let Some(tag) = r.from().tag() {
+                self.end_dialog(r.call_id().as_str(), tag);
+            }
+        }
+    }
+
+    /// End every ladder of the dialog `call_id` and this endpoint's `tag`
+    /// name.
+    fn end_dialog(&self, call_id: &str, tag: &str) {
+        self.pending.lock().unwrap().retain(|(c, t, _), _| !(c == call_id && t == tag));
     }
 
     /// When the next final is due again, if one awaits its ACK.
@@ -78,5 +100,10 @@ impl UnackedFinals {
             p.next = now + p.interval;
         }
         due
+    }
+
+    /// Whether a final still awaits its ACK at `now`.
+    pub(super) fn awaits_an_ack(&self, now: Instant) -> bool {
+        self.pending.lock().unwrap().values().any(|p| p.until > now)
     }
 }

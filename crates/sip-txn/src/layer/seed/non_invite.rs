@@ -98,13 +98,14 @@ impl Owner {
 
     /// A server non-INVITE Completed on the final `response` (RFC 3261
     /// §17.2.2), keyed by its top Via and method, held for Timer J from now,
-    /// sending nothing: a copy of its request draws `response` toward the
-    /// transaction's destination, the top Via's response target, `dest` where
-    /// it names none. An occupant that has sent no final, opened by the copy
-    /// that triggered the materialisation, takes `response` and sends it to
-    /// its own destination: that copy is answered. `false` when the response
-    /// names no branch or its identity holds a transaction that has sent its
-    /// final.
+    /// `response` sent once now toward the transaction's destination — the
+    /// top Via's response target, `dest` where it names none — and to each
+    /// copy of its request: the record may be ahead of the wire, so the first
+    /// copy may never have left, and a repeat is absorbed by the client
+    /// transaction (§17.1.2.2). An occupant that has sent no final, opened by
+    /// the copy that triggered the materialisation, takes `response` and keeps
+    /// its own destination. `false` when the response names no branch or its
+    /// identity holds a transaction that has sent its final.
     pub(super) async fn seed_answered_non_invite(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -116,9 +117,9 @@ impl Owner {
         let Some(key) = ServerTxnId::of_response(&response).map(ServerTxnId::to_key) else {
             return false;
         };
-        let occupant = match self.server(key.id()) {
+        let to = match self.server(key.id()) {
             Some(occupant) if !occupant.state.is_active() => return false,
-            Some(occupant) => Some(occupant.destination.unwrap_or(dest)),
+            Some(occupant) => occupant.destination.unwrap_or(dest),
             None => {
                 let destination = response_destination(response.top_via()).unwrap_or(dest);
                 self.open_txn(NewTransaction {
@@ -136,7 +137,7 @@ impl Owner {
                     destination: Some(destination),
                 });
                 self.hold_seeded_identity(TxnRef::Server(key.id()));
-                None
+                destination
             }
         };
         if let Some(txn) = self.server_mut(key.id()) {
@@ -146,9 +147,7 @@ impl Owner {
             txn.original_request = None;
         }
         self.arm_final_hold(key.id(), TxnKind::NonInvite, response.status());
-        if let Some(source) = occupant {
-            self.send_buffer(endpoint, response.image(), source).await;
-        }
+        self.send_buffer(endpoint, response.image(), to).await;
         true
     }
 }

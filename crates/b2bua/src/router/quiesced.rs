@@ -6,7 +6,9 @@
 //! the copy, never by a second takeover after the shed. A copy that holds the
 //! end of a call whose primary departed — the call ending, or a 2xx awaiting
 //! its ACK — is never shed: no other node runs those deadlines (ADR-0055 §5),
-//! and the copy discharges the call once it ends.
+//! and the copy discharges the call once it ends. Nor is a copy that awaits
+//! the answer to a request it sent off the call's turn: the answer comes back
+//! to it alone.
 
 use std::sync::Arc;
 
@@ -57,7 +59,7 @@ pub(super) async fn self_release_turn(ctx: &Arc<RouterCtx>, call_ref: &str) {
         }
         return;
     }
-    if ends_for_departed_primary(ctx, call_ref) {
+    if ends_for_departed_primary(ctx, call_ref) || awaits_an_answer(ctx, call_ref) {
         return;
     }
     if ctx.txn.active_txn_count_for_call(call_ref).await.unwrap_or(0) != 0 {
@@ -82,6 +84,7 @@ pub(super) async fn shed_if_quiesced(ctx: &Arc<RouterCtx>, call_ref: &str) -> bo
     let _guard = ctx.state.lock(call_ref).await;
     if !ctx.state.is_takeover(call_ref)
         || ends_for_departed_primary(ctx, call_ref)
+        || awaits_an_answer(ctx, call_ref)
         || ctx.txn.active_txn_count_for_call(call_ref).await.unwrap_or(0) != 0
     {
         return false;
@@ -99,6 +102,27 @@ fn ends_for_departed_primary(ctx: &RouterCtx, call_ref: &str) -> bool {
             || c.timers.iter().any(|t| *t.timer_type() == call::TimerType::RepeatGiveUp)
     };
     ctx.state.resident(call_ref).is_some_and(|c| ends(&c)) && primary_departed(ctx, call_ref)
+}
+
+/// Whether the copy of `call_ref` here awaits the answer to a request it sent
+/// off the call's turn: the answer reaches only this node, whose turn takes
+/// it, so the copy stays until it did ([`rearm_after_answer`]).
+fn awaits_an_answer(ctx: &RouterCtx, call_ref: &str) -> bool {
+    ctx.state.resident(call_ref).is_some_and(|c| !c.awaited.is_empty())
+}
+
+/// A takeover copy's turn took the last answer it awaited (the copy awaited
+/// some before the turn, `after` none): watch its transactions again, so the copy is shed once
+/// they clear, at once when none is left.
+pub(super) async fn rearm_after_answer(
+    ctx: &RouterCtx,
+    call_ref: &str,
+    awaited_before: bool,
+    after: &call::Call,
+) {
+    if awaited_before && after.awaited.is_empty() && ctx.state.is_takeover(call_ref) {
+        let _ = ctx.txn.watch_self_release(call_ref).await;
+    }
 }
 
 /// Shed the takeover copy of `call_ref`, under its per-call lock. A takeover

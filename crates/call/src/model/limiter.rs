@@ -113,7 +113,7 @@ pub enum Replacement {
 
 /// The admits a consult dispatched on a call's turn may send
 /// ([`CallLimiterState::owe_consult`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsultAdmits {
     /// The change number of the consult's first admit; the next ones follow.
     pub first_change: u64,
@@ -346,6 +346,23 @@ impl CallLimiterState {
         self.release_owed = true;
         self.admit_sent = true;
         Replacement::Send { change, held: self.held_set() }
+    }
+
+    /// A consult the call awaits is sent again by a node that did not send
+    /// it: `n` change numbers above every one reserved before, the consult
+    /// still open once.
+    pub fn renumber_consult(&mut self, n: u64) -> ConsultAdmits {
+        ConsultAdmits { first_change: self.reserve_changes(n), may_hold: self.may_hold() }
+    }
+
+    /// A service's replacement of the set with `entries` is sent again by a
+    /// node that did not send it, under a change number above every one
+    /// reserved before: the target from this turn, and the held set the
+    /// admit carries.
+    pub fn renumber_replacement(&mut self, entries: Vec<LimiterEntry>) -> (u64, LimiterHeld) {
+        let change = self.next_change();
+        self.ask(change, entries);
+        (change, self.held_set())
     }
 
     /// The change number and held set of the initial route's admit, sent on

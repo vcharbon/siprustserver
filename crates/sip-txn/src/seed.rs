@@ -20,8 +20,8 @@ pub enum TxnSeed {
     /// `Proceeding`, else `Trying`, where a CANCEL waits for one (RFC 3261
     /// §9.1), and the INVITE is re-sent once at the seed so the callee resends
     /// its latest provisional (§17.2.1).
-    /// `cancel` is a CANCEL the record says this side sent for it while it had
-    /// drawn no provisional: held until its first one (§9.1).
+    /// `cancel` is a CANCEL the record says this side sent for it: held until
+    /// its first provisional (§9.1); a seed that carries one opens `Trying`.
     /// `ack_ahead` is the ACK, as it left and where, of the 2xx to the INVITE
     /// the dialog sent before this one: sent once at the seed, ahead of the
     /// re-sent INVITE, so the peer never sees it while that INVITE is still
@@ -93,12 +93,13 @@ pub enum TxnSeed {
     /// A server non-INVITE this side answered with a final: `response`, the
     /// final as it left, keyed by its top-Via branch, sent-by and method
     /// (RFC 3261 §17.2.3). It runs in Completed from the seed for Timer J and
-    /// sends nothing on its own: a copy of the request draws `response`,
-    /// toward the transaction's response target (§18.2.2; `dest` where that
-    /// names no IP) (§17.2.2), so a copy that reaches this node after the
-    /// final was decided elsewhere is never handed up as a new request. A
-    /// transaction already on its key that has sent no final takes `response`
-    /// as its final and sends it to the copy that opened it.
+    /// sends `response` once at the seed toward the transaction's response
+    /// target (§18.2.2; `dest` where that names no IP) — the record may be
+    /// ahead of the wire, so the first copy may never have left — and again to
+    /// each copy of the request (§17.2.2), so a copy that reaches this node
+    /// after the final was decided elsewhere is never handed up as a new
+    /// request. A transaction already on its key that has sent no final takes
+    /// `response` as its final and sends it to the copy that opened it.
     ServerNonInviteAnswered { response: SipResponse, dest: SocketAddr, leg_id: Option<String> },
 }
 

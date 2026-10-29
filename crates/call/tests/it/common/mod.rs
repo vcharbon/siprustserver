@@ -345,6 +345,7 @@ pub fn representative_call() -> Call {
         tag_seed: 0,
         leg_space: call::LegSpace::Creator,
         answered: Vec::new(),
+        awaited: Vec::new(),
     }
 }
 
@@ -730,6 +731,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             tag_seed: 7,
             leg_space: call::LegSpace::Creator,
             answered: Vec::new(),
+            awaited: Vec::new(),
         },
     )
 }

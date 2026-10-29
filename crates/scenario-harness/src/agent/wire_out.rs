@@ -76,6 +76,17 @@ impl Agent {
         }
     }
 
+    /// Send again every final to an INVITE due for want of its ACK, as the
+    /// UAS core does until the ACK or 64·T1 (RFC 3261 §13.3.1.4, §17.2.1)
+    /// whatever its scenario still does; whether one still awaits its ACK.
+    pub async fn repeat_unacked_finals(&self) -> bool {
+        let (due, awaiting) = self.txn.take_due_finals(tokio::time::Instant::now());
+        for (wire, dst) in due {
+            let _ = self.send_bytes(&wire, dst).await;
+        }
+        awaiting
+    }
+
     /// This UA plays a peer that never retransmits: an actor driving it
     /// sends no request again for want of its answer and no final for want
     /// of its ACK.

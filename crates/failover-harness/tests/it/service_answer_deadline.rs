@@ -1,11 +1,13 @@
 //! A service's request sent off the call's turn (an adaptation HTTP request, a
 //! replacement of the call's admission set) whose answer dies with the node
 //! that sent it: the node crashes with the request in flight, and the call is
-//! served again either by the rebooted primary's reclaim or by the backup's
-//! takeover (the primary staying dead until the copy lets the call go). The
-//! copy reads the request's answer as lost at the request's deadline — not
-//! when it was served again — the service goes on, the call ends properly, one
-//! CDR is written and the limiter drains.
+//! served again by the rebooted primary's reclaim, by the backup's takeover on
+//! the callee's next request (the primary staying dead until the copy lets the
+//! call go), or by the backup's takeover at the proxy's dead verdict with no
+//! message from either party. The node serving the call again sends the
+//! request again from its record, and the service reads the outside answer
+//! before the request's deadline; the call ends properly, one CDR is written
+//! and the limiter drains.
 //!
 //! The service under test waits in `Awaiting` for the answer and tells the
 //! caller what it read with an in-dialog INFO, so the caller's inbox is the
@@ -216,6 +218,7 @@ async fn cluster(
     name: &str,
     http: &SimulatedHttpNetwork,
     limiter: Arc<dyn CallLimiter>,
+    recovery: Recovery,
 ) -> Cluster {
     let mut fh = FailoverHarness::new(name, &["b1", "b2"])
         .with_worker_services(awaiter_services)
@@ -226,8 +229,11 @@ async fn cluster(
         ));
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
-    let proxy =
+    let mut proxy =
         fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    if !matches!(recovery, Recovery::Verdict) {
+        proxy.tell_no_dead_verdict();
+    }
     let mut spawn = async |ordinal: &str, addr: &str, peer: &str| {
         fh.spawn_worker_limited(
             ordinal,
@@ -257,6 +263,10 @@ enum Recovery {
     /// backup take the call over. The primary reboots once the backup's copy
     /// let the call go, and reclaims it.
     Takeover,
+    /// The primary stays dead; the proxy's dead verdict makes the backup take
+    /// the call over, its only work the request's answer. The primary's
+    /// endpoint leaves the membership once the call ended.
+    Verdict,
 }
 
 /// What [`ask`] leaves in the test's hands.
@@ -359,20 +369,25 @@ async fn take_over(c: &mut Cluster, asked: &mut Asked) {
     assert!(worker(c, backup).serves(&asked.call_ref), "the backup took the call over");
 }
 
-/// The caller is told the outcome the service read at the request's
-/// deadline (`budget` past the asking turn plus the margin), not earlier.
+/// The caller is told the outcome the service read: the outside answer to
+/// the request sent again, before the request's deadline (`budget` past the
+/// asking turn plus the margin) — never the lost answer that deadline reads.
 async fn caller_told(c: &mut Cluster, asked: &Asked, outcome: &str, budget: Duration) {
     let deadline = asked.asked_at + (budget + MARGIN).as_millis() as i64;
-    assert!(c.fh.now_ms() < deadline, "the call is served again before its deadline");
     let mut told = c.alice.receive("INFO").await;
     assert_eq!(String::from_utf8_lossy(told.request().body()), outcome);
-    assert!(c.fh.now_ms() >= deadline, "read at the deadline, not when the call was restored");
+    assert!(c.fh.now_ms() < deadline, "the outside answer, read before the deadline");
     told.respond(200, "OK").await;
 }
 
 /// Alice hangs up; the call is over everywhere with one CDR and nothing held.
 async fn hang_up(c: &mut Cluster, mut asked: Asked, store: &CallStore) {
     scenario_harness::callflow::hangup(&mut asked.dialog, &c.bob).await;
+    settle_over(c, &asked, store).await;
+}
+
+/// The ended call is over everywhere with one CDR and nothing held.
+async fn settle_over(c: &mut Cluster, asked: &Asked, store: &CallStore) {
     // A replica goes once its holder's puller reconnects, whose backoff caps
     // at 30 s: the harness's terminal settle outlasts it.
     let (b1, b2, call_ref) = (&c.w_b1, &c.w_b2, asked.call_ref.as_str());
@@ -389,7 +404,8 @@ async fn hang_up(c: &mut Cluster, mut asked: Asked, store: &CallStore) {
 }
 
 /// The request named by `request` is lost with the primary and the call is
-/// served again by `recovery`; the service reads `outcome` at the deadline.
+/// served again by `recovery`, which sends it again; the service reads
+/// `outcome`, the outside answer.
 async fn lost_answer_cell(
     c: &mut Cluster,
     http: &SimulatedHttpNetwork,
@@ -422,6 +438,17 @@ async fn lost_answer_cell(
             assert!(!worker(c, backup).serves(&asked.call_ref), "the copy let the call go");
             reboot_and_reclaim(c, &primary).await;
         }
+        Recovery::Verdict => {
+            caller_told(c, &asked, outcome, budget).await;
+            let backup = if primary == "b1" { "b2" } else { "b1" };
+            assert!(worker(c, backup).serves(&asked.call_ref), "the backup took the call over");
+            scenario_harness::callflow::hangup(&mut asked.dialog, &c.bob).await;
+            // The copy ended the call and deferred it to its primary; the
+            // primary's departure discharges it (ADR-0047 D8).
+            worker(c, backup).simulate_peer_removed(&primary);
+            settle_over(c, &asked, store).await;
+            return;
+        }
     }
     hang_up(c, asked, store).await;
 }
@@ -431,8 +458,8 @@ async fn http_cell(name: &str, recovery: Recovery) {
     let _service: Box<dyn HttpServerHandle> =
         http.serve(service_addr(), Arc::new(AnswersOk)).await.unwrap();
     let store = CallStore::new(LEASE_OUTLIVING_THE_REPLICA_TTL, Clock::test_at(0));
-    let mut c = cluster(name, &http, Arc::new(NoopLimiter)).await;
-    let read = ("error", HTTP_BUDGET);
+    let mut c = cluster(name, &http, Arc::new(NoopLimiter), recovery).await;
+    let read = ("ok", HTTP_BUDGET);
     lost_answer_cell(&mut c, &http, service_addr(), b"http", recovery, read, &store).await;
 }
 
@@ -443,28 +470,38 @@ async fn admit_cell(name: &str, recovery: Recovery) {
     let _limiter: Box<dyn HttpServerHandle> = http.serve(limiter_addr(), server).await.unwrap();
     let limiter: Arc<dyn CallLimiter> =
         Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), limiter_addr(), ADMIT_BUDGET));
-    let mut c = cluster(name, &http, limiter).await;
-    let read = ("unavailable", ADMIT_BUDGET);
+    let mut c = cluster(name, &http, limiter, recovery).await;
+    let read = ("admitted", ADMIT_BUDGET);
     lost_answer_cell(&mut c, &http, limiter_addr(), b"admit", recovery, read, &store).await;
     assert_eq!(store.stats().current_total, 0, "the call's release drained the limiter");
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_http_answer_lost_with_its_node_is_read_as_lost_at_its_deadline() {
+async fn an_http_request_lost_with_its_node_is_sent_again_on_the_reclaim() {
     http_cell("service-answer-deadline-http", Recovery::Reclaim).await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_http_answer_lost_with_its_node_is_read_as_lost_on_the_takeover_copy() {
+async fn an_http_request_lost_with_its_node_is_sent_again_by_the_takeover_copy() {
     http_cell("service-answer-deadline-http-takeover", Recovery::Takeover).await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_admit_answer_lost_with_its_node_is_read_as_unavailable_at_its_deadline() {
+async fn an_http_request_lost_with_its_node_is_sent_again_at_the_dead_verdict() {
+    http_cell("service-answer-deadline-http-verdict", Recovery::Verdict).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_admit_lost_with_its_node_is_sent_again_on_the_reclaim() {
     admit_cell("service-answer-deadline-admit", Recovery::Reclaim).await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_admit_answer_lost_with_its_node_is_read_as_unavailable_on_the_takeover_copy() {
+async fn an_admit_lost_with_its_node_is_sent_again_by_the_takeover_copy() {
     admit_cell("service-answer-deadline-admit-takeover", Recovery::Takeover).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_admit_lost_with_its_node_is_sent_again_at_the_dead_verdict() {
+    admit_cell("service-answer-deadline-admit-verdict", Recovery::Verdict).await;
 }

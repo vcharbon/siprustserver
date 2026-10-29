@@ -251,8 +251,12 @@ pub enum Screened {
 /// Screen `event` against the call's pending deadlines: a delivered deadline
 /// fire (the timer screen already took it off the ledger) is read as its lost
 /// answer; an answer takes the deadline it closes off `call`'s ledger and
-/// cancels it on `fx`.
+/// cancels it on `fx`. Either takes the request it answers off the record of
+/// awaited requests ([`crate::off_turn::settle`]).
 pub fn screen(call: &mut Call, fx: &mut HandlerEffects, event: &CallEvent) -> Screened {
+    if !of_another_call(call, event) {
+        crate::off_turn::settle(call, event);
+    }
     if let CallEvent::Timer { key, .. } = event {
         return match &key.timer_type {
             TimerType::ServiceHttpAnswer { correlation_id } => {

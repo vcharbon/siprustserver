@@ -167,6 +167,7 @@ pub fn build_initial_call(
         tag_seed,
         leg_space: call::LegSpace::Creator,
         answered: Vec::new(),
+        awaited: Vec::new(),
     }
 }
 

@@ -1,21 +1,20 @@
 //! A decision consult the core sends off the call's turn whose answer dies
 //! with the node that sent it: the node crashes with the consult in flight,
 //! and the call is served again either by the rebooted primary's reclaim or by
-//! the backup's takeover. What bounds the wait (ADR-0039):
+//! the backup's takeover on a message that reaches it (the proxy tells no dead
+//! verdict). The node serving the call again sends the consult again from its
+//! record (ADR-0039); the engine under test never answers a consult, so what
+//! bounds the wait is the re-sent consult's own:
 //!
-//! - a `/call/failure` consult: its answer's deadline. The copy reads the
-//!   answer as lost at the deadline — not when it was served again — and
-//!   answers the caller the stack's own `503`, as for an unanswered consult;
+//! - a `/call/failure` consult: the decision deadline of the re-sent consult,
+//!   past which the caller is answered the stack's own `503`, as for an
+//!   unanswered consult;
 //! - a release event's consult (the subscribed maximum duration): the
-//!   duration timer is re-armed as the consult's answer deadline in the
-//!   call's replicated timer list, so the copy fires it again at that
-//!   deadline and re-sends the consult; the call ends within that consult's
-//!   own decision deadline (here unanswered: the local teardown);
+//!   re-sent consult's decision deadline, past which the call ends locally;
 //! - a REFER's authorization: its subscription's expiry, a timer of the
 //!   call's own; the referrer is told the transfer failed.
 //!
-//! Each call ends with one CDR and the limiter drained. The decision engine
-//! under test never answers a consult.
+//! Each call ends with one CDR and the limiter drained.
 
 use call::LimiterEntry;
 use std::net::SocketAddr;
@@ -148,8 +147,9 @@ async fn cluster(name: &str, max_duration_sec: i64) -> Cluster {
     });
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
-    let proxy =
+    let mut proxy =
         fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    proxy.tell_no_dead_verdict();
     let mut spawn = async |ordinal: &str, addr: &str, peer: &str| {
         fh.spawn_worker_limited(
             ordinal,
@@ -322,13 +322,14 @@ async fn fully_over(c: &mut Cluster, call_ref: &str) -> TerminationCause {
     cdr.termination.expect("the record names what ended the call").cause
 }
 
-// ── /call/failure: the answer's deadline ────────────────────────────────────
+// ── /call/failure: sent again, its decision deadline ───────────────────────
 
 /// Bob rings then refuses alice's call; the `/call/failure` consult is lost
-/// with the primary; the copy answers alice the stack's own 503 at the
-/// consult's deadline, not at the call's setup deadline. On the takeover path alice's
-/// UPDATE on the early dialog makes the backup take the call over; the
-/// pending failover answers it 491 (RFC 5407 §3.1).
+/// with the primary; the node serving the call again sends it again at once,
+/// and answers alice the stack's own 503 at that consult's decision deadline,
+/// before the lost one's answer deadline. On the takeover path alice's UPDATE
+/// on the early dialog makes the backup take the call over; the pending
+/// failover answers it 491 (RFC 5407 §3.1).
 async fn failure_cell(name: &str, recovery: Recovery) {
     let mut c = cluster(name, LONG_DURATION_SEC).await;
     let mut invite = c.alice.invite(&c.bob).with_sdp(OFFER).through(c.proxy.addr()).send().await;
@@ -342,7 +343,7 @@ async fn failure_cell(name: &str, recovery: Recovery) {
     let call_ref = served_call(&mut c, &primary);
     crash(&mut c, &primary).await;
     let budget = failure_budget(CONSULT_BUDGET, ADMIT_BUDGET).expect("a bounded consult");
-    let deadline = window(asked_at, budget + MARGIN);
+    let lost_deadline = window(asked_at, budget + MARGIN);
     match recovery {
         Recovery::Reclaim => reboot_and_reclaim(&mut c, &primary).await,
         Recovery::Takeover => {
@@ -350,12 +351,16 @@ async fn failure_cell(name: &str, recovery: Recovery) {
             assert!(worker(&mut c, backup_of(&primary)).serves(&call_ref), "the backup took over");
         }
     }
-    assert!(c.fh.now_ms() < deadline.0, "the call is served again before its deadline");
-    // Quiet up to a second before the deadline: nothing answers alice sooner.
-    c.fh.advance(Duration::from_millis((deadline.0 - c.fh.now_ms() - 1_000) as u64)).await;
+    // The reclaim re-sends while the rebooted node turns ready, the copy as
+    // it takes the call over: by the time the call is served either way.
+    let served_at = c.fh.now_ms();
+    let resent_at = consults_sent(&mut c, 2).await;
+    assert!(resent_at <= served_at + STEP.as_millis() as i64, "re-sent as the call is served");
     invite.expect(503).await;
-    assert_in(&c, deadline, "the caller was answered");
-    assert_eq!(c.asked.load(Ordering::SeqCst), 1, "the lost consult is not re-sent");
+    let answered_by = served_at + (CONSULT_BUDGET + STEP).as_millis() as i64;
+    assert!(c.fh.now_ms() <= answered_by, "answered within the re-sent consult's deadline");
+    assert!(c.fh.now_ms() < lost_deadline.0, "before the lost consult's answer deadline");
+    assert_eq!(c.asked.load(Ordering::SeqCst), 2, "the lost consult is sent again once");
     if let Recovery::Takeover = recovery {
         copy_lets_go_then_reboot(&mut c, &primary, &call_ref).await;
     }
@@ -363,16 +368,16 @@ async fn failure_cell(name: &str, recovery: Recovery) {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_failure_consult_lost_with_its_node_answers_503_at_its_deadline() {
+async fn a_failure_consult_lost_with_its_node_is_sent_again_by_the_reclaimed_call() {
     failure_cell("consult-answer-deadline-failure", Recovery::Reclaim).await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_failure_consult_lost_with_its_node_answers_503_on_the_takeover_copy() {
+async fn a_failure_consult_lost_with_its_node_is_sent_again_by_the_takeover_copy() {
     failure_cell("consult-answer-deadline-failure-takeover", Recovery::Takeover).await;
 }
 
-// ── release event: the duration timer fires again on the copy ──────────────
+// ── release event: sent again, its decision deadline ───────────────────────
 
 /// The backup takes the call over on bob's in-dialog INFO, relayed to alice.
 async fn take_over(c: &mut Cluster, call: &mut Established) {
@@ -389,10 +394,9 @@ async fn take_over(c: &mut Cluster, call: &mut Established) {
 }
 
 /// The subscribed maximum duration fires and its release consult is lost
-/// with the primary. The copy that serves the call reads the release event
-/// again at the consult's answer deadline — at once when it is served past
-/// it — and re-sends the consult (the decision layer sees the release event
-/// twice); unanswered within its decision deadline, it ends the call locally.
+/// with the primary. The node that serves the call again sends the consult
+/// again at once (the decision layer sees the release event twice);
+/// unanswered within its decision deadline, it ends the call locally.
 async fn release_cell(name: &str, recovery: Recovery) {
     let mut c = cluster(name, SHORT_DURATION_SEC).await;
     let mut call = establish(&mut c).await;
@@ -408,12 +412,10 @@ async fn release_cell(name: &str, recovery: Recovery) {
     let deadline = asked_at + (budget + MARGIN).as_millis() as i64;
     let resent_at = consults_sent(&mut c, 2).await;
     assert!(
-        resent_at <= served_at.max(deadline) + STEP.as_millis() as i64,
-        "the copy re-sent the release consult at its answer deadline, or as it was served past it"
+        resent_at <= served_at + STEP.as_millis() as i64,
+        "the node serving the call re-sent the release consult as it was served"
     );
-    if served_at < deadline {
-        assert!(resent_at >= deadline, "served before the deadline, the copy waited for it");
-    }
+    assert!(resent_at < deadline, "before the lost consult's answer deadline");
     c.alice.receive_absorbing("BYE", &["INFO"]).await.respond(200, "OK").await;
     c.bob.receive_absorbing("BYE", &["INFO"]).await.respond(200, "OK").await;
     assert_eq!(c.asked.load(Ordering::SeqCst), 2, "the copy re-sent the release consult once");
@@ -437,10 +439,11 @@ async fn a_release_consult_lost_with_its_node_is_re_sent_by_the_takeover_copy() 
 
 // ── REFER: the subscription's expiry ────────────────────────────────────────
 
-/// A REFER's authorization lost with its node: the reclaimed call tells the
-/// referrer the transfer failed at the subscription's expiry, and runs on.
+/// A REFER's authorization lost with its node: the reclaimed call sends it
+/// again, and unanswered, tells the referrer the transfer failed at the
+/// subscription's expiry, and runs on.
 #[tokio::test(start_paused = true)]
-async fn a_refer_consult_lost_with_its_node_ends_the_transfer_at_the_subscription_expiry() {
+async fn a_refer_consult_lost_with_its_node_is_sent_again_and_ends_at_the_subscription_expiry() {
     let mut c = cluster("consult-answer-deadline-refer", LONG_DURATION_SEC).await;
     let mut call = establish(&mut c).await;
     let refer_at = c.fh.now_ms();
@@ -465,7 +468,7 @@ async fn a_refer_consult_lost_with_its_node_ends_the_transfer_at_the_subscriptio
     );
     notify.respond(200, "OK").await;
     assert_in(&c, window(refer_at, Duration::from_secs(REFER_EXPIRY_SEC as u64)), "told");
-    assert_eq!(c.asked.load(Ordering::SeqCst), 1, "the authorization is not re-sent");
+    assert_eq!(c.asked.load(Ordering::SeqCst), 2, "the authorization is sent again once");
     scenario_harness::callflow::hangup(&mut call.dialog, &c.bob).await;
     assert_eq!(fully_over(&mut c, &call.call_ref).await, TerminationCause::RemoteBye);
 }

@@ -569,10 +569,10 @@ fn an_early_b_leg_seeds_its_invite_with_a_provisional() {
     assert_eq!(client_cancel(&seeds_for(&call, 0)), (true, None));
 }
 
-/// A CANCEL the record says was sent with no provisional on record is still
-/// held: it rides the seed, stating the `Reason` it stated. One sent after a
-/// provisional is on the wire already; the early dialog it is ending still
-/// records that provisional.
+/// A CANCEL the record says was sent rides the seed, stating the `Reason` it
+/// stated, held until a provisional: with one on record the seed opens as an
+/// INVITE that drew none, so the INVITE re-sent at the seed draws the callee's
+/// latest provisional, which releases the CANCEL, or its final.
 #[test]
 fn a_cancelled_b_leg_seeds_its_held_cancel_with_the_stated_reason() {
     let reason = vec![("Reason".to_string(), "Q.850;cause=16".to_string())];
@@ -586,7 +586,10 @@ fn a_cancelled_b_leg_seeds_its_held_cancel_with_the_stated_reason() {
 
     let mut call = call_with(LegState::Early, b_leg(LegState::Early, Some(b_handle(B_BRANCH, 1))));
     call::helpers::record_cancel_sent(&mut call, "b-1", reason);
-    assert_eq!(client_cancel(&seeds_for(&call, 0)), (true, None));
+    assert_eq!(
+        client_cancel(&seeds_for(&call, 0)),
+        (false, Some(vec!["Q.850;cause=16".to_string()]))
+    );
 }
 
 /// This stack's own INFO on the b-leg's confirmed dialog, sent with the

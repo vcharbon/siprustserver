@@ -124,10 +124,15 @@ pub fn rule_chain_turn(
     {
         Screened::Expired(lost) => {
             lost_answer = lost;
+            ladder_fx.took_answer = true;
             (&lost_answer, true)
         }
         Screened::Unawaited => (event, false),
-        Screened::Awaited | Screened::Other => (event, true),
+        Screened::Awaited => {
+            ladder_fx.took_answer = true;
+            (event, true)
+        }
+        Screened::Other => (event, true),
     };
     if let Some(obligation) = fired_obligation(event, &TimerType::Rung) {
         let before = call.clone();

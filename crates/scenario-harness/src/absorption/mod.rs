@@ -278,6 +278,7 @@ impl Absorption {
             SipMessage::Request(r) => {
                 self.unanswered.note_sent(r, wire, dst);
                 self.rejected_acks.note_sent(r, wire, dst);
+                self.unacked_finals.note_request_sent(r);
             }
         }
     }
@@ -306,6 +307,15 @@ impl Absorption {
         let mut due = self.unacked_finals.take_due(now);
         due.extend(self.unanswered.take_due(now));
         due
+    }
+
+    /// The finals to an INVITE due again at `now` for want of their ACK, each
+    /// with its destination, and whether one still awaits its ACK.
+    pub fn take_due_finals(&self, now: tokio::time::Instant) -> (Vec<(Vec<u8>, SocketAddr)>, bool) {
+        if !self.retransmits.load(Ordering::Relaxed) {
+            return (Vec::new(), false);
+        }
+        (self.unacked_finals.take_due(now), self.unacked_finals.awaits_an_ack(now))
     }
 
     /// The finals the [`Owner::TxnCompleted`] sightings since the last call

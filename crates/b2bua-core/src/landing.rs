@@ -1,6 +1,6 @@
 //! The landing pass a turn's result takes before the shell persists it
 //! (ADR-0052 §6): the answer deadlines of the requests the turn sent off its
-//! turn, the refresh arming, the stated headers on every outbound message, the
+//! turn and the requests themselves, the refresh arming, the stated headers on every outbound message, the
 //! non-INVITE finals it sends, the message ring's record of what the turn
 //! sends and the turn's seal.
 
@@ -27,6 +27,9 @@ pub fn land(result: HandlerResult, landing: &Landing<'_>, now_ms: i64) -> Handle
     // Every request sent off the call's turn has its answer's deadline on
     // the record the turn lands (ADR-0039).
     let result = crate::answer_deadline::arm(result, &landing.budgets, now_ms);
+    // ... and is itself on that record, which a node serving the call sends
+    // again from.
+    let result = crate::off_turn::record(result);
     // A counted live call always has its refresh armed within one refresh
     // period of the learnt lease, before the record lands: the one arming of
     // the refresh, for the admitting turn, the refresh turn and every other.

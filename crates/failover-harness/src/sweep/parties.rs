@@ -102,6 +102,17 @@ impl Parties {
             .chain(self.shared.iter().map(|(_, agent)| agent))
     }
 
+    /// Send again every party's final to an INVITE due for want of its ACK
+    /// once the scenario ended (RFC 3261 §13.3.1.4, §17.2.1); whether one
+    /// still awaits its ACK.
+    pub async fn repeat_unacked_finals(&self) -> bool {
+        let mut awaiting = false;
+        for agent in self.all() {
+            awaiting |= agent.repeat_unacked_finals().await;
+        }
+        awaiting
+    }
+
     /// Answer every request queued at a party whose call is over, as a UA
     /// holding no dialog does: an ACK takes no answer, a request in a dialog
     /// draws `481` (RFC 3261 §12.2.2, §15.1.2), any other request `200`. A
