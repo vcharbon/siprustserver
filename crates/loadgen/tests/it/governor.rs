@@ -117,10 +117,13 @@ async fn post_rate_retargets_the_running_server() {
     // and the retry-connect loop below would then talk to the foreign server.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bind = listener.local_addr().unwrap();
-    let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(|| "render-body\n".to_string());
-    let srv_rate = rate.clone();
+    let surface = loadgen::MetricsSurface {
+        metrics: Arc::new(|| "render-body\n".to_string()),
+        rate: Some(rate.clone()),
+        report: None,
+    };
     tokio::spawn(async move {
-        let _ = serve_metrics_on(listener, render, Some(srv_rate)).await;
+        let _ = serve_metrics_on(listener, surface).await;
     });
 
     // Retry-connect + one HTTP round-trip helper.
@@ -177,10 +180,13 @@ async fn post_drain_closes_the_window_of_the_running_server() {
     let rate = RateHandle::new(10.0);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bind = listener.local_addr().unwrap();
-    let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(|| "render-body\n".to_string());
-    let srv_rate = rate.clone();
+    let surface = loadgen::MetricsSurface {
+        metrics: Arc::new(|| "render-body\n".to_string()),
+        rate: Some(rate.clone()),
+        report: None,
+    };
     tokio::spawn(async move {
-        let _ = serve_metrics_on(listener, render, Some(srv_rate)).await;
+        let _ = serve_metrics_on(listener, surface).await;
     });
     let mut stream = tokio::net::TcpStream::connect(bind).await.unwrap();
     stream.write_all(b"POST /drain HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();

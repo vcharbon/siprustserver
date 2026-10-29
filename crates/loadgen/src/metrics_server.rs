@@ -1,36 +1,66 @@
 //! The metrics socket: a minimal HTTP/1.1 server for `/metrics`, the live
-//! rate, the drain and the on-demand flamegraph.
+//! report, the live rate, the drain and the on-demand flamegraph.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use e2e_model::LoadRunIndex;
+use loadrun_render::{Live, RenderOpts, DEFAULT_REFRESH_SECS};
+use tokio::io::AsyncWriteExt;
+
 use crate::rate::RateHandle;
 
-/// A minimal HTTP/1.1 server (hand-rolled over `TcpListener` — no hyper
+mod request;
+use request::{read_request, Request};
+
+/// A stored sample page by run-dir-relative path, if any.
+pub type SamplePageFn = dyn Fn(&str) -> Option<Arc<str>> + Send + Sync;
+
+/// The live report a running load generator serves: its index as of now and
+/// its stored sample pages.
+#[derive(Clone)]
+pub struct LiveReport {
+    /// The run's index as of the call (`finished: false`).
+    pub index: Arc<dyn Fn() -> LoadRunIndex + Send + Sync>,
+    /// The stored sample page at a run-dir-relative path, if any.
+    pub page: Arc<SamplePageFn>,
+}
+
+/// What the metrics socket serves.
+#[derive(Clone)]
+pub struct MetricsSurface {
+    /// The Prometheus text of `/metrics`.
+    pub metrics: Arc<dyn Fn() -> String + Send + Sync>,
+    /// The live rate `/rate` and `/drain` act on; `None` answers them 404.
+    pub rate: Option<RateHandle>,
+    /// The live report of `/`; `None` serves `/metrics` there.
+    pub report: Option<LiveReport>,
+}
+
+/// A minimal HTTP/1.1 server (hand-rolled over `TcpListener`: no hyper
 /// dependency). Routes:
 ///
-/// - **`GET /metrics`** (and any other GET) → `render()`, the Prometheus surface.
-/// - **`POST /rate?cps=<float>`** (when a [`RateHandle`] is attached) → re-targets
-///   the offered call rate live (clamped to `>= 0`; `0` pauses new-call admission).
-///   The governor re-anchors its grid on the next slot. Responds with the applied
-///   value.
+/// - **`GET /`** (when a [`LiveReport`] is attached) → the report page
+///   rendered from the live index, reloading every 60 s; `?refresh=N` sets the
+///   period, `?refresh=0` freezes it.
+/// - **`GET /load-result.json`** → the live index; **`GET /callflows/…`** → a
+///   stored sample page, from memory.
+/// - **`GET /metrics`** (and any other GET) → the Prometheus surface.
+/// - **`POST /rate?cps=<float>`** (when a [`RateHandle`] is attached) →
+///   re-targets the offered call rate live (clamped to `>= 0`; `0` pauses
+///   new-call admission), answering the applied value. `cps` may come as a
+///   form field instead; a form post is answered by a redirect to `/`.
 /// - **`GET /rate`** → the current target cps.
-/// - **`POST /drain`** (when a [`RateHandle`] is attached) → the run places no
-///   new call, waits for its calls in flight to end and exits.
-/// - **`GET /debug/flamegraph[?seconds=N]`** → on-demand pprof CPU flamegraph
-///   SVG of this process (default 20 s, max 120). The load driver runs the same
-///   shared `sip-message` parse path the SUT tiers do, at a saturated core, so
-///   it is the high-signal vantage for parse/allocation cost. Sampled on a
-///   blocking thread; zero overhead when no capture is in flight.
+/// - **`POST /drain`** → the run places no new call, waits for its calls in
+///   flight to end and exits (a form post redirects to `/`).
+/// - **`GET /debug/flamegraph[?seconds=N]`** → an on-demand pprof CPU
+///   flamegraph SVG of this process (default 20 s, max 120), sampled on a
+///   blocking thread.
 ///
 /// Runs until the task is cancelled.
-pub async fn serve_metrics(
-    addr: SocketAddr,
-    render: Arc<dyn Fn() -> String + Send + Sync>,
-    rate: Option<RateHandle>,
-) -> std::io::Result<()> {
+pub async fn serve_metrics(addr: SocketAddr, surface: MetricsSurface) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    serve_metrics_on(listener, render, rate).await
+    serve_metrics_on(listener, surface).await
 }
 
 /// [`serve_metrics`] over an already-bound listener. Callers that need the
@@ -38,104 +68,117 @@ pub async fn serve_metrics(
 /// collide with an unrelated listener — bind first and hand the listener over.
 pub async fn serve_metrics_on(
     listener: tokio::net::TcpListener,
-    render: Arc<dyn Fn() -> String + Send + Sync>,
-    rate: Option<RateHandle>,
+    surface: MetricsSurface,
 ) -> std::io::Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     loop {
         let (mut sock, _) = listener.accept().await?;
-        let render = render.clone();
-        let rate = rate.clone();
+        let surface = surface.clone();
         tokio::spawn(async move {
-            let mut buf = [0u8; 2048];
-            let n = sock.read(&mut buf).await.unwrap_or(0);
-            let (method, path, query) = parse_request_line(&buf[..n]);
-
-            // CPU flamegraph: binary SVG body, so it answers ahead of the
-            // text/plain routes below. Sampled on a blocking thread, leaving the
-            // call-driving async workers to keep offering load.
-            if path == "/debug/flamegraph" {
-                let secs = flamegraph_util::parse_seconds(&format!("?{query}"), 20, 120);
-                let svg =
-                    tokio::task::spawn_blocking(move || flamegraph_util::capture_svg(secs, 99))
-                        .await
-                        .unwrap_or_else(|e| Err(format!("join error: {e}")));
-                let (status, ctype, body) = match svg {
-                    Ok(svg) => ("200 OK", "image/svg+xml", svg),
-                    Err(e) => (
-                        "500 Internal Server Error",
-                        "text/plain",
-                        format!("flamegraph failed: {e}\n").into_bytes(),
-                    ),
-                };
-                let head = format!(
-                    "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                let _ = sock.write_all(head.as_bytes()).await;
-                let _ = sock.write_all(&body).await;
-                return;
-            }
-
-            let (status, body) = if method == "POST" && path == "/drain" {
-                match &rate {
-                    None => ("404 Not Found", "no rate handle attached\n".to_string()),
-                    Some(h) => {
-                        h.drain();
-                        ("200 OK", "ok: draining\n".to_string())
-                    }
-                }
-            } else if path == "/rate" {
-                match &rate {
-                    None => ("404 Not Found", "no rate handle attached\n".to_string()),
-                    Some(h) if method == "POST" => match query_get(&query, "cps")
-                        .map(|s| s.parse::<f64>())
-                    {
-                        Some(Ok(cps)) => {
-                            let applied = h.set(cps);
-                            ("200 OK", format!("ok: target cps={applied}\n"))
-                        }
-                        // A missing or malformed `cps` is a client error (never a
-                        // silent no-op that leaves the rate wherever it was).
-                        _ => ("400 Bad Request", "expected POST /rate?cps=<float>\n".to_string()),
-                    },
-                    // GET /rate → the current target.
-                    Some(h) => ("200 OK", format!("{}\n", h.cps())),
-                }
-            } else {
-                ("200 OK", render())
-            };
-
-            let resp = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
+            let req = read_request(&mut sock).await;
+            let reply = route(&surface, &req).await;
+            let mut head = format!(
+                "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+                reply.status,
+                reply.ctype,
+                reply.body.len()
             );
-            let _ = sock.write_all(resp.as_bytes()).await;
+            if let Some(location) = reply.location {
+                head.push_str(&format!("Location: {location}\r\n"));
+            }
+            head.push_str("\r\n");
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(&reply.body).await;
         });
     }
 }
 
-/// Parse the first request line into `(METHOD, path, query)`. Best-effort: a
-/// malformed/empty request yields `("", "", "")` and falls through to the render
-/// path. The query is the raw `a=b&c=d` after `?` (empty if none).
-fn parse_request_line(buf: &[u8]) -> (String, String, String) {
-    let text = String::from_utf8_lossy(buf);
-    let line = text.lines().next().unwrap_or("");
-    let mut parts = line.split_whitespace();
-    let method = parts.next().unwrap_or("").to_string();
-    let target = parts.next().unwrap_or("");
-    let (path, query) = match target.split_once('?') {
-        Some((p, q)) => (p.to_string(), q.to_string()),
-        None => (target.to_string(), String::new()),
-    };
-    (method, path, query)
+struct Reply {
+    status: &'static str,
+    ctype: &'static str,
+    body: Vec<u8>,
+    location: Option<&'static str>,
 }
 
-/// Pull `key`'s value out of a raw `a=b&c=d` query string (no percent-decoding:
-/// the values are numbers).
-fn query_get(query: &str, key: &str) -> Option<String> {
-    query.split('&').find_map(|kv| {
-        let (k, v) = kv.split_once('=')?;
-        (k == key && !v.is_empty()).then(|| v.to_string())
-    })
+const TEXT: &str = "text/plain; version=0.0.4";
+const HTML: &str = "text/html; charset=utf-8";
+
+fn text(status: &'static str, body: String) -> Reply {
+    Reply { status, ctype: TEXT, body: body.into_bytes(), location: None }
+}
+
+/// A rate or drain request's answer: the text for a client, a redirect back
+/// to the page for a browser form.
+fn acted(req: &Request, body: String) -> Reply {
+    if req.is_form() {
+        Reply { location: Some("/"), ..text("303 See Other", body) }
+    } else {
+        text("200 OK", body)
+    }
+}
+
+async fn route(surface: &MetricsSurface, req: &Request) -> Reply {
+    let (method, path) = (req.method.as_str(), req.path.as_str());
+    if path == "/debug/flamegraph" {
+        let secs = flamegraph_util::parse_seconds(&format!("?{}", req.query), 20, 120);
+        let svg = tokio::task::spawn_blocking(move || flamegraph_util::capture_svg(secs, 99))
+            .await
+            .unwrap_or_else(|e| Err(format!("join error: {e}")));
+        return match svg {
+            Ok(svg) => {
+                Reply { status: "200 OK", ctype: "image/svg+xml", body: svg, location: None }
+            }
+            Err(e) => text("500 Internal Server Error", format!("flamegraph failed: {e}\n")),
+        };
+    }
+    let no_rate = || text("404 Not Found", "no rate handle attached\n".to_string());
+    match (method, path, &surface.rate, &surface.report) {
+        ("POST", "/drain", None, _) | (_, "/rate", None, _) => no_rate(),
+        ("POST", "/drain", Some(rate), _) => {
+            rate.drain();
+            acted(req, "ok: draining\n".to_string())
+        }
+        ("POST", "/rate", Some(rate), _) => match req.param("cps").map(|s| s.parse::<f64>()) {
+            Some(Ok(cps)) => {
+                let applied = rate.set(cps);
+                acted(req, format!("ok: target cps={applied}\n"))
+            }
+            // A missing or malformed `cps` is a client error (never a silent
+            // no-op that leaves the rate wherever it was).
+            _ => text("400 Bad Request", "expected POST /rate?cps=<float>\n".to_string()),
+        },
+        (_, "/rate", Some(rate), _) => text("200 OK", format!("{}\n", rate.cps())),
+        ("GET", "/", _, Some(report)) => {
+            let refresh = req
+                .param("refresh")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(DEFAULT_REFRESH_SECS);
+            let opts = RenderOpts {
+                sample_prefix: String::new(),
+                live: Some(Live { refresh_secs: refresh }),
+            };
+            let page = loadrun_render::render_page(&(report.index)(), &opts);
+            Reply { status: "200 OK", ctype: HTML, body: page.into_bytes(), location: None }
+        }
+        ("GET", "/load-result.json", _, Some(report)) => {
+            let json = serde_json::to_string_pretty(&(report.index)()).unwrap_or_default();
+            Reply {
+                status: "200 OK",
+                ctype: "application/json",
+                body: json.into_bytes(),
+                location: None,
+            }
+        }
+        ("GET", p, _, Some(report)) if p.starts_with("/callflows/") => {
+            match (report.page)(&p[1..]) {
+                Some(page) => Reply {
+                    status: "200 OK",
+                    ctype: HTML,
+                    body: page.as_bytes().to_vec(),
+                    location: None,
+                },
+                None => text("404 Not Found", "no such sample page\n".to_string()),
+            }
+        }
+        _ => text("200 OK", (surface.metrics)()),
+    }
 }

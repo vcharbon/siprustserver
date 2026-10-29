@@ -4,7 +4,8 @@
 //! It mixes basic load (the kind SIPp does well) with complex flows SIPp can't
 //! easily express (REFER blind transfer, re-INVITE, OPTIONS-keepalive long hold)
 //! against the **real** cluster, with a managed call rate, bounded memory, and
-//! dual reporting: a live Prometheus `/metrics` surface plus an on-disk report
+//! dual reporting: a live Prometheus `/metrics` surface and live report page,
+//! plus an on-disk report
 //! with bounded per-`(scenario × result-class)` callflow samples (including OK,
 //! so OK vs failing flows are comparable).
 //!
@@ -76,20 +77,20 @@ pub use catalogue::CATALOGUE;
 pub use class::{CallOutcome, ResultClass};
 pub use ctx::{CallCtx, CallEnv, CoreIdentity, CorrelationStamp};
 pub use driver::{CallConfig, CallTuning, Driver, DriverCfg, MuxTransport};
-pub use metrics_server::{serve_metrics, serve_metrics_on};
+pub use metrics_server::{serve_metrics, serve_metrics_on, LiveReport, MetricsSurface};
 pub use mix_entry::MixEntry;
 pub use mux::{
     labelled_prefix_leg_picker, prefix_leg_picker, CallRouting, ClaimRule, Correlation, DropDir,
     EndpointSpec, Exchange, LegInfo, LegPicker, MuxCore, Role, RttSink, TargetedDrop,
 };
 pub use rate::{Governor, RateHandle};
-pub use report::{CallEvidence, Reporter, ReporterCfg};
+pub use report::{CallEvidence, Reporter, ReporterCfg, SERIES_TICK};
 // The machine-readable run index (`load-result.json`) the reporter writes — the
 // axis data model shared with the e2e website. Re-exported so the CLI/tests use
 // one path (`loadgen::LoadRunIndex`) without a direct e2e-model dependency.
 pub use e2e_model::{
     Canaries, CheckSummaryRow, CheckpointRow, CountRow, LatencyRow, LoadRunIndex, LoadRunMeta,
-    SampleGroup,
+    Progress, SampleGroup, SeriesPoint,
 };
 pub use scenarios::{
     LegSpec, LoadScenario, ScenarioId, ScenarioInputs, ShapeDescriptor, ShapeRegistry,

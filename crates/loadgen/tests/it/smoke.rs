@@ -2679,7 +2679,7 @@ async fn loadgen_loss_soak_all_bodies_recover() {
         assert_eq!(
             audit,
             0,
-            "body {id}: {audit} rfc_audit_fail under loss, by rule in the report's summary.md:\n{}",
+            "body {id}: {audit} rfc_audit_fail under loss, by rule in the report's index.html:\n{}",
             reporter.render_prometheus()
         );
         assert_eq!(panic, 0, "body {id}: {panic} panic:\n{}", reporter.render_prometheus());

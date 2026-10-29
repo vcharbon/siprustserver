@@ -353,11 +353,19 @@ fn fixture_load_result() -> serde_json::Value {
             "durationSecs": 60,
             "maxInFlight": 2000,
             "egress": "transparent",
-            "profile": "endurance baseline"
+            "profile": "endurance baseline",
+            "commandLine": ["loadgen", "--cps", "20", "--duration", "60"]
+        },
+        "progress": {
+            "elapsedMs": 60_000, "targetCps": 20.0, "draining": false, "offered": 1185,
+            "placed": 1181, "inFlight": 0, "ok": 1180, "failed": 1, "rejected": 0,
+            "notPlaced": 4, "generatorFailures": 0
         },
         "counts": [
             { "scenario": "basic_call", "class": "ok", "case": "", "count": 1180, "ok": true },
-            { "scenario": "reinvite", "class": "check_fail", "case": "alice.invite.from.userInfo", "count": 1, "ok": false }
+            { "scenario": "reinvite", "class": "check_fail", "case": "alice.invite.from.userInfo", "count": 1, "ok": false,
+              "judged": { "failed": 1, "judged": 8, "base": 9, "basis": "checked" },
+              "error": "case checks: alice.invite from.userInfo: mismatch" }
         ],
         "latency": [
             { "scenario": "basic_call", "n": 1180, "meanMs": 12.5, "p50Ms": 10.0, "p90Ms": 25.0, "p99Ms": 40.0, "maxMs": 88.0 }
@@ -369,7 +377,7 @@ fn fixture_load_result() -> serde_json::Value {
             { "scenario": "reinvite", "passed": 7, "failed": 1 }
         ],
         "canaries": {
-            "orphans": 0, "shed": 4, "drops": 11, "ringingExpected": 1185, "ringingReceived": 1184
+            "orphans": 0, "shed": 4, "dropsIn": 5, "dropsOut": 6, "inboxDrops": 0, "ringingExpected": 1185, "ringingReceived": 1184
         },
         "samples": [
             { "scenario": "reinvite", "class": "check_fail", "case": "alice.invite.from.userInfo",
@@ -406,9 +414,9 @@ fn load_run_app(tag: &str) -> (PathBuf, Router) {
 }
 
 /// The list + detail + JSON-negotiation path for load runs: the index lists the
-/// run (skipping the index-less dir); the detail HTML renders the counts table,
-/// latency, checks, canaries + a sample link; and the same detail route mirrors
-/// the persisted load-result.json under `Accept: application/json`.
+/// run (skipping the index-less dir); the detail HTML is the shared load run
+/// report with its sample links under the run's files; and the same detail
+/// route mirrors the persisted load-result.json under `Accept: application/json`.
 #[tokio::test(flavor = "multi_thread")]
 async fn load_runs_list_detail_and_json() {
     let (root, app) = load_run_app("listdetail");
@@ -428,13 +436,18 @@ async fn load_runs_list_detail_and_json() {
     assert_eq!(doc["failedCalls"], 1);
     assert_eq!(doc["finished"], true);
 
-    // Detail HTML: counts table + latency + checks + canaries + sample link.
+    // Detail HTML: the shared load run report, inside the site's chrome.
     let (st, html) = get(&app, "/load/endurance-1", false).await;
     assert_eq!(st, StatusCode::OK);
+    assert!(html.contains("<nav>"), "the site's chrome around it");
+    assert!(html.contains("loadgen --cps 20 --duration 60"), "the command line: {html}");
     assert!(html.contains("check_fail"), "counts table: {html}");
+    assert!(html.contains("1 of 8 checked (12.5 %), ≈ 1 of 9"), "judged share: {html}");
+    assert!(html.contains("case checks: alice.invite from.userInfo: mismatch"), "error column");
     assert!(html.contains("192.0.2.250:5060"), "target echoed");
+    assert!(html.contains("Headline") && html.contains("in 5 · out 6"), "headline: {html}");
     assert!(html.contains("Latency"), "latency section");
-    assert!(html.contains("Canaries"), "canaries section");
+    assert!(!html.contains("<form"), "a stored run has no live controls");
     assert!(
         html.contains("/load/endurance-1/files/callflows/reinvite/check_fail/alice.invite.from.userInfo/0.html"),
         "sample page linked: {html}"

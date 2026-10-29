@@ -1477,6 +1477,7 @@ dependencies = [
  "axum",
  "e2e-core",
  "http-body-util",
+ "loadrun-render",
  "maud",
  "seq-report",
  "serde",
@@ -2756,6 +2757,7 @@ dependencies = [
  "flamegraph-util",
  "futures",
  "layer-harness",
+ "loadrun-render",
  "metric-catalogue",
  "metric-values",
  "regex",
@@ -2767,6 +2769,13 @@ dependencies = [
  "sip-net-testkit",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "loadrun-render"
+version = "0.1.0"
+dependencies = [
+ "e2e-model",
 ]
 
 [[package]]

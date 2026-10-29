@@ -48,7 +48,7 @@ crates/callshapes/src/plan.rs 1132
 crates/call/tests/it/model_helpers.rs 893
 crates/e2e-core/src/infra.rs 622
 crates/e2e-model/src/registry.rs 575
-crates/e2e-web/src/lib.rs 1280
+crates/e2e-web/src/lib.rs 1123
 crates/failover-harness/src/harness.rs 1970
 crates/failover-harness/src/runner.rs 615
 crates/failover-harness/tests/it/call_terminate_on_backup.rs 986
@@ -60,7 +60,6 @@ crates/failover-harness/tests/it/limiter_release_by_call.rs 938
 crates/failover-harness/tests/it/prack_takeover.rs 897
 crates/http-net-testkit/tests/it/scripted.rs 921
 crates/loadgen/src/driver.rs 574
-crates/loadgen/src/report.rs 550
 crates/loadgen/tests/it/fake_net.rs 893
 crates/loadgen/tests/it/smoke.rs 2695
 crates/media/src/transport.rs 533

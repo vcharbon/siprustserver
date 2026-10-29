@@ -1,3 +1,8 @@
+use std::path::Path;
+use std::sync::Arc;
+
+use e2e_model::{Canaries, JudgedBasis, JudgedShare, LoadRunIndex, LoadRunMeta, Sampling};
+
 use super::*;
 
 fn rfc_fail(rule: &str, detail: &str) -> CallOutcome {
@@ -222,20 +227,8 @@ fn the_index_counts_an_accepted_reject_as_ok() {
         &[],
         CallEvidence::default(),
     );
-    let idx = r.build_index(
-        LoadRunMeta {
-            started_ms: 0,
-            finished_ms: 0,
-            finished: true,
-            target: "t".into(),
-            cps: 1.0,
-            duration_secs: 1,
-            max_in_flight: 1,
-            egress: None,
-            profile: None,
-        },
-        Canaries::default(),
-    );
+    let idx = r
+        .build_index(LoadRunMeta { finished: true, ..LoadRunMeta::default() }, Canaries::default());
     let row = idx.counts.iter().find(|c| c.class == "ok").expect("a row");
     assert!(row.ok, "{row:?}");
     assert_eq!((idx.total_calls(), idx.failed_calls()), (1, 0));
@@ -288,20 +281,8 @@ fn case_splits_sample_buckets_within_a_class() {
     let out = std::env::temp_dir().join(format!("loadgen-case-split-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
     r.finalize(&out).unwrap();
-    let idx = r.build_index(
-        LoadRunMeta {
-            started_ms: 0,
-            finished_ms: 0,
-            finished: true,
-            target: "t".into(),
-            cps: 1.0,
-            duration_secs: 1,
-            max_in_flight: 1,
-            egress: None,
-            profile: None,
-        },
-        Canaries::default(),
-    );
+    let idx = r
+        .build_index(LoadRunMeta { finished: true, ..LoadRunMeta::default() }, Canaries::default());
     assert!(idx.counts.iter().any(|c| c.case == case_a && c.count == 1));
     assert!(idx.counts.iter().any(|c| c.case == case_b && c.count == 1));
     for group in &idx.samples {
@@ -370,16 +351,19 @@ fn writes_and_parses_the_machine_readable_index() {
         max_in_flight: 100,
         egress: Some("transparent".to_string()),
         profile: Some("smoke".to_string()),
+        command_line: vec!["loadgen".to_string(), "--cps".to_string(), "20".to_string()],
+        sampling: None,
     };
-    let canaries = Canaries { orphans: 0, drops: 7, ..Canaries::default() };
-    r.finalize_run(&out, meta.clone(), canaries).unwrap();
+    let canaries = Canaries { orphans: 0, drops_in: 7, ..Canaries::default() };
+    r.write_report(&out, &r.build_index(meta.clone(), canaries)).unwrap();
 
     let path = out.join("load-result.json");
     assert!(path.exists(), "load-result.json missing next to index.html");
     assert!(out.join("index.html").exists(), "index.html still written");
     let idx: LoadRunIndex = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
 
-    assert_eq!(idx.meta, meta, "run metadata echoed verbatim");
+    let sampling = Sampling { sample_cap: 5, record_every: 0, chase_calls: CHASE_CALLS };
+    assert_eq!(idx.meta, LoadRunMeta { sampling: Some(sampling), ..meta }, "run metadata echoed");
     assert_eq!(idx.total_calls(), 2);
     assert_eq!(idx.failed_calls(), 1, "the check_fail reinvite");
     assert!(idx.counts.iter().any(|c| c.scenario == "basic_call" && c.class == "ok" && c.ok));
@@ -390,7 +374,7 @@ fn writes_and_parses_the_machine_readable_index() {
 
     // Canaries: reporter-owned shed/ringing filled in; caller-owned drops kept.
     assert_eq!(idx.canaries.shed, 1);
-    assert_eq!(idx.canaries.drops, 7);
+    assert_eq!(idx.canaries.drops_in, 7);
     assert_eq!((idx.canaries.ringing_received, idx.canaries.ringing_expected), (1, 2));
 
     // Per-scenario check-verdict tally.
@@ -435,8 +419,7 @@ async fn final_write_is_not_overwritten_by_snapshot_task() {
         cps: 1.0,
         duration_secs: 60,
         max_in_flight: 1,
-        egress: None,
-        profile: None,
+        ..LoadRunMeta::default()
     };
     let read_finished = |out: &Path| -> bool {
         let idx: LoadRunIndex =
@@ -445,13 +428,10 @@ async fn final_write_is_not_overwritten_by_snapshot_task() {
         idx.meta.finished
     };
 
-    let snap_meta = base.clone();
-    let snap = r.spawn_snapshots(
-        out.clone(),
-        Duration::from_secs(1),
-        move || snap_meta.clone(),
-        Canaries::default,
-    );
+    let (snap_meta, snap_reporter) = (base.clone(), r.clone());
+    let snap = r.spawn_snapshots(out.clone(), Duration::from_secs(1), move || {
+        snap_reporter.build_index(snap_meta.clone(), Canaries::default())
+    });
 
     // Let a few ticks land: mid-run snapshots say finished:false.
     for _ in 0..3 {
@@ -463,7 +443,8 @@ async fn final_write_is_not_overwritten_by_snapshot_task() {
     // The shutdown sequence under test: stop the task, THEN write the final.
     snap.abort();
     let _ = snap.await;
-    r.finalize_run(&out, LoadRunMeta { finished: true, ..base }, Canaries::default()).unwrap();
+    let index = r.build_index(LoadRunMeta { finished: true, ..base }, Canaries::default());
+    r.write_report(&out, &index).unwrap();
     assert!(read_finished(&out), "final write says finished:true");
 
     // Advance past several more would-be ticks — a leaked
@@ -527,15 +508,20 @@ fn an_unrecorded_occurrence_arms_the_chase_once() {
     assert!(r.should_record("s"), "a stored callflow under cap re-arms it");
 }
 
-/// A bucket counted with no stored sample says so in the index.
+/// A bucket counted with no stored sample lists none, and the index states
+/// the sampling bounds the page names it by.
 #[test]
 #[ignore = "slow lane: loadgen"]
 fn the_index_names_a_bucket_with_no_recorded_call() {
     let r = Reporter::new(ReporterCfg { sample_cap: 2, background_record_every: 64 });
     let failed = rfc_fail("rule", "detail");
     r.record("s", &failed, &failed.case(None), Duration::ZERO, &[], CallEvidence::default());
-    let idx = r.render_report().index;
-    assert!(idx.contains("none recorded (1 in 64 calls is recorded)"), "{idx}");
+    let idx = r.build_index(LoadRunMeta::default(), Canaries::default());
+    assert!(idx.samples.is_empty(), "{:?}", idx.samples);
+    let sampling = Sampling { sample_cap: 2, record_every: 64, chase_calls: CHASE_CALLS };
+    assert_eq!(idx.meta.sampling, Some(sampling));
+    let row = &idx.counts[0];
+    assert_eq!(row.error, None, "no stored sample, no detail: {row:?}");
 }
 
 /// An `rfc_audit_fail` row shows the share of its audited recorded calls
@@ -563,11 +549,118 @@ fn the_index_shows_the_audited_share_of_an_audit_failure() {
     r.record("s", &failed, &case, Duration::ZERO, &[], unrecorded());
     let refused = rfc_fail("refused", "detail");
     r.record("s", &refused, &refused.case(None), Duration::ZERO, &[], unjudged);
-    let ReportFiles { index, summary, .. } = r.render_report();
-    assert!(index.contains("<td>2</td><td>1 of 3 audited (33.3 %), ≈ 33 of 99</td>"), "{index}");
-    assert!(index.contains("<td>1</td><td></td>"), "the refused row has no share: {index}");
-    assert!(index.contains("100 calls placed, 4 recorded"), "{index}");
-    assert!(index.contains("99 ended on an accepted branch"), "{index}");
-    assert!(index.contains("the recording of 3 of them"), "{index}");
-    assert!(summary.contains("| 2 | 1 of 3 audited (33.3 %), ≈ 33 of 99 |"), "{summary}");
+    let idx = r.build_index(LoadRunMeta::default(), Canaries::default());
+    let row = |rule: &str| {
+        idx.counts.iter().find(|c| c.case.contains(rule)).unwrap_or_else(|| panic!("{rule}"))
+    };
+    let share = JudgedShare { failed: 1, judged: 3, base: 99, basis: JudgedBasis::Audited };
+    assert_eq!((row("rule").count, row("rule").judged.as_ref()), (2, Some(&share)));
+    assert_eq!(share.estimate(), 33);
+    assert_eq!(row("refused").judged, None, "the refused row has no share");
+    let rec = &idx.recording[0];
+    assert_eq!((rec.placed, rec.recorded, rec.accepted, rec.audited), (100, 4, 99, 3));
+}
+
+/// The index keeps the last failed calls, bounded, each with its stored
+/// sample page, and each failure bucket's error is its first stored detail.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn the_index_keeps_the_last_failures_and_each_bucket_error() {
+    let r = Reporter::new(ReporterCfg { sample_cap: 1, background_record_every: 0 });
+    let flow = |d: &str| RenderedSample {
+        html: Some(Arc::from("<html/>")),
+        detail: Some(d.into()),
+        e2e_ms: 1.0,
+    };
+    let failed = rfc_fail("rule", "detail");
+    let case = failed.case(None);
+    for i in 0..live::RECENT_FAILURES + 5 {
+        let evidence =
+            CallEvidence { sample: Some(flow(&format!("d{i}"))), ..CallEvidence::default() };
+        r.record("s", &failed, &case, Duration::ZERO, &[], evidence);
+    }
+    r.record(
+        "s",
+        &CallOutcome::Ok { branch: "answered" },
+        "",
+        Duration::ZERO,
+        &[],
+        CallEvidence::default(),
+    );
+    let idx = r.build_index(LoadRunMeta::default(), Canaries::default());
+    assert_eq!(idx.recent_failures.len(), live::RECENT_FAILURES, "bounded, ok calls left out");
+    assert!(idx.recent_failures.iter().all(|f| f.class == "rfc_audit_fail" && f.case == case));
+    assert_eq!(
+        idx.recent_failures.iter().filter(|f| f.page.is_some()).count(),
+        0,
+        "cap 1: the first only"
+    );
+    assert_eq!(idx.counts.iter().find(|c| !c.ok).and_then(|c| c.error.as_deref()), Some("d0"));
+    let page = sample_rel("s", "rfc_audit_fail", &case, 0);
+    assert_eq!(r.sample_page(&page).as_deref(), Some("<html/>"), "served from memory");
+    assert_eq!(r.sample_page("callflows/s/none/0.html"), None);
+}
+
+/// A failure whose sample is stored names its page.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn a_failure_with_a_stored_sample_names_its_page() {
+    let r = Reporter::new(ReporterCfg { sample_cap: 2, background_record_every: 0 });
+    let failed = rfc_fail("rule", "detail");
+    let case = failed.case(None);
+    let sample = RenderedSample { html: Some(Arc::from("<html/>")), detail: None, e2e_ms: 1.0 };
+    r.record(
+        "s",
+        &failed,
+        &case,
+        Duration::ZERO,
+        &[],
+        CallEvidence { sample: Some(sample), ..CallEvidence::default() },
+    );
+    let idx = r.build_index(LoadRunMeta::default(), Canaries::default());
+    assert_eq!(idx.recent_failures[0].page, Some(sample_rel("s", "rfc_audit_fail", &case, 0)));
+}
+
+/// A tick closes a window of what changed since the last one: calls placed,
+/// ended ok, failed, and rejected or shed.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_tick_closes_a_window_of_deltas() {
+    let r = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
+    let ok = CallOutcome::Ok { branch: "answered" };
+    let failed = rfc_fail("rule", "detail");
+    let rejected = CallOutcome::Rejected("key_in_flight");
+    for _ in 0..3 {
+        r.inc_inflight();
+        r.record("s", &ok, "", Duration::from_millis(10), &[], CallEvidence::default());
+        r.dec_inflight();
+    }
+    tokio::time::advance(SERIES_TICK).await;
+    let first = r.tick();
+    assert_eq!((first.start_ms, first.span_ms, first.placed, first.ok), (0, 5_000, 3, 3));
+    r.inc_inflight();
+    r.record(
+        "s",
+        &failed,
+        &failed.case(None),
+        Duration::from_millis(10),
+        &[],
+        CallEvidence::default(),
+    );
+    r.record("s", &rejected, &rejected.case(None), Duration::ZERO, &[], CallEvidence::default());
+    r.inc_shed("s");
+    tokio::time::advance(SERIES_TICK).await;
+    let second = r.tick();
+    assert_eq!(
+        (second.start_ms, second.placed, second.ok, second.failed, second.rejected),
+        (5_000, 1, 0, 1, 2)
+    );
+    assert_eq!(second.error_pct(), Some(100.0));
+    let p = r.progress();
+    assert_eq!(
+        (p.elapsed_ms, p.placed, p.in_flight, p.ok, p.failed, p.rejected),
+        (10_000, 4, 1, 3, 1, 1)
+    );
+    let idx = r.build_index(LoadRunMeta::default(), Canaries::default());
+    assert_eq!(idx.series, vec![first, second]);
 }

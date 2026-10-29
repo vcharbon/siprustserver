@@ -228,6 +228,10 @@ pub struct Args {
     /// wants to override a `--load-profile` value with.
     #[arg(skip)]
     pub explicit: BTreeSet<String>,
+    /// The command line as typed, program first. Filled by the loadgen
+    /// parsers; echoed at the top of the report.
+    #[arg(skip)]
+    pub command_line: Vec<String>,
 }
 
 impl Args {
@@ -240,7 +244,11 @@ impl Args {
         T: Into<OsString> + Clone,
     {
         use clap::CommandFactory;
-        Self::from_matches(&Self::command().get_matches_from(itr)).unwrap_or_else(|e| e.exit())
+        let argv: Vec<OsString> = itr.into_iter().map(Into::into).collect();
+        let mut args = Self::from_matches(&Self::command().get_matches_from(argv.clone()))
+            .unwrap_or_else(|e| e.exit());
+        args.command_line = command_line(&argv);
+        args
     }
 
     /// The args of a parsed command line, with its explicit-flag record.
@@ -262,6 +270,11 @@ impl Args {
     pub fn explicit(&self, id: &str) -> bool {
         self.explicit.contains(id)
     }
+}
+
+/// `argv` as text, each argument converted lossily.
+pub(super) fn command_line(argv: &[OsString]) -> Vec<String> {
+    argv.iter().map(|a| a.to_string_lossy().into_owned()).collect()
 }
 
 /// The GLOBAL loss/retransmit default: an explicit loss flag

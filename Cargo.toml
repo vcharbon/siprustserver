@@ -58,6 +58,7 @@ members = [
     "crates/e2e-cli",
     "crates/e2e-web",
     "crates/loadgen",
+    "crates/loadrun-render",
     "crates/rfc-rules",
     "crates/sip-pcap",
     "crates/pivot-schema",

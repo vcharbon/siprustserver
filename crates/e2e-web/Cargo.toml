@@ -19,6 +19,8 @@ path = "src/main.rs"
 [dependencies]
 e2e-core = { path = "../e2e-core" }
 seq-report = { path = "../seq-report" }
+# The load run report page, shared with the load generator.
+loadrun-render = { path = "../loadrun-render" }
 axum = { workspace = true }
 maud = { workspace = true }
 serde = { workspace = true }

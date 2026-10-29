@@ -14,6 +14,7 @@ mod fake_rig;
 mod from_user_net;
 mod governor;
 mod late_final;
+mod live_report;
 mod mux_claims;
 mod mux_from_user;
 mod outcome_records;

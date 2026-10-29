@@ -50,7 +50,15 @@ describe("the load-run index against its committed schema", () => {
     ["CheckpointRow", defs.CheckpointRow, LoadRun.CheckpointRow],
     ["CheckSummaryRow", defs.CheckSummaryRow, LoadRun.CheckSummaryRow],
     ["Canaries", defs.Canaries, LoadRun.Canaries],
-    ["SampleGroup", defs.SampleGroup, LoadRun.SampleGroup]
+    ["SampleGroup", defs.SampleGroup, LoadRun.SampleGroup],
+    ["Progress", defs.Progress, LoadRun.Progress],
+    ["SeriesPoint", defs.SeriesPoint, LoadRun.SeriesPoint],
+    ["RateEvent", defs.RateEvent, LoadRun.RateEvent],
+    ["FailureRow", defs.FailureRow, LoadRun.FailureRow],
+    ["ScenarioRecording", defs.ScenarioRecording, LoadRun.ScenarioRecording],
+    ["Sampling", defs.Sampling, LoadRun.Sampling],
+    ["JudgedShare", defs.JudgedShare, LoadRun.JudgedShare],
+    ["RttRow", defs.RttRow, LoadRun.RttRow]
   ]
 
   it.each(pairs)("%s states the same keys, and the same ones required", (_name, committedNode, schema) => {
@@ -216,17 +224,57 @@ describe("a load-run index", () => {
       durationSecs: 60,
       maxInFlight: 2000,
       egress: "transparent",
-      profile: "endurance baseline"
+      profile: "endurance baseline",
+      commandLine: ["loadgen", "--cps", "20"],
+      sampling: { sampleCap: 10, recordEvery: 64, chaseCalls: 64 }
     },
+    progress: {
+      elapsedMs: 60000,
+      targetCps: 20,
+      draining: false,
+      offered: 1190,
+      placed: 1185,
+      inFlight: 0,
+      ok: 1180,
+      failed: 5,
+      rejected: 0,
+      notPlaced: 5,
+      generatorFailures: 0
+    },
+    series: [{ startMs: 0, spanMs: 5000, placed: 100, ok: 98, failed: 2, rejected: 0, p50Ms: 10, p99Ms: 40 }],
+    rateEvents: [{ atMs: 30000, kind: "rate", fromCps: 20, toCps: 10 }],
+    rateEventsDropped: 2,
+    recentFailures: [
+      { atMs: 12000, scenario: "reinvite", class: "timeout", case: "bob@connected" },
+      { atMs: 13000, scenario: "reinvite", class: "check_fail", case: "alice.invite", page: "callflows/0.html" }
+    ],
+    recording: [{ scenario: "reinvite", placed: 5, recorded: 5, accepted: 3, audited: 3 }],
     counts: [
       { scenario: "basic_call", class: "ok", case: "", count: 1180, ok: true },
       { scenario: "reinvite", class: "timeout", case: "bob@connected", count: 2, ok: false },
-      { scenario: "reinvite", class: "check_fail", case: "alice.invite", count: 3, ok: false }
+      {
+        scenario: "reinvite",
+        class: "check_fail",
+        case: "alice.invite",
+        count: 3,
+        ok: false,
+        judged: { failed: 3, judged: 10, base: 50, basis: "checked" },
+        error: "case checks: alice.invite from: mismatch"
+      }
     ],
     latency: [{ scenario: "basic_call", n: 1180, meanMs: 12.5, p50Ms: 10, p90Ms: 25, p99Ms: 40, maxMs: 88 }],
     checkpoints: [{ scenario: "basic_call", checkpoint: "ringing", n: 1180, p50Ms: 3, p90Ms: 8, p99Ms: 15 }],
+    rtt: [{ scenario: "basic_call", exchange: "invite_100", n: 1180, p50Ms: 1, p90Ms: 2, p99Ms: 4 }],
     checks: [{ scenario: "reinvite", passed: 7, failed: 3 }],
-    canaries: { orphans: 0, shed: 4, drops: 11, ringingExpected: 1185, ringingReceived: 1184 },
+    canaries: {
+      orphans: 0,
+      shed: 4,
+      dropsIn: 5,
+      dropsOut: 6,
+      inboxDrops: 0,
+      ringingExpected: 1185,
+      ringingReceived: 1184
+    },
     samples: [
       { scenario: "reinvite", class: "check_fail", case: "alice.invite", pages: ["callflows/0.html"] }
     ]

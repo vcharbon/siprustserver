@@ -4,11 +4,12 @@
 //! anything from Prometheus scrapes or the HTML report.
 //!
 //! The loadgen `Reporter` writes one of these next to `index.html` on every
-//! periodic report rewrite AND at run end; the e2e-web `Load runs` section reads
-//! it back (JSON-first — the HTML detail page is a pure projection of this doc,
-//! so the two can never drift). Every path in it is **relative** to the run
-//! directory (the `load-result.json` sits at the run-dir root), so a run dir is
-//! self-contained and portable.
+//! periodic report rewrite AND at run end, and serves it live on its metrics
+//! socket; the e2e-web `Load runs` section reads it back. Every page that shows
+//! a load run is rendered from this doc alone (`loadrun-render`), so the live
+//! page, the on-disk `index.html` and the website can never disagree. Every
+//! path in it is **relative** to the run directory (the `load-result.json` sits
+//! at the run-dir root), so a run dir is self-contained and portable.
 //!
 //! `xtask e2e-schema` emits `load-run-index.schema.json` alongside the authored
 //! docs. Unlike the authored inputs (Test case / Campaign / Load profile) this is
@@ -19,12 +20,36 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+mod progress;
+mod sampling;
+pub use progress::{FailureRow, Progress, RateEvent, RateEventKind, SeriesPoint};
+pub use sampling::{JudgedBasis, JudgedShare, Sampling, ScenarioRecording};
+
 /// One load run's complete result, as persisted to `load-result.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoadRunIndex {
     /// Run metadata: when it ran and the echoed knobs it ran with.
     pub meta: LoadRunMeta,
+    /// The run's headline figures as of this doc.
+    #[serde(default)]
+    pub progress: Progress,
+    /// The run's time series, oldest first: one point per window, every
+    /// window of the run covered (adjacent windows merge as the run grows).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub series: Vec<SeriesPoint>,
+    /// Every offered-rate change and drain, oldest first (bounded).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rate_events: Vec<RateEvent>,
+    /// Rate events past the bound, not listed in `rate_events`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rate_events_dropped: u64,
+    /// The last failed calls, oldest first (bounded).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_failures: Vec<FailureRow>,
+    /// Per scenario: the calls placed, recorded and judged on their recording.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recording: Vec<ScenarioRecording>,
     /// Per-`(scenario, class, case)` completed-call counts (the report's main
     /// table). A row's `ok` marks its class as no failure (`ok`: the call ended
     /// on an accepted branch).
@@ -34,6 +59,9 @@ pub struct LoadRunIndex {
     /// Per-`(scenario, checkpoint)` named-checkpoint latency summary (ms).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checkpoints: Vec<CheckpointRow>,
+    /// Per-`(scenario, exchange)` SIP round-trip summary (ms).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rtt: Vec<RttRow>,
     /// Per-scenario Test-case check-verdict tally over the SAMPLED calls (the
     /// per-sample oracle): how many sampled calls passed all their checks vs
     /// failed at least one. Empty when no case with checks was attached.
@@ -48,7 +76,7 @@ pub struct LoadRunIndex {
 }
 
 /// Run metadata: timing and the echoed run knobs.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoadRunMeta {
     /// Wall-clock start, Unix epoch milliseconds.
@@ -73,6 +101,12 @@ pub struct LoadRunMeta {
     /// Optional load-profile description echoed from the run's `--load-profile`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// The load generator's command line, as typed (program first).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command_line: Vec<String>,
+    /// The sampling gate's bounds: which calls ran recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling: Option<Sampling>,
 }
 
 /// One `(scenario, class, case)` completed-call count.
@@ -92,6 +126,14 @@ pub struct CountRow {
     /// `true` iff the class is no failure (`ok`). Drives the OK-green / NOK-red
     /// split.
     pub ok: bool,
+    /// The row's share of the calls its class judges on their recording;
+    /// `None` for a class judged on every call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judged: Option<JudgedShare>,
+    /// The first stored sample's one-line failure detail; `None` when the
+    /// bucket stores no sample with a detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Per-scenario end-to-end latency summary (all values in milliseconds).
@@ -119,6 +161,19 @@ pub struct CheckpointRow {
     pub p99_ms: f64,
 }
 
+/// Per-`(scenario, exchange)` SIP round-trip summary (milliseconds).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RttRow {
+    pub scenario: String,
+    /// The exchange timed (`invite_100`, `bye_final`, …).
+    pub exchange: String,
+    pub n: u64,
+    pub p50_ms: f64,
+    pub p90_ms: f64,
+    pub p99_ms: f64,
+}
+
 /// Per-scenario Test-case check-verdict tally over the sampled calls.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -139,8 +194,14 @@ pub struct Canaries {
     pub orphans: u64,
     /// Offered calls dropped at the max-in-flight cap (offered load we shed).
     pub shed: u64,
-    /// Datagrams discarded by the simulated packet-loss model (0 when loss off).
-    pub drops: u64,
+    /// Inbound datagrams discarded by the simulated packet-loss model (0 when
+    /// loss is off).
+    pub drops_in: u64,
+    /// Outbound datagrams discarded by the simulated packet-loss model.
+    pub drops_out: u64,
+    /// Correlated datagrams discarded because their call's inbox was full.
+    #[serde(default)]
+    pub inbox_drops: u64,
     /// Calls that reached the ring→answer step (the 18x-delivery denominator).
     pub ringing_expected: u64,
     /// Of those, how many saw the 18x ringing provisional (numerator). A dropped
@@ -177,6 +238,10 @@ pub struct SampleGroup {
     pub pages: Vec<String>,
 }
 
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
 impl LoadRunIndex {
     /// Total completed calls across every `(scenario, class, case)` bucket.
     pub fn total_calls(&self) -> u64 {
@@ -205,7 +270,47 @@ mod tests {
                 max_in_flight: 2000,
                 egress: Some("transparent".to_string()),
                 profile: Some("endurance baseline".to_string()),
+                command_line: vec!["loadgen".into(), "--cps".into(), "20".into()],
+                sampling: Some(Sampling { sample_cap: 10, record_every: 64, chase_calls: 64 }),
             },
+            progress: Progress {
+                elapsed_ms: 60_000,
+                placed: 1185,
+                ok: 1180,
+                failed: 5,
+                ..Progress::default()
+            },
+            series: vec![SeriesPoint {
+                start_ms: 0,
+                span_ms: 5_000,
+                placed: 100,
+                ok: 98,
+                failed: 2,
+                rejected: 0,
+                p50_ms: 10.0,
+                p99_ms: 40.0,
+            }],
+            rate_events: vec![RateEvent {
+                at_ms: 30_000,
+                kind: RateEventKind::Rate,
+                from_cps: 20.0,
+                to_cps: 10.0,
+            }],
+            rate_events_dropped: 0,
+            recent_failures: vec![FailureRow {
+                at_ms: 12_000,
+                scenario: "reinvite".into(),
+                class: "timeout".into(),
+                case: "bob@connected".into(),
+                page: None,
+            }],
+            recording: vec![ScenarioRecording {
+                scenario: "reinvite".into(),
+                placed: 5,
+                recorded: 5,
+                accepted: 3,
+                audited: 3,
+            }],
             counts: vec![
                 CountRow {
                     scenario: "basic_call".into(),
@@ -213,6 +318,8 @@ mod tests {
                     case: String::new(),
                     count: 1180,
                     ok: true,
+                    judged: None,
+                    error: None,
                 },
                 CountRow {
                     scenario: "reinvite".into(),
@@ -220,6 +327,13 @@ mod tests {
                     case: "alice.invite.from.userInfo".into(),
                     count: 3,
                     ok: false,
+                    judged: Some(JudgedShare {
+                        failed: 3,
+                        judged: 10,
+                        base: 50,
+                        basis: JudgedBasis::Checked,
+                    }),
+                    error: Some("case checks: alice invite.from.userInfo: mismatch".into()),
                 },
                 CountRow {
                     scenario: "reinvite".into(),
@@ -227,6 +341,8 @@ mod tests {
                     case: "bob@connected".into(),
                     count: 2,
                     ok: false,
+                    judged: None,
+                    error: None,
                 },
             ],
             latency: vec![LatencyRow {
@@ -246,11 +362,21 @@ mod tests {
                 p90_ms: 8.0,
                 p99_ms: 15.0,
             }],
+            rtt: vec![RttRow {
+                scenario: "basic_call".into(),
+                exchange: "invite_100".into(),
+                n: 1185,
+                p50_ms: 1.0,
+                p90_ms: 2.0,
+                p99_ms: 4.0,
+            }],
             checks: vec![CheckSummaryRow { scenario: "reinvite".into(), passed: 7, failed: 3 }],
             canaries: Canaries {
                 orphans: 0,
                 shed: 4,
-                drops: 11,
+                drops_in: 6,
+                drops_out: 5,
+                inbox_drops: 0,
                 ringing_expected: 1185,
                 ringing_received: 1184,
             },

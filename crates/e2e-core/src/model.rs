@@ -12,6 +12,7 @@ pub use e2e_model::model::*;
 // doc the e2e website renders beside functional Campaign runs. Re-exported on the
 // same `e2e_core::model::…` path as the authored input docs.
 pub use e2e_model::loadrun::{
-    Canaries, CheckSummaryRow, CheckpointRow, CountRow, LatencyRow, LoadRunIndex, LoadRunMeta,
-    SampleGroup,
+    Canaries, CheckSummaryRow, CheckpointRow, CountRow, FailureRow, JudgedBasis, JudgedShare,
+    LatencyRow, LoadRunIndex, LoadRunMeta, Progress, RateEvent, RateEventKind, RttRow, SampleGroup,
+    Sampling, ScenarioRecording, SeriesPoint,
 };

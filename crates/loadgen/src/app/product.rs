@@ -116,10 +116,12 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    let argv: Vec<OsString> = itr.into_iter().map(Into::into).collect();
     let mut cmd = command(product);
-    let matches = cmd.try_get_matches_from_mut(itr)?;
+    let matches = cmd.try_get_matches_from_mut(argv.clone())?;
     let flags = P::Flags::from_arg_matches(&matches)?;
     let mut args = Args::from_matches(&matches)?;
+    args.command_line = super::args::command_line(&argv);
     product
         .configure(&flags, &mut args)
         .map_err(|e| cmd.error(clap::error::ErrorKind::ValueValidation, e))?;

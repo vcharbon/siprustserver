@@ -887,7 +887,7 @@ async fn load_runs_index(State(st): State<Arc<AppState>>, headers: HeaderMap) ->
                     @for (name, idx) in &runs {
                         tr {
                             td { a href={ "/load/" (name) } { (name) } }
-                            td { (fmt_epoch_ms(idx.meta.started_ms)) }
+                            td { (loadrun_render::fmt_epoch_ms(idx.meta.started_ms)) }
                             td { (idx.total_calls()) }
                             td {
                                 @if idx.failed_calls() == 0 { span .pass { "0" } }
@@ -907,9 +907,9 @@ async fn load_runs_index(State(st): State<Arc<AppState>>, headers: HeaderMap) ->
 }
 
 /// A load run's detail. Content-negotiated: JSON is the persisted
-/// `load-result.json` verbatim (so the HTML can never drift); HTML renders the
-/// counts table, latency + checkpoint summaries, the check-verdict tally, the
-/// canaries, and links to the sampled callflow pages.
+/// `load-result.json` verbatim; HTML is the load run report rendered from it
+/// (`loadrun-render`, the page the load generator itself serves and writes),
+/// its sample links served through `/load/{run}/files/…`.
 async fn load_run_detail(
     State(st): State<Arc<AppState>>,
     UrlPath(run): UrlPath<String>,
@@ -920,152 +920,16 @@ async fn load_run_detail(
         // The mirrored JSON IS the persisted load-result.json.
         return Ok(Json(idx).into_response());
     }
-    let m = &idx.meta;
+    let opts =
+        loadrun_render::RenderOpts { sample_prefix: format!("/load/{run}/files/"), live: None };
     Ok(page(
         &format!("Load run {run}"),
         html! {
-            p .muted {
-                "target " code { (m.target) }
-                " · " (format!("{:.0}", m.cps)) " cps"
-                " · " (m.duration_secs) "s"
-                " · max-in-flight " (m.max_in_flight)
-                @if let Some(egress) = &m.egress { " · egress " code { (egress) } }
-                @if let Some(profile) = &m.profile { " · profile " (profile) }
-            }
-            p {
-                "Started " (fmt_epoch_ms(m.started_ms)) " · "
-                @if m.finished { "finished " (fmt_epoch_ms(m.finished_ms)) }
-                @else { span .pending { "running (snapshot at " (fmt_epoch_ms(m.finished_ms)) ")" } }
-                " · " b { (idx.total_calls()) } " call(s), "
-                @if idx.failed_calls() == 0 { span .pass { "0 failures" } }
-                @else { span .fail { (idx.failed_calls()) " failure(s)" } }
-            }
-
-            h2 { "Results by scenario × class × case" }
-            p .muted {
-                "case splits a class into its distinct failure modes (RFC rule, failed check, "
-                "failed step), each with its own first-N samples."
-            }
-            table {
-                tr { th { "scenario" } th { "class" } th { "case" } th { "count" } th { "samples" } }
-                @for row in &idx.counts {
-                    tr {
-                        td { (row.scenario) }
-                        td {
-                            @if row.ok { span .pass { (row.class) } }
-                            @else { span .fail { (row.class) } }
-                        }
-                        td { code { (row.case) } }
-                        td { (row.count) }
-                        td { (sample_links(&run, &idx, &row.scenario, &row.class, &row.case)) }
-                    }
-                }
-            }
-
-            h2 { "Latency (ms)" }
-            table {
-                tr { th { "scenario" } th { "n" } th { "mean" } th { "p50" } th { "p90" } th { "p99" } th { "max" } }
-                @for row in &idx.latency {
-                    tr {
-                        td { (row.scenario) }
-                        td { (row.n) }
-                        td { (format!("{:.1}", row.mean_ms)) }
-                        td { (format!("{:.1}", row.p50_ms)) }
-                        td { (format!("{:.1}", row.p90_ms)) }
-                        td { (format!("{:.1}", row.p99_ms)) }
-                        td { (format!("{:.1}", row.max_ms)) }
-                    }
-                }
-            }
-
-            @if !idx.checkpoints.is_empty() {
-                h2 { "Checkpoints (ms)" }
-                table {
-                    tr { th { "scenario" } th { "checkpoint" } th { "n" } th { "p50" } th { "p90" } th { "p99" } }
-                    @for row in &idx.checkpoints {
-                        tr {
-                            td { (row.scenario) }
-                            td { (row.checkpoint) }
-                            td { (row.n) }
-                            td { (format!("{:.1}", row.p50_ms)) }
-                            td { (format!("{:.1}", row.p90_ms)) }
-                            td { (format!("{:.1}", row.p99_ms)) }
-                        }
-                    }
-                }
-            }
-
-            @if !idx.checks.is_empty() {
-                h2 { "Test-case checks (sampled calls)" }
-                table {
-                    tr { th { "scenario" } th { "passed" } th { "failed" } }
-                    @for row in &idx.checks {
-                        tr {
-                            td { (row.scenario) }
-                            td { span .pass { (row.passed) } }
-                            td {
-                                @if row.failed == 0 { (row.failed) }
-                                @else { span .fail { (row.failed) } }
-                            }
-                        }
-                    }
-                }
-            }
-
-            h2 { "Canaries" }
-            table {
-                tr { th { "signal" } th { "value" } }
-                (canary_row("orphans (stray-sends)", idx.canaries.orphans))
-                (canary_row("shed (max-in-flight)", idx.canaries.shed))
-                (canary_row("simulated drops", idx.canaries.drops))
-                tr {
-                    td { "18x delivery ratio" }
-                    td {
-                        @let ratio = idx.canaries.ringing_ratio();
-                        @if ratio >= 0.99 { span .pass { (format!("{:.4}", ratio)) } }
-                        @else { span .fail { (format!("{:.4}", ratio)) } }
-                        " (" (idx.canaries.ringing_received) "/" (idx.canaries.ringing_expected) ")"
-                    }
-                }
-            }
+            style { (PreEscaped(loadrun_render::CSS)) }
+            (PreEscaped(loadrun_render::render_body(&idx, &opts)))
         },
     )
     .into_response())
-}
-
-/// A canary table row: green when 0, red otherwise (orphans/shed/drops are all
-/// "should be ~0 in a clean run" signals).
-fn canary_row(label: &str, value: u64) -> Markup {
-    html! {
-        tr {
-            td { (label) }
-            td {
-                @if value == 0 { span .pass { "0" } }
-                @else { span .fail { (value) } }
-            }
-        }
-    }
-}
-
-/// The sample-page links for a `(scenario, class, case)` count row: the
-/// stored callflow pages, each served through `/load/{run}/files/…`.
-fn sample_links(
-    run: &str,
-    idx: &model::LoadRunIndex,
-    scenario: &str,
-    class: &str,
-    case: &str,
-) -> Markup {
-    let group =
-        idx.samples.iter().find(|g| g.scenario == scenario && g.class == class && g.case == case);
-    html! {
-        @if let Some(group) = group {
-            @for (i, page) in group.pages.iter().enumerate() {
-                a href={ "/load/" (run) "/files/" (page) } { (i) }
-                " "
-            }
-        }
-    }
 }
 
 /// Serve a file from a load run's directory (the sampled callflow HTML pages).
@@ -1108,27 +972,6 @@ async fn load_run_file(
         "application/octet-stream"
     };
     Ok(([(header::CONTENT_TYPE, content_type)], bytes).into_response())
-}
-
-/// Format a Unix epoch-ms timestamp as `YYYY-MM-DD HH:MM:SSZ` (UTC), with no
-/// chrono dependency — a plain civil-date calc off the epoch-day.
-fn fmt_epoch_ms(ms: i64) -> String {
-    let secs = ms.div_euclid(1000);
-    let days = secs.div_euclid(86_400);
-    let tod = secs.rem_euclid(86_400);
-    let (h, m, s) = (tod / 3600, (tod % 3600) / 60, tod % 60);
-    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if month <= 2 { y + 1 } else { y };
-    format!("{year:04}-{month:02}-{d:02} {h:02}:{m:02}:{s:02}Z")
 }
 
 /// Serve a cell's sibling artifact (the `.wav` recordings). File names are

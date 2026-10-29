@@ -40,11 +40,69 @@
       "description": "Run metadata: when it ran and the echoed knobs it ran with.",
       "$ref": "#/$defs/LoadRunMeta"
     },
+    "progress": {
+      "description": "The run's headline figures as of this doc.",
+      "$ref": "#/$defs/Progress",
+      "default": {
+        "draining": false,
+        "elapsedMs": 0,
+        "failed": 0,
+        "generatorFailures": 0,
+        "inFlight": 0,
+        "notPlaced": 0,
+        "offered": 0,
+        "ok": 0,
+        "placed": 0,
+        "rejected": 0,
+        "targetCps": 0.0
+      }
+    },
+    "rateEvents": {
+      "description": "Every offered-rate change and drain, oldest first (bounded).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RateEvent"
+      }
+    },
+    "rateEventsDropped": {
+      "description": "Rate events past the bound, not listed in `rate_events`.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "recentFailures": {
+      "description": "The last failed calls, oldest first (bounded).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FailureRow"
+      }
+    },
+    "recording": {
+      "description": "Per scenario: the calls placed, recorded and judged on their recording.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ScenarioRecording"
+      }
+    },
+    "rtt": {
+      "description": "Per-`(scenario, exchange)` SIP round-trip summary (ms).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RttRow"
+      }
+    },
     "samples": {
       "description": "Links to the stored sampled callflow pages, grouped by their\n`(scenario, class, case)` bucket. Paths are RELATIVE to the run dir.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/SampleGroup"
+      }
+    },
+    "series": {
+      "description": "The run's time series, oldest first: one point per window, every\nwindow of the run covered (adjacent windows merge as the run grows).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SeriesPoint"
       }
     }
   },
@@ -59,10 +117,23 @@
       "description": "The run's cross-call health canaries — the first things a triager scans.",
       "type": "object",
       "properties": {
-        "drops": {
-          "description": "Datagrams discarded by the simulated packet-loss model (0 when loss off).",
+        "dropsIn": {
+          "description": "Inbound datagrams discarded by the simulated packet-loss model (0 when\nloss is off).",
           "type": "integer",
           "format": "uint64",
+          "minimum": 0
+        },
+        "dropsOut": {
+          "description": "Outbound datagrams discarded by the simulated packet-loss model.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "inboxDrops": {
+          "description": "Correlated datagrams discarded because their call's inbox was full.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
           "minimum": 0
         },
         "orphans": {
@@ -93,7 +164,8 @@
       "required": [
         "orphans",
         "shed",
-        "drops",
+        "dropsIn",
+        "dropsOut",
         "ringingExpected",
         "ringingReceived"
       ]
@@ -179,6 +251,24 @@
           "format": "uint64",
           "minimum": 0
         },
+        "error": {
+          "description": "The first stored sample's one-line failure detail; `None` when the\nbucket stores no sample with a detail.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "judged": {
+          "description": "The row's share of the calls its class judges on their recording;\n`None` for a class judged on every call.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JudgedShare"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "ok": {
           "description": "`true` iff the class is no failure (`ok`). Drives the OK-green / NOK-red\nsplit.",
           "type": "boolean"
@@ -192,6 +282,89 @@
         "class",
         "count",
         "ok"
+      ]
+    },
+    "FailureRow": {
+      "description": "One failed call among the run's last failures.",
+      "type": "object",
+      "properties": {
+        "atMs": {
+          "description": "When the call ended, since the run started.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "case": {
+          "description": "The class's case discriminator (see [`super::CountRow::case`]).",
+          "type": "string",
+          "default": ""
+        },
+        "class": {
+          "type": "string"
+        },
+        "page": {
+          "description": "The run-dir-relative path of the call's stored sample page, when it was\nstored.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scenario": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "atMs",
+        "scenario",
+        "class"
+      ]
+    },
+    "JudgedBasis": {
+      "description": "The recorded calls a failure row's class judges on their recording.",
+      "oneOf": [
+        {
+          "description": "`rfc_audit_fail`: the accepted calls whose recording the audit judged,\nstanding for every accepted call.",
+          "type": "string",
+          "const": "audited"
+        },
+        {
+          "description": "`check_fail`: the calls whose case checks ran, standing for every\naccepted call clean of the audit.",
+          "type": "string",
+          "const": "checked"
+        }
+      ]
+    },
+    "JudgedShare": {
+      "description": "A failure row's share of the recorded calls its class judged, and the\nestimate it gives over every call that class would judge.",
+      "type": "object",
+      "properties": {
+        "base": {
+          "description": "Every call the class would judge.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "basis": {
+          "$ref": "#/$defs/JudgedBasis"
+        },
+        "failed": {
+          "description": "Judged calls that failed this row.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "judged": {
+          "description": "Recorded calls the class judged.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "failed",
+        "judged",
+        "base",
+        "basis"
       ]
     },
     "LatencyRow": {
@@ -241,6 +414,13 @@
       "description": "Run metadata: timing and the echoed run knobs.",
       "type": "object",
       "properties": {
+        "commandLine": {
+          "description": "The load generator's command line, as typed (program first).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "cps": {
           "description": "Offered call rate the run was configured for (calls/s).",
           "type": "number",
@@ -281,6 +461,17 @@
             "null"
           ]
         },
+        "sampling": {
+          "description": "The sampling gate's bounds: which calls ran recorded.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sampling"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "startedMs": {
           "description": "Wall-clock start, Unix epoch milliseconds.",
           "type": "integer",
@@ -299,6 +490,172 @@
         "cps",
         "durationSecs",
         "maxInFlight"
+      ]
+    },
+    "Progress": {
+      "description": "The run's headline figures as of the doc.",
+      "type": "object",
+      "properties": {
+        "draining": {
+          "description": "The run was drained: it places no new call.",
+          "type": "boolean"
+        },
+        "elapsedMs": {
+          "description": "Time since the run started.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "failed": {
+          "description": "Calls ended in failure: every class but `ok` and `rejected`.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "generatorFailures": {
+          "description": "Calls the generator itself failed: a run with one is invalid.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "inFlight": {
+          "description": "Calls placed and not ended yet.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "notPlaced": {
+          "description": "Calls never placed (shed at the cap, or their key refused), as the\ncall-outcome records count them.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "offered": {
+          "description": "Calls offered: every slot of the rate, placed or not.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "ok": {
+          "description": "Calls ended on an accepted branch.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "placed": {
+          "description": "Calls placed: started past the max-in-flight cap.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "rejected": {
+          "description": "Calls of the `rejected` class: refused before any datagram.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "targetCps": {
+          "description": "The offered-rate target (calls/s) as of the doc: the configured rate\nuntil a rate change moves it, `0` while paused.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "elapsedMs",
+        "targetCps",
+        "draining",
+        "offered",
+        "placed",
+        "inFlight",
+        "ok",
+        "failed",
+        "rejected",
+        "notPlaced",
+        "generatorFailures"
+      ]
+    },
+    "RateEvent": {
+      "description": "One change of the offered rate, or the drain.",
+      "type": "object",
+      "properties": {
+        "atMs": {
+          "description": "When it happened, since the run started.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "fromCps": {
+          "description": "The target before the event.",
+          "type": "number",
+          "format": "double"
+        },
+        "kind": {
+          "$ref": "#/$defs/RateEventKind"
+        },
+        "toCps": {
+          "description": "The target after the event (equal to `fromCps` for a drain).",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "atMs",
+        "kind",
+        "fromCps",
+        "toCps"
+      ]
+    },
+    "RateEventKind": {
+      "description": "What a rate event did.",
+      "oneOf": [
+        {
+          "description": "The offered-rate target moved from `fromCps` to `toCps`.",
+          "type": "string",
+          "const": "rate"
+        },
+        {
+          "description": "The run was drained: no new call from then on.",
+          "type": "string",
+          "const": "drain"
+        }
+      ]
+    },
+    "RttRow": {
+      "description": "Per-`(scenario, exchange)` SIP round-trip summary (milliseconds).",
+      "type": "object",
+      "properties": {
+        "exchange": {
+          "description": "The exchange timed (`invite_100`, `bye_final`, …).",
+          "type": "string"
+        },
+        "n": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p50Ms": {
+          "type": "number",
+          "format": "double"
+        },
+        "p90Ms": {
+          "type": "number",
+          "format": "double"
+        },
+        "p99Ms": {
+          "type": "number",
+          "format": "double"
+        },
+        "scenario": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "scenario",
+        "exchange",
+        "n",
+        "p50Ms",
+        "p90Ms",
+        "p99Ms"
       ]
     },
     "SampleGroup": {
@@ -328,6 +685,137 @@
         "scenario",
         "class",
         "pages"
+      ]
+    },
+    "Sampling": {
+      "description": "The sampling gate's bounds, as the run was configured.",
+      "type": "object",
+      "properties": {
+        "chaseCalls": {
+          "description": "Calls of its scenario a bucket under cap keeps recording after its\nfirst call or its last sample.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "recordEvery": {
+          "description": "1 call of each scenario in this many records (`0`: none).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "sampleCap": {
+          "description": "Stored callflow samples per `(scenario, class, case)` bucket; also the\nfirst calls of each scenario that record.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "sampleCap",
+        "recordEvery",
+        "chaseCalls"
+      ]
+    },
+    "ScenarioRecording": {
+      "description": "Per scenario: the calls placed and recorded, and the calls the RFC audit\njudged.",
+      "type": "object",
+      "properties": {
+        "accepted": {
+          "description": "Calls that ended on an accepted branch before the RFC audit: the calls\nthe audit judges.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "audited": {
+          "description": "Accepted calls whose recording the audit judged.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "placed": {
+          "description": "Calls placed, as the sampling gate counts them.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "recorded": {
+          "description": "Calls that ran recorded.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "scenario": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "scenario",
+        "placed",
+        "recorded",
+        "accepted",
+        "audited"
+      ]
+    },
+    "SeriesPoint": {
+      "description": "One window of the run's time series: what changed between its start and\nits end.",
+      "type": "object",
+      "properties": {
+        "failed": {
+          "description": "Calls ended in failure in the window (as [`Progress::failed`]).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "ok": {
+          "description": "Calls ended ok in the window.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p50Ms": {
+          "description": "End-to-end latency median of the calls ended in the window (`0` when none).",
+          "type": "number",
+          "format": "double"
+        },
+        "p99Ms": {
+          "description": "End-to-end latency 99th percentile of the calls ended in the window.",
+          "type": "number",
+          "format": "double"
+        },
+        "placed": {
+          "description": "Calls placed in the window.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "rejected": {
+          "description": "Calls refused before any datagram or shed at the cap in the window.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "spanMs": {
+          "description": "Window length.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "startMs": {
+          "description": "Window start, since the run started.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "startMs",
+        "spanMs",
+        "placed",
+        "ok",
+        "failed",
+        "rejected",
+        "p50Ms",
+        "p99Ms"
       ]
     }
   }

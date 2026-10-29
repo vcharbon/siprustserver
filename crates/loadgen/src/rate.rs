@@ -16,10 +16,14 @@
 //! just the shared cell + the `cps ⇄ millicps` conversion and clamping.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use e2e_model::{RateEvent, RateEventKind};
 use tokio::time::Instant;
+
+mod events;
+use events::RateLog;
 
 /// A shared, live-tunable offered-rate target (milli-cps under the hood). Cheap to
 /// clone (an `Arc<AtomicU64>`); the governor holds one clone and the `/rate` HTTP
@@ -30,6 +34,8 @@ pub struct RateHandle {
     millicps: Arc<AtomicU64>,
     /// Set once by [`Self::drain`]; never cleared.
     draining: Arc<AtomicBool>,
+    /// Every [`Self::set`] and the drain, stamped.
+    log: Arc<Mutex<RateLog>>,
 }
 
 impl RateHandle {
@@ -38,8 +44,9 @@ impl RateHandle {
         let h = RateHandle {
             millicps: Arc::new(AtomicU64::new(0)),
             draining: Arc::new(AtomicBool::new(false)),
+            log: Arc::default(),
         };
-        h.set(cps);
+        h.store(cps);
         h
     }
 
@@ -59,9 +66,12 @@ impl RateHandle {
     }
 
     /// Close the run window: the governor admits no further call, whatever the
-    /// rate. Idempotent.
+    /// rate. Idempotent: only the first drain is logged.
     pub fn drain(&self) {
-        self.draining.store(true, Ordering::Relaxed);
+        if !self.draining.swap(true, Ordering::Relaxed) {
+            let cps = self.cps();
+            self.log.lock().unwrap().push(RateEventKind::Drain, cps, cps);
+        }
     }
 
     /// Whether [`Self::drain`] was called.
@@ -69,10 +79,24 @@ impl RateHandle {
         self.draining.load(Ordering::Relaxed)
     }
 
-    /// Re-target the rate. A negative or NaN value is clamped to `0` (pause).
-    /// Returns the value actually applied, in cps (so the HTTP handler can echo
-    /// the clamped result).
+    /// Re-target the rate, and log the change. A negative or NaN value is
+    /// clamped to `0` (pause). Returns the value actually applied, in cps (so
+    /// the HTTP handler can echo the clamped result).
     pub fn set(&self, cps: f64) -> f64 {
+        let mut log = self.log.lock().unwrap();
+        let from = self.cps();
+        let applied = self.store(cps);
+        log.push(RateEventKind::Rate, from, applied);
+        applied
+    }
+
+    /// The logged rate changes and drain, each stamped in milliseconds since
+    /// `start`, and the count of those past the log's bound.
+    pub fn events_since(&self, start: Instant) -> (Vec<RateEvent>, u64) {
+        self.log.lock().unwrap().since(start)
+    }
+
+    fn store(&self, cps: f64) -> f64 {
         let applied = if cps.is_finite() && cps > 0.0 { cps } else { 0.0 };
         // Round to the nearest milli-cps; a huge value saturates rather than wraps.
         let milli = (applied * 1000.0).round();
@@ -280,5 +304,33 @@ mod tests {
         let b = a.clone();
         b.set(30.0);
         assert_eq!(a.cps(), 30.0, "both handles share one atomic");
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[ignore = "slow lane: loadgen"]
+    async fn every_rate_change_and_the_first_drain_are_logged_with_their_time() {
+        let start = Instant::now();
+        let h = RateHandle::new(20.0);
+        tokio::time::advance(Duration::from_secs(3)).await;
+        h.set(10.0);
+        tokio::time::advance(Duration::from_secs(2)).await;
+        h.drain();
+        h.drain();
+        let (events, dropped) = h.events_since(start);
+        let seen: Vec<_> = events.iter().map(|e| (e.at_ms, e.kind, e.from_cps, e.to_cps)).collect();
+        assert_eq!(
+            seen,
+            vec![
+                (3_000, RateEventKind::Rate, 20.0, 10.0),
+                (5_000, RateEventKind::Drain, 10.0, 10.0)
+            ],
+            "the construction is no event; a second drain is none"
+        );
+        assert_eq!(dropped, 0);
+        for i in 0..events::RATE_EVENTS_CAP + 4 {
+            h.set(i as f64);
+        }
+        let (events, dropped) = h.events_since(start);
+        assert_eq!((events.len(), dropped), (events::RATE_EVENTS_CAP, 6));
     }
 }

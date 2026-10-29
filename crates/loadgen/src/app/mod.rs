@@ -12,19 +12,21 @@ use sip_clock::Clock;
 use crate::case::CaseLoader;
 use crate::outcome::OutcomeSink;
 use crate::{
-    serve_metrics, CallConfig, Canaries, Driver, DriverCfg, EndpointSpec, LoadRunMeta, MuxCore,
-    MuxTransport, RateHandle, Reporter, ReporterCfg, Role, ScenarioInputs,
+    serve_metrics, CallConfig, Driver, DriverCfg, EndpointSpec, LoadRunMeta, MetricsSurface,
+    MuxCore, MuxTransport, RateHandle, Reporter, ReporterCfg, Role, ScenarioInputs,
 };
 
 mod args;
 mod mix;
 pub mod product;
+mod view;
 
 pub use args::Args;
 use args::{base_tuning, correlation, endpoint_config, outcome_sink};
 pub use mix::check_from_user_mix;
 use mix::{resolve_mix, Mix};
 pub use product::{command, main, parse_from, NoFlags, Product, RunLayout, Shipped};
+use view::RunView;
 
 /// The file of `--out-dir` that holds the `/metrics` body as the run ended.
 pub const FINAL_METRICS_FILE: &str = "metrics.prom";
@@ -193,81 +195,82 @@ pub async fn run<P: Product>(product: &P, flags: &P::Flags, args: Args) -> std::
         }
     });
 
-    // Live /metrics: reporter series + mux series + the current rate target + a process-memory canary (RSS) so the loadgen dashboard can
-    // watch the load generator itself while full recording is on.
-    let metrics_reporter = reporter.clone();
-    let metrics_core = core.clone();
-    let metrics_rate = rate.clone();
-    let metrics_outcomes = outcomes.clone();
-    let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(move || {
-        metrics_body(&metrics_reporter, &metrics_core, &metrics_rate, &metrics_outcomes)
+    // The run as its report states it: the index every report page renders
+    // from, built from the reporter, the mux, the rate and the outcome sink.
+    let started_ms = clock.now_ms();
+    let view = Arc::new(RunView {
+        reporter: reporter.clone(),
+        core: core.clone(),
+        rate: rate.clone(),
+        outcomes: outcomes.clone(),
+        clock: clock.clone(),
+        meta: LoadRunMeta {
+            started_ms,
+            finished_ms: started_ms,
+            finished: false,
+            target: via.to_string(),
+            cps,
+            duration_secs: duration,
+            max_in_flight: max_in_flight as u64,
+            egress: Some(egress_label(&egress)),
+            profile: profile.description.clone(),
+            command_line: args.command_line.clone(),
+            sampling: None,
+        },
     });
+
+    // The metrics socket: the reporter's and the mux's series, the current
+    // rate target and a process-memory canary (RSS) on `/metrics`, and the
+    // live report page on `/`.
+    let (metrics_reporter, metrics_core) = (reporter.clone(), core.clone());
+    let (metrics_rate, metrics_outcomes) = (rate.clone(), outcomes.clone());
+    let surface = MetricsSurface {
+        metrics: Arc::new(move || {
+            metrics_body(&metrics_reporter, &metrics_core, &metrics_rate, &metrics_outcomes)
+        }),
+        rate: Some(rate.clone()),
+        report: Some(view.live_report()),
+    };
     let metrics_addr = args.metrics_addr;
-    let server_rate = rate.clone();
     tokio::spawn(async move {
-        if let Err(e) = serve_metrics(metrics_addr, render, Some(server_rate)).await {
+        if let Err(e) = serve_metrics(metrics_addr, surface).await {
             eprintln!("[{name}] /metrics server stopped: {e}");
         }
     });
 
-    // The run-metadata template for the machine-readable `load-result.json`: the
-    // echoed knobs (timing filled per-write). Shared with the periodic snapshot
-    // task; each write clones it and stamps `finished`/`finished_ms`.
-    let started_ms = clock.now_ms();
-    let meta_base = LoadRunMeta {
-        started_ms,
-        finished_ms: started_ms,
-        finished: false,
-        target: via.to_string(),
-        cps,
-        duration_secs: duration,
-        max_in_flight: max_in_flight as u64,
-        egress: Some(egress_label(&egress)),
-        profile: profile.description.clone(),
-    };
-    let meta_for = |clock: &Clock, finished: bool| LoadRunMeta {
-        finished_ms: clock.now_ms(),
-        finished,
-        ..meta_base.clone()
-    };
-
-    // Periodically snapshot the on-disk report so it is browsable mid-run. Each
-    // snapshot rewrites index.html/summary.md AND the machine-readable
-    // load-result.json (still `finished:false`), listing the same sample pages.
-    // The handle is aborted+awaited before the final write below (see
-    // `Reporter::spawn_snapshots` shutdown-ordering contract).
+    // Periodically snapshot the on-disk report so it is browsable mid-run
+    // (`finished: false`). The handle is aborted and awaited before the final
+    // write below (see `Reporter::spawn_snapshots`).
     let snapshots = (report_interval_secs > 0).then(|| {
-        let snap_clock = clock.clone();
-        let snap_meta = meta_base.clone();
-        let snap_core = core.clone();
+        let snap_view = view.clone();
         reporter.spawn_snapshots(
             args.out_dir.clone(),
             Duration::from_secs(report_interval_secs),
-            move || LoadRunMeta {
-                finished_ms: snap_clock.now_ms(),
-                finished: false,
-                ..snap_meta.clone()
-            },
-            move || mux_canaries(&snap_core),
+            move || snap_view.index(false),
         )
     });
+    let ticker = view.spawn_ticker(name);
 
     eprintln!(
         "[{name}] {cps} cps for {duration}s, max_in_flight={max_in_flight}, target={via}, uas={uas}, egress={egress:?}, shapes={:?}, /metrics on {}",
         mix_ids,
         args.metrics_addr
     );
+    eprintln!("[{name}] live report: http://{}/", args.metrics_addr);
     driver.run().await;
 
     // Stop the snapshot task BEFORE the final write: aborting and awaiting the
     // handle guarantees no `finished:false` snapshot lands after (or interleaves
-    // with) the `finished:true` index — a tick fired exactly at the run's last
-    // instant (report interval dividing the duration) otherwise races it.
+    // with) the `finished:true` index. The ticker stops before the last window
+    // closes, so the series ends at the run's end.
     if let Some(snap) = snapshots {
         snap.abort();
         let _ = snap.await;
     }
-    reporter.finalize_run(&args.out_dir, meta_for(&clock, true), mux_canaries(&core))?;
+    ticker.abort();
+    let _ = ticker.await;
+    reporter.tick();
+    reporter.write_report(&args.out_dir, &view.index(true))?;
     outcomes.close();
     // The final `/metrics` body, for whoever reads the run's counters once the
     // process is gone.
@@ -300,17 +303,6 @@ fn egress_label(egress: &crate::EgressPolicy) -> String {
         EgressPolicy::ApiCallPin => "api-call-pin".to_string(),
         EgressPolicy::RegistrarAor { domain } => format!("registrar-aor:{domain}"),
     }
-}
-
-/// The mux-owned run canaries (orphans + simulated-loss drops) for the
-/// machine-readable index. The reporter fills in its own shed + ringing halves
-/// in `build_index`, so these two totals are all the caller supplies.
-fn mux_canaries(core: &MuxCore) -> Canaries {
-    use std::sync::atomic::Ordering;
-    let s = core.stats();
-    let orphans = s.orphans_total();
-    let drops = s.dropped_out.load(Ordering::Relaxed) + s.dropped_in.load(Ordering::Relaxed);
-    Canaries { orphans, drops, ..Canaries::default() }
 }
 
 /// The `/metrics` body, every family of [`crate::CATALOGUE`]: the

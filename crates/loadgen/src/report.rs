@@ -3,8 +3,9 @@
 //! named-checkpoint latency histograms, per-`(scenario, exchange)` SIP
 //! round-trip histograms, a bounded sample store (the first N
 //! callflows per `(scenario, class)` — **including OK**, so OK vs failing flows
-//! are comparable), a live Prometheus `/metrics` surface, and a final on-disk
-//! HTML/markdown report.
+//! are comparable), the run's time series and last failures, a live
+//! Prometheus `/metrics` surface, and the load run index the report pages are
+//! rendered from (served live, written to disk).
 //!
 //! The memory ceiling is structural: counters and histograms are fixed-size;
 //! samples are capped per bucket; and the sampling gate
@@ -14,25 +15,17 @@
 //! per-call (freed when the call's binder drops): nothing accumulates.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 
-use e2e_model::{
-    Canaries, CheckSummaryRow, CheckpointRow, CountRow, LatencyRow, LoadRunIndex, LoadRunMeta,
-    SampleGroup,
-};
+use tokio::time::Instant;
 
 use crate::class::{CallOutcome, ResultClass};
 use crate::hist::Hist;
 use crate::mux::Exchange;
 use crate::scenarios::ScenarioId;
 use scenario_harness::actor::FailedAt;
-
-// ---------------------------------------------------------------------------
-// A rendered sample (a captured callflow for one (scenario, class) bucket)
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Reporter
@@ -126,11 +119,15 @@ struct Inner {
     /// "was ever used" OR-aggregated across the scenario's sampled calls, so the
     /// unused-waiver gate is per CAMPAIGN, never per call.
     waivers: BTreeMap<ScenarioId, crate::waiver::CampaignWaivers>,
+    /// The time series, the run-wide latency it windows and the last failures.
+    live: live::Live,
 }
 
 /// The bounded-memory load-test reporter. Cloneable handle via `Arc`.
 pub struct Reporter {
     cfg: ReporterCfg,
+    /// The run's start: every time the reporter states is counted from it.
+    start: Instant,
     inner: Mutex<Inner>,
     inflight: AtomicU64,
     started: AtomicU64,
@@ -146,6 +143,7 @@ impl Reporter {
     pub fn new(cfg: ReporterCfg) -> Self {
         Self {
             cfg,
+            start: Instant::now(),
             inner: Mutex::new(Inner::default()),
             inflight: AtomicU64::new(0),
             started: AtomicU64::new(0),
@@ -312,7 +310,9 @@ impl Reporter {
         }
         // A rejected call never ran: it has no end-to-end time to fold in.
         if class != ResultClass::Rejected {
-            g.e2e.entry(scenario).or_insert_with(Hist::call).record(e2e.as_secs_f64() * 1000.0);
+            let ms = e2e.as_secs_f64() * 1000.0;
+            g.e2e.entry(scenario).or_insert_with(Hist::call).record(ms);
+            g.live.latency.record(ms);
         }
         for (name, d) in checkpoints {
             g.checkpoints
@@ -322,12 +322,19 @@ impl Reporter {
         }
         let key = (scenario, label, case.to_string());
         let tally = g.sample_taken.entry(key.clone()).or_default();
+        let mut page = None;
         if let Some(sample) = sample {
             if tally.taken < self.cfg.sample_cap {
                 let chased = if sample.html.is_some() { 0 } else { tally.chased };
                 *tally = BucketTally { taken: tally.taken + 1, chased };
-                g.samples.entry(key).or_default().push(sample);
+                let stored = g.samples.entry(key.clone()).or_default();
+                stored.push(sample);
+                page = Some(sample_rel(scenario, &key.1, case, stored.len() - 1));
             }
+        }
+        if !class.is_ok() {
+            let at_ms = self.ms_since_start(Instant::now());
+            g.live.note_failure(at_ms, &key, page);
         }
     }
 
@@ -366,185 +373,18 @@ impl Reporter {
     pub fn set_stream(&self, stream: &str) {
         self.inner.lock().unwrap().stream = Some(stream.to_string());
     }
-
-    // -- Final on-disk report ----------------------------------------------
-
-    /// Write the on-disk report under `out_dir`: per-`(scenario, class)`
-    /// callflow HTML pages, an `index.html` (counts table, latency percentiles,
-    /// links), and a `summary.md`. The report is rendered under the reporter's
-    /// lock and written after it is released, so recording calls never wait on
-    /// the disk.
-    pub fn finalize(&self, out_dir: &Path) -> std::io::Result<()> {
-        let ReportFiles { pages, index, summary } = self.render_report();
-        std::fs::create_dir_all(out_dir)?;
-        for (rel, html) in pages {
-            let page = out_dir.join(&rel);
-            if let Some(parent) = page.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&page, html.as_bytes())?;
-        }
-        std::fs::write(out_dir.join("index.html"), index)?;
-        std::fs::write(out_dir.join("summary.md"), summary)
-    }
-
-    // -- Machine-readable index (load-result.json) -------------------------
-
-    /// Build the [`LoadRunIndex`] — the machine-readable projection of the
-    /// current reporter state — folding in the caller-supplied run `meta` (timing
-    /// and echoed knobs, which the reporter is clock- and config-free about) and
-    /// the external `canaries` (mux orphans/drops the reporter doesn't own). The
-    /// sample-page paths it lists are EXACTLY the run-dir-relative paths that
-    /// [`finalize`](Self::finalize) writes, so the two never disagree.
-    pub fn build_index(&self, meta: LoadRunMeta, mut canaries: Canaries) -> LoadRunIndex {
-        let g = self.inner.lock().unwrap();
-
-        let counts = g
-            .counts
-            .iter()
-            .map(|((scenario, class, case), n)| CountRow {
-                scenario: scenario.to_string(),
-                class: class.clone(),
-                case: case.clone(),
-                count: *n,
-                ok: ResultClass::label_is_ok(class),
-            })
-            .collect();
-
-        let latency = g
-            .e2e
-            .iter()
-            .map(|(scenario, h)| LatencyRow {
-                scenario: scenario.to_string(),
-                n: h.total,
-                mean_ms: h.mean_ms(),
-                p50_ms: h.quantile_ms(0.5),
-                p90_ms: h.quantile_ms(0.9),
-                p99_ms: h.quantile_ms(0.99),
-                max_ms: h.max,
-            })
-            .collect();
-
-        let checkpoints = g
-            .checkpoints
-            .iter()
-            .map(|((scenario, name), h)| CheckpointRow {
-                scenario: scenario.to_string(),
-                checkpoint: name.to_string(),
-                n: h.total,
-                p50_ms: h.quantile_ms(0.5),
-                p90_ms: h.quantile_ms(0.9),
-                p99_ms: h.quantile_ms(0.99),
-            })
-            .collect();
-
-        let checks = g
-            .check_verdicts
-            .iter()
-            .map(|(scenario, (passed, failed))| CheckSummaryRow {
-                scenario: scenario.to_string(),
-                passed: *passed,
-                failed: *failed,
-            })
-            .collect();
-
-        // The stored-sample links, keyed by their `(scenario, class, case)`
-        // bucket — the SAME layout `finalize` writes to disk
-        // (`sample_rel` is the single path authority).
-        let samples = g
-            .samples
-            .iter()
-            .map(|((scenario, class, case), stored)| {
-                let pages =
-                    (0..stored.len()).map(|i| sample_rel(scenario, class, case, i)).collect();
-                SampleGroup {
-                    scenario: scenario.to_string(),
-                    class: class.clone(),
-                    case: case.clone(),
-                    pages,
-                }
-            })
-            .collect();
-
-        // The reporter owns shed + the 18x ringing gate; the caller supplies the
-        // mux-owned orphans/drops. Fill the reporter half here so a caller can pass
-        // `Canaries::default()` and still get correct shed/ringing.
-        canaries.shed = g.shed.values().sum();
-        canaries.ringing_expected = self.ringing_expected.load(Ordering::Relaxed);
-        canaries.ringing_received = self.ringing_received.load(Ordering::Relaxed);
-
-        LoadRunIndex { meta, counts, latency, checkpoints, checks, canaries, samples }
-    }
-
-    /// Write `load-result.json` (the [`LoadRunIndex`]) into `out_dir`. Called on
-    /// every periodic report rewrite and at run end, right after
-    /// [`finalize`](Self::finalize), so the machine-readable index sits next to
-    /// `index.html` and lists the same sample pages that were just written.
-    pub fn write_index(
-        &self,
-        out_dir: &Path,
-        meta: LoadRunMeta,
-        canaries: Canaries,
-    ) -> std::io::Result<()> {
-        std::fs::create_dir_all(out_dir)?;
-        let index = self.build_index(meta, canaries);
-        let json = serde_json::to_string_pretty(&index)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(out_dir.join("load-result.json"), json + "\n")
-    }
-
-    /// One-shot: write the HTML/markdown report AND the machine-readable
-    /// `load-result.json` for one snapshot (periodic or final). The bin calls this
-    /// so both artifacts stay in lockstep.
-    pub fn finalize_run(
-        &self,
-        out_dir: &Path,
-        meta: LoadRunMeta,
-        canaries: Canaries,
-    ) -> std::io::Result<()> {
-        self.finalize(out_dir)?;
-        self.write_index(out_dir, meta, canaries)
-    }
-
-    /// Spawn the periodic on-disk snapshot task: every `every` it rewrites the
-    /// HTML/markdown report AND `load-result.json` (via
-    /// [`finalize_run`](Self::finalize_run)) so the report is browsable mid-run.
-    /// `meta` must stamp `finished: false` — a snapshot is never the final word.
-    ///
-    /// SHUTDOWN ORDERING: the caller MUST `abort()` the returned handle and
-    /// await it BEFORE the final `finalize_run(finished: true)` write. The task
-    /// loops forever; left running, a tick that lands on the run's last instant
-    /// (any report interval that divides the duration) races the final write and
-    /// strands `finished: false` on disk.
-    /// Awaiting the aborted handle guarantees no snapshot write is in flight or
-    /// pending when the final write starts.
-    pub fn spawn_snapshots(
-        self: &Arc<Self>,
-        out_dir: PathBuf,
-        every: Duration,
-        meta: impl Fn() -> LoadRunMeta + Send + 'static,
-        canaries: impl Fn() -> Canaries + Send + 'static,
-    ) -> tokio::task::JoinHandle<()> {
-        let reporter = Arc::clone(self);
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(every);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tick.tick().await;
-                if let Err(e) = reporter.finalize_run(&out_dir, meta(), canaries()) {
-                    eprintln!("[loadgen] periodic report snapshot failed: {e}");
-                }
-            }
-        })
-    }
 }
 
+mod disk;
 mod evidence;
+mod index;
 mod inspect;
-pub use evidence::{CallEvidence, RenderedSample};
+mod live;
+mod pages;
 mod prometheus;
-mod render;
-use render::ReportFiles;
+mod series;
+pub use evidence::{CallEvidence, RenderedSample};
+pub use series::SERIES_TICK;
 
 #[cfg(test)]
 mod tests;

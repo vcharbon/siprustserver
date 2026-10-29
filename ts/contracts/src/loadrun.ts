@@ -13,6 +13,98 @@ import { formatDeclared } from "./canonical.js"
 import { defaulted } from "./serde.js"
 import { STRICT } from "./strict.js"
 
+/** The sampling gate's bounds, as the run was configured. */
+export const Sampling = Schema.Struct({
+  sampleCap: Schema.Int,
+  recordEvery: Schema.Int,
+  chaseCalls: Schema.Int
+})
+export interface Sampling extends Schema.Schema.Type<typeof Sampling> {}
+
+/** The recorded calls a failure row's class judges on their recording. */
+export const JudgedBasis = Schema.Literals(["audited", "checked"])
+
+/** A failure row's share of the recorded calls its class judged, and the estimate base. */
+export const JudgedShare = Schema.Struct({
+  failed: Schema.Int,
+  judged: Schema.Int,
+  base: Schema.Int,
+  basis: JudgedBasis
+})
+export interface JudgedShare extends Schema.Schema.Type<typeof JudgedShare> {}
+
+/** The run's headline figures as of the doc. */
+export const Progress = Schema.Struct({
+  elapsedMs: Schema.Int,
+  targetCps: Schema.Number,
+  draining: Schema.Boolean,
+  offered: Schema.Int,
+  placed: Schema.Int,
+  inFlight: Schema.Int,
+  ok: Schema.Int,
+  failed: Schema.Int,
+  rejected: Schema.Int,
+  notPlaced: Schema.Int,
+  generatorFailures: Schema.Int
+})
+export interface Progress extends Schema.Schema.Type<typeof Progress> {}
+
+const NO_PROGRESS = {
+  elapsedMs: 0,
+  targetCps: 0,
+  draining: false,
+  offered: 0,
+  placed: 0,
+  inFlight: 0,
+  ok: 0,
+  failed: 0,
+  rejected: 0,
+  notPlaced: 0,
+  generatorFailures: 0
+}
+
+/** One window of the run's time series (milliseconds since the run started). */
+export const SeriesPoint = Schema.Struct({
+  startMs: Schema.Int,
+  spanMs: Schema.Int,
+  placed: Schema.Int,
+  ok: Schema.Int,
+  failed: Schema.Int,
+  rejected: Schema.Int,
+  p50Ms: Schema.Number,
+  p99Ms: Schema.Number
+})
+export interface SeriesPoint extends Schema.Schema.Type<typeof SeriesPoint> {}
+
+/** One change of the offered rate, or the drain. */
+export const RateEvent = Schema.Struct({
+  atMs: Schema.Int,
+  kind: Schema.Literals(["rate", "drain"]),
+  fromCps: Schema.Number,
+  toCps: Schema.Number
+})
+export interface RateEvent extends Schema.Schema.Type<typeof RateEvent> {}
+
+/** One failed call among the run's last failures. */
+export const FailureRow = Schema.Struct({
+  atMs: Schema.Int,
+  scenario: Schema.String,
+  class: Schema.String,
+  case: defaulted(Schema.String, ""),
+  page: Schema.optionalKey(Schema.String)
+})
+export interface FailureRow extends Schema.Schema.Type<typeof FailureRow> {}
+
+/** Per scenario: the calls placed, recorded and judged on their recording. */
+export const ScenarioRecording = Schema.Struct({
+  scenario: Schema.String,
+  placed: Schema.Int,
+  recorded: Schema.Int,
+  accepted: Schema.Int,
+  audited: Schema.Int
+})
+export interface ScenarioRecording extends Schema.Schema.Type<typeof ScenarioRecording> {}
+
 /** Run metadata: timing and the echoed run knobs. */
 export const LoadRunMeta = Schema.Struct({
   /** Wall-clock start, Unix epoch milliseconds. */
@@ -30,7 +122,11 @@ export const LoadRunMeta = Schema.Struct({
   maxInFlight: Schema.Int,
   /** The egress policy label the run realized its b-leg with. */
   egress: Schema.optionalKey(Schema.String),
-  profile: Schema.optionalKey(Schema.String)
+  profile: Schema.optionalKey(Schema.String),
+  /** The load generator's command line, as typed (program first). */
+  commandLine: Schema.optionalKey(Schema.Array(Schema.String)),
+  /** The sampling gate's bounds: which calls ran recorded. */
+  sampling: Schema.optionalKey(Sampling)
 })
 export interface LoadRunMeta extends Schema.Schema.Type<typeof LoadRunMeta> {}
 
@@ -43,7 +139,11 @@ export const CountRow = Schema.Struct({
   case: defaulted(Schema.String, ""),
   count: Schema.Int,
   /** `true` iff the class is no failure (`ok`). */
-  ok: Schema.Boolean
+  ok: Schema.Boolean,
+  /** The row's share of the calls its class judges on their recording. */
+  judged: Schema.optionalKey(JudgedShare),
+  /** The first stored sample's one-line failure detail. */
+  error: Schema.optionalKey(Schema.String)
 })
 export interface CountRow extends Schema.Schema.Type<typeof CountRow> {}
 
@@ -70,6 +170,17 @@ export const CheckpointRow = Schema.Struct({
 })
 export interface CheckpointRow extends Schema.Schema.Type<typeof CheckpointRow> {}
 
+/** Per-`(scenario, exchange)` SIP round-trip summary (milliseconds). */
+export const RttRow = Schema.Struct({
+  scenario: Schema.String,
+  exchange: Schema.String,
+  n: Schema.Int,
+  p50Ms: Schema.Number,
+  p90Ms: Schema.Number,
+  p99Ms: Schema.Number
+})
+export interface RttRow extends Schema.Schema.Type<typeof RttRow> {}
+
 /** Per-scenario check-verdict tally over the sampled calls. */
 export const CheckSummaryRow = Schema.Struct({
   scenario: Schema.String,
@@ -84,8 +195,12 @@ export const Canaries = Schema.Struct({
   orphans: Schema.Int,
   /** Offered calls dropped at the max-in-flight cap. */
   shed: Schema.Int,
-  /** Datagrams discarded by the simulated packet-loss model. */
-  drops: Schema.Int,
+  /** Inbound datagrams discarded by the simulated packet-loss model. */
+  dropsIn: Schema.Int,
+  /** Outbound datagrams discarded by the simulated packet-loss model. */
+  dropsOut: Schema.Int,
+  /** Correlated datagrams discarded because their call's inbox was full. */
+  inboxDrops: defaulted(Schema.Int, 0),
   /** Calls that reached the ring→answer step (the 18x-delivery denominator). */
   ringingExpected: Schema.Int,
   /** Of those, how many saw the 18x ringing provisional. A RATE gated at >99%. */
@@ -110,9 +225,16 @@ export interface SampleGroup extends Schema.Schema.Type<typeof SampleGroup> {}
 /** One load run's complete result, as persisted to `load-result.json`. */
 export const LoadRunIndex = Schema.Struct({
   meta: LoadRunMeta,
+  progress: defaulted(Progress, NO_PROGRESS),
+  series: Schema.optionalKey(Schema.Array(SeriesPoint)),
+  rateEvents: Schema.optionalKey(Schema.Array(RateEvent)),
+  rateEventsDropped: Schema.optionalKey(Schema.Int),
+  recentFailures: Schema.optionalKey(Schema.Array(FailureRow)),
+  recording: Schema.optionalKey(Schema.Array(ScenarioRecording)),
   counts: Schema.Array(CountRow),
   latency: Schema.Array(LatencyRow),
   checkpoints: Schema.optionalKey(Schema.Array(CheckpointRow)),
+  rtt: Schema.optionalKey(Schema.Array(RttRow)),
   checks: Schema.optionalKey(Schema.Array(CheckSummaryRow)),
   canaries: Canaries,
   samples: Schema.optionalKey(Schema.Array(SampleGroup))
@@ -145,15 +267,65 @@ export const loadRunIndexJson = (index: LoadRunIndex): Record<string, unknown> =
       durationSecs: index.meta.durationSecs,
       maxInFlight: index.meta.maxInFlight,
       egress: index.meta.egress,
-      profile: index.meta.profile
+      profile: index.meta.profile,
+      commandLine: index.meta.commandLine,
+      sampling: index.meta.sampling && {
+        sampleCap: index.meta.sampling.sampleCap,
+        recordEvery: index.meta.sampling.recordEvery,
+        chaseCalls: index.meta.sampling.chaseCalls
+      }
     }),
-    counts: index.counts.map((row) => ({
-      scenario: row.scenario,
-      class: row.class,
-      case: row.case,
-      count: row.count,
-      ok: row.ok
+    progress: {
+      elapsedMs: index.progress.elapsedMs,
+      targetCps: index.progress.targetCps,
+      draining: index.progress.draining,
+      offered: index.progress.offered,
+      placed: index.progress.placed,
+      inFlight: index.progress.inFlight,
+      ok: index.progress.ok,
+      failed: index.progress.failed,
+      rejected: index.progress.rejected,
+      notPlaced: index.progress.notPlaced,
+      generatorFailures: index.progress.generatorFailures
+    },
+    series: index.series?.map((p) => ({
+      startMs: p.startMs,
+      spanMs: p.spanMs,
+      placed: p.placed,
+      ok: p.ok,
+      failed: p.failed,
+      rejected: p.rejected,
+      p50Ms: p.p50Ms,
+      p99Ms: p.p99Ms
     })),
+    rateEvents: index.rateEvents?.map((e) => ({ atMs: e.atMs, kind: e.kind, fromCps: e.fromCps, toCps: e.toCps })),
+    rateEventsDropped: index.rateEventsDropped,
+    recentFailures: index.recentFailures?.map((f) =>
+      pruned({ atMs: f.atMs, scenario: f.scenario, class: f.class, case: f.case, page: f.page })
+    ),
+    recording: index.recording?.map((r) => ({
+      scenario: r.scenario,
+      placed: r.placed,
+      recorded: r.recorded,
+      accepted: r.accepted,
+      audited: r.audited
+    })),
+    counts: index.counts.map((row) =>
+      pruned({
+        scenario: row.scenario,
+        class: row.class,
+        case: row.case,
+        count: row.count,
+        ok: row.ok,
+        judged: row.judged && {
+          failed: row.judged.failed,
+          judged: row.judged.judged,
+          base: row.judged.base,
+          basis: row.judged.basis
+        },
+        error: row.error
+      })
+    ),
     latency: index.latency.map((row) => ({
       scenario: row.scenario,
       n: row.n,
@@ -171,11 +343,21 @@ export const loadRunIndexJson = (index: LoadRunIndex): Record<string, unknown> =
       p90Ms: row.p90Ms,
       p99Ms: row.p99Ms
     })),
+    rtt: index.rtt?.map((row) => ({
+      scenario: row.scenario,
+      exchange: row.exchange,
+      n: row.n,
+      p50Ms: row.p50Ms,
+      p90Ms: row.p90Ms,
+      p99Ms: row.p99Ms
+    })),
     checks: index.checks?.map((row) => ({ scenario: row.scenario, passed: row.passed, failed: row.failed })),
     canaries: {
       orphans: index.canaries.orphans,
       shed: index.canaries.shed,
-      drops: index.canaries.drops,
+      dropsIn: index.canaries.dropsIn,
+      dropsOut: index.canaries.dropsOut,
+      inboxDrops: index.canaries.inboxDrops,
       ringingExpected: index.canaries.ringingExpected,
       ringingReceived: index.canaries.ringingReceived
     },

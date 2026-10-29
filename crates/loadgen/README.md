@@ -3,9 +3,10 @@
 `loadgen` drives **managed-rate SIP load** through a SUT (our front-proxy +
 B2BUA, or any SIP element) by **reusing the functional `scenario-harness`
 choreography** as load scenarios. One process, thousands of concurrent calls,
-bounded memory, a live Prometheus `/metrics` endpoint, and an on-disk callflow
-report that keeps the first-N samples per `(scenario × result-class)` — including
-the OK flows and, for failures, *why* they failed.
+bounded memory, a live Prometheus `/metrics` endpoint, a live report page on
+the same socket, and an on-disk callflow report that keeps the first-N samples
+per `(scenario × result-class)` — including the OK flows and, for failures,
+*why* they failed.
 
 It multiplexes every dialog over a **few static UDP sockets** (one per defined
 endpoint address: `uac`, `uas`, `refer`, or one shared socket with
@@ -149,6 +150,9 @@ HTTP socket as `/metrics`:
   untouched); a later `POST /rate?cps=N` **resumes** cleanly.
 - The current target is exported as the **`loadgen_target_cps`** gauge (`0` while
   paused).
+- Every rate change and the drain is logged (the first 256, then counted), marked
+  on the report's time series and listed on the report. The live report page
+  carries a form for each.
 
 ```bash
 curl -X POST 'http://<metrics-addr>/rate?cps=40'   # ramp up to 40 cps
@@ -497,8 +501,16 @@ quantiles, RSS + leak canaries), with the incident windows annotated.
 
 The report is written to `--out-dir`, bucketed per `(scenario × result-class × case)`:
 
-- **`index.html`** — counts table (`scenario | class | case | count | sample-links`),
-  OK rows green, failing rows red; plus latency percentiles and checkpoints.
+- **`index.html`** — in order: the command line, the headline figures (elapsed,
+  target vs achieved cps, in flight, placed / ok / failed, every rejection
+  source, injected drops, mux orphans and inbox drops, 18x delivery), the time
+  series (a window every 5 s, adjacent windows merging past 720 so the whole run
+  stays covered: placed, ok, failed, rejected, error %, p50 / p99 end-to-end
+  latency, as sparklines and the last 20 windows), the last 20 failures, the
+  counts table (`scenario | class | case | count | judged share | error |
+  sample-links`, the error being the first stored sample's detail), the latency,
+  checkpoint, SIP round-trip and check tables, the rate changes and the run's
+  settings.
 - **`callflows/<scenario>/<class>[/<case>]/<i>.html`** — the per-call **SIP sequence
   diagram** for sampled calls. For a failing call the page shows `FAIL` **and the
   reason** (the `StepError` / outcome) as the header banner and a `call-result`
@@ -511,8 +523,17 @@ The report is written to `--out-dir`, bucketed per `(scenario × result-class ×
   A failed call's sample bucket (its *case*) is the step it failed at,
   `<who>[:<goal kind>#<goal index>]@<barrier>` (e.g. `alice:bye#1@established`,
   or `settle` for an unmet settle barrier), in a filesystem-safe spelling.
-- **`summary.md`** — the same counts in markdown.
-- **Live:** `curl <metrics-addr>/metrics` during a run (every series names its
+- **`load-result.json`** — the run's index, everything `index.html` shows
+  (`index.html` is rendered from it alone, by the `loadrun-render` crate the
+  e2e website's `/load/<run>` page uses too).
+- **Live report:** `http://<metrics-addr>/` (printed at startup as
+  `live report: …`) is the same page rendered on demand from the running
+  reporter, with the rate and drain controls, reloading every 60 s
+  (`?refresh=N`, `?refresh=0` freezes it); `/load-result.json` is the live
+  index and `/callflows/…` the stored samples, served from memory.
+- **stderr:** every 5 s a status line: elapsed, achieved cps, in flight,
+  ok / fail / rej, and the error % of the window just closed.
+- **Live metrics:** `curl <metrics-addr>/metrics` during a run (every series names its
   `--stream` first) for the per-`(stream, shape,
   class)` counters, `loadgen_branch_total{stream,shape,branch}` (ok calls by
   the accepted ending they took) and `loadgen_failed_step_total{stream,shape,step}`
