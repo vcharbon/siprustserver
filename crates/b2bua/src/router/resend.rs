@@ -76,11 +76,6 @@ pub(super) async fn resend_turn(ctx: &Arc<RouterCtx>, call_ref: &str) {
     process_result(ctx, call_ref, result, now_ms, turn, None).await;
 }
 
-/// The answer deadline `call`'s ledger holds for `request`, if any.
-pub(super) fn deadline_of(call: &Call, request: &OffTurnRequest) -> Option<i64> {
-    call.timers.iter().find(|t| answers(request, t.timer_type())).map(|t| t.fire_at)
-}
-
 /// Whether `deadline` is the answer deadline of a request `call` awaits.
 pub(super) fn awaited_deadline(call: &Call, deadline: &TimerType) -> bool {
     call.awaited.iter().any(|r| answers(r, deadline))

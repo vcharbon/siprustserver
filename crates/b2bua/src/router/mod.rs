@@ -174,6 +174,10 @@ pub struct RouterCtx {
     /// Whether a call's primary has departed (ADR-0047). `None` on an unwired
     /// node: no call there has another primary.
     pub departed: Option<crate::repl::DepartedProbe>,
+    /// The replication streams from the peers, which confirm a proxy's dead
+    /// verdict (ADR-0047 D1). `None` on an unwired node: a verdict there
+    /// stands alone.
+    pub(crate) peer_streams: Option<crate::repl::ReplicationSupervisor>,
     /// Worker-side overload signal stamped on every OPTIONS-200 reply as
     /// `X-Overload: v=1; elu=…; gc=…; adm=…`. The front proxy's ELU-band AIMD
     /// (`sip_proxy::load_observer`) consumes it; the EWMAs advance only while a

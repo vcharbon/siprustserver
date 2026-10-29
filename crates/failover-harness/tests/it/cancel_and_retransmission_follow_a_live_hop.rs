@@ -369,9 +369,10 @@ impl b2bua::decision::CallDecisionEngine for SlowRelease {
 
 /// The proxy reads the live primary dead, and tells the backup, while the
 /// primary awaits its release consult's answer on the established call; it
-/// reads it alive again 200 ms later. The backup takes nothing over before
-/// the consult's deadline, by which the primary took the answer and ended the
-/// call: one teardown, nothing asked twice, one CDR (ADR-0047 D2).
+/// reads it alive again 200 ms later. The replication stream from the
+/// primary stays open, so the backup takes nothing over; the primary takes
+/// the answer and ends the call: one teardown, nothing asked twice, one CDR
+/// (ADR-0047 D1).
 #[tokio::test(start_paused = true)]
 async fn a_told_misread_while_the_primary_awaits_an_outside_answer_asks_nothing_twice() {
     let name = "told-misread-awaiting-an-outside-answer";
@@ -405,6 +406,7 @@ async fn a_told_misread_while_the_primary_awaits_an_outside_answer_asks_nothing_
         "the backup took nothing over, past the consult's deadline too"
     );
     assert_eq!(survivor.metrics().dead_verdicts_taken_total(), 1);
+    assert_eq!(survivor.metrics().dead_verdicts_unconfirmed_total(), 1, "the stream stayed open");
     let drained = fh.settle_terminal(async || w_b1.memory_clean() && w_b2.memory_clean()).await;
     assert!(drained, "the cluster drains the call");
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
@@ -416,9 +418,10 @@ async fn a_told_misread_while_the_primary_awaits_an_outside_answer_asks_nothing_
 
 /// The proxy reads the live primary dead, and tells the backup, while the
 /// callee holds its answer to the caller's INFO the primary relayed; it reads
-/// it alive again 200 ms later. The backup takes nothing over before the
-/// relay's Timer F, by which the primary relayed the callee's 200: one INFO
-/// to the callee, one 200 to the caller, one CDR (ADR-0047 D2).
+/// it alive again 200 ms later. The replication stream from the primary
+/// stays open, so the backup takes nothing over; the primary relays the
+/// callee's 200: one INFO to the callee, one 200 to the caller, one CDR
+/// (ADR-0047 D1).
 #[tokio::test(start_paused = true)]
 async fn a_told_misread_while_the_primary_relays_an_in_dialog_request_relays_it_once() {
     let name = "told-misread-relaying-an-info";
@@ -461,6 +464,7 @@ async fn a_told_misread_while_the_primary_relays_an_in_dialog_request_relays_it_
         hydrated,
         "the backup took nothing over, past the relay's Timer F too"
     );
+    assert_eq!(survivor.metrics().dead_verdicts_unconfirmed_total(), 1, "the stream stayed open");
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     let drained = fh.settle_terminal(async || w_b1.memory_clean() && w_b2.memory_clean()).await;
     assert!(drained, "the cluster drains the call");

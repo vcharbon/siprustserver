@@ -2,7 +2,8 @@
 //! with the node that sent it: the node crashes with the consult in flight,
 //! and the call is served again either by the rebooted primary's reclaim or by
 //! the backup's takeover on a message that reaches it (the proxy tells no dead
-//! verdict). The node serving the call again sends the consult again from its
+//! verdict), or by the backup's takeover at the proxy's dead verdict on a
+//! primary killed unannounced. The node serving the call again sends the consult again from its
 //! record (ADR-0039); the engine under test never answers a consult, so what
 //! bounds the wait is the re-sent consult's own:
 //!
@@ -130,8 +131,14 @@ struct Cluster {
 }
 
 /// Two replicating workers behind the proxy over one unanswering engine
-/// routing with `max_duration_sec`, and one limiter server.
+/// routing with `max_duration_sec`, and one limiter server; the proxy tells
+/// no dead verdict.
 async fn cluster(name: &str, max_duration_sec: i64) -> Cluster {
+    cluster_telling(name, max_duration_sec, false).await
+}
+
+/// [`cluster`], the proxy telling its dead verdicts when `tells`.
+async fn cluster_telling(name: &str, max_duration_sec: i64, tells: bool) -> Cluster {
     let http = SimulatedHttpNetwork::new();
     let store = Arc::new(CallStore::new(LEASE_OUTLIVING_THE_REPLICA_TTL, Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
@@ -149,7 +156,9 @@ async fn cluster(name: &str, max_duration_sec: i64) -> Cluster {
     let bob = fh.agent("bob", BOB).await;
     let mut proxy =
         fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
-    proxy.tell_no_dead_verdict();
+    if !tells {
+        proxy.tell_no_dead_verdict();
+    }
     let mut spawn = async |ordinal: &str, addr: &str, peer: &str| {
         fh.spawn_worker_limited(
             ordinal,
@@ -470,5 +479,61 @@ async fn a_refer_consult_lost_with_its_node_is_sent_again_and_ends_at_the_subscr
     assert_in(&c, window(refer_at, Duration::from_secs(REFER_EXPIRY_SEC as u64)), "told");
     assert_eq!(c.asked.load(Ordering::SeqCst), 2, "the authorization is sent again once");
     scenario_harness::callflow::hangup(&mut call.dialog, &c.bob).await;
+    assert_eq!(fully_over(&mut c, &call.call_ref).await, TerminationCause::RemoteBye);
+}
+
+/// How long the proxy's probe takes to read a node killed unannounced dead
+/// (ADR-0031 case 3a: two missed windows).
+const PROBE_READS_DEAD_AFTER: Duration = Duration::from_secs(2);
+
+/// A REFER's authorization lost with a primary killed unannounced: the
+/// replication stream from it ends with the node, so the proxy's dead verdict
+/// is confirmed and the backup takes the call over at once, sending the
+/// authorization again before the lost one is due. Unanswered, the referrer
+/// is told the transfer failed at the subscription's expiry; the call runs
+/// on and ends with one CDR once the node's endpoint leaves the slice.
+#[tokio::test(start_paused = true)]
+async fn a_refer_consult_lost_with_a_node_killed_unannounced_is_sent_again_at_the_verdict() {
+    let mut c =
+        cluster_telling("consult-answer-deadline-refer-read-dead", LONG_DURATION_SEC, true).await;
+    let mut call = establish(&mut c).await;
+    let refer_at = c.fh.now_ms();
+    let mut refer = call
+        .bob_dialog
+        .send_request(InDialogMethod::Refer)
+        .with_header("Refer-To", "<sip:charlie@127.0.0.1:5090>")
+        .send()
+        .await;
+    refer.expect(202).await;
+    c.bob.receive_absorbing("NOTIFY", &["ACK"]).await.respond(200, "OK").await;
+    let asked_at = consults_sent(&mut c, 1).await;
+    let primary = call.primary.clone();
+    c.fh.advance(Duration::from_millis(300)).await;
+    c.fh.mark(&primary, None, "crash", "kill (unannounced)");
+    worker(&mut c, &primary).crash();
+    c.fh.advance(PROBE_READS_DEAD_AFTER).await;
+    assert_eq!(c.asked.load(Ordering::SeqCst), 1, "nothing is sent again before the verdict");
+
+    c.fh.mark(&primary, None, "health", "the proxy's probe reads it dead");
+    c.proxy.set_health(&primary, WorkerHealth::Dead);
+    let verdict_at = c.fh.now_ms();
+    let resent_at = consults_sent(&mut c, 2).await;
+    let lost_due = asked_at + (CONSULT_BUDGET + MARGIN).as_millis() as i64;
+    assert!(resent_at < lost_due, "re-sent before the lost authorization is due");
+    assert!(resent_at <= verdict_at + 500, "re-sent at the verdict");
+    let backup = backup_of(&primary);
+    assert!(worker(&mut c, backup).serves(&call.call_ref), "the backup took over");
+
+    let mut notify = c.bob.receive_absorbing("NOTIFY", &["ACK"]).await;
+    assert!(
+        String::from_utf8_lossy(notify.request().body()).starts_with("SIP/2.0 500"),
+        "the referrer is told the transfer failed"
+    );
+    notify.respond(200, "OK").await;
+    assert_in(&c, window(refer_at, Duration::from_secs(REFER_EXPIRY_SEC as u64)), "told");
+    assert_eq!(c.asked.load(Ordering::SeqCst), 2, "the authorization is sent again once");
+    scenario_harness::callflow::hangup(&mut call.dialog, &c.bob).await;
+    c.fh.mark(&primary, None, "depart", "the evicted pod is force-deleted");
+    worker(&mut c, backup).simulate_peer_removed(&primary);
     assert_eq!(fully_over(&mut c, &call.call_ref).await, TerminationCause::RemoteBye);
 }

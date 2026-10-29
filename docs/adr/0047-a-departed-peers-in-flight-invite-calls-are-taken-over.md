@@ -14,6 +14,8 @@ undecided call on a departure only; the residual of a death the peers are not to
 Amended (2026-10-29): D2, the sweep also takes over a call with an in-dialog request in
 flight, and one that awaits the answer to a request sent off its turn, which the copy
 sends again (ADR-0039 decision 5).
+Amended (2026-10-29): D1, a dead verdict acts once this node's replication stream from
+the peer is down; D2, the takeover half then takes every such call over at once.
 
 **Amends:** ADR-0014 D1 (takeover is reactive only), ADR-0022 X4 and X5, ADR-0031's
 case table and its D3 split rule (the lifecycle order the forward and reverse gates read),
@@ -73,6 +75,15 @@ that verdict rather than wait for the endpoint to leave the slice. A notice nami
 node is ignored (`router/dead_verdict/tests.rs`;
 `read_dead_primary_taken_over.rs`).
 
+The replication stream confirms the verdict (user ruling). A backup acts on it only
+once its own Backup flow from that peer holds no open stream: at once when the stream is
+already down, as when the peer's process died and its connections closed, or when the
+stream ends within the pullers' idle bound (ADR-0045), as when the peer went silent.
+A stream that stays open through that bound speaks for a live peer the proxy misread,
+and the verdict takes nothing over (`b2bua_dead_verdicts_unconfirmed_total`). Two
+independent signals must agree, so a flap or a partition between the proxy and a live
+peer never moves its calls.
+
 **D2 — The departure sweep takes over the calls with an INVITE in flight.** The
 router starts a task of its own over the departed peer's backup partition — never the
 router loop's, which serves its own calls meanwhile — tracked by the dispatcher, so a
@@ -80,11 +91,9 @@ crash of the node stops it (`router/departure/tests.rs`). It
 reads the bodies one at a time, yielding as it goes, and for every call that names an
 INVITE transaction in flight — exactly the calls a materialisation would seed — or an
 in-dialog request in flight but the keepalive (a relay, a request of its own or one it
-holds), or awaits the answer to a request it sent off its turn, whose task died with the
-peer (ADR-0039 decision 5), takes the call lock and materialises the call as a takeover —
-on a dead verdict, a call whose only work is such a request once that request is due
-(its answer deadline, a REFER authorization's send time plus the decision deadline and
-its margin, an in-dialog request's Timer F), re-checked on this node then: its timers re-arm at their
+holds), or holds the answer to a request it sent off its turn, whose task died with the
+peer (ADR-0039 decision 5), takes the call lock and materialises the call as a takeover
+at once: its timers re-arm at their
 replicated deadlines, its INVITE transactions are rebuilt, the self-release watch is
 armed. A call already live here is left as it is. A call with nothing in flight is
 not touched: it stays reactive, for the reason ADR-0014 D1 removed the eager takeover
@@ -318,17 +327,16 @@ the call has one CDR.
   CANCEL cell of `undecided_call_settled_on_departure.rs`), and a restarted node
   answers its own undecided calls on its reclaim (the restart cell there).
 - **A primary read dead while it lives.** A flap or a partition between the proxy and
-  the primary alone: the backup takes over the primary's calls with an INVITE or a
-  teardown in flight while the primary serves them, so the callee may get the dialled
-  INVITE twice; an undecided call is left to its primary, which decides and answers it
-  alone; a call whose only work is a request in flight — an outside answer it awaits,
-  an in-dialog request — waits for those requests' deadlines, by which the live primary
-  took its answers and its write took them off the record, so nothing is asked or
-  relayed twice (`cancel_and_retransmission_follow_a_live_hop.rs`, the cells that tell
-  the verdict).
-  `live_primary_read_dead.rs` pins a flap: the second
-  verdict takes over afresh the re-INVITE round a stood-down copy left open, and the
-  callee absorbs the re-sent INVITE.
+  the primary alone leaves the replication stream open, so the verdict takes nothing
+  over: nothing is dialled, asked or relayed twice
+  (`cancel_and_retransmission_follow_a_live_hop.rs`, the cells that tell the verdict;
+  `live_primary_read_dead.rs`, a flap). A verdict that meets a stream cut for another
+  reason, a partition between the two workers too, takes over the calls with work in
+  flight while the primary serves them, so the callee may get the dialled INVITE twice
+  and an outside service the request twice.
+- **A peer that goes silent with its streams open** is confirmed only at the pullers'
+  idle bound (ADR-0045), past the proxy's verdict: its calls with work in flight are
+  taken over that much later.
 - **The creation write lands one stream hop after the 100.** A death inside that
   hop leaves no replica (`new_call_replication_window.rs` measures it).
 - **A route applied before its write replicated.** A node that dies after dialling

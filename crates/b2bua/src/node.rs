@@ -368,11 +368,11 @@ impl B2buaCore {
             rules: Arc::new(rules),
             services: Arc::new(services),
             metrics: metrics.clone(),
-            // The two core obligation kinds (limiter, CDR); a future service-
-            // contributed kind registers here via `.with(...)` (ADR-0020 X7).
+            // The core obligation kinds, limiter and CDR (ADR-0020 X7).
             obligations: Arc::new(crate::obligations::ObligationSet::core()),
             readiness: readiness.clone(),
             departed: supervisor.as_ref().map(crate::repl::departed_probe),
+            peer_streams: supervisor.clone(),
             overload: overload.clone(),
             capacity: capacity.clone(),
             refusals: refusals.clone(),

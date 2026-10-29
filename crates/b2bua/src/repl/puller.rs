@@ -96,37 +96,11 @@ mod bootstrap_complete;
 mod build;
 mod config;
 mod held_meetings;
+mod status;
 mod wiring;
 use apply::{ApplyMode, ApplyOutcome};
 pub use config::PullerConfig;
-
-/// Shared, observable per-`(peer, flow)` puller status. The supervisor reads
-/// `current` for readiness (scoped to the **Reclaim** flow) and the retained
-/// `watermark`.
-#[derive(Clone, Copy, Debug)]
-pub struct PullerStatus {
-    /// Sticky current flag — set on the first `Noop`, never cleared.
-    pub current: bool,
-    /// The retained watermark (advances on Noop / post-bootstrap tail). The
-    /// supervisor owns the authoritative copy keyed by `(ordinal, flow)`; the
-    /// puller publishes its progress here so a Park/re-add resumes from it.
-    pub watermark: Watermark,
-    /// Sticky **bootstrap-complete** flag (ADR-0011 X5). Set when the first
-    /// catch-up `Noop` arrives OR the bootstrap hard timer fires (best-effort) OR
-    /// the puller resumes warm (`W > (0,0)` — no bootstrap needed). Cleared only
-    /// by a `ResetToBootstrap`. Readiness consumes this.
-    pub bootstrap_complete: bool,
-    /// Monotonic reset generation: bumped each time the server pushes
-    /// `ResetToBootstrap` (watermark forced back to `(0,0)`). Lets the supervisor
-    /// distinguish "never advanced past `(0,0)`" from "was just reset" and pull
-    /// the retained watermark down accordingly (survives the `watch` channel's
-    /// last-value-wins coalescing of a reset-then-advance).
-    pub reset_gen: u64,
-    /// Set the first time `connect` succeeds for this peer. Readiness uses it so
-    /// an unreachable peer (hard-timer bootstrap-complete, never connected) does
-    /// not pin the node NotReady.
-    pub ever_connected: bool,
-}
+pub use status::PullerStatus;
 
 /// What ended a single `run_once` connection attempt — drives the supervisor's
 /// retention + the puller's own reconnect.
@@ -290,7 +264,9 @@ impl Puller {
             if *cancel.borrow() {
                 return;
             }
-            match self.run_once(&mut cancel, &mut deadline).await {
+            let outcome = self.run_once(&mut cancel, &mut deadline).await;
+            self.status_tx.send_if_modified(|s| std::mem::replace(&mut s.streaming, false));
+            match outcome {
                 RunOutcome::Cancelled => return,
                 outcome @ (RunOutcome::ConnectFailed | RunOutcome::Disconnected { .. }) => {
                     // ---- Backoff{attempt} ---- retain W (status already holds it).
@@ -420,10 +396,12 @@ impl Puller {
             Some(c) => c,
             None => return RunOutcome::ConnectFailed,
         };
-        // Mark the peer reached so readiness no longer treats it as unreachable.
-        if !self.status_tx.borrow().ever_connected {
-            self.status_tx.send_modify(|s| s.ever_connected = true);
-        }
+        // The peer is reached, so readiness no longer treats it as unreachable,
+        // and a stream to it is open.
+        self.status_tx.send_modify(|s| {
+            s.ever_connected = true;
+            s.streaming = true;
+        });
         self.note_state("streaming", "connected");
         let connected_at = tokio::time::Instant::now();
 

@@ -220,8 +220,12 @@ plain_counters! {
     ) => dead_notices_refused, bump_dead_notice_refused, dead_notices_refused_total;
     DEAD_VERDICTS_TAKEN = (
         "b2bua_dead_verdicts_taken_total",
-        "a front proxy's dead verdicts on another worker taken: each runs the takeover of the calls this node backs for it with work in flight (ADR-0047 D1)",
+        "a front proxy's dead verdicts on another worker taken: each runs the takeover of the calls this node backs for it with work in flight once its replication stream from that worker is down (ADR-0047 D1)",
     ) => dead_verdicts_taken, bump_dead_verdict_taken, dead_verdicts_taken_total;
+    DEAD_VERDICTS_UNCONFIRMED = (
+        "b2bua_dead_verdicts_unconfirmed_total",
+        "taken dead verdicts the replication stream from that worker stayed open through, within its silence bound: the proxy misread a live worker, and nothing was taken over (ADR-0047 D1)",
+    ) => dead_verdicts_unconfirmed, bump_dead_verdict_unconfirmed, dead_verdicts_unconfirmed_total;
     STORE_RECONCILED_ORPHAN_STAMPS = (
         "b2bua_store_reconciled_orphan_stamps_total",
         "last-touched stamps of no resident call the reaper sweep dropped; each is a store write a panic cut short — expected 0",

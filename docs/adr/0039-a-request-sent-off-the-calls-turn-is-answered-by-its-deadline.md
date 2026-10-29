@@ -94,10 +94,9 @@ second request while the first is awaited merges their deadlines.
 - A service needs no watchdog of its own for a request's answer; every
   waiting state it has on one is bounded by the request's budget plus the
   margin, on whichever node serves the call.
-- A primary read dead while it lives keeps the requests it awaits: the dead
-  verdict takes such a call over only once they are due, by which the primary
-  took its answers (ADR-0047 D2), so under `applied` no request is sent twice
-  and no transfer is repeated. A copy that still sends a request again while
+- A primary read dead while it lives keeps the requests it awaits: its
+  replication stream stays open, so the dead verdict takes nothing over
+  (ADR-0047 D1), and no request is sent twice and no transfer is repeated. A copy that still sends a request again while
   its primary lives — an LB misroute's message, a record behind the wire under
   `off` or past the cap — acts on its own answer while the primary acts on its
   (ADR-0055 §11, `W-stale-resend`); the deadline still fires wherever the call

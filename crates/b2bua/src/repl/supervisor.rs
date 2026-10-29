@@ -69,6 +69,7 @@ use crate::poison::{locked, SUPERVISOR_PEERS, SUPERVISOR_WIRING};
 mod backup_deferral;
 mod bindings;
 mod follow;
+mod streams;
 mod wiring;
 
 /// One of the supervisor's wiring slots ([`SUPERVISOR_WIRING`]).
@@ -701,11 +702,6 @@ impl ReplicationSupervisor {
     /// The metrics handle this supervisor and its pullers write.
     pub fn metrics(&self) -> &crate::metrics::B2buaMetrics {
         &self.inner.metrics
-    }
-
-    /// Whether the **Reclaim** puller is currently running (not Parked) for `peer`.
-    pub fn is_running(&self, peer: &str) -> bool {
-        self.inner.peers().get(peer).map(|e| e.reclaim.status_rx.is_some()).unwrap_or(false)
     }
 
     /// Await `peer`'s **Reclaim** flow becoming current (sticky), folding live

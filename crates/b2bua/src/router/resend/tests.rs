@@ -1,5 +1,6 @@
 //! The requests a call awaits answers to over a wired core: a dead verdict
-//! takes over a call whose only work is such a request and sends it again;
+//! takes over a call whose only work is such a request at once and sends it
+//! again;
 //! the answer to a request a node sent never takes a call over.
 
 use std::time::Duration;
@@ -60,11 +61,11 @@ async fn put(store: &ReplicatingCallStore, call: &Call) {
 }
 
 /// A call whose only work is an awaited request is taken over at the dead
-/// verdict once that request's answer deadline passed, and sends it again;
-/// with no adaptation port its answer comes at once and takes it off the
-/// record.
+/// verdict at once, before that request's answer deadline, and sends it
+/// again; with no adaptation port its answer comes at once and takes it off
+/// the record.
 #[tokio::test(start_paused = true)]
-async fn a_call_awaiting_an_answer_is_taken_over_past_its_deadline_and_asks_again() {
+async fn a_call_awaiting_an_answer_is_taken_over_at_the_verdict_and_asks_again() {
     let net = SimulatedSignalingNetwork::new(1);
     let n = node_on(&net, "w1", |_| {}, Vec::new()).await;
     let ctx = n.core.router_ctx();
@@ -75,9 +76,6 @@ async fn a_call_awaiting_an_answer_is_taken_over_past_its_deadline_and_asks_agai
 
     assert!(super::super::departure::take_over_read_dead(ctx, "w0"));
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(n.metrics.repl_takeover_hydrated_total(), 0, "nothing before the deadline");
-    tokio::time::sleep(Duration::from_millis(1_000)).await;
-
     assert_eq!(n.metrics.repl_takeover_hydrated_total(), 1, "the call was taken over");
     let body = n.store.get_call(PartitionRole::Backup, "w0", &call.call_ref).await.unwrap();
     let element = crate::store::envelope::decode(&call::MsgpackCodec::new(), &body.unwrap());

@@ -99,9 +99,10 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    with no cluster key tells nothing and a worker with none trusts nothing.
    A worker takes each verdict once, however many copies reach it, and runs
    on it the takeover half of the departure sweep over the calls it backs for
-   the dead worker (ADR-0047 D1, D2): the proxy now routes their traffic to
-   it, so the proxy's verdict is the one it acts on. An undecided call is left
-   to the departure.
+   the dead worker (ADR-0047 D1, D2) once its own replication stream from that
+   worker is down: the proxy now routes their traffic to it, and the stream
+   tells a dead worker from a live one the proxy misread. An undecided call is
+   left to the departure.
 4. **In-dialog routing reads liveness only.** A request carrying a verified
    cookie goes to `w_pri` while `w_pri` is `Alive`, whatever its acceptance;
    otherwise to `w_bak` while `w_bak` is `Alive`. It never runs a fresh

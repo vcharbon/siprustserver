@@ -155,7 +155,8 @@ writes its own (residual as amended below). (Amends ADR-0014 §3.)
 (cases 1, 2 and 4: the address is tombstoned `Dead`) and the OPTIONS probe (case 3a: `Dead`
 after the miss threshold) both land on the same `Dead` health, and the request and response
 paths already take the backup on it. The probe's verdict is also told to the other workers,
-signed (ADR-0050 §3), so the backups take over at once what the proxy now routes to them;
+signed (ADR-0050 §3), so the backups take over at once what the proxy now routes to them,
+once their replication stream from the worker confirms it (ADR-0047 D1);
 the tombstone's is not, as a draining worker still serves its calls. The response path takes the backup for
 **INVITE responses only**: a non-INVITE response answers a client transaction
 only its sender holds (RFC 3261 §17.1.2), so it follows the Via to its sender

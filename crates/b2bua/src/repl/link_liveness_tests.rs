@@ -12,6 +12,7 @@
 //!                                                     peer's log reapable
 //!   server   a Noop at least every noop interval   → a quiet stream is kept
 //!   server   accepts that fail                     → accepting goes on
+//!   puller   streaming while a stream is open      → cleared when it is left
 //! ```
 
 use std::net::SocketAddr;
@@ -240,6 +241,25 @@ async fn a_peer_silent_after_bootstrap_is_left_after_15_s_and_pulled_again_from_
         "re-pulled {gap:?} after the last frame"
     );
     assert_eq!(pulls[1].since, W, "the new stream resumes from the watermark the Noop announced");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_puller_reads_streaming_while_its_stream_is_open_and_not_once_it_ends() {
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let b = addr(9);
+    let peer = ScriptedPeer::listen(&net, b).await;
+    let (_run, status) = pull_from(net, b);
+    assert!(!status.borrow().streaming, "no stream before the first connect");
+
+    tick(100).await;
+    assert!(status.borrow().streaming, "the stream is open");
+    let last_frame = peer.noop_sent();
+    tick_until(last_frame + IDLE - Duration::from_millis(100)).await;
+    assert!(status.borrow().streaming, "a stream quiet for less than the idle bound is open");
+    tick_until(last_frame + IDLE + Duration::from_millis(20)).await;
+    assert!(!status.borrow().streaming, "a stream silent for the idle bound is left");
+    tick(BACKOFF_FLOOR.as_millis() as u64 + 20).await;
+    assert!(status.borrow().streaming, "the next stream is open");
 }
 
 #[tokio::test(start_paused = true)]

@@ -13,6 +13,11 @@
 //! verdict on the same worker sweeps again. Only the first notice of a
 //! request is read. A notice naming this node is ignored: a proxy that reads
 //! it dead routes its calls to their backups.
+//!
+//! A taken verdict acts once this node's replication stream from that worker
+//! is down: at once when it already is, else when it ends within the stream's
+//! silence bound. A stream that stays open through that bound speaks for a
+//! live worker the proxy misread, and nothing is taken over (ADR-0047 D1).
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -21,9 +26,10 @@ use sip_ids::SigningKey;
 use sip_message::dead_notice::{dead_notice, ReceivedNotice};
 use sip_message::SipRequest;
 
-use super::departure::take_over_read_dead;
+use super::departure::{backs_calls_of, take_over_read_dead};
 use super::RouterCtx;
 use crate::poison::{locked, DEAD_VERDICTS};
+use crate::repl::ReplicationSupervisor;
 
 /// How far a verdict's instant may stand from this node's clock, either way.
 pub(crate) const FRESH_MS: i64 = 10_000;
@@ -94,17 +100,59 @@ fn take(ctx: &Arc<RouterCtx>, received: &ReceivedNotice) {
         return;
     }
     if !ctx.dead_verdicts.take(&notice.ordinal, notice.at_ms)
-        || !take_over_read_dead(ctx, &notice.ordinal)
+        || !backs_calls_of(ctx, &notice.ordinal)
     {
         return;
     }
     ctx.metrics.bump_dead_verdict_taken();
+    match &ctx.peer_streams {
+        Some(streams) if streams.streams_from(&notice.ordinal) => {
+            confirm_on_the_stream(ctx, streams.clone(), notice.ordinal.clone(), notice.at_ms);
+        }
+        _ => act(ctx, &notice.ordinal, notice.at_ms),
+    }
+}
+
+/// Take over the calls this node backs for `ordinal` with work in flight.
+fn act(ctx: &Arc<RouterCtx>, ordinal: &str, at_ms: i64) {
+    if !take_over_read_dead(ctx, ordinal) {
+        return;
+    }
     tracing::info!(
         node = observe::node(),
-        worker = %notice.ordinal,
-        at_ms = notice.at_ms,
-        "a proxy reads the worker dead: its in-flight calls are taken over"
+        worker = %ordinal,
+        at_ms,
+        "a proxy reads the worker dead, its replication stream is down: its in-flight calls are taken over"
     );
+}
+
+/// Act on the verdict on `ordinal` once the replication stream from it ends,
+/// within its silence bound; past that bound the verdict is a misread.
+fn confirm_on_the_stream(
+    ctx: &Arc<RouterCtx>,
+    streams: ReplicationSupervisor,
+    ordinal: String,
+    at_ms: i64,
+) {
+    let task_ctx = ctx.clone();
+    let confirm: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> = Box::pin(
+        async move {
+            let bound = streams.silence_bound();
+            if tokio::time::timeout(bound, streams.stream_from_ends(&ordinal)).await.is_ok() {
+                act(&task_ctx, &ordinal, at_ms);
+                return;
+            }
+            task_ctx.metrics.bump_dead_verdict_unconfirmed();
+            tracing::info!(
+                node = observe::node(),
+                worker = %ordinal,
+                at_ms,
+                "a proxy reads the worker dead while its replication stream stays open: nothing is taken over"
+            );
+        },
+    );
+    let task = observe::spawn_keeping_node(confirm);
+    ctx.dispatcher.track(task.abort_handle());
 }
 
 /// Whether `received` verifies under `key` and is fresh at `now_ms`.

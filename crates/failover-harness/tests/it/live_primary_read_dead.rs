@@ -1,16 +1,15 @@
 //! **A live primary the proxy reads dead, the dead verdict told.** The proxy
 //! misreads the primary of an established call dead while it runs, and tells
-//! the backup (ADR-0050 §3). The call has nothing in flight, so the verdict
-//! takes nothing over; the caller's re-INVITE, which the proxy now routes to
-//! the backup, is relayed by a copy there. The proxy reads the primary alive,
-//! the callee's INFO goes through it, and the copy stands down on the
-//! primary's write (ADR-0047 D7). The proxy reads the primary dead again:
-//! that second verdict takes the call over afresh at the backup, whose record
-//! holds the round open, so the copy re-sends the callee the re-INVITE under
-//! its branch, ahead of it the ACK of the call's 2xx, both repeats the callee
-//! absorbs (RFC 3261 §17.2.3, §13.2.2.4). The callee's 200 completes the
-//! round at the backup; the call ends with the caller's BYE and one CDR.
-//! The twin of `stood_down_round.rs`, which tells no verdict.
+//! the backup (ADR-0050 §3). The replication stream from the primary stays
+//! open, so the backup takes nothing over at either verdict (ADR-0047 D1).
+//! The caller's re-INVITE, which the proxy now routes to the backup, is
+//! relayed by a copy there. The proxy reads the primary alive, the callee's
+//! INFO goes through it, and the copy stands down on the primary's write
+//! (ADR-0047 D7). The proxy reads the primary dead again, and that verdict
+//! takes nothing over either. The callee's 200, which still reaches the
+//! backup, takes the call over afresh: the round completes end to end; the
+//! call ends with the caller's BYE and one CDR. The twin of
+//! `stood_down_round.rs`, which tells no verdict.
 
 use std::time::Duration;
 
@@ -20,7 +19,7 @@ use sip_message::generators::InDialogMethod;
 use crate::call_terminate_on_backup::{establish, Established, ANSWER, OFFER};
 
 #[tokio::test(start_paused = true)]
-async fn a_second_dead_verdict_takes_over_the_round_a_stood_down_copy_left_open() {
+async fn a_dead_verdict_on_a_live_primary_takes_nothing_over_and_the_callees_answer_does() {
     let name = "flap-read-dead-takes-the-round-over";
     let Established {
         fh,
@@ -60,10 +59,10 @@ async fn a_second_dead_verdict_takes_over_the_round_a_stood_down_copy_left_open(
     assert_eq!(backup.metrics().dead_verdicts_taken_total(), 2, "the second verdict is told");
     assert_eq!(
         backup.metrics().repl_takeover_hydrated_total(),
-        hydrated + 1,
-        "the second verdict takes the open round over afresh"
+        hydrated,
+        "the second verdict takes nothing over"
     );
-    assert!(backup.serves(&call_ref), "the backup serves the round again");
+    assert!(!backup.serves(&call_ref), "the copy stood down");
 
     at_bob.respond(200, "OK").with_sdp(ANSWER).await;
     round.expect(200).await;
