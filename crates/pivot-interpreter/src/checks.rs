@@ -35,6 +35,8 @@ pub trait Observables {
 /// | `rseq` | the RSeq of a reliable provisional |
 /// | `from.tag` / `to.tag` | the dialog tags |
 /// | `from.userInfo` / `to.userInfo` | the two user parts, canonically |
+/// | `from.uri` / `to.uri` | the two whole URIs, parameters included |
+/// | `ruri.uri` / `ruri.userInfo` | a request's Request-URI, whole / its user part canonically |
 /// | `header(<Name>)` | the first occurrence of that header, in wire order |
 /// | `body` | the body as text |
 pub struct MessageObservables<'a>(pub &'a Inbound);
@@ -59,6 +61,10 @@ impl Observables for MessageObservables<'_> {
             "to.tag" => m.to_tag.clone(),
             "from.userInfo" => m.from_user.clone(),
             "to.userInfo" => m.to_user.clone(),
+            "from.uri" => m.from_uri.clone(),
+            "to.uri" => m.to_uri.clone(),
+            "ruri.uri" => m.ruri.clone(),
+            "ruri.userInfo" => m.ruri_user.clone(),
             // The body is bytes: observed as text when the bytes are UTF-8,
             // as standard base64 otherwise, chosen by the bytes alone.
             "body" => Some(match std::str::from_utf8(&m.body) {
@@ -194,10 +200,13 @@ mod tests {
             body: vec![],
             content_type: None,
             ruri_user: None,
+            ruri: None,
             from_tag: Some("a1".into()),
             to_tag: Some("t7".into()),
             from_user: Some("0009001".into()),
             to_user: Some("bob".into()),
+            from_uri: Some("sip:0009001@h;user=phone".into()),
+            to_uri: Some("sip:bob@h".into()),
         }
     }
 
@@ -267,6 +276,8 @@ mod tests {
             ("to.tag", "t7"),
             ("from.userInfo", "0009001"),
             ("to.userInfo", "bob"),
+            ("from.uri", "sip:0009001@h;user=phone"),
+            ("to.uri", "sip:bob@h"),
         ] {
             assert!(
                 run(&check(field, CheckOp::Eq, Some(value)), &m, &state, &bindings).is_none(),
@@ -353,6 +364,58 @@ mod tests {
         assert!(
             matches!(&failure, Some(Failure::CheckFailed { observed, .. }) if observed.starts_with("unreadable")),
             "{failure:?}"
+        );
+    }
+
+    /// The URI selectors read off a parsed message: a request's whole
+    /// Request-URI and its user part, the whole From and To URIs with their
+    /// parameters. A response has no Request-URI, so `ruri.uri` is absent there.
+    #[test]
+    fn the_uri_selectors_read_off_a_parsed_message() {
+        use sip_message::parser::custom::CustomParser;
+        use sip_message::SipParser;
+        let state = RunState::new();
+        let bindings = IdentityBindings::new();
+        let parse = |raw: &str| {
+            Inbound::of(&CustomParser::new().parse(raw.as_bytes()).expect("the message parses"))
+        };
+        let request = parse(
+            "INVITE sip:+15550100@192.0.2.7:5060;user=phone SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-1\r\n\
+             From: \"Alice\" <sip:+15550199@example.com;user=phone>;tag=a1\r\n\
+             To: <sip:+15550100@example.net;user=phone>\r\n\
+             Call-ID: c1@192.0.2.1\r\nCSeq: 1 INVITE\r\nMax-Forwards: 70\r\n\
+             Content-Length: 0\r\n\r\n",
+        );
+        for (field, value) in [
+            ("ruri.uri", "sip:+15550100@192.0.2.7:5060;user=phone"),
+            ("ruri.userInfo", "+15550100"),
+            ("from.uri", "sip:+15550199@example.com;user=phone"),
+            ("to.uri", "sip:+15550100@example.net;user=phone"),
+        ] {
+            let held = run(&check(field, CheckOp::Eq, Some(value)), &request, &state, &bindings);
+            assert!(held.is_none(), "{field}: {held:?}");
+        }
+        let response = parse(
+            "SIP/2.0 403 Forbidden\r\n\
+             Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-1\r\n\
+             From: <sip:+15550199@example.com;user=phone>;tag=a1\r\n\
+             To: <sip:+15550100@example.net;user=phone>;tag=b1\r\n\
+             Call-ID: c1@192.0.2.1\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n",
+        );
+        assert!(
+            run(&check("ruri.uri", CheckOp::Absent, None), &response, &state, &bindings).is_none()
+        );
+        let to = run(
+            &check("to.uri", CheckOp::Eq, Some("sip:+15550100@example.net")),
+            &response,
+            &state,
+            &bindings,
+        );
+        assert!(
+            matches!(&to, Some(Failure::CheckFailed { observed, .. })
+                if observed == "sip:+15550100@example.net;user=phone"),
+            "a parameter is part of the URI: {to:?}"
         );
     }
 }

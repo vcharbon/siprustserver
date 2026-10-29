@@ -2108,7 +2108,7 @@ there.
 | `status`, `reason`, `cseq-method` | responses | discriminator |
 | `cseq` | auto steps only | the CSeq number (§6.3) |
 | `ruri`, `from`, `to` | dialog-opening INVITE sends | tier-2 refs |
-| `from`, `to` | the dialog-opening INVITE a UAS expects | tier-2 refs, recorded: the identity the system launched |
+| `from`, `to` | the dialog-opening INVITE a UAS expects | tier-2 refs, recorded: the identity the system launched. An authored expectation of it is a check on `ruri.uri`, `from.uri`, `to.uri` (§9) |
 | `headers` | any | tier-3 frozen list, wire order |
 | `headers-present` | expects | existence checks |
 | `body` | any | §8.3 |
@@ -2535,7 +2535,7 @@ One check vocabulary everywhere, borrowed from the upstream `e2e-model`:
 
 | field | required | meaning |
 |---|---|---|
-| `field` | yes | field selector. Open token: `from.userInfo`, `header(P-Asserted-Identity)`, `body`, `body.b64`, or a deployment observable's name in a postcondition |
+| `field` | yes | field selector. Open token: `from.userInfo`, `from.uri`, `to.uri`, `ruri.uri`, `ruri.userInfo`, `header(P-Asserted-Identity)`, `body`, `body.b64`, or a deployment observable's name in a postcondition |
 | `op` | yes | `eq`, `regex`, `exists`, `absent` |
 | `value` | with `eq` / `regex` | a literal, a regex, or a string carrying `${…}` accessors |
 

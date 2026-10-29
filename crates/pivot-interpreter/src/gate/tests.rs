@@ -8,6 +8,7 @@ use pivot_schema::flow::{Anchor, CheckMode, Delay};
 use pivot_schema::known_bug::KnownBug;
 use pivot_schema::msg::Header;
 use pivot_schema::scoping::CheckClass;
+use sip_message::HeaderProjection;
 use std::sync::OnceLock;
 
 /// A resolver over an empty binding set. These tests freeze literal values,
@@ -71,6 +72,9 @@ pub(super) fn inbound_response(status: u16, cseq_method: &str) -> Inbound {
         to_tag: Some("b1".into()),
         from_user: Some("alice".into()),
         to_user: Some("bob".into()),
+        ruri: None,
+        from_uri: None,
+        to_uri: None,
     }
 }
 
@@ -91,6 +95,9 @@ pub(super) fn inbound_request(method: &str) -> Inbound {
         to_tag: None,
         from_user: Some("alice".into()),
         to_user: Some("bob".into()),
+        ruri: None,
+        from_uri: None,
+        to_uri: None,
     }
 }
 

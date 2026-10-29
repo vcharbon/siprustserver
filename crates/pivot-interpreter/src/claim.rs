@@ -168,6 +168,9 @@ mod tests {
             to_tag: Some("t7".into()),
             from_user: Some("0009001".into()),
             to_user: Some("bob".into()),
+            ruri: None,
+            from_uri: None,
+            to_uri: None,
         }
     }
 

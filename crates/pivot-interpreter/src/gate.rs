@@ -18,10 +18,10 @@
 //! by a background policy, or a FAILURE — it is never quietly tolerated and
 //! never silently dropped. There is no absorb-set and no window construct.
 
-use pivot_schema::bundle::{Arrived, Failure};
+use pivot_schema::bundle::Failure;
 use pivot_schema::msg::{Header, MsgSpec};
 use sip_message::generators::states_send_time;
-use sip_message::{header_forms_equivalent, HeaderName, HeaderProjection, Method, SipMessage};
+use sip_message::{header_forms_equivalent, Method};
 
 use crate::early::LearnedForks;
 use crate::plan::{CompiledStep, Discriminator};
@@ -29,105 +29,10 @@ use crate::resolve::Resolver;
 use crate::scope::{Finding, Scope};
 
 mod body;
+mod inbound;
 
 pub use body::{body_type_finding, body_type_holds, BodyTypeFinding};
-
-/// The facts a gate reads off an inbound datagram. Extraction lives in
-/// `sip-message`; this is the projection the gate compares against.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Inbound {
-    pub method: Option<String>,
-    pub status: Option<u16>,
-    pub reason: Option<String>,
-    pub cseq_method: String,
-    pub cseq: u32,
-    pub call_id: String,
-    pub rseq: Option<u32>,
-    pub headers: HeaderProjection,
-    pub body: Vec<u8>,
-    pub content_type: Option<String>,
-    /// A request's Request-URI user part — what a `ruri-pos` claim reads. `None`
-    /// on a response and on a user-less URI.
-    pub ruri_user: Option<String>,
-    /// The From/To dialog identity, off `sip-message`'s own accessors: the two
-    /// tags and the two user parts the §9 check vocabulary names.
-    pub from_tag: Option<String>,
-    pub to_tag: Option<String>,
-    pub from_user: Option<String>,
-    pub to_user: Option<String>,
-}
-
-impl Inbound {
-    /// Project a parsed message. Every field comes off `sip-message`'s own
-    /// accessors — no header text is re-parsed here.
-    pub fn of(msg: &SipMessage) -> Inbound {
-        let headers = HeaderProjection::of(msg);
-        let content_type = msg.raw(HeaderName::ContentType).next().map(str::to_string);
-        let rseq = msg.raw(HeaderName::RSeq).next().and_then(|v| v.trim().parse().ok());
-        match msg {
-            SipMessage::Request(r) => Inbound {
-                ruri_user: r.request_uri().user_identity(),
-                from_tag: r.from().tag().map(str::to_string),
-                to_tag: r.to().tag().map(str::to_string),
-                from_user: r.from().uri().user_identity(),
-                to_user: r.to().uri().user_identity(),
-                method: Some(r.method().to_string()),
-                status: None,
-                reason: None,
-                cseq_method: r.cseq().method().to_string(),
-                cseq: r.cseq().seq(),
-                call_id: r.call_id().to_string(),
-                rseq,
-                headers,
-                body: r.body().to_vec(),
-                content_type,
-            },
-            SipMessage::Response(r) => Inbound {
-                ruri_user: None,
-                from_tag: r.from().tag().map(str::to_string),
-                to_tag: r.to().tag().map(str::to_string),
-                from_user: r.from().uri().user_identity(),
-                to_user: r.to().uri().user_identity(),
-                method: None,
-                status: Some(r.status()),
-                reason: Some(r.reason().to_string()),
-                cseq_method: r.cseq().method().to_string(),
-                cseq: r.cseq().seq(),
-                call_id: r.call_id().to_string(),
-                rseq,
-                headers,
-                body: r.body().to_vec(),
-                content_type,
-            },
-        }
-    }
-
-    /// The structural identity a failure states for this datagram — the
-    /// machine-readable form; its `Display` is the human one.
-    pub fn arrived(&self) -> Arrived {
-        match (&self.method, self.status) {
-            (Some(m), _) => Arrived::Request { method: m.clone(), cseq: self.cseq },
-            (None, Some(s)) => Arrived::Response {
-                status: s,
-                reason: self.reason.clone().unwrap_or_default(),
-                cseq_method: self.cseq_method.clone(),
-                cseq: self.cseq,
-            },
-            (None, None) => Arrived::Unreadable,
-        }
-    }
-
-    /// A one-line description, for a failure that has to say what arrived.
-    pub fn describe(&self) -> String {
-        self.arrived().to_string()
-    }
-
-    /// The value of `name` by header IDENTITY — a compact spelling is found —
-    /// first occurrence in wire order.
-    pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.first(name)
-    }
-}
+pub use inbound::Inbound;
 
 /// What the gate decided about one datagram.
 #[derive(Debug, Clone, PartialEq, Eq)]
