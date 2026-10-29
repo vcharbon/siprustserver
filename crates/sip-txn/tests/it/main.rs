@@ -23,6 +23,7 @@ mod first_provisional;
 mod fsm;
 mod handles;
 mod held_ack;
+mod held_cancel;
 mod hop_alive;
 mod invite_give_up;
 mod late_cancel_hold;

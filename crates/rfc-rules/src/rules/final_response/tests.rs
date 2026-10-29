@@ -374,3 +374,64 @@ fn a_branchless_provisional_is_no_occasion() {
     late.via_branch = None;
     assert!(late_1xx(&[inv(1_000, 200), late]).is_empty());
 }
+
+// ── TakenFinalEndsInviteTxn (RFC 3261 §17.2.1, RFC 6026 §7.1) ───────────
+
+/// The second server-side sender of the one INVITE transaction.
+const RELIEF: &str = "10.0.0.3:5060";
+
+fn from_relief(mut m: Msg) -> Msg {
+    m.src = RELIEF.to_string();
+    m
+}
+
+fn taken(msgs: &[Msg]) -> Vec<crate::verdict::Finding> {
+    super::TakenFinalEndsInviteTxn.eval(&WireView { msgs, obs: &obs(msgs) })
+}
+
+/// A provisional and a 2xx from another sender after the taker's 487: both
+/// violate, each charged to its sender and reported at the taker.
+#[test]
+fn another_senders_provisional_or_other_final_after_the_taken_final_is_violated() {
+    let f = taken(&[
+        early(1_000, 180, "bt"),
+        inv(2_000, 487),
+        from_relief(early(3_000, 180, "bt")),
+        from_relief(inv(4_000, 200)),
+    ]);
+    assert_eq!(f.len(), 2, "{f:?}");
+    assert!(f.iter().all(|f| f.rule == RuleId::TakenFinalEndsInviteTxn));
+    assert!(f.iter().all(|f| f.emitter == RELIEF && f.taker == UAC));
+    assert!(matches!(
+        f[0].decision,
+        Decision::Violated(Evidence::LateProvisional { status: 180, completed_by_status: 487, .. })
+    ));
+    assert!(matches!(
+        f[1].decision,
+        Decision::Violated(Evidence::MultipleFinals { first_status: 487, second_status: 200, .. })
+    ));
+}
+
+/// Another sender repeating the taken final, or a 2xx after a 2xx (RFC 6026
+/// §7.1), is compliant; one sender after its own final is its siblings' and
+/// no occasion here; a 100 is never one.
+#[test]
+fn repeats_2xx_after_2xx_and_one_senders_own_responses_are_not_violated() {
+    let f = taken(&[
+        inv(1_000, 487),
+        from_relief(inv(2_000, 487)),
+        from_relief(early(2_500, 100, "bt")),
+        early(3_000, 180, "bt"),
+    ]);
+    assert_eq!(f.len(), 1, "only the other sender's 487 is an occasion: {f:?}");
+    assert!(matches!(f[0].decision, Decision::Compliant));
+    let f = taken(&[inv(1_000, 200), from_relief(inv(2_000, 200))]);
+    assert!(f.iter().all(|f| matches!(f.decision, Decision::Compliant)), "{f:?}");
+}
+
+/// The transaction ends at its timers: a response after them is no occasion.
+#[test]
+fn the_taken_transaction_ends_with_its_timers() {
+    let end = 32_000_000 + 5_000_000;
+    assert!(taken(&[inv(1_000, 487), from_relief(early(end + 2_000, 180, "bt"))]).is_empty());
+}

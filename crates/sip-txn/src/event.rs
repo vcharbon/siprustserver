@@ -26,8 +26,8 @@ pub enum TransactionEvent {
         /// receipt (RFC 3261 §18.2.1); this is what the peer sent.
         datagram: Bytes,
     },
-    /// A CANCEL matched a server INVITE txn; the 200/487 were sent by this
-    /// layer. RFC 3261 §9 scopes a CANCEL to the one INVITE *transaction* it
+    /// A CANCEL matched a server INVITE txn; this layer sent the 200/487, or
+    /// holds them for release (`TransactionConfig::cancel_bound_ms`). RFC 3261 §9 scopes a CANCEL to the one INVITE *transaction* it
     /// matched, so the event carries enough for the consumer to tell an
     /// initial-INVITE CANCEL (tear the call down) from one targeting an
     /// in-dialog re-INVITE (end that renegotiation only, keep the call):

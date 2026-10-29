@@ -9,6 +9,9 @@
 //!   B2BUA_REPL_ACK_BOUND_MS             the longest the ACK of a callee's
 //!                                       non-2xx final waits for the turn
 //!                                       that took it                       (200)
+//!   B2BUA_REPL_CANCEL_BOUND_MS          the longest the 200 to a CANCEL and
+//!                                       the 487 to its INVITE wait for the
+//!                                       turn that took the CANCEL          (200)
 //!   B2BUA_REPL_BACKLOG_HIGH_ENTRIES     pending writes toward a backup at
 //!                                       which new calls get none           (10000)
 //!   B2BUA_REPL_BACKLOG_LOW_ENTRIES      … under which they get one again    (1000)
@@ -22,8 +25,9 @@
 //! so does a cap not below T1 and the RFC 3261 §17.2.1 bound (200 ms), at
 //! either level, an ACK bound not above the cap and below T1 (500 ms) — above
 //! the cap, so the turn's release beats it while the backup keeps up; below
-//! T1, so the ACK leaves before the callee repeats its final — or a low-water
-//! mark not under its high one.
+//! T1, so the ACK leaves before the callee repeats its final — a CANCEL bound
+//! off the same range — below T1, so the answers leave before the caller
+//! repeats her CANCEL — or a low-water mark not under its high one.
 
 use std::time::Duration;
 
@@ -52,6 +56,7 @@ pub(crate) fn write_path(get: impl Fn(&str) -> Option<String>) -> Result<WritePa
         sync,
         sync_cap: ms("B2BUA_REPL_SYNC_CAP_MS", d.sync_cap)?,
         ack_bound: ms("B2BUA_REPL_ACK_BOUND_MS", d.ack_bound)?,
+        cancel_bound: ms("B2BUA_REPL_CANCEL_BOUND_MS", d.cancel_bound)?,
         backlog: BacklogMarks {
             high_entries: count("B2BUA_REPL_BACKLOG_HIGH_ENTRIES", d.backlog.high_entries)?,
             low_entries: count("B2BUA_REPL_BACKLOG_LOW_ENTRIES", d.backlog.low_entries)?,
@@ -60,7 +65,10 @@ pub(crate) fn write_path(get: impl Fn(&str) -> Option<String>) -> Result<WritePa
         },
     };
     path.validate().map_err(|why| {
-        format!("B2BUA_REPL_SYNC_CAP_MS / B2BUA_REPL_ACK_BOUND_MS / B2BUA_REPL_BACKLOG_*: {why}")
+        format!(
+            "B2BUA_REPL_SYNC_CAP_MS / B2BUA_REPL_ACK_BOUND_MS / B2BUA_REPL_CANCEL_BOUND_MS / \
+             B2BUA_REPL_BACKLOG_*: {why}"
+        )
     })?;
     Ok(path)
 }
@@ -84,6 +92,7 @@ mod tests {
             ("B2BUA_REPL_SYNC", "off"),
             ("B2BUA_REPL_SYNC_CAP_MS", "150"),
             ("B2BUA_REPL_ACK_BOUND_MS", "300"),
+            ("B2BUA_REPL_CANCEL_BOUND_MS", "250"),
             ("B2BUA_REPL_BACKLOG_HIGH_ENTRIES", "50"),
             ("B2BUA_REPL_BACKLOG_LOW_ENTRIES", "5"),
             ("B2BUA_REPL_BACKLOG_HIGH_AGE_MS", "3000"),
@@ -93,6 +102,7 @@ mod tests {
         assert_eq!(path.sync, SyncLevel::Off);
         assert_eq!(path.sync_cap, Duration::from_millis(150));
         assert_eq!(path.ack_bound, Duration::from_millis(300));
+        assert_eq!(path.cancel_bound, Duration::from_millis(250));
         assert_eq!(
             path.backlog,
             BacklogMarks {
@@ -122,6 +132,21 @@ mod tests {
             let err = read(pairs).unwrap_err();
             assert!(
                 err.contains("B2BUA_REPL_ACK_BOUND_MS") && err.contains("B2BUA_REPL_SYNC_CAP_MS"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cancel_bound_not_above_the_cap_and_below_t1_refuses_the_boot_naming_both() {
+        for pairs in [
+            &[("B2BUA_REPL_CANCEL_BOUND_MS", "100")][..],
+            &[("B2BUA_REPL_CANCEL_BOUND_MS", "500")][..],
+        ] {
+            let err = read(pairs).unwrap_err();
+            assert!(
+                err.contains("B2BUA_REPL_CANCEL_BOUND_MS")
+                    && err.contains("B2BUA_REPL_SYNC_CAP_MS"),
                 "{err}"
             );
         }

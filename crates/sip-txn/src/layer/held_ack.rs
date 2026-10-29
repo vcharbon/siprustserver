@@ -107,8 +107,10 @@ impl Owner {
         branch: &str,
         opened: Instant,
     ) {
-        if self.clients.get(branch).is_some_and(|t| t.created_at == opened) {
-            self.send_held_ack(endpoint, branch).await;
+        if self.clients.get(branch).is_some_and(|t| t.created_at == opened)
+            && self.send_held_ack(endpoint, branch).await
+        {
+            self.told_bound();
         }
     }
 

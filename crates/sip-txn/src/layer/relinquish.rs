@@ -13,9 +13,10 @@ use super::txn::TxnRef;
 impl Owner {
     /// Delete every client and server transaction attributed to `call_ref`,
     /// Accepted client ones included, their timers with them, owing nothing:
-    /// no CANCEL, no final, no retransmission. The one thing sent is the ACK a
-    /// client INVITE holds for the non-2xx final it took (`layer::held_ack`):
-    /// the final is taken, and no other node holds its transaction. The
+    /// no CANCEL, no final, no retransmission. The things sent are those held
+    /// for a final already taken: the ACK a client INVITE holds for its
+    /// non-2xx (`layer::held_ack`), and the 200 and 487 a server INVITE holds
+    /// for the CANCEL that cancelled it (`layer::held_cancel`). The
     /// call's self-release watch goes too, so no `CallQuiesced` follows.
     /// Replies with how many went.
     pub(super) async fn relinquish_call(
@@ -32,6 +33,9 @@ impl Owner {
             txns.into_iter().flat_map(|t| t.server.iter().cloned()).collect();
         for branch in &clients {
             self.send_held_ack(endpoint, branch).await;
+        }
+        for key in &servers {
+            self.send_held_cancel(endpoint, key).await;
         }
         let clients = clients.iter().filter(|b| self.delete_txn(TxnRef::Client(b))).count();
         let servers = servers.iter().filter(|k| self.delete_txn(TxnRef::Server(k.id()))).count();

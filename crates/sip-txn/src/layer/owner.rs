@@ -95,6 +95,13 @@ pub(super) struct Owner {
     pub(super) trying_bound_ms: u64,
     /// [`TransactionConfig::ack_bound_ms`](crate::TransactionConfig).
     pub(super) ack_bound_ms: u64,
+    /// [`TransactionConfig::cancel_bound_ms`](crate::TransactionConfig).
+    pub(super) cancel_bound_ms: u64,
+    /// [`TransactionConfig::on_bound`](crate::TransactionConfig).
+    pub(super) on_bound: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// The INVITE server transactions holding the answers to a CANCEL, by the
+    /// INVITE's Call-ID, From-tag and CSeq number (`layer::held_cancel`).
+    pub(super) held_cancels: HashMap<(String, String, u32), ServerTxnKey>,
     /// The To-tag this node bound to a dialog it answered as UAS, by
     /// (Call-ID, From-tag), kept for Timer L past the transaction so a
     /// CANCEL or a stray answered after the transaction is gone still carries
@@ -143,6 +150,9 @@ impl Owner {
             invite_first_response_timeout_ms: config.invite_first_response_timeout_ms,
             trying_bound_ms: config.trying_bound_ms,
             ack_bound_ms: config.ack_bound_ms,
+            cancel_bound_ms: config.cancel_bound_ms,
+            on_bound: config.on_bound.clone(),
+            held_cancels: HashMap::new(),
             recent_uas_tags: HashMap::new(),
             strict_to_tag: config.strict_to_tag,
             stateless_options: config.stateless_options,
@@ -398,6 +408,7 @@ impl Owner {
             Timer::FirstResponse(branch) => self.fire_first_response(&branch),
             Timer::Trying(key, opened) => self.fire_trying(endpoint, &key, opened).await,
             Timer::AckBound(branch, opened) => self.fire_ack_bound(endpoint, &branch, opened).await,
+            Timer::CancelBound(key, opened) => self.fire_cancel_bound(endpoint, &key, opened).await,
             Timer::Cleanup(id) => {
                 if let Some(t) = self.txn_mut(id.as_ref()) {
                     t.cleanup_key = None;

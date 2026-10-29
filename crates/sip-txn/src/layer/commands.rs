@@ -57,6 +57,10 @@ impl Owner {
             Command::HoldsClient { branch, reply } => {
                 let _ = reply.send(self.clients.contains_key(&branch));
             }
+            Command::ReleaseCancel { call_id, from_tag, cseq, reply } => {
+                let key = (call_id, from_tag, cseq);
+                let _ = reply.send(self.release_held_cancel(endpoint, &key).await);
+            }
             Command::ReleaseAck { branch, reply } => {
                 let _ = reply.send(self.send_held_ack(endpoint, &branch).await);
             }

@@ -43,6 +43,15 @@ pub struct TransactionConfig {
     /// and sends it itself this long after the final arrived. `0`, the
     /// default, sends it as the final arrives (RFC 3261 §17.1.1.2).
     pub ack_bound_ms: u64,
+    /// The bound on the 200 to a CANCEL and the 487 to the INVITE it cancels,
+    /// ms: the layer holds both until its consumer releases them
+    /// ([`TransactionLayer::release_cancel`](crate::TransactionLayer::release_cancel))
+    /// and sends them itself this long after the CANCEL arrived. `0`, the
+    /// default, sends them as the CANCEL arrives (RFC 3261 §9.2).
+    pub cancel_bound_ms: u64,
+    /// Told each time a held ACK, or the held answers to a CANCEL, leave at
+    /// their bound rather than on their consumer's release.
+    pub on_bound: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Whether a response the TU hands over under a To-tag other than the
     /// bound one fails a debug build loudly (`debug_assert!`) besides being
     /// re-rendered. The wire is corrected either way; `true` — the default —
@@ -96,6 +105,8 @@ impl TransactionConfig {
             invite_first_response_timeout_ms: crate::timers::TIMER_B,
             trying_bound_ms: crate::timers::TRYING_BOUND,
             ack_bound_ms: 0,
+            cancel_bound_ms: 0,
+            on_bound: None,
             strict_to_tag: true,
             deferred_bound: None,
             invite_refusals: None,

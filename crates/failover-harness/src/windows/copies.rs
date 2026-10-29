@@ -7,8 +7,6 @@ use std::net::SocketAddr;
 use sip_message::Method;
 use sip_net_testkit::{CaptureIndex, Captured};
 
-use crate::sweep::ALICE;
-
 /// The audit rule a caller's unACKed non-2xx INVITE final meets.
 pub(super) const RULE_UNACKED_NON_2XX: &str = "unacked-invite-non-2xx-final";
 
@@ -22,6 +20,10 @@ pub(super) const RULE_EARLY_BYE: &str = "no-bye-outside-or-early-dialog";
 /// The audit rule a UAS answering 2xx an INVITE it took a CANCEL for meets.
 pub(super) const RULE_NO_200_AFTER_CANCEL: &str = "no-200-after-cancel";
 
+/// The audit rule a response to an INVITE meets that follows, at its taker,
+/// another sender's final to it.
+pub(super) const RULE_TAKEN_FINAL: &str = "taken-final-ends-invite-txn";
+
 /// Whether the CANCEL at index `i` of `capture` names an INVITE an entry
 /// before it, captured at or before `upto`, answered with a final.
 pub(super) fn cancels_an_answered_invite(i: usize, capture: &CaptureIndex, upto: u64) -> bool {
@@ -32,15 +34,27 @@ pub(super) fn cancels_an_answered_invite(i: usize, capture: &CaptureIndex, upto:
     answered_before(capture, i, upto, cancel, None, ours)
 }
 
-/// Whether the final at index `i` of `capture` is a non-2xx to the caller's
-/// INVITE after a 2xx to that INVITE sent to her at or before `opened_at`,
-/// the kill.
+/// Whether the final at index `i` of `capture` is a non-2xx to an INVITE
+/// after a 2xx to that INVITE sent to the same taker at or before
+/// `opened_at`, the kill.
 pub(super) fn non_2xx_after_the_dead_owners_2xx(
     i: usize,
     capture: &CaptureIndex,
     opened_at: u64,
 ) -> bool {
-    non_2xx_after_a_2xx(i, capture, ALICE.parse().ok(), opened_at)
+    let taker = capture.entry(i).map(|e| e.to);
+    taker.is_some() && non_2xx_after_a_2xx(i, capture, taker, opened_at)
+}
+
+/// Whether the response at index `i` of `capture` is a 2xx to an INVITE a
+/// 487 to it, sent to the same taker, came before: the callee's answer to a
+/// call asked again after the caller's CANCEL.
+pub(super) fn two_xx_after_a_487(i: usize, capture: &CaptureIndex) -> bool {
+    let (Some(entry), Some(resp)) = (capture.entry(i), capture.message(i)) else { return false };
+    let terminated = |r: &Captured| r.status() == Some(487);
+    resp.status().is_some_and(|s| (200..300).contains(&s))
+        && resp.cseq_method == Method::Invite
+        && answered_before(capture, i, u64::MAX, resp, Some(entry.to), terminated)
 }
 
 /// Whether the final at index `i` of `capture` is a non-2xx to an INVITE,

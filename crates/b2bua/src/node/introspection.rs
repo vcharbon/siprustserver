@@ -22,6 +22,15 @@ impl B2buaCore {
         }
     }
 
+    /// The transaction layer's metrics handle (events-channel depth/capacity,
+    /// per-reason drop counters, active transactions). Exposed so the host can
+    /// render the txn-level backpressure signals the `B2buaMetrics` set omits —
+    /// notably `event_queue_drops{reason="response"}`, the keepalive-response
+    /// shedding that silently tears down established dialogs under a new-call burst.
+    pub fn txn_metrics(&self) -> &sip_txn::TransactionMetrics {
+        self.ctx.txn.metrics()
+    }
+
     /// Active call count (test/observability).
     pub fn active_calls(&self) -> usize {
         self.ctx.state.active_count()

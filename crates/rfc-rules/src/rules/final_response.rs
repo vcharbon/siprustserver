@@ -74,7 +74,14 @@ crate::registry::rules! {
     /// provisional afterwards. Charges the transaction's UAS side; the general sibling of
     /// [`RuleId::SingleFinalPerServerTxn`].
     No1xxAfterFinal = "no-1xx-after-final";
+    /// RFC 3261 §17.2.1 / §13.3.1.1, RFC 6026 §7.1: once a final reached the taker of an INVITE
+    /// server transaction, no provisional and no final of another kind reaches it there from any
+    /// other sender on the server side. Charges the late response's sender.
+    TakenFinalEndsInviteTxn = "taken-final-ends-invite-txn";
 }
+
+mod taken;
+pub use taken::TakenFinalEndsInviteTxn;
 
 /// **RFC 3261 §17.2.1 — one final per server transaction.** See the module doc.
 ///

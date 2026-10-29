@@ -52,6 +52,12 @@ pub struct WritePath {
     /// release beats it whenever the backup applies the write in time, and
     /// below T1, so the ACK leaves before the callee repeats its final.
     pub ack_bound: Duration,
+    /// The longest the transaction layer holds the 200 to a CANCEL and the
+    /// 487 to the INVITE it cancels for the turn that took the CANCEL to
+    /// release through the outbox, then sends them itself. Above the cap and
+    /// below T1, as the ACK bound: the caller repeats a CANCEL with no answer
+    /// at T1.
+    pub cancel_bound: Duration,
     /// When the backlog toward a backup gives new calls no backup.
     pub backlog: BacklogMarks,
 }
@@ -64,6 +70,7 @@ impl Default for WritePath {
             sync: SyncLevel::default(),
             sync_cap: Duration::from_millis(TRYING_BOUND / 2),
             ack_bound: Duration::from_millis(TRYING_BOUND),
+            cancel_bound: Duration::from_millis(TRYING_BOUND),
             backlog: BacklogMarks::default(),
         }
     }
@@ -71,8 +78,8 @@ impl Default for WritePath {
 
 impl WritePath {
     /// `Err` naming the setting out of range: a cap not above zero, not below
-    /// T1 or not below the §17.2.1 bound, an ACK bound not above the cap or
-    /// not below T1, or backlog marks out of order.
+    /// T1 or not below the §17.2.1 bound, an ACK or CANCEL bound not above
+    /// the cap or not below T1, or backlog marks out of order.
     pub fn validate(&self) -> Result<(), String> {
         let cap = self.sync_cap;
         let below = Duration::from_millis(T1.min(TRYING_BOUND));
@@ -88,6 +95,13 @@ impl WritePath {
                 "ACK bound {:?} is not above the replication sync cap {cap:?} and below T1 \
                  ({t1:?})",
                 self.ack_bound
+            ));
+        }
+        if self.cancel_bound <= cap || self.cancel_bound >= t1 {
+            return Err(format!(
+                "CANCEL bound {:?} is not above the replication sync cap {cap:?} and below T1 \
+                 ({t1:?})",
+                self.cancel_bound
             ));
         }
         self.backlog.validate()

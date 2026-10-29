@@ -113,6 +113,14 @@ pub(super) enum Command {
         reason: String,
         reply: oneshot::Sender<usize>,
     },
+    /// Send the held answers to a CANCEL of the INVITE named by its Call-ID,
+    /// From-tag and CSeq number; replies whether they left.
+    ReleaseCancel {
+        call_id: String,
+        from_tag: String,
+        cseq: u32,
+        reply: oneshot::Sender<bool>,
+    },
     /// Send the held ACK of the client INVITE transaction at `branch`;
     /// replies whether it left.
     ReleaseAck {
@@ -443,6 +451,22 @@ impl TransactionLayer {
     pub async fn release_ack(&self, branch: &str) -> Result<bool, TransactionLayerClosed> {
         let branch = branch.to_string();
         self.roundtrip(|reply| Command::ReleaseAck { branch, reply }).await
+    }
+
+    /// Release the 200 to a CANCEL and the 487 to the INVITE it cancelled, the
+    /// INVITE named by its Call-ID, From-tag and CSeq number as the
+    /// `Cancelled` event states them
+    /// ([`TransactionConfig::cancel_bound_ms`](crate::TransactionConfig)):
+    /// they leave now if still held. `true` when they left; `false` when none
+    /// are held for that INVITE.
+    pub async fn release_cancel(
+        &self,
+        call_id: &str,
+        from_tag: &str,
+        cseq: u32,
+    ) -> Result<bool, TransactionLayerClosed> {
+        let (call_id, from_tag) = (call_id.to_string(), from_tag.to_string());
+        self.roundtrip(|reply| Command::ReleaseCancel { call_id, from_tag, cseq, reply }).await
     }
 
     /// Ask to be notified (via [`TransactionEvent::CallQuiesced`]) when the last

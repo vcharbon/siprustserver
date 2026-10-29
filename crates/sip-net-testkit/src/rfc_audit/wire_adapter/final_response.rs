@@ -9,6 +9,7 @@ pub(super) const LIVE: &[Live] = &[
     Live::emitter(RuleId::No1xxAfterFinal, no_1xx_after_final)
         .roles(&[UaRole::Uas])
         .skip(Skip::RelayLanes),
+    Live::taker(RuleId::TakenFinalEndsInviteTxn, taken_final_ends_invite_txn).roles(&[UaRole::Uas]),
 ];
 
 fn single_final_per_server_txn(f: &rfc_rules::Finding, cid: &str) -> String {
@@ -53,5 +54,30 @@ fn no_1xx_after_final(f: &rfc_rules::Finding, cid: &str) -> String {
         "Sent a new {status} provisional on an INVITE server transaction (callId {cid}, \
          branch {branch}) after its {completed_by_status} final — a completed \
          transaction emits no further provisionals (RFC 3261 §13.3.1.1 / §17.2.1)",
+    )
+}
+
+fn taken_final_ends_invite_txn(f: &rfc_rules::Finding, cid: &str) -> String {
+    let (late, first, branch) = match &f.decision {
+        Decision::Violated(rfc_rules::Evidence::LateProvisional {
+            status,
+            completed_by_status,
+            branch,
+            ..
+        }) => (status, completed_by_status, branch),
+        Decision::Violated(rfc_rules::Evidence::MultipleFinals {
+            second_status,
+            first_status,
+            branch,
+            ..
+        }) => (second_status, first_status, branch),
+        _ => return String::new(),
+    };
+    format!(
+        "Sent {late} on an INVITE server transaction (callId {cid}, branch {branch}) whose \
+         {first} final another sender had already given {taker} — the taker's transaction \
+         ended at that final: only its repeats, or after a 2xx other 2xx, follow (RFC 3261 \
+         §17.2.1 / §13.3.1.1, RFC 6026 §7.1)",
+        taker = f.taker,
     )
 }

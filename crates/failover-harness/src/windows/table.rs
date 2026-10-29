@@ -5,8 +5,8 @@ use scenario_harness::dialogs::{DIALOG_CSEQ_BACKWARDS, DIALOG_ENDED};
 
 use super::copies::{
     cancels_an_answered_invite, non_2xx_after_another_final, non_2xx_after_the_dead_owners_2xx,
-    second_bye_at_one_cseq, RULE_EARLY_BYE, RULE_NO_200_AFTER_CANCEL, RULE_TAG_CONSISTENCY,
-    RULE_UNACKED_NON_2XX,
+    second_bye_at_one_cseq, two_xx_after_a_487, RULE_EARLY_BYE, RULE_NO_200_AFTER_CANCEL,
+    RULE_TAG_CONSISTENCY, RULE_TAKEN_FINAL, RULE_UNACKED_NON_2XX,
 };
 use super::stall_cseq::reuses_a_stall_cseq;
 use super::stall_repeat::{reason_only_cancel_repeat, RULE_RUNG_BYTE_IDENTICAL};
@@ -42,7 +42,7 @@ pub(super) const RESEND_ROWS: &[&str] = &[
 ];
 /// The rows that accept only what follows a routing decision a node asked
 /// again.
-pub(super) const REASK_ROWS: &[&str] = &["W-off-stale-reask"];
+pub(super) const REASK_ROWS: &[&str] = &["W-off-stale-reask", "W-kill-reask-after-cancel-answer"];
 /// The rows that accept only a dialog two workers each ended with a BYE.
 pub(super) const TWO_SERVER_ROWS: &[&str] = &["W-off-reboot-two-servers"];
 /// The re-INVITE rule of RFC 3261 §14.1: no re-INVITE while one is in progress.
@@ -102,7 +102,7 @@ pub static TABLE: &[Row] = &[
         covers: "one copy's non-2xx after the final the other copy sent the caller, under \
                  whatever To-tag, which she discards, and its repeats",
         kind: Kind::Rfc {
-            rules: &[RULE_UNACKED_NON_2XX, RULE_TAG_CONSISTENCY],
+            rules: &[RULE_UNACKED_NON_2XX, RULE_TAG_CONSISTENCY, RULE_TAKEN_FINAL],
             once_per_dialog: false,
             admits: Some(|i, capture, _| non_2xx_after_another_final(i, capture)),
         },
@@ -369,6 +369,20 @@ pub static TABLE: &[Row] = &[
         witness: None,
     },
     Row {
+        id: "W-kill-reask-after-cancel-answer",
+        tier: Tier::Degraded,
+        opens: Opens::any(PRIMARY_KILLS),
+        covers: "the answer of the callee dialled after the caller's 487, which reaches her \
+                 completed INVITE",
+        kind: Kind::Rfc {
+            rules: &[RULE_TAKEN_FINAL],
+            once_per_dialog: false,
+            admits: Some(|i, capture, _| two_xx_after_a_487(i, capture)),
+        },
+        closes_when_over: false,
+        witness: None,
+    },
+    Row {
         id: "W-stale-resend-cseq",
         tier: Tier::Degraded,
         opens: Opens::any(STALE_COPY),
@@ -425,7 +439,7 @@ pub static TABLE: &[Row] = &[
         covers: "a copy's non-2xx to a caller's INVITE the dead primary answered 2xx, which she \
                  discards",
         kind: Kind::Rfc {
-            rules: &[RULE_UNACKED_NON_2XX],
+            rules: &[RULE_UNACKED_NON_2XX, RULE_TAKEN_FINAL],
             once_per_dialog: false,
             admits: Some(non_2xx_after_the_dead_owners_2xx),
         },
@@ -440,7 +454,7 @@ pub static TABLE: &[Row] = &[
         covers: "the copy CANCELs the callee after its answer and refuses the caller after her \
                  200, acting on a call it never saw answered",
         kind: Kind::Rfc {
-            rules: &[RULE_NO_CANCEL_AFTER_FINAL, RULE_UNACKED_NON_2XX],
+            rules: &[RULE_NO_CANCEL_AFTER_FINAL, RULE_UNACKED_NON_2XX, RULE_TAKEN_FINAL],
             once_per_dialog: false,
             admits: None,
         },
@@ -467,7 +481,11 @@ pub static TABLE: &[Row] = &[
         opens: Opens::Transitional(Transitional::UndecidedDeparture),
         covers: "a final no node ACKs: the callee's give-up after its node departed, or the \
                  backup's refusal after the caller's transaction completed",
-        kind: Kind::Rfc { rules: &[RULE_UNACKED_NON_2XX], once_per_dialog: false, admits: None },
+        kind: Kind::Rfc {
+            rules: &[RULE_UNACKED_NON_2XX, RULE_TAKEN_FINAL],
+            once_per_dialog: false,
+            admits: None,
+        },
         closes_when_over: false,
         witness: None,
     },

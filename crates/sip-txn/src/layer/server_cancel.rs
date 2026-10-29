@@ -61,6 +61,10 @@ impl Owner {
         // final's To-tag (RFC 3261 §9.2): no 487, no `Cancelled`, and the
         // established call upstream is untouched.
         if matched.is_none() {
+            // A copy of a CANCEL whose answers are still held: they answer it.
+            if self.cancelled_invite(cancel_via, |t| t.unsent_cancel.is_some()).is_some() {
+                return true;
+            }
             let is_answered_target = |t: &Transaction| {
                 t.kind == TxnKind::Invite
                     && t.call_id == call_id.as_str()
@@ -119,8 +123,11 @@ impl Owner {
         // messages.
         // A request whose lines no response can echo draws none.
         let opts = GenerateResponseOpts { to_tag: uas_to_tag.clone(), ..Default::default() };
-        if let Ok(cancel_ok) = generate_response(&req, 200, "OK", &opts) {
-            self.send_buffer(endpoint, cancel_ok.image(), cancel_dest).await;
+        let hold = self.holds_cancel_answers();
+        let cancel_ok = generate_response(&req, 200, "OK", &opts).ok();
+        let cancel_ok = cancel_ok.map(|ok| (ok.image().clone(), cancel_dest));
+        if let Some((buf, dest)) = cancel_ok.as_ref().filter(|_| !hold) {
+            self.send_buffer(endpoint, buf, *dest).await;
         }
 
         // 487 Request Terminated on the matched INVITE.
@@ -128,9 +135,14 @@ impl Owner {
         let original = self.server(id).and_then(|t| t.original_request.clone());
         let terminated =
             original.and_then(|o| generate_response(&o, 487, "Request Terminated", &opts).ok());
+        let mut held_487 = None;
         if let Some(terminated) = terminated {
             let terminated_buf = terminated.image().clone();
-            self.send_buffer(endpoint, &terminated_buf, invite_dest).await;
+            if hold {
+                held_487 = Some((terminated_buf.clone(), invite_dest));
+            } else {
+                self.send_buffer(endpoint, &terminated_buf, invite_dest).await;
+            }
             self.record_uas_tag(id, &terminated);
             if let Some(txn) = self.server_mut(id) {
                 txn.state = TxnState::Completed;
@@ -139,12 +151,23 @@ impl Owner {
                 txn.original_request = None;
             }
             // The layer's own final holds the transaction like a TU's: Timer G
-            // repeats the 487 until the ACK, Timer H bounds it (§17.2.1).
-            self.arm_final_hold(id, TxnKind::Invite, 487);
+            // repeats the 487 until the ACK, Timer H bounds it (§17.2.1);
+            // from its release when it is held.
+            if !hold {
+                self.arm_final_hold(id, TxnKind::Invite, 487);
+            }
+        }
+        if hold {
+            let held_as = (
+                call_id.as_str().to_string(),
+                from_tag.to_string(),
+                invite_cseq.unwrap_or_default(),
+            );
+            self.hold_cancel_answers(&key, held_as, cancel_ok, held_487);
         }
 
-        // Critical: we already answered 200 + 487 on the wire; a dropped Cancelled
-        // would leave the b-leg ringing a cancelled call (no other signal upstream).
+        // Critical: the 200 and the 487 are sent or held for this event's turn; a
+        // dropped Cancelled would leave the b-leg ringing a cancelled call.
         self.emit_critical(TransactionEvent::Cancelled {
             call_id: call_id.as_str().to_string(),
             from_tag: from_tag.to_string(),

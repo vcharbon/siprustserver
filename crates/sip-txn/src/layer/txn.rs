@@ -127,6 +127,11 @@ pub(super) enum Timer {
     /// leaves then if its consumer released none. Its key is never stored;
     /// the fire reads the transaction.
     AckBound(String, tokio::time::Instant),
+    /// The bound of the server INVITE transaction opened at the instant it
+    /// carries on the answers to a CANCEL of it (`layer::held_cancel`): the
+    /// 200 and the 487 leave then if its consumer released none. Its key is
+    /// never stored; the fire reads the transaction.
+    CancelBound(ServerTxnKey, tokio::time::Instant),
     /// Timer E for the on-wire CANCEL (RFC 3261 §17.1.2.2 — a CANCEL is a
     /// non-INVITE request, but it reuses its INVITE's branch and builds no txn
     /// of its own, so its retransmit ladder rides the INVITE client txn as the
@@ -149,6 +154,15 @@ pub(super) enum CancelWire {
     Held,
     /// On the wire; only the [`Timer::CancelRetransmit`] ladder re-sends it.
     Sent,
+}
+
+/// The answers to a CANCEL an INVITE server transaction holds: the CANCEL's
+/// 200 and the INVITE's 487, each as it leaves and where.
+pub(super) struct UnsentCancel {
+    pub(super) cancel_ok: Option<(Bytes, SocketAddr)>,
+    pub(super) terminated: Option<(Bytes, SocketAddr)>,
+    /// The key the transaction is held under in `Owner::held_cancels`.
+    pub(super) held_as: (String, String, u32),
 }
 
 /// A CANCEL datagram parked on its INVITE client txn (see
@@ -239,6 +253,7 @@ impl Transaction {
             retransmit_buf: None,
             seed_resend: None,
             unsent_ack: None,
+            unsent_cancel: None,
             ladder: None,
             timeout_kind: TxnTimeoutKind::Response,
             dead_hop_reported: false,
@@ -369,6 +384,10 @@ pub(super) struct Transaction {
     /// goes, held until the consumer releases it or its bound passes
     /// (`layer::held_ack`), taken at that send.
     pub(super) unsent_ack: Option<(Bytes, SocketAddr)>,
+    /// On a server INVITE a CANCEL cancelled: the CANCEL's 200 and the
+    /// INVITE's 487, each with where it goes, held until the consumer
+    /// releases them or their bound passes (`layer::held_cancel`).
+    pub(super) unsent_cancel: Option<Box<UnsentCancel>>,
     /// The Timer A/E ladder for [`retransmit_buf`](Self::retransmit_buf).
     /// `None` until this txn starts retransmitting, and on a server txn until
     /// its non-2xx final arms Timer G.

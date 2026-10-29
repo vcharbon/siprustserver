@@ -161,9 +161,10 @@ impl B2buaCore {
             )
         });
         refusals.advertise(&config.minted_final_advertisement);
-        let ack_bound = replication.as_ref().map(|s| s.write_path).unwrap_or_default().ack_bound;
         let verdict_bounds = replication.as_ref().map(|s| s.verdict).unwrap_or_default();
-        let txn_config = txn_config(&config, &id_gen, &refusals, deferred_ceilings, ack_bound);
+        let path = replication.as_ref().map(|s| s.write_path).unwrap_or_default();
+        let txn_config =
+            txn_config(&config, &id_gen, &refusals, deferred_ceilings, &path, &turn_probe);
         let (txn, txn_rx) = TransactionLayer::spawn(endpoint, parser, txn_config);
         let (timers, timer_rx) = TimerService::spawn_with_metrics(clock.clone(), metrics.clone());
 
@@ -550,15 +551,6 @@ impl B2buaCore {
 
     pub fn metrics(&self) -> &B2buaMetrics {
         &self.metrics
-    }
-
-    /// The transaction layer's metrics handle (events-channel depth/capacity,
-    /// per-reason drop counters, active transactions). Exposed so the host can
-    /// render the txn-level backpressure signals the `B2buaMetrics` set omits —
-    /// notably `event_queue_drops{reason="response"}`, the keepalive-response
-    /// shedding that silently tears down established dialogs under a new-call burst.
-    pub fn txn_metrics(&self) -> &sip_txn::TransactionMetrics {
-        self.ctx.txn.metrics()
     }
 
     pub fn cdr(&self) -> &Arc<dyn CdrWriter> {

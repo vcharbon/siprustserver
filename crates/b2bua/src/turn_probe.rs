@@ -98,6 +98,11 @@ pub type Hold = Pin<Box<dyn Future<Output = ()> + Send>>;
 pub trait TurnProbe: Send + Sync {
     /// Called at every sub-point of every turn; `Some` holds the turn there.
     fn reached(&self, mark: &TurnMark<'_>) -> Option<Hold>;
+
+    /// Called when the transaction layer of `node` sent at their bound
+    /// messages it held for a turn's release: they left before that turn's
+    /// write.
+    fn bound_passed(&self, _node: &str) {}
 }
 
 /// The handle a worker carries: no probe by default.
@@ -108,6 +113,19 @@ impl TurnProbes {
     /// A handle reporting to `probe`.
     pub fn new(probe: Arc<dyn TurnProbe>) -> Self {
         Self(Some(probe))
+    }
+
+    /// Report that the transaction layer of `node` sent held messages at
+    /// their bound.
+    pub fn bound_passed(&self, node: &str) {
+        if let Some(probe) = &self.0 {
+            probe.bound_passed(node);
+        }
+    }
+
+    /// Whether a probe is installed.
+    pub fn installed(&self) -> bool {
+        self.0.is_some()
     }
 
     /// Report the sub-point `mark` builds and wait out the hold, if any. The

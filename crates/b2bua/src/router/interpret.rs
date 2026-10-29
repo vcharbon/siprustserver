@@ -11,11 +11,12 @@
 
 use std::sync::Arc;
 
+use b2bua_sdk::event::CallEvent;
 use call::CallModelState;
 use sip_message::{Method, SipMessage, SipRequest};
 
 use super::release::{release_call, ReleaseKind};
-use super::turn_entry::TurnEntry;
+use super::turn_entry::{HeldCancel, TurnEntry};
 use super::RouterCtx;
 use crate::effects::{
     BufferedObservabilityEffect, CriticalStateEffect, FireAndForgetEffect, HandlerResult,
@@ -46,20 +47,25 @@ fn answer_budgets(ctx: &RouterCtx) -> crate::answer_deadline::AnswerBudgets {
 
 /// Interpret a handler result: persist → critical → outbound → soft → buffered.
 /// `turn` names what the turn handled, for a model-invariant violation, and
-/// `trigger` is the message it handled, when its event is one.
+/// `trigger` is the event it handled, when it handled one.
 pub(super) async fn process_result(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
     result: HandlerResult,
     now_ms: i64,
     turn: &(dyn std::fmt::Display + Sync),
-    trigger: Option<&SipMessage>,
+    trigger: Option<&CallEvent>,
 ) {
-    let received = trigger.and_then(|m| match m {
+    let message = trigger.and_then(|e| match e {
+        CallEvent::Sip { message, .. } => Some(message.as_ref()),
+        _ => None,
+    });
+    let received = message.and_then(|m| match m {
         SipMessage::Request(r) => Some(r),
         SipMessage::Response(_) => None,
     });
-    let ack = trigger.and_then(held_ack_branch);
+    let ack = message.and_then(held_ack_branch);
+    let cancel = trigger.and_then(held_cancel_answers);
     let landing = crate::landing::Landing {
         config: &ctx.config,
         budgets: answer_budgets(ctx),
@@ -165,7 +171,7 @@ pub(super) async fn process_result(
         // H. It leaves once the primary applied the terminal body, and the
         // copy is released after it.
         let entry = TurnEntry::sending(ctx, call_ref, call, now_ms, effects.outbound);
-        let entry = TurnEntry { mark: (version, wrote, kind), ack, ..entry };
+        let entry = TurnEntry { mark: (version, wrote, kind), ack, cancel, ..entry };
         push(ctx, call_ref, entry).await;
         ctx.outboxes.drained(call_ref).await;
         release_call(ctx, call_ref, ReleaseKind::SelfRelease { ended: true }).await;
@@ -237,6 +243,7 @@ pub(super) async fn process_result(
     let entry = TurnEntry {
         trying: trying.cloned(),
         ack,
+        cancel,
         relinquish,
         limiter_releases: effects
             .soft
@@ -280,6 +287,16 @@ fn held_ack_branch(trigger: &SipMessage) -> Option<String> {
         return None;
     }
     resp.top_via().branch().filter(|b| !b.is_empty()).map(str::to_string)
+}
+
+/// The CANCEL `trigger` reports: the layer holds the 200 to it and the 487
+/// to the INVITE until the turn's entry releases them.
+fn held_cancel_answers(trigger: &CallEvent) -> Option<HeldCancel> {
+    let CallEvent::Cancelled { call_id, from_tag, invite_cseq, .. } = trigger else {
+        return None;
+    };
+    let (call_id, from_tag) = (call_id.clone(), from_tag.clone());
+    Some(HeldCancel { call_id, from_tag, cseq: (*invite_cseq)? })
 }
 
 /// Whether the turn's result enqueues the call's CDR.

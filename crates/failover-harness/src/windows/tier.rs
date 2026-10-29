@@ -1,8 +1,9 @@
 //! A cell's tier, measured (ADR-0055 §11): `Off` at level `off`; at level
 //! `applied`, `Guaranteed` when a kill struck a cluster every call of which
 //! was backed and bootstrapped at every turn up to the strike, no entry of
-//! any of them hit the cap, and the test tampered with no replication stream
-//! or replica; `Degraded` otherwise.
+//! any of them hit the cap, no transaction layer sent what it held for a turn
+//! at its bound, and the test tampered with no replication stream or replica;
+//! `Degraded` otherwise.
 
 use b2bua::repl::SyncLevel;
 
@@ -21,6 +22,9 @@ pub struct Measured<'a> {
     /// replica, before or during the run: what a backup holds is not what
     /// its turns report.
     pub tampered: bool,
+    /// A node's transaction layer sent messages held for a turn at their
+    /// bound, before that turn's write: as a cap hit.
+    pub bound_passed: bool,
 }
 
 /// The tier `m` places a cell in.
@@ -30,7 +34,8 @@ pub fn measure(m: &Measured<'_>) -> Tier {
     }
     let killed = m.strike.incident().is_some_and(|i| i.kills());
     let backed = m.at_strike.iter().all(|(_, turns)| turns.iter().all(|t| t.backed));
-    let capped = m.at_end.iter().any(|(_, turns)| turns.iter().any(Turn::cap_hit));
+    let capped =
+        m.bound_passed || m.at_end.iter().any(|(_, turns)| turns.iter().any(Turn::cap_hit));
     if killed && backed && !capped && !m.tampered {
         Tier::Guaranteed
     } else {
@@ -69,7 +74,14 @@ mod tests {
         tampered: bool,
     ) -> Tier {
         let strike = Strike::from(incident);
-        measure(&Measured { level, strike, at_strike: at, at_end: at, tampered })
+        measure(&Measured {
+            level,
+            strike,
+            at_strike: at,
+            at_end: at,
+            tampered,
+            bound_passed: false,
+        })
     }
 
     #[test]

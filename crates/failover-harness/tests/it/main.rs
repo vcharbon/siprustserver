@@ -20,6 +20,7 @@ mod backup_capacity;
 mod call_terminate_on_backup;
 mod caller_copy_takes_over;
 mod cancel_and_retransmission_follow_a_live_hop;
+mod cancel_answers_after_the_kill;
 mod consult_answer_deadline;
 mod cordoned_worker;
 mod crossed_reinvite_round;

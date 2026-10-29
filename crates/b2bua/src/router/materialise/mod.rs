@@ -147,6 +147,19 @@ pub(super) async fn materialise(
     call_ref: &str,
     origin: Origin,
 ) -> Materialised {
+    materialise_after(ctx, call_ref, origin, false).await
+}
+
+/// [`materialise`], for a trigger that shows the caller took a final when
+/// `answered`: a request only a confirmed dialog carries. A takeover's seeds
+/// then re-send no provisional, which would follow that final (RFC 3261
+/// §13.3.1.1).
+pub(super) async fn materialise_after(
+    ctx: &Arc<RouterCtx>,
+    call_ref: &str,
+    origin: Origin,
+    answered: bool,
+) -> Materialised {
     if let Some(live) = ctx.state.peek(call_ref) {
         if let Origin::Park = origin {
             return Materialised::Resident(live);
@@ -211,7 +224,7 @@ pub(super) async fn materialise(
         ctx.metrics.bump_repl_reclaimed();
         return Materialised::Parked(call);
     }
-    let seeded = serve(ctx, call_ref, &call, now_ms, origin).await;
+    let seeded = serve(ctx, call_ref, &call, now_ms, origin, answered).await;
     match origin {
         Origin::Takeover => {
             ctx.state.mark_takeover(call_ref);
@@ -243,15 +256,17 @@ pub(super) async fn materialise(
 /// Arm the resident `call` this node now serves: its ledger re-armed in the
 /// timer service, its transactions seeded, a sent request past its deadline
 /// settled as the timeout it drew, the requests it awaits answers to sent
-/// again on a turn of its own ([`super::resend`]). A reclaim's seeds re-send no provisional
-/// ([`seeds::without_provisional`]). What the layer seeded, `None` when it
-/// could not be asked.
+/// again on a turn of its own ([`super::resend`]). A reclaim's seeds, and a
+/// takeover's whose trigger shows the caller `answered`, re-send no
+/// provisional ([`seeds::without_provisional`]). What the layer seeded, `None`
+/// when it could not be asked.
 async fn serve(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
     call: &Call,
     now_ms: i64,
     origin: Origin,
+    answered: bool,
 ) -> Option<usize> {
     // The answer deadlines of the requests sent again are the re-send's to
     // arm: one already past would read the answer as lost first.
@@ -266,7 +281,7 @@ async fn serve(
     let mut seeds = seeds::seeds_for(call, now_ms);
     seeds.extend(seeds::answered_seeds(call, now_ms));
     seeds.extend(rejected_dialled::rejected_dialled_seeds(call, now_ms));
-    if !matches!(origin, Origin::Takeover) {
+    if answered || !matches!(origin, Origin::Takeover) {
         seeds = seeds::without_provisional(seeds);
     }
     let seeded = ctx.txn.seed(call_ref, seeds).await.ok();
@@ -303,7 +318,7 @@ pub(super) async fn arm(
         );
         ctx.state.update_quiet(call.clone());
     }
-    let seeded = serve(ctx, call_ref, &call, now_ms, Origin::Reclaim).await;
+    let seeded = serve(ctx, call_ref, &call, now_ms, Origin::Reclaim, false).await;
     Some((call, seeded))
 }
 

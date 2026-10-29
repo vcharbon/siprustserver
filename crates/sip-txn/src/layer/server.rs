@@ -406,6 +406,11 @@ impl Owner {
         src: SocketAddr,
     ) -> bool {
         let Some(id) = ServerTxnId::of_request(req) else { return false };
+        // A copy of an INVITE whose CANCEL's answers are still held: they
+        // answer it.
+        if self.holds_cancel(id) {
+            return true;
+        }
         let Some(existing) = self.server(id) else { return false };
         let replay = existing
             .last_response

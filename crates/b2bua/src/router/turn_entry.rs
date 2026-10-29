@@ -1,6 +1,7 @@
 //! A turn's outbox entry (ADR-0055 §3): everything the turn sends off the
 //! node, run in one go when the call's outbox releases it. It runs the turn's
-//! first provisional of a re-INVITE, the ACK of the non-2xx final it took,
+//! first provisional of a re-INVITE, the ACK of the non-2xx final it took, the
+//! answers to the CANCEL it took,
 //! then the transactions it relinquishes, its
 //! SIP in emission order, its limiter releases and its requests to outside
 //! services, and marks the turn [`Left`](TurnPoint::Left) last.
@@ -30,6 +31,9 @@ pub(super) struct TurnEntry {
     /// The branch of the client INVITE whose non-2xx final the turn took:
     /// the layer holds its ACK until this entry releases it.
     pub ack: Option<String>,
+    /// The CANCEL the turn took: the layer holds its 200 and the INVITE's
+    /// 487 until this entry releases them.
+    pub cancel: Option<HeldCancel>,
     /// The Vias of the answered INVITEs whose server transactions go.
     pub relinquish: Vec<Via>,
     pub outbound: Vec<OutboundSipEffect>,
@@ -59,6 +63,7 @@ impl TurnEntry {
             now_ms,
             trying: None,
             ack: None,
+            cancel: None,
             relinquish: Vec::new(),
             outbound,
             limiter_releases: Vec::new(),
@@ -76,6 +81,9 @@ impl TurnEntry {
         }
         if let Some(branch) = &self.ack {
             let _ = ctx.txn.release_ack(branch).await;
+        }
+        if let Some(held) = &self.cancel {
+            let _ = ctx.txn.release_cancel(&held.call_id, &held.from_tag, held.cseq).await;
         }
         for via in &self.relinquish {
             if let Some(branch) = via.branch() {
@@ -248,4 +256,12 @@ async fn emit(ctx: &RouterCtx, call_ref: &str, call: &Call, eff: &OutboundSipEff
             let _ = ctx.txn.send_raw(req.image().to_vec(), dest).await;
         }
     }
+}
+
+/// The CANCEL of the INVITE named by its Call-ID, From-tag and CSeq number,
+/// whose answers the layer holds.
+pub struct HeldCancel {
+    pub call_id: String,
+    pub from_tag: String,
+    pub cseq: u32,
 }

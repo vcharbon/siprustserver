@@ -8,13 +8,15 @@
 use std::sync::Arc;
 
 use call::{Call, TimerType};
-use sip_message::SipMessage;
+use sip_message::{Method, SipMessage};
 
 use super::admit::UnbornCall;
 use super::incarnation_gate::of_another_incarnation;
 use super::interpret::process_result;
 
-use super::materialise::{materialise, reoffer_trigger, Materialised, Offered, Origin, Reason};
+use super::materialise::{
+    materialise, materialise_after, reoffer_trigger, Materialised, Offered, Origin, Reason,
+};
 use super::peer_metrics::record_keepalive_timeout_peer;
 use super::reclaim::discharge_as_own;
 use super::release::{release_call, ReleaseKind};
@@ -125,7 +127,7 @@ pub(super) async fn process(
         {
             return;
         }
-        let Some(call) = resident_or_materialised(ctx, &call_ref).await else {
+        let Some(call) = resident_or_materialised(ctx, &call_ref, answered(&event)).await else {
             answer_vanished(ctx, &event, &mut turn.ids).await;
             // An admit report for a vanished call (a route fold, a service's
             // admit result): no call is left to own the set its admit may
@@ -248,11 +250,7 @@ pub(super) async fn process(
     record_keepalive_timeout_peer(ctx, &event, &result.call);
 
     let turn = super::turn_label::EventSummary { call_ref: &call_ref, event: &event };
-    let trigger = match &event {
-        CallEvent::Sip { message, .. } => Some(message.as_ref()),
-        _ => None,
-    };
-    process_result(ctx, &call_ref, result, now_ms, &turn, trigger).await;
+    process_result(ctx, &call_ref, result, now_ms, &turn, Some(&event)).await;
 }
 
 /// How a pre-handler gate resolved the event.
@@ -340,8 +338,12 @@ async fn holds_a_record(ctx: &RouterCtx, call_ref: &str) -> bool {
 /// reclaim is (ADR-0047 D7). `None` = a genuine orphan, or a deferred
 /// terminal this call just discharged through the reclaim funnel (CDR written,
 /// delete propagated); the request then draws the orphan 481 (ADR-0020 X3).
-async fn resident_or_materialised(ctx: &Arc<RouterCtx>, call_ref: &str) -> Option<Call> {
-    let first = materialise(ctx, call_ref, Origin::Takeover).await;
+async fn resident_or_materialised(
+    ctx: &Arc<RouterCtx>,
+    call_ref: &str,
+    answered: bool,
+) -> Option<Call> {
+    let first = materialise_after(ctx, call_ref, Origin::Takeover, answered).await;
     let disposition = match first {
         Materialised::Refused(Reason::NotBackupRole) => {
             let reclaimed = materialise(ctx, call_ref, Origin::Reclaim).await;
@@ -358,6 +360,14 @@ async fn resident_or_materialised(ctx: &Arc<RouterCtx>, call_ref: &str) -> Optio
         | Materialised::Parked(call) => Some(call),
         Materialised::Refused(_) => None,
     }
+}
+
+/// Whether `event` is a request only a confirmed dialog carries, an ACK or a
+/// BYE (RFC 3261 §13.2.2.4, §15): its sender took a 2xx.
+fn answered(event: &CallEvent) -> bool {
+    matches!(event, CallEvent::Sip { message, .. }
+        if matches!(message.as_ref(), SipMessage::Request(r)
+            if matches!(r.method(), Method::Ack | Method::Bye)))
 }
 
 /// A request the router answered on a live call's behalf is still a message

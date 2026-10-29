@@ -261,7 +261,15 @@ ends the transaction with the CANCEL unsent (§9.1, §17.2.1).
   `B2BUA_REPL_ACK_BOUND_MS` (200 ms) past the final: above the cap, so the
   turn's release beats it while the backup keeps up, and below T1, so it
   leaves before the callee repeats its final; a boot refuses a bound off that
-  range, naming it and the cap.
+  range, naming it and the cap. The 200 to a CANCEL and the 487 to the INVITE
+  it cancels are held likewise: the layer answers the CANCEL's transaction at
+  once and hands the call its `Cancelled` event, and the turn that takes it
+  releases both after its write, or the layer sends them
+  `B2BUA_REPL_CANCEL_BOUND_MS` (200 ms) past the CANCEL, off the same range:
+  below T1, so they leave before the caller repeats her CANCEL. A copy of the
+  CANCEL or the INVITE meanwhile draws nothing; a node killed holding them
+  leaves the caller's repeated CANCEL to the backup, which answers it on the
+  transaction its takeover seeds and CANCELs the callee.
 
 A graceful drain is transparent: it exits once the backup has caught up and
 every outbox is empty. A call with no backup has no peer holding it, so while
@@ -566,8 +574,9 @@ the re-anchor deadband of each other.
     at every turn up to the strike (the turn probe reports it at the logged
     sub-point); no outbox entry hit the cap (a release because the backup
     left, or one the harness's own hold of an applied sub-point caused, is
-    no cap hit); the test tampered with no replication stream or replica;
-    the incident is a kill. The cell is perfect: no row of any kind opens,
+    no cap hit); no transaction layer sent at its bound an ACK or a
+    CANCEL's answers it held for a turn (the probe reports it); the test
+    tampered with no replication stream or replica; the incident is a kill. The cell is perfect: no row of any kind opens,
     every party goal is met, the evidence rule (§4) ends no call, and the CDR
     count is §5's.
   - **Degraded**: level `applied`, any other case: every row below opens.
@@ -700,15 +709,19 @@ the re-anchor deadband of each other.
     the copy's evidence rule sends on a caller dialog it holds possibly
     confirmed;
   - `W-kill-reask-after-cancel`, a kill of the primary (user ruling): the
-    caller's CANCEL is answered by the dead node's transaction layer while
-    her call is undecided, and the turn that would record it waits for the
-    decision; the backup holds the call undecided, asks the decision again
-    and dials the callee after her 487. Rare: a CANCEL and a kill inside one
-    decision round trip. The record says nothing of the CANCEL, so the copy
-    cannot tell it apart from an undecided call; when it does say so the
-    copy ends the call with nothing on the wire
+    caller's CANCEL is answered by the dead node's transaction layer at its
+    CANCEL bound while her call is undecided, and the turn that would record
+    it waits for the decision; the backup holds the call undecided, asks the
+    decision again and dials the callee after her 487. Rare: a CANCEL and a
+    kill inside one decision round trip. The record says nothing of the
+    CANCEL, so the copy cannot tell it apart from an undecided call; when it
+    does say so the copy ends the call with nothing on the wire
     (`undecided_call_settled_on_departure.rs`, the CANCEL-during-decision
-    cell);
+    cell). A layer that sends what it held at its bound places the run in
+    Degraded, as a cap hit does;
+  - `W-kill-reask-after-cancel-answer`, the same window: that callee's 2xx,
+    relayed to the caller after her 487, which her completed INVITE
+    discards (she ACKs and BYEs the dialog it confirms);
   - `W-kill-rseq`, a kill inside the replication window, and a split that
     heals (user ruling): a copy's reliable provisional under the dialog's
     derived tag whose RSeq cannot continue the sequence the dead primary sent

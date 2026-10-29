@@ -18,7 +18,8 @@ pub(super) fn txn_config(
     id_gen: &Arc<IdGen>,
     refusals: &Refusals,
     ceilings: Option<DeferredBound>,
-    ack_bound: std::time::Duration,
+    write_path: &crate::repl::WritePath,
+    probe: &crate::turn_probe::TurnProbes,
 ) -> TransactionConfig {
     let mut txn_config = TransactionConfig {
         // Sizes the events channel at 4096: room for a new-INVITE burst
@@ -40,7 +41,14 @@ pub(super) fn txn_config(
         // The ACK of a callee's non-2xx final is the router's to release with
         // the turn that took the final (ADR-0055 §3); the layer sends it at
         // the write path's ACK bound otherwise.
-        ack_bound_ms: u64::try_from(ack_bound.as_millis()).unwrap_or(u64::MAX),
+        ack_bound_ms: u64::try_from(write_path.ack_bound.as_millis()).unwrap_or(u64::MAX),
+        // The answers to a CANCEL likewise, with the turn that took it.
+        cancel_bound_ms: u64::try_from(write_path.cancel_bound.as_millis()).unwrap_or(u64::MAX),
+        // A probe hears of what left at its bound, before its turn's write.
+        on_bound: probe.installed().then(|| {
+            let (probe, node) = (probe.clone(), config.self_ordinal.clone());
+            Arc::new(move || probe.bound_passed(&node)) as Arc<dyn Fn() + Send + Sync>
+        }),
         strict_to_tag: true,
         deferred_bound: None,
         invite_refusals: Some(refusals.memo().clone()),

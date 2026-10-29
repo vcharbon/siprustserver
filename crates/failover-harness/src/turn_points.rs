@@ -121,6 +121,9 @@ struct Inner {
     resent: bool,
     /// A node asked again a call's routing decision another had asked.
     reasked: bool,
+    /// A node's transaction layer sent messages held for a turn at their
+    /// bound, before that turn's write.
+    bound_passed: bool,
 }
 
 /// An arm on the first call that takes a turn.
@@ -145,6 +148,12 @@ impl TurnPoints {
         let inner = self.lock();
         let turns = |c: &String| inner.calls.get(c).cloned().unwrap_or_default();
         inner.order.iter().map(|c| (c.clone(), turns(c))).collect()
+    }
+
+    /// Whether a node's transaction layer sent messages held for a turn at
+    /// their bound, before that turn's write.
+    pub fn bound_passed(&self) -> bool {
+        self.lock().bound_passed
     }
 
     /// The first call that took a turn, with its turns so far.
@@ -264,6 +273,10 @@ fn covers(mark: &TurnMark<'_>, turn: &Turn) -> bool {
 }
 
 impl TurnProbe for TurnPoints {
+    fn bound_passed(&self, _node: &str) {
+        self.lock().bound_passed = true;
+    }
+
     fn reached(&self, mark: &TurnMark<'_>) -> Option<Hold> {
         let applied_held = locked(&self.applied_held).contains_key(mark.call_ref);
         let mut inner = self.lock();

@@ -79,6 +79,7 @@ impl FailoverHarness {
     pub fn tier(&self) -> Option<Tier> {
         let at_end = self.turn_points.calls();
         let tampered = self.harness.tampered.load(Ordering::Relaxed);
+        let bound_passed = self.turn_points.bound_passed();
         self.struck
             .iter()
             .map(|s| {
@@ -88,6 +89,7 @@ impl FailoverHarness {
                     at_strike: &s.calls,
                     at_end: &at_end,
                     tampered,
+                    bound_passed,
                 };
                 measure(&m)
             })
