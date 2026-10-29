@@ -33,6 +33,15 @@ pub enum TxnSeed {
         cancel: Option<Box<SipRequest>>,
         ack_ahead: Option<(Vec<u8>, SocketAddr)>,
     },
+    /// A client INVITE this side sent toward `dest` that took a non-2xx
+    /// final, its ACK not known to have left: `invite` as it left, keyed by
+    /// its top-Via branch and attributed from its Via `cr` / `lg` params. It
+    /// runs in Completed for `bound_ms` from the seed, what is left of the
+    /// Timer D the final started, ACKing each copy of a non-2xx final on its
+    /// branch and absorbing it (RFC 3261 §17.1.1.2): the record may be ahead
+    /// of the wire, so the first ACK may never have left, and the callee
+    /// repeats its final until one arrives (§17.2.1).
+    ClientRejected { invite: SipRequest, dest: SocketAddr, bound_ms: u64 },
     /// A server INVITE this side admitted and has not answered: `request`,
     /// rebuilt from the record as far as a response to it reads it — Via
     /// stack, From, To, Call-ID, CSeq. Keyed by its top-Via branch and sent-by

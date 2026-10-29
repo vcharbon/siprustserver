@@ -36,6 +36,10 @@ pub(super) fn txn_config(
         // applied at its backup (ADR-0055 §3); the layer sends it at the
         // §17.2.1 bound otherwise.
         trying_bound_ms: sip_txn::timers::TRYING_BOUND,
+        // The ACK of a callee's non-2xx final is the router's to release with
+        // the turn that took the final (ADR-0055 §3); the layer sends it at
+        // the same bound otherwise.
+        ack_bound_ms: sip_txn::timers::TRYING_BOUND,
         strict_to_tag: true,
         deferred_bound: None,
         invite_refusals: Some(refusals.memo().clone()),

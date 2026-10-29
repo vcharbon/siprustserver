@@ -93,6 +93,8 @@ pub(super) struct Owner {
     pub(super) invite_first_response_timeout_ms: u64,
     /// [`TransactionConfig::trying_bound_ms`](crate::TransactionConfig).
     pub(super) trying_bound_ms: u64,
+    /// [`TransactionConfig::ack_bound_ms`](crate::TransactionConfig).
+    pub(super) ack_bound_ms: u64,
     /// The To-tag this node bound to a dialog it answered as UAS, by
     /// (Call-ID, From-tag), kept for Timer L past the transaction so a
     /// CANCEL or a stray answered after the transaction is gone still carries
@@ -140,6 +142,7 @@ impl Owner {
             invite_initial_timeout_ms: config.invite_initial_timeout_ms,
             invite_first_response_timeout_ms: config.invite_first_response_timeout_ms,
             trying_bound_ms: config.trying_bound_ms,
+            ack_bound_ms: config.ack_bound_ms,
             recent_uas_tags: HashMap::new(),
             strict_to_tag: config.strict_to_tag,
             stateless_options: config.stateless_options,
@@ -394,6 +397,7 @@ impl Owner {
             }
             Timer::FirstResponse(branch) => self.fire_first_response(&branch),
             Timer::Trying(key, opened) => self.fire_trying(endpoint, &key, opened).await,
+            Timer::AckBound(branch, opened) => self.fire_ack_bound(endpoint, &branch, opened).await,
             Timer::Cleanup(id) => {
                 if let Some(t) = self.txn_mut(id.as_ref()) {
                     t.cleanup_key = None;

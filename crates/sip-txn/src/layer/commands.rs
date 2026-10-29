@@ -55,6 +55,9 @@ impl Owner {
             Command::HoldsClient { branch, reply } => {
                 let _ = reply.send(self.clients.contains_key(&branch));
             }
+            Command::ReleaseAck { branch, reply } => {
+                let _ = reply.send(self.send_held_ack(endpoint, &branch).await);
+            }
             Command::ReleaseTrying { key, reply } => {
                 let _ = reply.send(self.send_first_trying(endpoint, key.id()).await);
             }

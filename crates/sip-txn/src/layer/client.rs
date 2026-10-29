@@ -16,7 +16,6 @@ use std::net::SocketAddr;
 use bytes::Bytes;
 use call::{TxnKind, TxnTimeoutKind};
 use sip_clock::delay_queue;
-use sip_message::generators::generate_ack_for_non_2xx;
 use sip_message::serializer::{render, write_request_line};
 use sip_message::{Method, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
@@ -373,7 +372,7 @@ impl Owner {
     /// on it is moot (the UAS answered — §9.2; counted dropped only if it
     /// never reached the wire), and Timer D holds it to re-ACK repeats (RFC
     /// 3261 §17.1.1.2), from this final.
-    fn complete_non_2xx(&mut self, branch: &str) {
+    pub(super) fn complete_non_2xx(&mut self, branch: &str) {
         let (r, t, cr) = match self.clients.get_mut(branch) {
             Some(txn) => {
                 txn.state = TxnState::Completed;
@@ -527,35 +526,9 @@ impl Owner {
                         self.flush_cancel_on_provisional(endpoint, branch).await;
                     }
                 } else if kind == TxnKind::Invite && resp.status() >= 300 {
-                    // Non-2xx INVITE final: (re-)ACK hop-by-hop (RFC 3261 §17.1.1.2).
-                    if let (Some(orig), Some(dest)) = (original_request, destination) {
-                        match generate_ack_for_non_2xx(&orig, &resp, &[]) {
-                            Ok(ack) => self.send_buffer(endpoint, ack.image(), dest).await,
-                            Err(e) => tracing::warn!(%branch, %e, "ACK not sent: no ACK echoes it"),
-                        }
-                    }
-                    if state == TxnState::Completed {
-                        // A RETRANSMITTED non-2xx final (our first ACK was lost): we
-                        // just re-ACKed it above; absorb without re-notifying.
-                        return true;
-                    }
-                    if orphaned {
-                        // No consumer holds this transaction's call: the hop
-                        // ACK above and the Timer D hold below are the whole
-                        // of what the final draws.
-                        self.complete_non_2xx(branch);
-                        return true;
-                    }
-                    // FIRST non-2xx final: hold the txn in Completed for Timer D so
-                    // retransmitted finals are re-ACKed + absorbed, not re-surfaced.
-                    // The auto-ACK silenced the UAS's retransmission *trigger*, so
-                    // without Timer D a lost ACK would have the UAS resend the final
-                    // unanswered until its own Timer H, each resend re-emitting
-                    // upstream as a duplicate.
-                    self.complete_non_2xx(branch);
-                    // Critical: we auto-ACKed (silenced the UAS's resend), so this is
-                    // the app's only delivery of the final.
-                    self.emit_critical(TransactionEvent::response(resp, src, true));
+                    let txn = (state, orphaned, original_request, destination);
+                    let branch = branch.to_string();
+                    self.take_non_2xx_final(endpoint, &branch, resp, src, txn).await;
                     return true;
                 } else if kind == TxnKind::Invite {
                     // A 2xx INVITE final: Accepted until Timer M (RFC 6026

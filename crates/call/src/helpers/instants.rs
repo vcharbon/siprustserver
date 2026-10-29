@@ -77,6 +77,9 @@ pub fn shift_instants(call: &mut Call, offset_ms: i64) {
 fn shift_leg(leg: &mut Leg, offset_ms: i64) {
     if let Some(invite) = leg.outbound_invite_mut() {
         invite.sent_at_ms = invite.sent_at_ms.saturating_add(offset_ms);
+        if let Some(at) = invite.final_at_ms.as_mut() {
+            *at = at.saturating_add(offset_ms);
+        }
     }
     for entry in &mut leg.messages.entries {
         entry.at_ms = entry.at_ms.saturating_add(offset_ms);

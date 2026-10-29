@@ -59,7 +59,9 @@
 //! the peer's `bak:{self}`) is a genuine miss here.
 
 mod received_request;
+mod rejected_dialled;
 mod seeds;
+pub(in crate::router) use rejected_dialled::rejected_dialled_seeds;
 pub(in crate::router) use seeds::{
     names_request_in_flight, names_server_branch, names_unanswered_caller_invite, rejected_seed,
     relayed_server_key,
@@ -263,6 +265,7 @@ async fn serve(
     ctx.timers.restore(timers, call_ref.to_string(), call.incarnation()).await;
     let mut seeds = seeds::seeds_for(call, now_ms);
     seeds.extend(seeds::answered_seeds(call, now_ms));
+    seeds.extend(rejected_dialled::rejected_dialled_seeds(call, now_ms));
     if !matches!(origin, Origin::Takeover) {
         seeds = seeds::without_provisional(seeds);
     }

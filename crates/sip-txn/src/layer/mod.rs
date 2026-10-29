@@ -47,6 +47,7 @@ mod commands;
 mod config;
 mod events;
 mod handle;
+mod held_ack;
 mod ingress;
 mod key;
 mod lifetime;

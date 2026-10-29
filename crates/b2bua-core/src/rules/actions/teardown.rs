@@ -262,7 +262,7 @@ impl ActionExecutor<'_> {
         match end {
             LegEnd::InviteRejected => match rejecting_final(ctx, leg_id) {
                 Some((cseq, status)) => {
-                    record_dialled_invite_final(call, leg_id, cseq, status);
+                    record_dialled_invite_final(call, leg_id, cseq, status, self.now_ms);
                 }
                 None => call::helpers::update_leg(call, leg_id, abandon_leg),
             },

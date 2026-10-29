@@ -277,6 +277,7 @@ pub fn rule_chain_turn(
                     source_leg_id,
                     i64::from(resp.cseq().seq()),
                     resp.status(),
+                    now_ms,
                 );
             }
         }

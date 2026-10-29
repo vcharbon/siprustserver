@@ -72,7 +72,8 @@ pub(super) fn seeds_for(call: &Call, now_ms: i64) -> Vec<TxnSeed> {
                 // A client and a server transaction are told apart (RFC 3261
                 // §17.1.3, §17.2.3): one of each may share a branch.
                 let (server, via) = match &seed {
-                    TxnSeed::ClientInvite { invite, .. } => (false, invite.top_via()),
+                    TxnSeed::ClientInvite { invite, .. }
+                    | TxnSeed::ClientRejected { invite, .. } => (false, invite.top_via()),
                     TxnSeed::ServerInvite { request, .. } => (true, request.top_via()),
                     TxnSeed::ServerAccepted { response, .. } => (true, response.top_via()),
                     TxnSeed::ServerRejected { response, .. } => (true, response.top_via()),

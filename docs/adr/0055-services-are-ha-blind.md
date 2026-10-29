@@ -215,7 +215,13 @@ ends the transaction with the CANCEL unsent (§9.1, §17.2.1).
 - **The first provisional, the gate and the end of a call.** The caller's
   100 is an outbox entry waiting for the call's creation write; the
   transaction layer sends it itself at the §17.2.1 bound if no entry released
-  one. The answer the dialog gate gives a request on a live call is an entry
+  one. The hop-by-hop ACK of a callee's non-2xx final is an entry
+  of the turn that took the final the same way: the transaction layer holds
+  it, absorbs a copy of the final meanwhile, and sends it itself at that
+  bound if the entry released none. A copy that takes the call over, and a
+  node that discharges its ended body, hold the callee's INVITE Completed for
+  what is left of Timer D past the final's arrival, so each copy the callee
+  repeats for want of the ACK draws one (RFC 3261 §17.1.1.2). The answer the dialog gate gives a request on a live call is an entry
   too: when it took the request in order (the dialog's CSeq advanced), the
   turn writes that change to the change log and the answer waits for it; a
   change to the message ring alone is not written. The turn that ends a call

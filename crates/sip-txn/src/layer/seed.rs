@@ -54,6 +54,9 @@ impl Owner {
                     }
                     went_in
                 }
+                TxnSeed::ClientRejected { invite, dest, bound_ms } => {
+                    self.seed_client_rejected(call_ref, invite, dest, bound_ms)
+                }
                 TxnSeed::ServerInvite { request, to_tag, provisional, leg_id } => {
                     self.seed_server_invite(
                         endpoint,
@@ -325,6 +328,45 @@ impl Owner {
             self.seed_held_cancel(&branch, *cancel, dest);
         }
         self.release_seed_resend(&branch);
+        true
+    }
+
+    /// A client INVITE keyed by `invite`'s branch, attributed from its Via as
+    /// [`seed_client_invite`](Self::seed_client_invite) attributes it,
+    /// Completed on a non-2xx final and held for `bound_ms` from now, so each
+    /// copy of the final is ACKed and absorbed (RFC 3261 §17.1.1.2). `false`
+    /// when the INVITE names no branch or a client transaction holds it.
+    fn seed_client_rejected(
+        &mut self,
+        call_ref: &str,
+        invite: SipRequest,
+        dest: SocketAddr,
+        bound_ms: u64,
+    ) -> bool {
+        let Some(branch) = invite.top_via().branch().filter(|b| !b.is_empty()).map(str::to_string)
+        else {
+            return false;
+        };
+        if self.clients.contains_key(&branch) {
+            return false;
+        }
+        let ViaMarks { call_ref: via_call_ref, leg_id, incarnation_mark } =
+            extract_via_custom_params(&invite);
+        self.open_txn(NewTransaction {
+            id: TxnId::Client(branch.clone()),
+            kind: TxnKind::Invite,
+            method: Method::Invite,
+            cseq: invite.cseq().seq(),
+            call_id: invite.call_id().as_str().to_string(),
+            from_tag: invite.from().tag().unwrap_or_default().to_string(),
+            original_request: Some(invite),
+            call_ref: via_call_ref.or_else(|| Some(call_ref.to_string())),
+            leg_id,
+            incarnation_mark,
+            state: TxnState::Completed,
+            destination: Some(dest),
+        });
+        self.hold_for(TxnRef::Client(&branch), Hold::TimerD, ms(bound_ms));
         true
     }
 

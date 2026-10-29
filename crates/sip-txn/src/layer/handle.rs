@@ -113,6 +113,12 @@ pub(super) enum Command {
         reason: String,
         reply: oneshot::Sender<usize>,
     },
+    /// Send the held ACK of the client INVITE transaction at `branch`;
+    /// replies whether it left.
+    ReleaseAck {
+        branch: String,
+        reply: oneshot::Sender<bool>,
+    },
     /// Send the 100 Trying of the server INVITE transaction `key` names if it
     /// has sent nothing yet; replies whether the 100 left.
     ReleaseTrying {
@@ -427,6 +433,15 @@ impl TransactionLayer {
             return Ok(false);
         };
         self.roundtrip(|reply| Command::ReleaseTrying { key, reply }).await
+    }
+
+    /// Release the ACK of the non-2xx final the client INVITE transaction at
+    /// `branch` took ([`TransactionConfig::ack_bound_ms`](crate::TransactionConfig)):
+    /// it leaves now if it is still held. `true` when it left; `false` when
+    /// none is held there.
+    pub async fn release_ack(&self, branch: &str) -> Result<bool, TransactionLayerClosed> {
+        let branch = branch.to_string();
+        self.roundtrip(|reply| Command::ReleaseAck { branch, reply }).await
     }
 
     /// Ask to be notified (via [`TransactionEvent::CallQuiesced`]) when the last

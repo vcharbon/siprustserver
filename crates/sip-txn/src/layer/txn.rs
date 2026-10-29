@@ -122,6 +122,11 @@ pub(super) enum Timer {
     /// backstop of an active one, the end of a hold otherwise. Every resident
     /// transaction has exactly one; firing removes the transaction.
     Cleanup(TxnId),
+    /// The bound of the client INVITE transaction opened at the instant it
+    /// carries on the ACK of its non-2xx final (`layer::held_ack`): the ACK
+    /// leaves then if its consumer released none. Its key is never stored;
+    /// the fire reads the transaction.
+    AckBound(String, tokio::time::Instant),
     /// Timer E for the on-wire CANCEL (RFC 3261 §17.1.2.2 — a CANCEL is a
     /// non-INVITE request, but it reuses its INVITE's branch and builds no txn
     /// of its own, so its retransmit ladder rides the INVITE client txn as the
@@ -233,6 +238,7 @@ impl Transaction {
             cancel_retransmit_key: None,
             retransmit_buf: None,
             seed_resend: None,
+            unsent_ack: None,
             ladder: None,
             timeout_kind: TxnTimeoutKind::Response,
             dead_hop_reported: false,
@@ -359,6 +365,10 @@ pub(super) struct Transaction {
     /// On a client INVITE seeded `Trying` (ADR-0014): its INVITE, re-sent once
     /// when a CANCEL is first held on it (ADR-0043), taken at that send.
     pub(super) seed_resend: Option<Bytes>,
+    /// On a client INVITE that took a non-2xx final: its ACK and where it
+    /// goes, held until the consumer releases it or its bound passes
+    /// (`layer::held_ack`), taken at that send.
+    pub(super) unsent_ack: Option<(Bytes, SocketAddr)>,
     /// The Timer A/E ladder for [`retransmit_buf`](Self::retransmit_buf).
     /// `None` until this txn starts retransmitting, and on a server txn until
     /// its non-2xx final arms Timer G.

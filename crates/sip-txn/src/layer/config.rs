@@ -37,6 +37,12 @@ pub struct TransactionConfig {
     /// this long after its INVITE arrived sends the 100 itself. Default
     /// [`TRYING_BOUND`](crate::timers::TRYING_BOUND); the RFC allows no more.
     pub trying_bound_ms: u64,
+    /// The bound on the hop-by-hop ACK of a client INVITE's first non-2xx
+    /// final, ms: the layer holds the ACK until its consumer releases it
+    /// ([`TransactionLayer::release_ack`](crate::TransactionLayer::release_ack))
+    /// and sends it itself this long after the final arrived. `0`, the
+    /// default, sends it as the final arrives (RFC 3261 §17.1.1.2).
+    pub ack_bound_ms: u64,
     /// Whether a response the TU hands over under a To-tag other than the
     /// bound one fails a debug build loudly (`debug_assert!`) besides being
     /// re-rendered. The wire is corrected either way; `true` — the default —
@@ -89,6 +95,7 @@ impl TransactionConfig {
             invite_initial_timeout_ms: crate::timers::INVITE_INITIAL_TIMEOUT,
             invite_first_response_timeout_ms: crate::timers::TIMER_B,
             trying_bound_ms: crate::timers::TRYING_BOUND,
+            ack_bound_ms: 0,
             strict_to_tag: true,
             deferred_bound: None,
             invite_refusals: None,

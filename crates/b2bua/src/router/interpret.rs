@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use call::CallModelState;
-use sip_message::{Method, SipRequest};
+use sip_message::{Method, SipMessage, SipRequest};
 
 use super::release::{release_call, ReleaseKind};
 use super::turn_entry::TurnEntry;
@@ -46,15 +46,20 @@ fn answer_budgets(ctx: &RouterCtx) -> crate::answer_deadline::AnswerBudgets {
 
 /// Interpret a handler result: persist → critical → outbound → soft → buffered.
 /// `turn` names what the turn handled, for a model-invariant violation, and
-/// `received` is the request it handled, when its event is one.
+/// `trigger` is the message it handled, when its event is one.
 pub(super) async fn process_result(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
     result: HandlerResult,
     now_ms: i64,
     turn: &(dyn std::fmt::Display + Sync),
-    received: Option<&SipRequest>,
+    trigger: Option<&SipMessage>,
 ) {
+    let received = trigger.and_then(|m| match m {
+        SipMessage::Request(r) => Some(r),
+        SipMessage::Response(_) => None,
+    });
+    let ack = trigger.and_then(held_ack_branch);
     let landing = crate::landing::Landing {
         config: &ctx.config,
         budgets: answer_budgets(ctx),
@@ -160,7 +165,7 @@ pub(super) async fn process_result(
         // H. It leaves once the primary applied the terminal body, and the
         // copy is released after it.
         let entry = TurnEntry::sending(ctx, call_ref, call, now_ms, effects.outbound);
-        let entry = TurnEntry { mark: (version, wrote, kind), ..entry };
+        let entry = TurnEntry { mark: (version, wrote, kind), ack, ..entry };
         push(ctx, call_ref, entry).await;
         ctx.outboxes.drained(call_ref).await;
         release_call(ctx, call_ref, ReleaseKind::SelfRelease { ended: true }).await;
@@ -231,6 +236,7 @@ pub(super) async fn process_result(
     let trying = received.filter(|r| *r.method() == Method::Invite && r.to().tag().is_some());
     let entry = TurnEntry {
         trying: trying.cloned(),
+        ack,
         relinquish,
         limiter_releases: effects
             .soft
@@ -264,6 +270,16 @@ pub(super) async fn process_result(
 async fn push(ctx: &Arc<RouterCtx>, call_ref: &str, entry: TurnEntry) {
     let wait = ctx.state.hold_target(call_ref);
     ctx.outboxes.push(call_ref, wait, Box::new(|released| Box::pin(entry.run(released)))).await;
+}
+
+/// The branch of the client INVITE transaction whose non-2xx final `trigger`
+/// is: the layer holds its ACK until the turn's entry releases it.
+fn held_ack_branch(trigger: &SipMessage) -> Option<String> {
+    let SipMessage::Response(resp) = trigger else { return None };
+    if *resp.cseq().method() != Method::Invite || resp.status() < 300 {
+        return None;
+    }
+    resp.top_via().branch().filter(|b| !b.is_empty()).map(str::to_string)
 }
 
 /// Whether the turn's result enqueues the call's CDR.

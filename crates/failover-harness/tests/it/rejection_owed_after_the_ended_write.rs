@@ -4,9 +4,10 @@
 //! deletes it only once the final left (ADR-0055 §3). The primary dies with
 //! the backup holding that write and the final still unsent, the caller in
 //! `Proceeding` after the 100 she heard (RFC 3261 §17.1.1.2). The backup
-//! that discharges the ended call, at the departure or at the reclaim of the
-//! restarted primary, sends her the 486 on a Completed transaction that
-//! absorbs her ACK (§17.2.1).
+//! that discharges the ended call at the departure sends her the 486 on a
+//! Completed transaction that absorbs her ACK (§17.2.1). The ACK of the
+//! callee's 486 died held with the node too (ADR-0055 §3): the backup ACKs
+//! the 486 the callee repeats for want of it (§17.1.1.2).
 
 use std::time::Duration;
 
@@ -38,6 +39,10 @@ async fn a_rejection_lost_with_its_node_after_the_ended_write_applied_reaches_th
     held.release();
 
     call.expect(486).await;
+    // The callee repeats its 486 on Timer G (RFC 3261 §17.2.1).
+    cluster.fh.advance(Duration::from_millis(500)).await;
+    assert!(bob.repeat_unacked_finals().await, "the callee's 486 awaits its ACK");
+    bob.receive("ACK").await;
     let drained = cluster.fh.settle_terminal(async || cluster.is_clear_of(&call_ref).await).await;
     assert!(drained, "the cluster forgets the call");
     cluster.fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;

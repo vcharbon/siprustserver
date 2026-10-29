@@ -21,6 +21,10 @@ pub struct OutboundInvite {
     /// for a transaction this stack gave up on (§8.1.3.1). `None` while it
     /// has none.
     pub final_received: Option<u16>,
+    /// When the final a response brought arrived, epoch ms; `None` while it
+    /// has none, and for a final this stack gave itself.
+    #[serde(default)]
+    pub final_at_ms: Option<i64>,
     /// This stack sent a CANCEL of the INVITE (§9.1).
     pub cancel_sent: bool,
     /// The headers that CANCEL stated beyond the ones it echoes from the
@@ -37,6 +41,7 @@ impl OutboundInvite {
             our_tag: our_tag.into(),
             sent_at_ms,
             final_received: None,
+            final_at_ms: None,
             cancel_sent: false,
             cancel_headers: Vec::new(),
         }
@@ -46,5 +51,14 @@ impl OutboundInvite {
     /// (§17.1.1.2: the transaction takes one).
     pub fn record_final(&mut self, status: u16) {
         self.final_received.get_or_insert(status);
+    }
+
+    /// [`record_final`](Self::record_final) of a final a response brought at
+    /// `at_ms`, the instant kept with the first final.
+    pub fn record_final_at(&mut self, status: u16, at_ms: i64) {
+        if self.final_received.is_none() {
+            self.final_received = Some(status);
+            self.final_at_ms = Some(at_ms);
+        }
     }
 }

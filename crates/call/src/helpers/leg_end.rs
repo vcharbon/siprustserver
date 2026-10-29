@@ -49,18 +49,24 @@ pub fn record_dialling_invite_rejected(call: &mut Call, leg_id: &str, cseq: i64,
     })
 }
 
-/// Record the final `status` that answered, on `leg_id`, the INVITE of CSeq
-/// `cseq` this stack sent, when it is the INVITE that dialled the leg
-/// ([`Leg::outbound_invite`]): the leg's INVITE outcome, the first final
-/// standing (RFC 3261 §17.1.1.2); a non-2xx final ends every early dialog it
-/// created (§12.1).
-pub fn record_dialled_invite_final(call: &mut Call, leg_id: &str, cseq: i64, status: u16) {
+/// Record the final `status` that answered at `at_ms`, on `leg_id`, the
+/// INVITE of CSeq `cseq` this stack sent, when it is the INVITE that dialled
+/// the leg ([`Leg::outbound_invite`]): the leg's INVITE outcome, the first
+/// final standing (RFC 3261 §17.1.1.2); a non-2xx final ends every early
+/// dialog it created (§12.1).
+pub fn record_dialled_invite_final(
+    call: &mut Call,
+    leg_id: &str,
+    cseq: i64,
+    status: u16,
+    at_ms: i64,
+) {
     update_leg(call, leg_id, |l| {
         if l.dialled_cseq() != Some(cseq) {
             return;
         }
         let Some(invite) = l.outbound_invite_mut() else { return };
-        invite.record_final(status);
+        invite.record_final_at(status, at_ms);
         if status >= 300 {
             reject_early_dialogs(l, status);
         }

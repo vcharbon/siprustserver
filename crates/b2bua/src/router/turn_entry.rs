@@ -1,6 +1,7 @@
 //! A turn's outbox entry (ADR-0055 §3): everything the turn sends off the
 //! node, run in one go when the call's outbox releases it. It runs the turn's
-//! first provisional of a re-INVITE, then the transactions it relinquishes, its
+//! first provisional of a re-INVITE, the ACK of the non-2xx final it took,
+//! then the transactions it relinquishes, its
 //! SIP in emission order, its limiter releases and its requests to outside
 //! services, and marks the turn [`Left`](TurnPoint::Left) last.
 
@@ -26,6 +27,9 @@ pub(super) struct TurnEntry {
     pub now_ms: i64,
     /// The re-INVITE whose first provisional the turn's write records.
     pub trying: Option<SipRequest>,
+    /// The branch of the client INVITE whose non-2xx final the turn took:
+    /// the layer holds its ACK until this entry releases it.
+    pub ack: Option<String>,
     /// The Vias of the answered INVITEs whose server transactions go.
     pub relinquish: Vec<Via>,
     pub outbound: Vec<OutboundSipEffect>,
@@ -54,6 +58,7 @@ impl TurnEntry {
             call,
             now_ms,
             trying: None,
+            ack: None,
             relinquish: Vec::new(),
             outbound,
             limiter_releases: Vec::new(),
@@ -68,6 +73,9 @@ impl TurnEntry {
         let call_ref = self.call_ref.as_str();
         if let Some(reinvite) = &self.trying {
             let _ = ctx.txn.release_trying(reinvite).await;
+        }
+        if let Some(branch) = &self.ack {
+            let _ = ctx.txn.release_ack(branch).await;
         }
         for via in &self.relinquish {
             if let Some(branch) = via.branch() {
