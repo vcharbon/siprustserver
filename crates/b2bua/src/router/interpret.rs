@@ -4,7 +4,10 @@
 //! replication sync level ([`super::outbox`]). A turn that removes the call
 //! enqueues its CDR and logs its delete at the persist step, before any effect
 //! leaves (ADR-0020 X2, ADR-0055 §3), and evicts the call once its outbox
-//! drained.
+//! drained. A turn that removes the call while it owes the caller the non-2xx
+//! that answers her INVITE writes the ended body instead, and logs the delete
+//! once its outbox drained: the backup keeps the final until it left
+//! ([`super::owed_final`]).
 
 use std::sync::Arc;
 
@@ -104,6 +107,9 @@ pub(super) async fn process_result(
         && !primary_departed(ctx, call_ref);
     let remove_call = !takeover_end
         && result.effects.critical.iter().any(|e| matches!(e, CriticalStateEffect::RemoveCall));
+    let owes_final = remove_call
+        && !result.effects.outbound.is_empty()
+        && result.call.a_leg.invite_rejection().is_some();
     let cdr = has_cdr(&result);
     // The landed record is shared with the store from here on: what follows
     // only reads it.
@@ -114,6 +120,12 @@ pub(super) async fn process_result(
             ctx.state.update_quiet(Arc::clone(&call));
             ctx.metrics.record_quiet_turn(kind.kind());
             false
+        }
+        None if remove_call && owes_final => {
+            if cdr {
+                ctx.cdr.write(&call, now_ms).await;
+            }
+            ctx.state.write(Arc::clone(&call))
         }
         None if remove_call => {
             ctx.state.update(Arc::clone(&call));
@@ -235,6 +247,9 @@ pub(super) async fn process_result(
     // stays resident and takes no turn until then (ADR-0055 §3).
     if remove_call {
         ctx.outboxes.drained(call_ref).await;
+        if owes_final {
+            ctx.state.log_delete(call_ref);
+        }
         release_call(ctx, call_ref, ReleaseKind::Terminated).await;
     }
     for eff in reentries {

@@ -61,7 +61,7 @@
 mod received_request;
 mod seeds;
 pub(in crate::router) use seeds::{
-    names_request_in_flight, names_server_branch, names_unanswered_caller_invite,
+    names_request_in_flight, names_server_branch, names_unanswered_caller_invite, rejected_seed,
     relayed_server_key,
 };
 #[cfg(test)]
@@ -174,6 +174,7 @@ pub(super) async fn materialise(
             if matches!(call.state, CallModelState::Terminated | CallModelState::Terminating) =>
         {
             let force_terminal = call.state == CallModelState::Terminating;
+            super::owed_final::deliver(ctx, call_ref, &call).await;
             let terminal = Enveloped::new(call, topology);
             discharge_materialized_terminal(ctx, call_ref, terminal, now_ms, force_terminal).await;
             return Materialised::Refused(Reason::Terminated);

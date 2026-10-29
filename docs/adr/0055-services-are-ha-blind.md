@@ -220,9 +220,15 @@ ends the transaction with the CANCEL unsent (§9.1, §17.2.1).
   turn writes that change to the change log and the answer waits for it; a
   change to the message ring alone is not written. The turn that ends a call
   enqueues the CDR, then logs the delete, and its entries wait for the
-  delete like any other, which the earlier rule (the final a terminal turn
-  sends skips the hold) did not: a kill then adds a second CDR, never loses
-  one (§5). While its outbox drains, the call stays resident and takes no
+  delete like any other: a kill then adds a second CDR, never loses one
+  (§5). A turn that ends the call with the non-2xx final that answers the
+  caller's INVITE writes the ended call instead, its entries wait for that
+  write, and it logs the delete once they left, so the backup keeps the
+  final until it left. A node that meets that ended body with no live copy
+  of the call (the backup at a departure or a confirmed dead verdict, the
+  restarted primary at its reclaim) cannot tell whether the final left: it
+  sends it again on a Completed transaction, within Timer H of the call's
+  end, which repeats it until her ACK (RFC 3261 §17.2.1). While its outbox drains, the call stays resident and takes no
   turn, and neither the reaper nor the departure sweep acts on it; it is
   released once the outbox is empty. A takeover copy's terminal turn waits
   for its reverse-flushed write the same way. A stand-down, a self-release

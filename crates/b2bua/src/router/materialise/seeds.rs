@@ -193,7 +193,7 @@ fn dialog_creating_seed(call: &Call, leg: &Leg, record: &RequestRecord) -> Optio
 /// The seed of the caller's INVITE answered with the non-2xx final the record
 /// keeps: Completed on it, so the final reaches her even when the record ran
 /// ahead of the wire (RFC 3261 §17.2.1).
-fn rejected_seed(leg: &Leg) -> Option<TxnSeed> {
+pub(in crate::router) fn rejected_seed(leg: &Leg) -> Option<TxnSeed> {
     let (bytes, (host, port)) = leg.invite_rejection()?.wire();
     let response = match CustomParser::new().parse(bytes).ok()? {
         SipMessage::Response(r) => r,

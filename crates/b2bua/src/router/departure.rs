@@ -28,7 +28,8 @@
 //! takeover half alone: the same calls are taken over at once, while an
 //! undecided call, a finished call and a deferred end are left to the peer,
 //! which may live behind a partition and decide or discharge them itself, or
-//! to its departure.
+//! to its departure; the final a finished call may still owe its caller is
+//! sent at once.
 //!
 //! The sweep is a task of its own, never the router loop's: a departed
 //! partition holds every call the peer served, read one body at a time, and
@@ -184,15 +185,20 @@ async fn sweep<F, Fut>(
 /// ([`ending_work`]), or awaits the answer to a request it sent off its turn,
 /// which the copy sends again. On a dead verdict an undecided call is left to
 /// the departure: its decision may be in flight at a primary behind a
-/// partition. The body is read once without the lock to leave a quiet call
+/// partition; a finished one too, the final it may still owe its caller sent
+/// ([`super::owed_final`]). The body is read once without the lock to leave a quiet call
 /// untouched; a call already live here is left as it is.
 async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Swept {
-    let Ok((copy, _)) = ctx.state.peek_replica(call_ref).await else { return Swept::Left };
-    let call = copy.call;
+    let Ok((copy, skew)) = ctx.state.peek_replica(call_ref).await else { return Swept::Left };
+    let mut call = copy.call;
     if finished(&call) {
         return match cause {
             Cause::Departed => discharge_finished(ctx, call_ref).await,
-            Cause::ReadDead => Swept::Left,
+            Cause::ReadDead => {
+                reanchor(&mut call, skew);
+                super::owed_final::deliver(ctx, call_ref, &call).await;
+                Swept::Left
+            }
         };
     }
     let ending = call.state == CallModelState::Terminating;
@@ -264,6 +270,7 @@ async fn discharge_finished(ctx: &Arc<RouterCtx>, call_ref: &str) -> Swept {
     };
     let now_ms = ctx.clock.now_ms();
     let force_terminal = ended.call.state == CallModelState::Terminating;
+    super::owed_final::deliver(ctx, call_ref, &ended.call).await;
     if discharge_materialized_terminal(ctx, call_ref, ended, now_ms, force_terminal).await {
         return Swept::Discharged;
     }
