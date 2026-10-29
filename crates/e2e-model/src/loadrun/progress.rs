@@ -90,6 +90,15 @@ impl SeriesPoint {
         (ended > 0).then(|| self.failed as f64 * 100.0 / ended as f64)
     }
 
+    /// Calls placed per second of the window (`0` for an empty span).
+    pub fn placed_cps(&self) -> f64 {
+        if self.span_ms == 0 {
+            0.0
+        } else {
+            self.placed as f64 * 1000.0 / self.span_ms as f64
+        }
+    }
+
     /// Window end, since the run started.
     pub fn end_ms(&self) -> u64 {
         self.start_ms + self.span_ms

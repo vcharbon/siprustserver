@@ -44,9 +44,12 @@ pub(crate) fn headline(out: &mut String, idx: &LoadRunIndex, live: Option<Live>)
         (
             "rate",
             format!(
-                "target {} cps (configured {}) · achieved {:.1} cps",
+                "target {} cps (configured {}) · achieved {} now · {:.1} cps run average",
                 cps(p.target_cps),
                 cps(m.cps),
+                idx.series
+                    .last()
+                    .map_or("–".to_string(), |w| format!("{:.1} cps", w.placed_cps())),
                 p.achieved_cps()
             ),
         ),

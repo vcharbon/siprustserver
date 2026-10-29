@@ -104,3 +104,25 @@ async fn the_metrics_socket_serves_the_live_report() {
     let (events, _) = rate.events_since(reporter.started_at());
     assert_eq!((events.len(), events[0].from_cps, events[0].to_cps), (1, 20.0, 40.0));
 }
+
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn an_idle_connection_is_closed_unanswered() {
+    let surface = MetricsSurface {
+        metrics: Arc::new(|| "loadgen_calls_total 1\n".to_string()),
+        rate: None,
+        report: None,
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bind = listener.local_addr().unwrap();
+    tokio::spawn(serve_metrics_on(listener, surface));
+
+    // A browser's preconnect: nothing sent until the server gives up on it.
+    let mut idle = tokio::net::TcpStream::connect(bind).await.unwrap();
+    let mut buf = Vec::new();
+    let _ = idle.read_to_end(&mut buf).await;
+    assert!(buf.is_empty(), "no reply on an idle connection: {}", String::from_utf8_lossy(&buf));
+
+    let metrics = http(bind, "GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").await;
+    assert!(metrics.contains("loadgen_calls_total 1"), "{metrics}");
+}

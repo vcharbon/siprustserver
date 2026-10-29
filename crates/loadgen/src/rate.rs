@@ -79,14 +79,17 @@ impl RateHandle {
         self.draining.load(Ordering::Relaxed)
     }
 
-    /// Re-target the rate, and log the change. A negative or NaN value is
-    /// clamped to `0` (pause). Returns the value actually applied, in cps (so
-    /// the HTTP handler can echo the clamped result).
+    /// Re-target the rate, and log the change (a value equal to the current
+    /// target logs nothing). A negative or NaN value is clamped to `0`
+    /// (pause). Returns the value actually applied, in cps (so the HTTP
+    /// handler can echo the clamped result).
     pub fn set(&self, cps: f64) -> f64 {
         let mut log = self.log.lock().unwrap();
         let from = self.cps();
         let applied = self.store(cps);
-        log.push(RateEventKind::Rate, from, applied);
+        if applied != from {
+            log.push(RateEventKind::Rate, from, applied);
+        }
         applied
     }
 
@@ -313,6 +316,7 @@ mod tests {
         let h = RateHandle::new(20.0);
         tokio::time::advance(Duration::from_secs(3)).await;
         h.set(10.0);
+        h.set(10.0);
         tokio::time::advance(Duration::from_secs(2)).await;
         h.drain();
         h.drain();
@@ -324,7 +328,7 @@ mod tests {
                 (3_000, RateEventKind::Rate, 20.0, 10.0),
                 (5_000, RateEventKind::Drain, 10.0, 10.0)
             ],
-            "the construction is no event; a second drain is none"
+            "the construction is no event; a re-set to the same rate and a second drain are none"
         );
         assert_eq!(dropped, 0);
         for i in 0..events::RATE_EVENTS_CAP + 4 {

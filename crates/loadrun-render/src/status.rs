@@ -5,8 +5,8 @@ use e2e_model::{Progress, SeriesPoint};
 use crate::html::{clock, cps};
 
 /// `elapsed 0:35 / 1:00 · 19.9 cps (target 20) · in flight 41 · ok 650 fail 3
-/// rej 0 · error 0.5 % (last 5 s)`: where the run stands, and the failed
-/// share of the calls ended in `window`, the window just closed.
+/// rej 0 · error 0.5 % (last 5 s)`: where the run stands, and the placed rate
+/// and failed share of the calls ended in `window`, the window just closed.
 pub fn status_line(progress: &Progress, duration_secs: u64, window: &SeriesPoint) -> String {
     let err = window.error_pct().map_or("–".to_string(), |e| format!("{e:.1} %"));
     format!(
@@ -14,7 +14,7 @@ pub fn status_line(progress: &Progress, duration_secs: u64, window: &SeriesPoint
          error {err} (last {} s)",
         clock(progress.elapsed_ms),
         clock(duration_secs.saturating_mul(1000)),
-        progress.achieved_cps(),
+        window.placed_cps(),
         cps(progress.target_cps),
         progress.in_flight,
         progress.ok,

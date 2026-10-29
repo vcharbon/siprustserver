@@ -57,6 +57,8 @@ pub struct MetricsSurface {
 ///   flamegraph SVG of this process (default 20 s, max 120), sampled on a
 ///   blocking thread.
 ///
+/// A connection that sends no request line is closed unanswered.
+///
 /// Runs until the task is cancelled.
 pub async fn serve_metrics(addr: SocketAddr, surface: MetricsSurface) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -75,6 +77,12 @@ pub async fn serve_metrics_on(
         let surface = surface.clone();
         tokio::spawn(async move {
             let req = read_request(&mut sock).await;
+            // No request line (a browser's idle preconnect, a malformed
+            // head): closed unanswered, so no reply waits on a socket the
+            // client sends a later request on.
+            if req.method.is_empty() {
+                return;
+            }
             let reply = route(&surface, &req).await;
             let mut head = format!(
                 "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",

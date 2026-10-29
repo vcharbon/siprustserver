@@ -178,7 +178,7 @@ fn the_headline_states_rate_flight_and_every_rejection_source() {
     let page = render_body(&index(false), &RenderOpts::default());
     for want in [
         "0:35 / 1:00 (running)",
-        "target 10 cps (configured 20) · achieved 19.8 cps",
+        "target 10 cps (configured 20) · achieved 10.0 cps now · 19.8 cps run average",
         "41 / 500 max",
         "offered 700 · placed 693",
         "ok 640",
@@ -353,7 +353,7 @@ fn the_status_line_reads_the_window_just_closed() {
     let w = window(30, 5, 97, 3);
     assert_eq!(
         status_line(&idx.progress, 60, &w),
-        "elapsed 0:35 / 1:00 · 19.8 cps (target 10) · in flight 41 · ok 640 fail 9 rej 3 · \
+        "elapsed 0:35 / 1:00 · 20.0 cps (target 10) · in flight 41 · ok 640 fail 9 rej 3 · \
          error 3.0 % (last 5 s)"
     );
 }
