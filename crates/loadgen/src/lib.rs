@@ -83,7 +83,7 @@ pub use mux::{
     EndpointSpec, Exchange, LegInfo, LegPicker, MuxCore, Role, RttSink, TargetedDrop,
 };
 pub use rate::{Governor, RateHandle};
-pub use report::{Reporter, ReporterCfg};
+pub use report::{CallEvidence, Reporter, ReporterCfg};
 // The machine-readable run index (`load-result.json`) the reporter writes — the
 // axis data model shared with the e2e website. Re-exported so the CLI/tests use
 // one path (`loadgen::LoadRunIndex`) without a direct e2e-model dependency.

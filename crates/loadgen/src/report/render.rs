@@ -56,9 +56,10 @@ impl Reporter {
         idx.push_str(
             "<h2>Results by scenario × class × case</h2>\
             <p>The <b>case</b> column splits a class into its distinct failure modes (RFC rule id, \
-            failed check, failed step) — each keeps its own first-N samples. The RFC audit and \
-            the case checks need a call's recording: <b>judged share</b> is a failure's share of \
-            the recorded calls they judged, and its estimate over every call they would judge.</p>",
+            failed check, failed step) — each keeps its own first-N samples. The RFC audit's \
+            trace rules and the case checks judge a call's recording: <b>judged share</b> is a \
+            failure's share of the recorded calls they judged, and its estimate over the calls \
+            that ended on an accepted branch.</p>",
         );
         for line in self.recording_lines(&g) {
             idx.push_str(&format!("<p>{line}</p>"));
@@ -84,7 +85,7 @@ impl Reporter {
                         .join(" ")
                 })
                 .unwrap_or_else(|| none_recorded.clone());
-            let share = judged_share(&g, scenario, class, *n);
+            let share = judged_share(&g, &(scenario, class.clone(), case.clone()), *n);
             idx.push_str(&format!(
                 "<tr><td>{scenario}</td><td class=\"{cls}\">{class}</td><td>{case}</td>\
                  <td>{n}</td><td>{share}</td><td>{sample_links}</td></tr>"
@@ -123,7 +124,7 @@ impl Reporter {
         let _ = writeln!(md, "| scenario | class | case | count | judged share |");
         let _ = writeln!(md, "|---|---|---|---|---|");
         for ((scenario, class, case), n) in &g.counts {
-            let share = judged_share(&g, scenario, class, *n);
+            let share = judged_share(&g, &(scenario, class.clone(), case.clone()), *n);
             let _ = writeln!(md, "| {scenario} | {class} | {case} | {n} | {share} |");
         }
         let _ = writeln!(md, "\n## Latency (ms)\n");
@@ -144,8 +145,9 @@ impl Reporter {
         ReportFiles { pages, index: idx, summary: md }
     }
 
-    /// One line per scenario: the calls placed and recorded, and the recorded
-    /// calls the RFC audit and the case checks judged.
+    /// One line per scenario: the calls placed and recorded, the calls the RFC
+    /// audit judged and those whose recording it judged, and the calls the
+    /// case checks judged.
     fn recording_lines(&self, g: &Inner) -> Vec<String> {
         let ReporterCfg { sample_cap, background_record_every: every } = self.cfg;
         let mut gates = Vec::new();
@@ -160,11 +162,13 @@ impl Reporter {
         g.placed
             .iter()
             .map(|(scenario, placed)| {
-                let recorded = g.recorded.get(scenario).copied().unwrap_or(0);
-                let audited = g.audited.get(scenario).copied().unwrap_or(0);
+                let tally = |m: &BTreeMap<ScenarioId, u64>| m.get(scenario).copied().unwrap_or(0);
                 let mut line = format!(
-                    "<b>{scenario}</b>: {placed} calls placed, {recorded} recorded ({gates}). \
-                     The RFC audit judged {audited} recorded calls that ended on an accepted branch"
+                    "<b>{scenario}</b>: {placed} calls placed, {} recorded ({gates}). {} ended on \
+                     an accepted branch; the RFC audit judged the recording of {} of them",
+                    tally(&g.recorded),
+                    tally(&g.accepted),
+                    tally(&g.audited),
                 );
                 if let Some((passed, failed)) = g.check_verdicts.get(scenario) {
                     line.push_str(&format!("; the case checks judged {}", passed + failed));
@@ -176,33 +180,28 @@ impl Reporter {
     }
 }
 
-/// A row's share of the recorded calls its class is judged on, and the
-/// estimate over every call of the scenario that class would judge:
-/// `rfc_audit_fail` over the audited calls (estimated over the calls that
-/// ended on an accepted branch), `check_fail` over the calls whose checks ran
-/// (estimated over the calls clean of the audit). Empty for any other class,
-/// which every call is counted in.
-fn judged_share(g: &Inner, scenario: ScenarioId, class: &str, n: u64) -> String {
-    let count = |label: String| -> u64 {
-        g.counts.iter().filter(|((s, c, _), _)| *s == scenario && *c == label).map(|(_, n)| n).sum()
-    };
-    let (ok, audit, check) = (
-        count(ResultClass::Ok.label()),
-        count(ResultClass::RfcAuditFail.label()),
-        count(ResultClass::CheckFail.label()),
-    );
-    let (judged, base, noun) = if class == ResultClass::RfcAuditFail.label() {
-        (g.audited.get(scenario).copied().unwrap_or(0), ok + audit + check, "audited")
-    } else if class == ResultClass::CheckFail.label() {
+/// A row's share of the recorded calls its class judges on their recording,
+/// and the estimate over every call that ended on an accepted branch: an
+/// `rfc_audit_fail` row counts its audited recorded calls over the audited
+/// ones, a `check_fail` row its calls over the checked ones. Empty for a row
+/// with no such call: every other class, a refused in-dialog request, and a
+/// dialog verdict on unrecorded calls are judged on every call.
+fn judged_share(g: &Inner, bucket: &Bucket, n: u64) -> String {
+    let (scenario, class, _) = bucket;
+    let tally = |m: &BTreeMap<ScenarioId, u64>| m.get(scenario).copied().unwrap_or(0);
+    let (k, judged, noun) = if *class == ResultClass::RfcAuditFail.label() {
+        (g.audited_failed.get(bucket).copied().unwrap_or(0), tally(&g.audited), "audited")
+    } else if *class == ResultClass::CheckFail.label() {
         let (passed, failed) = g.check_verdicts.get(scenario).copied().unwrap_or((0, 0));
-        (passed + failed, ok + check, "checked")
+        (n, passed + failed, "checked")
     } else {
         return String::new();
     };
-    if judged == 0 {
+    if k == 0 || judged == 0 {
         return String::new();
     }
-    let share = n as f64 / judged as f64;
+    let base = tally(&g.accepted);
+    let share = k as f64 / judged as f64;
     let estimate = (share * base as f64).round();
-    format!("{n} of {judged} {noun} ({:.1} %), ≈ {estimate} of {base}", share * 100.0)
+    format!("{k} of {judged} {noun} ({:.1} %), ≈ {estimate} of {base}", share * 100.0)
 }

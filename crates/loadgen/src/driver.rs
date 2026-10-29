@@ -31,13 +31,14 @@ use crate::mix_entry::{LoadBody, MixEntry};
 use crate::mux::{Correlation, MuxCore};
 use crate::outcome::{CallWire, OutcomeSink};
 use crate::rate::{Governor, RateHandle};
-use crate::report::{RenderedSample, Reporter};
-use crate::scenarios::ScenarioId;
+use crate::report::{CallEvidence, RenderedSample, Reporter};
 use crate::{call_rtt::CallRtts, call_task::call_task, failed_call};
 use scenario_harness::actor::ScenarioVerdict;
 
 mod binding;
+mod record;
 use binding::{bind_agents, bind_refusal, call_routing, from_user_key};
+use record::{phase_annotated_detail, record_unrun};
 
 /// The mux transport the driver binds calls on.
 pub struct MuxTransport {
@@ -476,10 +477,8 @@ pub(crate) async fn run_one(
         Ok(verdict) => CallOutcome::from(verdict),
         Err(payload) => CallOutcome::Panic(panic_msg(payload)),
     };
+    let accepted = outcome.is_checkable();
     let outcome = outcome.audited(|| {
-        if binder.is_recording() {
-            reporter.record_audited(id);
-        }
         let wo = binder.rfc_findings(&merged_waivers);
         // Fold this sampled call's per-waiver use into the CAMPAIGN tally
         // (never per call — a call exercises only its own branch).
@@ -558,7 +557,8 @@ pub(crate) async fn run_one(
         None
     };
 
-    reporter.record(id, &outcome, &case, e2e, &checkpoints, sample);
+    let evidence = CallEvidence { recorded: binder.is_recording(), accepted, sample };
+    reporter.record(id, &outcome, &case, e2e, &checkpoints, evidence);
     rtts.finish();
     if let (Some(sink), Some(wire)) = (&outcomes, &wire) {
         crate::outcome::write_call(sink, id, &wire.facts(), &outcome, transport.clock.now_ms());
@@ -572,53 +572,3 @@ const CALLER: &str = "alice";
 /// How many numbers a from-user call draws from its case's pool before it is
 /// rejected for contention (every draw held or cooling).
 const KEY_DRAWS: usize = 8;
-
-/// Record a call that never ran (refused before any datagram) and close its
-/// in-flight count.
-fn record_unrun(
-    reporter: &Reporter,
-    outcomes: &Option<Arc<OutcomeSink>>,
-    id: ScenarioId,
-    outcome: CallOutcome,
-) {
-    if let Some(sink) = outcomes {
-        match &outcome {
-            CallOutcome::Rejected(reason) => sink.not_placed(id, reason),
-            _ => sink.generator_failure(id, "bind_refused"),
-        }
-    }
-    let class = ResultClass::from(&outcome);
-    let case = outcome.case(None);
-    let sample = reporter.wants_sample(id, &class, &case).then(|| RenderedSample {
-        html: None,
-        detail: outcome.detail(),
-        e2e_ms: 0.0,
-    });
-    reporter.record(id, &outcome, &case, Duration::ZERO, &[], sample);
-    reporter.dec_inflight();
-}
-
-/// Append the call's lifecycle phase trail (`connected@1234ms`, `reinvited@…`) to
-/// a NOK sample's one-line detail, so a sampled failing flow says WHICH phase it
-/// reached before it failed.
-/// `None`/empty detail (an OK call) is left untouched.
-fn phase_annotated_detail(detail: Option<String>, ctx: &CallCtx) -> Option<String> {
-    let mut detail = detail?;
-    // Scenario-attached diagnostic notes (e.g. the actor settle barrier's
-    // still-open obligations) — detail-channel only, never a report key.
-    let notes = ctx.notes();
-    if !notes.is_empty() {
-        detail = format!("{detail} [{}]", notes.join("; "));
-    }
-    let phases = ctx.phases();
-    if phases.is_empty() {
-        return Some(detail);
-    }
-    let start = ctx.start_instant();
-    let trail = phases
-        .iter()
-        .map(|(name, at)| format!("{name}@{}ms", at.saturating_duration_since(start).as_millis()))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!("{detail} [phases: {trail}]"))
-}

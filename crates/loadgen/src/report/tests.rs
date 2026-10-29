@@ -25,7 +25,7 @@ fn latency_histograms_are_exported_as_prometheus_histograms() {
             "",
             Duration::from_millis(e2e),
             &[("time_to_200", Duration::from_millis(setup))],
-            None,
+            CallEvidence::default(),
         );
     }
     let prom = r.render_prometheus();
@@ -73,13 +73,20 @@ fn a_scrape_holds_no_quantile_gauge_and_counts_branches_and_steps() {
         "",
         Duration::from_millis(9_000),
         &[("time_to_200", Duration::from_millis(5))],
-        None,
+        CallEvidence::default(),
     );
     let failed = CallOutcome::Step {
         at: FailedAt { who: "alice", goal: Some(("bye", 1)), barrier: "established" },
         cause: scenario_harness::StepError::timeout("alice", None, "a datagram"),
     };
-    r.record("basic_call", &failed, &failed.case(None), Duration::from_millis(9_000), &[], None);
+    r.record(
+        "basic_call",
+        &failed,
+        &failed.case(None),
+        Duration::from_millis(9_000),
+        &[],
+        CallEvidence::default(),
+    );
     let prom = r.render_prometheus();
     assert!(!prom.contains("loadgen_e2e_seconds"), "{prom}");
     assert!(!prom.contains("loadgen_checkpoint_seconds"), "{prom}");
@@ -159,7 +166,14 @@ fn a_bucket_under_cap_chases_its_next_sample_for_a_bounded_run() {
     };
     let record = |o: &CallOutcome| {
         let sample = RenderedSample { html: None, detail: o.detail(), e2e_ms: 1.0 };
-        r.record("s", o, &o.case(None), Duration::ZERO, &[], Some(sample));
+        r.record(
+            "s",
+            o,
+            &o.case(None),
+            Duration::ZERO,
+            &[],
+            CallEvidence { sample: Some(sample), ..CallEvidence::default() },
+        );
     };
     record(&failed());
     let chased = (0..CHASE_CALLS + 10).filter(|_| r.should_record("s")).count();
@@ -200,7 +214,14 @@ fn before_any_outcome_the_gate_records_the_first_samples_and_the_share() {
 fn the_index_counts_an_accepted_reject_as_ok() {
     let r = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
     let reject = CallOutcome::Ok { branch: "rejected" };
-    r.record("limited", &reject, &reject.case(None), Duration::from_millis(3), &[], None);
+    r.record(
+        "limited",
+        &reject,
+        &reject.case(None),
+        Duration::from_millis(3),
+        &[],
+        CallEvidence::default(),
+    );
     let idx = r.build_index(
         LoadRunMeta {
             started_ms: 0,
@@ -236,7 +257,14 @@ fn case_splits_sample_buckets_within_a_class() {
     assert_ne!(case_a, case_b, "different rules → different cases");
 
     // Fill rule A's bucket (cap 1), then rule B must STILL want a sample.
-    r.record("reinvite", &unacked, &case_a, Duration::from_millis(1), &[], mk("a"));
+    r.record(
+        "reinvite",
+        &unacked,
+        &case_a,
+        Duration::from_millis(1),
+        &[],
+        CallEvidence { sample: mk("a"), ..CallEvidence::default() },
+    );
     assert!(
         !r.wants_sample("reinvite", &ResultClass::RfcAuditFail, &case_a),
         "rule A bucket full at cap"
@@ -245,7 +273,14 @@ fn case_splits_sample_buckets_within_a_class() {
         r.wants_sample("reinvite", &ResultClass::RfcAuditFail, &case_b),
         "rule B keeps its own bucket"
     );
-    r.record("reinvite", &cseq, &case_b, Duration::from_millis(1), &[], mk("b"));
+    r.record(
+        "reinvite",
+        &cseq,
+        &case_b,
+        Duration::from_millis(1),
+        &[],
+        CallEvidence { sample: mk("b"), ..CallEvidence::default() },
+    );
     assert_eq!(r.sample_count("reinvite", &ResultClass::RfcAuditFail), 2);
 
     // The machine-readable index carries the case on counts AND samples,
@@ -297,7 +332,7 @@ fn writes_and_parses_the_machine_readable_index() {
         "",
         Duration::from_millis(3),
         &[("ringing", Duration::from_millis(1))],
-        mk("ok"),
+        CallEvidence { sample: mk("ok"), ..CallEvidence::default() },
     );
     let check_fail = CallOutcome::CheckFail(vec![e2e_model::CheckVerdict {
         on: "alice.invite".to_string(),
@@ -309,7 +344,14 @@ fn writes_and_parses_the_machine_readable_index() {
         detail: "from.userInfo mismatch".to_string(),
     }]);
     let check_case = check_fail.case(None);
-    r.record("reinvite", &check_fail, &check_case, Duration::from_millis(5), &[], mk("check fail"));
+    r.record(
+        "reinvite",
+        &check_fail,
+        &check_case,
+        Duration::from_millis(5),
+        &[],
+        CallEvidence { sample: mk("check fail"), ..CallEvidence::default() },
+    );
     r.record_ringing(Some(true));
     r.record_ringing(Some(false));
     r.record_checks("reinvite", true);
@@ -380,7 +422,7 @@ async fn final_write_is_not_overwritten_by_snapshot_task() {
         "",
         Duration::from_millis(3),
         &[],
-        None,
+        CallEvidence::default(),
     );
 
     let out = std::env::temp_dir().join(format!("loadgen-snapshot-race-{}", std::process::id()));
@@ -447,20 +489,41 @@ fn an_unrecorded_occurrence_arms_the_chase_once() {
         cause: scenario_harness::StepError::timeout("established", None, "a datagram"),
     };
     let case = failed.case(None);
-    r.record("s", &failed, &case, Duration::ZERO, &[], None);
+    r.record("s", &failed, &case, Duration::ZERO, &[], CallEvidence::default());
     let chased = (0..CHASE_CALLS + 10).filter(|_| r.should_record("s")).count();
     assert_eq!(chased, CHASE_CALLS as usize, "an unrecorded occurrence arms a bounded chase");
-    r.record("s", &failed, &case, Duration::ZERO, &[], None);
+    r.record("s", &failed, &case, Duration::ZERO, &[], CallEvidence::default());
     assert!(!r.should_record("s"), "a later unrecorded occurrence does not re-arm it");
     let stub = RenderedSample { html: None, detail: None, e2e_ms: 0.0 };
-    r.record("s", &failed, &case, Duration::ZERO, &[], Some(stub));
+    r.record(
+        "s",
+        &failed,
+        &case,
+        Duration::ZERO,
+        &[],
+        CallEvidence { sample: Some(stub), ..CallEvidence::default() },
+    );
     assert!(!r.should_record("s"), "the stub of a call that never ran does not re-arm it");
     let r = Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 0 });
     let flow = || RenderedSample { html: Some(Arc::from("<html/>")), detail: None, e2e_ms: 1.0 };
-    r.record("s", &failed, &case, Duration::ZERO, &[], Some(flow()));
+    r.record(
+        "s",
+        &failed,
+        &case,
+        Duration::ZERO,
+        &[],
+        CallEvidence { sample: Some(flow()), ..CallEvidence::default() },
+    );
     let chased = (0..CHASE_CALLS + 10).filter(|_| r.should_record("s")).count();
     assert_eq!(chased, CHASE_CALLS as usize, "a stored callflow arms the chase");
-    r.record("s", &failed, &case, Duration::ZERO, &[], Some(flow()));
+    r.record(
+        "s",
+        &failed,
+        &case,
+        Duration::ZERO,
+        &[],
+        CallEvidence { sample: Some(flow()), ..CallEvidence::default() },
+    );
     assert!(r.should_record("s"), "a stored callflow under cap re-arms it");
 }
 
@@ -470,33 +533,41 @@ fn an_unrecorded_occurrence_arms_the_chase_once() {
 fn the_index_names_a_bucket_with_no_recorded_call() {
     let r = Reporter::new(ReporterCfg { sample_cap: 2, background_record_every: 64 });
     let failed = rfc_fail("rule", "detail");
-    r.record("s", &failed, &failed.case(None), Duration::ZERO, &[], None);
+    r.record("s", &failed, &failed.case(None), Duration::ZERO, &[], CallEvidence::default());
     let idx = r.render_report().index;
     assert!(idx.contains("none recorded (1 in 64 calls is recorded)"), "{idx}");
 }
 
-/// An `rfc_audit_fail` row shows its share of the audited calls and the
-/// estimate over the scenario's calls that ended on an accepted branch; the
-/// scenario line says how many calls were recorded and judged.
+/// An `rfc_audit_fail` row shows the share of its audited recorded calls
+/// among the audited ones and the estimate over the calls that ended on an
+/// accepted branch; a dialog verdict on an unrecorded call and a call that
+/// never reached the audit add to the count, never to the share.
 #[test]
 #[ignore = "slow lane: loadgen"]
 fn the_index_shows_the_audited_share_of_an_audit_failure() {
-    let r = Reporter::new(ReporterCfg { sample_cap: 2, background_record_every: 50 });
-    let recorded = (0..100).filter(|_| r.should_record("s")).count();
-    assert_eq!(recorded, 3, "calls 0 and 1 (the first two), call 50 (1 in 50)");
+    let r = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
+    assert_eq!((0..100).filter(|_| r.should_record("s")).count(), 0);
     let ok = CallOutcome::Ok { branch: "answered" };
     let failed = rfc_fail("rule", "detail");
-    for _ in 0..3 {
-        r.record_audited("s");
+    let case = failed.case(None);
+    let audited = || CallEvidence { recorded: true, accepted: true, sample: None };
+    let unrecorded = || CallEvidence { recorded: false, accepted: true, sample: None };
+    let unjudged = CallEvidence { recorded: true, accepted: false, sample: None };
+    for _ in 0..2 {
+        r.record("s", &ok, "", Duration::ZERO, &[], audited());
     }
-    for _ in 0..98 {
-        r.record("s", &ok, "", Duration::ZERO, &[], None);
+    r.record("s", &failed, &case, Duration::ZERO, &[], audited());
+    for _ in 0..95 {
+        r.record("s", &ok, "", Duration::ZERO, &[], unrecorded());
     }
-    r.record("s", &failed, &failed.case(None), Duration::ZERO, &[], None);
-    let idx = r.render_report().index;
-    assert!(idx.contains("1 of 3 audited (33.3 %), ≈ 33 of 99"), "{idx}");
-    assert!(idx.contains("100 calls placed, 3 recorded"), "{idx}");
-    assert!(idx.contains("judged 3 recorded calls"), "{idx}");
-    let md = r.render_report().summary;
-    assert!(md.contains("1 of 3 audited (33.3 %), ≈ 33 of 99"), "{md}");
+    r.record("s", &failed, &case, Duration::ZERO, &[], unrecorded());
+    let refused = rfc_fail("refused", "detail");
+    r.record("s", &refused, &refused.case(None), Duration::ZERO, &[], unjudged);
+    let ReportFiles { index, summary, .. } = r.render_report();
+    assert!(index.contains("<td>2</td><td>1 of 3 audited (33.3 %), ≈ 33 of 99</td>"), "{index}");
+    assert!(index.contains("<td>1</td><td></td>"), "the refused row has no share: {index}");
+    assert!(index.contains("100 calls placed, 4 recorded"), "{index}");
+    assert!(index.contains("99 ended on an accepted branch"), "{index}");
+    assert!(index.contains("the recording of 3 of them"), "{index}");
+    assert!(summary.contains("| 2 | 1 of 3 audited (33.3 %), ≈ 33 of 99 |"), "{summary}");
 }

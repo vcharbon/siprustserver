@@ -53,7 +53,13 @@ impl Reporter {
         self.inner.lock().unwrap().counts.values().sum()
     }
 
-    /// Recorded calls of `scenario` the RFC audit judged.
+    /// Calls of `scenario` that ended on an accepted branch before the RFC
+    /// audit.
+    pub fn accepted_count(&self, scenario: ScenarioId) -> u64 {
+        self.inner.lock().unwrap().accepted.get(scenario).copied().unwrap_or(0)
+    }
+
+    /// Accepted calls of `scenario` whose recording the RFC audit judged.
     pub fn audited_count(&self, scenario: ScenarioId) -> u64 {
         self.inner.lock().unwrap().audited.get(scenario).copied().unwrap_or(0)
     }

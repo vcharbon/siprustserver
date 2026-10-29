@@ -35,6 +35,9 @@ async fn loadgen_fake_net_error_samples_are_recorded_calls() {
     assert!(reporter.count("basic_call", &refused) >= 20, "too few refusals:\n{prom}");
     assert_eq!(reporter.stub_sample_count("basic_call", &refused), 0, "a stub took a slot");
     assert_eq!(reporter.sample_count("basic_call", &refused), 3, "the bucket fills:\n{prom}");
+    let ok = reporter.count("basic_call", &ResultClass::Ok);
+    assert_eq!(reporter.accepted_count("basic_call"), ok, "only accepted calls are audited");
+    assert!(reporter.audited_count("basic_call") <= ok, "only recorded ones by their trace");
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak");

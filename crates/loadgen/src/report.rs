@@ -34,16 +34,6 @@ use scenario_harness::actor::FailedAt;
 // A rendered sample (a captured callflow for one (scenario, class) bucket)
 // ---------------------------------------------------------------------------
 
-/// One captured call: its rendered callflow HTML (`None` only for a call that
-/// never ran, which has no flow) plus a one-line detail and its end-to-end
-/// time. Stored bounded per `(scenario, class)`; the page is shared, so a
-/// report snapshot takes it without copying.
-pub struct RenderedSample {
-    pub html: Option<Arc<str>>,
-    pub detail: Option<String>,
-    pub e2e_ms: f64,
-}
-
 // ---------------------------------------------------------------------------
 // Reporter
 // ---------------------------------------------------------------------------
@@ -118,15 +108,20 @@ struct Inner {
     sample_taken: BTreeMap<Bucket, BucketTally>,
     /// Calls placed per scenario, counted by the sampling gate.
     placed: BTreeMap<ScenarioId, u64>,
-    /// Calls the sampling gate recorded, per scenario.
+    /// Calls that ran recorded, per scenario.
     recorded: BTreeMap<ScenarioId, u64>,
+    /// Calls that ended on an accepted branch before the RFC audit, per
+    /// scenario: the calls the audit judges.
+    accepted: BTreeMap<ScenarioId, u64>,
     samples: BTreeMap<Bucket, Vec<RenderedSample>>,
     /// Per-scenario Test-case check-verdict tally over the SAMPLED calls:
     /// `(passed_all, failed_any)`. Fed only for calls whose attached case had
     /// checks that were actually evaluated (sampled OK/check-fail calls).
     check_verdicts: BTreeMap<ScenarioId, (u64, u64)>,
-    /// Recorded calls the RFC audit judged, per scenario.
+    /// Accepted calls whose recording the RFC audit judged, per scenario.
     audited: BTreeMap<ScenarioId, u64>,
+    /// Of those, the calls the audit failed, per bucket.
+    audited_failed: BTreeMap<Bucket, u64>,
     /// Per-scenario structural-waiver campaign tally (ADR-0024 §6): a waiver's
     /// "was ever used" OR-aggregated across the scenario's sampled calls, so the
     /// unused-waiver gate is per CAMPAIGN, never per call.
@@ -183,12 +178,6 @@ impl Reporter {
         } else {
             e.1 += 1;
         }
-    }
-
-    /// Count one call the RFC audit judged: a recorded call that ended on an
-    /// accepted branch.
-    pub fn record_audited(&self, scenario: ScenarioId) {
-        *self.inner.lock().unwrap().audited.entry(scenario).or_default() += 1;
     }
 
     /// Fold one sampled call's per-waiver used mask into its scenario's CAMPAIGN
@@ -254,18 +243,8 @@ impl Reporter {
     /// Before any call of the scenario has ended, the last two give at most
     /// `sample_cap` calls.
     pub fn should_record(&self, scenario: ScenarioId) -> bool {
-        let mut g = self.inner.lock().unwrap();
-        let record = self.gate(&mut g, scenario);
-        if record {
-            *g.recorded.entry(scenario).or_default() += 1;
-        }
-        record
-    }
-
-    /// The decision of [`should_record`](Self::should_record) for the next
-    /// call of `scenario`, counted as placed.
-    fn gate(&self, g: &mut Inner, scenario: ScenarioId) -> bool {
         let every = self.cfg.background_record_every;
+        let mut g = self.inner.lock().unwrap();
         let nth = *g.placed.entry(scenario).and_modify(|n| *n += 1).or_insert(1) - 1;
         if every != 0 && nth.is_multiple_of(every) {
             return true;
@@ -292,7 +271,8 @@ impl Reporter {
     /// Record one completed call: bump its `(scenario, class, case)` count and
     /// its accepted-branch or failed-step count, fold its end-to-end time and
     /// checkpoints into the histograms, and store its sample if the bucket
-    /// still has room. The bucket's first call arms its chase, recorded or
+    /// still has room, and fold its `evidence` into the recorded and audited
+    /// tallies. The bucket's first call arms its chase, recorded or
     /// not; only a stored callflow re-arms it. `case` is the outcome's bounded
     /// discriminator ([`CallOutcome::case`] — the driver computes it once, with
     /// the call's phase trail).
@@ -303,12 +283,26 @@ impl Reporter {
         case: &str,
         e2e: Duration,
         checkpoints: &[(&'static str, Duration)],
-        sample: Option<RenderedSample>,
+        evidence: CallEvidence,
     ) {
+        let CallEvidence { recorded, accepted, sample } = evidence;
         let class = ResultClass::from(outcome);
         let label = class.label();
         let mut g = self.inner.lock().unwrap();
         *g.counts.entry((scenario, label.clone(), case.to_string())).or_default() += 1;
+        if recorded {
+            *g.recorded.entry(scenario).or_default() += 1;
+        }
+        if accepted {
+            *g.accepted.entry(scenario).or_default() += 1;
+        }
+        if accepted && recorded {
+            *g.audited.entry(scenario).or_default() += 1;
+            if class == ResultClass::RfcAuditFail {
+                let bucket = (scenario, label.clone(), case.to_string());
+                *g.audited_failed.entry(bucket).or_default() += 1;
+            }
+        }
         match outcome {
             CallOutcome::Ok { branch } => *g.branches.entry((scenario, branch)).or_default() += 1,
             CallOutcome::Step { at, .. } => {
@@ -545,7 +539,9 @@ impl Reporter {
     }
 }
 
+mod evidence;
 mod inspect;
+pub use evidence::{CallEvidence, RenderedSample};
 mod prometheus;
 mod render;
 use render::ReportFiles;
