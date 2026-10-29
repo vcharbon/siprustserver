@@ -645,6 +645,13 @@ the re-anchor deadband of each other.
     its outcome in vain, never for the teardown, every dialog is ended
     cleanly or left to its endpoint's own timer, and every request that
     reaches a living worker still draws its final there;
+  - `W-kill-cseq`, a kill inside the replication window: a copy re-uses a
+    CSeq the dead primary sent before the backup applied the write, at most
+    one rejected request per dialog; the call still ends or continues
+    cleanly. A call with no backup is inside the window for its whole life:
+    the node answering a response no node holds (§4) re-uses a CSeq the same
+    way. A kill at an applied sub-point is inside the window only when the
+    primary already wrote a later turn;
   - `W-stale-resend`, `W-stale-resend-cseq`, `W-stale-resend-cseq-reuse` and
     `W-stale-resend-reinvite`, a
     kill of the primary or a stall past the cap then a kill, where the copy's
@@ -656,13 +663,6 @@ the re-anchor deadband of each other.
     primary sent on the dialog, or at ones it already sent;
     a re-INVITE while one the dead primary sent on the dialog awaits its ACK
     (a second transfer over the first);
-  - `W-kill-cseq`, a kill inside the replication window: a copy re-uses a
-    CSeq the dead primary sent before the backup applied the write, at most
-    one rejected request per dialog; the call still ends or continues
-    cleanly. A call with no backup is inside the window for its whole life:
-    the node answering a response no node holds (§4) re-uses a CSeq the same
-    way. A kill at an applied sub-point is inside the window only when the
-    primary already wrote a later turn;
   - `W-kill-rseq`, a kill inside the replication window, and a split that
     heals (user ruling): a copy's reliable provisional under the dialog's
     derived tag whose RSeq cannot continue the sequence the dead primary sent

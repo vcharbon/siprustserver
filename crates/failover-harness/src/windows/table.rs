@@ -292,6 +292,20 @@ pub static TABLE: &[Row] = &[
         witness: None,
     },
     Row {
+        id: "W-kill-cseq",
+        tier: Tier::Degraded,
+        opens: Opens::Incidents { always: &[UnbackedKilled], in_window: PRIMARY_KILLS },
+        covers: "a CSeq the dead primary sent before the backup applied the write, re-used once \
+                 per dialog by a node without its record",
+        kind: Kind::Rfc {
+            rules: &[RULE_CSEQ_IN_DIALOG_ORDER],
+            once_per_dialog: true,
+            admits: None,
+        },
+        closes_when_over: false,
+        witness: witness("prack", SyncLevel::Applied, UnbackedKilled, 3, TurnPoint::Left),
+    },
+    Row {
         id: "W-stale-resend",
         tier: Tier::Degraded,
         opens: Opens::any(STALE_COPY),
@@ -337,20 +351,6 @@ pub static TABLE: &[Row] = &[
         },
         closes_when_over: false,
         witness: None,
-    },
-    Row {
-        id: "W-kill-cseq",
-        tier: Tier::Degraded,
-        opens: Opens::Incidents { always: &[UnbackedKilled], in_window: PRIMARY_KILLS },
-        covers: "a CSeq the dead primary sent before the backup applied the write, re-used once \
-                 per dialog by a node without its record",
-        kind: Kind::Rfc {
-            rules: &[RULE_CSEQ_IN_DIALOG_ORDER],
-            once_per_dialog: true,
-            admits: None,
-        },
-        closes_when_over: false,
-        witness: witness("prack", SyncLevel::Applied, UnbackedKilled, 3, TurnPoint::Left),
     },
     Row {
         id: "W-kill-rseq",
