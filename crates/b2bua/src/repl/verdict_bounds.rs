@@ -11,7 +11,7 @@ pub const DEFAULT_FRESH_MS: i64 = 10_000;
 
 /// The default hold of a taken verdict, ms: the freshness window plus Timer F
 /// (64·T1), the last a repeat of its notice can arrive.
-pub const DEFAULT_HOLD_MS: i64 = DEFAULT_FRESH_MS + TIMER_F as i64;
+pub const DEFAULT_HOLD_MS: i64 = DEFAULT_FRESH_MS + TIMER_F.cast_signed();
 
 /// The dead-verdict bounds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,7 +42,7 @@ impl VerdictBounds {
         if self.fresh_ms <= 0 {
             return Err(format!("the freshness window {} ms is not above zero", self.fresh_ms));
         }
-        let floor = self.fresh_ms.saturating_add(TIMER_F as i64);
+        let floor = self.fresh_ms.saturating_add(TIMER_F.cast_signed());
         if self.hold_ms < floor {
             return Err(format!(
                 "the verdict hold {} ms is under the freshness window {} ms plus Timer F \
