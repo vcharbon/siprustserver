@@ -23,7 +23,4 @@ pub struct CallEvidence {
     pub accepted: bool,
     /// Its callflow sample, when its bucket wants one.
     pub sample: Option<RenderedSample>,
-    /// Its message tally, for its scenario's ladder (`None`: a call that
-    /// never ran).
-    pub messages: Option<crate::mux::CallMessages>,
 }

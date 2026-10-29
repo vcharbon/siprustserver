@@ -70,7 +70,6 @@ mod registry;
 mod retransmit;
 mod routing;
 mod rtt;
-mod sniffed;
 mod stats;
 mod tally;
 mod taps;

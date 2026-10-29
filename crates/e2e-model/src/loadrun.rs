@@ -315,6 +315,7 @@ mod tests {
                 scenario: "reinvite".into(),
                 calls: 5,
                 engine: true,
+                truncated: false,
                 lanes: vec!["alice".into(), "SUT".into()],
                 arrows: vec![LadderArrow {
                     from: "SUT".into(),

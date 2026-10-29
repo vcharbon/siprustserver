@@ -427,7 +427,7 @@
           "minimum": 0
         },
         "engine": {
-          "description": "Some call of the scenario ran the retransmit engine (re-sends are\ncounted only then).",
+          "description": "The run configured the retransmit engine for the scenario. Re-sends\ncount the engine's and the scenario's own; with it off, only the\nscenario's.",
           "type": "boolean"
         },
         "lanes": {
@@ -450,6 +450,10 @@
         },
         "scenario": {
           "type": "string"
+        },
+        "truncated": {
+          "description": "Some arrow did not fit the ladder's bounds and counts on \"other\".",
+          "type": "boolean"
         }
       },
       "required": [
@@ -722,7 +726,7 @@
           "minimum": 0
         },
         "retransmitEngine": {
-          "description": "Some call ran the retransmit engine (re-sends are counted only then).",
+          "description": "The run configured the retransmit engine for some scenario; re-sends\notherwise are the scenarios' own.",
           "type": "boolean"
         },
         "targetCps": {

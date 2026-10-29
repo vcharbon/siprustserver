@@ -144,6 +144,7 @@ impl Reporter {
             ladders: g
                 .ladders
                 .iter()
+                .filter(|(_, l)| l.calls() > 0)
                 .map(|(scenario, l)| l.project(scenario, crate::driver::CALLER))
                 .collect(),
             recording,

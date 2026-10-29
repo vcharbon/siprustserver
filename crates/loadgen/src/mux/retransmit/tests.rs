@@ -5,6 +5,10 @@ use tokio::net::UdpSocket as TokioUdp;
 use tokio::time::{timeout, Duration as TokioDuration};
 
 async fn txn_rig() -> (Arc<CallTxns>, TokioUdp, SocketAddr) {
+    txn_rig_with(None).await
+}
+
+async fn txn_rig_with(taps: Option<Arc<Taps>>) -> (Arc<CallTxns>, TokioUdp, SocketAddr) {
     // The engine sends through the same fabric seam the mux binds on.
     let endpoint: Arc<dyn UdpEndpoint> = Arc::from(
         RealSignalingNetwork::new()
@@ -18,7 +22,7 @@ async fn txn_rig() -> (Arc<CallTxns>, TokioUdp, SocketAddr) {
         endpoint,
         Arc::new(DropModel::new(0.0, 1, None)),
         Arc::new(MuxStats::new(4)),
-        None,
+        taps,
     ));
     (txns, peer, peer_addr)
 }
@@ -220,4 +224,35 @@ async fn calltxns_sendtap_records_every_reemission() {
     assert!(kinds.contains(&ReEmitKind::ReAnswer), "reactive re-answer tapped: {kinds:?}");
     assert!(kinds.contains(&ReEmitKind::ReAck), "reactive re-ACK tapped: {kinds:?}");
     txns.shutdown();
+}
+
+/// Every re-send the engine makes reaches the call's tally through its
+/// endpoint's taps: the proactive Timer E retransmit and the reactive re-ACK.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "slow lane: loadgen"]
+async fn calltxns_counts_every_resend_on_the_tally() {
+    use crate::mux::tally::CallTally;
+    use sip_message::sniff::identity;
+
+    let tally = Arc::new(CallTally::new("alice"));
+    let taps = Taps::new(None, Some(tally.clone()), None, None);
+    let (txns, peer, peer_addr) = txn_rig_with(taps).await;
+    let (update, ack) = (update_req("z9hG4bK-u1"), ack_req("z9hG4bK-a9", 1));
+    let now = tokio::time::Instant::now();
+    tally.on_datagram(None, super::super::taps::Dir::Out, &identity(&update), now);
+    tally.on_datagram(None, super::super::taps::Dir::Out, &identity(&ack), now);
+
+    txns.on_outbound(&update, peer_addr);
+    recv_one(&peer, 2_000).await.expect("Timer E retransmit of the UPDATE");
+    assert!(txns.on_inbound(&resp(200, "z9hG4bK-u1", "2 UPDATE", ""), peer_addr));
+    let ok_inv = resp(200, "z9hG4bK-i9", "1 INVITE", "");
+    assert!(txns.on_inbound(&ok_inv, peer_addr));
+    txns.on_outbound(&ack, peer_addr);
+    assert!(!txns.on_inbound(&ok_inv, peer_addr), "dup 200 (INVITE) absorbed → re-ACK");
+    txns.shutdown();
+
+    let m = tally.finish();
+    let resent = |label: &str| m.arrows.iter().find(|(k, _)| k.label == label).unwrap().1.resent;
+    assert!(resent("UPDATE") >= 1, "the proactive retransmit: {m:?}");
+    assert_eq!(resent("ACK"), 1, "the reactive re-ACK: {m:?}");
 }

@@ -21,13 +21,23 @@ pub(crate) fn ladders(out: &mut String, idx: &LoadRunIndex) {
         "<h2>Message ladders</h2><p class=\"muted\">One per scenario: every message its calls \
          exchanged with the SUT, merged over the calls by sender, receiver, message and \
          occurrence, ordered by its mean time from call start. <b>retr</b>: copies received \
-         after the first; <b>resent</b>: copies sent after the first; <b>errors</b>: failed \
+         after the first; <b>resent</b>: copies sent after the first (the retransmit engine's and the scenario's own); <b>errors</b>: failed \
          calls whose failure was detected at that message (the last one in before the \
          outcome).</p>",
     );
     for ladder in &idx.ladders {
-        let engine = if ladder.engine { "" } else { " · retransmit engine off" };
+        let engine = if ladder.engine {
+            ""
+        } else {
+            " · retransmit engine off: re-sent counts the scenario's own re-sends"
+        };
         let _ = write!(out, "<h3>{} ({} calls{engine})</h3>", esc(&ladder.scenario), ladder.calls);
+        if ladder.truncated {
+            out.push_str(
+                "<p class=\"nok\">truncated: more distinct messages than the ladder holds; \
+                 the rest count on the \"other arrows\" row</p>",
+            );
+        }
         out.push_str(&seq_report::render_embed(&seq_doc(ladder)));
         table(out, ladder);
     }

@@ -12,9 +12,13 @@ pub struct Ladder {
     pub scenario: String,
     /// Calls folded in.
     pub calls: u64,
-    /// Some call of the scenario ran the retransmit engine (re-sends are
-    /// counted only then).
+    /// The run configured the retransmit engine for the scenario. Re-sends
+    /// count the engine's and the scenario's own; with it off, only the
+    /// scenario's.
     pub engine: bool,
+    /// Some arrow did not fit the ladder's bounds and counts on "other".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
     /// The lanes, in display order: the caller, the SUT, the callee roles.
     pub lanes: Vec<String>,
     /// The arrows, by mean offset from call start (bounded).

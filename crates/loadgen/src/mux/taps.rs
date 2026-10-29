@@ -10,8 +10,8 @@ use std::sync::Arc;
 use tokio::time::Instant;
 
 use super::rtt::{RttSink, RttTracker};
-use super::sniffed::Sniffed;
 use super::tally::CallTally;
+use sip_message::sniff::identity;
 
 /// The endpoint of a call a datagram crossed: its caller, or the callee leg
 /// bound under this role.
@@ -69,7 +69,7 @@ impl Taps {
 
     pub(in crate::mux) fn on_outbound(&self, raw: &[u8], now: Instant) {
         if self.sniffs() {
-            let m = Sniffed::of(raw);
+            let m = identity(raw);
             if let Some(rtt) = &self.rtt {
                 rtt.on_outbound(&m, now);
             }
@@ -84,7 +84,7 @@ impl Taps {
 
     pub(in crate::mux) fn on_inbound(&self, raw: &[u8], now: Instant) {
         if self.sniffs() {
-            let m = Sniffed::of(raw);
+            let m = identity(raw);
             if let Some(rtt) = &self.rtt {
                 rtt.on_inbound(&m, now);
             }
@@ -100,7 +100,7 @@ impl Taps {
     /// A re-send this endpoint's retransmit engine made.
     pub(in crate::mux) fn on_resend(&self, raw: &[u8]) {
         if let Some(tally) = &self.tally {
-            tally.on_resend(self.leg.as_deref(), &Sniffed::of(raw));
+            tally.on_resend(self.leg.as_deref(), &identity(raw));
         }
     }
 }

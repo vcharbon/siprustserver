@@ -1,24 +1,25 @@
 //! One call's message tally: every datagram its endpoints send or have
 //! delivered, keyed by arrow `(from, to, label, nth)`, with the duplicates
 //! received and the re-sends of each. A datagram whose identity (direction,
-//! endpoint, Call-ID, CSeq, method or status, RSeq) was already seen on the
-//! call is a retransmission of that arrow and opens no new occurrence. The
-//! state is per call, bounded by [`MAX_ARROWS`], and folded into the reporter
-//! once when the call ends.
+//! endpoint, Call-ID, CSeq, the request method, or the status with the RSeq
+//! and the To-tag) was already seen on the call is a copy of that arrow and
+//! opens no new occurrence. The state is per call, bounded by
+//! [`MAX_ARROWS`] (past it a datagram counts on an "other" arrow), folded into
+//! the reporter once when the call ends, and released then.
 
-use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 
+use sip_message::sniff::Identity;
 use tokio::time::Instant;
 
-use super::sniffed::Sniffed;
 use super::taps::Dir;
 
 /// The SUT's lane: the far end of every arrow.
 pub const SUT_LANE: &str = "SUT";
 
 /// The distinct arrows one call keeps at most; a datagram opening an arrow
-/// past it is not tallied.
+/// past it counts on the call's "other" arrow.
 pub(crate) const MAX_ARROWS: usize = 256;
 
 /// One arrow of a ladder: who sent what to whom, the how-many-th distinct
@@ -38,8 +39,8 @@ pub struct ArrowStat {
     pub count: u64,
     /// Copies received after the first.
     pub duplicates: u64,
-    /// Copies sent after the first: the retransmit engine's re-sends and any
-    /// re-send by the call itself.
+    /// Copies sent after the first: the retransmit engine's re-sends and the
+    /// call's own.
     pub resent: u64,
     /// Sum over the occurrences of their first copy's offset from call
     /// start, in milliseconds.
@@ -49,26 +50,47 @@ pub struct ArrowStat {
 /// What one call leaves for its scenario's ladder.
 #[derive(Debug, Clone, Default)]
 pub struct CallMessages {
+    /// The caller's lane.
+    pub caller: String,
     /// Every arrow of the call, in first-seen order.
     pub arrows: Vec<(ArrowKey, ArrowStat)>,
-    /// The last inbound arrow before the call's outcome was decided; `None`
-    /// when nothing had come in (or the outcome was never marked).
-    pub charge: Option<ArrowKey>,
-    /// The call ran the retransmit engine.
-    pub engine: bool,
+    /// The datagrams past the call's arrow cap.
+    pub other: ArrowStat,
+    /// Per lane, the last arrow it received before the call's outcome was
+    /// decided (`None`: an arrow past the bound, counted on "other").
+    pub charges: Vec<(String, Option<ArrowKey>)>,
 }
 
-/// A datagram's identity, hashed: one call's handful of messages never
-/// collide in 64 bits, and no field is copied per datagram.
-type DupKey = u64;
+impl CallMessages {
+    /// Where a failure of the agent on `lane` is charged: the last arrow the
+    /// lane received before the outcome. `None`: the lane had received
+    /// nothing; `Some(None)`: the "other" arrow.
+    pub fn charge_of(&self, lane: &str) -> Option<Option<&ArrowKey>> {
+        self.charges.iter().find(|(l, _)| l == lane).map(|(_, arrow)| arrow.as_ref())
+    }
+}
 
+/// An arrow's slot in the call: one of its entries, or "other".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slot {
+    Entry(usize),
+    Other,
+}
+
+struct Entry {
+    key: u64,
+    arrow: ArrowKey,
+    stat: ArrowStat,
+}
+
+#[derive(Default)]
 struct TallyState {
-    seen: HashMap<DupKey, usize>,
-    nth: HashMap<(String, String, String), u32>,
-    arrows: Vec<(ArrowKey, ArrowStat)>,
-    last_inbound: Option<usize>,
-    /// Set once, when the outcome is decided: the inbound arrow it is charged to.
-    charge: Option<Option<usize>>,
+    entries: Vec<Entry>,
+    other: ArrowStat,
+    /// Per receiving lane, the last new arrow it received.
+    last_inbound: Vec<(String, Slot)>,
+    /// Set once, when the outcome is decided.
+    charges: Option<Vec<(String, Slot)>>,
     /// The tally was handed over: later datagrams are not tallied.
     finished: bool,
 }
@@ -77,126 +99,134 @@ struct TallyState {
 pub struct CallTally {
     start: Instant,
     caller: String,
-    engine: bool,
     state: Mutex<TallyState>,
 }
 
 impl CallTally {
-    /// A tally starting now; `caller` names the caller's lane, `engine` says
-    /// whether the call runs the retransmit engine.
-    pub fn new(caller: &str, engine: bool) -> Self {
-        Self {
-            start: Instant::now(),
-            caller: caller.to_string(),
-            engine,
-            state: Mutex::new(TallyState {
-                seen: HashMap::new(),
-                nth: HashMap::new(),
-                arrows: Vec::new(),
-                last_inbound: None,
-                charge: None,
-                finished: false,
-            }),
-        }
+    /// A tally starting now; `caller` names the caller's lane.
+    pub fn new(caller: &str) -> Self {
+        Self { start: Instant::now(), caller: caller.to_string(), state: Mutex::default() }
+    }
+
+    fn lane<'a>(&'a self, leg: Option<&'a str>) -> &'a str {
+        leg.unwrap_or(&self.caller)
     }
 
     /// A datagram the endpoint `leg` (`None`: the caller) sent (`Out`, its
-    /// first transmission by the call) or had delivered (`In`) at `now`.
-    pub(super) fn on_datagram(&self, leg: Option<&str>, dir: Dir, m: &Sniffed, now: Instant) {
+    /// first transmission by the call) or had delivered (`In`) at `now`. A
+    /// copy counts on its arrow and moves nothing else.
+    pub(super) fn on_datagram(&self, leg: Option<&str>, dir: Dir, id: &Identity<'_>, now: Instant) {
+        let key = dup_key(leg, dir, id);
         let mut g = self.state.lock().unwrap();
         if g.finished {
             return;
         }
-        let key = dup_key(leg, dir, m);
-        let idx = match g.seen.get(&key).copied() {
-            Some(idx) => {
-                if let Some((_, stat)) = g.arrows.get_mut(idx) {
-                    match dir {
-                        Dir::In => stat.duplicates += 1,
-                        Dir::Out => stat.resent += 1,
-                    }
-                }
-                Some(idx)
+        if let Some(e) = g.entries.iter_mut().find(|e| e.key == key) {
+            match dir {
+                Dir::In => e.stat.duplicates += 1,
+                Dir::Out => e.stat.resent += 1,
             }
-            None => self.open(&mut g, key, leg, dir, m, now),
+            return;
+        }
+        let lane = self.lane(leg);
+        let slot = if g.entries.len() < MAX_ARROWS {
+            let (from, to) = match dir {
+                Dir::Out => (lane, SUT_LANE),
+                Dir::In => (SUT_LANE, lane),
+            };
+            let label = label(id);
+            let nth = 1 + g
+                .entries
+                .iter()
+                .filter(|e| e.arrow.from == from && e.arrow.to == to && e.arrow.label == label)
+                .count() as u32;
+            let arrow = ArrowKey { from: from.to_string(), to: to.to_string(), label, nth };
+            let offset_ms = now.saturating_duration_since(self.start).as_secs_f64() * 1000.0;
+            let stat = ArrowStat { count: 1, offset_ms_sum: offset_ms, ..ArrowStat::default() };
+            g.entries.push(Entry { key, arrow, stat });
+            Slot::Entry(g.entries.len() - 1)
+        } else {
+            g.other.count += 1;
+            Slot::Other
         };
-        if dir == Dir::In && idx.is_some() {
-            g.last_inbound = idx;
+        if dir == Dir::In {
+            match g.last_inbound.iter_mut().find(|(l, _)| l == lane) {
+                Some((_, last)) => *last = slot,
+                None => g.last_inbound.push((lane.to_string(), slot)),
+            }
         }
     }
 
     /// A re-send the retransmit engine of endpoint `leg` made of a datagram
-    /// it sent before.
-    pub(super) fn on_resend(&self, leg: Option<&str>, m: &Sniffed) {
+    /// it sent before; a datagram the tally never saw opens nothing.
+    pub(super) fn on_resend(&self, leg: Option<&str>, id: &Identity<'_>) {
+        let key = dup_key(leg, Dir::Out, id);
         let mut g = self.state.lock().unwrap();
-        if g.finished {
-            return;
-        }
-        let key = dup_key(leg, Dir::Out, m);
-        let idx = match g.seen.get(&key).copied() {
-            Some(idx) => Some(idx),
-            None => self.open(&mut g, key, leg, Dir::Out, m, Instant::now()),
-        };
-        if let Some((_, stat)) = idx.and_then(|idx| g.arrows.get_mut(idx)) {
-            stat.resent += 1;
+        if let Some(e) = g.entries.iter_mut().find(|e| e.key == key) {
+            e.stat.resent += 1;
         }
     }
 
-    /// The call's outcome is decided: its error, if any, is charged to the
-    /// last inbound arrow seen so far. Only the first mark counts.
+    /// The call's outcome is decided: each lane's failure is charged to the
+    /// last arrow it received so far. Only the first mark counts.
     pub fn mark_outcome(&self) {
         let mut g = self.state.lock().unwrap();
-        if g.charge.is_none() {
-            g.charge = Some(g.last_inbound);
+        if g.charges.is_none() {
+            g.charges = Some(g.last_inbound.clone());
         }
     }
 
-    /// The call's tally, for its scenario's ladder. The tally is then closed:
-    /// a datagram after it (a late copy, a resender still running) is not
-    /// tallied, and a second call returns nothing.
+    /// The call's tally, for its scenario's ladder. The tally is then closed
+    /// and emptied: a later datagram (a late copy, a resender still running)
+    /// is not tallied, and nothing of the call stays held.
     pub fn finish(&self) -> CallMessages {
         let mut g = self.state.lock().unwrap();
-        g.finished = true;
-        g.seen.clear();
-        let arrows = std::mem::take(&mut g.arrows);
-        let charge = g.charge.flatten().and_then(|i| arrows.get(i)).map(|(k, _)| k.clone());
-        CallMessages { arrows, charge, engine: self.engine }
-    }
-
-    fn open(
-        &self,
-        g: &mut TallyState,
-        key: DupKey,
-        leg: Option<&str>,
-        dir: Dir,
-        m: &Sniffed,
-        now: Instant,
-    ) -> Option<usize> {
-        if g.arrows.len() >= MAX_ARROWS {
-            return None;
+        let state =
+            std::mem::replace(&mut *g, TallyState { finished: true, ..TallyState::default() });
+        drop(g);
+        let charges = state
+            .charges
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(lane, slot)| {
+                let arrow = match slot {
+                    Slot::Entry(i) => state.entries.get(i).map(|e| e.arrow.clone()),
+                    Slot::Other => None,
+                };
+                (lane, arrow)
+            })
+            .collect();
+        CallMessages {
+            caller: self.caller.clone(),
+            arrows: state.entries.into_iter().map(|e| (e.arrow, e.stat)).collect(),
+            other: state.other,
+            charges,
         }
-        let side = leg.unwrap_or(&self.caller).to_string();
-        let (from, to) = match dir {
-            Dir::Out => (side, SUT_LANE.to_string()),
-            Dir::In => (SUT_LANE.to_string(), side),
-        };
-        let label = m.label();
-        let nth = g.nth.entry((from.clone(), to.clone(), label.clone())).or_default();
-        *nth += 1;
-        let arrow = ArrowKey { from, to, label, nth: *nth };
-        let offset_ms = now.saturating_duration_since(self.start).as_secs_f64() * 1000.0;
-        let stat = ArrowStat { count: 1, offset_ms_sum: offset_ms, ..ArrowStat::default() };
-        g.arrows.push((arrow, stat));
-        let idx = g.arrows.len() - 1;
-        g.seen.insert(key, idx);
-        Some(idx)
     }
 }
 
-fn dup_key(leg: Option<&str>, dir: Dir, m: &Sniffed) -> DupKey {
-    use std::hash::{Hash, Hasher};
+/// The message as a ladder labels it: the request method (`INVITE`), or the
+/// status and the CSeq method (`180 (INVITE)`); `?` when unreadable.
+fn label(id: &Identity<'_>) -> String {
+    match (id.status, id.method, id.cseq_method) {
+        (Some(status), _, Some(m)) => format!("{status} ({m})"),
+        (Some(status), _, None) => status.to_string(),
+        (None, Some(method), _) => method.to_string(),
+        (None, None, _) => "?".to_string(),
+    }
+}
+
+/// A datagram's identity in one hash: one call's few hundred messages never
+/// collide in 64 bits. A request is its method (its CSeq method is the same);
+/// a response its status, CSeq method, RSeq and To-tag, so a forked final is a
+/// new occurrence and a re-sent provisional a copy.
+fn dup_key(leg: Option<&str>, dir: Dir, id: &Identity<'_>) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    (dir, leg, &m.call_id, m.cseq, &m.cseq_method, m.status, &m.method, m.rseq).hash(&mut h);
+    (dir, leg, id.call_id, id.cseq).hash(&mut h);
+    match id.status {
+        Some(status) => (status, id.cseq_method, id.rseq, id.to_tag).hash(&mut h),
+        None => id.method.hash(&mut h),
+    }
     h.finish()
 }
 

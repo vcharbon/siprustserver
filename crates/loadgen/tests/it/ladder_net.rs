@@ -6,7 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua_harness::settle_until;
-use loadgen::{CallTuning, Canaries, Driver, LoadRunMeta, Reporter, ReporterCfg, ResultClass};
+use loadgen::{
+    CallTuning, Canaries, Driver, DropDir, LoadRunMeta, Reporter, ReporterCfg, ResultClass,
+    TargetedDrop,
+};
 
 use crate::fake_rig::*;
 
@@ -81,6 +84,51 @@ async fn a_refused_call_is_charged_to_the_refusal() {
     assert!(ladder.before_reply.is_empty() && ladder.after_call.is_empty());
 
     settle_until(|| core.registry_size() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// The SUT stalls after its 100 (the callee never gets the INVITE): the
+/// caller's wait fails, and its teardown CANCEL then draws a 200 (CANCEL) and
+/// a 487. The failure is charged to the 100, the last message the caller
+/// received before the verdict, never to the teardown's.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_failure_stays_on_the_message_before_the_teardown() {
+    let (h, b2bua, core, transport) = setup_fake_tuned(7640, |c| {
+        c.invite_first_response_timeout_sec =
+            b2bua_sdk::B2buaConfig::MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC;
+    })
+    .await;
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 }));
+    let mut c = cfg(b2bua.addr, 2.0, 1, 4, 0xB7E);
+    c.default_tuning = CallTuning {
+        drop_nth: Some(TargetedDrop {
+            method: "INVITE",
+            nth: 1,
+            permanent: true,
+            dir: DropDir::Inbound,
+            leg: Some("bob"),
+        }),
+        ..CallTuning::default()
+    };
+    Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport).run().await;
+
+    let idx = reporter.build_index(LoadRunMeta::default(), Canaries::default());
+    let ladder = &idx.ladders[0];
+    assert_eq!(reporter.count("basic_call", &ResultClass::Timeout), ladder.calls);
+    let charged: Vec<_> = ladder.arrows.iter().filter(|a| !a.errors.is_empty()).collect();
+    assert_eq!(charged.len(), 1, "one arrow carries the failures: {ladder:#?}");
+    let at = charged[0];
+    let charged_at = (at.from.as_str(), at.to.as_str(), at.label.as_str());
+    assert_eq!(charged_at, ("SUT", "alice", "100 (INVITE)"), "{ladder:#?}");
+    let teardown = ["200 (CANCEL)", "487 (INVITE)"];
+    let after = ladder.arrows.iter().filter(|a| a.to == "alice" && teardown.contains(&&*a.label));
+    assert_eq!(after.count(), 2, "the teardown's traffic came in, uncharged: {ladder:#?}");
+
+    settle_until(|| core.registry_size() == 0).await;
+    h.advance(Duration::from_secs(40)).await;
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }

@@ -80,7 +80,7 @@ pub(crate) fn headline(out: &mut String, idx: &LoadRunIndex, live: Option<Live>)
                 )
             } else {
                 format!(
-                    "received {} · re-sent {} (retransmit engine off)",
+                    "received {} · re-sent {}, by the scenario; retransmit engine off",
                     p.retransmissions_received, p.retransmissions_resent
                 )
             },

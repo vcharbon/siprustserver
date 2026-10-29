@@ -37,7 +37,8 @@ pub struct Progress {
     pub retransmissions_received: u64,
     /// Datagram copies sent after the first, over every call.
     pub retransmissions_resent: u64,
-    /// Some call ran the retransmit engine (re-sends are counted only then).
+    /// The run configured the retransmit engine for some scenario; re-sends
+    /// otherwise are the scenarios' own.
     pub retransmit_engine: bool,
 }
 

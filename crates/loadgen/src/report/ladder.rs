@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use e2e_model::{ClassCount, Ladder, LadderArrow};
 
-use crate::class::ResultClass;
+use crate::class::{CallOutcome, ResultClass};
 use crate::mux::{ArrowKey, ArrowStat, CallMessages, SUT_LANE};
 
 /// The distinct arrows a scenario's ladder keeps; later ones fold into its
@@ -42,8 +42,10 @@ fn add_stat(into: &mut ArrowStat, s: &ArrowStat) {
 #[derive(Default)]
 pub(super) struct LadderAgg {
     calls: u64,
-    /// Some call folded in ran the retransmit engine.
+    /// The run configured the retransmit engine for the scenario.
     pub(super) engine: bool,
+    /// An arrow was folded into "other" for want of room.
+    truncated: bool,
     arrows: HashMap<ArrowKey, ArrowAgg>,
     other: ArrowAgg,
     after_call: BTreeMap<String, u64>,
@@ -55,21 +57,42 @@ pub(super) struct LadderAgg {
 }
 
 impl LadderAgg {
-    /// Fold one call of result `class`: its arrows, and its failure charged
-    /// to the arrow it was detected at; a verdict judged after the call
+    /// Calls folded in.
+    pub(super) fn calls(&self) -> u64 {
+        self.calls
+    }
+
+    /// A ladder for a scenario the run configured the retransmit engine
+    /// for, or not.
+    pub(super) fn new(engine: bool) -> Self {
+        Self { engine, ..Self::default() }
+    }
+
+    /// Fold one call of `outcome`: its arrows, and its failure charged to the
+    /// last arrow the failing agent's lane received before the outcome (the
+    /// caller's when no agent failed); a verdict judged after the call
     /// (`rfc_audit_fail`, `check_fail`) has no arrow.
-    pub(super) fn fold(&mut self, call: CallMessages, class: &ResultClass) {
+    pub(super) fn fold(&mut self, call: CallMessages, outcome: &CallOutcome) {
         self.calls += 1;
-        self.engine |= call.engine;
-        for (key, stat) in call.arrows {
+        if call.other.count > 0 {
+            self.truncated = true;
+            self.received += call.other.duplicates;
+            self.other.add(&ArrowAgg { stat: call.other, errors: BTreeMap::new() });
+        }
+        for (key, stat) in &call.arrows {
+            let (key, stat) = (key.clone(), *stat);
             self.received += stat.duplicates;
             self.resent += stat.resent;
             let agg = ArrowAgg { stat, errors: BTreeMap::new() };
             match self.slot(key) {
                 Some(slot) => slot.add(&agg),
-                None => self.other.add(&agg),
+                None => {
+                    self.truncated = true;
+                    self.other.add(&agg);
+                }
             }
         }
+        let class = ResultClass::from(outcome);
         let label = class.label();
         match class {
             ResultClass::Ok | ResultClass::Rejected => {}
@@ -77,11 +100,17 @@ impl LadderAgg {
                 *self.after_call.entry(label).or_default() += 1
             }
             _ => {
-                let errors = match &call.charge {
-                    Some(key) => match self.arrows.get_mut(key) {
+                // A barrier's own failure names no agent: the caller's lane.
+                let who = match outcome {
+                    CallOutcome::Step { at, .. } if at.who != at.barrier => at.who,
+                    _ => call.caller.as_str(),
+                };
+                let errors = match call.charge_of(who) {
+                    Some(Some(key)) => match self.arrows.get_mut(key) {
                         Some(slot) => &mut slot.errors,
                         None => &mut self.other.errors,
                     },
+                    Some(None) => &mut self.other.errors,
                     None => &mut self.before_reply,
                 };
                 *errors.entry(label).or_default() += 1;
@@ -125,6 +154,7 @@ impl LadderAgg {
             scenario: scenario.to_string(),
             calls: self.calls,
             engine: self.engine,
+            truncated: self.truncated,
             lanes,
             arrows: shown,
             other,

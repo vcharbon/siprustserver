@@ -386,6 +386,7 @@ fn a_ladder_draws_its_arrows_with_their_counts_and_errors() {
         scenario: "basic_call".into(),
         calls: 100,
         engine: false,
+        truncated: true,
         lanes: vec!["alice".into(), "SUT".into(), "bob".into()],
         arrows: vec![
             arrow("alice", "SUT", "INVITE", 1, 0.0, &[]),
@@ -401,7 +402,11 @@ fn a_ladder_draws_its_arrows_with_their_counts_and_errors() {
     let ladder = &page[page.find("<h2>Message ladders</h2>").expect("the section")..];
     assert!(page.find("Message ladders") > page.find("Results by"), "after the class table");
     assert!(page.find("Message ladders") < page.find("<h2>Latency"), "before the latency");
-    assert!(ladder.contains("<h3>basic_call (100 calls · retransmit engine off)</h3>"));
+    assert!(ladder.contains(
+        "<h3>basic_call (100 calls · retransmit engine off: re-sent counts the scenario's own \
+         re-sends)</h3>"
+    ));
+    assert!(ladder.contains("truncated: more distinct messages"));
     assert!(ladder.contains("class=\"seq-embed\""), "drawn through seq-report");
     assert!(ladder.contains("486 (INVITE) ×100 · retr 3 · status_486 7"), "the arrow caption");
     assert!(ladder.contains("INVITE #2 ×100"), "a second occurrence is numbered");
@@ -410,5 +415,8 @@ fn a_ladder_draws_its_arrows_with_their_counts_and_errors() {
          <td>0</td><td class=\"nok\">status_486 7</td></tr>"
     ));
     assert!(ladder.contains("before any message in: timeout 1; after the call: rfc_audit_fail 2"));
-    assert!(page.contains("received 12 · re-sent 0 (retransmit engine off)"), "the headline");
+    assert!(
+        page.contains("received 12 · re-sent 0, by the scenario; retransmit engine off"),
+        "the headline"
+    );
 }

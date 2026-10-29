@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use crate::class::{CallOutcome, ResultClass};
 use crate::ctx::CallCtx;
+use crate::mux::CallTally;
 use crate::outcome::OutcomeSink;
 use crate::report::{CallEvidence, RenderedSample, Reporter};
 use crate::scenarios::ScenarioId;
@@ -40,6 +41,18 @@ pub(super) fn record_unrun(
         CallEvidence { sample, ..CallEvidence::default() },
     );
     reporter.dec_inflight();
+}
+
+/// What folds the call's messages into its scenario's ladder, once its
+/// traffic is over.
+pub(super) fn ladder_fold(
+    reporter: &Arc<Reporter>,
+    id: ScenarioId,
+    tally: &Arc<CallTally>,
+    outcome: &CallOutcome,
+) -> Box<dyn FnOnce() + Send> {
+    let (reporter, tally, outcome) = (reporter.clone(), tally.clone(), outcome.clone());
+    Box::new(move || reporter.record_messages(id, tally.finish(), &outcome))
 }
 
 /// Append the call's lifecycle phase trail (`connected@1234ms`, `reinvited@…`) to

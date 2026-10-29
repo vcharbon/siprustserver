@@ -37,7 +37,8 @@ use scenario_harness::actor::ScenarioVerdict;
 mod binding;
 mod record;
 mod seeds;
-use binding::{bind_agents, bind_refusal, call_routing, from_user_key};
+pub(crate) use binding::CALLER;
+use binding::{bind_agents, bind_refusal, call_routing, from_user_key, KEY_DRAWS};
 use record::{phase_annotated_detail, record_unrun};
 use seeds::{mint_token, next_seed, panic_msg, xorshift};
 
@@ -159,6 +160,10 @@ impl Driver {
         let scenarios: Vec<MixEntry> = scenarios.into_iter().map(Into::into).collect();
         assert!(!scenarios.is_empty(), "loadgen needs at least one scenario");
         let total_weight = scenarios.iter().map(|e| e.weight).sum();
+        for e in &scenarios {
+            let tuned = cfg.tuning.get(e.id).unwrap_or(&cfg.default_tuning);
+            reporter.declare_retransmit(e.id, tuned.retransmit);
+        }
         Self {
             rate: RateHandle::new(cfg.cps),
             duration: cfg.duration,
@@ -292,7 +297,7 @@ pub(crate) async fn run_one(
     let draws = if from_user && case.is_some() { KEY_DRAWS } else { 1 };
     let mut draw = 0;
     let rtts = CallRtts::new(reporter.clone(), id);
-    let tally = Arc::new(CallTally::new(CALLER, tuning.retransmit));
+    let tally = Arc::new(CallTally::new(CALLER));
     let (core, dwells, banner, resolved_input, token, net, binder, alice, callee_agents) = loop {
         draw += 1;
         // Resolve THIS call's binding from the attached Test case (pool walk +
@@ -369,10 +374,13 @@ pub(crate) async fn run_one(
     if record {
         ctx.enable_anchor_collection();
     }
-    if let Some(wire) = &wire {
-        let wire = wire.clone();
-        ctx.on_resolved(move || wire.seal());
-    }
+    // At the verdict, before the runner's own teardown: seal the wire facts
+    // and charge a failure to each lane's last message in.
+    let (seal, mark) = (wire.clone(), tally.clone());
+    ctx.on_resolved(move || {
+        seal.iter().for_each(CallWire::seal);
+        mark.mark_outcome();
+    });
 
     let env = CallEnv {
         alice: &alice,
@@ -403,15 +411,11 @@ pub(crate) async fn run_one(
         long_hold: dwells.long_hold.unwrap_or(call.long_hold),
     };
     // The single body-invocation site: an actor scenario rides the per-endpoint
-    // reactor runner (each runner owns its per-actor teardown scopes, so no
-    // outer `CallScope` is needed), yielding the `ScenarioVerdict` everything
-    // downstream — classification, sampling, phases, the ringing gate —
-    // buckets on, inside a `catch_unwind` boundary (a panic is a counted
-    // failure, never a worker abort). The body is built ONCE here so its
-    // declared waivers (ADR-0024 §6) can be read for the audit, then the BUILT
-    // call is run — never built twice. A build guard error is the call's
-    // `build` failure; a build panic is caught at the same boundary as a run
-    // panic.
+    // reactor runner (it owns the per-actor teardown scopes), yielding the
+    // verdict everything downstream buckets on, inside a `catch_unwind`
+    // boundary (a panic is a counted failure). The body is built ONCE so its
+    // declared waivers (ADR-0024 §6) reach the audit; a build guard error is
+    // the call's `build` failure, a build panic caught like a run panic.
     let mut plan_waivers: Vec<WaiverScope> = Vec::new();
     let result = match &body {
         LoadBody::Actor(scenario) => {
@@ -430,12 +434,12 @@ pub(crate) async fn run_one(
         }
     };
 
-    // The outcome is decided: its error is charged to the last message in,
-    // before the teardown below adds its own.
-    tally.mark_outcome();
+    tally.mark_outcome(); // a call whose runner never resolved (its build failed)
     let failed = !matches!(result, Ok(ScenarioVerdict::Success { .. }));
+    let (fold_tx, fold_rx) = tokio::sync::oneshot::channel();
     if failed {
-        failed_call::release(tails, net, &alice, &callee_agents, call.teardown_quiesce).await;
+        let quiesce = call.teardown_quiesce;
+        failed_call::release(tails, net, &alice, &callee_agents, quiesce, fold_rx).await;
     }
 
     // The per-call audit policy (ADR-0024 §6): the merged structural waivers —
@@ -514,12 +518,9 @@ pub(crate) async fn run_one(
     // a later recorded call of its bucket would fill with a full callflow.
     let sample = if binder.is_recording() && reporter.wants_sample(id, &class, &case) {
         let detail = phase_annotated_detail(outcome.detail(), &ctx);
-        // Thread the failure reason into the rendered callflow so a sampled NOK
-        // page explains WHY (header banner + an explicit anomaly), not just "FAIL".
-        // The banner (the resolved binding — the actual From/To used) shows
-        // in the page header on PASS and FAIL alike; the failure detail
-        // stays FAIL-only; the case's check verdicts render pass AND fail.
-        // Metrics labels stay scenario-keyed.
+        // A sampled NOK page states WHY (banner + anomaly); the banner (the
+        // resolved binding) shows on PASS and FAIL alike, the failure detail on
+        // FAIL only, the case's check verdicts pass AND fail.
         binder
             .render_html(id, class.is_ok(), banner.as_deref(), detail.as_deref(), &check_notes)
             .map(|html| RenderedSample {
@@ -531,19 +532,17 @@ pub(crate) async fn run_one(
         None
     };
 
-    let recorded = binder.is_recording();
-    let evidence = CallEvidence { recorded, accepted, sample, messages: Some(tally.finish()) };
+    let evidence = CallEvidence { recorded: binder.is_recording(), accepted, sample };
     reporter.record(id, &outcome, &case, e2e, &checkpoints, evidence);
+    // The ladder takes the call's messages once its traffic is over.
+    let fold = record::ladder_fold(&reporter, id, &tally, &outcome);
+    match failed {
+        true => drop(fold_tx.send(fold)),
+        false => fold(),
+    }
     rtts.finish();
     if let (Some(sink), Some(wire)) = (&outcomes, &wire) {
         crate::outcome::write_call(sink, id, &wire.facts(), &outcome, transport.clock.now_ms());
     }
     reporter.dec_inflight();
 }
-
-/// The caller agent's name: the agent that originates every call.
-pub(crate) const CALLER: &str = "alice";
-
-/// How many numbers a from-user call draws from its case's pool before it is
-/// rejected for contention (every draw held or cooling).
-const KEY_DRAWS: usize = 8;

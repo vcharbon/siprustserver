@@ -285,7 +285,7 @@ impl Reporter {
         checkpoints: &[(&'static str, Duration)],
         evidence: CallEvidence,
     ) {
-        let CallEvidence { recorded, accepted, sample, messages } = evidence;
+        let CallEvidence { recorded, accepted, sample } = evidence;
         let class = ResultClass::from(outcome);
         let label = class.label();
         let mut g = self.inner.lock().unwrap();
@@ -339,9 +339,6 @@ impl Reporter {
             let at_ms = self.ms_since_start(Instant::now());
             g.live.note_failure(at_ms, &key, page);
         }
-        if let Some(messages) = messages {
-            g.ladders.entry(scenario).or_default().fold(messages, &class);
-        }
     }
 
     /// Fold the measured SIP round trips of one finished `scenario` call into
@@ -373,6 +370,23 @@ impl Reporter {
     pub fn declare_scenarios(&self, scenarios: impl IntoIterator<Item = ScenarioId>) {
         let mut g = self.inner.lock().unwrap();
         g.declared.extend(scenarios);
+    }
+
+    /// Fold one finished call's messages into its scenario's ladder.
+    pub fn record_messages(
+        &self,
+        scenario: ScenarioId,
+        messages: crate::mux::CallMessages,
+        outcome: &CallOutcome,
+    ) {
+        let mut g = self.inner.lock().unwrap();
+        g.ladders.entry(scenario).or_default().fold(messages, outcome);
+    }
+
+    /// The run configured the retransmit engine for `scenario`, or not.
+    pub fn declare_retransmit(&self, scenario: ScenarioId, engine: bool) {
+        let mut g = self.inner.lock().unwrap();
+        g.ladders.entry(scenario).or_insert_with(|| ladder::LadderAgg::new(engine)).engine = engine;
     }
 
     /// Name the load stream every series carries (`main` until set).

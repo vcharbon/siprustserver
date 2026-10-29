@@ -4,7 +4,7 @@
 use e2e_model::LegSpec;
 use scenario_harness::{Agent, AgentBinder};
 
-use super::{MuxTransport, CALLER};
+use super::MuxTransport;
 use crate::class::CallOutcome;
 use crate::mux::{labelled_prefix_leg_picker_defaulting, CallRouting};
 
@@ -87,3 +87,10 @@ pub(super) fn bind_refusal(e: &sip_net::BindError) -> CallOutcome {
         _ => CallOutcome::Panic(format!("agent bind refused: {e}")),
     }
 }
+
+/// The caller agent's name: the agent that originates every call.
+pub(crate) const CALLER: &str = "alice";
+
+/// How many numbers a from-user call draws from its case's pool before it is
+/// rejected for contention (every draw held or cooling).
+pub(super) const KEY_DRAWS: usize = 8;

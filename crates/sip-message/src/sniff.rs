@@ -1,18 +1,18 @@
-//! Lenient raw-datagram scanners: extract one field from an unparsed SIP datagram without a
-//! full parse. For hot paths (demux, dedup, metrics labelling) that must stay cheap and
-//! tolerate malformed input by returning `None`/empty rather than erroring.
-//!
-//! This module is the ONLY sanctioned home for raw SIP header extraction — never re-implement
-//! these scanners in another crate. If a scanner you need is missing, add it here. For
-//! anything richer than single-field extraction, use the real parser ([`crate::parser`]).
+//! Lenient raw-datagram scanners: extract fields from an unparsed SIP datagram without a full
+//! parse, for hot paths (demux, dedup, metrics labelling) that must stay cheap and tolerate
+//! malformed input by returning `None`/empty rather than erroring. This module is the ONLY
+//! sanctioned home for raw SIP header extraction: never re-implement these scanners in another
+//! crate; add a missing one here. For anything richer, use the real parser ([`crate::parser`]).
 //! Strict, allocation-free pre-parse *classifiers* (overload brake, dispatcher fast-path) live
 //! in [`crate::preparse`] and its sibling modules.
 
 mod except;
+mod identity;
 mod uri_facts;
 mod via_hops;
 mod via_stamp;
 pub use except::{equal_except, header_row_spans, line_at, Except};
+pub use identity::{identity, Identity};
 use std::borrow::Cow;
 pub use uri_facts::UriFacts;
 pub use via_hops::{bottom_via, via_rport, OriginVia, ViaRport};

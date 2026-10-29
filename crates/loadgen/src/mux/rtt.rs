@@ -8,7 +8,7 @@
 //!   INVITE's final is not measured: it holds the callee's ring and answer.
 //! - UAS: a 2xx to an INVITE, first transmission, to the ACK of that CSeq.
 //!
-//! A request is matched by Call-ID + CSeq number + CSeq method; an ACK, which
+//! A request is matched by Call-ID (hashed) + CSeq number + CSeq method; an ACK, which
 //! has no response, is not tracked. State is per endpoint, bounded by
 //! [`MAX_PENDING`] open exchanges per direction, and dies with the endpoint.
 
@@ -17,9 +17,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sip_message::method::Method;
+use sip_message::sniff::Identity;
 use tokio::time::Instant;
-
-use super::sniffed::Sniffed;
 
 /// One measured exchange: the bounded `exchange` label of
 /// `loadgen_rtt_seconds`.
@@ -155,10 +154,18 @@ struct Pending {
 /// One endpoint's open exchanges.
 #[derive(Default)]
 struct RttState {
-    /// Requests sent, by (Call-ID, CSeq number, CSeq method).
-    requests: HashMap<(String, u32, Method), Pending>,
-    /// 2xx to an INVITE sent and not yet ACKed, by (Call-ID, CSeq number).
-    answers: HashMap<(String, u32), Instant>,
+    /// Requests sent, by (Call-ID hash, CSeq number, CSeq method).
+    requests: HashMap<(u64, u32, Method), Pending>,
+    /// 2xx to an INVITE sent and not yet ACKed, by (Call-ID hash, CSeq number).
+    answers: HashMap<(u64, u32), Instant>,
+}
+
+/// A Call-ID as a map key: hashed, so a datagram copies none of it.
+fn cid_key(call_id: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    call_id.hash(&mut h);
+    h.finish()
 }
 
 /// One endpoint's round-trip tracker: fed every datagram the endpoint sends
@@ -176,19 +183,19 @@ impl RttTracker {
 
     /// A datagram this endpoint sends at `now`: a request (not an ACK) or a
     /// 2xx to an INVITE opens its exchange, unless it is already open.
-    pub(super) fn on_outbound(&self, sniffed: &Sniffed, now: Instant) {
-        let Some(cid) = sniffed.call_id.clone() else { return };
-        let Some(cseq) = sniffed.cseq else { return };
+    pub(super) fn on_outbound(&self, id: &Identity<'_>, now: Instant) {
+        let Some(cid) = id.call_id.map(cid_key) else { return };
+        let Some(cseq) = id.cseq else { return };
         let mut g = self.state.lock().unwrap();
-        match sniffed.status {
+        match id.status {
             Some(status) => {
-                let invite = sniffed.cseq_method.as_deref() == Some("INVITE");
+                let invite = id.cseq_method == Some("INVITE");
                 if invite && (200..300).contains(&status) && g.answers.len() < MAX_PENDING {
                     g.answers.entry((cid, cseq)).or_insert(now);
                 }
             }
             None => {
-                let Some(method) = sniffed.method.clone().map(Method::from) else { return };
+                let Some(method) = id.method.map(Method::from) else { return };
                 if method == Method::Ack || g.requests.len() >= MAX_PENDING {
                     return;
                 }
@@ -203,19 +210,19 @@ impl RttTracker {
 
     /// A datagram delivered to this endpoint at `now`: a response to one of
     /// its open requests, or the ACK of one of its open 2xx.
-    pub(super) fn on_inbound(&self, sniffed: &Sniffed, now: Instant) {
-        let Some(cid) = sniffed.call_id.clone() else { return };
-        let Some(cseq) = sniffed.cseq else { return };
+    pub(super) fn on_inbound(&self, id: &Identity<'_>, now: Instant) {
+        let Some(cid) = id.call_id.map(cid_key) else { return };
+        let Some(cseq) = id.cseq else { return };
         let done = {
             let mut g = self.state.lock().unwrap();
-            match sniffed.status {
+            match id.status {
                 Some(status) => {
-                    let Some(method) = sniffed.cseq_method.clone().map(Method::from) else {
+                    let Some(method) = id.cseq_method.map(Method::from) else {
                         return;
                     };
                     response_rtt(&mut g, (cid, cseq, method), status, now)
                 }
-                None => match sniffed.method.clone().map(Method::from) {
+                None => match id.method.map(Method::from) {
                     Some(Method::Ack) => g
                         .answers
                         .remove(&(cid, cseq))
@@ -234,7 +241,7 @@ impl RttTracker {
 /// final closes the request.
 fn response_rtt(
     g: &mut RttState,
-    key: (String, u32, Method),
+    key: (u64, u32, Method),
     status: u16,
     now: Instant,
 ) -> Option<(Exchange, Duration)> {
@@ -265,6 +272,7 @@ fn response_rtt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sip_message::sniff::identity;
 
     type Seen = Arc<Mutex<Vec<(Exchange, Duration)>>>;
 
@@ -274,22 +282,20 @@ mod tests {
         (RttTracker::new(Arc::new(move |e, d| sink.lock().unwrap().push((e, d)))), seen)
     }
 
-    fn req(method: &str, cseq: u32, cid: &str) -> Sniffed {
-        Sniffed::of(&format!(
+    fn req(method: &str, cseq: u32, cid: &str) -> Vec<u8> {
+        format!(
             "{method} sip:bob@192.0.2.2 SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK{cseq}\r\n\
              Call-ID: {cid}\r\nCSeq: {cseq} {method}\r\nContent-Length: 0\r\n\r\n"
         )
-        .into_bytes())
+        .into_bytes()
     }
 
-    fn resp(status: u16, method: &str, cseq: u32, cid: &str) -> Sniffed {
-        Sniffed::of(
-            &format!(
-                "SIP/2.0 {status} Reason\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK{cseq}\r\n\
+    fn resp(status: u16, method: &str, cseq: u32, cid: &str) -> Vec<u8> {
+        format!(
+            "SIP/2.0 {status} Reason\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK{cseq}\r\n\
              Call-ID: {cid}\r\nCSeq: {cseq} {method}\r\nContent-Length: 0\r\n\r\n"
-            )
-            .into_bytes(),
         )
+        .into_bytes()
     }
 
     fn ms(n: u64) -> Duration {
@@ -303,9 +309,9 @@ mod tests {
     fn the_first_transmission_starts_the_clock() {
         let (t, seen) = tracker();
         let t0 = Instant::now();
-        t.on_outbound(&req("INVITE", 1, "a"), t0);
-        t.on_outbound(&req("INVITE", 1, "a"), t0 + ms(500));
-        t.on_inbound(&resp(100, "INVITE", 1, "a"), t0 + ms(600));
+        t.on_outbound(&identity(&req("INVITE", 1, "a")), t0);
+        t.on_outbound(&identity(&req("INVITE", 1, "a")), t0 + ms(500));
+        t.on_inbound(&identity(&resp(100, "INVITE", 1, "a")), t0 + ms(600));
         assert_eq!(*seen.lock().unwrap(), vec![(Exchange::Invite100, ms(600))]);
     }
 
@@ -316,14 +322,14 @@ mod tests {
     fn an_invite_times_its_first_100_and_first_18x_only() {
         let (t, seen) = tracker();
         let t0 = Instant::now();
-        t.on_outbound(&req("INVITE", 1, "a"), t0);
-        t.on_inbound(&resp(100, "INVITE", 1, "a"), t0 + ms(2));
-        t.on_inbound(&resp(100, "INVITE", 1, "a"), t0 + ms(3));
-        t.on_inbound(&resp(180, "INVITE", 1, "a"), t0 + ms(4));
-        t.on_inbound(&resp(183, "INVITE", 1, "a"), t0 + ms(5));
-        t.on_inbound(&resp(200, "INVITE", 1, "a"), t0 + ms(400));
-        t.on_inbound(&resp(180, "INVITE", 1, "a"), t0 + ms(401));
-        t.on_outbound(&req("ACK", 1, "a"), t0 + ms(402));
+        t.on_outbound(&identity(&req("INVITE", 1, "a")), t0);
+        t.on_inbound(&identity(&resp(100, "INVITE", 1, "a")), t0 + ms(2));
+        t.on_inbound(&identity(&resp(100, "INVITE", 1, "a")), t0 + ms(3));
+        t.on_inbound(&identity(&resp(180, "INVITE", 1, "a")), t0 + ms(4));
+        t.on_inbound(&identity(&resp(183, "INVITE", 1, "a")), t0 + ms(5));
+        t.on_inbound(&identity(&resp(200, "INVITE", 1, "a")), t0 + ms(400));
+        t.on_inbound(&identity(&resp(180, "INVITE", 1, "a")), t0 + ms(401));
+        t.on_outbound(&identity(&req("ACK", 1, "a")), t0 + ms(402));
         assert_eq!(
             *seen.lock().unwrap(),
             vec![(Exchange::Invite100, ms(2)), (Exchange::Invite18x, ms(4))]
@@ -339,13 +345,13 @@ mod tests {
     fn a_non_invite_request_times_its_final() {
         let (t, seen) = tracker();
         let t0 = Instant::now();
-        t.on_outbound(&req("INVITE", 1, "a"), t0);
-        t.on_outbound(&req("CANCEL", 1, "a"), t0 + ms(10));
-        t.on_inbound(&resp(200, "CANCEL", 1, "a"), t0 + ms(13));
-        t.on_inbound(&resp(487, "INVITE", 1, "a"), t0 + ms(14));
-        t.on_outbound(&req("BYE", 2, "a"), t0 + ms(20));
-        t.on_inbound(&resp(100, "BYE", 2, "a"), t0 + ms(21));
-        t.on_inbound(&resp(200, "BYE", 2, "a"), t0 + ms(24));
+        t.on_outbound(&identity(&req("INVITE", 1, "a")), t0);
+        t.on_outbound(&identity(&req("CANCEL", 1, "a")), t0 + ms(10));
+        t.on_inbound(&identity(&resp(200, "CANCEL", 1, "a")), t0 + ms(13));
+        t.on_inbound(&identity(&resp(487, "INVITE", 1, "a")), t0 + ms(14));
+        t.on_outbound(&identity(&req("BYE", 2, "a")), t0 + ms(20));
+        t.on_inbound(&identity(&resp(100, "BYE", 2, "a")), t0 + ms(21));
+        t.on_inbound(&identity(&resp(200, "BYE", 2, "a")), t0 + ms(24));
         assert_eq!(
             *seen.lock().unwrap(),
             vec![(Exchange::CancelFinal, ms(3)), (Exchange::ByeFinal, ms(4))]
@@ -359,12 +365,12 @@ mod tests {
     fn a_2xx_is_timed_to_its_ack() {
         let (t, seen) = tracker();
         let t0 = Instant::now();
-        t.on_inbound(&req("INVITE", 7, "b"), t0);
-        t.on_outbound(&resp(180, "INVITE", 7, "b"), t0 + ms(1));
-        t.on_outbound(&resp(200, "INVITE", 7, "b"), t0 + ms(100));
-        t.on_outbound(&resp(200, "INVITE", 7, "b"), t0 + ms(600));
-        t.on_inbound(&req("ACK", 7, "b"), t0 + ms(700));
-        t.on_inbound(&req("ACK", 7, "b"), t0 + ms(701));
+        t.on_inbound(&identity(&req("INVITE", 7, "b")), t0);
+        t.on_outbound(&identity(&resp(180, "INVITE", 7, "b")), t0 + ms(1));
+        t.on_outbound(&identity(&resp(200, "INVITE", 7, "b")), t0 + ms(100));
+        t.on_outbound(&identity(&resp(200, "INVITE", 7, "b")), t0 + ms(600));
+        t.on_inbound(&identity(&req("ACK", 7, "b")), t0 + ms(700));
+        t.on_inbound(&identity(&req("ACK", 7, "b")), t0 + ms(701));
         assert_eq!(*seen.lock().unwrap(), vec![(Exchange::TwoXxAck, ms(600))]);
     }
 
@@ -375,14 +381,14 @@ mod tests {
     fn an_unrelated_cseq_completes_nothing() {
         let (t, seen) = tracker();
         let t0 = Instant::now();
-        t.on_outbound(&req("INVITE", 1, "a"), t0);
-        t.on_outbound(&req("BYE", 2, "a"), t0);
-        t.on_outbound(&resp(200, "INVITE", 3, "a"), t0);
-        t.on_inbound(&resp(100, "INVITE", 9, "a"), t0 + ms(1));
-        t.on_inbound(&resp(180, "INVITE", 1, "other"), t0 + ms(1));
-        t.on_inbound(&resp(200, "OPTIONS", 2, "a"), t0 + ms(1));
-        t.on_inbound(&req("ACK", 4, "a"), t0 + ms(1));
-        t.on_inbound(&req("BYE", 3, "a"), t0 + ms(1));
+        t.on_outbound(&identity(&req("INVITE", 1, "a")), t0);
+        t.on_outbound(&identity(&req("BYE", 2, "a")), t0);
+        t.on_outbound(&identity(&resp(200, "INVITE", 3, "a")), t0);
+        t.on_inbound(&identity(&resp(100, "INVITE", 9, "a")), t0 + ms(1));
+        t.on_inbound(&identity(&resp(180, "INVITE", 1, "other")), t0 + ms(1));
+        t.on_inbound(&identity(&resp(200, "OPTIONS", 2, "a")), t0 + ms(1));
+        t.on_inbound(&identity(&req("ACK", 4, "a")), t0 + ms(1));
+        t.on_inbound(&identity(&req("BYE", 3, "a")), t0 + ms(1));
         assert!(seen.lock().unwrap().is_empty(), "{:?}", seen.lock().unwrap());
     }
 
@@ -394,10 +400,10 @@ mod tests {
         let (t, seen) = tracker();
         let t0 = Instant::now();
         for n in 0..(MAX_PENDING as u32 + 8) {
-            t.on_outbound(&req("OPTIONS", n, "a"), t0);
+            t.on_outbound(&identity(&req("OPTIONS", n, "a")), t0);
         }
         assert_eq!(t.state.lock().unwrap().requests.len(), MAX_PENDING);
-        t.on_inbound(&resp(200, "OPTIONS", MAX_PENDING as u32 + 1, "a"), t0 + ms(1));
+        t.on_inbound(&identity(&resp(200, "OPTIONS", MAX_PENDING as u32 + 1, "a")), t0 + ms(1));
         assert!(seen.lock().unwrap().is_empty());
     }
 }
