@@ -61,6 +61,7 @@ impl Puller {
                 on_request: false,
                 on_answer: false,
                 called_out: false,
+                resent: false,
                 released: None,
                 backed: false,
             })

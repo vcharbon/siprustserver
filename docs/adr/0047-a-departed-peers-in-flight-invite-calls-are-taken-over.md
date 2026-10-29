@@ -81,7 +81,10 @@ reads the bodies one at a time, yielding as it goes, and for every call that nam
 INVITE transaction in flight — exactly the calls a materialisation would seed — or an
 in-dialog request in flight but the keepalive (a relay, a request of its own or one it
 holds), or awaits the answer to a request it sent off its turn, whose task died with the
-peer (ADR-0039 decision 5), takes the call lock and materialises the call as a takeover: its timers re-arm at their
+peer (ADR-0039 decision 5), takes the call lock and materialises the call as a takeover —
+on a dead verdict, a call whose only work is such a request once that request is due
+(its answer deadline, a REFER authorization's send time plus the decision deadline and
+its margin, an in-dialog request's Timer F), re-checked on this node then: its timers re-arm at their
 replicated deadlines, its INVITE transactions are rebuilt, the self-release watch is
 armed. A call already live here is left as it is. A call with nothing in flight is
 not touched: it stays reactive, for the reason ADR-0014 D1 removed the eager takeover
@@ -298,10 +301,14 @@ the call has one CDR.
   CANCEL cell of `undecided_call_settled_on_departure.rs`), and a restarted node
   answers its own undecided calls on its reclaim (the restart cell there).
 - **A primary read dead while it lives.** A flap or a partition between the proxy and
-  the primary alone: the backup takes over the primary's in-flight calls while the
-  primary serves them, so the callee may get the dialled INVITE twice; an undecided
-  call is left to its primary, which decides and answers it alone
-  (`cancel_and_retransmission_follow_a_live_hop.rs`, the cells that tell the verdict).
+  the primary alone: the backup takes over the primary's calls with an INVITE or a
+  teardown in flight while the primary serves them, so the callee may get the dialled
+  INVITE twice; an undecided call is left to its primary, which decides and answers it
+  alone; a call whose only work is a request in flight — an outside answer it awaits,
+  an in-dialog request — waits for those requests' deadlines, by which the live primary
+  took its answers and its write took them off the record, so nothing is asked or
+  relayed twice (`cancel_and_retransmission_follow_a_live_hop.rs`, the cells that tell
+  the verdict).
   `live_primary_read_dead.rs` pins a flap: the second
   verdict takes over afresh the re-INVITE round a stood-down copy left open, and the
   callee absorbs the re-sent INVITE.

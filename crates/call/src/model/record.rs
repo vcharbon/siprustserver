@@ -212,7 +212,8 @@ pub struct Call {
     pub leg_space: super::leg_space::LegSpace,
     /// The received non-INVITE requests answered with a final whose server
     /// transaction is still Completed, oldest first: what a copy of one draws
-    /// again (RFC 3261 §17.2.2).
+    /// again (RFC 3261 §17.2.2), bounded by the messages the call may take over
+    /// Timer J (`max_messages_per_call`).
     #[serde(default)]
     pub answered: Vec<super::answered_request::AnsweredRequest>,
     /// The requests sent off the call's turn whose answers it awaits, in

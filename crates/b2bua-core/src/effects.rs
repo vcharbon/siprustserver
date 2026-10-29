@@ -284,6 +284,9 @@ pub struct HandlerEffects {
     /// turn, or on its deadline's expiry (ADR-0039). Turn-local, never
     /// replicated.
     pub took_answer: bool,
+    /// The turn sent again requests another node had sent off the call's
+    /// turn. Turn-local, never replicated.
+    pub resent: bool,
 }
 
 impl HandlerEffects {
@@ -297,6 +300,7 @@ impl HandlerEffects {
     pub fn extend(&mut self, other: HandlerEffects) {
         self.quiet = self.quiet.or(other.quiet);
         self.took_answer |= other.took_answer;
+        self.resent |= other.resent;
         self.critical.extend(other.critical);
         self.outbound.extend(other.outbound);
         self.soft.extend(other.soft);

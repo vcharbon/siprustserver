@@ -117,6 +117,8 @@ struct Inner {
     calls: BTreeMap<String, Vec<Turn>>,
     order: Vec<String>,
     armed: Option<Armed>,
+    /// A node sent again requests another had sent off a call's turn.
+    resent: bool,
 }
 
 /// An arm on the first call that takes a turn.
@@ -151,6 +153,12 @@ impl TurnPoints {
         Some((call_ref, turns))
     }
 
+    /// Whether a node sent again, this run, requests another node had sent
+    /// off a call's turn (ADR-0039 decision 5).
+    pub fn resent(&self) -> bool {
+        self.lock().resent
+    }
+
     /// Arm `at` on the first call that takes a turn; the returned receiver
     /// yields the turn held there once it is reached. Replaces any arm.
     pub fn arm(&self, at: TurnAt) -> oneshot::Receiver<HeldTurn> {
@@ -167,6 +175,7 @@ impl TurnPoints {
 impl Inner {
     /// Record `mark` and say which turn of its call it stands at.
     fn record(&mut self, mark: &TurnMark<'_>, applied_held: bool) -> Option<usize> {
+        self.resent |= mark.resent;
         let primary = call::call_ref_primary(mark.call_ref)?;
         let at_primary = primary == mark.node;
         match (mark.point, at_primary) {

@@ -213,6 +213,11 @@ impl CallLimiterState {
         &self.held
     }
 
+    /// The change number the target was asked under.
+    pub fn target_change(&self) -> u64 {
+        self.target_change
+    }
+
     /// The set the call's latest admit asked for; after a refused or
     /// superseded change, the held set.
     pub fn target(&self) -> &[LimiterEntry] {

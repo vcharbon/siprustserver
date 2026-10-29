@@ -329,13 +329,6 @@ async fn reaper_verdict_gate(
     Gate::Pass
 }
 
-/// The live call for an in-dialog event: resident (a parked one armed), or
-/// materialised as an acting-backup takeover (`bak:`), or — for a ref this
-/// node is primary for — as an on-demand reclaim (`pri:`), the in-dialog
-/// request that races the bulk sweep on a rebooted primary, written as every
-/// reclaim is (ADR-0047 D7). `None` = a genuine orphan, or a deferred
-/// terminal this call just discharged through the reclaim funnel (CDR written,
-/// delete propagated); the request then draws the orphan 481 (ADR-0020 X3).
 /// Whether this node's store holds a body of `call_ref`, as its backup or as
 /// its primary: the call lives on, here or elsewhere.
 async fn holds_a_record(ctx: &RouterCtx, call_ref: &str) -> bool {
@@ -343,6 +336,13 @@ async fn holds_a_record(ctx: &RouterCtx, call_ref: &str) -> bool {
         || ctx.state.peek_reclaimable(call_ref).await.is_ok()
 }
 
+/// The live call for an in-dialog event: resident (a parked one armed), or
+/// materialised as an acting-backup takeover (`bak:`), or — for a ref this
+/// node is primary for — as an on-demand reclaim (`pri:`), the in-dialog
+/// request that races the bulk sweep on a rebooted primary, written as every
+/// reclaim is (ADR-0047 D7). `None` = a genuine orphan, or a deferred
+/// terminal this call just discharged through the reclaim funnel (CDR written,
+/// delete propagated); the request then draws the orphan 481 (ADR-0020 X3).
 async fn resident_or_materialised(ctx: &Arc<RouterCtx>, call_ref: &str) -> Option<Call> {
     let first = materialise(ctx, call_ref, Origin::Takeover).await;
     let disposition = match first {

@@ -29,7 +29,7 @@ pub fn land(result: HandlerResult, landing: &Landing<'_>, now_ms: i64) -> Handle
     let result = crate::answer_deadline::arm(result, &landing.budgets, now_ms);
     // ... and is itself on that record, which a node serving the call sends
     // again from.
-    let result = crate::off_turn::record(result);
+    let result = crate::off_turn::record(result, now_ms);
     // A counted live call always has its refresh armed within one refresh
     // period of the learnt lease, before the record lands: the one arming of
     // the refresh, for the admitting turn, the refresh turn and every other.

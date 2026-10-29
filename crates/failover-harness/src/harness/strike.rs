@@ -110,14 +110,24 @@ impl FailoverHarness {
     }
 
     /// The rows that fired this run although its measured tier keeps them
-    /// closed, rendered one per line, or `None`.
+    /// closed, or that follow a re-sent request in a run where no node sent
+    /// one again, rendered one per line, or `None`.
     pub(super) fn tier_gate_failure(&self) -> Option<String> {
         let tier = self.tier()?;
+        let resent = self.turn_points.resent();
         let closed: Vec<String> = self
             .fired_rows()
             .into_iter()
-            .filter(|f| !tier.opens(f.row))
-            .map(|f| format!("  • {} (closed in the {} tier): {}", f.row.id, tier.label(), f.what))
+            .filter_map(|f| {
+                let why = if !tier.opens(f.row) {
+                    format!("closed in the {} tier", tier.label())
+                } else if f.row.needs_resend() && !resent {
+                    "closed: no node sent a request again".to_string()
+                } else {
+                    return None;
+                };
+                Some(format!("  • {} ({why}): {}", f.row.id, f.what))
+            })
             .collect();
         (!closed.is_empty()).then(|| {
             format!(

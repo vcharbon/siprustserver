@@ -316,3 +316,157 @@ async fn an_initial_invite_retransmitted_after_an_unannounced_kill_draws_the_rep
     settle_to_one_cdr(&fh, &[&alice, &bob], &[&w_b1, &w_b2], &call_ref).await;
     drop(proxy);
 }
+
+/// Routes to bob with a callback context, subscribed to its maximum
+/// duration's release event; answers the release consult after
+/// [`RELEASE_DELAY`] with the local teardown.
+struct SlowRelease;
+
+/// The call's maximum duration, which raises the release consult.
+const MAX_DURATION_MS: i64 = 2_000;
+/// How long the release consult takes: past the misread.
+const RELEASE_DELAY: Duration = Duration::from_secs(1);
+
+#[async_trait::async_trait]
+impl b2bua::decision::CallDecisionEngine for SlowRelease {
+    async fn new_call(
+        &self,
+        _req: b2bua::decision::NewCallRequest,
+    ) -> Result<b2bua::decision::NewCallResponse, b2bua::decision::CallDecisionError> {
+        let mut route = b2bua::decision::test_adapter::route_to("127.0.0.1", 5070);
+        route.new_ruri = None;
+        route.callback_context = Some("ctx".into());
+        route.features.platform.max_duration_ms = MAX_DURATION_MS;
+        route.subscriptions = vec![call::ReleaseEventKind::MaxCallDuration];
+        Ok(b2bua::decision::NewCallResponse::Route(route))
+    }
+
+    async fn call_failure(
+        &self,
+        _req: b2bua::decision::CallFailureRequest,
+    ) -> Result<b2bua::decision::CallFailureResponse, b2bua::decision::CallDecisionError> {
+        Ok(b2bua::decision::CallFailureResponse::Relay { label: None })
+    }
+
+    async fn call_refer(
+        &self,
+        _req: b2bua::decision::CallReferRequest,
+    ) -> Result<b2bua::decision::CallReferResponse, b2bua::decision::CallDecisionError> {
+        Err(b2bua::decision::CallDecisionError::Unavailable("no transfer here".into()))
+    }
+
+    async fn call_release(
+        &self,
+        _req: b2bua::decision::CallReleaseRequest,
+    ) -> Result<b2bua::decision::CallReleaseResponse, b2bua::decision::CallDecisionError> {
+        tokio::time::sleep(RELEASE_DELAY).await;
+        Ok(b2bua::decision::CallReleaseResponse::Release {
+            label: None,
+            service_ext: Default::default(),
+        })
+    }
+}
+
+/// The proxy reads the live primary dead, and tells the backup, while the
+/// primary awaits its release consult's answer on the established call; it
+/// reads it alive again 200 ms later. The backup takes nothing over before
+/// the consult's deadline, by which the primary took the answer and ended the
+/// call: one teardown, nothing asked twice, one CDR (ADR-0047 D2).
+#[tokio::test(start_paused = true)]
+async fn a_told_misread_while_the_primary_awaits_an_outside_answer_asks_nothing_twice() {
+    let name = "told-misread-awaiting-an-outside-answer";
+    let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let (proxy, w_b1, w_b2) = bring_up_deciding(&mut fh, std::sync::Arc::new(SlowRelease)).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let (pri_ord, _bak) = worker_ordinals(uas.request());
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let _dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    // The maximum duration fires and its consult is in flight.
+    fh.advance(Duration::from_millis(u64::try_from(MAX_DURATION_MS).unwrap() + 200)).await;
+    let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
+    let hydrated = survivor.metrics().repl_takeover_hydrated_total();
+    proxy.set_health(&pri_ord, WorkerHealth::Dead);
+    fh.advance(Duration::from_millis(200)).await;
+    proxy.set_health(&pri_ord, WorkerHealth::Alive);
+
+    alice.receive_absorbing("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
+    bob.receive_absorbing("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
+    fh.advance(Duration::from_secs(30)).await;
+    assert_eq!(
+        survivor.metrics().repl_takeover_hydrated_total(),
+        hydrated,
+        "the backup took nothing over, past the consult's deadline too"
+    );
+    assert_eq!(survivor.metrics().dead_verdicts_taken_total(), 1);
+    let drained = fh.settle_terminal(async || w_b1.memory_clean() && w_b2.memory_clean()).await;
+    assert!(drained, "the cluster drains the call");
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    let cdrs: usize = [&w_b1, &w_b2].iter().map(|n| n.cdr_records().len()).sum();
+    assert_eq!(cdrs, 1, "one CDR");
+    fh.assert_sip_rfc_clean(name);
+    drop(proxy);
+}
+
+/// The proxy reads the live primary dead, and tells the backup, while the
+/// callee holds its answer to the caller's INFO the primary relayed; it reads
+/// it alive again 200 ms later. The backup takes nothing over before the
+/// relay's Timer F, by which the primary relayed the callee's 200: one INFO
+/// to the callee, one 200 to the caller, one CDR (ADR-0047 D2).
+#[tokio::test(start_paused = true)]
+async fn a_told_misread_while_the_primary_relays_an_in_dialog_request_relays_it_once() {
+    let name = "told-misread-relaying-an-info";
+    let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
+    let (proxy, w_b1, w_b2) = bring_up_deciding(&mut fh, route).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let (pri_ord, _bak) = worker_ordinals(uas.request());
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    fh.advance(REPLICATE).await;
+
+    let mut info = dialog.request(sip_message::generators::InDialogMethod::Info, None).await;
+    let mut relayed = bob.receive("INFO").await;
+    let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
+    let hydrated = survivor.metrics().repl_takeover_hydrated_total();
+    proxy.set_health(&pri_ord, WorkerHealth::Dead);
+    fh.advance(Duration::from_millis(200)).await;
+    proxy.set_health(&pri_ord, WorkerHealth::Alive);
+    fh.advance(Duration::from_millis(100)).await;
+    relayed.respond(200, "OK").await;
+    info.expect(200).await;
+
+    fh.advance(Duration::from_secs(40)).await;
+    let infos: std::collections::HashSet<_> = fh
+        .sip_entries()
+        .into_iter()
+        .filter(|e| e.to == bob.addr() && e.opens_with("INFO "))
+        .map(|e| e.raw)
+        .collect();
+    assert_eq!(infos.len(), 1, "the callee is sent one INFO, its repeats the primary's own");
+    assert_eq!(
+        survivor.metrics().repl_takeover_hydrated_total(),
+        hydrated,
+        "the backup took nothing over, past the relay's Timer F too"
+    );
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
+    let drained = fh.settle_terminal(async || w_b1.memory_clean() && w_b2.memory_clean()).await;
+    assert!(drained, "the cluster drains the call");
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    let cdrs: usize = [&w_b1, &w_b2].iter().map(|n| n.cdr_records().len()).sum();
+    assert_eq!(cdrs, 1, "one CDR");
+    fh.assert_sip_rfc_clean(name);
+    drop(proxy);
+}

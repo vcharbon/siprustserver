@@ -197,6 +197,12 @@ pub struct Row {
 }
 
 impl Row {
+    /// Whether the row accepts only what follows a request a node sent again
+    /// (`W-stale-resend…`): it stays closed in a run where none was.
+    pub fn needs_resend(&self) -> bool {
+        table::RESEND_ROWS.contains(&self.id)
+    }
+
     /// Whether `strike` opens this row in a cell at `level`, its tier not yet
     /// measured.
     pub fn opened_by(&self, strike: Strike, level: SyncLevel) -> bool {

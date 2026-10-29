@@ -288,7 +288,8 @@ pub(super) fn answered_seeds(call: &Call, now_ms: i64) -> Vec<TxnSeed> {
             let response = parse_emitted_response(&a.response)?;
             let (_, (host, port)) = a.response.wire();
             let dest = sip_net::ip_socket_addr(host, port)?;
-            Some(TxnSeed::ServerNonInviteAnswered { response, dest, leg_id: None })
+            let bound_ms = u64::try_from(a.until_ms.saturating_sub(now_ms)).ok()?;
+            Some(TxnSeed::ServerNonInviteAnswered { response, dest, bound_ms, leg_id: None })
         })
         .collect()
 }

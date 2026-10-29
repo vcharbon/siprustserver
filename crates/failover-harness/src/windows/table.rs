@@ -32,6 +32,13 @@ const PRIMARY_KILLS: &[Incident] = &[PrimaryKilled, PrimaryKilledUnannounced, Pr
 /// the cap, and a stall past the cap then a kill.
 const STALE_COPY: &[Incident] =
     &[PrimaryKilled, PrimaryKilledUnannounced, PrimaryRebooted, StalledKilled];
+/// The rows that accept only what follows a request a node sent again.
+pub(super) const RESEND_ROWS: &[&str] = &[
+    "W-stale-resend",
+    "W-stale-resend-cseq",
+    "W-stale-resend-cseq-reuse",
+    "W-stale-resend-reinvite",
+];
 /// The re-INVITE rule of RFC 3261 §14.1: no re-INVITE while one is in progress.
 const RULE_REINVITE_IN_PROGRESS: &str = "no-re-invite-while-invite-in-progress";
 /// The rows of every incident but a split.

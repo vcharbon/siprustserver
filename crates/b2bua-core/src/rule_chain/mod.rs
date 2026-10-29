@@ -128,11 +128,11 @@ pub fn rule_chain_turn(
             (&lost_answer, true)
         }
         Screened::Unawaited => (event, false),
-        Screened::Awaited => {
-            ladder_fx.took_answer = true;
+        Screened::Awaited | Screened::Other => {
+            // A REFER's authorization answers with no deadline of its own.
+            ladder_fx.took_answer = crate::off_turn::is_answer(event);
             (event, true)
         }
-        Screened::Other => (event, true),
     };
     if let Some(obligation) = fired_obligation(event, &TimerType::Rung) {
         let before = call.clone();

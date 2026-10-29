@@ -94,10 +94,14 @@ second request while the first is awaited merges their deadlines.
 - A service needs no watchdog of its own for a request's answer; every
   waiting state it has on one is bounded by the request's budget plus the
   margin, on whichever node serves the call.
-- A takeover copy made while the primary still lives (an LB misroute, a
-  primary read dead while it lives) sends the awaited requests again and acts
-  on its own answers while the primary acts on its; the deadline still fires
-  wherever the call is served, bounding the request as last sent.
+- A primary read dead while it lives keeps the requests it awaits: the dead
+  verdict takes such a call over only once they are due, by which the primary
+  took its answers (ADR-0047 D2), so under `applied` no request is sent twice
+  and no transfer is repeated. A copy that still sends a request again while
+  its primary lives — an LB misroute's message, a record behind the wire under
+  `off` or past the cap — acts on its own answer while the primary acts on its
+  (ADR-0055 §11, `W-stale-resend`); the deadline still fires wherever the call
+  is served, bounding the request as last sent.
 - A release event's consult (`ReleaseAsyncHttp`, the subscribed maximum
   duration) has a deadline of its own (`ReleaseAnswer`), named by the change
   its turn reserved: the decision deadline plus the admit budget of the route

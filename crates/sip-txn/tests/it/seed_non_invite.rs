@@ -138,10 +138,13 @@ async fn a_seeded_server_non_invite_absorbs_copies_until_its_final() {
     assert!(stack.drain_events().is_empty());
 }
 
+/// What is left of a Timer J its final started 10 s before the seed.
+const J_LEFT: u64 = sip_txn::timers::TIMER_J - 10_000;
+
 /// A seeded answered server non-INVITE sends its final once at the seed —
 /// the record may be ahead of the wire — answers each copy of its request
-/// with it and hands none up, and leaves the map at Timer J from the seed
-/// (RFC 3261 §17.2.2).
+/// with it and hands none up, and leaves the map once what was left of its
+/// Timer J ran out (RFC 3261 §17.2.2).
 #[tokio::test(start_paused = true)]
 async fn a_seeded_answered_server_non_invite_repeats_its_final_until_timer_j() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
@@ -151,6 +154,7 @@ async fn a_seeded_answered_server_non_invite_repeats_its_final_until_timer_j() {
     let seed = TxnSeed::ServerNonInviteAnswered {
         response: ok,
         dest: addr(PEER),
+        bound_ms: J_LEFT,
         leg_id: Some("a".into()),
     };
     assert_eq!(stack.txn.seed(CALL_REF, vec![seed]).await.unwrap(), 1);
@@ -162,7 +166,7 @@ async fn a_seeded_answered_server_non_invite_repeats_its_final_until_timer_j() {
     assert_eq!(count_responses(&stack.drain_peer(), 200), 1, "a copy draws the final");
     assert!(stack.drain_events().is_empty(), "and is not handed up");
 
-    elapse_ms(sip_txn::timers::TIMER_J).await;
+    elapse_ms(J_LEFT).await;
     assert_eq!(
         stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(),
         0,
@@ -188,6 +192,7 @@ async fn an_answered_seed_gives_its_final_to_the_copy_that_came_first() {
     let seed = TxnSeed::ServerNonInviteAnswered {
         response: ok,
         dest: addr(PEER),
+        bound_ms: sip_txn::timers::TIMER_J,
         leg_id: Some("a".into()),
     };
     assert_eq!(stack.txn.seed(CALL_REF, vec![seed]).await.unwrap(), 1);
@@ -197,4 +202,20 @@ async fn an_answered_seed_gives_its_final_to_the_copy_that_came_first() {
     elapse_ms(60).await;
     assert_eq!(count_responses(&stack.drain_peer(), 200), 1, "the next copy draws the final");
     assert!(stack.drain_events().is_empty());
+}
+
+/// No non-INVITE server transaction holds a final to an INVITE: such a seed
+/// goes in nowhere.
+#[tokio::test(start_paused = true)]
+async fn an_answered_seed_of_an_invite_final_goes_in_nowhere() {
+    let stack = Stack::build(TRANSIT, 64, 64).await;
+    let (branch, call_id) = ("z9hG4bK-seed-answered-invite", "seed-answered-invite");
+    let ok = parse_response(&response_bytes(200, "OK", "INVITE", branch, call_id, true));
+    let seed = TxnSeed::ServerNonInviteAnswered {
+        response: ok,
+        dest: addr(PEER),
+        bound_ms: J_LEFT,
+        leg_id: None,
+    };
+    assert_eq!(stack.txn.seed(CALL_REF, vec![seed]).await.unwrap(), 0);
 }

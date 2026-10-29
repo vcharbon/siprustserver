@@ -22,25 +22,25 @@ const RELEASE_TOPIC: &str = "call-release-result";
 /// `result` with every request its turn sends off the call's turn on its
 /// record, replacing the same request sent before. A turn that ends the call
 /// awaits nothing.
-pub fn record(mut result: HandlerResult) -> HandlerResult {
+pub fn record(mut result: HandlerResult, now_ms: i64) -> HandlerResult {
     if result.call.state == CallModelState::Terminated {
         result.call.awaited.clear();
         return result;
     }
     for fx in &result.effects.fire_and_forget {
-        let Some(request) = image_of(fx) else { continue };
+        let Some(request) = image_of(fx, now_ms) else { continue };
         result.call.awaited.retain(|r| !r.same_request(&request));
         result.call.awaited.push(request);
     }
     result
 }
 
-/// The record image of `fx`, a request sent off the call's turn; `None` for
-/// an answer the turn re-enters itself.
-fn image_of(fx: &FireAndForgetEffect) -> Option<OffTurnRequest> {
+/// The record image of `fx`, a request sent off the call's turn at
+/// `now_ms`; `None` for an answer the turn re-enters itself.
+fn image_of(fx: &FireAndForgetEffect, now_ms: i64) -> Option<OffTurnRequest> {
     Some(match fx {
         FireAndForgetEffect::ReferAsyncHttp { request, .. } => {
-            OffTurnRequest::Refer { request: request.clone() }
+            OffTurnRequest::Refer { request: request.clone(), sent_at_ms: now_ms }
         }
         FireAndForgetEffect::ServiceHttpRequest {
             correlation_id,
@@ -66,10 +66,11 @@ fn image_of(fx: &FireAndForgetEffect) -> Option<OffTurnRequest> {
         FireAndForgetEffect::ReleaseAsyncHttp { request, limiter, .. } => {
             OffTurnRequest::Release { request: request.clone(), limiter: *limiter }
         }
-        FireAndForgetEffect::LimiterAdmit { correlation_id, entries, .. } => {
+        FireAndForgetEffect::LimiterAdmit { correlation_id, entries, change, .. } => {
             OffTurnRequest::Admit {
                 correlation_id: correlation_id.clone(),
                 entries: entries.clone(),
+                change: *change,
             }
         }
         FireAndForgetEffect::Reenter(_) => return None,

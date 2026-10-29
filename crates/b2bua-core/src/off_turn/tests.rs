@@ -49,9 +49,9 @@ fn a_sent_request_is_awaited_until_its_answer() {
         limiter: ConsultAdmits { first_change: 7, may_hold: true },
         deadline: Some(7),
     };
-    let sent = record(sending(call(), vec![http("a"), http("b"), consult]));
+    let sent = record(sending(call(), vec![http("a"), http("b"), consult]), 0);
     assert_eq!(sent.call.awaited.len(), 3);
-    let again = record(sending(sent.call, vec![http("a")]));
+    let again = record(sending(sent.call, vec![http("a")]), 0);
     assert_eq!(again.call.awaited.len(), 3, "the same request replaces itself");
 
     let mut call = again.call;
@@ -74,7 +74,7 @@ fn a_sent_request_is_awaited_until_its_answer() {
 #[test]
 fn an_ended_call_awaits_nothing() {
     let mut ended = call();
-    ended.awaited.push(OffTurnRequest::Refer { request: serde_json::json!({}) });
+    ended.awaited.push(OffTurnRequest::Refer { request: serde_json::json!({}), sent_at_ms: 0 });
     ended.state = CallModelState::Terminated;
-    assert!(record(sending(ended, vec![http("a")])).call.awaited.is_empty());
+    assert!(record(sending(ended, vec![http("a")]), 0).call.awaited.is_empty());
 }

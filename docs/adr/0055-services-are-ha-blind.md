@@ -655,8 +655,9 @@ the re-anchor deadband of each other.
   - `W-stale-resend`, `W-stale-resend-cseq`, `W-stale-resend-cseq-reuse` and
     `W-stale-resend-reinvite`, a
     kill of the primary or a stall past the cap then a kill, where the copy's
-    record is behind the wire — under `off`, or past the cap (user ruling):
-    the copy sends again a request the call awaited an answer to (ADR-0039
+    record is behind the wire — under `off`, or past the cap (user ruling),
+    in a run where a node sent a request again (a turn mark says so): the
+    copy sends again a request the call awaited an answer to (ADR-0039
     decision 5) though the dead primary had already acted on that answer, and
     acts on its own: its requests into a dialog the dead primary ended, each
     closed by the 481 it draws; a request at a CSeq below one the dead

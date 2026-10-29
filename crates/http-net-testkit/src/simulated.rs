@@ -140,6 +140,8 @@ struct Shared {
     resume: Notify,
     /// Requests started and not yet finished or dropped, keyed by destination.
     in_flight: Mutex<HashMap<SocketAddr, usize>>,
+    /// Requests ever started, keyed by destination.
+    started: Mutex<HashMap<SocketAddr, usize>>,
 }
 
 /// Counts one request to `dst` as in flight until it finishes or its future
@@ -152,6 +154,7 @@ struct InFlight<'a> {
 impl<'a> InFlight<'a> {
     fn start(shared: &'a Shared, dst: SocketAddr) -> Self {
         *shared.in_flight.lock().unwrap().entry(dst).or_default() += 1;
+        *shared.started.lock().unwrap().entry(dst).or_default() += 1;
         Self { shared, dst }
     }
 }
@@ -199,6 +202,7 @@ impl SimulatedHttpNetwork {
                 connect_timeout: ClientSettings::default().connect_timeout,
                 resume: Notify::new(),
                 in_flight: Mutex::new(HashMap::new()),
+                started: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -244,6 +248,12 @@ impl SimulatedHttpNetwork {
     /// detached request still owes.
     pub fn in_flight(&self, dst: SocketAddr) -> usize {
         self.shared.in_flight.lock().unwrap().get(&dst).copied().unwrap_or(0)
+    }
+
+    /// Requests to `dst` started this run, answered or not: each attempt of
+    /// a client's retry counts.
+    pub fn started(&self, dst: SocketAddr) -> usize {
+        self.shared.started.lock().unwrap().get(&dst).copied().unwrap_or(0)
     }
 
     /// What `dst` does with the next request: the script's next step, else

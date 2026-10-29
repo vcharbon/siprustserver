@@ -92,15 +92,21 @@ pub enum TxnSeed {
     ServerNonInvite { request: SipRequest, leg_id: Option<String> },
     /// A server non-INVITE this side answered with a final: `response`, the
     /// final as it left, keyed by its top-Via branch, sent-by and method
-    /// (RFC 3261 §17.2.3). It runs in Completed from the seed for Timer J and
-    /// sends `response` once at the seed toward the transaction's response
+    /// (RFC 3261 §17.2.3). It runs in Completed from the seed for `bound_ms`,
+    /// what is left of the Timer J its final started, and sends `response`
+    /// once at the seed toward the transaction's response
     /// target (§18.2.2; `dest` where that names no IP) — the record may be
     /// ahead of the wire, so the first copy may never have left — and again to
     /// each copy of the request (§17.2.2), so a copy that reaches this node
     /// after the final was decided elsewhere is never handed up as a new
     /// request. A transaction already on its key that has sent no final takes
     /// `response` as its final and sends it to the copy that opened it.
-    ServerNonInviteAnswered { response: SipResponse, dest: SocketAddr, leg_id: Option<String> },
+    ServerNonInviteAnswered {
+        response: SipResponse,
+        dest: SocketAddr,
+        bound_ms: u64,
+        leg_id: Option<String>,
+    },
 }
 
 /// What [`TransactionLayer::reoffer`](crate::TransactionLayer::reoffer) made

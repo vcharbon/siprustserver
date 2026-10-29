@@ -264,8 +264,9 @@ enum Recovery {
     /// let the call go, and reclaims it.
     Takeover,
     /// The primary stays dead; the proxy's dead verdict makes the backup take
-    /// the call over, its only work the request's answer. The primary's
-    /// endpoint leaves the membership once the call ended.
+    /// the call over, its only work the request's answer, once that answer's
+    /// deadline passed. The primary's endpoint leaves the membership once the
+    /// call ended.
     Verdict,
 }
 
@@ -380,6 +381,22 @@ async fn caller_told(c: &mut Cluster, asked: &Asked, outcome: &str, budget: Dura
     told.respond(200, "OK").await;
 }
 
+/// The caller is told the outside answer to the request the backup sent
+/// again once the request's deadline passed: a primary read dead while it
+/// lives would have taken its own answer by then (ADR-0047 D2).
+async fn caller_told_past_the_deadline(
+    c: &mut Cluster,
+    asked: &Asked,
+    outcome: &str,
+    budget: Duration,
+) {
+    let deadline = asked.asked_at + (budget + MARGIN).as_millis() as i64;
+    let mut told = c.alice.receive("INFO").await;
+    assert_eq!(String::from_utf8_lossy(told.request().body()), outcome);
+    assert!(c.fh.now_ms() >= deadline, "the backup waited for the request's deadline");
+    told.respond(200, "OK").await;
+}
+
 /// Alice hangs up; the call is over everywhere with one CDR and nothing held.
 async fn hang_up(c: &mut Cluster, mut asked: Asked, store: &CallStore) {
     scenario_harness::callflow::hangup(&mut asked.dialog, &c.bob).await;
@@ -439,7 +456,7 @@ async fn lost_answer_cell(
             reboot_and_reclaim(c, &primary).await;
         }
         Recovery::Verdict => {
-            caller_told(c, &asked, outcome, budget).await;
+            caller_told_past_the_deadline(c, &asked, outcome, budget).await;
             let backup = if primary == "b1" { "b2" } else { "b1" };
             assert!(worker(c, backup).serves(&asked.call_ref), "the backup took the call over");
             scenario_harness::callflow::hangup(&mut asked.dialog, &c.bob).await;

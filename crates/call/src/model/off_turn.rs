@@ -13,8 +13,9 @@ use super::limiter::{ConsultAdmits, LimiterEntry};
 /// One request awaiting its answer.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum OffTurnRequest {
-    /// The REFER's authorization, its request as the seed rule built it.
-    Refer { request: serde_json::Value },
+    /// The REFER's authorization, its request as the seed rule built it, sent
+    /// at `sent_at_ms`: it has no answer deadline of its own.
+    Refer { request: serde_json::Value, sent_at_ms: i64 },
     /// A service's adaptation HTTP request.
     ServiceHttp {
         correlation_id: String,
@@ -32,8 +33,9 @@ pub enum OffTurnRequest {
     /// A release event's consult, its request as the rule built it and the
     /// admit its reroute may send.
     Release { request: serde_json::Value, limiter: ConsultAdmits },
-    /// A service's replacement of the call's admission set.
-    Admit { correlation_id: String, entries: Vec<LimiterEntry> },
+    /// A service's replacement of the call's admission set, numbered
+    /// `change` by the turn that sent it.
+    Admit { correlation_id: String, entries: Vec<LimiterEntry>, change: u64 },
 }
 
 impl OffTurnRequest {

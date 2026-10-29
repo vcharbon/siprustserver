@@ -60,18 +60,23 @@ async fn put(store: &ReplicatingCallStore, call: &Call) {
 }
 
 /// A call whose only work is an awaited request is taken over at the dead
-/// verdict and sends the request again; with no adaptation port its answer
-/// comes at once and takes it off the record.
+/// verdict once that request's answer deadline passed, and sends it again;
+/// with no adaptation port its answer comes at once and takes it off the
+/// record.
 #[tokio::test(start_paused = true)]
-async fn a_call_awaiting_an_answer_is_taken_over_at_the_dead_verdict_and_asks_again() {
+async fn a_call_awaiting_an_answer_is_taken_over_past_its_deadline_and_asks_again() {
     let net = SimulatedSignalingNetwork::new(1);
     let n = node_on(&net, "w1", |_| {}, Vec::new()).await;
     let ctx = n.core.router_ctx();
-    let call = awaiting("awaiting");
+    let mut call = awaiting("awaiting");
+    let deadline = call::TimerType::ServiceHttpAnswer { correlation_id: "svc:ask".into() };
+    call::helpers::arm_timer(&mut call, call::TimerKey::call(deadline), 1_000);
     put(&n.store, &call).await;
 
     assert!(super::super::departure::take_over_read_dead(ctx, "w0"));
     tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(n.metrics.repl_takeover_hydrated_total(), 0, "nothing before the deadline");
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
 
     assert_eq!(n.metrics.repl_takeover_hydrated_total(), 1, "the call was taken over");
     let body = n.store.get_call(PartitionRole::Backup, "w0", &call.call_ref).await.unwrap();
@@ -106,4 +111,26 @@ async fn an_answer_for_a_call_not_held_here_takes_nothing_over() {
 
     assert_eq!(n.metrics.repl_takeover_hydrated_total(), 0, "nothing was taken over");
     assert!(ctx.state.peek(&call.call_ref).is_none(), "the call is not served here");
+}
+
+/// A call whose awaited request's deadline already passed when the departure
+/// takes it over still sends the request again: the deadline restored with
+/// the call is the re-send's to arm, never read first as the lost answer.
+#[tokio::test(start_paused = true)]
+async fn a_request_past_its_deadline_at_the_takeover_is_still_sent_again() {
+    let (_capture, log) = observe_testkit::test_buffer();
+    let net = SimulatedSignalingNetwork::new(1);
+    let n = node_on(&net, "w1", |_| {}, Vec::new()).await;
+    let ctx = n.core.router_ctx();
+    let mut call = awaiting("overdue");
+    let deadline = call::TimerType::ServiceHttpAnswer { correlation_id: "svc:ask".into() };
+    call::helpers::arm_timer(&mut call, call::TimerKey::call(deadline), 1);
+    put(&n.store, &call).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    super::super::departure::take_over_departed(ctx, "w0");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert_eq!(n.metrics.repl_takeover_hydrated_total(), 1, "the call was taken over");
+    assert_eq!(log.matching("awaited requests sent again").len(), 1, "the request went again");
 }

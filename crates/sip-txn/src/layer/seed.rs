@@ -77,8 +77,9 @@ impl Owner {
                 TxnSeed::ServerNonInvite { request, leg_id } => {
                     self.seed_server_non_invite(call_ref, request, leg_id)
                 }
-                TxnSeed::ServerNonInviteAnswered { response, dest, leg_id } => {
-                    self.seed_answered_non_invite(endpoint, call_ref, response, dest, leg_id).await
+                TxnSeed::ServerNonInviteAnswered { response, dest, bound_ms, leg_id } => {
+                    let seed = (response, dest, bound_ms, leg_id);
+                    self.seed_answered_non_invite(endpoint, call_ref, seed).await
                 }
             };
             if went_in {

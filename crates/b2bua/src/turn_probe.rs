@@ -74,6 +74,9 @@ pub struct TurnMark<'a> {
     /// The turn sent a request to an outside service, whose answer a later
     /// turn takes.
     pub called_out: bool,
+    /// The turn sent again requests another node had sent off the call's
+    /// turn (ADR-0039 decision 5).
+    pub resent: bool,
     /// Why the turn's last outbox entry left: set on [`Left`](TurnPoint::Left)
     /// only.
     pub released: Option<Released>,
@@ -144,6 +147,7 @@ mod tests {
             on_request,
             on_answer: false,
             called_out: false,
+            resent: false,
             released: None,
             backed: true,
         }

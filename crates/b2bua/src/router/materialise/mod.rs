@@ -250,7 +250,16 @@ async fn serve(
     now_ms: i64,
     origin: Origin,
 ) -> Option<usize> {
-    ctx.timers.restore(call.timers.clone(), call_ref.to_string(), call.incarnation()).await;
+    // The answer deadlines of the requests sent again are the re-send's to
+    // arm: one already past would read the answer as lost first.
+    let resend = !call.awaited.is_empty() && call.state == call::CallModelState::Active;
+    let timers = call
+        .timers
+        .iter()
+        .filter(|t| !(resend && super::resend::awaited_deadline(call, t.timer_type())))
+        .cloned()
+        .collect();
+    ctx.timers.restore(timers, call_ref.to_string(), call.incarnation()).await;
     let mut seeds = seeds::seeds_for(call, now_ms);
     seeds.extend(seeds::answered_seeds(call, now_ms));
     if !matches!(origin, Origin::Takeover) {
@@ -260,7 +269,7 @@ async fn serve(
     for timeout in seeds::overdue_sent(call, now_ms) {
         let _ = ctx.reentry_tx.send(timeout);
     }
-    if !call.awaited.is_empty() {
+    if resend {
         let _ = ctx.reentry_tx.send(super::resend::notice(call));
     }
     seeded

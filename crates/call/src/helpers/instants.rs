@@ -29,7 +29,8 @@ pub fn reanchor_offset(skew_offset_ms: i64) -> i64 {
 /// Move every absolute instant `call` holds by `offset_ms` (the reading
 /// clock minus the writing clock): the timer ledger's deadlines, the creation
 /// time, each dialled INVITE's send time, each NOTIFY in flight's send time, each
-/// request record's deadline, each answered request's Timer J, the CDR
+/// request record's deadline, each answered request's Timer J, each awaited
+/// REFER authorization's send time, the CDR
 /// events, the message rings, the decision log, the termination record and the
 /// start of a transfer or reroute. Durations and counters are left as they
 /// are, and so is the opaque service `ext`. A zero offset changes nothing.
@@ -59,6 +60,11 @@ pub fn shift_instants(call: &mut Call, offset_ms: i64) {
     }
     for answered in &mut call.answered {
         shift(&mut answered.until_ms);
+    }
+    for awaited in &mut call.awaited {
+        if let crate::OffTurnRequest::Refer { sent_at_ms, .. } = awaited {
+            shift(sent_at_ms);
+        }
     }
     shift_leg(&mut call.a_leg, offset_ms);
     for leg in &mut call.b_legs {

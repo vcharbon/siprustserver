@@ -26,7 +26,12 @@
 //! A proxy's dead verdict on the peer (ADR-0050 §3) runs the takeover half
 //! alone: the same calls are taken over, while an undecided call, a finished
 //! call and a deferred end are left to the peer, which may live behind a
-//! partition and decide or discharge them itself, or to its departure.
+//! partition and decide or discharge them itself, or to its departure. A call
+//! whose only work is a request in flight — an outside answer it awaits, an
+//! in-dialog request — is taken over only once those requests are due: a
+//! primary read dead while it lives takes its own answers by then, and its
+//! write takes them off the record, so a node-local re-check of that call at
+//! the latest of them finds nothing to do.
 //!
 //! The sweep is a task of its own, never the router loop's: a departed
 //! partition holds every call the peer served, read one body at a time, and
@@ -177,11 +182,12 @@ async fn sweep<F, Fut>(
 /// ([`ending_work`]), or awaits the answer to a request it sent off its turn,
 /// which the copy sends again. On a dead verdict an undecided call is left to
 /// the departure: its decision may be in flight at a primary the proxy misread
-/// dead. The body is read once without the lock to leave a quiet call
+/// dead; a call with only requests in flight is taken over once they are due
+/// ([`requests_due_at`]), re-checked then ([`recheck_at`]). The body is read once without the lock to leave a quiet call
 /// untouched; a call already live here is left as it is.
 async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Swept {
-    let Ok((copy, _skew)) = ctx.state.peek_replica(call_ref).await else { return Swept::Left };
-    let call = copy.call;
+    let Ok((copy, skew)) = ctx.state.peek_replica(call_ref).await else { return Swept::Left };
+    let mut call = copy.call;
     if finished(&call) {
         return match cause {
             Cause::Departed => discharge_finished(ctx, call_ref).await,
@@ -189,13 +195,24 @@ async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Sw
         };
     }
     let ending = call.state == CallModelState::Terminating;
-    let in_flight =
-        has_invite_to_serve(&call) || names_request_in_flight(&call) || !call.awaited.is_empty();
-    if !in_flight && !(ending && ending_work(&call)) {
+    let at_once = has_invite_to_serve(&call) || (ending && ending_work(&call));
+    let awaited = call.state == CallModelState::Active && !call.awaited.is_empty();
+    if !at_once && !names_request_in_flight(&call) && !awaited {
         return Swept::Left;
     }
     if cause == Cause::ReadDead && is_undecided(&call) {
         return Swept::Left;
+    }
+    if cause == Cause::ReadDead && !at_once {
+        reanchor(&mut call, skew);
+        match requests_due_at(ctx, &call) {
+            Some(due) if due <= ctx.clock.now_ms() => {}
+            Some(due) => {
+                recheck_at(ctx, call_ref, due);
+                return Swept::Left;
+            }
+            None => return Swept::Left,
+        }
     }
     let guard = ctx.state.lock(call_ref).await;
     match materialise(ctx, call_ref, Origin::Takeover).await {
@@ -216,6 +233,42 @@ async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Sw
             Swept::Left
         }
     }
+}
+
+/// When the requests `call` has in flight are all due — each outside
+/// request's answer deadline, a REFER's authorization's send time plus the
+/// decision deadline and its margin, each in-dialog request's Timer F or
+/// answer deadline — the latest of them; `None` when one has no bound. A
+/// primary read dead while it lives has taken each answer by then, and its
+/// write took the request off the record.
+fn requests_due_at(ctx: &RouterCtx, call: &Call) -> Option<i64> {
+    let decision = u64::try_from(ctx.config.call_control_timeout_ms).ok().filter(|ms| *ms > 0);
+    let margin = call::millis_i64(crate::answer_deadline::MARGIN);
+    let awaited = call.awaited.iter().map(|r| match r {
+        call::OffTurnRequest::Refer { sent_at_ms, .. } => {
+            decision.map(|d| sent_at_ms + i64::try_from(d).unwrap_or(i64::MAX) + margin)
+        }
+        request => super::resend::deadline_of(call, request),
+    });
+    let in_dialog = call::helpers::every_record(call)
+        .filter(|(_, _, r)| {
+            r.method != "INVITE" && r.author.as_deref() != Some(call::KEEPALIVE_AUTHOR)
+        })
+        .map(|(_, _, r)| r.deadline_ms);
+    awaited.chain(in_dialog).try_fold(i64::MIN, |due, at| at.map(|at| due.max(at)))
+}
+
+/// Take `call_ref` over at `due_ms` if it still needs a copy then: a re-check
+/// of one call, on this node alone, of the takeover half of a dead verdict.
+fn recheck_at(ctx: &Arc<RouterCtx>, call_ref: &str, due_ms: i64) {
+    let wait = u64::try_from(due_ms.saturating_sub(ctx.clock.now_ms())).unwrap_or(0);
+    let (task_ctx, call_ref) = (ctx.clone(), call_ref.to_string());
+    let recheck: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+        take_over_one(&task_ctx, &call_ref, Cause::ReadDead).await;
+    });
+    let task = observe::spawn_keeping_node(recheck);
+    ctx.dispatcher.track(task.abort_handle());
 }
 
 /// Whether `call` needs no copy to serve it, only its discharge: ended, or

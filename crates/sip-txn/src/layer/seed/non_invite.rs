@@ -6,12 +6,15 @@
 use std::net::SocketAddr;
 
 use sip_message::received::response_destination;
-use sip_message::{SipRequest, SipResponse};
+use sip_message::{Method, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
 use call::TxnKind;
 
+use crate::timers::ms;
+
 use super::super::key::{ServerTxnId, ServerTxnKey};
+use super::super::lifetime::Hold;
 use super::super::owner::Owner;
 use super::super::txn::{NewTransaction, TxnId, TxnRef, TxnState};
 use super::super::via_marks::{extract_via_custom_params, ViaMarks};
@@ -97,23 +100,26 @@ impl Owner {
     }
 
     /// A server non-INVITE Completed on the final `response` (RFC 3261
-    /// §17.2.2), keyed by its top Via and method, held for Timer J from now,
-    /// `response` sent once now toward the transaction's destination — the
-    /// top Via's response target, `dest` where it names none — and to each
-    /// copy of its request: the record may be ahead of the wire, so the first
-    /// copy may never have left, and a repeat is absorbed by the client
-    /// transaction (§17.1.2.2). An occupant that has sent no final, opened by
-    /// the copy that triggered the materialisation, takes `response` and keeps
-    /// its own destination. `false` when the response names no branch or its
-    /// identity holds a transaction that has sent its final.
+    /// §17.2.2), keyed by its top Via and method, held for `bound_ms` from
+    /// now — what is left of its Timer J — `response` sent once now toward the
+    /// transaction's destination, the top Via's response target, `dest` where
+    /// it names none, and to each copy of its request: the record may be ahead
+    /// of the wire, so the first copy may never have left, and a repeat is
+    /// absorbed by the client transaction (§17.1.2.2). An occupant that has
+    /// sent no final, opened by the copy that triggered the materialisation,
+    /// takes `response` and keeps its own destination. `false` for a final to
+    /// an INVITE, an ACK or a CANCEL, which no non-INVITE server transaction
+    /// holds, when the response names no branch, or when its identity holds a
+    /// transaction that has sent its final.
     pub(super) async fn seed_answered_non_invite(
         &mut self,
         endpoint: &dyn UdpEndpoint,
         call_ref: &str,
-        response: SipResponse,
-        dest: SocketAddr,
-        leg_id: Option<String>,
+        (response, dest, bound_ms, leg_id): (SipResponse, SocketAddr, u64, Option<String>),
     ) -> bool {
+        if matches!(response.cseq().method(), Method::Invite | Method::Ack | Method::Cancel) {
+            return false;
+        }
         let Some(key) = ServerTxnId::of_response(&response).map(ServerTxnId::to_key) else {
             return false;
         };
@@ -146,7 +152,7 @@ impl Owner {
             txn.last_response_status = Some(response.status());
             txn.original_request = None;
         }
-        self.arm_final_hold(key.id(), TxnKind::NonInvite, response.status());
+        self.hold_for(TxnRef::Server(key.id()), Hold::TimerJ, ms(bound_ms));
         self.send_buffer(endpoint, response.image(), to).await;
         true
     }
