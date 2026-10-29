@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use sip_txn::{DeferredBound, IdGen, TransactionConfig};
+use sip_txn::{BoundPassed, DeferredBound, IdGen, OnBound, TransactionConfig};
 
 use crate::admission::Refusals;
 use crate::config::B2buaConfig;
@@ -45,10 +45,7 @@ pub(super) fn txn_config(
         // The answers to a CANCEL likewise, with the turn that took it.
         cancel_bound_ms: u64::try_from(write_path.cancel_bound.as_millis()).unwrap_or(u64::MAX),
         // A probe hears of what left at its bound, before its turn's write.
-        on_bound: probe.installed().then(|| {
-            let (probe, node) = (probe.clone(), config.self_ordinal.clone());
-            Arc::new(move || probe.bound_passed(&node)) as Arc<dyn Fn() + Send + Sync>
-        }),
+        on_bound: probe.installed().then(|| bound_report(probe, &config.self_ordinal)),
         strict_to_tag: true,
         deferred_bound: None,
         invite_refusals: Some(refusals.memo().clone()),
@@ -63,6 +60,20 @@ pub(super) fn txn_config(
         ceilings.unwrap_or_else(|| crate::admission::deferred_bound(txn_config.event_capacity())),
     );
     txn_config
+}
+
+/// The report to `probe` of held messages that left at their bound on
+/// `node`, by the call their transaction names: the one a request of it
+/// carried, else the call `node` derives from the caller's leg, as it does
+/// for a new INVITE.
+fn bound_report(probe: &crate::turn_probe::TurnProbes, node: &str) -> OnBound {
+    let (probe, node) = (probe.clone(), node.to_string());
+    Arc::new(move |held: BoundPassed<'_>| match held.call_ref {
+        Some(call_ref) => probe.bound_passed(&node, call_ref),
+        None => {
+            probe.bound_passed(&node, &call::derive_call_ref(&node, held.call_id, held.from_tag))
+        }
+    })
 }
 
 /// `host:port`, an IPv6 literal host in brackets (RFC 3261 §25.1 `hostport`).

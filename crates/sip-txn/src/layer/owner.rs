@@ -100,7 +100,7 @@ pub(super) struct Owner {
     /// [`TransactionConfig::cancel_bound_ms`](crate::TransactionConfig).
     pub(super) cancel_bound_ms: u64,
     /// [`TransactionConfig::on_bound`](crate::TransactionConfig).
-    pub(super) on_bound: Option<Arc<dyn Fn() + Send + Sync>>,
+    pub(super) on_bound: Option<super::config::OnBound>,
     /// The INVITE server transactions holding the answers to a CANCEL, by the
     /// INVITE's Call-ID, From-tag and CSeq number (`layer::held_cancel`).
     pub(super) held_cancels: HashMap<(String, String, u32), ServerTxnKey>,

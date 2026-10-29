@@ -4,6 +4,8 @@
 //! re-ACKed once the ACK left; and the seed of an INVITE that took such a
 //! final, which ACKs each copy the callee repeats.
 
+use std::sync::Arc;
+
 use crate::common::{self, *};
 use call::TxnKind;
 use sip_txn::{TransactionConfig, TxnSeed};
@@ -58,13 +60,30 @@ async fn a_held_ack_leaves_on_release_and_a_repeat_meanwhile_draws_none() {
 
 #[tokio::test(start_paused = true)]
 async fn a_held_ack_nobody_releases_leaves_at_its_bound() {
-    let stack = holding().await;
+    let told: Told = Arc::default();
+    let config = TransactionConfig {
+        ack_bound_ms: BOUND,
+        on_bound: Some(telling(&told)),
+        ..common::config()
+    };
+    let stack = Stack::build_with_config(TRANSIT, 64, config).await;
     let branch = "z9hG4bK-held-bound";
-    rejected(&stack, branch).await;
-    elapse_ms(BOUND - 60).await;
+    let invite = invite_with_cr_lg("call-a", "handle-shape-test", branch, "b-1");
+    stack.txn.send_request(invite, addr(PEER), TxnKind::Invite).await.unwrap();
+    elapse_ms(20).await;
+    let _ = stack.drain_peer();
+    stack
+        .inject(&response_bytes(486, "Busy Here", "INVITE", branch, "handle-shape-test", true))
+        .await;
+    elapse_ms(BOUND - 40).await;
     assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 0, "held inside the bound");
+    assert!(told.lock().unwrap().is_empty(), "nothing left at its bound yet");
     elapse_ms(60).await;
     assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1, "sent at the bound");
+    let told = told.lock().unwrap();
+    assert_eq!(told.len(), 1, "told once: {told:?}");
+    assert_eq!(told[0].0.as_deref(), Some("call-a"), "naming the call");
+    assert_eq!((told[0].1.as_str(), told[0].2.as_str()), ("handle-shape-test", "b2bua-b-1"));
 }
 
 #[tokio::test(start_paused = true)]

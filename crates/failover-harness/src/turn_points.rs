@@ -68,6 +68,14 @@ impl Turn {
     }
 }
 
+/// A node's transaction layer sent messages it held for a turn of a call at
+/// their bound, before that turn's write (ADR-0055 §3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundPass {
+    pub node: String,
+    pub call_ref: String,
+}
+
 /// A sub-point of one turn: where an incident arms.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TurnAt {
@@ -108,7 +116,13 @@ pub struct TurnPoints {
     /// The calls whose applied sub-point the harness holds now, with how many
     /// holds.
     applied_held: Arc<Mutex<BTreeMap<String, usize>>>,
+    /// Draws the place of a sub-point in the order of the run's recorded
+    /// messages: the recording's own sequencer.
+    stamp: Option<Stamp>,
 }
+
+/// A source of places in the order of the run's recorded messages.
+pub type Stamp = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 #[derive(Default)]
 struct Inner {
@@ -121,9 +135,17 @@ struct Inner {
     resent: bool,
     /// A node asked again a call's routing decision another had asked.
     reasked: bool,
-    /// A node's transaction layer sent messages held for a turn at their
-    /// bound, before that turn's write.
-    bound_passed: bool,
+    /// Every node whose transaction layer sent messages held for a turn of
+    /// a call at their bound, before that turn's write, with the call, once
+    /// each, in the order they first did.
+    bound_passes: Vec<BoundPass>,
+    /// The calls whose delete a backup applied.
+    removed: std::collections::BTreeSet<String>,
+    /// Where each call's turn sub-points first stood in the order of the
+    /// run's recorded messages.
+    stamps: BTreeMap<(String, TurnAt), u64>,
+    /// The turns the applied write being taken covers for the first time.
+    newly_applied: Vec<usize>,
 }
 
 /// An arm on the first call that takes a turn.
@@ -135,6 +157,25 @@ struct Armed {
 impl TurnPoints {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// Turn points that place each sub-point in the order of the run's
+    /// recorded messages, drawing from `stamp`.
+    pub fn stamped(stamp: Stamp) -> Arc<Self> {
+        Arc::new(Self { stamp: Some(stamp), ..Self::default() })
+    }
+
+    /// Every bound pass of the run so far, the calls a backup deleted
+    /// included.
+    pub fn all_bound_passes(&self) -> Vec<BoundPass> {
+        self.lock().bound_passes.clone()
+    }
+
+    /// Where `call_ref`'s sub-point `at` first stood in the order of the
+    /// run's recorded messages, once it did and turn points are
+    /// [`stamped`](Self::stamped).
+    pub fn stamp_of(&self, call_ref: &str, at: TurnAt) -> Option<u64> {
+        self.lock().stamps.get(&(call_ref.to_string(), at)).copied()
     }
 
     /// The turns `call_ref` took at its primary so far.
@@ -150,10 +191,13 @@ impl TurnPoints {
         inner.order.iter().map(|c| (c.clone(), turns(c))).collect()
     }
 
-    /// Whether a node's transaction layer sent messages held for a turn at
-    /// their bound, before that turn's write.
-    pub fn bound_passed(&self) -> bool {
-        self.lock().bound_passed
+    /// Every node whose transaction layer sent messages held for a turn of a
+    /// call the cluster still holds at their bound so far, with the call,
+    /// once each: a call whose delete a backup applied is no longer held.
+    pub fn bound_passes(&self) -> Vec<BoundPass> {
+        let inner = self.lock();
+        let held = |p: &&BoundPass| !inner.removed.contains(&p.call_ref);
+        inner.bound_passes.iter().filter(held).cloned().collect()
     }
 
     /// The first call that took a turn, with its turns so far.
@@ -190,8 +234,30 @@ impl TurnPoints {
 }
 
 impl Inner {
-    /// Record `mark` and say which turn of its call it stands at.
-    fn record(&mut self, mark: &TurnMark<'_>, applied_held: bool) -> Option<usize> {
+    /// Record `mark`, placed at `stamp`, and say which turn of its call it
+    /// stands at.
+    fn record(
+        &mut self,
+        mark: &TurnMark<'_>,
+        applied_held: bool,
+        stamp: Option<u64>,
+    ) -> Option<usize> {
+        let turn = self.take(mark, applied_held)?;
+        if let Some(stamp) = stamp {
+            let firsts = match mark.point {
+                TurnPoint::Applied => std::mem::take(&mut self.newly_applied),
+                _ => vec![turn],
+            };
+            for k in firsts {
+                let at = TurnAt { turn: k, point: mark.point };
+                self.stamps.entry((mark.call_ref.to_string(), at)).or_insert(stamp);
+            }
+        }
+        Some(turn)
+    }
+
+    /// Take `mark` into the call's turns and say which turn it stands at.
+    fn take(&mut self, mark: &TurnMark<'_>, applied_held: bool) -> Option<usize> {
         self.resent |= mark.resent;
         self.reasked |= mark.reasked;
         let primary = call::call_ref_primary(mark.call_ref)?;
@@ -230,10 +296,17 @@ impl Inner {
                 Some(i + 1)
             }
             (TurnPoint::Applied, false) => {
+                if mark.removed {
+                    self.removed.insert(mark.call_ref.to_string());
+                }
                 let turns = self.calls.get_mut(mark.call_ref)?;
                 let mut first = None;
+                self.newly_applied.clear();
                 for (i, t) in turns.iter_mut().enumerate().filter(|(_, t)| t.wrote) {
                     if covers(mark, t) {
+                        if !t.applied {
+                            self.newly_applied.push(i + 1);
+                        }
                         t.applied = true;
                         first.get_or_insert(i + 1);
                     }
@@ -273,14 +346,19 @@ fn covers(mark: &TurnMark<'_>, turn: &Turn) -> bool {
 }
 
 impl TurnProbe for TurnPoints {
-    fn bound_passed(&self, _node: &str) {
-        self.lock().bound_passed = true;
+    fn bound_passed(&self, node: &str, call_ref: &str) {
+        let pass = BoundPass { node: node.to_string(), call_ref: call_ref.to_string() };
+        let mut inner = self.lock();
+        if !inner.bound_passes.contains(&pass) {
+            inner.bound_passes.push(pass);
+        }
     }
 
     fn reached(&self, mark: &TurnMark<'_>) -> Option<Hold> {
         let applied_held = locked(&self.applied_held).contains_key(mark.call_ref);
+        let stamp = self.stamp.as_ref().map(|s| s());
         let mut inner = self.lock();
-        let turn = inner.record(mark, applied_held)?;
+        let turn = inner.record(mark, applied_held, stamp)?;
         if !inner.reaches(mark, turn) {
             return None;
         }
@@ -317,4 +395,46 @@ impl TurnProbe for TurnPoints {
 
 fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn applied_delete(call_ref: &str) -> TurnMark<'_> {
+        TurnMark {
+            node: "b2",
+            call_ref,
+            point: TurnPoint::Applied,
+            version: (3, 0),
+            wrote: true,
+            removed: true,
+            on_request: false,
+            on_answer: false,
+            called_out: false,
+            resent: false,
+            reasked: false,
+            released: None,
+            backed: false,
+        }
+    }
+
+    #[test]
+    fn a_bound_pass_is_kept_by_node_and_call_until_the_call_is_deleted() {
+        let points = TurnPoints::new();
+        points.bound_passed("b1", "b1|c1|f1");
+        points.bound_passed("b1", "b1|c1|f1");
+        points.bound_passed("b2", "b1|c1|f1");
+        points.bound_passed("b1", "b1|c2|f2");
+        let pass = |node: &str, call_ref: &str| BoundPass {
+            node: node.to_string(),
+            call_ref: call_ref.to_string(),
+        };
+        assert_eq!(
+            points.bound_passes(),
+            [pass("b1", "b1|c1|f1"), pass("b2", "b1|c1|f1"), pass("b1", "b1|c2|f2")]
+        );
+        assert!(points.reached(&applied_delete("b1|c1|f1")).is_none());
+        assert_eq!(points.bound_passes(), [pass("b1", "b1|c2|f2")]);
+    }
 }

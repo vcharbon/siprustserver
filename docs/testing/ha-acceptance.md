@@ -32,9 +32,13 @@ Read a failure in this order:
    `failover-harness`'s `windows` module, one row per §11 bullet (`W-…`); a
    test strikes its incident (`FailoverHarness::strike`) and is given its
    rows. Its tier is measured: a kill of a call backed at every turn with no
-   cap hit, at `applied`, is Guaranteed and opens no row; any other cell at
+   cap hit, and no held message the killed node sent at its bound before the
+   kill, at `applied`, is Guaranteed and opens no row; any other cell at
    `applied` is Degraded, and every cell at `off` is Off. `just sweep-report`
-   counts the rows and tiers of the last sweep.
+   counts the rows and tiers of the last sweep, the cells cut in a narrow
+   window apart: a cut point whose primary sent the messages around it less
+   than 1 ms apart, one instant of the node, where a crash has practically no
+   chance to land.
 3. **Anything else is a SUT defect.** A call that ends cleanly once the incident
    struck is a pass (ADR-0055 §1, §4); a request left without its final, a
    dialog left open outside a lost call, a leak, or a CDR count outside §5 is

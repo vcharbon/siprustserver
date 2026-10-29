@@ -1,7 +1,10 @@
 //! What one sweep test's cells measured, written as JSON to
 //! `target/sweep-report/<test>.json`: each cell's tier, the rows that fired
-//! in it, whether the evidence rule ended its call, and whether it passed,
-//! with the first line of its failure.
+//! in it, whether the evidence rule ended its call, its cut point's window
+//! (`window_ms`, `null` when unbounded) and whether that window is narrow
+//! ([`super::window::NARROW`]), the nodes whose transaction layer sent held
+//! messages at their bound, and whether it passed, with the first line of its
+//! failure.
 //! `just sweep-report` adds every test's file together into counts per row
 //! and per tier; nothing gates on them.
 
@@ -31,6 +34,9 @@ pub fn write(prefix: &str, ran: &[Ran]) {
                 "tier": r.measured.tier.map(|t| t.label()),
                 "fired": r.measured.fired,
                 "evidence": r.measured.evidence,
+                "window_ms": r.window.map(|w| w.as_millis()),
+                "narrow": r.narrow(),
+                "bound_passed_on": r.measured.bound_passed_on,
                 "passed": r.failure.is_none(),
                 "failure": r.failure.as_deref().and_then(|f| f.lines().find(|l| !l.trim().is_empty())),
             })

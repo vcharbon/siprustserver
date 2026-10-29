@@ -23,7 +23,7 @@ use call::TxnKind;
 
 use super::key::{ServerTxnId, ServerTxnKey};
 use super::owner::Owner;
-use super::txn::{Timer, UnsentCancel};
+use super::txn::{Timer, TxnRef, UnsentCancel};
 use crate::timers::ms;
 
 impl Owner {
@@ -67,7 +67,7 @@ impl Owner {
         if self.server(key.id()).is_some_and(|t| t.created_at == opened)
             && self.send_held_cancel(endpoint, key).await
         {
-            self.told_bound();
+            self.told_bound(TxnRef::Server(key.id()));
         }
     }
 

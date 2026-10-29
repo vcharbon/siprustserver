@@ -60,8 +60,8 @@ pub mod timers;
 // The layer actor: spawn, send API, per-call eviction, ADR-0014 self-release,
 // the deferred-backlog ceiling on new calls and the node's shared refusals.
 pub use layer::{
-    DeferredBound, InviteRefusals, NewCallRefusal, ServerTxnKey, TransactionConfig,
-    TransactionLayer, TransactionLayerClosed, Verdict, REFUSED_MEMO_MAX,
+    BoundPassed, DeferredBound, InviteRefusals, NewCallRefusal, OnBound, ServerTxnKey,
+    TransactionConfig, TransactionLayer, TransactionLayerClosed, Verdict, REFUSED_MEMO_MAX,
 };
 // The class a new INVITE is judged in, read off the parsed request.
 pub use invite_class::{class_of, InviteClass};

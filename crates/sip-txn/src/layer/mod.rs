@@ -69,6 +69,8 @@ mod unanswered;
 mod via_marks;
 
 pub use backlog::DeferredBound;
+pub use bound_report::BoundPassed;
+pub use config::OnBound;
 pub use handle::{TransactionConfig, TransactionLayer, TransactionLayerClosed};
 pub use key::ServerTxnKey;
 pub use refusals::{InviteRefusals, NewCallRefusal, Verdict, REFUSED_MEMO_MAX};

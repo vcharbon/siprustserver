@@ -21,7 +21,9 @@
 //! [`failover_sweep!`](crate::failover_sweep) expands a list of shapes into
 //! one test per shape, incident and level against the consumer's own
 //! ratchet. Each test writes what its cells measured to
-//! `target/sweep-report/` ([`report`]).
+//! `target/sweep-report/` ([`report`]), each cell with its cut point's
+//! window ([`window`]): a cell cut inside a narrow one is judged like any
+//! other and counted apart.
 
 mod after_cancel;
 mod aftermath;
@@ -31,6 +33,7 @@ mod cell;
 mod parties;
 mod ratchet;
 pub mod report;
+pub mod window;
 mod witness;
 
 use std::sync::Mutex;
@@ -108,23 +111,40 @@ pub fn test_prefix(shape: &str, level: SyncLevel, incident: Incident) -> String 
     format!("{shape}/{}/{}/", level_label(level), incident.label())
 }
 
+/// What the uncut call measured: its turns, whose sub-points are the
+/// sweep's cut points, and the window of each.
+pub struct Baseline {
+    pub turns: Vec<crate::turn_points::Turn>,
+    pub windows: window::Windows,
+}
+
 /// Run `shape` with no incident at `level`: the call must pass every check
 /// and take at least one turn. Its turns are the sweep's turn points.
-pub fn baseline(shape: &dyn SweepShape, level: SyncLevel) -> Vec<crate::turn_points::Turn> {
+pub fn baseline(shape: &dyn SweepShape, level: SyncLevel) -> Baseline {
     let name = format!("{}/{}/baseline", shape.id(), level_label(level));
-    let sink = Mutex::default();
+    let sink: Mutex<CellReport> = Mutex::default();
     let turns = in_cell(&name, || run_cell(shape, &name, None, level, false, &sink))
         .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
     assert!(!turns.is_empty(), "[{name}] the call took no turn at its primary");
-    turns
+    let windows = sink.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner).windows;
+    Baseline { turns, windows }
 }
 
-/// One cell the sweep ran: its name, what it measured, and its failure.
+/// One cell the sweep ran: its name, what it measured, its cut point's
+/// window, and its failure.
 pub struct Ran {
     pub name: String,
     pub at: TurnAt,
     pub measured: CellReport,
+    pub window: Option<std::time::Duration>,
     pub failure: Option<String>,
+}
+
+impl Ran {
+    /// Whether the cell's cut point lies in a narrow window.
+    pub fn narrow(&self) -> bool {
+        window::narrow(self.window)
+    }
 }
 
 /// Cut `shape` at every turn point of its baseline by `incident` at `level`,
@@ -137,7 +157,7 @@ pub fn sweep(shape: &dyn SweepShape, incident: Incident, level: SyncLevel, ratch
     if incident == Incident::Split && !shape.splits_unhealed() {
         eprintln!("{prefix}: no cell, the shape is not cut by a split that never heals");
     } else {
-        let turns = baseline(shape, level);
+        let Baseline { turns, windows } = baseline(shape, level);
         for (i, turn) in turns.iter().enumerate() {
             let points = turn
                 .points()
@@ -151,13 +171,18 @@ pub fn sweep(shape: &dyn SweepShape, incident: Incident, level: SyncLevel, ratch
                 let outcome = in_cell(&name, || run_cell(shape, &name, cut, level, false, &sink));
                 let failure = outcome.err().map(|payload| panic_text(payload.as_ref()));
                 let measured = sink.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
-                ran.push(Ran { name, at, measured, failure });
+                let window = windows.get(&at).copied().flatten();
+                ran.push(Ran { name, at, measured, window, failure });
             }
         }
     }
     let guaranteed = ran.iter().filter(|r| r.measured.tier == Some(Tier::Guaranteed)).count();
     let failing = ran.iter().filter(|r| r.failure.is_some()).count();
-    eprintln!("{prefix}: {} cells, {failing} failing, {guaranteed} guaranteed", ran.len());
+    let narrow = ran.iter().filter(|r| r.narrow()).count();
+    eprintln!(
+        "{prefix}: {} cells, {failing} failing, {guaranteed} guaranteed, {narrow} in a narrow window",
+        ran.len()
+    );
     report::write(&prefix, &ran);
     let dead = witness::dead_windows(shape.id(), incident, level, &ran);
     ratchet.hold(&prefix, &ran, guaranteed, &dead);

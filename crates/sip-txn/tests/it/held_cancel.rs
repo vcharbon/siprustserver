@@ -3,6 +3,8 @@
 //! released or until their bound passes, a copy of the CANCEL or the INVITE
 //! absorbed meanwhile, the 487 repeated on Timer G once it left.
 
+use std::sync::Arc;
+
 use crate::common::{self, *};
 use sip_txn::{TransactionConfig, TransactionEvent};
 
@@ -59,13 +61,22 @@ async fn the_answers_to_a_cancel_leave_on_release_and_copies_meanwhile_draw_none
 
 #[tokio::test(start_paused = true)]
 async fn the_answers_nobody_releases_leave_at_their_bound() {
-    let mut stack = holding().await;
+    let told: Told = Arc::default();
+    let config = TransactionConfig {
+        cancel_bound_ms: BOUND,
+        on_bound: Some(telling(&told)),
+        ..common::config()
+    };
+    let mut stack = Stack::build_with_config(TRANSIT, 64, config).await;
     let branch = "z9hG4bK-held-cxl-bound";
     cancelled(&mut stack, branch).await;
     elapse_ms(BOUND - 60).await;
     assert_eq!(answers(&stack), (0, 0), "held inside the bound");
+    assert!(told.lock().unwrap().is_empty(), "nothing left at its bound yet");
     elapse_ms(60).await;
     assert_eq!(answers(&stack), (1, 1), "sent at the bound");
+    let caller = (None, CALL_ID.to_string(), "caller-tag".to_string());
+    assert_eq!(*told.lock().unwrap(), [caller], "told once, naming the caller's INVITE");
 }
 
 /// A transaction relinquished while it holds the answers to a CANCEL owes

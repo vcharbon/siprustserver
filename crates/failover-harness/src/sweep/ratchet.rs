@@ -145,6 +145,7 @@ mod tests {
                 name: c.to_string(),
                 at,
                 measured: CellReport::default(),
+                window: None,
                 failure: failing.contains(c).then(|| "finding".to_string()),
             })
             .collect()

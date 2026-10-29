@@ -18,7 +18,7 @@ use sip_net::UdpEndpoint;
 use tokio::time::Instant;
 
 use super::owner::Owner;
-use super::txn::{Timer, TxnState};
+use super::txn::{Timer, TxnRef, TxnState};
 use crate::event::TransactionEvent;
 use crate::timers::ms;
 
@@ -110,7 +110,7 @@ impl Owner {
         if self.clients.get(branch).is_some_and(|t| t.created_at == opened)
             && self.send_held_ack(endpoint, branch).await
         {
-            self.told_bound();
+            self.told_bound(TxnRef::Client(branch));
         }
     }
 

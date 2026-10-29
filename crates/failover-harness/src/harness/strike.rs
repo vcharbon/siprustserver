@@ -9,7 +9,7 @@ use b2bua::repl::SyncLevel;
 use scenario_harness::WaiverScope;
 
 use super::{FailoverHarness, HarnessHandle};
-use crate::turn_points::Turn;
+use crate::turn_points::{BoundPass, Turn};
 use crate::windows::tier::{measure, Measured};
 use crate::windows::{self, Kind, Row, Strike, Tier};
 
@@ -18,6 +18,8 @@ pub(super) struct Struck {
     pub(super) strike: Strike,
     /// Every call's turns at its primary at the strike.
     pub(super) calls: Vec<(String, Vec<Turn>)>,
+    /// Every bound pass before the strike.
+    pub(super) bound_passes: Vec<BoundPass>,
 }
 
 /// A row that accepted something this run, and what.
@@ -64,7 +66,8 @@ impl FailoverHarness {
             }
         }
         let calls = self.turn_points.calls();
-        self.struck.push(Struck { strike, calls });
+        let bound_passes = self.turn_points.bound_passes();
+        self.struck.push(Struck { strike, calls, bound_passes });
     }
 
     /// The struck incident is over: every RFC window of a row that closes
@@ -79,7 +82,6 @@ impl FailoverHarness {
     pub fn tier(&self) -> Option<Tier> {
         let at_end = self.turn_points.calls();
         let tampered = self.harness.tampered.load(Ordering::Relaxed);
-        let bound_passed = self.turn_points.bound_passed();
         self.struck
             .iter()
             .map(|s| {
@@ -89,7 +91,7 @@ impl FailoverHarness {
                     at_strike: &s.calls,
                     at_end: &at_end,
                     tampered,
-                    bound_passed,
+                    bound_passes: &s.bound_passes,
                 };
                 measure(&m)
             })

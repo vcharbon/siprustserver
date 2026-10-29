@@ -1002,7 +1002,7 @@ impl FailoverHarness {
         let repl_recording = RecordingReplicationNetwork::with_seq(
             repl_sim.clone() as Arc<dyn ReplicationNetwork>,
             clock.clone(),
-            capture_seq,
+            capture_seq.clone(),
         );
         let repl_addrs: HashMap<String, SocketAddr> = worker_ordinals
             .iter()
@@ -1043,7 +1043,7 @@ impl FailoverHarness {
             views: ViewLedger::new(clock, event_seq_for_views),
             worker_specs: HashMap::new(),
             sip_cut,
-            turn_points: TurnPoints::new(),
+            turn_points: TurnPoints::stamped(capture_seq),
         }
     }
 

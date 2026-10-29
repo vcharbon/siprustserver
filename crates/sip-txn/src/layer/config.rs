@@ -5,7 +5,11 @@ use std::sync::Arc;
 use crate::rng::IdGen;
 
 use super::backlog::DeferredBound;
+use super::bound_report::BoundPassed;
 use super::refusals::InviteRefusals;
+
+/// What [`TransactionConfig::on_bound`] calls.
+pub type OnBound = Arc<dyn Fn(BoundPassed<'_>) + Send + Sync>;
 
 /// Tunables for the transaction layer.
 pub struct TransactionConfig {
@@ -50,8 +54,9 @@ pub struct TransactionConfig {
     /// default, sends them as the CANCEL arrives (RFC 3261 §9.2).
     pub cancel_bound_ms: u64,
     /// Told each time a held ACK, or the held answers to a CANCEL, leave at
-    /// their bound rather than on their consumer's release.
-    pub on_bound: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// their bound rather than on their consumer's release, with the
+    /// transaction that held them.
+    pub on_bound: Option<OnBound>,
     /// Whether a response the TU hands over under a To-tag other than the
     /// bound one fails a debug build loudly (`debug_assert!`) besides being
     /// re-rendered. The wire is corrected either way; `true` — the default —

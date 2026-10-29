@@ -20,6 +20,7 @@ use sip_net_testkit::CaptureIndex;
 
 use super::aftermath::Aftermath;
 use super::parties::Parties;
+use super::window::{self, Windows};
 use super::SweepShape;
 use crate::cluster::Cluster;
 use crate::incident::Incident;
@@ -54,6 +55,11 @@ pub struct CellReport {
     pub fired: Vec<&'static str>,
     /// The evidence rule ended a call of the cell.
     pub evidence: bool,
+    /// The uncut run's window of each cut point of its call.
+    pub windows: Windows,
+    /// The nodes whose transaction layer sent held messages at their bound
+    /// in the run, before the strike or after it, once each.
+    pub bound_passed_on: Vec<String>,
 }
 
 impl CellReport {
@@ -157,6 +163,16 @@ pub async fn run_cell(
         .collect();
 
     let mut cell = CellReport { tier: cluster.fh.tier(), ..CellReport::default() };
+    for pass in turn_points.all_bound_passes() {
+        if !cell.bound_passed_on.contains(&pass.node) {
+            cell.bound_passed_on.push(pass.node);
+        }
+    }
+    if cut.is_none() {
+        let primary = cluster.node(&placement.primary).sip_addr();
+        let entries = cluster.fh.sip_entries();
+        cell.windows = window::measure(&turn_points, &call_ref, &turns, &entries, primary);
+    }
     for fired in cluster.fh.fired_rows() {
         cell.fire(fired.row);
     }

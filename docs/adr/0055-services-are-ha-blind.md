@@ -574,8 +574,10 @@ the re-anchor deadband of each other.
     at every turn up to the strike (the turn probe reports it at the logged
     sub-point); no outbox entry hit the cap (a release because the backup
     left, or one the harness's own hold of an applied sub-point caused, is
-    no cap hit); no transaction layer sent at its bound an ACK or a
-    CANCEL's answers it held for a turn (the probe reports it); the test
+    no cap hit); the transaction layer of the node the kill struck sent at
+    its bound, before the strike, no ACK or CANCEL's answers it held for a
+    turn of a call it still held (the probe reports it, by node and call; a
+    surviving node's loses nothing); the test
     tampered with no replication stream or replica; the incident is a kill. The cell is perfect: no row of any kind opens,
     every party goal is met, the evidence rule (§4) ends no call, and the CDR
     count is §5's.
@@ -717,8 +719,8 @@ the re-anchor deadband of each other.
     CANCEL, so the copy cannot tell it apart from an undecided call; when it
     does say so the copy ends the call with nothing on the wire
     (`undecided_call_settled_on_departure.rs`, the CANCEL-during-decision
-    cell). A layer that sends what it held at its bound places the run in
-    Degraded, as a cap hit does;
+    cell). The dead node's layer sending what it held at its bound before
+    the kill places the cell in Degraded, as a cap hit does;
   - `W-stale-after-final`, a kill of the primary, a stall past the cap then
     a kill, and a split, healed or not, in the Degraded tier: a copy's
     provisional or non-2xx after the final the other owner sent the caller,

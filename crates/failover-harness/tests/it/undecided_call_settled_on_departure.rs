@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use b2bua::decision::ScriptedDecisionEngine;
 use failover_harness::{
-    assert_call_fully_released, total_cdrs_for, FailoverHarness, Incident, Transitional,
+    assert_call_fully_released, total_cdrs_for, FailoverHarness, Incident, Tier, Transitional,
     WorkerHealth,
 };
 use scenario_harness::agent::Agent;
@@ -474,6 +474,9 @@ async fn a_setup_cancelled_during_its_decision_is_asked_again_by_its_backup() {
     fh.advance(Duration::from_millis(200)).await;
 
     fh.strike(Incident::PrimaryKilled);
+    // The node the kill strikes sent the CANCEL's answers at their bound,
+    // before the turn that took the CANCEL wrote.
+    assert_eq!(fh.tier(), Some(Tier::Degraded));
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
     kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
     let mut uas = bob.receive("INVITE").await;
