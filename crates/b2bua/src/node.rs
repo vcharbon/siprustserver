@@ -161,8 +161,7 @@ impl B2buaCore {
             )
         });
         refusals.advertise(&config.minted_final_advertisement);
-        let verdict_bounds = replication.as_ref().map(|s| s.verdict).unwrap_or_default();
-        let path = replication.as_ref().map(|s| s.write_path).unwrap_or_default();
+        let (verdict_bounds, path) = ReplicationSetup::bounds_of(replication.as_ref());
         let txn_config =
             txn_config(&config, &id_gen, &refusals, deferred_ceilings, &path, &turn_probe);
         let (txn, txn_rx) = TransactionLayer::spawn(endpoint, parser, txn_config);

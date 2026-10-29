@@ -14,9 +14,10 @@ impl Owner {
     /// Delete every client and server transaction attributed to `call_ref`,
     /// Accepted client ones included, their timers with them, owing nothing:
     /// no CANCEL, no final, no retransmission. The things sent are those held
-    /// for a final already taken: the ACK a client INVITE holds for its
-    /// non-2xx (`layer::held_ack`), and the 200 and 487 a server INVITE holds
-    /// for the CANCEL that cancelled it (`layer::held_cancel`). The
+    /// for a message already taken: the ACK a client INVITE holds for its
+    /// non-2xx (`layer::held_ack`), and the 200 a server INVITE holds for the
+    /// CANCEL that cancelled it (`layer::held_cancel`); its 487 is the node
+    /// serving the call's to send. The
     /// call's self-release watch goes too, so no `CallQuiesced` follows.
     /// Replies with how many went.
     pub(super) async fn relinquish_call(
@@ -35,7 +36,7 @@ impl Owner {
             self.send_held_ack(endpoint, branch).await;
         }
         for key in &servers {
-            self.send_held_cancel(endpoint, key).await;
+            self.waive_held_final(key);
         }
         let clients = clients.iter().filter(|b| self.delete_txn(TxnRef::Client(b))).count();
         let servers = servers.iter().filter(|k| self.delete_txn(TxnRef::Server(k.id()))).count();
@@ -58,9 +59,10 @@ impl Owner {
 }
 
 impl Owner {
-    /// Delete the one server transaction `key`, its timers with it, sending
-    /// nothing and owing nothing. Replies whether it was there.
+    /// Delete the one server transaction `key`, its timers with it, owing
+    /// nothing but the 200 to a CANCEL it holds. Replies whether it was there.
     pub(super) fn relinquish_server(&mut self, key: &ServerTxnKey, reply: oneshot::Sender<bool>) {
+        self.waive_held_final(key);
         let _ = reply.send(self.delete_txn(TxnRef::Server(key.id())));
     }
 }

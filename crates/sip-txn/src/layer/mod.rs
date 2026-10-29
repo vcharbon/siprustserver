@@ -40,6 +40,7 @@
 mod accepted;
 mod backlog;
 mod bind;
+mod bound_report;
 mod call_txns;
 mod client;
 mod client_give_up;

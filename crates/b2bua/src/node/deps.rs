@@ -61,6 +61,30 @@ pub struct ReplicationSetup {
     pub verdict: crate::repl::VerdictBounds,
 }
 
+impl ReplicationSetup {
+    /// The dead verdict's bounds and the write path a node runs with,
+    /// `setup` checked ([`Self::check_bounds`]): with no replication, the
+    /// defaults and [`WritePath::unwired`](crate::repl::WritePath::unwired).
+    pub fn bounds_of(setup: Option<&Self>) -> (crate::repl::VerdictBounds, crate::repl::WritePath) {
+        let Some(setup) = setup else {
+            return (Default::default(), crate::repl::WritePath::unwired());
+        };
+        setup.check_bounds();
+        (setup.verdict, setup.write_path)
+    }
+
+    /// Check the write path's and the dead verdict's bounds as the runner's
+    /// boot does: one out of range is logged as an error, and a debug build
+    /// stops on it.
+    pub fn check_bounds(&self) {
+        let checked = self.write_path.validate().and_then(|()| self.verdict.validate());
+        if let Err(why) = &checked {
+            tracing::error!(node = observe::node(), "replication bounds out of range: {why}");
+        }
+        debug_assert!(checked.is_ok(), "replication bounds out of range: {checked:?}");
+    }
+}
+
 /// Wiring inputs for [`B2buaCore::spawn`](super::B2buaCore::spawn).
 pub struct B2buaDeps {
     pub config: B2buaConfig,

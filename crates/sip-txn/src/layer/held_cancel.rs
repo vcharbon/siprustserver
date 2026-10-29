@@ -5,7 +5,10 @@
 //! ([`TransactionLayer::release_cancel`]) or until `cancel_bound_ms` past the
 //! CANCEL, whichever comes first. A copy of the CANCEL or of the INVITE that
 //! arrives meanwhile is absorbed with nothing sent: the held answers answer
-//! it. On release the 487 starts its Timer G ladder and its Timer H hold.
+//! it. On release the 487 starts its Timer G ladder and its Timer H hold. A
+//! transaction that leaves the map holding them owes the CANCEL its 200
+//! (§9.2), and the 487 unless another node serves the call: both are sent at
+//! the end of the layer's turn.
 //!
 //! [`TransactionLayer::release_cancel`]: crate::TransactionLayer::release_cancel
 
@@ -68,11 +71,27 @@ impl Owner {
         }
     }
 
-    /// Tell [`TransactionConfig::on_bound`](crate::TransactionConfig) that
-    /// held messages left at their bound.
-    pub(super) fn told_bound(&self) {
-        if let Some(on_bound) = &self.on_bound {
-            on_bound();
+    /// What a transaction leaving the map with `held` owes: queued for the
+    /// end of the turn.
+    pub(super) fn owe_held_cancel(&mut self, held: UnsentCancel) {
+        self.held_cancels.remove(&held.held_as);
+        self.owed_sends.extend(held.cancel_ok);
+        self.owed_sends.extend(held.terminated);
+    }
+
+    /// The server transaction `key` names leaves for another node, which
+    /// serves its INVITE's final: of what it holds only the CANCEL's 200 is
+    /// owed.
+    pub(super) fn waive_held_final(&mut self, key: &ServerTxnKey) {
+        if let Some(held) = self.server_mut(key.id()).and_then(|t| t.unsent_cancel.as_mut()) {
+            held.terminated = None;
+        }
+    }
+
+    /// Send what transactions that left the map this turn owed.
+    pub(super) async fn flush_owed_sends(&mut self, endpoint: &dyn UdpEndpoint) {
+        for (buf, dest) in std::mem::take(&mut self.owed_sends) {
+            self.send_buffer(endpoint, &buf, dest).await;
         }
     }
 

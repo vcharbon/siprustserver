@@ -90,6 +90,7 @@ pub(super) async fn run(
         // End-of-turn: emit deferred CallQuiesced notices AFTER this turn's
         // protocol events, so the router never self-releases a takeover copy ahead
         // of the ACK/Timeout that cleared the call's last txn (ADR-0014 ordering).
+        owner.flush_owed_sends(endpoint).await;
         owner.flush_pending_quiesce();
         // Sample the DelayQueue depth (O(1)) so a timer/slab leak is visible even
         // when active_transactions is flat (the no-chaos RSS-climb localisation).

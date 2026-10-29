@@ -67,3 +67,28 @@ async fn the_answers_nobody_releases_leave_at_their_bound() {
     elapse_ms(60).await;
     assert_eq!(answers(&stack), (1, 1), "sent at the bound");
 }
+
+/// A transaction relinquished while it holds the answers to a CANCEL owes
+/// the CANCEL its 200 (§9.2) and leaves the 487 to the node serving the call;
+/// nothing stays held for it.
+#[tokio::test(start_paused = true)]
+async fn a_relinquished_transaction_sends_the_cancels_200_and_not_the_487() {
+    let mut stack = holding().await;
+    let branch = "z9hG4bK-held-cxl-relinquish";
+    cancelled(&mut stack, branch).await;
+    let events = stack.drain_events();
+    let Some(TransactionEvent::Cancelled { invite_cseq, from_tag, .. }) =
+        events.iter().find(|e| matches!(e, TransactionEvent::Cancelled { .. }))
+    else {
+        panic!("the Cancelled event goes up: {events:?}");
+    };
+    let (cseq, from_tag) = (invite_cseq.expect("the INVITE's CSeq"), from_tag.clone());
+
+    let key = sip_txn::ServerTxnKey::invite(branch.to_string(), peer_sent_by());
+    assert!(stack.txn.relinquish_server(key).await.unwrap(), "it was there");
+    elapse_ms(20).await;
+    assert_eq!(answers(&stack), (1, 0), "the 200 leaves, the 487 does not");
+    assert!(!stack.txn.release_cancel(CALL_ID, &from_tag, cseq).await.unwrap(), "none held");
+    elapse_ms(BOUND).await;
+    assert_eq!(answers(&stack), (0, 0), "nothing at the bound");
+}

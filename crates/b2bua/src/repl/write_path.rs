@@ -1,8 +1,9 @@
 //! The write path's settings (ADR-0055 §3): the replication sync level, how
 //! long an outbox entry waits for its backup at most, how long the
-//! transaction layer holds the ACK of a callee's non-2xx final for the turn
-//! that releases it, and the backlog marks past which new calls get no
-//! backup. The cap, the ACK bound and the marks derive from the SIP timers.
+//! transaction layer holds the ACK of a callee's non-2xx final, and the 200
+//! to a CANCEL with the 487 to its INVITE, for the turn that releases them,
+//! and the backlog marks past which new calls get no backup. The cap, the
+//! ACK and CANCEL bounds and the marks derive from the SIP timers.
 
 use std::time::Duration;
 
@@ -77,6 +78,12 @@ impl Default for WritePath {
 }
 
 impl WritePath {
+    /// The write path of a node with no replication: no backup to wait for,
+    /// so the transaction layer holds neither an ACK nor a CANCEL's answers.
+    pub fn unwired() -> Self {
+        Self { ack_bound: Duration::ZERO, cancel_bound: Duration::ZERO, ..Self::default() }
+    }
+
     /// `Err` naming the setting out of range: a cap not above zero, not below
     /// T1 or not below the §17.2.1 bound, an ACK or CANCEL bound not above
     /// the cap or not below T1, or backlog marks out of order.

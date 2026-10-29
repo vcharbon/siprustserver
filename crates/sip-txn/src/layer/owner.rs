@@ -9,6 +9,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
+
 use sip_message::SipParser;
 use sip_net::UdpEndpoint;
 use tokio::sync::mpsc;
@@ -102,6 +104,9 @@ pub(super) struct Owner {
     /// The INVITE server transactions holding the answers to a CANCEL, by the
     /// INVITE's Call-ID, From-tag and CSeq number (`layer::held_cancel`).
     pub(super) held_cancels: HashMap<(String, String, u32), ServerTxnKey>,
+    /// Held answers to a CANCEL whose transaction left the map this turn,
+    /// sent at its end (`layer::held_cancel`).
+    pub(super) owed_sends: Vec<(Bytes, SocketAddr)>,
     /// The To-tag this node bound to a dialog it answered as UAS, by
     /// (Call-ID, From-tag), kept for Timer L past the transaction so a
     /// CANCEL or a stray answered after the transaction is gone still carries
@@ -153,6 +158,7 @@ impl Owner {
             cancel_bound_ms: config.cancel_bound_ms,
             on_bound: config.on_bound.clone(),
             held_cancels: HashMap::new(),
+            owed_sends: Vec::new(),
             recent_uas_tags: HashMap::new(),
             strict_to_tag: config.strict_to_tag,
             stateless_options: config.stateless_options,
@@ -294,11 +300,14 @@ impl Owner {
             TxnRef::Server(id) => self.servers.remove(&id as &dyn ServerTxnIdentity),
         };
         match removed {
-            Some(t) => {
+            Some(mut t) => {
                 if t.role() == TxnRole::Server {
                     if let Some(tag) = t.bound_to_tag() {
                         self.remember_uas_tag(&t.call_id, &t.from_tag, tag);
                     }
+                }
+                if let Some(held) = t.unsent_cancel.take() {
+                    self.owe_held_cancel(*held);
                 }
                 self.cancel_timer(t.retransmit_key);
                 self.cancel_timer(t.timeout_key);

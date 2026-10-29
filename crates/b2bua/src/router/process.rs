@@ -365,8 +365,11 @@ async fn resident_or_materialised(
     }
 }
 
-/// Whether `event` is a request only a confirmed dialog carries, an ACK or a
-/// BYE (RFC 3261 §13.2.2.4, §15): its sender took a 2xx.
+/// Whether `event` is an ACK or a BYE request. An ACK reaching the router
+/// acknowledges a 2xx: the transaction layer absorbs the ACK of a non-2xx on
+/// the INVITE's own transaction (RFC 3261 §17.2.1). A BYE ends the dialog it
+/// names, early or confirmed (§15). After either, a provisional to the INVITE
+/// tells its sender nothing.
 fn answered(event: &CallEvent) -> bool {
     matches!(event, CallEvent::Sip { message, .. }
         if matches!(message.as_ref(), SipMessage::Request(r)

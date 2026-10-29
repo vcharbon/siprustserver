@@ -85,7 +85,11 @@ worker:
     port: 9092
   # Env by name over the env the chart derives (pod identity, listen and
   # advertise, metrics, outbound proxy, replication, limiter URL, CDR sink,
-  # tracing): a name here overrides a derived one.
+  # tracing): a name here overrides a derived one. The failover timings
+  # (B2BUA_REPL_NOOP_INTERVAL_MS, _IDLE_TIMEOUT_MS, _ACK_BOUND_MS,
+  # _CANCEL_BOUND_MS, B2BUA_DEAD_NOTICE_FRESH_MS, B2BUA_DEAD_VERDICT_HOLD_MS)
+  # are set here; their roles, defaults and relations are the b2bua-runner
+  # configuration reference (crates/b2bua-runner/src/main.rs).
   env: {}
   # EnvVar entries appended after `env` (valueFrom and the like).
   extraEnv: []

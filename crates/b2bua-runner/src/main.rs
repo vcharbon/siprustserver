@@ -78,7 +78,24 @@
 //!   B2BUA_NAMESPACE / B2BUA_REPL_*_MS / B2BUA_DEAD_*_MS  the replication
 //!   grammar, its link and write-path bounds, the held ACK's bound and the
 //!   dead-verdict bounds (see `b2bua_runner_kit::ReplicationSettings`,
-//!   ADR-0045, ADR-0055 §3, ADR-0050 §3)
+//!   ADR-0045, ADR-0055 §3, ADR-0050 §3). The failover timings, each refused
+//!   at boot off its range, the message naming both variables:
+//!   B2BUA_REPL_NOOP_INTERVAL_MS  heartbeat of every served stream    (500)
+//!   B2BUA_REPL_IDLE_TIMEOUT_MS   a silent stream reads down; a dead verdict
+//!                                on a silent peer is confirmed this long
+//!                                after its last frame; >= 2 x the Noop
+//!                                interval                             (2000)
+//!   B2BUA_REPL_ACK_BOUND_MS      the longest the ACK of a callee's non-2xx
+//!                                waits for its turn; above the sync cap,
+//!                                below T1                             (200)
+//!   B2BUA_REPL_CANCEL_BOUND_MS   the longest a CANCEL's 200 and its
+//!                                INVITE's 487 wait for their turn; above
+//!                                the sync cap, below T1               (200)
+//!   B2BUA_DEAD_NOTICE_FRESH_MS   how fresh a proxy's dead notice must be to
+//!                                act on; above zero                   (10000)
+//!   B2BUA_DEAD_VERDICT_HOLD_MS   the longest a verdict waits for the
+//!                                replication link to confirm it; >= the
+//!                                freshness window + Timer F           (42000)
 //!
 //! SIGTERM, or the worker's own endpoint withdrawn with no SIGTERM, latches
 //! the worker into `Draining` (OPTIONS 503 + readiness probe fails) so k8s

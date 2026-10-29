@@ -316,8 +316,9 @@ impl TransactionLayer {
 
     /// Relinquish every transaction of `call_ref`, client and server, to the
     /// node that serves the call now: each is deleted with its timers, nothing
-    /// sent but the held ACK of a non-2xx final one took, nothing owed, and no
-    /// `CallQuiesced` follows. A message for one
+    /// sent but the held ACK of a non-2xx final one took and the held 200 to a
+    /// CANCEL one answered (the 487 to its INVITE is the serving node's),
+    /// nothing else owed, and no `CallQuiesced` follows. A message for one
     /// of them arriving afterwards matches nothing here and is handed up as a
     /// new arrival. Returns how many went. Idempotent.
     pub async fn relinquish_call(&self, call_ref: &str) -> Result<usize, TransactionLayerClosed> {
@@ -341,8 +342,8 @@ impl TransactionLayer {
     }
 
     /// Relinquish the one server transaction `key` to the node that answered
-    /// its request: it is deleted with its timers, nothing sent and nothing
-    /// owed. A retransmission of its request arriving afterwards matches
+    /// its request: it is deleted with its timers, nothing sent but the held
+    /// 200 to a CANCEL it answered, nothing else owed. A retransmission of its request arriving afterwards matches
     /// nothing here and is handed up as a new arrival. Returns whether it was
     /// there. Idempotent.
     pub async fn relinquish_server(

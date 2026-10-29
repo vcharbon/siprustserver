@@ -27,15 +27,16 @@ pub enum TransactionEvent {
         datagram: Bytes,
     },
     /// A CANCEL matched a server INVITE txn; this layer sent the 200/487, or
-    /// holds them for release (`TransactionConfig::cancel_bound_ms`). RFC 3261 §9 scopes a CANCEL to the one INVITE *transaction* it
-    /// matched, so the event carries enough for the consumer to tell an
-    /// initial-INVITE CANCEL (tear the call down) from one targeting an
-    /// in-dialog re-INVITE (end that renegotiation only, keep the call):
-    /// `invite_cseq` is the matched INVITE's CSeq number and `in_dialog` is
-    /// whether its `To` already carried a tag (an established dialog — a
-    /// re-INVITE). Both derive from the matched txn's stored original request;
-    /// `(None, false)` only on the degenerate no-stored-request path, which
-    /// consumers treat as the initial-INVITE (teardown) case.
+    /// holds them for release (`TransactionConfig::cancel_bound_ms`). RFC 3261
+    /// §9 scopes a CANCEL to the one INVITE *transaction* it matched, so the
+    /// event carries enough for the consumer to tell an initial-INVITE CANCEL
+    /// (tear the call down) from one targeting an in-dialog re-INVITE (end
+    /// that renegotiation only, keep the call): `invite_cseq` is the matched
+    /// INVITE's CSeq number and `in_dialog` is whether its `To` already
+    /// carried a tag (an established dialog — a re-INVITE). Both derive from
+    /// the matched txn's stored original request; `(None, false)` only on the
+    /// degenerate no-stored-request path, which consumers treat as the
+    /// initial-INVITE (teardown) case.
     Cancelled {
         call_id: String,
         from_tag: String,
