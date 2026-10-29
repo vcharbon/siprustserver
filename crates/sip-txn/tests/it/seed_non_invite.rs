@@ -137,3 +137,63 @@ async fn a_seeded_server_non_invite_absorbs_copies_until_its_final() {
     assert_eq!(count_responses(&stack.drain_peer(), 200), 1, "a later copy draws it again");
     assert!(stack.drain_events().is_empty());
 }
+
+/// A seeded answered server non-INVITE sends nothing at the seed, answers
+/// each copy of its request with the final it holds and hands none up, and
+/// leaves the map at Timer J from the seed (RFC 3261 §17.2.2).
+#[tokio::test(start_paused = true)]
+async fn a_seeded_answered_server_non_invite_repeats_its_final_until_timer_j() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let (branch, call_id) = ("z9hG4bK-seed-answered-info", "seed-answered-info");
+    let raw = inbound_request("INFO", branch, call_id, Some("peer-tag"));
+    let ok = parse_response(&response_bytes(200, "OK", "INFO", branch, call_id, true));
+    let seed = TxnSeed::ServerNonInviteAnswered {
+        response: ok,
+        dest: addr(PEER),
+        leg_id: Some("a".into()),
+    };
+    assert_eq!(stack.txn.seed(CALL_REF, vec![seed]).await.unwrap(), 1);
+    elapse_ms(60).await;
+    assert!(stack.drain_peer().is_empty(), "nothing leaves at the seed");
+
+    stack.inject(&raw).await;
+    elapse_ms(60).await;
+    assert_eq!(count_responses(&stack.drain_peer(), 200), 1, "a copy draws the final");
+    assert!(stack.drain_events().is_empty(), "and is not handed up");
+
+    elapse_ms(sip_txn::timers::TIMER_J).await;
+    assert_eq!(
+        stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(),
+        0,
+        "Timer J ends the transaction"
+    );
+    stack.inject(&raw).await;
+    elapse_ms(60).await;
+    assert!(stack.drain_peer().is_empty(), "past Timer J the layer answers nothing itself");
+}
+
+/// A copy of the request that opened a transaction before the seed has drawn
+/// no final there: the seed hands that transaction its final and sends it to
+/// that copy, and the next copy draws it again.
+#[tokio::test(start_paused = true)]
+async fn an_answered_seed_gives_its_final_to_the_copy_that_came_first() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let (branch, call_id) = ("z9hG4bK-seed-answered-occ", "seed-answered-occ");
+    let raw = inbound_request("INFO", branch, call_id, Some("peer-tag"));
+    stack.inject(&raw).await;
+    elapse_ms(60).await;
+    assert_eq!(messages(&stack.drain_events()), vec![(false, 0, false)], "the copy is handed up");
+    let ok = parse_response(&response_bytes(200, "OK", "INFO", branch, call_id, true));
+    let seed = TxnSeed::ServerNonInviteAnswered {
+        response: ok,
+        dest: addr(PEER),
+        leg_id: Some("a".into()),
+    };
+    assert_eq!(stack.txn.seed(CALL_REF, vec![seed]).await.unwrap(), 1);
+    elapse_ms(60).await;
+    assert_eq!(count_responses(&stack.drain_peer(), 200), 1, "the first copy is answered");
+    stack.inject(&raw).await;
+    elapse_ms(60).await;
+    assert_eq!(count_responses(&stack.drain_peer(), 200), 1, "the next copy draws the final");
+    assert!(stack.drain_events().is_empty());
+}

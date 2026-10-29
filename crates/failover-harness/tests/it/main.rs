@@ -15,6 +15,7 @@ mod a_returned_primary_serves_its_dialogs;
 mod abandoned_callee_via_lb;
 mod answer_lost;
 mod answer_lost_with_primary_no_answer;
+mod answered_request_repeated_at_the_takeover;
 mod backup_capacity;
 mod call_terminate_on_backup;
 mod caller_copy_takes_over;

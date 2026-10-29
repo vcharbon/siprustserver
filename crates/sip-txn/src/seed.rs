@@ -90,6 +90,16 @@ pub enum TxnSeed {
     /// sent-by and method (RFC 3261 §17.2.3). A retransmission is absorbed
     /// with nothing sent; the consumer's final leaves on it.
     ServerNonInvite { request: SipRequest, leg_id: Option<String> },
+    /// A server non-INVITE this side answered with a final: `response`, the
+    /// final as it left, keyed by its top-Via branch, sent-by and method
+    /// (RFC 3261 §17.2.3). It runs in Completed from the seed for Timer J and
+    /// sends nothing on its own: a copy of the request draws `response`,
+    /// toward the transaction's response target (§18.2.2; `dest` where that
+    /// names no IP) (§17.2.2), so a copy that reaches this node after the
+    /// final was decided elsewhere is never handed up as a new request. A
+    /// transaction already on its key that has sent no final takes `response`
+    /// as its final and sends it to the copy that opened it.
+    ServerNonInviteAnswered { response: SipResponse, dest: SocketAddr, leg_id: Option<String> },
 }
 
 /// What [`TransactionLayer::reoffer`](crate::TransactionLayer::reoffer) made

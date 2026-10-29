@@ -38,6 +38,7 @@
 )]
 
 pub mod answer_deadline;
+pub mod answered_finals;
 pub mod attempts;
 pub use b2bua_sdk::caller_tags;
 pub mod config;

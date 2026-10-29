@@ -35,6 +35,9 @@
 //!   rebuilt from the record, so a copy is absorbed and the final leaves on
 //!   it (§17.2.2). A relay past its deadline has none: it settles as its
 //!   timeout, which answers its originator nothing.
+//! - a **server non-INVITE** this stack answered, while its Completed state
+//!   lasts ([`answered_seeds`]): the final as it left, which a copy of the
+//!   request draws again (§17.2.2) — the record may be ahead of the wire.
 
 use std::collections::HashSet;
 
@@ -74,6 +77,7 @@ pub(super) fn seeds_for(call: &Call, now_ms: i64) -> Vec<TxnSeed> {
                     TxnSeed::ServerRejected { response, .. } => (true, response.top_via()),
                     TxnSeed::ClientNonInvite { request, .. } => (false, request.top_via()),
                     TxnSeed::ServerNonInvite { request, .. } => (true, request.top_via()),
+                    TxnSeed::ServerNonInviteAnswered { response, .. } => (true, response.top_via()),
                 };
                 let branch = via.branch().unwrap_or_default().to_string();
                 if !branch.is_empty() && branches.insert((server, branch)) {
@@ -238,6 +242,39 @@ pub(in crate::router) fn received_record<'a>(
         .filter(|(_, _, r)| !r.is_own() && !invite_record(r))
         .find(|(_, _, r)| pending_via(r).is_some_and(|v| v.branch() == Some(branch)))
         .map(|(_, _, r)| r)
+}
+
+/// Whether `call` holds a final it sent on `branch` to a received `method`
+/// request whose server transaction is Completed at `now_ms`: a copy of that
+/// request draws the final again and is no new request (RFC 3261 §17.2.2).
+pub(in crate::router) fn names_answered_branch(
+    call: &Call,
+    branch: &str,
+    method: &str,
+    now_ms: i64,
+) -> bool {
+    !branch.is_empty()
+        && call
+            .answered
+            .iter()
+            .any(|a| a.branch == branch && a.method == method && a.completed_at(now_ms))
+}
+
+/// The seeds of the received non-INVITE requests `call` answered whose
+/// server transactions are Completed at `now_ms`: each final, as it left,
+/// which a copy of its request draws (RFC 3261 §17.2.2) — the record may
+/// hold the final before the wire saw it.
+pub(super) fn answered_seeds(call: &Call, now_ms: i64) -> Vec<TxnSeed> {
+    call.answered
+        .iter()
+        .filter(|a| a.completed_at(now_ms))
+        .filter_map(|a| {
+            let response = parse_emitted_response(&a.response)?;
+            let (_, (host, port)) = a.response.wire();
+            let dest = sip_net::ip_socket_addr(host, port)?;
+            Some(TxnSeed::ServerNonInviteAnswered { response, dest, leg_id: None })
+        })
+        .collect()
 }
 
 /// `call` without the relay a copy of its originator's request on `branch`

@@ -87,7 +87,7 @@ pub use model::{
 pub use model::{DialogUsage, RequestOrigin, RequestRecord, SentRequest, KEEPALIVE_AUTHOR};
 // The retained emission every dialog-level retransmission repeats (ADR-0032 X3)
 // and the obligation that discharges its ladder (X4).
-pub use model::{Obligation, Repeat, Repeated, RetainedEmission};
+pub use model::{AnsweredRequest, Obligation, Repeat, Repeated, RetainedEmission};
 // The subscriptions this stack notifies on a dialog (RFC 6665) and its
 // requests waiting there.
 pub use model::{Behind, NotifyInFlight, Queued, QueuedRequest, Subscription, SubscriptionState};

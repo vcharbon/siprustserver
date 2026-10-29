@@ -19,6 +19,8 @@ use super::owner::Owner;
 use super::txn::{CancelWire, HeldCancel, NewTransaction, Timer, TxnId, TxnRef, TxnState};
 use super::via_marks::{extract_via_custom_params, ViaMarks};
 
+mod non_invite;
+
 impl Owner {
     /// Put every seed in the map of its role, with the CANCEL a client INVITE
     /// seed carries, and return how many went in. A seed whose
@@ -74,6 +76,9 @@ impl Owner {
                 }
                 TxnSeed::ServerNonInvite { request, leg_id } => {
                     self.seed_server_non_invite(call_ref, request, leg_id)
+                }
+                TxnSeed::ServerNonInviteAnswered { response, dest, leg_id } => {
+                    self.seed_answered_non_invite(endpoint, call_ref, response, dest, leg_id).await
                 }
             };
             if went_in {
@@ -319,85 +324,6 @@ impl Owner {
             self.seed_held_cancel(&branch, *cancel, dest);
         }
         self.release_seed_resend(&branch);
-        true
-    }
-
-    /// A client non-INVITE keyed by `request`'s branch, attributed from its
-    /// Via as `do_send_request` attributes what it sends (falling back to
-    /// `call_ref`), `Trying`, sending `request`'s image once now, ahead of
-    /// anything sent after the seed, then on its Timer E ladder from now — the
-    /// next copy T1 after the seed — and giving up `bound_ms` from now, at most
-    /// Timer F. `false` when the request names no branch or a client
-    /// transaction holds it.
-    async fn seed_client_non_invite(
-        &mut self,
-        endpoint: &dyn UdpEndpoint,
-        call_ref: &str,
-        request: SipRequest,
-        dest: SocketAddr,
-        bound_ms: u64,
-    ) -> bool {
-        let Some(branch) = request.top_via().branch().filter(|b| !b.is_empty()).map(str::to_string)
-        else {
-            return false;
-        };
-        if self.clients.contains_key(&branch) {
-            return false;
-        }
-        let ViaMarks { call_ref: via_call_ref, leg_id, incarnation_mark } =
-            extract_via_custom_params(&request);
-        let buf = request.image().clone();
-        let (timer_f, timeout_kind) = self.client_timeout(TxnKind::NonInvite, &request);
-        let max_ms = bound_ms.min(timer_f);
-        self.open_txn(NewTransaction {
-            id: TxnId::Client(branch.clone()),
-            kind: TxnKind::NonInvite,
-            method: request.method().clone(),
-            cseq: request.cseq().seq(),
-            call_id: request.call_id().as_str().to_string(),
-            from_tag: request.from().tag().unwrap_or_default().to_string(),
-            original_request: None,
-            call_ref: via_call_ref.or_else(|| Some(call_ref.to_string())),
-            leg_id,
-            incarnation_mark,
-            state: TxnState::Trying,
-            destination: Some(dest),
-        });
-        self.start_client_retransmit(&branch, buf.clone(), dest, max_ms, timeout_kind);
-        self.send_buffer(endpoint, &buf, dest).await;
-        true
-    }
-
-    /// A server non-INVITE holding no response, keyed by `request`'s top Via
-    /// and method, `Trying`: a retransmission is absorbed with nothing sent
-    /// until the consumer's final leaves on it (RFC 3261 §17.2.2), to the top
-    /// Via's response target (§18.2.2). `false`
-    /// when the request names no branch or its identity is occupied — the
-    /// occupant is the copy that triggered the materialisation.
-    fn seed_server_non_invite(
-        &mut self,
-        call_ref: &str,
-        request: SipRequest,
-        leg_id: Option<String>,
-    ) -> bool {
-        let Some(key) = ServerTxnKey::of(&request) else { return false };
-        if self.server(key.id()).is_some() {
-            return false;
-        }
-        self.open_txn(NewTransaction {
-            id: TxnId::Server(key.clone()),
-            kind: TxnKind::NonInvite,
-            method: request.method().clone(),
-            cseq: request.cseq().seq(),
-            call_id: request.call_id().as_str().to_string(),
-            from_tag: request.from().tag().unwrap_or_default().to_string(),
-            original_request: None,
-            call_ref: Some(call_ref.to_string()),
-            leg_id,
-            incarnation_mark: None,
-            state: TxnState::Trying,
-            destination: response_destination(request.top_via()),
-        });
         true
     }
 

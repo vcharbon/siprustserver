@@ -51,6 +51,7 @@
 //!   - [`services`] — per-service typed runtime slices + opaque [`ExtMap`]
 //!   - [`sm`] — state-machine identifiers (ADR-0016)
 
+pub mod answered_request;
 pub mod attempt;
 pub mod cdr;
 pub mod deadline;
@@ -80,6 +81,7 @@ pub mod subscription;
 pub mod termination;
 pub mod timer;
 
+pub use answered_request::AnsweredRequest;
 pub use attempt::{Attempt, AttemptCause, AttemptId, AttemptOutcome};
 pub use cdr::{CdrEvent, CdrEventType};
 pub use deadline::{millis_i64, millis_u64, Deadline};

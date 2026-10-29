@@ -1,7 +1,8 @@
 //! The landing pass a turn's result takes before the shell persists it
 //! (ADR-0052 §6): the answer deadlines of the requests the turn sent off its
 //! turn, the refresh arming, the stated headers on every outbound message, the
-//! message ring's record of what the turn sends and the turn's seal.
+//! non-INVITE finals it sends, the message ring's record of what the turn
+//! sends and the turn's seal.
 
 use std::time::Duration;
 
@@ -33,6 +34,9 @@ pub fn land(result: HandlerResult, landing: &Landing<'_>, now_ms: i64) -> Handle
     // Every message the turn sends takes the call's stated headers before the
     // ring records it or the wire sees it.
     let result = crate::rules::stated_headers::stamp_outbound(result);
+    // Every non-INVITE final the turn sends is on the record as it leaves, so
+    // a copy of its request draws it again wherever the call is served.
+    let result = crate::answered_finals::retain(result, now_ms);
     // What the turn sends is on the record before the record lands, and a
     // termination this turn began is cut after it: every ring entry with
     // `seq <= termination.last_seq` was received or sent as part of

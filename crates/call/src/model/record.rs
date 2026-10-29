@@ -210,6 +210,11 @@ pub struct Call {
     /// node's from the call's birth, set by whichever node acts on it.
     #[serde(default)]
     pub leg_space: super::leg_space::LegSpace,
+    /// The received non-INVITE requests answered with a final whose server
+    /// transaction is still Completed, oldest first: what a copy of one draws
+    /// again (RFC 3261 §17.2.2).
+    #[serde(default)]
+    pub answered: Vec<super::answered_request::AnsweredRequest>,
 }
 
 impl Call {

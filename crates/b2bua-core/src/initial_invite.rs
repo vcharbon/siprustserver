@@ -166,6 +166,7 @@ pub fn build_initial_call(
         sm_cursors: std::collections::BTreeMap::new(),
         tag_seed,
         leg_space: call::LegSpace::Creator,
+        answered: Vec::new(),
     }
 }
 

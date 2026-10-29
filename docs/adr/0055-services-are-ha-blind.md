@@ -150,7 +150,12 @@ final its record keeps, sent on Timer G from the seed until her ACK
 the latest provisional its record keeps, which a copy of her INVITE draws
 again (§13.3.1.1); a reliable one is left to its own ladder (RFC 3262 §3). A
 reclaim re-sends none: its record may be behind what the takeover copy sent
-her (§8).
+her (§8). The final of a received non-INVITE request is kept on the record
+while its server transaction is Completed, Timer J from the final
+(§17.2.2), and seeded Completed on it: a copy of the request that reaches the
+node serving the call draws that final, which the record may hold before the
+wire saw it, and the rules never read it as a new request (a second relay, a
+REFER read as glare).
 
 ### 3. The replication write path
 

@@ -34,8 +34,9 @@
 //!    the call parked unarmed until [`arm`] runs the rest;
 //! 6. `timers.restore`;
 //! 7. **seed** — the in-flight transactions the record names, the answered
-//!    INVITEs whose 2xx it retains, and every non-INVITE request record's
-//!    client and server halves ([`seeds::seeds_for`]), are rebuilt in the
+//!    INVITEs whose 2xx it retains, every non-INVITE request record's client
+//!    and server halves ([`seeds::seeds_for`]) and every answered non-INVITE
+//!    request still Completed ([`seeds::answered_seeds`]), are rebuilt in the
 //!    transaction layer, on every origin, so the layer owns their ACKs, their
 //!    Timer D / E / G / L and the copies of their requests;
 //! 8. takeover only: `mark_takeover` + `watch_self_release`, so the copy is
@@ -248,6 +249,7 @@ async fn serve(
 ) -> Option<usize> {
     ctx.timers.restore(call.timers.clone(), call_ref.to_string(), call.incarnation()).await;
     let mut seeds = seeds::seeds_for(call, now_ms);
+    seeds.extend(seeds::answered_seeds(call, now_ms));
     if !matches!(origin, Origin::Takeover) {
         seeds = seeds::without_provisional(seeds);
     }
@@ -298,7 +300,9 @@ pub(super) async fn arm(
 /// the round nor refuse its copy as glare); a non-INVITE
 /// request only when the record names its branch as a request it relayed or
 /// holds ([`seeds::names_received_branch`]: a copy of it is absorbed, never
-/// relayed a second time) — a relay whose client transaction this node does
+/// relayed a second time) or answered while its server transaction is
+/// Completed ([`seeds::names_answered_branch`]: a copy draws the final the
+/// record holds) — a relay whose client transaction this node does
 /// not hold is superseded instead: dropped from the record, and the copy
 /// relayed afresh; any other request, a response a transaction here already
 /// took, and any non-SIP event are the turn's to process. `Matched`: the layer re-emitted
@@ -323,7 +327,10 @@ pub(super) async fn reoffer_trigger(
         SipMessage::Request(req) => {
             let branch = req.top_via().branch().unwrap_or_default();
             match seeds::received_record(&call, branch) {
-                None => false,
+                None => {
+                    let now_ms = ctx.clock.now_ms();
+                    seeds::names_answered_branch(&call, branch, req.method().as_str(), now_ms)
+                }
                 Some(record) => match record.branch() {
                     // A relay whose client transaction is another node's:
                     // its final follows that relay's Via there, so its

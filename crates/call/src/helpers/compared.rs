@@ -15,7 +15,8 @@
 //! - the container's value stands: the keepalive request records, the
 //!   keepalive and limiter-refresh ledger entries, the ladder rungs a quiet
 //!   turn moves (none changes a dialog), the trace fields, the leg-id space
-//!   the node acting on the call mints from.
+//!   the node acting on the call mints from, the finals of the answered
+//!   non-INVITE requests a copy of one draws again.
 
 use std::collections::BTreeSet;
 
@@ -71,6 +72,7 @@ pub fn same_state(a: &Call, b: &Call) -> bool {
         sm_cursors,
         tag_seed,
         leg_space: _,
+        answered: _,
     } = a;
     *call_ref == b.call_ref
         && same_leg(a_leg, &b.a_leg)
