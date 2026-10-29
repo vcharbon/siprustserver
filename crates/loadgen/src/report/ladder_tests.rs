@@ -124,3 +124,23 @@ fn past_its_key_cap_a_ladder_folds_new_arrows_into_other_and_says_so() {
     capped.fold(one, &OK);
     assert!(capped.project("s", "alice").truncated, "a call past its own cap truncates too");
 }
+
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn a_late_reanswer_counts_on_its_arrow_folded_before_or_after() {
+    let mut agg = LadderAgg::new(false);
+    let bob_invite = key("SUT", "bob", "INVITE", 1);
+    agg.late(&bob_invite);
+    agg.fold(call(&[]), &OK);
+    agg.late(&bob_invite);
+    agg.late(&key("SUT", "alice", "486 (INVITE)", 1));
+    let l = agg.project("basic_call", "alice");
+    let late = |label: &str, to: &str| {
+        l.arrows.iter().find(|a| a.label == label && a.to == to).map(|a| a.late_answered)
+    };
+    assert_eq!(late("INVITE", "bob"), Some(2), "a repair before its call folded counts too");
+    assert_eq!(late("486 (INVITE)", "alice"), Some(1));
+    assert_eq!(late("INVITE", "SUT"), Some(0));
+    assert_eq!(l.arrows.iter().find(|a| a.to == "bob").map(|a| a.count), Some(1), "one call");
+    assert_eq!(agg.late, 3, "the run's total");
+}

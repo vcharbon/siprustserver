@@ -11,11 +11,12 @@ use std::time::Duration;
 use scenario_harness::claim::{resolve_claim, ClaimRule};
 use scenario_harness::legpick::LegInfo;
 use sip_message::preparse::is_invite_request_buffer;
-use sip_message::sniff::call_id;
+use sip_message::sniff::{call_id, is_response};
 use sip_net::queue::PacketQueue;
 use sip_net::{UdpEndpoint, UdpPacket};
 use tokio::time::Instant;
 
+use super::late_answer::LateReply;
 use super::late_final::Reply;
 use super::stats::{MuxStats, OrphanReason};
 use super::{CallSlot, Delivery, Key, MuxSocket};
@@ -35,12 +36,14 @@ pub(super) async fn dispatch_loop(mux: std::sync::Weak<MuxSocket>, endpoint: Arc
 
 /// Demux precedence: (1) known Call-ID — covers EVERY in-dialog datagram with
 /// no token or R-URI cooperation, except a new INVITE on a caller's own
-/// Call-ID (`call_id_reuse` orphan); (2) correlation token — an initial INVITE
-/// spawning a new leg of a known call, unless its Call-ID was released by a
-/// finished call (`released`) or the call's caller has not sent its INVITE yet
-/// (`early`); (3) a final to the INVITE a released caller dialog last sent,
-/// answered with the datagrams this returns (its ACK, and for a 2xx the BYE
-/// ending the dialog); (4) orphan.
+/// Call-ID (`call_id_reuse` orphan); (2) a retransmitted request a released
+/// dialog's agent answered, answered again with the held final (its ACK
+/// absorbed for an INVITE's non-2xx); (3) correlation token — an initial
+/// INVITE spawning a new leg of a known call, unless its Call-ID was released
+/// by a finished call (`released`) or the call's caller has not sent its
+/// INVITE yet (`early`); (4) a final to the INVITE a released caller dialog
+/// last sent, answered with the datagrams this returns (its ACK, and for a 2xx
+/// the BYE ending the dialog); (5) orphan.
 fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Vec<(Vec<u8>, SocketAddr)> {
     let cid = call_id(raw);
     let mut g = mux.reg.lock().unwrap();
@@ -61,7 +64,22 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Vec<(Vec<u8>, SocketAd
             return Vec::new();
         }
     }
-    // 2. A new leg of a known call: an INITIAL INVITE whose Call-ID we have not
+    // 2. A retransmission of a request a released dialog's agent answered.
+    if let Some(cid) = cid.as_deref().filter(|_| !is_response(raw)) {
+        match g.released_answer(cid, raw, Instant::now()) {
+            LateReply::Reanswer(answer, repair) => {
+                drop(g);
+                mux.stats.late_answered.fetch_add(1, Ordering::Relaxed);
+                if let Some(repair) = repair {
+                    repair.record();
+                }
+                return vec![(answer, src)];
+            }
+            LateReply::Absorbed => return Vec::new(),
+            LateReply::NotHeld => {}
+        }
+    }
+    // 3. A new leg of a known call: an INITIAL INVITE whose Call-ID we have not
     //    seen, carrying our per-call token. Only an initial INVITE may spawn a
     //    leg (an in-dialog request with an unknown Call-ID is a stray, never a
     //    new dialog). The token entry is NON-consuming: it persists for the
@@ -170,7 +188,7 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Vec<(Vec<u8>, SocketAd
         handle_inbound(mux, &delivery, raw, src);
         return Vec::new();
     }
-    // 3. A late final of a released caller's INVITE transaction.
+    // 4. A late final of a released caller's INVITE transaction.
     let late = cid.as_deref().and_then(|c| g.released_invite(c, Instant::now()));
     match late.map_or(Reply::NotHeld, |held| held.on_final(raw)) {
         Reply::Absorbed => return Vec::new(),
@@ -184,7 +202,7 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) -> Vec<(Vec<u8>, SocketAd
         }
         Reply::NotHeld => {}
     }
-    // 4. Not a known dialog and not an initial INVITE → a late straggler.
+    // 5. Not a known dialog and not an initial INVITE → a late straggler.
     mux.stats.orphan(OrphanReason::Stray, raw);
     Vec::new()
 }

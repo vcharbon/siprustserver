@@ -393,6 +393,7 @@ loadgen loadgen_mux_token_collision_total counter semi_open {stream}
 loadgen loadgen_mux_caller_key_mismatch_total counter semi_open {stream}
 loadgen loadgen_mux_key_cooling_total counter semi_open {stream}
 loadgen loadgen_mux_claim_unfired_total counter semi_open {stream}
+loadgen loadgen_mux_late_retransmission_answered_total counter semi_open {stream}
 loadgen loadgen_mux_inbox_drop_total counter semi_open {stream}
 loadgen loadgen_mux_delivered_total counter semi_open {stream}
 loadgen loadgen_drop_total counter semi_open {stream,dir}

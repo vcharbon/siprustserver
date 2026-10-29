@@ -104,13 +104,9 @@ async fn a_failure_stays_on_the_message_before_the_teardown() {
         Arc::new(Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 }));
     let mut c = cfg(b2bua.addr, 2.0, 1, 4, 0xB7E);
     c.default_tuning = CallTuning {
-        drop_nth: Some(TargetedDrop {
-            method: "INVITE",
-            nth: 1,
-            permanent: true,
-            dir: DropDir::Inbound,
-            leg: Some("bob"),
-        }),
+        drop_nth: Some(
+            TargetedDrop::request("INVITE", 1, DropDir::Inbound).permanent().on_leg("bob"),
+        ),
         ..CallTuning::default()
     };
     Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport).run().await;

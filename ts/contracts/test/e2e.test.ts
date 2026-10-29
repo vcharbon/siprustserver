@@ -257,6 +257,7 @@ describe("a load-run index", () => {
         rejected: 0,
         retransmissionsReceived: 4,
         retransmissionsResent: 1,
+        lateAnswered: 2,
         p50Ms: 10,
         p99Ms: 40
       }
@@ -284,6 +285,7 @@ describe("a load-run index", () => {
             retransmissions: 1,
             resent: 0,
             meanOffsetMs: 20,
+            lateAnswered: 3,
             errors: [{ class: "timeout", count: 2 }]
           }
         ],
@@ -313,6 +315,7 @@ describe("a load-run index", () => {
       dropsIn: 5,
       dropsOut: 6,
       inboxDrops: 0,
+      lateAnswered: 2,
       ringingExpected: 1185,
       ringingReceived: 1184
     },

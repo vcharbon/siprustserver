@@ -10,8 +10,8 @@ use std::sync::Arc;
 use tokio::time::Instant;
 
 use super::rtt::{RttSink, RttTracker};
-use super::tally::CallTally;
-use sip_message::sniff::identity;
+use super::tally::{CallTally, LateRepair};
+use sip_message::sniff::{identity, Identity};
 
 /// The endpoint of a call a datagram crossed: its caller, or the callee leg
 /// bound under this role.
@@ -95,6 +95,12 @@ impl Taps {
         if let Some(wire) = &self.wire {
             wire(self.side(), Dir::In, raw);
         }
+    }
+
+    /// The report of a late re-send of `answer`, a final this endpoint sent
+    /// (see [`CallTally::late_repair`]).
+    pub(in crate::mux) fn late_repair(&self, answer: &Identity<'_>) -> Option<LateRepair> {
+        self.tally.as_ref()?.late_repair(self.leg.as_deref(), answer)
     }
 
     /// A re-send this endpoint's retransmit engine made.

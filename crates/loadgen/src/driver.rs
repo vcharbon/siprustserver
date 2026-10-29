@@ -297,7 +297,7 @@ pub(crate) async fn run_one(
     let draws = if from_user && case.is_some() { KEY_DRAWS } else { 1 };
     let mut draw = 0;
     let rtts = CallRtts::new(reporter.clone(), id);
-    let tally = Arc::new(CallTally::new(CALLER));
+    let tally = Arc::new(CallTally::new(CALLER).with_late_sink(reporter.late_sink(id)));
     let (core, dwells, banner, resolved_input, token, net, binder, alice, callee_agents) = loop {
         draw += 1;
         // Resolve THIS call's binding from the attached Test case (pool walk +

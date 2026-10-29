@@ -21,6 +21,7 @@ use sip_net::{
 };
 use tokio::time::Instant;
 
+use super::late_answer::SentAnswers;
 use super::late_final::SentInvites;
 use super::loss::{DropDir, DropModel, TargetedDrop};
 use super::retransmit::CallTxns;
@@ -285,6 +286,7 @@ impl SignalingNetwork for MuxNetwork {
             txns,
             taps,
             invites: (role == Role::Caller).then(Default::default),
+            answers: SentAnswers::default(),
         }))
     }
 
@@ -335,6 +337,9 @@ struct MuxEndpoint {
     /// A caller's INVITEs still open to a non-2xx final; handed to the
     /// registry on `Drop` so a late final is still ACKed.
     invites: Option<Arc<SentInvites>>,
+    /// The finals this endpoint's agent sent; handed to the registry on
+    /// `Drop` so a retransmitted request still draws its answer.
+    answers: SentAnswers,
 }
 
 #[async_trait]
@@ -396,6 +401,7 @@ impl UdpEndpoint for MuxEndpoint {
         if let Some(invites) = &self.invites {
             invites.on_outbound(buf, dst);
         }
+        self.answers.on_outbound(buf, self.taps.as_deref());
         // A round trip runs from the first transmission attempt, lost or not.
         if let Some(taps) = &self.taps {
             taps.on_outbound(buf, Instant::now());
@@ -456,8 +462,8 @@ impl Drop for MuxEndpoint {
         // leg's Call-ID into its keyset under the registry lock).
         let mut g = self.mux.reg.lock().unwrap();
         let keys: Vec<Key> = self.keyset.lock().unwrap().drain(..).collect();
-        let invites = |c: &str| self.invites.as_ref().and_then(|i| i.take(c));
-        g.release_keys(keys, invites, Instant::now() + RELEASE_HOLD, &self.mux.stats);
+        let held = |c: &str| (self.invites.as_ref().and_then(|i| i.take(c)), self.answers.take(c));
+        g.release_keys(keys, held, Instant::now() + RELEASE_HOLD, &self.mux.stats);
         drop(g);
         self.queue.close();
         // Stop this call's resender tasks now (call ended) rather than letting them

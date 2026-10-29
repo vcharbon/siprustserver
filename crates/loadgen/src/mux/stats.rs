@@ -40,6 +40,10 @@ pub struct MuxStats {
     /// each answered with its ACK, the first with the BYE ending the dialog
     /// (RFC 3261 §13.2.2.4, §15) — never an orphan.
     pub late_answer_ended: AtomicU64,
+    /// Requests (retransmissions) on a dialog its call already released,
+    /// answered again with the final its agent sent (RFC 3261 §17.2.2) —
+    /// never an orphan.
+    pub late_answered: AtomicU64,
     pub pending_expired: AtomicU64,
     pub inbox_drop: AtomicU64,
     pub delivered: AtomicU64,
@@ -212,6 +216,7 @@ impl MuxCore {
         one(&mut out, &c::MUX_CALLER_KEY_MISMATCH, load(&s.caller_key_mismatch));
         one(&mut out, &c::MUX_KEY_COOLING, load(&s.key_cooling));
         one(&mut out, &c::MUX_CLAIM_UNFIRED, load(&s.claim_unfired));
+        one(&mut out, &c::MUX_LATE_ANSWERED, load(&s.late_answered));
         one(&mut out, &c::MUX_INBOX_DROP, load(&s.inbox_drop));
         one(&mut out, &c::MUX_DELIVERED, load(&s.delivered));
         let drops = [([st, "out"], load(&s.dropped_out)), ([st, "in"], load(&s.dropped_in))];

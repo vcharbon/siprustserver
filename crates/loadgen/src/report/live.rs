@@ -65,6 +65,11 @@ fn retransmissions(g: &Inner) -> (u64, u64) {
     g.ladders.values().fold((0, 0), |(r, s), l| (r + l.received, s + l.resent))
 }
 
+/// The requests answered again after their call ended, so far.
+fn late_answered(g: &Inner) -> u64 {
+    g.ladders.values().map(|l| l.late).sum()
+}
+
 impl Reporter {
     /// Milliseconds from the run's start to `at`.
     pub fn ms_since_start(&self, at: Instant) -> u64 {
@@ -117,6 +122,7 @@ impl Reporter {
             rejected: rejected + g.shed.values().sum::<u64>(),
             received: retransmissions(&g).0,
             resent: retransmissions(&g).1,
+            late: late_answered(&g),
         };
         let Live { series, latency, .. } = &mut g.live;
         series.tick(now_ms, totals, latency)

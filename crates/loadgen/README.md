@@ -262,6 +262,15 @@ INVITE on a Call-ID a finished call released within 64·T1 is a
 its INVITE is a `reason="early"` orphan. A new INVITE reusing a caller's own
 Call-ID (RFC 3261 §8.1.1.4) is a `reason="call_id_reuse"` orphan.
 
+A server transaction outlives its call (RFC 3261 §17.2.2, Timer J): for the
+same 64·T1 a released Call-ID keeps the finals its agents sent to the requests
+of the dialog (every non-INVITE final, an INVITE's non-2xx final), at most the
+last 8 per dialog. A retransmission of an answered request arriving after the
+call ended (the final was lost, or the SUT re-sent before it got it) is answered
+again with the same final, counted `loadgen_mux_late_retransmission_answered_total`
+and never an orphan; the ACK of a held INVITE non-2xx final is absorbed. A
+request with no held answer stays a `reason="stray"` orphan.
+
 Correlation failures are observable either way: an arriving initial INVITE with
 no extractable token counts `loadgen_mux_orphan_total{reason="no_header"}`; an
 extracted token matching no pending call counts `reason="unknown_token"`.
@@ -503,7 +512,8 @@ The report is written to `--out-dir`, bucketed per `(scenario × result-class ×
 
 - **`index.html`** — in order: the command line, the headline figures (elapsed,
   target vs achieved cps, in flight, placed / ok / failed, every rejection
-  source, injected drops, mux orphans and inbox drops, 18x delivery), the time
+  source, injected drops, mux orphans, late retransmissions answered and inbox
+  drops, 18x delivery), the time
   series (a window every 5 s, adjacent windows merging past 720 so the whole run
   stays covered: placed, ok, failed, rejected, error %, p50 / p99 end-to-end
   latency, as sparklines and the last 20 windows), the last 20 failures, the

@@ -79,6 +79,8 @@ export const SeriesPoint = Schema.Struct({
   rejected: Schema.Int,
   retransmissionsReceived: Schema.Int,
   retransmissionsResent: Schema.Int,
+  /** Retransmitted requests answered again after their call ended, in the window. */
+  lateAnswered: defaulted(Schema.Int, 0),
   p50Ms: Schema.Number,
   p99Ms: Schema.Number
 })
@@ -117,6 +119,8 @@ export const LadderArrow = Schema.Struct({
   retransmissions: Schema.Int,
   resent: Schema.Int,
   meanOffsetMs: Schema.Number,
+  /** Retransmissions of the request answered again after its call ended. */
+  lateAnswered: Schema.optionalKey(Schema.Int),
   errors: Schema.optionalKey(Schema.Array(ClassCount))
 })
 export interface LadderArrow extends Schema.Schema.Type<typeof LadderArrow> {}
@@ -241,6 +245,8 @@ export const Canaries = Schema.Struct({
   dropsOut: Schema.Int,
   /** Correlated datagrams discarded because their call's inbox was full. */
   inboxDrops: defaulted(Schema.Int, 0),
+  /** Retransmitted requests on an ended call's dialog, answered again with its final. */
+  lateAnswered: defaulted(Schema.Int, 0),
   /** Calls that reached the ring→answer step (the 18x-delivery denominator). */
   ringingExpected: Schema.Int,
   /** Of those, how many saw the 18x ringing provisional. A RATE gated at >99%. */
@@ -309,6 +315,7 @@ const arrowJson = (a: LadderArrow): Record<string, unknown> =>
     retransmissions: a.retransmissions,
     resent: a.resent,
     meanOffsetMs: a.meanOffsetMs,
+    lateAnswered: a.lateAnswered,
     errors: a.errors?.map(classCountJson)
   })
 
@@ -356,6 +363,7 @@ export const loadRunIndexJson = (index: LoadRunIndex): Record<string, unknown> =
       rejected: p.rejected,
       retransmissionsReceived: p.retransmissionsReceived,
       retransmissionsResent: p.retransmissionsResent,
+      lateAnswered: p.lateAnswered,
       p50Ms: p.p50Ms,
       p99Ms: p.p99Ms
     })),
@@ -432,6 +440,7 @@ export const loadRunIndexJson = (index: LoadRunIndex): Record<string, unknown> =
       dropsIn: index.canaries.dropsIn,
       dropsOut: index.canaries.dropsOut,
       inboxDrops: index.canaries.inboxDrops,
+      lateAnswered: index.canaries.lateAnswered,
       ringingExpected: index.canaries.ringingExpected,
       ringingReceived: index.canaries.ringingReceived
     },

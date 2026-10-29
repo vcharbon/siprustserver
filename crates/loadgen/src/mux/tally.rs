@@ -6,9 +6,13 @@
 //! opens no new occurrence. The state is per call, bounded by
 //! [`MAX_ARROWS`] (past it a datagram counts on an "other" arrow), folded into
 //! the reporter once when the call ends, and released then.
+//!
+//! A request the mux re-answers after the call ended (its agent's held answer,
+//! RFC 3261 §17.2.2) is reported through the tally's [`LateSink`] on the
+//! arrow of the request, resolved when the agent answered it.
 
 use std::hash::{Hash, Hasher};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use sip_message::sniff::Identity;
 use tokio::time::Instant;
@@ -95,17 +99,70 @@ struct TallyState {
     finished: bool,
 }
 
+/// Where a call's late re-answers go: the arrow of each request the mux
+/// re-answered after the call ended.
+pub type LateSink = Arc<dyn Fn(&ArrowKey) + Send + Sync>;
+
+/// The report of one held answer's re-sends: its request's arrow, and where
+/// it goes.
+#[derive(Clone)]
+pub(in crate::mux) struct LateRepair {
+    sink: LateSink,
+    arrow: ArrowKey,
+}
+
+impl LateRepair {
+    /// One retransmission of the request re-answered after the call.
+    pub(in crate::mux) fn record(&self) {
+        (self.sink)(&self.arrow)
+    }
+}
+
 /// One call's tally, shared by its endpoints.
 pub struct CallTally {
     start: Instant,
     caller: String,
     state: Mutex<TallyState>,
+    late: Option<LateSink>,
 }
 
 impl CallTally {
     /// A tally starting now; `caller` names the caller's lane.
     pub fn new(caller: &str) -> Self {
-        Self { start: Instant::now(), caller: caller.to_string(), state: Mutex::default() }
+        Self {
+            start: Instant::now(),
+            caller: caller.to_string(),
+            state: Mutex::default(),
+            late: None,
+        }
+    }
+
+    /// Report the call's late re-answers into `sink`.
+    pub fn with_late_sink(mut self, sink: LateSink) -> Self {
+        self.late = Some(sink);
+        self
+    }
+
+    /// The report of a late re-send of `answer`, the final the endpoint `leg`
+    /// sent: the arrow of the request it answers (as that endpoint received
+    /// it). `None` without a sink, or when the request has no arrow of its own.
+    pub(in crate::mux) fn late_repair(
+        &self,
+        leg: Option<&str>,
+        answer: &Identity<'_>,
+    ) -> Option<LateRepair> {
+        let sink = self.late.clone()?;
+        let request = Identity {
+            call_id: answer.call_id,
+            cseq: answer.cseq,
+            cseq_method: answer.cseq_method,
+            method: answer.cseq_method,
+            ..Identity::default()
+        };
+        let key = dup_key(leg, Dir::In, &request);
+        let g = self.state.lock().unwrap();
+        let arrow = g.entries.iter().find(|e| e.key == key)?.arrow.clone();
+        Some(LateRepair { sink, arrow })
     }
 
     fn lane<'a>(&'a self, leg: Option<&'a str>) -> &'a str {

@@ -206,13 +206,7 @@ async fn loadgen_fake_net_recovers_targeted_dropped_bye() {
     c.default_tuning = CallTuning {
         drop_rate: 0.0,
         retransmit: true,
-        drop_nth: Some(TargetedDrop {
-            method: "BYE",
-            nth: 1,
-            permanent: false,
-            dir: DropDir::Outbound,
-            leg: None,
-        }),
+        drop_nth: Some(TargetedDrop::request("BYE", 1, DropDir::Outbound)),
     };
     let driver = Driver::new(c, vec![mix("refer", 1.0)], reporter.clone(), transport);
     driver.run().await;
@@ -372,13 +366,7 @@ async fn loadgen_fake_net_crossing_bye_recovers_dropped_byes() {
     c.default_tuning = CallTuning {
         drop_rate: 0.0,
         retransmit: true,
-        drop_nth: Some(TargetedDrop {
-            method: "BYE",
-            nth: 1,
-            permanent: false,
-            dir: DropDir::Outbound,
-            leg: None,
-        }),
+        drop_nth: Some(TargetedDrop::request("BYE", 1, DropDir::Outbound)),
     };
     let driver = Driver::new(c, vec![mix("crossing_bye", 1.0)], reporter.clone(), transport);
     driver.run().await;
@@ -764,13 +752,7 @@ async fn loadgen_fake_net_recovers_dropped_early_update() {
     c.default_tuning = CallTuning {
         drop_rate: 0.0,
         retransmit: true,
-        drop_nth: Some(TargetedDrop {
-            method: "UPDATE",
-            nth: 1,
-            permanent: false,
-            dir: DropDir::Outbound,
-            leg: None,
-        }),
+        drop_nth: Some(TargetedDrop::request("UPDATE", 1, DropDir::Outbound)),
     };
     let driver = Driver::new(c, vec![mix("prack_update_early", 1.0)], reporter.clone(), transport);
     driver.run().await;
@@ -862,13 +844,7 @@ async fn loadgen_fake_net_recovers_dropped_prack() {
     c.default_tuning = CallTuning {
         drop_rate: 0.0,
         retransmit: true,
-        drop_nth: Some(TargetedDrop {
-            method: "PRACK",
-            nth: 1,
-            permanent: false,
-            dir: DropDir::Outbound,
-            leg: None,
-        }),
+        drop_nth: Some(TargetedDrop::request("PRACK", 1, DropDir::Outbound)),
     };
     let driver = Driver::new(c, vec![mix("forked_reliable", 1.0)], reporter.clone(), transport);
     driver.run().await;

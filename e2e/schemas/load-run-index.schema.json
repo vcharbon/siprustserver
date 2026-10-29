@@ -146,6 +146,13 @@
           "default": 0,
           "minimum": 0
         },
+        "lateAnswered": {
+          "description": "Retransmitted requests on a dialog whose call had ended, answered again\nwith the final the call sent (RFC 3261 §17.2.2): the repairs an orphan\ncount no longer includes.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
         "orphans": {
           "description": "Inbound datagrams that matched no live call (a post-failover stray-send\nburst is the classic SUT reclaim bug; should be ~0 in a clean run).",
           "type": "integer",
@@ -487,6 +494,12 @@
         "label": {
           "description": "`INVITE`, or the status and its CSeq method: `180 (INVITE)`.",
           "type": "string"
+        },
+        "lateAnswered": {
+          "description": "Retransmissions of the request arriving after its call ended, answered\nagain with the final the call sent (RFC 3261 §17.2.2).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
         },
         "meanOffsetMs": {
           "description": "Mean offset of its first copy from call start (ms).",
@@ -942,6 +955,13 @@
           "description": "Calls ended in failure in the window (as [`Progress::failed`]).",
           "type": "integer",
           "format": "uint64",
+          "minimum": 0
+        },
+        "lateAnswered": {
+          "description": "Retransmitted requests answered again after their call ended, in the\nwindow.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
           "minimum": 0
         },
         "ok": {

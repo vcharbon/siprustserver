@@ -21,9 +21,10 @@ pub(crate) fn ladders(out: &mut String, idx: &LoadRunIndex) {
         "<h2>Message ladders</h2><p class=\"muted\">One per scenario: every message its calls \
          exchanged with the SUT, merged over the calls by sender, receiver, message and \
          occurrence, ordered by its mean time from call start. <b>retr</b>: copies received \
-         after the first; <b>resent</b>: copies sent after the first (the retransmit engine's and the scenario's own); <b>errors</b>: failed \
-         calls whose failure was detected at that message (the last one in before the \
-         outcome).</p>",
+         after the first; <b>resent</b>: copies sent after the first (the retransmit engine's and the scenario's own); <b>after call</b>: \
+         copies of a request that arrived after its call ended, answered again with the \
+         final the call sent; <b>errors</b>: failed calls whose failure was detected at \
+         that message (the last one in before the outcome).</p>",
     );
     for ladder in &idx.ladders {
         let engine = if ladder.engine {
@@ -66,6 +67,9 @@ fn caption(a: &LadderArrow) -> String {
     if a.resent > 0 {
         let _ = write!(s, " · resent {}", a.resent);
     }
+    if a.late_answered > 0 {
+        let _ = write!(s, " · after call {}", a.late_answered);
+    }
     if !a.errors.is_empty() {
         let _ = write!(s, " · {}", classes(&a.errors));
     }
@@ -93,6 +97,7 @@ fn seq_doc(l: &Ladder) -> SeqDoc {
             label: caption(a),
             detail: Some(format!(
                 "{} {} → {}\ncalls: {}\nretransmissions received: {}\nre-sent: {}\n\
+                 answered again after the call: {}\n\
                  mean offset from call start: {:.1} ms\nerrors: {}",
                 name(a),
                 a.from,
@@ -100,6 +105,7 @@ fn seq_doc(l: &Ladder) -> SeqDoc {
                 a.count,
                 a.retransmissions,
                 a.resent,
+                a.late_answered,
                 a.mean_offset_ms,
                 if a.errors.is_empty() { "none".to_string() } else { classes(&a.errors) }
             )),
@@ -139,7 +145,7 @@ fn seq_doc(l: &Ladder) -> SeqDoc {
 fn table(out: &mut String, l: &Ladder) {
     out.push_str(
         "<table><tr><th>from → to</th><th>message</th><th>calls</th><th>mean T+</th>\
-         <th>retr</th><th>resent</th><th>errors</th></tr>",
+         <th>retr</th><th>resent</th><th>after call</th><th>errors</th></tr>",
     );
     let row = |out: &mut String, route: String, a: &LadderArrow| {
         let errors = classes(&a.errors);
@@ -147,13 +153,14 @@ fn table(out: &mut String, l: &Ladder) {
         let _ = write!(
             out,
             "<tr><td>{}</td><td>{}</td><td>{}</td><td>{:.0} ms</td><td>{}</td><td>{}</td>\
-             <td{cls}>{}</td></tr>",
+             <td>{}</td><td{cls}>{}</td></tr>",
             esc(&route),
             esc(&name(a)),
             a.count,
             a.mean_offset_ms,
             a.retransmissions,
             a.resent,
+            a.late_answered,
             esc(&errors)
         );
     };

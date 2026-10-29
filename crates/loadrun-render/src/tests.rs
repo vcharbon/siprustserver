@@ -16,6 +16,7 @@ fn window(start_s: u64, span_s: u64, ok: u64, failed: u64) -> SeriesPoint {
         rejected: 0,
         retransmissions_received: failed,
         retransmissions_resent: 0,
+        late_answered: failed,
         p50_ms: 12.0,
         p99_ms: 80.0,
     }
@@ -145,6 +146,7 @@ fn index(finished: bool) -> LoadRunIndex {
             drops_in: 11,
             drops_out: 13,
             inbox_drops: 0,
+            late_answered: 5,
             ringing_expected: 100,
             ringing_received: 97,
         },
@@ -187,8 +189,7 @@ fn the_headline_states_rate_flight_and_every_rejection_source() {
         "shed at max-in-flight 4",
         "generator failures 0",
         "in 11 · out 13",
-        "orphans 2",
-        "inbox drops 0",
+        "orphans 2</span> · late retransmissions answered 5 · inbox drops 0",
         "0.9700",
     ] {
         assert!(page.contains(want), "headline lacks {want:?}: {page}");
@@ -249,6 +250,7 @@ fn the_series_lists_the_last_windows_newest_first_with_their_events() {
     let rows: Vec<&str> = table.split("<tr>").skip(1).collect();
     assert_eq!(rows.len(), series::TABLE_WINDOWS, "the last 20 windows");
     assert!(rows[0].starts_with("<td>2:05–2:10</td>"), "newest first: {}", rows[0]);
+    assert!(rows[0].contains("<td>2</td><td>12.0</td>"), "answered after call: {}", rows[0]);
     assert!(rows[19].starts_with("<td>0:30–0:35</td>"), "oldest listed: {}", rows[19]);
     let marked = rows.iter().find(|r| r.contains("rate 15 → 10")).expect("event marked");
     assert!(marked.starts_with("<td>1:50–1:55</td>"), "on the window holding it: {marked}");
@@ -288,8 +290,8 @@ fn a_window_without_an_ended_call_shows_no_latency() {
     idx.rate_events.clear();
     let page = render_body(&idx, &RenderOpts::default());
     assert!(
-        page.contains("<td>0</td><td>–</td><td>–</td><td>–</td><td>–</td><td></td></tr>"),
-        "error %, p50 and p99 unknown: {page}"
+        page.contains("<td>0</td><td>–</td><td>–</td><td>0</td><td>–</td><td>–</td><td></td></tr>"),
+        "error %, retr/call, p50 and p99 unknown, none answered after the call: {page}"
     );
 }
 
@@ -375,6 +377,7 @@ fn arrow(
         retransmissions: 3,
         resent: 0,
         mean_offset_ms: offset,
+        late_answered: 0,
         errors: errors.iter().map(|(c, n)| ClassCount { class: (*c).into(), count: *n }).collect(),
     }
 }
@@ -393,6 +396,7 @@ fn a_ladder_draws_its_arrows_with_their_counts_and_errors() {
             arrow("SUT", "bob", "INVITE", 1, 2.0, &[]),
             arrow("SUT", "alice", "486 (INVITE)", 1, 40.0, &[("status_486", 7)]),
             arrow("alice", "SUT", "INVITE", 2, 900.0, &[]),
+            LadderArrow { late_answered: 4, ..arrow("SUT", "bob", "BYE", 1, 950.0, &[]) },
         ],
         other: None,
         after_call: vec![ClassCount { class: "rfc_audit_fail".into(), count: 2 }],
@@ -412,7 +416,12 @@ fn a_ladder_draws_its_arrows_with_their_counts_and_errors() {
     assert!(ladder.contains("INVITE #2 ×100"), "a second occurrence is numbered");
     assert!(ladder.contains(
         "<tr><td>SUT → alice</td><td>486 (INVITE)</td><td>100</td><td>40 ms</td><td>3</td>\
-         <td>0</td><td class=\"nok\">status_486 7</td></tr>"
+         <td>0</td><td>0</td><td class=\"nok\">status_486 7</td></tr>"
+    ));
+    assert!(ladder.contains("BYE ×100 · retr 3 · after call 4"), "re-answered after the call");
+    assert!(ladder.contains(
+        "<tr><td>SUT → bob</td><td>BYE</td><td>100</td><td>950 ms</td><td>3</td><td>0</td>\
+         <td>4</td><td></td></tr>"
     ));
     assert!(ladder.contains("before any message in: timeout 1; after the call: rfc_audit_fail 2"));
     assert!(

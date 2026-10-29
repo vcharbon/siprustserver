@@ -7,7 +7,7 @@
 
 use std::sync::Mutex;
 
-use sip_message::sniff::{cseq_method_label, cseq_number, is_response};
+use sip_message::sniff::{cseq_method_label, cseq_number, is_response, resp_status};
 use sip_net_testkit::RandomLoss;
 
 /// Which direction a [`TargetedDrop`] fires on.
@@ -27,7 +27,8 @@ pub enum DropDir {
 }
 
 /// A deterministic, targeted drop for one call: discard the `nth` DISTINCT (by
-/// CSeq number) **request** whose CSeq method is `method`, on the `dir` path.
+/// CSeq number) **request** whose CSeq method is `method` (with `response`,
+/// the final response to it instead), on the `dir` path.
 /// `permanent: false` drops only its FIRST occurrence — a re-emission gets
 /// through, proving loss RECOVERY; `permanent: true` drops every occurrence
 /// including re-emissions — proving the bounded give-up path (the actor settle
@@ -35,8 +36,11 @@ pub enum DropDir {
 /// engine, exactly like the random rate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TargetedDrop {
-    /// The CSeq method to match (e.g. `"NOTIFY"`, `"BYE"`). Requests only.
+    /// The CSeq method to match (e.g. `"NOTIFY"`, `"BYE"`).
     pub method: &'static str,
+    /// Match the final responses (status 200 and above) whose CSeq method is
+    /// `method`, not the requests.
+    pub response: bool,
     /// Which distinct occurrence (1-based, by CSeq number, in arrival order).
     pub nth: u32,
     /// Drop every occurrence (incl. re-emissions) instead of just the first.
@@ -49,6 +53,30 @@ pub struct TargetedDrop {
     /// then drops the nth match on each leg independently. Target the leg when
     /// the repro needs exactly one victim.
     pub leg: Option<&'static str>,
+}
+
+impl TargetedDrop {
+    /// The first copy of the `nth` distinct `method` request on `dir`, on
+    /// every endpoint of the call.
+    pub const fn request(method: &'static str, nth: u32, dir: DropDir) -> Self {
+        Self { method, response: false, nth, permanent: false, dir, leg: None }
+    }
+
+    /// The first copy of the final response to the `nth` distinct `method`
+    /// request on `dir`, on every endpoint of the call.
+    pub const fn final_response(method: &'static str, nth: u32, dir: DropDir) -> Self {
+        Self { response: true, ..Self::request(method, nth, dir) }
+    }
+
+    /// Every copy, re-emissions included.
+    pub const fn permanent(self) -> Self {
+        Self { permanent: true, ..self }
+    }
+
+    /// On the endpoint of the callee leg `leg` only.
+    pub const fn on_leg(self, leg: &'static str) -> Self {
+        Self { leg: Some(leg), ..self }
+    }
 }
 
 /// The targeted drop's arrival bookkeeping (per endpoint, like the loss RNG).
@@ -95,7 +123,10 @@ impl DropModel {
     /// only scanned when a target for that direction is configured.
     pub(super) fn targeted_hit(&self, raw: &[u8], dir: DropDir) -> bool {
         let Some((td, state)) = &self.targeted else { return false };
-        if td.dir != dir || is_response(raw) || cseq_method_label(raw) != td.method {
+        if td.dir != dir || is_response(raw) != td.response || cseq_method_label(raw) != td.method {
+            return false;
+        }
+        if td.response && !resp_status(raw).is_some_and(|s| s >= 200) {
             return false;
         }
         let Some(cseq) = cseq_number(raw) else { return false };

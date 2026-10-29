@@ -42,13 +42,15 @@ pub(crate) fn series(out: &mut String, idx: &LoadRunIndex) {
         out,
         "<p class=\"muted\">{} window(s) over {}; the last {TABLE_WINDOWS}, newest first. \
          Error % is the failed share of the calls that ended in the window; retr/call the \
-         retransmissions received and re-sent per call ended in it.</p>",
+         retransmissions received and re-sent per call ended in it; after call the requests \
+         answered again after their call ended.</p>",
         points.len(),
         clock(span)
     );
     out.push_str(
         "<table><tr><th>window</th><th>placed</th><th>ok</th><th>failed</th><th>rejected</th>\
-         <th>error %</th><th>retr/call</th><th>p50 ms</th><th>p99 ms</th><th>events</th></tr>",
+         <th>error %</th><th>retr/call</th><th>after call</th><th>p50 ms</th><th>p99 ms</th>\
+         <th>events</th></tr>",
     );
     for (i, p) in points.iter().rev().take(TABLE_WINDOWS).enumerate() {
         let err = p.error_pct().map_or("–".to_string(), |e| format!("{e:.1}"));
@@ -74,12 +76,13 @@ pub(crate) fn series(out: &mut String, idx: &LoadRunIndex) {
         let _ = write!(
             out,
             "<tr><td>{}–{}</td><td>{}</td><td>{}</td><td>{failed}</td><td>{}</td><td>{err}</td>\
-             <td>{retr}</td><td>{p50}</td><td>{p99}</td><td>{}</td></tr>",
+             <td>{retr}</td><td>{}</td><td>{p50}</td><td>{p99}</td><td>{}</td></tr>",
             clock(p.start_ms),
             clock(p.end_ms()),
             p.placed,
             p.ok,
             p.rejected,
+            p.late_answered,
             esc(&marks)
         );
     }

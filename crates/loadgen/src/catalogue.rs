@@ -197,6 +197,13 @@ pub const MUX_CLAIM_UNFIRED: Family = Family::counter(
 )
 .semi_open();
 
+pub const MUX_LATE_ANSWERED: Family = Family::counter(
+    "loadgen_mux_late_retransmission_answered_total",
+    Labels::Product(&[STREAM]),
+    "Retransmitted requests on a released dialog answered again with the final its agent sent (RFC 3261 Timer J).",
+)
+.semi_open();
+
 pub const MUX_INBOX_DROP: Family = Family::counter(
     "loadgen_mux_inbox_drop_total",
     Labels::Product(&[STREAM]),
@@ -319,6 +326,7 @@ pub const CATALOGUE: Catalogue = Catalogue {
         MUX_CALLER_KEY_MISMATCH,
         MUX_KEY_COOLING,
         MUX_CLAIM_UNFIRED,
+        MUX_LATE_ANSWERED,
         MUX_INBOX_DROP,
         MUX_DELIVERED,
         DROP,

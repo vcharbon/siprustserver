@@ -51,7 +51,9 @@
 //! - a from-user key whose call ended not ok cools for [`RELEASE_HOLD`]
 //!   ([`MuxCore::release_key`]); a bind claiming it meanwhile fails with
 //!   `BindErrorReason::HeldBack`, checked under the registry lock in the step
-//!   that would claim it. A key whose call ended ok is reusable at once.
+//!   that would claim it. A key whose call ended ok is reusable at once;
+//! - a released Call-ID keeps, for the same hold, the finals its agent sent:
+//!   a retransmitted request draws its final again (`late_answer`).
 //!
 //! A new INVITE on a Call-ID a caller owns (a SUT reusing the dialog's Call-ID
 //! for a new leg, against RFC 3261 §8.1.1.4) is a `call_id_reuse` orphan.
@@ -64,6 +66,7 @@ mod buffers;
 mod correlation;
 mod demux;
 mod endpoint;
+mod late_answer;
 mod late_final;
 mod loss;
 mod registry;
@@ -85,7 +88,7 @@ pub use rtt::{Exchange, RttSink};
 pub use scenario_harness::claim::ClaimRule;
 pub use stats::MuxStats;
 pub(crate) use stats::OrphanReason;
-pub use tally::{ArrowKey, ArrowStat, CallMessages, CallTally, SUT_LANE};
+pub use tally::{ArrowKey, ArrowStat, CallMessages, CallTally, LateSink, SUT_LANE};
 pub use taps::{Dir, Side, WireTap};
 
 use late_final::SentInvites;

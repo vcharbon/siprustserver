@@ -60,8 +60,8 @@ crates/failover-harness/tests/it/limiter_release_by_call.rs 938
 crates/failover-harness/tests/it/prack_takeover.rs 897
 crates/http-net-testkit/tests/it/scripted.rs 921
 crates/loadgen/src/driver.rs 548
-crates/loadgen/tests/it/fake_net.rs 893
-crates/loadgen/tests/it/smoke.rs 2695
+crates/loadgen/tests/it/fake_net.rs 869
+crates/loadgen/tests/it/smoke.rs 2659
 crates/media/src/transport.rs 533
 crates/pivot-interpreter/src/close.rs 649
 crates/pivot-interpreter/src/close/tests.rs 833

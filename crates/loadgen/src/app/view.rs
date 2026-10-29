@@ -89,8 +89,9 @@ impl RunView {
     }
 }
 
-/// The mux-owned run canaries (orphans, simulated-loss drops each way and full
-/// inbox drops). The reporter fills in its own shed and ringing halves.
+/// The mux-owned run canaries (orphans, simulated-loss drops each way, full
+/// inbox drops and late re-answers). The reporter fills in its own shed and
+/// ringing halves.
 pub(super) fn mux_canaries(core: &MuxCore) -> Canaries {
     use std::sync::atomic::Ordering;
     let s = core.stats();
@@ -99,6 +100,7 @@ pub(super) fn mux_canaries(core: &MuxCore) -> Canaries {
         drops_in: s.dropped_in.load(Ordering::Relaxed),
         drops_out: s.dropped_out.load(Ordering::Relaxed),
         inbox_drops: s.inbox_drop.load(Ordering::Relaxed),
+        late_answered: s.late_answered.load(Ordering::Relaxed),
         ..Canaries::default()
     }
 }

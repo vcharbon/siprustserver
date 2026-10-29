@@ -142,13 +142,9 @@ async fn a_stalled_setup_is_a_timeout_whatever_its_teardown_draws() {
     .await;
     let records = run(rig, &["basic_call", "abandon_ringing"], |c| {
         c.default_tuning = CallTuning {
-            drop_nth: Some(TargetedDrop {
-                method: "INVITE",
-                nth: 1,
-                permanent: true,
-                dir: DropDir::Inbound,
-                leg: Some("bob"),
-            }),
+            drop_nth: Some(
+                TargetedDrop::request("INVITE", 1, DropDir::Inbound).permanent().on_leg("bob"),
+            ),
             ..CallTuning::default()
         };
     })
@@ -179,13 +175,7 @@ async fn a_stalled_setup_is_a_timeout_whatever_its_teardown_draws() {
 async fn a_bye_without_a_final_is_stranded() {
     let records = run(setup_fake(7820).await, &["basic_call"], |c| {
         c.default_tuning = CallTuning {
-            drop_nth: Some(TargetedDrop {
-                method: "BYE",
-                nth: 1,
-                permanent: true,
-                dir: DropDir::Outbound,
-                leg: None,
-            }),
+            drop_nth: Some(TargetedDrop::request("BYE", 1, DropDir::Outbound).permanent()),
             ..CallTuning::default()
         };
     })

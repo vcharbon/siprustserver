@@ -378,7 +378,7 @@ fn fixture_load_result() -> serde_json::Value {
             { "scenario": "reinvite", "passed": 7, "failed": 1 }
         ],
         "canaries": {
-            "orphans": 0, "shed": 4, "dropsIn": 5, "dropsOut": 6, "inboxDrops": 0, "ringingExpected": 1185, "ringingReceived": 1184
+            "orphans": 0, "shed": 4, "dropsIn": 5, "dropsOut": 6, "inboxDrops": 0, "lateAnswered": 0, "ringingExpected": 1185, "ringingReceived": 1184
         },
         "samples": [
             { "scenario": "reinvite", "class": "check_fail", "case": "alice.invite.from.userInfo",

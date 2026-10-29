@@ -207,6 +207,11 @@ pub struct Canaries {
     /// Correlated datagrams discarded because their call's inbox was full.
     #[serde(default)]
     pub inbox_drops: u64,
+    /// Retransmitted requests on a dialog whose call had ended, answered again
+    /// with the final the call sent (RFC 3261 §17.2.2): the repairs an orphan
+    /// count no longer includes.
+    #[serde(default)]
+    pub late_answered: u64,
     /// Calls that reached the ring→answer step (the 18x-delivery denominator).
     pub ringing_expected: u64,
     /// Of those, how many saw the 18x ringing provisional (numerator). A dropped
@@ -294,6 +299,7 @@ mod tests {
                 rejected: 0,
                 retransmissions_received: 4,
                 retransmissions_resent: 1,
+                late_answered: 2,
                 p50_ms: 10.0,
                 p99_ms: 40.0,
             }],
@@ -326,6 +332,7 @@ mod tests {
                     retransmissions: 1,
                     resent: 0,
                     mean_offset_ms: 20.0,
+                    late_answered: 0,
                     errors: vec![ClassCount { class: "timeout".into(), count: 2 }],
                 }],
                 other: None,
@@ -405,6 +412,7 @@ mod tests {
                 drops_in: 6,
                 drops_out: 5,
                 inbox_drops: 0,
+                late_answered: 2,
                 ringing_expected: 1185,
                 ringing_received: 1184,
             },

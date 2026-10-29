@@ -20,11 +20,14 @@ pub(crate) const SHOWN_ARROWS: usize = 64;
 struct ArrowAgg {
     stat: ArrowStat,
     errors: BTreeMap<String, u64>,
+    /// Retransmissions of the request answered again after its call ended.
+    late: u64,
 }
 
 impl ArrowAgg {
     fn add(&mut self, other: &ArrowAgg) {
         add_stat(&mut self.stat, &other.stat);
+        self.late += other.late;
         for (class, n) in &other.errors {
             *self.errors.entry(class.clone()).or_default() += n;
         }
@@ -54,6 +57,8 @@ pub(super) struct LadderAgg {
     pub(super) received: u64,
     /// Copies sent after the first, over the calls.
     pub(super) resent: u64,
+    /// Requests answered again after their call ended, over the calls.
+    pub(super) late: u64,
 }
 
 impl LadderAgg {
@@ -77,13 +82,13 @@ impl LadderAgg {
         if call.other.count > 0 {
             self.truncated = true;
             self.received += call.other.duplicates;
-            self.other.add(&ArrowAgg { stat: call.other, errors: BTreeMap::new() });
+            self.other.add(&ArrowAgg { stat: call.other, ..ArrowAgg::default() });
         }
         for (key, stat) in &call.arrows {
             let (key, stat) = (key.clone(), *stat);
             self.received += stat.duplicates;
             self.resent += stat.resent;
-            let agg = ArrowAgg { stat, errors: BTreeMap::new() };
+            let agg = ArrowAgg { stat, ..ArrowAgg::default() };
             match self.slot(key) {
                 Some(slot) => slot.add(&agg),
                 None => {
@@ -118,6 +123,19 @@ impl LadderAgg {
         }
     }
 
+    /// A retransmission of the request on `arrow`, answered again by the mux
+    /// after its call ended (the call may not be folded yet).
+    pub(super) fn late(&mut self, arrow: &ArrowKey) {
+        self.late += 1;
+        match self.slot(arrow.clone()) {
+            Some(slot) => slot.late += 1,
+            None => {
+                self.truncated = true;
+                self.other.late += 1;
+            }
+        }
+    }
+
     fn slot(&mut self, key: ArrowKey) -> Option<&mut ArrowAgg> {
         if !self.arrows.contains_key(&key) && self.arrows.len() >= MAX_KEYS {
             return None;
@@ -144,12 +162,18 @@ impl LadderAgg {
             }
         }
         let shown = arrows.iter().take(SHOWN_ARROWS).map(|(k, a)| arrow(k, a)).collect();
-        let other = (other.stat.count > 0 || !other.errors.is_empty()).then(|| {
-            arrow(
-                &ArrowKey { from: String::new(), to: String::new(), label: String::new(), nth: 0 },
-                &other,
-            )
-        });
+        let other =
+            (other.stat.count > 0 || !other.errors.is_empty() || other.late > 0).then(|| {
+                arrow(
+                    &ArrowKey {
+                        from: String::new(),
+                        to: String::new(),
+                        label: String::new(),
+                        nth: 0,
+                    },
+                    &other,
+                )
+            });
         Ladder {
             scenario: scenario.to_string(),
             calls: self.calls,
@@ -182,6 +206,7 @@ fn arrow(key: &ArrowKey, agg: &ArrowAgg) -> LadderArrow {
         retransmissions: agg.stat.duplicates,
         resent: agg.stat.resent,
         mean_offset_ms: mean(&agg.stat),
+        late_answered: agg.late,
         errors: counts(&agg.errors),
     }
 }

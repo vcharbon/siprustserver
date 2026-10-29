@@ -53,6 +53,10 @@ pub struct LadderArrow {
     pub resent: u64,
     /// Mean offset of its first copy from call start (ms).
     pub mean_offset_ms: f64,
+    /// Retransmissions of the request arriving after its call ended, answered
+    /// again with the final the call sent (RFC 3261 §17.2.2).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub late_answered: u64,
     /// Failed calls whose failure was detected here: the last message in
     /// before the outcome.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -65,4 +69,8 @@ pub struct LadderArrow {
 pub struct ClassCount {
     pub class: String,
     pub count: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }

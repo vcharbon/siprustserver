@@ -1108,13 +1108,7 @@ async fn loadgen_packet_drop_without_retransmit_breaks_calls() {
     c.default_tuning = CallTuning {
         drop_rate: 0.0,
         retransmit: false,
-        drop_nth: Some(TargetedDrop {
-            method: "INVITE",
-            nth: 1,
-            permanent: true,
-            dir: DropDir::Outbound,
-            leg: None,
-        }),
+        drop_nth: Some(TargetedDrop::request("INVITE", 1, DropDir::Outbound).permanent()),
     };
     let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
@@ -1435,13 +1429,7 @@ async fn loadgen_settle_gate_recovers_dropped_bye() {
     c.default_tuning = CallTuning {
         drop_rate: 0.0,
         retransmit: true,
-        drop_nth: Some(TargetedDrop {
-            method: "BYE",
-            nth: 1,
-            permanent: false,
-            dir: DropDir::Outbound,
-            leg: None,
-        }),
+        drop_nth: Some(TargetedDrop::request("BYE", 1, DropDir::Outbound)),
     };
     let driver = Driver::new(c, vec![mix("refer", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
@@ -1490,13 +1478,7 @@ async fn loadgen_reack_recovers_dropped_initial_b_leg_ack() {
     c.default_tuning = CallTuning {
         drop_rate: 0.0,
         retransmit: true,
-        drop_nth: Some(TargetedDrop {
-            method: "ACK",
-            nth: 1,
-            permanent: false,
-            dir: DropDir::Inbound,
-            leg: None,
-        }),
+        drop_nth: Some(TargetedDrop::request("ACK", 1, DropDir::Inbound)),
     };
     let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
@@ -1542,13 +1524,7 @@ async fn loadgen_callee_retransmits_non2xx_final_on_lost_hop_ack() {
     c.default_tuning = CallTuning {
         drop_rate: 0.0,
         retransmit: true,
-        drop_nth: Some(TargetedDrop {
-            method: "ACK",
-            nth: 1,
-            permanent: false,
-            dir: DropDir::Inbound,
-            leg: None,
-        }),
+        drop_nth: Some(TargetedDrop::request("ACK", 1, DropDir::Inbound)),
     };
     let driver = Driver::new(c, vec![mix("invite_reject", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
@@ -1596,13 +1572,7 @@ async fn loadgen_abandoned_reject_leg_recovery_lands_on_recording() {
         // Leg-scoped to bob: an unscoped `ACK`/`nth:1` would ALSO drop bob2's
         // answer ACK (per-endpoint counters), whose ~500 ms recovery delays the
         // whole call and masks the off-recording window under test.
-        drop_nth: Some(TargetedDrop {
-            method: "ACK",
-            nth: 1,
-            permanent: false,
-            dir: DropDir::Inbound,
-            leg: Some("bob"),
-        }),
+        drop_nth: Some(TargetedDrop::request("ACK", 1, DropDir::Inbound).on_leg("bob")),
     };
     let driver = Driver::new(c, vec![mix("rerouting_prack", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
@@ -1664,13 +1634,7 @@ async fn loadgen_settle_gate_permanent_notify_loss_names_obligation() {
     c.default_tuning = CallTuning {
         drop_rate: 0.0,
         retransmit: true,
-        drop_nth: Some(TargetedDrop {
-            method: "NOTIFY",
-            nth: 2,
-            permanent: true,
-            dir: DropDir::Inbound,
-            leg: None,
-        }),
+        drop_nth: Some(TargetedDrop::request("NOTIFY", 2, DropDir::Inbound).permanent()),
     };
     let driver = Driver::new(c, vec![mix("refer", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;

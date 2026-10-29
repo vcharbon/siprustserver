@@ -24,6 +24,7 @@ pub(crate) struct Totals {
     pub(crate) rejected: u64,
     pub(crate) received: u64,
     pub(crate) resent: u64,
+    pub(crate) late: u64,
 }
 
 impl Totals {
@@ -35,6 +36,7 @@ impl Totals {
             rejected: self.rejected.saturating_sub(earlier.rejected),
             received: self.received.saturating_sub(earlier.received),
             resent: self.resent.saturating_sub(earlier.resent),
+            late: self.late.saturating_sub(earlier.late),
         }
     }
 
@@ -45,6 +47,7 @@ impl Totals {
         self.rejected += other.rejected;
         self.received += other.received;
         self.resent += other.resent;
+        self.late += other.late;
     }
 }
 
@@ -77,6 +80,7 @@ impl Window {
             rejected: self.totals.rejected,
             retransmissions_received: self.totals.received,
             retransmissions_resent: self.totals.resent,
+            late_answered: self.totals.late,
             p50_ms: self.latency.quantile_ms(0.5),
             p99_ms: self.latency.quantile_ms(0.99),
         }

@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::time::Instant;
@@ -381,6 +381,19 @@ impl Reporter {
     ) {
         let mut g = self.inner.lock().unwrap();
         g.ladders.entry(scenario).or_default().fold(messages, outcome);
+    }
+
+    /// A retransmission of the request on `arrow` of a `scenario` call,
+    /// answered again by the mux after the call ended.
+    pub fn record_late_answer(&self, scenario: ScenarioId, arrow: &crate::mux::ArrowKey) {
+        let mut g = self.inner.lock().unwrap();
+        g.ladders.entry(scenario).or_default().late(arrow);
+    }
+
+    /// Where a `scenario` call's late re-answers go: its scenario's ladder.
+    pub fn late_sink(self: &Arc<Self>, scenario: ScenarioId) -> crate::mux::LateSink {
+        let reporter = self.clone();
+        Arc::new(move |arrow| reporter.record_late_answer(scenario, arrow))
     }
 
     /// The run configured the retransmit engine for `scenario`, or not.
