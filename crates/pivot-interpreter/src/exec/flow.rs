@@ -20,6 +20,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         // or advances the clock; if neither happens for a long stretch the loop
         // cannot make progress, and saying so beats spinning forever.
         let mut stall = Stall::new(self.wall_ceiling());
+        self.state_bound_addresses();
         if !self.refuse_unsupported_events() {
             return false;
         }

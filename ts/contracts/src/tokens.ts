@@ -153,7 +153,8 @@ export const LEG_FIELDS = [
   "route-set",
   "cseq.local",
   "cseq.remote",
-  "rseq"
+  "rseq",
+  "local-hostport"
 ] as const
 export type LegField = (typeof LEG_FIELDS)[number]
 

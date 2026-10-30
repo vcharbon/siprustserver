@@ -62,6 +62,16 @@ impl Sut for ScriptedSystem {
 /// The caller's leg: INVITE, the 180, then a CANCEL awaiting the event, its
 /// 200 and the INVITE's 487.
 fn caller_document(id: &str, sys: SocketAddr, cancel_within_ms: Option<u64>) -> PivotV3 {
+    awaiting_document(id, sys, cancel_within_ms, false)
+}
+
+/// [`caller_document`], the INVITE awaiting the same event where `invite_awaits`.
+fn awaiting_document(
+    id: &str,
+    sys: SocketAddr,
+    cancel_within_ms: Option<u64>,
+    invite_awaits: bool,
+) -> PivotV3 {
     let delay = |from: &str| serde_json::json!({ "compressible": true, "from": from, "ms": 0, "timer_linked": false });
     let mut cancel = serde_json::json!({
         "id": "s3", "leg": "A", "op": "send", "awaits": EVENT, "delay": delay("step:s2"),
@@ -70,7 +80,7 @@ fn caller_document(id: &str, sys: SocketAddr, cancel_within_ms: Option<u64>) -> 
     if let Some(ms) = cancel_within_ms {
         cancel["within_ms"] = ms.into();
     }
-    let doc = serde_json::json!({
+    let mut doc = serde_json::json!({
         "pivot_version": 3,
         "actors": [{ "endpoint": "ep-caller", "id": "uac1", "identity": "caller", "kind": "uac" }],
         "calls": [{ "attempts": [], "caller_leg": "A", "id": "c1" }],
@@ -97,6 +107,9 @@ fn caller_document(id: &str, sys: SocketAddr, cancel_within_ms: Option<u64>) -> 
               "msg": { "cseq-method": "INVITE", "reason": "Request Terminated", "status": 487 } }
         ]
     });
+    if invite_awaits {
+        doc["flow"][0]["awaits"] = EVENT.into();
+    }
     PivotV3::from_json(&doc.to_string()).expect("the document parses")
 }
 
@@ -210,5 +223,40 @@ async fn a_lane_that_does_not_report_the_event_refuses_before_it_dials() {
         outcome.verdict.failures
     );
     assert!(outcome.recording.legs().get("A").is_none_or(Vec::is_empty), "nothing was dialled");
+    let _ = h.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn one_occurrence_releases_exactly_one_of_two_awaiting_sends() {
+    let h = Harness::new("pivot-lane-event-one-release");
+    let alice = h.agent("alice", "127.0.0.1:5165").await;
+    let sys = h.agent("sys", "127.0.0.1:5194").await;
+    let document = awaiting_document("lane-event-one-release", sys.addr(), Some(2000), true);
+    let sut = ScriptedSystem::default();
+    let (reporter, events) = LaneEvents::channel([EVENT]);
+    reporter.occurred(EVENT);
+    let system = async {
+        let mut uas = sys.receive("INVITE").await;
+        uas.respond(180, "Ringing").await;
+        // The INVITE took the one occurrence; the generic close CANCELs.
+        let mut cancel = sys.receive("CANCEL").await;
+        cancel.respond(200, "OK").await;
+        uas.respond(487, "Request Terminated").await;
+        uas.expect_ack().await;
+        sut.done.store(true, Ordering::SeqCst);
+    };
+    let (outcome, ()) =
+        tokio::join!(run(document, &alice, sys.addr(), &sut, Some(events), "one-release"), system);
+
+    let missing: Vec<&str> = outcome
+        .verdict
+        .failures
+        .iter()
+        .filter_map(|f| match f {
+            Failure::LaneEventMissing { step, .. } => Some(step.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(missing, ["s3"], "{:#?}", outcome.verdict.failures);
     let _ = h.finish().await;
 }

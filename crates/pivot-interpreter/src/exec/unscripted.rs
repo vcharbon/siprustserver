@@ -217,7 +217,9 @@ impl<'a, 'p> Runner<'a, 'p> {
             // may answer it); the flow walks on from it as from any send.
             if let Owed::Answer { cseq_method, status: 487, cseq, to_tag, .. } = &owed {
                 if cseq_method == "INVITE" {
-                    if let Some(step) = self.pending_reject(leg, *cseq) {
+                    let reject = self.pending_reject(leg, *cseq);
+                    if let Some(step) = reject.filter(|step| self.event_released(step)) {
+                        self.consume_event(&step);
                         if !self.emit(&step, Some((*cseq, to_tag.clone()))).await {
                             self.end_script(Some(leg), Some(&step.id));
                         }

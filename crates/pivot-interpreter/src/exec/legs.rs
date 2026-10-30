@@ -93,6 +93,17 @@ impl<'a, 'p> Runner<'a, 'p> {
     }
 
     /// The agent that plays `leg`, if the lane bound one.
+    /// Publish each leg's bound `host:port` to `${leg:<id>.local-hostport}`.
+    pub(super) fn state_bound_addresses(&mut self) {
+        let legs: Vec<String> =
+            self.instance.plan().document().legs.iter().map(|l| l.id.clone()).collect();
+        for leg in legs {
+            if let Some(agent) = self.agent_of_leg(&leg) {
+                self.instance.leg_mut(&leg).local_hostport = Some(agent.addr().to_string());
+            }
+        }
+    }
+
     pub(super) fn agent_of_leg(&self, leg: &str) -> Option<Agent> {
         let actor = self.instance.plan().actor_of_leg(leg)?;
         self.lane.agents.get(actor).cloned()

@@ -36,6 +36,23 @@ impl HeaderProjection {
         let want = HeaderName::from(name);
         self.0.iter().filter(|(n, _)| want.matches(n)).map(|(_, v)| v.as_str()).collect()
     }
+    /// The option tags every row of the set-like header `name` lists
+    /// (`Supported`, `Require`, …), in wire order, read as
+    /// [`crate::sniff::option_tags`] reads them: one case-insensitive set, a
+    /// value that is no `token` dropped.
+    pub fn option_tags(&self, name: &str) -> Vec<String> {
+        let sep = HeaderName::item_separator_of(name);
+        let mut out: Vec<String> = Vec::new();
+        for row in self.all(name) {
+            for tag in sep.split(row) {
+                let ok = !tag.is_empty() && tag.bytes().all(crate::char_class::is_token_char);
+                if ok && !out.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+                    out.push(tag.to_string());
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Pairs a test states directly stand in for a projected message.

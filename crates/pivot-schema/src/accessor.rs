@@ -50,6 +50,9 @@ pub enum LegField {
     CseqLocal,
     CseqRemote,
     Rseq,
+    /// The `host:port` the leg's endpoint is bound at on this run, which the
+    /// document's stated `observed` address is only a default for.
+    LocalHostport,
 }
 
 /// What an early-dialog accessor reads off ONE fork of a forking leg.
@@ -75,7 +78,7 @@ pub enum StepField {
 }
 
 impl LegField {
-    const NAMES: [(&'static str, LegField); 8] = [
+    const NAMES: [(&'static str, LegField); 9] = [
         ("call-id", LegField::CallId),
         ("local-tag", LegField::LocalTag),
         ("remote-tag", LegField::RemoteTag),
@@ -84,6 +87,7 @@ impl LegField {
         ("cseq.local", LegField::CseqLocal),
         ("cseq.remote", LegField::CseqRemote),
         ("rseq", LegField::Rseq),
+        ("local-hostport", LegField::LocalHostport),
     ];
 
     fn name(self) -> &'static str {

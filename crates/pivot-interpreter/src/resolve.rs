@@ -99,6 +99,20 @@ impl<'a> Resolver<'a> {
     /// Substitute every `${…}` in `text`. A text with no accessor comes back
     /// unchanged, and a malformed one is a failure rather than literal text.
     pub fn text(&self, text: &str) -> Result<String, ResolveError> {
+        self.substitute(text, |value| value)
+    }
+
+    /// Substitute every `${…}` in a regular expression, each value a literal
+    /// inside it: a bound `+15550100` matches a plus sign, not a repetition.
+    pub fn pattern(&self, text: &str) -> Result<String, ResolveError> {
+        self.substitute(text, |value| regex::escape(&value))
+    }
+
+    fn substitute(
+        &self,
+        text: &str,
+        literal: impl Fn(String) -> String,
+    ) -> Result<String, ResolveError> {
         if !Accessor::present_in(text) {
             return Ok(text.to_string());
         }
@@ -115,7 +129,7 @@ impl<'a> Resolver<'a> {
             };
             let accessor = Accessor::parse_body(&after[..end])
                 .map_err(|detail| ResolveError::Malformed { text: text.to_string(), detail })?;
-            out.push_str(&self.accessor(&accessor)?);
+            out.push_str(&literal(self.accessor(&accessor)?));
             rest = &after[end + 1..];
         }
         out.push_str(rest);
@@ -164,6 +178,9 @@ impl<'a> Resolver<'a> {
                 state.cseq_remote.map(|n| n.to_string()).ok_or_else(|| unset("remote CSeq"))
             }
             LegField::Rseq => state.rseq.map(|n| n.to_string()).ok_or_else(|| unset("RSeq")),
+            LegField::LocalHostport => {
+                state.local_hostport.clone().ok_or_else(|| unset("bound address"))
+            }
         }
     }
 

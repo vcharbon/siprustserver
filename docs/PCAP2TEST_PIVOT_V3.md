@@ -1659,8 +1659,8 @@ Some orderings a test needs are against something the SIP wire does not show:
 a CANCEL that must cross the system's own routing exchange is sent while the
 system has a request to its decision backend outstanding, and no datagram marks
 that moment. `awaits` names such an event, and the send goes out only once its
-dwell has elapsed AND the lane has reported an occurrence of the event that no
-earlier send consumed. One occurrence releases one send.
+dwell has elapsed AND an occurrence the lane reported is not yet consumed; the
+send consumes it. One occurrence releases one send, whenever it was reported.
 
 The token is the LANE's, from its event registry, like an `inject` action
 (§6.6). The one this document names:
@@ -2167,12 +2167,16 @@ held. Four namespaces, and the order between them matters.
 ${leg:<leg-id>.call-id}        ${leg:<leg-id>.cseq.local}
 ${leg:<leg-id>.local-tag}      ${leg:<leg-id>.cseq.remote}
 ${leg:<leg-id>.remote-tag}     ${leg:<leg-id>.rseq}
-${leg:<leg-id>.remote-target}
+${leg:<leg-id>.remote-target}  ${leg:<leg-id>.local-hostport}
 ${leg:<leg-id>.route-set}
 ```
 
 They exist because asserting a dialog's own tags, composing a header out of
 them, or routing through a proxy needs exactly this dialog state.
+`local-hostport` is the `host:port` the leg's endpoint is bound at on THIS run:
+a lane may bind an endpoint elsewhere than its stated `observed` address (a
+port the OS picks, so cells run side by side), and a check on the Request-URI
+the system addressed the leg with reads the bound one.
 
 **Early-dialog accessors** read ONE fork of a forking leg:
 
@@ -2570,7 +2574,7 @@ One check vocabulary everywhere, borrowed from the upstream `e2e-model`:
 
 | field | required | meaning |
 |---|---|---|
-| `field` | yes | field selector. Open token: `status`, `from.userInfo`, `from.uri`, `to.uri`, `ruri.uri`, `ruri.userInfo`, `header(P-Asserted-Identity)`, `body`, `body.b64`, or a deployment observable's name in a postcondition |
+| `field` | yes | field selector. Open token: `status`, `from.userInfo`, `from.uri`, `to.uri`, `ruri.uri`, `ruri.userInfo`, `header(P-Asserted-Identity)`, `tags(Supported,Require)` (the option tags every row of the named headers lists, one set joined by `,`), `body`, `body.b64`, or a deployment observable's name in a postcondition |
 | `op` | yes | `eq`, `regex`, `exists`, `absent` |
 | `value` | with `eq` / `regex` | a literal, a regex, or a string carrying `${…}` accessors |
 
@@ -2583,6 +2587,9 @@ text.
 
 `exists` and `absent` take no value, and `eq` / `regex` require one; lint refuses
 either mismatch.
+
+A `${…}` inside a `regex` value is substituted as a LITERAL: a bound
+`+15550100` matches a plus sign, never a repetition.
 
 Checks appear inline on an `expect` (asserting over the matched message) and in
 `postconditions` (asserting over what the run left behind). Both are

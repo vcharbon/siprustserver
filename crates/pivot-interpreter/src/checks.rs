@@ -38,12 +38,28 @@ pub trait Observables {
 /// | `from.uri` / `to.uri` | the two whole URIs, parameters included |
 /// | `ruri.uri` / `ruri.userInfo` | a request's Request-URI, whole / its user part canonically |
 /// | `header(<Name>)` | the first occurrence of that header, in wire order |
+/// | `tags(<Name>,…)` | the option tags every row of the named set-like headers lists, one set joined by `,` |
 /// | `body` | the body as text |
 pub struct MessageObservables<'a>(pub &'a Inbound);
 
 impl Observables for MessageObservables<'_> {
     fn observe(&self, field: &str) -> Result<Option<String>, String> {
         let m = self.0;
+        if let Some(rest) = field.strip_prefix("tags(") {
+            let names = rest
+                .strip_suffix(')')
+                .ok_or_else(|| format!("selector {field:?} opens `tags(` and never closes it"))?;
+            let tags: Vec<String> = names
+                .split(',')
+                .flat_map(|name| m.headers.option_tags(name.trim()))
+                .fold(Vec::new(), |mut set, tag| {
+                    if !set.iter().any(|t: &String| t.eq_ignore_ascii_case(&tag)) {
+                        set.push(tag);
+                    }
+                    set
+                });
+            return Ok((!tags.is_empty()).then(|| tags.join(",")));
+        }
         if let Some(rest) = field.strip_prefix("header(") {
             let name = rest
                 .strip_suffix(')')
@@ -100,7 +116,10 @@ pub fn evaluate(
     };
     let expected = match &check.value {
         None => None,
-        Some(text) => match resolver.text(text) {
+        Some(text) => match match check.op {
+            CheckOp::Regex => resolver.pattern(text),
+            _ => resolver.text(text),
+        } {
             Ok(value) => Some(value),
             Err(e) => {
                 return Some(Failure::AccessorUnresolved {
@@ -250,6 +269,44 @@ mod tests {
         .is_none());
         assert!(run(&check("header(To)", CheckOp::Regex, Some("^nope$")), &m, &state, &bindings)
             .is_some());
+    }
+
+    /// `tags(…)` reads every row of every named header: an option tag only a
+    /// second `Supported` row or a `Require` lists is found.
+    #[test]
+    fn the_tags_selector_reads_every_row_of_every_named_header() {
+        let state = RunState::new();
+        let bindings = IdentityBindings::new();
+        let mut m = inbound();
+        m.headers = vec![
+            ("Supported".into(), "timer".into()),
+            ("k".into(), "replaces, 100rel".into()),
+            ("Require".into(), "precondition".into()),
+        ]
+        .into();
+        let tags = check(
+            "tags(Supported,Require)",
+            CheckOp::Eq,
+            Some("timer,replaces,100rel,precondition"),
+        );
+        assert!(
+            run(&tags, &m, &state, &bindings).is_none(),
+            "{:?}",
+            run(&tags, &m, &state, &bindings)
+        );
+    }
+
+    /// A value bound into a pattern is a literal there: the `+` of an E.164
+    /// number matches a plus sign.
+    #[test]
+    fn a_bound_value_is_a_literal_inside_a_regex() {
+        let state = RunState::new();
+        let bindings = IdentityBindings::new().bind("caller", "e164", "+15550100");
+        let mut m = inbound();
+        m.headers = vec![("P-Asserted-Identity".into(), "<sip:+15550100@h>".into())].into();
+        let pattern =
+            check("header(P-Asserted-Identity)", CheckOp::Regex, Some("^<sip:${num:caller:e164}@"));
+        assert!(run(&pattern, &m, &state, &bindings).is_none());
     }
 
     #[test]

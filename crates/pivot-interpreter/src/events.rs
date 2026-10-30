@@ -2,9 +2,10 @@
 //! SIP wire, reported to the run so a `send` can wait on it.
 //!
 //! The tokens are the lane's: the run knows only which ones the lane reports
-//! (a document awaiting another refuses before it dials) and how many
-//! occurrences no awaiting send has consumed yet. Each occurrence releases
-//! exactly one send.
+//! (a document awaiting another refuses before it dials) and the occurrences
+//! reported and not yet consumed. An awaiting send goes out once its dwell has
+//! elapsed and such an occurrence exists, and consumes it: one occurrence
+//! releases one send, whenever it was reported.
 
 use std::collections::{BTreeMap, BTreeSet};
 
