@@ -5,6 +5,7 @@
 //! Select one (the workspace build `just test` made, no rebuild):
 //! `cargo nextest run --workspace -E 'package(=http-net-testkit) & binary(it)' <module>::`.
 
+mod external;
 mod recording;
 mod scripted;
 mod scripted_codec;

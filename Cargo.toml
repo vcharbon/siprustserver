@@ -29,6 +29,7 @@ members = [
     "crates/repl-net-testkit",
     "crates/http-net",
     "crates/http-net-testkit",
+    "crates/clock-bridge",
     "crates/call-limiter",
     "crates/call-limiter-wire",
     "crates/seq-report",

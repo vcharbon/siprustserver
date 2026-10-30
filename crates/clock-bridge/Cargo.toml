@@ -1,0 +1,20 @@
+[package]
+name = "clock-bridge"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Test support bridging a paused tokio clock to work done on the real clock: an external process the simulation cannot host answers in real time, and its result is delivered at a virtual instant, the paused clock held only while a due result is still on its way. It declares no purity tier, so no production binary links it."
+
+[package.metadata.ha]
+side = "blind"
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+
+[dev-dependencies]
+# `start_paused` lives behind tokio's test-util feature.
+tokio = { workspace = true, features = ["test-util"] }

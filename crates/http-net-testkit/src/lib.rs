@@ -14,11 +14,15 @@
 //!   exchanges a scenario states as a program and answers anything else `500`,
 //!   recorded as a finding. Its faults include closing the connection without
 //!   a response, through [`HttpService::answer`] and [`HttpAnswer`].
+//! - [`ExternalHttp`] — an [`HttpService`] forwarding to a real backend
+//!   through `clock-bridge`: a paused-clock test reaches an external process,
+//!   its answer delivered at a virtual instant.
 //!
 //! The crate declares no purity tier (ADR-0051 §1): a production binary that
 //! links it fails the closure check.
 
 mod entries;
+mod external;
 mod recording;
 pub mod scripted;
 mod simulated;
@@ -30,5 +34,6 @@ use http_net::{
 };
 
 pub use entries::{to_http_entries, CapturedExchange, ExchangeOutcome, RecordedHttpEntry};
+pub use external::ExternalHttp;
 pub use recording::{HttpNetworkEvent, HttpOutcome, RecordingHttpNetwork, HTTP_TAG};
 pub use simulated::{Behaviour, Fault, SimulatedHttpNetwork};
