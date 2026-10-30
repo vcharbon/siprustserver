@@ -16,8 +16,7 @@ import { STRICT } from "./strict.js"
 /** The sampling gate's bounds, as the run was configured. */
 export const Sampling = Schema.Struct({
   sampleCap: Schema.Int,
-  recordEvery: Schema.Int,
-  chaseCalls: Schema.Int
+  recordEvery: Schema.Int
 })
 export interface Sampling extends Schema.Schema.Type<typeof Sampling> {}
 
@@ -334,8 +333,7 @@ export const loadRunIndexJson = (index: LoadRunIndex): Record<string, unknown> =
       commandLine: index.meta.commandLine,
       sampling: index.meta.sampling && {
         sampleCap: index.meta.sampling.sampleCap,
-        recordEvery: index.meta.sampling.recordEvery,
-        chaseCalls: index.meta.sampling.chaseCalls
+        recordEvery: index.meta.sampling.recordEvery
       }
     }),
     progress: {

@@ -569,10 +569,9 @@ Sampling is bounded: a small fraction of calls record their trace (`--sample-cap
 per bucket); the rest are counted only. A non-sampled failure still gets a stub
 page with its one-line reason. A call records when it falls in its scenario's
 fixed share of 1 in `--background-record-every` (from the first call on), when it
-is one of the first `--sample-cap` calls of its scenario, or when a bucket of
-its scenario still under its cap chases its next sample (for 64 calls after
-the bucket's last sample). The recorded calls are thus a steady share whatever
-the call hold time. The RFC audit and the case checks run on recorded calls
+or is one of the first `--sample-cap` calls of its scenario. The recorded calls
+are thus a steady share whatever the call hold time and the outcomes: an error
+burst never raises the loadgen's recording cost. The RFC audit and the case checks run on recorded calls
 only: a rare outcome may go without its second sample. Lower `--background-record-every`
 (`1` records every call) when the audit's reach matters more than CPU.
 

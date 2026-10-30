@@ -144,7 +144,6 @@ fn recording_lines(idx: &LoadRunIndex) -> Vec<String> {
             if s.record_every > 0 {
                 gates.push(format!("1 in {}", s.record_every));
             }
-            gates.push(format!("{} after each new failure mode", s.chase_calls));
             format!(" ({})", gates.join(", "))
         }
         None => String::new(),

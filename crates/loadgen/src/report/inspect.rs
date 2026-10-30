@@ -30,7 +30,7 @@ impl Reporter {
             .sample_taken
             .iter()
             .filter(|((s, c, _), _)| *s == scenario && *c == label)
-            .map(|(_, t)| t.taken)
+            .map(|(_, taken)| taken)
             .sum()
     }
 

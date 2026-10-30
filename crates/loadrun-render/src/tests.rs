@@ -42,7 +42,7 @@ fn index(finished: bool) -> LoadRunIndex {
                 "--case".into(),
                 "a b".into(),
             ],
-            sampling: Some(Sampling { sample_cap: 10, record_every: 64, chase_calls: 64 }),
+            sampling: Some(Sampling { sample_cap: 10, record_every: 64 }),
         },
         progress: Progress {
             elapsed_ms: 35_000,
@@ -343,9 +343,8 @@ fn the_error_column_cuts_the_detail_and_titles_it_whole() {
 fn the_recording_line_states_the_gates() {
     let page = render_body(&index(false), &RenderOpts::default());
     assert!(page.contains(
-        "<b>basic_call</b>: 693 calls placed, 40 recorded (the first 10, 1 in 64, 64 after each \
-         new failure mode). 640 ended on an accepted branch; the RFC audit judged the recording \
-         of 30 of them."
+        "<b>basic_call</b>: 693 calls placed, 40 recorded (the first 10, 1 in 64). 640 ended on \
+         an accepted branch; the RFC audit judged the recording of 30 of them."
     ));
 }
 

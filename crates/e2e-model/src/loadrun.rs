@@ -281,7 +281,7 @@ mod tests {
                 egress: Some("transparent".to_string()),
                 profile: Some("endurance baseline".to_string()),
                 command_line: vec!["loadgen".into(), "--cps".into(), "20".into()],
-                sampling: Some(Sampling { sample_cap: 10, record_every: 64, chase_calls: 64 }),
+                sampling: Some(Sampling { sample_cap: 10, record_every: 64 }),
             },
             progress: Progress {
                 elapsed_ms: 60_000,

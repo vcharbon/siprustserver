@@ -140,9 +140,9 @@ pub(crate) fn settings(out: &mut String, idx: &LoadRunIndex) {
     if let Some(s) = &m.sampling {
         let _ = write!(
             out,
-            "<tr><th>sampling</th><td>first {} per scenario, 1 in {}, {} after each new failure \
-             mode; {} samples per bucket</td></tr>",
-            s.sample_cap, s.record_every, s.chase_calls, s.sample_cap
+            "<tr><th>sampling</th><td>first {} per scenario, 1 in {}; {} samples per \
+             bucket</td></tr>",
+            s.sample_cap, s.record_every, s.sample_cap
         );
     }
     out.push_str("</table>");

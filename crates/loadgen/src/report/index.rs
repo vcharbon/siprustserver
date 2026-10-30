@@ -9,7 +9,7 @@ use e2e_model::{
     LoadRunIndex, LoadRunMeta, RttRow, SampleGroup, Sampling, ScenarioRecording,
 };
 
-use super::{sample_rel, Bucket, Inner, Reporter, CHASE_CALLS};
+use super::{sample_rel, Bucket, Inner, Reporter};
 use crate::class::ResultClass;
 use crate::scenarios::ScenarioId;
 
@@ -28,7 +28,6 @@ impl Reporter {
         meta.sampling = Some(Sampling {
             sample_cap: self.cfg.sample_cap,
             record_every: self.cfg.background_record_every,
-            chase_calls: CHASE_CALLS,
         });
         let mut progress = self.progress_of(&g);
         progress.target_cps = meta.cps;

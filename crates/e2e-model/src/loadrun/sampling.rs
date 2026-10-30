@@ -13,9 +13,6 @@ pub struct Sampling {
     pub sample_cap: u32,
     /// 1 call of each scenario in this many records (`0`: none).
     pub record_every: u64,
-    /// Calls of its scenario a bucket under cap keeps recording after its
-    /// first call or its last sample.
-    pub chase_calls: u32,
 }
 
 /// Per scenario: the calls placed and recorded, and the calls the RFC audit

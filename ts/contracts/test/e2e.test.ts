@@ -229,7 +229,7 @@ describe("a load-run index", () => {
       egress: "transparent",
       profile: "endurance baseline",
       commandLine: ["loadgen", "--cps", "20"],
-      sampling: { sampleCap: 10, recordEvery: 64, chaseCalls: 64 }
+      sampling: { sampleCap: 10, recordEvery: 64 }
     },
     progress: {
       elapsedMs: 60000,

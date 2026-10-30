@@ -882,12 +882,6 @@
       "description": "The sampling gate's bounds, as the run was configured.",
       "type": "object",
       "properties": {
-        "chaseCalls": {
-          "description": "Calls of its scenario a bucket under cap keeps recording after its\nfirst call or its last sample.",
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
         "recordEvery": {
           "description": "1 call of each scenario in this many records (`0`: none).",
           "type": "integer",
@@ -903,8 +897,7 @@
       },
       "required": [
         "sampleCap",
-        "recordEvery",
-        "chaseCalls"
+        "recordEvery"
       ]
     },
     "ScenarioRecording": {

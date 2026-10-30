@@ -10,9 +10,9 @@
 //! The memory ceiling is structural: counters and histograms are fixed-size;
 //! samples are capped per bucket; and the sampling gate
 //! ([`Reporter::should_record`]) records a fixed share of the calls from the
-//! first call on, the first `sample_cap` calls of each scenario and a bounded
-//! chase of each bucket under cap, whatever the call hold time. Recording is
-//! per-call (freed when the call's binder drops): nothing accumulates.
+//! first call on and the first `sample_cap` calls of each scenario, whatever the
+//! call hold time and the outcomes. Recording is per-call (freed when the call's
+//! binder drops): nothing accumulates.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -55,21 +55,6 @@ impl Default for ReporterCfg {
 // un-refined (Ok).
 type Bucket = (ScenarioId, String, String);
 
-/// How many calls of its scenario a bucket under cap keeps recording after its
-/// first call or its last sample: the sampling gate chases the bucket's next
-/// occurrence that long, then leaves it to the background fraction, so a rare
-/// failure mode never keeps a whole scenario recording.
-const CHASE_CALLS: u32 = 64;
-
-/// One sample bucket's tally, from the bucket's first call: the samples it
-/// holds, and the calls recorded to chase its next sample since its first call
-/// or its last sample ([`CHASE_CALLS`]).
-#[derive(Default, Clone, Copy)]
-struct BucketTally {
-    taken: u32,
-    chased: u32,
-}
-
 /// The run-dir-relative path of one sample page — THE single place the on-disk
 /// layout is spelled, used by both `finalize` (the writer) and `build_index`
 /// (the machine-readable listing) so the two can never disagree. An empty case
@@ -98,7 +83,8 @@ struct Inner {
     checkpoints: BTreeMap<(ScenarioId, &'static str), Hist>,
     /// SIP round trips per scenario and exchange (`Hist::round_trip` bounds).
     rtt: BTreeMap<(ScenarioId, Exchange), Hist>,
-    sample_taken: BTreeMap<Bucket, BucketTally>,
+    /// Samples stored per bucket.
+    sample_taken: BTreeMap<Bucket, u32>,
     /// Calls placed per scenario, counted by the sampling gate.
     placed: BTreeMap<ScenarioId, u64>,
     /// Calls that ran recorded, per scenario.
@@ -236,26 +222,14 @@ impl Reporter {
 
     /// The sampling-gate decision at call start: should this call record its
     /// trace? True for 1 call of its scenario in `background_record_every` (0:
-    /// none), for a call that chases the next sample of a bucket of its
-    /// scenario still under cap (at most `CHASE_CALLS` calls after the bucket's
-    /// first call or last sample), and for the first `sample_cap` calls of its
-    /// scenario.
-    /// Before any call of the scenario has ended, the last two give at most
-    /// `sample_cap` calls.
+    /// none) and for the first `sample_cap` calls of its scenario. The calls
+    /// that record depend only on the scenario's call count, never on the
+    /// outcomes: the loadgen's recording cost stays flat through an error burst.
     pub fn should_record(&self, scenario: ScenarioId) -> bool {
         let every = self.cfg.background_record_every;
         let mut g = self.inner.lock().unwrap();
         let nth = *g.placed.entry(scenario).and_modify(|n| *n += 1).or_insert(1) - 1;
-        if every != 0 && nth.is_multiple_of(every) {
-            return true;
-        }
-        for ((s, _, _), tally) in g.sample_taken.iter_mut() {
-            if *s == scenario && tally.taken < self.cfg.sample_cap && tally.chased < CHASE_CALLS {
-                tally.chased += 1;
-                return true;
-            }
-        }
-        nth < u64::from(self.cfg.sample_cap)
+        (every != 0 && nth.is_multiple_of(every)) || nth < u64::from(self.cfg.sample_cap)
     }
 
     /// Whether a sample is still wanted for `(scenario, class, case)`
@@ -265,15 +239,14 @@ impl Reporter {
     pub fn wants_sample(&self, scenario: ScenarioId, class: &ResultClass, case: &str) -> bool {
         let g = self.inner.lock().unwrap();
         let key = (scenario, class.label(), case.to_string());
-        g.sample_taken.get(&key).map_or(0, |t| t.taken) < self.cfg.sample_cap
+        g.sample_taken.get(&key).copied().unwrap_or(0) < self.cfg.sample_cap
     }
 
     /// Record one completed call: bump its `(scenario, class, case)` count and
     /// its accepted-branch or failed-step count, fold its end-to-end time and
     /// checkpoints into the histograms, and store its sample if the bucket
     /// still has room, and fold its `evidence` into the recorded and audited
-    /// tallies. The bucket's first call arms its chase, recorded or
-    /// not; only a stored callflow re-arms it. `case` is the outcome's bounded
+    /// tallies. `case` is the outcome's bounded
     /// discriminator ([`CallOutcome::case`] — the driver computes it once, with
     /// the call's phase trail).
     pub fn record(
@@ -323,12 +296,11 @@ impl Reporter {
                 .record(d.as_secs_f64() * 1000.0);
         }
         let key = (scenario, label, case.to_string());
-        let tally = g.sample_taken.entry(key.clone()).or_default();
         let mut page = None;
         if let Some(sample) = sample {
-            if tally.taken < self.cfg.sample_cap {
-                let chased = if sample.html.is_some() { 0 } else { tally.chased };
-                *tally = BucketTally { taken: tally.taken + 1, chased };
+            let taken = g.sample_taken.entry(key.clone()).or_default();
+            if *taken < self.cfg.sample_cap {
+                *taken += 1;
                 let stored = g.samples.entry(key.clone()).or_default();
                 stored.push(sample);
                 page = Some(sample_rel(scenario, &key.1, case, stored.len() - 1));

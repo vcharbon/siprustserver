@@ -157,39 +157,35 @@ fn round_trips_render_as_a_fine_histogram_per_exchange() {
     assert!(!prom.contains("exchange=\"invite_100\""), "an unobserved exchange is not written");
 }
 
-/// A bucket under cap keeps its scenario recording for [`CHASE_CALLS`]
-/// calls after its last sample, then only the background fraction does;
-/// its next sample re-arms the chase.
+/// The gate records the same calls whatever the outcomes: new failure modes,
+/// recorded or not, stored as samples or not, never raise the recorded share.
 #[test]
 #[ignore = "slow lane: loadgen"]
-fn a_bucket_under_cap_chases_its_next_sample_for_a_bounded_run() {
-    let r = Reporter::new(ReporterCfg { sample_cap: 2, background_record_every: 0 });
-    assert!(r.should_record("s"), "one of the first sample_cap calls");
-    let failed = || CallOutcome::Step {
-        at: FailedAt::at_barrier("established"),
-        cause: scenario_harness::StepError::timeout("established", None, "a datagram"),
-    };
-    let record = |o: &CallOutcome| {
-        let sample = RenderedSample { html: None, detail: o.detail(), e2e_ms: 1.0 };
-        r.record(
+fn the_recorded_share_does_not_depend_on_the_outcomes() {
+    let cfg = || ReporterCfg { sample_cap: 3, background_record_every: 16 };
+    let (quiet, failing) = (Reporter::new(cfg()), Reporter::new(cfg()));
+    let flow = || RenderedSample { html: Some(Arc::from("<html/>")), detail: None, e2e_ms: 1.0 };
+    let mut recorded = (Vec::new(), Vec::new());
+    for i in 0..1_000 {
+        let failed = rfc_fail(&format!("rule-{}", i % 40), "detail");
+        let sample = (i % 2 == 0).then(flow);
+        failing.record(
             "s",
-            o,
-            &o.case(None),
+            &failed,
+            &failed.case(None),
             Duration::ZERO,
             &[],
-            CallEvidence { sample: Some(sample), ..CallEvidence::default() },
+            CallEvidence { sample, ..CallEvidence::default() },
         );
-    };
-    record(&failed());
-    let chased = (0..CHASE_CALLS + 10).filter(|_| r.should_record("s")).count();
-    assert_eq!(chased, CHASE_CALLS as usize, "the chase is bounded");
-    record(&failed());
-    assert!(!r.should_record("s"), "a full bucket is not chased");
-    record(&CallOutcome::Step {
-        at: FailedAt::at_barrier("torn_down"),
-        cause: scenario_harness::StepError::timeout("torn_down", None, "a datagram"),
-    });
-    assert!(r.should_record("s"), "a new bucket re-arms the chase");
+        if quiet.should_record("s") {
+            recorded.0.push(i);
+        }
+        if failing.should_record("s") {
+            recorded.1.push(i);
+        }
+    }
+    assert_eq!(recorded.0.len(), 65, "calls 0, 1, 2 and every 16th (63 from call 0 on)");
+    assert_eq!(recorded.0, recorded.1, "failure modes changed which calls record");
 }
 
 /// Before any call of a scenario has ended, the gate records the first
@@ -362,7 +358,7 @@ fn writes_and_parses_the_machine_readable_index() {
     assert!(out.join("index.html").exists(), "index.html still written");
     let idx: LoadRunIndex = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
 
-    let sampling = Sampling { sample_cap: 5, record_every: 0, chase_calls: CHASE_CALLS };
+    let sampling = Sampling { sample_cap: 5, record_every: 0 };
     assert_eq!(idx.meta, LoadRunMeta { sampling: Some(sampling), ..meta }, "run metadata echoed");
     assert_eq!(idx.total_calls(), 2);
     assert_eq!(idx.failed_calls(), 1, "the check_fail reinvite");
@@ -457,57 +453,6 @@ async fn final_write_is_not_overwritten_by_snapshot_task() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
-/// The first unrecorded occurrence of a bucket arms its chase; later
-/// unrecorded occurrences and never-ran stubs never re-arm it, a stored
-/// callflow does.
-#[test]
-#[ignore = "slow lane: loadgen"]
-fn an_unrecorded_occurrence_arms_the_chase_once() {
-    let r = Reporter::new(ReporterCfg { sample_cap: 2, background_record_every: 0 });
-    assert!(r.should_record("s") && r.should_record("s"), "the first sample_cap calls");
-    let failed = CallOutcome::Step {
-        at: FailedAt::at_barrier("established"),
-        cause: scenario_harness::StepError::timeout("established", None, "a datagram"),
-    };
-    let case = failed.case(None);
-    r.record("s", &failed, &case, Duration::ZERO, &[], CallEvidence::default());
-    let chased = (0..CHASE_CALLS + 10).filter(|_| r.should_record("s")).count();
-    assert_eq!(chased, CHASE_CALLS as usize, "an unrecorded occurrence arms a bounded chase");
-    r.record("s", &failed, &case, Duration::ZERO, &[], CallEvidence::default());
-    assert!(!r.should_record("s"), "a later unrecorded occurrence does not re-arm it");
-    let stub = RenderedSample { html: None, detail: None, e2e_ms: 0.0 };
-    r.record(
-        "s",
-        &failed,
-        &case,
-        Duration::ZERO,
-        &[],
-        CallEvidence { sample: Some(stub), ..CallEvidence::default() },
-    );
-    assert!(!r.should_record("s"), "the stub of a call that never ran does not re-arm it");
-    let r = Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 0 });
-    let flow = || RenderedSample { html: Some(Arc::from("<html/>")), detail: None, e2e_ms: 1.0 };
-    r.record(
-        "s",
-        &failed,
-        &case,
-        Duration::ZERO,
-        &[],
-        CallEvidence { sample: Some(flow()), ..CallEvidence::default() },
-    );
-    let chased = (0..CHASE_CALLS + 10).filter(|_| r.should_record("s")).count();
-    assert_eq!(chased, CHASE_CALLS as usize, "a stored callflow arms the chase");
-    r.record(
-        "s",
-        &failed,
-        &case,
-        Duration::ZERO,
-        &[],
-        CallEvidence { sample: Some(flow()), ..CallEvidence::default() },
-    );
-    assert!(r.should_record("s"), "a stored callflow under cap re-arms it");
-}
-
 /// A bucket counted with no stored sample lists none, and the index states
 /// the sampling bounds the page names it by.
 #[test]
@@ -518,7 +463,7 @@ fn the_index_names_a_bucket_with_no_recorded_call() {
     r.record("s", &failed, &failed.case(None), Duration::ZERO, &[], CallEvidence::default());
     let idx = r.build_index(LoadRunMeta::default(), Canaries::default());
     assert!(idx.samples.is_empty(), "{:?}", idx.samples);
-    let sampling = Sampling { sample_cap: 2, record_every: 64, chase_calls: CHASE_CALLS };
+    let sampling = Sampling { sample_cap: 2, record_every: 64 };
     assert_eq!(idx.meta.sampling, Some(sampling));
     let row = &idx.counts[0];
     assert_eq!(row.error, None, "no stored sample, no detail: {row:?}");
