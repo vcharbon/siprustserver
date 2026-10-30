@@ -38,9 +38,9 @@ mod binding;
 mod record;
 mod seeds;
 pub(crate) use binding::CALLER;
-use binding::{bind_agents, bind_refusal, call_routing, from_user_key, KEY_DRAWS};
+use binding::{bind_agents, bind_refusal, call_key, call_routing, KEY_DRAWS};
 use record::{phase_annotated_detail, record_unrun};
-use seeds::{mint_token, next_seed, panic_msg, xorshift};
+use seeds::{next_seed, panic_msg, xorshift};
 
 /// The mux transport the driver binds calls on.
 pub struct MuxTransport {
@@ -309,19 +309,13 @@ pub(crate) async fn run_one(
             Some(r) => (r.core, r.dwells, Some(r.banner), Some(r.input)),
             None => (Default::default(), Default::default(), None, None),
         };
-        // The call's key: minted, or under from-user correlation the resolved
-        // caller's From user (the SUT keeps it on every leg it originates); a
-        // call without one is refused here, before any bind or datagram.
-        let token = if from_user {
-            match from_user_key(core.from.as_deref()) {
-                Ok(key) => key,
-                Err(reason) => {
-                    let outcome = CallOutcome::Rejected(reason);
-                    return record_unrun(&reporter, &outcomes, id, outcome);
-                }
+        // A call without a usable key is refused here, before any bind or datagram.
+        let nonce = outcomes.as_ref().map(|sink| sink.call_id_nonce.as_str());
+        let token = match call_key(&transport.correlation, core.from.as_deref(), nonce) {
+            Ok(key) => key,
+            Err(reason) => {
+                return record_unrun(&reporter, &outcomes, id, CallOutcome::Rejected(reason))
             }
-        } else {
-            mint_token()
         };
         // Simulated packet loss + auto-retransmit both ride the mux transport
         // (the mux dispatcher is the background pump that reacts to inbound

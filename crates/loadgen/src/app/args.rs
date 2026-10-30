@@ -83,7 +83,10 @@ pub struct Args {
     /// for a SUT that keeps the calling party's number on every leg; every mix
     /// entry needs a case (checked at startup), and a call whose resolved From
     /// has no user, or whose number a concurrent call holds, is counted
-    /// `rejected` before any datagram.
+    /// `rejected` before any datagram; `--correlation-extract` keys on a
+    /// regex's capture group of the From user instead. `call-id`: the token IS
+    /// the caller's Call-ID, found in each SUT-originated leg's Call-ID by the
+    /// required `--correlation-extract` regex.
     #[arg(long, default_value = "header")]
     pub correlate: String,
     /// Correlation header name (the `header` strategy): the transparent
@@ -96,9 +99,13 @@ pub struct Args {
     /// the bare token.
     #[arg(long, default_value = "${token}")]
     pub correlation_template: String,
-    /// Override the token-extraction regex (FIRST capture group = the token).
-    /// Default: derived from `--correlation-template` (literal parts escaped,
-    /// the placeholder matched as unreserved URI chars).
+    /// The token-extraction regex (FIRST capture group = the token). `header`:
+    /// overrides the regex derived from `--correlation-template` (literal parts
+    /// escaped, the placeholder matched as unreserved URI chars). `from-user`:
+    /// applied to the From URI user of the caller and of every received leg
+    /// (e.g. `^(\+?[0-9]+)` drops `;ext=…`); unset → the whole user.
+    /// `call-id`: required, applied to a received leg's Call-ID (e.g.
+    /// `^leg[0-9]+-(.+)$`).
     #[arg(long)]
     pub correlation_extract: Option<String>,
     /// Shorthand for the `api-call-pin` egress policy: attach an X-Api-Call
@@ -403,9 +410,20 @@ pub(super) fn correlation(args: &Args) -> Result<Correlation, String> {
         )
         .map_err(|e| format!("bad correlation config: {e}")),
         "to-user" | "to_user" => Ok(Correlation::to_user()),
-        "from-user" | "from_user" => Ok(Correlation::from_user()),
+        "from-user" | "from_user" => match args.correlation_extract.as_deref() {
+            None => Ok(Correlation::from_user()),
+            Some(re) => Correlation::from_user_extract(re)
+                .map_err(|e| format!("bad correlation config: {e}")),
+        },
+        "call-id" | "call_id" => {
+            let re = args.correlation_extract.as_deref().ok_or(
+                "--correlate call-id needs --correlation-extract (group 1 = the caller's Call-ID)",
+            )?;
+            Correlation::call_id(re).map_err(|e| format!("bad correlation config: {e}"))
+        }
         other => Err(format!(
-            "unknown --correlate {other:?} (expected `header`, `to-user` or `from-user`)"
+            "unknown --correlate {other:?} (expected `header`, `to-user`, `from-user` or \
+             `call-id`)"
         )),
     }
 }

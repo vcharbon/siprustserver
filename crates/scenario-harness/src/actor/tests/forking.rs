@@ -362,6 +362,7 @@ async fn actor_caller_pracks_each_reliable_fork() {
         from: None,
         to: None,
         ruri: None,
+        call_id: None,
         headers: vec![("Supported".to_string(), "100rel".to_string())],
         rewrite: Default::default(),
     };
@@ -427,6 +428,7 @@ async fn actor_caller_confirms_reliable_unrung_winner() {
         from: None,
         to: None,
         ruri: None,
+        call_id: None,
         headers: vec![("Supported".to_string(), "100rel".to_string())],
         rewrite: Default::default(),
     };

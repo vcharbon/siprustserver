@@ -1,12 +1,14 @@
 //! A call's agent layout on the mux: its routing, its agent binds, its
-//! from-user correlation key, and the outcome of a refused bind.
+//! correlation key, and the outcome of a refused bind.
 
 use e2e_model::LegSpec;
 use scenario_harness::{Agent, AgentBinder};
 
+use super::seeds::mint_token;
 use super::MuxTransport;
 use crate::class::CallOutcome;
 use crate::mux::{labelled_prefix_leg_picker_defaulting, CallRouting};
+use crate::Correlation;
 
 /// The per-call routing the driver declares: one correlation token per call,
 /// the callee legs on the callee address, and the R-URI picker when there are
@@ -69,11 +71,23 @@ pub(super) async fn bind_agents(
     Ok((alice, callees))
 }
 
-/// The from-user correlation key of a call: the URI user of its resolved
-/// caller identity, or the bounded rejection reason when there is none.
-pub(super) fn from_user_key(from: Option<&str>) -> Result<String, &'static str> {
-    let from = from.ok_or("no_from")?;
-    sip_message::sniff::address_user(from).ok_or("userless_from")
+/// The call's correlation key, or the bounded rejection reason. Under
+/// from-user correlation it is the resolved caller's From key (the SUT keeps
+/// the number on every leg it originates); under Call-ID correlation a minted
+/// token carrying the run `nonce`, since it is the caller's Call-ID; otherwise
+/// a minted token.
+pub(super) fn call_key(
+    correlation: &Correlation,
+    from: Option<&str>,
+    nonce: Option<&str>,
+) -> Result<String, &'static str> {
+    if correlation.is_from_user() {
+        return correlation.caller_key(from);
+    }
+    Ok(match nonce.filter(|_| correlation.is_call_id()) {
+        Some(nonce) => format!("{}.{nonce}", mint_token()),
+        None => mint_token(),
+    })
 }
 
 /// The outcome of a refused agent bind: a key a concurrent call holds is a

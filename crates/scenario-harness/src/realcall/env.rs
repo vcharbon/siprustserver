@@ -42,6 +42,9 @@ pub enum CorrelationStamp {
     /// identity already carries: no header and no To override. Requires a SUT
     /// that keeps the From URI user on every originated leg.
     FromUser,
+    /// The token IS the INVITE's Call-ID. Requires a SUT whose originated legs
+    /// carry a Call-ID derived from it by a fixed rule.
+    CallId,
 }
 
 /// The per-call **core identity** overrides — the load-side twin of the e2e
@@ -303,6 +306,7 @@ impl<'a> CallEnv<'a> {
         // applies AFTER `apply_core` on the builder; eager form: override here).
         let mut headers = Vec::new();
         let mut to = self.core.to.clone();
+        let mut call_id = None;
         match &self.stamp {
             CorrelationStamp::Header { name, value } => {
                 headers.push((name.clone(), value.clone()));
@@ -311,6 +315,7 @@ impl<'a> CallEnv<'a> {
                 to = Some(format!("sip:{}@{}", self.token, self.bob.addr()));
             }
             CorrelationStamp::FromUser => {}
+            CorrelationStamp::CallId => call_id = Some(self.token.clone()),
         }
         if self.emergency {
             headers.push(("Resource-Priority".to_string(), "esnet.0".to_string()));
@@ -321,6 +326,7 @@ impl<'a> CallEnv<'a> {
             from: self.core.from.clone(),
             to,
             ruri: self.core.ruri.clone(),
+            call_id,
             headers,
             rewrite: self.egress.rewrite_with_no_answer(&targets, no_answer_ms),
         }
@@ -385,6 +391,9 @@ pub struct InvitePlan {
     /// Resolved R-URI override (the authored core), if any — the egress
     /// rewrite's own R-URI still has the final say.
     pub ruri: Option<String>,
+    /// The Call-ID the dialog is created under (a Call-ID correlation stamp);
+    /// `None` lets the caller mint one.
+    pub call_id: Option<String>,
     /// Extra headers, in fold-in order: the correlation header stamp, then the
     /// emergency `Resource-Priority` marker.
     pub headers: Vec<(String, String)>,
@@ -420,6 +429,9 @@ impl InvitePlan {
         }
         if let Some(ruri) = &self.ruri {
             inv = inv.ruri(ruri);
+        }
+        if let Some(call_id) = &self.call_id {
+            inv = inv.with_call_id(call_id);
         }
         for (name, value) in &self.headers {
             inv = inv.with_header(name, value);

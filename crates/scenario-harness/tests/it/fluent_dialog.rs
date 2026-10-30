@@ -194,3 +194,29 @@ async fn a_dial_carries_the_identity_its_caller_seeds() {
     bye.expect(200).await;
     h.finish().await;
 }
+
+/// A Call-ID seeded alone creates the dialog under it with a minted From tag;
+/// every request of the dialog carries it (RFC 3261 §8.1.1.4, §12.2.1.1).
+#[tokio::test]
+async fn a_dial_carries_the_call_id_its_caller_seeds() {
+    const CALL_ID: &str = "lg0a1b2c.run-1";
+    let h = Harness::new("seeded-call-id");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let mut call = alice.invite(&bob).with_call_id(CALL_ID).with_sdp(SDP_OFFER).send().await;
+    assert_eq!(call.call_id(), CALL_ID);
+    let mut uas = bob.receive("INVITE").await;
+    assert_eq!(uas.request().call_id(), CALL_ID);
+    assert!(uas.request().from().tag().is_some_and(|t| !t.is_empty()), "From tag minted");
+    uas.respond(200, "OK").with_sdp(SDP_ANSWER).send().await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    assert_eq!(bob.receive("ACK").await.request().call_id(), CALL_ID);
+    let mut bye = dialog.bye().await;
+    let mut bye_in = bob.receive("BYE").await;
+    assert_eq!(bye_in.request().call_id(), CALL_ID);
+    bye_in.respond(200, "OK").await;
+    bye.expect(200).await;
+    h.finish().await;
+}

@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use scenario_harness::claim::ClaimRule;
 use scenario_harness::legpick::LegPicker;
 use sip_message::preparse::is_invite_request_buffer;
-use sip_message::sniff::{call_id, from_user};
+use sip_message::sniff::call_id;
 use sip_net::queue::PacketQueue;
 use sip_net::{
     BindError, BindErrorReason, BindUdpOpts, SendError, SendTap, SignalingNetwork, UdpEndpoint,
@@ -311,7 +311,7 @@ impl SignalingNetwork for MuxNetwork {
 struct MuxEndpoint {
     local: SocketAddr,
     role: Role,
-    /// The From user a caller's initial INVITE must carry (from-user
+    /// The From key a caller's initial INVITE must yield (from-user
     /// correlation only): the call's key, registered by its callee legs.
     caller_key: Option<String>,
     mux: Arc<MuxSocket>,
@@ -357,11 +357,11 @@ impl UdpEndpoint for MuxEndpoint {
             let invite = is_invite_request_buffer(buf);
             if invite {
                 if let Some(key) = &self.caller_key {
-                    let from = from_user(buf);
+                    let from = self.mux.correlation.token(buf);
                     if from.as_deref() != Some(key.as_str()) {
                         self.mux.stats.caller_key_mismatch.fetch_add(1, Ordering::Relaxed);
                         return Err(SendError::stated(format!(
-                            "caller INVITE From user {from:?} is not the call key {key:?}"
+                            "caller INVITE From key {from:?} is not the call key {key:?}"
                         )));
                     }
                 }

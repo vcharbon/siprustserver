@@ -184,6 +184,7 @@ async fn early_update_on_the_reliable_early_dialog() {
         from: None,
         to: None,
         ruri: None,
+        call_id: None,
         headers: vec![("Supported".to_string(), "100rel".to_string())],
         rewrite: Default::default(),
     };

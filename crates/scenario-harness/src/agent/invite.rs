@@ -60,6 +60,9 @@ pub struct Invite<'a> {
     delayed_automatic: Option<DelayedAutomatic>,
     /// The `(Call-ID, From tag)` the dialog is created under; `None` mints both.
     identity: Option<(String, String)>,
+    /// The Call-ID the dialog is created under when no `identity` is set;
+    /// `None` mints one.
+    call_id: Option<String>,
     /// The INVITE's CSeq number; `None` is the caller's first
     /// ([`Party::first_cseq`]). A retry of an earlier INVITE
     /// under the same identity states the next one (RFC 3261 §8.1.3.5).
@@ -85,6 +88,7 @@ impl<'a> Invite<'a> {
             max_forwards: None,
             delayed_automatic: None,
             identity: None,
+            call_id: None,
             cseq: None,
         }
     }
@@ -191,6 +195,14 @@ impl<'a> Invite<'a> {
         self
     }
 
+    /// Create the dialog under `call_id`, the From tag still minted. The test
+    /// owns its uniqueness (RFC 3261 §8.1.1.4); an [`identity`](Self::identity)
+    /// takes precedence.
+    pub fn with_call_id(mut self, call_id: impl Into<String>) -> Self {
+        self.call_id = Some(call_id.into());
+        self
+    }
+
     /// State the INVITE's CSeq number: a retry under an earlier INVITE's
     /// identity carries the next one (RFC 3261 §8.1.3.5).
     pub fn cseq(mut self, cseq: u32) -> Self {
@@ -220,10 +232,11 @@ impl<'a> Invite<'a> {
         let caller = self.caller;
         let peer = self.peer;
         let wire_dst = self.wire_dst.unwrap_or(peer.addr);
-        let (call_id, from_tag) = self
-            .identity
-            .clone()
-            .unwrap_or_else(|| (caller.ids.call_id(&caller.name, caller.addr.ip()), caller.tag()));
+        let (call_id, from_tag) = self.identity.clone().unwrap_or_else(|| {
+            let call_id = (self.call_id.clone())
+                .unwrap_or_else(|| caller.ids.call_id(&caller.name, caller.addr.ip()));
+            (call_id, caller.tag())
+        });
         // Default identities are the agent URIs / a peer-addressed R-URI; a Test
         // case may override any of From/To/R-URI from its input data.
         let request_uri = self.request_uri.clone().unwrap_or_else(|| {
