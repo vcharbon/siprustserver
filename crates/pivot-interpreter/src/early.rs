@@ -116,6 +116,7 @@ mod tests {
             after: Vec::new(),
             early: early.map(str::to_string),
             overlap: None,
+            awaits: None,
             discriminator: Discriminator::Response { status: 183, cseq_method: None },
             msg: MsgSpec { status: Some(183), ..Default::default() },
             checks: Vec::new(),

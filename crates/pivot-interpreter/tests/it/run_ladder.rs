@@ -651,6 +651,7 @@ async fn replay_directed(
         media: Booking::new("127.0.0.1", LANE_RTP_BASE),
         base_dir,
         composer: &composer,
+        events: None,
     };
 
     let dir = bundle_dir(&case);

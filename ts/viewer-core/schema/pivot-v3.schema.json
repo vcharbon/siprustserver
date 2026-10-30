@@ -2045,6 +2045,13 @@
           "description": "`true` when the interpreter's own stack COMPOSES this message (100\nTrying, ACK-to-final, PRACK and its 2xx), deriving its R-URI, Route, Via\nand CSeq from the transaction that obliged it rather than from dialog\nstate (§6.3). It is not a storage policy: the step stores what any step\nstores, and only a body the stack could not place is withheld.",
           "type": "boolean"
         },
+        "awaits": {
+          "description": "`send` only: a lane event that must have occurred before the message\ngoes out (§6.7g), an open token from the lane's event registry\n(`decision-request-in-flight`). Each occurrence releases one send.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "check": {
           "anyOf": [
             {

@@ -966,6 +966,12 @@ export interface Step {
    */
   auto?: boolean
   /**
+   * `send` only: a lane event that must have occurred before the message
+   * goes out (§6.7g), an open token from the lane's event registry
+   * (`decision-request-in-flight`). Each occurrence releases one send.
+   */
+  awaits?: string | null
+  /**
    * `expect` only: whether the stored content is matched or merely recorded.
    */
   check?: CheckMode | null

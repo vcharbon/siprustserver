@@ -48,6 +48,7 @@
 //! - `cursor` — the scheduler: readiness, `after`, dwell, `alt` commit,
 //!   `optional` release, `unordered` completion.
 //! - `early` — the early dialogs a forking callee answers under (§6.1).
+//! - `events` — the lane events a `send` waits on (§6.7g).
 //! - `deviation` — the reproduced non-compliance an emission must carry.
 //! - `preserve` — holding a preserved emission to the block the document
 //!   stores (`verbatim-emission`, `raw-order`).
@@ -81,6 +82,7 @@ pub(crate) mod close;
 pub(crate) mod cursor;
 pub(crate) mod deviation;
 pub(crate) mod early;
+pub(crate) mod events;
 pub(crate) mod exec;
 pub(crate) mod gate;
 pub(crate) mod instance;
@@ -102,6 +104,7 @@ pub(crate) mod settle;
 pub(crate) mod stack;
 pub(crate) mod state;
 
+pub use events::{LaneEventSender, LaneEvents};
 pub use exec::{Lane, Outcome};
 pub use instance::mint_nonce;
 pub use media::{Booking, MediaMode};

@@ -158,6 +158,18 @@ export const InjectorMissing = failure("injector-missing", {
   node: Schema.String,
   action: Schema.String
 })
+/** A send awaits a lane event the lane does not report (§6.7g): refused before the dial. */
+export const LaneEventUnsupported = failure("lane-event-unsupported", {
+  step: Schema.String,
+  event: Schema.String
+})
+/** A send's awaited lane event did not occur inside the step's budget. */
+export const LaneEventMissing = failure("lane-event-missing", {
+  step: Schema.String,
+  leg: Schema.String,
+  event: Schema.String,
+  within_ms: Schema.Int
+})
 /** The lane bound no number for an identity the run needs. */
 export const IdentityUnbound = failure("identity-unbound", {
   site: Schema.String,
@@ -256,6 +268,8 @@ export const Failure = Schema.Union([
   FlowIncomplete,
   DeviationUnimplemented,
   InjectorMissing,
+  LaneEventUnsupported,
+  LaneEventMissing,
   IdentityUnbound,
   TransportClosed,
   RecordingFailed,
@@ -283,6 +297,8 @@ export const failureStep = (value: Failure): string | undefined => {
     case "timing-out-of-tolerance":
     case "retransmit-ladder-refused":
     case "declared-failure-not-produced":
+    case "lane-event-unsupported":
+    case "lane-event-missing":
       return value.step
     case "deviation-unimplemented":
       return value.step ?? undefined

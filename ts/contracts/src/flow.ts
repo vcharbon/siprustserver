@@ -75,6 +75,8 @@ export const Step = Schema.Struct({
   checks: Schema.optionalKey(Schema.Array(Check)),
   early: Schema.optionalKey(Schema.String),
   overlap: Schema.optionalKey(Schema.String),
+  /** `send` only: a lane event that must have occurred before the message goes out (§6.7g). */
+  awaits: Schema.optionalKey(Schema.String),
   msg: MsgSpec,
   delay: Delay,
   within_ms: Schema.optionalKey(Schema.Int),

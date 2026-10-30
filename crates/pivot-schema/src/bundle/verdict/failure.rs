@@ -123,6 +123,11 @@ pub enum Failure {
     DeviationUnimplemented { deviation: String, kind: String, step: Option<String>, reason: String },
     /// The document holds an `inject` and the lane supplied no injector.
     InjectorMissing { node: String, action: String },
+    /// A send awaits a lane event the lane does not report (§6.7g): the run
+    /// refuses before it dials rather than wait on what can never come.
+    LaneEventUnsupported { step: String, event: String },
+    /// A send's awaited lane event did not occur inside the step's budget.
+    LaneEventMissing { step: String, leg: String, event: String, within_ms: u64 },
     /// The lane bound no number for an identity the run needs — a claim whose
     /// number set is empty matches nothing, so the run refuses before it dials.
     IdentityUnbound { site: String, identity: String, detail: String },
@@ -271,6 +276,13 @@ impl std::fmt::Display for Failure {
             Failure::InjectorMissing { node, action } => {
                 write!(f, "inject {node:?} names action {action:?} and the lane supplied no injector")
             }
+            Failure::LaneEventUnsupported { step, event } => {
+                write!(f, "send {step:?} awaits lane event {event:?}, which the lane does not report")
+            }
+            Failure::LaneEventMissing { step, leg, event, within_ms } => write!(
+                f,
+                "send {step:?} on leg {leg} awaited lane event {event:?}, which did not occur within {within_ms} ms"
+            ),
             Failure::IdentityUnbound { site, identity, detail } => {
                 write!(f, "{site}: the lane bound no number for identity {identity:?} ({detail})")
             }

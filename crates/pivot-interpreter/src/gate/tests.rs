@@ -43,6 +43,7 @@ pub(super) fn step(msg: MsgSpec, check: CheckMode) -> CompiledStep {
         checks: vec![],
         early: None,
         overlap: None,
+        awaits: None,
         msg,
         delay: Delay { ms: 0, from: Anchor::Trigger, compressible: true, timer_linked: false },
         within_ms: 32000,

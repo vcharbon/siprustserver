@@ -1057,6 +1057,7 @@ FIRST message, and a nested block has no first message to commit on.
 | `checks` | no | field assertions over the matched message — AUTHORED ONLY (§9) |
 | `early` | no | id of the early dialog this message answers under, or rides |
 | `overlap` | no | a declared race with the named step |
+| `awaits` | `send` only | a lane event that must have occurred before the message goes out — AUTHORED ONLY (§6.7g) |
 | `msg` | yes | message spec (§8) |
 | `delay` | yes | dwell and its anchor (§6.8) |
 | `within_ms` | no | per-step override of `timing.expect_budget_ms` |
@@ -1645,6 +1646,40 @@ holds, and a real UA answers it 481 (§12.2.2). So does the interpreter:
   any other, except a BYE (§15) or an INVITE (§14.1), which the answering side
   never sends on an early dialog;
 - an ACK and a CANCEL are never refused here (§17.1.1.3, §9.1).
+
+### 6.7g awaits — a lane event a send waits on — AUTHORED ONLY
+
+```json
+{ "id": "s3", "leg": "A", "op": "send", "awaits": "decision-request-in-flight",
+  "msg": { "method": "CANCEL" },
+  "delay": { "ms": 0, "from": "step:s2", "compressible": true, "timer_linked": false } }
+```
+
+Some orderings a test needs are against something the SIP wire does not show:
+a CANCEL that must cross the system's own routing exchange is sent while the
+system has a request to its decision backend outstanding, and no datagram marks
+that moment. `awaits` names such an event, and the send goes out only once its
+dwell has elapsed AND the lane has reported an occurrence of the event that no
+earlier send consumed. One occurrence releases one send.
+
+The token is the LANE's, from its event registry, like an `inject` action
+(§6.6). The one this document names:
+
+| token | the lane reports it when |
+|---|---|
+| `decision-request-in-flight` | the system under test sent a request to its decision backend and holds no response to it yet |
+
+What produces the event, and what keeps the request in flight long enough for
+the send to cross it, is the lane's (a relay holding the decision backend's
+response, the delivery instant of a virtual clock). The interpreter only waits.
+
+- a run whose lane does not report an awaited event refuses before it dials
+  (`lane-event-unsupported`): the send could only ever time out;
+- a send whose event does not come inside its budget (`within_ms`, else
+  `timing.expect_budget_ms`, counted from its dwell) fails
+  (`lane-event-missing`) and ends the script, as a required expect does;
+- `awaits` sits on a `send` only (`awaits/on-expect`): an arrival is ordered by
+  what arrives.
 
 ### 6.8 delay and dwell
 
@@ -2535,7 +2570,7 @@ One check vocabulary everywhere, borrowed from the upstream `e2e-model`:
 
 | field | required | meaning |
 |---|---|---|
-| `field` | yes | field selector. Open token: `from.userInfo`, `from.uri`, `to.uri`, `ruri.uri`, `ruri.userInfo`, `header(P-Asserted-Identity)`, `body`, `body.b64`, or a deployment observable's name in a postcondition |
+| `field` | yes | field selector. Open token: `status`, `from.userInfo`, `from.uri`, `to.uri`, `ruri.uri`, `ruri.userInfo`, `header(P-Asserted-Identity)`, `body`, `body.b64`, or a deployment observable's name in a postcondition |
 | `op` | yes | `eq`, `regex`, `exists`, `absent` |
 | `value` | with `eq` / `regex` | a literal, a regex, or a string carrying `${…}` accessors |
 

@@ -168,6 +168,18 @@
       "node": "i1"
     },
     {
+      "event": "decision-request-in-flight",
+      "failure": "lane-event-unsupported",
+      "step": "s3"
+    },
+    {
+      "event": "decision-request-in-flight",
+      "failure": "lane-event-missing",
+      "leg": "A",
+      "step": "s3",
+      "within_ms": 2000
+    },
+    {
       "detail": "the lane bound caller and called-0-0",
       "failure": "identity-unbound",
       "identity": "transferee",

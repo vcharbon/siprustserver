@@ -18,6 +18,7 @@ mod accessors;
 mod annotation_rules;
 mod body_rules;
 mod deviation_rules;
+mod event_rules;
 mod flow_rules;
 mod must_fail_rules;
 mod references;
@@ -141,6 +142,7 @@ pub fn lint(pivot: &PivotV3) -> Report {
     flow_rules::check(&index, &mut report);
     body_rules::check(&index, &mut report);
     deviation_rules::check(&index, &mut report);
+    event_rules::check(&index, &mut report);
     violation_rules::check(&index, &mut report);
     must_fail_rules::check(&index, &mut report);
     scoping_rules::check(&index, &mut report);

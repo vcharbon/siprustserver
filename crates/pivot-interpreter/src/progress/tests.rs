@@ -78,6 +78,7 @@ fn armed(id: &str, discriminator: Discriminator, optional: bool, order: usize) -
         after: Vec::new(),
         early: None,
         overlap: None,
+        awaits: None,
         discriminator,
         msg: MsgSpec::default(),
         checks: Vec::new(),
