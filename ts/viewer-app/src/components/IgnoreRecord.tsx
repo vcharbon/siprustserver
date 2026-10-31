@@ -132,12 +132,7 @@ export const IgnoreRecord = (
 
   return (
     <details className="study-ignore">
-      <summary>ignore this capture — copy a never-fix record</summary>
-      <p className="muted">
-        for a capture whose SOURCE is plainly unreplayable, read off the pcap rather than proven by
-        a run. Paste the entry into the triage registry, keeping its keys sorted. Every other
-        verdict names a defect and still owes a triage session.
-      </p>
+      <summary title="a registry entry for a capture whose source is unreplayable">never-fix record</summary>
       <div className="ignore-controls">
         <select
           value={pick}
@@ -152,7 +147,7 @@ export const IgnoreRecord = (
           <input
             type="text"
             className="ignore-note"
-            placeholder="why this capture is not worth replaying"
+            placeholder="note"
             value={typed}
             onChange={(event) => {
               setTyped(event.target.value)
@@ -164,7 +159,7 @@ export const IgnoreRecord = (
           type="button"
           className="copy-ref"
           disabled={!ready}
-          title={ready ? `copy the record for ${capture}` : "a record needs a note and an evidence path"}
+          title={ready ? `copy the record for ${capture}` : "needs a note and an evidence path"}
           onClick={() => {
             void navigator.clipboard.writeText(text).then(() => {
               setCopied(true)
@@ -176,10 +171,7 @@ export const IgnoreRecord = (
         </button>
       </div>
       {bundle === "" && (
-        <p className="error">
-          nothing on disk to cite: a record's evidence path cannot be empty, so this one is written
-          by hand.
-        </p>
+        <p className="error">no evidence path on disk</p>
       )}
       <pre className="ignore-preview">{text}</pre>
     </details>

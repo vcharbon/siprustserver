@@ -6,7 +6,7 @@
  * message is rendered on its own — start-line, headers one per line, blank
  * line, body — and the line's bookkeeping (sequence, direction, time, step) is
  * kept beside it rather than interleaved. The verbatim record stays one click
- * away, because the escaping is sometimes exactly what is in question.
+ * away (`record`), because the escaping is sometimes exactly what is in question.
  *
  * Nothing is validated here: a malformation is drawn as recorded, and a
  * message this reader cannot split is shown raw with its line breaks restored.
@@ -20,6 +20,7 @@
 import { ARM_KEYS, bodySegments, bodyText, carriesWire, parseSip, readBody, readPayload, type BodySegment } from "@sip/viewer-core"
 import type { JSX } from "react"
 import { useState } from "react"
+import { DetailChips } from "./DetailChips.tsx"
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -41,23 +42,6 @@ const rawMessage = (
   if (typeof value === "string" && value.length > 0) return { raw: value, binary: false, segments: undefined }
   return undefined
 }
-
-const metaValue = (value: unknown): string =>
-  typeof value === "string" ? value : JSON.stringify(value) ?? "undefined"
-
-/** The record's own fields, minus the message: the line's bookkeeping. */
-const Metadata = ({ record }: { record: Record<string, unknown> }): JSX.Element => (
-  <div className="sip-meta">
-    {Object.entries(record)
-      .filter(([key]) => !RAW_KEYS.includes(key))
-      .map(([key, value]) => (
-        <span key={key} className="sip-meta-item">
-          <span className="sip-meta-key">{key}</span>
-          <span className="sip-meta-value">{metaValue(value)}</span>
-        </span>
-      ))}
-  </div>
-)
 
 /** A binary body, one segment at a time: hex dumps keep their columns, the rest wraps as text. */
 const SegmentedBody = ({ segments }: { segments: readonly BodySegment[] }): JSX.Element => (
@@ -95,31 +79,36 @@ export const SipMessageView = (
     ? raw
     : raw.slice(0, raw.length - (parsed?.body?.length ?? 0)) + bodyText(segments)
 
+  const [verbatim, setVerbatim] = useState(false)
+  const fields = source === undefined ? [] : Object.entries(source).filter(([key]) => !RAW_KEYS.includes(key))
+
   return (
     <div className="sip-view">
-      {source && message && <Metadata record={source} />}
+      {source && message && <DetailChips fields={fields} />}
 
       <div className="sip-view-bar">
         <span>{label ?? "sip message"}</span>
-        <button
-          type="button"
-          onClick={() => {
-            void navigator.clipboard?.writeText(copyText)
-            setCopied(true)
-            window.setTimeout(() => setCopied(false), 1200)
-          }}
-        >
-          {copied ? "copied" : "copy"}
-        </button>
+        <span className="sip-view-actions">
+          {raw !== undefined && (
+            <button type="button" className={verbatim ? "on" : undefined} title="the recorded line, verbatim" onClick={() => setVerbatim(!verbatim)}>
+              record
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              void navigator.clipboard?.writeText(copyText)
+              setCopied(true)
+              window.setTimeout(() => setCopied(false), 1200)
+            }}
+          >
+            {copied ? "copied" : "copy"}
+          </button>
+        </span>
       </div>
 
-      {raw === undefined
-        ? (
-          <>
-            <p className="muted">the record carries no wire message — here it is verbatim.</p>
-            <pre className="sip-message">{recordJson}</pre>
-          </>
-        )
+      {raw === undefined || verbatim
+        ? <pre className="sip-message">{recordJson}</pre>
         : headers.length === 0
         ? <pre className="sip-message">{raw.replace(/\r\n/g, "\n")}</pre>
         : (
@@ -150,13 +139,6 @@ export const SipMessageView = (
               )}
           </pre>
         )}
-
-      {raw !== undefined && (
-        <details className="sip-record">
-          <summary>record, verbatim</summary>
-          <pre>{recordJson}</pre>
-        </details>
-      )}
     </div>
   )
 }

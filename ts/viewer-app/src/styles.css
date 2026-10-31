@@ -350,16 +350,18 @@ h3 {
   justify-content: space-between;
   align-items: center;
   gap: 8px;
-}
-
-.json-view-actions {
-  display: flex;
-  gap: 6px;
-  padding: 4px 8px;
+  min-height: 30px;
+  padding: 2px 8px;
   background: var(--none-bg);
   border-bottom: 1px solid var(--line);
   font-size: 11px;
   color: var(--mute);
+}
+
+.json-view-actions,
+.sip-view-actions {
+  display: flex;
+  gap: 6px;
 }
 
 .json-view pre {
@@ -408,19 +410,32 @@ h3 {
   margin-bottom: 12px;
 }
 
+/* One line of chips, each cut to fit; the full value is the chip's tooltip. */
 .sip-meta {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px 6px;
+  flex-wrap: nowrap;
+  gap: 4px;
+  height: 22px;
   margin-bottom: 6px;
+  overflow: hidden;
 }
 
 .sip-meta-item {
+  flex: 0 0 auto;
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 1px 7px;
   font-size: 11px;
-  font-family: ui-monospace, monospace;
+  line-height: 18px;
+  font-family: var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sip-meta-item.long {
+  flex: 0 1 auto;
+  min-width: 6em;
 }
 
 .sip-meta-key {
@@ -432,7 +447,9 @@ h3 {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 4px 8px;
+  gap: 8px;
+  min-height: 30px;
+  padding: 2px 8px;
   background: var(--none-bg);
   border: 1px solid var(--line);
   border-radius: 8px 8px 0 0;
@@ -670,8 +687,31 @@ h3 {
 
 .verdict-section {
   border-left: 3px solid var(--line);
-  padding: 2px 0 2px 10px;
-  margin-bottom: 12px;
+  border-radius: 0 6px 6px 0;
+  padding: 6px 8px 6px 10px;
+  margin-bottom: 8px;
+  background: var(--panel);
+}
+
+.verdict-section > summary {
+  list-style: none;
+}
+
+.verdict-section > summary::-webkit-details-marker {
+  display: none;
+}
+
+.verdict-section > summary h4::before {
+  content: "▸ ";
+  color: var(--mute);
+}
+
+.verdict-section[open] > summary h4::before {
+  content: "▾ ";
+}
+
+.verdict-section > summary h4 {
+  display: inline-block;
 }
 
 .verdict-section h4 {
@@ -683,7 +723,6 @@ h3 {
 
 .verdict-violations {
   border-left-color: var(--warn);
-  background: var(--warn-bg);
 }
 
 .verdict-violations h4 {
@@ -703,7 +742,6 @@ h3 {
 .verdict-declared {
   border-left-color: var(--warn);
   border-left-style: double;
-  background: var(--warn-bg);
 }
 
 .verdict-declared h4 {
@@ -851,6 +889,82 @@ h3 {
 .verdict-detail {
   color: var(--mute);
   word-break: break-word;
+}
+
+/* Findings: one line each, columns shared by the list (rule · chip · party ·
+   step · difference); the full text opens under its row. */
+.finding-list {
+  display: grid;
+  grid-template-columns: 1.2em max-content max-content max-content max-content minmax(0, 1fr);
+  column-gap: 8px;
+  font-size: 12px;
+}
+
+.finding {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: center;
+  padding: 2px 4px;
+  border-radius: 4px;
+  min-height: 22px;
+}
+
+.finding:hover {
+  background: var(--none-bg);
+}
+
+.finding > span,
+.finding > code {
+  min-width: 0;
+  justify-self: start;
+}
+
+.finding > .finding-text {
+  justify-self: stretch;
+}
+
+.finding .verdict-tag {
+  margin-right: 0;
+}
+
+.finding-party {
+  color: var(--mute);
+}
+
+.finding-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.finding-expand {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--mute);
+  font-size: 11px;
+}
+
+.finding-full {
+  grid-column: 2 / -1;
+  margin: 2px 0 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--none-bg);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+h4 .count,
+h3 .count,
+h2 .count {
+  margin-left: 4px;
+  font-weight: 600;
+  color: var(--mute);
+  text-transform: none;
+  letter-spacing: normal;
 }
 
 /* An excluded entry — the pipeline refused to cut a case here. Amber, never
@@ -1132,44 +1246,6 @@ tr.class-unknown td {
   cursor: pointer;
 }
 
-.study-panes {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 18px;
-  align-items: start;
-}
-
-.study-panes[data-open="2"] {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-}
-
-.study-panes[data-open="3"] {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 0.7fr);
-}
-
-.study-pane {
-  min-width: 0;
-}
-
-/* A pane that reads as prose rather than as a ladder spans the whole row. */
-.study-pane.wide {
-  grid-column: 1 / -1;
-}
-
-.study-pane-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.study-pane-head h3 {
-  margin: 0 0 4px;
-}
-
-.study-pane .ladder-scroll {
-  max-height: calc(100vh - 320px);
-}
 
 /* The outcome line: the verdict first, then what the deltas cost. */
 .outcome {
@@ -1366,36 +1442,6 @@ button.tag.error-refused:hover {
 .skipped-note { margin: 0.5rem 0; padding: 0.6rem 0.8rem; border-left: 3px solid var(--warn); background: var(--warn-bg); font-size: 0.9rem; }
 .skipped-note code { padding: 0 0.3rem; border-radius: 3px; background: var(--none-bg); }
 
-/* Three ladders, equal width: the study is a confrontation of all three, and a
-   narrowed third column is the one nobody reads. */
-.study-panes[data-open="3"] {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-/* The selected message, kept above its OWN ladder: reading a delta means
-   holding the capture's bytes and the replay's side by side, which one shared
-   panel at the foot of the page cannot do. */
-.pane-detail {
-  position: sticky;
-  top: 44px;
-  z-index: 1;
-  margin: 6px 0;
-  padding: 6px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--bg);
-  max-height: 42vh;
-  overflow: auto;
-}
-
-.pane-detail .sip-message,
-.pane-detail pre {
-  max-height: 30vh;
-}
-
-.study-pane .ladder-scroll {
-  max-height: calc(100vh - 260px);
-}
 
 /* The step name is the cross-reference: it takes the ladders to the message. */
 .step-link {
@@ -2245,3 +2291,285 @@ tr.rule-unrostered td {
 .cp-modal-body { background: var(--bg); color: var(--ink); border-radius: 12px; padding: 14px 18px; width: 100%; max-width: 1100px; }
 .cp-modal-body .ladder-pane { background: var(--panel); color: var(--ink); border-radius: 8px; padding: 6px; }
 .cp-pre { font-family: var(--mono); font-size: 12px; background: var(--none-bg); padding: 10px; border-radius: 8px; white-space: pre-wrap; }
+
+/* ---- study workbench: the three ladder panes ----
+   One grid, its rows shared by every pane through subgrid: head, controls,
+   the selected message, the ladder. The detail boxes and the ladders start on
+   one line whatever each pane's controls hold, and the block fits the viewport
+   under the top bar so every ladder's scrollbars are on screen. */
+
+.study-verdict {
+  margin: 10px 0;
+}
+
+.study-paths {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.copy-chip {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  color: var(--mute);
+}
+
+.study-workbench {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - var(--topbar-h));
+  margin: 12px 0;
+  scroll-margin-top: var(--topbar-h);
+}
+
+.study-workbench[data-open="0"] {
+  height: auto;
+}
+
+.study-workbench > .pane-toolbar {
+  flex: none;
+  margin: 0 0 6px;
+}
+
+.study-panes {
+  --detail-row: 0px;
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(var(--open, 3), minmax(0, 1fr));
+  grid-template-rows: auto auto var(--detail-row) minmax(0, 1fr);
+  gap: 6px 10px;
+}
+
+.study-workbench[data-open="1"] .study-panes { --open: 1; }
+.study-workbench[data-open="2"] .study-panes { --open: 2; }
+
+.study-workbench[data-detail="true"] .study-panes {
+  --detail-row: minmax(0, 0.75fr);
+}
+
+.study-pane {
+  grid-row: 1 / span 4;
+  display: grid;
+  grid-template-rows: subgrid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.study-pane > .ladder-pane {
+  display: contents;
+}
+
+.study-pane-head {
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.study-pane-head h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.study-pane-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+
+.study-pane .pane-controls {
+  grid-row: 2;
+  min-width: 0;
+}
+
+.study-pane .pane-controls > :first-child {
+  margin-top: 0;
+}
+
+.study-pane .pane-detail {
+  grid-row: 3;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.study-pane .ladder-scroll {
+  grid-row: 4;
+  min-height: 0;
+  max-height: none;
+}
+
+/* Inside a pane, a long call strip is one line; its chip's tooltip holds the rest. */
+.study-pane .fv-call-legend {
+  flex-wrap: nowrap;
+  overflow: hidden;
+  margin: 0 0 4px;
+}
+
+.study-pane .fv-call-chip {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.pane-folds {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.pane-folds .study-record,
+.capture-legend-fold {
+  margin: 0;
+  font-size: 12px;
+}
+
+.capture-legend-fold > summary {
+  color: var(--mute);
+}
+
+.capture-legend-fold[open] .fv-capture-legend {
+  max-height: 30vh;
+  overflow: auto;
+  padding: 6px 0;
+}
+
+.source-filters {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--mute);
+  margin-bottom: 4px;
+}
+
+.source-filters .source-toggle,
+.source-filters .source-filter {
+  margin: 0;
+}
+
+/* The selected message: its chips, its bar, its body taking what is left. */
+.pane-detail > .sip-view,
+.pane-detail > .json-detail {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+}
+
+.pane-detail .sip-message {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+
+.pane-detail .json-detail > .json-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+}
+
+.pane-detail .json-view pre {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+
+.detail-empty {
+  margin: auto;
+}
+
+.study-http,
+.confrontation-section {
+  margin-top: 12px;
+}
+
+/* ---- triage queue ---- */
+
+.triage-page .page-head h1 .tag {
+  font-size: 11px;
+  font-weight: 400;
+  vertical-align: middle;
+}
+
+.queue-facets .facets {
+  margin: 0;
+}
+
+.queue-bar {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.queue-counts code {
+  font-size: 12px;
+}
+
+.queue-tools {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.queue-tools .request-builder {
+  margin: 0;
+}
+
+.queue-tools .request-builder:not(.collapsed) {
+  flex: 1 1 100%;
+  background: var(--panel);
+}
+
+.queue-tools .drop-captures {
+  flex: 1;
+  margin: 0;
+}
+
+.queue-tools .drop-zone {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.queue-table {
+  padding: 4px 14px;
+}
+
+.queue-table .listing td:nth-child(6) {
+  white-space: nowrap;
+}
+
+.queue-table .listing td {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.call-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  margin: 0;
+}
+
+.triage-listing tbody tr:hover td {
+  background: var(--none-bg);
+}

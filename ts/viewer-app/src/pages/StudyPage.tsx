@@ -28,6 +28,8 @@ import {
   buildFlowsLayout,
   buildRecordingLayout,
   buildScenarioLayout,
+  flowsToText,
+  ladderToText,
   NO_HTTP_EXCHANGES,
   parseFlowsDocument,
   parseRecording,
@@ -44,6 +46,9 @@ import { Age } from "../components/Age.tsx"
 import { useCaptureFilters } from "../components/capture-filters.ts"
 import { CallLanes } from "../components/CallLanes.tsx"
 import { Confrontation } from "../components/Confrontation.tsx"
+import { CopyChip } from "../components/CopyChip.tsx"
+import { CopyText } from "../components/CopyText.tsx"
+import { DetailChips, scalarFields } from "../components/DetailChips.tsx"
 import { Deltas, deltasOfClassification, FailedSteps } from "../components/Deltas.tsx"
 import { ExclusionPane } from "../components/ExclusionPane.tsx"
 import { Exchange } from "../components/Exchange.tsx"
@@ -56,6 +61,7 @@ import { Profile } from "../components/Profile.tsx"
 import { Link } from "../components/Link.tsx"
 import { ReplayButton } from "../components/ReplayButton.tsx"
 import { RfcAuditPane } from "../components/RfcAuditPane.tsx"
+import { type RowAnchor, RowAnchorContext } from "../components/scroll.ts"
 import { SipMessageView } from "../components/SipMessageView.tsx"
 import { StudyHead } from "../components/StudyHead.tsx"
 import { SutRecords } from "../components/SutRecords.tsx"
@@ -102,7 +108,7 @@ const CopyRef = (
         })
       }}
     >
-      {copied ? "copied" : `copy "${command} ${(caseId ?? capture).slice(0, 16)}…"`}
+      {copied ? "copied" : "copy ref"}
     </button>
   )
 }
@@ -124,17 +130,16 @@ const Outcome = (
   const deltas = deltasOfClassification(classification)
   return (
     <p className="counts outcome">
-      <span className="muted">this call:</span>
       <span className={`tag ${cellPassed(cell) ? "matched" : "missing"}`}>
-        {cell.status ?? "no verdict.json"}
+        {cell.status ?? "no verdict"}
       </span>
       <Age at={cell.writtenAt} prefix="replayed" />
       {cell.failedStep !== undefined && (
         <FailedSteps steps={[cell.failedStep]} onPick={onPickStep} />
       )}
-      <span className="muted">deltas vs the capture:</span>
+      <span className="muted">deltas</span>
       {deltas === undefined
-        ? <span className="muted">no classification</span>
+        ? <span className="muted">none</span>
         : <Deltas counts={deltas} detail />}
     </p>
   )
@@ -142,33 +147,45 @@ const Outcome = (
 
 /** The evidence panes, and which of them are open. */
 const PANES = [
-  { key: "capture", label: "capture (pcap)" },
-  { key: "case", label: "case (ladder + json)" },
-  { key: "replay", label: "replay (recording)" },
-  { key: "http", label: "http (exchanges)" }
+  { key: "capture", label: "capture" },
+  { key: "case", label: "case" },
+  { key: "replay", label: "replay" },
+  { key: "http", label: "http" }
 ] as const
 
 type PaneKey = typeof PANES[number]["key"]
 
-/** One evidence pane: its own hide control, so a wide capture can be put away. */
+/**
+ * One ladder pane of the study: a one-line head (title, path, copy, hide),
+ * then the pane's ladder in its three slots, lined up with the other panes'
+ * by the grid they share.
+ */
 const Pane = (
-  { title, path, wide, onHide, children }: {
+  { title, path, text, onHide, children }: {
     title: string
     path?: string | undefined
-    /** A pane that reads as prose, not as a ladder: it takes the whole row. */
-    wide?: boolean
+    /** The ladder as text, for the head's copy button. */
+    text?: (() => string) | undefined
     onHide: () => void
     children: ReactNode
   }
 ): JSX.Element => (
-  <section className={wide === true ? "study-pane wide" : "study-pane"}>
+  <section className="study-pane">
     <header className="study-pane-head">
       <h3>{title}</h3>
-      <button type="button" className="copy-ref" onClick={onHide}>hide</button>
+      {path !== undefined && <CopyChip label="path" value={path} />}
+      <span className="study-pane-actions">
+        {text !== undefined && <CopyText text={text} label="copy text" />}
+        <button type="button" className="copy-ref" title="hide this pane" onClick={onHide}>×</button>
+      </span>
     </header>
-    {path !== undefined && <p className="muted path">{path}</p>}
     {children}
   </section>
+)
+
+/** The detail slot of a pane that holds no selected message while another pane does. */
+const NoDetail = ({ step }: { step: string | undefined }): JSX.Element => (
+  <p className="muted detail-empty">{step === undefined ? "—" : `${step}: not on this ladder`}</p>
 )
 
 /**
@@ -191,7 +208,7 @@ const OwnRun = (
   const elsewhere = own !== undefined && `run${own.runId}` !== session
   return (
     <p className="counts own-run">
-      <span className="muted">this call alone:</span>
+      <span className="muted">alone</span>
       {elsewhere && (
         <span className={`tag ${own.skipped !== null ? "muted" : own.passed ? "matched" : "missing"}`}>
           run{own.runId} {own.skipped !== null ? "skipped" : own.passed ? "passed" : "failed"}
@@ -248,6 +265,7 @@ const CellStudy = (
   // exclusion record instead (`../opening.ts`).
   const skipped = cell.skipped
   const studyCase = study.cases.find((entry) => cell.name.startsWith(`${entry.id}__`))
+  const pivotRaw: unknown = detail?.pivot ?? studyCase?.document
   const pivotRead = useMemo(() => cellDocument(detail?.pivot, studyCase?.document), [detail, studyCase])
   const opening = useMemo(
     () => cellOpening(pivotRead, study.exclusions, caseIdOf(cell.name)),
@@ -302,14 +320,21 @@ const CellStudy = (
   const replayMarks = useMemo(() => marksOnLadder(findings, indexes.replay), [findings, indexes])
   const caseMarks = useMemo(() => marksOnLadder(findings, indexes.scenario), [findings, indexes])
 
+  // The ladders side by side share one anchor: a row clicked on one ladder is
+  // put at the same height on the others (`scroll.ts`).
+  const anchor = useMemo<RowAnchor>(() => ({ current: undefined }), [])
+
   // The URL's step is a selection like any other, applied once the layouts that
   // resolve it exist. It only ever ADDS a focus: a click on a message no step
   // cites must not be undone by the URL saying nothing.
   useEffect(() => {
-    if (step !== undefined) setFocus(focusStep(step, indexes))
-  }, [step, indexes])
+    if (step === undefined) return
+    if (anchor.current === undefined) anchor.current = "centre"
+    setFocus(focusStep(step, indexes))
+  }, [step, indexes, anchor])
 
   const pickStep = (next: string): void => {
+    anchor.current = "centre"
     setFocus(focusStep(next, indexes))
     onStep(next)
   }
@@ -318,8 +343,8 @@ const CellStudy = (
     onStep(undefined)
   }
   // Clicking the message already selected UNSELECTS it, on every pane at once:
-  // the detail panels are sticky, and three of them open is most of the
-  // viewport spent on a message the reader has finished with.
+  // three detail panels open are most of the viewport spent on a message the
+  // reader has finished with.
   const pickCapture = (row: FlowsRow): void => {
     if (focus.capture === row.id) return clearStep()
     setFocus({ ...(row.stepId === undefined ? {} : focusStep(row.stepId, indexes)), capture: row.id })
@@ -341,203 +366,204 @@ const CellStudy = (
   const captureSelected = flowsLayout?.rows.find((row) => row.id === focus.capture)
   const replaySelected = runLayout.events.find((event) => event.id === focus.replay)
   const caseSelected = caseLayout?.events.find((event) => event.id === focus.scenario)
-  // The column count is the LADDER panes': the http pane takes a row of its own.
+  // Every pane holds a detail box while any of them holds a message, so the
+  // boxes and the ladders under them start on one line.
+  const anyDetail = captureSelected !== undefined || replaySelected !== undefined || caseSelected !== undefined
+  const placeholder = anyDetail ? <NoDetail step={focus.step} /> : undefined
+  // The column count is the LADDER panes': the http pane is a section of its own.
   const open = PANES.filter((pane) => shown.has(pane.key) && pane.key !== "http")
 
   return (
     <>
-      <Outcome cell={cell} classification={detail?.classification} onPickStep={pickStep} />
-      <OwnRun study={study} cell={cell} session={session} lane={lane} />
-      {skipped === undefined
-        ? (
-          <>
-            <VerdictPane verdict={detail?.verdict} onPickStep={pickStep} />
-            <RfcAuditPane rfc={detail?.rfc} />
-          </>
-        )
-        : (
-          <p className="skipped-note">
-            <strong>skipped</strong> — the document declares this lane{" "}
-            <code>{skipped}</code>, and a driver skips a blocked lane rather than
-            failing it. Nothing was asked of the SUT, so this cell has no verdict
-            and no replay ladder; the capture and the case below are the evidence.
-          </p>
-        )}
-      {/* A cell with no document of a call the standing cut refused: the
-          record is the verdict, and the capture pane below is drawn from it. */}
-      {!pivotRead.ok && study.exclusions !== undefined && opening.selection !== undefined && (
-        <ExclusionPane exclusion={study.exclusions} caseId={caseIdOf(cell.name)} />
-      )}
-      {cell.refused && (
-        <div className="refused-note">
-          <h3>the interpreter refused this case — no bundle was produced</h3>
-          <p className="muted">
-            the run failed HERE and has no recording to show for it: the case below is the
-            evidence, and the refusal is what to fix.
-          </p>
-          <pre className="raw">{detail?.error ?? "loading the refusal…"}</pre>
-        </div>
-      )}
-      {detail?.stderr !== undefined && (
-        <details className="study-record cell-stderr" open>
-          <summary>stderr.txt — what the interpreter said</summary>
-          <pre className="raw">{detail.stderr}</pre>
-        </details>
-      )}
-      {detail?.join !== undefined && detail.join !== null && (
-        <SutRecords join={detail.join} windows={detail.windows ?? []} held={detail.held ?? []} />
-      )}
-      {evidence.state === "error" && (
-        <p className="error">this cell's evidence did not load: {evidence.message}</p>
-      )}
-      {detail?.confrontationProblem !== undefined && (
-        <p className="error">confrontation output did not decode: {detail.confrontationProblem}</p>
-      )}
-
-      <div className="pane-toolbar">
-        <span className="muted">panes:</span>
-        {PANES.map((pane) => (
-          <label key={pane.key}>
-            <input
-              type="checkbox"
-              checked={shown.has(pane.key)}
-              onChange={() => toggle(pane.key)}
-            />
-            {pane.label}
-          </label>
-        ))}
-        {focus.step === undefined
-          ? <span className="muted">click a message to read it; click it again to put it away.</span>
+      <div className="study-verdict">
+        <Outcome cell={cell} classification={detail?.classification} onPickStep={pickStep} />
+        <OwnRun study={study} cell={cell} session={session} lane={lane} />
+        {skipped === undefined
+          ? (
+            <>
+              <VerdictPane verdict={detail?.verdict} onPickStep={pickStep} />
+              <RfcAuditPane rfc={detail?.rfc} onPickStep={pickStep} />
+            </>
+          )
           : (
-            <span className="focus-note">
-              step <code>{focus.step}</code> on every ladder that draws it
-              <button type="button" className="copy-ref" onClick={clearStep}>clear</button>
-            </span>
+            <p className="skipped-note" title="the document declares this lane blocked: no verdict, no replay">
+              <strong>skipped</strong> · lane <code>{skipped}</code> blocked
+            </p>
           )}
+        {/* A cell with no document of a call the standing cut refused: the
+            record is the verdict, and the capture pane below is drawn from it. */}
+        {!pivotRead.ok && study.exclusions !== undefined && opening.selection !== undefined && (
+          <ExclusionPane exclusion={study.exclusions} caseId={caseIdOf(cell.name)} />
+        )}
+        {cell.refused && (
+          <div className="refused-note">
+            <h3>interpreter refused this case</h3>
+            <pre className="raw">{detail?.error ?? "loading…"}</pre>
+          </div>
+        )}
+        {detail?.stderr !== undefined && (
+          <details className="study-record cell-stderr">
+            <summary>
+              stderr <span className="count">{detail.stderr.split("\n").filter((one) => one !== "").length} lines</span>
+            </summary>
+            <pre className="raw">{detail.stderr}</pre>
+          </details>
+        )}
+        {detail?.join !== undefined && detail.join !== null && (
+          <SutRecords join={detail.join} windows={detail.windows ?? []} held={detail.held ?? []} />
+        )}
+        {evidence.state === "error" && <p className="error">evidence: {evidence.message}</p>}
+        {detail?.confrontationProblem !== undefined && (
+          <p className="error">confrontation: {detail.confrontationProblem}</p>
+        )}
       </div>
 
-      <div className="study-panes" data-open={open.length}>
-        {shown.has("capture") && (
-          <Pane
-            title="capture — what the wire carried"
-            path={study.flows?.path}
-            onHide={() => toggle("capture")}
-          >
-            {study.flows === undefined && (
-              <p className="muted">no flows document was found for this capture.</p>
+      <RowAnchorContext.Provider value={anchor}>
+        <section className="study-workbench" data-detail={anyDetail} data-open={open.length}>
+          <div className="pane-toolbar">
+            {PANES.map((pane) => (
+              <label key={pane.key}>
+                <input type="checkbox" checked={shown.has(pane.key)} onChange={() => toggle(pane.key)} />
+                {pane.label}
+              </label>
+            ))}
+            {focus.step !== undefined && (
+              <span className="focus-note">
+                step <code>{focus.step}</code>
+                <button type="button" className="copy-ref" onClick={clearStep}>clear</button>
+              </span>
             )}
-            {flows.error !== undefined && (
-              <p className="error">{study.flows?.path}: {flows.error}</p>
-            )}
-            {flowsRead !== undefined && !flowsRead.ok && (
-              <p className="error">{study.flows?.path}: {flowsRead.reason}</p>
-            )}
-            {flowsLayout && (
-              <FlowsPane
-                layout={flowsLayout}
-                selected={captureSelected}
-                onSelect={pickCapture}
-                onlySelected={{ value: onlySelected, onChange: setOnlySelected }}
-                legs={filters.legs}
-                sockets={filters.sockets}
-                tag={filters.tag}
-                window={{ ...flows.window, beyond: flows.beyond, total: study.flows?.legs ?? 0, onWindow: flows.onWindow }}
-              />
-            )}
-          </Pane>
-        )}
-        {shown.has("case") && (
-          <Pane
-            title="case — the script cut from the selection"
-            path={`${cell.dir}/pivot.json`}
-            onHide={() => toggle("case")}
-          >
-            <p className="muted">
-              the v3 document the run replayed, drawn: every step's <code>observed</code> is the
-              capture coordinate it came from, so a step here and a datagram there are one message.
-            </p>
-            {/* The ladder leads; the detector roster is long enough to bury it. */}
-            <details className="study-record">
-              <summary>detectors and generator flags</summary>
-              <Flags annotations={annotationsOf(document)} />
-            </details>
-            {evidence.state === "loading" && document === undefined
-              ? <p className="muted">loading this cell's document…</p>
-              : !pivotRead.ok
-              ? <p className="error">case document: {pivotRead.reason}</p>
-              : caseLayout && (
-                <LadderPane
-                  layout={caseLayout}
-                  selectedId={focus.scenario}
-                  onSelect={pickCase}
-                  marksById={caseMarks}
-                  legend={false}
-                  detail={caseSelected === undefined
-                    ? undefined
-                    : <JsonView value={caseSelected.source} label={`step ${caseSelected.id}`} />}
-                />
+          </div>
+
+          {open.length > 0 && (
+            <div className="study-panes">
+              {shown.has("capture") && (
+                <Pane
+                  title="capture"
+                  path={study.flows?.path}
+                  text={flowsLayout === undefined ? undefined : () => flowsToText(flowsLayout)}
+                  onHide={() => toggle("capture")}
+                >
+                  {study.flows === undefined && <p className="muted">no flows document</p>}
+                  {flows.error !== undefined && <p className="error">flows: {flows.error}</p>}
+                  {flowsRead !== undefined && !flowsRead.ok && <p className="error">flows: {flowsRead.reason}</p>}
+                  {flowsLayout && (
+                    <FlowsPane
+                      layout={flowsLayout}
+                      selected={captureSelected}
+                      onSelect={pickCapture}
+                      onlySelected={{ value: onlySelected, onChange: setOnlySelected }}
+                      legs={filters.legs}
+                      sockets={filters.sockets}
+                      tag={filters.tag}
+                      window={{ ...flows.window, beyond: flows.beyond, total: study.flows?.legs ?? 0, onWindow: flows.onWindow }}
+                      copy={false}
+                      foldLegend
+                      placeholder={placeholder}
+                    />
+                  )}
+                </Pane>
               )}
-            <details className="study-record">
-              <summary>pivot.json</summary>
-              <JsonView value={document} label="pivot.json" />
-            </details>
-          </Pane>
-        )}
-        {shown.has("replay") && (
-          <Pane
-            title="replay — what the run produced"
-            path={cell.dir}
-            onHide={() => toggle("replay")}
-          >
-            {evidence.state === "loading"
-              ? <p className="muted">loading this cell's recording…</p>
-              : (
-                <LadderPane
-                  layout={runLayout}
-                  selectedId={focus.replay}
-                  onSelect={pickReplay}
-                  marksById={replayMarks}
-                  legend={false}
-                  detail={replaySelected === undefined
-                    ? undefined
-                    : (
-                      <SipMessageView
-                        record={replaySelected.source}
-                        label={`replay · ${replaySelected.id}`}
+              {shown.has("case") && (
+                <Pane
+                  title="case"
+                  path={`${cell.dir}/pivot.json`}
+                  text={caseLayout === undefined ? undefined : () => ladderToText(caseLayout)}
+                  onHide={() => toggle("case")}
+                >
+                  {evidence.state === "loading" && pivotRaw === undefined
+                    ? <p className="muted">loading…</p>
+                    : !pivotRead.ok
+                    ? <p className="error">case document: {pivotRead.reason}</p>
+                    : caseLayout && (
+                      <LadderPane
+                        layout={caseLayout}
+                        selectedId={focus.scenario}
+                        onSelect={pickCase}
+                        marksById={caseMarks}
+                        legend={false}
+                        copy={false}
+                        controls={
+                          <span className="pane-folds">
+                            <details className="study-record">
+                              <summary>flags</summary>
+                              <Flags annotations={annotationsOf(pivotRaw)} />
+                            </details>
+                            <details className="study-record">
+                              <summary>pivot.json</summary>
+                              <JsonView value={pivotRaw} label="pivot.json" />
+                            </details>
+                          </span>
+                        }
+                        detail={caseSelected === undefined
+                          ? placeholder
+                          : (
+                            <div className="json-detail">
+                              <DetailChips fields={scalarFields(caseSelected.source)} />
+                              <JsonView value={caseSelected.source} label={`case · step ${caseSelected.id}`} />
+                            </div>
+                          )}
                       />
                     )}
-                />
+                </Pane>
               )}
-          </Pane>
-        )}
-        {shown.has("http") && (
-          <Pane
-            title="http — the exchange as replayed"
-            path={`${cell.dir}/http.json`}
-            wide
-            onHide={() => toggle("http")}
-          >
-            <Exchange exchanges={served.exchanges} warnings={served.warnings} />
-            {/* What the mock was SET to answer, as the cut wrote it: what the
-                exchange above should be read against. */}
-            <details className="study-record">
-              <summary>what the mock was set to answer</summary>
-              <Profile ledger={studyCase?.ledger} />
-            </details>
-          </Pane>
-        )}
-      </div>
+              {shown.has("replay") && (
+                <Pane
+                  title="replay"
+                  path={cell.dir}
+                  text={() => ladderToText(runLayout)}
+                  onHide={() => toggle("replay")}
+                >
+                  {evidence.state === "loading"
+                    ? <p className="muted">loading…</p>
+                    : (
+                      <LadderPane
+                        layout={runLayout}
+                        selectedId={focus.replay}
+                        onSelect={pickReplay}
+                        marksById={replayMarks}
+                        legend={false}
+                        copy={false}
+                        detail={replaySelected === undefined
+                          ? placeholder
+                          : <SipMessageView record={replaySelected.source} label={`replay · ${replaySelected.id}`} />}
+                      />
+                    )}
+                </Pane>
+              )}
+            </div>
+          )}
+        </section>
+      </RowAnchorContext.Provider>
 
-      <section className="confrontation-section">
-        <h3>confrontation — per-message delta</h3>
-        <p className="muted">
-          click a <code>step</code> to put that message on every ladder above; clicking a message on
-          a ladder marks its rows here.
-        </p>
+      {shown.has("http") && (
+        <section className="panel study-http">
+          <header className="study-pane-head">
+            <h3>http</h3>
+            <CopyChip label="path" value={`${cell.dir}/http.json`} />
+            <span className="study-pane-actions">
+              <button type="button" className="copy-ref" title="hide this pane" onClick={() => toggle("http")}>×</button>
+            </span>
+          </header>
+          <Exchange exchanges={served.exchanges} warnings={served.warnings} />
+          {/* What the mock was SET to answer, as the cut wrote it: what the
+              exchange above should be read against. */}
+          <details className="study-record">
+            <summary>mock profile</summary>
+            <Profile ledger={studyCase?.ledger} />
+          </details>
+        </section>
+      )}
+
+      <section className="panel confrontation-section">
+        <h3>
+          confrontation{" "}
+          <span className="count">{evidence.state === "loading" ? "…" : (detail?.confrontation ?? []).length}</span>
+        </h3>
         {evidence.state === "loading"
-          ? <p className="muted">loading this cell's delta sheet…</p>
+          ? <p className="muted">loading…</p>
           : (detail?.confrontation ?? []).length === 0
-          ? <p className="muted">no confrontation records: nothing differed, or nothing was compared.</p>
+          ? <p className="muted">none</p>
           : (
             <Confrontation
               rows={detail?.confrontation ?? []}
@@ -551,7 +577,7 @@ const CellStudy = (
         </details>
         {detail !== undefined && detail.terminated !== null && (
           <details className="study-record">
-            <summary>call.terminated.json — the calls the SUT reported terminated</summary>
+            <summary>call.terminated.json</summary>
             <JsonView value={detail.terminated} label="call.terminated.json" />
           </details>
         )}
@@ -586,9 +612,7 @@ const CallBar = (
   }
 ): JSX.Element => (
   <p className="call-bar">
-    <span className="muted">
-      {calls.length} call(s) cut from this capture, each ruled on by itself:
-    </span>
+    <span className="muted">calls <span className="count">{calls.length}</span></span>
     {calls.map((call) => (
       <Link
         key={call.key}
@@ -601,7 +625,7 @@ const CallBar = (
       >
         <span className={`tag ${call.tone}`}>{call.label}</span>
         {call.caseId.replace(capture, "…")}
-        {call.failedStep !== undefined && <span className="call-step">died at {call.failedStep}</span>}
+        {call.failedStep !== undefined && <span className="call-step">✗ {call.failedStep}</span>}
       </Link>
     ))}
   </p>
@@ -614,13 +638,13 @@ const CallBar = (
  */
 const RefusalNote = ({ refusal }: { refusal: TriageRefusal }): JSX.Element => (
   <section className="refused-note">
-    <h3>the cut refused this call — no case was made of it</h3>
+    <h3>refused by the cut</h3>
     <p className="counts">
       {refusal.reasons.map((reason) => <span key={reason} className="tag error-refused">{reason}</span>)}
     </p>
     {refusal.callIds.length > 0 && (
       <p className="muted">
-        calls:{" "}
+        Call-IDs{" "}
         {refusal.callIds.map((callId, index) => (
           <span key={callId}>
             {index > 0 && " "}
@@ -678,7 +702,7 @@ export const StudyPage = ({ capture }: { capture: string }): JSX.Element => {
   // The header follows the CELL on screen: picking an older run must not leave
   // the page stating the latest run's number over an older run's ladders.
   const activeSession = active?.session
-  // The run whose hooks and held state stand for the page where no cell is on screen: the latest not set aside.
+  // Hooks and held state come from the cell's run; with no cell on screen, from the latest run not set aside.
   const shownSession = activeSession ?? [...(loaded?.sessions ?? [])].reverse().find((one) => one.aside === undefined)
   // The prep the run on screen read its cases as of, where it is the standing
   // run and that prep is not the standing cut's: the lanes pin their own preps.
@@ -724,7 +748,7 @@ export const StudyPage = ({ capture }: { capture: string }): JSX.Element => {
           <StudyHead study={value} lane={lane} cell={active?.key} />
           {/* The run's identity and its age — never a verdict: a run over
               several calls has none, and each chip below states its own. */}
-          <p className="muted">
+          <p className="muted study-run">
             {study.loading && <span className="tag">reloading…</span>}
             {study.error !== undefined && <span className="tag missing">{study.error}</span>}{" "}
             {activeSession?.aside !== undefined && (
@@ -751,15 +775,29 @@ export const StudyPage = ({ capture }: { capture: string }): JSX.Element => {
               </>
             )}
           </p>
+          {/* Where the cases and the flows doc come from, one line of chips.
+              The lanes pin their own preps, so the standing cut and the run
+              that produced the ladders are stated apart. */}
+          <p className="muted study-paths">
+            {value.cut !== undefined && (
+              <span className="mono">
+                cut prep{value.cut.prepId} · {value.cut.cases} cases · <Age at={value.cut.cutAt} />
+                {value.cut.broke !== null && <span className="error"> · broke: {value.cut.broke}</span>}
+              </span>
+            )}
+            {value.corpusDir !== undefined && <CopyChip label="corpus" value={value.corpusDir} />}
+            {value.sessionDir !== undefined && <CopyChip label="session" value={value.sessionDir} />}
+            {value.flows?.path !== undefined && <CopyChip label="flows" value={value.flows.path} />}
+          </p>
           {/* What the deployment's hooks recorded around the run on screen —
               the box's own account of that replay, kept beside it. */}
           {shownSession?.hooks.map((hook) => (
             <details key={hook.name} className="rerun-log study-hook">
               <summary className="muted">
-                hook: {hook.name}
-                {hook.bytes !== undefined && <> · {hook.bytes} byte(s)</>}
+                hook {hook.name}
+                {hook.bytes !== undefined && <span className="count">{hook.bytes} B</span>}
               </summary>
-              {hook.href !== undefined && <p className="muted"><a href={hook.href}>the whole log</a></p>}
+              {hook.href !== undefined && <p className="muted"><a href={hook.href}>whole log</a></p>}
               <pre className="raw">{hook.text}</pre>
             </details>
           ))}
@@ -767,22 +805,10 @@ export const StudyPage = ({ capture }: { capture: string }): JSX.Element => {
               what it held before and after, and what the batch's calls left. */}
           {(shownSession?.held ?? []).length > 0 && (
             <details className="rerun-log study-held">
-              <summary className="muted">SUT call state around each batch</summary>
+              <summary className="muted">SUT call state</summary>
               <JsonView value={shownSession?.held} label="contexts" />
             </details>
           )}
-          {/* Where the cases and the flows doc below come from. The lanes pin
-              their own preps, so the standing cut and the run that produced the
-              ladders are stated apart rather than as one fact. */}
-          {value.cut !== undefined && (
-            <p className="muted path">
-              cut: prep{value.cut.prepId} · {value.cut.cases} case(s) ·{" "}
-              <Age at={value.cut.cutAt} />
-              {value.cut.broke !== null && <span className="error"> · broke: {value.cut.broke}</span>}
-            </p>
-          )}
-          {value.corpusDir !== undefined && <p className="muted path">corpus: {value.corpusDir}</p>}
-          {value.sessionDir !== undefined && <p className="muted path">session: {value.sessionDir}</p>}
           {value.case !== undefined && <CallLanes capture={value.capture} caseId={value.case} lane={lane} />}
         </div>
         <div className="page-actions">
@@ -839,11 +865,9 @@ export const StudyPage = ({ capture }: { capture: string }): JSX.Element => {
           bundles below it, where there are any, belong to an older cut. */}
       {value.standing !== undefined && value.standing.cases === 0 && value.exclusions !== undefined && (
         <section className="refused-note">
-          <h3>the current cut refuses this capture</h3>
-          <p className="muted">
-            run{value.standing.runId} produced no case, so there is nothing to replay and nothing
-            to triage here — the work is the generator's. Any ladder below comes from an earlier
-            cut that did produce one.
+          <h3>refused by the current cut</h3>
+          <p className="muted" title="any ladder below comes from an earlier cut">
+            run{value.standing.runId}: no case
           </p>
           <ExclusionPane exclusion={value.exclusions} />
         </section>
@@ -895,15 +919,15 @@ export const StudyPage = ({ capture }: { capture: string }): JSX.Element => {
             {value.exclusions === undefined
               ? (
                 <p className="muted">
-                  no replay bundle yet
+                  no replay yet
                   {commands.triage !== undefined && (
-                    <> — launch <code>{launchRef(commands.triage, value.capture, lane, value.case)}</code> to produce one</>
-                  )}. The cut cases below are what a session would replay.
+                    <> · <code>{launchRef(commands.triage, value.capture, lane, value.case)}</code></>
+                  )}
                 </p>
               )
               : <ExclusionPane exclusion={value.exclusions} />}
             {value.cases.length === 0
-              ? <p className="muted">no cases were cut from this capture.</p>
+              ? <p className="muted">no cases</p>
               : (
                 <ul className="mono">
                   {value.cases.map((entry) => <li key={entry.id}>{entry.id}</li>)}
@@ -920,7 +944,7 @@ export const StudyPage = ({ capture }: { capture: string }): JSX.Element => {
         )}
 
       <p className="muted">
-        <Link to={href.triage({ lane })}>back to the queue</Link>
+        <Link to={href.triage({ lane })}>← queue</Link>
       </p>
     </div>
   )
@@ -940,18 +964,16 @@ const CitedRunGone = (
     cell: string
   }
 ): JSX.Element => (
-  <p className="report-summary-note">
-    <strong>run {runId} is not on disk</strong> — the cell this link cites (<code>{cell}</code>) went with its
-    bundle. <Link to={href.report({ run: `@run:${runId}`, lane })}>run {runId}'s report</Link> reads what the
-    store still holds of it, the summary a citation kept included;{" "}
+  <p className="report-summary-note" title={`the cited cell (${cell}) went with its bundle`}>
+    <strong>run {runId} not on disk</strong> ·{" "}
+    <Link to={href.report({ run: `@run:${runId}`, lane })}>report</Link> ·{" "}
     <a
       href={`/api/triage/${encodeURIComponent(capture)}/runs/run${runId}/text${
         caseId === undefined ? "" : `?case=${encodeURIComponent(caseId)}`
       }`}
     >
-      its text
-    </a>{" "}
-    says the same. The page below shows the runs on disk.
+      text
+    </a>
   </p>
 )
 
@@ -986,12 +1008,15 @@ const StandaloneCapture = (
         : undefined,
     [read, study, opening, onlySelected, filters.legs.value, filters.sockets.value]
   )
-  if (study.flows === undefined) return <p className="muted">no flows document was found for this capture.</p>
+  if (study.flows === undefined) return <p className="muted">no flows document</p>
   if (flows.error !== undefined) return <p className="error">{study.flows.path}: {flows.error}</p>
   if (read !== undefined && !read.ok) return <p className="error">{study.flows.path}: {read.reason}</p>
   return (
-    <div>
-      <p className="muted path">{study.flows.path}</p>
+    <div className="panel standalone-capture">
+      <header className="study-pane-head">
+        <h3>capture</h3>
+        <CopyChip label="path" value={study.flows.path} />
+      </header>
       {layout && (
         <FlowsPane
           layout={layout}

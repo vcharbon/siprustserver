@@ -57,10 +57,10 @@ import { setQuery, useQuery } from "../router.ts"
  * the queue opens on the failures alone, and the refusals are a pick away.
  */
 const SCOPES = [
-  ["failed", "failed: the SUT's failing calls"],
-  ["refused", "refused by the cut (cut work, not SIP)"],
-  ["red", "red: failed and refused together"],
-  ["all", "every call, green included"],
+  ["failed", "failed"],
+  ["refused", "refused by the cut"],
+  ["red", "failed + refused"],
+  ["all", "all"],
   ["passed", "passed"],
   ["skipped", "skipped"]
 ] as const
@@ -132,7 +132,7 @@ const MainError = (
       <button
         type="button"
         className="tag main-error error-bad-body also"
-        title={`${row.bodyFailing} body row(s) no rule accepts\n\nclick: show every call with a bad body`}
+        title={`${row.bodyFailing} body row(s) no rule accepts\nclick: filter on bad-body`}
         onClick={() => onChip("rule", "bad-body")}
       >
         + bad body
@@ -143,7 +143,7 @@ const MainError = (
 
 const SourceBeside = ({ source }: { source: TriageSourceFault | null }): JSX.Element | null =>
   source === null ? null : (
-    <span className="tag main-error error-source-fault also" title={`information, not the SUT's:\n${source.detail}`}>
+    <span className="tag main-error error-source-fault also" title={`source fault, not the SUT's\n${source.detail}`}>
       + {sourceFaultText(source)}
     </span>
   )
@@ -156,7 +156,7 @@ const MainErrorChip = (
   }
   if (row.kind === "case" && row.passed) return <span className="tag status-passing">passed</span>
   const error = row.mainError
-  if (error === null) return <span className="tag muted" title="this run predates the measure">not measured</span>
+  if (error === null) return <span className="tag muted" title="run predates the measure">not measured</span>
   const chip = (target: Group, value: string | null, label: JSX.Element): JSX.Element =>
     value === null
       ? <span className={`tag main-error error-${error.kind}`} title={error.detail}>{label}</span>
@@ -164,7 +164,7 @@ const MainErrorChip = (
         <button
           type="button"
           className={`tag main-error error-${error.kind}`}
-          title={`${error.detail}\n\nclick: show every call with this ${target}`}
+          title={`${error.detail}\nclick: filter on this ${target}`}
           onClick={() => onChip(target, value)}
         >
           {label}
@@ -203,7 +203,7 @@ const MainErrorChip = (
         <>
           {chip(row.kind === "case" ? "rule" : "refusal", error.rule, <>{error.rule ?? "refused"}</>)}
           {row.kind === "refused" && row.reasons.slice(1).map((reason) => (
-            <span key={reason} className="tag error-refused also" title="also refused under this reason">
+            <span key={reason} className="tag error-refused also" title="also refused for">
               {reason}
             </span>
           ))}
@@ -231,7 +231,7 @@ const QueueTable = (
         <th className="tick">
           <input
             type="checkbox"
-            title="tick every row on screen"
+            title="tick every row"
             checked={rows.length > 0 && rows.every((row) => ticked.has(rowKey(row)))}
             onChange={onTickAll}
           />
@@ -256,14 +256,16 @@ const QueueTable = (
           </td>
           <td className="mono call-cell">
             <Link to={callStudyOf(row, lane)}>{shortCase(row)}</Link>
-            {row.dialled !== null && <div className="muted">{row.dialled}</div>}
-            {row.family !== null && (
-              <div className="muted">
-                {row.family}
-                {row.legs !== null && <> · {row.legs} leg{row.legs === 1 ? "" : "s"}</>}
-                {row.attempts !== null && <> · {row.attempts} attempt{row.attempts === 1 ? "" : "s"}</>}
-              </div>
-            )}
+            <div className="muted call-facts">
+              {row.dialled !== null && <span>{row.dialled}</span>}
+              {row.family !== null && (
+                <span>
+                  {row.family}
+                  {row.legs !== null && <> · {row.legs} leg{row.legs === 1 ? "" : "s"}</>}
+                  {row.attempts !== null && <> · {row.attempts} attempt{row.attempts === 1 ? "" : "s"}</>}
+                </span>
+              )}
+            </div>
             {row.features.length > 0 && (
               <div className="row-features">
                 {row.features.map((feature) => (
@@ -271,7 +273,7 @@ const QueueTable = (
                     type="button"
                     key={feature}
                     className="facet"
-                    title={`show only the calls with ${feature}`}
+                    title={`filter on ${feature}`}
                     onClick={() => onChip("feature", feature)}
                   >
                     {feature}
@@ -293,9 +295,9 @@ const QueueTable = (
           <td className="muted mono">
             {row.kind === "refused"
               ? `cut ${row.prepId ?? "?"}`
-              : `run${row.runId ?? "?"} ${row.setKind ?? ""}` + (row.bundle ? "" : " (evidence cleaned)")}
+              : `run${row.runId ?? "?"} ${row.setKind ?? ""}` + (row.bundle ? "" : " · cleaned")}
             {/* When it ran: what says whether a re-run has landed yet. */}
-            {row.finishedAt !== null && <div><Age at={row.finishedAt} /></div>}
+            {row.finishedAt !== null && <> · <Age at={row.finishedAt} /></>}
           </td>
           <td className="row-actions">
             <CopyRef row={row} lane={lane} />
@@ -313,20 +315,21 @@ const QueueTable = (
  * make the queue look smaller than it is.
  */
 const Counts = ({ value }: { value: TriageQueue }): JSX.Element => (
-  <p className="muted">
-    showing <b>{value.rows.length}</b> of <b>{value.matched}</b> matching call(s) on lane{" "}
+  <span className="queue-counts">
+    <b>{value.rows.length}</b>
+    {value.matched > value.rows.length
+      ? <span className="muted" title={`cap ${value.limit}`}> / {value.matched} calls</span>
+      : <span className="muted"> calls</span>}
+    <span className="muted"> · {value.facets.captures} captures · </span>
     <code>{value.lane}</code>
-    {value.matched > value.rows.length && <> — raise the row cap ({value.limit}) to see the rest</>}
-    {" · "}
-    {value.facets.captures} capture(s) in scope <code>{value.scope}</code>
-  </p>
+  </span>
 )
 
 /** What a click on a chip in each state does, as its title says. */
 const CHIP_TITLE: Readonly<Record<ChipState, (value: string, count: number) => string>> = {
-  none: (value, count) => `show the ${count} call(s) on ${value} — click again to hide them`,
-  include: () => "included — click to hide these calls instead",
-  exclude: () => "excluded — click to clear"
+  none: (value, count) => `${count} call(s) · click: include · again: exclude`,
+  include: () => "included · click: exclude",
+  exclude: () => "excluded · click: clear"
 }
 
 /** One chip: its value, its count over the population, and what it is to the filter. */
@@ -533,13 +536,13 @@ export const TriagePage = (): JSX.Element => {
   const value = queue.current
   if (value === undefined) {
     if (queue.error !== undefined) return <p className="page error">{queue.error}</p>
-    return <p className="page muted">loading the triage queue…</p>
+    return <p className="page muted">loading…</p>
   }
   if (!value.available) {
     return (
       <div className="page">
-        <h1>triage queue</h1>
-        <p className="muted">not available — {value.detail}</p>
+        <h1>Triage queue</h1>
+        <p className="muted">unavailable: {value.detail}</p>
       </div>
     )
   }
@@ -548,8 +551,10 @@ export const TriagePage = (): JSX.Element => {
     <div className="page triage-page">
       <header className="page-head">
         <div>
-          <h1>triage queue</h1>
-          {queue.loading && <div className="counts"><span className="tag">reloading…</span></div>}
+          <h1>
+            Triage queue{" "}
+            {queue.loading && <span className="tag">reloading…</span>}
+          </h1>
           {queue.error !== undefined && <p className="error">{queue.error}</p>}
           {value.detail !== "" && <p className="error">{value.detail}</p>}
         </div>
@@ -567,17 +572,22 @@ export const TriagePage = (): JSX.Element => {
         />
       </header>
 
-      <FacetRow facets={value.facets} filter={filter} onToggle={toggleChip} />
+      <section className="panel queue-facets">
+        <FacetRow facets={value.facets} filter={filter} onToggle={toggleChip} />
+      </section>
 
-      <Counts value={value} />
-      {/* Built from the page's own state: a held answer may be of the slice before the last pick. */}
-      <p className="muted">
-        <Link to={deltasOf({ lane: lane === "" ? value.lane ?? "" : lane, scope, q: settled, filter })}>
-          delta sheet of this slice
-        </Link>{" "}
-        — every header, body and shape difference of its calls, one line per signature with samples
-      </p>
+      <div className="queue-bar">
+        <Counts value={value} />
+        {/* Built from the page's own state: a held answer may be of the slice before the last pick. */}
+        <Link
+          to={deltasOf({ lane: lane === "" ? value.lane ?? "" : lane, scope, q: settled, filter })}
+          title="header, body and shape differences of these calls, one line per signature"
+        >
+          delta sheet
+        </Link>
+      </div>
 
+      <div className="queue-tools">
       <RequestBuilder
         lane={value.lane ?? ""}
         lanes={value.lanes.map((entry) => entry.lane)}
@@ -593,7 +603,9 @@ export const TriagePage = (): JSX.Element => {
         lanes={value.lanes.map((entry) => entry.lane)}
         onFresh={onFresh}
       />
+      </div>
 
+      <section className="panel queue-table">
       <QueueTable
         rows={value.rows}
         lane={value.lane ?? ""}
@@ -602,6 +614,7 @@ export const TriagePage = (): JSX.Element => {
         onTickAll={() => tickAll(value.rows)}
         onChip={setChip}
       />
+      </section>
     </div>
   )
 }

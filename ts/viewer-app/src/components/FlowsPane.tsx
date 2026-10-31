@@ -9,6 +9,9 @@
  * Its narrowings — the case's legs, one leg, a socket, a tag — are all the same
  * gesture, and none of them hides anything permanently: a capture is triage
  * evidence, so every control here is reversible in one click.
+ *
+ * The same three slots as `LadderPane`: `.pane-controls`, `.pane-detail`,
+ * `.ladder-scroll`.
  */
 import {
   bodySegments,
@@ -18,7 +21,7 @@ import {
   type FlowsLayout,
   type FlowsRow
 } from "@sip/viewer-core"
-import type { JSX } from "react"
+import type { JSX, ReactNode } from "react"
 import { CopyText } from "./CopyText.tsx"
 import { useScrollToRow } from "./scroll.ts"
 import { WindowLine, type DrawnWindow } from "./WindowLine.tsx"
@@ -70,10 +73,16 @@ export interface FlowsPaneProps {
   } | undefined
   /** The legs this ladder drew, where it drew a window of them, and how to move it. */
   readonly window?: DrawnWindow | undefined
+  /** The copy-as-text button; on by default, off where the host puts its own. */
+  readonly copy?: boolean | undefined
+  /** The legend folded behind a summary; open by default. */
+  readonly foldLegend?: boolean | undefined
+  /** What the detail slot holds while no row is selected; nothing by default. */
+  readonly placeholder?: ReactNode | undefined
 }
 
 export const FlowsPane = (
-  { layout, selected, onSelect, onlySelected, legs, sockets, tag, window }: FlowsPaneProps
+  { layout, selected, onSelect, onlySelected, legs, sockets, tag, window, copy, foldLegend, placeholder }: FlowsPaneProps
 ): JSX.Element => {
   const scroll = useScrollToRow(layout.rows.find((row) => row.id === selected?.id)?.y)
   // Picking the tag already picked drops it, the way clicking a selected
@@ -81,78 +90,93 @@ export const FlowsPane = (
   const pickTag = tag === undefined
     ? undefined
     : (next: string): void => (next === tag.value ? tag.onClear() : tag.onSelect(next))
+  const legend = (
+    <CaptureLegend
+      layout={layout}
+      sockets={sockets?.value}
+      onToggleSocket={sockets?.onToggle}
+      selectedTag={tag?.value}
+      onSelectTag={pickTag}
+      legs={legs?.value}
+      onToggleLeg={legs?.onToggle}
+    />
+  )
   return (
-    <>
-      <div className="ladder-actions">
-        <CopyText text={() => flowsToText(layout)} />
-      </div>
-      {onlySelected !== undefined && (
-        <label className="source-toggle">
-          <input
-            type="checkbox"
-            checked={onlySelected.value}
-            onChange={(event) => onlySelected.onChange(event.target.checked)}
-            disabled={!layout.hasSelection}
-          />
-          only selected legs (off: the capture around them, for the traffic this call met)
-        </label>
-      )}
-      {(legs !== undefined && legs.value.length > 0) && (
-        <p className="source-filter">
-          drawing only leg {[...legs.value].sort((a, b) => a - b).join(", ")}
-          <button type="button" className="copy-ref" onClick={legs.onClear}>every leg</button>
-        </p>
-      )}
-      {(sockets !== undefined && sockets.value.length > 0) && (
-        <p className="source-filter">
-          drawing only what {sockets.value.join(" and ")} exchanged
-          <button type="button" className="copy-ref" onClick={sockets.onClear}>every socket</button>
-        </p>
-      )}
-      {window !== undefined && <WindowLine window={window} />}
-      {(tag !== undefined && tag.value !== undefined) && (
-        <p className="source-filter">
-          lit: the messages stating <code>{tag.value}</code>
-          <button type="button" className="copy-ref" onClick={tag.onClear}>every tag</button>
-        </p>
-      )}
-      <CaptureLegend
-        layout={layout}
-        sockets={sockets?.value}
-        onToggleSocket={sockets?.onToggle}
-        selectedTag={tag?.value}
-        onSelectTag={pickTag}
-        legs={legs?.value}
-        onToggleLeg={legs?.onToggle}
-      />
-      {layout.warnings.length > 0 && (
-        <ul className="warnings">
-          {layout.warnings.slice(0, 6).map((warning) => <li key={warning}>{warning}</li>)}
-        </ul>
-      )}
-      {/* Only ever drawn for a SELECTION: a placeholder panel above every
-          ladder would hold a third of the viewport open for nothing. */}
-      {selected !== undefined && (
-        <div className="pane-detail">
-          <SipMessageView
-            record={capturedRecord(selected)}
-            body={selected.message.binary ? bodySegments(selected.message) : undefined}
-            label={`capture · leg ${selected.legIndex} msg ${selected.message.msgIndex}` +
-              (selected.stepId === undefined ? "" : ` · step ${selected.stepId}`)}
-          />
+    <section className="ladder-pane flows-pane">
+      <div className="pane-controls">
+        <div className="source-filters">
+          {(copy ?? true) && <CopyText text={() => flowsToText(layout)} />}
+          {onlySelected !== undefined && (
+            <label className="source-toggle" title="off: the capture around this call's legs">
+              <input
+                type="checkbox"
+                checked={onlySelected.value}
+                onChange={(event) => onlySelected.onChange(event.target.checked)}
+                disabled={!layout.hasSelection}
+              />
+              selected legs only
+            </label>
+          )}
+          {(legs !== undefined && legs.value.length > 0) && (
+            <span className="source-filter">
+              leg {[...legs.value].sort((a, b) => a - b).join(", ")}
+              <button type="button" className="copy-ref" onClick={legs.onClear}>every leg</button>
+            </span>
+          )}
+          {(sockets !== undefined && sockets.value.length > 0) && (
+            <span className="source-filter">
+              {sockets.value.join(" ↔ ")}
+              <button type="button" className="copy-ref" onClick={sockets.onClear}>every socket</button>
+            </span>
+          )}
+          {(tag !== undefined && tag.value !== undefined) && (
+            <span className="source-filter">
+              lit <code>{tag.value}</code>
+              <button type="button" className="copy-ref" onClick={tag.onClear}>every tag</button>
+            </span>
+          )}
         </div>
-      )}
-      <div className="ladder-scroll" ref={scroll}>
+        {window !== undefined && <WindowLine window={window} />}
+        {foldLegend === true
+          ? (
+            <details className="capture-legend-fold">
+              <summary>legs <span className="count">{layout.legs.length}</span> · sockets <span className="count">{layout.sockets.length}</span></summary>
+              {legend}
+            </details>
+          )
+          : legend}
+        {layout.warnings.length > 0 && (
+          <ul className="warnings">
+            {layout.warnings.slice(0, 6).map((warning) => <li key={warning}>{warning}</li>)}
+          </ul>
+        )}
+      </div>
+      {selected !== undefined
+        ? (
+          <div className="pane-detail">
+            <SipMessageView
+              record={capturedRecord(selected)}
+              body={selected.message.binary ? bodySegments(selected.message) : undefined}
+              label={`capture · leg ${selected.legIndex} msg ${selected.message.msgIndex}` +
+                (selected.stepId === undefined ? "" : ` · step ${selected.stepId}`)}
+            />
+          </div>
+        )
+        : placeholder !== undefined && <div className="pane-detail">{placeholder}</div>}
+      <div className="ladder-scroll" ref={scroll.ref}>
         <FlowsLadder
           layout={layout}
           selectedId={selected?.id}
-          onSelect={onSelect}
+          onSelect={(row) => {
+            scroll.anchorAt(row.y)
+            onSelect(row)
+          }}
           selectedTag={tag?.value}
           onSelectTag={pickTag}
           legs={legs?.value}
           onToggleLeg={legs?.onToggle}
         />
       </div>
-    </>
+    </section>
   )
 }

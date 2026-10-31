@@ -167,7 +167,7 @@ describe("the pane over a window", () => {
   })
 
   it("offers the windows either side, and says so once the reader paged", () => {
-    expect(markup(20_000)).toContain("later legs")
+    expect(markup(20_000)).toContain("later ›")
     expect(markup(20_200)).toContain("legs 20200–20399 of 30100")
   })
 })

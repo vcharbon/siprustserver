@@ -85,7 +85,7 @@ describe("what one capture's window and legs are read against", () => {
     if (!read.ok) throw new Error(read.reason)
     expect(read.document.legs[25_000]?.callId).toBe("call-25000@10.0.0.1")
     expect(read.document.legs[24_999]).toBeUndefined()
-    expect(windowLine(view.window, A.legs, view.beyond)).toBe("legs 20000–20199 of 30100, and the case's 1 leg past them")
+    expect(windowLine(view.window, A.legs, view.beyond)).toBe("legs 20000–20199 of 30100 + 1 case leg")
   })
 
   it("draws the window the reader opened on this capture, as far as its legs reach", () => {
@@ -181,7 +181,7 @@ describe("the ladder of a window", () => {
   })
 
   it("offers the windows either side of the one drawn", () => {
-    expect(markup).toContain("earlier legs")
-    expect(markup).toContain("later legs")
+    expect(markup).toContain("‹ earlier")
+    expect(markup).toContain("later ›")
   })
 })

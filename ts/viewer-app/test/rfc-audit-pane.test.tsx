@@ -53,7 +53,7 @@ describe("rfc audit pane", () => {
       />
     )
     expect(html).toContain("rfc-badge-party")
-    expect(html).toContain("the reference shows it")
+    expect(html).toContain("scripted · ref")
     expect(html).not.toContain("rfc-audit-gating")
     expect(html).not.toContain("rfc-audit-harness")
   })
@@ -76,7 +76,7 @@ describe("rfc audit pane", () => {
     expect(html).toContain("rfc-audit-source")
     expect(html).toContain("rfc-badge-source")
     expect(html).toContain("source fault")
-    expect(html).toContain("repeats a captured message where, in this run, the RFC no longer allows it")
+    expect(html).toContain("a scripted party&#x27;s violation the document does not state")
     expect(html).not.toContain("source capture&#x27;s endpoint")
     expect(html).not.toContain("harness")
     expect(html).not.toContain("rfc-audit-gating")

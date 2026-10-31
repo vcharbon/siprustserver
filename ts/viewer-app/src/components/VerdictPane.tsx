@@ -22,6 +22,7 @@
  * rather than rendering something invented.
  */
 import type { JSX } from "react"
+import { type Finding, type FindingChip, FindingList, StepLink } from "./FindingList.tsx"
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -109,7 +110,7 @@ const readAbandoned = (value: unknown): Abandoned | undefined => {
  * is what the document asked of it.
  */
 const statusNote = (status: string): string | undefined =>
-  status === "ok-negative" ? "a negative case: it failed exactly as declared" : undefined
+  status === "ok-negative" ? "negative case, failed as declared" : undefined
 
 /** One classified check that did not hold and did not gate. */
 interface Informative {
@@ -128,51 +129,43 @@ const stepOfSite = (site: unknown): string | undefined =>
   /^step "([^"]+)"$/.exec(str(site) ?? "")?.[1]
 
 /**
- * A failure's own tag, the step it was raised at, and the fields worth reading
- * before the raw JSON. The step is lifted out because it is an ADDRESS: it puts
- * the finding on the ladders, and reading it as prose loses that.
+ * A failure's own tag, the step it was raised at, and its other fields: one
+ * line joined by ` · `, the full text one field per line. The step is lifted
+ * out because it is an ADDRESS: it puts the finding on the ladders.
  */
-const failureLine = (
-  value: unknown
-): { readonly tag: string; readonly step: string | undefined; readonly detail: string } => {
-  if (!isRecord(value)) return { tag: "failure", step: undefined, detail: JSON.stringify(value) ?? "" }
+const failureLine = (value: unknown): Finding => {
+  if (!isRecord(value)) return { rule: "failure", text: JSON.stringify(value) ?? "" }
   const tag = str(value.failure) ?? "failure"
   const step = str(value.step) ?? stepOfSite(value.site)
-  const detail = Object.entries(value)
+  const fields = Object.entries(value)
     .filter(([key]) => key !== "failure" && key !== "step" && !(key === "site" && step !== undefined))
     .map(([key, entry]) => `${key}: ${typeof entry === "string" ? entry : JSON.stringify(entry)}`)
-    .join(" · ")
-  return { tag, step, detail }
+  return { rule: tag, step, text: fields.join(" · "), full: fields.join("\n") }
 }
 
-/** The step chip: the finding's address on every ladder that draws it. */
-const StepLink = (
-  { step, onPickStep }: { step: string; onPickStep: ((step: string) => void) | undefined }
-): JSX.Element =>
-  onPickStep === undefined
-    ? <code className="verdict-step">{step}</code>
-    : (
-      <button
-        type="button"
-        className="step-link verdict-step"
-        title={`show ${step} on the ladders`}
-        onClick={() => onPickStep(step)}
-      >
-        {step}
-      </button>
-    )
+/** A section head: a noun and a count. */
+const Head = ({ title, count }: { title: string; count: number }): JSX.Element => (
+  <h4>{title} <span className="count">{count}</span></h4>
+)
 
-const FindingLine = (
-  { value, onPickStep }: { value: unknown; onPickStep?: ((step: string) => void) | undefined }
-): JSX.Element => {
-  const { tag, step, detail } = failureLine(value)
-  return (
-    <>
-      <code className="verdict-tag">{tag}</code>
-      {step !== undefined && <StepLink step={step} onPickStep={onPickStep} />}
-      <span className="verdict-detail">{detail}</span>
-    </>
-  )
+const DECLARED: FindingChip = { label: "must fail", tone: "bound", title: "the failure the document declares its run must produce" }
+
+const declaredLine = (d: Declared): Finding => {
+  const seen = d.observed !== undefined
+    ? failureLine(d.observed)
+    : undefined
+  const text = seen !== undefined
+    ? `${seen.rule}${seen.text === "" ? "" : ` · ${seen.text}`}`
+    : d.recorded !== undefined
+    ? `recorded, no expect armed: ${d.recorded}`
+    : "✗ not produced"
+  return {
+    rule: d.failure,
+    chip: DECLARED,
+    step: d.step,
+    text,
+    full: `derived from ${d.derivedFrom}\n${text}${seen?.full === undefined ? "" : `\n${seen.full}`}`
+  }
 }
 
 export const VerdictPane = (
@@ -202,126 +195,74 @@ export const VerdictPane = (
 
       {declared.length > 0 && (
         <section className="verdict-section verdict-declared">
-          <h4>must fail ({declared.length})</h4>
-          <p className="muted">
-            the document declares the failure its run must produce, and passes only by producing
-            exactly that one — any other failure, or none, and the run is red.
-          </p>
-          {declared.map((d) => (
-            <div key={`${d.failure}-${d.step}`} className="verdict-row">
-              <p className="verdict-row">
-                <code className="verdict-tag">{d.failure}</code>
-                <span className="verdict-detail">
-                  anchor <StepLink step={d.step} onPickStep={onPickStep} /> · derived from{" "}
-                  {d.derivedFrom}
-                </span>
-              </p>
-              <p className="verdict-row verdict-declared-outcome">
-                {d.observed !== undefined ? (
-                  <FindingLine value={d.observed} onPickStep={onPickStep} />
-                ) : d.recorded !== undefined ? (
-                  <span className="verdict-detail">
-                    recorded after the script ended, with no expect armed to refuse it:{" "}
-                    {d.recorded}
-                  </span>
-                ) : (
-                  <span className="verdict-declared-absent">the run did not produce it</span>
-                )}
-              </p>
-            </div>
-          ))}
+          <Head title="must fail" count={declared.length} />
+          <FindingList findings={declared.map(declaredLine)} onPickStep={onPickStep} />
         </section>
       )}
 
       {tolerated.length > 0 && (
         <section className="verdict-section verdict-tolerated">
-          <h4>tolerated ({tolerated.length})</h4>
-          <p className="muted">
-            wire divergences at or after the declared one. A negative case replays a capture it is
-            known to diverge from, so these are carried — and shown, never dropped. A settle, CDR or
-            postcondition failure would still be red.
-          </p>
-          {tolerated.map((failure, index) => (
-            // The list is the run's own order and nothing else identifies a row.
-            <p key={index} className="verdict-row">
-              <FindingLine value={failure} onPickStep={onPickStep} />
-            </p>
-          ))}
+          <Head title="tolerated" count={tolerated.length} />
+          <FindingList findings={tolerated.map(failureLine)} onPickStep={onPickStep} />
         </section>
       )}
 
       {abandoned !== undefined && (
         <section className="verdict-section verdict-abandoned">
-          <h4>script ended ({abandoned.pending.length} step(s) not run)</h4>
-          <p className="muted">
-            the run could not go on, so the SCRIPT ended — not the call. Leg {abandoned.leg}
-            {abandoned.step !== undefined && (
-              <> at <StepLink step={abandoned.step} onPickStep={onPickStep} /></>
-            )} — and the scripted ends
-            then closed what they held, so the run still settled and still billed.
-          </p>
-          {abandoned.pending.length > 0 && (
-            <p className="verdict-row">
-              <code className="verdict-tag">not run</code>
-              <span className="verdict-detail">
-                {abandoned.pending.map((pending) => (
-                  <StepLink key={pending} step={pending} onPickStep={onPickStep} />
-                ))}
-              </span>
-            </p>
-          )}
-          {abandoned.closed.map((act, index) => (
-            // The list is the close's own order and nothing else identifies a row.
-            <p key={index} className="verdict-row">
-              <code className="verdict-tag">{act.owed}</code>
-              <span className="verdict-detail">
-                leg {act.leg} · {act.sent}
-              </span>
-            </p>
-          ))}
+          <h4>
+            script ended <span className="count">{abandoned.pending.length} not run</span>{" "}
+            <span className="muted">
+              leg {abandoned.leg}
+              {abandoned.step !== undefined && <> at <StepLink step={abandoned.step} onPickStep={onPickStep} /></>}
+            </span>
+          </h4>
+          <FindingList
+            findings={[
+              ...(abandoned.pending.length === 0
+                ? []
+                : [{ rule: "not run", text: abandoned.pending.join(" "), full: abandoned.pending.join("\n") }]),
+              ...abandoned.closed.map((act) => ({ rule: act.owed, party: `leg ${act.leg}`, text: act.sent }))
+            ]}
+            onPickStep={onPickStep}
+          />
         </section>
       )}
 
       {violations.length > 0 && (
         <section className="verdict-section verdict-violations">
-          <h4>rfc violations ({violations.length})</h4>
-          {violations.map((v) => (
-            <p key={`${v.rule}-${v.step}`} className="verdict-row">
-              <code className="verdict-tag">{v.rule}</code>
-              <span className="verdict-detail">
-                step <StepLink step={v.step} onPickStep={onPickStep} /> · emitted by {v.emitter} ·{" "}
-                {v.gating ? "the system under test: it GATES" : "a scripted peer: listed, gates nothing"}
-              </span>
-            </p>
-          ))}
+          <Head title="rfc violations" count={violations.length} />
+          <FindingList
+            findings={violations.map((v) => ({
+              rule: v.rule,
+              chip: v.gating
+                ? { label: "gates", tone: "gating", title: "emitted by the SUT: gates" }
+                : { label: "scripted", tone: "party", title: "emitted by a scripted peer: listed, gates nothing" },
+              party: v.emitter,
+              step: v.step,
+              text: ""
+            }))}
+            onPickStep={onPickStep}
+          />
         </section>
       )}
 
       {failures.length > 0 && (
         <section className="verdict-section verdict-failures">
-          <h4>failures ({failures.length})</h4>
-          {failures.map((failure, index) => (
-            // The list is the run's own order and nothing else identifies a row.
-            <p key={index} className="verdict-row">
-              <FindingLine value={failure} onPickStep={onPickStep} />
-            </p>
-          ))}
+          <Head title="failures" count={failures.length} />
+          <FindingList findings={failures.map(failureLine)} onPickStep={onPickStep} />
         </section>
       )}
 
       {informative.length > 0 && (
         <section className="verdict-section verdict-informative">
-          <h4>informative ({informative.length})</h4>
-          <p className="muted">
-            evaluated on a lane they do not gate on — the origin platform's vocabulary, kept as a
-            fact rather than dropped.
-          </p>
-          {informative.map((note, index) => (
-            <p key={index} className="verdict-row">
-              <code className="verdict-class">{note.checkClass}</code>
-              <FindingLine value={note.finding} onPickStep={onPickStep} />
-            </p>
-          ))}
+          <Head title="informative" count={informative.length} />
+          <FindingList
+            findings={informative.map((entry) => ({
+              ...failureLine(entry.finding),
+              chip: { label: entry.checkClass, tone: "advisory", title: "evaluated on a lane it does not gate on" }
+            }))}
+            onPickStep={onPickStep}
+          />
         </section>
       )}
     </div>

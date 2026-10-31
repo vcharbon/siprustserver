@@ -54,6 +54,19 @@ export const notations: readonly Notation[] = [
   { key: "arrow colour", what: "which call the message belongs to, where a document holds several" }
 ]
 
+/** One call in a line: its caller, its legs, each attempt and how it ended. */
+const callLine = (call: LadderLayout["calls"][number]): string =>
+  `caller ${call.callerLeg} · legs ${call.legs.join(", ")}` +
+  call.attempts.map((attempt) =>
+    ` · ${attempt.branch}.${attempt.position} ${attempt.leg} -> ${attempt.callee}${
+      attempt.finalStatus === undefined ? "" : ` (${attempt.finalStatus})`
+    }${attempt.cause === undefined ? "" : ` ${attempt.cause}`}${
+      attempt.joinedBy === undefined
+        ? ""
+        : ` ⤷ ${attempt.joinedBy.kind}@${attempt.joinedBy.step}`
+    }`
+  ).join("")
+
 /** The call colour strip: which colour is which `calls[]` entry. */
 export const CallLegend = ({ layout }: { layout: LadderLayout }): JSX.Element | null => {
   // One call still earns the strip once a leg JOINED it: the joined leg sits on
@@ -63,20 +76,9 @@ export const CallLegend = ({ layout }: { layout: LadderLayout }): JSX.Element | 
   return (
     <div className="fv-call-legend">
       {layout.calls.map((call) => (
-        <span key={call.id} className={`fv-call-chip ${callSlotClass(call.slot)}`}>
+        <span key={call.id} className={`fv-call-chip ${callSlotClass(call.slot)}`} title={callLine(call)}>
           <b>{call.id}</b>
-          <span>
-            {`caller ${call.callerLeg} · legs ${call.legs.join(", ")}`}
-            {call.attempts.map((attempt) =>
-              ` · ${attempt.branch}.${attempt.position} ${attempt.leg} -> ${attempt.callee}${
-                attempt.finalStatus === undefined ? "" : ` (${attempt.finalStatus})`
-              }${attempt.cause === undefined ? "" : ` ${attempt.cause}`}${
-                attempt.joinedBy === undefined
-                  ? ""
-                  : ` ⤷ ${attempt.joinedBy.kind}@${attempt.joinedBy.step}`
-              }`
-            ).join("")}
-          </span>
+          <span>{callLine(call)}</span>
         </span>
       ))}
     </div>

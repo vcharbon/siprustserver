@@ -149,7 +149,7 @@ export const JobPage = ({ id }: { readonly id: number }): JSX.Element => {
   useEffect(() => {
     setEvery(ENDED.has(status) ? null : POLL_MS)
   }, [status])
-  // The cells and the hooks follow the landing count while the job runs; once it has ended, one read each.
+  // Cells and hooks refetch when the landed count moves while the job runs, and once after it ends.
   const cellsKey = `${id}#${refresh}#${running ? job?.progress.landed ?? 0 : "ended"}`
   const gone = useHeld(() => api.jobCells(id, "gone", CELLS_SHOWN), `gone#${cellsKey}`)
   const red = useHeld(() => api.jobCells(id, "red", CELLS_SHOWN), `red#${cellsKey}`)

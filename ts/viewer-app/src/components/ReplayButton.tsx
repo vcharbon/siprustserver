@@ -40,7 +40,7 @@ export const ReplayButton = (
       })
       const request = created[0]
       if (request === undefined) {
-        setPhase({ kind: "refused", detail: "no request was created" })
+        setPhase({ kind: "refused", detail: "no request created" })
         return
       }
       const { jobs } = await api.jobStart({ kind: "replay", requestId: request.requestId })
@@ -58,10 +58,10 @@ export const ReplayButton = (
         className="copy-ref"
         disabled={phase.kind === "starting" || lane === ""}
         title={lane === ""
-          ? "pick a lane first: a request names one"
+          ? "no lane picked"
           : caseId === undefined
-          ? `replay ${capture} whole on ${lane}: a request of every case of its cut, and a job over it`
-          : `replay this call alone on ${lane}: a one-cell request and a cases run over it — the capture's standing does not move`}
+          ? `every case of ${capture} on ${lane}`
+          : `this call alone on ${lane}; the capture's standing does not move`}
         onClick={() => void start()}
       >
         {phase.kind === "starting"
@@ -70,7 +70,7 @@ export const ReplayButton = (
           ? "again"
           : caseId === undefined
           ? "replay whole"
-          : "replay this call"}
+          : "replay call"}
       </button>
       {phase.kind === "started" && <> <JobLinks jobs={phase.jobs} /></>}
       {phase.kind === "refused" && <span className="error"> {phase.detail}</span>}

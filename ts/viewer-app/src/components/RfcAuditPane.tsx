@@ -24,6 +24,8 @@
  * dropped.
  */
 import type { JSX } from "react"
+import { shortDifference, stepNamed } from "../finding-text.ts"
+import { type Finding as FindingLine, type FindingChip, FindingList } from "./FindingList.tsx"
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -94,81 +96,71 @@ const readFinding = (value: unknown): Finding => {
   }
 }
 
-/** What a finding is, in a word: its badge, the class that draws it, and what the badge means. */
-const weight = (finding: Finding): { readonly badge: string; readonly tone: string; readonly title: string } =>
+/** What a finding is, in a word: its chip, and the one line that says what the chip means. */
+const weight = (finding: Finding): FindingChip =>
   finding.gating
-    ? { badge: "gates", tone: "gating", title: "the SUT's finding: this is why the cell is red" }
+    ? { label: "gates", tone: "gating", title: "the SUT's: why the cell is red" }
     : finding.sourceFault
-    ? {
-      badge: "source fault",
-      tone: "source",
-      title: "a scripted party's violation the document does not state: the replayed party repeats a captured message where, in this run, the RFC no longer allows it"
-    }
+    ? { label: "source fault", tone: "source", title: "a scripted party's violation the document does not state" }
     : finding.causedBy !== undefined
-    ? {
-      badge: "relayed",
-      tone: "relayed",
-      title: "the SUT relayed another party's violation, and the document states that party committing it and the captured platform relaying it"
-    }
+    ? { label: "relayed", tone: "relayed", title: `relayed by the SUT, committed by ${finding.causedBy}` }
     : finding.actor !== undefined && finding.cancelledBy !== undefined
-    ? {
-      badge: "scripted party · the reference shows it",
-      tone: "party",
-      title: "a scripted party's violation the document states: the captured trace holds the same one"
-    }
+    ? { label: "scripted · ref", tone: "party", title: "a scripted party's violation the reference shows too" }
     : finding.unjudged !== undefined
-    ? {
-      badge: "scripted party · unjudged",
-      tone: "party",
-      title: "a scripted party's violation the document could not judge: it never read its captured trace's violations"
-    }
+    ? { label: "scripted · unjudged", tone: "party", title: "a scripted party's violation the document could not judge" }
     : finding.advisory
-    ? { badge: "advisory", tone: "advisory", title: "an advisory rule: recorded, failed on by nobody" }
-    : { badge: "does not gate", tone: "bound", title: "a binding rule, charged to a party this lane does not gate on" }
+    ? { label: "advisory", tone: "advisory", title: "advisory rule: recorded, gates nothing" }
+    : { label: "not gated", tone: "bound", title: "binding rule, charged to a party this lane does not gate on" }
 
-const FindingRow = ({ finding }: { finding: Finding }): JSX.Element => {
-  const { badge, tone, title } = weight(finding)
-  return (
-    <p className="verdict-row">
-      <code className="verdict-tag">{finding.rule}</code>
-      <span className={`rfc-badge rfc-badge-${tone}`} title={title}>
-        {badge}
-      </span>
-      <span className="verdict-detail">
-        charged {finding.charged}
-        {finding.actor !== undefined && ` (${finding.actor})`}
-        {finding.lane !== undefined && ` · on ${finding.lane}`}
-        {finding.offending !== undefined && ` · message ${finding.offending}`}
-        {finding.causedBy !== undefined && ` · caused by ${finding.causedBy}`}
-        {finding.detail !== "" && ` — ${finding.detail}`}
-        {finding.cancelledBy !== undefined && ` · cancelled by ${finding.cancelledBy}`}
-        {finding.unjudged !== undefined && ` · unjudged: ${finding.unjudged}`}
-      </span>
-    </p>
-  )
-}
+/** The finding's whole text: every coordinate the line leaves out. */
+const fullText = (finding: Finding): string =>
+  [
+    `charged ${finding.charged}${finding.actor === undefined ? "" : ` (${finding.actor})`}`,
+    ...(finding.lane === undefined ? [] : [`on ${finding.lane}`]),
+    ...(finding.offending === undefined ? [] : [`message ${finding.offending}`]),
+    ...(finding.causedBy === undefined ? [] : [`caused by ${finding.causedBy}`]),
+    ...(finding.cancelledBy === undefined ? [] : [`cancelled by ${finding.cancelledBy}`]),
+    ...(finding.unjudged === undefined ? [] : [`unjudged: ${finding.unjudged}`]),
+    ...(finding.detail === "" ? [] : [finding.detail])
+  ].join("\n")
 
-/** One titled group of findings, drawn only where it holds one. */
+const line = (finding: Finding): FindingLine => ({
+  rule: finding.rule,
+  chip: weight(finding),
+  party: finding.actor ?? finding.charged,
+  step: stepNamed(finding.cancelledBy),
+  at: finding.offending === undefined ? undefined : `m${finding.offending}`,
+  text: shortDifference(finding.detail),
+  full: fullText(finding)
+})
+
+/** Past this many rows a section that gates nothing opens folded. */
+const FOLD_AT = 8
+
+/** One titled group of findings, drawn only where it holds one; `fold` folds it past `FOLD_AT` rows. */
 const Section = (
-  { tone, title, lead, findings }: {
+  { tone, title, findings, fold, onPickStep }: {
     tone: string
     title: string
-    lead: string
     findings: ReadonlyArray<Finding>
+    fold?: boolean
+    onPickStep: ((step: string) => void) | undefined
   }
 ): JSX.Element | null =>
   findings.length === 0 ? null : (
-    <section className={`verdict-section rfc-audit rfc-audit-${tone}`}>
-      <h4>rfc audit — {title} ({findings.length})</h4>
-      <p className="muted">{lead}</p>
-      {findings.map((finding, index) => (
-        // The audit's own order and nothing else identifies a row.
-        <FindingRow key={index} finding={finding} />
-      ))}
-    </section>
+    <details className={`verdict-section rfc-audit rfc-audit-${tone}`} open={fold !== true || findings.length <= FOLD_AT}>
+      <summary><h4>{title} <span className="count">{findings.length}</span></h4></summary>
+      <FindingList findings={findings.map(line)} onPickStep={onPickStep} />
+    </details>
   )
 
-export const RfcAuditPane = ({ rfc }: { rfc: unknown }): JSX.Element | null => {
+export const RfcAuditPane = (
+  { rfc, onPickStep }: {
+    rfc: unknown
+    /** Puts a finding's step on the ladders; absent where there are none. */
+    onPickStep?: ((step: string) => void) | undefined
+  }
+): JSX.Element | null => {
   if (!isRecord(rfc)) return null
   const status = str(rfc.status) ?? "unknown"
   const findings = list(rfc.findings).map(readFinding)
@@ -178,12 +170,7 @@ export const RfcAuditPane = ({ rfc }: { rfc: unknown }): JSX.Element | null => {
   if (findings.length === 0) {
     return (
       <section className="verdict-section rfc-audit rfc-audit-clean">
-        <h4>rfc audit</h4>
-        <p className="muted">
-          {status === "audited"
-            ? "audited, none — every rule this lane checks held on this replay."
-            : `the audit states "${status}" and lists no finding.`}
-        </p>
+        <h4>rfc audit <span className="count">{status === "audited" ? "✓ none" : status}</span></h4>
       </section>
     )
   }
@@ -192,23 +179,24 @@ export const RfcAuditPane = ({ rfc }: { rfc: unknown }): JSX.Element | null => {
     <>
       <Section
         tone="gating"
-        title="gating"
-        lead="the post-run audit of what the wire carried. These are the SUT's, and why this cell is red, whatever the verdict and the delta sheet say."
+        title="rfc audit · gating"
         findings={findings.filter((finding) => finding.gating)}
+        onPickStep={onPickStep}
       />
       <Section
         tone="source"
-        title="source fault"
-        lead="a scripted party's violation the document does not state: the replayed party repeats a captured message where, in this run, the RFC no longer allows it. Information, not the SUT's: the cell is judged on the SUT alone."
+        title="rfc audit · source fault"
         findings={findings.filter((finding) => !finding.gating && finding.sourceFault)}
+        onPickStep={onPickStep}
       />
       <Section
         tone="advisory"
-        title="not gating"
-        lead="recorded, and failed on by nobody: a scripted party's finding the reference shows or the document could not judge, an advisory rule, or a binding one charged to a party this lane does not gate on."
+        title="rfc audit · not gating"
         findings={findings.filter((finding) => !finding.gating && !finding.sourceFault)}
+        fold
+        onPickStep={onPickStep}
       />
-      {status !== "audited" && <p className="muted">the audit states "{status}".</p>}
+      {status !== "audited" && <p className="muted">audit status: {status}</p>}
     </>
   )
 }

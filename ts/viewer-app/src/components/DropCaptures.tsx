@@ -42,7 +42,7 @@ const ringOrder = (files: readonly File[]): readonly File[] =>
   [...files].sort((a, b) => natural.compare(a.name, b.name))
 
 const WORD: Readonly<Record<Item["status"], string>> = {
-  waiting: "waiting for the drop before it",
+  waiting: "queued",
   uploading: "uploading…",
   started: "",
   refused: "refused",
@@ -151,8 +151,8 @@ export const DropCaptures = (
         }}
       >
         <span>
-          <b>drop captures here</b>
-          <span className="muted"> — .pcap, .pcap.gz, .pcapng, .pcapng.gz</span>
+          <b>drop captures</b>
+          <span className="muted"> .pcap · .pcap.gz · .pcapng · .pcapng.gz</span>
         </span>
         <label className="copy-ref">
           pick files…
@@ -171,17 +171,17 @@ export const DropCaptures = (
         <label>
           lane{" "}
           <select value={choice} onChange={(event) => setChoice(event.target.value)}>
-            <option value="">add only — ingest and cut, no replay</option>
+            <option value="">add only (ingest + cut)</option>
             {lanes.map((one) => <option key={one} value={one}>replay on {one}</option>)}
           </select>
         </label>
         <label>
-          several files are{" "}
+          several files{" "}
           <select
             value={asSet ? "set" : "each"}
             onChange={(event) => setAsSet(event.target.value === "set")}
           >
-            <option value="set">one capture — consecutive files of one tap</option>
+            <option value="set">one capture (one tap's ring)</option>
             <option value="each">one capture each</option>
           </select>
         </label>
@@ -211,7 +211,7 @@ export const DropCaptures = (
                 )
                 : <span className="muted">{WORD[item.status]}</span>}
               {item.detail !== undefined && item.detail !== "" && (
-                <span className="muted"> — {item.detail}</span>
+                <span className="muted"> · {item.detail}</span>
               )}
             </li>
           ))}
