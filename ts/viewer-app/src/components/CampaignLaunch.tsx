@@ -38,7 +38,7 @@ const useStart = (capture: string) => {
 
 const Said = ({ outcome }: { readonly outcome: Outcome }): JSX.Element | null =>
   outcome === undefined ? null : "error" in outcome
-    ? <span className="cp-nok">{outcome.error}</span>
+    ? <span className="cp-nok">run: {outcome.error}</span>
     : <JobLinks jobs={outcome.jobs} />
 
 const Rebuild = ({ on, set }: { readonly on: boolean; readonly set: (on: boolean) => void }): JSX.Element => (
@@ -57,7 +57,7 @@ export const CampaignStart = ({ capture, lanes }: { readonly capture: string; re
     setPicked((now) => (now.includes(lane) ? now.filter((l) => l !== lane) : [...now, lane]))
   return (
     <details className="cp-launch">
-      <summary>run</summary>
+      <summary>start</summary>
       <div className="cp-launch-body">
         {lanes.map((lane) => (
           <label key={lane} className="cp-check mono">
@@ -82,27 +82,25 @@ export const CaseReplay = ({ capture, lanes, scope }: {
   readonly scope: Scope
 }): JSX.Element => {
   const [rebuild, setRebuild] = useState(false)
+  const [whole, setWhole] = useState(false)
   const { busy, outcome, start } = useStart(capture)
+  const asked: Scope = whole && scope.case !== undefined ? { case: scope.case } : scope
   return (
     <div className="cp-replay">
       <b>Replay</b>
       {lanes.map((lane) => (
-        <button key={lane} type="button" className="mono" disabled={busy} onClick={() => void start([lane], scope, rebuild)}>
+        <button key={lane} type="button" className="mono" disabled={busy} onClick={() => void start([lane], asked, rebuild)}>
           {lane}
         </button>
       ))}
       {lanes.length > 1 && (
-        <button type="button" disabled={busy} onClick={() => void start(lanes, scope, rebuild)}>every lane</button>
+        <button type="button" disabled={busy} onClick={() => void start(lanes, asked, rebuild)}>every lane</button>
       )}
       {scope.subcase !== undefined && (
-        <button
-          type="button"
-          disabled={busy}
-          title="every sub-case of the case"
-          onClick={() => void start(lanes, { ...(scope.case === undefined ? {} : { case: scope.case }) }, rebuild)}
-        >
+        <label className="cp-check" title="every sub-case of the case">
+          <input type="checkbox" checked={whole} onChange={(event) => setWhole(event.target.checked)} />
           whole case
-        </button>
+        </label>
       )}
       <Rebuild on={rebuild} set={setRebuild} />
       <Said outcome={outcome} />

@@ -328,6 +328,10 @@ const startCommand = (facts: CliFacts, root: Root) =>
         if (kind === "cut") return yield* startCut(facts, input, yield* pathsFrom(root))
         if (kind === "retire") return yield* startRetire(facts, input, yield* pathsFrom(root))
         if (kind === "delete") return yield* startDelete(facts, input, yield* pathsFrom(root))
+        if (kind === "campaign") {
+          yield* Console.error("[job] refused: a campaign job is started from the campaign page, or run in the foreground by the deployment's campaign command")
+          return yield* exit(2)
+        }
         if (Option.isNone(input.request)) {
           yield* Console.error("[job] refused: a replay job names its request (--request <id>)")
           return yield* exit(2)

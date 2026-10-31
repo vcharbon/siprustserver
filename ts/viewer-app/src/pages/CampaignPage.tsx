@@ -26,7 +26,7 @@ const notRun = (run: CampaignRun | undefined, lane: string): number =>
   run?.lanes.find((l) => l.lane === lane)?.skipped ?? 0
 
 const runLabel = (run: CampaignRun): string =>
-  `#${run.id} · ${run.startedAt.slice(5, 16).replace("T", " ")}${
+  `#${run.id}${run.scope === null ? "" : "°"} · ${run.startedAt.slice(5, 16).replace("T", " ")}${
     run.labels.filter((l) => l.name !== "branch" && l.name !== "env").slice(0, 3).map((l) => ` · ${l.value}`).join("")
   }${run.finishedAt === null ? " · running" : ""}`
 
@@ -189,7 +189,7 @@ const Summary = ({ view: whole }: { readonly view: Campaign }): JSX.Element => {
           {flag("failing", "failing", "fails on a lane read")}
           {flag("oneLane", "one lane", "fails on exactly one lane read")}
           {flag("fresh", "new", "fails where the compared run did not")}
-          <CampaignStart capture={view.capture} lanes={view.lanes} />
+          {view.launch !== null && <CampaignStart capture={view.capture} lanes={view.launch.lanes} />}
           <input
             className="cp-filter"
             placeholder="filter"

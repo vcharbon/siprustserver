@@ -42,10 +42,10 @@ export const CaseHistory = ({ view, caseId, lanes, onClose, onDelta }: {
       <button type="button" className="cp-close" onClick={onClose} title="close (Esc)">✕</button>
       <h2>{known?.title ?? "Case history"}</h2>
       <p className="muted mono">{caseId}{known === undefined ? "" : ` · ${known.family}`}</p>
-      {known !== undefined && (
+      {known !== undefined && view.launch !== null && (
         <CaseReplay
           capture={view.capture}
-          lanes={view.lanes}
+          lanes={view.launch.lanes}
           scope={{ case: known.ref, ...(known.subcase === null ? {} : { subcase: known.subcase }) }}
         />
       )}

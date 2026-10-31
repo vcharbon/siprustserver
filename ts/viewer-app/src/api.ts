@@ -1078,6 +1078,8 @@ export interface Campaign {
   readonly lanes: readonly string[]
   readonly runs: readonly CampaignRun[]
   readonly cases: readonly CampaignCase[]
+  /** The lanes a run started from the page may take; null where the page reads another environment than the server's. */
+  readonly launch: { readonly lanes: readonly string[] } | null
 }
 
 /** A request whose failure, of any status, is the server's stated reason where it states one. */

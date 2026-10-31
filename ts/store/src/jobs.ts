@@ -28,7 +28,7 @@ import { type ErrorColumns, errorOf } from "./error-columns.js"
 import type { MainError } from "./model.js"
 import type { Outcome } from "./requests.js"
 
-/** What a job does: a request replay, a cut, an ingest, a source retired, runs deleted. */
+/** What a job does: a request replay, a cut, an ingest, a source retired, runs deleted, a campaign run. */
 export type Kind = "replay" | "cut" | "ingest" | "retire" | "delete" | "campaign"
 
 export const KINDS: ReadonlyArray<Kind> = ["replay", "cut", "ingest", "retire", "delete", "campaign"]
