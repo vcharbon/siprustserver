@@ -1,7 +1,5 @@
-//! **A request in flight when the node serving the call dies** — the baseline
-//! the takeover-materialise refactor must keep (the superproject's
-//! `docs/todos/takeover-materialise`; `takeover-materialise/issues/NN` below is
-//! that effort's `issues/` directory, spec D7/D17).
+//! **A request in flight when the node serving the call dies** is served by
+//! the survivor on the peer's re-send.
 //!
 //! One cell per method, all on one premise — the caller's exchange is
 //! **unanswered** when the node dies — reached two ways:
@@ -37,19 +35,19 @@
 //! request record's seeds (ADR-0055 §2): the survivor absorbs the re-send in
 //! the server transaction it rebuilds and retransmits the relay under its
 //! branch, and the callee repeats its final (RFC 3261 §17.2.2). The BYE cell's
-//! re-send builds a fresh transaction, is answered, and the call ends. The two INVITE cells verify the seeds (D7, D9): the
-//! caller's CANCEL is answered from the a-leg INVITE transaction the survivor
-//! rebuilds from the record, and the caller's re-INVITE re-send is absorbed by
-//! the transaction the record names — one b-leg INVITE for the round, whose
-//! seeded client transaction takes the callee's 200 the front proxy fails over
-//! to it (on the cookie of its own Via).
+//! re-send builds a fresh transaction, is answered, and the call ends. The two
+//! INVITE cells verify the seeds: the caller's CANCEL is answered from the
+//! a-leg INVITE transaction the survivor rebuilds from the record, and the
+//! caller's re-INVITE re-send is absorbed by the transaction the record names
+//! — one b-leg INVITE for the round, whose seeded client transaction takes the
+//! callee's 200 the front proxy fails over to it (on the cookie of its own Via).
 //!
 //! The killed primary is the call's sole CDR authority (ADR-0020 X3), so every
 //! cell reboots it and lets its reclaim discharge the terminal the survivor
 //! deferred.
 //!
-//! A cell whose contract the cluster does not yet hold stays here, red, naming
-//! the issue that owns it — the cell scripts the contract, never the defect.
+//! Beyond the failover sweep: the peer's own re-send takes the call over, one relay per request,
+//! and the 487's headers.
 
 use std::net::SocketAddr;
 use std::time::Duration;

@@ -6,6 +6,8 @@
 //! §7): once the replication heals, the call ends cleanly, and the first BYE
 //! each party takes follows the highest CSeq either node sent it in that
 //! dialog (RFC 3261 §12.2.1.1), whichever way the writes cross.
+//!
+//! Beyond the failover sweep: each node's CSeq sequence across a split, to a clean end.
 
 use std::time::Duration;
 

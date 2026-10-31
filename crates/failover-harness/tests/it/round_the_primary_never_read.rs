@@ -12,6 +12,9 @@
 //! directions, healed after the primary's INFO; or a stall of the copy's
 //! writes alone, the primary's INFO reaching the copy first. Each cell
 //! settles to one CDR.
+//!
+//! Beyond the failover sweep: rounds on diverged copies, with traffic on both sides of a cut or a
+//! stall.
 
 use std::time::Duration;
 

@@ -15,6 +15,9 @@
 //!   alice ◀─180/200── b2 ◀─180/200── bob; ACK, BYE
 //!   b1's endpoint leaves the slice: b2 writes the one CDR
 //! ```
+//!
+//! Beyond the failover sweep: the takeover bound at the dead verdict, and a silent host confirmed
+//! at the idle bound.
 
 use std::time::Duration;
 

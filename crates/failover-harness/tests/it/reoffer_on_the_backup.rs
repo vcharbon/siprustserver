@@ -5,6 +5,9 @@
 //! §8.1.3.5) — on P's backup S while S still holds the ended call's replica.
 //! S places it as the new call it is, with its own CDR; it takes nothing
 //! over from the live P.
+//!
+//! Beyond the failover sweep: a re-offer or a crafted INVITE on a call's identity reaching the
+//! backup.
 
 use std::time::Duration;
 
@@ -28,6 +31,7 @@ async fn an_invite_on_a_calls_identity_that_copies_no_transaction_is_not_answere
 {
     let name = "reoffer-copying-no-transaction";
     let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
+    // alice breaks RFC 3261 §12.2.1.1: an INVITE on an established dialog's identity, no To-tag.
     fh.allow_rfc_violation(
         "in-dialog-to-tag",
         "the peer under test re-offers on an established call's identity with no To-tag, \

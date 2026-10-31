@@ -15,6 +15,9 @@
 //!   the copy runs the ring from the callee's INVITE while the leg reads as
 //!   not having rung, and an 18x it later takes runs the ring from that 18x
 //!   (`a_later_18x_on_the_survivor_…`).
+//!
+//! Beyond the failover sweep: a ring deadline armed, moved and fired across takeovers, to its exact
+//! instant.
 
 use b2bua::store::envelope;
 use std::sync::Arc;

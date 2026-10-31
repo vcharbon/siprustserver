@@ -19,6 +19,8 @@
 //! The killed worker departed, so the survivor discharges each call it ends
 //! (ADR-0047 D8); the worker then reboots, and each call has exactly one CDR in
 //! the cluster.
+//!
+//! Beyond the failover sweep: a spiral through a third-party proxy across a worker kill.
 
 use std::collections::HashSet;
 use std::sync::Arc;

@@ -12,6 +12,8 @@
 //!   alice BYE                  served on the backup, which discharges it
 //!   primary reboots            nothing left to reclaim: one CDR
 //! ```
+//!
+//! Beyond the failover sweep: a takeover numbers its turns past the replicated message ring.
 
 use b2bua::store::envelope;
 use std::time::Duration;

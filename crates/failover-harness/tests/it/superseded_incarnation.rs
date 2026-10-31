@@ -18,6 +18,8 @@
 //!         one keepalive interval on: b1#g1 has sent nothing and written no CDR
 //!         b1#g1's process exits
 //! ```
+//!
+//! Beyond the failover sweep: a force-deleted worker stops authoring once its ordinal is replaced.
 
 use std::time::Duration;
 

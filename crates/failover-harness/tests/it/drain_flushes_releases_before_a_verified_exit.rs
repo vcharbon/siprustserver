@@ -18,6 +18,8 @@
 //!   then      exit caught_up once the backup applied that change
 //!   then      the process exits, a replacement reclaims the call, BYE ends it
 //! ```
+//!
+//! Beyond the failover sweep: a drain's exit waits for its release flush to be verified.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

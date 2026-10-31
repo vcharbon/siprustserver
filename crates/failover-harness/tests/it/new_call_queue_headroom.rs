@@ -15,6 +15,8 @@
 //!   alice BYE on call A           Q takes the call over: 4 queues, BYE 200
 //!   N1, N2 and the emergency call end
 //! ```
+//!
+//! Beyond the failover sweep: the queue headroom a taken-over request and an emergency INVITE get.
 
 use std::time::Duration;
 

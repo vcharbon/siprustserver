@@ -25,6 +25,9 @@
 //!                                        delete, its CDR already written, the
 //!                                        call resident until then
 //! ```
+//!
+//! Beyond the failover sweep: how long, and in what order, a message trails its replication, and
+//! the cap.
 
 use std::sync::Arc;
 use std::time::Duration;

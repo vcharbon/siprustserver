@@ -11,6 +11,8 @@
 //!
 //! The primary departed, so the backup discharges the call it ends; the
 //! primary reboots within its budget, and the call ends with its one CDR.
+//!
+//! Beyond the failover sweep: a callee-side proxy rewriting the Request-URI of a BYE.
 
 use std::net::SocketAddr;
 use std::time::Duration;

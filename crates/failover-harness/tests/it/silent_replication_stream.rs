@@ -14,6 +14,8 @@
 //!   25 s               the hold is lifted: the backup catches up
 //!   then               both calls released on both nodes, one CDR each
 //! ```
+//!
+//! Beyond the failover sweep: a silent replication stream reopened from its watermark.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

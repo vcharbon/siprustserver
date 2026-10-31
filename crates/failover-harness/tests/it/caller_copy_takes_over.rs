@@ -14,6 +14,9 @@
 //!   alice ─INVITE (copy)─▶ proxy ─▶ b2 ─INVITE─▶ bob   (b2 takes the call over)
 //!   alice ◀─180/200── b2 ◀─180/200── bob; ACK, BYE
 //! ```
+//!
+//! Beyond the failover sweep: the caller's INVITE copy takes the call over after every effect was
+//! lost, counted once.
 
 use failover_harness::FailoverHarness;
 

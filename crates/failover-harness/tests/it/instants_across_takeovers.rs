@@ -16,6 +16,9 @@
 //!     primary reboots, reclaims the body the backup held for it
 //!     alice BYE   → served by the rebooted primary
 //! ```
+//!
+//! Beyond the failover sweep: the call's instants stay anchored across takeovers between skewed
+//! clocks.
 
 use std::time::Duration;
 

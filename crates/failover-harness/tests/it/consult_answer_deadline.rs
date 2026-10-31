@@ -16,6 +16,9 @@
 //!   call's own; the referrer is told the transfer failed.
 //!
 //! Each call ends with one CDR and the limiter drained.
+//!
+//! Beyond the failover sweep: consults the engine never answers, sent again by the next owner and
+//! ended at their deadline.
 
 use call::LimiterEntry;
 use std::net::SocketAddr;

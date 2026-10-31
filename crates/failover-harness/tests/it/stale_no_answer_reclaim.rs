@@ -15,6 +15,9 @@
 //! `arm_parked`) materialises the call + re-arms its timers
 //! (`sanitize_restored_timers` + `TimerService::restore`).
 //! The fire then reaches the `no-answer` rule exactly as it did on the cluster.
+//!
+//! Beyond the failover sweep: a stale ring deadline implanted in the replica, absorbed and
+//! scrubbed.
 
 use b2bua::store::envelope;
 use std::sync::Arc;
@@ -227,7 +230,13 @@ async fn stale_no_answer_restored_by_reclaim_is_absorbed_and_scrubbed() {
     bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
     bye.expect_tolerating(200, &["OPTIONS"]).await;
     fh.advance(Duration::from_secs(1)).await;
-    failover_harness::assert_call_fully_released(&[&*b1, &*b2], &call_ref).await;
+    failover_harness::assert_call_ended(
+        &[&*b1, &*b2],
+        &call_ref,
+        1,
+        "the reclaimed primary ends the call",
+    )
+    .await;
 
     // No trace of the absorbed fire in the CDR stream: no timeout event, no
     // no-answer reason, on any incarnation of either node.

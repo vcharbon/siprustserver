@@ -24,6 +24,8 @@
 //!
 //! The kill is never told to the peers (ADR-0031 cases 3a and 4). Every cell
 //! ends with a BYE, one CDR and clean memory on both nodes.
+//!
+//! Beyond the failover sweep: re-INVITE retransmissions and CANCELs absorbed at the takeover.
 
 use std::net::SocketAddr;
 use std::time::Duration;

@@ -19,6 +19,8 @@
 //! ```
 //!
 //! Every cell ends with the caller's BYE, one CDR and clean memory.
+//!
+//! Beyond the failover sweep: a reclaimed call is probed only once its endpoint is routable.
 
 use std::time::Duration;
 

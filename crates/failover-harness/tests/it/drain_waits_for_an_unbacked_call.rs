@@ -12,6 +12,8 @@
 //!   then       the endpoint is readmitted and the call ends through its
 //!              primary; one CDR, nothing left
 //! ```
+//!
+//! Beyond the failover sweep: a drain never reads an unbacked call as held.
 
 use std::time::Duration;
 

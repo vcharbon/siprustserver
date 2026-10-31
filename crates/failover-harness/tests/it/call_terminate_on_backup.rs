@@ -1,25 +1,25 @@
-//! The "call terminated on the backup" matrix. Every cell drives one call to a
-//! terminal that is (in most cells) served by the **backup**, then asserts the
-//! universal invariants via [`assert_call_fully_over`]: one CDR across the
-//! cluster, the call fully over everywhere (0 owners, no resurrectable replica,
-//! memory clean), and the shared limiter released. No cell kills a primary
-//! inside its call's replication window, so none leaves the second CDR ADR-0055
-//! §5 accepts there.
+//! The "call terminated on the backup" matrix. Every cell drives one call to a terminal that is (in
+//! most cells) served by the **backup**, then asserts the universal invariants via
+//! [`assert_call_fully_over`]: one CDR across the cluster, the call fully over everywhere (0
+//! owners, no resurrectable replica, memory clean), and the shared limiter released. No cell kills
+//! a primary inside its call's replication window, so none leaves the second CDR ADR-0055 §5
+//! accepts there.
 //!
-//! C1 (`bye_on_primary`) and C11 (`reinvite_on_backup`, the no-discharge guard
-//! rail) are the controls; C2–C10 exercise the backup terminating a call. Each
-//! cell's `FailoverHarness` name is unique, so its unified callflow is written
-//! to `target/seq-reports/<cell>/report.html` on drop (including on failure)
-//! for review.
+//! C1 (`bye_on_primary`) and C11 (`reinvite_on_backup`, the no-discharge guard rail) are the
+//! controls; C2–C10 exercise the backup terminating a call. Each cell's `FailoverHarness` name is
+//! unique, so its unified callflow is written to `target/seq-reports/<cell>/report.html` on drop
+//! (including on failure) for review.
 //!
 //! ## Misroute mechanism (primary stays ALIVE)
-//! ADR-0014: a partition can route an in-dialog request to the backup at any time
-//! with the primary perfectly healthy. We model that **without a production
-//! routing change** by flipping the proxy's *health view* of the primary to
-//! `Dead` (`set_health`) while leaving the primary worker running and owning the
-//! live call. The proxy then cookie-routes the in-dialog request to the backup;
-//! the primary never learns the call ended. (We use `spawn_proxy` — no health
-//! probe — so `set_health` is authoritative and deterministic.)
+//! ADR-0014: a partition can route an in-dialog request to the backup at any time with the primary
+//! perfectly healthy. We model that **without a production routing change** by flipping the proxy's
+//! *health view* of the primary to `Dead` (`set_health`) while leaving the primary worker running
+//! and owning the live call. The proxy then cookie-routes the in-dialog request to the backup; the
+//! primary never learns the call ended. (We use `spawn_proxy` — no health probe — so `set_health`
+//! is authoritative and deterministic.)
+//!
+//! Beyond the failover sweep: `c1` is the sweep's uncut basic call; the other cells misroute a live
+//! primary, keep a dead one past the replica TTL, or end the call by keepalive or maximum duration.
 // The cells share one uniform `Established { .. }` destructuring shape; whether a
 // given binding needs `mut` varies per cell (only reboot cells mutate `fh`), so
 // `unused_mut` is expected noise here.

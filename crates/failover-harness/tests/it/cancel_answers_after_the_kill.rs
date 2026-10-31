@@ -7,13 +7,18 @@
 //! the repeat reaches the backup, whose takeover copy answers it 200 and 487
 //! on the INVITE transaction it seeded and CANCELs the callee: nothing but
 //! the 487 ends the caller's INVITE, and the callee rings no more.
+//!
+//! Beyond the failover sweep: nothing but the 487 ends the caller's INVITE, and a CANCEL during the
+//! decision dials nobody.
 
 use std::time::Duration;
 
 use b2bua::decision::ScriptedDecisionEngine;
 use failover_harness::cluster::{Cluster, ClusterRecipe};
 use failover_harness::sweep::{ALICE, BOB};
-use failover_harness::{total_cdrs_for, FailoverHarness, Incident, TurnAt, TurnPoint};
+use failover_harness::{
+    assert_call_ended, total_cdrs_for, FailoverHarness, Incident, TurnAt, TurnPoint,
+};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser};
 
@@ -93,6 +98,11 @@ async fn cancel_lost_with_its_node(name: &str, point: TurnPoint) {
     cluster.node(&placement.backup).simulate_peer_removed(&placement.primary);
     let drained = cluster.fh.settle_terminal(async || cluster.is_clear_of(&call_ref).await).await;
     assert!(drained, "the cluster forgets the call");
+    assert_eq!(
+        total_cdrs_for(&cluster.nodes(), &call_ref),
+        1,
+        "the backup discharges the call of its departed primary once"
+    );
     cluster.fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     cluster.fh.assert_sip_rfc_clean(name);
 }
@@ -134,7 +144,7 @@ async fn an_undecided_cancel_lost_with_its_node_is_answered_by_the_backup_which_
         })
         .await;
     assert!(released, "nothing of the call is left live or stored");
-    assert_eq!(total_cdrs_for(&[survivor], &call_ref), 1, "the backup writes the one CDR");
+    assert_call_ended(&[&w_b1, &w_b2], &call_ref, 1, "the backup writes the one CDR").await;
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     fh.assert_sip_rfc_clean(name);
     drop(proxy);

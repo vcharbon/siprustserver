@@ -8,6 +8,8 @@
 //! copy's ending and ends the answered call cleanly from its own copy, ranked
 //! higher on the answer — a BYE to each party (RFC 3261 §13.2.2.4: a non-2xx
 //! after the 2xx ends no dialog, so the dialog the 200 made is BYEd), one CDR.
+//!
+//! Beyond the failover sweep: an answer inside the replication lag, against the copy's deadline.
 
 use std::time::Duration;
 

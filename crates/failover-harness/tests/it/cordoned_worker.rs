@@ -14,6 +14,8 @@
 //! ```
 //!
 //! Every call ends with one CDR, the refused one included.
+//!
+//! Beyond the failover sweep: new-call placement around cordoned workers, with no node fault.
 
 use std::time::Duration;
 

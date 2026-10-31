@@ -56,6 +56,9 @@
 //! record of the answered call: the primary discharged behind the cut, and its
 //! resurrection tombstone then refuses the terminal the survivor defers to it, so
 //! that terminal is counted lost when the Element ages out.
+//!
+//! Beyond the failover sweep: a forward flush never regresses the backup's Element and its
+//! counters.
 
 use b2bua::store::envelope;
 use std::net::SocketAddr;

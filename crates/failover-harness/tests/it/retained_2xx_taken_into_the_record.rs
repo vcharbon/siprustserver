@@ -14,6 +14,8 @@
 //!                   COPY ══ write ══▶ PRIMARY (takes the round and its 2xx)
 //!   alice ─INVITE─▶ PRIMARY ─200 (the retained one)─▶ alice
 //! ```
+//!
+//! Beyond the failover sweep: a misrouted re-INVITE retransmission draws the 2xx its copy retained.
 
 use std::net::SocketAddr;
 use std::time::Duration;

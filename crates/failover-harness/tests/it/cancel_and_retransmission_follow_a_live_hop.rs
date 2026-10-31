@@ -16,11 +16,14 @@
 //! ```
 //!
 //! Every cell ends with the caller's BYE, one CDR and clean memory.
+//!
+//! Beyond the failover sweep: a live primary read dead, a proxy that lost its memo, and where each
+//! sends the copies.
 
 use std::time::Duration;
 
 use b2bua::decision::ScriptedDecisionEngine;
-use failover_harness::{worker_ordinals, FailoverHarness, WorkerHealth};
+use failover_harness::{assert_call_ended, worker_ordinals, FailoverHarness, WorkerHealth};
 use sip_message::Method;
 
 use crate::departure_support::{bring_up_deciding, bring_up_reactive, placed, CountedDecision};
@@ -70,7 +73,7 @@ async fn retransmission_to_the_backup_of_a_live_primary(name: &str, told: bool) 
     // ── the caller hears nothing; the primary holds the INVITE undecided ────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     fh.cut_signalling("alice", alice.addr());
-    let (pri_ord, _call_ref) = placed(&fh, &w_b1, &w_b2).await;
+    let (pri_ord, call_ref) = placed(&fh, &w_b1, &w_b2).await;
     fh.mark(&pri_ord, None, "misread dead", "the proxy reads the live primary dead");
     proxy.set_health(&pri_ord, WorkerHealth::Dead);
     fh.restore_signalling("alice", alice.addr());
@@ -100,8 +103,7 @@ async fn retransmission_to_the_backup_of_a_live_primary(name: &str, told: bool) 
     let drained = fh.settle_terminal(async || w_b1.memory_clean() && w_b2.memory_clean()).await;
     assert!(drained, "the cluster drains the call");
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
-    let cdrs: usize = [&w_b1, &w_b2].iter().map(|n| n.cdr_records().len()).sum();
-    assert_eq!(cdrs, 1, "one CDR");
+    assert_call_ended(&[&w_b1, &w_b2], &call_ref, 1, "the live primary alone ends the call").await;
     fh.assert_sip_rfc_clean(name);
     drop(proxy);
 }
@@ -134,7 +136,7 @@ async fn cancel_after_a_misread_retransmission(name: &str, told: bool) {
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     fh.cut_signalling("alice", alice.addr());
-    let (pri_ord, _call_ref) = placed(&fh, &w_b1, &w_b2).await;
+    let (pri_ord, call_ref) = placed(&fh, &w_b1, &w_b2).await;
     proxy.set_health(&pri_ord, WorkerHealth::Dead);
     fh.restore_signalling("alice", alice.addr());
     let (wire, dst) = last_request_sent(&fh, alice.addr(), &Method::Invite);
@@ -172,8 +174,7 @@ async fn cancel_after_a_misread_retransmission(name: &str, told: bool) {
     let drained = fh.settle_terminal(async || w_b1.memory_clean() && w_b2.memory_clean()).await;
     assert!(drained, "the cluster drains the call");
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
-    let cdrs: usize = [&w_b1, &w_b2].iter().map(|n| n.cdr_records().len()).sum();
-    assert_eq!(cdrs, 1, "one CDR");
+    assert_call_ended(&[&w_b1, &w_b2], &call_ref, 1, "the live primary alone ends the call").await;
     fh.assert_sip_rfc_clean(name);
     drop(proxy);
 }
@@ -388,6 +389,7 @@ async fn a_told_misread_while_the_primary_awaits_an_outside_answer_asks_nothing_
     call.expect(200).await;
     let _dialog = call.ack().await;
     bob.receive("ACK").await;
+    let (_, call_ref) = placed(&fh, &w_b1, &w_b2).await;
 
     // The maximum duration fires and its consult is in flight.
     fh.advance(Duration::from_millis(u64::try_from(MAX_DURATION_MS).unwrap() + 200)).await;
@@ -410,8 +412,7 @@ async fn a_told_misread_while_the_primary_awaits_an_outside_answer_asks_nothing_
     let drained = fh.settle_terminal(async || w_b1.memory_clean() && w_b2.memory_clean()).await;
     assert!(drained, "the cluster drains the call");
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
-    let cdrs: usize = [&w_b1, &w_b2].iter().map(|n| n.cdr_records().len()).sum();
-    assert_eq!(cdrs, 1, "one CDR");
+    assert_call_ended(&[&w_b1, &w_b2], &call_ref, 1, "the live primary alone ends the call").await;
     fh.assert_sip_rfc_clean(name);
     drop(proxy);
 }
@@ -439,6 +440,7 @@ async fn a_told_misread_while_the_primary_relays_an_in_dialog_request_relays_it_
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
     fh.advance(REPLICATE).await;
+    let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
 
     let mut info = dialog.request(sip_message::generators::InDialogMethod::Info, None).await;
     let mut relayed = bob.receive("INFO").await;
@@ -469,8 +471,7 @@ async fn a_told_misread_while_the_primary_relays_an_in_dialog_request_relays_it_
     let drained = fh.settle_terminal(async || w_b1.memory_clean() && w_b2.memory_clean()).await;
     assert!(drained, "the cluster drains the call");
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
-    let cdrs: usize = [&w_b1, &w_b2].iter().map(|n| n.cdr_records().len()).sum();
-    assert_eq!(cdrs, 1, "one CDR");
+    assert_call_ended(&[&w_b1, &w_b2], &call_ref, 1, "the live primary alone ends the call").await;
     fh.assert_sip_rfc_clean(name);
     drop(proxy);
 }

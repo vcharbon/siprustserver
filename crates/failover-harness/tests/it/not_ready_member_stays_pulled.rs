@@ -20,6 +20,9 @@
 //! What the flap must not do is park the peer: a parked peer sees nothing the
 //! worker authors while it is unroutable, and the ring deadline it fires would
 //! exist on one node only. The caller takes exactly one final.
+//!
+//! Beyond the failover sweep: a member flapping not ready is departed by the proxy and still pulled
+//! by its peer.
 
 use b2bua::store::envelope;
 use std::net::SocketAddr;
@@ -339,6 +342,13 @@ async fn a_member_flapping_not_ready_is_departed_by_the_proxy_and_still_pulled()
     assert_eq!(total_cdrs_for(&nodes[..], &call_ref), 1, "exactly one CDR for the rejected call");
     let cdrs: usize = nodes.iter().map(|n| n.cdr_records().len()).sum();
     assert_eq!(cdrs, 2, "one CDR per call across the cluster, the second call included");
+    let second = nodes
+        .iter()
+        .flat_map(|n| n.cdr_records())
+        .map(|c| c.call_ref)
+        .find(|r| *r != call_ref)
+        .expect("the second call's CDR");
+    assert_call_fully_released(&nodes[..], &second).await;
 
     // ── what the ledger recorded ─────────────────────────────────────────────
     // Nothing — primitive or sampler — ever parked the peer; the live link reads

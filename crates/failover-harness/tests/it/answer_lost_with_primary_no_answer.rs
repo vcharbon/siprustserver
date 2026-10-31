@@ -14,12 +14,15 @@
 //!   copy answered the caller, and the rebooted primary reclaimed the ringing
 //!   body (`an_answer_served_by_the_takeover_copy_…`) — the endurance timeline.
 //!
-//! Unlike the 059 pin (`stale_no_answer_reclaim.rs`, a Confirmed replica with a
+//! Unlike `stale_no_answer_reclaim.rs` (a Confirmed replica with a
 //! stale timer), both restored copies read the caller as unanswered.
 //!
 //! The two cells whose callee's 2xx takes the call over kill the primary
 //! unannounced to the peers (ADR-0031 cases 3a and 4), so no departure sweep
 //! takes the ringing call over first.
+//!
+//! Beyond the failover sweep: a restored ring deadline on an answered call, under a lagging proxy
+//! view or a rewound replica.
 
 use b2bua::store::envelope;
 use std::path::{Path, PathBuf};
@@ -63,7 +66,7 @@ fn no_answer_decision() -> Arc<dyn CallDecisionEngine> {
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5070);
                 r.no_answer_ms = Some(NO_ANSWER_SEC * 1000);
-                r.callback_context = Some("078-no-answer-ctx".into());
+                r.callback_context = Some("no-answer-ctx".into());
                 NewCallResponse::Route(r)
             })
             .on_failure(|_| {
@@ -243,7 +246,8 @@ async fn cross_deadline(
 
 /// Pump until no node holds a trace of `call_ref` — a survivor's late takeover
 /// copy self-releases at Timer H (32 s past the 2xx) — then assert the
-/// cluster-wide release. Answers keepalive OPTIONS along the way.
+/// cluster-wide release and the call's one CDR. Answers keepalive OPTIONS
+/// along the way.
 async fn settle_released(
     fh: &FailoverHarness,
     alice: &Agent,
@@ -269,7 +273,7 @@ async fn settle_released(
         })
         .await;
     assert!(released, "every node released {call_ref} within Timer H of the teardown");
-    failover_harness::assert_call_fully_released(nodes, call_ref).await;
+    failover_harness::assert_call_ended(nodes, call_ref, 1, "one end, discharged once").await;
 }
 
 /// The live copy `node` serves for `call_ref` reads the caller as answered and
@@ -300,7 +304,7 @@ fn report_dir(stem: &str) -> PathBuf {
             wire check at the ring deadline (ADR-0014 rejects sync confirm-replicate)"]
 async fn an_answer_the_primary_never_replicated_draws_no_second_final_from_no_answer() {
     let Cluster { mut fh, alice, bob, proxy, mut w_b1, mut w_b2 } =
-        spawn_cluster("078-answer-lost-with-primary-no-answer").await;
+        spawn_cluster("answer-lost-with-primary-no-answer").await;
 
     // ── ring: the route arms NoAnswer and the ringing version reaches the backup
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
@@ -359,9 +363,9 @@ async fn an_answer_the_primary_never_replicated_draws_no_second_final_from_no_an
     let passed = crossed.stray_final.is_none() && crossed.cancels_to_bob == 0;
     let written = fh
         .write_unified_report(
-            &report_dir("078-answer-lost-with-primary-no-answer"),
+            &report_dir("answer-lost-with-primary-no-answer"),
             "report",
-            "078 — the answer the primary never replicated",
+            "The answer the primary never replicated",
             passed,
         )
         .expect("report written");
@@ -388,7 +392,7 @@ async fn an_answer_the_primary_never_replicated_draws_no_second_final_from_no_an
 #[tokio::test(start_paused = true)]
 async fn an_answer_served_by_the_takeover_copy_draws_no_second_final_from_no_answer() {
     let Cluster { mut fh, alice, bob, mut proxy, mut w_b1, mut w_b2 } =
-        spawn_cluster("078-answered-on-backup-then-reclaim").await;
+        spawn_cluster("answered-on-backup-then-reclaim").await;
     // The reactive path: the proxy tells no dead verdict (ADR-0050 §3).
     proxy.tell_no_dead_verdict();
 
@@ -444,9 +448,9 @@ async fn an_answer_served_by_the_takeover_copy_draws_no_second_final_from_no_ans
     let passed = crossed.stray_final.is_none() && crossed.cancels_to_bob == 0;
     let written = fh
         .write_unified_report(
-            &report_dir("078-answered-on-backup-then-reclaim"),
+            &report_dir("answered-on-backup-then-reclaim"),
             "report",
-            "078 — the answer served by the takeover copy",
+            "The answer served by the takeover copy",
             passed,
         )
         .expect("report written");
@@ -474,7 +478,7 @@ async fn an_answer_served_by_the_takeover_copy_draws_no_second_final_from_no_ans
 #[tokio::test(start_paused = true)]
 async fn an_answer_served_by_the_takeover_copy_after_the_reclaim_draws_no_second_final() {
     let Cluster { mut fh, alice, bob, proxy, mut w_b1, mut w_b2 } =
-        spawn_cluster("078-answered-on-backup-after-reclaim").await;
+        spawn_cluster("answered-on-backup-after-reclaim").await;
 
     // ── ring: the route arms NoAnswer and the ringing version reaches the backup
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
@@ -534,9 +538,9 @@ async fn an_answer_served_by_the_takeover_copy_after_the_reclaim_draws_no_second
     let passed = crossed.stray_final.is_none() && crossed.cancels_to_bob == 0;
     let written = fh
         .write_unified_report(
-            &report_dir("078-answered-on-backup-after-reclaim"),
+            &report_dir("answered-on-backup-after-reclaim"),
             "report",
-            "078 — the answer served by the takeover copy after the reclaim",
+            "The answer served by the takeover copy after the reclaim",
             passed,
         )
         .expect("report written");
@@ -567,7 +571,7 @@ async fn an_answer_served_by_the_takeover_copy_after_the_reclaim_draws_no_second
 #[tokio::test(start_paused = true)]
 async fn an_answer_the_reclaimed_copy_saw_the_ack_of_first_draws_no_second_final() {
     let Cluster { mut fh, alice, bob, proxy, mut w_b1, mut w_b2 } =
-        spawn_cluster("078-ack-lands-before-the-answer").await;
+        spawn_cluster("ack-lands-before-the-answer").await;
 
     // ── ring: the route arms NoAnswer and the ringing version reaches the backup
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
@@ -638,9 +642,9 @@ async fn an_answer_the_reclaimed_copy_saw_the_ack_of_first_draws_no_second_final
     let passed = crossed.stray_final.is_none() && crossed.cancels_to_bob == 0;
     let written = fh
         .write_unified_report(
-            &report_dir("078-ack-lands-before-the-answer"),
+            &report_dir("ack-lands-before-the-answer"),
             "report",
-            "078 — alice's ACK reaches the reclaimed copy before the survivor's answer",
+            "Alice's ACK reaches the reclaimed copy before the survivor's answer",
             passed,
         )
         .expect("report written");

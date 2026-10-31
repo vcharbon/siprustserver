@@ -2,6 +2,8 @@
 //! would be (ADR-0055 §4): a non-2xx final to an INVITE is ACKed hop by hop
 //! at the Request-URI the sender's via-extension states (RFC 3261 §17.1.1.3,
 //! ADR-0055 §12), so the callee stops retransmitting it (§17.2.1).
+//!
+//! Beyond the failover sweep: a 487 failed over to the node that released the call is ACKed.
 
 use std::time::Duration;
 

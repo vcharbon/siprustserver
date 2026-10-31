@@ -30,6 +30,9 @@
 //! - The same, the caller's INVITE offerless: the callee's 2xx makes the offer
 //!   and the caller's ACK, gone to the backup, carries the answer. The node
 //!   ACKs the 2xx answering every stream rejected (RFC 3264 §6), then BYEs.
+//!
+//! Beyond the failover sweep: a swept call answered as its node turns routable, or with its write
+//! late.
 
 use std::time::Duration;
 

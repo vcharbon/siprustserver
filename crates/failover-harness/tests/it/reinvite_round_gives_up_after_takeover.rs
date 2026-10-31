@@ -14,6 +14,9 @@
 //! the peers (ADR-0031 cases 3a and 4), or — the caller having heard the 100,
 //! so sending nothing more — the departure announced, on which the survivor
 //! takes over the call whose round is in flight (ADR-0047).
+//!
+//! Beyond the failover sweep: a re-INVITE the callee never answers, given up at its bound after a
+//! takeover.
 
 use std::time::Duration;
 

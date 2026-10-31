@@ -5,6 +5,9 @@
 //! relays the callee's INFO on its own: each copy made a compared write the
 //! other never read, so they diverged (ADR-0055 §7), and the copy that meets
 //! the primary's write ends the call cleanly; the call settles to one CDR.
+//!
+//! Beyond the failover sweep: a copy's relay crossing its live primary's writes under a one-way
+//! stall.
 
 use std::time::Duration;
 

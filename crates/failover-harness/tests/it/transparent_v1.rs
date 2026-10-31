@@ -34,8 +34,8 @@ transparent_matrix! {
         Established, Nothing, Kill, RebootNoTraffic, 0;
 }
 
-// AS-generated keepalive OPTIONS (its own category): after the primary reboots
-// + reclaims with no traffic, the reclaimed AS probes BOTH legs with in-dialog
+// B2BUA-generated keepalive OPTIONS (its own category): after the primary reboots
+// + reclaims with no traffic, the reclaimed B2BUA probes BOTH legs with in-dialog
 // OPTIONS at the production 300 s cadence, refreshing dead-peer detection AND
 // the call-limiter hold — and the failover must be transparent: a long, idle
 // call survives the kill→reboot→reclaim cycle exactly as the clean baseline does.
@@ -45,7 +45,8 @@ transparent_matrix! {
 // regardless of the three interleaving timers (eager-takeover keepalive,
 // reclaimed-primary keepalive, dead-peer reap). Core keepalive-rearm-on-takeover
 // is also covered by `failover.rs::hydrated_call_rearms_keepalive_and_reaps_dead_peer`
-// and the happy-path foundation by `failover.rs::successful_long_call_with_as_generated_options`.
+// and the happy-path foundation by
+// `failover.rs::successful_long_call_with_b2bua_generated_options`.
 transparent_matrix! {
     established__keepalive__kill__reboot_no_traffic:
         Established, Keepalive, Kill, RebootNoTraffic, 0;

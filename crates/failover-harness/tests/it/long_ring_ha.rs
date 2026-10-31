@@ -8,6 +8,8 @@
 //! The worker tune rides [`FailoverHarness::with_worker_tune`], which re-applies
 //! on every spawn AND reboot — so the reborn primary carries the same raised
 //! bound its dead incarnation armed the call under.
+//!
+//! Beyond the failover sweep: a raised ring bound held across a reclaim to its original deadline.
 
 use call::LimiterEntry;
 use std::net::SocketAddr;

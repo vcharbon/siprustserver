@@ -19,6 +19,8 @@
 //!             of the same ordinal bootstraps and reclaims the call
 //!   alice ──BYE──▶ proxy ──▶ replacement ──▶ 200
 //! ```
+//!
+//! Beyond the failover sweep: a withdrawn worker's drain exits once its backup is caught up.
 
 use std::time::Duration;
 

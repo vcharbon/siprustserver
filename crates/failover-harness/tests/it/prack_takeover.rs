@@ -7,11 +7,10 @@
 //! bytes survive `MsgpackCodec`. Neither proves a survivor node answering a
 //! real PRACK on the wire, which is what these cells do.
 //!
-//! The shape is the **delayed offer** (RFC 3264 §4): alice's INVITE carries no
-//! body, bob's reliable 183 carries the OFFER, and alice's PRACK carries the
-//! ANSWER. So the cell proves both halves at once — the survivor translates
-//! `(a_tag, a_rseq) → (b_leg, b_rseq)` from hydrated books, AND relays the
-//! answer body onward to the callee.
+//! The shape is the **delayed offer** (RFC 3264 §4): alice's INVITE carries no body, bob's reliable
+//! 183 carries the OFFER, and alice's PRACK carries the ANSWER. So the cell proves both halves at
+//! once — the survivor translates `(a_tag, a_rseq) → (b_leg, b_rseq)` from hydrated books, AND
+//! relays the answer body onward to the callee.
 //!
 //! ```text
 //!   INVITE(no SDP) → 183(Require:100rel, RSeq, offer) → ✗ primary killed ✗
@@ -19,12 +18,13 @@
 //!                  → 200(PRACK) → 200(INVITE) → ACK → BYE → 200(BYE)
 //! ```
 //!
-//! The negative half is its sibling: a post-takeover PRACK naming a number this
-//! stack never showed must still draw 481 — hydrated books refuse as well as
-//! they admit.
+//! The negative half is its sibling: a post-takeover PRACK naming a number this stack never showed
+//! must still draw 481 — hydrated books refuse as well as they admit.
 //!
 //! Every kill here is unannounced to the peers (ADR-0031 cases 3a and 4): no
 //! departure sweep runs, so the message each cell is about takes the call over.
+//!
+//! Beyond the failover sweep: PRACK and RAck across a takeover, lost messages, an unseen RSeq.
 
 use b2bua::store::envelope;
 use std::net::SocketAddr;

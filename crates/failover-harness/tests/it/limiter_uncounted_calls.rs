@@ -5,6 +5,8 @@
 //! backup that takes the call over and the rebooted primary that reclaims it
 //! each count it while it is resident on them, and each stops counting it
 //! when it leaves them (the takeover copy's self-release, the call's end).
+//!
+//! Beyond the failover sweep: the fail-open gauge follows the node a call resides on.
 
 use call::LimiterEntry;
 use std::net::SocketAddr;

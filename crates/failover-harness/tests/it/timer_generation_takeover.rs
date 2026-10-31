@@ -14,6 +14,8 @@
 //!   alice BYE                  served on the backup, which discharges it
 //!   primary reboots            nothing left to reclaim: one CDR
 //! ```
+//!
+//! Beyond the failover sweep: a stale timer fire across a takeover or a reclaim is dropped.
 
 use b2bua::store::envelope;
 use std::time::Duration;

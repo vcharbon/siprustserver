@@ -1,13 +1,13 @@
-//! **Response↔transaction Via correlation across reroute and glare, via-LB.**
+//! **Response↔transaction Via correlation across a retarget and glare, via-LB.**
 //! Two flows that are clean direct and must stay clean under the
 //! `response-echoes-request-via` audit once a REAL `sip_proxy::ProxyCore` relays
 //! both directions of the b-leg:
 //!
 //!   alice :5060 ─▶ proxy :5080 ─▶ b1 :5091 ─▶ proxy :5080 ─▶ bob :5070
 //!
-//! 1. **486-then-reroute** — the first b-leg answers 486; the worker auto-ACKs
+//! 1. **486-then-retarget** — the first b-leg answers 486; the worker auto-ACKs
 //!    it (same branch as the INVITE, §17.1.1.3, riding the INVITE's preloaded
-//!    outbound-proxy Route) and immediately forks the reroute INVITE toward the
+//!    outbound-proxy Route) and immediately forks the second-target INVITE toward the
 //!    SAME next hop (the proxy).
 //! 2. **BYE/BYE glare** — the worker's teardown BYE (relaying alice's) crosses
 //!    the callee's own BYE on the b-leg; both directions of the SAME Call-ID
@@ -20,6 +20,9 @@
 //! every worker/proxy transaction toward a shared next hop presents a distinct
 //! top-Via branch, and each response correlates (per §17.1.3, BY BRANCH) to
 //! exactly the client transaction that sent it.
+//!
+//! Beyond the failover sweep: relay-bind correlation across a retarget and a BYE glare, with no
+//! node fault.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,17 +37,17 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 
 const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
-const CHARLIE: &str = "127.0.0.1:5071"; // reroute target
+const CHARLIE: &str = "127.0.0.1:5071"; // the second target, after a failure
 const PROXY: &str = "127.0.0.1:5080";
 const B1: &str = "127.0.0.1:5091";
 
-/// Failover-capable decision: route to bob, and on failure reroute to charlie.
-fn reroute_decision() -> Arc<dyn CallDecisionEngine> {
+/// Failover-capable decision: route to bob, and on failure route to charlie.
+fn retarget_decision() -> Arc<dyn CallDecisionEngine> {
     Arc::new(
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.callback_context = Some("via-lb-486-reroute-ctx".into());
+                r.callback_context = Some("via-lb-486-retarget-ctx".into());
                 NewCallResponse::Route(r)
             })
             .on_failure(|_| {
@@ -56,16 +59,16 @@ fn reroute_decision() -> Arc<dyn CallDecisionEngine> {
     )
 }
 
-/// **486-then-reroute.** Bob rejects
-/// with 486; the worker ACKs the failed b-leg and forks the reroute INVITE to
+/// **486-then-retarget.** Bob rejects
+/// with 486; the worker ACKs the failed b-leg and forks the second-target INVITE to
 /// charlie through the same proxy hop; alice is bridged to charlie. The
 /// recorded traces (alice, bob, charlie, proxy, worker) must pass the full RFC
 /// audit — in particular `response-echoes-request-via` response↔transaction correlation at the
-/// relay bind that carried the 486-leg INVITE, its ACK, and the reroute INVITE
+/// relay bind that carried the 486-leg INVITE, its ACK, and the second-target INVITE
 /// back to back.
 #[tokio::test(start_paused = true)]
-async fn reroute_on_486_via_lb_keeps_response_txn_correlation() {
-    let mut fh = FailoverHarness::new("via-lb-486-reroute", &["b1"]);
+async fn retarget_on_486_via_lb_keeps_response_txn_correlation() {
+    let mut fh = FailoverHarness::new("via-lb-486-retarget", &["b1"]);
 
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -80,7 +83,7 @@ async fn reroute_on_486_via_lb_keeps_response_txn_correlation() {
             &[],
             ("127.0.0.1", 5070),
             ("127.0.0.1", 5080),
-            reroute_decision(),
+            retarget_decision(),
             Arc::new(NoopLimiter),
         )
         .await;
@@ -97,11 +100,11 @@ async fn reroute_on_486_via_lb_keeps_response_txn_correlation() {
     bob_uas.respond(486, "Busy Here").await;
     bob.receive_absorbing("ACK", &["INVITE"]).await;
 
-    // ── The reroute INVITE reaches charlie via the proxy; alice is bridged ───
+    // ── The second-target INVITE reaches charlie via the proxy; alice is bridged ───
     let mut charlie_uas = charlie.receive("INVITE").await;
     charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
     let confirmed = call.expect(200).await;
-    assert_eq!(confirmed.status(), 200, "caller bridged to the reroute target");
+    assert_eq!(confirmed.status(), 200, "caller bridged to the second target");
     let mut dialog = call.ack().await;
     charlie.receive("ACK").await;
 
@@ -112,7 +115,7 @@ async fn reroute_on_486_via_lb_keeps_response_txn_correlation() {
 
     // Full per-bind suite — including the relay bind's own client-transaction
     // correlation (`response-echoes-request-via`), which the Drop-time endpoint gate skips.
-    fh.assert_full_rfc_clean("via-lb-486-reroute");
+    fh.assert_full_rfc_clean("via-lb-486-retarget");
     drop(proxy);
 }
 

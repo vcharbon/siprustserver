@@ -8,6 +8,9 @@
 //! (ADR-0055 §7): once healed, the call ends cleanly from the union of both —
 //! every dialog BYEd at the higher of both CSeqs, one CDR — whatever the
 //! round reached at the copy and whatever the primary holds of its INFO.
+//!
+//! Beyond the failover sweep: re-INVITE rounds crossing between a misrouted copy and its live
+//! primary.
 
 use std::time::Duration;
 

@@ -13,6 +13,9 @@
 //!   alice ─INFO (copy)─▶ SURVIVOR        (absorbed by the seeded server transaction)
 //!   timer fires on SURVIVOR ─202─▶ alice
 //! ```
+//!
+//! Beyond the failover sweep: a request a service holds for a timer-driven final, answered by the
+//! takeover copy.
 
 use std::time::Duration;
 

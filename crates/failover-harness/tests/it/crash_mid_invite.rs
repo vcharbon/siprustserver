@@ -1,6 +1,9 @@
 //! A crash of the primary mid-INVITE, while the callee rings: the call
 //! completes through the backup and leaves its one CDR once the dead primary
 //! departs.
+//!
+//! Beyond the failover sweep: the departure discharges the call after its BYE, and a fresh call
+//! follows on the survivor.
 
 use std::time::Duration;
 

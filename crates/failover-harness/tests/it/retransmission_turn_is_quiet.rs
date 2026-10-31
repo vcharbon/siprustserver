@@ -33,6 +33,9 @@
 //!
 //! The single-node twin (`b2bua-harness/tests/it/retransmission_turn_and_message_cap.rs`)
 //! pins the runaway-message cap's side of the same rule.
+//!
+//! Beyond the failover sweep: the 2xx ladder's rungs and re-ACKs as quiet turns, and the message
+//! cap.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -242,9 +245,7 @@ async fn reboot_and_reclaim(
 /// One run of the scenario: the kill lands after rung `k`.
 async fn own_2xx_ladder_across_a_kill(name: &str, k: usize) {
     let Cluster { mut fh, alice, bob, proxy, mut w_b1, mut w_b2 } = spawn_cluster(name).await;
-    // The one knowingly-unmet obligation is alice's, and it is the subject: her
-    // missing ACK is what keeps the ladder walking across the kill. The callee's
-    // 2xx is acknowledged by the give-up before its BYE (§13.2.2.4).
+    // alice breaks RFC 3261 §13.2.2.4: she never ACKs the 2xx, whose ladder is the target.
     fh.allow_rfc_violation(
         "no-ack-to-dialog-creating-2xx",
         "alice deliberately never ACKs — the ladder across a kill is under test",

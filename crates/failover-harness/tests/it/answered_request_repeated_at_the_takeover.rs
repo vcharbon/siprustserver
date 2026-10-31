@@ -11,6 +11,9 @@
 //!                 ✗ b1 killed before its 200 leaves ✗
 //!   alice ─INFO (Timer E)─▶ b2 ─200─▶ alice; bob sees one INFO
 //! ```
+//!
+//! Beyond the failover sweep: the copy repeats the 200 the dead primary never sent, and the callee
+//! sees one INFO.
 
 use std::time::Duration;
 

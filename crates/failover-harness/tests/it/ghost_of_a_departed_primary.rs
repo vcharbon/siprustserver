@@ -10,6 +10,9 @@
 //!   the replica's TTL passes      (B's reap ends it, with its CDR)
 //!   alice ──BYE──▶ B: 481         bob ──BYE──▶ B: 481
 //! ```
+//!
+//! Beyond the failover sweep: a quiet call of a primary departed for good, reaped at the replica
+//! TTL.
 
 use std::time::Duration;
 

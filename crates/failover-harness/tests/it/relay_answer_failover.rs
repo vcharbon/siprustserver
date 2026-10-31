@@ -12,6 +12,9 @@
 //!               ✗ primary killed, read dead ✗
 //!   bob ─200─▶ proxy ─▶ SURVIVOR ─200─▶ alice
 //! ```
+//!
+//! Beyond the failover sweep: an UPDATE or INFO answered after the kill, its takeover and
+//! transaction counts.
 
 use std::net::SocketAddr;
 use std::time::Duration;

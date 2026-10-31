@@ -30,7 +30,7 @@ Home: the new **`crates/failover-harness/`** crate (ADR-0013 §0) — `FailoverH
   is not computable in advance; the new `FailoverHarness::pump_until` +
   `Agent::try_receive_tolerating` drive a fine-grained sub-reap pump instead of a
   fixed `advance` (which would overshoot the 5 s dead-peer reap and tear the call
-  down). Happy-path foundation: `failover.rs::successful_long_call_with_as_generated_options`.
+  down). Happy-path foundation: `failover.rs::successful_long_call_with_b2bua_generated_options`.
   Teeth verified by dropping the reclaim keepalive re-arm (cell fails).
 - **Quiescence reclassification:** `Early`/`CANCEL` moved to v2-disruptive — a
   pending INVITE transaction is not replicated (only confirmed call context is),

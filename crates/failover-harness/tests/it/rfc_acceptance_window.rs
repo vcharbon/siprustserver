@@ -8,6 +8,8 @@
 //! alice's, declared through the `CseqPattern` DSL, so the SUT-side output is not
 //! what is being excused. Each call is fully torn down (BYE + 200) before the
 //! harness drops and runs its hard gate.
+//!
+//! Beyond the failover sweep: the harness's own window table and tier gate.
 
 use std::time::Duration;
 

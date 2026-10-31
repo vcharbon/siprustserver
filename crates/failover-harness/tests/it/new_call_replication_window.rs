@@ -6,6 +6,8 @@
 //! to answer (ADR-0047). The creation write precedes the routing decision, so
 //! a decision that takes a known time to answer is no part of the wait: the
 //! 100 leaves well inside the §17.2.1 bound, before the callee is dialled.
+//!
+//! Beyond the failover sweep: a new call's 100 leaves once its backup holds it.
 
 use std::sync::Arc;
 use std::time::Duration;

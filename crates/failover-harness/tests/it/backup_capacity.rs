@@ -16,6 +16,8 @@
 //!   alice INFO on call B          B's write goes to no backup
 //!   both calls end                one CDR each, nothing left behind
 //! ```
+//!
+//! Beyond the failover sweep: a replica refused above the backup's RSS ceiling, with no node fault.
 
 use std::time::Duration;
 

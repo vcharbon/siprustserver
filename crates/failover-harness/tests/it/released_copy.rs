@@ -24,6 +24,9 @@
 //! takeover log carries one hydration for the whole run), it counts the refusal
 //! instead, and the cluster still settles to exactly one CDR with no trace and
 //! clean memory on both nodes.
+//!
+//! Beyond the failover sweep: requests and responses naming a released takeover copy, and a handler
+//! panic on one.
 
 use std::net::SocketAddr;
 use std::time::Duration;

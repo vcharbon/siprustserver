@@ -15,6 +15,8 @@
 //!
 //! The probe reads a breaker flip within one probe round ([`PROBE_ROUND`]).
 //! Every call ends with one CDR, the refused one included.
+//!
+//! Beyond the failover sweep: new-call placement under a backend outage or a refusing worker.
 
 use std::sync::Arc;
 use std::time::Duration;

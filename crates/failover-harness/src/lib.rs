@@ -6,7 +6,8 @@
 //! Layers:
 //! - `harness` — the [`FailoverHarness`] engine + [`ReplicatedB2buaSut`] +
 //!   [`ProxySut`] (moved here from `b2bua-harness`; the canonical 5-step failover
-//!   scenario and the fault matrix live in `tests/it/failover.rs`).
+//!   scenario lives in `tests/it/failover.rs`, the fault matrix in
+//!   `tests/it/failover_matrix.rs`).
 //! - [`scenario`] — the `CallScenario` step-list + `SafePoint` DSL: a callflow
 //!   declares its steps and the quiescent points where an injected crash/recovery
 //!   is expected to be *transparent*.
@@ -185,6 +186,21 @@ pub async fn assert_call_lost_no_cdr(
         "limiter set of {call_ref} not released by the backup auto-cleanup: \
          current_total = {total}"
     );
+}
+
+/// A terminated call left exactly `cdrs` CDRs across `nodes` and nothing else:
+/// no node serves it or holds a replica of it, and every node's per-call memory
+/// is clean ([`assert_call_fully_released`]). `why` names the scenario's reason
+/// for that count. For a cluster without a limiter, or before its limiter check.
+pub async fn assert_call_ended(
+    nodes: &[&ReplicatedB2buaSut],
+    call_ref: &str,
+    cdrs: usize,
+    why: &str,
+) {
+    assert_call_fully_released(nodes, call_ref).await;
+    let got = total_cdrs_for(nodes, call_ref);
+    assert_eq!(got, cdrs, "{call_ref}: expected {cdrs} CDR(s) ({why}); got {got}");
 }
 
 /// **High-level cluster invariant**: a terminated call left **no trace anywhere** —

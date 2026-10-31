@@ -16,6 +16,8 @@
 //! and a BYE, as a 2xx no node holds does (ADR-0055 §4), numbered from the 2xx
 //! alone; the callee answers the BYE into its ended dialog with a 481
 //! (ADR-0055 §11).
+//!
+//! Beyond the failover sweep: a re-INVITE round answered or refused before it replicated.
 
 use std::time::Duration;
 

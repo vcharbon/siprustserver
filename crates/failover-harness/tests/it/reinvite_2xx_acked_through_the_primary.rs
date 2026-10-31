@@ -20,6 +20,9 @@
 //!
 //! The ACK reaching the backup instead is `stood_down_round` (mid-round write)
 //! and `call_terminate_on_backup::c11_reinvite_on_backup__primary_alive__no_terminal`.
+//!
+//! Beyond the failover sweep: a re-INVITE 2xx a misrouted copy relayed is ACKed once, through the
+//! live primary.
 
 use std::time::Duration;
 

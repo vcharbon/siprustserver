@@ -12,6 +12,8 @@
 //! The service under test waits in `Awaiting` for the answer and tells the
 //! caller what it read with an in-dialog INFO, so the caller's inbox is the
 //! observation: no INFO means the call is stranded in `Awaiting`.
+//!
+//! Beyond the failover sweep: service requests in flight at the kill, sent again by the next owner.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

@@ -15,6 +15,8 @@
 //!   bob ─200─▶ proxy ─▶ b3 (takes the call over) ─200─▶ alice ─ACK─▶ b3 ─ACK─▶ bob
 //!   alice ─BYE─▶ b3 ─BYE─▶ bob; b1 reboots and discharges the call: one CDR
 //! ```
+//!
+//! Beyond the failover sweep: three workers, and the backup the callee's answer reaches.
 
 use std::sync::Arc;
 use std::time::Duration;

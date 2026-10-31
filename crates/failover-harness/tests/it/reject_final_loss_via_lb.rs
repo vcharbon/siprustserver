@@ -23,6 +23,8 @@
 //! proves the full recovery loop: Timer G re-sends at ~500 ms → the proxy
 //! relays the retransmit → alice receives + ACKs → the ACK crosses the proxy
 //! back to the worker → Timer G is quenched (no third copy) → the call reaps.
+//!
+//! Beyond the failover sweep: a lone worker's Timer G recovery of a lost final, with no node fault.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

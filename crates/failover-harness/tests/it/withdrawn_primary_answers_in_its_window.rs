@@ -40,6 +40,8 @@
 //! it gracefully (the endpoint stays in the slice as `terminating`, the peers
 //! keep pulling it through its drain, no kill at all — ADR-0031 case 1), C makes
 //! the process die WITH its endpoint. The answer reaches the caller in all three.
+//!
+//! Beyond the failover sweep: a removed primary answering inside its window draws no second final.
 
 use b2bua::store::envelope;
 use std::net::SocketAddr;

@@ -21,6 +21,9 @@
 //! is down, so the backup never sees that delete — the primary's changelog
 //! keeps one entry per callRef — and holds the challenged call, at a higher
 //! `(p,b)` than the retry's first versions, when the retry's `Put` lands.
+//!
+//! Beyond the failover sweep: a retry after a challenge, and changelog compaction across a
+//! partition.
 
 use b2bua::store::{envelope, Enveloped};
 use std::time::Duration;

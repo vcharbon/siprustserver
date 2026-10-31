@@ -26,6 +26,8 @@
 //!              and a replacement of the same ordinal reclaims the call
 //!   alice ──BYE──▶ proxy ──▶ replacement ──▶ 200
 //! ```
+//!
+//! Beyond the failover sweep: a drain waits to its grace for a backup that reports nothing.
 
 use std::time::Duration;
 

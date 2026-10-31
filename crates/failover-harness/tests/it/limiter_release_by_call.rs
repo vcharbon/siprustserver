@@ -1,22 +1,22 @@
 //! A call's limiter holds are released exactly once across a crash, whatever
 //! copy of the call the releasing node holds.
 //!
-//! Two nodes can each release one call: the crashed primary before it died
-//! and the backup after the takeover (a fold's flush lost with the crash).
-//! The release is keyed by the call, so the second one frees nothing: a
-//! neighbour's hold on the same id is never taken. A deferred terminal of a
+//! Two nodes can each release one call: the crashed primary before it died and the backup after the
+//! takeover (a fold's flush lost with the crash). The release is keyed by the call, so the second
+//! one frees nothing: a neighbour's hold on the same id is never taken. A deferred terminal of a
 //! primary that departs is released once, by the backup's departure sweep.
 //!
-//! A counted call whose set lapsed while its primary was down (the lease is
-//! shorter than a silent takeover window) is counted again by the first
-//! refresh of the node that materialises it: the refresh re-registers the set.
-//! A call that sent an admit request releases its key on every end path, a
-//! late-landed initial admit included; a fold set whose admit no surviving
-//! copy of the call knows of lapses with its lease and is counted there.
+//! A counted call whose set lapsed while its primary was down (the lease is shorter than a silent
+//! takeover window) is counted again by the first refresh of the node that materialises it: the
+//! refresh re-registers the set. A call that sent an admit request releases its key on every end
+//! path, a late-landed initial admit included; a fold set whose admit no surviving copy of the call
+//! knows of lapses with its lease and is counted there.
 //!
 //! Each id carries one **witness** hold admitted outside the call, so a
 //! surplus release reads below the witness instead of vanishing under the
 //! store's floor at 0.
+//!
+//! Beyond the failover sweep: each limiter set released once across folds, lapses and reaps.
 
 use call::LimiterEntry;
 use std::net::SocketAddr;
@@ -46,7 +46,7 @@ const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
-/// The target a release reroute dials.
+/// The target a release's new route dials.
 const MEDIA: &str = "127.0.0.1:5090";
 const PROXY: &str = "127.0.0.1:5080";
 const B1: &str = "127.0.0.1:5091";
@@ -202,11 +202,11 @@ pub(crate) async fn spawn_workers(
 }
 
 /// The route toward bob holding `ids`, whose duration cap raises the
-/// subscribed release consult; the reroute dials the new target with
-/// `reroute`.
-fn release_reroute_decision(
+/// subscribed release consult; the new route dials the new target with
+/// `retarget`.
+fn release_retarget_decision(
     ids: &'static [&'static str],
-    reroute: &'static [&'static str],
+    retarget: &'static [&'static str],
 ) -> Arc<dyn CallDecisionEngine> {
     Arc::new(
         ScriptedDecisionEngine::builder()
@@ -222,30 +222,30 @@ fn release_reroute_decision(
             .on_release(move |_| {
                 let mut r = route_to("127.0.0.1", 5090);
                 r.new_ruri = Some(format!("sip:{MEDIA}"));
-                r.call_limiter = limiters(reroute);
+                r.call_limiter = limiters(retarget);
                 ReleaseOutcome::Respond(CallReleaseResponse::Route(r))
             })
             .build(),
     )
 }
 
-/// The primary crashes between a reroute fold and its replication flush. The
+/// The primary crashes between a new-route fold and its replication flush. The
 /// established call holds `[x, y]`, replicated to the backup; the replication
-/// fabric is then cut and the duration cap reroutes the call to `[y, z]`: the
+/// fabric is then cut and the duration cap retargets the call to `[y, z]`: the
 /// fold replaces the call's set on the limiter and dials the new target, and
 /// its flush never lands. The primary crashes. The caller's BYE fails over to
 /// the backup, whose copy still says `[x, y]`; its lossy cleanup releases the
 /// call by its limiter key, which frees what the limiter holds for it, `y` and `z`,
 /// and nothing of `x`: the witness on `x` is intact and the call drains to 0.
 #[tokio::test(start_paused = true)]
-async fn a_crash_between_a_reroute_fold_and_its_flush_releases_the_call_once() {
+async fn a_crash_between_a_retarget_fold_and_its_flush_releases_the_call_once() {
     let mut fh = ha_harness("limiter-release-by-call-fold-flush-lost");
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
     let media = fh.agent("media", MEDIA).await;
     let rig = LimiterRig::serve().await;
     let (proxy, mut w_b1, mut w_b2) =
-        spawn_workers(&mut fh, &rig, release_reroute_decision(&["x", "y"], &["y", "z"])).await;
+        spawn_workers(&mut fh, &rig, release_retarget_decision(&["x", "y"], &["y", "z"])).await;
 
     // ── establish A↔B on the primary; replicate ──────────────────────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
@@ -264,11 +264,11 @@ async fn a_crash_between_a_reroute_fold_and_its_flush_releases_the_call_once() {
     // ── the fold's flush will never land: cut the replication fabric ─────
     fh.partition(&primary_ord, backup_ord);
 
-    // ── the duration cap reroutes the call: [x, y] → [y, z] ──────────────
+    // ── the duration cap retargets the call: [x, y] → [y, z] ──────────────
     fh.advance(Duration::from_secs(61)).await;
     assert!(
         media.try_receive_tolerating("INVITE", &[]).await.is_some(),
-        "the reroute dials the new target",
+        "the new route dials the new target",
     );
     assert_eq!(rig.holds(), [0, 1, 1], "the fold replaced the call's set with y and z");
 
@@ -818,7 +818,7 @@ async fn a_call_whose_set_lapsed_while_its_primary_was_down_is_counted_again_on_
 
 /// A fold admitted for a call that sent no admit before, then a crash before
 /// the fold's flush. The initial route states no limiter, so the call is
-/// uncounted and owes nothing; the duration cap reroutes it to `[y, z]`, which
+/// uncounted and owes nothing; the duration cap retargets it to `[y, z]`, which
 /// the fold admits; the primary crashes with the flush unlanded. The backup's
 /// copy owes nothing, so the takeover never refreshes or releases: the set
 /// lapses with its lease and is counted there (ADR-0040 decision 5).
@@ -830,7 +830,7 @@ async fn a_fold_set_of_an_uncounted_call_lost_with_the_primary_lapses_with_its_l
     let media = fh.agent("media", MEDIA).await;
     let rig = LimiterRig::serve_with(LimiterConfig::default()).await;
     let (proxy, mut w_b1, mut w_b2) =
-        spawn_workers(&mut fh, &rig, release_reroute_decision(&[], &["y", "z"])).await;
+        spawn_workers(&mut fh, &rig, release_retarget_decision(&[], &["y", "z"])).await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -848,10 +848,10 @@ async fn a_fold_set_of_an_uncounted_call_lost_with_the_primary_lapses_with_its_l
     // ── the fold's flush will never land: cut the replication fabric ─────
     fh.partition(&primary_ord, backup_ord);
 
-    // ── the duration cap reroutes the uncounted call: the fold admits [y, z]
+    // ── the duration cap retargets the uncounted call: the fold admits [y, z]
     let mut waited = 0;
     while media.try_receive_tolerating("INVITE", &[]).await.is_none() {
-        assert!(waited < 61, "the reroute dials the new target");
+        assert!(waited < 61, "the new route dials the new target");
         fh.advance(Duration::from_secs(1)).await;
         rig.refresh_witnesses();
         waited += 1;

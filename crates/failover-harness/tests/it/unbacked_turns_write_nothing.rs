@@ -1,6 +1,8 @@
 //! A call whose backup refused its replica has no backup for life (ADR-0055
 //! §3): once the refusal is in, its turns hand nothing to replication, so no
 //! turn of it offers a write the backup could apply.
+//!
+//! Beyond the failover sweep: the turn records of a call with no backup.
 
 use failover_harness::cluster::ClusterRecipe;
 use failover_harness::sweep::catalogue::Basic;

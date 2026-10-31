@@ -8,6 +8,9 @@
 //! Completed transaction that absorbs her ACK (§17.2.1). The ACK of the
 //! callee's 486 died held with the node too (ADR-0055 §3): the backup ACKs
 //! the 486 the callee repeats for want of it (§17.1.1.2).
+//!
+//! Beyond the failover sweep: equal to `reject/applied/primary-killed/t2-applied`, kept as the
+//! sweep is not in the default lane.
 
 use std::time::Duration;
 

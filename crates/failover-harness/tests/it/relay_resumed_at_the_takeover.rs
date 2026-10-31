@@ -19,6 +19,8 @@
 //!   alice ─REQ─▶ SURVIVOR                    (absorbed by the seeded server transaction)
 //!                SURVIVOR ─REQ (same branch)─▶ bob ─200 (repeated)─▶ SURVIVOR ─200─▶ alice
 //! ```
+//!
+//! Beyond the failover sweep: a replicated relay resumed on the peer's re-send, under its branch.
 
 use std::net::SocketAddr;
 use std::time::Duration;

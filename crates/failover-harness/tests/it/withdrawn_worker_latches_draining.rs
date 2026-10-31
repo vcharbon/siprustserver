@@ -15,6 +15,8 @@
 //!         orchestrator starts and readmits a replacement, kills the elder
 //!   alice ──BYE──▶ proxy ──▶ replacement ──▶ 200
 //! ```
+//!
+//! Beyond the failover sweep: a withdrawn worker latches Draining on its own, with no SIGTERM.
 
 use std::time::Duration;
 

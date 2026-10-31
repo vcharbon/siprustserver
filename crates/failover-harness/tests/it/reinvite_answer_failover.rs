@@ -14,6 +14,9 @@
 //! what takes the call over; announced, the departure sweep takes over the call
 //! whose round is in flight at once (ADR-0047), and the 200 then reaches the
 //! copy already live, whose seeded transaction takes it.
+//!
+//! Beyond the failover sweep: a re-INVITE answered after the kill, its re-send branch and the
+//! takeover count.
 
 use std::time::Duration;
 

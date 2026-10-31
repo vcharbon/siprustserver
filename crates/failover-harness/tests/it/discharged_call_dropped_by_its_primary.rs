@@ -15,6 +15,8 @@
 //!   alice ──BYE──▶ proxy ──▶ B   (takeover copy: ends the call, discharges it)
 //!   B's delete ──▶ P / P'        (the live copy there is dropped)
 //! ```
+//!
+//! Beyond the failover sweep: a withdrawn or replaced primary drops the call its backup discharged.
 
 use std::time::Duration;
 

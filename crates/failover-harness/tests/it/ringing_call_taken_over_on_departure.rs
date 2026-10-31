@@ -10,6 +10,8 @@
 //! INVITE re-sent once so the callee resends its latest one, §17.2.1). An
 //! established call of the same node, with nothing in flight, is not taken
 //! over: it stays reactive (ADR-0014 §1).
+//!
+//! Beyond the failover sweep: ringing calls ended at their replicated deadline after a departure.
 
 use b2bua::store::envelope;
 use std::sync::Arc;

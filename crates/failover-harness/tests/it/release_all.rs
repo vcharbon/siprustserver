@@ -16,6 +16,8 @@
 //! The parties are left holding a dialog the SUT dropped: that is what the
 //! test asserts. Each ends its side with a BYE, and the `481` terminates it
 //! (RFC 3261 §12.2.1.2).
+//!
+//! Beyond the failover sweep: the operator's release-all and the 481s that follow it.
 
 use std::time::Duration;
 

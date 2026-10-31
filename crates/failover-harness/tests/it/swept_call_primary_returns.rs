@@ -8,6 +8,9 @@
 //! routable, or the backup's copy wrote before the node came back, and
 //! whether the backup learns of the node's return from its reclaim write or
 //! from its delete of the call.
+//!
+//! Beyond the failover sweep: a swept call whose node returns: the copy stands down and the call
+//! ends once.
 
 use std::net::SocketAddr;
 use std::time::Duration;

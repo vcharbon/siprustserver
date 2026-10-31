@@ -10,6 +10,8 @@
 //! backup, takes the call over afresh: the round completes end to end; the
 //! call ends with the caller's BYE and one CDR. The twin of
 //! `stood_down_round.rs`, which tells no verdict.
+//!
+//! Beyond the failover sweep: a live primary read dead and alive again, with replication intact.
 
 use std::time::Duration;
 

@@ -8,19 +8,22 @@
 //!   alice ─INVITE─▶ proxy ─▶ primary ──(decision in flight)       backup: the born call
 //!   alice ◀──100── proxy ◀── primary
 //!                            ✗ primary killed ✗
-//!   departure announced → backup takes the call over, answers 503 → alice ACKs
-//!   the primary departed: the backup writes the one CDR and deletes the call
-//!   primary restarts: nothing of the call is left to reclaim
+//!   departure announced → backup takes the call over, asks the decision again
+//!   bob dialled, answers; alice ACKs and hangs up; one CDR, nothing left
 //! ```
 //!
-//! The caller gets a 503 with no Retry-After (its next hop is the proxy, which
-//! places a retry on a live worker at once); the decision is never asked
-//! again, and nothing reaches the callee. Three variants: a CANCEL with the
+//! The node holding the call next asks the decision again, once, and the call
+//! proceeds with the caller never refused: the backup on the departure, or a
+//! node restarted in place on its reclaim. Variants: a CANCEL with the
 //! departure unannounced is answered by the backup the CANCEL takes the call
-//! over to; a primary restarted in place, the departure never announced,
-//! reclaims the call and answers it 503 itself; and a caller retransmission the
-//! proxy placed on the survivor as a call of its own before the departure is
-//! announced is not answered on that call's transaction.
+//! over to, and the callee is never dialled; a caller retransmission the proxy
+//! placed on the survivor as a call of its own is not answered for the
+//! departed call; a removal with a replacement dials the callee once; a
+//! removed process whose backup never received the call refuses the caller
+//! 503 itself.
+//!
+//! Beyond the failover sweep: a decision in flight at the kill, asked again once, under removals
+//! and restarts.
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -530,6 +533,7 @@ async fn an_undecided_call_of_a_node_that_never_returns_is_discharged_by_its_bac
     assert_eq!(survivor.metrics().repl_terminal_lost_total(), 0, "no ended call is lost");
     assert_eq!(total_cdrs_for(&[survivor], &call_ref), 1, "the backup writes the one CDR");
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    assert_call_fully_released(&[&w_b1, &w_b2], &call_ref).await;
     drop(proxy);
 }
 

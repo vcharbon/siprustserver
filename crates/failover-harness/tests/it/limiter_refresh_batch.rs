@@ -6,6 +6,8 @@
 //! keys, instead of one request per call.
 //!
 //! Every call holds three limiters.
+//!
+//! Beyond the failover sweep: the limiter refreshes of a bulk reclaim, sent in batches.
 
 use call::LimiterEntry;
 use std::net::SocketAddr;

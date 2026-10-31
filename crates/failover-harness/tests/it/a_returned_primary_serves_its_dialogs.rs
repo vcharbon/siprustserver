@@ -14,6 +14,9 @@
 //! ```
 //!
 //! Every cell ends with the caller's BYE, one CDR and clean memory.
+//!
+//! Beyond the failover sweep: the routing of dialogs and new calls to a worker just after it
+//! returns.
 
 use std::time::Duration;
 

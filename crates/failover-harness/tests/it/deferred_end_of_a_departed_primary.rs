@@ -11,6 +11,9 @@
 //!   alice ──BYE──▶ proxy ──▶ B   (takeover copy: ends the call, defers)
 //!   P's endpoint leaves the set  (B's departure sweep discharges the call)
 //! ```
+//!
+//! Beyond the failover sweep: the deferred end held until the departure, and the two-CDR residual
+//! window.
 
 use std::time::Duration;
 

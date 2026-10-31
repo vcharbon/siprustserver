@@ -12,6 +12,9 @@
 //! - the primary ends the call while the copy holds the callee's round: the
 //!   copy keeps the round until its final reaches the callee, through the
 //!   primary's writes and through its delete of the call.
+//!
+//! Beyond the failover sweep: a copy's ending crossing a round its live primary holds, under a
+//! one-way stall.
 
 use std::time::Duration;
 

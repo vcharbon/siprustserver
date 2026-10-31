@@ -6,6 +6,8 @@
 //! relinquished (ADR-0047 D7). The callee's 200, which still reaches the
 //! backup, takes the call over afresh: the round completes end to end and the
 //! call settles to one CDR.
+//!
+//! Beyond the failover sweep: a copy stood down mid-round takes the call over afresh.
 
 use std::time::Duration;
 

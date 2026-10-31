@@ -7,6 +7,8 @@
 //! the copy stands down on the primary's write: one owner of the answer, the
 //! primary, which sends the consult again and relays the 486 to the caller as
 //! the answer says (ADR-0039 decision 5).
+//!
+//! Beyond the failover sweep: one consult, sent by the primary that takes its copy's write.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
