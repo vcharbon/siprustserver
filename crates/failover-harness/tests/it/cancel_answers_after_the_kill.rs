@@ -8,23 +8,18 @@
 //! on the INVITE transaction it seeded and CANCELs the callee: nothing but
 //! the 487 ends the caller's INVITE, and the callee rings no more.
 //!
-//! Beyond the failover sweep: nothing but the 487 ends the caller's INVITE, and a CANCEL during the
-//! decision dials nobody.
+//! Beyond the failover sweep: nothing but the 487 ends the caller's INVITE.
 
 use std::time::Duration;
 
-use b2bua::decision::ScriptedDecisionEngine;
 use failover_harness::cluster::{Cluster, ClusterRecipe};
 use failover_harness::sweep::{ALICE, BOB};
-use failover_harness::{
-    assert_call_ended, total_cdrs_for, FailoverHarness, Incident, TurnAt, TurnPoint,
-};
+use failover_harness::{total_cdrs_for, TurnAt, TurnPoint};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser};
 
 use crate::call_terminate_on_backup::OFFER;
-use crate::departure_support::{bring_up_deciding, kill_announced, placed, CountedDecision};
-use crate::inflight_resend::{last_request_sent, split_mut, survivor_of};
+use crate::inflight_resend::last_request_sent;
 
 #[tokio::test(start_paused = true)]
 async fn a_cancel_lost_with_its_node_is_answered_by_the_backup_and_cancels_the_callee() {
@@ -105,47 +100,4 @@ async fn cancel_lost_with_its_node(name: &str, point: TurnPoint) {
     );
     cluster.fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     cluster.fh.assert_sip_rfc_clean(name);
-}
-
-/// The same loss before the decision: the caller CANCELs a call still asking
-/// its decision, and its node dies holding the answers. The backup asks the
-/// decision again (ADR-0055 §11); the caller's repeated CANCEL reaches it, is
-/// answered 200 and 487, and the decision that returns dials nobody.
-#[tokio::test(start_paused = true)]
-async fn an_undecided_cancel_lost_with_its_node_is_answered_by_the_backup_which_dials_nobody() {
-    let name = "undecided-cancel-answers-after-the-kill";
-    let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
-    let alice = fh.agent("alice", ALICE).await;
-    let bob = fh.agent("bob", BOB).await;
-    let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
-    let (decision, _consults) = CountedDecision::counting(route, Duration::from_secs(3));
-    let (proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
-
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
-    call.expect(100).await;
-    let (pri_ord, call_ref) = placed(&fh, &w_b1, &w_b2).await;
-    let mut cancel = call.cancel().await;
-    fh.advance(Duration::from_millis(20)).await;
-    let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
-    fh.strike(Incident::PrimaryKilled);
-    kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
-
-    let (wire, dst) = last_request_sent(&fh, alice.addr(), &Method::Cancel);
-    alice.try_send_datagram(&wire, dst).await.expect("the caller's repeat leaves");
-    cancel.expect(200).await;
-    call.expect(487).await;
-    fh.advance(Duration::from_secs(10)).await;
-    assert!(!fh.sip_entries().iter().any(|e| e.to == bob.addr()), "the callee is never dialled");
-
-    let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
-    let released = fh
-        .settle_terminal(async || {
-            survivor.memory_clean() && !survivor.holds_any_trace(&call_ref).await
-        })
-        .await;
-    assert!(released, "nothing of the call is left live or stored");
-    assert_call_ended(&[&w_b1, &w_b2], &call_ref, 1, "the backup writes the one CDR").await;
-    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
-    fh.assert_sip_rfc_clean(name);
-    drop(proxy);
 }

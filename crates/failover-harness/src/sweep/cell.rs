@@ -276,20 +276,7 @@ fn cut_facts(
             &living,
             cluster.node(&placement.primary).sip_addr(),
         ),
-        dialled_after_cancel: super::after_cancel::dialled_after_the_callers_487(
-            &capture,
-            super::ALICE.parse().expect("the caller's address"),
-            &callees(),
-        ),
     }
-}
-
-/// The parties a call dials.
-fn callees() -> Vec<std::net::SocketAddr> {
-    [super::BOB, super::BOB2, super::CHARLIE, super::MEDIA]
-        .iter()
-        .filter_map(|a| a.parse().ok())
-        .collect()
 }
 
 /// The call the cell placed: the first that took a turn.

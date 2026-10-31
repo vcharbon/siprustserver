@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use call::{Call, CallModelState, TerminationCause};
 
+use super::cancel_in_consult::consult_writing_its_cancel;
 use super::interpret::process_result;
 use super::RouterCtx;
 use crate::effects::HandlerResult;
@@ -175,8 +176,8 @@ pub(super) async fn reask_turn(ctx: &Arc<RouterCtx>, call_ref: &str) {
         &ctx.clock,
         now_ms,
         &cancelled,
-    )
-    .await;
+    );
+    let consult = consult_writing_its_cancel(ctx, call_ref, &call, &caller, consult).await;
     let (handled, recorded) = match consult {
         Consulted::Applied(handled) => (*handled, false),
         // The caller CANCELed during the round trip: the decision is recorded,

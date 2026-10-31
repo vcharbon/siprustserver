@@ -5,8 +5,8 @@ use scenario_harness::dialogs::{DIALOG_CSEQ_BACKWARDS, DIALOG_ENDED};
 
 use super::copies::{
     cancels_an_answered_invite, non_2xx_after_another_final, non_2xx_after_the_dead_owners_2xx,
-    provisional_after_a_final, second_bye_at_one_cseq, two_xx_after_a_487, RULE_EARLY_BYE,
-    RULE_NO_200_AFTER_CANCEL, RULE_TAG_CONSISTENCY, RULE_TAKEN_FINAL, RULE_UNACKED_NON_2XX,
+    provisional_after_a_final, second_bye_at_one_cseq, RULE_EARLY_BYE, RULE_NO_200_AFTER_CANCEL,
+    RULE_TAG_CONSISTENCY, RULE_TAKEN_FINAL, RULE_UNACKED_NON_2XX,
 };
 use super::stall_cseq::reuses_a_stall_cseq;
 use super::stall_repeat::{reason_only_cancel_repeat, RULE_RUNG_BYTE_IDENTICAL};
@@ -31,7 +31,7 @@ pub(super) const RESEND_ROWS: &[&str] = &[
 ];
 /// The rows that accept only what follows a routing decision a node asked
 /// again.
-pub(super) const REASK_ROWS: &[&str] = &["W-off-stale-reask", "W-kill-reask-after-cancel-answer"];
+pub(super) const REASK_ROWS: &[&str] = &["W-off-stale-reask"];
 /// The rows that accept only a dialog two workers each ended with a BYE.
 pub(super) const TWO_SERVER_ROWS: &[&str] = &["W-off-reboot-two-servers"];
 /// The re-INVITE rule of RFC 3261 §14.1: no re-INVITE while one is in progress.
@@ -352,31 +352,6 @@ pub static TABLE: &[Row] = &[
         },
         closes_when_over: false,
         witness: witness("prack", SyncLevel::Off, StalledKilled, 1, TurnPoint::Left),
-    },
-    Row {
-        id: "W-kill-reask-after-cancel",
-        tier: Tier::Degraded,
-        opens: Opens::any(PRIMARY_KILLS),
-        covers: "the caller's CANCEL answered while her call was undecided, its record lost \
-                 with the primary: the backup asks the decision again and dials the callee \
-                 after her 487",
-        kind: Kind::Outcome(outcome::reask_after_cancel),
-        closes_when_over: false,
-        witness: None,
-    },
-    Row {
-        id: "W-kill-reask-after-cancel-answer",
-        tier: Tier::Degraded,
-        opens: Opens::any(PRIMARY_KILLS),
-        covers: "the answer of the callee dialled after the caller's 487, which reaches her \
-                 completed INVITE",
-        kind: Kind::Rfc {
-            rules: &[RULE_TAKEN_FINAL],
-            once_per_dialog: false,
-            admits: Some(|i, capture, _| two_xx_after_a_487(i, capture)),
-        },
-        closes_when_over: false,
-        witness: None,
     },
     Row {
         id: "W-stale-resend-cseq",

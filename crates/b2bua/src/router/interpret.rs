@@ -274,7 +274,7 @@ pub(super) async fn process_result(
 
 /// Queue `entry` on `call_ref`'s outbox, waiting for the call's current
 /// change-log entry.
-async fn push(ctx: &Arc<RouterCtx>, call_ref: &str, entry: TurnEntry) {
+pub(super) async fn push(ctx: &Arc<RouterCtx>, call_ref: &str, entry: TurnEntry) {
     let wait = ctx.state.hold_target(call_ref);
     ctx.outboxes.push(call_ref, wait, Box::new(|released| Box::pin(entry.run(released)))).await;
 }
@@ -331,6 +331,11 @@ pub(super) struct TurnKind {
 }
 
 impl TurnKind {
+    /// A turn taken on a SIP request that started nothing off the node.
+    pub(super) fn on_request() -> Self {
+        Self { on_request: true, ..Self::default() }
+    }
+
     fn of(result: &HandlerResult, received: Option<&SipRequest>) -> Self {
         let called_out = result
             .effects

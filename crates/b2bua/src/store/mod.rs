@@ -134,6 +134,10 @@ struct Inner {
     /// waiting INVITE holds ([`retain_setup_cancelled`](Self::retain_setup_cancelled)).
     /// The marked CSeqs of each `callRef`; no entry is empty.
     setup_cancelled: HashMap<String, Vec<u32>>,
+    /// The initial INVITEs whose turn awaits their setup-CANCEL mark while
+    /// their decision runs, by `(callRef, INVITE CSeq)`: the mark wakes it.
+    /// An entry lives as long as its `SetupCancelWatch`.
+    setup_cancel_watches: HashMap<(String, u32), Arc<tokio::sync::Notify>>,
     /// Resident calls that run uncounted (`CallLimiterState::runs_uncounted`):
     /// moved by every insertion, replacement and removal of `calls`, so it is
     /// exact at every write, and published as `b2bua_limiter_uncounted_calls`.
@@ -710,13 +714,6 @@ impl CallState {
     /// `assert_fully_reaped` 4th invariant — ADR-0020).
     pub fn touched_count(&self) -> usize {
         self.locked().touched.len()
-    }
-
-    /// The number of live setup-CANCEL marks. Cleared by every release of the
-    /// call that no waiting INVITE outlives; a residue after teardown is a
-    /// mark leak (the harness `assert_fully_reaped` 5th invariant).
-    pub fn setup_cancelled_count(&self) -> usize {
-        self.locked().setup_cancelled.values().map(Vec::len).sum()
     }
 
     /// Push the store's map lengths into the memory-attribution gauges (one

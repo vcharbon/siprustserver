@@ -38,9 +38,9 @@ pub fn cancelled_setup(
 pub enum Consulted {
     /// The decision applied and the services seeded: the turn's result.
     Applied(Box<HandlerResult>),
-    /// The caller CANCELed while the consult ran (the transaction layer
-    /// already answered 487): the call as the decision left it, before any
-    /// service's `init`, its effects never sent.
+    /// The caller CANCELed while the consult ran (the transaction layer took
+    /// its 487): the call as the decision left it, before any service's
+    /// `init`, its effects never sent.
     Cancelled(Box<Call>),
 }
 

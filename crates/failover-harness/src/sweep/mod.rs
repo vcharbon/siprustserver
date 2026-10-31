@@ -25,7 +25,6 @@
 //! window ([`window`]): a cell cut between two sends of one turn's effects
 //! is judged like any other and counted apart.
 
-mod after_cancel;
 mod aftermath;
 mod answered;
 pub mod catalogue;

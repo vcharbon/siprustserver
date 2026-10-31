@@ -266,7 +266,13 @@ ends the transaction with the CANCEL unsent (§9.1, §17.2.1).
   once and hands the call its `Cancelled` event, and the turn that takes it
   releases both after its write, or the layer sends them
   `B2BUA_REPL_CANCEL_BOUND_MS` (200 ms) past the CANCEL, off the same range:
-  below T1, so they leave before the caller repeats her CANCEL. A copy of the
+  below T1, so they leave before the caller repeats her CANCEL. A CANCEL of a
+  setup whose turn awaits its routing decision, which the `Cancelled` turn
+  queues behind, is written by that turn at once, as a turn of its own: the
+  call as born, marked cancelled, its two answers released after that write.
+  A node that takes over the marked call ends it with nothing on the wire;
+  the decision that returns is recorded, never applied, and the `Cancelled`
+  turn ends the call with the CDR it builds from it. A copy of the
   CANCEL or the INVITE meanwhile draws nothing; a node killed holding them
   leaves the caller's repeated CANCEL to the backup, which answers it on the
   transaction its takeover seeds and CANCELs the callee.
@@ -727,26 +733,12 @@ the re-anchor deadband of each other.
     that second leg's 2xx crossing the CANCEL the copy sends it, and the BYE
     the copy's evidence rule sends on a caller dialog it holds possibly
     confirmed;
-  - `W-kill-reask-after-cancel`, a kill of the primary (user ruling): the
-    caller's CANCEL is answered by the dead node's transaction layer at its
-    CANCEL bound while her call is undecided, and the turn that would record
-    it waits for the decision; the backup holds the call undecided, asks the
-    decision again and dials the callee after her 487. Rare: a CANCEL and a
-    kill inside one decision round trip. The record says nothing of the
-    CANCEL, so the copy cannot tell it apart from an undecided call; when it
-    does say so the copy ends the call with nothing on the wire
-    (`undecided_call_settled_on_departure.rs`, the CANCEL-during-decision
-    cell). The dead node's layer sending what it held at its bound before
-    the kill places the cell in Degraded, as a cap hit does;
   - `W-stale-after-final`, a kill of the primary, a stall past the cap then
     a kill, and a split, healed or not, in the Degraded tier: a copy's
     provisional or non-2xx after the final the other owner sent the caller,
     its record behind the wire — the latest provisional its seed re-sends, a
     reliable one its ladder repeats, a refusal of a call it holds unanswered
     — which her completed INVITE discards (RFC 3261 §17.1.1.2);
-  - `W-kill-reask-after-cancel-answer`, the same window: that callee's 2xx,
-    relayed to the caller after her 487, which her completed INVITE
-    discards (she ACKs and BYEs the dialog it confirms);
   - `W-kill-rseq`, a kill inside the replication window, and a split that
     heals (user ruling): a copy's reliable provisional under the dialog's
     derived tag whose RSeq cannot continue the sequence the dead primary sent

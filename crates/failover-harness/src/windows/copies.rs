@@ -56,17 +56,6 @@ pub(super) fn provisional_after_a_final(i: usize, capture: &CaptureIndex) -> boo
         && answered_before(capture, i, u64::MAX, resp, Some(entry.to), finished)
 }
 
-/// Whether the response at index `i` of `capture` is a 2xx to an INVITE a
-/// 487 to it, sent to the same taker, came before: the callee's answer to a
-/// call asked again after the caller's CANCEL.
-pub(super) fn two_xx_after_a_487(i: usize, capture: &CaptureIndex) -> bool {
-    let (Some(entry), Some(resp)) = (capture.entry(i), capture.message(i)) else { return false };
-    let terminated = |r: &Captured| r.status() == Some(487);
-    resp.status().is_some_and(|s| (200..300).contains(&s))
-        && resp.cseq_method == Method::Invite
-        && answered_before(capture, i, u64::MAX, resp, Some(entry.to), terminated)
-}
-
 /// Whether the final at index `i` of `capture` is a non-2xx to an INVITE,
 /// sent to `to` when it is stated, after a 2xx to that INVITE sent there and
 /// captured at or before `upto`.

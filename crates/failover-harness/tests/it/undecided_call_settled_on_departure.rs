@@ -30,8 +30,7 @@ use std::time::Duration;
 
 use b2bua::decision::ScriptedDecisionEngine;
 use failover_harness::{
-    assert_call_fully_released, total_cdrs_for, FailoverHarness, Incident, Tier, Transitional,
-    WorkerHealth,
+    assert_call_fully_released, total_cdrs_for, FailoverHarness, Transitional, WorkerHealth,
 };
 use scenario_harness::agent::Agent;
 use sip_message::header::HeaderName;
@@ -449,54 +448,6 @@ async fn a_route_applied_before_it_replicated_is_dialled_again_by_the_backup() {
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
     assert_call_fully_released(&[&w_b1, &w_b2], &call_ref).await;
     drop((call, proxy));
-}
-
-/// The caller CANCELs while the decision is in flight (RFC 3261 §9.2: 200 and
-/// 487 from the node's transaction layer), and the node dies before the
-/// decision returns: the turn that records the CANCEL never ran, so the
-/// backup holds the call undecided, not cancelled. It asks the decision again
-/// and dials the callee after the caller's 487 (ADR-0055 §11,
-/// `W-kill-reask-after-cancel`); the callee's answer reaches a caller whose
-/// transaction completed on the 487.
-#[tokio::test(start_paused = true)]
-async fn a_setup_cancelled_during_its_decision_is_asked_again_by_its_backup() {
-    let name = "undecided-call-cancelled-then-departed";
-    let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
-    let alice = fh.agent("alice", ALICE).await;
-    let bob = fh.agent("bob", BOB).await;
-    let route = std::sync::Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
-    let (decision, consults) = CountedDecision::counting(route, DECISION_DELAY);
-    let (proxy, mut w_b1, mut w_b2) = bring_up_deciding(&mut fh, decision).await;
-
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
-    call.expect(100).await;
-    let (pri_ord, call_ref) = placed(&fh, &w_b1, &w_b2).await;
-    let mut cancel = call.cancel().await;
-    cancel.expect(200).await;
-    call.expect(487).await;
-    fh.advance(Duration::from_millis(200)).await;
-
-    fh.strike(Incident::PrimaryKilled);
-    // The node the kill strikes sent the CANCEL's answers at their bound,
-    // before the turn that took the CANCEL wrote.
-    assert_eq!(fh.tier(), Some(Tier::Degraded));
-    let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
-    kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
-    let mut uas = bob.receive("INVITE").await;
-    assert_eq!(consults.load(Ordering::SeqCst), 2, "the backup asks the decision again");
-    uas.respond(200, "OK").with_sdp(OFFER).await;
-    // The caller ACKs the 2xx her completed INVITE draws and ends the
-    // dialog it confirms (RFC 3261 §13.2.2.4, §15).
-    call.expect(200).await;
-    let mut dialog = call.ack().await;
-    bob.receive("ACK").await;
-    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
-
-    let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
-    reboot_and_reclaim(&mut fh, primary, survivor, &pri_ord, &proxy).await;
-    settle_to_one_cdr(&fh, &[&alice, &bob], &[&w_b1, &w_b2], &call_ref).await;
-    fh.assert_sip_rfc_clean(name);
-    drop(proxy);
 }
 
 /// Scale-down: the departed node never returns. Its backup asked the

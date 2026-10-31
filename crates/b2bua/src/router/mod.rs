@@ -30,6 +30,7 @@ mod callout_requests;
 mod callouts;
 #[cfg(test)]
 mod cancel_crossing_tests;
+mod cancel_in_consult;
 mod dead_verdict;
 mod departure;
 mod dialog_gate;

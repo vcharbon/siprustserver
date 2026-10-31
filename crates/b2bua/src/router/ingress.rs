@@ -140,12 +140,14 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, matched_cli
 
     // ── Setup-CANCEL mark ──────────────────────────────────────────────
     // An out-of-dialog CANCEL means the txn layer just finalized the initial
-    // INVITE (200 + 487 already on the wire). The `Cancelled` event queues on
+    // INVITE (200 + 487 sent, or held for the turn that writes the CANCEL).
+    // The `Cancelled` event queues on
     // the per-call FIFO BEHIND the initial-INVITE turn (waiting for a permit,
     // or parked on its decision round trip), so the call model cannot learn
     // the caller is gone until that turn ends — mark it here (the run loop) so
     // the turn (`process::initial_invite_turn`) skips the decision of a setup
-    // not yet ruled, and drops a route/reject landing on the cancelled call.
+    // not yet ruled, writes the CANCEL of one whose decision runs, and drops a
+    // route/reject landing on the cancelled call.
     // The mark names the cancelled INVITE's CSeq: only that INVITE's turn
     // reads it. An in-dialog CANCEL targets one re-INVITE transaction, never
     // the call setup, and is not marked. Gated on that INVITE being here —

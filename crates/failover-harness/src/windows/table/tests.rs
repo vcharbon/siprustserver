@@ -8,8 +8,6 @@ const UNWITNESSED: &[&str] = &[
     "W-cdr-split",
     "W-kill-cancel-answered",
     "W-kill-non-2xx-after-2xx",
-    "W-kill-reask-after-cancel",
-    "W-kill-reask-after-cancel-answer",
     "W-kill-teardown-lost",
     "W-off-answer-lost",
     "W-off-reboot-two-servers",

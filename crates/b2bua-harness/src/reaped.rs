@@ -92,6 +92,12 @@ impl B2buaSut {
             "mark leak: {} stranded setup-CANCEL mark(s)",
             self._core.setup_cancelled_count()
         );
+        assert_eq!(
+            self._core.setup_cancel_watch_count(),
+            0,
+            "watch leak: {} setup-CANCEL watch(es) outlived their turn",
+            self._core.setup_cancel_watch_count()
+        );
         // 8. the store's sweep corrected nothing, and no lock was poisoned nor
         //    a supervised task restarted: each is a defect unless declared.
         self.shell.assert_none(&self.metrics);

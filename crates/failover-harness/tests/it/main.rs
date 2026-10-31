@@ -87,6 +87,7 @@ mod ring_deadline_takeover;
 mod ringing_call_taken_over_on_departure;
 mod round_the_primary_never_read;
 mod service_answer_deadline;
+mod setup_cancelled_during_its_decision;
 mod silent_replication_stream;
 mod spiral_takeover;
 mod split_dialog_sequence;

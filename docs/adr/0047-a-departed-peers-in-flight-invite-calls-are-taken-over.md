@@ -149,10 +149,10 @@ backend may be asked twice and the callee dialled twice; the backend is stateles
 (ADR-0055 §1). One owner acts on the answer (D7): a takeover copy whose primary wrote
 the call since the copy was made — a returning primary's reclaim, which asks the
 decision itself — asks nothing, and applies no answer that returns after that write.
-A call whose caller CANCELed the setup during its consult (`Call::setup_cancelled`)
-ends under her cancel with nothing on the wire; a CANCEL whose turn never ran, waiting
-for the decision when the node died, is in no record, and the copy asks the decision
-again (ADR-0055 §11, `W-kill-reask-after-cancel`). When the caller's INVITE branch is
+A call whose caller CANCELed the setup during its consult (`Call::setup_cancelled`,
+written by the consulting turn before her CANCEL's answers leave, ADR-0055 §3) ends
+under her cancel with nothing on the wire (`setup_cancelled_during_its_decision.rs`,
+a kill at each sub-point after the CANCEL). When the caller's INVITE branch is
 already another call's transaction on this node — its retransmission placed here as a
 call of its own — the undecided call ends with nothing on the wire; when the
 transaction layer cannot be asked, nothing is settled. A node whose endpoint left the
@@ -361,12 +361,9 @@ the call has one CDR.
   only on the dead node (§17.1.3); the BYE ends its dialog instead
   (`reinvite_round_not_yet_replicated.rs`). Answering it would need the 100 held on
   a synchronous replication, which ADR-0014 rejects.
-- **A callee dialled after the caller's 487.** A CANCEL during the decision round
-  trip, and a kill before the decision returns: the backup holds the call undecided
-  and asks the decision again (D4, ADR-0055 §11 `W-kill-reask-after-cancel`;
-  `undecided_call_settled_on_departure.rs`, the CANCEL-during-decision cell). A removed
-  node whose ordinal is bound to its replacement is superseded and answers nothing,
-  nor writes a CDR (ADR-0055 §6, the replacement-decision cell).
+- **A removed node superseded by its replacement.** A removed node whose ordinal is
+  bound to its replacement answers nothing, nor writes a CDR (ADR-0055 §6,
+  `undecided_call_settled_on_departure.rs`, the replacement-decision cell).
 - **A returning primary's reclaim inside the copy's decision.** At `applied`, the
   copy's re-asked answer can apply in the one replication hop between the returning
   primary's reclaim write and its arrival at the copy; both nodes then dial the

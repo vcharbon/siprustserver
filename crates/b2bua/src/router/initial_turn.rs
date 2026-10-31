@@ -9,6 +9,7 @@ use sip_ids::TurnIds;
 use sip_message::SipRequest;
 
 use super::admit::UnbornCall;
+use super::cancel_in_consult::consult_writing_its_cancel;
 use super::reply_to::reply_to;
 use super::responses::{build_merged_482, build_retry_later_500, build_unborn_500};
 use super::topology_cookie::topology_from_cookie;
@@ -223,8 +224,8 @@ pub(super) async fn initial_invite_turn(
             &ctx.clock,
             now_ms,
             &setup_cancelled,
-        )
-        .await;
+        );
+        let consult = consult_writing_its_cancel(ctx, call_ref, &call, &caller, consult).await;
         match consult {
             Consulted::Applied(result) => *result,
             // The caller CANCELed during the round trip: the txn layer already

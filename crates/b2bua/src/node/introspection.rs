@@ -122,6 +122,12 @@ impl B2buaCore {
         self.ctx.state.setup_cancelled_count()
     }
 
+    /// Live watches turns hold on their INVITE's setup-CANCEL mark while
+    /// their decision runs; none outlives its turn.
+    pub fn setup_cancel_watch_count(&self) -> usize {
+        self.ctx.state.setup_cancel_watch_count()
+    }
+
     /// HARNESS SURGERY: drop the live in-memory copy of `call_ref` — map, index,
     /// lock, takeover mark — with NO store mutation (the `pri:`/`bak:` replica
     /// bodies stay). Recreates, deterministically, the rebooted-primary

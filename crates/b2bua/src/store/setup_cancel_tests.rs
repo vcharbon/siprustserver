@@ -42,3 +42,36 @@ fn a_release_keeps_only_the_marks_of_waiting_invites_of_its_call() {
     s.clear_setup_cancelled("d", 1);
     assert_eq!(s.setup_cancelled_count(), 0);
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_watch_wakes_on_its_own_invites_mark_only() {
+    let s = state();
+    let watch = s.watch_setup_cancel("c", 1);
+    s.mark_setup_cancelled("c", 2);
+    s.mark_setup_cancelled("d", 1);
+    let early = tokio::time::timeout(std::time::Duration::from_millis(10), watch.marked()).await;
+    assert!(early.is_err(), "another INVITE's mark wakes nothing");
+    s.mark_setup_cancelled("c", 1);
+    let woken = tokio::time::timeout(std::time::Duration::from_millis(10), watch.marked()).await;
+    assert!(woken.is_ok(), "the INVITE's own mark wakes its watch");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_watch_taken_after_the_mark_resolves_at_once() {
+    let s = state();
+    s.mark_setup_cancelled("c", 1);
+    let watch = s.watch_setup_cancel("c", 1);
+    let woken = tokio::time::timeout(std::time::Duration::from_millis(10), watch.marked()).await;
+    assert!(woken.is_ok(), "a mark set before the watch resolves it");
+}
+
+#[test]
+fn a_dropped_watch_leaves_no_entry() {
+    let s = state();
+    let first = s.watch_setup_cancel("c", 1);
+    let second = s.watch_setup_cancel("c", 1);
+    drop(first);
+    assert_eq!(s.setup_cancel_watch_count(), 1, "a replaced watch keeps its successor's entry");
+    drop(second);
+    assert_eq!(s.setup_cancel_watch_count(), 0);
+}
