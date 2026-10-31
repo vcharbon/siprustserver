@@ -20,9 +20,9 @@ use std::time::Duration;
 
 pub use scenario_harness::actor::ForkWinner;
 use scenario_harness::actor::{
-    phase, ActorCall, ActorScenario, ActorSpec, Barrier, BarrierPhase, Branch, CtxFeed,
-    Disposition, Ending, Expect, Feed, Goal, GoalStep, LegPhase, MediaState, SettleBarrier,
-    StateInner, SubflowState, SUBFLOW_EARLY, SUBFLOW_REFER,
+    phase, provisional_lost, ActorCall, ActorScenario, ActorSpec, Barrier, BarrierPhase, Branch,
+    CtxFeed, Disposition, Ending, Expect, Feed, Goal, GoalStep, LegPhase, MediaState,
+    SettleBarrier, StateInner, SubflowState, SUBFLOW_EARLY, SUBFLOW_REFER,
 };
 use scenario_harness::realcall::{CallEnv, ScenarioId};
 use scenario_harness::{StepError, ANSWER_SDP, OFFER_SDP};
@@ -860,7 +860,7 @@ impl ShapePlan {
             }
             Establishment::AbandonAfterRinging => {
                 let plan = self.binder.invite_plan(env, RouteIntent::Direct { target: "bob" });
-                let ringing = |s: &StateInner| s.leg_rang("alice");
+                let ringing = |s: &StateInner| s.leg_rang("alice") || provisional_lost(s, "alice");
                 b.caller_goals.push(Goal::new(
                     Barrier::None,
                     GoalStep::Invite { callee: "bob", plan: Some(plan) },

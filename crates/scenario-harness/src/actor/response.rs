@@ -176,6 +176,7 @@ pub(super) async fn react_response(
                     st.dialogs.pending_invite = Some(inv);
                 }
                 InviteResponseFate::Answered => {
+                    super::lost_provisional::note_final(st, now);
                     st.ctx.anchor(&st.agent, "answer", &resp);
                     if st.feed.ringing_gate && !st.saw_provisional {
                         // Answered without ever ringing: a lost non-PRACK 18x is
@@ -184,9 +185,8 @@ pub(super) async fn react_response(
                         st.ctx.mark_ringing(false);
                     }
                     st.feed.on_answer_rx.stamp(st.ctx);
-                    // ACK the 2xx then register the confirmed dialog with NO await in
-                    // between, so a mid-window cancellation can never leave a
-                    // confirmed-but-unregistered dialog (the drop-safety rule).
+                    // ACK the 2xx and register the confirmed dialog with NO await
+                    // between (the drop-safety rule).
                     let (mut dialog, ack_sent) = inv.ack_reporting(None, &[]).await;
                     // Dialog-formation point: attach this leg's shared CSeq counter
                     // BEFORE the scope-refresh clone, so both share ONE step counter
@@ -195,12 +195,12 @@ pub(super) async fn react_response(
                     st.dialogs.confirmed = Some(dialog.clone());
                     st.scope.set_confirmed(dialog);
                     st.obs.record(Observation::LegConfirmed { leg: st.role }, now);
-                    // RETAIN the establishing INVITE (C1/E3): a LOSING fork's late
-                    // 2xx (§13.2.2.4) is ACK+BYE'd on a fork dialog derived from it.
+                    // RETAIN the INVITE: a losing fork's late 2xx is ACK+BYE'd (§13.2.2.4).
                     st.dialogs.won_invite = Some(inv);
                     ack_sent?;
                 }
                 InviteResponseFate::Failed { status } => {
+                    super::lost_provisional::note_final(st, now);
                     if absorb_establishing_failure(st, &mut inv, &resp, status, now).await? {
                         // §22.2 authenticated resend — the retried INVITE is a
                         // fresh pending transaction, parked back.

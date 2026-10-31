@@ -44,6 +44,9 @@ pub struct CallCtx {
     /// Whether a party the system under test ends cleanly ends the call
     /// cleanly ([`accept_clean_ends`](Self::accept_clean_ends)).
     clean_ends: AtomicBool,
+    /// Whether a provisional lost to a crash is accepted
+    /// ([`accept_lost_provisionals`](Self::accept_lost_provisionals)).
+    lost_provisionals: AtomicBool,
 }
 
 /// What a call runs at the instant its verdict resolves.
@@ -61,6 +64,7 @@ impl CallCtx {
             notes: Mutex::new(Vec::new()),
             on_resolved: Mutex::new(None),
             clean_ends: AtomicBool::new(false),
+            lost_provisionals: AtomicBool::new(false),
         }
     }
 
@@ -77,6 +81,21 @@ impl CallCtx {
     /// Whether [`accept_clean_ends`](Self::accept_clean_ends) was armed.
     pub fn clean_ends_accepted(&self) -> bool {
         self.clean_ends.load(Ordering::Relaxed)
+    }
+
+    /// From now on, a party whose establishing INVITE reaches its final with
+    /// no provisional before it reads as having rung: an unreliable
+    /// provisional is not guaranteed across a crash. A fault injection that
+    /// crashes a node arms it when the fault strikes; every other check
+    /// stands.
+    pub fn accept_lost_provisionals(&self) {
+        self.lost_provisionals.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether [`accept_lost_provisionals`](Self::accept_lost_provisionals)
+    /// was armed.
+    pub fn lost_provisionals_accepted(&self) -> bool {
+        self.lost_provisionals.load(Ordering::Relaxed)
     }
 
     /// Run `hook` at the instant the call's verdict resolves: after its last

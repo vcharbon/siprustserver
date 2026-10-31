@@ -57,6 +57,7 @@ mod goals;
 mod held;
 mod held_acks;
 mod ledger;
+mod lost_provisional;
 mod observe;
 mod originate;
 mod pacing;
@@ -102,6 +103,7 @@ pub use goals::{
     Barrier, BodyExpect, EarlyId, FinalAssert, Goal, GoalCursor, GoalStep, RequestKind,
 };
 pub use ledger::{ObligationKey, ObligationKind, ObligationLedger};
+pub use lost_provisional::provisional_lost;
 pub use observe::{ReceivedMessage, ReceptionContext, ReceptionObserver};
 pub use pacing::{Dwell, Pacing};
 pub use settle::{SettleBarrier, SettleVerdict, T1};

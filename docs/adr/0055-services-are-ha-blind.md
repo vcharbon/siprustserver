@@ -585,6 +585,23 @@ the re-anchor deadband of each other.
   - **Off**: level `off`: Degraded's rows, and the off-only rows a user
     ruling adds.
 
+  **What the guarantee promises, and what it does not** (user ruling). In
+  every tier:
+  - an unreliable provisional (an 18x without RFC 3262) is not guaranteed
+    across a crash: one a dead node took, or was to relay, is lost, and
+    nothing can do better, so a caller may go from silence straight to her
+    final. At a kill of the primary the parties read a final reached with
+    no provisional before it as rung (`CallCtx::accept_lost_provisionals`);
+    the RFC audit is unchanged;
+  - a request whose answer is lost with a node is answered on its sender's
+    retransmission (RFC 3261 §17): the 200 to a CANCEL and the 487 a dead
+    node held come from the node serving the call when the caller repeats
+    her CANCEL on Timer E. That is the protocol at work, not a deviation;
+  - an outside service sees a request once or twice across a failover: the
+    node serving the call next sends again a request whose answer died with
+    the other (ADR-0039 decision 5), and nothing on the request tells the
+    repeat apart. Seen once is not promised.
+
   **The window table** (`failover-harness`, `windows`). Every deviation an
   incident may cause is one row: an RFC-rule window, a dialog-verdict waiver,
   a party outcome, a clean-end goal drop or a CDR count. A row names the

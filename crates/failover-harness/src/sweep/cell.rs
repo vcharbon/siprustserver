@@ -120,6 +120,9 @@ pub async fn run_cell(
                 if goal_drop_row(strike, level).is_some() {
                     ctx.accept_clean_ends();
                 }
+                if cut.incident.kills_the_primary() {
+                    ctx.accept_lost_provisionals();
+                }
                 struck = Some(strike);
                 aftermath = Aftermath::of(cut.incident);
             }

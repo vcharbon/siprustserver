@@ -82,6 +82,3 @@ reinvite-x-bye/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: W
 
 # The cells that fail outright, at either level, with no row to take the
 # finding.
-cancel/applied/primary-killed-unannounced/t1-left ADR-0055 §11  # unannounced: the callee's 180 reaches the dead node and is lost; the backup takes the call over at the dead verdict, 2 s on, and sends the INVITE again in the instant the callee's ring ends in its 200, so the caller never rings and never CANCELs
-cancel/off/primary-killed-unannounced/t1-applied ADR-0055 §11  # unannounced: the callee's 180 reaches the dead node and is lost; the backup takes the call over at the dead verdict, 2 s on, and sends the INVITE again in the instant the callee's ring ends in its 200, so the caller never rings and never CANCELs
-cancel/off/primary-killed-unannounced/t1-left ADR-0055 §11  # unannounced: the callee's 180 reaches the dead node and is lost; the backup takes the call over at the dead verdict, 2 s on, and sends the INVITE again in the instant the callee's ring ends in its 200, so the caller never rings and never CANCELs
