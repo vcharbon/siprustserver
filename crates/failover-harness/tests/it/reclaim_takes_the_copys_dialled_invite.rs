@@ -283,6 +283,23 @@ fn invite_200s_delivered_to(r: &Ringing, worker_port: u16) -> usize {
         .count()
 }
 
+/// How many `status` responses to a `method` request the proxy delivered to
+/// `worker_port`.
+fn responses_delivered_to(r: &Ringing, worker_port: u16, status: u16, method: &str) -> usize {
+    let proxy = r.proxy.addr();
+    let parser = CustomParser::new();
+    r.fh.sip_entries()
+        .into_iter()
+        .filter(|e| e.from == proxy && e.to.port() == worker_port)
+        .filter(|e| match parser.parse(&e.raw) {
+            Ok(SipMessage::Response(resp)) => {
+                resp.status() == status && resp.cseq().method().as_str() == method
+            }
+            _ => false,
+        })
+        .count()
+}
+
 /// The most copies of one 2xx the RFC 3261 §13.3.1.4 ladder sends from
 /// `first_ms` through `last_ms`: the first, then one at each interval,
 /// doubling from T1 up to T2.
@@ -476,7 +493,10 @@ async fn a_copys_answer_before_the_primary_is_routable_is_met_without_an_extra_2
     );
 
     // The caller's ACK is held while the primary meets the copy's answer and
-    // turns routable.
+    // turns routable. The test relies on the paused runtime draining every
+    // task an advance wakes, in order, before the advance returns: the copy's
+    // answered write reaches the primary inside this advance, and the arming
+    // and the meeting inside the next.
     r.fh.advance(Duration::from_secs(1)).await;
     r.fh.flap_ready(&pri);
     r.proxy.set_health(&pri, WorkerHealth::Alive);
@@ -528,6 +548,9 @@ async fn a_copys_dialled_invite_answered_inside_the_reclaim_lag_is_answered_by_t
     primary_returns(&mut r).await;
     assert!(r.copy().serves(&r.call_ref), "the reclaim write has not reached the copy yet");
 
+    // The paused runtime drains the 2xx's turn at the primary, and the parked
+    // call's arming before it, before `answer` returns; the delayed reclaim
+    // write is still on the link to the copy.
     let (_dialog, mut bob_dialog) = answer(&mut r).await;
     answered_by_the_primary_alone(&r);
     r.fh.heal(&pri, bak);
@@ -585,6 +608,11 @@ async fn a_transfer_target_the_copy_dialled_is_cancelled_by_the_returned_primary
         senders(&r, "ACK sip:charlie@", None, "ACK"),
         [r.primary_port()],
         "the returned primary ACKs the target's 487"
+    );
+    assert_eq!(
+        (responses_delivered_to(&r, r.primary_port(), 200, "CANCEL"), responses_delivered_to(&r, r.copy_port(), 200, "CANCEL")),
+        (1, 0),
+        "the CANCEL's 200 follows its Via's received and rport (RFC 3581) to the primary that sent it"
     );
     settle(r, name).await;
 }

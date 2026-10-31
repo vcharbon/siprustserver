@@ -22,6 +22,7 @@ mod caller_copy_takes_over;
 mod cancel_and_retransmission_follow_a_live_hop;
 mod cancel_answers_after_the_kill;
 mod consult_answer_deadline;
+mod copys_dial_while_the_primary_is_misread;
 mod cordoned_worker;
 mod crash_mid_invite;
 mod crossed_reinvite_round;

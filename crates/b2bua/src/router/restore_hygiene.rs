@@ -164,12 +164,14 @@ pub(super) fn sanitize_restored_timers(
 
 /// Step every rung in `fresh` — ladder timers a meeting takes from the other
 /// owner's copy of `call` — whose deadline is at or before `now_ms` along its
-/// ladder to its first rung after `now_ms`, `call`'s rung index with it. The
-/// other owner served the call up to the meeting and sent the rungs due
-/// before it, so the ladder goes on from where it stands and is never
-/// repeated at once (RFC 3261 §13.3.1.4, RFC 3262 §3). A ladder with no rung
-/// left inside `config`'s bound leaves `fresh` as a ladder ceasing does; a
-/// 2xx's give-up stands.
+/// ladder to its first rung after `now_ms`, `call`'s rung index with it, so
+/// the ladder goes on from where it stands and is never repeated at once
+/// (RFC 3261 §13.3.1.4, RFC 3262 §3). This assumes the other owner sent the
+/// rungs due before the meeting; one it did not (it stopped between its
+/// write and the rung) is skipped, a wider gap between two retransmissions,
+/// which no RFC requirement forbids. A ladder with no rung left inside
+/// `config`'s bound leaves `fresh` as a ladder ceasing does; a 2xx's give-up
+/// stands.
 pub(super) fn resume_met_ladders(
     call: &mut Call,
     fresh: &mut Vec<TimerEntry>,

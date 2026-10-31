@@ -118,6 +118,7 @@ pub(in crate::router) async fn meet_live(
                 let taken = own_records(taken, &live.call, by);
                 let mut taken = with_own_running(taken, &live.call);
                 resync_timers(ctx, call_ref, &live.call, &mut taken, now_ms).await;
+                retire_met_dials(ctx, &live.call, &taken).await;
                 ctx.state.update_enveloped(Enveloped::new(taken, topology));
             }
         },
@@ -139,13 +140,16 @@ fn keep(ctx: &Arc<RouterCtx>, live: &Enveloped, kept: Enveloped) {
 /// copy's exempt fields merged in. A copy that does not rebuild its caller's
 /// INVITE never replaces a live one (ADR-0052 §11): it is counted, and the
 /// live copy stands at its own vector — a vector is never taken without the
-/// body it counts — with the other's exempt fields. The live timer service
-/// follows the ledger taken, and every INVITE it holds answered 2xx and
-/// awaiting its ACK is seeded in the layer, so a copy of that INVITE draws
-/// the 2xx (an identity already held takes it as its final), and every leg's
-/// dialling INVITE the other owner sent with no final that the live copy
-/// lacks is seeded as a client INVITE ([`dialled_invite_seeds`]): its
-/// responses reach this node. A taken copy that carries such a dial, or the
+/// body it counts — with the other's exempt fields. On an armed call the
+/// live timer service follows the ledger taken, and every INVITE it holds
+/// answered 2xx and awaiting its ACK is seeded in the layer, so a copy of
+/// that INVITE draws the 2xx (an identity already held takes it as its
+/// final), and every leg's dialling INVITE the other owner sent with no final
+/// that the live copy lacks is seeded as a client INVITE
+/// ([`dialled_invite_seeds`]): its responses reach this node; a parked call
+/// does both when it is armed. A dial whose final the taken copy carries
+/// retires this node's client transaction of it ([`retire_met_dials`]). A
+/// taken copy that carries such a dial, or the
 /// final of one the live copy awaits, draws one write ([`announce_reclaim`]):
 /// the other owner took it as a takeover copy, and stands down on the write;
 /// the requests it awaited that the live copy did not are sent again here,
@@ -167,11 +171,18 @@ async fn take_whole(
         return;
     }
     let Enveloped { call: mut taken, topology } = taken;
-    resync_timers(ctx, call_ref, &live.call, &mut taken, now_ms).await;
-    let mut seeds = answered_invite_seeds(&taken);
-    seeds.extend(dialled_invite_seeds(&taken, &live.call, &ctx.relay_owner));
+    // A parked call arms nothing and seeds nothing: its arming restores the
+    // ledger and seeds every transaction the record names (ADR-0055 §8).
+    let parked = ctx.state.is_parked(call_ref);
+    let mut seeds = Vec::new();
+    if !parked {
+        resync_timers(ctx, call_ref, &live.call, &mut taken, now_ms).await;
+        seeds = answered_invite_seeds(&taken);
+        seeds.extend(dialled_invite_seeds(&taken, &live.call, &ctx.relay_owner));
+    }
     let released = takes_a_copys_dial(&live.call, &taken, &ctx.relay_owner);
     ctx.state.update_enveloped(Enveloped::new(taken.clone(), topology));
+    retire_met_dials(ctx, &live.call, &taken).await;
     if !seeds.is_empty() {
         let _ = ctx.txn.seed(call_ref, seeds).await;
     }
@@ -184,6 +195,20 @@ async fn take_whole(
         announce_reclaim(ctx, taken);
         if let Some(notice) = notice {
             let _ = ctx.reentry_tx.send(notice);
+        }
+    }
+}
+
+/// Retire this node's client transaction of each leg's dialling INVITE whose
+/// final `taken`, the other owner's copy, carries and `live` still awaits: the
+/// final reached the other owner, so none reaches that transaction here, and
+/// left open it would time out on a leg the call holds answered or ended.
+async fn retire_met_dials(ctx: &Arc<RouterCtx>, live: &Call, taken: &Call) {
+    let answered = |l: &call::Leg| l.outbound_invite().is_some_and(|i| i.final_received.is_some());
+    for leg in live.b_legs.iter().filter(|l| !answered(l)) {
+        let met = taken.b_legs.iter().find(|t| t.leg_id == leg.leg_id).is_some_and(answered);
+        if let Some(sent) = leg.dialled_sent().filter(|_| met) {
+            let _ = ctx.txn.relinquish_client(&sent.branch).await;
         }
     }
 }
