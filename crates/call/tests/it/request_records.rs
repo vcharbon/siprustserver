@@ -61,3 +61,23 @@ fn a_final_answers_the_sent_record_of_its_branch_alone() {
     assert!(answered_record(&call, "b-1", to, from, answers("z9hG4bK-ours")).is_some());
     assert!(answered_record(&call, "b-1", to, from, answers("z9hG4bK-theirs")).is_none());
 }
+
+/// A relayed re-INVITE's record is answered on its own client transaction
+/// alone: a 2xx to another owner's re-INVITE at the same CSeq answers
+/// nothing here (RFC 3261 §17.1.3).
+#[test]
+fn a_relayed_reinvite_record_answers_its_branch_alone() {
+    let mut call = settled_call();
+    let sent = SentRequest {
+        branch: "z9hG4bK-ours".into(),
+        image: Vec::new(),
+        destination: HostPort { host: "127.0.0.1".into(), port: 5070 },
+    };
+    let relayed = RequestRecord { sent: Some(sent), ..RequestRecord::relayed("INVITE", 5, 3) };
+    call.b_legs[0].dialogs.confirmed_mut().expect("confirmed").sent_invite = Some(relayed);
+    let answers = |branch| Answers { method: "INVITE", cseq: 5, branch: Some(branch) };
+    let to = Some(B_TAG);
+    let from = Some(B_LOCAL_TAG);
+    assert!(answered_record(&call, "b-1", to, from, answers("z9hG4bK-ours")).is_some());
+    assert!(answered_record(&call, "b-1", to, from, answers("z9hG4bK-theirs")).is_none());
+}

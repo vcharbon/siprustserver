@@ -263,14 +263,14 @@ impl RequestRecord {
     }
 
     /// Whether the record's sent half is the request a final numbered `cseq`
-    /// for `method`, on the client transaction `branch`, answers: a sent
-    /// non-INVITE transaction by its branch (RFC 3261 §17.1.3), so a final to
-    /// another request reusing the number answers nothing here; an INVITE's
-    /// by its number.
+    /// for `method`, on the client transaction `branch`, answers: a record
+    /// holding its sent transaction by that transaction's branch (RFC 3261
+    /// §17.1.3), so a final to another request reusing the number answers
+    /// nothing here; one holding none by its number.
     pub fn answered_by(&self, method: &str, cseq: i64, branch: Option<&str>) -> bool {
-        let transaction = match (&self.sent, self.is_invite()) {
-            (Some(sent), false) => branch == Some(sent.branch.as_str()),
-            _ => true,
+        let transaction = match &self.sent {
+            Some(sent) => branch == Some(sent.branch.as_str()),
+            None => true,
         };
         self.awaits_final() && transaction && self.outbound_cseq == cseq && self.method == method
     }

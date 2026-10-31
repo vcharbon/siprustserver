@@ -101,6 +101,43 @@ fn the_ack_of_a_2xx_at_a_reused_number_takes_that_number() {
     assert_eq!(ack.cseq().seq(), lost.cseq().seq(), "at the number the 2xx names");
 }
 
+/// This side re-used the number of a re-INVITE another owner relayed, for
+/// the caller's next re-INVITE: bob's 2xx to the other owner's, retransmitted
+/// because its ACK never reached him (RFC 3261 §13.3.1.4), answers that
+/// owner's transaction, not the one this side relays (§17.1.3). It is
+/// evidence: ACKed at its number, the call ended, nothing relayed to alice.
+#[test]
+fn a_2xx_to_another_owners_relayed_reinvite_at_a_reused_number_is_evidence() {
+    let driver = Driver::new();
+    let lost = [Step::Sends("a", Method::Invite), Step::AnswersSent("b-1", 200), Step::AliceAcks];
+    let mut call = losing(bridged(&driver), lost);
+    call.run([Step::Sends("a", Method::Invite)]);
+    let heard = call.peer("b-1").expect("bob").heard.clone();
+    let invites: Vec<_> = heard.iter().filter(|r| *r.method() == Method::Invite).collect();
+    let (theirs, relayed) = (invites[1], invites[2]);
+    assert_eq!(theirs.cseq().seq(), relayed.cseq().seq(), "the number re-used");
+    assert_ne!(theirs.top_via().branch(), relayed.top_via().branch());
+    let turn = call.turned(Step::AnswersHeard("b-1", Method::Invite, 1, 200));
+    assert_eq!(turn.rule, Some("evidence-final"));
+    assert!(turn.statuses_to("a").is_empty(), "nothing relayed to alice");
+    let ack = turn.request_to("b-1", "ACK").expect("the 2xx is ACKed");
+    assert_eq!(ack.cseq().seq(), theirs.cseq().seq(), "at the number the 2xx names");
+    assert!(turn.methods_to("a").iter().any(|(m, _)| m == "BYE"), "the caller's BYE");
+    assert_eq!(call.call().state, CallModelState::Terminating);
+}
+
+/// The 2xx to the re-INVITE this side relayed, on its branch, is the
+/// caller's answer: relayed to her, no evidence.
+#[test]
+fn a_2xx_to_the_relayed_reinvite_on_its_branch_is_relayed_to_the_caller() {
+    let driver = Driver::new();
+    let mut call = bridged(&driver);
+    call.run([Step::Sends("a", Method::Invite)]);
+    let turn = call.turned(Step::AnswersLast("b-1", Method::Invite, 200));
+    assert_eq!(turn.rule, Some("relay-reinvite-response"));
+    assert_eq!(turn.statuses_to("a"), vec![200]);
+}
+
 /// A final at or below the sequence that answers no request held open at its
 /// number is a stray, not evidence: a 200 at the number of an INFO the record
 /// holds answered, under a branch no request of this stack's carried.
