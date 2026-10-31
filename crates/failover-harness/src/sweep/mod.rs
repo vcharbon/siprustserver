@@ -22,8 +22,8 @@
 //! one test per shape, incident and level against the consumer's own
 //! ratchet. Each test writes what its cells measured to
 //! `target/sweep-report/` ([`report`]), each cell with its cut point's
-//! window ([`window`]): a cell cut inside a narrow one is judged like any
-//! other and counted apart.
+//! window ([`window`]): a cell cut between two sends of one turn's effects
+//! is judged like any other and counted apart.
 
 mod after_cancel;
 mod aftermath;
@@ -136,14 +136,14 @@ pub struct Ran {
     pub name: String,
     pub at: TurnAt,
     pub measured: CellReport,
-    pub window: Option<std::time::Duration>,
+    pub window: window::Window,
     pub failure: Option<String>,
 }
 
 impl Ran {
     /// Whether the cell's cut point lies in a narrow window.
     pub fn narrow(&self) -> bool {
-        window::narrow(self.window)
+        self.window.narrow()
     }
 }
 
@@ -171,7 +171,7 @@ pub fn sweep(shape: &dyn SweepShape, incident: Incident, level: SyncLevel, ratch
                 let outcome = in_cell(&name, || run_cell(shape, &name, cut, level, false, &sink));
                 let failure = outcome.err().map(|payload| panic_text(payload.as_ref()));
                 let measured = sink.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
-                let window = windows.get(&at).copied().flatten();
+                let window = windows.get(&at).copied().unwrap_or_default();
                 ran.push(Ran { name, at, measured, window, failure });
             }
         }

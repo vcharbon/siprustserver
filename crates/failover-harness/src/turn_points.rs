@@ -69,11 +69,12 @@ impl Turn {
 }
 
 /// A node's transaction layer sent messages it held for a turn of a call at
-/// their bound, before that turn's write (ADR-0055 §3).
+/// their bound, before that turn's write (ADR-0055 §3). `call_ref` is `None`
+/// when the layer no longer knew the transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoundPass {
     pub node: String,
-    pub call_ref: String,
+    pub call_ref: Option<String>,
 }
 
 /// A sub-point of one turn: where an incident arms.
@@ -171,6 +172,19 @@ impl TurnPoints {
         self.lock().bound_passes.clone()
     }
 
+    /// Where each turn taken at `primary` started (its logged sub-point) in
+    /// the order of the run's recorded messages.
+    pub fn logged_stamps(&self, primary: &str) -> Vec<u64> {
+        let inner = self.lock();
+        let at_primary = |c: &str| call::call_ref_primary(c) == Some(primary);
+        inner
+            .stamps
+            .iter()
+            .filter(|((c, at), _)| at.point == TurnPoint::Logged && at_primary(c))
+            .map(|(_, stamp)| *stamp)
+            .collect()
+    }
+
     /// Where `call_ref`'s sub-point `at` first stood in the order of the
     /// run's recorded messages, once it did and turn points are
     /// [`stamped`](Self::stamped).
@@ -196,7 +210,7 @@ impl TurnPoints {
     /// once each: a call whose delete a backup applied is no longer held.
     pub fn bound_passes(&self) -> Vec<BoundPass> {
         let inner = self.lock();
-        let held = |p: &&BoundPass| !inner.removed.contains(&p.call_ref);
+        let held = |p: &&BoundPass| p.call_ref.as_ref().is_none_or(|c| !inner.removed.contains(c));
         inner.bound_passes.iter().filter(held).cloned().collect()
     }
 
@@ -346,8 +360,8 @@ fn covers(mark: &TurnMark<'_>, turn: &Turn) -> bool {
 }
 
 impl TurnProbe for TurnPoints {
-    fn bound_passed(&self, node: &str, call_ref: &str) {
-        let pass = BoundPass { node: node.to_string(), call_ref: call_ref.to_string() };
+    fn bound_passed(&self, node: &str, call_ref: Option<&str>) {
+        let pass = BoundPass { node: node.to_string(), call_ref: call_ref.map(str::to_string) };
         let mut inner = self.lock();
         if !inner.bound_passes.contains(&pass) {
             inner.bound_passes.push(pass);
@@ -422,19 +436,25 @@ mod tests {
     #[test]
     fn a_bound_pass_is_kept_by_node_and_call_until_the_call_is_deleted() {
         let points = TurnPoints::new();
-        points.bound_passed("b1", "b1|c1|f1");
-        points.bound_passed("b1", "b1|c1|f1");
-        points.bound_passed("b2", "b1|c1|f1");
-        points.bound_passed("b1", "b1|c2|f2");
-        let pass = |node: &str, call_ref: &str| BoundPass {
+        points.bound_passed("b1", Some("b1|c1|f1"));
+        points.bound_passed("b1", Some("b1|c1|f1"));
+        points.bound_passed("b2", Some("b1|c1|f1"));
+        points.bound_passed("b1", Some("b1|c2|f2"));
+        points.bound_passed("b2", None);
+        let pass = |node: &str, call_ref: Option<&str>| BoundPass {
             node: node.to_string(),
-            call_ref: call_ref.to_string(),
+            call_ref: call_ref.map(str::to_string),
         };
         assert_eq!(
             points.bound_passes(),
-            [pass("b1", "b1|c1|f1"), pass("b2", "b1|c1|f1"), pass("b1", "b1|c2|f2")]
+            [
+                pass("b1", Some("b1|c1|f1")),
+                pass("b2", Some("b1|c1|f1")),
+                pass("b1", Some("b1|c2|f2")),
+                pass("b2", None)
+            ]
         );
         assert!(points.reached(&applied_delete("b1|c1|f1")).is_none());
-        assert_eq!(points.bound_passes(), [pass("b1", "b1|c2|f2")]);
+        assert_eq!(points.bound_passes(), [pass("b1", Some("b1|c2|f2")), pass("b2", None)]);
     }
 }

@@ -8,7 +8,7 @@ DIR is the directory the sweep tests write to (default `target/sweep-report`):
 one JSON file per test, `{"test": prefix, "cells": [{"cell", "tier", "fired",
 "evidence", "window_ms", "narrow", "passed", "failure"}]}`. Prints, per level
 and tier, the cells, how many failed and how many are cut in a narrow window
-(between sends of one instant of the primary); per row, the cells it fired in
+(between two sends of one turn's effects, under 1 ms apart); per row, the cells it fired in
 by level and tier, the narrow ones apart; then every failing Guaranteed cell
 with the rows it fired, and every failing narrow cell.
 """

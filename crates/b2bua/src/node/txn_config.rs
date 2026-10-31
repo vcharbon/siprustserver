@@ -65,14 +65,17 @@ pub(super) fn txn_config(
 /// The report to `probe` of held messages that left at their bound on
 /// `node`, by the call their transaction names: the one a request of it
 /// carried, else the call `node` derives from the caller's leg, as it does
-/// for a new INVITE.
+/// for a new INVITE; `None` when the transaction is gone.
 fn bound_report(probe: &crate::turn_probe::TurnProbes, node: &str) -> OnBound {
     let (probe, node) = (probe.clone(), node.to_string());
-    Arc::new(move |held: BoundPassed<'_>| match held.call_ref {
-        Some(call_ref) => probe.bound_passed(&node, call_ref),
-        None => {
-            probe.bound_passed(&node, &call::derive_call_ref(&node, held.call_id, held.from_tag))
-        }
+    Arc::new(move |held: BoundPassed<'_>| {
+        let derived = match (held.call_ref, held.call_id, held.from_tag) {
+            (None, Some(call_id), Some(from_tag)) => {
+                Some(call::derive_call_ref(&node, call_id, from_tag))
+            }
+            _ => None,
+        };
+        probe.bound_passed(&node, held.call_ref.or(derived.as_deref()));
     })
 }
 

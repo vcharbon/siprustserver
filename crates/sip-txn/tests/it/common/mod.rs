@@ -279,13 +279,15 @@ pub fn response_bytes(
 
 /// What an `on_bound` report named, each time: the transaction's call, Call-ID
 /// and From-tag.
-pub type Told = std::sync::Arc<std::sync::Mutex<Vec<(Option<String>, String, String)>>>;
+pub type Told =
+    std::sync::Arc<std::sync::Mutex<Vec<(Option<String>, Option<String>, Option<String>)>>>;
 
 /// An `on_bound` report that keeps what it is told in `told`.
 pub fn telling(told: &Told) -> sip_txn::OnBound {
     let told = told.clone();
     std::sync::Arc::new(move |held: sip_txn::BoundPassed<'_>| {
-        let named = (held.call_ref.map(str::to_string), held.call_id.into(), held.from_tag.into());
+        let owned = |v: Option<&str>| v.map(str::to_string);
+        let named = (owned(held.call_ref), owned(held.call_id), owned(held.from_tag));
         told.lock().unwrap().push(named);
     })
 }

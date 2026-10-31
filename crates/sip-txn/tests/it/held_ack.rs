@@ -83,7 +83,8 @@ async fn a_held_ack_nobody_releases_leaves_at_its_bound() {
     let told = told.lock().unwrap();
     assert_eq!(told.len(), 1, "told once: {told:?}");
     assert_eq!(told[0].0.as_deref(), Some("call-a"), "naming the call");
-    assert_eq!((told[0].1.as_str(), told[0].2.as_str()), ("handle-shape-test", "b2bua-b-1"));
+    assert_eq!(told[0].1.as_deref(), Some("handle-shape-test"));
+    assert_eq!(told[0].2.as_deref(), Some("b2bua-b-1"));
 }
 
 #[tokio::test(start_paused = true)]

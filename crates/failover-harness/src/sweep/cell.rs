@@ -171,6 +171,7 @@ pub async fn run_cell(
     if cut.is_none() {
         let primary = cluster.node(&placement.primary).sip_addr();
         let entries = cluster.fh.sip_entries();
+        let primary = (placement.primary.as_str(), primary);
         cell.windows = window::measure(&turn_points, &call_ref, &turns, &entries, primary);
     }
     for fired in cluster.fh.fired_rows() {

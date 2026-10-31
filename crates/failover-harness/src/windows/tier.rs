@@ -1,10 +1,11 @@
 //! A cell's tier, measured (ADR-0055 §11): `Off` at level `off`; at level
 //! `applied`, `Guaranteed` when a kill struck a cluster every call of which
 //! was backed and bootstrapped at every turn up to the strike, no entry of
-//! any of them hit the cap, no transaction layer of the node the kill struck
-//! sent at its bound, before the strike, what it held for a turn of a call
-//! the kill struck there, and the test tampered with no replication stream
-//! or replica; `Degraded` otherwise.
+//! any of them hit the cap, the transaction layer of the node the kill struck
+//! sent at its bound, before the strike, nothing it held for a turn of any
+//! call on that node but the ones whose delete a backup applied, and the
+//! test tampered with no replication stream or replica; `Degraded`
+//! otherwise.
 
 use b2bua::repl::SyncLevel;
 
@@ -94,7 +95,7 @@ mod tests {
     }
 
     fn pass(node: &str, call_ref: &str) -> BoundPass {
-        BoundPass { node: node.to_string(), call_ref: call_ref.to_string() }
+        BoundPass { node: node.to_string(), call_ref: Some(call_ref.to_string()) }
     }
 
     fn tier_after(incident: Incident, passes: &[BoundPass]) -> Tier {

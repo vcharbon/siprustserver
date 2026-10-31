@@ -100,9 +100,9 @@ pub trait TurnProbe: Send + Sync {
     fn reached(&self, mark: &TurnMark<'_>) -> Option<Hold>;
 
     /// Called when the transaction layer of `node` sent at their bound
-    /// messages it held for a turn of `call_ref`: they left before that
-    /// turn's write.
-    fn bound_passed(&self, _node: &str, _call_ref: &str) {}
+    /// messages it held for a turn of `call_ref` (`None` when the layer no
+    /// longer knew the transaction): they left before that turn's write.
+    fn bound_passed(&self, _node: &str, _call_ref: Option<&str>) {}
 }
 
 /// The handle a worker carries: no probe by default.
@@ -117,7 +117,7 @@ impl TurnProbes {
 
     /// Report that the transaction layer of `node` sent held messages of
     /// `call_ref` at their bound.
-    pub fn bound_passed(&self, node: &str, call_ref: &str) {
+    pub fn bound_passed(&self, node: &str, call_ref: Option<&str>) {
         if let Some(probe) = &self.0 {
             probe.bound_passed(node, call_ref);
         }
