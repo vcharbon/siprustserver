@@ -400,7 +400,12 @@ the call has one CDR.
   copy's re-asked answer can apply in the one replication hop between the returning
   primary's reclaim write and its arrival at the copy; both nodes then dial the
   callee, and the responses to the copy's INVITE reach the primary (D7, ADR-0055
-  §8).
+  §8), which holds no transaction of it. A non-2xx is ACKed there from its
+  via-extension (ADR-0055 §12). A 2xx on a leg the primary's record lacks is
+  evidence (ADR-0055 §4): it is ACKed and BYEd from its via-extension and the
+  call ends. A 2xx on a leg id the primary's own dial holds names no dialog
+  of it and is dropped unACKed: the callee ends that dialog when its
+  retransmissions run out (RFC 3261 §13.3.1.4). No test cuts this crossing.
 - **A returning node's answer inside the replication lag of the deadline.** The
   copy's ring deadline fires before the returned node's reclaim and answer reach the
   backup: the copy CANCELs the callee after its answer and refuses the caller 480

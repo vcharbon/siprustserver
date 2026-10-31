@@ -468,12 +468,15 @@ signs the stated owners into that leg's cookie, a worker stating no primary
 being the cookie's primary. An in-dialog request goes to the cookie's primary
 while it is alive. A response to a leg's dialling INVITE goes to the call's
 primary while it is alive, whichever owner sent the INVITE: the primary takes
-that INVITE's client transaction over from the call record (ADR-0047 D7). Any
-other response, a non-INVITE one above all (RFC 3261 §17.1.2), goes to the
-owner that sent its request. Once a returned primary is alive, the call it
-reclaimed from a takeover copy has one owner: every leg's INVITE responses and
-in-dialog requests reach it, and a request the copy still awaits a final for
-keeps the copy playing on until that final.
+that INVITE's client transaction over from the call record (ADR-0047 D7). The
+proxy reads which INVITE it answers from a mark it signs on its own Via cookie
+of that INVITE, never from the worker's Via, which the far end echoes. Any
+other response, a non-INVITE one above all (RFC 3261 §17.1.2) and one to a
+re-INVITE, goes to the owner that sent its request. Once a returned primary is
+alive, the call it reclaimed from a takeover copy has one owner for every
+leg's dialling INVITE and every in-dialog request; a re-INVITE round the copy
+relayed, or any other request it awaits a final for, keeps the copy playing
+on until that final.
 
 A worker's own in-dialog requests keep following the route set through the
 proxy, which forwards them without an ownership check. While two copies run (a
@@ -485,9 +488,12 @@ A worker reclaims its own calls in two steps. Once recovered, whether or not
 its own endpoint reads ready, it makes every call of its partition resident
 and parks it: no timer armed, no transaction seeded, nothing sent. A call with
 an INVITE to serve, or one the backup wrote, is written once (ADR-0047 D7), so
-the backup's takeover copy stands down on that write, an INVITE it dialled
-awaiting its final or not, and the burst of those writes drains, before the
-proxy routes anything to the worker. A message the proxy routes to the backup
+the backup's takeover copy stands down on that write when it covers the copy
+(an INVITE the copy dialled awaiting its final or not), and the burst of those
+writes drains, before the proxy routes anything to the worker. A copy the
+write does not cover — one that wrote after the worker's pull, or holds a
+non-INVITE request of its own open — plays on until a later write of the
+worker covers it. A message the proxy routes to the backup
 meanwhile takes the call over afresh there; a final the copy takes that way is
 met by the worker, which writes the call once so the copy stands down again,
 and a 2xx it takes from the copy goes on along the copy's §13.3.1.4 ladder,
@@ -715,11 +721,13 @@ the re-anchor deadband of each other.
   - `W-off-reboot-two-servers`, off only, a restart of the primary (user
     ruling): the restarted primary reclaims a call while the backup's takeover
     copy dials a leg whose write has not reached it. The reclaim write does
-    not contain that write, so the copy plays on, and both serve the call at
-    once; their writes diverge and each node ends the call cleanly (§7), its BYE into
-    a dialog the other already ended closed by its 481, once per dialog, the
-    two BYEs of the dialog from two workers. No upstream shape restarts the
-    primary while a copy is dialling, so the row has no witness;
+    not contain that write, so the copy plays on. When the copy takes that
+    leg's answer before the primary is routable, both serve the call at once;
+    their writes diverge and each node ends the call cleanly (§7), its BYE
+    into a dialog the other already ended closed by its 481, once per dialog,
+    the two BYEs of the dialog from two workers. Otherwise the answer reaches
+    the primary (§8). No upstream shape restarts the primary while a copy is
+    dialling, so the row has no witness;
   - `W-kill-cseq`, a kill inside the replication window: a copy re-uses a
     CSeq the dead primary sent before the backup applied the write, at most
     one rejected request per dialog; the call still ends or continues
