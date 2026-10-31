@@ -1,7 +1,9 @@
 //! A datagram's transaction identity in one pass over its start line and
 //! header block, borrowed from the datagram: no allocation, and no decoding
 //! of anything past the headers. A field the datagram lacks, or holds in
-//! bytes that are not UTF-8, is `None`.
+//! bytes that are not UTF-8, is `None`. Every reader of a datagram's
+//! transaction and dialog keys (Call-ID, CSeq, top Via branch, To tag,
+//! RSeq/RAck) can share one identity instead of scanning the datagram again.
 
 /// The identity fields of one datagram.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -16,8 +18,17 @@ pub struct Identity<'a> {
     pub status: Option<u16>,
     /// The RSeq of a provisional response above 100 (RFC 3262 §7.1).
     pub rseq: Option<u64>,
-    /// The To `tag` parameter of a response.
+    /// A provisional response above 100 lists `100rel` in a Require header:
+    /// it is sent reliably (RFC 3262 §3).
+    pub reliable: bool,
+    /// The RAck response-num of a PRACK: the RSeq it acknowledges (RFC 3262
+    /// §7.2).
+    pub rack_rseq: Option<u64>,
+    /// The To `tag` parameter.
     pub to_tag: Option<&'a str>,
+    /// The `branch` parameter of the top Via (RFC 3261 §17 transaction key),
+    /// read as [`via_branch`](super::via_branch) reads it.
+    pub branch: Option<&'a str>,
 }
 
 /// The identity of `raw`. The header block ends at its first empty line;
@@ -36,6 +47,8 @@ pub fn identity(raw: &[u8]) -> Identity<'_> {
         id.method = first;
     }
     let provisional = id.status.is_some_and(|s| (101..200).contains(&s));
+    let prack = id.method == Some("PRACK");
+    let mut top_via = false;
     for line in lines {
         if line.is_empty() {
             break;
@@ -52,13 +65,26 @@ pub fn identity(raw: &[u8]) -> Identity<'_> {
             id.cseq_method = parts.next();
         } else if provisional && name.eq_ignore_ascii_case(b"rseq") {
             id.rseq = value.parse().ok();
-        } else if id.status.is_some()
-            && (name.eq_ignore_ascii_case(b"to") || name.eq_ignore_ascii_case(b"t"))
-        {
+        } else if provisional && name.eq_ignore_ascii_case(b"require") {
+            id.reliable |= value.split(',').any(|t| t.trim().eq_ignore_ascii_case("100rel"));
+        } else if prack && name.eq_ignore_ascii_case(b"rack") {
+            id.rack_rseq = value.split_ascii_whitespace().next().and_then(|n| n.parse().ok());
+        } else if name.eq_ignore_ascii_case(b"to") || name.eq_ignore_ascii_case(b"t") {
             id.to_tag = tag(value);
+        } else if !top_via && (name.eq_ignore_ascii_case(b"via") || name.eq_ignore_ascii_case(b"v"))
+        {
+            top_via = true;
+            id.branch = branch_of(value);
         }
     }
     id
+}
+
+/// The `branch` parameter of one Via row's value, `None` when empty or absent.
+pub(super) fn branch_of(value: &str) -> Option<&str> {
+    let rest = value.get(value.find("branch=")? + "branch=".len()..)?;
+    let b = super::up_to_delimiter(rest, &[';', ',', ' ', '\t']).trim();
+    (!b.is_empty()).then_some(b)
 }
 
 fn trim(b: &[u8]) -> &[u8] {
@@ -97,13 +123,42 @@ mod tests {
                 method: None,
                 status: Some(183),
                 rseq: Some(3),
+                reliable: false,
+                rack_rseq: None,
                 to_tag: Some("b1"),
+                branch: Some("z9hG4bK1"),
             }
         );
     }
 
     #[test]
-    fn a_request_has_its_method_and_no_tag_or_rseq() {
+    fn a_reliable_provisional_lists_100rel_in_any_require_row() {
+        let raw = b"SIP/2.0 180 Ringing\r\nRequire: timer\r\nRequire: foo, 100REL\r\n\
+            RSeq: 1\r\nCSeq: 1 INVITE\r\n\r\n";
+        assert!(identity(raw).reliable);
+        let final_ = b"SIP/2.0 200 OK\r\nRequire: 100rel\r\nCSeq: 1 INVITE\r\n\r\n";
+        assert!(!identity(final_).reliable, "only a provisional above 100 is reliable");
+    }
+
+    #[test]
+    fn a_prack_has_the_rseq_it_acknowledges() {
+        let raw = b"PRACK sip:b@h SIP/2.0\r\nCSeq: 2 PRACK\r\nRAck: 4 1 INVITE\r\n\r\n";
+        assert_eq!(identity(raw).rack_rseq, Some(4));
+        let bye = b"BYE sip:b@h SIP/2.0\r\nRAck: 4 1 INVITE\r\n\r\n";
+        assert_eq!(identity(bye).rack_rseq, None, "only a PRACK acknowledges");
+    }
+
+    #[test]
+    fn the_branch_is_the_top_vias() {
+        let raw = b"BYE sip:b@h SIP/2.0\r\nv: SIP/2.0/UDP a;rport;branch=z9hG4bKtop, \
+            SIP/2.0/UDP b;branch=z9hG4bKfold\r\nVia: SIP/2.0/UDP c;branch=z9hG4bKlow\r\n\r\n";
+        assert_eq!(identity(raw).branch, Some("z9hG4bKtop"));
+        let none = b"BYE sip:b@h SIP/2.0\r\nVia: SIP/2.0/UDP a\r\nVia: SIP/2.0/UDP c;branch=z9hG4bKlow\r\n\r\n";
+        assert_eq!(identity(none).branch, None, "a top Via without a branch has none");
+    }
+
+    #[test]
+    fn a_request_has_its_method_and_to_tag_and_no_rseq() {
         let raw =
             b"BYE sip:bob@h SIP/2.0\nCall-ID: c2\nTo: <sip:bob@h>;tag=b1\nCSeq: 2 BYE\nRSeq: 9\n\n";
         let id = identity(raw);
@@ -111,7 +166,7 @@ mod tests {
             (id.method, id.status, id.cseq, id.cseq_method),
             (Some("BYE"), None, Some(2), Some("BYE"))
         );
-        assert_eq!((id.call_id, id.to_tag, id.rseq), (Some("c2"), None, None));
+        assert_eq!((id.call_id, id.to_tag, id.rseq), (Some("c2"), Some("b1"), None));
     }
 
     #[test]

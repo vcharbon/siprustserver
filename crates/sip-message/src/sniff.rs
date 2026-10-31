@@ -332,9 +332,7 @@ pub fn via_branch(raw: &[u8]) -> Option<String> {
         let Some((h, v)) = line.split_once(':') else { continue };
         let h = h.trim();
         if h.eq_ignore_ascii_case("via") || h.eq_ignore_ascii_case("v") {
-            let rest = v.get(v.find("branch=")? + "branch=".len()..)?;
-            let b = up_to_delimiter(rest, &[';', ',', ' ', '\t']).trim();
-            return (!b.is_empty()).then(|| b.to_string());
+            return identity::branch_of(v).map(str::to_string);
         }
     }
     None
