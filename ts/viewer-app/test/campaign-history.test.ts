@@ -19,6 +19,8 @@ const result = (caseId: string, outcome: CampaignResult["outcome"], keys: Readon
 
 const VIEW: Campaign = {
   capture: "campaign",
+  env: null,
+  envs: [],
   saidLabel: "decision said",
   sides: ["decision", "sut"],
   lanes: ["lane-x", "lane-y"],
@@ -29,6 +31,7 @@ const VIEW: Campaign = {
   ],
   runs: [3, 2, 1].map((id) => ({
     id,
+    env: null,
     startedAt: `2026-10-1${id}T02:00:00.000Z`,
     finishedAt: null,
     labels: [{ name: "seed", value: id === 3 ? "s2" : "s1" }, { name: "sut", value: "c1" }],

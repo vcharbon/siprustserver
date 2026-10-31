@@ -15,7 +15,7 @@ import { CampaignGrid } from "../components/CampaignGrid.tsx"
 import { CaseHistory } from "../components/CaseHistory.tsx"
 import { CheckDelta } from "../components/CheckDelta.tsx"
 import { Link } from "../components/Link.tsx"
-import { href, setQuery, useQuery } from "../router.ts"
+import { href, navigate, setQuery, useQuery } from "../router.ts"
 
 const count = (run: CampaignRun | undefined, lane: string, outcome: string): number =>
   run?.lanes.find((l) => l.lane === lane)?.results.filter((r) => r.outcome === outcome).length ?? 0
@@ -96,7 +96,7 @@ const Summary = ({ view }: { readonly view: Campaign }): JSX.Element => {
   const query = useQuery()
   const [state, setState] = useState<CampaignState>(() => readState(query))
   const update = (patch: Partial<CampaignState>) => setState((now) => ({ ...now, ...patch }))
-  useEffect(() => setQuery(paramsOf(state)), [state])
+  useEffect(() => setQuery(paramsOf({ ...state, env: view.env ?? undefined })), [state, view.env])
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return
@@ -147,9 +147,20 @@ const Summary = ({ view }: { readonly view: Campaign }): JSX.Element => {
       <header className="cp-head">
         <div>
           <h1>Campaign summary</h1>
-          <p className="muted mono">{view.capture}</p>
+          <p className="muted mono">{view.capture}{view.env === null ? "" : ` · ${view.env}`}</p>
         </div>
         <div className="cp-controls">
+          {view.envs.length > 1 && (
+            <label>
+              env{" "}
+              <select
+                value={view.env ?? ""}
+                onChange={(event) => navigate(href.campaign(view.capture, { env: event.target.value }))}
+              >
+                {view.envs.map((env) => <option key={env} value={env}>{env}</option>)}
+              </select>
+            </label>
+          )}
           <label>
             run{" "}
             <select value={runId ?? ""} onChange={(event) => update({ run: Number(event.target.value) })}>
@@ -236,9 +247,13 @@ const Summary = ({ view }: { readonly view: Campaign }): JSX.Element => {
 }
 
 export const CampaignPage = ({ capture }: { readonly capture?: string | undefined }): JSX.Element => {
+  const asked = readState(useQuery())
   const loaded = useAsync(
-    () => (capture === undefined ? Promise.resolve(undefined) : api.campaign(capture)),
-    capture ?? ""
+    () =>
+      capture === undefined
+        ? Promise.resolve(undefined)
+        : api.campaign(capture, { env: asked.env, run: asked.delta?.run ?? asked.run }),
+    `${capture ?? ""}|${asked.env ?? ""}`
   )
   if (capture === undefined) return <Campaigns />
   if (loaded.state === "loading") return <div className="page campaign"><p className="muted">…</p></div>

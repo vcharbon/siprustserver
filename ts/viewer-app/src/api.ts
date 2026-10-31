@@ -998,6 +998,8 @@ export interface CampaignLane {
 
 export interface CampaignRun {
   readonly id: number
+  /** The environment that made the run. */
+  readonly env: string | null
   readonly startedAt: string
   readonly finishedAt: string | null
   /** What the run states it ran on, in the deployment's order. */
@@ -1012,9 +1014,13 @@ export interface CampaignCase {
   readonly family: string
 }
 
-/** One campaign's latest runs, newest first, and every case any of them ran. */
+/** One environment's latest runs of a campaign, newest first, and every case any of them ran. */
 export interface Campaign {
   readonly capture: string
+  /** The environment whose runs these are. */
+  readonly env: string | null
+  /** Every environment that wrote the campaign's runs, the latest writer first. */
+  readonly envs: readonly string[]
   /** The label of a check's `said`. */
   readonly saidLabel: string
   /** The side vocabulary, in the order the pages list it. */
@@ -1022,23 +1028,6 @@ export interface Campaign {
   readonly lanes: readonly string[]
   readonly runs: readonly CampaignRun[]
   readonly cases: readonly CampaignCase[]
-}
-
-/** A cell's decision-service log: its records, or why it has none. */
-export type CampaignLog = { readonly records: string } | { readonly missing: string }
-
-/** A text GET whose 404 states why there is nothing. */
-const campaignLog = async (path: string): Promise<CampaignLog> => {
-  const response = await fetch(path)
-  if (response.ok) return { records: await response.text() }
-  const text = await response.text()
-  try {
-    const parsed = JSON.parse(text) as { note?: unknown }
-    if (typeof parsed.note === "string") return { missing: parsed.note }
-  } catch {
-    // Not JSON: the text is the reason.
-  }
-  return { missing: `${response.status} ${text.slice(0, 200)}` }
 }
 
 /** A request whose failure, of any status, is the server's stated reason where it states one. */
@@ -1233,14 +1222,9 @@ export const api = {
     ),
   retirePlan: (capture: string) => request<RetirePlan>(`/api/sources/${encodeURIComponent(capture)}/retire-plan`),
   campaigns: () => request<readonly string[]>("/api/campaign"),
-  campaign: (capture: string, limit?: number) =>
-    request<Campaign>(`/api/campaign/${encodeURIComponent(capture)}${search({ limit })}`),
-  campaignLog: (capture: string, session: string, cell: string) =>
-    campaignLog(
-      `/api/campaign/${encodeURIComponent(capture)}/runs/${encodeURIComponent(session)}/cells/${
-        encodeURIComponent(cell)
-      }/log`
-    )
+  /** One environment's latest runs of a campaign (the server's choice where none is named), `run` among them. */
+  campaign: (capture: string, query: { readonly env?: string | undefined; readonly run?: number | undefined } = {}) =>
+    request<Campaign>(`/api/campaign/${encodeURIComponent(capture)}${search({ env: query.env, run: query.run })}`)
 }
 
 export type Async<A> =

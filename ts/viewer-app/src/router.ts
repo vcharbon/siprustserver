@@ -207,6 +207,8 @@ export interface QueueParams {
 
 /** Where in a campaign's summary the link points; every value is text, because a URL carries text. */
 export interface CampaignParams {
+  /** The environment whose runs are read; absent, the server's choice. */
+  readonly env?: string | undefined
   /** `grid` for the run grid; absent, the failures. */
   readonly tab?: string | undefined
   /** The run read, and the run it is compared with. */

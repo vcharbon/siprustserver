@@ -40,6 +40,7 @@ const UUI = check("B1 INVITE", "header(User-to-User)", null, "decision")
 
 const run = (id: number, lanes: Readonly<Record<string, ReadonlyArray<CampaignResult>>>) => ({
   id,
+  env: null,
   startedAt: `2026-10-${10 + id}T02:00:00.000Z`,
   finishedAt: null,
   labels: [],
@@ -59,6 +60,8 @@ const CASES = ["fam-a/one", "fam-a/two", "fam-b/three", "fam-b/four"]
 /** Four runs, newest first: run 3 a pre-run error; PAI failing since run 2, URI new in run 4. */
 const VIEW: Campaign = {
   capture: "campaign",
+  env: null,
+  envs: [],
   saidLabel: "decision said",
   sides: ["decision", "sut"],
   lanes: ["lane-x", "lane-y"],
@@ -138,5 +141,22 @@ describe("the failure facets of a run", () => {
   it("state a run that judged no call as one error facet", () => {
     const f = facets(VIEW, 3, 2, ALL_FILTERS, { checks: [], families: [] })
     expect(f.checks.map((c) => [c.key, c.calls, c.sides])).toEqual([["error database init failed", 4, { error: 8 }]])
+  })
+
+  it("read a call a run did not judge as unknown: no streak broken, nothing new, nothing passing again", () => {
+    const only = (id: number, results: ReadonlyArray<CampaignResult>) => run(id, { "lane-x": results })
+    const view: Campaign = {
+      ...VIEW,
+      lanes: ["lane-x"],
+      runs: [
+        only(3, [failed("fam-a/one", PAI), ok("fam-a/two")]),
+        only(2, [ok("fam-a/two"), failed("fam-b/three", UUI)]),
+        only(1, [failed("fam-a/one", PAI), ok("fam-a/two")])
+      ]
+    }
+    const f = facets(view, 3, 2, ALL_FILTERS, { checks: [], families: [] })
+    expect(f.checks.map((c) => [c.key, c.since])).toEqual([[keyOf(PAI), 1]])
+    expect(f.passingAgain).toEqual([])
+    expect(facets(view, 3, 2, { ...ALL_FILTERS, fresh: true }, { checks: [], families: [] }).matching).toEqual([])
   })
 })

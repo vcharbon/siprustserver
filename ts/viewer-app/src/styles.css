@@ -2080,6 +2080,7 @@ tr.rule-unrostered td {
 .cp-tag { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 9px; border: 1px solid var(--cp-line); white-space: nowrap; }
 .cp-tag.side0 { background: var(--cp-accbg); color: var(--cp-acc); border-color: transparent; }
 .cp-tag.side1 { background: var(--cp-nokbg); color: var(--cp-nok); border-color: transparent; }
+.cp-tag.side2 { background: var(--cp-errbg); color: var(--cp-err); border-color: transparent; }
 .cp-tag.error { background: var(--cp-errbg); color: var(--cp-err); border-color: transparent; }
 .cp-tag.untyped { color: var(--cp-mute); }
 .cp-tag.new { background: var(--cp-nokbg); color: var(--cp-nok); border-color: transparent; font-weight: 600; }
@@ -2126,6 +2127,7 @@ tr.rule-unrostered td {
 .cp-cell.error { background: var(--cp-err); }
 .cp-cell.none { background: var(--cp-none); }
 .cp-cell.cur { outline: 2px solid var(--cp-acc); outline-offset: -1px; }
+.cp-cell.cp-key { display: inline-block; vertical-align: middle; cursor: default; }
 
 .cp-drawer {
   position: fixed;

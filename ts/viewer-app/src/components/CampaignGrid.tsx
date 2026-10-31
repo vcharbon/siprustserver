@@ -37,6 +37,11 @@ export const CampaignGrid = ({ grid, lanes, run, onCase }: {
     ])
   return (
     <section className="cp-panel cp-grid">
+      <p className="muted cp-legend">
+        <span className="cp-cell pass cp-key" /> ✓ pass · <span className="cp-cell failure cp-key" /> ✗ fail ·{" "}
+        <span className="cp-cell error cp-key" /> ! error · <span className="cp-cell none cp-key" /> — not run ·{" "}
+        <span className="cp-cell none cur cp-key" /> run read
+      </p>
       <table>
         <thead>
           <tr>

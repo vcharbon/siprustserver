@@ -110,12 +110,8 @@ export const resultOf = (run: CampaignRun | undefined, lane: string, caseId: str
 const failing = (result: CampaignResult | undefined): boolean =>
   result !== undefined && result.outcome !== "pass"
 
-/** Whether `run` judged a call on any of `lanes`. */
-const judged = (run: CampaignRun, lanes: readonly string[]): boolean =>
-  run.lanes.some((l) => lanes.includes(l.lane) && l.results.some((r) => r.outcome !== "error"))
-
-/** The checks some call of `run` failed on `lanes`, by key. */
-const keysOf = (run: CampaignRun | undefined, lanes: readonly string[]): ReadonlyMap<string, number> => {
+/** The calls each check some call of `run` failed on `lanes`, by key. */
+const keysOf = (run: CampaignRun | undefined, lanes: readonly string[]): ReadonlyMap<string, ReadonlySet<string>> => {
   const calls = new Map<string, Set<string>>()
   for (const lane of run?.lanes ?? []) {
     if (!lanes.includes(lane.lane)) continue
@@ -126,8 +122,15 @@ const keysOf = (run: CampaignRun | undefined, lanes: readonly string[]): Readonl
       }
     }
   }
-  return new Map([...calls].map(([key, set]) => [key, set.size]))
+  return calls
 }
+
+/** Whether `run` judged a call of `caseId` on one of `lanes`. */
+export const judgedIn = (run: CampaignRun | undefined, lanes: readonly string[], caseId: string): boolean =>
+  lanes.some((lane) => {
+    const outcome = resultOf(run, lane, caseId)?.outcome
+    return outcome === "pass" || outcome === "failure"
+  })
 
 const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
 
@@ -150,7 +153,10 @@ export const facets = (
     const bad = now.filter(failing).length
     if (filters.failing && bad === 0) return false
     if (filters.oneLane && bad !== 1) return false
-    if (filters.fresh && !lanes.some((lane) => failing(resultOf(run, lane, c.caseId)) && !failing(resultOf(vs, lane, c.caseId)))) {
+    if (
+      filters.fresh &&
+      !lanes.some((lane) => failing(resultOf(run, lane, c.caseId)) && resultOf(vs, lane, c.caseId)?.outcome === "pass")
+    ) {
       return false
     }
     if (text !== "") {
@@ -216,19 +222,22 @@ export const facets = (
     })
   }
 
+  const now = keysOf(run, lanes)
+  const before = keysOf(vs, lanes)
+
   const since = (key: string, on: readonly string[]): number => {
+    const failingNow = [...(keysOf(run, on).get(key) ?? [])]
     let first = runId
     for (let at = order.findIndex((r) => r.id === runId) - 1; at >= 0; at -= 1) {
       const earlier = order[at]!
-      if (!judged(earlier, on)) continue
-      if (!keysOf(earlier, on).has(key)) break
-      first = earlier.id
+      if (keysOf(earlier, on).has(key)) {
+        first = earlier.id
+        continue
+      }
+      if (failingNow.some((caseId) => judgedIn(earlier, on, caseId))) break
     }
     return first
   }
-
-  const now = keysOf(run, lanes)
-  const before = keysOf(vs, lanes)
   const checks = [...byKey.entries()]
     .map(([key, f]): CheckFacet => ({
       key,
@@ -245,8 +254,10 @@ export const facets = (
     checks,
     families: [...families].map(([family, calls]) => ({ family, calls }))
       .sort((a, b) => b.calls - a.calls || compare(a.family, b.family)),
-    passingAgain: [...before].filter(([key]) => !now.has(key)).map(([key, calls]) => ({ key, calls }))
-      .sort((a, b) => compare(a.key, b.key)),
+    passingAgain: [...before].flatMap(([key, calls]) => {
+      const judgedNow = [...calls].filter((caseId) => judgedIn(run, lanes, caseId))
+      return now.has(key) || judgedNow.length === 0 ? [] : [{ key, calls: judgedNow.length }]
+    }).sort((a, b) => compare(a.key, b.key)),
     shapes: single === undefined ? [] : [...single.shapes.values()].sort((a, b) => b.count - a.count),
     matching: matches,
     ran: kept.length,
