@@ -272,8 +272,9 @@ ends the transaction with the CANCEL unsent (§9.1, §17.2.1).
   call as born, marked cancelled, its two answers released after that write.
   A node that takes over the marked call ends it with nothing on the wire;
   the decision that returns is recorded, never applied, and the `Cancelled`
-  turn ends the call with the CDR it builds from it. A copy of the
-  CANCEL or the INVITE meanwhile draws nothing; a node killed holding them
+  turn ends the call with the CDR it builds from it; under `off` the answers
+  leave as that write is logged. A copy of the CANCEL or the INVITE while the
+  answers are held draws nothing; a node killed holding them
   leaves the caller's repeated CANCEL to the backup, which answers it on the
   transaction its takeover seeds and CANCELs the callee.
 

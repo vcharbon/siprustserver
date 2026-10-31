@@ -141,9 +141,9 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent, matched_cli
     // ── Setup-CANCEL mark ──────────────────────────────────────────────
     // An out-of-dialog CANCEL means the txn layer just finalized the initial
     // INVITE (200 + 487 sent, or held for the turn that writes the CANCEL).
-    // The `Cancelled` event queues on
-    // the per-call FIFO BEHIND the initial-INVITE turn (waiting for a permit,
-    // or parked on its decision round trip), so the call model cannot learn
+    // The `Cancelled` event queues on the per-call FIFO BEHIND the
+    // initial-INVITE turn (waiting for a permit, or parked on its decision
+    // round trip), so the call model cannot learn
     // the caller is gone until that turn ends — mark it here (the run loop) so
     // the turn (`process::initial_invite_turn`) skips the decision of a setup
     // not yet ruled, writes the CANCEL of one whose decision runs, and drops a

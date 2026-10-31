@@ -10,8 +10,9 @@
 //! counter having moved to its next epoch on the restore, so the limiter
 //! checks it net of what the key holds and counts the call once. A call whose
 //! caller CANCELed the setup during its consult ([`Call::setup_cancelled`])
-//! holds a decision never applied and a caller already answered 487: it ends
-//! under the caller's cancel with nothing on the wire. A node whose endpoint
+//! holds no applied decision, possibly none at all; her 487 either left
+//! already or leaves on the seeded transaction when she repeats her CANCEL.
+//! It ends under her cancel, its CDR stating it, with nothing on the wire. A node whose endpoint
 //! left the slice asks nothing and refuses the caller 503, as it refuses a
 //! decision it does not apply (ADR-0047 D6). One owner acts on the answer
 //! (ADR-0047 D7): a takeover copy whose call's primary wrote the call since
@@ -20,7 +21,7 @@
 
 use std::sync::Arc;
 
-use call::{Call, CallModelState, TerminationCause};
+use call::{Call, CallModelState, CdrEvent, CdrEventType, TerminationCause};
 
 use super::cancel_in_consult::consult_writing_its_cancel;
 use super::interpret::process_result;
@@ -101,6 +102,18 @@ pub(super) async fn settle_undecided(
             (TerminationCause::Admission, None)
         };
         let mut ended = call;
+        // The caller's cancel, as the CANCEL's own turn records it.
+        if ended.setup_cancelled {
+            let event = CdrEvent {
+                event_type: CdrEventType::Cancel,
+                timestamp: now_ms,
+                leg_id: ended.a_leg.leg_id.clone(),
+                status_code: None,
+                reason: None,
+                decision_ordinal: 0,
+            };
+            call::helpers::add_cdr_event(&mut ended, event);
+        }
         call::helpers::record_termination(&mut ended, now_ms, cause, by_leg);
         ended.state = CallModelState::Terminated;
         (HandlerResult::new(ended), UnansweredCaller::Leave)

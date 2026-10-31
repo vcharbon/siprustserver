@@ -181,8 +181,10 @@ pub struct Call {
     /// so a stamp reads it without a length; `0` before the first decision.
     pub decision_ordinal: u32,
     /// The caller CANCELed the setup while its initial decision was in
-    /// flight: the caller holds the transaction layer's 487, and nothing the
-    /// decision stated was applied.
+    /// flight: nothing the decision stated was applied, and the record may
+    /// hold no decision at all. The caller's 487 is the transaction layer's,
+    /// sent already or, from another node serving the call, on the INVITE
+    /// transaction it seeds when she repeats her CANCEL.
     #[serde(default)]
     pub setup_cancelled: bool,
     /// Who ended the call and why ([`crate::helpers::record_termination`] is

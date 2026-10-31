@@ -136,7 +136,7 @@ struct Inner {
     setup_cancelled: HashMap<String, Vec<u32>>,
     /// The initial INVITEs whose turn awaits their setup-CANCEL mark while
     /// their decision runs, by `(callRef, INVITE CSeq)`: the mark wakes it.
-    /// An entry lives as long as its `SetupCancelWatch`.
+    /// Removed when its `SetupCancelWatch` drops, unless a later watch replaced it.
     setup_cancel_watches: HashMap<(String, u32), Arc<tokio::sync::Notify>>,
     /// Resident calls that run uncounted (`CallLimiterState::runs_uncounted`):
     /// moved by every insertion, replacement and removal of `calls`, so it is

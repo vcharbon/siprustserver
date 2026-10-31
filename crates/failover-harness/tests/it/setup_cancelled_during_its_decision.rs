@@ -21,10 +21,10 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use b2bua::repl::SyncLevel;
-use call::TerminationCause;
+use call::{CdrEventType, TerminationCause};
 use failover_harness::cluster::{limited_route_to, Cluster, ClusterRecipe};
 use failover_harness::sweep::{ALICE, BOB};
-use failover_harness::{Incident, Tier, TurnAt, TurnPoint};
+use failover_harness::{Incident, Tier, TurnAt, TurnPoint, WorkerHealth};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser};
 
@@ -35,49 +35,125 @@ use crate::inflight_resend::last_request_sent;
 /// How long the routing decision takes: far above the CANCEL's bound.
 const DECISION_DELAY: Duration = Duration::from_secs(3);
 
+/// The CDR events of a setup the caller CANCELed during its decision, whoever
+/// ends it.
+const CANCELLED_EVENTS: &[CdrEventType] = &[CdrEventType::InviteReceived, CdrEventType::Cancel];
+
+/// How the primary dies.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kill {
+    /// Its departure announced: the backup takes the call over.
+    Announced,
+    /// Unannounced, then restarted empty: it reclaims the call from the backup.
+    UnannouncedThenRebooted,
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_kill_as_the_cancel_is_logged_dials_nobody() {
-    cancelled_during_its_decision("cancel-in-decision-t1-logged", 1, TurnPoint::Logged).await;
+    cancelled_during_its_decision(
+        Kill::Announced,
+        "cancel-in-decision-t1-logged",
+        1,
+        TurnPoint::Logged,
+    )
+    .await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_kill_as_the_cancel_is_applied_dials_nobody() {
-    cancelled_during_its_decision("cancel-in-decision-t1-applied", 1, TurnPoint::Applied).await;
+    cancelled_during_its_decision(
+        Kill::Announced,
+        "cancel-in-decision-t1-applied",
+        1,
+        TurnPoint::Applied,
+    )
+    .await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_kill_as_the_cancels_answers_left_dials_nobody() {
-    cancelled_during_its_decision("cancel-in-decision-t1-left", 1, TurnPoint::Left).await;
+    cancelled_during_its_decision(
+        Kill::Announced,
+        "cancel-in-decision-t1-left",
+        1,
+        TurnPoint::Left,
+    )
+    .await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_kill_as_the_recorded_decision_is_logged_dials_nobody() {
-    cancelled_during_its_decision("cancel-in-decision-t2-logged", 2, TurnPoint::Logged).await;
+    cancelled_during_its_decision(
+        Kill::Announced,
+        "cancel-in-decision-t2-logged",
+        2,
+        TurnPoint::Logged,
+    )
+    .await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_kill_as_the_recorded_decision_is_applied_dials_nobody() {
-    cancelled_during_its_decision("cancel-in-decision-t2-applied", 2, TurnPoint::Applied).await;
+    cancelled_during_its_decision(
+        Kill::Announced,
+        "cancel-in-decision-t2-applied",
+        2,
+        TurnPoint::Applied,
+    )
+    .await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_kill_as_the_recorded_decision_left_dials_nobody() {
-    cancelled_during_its_decision("cancel-in-decision-t2-left", 2, TurnPoint::Left).await;
+    cancelled_during_its_decision(
+        Kill::Announced,
+        "cancel-in-decision-t2-left",
+        2,
+        TurnPoint::Left,
+    )
+    .await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_kill_as_the_end_is_logged_dials_nobody() {
-    cancelled_during_its_decision("cancel-in-decision-t3-logged", 3, TurnPoint::Logged).await;
+    cancelled_during_its_decision(
+        Kill::Announced,
+        "cancel-in-decision-t3-logged",
+        3,
+        TurnPoint::Logged,
+    )
+    .await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_kill_as_the_end_is_applied_dials_nobody() {
-    cancelled_during_its_decision("cancel-in-decision-t3-applied", 3, TurnPoint::Applied).await;
+    cancelled_during_its_decision(
+        Kill::Announced,
+        "cancel-in-decision-t3-applied",
+        3,
+        TurnPoint::Applied,
+    )
+    .await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_kill_as_the_end_left_dials_nobody() {
-    cancelled_during_its_decision("cancel-in-decision-t3-left", 3, TurnPoint::Left).await;
+    cancelled_during_its_decision(
+        Kill::Announced,
+        "cancel-in-decision-t3-left",
+        3,
+        TurnPoint::Left,
+    )
+    .await;
+}
+
+/// Killed unannounced as the CANCEL is applied, the primary restarts empty
+/// and reclaims the marked call from its backup; the caller's repeated CANCEL
+/// reaches it.
+#[tokio::test(start_paused = true)]
+async fn a_primary_rebooted_after_the_cancel_is_applied_reclaims_it_and_dials_nobody() {
+    let name = "cancel-in-decision-rebooted-t1-applied";
+    cancelled_during_its_decision(Kill::UnannouncedThenRebooted, name, 1, TurnPoint::Applied).await;
 }
 
 /// With no kill, the CANCEL's answers leave once the backup applied its
@@ -126,14 +202,15 @@ async fn with_no_kill_the_answers_leave_before_their_bound_and_the_cdr_records_t
     let cause = cdr.termination.as_ref().map(|t| t.cause);
     assert_eq!(cause, Some(TerminationCause::RemoteCancel), "a cancelled call");
     assert_eq!(cdr.decision_log.len(), 1, "the decision recorded, never applied");
+    assert_eq!(event_kinds(cdr), CANCELLED_EVENTS, "the cancelled call's events");
     assert!(cdr.b_legs.is_empty(), "the CDR dials nobody");
     assert_eq!(cluster.node(&placement.backup).cdr_records().len(), 0, "the primary wrote it");
     cluster.fh.assert_sip_rfc_clean(name);
 }
 
 /// The caller CANCELs 100 ms into a 3 s decision; the primary dies at
-/// sub-point `point` of turn `turn`, its departure announced.
-async fn cancelled_during_its_decision(name: &str, turn: usize, point: TurnPoint) {
+/// sub-point `point` of turn `turn` as `kill` says.
+async fn cancelled_during_its_decision(kill: Kill, name: &str, turn: usize, point: TurnPoint) {
     let (decision, consults) = CountedDecision::counting(
         limited_route_to(BOB.parse().expect("bob's address")),
         DECISION_DELAY,
@@ -153,13 +230,28 @@ async fn cancelled_during_its_decision(name: &str, turn: usize, point: TurnPoint
         .await
         .unwrap_or_else(|_| panic!("[{name}] the call never reached t{turn}-{}", point.label()))
         .expect("the armed turn is handed over");
-    cluster.fh.strike(Incident::PrimaryKilled);
-    cluster.kill(&placement.primary, &placement.backup);
-    held.release();
     assert_eq!(consults.load(Ordering::SeqCst), 1, "the primary asked the decision once");
+    // The primary wrote the end's CDR and its delete is not applied: the
+    // survivor writes one too (ADR-0020 X2).
+    let (_, turns) = cluster.fh.turn_points().first_call().expect("a call");
+    let most = if turns.get(2).is_some_and(|end| !end.applied) { 2 } else { 1 };
+    match kill {
+        Kill::Announced => {
+            cluster.fh.strike(Incident::PrimaryKilled);
+            cluster.kill(&placement.primary, &placement.backup);
+            held.release();
+        }
+        Kill::UnannouncedThenRebooted => {
+            cluster.fh.strike(Incident::PrimaryRebooted);
+            cluster.kill_unannounced(&placement.primary);
+            held.release();
+            cluster.fh.advance(Duration::from_secs(1)).await;
+            reboot_and_reclaim(&mut cluster, &placement.primary).await;
+        }
+    }
 
     // A CANCEL whose answers died with the primary goes again on Timer E
-    // (RFC 3261 §17.1.2.2) and reaches the backup.
+    // (RFC 3261 §17.1.2.2) and reaches the node now serving the call.
     cluster.fh.advance(Duration::from_millis(500)).await;
     if !answered(&cluster, &alice) {
         let (wire, dst) = last_request_sent(&cluster.fh, alice.addr(), &Method::Cancel);
@@ -173,6 +265,11 @@ async fn cancelled_during_its_decision(name: &str, turn: usize, point: TurnPoint
         !cluster.fh.sip_entries().iter().any(|e| e.to == bob.addr()),
         "[{name}] the callee is never dialled"
     );
+    // Only a backup holding the call as born asks the decision again.
+    let asked = consults.load(Ordering::SeqCst);
+    let unmarked = (turn, point) == (1, TurnPoint::Logged);
+    let asks = if unmarked { 1..=2 } else { 1..=1 };
+    assert!(asks.contains(&asked), "[{name}] the decision was asked {asked} times");
     let call_ref = cluster.fh.turn_points().first_call().expect("a call").0;
     let drained = cluster.fh.settle_terminal(async || cluster.is_clear_of(&call_ref).await).await;
     assert!(drained, "[{name}] the cluster forgets the call, its limiter set released");
@@ -185,15 +282,37 @@ async fn cancelled_during_its_decision(name: &str, turn: usize, point: TurnPoint
         .flat_map(|n| n.cdr_records())
         .filter(|r| r.call_ref == call_ref)
         .collect();
-    assert!((1..=2).contains(&cdrs.len()), "[{name}] one CDR, or the dead primary's too");
+    assert!((1..=most).contains(&cdrs.len()), "[{name}] {} CDRs, at most {most}", cdrs.len());
     for cdr in &cdrs {
         let cause = cdr.termination.as_ref().map(|t| t.cause);
         assert_eq!(cause, Some(TerminationCause::RemoteCancel), "[{name}] a cancelled call");
+        assert_eq!(event_kinds(cdr), CANCELLED_EVENTS, "[{name}] the cancelled call's events");
         assert!(cdr.b_legs.is_empty(), "[{name}] the CDR dials nobody");
     }
     let only_the_487 = finals_to(&cluster, &alice).iter().all(|s| *s == 487);
     assert!(only_the_487, "[{name}] nothing but the 487 ends the caller's INVITE");
     cluster.fh.assert_sip_rfc_clean(name);
+}
+
+/// The primary, killed unannounced, restarts empty at a new address,
+/// becomes ready and is published to the proxy again.
+async fn reboot_and_reclaim(cluster: &mut Cluster, primary: &str) {
+    let addr = cluster.reboot(primary).await;
+    for _ in 0..40 {
+        cluster.fh.advance(Duration::from_millis(500)).await;
+        if cluster.node(primary).is_ready() {
+            break;
+        }
+    }
+    assert!(cluster.node(primary).is_ready(), "the restarted primary became ready");
+    cluster.proxy.set_address(primary, addr);
+    cluster.fh.readmit(primary, addr);
+    cluster.proxy.set_health(primary, WorkerHealth::Alive);
+}
+
+/// The kinds of `cdr`'s events, in order.
+fn event_kinds(cdr: &b2bua::cdr::CdrRecord) -> Vec<CdrEventType> {
+    cdr.events.iter().map(|e| e.event_type).collect()
 }
 
 /// Whether the caller's CANCEL drew its 200 so far.
