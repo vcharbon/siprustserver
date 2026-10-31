@@ -2574,7 +2574,7 @@ One check vocabulary everywhere, borrowed from the upstream `e2e-model`:
 
 | field | required | meaning |
 |---|---|---|
-| `field` | yes | field selector. Open token: `status`, `from.userInfo`, `from.uri`, `to.uri`, `ruri.uri`, `ruri.userInfo`, `header(P-Asserted-Identity)`, `tags(Supported,Require)` (the option tags every row of the named headers lists, one set joined by `,`), `body`, `body.b64`, or a deployment observable's name in a postcondition |
+| `field` | yes | field selector. Open token: `status`, `from.userInfo`, `from.uri`, `to.uri`, `ruri.uri`, `ruri.userInfo`, `header(P-Asserted-Identity)`, `tags(Supported,Require)` (the option tags every row of the named headers lists, one set joined by `,`), `body`, `body.b64`, `part(application/sdp)` (the first entity part of that media type, read as `body` reads a body), or a deployment observable's name in a postcondition |
 | `op` | yes | `eq`, `regex`, `exists`, `absent` |
 | `value` | with `eq` / `regex` | a literal, a regex, or a string carrying `${…}` accessors |
 
@@ -2584,6 +2584,11 @@ and nothing else, unlike the confrontation's probe rendering (§8.3), which
 also treats a control byte as non-text; `body.b64` observes it as base64
 always — the byte-exact assertion an author writes for a body that is not
 text.
+
+`part(<type>)` observes the payload of the first entity part whose bare media
+type is `<type>`, case-insensitively (RFC 2045 §5.1): a `multipart/*` body's
+parts (RFC 2046 §5.1), or a single-part body as its one part. A body holding no
+such part observes none, so `exists` asserts the part is there.
 
 `exists` and `absent` take no value, and `eq` / `regex` require one; lint refuses
 either mismatch.
