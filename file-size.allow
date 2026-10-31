@@ -49,10 +49,10 @@ crates/call/tests/it/model_helpers.rs 893
 crates/e2e-core/src/infra.rs 622
 crates/e2e-model/src/registry.rs 575
 crates/e2e-web/src/lib.rs 1123
-crates/failover-harness/src/harness.rs 1970
+crates/failover-harness/src/harness.rs 1969
 crates/failover-harness/src/runner.rs 615
 crates/failover-harness/tests/it/call_terminate_on_backup.rs 986
-crates/failover-harness/tests/it/failover.rs 1517
+crates/failover-harness/tests/it/failover.rs 1516
 crates/failover-harness/tests/it/fault_primitives.rs 887
 crates/failover-harness/tests/it/inflight_resend.rs 806
 crates/failover-harness/tests/it/limiter_ha.rs 862
@@ -94,7 +94,7 @@ crates/scenario-harness/src/agent/harness.rs 855
 crates/scenario-harness/src/agent/server_txn.rs 599
 crates/scenario-harness/src/agent/ua.rs 726
 crates/scenario-harness/tests/it/template_emission.rs 1016
-crates/seq-report/src/html.rs 1005
+crates/seq-report/src/html.rs 1002
 crates/sip-message/src/generators/relay.rs 504
 crates/sip-message/src/parser/custom/structured_headers.rs 503
 crates/sip-message/src/sdp_answer.rs 534

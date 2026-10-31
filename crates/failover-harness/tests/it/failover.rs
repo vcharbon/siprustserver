@@ -14,7 +14,6 @@
 
 use std::time::Duration;
 
-use crate::departure_support::spawn_reactive_proxy;
 use call::parse_call_ref;
 use call::CdrEventType;
 use failover_harness::{

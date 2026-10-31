@@ -891,6 +891,8 @@ pub struct FailoverHarness {
     /// The turn points of every call the cluster serves; every worker reports
     /// to it (ADR-0055 §13).
     turn_points: Arc<TurnPoints>,
+    /// Every worker's decision requests and their answers.
+    callouts: crate::callouts::Callouts,
 }
 
 /// How one worker ordinal was spawned — everything a replacement incarnation of
@@ -983,14 +985,9 @@ impl FailoverHarness {
         // skip. `FailoverHarness` runs its own endpoint-scoped audit on Drop
         // (`rfc_audit_findings`), so disarm the redundant unscoped one here.
         harness.disarm_cseq_gate();
-        // ONE shared global recording-order sequencer for ALL THREE planes. It IS
-        // the SIP layer-harness `EventSequencer` (the same counter that stamps
-        // every recorded SIP message's `seq`); we thread it into the repl capture
-        // sink and into the lifecycle/chaos markers so the unified combiner can
-        // render strictly in TRUE append order. `at_ms` then serves only as the
-        // displayed time label — never the cross-source tiebreaker — so a reboot
-        // marker appended just before the bootstrap pull it triggers sorts first
-        // even though both land on the same paused-clock millisecond.
+        // ONE global recording-order sequencer for every plane (the SIP
+        // recorder's), so the unified report renders in true append order;
+        // `at_ms` is only the time label, never the cross-source tiebreaker.
         let event_seq = harness.recording().recorder().sequencer();
         let capture_seq: repl_net_testkit::CaptureSeq = {
             let s = event_seq.clone();
@@ -1040,10 +1037,11 @@ impl FailoverHarness {
             worker_services: Vec::new,
             worker_adaptation_http: None,
             worker_compose: b2bua::rules::ComposeOptions::default(),
-            views: ViewLedger::new(clock, event_seq_for_views),
+            views: ViewLedger::new(clock.clone(), event_seq_for_views),
             worker_specs: HashMap::new(),
             sip_cut,
-            turn_points: TurnPoints::stamped(capture_seq),
+            turn_points: TurnPoints::stamped(capture_seq.clone()),
+            callouts: crate::callouts::Callouts::new(capture_seq, clock.clone()),
         }
     }
 
@@ -1476,7 +1474,7 @@ impl FailoverHarness {
             // Placeholder; replaced by the real handle setup() builds, just below.
             membership: Arc::new(SimulatedMembership::with_clock(vec![], node_clock.clone())),
             harness: self.harness.clone(),
-            decision: spec.decision.clone(),
+            decision: self.callouts.wrap(spec.decision.clone(), ordinal),
             limiter: spec.limiter.clone(),
             tune: self.worker_tune.clone(),
             services: self.worker_services,
@@ -1658,6 +1656,7 @@ impl FailoverHarness {
             &self.worker_axes(),
             &self.views.views(),
         );
+        self.callouts.draw(&mut doc);
         // RFC 3261 status MUST be reflected in the report: a trace that violates a
         // gating rule can NEVER show PASS. Fold the findings into the doc anomalies
         // and force passed=false so the rendered report.html / global.txt show FAIL

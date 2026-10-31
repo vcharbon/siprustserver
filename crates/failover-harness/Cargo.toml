@@ -13,6 +13,8 @@ side = "aware"
 workspace = true
 
 [dependencies]
+# The decision callouts wrap the engine (the `CallDecisionEngine` trait is async-trait).
+async-trait = { workspace = true }
 b2bua = { path = "../b2bua", features = ["testkit"] }
 # The simulated load sampler each worker's overload signal reads.
 load-shed = { path = "../load-shed" }
@@ -56,5 +58,3 @@ tokio = { workspace = true, features = ["test-util"] }
 observe-testkit = { path = "../observe-testkit" }
 # A test service states the body of a request it originates.
 b2bua-sdk = { path = "../b2bua-sdk" }
-# A test wraps the limiter client (the `CallLimiter` trait is async-trait).
-async-trait = { workspace = true }

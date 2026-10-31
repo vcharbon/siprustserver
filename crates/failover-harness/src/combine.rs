@@ -152,7 +152,7 @@ pub fn combine_doc(
             to: Some(sip_col(e.to)),
             label: facets(&e.raw).label,
             detail: Some(detail),
-            conn: None,
+            conn: sip_message::sniff::call_id(&e.raw),
             kind: RowKind::Sip { delivered: e.delivered },
         });
     }

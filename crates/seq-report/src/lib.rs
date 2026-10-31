@@ -52,6 +52,7 @@
 //! the observer's own column in the sequence, plus a views table and a
 //! disagreements list under the diagram — see `views`.
 
+mod flows;
 mod html;
 mod normalize;
 mod sanitize;

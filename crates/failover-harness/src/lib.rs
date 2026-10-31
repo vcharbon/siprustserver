@@ -33,6 +33,7 @@
 //!   `(state, event, fault, recovery, seed)` rows into one named
 //!   `#[tokio::test]` per legal cell (`tests/it/transparent_v1.rs`).
 
+pub mod callouts;
 pub mod cluster;
 pub mod combine;
 pub mod cookie;

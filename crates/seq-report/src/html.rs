@@ -37,6 +37,7 @@
 
 use std::collections::HashMap;
 
+use crate::flows::{self, Flows, FLOW_PALETTE};
 use crate::views::{disagreements, views_table, ViewChange};
 use crate::{format_relative, Anomaly, Item, Lane, LaneKind, RowKind, SeqDoc};
 
@@ -198,20 +199,10 @@ pub fn render_html(doc: &SeqDoc) -> String {
         .map(|d| format!("<p class=\"desc\">{}</p>", escape(d)))
         .unwrap_or_default();
 
-    // Per-flow color legend: SIP rows carrying a `conn` (the
-    // Call-ID) are colored per flow — name each color so a reader can map
-    // arrow hue → dialog without opening payloads. First-seen order.
+    // Per-call legend: SIP rows carrying a `conn` (the Call-ID) are colored
+    // per call (`flows`), named here in first-seen order.
     let mut flow_chips = String::new();
-    let mut seen_conns: Vec<&str> = Vec::new();
-    for item in &items {
-        let Item::Row(row) = item else { continue };
-        let (RowKind::Sip { .. }, Some(conn)) = (&row.kind, row.conn.as_deref()) else {
-            continue;
-        };
-        if seen_conns.contains(&conn) {
-            continue;
-        }
-        seen_conns.push(conn);
+    for (conn, color) in Flows::of(&items).legend() {
         let shown: String = if conn.chars().count() > 28 {
             format!("{}…", conn.chars().take(27).collect::<String>())
         } else {
@@ -219,7 +210,7 @@ pub fn render_html(doc: &SeqDoc) -> String {
         };
         flow_chips.push_str(&format!(
             "<span><i class=\"swatch\" style=\"border-top-color:{}\"></i>Call-ID {}</span>\n",
-            conn_color(conn),
+            color,
             escape(&shown),
         ));
     }
@@ -502,6 +493,7 @@ fn svg_markup(
     anoms_of_row: &HashMap<usize, Vec<usize>>,
     views: &[AnomalyView<'_>],
 ) -> String {
+    let calls = Flows::of(items);
     let n_lanes = doc.lanes.len().max(1);
     let width = LEFT_PAD + (n_lanes as i64) * LANE_GAP;
     let height = TOP_PAD + (items.len() as i64) * ROW_GAP + BOTTOM_PAD;
@@ -521,6 +513,7 @@ fn svg_markup(
             "<marker id=\"ah-http\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"3\" orient=\"auto\"><path d=\"M0,0 L7,3 L0,6 Z\" fill=\"{HTTP_COLOR}\"/></marker>"
         ));
     }
+    s.push_str(&flows::marker_defs());
     for (i, c) in CONN_PALETTE.iter().enumerate() {
         s.push_str(&format!(
             "<marker id=\"ah-conn-{i}\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"3\" orient=\"auto\"><path d=\"M0,0 L7,3 L0,6 Z\" fill=\"{c}\"/></marker>"
@@ -611,14 +604,17 @@ fn svg_markup(
                 // (a b2bua's a-leg vs b-leg read as distinct flows). A row
                 // with no `conn` falls back to its plane's default color.
                 // An HTTP row keeps its plane's color whatever its `conn`.
+                let flow = row.conn.as_deref().filter(|_| !is_repl).and_then(|c| calls.index(c));
                 let color = match (&row.conn, is_repl) {
                     _ if is_http => HTTP_COLOR,
+                    _ if flow.is_some() => FLOW_PALETTE[flow.unwrap_or_default()],
                     (Some(c), _) => conn_color(c),
                     (None, true) => REPL_COLOR,
                     (None, false) => SIP_COLOR,
                 };
                 let marker = match (&row.conn, is_repl) {
                     _ if is_http => "ah-http".to_string(),
+                    _ if flow.is_some() => format!("ah-flow-{}", flow.unwrap_or_default()),
                     (Some(c), _) => format!("ah-conn-{}", conn_palette_index(c)),
                     (None, true) => "ah-conn-0".to_string(),
                     (None, false) => "ah-sip".to_string(),
@@ -747,6 +743,7 @@ fn render_payloads(
     anoms_of_row: &HashMap<usize, Vec<usize>>,
     views: &[AnomalyView<'_>],
 ) -> String {
+    let calls = Flows::of(items);
     let mut out = String::new();
     for (ord, item) in items.iter().enumerate() {
         let Item::Row(row) = item else { continue };
@@ -776,12 +773,12 @@ fn render_payloads(
                 let conn_chip = row
                     .conn
                     .as_deref()
-                    .map(|c| {
-                        format!(
-                            " &nbsp; <code style=\"color:{}\">conn {}</code>",
-                            conn_color(c),
-                            escape(c)
-                        )
+                    .map(|c| match calls.index(c).filter(|_| plane == "SIP") {
+                        Some(i) => (FLOW_PALETTE[i], "Call-ID", c),
+                        None => (conn_color(c), "conn", c),
+                    })
+                    .map(|(color, what, c)| {
+                        format!(" &nbsp; <code style=\"color:{color}\">{what} {}</code>", escape(c))
                     })
                     .unwrap_or_default();
                 let badge = match (delivered, row.conn.as_deref()) {
