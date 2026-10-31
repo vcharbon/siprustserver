@@ -4,9 +4,10 @@
 //! non-2xx INVITE final ACKed at the Request-URI its via-extension states, so
 //! the peer stops retransmitting it (RFC 3261 §13.3.1.4, §17.2.1). A response
 //! to a request this node sent is owed nothing here: its own transaction and
-//! call absorbed the final and its repeats while they lived (§17.1.1.2). A
-//! non-2xx INVITE final no client transaction here matched, on a call this
-//! node holds but a leg it lacks, is ACKed the same way.
+//! call absorbed the final and its repeats while they lived (§17.1.1.2). An
+//! INVITE final no client transaction here matched, on a call this node
+//! holds, that names no leg or dialog this node holds, is answered the same
+//! way.
 
 use std::net::SocketAddr;
 
@@ -50,12 +51,13 @@ pub(super) async fn answer(
     }
 }
 
-/// Send what `event` is owed when it is a non-2xx final to an INVITE that
-/// matched none of this node's client transactions (`matched_client_txn`
-/// false) on a call this node holds, whose dialog gate found no leg or dialog
-/// for it: a leg the call's other owner dialled, its responses reaching this
-/// node as the call's primary (ADR-0055 §8). It is ACKed as for a call this
-/// node does not hold (ADR-0055 §12); any other response is owed nothing here.
+/// Send what `event` is owed when it is a final to an INVITE that matched
+/// none of this node's client transactions (`matched_client_txn` false) on a
+/// call this node holds, whose dialog gate found no leg or dialog for it: a
+/// leg the call's other owner dialled, its responses reaching this node as
+/// the call's primary (ADR-0055 §8). It is answered as for a call this node
+/// does not hold (ADR-0055 §12): a non-2xx ACKed, a 2xx ACKed and its dialog
+/// BYEd; any other response is owed nothing here.
 pub(super) async fn answer_unheld_final(
     ctx: &RouterCtx,
     event: &CallEvent,
@@ -64,7 +66,7 @@ pub(super) async fn answer_unheld_final(
 ) {
     let CallEvent::Sip { message, src, .. } = event else { return };
     let SipMessage::Response(resp) = message.as_ref() else { return };
-    if matched_client_txn || resp.status() < 300 || resp.cseq().method() != Method::Invite {
+    if matched_client_txn || resp.status() < 200 || resp.cseq().method() != Method::Invite {
         return;
     }
     answer(ctx, resp, *src, ids).await;

@@ -403,9 +403,10 @@ the call has one CDR.
   §8), which holds no transaction of it. A non-2xx is ACKed there from its
   via-extension (ADR-0055 §12). A 2xx on a leg the primary's record lacks is
   evidence (ADR-0055 §4): it is ACKed and BYEd from its via-extension and the
-  call ends. A 2xx on a leg id the primary's own dial holds names no dialog
-  of it and is dropped unACKed: the callee ends that dialog when its
-  retransmissions run out (RFC 3261 §13.3.1.4). No test cuts this crossing.
+  call ends (`router/evidence_gate_tests.rs`). A 2xx on a leg id the
+  primary's own dial holds, under tags that name no dialog of it, is ACKed
+  and its dialog BYEd from its via-extension, and the call goes on
+  (`router/unheld_final_tests.rs`).
 - **A returning node's answer inside the replication lag of the deadline.** The
   copy's ring deadline fires before the returned node's reclaim and answer reach the
   backup: the copy CANCELs the callee after its answer and refuses the caller 480
