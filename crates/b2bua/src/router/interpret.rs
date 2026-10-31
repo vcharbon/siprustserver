@@ -100,11 +100,12 @@ pub(super) async fn process_result(
     // A takeover copy that reaches Terminated defers the discharge to its live
     // primary (ADR-0020 X3, ADR-0055 §5): it reverse-flushes the terminal body,
     // which the primary's reconcile discharges, then self-releases its live
-    // copy, writing no CDR, releasing no limiter hold, propagating no delete. A
-    // primary that departs first leaves the body to the departure sweep, one
-    // that neither returns nor departs to the reap. A copy whose primary has
-    // already departed (ADR-0047 D8) discharges the call below, as does a
-    // primary-served terminal.
+    // copy, writing no CDR, propagating no delete, and releasing no limiter
+    // hold unless a dead verdict on its primary acted here and nothing was
+    // heard from it since (ADR-0047 D8). A primary that departs first leaves
+    // the body to the departure sweep, one that neither returns nor departs to
+    // the reap. A copy whose primary has already departed (ADR-0047 D8)
+    // discharges the call below, as does a primary-served terminal.
     //
     // Every other written turn lands in the change log while the call has a
     // backup. `Terminating` writes too: a teardown in progress carries the
@@ -170,8 +171,16 @@ pub(super) async fn process_result(
         // the node that took the event, or the peers wedge on Timer B / Timer
         // H. It leaves once the primary applied the terminal body, and the
         // copy is released after it.
+        // A primary read dead is not there to release the call's keys: they
+        // leave with the wire, and the CDR still waits for the primary.
+        let limiter_releases = if super::dead_verdict::primary_read_dead(ctx, call_ref) {
+            effects.soft.into_iter().map(|SoftBoundedEffect::ReleaseLimiter { key }| key).collect()
+        } else {
+            Vec::new()
+        };
         let entry = TurnEntry::sending(ctx, call_ref, call, now_ms, effects.outbound);
-        let entry = TurnEntry { mark: (version, wrote, kind), ack, cancel, ..entry };
+        let entry =
+            TurnEntry { mark: (version, wrote, kind), ack, cancel, limiter_releases, ..entry };
         push(ctx, call_ref, entry).await;
         ctx.outboxes.drained(call_ref).await;
         release_call(ctx, call_ref, ReleaseKind::SelfRelease { ended: true }).await;

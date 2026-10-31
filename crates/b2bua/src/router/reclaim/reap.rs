@@ -48,17 +48,19 @@ pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
         // there is no writer to serialize against — and taking the lock would leak
         // a `locks` map entry (only `release_call`/`discard_orphan` clear it). The
         // decoded snapshot is all the limiter release needs.
-        release_orphaned_limiter_holds(ctx, &terminal.call);
+        release_owed_limiter_key(ctx, &terminal.call);
         ctx.metrics.bump_repl_terminal_lost();
     }
 }
 
-/// Release the cluster-wide limiter set a never-reclaimed deferred terminal
-/// still owns (`CallLimiterState::owed_release`: a call that sent no admit
-/// owes nothing), WITHOUT writing a CDR or propagating a delete. No turn
-/// serves the body, so the release goes to the worker directly. The backup is
-/// the only node that can free this slot once its primary is dead for good.
-fn release_orphaned_limiter_holds(ctx: &Arc<RouterCtx>, call: &Call) {
+/// Release the cluster-wide limiter set an ended body still owns
+/// (`CallLimiterState::owed_release`: a call that sent no admit owes nothing),
+/// WITHOUT writing a CDR or propagating a delete: a never-reclaimed deferred
+/// terminal here, a deferred end of a primary read dead at its verdict
+/// ([`super::super::departure`]). No turn serves the body, so the release goes
+/// to the worker directly; the release is keyed by the call, so one another
+/// node sent too frees nothing more.
+pub(in crate::router) fn release_owed_limiter_key(ctx: &RouterCtx, call: &Call) {
     if let Some(key) = call.limiter.owed_release() {
         ctx.limiter.release(key);
     }

@@ -13,14 +13,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{CallDecisionEngine, CallTreatment, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
 use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
-use call_limiter::wire::AdmitEntry;
-use call_limiter::{AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
+use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use failover_harness::{
-    assert_call_ended, assert_call_fully_over, assert_call_lost_no_cdr, cookie_field,
-    FailoverHarness, ReplicatedB2buaSut, WorkerHealth, LEASE_OUTLIVING_THE_REPLICA_TTL,
+    assert_call_fully_over, assert_call_lost_no_cdr, cookie_field, FailoverHarness,
+    ReplicatedB2buaSut, WorkerHealth, LEASE_OUTLIVING_THE_REPLICA_TTL,
 };
 use http_net::{HttpServerHandle, HttpTransport};
 use sip_clock::Clock;
@@ -34,8 +33,6 @@ const BOB: &str = "127.0.0.1:5070";
 /// workers, so they must hit two different bobs to keep each b-leg on its own
 /// RFC-audit Call-ID lane.
 const BOB2: &str = "127.0.0.1:5071";
-/// The failover target of the retargeted-call case.
-const CHARLIE: &str = "127.0.0.1:5072";
 const PROXY: &str = "127.0.0.1:5080";
 const B1: &str = "127.0.0.1:5091";
 const B2: &str = "127.0.0.1:5092";
@@ -160,21 +157,25 @@ async fn hold_is_released_on_the_takeover_node_after_primary_crash() {
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
 
     // The deferral (ADR-0055 §5, ADR-0020 X3): the takeover backup DEFERS the
-    // discharge — it answers the wire but writes NO CDR and does NOT release the
-    // limiter itself (its primary is a member and owns the CDR). With the primary crashed and NEVER rebooting, the
-    // CDR is the accepted loss — BUT the backup must still not leak the limiter slot:
-    // once the deferral's replica TTL (`reboot_budget`) expires, the periodic reap
-    // releases the hold (no CDR) and frees the body. Pump past that TTL, then assert
-    // the limiter drained to 0 with zero CDRs and exactly one lost-CDR cleanup.
-    let released = fh.settle_lossy_cleanup(async || store.stats().current_total == 0).await;
+    // CDR — it answers the wire but writes NO CDR (its primary is a member and
+    // owns it). The proxy's dead verdict on the crashed primary acted on the
+    // backup, so the end releases the limiter hold at once (ADR-0047 D8). With
+    // the primary NEVER rebooting, the CDR is the accepted loss: once the
+    // deferral's replica TTL (`reboot_budget`) expires, the periodic reap frees
+    // the body and counts the lost CDR. Pump past that TTL, then assert zero
+    // CDRs and exactly one lost-CDR cleanup.
+    fh.advance(Duration::from_millis(500)).await;
     assert!(
         backup.metrics().creations_total() > creations_before,
         "backup processed the failed-over BYE",
     );
-    assert!(
-        released,
-        "the takeover node released the limiter hold via its lossy auto-cleanup reap",
+    assert_eq!(
+        store.stats().current_total,
+        0,
+        "the takeover node released the limiter hold at the end: its primary is read dead",
     );
+    let reaped = fh.settle_lossy_cleanup(async || !backup.holds_any_trace(&call_ref).await).await;
+    assert!(reaped, "the takeover node's reap freed the deferred body");
     // StayDead: the primary never reclaims, so no CDR — the accepted loss.
     assert_call_lost_no_cdr(&[&w_b1, &w_b2], &call_ref, &store).await;
     assert_eq!(
@@ -711,137 +712,4 @@ async fn switchback_bye_on_returned_primary_releases_the_shared_limiter() {
     // Universal teardown post-condition: exactly one CDR cluster-wide, limiter at 0,
     // no resurrectable trace, memory clean.
     assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &store).await;
-}
-
-/// A failover decision through the worker's outbound proxy: the initial route
-/// toward bob holds `x` + `y`; bob's failure fails over to charlie with `y` +
-/// `z` (an overlapping set).
-fn failover_decision() -> Arc<dyn CallDecisionEngine> {
-    let limiters = |ids: &[&str]| -> Vec<LimiterEntry> {
-        ids.iter().map(|id| LimiterEntry { id: (*id).into(), limit: 10 }).collect()
-    };
-    Arc::new(
-        ScriptedDecisionEngine::builder()
-            .fallback(move |_req| {
-                let mut r = route_to("127.0.0.1", 5070);
-                r.new_ruri = None;
-                r.callback_context = Some("limiter-ha-failover-ctx".into());
-                r.call_limiter = limiters(&["x", "y"]);
-                NewCallResponse::Route(r)
-            })
-            .on_failure(move |_req| {
-                let mut r = route_to("127.0.0.1", 5072);
-                r.new_ruri = Some(format!("sip:{CHARLIE}"));
-                r.call_limiter = limiters(&["y", "z"]);
-                CallTreatment::Route(r)
-            })
-            .build(),
-    )
-}
-
-/// A retargeted call's holds after a takeover. The initial route holds `x` + `y`;
-/// bob busies out and the failover route to charlie replaces them with `y` +
-/// `z`, which the backup counts in its replica. The primary crashes after the
-/// failover; the caller's BYE fails over to the backup, whose lossy
-/// auto-cleanup releases the call by its limiter key: `y` and `z` are freed, never
-/// the replaced `x` again. Each id carries one witness hold admitted under a
-/// call of its own, so a surplus release reads below the witness instead of
-/// vanishing under the store's floor at 0.
-#[tokio::test(start_paused = true)]
-async fn retargeted_call_holds_drain_on_the_takeover_node_without_re_releasing_the_replaced_route()
-{
-    let mut fh = ha_harness("limiter-ha-retargeted-takeover");
-    let alice = fh.agent("alice", ALICE).await;
-    let bob = fh.agent("bob", BOB).await;
-    let charlie = fh.agent("charlie", CHARLIE).await;
-
-    // Shared limiter server on its own simulated HTTP fabric (survives crashes).
-    let http = http_net_testkit::SimulatedHttpNetwork::new();
-    let store = Arc::new(CallStore::new(LEASE_OUTLIVING_THE_REPLICA_TTL, Clock::test_at(0)));
-    for id in ["x", "y", "z"] {
-        let witness = store.admit(
-            &format!("witness-{id}"),
-            1,
-            &[AdmitEntry { id: id.into(), limit: 100 }],
-            false,
-        );
-        assert_eq!(witness, AdmitResult::Admitted, "witness hold on {id}");
-    }
-    let holds = || ["x", "y", "z"].map(|id| store.held(id) - 1);
-    let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
-    let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
-
-    let proxy =
-        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
-    let mut w_b1 = fh
-        .spawn_worker_limited(
-            "b1",
-            "b1",
-            B1,
-            &["b2"],
-            ("127.0.0.1", 5070),
-            ("127.0.0.1", 5080),
-            failover_decision(),
-            limiter_client(&http),
-        )
-        .await;
-    let mut w_b2 = fh
-        .spawn_worker_limited(
-            "b2",
-            "b2",
-            B2,
-            &["b1"],
-            ("127.0.0.1", 5070),
-            ("127.0.0.1", 5080),
-            failover_decision(),
-            limiter_client(&http),
-        )
-        .await;
-
-    fh.advance(Duration::from_millis(500)).await;
-    assert!(w_b1.is_ready() && w_b2.is_ready(), "workers ready");
-
-    // ── bob busies out; the failover route to charlie is applied ─────────────
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
-    let mut bob_uas = bob.receive("INVITE").await;
-    let primary_ord = cookie_field(bob_uas.request(), "w_pri").unwrap_or_default();
-    assert_eq!(holds(), [1, 1, 0], "the initial route holds x and y");
-    bob_uas.respond(486, "Busy Here").await;
-    bob.receive_absorbing("ACK", &["INVITE"]).await;
-
-    let mut charlie_uas = charlie.receive("INVITE").await;
-    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
-    call.expect(200).await;
-    let mut dialog = call.ack().await;
-    charlie.receive("ACK").await;
-
-    // Drive the answer + replicate primary → backup.
-    fh.advance(Duration::from_millis(500)).await;
-    assert_eq!(holds(), [0, 1, 1], "the failover route's holds replace the initial route's");
-
-    let (primary, backup): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
-        if primary_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
-    let call_ref = backup.scan_one_backed_up(&primary_ord).await.expect("the call replicated");
-
-    // ── the primary crashes; the BYE fails over to the backup ────────────────
-    primary.crash();
-    proxy.set_health(&primary_ord, WorkerHealth::Dead);
-    fh.advance(Duration::from_millis(300)).await;
-
-    let creations_before = backup.metrics().creations_total();
-    scenario_harness::callflow::hangup(&mut dialog, &charlie).await;
-    let released = fh.settle_lossy_cleanup(async || holds() == [0, 0, 0]).await;
-    assert!(
-        backup.metrics().creations_total() > creations_before,
-        "backup processed the failed-over BYE",
-    );
-    assert!(released, "the takeover node released the retargeted call's holds: {:?}", holds());
-    assert_eq!(holds(), [0, 0, 0], "each hold released exactly once, the witnesses intact");
-    // StayDead: the primary never reclaims, so no CDR — the accepted loss.
-    assert_call_ended(&[&w_b1, &w_b2], &call_ref, 0, "StayDead: the accepted loss").await;
-    assert_eq!(
-        w_b1.metrics().repl_terminal_lost_total() + w_b2.metrics().repl_terminal_lost_total(),
-        1,
-        "exactly one lost-CDR cleanup counted across the cluster",
-    );
 }

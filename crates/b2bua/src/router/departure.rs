@@ -29,7 +29,9 @@
 //! one included, while a finished call and a deferred end are left to the
 //! peer, which may live behind a partition and discharge them itself, or to
 //! its departure; the final a finished call may still owe its caller is sent
-//! at once.
+//! at once, and the limiter key it owes is released (ADR-0047 D8): the
+//! release is keyed by the call, so the peer's own release, or the
+//! discharge's, frees nothing more.
 //!
 //! The sweep is a task of its own, never the router loop's: a departed
 //! partition holds every call the peer served, read one body at a time, and
@@ -48,7 +50,7 @@ use super::materialise::{
     has_invite_to_serve, has_work_to_serve, materialise, names_request_in_flight, Materialised,
     Origin,
 };
-use super::reclaim::discharge_materialized_terminal;
+use super::reclaim::{discharge_materialized_terminal, release_owed_limiter_key};
 use super::restore_hygiene::reanchor;
 use super::undecided::{is_undecided, settle_undecided};
 use super::RouterCtx;
@@ -186,7 +188,7 @@ async fn sweep<F, Fut>(
 /// which the copy sends again; an undecided call's decision is asked again
 /// ([`settle_undecided`]). On a dead verdict a finished call is left to the
 /// departure, the final it may still owe its caller sent
-/// ([`super::owed_final`]). The body is read once without the lock to leave a
+/// ([`super::owed_final`]) and the limiter key it owes released. The body is read once without the lock to leave a
 /// quiet call untouched; a call already live here is left as it is.
 async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Swept {
     let Ok((copy, skew)) = ctx.state.peek_replica(call_ref).await else { return Swept::Left };
@@ -197,6 +199,7 @@ async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Sw
             Cause::ReadDead => {
                 reanchor(&mut call, skew);
                 super::owed_final::deliver(ctx, call_ref, &call).await;
+                release_owed_limiter_key(ctx, &call);
                 Swept::Left
             }
         };

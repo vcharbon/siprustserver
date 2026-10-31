@@ -3,6 +3,8 @@
 **Status:** accepted (2026-09-27); **superseded in part by
 [ADR-0043](0043-outbound-backend-client-policy.md)** (the breaker's rule, probe
 and env keys are the limiter client's backend breaker)
+Amended (2026-10-31): the lease section, a takeover copy's release once a dead verdict on
+its primary acted (ADR-0047 D8).
 
 **Owner:** `crates/b2bua/src/limiter/` owns the admission set; its call side is `call::model::limiter`.
 
@@ -327,8 +329,10 @@ already dropped. Decision 4 is what closes this: the node that materialises
 the call re-arms its timers; the restored past-due refresh, or the refresh the
 materialising turn arms, re-registers the set within one
 refresh period of the takeover or the reclaim. A takeover copy that reaches
-its end defers the release to the primary; when no primary reclaims it inside
-the replica TTL, the backup's reap releases the key. The reap is the one
+its end defers the release to the primary, unless a dead verdict on the primary
+acted on the backup: that copy releases the key at its end, and the verdict's
+sweep releases the keys of the ends deferred before it (ADR-0047 D8). When no
+primary reclaims it inside the replica TTL, the backup's reap releases the key. The reap is the one
 eviction site of an expired replica body and no read evicts one first, so
 every expired deferred terminal is released once, whichever partition holds
 it. Under the deployed relation the lease has freed the re-registered set by

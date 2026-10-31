@@ -38,6 +38,16 @@ impl ReplicationSupervisor {
         unheard
     }
 
+    /// Whether a frame from `peer` arrived on the Backup flow after `since`.
+    /// Pure read; `false` for a peer this node pulls no Backup flow from.
+    pub fn heard_from_since(&self, peer: &str, since: Instant) -> bool {
+        self.inner
+            .peers()
+            .get(peer)
+            .and_then(|e| e.backup.status_rx.as_ref())
+            .is_some_and(|rx| rx.borrow().last_frame_at.is_some_and(|at| at > since))
+    }
+
     /// The longest an open stream from a peer that went silent stays open:
     /// the pullers' idle bound (ADR-0045).
     pub fn silence_bound(&self) -> Duration {

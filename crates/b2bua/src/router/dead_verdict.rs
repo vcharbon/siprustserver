@@ -21,9 +21,16 @@
 //! after the verdict, or a stream open through that bound, speaks for a live
 //! worker the proxy misread, and nothing is taken over (ADR-0047 D1); one wait
 //! runs per worker.
+//!
+//! A worker whose verdict acted reads dead here until a frame from it arrives
+//! ([`primary_read_dead`]): a call a copy here ends meanwhile releases its
+//! limiter key at its end, and its CDR waits for the worker's departure or
+//! reconcile (ADR-0047 D8).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+
+use tokio::time::Instant;
 
 use sip_ids::SigningKey;
 use sip_message::dead_notice::{dead_notice, ReceivedNotice};
@@ -42,6 +49,8 @@ pub(crate) struct VerdictBook {
     /// The workers whose verdict waits on the stream's confirmation: one
     /// wait per worker, however many verdicts on it arrive meanwhile.
     pending: Mutex<HashSet<String>>,
+    /// The workers whose verdict acted, each at the instant of its latest.
+    acted: Mutex<HashMap<String, Instant>>,
 }
 
 impl VerdictBook {
@@ -70,6 +79,27 @@ impl VerdictBook {
     fn take(&self, ordinal: &str, at_ms: i64) -> bool {
         locked(&self.taken, DEAD_VERDICTS).entry(ordinal.to_string()).or_default().insert(at_ms)
     }
+
+    /// A verdict on `ordinal` acted now.
+    fn acted(&self, ordinal: &str) {
+        locked(&self.acted, DEAD_VERDICTS).insert(ordinal.to_string(), Instant::now());
+    }
+
+    /// The instant the latest verdict on `ordinal` acted, if one did.
+    fn acted_at(&self, ordinal: &str) -> Option<Instant> {
+        locked(&self.acted, DEAD_VERDICTS).get(ordinal).copied()
+    }
+}
+
+/// Whether `call_ref`'s primary is another worker a verdict here acted on, and
+/// no frame from it arrived since.
+pub(super) fn primary_read_dead(ctx: &RouterCtx, call_ref: &str) -> bool {
+    let Some(primary) = call::call_ref_primary(call_ref) else { return false };
+    if primary == ctx.config.self_ordinal {
+        return false;
+    }
+    let Some(at) = ctx.dead_verdicts.acted_at(primary) else { return false };
+    ctx.peer_streams.as_ref().is_none_or(|streams| !streams.heard_from_since(primary, at))
 }
 
 /// Why a notice is not taken.
@@ -127,8 +157,10 @@ fn take(ctx: &Arc<RouterCtx>, received: &ReceivedNotice) {
     }
 }
 
-/// Take over the calls this node backs for `ordinal` with work in flight.
+/// Read `ordinal` dead and take over the calls this node backs for it with
+/// work in flight.
 fn act(ctx: &Arc<RouterCtx>, ordinal: &str, at_ms: i64) {
+    ctx.dead_verdicts.acted(ordinal);
     if !take_over_read_dead(ctx, ordinal) {
         return;
     }

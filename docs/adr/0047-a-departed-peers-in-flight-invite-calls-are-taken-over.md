@@ -18,6 +18,9 @@ Amended (2026-10-29): D1, a dead verdict acts once this node's replication strea
 the peer is down; D2, the takeover half then takes every such call over at once; D4, an
 undecided call's decision is asked again, on a verdict too, and a copy written over by
 its returning primary applies no answer (D7).
+Amended (2026-10-31): D2 and D8, a dead verdict that acted releases the limiter key of
+every ended call of the peer here, and a copy that ends a call while its primary reads
+dead releases the key at its end; the CDR still waits for the departure or the reconcile.
 
 **Amends:** ADR-0014 D1 (takeover is reactive only), ADR-0022 X4 and X5, ADR-0031's
 case table and its D3 split rule (the lifecycle order the forward and reverse gates read),
@@ -124,7 +127,8 @@ included, D4) runs on either trigger. The **discharge half** (D8's discharge of 
 ended Element and of a `Terminating` call with nothing left to serve, ADR-0055 §5) runs
 on a departure only: a peer read dead may live behind a partition and discharge those
 calls itself (user ruling). A copy taken over on a verdict that ends while its peer is still a member
-defers its CDR (ADR-0020 X3), and the departure's sweep discharges it. A call already
+defers its CDR (ADR-0020 X3), and the departure's sweep discharges it. The limiter half
+of the discharge runs on the verdict too (D8). A call already
 live here when the departure's sweep runs is left as it is. A primary that comes back
 from the partition meets the copies through D3's forward guard, D7's stand-down and
 ADR-0055 §7's containment, as it meets a reactive takeover.
@@ -312,8 +316,23 @@ cells measure the discharge).
 The departure sweep (D2) discharges, the same way and once, every ended Element of
 the departed peer: a copy here ended the call and deferred it while the peer was a
 member, and the peer left without reconciling it
-(`deferred_end_of_a_departed_primary.rs`; `limiter_release_by_call.rs`, the departing
-primary cell, counts one release).
+(`deferred_end_of_a_departed_primary.rs`, its limiter cell counting the release).
+
+**The limiter key of a deferred end leaves at the verdict, its CDR at the departure.**
+A peer reads dead here from a dead verdict that acted (D1) until a frame from it
+arrives. The verdict's sweep releases the limiter key every ended call of the peer owes
+(an ended Element, a `Terminating` call with nothing left to serve), and a copy that
+ends a call while its primary reads dead releases the key at its end, with the wire.
+Neither writes the CDR: on a misread that would be a second record (user ruling). The
+release is keyed by the call (ADR-0040 decisions 1 and 3): the key is minted once per
+call, a release drops that key's set only and fences it for one lease, so the
+departure's, the reclaim's or the reap's release of the same call frees nothing more.
+A live primary behind a partition that confirms the misread still holds its copy of the
+ended call: its refreshes meet the fence for one lease, then re-register the set until
+its reconcile of the copy's end writes the one CDR and releases the key. No other
+call's hold is taken; the ended call counts again at most from the fence's lapse to
+that reconcile, as it counted throughout before the verdict released it
+(`limiter_release_at_the_verdict.rs`; its unconfirmed cell releases nothing).
 
 A node of the departed ordinal that applies the backup's delete on its reclaim stream
 while it holds the call live — the departed process itself, still running (ADR-0031

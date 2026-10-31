@@ -2,16 +2,17 @@
 //! dead primary is released as the backup's own calls are (ADR-0050 §10):
 //! nothing is sent to either party. The copy defers the call's end to its
 //! primary, still a member of the set (ADR-0020 X3), so the backup writes no
-//! record yet; when the primary departs, the departure sweep discharges the
-//! ended call (ADR-0047 D8): one CDR, closed under `operator_release`, and the
-//! call's limiter holds released once.
+//! record yet; the proxy's verdict on the primary confirmed, the end releases
+//! the call's limiter holds at once. When the primary departs, the departure
+//! sweep discharges the ended call (ADR-0047 D8): one CDR, closed under
+//! `operator_release`, and a release that frees nothing more.
 //!
 //! ```text
 //!   established · P serves · B synchronized
-//!   P crashes in place (its endpoint stays in the set)
+//!   P crashes in place (its endpoint stays in the set); the proxy reads it dead
 //!   alice ──INFO──▶ proxy ──▶ B   (takeover copy, its transaction still open)
-//!   operator ──release-all──▶ B   (copy ended, deferred to P)
-//!   P's endpoint leaves the set   (B's sweep: CDR, release, delete)
+//!   operator ──release-all──▶ B   (copy ended, its holds released, CDR deferred to P)
+//!   P's endpoint leaves the set   (B's sweep: CDR, delete)
 //! ```
 //!
 //! The parties are left holding a dialog the SUT dropped: that is what the
@@ -76,12 +77,12 @@ async fn a_released_takeover_copy_is_settled_once_by_the_departure_sweep() {
     assert_eq!(sent, 0, "nothing is sent to either party");
     assert!(!backup.serves(&call_ref), "the copy is released");
     assert!(backup.cdr_records().is_empty(), "the copy defers the call's end to its primary");
-    assert_eq!(rig.holds(), [1, 0, 0], "and its release");
+    assert_eq!(rig.holds(), [0, 0, 0], "and releases its holds: the primary is read dead");
 
     // ── the primary departs: the sweep settles the call ─────────────────────
     backup.simulate_peer_removed(&pri);
     fh.advance(Duration::from_secs(1)).await;
-    assert_eq!(rig.holds(), [0, 0, 0], "the sweep released the call's holds");
+    assert_eq!(rig.holds(), [0, 0, 0], "the sweep's release frees nothing more");
     let records = backup.cdr_records();
     let [record] = records.as_slice() else { panic!("one record: {records:#?}") };
     let cause = record.termination.as_ref().map(|t| t.cause);

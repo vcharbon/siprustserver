@@ -24,6 +24,7 @@ use bulk::reclaim_into_live;
 pub(super) use bulk::{announce_reclaim, arm_parked, park_all};
 pub(super) use meeting::meet_live;
 pub(crate) use reap::reap_expired_replicas;
+pub(super) use reap::release_owed_limiter_key;
 
 /// Apply a backup's reverse-flushed copy that the puller just landed in our
 /// `pri:{self}` partition (ADR-0014 Reclaim-tail reconcile, extended to the
