@@ -15,7 +15,8 @@
     "./http": "./src/http/index.ts",
     "./pivot": "./src/generated/pivot-v3.ts",
     "./exclusion": "./src/exclusion/index.ts",
-    "./text": "./src/text/index.ts"
+    "./text": "./src/text/index.ts",
+    "./routes": "./src/routes/index.ts"
   },
   "scripts": {
     "regen-types": "tsx scripts/regen-types.ts",

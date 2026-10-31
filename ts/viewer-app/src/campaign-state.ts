@@ -6,6 +6,7 @@
  */
 import type { Campaign, CampaignRun } from "./api.ts"
 import type { Filters, Selection } from "./campaign-facets.ts"
+import { campaignDelta } from "@sip/viewer-core/routes"
 import type { CampaignParams } from "./router.ts"
 
 export interface CampaignState {
@@ -25,19 +26,6 @@ const number = (text: string | null): number | undefined => {
   return text === null || text === "" || !Number.isInteger(value) ? undefined : value
 }
 
-/** The delta asked: `delta=<run>:<lane>`, or the `run` and `lane` a report's link names beside its `case`. */
-const deltaOf = (query: URLSearchParams): CampaignState["delta"] => {
-  const delta = query.get("delta")
-  if (delta !== null) {
-    const at = delta.indexOf(":")
-    const run = at < 0 ? undefined : number(delta.slice(0, at))
-    return run === undefined ? undefined : { run, lane: delta.slice(at + 1) }
-  }
-  const run = number(query.get("run"))
-  const lane = query.get("lane")
-  return run === undefined || lane === null || query.get("case") === null ? undefined : { run, lane }
-}
-
 export const readState = (query: URLSearchParams): CampaignState => {
   return {
     env: query.get("env") ?? undefined,
@@ -53,7 +41,7 @@ export const readState = (query: URLSearchParams): CampaignState => {
     },
     selection: { checks: query.getAll("check"), groups: query.getAll("group"), families: query.getAll("family") },
     caseId: query.get("case") ?? undefined,
-    delta: deltaOf(query)
+    delta: campaignDelta(query)
   }
 }
 
