@@ -2,10 +2,11 @@
  * The failures of one campaign run as facets. Every failed check (anchor and
  * field) is a facet and all weigh the same: a call counts under each check it
  * fails, so the counts overlap. A cell no call was judged in is the facet
- * `error <its first line>`. Families stand beside the checks. Selected facets
- * narrow the calls by AND; one selected check is read by the shapes of what
- * was seen (long digit runs and ports folded), so many failures of one cause
- * read as one.
+ * `error <its first line>`. Groups and families stand beside the checks; a
+ * call counts under each of its groups too. Selected checks narrow the calls
+ * by AND, selected groups and families each by OR, the three by AND; one
+ * selected check is read by the shapes of what was seen (long digit runs and
+ * ports folded), so many failures of one cause read as one.
  *
  * A check is dated from the first run of its current streak: the oldest run,
  * going back without a gap, in which some call failed it on the lanes it fails
@@ -32,7 +33,20 @@ export const ALL_FILTERS: Filters = { lanes: [], failing: false, oneLane: false,
 
 export interface Selection {
   readonly checks: readonly string[]
+  readonly groups: readonly string[]
   readonly families: readonly string[]
+}
+
+export const NO_SELECTION: Selection = { checks: [], groups: [], families: [] }
+
+/** A kind of facet the page selects. */
+export type FacetKind = "check" | "group" | "family"
+
+/** The selection field of each facet kind. */
+export const SELECTED: Readonly<Record<FacetKind, keyof Selection>> = {
+  check: "checks",
+  group: "groups",
+  family: "families"
 }
 
 export interface CheckFacet {
@@ -59,6 +73,8 @@ export interface Shape {
 
 export interface Match {
   readonly caseId: string
+  readonly title: string | null
+  readonly groups: readonly string[]
   readonly family: string
   /** Each lane read: the call's outcome there, `none` where it did not run. */
   readonly outcomes: Readonly<Record<string, CampaignResult["outcome"] | "none">>
@@ -68,6 +84,7 @@ export interface Match {
 
 export interface Facets {
   readonly checks: readonly CheckFacet[]
+  readonly groups: ReadonlyArray<{ readonly group: string; readonly calls: number }>
   readonly families: ReadonlyArray<{ readonly family: string; readonly calls: number }>
   readonly passingAgain: ReadonlyArray<{ readonly key: string; readonly calls: number }>
   /** The selected check's shapes, where exactly one check is selected. */
@@ -161,7 +178,8 @@ export const facets = (
     }
     if (text !== "") {
       const keys = now.flatMap((r) => (r === undefined ? [] : failedChecks(r).map(checkKey)))
-      if (!`${c.caseId} ${keys.join(" ")}`.toLowerCase().includes(text)) return false
+      const about = [c.title ?? "", ...c.groups].join(" ")
+      if (!`${c.caseId} ${about} ${keys.join(" ")}`.toLowerCase().includes(text)) return false
     }
     return true
   })
@@ -175,6 +193,7 @@ export const facets = (
     shapes: Map<string, Shape>
   }>()
   const families = new Map<string, number>()
+  const groups = new Map<string, number>()
   const matches: Array<Match> = []
   let failingCalls = 0
   for (const c of kept) {
@@ -211,11 +230,15 @@ export const facets = (
     if (failed.size === 0) continue
     failingCalls += 1
     families.set(c.family, (families.get(c.family) ?? 0) + 1)
+    for (const group of c.groups) groups.set(group, (groups.get(group) ?? 0) + 1)
     const keys = [...failed.keys()]
     if (!selection.checks.every((key) => keys.includes(key))) continue
+    if (selection.groups.length > 0 && !selection.groups.some((group) => c.groups.includes(group))) continue
     if (selection.families.length > 0 && !selection.families.includes(c.family)) continue
     matches.push({
       caseId: c.caseId,
+      title: c.title,
+      groups: c.groups,
       family: c.family,
       outcomes,
       failed: keys.map((key) => ({ key, lanes: failed.get(key)! }))
@@ -252,6 +275,8 @@ export const facets = (
   const single = selection.checks.length === 1 ? byKey.get(selection.checks[0]!) : undefined
   return {
     checks,
+    groups: [...groups].map(([group, calls]) => ({ group, calls }))
+      .sort((a, b) => b.calls - a.calls || compare(a.group, b.group)),
     families: [...families].map(([family, calls]) => ({ family, calls }))
       .sort((a, b) => b.calls - a.calls || compare(a.family, b.family)),
     passingAgain: [...before].flatMap(([key, calls]) => {

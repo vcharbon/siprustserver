@@ -1013,11 +1013,24 @@ export interface CampaignRun {
   readonly lanes: readonly CampaignLane[]
 }
 
+/** One thing a campaign case uses, under the role it plays, with the page it is read on where there is one. */
+export interface CampaignLink {
+  readonly role: string
+  readonly label: string
+  readonly url: string | null
+}
+
 export interface CampaignCase {
   readonly caseId: string
   readonly ref: string
   readonly subcase: string | null
   readonly family: string
+  /** What the case tests, in a line; null where the campaign states none. */
+  readonly title: string | null
+  readonly description: string | null
+  /** The groups the case counts under, 0..N; the grid falls back on its family where there are none. */
+  readonly groups: readonly string[]
+  readonly links: readonly CampaignLink[]
 }
 
 /** One environment's latest runs of a campaign, newest first, and every case any of them ran. */

@@ -17,6 +17,8 @@ const result = (caseId: string, outcome: CampaignResult["outcome"], keys: Readon
   checks: keys.map((key) => ({ anchor: "B1 INVITE", field: key, expected: "x", seen: "y", said: null, side: "sut" }))
 })
 
+const UNGROUPED = { title: null, description: null, groups: [], links: [] }
+
 const VIEW: Campaign = {
   capture: "campaign",
   env: null,
@@ -25,9 +27,9 @@ const VIEW: Campaign = {
   sides: ["decision", "sut"],
   lanes: ["lane-x", "lane-y"],
   cases: [
-    { caseId: "fam-a/one", ref: "fam-a/one", subcase: null, family: "fam-a" },
-    { caseId: "fam-a/two", ref: "fam-a/two", subcase: null, family: "fam-a" },
-    { caseId: "fam-b/three", ref: "fam-b/three", subcase: null, family: "fam-b" }
+    { caseId: "fam-a/one", ref: "fam-a/one", subcase: null, family: "fam-a", ...UNGROUPED },
+    { caseId: "fam-a/two", ref: "fam-a/two", subcase: null, family: "fam-a", ...UNGROUPED },
+    { caseId: "fam-b/three", ref: "fam-b/three", subcase: null, family: "fam-b", ...UNGROUPED }
   ],
   runs: [3, 2, 1].map((id) => ({
     id,
@@ -58,11 +60,26 @@ describe("the run grid", () => {
   it("shows each family's worst verdict per run and lane, oldest run first, failing over error over pass", () => {
     const g = grid(VIEW, ["lane-x"])
     expect(g.runs).toEqual([1, 2, 3])
-    expect(g.rows.map((row) => [row.family, row.cells.map((c) => `${c.run}:${c.lane}:${c.worst}:${c.failing}/${c.ran}`)])).toEqual([
+    expect(g.rows.map((row) => [row.name, row.cells.map((c) => `${c.run}:${c.lane}:${c.worst}:${c.failing}/${c.ran}`)])).toEqual([
       ["fam-a", ["1:lane-x:pass:0/2", "2:lane-x:failure:2/2", "3:lane-x:failure:1/2"]],
       ["fam-b", ["1:lane-x:none:0/0", "2:lane-x:pass:0/1", "3:lane-x:pass:0/1"]]
     ])
     expect(g.rows[0]!.cases.map((c) => c.caseId)).toEqual(["fam-a/one", "fam-a/two"])
+  })
+
+  it("puts a case under each of its groups, under its family where it has none", () => {
+    const grouped: Campaign = {
+      ...VIEW,
+      cases: VIEW.cases.map((c) =>
+        c.caseId === "fam-a/one" ? { ...c, groups: ["group-1", "group-2"] } : c.caseId === "fam-a/two" ? { ...c, groups: ["group-1"] } : c
+      )
+    }
+    const g = grid(grouped, ["lane-x"])
+    expect(g.rows.map((row) => [row.name, row.cases.map((c) => c.caseId)])).toEqual([
+      ["fam-b", ["fam-b/three"]],
+      ["group-1", ["fam-a/one", "fam-a/two"]],
+      ["group-2", ["fam-a/one"]]
+    ])
   })
 })
 

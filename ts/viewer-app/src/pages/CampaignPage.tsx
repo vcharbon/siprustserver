@@ -7,7 +7,7 @@
 import type { JSX } from "react"
 import { useEffect, useMemo, useState } from "react"
 import { api, type Campaign, type CampaignRun, useAsync } from "../api.ts"
-import { facets as facetsOf, lanesRead } from "../campaign-facets.ts"
+import { type FacetKind, facets as facetsOf, lanesRead, SELECTED } from "../campaign-facets.ts"
 import { grid as gridOf } from "../campaign-history.ts"
 import { type CampaignState, paramsOf, readState, runOf, vsOf } from "../campaign-state.ts"
 import { CampaignFailures } from "../components/CampaignFailures.tsx"
@@ -123,13 +123,11 @@ const Summary = ({ view }: { readonly view: Campaign }): JSX.Element => {
     if (next.length === 0) return
     update({ filters: { ...state.filters, lanes: next.length === view.lanes.length ? [] : next } })
   }
-  const toggleFacet = (kind: "check" | "family", key: string) => {
-    const list = kind === "check" ? state.selection.checks : state.selection.families
+  const toggleFacet = (kind: FacetKind, key: string) => {
+    const field = SELECTED[kind]
+    const list = state.selection[field]
     const next = list.includes(key) ? list.filter((k) => k !== key) : [...list, key]
-    update({
-      tab: "failures",
-      selection: kind === "check" ? { ...state.selection, checks: next } : { ...state.selection, families: next }
-    })
+    update({ tab: "failures", selection: { ...state.selection, [field]: next } })
   }
   const flag = (name: "failing" | "oneLane" | "fresh", label: string, tip: string) => (
     <label className="cp-check" title={tip}>
@@ -209,7 +207,7 @@ const Summary = ({ view }: { readonly view: Campaign }): JSX.Element => {
             </button>
           </nav>
           {state.tab === "grid"
-            ? <CampaignGrid grid={grid} lanes={lanes} run={run.id} onCase={(caseId) => update({ caseId })} />
+            ? <CampaignGrid view={view} grid={grid} lanes={lanes} run={run.id} onCase={(caseId) => update({ caseId })} />
             : facets !== undefined && (
               <CampaignFailures
                 view={view}

@@ -14,7 +14,7 @@ describe("the summary page's place", () => {
       run: 7,
       vs: 5,
       filters: { lanes: ["lane-x"], failing: true, oneLane: false, fresh: true, text: "pai" },
-      selection: { checks: ["B1 INVITE pai.uri", "rfc rule"], families: ["fam-a"] },
+      selection: { checks: ["B1 INVITE pai.uri", "rfc rule"], groups: ["group-a", "group b"], families: ["fam-a"] },
       caseId: "fam-a/one [s]",
       delta: { run: 5, lane: "lane-x" }
     }

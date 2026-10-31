@@ -1,7 +1,7 @@
-/** The failures of the run read as facets: checks and families to pick, the calls they narrow to, one check's shapes. */
+/** The failures of the run read as facets: checks, groups and families to pick, the calls they narrow to, one check's shapes. */
 import type { JSX } from "react"
 import type { Campaign } from "../api.ts"
-import type { Facets } from "../campaign-facets.ts"
+import type { FacetKind, Facets, Selection } from "../campaign-facets.ts"
 import { CheckCard, SideTag } from "./CheckCard.tsx"
 
 const MARK: Readonly<Record<string, string>> = { pass: "✓", failure: "✗", error: "!", none: "—" }
@@ -12,8 +12,8 @@ export const CampaignFailures = ({ view, facets, run, vs, lanes, selected, onTog
   readonly run: number
   readonly vs: number | undefined
   readonly lanes: readonly string[]
-  readonly selected: { readonly checks: readonly string[]; readonly families: readonly string[] }
-  readonly onToggle: (kind: "check" | "family", key: string) => void
+  readonly selected: Selection
+  readonly onToggle: (kind: FacetKind, key: string) => void
   readonly onCase: (caseId: string) => void
 }): JSX.Element => {
   const single = selected.checks.length === 1 ? selected.checks[0] : undefined
@@ -51,6 +51,23 @@ export const CampaignFailures = ({ view, facets, run, vs, lanes, selected, onTog
             </div>
           ))}
         </section>
+        {facets.groups.length > 0 && (
+          <section className="cp-panel">
+            <h2>Groups</h2>
+            <div className="cp-chips">
+              {facets.groups.map((g) => (
+                <button
+                  key={g.group}
+                  type="button"
+                  className={`cp-chip${selected.groups.includes(g.group) ? " on" : ""}`}
+                  onClick={() => onToggle("group", g.group)}
+                >
+                  {g.group} <b>{g.calls}</b>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
         <section className="cp-panel">
           <h2>Families</h2>
           <div className="cp-chips">
@@ -71,7 +88,11 @@ export const CampaignFailures = ({ view, facets, run, vs, lanes, selected, onTog
       <section className="cp-panel">
         <div className="cp-matched">
           <b>{facets.matching.length}</b> failing of {facets.ran}
-          {[...selected.checks.map((k) => ["check", k] as const), ...selected.families.map((k) => ["family", k] as const)].map(
+          {[
+            ...selected.checks.map((k) => ["check", k] as const),
+            ...selected.groups.map((k) => ["group", k] as const),
+            ...selected.families.map((k) => ["family", k] as const)
+          ].map(
             ([kind, key]) => (
               <button key={`${kind}:${key}`} type="button" className="cp-chip on" onClick={() => onToggle(kind, key)}>
                 {key} ✕
@@ -99,9 +120,9 @@ export const CampaignFailures = ({ view, facets, run, vs, lanes, selected, onTog
           <tbody>
             {facets.matching.map((m) => (
               <tr key={m.caseId} className="cp-row" onClick={() => onCase(m.caseId)}>
-                <td>
-                  {m.caseId}
-                  <div className="muted mono">{m.family}</div>
+                <td title={m.caseId}>
+                  {m.title ?? m.caseId}
+                  <div className="muted mono">{[...m.groups, m.family].join(" · ")}</div>
                 </td>
                 {lanes.map((lane) => (
                   <td key={lane}><span className={`cp-dot ${m.outcomes[lane]}`} title={m.outcomes[lane]}>{MARK[m.outcomes[lane] ?? "none"]}</span></td>

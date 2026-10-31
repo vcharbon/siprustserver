@@ -1,11 +1,11 @@
 /**
- * A campaign over its runs, oldest first: the run grid (one row per family,
- * its cases under it, one cell per run × lane holding the row's worst verdict,
+ * A campaign over its runs, oldest first: the run grid (one row per group, a
+ * case under each of its groups, under its family where it has none, one cell per run × lane holding the row's worst verdict,
  * failure over error over pass), and one case's history (its verdict per run
  * and lane, the run labels that changed from the run before, and one flip row
  * per lane × check it ever failed, the runs where the verdict changed marked).
  */
-import type { Campaign, CampaignResult } from "./api.ts"
+import type { Campaign, CampaignCase, CampaignResult } from "./api.ts"
 import { checkKey, failedChecks, resultOf } from "./campaign-facets.ts"
 
 export type Verdict = CampaignResult["outcome"] | "none"
@@ -24,7 +24,8 @@ export interface GridCell {
 }
 
 export interface GridRow {
-  readonly family: string
+  /** The group, or the family of cases in no group. */
+  readonly name: string
   readonly cells: readonly GridCell[]
   readonly cases: ReadonlyArray<{ readonly caseId: string; readonly cells: readonly GridCell[] }>
 }
@@ -37,9 +38,12 @@ export interface Grid {
 
 const chronological = (view: Campaign) => [...view.runs].sort((a, b) => a.id - b.id)
 
+/** The grid rows a case is under: its groups, else its family. */
+export const rowsOf = (c: CampaignCase): readonly string[] => (c.groups.length > 0 ? c.groups : [c.family])
+
 export const grid = (view: Campaign, lanes: readonly string[]): Grid => {
   const runs = chronological(view)
-  const families = [...new Set(view.cases.map((c) => c.family))].sort((a, b) =>
+  const names = [...new Set(view.cases.flatMap(rowsOf))].sort((a, b) =>
     a.localeCompare(b, undefined, { numeric: true })
   )
   const cellOf = (caseIds: readonly string[], runId: number, lane: string): GridCell => {
@@ -59,10 +63,10 @@ export const grid = (view: Campaign, lanes: readonly string[]): Grid => {
     lanes.flatMap((lane) => runs.map((run) => cellOf(caseIds, run.id, lane)))
   return {
     runs: runs.map((r) => r.id),
-    rows: families.map((family) => {
-      const caseIds = view.cases.filter((c) => c.family === family).map((c) => c.caseId)
+    rows: names.map((name) => {
+      const caseIds = view.cases.filter((c) => rowsOf(c).includes(name)).map((c) => c.caseId)
       return {
-        family,
+        name,
         cells: cellsOf(caseIds),
         cases: caseIds.map((caseId) => ({ caseId, cells: cellsOf([caseId]) }))
       }

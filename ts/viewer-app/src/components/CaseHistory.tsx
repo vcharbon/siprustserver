@@ -1,4 +1,9 @@
-/** One case's history as a drawer: its verdict per run and lane, what changed between runs, the flip table, the runs with their deltas. */
+/**
+ * One case's history as a drawer: what the case is (its title, groups,
+ * description, and what it uses, each linked to its page where there is one),
+ * its verdict per run and lane, what changed between runs, the flip table, the
+ * runs with their deltas.
+ */
 import type { JSX } from "react"
 import type { Campaign } from "../api.ts"
 import { resultOf } from "../campaign-facets.ts"
@@ -19,8 +24,31 @@ export const CaseHistory = ({ view, caseId, lanes, onClose, onDelta }: {
   return (
     <aside className="cp-drawer" aria-label="case history">
       <button type="button" className="cp-close" onClick={onClose} title="close (Esc)">✕</button>
-      <h2>Case history</h2>
+      <h2>{known?.title ?? "Case history"}</h2>
       <p className="muted mono">{caseId}{known === undefined ? "" : ` · ${known.family}`}</p>
+      {known !== undefined && known.groups.length > 0 && (
+        <div className="cp-chips">{known.groups.map((group) => <span key={group} className="cp-chip">{group}</span>)}</div>
+      )}
+      {known?.description !== null && known?.description !== undefined && <p>{known.description}</p>}
+      {known !== undefined && known.links.length > 0 && (
+        <section className="cp-panel">
+          <h3>Uses</h3>
+          <table className="cp-table cp-uses">
+            <tbody>
+              {known.links.map((link) => (
+                <tr key={`${link.role}\u0000${link.label}`}>
+                  <td className="muted">{link.role}</td>
+                  <td className="mono">
+                    {link.url === null ? link.label : (
+                      <a href={link.url} target="_blank" rel="noreferrer">{link.label} ↗</a>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
       <section className="cp-panel">
         <h3>Verdicts</h3>
         <table className="cp-hist">

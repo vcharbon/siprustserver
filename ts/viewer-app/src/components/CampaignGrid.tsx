@@ -1,24 +1,31 @@
-/** The run grid: families × runs × lanes, each cell its row's worst verdict; a family opens to its cases, a case cell to its history. */
+/** The run grid: groups × runs × lanes, each cell its row's worst verdict; a group opens to its cases, a case cell to its history. */
 import type { JSX } from "react"
 import { useState } from "react"
+import type { Campaign } from "../api.ts"
 import type { Grid, GridCell } from "../campaign-history.ts"
 
 const tip = (label: string, cell: GridCell): string =>
   `${label} · ${cell.lane} · #${cell.run}: ${cell.worst === "none" ? "—" : `${cell.failing}/${cell.ran} ✗`}`
 
-export const CampaignGrid = ({ grid, lanes, run, onCase }: {
+export const CampaignGrid = ({ view, grid, lanes, run, onCase }: {
+  readonly view: Campaign
   readonly grid: Grid
   readonly lanes: readonly string[]
   readonly run: number
   readonly onCase: (caseId: string) => void
 }): JSX.Element => {
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set())
-  const toggle = (family: string) =>
+  const toggle = (name: string) =>
     setOpen((now) => {
       const next = new Set(now)
-      if (!next.delete(family)) next.add(family)
+      if (!next.delete(name)) next.add(name)
       return next
     })
+  const titleOf = (caseId: string): string => {
+    const known = view.cases.find((c) => c.caseId === caseId)
+    const name = known?.title ?? caseId.split("/").pop() ?? caseId
+    return known?.subcase === null || known?.subcase === undefined ? name : `${name} [${known.subcase}]`
+  }
   const cells = (label: string, row: readonly GridCell[], caseId?: string) =>
     lanes.flatMap((lane) => [
       ...grid.runs.map((id) => {
@@ -61,14 +68,14 @@ export const CampaignGrid = ({ grid, lanes, run, onCase }: {
         </thead>
         <tbody>
           {grid.rows.flatMap((row) => [
-            <tr key={row.family} className="cp-family" onClick={() => toggle(row.family)}>
-              <td className="cp-name">{open.has(row.family) ? "▾" : "▸"} {row.family} <span className="muted">{row.cases.length}</span></td>
-              {cells(row.family, row.cells)}
+            <tr key={row.name} className="cp-family" onClick={() => toggle(row.name)}>
+              <td className="cp-name">{open.has(row.name) ? "▾" : "▸"} {row.name} <span className="muted">{row.cases.length}</span></td>
+              {cells(row.name, row.cells)}
             </tr>,
-            ...(open.has(row.family)
+            ...(open.has(row.name)
               ? row.cases.map((c) => (
-                <tr key={c.caseId}>
-                  <td className="cp-name cp-case" title={c.caseId}>{c.caseId.split("/").pop()}</td>
+                <tr key={`${row.name}\u0000${c.caseId}`}>
+                  <td className="cp-name cp-case" title={c.caseId}>{titleOf(c.caseId)}</td>
                   {cells(c.caseId, c.cells, c.caseId)}
                 </tr>
               ))

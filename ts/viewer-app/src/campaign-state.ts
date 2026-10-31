@@ -1,7 +1,7 @@
 /**
  * The summary page's place as the URL carries it: the environment, the tab, the run read and
- * the one compared, the lanes, the filters, the selected facets, the open
- * case and the delta on screen. Read from a query string and written back to
+ * the one compared, the lanes, the filters, the selected facets (checks, groups, families),
+ * the open case and the delta on screen. Read from a query string and written back to
  * one, so a reload and a pasted link show the same view.
  */
 import type { Campaign, CampaignRun } from "./api.ts"
@@ -51,7 +51,7 @@ export const readState = (query: URLSearchParams): CampaignState => {
       fresh: query.get("new") === "1",
       text: query.get("q") ?? ""
     },
-    selection: { checks: query.getAll("check"), families: query.getAll("family") },
+    selection: { checks: query.getAll("check"), groups: query.getAll("group"), families: query.getAll("family") },
     caseId: query.get("case") ?? undefined,
     delta: deltaOf(query)
   }
@@ -70,6 +70,7 @@ export const paramsOf = (state: CampaignState): CampaignParams => ({
   new: flag(state.filters.fresh),
   q: state.filters.text === "" ? undefined : state.filters.text,
   check: state.selection.checks,
+  group: state.selection.groups,
   family: state.selection.families,
   case: state.caseId,
   delta: state.delta === undefined ? undefined : `${state.delta.run}:${state.delta.lane}`

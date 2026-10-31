@@ -222,6 +222,8 @@ export interface CampaignParams {
   readonly q?: string | undefined
   /** The selected check facets. */
   readonly check?: ReadonlyArray<string> | undefined
+  /** The selected group facets. */
+  readonly group?: ReadonlyArray<string> | undefined
   /** The selected family facets. */
   readonly family?: ReadonlyArray<string> | undefined
   /** The case whose history is open. */
