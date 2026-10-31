@@ -2775,6 +2775,7 @@ dependencies = [
  "sip-message",
  "sip-net",
  "sip-net-testkit",
+ "tikv-jemallocator",
  "tokio",
  "uuid",
 ]

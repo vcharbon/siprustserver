@@ -54,6 +54,12 @@ flamegraph-util = { path = "../flamegraph-util" }
 # SystemTime on its own timeline (the marker and frame axes stay in lockstep).
 sip-clock = { path = "../sip-clock" }
 
+# The global allocator of the `loadgen` binary only (src/bin/loadgen.rs); the lib
+# installs none, so a test binary may install its own. unix-only (jemalloc has no
+# MSVC target). "profiling" lets `_RJEM_MALLOC_CONF=prof:true` dump the heap.
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { version = "0.7", features = ["profiling"] }
+
 [dev-dependencies]
 # The counting global allocator of the allocations-per-call bench
 # (`tests/alloc_per_call.rs`, its own binary under ADR-0030 X2).
