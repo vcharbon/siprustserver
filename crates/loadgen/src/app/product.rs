@@ -129,14 +129,19 @@ where
 }
 
 /// The whole load binary for `product`: parse the process command line
-/// (exiting with clap's usage error on a bad one), then run on a
-/// multi-threaded runtime.
+/// (exiting with clap's usage error on a bad one), then run on [`runtime`].
 pub fn main<P: Product>(product: P) -> std::io::Result<()> {
     let (flags, args) = parse_from(&product, std::env::args_os()).unwrap_or_else(|e| e.exit());
+    runtime(&args)?.block_on(run(&product, &flags, args))
+}
+
+/// The multi-threaded runtime a load run drives on, with `--worker-threads`
+/// workers.
+fn runtime(args: &Args) -> std::io::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(args.worker_threads.get())
         .enable_all()
-        .build()?
-        .block_on(run(&product, &flags, args))
+        .build()
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use clap::{ArgMatches, Parser};
@@ -39,6 +40,11 @@ pub struct Args {
     /// How long to offer load, in seconds.
     #[arg(long, default_value_t = 60)]
     pub duration: u64,
+    /// Worker threads of the process's runtime. A load process does a fraction
+    /// of a core of work per hundred calls per second; one worker per CPU
+    /// spends its time parking and stealing.
+    #[arg(long, default_value = "4")]
+    pub worker_threads: NonZeroUsize,
     /// Max concurrent in-flight calls (offered load above this is dropped+counted).
     #[arg(long, default_value_t = 2000)]
     pub max_in_flight: usize,
