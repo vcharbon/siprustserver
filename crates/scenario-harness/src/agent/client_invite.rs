@@ -12,7 +12,6 @@ use sip_message::header::{self, CSeq, HeaderName, HeaderValue};
 use sip_message::sip_str::SipStr;
 use sip_message::{Automatic, DelayedAutomatic, SipMessage, SipRequest, SipResponse};
 
-use super::addressing::next_hop;
 use super::client_txn::{awaited_response, try_expect_response, try_send_cancel, AckCtx};
 use super::dialog::{Dialog, InDialogRequest, InDialogTxn};
 use super::step::{unwrap_step, unwrap_step_at, StepError};
@@ -20,6 +19,9 @@ use super::Agent;
 use crate::realcall::auth::{parse_challenge, ChallengeResponder};
 
 mod fallible;
+mod won;
+
+pub(crate) use won::WonInvite;
 
 /// The first Contact URI on a response — the dialog remote target it teaches.
 fn first_contact_uri(resp: &SipResponse) -> Option<String> {
@@ -335,22 +337,7 @@ impl ClientInvite {
     /// winner promotion in [`ack`](Self::ack), so the fork's BYE stays
     /// contiguous within its dialog (§12.2.1.1).
     pub fn fork_dialog(&self, resp: &SipResponse) -> Dialog {
-        let mut dialog = self.dialog.clone();
-        if let Some(tag) = &resp.to().tag() {
-            dialog.remote_tag = tag.to_string();
-        }
-        if let Some(target) = first_contact_uri(resp) {
-            dialog.remote_target = target;
-        }
-        let route_set = uac_route_set(resp);
-        if !route_set.is_empty() {
-            dialog.route_set = route_set;
-        }
-        if let Some(&fork) = self.fork_cseq.get(&dialog.remote_tag) {
-            dialog.local_cseq = dialog.local_cseq.max(fork);
-        }
-        let dst = next_hop(&dialog, self.fallback_addr);
-        Dialog::new(self.agent.clone(), dst, dialog)
+        won::fork_dialog(&self.agent, &self.dialog, &self.fork_cseq, self.fallback_addr, resp)
     }
 
     /// **RFC 3261 §22.2 authentication retry** — the ONE auth adapter point wired

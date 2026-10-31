@@ -195,8 +195,8 @@ pub(super) async fn react_response(
                     st.dialogs.confirmed = Some(dialog.clone());
                     st.scope.set_confirmed(dialog);
                     st.obs.record(Observation::LegConfirmed { leg: st.role }, now);
-                    // RETAIN the INVITE: a losing fork's late 2xx is ACK+BYE'd (§13.2.2.4).
-                    st.dialogs.won_invite = Some(inv);
+                    // Keep the fork seed: a losing fork's late 2xx is ACK+BYE'd (§13.2.2.4).
+                    st.dialogs.won_invite = Some(Box::new(inv.into_won()));
                     ack_sent?;
                 }
                 InviteResponseFate::Failed { status } => {
@@ -259,7 +259,7 @@ pub(super) async fn react_response(
                     .is_some_and(|(d, t)| d.remote_tag() != *t);
             if is_losing_fork {
                 if let Some(inv) = st.dialogs.won_invite.as_ref() {
-                    let mut fork = inv.fork_dialog(&resp);
+                    let mut fork = inv.fork_dialog(&st.agent, &resp);
                     // Our INVITE carried the offer, so the fork's 200 carried
                     // its answer — the ACK is bodyless (§13.2.2.4).
                     fork.try_ack_for(resp.cseq().seq(), None).await?;

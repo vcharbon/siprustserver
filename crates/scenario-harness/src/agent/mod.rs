@@ -129,6 +129,6 @@ pub use waiver::WaiverScope;
 // socket callee group construct `Agent`s directly; the reactive actor
 // dispatches on the INVITE fate and the top-Via branch.
 pub(crate) use addressing::top_via_branch;
-pub(crate) use client_invite::InviteResponseFate;
+pub(crate) use client_invite::{InviteResponseFate, WonInvite};
 pub(crate) use ids::Ids;
 pub(crate) use rr_fold::decide_rr_fold;

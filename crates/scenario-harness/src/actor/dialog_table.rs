@@ -1,5 +1,6 @@
 //! The dialogs an actor's endpoint owns.
 
+use crate::agent::WonInvite;
 use crate::{ClientInvite, Dialog};
 
 /// The confirmed dialog(s) + pending INVITE transaction an endpoint owns. Deliberately minimal: one
@@ -13,9 +14,10 @@ pub(super) struct DialogTable {
     pub(super) pending_invite: Option<Box<ClientInvite>>,
     /// Our confirmed dialog (caller after ACK, or UAS after answering).
     pub(super) confirmed: Option<Dialog>,
-    /// The caller's establishing INVITE, RETAINED after confirmation (C1/E3):
-    /// a LOSING fork's late 2xx (§13.2.2.4) arrives after the winner's and must
-    /// be ACK+BYE'd on ITS OWN fork dialog — derived from this transaction
-    /// ([`ClientInvite::fork_dialog`]), never from the confirmed (winner) one.
-    pub(super) won_invite: Option<Box<ClientInvite>>,
+    /// What the caller keeps of its establishing INVITE after confirmation
+    /// (C1/E3): a LOSING fork's late 2xx (§13.2.2.4) arrives after the
+    /// winner's and must be ACK+BYE'd on ITS OWN fork dialog — derived from
+    /// this seed ([`WonInvite::fork_dialog`]), never from the confirmed
+    /// (winner) one. The INVITE request and datagram are not kept.
+    pub(super) won_invite: Option<Box<WonInvite>>,
 }
