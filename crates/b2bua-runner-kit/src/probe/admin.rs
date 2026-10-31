@@ -6,7 +6,8 @@
 //! - `GET /admin/cordon`: `200` with `{"state", "cordoned", "calls"}`, the
 //!   readiness state, whether a cordon is set, and the live call count.
 //! - `GET /admin/calls`: `200` with `{"calls": [{"call_ref", "call_ids"}]}`,
-//!   every live call by its ref and the Call-IDs of its legs, a-leg first.
+//!   every live call by its ref and the Call-IDs of its legs, a-leg first;
+//!   `503` when the worker's calls cannot be read.
 //! - `POST /admin/release-all` releases every call the worker serves
 //!   ([`b2bua::release_all`]): `200` with `{"released", "aborted"}`, the
 //!   answered calls released and the calls in setup aborted. The calls are
@@ -29,8 +30,8 @@ pub(crate) struct LiveCall {
     pub call_ids: Vec<String>,
 }
 
-/// The live calls the routes list.
-pub(crate) type LiveCallsFn = Arc<dyn Fn() -> Vec<LiveCall> + Send + Sync>;
+/// The live calls the routes list; `None` when they cannot be read.
+pub(crate) type LiveCallsFn = Arc<dyn Fn() -> Option<Vec<LiveCall>> + Send + Sync>;
 
 /// The operator routes of a worker with `readiness`, reporting `calls`,
 /// listing `live`, whose calls `release_all` releases.
@@ -68,7 +69,13 @@ fn cordon(readiness: &Readiness, calls: &CallCount, method: &str) -> AdminReply 
 fn listed(live: &LiveCallsFn, method: &str) -> AdminReply {
     match method {
         "GET" => {
-            let calls: Vec<serde_json::Value> = live()
+            let Some(live) = live() else {
+                return AdminReply::json(
+                    503,
+                    serde_json::json!({ "error": "the worker's calls cannot be read" }).to_string(),
+                );
+            };
+            let calls: Vec<serde_json::Value> = live
                 .into_iter()
                 .map(|c| serde_json::json!({ "call_ref": c.call_ref, "call_ids": c.call_ids }))
                 .collect();

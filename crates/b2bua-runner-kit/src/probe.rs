@@ -97,21 +97,22 @@ pub(crate) fn ready_fn(
     })
 }
 
-/// `GET /admin/calls`: every call the worker serves, by ref and leg Call-IDs.
+/// `GET /admin/calls`: every call the worker serves, by ref and leg Call-IDs;
+/// `None` once the worker's state is gone.
 fn live_calls(core: &Arc<B2buaCore>) -> admin::LiveCallsFn {
     let probe = core.live_calls_probe();
-    Arc::new(move || {
-        probe()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|call| admin::LiveCall {
-                call_ref: call.call_ref,
-                call_ids: std::iter::once(call.a_leg.call_id)
-                    .chain(call.b_legs.into_iter().map(|leg| leg.call_id))
-                    .collect(),
-            })
-            .collect()
-    })
+    Arc::new(move || probe().map(|calls| calls.into_iter().map(live_call).collect()))
+}
+
+/// One call as `GET /admin/calls` lists it: its a-leg's Call-ID, then each
+/// b-leg's in the order the call holds them.
+fn live_call(call: call::Call) -> admin::LiveCall {
+    admin::LiveCall {
+        call_ref: call.call_ref,
+        call_ids: std::iter::once(call.a_leg.call_id)
+            .chain(call.b_legs.into_iter().map(|leg| leg.call_id))
+            .collect(),
+    }
 }
 
 /// `/healthz`: live while no loop is stalled past `stall`.
@@ -192,5 +193,37 @@ mod tests {
         );
         let ready = ready_fn(|| ReadinessState::Cordoned, loops, STALL);
         assert_eq!(ready(), ProbeState::Ready);
+    }
+
+    /// A call the worker built from an INVITE, with one dialled b-leg, lists
+    /// the INVITE's Call-ID first and the b-leg's after it.
+    #[test]
+    fn a_live_call_lists_its_a_leg_call_id_then_its_b_legs() {
+        use sip_message::parser::custom::CustomParser;
+        use sip_message::{SipMessage, SipParser};
+        let raw = "INVITE sip:bob@example.com SIP/2.0\r\n\
+            Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-live\r\n\
+            Max-Forwards: 70\r\n\
+            From: <sip:alice@example.com>;tag=alicetag\r\n\
+            To: <sip:bob@example.com>\r\n\
+            Call-ID: a-leg@10.0.0.9\r\n\
+            CSeq: 1 INVITE\r\n\
+            Contact: <sip:alice@10.0.0.9:5060>\r\n\
+            Content-Length: 0\r\n\r\n";
+        let SipMessage::Request(req) = CustomParser::new().parse(raw.as_bytes()).unwrap() else {
+            panic!("a request")
+        };
+        let cfg = b2bua::B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
+        let mut call = b2bua::initial_invite::build_initial_call(
+            &req,
+            std::net::SocketAddr::from(([10, 0, 0, 9], 5060)),
+            &cfg,
+            &mut sip_ids::TurnIds::fixed(1),
+            1_000,
+        );
+        call.b_legs.push(call::testkit::dialled_leg("b-1", "btag"));
+        let listed = live_call(call.clone());
+        assert_eq!(listed.call_ref, call.call_ref);
+        assert_eq!(listed.call_ids, ["a-leg@10.0.0.9", "b-1-call-id"]);
     }
 }
