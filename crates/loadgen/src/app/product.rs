@@ -129,7 +129,8 @@ where
 }
 
 /// The whole load binary for `product`: parse the process command line
-/// (exiting with clap's usage error on a bad one), then run on [`runtime`].
+/// (exiting with clap's usage error on a bad one), then run on a
+/// multi-threaded runtime of `--worker-threads` workers.
 pub fn main<P: Product>(product: P) -> std::io::Result<()> {
     let (flags, args) = parse_from(&product, std::env::args_os()).unwrap_or_else(|e| e.exit());
     runtime(&args)?.block_on(run(&product, &flags, args))
