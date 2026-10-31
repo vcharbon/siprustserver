@@ -17,6 +17,8 @@
  *   /sources               the source list, filtered by its query string
  *   /jobs                  the jobs, newest first
  *   /jobs/<id>             one job
+ *   /campaign              the end-to-end campaigns
+ *   /campaign/<capture>    one campaign's summary: failures, run grid, a case's history
  *
  * An `<id>` is `<root-id>~<entry-id>`, which the server also uses. A study URL
  * carries the capture BASENAME, so pasting it into a triage launch line works.
@@ -50,6 +52,7 @@ export type Route =
   | { readonly kind: "sources" }
   | { readonly kind: "jobs" }
   | { readonly kind: "job"; readonly id: number }
+  | { readonly kind: "campaign"; readonly capture?: string }
   | { readonly kind: "unknown"; readonly path: string }
 
 export const parseSideRef = (raw: string): SideRef => {
@@ -100,6 +103,9 @@ export const parseRoute = (pathname: string): Route => {
     const id = Number(segments[1])
     return segments[1] && Number.isInteger(id) ? { kind: "job", id } : { kind: "jobs" }
   }
+  if (segments[0] === "campaign") {
+    return segments[1] ? { kind: "campaign", capture: decodeURIComponent(segments[1]) } : { kind: "campaign" }
+  }
   if (segments[0] === "triage") {
     return segments[1]
       ? { kind: "triage-study", capture: decodeURIComponent(segments[1]) }
@@ -123,7 +129,10 @@ export const href = {
   rules: (params: RulesParams = {}) => `/rules${queryString(params)}`,
   sources: (params: SourcesParams = {}) => `/sources${queryString(params)}`,
   jobs: () => "/jobs",
-  job: (id: number) => `/jobs/${id}`
+  job: (id: number) => `/jobs/${id}`,
+  campaigns: () => "/campaign",
+  campaign: (capture: string, params: CampaignParams = {}) =>
+    `/campaign/${encodeURIComponent(capture)}${queryString(params)}`
 }
 
 /** Which two run sets a comparison reads, and how much of it. */
@@ -196,6 +205,29 @@ export interface QueueParams {
   readonly limit?: string | undefined
 }
 
+/** Where in a campaign's summary the link points; every value is text, because a URL carries text. */
+export interface CampaignParams {
+  /** `grid` for the run grid; absent, the failures. */
+  readonly tab?: string | undefined
+  /** The run read, and the run it is compared with. */
+  readonly run?: string | undefined
+  readonly vs?: string | undefined
+  /** The lanes read, comma-separated; absent, every lane. */
+  readonly lanes?: string | undefined
+  readonly fail?: string | undefined
+  readonly one?: string | undefined
+  readonly new?: string | undefined
+  readonly q?: string | undefined
+  /** The selected check facets. */
+  readonly check?: ReadonlyArray<string> | undefined
+  /** The selected family facets. */
+  readonly family?: ReadonlyArray<string> | undefined
+  /** The case whose history is open. */
+  readonly case?: string | undefined
+  /** `<run>:<lane>`: the delta of the open case on screen. */
+  readonly delta?: string | undefined
+}
+
 /** Where in a capture's study the link points: one call, and one of its steps. */
 export interface StudyParams {
   /** Which lane's standing the study reports; absent = the configured lane. */
@@ -210,7 +242,7 @@ export interface StudyParams {
 
 /** A list value repeats its key once per entry; a blank or empty value is left out. */
 const queryString = (
-  params: QueueParams | StudyParams | RulesParams | SourcesParams | CompareParams | ReportParams
+  params: QueueParams | StudyParams | RulesParams | SourcesParams | CompareParams | ReportParams | CampaignParams
 ): string => {
   const search = new URLSearchParams()
   for (const [key, value] of Object.entries(params)) {
@@ -239,7 +271,7 @@ export const useQuery = (): URLSearchParams => {
  * the pages the reader came through, not to every message they clicked.
  */
 export const setQuery = (
-  params: QueueParams | StudyParams | RulesParams | SourcesParams | CompareParams | ReportParams
+  params: QueueParams | StudyParams | RulesParams | SourcesParams | CompareParams | ReportParams | CampaignParams
 ): void => {
   window.history.replaceState({}, "", `${window.location.pathname}${queryString(params)}`)
 }

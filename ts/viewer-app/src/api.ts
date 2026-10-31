@@ -964,6 +964,83 @@ const search = (params: Record<string, string | number | ReadonlyArray<string> |
   return text === "" ? "" : `?${text}`
 }
 
+/** One failed check of a campaign case: where, what, expected beside seen, what the decision said, whose side. */
+export interface CampaignCheck {
+  readonly anchor: string
+  readonly field: string
+  readonly expected: string | null
+  readonly seen: string | null
+  readonly said: string | null
+  readonly side: string | null
+}
+
+export interface CampaignResult {
+  readonly caseId: string
+  readonly outcome: "pass" | "failure" | "error"
+  /** The cell's bundle directory under its lane's session; null where none was written. */
+  readonly cell: string | null
+  readonly log: { readonly records?: number; readonly missing?: string } | null
+  readonly detail: string | null
+  readonly checks: readonly CampaignCheck[]
+}
+
+export interface CampaignLane {
+  readonly lane: string
+  readonly runId: number
+  /** The run's bundle directory under the capture's session tree. */
+  readonly session: string
+  readonly status: string
+  readonly detail: string | null
+  /** Cases the lane did not run. */
+  readonly skipped: number
+  readonly results: readonly CampaignResult[]
+}
+
+export interface CampaignRun {
+  readonly id: number
+  readonly startedAt: string
+  readonly finishedAt: string | null
+  /** What the run states it ran on, in the deployment's order. */
+  readonly labels: ReadonlyArray<{ readonly name: string; readonly value: string }>
+  readonly lanes: readonly CampaignLane[]
+}
+
+export interface CampaignCase {
+  readonly caseId: string
+  readonly ref: string
+  readonly subcase: string | null
+  readonly family: string
+}
+
+/** One campaign's latest runs, newest first, and every case any of them ran. */
+export interface Campaign {
+  readonly capture: string
+  /** The label of a check's `said`. */
+  readonly saidLabel: string
+  /** The side vocabulary, in the order the pages list it. */
+  readonly sides: readonly string[]
+  readonly lanes: readonly string[]
+  readonly runs: readonly CampaignRun[]
+  readonly cases: readonly CampaignCase[]
+}
+
+/** A cell's decision-service log: its records, or why it has none. */
+export type CampaignLog = { readonly records: string } | { readonly missing: string }
+
+/** A text GET whose 404 states why there is nothing. */
+const campaignLog = async (path: string): Promise<CampaignLog> => {
+  const response = await fetch(path)
+  if (response.ok) return { records: await response.text() }
+  const text = await response.text()
+  try {
+    const parsed = JSON.parse(text) as { note?: unknown }
+    if (typeof parsed.note === "string") return { missing: parsed.note }
+  } catch {
+    // Not JSON: the text is the reason.
+  }
+  return { missing: `${response.status} ${text.slice(0, 200)}` }
+}
+
 /** A request whose failure, of any status, is the server's stated reason where it states one. */
 const request = async <A>(path: string, method: "GET" | "POST" = "GET"): Promise<A> => {
   const response = await fetch(path, { method, headers: { accept: "application/json" } })
@@ -1154,7 +1231,16 @@ export const api = {
     request<SourcesPage>(
       `/api/sources${search({ stale: query.stale === true ? "1" : undefined, q: query.q, limit: query.limit, offset: query.offset })}`
     ),
-  retirePlan: (capture: string) => request<RetirePlan>(`/api/sources/${encodeURIComponent(capture)}/retire-plan`)
+  retirePlan: (capture: string) => request<RetirePlan>(`/api/sources/${encodeURIComponent(capture)}/retire-plan`),
+  campaigns: () => request<readonly string[]>("/api/campaign"),
+  campaign: (capture: string, limit?: number) =>
+    request<Campaign>(`/api/campaign/${encodeURIComponent(capture)}${search({ limit })}`),
+  campaignLog: (capture: string, session: string, cell: string) =>
+    campaignLog(
+      `/api/campaign/${encodeURIComponent(capture)}/runs/${encodeURIComponent(session)}/cells/${
+        encodeURIComponent(cell)
+      }/log`
+    )
 }
 
 export type Async<A> =

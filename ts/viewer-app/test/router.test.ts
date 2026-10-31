@@ -8,6 +8,13 @@ import { describe, expect, it } from "vitest"
 import { href, isSelector, parseRoute } from "../src/router.ts"
 
 describe("the compare and report routes", () => {
+  it("reads a campaign by its capture, and writes its summary's place in the query", () => {
+    expect(parseRoute("/campaign")).toEqual({ kind: "campaign" })
+    expect(parseRoute("/campaign/e2e%20one")).toEqual({ kind: "campaign", capture: "e2e one" })
+    expect(href.campaign("e2e one", { run: "4", check: ["B1 INVITE to.uri", "rfc x"], case: "A/b [c]" }))
+      .toBe("/campaign/e2e%20one?run=4&check=B1+INVITE+to.uri&check=rfc+x&case=A%2Fb+%5Bc%5D")
+  })
+
   it("keeps the ladder alignment of two case or run sides", () => {
     expect(parseRoute("/compare/case:a~b/run:runs~x")).toEqual({
       kind: "compare",

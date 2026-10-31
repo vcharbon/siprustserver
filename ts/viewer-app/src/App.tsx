@@ -1,6 +1,7 @@
 /** The shell: route in, page out. */
 import type { JSX } from "react"
 import { Link } from "./components/Link.tsx"
+import { CampaignPage } from "./pages/CampaignPage.tsx"
 import { CasePage } from "./pages/CasePage.tsx"
 import { ComparePage } from "./pages/ComparePage.tsx"
 import { DeltasPage } from "./pages/DeltasPage.tsx"
@@ -31,6 +32,7 @@ export const App = (): JSX.Element => {
         <Link to={href.jobs()}>jobs</Link>
         <Link to={href.compareRuns({})}>compare</Link>
         <Link to={href.report({})}>report</Link>
+        <Link to={href.campaigns()}>campaign</Link>
         <span className="muted">{window.location.pathname}</span>
       </nav>
       {route.kind === "index" && <IndexPage />}
@@ -46,6 +48,7 @@ export const App = (): JSX.Element => {
       {route.kind === "job" && <JobPage id={route.id} />}
       {route.kind === "triage-study" && <StudyPage capture={route.capture} />}
       {route.kind === "deltas" && <DeltasPage />}
+      {route.kind === "campaign" && <CampaignPage capture={route.capture} />}
       {route.kind === "unknown" && (
         <p className="page error">
           no route for {route.path}. Try <Link to={href.index()}>the index</Link>.
