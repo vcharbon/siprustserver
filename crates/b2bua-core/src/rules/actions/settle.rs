@@ -10,11 +10,14 @@
 //! | a rule destroys a leg (`DestroyLeg`) | `destroy_leg` | that leg | [`Cause::LegEnd`] |
 //! | a rule ends a leg (`TerminateLeg`) | `terminate_leg` | that leg | [`Cause::LegEnd`] |
 //! | the call is released at once (`TerminateCall`) | `dispatch` | every | [`Cause::LegEnd`] |
-//! | the unanswered caller's 503 leaves (ADR-0022) | `answer_unanswered_caller` | the caller's | [`Cause::LegEnd`] |
+//! | the unanswered caller's 503 leaves, at termination (ADR-0022) or under the possibly-confirmed hold (ADR-0055 §4) | `answer_unanswered_caller` | the caller's | [`Cause::LegEnd`] |
 //!
 //! A Confirmed leg BYEd at termination is not settled: its relays wait for
 //! their real finals. A discharge never settles (ADR-0022 X5): it sends
-//! nothing.
+//! nothing. A service's own answer to one named request (`AnswerHeld`,
+//! `RejectPendingReinvite`) and the platform's answer at a held request's
+//! deadline are not settlements: each answers that request through its own
+//! action.
 
 use call::helpers::{find_leg, update_leg, RelayPeer};
 use call::{Call, CallModelState, Dialog, DialogId, RequestRecord};
@@ -149,7 +152,7 @@ fn answer_owed(call: &mut Call, fx: &mut HandlerEffects, leg_id: &str, owes: Owe
 
 /// The leg a relay toward `leg_id`'s dialog `dialog` came from: the one its
 /// final would have been relayed to; the caller's where none resolves.
-fn relay_originator(call: &Call, leg_id: &str, dialog: &DialogId) -> String {
+pub(super) fn relay_originator(call: &Call, leg_id: &str, dialog: &DialogId) -> String {
     match call::helpers::resolve_relay_peer(call, leg_id, Some(dialog)) {
         RelayPeer::Leg { leg_id, .. } => leg_id,
         RelayPeer::NoLeg | RelayPeer::Unadopted => call.a_leg.leg_id.clone(),

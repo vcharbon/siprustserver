@@ -123,8 +123,7 @@ impl ActionExecutor<'_> {
             refused("the originator's request lines make no response");
             return;
         };
-        let originator =
-            call::helpers::get_peer(call, leg_id).unwrap_or(call.a_leg.leg_id.as_str()).to_string();
+        let originator = super::settle::relay_originator(call, leg_id, &dialog.id());
         fx.outbound.push(OutboundSipEffect {
             body: OutboundBody::Response(reject),
             mode: OutboundTxnMode::ServerResponse,

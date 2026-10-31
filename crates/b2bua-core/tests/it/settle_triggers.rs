@@ -23,6 +23,50 @@ fn holds_bobs_info() -> RuleDefinition {
     )
 }
 
+/// A service holding every INFO either party sends for a later answer.
+fn holds_every_info() -> RuleDefinition {
+    RuleDefinition::core(
+        "test-hold-every-info",
+        SERVICE_LAYER,
+        &[],
+        Match::request().method("INFO"),
+        |_| Some(RuleHandleResult::new(vec![RuleAction::HoldRequest])),
+    )
+}
+
+/// The service's topic: bob's leg is split from the caller's.
+const SPLIT: &str = "test-split";
+
+/// A service splitting bob's leg from the caller's on its internal event.
+fn splits_bob() -> RuleDefinition {
+    RuleDefinition::core(
+        "test-split",
+        SERVICE_LAYER,
+        &[],
+        Match::internal_event().topic(SPLIT),
+        |_| Some(RuleHandleResult::new(vec![RuleAction::Split { leg_id: "b-1".into() }])),
+    )
+}
+
+/// The service's event splitting bob's leg.
+fn splits() -> Step {
+    Step::Internal { leg: "a", topic: SPLIT, outcome: "ok", payload: serde_json::json!({}) }
+}
+
+/// The held-answer timer's deadline on `call`, if armed.
+fn held_answer_at(call: &Session<'_>) -> Option<i64> {
+    let held = call::TimerKey::call(call::TimerType::HeldAnswer);
+    call.call().timers.iter().find(|t| t.key == held).map(|t| t.fire_at)
+}
+
+/// The deadlines of the requests `call` still holds for a service.
+fn held_deadlines(call: &Session<'_>) -> Vec<i64> {
+    call::helpers::every_record(call.call())
+        .filter(|(_, _, r)| r.is_held())
+        .filter_map(|(_, _, r)| r.deadline_ms)
+        .collect()
+}
+
 /// A service beginning the call's termination on its internal event.
 fn ends_the_call() -> RuleDefinition {
     RuleDefinition::core("test-end", SERVICE_LAYER, &[], Match::internal_event().topic(END), |_| {
@@ -124,7 +168,11 @@ fn the_callers_leg_is_settled_behind_the_unanswered_callers_503() {
 
     let turn = call.turned(Step::Answers("b-1", 487));
     assert_eq!(finals_to(turn, "a"), [fin(503, "INVITE")]);
-    assert_eq!(finals_to(turn, "b-1"), [fin(481, "INFO")], "after her 503");
+    assert_eq!(finals_to(turn, "b-1"), [fin(481, "INFO")]);
+    let labels: Vec<&str> = turn.result.effects.outbound.iter().map(|o| o.label.as_str()).collect();
+    let at = |prefix: &str| labels.iter().position(|l| l.starts_with(prefix));
+    let (her_503, his_481) = (at("503 "), at("481 INFO"));
+    assert!(her_503.is_some() && her_503 < his_481, "her 503 leaves first: {labels:?}");
     assert_eq!(call.call().state, CallModelState::Terminated);
 }
 
@@ -181,4 +229,62 @@ fn the_held_answer_timer_leaves_with_the_last_held_request() {
     let turn = call.turned(Step::Sends("b-1", Method::Bye));
     assert!(finals_to(turn, "b-1").contains(&fin(487, "INFO")));
     assert!(!call.call().timers.iter().any(|t| t.key == held), "off once none is held");
+}
+
+/// A leg's end that answers the earliest held request, on a call that stays
+/// up: the held-answer timer moves to the deadline of the request still
+/// held.
+#[test]
+fn the_held_answer_timer_moves_to_the_request_still_held() {
+    let driver =
+        Driver::new().with_rule(holds_every_info()).with_rule(crate::services::reinvite_release());
+    let mut call = bridged(&driver);
+    call.run([
+        Step::Sends("b-1", Method::Info),
+        Step::Advance(1_000),
+        Step::Sends("a", Method::Info),
+    ]);
+    let (bobs, hers) = match held_deadlines(&call)[..] {
+        [x, y] => (x.min(y), x.max(y)),
+        ref other => panic!("two requests held, got {other:?}"),
+    };
+    assert!(bobs < hers);
+    assert_eq!(held_answer_at(&call), Some(bobs), "armed at the earliest");
+
+    let turn = call.turned(crate::services::releases("b-1"));
+    assert_eq!(finals_to(turn, "b-1"), [fin(487, "INFO")], "bob's held INFO");
+    assert!(finals_to(turn, "a").is_empty(), "hers stays held");
+    assert_ne!(call.call().state, CallModelState::Terminated);
+    assert_eq!(held_answer_at(&call), Some(hers), "moved to the one still held");
+}
+
+/// A leg's end that answers the last held request, on a call that stays up:
+/// the held-answer timer is off.
+#[test]
+fn the_held_answer_timer_is_off_once_none_is_held_on_a_live_call() {
+    let driver =
+        Driver::new().with_rule(holds_bobs_info()).with_rule(crate::services::reinvite_release());
+    let mut call = bridged(&driver);
+    call.run([Step::Sends("b-1", Method::Info)]);
+    assert!(held_answer_at(&call).is_some(), "armed while held");
+
+    let turn = call.turned(crate::services::releases("b-1"));
+    assert_eq!(finals_to(turn, "b-1"), [fin(487, "INFO")]);
+    assert_ne!(call.call().state, CallModelState::Terminated);
+    assert_eq!(held_answer_at(&call), None, "off once none is held");
+}
+
+/// bob's re-INVITE awaits alice's final when a service splits his leg from
+/// hers and then ends the call: the termination answers his re-INVITE 487
+/// on his own leg, the one its final would have been relayed to.
+#[test]
+fn a_pending_reinvite_is_answered_on_the_leg_it_came_from_after_a_split() {
+    let driver = Driver::new().with_rule(splits_bob()).with_rule(ends_the_call());
+    let mut call = bridged(&driver);
+    call.run([Step::Sends("b-1", Method::Invite), splits()]);
+    assert!(call.call().active_peer.is_none(), "no active peer after the split");
+
+    let turn = call.turned(ends());
+    assert_eq!(finals_to(turn, "b-1"), [fin(487, "INVITE")]);
+    assert!(finals_to(turn, "a").is_empty(), "nothing answered on her leg");
 }
