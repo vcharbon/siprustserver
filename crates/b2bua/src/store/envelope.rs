@@ -96,6 +96,7 @@ pub fn owners(this: &RelayOwner, topology: Option<&CallTopology>) -> Owners {
         this: this.clone(),
         other: other.map(str::to_string),
         primary: topology.filter(|_| other.is_some()).map(|t| t.pri.clone()),
+        backup: topology.filter(|_| other.is_some()).map(|t| t.bak.clone()),
         copy_served: topology.is_some_and(|t| t.copy_served(&this.ordinal)),
     }
 }

@@ -56,12 +56,15 @@ fn a_copy_on_the_backup_states_the_primary() {
     assert_eq!(on("w1", Some(&t)).other.as_deref(), Some("w0"));
 }
 
-/// Either owner names the call's primary, the one its topology places it on.
+/// Either owner names the call's primary and backup, as its topology places
+/// them.
 #[test]
-fn both_owners_name_the_calls_primary() {
+fn both_owners_name_the_calls_primary_and_backup() {
     let t = CallTopology::new("w0", "w1", 1, 0);
     assert_eq!(on("w0", Some(&t)).primary.as_deref(), Some("w0"));
     assert_eq!(on("w1", Some(&t)).primary.as_deref(), Some("w0"));
+    assert_eq!(on("w0", Some(&t)).backup.as_deref(), Some("w1"));
+    assert_eq!(on("w1", Some(&t)).backup.as_deref(), Some("w1"));
 }
 
 #[test]

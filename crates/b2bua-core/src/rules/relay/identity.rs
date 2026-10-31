@@ -55,10 +55,8 @@ impl<'a> CallMarks<'a> {
     {
         let owners = self.owners;
         let primary = owners.primary.as_deref().filter(|_| dials);
-        let backup = match primary {
-            Some(primary) if primary != owners.this.ordinal => Some(owners.this.ordinal.as_str()),
-            _ => owners.other.as_deref(),
-        };
+        let backup =
+            if primary.is_some() { owners.backup.as_deref() } else { owners.other.as_deref() };
         StackIdentityOpts {
             local_ip: &config.sip_local_ip,
             local_port: config.sip_local_port,

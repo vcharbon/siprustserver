@@ -5,7 +5,8 @@
 //! §8). When the rules sent no ACK for it, it is ACKed as a node that holds
 //! no client transaction of it answers it, from its verified via-extension
 //! (ADR-0055 §12, [`crate::unheld_response`]); one whose extension does not
-//! verify draws nothing.
+//! verify draws nothing, nor does one whose Via names this node: its own
+//! transaction absorbed that final and its repeats while it lived.
 
 use sip_ids::TurnIds;
 use sip_message::{Method, SipMessage, SipResponse};
@@ -29,6 +30,9 @@ pub(super) fn ack_unheld_final(
     if matched_client_txn || resp.status() < 300 || resp.cseq().method() != Method::Invite {
         return;
     }
+    if resp.top_via().host_port() == (config.sip_local_ip.as_str(), config.sip_local_port) {
+        return;
+    }
     if effects.outbound.iter().any(|e| acks(&e.body, resp)) {
         return;
     }
@@ -45,3 +49,7 @@ fn acks(body: &OutboundBody, resp: &SipResponse) -> bool {
         && req.call_id().as_str() == resp.call_id().as_str()
         && req.cseq().seq() == resp.cseq().seq()
 }
+
+#[cfg(test)]
+#[path = "unheld_final_tests.rs"]
+mod tests;

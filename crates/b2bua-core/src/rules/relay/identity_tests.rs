@@ -57,6 +57,7 @@ fn dialling(this: &str, primary: &str, backup: &str) -> (Option<String>, Option<
         this: RelayOwner::new(this, "boot-1"),
         other: Some(other.into()),
         primary: Some(primary.into()),
+        backup: Some(backup.into()),
         copy_served: this != primary,
     };
     let marks = CallMarks {
@@ -89,6 +90,7 @@ fn an_in_dialog_request_states_no_primary() {
         this: RelayOwner::new("w1", "boot-1"),
         other: Some("w0".into()),
         primary: Some("w0".into()),
+        backup: Some("w1".into()),
         copy_served: true,
     };
     let marks = CallMarks {

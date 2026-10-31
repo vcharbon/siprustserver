@@ -13,10 +13,13 @@ pub struct Owners {
     /// The owner of the call other than this node, stated on every Via the
     /// turn emits; `None` for a call with one owner.
     pub other: Option<String>,
-    /// The call's primary, this node or the other owner, stated with the
-    /// call's backup on a leg's dialog-creating request (ADR-0055 §8); `None`
-    /// for a call with one owner.
+    /// The call's primary, this node or the other owner, stated on a leg's
+    /// dialog-creating request (ADR-0055 §8); `None` for a call with one
+    /// owner.
     pub primary: Option<String>,
+    /// The call's backup, stated beside its primary on a leg's
+    /// dialog-creating request; `None` for a call with one owner.
+    pub backup: Option<String>,
     /// Whether another owner served the call, so its record may lack what
     /// that owner sent (ADR-0055 §4).
     pub copy_served: bool,
@@ -29,6 +32,7 @@ impl Owners {
             this: RelayOwner { ordinal: String::new(), identity: String::new() },
             other: None,
             primary: None,
+            backup: None,
             copy_served: false,
         };
         &NONE
