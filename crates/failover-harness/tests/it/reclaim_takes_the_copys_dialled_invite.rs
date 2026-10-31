@@ -24,6 +24,9 @@
 //! after the primary is routable but before its reclaim write is applied at
 //! the backup. The copy also dials a new leg on an established call, a
 //! transfer target, and the primary returns while that leg rings.
+//!
+//! Beyond the failover sweep: which node each answer reaches and which sends
+//! each 2xx, ACK, BYE and CANCEL, and the caller's 2xx copies on one ladder.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};

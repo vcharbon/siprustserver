@@ -10,6 +10,8 @@
 //! callee's 200 reaches the primary, which never restarted, and the copy
 //! stands down on the primary's write (ADR-0055 §8). One owner after the
 //! flip, no call cut by evidence, one CDR.
+//!
+//! Beyond the failover sweep: a misread primary, which no sweep fault makes.
 
 use std::sync::Arc;
 use std::time::Duration;
