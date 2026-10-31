@@ -2292,6 +2292,8 @@ tr.rule-unrostered td {
   padding: 14px 18px 60px;
 }
 .cp-close { float: right; }
+.cp-checks td { text-align: left; vertical-align: top; font-size: 12px; }
+.cp-expected { word-break: break-all; }
 .cp-source {
   margin: 8px 0 0;
   max-height: 520px;

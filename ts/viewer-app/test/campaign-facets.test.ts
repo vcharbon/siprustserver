@@ -80,7 +80,8 @@ const VIEW: Campaign = {
     description: null,
     groups: GROUPS[caseId] ?? [],
     links: [],
-    source: null
+    source: null,
+    checked: null
   })),
   runs: [
     run(4, {

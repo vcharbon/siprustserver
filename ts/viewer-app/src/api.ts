@@ -1033,6 +1033,16 @@ export interface CampaignCase {
   readonly links: readonly CampaignLink[]
   /** The file the case was compiled from, as the newest run that compiled it read it; null where none kept it. */
   readonly source: { readonly file: string; readonly text: string } | null
+  /** Every check the case makes, passing or not; null where the campaign states none. */
+  readonly checked: readonly CampaignChecked[] | null
+}
+
+/** One check a campaign case makes: where, which field (`*`: any at the anchor), how, against what. */
+export interface CampaignChecked {
+  readonly anchor: string
+  readonly field: string
+  readonly op: string
+  readonly expected: string | null
 }
 
 /** One environment's latest runs of a campaign, newest first, and every case any of them ran. */

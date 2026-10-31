@@ -17,7 +17,7 @@ const result = (caseId: string, outcome: CampaignResult["outcome"], keys: Readon
   checks: keys.map((key) => ({ anchor: "B1 INVITE", field: key, expected: "x", seen: "y", said: null, side: "sut" }))
 })
 
-const UNGROUPED = { title: null, description: null, groups: [], links: [], source: null }
+const UNGROUPED = { title: null, description: null, groups: [], links: [], source: null, checked: null }
 
 const VIEW: Campaign = {
   capture: "campaign",
