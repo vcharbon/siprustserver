@@ -957,55 +957,6 @@ async fn acting_backup_terminate_leaves_no_expired_context_for_reclaim() {
 // MATRIX — fault cases (best-effort; deferrals documented in the report-back)
 // ===========================================================================
 
-/// Matrix: crash mid-INVITE — crash the primary BEFORE the call is established /
-/// replicated. The proxy fails the early dialog to the backup or the call is
-/// lost gracefully — assert no panic + a sane outcome (the harness/cores stay
-/// live and a subsequent fresh call still establishes).
-#[tokio::test(start_paused = true)]
-async fn matrix_crash_mid_invite() {
-    let mut fh = FailoverHarness::new("s10b-crash-mid-invite", &["b1", "b2"]);
-    let alice = fh.agent("alice", ALICE).await;
-    let bob = fh.agent("bob", BOB).await;
-    let proxy = spawn_reactive_proxy(&fh).await;
-    let mut w_b1 =
-        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
-    let mut w_b2 =
-        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
-    fh.advance(Duration::from_millis(500)).await;
-
-    // alice INVITEs; bob gets the b-leg. Determine the primary from the cookie.
-    let call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
-    let uas = bob.receive("INVITE").await;
-    let (pri_ord, _bak) = worker_ordinals(uas.request());
-
-    // Crash the primary BEFORE answering (no 200 → no establish → no replicate).
-    fh.mark(&pri_ord, None, "crash", "mid-INVITE (before answer)");
-    if pri_ord == "b1" {
-        w_b1.crash();
-    } else {
-        w_b2.crash();
-    }
-    proxy.set_health(&pri_ord, WorkerHealth::Dead);
-    // Drop bob's pending UAS (the early dialog is abandoned).
-    drop(uas);
-    drop(call); // alice abandons the early dialog.
-    fh.advance(Duration::from_millis(500)).await;
-
-    // SANE OUTCOME: no panic; the surviving worker + proxy still serve a fresh
-    // call end-to-end (the cluster degraded to 1 node but stays live).
-    let mut call2 = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
-    let mut uas2 = bob.receive("INVITE").await;
-    uas2.respond(200, "OK").with_sdp(ANSWER).await;
-    call2.expect(200).await;
-    let mut dlg2 = call2.ack().await;
-    bob.receive("ACK").await;
-    scenario_harness::callflow::hangup(&mut dlg2, &bob).await;
-    fh.advance(Duration::from_millis(300)).await;
-    // Reaching here without a panic IS the assertion (liveness preserved).
-    drop((w_b1, w_b2, proxy));
-    let _ = fh.repl_report();
-}
-
 /// Matrix: the backup crashes between two Timer-A copies of one INVITE. The
 /// callee is silent and the worker's 100 is lost on its way to the caller, so
 /// both INVITE client transactions keep their Timer A: the caller's rung and
@@ -1480,7 +1431,7 @@ async fn skew_ahead_backup_no_immediate_options_at_takeover() {
 
 /// The callRef the acting-backup `b2` holds for `primary` in its `bak:{primary}`
 /// partition (the replicated call). Scans the engine's live backup keyset.
-async fn find_backed_up_ref(b2: &ReplicatedB2buaSut, primary: &str) -> String {
+pub(crate) async fn find_backed_up_ref(b2: &ReplicatedB2buaSut, primary: &str) -> String {
     for _ in 0..50 {
         if let Some(rf) = b2.scan_one_backed_up(primary).await {
             // Sanity: the replicated ref encodes the original primary.

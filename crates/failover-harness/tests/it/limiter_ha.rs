@@ -337,6 +337,8 @@ async fn setup_stalled_call_is_released_at_the_deadline_after_crash_reboot_recla
 ///      Call B's admission is not the signal: `trunk-A` is capped at 1, so a
 ///      set that failed to lapse would 486 it, which the establish would fail
 ///      on; the count and the counter say the recovery came from the lease.
+///   4. Both calls end (Call A by alice's BYE on the backup); the dead primary
+///      departs and the sweep writes Call A's CDR (ADR-0047 D8).
 #[tokio::test(start_paused = true)]
 async fn leaked_limiter_slot_recovers_via_the_lease_when_primary_is_permanently_dead() {
     let mut fh = ha_harness("limiter-ha-lease-leak-budget");
@@ -405,7 +407,7 @@ async fn leaked_limiter_slot_recovers_via_the_lease_when_primary_is_permanently_
     // early: `Established` and early replicas are BOTH non-terminal, so both are
     // equally ignored by the lossy reap (`CallState::reap_replica`
     // returns only `Terminating`/`Terminated`).
-    let _dialog = call.ack().await;
+    let mut dialog_a = call.ack().await;
     bob1.receive("ACK").await;
 
     // Drive establish + replicate primary → backup (so the backup carries a
@@ -447,10 +449,8 @@ async fn leaked_limiter_slot_recovers_via_the_lease_when_primary_is_permanently_
         lapsed_before + 1,
         "the recovery was the lease lapsing (Call A's set), not an active release",
     );
-    // Belt-and-braces, NOT the discriminator: no lossy reap was counted.
-    // The reap only fires after `reboot_budget_sec` (600 s) of replica TTL, and
-    // the test finishes at ~126 s, so this reads 0 regardless of the replica's
-    // terminal state.
+    // Belt-and-braces, NOT the discriminator: the reap fires only past the
+    // 600 s replica TTL, so this reads 0 whatever the replica's state.
     assert_eq!(
         w_b1.metrics().repl_terminal_lost_total() + w_b2.metrics().repl_terminal_lost_total(),
         0,
@@ -458,27 +458,27 @@ async fn leaked_limiter_slot_recovers_via_the_lease_when_primary_is_permanently_
          600 s, so the reap cannot fire here regardless): recovery came from the lease",
     );
 
-    // Clean teardown so Call B writes its CDR and releases its own set. Wait for
-    // BOTH the limiter to drain AND the CDR to land: the limiter release and the
-    // CDR write ride different obligation lanes (the CDR-lane reorder, ADR-0020),
-    // so the limiter can hit 0 a flush before the CDR is recorded — settling on the
-    // limiter alone would race ahead of the write.
+    // Both calls end; the backup serves Call A's BYE and defers its CDR.
     scenario_harness::callflow::hangup(&mut call_b, &bob2).await;
+    scenario_harness::callflow::hangup(&mut dialog_a, &bob1).await;
+    fh.advance(Duration::from_secs(1)).await;
+
+    // The primary departs: the sweep discharges Call A. The limiter release
+    // and the CDR ride different lanes (ADR-0020), so settle on both.
+    fh.depart(&primary_ord);
     let drained = fh
         .settle_terminal(async || {
             store.stats().current_total == 0
-                && w_b1.cdr_records().len() + w_b2.cdr_records().len() == 1
+                && w_b1.cdr_records().len() + w_b2.cdr_records().len() == 2
         })
         .await;
-    assert!(drained, "Call B's clean BYE released its limiter set AND wrote exactly one CDR",);
-
-    // Call A's CDR is the accepted loss (its primary crashed for good and never
-    // reclaimed); only Call B terminated cleanly, so exactly one CDR exists.
-    assert_eq!(
-        w_b1.cdr_records().len() + w_b2.cdr_records().len(),
-        1,
-        "only Call B wrote a CDR — Call A's is lost (primary never reclaimed)",
-    );
+    assert!(drained, "both calls released their limiter sets and wrote their CDRs");
+    fh.linger_peers(&[&alice, &bob1, &bob2], Duration::from_secs(3)).await;
+    let survivor = if primary_ord == "b1" { &w_b2 } else { &w_b1 };
+    assert_eq!(survivor.cdr_records().len(), 2, "one CDR per call, both on the survivor");
+    for cdr in survivor.cdr_records() {
+        failover_harness::assert_call_fully_released(&[survivor], &cdr.call_ref).await;
+    }
 }
 
 /// **Switchback-BYE release** — port of
