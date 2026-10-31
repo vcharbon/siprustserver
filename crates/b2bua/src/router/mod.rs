@@ -48,6 +48,7 @@ mod notes;
 mod outbox;
 mod owed;
 mod owed_final;
+mod owed_limiter_key;
 mod peer_metrics;
 #[cfg(test)]
 mod possibly_confirmed_tests;

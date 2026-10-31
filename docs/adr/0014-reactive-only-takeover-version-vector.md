@@ -2,7 +2,9 @@
 
 **Status:** accepted (2026-06-05). Amended (2026-10-12): D1, a departed peer's calls with an
 INVITE in flight are taken over at its departure (ADR-0047). Amended (2026-10-16): §5, affinity
-is the ACK/CANCEL exemption and liveness routing, no fresh-pod guard (ADR-0050).
+is the ACK/CANCEL exemption and liveness routing, no fresh-pod guard (ADR-0050). Amended
+(2026-10-31): §2, a backup whose primary reads dead at a verdict releases the limiter key
+(ADR-0047 D8).
 **Amends:** ADR-0011 Decision X11 — removes the *eager* (membership-driven) takeover
 and the *`Deactivate` watermark handshake*; **keeps** reactive takeover; **replaces**
 LWW-by-`gen` reconciliation with a per-context `(primary, backup)` version vector.
@@ -43,7 +45,8 @@ primary+backup mutations (a latent equal-`gen` divergence).
    in-flight transaction** for a taken-over call reaches a terminal state, it
    `drop_local`s its live copy (the `bak:` replica + the reverse-flushed deltas
    remain). On a **terminal** (BYE/CANCEL) the backup **does not discharge** — no
-   CDR, no limiter release, no propagated delete: it records the terminal into the
+   CDR, no limiter release (unless its primary reads dead at a verdict, ADR-0047
+   D8), no propagated delete: it records the terminal into the
    `(p,b)` Element and reverse-flushes it with a short grace TTL (its alive-timer)
    before dropping the live copy; the **primary is the sole discharge authority**
    (§Terminal reconcile). Durability of the reverse-flush replaces the handshake.

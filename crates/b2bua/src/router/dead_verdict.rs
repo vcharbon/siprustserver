@@ -1,8 +1,9 @@
 //! A front proxy's dead verdict on another worker (ADR-0050 §3, ADR-0047 D1):
 //! the `X-Worker-Dead` notice an out-of-dialog OPTIONS carries. The proxy now
 //! routes that worker's traffic here, so this node takes over the calls it
-//! backs for it that have work in flight, as the departure sweep does, minus
-//! the discharge ([`super::departure`]).
+//! backs for it that have work in flight, as the departure sweep does, and
+//! releases the limiter keys its ended calls owe, writing none of their CDRs
+//! ([`super::departure`]).
 //!
 //! A notice is taken only when it verifies under the cluster key and its
 //! verdict is fresh: within the freshness window of this node's clock either
@@ -23,9 +24,9 @@
 //! runs per worker.
 //!
 //! A worker whose verdict acted reads dead here until a frame from it arrives
-//! ([`primary_read_dead`]): a call a copy here ends meanwhile releases its
-//! limiter key at its end, and its CDR waits for the worker's departure or
-//! reconcile (ADR-0047 D8).
+//! ([`primary_read_dead`]), which clears the verdict: a call a copy here ends
+//! meanwhile releases its limiter key at its end, and its CDR waits for the
+//! worker's departure or reconcile (ADR-0047 D8).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -89,17 +90,30 @@ impl VerdictBook {
     fn acted_at(&self, ordinal: &str) -> Option<Instant> {
         locked(&self.acted, DEAD_VERDICTS).get(ordinal).copied()
     }
+
+    /// Forget the verdict on `ordinal` that acted at `at`; a later one stays.
+    fn heard_since(&self, ordinal: &str, at: Instant) {
+        let mut acted = locked(&self.acted, DEAD_VERDICTS);
+        if acted.get(ordinal) == Some(&at) {
+            acted.remove(ordinal);
+        }
+    }
 }
 
 /// Whether `call_ref`'s primary is another worker a verdict here acted on, and
-/// no frame from it arrived since.
+/// no frame from it arrived since. The first frame read after the verdict
+/// clears it: a puller started afresh reads no frame before it.
 pub(super) fn primary_read_dead(ctx: &RouterCtx, call_ref: &str) -> bool {
     let Some(primary) = call::call_ref_primary(call_ref) else { return false };
     if primary == ctx.config.self_ordinal {
         return false;
     }
     let Some(at) = ctx.dead_verdicts.acted_at(primary) else { return false };
-    ctx.peer_streams.as_ref().is_none_or(|streams| !streams.heard_from_since(primary, at))
+    let heard = ctx.peer_streams.as_ref().is_some_and(|s| s.heard_from_since(primary, at));
+    if heard {
+        ctx.dead_verdicts.heard_since(primary, at);
+    }
+    !heard
 }
 
 /// Why a notice is not taken.

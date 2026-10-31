@@ -50,7 +50,7 @@ use super::materialise::{
     has_invite_to_serve, has_work_to_serve, materialise, names_request_in_flight, Materialised,
     Origin,
 };
-use super::reclaim::{discharge_materialized_terminal, release_owed_limiter_key};
+use super::reclaim::discharge_materialized_terminal;
 use super::restore_hygiene::reanchor;
 use super::undecided::{is_undecided, settle_undecided};
 use super::RouterCtx;
@@ -67,8 +67,8 @@ pub(super) enum Cause {
     /// The peer left the membership set: its calls are taken over and its
     /// finished ones discharged.
     Departed,
-    /// A proxy read the peer dead: its calls are taken over, nothing is
-    /// discharged.
+    /// A proxy read the peer dead: its calls are taken over, and its finished
+    /// ones release their limiter keys, with no CDR.
     ReadDead,
 }
 
@@ -115,6 +115,8 @@ enum Swept {
     TakenAndSettled,
     /// Ended here and deferred to the peer: discharged.
     Discharged,
+    /// Finished, the peer read dead: its limiter key released.
+    Released,
 }
 
 /// Run `step` over every call of `refs`, one at a time, each in a subtask of
@@ -132,6 +134,7 @@ async fn sweep<F, Fut>(
 {
     let scanned = refs.len();
     let (mut taken, mut settled, mut discharged, mut panicked) = (0usize, 0usize, 0usize, 0usize);
+    let mut released = 0usize;
     for (i, call_ref) in refs.into_iter().enumerate() {
         if i % YIELD_EVERY == YIELD_EVERY - 1 {
             tokio::task::yield_now().await;
@@ -144,6 +147,7 @@ async fn sweep<F, Fut>(
             Ok(Swept::Taken) => taken += 1,
             Ok(Swept::TakenAndSettled) => (taken, settled) = (taken + 1, settled + 1),
             Ok(Swept::Discharged) => discharged += 1,
+            Ok(Swept::Released) => released += 1,
             Err(e) if e.is_panic() => {
                 panicked += 1;
                 ctx.metrics.bump_departure_takeover_panic();
@@ -174,6 +178,7 @@ async fn sweep<F, Fut>(
             scanned,
             taken,
             settled,
+            released,
             panicked,
             "read-dead peer's in-flight calls taken over"
         ),
@@ -188,7 +193,8 @@ async fn sweep<F, Fut>(
 /// which the copy sends again; an undecided call's decision is asked again
 /// ([`settle_undecided`]). On a dead verdict a finished call is left to the
 /// departure, the final it may still owe its caller sent
-/// ([`super::owed_final`]) and the limiter key it owes released. The body is read once without the lock to leave a
+/// ([`super::owed_final`]), and the limiter key it owes released while the
+/// peer still reads dead. The body is read once without the lock to leave a
 /// quiet call untouched; a call already live here is left as it is.
 async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Swept {
     let Ok((copy, skew)) = ctx.state.peek_replica(call_ref).await else { return Swept::Left };
@@ -199,8 +205,12 @@ async fn take_over_one(ctx: &Arc<RouterCtx>, call_ref: &str, cause: Cause) -> Sw
             Cause::ReadDead => {
                 reanchor(&mut call, skew);
                 super::owed_final::deliver(ctx, call_ref, &call).await;
-                release_owed_limiter_key(ctx, &call);
-                Swept::Left
+                let read_dead = super::dead_verdict::primary_read_dead(ctx, call_ref);
+                if read_dead && super::owed_limiter_key::release(ctx, &call) {
+                    Swept::Released
+                } else {
+                    Swept::Left
+                }
             }
         };
     }

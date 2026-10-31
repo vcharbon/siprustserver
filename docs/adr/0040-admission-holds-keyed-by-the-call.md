@@ -330,7 +330,8 @@ the call re-arms its timers; the restored past-due refresh, or the refresh the
 materialising turn arms, re-registers the set within one
 refresh period of the takeover or the reclaim. A takeover copy that reaches
 its end defers the release to the primary, unless a dead verdict on the primary
-acted on the backup: that copy releases the key at its end, and the verdict's
+acted on the backup and nothing was heard from the primary since: that copy
+releases the key at its end, and the verdict's
 sweep releases the keys of the ends deferred before it (ADR-0047 D8). When no
 primary reclaims it inside the replica TTL, the backup's reap releases the key. The reap is the one
 eviction site of an expired replica body and no read evicts one first, so

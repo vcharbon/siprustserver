@@ -18,8 +18,8 @@
 //! A verdict on a live primary behind a replication partition is a misread
 //! the stream cannot tell: the copy's end releases the hold, the primary's
 //! refreshes are refused by the release fence, and the primary writes the one
-//! CDR when the partition heals. A verdict the stream does not confirm
-//! releases nothing.
+//! CDR when the partition heals. A verdict the stream does not confirm, or one
+//! the primary's frames answer before the end, releases nothing.
 //!
 //! Beyond the failover sweep: the limiter hold timing of a deferred end.
 
@@ -29,6 +29,7 @@ use b2bua::limiter::RefreshOutcome;
 use failover_harness::{
     assert_call_fully_over, cookie_field, total_cdrs_for, ReplicatedB2buaSut, WorkerHealth,
 };
+use repl_net::frame::Partition;
 
 use crate::limiter_release_by_call::{limited_decision, spawn_workers, LimiterRig};
 
@@ -305,6 +306,67 @@ async fn an_unconfirmed_verdict_releases_nothing() {
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     fh.advance(Duration::from_millis(500)).await;
     assert_eq!(rig.holds(), [1, 1, 0], "the backup's end releases nothing");
+    assert_eq!(rig.store.stats().releases_total, releases_before, "no release left");
+
+    fh.resume(&bak_ord, &pri_ord);
+    proxy.set_health(&pri_ord, WorkerHealth::Alive);
+    let reconciled = fh
+        .settle_terminal(async || {
+            total_cdrs_for(&[primary], &call_ref) == 1
+                && !primary.holds_any_trace(&call_ref).await
+                && !backup.holds_any_trace(&call_ref).await
+        })
+        .await;
+    assert!(reconciled, "the primary reconciled the backup's end");
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    assert_eq!(rig.holds(), [0, 0, 0], "the primary released the holds");
+    assert_eq!(rig.store.stats().releases_total, releases_before + 1, "once");
+    rig.release_witnesses();
+    assert_call_fully_over(&[primary, backup], &call_ref, &rig.store).await;
+    drop(proxy);
+}
+
+/// A confirmed verdict on a live primary behind a partition, then the
+/// partition heals and the primary's frames reach the backup again: the
+/// primary no longer reads dead. The caller's BYE, which the proxy still
+/// routes to the backup, ends the call there while the backup's writes to the
+/// primary are held: the copy defers and releases nothing. The writes flow
+/// again; the primary reconciles the end: one CDR, one release.
+#[tokio::test(start_paused = true)]
+async fn a_verdict_the_primary_s_frames_answer_releases_nothing_at_a_later_end() {
+    let Placed {
+        mut fh,
+        alice,
+        bob,
+        rig,
+        proxy,
+        w_b1,
+        w_b2,
+        pri_ord,
+        bak_ord,
+        call_ref,
+        mut dialog,
+    } = place("limiter-release-after-a-verdict-heard-over").await;
+    let (primary, backup) = if pri_ord == "b1" { (&w_b1, &w_b2) } else { (&w_b2, &w_b1) };
+    fh.partition(&pri_ord, &bak_ord);
+    proxy.set_health(&pri_ord, WorkerHealth::Dead);
+    fh.advance(CONFIRMED_WITHIN).await;
+    assert_eq!(backup.metrics().dead_verdicts_unconfirmed_total(), 0, "the silent stream confirms");
+
+    fh.heal(&pri_ord, &bak_ord);
+    let streaming = fh
+        .pump_until(Duration::from_millis(100), Duration::from_secs(10), async || {
+            primary.flow_caught_up(&bak_ord, Partition::Bak)
+        })
+        .await;
+    assert!(streaming, "the backup streams from the primary again");
+    fh.advance(Duration::from_secs(1)).await;
+    fh.stall(&bak_ord, &pri_ord);
+    let releases_before = rig.store.stats().releases_total;
+
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert_eq!(rig.holds(), [1, 1, 0], "the backup's end releases nothing: the primary was heard");
     assert_eq!(rig.store.stats().releases_total, releases_before, "no release left");
 
     fh.resume(&bak_ord, &pri_ord);
