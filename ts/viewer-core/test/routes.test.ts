@@ -103,6 +103,9 @@ describe("a page URL's base overview", () => {
   it("refuses a URL that is no page, saying why", () => {
     expect(routeOf(pageUrlOf("http://[x", ORIGIN), "http://[x")).toEqual({ reason: "not a URL: http://[x" })
     expect(routeOf(pageUrlOf("/nowhere/x", ORIGIN), "/nowhere/x")).toEqual({ reason: "no page at /nowhere/x" })
+    expect(routeOf(pageUrlOf("/case/%E0%A4%A", ORIGIN), "/case/%E0%A4%A"))
+      .toEqual({ reason: "malformed escape in /case/%E0%A4%A" })
+    expect(parseRoute("/case/%E0%A4%A")).toEqual({ kind: "unknown", path: "/case/%E0%A4%A" })
     expect(routeOf(pageUrlOf("/api/triage", ORIGIN), "/api/triage"))
       .toEqual({ reason: "/api/triage is an API endpoint, not a page" })
   })

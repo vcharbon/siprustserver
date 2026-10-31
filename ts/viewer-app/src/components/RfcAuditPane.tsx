@@ -23,6 +23,7 @@
  * guard: a finding this pane cannot read is listed as raw JSON rather than
  * dropped.
  */
+import { eventOfRef, type LadderLayout, type MessageRef, messageRefOf } from "@sip/viewer-core"
 import type { JSX } from "react"
 import { shortDifference, stepNamed } from "../finding-text.ts"
 import { type Finding as FindingLine, type FindingChip, FindingSection } from "./FindingList.tsx"
@@ -49,6 +50,8 @@ interface Finding {
   readonly lane: string | undefined
   /** The message the finding was raised at, as the audit numbers them. */
   readonly offending: number | undefined
+  /** That message as the recording holds it; absent in an audit written before findings named one. */
+  readonly message: MessageRef | undefined
   /** This finding is the SUT's, and why the cell is red. */
   readonly gating: boolean
   /** A scripted party's violation the document does not state: information, never the SUT's. */
@@ -72,6 +75,7 @@ const readFinding = (value: unknown): Finding => {
       actor: undefined,
       lane: undefined,
       offending: undefined,
+      message: undefined,
       gating: false,
       sourceFault: false,
       advisory: false,
@@ -87,6 +91,7 @@ const readFinding = (value: unknown): Finding => {
     actor: str(value.actor),
     lane: str(value.lane),
     offending: num(value.offending),
+    message: messageRefOf(value),
     gating: value.gating === true,
     sourceFault: value.source_fault === true,
     advisory: value.advisory === true,
@@ -112,42 +117,58 @@ const weight = (finding: Finding): FindingChip =>
     ? { label: "advisory", tone: "advisory", title: "advisory rule: recorded, gates nothing" }
     : { label: "not gated", tone: "bound", title: "binding rule, charged to a party this lane does not gate on" }
 
+/** The ladder number of the finding's message on `layout`, where the audit names one the ladder holds. */
+const rowOf = (finding: Finding, layout: LadderLayout | undefined): number | undefined =>
+  finding.message === undefined || layout === undefined ? undefined : eventOfRef(layout, finding.message)?.row
+
+/** Where the finding's message is, in words: its ladder number, or why there is none. */
+const messageText = (finding: Finding, layout: LadderLayout | undefined): ReadonlyArray<string> => {
+  if (finding.offending === undefined) return []
+  if (finding.message === undefined) return ["no message pointer in this run's audit; rerun"]
+  const row = rowOf(finding, layout)
+  return [row === undefined ? `message ${finding.message.leg} #${finding.message.seq}` : `message m${row}`]
+}
+
 /** The finding's whole text: every coordinate the line leaves out. */
-const fullText = (finding: Finding): string =>
+const fullText = (finding: Finding, layout?: LadderLayout): string =>
   [
     `charged ${finding.charged}${finding.actor === undefined ? "" : ` (${finding.actor})`}`,
     ...(finding.lane === undefined ? [] : [`on ${finding.lane}`]),
-    ...(finding.offending === undefined ? [] : [`message ${finding.offending}`]),
+    ...messageText(finding, layout),
     ...(finding.causedBy === undefined ? [] : [`caused by ${finding.causedBy}`]),
     ...(finding.cancelledBy === undefined ? [] : [`cancelled by ${finding.cancelledBy}`]),
     ...(finding.unjudged === undefined ? [] : [`unjudged: ${finding.unjudged}`]),
     ...(finding.detail === "" ? [] : [finding.detail])
   ].join("\n")
 
-const line = (finding: Finding): FindingLine => ({
-  rule: finding.rule,
-  chip: weight(finding),
-  party: finding.actor ?? finding.charged,
-  step: stepNamed(finding.cancelledBy),
-  at: finding.offending === undefined ? undefined : `m${finding.offending}`,
-  text: shortDifference(finding.detail),
-  full: fullText(finding)
-})
+const line = (layout: LadderLayout | undefined) => (finding: Finding): FindingLine => {
+  const row = rowOf(finding, layout)
+  return {
+    rule: finding.rule,
+    chip: weight(finding),
+    party: finding.actor ?? finding.charged,
+    step: stepNamed(finding.cancelledBy),
+    at: row === undefined ? undefined : `m${row}`,
+    text: shortDifference(finding.detail),
+    full: fullText(finding, layout)
+  }
+}
 
 /** One group of the audit's findings, as a finding section. */
 const Section = (
-  { tone, title, findings, fold, onPickStep }: {
+  { tone, title, findings, fold, onPickStep, layout }: {
     tone: string
     title: string
     findings: ReadonlyArray<Finding>
     fold?: boolean
     onPickStep: ((step: string) => void) | undefined
+    layout: LadderLayout | undefined
   }
 ): JSX.Element | null => (
   <FindingSection
     className={`rfc-audit rfc-audit-${tone}`}
     title={title}
-    findings={findings.map(line)}
+    findings={findings.map(line(layout))}
     fold={fold}
     onPickStep={onPickStep}
   />
@@ -169,10 +190,12 @@ export const auditLineOf = (
 }
 
 export const RfcAuditPane = (
-  { rfc, onPickStep }: {
+  { rfc, onPickStep, layout }: {
     rfc: unknown
     /** Puts a finding's step on the ladders; absent where there are none. */
     onPickStep?: ((step: string) => void) | undefined
+    /** The replay ladder the findings' messages are numbered on. */
+    layout?: LadderLayout | undefined
   }
 ): JSX.Element | null => {
   if (!isRecord(rfc)) return null
@@ -196,12 +219,14 @@ export const RfcAuditPane = (
         title="rfc audit · gating"
         findings={findings.filter((finding) => finding.gating)}
         onPickStep={onPickStep}
+        layout={layout}
       />
       <Section
         tone="source"
         title="rfc audit · source fault"
         findings={findings.filter((finding) => !finding.gating && finding.sourceFault)}
         onPickStep={onPickStep}
+        layout={layout}
       />
       <Section
         tone="advisory"
@@ -209,6 +234,7 @@ export const RfcAuditPane = (
         findings={findings.filter((finding) => !finding.gating && !finding.sourceFault)}
         fold
         onPickStep={onPickStep}
+        layout={layout}
       />
       {status !== "audited" && <p className="muted">audit status: {status}</p>}
     </>

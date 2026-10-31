@@ -46,8 +46,17 @@ export type PageRoute = Exclude<Route, { readonly kind: "unknown" }>
 /** The route of kind `K`. */
 export type RouteOf<K extends RouteKind> = Extract<Route, { readonly kind: K }>
 
+/** A path segment decoded; undefined where its escapes are malformed. */
+export const decodeSegment = (segment: string): string | undefined => {
+  try {
+    return decodeURIComponent(segment)
+  } catch {
+    return undefined
+  }
+}
+
 export const parseSideRef = (raw: string): SideRef => {
-  const decoded = decodeURIComponent(raw)
+  const decoded = decodeSegment(raw) ?? raw
   const separator = decoded.indexOf(":")
   const kind = separator < 0 ? "case" : decoded.slice(0, separator)
   const id = separator < 0 ? decoded : decoded.slice(separator + 1)
@@ -61,12 +70,14 @@ export const formatSideRef = (ref: SideRef): string => `${ref.kind}:${encodeURIC
  * selector term (`@env:X`, `@run:N`, …) or a bare run id (`N`, `runN`).
  */
 export const isSelector = (segment: string): boolean => {
-  const decoded = decodeURIComponent(segment)
+  const decoded = decodeSegment(segment) ?? segment
   return decoded.startsWith("@") || /^(run)?\d+$/.test(decoded)
 }
 
+/** The route `pathname` names; a path no route takes, or whose escapes are malformed, is `unknown`. */
 export const parseRoute = (pathname: string): Route => {
   const segments = pathname.split("/").filter((segment) => segment.length > 0)
+  if (segments.some((segment) => decodeSegment(segment) === undefined)) return { kind: "unknown", path: pathname }
   if (segments.length === 0) return { kind: "index" }
   if (segments[0] === "compare" && segments.length === 1) return { kind: "compare-runs" }
   if (segments[0] === "compare" && segments[1] && segments[2] && isSelector(segments[1]) && isSelector(segments[2])) {

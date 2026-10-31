@@ -149,7 +149,7 @@ export const ROUTES: { readonly [K in RouteKind]: RouteDoc<RouteOf<K>> } = {
   },
   "triage-study": {
     patterns: ["/triage/<capture>"],
-    page: "one capture's study: its replays per lane and the capture's flows",
+    page: "a capture's study: its calls; with `case`, one call's replays per lane",
     query: {
       lane: LANE,
       case: "one call of the capture (`<capture>-k…`): the study is of it alone",

@@ -8,7 +8,7 @@
  * line, the query and the JSON endpoints the page reads. A server adds the
  * sections its own data makes worth stating.
  */
-import { type PageRoute, parseRoute, type RouteKind } from "./route.ts"
+import { decodeSegment, type PageRoute, parseRoute, type RouteKind } from "./route.ts"
 import { ROUTES, routeDoc } from "./table.ts"
 
 /** One link of an overview: an absolute URL, its label, and short data inline. */
@@ -84,6 +84,9 @@ export const routeOf = (
 ): { readonly route: PageRoute } | OverviewRefusal => {
   if (url === undefined) return { reason: `not a URL: ${raw}` }
   if (url.pathname.startsWith("/api/")) return { reason: `${url.pathname} is an API endpoint, not a page` }
+  if (url.pathname.split("/").some((segment) => decodeSegment(segment) === undefined)) {
+    return { reason: `malformed escape in ${url.pathname}` }
+  }
   const route = parseRoute(url.pathname)
   return route.kind === "unknown" ? { reason: `no page at ${url.pathname}` } : { route }
 }

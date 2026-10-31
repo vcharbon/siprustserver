@@ -395,7 +395,7 @@ const CellStudy = (
           ? (
             <>
               <VerdictPane verdict={detail?.verdict} rfc={detail?.rfc} onPickStep={pickStep} />
-              <RfcAuditPane rfc={detail?.rfc} onPickStep={pickStep} />
+              <RfcAuditPane rfc={detail?.rfc} onPickStep={pickStep} layout={runLayout} />
             </>
           )
           : (
