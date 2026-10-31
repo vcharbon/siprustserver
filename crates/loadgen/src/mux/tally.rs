@@ -5,12 +5,15 @@
 //! and the To-tag) was already seen on the call is a copy of that arrow and
 //! opens no new occurrence. The state is per call, bounded by
 //! [`MAX_ARROWS`] (past it a datagram counts on an "other" arrow), folded into
-//! the reporter once when the call ends, and released then.
+//! the reporter once when the call ends, and released then. The arrows of a
+//! call share each lane name and label text they repeat.
 //!
 //! A request the mux re-answers after the call ended (its agent's held answer,
 //! RFC 3261 §17.2.2) is reported through the tally's [`LateSink`] on the
 //! arrow of the request, resolved when the agent answered it.
 
+use std::cell::RefCell;
+use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
@@ -26,13 +29,17 @@ pub const SUT_LANE: &str = "SUT";
 /// past it counts on the call's "other" arrow.
 pub(crate) const MAX_ARROWS: usize = 256;
 
+/// The arrows a call reserves room for at its first one: a two-leg call's
+/// setup and teardown.
+const USUAL_ARROWS: usize = 16;
+
 /// One arrow of a ladder: who sent what to whom, the how-many-th distinct
 /// occurrence of that `(from, to, label)` it is in its call (from 1).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ArrowKey {
-    pub from: String,
-    pub to: String,
-    pub label: String,
+    pub from: Arc<str>,
+    pub to: Arc<str>,
+    pub label: Arc<str>,
     pub nth: u32,
 }
 
@@ -55,14 +62,14 @@ pub struct ArrowStat {
 #[derive(Debug, Clone, Default)]
 pub struct CallMessages {
     /// The caller's lane.
-    pub caller: String,
+    pub caller: Arc<str>,
     /// Every arrow of the call, in first-seen order.
     pub arrows: Vec<(ArrowKey, ArrowStat)>,
     /// The datagrams past the call's arrow cap.
     pub other: ArrowStat,
     /// Per lane, the last arrow it received before the call's outcome was
     /// decided (`None`: an arrow past the bound, counted on "other").
-    pub charges: Vec<(String, Option<ArrowKey>)>,
+    pub charges: Vec<(Arc<str>, Option<ArrowKey>)>,
 }
 
 impl CallMessages {
@@ -70,7 +77,7 @@ impl CallMessages {
     /// lane received before the outcome. `None`: the lane had received
     /// nothing; `Some(None)`: the "other" arrow.
     pub fn charge_of(&self, lane: &str) -> Option<Option<&ArrowKey>> {
-        self.charges.iter().find(|(l, _)| l == lane).map(|(_, arrow)| arrow.as_ref())
+        self.charges.iter().find(|(l, _)| **l == *lane).map(|(_, arrow)| arrow.as_ref())
     }
 }
 
@@ -92,9 +99,9 @@ struct TallyState {
     entries: Vec<Entry>,
     other: ArrowStat,
     /// Per receiving lane, the last new arrow it received.
-    last_inbound: Vec<(String, Slot)>,
+    last_inbound: Vec<(Arc<str>, Slot)>,
     /// Set once, when the outcome is decided.
-    charges: Option<Vec<(String, Slot)>>,
+    charges: Option<Vec<(Arc<str>, Slot)>>,
     /// The tally was handed over: later datagrams are not tallied.
     finished: bool,
 }
@@ -121,7 +128,7 @@ impl LateRepair {
 /// One call's tally, shared by its endpoints.
 pub struct CallTally {
     start: Instant,
-    caller: String,
+    caller: Arc<str>,
     state: Mutex<TallyState>,
     late: Option<LateSink>,
 }
@@ -129,12 +136,7 @@ pub struct CallTally {
 impl CallTally {
     /// A tally starting now; `caller` names the caller's lane.
     pub fn new(caller: &str) -> Self {
-        Self {
-            start: Instant::now(),
-            caller: caller.to_string(),
-            state: Mutex::default(),
-            late: None,
-        }
+        Self { start: Instant::now(), caller: caller.into(), state: Mutex::default(), late: None }
     }
 
     /// Report the call's late re-answers into `sink`.
@@ -165,10 +167,6 @@ impl CallTally {
         Some(LateRepair { sink, arrow })
     }
 
-    fn lane<'a>(&'a self, leg: Option<&'a str>) -> &'a str {
-        leg.unwrap_or(&self.caller)
-    }
-
     /// A datagram the endpoint `leg` (`None`: the caller) sent (`Out`, its
     /// first transmission by the call) or had delivered (`In`) at `now`. A
     /// copy counts on its arrow and moves nothing else.
@@ -185,21 +183,31 @@ impl CallTally {
             }
             return;
         }
-        let lane = self.lane(leg);
+        let lane = match leg {
+            Some(leg) => shared(&g.entries, leg),
+            None => self.caller.clone(),
+        };
         let slot = if g.entries.len() < MAX_ARROWS {
+            let sut = shared(&g.entries, SUT_LANE);
             let (from, to) = match dir {
-                Dir::Out => (lane, SUT_LANE),
-                Dir::In => (SUT_LANE, lane),
+                Dir::Out => (lane.clone(), sut),
+                Dir::In => (sut, lane.clone()),
             };
-            let label = label(id);
+            let label = LABEL.with_borrow_mut(|text| {
+                write_label(id, text);
+                shared(&g.entries, text)
+            });
             let nth = 1 + g
                 .entries
                 .iter()
                 .filter(|e| e.arrow.from == from && e.arrow.to == to && e.arrow.label == label)
                 .count() as u32;
-            let arrow = ArrowKey { from: from.to_string(), to: to.to_string(), label, nth };
+            let arrow = ArrowKey { from, to, label, nth };
             let offset_ms = now.saturating_duration_since(self.start).as_secs_f64() * 1000.0;
             let stat = ArrowStat { count: 1, offset_ms_sum: offset_ms, ..ArrowStat::default() };
+            if g.entries.capacity() == 0 {
+                g.entries.reserve_exact(USUAL_ARROWS);
+            }
             g.entries.push(Entry { key, arrow, stat });
             Slot::Entry(g.entries.len() - 1)
         } else {
@@ -207,9 +215,9 @@ impl CallTally {
             Slot::Other
         };
         if dir == Dir::In {
-            match g.last_inbound.iter_mut().find(|(l, _)| l == lane) {
+            match g.last_inbound.iter_mut().find(|(l, _)| *l == lane) {
                 Some((_, last)) => *last = slot,
-                None => g.last_inbound.push((lane.to_string(), slot)),
+                None => g.last_inbound.push((lane, slot)),
             }
         }
     }
@@ -262,15 +270,33 @@ impl CallTally {
     }
 }
 
-/// The message as a ladder labels it: the request method (`INVITE`), or the
-/// status and the CSeq method (`180 (INVITE)`); `?` when unreadable.
-fn label(id: &Identity<'_>) -> String {
-    match (id.status, id.method, id.cseq_method) {
-        (Some(status), _, Some(m)) => format!("{status} ({m})"),
-        (Some(status), _, None) => status.to_string(),
-        (None, Some(method), _) => method.to_string(),
-        (None, None, _) => "?".to_string(),
-    }
+/// `text` as an arrow of the call already holds it, else a new copy.
+fn shared(entries: &[Entry], text: &str) -> Arc<str> {
+    entries
+        .iter()
+        .flat_map(|e| [&e.arrow.from, &e.arrow.to, &e.arrow.label])
+        .find(|held| ***held == *text)
+        .cloned()
+        .unwrap_or_else(|| text.into())
+}
+
+thread_local! {
+    /// The label of the datagram being tallied, written before it is looked up.
+    static LABEL: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// The message as a ladder labels it, into `out`: the request method
+/// (`INVITE`), or the status and the CSeq method (`180 (INVITE)`); `?` when
+/// unreadable.
+fn write_label(id: &Identity<'_>, out: &mut String) {
+    out.clear();
+    // Writing into a String cannot fail.
+    let _ = match (id.status, id.method, id.cseq_method) {
+        (Some(status), _, Some(m)) => write!(out, "{status} ({m})"),
+        (Some(status), _, None) => write!(out, "{status}"),
+        (None, Some(method), _) => out.write_str(method),
+        (None, None, _) => out.write_str("?"),
+    };
 }
 
 /// A datagram's identity in one hash: one call's few hundred messages never

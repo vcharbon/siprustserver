@@ -252,7 +252,7 @@ async fn calltxns_counts_every_resend_on_the_tally() {
     txns.shutdown();
 
     let m = tally.finish();
-    let resent = |label: &str| m.arrows.iter().find(|(k, _)| k.label == label).unwrap().1.resent;
+    let resent = |label: &str| m.arrows.iter().find(|(k, _)| *k.label == *label).unwrap().1.resent;
     assert!(resent("UPDATE") >= 1, "the proactive retransmit: {m:?}");
     assert_eq!(resent("ACK"), 1, "the reactive re-ACK: {m:?}");
 }

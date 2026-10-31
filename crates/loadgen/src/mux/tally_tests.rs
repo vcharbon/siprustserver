@@ -34,7 +34,8 @@ fn arrows(m: &CallMessages) -> Vec<Row> {
     m.arrows
         .iter()
         .map(|(k, s)| {
-            (k.from.clone(), k.to.clone(), k.label.clone(), k.nth, s.count, s.duplicates, s.resent)
+            let text = |t: &str| t.to_string();
+            (text(&k.from), text(&k.to), text(&k.label), k.nth, s.count, s.duplicates, s.resent)
         })
         .collect()
 }
@@ -153,4 +154,44 @@ async fn a_datagram_after_the_call_is_folded_is_not_tallied() {
     assert!(state.entries.is_empty() && state.last_inbound.is_empty(), "released and closed");
     drop(state);
     assert!(t.finish().arrows.is_empty(), "the late copies reach no arrow");
+}
+
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn the_arrows_of_a_call_share_their_lane_and_label_text() {
+    let t = CallTally::new("alice");
+    send(&t, None, Dir::Out, &req("INVITE", 1));
+    send(&t, Some("bob"), Dir::In, &req("INVITE", 1));
+    send(&t, Some("bob"), Dir::Out, &resp(200, "INVITE", 1, None));
+    send(&t, None, Dir::In, &resp(200, "INVITE", 1, None));
+    t.mark_outcome();
+    let m = t.finish();
+    let [(caller_invite, _), (callee_invite, _), (callee_ok, _), (caller_ok, _)] = &m.arrows[..]
+    else {
+        panic!("four arrows: {:?}", m.arrows)
+    };
+    let same = |a: &str, b: &str| a.as_ptr() == b.as_ptr();
+    assert!(same(&caller_invite.from, &caller_ok.to), "the caller's lane");
+    assert!(same(&callee_invite.to, &callee_ok.from), "the callee's lane");
+    assert!(same(&caller_invite.to, &callee_invite.from), "the SUT lane");
+    assert!(same(&caller_invite.label, &callee_invite.label), "one INVITE label");
+    assert!(same(&callee_ok.label, &caller_ok.label), "one 200 (INVITE) label");
+    let (lane, charged) = &m.charges[0];
+    assert!(same(lane, &callee_invite.to) && same(&charged.as_ref().unwrap().to, lane));
+}
+
+/// What a call holds per arrow while it runs: the arrow's key and counters,
+/// its text shared.
+#[test]
+#[ignore = "slow lane: loadgen"]
+fn an_arrow_entry_holds_no_text_of_its_own() {
+    assert!(std::mem::size_of::<Entry>() <= 96, "{} bytes", std::mem::size_of::<Entry>());
+}
+
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_call_reserves_its_arrows_once() {
+    let t = CallTally::new("alice");
+    send(&t, None, Dir::Out, &req("INVITE", 1));
+    assert_eq!(t.state.lock().unwrap().entries.capacity(), USUAL_ARROWS);
 }

@@ -25,7 +25,7 @@ fn call(charges: &[(&str, &str)]) -> CallMessages {
         other: ArrowStat::default(),
         charges: charges
             .iter()
-            .map(|(lane, label)| (lane.to_string(), Some(key("SUT", lane, label, 1))))
+            .map(|(lane, label)| ((*lane).into(), Some(key("SUT", lane, label, 1))))
             .collect(),
     }
 }
@@ -91,7 +91,7 @@ fn a_ladder_shows_its_first_arrows_and_folds_the_rest() {
         .map(|n| (key("alice", "SUT", "OPTIONS", n + 1), stat(f64::from(n), 0, 0)))
         .collect();
     let last = key("alice", "SUT", "OPTIONS", SHOWN_ARROWS as u32 + 6);
-    let charges = vec![("alice".to_string(), Some(last))];
+    let charges = vec![("alice".into(), Some(last))];
     let messages =
         CallMessages { caller: "alice".into(), arrows, other: ArrowStat::default(), charges };
     agg.fold(messages, &timeout_of("alice"));

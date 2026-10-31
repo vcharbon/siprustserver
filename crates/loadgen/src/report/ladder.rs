@@ -3,6 +3,7 @@
 //! detected at, and the projection the index carries.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use e2e_model::{ClassCount, Ladder, LadderArrow};
 
@@ -106,7 +107,7 @@ impl LadderAgg {
                 // A barrier's own failure names no agent: the caller's lane.
                 let who = match outcome {
                     CallOutcome::Step { at, .. } if at.who != at.barrier => at.who,
-                    _ => call.caller.as_str(),
+                    _ => &*call.caller,
                 };
                 let errors = match call.charge_of(who) {
                     Some(Some(key)) => match self.arrows.get_mut(key) {
@@ -156,8 +157,8 @@ impl LadderAgg {
         let mut lanes = vec![caller.to_string(), SUT_LANE.to_string()];
         for (key, _) in &arrows {
             for lane in [&key.from, &key.to] {
-                if !lanes.contains(lane) {
-                    lanes.push(lane.clone());
+                if !lanes.iter().any(|l| **l == **lane) {
+                    lanes.push(lane.to_string());
                 }
             }
         }
@@ -166,9 +167,9 @@ impl LadderAgg {
             (other.stat.count > 0 || !other.errors.is_empty() || other.late > 0).then(|| {
                 arrow(
                     &ArrowKey {
-                        from: String::new(),
-                        to: String::new(),
-                        label: String::new(),
+                        from: Arc::default(),
+                        to: Arc::default(),
+                        label: Arc::default(),
                         nth: 0,
                     },
                     &other,
@@ -198,9 +199,9 @@ fn mean(s: &ArrowStat) -> f64 {
 
 fn arrow(key: &ArrowKey, agg: &ArrowAgg) -> LadderArrow {
     LadderArrow {
-        from: key.from.clone(),
-        to: key.to.clone(),
-        label: key.label.clone(),
+        from: key.from.to_string(),
+        to: key.to.to_string(),
+        label: key.label.to_string(),
         nth: key.nth,
         count: agg.stat.count,
         retransmissions: agg.stat.duplicates,
