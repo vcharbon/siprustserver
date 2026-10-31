@@ -128,10 +128,10 @@ const RedTable = ({ slice }: { readonly slice: Extract<JobCells, { outcome: "red
 const Hooks = ({ hooks }: { readonly hooks: readonly JobHook[] }): JSX.Element | null =>
   hooks.length === 0 ? null : (
     <section>
-      <h2>hooks <span className="muted">({hooks.length})</span></h2>
+      <h2>hooks <span className="count">{hooks.length}</span></h2>
       {hooks.map((hook) => (
         <details key={hook.name} className="job-hook">
-          <summary className="mono">{hook.name}.log <span className="muted">({hook.text.length} chars)</span></summary>
+          <summary className="mono">{hook.name}.log <span className="count muted">{hook.text.length} chars</span></summary>
           <pre className="log-tail-text">{hook.text === "" ? <span className="muted">(empty)</span> : hook.text}</pre>
         </details>
       ))}
@@ -235,7 +235,8 @@ export const JobPage = ({ id }: { readonly id: number }): JSX.Element => {
       {gone.current !== undefined && gone.current.outcome === "gone" && gone.current.total > 0 && (
         <section>
           <h2>
-            gone cells <span className="muted">({gone.current.total}{gone.current.total > gone.current.cells.length && `, first ${gone.current.cells.length}`})</span>
+            gone cells <span className="count">{gone.current.total}</span>
+            {gone.current.total > gone.current.cells.length && <span className="muted"> · first {gone.current.cells.length}</span>}
           </h2>
           <GoneTable slice={gone.current} />
         </section>
@@ -245,7 +246,8 @@ export const JobPage = ({ id }: { readonly id: number }): JSX.Element => {
         <section>
           <h2>
             red cells{" "}
-            <span className="muted">({red.current.total}{red.current.total > red.current.cells.length && `, first ${red.current.cells.length}`})</span>
+            <span className="count">{red.current.total}</span>
+            {red.current.total > red.current.cells.length && <span className="muted"> · first {red.current.cells.length}</span>}
           </h2>
           {red.current.total === 0
             ? <p className="muted" title={running ? "written as each capture's row closes" : undefined}>none{running ? " yet" : ""}</p>

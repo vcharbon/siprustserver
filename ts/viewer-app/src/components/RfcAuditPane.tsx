@@ -25,7 +25,7 @@
  */
 import type { JSX } from "react"
 import { shortDifference, stepNamed } from "../finding-text.ts"
-import { type Finding as FindingLine, type FindingChip, FindingList } from "./FindingList.tsx"
+import { type Finding as FindingLine, type FindingChip, FindingSection } from "./FindingList.tsx"
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -105,7 +105,7 @@ const weight = (finding: Finding): FindingChip =>
     : finding.causedBy !== undefined
     ? { label: "relayed", tone: "relayed", title: `relayed by the SUT, committed by ${finding.causedBy}` }
     : finding.actor !== undefined && finding.cancelledBy !== undefined
-    ? { label: "scripted · ref", tone: "party", title: "a scripted party's violation the reference shows too" }
+    ? { label: "ref capture", tone: "party", title: "in the reference capture; not gating" }
     : finding.unjudged !== undefined
     ? { label: "scripted · unjudged", tone: "party", title: "a scripted party's violation the document could not judge" }
     : finding.advisory
@@ -134,10 +134,7 @@ const line = (finding: Finding): FindingLine => ({
   full: fullText(finding)
 })
 
-/** Past this many rows a section that gates nothing opens folded. */
-const FOLD_AT = 8
-
-/** One titled group of findings, drawn only where it holds one; `fold` folds it past `FOLD_AT` rows. */
+/** One group of the audit's findings, as a finding section. */
 const Section = (
   { tone, title, findings, fold, onPickStep }: {
     tone: string
@@ -146,13 +143,30 @@ const Section = (
     fold?: boolean
     onPickStep: ((step: string) => void) | undefined
   }
-): JSX.Element | null =>
-  findings.length === 0 ? null : (
-    <details className={`verdict-section rfc-audit rfc-audit-${tone}`} open={fold !== true || findings.length <= FOLD_AT}>
-      <summary><h4>{title} <span className="count">{findings.length}</span></h4></summary>
-      <FindingList findings={findings.map(line)} onPickStep={onPickStep} />
-    </details>
-  )
+): JSX.Element | null => (
+  <FindingSection
+    className={`rfc-audit rfc-audit-${tone}`}
+    title={title}
+    findings={findings.map(line)}
+    fold={fold}
+    onPickStep={onPickStep}
+  />
+)
+
+/**
+ * The audit's own line for a violation the verdict lists, where the audit
+ * cancelled one of its findings by that statement: its short difference and
+ * its whole text.
+ */
+export const auditLineOf = (
+  rfc: unknown,
+  violation: { readonly rule: string; readonly step: string; readonly emitter: string }
+): { readonly text: string; readonly full: string } | undefined => {
+  if (!isRecord(rfc)) return undefined
+  const statement = `${violation.rule} at ${violation.step} by ${violation.emitter}`
+  const finding = list(rfc.findings).map(readFinding).find((one) => one.cancelledBy?.includes(statement) === true)
+  return finding === undefined ? undefined : { text: shortDifference(finding.detail), full: fullText(finding) }
+}
 
 export const RfcAuditPane = (
   { rfc, onPickStep }: {

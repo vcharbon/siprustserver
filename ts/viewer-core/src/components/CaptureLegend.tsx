@@ -198,7 +198,10 @@ export const CaptureLegend = (
         hue = Call-ID family · shade = leg
         {layout.hasSelection && " · pale = not this case's"}
         {" · "}
-        <code>from</code>/<code>to</code> = real tags, shortened
+        <span title="several to-chips under one from-chip: a fork">
+          <code>from</code>/<code>to</code> = real tags, shortened
+        </span>
+        {onSelectTag !== undefined && <span title="click a tag: light the messages that state it"> · tags light</span>}
         {layout.hiddenMessages > 0 && ` · ${layout.hiddenMessages} filtered`}
       </p>
       {layout.families.families.map((family) => {

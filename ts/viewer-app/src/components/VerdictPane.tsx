@@ -22,7 +22,8 @@
  * rather than rendering something invented.
  */
 import type { JSX } from "react"
-import { type Finding, type FindingChip, FindingList, StepLink } from "./FindingList.tsx"
+import { type Finding, type FindingChip, FindingList, FindingSection, StepLink } from "./FindingList.tsx"
+import { auditLineOf } from "./RfcAuditPane.tsx"
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -163,14 +164,17 @@ const declaredLine = (d: Declared): Finding => {
     rule: d.failure,
     chip: DECLARED,
     step: d.step,
+    links: seen?.step === undefined ? undefined : [seen.step],
     text,
     full: `derived from ${d.derivedFrom}\n${text}${seen?.full === undefined ? "" : `\n${seen.full}`}`
   }
 }
 
 export const VerdictPane = (
-  { verdict, onPickStep }: {
+  { verdict, rfc, onPickStep }: {
     verdict: unknown
+    /** The cell's `rfc.json`: the audit's line for each violation the verdict lists. */
+    rfc?: unknown
     /** Puts a finding's step on the ladders; absent where there are none. */
     onPickStep?: ((step: string) => void) | undefined
   }
@@ -220,7 +224,7 @@ export const VerdictPane = (
             findings={[
               ...(abandoned.pending.length === 0
                 ? []
-                : [{ rule: "not run", text: abandoned.pending.join(" "), full: abandoned.pending.join("\n") }]),
+                : [{ rule: "not run", links: abandoned.pending, text: "" }]),
               ...abandoned.closed.map((act) => ({ rule: act.owed, party: `leg ${act.leg}`, text: act.sent }))
             ]}
             onPickStep={onPickStep}
@@ -228,23 +232,25 @@ export const VerdictPane = (
         </section>
       )}
 
-      {violations.length > 0 && (
-        <section className="verdict-section verdict-violations">
-          <Head title="rfc violations" count={violations.length} />
-          <FindingList
-            findings={violations.map((v) => ({
-              rule: v.rule,
-              chip: v.gating
-                ? { label: "gates", tone: "gating", title: "emitted by the SUT: gates" }
-                : { label: "scripted", tone: "party", title: "emitted by a scripted peer: listed, gates nothing" },
-              party: v.emitter,
-              step: v.step,
-              text: ""
-            }))}
-            onPickStep={onPickStep}
-          />
-        </section>
-      )}
+      <FindingSection
+        className="verdict-violations"
+        title="rfc violations"
+        fold
+        findings={violations.map((v) => {
+          const audit = auditLineOf(rfc, v)
+          return {
+            rule: v.rule,
+            chip: v.gating
+              ? { label: "gates", tone: "gating", title: "emitted by the SUT: gates" }
+              : { label: "ref capture", tone: "party", title: "in the reference capture; not gating" },
+            party: v.emitter,
+            step: v.step,
+            text: audit?.text ?? "",
+            full: audit?.full ?? `${v.rule} at ${v.step} by ${v.emitter}`
+          }
+        })}
+        onPickStep={onPickStep}
+      />
 
       {failures.length > 0 && (
         <section className="verdict-section verdict-failures">

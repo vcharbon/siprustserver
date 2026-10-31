@@ -957,10 +957,15 @@ h3 {
   word-break: break-word;
 }
 
+/* A count beside its noun: spaced from it wherever it stands. */
+.count {
+  margin-left: 4px;
+}
+
 h4 .count,
 h3 .count,
-h2 .count {
-  margin-left: 4px;
+h2 .count,
+summary .count {
   font-weight: 600;
   color: var(--mute);
   text-transform: none;
@@ -1581,6 +1586,7 @@ button.verdict-step {
 
 .rule-family {
   margin: 24px 0;
+  overflow-x: auto;
 }
 
 .rule-family h2 {
@@ -1596,7 +1602,8 @@ button.verdict-step {
 
 .rule-listing .rule-id {
   font-family: ui-monospace, SFMono-Regular, monospace;
-  white-space: nowrap;
+  max-width: 36ch;
+  overflow-wrap: anywhere;
 }
 
 .rule-listing .rule-count {
@@ -1661,7 +1668,9 @@ tr.rule-unrostered td {
    muted, a detected one stands out: the difference is the whole read. */
 .case-profile { margin: 0.75rem 0; }
 .case-profile h3 { margin: 0 0 0.35rem; font-size: 0.85rem; text-transform: lowercase; }
-.profile-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.35rem; }
+.profile-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.35rem; min-width: 0; }
+.profile-list > * { min-width: 0; }
+.profile-list pre { max-width: 100%; overflow: auto; }
 .profile-list .profile {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem;
   padding: 0.35rem 0.5rem; border: 1px solid var(--line); border-radius: 4px;
@@ -2187,6 +2196,8 @@ tr.rule-unrostered td {
 .cp-filter { width: 12em; }
 .cp-legend { margin: 4px 0 10px; }
 
+.cp-facets > * { min-width: 0; }
+.cp-facets > .cp-panel { overflow-x: auto; }
 .cp-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
 .cp-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
 .cp-tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; }
@@ -2329,9 +2340,27 @@ tr.rule-unrostered td {
   height: auto;
 }
 
+/* Until the workbench is docked its boxes do not scroll: a wheel over it
+   scrolls the page and stops where it docks (components/dock.ts). */
+.study-workbench:not([data-docked="true"]) .ladder-scroll,
+.study-workbench:not([data-docked="true"]) .pane-detail pre,
+.study-workbench:not([data-docked="true"]) .pane-controls {
+  overflow: hidden;
+}
+
 .study-workbench > .pane-toolbar {
   flex: none;
+  height: 30px;
+  flex-wrap: nowrap;
   margin: 0 0 6px;
+}
+
+.study-http {
+  min-width: 0;
+}
+
+.study-http .json-view pre {
+  overflow-wrap: anywhere;
 }
 
 .study-panes {
@@ -2340,8 +2369,17 @@ tr.rule-unrostered td {
   min-height: 0;
   display: grid;
   grid-template-columns: repeat(var(--open, 3), minmax(0, 1fr));
-  grid-template-rows: auto auto var(--detail-row) minmax(0, 1fr);
+  /* The controls row has a fixed height: a fold opened in one pane floats
+     over its pane and never resizes the rows the other panes share. */
+  --controls-row: 52px;
+  grid-template-rows: auto var(--controls-row) var(--detail-row) minmax(0, 1fr);
   gap: 6px 10px;
+}
+
+@media (max-width: 1300px) {
+  .study-panes {
+    --controls-row: 72px;
+  }
 }
 
 .study-workbench[data-open="1"] .study-panes { --open: 1; }
@@ -2352,6 +2390,7 @@ tr.rule-unrostered td {
 }
 
 .study-pane {
+  position: relative;
   grid-row: 1 / span 4;
   display: grid;
   grid-template-rows: subgrid;
@@ -2390,10 +2429,54 @@ tr.rule-unrostered td {
 .study-pane .pane-controls {
   grid-row: 2;
   min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  align-items: center;
+  gap: 2px 10px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  font-size: 12px;
 }
 
-.study-pane .pane-controls > :first-child {
-  margin-top: 0;
+.study-pane .pane-controls > *,
+.study-pane .pane-controls .source-filter {
+  margin: 0;
+}
+
+.study-pane .source-filters {
+  display: contents;
+}
+
+.study-pane .pane-controls > .fv-call-legend {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.pane-fold > summary {
+  color: var(--mute);
+  white-space: nowrap;
+}
+
+.pane-fold[open] > summary {
+  color: var(--acc);
+}
+
+/* An open fold floats over its own pane, anchored under its control. */
+.study-pane .pane-fold[open] > :not(summary) {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  z-index: 4;
+  max-height: 60%;
+  overflow: auto;
+  margin-top: 4px;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px var(--shadow);
 }
 
 .study-pane .pane-detail {
@@ -2423,27 +2506,6 @@ tr.rule-unrostered td {
   text-overflow: ellipsis;
 }
 
-.pane-folds {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.pane-folds .study-record,
-.capture-legend-fold {
-  margin: 0;
-  font-size: 12px;
-}
-
-.capture-legend-fold > summary {
-  color: var(--mute);
-}
-
-.capture-legend-fold[open] .fv-capture-legend {
-  max-height: 30vh;
-  overflow: auto;
-  padding: 6px 0;
-}
 
 .source-filters {
   display: flex;
@@ -2552,10 +2614,17 @@ tr.rule-unrostered td {
 
 .queue-table {
   padding: 4px 14px;
+  overflow-x: auto;
 }
 
-.queue-table .listing td:nth-child(6) {
+.queue-table .capture-cell a,
+.queue-table .row-features .facet {
+  display: inline-block;
+  max-width: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+  vertical-align: bottom;
 }
 
 .queue-table .listing td {
@@ -2572,4 +2641,19 @@ tr.rule-unrostered td {
 
 .triage-listing tbody tr:hover td {
   background: var(--none-bg);
+}
+
+.queue-table .queue-why .tag {
+  white-space: normal;
+}
+
+.queue-table .age {
+  white-space: normal;
+}
+
+.queue-table .row-actions > *,
+.queue-table .row-actions > .rerun > button {
+  display: block;
+  margin: 0 0 4px;
+  width: 100%;
 }

@@ -8,6 +8,8 @@
  * offset in its box, and every other ladder scrolls its own row to that
  * offset. A selection made off the ladders (a finding's step) anchors at the
  * centre. Outside a shared anchor, a ladder scrolls only a row off screen.
+ * Sideways, a ladder whose selected arrow is out of view is scrolled to it;
+ * one whose arrow is in view is left alone.
  */
 import { createContext, useContext, useEffect, useRef, type RefObject } from "react"
 
@@ -29,6 +31,29 @@ export interface BoxGeometry {
   readonly scrollTop: number
   readonly clientHeight: number
   readonly scrollHeight: number
+}
+
+/** A scroll box's horizontal geometry. */
+export interface BoxWidth {
+  readonly scrollLeft: number
+  readonly clientWidth: number
+  readonly scrollWidth: number
+}
+
+/**
+ * The scrollLeft that brings the arrow spanning `x1`–`x2` into view, or
+ * undefined to leave the box: an arrow wholly in view stays, and so does one
+ * wider than the box that already crosses it. Otherwise the arrow is centred.
+ */
+export const scrollLeftFor = (box: BoxWidth, x1: number, x2: number): number | undefined => {
+  const left = Math.min(x1, x2)
+  const right = Math.max(x1, x2)
+  const viewLeft = box.scrollLeft
+  const viewRight = box.scrollLeft + box.clientWidth
+  if (left >= viewLeft && right <= viewRight) return undefined
+  if (right - left > box.clientWidth && left < viewRight && right > viewLeft) return undefined
+  const max = Math.max(0, box.scrollWidth - box.clientWidth)
+  return Math.min(max, Math.max(0, (left + right) / 2 - box.clientWidth / 2))
 }
 
 /**
@@ -66,18 +91,25 @@ export const anchorOf = (box: BoxGeometry, y: number): Anchor => {
  * clicked row's offset as the shared anchor before the selection lands.
  */
 export const useScrollToRow = (
-  y: number | undefined
+  y: number | undefined,
+  /** The selected arrow's two ends, where it has them. */
+  x?: readonly [number, number] | undefined
 ): { readonly ref: RefObject<HTMLDivElement | null>; readonly anchorAt: (rowY: number) => void } => {
   const ref = useRef<HTMLDivElement | null>(null)
   const shared = useContext(RowAnchorContext)
+  const x1 = x?.[0]
+  const x2 = x?.[1]
   useEffect(() => {
     const box = ref.current
     if (box === null || y === undefined) return
     const top = scrollTopFor(box, y, shared?.current)
+    const left = x1 === undefined || x2 === undefined ? undefined : scrollLeftFor(box, x1, x2)
     // Instant, not smooth: the reader asked to be taken to a message, and an
     // animation that a re-render interrupts leaves them between two of them.
-    if (top !== undefined) box.scrollTo({ top })
-  }, [y, shared])
+    if (top !== undefined || left !== undefined) {
+      box.scrollTo({ ...(top === undefined ? {} : { top }), ...(left === undefined ? {} : { left }) })
+    }
+  }, [y, x1, x2, shared])
   const anchorAt = (rowY: number): void => {
     const box = ref.current
     if (shared !== undefined && box !== null) shared.current = anchorOf(box, rowY)

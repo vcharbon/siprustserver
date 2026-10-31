@@ -21,6 +21,7 @@
  * rows or their captures whole become a request through the replay control
  * (`RequestBuilder`), and each row's button replays that one call.
  */
+import { plural } from "../plural.ts"
 import type { JSX } from "react"
 import { useEffect, useState } from "react"
 import { api, type TriageCallRow, type TriageFacets, type TriageQueue, type TriageSourceFault } from "../api.ts"
@@ -132,7 +133,7 @@ const MainError = (
       <button
         type="button"
         className="tag main-error error-bad-body also"
-        title={`${row.bodyFailing} body row(s) no rule accepts\nclick: filter on bad-body`}
+        title={`unaccepted body rows ${row.bodyFailing}\nclick: filter on bad-body`}
         onClick={() => onChip("rule", "bad-body")}
       >
         + bad body
@@ -251,8 +252,8 @@ const QueueTable = (
             <input type="checkbox" checked={ticked.has(rowKey(row))} onChange={() => onTick(row)} />
           </td>
           {/* Two pages: the capture's study, and the study of this one call. */}
-          <td className="mono break">
-            <Link to={captureStudyOf(row, lane)}>{row.capture}</Link>
+          <td className="mono capture-cell">
+            <Link to={captureStudyOf(row, lane)} title={row.capture}>{row.capture}</Link>
           </td>
           <td className="mono call-cell">
             <Link to={callStudyOf(row, lane)}>{shortCase(row)}</Link>
@@ -297,7 +298,7 @@ const QueueTable = (
               ? `cut ${row.prepId ?? "?"}`
               : `run${row.runId ?? "?"} ${row.setKind ?? ""}` + (row.bundle ? "" : " · cleaned")}
             {/* When it ran: what says whether a re-run has landed yet. */}
-            {row.finishedAt !== null && <> · <Age at={row.finishedAt} /></>}
+            {row.finishedAt !== null && <div><Age at={row.finishedAt} /></div>}
           </td>
           <td className="row-actions">
             <CopyRef row={row} lane={lane} />
@@ -327,7 +328,7 @@ const Counts = ({ value }: { value: TriageQueue }): JSX.Element => (
 
 /** What a click on a chip in each state does, as its title says. */
 const CHIP_TITLE: Readonly<Record<ChipState, (value: string, count: number) => string>> = {
-  none: (value, count) => `${count} call(s) · click: include · again: exclude`,
+  none: (value, count) => `${plural(count, "call")} · click: include · again: exclude`,
   include: () => "included · click: exclude",
   exclude: () => "excluded · click: clear"
 }
@@ -588,32 +589,32 @@ export const TriagePage = (): JSX.Element => {
       </div>
 
       <div className="queue-tools">
-      <RequestBuilder
-        lane={value.lane ?? ""}
-        lanes={value.lanes.map((entry) => entry.lane)}
-        scope={scope}
-        q={settled}
-        filter={filter}
-        ticked={[...ticked.values()]}
-        shown={value.rows}
-      />
+        <RequestBuilder
+          lane={value.lane ?? ""}
+          lanes={value.lanes.map((entry) => entry.lane)}
+          scope={scope}
+          q={settled}
+          filter={filter}
+          ticked={[...ticked.values()]}
+          shown={value.rows}
+        />
 
-      <DropCaptures
-        lane={value.lane}
-        lanes={value.lanes.map((entry) => entry.lane)}
-        onFresh={onFresh}
-      />
+        <DropCaptures
+          lane={value.lane}
+          lanes={value.lanes.map((entry) => entry.lane)}
+          onFresh={onFresh}
+        />
       </div>
 
       <section className="panel queue-table">
-      <QueueTable
-        rows={value.rows}
-        lane={value.lane ?? ""}
-        ticked={new Set(ticked.keys())}
-        onTick={tick}
-        onTickAll={() => tickAll(value.rows)}
-        onChip={setChip}
-      />
+        <QueueTable
+          rows={value.rows}
+          lane={value.lane ?? ""}
+          ticked={new Set(ticked.keys())}
+          onTick={tick}
+          onTickAll={() => tickAll(value.rows)}
+          onChip={setChip}
+        />
       </section>
     </div>
   )

@@ -10,6 +10,7 @@
  * It draws the document and derives nothing: what the page says is what
  * `compare A B --json` printed.
  */
+import { plural } from "../plural.ts"
 import type { CompareReport } from "@sip/contracts"
 import type { JSX } from "react"
 import { href } from "../router.ts"
@@ -59,7 +60,7 @@ const SideTable = ({ doc }: { doc: CompareReport.CompareReport }): JSX.Element =
   const sides = [["before", doc.before], ["after", doc.after]] as const
   const rows: ReadonlyArray<readonly [string, (side: CompareReport.Side) => JSX.Element | string]> = [
     ["selector", (side) => <Link to={href.report({ run: side.selector })}>{side.selector}</Link>],
-    ["runs · calls", (side) => `${side.runs} run(s) · ${side.cells} call(s)`],
+    ["runs · calls", (side) => `${plural(side.runs, "run")} · ${plural(side.cells, "call")}`],
     ["env", (side) => list(side.envs)],
     ["branch", (side) => list(side.branches)],
     [
@@ -170,7 +171,7 @@ export const deltaOf = (delta: CompareReport.LadderDelta | null): string => {
   const first = delta.firstDifference
   return first === null
     ? "ladder: no difference"
-    : `ladder: ${delta.differingLines} line(s) differ, first at m${first.line}`
+    : `ladder: ${plural(delta.differingLines, "differing line")}, first at m${first.line}`
 }
 
 const CellLine = ({ label, cell }: { label: string; cell: CompareReport.Cell }): JSX.Element => (
@@ -243,12 +244,12 @@ export const CompareReportView = ({ doc }: { doc: CompareReport.CompareReport })
       <strong>{doc.headline}</strong> · {doc.compared} calls compared
       {doc.unexplained > 0 && (
         <span className="tag missing">
-          {doc.unexplained} verdict flip(s) on the same code, document and lane: the harness
+          <span title="same code, document and lane: the harness">unexplained flips {doc.unexplained}</span>
         </span>
       )}
       {doc.counts.unstable.sameDocument + doc.counts.unstable.documentChanged > 0 && (
         <span className="tag extra">
-          {doc.counts.unstable.sameDocument + doc.counts.unstable.documentChanged} unstable call(s): repeats disagree
+          <span title="repeats disagree">unstable calls {doc.counts.unstable.sameDocument + doc.counts.unstable.documentChanged}</span>
         </span>
       )}
     </p>
@@ -256,7 +257,7 @@ export const CompareReportView = ({ doc }: { doc: CompareReport.CompareReport })
     <ClassCounts doc={doc} />
     <Only label="only before" only={doc.onlyBefore} />
     <Only label="only after" only={doc.onlyAfter} />
-    <h3>{doc.calls.length} call(s) listed</h3>
+    <h3>calls <span className="count">{doc.calls.length}</span></h3>
     {doc.calls.map((call) => <CallRow key={`${call.capture}/${call.caseId}`} call={call} />)}
   </div>
 )

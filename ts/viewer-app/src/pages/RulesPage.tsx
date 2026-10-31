@@ -12,6 +12,7 @@
  * Every count carries the population it was taken over, in the banner. A rule
  * reading zero over a population nothing measured is not a finding.
  */
+import { plural } from "../plural.ts"
 import type { JSX } from "react"
 import { useEffect, useState } from "react"
 import { api, useAsync, type RuleRow, type RulesView } from "../api.ts"
@@ -48,7 +49,7 @@ const markOf = (row: RuleRow): { readonly mark: string; readonly why: string } =
   if ((row.offTier?.fired ?? 0) > 0) {
     return {
       mark: "!",
-      why: `fires on ${row.offTier!.fired} passed cell(s)`
+      why: `fires on ${plural(row.offTier!.fired, "passed cell")}`
     }
   }
   if (row.standing === "unrostered") {
@@ -66,15 +67,15 @@ const markOf = (row: RuleRow): { readonly mark: string; readonly why: string } =
 /** The row's own reading, in the words its standing earns. */
 const stateOf = (row: RuleRow, population: RulesView["population"]): string => {
   if (row.standing === "measured") {
-    return `fired ${row.hits} time(s) over ${row.cells}`
+    return `fired ${row.hits}× over ${row.cells}`
   }
   if (row.standing === "declared-zero") return `DECLARED ZERO — ${row.inert ?? ""}`
-  if (row.standing === "unrostered") return `UNROSTERED — ${row.hits} hit(s) nothing claims`
+  if (row.standing === "unrostered") return `unrostered · hits ${row.hits}`
   const over = row.family === "refusal"
-    ? `${population.refusalCaptures} capture(s)`
+    ? plural(population.refusalCaptures, "capture")
     : row.family === "declaration"
-    ? `${population.cutCases} cut case(s)`
-    : `${population.measuredRuns} measured run(s)`
+    ? plural(population.cutCases, "cut case")
+    : plural(population.measuredRuns, "measured run")
   return `NEVER FIRED over ${over}`
 }
 
@@ -94,7 +95,7 @@ const Buckets = ({ row }: { row: RuleRow }): JSX.Element | null => {
           className={`tag class-${bucket.bucket}`}
           title={bucket.bucket === "shape"
             ? "shape records, any class; the only kind a bless cites"
-            : `${bucket.cells} cell(s)`}
+            : plural(bucket.cells, "cell")}
         >
           {bucket.bucket} {bucket.hits}
         </span>
@@ -267,7 +268,7 @@ export const RulesPage = (): JSX.Element => {
             <option value="">{view.value.lane} (configured)</option>
             {view.value.lanes.map((entry) => (
               <option key={entry.lane} value={entry.lane}>
-                {entry.lane} · {entry.captures} capture(s)
+                {entry.lane} · {plural(entry.captures, "capture")}
               </option>
             ))}
           </select>

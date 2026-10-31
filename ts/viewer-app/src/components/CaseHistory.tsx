@@ -98,7 +98,7 @@ export const CaseHistory = ({ view, caseId, lanes, onClose, onDelta }: {
                       {result.outcome === "error" && <div>{(result.detail ?? "").split("\n")[0]}</div>}
                     </td>
                     <td>
-                      <button type="button" onClick={() => onDelta(run.id, lane)}>delta</button>
+                      <button type="button" onClick={() => onDelta(run.id, lane)}>details</button>
                       <div className="muted mono cp-small">{session}/{result.cell}</div>
                     </td>
                   </tr>

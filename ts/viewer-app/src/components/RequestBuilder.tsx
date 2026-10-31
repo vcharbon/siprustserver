@@ -12,6 +12,7 @@
  * Nothing is written until Create: a preview is the server reading the
  * selection the way the resolution would.
  */
+import { plural } from "../plural.ts"
 import type { JSX } from "react"
 import { useState } from "react"
 import { api, type JobStarted, type LanesView, type RequestPreview, type TriageCallRow, useAsync } from "../api.ts"
@@ -115,7 +116,7 @@ export const RequestBuilder = (
       setOutcome({
         kind: "created",
         jobs,
-        requests: created.map((one) => `request ${one.requestId} on ${one.lane}: ${one.cells} cell(s)`)
+        requests: created.map((one) => `request ${one.requestId} on ${one.lane}: ${plural(one.cells, "cell")}`)
       })
     } catch (error) {
       setOutcome({ kind: "refused", detail: said(error) })

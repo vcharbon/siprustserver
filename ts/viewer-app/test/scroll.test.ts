@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { anchorOf, scrollTopFor } from "../src/components/scroll.ts"
+import { anchorOf, scrollLeftFor, scrollTopFor } from "../src/components/scroll.ts"
 
 const box = (scrollTop: number) => ({ scrollTop, clientHeight: 400, scrollHeight: 2000 })
 
@@ -36,5 +36,27 @@ describe("row alignment", () => {
   it("anchors a clicked row at its offset, a row off screen at the centre", () => {
     expect(anchorOf(box(600), 750)).toBe(150)
     expect(anchorOf(box(600), 1200)).toBe("centre")
+  })
+})
+
+describe("sideways", () => {
+  const wide = (scrollLeft: number) => ({ scrollLeft, clientWidth: 500, scrollWidth: 2000 })
+
+  it("leaves an arrow wholly in view", () => {
+    expect(scrollLeftFor(wide(0), 100, 400)).toBeUndefined()
+    expect(scrollLeftFor(wide(800), 1250, 900)).toBeUndefined()
+  })
+
+  it("centres an arrow out of view", () => {
+    expect(scrollLeftFor(wide(0), 900, 1300)).toBe(850)
+    expect(scrollLeftFor(wide(1200), 100, 300)).toBe(0)
+  })
+
+  it("leaves an arrow wider than the box that already crosses it", () => {
+    expect(scrollLeftFor(wide(400), 100, 1500)).toBeUndefined()
+  })
+
+  it("clamps to what the box can scroll", () => {
+    expect(scrollLeftFor(wide(0), 1900, 1990)).toBe(1500)
   })
 })

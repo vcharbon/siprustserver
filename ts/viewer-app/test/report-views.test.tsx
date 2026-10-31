@@ -136,7 +136,7 @@ describe("the compare view", () => {
   })
 
   it("names an unstable call and the repeats its side ran it in", () => {
-    expect(markup).toContain("1 unstable call(s): repeats disagree")
+    expect(markup).toContain("unstable calls 1")
     expect(markup).toContain(`<span class="tag">unstable</span> <code>c-case3</code>`)
     expect(markup).toContain("repeats 2/3 passed")
     // A cell run once states no repeats.
@@ -151,9 +151,9 @@ describe("the compare view", () => {
       `<mark class="ladder-first-difference">  m1 +0.010000 SUT -&gt; uac1 | 486 Busy Here | INVITE · CSeq 1 | fromA1 · toA1 | s2</mark>`
     )
     expect(markup.match(/<mark class="ladder-first-difference">/g)).toHaveLength(2)
-    expect(markup).toContain("ladder: 1 line(s) differ, first at m1")
+    expect(markup).toContain("ladder: 1 differing line, first at m1")
     // A call whose ladders were not both read states no delta.
-    expect(markup.match(/ladder: \d+ line\(s\) differ/g)).toHaveLength(1)
+    expect(markup.match(/ladder: \d+ differing line/g)).toHaveLength(1)
   })
 
   it("links each cell into this viewer, and each side to its report", () => {

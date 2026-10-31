@@ -1,4 +1,8 @@
-/** One failed check as a card: where and what, expected beside seen character by character, what the decision said, whose side. */
+/**
+ * One failed check as a card: where and what, expected beside seen, what the
+ * decision said, whose side. Two values of one thing read character by
+ * character; a statement the seen broke reads plain, with no empty said line.
+ */
 import type { JSX, ReactNode } from "react"
 import type { CampaignCheck } from "../api.ts"
 import { charDiff, type Part } from "../char-diff.ts"
@@ -22,6 +26,10 @@ export const SideTag = (
   return <span className={`cp-tag ${tone}`}>{side}{count === undefined ? "" : ` ${count}`}</span>
 }
 
+/** Whether a check's expected and seen are compared character by character: only two values of one thing are. */
+export const comparesCharacters = (check: CampaignCheck): boolean =>
+  check.compare !== "statement" && check.expected !== null && check.seen !== null
+
 export const CheckCard = ({ check, sides, saidLabel, head, said }: {
   readonly check: CampaignCheck
   readonly sides: readonly string[]
@@ -32,6 +40,8 @@ export const CheckCard = ({ check, sides, saidLabel, head, said }: {
   readonly said?: ReactNode
 }): JSX.Element => {
   const diff = charDiff(check.expected, check.seen)
+  const byCharacter = comparesCharacters(check)
+  const saidShown = check.compare !== "statement" || check.said !== null || said !== undefined
   return (
     <div className="cp-card">
       <div className="cp-card-head">
@@ -40,11 +50,27 @@ export const CheckCard = ({ check, sides, saidLabel, head, said }: {
       </div>
       <dl className="cp-kv">
         <dt>expected</dt>
-        <dd>{check.expected === null ? <span className="muted">—</span> : <Parts parts={diff.expected} kind="del" />}</dd>
+        <dd>
+          {check.expected === null
+            ? <span className="muted">—</span>
+            : byCharacter
+            ? <Parts parts={diff.expected} kind="del" />
+            : <span className="cp-diff">{check.expected}</span>}
+        </dd>
         <dt>seen</dt>
-        <dd>{check.seen === null ? <span className="cp-nok">(absent)</span> : <Parts parts={diff.seen} kind="ins" />}</dd>
-        <dt>{saidLabel}</dt>
-        <dd className="mono">{check.said ?? <span className="muted">—</span>}{said}</dd>
+        <dd>
+          {check.seen === null
+            ? <span className="cp-nok">(absent)</span>
+            : byCharacter
+            ? <Parts parts={diff.seen} kind="ins" />
+            : <span className="cp-diff cp-nok">{check.seen}</span>}
+        </dd>
+        {saidShown && (
+          <>
+            <dt>{saidLabel}</dt>
+            <dd className="mono">{check.said ?? <span className="muted">—</span>}{said}</dd>
+          </>
+        )}
       </dl>
     </div>
   )

@@ -31,7 +31,7 @@ describe("finding rows", () => {
     expect(html).toContain(">Sent an SDP offer while CSeq 5 was unanswered</span>")
     expect(html).toContain(">uas1</span>")
     expect(html).toContain(">s54</button>")
-    expect(html).toContain("scripted · ref")
+    expect(html).toContain("ref capture")
   })
 
   it("keeps the whole finding on demand: the tooltip and an expander", () => {

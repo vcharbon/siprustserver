@@ -37,7 +37,7 @@ import {
   type LadderEvent
 } from "@sip/viewer-core"
 import type { JSX, ReactNode } from "react"
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { api, useAsync, type CaseRun, type TriageRefusal, type TriageStudy, type TriageStudyCell } from "../api.ts"
 import { useCaptureFlows } from "../capture-flows.ts"
 import { useHeld } from "../held.ts"
@@ -61,6 +61,7 @@ import { Profile } from "../components/Profile.tsx"
 import { Link } from "../components/Link.tsx"
 import { ReplayButton } from "../components/ReplayButton.tsx"
 import { RfcAuditPane } from "../components/RfcAuditPane.tsx"
+import { useDock } from "../components/dock.ts"
 import { type RowAnchor, RowAnchorContext } from "../components/scroll.ts"
 import { SipMessageView } from "../components/SipMessageView.tsx"
 import { StudyHead } from "../components/StudyHead.tsx"
@@ -208,7 +209,7 @@ const OwnRun = (
   const elsewhere = own !== undefined && `run${own.runId}` !== session
   return (
     <p className="counts own-run">
-      <span className="muted">alone</span>
+      <span className="muted">this call</span>
       {elsewhere && (
         <span className={`tag ${own.skipped !== null ? "muted" : own.passed ? "matched" : "missing"}`}>
           run{own.runId} {own.skipped !== null ? "skipped" : own.passed ? "passed" : "failed"}
@@ -333,10 +334,22 @@ const CellStudy = (
     setFocus(focusStep(step, indexes))
   }, [step, indexes, anchor])
 
+  // Every pick off the ladders docks the workbench, so the rows it selects are
+  // on screen; the step a link opened on docks it once its evidence is in.
+  const workbench = useDock()
+  const [openedOnStep] = useState(step !== undefined)
+  const dockedOnLoad = useRef(false)
+  useEffect(() => {
+    if (!openedOnStep || dockedOnLoad.current || evidence.state !== "ok") return
+    dockedOnLoad.current = true
+    workbench.dock()
+  }, [openedOnStep, evidence.state, workbench])
+
   const pickStep = (next: string): void => {
     anchor.current = "centre"
     setFocus(focusStep(next, indexes))
     onStep(next)
+    workbench.dock()
   }
   const clearStep = (): void => {
     setFocus({})
@@ -381,7 +394,7 @@ const CellStudy = (
         {skipped === undefined
           ? (
             <>
-              <VerdictPane verdict={detail?.verdict} onPickStep={pickStep} />
+              <VerdictPane verdict={detail?.verdict} rfc={detail?.rfc} onPickStep={pickStep} />
               <RfcAuditPane rfc={detail?.rfc} onPickStep={pickStep} />
             </>
           )
@@ -419,7 +432,13 @@ const CellStudy = (
       </div>
 
       <RowAnchorContext.Provider value={anchor}>
-        <section className="study-workbench" data-detail={anyDetail} data-open={open.length}>
+        <section
+          ref={workbench.ref}
+          className="study-workbench"
+          data-detail={anyDetail}
+          data-open={open.length}
+          data-docked={workbench.docked}
+        >
           <div className="pane-toolbar">
             {PANES.map((pane) => (
               <label key={pane.key}>
@@ -458,7 +477,7 @@ const CellStudy = (
                       tag={filters.tag}
                       window={{ ...flows.window, beyond: flows.beyond, total: study.flows?.legs ?? 0, onWindow: flows.onWindow }}
                       copy={false}
-                      foldLegend
+                      compact
                       placeholder={placeholder}
                     />
                   )}
@@ -483,17 +502,18 @@ const CellStudy = (
                         marksById={caseMarks}
                         legend={false}
                         copy={false}
+                        compact
                         controls={
-                          <span className="pane-folds">
-                            <details className="study-record">
+                          <>
+                            <details className="pane-fold">
                               <summary>flags</summary>
                               <Flags annotations={annotationsOf(pivotRaw)} />
                             </details>
-                            <details className="study-record">
+                            <details className="pane-fold">
                               <summary>pivot.json</summary>
                               <JsonView value={pivotRaw} label="pivot.json" />
                             </details>
-                          </span>
+                          </>
                         }
                         detail={caseSelected === undefined
                           ? placeholder
@@ -524,6 +544,7 @@ const CellStudy = (
                         marksById={replayMarks}
                         legend={false}
                         copy={false}
+                        compact
                         detail={replaySelected === undefined
                           ? placeholder
                           : <SipMessageView record={replaySelected.source} label={`replay · ${replaySelected.id}`} />}
@@ -757,7 +778,14 @@ export const StudyPage = ({ capture }: { capture: string }): JSX.Element => {
               </>
             )}
             {value.standing === undefined
-              ? `never run on ${queryLane ?? "the configured lane"}`
+              ? activeSession === undefined
+                ? `never run on ${queryLane ?? "the configured lane"}`
+                : (
+                  // No capture-wide standing on this lane, but the call on screen ran on it.
+                  <>
+                    {lane ?? queryLane} · {activeSession.name} · <Age at={activeSession.writtenAt} />
+                  </>
+                )
               : (
                 <>
                   {value.standing.lane} · {activeSession?.name ?? `run${value.standing.runId}`}

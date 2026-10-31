@@ -174,6 +174,6 @@ describe("the preview", () => {
       whole: [],
       unkeyed: 2
     }
-    expect(previewLine(fake)).toBe("41 cell(s) over 1 capture(s) — 0 full, 1 as cases; 2 row(s) no cut names a key for")
+    expect(previewLine(fake)).toBe("41 cells over 1 capture — 0 full, 1 as cases; unkeyed rows 2")
   })
 })

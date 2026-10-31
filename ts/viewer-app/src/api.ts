@@ -972,6 +972,12 @@ export interface CampaignCheck {
   readonly seen: string | null
   readonly said: string | null
   readonly side: string | null
+  /**
+   * `value`: expected and seen are two values of one thing, read character by
+   * character; `statement`: the expected is a rule the seen broke. Absent
+   * where the store does not say.
+   */
+  readonly compare?: "value" | "statement" | null
 }
 
 export interface CampaignResult {

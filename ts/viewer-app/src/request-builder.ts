@@ -6,6 +6,7 @@
  * defaults and ceilings say about them. The page holds the state, this names
  * its meaning.
  */
+import { plural } from "./plural.ts"
 import type {
   LaneView,
   RequestKnobs,
@@ -220,9 +221,9 @@ export const laneNotes = (input: KnobsInput, lane: LaneView, generic: RequestKno
 /** The preview's one line for a lane: cells, captures, and the rows no cut names a key for. */
 export const previewLine = (preview: RequestLanePreview): string => {
   const full = preview.captures.filter((one) => one.kind === "full").length
-  return `${preview.cells} cell(s) over ${preview.captures.length} capture(s) — ${full} full, ` +
+  return `${plural(preview.cells, "cell")} over ${plural(preview.captures.length, "capture")} — ${full} full, ` +
     `${preview.captures.length - full} as cases` +
-    (preview.unkeyed === 0 ? "" : `; ${preview.unkeyed} row(s) no cut names a key for`)
+    (preview.unkeyed === 0 ? "" : `; unkeyed rows ${preview.unkeyed}`)
 }
 
 /** A lane's captures as the pane lists them: by name. */

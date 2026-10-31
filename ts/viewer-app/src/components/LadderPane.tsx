@@ -30,6 +30,8 @@ export interface LadderPaneProps {
   readonly legend?: boolean | undefined
   /** The copy-as-text button; on by default, off where the host puts its own. */
   readonly copy?: boolean | undefined
+  /** The warnings folded behind a summary; open by default. */
+  readonly compact?: boolean | undefined
   /** The host's own controls, after the legends. */
   readonly controls?: ReactNode | undefined
   /**
@@ -41,10 +43,13 @@ export interface LadderPaneProps {
 }
 
 export const LadderPane = (
-  { layout, heading, selectedId, onSelect, statusById, marksById, legend, copy, controls, detail }: LadderPaneProps
+  { layout, heading, selectedId, onSelect, statusById, marksById, legend, copy, compact, controls, detail }: LadderPaneProps
 ): JSX.Element => {
   const selected = layout.events.find((event) => event.id === selectedId)
-  const scroll = useScrollToRow(selected?.y)
+  const scroll = useScrollToRow(
+    selected?.y,
+    selected !== undefined && selected.kind === "message" ? [selected.x1, selected.x2] : undefined
+  )
   return (
     <section className="ladder-pane">
       {heading !== undefined && (
@@ -61,11 +66,20 @@ export const LadderPane = (
         )}
         <CallLegend layout={layout} />
         {(legend ?? true) && <LadderLegend layout={layout} />}
-        {layout.warnings.length > 0 && (
-          <ul className="warnings">
-            {layout.warnings.map((warning) => <li key={warning}>{warning}</li>)}
-          </ul>
-        )}
+        {layout.warnings.length > 0 && (compact === true
+          ? (
+            <details className="pane-fold">
+              <summary>warnings <span className="count">{layout.warnings.length}</span></summary>
+              <ul className="warnings">
+                {layout.warnings.map((warning) => <li key={warning}>{warning}</li>)}
+              </ul>
+            </details>
+          )
+          : (
+            <ul className="warnings">
+              {layout.warnings.map((warning) => <li key={warning}>{warning}</li>)}
+            </ul>
+          ))}
         {controls}
       </div>
       {detail !== undefined && <div className="pane-detail">{detail}</div>}

@@ -79,7 +79,7 @@ export const CheckDelta = ({ view, caseId, run, lane, onClose }: {
     <div className="cp-modal" onClick={(event) => event.target === event.currentTarget && onClose()}>
       <div className="cp-modal-body">
         <button type="button" className="cp-close" onClick={onClose} title="close (Esc)">✕</button>
-        <h2>Check delta</h2>
+        <h2>Call details</h2>
         <p className="muted mono">#{run} · {lane} · {caseId}</p>
         {laneRun === undefined || result === undefined ? <p className="muted">— not run</p> : (
           <>

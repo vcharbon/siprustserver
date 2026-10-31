@@ -86,7 +86,7 @@ const Group = (
   }
 ): JSX.Element => (
   <section className="jobs-group">
-    <h2>{title} <span className="muted">({jobs.length})</span></h2>
+    <h2>{title} <span className="count">{jobs.length}</span></h2>
     {jobs.length === 0 ? <p className="muted">{empty}</p> : (
       <table className="listing jobs-listing">
         <thead>
@@ -158,7 +158,7 @@ export const JobsPage = (): JSX.Element => {
 
       <section className="jobs-group">
         <h2>
-          finished <span className="muted">({page.total})</span>
+          finished <span className="count">{page.total}</span>
         </h2>
         <p className="muted">
           <b>{page.rows.length === 0 ? 0 : page.offset + 1}–{last}</b> / <b>{page.total}</b>

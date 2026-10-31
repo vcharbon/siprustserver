@@ -53,7 +53,7 @@ describe("rfc audit pane", () => {
       />
     )
     expect(html).toContain("rfc-badge-party")
-    expect(html).toContain("scripted · ref")
+    expect(html).toContain("ref capture")
     expect(html).not.toContain("rfc-audit-gating")
     expect(html).not.toContain("rfc-audit-harness")
   })

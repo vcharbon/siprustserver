@@ -10,6 +10,7 @@
  * and RETIRE (§3 S4), which reads the capture's plan, confirms once on the
  * counts, and starts a retire job. Both link the job they started.
  */
+import { plural } from "../plural.ts"
 import type { JSX } from "react"
 import { useEffect, useState } from "react"
 import { api, type JobStarted, type RetirePlan, type SourceRow, type SourcesPage as Page } from "../api.ts"
@@ -98,7 +99,7 @@ const AddByPath = ({ roots }: { readonly roots: readonly string[] }): JSX.Elemen
           <input type="checkbox" checked={cut} onChange={(event) => setCut(event.target.checked)} /> cut after ingest
         </label>
         <button type="button" className="copy-ref" disabled={busy || paths.length === 0} onClick={() => void start()}>
-          {busy ? "starting…" : `add ${paths.length} path(s)`}
+          {busy ? "starting…" : `add ${plural(paths.length, "path")}`}
         </button>
         {outcome !== undefined && "jobs" in outcome && <JobLinks jobs={outcome.jobs} />}
         {outcome !== undefined && "error" in outcome && <span className="error">{outcome.error}</span>}
@@ -142,11 +143,11 @@ const RetireButton = ({ capture, onStarted }: { readonly capture: string; readon
     return (
       <span className="retire-confirm">
         <span className="mono">
-          {rows.length === 0 ? "no row" : rows.map(([table, count]) => `${table} ${count}`).join(", ")}; {shown.runs} run(s),{" "}
-          {shown.bundles} bundle(s) on disk
+          {rows.length === 0 ? "no row" : rows.map(([table, count]) => `${table} ${count}`).join(", ")}; {plural(shown.runs, "run")},{" "}
+          {plural(shown.bundles, "bundle")} on disk
           {shown.artifactDir !== null && ", the artifact directory"}
           {shown.sessionDir !== null && ", the session directory"}
-          {shown.uploads.length > 0 && `, ${shown.uploads.length} upload(s)`}
+          {shown.uploads.length > 0 && `, ${plural(shown.uploads.length, "upload")}`}
         </span>
         {shown.holders.length > 0
           ? <span className="error"> held by {shown.holders.map((one) => `job ${one.jobId} (${one.how})`).join(", ")}</span>

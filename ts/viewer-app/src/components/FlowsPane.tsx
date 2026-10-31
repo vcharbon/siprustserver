@@ -44,6 +44,12 @@ const capturedRecord = (row: FlowsRow): Record<string, unknown> => ({
   raw: row.message.raw
 })
 
+const Warnings = ({ warnings }: { warnings: readonly string[] }): JSX.Element => (
+  <ul className="warnings">
+    {warnings.map((warning) => <li key={warning}>{warning}</li>)}
+  </ul>
+)
+
 export interface FlowsPaneProps {
   readonly layout: FlowsLayout
   readonly selected: FlowsRow | undefined
@@ -75,16 +81,17 @@ export interface FlowsPaneProps {
   readonly window?: DrawnWindow | undefined
   /** The copy-as-text button; on by default, off where the host puts its own. */
   readonly copy?: boolean | undefined
-  /** The legend folded behind a summary; open by default. */
-  readonly foldLegend?: boolean | undefined
+  /** The legend and the warnings folded behind summaries; open by default. */
+  readonly compact?: boolean | undefined
   /** What the detail slot holds while no row is selected; nothing by default. */
   readonly placeholder?: ReactNode | undefined
 }
 
 export const FlowsPane = (
-  { layout, selected, onSelect, onlySelected, legs, sockets, tag, window, copy, foldLegend, placeholder }: FlowsPaneProps
+  { layout, selected, onSelect, onlySelected, legs, sockets, tag, window, copy, compact, placeholder }: FlowsPaneProps
 ): JSX.Element => {
-  const scroll = useScrollToRow(layout.rows.find((row) => row.id === selected?.id)?.y)
+  const drawn = layout.rows.find((row) => row.id === selected?.id)
+  const scroll = useScrollToRow(drawn?.y, drawn === undefined ? undefined : [drawn.x1, drawn.x2])
   // Picking the tag already picked drops it, the way clicking a selected
   // message puts it away: one control, both directions.
   const pickTag = tag === undefined
@@ -137,19 +144,22 @@ export const FlowsPane = (
           )}
         </div>
         {window !== undefined && <WindowLine window={window} />}
-        {foldLegend === true
+        {compact === true
           ? (
-            <details className="capture-legend-fold">
+            <details className="pane-fold capture-legend-fold">
               <summary>legs <span className="count">{layout.legs.length}</span> · sockets <span className="count">{layout.sockets.length}</span></summary>
               {legend}
             </details>
           )
           : legend}
-        {layout.warnings.length > 0 && (
-          <ul className="warnings">
-            {layout.warnings.slice(0, 6).map((warning) => <li key={warning}>{warning}</li>)}
-          </ul>
-        )}
+        {layout.warnings.length > 0 && (compact === true
+          ? (
+            <details className="pane-fold">
+              <summary>warnings <span className="count">{layout.warnings.length}</span></summary>
+              <Warnings warnings={layout.warnings.slice(0, 6)} />
+            </details>
+          )
+          : <Warnings warnings={layout.warnings.slice(0, 6)} />)}
       </div>
       {selected !== undefined
         ? (

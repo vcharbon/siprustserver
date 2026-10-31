@@ -4,6 +4,7 @@
  * plan's counts. Each is a job command the server runs for the page; a
  * job it starts is linked. A verb the CLI refuses shows its sentence in place.
  */
+import { plural } from "../plural.ts"
 import type { JSX } from "react"
 import { useState } from "react"
 import { api, type JobDeletePlan, type JobStarted, type JobStatus } from "../api.ts"
@@ -66,8 +67,8 @@ export const JobActions = ({ id, kind, status, requestId, stopRequestedAt, onCha
     return (
       <span className="retire-confirm">
         <span className="mono">
-          {shown.runs} run(s): rows runs {shown.rows.runs}, case results {shown.rows.caseResults}, rule hits{" "}
-          {shown.rows.runRuleHits}; {shown.bundles} bundle(s) on disk
+          {plural(shown.runs, "run")}: rows runs {shown.rows.runs}, case results {shown.rows.caseResults}, rule hits{" "}
+          {shown.rows.runRuleHits}; {plural(shown.bundles, "bundle")} on disk
         </span>
         {shown.held.length > 0
           ? <span className="error"> held: {shown.held.map((one) => `run${one.id} (${one.why})`).join("; ")}</span>
@@ -75,7 +76,7 @@ export const JobActions = ({ id, kind, status, requestId, stopRequestedAt, onCha
           ? <span className="muted"> nothing</span>
           : (
             <button type="button" className="copy-ref danger" onClick={() => void del()}>
-              delete {shown.runs} run(s)
+              delete {plural(shown.runs, "run")}
             </button>
           )}
         <button type="button" className="copy-ref" onClick={() => setPhase({ kind: "idle" })}>keep</button>

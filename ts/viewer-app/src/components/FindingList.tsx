@@ -21,6 +21,8 @@ export interface Finding {
   /** Where no step names the place: the audit's message number, say. */
   readonly at?: string | undefined
   readonly text: string
+  /** Further steps the finding names, drawn as links before `text`. */
+  readonly links?: readonly string[] | undefined
   /** The whole finding, where it says more than `text`. */
   readonly full?: string | undefined
 }
@@ -65,11 +67,41 @@ const Row = (
           ? <StepLink step={finding.step} onPickStep={onPickStep} />
           : finding.at !== undefined && <span className="muted mono">{finding.at}</span>}
       </span>
-      <span className="finding-text">{finding.text}</span>
+      <span className="finding-text">
+        {(finding.links ?? []).map((step) => (
+          <span key={step} className="finding-link">
+            <StepLink step={step} onPickStep={onPickStep} />{" "}
+          </span>
+        ))}
+        {finding.text}
+      </span>
       {open && more && <pre className="finding-full">{finding.full}</pre>}
     </div>
   )
 }
+
+/** Past this many rows a section that gates nothing opens folded. */
+export const FOLD_AT = 8
+
+/**
+ * A titled group of findings: a noun and a count over the rows, drawn only
+ * where it holds one; `fold` folds it past `FOLD_AT` rows.
+ */
+export const FindingSection = (
+  { className, title, findings, fold, onPickStep }: {
+    className: string
+    title: string
+    findings: readonly Finding[]
+    fold?: boolean | undefined
+    onPickStep?: ((step: string) => void) | undefined
+  }
+): JSX.Element | null =>
+  findings.length === 0 ? null : (
+    <details className={`verdict-section ${className}`} open={fold !== true || findings.length <= FOLD_AT}>
+      <summary><h4>{title} <span className="count">{findings.length}</span></h4></summary>
+      <FindingList findings={findings} onPickStep={onPickStep} />
+    </details>
+  )
 
 export const FindingList = (
   { findings, onPickStep }: {
