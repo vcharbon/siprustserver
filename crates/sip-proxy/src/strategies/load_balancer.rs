@@ -18,14 +18,15 @@
 //!   (= `w_bak`, §7), and sign `v=3|w_pri=…|w_bak=…|e=<0|1>|c=<callId>`
 //!   (HMAC-SHA256 truncated to 128 bits, base64url) into
 //!   `{w_pri,w_bak,e,v,kid,sig}`.
-//! - `encode_originated`: a request a worker originates. `w_pri` is the
-//!   originating worker, recovered by address, a departed-address tombstone
-//!   included; `w_bak` is the call's other owner as the worker states it, so
-//!   every leg of a call names the same backup, the one holding its replica
-//!   (ADR-0055 §8). A dialog a departed worker originates is thus pinned to its
-//!   ordinal for the dialog's life: the core carries the cookie on its own Via
-//!   too, so it outlives the tombstone. An address neither live nor tombstoned
-//!   gets no cookie.
+//! - `encode_originated`: a request a worker originates, from an address
+//!   live or tombstoned (an address neither gets no cookie). `w_pri` is the
+//!   call's primary the worker states, else the originating worker,
+//!   recovered by address, a departed-address tombstone included; `w_bak` is
+//!   the backup the worker states, so every leg of a call names the call's
+//!   primary and the backup holding its replica, whichever of the two dialled
+//!   it (ADR-0055 §8). A dialog a departed worker originates is thus pinned
+//!   to the ordinals it names for the dialog's life: the core carries the
+//!   cookie on its own Via too, so it outlives the tombstone.
 //! - `decode_stickiness`: verify the MAC, then `w_pri` while it is `Alive`,
 //!   else `w_bak` while it is `Alive`, else `Unroutable` (§4, §5); acceptance
 //!   is never read. It resolves the primary by ORDINAL, so a departed-address
@@ -46,7 +47,9 @@ use crate::load_observer::{EluBand, WorkerLoadObserver};
 use crate::observability::metrics::ProxyMetrics;
 use crate::registry::{WorkerEntry, WorkerRegistry};
 use crate::security::hmac::{HmacKeyProvider, TRUNCATED_MAC_BYTES};
-use crate::strategy::{DecodeResult, RouteParams, RoutingStrategy, SelectError, SelectOpts};
+use crate::strategy::{
+    DecodeResult, RouteParams, RoutingStrategy, SelectError, SelectOpts, StatedOwners,
+};
 
 use super::rendezvous::{rendezvous_rank, rendezvous_select, RendezvousCandidate};
 
@@ -284,13 +287,14 @@ impl RoutingStrategy for LoadBalancerStrategy {
         &self,
         origin: &ProxyAddr,
         msg: &SipMessage,
-        backup: &str,
+        stated: &StatedOwners,
     ) -> Option<RouteParams> {
         let call_id = call_id_of(msg)?;
         // A departed-address tombstone answers as the ordinal last bound there.
-        let primary = self.registry.lookup_by_address(origin)?;
-        let backup = if backup == primary.id { "" } else { backup };
-        Some(self.sign(&primary.id, backup, msg, call_id))
+        let sender = self.registry.lookup_by_address(origin)?;
+        let primary = if stated.primary.is_empty() { &sender.id } else { &stated.primary };
+        let backup = if stated.backup == *primary { "" } else { stated.backup.as_str() };
+        Some(self.sign(primary, backup, msg, call_id))
     }
 
     fn stickiness_primary<'p>(&self, params: &'p RouteParams) -> Option<&'p str> {

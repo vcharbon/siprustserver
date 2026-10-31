@@ -8,7 +8,7 @@
 use sip_message::header::{ParamValue, RecordRouteEntry, Uri, Via};
 
 use crate::addr::ProxyAddr;
-use crate::strategy::RouteParams;
+use crate::strategy::{RouteParams, StatedOwners};
 
 /// A loose-route Record-Route entry naming `advertised`: the stickiness params
 /// in the order the strategy yields them, then the trailing `;lr`.
@@ -74,12 +74,22 @@ pub fn via_cookie_params(via: &Via) -> RouteParams {
         .collect()
 }
 
-/// The call's other owner a worker states on its own Via, `bak` (ADR-0055 §8):
-/// empty when it states none, for a call with one owner. Read only off a
-/// worker's request, on the internal face.
-pub fn stated_backup(worker_via: &Via) -> String {
+/// The call's owners a worker states on its own Via, `pri` and `bak`
+/// (ADR-0055 §8): each empty when it states none. Read only off a worker's
+/// request, on the internal face.
+pub fn stated_owners(worker_via: &Via) -> StatedOwners {
+    StatedOwners { primary: stated(worker_via, "pri"), backup: stated(worker_via, "bak") }
+}
+
+/// Whether a worker's Via states the call's primary: the Via of a leg's
+/// dialog-creating request, or of the CANCEL and non-2xx ACK that share it.
+pub fn states_primary(worker_via: &Via) -> bool {
+    !stated(worker_via, "pri").is_empty()
+}
+
+fn stated(worker_via: &Via, name: &str) -> String {
     worker_via
-        .param("bak")
+        .param(name)
         .and_then(ParamValue::as_str)
         .map(sip_message::param_codec::decode_param)
         .unwrap_or_default()

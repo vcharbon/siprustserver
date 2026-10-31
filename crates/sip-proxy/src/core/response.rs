@@ -1,6 +1,6 @@
 //! Response path, single-endpoint: validate ≥2 Via and that the top is us;
-//! route by the owner rule (`owner`, ADR-0055 §8), every method alike: to the
-//! owner holding the response's transaction, along the next Via
+//! route by the owner rule (`owner`, ADR-0055 §8): to the owner holding the
+//! response's transaction, along the next Via
 //! (received/rport precedence) or at the address it holds now, else to the
 //! call's other owner, else nowhere; pop the top Via entry (comma-aware);
 //! forward; remember the ACK-relay hop for a non-2xx INVITE final — the node
@@ -96,9 +96,9 @@ impl ProxyCore {
         let sent_by = ProxyAddr::new(sent_by_host, sent_by_port);
         self.registry.rearm_departed(&sent_by);
 
-        // ── The owner rule (ADR-0055 §8), every method alike ────────────────
+        // ── The owner rule (ADR-0055 §8) ────────────────────────────────────
         let msg = SipMessage::Response(resp);
-        let route = self.owner_route(&msg, ours, &sent_by).await;
+        let route = self.owner_route(&msg, ours, next, &sent_by).await;
         let SipMessage::Response(resp) = msg else { return };
         let (host, port) = match (route, face) {
             (OwnerRoute::To(target), _) => (target.host, target.port),

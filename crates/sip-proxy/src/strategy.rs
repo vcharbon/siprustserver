@@ -12,7 +12,7 @@
 //!   target, optionally produce route params the core appends to the
 //!   Record-Route URI it inserts for dialog-creating requests (§16.6.5);
 //!   [`encode_originated`](RoutingStrategy::encode_originated) the same for a
-//!   request a worker originates, naming the backup the worker states.
+//!   request a worker originates, naming the owners the worker states.
 //! - [`decode_stickiness`](RoutingStrategy::decode_stickiness) — given the parsed
 //!   params off the top-Route URI (which the core just stripped per §16.4),
 //!   recover the downstream target. Five outcomes, see [`DecodeResult`].
@@ -29,6 +29,16 @@ use crate::addr::ProxyAddr;
 /// deterministic. `ForwardAll` uses `{target: "host:port"}`; `LoadBalancer` uses
 /// `{w_pri, w_bak, e, v, kid, sig}`.
 pub type RouteParams = BTreeMap<String, String>;
+
+/// The call's owners a worker states on its own Via (ADR-0055 §8): `pri`, the
+/// call's primary, on a leg's dialog-creating request only, and `bak`. With a
+/// primary stated, `bak` is the call's backup; with none, the sender is the
+/// call's primary and `bak` its other owner. Empty: not stated.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StatedOwners {
+    pub primary: String,
+    pub backup: String,
+}
 
 /// Outcome of [`RoutingStrategy::decode_stickiness`]. Tagged so the core can
 /// dispatch without casts (port of the `DecodeResult` ADT).
@@ -106,18 +116,18 @@ pub trait RoutingStrategy: Send + Sync {
     fn encode_stickiness(&self, target: &ProxyAddr, msg: &SipMessage) -> Option<RouteParams>;
 
     /// The cookie of a request a worker originates: `origin` is that worker's
-    /// address and `backup` the call's other owner, as the worker states it on
-    /// its request (empty: the call has one owner). The cookie names the
-    /// stated backup, never one the proxy picks, so every leg of a call names
-    /// the same owners (ADR-0055 §8). `None` → this strategy has no per-dialog
-    /// stickiness.
+    /// address and `stated` the call's owners as the worker states them on
+    /// its request. The cookie names the stated primary, else the worker, and
+    /// the stated backup, never one the proxy picks, so every leg of a call
+    /// names the same owners whichever of them sent it (ADR-0055 §8). `None` →
+    /// this strategy has no per-dialog stickiness.
     fn encode_originated(
         &self,
         origin: &ProxyAddr,
         msg: &SipMessage,
-        backup: &str,
+        stated: &StatedOwners,
     ) -> Option<RouteParams> {
-        let _ = backup;
+        let _ = stated;
         self.encode_stickiness(origin, msg)
     }
 

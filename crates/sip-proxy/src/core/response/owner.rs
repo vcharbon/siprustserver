@@ -1,17 +1,21 @@
 //! The owner rule on the response path (ADR-0055 §8): a response bound for a
 //! worker goes to the owner that holds its transaction; if that owner is not
-//! alive, to the call's other owner; a call with one owner goes to it. The
-//! rule is the same for every method.
+//! alive, to the call's other owner; a call with one owner goes to it.
 //!
 //! The owners are read off the cookie of the Via this proxy pushed on the
-//! request (`core/request/via_cookie`): the worker that sent it and the call's
-//! other owner. Without one there, off the proxy's own Record-Route entry
-//! naming the worker the response is for. A response whose Via carries no
-//! cookie and names no worker — a stranger's request — follows its Via.
+//! request (`core/request/via_cookie`): the call's primary and backup. Without
+//! one there, off the proxy's own Record-Route entry naming the worker the
+//! response is for. A response whose Via carries no cookie and names no
+//! worker — a stranger's request — follows its Via.
 //!
 //! The owner holding the transaction is the worker the response's next Via
 //! names by its sent-by, when that worker is one of the cookie's; else, the
-//! address having stopped naming it, the cookie's primary. It holds its
+//! address having stopped naming it, the cookie's primary. An INVITE response
+//! whose next Via states the call's primary — the worker's Via of a leg's
+//! dialog-creating INVITE — is held by the cookie's primary, whichever owner
+//! sent the INVITE: the primary takes the INVITE's client transaction over
+//! from the call record. Every other response, a non-INVITE one above all
+//! (RFC 3261 §17.1.2), is held by its sender. The holder holds its
 //! transaction while the proxy does not read it `Dead`: a departed address
 //! reads `Dead` for its window (`registry::tombstone`). Past that, the
 //! strategy places the response as it places a request on the cookie
@@ -20,10 +24,10 @@
 //! the other.
 
 use sip_message::header::Via;
-use sip_message::SipMessage;
+use sip_message::{Method, SipMessage};
 
 use crate::addr::ProxyAddr;
-use crate::headers::{cookie_params, via_cookie_params};
+use crate::headers::{cookie_params, states_primary, via_cookie_params};
 use crate::registry::{WorkerEntry, WorkerHealth};
 use crate::strategy::{DecodeResult, RouteParams};
 
@@ -42,11 +46,12 @@ pub(super) enum OwnerRoute {
 
 impl ProxyCore {
     /// The owner rule for `msg`, a response whose top Via is `ours` and whose
-    /// next Via's sent-by is `sent_by`.
+    /// next Via, `next`, has the sent-by `sent_by`.
     pub(super) async fn owner_route(
         &self,
         msg: &SipMessage,
         ours: &Via,
+        next: &Via,
         sent_by: &ProxyAddr,
     ) -> OwnerRoute {
         let named = self.registry.lookup_by_address(sent_by);
@@ -63,9 +68,10 @@ impl ProxyCore {
         };
         let primary = self.strategy.stickiness_primary(&cookie).unwrap_or_default();
         let backup = self.strategy.stickiness_backup(&cookie).unwrap_or_default();
+        let held_by_primary = is_invite_response(msg) && states_primary(next);
         let holder = named
             .as_ref()
-            .filter(|n| n.id == primary || n.id == backup)
+            .filter(|n| !held_by_primary && (n.id == primary || n.id == backup))
             .map_or(primary, |n| n.id.as_str());
         if named.as_ref().is_some_and(|n| n.id == holder && n.health != WorkerHealth::Dead) {
             return OwnerRoute::Via;
@@ -110,4 +116,9 @@ impl ProxyCore {
             .map(|entry| cookie_params(entry.uri()))
             .find(|params| self.strategy.stickiness_primary(params) == Some(worker))
     }
+}
+
+/// Whether `msg` answers an INVITE.
+fn is_invite_response(msg: &SipMessage) -> bool {
+    matches!(msg, SipMessage::Response(r) if r.cseq().method() == Method::Invite)
 }
