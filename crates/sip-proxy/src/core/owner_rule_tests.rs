@@ -134,7 +134,30 @@ fn request(
     to_tag: &str,
     seq: &str,
 ) -> String {
-    let stated = if bak.is_empty() { String::new() } else { format!(";bak={bak}") };
+    stating(call_id, pod, "", bak, method, branch, route, to_tag, seq)
+}
+
+/// [`request`], the worker stating the call's primary `pri` on its Via as
+/// well (`""`: none).
+#[allow(clippy::too_many_arguments)]
+fn stating(
+    call_id: &str,
+    pod: &str,
+    pri: &str,
+    bak: &str,
+    method: &str,
+    branch: &str,
+    route: &str,
+    to_tag: &str,
+    seq: &str,
+) -> String {
+    let mut stated = String::new();
+    if !pri.is_empty() {
+        stated.push_str(&format!(";pri={pri}"));
+    }
+    if !bak.is_empty() {
+        stated.push_str(&format!(";bak={bak}"));
+    }
     format!(
         "{method} sip:bob@{UAS}:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP {pod}:5060;branch={branch};rport{stated}\r\n\
@@ -362,5 +385,99 @@ async fn a_response_for_a_dead_sole_owner_goes_nowhere() {
         f.core.handle_response_from(answer(&f, &fwd, "200 OK", method, seq), uas()).await;
         assert!(f.wire.sent.lock().unwrap().is_empty(), "{method}: dropped");
         f.registry.set_health("w1", WorkerHealth::Alive);
+    }
+}
+
+/// `pod`'s worker dials a leg of the call, stating `pri` and `bak` as the
+/// call's owners: the forwarded INVITE, and the cookie its Record-Route
+/// carries, verified for the call.
+async fn dialled_stating(f: &Fixture, pod: &str, pri: &str, bak: &str) -> (Vec<u8>, RouteParams) {
+    let raw = stating(&f.call_id, pod, pri, bak, "INVITE", "z9hG4bKleg", &preloaded(), "", "1");
+    f.core.handle_request_from(parse(&raw), at(pod)).await;
+    let (_, fwd) = one_sent(f);
+    let rr = line(&fwd, "record-route:", "sig=").expect("the cookie half");
+    let uri = rr.split('<').nth(1).unwrap().split('>').next().unwrap();
+    let uri = sip_message::header::Uri::parse(&sip_message::SipStr::owned(uri)).unwrap();
+    let all = crate::headers::cookie_params(&uri);
+    let cookie = f.strategy.verified_cookie(&all, &parse(&raw)).expect("the cookie verifies");
+    (fwd, cookie)
+}
+
+// A takeover copy dials a leg of its primary's call, stating both owners:
+// the leg's cookie names the call's primary and backup as stated, whichever
+// of the two sent it, on the Record-Route and on the pushed Via alike.
+#[tokio::test]
+async fn a_copys_dialled_leg_names_the_primary_and_backup_it_states() {
+    let f = fixture();
+    let (fwd, cookie) = dialled_stating(&f, W3_POD, "w1", "w3").await;
+    assert_eq!(cookie["w_pri"], "w1", "{cookie:?}");
+    assert_eq!(cookie["w_bak"], "w3", "{cookie:?}");
+    let via = top_via(&fwd);
+    assert!(via.contains("w_pri=w1") && via.contains("w_bak=w3"), "{via}");
+}
+
+// The copy dials while the proxy reads the call's primary dead: the cookie
+// still names the stated primary, and the backup as the stated backup.
+#[tokio::test]
+async fn a_copys_dialled_leg_names_its_dead_primary() {
+    let f = fixture();
+    f.registry.set_health("w1", WorkerHealth::Dead);
+    let (fwd, cookie) = dialled_stating(&f, W3_POD, "w1", "w3").await;
+    assert_eq!(cookie["w_pri"], "w1", "{cookie:?}");
+    assert_eq!(cookie["w_bak"], "w3", "{cookie:?}");
+    let via = top_via(&fwd);
+    assert!(via.contains("w_pri=w1") && via.contains("w_bak=w3"), "{via}");
+}
+
+// A worker that states no primary is the cookie's primary, the backup it
+// states the cookie's backup.
+#[tokio::test]
+async fn a_worker_stating_no_primary_is_named_the_primary() {
+    let f = fixture();
+    let (fwd, cookie) = dialled_stating(&f, W3_POD, "", "w1").await;
+    assert_eq!(cookie["w_pri"], "w3", "{cookie:?}");
+    assert_eq!(cookie["w_bak"], "w1", "{cookie:?}");
+    let via = top_via(&fwd);
+    assert!(via.contains("w_pri=w3") && via.contains("w_bak=w1"), "{via}");
+}
+
+// The INVITE a copy dialled is answered: while the call's primary is dead
+// its responses go to the copy, the call's other owner; once the primary is
+// alive again they go to the primary, which holds the call.
+#[tokio::test]
+async fn an_invite_response_to_a_copys_dialled_leg_goes_to_its_live_primary() {
+    let f = fixture();
+    f.registry.set_health("w1", WorkerHealth::Dead);
+    let (fwd, _) = dialled_stating(&f, W3_POD, "w1", "w3").await;
+    f.core.handle_response_from(answer(&f, &fwd, "180 Ringing", "INVITE", "1"), uas()).await;
+    assert_eq!(one_sent(&f).0, at(W3_POD), "the 180 while the primary is dead");
+    f.registry.set_health("w1", WorkerHealth::Alive);
+    f.core.handle_response_from(answer(&f, &fwd, "200 OK", "INVITE", "1"), uas()).await;
+    assert_eq!(one_sent(&f).0, at(W1_POD), "the 200 once the primary is alive");
+}
+
+// A non-INVITE response answers a client transaction only its sender holds
+// (RFC 3261 §17.1.2): a copy's request in the call's dialog has its final
+// follow the Via to the copy while the primary lives.
+#[tokio::test]
+async fn a_non_invite_response_to_a_copys_request_follows_its_via() {
+    let f = fixture();
+    let cookie = dialog_cookie(&f, W1_POD, "w3").await;
+    for (method, seq) in [("BYE", "2"), ("INFO", "3"), ("OPTIONS", "4")] {
+        let raw = stating(
+            &f.call_id,
+            W3_POD,
+            "w1",
+            "w3",
+            method,
+            &format!("z9hG4bK{method}{seq}"),
+            &dialog_route(&cookie),
+            ";tag=b",
+            seq,
+        );
+        f.core.handle_request_from(parse(&raw), at(W3_POD)).await;
+        let fwd = one_sent(&f).1;
+        f.core.handle_response_from(answer(&f, &fwd, "200 OK", method, seq), uas()).await;
+        assert_eq!(one_sent(&f).0, at(W3_POD), "{method}");
     }
 }
