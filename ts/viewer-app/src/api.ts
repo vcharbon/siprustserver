@@ -1031,6 +1031,8 @@ export interface CampaignCase {
   /** The groups the case counts under, 0..N; the grid falls back on its family where there are none. */
   readonly groups: readonly string[]
   readonly links: readonly CampaignLink[]
+  /** The file the case was compiled from, as the newest run that compiled it read it; null where none kept it. */
+  readonly source: { readonly file: string; readonly text: string } | null
 }
 
 /** One environment's latest runs of a campaign, newest first, and every case any of them ran. */

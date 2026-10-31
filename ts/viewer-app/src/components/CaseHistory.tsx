@@ -1,6 +1,7 @@
 /**
  * One case's history as a drawer: what the case is (its title, groups,
- * description, and what it uses, each linked to its page where there is one),
+ * description, what it uses, each linked to its page where there is one, and
+ * the file it was compiled from, folded),
  * its verdict per run and lane, what changed between runs, the flip table, the
  * runs with their deltas.
  */
@@ -47,6 +48,18 @@ export const CaseHistory = ({ view, caseId, lanes, onClose, onDelta }: {
               ))}
             </tbody>
           </table>
+        </section>
+      )}
+      {known?.source !== null && known?.source !== undefined && (
+        <section className="cp-panel">
+          <details>
+            <summary><b>Source</b> <span className="muted mono">{known.source.file}</span></summary>
+            <pre className="cp-source mono">
+              {known.source.text.replace(/\n$/, "").split("\n").map((line, at) => (
+                <span key={at} className="cp-line">{line}{"\n"}</span>
+              ))}
+            </pre>
+          </details>
         </section>
       )}
       <section className="cp-panel">

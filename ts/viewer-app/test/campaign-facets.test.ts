@@ -79,7 +79,8 @@ const VIEW: Campaign = {
     title: caseId === "fam-a/one" ? "Number one" : null,
     description: null,
     groups: GROUPS[caseId] ?? [],
-    links: []
+    links: [],
+    source: null
   })),
   runs: [
     run(4, {

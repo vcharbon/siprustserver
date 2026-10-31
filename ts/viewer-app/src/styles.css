@@ -2292,6 +2292,26 @@ tr.rule-unrostered td {
   padding: 14px 18px 60px;
 }
 .cp-close { float: right; }
+.cp-source {
+  margin: 8px 0 0;
+  max-height: 520px;
+  overflow: auto;
+  padding: 8px 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  line-height: 1.45;
+  counter-reset: cp-line;
+}
+.cp-line::before {
+  counter-increment: cp-line;
+  content: counter(cp-line);
+  display: inline-block;
+  width: 3ch;
+  margin-right: 1.5ch;
+  text-align: right;
+  color: var(--mute);
+}
 .cp-hist td, .cp-hist th { padding: 3px 5px; text-align: center; font-size: 12px; }
 .cp-hist td:first-child { text-align: left; white-space: nowrap; }
 .cp-hist td.x { background: var(--nok-bg); color: var(--nok); font-weight: 600; }
