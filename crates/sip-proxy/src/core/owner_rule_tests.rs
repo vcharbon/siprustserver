@@ -481,3 +481,43 @@ async fn a_non_invite_response_to_a_copys_request_follows_its_via() {
         assert_eq!(one_sent(&f).0, at(W3_POD), "{method}");
     }
 }
+
+// A copy's re-INVITE on a leg the primary dialled: its 200 follows the Via
+// to the copy, even when the far end echoes the copy's Via with a `pri` it
+// added: only the proxy's signed dialling mark sends an INVITE response to
+// the primary.
+#[tokio::test]
+async fn a_reinvite_response_with_an_echoed_pri_follows_its_via() {
+    let f = fixture();
+    let cookie = dialog_cookie(&f, W1_POD, "w3").await;
+    let raw = request(
+        &f.call_id,
+        W3_POD,
+        "w1",
+        "INVITE",
+        "z9hG4bKreinvite",
+        &dialog_route(&cookie),
+        ";tag=b",
+        "2",
+    );
+    f.core.handle_request_from(parse(&raw), at(W3_POD)).await;
+    let fwd = one_sent(&f).1;
+    let forged = String::from_utf8_lossy(&fwd).replace(";bak=w1", ";pri=w1;bak=w1");
+    f.core
+        .handle_response_from(answer(&f, forged.as_bytes(), "200 OK", "INVITE", "2"), uas())
+        .await;
+    assert_eq!(one_sent(&f).0, at(W3_POD), "the 200 follows the Via to the copy");
+}
+
+// The INVITE a copy dialled is answered while the proxy has not read the
+// call's primary alive yet (`Unknown`): the response goes to the call's
+// backup, as a request on the leg's cookie would.
+#[tokio::test]
+async fn an_invite_response_to_a_copys_dialled_leg_waits_for_an_alive_primary() {
+    let f = fixture();
+    f.registry.set_health("w1", WorkerHealth::Unknown);
+    let (fwd, _) = dialled_stating(&f, W3_POD, "w1", "w3").await;
+    f.core.handle_response_from(answer(&f, &fwd, "200 OK", "INVITE", "1"), uas()).await;
+    assert_eq!(one_sent(&f).0, at(W3_POD), "the 200 while the primary is not read alive");
+    f.registry.set_health("w1", WorkerHealth::Alive);
+}

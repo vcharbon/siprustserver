@@ -11,10 +11,12 @@
 //! The owner holding the transaction is the worker the response's next Via
 //! names by its sent-by, when that worker is one of the cookie's; else, the
 //! address having stopped naming it, the cookie's primary. An INVITE response
-//! whose next Via states the call's primary — the worker's Via of a leg's
-//! dialog-creating INVITE — is held by the cookie's primary, whichever owner
-//! sent the INVITE: the primary takes the INVITE's client transaction over
-//! from the call record. Every other response, a non-INVITE one above all
+//! whose Via cookie carries the signed dialling mark — a leg's dialling
+//! INVITE whose worker stated the call's primary — is held by the cookie's
+//! primary, whichever owner sent the INVITE: the primary takes the INVITE's
+//! client transaction over from the call record. It goes there while the
+//! strategy reads the primary alive, else to the backup, as a request on the
+//! cookie does. Every other response, a non-INVITE one above all
 //! (RFC 3261 §17.1.2), is held by its sender. The holder holds its
 //! transaction while the proxy does not read it `Dead`: a departed address
 //! reads `Dead` for its window (`registry::tombstone`). Past that, the
@@ -27,7 +29,7 @@ use sip_message::header::Via;
 use sip_message::{Method, SipMessage};
 
 use crate::addr::ProxyAddr;
-use crate::headers::{cookie_params, states_primary, via_cookie_params};
+use crate::headers::{cookie_params, via_cookie_params};
 use crate::registry::{WorkerEntry, WorkerHealth};
 use crate::strategy::{DecodeResult, RouteParams};
 
@@ -46,12 +48,11 @@ pub(super) enum OwnerRoute {
 
 impl ProxyCore {
     /// The owner rule for `msg`, a response whose top Via is `ours` and whose
-    /// next Via, `next`, has the sent-by `sent_by`.
+    /// next Via's sent-by is `sent_by`.
     pub(super) async fn owner_route(
         &self,
         msg: &SipMessage,
         ours: &Via,
-        next: &Via,
         sent_by: &ProxyAddr,
     ) -> OwnerRoute {
         let named = self.registry.lookup_by_address(sent_by);
@@ -68,10 +69,14 @@ impl ProxyCore {
         };
         let primary = self.strategy.stickiness_primary(&cookie).unwrap_or_default();
         let backup = self.strategy.stickiness_backup(&cookie).unwrap_or_default();
-        let held_by_primary = is_invite_response(msg) && states_primary(next);
+        let held_by_primary =
+            is_invite_response(msg) && self.strategy.marks_dialling(&via_cookie_params(ours));
+        if held_by_primary && named.as_ref().is_none_or(|n| n.id != primary) {
+            return self.placed_on(&cookie, msg).await;
+        }
         let holder = named
             .as_ref()
-            .filter(|n| !held_by_primary && (n.id == primary || n.id == backup))
+            .filter(|n| n.id == primary || n.id == backup)
             .map_or(primary, |n| n.id.as_str());
         if named.as_ref().is_some_and(|n| n.id == holder && n.health != WorkerHealth::Dead) {
             return OwnerRoute::Via;
@@ -80,7 +85,13 @@ impl ProxyCore {
         if let Some(holder) = at_now {
             return OwnerRoute::To(holder.address);
         }
-        match self.strategy.decode_stickiness(&cookie, msg).await {
+        self.placed_on(&cookie, msg).await
+    }
+
+    /// Where the strategy places `msg` on `cookie`, as it places a request on
+    /// it (`RoutingStrategy::decode_stickiness`).
+    async fn placed_on(&self, cookie: &RouteParams, msg: &SipMessage) -> OwnerRoute {
+        match self.strategy.decode_stickiness(cookie, msg).await {
             DecodeResult::Forward { target, .. } | DecodeResult::ForwardBackup { target, .. } => {
                 OwnerRoute::To(target)
             }

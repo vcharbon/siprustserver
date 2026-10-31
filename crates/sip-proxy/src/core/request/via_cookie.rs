@@ -18,13 +18,16 @@
 //! no entry they carry the cookie the INVITE would have carried. Only the
 //! strategy's own fields ride, and only once they verify for the call
 //! (`RoutingStrategy::verified_cookie`): a strategy whose cookie names no
-//! worker puts none on the Via.
+//! worker puts none on the Via. The Via of a leg's dialling INVITE whose
+//! worker states the call's primary carries the strategy's signed dialling
+//! mark beside the cookie (`RoutingStrategy::dialling_mark`), and so do its
+//! CANCEL and non-2xx ACK.
 
 use sip_message::{Method, SipMessage, SipRequest};
 
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::invite_txn_key;
-use crate::headers::{cookie_params, stated_owners};
+use crate::headers::{cookie_params, stated_owners, states_primary};
 use crate::strategy::RouteParams;
 
 use super::super::ProxyCore;
@@ -58,7 +61,8 @@ impl ProxyCore {
         if !c.worker_outbound {
             return None;
         }
-        c.own_routes
+        let mut cookie = c
+            .own_routes
             .iter()
             .find_map(|route| self.strategy.verified_cookie(&cookie_params(route.uri()), msg))
             .or_else(|| {
@@ -67,6 +71,12 @@ impl ProxyCore {
                     self.strategy.encode_originated(originator, msg, &stated)
                 })?;
                 self.strategy.verified_cookie(&own, msg)
-            })
+            })?;
+        // A worker states the primary on a leg's dialling INVITE alone, and
+        // on the CANCEL and non-2xx ACK that share its Via (ADR-0055 §8).
+        if states_primary(req.top_via()) {
+            cookie.extend(self.strategy.dialling_mark(&cookie));
+        }
+        Some(cookie)
     }
 }

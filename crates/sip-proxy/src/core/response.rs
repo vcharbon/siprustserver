@@ -98,7 +98,7 @@ impl ProxyCore {
 
         // ── The owner rule (ADR-0055 §8) ────────────────────────────────────
         let msg = SipMessage::Response(resp);
-        let route = self.owner_route(&msg, ours, next, &sent_by).await;
+        let route = self.owner_route(&msg, ours, &sent_by).await;
         let SipMessage::Response(resp) = msg else { return };
         let (host, port) = match (route, face) {
             (OwnerRoute::To(target), _) => (target.host, target.port),

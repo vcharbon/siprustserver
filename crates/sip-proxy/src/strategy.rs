@@ -151,4 +151,18 @@ pub trait RoutingStrategy: Send + Sync {
     fn verified_cookie(&self, _params: &RouteParams, _msg: &SipMessage) -> Option<RouteParams> {
         None
     }
+
+    /// The signed field the Via cookie `cookie` carries beside it when the
+    /// request it rides is a leg's dialling INVITE whose worker states the
+    /// call's primary (ADR-0055 §8). `None` → this strategy marks nothing.
+    fn dialling_mark(&self, _cookie: &RouteParams) -> Option<(String, String)> {
+        None
+    }
+
+    /// Whether `params`, the params of one of the proxy's own Vias, carry a
+    /// [`dialling_mark`](Self::dialling_mark) that verifies for the cookie
+    /// beside it. Read only after that cookie verified.
+    fn marks_dialling(&self, _params: &RouteParams) -> bool {
+        false
+    }
 }

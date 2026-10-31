@@ -27,6 +27,11 @@
 //!   it (ADR-0055 §8). A dialog a departed worker originates is thus pinned
 //!   to the ordinals it names for the dialog's life: the core carries the
 //!   cookie on its own Via too, so it outlives the tombstone.
+//! - `dialling_mark`: the Via cookie of a leg's dialling INVITE whose worker
+//!   states the call's primary carries `dl`, a MAC over the cookie's own
+//!   signature under its key, which the response path reads as that INVITE's
+//!   (ADR-0055 §8): the far end echoes the worker's Via, so its unsigned `pri`
+//!   decides nothing there.
 //! - `decode_stickiness`: verify the MAC, then `w_pri` while it is `Alive`,
 //!   else `w_bak` while it is `Alive`, else `Unroutable` (§4, §5); acceptance
 //!   is never read. It resolves the primary by ORDINAL, so a departed-address
@@ -307,5 +312,13 @@ impl RoutingStrategy for LoadBalancerStrategy {
 
     fn verified_cookie(&self, params: &RouteParams, msg: &SipMessage) -> Option<RouteParams> {
         self.own_fields(params, msg)
+    }
+
+    fn dialling_mark(&self, cookie: &RouteParams) -> Option<(String, String)> {
+        self.mark_dialling(cookie)
+    }
+
+    fn marks_dialling(&self, params: &RouteParams) -> bool {
+        self.dialling_marked(params)
     }
 }
