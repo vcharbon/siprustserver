@@ -1,6 +1,7 @@
-//! The request record's one settle machine for non-INVITE requests (ADR-0055
-//! §2): where each record is written as its request leaves or is held, and
-//! what each way it settles owes.
+//! The non-INVITE request records (ADR-0055 §2): where each record is
+//! written as its request leaves or is held, and what each way it settles
+//! owes. A leg's end and the call's release settle through the one settle
+//! entry ([`super::settle`]).
 //!
 //! | settled by | relay | own | held |
 //! |---|---|---|---|
@@ -17,21 +18,21 @@
 //! through [`call::helpers::Resolved::record`].
 
 use call::helpers::{
-    add_record, close_held, close_record, find_leg, get_peer, held_record, next_held_deadline,
-    record_with_branch, take_overdue_held, update_leg, Resolved,
+    add_record, close_held, close_record, disarm_timer, find_leg, held_record, next_held_deadline,
+    record_with_branch, take_overdue_held, Resolved,
 };
 use call::{
-    Call, Dialog, DialogId, HostPort, RequestOrigin, RequestRecord, SentRequest, TimerKey,
-    TimerType,
+    Call, DialogId, HostPort, RequestOrigin, RequestRecord, SentRequest, TimerKey, TimerType,
 };
 use sip_message::generators::{self, GenerateError};
 use sip_message::header::{HeaderName, MediaType};
 use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 
 use crate::effects::{
-    HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
+    CriticalStateEffect, HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode,
+    Provenance,
 };
-use crate::rules::method_table::{row_of, usage_of};
+use crate::rules::method_table::usage_of;
 use crate::rules::relay;
 use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::RuleContext;
@@ -42,10 +43,6 @@ use super::ActionExecutor;
 /// The final the platform gives a held request no service answered by its
 /// deadline: the service failed to.
 const UNANSWERED_HELD: (u16, &str) = (500, "Server Internal Error");
-
-/// The final a received request still held when its dialog ends draws (RFC
-/// 3261 §15.1.2).
-const ENDED_HELD: (u16, &str) = (487, "Request Terminated");
 
 fn held_answer_key() -> TimerKey {
     TimerKey::call(TimerType::HeldAnswer)
@@ -156,7 +153,7 @@ impl ActionExecutor<'_> {
             let (status, reason) = UNANSWERED_HELD;
             answer_received(call, fx, &leg_id, &record, status, reason, Vec::new(), None);
         }
-        self.arm_held_answer(call, fx);
+        arm_held_answer(call, fx, self.now_ms);
     }
 
     /// Hold the turn's received request on the dialog it names for a final a
@@ -190,7 +187,7 @@ impl ActionExecutor<'_> {
             ..RequestRecord::relayed(req.method().as_str(), 0, i64::from(req.cseq().seq()))
         };
         add_record(call, ctx.source_leg_id, &id, record);
-        self.arm_held_answer(call, fx);
+        arm_held_answer(call, fx, self.now_ms);
     }
 
     /// Answer the request held on `leg_id` numbered `cseq` with `status`
@@ -218,122 +215,41 @@ impl ActionExecutor<'_> {
         close_held(call, leg_id, &holder, cseq);
         let content_type = content_type.and_then(relay::media_type);
         answer_received(call, fx, leg_id, &record, status, reason, body.to_vec(), content_type);
-        self.arm_held_answer(call, fx);
+        arm_held_answer(call, fx, self.now_ms);
     }
+}
 
-    /// Settle every record `leg_id` holds as the leg ends: a relay toward it
-    /// draws the method table's owed final for its originator (RFC 3261
-    /// §8.2.6), a request it sent and this stack holds draws 487 (§15.1.2);
-    /// each leaves the record so a late final from the target is never a
-    /// second final (§17.2.1). This stack's own requests stay until their
-    /// final or their timeout. A relayed INVITE is
-    /// [`Self::reject_pending_reinvite`]'s.
-    pub(super) fn settle_at_leg_end(
-        &mut self,
-        call: &mut Call,
-        fx: &mut HandlerEffects,
-        leg_id: &str,
-    ) {
-        if settle_owed(call, fx, leg_id) {
-            self.arm_held_answer(call, fx);
-        }
-    }
-
-    /// [`Self::settle_at_leg_end`] over every leg, for a termination that
-    /// brings them all to `Terminated` at once.
-    pub(super) fn settle_all_at_release(&mut self, call: &mut Call, fx: &mut HandlerEffects) {
-        let ids: Vec<String> = std::iter::once(call.a_leg.leg_id.clone())
-            .chain(call.b_legs.iter().map(|l| l.leg_id.clone()))
-            .collect();
-        for id in ids {
-            self.settle_at_leg_end(call, fx, &id);
-        }
-    }
-
-    /// Answer every request a leg of `call` holds for a service with 487:
-    /// the call is ending, and no service answers it now (RFC 3261 §15.1.2).
-    pub(super) fn settle_held_at_release(&mut self, call: &mut Call, fx: &mut HandlerEffects) {
-        let held: Vec<(String, RequestRecord)> = call::helpers::every_record(call)
-            .filter(|(_, _, r)| r.is_held())
-            .map(|(leg, _, r)| (leg.leg_id.clone(), r.clone()))
-            .collect();
-        for (leg_id, record) in held {
-            if let Some((holder, _)) =
-                held_record(call, &leg_id, &record.method, record.inbound_cseq)
-            {
-                close_held(call, &leg_id, &holder, record.inbound_cseq);
+/// The [`TimerType::HeldAnswer`] stands at the earliest deadline of a held
+/// request, never before `now_ms`, and is off while none is held.
+pub(super) fn arm_held_answer(call: &mut Call, fx: &mut HandlerEffects, now_ms: i64) {
+    match next_held_deadline(call) {
+        Some(at) => crate::timer_arm::arm(call, fx, held_answer_key(), at.max(now_ms)),
+        None => {
+            if let Some(entry) = disarm_timer(call, &held_answer_key()) {
+                fx.critical.push(CriticalStateEffect::CancelTimer { key: entry.key });
             }
-            let (status, reason) = ENDED_HELD;
-            answer_received(call, fx, &leg_id, &record, status, reason, Vec::new(), None);
-        }
-        self.arm_held_answer(call, fx);
-    }
-
-    /// The [`TimerType::HeldAnswer`] stands at the earliest deadline of a
-    /// held request, and is off while none is held.
-    fn arm_held_answer(&mut self, call: &mut Call, fx: &mut HandlerEffects) {
-        match next_held_deadline(call) {
-            Some(at) => self.schedule(call, fx, held_answer_key(), (at - self.now_ms).max(0)),
-            None => self.disarm(call, fx, &held_answer_key()),
         }
     }
 }
 
-/// Settle every record `leg_id` owes a final for as the leg ends (the
-/// table's "its leg's end" row): each relay toward it and each request held
-/// on it leaves the record and is answered. Returns whether one was.
-pub(crate) fn settle_owed(call: &mut Call, fx: &mut HandlerEffects, leg_id: &str) -> bool {
-    let Some(leg) = find_leg(call, leg_id) else { return false };
-    let owed = |r: &RequestRecord| (r.is_relay() || r.is_held()) && !r.is_invite();
-    // The live dialogs' records are answered first, then the retired ones'.
-    let (retired, live): (Vec<&Dialog>, Vec<&Dialog>) =
-        leg.dialogs.iter().partition(|d| d.is_retired());
-    let settled: Vec<RequestRecord> = live
-        .iter()
-        .chain(&retired)
-        .flat_map(|d| d.requests.iter().filter(|r| owed(r)).cloned())
-        .collect();
-    update_leg(call, leg_id, |l| {
-        for d in l.dialogs.iter_mut() {
-            // A retired dialog keeps only its own records: a relayed INVITE
-            // it still holds ends with the leg, unanswered here.
-            let retired = d.is_retired();
-            d.requests.retain(|r| if retired { r.is_own() } else { !owed(r) });
-        }
-    });
-    for record in &settled {
-        let (status, reason) =
-            if record.is_held() { ENDED_HELD } else { row_of(&record.method).owed_at_leg_end };
-        answer_received(call, fx, leg_id, record, status, reason, Vec::new(), None);
-    }
-    !settled.is_empty()
-}
-
-/// The final `status` to the received half of `record`, held on (or
-/// relayed toward) `leg_id`, sent to its originator's top Via response
-/// target (RFC 3261 §18.2.2).
+/// The final `status` to the received half of `record`, sent on the leg
+/// `originator` to its top Via response target (RFC 3261 §18.2.2): the leg a
+/// held request arrived on, or the one a relay came from.
 #[allow(clippy::too_many_arguments)]
-fn answer_received(
+pub(super) fn answer_received(
     call: &Call,
     fx: &mut HandlerEffects,
-    leg_id: &str,
+    originator: &str,
     record: &RequestRecord,
     status: u16,
     reason: &str,
     body: Vec<u8>,
     content_type: Option<MediaType>,
 ) {
-    // A relay's originator is the peer of the leg it was relayed toward;
-    // a held request's, the leg it arrived on.
-    let originator = if record.is_held() {
-        leg_id.to_string()
-    } else {
-        get_peer(call, leg_id).unwrap_or(call.a_leg.leg_id.as_str()).to_string()
-    };
     let Some(dest) = record.source_vias.first().and_then(|v| via_response_target(v)) else {
         tracing::warn!(
             call_ref = %call.call_ref,
-            leg_id = %leg_id,
+            leg_id = %originator,
             method = %record.method,
             "request left unanswered — the originator's top Via names no destination"
         );
@@ -343,7 +259,7 @@ fn answer_received(
     else {
         tracing::warn!(
             call_ref = %call.call_ref,
-            leg_id = %leg_id,
+            leg_id = %originator,
             method = %record.method,
             "request left unanswered — the originator's request lines make no response"
         );
@@ -354,7 +270,7 @@ fn answer_received(
         mode: OutboundTxnMode::ServerResponse,
         destination: dest,
         label: format!("{status} {} → {originator}", record.method),
-        leg_id: Some(originator),
+        leg_id: Some(originator.to_string()),
         provenance: Provenance::Authored,
     });
 }

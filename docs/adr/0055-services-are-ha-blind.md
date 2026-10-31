@@ -13,7 +13,7 @@ round becomes the rule of §4, any method; the creation write before the first
 provisional, §3).
 
 **Owner:** `crates/call` (the request record, the subscription record, timer
-scopes), `crates/b2bua-core` (the method table, the settle paths, the evidence
+scopes), `crates/b2bua-core` (the method table, the one settle entry, the evidence
 rule), `crates/b2bua` (the turn engine, the replication write path, the store
 and its envelope, materialise, reclaim, departure, stand-down), `crates/repl-net`
 (send on write, explicit replica refusal), `crates/sip-txn` (seeds for every
@@ -114,25 +114,40 @@ BYEd, RFC 3261 §13.2.2.4). Offer/answer is a fact of the session, not of a
 request record: an offer may open in one transaction and close in another (a
 reliable 18x and its PRACK, RFC 3262 §5; a 2xx and its ACK; an UPDATE, RFC 3311).
 
-One state machine settles a request record on a final, a timeout, a CANCEL, a
-crossing BYE, the leg's end, the call's release and a takeover. It replaces the
-fields listed in the Context, `OwnNotify`, the four `handle-timeout` intercepts
-and the per-method verdicts of `dialog_gate` and `teardown`.
+A request record settles on its final, its timeout, its leg's end, the call's
+release, its deadline or a service's answer. Whatever answers a request the call
+holds, or owes a final for, as a leg ends, as the call is released or as its
+termination begins goes through one settle entry, for every method: a held
+request draws 487 (RFC 3261 §15.1.2), a relay toward an ended leg the method
+table's owed final, a relayed INVITE still pending at the termination 487 and a
+CANCEL toward its target (§9.1). The entry is called at a listed set of
+triggers, each with its caller, kept as one list in the settle module's doc
+(`crates/b2bua-core/src/rules/actions/settle.rs`). A Confirmed leg BYEd at
+termination is not settled there: its relays wait for their real finals.
+Discharge, reclaim and takeover never call the entry (ADR-0022 X5). What a
+record owes the wire at a takeover or a reclaim (a retained final, an awaited
+request sent again, an undecided call's answer) is sent from the record as it
+stands, not settled.
 
-What differs by method is one table that knows no HA:
+What differs by method is split three ways, none of which knows HA. The method
+table holds the non-INVITE facts: the dialog usage a request belongs to, what a
+dialog this side is ending makes of it, and the final a relay toward a leg that
+ended owes its originator. Every non-INVITE shares one rule: a final ends the
+exchange, and the client side holds through Timer K (§17.1.2). The INVITE has
+its own exchange: offer/answer, the reliable-provisional ladder and its
+RSeq/RAck mapping (RFC 3262 §3), an owed ACK on 2xx, 491 on glare (RFC 3261
+§14), and its CANCEL. The rules hold the policy: what the timeout of this
+stack's own request ends is an overridable default a service can outrank, and
+how a request reaching an ending dialog is absorbed. Beyond the table:
 
-- INVITE: offer/answer, the reliable-provisional ladder and its RSeq/RAck
-  mapping (RFC 3262 §3), an owed ACK on 2xx, 491 on glare (RFC 3261 §14);
 - UPDATE: offer/answer, 491 on glare (RFC 3311 §5.2);
 - PRACK: may carry the answer (RFC 3262 §5);
-- any non-INVITE: a final ends the exchange; the client side holds through
-  Timer K (§17.1.2);
 - REFER: opens an implicit subscription (RFC 3515);
 - NOTIFY: carries subscription state; after `terminated` no NOTIFY is sent on
   that subscription (RFC 6665 §4.2.2); NOTIFYs of one subscription leave in
   order;
 - BYE: ends the dialog; it is queued behind an owed ACK and behind an own NOTIFY
-  in flight (RFC 3261 §15).
+  in flight (RFC 3261 §15), in the dialog's one queue of requests not yet sent.
 
 A held request record lets a service answer a received non-INVITE request on a
 later turn. It carries a deadline under the originator's Timer F, 64·T1, with

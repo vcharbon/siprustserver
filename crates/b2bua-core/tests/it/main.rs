@@ -15,6 +15,7 @@ mod media_leg_advertisement;
 mod rules;
 mod service_macro;
 mod services;
+mod settle_triggers;
 mod timer_scope_rules;
 mod turn_lane;
 mod unheld_lane;

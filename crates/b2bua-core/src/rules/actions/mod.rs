@@ -15,8 +15,10 @@
 //! - `relay_request` / `relay_response` — relaying the current event to a peer
 //! - `relay_pending_response` — a response to a request this stack relayed
 //! - `request_record` — the non-INVITE request records: written as a request
-//!   leaves or is held, settled by its final, timeout, leg end, release or
-//!   deadline (ADR-0055 §2)
+//!   leaves or is held, settled by its final, timeout, deadline or a
+//!   service's answer (ADR-0055 §2)
+//! - `settle` — the one settle entry: what a leg's end, the call's release
+//!   or its termination answers, at its listed triggers (ADR-0055 §2)
 //! - `dialog_track` — early-dialog tracking, 2xx confirmation, the a-dialog
 //! - `dialog_end` — a leg's dialogs moving to the state its teardown records
 //! - `create_leg` — the new leg's INVITE, opening the attempt it dials
@@ -64,6 +66,7 @@ mod request_record;
 mod respond;
 mod retire;
 mod select;
+mod settle;
 mod show_provisional;
 mod snapshot_answer;
 mod straggler;
@@ -83,7 +86,7 @@ use b2bua_sdk::model::{RuleAction, RuleContext};
 pub use ladder::ladder_bound;
 pub use prack::{Owed, Settle};
 pub use provisional_arrival::invite_open;
-pub(crate) use request_record::settle_owed;
+pub(crate) use settle::{settle, Cause, Legs};
 pub(crate) use subscription::holds_requests;
 
 /// Executes rule actions against a working copy of the call, drawing every

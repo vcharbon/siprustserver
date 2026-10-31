@@ -3,14 +3,17 @@
 //! simulated fabric) so the post-materialise list runs for real. Each test
 //! holds the per-call lock across the call, as every caller does.
 
-use call::{Call, CallModelState, TimerEntry, TimerKey, TimerType};
+use call::{Call, CallModelState, LegState, RequestOrigin, RequestRecord};
+use call::{TimerEntry, TimerKey, TimerType};
 use sip_clock::Clock;
+use sip_net::{BindUdpOpts, SignalingNetwork};
+use sip_net_testkit::SimulatedSignalingNetwork;
 
 use super::{materialise, Materialised, Origin, Reason};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::repl::ReplicatingCallStore;
-use crate::router::test_support::{invite, node, src};
+use crate::router::test_support::{invite, node, node_on, src};
 use crate::store::{CallStore, PartitionRole, PutOpts};
 
 const PRI: PartitionRole = PartitionRole::Primary;
@@ -327,6 +330,49 @@ async fn reclaim_discharges_a_terminal_body_instead_of_serving_it() {
     assert!(ctx.state.peek(&r_dying).is_none(), "the forced-terminal body is not live");
     assert_eq!(n.cdr.snapshot().len(), 2, "a Terminating deferral is completed and billed");
     assert_eq!(ctx.state.active_count(), 0);
+}
+
+/// A reclaimed ending body still owing answers — a request a service held on
+/// the caller's dialog, a request relayed toward her — is discharged with
+/// nothing on the wire: a discharge never settles (ADR-0022 X5), the node
+/// that served the call to its end answered them, or their senders' timers
+/// did.
+#[tokio::test(start_paused = true)]
+async fn a_reclaimed_ending_body_owing_answers_is_discharged_off_the_wire() {
+    let net = SimulatedSignalingNetwork::new(1);
+    let n = node_on(&net, "w1", |_| {}, Vec::new()).await;
+    let caller = net.bind_udp(BindUdpOpts::new(src(), 64)).await.unwrap();
+    let ctx = n.core.router_ctx();
+    let mut ending = call_in("w1", "w0", "cid-owing", CallModelState::Terminating, &n.clock);
+    *ending.a_leg.invite_final_sent_mut() = Some(200);
+    call::testkit::stage_leg(&mut ending.a_leg, LegState::Confirmed);
+    let dialog = ending.a_leg.dialogs.confirmed().map(call::Dialog::id).expect("her dialog");
+    ending.a_leg.own_tag = Some(dialog.our_tag.clone());
+    let via = format!("SIP/2.0/UDP {};branch=z9hG4bK-owed", src());
+    let held = RequestRecord {
+        origin: RequestOrigin::Held,
+        source_vias: vec![via.clone()],
+        ..RequestRecord::relayed("INFO", 0, 2)
+    };
+    let relayed = RequestRecord { source_vias: vec![via], ..RequestRecord::relayed("INFO", 3, 7) };
+    call::helpers::add_record(&mut ending, "a", &dialog, held);
+    call::helpers::add_record(&mut ending, "a", &dialog, relayed);
+    let r = ending.call_ref.clone();
+    put(&n.store, PRI, "w1", &ending).await;
+
+    let _guard = ctx.state.lock(&r).await;
+    assert!(matches!(
+        materialise(ctx, &r, Origin::Reclaim).await,
+        Materialised::Refused(Reason::Terminated)
+    ));
+    let mut heard = Vec::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(200);
+    while let Ok(Some(p)) = tokio::time::timeout_at(deadline, caller.recv()).await {
+        heard.push(String::from_utf8_lossy(&p.raw).lines().next().unwrap_or_default().to_string());
+    }
+    assert!(heard.is_empty(), "nothing on the wire: {heard:?}");
+    assert!(ctx.state.peek(&r).is_none(), "the discharged body is not live");
+    assert_eq!(n.cdr.snapshot().len(), 1, "the ending body is billed once");
 }
 
 /// A body whose record does not rebuild its caller's INVITE is unrecoverable

@@ -13,6 +13,7 @@ use b2bua_sdk::model::{Body, MessageTransform, RuleAction, RuleContext};
 use sip_message::SipHeader;
 
 use super::select::resolve_peer;
+use super::settle::{settle, Cause, Legs};
 use super::teardown::terminate_all;
 use super::unrelayed::Unrelayed;
 use super::ActionExecutor;
@@ -123,7 +124,7 @@ impl ActionExecutor<'_> {
                 self.reject_pending_reinvite(call, fx, leg_id, *outbound_cseq, *status, reason);
             }
             RuleAction::TerminateCall { cause, by_leg } => {
-                self.settle_all_at_release(call, fx);
+                settle(call, fx, Legs::Every, Cause::LegEnd, self.now_ms);
                 terminate_all(call, self.now_ms, *cause, by_leg.clone());
             }
             RuleAction::BeginTermination { reason, cause, by_leg } => {

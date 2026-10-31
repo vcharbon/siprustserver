@@ -23,6 +23,7 @@ use b2bua_sdk::model::{LegEnd, RuleContext};
 
 pub(super) use super::relayed_teardown::Relayed;
 use super::relayed_teardown::{relayed_teardown, relayed_teardown_hops};
+use super::settle::{settle, Cause, Legs};
 use super::{ActionExecutor, Owed, Settle};
 
 impl ActionExecutor<'_> {
@@ -71,27 +72,8 @@ impl ActionExecutor<'_> {
     ) {
         record_termination(call, self.now_ms, ended.0, ended.1);
         crate::rules::stated_headers::withdraw_tentative(call);
-        let pending_invites: Vec<(String, i64)> = std::iter::once(&call.a_leg)
-            .chain(call.b_legs.iter())
-            .flat_map(|leg| leg.dialogs.iter().map(move |d| (leg, d)))
-            .flat_map(|(leg, d)| {
-                call::helpers::invite_relay(d)
-                    .filter(|p| !p.cancelled)
-                    .map(move |p| (leg.leg_id.clone(), p.outbound_cseq))
-            })
-            .collect();
-        for (leg_id, outbound_cseq) in pending_invites {
-            self.reject_pending_reinvite(
-                call,
-                fx,
-                &leg_id,
-                outbound_cseq,
-                487,
-                "Request Terminated",
-            );
-        }
-        // No service answers a request it held once the call ends (§15.1.2).
-        self.settle_held_at_release(call, fx);
+        let now_ms = self.now_ms;
+        settle(call, fx, Legs::Every, Cause::TerminationBegins(self), now_ms);
         // RFC 3261 §16.6: a termination the peer ASKED for restates what it
         // said — the Q.850 cause (RFC 3326 §2), the charging correlation, the
         // end-to-end data and body — on the BYE/CANCEL minted for the other leg.
@@ -133,7 +115,7 @@ impl ActionExecutor<'_> {
                 // are answered too.
                 _ if is_a => {
                     if call.a_leg.invite_final_sent().is_some() {
-                        self.settle_at_leg_end(call, fx, &id);
+                        settle(call, fx, Legs::One(&id), Cause::LegEnd, self.now_ms);
                     }
                 }
                 // A b-leg whose INVITE still rings is CANCELled (§9.1), an
@@ -142,7 +124,7 @@ impl ActionExecutor<'_> {
                 _ if ringing => {
                     let relayed = relayed(&Method::Cancel, &id);
                     self.send_cancel(call, fx, &id, &relayed.headers);
-                    self.settle_at_leg_end(call, fx, &id);
+                    settle(call, fx, Legs::One(&id), Cause::LegEnd, self.now_ms);
                 }
                 // Already ended or being ended: its CANCEL or BYE left, its
                 // INVITE took its final.
@@ -220,8 +202,8 @@ impl ActionExecutor<'_> {
         // re-offers a torn-down leg's answer, short of the 2xx its BYE waits
         // behind (RFC 3261 §15).
         self.retire_byed_leg(call, fx, leg_id);
-        self.settle_at_leg_end(call, fx, leg_id);
-        call::helpers::update_leg(call, leg_id, settle_ended_leg);
+        settle(call, fx, Legs::One(leg_id), Cause::LegEnd, self.now_ms);
+        call::helpers::update_leg(call, leg_id, retire_early_if_ended);
     }
 
     /// CANCEL a ringing b-leg, which then reads `Cancelling`
@@ -258,7 +240,7 @@ impl ActionExecutor<'_> {
         } else {
             self.retire(call, fx, Scope::Leg(leg_id));
         }
-        self.settle_at_leg_end(call, fx, leg_id);
+        settle(call, fx, Legs::One(leg_id), Cause::LegEnd, self.now_ms);
         match end {
             LegEnd::InviteRejected => match rejecting_final(ctx, leg_id) {
                 Some((cseq, status)) => {
@@ -273,7 +255,7 @@ impl ActionExecutor<'_> {
             | LegEnd::OurByeAnswered
             | LegEnd::OurByeTimedOut => super::dialog_end::end_dialogs(call, ctx, leg_id, end),
         }
-        call::helpers::update_leg(call, leg_id, settle_ended_leg);
+        call::helpers::update_leg(call, leg_id, retire_early_if_ended);
     }
 
     /// CANCEL `leg_id`'s INVITE carrying `relayed` (RFC 3261 §9.1): the PRACKs
@@ -375,7 +357,7 @@ pub(super) fn terminate_all(
     record_termination(call, now_ms, cause, by_leg);
     for leg in std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut()) {
         abandon_leg(leg);
-        settle_ended_leg(leg);
+        retire_early_if_ended(leg);
     }
     call.state = call::CallModelState::Terminated;
 }
@@ -392,7 +374,7 @@ fn rejecting_final(ctx: &RuleContext, leg_id: &str) -> Option<(i64, u16)> {
 /// A leg that reads `Terminated` lets go of the early dialogs its INVITE left
 /// open: each retires with its open relays (RFC 3261 §12.1.2); a dialog whose
 /// CANCEL is in flight still ends on the INVITE's final.
-fn settle_ended_leg(leg: &mut Leg) {
+fn retire_early_if_ended(leg: &mut Leg) {
     if leg.state() == LegState::Terminated {
         retire_early_dialogs(leg);
     }

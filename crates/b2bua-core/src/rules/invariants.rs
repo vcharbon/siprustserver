@@ -203,7 +203,8 @@ pub(crate) fn answer_unanswered_caller(
     };
     effect.label = "503 (terminated unanswered) → a-leg".to_string();
     effects.outbound.push(effect);
-    super::actions::settle_owed(call, effects, &a_leg_id);
+    let caller = super::actions::Legs::One(&a_leg_id);
+    super::actions::settle(call, effects, caller, super::actions::Cause::LegEnd, now_ms);
     // Before `obligations.settle` reads the snapshot, so the CDR carries it.
     call.cdr_events.push(CdrEvent {
         event_type: CdrEventType::Reject,
