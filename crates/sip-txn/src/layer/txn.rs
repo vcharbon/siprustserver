@@ -263,6 +263,7 @@ impl Transaction {
             lifetime,
             orphaned: false,
             held: false,
+            seeded: false,
         }
     }
 
@@ -432,4 +433,7 @@ pub(super) struct Transaction {
     /// stage ahead of this layer refuses a copy of it; leaving the map
     /// releases the hold.
     pub(super) held: bool,
+    /// A server INVITE transaction a seed rebuilt from a record, not one a
+    /// request this layer received opened: it answers no copy of its own.
+    pub(super) seeded: bool,
 }

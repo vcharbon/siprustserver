@@ -130,7 +130,10 @@ impl Owner {
             state: TxnState::Proceeding,
             destination,
         };
-        self.open_txn_with(head, |txn| txn.uas_to_tag = to_tag.filter(|t| !t.is_empty()));
+        self.open_txn_with(head, |txn| {
+            txn.uas_to_tag = to_tag.filter(|t| !t.is_empty());
+            txn.seeded = true;
+        });
         self.hold_seeded_identity(TxnRef::Server(key.id()));
         let Some(provisional) = provisional else { return true };
         if let Some(txn) = self.server_mut(key.id()) {
@@ -144,10 +147,12 @@ impl Owner {
     }
 
     /// A server INVITE Accepted on `response` (RFC 6026 §7.1), keyed by its top
-    /// Via. An occupant that has sent no final takes `response` and sends it to
-    /// the address its INVITE came from: it answered that copy with a
-    /// provisional only. `false` when the response names no branch or its
-    /// identity holds a transaction that has sent its final.
+    /// Via. An occupant that has sent no final takes `response`; one a received
+    /// copy of the INVITE opened sends it to the address that copy came from,
+    /// having answered it with a provisional only, and a seeded one sends
+    /// nothing: the 2xx's own retransmission ladder repeats it (RFC 3261
+    /// §13.3.1.4). `false` when the response names no branch or its identity
+    /// holds a transaction that has sent its final.
     async fn seed_accepted(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -162,7 +167,7 @@ impl Owner {
             if !occupant.state.is_active() {
                 return false;
             }
-            let dest = occupant.destination;
+            let dest = occupant.destination.filter(|_| !occupant.seeded);
             self.accept(key.id(), &response);
             if let Some(dest) = dest {
                 self.send_buffer(endpoint, response.image(), dest).await;

@@ -68,9 +68,10 @@ pub enum TxnSeed {
     /// `response` — this stack's choice over §8.7's silent absorption: the
     /// node holding the seed never sent the 2xx the copy may have missed. It
     /// holds a takeover copy for Timer L unless an ACK on its own branch
-    /// detaches it: a 2xx's ACK takes a new branch. A transaction already on its key that has sent no final —
-    /// the one the INVITE's retransmission opened before the record was read —
-    /// takes `response` as its final and sends it once.
+    /// detaches it: a 2xx's ACK takes a new branch. A transaction already on its key that has sent no final
+    /// takes `response` as its final: the one the INVITE's retransmission
+    /// opened before the record was read sends it once, a seeded one leaves
+    /// it to the 2xx's retransmission ladder (RFC 3261 §13.3.1.4).
     ServerAccepted { response: SipResponse, leg_id: Option<String> },
     /// A server INVITE this side answered with a non-2xx final, its ACK not
     /// known to have arrived: `response`, the final as it left, keyed by its
