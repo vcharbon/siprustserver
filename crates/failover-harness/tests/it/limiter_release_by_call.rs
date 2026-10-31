@@ -303,7 +303,7 @@ async fn a_crash_between_a_reroute_fold_and_its_flush_releases_the_call_once() {
 /// release the admit request made. The primary crashes; the caller's BYE
 /// fails over to the backup, whose copy defers the terminal to the dead
 /// primary; the backup's lossy cleanup releases the call's key, which frees
-/// the late set. The witnesses are intact.
+/// the late set. The witnesses are intact. The outcome is accepted (ADR-0040 decision 5).
 #[tokio::test(start_paused = true)]
 async fn a_late_landed_initial_admit_is_released_by_the_takeover_s_lossy_cleanup() {
     let mut fh = ha_harness("limiter-release-by-call-late-initial-admit");
@@ -729,7 +729,7 @@ async fn a_primary_back_inside_the_ttl_discharges_the_served_terminal_and_the_re
 /// re-arms the call's timers; the refresh re-registers the set within one
 /// refresh period of the node being ready. The caller's BYE lands on the
 /// reborn primary, which releases the call once: the re-registered set is
-/// freed by that release, not by the lease.
+/// freed by that release, not by the lease. The outcome is accepted (ADR-0040 decision 5).
 #[tokio::test(start_paused = true)]
 async fn a_call_whose_set_lapsed_while_its_primary_was_down_is_counted_again_on_reclaim() {
     let mut fh = ha_harness("limiter-release-by-call-lapsed-then-reclaim");
@@ -887,7 +887,7 @@ async fn a_fold_set_of_an_uncounted_call_lost_with_the_primary_lapses_with_its_l
 /// stalls, the caller hangs up on the primary, which writes the CDR, removes
 /// the call and replicates the removal, its release queued. The primary
 /// crashes with the queue: the backup holds no copy to release, and the lease
-/// frees the call. The witnesses are intact.
+/// frees the call. The witnesses are intact. The outcome is accepted (ADR-0040 decision 5).
 #[tokio::test(start_paused = true)]
 async fn a_release_queued_on_a_crashed_primary_is_freed_by_the_lease() {
     const LEASE_SEC: i64 = 60;
