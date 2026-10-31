@@ -11,6 +11,7 @@ Each file must have it own concern. No not mix concerns.
 Never implement SIP header or message extraction in crates other than sip-message.
 A crate a production binary links declares its tier and never panics on input, a pure one does no effects ([ADR-0051](docs/adr/0051-production-crates-never-panic-on-input.md)): `just purity` and `just panic-sites` check it, and `panic-sites.allow` only goes down, except by sites a rule the change adds reveals.
 A branch that touches `Cargo.lock` or `.cargo/audit.toml` passes `just audit-gate`: no RustSec vulnerability outside the `[advisories] ignore` list of `.cargo/audit.toml`, whose every entry states who links the crate and why it is acceptable.
+The flow viewer's UI (text, colours, dark mode) follows [ts/viewer-app/UI-STYLE.md](ts/viewer-app/UI-STYLE.md).
 Formatting is `cargo fmt` under the root `rustfmt.toml` (stable options only). Run `just fmt` before a commit; `.githooks/pre-commit` (installed by `just hooks`) refuses an unformatted stage — never hand-format around it; `.githooks/prepare-commit-msg` refuses an amend on `develop`, the integration branch (commit on a topic branch).
 
 
