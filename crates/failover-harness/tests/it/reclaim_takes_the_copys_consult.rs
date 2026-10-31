@@ -1,14 +1,19 @@
-//! **A returning primary that takes its copy's write takes the consult the
-//! copy awaits.** The primary dies undecided; its backup asks the decision
-//! again and dials the callee. The primary restarts and reclaims the call
-//! while the copy's INVITE rings: the copy plays on (ADR-0047 D7). The callee
-//! refuses 486, and the copy sends the `/call/failure` consult and writes the
-//! call. The primary takes that write, final and awaited consult with it, and
-//! the copy stands down on the primary's write: one owner of the answer, the
-//! primary, which sends the consult again and relays the 486 to the caller as
-//! the answer says (ADR-0039 decision 5).
+//! **One owner acts on the consult a refusal draws.** The primary dies
+//! undecided; its backup asks the decision again and dials the callee. The
+//! primary restarts and reclaims the call while the copy's INVITE rings, and
+//! the copy stands down on the reclaim write (ADR-0047 D7). The callee refuses
+//! 486, which draws a `/call/failure` consult:
 //!
-//! Beyond the failover sweep: one consult, sent by the primary that takes its copy's write.
+//! - once the primary is routable, the 486 reaches the primary, which owns
+//!   the INVITE the copy dialled (ADR-0055 §8): it alone consults and relays
+//!   the 486 to the caller as the answer says;
+//! - before the primary is routable, the 486 reaches the copy, which takes the
+//!   call over again, sends the consult and writes the call. The primary
+//!   takes that write, final and awaited consult with it, and the copy stands
+//!   down on the primary's write: one owner of the answer, the primary, which
+//!   sends the consult again and relays the 486 (ADR-0039 decision 5).
+//!
+//! Beyond the failover sweep: one owner of each consult, the primary once it is routable.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -66,9 +71,26 @@ impl CallDecisionEngine for Engine {
     }
 }
 
-#[tokio::test(start_paused = true)]
-async fn the_primary_that_takes_its_copys_write_sends_the_consult_the_copy_awaited() {
-    let name = "reclaim-takes-the-copys-consult";
+/// The cluster, the parties, and the call ringing the callee from the copy.
+struct Ringing {
+    fh: failover_harness::FailoverHarness,
+    alice: scenario_harness::agent::Agent,
+    bob: scenario_harness::agent::Agent,
+    proxy: failover_harness::ProxySut,
+    w_b1: failover_harness::ReplicatedB2buaSut,
+    w_b2: failover_harness::ReplicatedB2buaSut,
+    pri_ord: String,
+    call_ref: String,
+    call: scenario_harness::ClientInvite,
+    uas: scenario_harness::ServerTxn,
+    failures: Arc<AtomicUsize>,
+}
+
+/// The call placed, its primary killed with the decision in flight, the
+/// copy's INVITE ringing the callee, and the primary restarted at a new
+/// address and ready; its endpoint reads ready, and the proxy reads it alive,
+/// when `routable`.
+async fn ringing_while_the_primary_returns(name: &str, routable: bool) -> Ringing {
     let mut fh = failover_harness::FailoverHarness::new(name, &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -92,6 +114,9 @@ async fn the_primary_that_takes_its_copys_write_sends_the_consult_the_copy_await
     proxy.set_address(&pri_ord, new_addr);
     fh.note_worker_rebound(&pri_ord, new_addr);
     survivor.simulate_peer_added(&pri_ord);
+    if !routable {
+        fh.flap_not_ready(&pri_ord);
+    }
     for _ in 0..120 {
         fh.advance(Duration::from_millis(500)).await;
         if primary.is_ready() {
@@ -99,15 +124,46 @@ async fn the_primary_that_takes_its_copys_write_sends_the_consult_the_copy_await
         }
     }
     assert!(primary.is_ready(), "the restarted primary became ready");
-    proxy.set_health(&pri_ord, WorkerHealth::Alive);
+    if routable {
+        proxy.set_health(&pri_ord, WorkerHealth::Alive);
+    }
     fh.advance(Duration::from_millis(500)).await;
+    Ringing { fh, alice, bob, proxy, w_b1, w_b2, pri_ord, call_ref, call, uas, failures }
+}
 
-    uas.respond(486, "Busy Here").await;
-    bob.receive("ACK").await;
-    let refused = call.expect(486).await;
+/// The callee refuses once the primary is routable: the primary alone takes
+/// the 486 and consults.
+#[tokio::test(start_paused = true)]
+async fn the_primary_consults_on_a_refusal_of_the_invite_its_copy_dialled() {
+    let name = "reclaim-takes-the-copys-refused-invite";
+    let mut r = ringing_while_the_primary_returns(name, true).await;
+    r.uas.respond(486, "Busy Here").await;
+    r.bob.receive("ACK").await;
+    let refused = r.call.expect(486).await;
     assert_eq!(refused.status(), 486, "the caller hears the callee's refusal, relayed");
-    assert_eq!(failures.load(Ordering::SeqCst), 2, "the copy's consult, and the primary's again");
-    settle_to_one_cdr(&fh, &[&alice, &bob], &[&w_b1, &w_b2], &call_ref).await;
-    fh.assert_sip_rfc_clean(name);
-    drop(proxy);
+    assert_eq!(r.failures.load(Ordering::SeqCst), 1, "the primary's consult alone");
+    settle_to_one_cdr(&r.fh, &[&r.alice, &r.bob], &[&r.w_b1, &r.w_b2], &r.call_ref).await;
+    r.fh.assert_sip_rfc_clean(name);
+    drop(r.proxy);
+}
+
+/// The callee refuses before the primary is routable: the copy consults, and
+/// the primary that takes its write consults again and relays the 486.
+#[tokio::test(start_paused = true)]
+async fn the_primary_that_takes_its_copys_write_sends_the_consult_the_copy_awaited() {
+    let name = "reclaim-takes-the-copys-consult";
+    let mut r = ringing_while_the_primary_returns(name, false).await;
+    r.uas.respond(486, "Busy Here").await;
+    r.bob.receive("ACK").await;
+    r.fh.advance(Duration::from_millis(100)).await;
+    assert_eq!(r.failures.load(Ordering::SeqCst), 1, "the copy's consult");
+    let pri = r.pri_ord.clone();
+    r.fh.flap_ready(&pri);
+    r.proxy.set_health(&pri, WorkerHealth::Alive);
+    let refused = r.call.expect(486).await;
+    assert_eq!(refused.status(), 486, "the caller hears the callee's refusal, relayed");
+    assert_eq!(r.failures.load(Ordering::SeqCst), 2, "the copy's consult, and the primary's again");
+    settle_to_one_cdr(&r.fh, &[&r.alice, &r.bob], &[&r.w_b1, &r.w_b2], &r.call_ref).await;
+    r.fh.assert_sip_rfc_clean(name);
+    drop(r.proxy);
 }

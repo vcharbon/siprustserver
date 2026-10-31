@@ -15,7 +15,6 @@ use super::RouterCtx;
 use crate::store::{role_of, CallTopology, Enveloped, MaterialiseOrigin, PartitionRole};
 
 mod bulk;
-mod carried_cancel;
 mod diverged;
 mod ending;
 mod meeting;

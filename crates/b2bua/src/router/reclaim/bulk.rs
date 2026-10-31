@@ -17,8 +17,8 @@ use crate::store::PartitionRole;
 /// `pri:{self}` call resident and park it, nothing armed, so nothing of it
 /// leaves the node; a call with an INVITE to serve, or one its backup wrote,
 /// is written once ([`announce_reclaim`]), so the backup's takeover copy of
-/// it meets that write before the proxy routes anything to this node, and a
-/// copy holding an INVITE it dialled plays on (ADR-0047 D7). It runs on bootstrap
+/// it meets that write, and stands down on it, before the proxy routes
+/// anything to this node (ADR-0047 D7). It runs on bootstrap
 /// completion, whether or not the node's own endpoint reads ready; the
 /// parked calls are armed once it does ([`arm_parked`]). Each body is read
 /// through the TTL-gated reclaim read, so a body whose TTL ran out is dead and

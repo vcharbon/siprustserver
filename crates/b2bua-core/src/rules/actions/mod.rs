@@ -80,6 +80,7 @@ use crate::turn_scope::TurnScope;
 
 use b2bua_sdk::model::{RuleAction, RuleContext};
 
+pub use ladder::ladder_bound;
 pub use prack::{Owed, Settle};
 pub use provisional_arrival::invite_open;
 pub(crate) use request_record::settle_owed;

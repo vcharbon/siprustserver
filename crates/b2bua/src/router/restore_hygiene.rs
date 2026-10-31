@@ -2,13 +2,16 @@
 //! instant of a copy into this node's clock frame (ADR-0055 §9), and the single
 //! seam every failover/reclaim hydration path runs `call.timers` through before
 //! re-arming them into this node's `TimerService` (keepalive hygiene + cohort
-//! smoothing). Pure functions — the `timers.rs` driver stays untouched and
+//! smoothing), and the ladders a meeting takes going on from where they stand.
+//! Pure functions — the `timers.rs` driver stays untouched and
 //! `(p,b)`-causal reconciliation remains the sole correctness mechanism
 //! (ADR-0014).
 
+use b2bua_core::config::B2buaConfig;
+use b2bua_core::rules::actions::ladder_bound;
 use call::helpers::instants::reanchor_offset;
-use call::helpers::{cap_keepalive_fire_at, shift_instants};
-use call::{Call, TimerEntry, TimerType};
+use call::helpers::{advance_ladder, cap_keepalive_fire_at, cease_shown_ladder, shift_instants};
+use call::{Call, Ceased, Obligation, TimerEntry, TimerType};
 
 /// Strip a stale `KeepaliveTimeout` from a timer set hydrated off a replica
 /// snapshot (reclaim or reactive takeover).
@@ -157,6 +160,39 @@ pub(super) fn sanitize_restored_timers(
             cap_future_keepalives(timers, now_ms, keepalive_interval_ms);
         }
     }
+}
+
+/// Step every rung in `fresh` — ladder timers a meeting takes from the other
+/// owner's copy of `call` — whose deadline is at or before `now_ms` along its
+/// ladder to its first rung after `now_ms`, `call`'s rung index with it. The
+/// other owner served the call up to the meeting and sent the rungs due
+/// before it, so the ladder goes on from where it stands and is never
+/// repeated at once (RFC 3261 §13.3.1.4, RFC 3262 §3). A ladder with no rung
+/// left inside `config`'s bound leaves `fresh` as a ladder ceasing does; a
+/// 2xx's give-up stands.
+pub(super) fn resume_met_ladders(
+    call: &mut Call,
+    fresh: &mut Vec<TimerEntry>,
+    now_ms: i64,
+    config: &B2buaConfig,
+) {
+    fresh.retain_mut(|t| {
+        if *t.timer_type() != TimerType::Rung || t.fire_at > now_ms {
+            return true;
+        }
+        let Some(obligation) = t.key.obligation_of().cloned() else { return true };
+        let bound = ladder_bound(config, &obligation);
+        while t.fire_at <= now_ms {
+            let Some(next) = advance_ladder(call, &obligation, bound) else {
+                if let Obligation::AwaitPrack { tag, rseq } = &obligation {
+                    cease_shown_ladder(call, tag, *rseq, Ceased::Bound);
+                }
+                return false;
+            };
+            t.fire_at += call::millis_i64(next);
+        }
+        true
+    });
 }
 
 /// Cohort-smoothing parameters for the bulk reboot sweep, passed through the

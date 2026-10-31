@@ -198,19 +198,13 @@ fn dialling(mut copy: Enveloped, by: RelayOwner, final_received: Option<u16>) ->
     copy
 }
 
-/// An INVITE the copy dialled and that awaits its final pins the copy, even
-/// when the primary's record holds it: the proxy's cookie on that INVITE
-/// names the copy, so its responses come back to the copy alone.
+/// A leg's dialling INVITE never pins the copy, awaiting its final or not,
+/// whichever node sent it: its cookie names the call's primary, which takes
+/// its client transaction over from the record (ADR-0047 D7).
 #[test]
-fn an_invite_the_copy_dialled_awaiting_its_final_pins_the_copy() {
-    let copy = dialling(in_round(2, None), copy_worker(), None);
-    assert!(!covers(&copy, &copy), "the callee's final comes back to the copy");
-}
-
-/// The dialled INVITE pins nothing once it took its final, nor when another
-/// node sent it.
-#[test]
-fn an_answered_dialled_invite_or_one_another_node_sent_never_pins_the_copy() {
+fn a_dialled_invite_never_pins_the_copy() {
+    let ringing = dialling(in_round(2, None), copy_worker(), None);
+    assert!(covers(&ringing, &ringing), "the callee's final reaches the primary");
     let answered = dialling(in_round(2, None), copy_worker(), Some(200));
     assert!(covers(&answered, &answered), "its final is in");
     let theirs = dialling(in_round(2, None), RelayOwner::new("w0", "w0-boot-1"), None);

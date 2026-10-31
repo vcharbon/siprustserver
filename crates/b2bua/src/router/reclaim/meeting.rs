@@ -5,9 +5,9 @@
 //! live copy is replaced without a bump of this node's axis
 //! ([`CallState::update_quiet`](crate::store::CallState::update_quiet)) and
 //! without a flush. The one exception is a taken copy that carries the
-//! final of an INVITE its node dialled. That INVITE pinned the node's
-//! takeover copy, and the primary then writes once so the copy stands down
-//! (ADR-0047 D7).
+//! final of a leg's dialling INVITE the other node took while this node was
+//! not routable: that node serves the call as a takeover copy, and the
+//! primary then writes once so the copy stands down (ADR-0047 D7).
 
 use std::sync::Arc;
 
@@ -17,11 +17,10 @@ use call::{Call, CallModelState};
 use super::super::materialise::answered_invite_seeds;
 use super::super::release::{release_call, ReleaseKind};
 use super::super::resend;
-use super::super::restore_hygiene::sanitize_restored_timers;
+use super::super::restore_hygiene::{resume_met_ladders, sanitize_restored_timers};
 use super::super::stand_down::covers;
 use super::super::RouterCtx;
 use super::bulk::announce_reclaim;
-use super::carried_cancel::send_carried_cancels;
 use super::diverged::{end_diverged, end_over_an_ending, own_records};
 use super::ending::discharge_met_ending;
 use super::{format_pb, FlushDirection};
@@ -45,8 +44,9 @@ use crate::store::Enveloped;
 ///   each containing the other included, plays on from the primary's copy
 ///   taken whole, its own open request records, leg-id space and exempt
 ///   ledger entries carried into it — a vector is never taken without the
-///   body it counts — and sends each CANCEL the primary's copy records on
-///   an INVITE whose transaction it holds ([`send_carried_cancels`]).
+///   body it counts. A CANCEL the primary's copy records on a leg's dialling
+///   INVITE the copy sent leaves the primary, which holds that INVITE's
+///   client transaction.
 ///
 /// Copies that diverged end the call cleanly from here ([`end_diverged`]).
 pub(in crate::router) async fn meet_live(
@@ -117,7 +117,6 @@ pub(in crate::router) async fn meet_live(
                 let taken = own_records(taken, &live.call, by);
                 let mut taken = with_own_running(taken, &live.call);
                 resync_timers(ctx, call_ref, &live.call, &mut taken, now_ms).await;
-                send_carried_cancels(ctx, &live.call, &taken).await;
                 ctx.state.update_enveloped(Enveloped::new(taken, topology));
             }
         },
@@ -142,11 +141,13 @@ fn keep(ctx: &Arc<RouterCtx>, live: &Enveloped, kept: Enveloped) {
 /// body it counts — with the other's exempt fields. The live timer service
 /// follows the ledger taken, and every INVITE it holds answered 2xx and
 /// awaiting its ACK is seeded in the layer, so a copy of that INVITE draws
-/// the 2xx (an identity already held is left as it is). A taken copy that
-/// carries the final of an INVITE the other owner dialled draws one write
-/// ([`announce_reclaim`]): the copy that INVITE pinned stands down on it, and
-/// the requests it awaited that the live copy did not are sent again here,
-/// the only owner of their answers now (ADR-0047 D7, ADR-0039 decision 5).
+/// the 2xx (an identity already held takes it as its final). A taken copy
+/// that carries the final of a leg's dialling INVITE the other owner sent
+/// draws one write ([`announce_reclaim`]): the other owner took that final
+/// as a takeover copy while this node was not routable, and stands down on
+/// the write; the requests it awaited that the live copy did not are sent
+/// again here, the only owner of their answers now (ADR-0047 D7, ADR-0039
+/// decision 5).
 async fn take_whole(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
@@ -166,7 +167,7 @@ async fn take_whole(
     let Enveloped { call: mut taken, topology } = taken;
     resync_timers(ctx, call_ref, &live.call, &mut taken, now_ms).await;
     let seeds = answered_invite_seeds(&taken);
-    let released = releases_a_pinned_copy(&live.call, &taken, &ctx.relay_owner);
+    let released = takes_a_copys_final(&live.call, &taken, &ctx.relay_owner);
     ctx.state.update_enveloped(Enveloped::new(taken.clone(), topology));
     if !seeds.is_empty() {
         let _ = ctx.txn.seed(call_ref, seeds).await;
@@ -185,12 +186,12 @@ async fn take_whole(
 }
 
 /// Whether `taken`, the other owner's copy, carries the final of a leg's
-/// dialling INVITE that node sent and `live` still awaits. That INVITE pinned
-/// the other owner's takeover copy (ADR-0047 D7); with its final in, this
-/// node writes the call once, and the copy stands down on that write.
-fn releases_a_pinned_copy(live: &Call, taken: &Call, this: &call::RelayOwner) -> bool {
+/// dialling INVITE that node sent and `live` still awaits: the final reached
+/// the other owner's takeover copy while this node was not routable, and
+/// this node writes the call once so that copy stands down (ADR-0047 D7).
+fn takes_a_copys_final(live: &Call, taken: &Call, this: &call::RelayOwner) -> bool {
     live.b_legs.iter().any(|leg| {
-        let pinned = leg.invite.as_ref().is_some_and(|r| r.relayed_by != *this)
+        let awaited = leg.invite.as_ref().is_some_and(|r| r.relayed_by != *this)
             && leg.outbound_invite().is_some_and(|i| i.final_received.is_none());
         let answered = taken
             .b_legs
@@ -198,14 +199,15 @@ fn releases_a_pinned_copy(live: &Call, taken: &Call, this: &call::RelayOwner) ->
             .find(|t| t.leg_id == leg.leg_id)
             .and_then(call::Leg::outbound_invite)
             .is_some_and(|i| i.final_received.is_some());
-        pinned && answered
+        awaited && answered
     })
 }
 
 /// The live timer service follows the ledger `taken` holds: every entry it
 /// no longer carries is cancelled, and every entry it took from the other
 /// owner — one the live copy does not hold as it is — is (re)armed in this
-/// node's clock frame through the restore-hygiene seam; `taken` keeps the
+/// node's clock frame through the restore-hygiene seam, a ladder going on
+/// from where it stands ([`resume_met_ladders`]); `taken` keeps the
 /// re-anchored ledger it was armed from.
 pub(super) async fn resync_timers(
     ctx: &Arc<RouterCtx>,
@@ -226,6 +228,7 @@ pub(super) async fn resync_timers(
         ctx.config.keepalive_interval_sec * 1000,
         None,
     );
+    resume_met_ladders(taken, &mut fresh, now_ms, &ctx.config);
     ctx.timers.restore(fresh.clone(), call_ref.to_string(), taken.incarnation()).await;
     taken.timers = kept.into_iter().chain(fresh).collect();
 }

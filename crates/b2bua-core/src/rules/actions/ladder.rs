@@ -20,6 +20,7 @@ use sip_message::header::RAck;
 use sip_message::{Method, SipMessage, SipResponse};
 use sip_retransmit::{Class, Schedule};
 
+use crate::config::B2buaConfig;
 use crate::effects::{
     HandlerEffects, HandlerResult, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
 };
@@ -171,10 +172,7 @@ impl ActionExecutor<'_> {
             return;
         };
         fx.outbound.push(effect);
-        let give_up = match obligation {
-            Obligation::AckOf2xx { .. } => Some(self.ack_ladder_bound()),
-            Obligation::AwaitPrack { .. } => None,
-        };
+        let give_up = ladder_bound(self.config, obligation);
         match call::helpers::advance_ladder(call, obligation, give_up) {
             Some(next) => self.schedule(call, fx, rung, ::call::millis_i64(next)),
             None => {
@@ -297,20 +295,31 @@ impl ActionExecutor<'_> {
         self.scrub_where(call, fx, |t| t.key.obligation_of() == Some(obligation));
     }
 
-    /// The bound of a §13.3.1.4 ladder — no rung is scheduled at or past it:
-    /// Timer L (64·T1), where RFC 3261 ceases whatever local policy says, or
-    /// the deployment's ACK deadline where that comes sooner (a rung after the
-    /// teardown would repeat into a dead call). Protocol, not policy.
-    fn ack_ladder_bound(&mut self) -> Duration {
-        self.ack_give_up_deadline().min(Schedule::rfc(Class::Final2xx).give_up_after())
-    }
-
     /// When a §13.3.1.4 give-up fires — policy, distinct from the ladder's
     /// bound: the deployment's ACK deadline, either side of Timer L
     /// (`ack_timeout_ms`, never non-positive).
     fn ack_give_up_deadline(&self) -> Duration {
-        Duration::from_millis(self.config.ack_timeout_ms())
+        ack_give_up_deadline(self.config)
     }
+}
+
+/// The bound `obligation`'s ladder advances under ([`call::helpers::advance_ladder`]).
+/// A §13.3.1.4 ladder schedules no rung at or past Timer L (64·T1), where RFC
+/// 3261 ceases whatever local policy says, or the deployment's ACK deadline
+/// where that comes sooner (a rung after the teardown would repeat into a
+/// dead call): protocol, not policy. A reliable provisional's ladder runs to
+/// its class's own bound (`None`).
+pub fn ladder_bound(config: &B2buaConfig, obligation: &Obligation) -> Option<Duration> {
+    match obligation {
+        Obligation::AckOf2xx { .. } => {
+            Some(ack_give_up_deadline(config).min(Schedule::rfc(Class::Final2xx).give_up_after()))
+        }
+        Obligation::AwaitPrack { .. } => None,
+    }
+}
+
+fn ack_give_up_deadline(config: &B2buaConfig) -> Duration {
+    Duration::from_millis(config.ack_timeout_ms())
 }
 
 /// The repeat `obligation`'s rung sends, toward the leg that owes the
