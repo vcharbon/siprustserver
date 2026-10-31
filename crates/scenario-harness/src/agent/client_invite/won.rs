@@ -51,9 +51,11 @@ impl WonInvite {
 }
 
 /// The dialog a fork's 2xx `resp` confirms, derived from the INVITE's dialog
-/// state: the response's own To-tag, Contact and route set (RFC 3261
-/// §12.1.2), the CSeq continuing from the fork's own PRACK sequence when it
-/// had one so its BYE stays contiguous within its dialog (§12.2.1.1).
+/// state: the response's own To-tag and route set, empty when it records none,
+/// and its Contact as the remote target (RFC 3261 §12.1.2; the INVITE's target
+/// when it carries none), the CSeq continuing from the fork's own PRACK
+/// sequence when it had one so its BYE stays contiguous within its dialog
+/// (§12.2.1.1).
 pub(super) fn fork_dialog(
     agent: &Agent,
     invite_dialog: &StackDialog,
@@ -68,10 +70,7 @@ pub(super) fn fork_dialog(
     if let Some(target) = first_contact_uri(resp) {
         dialog.remote_target = target;
     }
-    let route_set = uac_route_set(resp);
-    if !route_set.is_empty() {
-        dialog.route_set = route_set;
-    }
+    dialog.route_set = uac_route_set(resp);
     if let Some(&fork) = fork_cseq.get(&dialog.remote_tag) {
         dialog.local_cseq = dialog.local_cseq.max(fork);
     }

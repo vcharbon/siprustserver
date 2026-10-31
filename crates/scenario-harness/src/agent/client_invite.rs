@@ -328,14 +328,12 @@ impl ClientInvite {
         &self.dialog.remote_tag
     }
 
-    /// The confirmed [`Dialog`] a FORK's 2xx establishes — keyed by the
+    /// The confirmed [`Dialog`] a FORK's 2xx establishes, keyed by the
     /// response's OWN To-tag rather than the shared dialog state (which tracks
-    /// the §13.2.2.4 winner). The losing-fork path: a late 2xx from a fork this
-    /// INVITE created must be ACKed and BYE'd on ITS OWN dialog — its tag, its
-    /// Contact, its route set (RFC 3261 §12.1.2). The CSeq continues from the
-    /// fork's own PRACK sequence when it had one (`fork_cseq`), mirroring the
-    /// winner promotion in [`ack`](Self::ack), so the fork's BYE stays
-    /// contiguous within its dialog (§12.2.1.1).
+    /// the §13.2.2.4 winner): a losing fork's late 2xx is ACKed and BYE'd on
+    /// ITS OWN dialog, with its tag, Contact and route set (empty when it
+    /// records none, RFC 3261 §12.1.2), its CSeq continuing from the fork's own
+    /// PRACK sequence (`fork_cseq`) so its BYE stays contiguous (§12.2.1.1).
     pub fn fork_dialog(&self, resp: &SipResponse) -> Dialog {
         won::fork_dialog(&self.agent, &self.dialog, &self.fork_cseq, self.fallback_addr, resp)
     }

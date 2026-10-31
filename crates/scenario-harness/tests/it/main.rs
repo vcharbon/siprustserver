@@ -17,6 +17,7 @@ mod early_dialogs;
 mod failure_output;
 mod finish_settles;
 mod fluent_dialog;
+mod fork_route_set;
 mod harness_log_capture;
 mod http_exchanges;
 mod proxy_record_route;

@@ -1,7 +1,7 @@
-//! A confirmed caller keeps its establishing INVITE for the whole call, so
-//! every byte of what it keeps is held per call: the seed of the dialog a
-//! losing fork's late 2xx confirms (RFC 3261 §13.2.2.4), never the INVITE
-//! request or the datagram it went out as.
+//! What a confirmed caller keeps of its establishing INVITE is held for the
+//! whole call: the seed of the dialog a losing fork's late 2xx confirms
+//! (RFC 3261 §13.2.2.4), never the INVITE request or the datagram it went
+//! out as.
 
 use std::collections::HashMap;
 use std::mem::size_of;
