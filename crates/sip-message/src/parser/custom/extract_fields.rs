@@ -310,7 +310,7 @@ fn read_contacts(
             "Contact: * wildcard must be the only value (RFC 3261 §10.2.2)",
         ));
     }
-    let mut contact_list: Vec<header::Contact> = Vec::new();
+    let mut contact_list: Vec<header::Contact> = Vec::with_capacity(spans.len());
     for span in &spans {
         match read_contact_entry(span) {
             ContactEntry::Wildcard => {}

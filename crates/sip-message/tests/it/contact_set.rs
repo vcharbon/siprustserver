@@ -121,6 +121,18 @@ fn comma_separated_contacts_fold_identically() {
     assert_eq!(uris(cs), vec!["sip:bob@10.0.0.2:5060", "sip:bob@10.0.0.3:5060"]);
 }
 
+/// The parsed message keeps its Contact list at its length: the list is
+/// reserved once for the entries the header lines carry, so a message kept for
+/// a call's life holds no spare slots.
+#[test]
+fn the_contact_list_is_reserved_at_its_length() {
+    for (raw, len) in [(SINGLE_INVITE, 1), (REDIRECT_MULTI_LINE, 2), (REDIRECT_COMMA_LIST, 2)] {
+        let msg = parse_ok(raw);
+        let ContactSet::Contacts(cs) = contacts_of(&msg) else { panic!("non-wildcard") };
+        assert_eq!((cs.len(), cs.capacity()), (len, len), "{raw}");
+    }
+}
+
 #[test]
 fn wildcard_contact_has_no_single_accessor() {
     let msg = parse_ok(REGISTER_WILDCARD);

@@ -18,12 +18,13 @@ use crate::types::{OptionalHeaders, SipHeader};
 /// Parse a multi-value name-addr header (flattened across instances and
 /// comma-separated entries), each entry by the strict name-addr reader, its
 /// URI a [`UriRole::Identity`]. Any malformed entry → `Err`, and the header's
-/// entries are not used (ADR-0053).
+/// entries are not used (ADR-0053). The list is reserved for one entry per
+/// line.
 fn parse_name_addr_list(
     values: &[&SipStr],
     header_name: HeaderName,
 ) -> Result<Vec<NameAddr>, SipParseError> {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(values.len());
     for v in values {
         for entry in top_level_comma_entries(v.as_str()) {
             if entry.is_empty() {
