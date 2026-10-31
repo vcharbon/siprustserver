@@ -72,10 +72,10 @@ export const JobActions = ({ id, kind, status, requestId, stopRequestedAt, onCha
         {shown.held.length > 0
           ? <span className="error"> held: {shown.held.map((one) => `run${one.id} (${one.why})`).join("; ")}</span>
           : shown.runs === 0
-          ? <span className="muted"> nothing to delete</span>
+          ? <span className="muted"> nothing</span>
           : (
             <button type="button" className="copy-ref danger" onClick={() => void del()}>
-              delete the {shown.runs} run(s) of job {id}
+              delete {shown.runs} run(s)
             </button>
           )}
         <button type="button" className="copy-ref" onClick={() => setPhase({ kind: "idle" })}>keep</button>
@@ -91,7 +91,7 @@ export const JobActions = ({ id, kind, status, requestId, stopRequestedAt, onCha
           type="button"
           className="copy-ref danger"
           disabled={busy || stopRequestedAt !== null}
-          title="stop: no new cell, a grace for the cells in flight, rows closed interrupted"
+          title="no new cell; cells in flight get a grace, then close interrupted"
           onClick={() => void stop()}
         >
           {stopRequestedAt !== null ? "stopping" : "stop"}
@@ -103,7 +103,7 @@ export const JobActions = ({ id, kind, status, requestId, stopRequestedAt, onCha
             type="button"
             className="copy-ref"
             disabled={busy}
-            title="restart, resume: the request's cells no job of it ran, as cases sets"
+            title="restart over the request's cells no job ran"
             onClick={() => void restart("resume")}
           >
             resume
@@ -112,7 +112,7 @@ export const JobActions = ({ id, kind, status, requestId, stopRequestedAt, onCha
             type="button"
             className="copy-ref"
             disabled={busy}
-            title="restart, again: every cell of the request, kinds as it resolves"
+            title="restart over every cell of the request"
             onClick={() => void restart("again")}
           >
             again
@@ -124,7 +124,7 @@ export const JobActions = ({ id, kind, status, requestId, stopRequestedAt, onCha
           type="button"
           className="copy-ref"
           disabled={busy}
-          title="delete the runs this job opened — rows and bundles — after one confirmation on the counts"
+          title="delete this job's runs, rows and bundles; asks once"
           onClick={() => void plan()}
         >
           delete results…

@@ -122,13 +122,13 @@ export const CasePage = ({ id }: { id: string }): JSX.Element => {
 
       {!excluded && <Flags annotations={document?.case.annotations} />}
 
-      {read && !read.ok && <p className="error">{read.reason} — the raw JSON tab still works.</p>}
+      {read && !read.ok && <p className="error">{read.reason}</p>}
 
       {tab === "source" && (
         <div className={excluded ? "source-only" : "source-grid"}>
           {!excluded && (
             <div>
-              <h3>pivot ladder — the interpretation</h3>
+              <h3>pivot ladder</h3>
               {layout && (
                 <LadderPane
                   layout={layout}
@@ -139,7 +139,7 @@ export const CasePage = ({ id }: { id: string }): JSX.Element => {
             </div>
           )}
           <div>
-            <h3>capture source — what the wire carried</h3>
+            <h3>capture</h3>
             <SourcePane id={id} variant={variant} pivot={document} />
           </div>
         </div>
@@ -169,14 +169,7 @@ export const CasePage = ({ id }: { id: string }): JSX.Element => {
             ? (
               <>
                 <h3>no case</h3>
-                <p className="muted">
-                  This directory holds the pipeline's refusal and nothing else. Evidence is kept
-                  rather than deleted, so the call can still be ruled on from the capture.
-                </p>
-                <p className="muted">
-                  the <strong>source</strong> tab draws the whole capture, with the refused call's
-                  groups selectable.
-                </p>
+                <p className="muted" title="the pipeline's refusal; the source tab draws the capture">refused by the pipeline</p>
               </>
             )
             : selected
@@ -199,11 +192,11 @@ export const CasePage = ({ id }: { id: string }): JSX.Element => {
                 {value.resources.length > 0 && (
                   <JsonView value={value.resources} label="resources" />
                 )}
-                <p className="muted">click a message in the ladder to inspect its step.</p>
+
               </>
             )}
           <p className="muted">
-            <Link to={href.index()}>back to the index</Link>
+            <Link to={href.index()}>← index</Link>
           </p>
         </aside>
       </div>

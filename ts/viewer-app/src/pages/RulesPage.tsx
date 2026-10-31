@@ -23,22 +23,22 @@ import { href, setQuery, useQuery } from "../router.ts"
 const FAMILIES = [
   {
     id: "refusal",
-    title: "refusal — deletes the case before any run",
+    title: "refusal · before the run",
     what: "hits = cases refused · reach = captures refused"
   },
   {
     id: "declaration",
-    title: "declaration — states the failure the case OWES",
+    title: "declaration · must_fail",
     what: "hits = must_fail entries · reach = case documents"
   },
   {
     id: "tolerance",
-    title: "tolerance — names an accepted difference after the run",
+    title: "tolerance · after the run",
     what: "hits = confrontation records named · reach = cells"
   },
   {
     id: "bless",
-    title: "bless — restates a failed run as a pass",
+    title: "bless · failed → pass",
     what: "hits = cells restated · reach = cells"
   }
 ] as const
@@ -48,17 +48,17 @@ const markOf = (row: RuleRow): { readonly mark: string; readonly why: string } =
   if ((row.offTier?.fired ?? 0) > 0) {
     return {
       mark: "!",
-      why: `fires on ${row.offTier!.fired} cell(s) that PASSED — it refuses more than it must`
+      why: `fires on ${row.offTier!.fired} passed cell(s)`
     }
   }
   if (row.standing === "unrostered") {
-    return { mark: "#", why: "the corpus carries this token and no rule mints it" }
+    return { mark: "#", why: "token in the corpus, no rule mints it" }
   }
   if (row.standing === "declared-zero") {
-    return { mark: "=", why: row.inert ?? "the rule states that nothing can match it" }
+    return { mark: "=", why: row.inert ?? "declared: matches nothing" }
   }
   if (row.standing === "unexercised") {
-    return { mark: "0", why: "NEVER FIRED, and nothing declares that it could not" }
+    return { mark: "0", why: "never fired, not declared inert" }
   }
   return { mark: "", why: "" }
 }
@@ -93,7 +93,7 @@ const Buckets = ({ row }: { row: RuleRow }): JSX.Element | null => {
           key={bucket.bucket}
           className={`tag class-${bucket.bucket}`}
           title={bucket.bucket === "shape"
-            ? "shape records, whatever their class — the only kind a bless can cite"
+            ? "shape records, any class; the only kind a bless cites"
             : `${bucket.cells} cell(s)`}
         >
           {bucket.bucket} {bucket.hits}
@@ -159,8 +159,7 @@ const FamilyTable = (
     <section className="rule-family">
       <h2>{family.title}</h2>
       <p className="muted">
-        {rows.length} rule(s) · {zeros} never fired · {fired} firing on a cell that passed ·{" "}
-        {family.what}
+        {rows.length} rules · {zeros} never fired · {fired} fire on passed · {family.what}
       </p>
       <table className="listing rule-listing">
         <thead>
@@ -195,7 +194,7 @@ const FamilyTable = (
                   {row.disposition === "" ? null : <span className="tag">{row.disposition}</span>}
                   {row.unfalsifiable === undefined ? null : (
                     <span className="tag rule-unfalsifiable" title={row.unfalsifiable}>
-                      no replay can falsify it
+                      unfalsifiable
                     </span>
                   )}
                   <Lanes row={row} />
@@ -219,14 +218,12 @@ const FamilyTable = (
 /** What the counts were taken over, stated before any of them are read. */
 const Population = ({ view }: { view: RulesView }): JSX.Element => (
   <p className="muted rule-population">
-    refusals read from {view.population.refusalCaptures} capture(s) of the standing cut (
-    {view.population.refusalRecords} record(s)) · post-run counts from{" "}
-    {view.population.measuredRuns} of {view.population.standingRuns} standing run(s) on{" "}
-    {view.lane} · declarations from {view.population.cutCases} case(s) over{" "}
-    {view.population.cutCaptures} capture(s) ·{" "}
+    refusals {view.population.refusalCaptures} captures ({view.population.refusalRecords} records) · post-run{" "}
+    {view.population.measuredRuns}/{view.population.standingRuns} runs on {view.lane} · declarations{" "}
+    {view.population.cutCases} cases / {view.population.cutCaptures} captures ·{" "}
     {view.offTierPass === undefined
-      ? "no cheap-falsifier pass has left a report"
-      : `off-tier pass ${view.offTierPass.at.slice(0, 19)} over ${view.offTierPass.evaluated} green cell(s), ${view.offTierPass.findings} finding(s)`}
+      ? "no off-tier pass"
+      : `off-tier ${view.offTierPass.at.slice(0, 19)} · ${view.offTierPass.evaluated} green cells · ${view.offTierPass.findings} findings`}
   </p>
 )
 
@@ -239,7 +236,7 @@ export const RulesPage = (): JSX.Element => {
   const [zerosOnly, setZerosOnly] = useState(query.get("zeros") === "1")
   const view = useAsync(() => api.rules(lane === "" ? undefined : lane), `rules:${lane}`)
 
-  if (view.state === "loading") return <p className="page muted">reading the roster…</p>
+  if (view.state === "loading") return <p className="page muted">loading…</p>
   if (view.state === "error") return <p className="page error">{view.message}</p>
 
   const kept = view.value.rows.filter((row) =>
@@ -251,11 +248,7 @@ export const RulesPage = (): JSX.Element => {
     <div className="page rules-page">
       <header className="page-head">
         <div>
-          <h1>rules</h1>
-          <p className="muted">
-            every rule of the roster, and what the corpus came to under it. A zero is a row,
-            never an absence.
-          </p>
+          <h1>Rules</h1>
           <Population view={view.value} />
           {view.value.detail === "" ? null : <p className="error">{view.value.detail}</p>}
         </div>
@@ -293,9 +286,9 @@ export const RulesPage = (): JSX.Element => {
             checked={zerosOnly}
             onChange={(event) => setZerosOnly(event.target.checked)}
           />
-          suspicious only (never fired, or firing on a cell that passed)
+          <span title="never fired, or fires on a passed cell">suspicious only</span>
         </label>
-        <span className="muted">{kept.length} of {view.value.rows.length} rule(s)</span>
+        <span className="muted">{kept.length} / {view.value.rows.length}</span>
       </div>
 
       {FAMILIES.map((family) => (
@@ -308,8 +301,7 @@ export const RulesPage = (): JSX.Element => {
       ))}
 
       <p className="muted">
-        <Link to={href.triage()}>the triage queue</Link> ·{" "}
-        <Link to={href.index()}>the index</Link>
+        <Link to={href.triage()}>← queue</Link>
       </p>
     </div>
   )

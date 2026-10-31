@@ -67,7 +67,7 @@ export const FailedSteps = (
   }
 ): JSX.Element | null =>
   steps.length === 0 ? null : (
-    <span className="failed-steps" title="the replay stopped here">
+    <span className="failed-steps" title="replay stopped here">
       {steps.map((step) =>
         onPick === undefined
           ? <span key={step} className="tag failed-step">died at {step}</span>

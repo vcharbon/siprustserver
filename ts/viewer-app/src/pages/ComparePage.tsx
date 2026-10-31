@@ -41,7 +41,7 @@ export const ComparePage = ({ left, right }: { left: SideRef; right: SideRef }):
     }
   }, [sides])
 
-  if (sides.state === "loading") return <p className="page muted">loading both sides…</p>
+  if (sides.state === "loading") return <p className="page muted">loading…</p>
   if (sides.state === "error") return <p className="page error">{sides.message}</p>
 
   const [a, b] = sides.value as [SideData, SideData]
@@ -50,7 +50,7 @@ export const ComparePage = ({ left, right }: { left: SideRef; right: SideRef }):
     <div className="page compare-page">
       <header className="page-head">
         <div>
-          <h1>compare</h1>
+          <h1>Compare</h1>
           <p className="muted">{label(left)} vs {label(right)}</p>
         </div>
         {comparison && (
@@ -117,9 +117,9 @@ export const ComparePage = ({ left, right }: { left: SideRef; right: SideRef }):
                   : <JsonView value={selected.source} label="selected" />}
               </>
             )
-            : <p className="muted">click a message on either side.</p>}
+            : <p className="muted">—</p>}
           <p className="muted">
-            <Link to={href.index()}>back to the index</Link>
+            <Link to={href.index()}>← index</Link>
           </p>
         </aside>
       </div>

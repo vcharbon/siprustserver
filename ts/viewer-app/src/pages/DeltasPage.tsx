@@ -76,7 +76,7 @@ export const DeltasPage = (): JSX.Element => {
     navigate(href.deltas({ ...slice, ...over }))
 
   if (sheet.state === "loading") {
-    return <p className="page muted">reading every kept call's delta sheet — a whole lane takes seconds…</p>
+    return <p className="page muted" title="a whole lane takes seconds">loading…</p>
   }
   if (sheet.state === "error") return <p className="page error">{sheet.message}</p>
   const value = sheet.value
@@ -102,12 +102,12 @@ export const DeltasPage = (): JSX.Element => {
     <div className="page deltas-page">
       <header className="page-head">
         <div>
-          <h1>delta sheet</h1>
+          <h1>Delta sheet</h1>
           <p className="muted">
-            {value.matched} call(s) kept on lane <code>{value.lane}</code> in scope <code>{value.scope}</code>
-            {q === "" ? null : <> matching <code>{q}</code></>} · {value.read} cell(s) read ·{" "}
-            {value.unread} call(s) with no confrontation file (refused, skipped or bundle cleaned)
-            {value.undecodable === 0 ? null : <> · {value.undecodable} file(s) that did not decode</>} · read in{" "}
+            {value.matched} calls · <code>{value.lane}</code> · <code>{value.scope}</code>
+            {q === "" ? null : <> · <code>{q}</code></>} · {value.read} cells read ·{" "}
+            <span title="refused, skipped or bundle cleaned">{value.unread} without confrontation</span>
+            {value.undecodable === 0 ? null : <> · {value.undecodable} undecodable</>} ·{" "}
             {(value.elapsedMs / 1000).toFixed(1)} s
           </p>
           {value.detail === "" ? null : <p className="error">{value.detail}</p>}
@@ -132,7 +132,7 @@ export const DeltasPage = (): JSX.Element => {
         <label>
           kind
           <select value={kind} onChange={(event) => setKind(event.target.value)}>
-            <option value="">every kind</option>
+            <option value="">all</option>
             {kinds.map((one) => <option key={one} value={one}>{one}</option>)}
           </select>
         </label>
@@ -146,7 +146,7 @@ export const DeltasPage = (): JSX.Element => {
             <span className={`tag class-${klass}`}>{klass}</span>
           </label>
         ))}
-        <span className="muted">{kept.length} of {value.lines.length} line(s)</span>
+        <span className="muted">{kept.length} / {value.lines.length}</span>
       </div>
 
       <table className="listing confrontation-listing deltas-listing">
@@ -177,7 +177,7 @@ export const DeltasPage = (): JSX.Element => {
       </table>
 
       <p className="muted">
-        <Link to={href.triage({ ...slice, lane: value.lane })}>the triage queue of this slice</Link>
+        <Link to={href.triage({ ...slice, lane: value.lane })}>← queue</Link>
       </p>
     </div>
   )

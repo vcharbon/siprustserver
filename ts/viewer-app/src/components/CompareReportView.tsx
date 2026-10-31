@@ -116,7 +116,7 @@ const ClassCounts = ({ doc }: { doc: CompareReport.CompareReport }): JSX.Element
       <tbody>
         {classes.length === 0 && (
           <tr>
-            <td colSpan={4} className="muted">no call both sides ran</td>
+            <td colSpan={4} className="muted">none</td>
           </tr>
         )}
         {classes.map((one) => {
@@ -159,7 +159,7 @@ const LadderText = (
   <div className="compare-ladder">
     <h4>{title}</h4>
     {lines === null
-      ? <p className="muted">not read: the bundle is gone, the store holds no document, or the call is past the ladder budget</p>
+      ? <p className="muted" title="bundle gone, no stored document, or past the ladder budget">not read</p>
       : <LadderLines lines={lines} marked={marked} />}
   </div>
 )
@@ -227,11 +227,11 @@ const CallRow = ({ call }: { call: CompareReport.Call }): JSX.Element => (
 
 const Only = ({ label, only }: { label: string; only: CompareReport.Only }): JSX.Element => (
   <p className="muted">
-    {label}: {only.captures} capture(s) the other side never ran; {only.count} call(s) within the captures both ran
+    {label}: {only.captures} captures only here · {only.count} calls only here in shared captures
     {only.calls.length > 0 && (
       <>
         {" "}— <code>{only.calls.slice(0, 10).join(", ")}</code>
-        {only.calls.length > 10 && ` … ${only.calls.length - 10} more listed in the JSON`}
+        {only.calls.length > 10 && ` … +${only.calls.length - 10} (JSON)`}
       </>
     )}
   </p>
@@ -240,7 +240,7 @@ const Only = ({ label, only }: { label: string; only: CompareReport.Only }): JSX
 export const CompareReportView = ({ doc }: { doc: CompareReport.CompareReport }): JSX.Element => (
   <div className="compare-report">
     <p className="compare-headline">
-      <strong>{doc.headline}</strong> · {doc.compared} call(s) both ran
+      <strong>{doc.headline}</strong> · {doc.compared} calls compared
       {doc.unexplained > 0 && (
         <span className="tag missing">
           {doc.unexplained} verdict flip(s) on the same code, document and lane: the harness

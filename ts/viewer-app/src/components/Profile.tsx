@@ -19,7 +19,7 @@ export const Profile = ({ ledger }: { ledger?: MockAnswers | null | undefined })
     return (
       <section className="case-profile">
         <h3>mock answers</h3>
-        <p className="profile-source">no mock record beside this document — the mock answers from its own scenario</p>
+        <p className="profile-source" title="the mock answers from its own scenario">no mock record</p>
       </section>
     )
   }
@@ -32,7 +32,7 @@ export const Profile = ({ ledger }: { ledger?: MockAnswers | null | undefined })
         {ledger.observed !== null && <> · captured <code>{ledger.observed}</code></>}
       </p>
       {answers.length === 0
-        ? <p className="profile-source">the record states no answer — the mock answers nothing for this case</p>
+        ? <p className="profile-source">no answer</p>
         : answers.length > OPEN_ENTRIES
         ? (
           <details className="ledger-fold">

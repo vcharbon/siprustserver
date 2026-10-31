@@ -46,11 +46,11 @@ const SocketStrip = (
   }
 ): JSX.Element => (
   <div className="fv-capture-sockets">
-    <span className="fv-capture-rule">
-      {sutSockets.length === 0
-        ? "SUT unknown: this case cites no capture coordinate, so nothing here names the system under test"
-        : `SUT at ${sutSockets.join(", ")} — where the case's steps send to and expect from`}
-      {onToggle !== undefined && " · click a socket to draw only what it exchanged"}
+    <span
+      className="fv-capture-rule"
+      title={onToggle === undefined ? undefined : "click a socket: draw only what it exchanged"}
+    >
+      {sutSockets.length === 0 ? "SUT unknown: no capture coordinate" : `SUT ${sutSockets.join(", ")}`}
     </span>
     <div className="fv-socket-chips">
       {sockets.map((socket) => (

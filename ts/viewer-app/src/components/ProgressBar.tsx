@@ -21,8 +21,8 @@ export interface Props {
 export const ProgressBar = ({ progress, unit, startedAt, finishedAt, compact }: Props): JSX.Element => {
   const bar = barOf(progress)
   const pace = startedAt === undefined ? undefined : paceOf(progress, startedAt, finishedAt ?? null, Date.now())
-  const title = `${bar.landed} of ${bar.total} ${unit}(s) landed · ${progress.passed} passed, ${progress.failed} failed, ` +
-    `${progress.skipped} skipped · ${bar.gone} gone`
+  const title = `${bar.landed}/${bar.total} ${unit}(s) · ✓ ${progress.passed} · ✗ ${progress.failed} · ` +
+    `— ${progress.skipped} · ${bar.gone} gone`
   return (
     <div className={`progress${compact ? " compact" : ""}`} title={title}>
       <div className="progress-bar" role="progressbar" aria-valuemin={0} aria-valuemax={bar.total} aria-valuenow={bar.landed}>

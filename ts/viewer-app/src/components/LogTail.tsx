@@ -53,8 +53,8 @@ export const LogTail = ({ id, path }: { readonly id: number; readonly path: stri
     <section className="log-tail">
       <div className="log-tail-head">
         <span className="muted">
-          {path === null ? "this job ran in the foreground: no log file" : <code className="mono">{path}</code>}
-          {tail.dropped > 0 && ` · ${tail.dropped} earlier byte(s) not shown`}
+          {path === null ? "no log file (foreground job)" : <code className="mono">{path}</code>}
+          {tail.dropped > 0 && ` · ${tail.dropped} B cut`}
         </span>
         <span>
           <span className="muted">{tail.done ? "ended" : paused ? "paused" : "live"}</span>{" "}
@@ -66,7 +66,7 @@ export const LogTail = ({ id, path }: { readonly id: number; readonly path: stri
         </span>
       </div>
       {error !== undefined && <p className="error">{error}</p>}
-      <pre ref={pre} className="log-tail-text">{tail.text === "" ? <span className="muted">(nothing yet)</span> : tail.text}</pre>
+      <pre ref={pre} className="log-tail-text">{tail.text === "" ? <span className="muted">empty</span> : tail.text}</pre>
     </section>
   )
 }

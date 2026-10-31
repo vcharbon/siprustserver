@@ -80,6 +80,6 @@ describe("the exchange pane", () => {
   })
 
   it("says so where a run recorded no exchange at all", () => {
-    expect(renderToStaticMarkup(<Exchange exchanges={[]} />)).toContain("records no exchange")
+    expect(renderToStaticMarkup(<Exchange exchanges={[]} />)).toContain("no exchange")
   })
 })

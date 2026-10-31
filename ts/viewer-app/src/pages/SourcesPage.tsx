@@ -80,24 +80,22 @@ const AddByPath = ({ roots }: { readonly roots: readonly string[] }): JSX.Elemen
   return (
     <details className="add-by-path">
       <summary>add by path</summary>
-      <p className="muted">
-        A file, a directory, or the files of a ring, under one of the roots:{" "}
-        {roots.map((root) => <code key={root} className="mono">{root} </code>)}
-        — one path per line; a relative one resolves against the repo.
+      <p className="muted" title="a file, a directory or a ring's files; one per line; relative to the repo">
+        roots {roots.map((root) => <code key={root} className="mono">{root} </code>)}
       </p>
       <textarea
         rows={3}
         value={text}
-        placeholder="../SamplePcapGz/OTS_pcaps_vhkh_outgoing/A103-21_145407_sip_vHKH.pcapng.gz"
+        placeholder="path/to/capture.pcapng.gz"
         onChange={(event) => setText(event.target.value)}
       />
       <div className="request-row">
         <label>
           <input type="checkbox" checked={asSet} onChange={(event) => setAsSet(event.target.checked)} />{" "}
-          the paths are ONE capture (consecutive files of one tap)
+          one capture (one tap's ring)
         </label>
         <label>
-          <input type="checkbox" checked={cut} onChange={(event) => setCut(event.target.checked)} /> cut once ingested
+          <input type="checkbox" checked={cut} onChange={(event) => setCut(event.target.checked)} /> cut after ingest
         </label>
         <button type="button" className="copy-ref" disabled={busy || paths.length === 0} onClick={() => void start()}>
           {busy ? "starting…" : `add ${paths.length} path(s)`}
@@ -154,7 +152,7 @@ const RetireButton = ({ capture, onStarted }: { readonly capture: string; readon
           ? <span className="error"> held by {shown.holders.map((one) => `job ${one.jobId} (${one.how})`).join(", ")}</span>
           : (
             <button type="button" className="copy-ref danger" onClick={() => void retire()}>
-              retire {capture} — remove all of it
+              retire {capture}
             </button>
           )}
         <button type="button" className="copy-ref" onClick={() => setPhase({ kind: "idle" })}>keep</button>
@@ -167,7 +165,7 @@ const RetireButton = ({ capture, onStarted }: { readonly capture: string; readon
         type="button"
         className="copy-ref"
         disabled={phase.kind === "planning" || phase.kind === "started"}
-        title="retire the capture: its population row, cut, runs, bundles and artifacts — after one confirmation on the counts"
+        title="remove the capture's row, cut, runs, bundles and artifacts; asks once"
         onClick={() => void plan()}
       >
         {phase.kind === "planning" ? "counting…" : phase.kind === "started" ? "retiring" : "retire…"}
@@ -248,7 +246,7 @@ export const SourcesPage = (): JSX.Element => {
   const value = page.current
   if (value === undefined) {
     if (page.error !== undefined) return <p className="page error">{page.error}</p>
-    return <p className="page muted">loading the source list…</p>
+    return <p className="page muted">loading…</p>
   }
   const last = Math.min(value.total, value.offset + value.rows.length)
 
@@ -256,7 +254,7 @@ export const SourcesPage = (): JSX.Element => {
     <div className="page sources-page">
       <header className="page-head">
         <div>
-          <h1>sources</h1>
+          <h1>Sources</h1>
           {page.loading && <div className="counts"><span className="tag">reloading…</span></div>}
           {page.error !== undefined && <p className="error">{page.error}</p>}
         </div>
@@ -270,7 +268,7 @@ export const SourcesPage = (): JSX.Element => {
                 setOffset(0)
               }}
             />{" "}
-            stale only — needs ingest or needs cut
+            <span title="needs ingest or cut">stale only</span>
           </label>
           <label>
             capture{" "}
@@ -299,13 +297,13 @@ export const SourcesPage = (): JSX.Element => {
       </header>
 
       <p className="muted">
-        showing <b>{value.rows.length === 0 ? 0 : value.offset + 1}–{last}</b> of <b>{value.total}</b> capture(s)
+        <b>{value.rows.length === 0 ? 0 : value.offset + 1}–{last}</b> / <b>{value.total}</b> captures
         {" · "}
         <button type="button" className="copy-ref" disabled={value.offset === 0} onClick={() => setOffset(Math.max(0, offset - perPage))}>
-          previous
+          ‹ previous
         </button>{" "}
         <button type="button" className="copy-ref" disabled={last >= value.total} onClick={() => setOffset(offset + perPage)}>
-          next
+          next ›
         </button>
       </p>
 

@@ -22,7 +22,7 @@ export const CopyText = (
     <button
       type="button"
       className="copy-ref"
-      title={title ?? "the ladder as text, one line per message"}
+      title={title ?? "ladder as text, one line per message"}
       onClick={() => {
         const flip = (next: State): void => {
           setState(next)

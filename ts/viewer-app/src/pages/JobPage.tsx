@@ -158,7 +158,7 @@ export const JobPage = ({ id }: { readonly id: number }): JSX.Element => {
 
   if (job === undefined) {
     if (held.error !== undefined) return <p className="page error">{held.error}</p>
-    return <p className="page muted">loading job {id}…</p>
+    return <p className="page muted">loading…</p>
   }
   const unit = unitOf(job.kind)
 
@@ -167,8 +167,8 @@ export const JobPage = ({ id }: { readonly id: number }): JSX.Element => {
       <header className="page-head">
         <div>
           <h1>
-            job {job.id} <span className="muted">— {job.label}</span>{" "}
-            <Link to={href.jobs()} className="muted">(all jobs)</Link>
+            Job {job.id} <span className="muted">· {job.label}</span>{" "}
+            <Link to={href.jobs()} className="muted">← jobs</Link>
           </h1>
           <p className="job-facts">
             <span className={`tag ${job.status === "done" ? "status-passing" : ENDED.has(job.status) ? "error" : "state-stale"}`}>
@@ -191,7 +191,7 @@ export const JobPage = ({ id }: { readonly id: number }): JSX.Element => {
           {job.request !== null && (
             <p className="mono">
               request {job.request.id} on <Link to={href.triage({ lane: job.request.lane })}>{job.request.lane}</Link>:{" "}
-              {job.request.cells} cell(s) over {job.request.captures} capture(s) — <code>{job.request.selection}</code>
+              {job.request.cells} cells · {job.request.captures} captures · <code>{job.request.selection}</code>
             </p>
           )}
           {held.error !== undefined && <p className="error">{held.error}</p>}
@@ -211,14 +211,14 @@ export const JobPage = ({ id }: { readonly id: number }): JSX.Element => {
       <section className="job-progress">
         <ProgressBar progress={job.progress} unit={unit} startedAt={job.startedAt} finishedAt={job.finishedAt} />
         <p className="muted">
-          {job.progress.total} planned, {job.progress.landed} landed, {job.progress.pending} pending,{" "}
+          {job.progress.total} planned · {job.progress.landed} landed · {job.progress.pending} pending ·{" "}
           {job.progress.goneRefused + job.progress.goneMissing} gone ({job.progress.goneRefused} refused,{" "}
-          {job.progress.goneMissing} not in this cut)
+          {job.progress.goneMissing} not in cut)
           {job.kind === "replay" && (
             <>
               {" · "}
-              {job.progress.passed} passed, {job.progress.failed} failed, {job.progress.skipped} skipped over{" "}
-              {job.progress.runs} run(s), {job.progress.openRuns} open
+              ✓ {job.progress.passed} · ✗ {job.progress.failed} · — {job.progress.skipped} · {job.progress.runs} runs,{" "}
+              {job.progress.openRuns} open
             </>
           )}
           {job.batchAt !== null && job.batches !== null && <> · batch {job.batchAt}/{job.batches}</>}
@@ -244,11 +244,11 @@ export const JobPage = ({ id }: { readonly id: number }): JSX.Element => {
       {red.current !== undefined && red.current.outcome === "red" && (
         <section>
           <h2>
-            red cells so far{" "}
+            red cells{" "}
             <span className="muted">({red.current.total}{red.current.total > red.current.cells.length && `, first ${red.current.cells.length}`})</span>
           </h2>
           {red.current.total === 0
-            ? <p className="muted">none landed red{running ? " yet — results are written as each capture's row closes" : ""}</p>
+            ? <p className="muted" title={running ? "written as each capture's row closes" : undefined}>none{running ? " yet" : ""}</p>
             : <RedTable slice={red.current} />}
         </section>
       )}

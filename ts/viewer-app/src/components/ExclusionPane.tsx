@@ -78,11 +78,7 @@ export const ExclusionPane = (
   const records = caseId === undefined ? read.records : read.records.filter((record) => record.caseId === caseId)
   return (
     <div className="exclusion-pane">
-      <p className="muted">
-        No case was generated here. The pipeline refused it and kept its reason beside the cases
-        it did write; the capture itself stays readable.
-      </p>
-      <p className="muted path">{exclusion.path}</p>
+      <p className="muted path" title="refused by the pipeline; the capture stays readable">{exclusion.path}</p>
       {records.map((record) => <Record key={`${record.caseId}-${record.reason}`} record={record} />)}
       {read.warnings.length > 0 && (
         <ul className="warnings">

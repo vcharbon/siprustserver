@@ -13,8 +13,8 @@ import { formatSideRef, href, navigate } from "../router.ts"
  * regenerated from its pcap and is replaced wholesale.
  */
 const ORIGINS: readonly { readonly origin: string; readonly title: string; readonly note: string }[] = [
-  { origin: "authored", title: "authored", note: "written by hand and kept in git" },
-  { origin: "capture", title: "captured", note: "generated from a pcap; regenerate rather than edit" }
+  { origin: "authored", title: "authored", note: "hand-written, in git" },
+  { origin: "capture", title: "captured", note: "generated from a pcap" }
 ]
 
 const CaseTable = (
@@ -116,7 +116,7 @@ export const IndexPage = (): JSX.Element => {
 
   return (
     <div className="page index-page">
-      <h1>flow viewer</h1>
+      <h1>Flow viewer</h1>
 
       {config.state === "ok" && config.value.triage !== undefined && (
         <DropCaptures lanes={[config.value.triage.lane]} />
@@ -135,7 +135,7 @@ export const IndexPage = (): JSX.Element => {
                   <span className="muted"> {entries.length} cases · {group.note}</span>
                 </h2>
                 {entries.length === 0
-                  ? <p className="muted">none under the configured case roots</p>
+                  ? <p className="muted">none</p>
                   : <CaseTable entries={entries} rootLabel={rootLabel} />}
               </section>
             )
@@ -158,9 +158,8 @@ export const IndexPage = (): JSX.Element => {
             <section className="origin-section origin-excluded">
               <h2>
                 <span className="origin-badge origin-excluded">excluded</span>
-                <span className="muted">
-                  {" "}{excluded.length} entries · the pipeline refused to cut a case; the
-                  evidence is kept and the capture is still readable
+                <span className="muted" title="the pipeline refused to cut a case; the capture stays readable">
+                  {" "}{excluded.length} entries
                 </span>
               </h2>
               <ExcludedTable entries={excluded} rootLabel={rootLabel} />
@@ -172,7 +171,7 @@ export const IndexPage = (): JSX.Element => {
       <section>
         <h2>runs</h2>
         {runs.state === "ok" && runs.value.length === 0 && (
-          <p className="muted">no run bundles under the configured run roots</p>
+          <p className="muted">none</p>
         )}
         {runs.state === "ok" && runs.value.length > 0 && (
           <table className="listing">
@@ -200,7 +199,7 @@ export const IndexPage = (): JSX.Element => {
         <h2>compare</h2>
         <div className="compare-launcher">
           <select value={left} onChange={(event) => setLeft(event.target.value)}>
-            <option value="">left side…</option>
+            <option value="">left…</option>
             {generated.map((entry) => (
               <option key={entry.id} value={formatSideRef({ kind: "case", id: entry.id })}>
                 case {entry.id}
@@ -214,7 +213,7 @@ export const IndexPage = (): JSX.Element => {
               ))}
           </select>
           <select value={right} onChange={(event) => setRight(event.target.value)}>
-            <option value="">right side…</option>
+            <option value="">right…</option>
             {generated.map((entry) => (
               <option key={entry.id} value={formatSideRef({ kind: "case", id: entry.id })}>
                 case {entry.id}

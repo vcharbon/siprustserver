@@ -40,7 +40,7 @@ export const Exchange = ({ exchanges, warnings }: {
     {exchanges.length === 0
       ? (
         <p className="profile-source">
-          this bundle records no exchange — the lane recorded none, or the run predates the record
+          <span title="the lane recorded none, or the run predates the record">no exchange</span>
         </p>
       )
       : (

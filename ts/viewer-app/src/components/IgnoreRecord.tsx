@@ -26,7 +26,7 @@ interface Reason {
 }
 
 /** The picker's free-text entry: a reason the list does not carry. */
-const OTHER = "other (type the note)"
+const OTHER = "other"
 
 /**
  * The reasons that can be READ OFF a capture without a run — the whole point of

@@ -58,14 +58,15 @@ export const RunReportView = ({ doc }: { doc: RunReport.RunReport }): JSX.Elemen
     <div className="run-report">
       {doc.source === "summaries" && (
         <p className="report-summary-note">
-          <strong>summary kept by a citation</strong> — run {doc.runs.map((run) => run.id).join(", ")}'s bundle and row
-          are gone; what stands is the summary its citation kept: each call's verdict, failed step and main error.
-          Its ladders, recording and bless class went with the bundle.
+          <strong>cited summary</strong>{" "}
+          <span className="muted" title="bundle and row gone: verdict, failed step and main error only">
+            run {doc.runs.map((run) => run.id).join(", ")}: bundle gone
+          </span>
         </p>
       )}
       <p className="report-headline">
         <strong>{doc.headline}</strong>
-        {doc.total > doc.runs.length && <span className="muted"> · {doc.runs.length} of {doc.total} runs listed</span>}
+        {doc.total > doc.runs.length && <span className="muted"> · {doc.runs.length} / {doc.total} runs</span>}
       </p>
       <Runs doc={doc} />
       <table className="listing report-calls">
