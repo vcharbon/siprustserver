@@ -29,9 +29,9 @@ import type { MainError } from "./model.js"
 import type { Outcome } from "./requests.js"
 
 /** What a job does: a request replay, a cut, an ingest, a source retired, runs deleted. */
-export type Kind = "replay" | "cut" | "ingest" | "retire" | "delete"
+export type Kind = "replay" | "cut" | "ingest" | "retire" | "delete" | "campaign"
 
-export const KINDS: ReadonlyArray<Kind> = ["replay", "cut", "ingest", "retire", "delete"]
+export const KINDS: ReadonlyArray<Kind> = ["replay", "cut", "ingest", "retire", "delete", "campaign"]
 
 /**
  * `queued` is the row before its process exists; `running` while the pid is

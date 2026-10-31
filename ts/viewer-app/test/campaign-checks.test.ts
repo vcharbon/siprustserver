@@ -72,6 +72,7 @@ const view = (...runs: Run[]): Campaign => ({
     finishedAt: null,
     labels: [],
     lanes: r.lanes,
+    scope: null,
     checked: { c: r.checked ?? LISTED }
   }))
 })

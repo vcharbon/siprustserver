@@ -736,6 +736,19 @@ const cutCaseHashes = Effect.gen(function*() {
 /** The key of the migration that indexes the cut cases by case hash. */
 export const CUT_CASE_HASHES = "9_cut_case_hashes"
 
+/** A campaign run is a job kind of its own: lanes and cases of a campaign, run end to end. */
+const campaignJobs = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`ALTER TABLE jobs DROP CONSTRAINT jobs_kind_check`
+  yield* sql`
+    ALTER TABLE jobs ADD CONSTRAINT jobs_kind_check
+    CHECK (kind IN ('replay', 'cut', 'ingest', 'retire', 'delete', 'campaign'))
+  `
+})
+
+/** The key of the migration that admits campaign jobs. */
+export const CAMPAIGN_JOBS = "10_campaign_jobs"
+
 /**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
@@ -749,7 +762,8 @@ export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [ID_GAPS]: idGaps,
   [FROZEN_CUT_GUARD]: frozenCutGuard,
   [SOURCE_FAULT]: sourceFault,
-  [CUT_CASE_HASHES]: cutCaseHashes
+  [CUT_CASE_HASHES]: cutCaseHashes,
+  [CAMPAIGN_JOBS]: campaignJobs
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)

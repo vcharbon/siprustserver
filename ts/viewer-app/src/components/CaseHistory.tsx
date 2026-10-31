@@ -1,5 +1,6 @@
 /**
- * One case's history as a drawer: what the case is (its title, groups,
+ * One case's history as a drawer, partial runs among the full ones (`°`), with
+ * a replay of the case on its lanes: what the case is (its title, groups,
  * description, what it uses, each linked to its page where there is one, and
  * the file it was compiled from, folded), every check it makes marked per
  * lane (folded),
@@ -10,10 +11,16 @@ import type { JSX } from "react"
 import type { Campaign } from "../api.ts"
 import { resultOf } from "../campaign-facets.ts"
 import { checkList } from "../campaign-checks.ts"
+import { CaseReplay } from "./CampaignLaunch.tsx"
 import { history } from "../campaign-history.ts"
 import { sourceLines } from "../source-lines.ts"
 
 const MARK: Readonly<Record<string, string>> = { pass: "✓", failure: "✗", error: "!", none: "—" }
+
+/** A run's column head: its id, a partial run's marked with `°` and its scope as the tooltip. */
+const RunHead = ({ id, scope }: { readonly id: number; readonly scope: string | null }): JSX.Element => (
+  <th title={scope === null ? undefined : `partial: ${scope}`}>#{id}{scope === null ? "" : "°"}</th>
+)
 
 /** How an operator reads before its expected value. */
 const OP: Readonly<Record<string, string>> = { eq: "=", regex: "~", absent: "absent", exists: "present" }
@@ -27,6 +34,7 @@ export const CaseHistory = ({ view, caseId, lanes, onClose, onDelta }: {
 }): JSX.Element => {
   const h = history(view, caseId, lanes)
   const checks = checkList(view, caseId, lanes)
+  const scopeOf = (id: number): string | null => view.runs.find((r) => r.id === id)?.scope ?? null
   const known = view.cases.find((c) => c.caseId === caseId)
   const newest = [...view.runs]
   return (
@@ -34,6 +42,13 @@ export const CaseHistory = ({ view, caseId, lanes, onClose, onDelta }: {
       <button type="button" className="cp-close" onClick={onClose} title="close (Esc)">✕</button>
       <h2>{known?.title ?? "Case history"}</h2>
       <p className="muted mono">{caseId}{known === undefined ? "" : ` · ${known.family}`}</p>
+      {known !== undefined && (
+        <CaseReplay
+          capture={view.capture}
+          lanes={view.lanes}
+          scope={{ case: known.ref, ...(known.subcase === null ? {} : { subcase: known.subcase }) }}
+        />
+      )}
       {known !== undefined && known.groups.length > 0 && (
         <div className="cp-chips">{known.groups.map((group) => <span key={group} className="cp-chip">{group}</span>)}</div>
       )}
@@ -73,7 +88,7 @@ export const CaseHistory = ({ view, caseId, lanes, onClose, onDelta }: {
         <h3>Verdicts</h3>
         <table className="cp-hist">
           <thead>
-            <tr><th />{h.runs.map((id) => <th key={id}>#{id}</th>)}</tr>
+            <tr><th />{h.runs.map((id) => <RunHead key={id} id={id} scope={scopeOf(id)} />)}</tr>
           </thead>
           <tbody>
             {lanes.map((lane) => (
@@ -106,7 +121,7 @@ export const CaseHistory = ({ view, caseId, lanes, onClose, onDelta }: {
         {h.flips.length === 0 ? <p className="muted">✓ every run</p> : (
           <table className="cp-hist">
             <thead>
-              <tr><th />{h.runs.map((id) => <th key={id}>#{id}</th>)}</tr>
+              <tr><th />{h.runs.map((id) => <RunHead key={id} id={id} scope={scopeOf(id)} />)}</tr>
             </thead>
             <tbody>
               {h.flips.map((flip) => (

@@ -45,6 +45,7 @@ const run = (id: number, lanes: Readonly<Record<string, ReadonlyArray<CampaignRe
   finishedAt: null,
   labels: [],
   checked: {},
+    scope: null,
   lanes: Object.entries(lanes).map(([lane, results], at) => ({
     lane,
     runId: id * 10 + at,

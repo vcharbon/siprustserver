@@ -38,6 +38,7 @@ const VIEW: Campaign = {
     finishedAt: null,
     labels: [{ name: "seed", value: id === 3 ? "s2" : "s1" }, { name: "sut", value: "c1" }],
     checked: {},
+    scope: null,
     lanes: [
       {
         lane: "lane-x",

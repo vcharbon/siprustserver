@@ -744,6 +744,16 @@ export type JobStartBody =
     readonly recutFirst?: "stale-only" | "force"
   }
   | { readonly kind: "retire"; readonly captures: readonly string[] }
+  | {
+    readonly kind: "campaign"
+    readonly capture: string
+    readonly lanes: readonly string[]
+    /** One case, by its test id, and one of its sub-cases; absent, every case. */
+    readonly case?: string
+    readonly subcase?: string
+    /** Rebuild the system's data from scratch before the run. */
+    readonly rebuild?: boolean
+  }
   | { readonly kind: "ingest"; readonly paths: readonly string[]; readonly set?: boolean; readonly cut?: boolean }
 
 export interface JobStarted {
@@ -1013,6 +1023,8 @@ export interface CampaignRun {
   /** What the run states it ran on, in the deployment's order. */
   readonly labels: ReadonlyArray<{ readonly name: string; readonly value: string }>
   readonly lanes: readonly CampaignLane[]
+  /** What the run covered where it was not the whole campaign (one case, a sub-case, a glob); null for a full run. */
+  readonly scope: string | null
   /** Every check each case the run compiled makes, by case id. */
   readonly checked: Readonly<Record<string, readonly CampaignChecked[]>>
 }

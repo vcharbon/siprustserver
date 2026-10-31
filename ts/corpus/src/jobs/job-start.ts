@@ -1,6 +1,8 @@
 /**
  * Jobs started: a REPLAY of a request, an INGEST over paths on the box, a CUT
- * over a capture list, a RETIRE of sources and a DELETE of runs. Each is a row
+ * over a capture list, a RETIRE of sources, a DELETE of runs and a CAMPAIGN
+ * run (its lanes, all its cases or one, the system's data rebuilt first or
+ * not). Each is a row
  * made `queued`, the deployment's entry point for its kind (`Launcher`)
  * launched detached (`job.ts`) with `--job <id>`, so the process runs as that
  * row, and the row marked `running` with what the launcher knows. A command
@@ -10,8 +12,8 @@
  * What was asked is on the row's `args`: a replay's knobs, so a restart
  * launches the same; the absolute paths and the captures they came to for an
  * ingest; the list's words and the mode for a cut; the captures for a retire;
- * the selector for a delete. Only a replay drives a lane, so only its row has
- * one.
+ * the selector for a delete; the lanes, the case and the rebuild for a
+ * campaign. Only a replay drives one lane, so only its row has one.
  */
 import { Jobs, type Removal, type Requests } from "@sip/store"
 import * as Effect from "effect/Effect"
@@ -191,6 +193,30 @@ const deleteArgs = (id: number, request: DeleteRequest): ReadonlyArray<string> =
   ...selectorArgs(request.selector)
 ]
 
+/**
+ * What a campaign job is asked: the campaign, its lanes, one case (by its
+ * test id) and one of its sub-cases or every case, and whether the system's
+ * data is rebuilt from scratch before the run.
+ */
+export interface CampaignRequest {
+  readonly capture: string
+  readonly lanes: ReadonlyArray<string>
+  readonly case: string | null
+  readonly subcase: string | null
+  readonly rebuild: boolean
+}
+
+/** The entry point's arguments of a campaign job. */
+export const campaignArgs = (id: number, request: CampaignRequest): ReadonlyArray<string> => [
+  "--job",
+  String(id),
+  "--lanes",
+  request.lanes.join(","),
+  ...(request.case === null ? [] : ["--case", request.case]),
+  ...(request.subcase === null ? [] : ["--subcase", request.subcase]),
+  ...(request.rebuild ? ["--recreate"] : [])
+]
+
 /** The row, then the process; a launch that made no process closes the row `failed`. */
 const start = Effect.fn("JobStart.start")(function*(
   sessions: string,
@@ -246,6 +272,9 @@ export const retire = (sessions: string, request: RetireRequest) =>
 
 export const deleteRuns = (sessions: string, request: DeleteRequest) =>
   start(sessions, "delete", { ...request }, (id) => deleteArgs(id, request))
+
+export const campaign = (sessions: string, request: CampaignRequest) =>
+  start(sessions, "campaign", { ...request }, (id) => campaignArgs(id, request))
 
 /** Why a foreground command cannot run as the row it was named. */
 export class NoSuchJob extends Schema.TaggedError<NoSuchJob>()("JobStart.NoSuchJob", { detail: Schema.String }) {

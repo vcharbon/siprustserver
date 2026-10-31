@@ -1,6 +1,7 @@
 /**
- * An end-to-end campaign's summary: per-lane tiles of the run read against the
- * one compared, then the failures as facets (the landing tab) or the run grid;
+ * An end-to-end campaign's summary, over its full runs (a partial run only
+ * where asked by id), with a control that runs the campaign: per-lane tiles
+ * of the run read against the one compared, then the failures as facets (the landing tab) or the run grid;
  * a case's history opens as a drawer from either, and a run's delta of it as a
  * modal. With no campaign named, the campaigns the store holds.
  */
@@ -9,8 +10,9 @@ import { useEffect, useMemo, useState } from "react"
 import { api, type Campaign, type CampaignRun, useAsync } from "../api.ts"
 import { type FacetKind, facets as facetsOf, lanesRead, SELECTED } from "../campaign-facets.ts"
 import { grid as gridOf } from "../campaign-history.ts"
-import { type CampaignState, paramsOf, readState, runOf, vsOf } from "../campaign-state.ts"
+import { type CampaignState, paramsOf, readState, runOf, summaryOf, vsOf } from "../campaign-state.ts"
 import { CampaignFailures } from "../components/CampaignFailures.tsx"
+import { CampaignStart } from "../components/CampaignLaunch.tsx"
 import { CampaignGrid } from "../components/CampaignGrid.tsx"
 import { CaseHistory } from "../components/CaseHistory.tsx"
 import { CheckDelta } from "../components/CheckDelta.tsx"
@@ -92,9 +94,10 @@ const Campaigns = (): JSX.Element => {
   )
 }
 
-const Summary = ({ view }: { readonly view: Campaign }): JSX.Element => {
+const Summary = ({ view: whole }: { readonly view: Campaign }): JSX.Element => {
   const query = useQuery()
   const [state, setState] = useState<CampaignState>(() => readState(query))
+  const view = useMemo(() => summaryOf(whole, state.run), [whole, state.run])
   const update = (patch: Partial<CampaignState>) => setState((now) => ({ ...now, ...patch }))
   useEffect(() => setQuery(paramsOf({ ...state, env: view.env ?? undefined })), [state, view.env])
   useEffect(() => {
@@ -186,6 +189,7 @@ const Summary = ({ view }: { readonly view: Campaign }): JSX.Element => {
           {flag("failing", "failing", "fails on a lane read")}
           {flag("oneLane", "one lane", "fails on exactly one lane read")}
           {flag("fresh", "new", "fails where the compared run did not")}
+          <CampaignStart capture={view.capture} lanes={view.lanes} />
           <input
             className="cp-filter"
             placeholder="filter"
@@ -224,7 +228,7 @@ const Summary = ({ view }: { readonly view: Campaign }): JSX.Element => {
       )}
       {state.caseId !== undefined && (
         <CaseHistory
-          view={view}
+          view={whole}
           caseId={state.caseId}
           lanes={lanes}
           onClose={() => update({ caseId: undefined, delta: undefined })}
@@ -233,7 +237,7 @@ const Summary = ({ view }: { readonly view: Campaign }): JSX.Element => {
       )}
       {state.caseId !== undefined && state.delta !== undefined && (
         <CheckDelta
-          view={view}
+          view={whole}
           caseId={state.caseId}
           run={state.delta.run}
           lane={state.delta.lane}

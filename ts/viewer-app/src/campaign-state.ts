@@ -64,6 +64,12 @@ export const paramsOf = (state: CampaignState): CampaignParams => ({
   delta: state.delta === undefined ? undefined : `${state.delta.run}:${state.delta.lane}`
 })
 
+/** The view the summary reads: its full runs, and a partial run only where the page asks for it by id. */
+export const summaryOf = (view: Campaign, asked: number | undefined): Campaign => ({
+  ...view,
+  runs: view.runs.filter((run) => run.scope === null || run.id === asked)
+})
+
 /** The run read: the one asked where the view holds it, else the newest. */
 export const runOf = (view: Campaign, state: CampaignState): number | undefined =>
   view.runs.find((r) => r.id === state.run)?.id ?? view.runs[0]?.id
