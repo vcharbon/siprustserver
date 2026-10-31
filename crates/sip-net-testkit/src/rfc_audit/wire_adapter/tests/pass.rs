@@ -134,7 +134,16 @@ fn a_shared_pass_finds_what_a_pass_per_rule_finds() {
 #[test]
 fn the_scoped_recording_of_a_pass_is_the_recording_built_scoped() {
     use crate::rfc_audit::recorded::Recorded;
-    let parties = [ALICE, BOB, SUT, HOP, "127.0.0.1:5999", "127.0.0.2:5060", "lane-without-addr"];
+    let parties = [
+        ALICE,
+        BOB,
+        SUT,
+        HOP,
+        "127.0.0.1:5999",
+        "127.0.0.2:5060",
+        "127.0.0.3:5060",
+        "lane-without-addr",
+    ];
     for evs in [recorded_call(), relayed_call()] {
         let pass = AuditPass::new(&evs);
         let visible: Vec<_> = evs
@@ -146,6 +155,8 @@ fn the_scoped_recording_of_a_pass_is_the_recording_built_scoped() {
             HashSet::new(),
             HashSet::from([ALICE.to_string()]),
             HashSet::from([BOB.to_string(), "127.0.0.2:5060".to_string()]),
+            // A key that names an address with a suffix is held by that address.
+            HashSet::from(["127.0.0.3:5060#x".to_string()]),
         ] {
             let built = Recorded::of(&visible, &scoped_out);
             let scoped = pass.recorded().scoped(&scoped_out);
@@ -154,4 +165,18 @@ fn the_scoped_recording_of_a_pass_is_the_recording_built_scoped() {
             }
         }
     }
+}
+
+/// A finding's offending position indexes the audit's wire entries, which
+/// leave the arrival the loss model dropped out: the second final on the
+/// a-leg's INVITE transaction, sent after that drop, is the entry it names.
+#[test]
+fn a_position_after_a_dropped_arrival_indexes_the_audit_wire_entries() {
+    let evs = recorded_call();
+    let findings = evaluate_rfc_audit(&evs).findings;
+    let single_final = rfc_rules::RuleId::SingleFinalPerServerTxn.token();
+    let finding = findings.iter().find(|f| f.rule == single_final).expect("{findings:?}");
+    let entries = crate::rfc_audit::audit_wire_entries(&evs);
+    assert_eq!(finding.offending, Some(6), "{finding:?}");
+    assert_eq!(entries[5].seq, 9, "the 603 the B2BUA sent after its 487");
 }

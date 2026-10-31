@@ -281,10 +281,12 @@ impl CrossMessageAuditRule for Live {
 }
 
 impl Live {
-    /// The row's findings over `pass`, the binds of `scoped_out` taken out of
-    /// its events. The rules judge the audit-visible events; the arrivals the
-    /// loss model dropped only tell [`Vantage::EmitterUnlessLost`] where a
-    /// sender's traffic is incomplete.
+    /// The row's findings over `pass`, with the binds of `scoped_out` held as
+    /// recorded parties: a consumer took their traffic out of the events, so
+    /// what they sent is never judged at the lane that took it. The rules
+    /// judge the audit-visible events; the arrivals the loss model dropped
+    /// only tell [`Vantage::EmitterUnlessLost`] where a sender's traffic is
+    /// incomplete.
     fn found(
         &self,
         pass: &AuditPass<'_>,
