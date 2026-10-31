@@ -332,7 +332,7 @@ pub fn via_branch(raw: &[u8]) -> Option<String> {
         let Some((h, v)) = line.split_once(':') else { continue };
         let h = h.trim();
         if h.eq_ignore_ascii_case("via") || h.eq_ignore_ascii_case("v") {
-            return identity::branch_of(v).map(str::to_string);
+            return identity::branch_of(v.as_bytes()).map(str::to_string);
         }
     }
     None

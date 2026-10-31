@@ -50,7 +50,7 @@ async fn a_copy_is_a_retransmission_and_a_new_transaction_a_new_occurrence() {
     let t = CallTally::new("alice");
     send(&t, None, Dir::Out, &req("INVITE", 1));
     send(&t, None, Dir::Out, &req("INVITE", 1));
-    t.on_resend(None, &identity(&req("INVITE", 1)));
+    t.on_resend(CallTally::resend_key(None, &identity(&req("INVITE", 1))));
     send(&t, None, Dir::In, &resp(180, "INVITE", 1, None));
     send(&t, None, Dir::In, &resp(180, "INVITE", 1, None));
     send(&t, None, Dir::In, &resp(183, "INVITE", 1, Some(1)));
@@ -136,7 +136,7 @@ async fn past_its_cap_a_call_counts_on_its_other_arrow() {
 #[ignore = "slow lane: loadgen"]
 async fn a_resend_of_a_message_never_seen_opens_nothing() {
     let t = CallTally::new("alice");
-    t.on_resend(None, &identity(&req("INVITE", 1)));
+    t.on_resend(CallTally::resend_key(None, &identity(&req("INVITE", 1))));
     assert!(t.finish().arrows.is_empty());
 }
 
@@ -147,7 +147,7 @@ async fn a_datagram_after_the_call_is_folded_is_not_tallied() {
     send(&t, None, Dir::Out, &req("INVITE", 1));
     send(&t, None, Dir::In, &resp(200, "INVITE", 1, None));
     assert_eq!(t.finish().arrows.len(), 2);
-    t.on_resend(None, &identity(&req("INVITE", 1)));
+    t.on_resend(CallTally::resend_key(None, &identity(&req("INVITE", 1))));
     send(&t, None, Dir::In, &resp(200, "INVITE", 1, None));
     send(&t, None, Dir::Out, &req("BYE", 2));
     let state = t.state.lock().unwrap();

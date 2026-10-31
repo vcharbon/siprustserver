@@ -49,9 +49,9 @@ impl<'a> Datagram<'a> {
     }
 }
 
-/// A store's key for the datagram fields `parts`: hashed, so the store copies
-/// none of their text. One endpoint's few hundred messages never collide in
-/// 64 bits.
+/// A store's key for the datagram fields `parts`: a 64-bit hash, so the store
+/// copies none of their text. Two of one endpoint's few hundred keys collide
+/// with a chance of the order of 1e-15.
 pub(in crate::mux) fn key_of(parts: impl Hash) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     parts.hash(&mut h);

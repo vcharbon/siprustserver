@@ -12,7 +12,7 @@ use tokio::time::Instant;
 use super::datagram::Datagram;
 use super::rtt::{RttSink, RttTracker};
 use super::tally::{CallTally, LateRepair};
-use sip_message::sniff::{identity, Identity};
+use sip_message::sniff::Identity;
 
 /// The endpoint of a call a datagram crossed: its caller, or the callee leg
 /// bound under this role.
@@ -93,10 +93,26 @@ impl Taps {
         self.tally.as_ref()?.late_repair(self.leg.as_deref(), answer)
     }
 
-    /// A re-send this endpoint's retransmit engine made.
-    pub(in crate::mux) fn on_resend(&self, raw: &[u8]) {
-        if let Some(tally) = &self.tally {
-            tally.on_resend(self.leg.as_deref(), &identity(raw));
-        }
+    /// Where the re-sends of the datagram `id` this endpoint sends are
+    /// counted; `None` when the call tallies nothing.
+    pub(in crate::mux) fn resend_count(&self, id: &Identity<'_>) -> Option<ResendCount> {
+        let tally = self.tally.clone()?;
+        Some(ResendCount { key: CallTally::resend_key(self.leg.as_deref(), id), tally })
+    }
+}
+
+/// Where the re-sends of one datagram an endpoint sent are counted: the
+/// tally key resolved from the datagram's sniff when it was first sent, so a
+/// re-send is not sniffed again.
+#[derive(Clone)]
+pub(in crate::mux) struct ResendCount {
+    tally: Arc<CallTally>,
+    key: u64,
+}
+
+impl ResendCount {
+    /// One re-send of the datagram.
+    pub(in crate::mux) fn record(&self) {
+        self.tally.on_resend(self.key);
     }
 }

@@ -1,9 +1,13 @@
 //! A datagram's transaction identity in one pass over its start line and
 //! header block, borrowed from the datagram: no allocation, and no decoding
-//! of anything past the headers. A field the datagram lacks, or holds in
-//! bytes that are not UTF-8, is `None`. Every reader of a datagram's
-//! transaction and dialog keys (Call-ID, CSeq, top Via branch, To tag,
-//! RSeq/RAck) can share one identity instead of scanning the datagram again.
+//! of anything past the headers. Each field reads the first row that carries
+//! it, as the line scanners of [`sniff`](super) do; only the field's own
+//! bytes need be UTF-8 (a field the datagram lacks, or holds in bytes that
+//! are not UTF-8, is `None`), so a start line that is not UTF-8 leaves the
+//! method and status `None` and the headers still read. Every reader of a
+//! datagram's transaction and dialog keys (Call-ID, CSeq, top Via branch, To
+//! tag, RSeq/RAck) can share one identity instead of scanning the datagram
+//! again.
 
 /// The identity fields of one datagram.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -32,59 +36,82 @@ pub struct Identity<'a> {
 }
 
 /// The identity of `raw`. The header block ends at its first empty line;
-/// header names match case-insensitively, compact forms included (`i`, `t`).
+/// header names match case-insensitively, compact forms included (`i`, `t`,
+/// `v`).
 pub fn identity(raw: &[u8]) -> Identity<'_> {
     let mut lines = raw.split(|&b| b == b'\n').map(|l| l.strip_suffix(b"\r").unwrap_or(l));
     let mut id = Identity::default();
-    let Some(start) = lines.next().and_then(|l| std::str::from_utf8(l).ok()) else {
-        return id;
-    };
-    let mut words = start.split_ascii_whitespace();
-    let first = words.next();
-    if first == Some("SIP/2.0") {
-        id.status = words.next().and_then(|s| s.parse().ok());
-    } else {
-        id.method = first;
+    let Some(start) = lines.next() else { return id };
+    if let Ok(start) = std::str::from_utf8(start) {
+        let mut words = start.split_ascii_whitespace();
+        let first = words.next();
+        if first == Some("SIP/2.0") {
+            id.status = words.next().and_then(|s| s.parse().ok());
+        } else {
+            id.method = first;
+        }
     }
     let provisional = id.status.is_some_and(|s| (101..200).contains(&s));
     let prack = id.method == Some("PRACK");
-    let mut top_via = false;
+    let (mut cseq, mut rseq, mut rack, mut to, mut via) = (false, false, false, false, false);
     for line in lines {
         if line.is_empty() {
             break;
         }
         let Some(colon) = line.iter().position(|&b| b == b':') else { continue };
         let name = trim(line.get(..colon).unwrap_or_default());
-        let value = line.get(colon + 1..).unwrap_or_default();
-        let Ok(value) = std::str::from_utf8(value).map(str::trim) else { continue };
-        if name.eq_ignore_ascii_case(b"call-id") || name.eq_ignore_ascii_case(b"i") {
-            id.call_id.get_or_insert(value);
-        } else if name.eq_ignore_ascii_case(b"cseq") {
-            let mut parts = value.split_ascii_whitespace();
-            id.cseq = parts.next().and_then(|n| n.parse().ok());
-            id.cseq_method = parts.next();
-        } else if provisional && name.eq_ignore_ascii_case(b"rseq") {
-            id.rseq = value.parse().ok();
-        } else if provisional && name.eq_ignore_ascii_case(b"require") {
-            id.reliable |= value.split(',').any(|t| t.trim().eq_ignore_ascii_case("100rel"));
-        } else if prack && name.eq_ignore_ascii_case(b"rack") {
-            id.rack_rseq = value.split_ascii_whitespace().next().and_then(|n| n.parse().ok());
-        } else if name.eq_ignore_ascii_case(b"to") || name.eq_ignore_ascii_case(b"t") {
+        let value = trim(line.get(colon + 1..).unwrap_or_default());
+        let is = |names: &[&[u8]]| names.iter().any(|n| name.eq_ignore_ascii_case(n));
+        if id.call_id.is_none() && is(&[b"call-id", b"i"]) {
+            id.call_id = text(value);
+        } else if !cseq && is(&[b"cseq"]) {
+            cseq = true;
+            let mut words = words(value);
+            id.cseq = words.next().and_then(number);
+            id.cseq_method = words.next().and_then(text);
+        } else if provisional && !rseq && is(&[b"rseq"]) {
+            rseq = true;
+            id.rseq = number(value);
+        } else if provisional && is(&[b"require"]) {
+            id.reliable |=
+                value.split(|&b| b == b',').any(|t| trim(t).eq_ignore_ascii_case(b"100rel"));
+        } else if prack && !rack && is(&[b"rack"]) {
+            rack = true;
+            id.rack_rseq = words(value).next().and_then(number);
+        } else if !to && is(&[b"to", b"t"]) {
+            to = true;
             id.to_tag = tag(value);
-        } else if !top_via && (name.eq_ignore_ascii_case(b"via") || name.eq_ignore_ascii_case(b"v"))
-        {
-            top_via = true;
+        } else if !via && is(&[b"via", b"v"]) {
+            via = true;
             id.branch = branch_of(value);
         }
     }
     id
 }
 
-/// The `branch` parameter of one Via row's value, `None` when empty or absent.
-pub(super) fn branch_of(value: &str) -> Option<&str> {
-    let rest = value.get(value.find("branch=")? + "branch=".len()..)?;
-    let b = super::up_to_delimiter(rest, &[';', ',', ' ', '\t']).trim();
-    (!b.is_empty()).then_some(b)
+/// `b` as text, when it is UTF-8.
+fn text(b: &[u8]) -> Option<&str> {
+    std::str::from_utf8(b).ok()
+}
+
+/// `b` as a decimal number.
+fn number<N: std::str::FromStr>(b: &[u8]) -> Option<N> {
+    text(b)?.parse().ok()
+}
+
+/// The words of `b`, split at ASCII whitespace.
+fn words(b: &[u8]) -> impl Iterator<Item = &[u8]> {
+    b.split(u8::is_ascii_whitespace).filter(|w| !w.is_empty())
+}
+
+/// The `branch` parameter of one Via row's value, `None` when empty or absent:
+/// the bytes after the first `branch=` up to `;`, `,`, a space or a tab.
+pub(super) fn branch_of(value: &[u8]) -> Option<&str> {
+    let at = value.windows(b"branch=".len()).position(|w| w == b"branch=")?;
+    let rest = value.get(at + b"branch=".len()..)?;
+    let end = rest.iter().position(|b| matches!(b, b';' | b',' | b' ' | b'\t'));
+    let b = trim(rest.get(..end.unwrap_or(rest.len()))?);
+    text(b).filter(|b| !b.is_empty())
 }
 
 fn trim(b: &[u8]) -> &[u8] {
@@ -94,14 +121,15 @@ fn trim(b: &[u8]) -> &[u8] {
 }
 
 /// The `tag` parameter of a To value, outside its angle brackets.
-fn tag(value: &str) -> Option<&str> {
-    let params = match value.rfind('>') {
+fn tag(value: &[u8]) -> Option<&str> {
+    let params = match value.iter().rposition(|&b| b == b'>') {
         Some(gt) => value.get(gt + 1..)?,
         None => value,
     };
-    params.split(';').skip(1).find_map(|p| {
-        let (k, v) = p.split_once('=')?;
-        k.trim().eq_ignore_ascii_case("tag").then(|| v.trim())
+    params.split(|&b| b == b';').skip(1).find_map(|p| {
+        let eq = p.iter().position(|&b| b == b'=')?;
+        let (k, v) = (p.get(..eq)?, p.get(eq + 1..)?);
+        trim(k).eq_ignore_ascii_case(b"tag").then(|| text(trim(v))).flatten()
     })
 }
 
@@ -174,6 +202,31 @@ mod tests {
         let raw = b"SIP/2.0 100 Trying\r\nTo: <sip:bob@h;tag=uri-param>\r\nRSeq: 1\r\n\r\n";
         let id = identity(raw);
         assert_eq!((id.status, id.rseq, id.to_tag), (Some(100), None, None));
+    }
+
+    #[test]
+    fn the_first_row_of_each_field_wins() {
+        let raw = b"SIP/2.0 183 Progress\r\nCSeq: 1 INVITE\r\nCSeq: 2 BYE\r\n\
+            To: <sip:b@h>;tag=first\r\nt: <sip:b@h>;tag=second\r\nRSeq: 4\r\nRSeq: 5\r\n\
+            Call-ID: c1\r\ni: c2\r\n\r\n";
+        let id = identity(raw);
+        assert_eq!((id.cseq, id.cseq_method, id.to_tag), (Some(1), Some("INVITE"), Some("first")));
+        assert_eq!((id.rseq, id.call_id), (Some(4), Some("c1")));
+    }
+
+    #[test]
+    fn a_field_needs_only_its_own_bytes_in_utf8() {
+        let raw = b"BYE sip:b@h SIP/2.0\r\nVia: SIP/2.0/UDP \xffh;branch=z9hG4bKtop\r\n\
+            Via: SIP/2.0/UDP c;branch=z9hG4bKlow\r\nTo: \"\xfe\" <sip:b@h>;tag=b1\r\n\
+            Call-ID: c1\r\n\r\n";
+        let id = identity(raw);
+        assert_eq!(id.branch, Some("z9hG4bKtop"), "the top Via row, whatever else it holds");
+        assert_eq!(crate::sniff::via_branch(raw).as_deref(), id.branch);
+        assert_eq!(id.to_tag, Some("b1"));
+        let start = b"BYE sip:\xff@h SIP/2.0\r\nCall-ID: c1\r\nCSeq: 2 BYE\r\n\r\n";
+        let id = identity(start);
+        assert_eq!((id.method, id.status), (None, None), "an unreadable start line");
+        assert_eq!((id.call_id, id.cseq), (Some("c1"), Some(2)), "the headers still read");
     }
 
     #[test]

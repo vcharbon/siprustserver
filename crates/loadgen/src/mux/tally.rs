@@ -222,10 +222,16 @@ impl CallTally {
         }
     }
 
-    /// A re-send the retransmit engine of endpoint `leg` made of a datagram
-    /// it sent before; a datagram the tally never saw opens nothing.
-    pub(super) fn on_resend(&self, leg: Option<&str>, id: &Identity<'_>) {
-        let key = dup_key(leg, Dir::Out, id);
+    /// The key a re-send of the datagram `id` the endpoint `leg` sent counts
+    /// under, resolved once from the datagram's sniff.
+    pub(super) fn resend_key(leg: Option<&str>, id: &Identity<'_>) -> u64 {
+        dup_key(leg, Dir::Out, id)
+    }
+
+    /// A re-send the retransmit engine made of a datagram it sent before,
+    /// under its [`resend_key`](Self::resend_key); a datagram the tally never
+    /// saw opens nothing.
+    pub(super) fn on_resend(&self, key: u64) {
         let mut g = self.state.lock().unwrap();
         if let Some(e) = g.entries.iter_mut().find(|e| e.key == key) {
             e.stat.resent += 1;

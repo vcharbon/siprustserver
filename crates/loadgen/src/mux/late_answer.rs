@@ -8,7 +8,10 @@
 //!
 //! Held: every final to a non-INVITE request, and an INVITE's non-2xx final
 //! (whose ACK the hold then absorbs). An INVITE's 2xx is the dialog's own
-//! (§13.3.1.4) and is not held.
+//! (§13.3.1.4) and is not held. Once the ACK of a held INVITE final arrives,
+//! before or after the call released, the final is owed no more (§17.2.1
+//! Confirmed): its bytes go, and a retransmitted INVITE or ACK of that
+//! transaction is absorbed.
 //!
 //! Bounds: per dialog the last [`ANSWERS_HELD`] answers, each the response
 //! datagram as sent (the copy the endpoint's other stores share) with a
@@ -38,7 +41,8 @@ struct Answer {
     /// The transaction: the request's CSeq number, CSeq method and top Via
     /// branch (echoed on the response), hashed.
     txn: u64,
-    bytes: Arc<[u8]>,
+    /// The final as sent; `None` once its ACK arrived (an INVITE's).
+    bytes: Option<Arc<[u8]>>,
     /// Where a late re-send of it is reported; `None`: not reported.
     repair: Option<LateRepair>,
 }
@@ -52,7 +56,8 @@ fn txn_key(cseq: u32, method: &str, branch: &str) -> u64 {
 pub(in crate::mux) enum LateReply {
     /// No held answer is this request's: it is a stray.
     NotHeld,
-    /// The ACK of a held INVITE non-2xx final: absorbed.
+    /// The ACK of a held INVITE non-2xx final, or a retransmission of an
+    /// INVITE whose final was ACKed: absorbed.
     Absorbed,
     /// A retransmission of an answered request: the same final again, and
     /// where that re-send is reported.
@@ -63,20 +68,37 @@ pub(in crate::mux) enum LateReply {
 pub(in crate::mux) struct HeldAnswers(Vec<Answer>);
 
 impl HeldAnswers {
-    /// What the request `id` draws from these answers.
-    pub(in crate::mux) fn on_request(&self, id: &Identity<'_>) -> LateReply {
+    /// What the request `id` draws from these answers; an ACK of a held
+    /// final marks it ACKed.
+    pub(in crate::mux) fn on_request(&mut self, id: &Identity<'_>) -> LateReply {
         let (Some(method), Some(cseq), Some(branch)) = (id.method, id.cseq, id.branch) else {
             return LateReply::NotHeld;
         };
         if method == "ACK" {
-            let acked = self.0.iter().any(|a| a.txn == txn_key(cseq, "INVITE", branch));
-            return if acked { LateReply::Absorbed } else { LateReply::NotHeld };
+            let held = acked(&mut self.0, cseq, branch);
+            return if held { LateReply::Absorbed } else { LateReply::NotHeld };
         }
         let txn = txn_key(cseq, method, branch);
         match self.0.iter().find(|a| a.txn == txn) {
-            Some(a) => LateReply::Reanswer(a.bytes.clone(), a.repair.clone()),
+            Some(Answer { bytes: Some(bytes), repair, .. }) => {
+                LateReply::Reanswer(bytes.clone(), repair.clone())
+            }
+            Some(_) => LateReply::Absorbed,
             None => LateReply::NotHeld,
         }
+    }
+}
+
+/// Mark ACKed the held INVITE final of transaction (`cseq`, `branch`) in
+/// `held`: whether one is held.
+fn acked(held: &mut [Answer], cseq: u32, branch: &str) -> bool {
+    let txn = txn_key(cseq, "INVITE", branch);
+    match held.iter_mut().find(|a| a.txn == txn) {
+        Some(a) => {
+            a.bytes = None;
+            true
+        }
+        None => false,
     }
 }
 
@@ -108,7 +130,21 @@ impl SentAnswers {
         }
         // An endpoint holds a handful of answers: room for one more at a time.
         held.reserve_exact(1);
-        held.push(Answer { dialog, txn, bytes: d.shared(), repair });
+        held.push(Answer { dialog, txn, bytes: Some(d.shared()), repair });
+    }
+
+    /// An ACK `id` delivered to this endpoint: the INVITE final it ACKs, if
+    /// held, is owed no more.
+    pub(in crate::mux) fn on_ack(&self, id: &Identity<'_>) {
+        let (Some(cid), Some(cseq), Some(branch)) = (id.call_id, id.cseq, id.branch) else {
+            return;
+        };
+        let dialog = key_of(cid);
+        let mut held = self.0.lock().unwrap();
+        let txn = txn_key(cseq, "INVITE", branch);
+        if let Some(a) = held.iter_mut().find(|a| a.dialog == dialog && a.txn == txn) {
+            a.bytes = None;
+        }
     }
 
     /// The answers of dialog `call_id`, removed.

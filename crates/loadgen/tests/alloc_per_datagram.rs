@@ -177,6 +177,11 @@ fn an_absorbed_duplicate_costs_the_mux_nothing() {
     // the mux's dispatcher takes it off the mux's.
     let plain = rt.block_on(r.sim.bind_udp(BindUdpOpts::new(addr(PLAIN), 64))).unwrap();
     rt.spawn(async move { while plain.recv().await.is_some() {} });
+    // A warm-up round on each side first: what grows once lands in neither
+    // measured round, whichever is measured first.
+    for to in [PLAIN, BOB] {
+        arrivals(&rt, &r, &raw, N, to);
+    }
     let fabric = arrivals(&rt, &r, &raw, N, PLAIN);
     let mux = arrivals(&rt, &r, &raw, N, BOB);
     assert!(r.bob.try_recv().is_none(), "every duplicate absorbed");

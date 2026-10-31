@@ -185,6 +185,7 @@ fn route(mux: &MuxSocket, pkt: &UdpPacket) -> Vec<(Arc<[u8]>, SocketAddr)> {
                 txns: recv.txns.clone(),
                 taps: recv.taps.clone(),
                 invites: None,
+                answers: recv.answers.clone(),
             }
         };
         if let Some(cid) = cid {
@@ -231,6 +232,9 @@ fn handle_inbound(mux: &MuxSocket, d: &Delivery, dg: &Datagram<'_>, pkt: &UdpPac
     }
     if let Some(taps) = &d.taps {
         taps.on_inbound(dg, Instant::now());
+    }
+    if dg.id().method == Some("ACK") {
+        d.answers.on_ack(dg.id());
     }
     if let Some(invites) = &d.invites {
         invites.on_inbound(dg);

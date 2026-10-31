@@ -180,6 +180,7 @@ impl SignalingNetwork for MuxNetwork {
         if let Some(txns) = &txns {
             self.engines.lock().unwrap().push(txns.clone());
         }
+        let answers = Arc::new(SentAnswers::default());
 
         if let Some((label, claim)) = uas {
             let claim_mode = claim.is_some();
@@ -263,6 +264,7 @@ impl SignalingNetwork for MuxNetwork {
                 drop: drop.clone(),
                 txns: txns.clone(),
                 taps: taps.clone(),
+                answers: answers.clone(),
                 claim,
                 claimed: false,
             });
@@ -286,7 +288,7 @@ impl SignalingNetwork for MuxNetwork {
             txns,
             taps,
             invites: (role == Role::Caller).then(Default::default),
-            answers: SentAnswers::default(),
+            answers,
         }))
     }
 
@@ -339,7 +341,7 @@ struct MuxEndpoint {
     invites: Option<Arc<SentInvites>>,
     /// The finals this endpoint's agent sent; handed to the registry on
     /// `Drop` so a retransmitted request still draws its answer.
-    answers: SentAnswers,
+    answers: Arc<SentAnswers>,
 }
 
 impl MuxEndpoint {
@@ -382,6 +384,7 @@ impl MuxEndpoint {
                         txns: self.txns.clone(),
                         taps: self.taps.clone(),
                         invites: self.invites.clone(),
+                        answers: self.answers.clone(),
                     },
                 );
                 keys.push(Key::CallId(cid));

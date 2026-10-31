@@ -3,7 +3,7 @@
 //! INVITE draws on the shared branch (RFC 3261 §9.1), a final to the INVITE
 //! ends its reliable provisionals (RFC 3262 §3), a retransmitted CANCEL or
 //! INVITE draws its own transaction's final again, and an ACKed INVITE final
-//! is not re-sent.
+//! is not re-sent, the hop-ACK of a non-2xx touching no other transaction.
 
 use super::*;
 use sip_net::{BindUdpOpts, SignalingNetwork};
@@ -162,4 +162,32 @@ async fn an_acked_invite_final_is_not_sent_again() {
         assert!(resent.is_empty(), "{status}: nothing sent after the ACK: {resent:?}");
         txns.shutdown();
     }
+}
+
+/// `raw` on top Via branch `branch`.
+fn on_branch(raw: Vec<u8>, branch: &str) -> Vec<u8> {
+    String::from_utf8(raw).unwrap().replace("z9hG4bK-c1", branch).into_bytes()
+}
+
+/// A merged request (RFC 3261 §8.2.2.2): one INVITE reaches the engine on two
+/// branches, answered 200 on the first and 482 on the second. The 482's
+/// hop-ACK, on the second branch (§17.1.1.3), ends that transaction only: the
+/// 200 is still retransmitted until its own ACK, and still re-answers a
+/// retransmission of the first branch's INVITE.
+#[tokio::test(start_paused = true)]
+async fn a_merged_requests_hop_ack_leaves_the_other_branchs_2xx() {
+    let (txns, peer, peer_addr) = sim_rig().await;
+    let (b1, b2) = ("z9hG4bK-m1", "z9hG4bK-m2");
+    let invite = |b| on_branch(request("INVITE", "1 INVITE"), b);
+    assert!(txns.on_inbound(&Datagram::sniff(&invite(b1)), peer_addr));
+    txns.on_outbound(&Datagram::sniff(&on_branch(response(200, "1 INVITE", ""), b1)), peer_addr);
+    assert!(txns.on_inbound(&Datagram::sniff(&invite(b2)), peer_addr), "another transaction");
+    txns.on_outbound(&Datagram::sniff(&on_branch(response(482, "1 INVITE", ""), b2)), peer_addr);
+    assert!(txns.on_inbound(&Datagram::sniff(&ack(b2)), peer_addr), "the 482's hop-ACK");
+    assert!(!txns.on_inbound(&Datagram::sniff(&invite(b1)), peer_addr), "absorbed");
+    let window = TokioDuration::from_millis(100);
+    assert_eq!(received(peer.as_ref(), window).await, ["SIP/2.0 200 X"], "re-answered");
+    let resent = received(peer.as_ref(), TokioDuration::from_secs(2)).await;
+    assert!(!resent.is_empty() && resent.iter().all(|l| l == "SIP/2.0 200 X"), "{resent:?}");
+    txns.shutdown();
 }

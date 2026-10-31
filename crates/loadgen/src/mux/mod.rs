@@ -95,6 +95,7 @@ pub(crate) use stats::OrphanReason;
 pub use tally::{ArrowKey, ArrowStat, CallMessages, CallTally, LateSink, SUT_LANE};
 pub use taps::{Dir, Side, WireTap};
 
+use late_answer::SentAnswers;
 use late_final::SentInvites;
 use loss::DropModel;
 use registry::SocketRegistry;
@@ -165,6 +166,8 @@ pub(in crate::mux) struct Delivery {
     pub(in crate::mux) taps: Option<Arc<Taps>>,
     /// A caller dialog's INVITEs still open to a non-2xx final.
     pub(in crate::mux) invites: Option<Arc<SentInvites>>,
+    /// The finals the endpoint's agent sent, told of each ACK delivered.
+    pub(in crate::mux) answers: Arc<SentAnswers>,
 }
 
 /// One receiver bound on a socket: an inbox + its label (the agent name a
@@ -177,6 +180,7 @@ pub(in crate::mux) struct ReceiverEntry {
     pub(in crate::mux) drop: Arc<DropModel>,
     pub(in crate::mux) txns: Option<Arc<CallTxns>>,
     pub(in crate::mux) taps: Option<Arc<Taps>>,
+    pub(in crate::mux) answers: Arc<SentAnswers>,
     /// The scenario-declared claim this receiver holds over its inbound
     /// initial INVITE (claim-mode slots only — all receivers of a slot either
     /// carry a claim or none do, enforced at bind).

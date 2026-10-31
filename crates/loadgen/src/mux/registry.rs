@@ -100,13 +100,14 @@ impl SocketRegistry {
     /// What the request `id` on the released dialog `call_id` draws from its
     /// held answers, while its hold lasts at `now`.
     pub(in crate::mux) fn released_answer(
-        &self,
+        &mut self,
         call_id: &str,
         id: &Identity<'_>,
         now: Instant,
     ) -> LateReply {
-        match self.released_answers.get(call_id) {
-            Some(answers) if self.is_released(call_id, now) => answers.on_request(id),
+        let live = self.is_released(call_id, now);
+        match self.released_answers.get_mut(call_id) {
+            Some(answers) if live => answers.on_request(id),
             _ => LateReply::NotHeld,
         }
     }

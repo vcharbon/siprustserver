@@ -145,3 +145,60 @@ async fn a_retransmitted_rejected_invite_draws_its_486_and_its_ack_is_absorbed()
     assert_eq!(recv().await, None);
     assert_eq!(s.orphan_released.load(Relaxed), 1, "another transaction stays released");
 }
+
+/// The callee rejects an initial INVITE with 486 and the SUT ACKs it before
+/// the call ends: the final is owed no more (RFC 3261 §17.2.1 Confirmed), so a
+/// retransmitted INVITE within the hold is absorbed, not answered again, as
+/// the live call's engine would absorb it; neither it nor a retransmitted ACK
+/// is an orphan.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_rejected_invite_acked_during_the_call_is_not_answered_again() {
+    use loadgen::{CallRouting, Correlation, EndpointSpec, MuxCore, Role};
+    use sip_net::{BindUdpOpts, SignalingNetwork};
+
+    let sim = Arc::new(sip_net_testkit::SimulatedSignalingNetwork::new(1));
+    let core = MuxCore::bind_on(
+        sim.as_ref(),
+        vec![EndpointSpec { addr: addr(46401), role: Role::Callee }],
+        Correlation::header("X-Loadgen-Id"),
+        64,
+        8,
+        RECV,
+        sip_clock::Clock::test_at(0),
+    )
+    .await
+    .unwrap();
+    let sut = sim.bind_udp(BindUdpOpts::new(addr(46409), 64)).await.unwrap();
+    let recv = || async {
+        let p = tokio::time::timeout(Duration::from_secs(2), sut.recv()).await.ok().flatten();
+        p.map(|p| p.raw.to_vec())
+    };
+    let invite = rejected_invite("INVITE", "1 INVITE", "z9hG4bK-rej");
+    let ack = rejected_invite("ACK", "1 ACK", "z9hG4bK-rej");
+
+    let net = core.network(CallRouting::new("tok-rej").leg(addr(46401), "bob"));
+    let bob = net.bind_udp(BindUdpOpts::new(addr(46401), 16)).await.unwrap();
+    sut.send_to(&invite, addr(46401)).await.unwrap();
+    let got = tokio::time::timeout(RECV, bob.recv()).await.unwrap().unwrap();
+    assert!(got.raw.starts_with(b"INVITE "));
+    let busy = b"SIP/2.0 486 Busy Here\r\nVia: SIP/2.0/UDP 127.0.0.1:46409;branch=z9hG4bK-rej\r\n\
+        Call-ID: cid-rej\r\nFrom: <sip:sut@h>;tag=s1\r\nTo: <sip:bob@h>;tag=b1\r\n\
+        CSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n"
+        .to_vec();
+    bob.send_to(&busy, addr(46409)).await.unwrap();
+    assert_eq!(recv().await, Some(busy), "the live 486");
+    sut.send_to(&ack, addr(46401)).await.unwrap();
+    let got = tokio::time::timeout(RECV, bob.recv()).await.unwrap().unwrap();
+    assert!(got.raw.starts_with(b"ACK "), "the ACK reaches the live callee");
+    drop(bob);
+    drop(net);
+
+    sut.send_to(&invite, addr(46401)).await.unwrap();
+    assert_eq!(recv().await, None, "the retransmitted INVITE draws nothing");
+    sut.send_to(&ack, addr(46401)).await.unwrap();
+    assert_eq!(recv().await, None, "nor does a retransmitted ACK");
+    let s = core.stats();
+    assert_eq!(s.late_answered.load(Relaxed), 0);
+    assert_eq!(s.orphans_total(), 0, "neither is an orphan: {:?}", s.samples());
+}
