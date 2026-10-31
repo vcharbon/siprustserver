@@ -41,7 +41,12 @@ async fn server_releasing(
         ready: Arc::new(|| ProbeState::Ready),
         heap: None,
         vrrp: None,
-        admin: Some(admin_routes(readiness.clone(), Arc::new(move || calls), release_all)),
+        admin: Some(admin_routes(
+            readiness.clone(),
+            Arc::new(move || calls),
+            Arc::new(Vec::new),
+            release_all,
+        )),
     };
     ProbeServer::start("127.0.0.1:0".parse().unwrap(), routes).await.unwrap()
 }
@@ -151,4 +156,35 @@ async fn release_all_answers_its_counts_and_runs_once_per_post() {
     assert!(get.starts_with("HTTP/1.1 405 Method Not Allowed"), "{get}");
     assert!(get.contains("Allow: POST\r\n"), "{get}");
     assert_eq!(runs.load(Ordering::SeqCst), 1, "a GET releases nothing");
+}
+
+/// `GET /admin/calls` names every live call by its ref and the Call-IDs of
+/// its legs, a-leg first: what an observer joins a call it placed to.
+#[tokio::test]
+async fn the_live_calls_are_listed_with_their_legs_call_ids() {
+    let live: LiveCallsFn = Arc::new(|| {
+        vec![LiveCall { call_ref: "c1".into(), call_ids: vec!["a@x".into(), "b@y".into()] }]
+    });
+    let routes = ProbeRoutes {
+        metrics: Arc::new(String::new),
+        ready: Arc::new(|| ProbeState::Ready),
+        heap: None,
+        vrrp: None,
+        admin: Some(admin_routes(
+            Readiness::always_ready(),
+            Arc::new(|| 1),
+            live,
+            Arc::new(ReleasedAll::default),
+        )),
+    };
+    let s = ProbeServer::start("127.0.0.1:0".parse().unwrap(), routes).await.unwrap();
+    let get = request(s.addr(), "GET", "/admin/calls").await;
+    assert!(get.starts_with("HTTP/1.1 200 OK"), "{get}");
+    let listed: serde_json::Value = serde_json::from_str(body(&get)).unwrap();
+    assert_eq!(
+        listed,
+        serde_json::json!({"calls": [{"call_ref": "c1", "call_ids": ["a@x", "b@y"]}]})
+    );
+    let post = request(s.addr(), "POST", "/admin/calls").await;
+    assert!(post.starts_with("HTTP/1.1 405 Method Not Allowed"), "{post}");
 }

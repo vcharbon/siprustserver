@@ -26,7 +26,7 @@ impl RunnerBase {
     /// `extra_metrics` (e.g. allocator stats). `/ready` reads NotReady and
     /// `/healthz` 503 while a worker loop is stalled past `loop_stall`.
     /// `/admin/cordon` is the operator's cordon, `/admin/release-all` its
-    /// release of every call. Hold the returned server for
+    /// release of every call, `/admin/calls` the list of the live ones. Hold the returned server for
     /// the process lifetime — its accept loop aborts on drop.
     pub async fn spawn_probe_server(
         &self,
@@ -54,6 +54,7 @@ impl RunnerBase {
             admin: Some(admin::admin_routes(
                 core.readiness(),
                 core.active_calls_probe(),
+                live_calls(core),
                 core.release_all_handle(),
             )),
         };
@@ -63,7 +64,7 @@ impl RunnerBase {
                 tracing::info!(
                     service = %self.name,
                     addr = %server.addr(),
-                    "metrics server listening (/metrics, readiness /ready, liveness /healthz, operator /admin/cordon /admin/release-all)"
+                    "metrics server listening (/metrics, readiness /ready, liveness /healthz, operator /admin/cordon /admin/release-all /admin/calls)"
                 );
                 Some(server)
             }
@@ -93,6 +94,23 @@ pub(crate) fn ready_fn(
         _ if !loops.stalled(stall).is_empty() => ProbeState::NotReady,
         ReadinessState::Ready | ReadinessState::Cordoned => ProbeState::Ready,
         ReadinessState::NotReady => ProbeState::NotReady,
+    })
+}
+
+/// `GET /admin/calls`: every call the worker serves, by ref and leg Call-IDs.
+fn live_calls(core: &Arc<B2buaCore>) -> admin::LiveCallsFn {
+    let probe = core.live_calls_probe();
+    Arc::new(move || {
+        probe()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|call| admin::LiveCall {
+                call_ref: call.call_ref,
+                call_ids: std::iter::once(call.a_leg.call_id)
+                    .chain(call.b_legs.into_iter().map(|leg| leg.call_id))
+                    .collect(),
+            })
+            .collect()
     })
 }
 
