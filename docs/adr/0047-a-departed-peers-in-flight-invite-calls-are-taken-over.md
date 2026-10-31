@@ -219,7 +219,9 @@ stands down when:
   call's primary (ADR-0055 §8), so once the proxy reads the primary alive the
   INVITE's responses reach the primary, which takes the INVITE's client transaction
   over from its record — seeded as every materialisation seeds a dialled INVITE
-  with no final — and takes its provisionals and final, ACKs a non-2xx, ACKs or
+  with no final, or at the meeting that takes the copy's write carrying the dial,
+  which the primary then writes once so the copy stands down — and takes its
+  provisionals and final, ACKs a non-2xx, ACKs or
   BYEs a 2xx and CANCELs it as the call decides
   (`reclaim_takes_the_copys_dialled_invite.rs`). A final that reaches the copy
   while the primary is not routable is the copy's: the primary that takes the
