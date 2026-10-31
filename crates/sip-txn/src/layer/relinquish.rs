@@ -66,3 +66,18 @@ impl Owner {
         let _ = reply.send(self.delete_txn(TxnRef::Server(key.id())));
     }
 }
+
+impl Owner {
+    /// Delete the one client transaction on `branch`, its timers with it,
+    /// owing nothing but the ACK it holds for a non-2xx final it took.
+    /// Replies whether it was there.
+    pub(super) async fn relinquish_client(
+        &mut self,
+        endpoint: &dyn UdpEndpoint,
+        branch: &str,
+        reply: oneshot::Sender<bool>,
+    ) {
+        self.send_held_ack(endpoint, branch).await;
+        let _ = reply.send(self.delete_txn(TxnRef::Client(branch)));
+    }
+}
