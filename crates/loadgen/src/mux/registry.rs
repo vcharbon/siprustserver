@@ -4,7 +4,9 @@
 //! answers a retransmitted request still draws.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
+use sip_message::sniff::Identity;
 use tokio::time::Instant;
 
 use super::late_answer::{HeldAnswers, LateReply};
@@ -12,21 +14,23 @@ use super::late_final::Held;
 use super::stats::MuxStats;
 use super::{CallSlot, Delivery, Key};
 
+/// Every map keyed by a Call-ID shares the one copy of it its endpoint's
+/// keyset holds.
 #[derive(Default)]
 pub(in crate::mux) struct SocketRegistry {
-    pub(in crate::mux) by_call_id: HashMap<String, Delivery>,
+    pub(in crate::mux) by_call_id: HashMap<Arc<str>, Delivery>,
     pub(in crate::mux) by_token: HashMap<String, CallSlot>,
     /// Call-IDs released by finished calls, until their hold deadline.
-    released: HashMap<String, Instant>,
+    released: HashMap<Arc<str>, Instant>,
     /// The same holds in deadline order, so expiry pops only what expired.
-    released_order: VecDeque<(Instant, String)>,
+    released_order: VecDeque<(Instant, Arc<str>)>,
     /// The INVITE a released caller dialog last sent, held with its Call-ID:
     /// a non-2xx final to it is still ACKed (RFC 3261 §17.1.1.3).
-    released_invites: HashMap<String, Held>,
+    released_invites: HashMap<Arc<str>, Held>,
     /// The answers a released dialog's agent sent, held with its Call-ID: a
     /// retransmission of an answered request draws its final again (RFC 3261
     /// §17.2.2).
-    released_answers: HashMap<String, HeldAnswers>,
+    released_answers: HashMap<Arc<str>, HeldAnswers>,
 }
 
 impl SocketRegistry {
@@ -93,16 +97,16 @@ impl SocketRegistry {
         self.released_invites.get_mut(call_id)
     }
 
-    /// What the request `raw` on the released dialog `call_id` draws from its
+    /// What the request `id` on the released dialog `call_id` draws from its
     /// held answers, while its hold lasts at `now`.
     pub(in crate::mux) fn released_answer(
         &self,
         call_id: &str,
-        raw: &[u8],
+        id: &Identity<'_>,
         now: Instant,
     ) -> LateReply {
         match self.released_answers.get(call_id) {
-            Some(answers) if self.is_released(call_id, now) => answers.on_request(raw),
+            Some(answers) if self.is_released(call_id, now) => answers.on_request(id),
             _ => LateReply::NotHeld,
         }
     }

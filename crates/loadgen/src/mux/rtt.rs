@@ -8,17 +8,19 @@
 //!   INVITE's final is not measured: it holds the callee's ring and answer.
 //! - UAS: a 2xx to an INVITE, first transmission, to the ACK of that CSeq.
 //!
-//! A request is matched by Call-ID (hashed) + CSeq number + CSeq method; an ACK, which
-//! has no response, is not tracked. State is per endpoint, bounded by
-//! [`MAX_PENDING`] open exchanges per direction, and dies with the endpoint.
+//! A request is matched by Call-ID + CSeq number + CSeq method, hashed; an
+//! ACK, which has no response, is not tracked. State is per endpoint, bounded
+//! by [`MAX_PENDING`] open exchanges per direction, sized to the exchanges
+//! open at once, and dies with the endpoint.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sip_message::method::Method;
 use sip_message::sniff::Identity;
 use tokio::time::Instant;
+
+use super::datagram::key_of;
 
 /// One measured exchange: the bounded `exchange` label of
 /// `loadgen_rtt_seconds`.
@@ -151,21 +153,37 @@ struct Pending {
     seen_18x: bool,
 }
 
-/// One endpoint's open exchanges.
+/// One endpoint's open exchanges: a few at a time, so a list.
 #[derive(Default)]
 struct RttState {
-    /// Requests sent, by (Call-ID hash, CSeq number, CSeq method).
-    requests: HashMap<(u64, u32, Method), Pending>,
-    /// 2xx to an INVITE sent and not yet ACKed, by (Call-ID hash, CSeq number).
-    answers: HashMap<(u64, u32), Instant>,
+    /// Requests sent, by [`request_key`].
+    requests: Vec<(u64, Pending)>,
+    /// 2xx to an INVITE sent and not yet ACKed, by [`answer_key`].
+    answers: Vec<(u64, Instant)>,
 }
 
-/// A Call-ID as a map key: hashed, so a datagram copies none of it.
-fn cid_key(call_id: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    call_id.hash(&mut h);
-    h.finish()
+/// A request's key: its Call-ID, CSeq number and CSeq method, hashed.
+fn request_key(call_id: &str, cseq: u32, method: &str) -> u64 {
+    key_of((call_id, cseq, method))
+}
+
+/// A 2xx's key: its Call-ID and CSeq number, hashed.
+fn answer_key(call_id: &str, cseq: u32) -> u64 {
+    key_of((call_id, cseq))
+}
+
+/// The value of `key` in `list`, removed.
+fn take<T>(list: &mut Vec<(u64, T)>, key: u64) -> Option<T> {
+    let i = list.iter().position(|(k, _)| *k == key)?;
+    Some(list.swap_remove(i).1)
+}
+
+/// Open `key` in `list` with `value`, unless it is open or the list is full.
+fn open<T>(list: &mut Vec<(u64, T)>, key: u64, value: T) {
+    if list.len() < MAX_PENDING && !list.iter().any(|(k, _)| *k == key) {
+        list.reserve_exact(1);
+        list.push((key, value));
+    }
 }
 
 /// One endpoint's round-trip tracker: fed every datagram the endpoint sends
@@ -184,26 +202,19 @@ impl RttTracker {
     /// A datagram this endpoint sends at `now`: a request (not an ACK) or a
     /// 2xx to an INVITE opens its exchange, unless it is already open.
     pub(super) fn on_outbound(&self, id: &Identity<'_>, now: Instant) {
-        let Some(cid) = id.call_id.map(cid_key) else { return };
-        let Some(cseq) = id.cseq else { return };
+        let (Some(cid), Some(cseq)) = (id.call_id, id.cseq) else { return };
         let mut g = self.state.lock().unwrap();
         match id.status {
             Some(status) => {
                 let invite = id.cseq_method == Some("INVITE");
-                if invite && (200..300).contains(&status) && g.answers.len() < MAX_PENDING {
-                    g.answers.entry((cid, cseq)).or_insert(now);
+                if invite && (200..300).contains(&status) {
+                    open(&mut g.answers, answer_key(cid, cseq), now);
                 }
             }
             None => {
-                let Some(method) = id.method.map(Method::from) else { return };
-                if method == Method::Ack || g.requests.len() >= MAX_PENDING {
-                    return;
-                }
-                g.requests.entry((cid, cseq, method)).or_insert(Pending {
-                    sent: now,
-                    seen_100: false,
-                    seen_18x: false,
-                });
+                let Some(method) = id.method.filter(|m| *m != "ACK") else { return };
+                let pending = Pending { sent: now, seen_100: false, seen_18x: false };
+                open(&mut g.requests, request_key(cid, cseq, method), pending);
             }
         }
     }
@@ -211,21 +222,16 @@ impl RttTracker {
     /// A datagram delivered to this endpoint at `now`: a response to one of
     /// its open requests, or the ACK of one of its open 2xx.
     pub(super) fn on_inbound(&self, id: &Identity<'_>, now: Instant) {
-        let Some(cid) = id.call_id.map(cid_key) else { return };
-        let Some(cseq) = id.cseq else { return };
+        let (Some(cid), Some(cseq)) = (id.call_id, id.cseq) else { return };
         let done = {
             let mut g = self.state.lock().unwrap();
             match id.status {
                 Some(status) => {
-                    let Some(method) = id.cseq_method.map(Method::from) else {
-                        return;
-                    };
-                    response_rtt(&mut g, (cid, cseq, method), status, now)
+                    let Some(method) = id.cseq_method else { return };
+                    response_rtt(&mut g, request_key(cid, cseq, method), method, status, now)
                 }
-                None => match id.method.map(Method::from) {
-                    Some(Method::Ack) => g
-                        .answers
-                        .remove(&(cid, cseq))
+                None => match id.method {
+                    Some("ACK") => take(&mut g.answers, answer_key(cid, cseq))
                         .map(|sent| (Exchange::TwoXxAck, now.saturating_duration_since(sent))),
                     _ => None,
                 },
@@ -237,24 +243,24 @@ impl RttTracker {
     }
 }
 
-/// The exchange a response to the open request `key` completes, if any; a
-/// final closes the request.
+/// The exchange a response to the open `method` request `key` completes, if
+/// any; a final closes the request.
 fn response_rtt(
     g: &mut RttState,
-    key: (u64, u32, Method),
+    key: u64,
+    method: &str,
     status: u16,
     now: Instant,
 ) -> Option<(Exchange, Duration)> {
-    let invite = key.2 == Method::Invite;
     if status >= 200 {
-        let pending = g.requests.remove(&key)?;
-        let exchange = Exchange::final_of(&key.2)?;
+        let pending = take(&mut g.requests, key)?;
+        let exchange = Exchange::final_of(&Method::from(method))?;
         return Some((exchange, now.saturating_duration_since(pending.sent)));
     }
-    if !invite {
+    if method != "INVITE" {
         return None;
     }
-    let pending = g.requests.get_mut(&key)?;
+    let pending = g.requests.iter_mut().find(|(k, _)| *k == key).map(|(_, p)| p)?;
     let exchange = match status {
         100 if !pending.seen_100 => {
             pending.seen_100 = true;

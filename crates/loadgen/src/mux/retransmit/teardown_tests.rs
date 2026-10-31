@@ -1,7 +1,9 @@
 //! The engine's transaction ends on the paused clock over the simulated
 //! fabric: a CANCEL keeps retransmitting until its own final whatever its
-//! INVITE draws on the shared branch (RFC 3261 §9.1), and a final to the
-//! INVITE ends its reliable provisionals (RFC 3262 §3).
+//! INVITE draws on the shared branch (RFC 3261 §9.1), a final to the INVITE
+//! ends its reliable provisionals (RFC 3262 §3), a retransmitted CANCEL or
+//! INVITE draws its own transaction's final again, and an ACKed INVITE final
+//! is not re-sent.
 
 use super::*;
 use sip_net::{BindUdpOpts, SignalingNetwork};
@@ -58,10 +60,13 @@ fn response(status: u16, cseq: &str, extra: &str) -> Vec<u8> {
 async fn a_cancel_retransmits_until_its_own_final_not_an_invite_provisional() {
     let (txns, peer, peer_addr) = sim_rig().await;
     let r183 = response(183, "1 INVITE", "Require: 100rel\r\nRSeq: 1\r\n");
-    txns.on_outbound(&request("INVITE", "1 INVITE"), peer_addr);
-    assert!(txns.on_inbound(&r183, peer_addr));
-    txns.on_outbound(&request("CANCEL", "1 CANCEL"), peer_addr);
-    assert!(!txns.on_inbound(&r183, peer_addr), "the retransmitted 183 is absorbed");
+    txns.on_outbound(&Datagram::sniff(&request("INVITE", "1 INVITE")), peer_addr);
+    assert!(txns.on_inbound(&Datagram::sniff(&r183), peer_addr));
+    txns.on_outbound(&Datagram::sniff(&request("CANCEL", "1 CANCEL")), peer_addr);
+    assert!(
+        !txns.on_inbound(&Datagram::sniff(&r183), peer_addr),
+        "the retransmitted 183 is absorbed"
+    );
 
     let sent = received(peer.as_ref(), TokioDuration::from_millis(1_200)).await;
     assert!(
@@ -73,7 +78,7 @@ async fn a_cancel_retransmits_until_its_own_final_not_an_invite_provisional() {
     tokio::time::sleep(TokioDuration::from_millis(10)).await;
     assert!(!ended.is_finished(), "the CANCEL's transaction is still open");
 
-    assert!(txns.on_inbound(&response(200, "1 CANCEL", ""), peer_addr));
+    assert!(txns.on_inbound(&Datagram::sniff(&response(200, "1 CANCEL", "")), peer_addr));
     timeout(TokioDuration::from_millis(10), ended)
         .await
         .expect("the CANCEL's 200 ends its transaction")
@@ -89,7 +94,7 @@ async fn a_cancel_retransmits_until_its_own_final_not_an_invite_provisional() {
 async fn an_unanswered_request_ends_at_timer_f() {
     let (txns, _peer, peer_addr) = sim_rig().await;
     let start = tokio::time::Instant::now();
-    txns.on_outbound(&request("CANCEL", "1 CANCEL"), peer_addr);
+    txns.on_outbound(&Datagram::sniff(&request("CANCEL", "1 CANCEL")), peer_addr);
     txns.clients_ended().await;
     assert_eq!(start.elapsed(), TXN_TIMEOUT, "the CANCEL's transaction ends at Timer F");
     txns.shutdown();
@@ -100,10 +105,61 @@ async fn an_unanswered_request_ends_at_timer_f() {
 #[tokio::test(start_paused = true)]
 async fn an_invite_final_stops_its_reliable_provisional() {
     let (txns, peer, peer_addr) = sim_rig().await;
-    txns.on_outbound(&response(183, "1 INVITE", "Require: 100rel\r\nRSeq: 1\r\n"), peer_addr);
-    txns.on_outbound(&response(504, "1 INVITE", ""), peer_addr);
+    txns.on_outbound(
+        &Datagram::sniff(&response(183, "1 INVITE", "Require: 100rel\r\nRSeq: 1\r\n")),
+        peer_addr,
+    );
+    txns.on_outbound(&Datagram::sniff(&response(504, "1 INVITE", "")), peer_addr);
     let sent = received(peer.as_ref(), TokioDuration::from_secs(5)).await;
     assert!(sent.iter().all(|l| !l.contains(" 183 ")), "no 183 after the final: {sent:?}");
     assert!(sent.iter().any(|l| l.contains(" 504 ")), "the 504 is retransmitted: {sent:?}");
     txns.shutdown();
+}
+
+/// An ACK of an INVITE's final, on `branch`.
+fn ack(branch: &str) -> Vec<u8> {
+    format!(
+        "ACK sip:b@127.0.0.1:5070 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5070;branch={branch}\r\n\
+         Call-ID: tc1@h\r\nFrom: <sip:a@h>;tag=1\r\nTo: <sip:b@h>;tag=2\r\nCSeq: 1 ACK\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+/// A CANCEL and its INVITE are two server transactions on one branch
+/// (RFC 3261 §9.1): a retransmitted CANCEL draws the CANCEL's 200 again, a
+/// retransmitted INVITE the INVITE's 487.
+#[tokio::test(start_paused = true)]
+async fn a_retransmitted_cancel_and_invite_each_draw_their_own_final() {
+    let (txns, peer, peer_addr) = sim_rig().await;
+    let (invite, cancel) = (request("INVITE", "1 INVITE"), request("CANCEL", "1 CANCEL"));
+    assert!(txns.on_inbound(&Datagram::sniff(&invite), peer_addr));
+    assert!(txns.on_inbound(&Datagram::sniff(&cancel), peer_addr));
+    txns.on_outbound(&Datagram::sniff(&response(200, "1 CANCEL", "")), peer_addr);
+    txns.on_outbound(&Datagram::sniff(&response(487, "1 INVITE", "")), peer_addr);
+    // Well inside T1: the 487's own Timer G resend is not due.
+    let window = TokioDuration::from_millis(100);
+    assert!(!txns.on_inbound(&Datagram::sniff(&cancel), peer_addr), "the CANCEL absorbed");
+    assert_eq!(received(peer.as_ref(), window).await, ["SIP/2.0 200 X"], "its own 200");
+    assert!(!txns.on_inbound(&Datagram::sniff(&invite), peer_addr), "the INVITE absorbed");
+    assert_eq!(received(peer.as_ref(), window).await, ["SIP/2.0 487 X"], "its own 487");
+    txns.shutdown();
+}
+
+/// Once its ACK arrived, an INVITE's final is owed to no retransmitted
+/// INVITE: the retransmission is absorbed and draws nothing (RFC 3261
+/// §17.2.1 Confirmed for a non-2xx; RFC 6026 Accepted for a 2xx, whose ACK
+/// is a transaction of its own).
+#[tokio::test(start_paused = true)]
+async fn an_acked_invite_final_is_not_sent_again() {
+    for (status, ack_branch) in [(486, "z9hG4bK-c1"), (200, "z9hG4bK-a2")] {
+        let (txns, peer, peer_addr) = sim_rig().await;
+        let invite = request("INVITE", "1 INVITE");
+        assert!(txns.on_inbound(&Datagram::sniff(&invite), peer_addr));
+        txns.on_outbound(&Datagram::sniff(&response(status, "1 INVITE", "")), peer_addr);
+        assert!(txns.on_inbound(&Datagram::sniff(&ack(ack_branch)), peer_addr), "its ACK");
+        assert!(!txns.on_inbound(&Datagram::sniff(&invite), peer_addr), "{status}: absorbed");
+        let resent = received(peer.as_ref(), TokioDuration::from_secs(40)).await;
+        assert!(resent.is_empty(), "{status}: nothing sent after the ACK: {resent:?}");
+        txns.shutdown();
+    }
 }

@@ -26,7 +26,7 @@ pub(super) fn early_media(cid: &str) -> Vec<u8> {
 fn feed(wire: &CallWire, events: &[(Side<'_>, Dir, Vec<u8>)]) -> WireFacts {
     let tap = wire.tap();
     for (side, dir, raw) in events {
-        tap(*side, *dir, raw);
+        tap(*side, *dir, &Datagram::sniff(raw));
     }
     wire.facts()
 }
@@ -42,12 +42,24 @@ async fn the_setup_facts_are_read_from_the_caller_side() {
     let clock = Clock::test_at(1_000);
     let wire = CallWire::new(clock.clone());
     let tap = wire.tap();
-    tap(Side::Caller, Dir::Out, &msg("INVITE sip:b@h SIP/2.0", "c1", "1 INVITE", "", ""));
+    tap(
+        Side::Caller,
+        Dir::Out,
+        &Datagram::sniff(&msg("INVITE sip:b@h SIP/2.0", "c1", "1 INVITE", "", "")),
+    );
     tokio::time::advance(std::time::Duration::from_millis(10)).await;
-    tap(Side::Caller, Dir::Out, &msg("INVITE sip:b@h SIP/2.0", "c1", "1 INVITE", "", ""));
-    tap(Side::Caller, Dir::In, &msg("SIP/2.0 100 Trying", "c1", "1 INVITE", "", ""));
+    tap(
+        Side::Caller,
+        Dir::Out,
+        &Datagram::sniff(&msg("INVITE sip:b@h SIP/2.0", "c1", "1 INVITE", "", "")),
+    );
+    tap(
+        Side::Caller,
+        Dir::In,
+        &Datagram::sniff(&msg("SIP/2.0 100 Trying", "c1", "1 INVITE", "", "")),
+    );
     tokio::time::advance(std::time::Duration::from_millis(10)).await;
-    tap(Side::Caller, Dir::In, &early_media("c1"));
+    tap(Side::Caller, Dir::In, &Datagram::sniff(&early_media("c1")));
     tokio::time::advance(std::time::Duration::from_millis(10)).await;
     let busy = msg(
         "SIP/2.0 486 Busy Here",
@@ -56,9 +68,9 @@ async fn the_setup_facts_are_read_from_the_caller_side() {
         "t1",
         "Reason: Q.850;cause=017;text=\"busy\"\r\n",
     );
-    tap(Side::Caller, Dir::In, &busy);
+    tap(Side::Caller, Dir::In, &Datagram::sniff(&busy));
     tokio::time::advance(std::time::Duration::from_millis(10)).await;
-    tap(Side::Caller, Dir::In, &busy);
+    tap(Side::Caller, Dir::In, &Datagram::sniff(&busy));
     let f = wire.facts();
     assert_eq!(f.call_id.as_deref(), Some("c1"));
     assert_eq!(f.started_at_ms, Some(1_000));
@@ -162,13 +174,37 @@ async fn each_leg_keeps_its_first_final() {
 async fn sealed_setup_facts_ignore_the_teardown() {
     let wire = CallWire::new(Clock::test_at(0));
     let tap = wire.tap();
-    tap(Side::Caller, Dir::Out, &msg("INVITE sip:b@h SIP/2.0", "c3", "1 INVITE", "", ""));
-    tap(Side::Caller, Dir::In, &msg("SIP/2.0 100 Trying", "c3", "1 INVITE", "", ""));
-    tap(Side::Leg("callee"), Dir::In, &msg("INVITE sip:q@h SIP/2.0", "b3", "1 INVITE", "", ""));
+    tap(
+        Side::Caller,
+        Dir::Out,
+        &Datagram::sniff(&msg("INVITE sip:b@h SIP/2.0", "c3", "1 INVITE", "", "")),
+    );
+    tap(
+        Side::Caller,
+        Dir::In,
+        &Datagram::sniff(&msg("SIP/2.0 100 Trying", "c3", "1 INVITE", "", "")),
+    );
+    tap(
+        Side::Leg("callee"),
+        Dir::In,
+        &Datagram::sniff(&msg("INVITE sip:q@h SIP/2.0", "b3", "1 INVITE", "", "")),
+    );
     wire.seal();
-    tap(Side::Caller, Dir::Out, &msg("CANCEL sip:b@h SIP/2.0", "c3", "1 CANCEL", "", ""));
-    tap(Side::Caller, Dir::In, &msg("SIP/2.0 487 Terminated", "c3", "1 INVITE", "t1", ""));
-    tap(Side::Leg("callee"), Dir::Out, &msg("SIP/2.0 487 Terminated", "b3", "1 INVITE", "q1", ""));
+    tap(
+        Side::Caller,
+        Dir::Out,
+        &Datagram::sniff(&msg("CANCEL sip:b@h SIP/2.0", "c3", "1 CANCEL", "", "")),
+    );
+    tap(
+        Side::Caller,
+        Dir::In,
+        &Datagram::sniff(&msg("SIP/2.0 487 Terminated", "c3", "1 INVITE", "t1", "")),
+    );
+    tap(
+        Side::Leg("callee"),
+        Dir::Out,
+        &Datagram::sniff(&msg("SIP/2.0 487 Terminated", "b3", "1 INVITE", "q1", "")),
+    );
     let f = wire.facts();
     assert!(!f.cancelled, "the teardown's CANCEL is not the caller's");
     assert_eq!((f.final_code, f.setup_ended_at_ms), (None, None));

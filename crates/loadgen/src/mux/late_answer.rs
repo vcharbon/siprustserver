@@ -11,19 +11,20 @@
 //! (§13.3.1.4) and is not held.
 //!
 //! Bounds: per dialog the last [`ANSWERS_HELD`] answers, each the response
-//! datagram as sent with its transaction key and its request's ladder arrow;
-//! dropped with the endpoint, or for a released dialog when its hold
+//! datagram as sent (the copy the endpoint's other stores share) with a
+//! hashed transaction key and its request's ladder arrow; dropped with the
+//! endpoint, or for a released dialog when its hold
 //! ([`RELEASE_HOLD`](super::RELEASE_HOLD), 64·T1 = 32 s) expires. In
 //! aggregate the mux holds the calls released in the last 32 s (cps × 32), a
 //! call typically 1 to 3 answers (the BYE's 200; a CANCEL's 200 and the 487)
-//! of about 0.5 KiB plus 0.2 KiB of key and arrow, so 1 to 2 KiB a call:
+//! of about 0.5 KiB plus 0.1 KiB of key and arrow, so 1 to 2 KiB a call:
 //! about 13 MiB at 200 cps, 130 MiB at 2000 cps; at worst 8 × 64 KiB a dialog.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use sip_message::sniff::{cseq_number, identity, is_response, req_method, resp_status, via_branch};
+use sip_message::sniff::Identity;
 
+use super::datagram::{key_of, Datagram};
 use super::tally::LateRepair;
 use super::taps::Taps;
 
@@ -32,20 +33,19 @@ pub(in crate::mux) const ANSWERS_HELD: usize = 8;
 
 /// One final our agent sent, keyed by the server transaction it ends.
 struct Answer {
-    cseq: u32,
-    /// The CSeq method of the request it answers.
-    method: String,
-    /// The request's top Via branch, echoed on the response.
-    branch: String,
-    bytes: Vec<u8>,
+    /// The dialog's Call-ID, hashed.
+    dialog: u64,
+    /// The transaction: the request's CSeq number, CSeq method and top Via
+    /// branch (echoed on the response), hashed.
+    txn: u64,
+    bytes: Arc<[u8]>,
     /// Where a late re-send of it is reported; `None`: not reported.
     repair: Option<LateRepair>,
 }
 
-impl Answer {
-    fn answers(&self, cseq: u32, method: &str, branch: &str) -> bool {
-        self.cseq == cseq && self.method == method && self.branch == branch
-    }
+/// The transaction key of a request, or of the response that answers it.
+fn txn_key(cseq: u32, method: &str, branch: &str) -> u64 {
+    key_of((cseq, method, branch))
 }
 
 /// What a request arriving on a released dialog draws from its held answers.
@@ -56,69 +56,67 @@ pub(in crate::mux) enum LateReply {
     Absorbed,
     /// A retransmission of an answered request: the same final again, and
     /// where that re-send is reported.
-    Reanswer(Vec<u8>, Option<LateRepair>),
+    Reanswer(Arc<[u8]>, Option<LateRepair>),
 }
 
 /// The answers one released dialog holds.
 pub(in crate::mux) struct HeldAnswers(Vec<Answer>);
 
 impl HeldAnswers {
-    /// What the request `raw` draws from these answers.
-    pub(in crate::mux) fn on_request(&self, raw: &[u8]) -> LateReply {
-        let (Some(method), Some(cseq), Some(branch)) =
-            (req_method(raw), cseq_number(raw), via_branch(raw))
-        else {
+    /// What the request `id` draws from these answers.
+    pub(in crate::mux) fn on_request(&self, id: &Identity<'_>) -> LateReply {
+        let (Some(method), Some(cseq), Some(branch)) = (id.method, id.cseq, id.branch) else {
             return LateReply::NotHeld;
         };
         if method == "ACK" {
-            let acked = self.0.iter().any(|a| a.answers(cseq, "INVITE", &branch));
+            let acked = self.0.iter().any(|a| a.txn == txn_key(cseq, "INVITE", branch));
             return if acked { LateReply::Absorbed } else { LateReply::NotHeld };
         }
-        match self.0.iter().find(|a| a.answers(cseq, &method, &branch)) {
+        let txn = txn_key(cseq, method, branch);
+        match self.0.iter().find(|a| a.txn == txn) {
             Some(a) => LateReply::Reanswer(a.bytes.clone(), a.repair.clone()),
             None => LateReply::NotHeld,
         }
     }
 }
 
-/// An endpoint's answers, per dialog (Call-ID).
+/// An endpoint's answers, every dialog's, in the order sent.
 #[derive(Default)]
-pub(in crate::mux) struct SentAnswers(Mutex<HashMap<String, Vec<Answer>>>);
+pub(in crate::mux) struct SentAnswers(Mutex<Vec<Answer>>);
 
 impl SentAnswers {
-    /// Hold `raw` when it is a final this endpoint's agent sends that a
+    /// Hold `d` when it is a final this endpoint's agent sends that a
     /// retransmitted request may draw again; it replaces an earlier answer to
     /// the same transaction. `taps` resolve the request's ladder arrow.
-    pub(in crate::mux) fn on_outbound(&self, raw: &[u8], taps: Option<&Taps>) {
-        // The start line first: a request or a provisional reads no header.
-        if !is_response(raw) || !resp_status(raw).is_some_and(|s| s >= 200) {
-            return;
-        }
-        let id = identity(raw);
-        let (Some(status), Some(cid), Some(cseq), Some(method)) =
-            (id.status, id.call_id, id.cseq, id.cseq_method)
+    pub(in crate::mux) fn on_outbound(&self, d: &Datagram<'_>, taps: Option<&Taps>) {
+        let id = d.id();
+        let (Some(status), Some(cid), Some(cseq), Some(method), Some(branch)) =
+            (d.final_status(), id.call_id, id.cseq, id.cseq_method, id.branch)
         else {
             return;
         };
         if method == "INVITE" && status < 300 {
             return;
         }
-        let Some(branch) = via_branch(raw) else { return };
-        let repair = taps.and_then(|t| t.late_repair(&id));
-        let answer =
-            Answer { cseq, method: method.to_string(), branch, bytes: raw.to_vec(), repair };
-        let mut g = self.0.lock().unwrap();
-        let dialog = g.entry(cid.to_string()).or_default();
-        dialog.retain(|a| !a.answers(answer.cseq, &answer.method, &answer.branch));
-        if dialog.len() == ANSWERS_HELD {
-            dialog.remove(0);
+        let repair = taps.and_then(|t| t.late_repair(id));
+        let (dialog, txn) = (key_of(cid), txn_key(cseq, method, branch));
+        let mut held = self.0.lock().unwrap();
+        held.retain(|a| a.dialog != dialog || a.txn != txn);
+        if held.iter().filter(|a| a.dialog == dialog).count() == ANSWERS_HELD {
+            let oldest = held.iter().position(|a| a.dialog == dialog).expect("a held answer");
+            held.remove(oldest);
         }
-        dialog.push(answer);
+        // An endpoint holds a handful of answers: room for one more at a time.
+        held.reserve_exact(1);
+        held.push(Answer { dialog, txn, bytes: d.shared(), repair });
     }
 
     /// The answers of dialog `call_id`, removed.
     pub(in crate::mux) fn take(&self, call_id: &str) -> Option<HeldAnswers> {
-        self.0.lock().unwrap().remove(call_id).map(HeldAnswers)
+        let dialog = key_of(call_id);
+        let mut held = self.0.lock().unwrap();
+        let taken: Vec<Answer> = held.extract_if(.., |a| a.dialog == dialog).collect();
+        (!taken.is_empty()).then_some(HeldAnswers(taken))
     }
 }
 

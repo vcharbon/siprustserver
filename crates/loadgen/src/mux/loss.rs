@@ -7,7 +7,7 @@
 
 use std::sync::Mutex;
 
-use sip_message::sniff::{cseq_method_label, cseq_number, is_response, resp_status};
+use sip_message::sniff::Identity;
 use sip_net_testkit::RandomLoss;
 
 /// Which direction a [`TargetedDrop`] fires on.
@@ -115,21 +115,22 @@ impl DropModel {
 
     /// Inbound-path drop verdict: the probabilistic model, plus the targeted
     /// matcher when it fires on the inbound direction.
-    pub(super) fn drops_inbound(&self, raw: &[u8]) -> bool {
-        self.drops() || self.targeted_hit(raw, DropDir::Inbound)
+    pub(super) fn drops_inbound(&self, id: &Identity<'_>) -> bool {
+        self.drops() || self.targeted_hit(id, DropDir::Inbound)
     }
 
-    /// Whether the targeted matcher fires on `raw` in direction `dir`. `raw` is
-    /// only scanned when a target for that direction is configured.
-    pub(super) fn targeted_hit(&self, raw: &[u8], dir: DropDir) -> bool {
+    /// Whether the targeted matcher fires on the datagram of identity `id` in
+    /// direction `dir`.
+    pub(super) fn targeted_hit(&self, id: &Identity<'_>, dir: DropDir) -> bool {
         let Some((td, state)) = &self.targeted else { return false };
-        if td.dir != dir || is_response(raw) != td.response || cseq_method_label(raw) != td.method {
+        let response = id.status.is_some();
+        if td.dir != dir || response != td.response || id.cseq_method != Some(td.method) {
             return false;
         }
-        if td.response && !resp_status(raw).is_some_and(|s| s >= 200) {
+        if td.response && !id.status.is_some_and(|s| s >= 200) {
             return false;
         }
-        let Some(cseq) = cseq_number(raw) else { return false };
+        let Some(cseq) = id.cseq else { return false };
         let mut st = state.lock().unwrap();
         if st.target_cseq.is_none() && !st.seen.contains(&cseq) {
             st.seen.push(cseq);

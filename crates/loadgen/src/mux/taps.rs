@@ -2,13 +2,14 @@
 //! datagram of an endpoint crosses (its send, before simulated loss, and its
 //! inbound delivery, after it), and at its retransmit engine's re-sends: SIP
 //! round-trip timing, the call's message tally, and the call's wire tap,
-//! which sees each datagram with the side of the call it crossed. A datagram
-//! is sniffed once for all of them.
+//! which sees each datagram with the side of the call it crossed. Each of
+//! them reads the datagram's one sniff ([`Datagram`]).
 
 use std::sync::Arc;
 
 use tokio::time::Instant;
 
+use super::datagram::Datagram;
 use super::rtt::{RttSink, RttTracker};
 use super::tally::{CallTally, LateRepair};
 use sip_message::sniff::{identity, Identity};
@@ -31,7 +32,7 @@ pub enum Dir {
 /// A call's wire tap: every datagram its endpoints send (first transmissions
 /// by the call, not the engine's retransmissions) and every datagram delivered
 /// to them, duplicates included.
-pub type WireTap = Arc<dyn Fn(Side<'_>, Dir, &[u8]) + Send + Sync>;
+pub type WireTap = Arc<dyn Fn(Side<'_>, Dir, &Datagram<'_>) + Send + Sync>;
 
 /// One endpoint's taps.
 pub(in crate::mux) struct Taps {
@@ -62,38 +63,27 @@ impl Taps {
         self.leg.as_deref().map_or(Side::Caller, Side::Leg)
     }
 
-    /// Whether a sniff is needed: the round trips or the tally are watched.
-    fn sniffs(&self) -> bool {
-        self.rtt.is_some() || self.tally.is_some()
-    }
-
-    pub(in crate::mux) fn on_outbound(&self, raw: &[u8], now: Instant) {
-        if self.sniffs() {
-            let m = identity(raw);
-            if let Some(rtt) = &self.rtt {
-                rtt.on_outbound(&m, now);
-            }
-            if let Some(tally) = &self.tally {
-                tally.on_datagram(self.leg.as_deref(), Dir::Out, &m, now);
-            }
+    pub(in crate::mux) fn on_outbound(&self, d: &Datagram<'_>, now: Instant) {
+        if let Some(rtt) = &self.rtt {
+            rtt.on_outbound(d.id(), now);
+        }
+        if let Some(tally) = &self.tally {
+            tally.on_datagram(self.leg.as_deref(), Dir::Out, d.id(), now);
         }
         if let Some(wire) = &self.wire {
-            wire(self.side(), Dir::Out, raw);
+            wire(self.side(), Dir::Out, d);
         }
     }
 
-    pub(in crate::mux) fn on_inbound(&self, raw: &[u8], now: Instant) {
-        if self.sniffs() {
-            let m = identity(raw);
-            if let Some(rtt) = &self.rtt {
-                rtt.on_inbound(&m, now);
-            }
-            if let Some(tally) = &self.tally {
-                tally.on_datagram(self.leg.as_deref(), Dir::In, &m, now);
-            }
+    pub(in crate::mux) fn on_inbound(&self, d: &Datagram<'_>, now: Instant) {
+        if let Some(rtt) = &self.rtt {
+            rtt.on_inbound(d.id(), now);
+        }
+        if let Some(tally) = &self.tally {
+            tally.on_datagram(self.leg.as_deref(), Dir::In, d.id(), now);
         }
         if let Some(wire) = &self.wire {
-            wire(self.side(), Dir::In, raw);
+            wire(self.side(), Dir::In, d);
         }
     }
 

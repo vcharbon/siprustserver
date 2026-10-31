@@ -19,6 +19,8 @@
 //!
 //! - `correlation` — how the per-call token travels through the SUT
 //!   (pluggable per run: relayed header, To-user, or the caller's From user).
+//! - `datagram` — one datagram as the stores and watchers below read it:
+//!   sniffed once, copied once for every store that keeps it.
 //! - `demux` — the inbound path. Precedence per datagram: (1) **known
 //!   Call-ID** (our UAC dialog, or a UAS dialog after its first request) — this
 //!   tier demuxes EVERY in-dialog datagram with no token and no R-URI
@@ -64,6 +66,7 @@
 
 mod buffers;
 mod correlation;
+mod datagram;
 mod demux;
 mod endpoint;
 mod late_answer;
@@ -78,6 +81,7 @@ mod tally;
 mod taps;
 
 pub use correlation::Correlation;
+pub use datagram::Datagram;
 pub use endpoint::MuxNetwork;
 pub use routing::CallRouting;
 // The data-driven claim rules live in their shared home, `scenario-harness`
@@ -140,13 +144,11 @@ pub enum Role {
 /// A registry key owned by one endpoint (removed on its `Drop`).
 #[derive(Debug, Clone)]
 pub(in crate::mux) enum Key {
-    CallId(String),
+    /// A dialog's Call-ID, shared with the registry entries that hold it.
+    CallId(Arc<str>),
     /// A receiver registered under `token`, identified by its `label` (agent
     /// name) so `Drop` removes exactly this receiver from a possibly-shared slot.
-    Token {
-        token: String,
-        label: String,
-    },
+    Token { token: String, label: String },
 }
 
 /// Everything the inbound route path needs to hand a datagram to one call: its
@@ -237,6 +239,9 @@ impl CallGate {
 pub(in crate::mux) struct MuxSocket {
     pub(in crate::mux) addr: SocketAddr,
     pub(in crate::mux) role: Role,
+    /// Called as `endpoint.as_ref()`, here and wherever the mux holds the
+    /// fabric endpoint: the trait's impl for the `Arc` would box every
+    /// call's future a second time.
     pub(in crate::mux) endpoint: Arc<dyn UdpEndpoint>,
     pub(in crate::mux) reg: Mutex<SocketRegistry>,
     pub(in crate::mux) correlation: Correlation,

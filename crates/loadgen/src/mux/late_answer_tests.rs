@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
 
 use super::*;
+use crate::mux::datagram::Datagram;
 use crate::mux::registry::SocketRegistry;
 use crate::mux::stats::MuxStats;
 use crate::mux::tally::{ArrowKey, CallTally};
@@ -29,16 +30,20 @@ fn resp(status: u16, method: &str, cseq: u32, branch: &str) -> Vec<u8> {
 fn held(sent: &[Vec<u8>]) -> HeldAnswers {
     let answers = SentAnswers::default();
     for raw in sent {
-        answers.on_outbound(raw, None);
+        answers.on_outbound(&Datagram::sniff(raw), None);
     }
     answers.take("c1").expect("the dialog holds answers")
 }
 
 fn reanswer(h: &HeldAnswers, raw: &[u8]) -> Option<Vec<u8>> {
-    match h.on_request(raw) {
-        LateReply::Reanswer(bytes, _) => Some(bytes),
+    match on_request(h, raw) {
+        LateReply::Reanswer(bytes, _) => Some(bytes.to_vec()),
         _ => None,
     }
+}
+
+fn on_request(h: &HeldAnswers, raw: &[u8]) -> LateReply {
+    h.on_request(Datagram::sniff(raw).id())
 }
 
 #[test]
@@ -53,7 +58,7 @@ fn a_retransmitted_bye_draws_its_final_and_another_request_stays_stray() {
         (req("INFO", 3, "z9hG4bKbye"), "another method"),
         (req("ACK", 3, "z9hG4bKbye"), "no INVITE final held to ACK"),
     ] {
-        assert!(matches!(h.on_request(&raw), LateReply::NotHeld), "{why}");
+        assert!(matches!(on_request(&h, &raw), LateReply::NotHeld), "{why}");
     }
 }
 
@@ -65,18 +70,18 @@ fn a_cancelled_invite_holds_the_cancel_final_and_the_487_and_absorbs_its_ack() {
     let h = held(&[resp(180, "INVITE", 1, branch), cancel_ok.clone(), terminated.clone()]);
     assert_eq!(reanswer(&h, &req("CANCEL", 1, branch)), Some(cancel_ok), "CANCEL's own final");
     assert_eq!(reanswer(&h, &req("INVITE", 1, branch)), Some(terminated), "the INVITE's 487");
-    assert!(matches!(h.on_request(&req("ACK", 1, branch)), LateReply::Absorbed), "its ACK");
-    assert!(matches!(h.on_request(&req("ACK", 1, "z9hG4bKx")), LateReply::NotHeld));
+    assert!(matches!(on_request(&h, &req("ACK", 1, branch)), LateReply::Absorbed), "its ACK");
+    assert!(matches!(on_request(&h, &req("ACK", 1, "z9hG4bKx")), LateReply::NotHeld));
 }
 
 #[test]
 #[ignore = "slow lane: loadgen"]
 fn an_invite_2xx_and_provisionals_are_not_held() {
     let answers = SentAnswers::default();
-    answers.on_outbound(&resp(100, "BYE", 2, "z9hG4bKb"), None);
-    answers.on_outbound(&resp(180, "INVITE", 1, "z9hG4bKi"), None);
-    answers.on_outbound(&resp(200, "INVITE", 1, "z9hG4bKi"), None);
-    answers.on_outbound(&req("BYE", 2, "z9hG4bKb"), None);
+    answers.on_outbound(&Datagram::sniff(&resp(100, "BYE", 2, "z9hG4bKb")), None);
+    answers.on_outbound(&Datagram::sniff(&resp(180, "INVITE", 1, "z9hG4bKi")), None);
+    answers.on_outbound(&Datagram::sniff(&resp(200, "INVITE", 1, "z9hG4bKi")), None);
+    answers.on_outbound(&Datagram::sniff(&req("BYE", 2, "z9hG4bKb")), None);
     assert!(answers.take("c1").is_none(), "nothing a retransmission may draw from the hold");
 }
 
@@ -85,10 +90,13 @@ fn an_invite_2xx_and_provisionals_are_not_held() {
 fn a_dialog_holds_its_last_answers_one_per_transaction() {
     let answers = SentAnswers::default();
     for cseq in 1..=ANSWERS_HELD as u32 + 2 {
-        answers.on_outbound(&resp(200, "INFO", cseq, &format!("z9hG4bK{cseq}")), None);
+        answers.on_outbound(
+            &Datagram::sniff(&resp(200, "INFO", cseq, &format!("z9hG4bK{cseq}"))),
+            None,
+        );
     }
     let again = resp(481, "INFO", 10, "z9hG4bK10");
-    answers.on_outbound(&again, None);
+    answers.on_outbound(&Datagram::sniff(&again), None);
     let h = answers.take("c1").unwrap();
     assert_eq!(h.0.len(), ANSWERS_HELD, "bounded");
     assert!(reanswer(&h, &req("INFO", 2, "z9hG4bK2")).is_none(), "the oldest went");
@@ -103,21 +111,22 @@ async fn a_held_answer_expires_with_the_hold() {
     let mut reg = SocketRegistry::default();
     let ok = resp(200, "BYE", 3, "z9hG4bKbye");
     let mut answers = Some(held(std::slice::from_ref(&ok)));
-    let keys = vec![Key::CallId("c1".to_string())];
+    let keys = vec![Key::CallId("c1".into())];
     reg.release_keys(keys, |_| (None, answers.take()), Instant::now() + RELEASE_HOLD, &stats);
     let bye = req("BYE", 3, "z9hG4bKbye");
-    let drawn = |reg: &SocketRegistry| match reg.released_answer("c1", &bye, Instant::now()) {
-        LateReply::Reanswer(bytes, _) => Some(bytes),
+    let bye = Datagram::sniff(&bye);
+    let drawn = |reg: &SocketRegistry| match reg.released_answer("c1", bye.id(), Instant::now()) {
+        LateReply::Reanswer(bytes, _) => Some(bytes.to_vec()),
         _ => None,
     };
 
     tokio::time::advance(RELEASE_HOLD - std::time::Duration::from_secs(1)).await;
     assert_eq!(drawn(&reg), Some(ok), "held for the hold");
-    assert!(matches!(reg.released_answer("c2", &bye, Instant::now()), LateReply::NotHeld));
+    assert!(matches!(reg.released_answer("c2", bye.id(), Instant::now()), LateReply::NotHeld));
     tokio::time::advance(std::time::Duration::from_secs(1)).await;
     assert_eq!(drawn(&reg), None, "gone at the deadline");
     reg.expire_released(Instant::now());
-    let keys = vec![Key::CallId("c1".to_string())];
+    let keys = vec![Key::CallId("c1".into())];
     reg.release_keys(keys, |_| (None, None), Instant::now() + RELEASE_HOLD, &stats);
     assert_eq!(drawn(&reg), None, "freed by the sweep: a later release of c1 holds nothing");
 }
@@ -131,10 +140,11 @@ async fn a_late_reanswer_is_reported_on_the_arrow_of_its_request() {
         .with_late_sink(Arc::new(move |arrow: &ArrowKey| sink.lock().unwrap().push(arrow.clone())));
     let taps = Taps::new(None, Some(Arc::new(tally)), None, Some("bob")).unwrap();
     let (bye, ok) = (req("BYE", 3, "z9hG4bKbye"), resp(200, "BYE", 3, "z9hG4bKbye"));
-    taps.on_inbound(&bye, Instant::now());
+    taps.on_inbound(&Datagram::sniff(&bye), Instant::now());
     let answers = SentAnswers::default();
-    answers.on_outbound(&ok, Some(&taps));
-    let LateReply::Reanswer(_, Some(repair)) = answers.take("c1").unwrap().on_request(&bye) else {
+    answers.on_outbound(&Datagram::sniff(&ok), Some(&taps));
+    let LateReply::Reanswer(_, Some(repair)) = on_request(&answers.take("c1").unwrap(), &bye)
+    else {
         panic!("the re-answer carries its report");
     };
     repair.record();
