@@ -18,6 +18,7 @@ use sip_message::header::{HeaderClass, HeaderName};
 use sip_message::{SipHeader, SipMessage, SipRequest, SipStr};
 
 use crate::config::B2buaConfig;
+use b2bua_sdk::consult_headers::consult_headers;
 use b2bua_sdk::reason_phrase::default_reason;
 
 use crate::decision::apply_reject::{apply_redirect, apply_reject};
@@ -28,25 +29,6 @@ use crate::decision::{
 use crate::effects::{BufferedObservabilityEffect, HandlerEffects, HandlerResult};
 use crate::rules::relay;
 use b2bua_sdk::event::CallEvent;
-
-/// Headers sent as top-level decision-request fields (excluded from
-/// `sip_headers`). Shared with the failure path: `route-failure` applies the
-/// same exclusion to the failed final response's headers, so "the
-/// non-structural remainder" means one thing across the decision seam.
-///
-/// `Max-Forwards` is deliberately NOT here: a decision that cannot see the hop
-/// count cannot answer a spent one. It rides `sip_headers` read-only — the stack
-/// owns what a leg it originates states ([`crate::rules::relay::build_b_leg`]).
-pub const STANDARD_HEADERS: &[HeaderName] = &[
-    HeaderName::From,
-    HeaderName::To,
-    HeaderName::Via,
-    HeaderName::Contact,
-    HeaderName::ContentType,
-    HeaderName::CallId,
-    HeaderName::CSeq,
-    HeaderName::ContentLength,
-];
 
 /// Build the initial [`Call`] (a-leg only) from an inbound INVITE, its
 /// incarnation mark and its caller-facing tag seed drawn from `ids`. Pure.
@@ -385,15 +367,7 @@ pub fn reject_call(
 
 /// The decision request the initial consult sends for `invite`.
 pub fn build_request(invite: &SipRequest) -> NewCallRequest {
-    // One `(name, value)` per wire line, in wire order: the order of a multi-line
-    // header is part of its meaning (RFC 7044 `History-Info` index chains), whatever
-    // spelling each line wears.
-    let sip_headers: Vec<(String, String)> = invite
-        .headers()
-        .iter()
-        .filter(|h| !STANDARD_HEADERS.iter().any(|n| n.matches(&h.name)))
-        .map(|h| (h.name.to_string(), h.value.to_string()))
-        .collect();
+    let sip_headers = consult_headers(invite.headers());
     NewCallRequest {
         call_id: invite.call_id().as_str().to_string(),
         ruri: invite.request_uri().to_string(),

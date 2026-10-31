@@ -599,14 +599,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                         let sip_headers: Vec<serde_json::Value> = ctx
                             .response()
                             .map(|r| {
-                                r.headers()
-                                    .iter()
-                                    .filter(|h| {
-                                        !crate::initial_invite::STANDARD_HEADERS
-                                            .iter()
-                                            .any(|n| n.matches(&h.name))
-                                    })
-                                    .map(|h| serde_json::json!([h.name, h.value]))
+                                b2bua_sdk::consult_headers::consult_headers(r.headers())
+                                    .into_iter()
+                                    .map(|(name, value)| serde_json::json!([name, value]))
                                     .collect()
                             })
                             .unwrap_or_default();
