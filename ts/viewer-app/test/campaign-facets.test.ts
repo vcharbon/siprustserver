@@ -44,6 +44,7 @@ const run = (id: number, lanes: Readonly<Record<string, ReadonlyArray<CampaignRe
   startedAt: `2026-10-${10 + id}T02:00:00.000Z`,
   finishedAt: null,
   labels: [],
+  checked: {},
   lanes: Object.entries(lanes).map(([lane, results], at) => ({
     lane,
     runId: id * 10 + at,
@@ -80,8 +81,7 @@ const VIEW: Campaign = {
     description: null,
     groups: GROUPS[caseId] ?? [],
     links: [],
-    source: null,
-    checked: null
+    source: null
   })),
   runs: [
     run(4, {

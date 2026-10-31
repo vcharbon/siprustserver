@@ -978,6 +978,8 @@ export interface CampaignCheck {
    * where the store does not say.
    */
   readonly compare?: "value" | "statement" | null
+  /** The flow step it was made at; absent or null where none is named. */
+  readonly step?: string | null
 }
 
 export interface CampaignResult {
@@ -1011,6 +1013,8 @@ export interface CampaignRun {
   /** What the run states it ran on, in the deployment's order. */
   readonly labels: ReadonlyArray<{ readonly name: string; readonly value: string }>
   readonly lanes: readonly CampaignLane[]
+  /** Every check each case the run compiled makes, by case id. */
+  readonly checked: Readonly<Record<string, readonly CampaignChecked[]>>
 }
 
 /** One thing a campaign case uses, under the role it plays, with the page it is read on where there is one. */
@@ -1033,12 +1037,15 @@ export interface CampaignCase {
   readonly links: readonly CampaignLink[]
   /** The file the case was compiled from, as the newest run that compiled it read it; null where none kept it. */
   readonly source: { readonly file: string; readonly text: string } | null
-  /** Every check the case makes, passing or not; null where the campaign states none. */
-  readonly checked: readonly CampaignChecked[] | null
 }
 
-/** One check a campaign case makes: where, which field (`*`: any at the anchor), how, against what. */
+/**
+ * One check a campaign case makes: the flow step it is made at (null for a
+ * gate), where, which field (`*`: any the step's other checks do not name, or
+ * any at a gate's anchor), how, against what.
+ */
 export interface CampaignChecked {
+  readonly step: string | null
   readonly anchor: string
   readonly field: string
   readonly op: string

@@ -142,8 +142,8 @@ export const CaseHistory = ({ view, caseId, lanes, onClose, onDelta }: {
                 </tr>
               </thead>
               <tbody>
-                {checks.rows.map((row) => (
-                  <tr key={`${row.anchor}\u0000${row.field}\u0000${row.op}`}>
+                {checks.rows.map((row, at) => (
+                  <tr key={at}>
                     <td className="mono">{row.anchor}</td>
                     <td className="mono">
                       {row.field === "*" ? "" : row.field} {OP[row.op] ?? row.op}{" "}

@@ -33,6 +33,7 @@ describe("the summary page's place", () => {
       startedAt: "",
       finishedAt: null,
       labels: [],
+      checked: {},
       lanes: [{
         lane: "l",
         runId: id,

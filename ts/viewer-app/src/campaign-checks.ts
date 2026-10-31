@@ -1,12 +1,17 @@
 /**
- * What a case checks, as the case details list it: every check the campaign
- * states for the case, in its order, each marked per lane of the newest run
- * that judged the case: failed where a failed check of the lane has its
- * anchor and its field (any field for `*`), passed where the lane judged the
- * case otherwise, none where it did not. A failed check no listed check
- * matches follows the list, so every failure shows.
+ * What a case checks, as the case details list it: every check the newest run
+ * that judged the case states for it, in its order, each marked per lane of
+ * that run: failed where a failed check of the lane is its own, passed where
+ * the lane judged the case otherwise, none where it did not.
+ *
+ * A failed check is the listed check's own where both name one flow step: of
+ * its field (the one whose expected value it states, where several share the
+ * field), else the step's `*`. Without a step, a listed check of no step at its
+ * anchor takes it, by field or `*`. A failed check no listed one takes, and a
+ * lane that failed without naming a check, follow the list, so every failure
+ * shows.
  */
-import type { Campaign, CampaignChecked } from "./api.ts"
+import type { Campaign, CampaignCheck, CampaignChecked } from "./api.ts"
 import { failedChecks, judgedIn, resultOf } from "./campaign-facets.ts"
 
 export type Mark = "pass" | "failure" | "none"
@@ -16,45 +21,56 @@ export interface CheckRow extends CampaignChecked {
 }
 
 export interface CheckList {
-  /** The run the marks are read in; undefined where no run judged the case. */
+  /** The run the list and its marks are read in; undefined where no run judged the case. */
   readonly run: number | undefined
   readonly rows: readonly CheckRow[]
 }
 
-const matches = (row: CampaignChecked, failed: { readonly anchor: string; readonly field: string }): boolean =>
-  row.anchor === failed.anchor && (row.field === "*" || row.field === failed.field)
+/** The index of the listed check `failed` is the failure of; -1 where none is. */
+export const ownerOf = (listed: readonly CampaignChecked[], failed: CampaignCheck): number => {
+  const step = failed.step ?? null
+  if (step !== null) {
+    const same = listed.flatMap((row, at) => (row.step === step && row.field === failed.field ? [at] : []))
+    if (same.length > 0) return same.find((at) => listed[at]!.expected === failed.expected) ?? same[0]!
+    return listed.findIndex((row) => row.step === step && row.field === "*")
+  }
+  const exact = listed.findIndex((row) => row.step === null && row.anchor === failed.anchor && row.field === failed.field)
+  return exact >= 0 ? exact : listed.findIndex((row) => row.step === null && row.anchor === failed.anchor && row.field === "*")
+}
+
+/** The row a lane that failed without naming a check is marked on. */
+const UNNAMED: CampaignChecked = { step: null, anchor: "call", field: "verdict", op: "", expected: null }
 
 export const checkList = (view: Campaign, caseId: string, lanes: readonly string[]): CheckList => {
-  const listed = view.cases.find((c) => c.caseId === caseId)?.checked ?? []
   const run = view.runs.find((r) => judgedIn(r, lanes, caseId))
-  const failedOn = (lane: string) => {
-    const result = resultOf(run, lane, caseId)
-    return result === undefined || result.outcome === "error" ? undefined : failedChecks(result)
+  const listed = run?.checked[caseId] ?? []
+  const judged = new Set<string>()
+  const failedAt = new Map<number, Set<string>>()
+  const extra: Array<{ readonly check: CampaignChecked; readonly lanes: Set<string> }> = []
+  const addExtra = (check: CampaignChecked, lane: string) => {
+    const known = extra.find((e) => e.check.anchor === check.anchor && e.check.field === check.field && e.check.step === check.step)
+    if (known !== undefined) known.lanes.add(lane)
+    else extra.push({ check, lanes: new Set([lane]) })
   }
-  const markOf = (lane: string, row: CampaignChecked): Mark => {
-    const failed = failedOn(lane)
-    return failed === undefined ? "none" : failed.some((f) => matches(row, f)) ? "failure" : "pass"
-  }
-  const rows: Array<CheckRow> = listed.map((row) => ({
-    ...row,
-    marks: Object.fromEntries(lanes.map((lane) => [lane, markOf(lane, row)]))
-  }))
   for (const lane of lanes) {
-    for (const failed of failedOn(lane) ?? []) {
-      if (listed.some((row) => matches(row, failed))) continue
-      const known = rows.find((row) => row.anchor === failed.anchor && row.field === failed.field && row.op === "")
-      if (known !== undefined) {
-        ;(known.marks as Record<string, Mark>)[lane] = "failure"
-        continue
-      }
-      rows.push({
-        anchor: failed.anchor,
-        field: failed.field,
-        op: "",
-        expected: failed.expected,
-        marks: Object.fromEntries(lanes.map((l) => [l, l === lane ? "failure" : failedOn(l) === undefined ? "none" : "pass"]))
-      })
+    const result = resultOf(run, lane, caseId)
+    if (result === undefined || result.outcome === "error") continue
+    judged.add(lane)
+    const failed = failedChecks(result)
+    if (result.outcome === "failure" && failed.length === 0) addExtra(UNNAMED, lane)
+    for (const check of failed) {
+      const at = ownerOf(listed, check)
+      if (at >= 0) failedAt.set(at, (failedAt.get(at) ?? new Set()).add(lane))
+      else addExtra({ step: check.step ?? null, anchor: check.anchor, field: check.field, op: "", expected: check.expected }, lane)
     }
   }
-  return { run: run?.id, rows }
+  const markOf = (lane: string, failed: ReadonlySet<string> | undefined): Mark =>
+    !judged.has(lane) ? "none" : failed?.has(lane) === true ? "failure" : "pass"
+  return {
+    run: run?.id,
+    rows: [
+      ...listed.map((row, at) => ({ ...row, marks: Object.fromEntries(lanes.map((lane) => [lane, markOf(lane, failedAt.get(at))])) })),
+      ...extra.map(({ check, lanes: on }) => ({ ...check, marks: Object.fromEntries(lanes.map((lane) => [lane, markOf(lane, on)])) }))
+    ]
+  }
 }
