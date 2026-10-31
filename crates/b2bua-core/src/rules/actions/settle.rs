@@ -13,9 +13,8 @@
 //! | the unanswered caller's 503 leaves (ADR-0022) | `answer_unanswered_caller` | the caller's | [`Cause::LegEnd`] |
 //!
 //! A Confirmed leg BYEd at termination is not settled: its relays wait for
-//! their real finals. Discharge, reclaim and takeover never settle (ADR-0022
-//! X5): what a record owes the wire there is sent from the record as it
-//! stands.
+//! their real finals. A discharge never settles (ADR-0022 X5): it sends
+//! nothing.
 
 use call::helpers::{find_leg, update_leg, RelayPeer};
 use call::{Call, CallModelState, Dialog, DialogId, RequestRecord};

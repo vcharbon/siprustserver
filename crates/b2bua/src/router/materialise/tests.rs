@@ -348,13 +348,16 @@ async fn a_reclaimed_ending_body_owing_answers_is_discharged_off_the_wire() {
     call::testkit::stage_leg(&mut ending.a_leg, LegState::Confirmed);
     let dialog = ending.a_leg.dialogs.confirmed().map(call::Dialog::id).expect("her dialog");
     ending.a_leg.own_tag = Some(dialog.our_tag.clone());
-    let via = format!("SIP/2.0/UDP {};branch=z9hG4bK-owed", src());
-    let held = RequestRecord {
-        origin: RequestOrigin::Held,
-        source_vias: vec![via.clone()],
+    // Each record rebuilds the answer its sender is owed, toward the caller.
+    let received = RequestRecord {
+        source_vias: vec![format!("SIP/2.0/UDP {};branch=z9hG4bK-owed", src())],
+        source_call_id: ending.a_leg.call_id.clone(),
+        source_from: "<sip:alice@example.com>;tag=alicetag".into(),
+        source_to: format!("<sip:bob@example.com>;tag={}", dialog.our_tag),
         ..RequestRecord::relayed("INFO", 0, 2)
     };
-    let relayed = RequestRecord { source_vias: vec![via], ..RequestRecord::relayed("INFO", 3, 7) };
+    let held = RequestRecord { origin: RequestOrigin::Held, ..received.clone() };
+    let relayed = RequestRecord { outbound_cseq: 3, inbound_cseq: 7, ..received };
     call::helpers::add_record(&mut ending, "a", &dialog, held);
     call::helpers::add_record(&mut ending, "a", &dialog, relayed);
     let r = ending.call_ref.clone();
