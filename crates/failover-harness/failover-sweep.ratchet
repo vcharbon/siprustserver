@@ -76,9 +76,6 @@ guaranteed update/applied/primary-killed-unannounced 24
 guaranteed update/applied/primary-rebooted 24
 
 # applied: the Guaranteed cells that fire a row.
-keepalive/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: W-clean-end, rebooted: the restarted primary reclaims the call while the backup's takeover copy rings the callee it dialled on the decision it asked again; the proxy routes the caller's leg to the primary and the copy's legs to the copy, both serve the call at once and the primary's setup timer, armed from the copy's record, ends the answered call
-refer-x-bye/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: rebooted: the restarted primary reclaims the call while the backup's takeover copy rings the callee it dialled on the decision it asked again; the proxy routes the caller's leg to the primary and the copy's legs to the copy, both serve the call at once: the copy serves the callee's REFER and the transfer target's 480 is never ACKed
-reinvite-x-bye/applied/primary-rebooted/t1-logged ADR-0055 §11  # guaranteed: W-stale-resend, rebooted: the restarted primary reclaims the call while the backup's takeover copy rings the callee it dialled on the decision it asked again; the proxy routes the caller's leg to the primary and the copy's legs to the copy, both serve the call at once: the callee's BYE reaches the copy and the caller's re-INVITE the primary
 
 # The cells that fail outright, at either level, with no row to take the
 # finding.
