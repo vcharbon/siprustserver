@@ -59,6 +59,9 @@ sip-clock = { path = "../sip-clock" }
 # MSVC target). "profiling" lets `_RJEM_MALLOC_CONF=prof:true` dump the heap.
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = { version = "0.7", features = ["profiling"] }
+# The binary's jemalloc defaults (its `malloc_conf`, ADR-0038) and the resolved
+# configuration line it logs at startup.
+jemalloc-stats = { path = "../jemalloc-stats" }
 
 [dev-dependencies]
 # The counting global allocator of the allocations-per-call bench

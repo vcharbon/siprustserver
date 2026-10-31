@@ -2764,6 +2764,7 @@ dependencies = [
  "e2e-model",
  "flamegraph-util",
  "futures",
+ "jemalloc-stats",
  "layer-harness",
  "loadrun-render",
  "metric-catalogue",

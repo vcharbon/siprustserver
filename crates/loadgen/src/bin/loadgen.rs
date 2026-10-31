@@ -24,5 +24,9 @@
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn main() -> std::io::Result<()> {
+    // The resolved allocator configuration, with the defaults jemalloc-stats
+    // sets (ADR-0038).
+    #[cfg(not(target_env = "msvc"))]
+    jemalloc_stats::log_config();
     loadgen::app::main(loadgen::app::Shipped)
 }
