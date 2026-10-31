@@ -19,7 +19,7 @@ use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenanc
 use super::address::{address, identity, UnreadableAddress};
 use super::body::{media_type, sdp, source_content_type};
 use super::egress::apply_b_leg_egress;
-use super::identity::{allocate_leg_contact, leg_via, stated_contact, CallMarks};
+use super::identity::{allocate_leg_contact, dialling_via, stated_contact, CallMarks};
 use super::option_tags::{apply_offered_option_tags, apply_withheld_option_tags};
 use super::stated_text::writable;
 use b2bua_sdk::model::Body;
@@ -379,15 +379,15 @@ pub fn build_b_leg(
         from: Some(header::From::new(from_addr.clone()).with_tag(SipStr::owned(&from_tag))),
         to: Some(header::To::new(to_addr.clone())),
         cseq: 1,
-        via: Some(leg_via(
+        via: Some(dialling_via(
             config,
             marks,
             leg_id,
-            Some(super::RequestFacts {
+            super::RequestFacts {
                 method: "INVITE",
                 uri: &request_uri.text(),
                 offer: !body.is_empty(),
-            }),
+            },
             branch.clone(),
         )),
         contact: stated_contact(&contact),

@@ -91,9 +91,11 @@ impl CallTopology {
 /// The owners the core reads for a turn on a call placed under `topology`,
 /// run on the node `this`.
 pub fn owners(this: &RelayOwner, topology: Option<&CallTopology>) -> Owners {
+    let other = topology.and_then(|t| t.other_owner(&this.ordinal));
     Owners {
         this: this.clone(),
-        other: topology.and_then(|t| t.other_owner(&this.ordinal)).map(str::to_string),
+        other: other.map(str::to_string),
+        primary: topology.filter(|_| other.is_some()).map(|t| t.pri.clone()),
         copy_served: topology.is_some_and(|t| t.copy_served(&this.ordinal)),
     }
 }

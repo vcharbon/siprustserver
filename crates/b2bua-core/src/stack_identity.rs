@@ -4,8 +4,9 @@
 //! params so any inbound response/request self-routes back to the owning call
 //! without an external lookup, and a straggler of an earlier call on the same
 //! `callRef` is told from the live one. The Via also states the call's other
-//! owner (`bak`), which the front proxy signs into the leg's stickiness cookie
-//! (ADR-0055 §8), and, signed with the cluster key, the leg and the request's
+//! owner (`bak`), or on a leg's dialog-creating request the call's primary and
+//! backup (`pri`, `bak`), which the front proxy signs into the leg's stickiness
+//! cookie (ADR-0055 §8), and, signed with the cluster key, the leg and the request's
 //! Request-URI (`vx`, ADR-0055 §12): a node that holds no record of the
 //! request reads them off its response.
 //!
@@ -32,9 +33,13 @@ pub struct StackIdentityOpts<'a> {
     /// The call's [`call::Call::incarnation_mark`].
     pub incarnation_mark: &'a str,
     pub is_emergency: bool,
-    /// The worker that owns the call beside the sender, `None` for a call
-    /// with one owner.
-    pub other_owner: Option<&'a str>,
+    /// The owner the Via names `bak`: the worker that owns the call beside
+    /// the sender, or with `primary` stated the call's backup; `None` for a
+    /// call with one owner.
+    pub backup: Option<&'a str>,
+    /// The call's primary, stated (`pri`) on a leg's dialog-creating request
+    /// only; `None` states none.
+    pub primary: Option<&'a str>,
     /// What the request the Via rides states about itself — its Request-URI
     /// and whether it carries a session offer — with the cluster key that
     /// signs it into the via-extension; `None` states none.
@@ -58,8 +63,9 @@ fn encoded(value: &str) -> ParamValue {
 }
 
 /// Build the B2BUA Via for an outbound message (with `cr`/`lg`/`ci`/`rport`
-/// params, `bak` naming the call's other owner when it has one, and the
-/// signed `vx` when the request states its Request-URI and it fits).
+/// params, `pri` naming the call's primary when stated, `bak` naming the
+/// call's other owner or backup when it has one, and the signed `vx` when the
+/// request states its Request-URI and it fits).
 pub fn build_call_via(opts: &StackIdentityOpts, branch: String) -> Via {
     let cr = encode_param(opts.call_ref);
     let mut via = Via::udp(SipStr::owned(opts.local_ip), opts.local_port)
@@ -71,7 +77,10 @@ pub fn build_call_via(opts: &StackIdentityOpts, branch: String) -> Via {
     if opts.is_emergency {
         via = via.with_param("em", ParamValue::Token(SipStr::from_static("1")));
     }
-    if let Some(owner) = opts.other_owner.filter(|o| !o.is_empty()) {
+    if let Some(primary) = opts.primary.filter(|p| !p.is_empty()) {
+        via = via.with_param("pri", encoded(primary));
+    }
+    if let Some(owner) = opts.backup.filter(|o| !o.is_empty()) {
         via = via.with_param("bak", encoded(owner));
     }
     if let Some((facts, key)) = opts.request {
@@ -110,7 +119,8 @@ pub fn call_via_of(via: &Via, local_ip: &str, local_port: u16, branch: String) -
         leg: &leg,
         incarnation_mark: &incarnation_mark,
         is_emergency: via.param("em").is_some(),
-        other_owner: None,
+        backup: None,
+        primary: None,
         request: None,
     };
     Some(build_call_via(&opts, branch))
@@ -338,7 +348,8 @@ mod tests {
             leg: "b-1",
             incarnation_mark: "k3x9",
             is_emergency,
-            other_owner: None,
+            backup: None,
+            primary: None,
             request: None,
         }
     }

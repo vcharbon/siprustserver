@@ -1,7 +1,7 @@
 //! The B2BUA's own per-leg identity (Via + Contact) on outbound messages,
 //! binding [`B2buaConfig`]'s addresses to [`crate::stack_identity`]'s wire
 //! shapes (call-ref/leg/incarnation markers, `;em=1`/`;emerg=1` emergency
-//! stamps, the call's other owner and the signed via-extension on the Via).
+//! stamps, the call's owners and the signed via-extension on the Via).
 //! The Via names the sending node; a leg's Contact is allocated once, when
 //! the leg is created, and read back from the record ever after.
 
@@ -26,7 +26,7 @@ pub struct CallMarks<'a> {
     /// `call.emergency == Some(true)`.
     pub is_emergency: bool,
     /// The call's owners: this node, named on the records of the requests it
-    /// sends, and the other owner, stated on the Via.
+    /// sends, and the owners stated on the Via.
     pub owners: &'a Owners,
 }
 
@@ -41,15 +41,24 @@ impl<'a> CallMarks<'a> {
         }
     }
 
+    /// The Via options of a request on `leg_id`. One that `dials` the leg
+    /// states the call's primary and its backup; any other, the other owner.
     fn opts<'b>(
         &self,
         config: &'b B2buaConfig,
         leg_id: &'b str,
         request: Option<RequestFacts<'b>>,
+        dials: bool,
     ) -> StackIdentityOpts<'b>
     where
         'a: 'b,
     {
+        let owners = self.owners;
+        let primary = owners.primary.as_deref().filter(|_| dials);
+        let backup = match primary {
+            Some(primary) if primary != owners.this.ordinal => Some(owners.this.ordinal.as_str()),
+            _ => owners.other.as_deref(),
+        };
         StackIdentityOpts {
             local_ip: &config.sip_local_ip,
             local_port: config.sip_local_port,
@@ -57,7 +66,8 @@ impl<'a> CallMarks<'a> {
             leg: leg_id,
             incarnation_mark: self.incarnation_mark,
             is_emergency: self.is_emergency,
-            other_owner: self.owners.other.as_deref(),
+            backup,
+            primary,
             request: request.zip(config.cluster_key.as_ref()),
         }
     }
@@ -72,7 +82,22 @@ pub fn leg_via(
     request: Option<RequestFacts>,
     branch: String,
 ) -> Via {
-    build_call_via(&marks.opts(config, leg_id, request), branch)
+    build_call_via(&marks.opts(config, leg_id, request, false), branch)
+}
+
+/// [`leg_via`] for the request that dials leg `leg_id`, its dialog-creating
+/// INVITE: it states the call's primary and backup whichever owner sends it,
+/// so the leg's cookie names the call's two owners and its INVITE responses
+/// reach the primary while it lives (ADR-0055 §8). Its CANCEL and non-2xx ACK
+/// share this Via.
+pub fn dialling_via(
+    config: &B2buaConfig,
+    marks: CallMarks,
+    leg_id: &str,
+    request: RequestFacts,
+    branch: String,
+) -> Via {
+    build_call_via(&marks.opts(config, leg_id, Some(request), true), branch)
 }
 
 /// The Contact URI of the leg `leg_id` of the call `marks` name, allocated

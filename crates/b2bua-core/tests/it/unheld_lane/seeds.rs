@@ -32,7 +32,8 @@ fn node_via(offer: bool, signed: bool) -> String {
         leg: "b-1",
         incarnation_mark: "k3x9",
         is_emergency: false,
-        other_owner: Some("w1"),
+        backup: Some("w1"),
+        primary: None,
         request: signed.then_some((facts, &k)),
     };
     build_call_via(&opts, "z9hG4bKinvite".to_string()).to_wire()
