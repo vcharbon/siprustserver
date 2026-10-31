@@ -234,10 +234,12 @@ pub(super) fn extract_identity(
             }
         }
     }
-    let mut vias: Vec<header::Via> = Vec::with_capacity(segments.len());
+    // The top hop and the lower ones, each list at its exact size.
+    let mut head: Option<header::Via> = None;
+    let mut hops: Vec<header::Via> = Vec::with_capacity(segments.len().saturating_sub(1));
     for &(value, raw) in &segments {
         let v = parse_via(&value.reslice(raw));
-        let top = vias.is_empty();
+        let top = head.is_none();
         // A lenient reading holds a sent-by the reader refuses whole, as it
         // holds a URI it refuses opaque.
         let (host, port) = match &v.sent_by {
@@ -275,18 +277,21 @@ pub(super) fn extract_identity(
             Some(host) => HostPort::new(host, port),
             None => HostPort::whole(v.sent_by_text),
         };
-        vias.push(header::Via::from_parts(v.protocol, v.version, v.transport, sent_by, v.params));
+        let via = header::Via::from_parts(v.protocol, v.version, v.transport, sent_by, v.params);
+        match head {
+            None => head = Some(via),
+            Some(_) => hops.push(via),
+        }
     }
 
-    let mut hops = vias.into_iter();
-    let top = hops.next().ok_or_else(|| SipParseError::new("Missing mandatory Via header"))?;
+    let top = head.ok_or_else(|| SipParseError::new("Missing mandatory Via header"))?;
 
     Ok(Identity {
         from: header::From::new(from),
         to: header::To::new(to),
         call_id: header::CallId::new(call_id),
         cseq,
-        via: NonEmpty::from_parts(top, hops.collect()),
+        via: NonEmpty::from_parts(top, hops),
     })
 }
 
@@ -324,6 +329,10 @@ fn read_contacts(
                 return Err(SipParseError::new(format!("Strict Contact: {reason} (\"{span}\")")));
             }
         }
+    }
+    // The list lives as long as the message: no room for a dropped entry.
+    if contact_list.len() < contact_list.capacity() {
+        contact_list.shrink_to_fit();
     }
     // A lenient read keeps the readable entries beside a misplaced wildcard.
     Ok(if contact_wildcard && contact_list.is_empty() {
@@ -447,3 +456,7 @@ pub fn extract_response_fields(
     }
     Ok(common)
 }
+
+#[cfg(test)]
+#[path = "extract_fields_tests.rs"]
+mod tests;

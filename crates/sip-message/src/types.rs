@@ -75,6 +75,11 @@ impl<T> NonEmpty<T> {
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         std::iter::once(&self.head).chain(self.tail.iter())
     }
+    /// The room the elements after the first hold.
+    #[cfg(test)]
+    pub(crate) fn tail_capacity(&self) -> usize {
+        self.tail.capacity()
+    }
 }
 
 /// Every Contact on a message. `Contact: *` (RFC 3261 §10.2.2 wildcard) is a

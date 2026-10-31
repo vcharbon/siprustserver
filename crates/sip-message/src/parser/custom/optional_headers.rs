@@ -19,7 +19,7 @@ use crate::types::{OptionalHeaders, SipHeader};
 /// comma-separated entries), each entry by the strict name-addr reader, its
 /// URI a [`UriRole::Identity`]. Any malformed entry → `Err`, and the header's
 /// entries are not used (ADR-0053). The list is reserved for one entry per
-/// line.
+/// line and holds no more room than its entries.
 fn parse_name_addr_list(
     values: &[&SipStr],
     header_name: HeaderName,
@@ -35,6 +35,9 @@ fn parse_name_addr_list(
                 .map_err(|e| SipParseError::new(format!("Strict {header_name}: {}", e.reason)))?;
             out.push(addr);
         }
+    }
+    if out.len() < out.capacity() {
+        out.shrink_to_fit();
     }
     Ok(out)
 }

@@ -122,11 +122,21 @@ fn comma_separated_contacts_fold_identically() {
 }
 
 /// The parsed message keeps its Contact list at its length: the list is
-/// reserved once for the entries the header lines carry, so a message kept for
-/// a call's life holds no spare slots.
+/// reserved once for the entries the header lines carry and holds no room for
+/// a dropped one, so a message kept for a call's life holds no spare slots.
 #[test]
 fn the_contact_list_is_reserved_at_its_length() {
-    for (raw, len) in [(SINGLE_INVITE, 1), (REDIRECT_MULTI_LINE, 2), (REDIRECT_COMMA_LIST, 2)] {
+    // A redirect drops its unreadable targets and keeps no room for them.
+    let unreadable = vec!["<sip:@>"; 100].join(", ");
+    let crowded =
+        REDIRECT_BAD_SECOND_CONTACT.replace("Contact: <sip:@>", &format!("Contact: {unreadable}"));
+    for (raw, len) in [
+        (SINGLE_INVITE, 1),
+        (REDIRECT_MULTI_LINE, 2),
+        (REDIRECT_COMMA_LIST, 2),
+        (REDIRECT_BAD_SECOND_CONTACT, 1),
+        (crowded.as_str(), 1),
+    ] {
         let msg = parse_ok(raw);
         let ContactSet::Contacts(cs) = contacts_of(&msg) else { panic!("non-wildcard") };
         assert_eq!((cs.len(), cs.capacity()), (len, len), "{raw}");
