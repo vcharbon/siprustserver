@@ -1,14 +1,18 @@
 /**
  * One case's delta on one run and lane: the failed checks as large cards, each
- * with its decision line and the cell's decision-service log beside it, then
- * the ladder of what the run produced and the HTTP exchanges, the selected
- * message above the ladder.
+ * with its decision line and the cell's decision-service log beside it, the
+ * cell's CDRs and their delta against the case's other sub-cases or lanes,
+ * then the ladder of what the run produced and the HTTP exchanges, the
+ * selected message above the ladder.
  */
 import { buildRecordingLayout, type LadderEvent, NO_HTTP_EXCHANGES, parseRecording } from "@sip/viewer-core"
 import type { JSX } from "react"
 import { useMemo, useState } from "react"
 import { api, type Campaign, type CampaignResult, useAsync } from "../api.ts"
+import { declaredOf } from "../campaign-cdr.ts"
 import { cellDocument } from "../opening.ts"
+import { CdrDeltaTable } from "./CdrDeltaTable.tsx"
+import { CellCdrs } from "./CellCdrs.tsx"
 import { CheckCard } from "./CheckCard.tsx"
 import { Exchange } from "./Exchange.tsx"
 import { LadderPane } from "./LadderPane.tsx"
@@ -100,6 +104,15 @@ export const CheckDelta = ({ view, caseId, run, lane, onClose }: {
                 <LogLine capture={view.capture} session={laneRun.session} result={result} />
               </p>
             )}
+            {result.cell !== null && (
+              <CellCdrs
+                capture={view.capture}
+                session={laneRun.session}
+                cell={result.cell}
+                declared={declaredOf(view, caseId, run)}
+              />
+            )}
+            {result.cell !== null && <CdrDeltaTable view={view} caseId={caseId} run={run} lane={lane} />}
             {result.cell !== null && <Ladder capture={view.capture} session={laneRun.session} cell={result.cell} />}
           </>
         )}

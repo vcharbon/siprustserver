@@ -1027,6 +1027,59 @@ export interface CampaignRun {
   readonly scope: string | null
   /** Every check each case the run compiled makes, by case id. */
   readonly checked: Readonly<Record<string, readonly CampaignChecked[]>>
+  /** The raw CDR lines each call of each case the run compiled declares, by case id; absent where the deployment states none. */
+  readonly rawCdr?: Readonly<Record<string, readonly CampaignDeclaredLines[]>>
+}
+
+/** One call's declared raw CDR lines: its id in the case, the caller leg its Call-ID is minted for, how many. */
+export interface CampaignDeclaredLines {
+  readonly call: string
+  readonly leg: string
+  readonly lines: number
+}
+
+/** One CDR of a cell as the call details draw it: a title, its fields, its tables, the whole as JSON where it is one. */
+export interface CdrBlock {
+  readonly title: string
+  readonly fields: ReadonlyArray<{ readonly name: string; readonly value: string }>
+  readonly tables: ReadonlyArray<{
+    readonly title: string
+    readonly columns: readonly string[]
+    readonly rows: ReadonlyArray<readonly string[]>
+  }>
+  readonly json: unknown
+}
+
+/** A campaign cell's CDRs: each file its bundle holds as blocks, its raw CDR lines per call, the counts its verdict states. */
+export interface CellCdr {
+  readonly files: ReadonlyArray<{
+    readonly name: string
+    readonly label: string
+    readonly blocks: readonly CdrBlock[]
+    /** Why a held file reads as no block; null where it reads. */
+    readonly note: string | null
+  }>
+  /** The raw CDR lines of each call, by the caller leg its Call-ID is minted for. */
+  readonly lines: ReadonlyArray<{ readonly leg: string; readonly callId: string; readonly lines: number }>
+  readonly facts: ReadonlyArray<{ readonly name: string; readonly value: string }>
+}
+
+/** How a differing CDR field is read: `timing` and `identity` are expected to differ, `content` is not. */
+export type CdrDeltaKind = "timing" | "identity" | "content"
+
+/** The raw CDR lines of several cells, the fields that tell them apart. */
+export interface CdrDelta {
+  /** Each cell compared and its raw CDR lines; null where its bundle holds none. */
+  readonly columns: ReadonlyArray<{ readonly session: string; readonly cell: string; readonly lines: number | null }>
+  readonly rows: ReadonlyArray<{
+    readonly leg: string
+    readonly line: number
+    readonly field: string
+    readonly kind: CdrDeltaKind
+    readonly values: ReadonlyArray<string | null>
+  }>
+  /** The fields compared that read the same in every cell holding their line. */
+  readonly same: number
 }
 
 /** One thing a campaign case uses, under the role it plays, with the page it is read on where there is one. */
@@ -1276,8 +1329,20 @@ export const api = {
   campaigns: () => request<readonly string[]>("/api/campaign"),
   /** One environment's latest runs of a campaign (the server's choice where none is named), `run` among them. */
   campaign: (capture: string, query: { readonly env?: string | undefined; readonly run?: number | undefined } = {}) =>
-    request<Campaign>(`/api/campaign/${encodeURIComponent(capture)}${search({ env: query.env, run: query.run })}`)
+    request<Campaign>(`/api/campaign/${encodeURIComponent(capture)}${search({ env: query.env, run: query.run })}`),
+  /** A campaign cell's CDRs, decoded. */
+  campaignCdr: (capture: string, session: string, cell: string) =>
+    request<CellCdr>(`${campaignCellPath(capture, session, cell)}/cdr`),
+  /** The raw CDR lines of `cells` compared, in their order. */
+  campaignCdrDelta: (capture: string, cells: ReadonlyArray<{ readonly session: string; readonly cell: string }>) =>
+    request<CdrDelta>(
+      `/api/campaign/${encodeURIComponent(capture)}/cdr-delta${search({ cells: cells.map((c) => `${c.session}/${c.cell}`).join(",") })}`
+    )
 }
+
+/** The path of one campaign cell under the API. */
+export const campaignCellPath = (capture: string, session: string, cell: string): string =>
+  `/api/campaign/${encodeURIComponent(capture)}/runs/${encodeURIComponent(session)}/cells/${encodeURIComponent(cell)}`
 
 export type Async<A> =
   | { readonly state: "loading" }
