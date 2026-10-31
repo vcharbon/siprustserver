@@ -766,3 +766,17 @@ async fn a_taken_final_of_the_copys_own_invite_draws_one_covering_write() {
     meet(&n, &live, &copy, FlushDirection::Reverse, MaterialiseOrigin::Reclaim).await;
     assert_eq!(live_versions(&n, &live.call.call_ref).0, (4, 2), "no write: nothing changed hands");
 }
+
+/// **The primary writes once when it takes a leg its copy dialled.** The
+/// backup's copy dialled a leg the primary's own copy lacks, its INVITE
+/// still ringing: the INVITE's responses reach the primary, which takes it
+/// over and writes the call once so the copy stands down (ADR-0047 D7).
+#[tokio::test(start_paused = true)]
+async fn a_taken_dial_of_the_copys_own_draws_one_covering_write() {
+    let n = node("w0").await;
+    let copy_worker = call::RelayOwner::new("w1", "w1-boot-1");
+    let live = answered(4, 1, CallModelState::Active);
+    let copy = dialled_by(answered(4, 2, CallModelState::Active), copy_worker, None);
+    meet(&n, &live, &copy, FlushDirection::Reverse, MaterialiseOrigin::Reclaim).await;
+    assert_eq!(live_versions(&n, &live.call.call_ref).0, (5, 2), "one write of the primary's");
+}

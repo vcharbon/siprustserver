@@ -4,17 +4,18 @@
 //! cleanly ([`super::diverged`]). A meeting is not this node's write: the
 //! live copy is replaced without a bump of this node's axis
 //! ([`CallState::update_quiet`](crate::store::CallState::update_quiet)) and
-//! without a flush. The one exception is a taken copy that carries the
-//! final of a leg's dialling INVITE the other node took while this node was
-//! not routable: that node serves the call as a takeover copy, and the
-//! primary then writes once so the copy stands down (ADR-0047 D7).
+//! without a flush. The one exception is a taken copy that carries a leg's
+//! dialling INVITE, or its final, the other node took as a takeover copy
+//! while this node was not routable or read dead: the primary takes that
+//! INVITE's client transaction over and writes once so the copy stands down
+//! (ADR-0047 D7).
 
 use std::sync::Arc;
 
 use call::helpers::{lifecycle_behind, with_own_running};
 use call::{Call, CallModelState};
 
-use super::super::materialise::answered_invite_seeds;
+use super::super::materialise::{answered_invite_seeds, dialled_invite_seeds};
 use super::super::release::{release_call, ReleaseKind};
 use super::super::resend;
 use super::super::restore_hygiene::{resume_met_ladders, sanitize_restored_timers};
@@ -141,13 +142,14 @@ fn keep(ctx: &Arc<RouterCtx>, live: &Enveloped, kept: Enveloped) {
 /// body it counts — with the other's exempt fields. The live timer service
 /// follows the ledger taken, and every INVITE it holds answered 2xx and
 /// awaiting its ACK is seeded in the layer, so a copy of that INVITE draws
-/// the 2xx (an identity already held takes it as its final). A taken copy
-/// that carries the final of a leg's dialling INVITE the other owner sent
-/// draws one write ([`announce_reclaim`]): the other owner took that final
-/// as a takeover copy while this node was not routable, and stands down on
-/// the write; the requests it awaited that the live copy did not are sent
-/// again here, the only owner of their answers now (ADR-0047 D7, ADR-0039
-/// decision 5).
+/// the 2xx (an identity already held takes it as its final), and every leg's
+/// dialling INVITE the other owner sent with no final that the live copy
+/// lacks is seeded as a client INVITE ([`dialled_invite_seeds`]): its
+/// responses reach this node. A taken copy that carries such a dial, or the
+/// final of one the live copy awaits, draws one write ([`announce_reclaim`]):
+/// the other owner took it as a takeover copy, and stands down on the write;
+/// the requests it awaited that the live copy did not are sent again here,
+/// the only owner of their answers now (ADR-0047 D7, ADR-0039 decision 5).
 async fn take_whole(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
@@ -166,8 +168,9 @@ async fn take_whole(
     }
     let Enveloped { call: mut taken, topology } = taken;
     resync_timers(ctx, call_ref, &live.call, &mut taken, now_ms).await;
-    let seeds = answered_invite_seeds(&taken);
-    let released = takes_a_copys_final(&live.call, &taken, &ctx.relay_owner);
+    let mut seeds = answered_invite_seeds(&taken);
+    seeds.extend(dialled_invite_seeds(&taken, &live.call, &ctx.relay_owner));
+    let released = takes_a_copys_dial(&live.call, &taken, &ctx.relay_owner);
     ctx.state.update_enveloped(Enveloped::new(taken.clone(), topology));
     if !seeds.is_empty() {
         let _ = ctx.txn.seed(call_ref, seeds).await;
@@ -185,21 +188,19 @@ async fn take_whole(
     }
 }
 
-/// Whether `taken`, the other owner's copy, carries the final of a leg's
-/// dialling INVITE that node sent and `live` still awaits: the final reached
-/// the other owner's takeover copy while this node was not routable, and
-/// this node writes the call once so that copy stands down (ADR-0047 D7).
-fn takes_a_copys_final(live: &Call, taken: &Call, this: &call::RelayOwner) -> bool {
-    live.b_legs.iter().any(|leg| {
-        let awaited = leg.invite.as_ref().is_some_and(|r| r.relayed_by != *this)
-            && leg.outbound_invite().is_some_and(|i| i.final_received.is_none());
-        let answered = taken
-            .b_legs
-            .iter()
-            .find(|t| t.leg_id == leg.leg_id)
-            .and_then(call::Leg::outbound_invite)
-            .is_some_and(|i| i.final_received.is_some());
-        awaited && answered
+/// Whether `taken`, the other owner's copy, carries a leg's dialling INVITE
+/// that node sent which `live` lacks, or its final `live` still awaits: the
+/// other owner dialled the leg, or took its final, as a takeover copy while
+/// this node was not routable or read dead, and this node writes the call
+/// once so that copy stands down, the leg's INVITE its own (ADR-0047 D7).
+fn takes_a_copys_dial(live: &Call, taken: &Call, this: &call::RelayOwner) -> bool {
+    let answered = |l: &call::Leg| l.outbound_invite().is_some_and(|i| i.final_received.is_some());
+    taken.b_legs.iter().any(|leg| {
+        let dialled_there = leg.invite.as_ref().is_some_and(|r| r.relayed_by != *this)
+            && leg.outbound_invite().is_some();
+        let held =
+            live.b_legs.iter().find(|l| l.leg_id == leg.leg_id && l.outbound_invite().is_some());
+        dialled_there && held.is_none_or(|held| !answered(held) && answered(leg))
     })
 }
 

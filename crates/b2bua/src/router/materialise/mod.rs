@@ -410,6 +410,44 @@ pub(in crate::router) fn answered_invite_seeds(call: &Call) -> Vec<sip_txn::TxnS
         .collect()
 }
 
+/// The seeds the call's primary hands the layer when it takes its backup's
+/// copy at a meeting, for the legs that copy dialled and `live`, the
+/// primary's own copy until the meeting, does not: each leg's dialling INVITE
+/// another node sent that has no final, as a client INVITE. A leg's cookie
+/// names the call's primary, so the INVITE's responses reach it (ADR-0055
+/// §8), and it takes the INVITE's client transaction over from the record
+/// (ADR-0047 D7).
+pub(in crate::router) fn dialled_invite_seeds(
+    call: &Call,
+    live: &Call,
+    this: &call::RelayOwner,
+) -> Vec<sip_txn::TxnSeed> {
+    let branches: Vec<&str> = call
+        .b_legs
+        .iter()
+        .filter(|leg| leg.invite.as_ref().is_some_and(|r| r.relayed_by != *this))
+        .filter(|leg| leg.outbound_invite().is_some_and(|i| i.final_received.is_none()))
+        .filter_map(|leg| leg.dialled_sent())
+        .map(|sent| sent.branch.as_str())
+        .filter(|branch| !dials_on(live, branch))
+        .collect();
+    // No instant moves an INVITE seed: the latest one is read.
+    seeds::seeds_for(call, i64::MAX)
+        .into_iter()
+        .filter(|s| match s {
+            sip_txn::TxnSeed::ClientInvite { invite, .. } => {
+                invite.top_via().branch().is_some_and(|b| branches.contains(&b))
+            }
+            _ => false,
+        })
+        .collect()
+}
+
+/// Whether `call` holds a leg whose dialling INVITE left on `branch`.
+fn dials_on(call: &Call, branch: &str) -> bool {
+    call.b_legs.iter().filter_map(|leg| leg.dialled_sent()).any(|sent| sent.branch == branch)
+}
+
 /// Whether `call` names an INVITE transaction a live copy must serve — one a
 /// materialisation would seed ([`seeds::seeds_for`]): an INVITE awaiting its
 /// final, whose bound and finals the copy owns, a 2xx awaiting its ACK, whose
