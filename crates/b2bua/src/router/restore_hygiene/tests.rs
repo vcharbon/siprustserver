@@ -401,3 +401,60 @@ fn reanchor_applies_above_deadband_and_ignores_below() {
     let small = reanchored(vec![keepalive(1_000_000)], 200); // below the 1 s deadband
     assert_eq!(small[0].fire_at, 1_000_000, "sub-deadband latency offset is a no-op");
 }
+
+/// A call whose caller's 2xx, sent at 0 ms, awaits its ACK on its §13.3.1.4
+/// ladder, the first rung due at 500 ms.
+fn answered_on_its_ladder() -> (Call, Obligation) {
+    use call::{Dialog, DialogState, Repeated, RetainedEmission, Unacked2xx};
+    use sip_retransmit::Class;
+    let mut call = call_holding(Vec::new());
+    let mut a1 = Dialog::new("a1", call.a_leg_invite.from_tag.clone(), DialogState::Confirmed, 1);
+    let (emission, first) = RetainedEmission::paced(
+        b"SIP/2.0 200 OK\r\n\r\n".to_vec(),
+        ("192.0.2.9".into(), 5060),
+        Class::Final2xx,
+        Repeated::response("INVITE", 200),
+    );
+    call::helpers::hold_answered_2xx(
+        &mut a1,
+        1,
+        Unacked2xx { dialog_tag: "a1".into(), cseq: 1, emission },
+    );
+    call.a_leg.dialogs = vec![a1].into();
+    let obligation = Obligation::AckOf2xx { leg: "a".into(), dialog_tag: "a1".into(), cseq: 1 };
+    let key = TimerKey::obligation(TimerType::Rung, obligation.clone());
+    call::helpers::arm_timer(&mut call, key, call::millis_i64(first));
+    (call, obligation)
+}
+
+/// A rung a meeting takes past due goes on along its ladder: the rung due at
+/// 500 ms, met at 1 100 ms, is the one due at 1 500 ms, its rung index
+/// stepped with it, so the next one is 2 s later (RFC 3261 §13.3.1.4).
+#[test]
+fn a_met_rung_past_due_goes_on_along_its_ladder() {
+    let (mut call, obligation) = answered_on_its_ladder();
+    let mut fresh = std::mem::take(&mut call.timers);
+    resume_met_ladders(&mut call, &mut fresh, 1_100, &B2buaConfig::default());
+    assert_eq!(fresh.iter().map(|t| t.fire_at).collect::<Vec<_>>(), vec![1_500]);
+    let bound = ladder_bound(&B2buaConfig::default(), &obligation);
+    let next = advance_ladder(&mut call, &obligation, bound).expect("a rung left");
+    assert_eq!(next, Duration::from_secs(2), "the rung after the one at 1 500 ms");
+}
+
+/// A rung not yet due is left as it stands.
+#[test]
+fn a_met_rung_not_yet_due_is_left_as_it_stands() {
+    let (mut call, _) = answered_on_its_ladder();
+    let mut fresh = std::mem::take(&mut call.timers);
+    resume_met_ladders(&mut call, &mut fresh, 400, &B2buaConfig::default());
+    assert_eq!(fresh.iter().map(|t| t.fire_at).collect::<Vec<_>>(), vec![500]);
+}
+
+/// A ladder with no rung left inside its bound leaves the met timers.
+#[test]
+fn a_met_ladder_past_its_bound_leaves_the_timers() {
+    let (mut call, _) = answered_on_its_ladder();
+    let mut fresh = std::mem::take(&mut call.timers);
+    resume_met_ladders(&mut call, &mut fresh, 60_000, &B2buaConfig::default());
+    assert!(fresh.is_empty(), "{fresh:?}");
+}
