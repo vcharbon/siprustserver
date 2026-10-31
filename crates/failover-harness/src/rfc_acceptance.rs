@@ -186,6 +186,7 @@ impl RfcAcceptance {
         let capture = CaptureIndex::new(sip_net_testkit::audit_wire_entries(events));
         let mut gating = Vec::new();
         let mut accepted = Vec::new();
+        let pass = sip_net_testkit::AuditPass::new(events);
         for rule in sip_net_testkit::rfc_cross_message_rules_scoped(scoped_out.clone()) {
             // Honour the advisory tier exactly as the scenario-harness hard gate
             // does: a `force_advisory` rule (a documented B2BUA-architectural
@@ -197,7 +198,7 @@ impl RfcAcceptance {
                 continue;
             }
             let mut per_dialog = DialogRequests::default();
-            for (lane, detail, offending, _charged) in rule.check_positioned(events) {
+            for (lane, detail, offending, _charged) in rule.check_pass(&pass) {
                 let finding = (rule.name().to_string(), lane, detail);
                 match self.taker(rule.name(), offending, &capture, &mut per_dialog) {
                     Some(row) => accepted.push((finding, row)),

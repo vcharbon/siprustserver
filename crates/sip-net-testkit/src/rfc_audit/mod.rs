@@ -24,7 +24,8 @@
 //! `rfc_rules::Msg` from; [`relay_lanes`] classifies which lanes forward rather
 //! than author, the one policy input the adapter needs beyond the rule bodies;
 //! [`capture_index`] parses a capture once for the predicates that read what
-//! surrounds an offending message.
+//! surrounds an offending message; [`AuditPass`] builds the projections every
+//! rule of one pass reads once for the whole rule list.
 //!
 //! SDP grammar is NOT here: a description is read as a document by
 //! [`sip_message::sdp_doc`], the one home for it.
@@ -69,9 +70,15 @@ mod recorded;
 // The datagrams the loss model dropped before their taker.
 mod dropped;
 
+// The projection builds a pass made, for the tests that bound them.
+#[cfg(test)]
+mod builds;
+
 /// A list of cross-message rules, shared: the rules are stateless, so one list
 /// serves every recorded network that audits with it.
 pub type CrossMessageRules = Arc<[Arc<dyn CrossMessageAuditRule>]>;
+
+pub use wire_adapter::AuditPass;
 
 /// The default cross-message rule list, built once per process.
 static CROSS_MESSAGE_RULES: LazyLock<CrossMessageRules> =
@@ -215,10 +222,11 @@ pub fn evaluate_rfc_audit(events: &[Stamped<SignalingNetworkEvent>]) -> RfcAudit
     let mut findings = Vec::new();
     let mut population: BTreeMap<&'static str, rfc_rules::Population> = BTreeMap::new();
 
-    // Cross-message rules — one pass over the whole channel each.
+    // Cross-message rules — every one over the one pass.
+    let pass = AuditPass::new(events);
     for rule in rfc_cross_message_rules().iter() {
         let subject = rule.subject();
-        let (positioned, tally) = occasions::tallied(|| rule.check_positioned(events));
+        let (positioned, tally) = occasions::tallied(|| rule.check_pass(&pass));
         for ((token, bind), noted) in tally {
             if subject_hits(&subject, &bind) {
                 population.entry(token).or_default().add(noted);

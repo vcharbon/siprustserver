@@ -34,7 +34,14 @@ impl CrossMessageAuditRule for Scoped {
         &self,
         events: &[Stamped<SignalingNetworkEvent>],
     ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
-        self.live.found(events, &self.scoped_out)
+        self.check_pass(&AuditPass::new(events))
+    }
+
+    fn check_pass(
+        &self,
+        pass: &AuditPass<'_>,
+    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+        self.live.found(pass, &self.scoped_out)
     }
 }
 

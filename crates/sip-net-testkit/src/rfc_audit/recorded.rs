@@ -1,6 +1,7 @@
 //! Which parties the recording holds a lane for: the one fact the live
 //! adapter needs to report what a sender minted where its own lane is absent.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 
@@ -14,6 +15,7 @@ use crate::report::lane_addr;
 /// from at another recorded bind — a bind asked at port 0 is recorded under the
 /// address it asked for and sends from the one it was given. A bind a consumer
 /// scoped out of the view is recorded all the same.
+#[derive(Clone)]
 pub(crate) struct Recorded {
     keys: HashSet<LaneKey>,
     addrs: HashSet<SocketAddr>,
@@ -50,6 +52,18 @@ impl Recorded {
             }
         }
         Recorded { keys, addrs }
+    }
+
+    /// The same recording with the binds of `scoped_out` held as well: what
+    /// [`of`](Self::of) returns over the same events with that `scoped_out`.
+    pub(crate) fn scoped(&self, scoped_out: &HashSet<LaneKey>) -> Cow<'_, Recorded> {
+        if scoped_out.is_empty() {
+            return Cow::Borrowed(self);
+        }
+        let mut scoped = self.clone();
+        scoped.addrs.extend(scoped_out.iter().filter_map(|k| lane_addr(k)));
+        scoped.keys.extend(scoped_out.iter().cloned());
+        Cow::Owned(scoped)
     }
 
     /// Whether `party` — a bind key or a socket address — is a recorded bind.

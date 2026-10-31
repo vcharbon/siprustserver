@@ -22,7 +22,6 @@
 //! Every rule has a row: `every_merged_rule_has_a_live_adapter` names one
 //! without.
 
-use std::borrow::Cow;
 use std::collections::HashSet;
 
 use layer_harness::{LaneKey, Stamped};
@@ -30,11 +29,7 @@ use layer_harness::{LaneKey, Stamped};
 use rfc_rules::rules::Obligation;
 use rfc_rules::{Decision, RuleId, WireView};
 
-use crate::contracts::{audit_visible_event, CrossMessageAuditRule, SignalingNetworkEvent};
-use crate::report::wire_positions_by_stamp;
-use crate::rfc_audit::dropped::Dropped;
-use crate::rfc_audit::recorded::Recorded;
-use crate::rfc_audit::relay_lanes::relay_lanes;
+use crate::contracts::{CrossMessageAuditRule, SignalingNetworkEvent};
 use crate::types::UaRole;
 
 mod ack;
@@ -45,6 +40,7 @@ mod cseq;
 mod dialog;
 mod final_response;
 mod offer_answer;
+mod pass;
 mod prack;
 mod proxy;
 mod register;
@@ -55,23 +51,22 @@ mod via;
 mod view;
 mod wellformed;
 
-use view::{bind_views, observation};
+pub use pass::AuditPass;
 
-/// Run `rule` over every bind view and keep the violated, non-relayed findings
-/// the `vantage` predicate accepts for the bind the view belongs to. Every
-/// non-relayed occasion at that vantage, violated or not, is noted for the
-/// run's rule population.
+/// Run `rule` over every bind view of the pass and keep the violated,
+/// non-relayed findings the `vantage` predicate accepts for the bind the view
+/// belongs to. Every non-relayed occasion at that vantage, violated or not, is
+/// noted for the run's rule population.
 fn at_vantage(
-    events: &[Stamped<SignalingNetworkEvent>],
+    pass: &AuditPass<'_>,
     rule: &dyn Obligation,
     vantage: impl Fn(&rfc_rules::Finding, &LaneKey, &str) -> bool,
     detail: impl Fn(&rfc_rules::Finding, &str) -> String,
 ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
-    let positions = wire_positions_by_stamp(events);
+    let positions = pass.positions();
     let mut out = Vec::new();
-    for view in bind_views(events) {
-        let obs = observation(&view.msgs);
-        for f in rule.eval(&WireView { msgs: &view.msgs, obs: &obs }) {
+    for (view, obs) in pass.views() {
+        for f in rule.eval(&WireView { msgs: &view.msgs, obs }) {
             let (seq, cid) = &view.meta[f.anchor];
             if f.relayed || !vantage(&f, &view.bind, cid) {
                 continue;
@@ -145,15 +140,12 @@ enum Skip {
 }
 
 impl Skip {
-    fn lanes(self, events: &[Stamped<SignalingNetworkEvent>]) -> HashSet<LaneKey> {
+    /// The lanes skipped over `pass`; `None` skips none.
+    fn lanes<'p>(self, pass: &'p AuditPass<'_>) -> Option<&'p HashSet<LaneKey>> {
         match self {
-            Skip::None => HashSet::new(),
-            Skip::RelayLanes => relay_lanes(events),
-            Skip::ProxyOnlyLanes => crate::rfc_audit::bind_roles_of(events)
-                .into_iter()
-                .filter(|(_, roles)| roles.len() == 1 && roles.contains(&UaRole::Proxy))
-                .map(|(lane, _)| lane)
-                .collect(),
+            Skip::None => None,
+            Skip::RelayLanes => Some(pass.relay_lanes()),
+            Skip::ProxyOnlyLanes => Some(pass.proxy_only_lanes()),
         }
     }
 }
@@ -277,38 +269,35 @@ impl CrossMessageAuditRule for Live {
         &self,
         events: &[Stamped<SignalingNetworkEvent>],
     ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
-        self.found(events, &HashSet::new())
+        self.check_pass(&AuditPass::new(events))
+    }
+
+    fn check_pass(
+        &self,
+        pass: &AuditPass<'_>,
+    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+        self.found(pass, &HashSet::new())
     }
 }
 
 impl Live {
-    /// The row's findings over `events`, the binds of `scoped_out` taken out of
-    /// it. The rules judge the audit-visible events; the arrivals the loss model
-    /// dropped only tell [`Vantage::EmitterUnlessLost`] where a sender's
-    /// traffic is incomplete.
+    /// The row's findings over `pass`, the binds of `scoped_out` taken out of
+    /// its events. The rules judge the audit-visible events; the arrivals the
+    /// loss model dropped only tell [`Vantage::EmitterUnlessLost`] where a
+    /// sender's traffic is incomplete.
     fn found(
         &self,
-        events: &[Stamped<SignalingNetworkEvent>],
+        pass: &AuditPass<'_>,
         scoped_out: &HashSet<LaneKey>,
     ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
-        let visible: Cow<'_, [Stamped<SignalingNetworkEvent>]> = if events
-            .iter()
-            .all(|s| audit_visible_event(&s.event))
-        {
-            Cow::Borrowed(events)
-        } else {
-            Cow::Owned(events.iter().filter(|s| audit_visible_event(&s.event)).cloned().collect())
-        };
-        let all = events;
-        let events = &*visible;
         let body = self.id.rule().body;
         let admits = self.admits;
         let found = match self.vantage {
             Vantage::Emitter => {
-                let recorded = Recorded::of(events, scoped_out);
+                let recorded = pass.recorded().scoped(scoped_out);
                 let falls_back = !self.proxy_only();
                 at_vantage(
-                    events,
+                    pass,
                     body,
                     |f, b, _| {
                         let own = !falls_back || recorded.holds(&f.emitter);
@@ -319,10 +308,10 @@ impl Live {
                 )
             }
             Vantage::EmitterUnlessLost => {
-                let recorded = Recorded::of(events, scoped_out);
-                let dropped = Dropped::of(all);
+                let recorded = pass.recorded().scoped(scoped_out);
+                let dropped = pass.dropped();
                 at_vantage(
-                    events,
+                    pass,
                     body,
                     |f, b, cid| {
                         if recorded.holds(&f.emitter) {
@@ -334,22 +323,22 @@ impl Live {
                 )
             }
             Vantage::EmitterOnly => {
-                at_vantage(events, body, |f, b, _| f.emitter == *b && admits(f), self.detail)
+                at_vantage(pass, body, |f, b, _| f.emitter == *b && admits(f), self.detail)
             }
             Vantage::Taker => {
-                at_vantage(events, body, |f, b, _| f.taker == *b && admits(f), self.detail)
+                at_vantage(pass, body, |f, b, _| f.taker == *b && admits(f), self.detail)
             }
             Vantage::EitherEnd => at_vantage(
-                events,
+                pass,
                 body,
                 |f, b, _| (f.emitter == *b || f.taker == *b) && admits(f),
                 self.detail,
             ),
             Vantage::TakerElseEmitter => {
                 // The taker's lane must be in the view to report there.
-                let recorded = Recorded::of(events, &HashSet::new());
+                let recorded = pass.recorded();
                 at_vantage(
-                    events,
+                    pass,
                     body,
                     |f, b, _| {
                         let at = if recorded.holds(&f.taker) { &f.taker } else { &f.emitter };
@@ -359,8 +348,12 @@ impl Live {
                 )
             }
         };
-        let skipped = self.skip.lanes(events);
-        found.into_iter().filter(|(lane, _, _, _)| !skipped.contains(lane)).collect()
+        match self.skip.lanes(pass) {
+            None => found,
+            Some(skipped) => {
+                found.into_iter().filter(|(lane, _, _, _)| !skipped.contains(lane)).collect()
+            }
+        }
     }
 }
 
