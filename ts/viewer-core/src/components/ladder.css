@@ -1,35 +1,87 @@
-/* Ladder presentation. Geometry is the layout model's; only paint lives here. */
+/* Ladder presentation. Geometry is the layout model's; only paint lives here.
+
+   The ladder takes its host's tokens (viewer-app/UI-STYLE.md): every `--fv-*`
+   below is a site token, so the ladder never paints a background of its own. */
+
+:root {
+  --fv-bg: var(--panel);
+  --fv-fg: var(--ink);
+  --fv-muted: var(--mute);
+  --fv-rule: var(--line-strong);
+  --fv-head-bg: var(--none-bg);
+  --fv-sut: var(--sut);
+  --fv-sut-bg: var(--sut-bg);
+  --fv-block: var(--mute);
+  --fv-block-fg: var(--mute);
+  --fv-arrow: var(--ink);
+  --fv-select: var(--sel);
+  --fv-missing: var(--nok);
+  --fv-extra: var(--warn);
+  --fv-matched: var(--ok);
+  --fv-inject: var(--warn);
+  --fv-inject-bg: var(--warn-bg);
+  /* Call-ID family shades: lightness per leg, the label's shift, a chip's fill. */
+  --fv-l-0: 40%;
+  --fv-l-1: 56%;
+  --fv-l-2: 27%;
+  --fv-l-3: 66%;
+  --fv-l-text: -6%;
+  --fv-l-fill: 96%;
+  --fv-l-edge: 82%;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --fv-l-0: 62%;
+    --fv-l-1: 74%;
+    --fv-l-2: 50%;
+    --fv-l-3: 82%;
+    --fv-l-text: 6%;
+    --fv-l-fill: 18%;
+    --fv-l-edge: 34%;
+  }
+}
+
+:root[data-theme="dark"] {
+  --fv-l-0: 62%;
+  --fv-l-1: 74%;
+  --fv-l-2: 50%;
+  --fv-l-3: 82%;
+  --fv-l-text: 6%;
+  --fv-l-fill: 18%;
+  --fv-l-edge: 34%;
+}
 
 .fv-ladder {
   font-family: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
-  background: var(--fv-bg, #ffffff);
+  background: var(--fv-bg);
 }
 
 .fv-ladder text {
-  fill: var(--fv-fg, #16181d);
+  fill: var(--fv-fg);
 }
 
 /* Lifelines */
 .fv-lifeline-line {
-  stroke: var(--fv-rule, #c8ccd4);
+  stroke: var(--fv-rule);
   stroke-width: 1;
   stroke-dasharray: 3 4;
 }
 
 .fv-lifeline-sut .fv-lifeline-line {
-  stroke: var(--fv-sut, #7a5af8);
+  stroke: var(--fv-sut);
   stroke-width: 2;
   stroke-dasharray: none;
 }
 
 .fv-lifeline-box {
-  fill: var(--fv-head-bg, #f2f4f8);
-  stroke: var(--fv-rule, #c8ccd4);
+  fill: var(--fv-head-bg);
+  stroke: var(--fv-rule);
 }
 
 .fv-lifeline-sut .fv-lifeline-box {
-  fill: var(--fv-sut-bg, #efeaff);
-  stroke: var(--fv-sut, #7a5af8);
+  fill: var(--fv-sut-bg);
+  stroke: var(--fv-sut);
 }
 
 .fv-lifeline-label {
@@ -41,23 +93,23 @@
 .fv-lifeline-sub {
   text-anchor: middle;
   font-size: 10px;
-  fill: var(--fv-muted, #6b7280);
+  fill: var(--fv-muted);
 }
 
 /* Blocks */
 .fv-block > rect {
   fill: none;
-  stroke: var(--fv-block, #9aa2b1);
+  stroke: var(--fv-block);
   stroke-dasharray: 5 4;
 }
 
 .fv-block-alt > rect {
-  fill: rgba(122, 90, 248, 0.05);
+  fill: color-mix(in srgb, var(--fv-sut) 5%, transparent);
 }
 
 .fv-block-branch > rect {
-  fill: rgba(122, 90, 248, 0.06);
-  stroke: var(--fv-sut, #7a5af8);
+  fill: color-mix(in srgb, var(--fv-sut) 6%, transparent);
+  stroke: var(--fv-sut);
   stroke-dasharray: 2 3;
 }
 
@@ -65,18 +117,18 @@
 .fv-branch-label {
   font-size: 11px;
   font-weight: 600;
-  fill: var(--fv-block-fg, #4b5563);
+  fill: var(--fv-block-fg);
 }
 
 .fv-branch-label {
-  fill: var(--fv-sut, #7a5af8);
+  fill: var(--fv-sut);
   font-size: 12px;
 }
 
 .fv-branch-note {
   text-anchor: end;
   font-size: 10px;
-  fill: var(--fv-muted, #6b7280);
+  fill: var(--fv-muted);
 }
 
 /* The participants, repeated at the head of each alternative so the section
@@ -85,9 +137,9 @@
   text-anchor: middle;
   font-size: 10px;
   font-weight: 600;
-  fill: var(--fv-muted, #6b7280);
+  fill: var(--fv-muted);
   paint-order: stroke;
-  stroke: var(--fv-bg, #ffffff);
+  stroke: var(--fv-bg);
   stroke-width: 3px;
 }
 
@@ -95,15 +147,15 @@
    alternatives from being read as one sequence in time. */
 .fv-alt-separator line,
 .fv-alt-rejoin line {
-  stroke: var(--fv-sut, #7a5af8);
+  stroke: var(--fv-sut);
   stroke-width: 1.4;
   stroke-dasharray: 6 5;
 }
 
 .fv-alt-separator rect,
 .fv-alt-rejoin rect {
-  fill: var(--fv-bg, #ffffff);
-  stroke: var(--fv-sut, #7a5af8);
+  fill: var(--fv-bg);
+  stroke: var(--fv-sut);
   stroke-width: 1.2;
 }
 
@@ -113,7 +165,7 @@
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.06em;
-  fill: var(--fv-sut, #7a5af8);
+  fill: var(--fv-sut);
 }
 
 .fv-alt-rejoin line {
@@ -127,13 +179,13 @@
 
 /* Arrows */
 .fv-arrow line {
-  stroke: var(--fv-arrow, #1f2937);
+  stroke: var(--fv-arrow);
   stroke-width: 1.6;
 }
 
 .fv-arrow marker,
 .fv-ladder marker polygon {
-  fill: var(--fv-arrow, #1f2937);
+  fill: var(--fv-arrow);
 }
 
 .fv-arrow-hit {
@@ -142,7 +194,7 @@
 }
 
 .fv-arrow-auto line {
-  stroke: var(--fv-muted, #6b7280);
+  stroke: var(--fv-muted);
   stroke-dasharray: 6 3;
 }
 
@@ -159,7 +211,7 @@
 .fv-arrow-sub,
 .fv-arrow-badges {
   font-size: 9.5px;
-  fill: var(--fv-muted, #6b7280);
+  fill: var(--fv-muted);
 }
 
 .fv-arrow-sub {
@@ -167,35 +219,44 @@
 }
 
 .fv-arrow-selected line {
-  stroke: var(--fv-select, #e11d48);
+  stroke: var(--fv-select);
   stroke-width: 2.6;
 }
 
 .fv-arrow-selected .fv-arrow-label {
-  fill: var(--fv-select, #e11d48);
+  fill: var(--fv-select);
 }
 
 .fv-arrow-missing line {
-  stroke: var(--fv-missing, #dc2626);
+  stroke: var(--fv-missing);
   stroke-dasharray: 4 3;
 }
 
 .fv-arrow-extra line {
-  stroke: var(--fv-extra, #d97706);
+  stroke: var(--fv-extra);
 }
 
 .fv-arrow-matched line {
-  stroke: var(--fv-matched, #059669);
+  stroke: var(--fv-matched);
 }
 
 /* Call colours. One slot per `calls[]` entry, applied only where a document
-   holds more than one call — a single-call ladder stays black on white. */
-.fv-call-0 { --fv-call: #2563eb; --fv-call-bg: #e8effd; }
-.fv-call-1 { --fv-call: #c2410c; --fv-call-bg: #fdeee5; }
-.fv-call-2 { --fv-call: #047857; --fv-call-bg: #e3f5ee; }
-.fv-call-3 { --fv-call: #a21caf; --fv-call-bg: #fbeafb; }
-.fv-call-4 { --fv-call: #0e7490; --fv-call-bg: #e2f2f6; }
-.fv-call-5 { --fv-call: #7c3aed; --fv-call-bg: #f0eafe; }
+   holds more than one call — a single-call ladder stays in the ink colour. */
+.fv-call-0 { --fv-call: var(--cat-0); }
+.fv-call-1 { --fv-call: var(--cat-1); }
+.fv-call-2 { --fv-call: var(--cat-2); }
+.fv-call-3 { --fv-call: var(--cat-3); }
+.fv-call-4 { --fv-call: var(--cat-4); }
+.fv-call-5 { --fv-call: var(--cat-5); }
+
+.fv-call-0,
+.fv-call-1,
+.fv-call-2,
+.fv-call-3,
+.fv-call-4,
+.fv-call-5 {
+  --fv-call-bg: color-mix(in srgb, var(--fv-call) 12%, var(--fv-bg));
+}
 
 .fv-arrow.fv-tinted line {
   stroke: var(--fv-call);
@@ -212,21 +273,28 @@
 
 /* Early dialogs. A forked leg's arrows and beads take one colour per fork, so
    two early dialogs on one leg are two colours, not one sequence. */
-.fv-fork-1 { --fv-fork: #b45309; --fv-fork-bg: #fdf0dc; }
-.fv-fork-2 { --fv-fork: #1d4ed8; --fv-fork-bg: #e6ecfd; }
-.fv-fork-3 { --fv-fork: #15803d; --fv-fork-bg: #e4f4e9; }
-.fv-fork-4 { --fv-fork: #a21caf; --fv-fork-bg: #fbeafb; }
+.fv-fork-1 { --fv-fork: var(--cat-1); }
+.fv-fork-2 { --fv-fork: var(--cat-0); }
+.fv-fork-3 { --fv-fork: var(--cat-2); }
+.fv-fork-4 { --fv-fork: var(--cat-3); }
+
+.fv-fork-1,
+.fv-fork-2,
+.fv-fork-3,
+.fv-fork-4 {
+  --fv-fork-bg: color-mix(in srgb, var(--fv-fork) 12%, var(--fv-bg));
+}
 
 .fv-arrow.fv-forked:not(.fv-tinted) line {
-  stroke: var(--fv-fork, #1f2937);
+  stroke: var(--fv-fork, var(--fv-arrow));
 }
 
 /* Dialog beads: the simplified tag pair, never the real one. The from-bead is
    muted because it never varies on a leg; the to-bead carries the weight and
    the fork colour, because it is the half a fork changes. */
 .fv-dialog rect {
-  fill: #ffffff;
-  stroke: #c8ccd4;
+  fill: var(--fv-bg);
+  stroke: var(--fv-rule);
   stroke-width: 1;
 }
 
@@ -235,66 +303,66 @@
   font-size: 9.5px;
   font-weight: 600;
   font-family: ui-monospace, monospace;
-  fill: #4b5563;
+  fill: var(--fv-muted);
 }
 
 .fv-dialog-from rect {
-  fill: #f3f4f6;
-  stroke: #d5d9e0;
+  fill: var(--fv-head-bg);
+  stroke: var(--fv-rule);
 }
 
 .fv-dialog-from text {
   font-weight: 500;
-  fill: #6b7280;
+  fill: var(--fv-muted);
 }
 
 .fv-dialog-to rect {
-  fill: var(--fv-fork-bg, #ffffff);
-  stroke: var(--fv-fork, #9aa1ad);
+  fill: var(--fv-fork-bg, var(--fv-bg));
+  stroke: var(--fv-fork, var(--fv-rule));
 }
 
 .fv-dialog-to text {
   font-weight: 700;
-  fill: var(--fv-fork, #16181d);
+  fill: var(--fv-fork, var(--fv-fg));
 }
 
 /* No To-tag stated yet: a hollow, dashed placeholder, so the phase before the
    dialog is established reads as a column down the ladder. */
 .fv-dialog-absent rect {
-  fill: #ffffff;
-  stroke: #c8ccd4;
+  fill: var(--fv-bg);
+  stroke: var(--fv-rule);
   stroke-dasharray: 2 2;
 }
 
 .fv-dialog-absent text,
 .fv-dialog-absent .fv-dialog-to-tag {
   font-weight: 400;
-  fill: #9aa1ad;
+  fill: var(--fv-muted);
 }
 
 /* Too short an arrow for two beads: one pill, the two halves still told apart. */
 .fv-dialog-pair rect {
-  fill: #ffffff;
-  stroke: var(--fv-fork, #c8ccd4);
+  fill: var(--fv-bg);
+  stroke: var(--fv-fork, var(--fv-rule));
 }
 
 .fv-dialog-pair .fv-dialog-from-tag {
   font-weight: 500;
-  fill: #6b7280;
+  fill: var(--fv-muted);
 }
 
 .fv-dialog-pair .fv-dialog-sep {
-  fill: #b6bcc6;
+  fill: var(--fv-rule);
 }
 
 .fv-dialog-pair .fv-dialog-to-tag {
   font-weight: 700;
-  fill: var(--fv-fork, #16181d);
+  fill: var(--fv-fork, var(--fv-fg));
 }
 
 /* Legend (HTML, not SVG: it sits beside the ladder) */
 .fv-legend {
-  border: 1px solid var(--fv-rule, #c8ccd4);
+  border: 1px solid var(--fv-rule);
   border-radius: 8px;
   padding: 6px 10px;
   margin: 8px 0;
@@ -310,7 +378,7 @@
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--fv-muted, #6b7280);
+  color: var(--fv-muted);
   margin: 10px 0 4px;
 }
 
@@ -335,11 +403,11 @@
   min-width: 78px;
   font-family: ui-monospace, monospace;
   font-size: 11px;
-  color: var(--fv-fg, #16181d);
+  color: var(--fv-fg);
 }
 
 .fv-legend .fv-legend-what {
-  color: var(--fv-muted, #6b7280);
+  color: var(--fv-muted);
 }
 
 .fv-legend svg {
@@ -359,9 +427,9 @@
   display: inline-flex;
   align-items: baseline;
   gap: 6px;
-  border: 1px solid var(--fv-call, #c8ccd4);
-  background: var(--fv-call-bg, #ffffff);
-  color: var(--fv-call, #16181d);
+  border: 1px solid var(--fv-call, var(--fv-rule));
+  background: var(--fv-call-bg, var(--fv-bg));
+  color: var(--fv-call, var(--fv-fg));
   border-radius: 999px;
   padding: 2px 10px;
 }
@@ -371,7 +439,7 @@
 }
 
 .fv-call-legend .fv-call-chip span {
-  color: var(--fv-fg, #16181d);
+  color: var(--fv-fg);
   font-size: 11px;
 }
 
@@ -384,9 +452,9 @@
 }
 
 .fv-dialog-legend .fv-dialog-chip {
-  border: 1px solid var(--fv-fork, #c8ccd4);
-  background: var(--fv-fork-bg, #ffffff);
-  color: var(--fv-fork, #16181d);
+  border: 1px solid var(--fv-fork, var(--fv-rule));
+  background: var(--fv-fork-bg, var(--fv-bg));
+  color: var(--fv-fork, var(--fv-fg));
   border-radius: 999px;
   padding: 1px 9px;
   font-family: ui-monospace, monospace;
@@ -409,10 +477,10 @@
 .fv-cid-6 { --fv-cid-h: 340; }
 .fv-cid-7 { --fv-cid-h: 116; }
 
-.fv-shade-0 { --fv-cid-l: 40%; }
-.fv-shade-1 { --fv-cid-l: 56%; }
-.fv-shade-2 { --fv-cid-l: 27%; }
-.fv-shade-3 { --fv-cid-l: 66%; }
+.fv-shade-0 { --fv-cid-l: var(--fv-l-0); }
+.fv-shade-1 { --fv-cid-l: var(--fv-l-1); }
+.fv-shade-2 { --fv-cid-l: var(--fv-l-2); }
+.fv-shade-3 { --fv-cid-l: var(--fv-l-3); }
 
 /* Selected by the case: full colour. Discarded: pale, still readable. */
 .fv-picked { --fv-cid-s: 72%; --fv-cid-a: 1; --fv-cid-weight: 1.6; }
@@ -431,7 +499,7 @@
 
 .fv-datagram:not(.fv-arrow-selected) .fv-arrow-label,
 .fv-datagram:not(.fv-arrow-selected) .fv-arrow-sub {
-  fill: hsl(var(--fv-cid-h, 220) var(--fv-cid-s, 0%) calc(var(--fv-cid-l, 30%) - 6%));
+  fill: hsl(var(--fv-cid-h, 220) var(--fv-cid-s, 0%) calc(var(--fv-cid-l, 30%) + var(--fv-l-text)));
   opacity: var(--fv-cid-a, 1);
 }
 
@@ -443,12 +511,12 @@
 .fv-datagram-time {
   font-size: 9.5px;
   font-family: ui-monospace, monospace;
-  fill: var(--fv-muted, #6b7280);
+  fill: var(--fv-muted);
 }
 
 /* Leg header band: one chip per captured leg, above the sockets. */
 .fv-leg-chip-box {
-  fill: hsl(var(--fv-cid-h, 220) var(--fv-cid-s, 0%) 96%);
+  fill: hsl(var(--fv-cid-h, 220) var(--fv-cid-s, 0%) var(--fv-l-fill));
   stroke: hsl(var(--fv-cid-h, 220) var(--fv-cid-s, 0%) var(--fv-cid-l, 40%));
   stroke-width: 1;
   opacity: var(--fv-cid-a, 1);
@@ -462,7 +530,7 @@
 .fv-leg-chip-label {
   font-family: ui-monospace, monospace;
   font-size: 10.5px;
-  fill: hsl(var(--fv-cid-h, 220) var(--fv-cid-s, 0%) calc(var(--fv-cid-l, 40%) - 8%));
+  fill: hsl(var(--fv-cid-h, 220) var(--fv-cid-s, 0%) calc(var(--fv-cid-l, 40%) + var(--fv-l-text)));
   font-weight: 600;
 }
 
@@ -474,23 +542,23 @@
   font-family: ui-monospace, monospace;
   font-size: 9.5px;
   text-anchor: end;
-  fill: var(--fv-muted, #6b7280);
+  fill: var(--fv-muted);
 }
 
 /* The SUT's lifeline: named, and drawn heavier than the peers around it. */
 .fv-socket-sut .fv-lifeline-box {
-  fill: #eef2ff;
-  stroke: #4338ca;
+  fill: var(--fv-sut-bg);
+  stroke: var(--fv-sut);
   stroke-width: 1.6;
 }
 
 .fv-socket-sut .fv-lifeline-label {
-  fill: #3730a3;
+  fill: var(--fv-sut);
   font-weight: 700;
 }
 
 .fv-socket-sut .fv-lifeline-line {
-  stroke: #6366f1;
+  stroke: var(--fv-sut);
   stroke-width: 1.4;
 }
 
@@ -509,7 +577,7 @@
 
 .fv-capture-rule {
   margin: 0;
-  color: var(--fv-muted, #6b7280);
+  color: var(--fv-muted);
 }
 
 .fv-capture-family h4 {
@@ -526,14 +594,14 @@
 .fv-capture-family h4 em {
   font-style: normal;
   font-weight: 400;
-  color: var(--fv-muted, #6b7280);
+  color: var(--fv-muted);
 }
 
 .fv-capture-family ul {
   margin: 0;
   padding: 0 0 0 14px;
   list-style: none;
-  border-left: 2px solid hsl(var(--fv-cid-h, 220) 40% 82%);
+  border-left: 2px solid hsl(var(--fv-cid-h, 220) 40% var(--fv-l-edge));
 }
 
 .fv-capture-leg {
@@ -559,19 +627,19 @@
 }
 
 .fv-capture-meta {
-  color: var(--fv-muted, #6b7280);
+  color: var(--fv-muted);
 }
 
 /* Inject */
 .fv-inject line {
-  stroke: var(--fv-inject, #b45309);
+  stroke: var(--fv-inject);
   stroke-width: 1.4;
   stroke-dasharray: 8 4;
 }
 
 .fv-inject rect {
-  fill: var(--fv-inject-bg, #fef3c7);
-  stroke: var(--fv-inject, #b45309);
+  fill: var(--fv-inject-bg);
+  stroke: var(--fv-inject);
   cursor: pointer;
 }
 
@@ -579,35 +647,35 @@
   text-anchor: middle;
   font-size: 11px;
   font-weight: 600;
-  fill: var(--fv-inject, #b45309);
+  fill: var(--fv-inject);
 }
 
 .fv-inject-selected rect {
-  stroke: var(--fv-select, #e11d48);
+  stroke: var(--fv-select);
   stroke-width: 2;
 }
 
 /* A ruling drawn on the row it was made at: the band finds the step while
    scrolling, the gutter label names the finding without a click. */
 .fv-mark-band {
-  fill: var(--fv-mark, #dc2626);
+  fill: var(--fv-mark, var(--fv-missing));
   fill-opacity: 0.1;
 }
 
 .fv-mark-label {
   font-size: 10px;
   font-weight: 700;
-  fill: var(--fv-mark, #dc2626);
+  fill: var(--fv-mark, var(--fv-missing));
 }
 
-.fv-mark-failure { --fv-mark: #dc2626; }
-.fv-mark-declared { --fv-mark: #7c3aed; }
-.fv-mark-abandoned { --fv-mark: #6b7280; }
-.fv-mark-violation { --fv-mark: #b45309; }
-.fv-mark-tolerated { --fv-mark: #d97706; }
+.fv-mark-failure { --fv-mark: var(--nok); }
+.fv-mark-declared { --fv-mark: var(--info); }
+.fv-mark-abandoned { --fv-mark: var(--mute); }
+.fv-mark-violation { --fv-mark: var(--warn); }
+.fv-mark-tolerated { --fv-mark: var(--warn); }
 /* Informative findings gate nothing: they are marked, never shouted — a row
    banded as loudly as a failure is a row that hides the failure. */
-.fv-mark-informative { --fv-mark: #64748b; }
+.fv-mark-informative { --fv-mark: var(--mute); }
 
 .fv-mark-informative .fv-mark-band { fill-opacity: 0.05; }
 
@@ -618,11 +686,11 @@
 }
 
 .fv-marked-failure line {
-  stroke: #dc2626;
+  stroke: var(--fv-missing);
 }
 
 .fv-marked-failure .fv-arrow-label {
-  fill: #dc2626;
+  fill: var(--fv-missing);
 }
 
 /* The socket strip: the capture's addresses, and the filter over them. */
@@ -643,8 +711,9 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  border: 1px solid #d3d7de;
-  background: #ffffff;
+  border: 1px solid var(--fv-rule);
+  background: var(--fv-bg);
+  color: var(--fv-fg);
   border-radius: 999px;
   padding: 1px 8px;
   font: inherit;
@@ -665,9 +734,9 @@
 }
 
 .fv-socket-chip-sut {
-  border-color: #4338ca;
-  background: #eef2ff;
-  color: #3730a3;
+  border-color: var(--fv-sut);
+  background: var(--fv-sut-bg);
+  color: var(--fv-sut);
 }
 
 .fv-socket-badge {
@@ -678,21 +747,21 @@
 /* On = the filter is applied to this address; the ring says so at a glance. */
 .fv-socket-chip-on,
 .fv-tag-chip-on {
-  box-shadow: 0 0 0 2px var(--fv-select, #e11d48);
+  box-shadow: 0 0 0 2px var(--fv-select);
   font-weight: 600;
 }
 
 .fv-tag-chip {
-  border-color: var(--fv-fork, #c8ccd4);
-  background: var(--fv-fork-bg, #ffffff);
-  color: var(--fv-fork, #16181d);
+  border-color: var(--fv-fork, var(--fv-rule));
+  background: var(--fv-fork-bg, var(--fv-bg));
+  color: var(--fv-fork, var(--fv-fg));
 }
 
 /* The originator's tag is one per leg and never forks: it takes no fork hue. */
 .fv-tag-chip-from {
-  border-color: #9aa1ad;
-  background: #f4f5f7;
-  color: #3f4653;
+  border-color: var(--fv-rule);
+  background: var(--fv-head-bg);
+  color: var(--fv-muted);
 }
 
 .fv-capture-leg-head {
@@ -718,7 +787,7 @@
 }
 
 .fv-leg-chip-on .fv-leg-chip-box {
-  stroke: var(--fv-select, #e11d48);
+  stroke: var(--fv-select);
   stroke-width: 2;
 }
 
@@ -739,7 +808,7 @@
 }
 
 .fv-leg-button:hover:not(:disabled) {
-  border-color: #c8ccd4;
+  border-color: var(--fv-rule);
 }
 
 .fv-leg-button:disabled {
@@ -747,6 +816,6 @@
 }
 
 .fv-leg-button-on {
-  border-color: var(--fv-select, #e11d48);
-  box-shadow: 0 0 0 1px var(--fv-select, #e11d48);
+  border-color: var(--fv-select);
+  box-shadow: 0 0 0 1px var(--fv-select);
 }

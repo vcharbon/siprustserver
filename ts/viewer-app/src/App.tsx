@@ -15,6 +15,7 @@ import { RunPage } from "./pages/RunPage.tsx"
 import { SourcesPage } from "./pages/SourcesPage.tsx"
 import { StudyPage } from "./pages/StudyPage.tsx"
 import { TriagePage } from "./pages/TriagePage.tsx"
+import { ThemeSwitch } from "./components/ThemeSwitch.tsx"
 import { href, useRoute } from "./router.ts"
 
 export const App = (): JSX.Element => {
@@ -33,7 +34,8 @@ export const App = (): JSX.Element => {
         <Link to={href.compareRuns({})}>compare</Link>
         <Link to={href.report({})}>report</Link>
         <Link to={href.campaigns()}>campaign</Link>
-        <span className="muted">{window.location.pathname}</span>
+        <span className="muted nav-path">{window.location.pathname}</span>
+        <ThemeSwitch />
       </nav>
       {route.kind === "index" && <IndexPage />}
       {route.kind === "case" && <CasePage id={route.id} />}
@@ -51,7 +53,7 @@ export const App = (): JSX.Element => {
       {route.kind === "campaign" && <CampaignPage capture={route.capture} />}
       {route.kind === "unknown" && (
         <p className="page error">
-          no route for {route.path}. Try <Link to={href.index()}>the index</Link>.
+          no route: {route.path} · <Link to={href.index()}>index</Link>
         </p>
       )}
     </div>
