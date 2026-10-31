@@ -191,7 +191,11 @@ pub(super) async fn process(
                 answer_after_the_write(ctx, &call_ref, event, answer).await;
                 return false;
             }
-            super::dialog_gate::Gate::Dropped => return false,
+            super::dialog_gate::Gate::Dropped => {
+                super::unheld::answer_unheld_final(ctx, event, matched_client_txn, &mut turn.ids)
+                    .await;
+                return false;
+            }
         };
         super::dialog_gate::note_in_order(&mut call, &res.source_leg_id, &resolved, event);
         // The layer emitted this datagram with no transaction to match it; a

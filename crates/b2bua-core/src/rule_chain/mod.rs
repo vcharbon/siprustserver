@@ -8,6 +8,7 @@ pub mod message_cap;
 pub mod quiet_turn;
 pub mod response_facts;
 pub mod timer_screen;
+mod unheld_final;
 
 use call::helpers::{Arrival, Resolved};
 use call::{Call, CallModelState, Direction, Obligation, TimerType};
@@ -286,6 +287,14 @@ pub fn rule_chain_turn(
             }
         }
     }
+    unheld_final::ack_unheld_final(
+        fw.config,
+        event,
+        matched_client_txn,
+        &mut result.effects,
+        &mut exec.turn.ids,
+        now_ms,
+    );
     quiet_turn::name_candidate(&mut result, &call, event, discharged.as_ref());
     // The ladder's own effects (its cancels) precede the rule's.
     ladder_fx.extend(std::mem::take(&mut result.effects));

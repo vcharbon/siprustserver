@@ -257,7 +257,11 @@ other copy plays on and self-releases at quiescence, and a refused flush folds a
 before (ADR-0031 D3). A CANCEL the primary's copy records on a leg's dialling INVITE
 the copy sent leaves the primary, which holds that INVITE's client transaction
 (RFC 3261 §9.1); a copy that plays on sends none
-(`reclaim_takes_the_copys_dialled_invite.rs`, the transfer-target cells).
+(`reclaim_takes_the_copys_dialled_invite.rs`, the transfer-target cells). A
+non-2xx final to a leg's dialling INVITE that reaches the primary while it
+holds no client transaction of it — the copies of a split each dialled and
+ended their own — is ACKed there from its via-extension (ADR-0055 §12;
+`router/unheld_final_tests.rs`).
 
 One owner acts on an outside service's answer. A copy awaiting the answer to a request
 the primary's reclaim write awaits too is covered by that write on that request: it stands down, an answer reaching

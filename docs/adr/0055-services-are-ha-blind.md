@@ -785,8 +785,9 @@ The worker's own Via carries a via-extension (§20.42): the leg, the request's
 Request-URI and whether it carried a session offer, signed by the worker with
 the cluster key over the decoded `cr`, `lg` and `ci` of the Via, its branch and
 the request's method, bounded in size and encoded as a token, so any owner
-that holds no request record of a dialled INVITE can CANCEL it or ACK its
-non-2xx from the callee's response (§9.1, §17.1.1.3), and ACK and BYE its 2xx,
+that holds no request record of a dialled INVITE, or no client transaction of
+it, can CANCEL it or ACK its non-2xx from the callee's response (§9.1,
+§17.1.1.3), and ACK and BYE its 2xx,
 with the answer an offer the 2xx makes is owed (§13.2.2.4, RFC 3264 §4). A
 response for a call no node holds draws nothing without an extension that
 verifies. An extension whose signature fails is ignored; a worker with no

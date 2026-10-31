@@ -86,6 +86,8 @@ pub(crate) mod txn_event;
 mod unaddressable;
 mod undecided;
 mod unheld;
+#[cfg(test)]
+mod unheld_final_tests;
 mod unrecoverable;
 #[cfg(test)]
 mod unrecoverable_tests;
