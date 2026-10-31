@@ -105,25 +105,49 @@ fn the_ack_of_a_2xx_at_a_reused_number_takes_that_number() {
 /// the caller's next re-INVITE: bob's 2xx to the other owner's, retransmitted
 /// because its ACK never reached him (RFC 3261 §13.3.1.4), answers that
 /// owner's transaction, not the one this side relays (§17.1.3). It is
-/// evidence: ACKed at its number, the call ended, nothing relayed to alice.
+/// evidence: ACKed at its number, and a repeat of it ACKed again; the call
+/// ends, and the caller's pending re-INVITE is answered 487 and CANCELled
+/// toward bob (§15.1.2, §9.1), never answered with bob's 2xx.
 #[test]
 fn a_2xx_to_another_owners_relayed_reinvite_at_a_reused_number_is_evidence() {
     let driver = Driver::new();
     let lost = [Step::Sends("a", Method::Invite), Step::AnswersSent("b-1", 200), Step::AliceAcks];
     let mut call = losing(bridged(&driver), lost);
     call.run([Step::Sends("a", Method::Invite)]);
+    let pending = call.peer("a").expect("alice").invite_cseq;
     let heard = call.peer("b-1").expect("bob").heard.clone();
     let invites: Vec<_> = heard.iter().filter(|r| *r.method() == Method::Invite).collect();
     let (theirs, relayed) = (invites[1], invites[2]);
     assert_eq!(theirs.cseq().seq(), relayed.cseq().seq(), "the number re-used");
     assert_ne!(theirs.top_via().branch(), relayed.top_via().branch());
+
     let turn = call.turned(Step::AnswersHeard("b-1", Method::Invite, 1, 200));
     assert_eq!(turn.rule, Some("evidence-final"));
-    assert!(turn.statuses_to("a").is_empty(), "nothing relayed to alice");
     let ack = turn.request_to("b-1", "ACK").expect("the 2xx is ACKed");
     assert_eq!(ack.cseq().seq(), theirs.cseq().seq(), "at the number the 2xx names");
+    let cancel = turn.request_to("b-1", "CANCEL").expect("the relayed re-INVITE CANCELled");
+    assert_eq!(cancel.top_via().branch(), relayed.top_via().branch(), "on its own branch");
     assert!(turn.methods_to("a").iter().any(|(m, _)| m == "BYE"), "the caller's BYE");
     assert_eq!(call.call().state, CallModelState::Terminating);
+
+    let again = call.turned(Step::AnswersHeard("b-1", Method::Invite, 1, 200));
+    let reack = again.request_to("b-1", "ACK").expect("the repeat of bob's 2xx is ACKed again");
+    assert_eq!(reack.cseq().seq(), theirs.cseq().seq());
+
+    call.run([
+        Step::AnswersLast("b-1", Method::Invite, 487),
+        Step::AnswersLast("b-1", Method::Bye, 200),
+        Step::AnswersLast("a", Method::Bye, 200),
+    ]);
+    let finals: Vec<u16> = call
+        .responses()
+        .iter()
+        .filter(|(leg, r)| leg == "a" && r.cseq().method() == Method::Invite)
+        .filter(|(_, r)| r.cseq().seq() == pending && r.status() >= 200)
+        .map(|(_, r)| r.status())
+        .collect();
+    assert_eq!(finals, vec![487], "the caller's re-INVITE owed one final");
+    assert_eq!(call.call().state, CallModelState::Terminated);
 }
 
 /// The 2xx to the re-INVITE this side relayed, on its branch, is the

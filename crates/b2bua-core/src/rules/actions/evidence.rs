@@ -71,7 +71,9 @@ impl ActionExecutor<'_> {
     /// awaiting that INVITE's final (early, or its CANCEL out and crossed)
     /// proves that dialog confirmed and the dialled INVITE answered, so the
     /// teardown BYEs it instead of cancelling an answered INVITE; a BYE's
-    /// final ends its dialog.
+    /// final ends its dialog. A relayed INVITE the dialog holds open under
+    /// another branch stays open on top of that round, its ACK carried ahead,
+    /// so the teardown answers its originator and CANCELs it (§15.1.2).
     fn take_evidence_final(
         &mut self,
         call: &mut Call,
@@ -83,6 +85,8 @@ impl ActionExecutor<'_> {
         let Some(id) = ctx.dialog().map(call::Dialog::id) else { return };
         let cseq = i64::from(resp.cseq().seq());
         let invite = resp.cseq().method() == Method::Invite;
+        let branch = resp.top_via().branch();
+        let mut open_relay = None;
         update_leg(call, leg_id, |leg| {
             // A re-INVITE rides a confirmed dialog (RFC 3261 §14).
             let reinvite = invite && leg.dialled_cseq().is_some_and(|dialled| cseq > dialled);
@@ -94,7 +98,9 @@ impl ActionExecutor<'_> {
             if let Some(d) = leg.dialogs.by_tags_mut(&id.our_tag, &id.peer_tag) {
                 d.our_cseq = d.our_cseq.max(cseq);
                 if invite {
-                    d.sent_invite = None;
+                    open_relay = d.sent_invite.take().filter(|r| {
+                        r.awaits_final() && r.branch().is_some_and(|b| Some(b) != branch)
+                    });
                 }
                 if reinvite && d.awaits_invite_final() {
                     d.state = DialogState::Confirmed;
@@ -102,7 +108,12 @@ impl ActionExecutor<'_> {
             }
         });
         match resp.cseq().method() {
-            Method::Invite => self.ack_evidence_invite(call, fx, leg_id, &id, resp),
+            Method::Invite => {
+                self.ack_evidence_invite(call, fx, leg_id, &id, resp);
+                if let Some(relay) = open_relay {
+                    call::helpers::open_sent_invite(call, leg_id, &id, relay);
+                }
+            }
             Method::Bye => {
                 super::dialog_end::end_dialogs(call, ctx, leg_id, LegEnd::OurByeAnswered)
             }
