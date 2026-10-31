@@ -17,7 +17,7 @@
 //! nothing. A service's own answer to one named request (`AnswerHeld`,
 //! `RejectPendingReinvite`) and the platform's answer at a held request's
 //! deadline are not settlements: each answers that request through its own
-//! action.
+//! path.
 
 use call::helpers::{find_leg, update_leg, RelayPeer};
 use call::{Call, CallModelState, Dialog, DialogId, RequestRecord};

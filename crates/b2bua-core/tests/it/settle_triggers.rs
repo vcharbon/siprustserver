@@ -216,19 +216,18 @@ fn a_call_released_at_once_settles_every_leg() {
     assert_eq!(owed_left(&call), 0);
 }
 
-/// A request held for a service is answered when its leg ends, and the
-/// held-answer timer leaves with the last one held.
+/// bob hangs up while his INFO is held for a service: his leg's end answers
+/// it 487 (RFC 3261 §15.1.2).
 #[test]
-fn the_held_answer_timer_leaves_with_the_last_held_request() {
+fn a_held_request_is_answered_487_as_its_leg_ends() {
     let driver = Driver::new().with_rule(holds_bobs_info());
     let mut call = bridged(&driver);
     call.run([Step::Sends("b-1", Method::Info)]);
-    let held = call::TimerKey::call(call::TimerType::HeldAnswer);
-    assert!(call.call().timers.iter().any(|t| t.key == held), "armed while held");
+    assert!(held_answer_at(&call).is_some(), "held for the service");
 
     let turn = call.turned(Step::Sends("b-1", Method::Bye));
     assert!(finals_to(turn, "b-1").contains(&fin(487, "INFO")));
-    assert!(!call.call().timers.iter().any(|t| t.key == held), "off once none is held");
+    assert!(held_deadlines(&call).is_empty(), "nothing is held any more");
 }
 
 /// A leg's end that answers the earliest held request, on a call that stays
