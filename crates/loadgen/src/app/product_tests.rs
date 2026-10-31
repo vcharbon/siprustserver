@@ -166,7 +166,7 @@ fn a_default_naming_no_flag_fails_at_startup() {
 #[test]
 fn the_runtime_runs_on_the_worker_threads_flag() {
     let (_, args) = parse_from(&Shipped, ["loadgen"]).unwrap();
-    assert_eq!(args.worker_threads.get(), 4, "the default leaves headroom over one core of work");
+    assert_eq!(args.worker_threads.get(), 4, "the default suits a few hundred cps");
     assert_eq!(runtime(&args).unwrap().metrics().num_workers(), 4);
 
     let (_, args) = parse_from(&Shipped, ["loadgen", "--worker-threads", "2"]).unwrap();

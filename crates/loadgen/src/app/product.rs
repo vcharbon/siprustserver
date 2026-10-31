@@ -37,7 +37,8 @@ pub trait Product {
 
     /// Loadgen flag defaults this product runs with, as `(clap id, value)`.
     /// A default changes the starting value only: a `--load-profile` field
-    /// still overrides it, and an explicit flag still overrides both.
+    /// overrides it where the profile carries that setting, and an explicit
+    /// flag overrides both.
     fn flag_defaults(&self) -> &'static [(&'static str, &'static str)] {
         &[]
     }

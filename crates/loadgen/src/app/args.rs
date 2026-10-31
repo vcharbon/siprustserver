@@ -40,9 +40,11 @@ pub struct Args {
     /// How long to offer load, in seconds.
     #[arg(long, default_value_t = 60)]
     pub duration: u64,
-    /// Worker threads of the process's runtime. A load process does a fraction
-    /// of a core of work per hundred calls per second; one worker per CPU
-    /// spends its time parking and stealing.
+    /// Worker threads of the process's runtime; the flag wins over
+    /// `TOKIO_WORKER_THREADS`. A `--load-profile` cannot set it: the runtime is
+    /// built before the profile is read. The default suits a process at a few
+    /// hundred calls per second; a process near its rate ceiling sets more,
+    /// about one worker per 400–500 cps at some 2 ms of CPU per call.
     #[arg(long, default_value = "4")]
     pub worker_threads: NonZeroUsize,
     /// Max concurrent in-flight calls (offered load above this is dropped+counted).
