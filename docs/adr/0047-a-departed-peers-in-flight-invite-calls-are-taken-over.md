@@ -214,12 +214,18 @@ stands down when:
   the transactions, never from a sequence a refusal raised), and each other request the
   copy relayed itself, as the same relay (`call::helpers::holds_relays_of`;
   `PendingRequest::relayed_by` names the relaying node). A relay the copy holds as the
-  primary's own returns its final to the primary and pins nothing. A leg's dialling
-  INVITE the copy sent and that awaits its final pins the copy whatever the primary's
-  record holds: the proxy's cookie on that INVITE names the copy, so its responses
-  return to the copy alone (ADR-0055 §8). When the final reaches the copy, the
-  primary that takes the copy's write carrying it writes the call once, and the
-  copy stands down on that write. One increment
+  primary's own returns its final to the primary and pins nothing. Nor does a leg's
+  dialling INVITE the copy sent, awaiting its final or not: its cookie names the
+  call's primary (ADR-0055 §8), so once the proxy reads the primary alive the
+  INVITE's responses reach the primary, which takes the INVITE's client transaction
+  over from its record — seeded as every materialisation seeds a dialled INVITE
+  with no final — and takes its provisionals and final, ACKs a non-2xx, ACKs or
+  BYEs a 2xx and CANCELs it as the call decides
+  (`reclaim_takes_the_copys_dialled_invite.rs`). A final that reaches the copy
+  while the primary is not routable is the copy's: the primary that takes the
+  copy's write carrying it writes the call once, the copy stands down on that
+  write, and a 2xx taken that way goes on along the copy's §13.3.1.4 ladder,
+  never sent again at once. One increment
   of a copy's `b` is one write this node made as the call's acting backup; a quiet
   turn, a fold or an adopted version moves nothing. A primary reaches a `b` only by
   reading the copy's write that carries it — applied or folded into its record, or
@@ -240,23 +246,24 @@ between. Standing down releases the copy local-only: its timers are cancelled, n
 is written, no CDR (ADR-0020 X3). Its transactions are **relinquished**, deleted with
 nothing sent, rather than orphaned (ADR-0034). They are images of the primary's own,
 so an orphan's ACK and BYE would end the dialog the primary holds, and every request
-the copy sent carries the route cookie naming the primary, so a response reaches the
-primary once the proxy reads it alive; one that still reaches the backup takes the
-call over afresh (`stood_down_round.rs`: a copy stood down in the middle of a re-INVITE
-round it relayed; the callee's 200 takes the call over afresh and the round completes).
-Any other copy plays on and self-releases at quiescence, and a refused flush folds as
-before (ADR-0031 D3). A copy that plays on from the primary's copy sends each CANCEL
-that copy records on an INVITE whose transaction the copy holds: the primary decided
-it, but a CANCEL goes on its INVITE's transaction (RFC 3261 §9.1), and only the copy
-holds that one (`router/reclaim/carried_cancel.rs`).
+the copy sent carries the route cookie naming the primary: the responses to a leg's
+dialling INVITE reach the primary once the proxy reads it alive, and any other
+response follows its Via to the backup, where it takes the call over afresh
+(`stood_down_round.rs`: a copy stood down in the middle of a re-INVITE round it
+relayed; the callee's 200 takes the call over afresh and the round completes). Any
+other copy plays on and self-releases at quiescence, and a refused flush folds as
+before (ADR-0031 D3). A CANCEL the primary's copy records on a leg's dialling INVITE
+the copy sent leaves the primary, which holds that INVITE's client transaction
+(RFC 3261 §9.1); a copy that plays on sends none
+(`reclaim_takes_the_copys_dialled_invite.rs`, the transfer-target cells).
 
 One owner acts on an outside service's answer. A copy awaiting the answer to a request
 the primary's reclaim write awaits too is covered by that write on that request: it stands down, an answer reaching
 it afterwards takes nothing over (ADR-0039 decision 5), and the primary alone acts on
-the answer, the backend possibly asked twice. A primary that takes the copy's write releasing a pinned copy
-sends again each request that write awaits and its own record did not: the copy stands
-down on the primary's write, and the primary is the one owner of those answers
-(`reclaim_takes_the_copys_consult.rs`).
+the answer, the backend possibly asked twice. A primary that takes the copy's write
+carrying a dialled INVITE's final the copy took sends again each request that write
+awaits and its own record did not: the copy stands down on the primary's write, and
+the primary is the one owner of those answers (`reclaim_takes_the_copys_consult.rs`).
 
 **An unanswered teardown never ends an answered call.** Both replication gates order
 two bodies of one call the same way (`call::helpers::lifecycle_behind`): the answer
@@ -386,7 +393,8 @@ the call has one CDR.
 - **A returning primary's reclaim inside the copy's decision.** At `applied`, the
   copy's re-asked answer can apply in the one replication hop between the returning
   primary's reclaim write and its arrival at the copy; both nodes then dial the
-  callee, and the copy plays its dialled INVITE on to its final (D7).
+  callee, and the responses to the copy's INVITE reach the primary (D7, ADR-0055
+  §8).
 - **A returning node's answer inside the replication lag of the deadline.** The
   copy's ring deadline fires before the returned node's reclaim and answer reach the
   backup: the copy CANCELs the callee after its answer and refuses the caller 480

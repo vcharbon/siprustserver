@@ -459,10 +459,21 @@ node awaits brings it, so the 2xx is ACKed with every stream rejected (RFC
 
 A response, and an in-dialog request toward the B2BUA, goes to the owner that
 holds its transaction; if that owner is not alive, to the call's other owner; a
-call with one owner goes to it. The rule is the same for every method, and the
-proxy's Via cookie is pushed on every method. The call's backup is stated by the
-worker on every request it sends for the call, and the proxy signs it into that
-leg's cookie, so every leg names the same backup.
+call with one owner goes to it. The proxy's Via cookie is pushed on every
+method. Every leg's cookie names the call's primary and its backup, whichever
+of the two dials the leg: the worker states the call's other owner on every
+request it sends for the call, and on a leg's dialog-creating INVITE (whose
+CANCEL and non-2xx ACK share its Via) the call's primary and backup; the proxy
+signs the stated owners into that leg's cookie, a worker stating no primary
+being the cookie's primary. An in-dialog request goes to the cookie's primary
+while it is alive. A response to a leg's dialling INVITE goes to the call's
+primary while it is alive, whichever owner sent the INVITE: the primary takes
+that INVITE's client transaction over from the call record (ADR-0047 D7). Any
+other response, a non-INVITE one above all (RFC 3261 §17.1.2), goes to the
+owner that sent its request. Once a returned primary is alive, the call it
+reclaimed from a takeover copy has one owner: every leg's INVITE responses and
+in-dialog requests reach it, and a request the copy still awaits a final for
+keeps the copy playing on until that final.
 
 A worker's own in-dialog requests keep following the route set through the
 proxy, which forwards them without an ownership check. While two copies run (a
@@ -474,10 +485,13 @@ A worker reclaims its own calls in two steps. Once recovered, whether or not
 its own endpoint reads ready, it makes every call of its partition resident
 and parks it: no timer armed, no transaction seeded, nothing sent. A call with
 an INVITE to serve, or one the backup wrote, is written once (ADR-0047 D7), so
-the backup's takeover copy stands down on that write (a copy holding an INVITE
-it dialled plays on until its final, and the primary's write that takes the
-final releases it), and the burst of those writes drains, before
-the proxy routes anything to the worker. The worker arms the parked calls —
+the backup's takeover copy stands down on that write, an INVITE it dialled
+awaiting its final or not, and the burst of those writes drains, before the
+proxy routes anything to the worker. A message the proxy routes to the backup
+meanwhile takes the call over afresh there; a final the copy takes that way is
+met by the worker, which writes the call once so the copy stands down again,
+and a 2xx it takes from the copy goes on along the copy's §13.3.1.4 ladder,
+never sent again at once (`reclaim_takes_the_copys_dialled_invite.rs`). The worker arms the parked calls —
 their timers, their transactions, the re-ask of an undecided call — only
 while its own endpoint reads ready in the slice the proxy routes from. While
 it does not, the proxy holds no address for it, so the response to a request
@@ -700,10 +714,9 @@ the re-anchor deadband of each other.
     reaches a living worker still draws its final there;
   - `W-off-reboot-two-servers`, off only, a restart of the primary (user
     ruling): the restarted primary reclaims a call while the backup's takeover
-    copy holds an INVITE it dialled. The proxy routes each leg to the worker
-    that sent its dialog-creating request (§8), so the caller's leg reaches the
-    primary and the copy's legs the copy, and both serve the call at once;
-    their writes diverge and each node ends the call cleanly (§7), its BYE into
+    copy dials a leg whose write has not reached it. The reclaim write does
+    not contain that write, so the copy plays on, and both serve the call at
+    once; their writes diverge and each node ends the call cleanly (§7), its BYE into
     a dialog the other already ended closed by its 481, once per dialog, the
     two BYEs of the dialog from two workers. No upstream shape restarts the
     primary while a copy is dialling, so the row has no witness;
@@ -841,6 +854,11 @@ naming the node that sends.
   transaction's lifetime. It would not cover the caller's ACK either, which
   the proxy routes to the backup while it reads the worker `Unknown`. §8's
   parking makes the meeting precede routability instead.
+- **A takeover copy keeping the call while an INVITE it dialled awaits its
+  final, or the returned worker stepping back for it.** The caller's leg names
+  the worker, so the caller's messages and the callee's reach two nodes, each
+  acting on its own half of the call. Every leg naming the call's primary
+  leaves one owner (§8).
 - **The proxy routing a response to a takeover copy's transaction, or keeping
   a returned worker's calls on the backup until it declares its reclaim
   met.** The proxy holds no call state, its replicas flip apart, a backup
