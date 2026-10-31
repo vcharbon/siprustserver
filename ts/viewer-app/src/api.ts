@@ -1059,8 +1059,8 @@ export interface CellCdr {
     /** Why a held file reads as no block; null where it reads. */
     readonly note: string | null
   }>
-  /** The raw CDR lines of each call, by the caller leg its Call-ID is minted for. */
-  readonly lines: ReadonlyArray<{ readonly leg: string; readonly callId: string; readonly lines: number }>
+  /** The raw CDR lines of each call, by the caller leg its Call-ID is minted for; null where the cell holds none. */
+  readonly lines: ReadonlyArray<{ readonly leg: string; readonly callId: string; readonly lines: number }> | null
   readonly facts: ReadonlyArray<{ readonly name: string; readonly value: string }>
 }
 

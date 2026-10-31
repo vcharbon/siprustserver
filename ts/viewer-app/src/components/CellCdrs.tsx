@@ -68,12 +68,14 @@ export const CellCdrs = ({ capture, session, cell, declared }: {
             <tr><th>call</th><th>Call-ID</th><th title="raw CDR lines the case declares">declared</th><th>seen</th></tr>
           </thead>
           <tbody>
-            {calls.map((call) => (
-              <tr key={call.leg}>
+            {calls.map((call, at) => (
+              <tr key={at}>
                 <td className="mono">{call.call ?? "—"}</td>
                 <td className="mono">{call.callId ?? call.leg}</td>
                 <td>{call.declared ?? "—"}</td>
-                <td className={call.declared === null || call.declared === call.seen ? "cp-ok" : "cp-nok"}>{call.seen}</td>
+                <td className={call.seen === null ? "muted" : call.declared === null || call.declared === call.seen ? "cp-ok" : "cp-nok"}>
+                  {call.seen ?? "—"}
+                </td>
               </tr>
             ))}
           </tbody>

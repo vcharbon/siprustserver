@@ -1,6 +1,7 @@
 /**
  * A cell's CDRs in its call details: each declared call beside the lines seen
- * for its caller leg, seen calls no declaration names after; the cells a delta
+ * for the Call-ID its caller leg mints, seen calls no declaration names after,
+ * no count where the cell holds no lines; the cells a delta
  * compares are the case's sub-cases on the cell's run and lane, or the case
  * on every lane of the run, each a cell the run wrote.
  */
@@ -88,6 +89,7 @@ describe("a cell's CDRs", () => {
       { call: null, leg: "held-A", callId: "held-A-2@h", declared: null, seen: 1 }
     ])
     expect(callLines(declared, [])).toEqual([{ call: "c1", leg: "A", callId: null, declared: 1, seen: 0 }])
+    expect(callLines(declared, null)).toEqual([{ call: "c1", leg: "A", callId: null, declared: 1, seen: null }])
     expect(declaredOf(VIEW, "R/b", 9)).toBeUndefined()
   })
 })

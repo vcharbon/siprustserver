@@ -21,14 +21,14 @@ export interface DeltaColumn {
 /** What a delta compares the cell with: its case's sub-cases on its lane, or its case on every lane. */
 export type DeltaAxis = "subcases" | "lanes"
 
-/** One call of the cell: its declared lines (null where none is declared) beside the lines seen for it. */
+/** One call of the cell: its declared lines (null where none is declared) beside the lines seen for it (null where the cell holds none). */
 export interface CallLines {
   /** The call's id in the case; null for seen lines no declared call names. */
   readonly call: string | null
   readonly leg: string
   readonly callId: string | null
   readonly declared: number | null
-  readonly seen: number
+  readonly seen: number | null
 }
 
 const laneOf = (view: Campaign, run: number, lane: string) =>
@@ -66,18 +66,22 @@ export const deltaColumns = (
 export const declaredOf = (view: Campaign, caseId: string, run: number): readonly CampaignDeclaredLines[] | undefined =>
   view.runs.find((r) => r.id === run)?.rawCdr?.[caseId]
 
-/** Each declared call beside the lines seen for its leg, then the seen calls no declared one names. */
+/**
+ * Each declared call beside the lines seen for the Call-ID its caller leg
+ * mints (`<leg>-…`), then the seen calls no declared one names; every count
+ * seen null where the cell holds no lines.
+ */
 export const callLines = (
   declared: readonly CampaignDeclaredLines[] | undefined,
   seen: CellCdr["lines"]
 ): readonly CallLines[] => {
   const listed = (declared ?? []).map((d) => {
-    const lines = seen.find((s) => s.leg === d.leg)
-    return { call: d.call, leg: d.leg, callId: lines?.callId ?? null, declared: d.lines, seen: lines?.lines ?? 0 }
+    const lines = seen?.find((s) => s.callId.startsWith(`${d.leg}-`))
+    return { call: d.call, leg: d.leg, callId: lines?.callId ?? null, declared: d.lines, seen: seen === null ? null : lines?.lines ?? 0 }
   })
-  const named = new Set(listed.map((c) => c.leg))
-  const rest = seen
-    .filter((s) => !named.has(s.leg))
+  const named = new Set(listed.flatMap((c) => (c.callId === null ? [] : [c.callId])))
+  const rest = (seen ?? [])
+    .filter((s) => !named.has(s.callId))
     .map((s) => ({ call: null, leg: s.leg, callId: s.callId, declared: null, seen: s.lines }))
   return [...listed, ...rest]
 }
