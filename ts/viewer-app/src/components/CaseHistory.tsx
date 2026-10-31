@@ -9,6 +9,7 @@ import type { JSX } from "react"
 import type { Campaign } from "../api.ts"
 import { resultOf } from "../campaign-facets.ts"
 import { history } from "../campaign-history.ts"
+import { sourceLines } from "../source-lines.ts"
 
 const MARK: Readonly<Record<string, string>> = { pass: "✓", failure: "✗", error: "!", none: "—" }
 
@@ -55,7 +56,7 @@ export const CaseHistory = ({ view, caseId, lanes, onClose, onDelta }: {
           <details>
             <summary><b>Source</b> <span className="muted mono">{known.source.file}</span></summary>
             <pre className="cp-source mono">
-              {known.source.text.replace(/\n$/, "").split("\n").map((line, at) => (
+              {sourceLines(known.source.text).map((line, at) => (
                 <span key={at} className="cp-line">{line}{"\n"}</span>
               ))}
             </pre>
