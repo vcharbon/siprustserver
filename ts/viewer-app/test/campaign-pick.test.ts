@@ -33,7 +33,7 @@ describe("a campaign start's lanes", () => {
 
   it("refuse a pick of two groups naming the groups that run, a refused lane with its reason, and no pick", () => {
     expect(pickRefusal(["sim", "lab-a"], SPLIT)).toBe("lanes of different groups run apart: sim alone, or lab-a + lab-b")
-    expect(pickRefusal(["sim", "lab-a"], AWAY)).toBe("lab-a: not here: real clock")
+    expect(pickRefusal(["sim", "lab-a"], AWAY)).toBe("not here: real clock")
     expect(pickRefusal([], SPLIT)).toBe("no lane picked")
     expect(pickRefusal(["gone"], SPLIT)).toBe("no lane gone")
   })

@@ -52,12 +52,12 @@ const Rebuild = ({ on, set }: { readonly on: boolean; readonly set: (on: boolean
   </label>
 )
 
-/** The lanes refused here, one line each: the lane and its reason. */
+/** The lanes refused here, one line each: the server's reason, which names the lane. */
 const RefusedLanes = ({ lanes }: { readonly lanes: readonly LaunchLane[] }): JSX.Element | null => {
   const refused = lanes.filter((l) => l.refused !== null)
   return refused.length === 0 ? null : (
     <ul className="cp-refused muted">
-      {refused.map((l) => <li key={l.lane}><span className="mono">{l.lane}</span>: {l.refused}</li>)}
+      {refused.map((l) => <li key={l.lane}>{l.refused}</li>)}
     </ul>
   )
 }

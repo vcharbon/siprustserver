@@ -28,7 +28,7 @@ export const pickRefusal = (picked: readonly string[], lanes: readonly LaunchLan
   if (picked.length === 0) return "no lane picked"
   const named = picked.map((id) => lanes.find((l) => l.lane === id))
   const refused = named.find((l) => l !== undefined && l.refused !== null)
-  if (refused !== undefined) return `${refused.lane}: ${refused.refused}`
+  if (refused !== undefined) return refused.refused
   if (named.some((l) => l === undefined)) return `no lane ${picked.filter((id, i) => named[i] === undefined).join(", ")}`
   return new Set(named.map((l) => l!.group)).size > 1 ? `lanes of different groups run apart: ${groupsLine(lanes)}` : null
 }
