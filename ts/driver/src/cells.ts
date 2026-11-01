@@ -477,14 +477,14 @@ const runRustTest = Effect.fn("Driver.runRustTest")(function* (
   const path = yield* Path.Path
   const run = yield* toolchainRunner
   const { tests } = context
-  if (tests.unavailable !== undefined) {
-    return { passed: false, detail: tests.unavailable, crashed: true } satisfies CellOutcome
-  }
 
   // The cell directory is wiped like the interpreter wipes a replay cell's:
   // a stale result.json from an earlier run must never read as this run's.
   yield* fs.remove(absolute, { recursive: true, force: true })
   yield* fs.makeDirectory(absolute, { recursive: true })
+  if (tests.unavailable !== undefined) {
+    return { passed: false, detail: tests.unavailable, crashed: true } satisfies CellOutcome
+  }
   const env = {
     ...(tests.cellDirEnv === undefined ? {} : { [tests.cellDirEnv]: absolute }),
     ...(tests.cellInfraEnv === undefined ? {} : { [tests.cellInfraEnv]: cellIdOf(cell).infra })
