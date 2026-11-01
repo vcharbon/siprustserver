@@ -376,6 +376,7 @@ pub async fn run(
             cmds = readmission.released() => Work::Released(cmds),
         };
         pulse.turning();
+        ctx.turn_probe.router_turn(&ctx.config.self_ordinal).await;
         match work {
             Work::Event(ev, matched_client_txn) => {
                 ingress::on_event(&ctx, ev, matched_client_txn).await

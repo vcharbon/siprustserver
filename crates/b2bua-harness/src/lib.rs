@@ -15,7 +15,7 @@ use b2bua::metrics::B2buaMetrics;
 use b2bua::store::{CallStore, FaultInjectingCallStore, InMemoryCallStore, StoreFaults};
 use b2bua::wire_faults::WireFaults;
 use b2bua::{B2buaCore, B2buaDeps};
-use scenario_harness::{Harness, RunReport};
+use scenario_harness::Harness;
 
 // The canonical INVITE/180/200/ACK choreography lives in
 // `scenario_harness::callflow`, shared by the single-SUT b2bua tests and the
@@ -25,6 +25,7 @@ use sip_clock::Clock;
 use sip_net::UdpEndpoint;
 use sip_txn::IdGen;
 
+pub mod backlog;
 pub mod failure_view;
 pub mod limiter;
 mod live;
@@ -32,17 +33,22 @@ pub mod model_gate;
 mod operator;
 mod proxy_core;
 mod reaped;
+pub mod router_pace;
 mod routes;
 mod scene;
 mod spawn_params;
 pub mod terminated;
+mod wire_reads;
 pub mod witness;
 
+pub use backlog::{drop_backlog_answers, send_backlog, BACKLOG_METHOD};
 pub use limiter::{LimiterCount, LimiterLeak, LimiterProbe, DEFAULT_LIMITER_ID};
 pub use proxy_core::{spawn_proxy_core, spawn_proxy_core_with, ExternalProxyFace, ProxyCoreParts};
+pub use router_pace::{Pace, RouterPace};
 pub use scene::{B2buaScene, ALICE_PORT, B2BUA_PORT, BOB_PORT};
 pub use spawn_params::{cluster_key, B2buaSpawnParams};
 use terminated::{TerminatedCalls, TerminatedCallsWriter};
+pub use wire_reads::{invite_final_statuses, stated, stated_by_response};
 pub use witness::{WitnessRig, WITNESS_IDS, WITNESS_LIMITER_ADDR};
 
 // ===========================================================================
@@ -175,44 +181,6 @@ pub async fn settle_until(cond: impl Fn() -> bool) {
         }
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
-}
-
-/// The first value `req` states under header `name`, as written on the wire.
-pub fn stated(req: &sip_message::SipRequest, name: &str) -> Option<String> {
-    req.raw_text(sip_message::header::HeaderName::from(name)).next().map(|v| v.as_str().to_string())
-}
-
-/// The first value `resp` states under header `name`, as written on the wire.
-pub fn stated_by_response(resp: &sip_message::SipResponse, name: &str) -> Option<String> {
-    resp.raw_text(sip_message::header::HeaderName::from(name))
-        .next()
-        .map(|v| v.as_str().to_string())
-}
-
-/// The distinct final statuses delivered to `to` for its initial-INVITE
-/// transaction (CSeq method INVITE) — the RFC 3261 §17.2.1
-/// one-final-per-transaction oracle shared by the cancelled-call scenarios.
-/// Retransmits of the SAME final dedup to one status; a
-/// regression's second, different final shows up as a second element.
-pub fn invite_final_statuses(report: &RunReport, to: SocketAddr) -> Vec<u16> {
-    use sip_message::parser::custom::CustomParser;
-    use sip_message::{Method, SipMessage, SipParser};
-    let mut statuses: Vec<u16> = report
-        .entries()
-        .iter()
-        .filter(|e| e.to == to)
-        .filter_map(|e| match CustomParser::new().parse(&e.raw) {
-            Ok(SipMessage::Response(r))
-                if r.status() >= 200 && *r.cseq().method() == Method::Invite =>
-            {
-                Some(r.status())
-            }
-            _ => None,
-        })
-        .collect();
-    statuses.sort_unstable();
-    statuses.dedup();
-    statuses
 }
 
 /// [`B2buaSut::force_brake_depth`]'s "no depth forced": the brake reads the live one.

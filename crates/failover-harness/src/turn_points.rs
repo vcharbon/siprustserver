@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use b2bua::turn_probe::{Hold, TurnMark, TurnProbe};
 pub use b2bua::{Released, TurnPoint};
+use b2bua_harness::RouterPace;
 use tokio::sync::oneshot;
 
 /// One turn of a call at its primary.
@@ -120,6 +121,8 @@ pub struct TurnPoints {
     /// Draws the place of a sub-point in the order of the run's recorded
     /// messages: the recording's own sequencer.
     stamp: Option<Stamp>,
+    /// The pace of each worker's router loop.
+    router_pace: Arc<RouterPace>,
 }
 
 /// A source of places in the order of the run's recorded messages.
@@ -164,6 +167,12 @@ impl TurnPoints {
     /// recorded messages, drawing from `stamp`.
     pub fn stamped(stamp: Stamp) -> Arc<Self> {
         Arc::new(Self { stamp: Some(stamp), ..Self::default() })
+    }
+
+    /// The pace of each worker's router loop: every worker runs free until a
+    /// test sets one.
+    pub fn router_pace(&self) -> &Arc<RouterPace> {
+        &self.router_pace
     }
 
     /// Every bound pass of the run so far, the calls a backup deleted
@@ -360,6 +369,10 @@ fn covers(mark: &TurnMark<'_>, turn: &Turn) -> bool {
 }
 
 impl TurnProbe for TurnPoints {
+    fn router_turn(&self, node: &str) -> Option<Hold> {
+        self.router_pace.hold(node)
+    }
+
     fn bound_passed(&self, node: &str, call_ref: Option<&str>) {
         let pass = BoundPass { node: node.to_string(), call_ref: call_ref.map(str::to_string) };
         let mut inner = self.lock();

@@ -1,7 +1,9 @@
 //! The turn-point seam (ADR-0055 §13): a test observes every turn of a call at
 //! its sub-points and may hold the turn there, so an incident lands at an exact
-//! instant of the turn. A worker built without a probe — production — tests one
-//! `Option` per sub-point and builds no mark.
+//! instant of the turn. It also hears each turn of the router loop and may
+//! hold the loop there, so events queue behind it as behind a starved process.
+//! A worker built without a probe — production — tests one `Option` per
+//! sub-point and builds no mark.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -103,6 +105,13 @@ pub trait TurnProbe: Send + Sync {
     /// messages it held for a turn of `call_ref` (`None` when the layer no
     /// longer knew the transaction): they left before that turn's write.
     fn bound_passed(&self, _node: &str, _call_ref: Option<&str>) {}
+
+    /// Called by the router loop of `node` each time it takes work, before it
+    /// handles it; `Some` holds the loop there, and everything queued for it
+    /// waits.
+    fn router_turn(&self, _node: &str) -> Option<Hold> {
+        None
+    }
 }
 
 /// The handle a worker carries: no probe by default.
@@ -126,6 +135,17 @@ impl TurnProbes {
     /// Whether a probe is installed.
     pub fn installed(&self) -> bool {
         self.0.is_some()
+    }
+
+    /// Report that the router loop of `node` took work and wait out the hold,
+    /// if any.
+    pub(crate) async fn router_turn(&self, node: &str) {
+        let Some(probe) = &self.0 else {
+            return;
+        };
+        if let Some(hold) = probe.router_turn(node) {
+            hold.await;
+        }
     }
 
     /// Report the sub-point `mark` builds and wait out the hold, if any. The
