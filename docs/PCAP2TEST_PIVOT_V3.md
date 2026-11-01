@@ -2578,7 +2578,7 @@ One check vocabulary everywhere, borrowed from the upstream `e2e-model`:
 
 | field | required | meaning |
 |---|---|---|
-| `field` | yes | field selector. Open token: `status`, `from.userInfo`, `from.uri`, `to.uri`, `ruri.uri`, `ruri.userInfo`, `header(P-Asserted-Identity)`, `tags(Supported,Require)` (the option tags every row of the named headers lists, one set joined by `,`), `body`, `body.b64`, `part(application/sdp)` (the first entity part of that media type, read as `body` reads a body), or a deployment observable's name in a postcondition |
+| `field` | yes | field selector. Open token: `status`, `from.userInfo`, `from.uri`, `to.uri`, `ruri.uri`, `ruri.userInfo`, `header(P-Asserted-Identity)` (its first occurrence), `header(Diversion)[1]` (the `n`-th item, 0-based, of that header's rows folded into one list, RFC 3261 §7.3.1), `tags(Supported,Require)` (the option tags every row of the named headers lists, one set joined by `,`), `body`, `body.b64`, `part(application/sdp)` (the first entity part of that media type, read as `body` reads a body), or a deployment observable's name in a postcondition |
 | `op` | yes | `eq`, `regex`, `exists`, `absent` |
 | `value` | with `eq` / `regex` | a literal, a regex, or a string carrying `${…}` accessors |
 

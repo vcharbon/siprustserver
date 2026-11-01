@@ -36,6 +36,15 @@ impl HeaderProjection {
         let want = HeaderName::from(name);
         self.0.iter().filter(|(n, _)| want.matches(n)).map(|(_, v)| v.as_str()).collect()
     }
+
+    /// The `n`-th item (0-based) of `name` over every row in wire order: the
+    /// rows fold into one list (RFC 3261 §7.3.1), split on the header's own
+    /// separator outside quoted-strings and `<…>`, each item trimmed.
+    pub fn item(&self, name: &str, n: usize) -> Option<&str> {
+        let sep = HeaderName::item_separator_of(name);
+        self.all(name).into_iter().flat_map(|row| sep.split(row)).nth(n)
+    }
+
     /// The option tags every row of the set-like header `name` lists
     /// (`Supported`, `Require`, …), in wire order, read as
     /// [`crate::sniff::option_tags`] reads them: one case-insensitive set, a
@@ -107,5 +116,21 @@ l: 3\r\n\r\nv=0",
         assert_eq!(headers.first("X-Api-Call"), Some("call-9"));
         assert_eq!(headers.all("x-API-call"), ["call-9", "call-10"]);
         assert!(headers.all("Reason").is_empty());
+    }
+
+    /// An item is counted over every row, a comma-folded row and separate
+    /// rows alike; a comma inside a quoted display name or `<…>` is data.
+    #[test]
+    fn an_item_counts_over_every_row_of_the_list() {
+        let rows: HeaderProjection = vec![
+            ("Diversion".to_string(), "\"a, b\" <sip:1@h>;counter=1, <sip:2@h>".to_string()),
+            ("diversion".to_string(), "<sip:3@h;x=1,2>;reason=unknown".to_string()),
+        ]
+        .into();
+        assert_eq!(rows.item("Diversion", 0), Some("\"a, b\" <sip:1@h>;counter=1"));
+        assert_eq!(rows.item("Diversion", 1), Some("<sip:2@h>"));
+        assert_eq!(rows.item("Diversion", 2), Some("<sip:3@h;x=1,2>;reason=unknown"));
+        assert_eq!(rows.item("Diversion", 3), None);
+        assert_eq!(rows.item("Reason", 0), None);
     }
 }

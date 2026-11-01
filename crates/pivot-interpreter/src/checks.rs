@@ -39,6 +39,7 @@ pub trait Observables {
 /// | `from.uri` / `to.uri` | the two whole URIs, parameters included |
 /// | `ruri.uri` / `ruri.userInfo` | a request's Request-URI, whole / its user part canonically |
 /// | `header(<Name>)` | the first occurrence of that header, in wire order |
+/// | `header(<Name>)[<n>]` | the `n`-th item (0-based) of that header, its rows folded into one list (RFC 3261 §7.3.1) |
 /// | `tags(<Name>,…)` | the option tags every row of the named set-like headers lists, one set joined by `,` |
 /// | `body` | the body as text |
 /// | `part(<type>)` | the first entity part of that media type, as `body` reads a body |
@@ -68,11 +69,11 @@ impl Observables for MessageObservables<'_> {
                 .ok_or_else(|| format!("selector {field:?} opens `part(` and never closes it"))?;
             return Ok(part_of(m, media).map(|payload| as_text(&payload)));
         }
-        if let Some(rest) = field.strip_prefix("header(") {
-            let name = rest
-                .strip_suffix(')')
-                .ok_or_else(|| format!("selector {field:?} opens `header(` and never closes it"))?;
-            return Ok(m.header(name).map(str::to_string));
+        if field.starts_with("header(") {
+            return Ok(match header_selector(field)? {
+                HeaderSelector::First(name) => m.header(name).map(str::to_string),
+                HeaderSelector::Item(name, n) => m.headers.item(name, n).map(str::to_string),
+            });
         }
         Ok(match field {
             "status" => m.status.map(|s| s.to_string()),
@@ -202,20 +203,54 @@ pub fn evaluate(
     }
 }
 
-/// Whether `observed` states what `want` states. On a `header(…)` selector that
-/// is a comparison of wire FORMS — RFC 3261 §7.3.1 lets a list header space its
-/// separators as it likes, so `Q.850; cause=16` and `Q.850;cause=16` are one
-/// value — and on every other selector it is the string.
+/// Whether `observed` states what `want` states. On a `header(…)` selector, an
+/// item selector included, that is a comparison of wire FORMS — RFC 3261
+/// §7.3.1 lets a list header space its separators as it likes, so
+/// `Q.850; cause=16` and `Q.850;cause=16` are one value — and on every other
+/// selector it is the string.
 fn eq_holds(field: &str, observed: &str, want: &str) -> bool {
-    match header_selector(field) {
+    match header_name(field) {
         Some(name) => header_forms_equivalent(name, &[observed], &[want]),
         None => observed == want,
     }
 }
 
-/// The header `field` selects, where it selects one.
-fn header_selector(field: &str) -> Option<&str> {
-    field.strip_prefix("header(")?.strip_suffix(')')
+/// What a `header(…)` selector reads: the header's first occurrence, or the
+/// `n`-th item of its rows folded into one list.
+enum HeaderSelector<'a> {
+    First(&'a str),
+    Item(&'a str, usize),
+}
+
+/// The `header(<Name>)` or `header(<Name>)[<n>]` selector `field` states; an
+/// error where it opens `header(` and is neither.
+fn header_selector(field: &str) -> Result<HeaderSelector<'_>, String> {
+    let rest = field.strip_prefix("header(").unwrap_or(field);
+    let Some((name, after)) = rest.split_once(')') else {
+        return Err(format!("selector {field:?} opens `header(` and never closes it"));
+    };
+    if after.is_empty() {
+        return Ok(HeaderSelector::First(name));
+    }
+    let index = after
+        .strip_prefix('[')
+        .and_then(|i| i.strip_suffix(']'))
+        .and_then(|i| (!i.is_empty() && i.bytes().all(|b| b.is_ascii_digit())).then_some(i))
+        .and_then(|i| i.parse::<usize>().ok())
+        .ok_or_else(|| {
+            format!("selector {field:?}: an item index is `[<n>]`, n a decimal number")
+        })?;
+    Ok(HeaderSelector::Item(name, index))
+}
+
+/// The header name a `header(…)` selector reads, where `field` is one.
+fn header_name(field: &str) -> Option<&str> {
+    if !field.starts_with("header(") {
+        return None;
+    }
+    match header_selector(field).ok()? {
+        HeaderSelector::First(name) | HeaderSelector::Item(name, _) => Some(name),
+    }
 }
 
 fn op_name(op: CheckOp) -> &'static str {

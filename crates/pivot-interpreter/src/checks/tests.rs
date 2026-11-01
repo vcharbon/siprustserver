@@ -61,6 +61,51 @@ fn every_op_reads_the_message_and_says_what_it_saw() {
     );
 }
 
+/// `header(<Name>)[<n>]` reads the n-th item over every row: the second
+/// Diversion entry is found whether the message spells it on its own row or
+/// folded into the first; an index past the end is absent.
+#[test]
+fn an_item_selector_reads_the_nth_entry_of_the_folded_rows() {
+    let state = RunState::new();
+    let bindings = IdentityBindings::new();
+    let second = "<sip:+15550100002@h;user=phone>;counter=1;reason=unknown";
+    for rows in [
+        vec![
+            ("Diversion".to_string(), "<sip:+15550100001@h;user=phone>;counter=1".to_string()),
+            ("Diversion".to_string(), second.to_string()),
+        ],
+        vec![(
+            "Diversion".to_string(),
+            format!("<sip:+15550100001@h;user=phone>;counter=1, {second}"),
+        )],
+    ] {
+        let mut m = inbound();
+        m.headers = rows.into();
+        let want = "<sip:+15550100002@h;user=phone>; counter=1; reason=unknown";
+        let eq = check("header(Diversion)[1]", CheckOp::Eq, Some(want));
+        assert!(run(&eq, &m, &state, &bindings).is_none(), "{:?}", run(&eq, &m, &state, &bindings));
+        let first = check("header(Diversion)[0]", CheckOp::Regex, Some("100001"));
+        assert!(run(&first, &m, &state, &bindings).is_none());
+        let past = check("header(Diversion)[2]", CheckOp::Absent, None);
+        assert!(run(&past, &m, &state, &bindings).is_none());
+    }
+}
+
+/// A malformed item index is an unreadable selector, never an absent value.
+#[test]
+fn a_malformed_item_index_is_unreadable() {
+    let state = RunState::new();
+    let bindings = IdentityBindings::new();
+    let m = inbound();
+    for field in ["header(To)[x]", "header(To)[1", "header(To)[]", "header(To", "header(To)x"] {
+        let failed = run(&check(field, CheckOp::Absent, None), &m, &state, &bindings);
+        assert!(
+            matches!(&failed, Some(Failure::CheckFailed { observed, .. }) if observed.starts_with("unreadable")),
+            "{field}: {failed:?}"
+        );
+    }
+}
+
 /// `tags(…)` reads every row of every named header: an option tag only a
 /// second `Supported` row or a `Require` lists is found.
 #[test]
