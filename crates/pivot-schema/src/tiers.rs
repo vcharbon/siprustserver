@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TierData {
-    /// Headers a stored message spec never carries.
+    /// Headers a generated message spec omits; an authored one states only
+    /// those whose reason says it may.
     pub tier1_omitted: Vec<OmittedHeader>,
     /// What happens to the address headers, per message.
     pub address_handling: Vec<AddressHandling>,
@@ -47,6 +48,9 @@ pub struct OmittedHeader {
 pub enum OmissionReason {
     /// The interpreter's stack regenerates it from dialog state.
     Regenerated,
+    /// The stack writes its default unless the spec states the header, whose
+    /// stated value it then sends in place of its own (`Max-Forwards`, §8).
+    RegeneratedUnlessStated,
     /// It is represented elsewhere in the document, in a tier-2 or body field.
     RepresentedElsewhere,
 }
@@ -177,12 +181,12 @@ pub fn tier_data() -> TierData {
 }
 
 fn tier1_omitted() -> Vec<OmittedHeader> {
-    use OmissionReason::{Regenerated, RepresentedElsewhere};
+    use OmissionReason::{Regenerated, RegeneratedUnlessStated, RepresentedElsewhere};
     [
         ("Via", Regenerated),
         ("Call-ID", Regenerated),
         ("CSeq", Regenerated),
-        ("Max-Forwards", Regenerated),
+        ("Max-Forwards", RegeneratedUnlessStated),
         ("Contact", Regenerated),
         ("Route", Regenerated),
         ("Record-Route", Regenerated),

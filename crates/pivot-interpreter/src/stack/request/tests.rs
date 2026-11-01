@@ -632,3 +632,60 @@ fn an_early_dialog_with_no_remote_target_refuses_its_requests_by_name() {
         Err(StackError::NoRemoteTarget { leg: "A".into(), method: "UPDATE".into() })
     );
 }
+
+/// The hop counts a request states: `Max-Forwards` rides once, as stated.
+fn hops(request: &SipRequest) -> Vec<String> {
+    request.raw_text(sip_message::HeaderName::MaxForwards).map(|s| s.to_string()).collect()
+}
+
+/// RFC 3261 §8.1.1.6, §20.22: every request a leg composes — in-dialog, the
+/// ACK of a 2xx and of a non-2xx, the CANCEL — sends the hop count its
+/// stated headers carry in place of the default, once; an unparsable or
+/// second stated count refuses it.
+#[test]
+fn a_stated_max_forwards_replaces_the_default_on_every_request() {
+    let stated = [TemplateHeader::frozen("Max-Forwards", "3")];
+    let mut uac = calling();
+    let cancel = uac.cancel(&stated).expect("the caller CANCELs");
+    assert_eq!(hops(&cancel), ["3"]);
+    assert_eq!(hops(&uac.cancel(&[]).expect("a CANCEL")), ["70"]);
+    let (mut uas, _) = ringing("B");
+    let ok = uas
+        .respond(
+            &Answer { status: 200, reason: "OK", cseq_method: Some("INVITE"), early_tag: None },
+            &[],
+            Vec::new(),
+            None,
+        )
+        .expect("the callee answers");
+    uac.learn_response(&ok);
+    let ack = uac.ack_for(&ok, &stated, Vec::new(), None, None).expect("the caller ACKs");
+    assert_eq!(hops(&ack), ["3"]);
+    let bye = uac.in_dialog(Method::Bye, &stated, Vec::new(), None, None).expect("a BYE");
+    assert_eq!(hops(&bye), ["3"]);
+    let twice =
+        [TemplateHeader::frozen("Max-Forwards", "3"), TemplateHeader::frozen("max-forwards", "4")];
+    for bad in [&[TemplateHeader::frozen("Max-Forwards", "x")][..], &twice[..]] {
+        let refused = uac.in_dialog(Method::Info, bad, Vec::new(), None, None);
+        assert!(matches!(refused, Err(StackError::Unbuilt { .. })), "{refused:?}");
+    }
+
+    let mut refused_call = calling();
+    let (mut callee, _) = ringing("B");
+    let busy = callee
+        .respond(
+            &Answer {
+                status: 486,
+                reason: "Busy Here",
+                cseq_method: Some("INVITE"),
+                early_tag: None,
+            },
+            &[],
+            Vec::new(),
+            None,
+        )
+        .expect("the callee is busy");
+    refused_call.learn_response(&busy);
+    let ack = refused_call.ack_for(&busy, &stated, Vec::new(), None, None).expect("the ACK");
+    assert_eq!(hops(&ack), ["3"]);
+}
