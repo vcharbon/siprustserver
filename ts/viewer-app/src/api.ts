@@ -529,7 +529,10 @@ export interface CaptureIngestStart {
   readonly capture: string
   readonly started: boolean
   readonly detail: string
+  /** The page the capture is followed on: its study view, or the pcaps page for an inbox drop. */
   readonly study: string
+  /** The drop went to the inbox, to enter the pcap root once made shareable. */
+  readonly inbox?: boolean | null
   /** The ingest job in the store; absent where the source command made none. */
   readonly jobId?: number | null
 }
@@ -759,6 +762,8 @@ export type JobStartBody =
     readonly rebuild?: boolean
   }
   | { readonly kind: "ingest"; readonly paths: readonly string[]; readonly set?: boolean; readonly cut?: boolean }
+  /** A file of the pcap root on a lane: an ingest with its cut, then a replay after it. */
+  | { readonly kind: "pcap-replay"; readonly file: string; readonly lane: string; readonly force?: boolean }
 
 export interface JobStarted {
   readonly id: number
@@ -938,6 +943,48 @@ export interface SourcesPage {
   readonly offset: number
   /** The roots a path may be added from. */
   readonly roots: readonly string[]
+}
+
+/** One file of the pcap root: its stat, where the pipeline stands with it, its last run per lane. */
+export interface PcapFile {
+  readonly file: string
+  readonly size: number
+  readonly modifiedAt: string
+  /** The capture the population holds it as, or the name its ingest will give it. */
+  readonly capture: string
+  readonly state: "new" | "ingested" | "cut"
+  /** The standing cut's cases; null unless cut. */
+  readonly cases: number | null
+  readonly ingest: string | null
+  readonly cut: string | null
+  readonly problem: string | null
+  readonly standings: readonly SourceStanding[]
+}
+
+/** One capture of the inbox and where it stands. */
+export interface InboxEntry {
+  /** The file its shareable copy takes in the pcap root. */
+  readonly copy: string
+  readonly files: readonly { readonly name: string; readonly size: number; readonly modifiedAt: string }[]
+  readonly state: "settling" | "waiting" | "taking" | "refused"
+  readonly jobId: number | null
+}
+
+/** How a capture replay fits one lane: it fits, runs only forced, or runs nowhere. */
+export interface PcapLane {
+  readonly lane: string
+  readonly fit: "fits" | "forced" | "none"
+  readonly lacks: readonly string[]
+  readonly line: string | null
+}
+
+/** The pcaps page: the pcap root's files, the inbox, the lanes; the roots null where the server has none. */
+export interface PcapsView {
+  readonly pcaps: string | null
+  readonly inbox: string | null
+  readonly files: readonly PcapFile[]
+  readonly inboxEntries: readonly InboxEntry[]
+  readonly lanes: readonly PcapLane[]
 }
 
 /** What retiring one capture takes (§3 S4), read before the one confirmation. */
@@ -1335,6 +1382,7 @@ export const api = {
       `/api/sources${search({ stale: query.stale === true ? "1" : undefined, q: query.q, limit: query.limit, offset: query.offset })}`
     ),
   retirePlan: (capture: string) => request<RetirePlan>(`/api/sources/${encodeURIComponent(capture)}/retire-plan`),
+  pcaps: () => request<PcapsView>("/api/pcaps"),
   campaigns: () => request<readonly string[]>("/api/campaign"),
   /** One environment's latest runs of a campaign (the server's choice where none is named), `run` among them. */
   campaign: (capture: string, query: { readonly env?: string | undefined; readonly run?: number | undefined } = {}) =>

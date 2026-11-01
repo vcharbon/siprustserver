@@ -3,7 +3,8 @@
  * its ingest, its standing cut and its standing on every lane, served paged
  * and counted in ONE statement — the population joined to the newest
  * `capture_cuts` reading of each capture, that reading's case and refusal
- * counts and longest call, and the latest full `@current` run per lane.
+ * counts and longest call, and the latest full `@current` run per lane (or
+ * the latest full run whoever made it, where the caller asks).
  *
  * Staleness is a comparison of columns: the extractor hash the row was
  * ingested under against the one the caller's tree runs (`ingestState`, the
@@ -24,6 +25,7 @@ import * as Layer from "effect/Layer"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import type { SqlError } from "effect/unstable/sql/SqlError"
 import type { Fragment } from "effect/unstable/sql/Statement"
+import * as Aside from "./aside.js"
 import type { RunStatus } from "./model.js"
 
 /** How a capture's ingest stands against the caller's extractor. */
@@ -92,6 +94,14 @@ export interface Query {
   readonly stale?: boolean
   /** A capture-name substring, matched case-insensitively. */
   readonly q?: string
+  /** Only the captures ingested from one of these paths, as the ingest recorded it (its files, one per line). */
+  readonly sourcePaths?: ReadonlyArray<string>
+  /**
+   * Which run stands per lane: the latest full `@current` one (`current`, the
+   * default), or the latest full one whoever made it (`latest`), an aside run
+   * never.
+   */
+  readonly standings?: "current" | "latest"
   readonly limit: number
   readonly offset: number
   /** The extractor CODE the caller's tree runs: a row ingested under another is stale. */
@@ -155,7 +165,12 @@ export const layer = Layer.effect(
     const sql = yield* SqlClient
 
     const list = Effect.fn("Sources.list")(function*(query: Query) {
-      const like = query.q === undefined || query.q === "" ? sql`true` : sql`p.capture ILIKE ${`%${query.q}%`}`
+      const substring = query.q === undefined || query.q === "" ? sql`true` : sql`p.capture ILIKE ${`%${query.q}%`}`
+      const like = query.sourcePaths === undefined
+        ? substring
+        : query.sourcePaths.length === 0
+        ? sql`false`
+        : sql`${substring} AND p.source_path IN ${sql.in(query.sourcePaths)}`
       // The stale predicate is the same rule `ingestState` and `cutOf` read a
       // row by, stated once more in SQL so the page and its count agree.
       const stale = query.stale !== true ? sql`true` : sql`(
@@ -165,6 +180,9 @@ export const layer = Layer.effect(
         OR s.cut_fingerprint IS DISTINCT FROM ${query.cutFingerprint}
         OR (p.ingested_at IS NOT NULL AND p.ingested_at > s.cut_at)
       )`
+      const standingRuns = query.standings === "latest"
+        ? sql`(SELECT * FROM runs WHERE finished_at IS NOT NULL AND ${Aside.excluded(sql, "runs")}) AS runs`
+        : sql`current_runs`
       const rows = yield* sql<SourceRow>`
         WITH standing_cut AS (
           SELECT DISTINCT ON (capture) capture, prep_id, cut_at, cut_fingerprint, broke
@@ -199,7 +217,7 @@ export const layer = Layer.effect(
                  ) ORDER BY r.lane) AS standings
           FROM (
             SELECT DISTINCT ON (capture, lane) *
-            FROM current_runs
+            FROM ${standingRuns}
             WHERE set_kind = 'full' AND status <> 'interrupted'
               AND capture IN (SELECT capture FROM matched)
             ORDER BY capture, lane, id DESC

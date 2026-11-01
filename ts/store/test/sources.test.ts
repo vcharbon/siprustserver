@@ -9,6 +9,7 @@ import * as Effect from "effect/Effect"
 import * as Tracer from "effect/Tracer"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import * as Aside from "../src/aside.js"
 import * as Client from "../src/client.js"
 import * as Server from "./server.js"
 import * as Cuts from "../src/cuts.js"
@@ -243,6 +244,42 @@ describe.skipIf(!served)("Sources.list", () => {
       const past = yield* sources.list(query({ limit: 2, offset: 10 }))
       expect(past.rows).toEqual([])
       expect(past.total).toBe(4)
+    })))
+
+  it("filters by the source paths the ingests recorded, none named matching nothing", () =>
+    withStore(Effect.gen(function*() {
+      yield* seeded
+      const sources = yield* Sources.Service
+      const named = yield* sources.list(query({ sourcePaths: ["/p/uncut", "/p/cur", "/p/elsewhere"] }))
+      expect(named.rows.map((row) => [row.capture, row.sourcePath])).toEqual([
+        ["cap_current.pcap.gz", "/p/cur"],
+        ["cap_uncut.pcap.gz", "/p/uncut"]
+      ])
+      expect(named.total).toBe(2)
+      expect(named.rows[0]?.standings.map((one) => one.lane)).toEqual(["fake", "ref"])
+      const none = yield* sources.list(query({ sourcePaths: [] }))
+      expect(none).toEqual({ rows: [], total: 0 })
+      const past = yield* sources.list(query({ sourcePaths: ["/p/cur"], offset: 5 }))
+      expect(past).toEqual({ rows: [], total: 1 })
+    })))
+
+  it("stands each lane at its latest full run whoever made it where asked, an aside run never", () =>
+    withStore(Effect.gen(function*() {
+      const prep = yield* seeded
+      const runs = yield* Runs.Service
+      const opened = yield* runs.openMany([
+        { capture: "cap_current.pcap.gz", lane: "fake", mode: "record", sessionDir: "/w/cap_current", prepId: prep, identity: { env: "elsewhere", branch: "b", laneHash: null, load: null } },
+        { capture: "cap_current.pcap.gz", lane: "ref", mode: "record", sessionDir: "/w/cap_current", prepId: prep, identity: Aside.IDENTITY }
+      ])
+      for (const one of opened) yield* runs.finish({ id: one.id, status: "done", cases: [] })
+      const sources = yield* Sources.Service
+      const current = (yield* sources.list(query({ sourcePaths: ["/p/cur"] }))).rows[0]!.standings
+      const latest = (yield* sources.list(query({ sourcePaths: ["/p/cur"], standings: "latest" }))).rows[0]!.standings
+      const fake = (rows: ReadonlyArray<Sources.LaneStanding>) => rows.find((one) => one.lane === "fake")!.runId
+      const ref = (rows: ReadonlyArray<Sources.LaneStanding>) => rows.find((one) => one.lane === "ref")!.runId
+      expect(fake(latest)).toBe(opened[0]!.id)
+      expect(fake(current)).not.toBe(opened[0]!.id)
+      expect(ref(latest)).toBe(ref(current))
     })))
 
   it("is one statement for a page that has rows", () =>

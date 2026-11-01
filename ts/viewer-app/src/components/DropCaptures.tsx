@@ -3,7 +3,8 @@
  * handed to the source command, which makes an INGEST JOB — ingest, into the
  * population, cut — and links it here. A replay is a request to create once
  * the job is done: the lane picked is said back, nothing is replayed by the
- * drop itself (§3 S3).
+ * drop itself (§3 S3). A server with an inbox takes the drop there instead,
+ * and the item links the pcaps page its shareable copy will be listed on.
  *
  * Several files dropped together are ONE capture by default — the consecutive
  * files of one tap, a call starting in one and ending in the next — and the
@@ -29,8 +30,10 @@ interface Item {
   /** The lane it was posted on; "" = added to the population only. */
   readonly lane?: string
   readonly detail?: string
-  /** The ingest job the source command made. */
+  /** The ingest job the source command made, or the inbox job. */
   readonly jobId?: number
+  /** It went to the inbox: followed on the pcaps page, not a study view. */
+  readonly inbox?: boolean
 }
 
 const said = (error: unknown): string => error instanceof Error ? error.message : String(error)
@@ -50,11 +53,13 @@ const WORD: Readonly<Record<Item["status"], string>> = {
 }
 
 export const DropCaptures = (
-  { lane, lanes, onFresh }: {
+  { lane, lanes, laneless, onFresh }: {
     /** The lane the page reports on: what a drop replays on unless changed. */
     readonly lane?: string | undefined
     /** The lanes offered beside "add only"; empty = add only is the only choice. */
     readonly lanes: readonly string[]
+    /** No lane choice: a page whose drop only brings the capture in. */
+    readonly laneless?: boolean
     /** Called once per capture that lands, so the page behind can reload. */
     readonly onFresh?: () => void
   }
@@ -92,7 +97,7 @@ export const DropCaptures = (
     try {
       const started: CaptureIngestStart = await api.captureIngest(files, on)
       if (!live.current) return
-      patch(id, { capture: started.capture, detail: started.detail })
+      patch(id, { capture: started.capture, detail: started.detail, inbox: started.inbox === true })
       if (!started.started) {
         patch(id, { status: "refused" })
         return
@@ -168,13 +173,15 @@ export const DropCaptures = (
             }}
           />
         </label>
-        <label>
-          lane{" "}
-          <select value={choice} onChange={(event) => setChoice(event.target.value)}>
-            <option value="">add only (ingest + cut)</option>
-            {lanes.map((one) => <option key={one} value={one}>replay on {one}</option>)}
-          </select>
-        </label>
+        {laneless !== true && (
+          <label>
+            lane{" "}
+            <select value={choice} onChange={(event) => setChoice(event.target.value)}>
+              <option value="">add only (ingest + cut)</option>
+              {lanes.map((one) => <option key={one} value={one}>replay on {one}</option>)}
+            </select>
+          </label>
+        )}
         <label>
           several files{" "}
           <select
@@ -198,7 +205,8 @@ export const DropCaptures = (
                     {item.jobId !== undefined
                       ? <Link to={href.job(item.jobId)} className="job-link">job {item.jobId}</Link>
                       : <span className="tag class-accepted">launched</span>}{" "}
-                    {item.capture !== undefined && (
+                    {item.inbox === true && <Link to={href.pcaps()}>pcaps</Link>}
+                    {item.inbox !== true && item.capture !== undefined && (
                       <Link
                         to={href.triageStudy(item.capture, {
                           lane: item.lane === "" ? undefined : item.lane

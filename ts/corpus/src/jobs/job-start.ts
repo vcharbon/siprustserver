@@ -1,8 +1,9 @@
 /**
  * Jobs started: a REPLAY of a request, an INGEST over paths on the box, a CUT
- * over a capture list, a RETIRE of sources, a DELETE of runs and a CAMPAIGN
+ * over a capture list, a RETIRE of sources, a DELETE of runs, a CAMPAIGN
  * run (its lanes, all its cases or one, the system's data rebuilt first or
- * not). Each is a row
+ * not) and an INBOX take (the files of one capture from the deployment's
+ * inbox into its pcap root). Each is a row
  * made `queued`, the deployment's entry point for its kind (`Launcher`)
  * launched detached (`job.ts`) with `--job <id>`, so the process runs as that
  * row, and the row marked `running` with what the launcher knows. A command
@@ -13,7 +14,8 @@
  * launches the same; the absolute paths and the captures they came to for an
  * ingest; the list's words and the mode for a cut; the captures for a retire;
  * the selector for a delete; the lanes, the case and the rebuild for a
- * campaign. Only a replay drives one lane, so only its row has one.
+ * campaign; the files, each as it stood when taken, for an inbox take. Only a
+ * replay drives one lane, so only its row has one.
  */
 import { Jobs, type Removal, type Requests } from "@sip/store"
 import * as Effect from "effect/Effect"
@@ -39,9 +41,11 @@ export interface ReplayKnobs {
   readonly unran: boolean
   /** A job this one waits for the end of before it resolves anything: the cut queued ahead of it. */
   readonly after: number | null
+  /** Drive the lane even where it lacks a capability a capture replay needs; the runs are recorded forced. */
+  readonly force: boolean
 }
 
-/** The knobs a row's `args` keeps; a knob it does not carry reads back unstated. */
+/** The knobs a row's `args` keeps; a knob it does not carry reads back unstated, and a restart keeps a force. */
 export const replayKnobsOf = (args: Readonly<Record<string, unknown>>): ReplayKnobs => ({
   prep: typeof args["prep"] === "number" ? args["prep"] : null,
   batch: typeof args["batch"] === "number" ? args["batch"] : null,
@@ -51,7 +55,8 @@ export const replayKnobsOf = (args: Readonly<Record<string, unknown>>): ReplayKn
   cleanup: typeof args["cleanup"] === "boolean" ? args["cleanup"] : DEFAULT_CLEANUP,
   wait: typeof args["wait"] === "number" ? args["wait"] : null,
   unran: false,
-  after: null
+  after: null,
+  force: args["force"] === true
 })
 
 /** Who starts a job or a request: the deployment's environment name, else the shell's user. */
@@ -129,7 +134,8 @@ export const replayArgs = (jobId: number, requestId: number, knobs: ReplayKnobs)
   ...(knobs.memoryMax === null ? [] : ["--memory-max", knobs.memoryMax]),
   ...(knobs.startsPerSecond === null ? [] : ["--starts-per-second", String(knobs.startsPerSecond)]),
   knobs.cleanup ? "--cleanup" : "--no-cleanup",
-  ...(knobs.wait === null ? [] : ["--wait", String(knobs.wait)])
+  ...(knobs.wait === null ? [] : ["--wait", String(knobs.wait)]),
+  ...(knobs.force ? ["--force"] : [])
 ]
 
 /** The arguments an ingest job runs its entry point with: the inputs as named, a list file by its path. */
@@ -206,6 +212,28 @@ export interface CampaignRequest {
   readonly rebuild: boolean
 }
 
+/** One inbox file as an inbox take found it: what tells a later copy over it from the one taken. */
+export interface InboxFile {
+  /** Absolute. */
+  readonly path: string
+  readonly size: number
+  readonly mtimeMs: number
+}
+
+/** What an inbox job is asked: the files of ONE capture, in the order its reader takes them. */
+export interface InboxRequest {
+  readonly files: ReadonlyArray<InboxFile>
+  /** The name the capture takes in the pcap root, recorded so the row says what came in. */
+  readonly capture: string
+}
+
+/** The entry point's arguments of an inbox job: the row, then the files. */
+export const inboxArgs = (id: number, request: InboxRequest): ReadonlyArray<string> => [
+  "--job",
+  String(id),
+  ...request.files.flatMap((file) => ["--file", file.path])
+]
+
 /** The entry point's arguments of a campaign job. */
 export const campaignArgs = (id: number, request: CampaignRequest): ReadonlyArray<string> => [
   "--job",
@@ -275,6 +303,10 @@ export const deleteRuns = (sessions: string, request: DeleteRequest) =>
 
 export const campaign = (sessions: string, request: CampaignRequest) =>
   start(sessions, "campaign", { ...request }, (id) => campaignArgs(id, request))
+
+/** An inbox take of one capture; its row plans the capture as its one unit. */
+export const inbox = (sessions: string, request: InboxRequest) =>
+  start(sessions, "inbox", { ...request }, (id) => inboxArgs(id, request), { planned: 1 })
 
 /** Why a foreground command cannot run as the row it was named. */
 export class NoSuchJob extends Schema.TaggedError<NoSuchJob>()("JobStart.NoSuchJob", { detail: Schema.String }) {

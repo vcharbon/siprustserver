@@ -28,10 +28,14 @@ import { type ErrorColumns, errorOf } from "./error-columns.js"
 import type { MainError } from "./model.js"
 import type { Outcome } from "./requests.js"
 
-/** What a job does: a request replay, a cut, an ingest, a source retired, runs deleted, a campaign run. */
-export type Kind = "replay" | "cut" | "ingest" | "retire" | "delete" | "campaign"
+/**
+ * What a job does: a request replay, a cut, an ingest, a source retired, runs
+ * deleted, a campaign run, a capture taken from the deployment's inbox into
+ * its pcap root.
+ */
+export type Kind = "replay" | "cut" | "ingest" | "retire" | "delete" | "campaign" | "inbox"
 
-export const KINDS: ReadonlyArray<Kind> = ["replay", "cut", "ingest", "retire", "delete", "campaign"]
+export const KINDS: ReadonlyArray<Kind> = ["replay", "cut", "ingest", "retire", "delete", "campaign", "inbox"]
 
 /**
  * `queued` is the row before its process exists; `running` while the pid is
@@ -146,6 +150,8 @@ export type StatusFilter = Status | "active" | "ended"
 
 export interface PageQuery {
   readonly status?: StatusFilter | undefined
+  /** Only the rows of this kind; absent, every kind. */
+  readonly kind?: Kind | undefined
   readonly limit: number
   readonly offset: number
 }
@@ -456,7 +462,7 @@ export const layer = Layer.effect(
         SELECT j.*,
                CASE
                  WHEN j.kind = 'replay' THEN (SELECT count(*)::int FROM job_cells c WHERE c.job_id = j.id AND c.outcome = 'ran')
-                 WHEN j.kind IN ('retire', 'delete') OR j.kind = 'ingest' AND NOT coalesce((j.args->>'cut')::boolean, false)
+                 WHEN j.kind IN ('retire', 'delete', 'inbox') OR j.kind = 'ingest' AND NOT coalesce((j.args->>'cut')::boolean, false)
                    THEN CASE WHEN j.status = 'done' THEN coalesce(j.planned, 0) ELSE 0 END
                  ELSE (SELECT count(*)::int FROM capture_cuts cc JOIN preps p ON p.id = cc.prep_id WHERE p.job_id = j.id)
                       + coalesce(j.settled, 0)
@@ -487,7 +493,7 @@ export const layer = Layer.effect(
       return rows.map(listedOf)
     })
 
-    const filter = (status: StatusFilter | undefined): Fragment =>
+    const statusFilter = (status: StatusFilter | undefined): Fragment =>
       status === undefined
         ? sql`true`
         : status === "active"
@@ -496,10 +502,15 @@ export const layer = Layer.effect(
         ? sql`j.status IN ('done', 'failed', 'interrupted', 'died')`
         : sql`j.status = ${status}`
 
+    const filter = (query: PageQuery): Fragment =>
+      query.kind === undefined
+        ? statusFilter(query.status)
+        : sql`${statusFilter(query.status)} AND j.kind = ${query.kind}`
+
     // Running rows lead whatever the filter: the page's first group is what is happening now.
     const page = Effect.fn("Jobs.page")(function*(query: PageQuery) {
       const rows = yield* listed(
-        filter(query.status),
+        filter(query),
         sql`CASE j.status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, j.id DESC`,
         query.limit,
         query.offset
@@ -508,7 +519,7 @@ export const layer = Layer.effect(
         ? Number(rows[0]!.count)
         : query.offset === 0
         ? 0
-        : Number((yield* sql<{ count: string }>`SELECT count(*) AS count FROM jobs j WHERE ${filter(query.status)}`)[0]!.count)
+        : Number((yield* sql<{ count: string }>`SELECT count(*) AS count FROM jobs j WHERE ${filter(query)}`)[0]!.count)
       return { rows: rows.map(listedOf), total } satisfies Page
     })
 

@@ -761,6 +761,19 @@ const forcedRuns = Effect.gen(function*() {
 /** The key of the migration that records a forced run. */
 export const FORCED_RUNS = "11_forced_runs"
 
+/** An inbox job is a job kind of its own: one capture taken from the deployment's inbox into its pcap root. */
+const inboxJobs = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`ALTER TABLE jobs DROP CONSTRAINT jobs_kind_check`
+  yield* sql`
+    ALTER TABLE jobs ADD CONSTRAINT jobs_kind_check
+    CHECK (kind IN ('replay', 'cut', 'ingest', 'retire', 'delete', 'campaign', 'inbox'))
+  `
+})
+
+/** The key of the migration that admits inbox jobs. */
+export const INBOX_JOBS = "12_inbox_jobs"
+
 /**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
@@ -776,7 +789,8 @@ export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [SOURCE_FAULT]: sourceFault,
   [CUT_CASE_HASHES]: cutCaseHashes,
   [CAMPAIGN_JOBS]: campaignJobs,
-  [FORCED_RUNS]: forcedRuns
+  [FORCED_RUNS]: forcedRuns,
+  [INBOX_JOBS]: inboxJobs
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)

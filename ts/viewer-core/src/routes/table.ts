@@ -199,6 +199,13 @@ export const ROUTES: { readonly [K in RouteKind]: RouteDoc<RouteOf<K>> } = {
     }],
     example: "/sources?stale=1"
   },
+  pcaps: {
+    patterns: ["/pcaps"],
+    page: "the files of the pcap root and the inbox: state, last run per lane, replay on a lane",
+    query: {},
+    api: () => [{ label: "pcap files", path: "/api/pcaps" }],
+    example: "/pcaps"
+  },
   jobs: {
     patterns: ["/jobs"],
     page: "the jobs, newest first",

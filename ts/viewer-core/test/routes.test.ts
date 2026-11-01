@@ -34,12 +34,12 @@ describe("the route table", () => {
       const sample = new URL(ROUTES[kind].example, ORIGIN)
       expect(parseRoute(sample.pathname).kind, kind).toBe(kind)
     }
-    expect(ROUTE_KINDS.length).toBe(14)
+    expect(ROUTE_KINDS.length).toBe(15)
   })
 
   it("names every page prefix the app answers", () => {
     expect([...PAGE_PREFIXES].sort()).toEqual(
-      ["/campaign", "/case", "/compare", "/deltas", "/jobs", "/report", "/rules", "/run", "/sources", "/triage"]
+      ["/campaign", "/case", "/compare", "/deltas", "/jobs", "/pcaps", "/report", "/rules", "/run", "/sources", "/triage"]
     )
   })
 })

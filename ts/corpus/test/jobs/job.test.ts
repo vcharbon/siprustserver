@@ -201,6 +201,23 @@ describe("starting a replay job", () => {
     const read = JobStart.replayKnobsOf({ batch: 1000, memoryMax: "2G" })
     expect([read.batch, read.concurrency, read.memoryMax, read.startsPerSecond]).toEqual([1000, null, "2G", null])
   })
+
+  it("launches a forced replay --force, and a restart of its row forced again", () => {
+    const forced = { ...JobStart.replayKnobsOf({}), force: true }
+    expect(JobStart.replayArgs(5, 11, forced).at(-1)).toBe("--force")
+    expect(JobStart.replayArgs(5, 11, JobStart.replayKnobsOf({})).includes("--force")).toBe(false)
+    expect(JobStart.replayKnobsOf({ ...forced }).force).toBe(true)
+  })
+})
+
+describe("an inbox job", () => {
+  it("is launched as its row with its files in order", () => {
+    const request: JobStart.InboxRequest = {
+      files: [{ path: "/in/tap.pcap", size: 1, mtimeMs: 2 }, { path: "/in/tap.pcap1", size: 3, mtimeMs: 4 }],
+      capture: "tap.anon.pcap"
+    }
+    expect(JobStart.inboxArgs(9, request)).toEqual(["--job", "9", "--file", "/in/tap.pcap", "--file", "/in/tap.pcap1"])
+  })
 })
 
 describe("reaping jobs", () => {

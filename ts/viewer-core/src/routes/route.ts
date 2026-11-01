@@ -32,6 +32,7 @@ export type Route =
   | { readonly kind: "deltas" }
   | { readonly kind: "rules" }
   | { readonly kind: "sources" }
+  | { readonly kind: "pcaps" }
   | { readonly kind: "jobs" }
   | { readonly kind: "job"; readonly id: number }
   | { readonly kind: "campaign"; readonly capture?: string }
@@ -101,6 +102,7 @@ export const parseRoute = (pathname: string): Route => {
   if (segments[0] === "rules") return { kind: "rules" }
   if (segments[0] === "deltas") return { kind: "deltas" }
   if (segments[0] === "sources") return { kind: "sources" }
+  if (segments[0] === "pcaps") return { kind: "pcaps" }
   if (segments[0] === "jobs") {
     const id = Number(segments[1])
     return segments[1] && Number.isInteger(id) ? { kind: "job", id } : { kind: "jobs" }
@@ -130,6 +132,7 @@ export const href = {
   deltas: (params: Omit<QueueParams, "limit"> = {}) => `/deltas${queryString(params)}`,
   rules: (params: RulesParams = {}) => `/rules${queryString(params)}`,
   sources: (params: SourcesParams = {}) => `/sources${queryString(params)}`,
+  pcaps: () => "/pcaps",
   jobs: () => "/jobs",
   job: (id: number) => `/jobs/${id}`,
   campaigns: () => "/campaign",

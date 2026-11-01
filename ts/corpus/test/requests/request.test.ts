@@ -10,6 +10,7 @@ import * as Layer from "effect/Layer"
 import { describe, expect, it } from "vitest"
 
 import {
+  ahead,
   describe as describeSelection,
   freeze,
   parseCells,
@@ -211,6 +212,14 @@ describe("freezing a selection", () => {
     const missing = await frozen({ kind: "captures", captures: [A, "capture_typo.pcap.gz"] })
     expect(missing).toBeInstanceOf(Refused)
     expect((missing as Refused).message).toContain("capture_typo.pcap.gz")
+  })
+
+  it("freezes captures a cut has yet to reach as whole with no cell, for the cut queued ahead to grow", () => {
+    expect(ahead([B, A, B])).toEqual({
+      selection: { kind: "captures", captures: [A, B], whole: [A, B] },
+      cells: [],
+      unkeyed: []
+    })
   })
 })
 

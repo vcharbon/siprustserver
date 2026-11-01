@@ -5,8 +5,8 @@
  * failure where one refused — the ingest, as one function a campaign and an
  * `ingest` job both run.
  *
- * A path is taken only under a ROOT: the artifact store's {@link UPLOADS} or
- * one the deployment names (`Roots.pcapRoots`). A path elsewhere is refused
+ * A path is taken only under a ROOT: the artifact store's {@link UPLOADS},
+ * where the deployment takes them, or one it names (`Roots.pcapRoots`). A path elsewhere is refused
  * with the roots, never read: what the store ingests must be findable again by
  * the name the population keeps.
  */
@@ -76,10 +76,15 @@ export const readPathList = Effect.fn("Source.readPathList")(function*(
   return { file, paths } satisfies PathList
 })
 
-/** The roots a source path may lie under, absolute: the store's uploads, then the deployment's own. */
+/**
+ * The roots a source path may lie under, absolute: the store's uploads where
+ * the deployment takes them (`Roots.uploadsRoot`), then the deployment's own.
+ */
 export const roots = Effect.fn("Source.roots")(function*(paths: Paths) {
-  const named = yield* Effect.flatMap(Roots.Service, (roots) => roots.pcapRoots)
-  return [path.join(paths.corpus, UPLOADS), ...named] as ReadonlyArray<string>
+  const deployed = yield* Roots.Service
+  const named = yield* deployed.pcapRoots
+  const uploads = deployed.uploadsRoot === undefined ? true : yield* deployed.uploadsRoot
+  return [...(uploads ? [path.join(paths.corpus, UPLOADS)] : []), ...named] as ReadonlyArray<string>
 })
 
 const under = (file: string, root: string): boolean => {

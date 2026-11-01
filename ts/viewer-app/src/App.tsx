@@ -11,6 +11,7 @@ import { JobsPage } from "./pages/JobsPage.tsx"
 import { ReportPage } from "./pages/ReportPage.tsx"
 import { RulesPage } from "./pages/RulesPage.tsx"
 import { RunComparePage } from "./pages/RunComparePage.tsx"
+import { PcapsPage } from "./pages/PcapsPage.tsx"
 import { RunPage } from "./pages/RunPage.tsx"
 import { SourcesPage } from "./pages/SourcesPage.tsx"
 import { StudyPage } from "./pages/StudyPage.tsx"
@@ -30,6 +31,7 @@ export const App = (): JSX.Element => {
         <Link to={href.triage()}>triage</Link>
         <Link to={href.rules()}>rules</Link>
         <Link to={href.sources()}>sources</Link>
+        <Link to={href.pcaps()}>pcaps</Link>
         <Link to={href.jobs()}>jobs</Link>
         <Link to={href.compareRuns({})}>compare</Link>
         <Link to={href.report({})}>report</Link>
@@ -46,6 +48,7 @@ export const App = (): JSX.Element => {
       {route.kind === "triage" && <TriagePage />}
       {route.kind === "rules" && <RulesPage />}
       {route.kind === "sources" && <SourcesPage />}
+      {route.kind === "pcaps" && <PcapsPage />}
       {route.kind === "jobs" && <JobsPage />}
       {route.kind === "job" && <JobPage id={route.id} />}
       {route.kind === "triage-study" && <StudyPage capture={route.capture} />}

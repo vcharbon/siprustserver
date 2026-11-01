@@ -34,6 +34,12 @@ export interface Interface {
    * it can find again by the name it keeps.
    */
   readonly pcapRoots: Effect.Effect<ReadonlyArray<string>, RootsUnstated>
+  /**
+   * Whether the artifact store's uploads are a root besides `pcapRoots`;
+   * absent, they are. A deployment whose captures enter only through its own
+   * pcap root states false.
+   */
+  readonly uploadsRoot?: Effect.Effect<boolean>
   /** Where box-wide locks are taken: outside every checkout, so every checkout on the box contends there. */
   readonly locks: Effect.Effect<string, RootsUnstated>
   /** Where the bench writes one directory per run. */
