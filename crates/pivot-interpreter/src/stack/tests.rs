@@ -158,3 +158,38 @@ fn two_runs_mint_disjoint_via_branches() {
     sorted.dedup();
     assert_eq!(sorted.len(), one.len(), "{one:?}");
 }
+
+/// RFC 3261 §8.1.1.6, §20.22: a dialog-opening request states its own hop
+/// count where the document states one; the line rides once, and a stated
+/// value that is no 0–255 count refuses the request.
+#[test]
+fn a_stated_max_forwards_replaces_the_default_hop_count() {
+    let addresses = Addresses {
+        ruri: "sip:callee@pivot.invalid",
+        from: "<sip:caller@pivot.invalid>",
+        to: "<sip:callee@pivot.invalid>",
+    };
+    let mut uac = stack("A", "r1a2b3");
+    let stated = [TemplateHeader::frozen("Max-Forwards", "0")];
+    let invite = uac
+        .out_of_dialog(Method::Invite, &addresses, &stated, Vec::new(), None, None)
+        .expect("the caller composes its INVITE");
+    let hops: Vec<String> =
+        invite.raw_text(sip_message::HeaderName::MaxForwards).map(|s| s.to_string()).collect();
+    assert_eq!(hops, ["0"], "one Max-Forwards, the stated count");
+    let plain = stack("A", "r1a2b4")
+        .out_of_dialog(Method::Invite, &addresses, &[], Vec::new(), None, None)
+        .expect("the caller composes its INVITE");
+    assert_eq!(header(&plain, sip_message::HeaderName::MaxForwards), "70");
+    for bad in ["256", "-1", "seventy"] {
+        let refused = stack("A", "r1a2b5").out_of_dialog(
+            Method::Invite,
+            &addresses,
+            &[TemplateHeader::frozen("Max-Forwards", bad)],
+            Vec::new(),
+            None,
+            None,
+        );
+        assert!(matches!(refused, Err(StackError::Unbuilt { .. })), "{bad}: {refused:?}");
+    }
+}

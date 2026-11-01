@@ -2090,6 +2090,9 @@ The tier model is UNCHANGED:
 
 - **Tier 1, stack-owned**, never stored: Via and branch, Call-ID, From/To tags,
   CSeq numbering, Max-Forwards, Content-Length, Contact host:port, Route sets.
+  A dialog-opening request whose `headers` state a `Max-Forwards` sends that
+  hop count in place of the RFC 3261 §8.1.1.6 default, once; a stated value
+  that is no 0–255 count (§20.22) refuses the send.
 - **Tier 2, role-mapped**, stored symbolically: numbers and domains, as
   positional refs (`{ "pos": "called[0][1]", "form": "trunk-composed" }`, §4.5)
   or, where the plan does not recognize the value, `{ "frozen": "…" }`. A frozen

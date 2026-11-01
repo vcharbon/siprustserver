@@ -7,7 +7,7 @@ use sip_message::generators::{
     GenerateOutOfDialogRequestOpts, InDialogMethod, InviteClientTransactionHandle,
     OutOfDialogMethod, StackDialog,
 };
-use sip_message::header::{self, NameAddr, Uri};
+use sip_message::header::{self, HeaderValue, NameAddr, Uri};
 use sip_message::{Method, SipHeader, SipRequest, SipResponse, SipStr};
 use sip_template::TemplateHeader;
 
@@ -41,6 +41,7 @@ impl LegStack {
         self.dialog.local_uri = from.to_string();
         self.dialog.remote_uri = to.to_string();
         self.dialog.local_cseq = cseq.unwrap_or(self.dialog.local_cseq + 1);
+        let (max_forwards, headers) = stated_hops(&self.leg, headers)?;
         let via = self.via();
         let opts = GenerateOutOfDialogRequestOpts {
             request_uri: Some(uri_of(ruri)),
@@ -52,10 +53,10 @@ impl LegStack {
             cseq: self.dialog.local_cseq,
             via: Some(via),
             contact: Some(self.contact()),
-            max_forwards: None,
+            max_forwards,
             body,
             content_type: content_type.as_deref().map(media_type),
-            extra_headers: frozen(headers),
+            extra_headers: frozen(&headers),
         };
         let request = generate_out_of_dialog_request(verb, &opts)
             .map_err(|e| StackError::unbuilt(&self.leg, e))?;
@@ -373,3 +374,35 @@ fn in_dialog_method(method: &Method) -> Option<InDialogMethod> {
 
 #[cfg(test)]
 mod tests;
+
+/// The hop count a dialog-opening request's stated headers carry, beside the
+/// other stated headers: a stated `Max-Forwards` replaces the RFC 3261
+/// §8.1.1.6 default the generator writes, so the line rides once. A stated
+/// value that is no 0–255 hop count (§20.22) refuses the request.
+fn stated_hops(
+    leg: &str,
+    headers: &[TemplateHeader],
+) -> Result<(Option<u32>, Vec<TemplateHeader>), StackError> {
+    let mut hops = None;
+    let mut rest = Vec::with_capacity(headers.len());
+    for h in headers {
+        if !header::HeaderName::MaxForwards.matches(&h.name) {
+            rest.push(h.clone());
+            continue;
+        }
+        if hops.is_some() {
+            return Err(StackError::Unbuilt {
+                leg: leg.to_string(),
+                reason: "the request states Max-Forwards twice".into(),
+            });
+        }
+        let parsed = header::MaxForwards::parse(&SipStr::owned(h.value.trim())).map_err(|e| {
+            StackError::Unbuilt {
+                leg: leg.to_string(),
+                reason: format!("stated Max-Forwards {:?} is no hop count: {e}", h.value),
+            }
+        })?;
+        hops = Some(parsed.value());
+    }
+    Ok((hops, rest))
+}
