@@ -5,14 +5,17 @@
 # values (deploy/helm/README.md).
 #
 #   kind-lab.sh up                   cluster + sipext bridge + images, kind-loaded
+#   kind-lab.sh images               the images of `up` rebuilt from the tree and
+#                                    kind-loaded, on the running cluster
 #   kind-lab.sh image <tag> [docker build args]
 #                                    build one more image with the lab's build
 #                                    wrapper (proxy settings) and kind-load it
 #   kind-lab.sh deploy [helm args]   the collectors, Chaos Mesh, the SIPp UAS, the
-#                                    SUT, then the VIP and isolation smokes (when
-#                                    the SUT runs a proxy) and the series check;
-#                                    helm args go to the SUT release (e.g. --set
-#                                    worker.replicas=3)
+#                                    SUT, the restart of every SUT workload whose
+#                                    pod runs an image a reload replaced, then the
+#                                    VIP and isolation smokes (when the SUT runs a
+#                                    proxy) and the series check; helm args go to
+#                                    the SUT release (e.g. --set worker.replicas=3)
 #   kind-lab.sh template [helm args] the SUT release as deploy would install it,
 #                                    rendered, nothing applied
 #   kind-lab.sh chaos-mesh           Chaos Mesh alone (chaos-mesh-values-kind.yaml)
@@ -51,6 +54,9 @@ helm_release() { # <release> <chart dir> <namespace> [helm args]
 # The SUT release, the siprust chart or a product chart (lib/sut.sh).
 # shellcheck source-path=SCRIPTDIR source=lib/sut.sh
 source "$HELM_DIR/lib/sut.sh"
+# The restart of the SUT's pods on a replaced image (lib/image-roll.sh).
+# shellcheck source-path=SCRIPTDIR source=lib/image-roll.sh
+source "$HELM_DIR/lib/image-roll.sh"
 
 # One more image, built with the lab's build wrapper and loaded into the cluster.
 lab_image() { # <tag> [docker build args]
@@ -123,6 +129,7 @@ lab_deploy() {
   # The UAS containers first: the first one is the workers' scripted callee.
   hakit_uas_up
   sut_release "$@"
+  roll_stale_images
   sut_smokes
   hakit obs-check "$(sut_obs_scope)" --namespace "$NS" \
     || die "observability: series missing after deploy (kubectl -n $OBS_NS get pods)"
@@ -132,11 +139,12 @@ lab_deploy() {
 
 case "${1:-}" in
   up) up ;;
+  images) lab_preflight; lab_images ;;
   image) shift; lab_image "$@" ;;
   deploy) shift; lab_deploy "$@" ;;
   template) shift; sut_template "$@" ;;
   chaos-mesh) chaos_mesh_release ;;
   uas) hakit_uas_up ;;
   down) down ;;
-  *) die "usage: $0 {up|image <tag> [build args]|deploy [helm args]|template [helm args]|chaos-mesh|uas|down}" ;;
+  *) die "usage: $0 {up|images|image <tag> [build args]|deploy [helm args]|template [helm args]|chaos-mesh|uas|down}" ;;
 esac

@@ -1,7 +1,9 @@
 """A Kubernetes API server answering what `helm template --dry-run=server`
-asks of a chart's render: the version, the discovery of every kind the charts
-render (core, apps, rbac), and GETs of the objects it holds (what `lookup`
-reads). Every other path is a 404 Status. Plain HTTP on 127.0.0.1, one test."""
+asks of a chart's render and what the lab's kubectl reads: the version, the
+discovery of every kind the charts render (core, apps, rbac) and of the pods
+and ReplicaSets under them, and GETs of the objects it holds (what `lookup`
+reads, a list at its collection path). Every other path is a 404 Status.
+Plain HTTP on 127.0.0.1, one test."""
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,9 +16,9 @@ def resource(kind: str, namespaced: bool = True) -> dict[str, Any]:
             "verbs": ["get", "list", "create", "update", "patch", "delete"]}
 
 GROUPS: dict[str, list[dict[str, Any]]] = {
-    "/api/v1": [resource(k) for k in ("Secret", "ConfigMap", "Service", "ServiceAccount")]
+    "/api/v1": [resource(k) for k in ("Secret", "ConfigMap", "Service", "ServiceAccount", "Pod")]
     + [resource("Namespace", namespaced=False)],
-    "/apis/apps/v1": [resource(k) for k in ("Deployment", "StatefulSet", "DaemonSet")],
+    "/apis/apps/v1": [resource(k) for k in ("Deployment", "StatefulSet", "DaemonSet", "ReplicaSet")],
     "/apis/rbac.authorization.k8s.io/v1": [resource("Role"), resource("RoleBinding"),
                                            resource("ClusterRole", namespaced=False),
                                            resource("ClusterRoleBinding", namespaced=False)],

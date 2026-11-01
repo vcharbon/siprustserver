@@ -78,7 +78,15 @@ up() {
   CLUSTER="$CLUSTER" "$K8S_DIR/weight-kind-cpu.sh" \
     || die "kind node CPU weights refused (weight-kind-cpu.sh above): the cluster is up but unweighted"
   sipext_up
+  lab_images
+  trap - EXIT
+}
 
+# The lab's images from the tree: the SUT and keepalived images and sipp:dev
+# built, RabbitMQ pulled when absent, and every one but sipp:dev kind-loaded
+# under its tag. An unchanged image reloads at the same digest; `deploy` rolls
+# the pods whose image a reload replaced (lib/image-roll.sh).
+lab_images() {
   log "proxy env (forwarded to docker build): $(proxy_env_summary)"
   log "building SUT image $SUT_IMAGE"
   docker_build -f "$REPO_ROOT/deploy/docker/Dockerfile" -t "$SUT_IMAGE" "$REPO_ROOT"
@@ -93,7 +101,6 @@ up() {
   kind_load "$SUT_IMAGE"
   kind_load "$KEEPALIVED_IMAGE"
   kind_load "$RABBITMQ_IMAGE"
-  trap - EXIT
 }
 
 up_failed() {
