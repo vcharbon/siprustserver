@@ -27,12 +27,12 @@ image_roll_strategies() { # <resource>
 }
 
 # The digests a kind node's image of that name answers to, one line: its image
-# id and each repo digest, `sha256:<hex>` each. Fails when the node holds no
-# image of that name.
+# id and each repo digest, `sha256:<hex>` each. Fails, crictl's error on
+# stderr, when the node cannot be read or holds no image of that name.
 image_roll_node_digests() { # <node> <image>
   local out entry digests=()
   out="$(docker exec "$1" crictl inspecti -o go-template \
-    --template '{{.status.id}}{{range .status.repoDigests}} {{.}}{{end}}' "$2" 2>/dev/null)" || return 1
+    --template '{{.status.id}}{{range .status.repoDigests}} {{.}}{{end}}' "$2")" || return 1
   for entry in $out; do digests+=("${entry##*@}"); done
   [ "${#digests[@]}" -gt 0 ] || return 1
   printf '%s\n' "${digests[*]}"
@@ -40,7 +40,9 @@ image_roll_node_digests() { # <node> <image>
 
 # Restarts every workload of NS with a pod on a replaced image and waits for
 # each rollout. A StatefulSet's pods below its partition are not read (the
-# rollout leaves them); a workload updated OnDelete is named and left.
+# rollout leaves them); a workload updated OnDelete is named and left. A node
+# that does not answer for the image of a live pod on it fails the deploy:
+# whether that pod is current is unknown.
 roll_stale_images() {
   local rows name owner kind pod node image id wl type part ordinal key digest
   local -A deployment=() strategy=() partition=() held=() stale=()
@@ -58,7 +60,6 @@ roll_stale_images() {
   done
   rows="$(image_roll_containers)" || die "image roll: cannot list the pods of $NS"
   while read -r kind owner pod node image id; do
-    [ -n "$id" ] || continue
     case "$kind" in
       ReplicaSet) [ -n "${deployment[$owner]:-}" ] || continue; wl="deployment/${deployment[$owner]}" ;;
       StatefulSet) wl="statefulset/$owner" ;;
@@ -72,9 +73,8 @@ roll_stale_images() {
     key="$node $image"
     if [ -z "${held[$key]+set}" ]; then
       held[$key]="$(image_roll_node_digests "$node" "$image")" \
-        || { log "image roll: $node holds no $image; $pod left on its image"; held[$key]=""; }
+        || die "image roll: node $node answers no $image for pod $pod (crictl inspecti above)"
     fi
-    [ -n "${held[$key]}" ] || continue
     digest="${id##*@}"
     case " ${held[$key]} " in *" $digest "*) continue ;; esac
     stale[$wl]+=" $pod ($image)"

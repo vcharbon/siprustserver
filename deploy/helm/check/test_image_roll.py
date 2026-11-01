@@ -21,9 +21,9 @@ OTHER = "sha256:" + "c" * 64
 
 # Stand-ins for lib/cluster.sh's log and die, `kubectl rollout` (recorded) on
 # top of the real kubectl, and a `docker exec <node> crictl inspecti` printing
-# what the crictl template prints, from FAKE_NODES lines
-# "<node> <image> <image id> [repo digest...]"; an unlisted pair is an image
-# the node does not hold.
+# what the crictl template (the image id, then each repo digest) prints, from
+# FAKE_NODES lines "<node> <image> <image id> [repo digest...]"; an unlisted
+# pair is an image the node does not hold, another template is unscripted.
 HARNESS = """
 set -euo pipefail
 log() { echo "log: $*"; }
@@ -37,6 +37,10 @@ kubectl() {
 }
 docker() {
   local node="$2" image="${!#}" n i rest
+  if [ "$*" != "exec $node crictl inspecti -o go-template --template $CRICTL_TEMPLATE $image" ]; then
+    echo "unscripted docker $*" >&2
+    return 97
+  fi
   while read -r n i rest; do
     if [ "$n $i" = "$node $image" ]; then echo "$rest"; return 0; fi
   done <<< "$FAKE_NODES"
@@ -44,6 +48,7 @@ docker() {
   return 1
 }
 HELM_DIR="$1" NS=lab ROLLOUT_TIMEOUT=7s
+CRICTL_TEMPLATE='{{.status.id}}{{range .status.repoDigests}} {{.}}{{end}}'
 source "$HELM_DIR/lib/image-roll.sh"
 roll_stale_images
 """
@@ -226,12 +231,14 @@ class ImageRoll(unittest.TestCase):
                                  [("worker", "app:dev", "")]))
         self.assertEqual(run(self.lab, NODES).calls, [])
 
-    def test_an_image_its_node_does_not_hold_is_named_and_left(self) -> None:
+    def test_a_node_that_answers_no_image_for_a_live_pod_fails_the_deploy(self) -> None:
         self.lab.pods[2] = pod("worker-0", ("StatefulSet", "worker"), "n3",
                                [("worker", "app:dev", imported(OLD))])
         r = run(self.lab, NODES)
-        self.assertEqual((r.code, r.calls), (0, []), r.out)
-        self.assertIn("n3 holds no app:dev", r.out)
+        self.assertNotEqual(r.code, 0, r.out)
+        self.assertEqual(r.calls, [])
+        self.assertIn("die: image roll: node n3 answers no app:dev for pod worker-0", r.out)
+        self.assertIn("no such image app:dev", r.out)
 
     def test_a_rollout_that_does_not_finish_fails_the_deploy(self) -> None:
         self.lab.pods[2] = pod("worker-0", ("StatefulSet", "worker"), "n1",

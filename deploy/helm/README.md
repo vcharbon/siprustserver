@@ -121,7 +121,9 @@ run needs. A `--set` of an earlier deploy that the next one omits is gone
 passes the whole set from its run profile.
 
 `--wait` makes every workload's readiness part of the deploy, the CDR broker
-and consumer included.
+and consumer included. The series check after it is `hakit obs-check` on the
+`proxy` scope, or `sut` when the release runs no proxy. Load and incidents are
+the HA tooling's runs (`tooling/hakit`, deploy/README.md).
 
 A reloaded image keeps its tag, so the pod templates do not change and helm
 rolls nothing. After the SUT release, `deploy` compares each live pod's
@@ -131,9 +133,8 @@ DaemonSet with a pod on a replaced image, then waits for each rollout
 (`lib/image-roll.sh`). It logs the workloads it rolled, or that nothing rolled.
 An unchanged image reloads at the same digest, so a redeploy with nothing
 rebuilt restarts nothing. A StatefulSet's pods below its partition are left to
-the partition; a workload updated `OnDelete` is named and left. The series check after it is `hakit obs-check` on the
-`proxy` scope, or `sut` when the release runs no proxy. Load and incidents are
-the HA tooling's runs (`tooling/hakit`, deploy/README.md).
+the partition; a workload updated `OnDelete` is named and left; a node that
+answers no image for a live pod on it fails the deploy.
 
 ## Checks
 
