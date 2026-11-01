@@ -1,12 +1,16 @@
 /**
  * Campaign runs started from its pages: the whole campaign on the lanes
- * picked (the header's control), or one case or sub-case on one lane or all
- * (the case drawer's), each with the system's data rebuilt first or not. A
- * start answers its job, linked to its page, or the server's refusal.
+ * picked (the header's control), or one case or sub-case on one lane or one
+ * group of lanes (the case drawer's), each with the system's data rebuilt
+ * first or not. Only the lanes the server runs are offered; the others show
+ * disabled with their reason, and a pick of two groups is refused before any
+ * job starts (`campaign-pick.ts`). A start answers its job, linked to its
+ * page, or the server's refusal.
  */
 import type { JSX } from "react"
 import { useState } from "react"
-import { api, type JobStarted } from "../api.ts"
+import { api, type JobStarted, type LaunchLane } from "../api.ts"
+import { defaultPick, groups, pickRefusal } from "../campaign-pick.ts"
 import { JobLinks } from "./JobLink.tsx"
 
 const said = (error: unknown): string => (error instanceof Error ? error.message : String(error))
@@ -48,37 +52,54 @@ const Rebuild = ({ on, set }: { readonly on: boolean; readonly set: (on: boolean
   </label>
 )
 
+/** The lanes refused here, one line each: the lane and its reason. */
+const RefusedLanes = ({ lanes }: { readonly lanes: readonly LaunchLane[] }): JSX.Element | null => {
+  const refused = lanes.filter((l) => l.refused !== null)
+  return refused.length === 0 ? null : (
+    <ul className="cp-refused muted">
+      {refused.map((l) => <li key={l.lane}><span className="mono">{l.lane}</span>: {l.refused}</li>)}
+    </ul>
+  )
+}
+
 /** The whole campaign on the lanes picked. */
-export const CampaignStart = ({ capture, lanes }: { readonly capture: string; readonly lanes: readonly string[] }): JSX.Element => {
-  const [picked, setPicked] = useState<readonly string[]>(lanes)
+export const CampaignStart = ({ capture, lanes }: { readonly capture: string; readonly lanes: readonly LaunchLane[] }): JSX.Element => {
+  const [picked, setPicked] = useState<readonly string[]>(() => defaultPick(lanes))
   const [rebuild, setRebuild] = useState(false)
   const { busy, outcome, start } = useStart(capture)
   const toggle = (lane: string) =>
     setPicked((now) => (now.includes(lane) ? now.filter((l) => l !== lane) : [...now, lane]))
+  const refusal = pickRefusal(picked, lanes)
   return (
     <details className="cp-launch">
       <summary>start</summary>
       <div className="cp-launch-body">
-        {lanes.map((lane) => (
-          <label key={lane} className="cp-check mono">
-            <input type="checkbox" checked={picked.includes(lane)} onChange={() => toggle(lane)} />
-            {lane}
+        {lanes.map((l) => (
+          <label key={l.lane} className="cp-check mono" title={l.refused ?? l.group}>
+            <input
+              type="checkbox"
+              disabled={l.refused !== null}
+              checked={picked.includes(l.lane)}
+              onChange={() => toggle(l.lane)}
+            />
+            {l.lane}
           </label>
         ))}
         <Rebuild on={rebuild} set={setRebuild} />
-        <button type="button" disabled={busy || picked.length === 0} onClick={() => void start(picked, {}, rebuild)}>
+        <button type="button" disabled={busy || refusal !== null} onClick={() => void start(picked, {}, rebuild)}>
           run campaign
         </button>
-        <Said outcome={outcome} />
+        {refusal !== null && picked.length > 0 ? <span className="cp-nok">run: {refusal}</span> : <Said outcome={outcome} />}
       </div>
+      <RefusedLanes lanes={lanes} />
     </details>
   )
 }
 
-/** One case's sub-case, or every sub-case of the case, on one lane or all. */
+/** One case's sub-case, or every sub-case of the case, on one lane or on one group of lanes. */
 export const CaseReplay = ({ capture, lanes, scope }: {
   readonly capture: string
-  readonly lanes: readonly string[]
+  readonly lanes: readonly LaunchLane[]
   readonly scope: Scope
 }): JSX.Element => {
   const [rebuild, setRebuild] = useState(false)
@@ -88,14 +109,23 @@ export const CaseReplay = ({ capture, lanes, scope }: {
   return (
     <div className="cp-replay">
       <b>Replay</b>
-      {lanes.map((lane) => (
-        <button key={lane} type="button" className="mono" disabled={busy} onClick={() => void start([lane], asked, rebuild)}>
-          {lane}
+      {lanes.map((l) => (
+        <button
+          key={l.lane}
+          type="button"
+          className="mono"
+          disabled={busy || l.refused !== null}
+          title={l.refused ?? undefined}
+          onClick={() => void start([l.lane], asked, rebuild)}
+        >
+          {l.lane}
         </button>
       ))}
-      {lanes.length > 1 && (
-        <button type="button" disabled={busy} onClick={() => void start(lanes, asked, rebuild)}>every lane</button>
-      )}
+      {groups(lanes).filter((group) => group.length > 1).map((group) => (
+        <button key={group.join("+")} type="button" disabled={busy} onClick={() => void start(group, asked, rebuild)}>
+          {group.join(" + ")}
+        </button>
+      ))}
       {scope.subcase !== undefined && (
         <label className="cp-check" title="every sub-case of the case">
           <input type="checkbox" checked={whole} onChange={(event) => setWhole(event.target.checked)} />

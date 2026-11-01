@@ -1187,8 +1187,19 @@ export interface Campaign {
   readonly lanes: readonly string[]
   readonly runs: readonly CampaignRun[]
   readonly cases: readonly CampaignCase[]
-  /** The lanes a run started from the page may take; null where the page reads another environment than the server's. */
-  readonly launch: { readonly lanes: readonly string[] } | null
+  /**
+   * Every lane a run started from the page may name, in the server's order;
+   * null where the page reads another environment than the server's.
+   */
+  readonly launch: { readonly lanes: readonly LaunchLane[] } | null
+}
+
+/** One lane a page start may name: the lanes of one group run together, a refused one does not run here. */
+export interface LaunchLane {
+  readonly lane: string
+  readonly group: string
+  /** Why this lane does not run here; null where it does. */
+  readonly refused: string | null
 }
 
 /** A request whose failure, of any status, is the server's stated reason where it states one. */

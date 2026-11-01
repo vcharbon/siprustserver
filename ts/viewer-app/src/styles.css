@@ -2295,6 +2295,7 @@ tr.rule-unrostered td {
 .cp-launch { display: inline-block; }
 .cp-launch > summary { cursor: pointer; }
 .cp-launch-body { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
+.cp-refused { margin: 4px 0 0; padding-left: 16px; font-size: 12px; }
 .cp-replay { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0; }
 .cp-checks td { text-align: left; vertical-align: top; font-size: 12px; }
 .cp-expected { word-break: break-all; }
