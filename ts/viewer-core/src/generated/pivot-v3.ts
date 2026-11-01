@@ -1320,7 +1320,8 @@ export interface ContactSpec {
    */
   display?: string | null
   /**
-   * The URI's user part, or `${…}` accessors composing it.
+   * The URI's user part, or `${…}` accessors composing it; empty, the URI
+   * states no userinfo (RFC 3261 §25.1).
    */
   user?: string | null
 }

@@ -82,7 +82,8 @@ pub struct ContactSpec {
     /// The display name, unescaped; the stack quotes it on the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
-    /// The URI's user part, or `${…}` accessors composing it.
+    /// The URI's user part, or `${…}` accessors composing it; empty, the URI
+    /// states no userinfo (RFC 3261 §25.1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
 }

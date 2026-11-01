@@ -113,6 +113,30 @@ fn a_stated_contact_names_its_display_and_user_on_every_later_message() {
     );
 }
 
+/// RFC 3261 §25.1: a SIP URI's userinfo is optional. A stated empty user
+/// part states a Contact with none, `<sip:host:port>`; a later target refresh
+/// still names a URI of its own, the leg id numbered.
+#[test]
+fn a_stated_empty_contact_user_states_no_userinfo() {
+    let addr: SocketAddr = "127.0.0.1:5070".parse().unwrap();
+    let mut uac = LegStack::new("A", addr, addr, "r1a2b3", "", "");
+    uac.state_contact(None, Some(""));
+    let addresses = Addresses {
+        ruri: "sip:callee@pivot.invalid",
+        from: "<sip:caller@pivot.invalid>",
+        to: "<sip:callee@pivot.invalid>",
+    };
+    let invite = uac
+        .out_of_dialog(Method::Invite, &addresses, &[], Vec::new(), None, None)
+        .expect("the caller composes its INVITE");
+    assert_eq!(header(&invite, sip_message::HeaderName::Contact), "<sip:127.0.0.1:5070>");
+    uac.refresh_target(2);
+    let again = uac
+        .out_of_dialog(Method::Options, &addresses, &[], Vec::new(), None, None)
+        .expect("an OPTIONS");
+    assert_eq!(header(&again, sip_message::HeaderName::Contact), "<sip:A-2@127.0.0.1:5070>");
+}
+
 // ── UPDATE on an early dialog (RFC 3311 §5.1) ───────────────────────────
 
 /// Compile once, run MANY: two instances of one plan must not share a

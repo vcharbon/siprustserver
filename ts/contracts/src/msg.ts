@@ -58,7 +58,8 @@ export interface Header extends Schema.Schema.Type<typeof Header> {}
 
 /**
  * The parts of a Contact its party chooses (RFC 3261 §8.1.1.8, §20.10): the
- * display name, unescaped, and the URI's user part. Host and port are tier 1.
+ * display name, unescaped, and the URI's user part (empty: no userinfo,
+ * RFC 3261 §25.1). Host and port are tier 1.
  */
 export const ContactSpec = Schema.Struct({
   display: Schema.optionalKey(Schema.String),

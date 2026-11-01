@@ -293,16 +293,24 @@ impl LegStack {
             .with_branch(SipStr::owned(&branch))
     }
 
+    /// The Contact this leg states: its user part the stated one, else the
+    /// leg id, numbered `-n` from the `n`-th target refresh on. A stated empty
+    /// user part states no userinfo (`<sip:host:port>`, RFC 3261 §25.1); its
+    /// refreshes, which need a URI of their own, take the leg id numbered.
     fn contact(&self) -> header::Contact {
         let base = self.contact_user.as_deref().unwrap_or(&self.leg);
-        let user = match self.target_refreshes {
-            0 => base.to_string(),
-            n => format!("{base}-{n}"),
+        let user = match (self.target_refreshes, base.is_empty()) {
+            (0, _) => base.to_string(),
+            (n, true) => format!("{}-{n}", self.leg),
+            (n, false) => format!("{base}-{n}"),
         };
-        let contact = header::Contact::from_uri(
-            Uri::sip_user(SipStr::owned(&user), SipStr::owned(&self.addr.ip().to_string()))
-                .with_port(self.addr.port()),
-        );
+        let host = SipStr::owned(&self.addr.ip().to_string());
+        let uri = if user.is_empty() {
+            Uri::sip(host)
+        } else {
+            Uri::sip_user(SipStr::owned(&user), host)
+        };
+        let contact = header::Contact::from_uri(uri.with_port(self.addr.port()));
         match &self.contact_display {
             Some(display) => contact.with_display(SipStr::owned(display)),
             None => contact,
