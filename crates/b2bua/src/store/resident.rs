@@ -4,7 +4,7 @@
 
 use call::CallModelState;
 
-use super::{CallState, CallTopology};
+use super::CallState;
 
 impl CallState {
     /// Every callRef this node holds live. The core's teardown reads it to
@@ -29,23 +29,25 @@ impl CallState {
             .collect()
     }
 
-    /// Every resident call still `Active` that no peer holds, as `(callRef,
-    /// incarnation)`: one with no backup (ADR-0055 §3), one naming no
-    /// topology, or one whose topology `held` reads unheld.
-    pub fn unheld_active_calls(
-        &self,
-        held: impl Fn(&CallTopology) -> bool,
-    ) -> Vec<(String, String)> {
+    /// Every resident call still `Active`, as `(callRef, incarnation,
+    /// holder)`: the `(primary, backup)` its topology names, `None` for a call
+    /// with no backup (ADR-0055 §3) or naming no topology. Read under the
+    /// call map's lock alone: the caller weighs each holder after it.
+    pub fn active_call_holders(&self) -> Vec<(String, String, Option<(String, String)>)> {
         let inner = self.locked();
         inner
             .calls
             .iter()
             .filter(|(_, call)| call.state == CallModelState::Active)
-            .filter(|(call_ref, _)| {
+            .map(|(call_ref, call)| {
                 let unbacked = self.repl_store().is_some_and(|repl| repl.unbacked(call_ref));
-                unbacked || !inner.topologies.get(*call_ref).is_some_and(&held)
+                let holder = inner
+                    .topologies
+                    .get(call_ref)
+                    .filter(|_| !unbacked)
+                    .map(|t| (t.pri.clone(), t.bak.clone()));
+                (call_ref.clone(), call.incarnation().to_string(), holder)
             })
-            .map(|(call_ref, call)| (call_ref.clone(), call.incarnation().to_string()))
             .collect()
     }
 

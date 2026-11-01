@@ -83,13 +83,38 @@ impl Changelog {
 
     /// Bind `peer`'s ordinal to the worker `identity` membership names for it
     /// (ADR-0055 §6): only that identity's reports count from now on. `None`:
-    /// membership names no identity, and every report counts.
+    /// membership names no identity, and every report counts. A new identity
+    /// holds nothing an earlier one applied: the highest position applied
+    /// falls back to none, on both sub-logs.
     pub fn bind_identity(&self, peer: &str, identity: Option<&str>) {
         let mut inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
-        match identity {
-            Some(identity) => inner.bound.insert(peer.to_string(), identity.to_string()),
-            None => inner.bound.remove(peer),
+        let Some(identity) = identity else {
+            inner.bound.remove(peer);
+            return;
         };
+        if inner.bound.get(peer).is_some_and(|bound| bound == identity) {
+            return;
+        }
+        inner.bound.insert(peer.to_string(), identity.to_string());
+        if let Some(log) = inner.peers.get_mut(peer) {
+            for partition in [Partition::Pri, Partition::Bak] {
+                log.sub_mut(partition).acked.send_replace(Watermark::new(0, 0));
+            }
+        }
+    }
+
+    /// Whether `peer`, under the identity bound to it, ever reported applying
+    /// a write of `call_ref`'s current call on `partition`: it holds a copy of
+    /// the call, current or stale. `false` when the call has no entry toward
+    /// it (none was written since its log was opened).
+    pub fn applied_any(&self, peer: &str, partition: Partition, call_ref: &str) -> bool {
+        let inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
+        let Some(sub) = inner.peers.get(peer).map(|log| log.sub(partition)) else {
+            return false;
+        };
+        let acked = *sub.acked.borrow();
+        acked.gen == self.gen
+            && sub.by_ref.get(call_ref).is_some_and(|st| st.first <= acked.counter)
     }
 
     /// Whether `peer` is a live, bootstrapped holder of `partition`: its flow is

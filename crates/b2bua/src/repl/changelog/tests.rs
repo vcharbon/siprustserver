@@ -293,3 +293,27 @@ async fn a_log_no_flow_serves_goes_at_the_dead_peer_ttl_whatever_it_is_written()
     cl.reap(clock.now_ms());
     assert!(!cl.has_peer("A"), "writes do not keep a log no flow serves");
 }
+
+/// A peer holds a call once, under the identity bound to it, it reported
+/// applying any write of the call, however stale; a new identity holds nothing
+/// an earlier one applied until it reports again.
+#[test]
+fn a_peer_holds_a_call_it_applied_a_write_of_under_its_identity() {
+    let cl = changelog();
+    cl.bind_identity("A", Some("a#g1"));
+    let _flow = cl.serving("A", Partition::Bak);
+    cl.bump_put("A", "call-1", Partition::Bak);
+    assert!(!cl.applied_any("A", Partition::Bak, "call-1"), "nothing applied yet");
+    cl.note_applied("A", Some("a#g1"), Partition::Bak, Watermark::new(7, 1));
+    cl.bump_put("A", "call-1", Partition::Bak);
+    assert!(cl.applied_any("A", Partition::Bak, "call-1"), "a stale copy is a copy");
+    cl.bump_put("A", "call-2", Partition::Bak);
+    assert!(!cl.applied_any("A", Partition::Bak, "call-2"), "born after its last report");
+    cl.bind_identity("A", Some("a#g2"));
+    assert!(!cl.applied_any("A", Partition::Bak, "call-1"), "a restarted peer holds nothing");
+    cl.note_applied("A", Some("a#g2"), Partition::Bak, Watermark::new(7, 3));
+    assert!(cl.applied_any("A", Partition::Bak, "call-2"), "its bootstrap carried the call");
+    cl.bump_delete("A", "call-2", Partition::Bak, false, None);
+    cl.bump_put("A", "call-2", Partition::Bak);
+    assert!(!cl.applied_any("A", Partition::Bak, "call-2"), "a new call on the ref is not held");
+}

@@ -3,7 +3,7 @@
 //! queue. A node with no live calls exits at once; a withdrawn node whose
 //! backups hold every live call exits as soon as a floor has passed; anything
 //! else is capped at `grace` and its residual is reported, never silently cut
-//! without a number. At the grace the calls no live peer holds are ended
+//! without a number. At the grace the calls no peer holds are ended
 //! ([`DrainInputs::end_unheld`]), and the drain waits for them to leave
 //! within the flush bound, discharging off the wire, halfway through it, an
 //! ending that has not left (ADR-0055 §3).
@@ -35,7 +35,7 @@ const DRAIN_POLL: Duration = Duration::from_millis(100);
 /// wait can outlive the caller's borrow of whatever it reads.
 pub type Probe<T> = Arc<dyn Fn() -> T + Send + Sync>;
 
-/// What the grace's end of the calls no live peer holds reached.
+/// What the grace's end of the calls no peer holds reached.
 pub struct GraceEnd {
     /// How many calls it handed to their ending.
     pub ended: usize,
@@ -53,7 +53,7 @@ impl GraceEnd {
     }
 }
 
-/// Ends, at the grace, each live call no live peer holds.
+/// Ends, at the grace, each live call no peer holds.
 pub type EndUnheld = Arc<dyn Fn() -> GraceEnd + Send + Sync>;
 
 /// The worker's limiter release flush, bounded by the duration it is given.
@@ -131,10 +131,10 @@ pub struct DrainInputs {
     /// cap (ADR-0055 §3): an exit is taken only with none.
     pub outboxes_waiting: Probe<usize>,
     /// Run when the grace expires with calls live: an established call no
-    /// live peer holds is ended where it stands, its record closed and
+    /// peer holds is ended where it stands, its record closed and
     /// nothing sent; a call in setup is aborted, its caller answered and a
-    /// ringing callee CANCELled (ADR-0055 §3, ADR-0022). A call a live peer
-    /// holds, caught up or not, is left to it. An ending still resident
+    /// ringing callee CANCELled (ADR-0055 §3, ADR-0022). A call a peer holds
+    /// a copy of, current or stale, is left to it. An ending still resident
     /// halfway through the flush bound is discharged off the wire.
     pub end_unheld: EndUnheld,
 }
@@ -157,7 +157,7 @@ impl DrainInputs {
         }
     }
 
-    /// These inputs with `end` as the grace's end of the calls no live peer
+    /// These inputs with `end` as the grace's end of the calls no peer
     /// holds (the default ends none).
     pub fn with_end_unheld(mut self, end: impl Fn() -> GraceEnd + Send + Sync + 'static) -> Self {
         self.end_unheld = Arc::new(end);
@@ -222,7 +222,7 @@ pub struct DrainBounds {
 /// is taken only if it still holds once the flush is done (a clean exit's
 /// condition, and an empty release queue); otherwise the wait goes on, and the
 /// drain never returns later than the grace plus the flush bound, where what
-/// is still queued is given up. At the grace the calls no live peer holds are
+/// is still queued is given up. At the grace the calls no peer holds are
 /// ended ([`DrainInputs::end_unheld`]); the exit stays the grace's, its
 /// residual the live calls the grace found, and it waits, within the same
 /// bound, for those endings to leave the node before its flush.

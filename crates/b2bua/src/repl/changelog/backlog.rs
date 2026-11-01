@@ -82,7 +82,8 @@ impl Changelog {
     /// bootstraps from the calls' metadata, not from this log. The entries
     /// kept toward such a peer are at most one per call written toward it
     /// since a flow last served the log (a newer write moves a call's entry),
-    /// and the whole log goes one dead-peer TTL after that, writes or not.
+    /// and the whole log goes one dead-peer TTL (60 s by default,
+    /// `B2BUA_REPL_DEAD_PEER_TTL_MS`) after that, writes or not.
     pub fn admits_backup(&self, peer: &str) -> bool {
         let now = self.clock.now_ms();
         let gen = self.gen;

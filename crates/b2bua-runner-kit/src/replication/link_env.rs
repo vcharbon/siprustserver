@@ -14,6 +14,8 @@
 //!   B2BUA_REPL_KEEPALIVE_RETRIES      TCP keepalive: unanswered probes   (3)
 //!   B2BUA_REPL_USER_TIMEOUT_MS        TCP_USER_TIMEOUT                   (15000)
 //!   B2BUA_REPL_LOOKUP_TIMEOUT_MS      one peer name lookup               (2000)
+//!   B2BUA_REPL_DEAD_PEER_TTL_MS       how long a peer's change log is kept
+//!                                     after a flow last served it        (60000)
 //! ```
 //!
 //! Unset takes the default. A value that is not a positive integer refuses the
@@ -33,6 +35,14 @@
 //! orchestrator's force-delete of an unreachable node's pod (minutes), and a
 //! stall of a live peer longer than it makes the puller pull again from its
 //! watermark.
+//!
+//! The dead-peer TTL is an HA timer of the serving side: a peer log no flow
+//! has served for that long is dropped, writes or not, so the log toward an
+//! away backup holds the writes of one TTL at most (ADR-0055 §3). It decides
+//! only whether a peer coming back with the same identity resumes warm from
+//! its watermark or re-bootstraps cold. It must exceed the idle timeout plus
+//! the backoff ceiling plus one connect: the longest a flow that blipped
+//! takes to be read down and pull again, so a short blip resumes warm.
 
 use std::time::Duration;
 
@@ -50,6 +60,7 @@ pub(crate) struct LinkSettings {
     pub(crate) send_stall: Duration,
     pub(crate) socket: SocketSettings,
     pub(crate) lookup_timeout: Duration,
+    pub(crate) dead_peer_ttl: Duration,
 }
 
 impl Default for LinkSettings {
@@ -64,6 +75,9 @@ impl Default for LinkSettings {
             send_stall: serve.send_stall,
             socket: SocketSettings::default(),
             lookup_timeout: http_net::LOOKUP_BOUND,
+            dead_peer_ttl: Duration::from_millis(
+                u64::try_from(b2bua::repl::DEFAULT_DEAD_PEER_TTL_MS).unwrap_or(u64::MAX),
+            ),
         }
     }
 }
@@ -114,6 +128,7 @@ impl LinkSettings {
                 },
             },
             lookup_timeout: ms("B2BUA_REPL_LOOKUP_TIMEOUT_MS", d.lookup_timeout)?,
+            dead_peer_ttl: ms("B2BUA_REPL_DEAD_PEER_TTL_MS", d.dead_peer_ttl)?,
         };
         let floor = Duration::from_millis(PullerConfig::default().backoff_init_ms);
         if settings.backoff_max < floor {
@@ -130,7 +145,21 @@ impl LinkSettings {
                 settings.noop_interval.as_millis()
             ));
         }
+        let blip = settings.idle_timeout + settings.backoff_max + settings.connect_timeout;
+        if settings.dead_peer_ttl <= blip {
+            return Err(format!(
+                "B2BUA_REPL_DEAD_PEER_TTL_MS ({} ms) must exceed B2BUA_REPL_IDLE_TIMEOUT_MS + \
+                 B2BUA_REPL_BACKOFF_MAX_MS + B2BUA_REPL_CONNECT_TIMEOUT_MS ({} ms)",
+                settings.dead_peer_ttl.as_millis(),
+                blip.as_millis()
+            ));
+        }
         Ok(settings)
+    }
+
+    /// The dead-peer TTL in the change log's unit.
+    pub(crate) fn dead_peer_ttl_ms(&self) -> i64 {
+        i64::try_from(self.dead_peer_ttl.as_millis()).unwrap_or(i64::MAX)
     }
 
     /// The pullers' configuration: the default backoff floor and bootstrap

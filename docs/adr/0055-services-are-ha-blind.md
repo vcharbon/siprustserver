@@ -205,8 +205,9 @@ ends the transaction with the CANCEL unsent (§9.1, §17.2.1).
   backup whose flow is live only: a backup that is away, or whose bootstrap
   is in flight, is no slow consumer, and the call is admitted with it. Its
   writes go to the change log toward that backup, one entry per call (a delete
-  stays until applied); the log goes one dead-peer TTL (300 s) after a flow
-  last served it, writes or not, so it holds the writes of that TTL at most,
+  stays until applied); the log goes one dead-peer TTL
+  (`B2BUA_REPL_DEAD_PEER_TTL_MS`, 60 s, ADR-0045) after a flow last served it,
+  writes or not, so it holds the writes of that TTL at most,
   and a warm pull past it re-bootstraps. On its return the backup's bootstrap
   carries the call from the primary's call metadata. No call is refused for
   the backlog. A gauge counts the live calls with no backup; such a call runs
@@ -301,21 +302,28 @@ ends the transaction with the CANCEL unsent (§9.1, §17.2.1).
   transaction its takeover seeds and CANCELs the callee.
 
 A graceful drain is transparent: it exits once the backup has caught up and
-every outbox is empty. A call no live peer holds (it has no backup, or its
-backup's flow is not live: away, or still bootstrapping) keeps the drain
+every outbox is empty. A call a peer is not shown to hold keeps the drain
 waiting for its calls or its grace, as a non-HA B2BUA does. At the grace the
-drain ends each such call (user ruling): an established one where it stands,
-its CDR written and its holds released, with nothing sent, so a call whose
-media still flows is never cut by the node; a call still in setup is aborted
-as a release-all aborts it (ADR-0050 §10): `503` to its caller (ADR-0022), a
-CANCEL to a ringing callee. A withdrawn worker never sees the answer to that
-CANCEL (the proxy hands it to the call's other owner), so an ending still
-resident halfway through the drain's flush bound is discharged off the wire.
-A call whose backup's flow is live, caught up or not, is left to that backup.
-The drain's exit stays the grace's and its residual counts the live calls the
-grace found. The parties' later requests reach a worker that holds no copy,
-which answers `481`, or, when neither owner the cookie names is alive, are
-dropped by the proxy (§8). A
+drain ends each call no peer holds (user ruling): one with no backup, or whose
+backup never reported applying any write of it under the identity bound to it
+now (away since before the call was born, or restarted since). The fact is
+durable: the backup's highest applied position against the call's first
+change-log entry, not the flow's liveness. Each such call is ended: an
+established one where it stands, its CDR written and its holds released, with
+nothing sent, so a call whose media still flows is never cut by the node; a
+call still in setup is aborted as a release-all aborts it (ADR-0050 §10):
+`503` to its caller (ADR-0022), a CANCEL to a ringing callee. A withdrawn
+worker never sees the answer to that CANCEL (the proxy hands it to the call's
+other owner), so an ending still resident halfway through the drain's flush
+bound is discharged off the wire. A call whose backup applied a write of it,
+current or stale, is left to that copy (user ruling): the draining node sends
+nothing for it, writes no CDR and logs no delete, and the parties notice
+nothing until an in-dialog request reaches the backup, which serves it once
+the primary is gone (§4 settles a stale copy). The drain's exit stays the
+grace's and its residual counts the live calls the grace found. A party's
+later request for an ended call reaches a worker that holds no copy, which
+answers `481`, or, when neither owner the cookie names is alive, is dropped
+by the proxy (§8). A
 kill is not transparent: under `applied` the backup holds every write whose
 effects left before the cap, and an ACK the kill takes after the backup applied
 its write is re-sent by the copy to the callee's 2xx repeat (RFC 3261

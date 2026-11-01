@@ -72,10 +72,6 @@ pub(crate) use repl_wiring::sync_level_from_env;
 use repl_wiring::ReplWiring;
 pub use strike::Fired;
 
-/// Changelog dead-peer TTL: a peer silent this long loses its log and pulls
-/// again from a bootstrap, reachable in a test budget.
-const DEFAULT_DEAD_PEER_TTL_MS: i64 = 60_000;
-
 // ===========================================================================
 // ReplicatedB2buaSut — a replicating B2BUA worker on the failover fabric
 // ===========================================================================
@@ -1447,7 +1443,7 @@ impl FailoverHarness {
             listen_addr,
             replica: self.worker_replica,
             sync: self.level,
-            dead_peer_ttl_ms: DEFAULT_DEAD_PEER_TTL_MS,
+            dead_peer_ttl_ms: b2bua::repl::DEFAULT_DEAD_PEER_TTL_MS,
         };
 
         // This node's own wall clock (shared monotonic timeline + per-node anchor

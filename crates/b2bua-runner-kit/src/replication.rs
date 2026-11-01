@@ -41,7 +41,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use b2bua::repl::ReplicatingCallStore;
+use b2bua::repl::{Changelog, ReplicatingCallStore};
 use b2bua::ReplicationSetup;
 use http_net::SystemResolver;
 use repl_net::{RealReplicationNetwork, ReplicationNetwork};
@@ -182,7 +182,11 @@ impl ReplicationSettings {
         Ok(ReplicationSetup {
             network: Arc::new(network),
             membership,
-            store: Arc::new(ReplicatingCallStore::new(incarnation_gen, clock)),
+            store: Arc::new(ReplicatingCallStore::with_changelog(
+                Changelog::new(incarnation_gen, clock.clone())
+                    .with_dead_peer_ttl(self.link.dead_peer_ttl_ms()),
+                clock,
+            )),
             listener,
             addr_resolver: Arc::new(ReplResolver::new(
                 self.peer_port,

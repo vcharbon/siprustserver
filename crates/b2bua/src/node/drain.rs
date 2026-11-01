@@ -143,23 +143,34 @@ fn backups_caught_up_in(ctx: &RouterCtx, changelog: &crate::repl::Changelog) -> 
     })
 }
 
-/// End each live call no live peer holds, at the drain's grace: the call has
-/// no backup, or its holder's flow is not live (away, or still bootstrapping).
-/// Each is sent the release turn of ADR-0050 §10, on its own queue: an
-/// established call ends where it stands, its record closed and nothing sent;
-/// a call in setup is aborted, `503` to its caller and a CANCEL to a ringing
-/// callee. A call a live peer holds, caught up or not, is left to it. An
-/// ending that does not leave in time (a withdrawn worker never sees the
-/// answer to its CANCEL: the proxy hands it to the call's other owner) is
-/// discharged off the wire, as the reaper discharges a wedged call.
+/// End each live call no peer holds, at the drain's grace: the call has no
+/// backup, or its holder never reported applying any write of it under the
+/// identity bound to it now (away since before the call was born, or
+/// restarted since). A call whose holder applied a write of it, current or
+/// stale, is left to that copy: nothing is sent, written or deleted for it
+/// (ADR-0055 §3). Each call ended is sent the release turn of ADR-0050 §10, on
+/// its own queue: an established call ends where it stands, its record
+/// closed and nothing sent; a call in setup is aborted, `503` to its caller
+/// and a CANCEL to a ringing callee. An ending that does not leave in time (a
+/// withdrawn worker never sees the answer to its CANCEL: the proxy hands it
+/// to the call's other owner) is discharged off the wire, as the reaper
+/// discharges a wedged call.
 fn end_unheld(ctx: &Arc<RouterCtx>, changelog: Option<&crate::repl::Changelog>) -> GraceEnd {
     use crate::rules::operator_release::{AT_DRAIN_GRACE, TOPIC};
     let me = &ctx.config.self_ordinal;
-    let unheld = ctx.state.unheld_active_calls(|t| {
+    let held = |call_ref: &str, (pri, bak): &(String, String)| {
         let (holder, partition) =
-            if t.pri == *me { (&t.bak, Partition::Bak) } else { (&t.pri, Partition::Pri) };
-        !holder.is_empty() && changelog.is_some_and(|cl| cl.flow_live(holder, partition))
-    });
+            if pri == me { (bak, Partition::Bak) } else { (pri, Partition::Pri) };
+        !holder.is_empty()
+            && changelog.is_some_and(|cl| cl.applied_any(holder, partition, call_ref))
+    };
+    let unheld: Vec<(String, String)> = ctx
+        .state
+        .active_call_holders()
+        .into_iter()
+        .filter(|(call_ref, _, holder)| !holder.as_ref().is_some_and(|h| held(call_ref, h)))
+        .map(|(call_ref, incarnation, _)| (call_ref, incarnation))
+        .collect();
     for (call_ref, incarnation) in &unheld {
         let _ = ctx.reentry_tx.send(CallEvent::InternalEvent {
             call_ref: call_ref.clone(),

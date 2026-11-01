@@ -88,7 +88,8 @@ that is not a positive integer refuses the boot, and so does a backoff
 ceiling under the 100 ms floor, a keepalive time
 that is not a whole number of seconds (1 s to 32 767 s), more than 127
 keepalive probes, or a user timeout above `u32::MAX` ms. The idle timeout must
-be at least twice the `Noop` interval. The two span nodes — a node's pullers
+be at least twice the `Noop` interval, and the dead-peer TTL above the idle
+timeout plus the backoff ceiling plus the connect timeout. The two span nodes — a node's pullers
 read its peers' `Noop`s — so a change raises the idle timeout first and the
 interval after.
 
@@ -102,6 +103,7 @@ interval after.
 | `B2BUA_REPL_KEEPALIVE_IDLE_MS` / `_INTERVAL_MS` / `_RETRIES` | TCP keepalive | 5000 / 2000 / 3 |
 | `B2BUA_REPL_USER_TIMEOUT_MS` | `TCP_USER_TIMEOUT` | 15000 |
 | `B2BUA_REPL_LOOKUP_TIMEOUT_MS` | one peer name lookup | 2000 |
+| `B2BUA_REPL_DEAD_PEER_TTL_MS` | an HA timer of the serving side: a peer's change log no flow has served this long is dropped, writes or not (ADR-0055 §3); it decides only whether a peer coming back with the same identity resumes warm from its watermark or re-bootstraps cold; above the idle timeout plus the backoff ceiling plus one connect, so a short flow blip resumes warm | 60000 |
 
 ## Consequences
 

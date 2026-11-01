@@ -63,13 +63,17 @@ pub use source::{BodySource, RefMeta};
 
 /// How long a peer's whole changelog is kept after a flow last served it (or
 /// its creation) before an idle [`reap`](Changelog::reap) drops it, writes or
-/// not (the peer re-bootstraps on return).
-pub const DEFAULT_DEAD_PEER_TTL_MS: i64 = 300_000;
+/// not: a peer coming back with the same identity after it re-bootstraps cold
+/// instead of resuming warm (`B2BUA_REPL_DEAD_PEER_TTL_MS`, ADR-0045).
+pub const DEFAULT_DEAD_PEER_TTL_MS: i64 = 60_000;
 
 /// Per-callRef position in a compacted sub-log.
 #[derive(Clone, Debug)]
 struct RefState {
     counter: u64,
+    /// The counter of the call's first `Put` in this sub-log, kept by its
+    /// later writes: the peer applied a write of the call once it reports it.
+    first: u64,
     op: Op,
     /// `now_ms` of the write the entry holds: the age of a pending write.
     written_ms: i64,
@@ -142,12 +146,16 @@ impl SubLog {
     /// ref never inherits a former call's.
     fn put(&mut self, counter: u64, call_ref: &str, op: Op, now_ms: i64, stated: Stated) {
         let Stated { mut answered, incarnation } = stated;
+        let mut first = counter;
         if let Some(prev) = self.by_ref.get(call_ref) {
             self.entries.remove(&prev.counter);
             answered |= op == Op::Delete && prev.op == Op::Delete && prev.answered;
+            if op == Op::Delete || prev.op == Op::Put {
+                first = prev.first;
+            }
         }
         self.entries.insert(counter, call_ref.to_string());
-        let state = RefState { counter, op, written_ms: now_ms, answered, incarnation };
+        let state = RefState { counter, first, op, written_ms: now_ms, answered, incarnation };
         self.by_ref.insert(call_ref.to_string(), state);
         self.head = self.head.max(counter);
         self.written.send_replace(self.head);

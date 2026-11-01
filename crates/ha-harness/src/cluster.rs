@@ -26,10 +26,6 @@ use topology::Peer;
 use crate::node::{HaNode, NodeWiring};
 use crate::report::{Marker, ReplReport};
 
-/// Default changelog dead-peer TTL for harness nodes: short enough that
-/// dead-peer auto-clean is reachable in a test budget.
-const DEFAULT_DEAD_PEER_TTL_MS: i64 = 300_000;
-
 /// Short backoff + bootstrap hard timeout so a couple of advances trip the
 /// relevant deadline deterministically — the canonical values live on
 /// [`PullerConfig::fast_test`], shared with the b2bua repl tests so the
@@ -119,7 +115,7 @@ impl HaCluster {
             addrs,
             markers: Vec::new(),
             config: fast_config(),
-            dead_peer_ttl_ms: DEFAULT_DEAD_PEER_TTL_MS,
+            dead_peer_ttl_ms: b2bua::repl::DEFAULT_DEAD_PEER_TTL_MS,
             replica_backstop_ms,
         };
 
