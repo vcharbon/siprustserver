@@ -119,7 +119,7 @@ pub fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
     c::SEND_ERRORS.render_value(&mut s, m.send_errors());
     c::EVENT_QUEUE_DEPTH.render_value(&mut s, m.event_queue_depth());
     c::EVENT_QUEUE_CAPACITY.render_value(&mut s, m.event_queue_capacity());
-    c::EVENT_QUEUE_SOJOURN.render_value(&mut s, m.event_queue_sojourn().as_millis());
+    c::EVENT_QUEUE_DELAY.render_value(&mut s, m.event_queue_delay().as_millis());
     c::KEEPALIVE_LANE_DROPS.render_value(&mut s, m.keepalive_lane_drops());
     let class = |series: &metric_catalogue::Series<'_>| {
         EventQueueClass::ALL.get(series.index(&c::EVENT_QUEUE_CLASS)).copied()

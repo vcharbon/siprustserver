@@ -113,10 +113,10 @@ pub const EVENT_QUEUE_CAPACITY: Family = Family::gauge(
     "Inbound->app events channel capacity.",
 );
 
-pub const EVENT_QUEUE_SOJOURN: Family = Family::gauge(
-    "b2bua_txn_event_queue_sojourn_ms",
+pub const EVENT_QUEUE_DELAY: Family = Family::gauge(
+    "b2bua_txn_event_queue_delay_ms",
     Labels::None,
-    "How long the event the app took last waited in the inbound->app events channel, ms; 0 while the channel is empty. While the channel is backed up, each taken event's wait is its delay.",
+    "How long the oldest event waiting in the inbound->app events channel has waited, ms, read at scrape; 0 while the channel is empty.",
 );
 
 pub const KEEPALIVE_LANE_DROPS: Family = Family::counter(

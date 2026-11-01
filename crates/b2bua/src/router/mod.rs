@@ -364,8 +364,10 @@ pub async fn run(
             },
             ev = txn_rx.recv() => match ev {
                 Some(ev) => {
+                    // The gate reads the queue at each take: a backlog that
+                    // drains between two probes still restarts its hold.
                     if let Some(gate) = ctx.readiness.queue_gate() {
-                        gate.observe_take(txn_rx.last_sojourn());
+                        gate.refusing();
                     }
                     let (ev, matched_client_txn) = txn_event::call_event(ev, ctx.clock.now_ms());
                     Work::Event(ev, matched_client_txn)

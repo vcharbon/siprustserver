@@ -261,7 +261,7 @@ pub const TXN: &[Family] = &[
     txn::SEND_ERRORS,
     txn::EVENT_QUEUE_DEPTH,
     txn::EVENT_QUEUE_CAPACITY,
-    txn::EVENT_QUEUE_SOJOURN,
+    txn::EVENT_QUEUE_DELAY,
     txn::KEEPALIVE_LANE_DROPS,
     txn::EVENT_QUEUE_DROPS,
     txn::EVENT_QUEUE_DEFERRALS,

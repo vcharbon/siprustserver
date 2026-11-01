@@ -22,7 +22,7 @@ use crate::rng::IdGen;
 
 use super::backlog::DeferredBound;
 use super::call_txns::CallTxns;
-use super::event_receiver::Queued;
+use super::event_age::EventAges;
 use super::handle::TransactionConfig;
 use super::key::{ServerTxnId, ServerTxnIdentity, ServerTxnKey};
 use super::parse_refusal::ParseRefusals;
@@ -47,7 +47,9 @@ pub(super) struct Owner {
     pub(super) servers: HashMap<ServerTxnKey, Box<Transaction>>,
     pub(super) timers: DelayQueue<Timer>,
     pub(super) parser: Arc<dyn SipParser + Send + Sync>,
-    pub(super) events_tx: mpsc::Sender<Queued>,
+    pub(super) events_tx: mpsc::Sender<TransactionEvent>,
+    /// The entry stamps of the events in `events_tx`'s queue.
+    pub(super) event_ages: Arc<EventAges>,
     /// The keepalive lane ([`TransactionConfig::keepalive_lane`](crate::TransactionConfig)),
     /// when the layer runs one.
     pub(super) keepalive_tx: Option<mpsc::Sender<TransactionEvent>>,
@@ -126,11 +128,12 @@ pub(super) struct Owner {
 }
 
 impl Owner {
-    /// The owner over `events_tx` and the keepalive lane `keepalive_tx`,
-    /// holding the tunables of `config` (which already sized both).
+    /// The owner over the event queue `events_tx` with its entry stamps and
+    /// the keepalive lane `keepalive_tx`, holding the tunables of `config`
+    /// (which already sized both).
     pub(super) fn new(
         parser: Arc<dyn SipParser + Send + Sync>,
-        events_tx: mpsc::Sender<Queued>,
+        (events_tx, event_ages): (mpsc::Sender<TransactionEvent>, Arc<EventAges>),
         keepalive_tx: Option<mpsc::Sender<TransactionEvent>>,
         metrics: Arc<MetricsInner>,
         config: TransactionConfig,
@@ -146,6 +149,7 @@ impl Owner {
             timers: DelayQueue::new(),
             parser,
             events_tx,
+            event_ages,
             keepalive_tx,
             metrics,
             parse_refusals: ParseRefusals::new(&config.id_gen, config.advertised),

@@ -1,6 +1,6 @@
 //! A worker whose event queue is backed up refuses new calls on its OPTIONS
 //! answer (`new=refuse; cause=overload`, ADR-0050 §2), by the queue's depth or
-//! by how long its events wait, and accepts again only once the queue has
+//! by how long its oldest event has waited, and accepts again only once the queue has
 //! stayed drained for the hold: a dip shorter than the hold flips nothing.
 //!
 //! The backlog is out-of-dialog requests the worker refuses `405`, behind a
@@ -23,8 +23,10 @@ use tokio::time::Instant;
 const NODE: &str = "w0";
 /// Queued events at which the worker refuses new calls.
 const REFUSE_DEPTH: usize = 512;
-/// A wait in the queue at which the worker refuses new calls.
-const REFUSE_SOJOURN: Duration = Duration::from_millis(500);
+/// The queue's delay at which the worker refuses new calls, once it persists.
+const REFUSE_DELAY: Duration = Duration::from_millis(300);
+/// How long the delay persists before the worker refuses.
+const REFUSE_INTERVAL: Duration = Duration::from_millis(150);
 /// How long the queue stays drained before the worker accepts again.
 const ACCEPT_HOLD: Duration = Duration::from_millis(3000);
 
@@ -66,24 +68,24 @@ async fn advance_to(s: &B2buaScene, at: Instant) {
     s.h.advance(at.saturating_duration_since(Instant::now())).await;
 }
 
-/// Events that have waited past the sojourn threshold refuse new calls while
+/// Events that have waited past the delay threshold refuse new calls while
 /// the queue is far below the depth threshold. Once drained the worker keeps
 /// refusing through the hold; a second, smaller backlog inside the hold, whose
 /// events wait above the accept bound and below the refusal one, restarts it.
 #[tokio::test(start_paused = true)]
-async fn events_waiting_past_the_sojourn_threshold_refuse_new_calls_until_the_hold_passes() {
-    let (s, pace, carol) = paced_scene("options-overload-refusal-sojourn").await;
+async fn events_waiting_past_the_delay_threshold_refuse_new_calls_until_the_hold_passes() {
+    let (s, pace, carol) = paced_scene("options-overload-refusal-delay").await;
     let mut dialog = s.establish().await;
     assert_eq!(readiness(&s).await, Some(Readiness::accept()), "an idle worker accepts");
 
     // 300 events at 10 ms a turn: three seconds of work, far below the depth.
     pace.set(NODE, Pace::PerTurn(Duration::from_millis(10)));
     send_backlog(&carol, s.b2bua.addr, 300, "backlog").await;
-    s.h.advance(2 * REFUSE_SOJOURN).await;
+    s.h.advance(2 * (REFUSE_DELAY + REFUSE_INTERVAL)).await;
     assert_eq!(
         readiness(&s).await,
         Some(Readiness::refuse("overload")),
-        "events waiting past the sojourn threshold refuse new calls"
+        "events waiting past the delay threshold refuse new calls"
     );
 
     let first_drain = drained(&s, 300).await;
@@ -94,7 +96,7 @@ async fn events_waiting_past_the_sojourn_threshold_refuse_new_calls_until_the_ho
         "drained for less than the hold: still refusing"
     );
 
-    // 20 events: the last waits about 200 ms, between the two sojourn bounds.
+    // 20 events: the last waits about 200 ms, between the two delay bounds.
     send_backlog(&carol, s.b2bua.addr, 20, "bump").await;
     let second_drain = drained(&s, 320).await;
     advance_to(&s, first_drain + ACCEPT_HOLD + Duration::from_millis(500)).await;
@@ -116,7 +118,7 @@ async fn events_waiting_past_the_sojourn_threshold_refuse_new_calls_until_the_ho
 }
 
 /// A burst past the depth threshold refuses new calls at once, before any of
-/// its events has waited the sojourn threshold, and the worker accepts again
+/// its events has waited the delay threshold, and the worker accepts again
 /// once the queue has stayed drained for the hold.
 #[tokio::test(start_paused = true)]
 async fn a_queue_past_the_depth_threshold_refuses_new_calls_until_the_hold_passes() {
@@ -129,20 +131,22 @@ async fn a_queue_past_the_depth_threshold_refuses_new_calls_until_the_hold_passe
     let sent = Instant::now();
     send_backlog(&carol, s.b2bua.addr, burst, "backlog").await;
     let mut queued = 0;
-    while queued < REFUSE_DEPTH && sent.elapsed() < REFUSE_SOJOURN {
+    while queued < REFUSE_DEPTH && sent.elapsed() < Duration::from_secs(1) {
         s.h.advance(Duration::from_millis(5)).await;
         queued = s.b2bua.txn_metrics().event_queue_depth();
     }
     assert!(queued >= REFUSE_DEPTH, "the burst is queued: {queued} events");
+    // Every queued event arrived in the last 5 ms.
+    let queued_at = Instant::now() - Duration::from_millis(5);
     assert_eq!(
         readiness(&s).await,
         Some(Readiness::refuse("overload")),
         "a queue past the depth threshold refuses new calls"
     );
     assert!(
-        sent.elapsed() < REFUSE_SOJOURN,
-        "refused on the depth alone, before an event waited the sojourn threshold: {:?}",
-        sent.elapsed()
+        queued_at.elapsed() < REFUSE_DELAY,
+        "refused on the depth alone, before an event waited the delay threshold: {:?}",
+        queued_at.elapsed()
     );
 
     let drain = drained(&s, burst as u64).await;

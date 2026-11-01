@@ -18,7 +18,7 @@ use crate::seed::{Reoffer, TxnSeed};
 use call::TxnKind;
 
 pub use super::config::TransactionConfig;
-use super::event_receiver::Queued;
+use super::event_age::EventAges;
 pub use super::event_receiver::TransactionEvents;
 use super::key::{ServerTxnId, ServerTxnKey};
 use super::owner::Owner;
@@ -191,7 +191,8 @@ impl TransactionLayer {
         config: TransactionConfig,
     ) -> (Self, TransactionEvents) {
         #[expect(clippy::disallowed_methods, reason = "event_capacity is within EVENT_CAPACITY")]
-        let (events_tx, events_rx) = mpsc::channel::<Queued>(config.event_capacity());
+        let (events_tx, events_rx) = mpsc::channel::<TransactionEvent>(config.event_capacity());
+        let ages = Arc::new(EventAges::new(config.event_capacity()));
         #[expect(clippy::disallowed_methods, reason = "the lane's bound is at least 1")]
         let (keepalive_tx, keepalive_rx) = config
             .keepalive_lane
@@ -202,10 +203,11 @@ impl TransactionLayer {
         let (forget_tx, forget_rx) = mpsc::unbounded_channel::<Forget>();
 
         let metrics_inner = Arc::new(MetricsInner::new());
-        let metrics = TransactionMetrics::new(metrics_inner.clone(), events_tx.clone());
-        let events = TransactionEvents::new(events_rx, keepalive_rx, metrics_inner.clone());
+        let metrics =
+            TransactionMetrics::new(metrics_inner.clone(), events_tx.clone(), ages.clone());
+        let events = TransactionEvents::new(events_rx, keepalive_rx, ages.clone());
 
-        let owner = Owner::new(parser, events_tx, keepalive_tx, metrics_inner, config);
+        let owner = Owner::new(parser, (events_tx, ages), keepalive_tx, metrics_inner, config);
         let owner_pulse = Arc::new(LoopPulse::new());
         let owner_abort =
             tokio::spawn(run(owner, endpoint, cmd_rx, forget_rx, owner_pulse.clone()))

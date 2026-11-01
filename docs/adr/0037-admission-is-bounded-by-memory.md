@@ -157,9 +157,10 @@ kills it, and a kill drops every call it serves.
     creation of the call.
 
     The event-queue rung reads the same gate as the OPTIONS answer's
-    `cause=overload`: one state, one set of bounds, one hold. It refuses from
-    the router's first reading past a refusal bound, before any probe reads
-    the refusal, and keeps refusing the new calls that still reach the worker
+    `cause=overload`: one state, one set of bounds, one hold, the queue's
+    depth and the age of its oldest waiting event read when the INVITE is
+    judged (ADR-0050 §9). It refuses from the first reading that trips the
+    gate, before any probe reads the refusal, and keeps refusing the new calls that still reach the worker
     (in flight, or placed on it while every worker refuses) until the gate
     accepts. It judges as the panic-ELU rung, a load signal: an emergency
     INVITE is admitted. It comes last, so a refusal another rung also makes

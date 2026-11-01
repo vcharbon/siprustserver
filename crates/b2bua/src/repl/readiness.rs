@@ -329,8 +329,8 @@ impl Readiness {
         let _ = self.inner.queue.set(EventQueueGate::new(bounds, queue));
     }
 
-    /// The event-queue gate, once installed: the router observes each event
-    /// it takes from the queue.
+    /// The event-queue gate, once installed: the router reads it at each
+    /// event it takes from the queue, the admission ladder at each new INVITE.
     pub fn queue_gate(&self) -> Option<&EventQueueGate> {
         self.inner.queue.get()
     }

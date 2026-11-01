@@ -122,6 +122,7 @@ mod options_answer_under_backlog;
 mod options_backend_gate;
 mod options_capabilities;
 mod options_overload_refusal;
+mod options_queue_delay;
 mod orphan_reject_no_leak;
 mod overflow_teardown;
 mod own_answer_past_bounds;

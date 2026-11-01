@@ -17,7 +17,7 @@ the cookie's `w_bak`), `load_observer/observer.rs` (the stale-payload sweep),
 notice),
 `crates/sip-proxy-runner/src/readiness.rs` and `main.rs` (`/readyz`, the boot
 probe), the proxy chart's VRRP check, `crates/sip-txn/src/layer/event_receiver.rs`
-and `events.rs` (the keepalive lane, each event's wait in the queue),
+and `events.rs` (the keepalive lane), `event_age.rs` (the queue's delay),
 `crates/b2bua/src/overload/event_queue_gate.rs` and
 `crates/b2bua-runner-kit/src/runner_env/event_queue_env.rs` (the event-queue gate).
 
@@ -179,12 +179,18 @@ take a new call, and may an in-dialog request of a call it owns reach it.
      reports `new=refuse; cause=backend` and refuses new calls (ADR-0043 §10),
      or else the event-queue gate refuses, which reports `new=refuse;
      cause=overload`. Never latched. The gate reads the transaction event
-     queue: its depth, and the sojourn, the time the event the router took
-     last waited in it (an empty queue reads zero). It refuses at or past
-     either refusal bound (depth 512, sojourn 500 ms) and accepts again once
-     depth and sojourn have both stayed at or below their accept bounds (64,
-     50 ms) for the hold (3 s, at least two probe intervals). The router
-     reads it at each event it takes and the OPTIONS answer at each probe.
+     queue when it reads: its depth, and its delay, the age of the oldest
+     event waiting in it (an empty queue reads zero), so a router that takes
+     nothing still reads a growing delay. It refuses at the refusal depth
+     (512) at once, and on the delay once it has stayed at or past the
+     refusal delay (300 ms, below T1) for the refusal interval (150 ms,
+     CoDel's persistence: one slow turn or one CPU-quota throttle gap trips
+     nothing). It accepts again once depth and delay have both stayed at or
+     below their accept bounds (64, 50 ms) for the hold (3 s, at least two
+     probe intervals). The router reads it at each event it takes, the
+     OPTIONS answer at each probe; each reading is a clock read and a few
+     atomics, the transaction layer stamping each event as it enters the
+     queue, with no lock on the event path.
      The same gate is the event-queue rung of the worker's admission ladder
      (ADR-0037 item 11): a new normal INVITE that still reaches the worker
      while the gate refuses gets the ladder's `503`, from the gate's first
@@ -283,6 +289,8 @@ take a new call, and may an in-dialog request of a call it owns reach it.
   backend outage with established calls ended by their BYE; a re-INVITE right
   after a primary returns, served by the primary), and the event-queue cells
   (an OPTIONS behind a backlog answered within the reply window; the refusal
-  by depth and by sojourn with its hold; a backed-up worker kept alive, its
+  by depth and by a persisting delay with its hold; a stalled router reading
+  the age of the event behind it; a wait shorter than the interval refusing
+  nothing; a backed-up worker kept alive, its
   dialogs on it, new calls elsewhere; a dead notice behind a backlog taken
   once, in order; a wedged or partitioned worker read dead).

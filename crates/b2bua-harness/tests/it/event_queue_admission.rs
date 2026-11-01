@@ -7,7 +7,8 @@
 //!
 //! The backlog is out-of-dialog requests the worker refuses `405`, behind a
 //! router loop that spends [`PER_TURN`] of simulated time on each turn
-//! ([`RouterPace`]); the gate runs on its defaults (sojourn 500 ms, hold 3 s).
+//! ([`RouterPace`]); the gate runs on its defaults (delay 300 ms held 150 ms,
+//! hold 3 s).
 //! No OPTIONS is sent: the rung reads the gate itself.
 
 use std::time::Duration;

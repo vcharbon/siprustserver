@@ -1,8 +1,8 @@
 //! `TransactionConfig::keepalive_lane`: an out-of-dialog OPTIONS passed up
 //! statelessly rides a bounded lane of its own, so it reaches a consumer that
 //! takes the lane first whatever the event queue holds; a full lane drops the
-//! newest and counts it. With no lane the OPTIONS rides the event queue. Each
-//! event of the queue reports how long it waited there.
+//! newest and counts it. With no lane the OPTIONS rides the event queue. The
+//! age of the oldest event waiting in the queue is read at any instant.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -113,24 +113,25 @@ async fn with_no_lane_the_options_rides_the_event_queue() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn each_taken_event_reports_its_wait_in_the_queue() {
+async fn the_oldest_waiting_event_ages_while_nothing_is_taken() {
     let mut stack = stack(None).await;
-    assert_eq!(stack.events.last_sojourn(), Duration::ZERO, "nothing taken yet");
+    let metrics = stack.txn.metrics().clone();
+    assert_eq!(metrics.event_queue_delay(), Duration::ZERO, "an empty queue");
     for i in 0..2 {
         stack.inject(&inbound_request("MESSAGE", &format!("z9hG4bK-wait-{i}"), "wait", None)).await;
+        elapse_ms(TRANSIT + 1).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    elapse_ms(TRANSIT + 1).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    let metrics = stack.txn.metrics().clone();
-    stack.events.try_recv().expect("the first event");
-    let waited = stack.events.last_sojourn();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let first = metrics.event_queue_delay();
     assert!(
-        waited >= Duration::from_millis(300) && waited < Duration::from_millis(310),
-        "the first waited from its enqueue: {waited:?}"
+        first >= Duration::from_millis(1000) && first < Duration::from_millis(1010),
+        "nothing taken: the first has waited a second: {first:?}"
     );
-    assert_eq!(metrics.event_queue_sojourn(), waited, "the gauge reads it while events queue");
+
+    stack.events.try_recv().expect("the first event");
+    let second = metrics.event_queue_delay();
+    assert_eq!(first - second, Duration::from_millis(106), "then the second, entered 106 ms later");
     stack.events.try_recv().expect("the second event");
-    assert_eq!(metrics.event_queue_depth(), 0);
-    assert_eq!(metrics.event_queue_sojourn(), Duration::ZERO, "an empty queue reads zero");
+    assert_eq!(metrics.event_queue_delay(), Duration::ZERO, "none waits");
 }

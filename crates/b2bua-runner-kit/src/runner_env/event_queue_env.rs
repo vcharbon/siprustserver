@@ -7,39 +7,50 @@
 //!
 //! | variable | role | default |
 //! |---|---|---|
-//! | `B2BUA_EVENT_QUEUE_REFUSE_DEPTH` | queued events at which new calls are refused | 512 |
+//! | `B2BUA_EVENT_QUEUE_REFUSE_DEPTH` | queued events at which new calls are refused, at once | 512 |
 //! | `B2BUA_EVENT_QUEUE_ACCEPT_DEPTH` | queued events at or below which they may be accepted again | 64 |
-//! | `B2BUA_EVENT_QUEUE_REFUSE_SOJOURN_MS` | a wait in the queue, ms, at which new calls are refused | 500 |
-//! | `B2BUA_EVENT_QUEUE_ACCEPT_SOJOURN_MS` | a wait in the queue, ms, at or below which they may be accepted again | 50 |
+//! | `B2BUA_EVENT_QUEUE_REFUSE_DELAY_MS` | the queue's delay, ms, at or past which new calls are refused once it persists | 300 |
+//! | `B2BUA_EVENT_QUEUE_REFUSE_INTERVAL_MS` | how long, ms, the delay stays at or past the refusal delay before new calls are refused | 150 |
+//! | `B2BUA_EVENT_QUEUE_ACCEPT_DELAY_MS` | the queue's delay, ms, at or below which they may be accepted again | 50 |
 //! | `B2BUA_EVENT_QUEUE_ACCEPT_HOLD_MS` | how long both accept bounds hold before new calls are accepted again | 3000 |
 //!
-//! The sojourn is the wait of the event the router took last; an empty queue
-//! reads zero. Ordinary operation holds the queue near empty, a handful of
-//! events; a backlog of hundreds, or an event waiting half a second, already
-//! means the router lags its traffic. The refusal bounds sit well above
-//! ordinary operation, so the worker's own admission ladder and the proxy's
-//! per-worker AIMD cap, both driven by the `X-Overload` load signal, act first
-//! under ordinary overload; the gate catches a router that falls behind while
-//! that signal does not show it (a process starved of CPU). The refusal sojourn
-//! stays under the proxy probe's reply window (`timeout_ms`, 1500): a router
-//! that lags that much is refused before its answers could be read late.
+//! The delay is the age of the oldest event waiting in the queue, read when
+//! the gate reads: a router that takes nothing still reads it grow. Ordinary
+//! operation holds the queue near empty, a handful of events; a backlog of
+//! hundreds already means the router lags its traffic, so the depth refuses
+//! at once. The refusal delay sits below SIP's T1 (500 ms), so the worker
+//! refuses before its peers start retransmitting what waits in its queue,
+//! and well above the gap a CPU quota throttles a process for (about 70 ms of
+//! each 100 ms period). The interval is CoDel's persistence: one slow turn or
+//! one throttle gap trips nothing; it spans more than one quota period, and
+//! the refusal delay plus the interval (450 ms, the longest one event waits
+//! before the worker refuses) stays under T1. The refusal bounds sit well
+//! above ordinary operation, so the worker's other admission rungs and the
+//! proxy's per-worker AIMD cap, driven by the `X-Overload` load signal, act
+//! first under ordinary overload; the gate catches a router that falls
+//! behind while that signal does not show it (a process starved of CPU).
 //!
-//! The ladder refuses from the router's first reading past a refusal bound;
+//! The ladder refuses from the router's first reading that trips the gate;
 //! the proxy reads the refusal on its next probe answer (`interval_ms`, 1000)
 //! and places new calls on the other workers, so the INVITEs placed on the
 //! worker in between get its `503` and their callers retry. Health, and so
-//! every dialog the worker owns, is unaffected. The hold spans at least two probe intervals,
-//! so a refusal is read by a probe and the worker does not flap at the probe's
-//! cadence; it is not tied to the probe's `threshold` (2), which only counts
-//! missed answers. A refusing worker's answers keep their load payload, so the
-//! AIMD cap keeps tracking it and resumes from it once the worker accepts.
+//! every dialog the worker owns, is unaffected. The refusal delay plus the
+//! interval stays under the probe's reply window (`timeout_ms`, 1500): a
+//! router that lags that much is refused before its answers could be read
+//! late. The hold spans at least two probe intervals, so a refusal is read by
+//! a probe and the worker does not flap at the probe's cadence; it is not
+//! tied to the probe's `threshold` (2), which only counts missed answers. A
+//! refusing worker's answers keep their load payload, so the AIMD cap keeps
+//! tracking it and resumes from it once the worker accepts.
 //!
 //! Unset or blank takes the default. A value that is not a positive integer
-//! refuses the boot naming its variable, and so do an accept depth not below
-//! the refuse depth, a refuse depth past the event queue's bound, and an
-//! accept sojourn not below the refuse sojourn. The relation to the probe
-//! timers is the deployment's to keep: they are the proxy's settings, which a
-//! worker does not read.
+//! refuses the boot naming its variable, and so does each broken relation,
+//! naming both: an accept depth not below the refuse depth, a refuse depth
+//! past the event queue's bound, an accept delay not below the refuse delay,
+//! and a refusal interval not below the hold (a refusal would end before a
+//! delay that persists could trip it again). The relation to the probe timers
+//! is the deployment's to keep: they are the proxy's settings, which a worker
+//! does not read.
 
 use b2bua::config::EventQueueGateConfig;
 
@@ -47,12 +58,13 @@ use crate::stated;
 
 const REFUSE_DEPTH: &str = "B2BUA_EVENT_QUEUE_REFUSE_DEPTH";
 const ACCEPT_DEPTH: &str = "B2BUA_EVENT_QUEUE_ACCEPT_DEPTH";
-const REFUSE_SOJOURN: &str = "B2BUA_EVENT_QUEUE_REFUSE_SOJOURN_MS";
-const ACCEPT_SOJOURN: &str = "B2BUA_EVENT_QUEUE_ACCEPT_SOJOURN_MS";
+const REFUSE_DELAY: &str = "B2BUA_EVENT_QUEUE_REFUSE_DELAY_MS";
+const REFUSE_INTERVAL: &str = "B2BUA_EVENT_QUEUE_REFUSE_INTERVAL_MS";
+const ACCEPT_DELAY: &str = "B2BUA_EVENT_QUEUE_ACCEPT_DELAY_MS";
 const ACCEPT_HOLD: &str = "B2BUA_EVENT_QUEUE_ACCEPT_HOLD_MS";
 
-/// The gate's bounds `lookup` states, checked against the event queue's
-/// bound `capacity`. `Err` names the variables.
+/// The gate's bounds `lookup` states, checked against each other and the
+/// event queue's bound `capacity`. `Err` names the variables.
 pub(crate) fn event_queue_gate_from_lookup(
     lookup: impl Fn(&str) -> Option<String>,
     capacity: usize,
@@ -73,16 +85,23 @@ pub(crate) fn event_queue_gate_from_lookup(
     let gate = EventQueueGateConfig {
         refuse_depth: count(REFUSE_DEPTH, d.refuse_depth)?,
         accept_depth: count(ACCEPT_DEPTH, d.accept_depth)?,
-        refuse_sojourn_ms: positive(REFUSE_SOJOURN, d.refuse_sojourn_ms)?,
-        accept_sojourn_ms: positive(ACCEPT_SOJOURN, d.accept_sojourn_ms)?,
+        refuse_delay_ms: positive(REFUSE_DELAY, d.refuse_delay_ms)?,
+        refuse_interval_ms: positive(REFUSE_INTERVAL, d.refuse_interval_ms)?,
+        accept_delay_ms: positive(ACCEPT_DELAY, d.accept_delay_ms)?,
         accept_hold_ms: positive(ACCEPT_HOLD, d.accept_hold_ms)?,
     };
-    if gate.accept_depth >= gate.refuse_depth {
-        return Err(format!(
-            "{ACCEPT_DEPTH}={} must be below {REFUSE_DEPTH}={}: the gate would never accept",
-            gate.accept_depth, gate.refuse_depth
-        ));
-    }
+    let below = |low: (&str, u64), high: (&str, u64), why: &str| {
+        if low.1 < high.1 {
+            return Ok(());
+        }
+        Err(format!("{}={} must be below {}={}: {why}", low.0, low.1, high.0, high.1))
+    };
+    let depth = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+    below(
+        (ACCEPT_DEPTH, depth(gate.accept_depth)),
+        (REFUSE_DEPTH, depth(gate.refuse_depth)),
+        "the gate would never accept",
+    )?;
     if gate.refuse_depth > capacity {
         return Err(format!(
             "{REFUSE_DEPTH}={} exceeds the event queue's bound {capacity}: the depth could \
@@ -90,12 +109,16 @@ pub(crate) fn event_queue_gate_from_lookup(
             gate.refuse_depth
         ));
     }
-    if gate.accept_sojourn_ms >= gate.refuse_sojourn_ms {
-        return Err(format!(
-            "{ACCEPT_SOJOURN}={} must be below {REFUSE_SOJOURN}={}: the gate would never accept",
-            gate.accept_sojourn_ms, gate.refuse_sojourn_ms
-        ));
-    }
+    below(
+        (ACCEPT_DELAY, gate.accept_delay_ms),
+        (REFUSE_DELAY, gate.refuse_delay_ms),
+        "the gate would never accept",
+    )?;
+    below(
+        (REFUSE_INTERVAL, gate.refuse_interval_ms),
+        (ACCEPT_HOLD, gate.accept_hold_ms),
+        "a refusal would end before a delay that persists could trip it again",
+    )?;
     Ok(gate)
 }
 
@@ -117,8 +140,9 @@ mod tests {
         let defaults = EventQueueGateConfig {
             refuse_depth: 512,
             accept_depth: 64,
-            refuse_sojourn_ms: 500,
-            accept_sojourn_ms: 50,
+            refuse_delay_ms: 300,
+            refuse_interval_ms: 150,
+            accept_delay_ms: 50,
             accept_hold_ms: 3_000,
         };
         assert_eq!(read(&[]), Ok(defaults));
@@ -131,8 +155,9 @@ mod tests {
         let gate = read(&[
             (REFUSE_DEPTH, "1024"),
             (ACCEPT_DEPTH, "128"),
-            (REFUSE_SOJOURN, "800"),
-            (ACCEPT_SOJOURN, "100"),
+            (REFUSE_DELAY, "400"),
+            (REFUSE_INTERVAL, "200"),
+            (ACCEPT_DELAY, "100"),
             (ACCEPT_HOLD, "5000"),
         ])
         .unwrap();
@@ -141,8 +166,9 @@ mod tests {
             EventQueueGateConfig {
                 refuse_depth: 1024,
                 accept_depth: 128,
-                refuse_sojourn_ms: 800,
-                accept_sojourn_ms: 100,
+                refuse_delay_ms: 400,
+                refuse_interval_ms: 200,
+                accept_delay_ms: 100,
                 accept_hold_ms: 5_000,
             }
         );
@@ -150,7 +176,9 @@ mod tests {
 
     #[test]
     fn a_value_that_is_not_a_positive_integer_refuses_the_boot_naming_it() {
-        for key in [REFUSE_DEPTH, ACCEPT_DEPTH, REFUSE_SOJOURN, ACCEPT_SOJOURN, ACCEPT_HOLD] {
+        let keys =
+            [REFUSE_DEPTH, ACCEPT_DEPTH, REFUSE_DELAY, REFUSE_INTERVAL, ACCEPT_DELAY, ACCEPT_HOLD];
+        for key in keys {
             for bad in ["0", "-1", "2s"] {
                 let err = read(&[(key, bad)]).unwrap_err();
                 assert!(err.starts_with(key), "{key}={bad}: {err}");
@@ -172,8 +200,15 @@ mod tests {
     }
 
     #[test]
-    fn an_accept_sojourn_not_below_the_refuse_sojourn_refuses_the_boot_naming_both() {
-        let err = read(&[(REFUSE_SOJOURN, "50")]).unwrap_err();
-        assert!(err.contains(REFUSE_SOJOURN) && err.contains(ACCEPT_SOJOURN), "{err}");
+    fn an_accept_delay_not_below_the_refuse_delay_refuses_the_boot_naming_both() {
+        let err = read(&[(REFUSE_DELAY, "50")]).unwrap_err();
+        assert!(err.contains(REFUSE_DELAY) && err.contains(ACCEPT_DELAY), "{err}");
+    }
+
+    #[test]
+    fn a_refusal_interval_not_below_the_hold_refuses_the_boot_naming_both() {
+        assert!(read(&[(REFUSE_INTERVAL, "2999")]).is_ok());
+        let err = read(&[(REFUSE_INTERVAL, "3000")]).unwrap_err();
+        assert!(err.contains(REFUSE_INTERVAL) && err.contains(ACCEPT_HOLD), "{err}");
     }
 }

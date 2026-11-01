@@ -14,7 +14,6 @@ use tokio::sync::mpsc;
 use crate::event::{EventQueueClass, TransactionEvent};
 use crate::timers::ms;
 
-use super::event_receiver::Queued;
 use super::key::{ServerTxnId, ServerTxnKey};
 use super::owner::Owner;
 use super::txn::Timer;
@@ -75,11 +74,15 @@ impl Owner {
             return true;
         }
         let class = EventQueueClass::of(&event);
-        match self.events_tx.try_send(Queued::now(event)) {
-            Ok(()) => true,
-            Err(mpsc::error::TrySendError::Full(queued)) => {
+        let place = self.event_ages.stamp();
+        match self.events_tx.try_send(event) {
+            Ok(()) => {
+                self.event_ages.entered(place);
+                true
+            }
+            Err(mpsc::error::TrySendError::Full(ev)) => {
                 if critical {
-                    self.defer(queued.event);
+                    self.defer(ev);
                 } else {
                     // Ordinary event: drop-newest, counted.
                     self.metrics.event_queue_drops.add(class.index());
@@ -115,10 +118,11 @@ impl Owner {
     /// A still-full queue re-arms the tick; a closed channel clears the backlog.
     pub(super) fn flush_deferred(&mut self) {
         while let Some(ev) = self.deferred_events.pop_front() {
-            match self.events_tx.try_send(Queued::now(ev)) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(queued)) => {
-                    self.deferred_events.push_front(queued.event);
+            let place = self.event_ages.stamp();
+            match self.events_tx.try_send(ev) {
+                Ok(()) => self.event_ages.entered(place),
+                Err(mpsc::error::TrySendError::Full(ev)) => {
+                    self.deferred_events.push_front(ev);
                     break;
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {

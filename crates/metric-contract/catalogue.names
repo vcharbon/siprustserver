@@ -161,7 +161,7 @@ b2bua-runner b2bua_txn_poisoned_lock_recoveries_total counter fixed {lock}
 b2bua-runner b2bua_txn_send_errors_total counter fixed {}
 b2bua-runner b2bua_txn_event_queue_depth gauge fixed {}
 b2bua-runner b2bua_txn_event_queue_capacity gauge fixed {}
-b2bua-runner b2bua_txn_event_queue_sojourn_ms gauge fixed {}
+b2bua-runner b2bua_txn_event_queue_delay_ms gauge fixed {}
 b2bua-runner b2bua_txn_keepalive_lane_drops_total counter fixed {}
 b2bua-runner b2bua_txn_event_queue_drops_total counter fixed {reason}
 b2bua-runner b2bua_txn_event_queue_deferred_total counter fixed {reason}
