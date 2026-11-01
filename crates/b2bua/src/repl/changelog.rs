@@ -71,8 +71,7 @@ pub const DEFAULT_DEAD_PEER_TTL_MS: i64 = 60_000;
 #[derive(Clone, Debug)]
 struct RefState {
     counter: u64,
-    /// The first counter this call's entry was snapshotted for send at, by
-    /// the tail or a bootstrap scan, kept as the entry moves (see `held`).
+    /// The first counter the entry was sent at, tail or scan (see `held`).
     first_sent: Option<u64>,
     op: Op,
     /// `now_ms` of the write the entry holds: the age of a pending write.
@@ -106,8 +105,7 @@ struct SubLog {
     /// stands for a log it never pulled and must re-bootstrap
     /// ([`needs_reset`](Changelog::needs_reset)).
     retained_floor: u64,
-    /// The node's counter when this sub-log opened: it holds nothing written
-    /// before. Unlike the floor, reaping never moves it (see `held`).
+    /// The counter this sub-log opened at; reaping never moves it (see `held`).
     opened: u64,
     /// Highest counter ever assigned in this sub-log. Unlike `entries`, it
     /// survives compaction and reaping — it is the position a caught-up puller
@@ -124,9 +122,10 @@ struct SubLog {
     /// The highest position the peer ever reported applying on this sub-log
     /// under this node's incarnation, connected or not ([`progress`]).
     acked: watch::Sender<Watermark>,
-    /// The highest position an identity membership does not bind reported,
-    /// counted once it is bound ([`progress`]).
+    /// The highest report of an identity not bound yet ([`progress`]).
     unbound: Option<(String, Watermark)>,
+    /// When the open flow started: a bootstrap in flight, until it claims.
+    flow_started: Option<tokio::time::Instant>,
     /// The sub-log's head counter, moved by every write: the serve task waits
     /// on it.
     written: watch::Sender<u64>,
@@ -144,6 +143,7 @@ impl SubLog {
             streams: 0,
             acked: watch::Sender::new(Watermark::new(0, 0)),
             unbound: None,
+            flow_started: None,
             written: watch::Sender::new(0),
         }
     }

@@ -202,14 +202,18 @@ ends the transaction with the CANCEL unsent (§9.1, §17.2.1).
   oldest evicted first, and a new call on the same identity is not refused. The backlog is measured per backup peer: the entries
   above that peer's applied position and the age of the oldest. New calls get a
   backup again once the backlog is under a low-water mark. The marks read a
-  backup with an open flow, bootstrapping or slow to answer alike, so the
-  entries new calls add toward it stop at the high-water mark. A backup no
-  flow carries is away, no slow consumer, and the call is admitted with it:
-  its writes go to the change log toward that backup, one entry per call (a
-  delete stays until applied), and the log goes one dead-peer TTL
-  (`B2BUA_REPL_DEAD_PEER_TTL_MS`, 60 s, ADR-0045) after a flow last closed,
-  writes or not, so it holds the writes of that TTL at most; a warm pull past
-  it re-bootstraps. On its return the backup's bootstrap
+  backup whose open flow completed its bootstrap (it claimed a position), or
+  stalled in it past the bootstrap hard deadline (10 s), slow to answer or
+  not, so the entries new calls add toward it stop at the high-water mark. A
+  backup no flow carries, or one still bootstrapping, is no slow consumer, and
+  the call is admitted with it (user ruling: every call born while its backup
+  restarts ends up held by it): its bootstrap carries the call. Its writes go
+  to the change log toward that backup, one entry per call (a delete stays
+  until applied). While a bootstrap is in flight the open flow holds the log
+  for at most that deadline, after which the marks apply; with no open flow
+  the log goes one dead-peer TTL (`B2BUA_REPL_DEAD_PEER_TTL_MS`, 60 s,
+  ADR-0045) after a flow last closed, writes or not, so it holds the writes of
+  that TTL at most; a warm pull past it re-bootstraps. On its return the backup's bootstrap
   carries the call from the primary's call metadata. No call is refused for
   the backlog. A gauge counts the live calls with no backup; such a call runs
   as on a non-HA B2BUA.
@@ -315,9 +319,16 @@ went at the dead-peer TTL), at or past the counter that log opened at. A new
 identity bound to the ordinal starts from what it reported itself. A backup
 away since before the call was sent, or restarted since without reporting
 again, is not shown to hold it. The flow's liveness plays no part. The cells
-of `failover-harness` pin these cases; nothing more is claimed. Each such call is ended: an
-established one where it stands, its CDR written and its holds released, with
-nothing sent, so a call whose media still flows is never cut by the node; a
+of `failover-harness` pin these cases; nothing more is claimed. Two residuals
+are accepted (user ruling):
+- a backup that applied a write whose position report was lost with a flow
+  break reads as not holding the call until it reports again;
+- a backup cut off under the same identity past the dead-peer TTL reads as
+  not holding the calls written before its log went, until it re-bootstraps.
+
+Each such call is ended: an established one where it stands, its CDR written
+and its holds released, with nothing sent, so a call whose media still flows
+is never cut by the node; a
 call still in setup is aborted as a release-all aborts it (ADR-0050 §10):
 `503` to its caller (ADR-0022), a CANCEL to a ringing callee. A withdrawn
 worker never sees the answer to that CANCEL (the proxy hands it to the call's

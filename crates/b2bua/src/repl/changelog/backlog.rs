@@ -2,9 +2,9 @@
 //! sub-log above the highest position it reported applying, and the age of the
 //! oldest. Above a high-water mark on either a new call is admitted with no
 //! backup; new calls get one again once both are under their low-water marks.
-//! The marks read a peer with an open flow, bootstrapping or slow: only a
-//! peer no flow carries is away, and no slow consumer. No call is refused for
-//! the backlog.
+//! The marks read a peer whose open flow completed its bootstrap, slow to
+//! answer or not: a peer no flow carries, or one still bootstrapping, is no
+//! slow consumer. No call is refused for the backlog.
 
 use std::ops::Bound;
 use std::time::Duration;
@@ -12,6 +12,7 @@ use std::time::Duration;
 use repl_net::frame::Partition;
 
 use super::Changelog;
+use crate::repl::puller::PullerConfig;
 use crate::store::{locked, REPLICA_CHANGELOG};
 
 /// The high- and low-water marks of the backlog toward one backup peer.
@@ -76,20 +77,26 @@ impl Changelog {
     }
 
     /// Whether a new call admitted now gets `peer` as its backup. Toward a
-    /// peer with an open flow, `false` from the moment the backlog reaches a
-    /// high-water mark until it is under both low-water marks, so the entries
-    /// new calls add stop at the high-water mark. Toward a peer no flow
-    /// carries, always `true`: its return bootstraps from the calls'
-    /// metadata, and its log holds at most one entry per call written toward
-    /// it since a flow last closed, gone one dead-peer TTL (60 s by default,
-    /// `B2BUA_REPL_DEAD_PEER_TTL_MS`) after that, writes or not.
+    /// peer whose open flow completed its bootstrap (it claimed a position),
+    /// or stalled in it past the bootstrap hard deadline (10 s), `false` from
+    /// the moment the backlog reaches a high-water mark until it is under both
+    /// low-water marks: the entries new calls add stop at the high-water mark.
+    /// Toward a peer no flow carries, or one still bootstrapping, always
+    /// `true`: its bootstrap carries the call. While a bootstrap is in flight
+    /// the open flow holds the log for at most that deadline; with no flow the
+    /// log holds one entry per call written since a flow last closed and goes
+    /// one dead-peer TTL (60 s, `B2BUA_REPL_DEAD_PEER_TTL_MS`) after.
     pub fn admits_backup(&self, peer: &str) -> bool {
         let now = self.clock.now_ms();
         let gen = self.gen;
         let mut inner = locked(&self.inner, REPLICA_CHANGELOG);
         let marks = inner.marks;
         let Some(log) = inner.peers.get_mut(peer) else { return true };
-        if log.sub(Partition::Bak).streams == 0 {
+        let sub = log.sub(Partition::Bak);
+        let deadline = Duration::from_millis(PullerConfig::default().bootstrap_hard_timeout_ms);
+        let bootstrapping =
+            sub.applied.is_none() && sub.flow_started.is_some_and(|t| t.elapsed() < deadline);
+        if sub.streams == 0 || bootstrapping {
             return true;
         }
         let backlog = measure(log.sub(Partition::Bak), gen, now, marks.high_entries);

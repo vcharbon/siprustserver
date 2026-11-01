@@ -25,6 +25,7 @@ impl Changelog {
             // A new flow starts unknown: a claim left by a flow the peer never
             // closed (a dead node sends no FIN) must not vouch for this one.
             sub.applied = None;
+            sub.flow_started = Some(tokio::time::Instant::now());
             sub.written.subscribe()
         };
         ServeGuard { changelog: self.clone(), peer: peer.to_string(), partition, written }

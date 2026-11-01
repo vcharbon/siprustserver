@@ -55,6 +55,7 @@ use crate::turn_points::TurnPoints;
 use crate::views::{Belief, Incarnation, ViewLedger};
 
 mod acceptance;
+mod flows;
 mod live;
 mod membership;
 mod peer_view;
@@ -300,17 +301,6 @@ impl ReplicatedB2buaSut {
     /// This incarnation's handle on its call limiter. `None` while crashed.
     pub fn limiter_worker(&self) -> Option<b2bua::limiter::LimiterWorker> {
         self.core.as_ref().map(|c| c.limiter().clone())
-    }
-
-    /// Whether `peer`'s flow on `partition` is connected to THIS node's
-    /// replication server and has reported applying everything this node ever
-    /// logged for it (ADR-0031 D2) — the per-flow predicate the drain's
-    /// caught-up exit is built from. `false` while crashed or unreplicated.
-    pub fn flow_caught_up(&self, peer: &str, partition: repl_net::frame::Partition) -> bool {
-        self.core
-            .as_ref()
-            .and_then(|c| c.repl_store())
-            .is_some_and(|s| s.changelog().flow_caught_up(peer, partition))
     }
 
     /// **Ground-truth** live in-memory call count (the actual `inner.calls` map

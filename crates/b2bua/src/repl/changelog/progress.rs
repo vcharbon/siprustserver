@@ -124,6 +124,12 @@ impl Changelog {
         })
     }
 
+    /// Whether a flow of `peer` is open on `partition`, bootstrapped or not.
+    pub fn flow_open(&self, peer: &str, partition: Partition) -> bool {
+        let inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
+        inner.peers.get(peer).is_some_and(|log| log.sub(partition).streams > 0)
+    }
+
     /// Whether `peer` reported applying `at` or past it on `partition`.
     pub fn has_applied(&self, peer: &str, partition: Partition, at: Watermark) -> bool {
         let inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
