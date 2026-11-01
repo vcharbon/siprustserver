@@ -19,7 +19,8 @@ import { CheckClass } from "./check.js"
 export const PositionalRef = Schema.Struct({
   pos: Schema.String,
   form: Schema.optionalKey(Schema.String),
-  addr: Schema.optionalKey(Schema.String)
+  addr: Schema.optionalKey(Schema.String),
+  params: Schema.optionalKey(Schema.String)
 })
 export interface PositionalRef extends Schema.Schema.Type<typeof PositionalRef> {}
 
@@ -27,7 +28,8 @@ export interface PositionalRef extends Schema.Schema.Type<typeof PositionalRef> 
 export const FrozenRef = Schema.Struct({
   frozen: Schema.String,
   kind: Schema.optionalKey(Schema.String),
-  addr: Schema.optionalKey(Schema.String)
+  addr: Schema.optionalKey(Schema.String),
+  params: Schema.optionalKey(Schema.String)
 })
 export interface FrozenRef extends Schema.Schema.Type<typeof FrozenRef> {}
 
@@ -36,7 +38,9 @@ export interface FrozenRef extends Schema.Schema.Type<typeof FrozenRef> {}
  * document stores its ROLE, or it did not and the document freezes the value.
  * UNTAGGED — told apart by which key is present. On a From or To either shape
  * may state `addr`: the captured name-addr (tag excluded) with its role numbers
- * composed as `${num:…}`, which is then the field's whole value.
+ * composed as `${num:…}`, which is then the field's whole value. Either shape
+ * may state `params`: the uri-parameters the URI the lane composes carries
+ * after its host (RFC 3261 §19.1.1), the leading `;` left out.
  */
 export const Ref = Schema.Union([PositionalRef, FrozenRef])
 export type Ref = typeof Ref.Type
@@ -52,6 +56,16 @@ export const Header = Schema.Struct({
 })
 export interface Header extends Schema.Schema.Type<typeof Header> {}
 
+/**
+ * The parts of a Contact its party chooses (RFC 3261 §8.1.1.8, §20.10): the
+ * display name, unescaped, and the URI's user part. Host and port are tier 1.
+ */
+export const ContactSpec = Schema.Struct({
+  display: Schema.optionalKey(Schema.String),
+  user: Schema.optionalKey(Schema.String)
+})
+export interface ContactSpec extends Schema.Schema.Type<typeof ContactSpec> {}
+
 /** The message a step sends or expects. */
 export const MsgSpec = Schema.Struct({
   method: Schema.optionalKey(Schema.String),
@@ -65,6 +79,8 @@ export const MsgSpec = Schema.Struct({
   headers: Schema.optionalKey(Schema.Array(Header)),
   "headers-present": Schema.optionalKey(Schema.Array(Schema.String)),
   body: Schema.optionalKey(Body),
-  "target-refresh": Schema.optionalKey(Schema.Int)
+  "target-refresh": Schema.optionalKey(Schema.Int),
+  /** On a send: the Contact the leg's party writes from this message on. */
+  contact: Schema.optionalKey(ContactSpec)
 })
 export interface MsgSpec extends Schema.Schema.Type<typeof MsgSpec> {}

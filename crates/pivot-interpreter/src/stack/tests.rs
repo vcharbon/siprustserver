@@ -82,6 +82,37 @@ fn a_target_refresh_changes_the_contact_the_leg_states() {
     assert_eq!(ring(&mut uas), second, "the refresh holds for later messages");
 }
 
+/// RFC 3261 §8.1.1.8, §20.10: the Contact's display name and user part are
+/// the party's choice. A stated Contact rides the INVITE that states it and
+/// every later message of the leg, its host and port the bound socket's; a
+/// target refresh numbers the stated user part.
+#[test]
+fn a_stated_contact_names_its_display_and_user_on_every_later_message() {
+    let mut uac = stack("A", "r1a2b3");
+    uac.state_contact(Some("Front Desk"), Some("+15556000777"));
+    let addresses = Addresses {
+        ruri: "sip:callee@pivot.invalid",
+        from: "<sip:caller@pivot.invalid>",
+        to: "<sip:callee@pivot.invalid>",
+    };
+    let invite = uac
+        .out_of_dialog(Method::Invite, &addresses, &[], Vec::new(), None, None)
+        .expect("the caller composes its INVITE");
+    assert_eq!(
+        header(&invite, sip_message::HeaderName::Contact),
+        "\"Front Desk\" <sip:+15556000777@127.0.0.1:5060>"
+    );
+    uac.state_contact(None, Some("+15556000778"));
+    uac.refresh_target(1);
+    let again = uac
+        .out_of_dialog(Method::Options, &addresses, &[], Vec::new(), None, None)
+        .expect("an OPTIONS");
+    assert_eq!(
+        header(&again, sip_message::HeaderName::Contact),
+        "\"Front Desk\" <sip:+15556000778-1@127.0.0.1:5060>"
+    );
+}
+
 // ── UPDATE on an early dialog (RFC 3311 §5.1) ───────────────────────────
 
 /// Compile once, run MANY: two instances of one plan must not share a

@@ -1,9 +1,11 @@
 use super::*;
 use crate::state::RunState;
 use pivot_schema::bundle::{ClockMode, IdentityBindings};
-use pivot_schema::msg::{Header, PositionalRef};
+use pivot_schema::msg::Header;
 use sip_message::header::Uri;
 use sip_message::SipParser;
+
+mod address;
 
 struct TestComposer;
 
@@ -31,53 +33,6 @@ impl UriComposer for TestComposer {
 fn config() -> RunConfig {
     RunConfig::new("upstream-fake", ClockMode::Virtual, "10.0.0.9:5080")
         .with_header("X-Lane", "upstream-fake")
-}
-
-#[test]
-fn a_send_carries_its_frozen_headers_its_tier_two_uris_and_the_lane_s_own_headers() {
-    let state = RunState::new();
-    let bindings = IdentityBindings::new();
-    let resolver = Resolver::new(&state, &bindings);
-    let msg = MsgSpec {
-        method: Some("INVITE".into()),
-        ruri: Some(Ref::Positional(PositionalRef {
-            pos: "called[0][0]".into(),
-            form: Some("trunk-composed".into()),
-            addr: None,
-        })),
-        from: Some(Ref::Positional(PositionalRef {
-            pos: "caller".into(),
-            form: Some("private".into()),
-            addr: None,
-        })),
-        headers: vec![Header {
-            name: "X-Vendor-Orig".into(),
-            value: "sbc.111".into(),
-            class: None,
-        }],
-        ..MsgSpec::default()
-    };
-    let rendered = render(
-        &msg,
-        "step \"s1\"",
-        &Context {
-            resolver: &resolver,
-            config: &config(),
-            effects: &StepEffects::default(),
-            composer: &TestComposer,
-            base_dir: Path::new("."),
-            media: &Booking::new("127.0.0.1", 40000),
-            leg: "A",
-            mscml: &MscmlRequests::default(),
-            call_headers: &BTreeMap::new(),
-        },
-    )
-    .expect("the message composes");
-    assert_eq!(rendered.ruri.as_deref(), Some("sip:+1999999900004@10.0.0.9:5080"));
-    assert_eq!(rendered.from.as_deref(), Some("sip:0009001@lane.invalid"));
-    let names: Vec<&str> = rendered.template.headers().iter().map(|h| h.name.as_str()).collect();
-    assert_eq!(names, ["X-Vendor-Orig", "X-Lane"], "the lane's own header rides last");
-    assert_eq!(rendered.template.method(), Some(&Method::Invite));
 }
 
 #[test]

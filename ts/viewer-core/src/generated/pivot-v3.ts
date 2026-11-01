@@ -1110,6 +1110,12 @@ export interface MsgSpec {
    */
   body?: Body | null
   /**
+   * On a send: the display name and user part the leg's party writes in its
+   * Contact from this message on (RFC 3261 §8.1.1.8, §20.10). Host and port
+   * stay tier 1.
+   */
+  contact?: ContactSpec | null
+  /**
    * The captured CSeq NUMBER, on `auto` steps only: the LABEL of the
    * transaction that obliged the message. An identity token for pairing,
    * lint and confrontation, and the marker that scopes an auto ACK's DRAWN
@@ -1302,6 +1308,23 @@ export interface ShapeBody {
   mode: "sdp-present" | "absent" | "multipart-present"
 }
 /**
+ * The parts of a Contact its party chooses: what the URI's host and port do
+ * not route.
+ *
+ * This interface was referenced by `PivotV3`'s JSON-Schema
+ * via the `definition` "ContactSpec".
+ */
+export interface ContactSpec {
+  /**
+   * The display name, unescaped; the stack quotes it on the wire.
+   */
+  display?: string | null
+  /**
+   * The URI's user part, or `${…}` accessors composing it.
+   */
+  user?: string | null
+}
+/**
  * Role-mapped: the lane substitutes the number it allocated for this
  * position.
  */
@@ -1316,6 +1339,11 @@ export interface PositionalRef {
    * Open dial-form token: which form of the number this field carried.
    */
   form?: string | null
+  /**
+   * The uri-parameters the URI the lane composes carries after its host
+   * (RFC 3261 §19.1.1), `;`-separated, the leading `;` left out.
+   */
+  params?: string | null
   /**
    * Position token in the tier-2 reference namespace, resolved against the
    * call chains: `caller` or `called[<branch>][<position>]`, call-qualified
@@ -1343,6 +1371,11 @@ export interface FrozenRef {
    * number to map, but the class still drives emission).
    */
   kind?: string | null
+  /**
+   * The uri-parameters the URI the lane composes carries after its host
+   * (RFC 3261 §19.1.1), `;`-separated, the leading `;` left out.
+   */
+  params?: string | null
 }
 /**
  * One frozen header, exactly as the capture carried it.
@@ -2105,6 +2138,11 @@ export interface FrozenRef1 {
    * number to map, but the class still drives emission).
    */
   kind?: string | null
+  /**
+   * The uri-parameters the URI the lane composes carries after its host
+   * (RFC 3261 §19.1.1), `;`-separated, the leading `;` left out.
+   */
+  params?: string | null
 }
 /**
  * The message a step sends or expects.
@@ -2117,6 +2155,12 @@ export interface MsgSpec1 {
    * The body, by resource reference, multipart structure or asserted shape.
    */
   body?: Body | null
+  /**
+   * On a send: the display name and user part the leg's party writes in its
+   * Contact from this message on (RFC 3261 §8.1.1.8, §20.10). Host and port
+   * stay tier 1.
+   */
+  contact?: ContactSpec | null
   /**
    * The captured CSeq NUMBER, on `auto` steps only: the LABEL of the
    * transaction that obliged the message. An identity token for pairing,
@@ -2220,6 +2264,11 @@ export interface PositionalRef1 {
    * Open dial-form token: which form of the number this field carried.
    */
   form?: string | null
+  /**
+   * The uri-parameters the URI the lane composes carries after its host
+   * (RFC 3261 §19.1.1), `;`-separated, the leading `;` left out.
+   */
+  params?: string | null
   /**
    * Position token in the tier-2 reference namespace, resolved against the
    * call chains: `caller` or `called[<branch>][<position>]`, call-qualified

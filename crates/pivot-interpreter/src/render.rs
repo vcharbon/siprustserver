@@ -24,7 +24,7 @@ use std::path::Path;
 
 use pivot_schema::body::Body;
 use pivot_schema::bundle::RunConfig;
-use pivot_schema::msg::{MsgSpec, Ref};
+use pivot_schema::msg::{ContactSpec, MsgSpec, Ref};
 use sip_message::header::NameAddr;
 use sip_message::{HeaderName, Method, MultipartPart, SipStr};
 use sip_template::{MessageTemplate, TemplateHeader};
@@ -113,6 +113,10 @@ pub struct Rendered {
     pub ruri: Option<String>,
     pub from: Option<String>,
     pub to: Option<String>,
+    /// The Contact display name and user part the message states, accessors
+    /// substituted.
+    pub contact_display: Option<String>,
+    pub contact_user: Option<String>,
     /// The MSCML request types the message's responses answer, one entry per
     /// response: what the leg's record consumes once the message is composed.
     pub mscml_answered: Vec<String>,
@@ -209,8 +213,22 @@ pub fn render(msg: &MsgSpec, site: &str, cx: &Context<'_>) -> Result<Rendered, R
         ruri: uri(msg.ruri.as_ref(), site, "ruri", true, resolver, composer)?,
         from: uri(msg.from.as_ref(), site, "from", false, resolver, composer)?,
         to: uri(msg.to.as_ref(), site, "to", false, resolver, composer)?,
+        contact_display: contact_part(msg, site, resolver, |c| c.display.as_deref())?,
+        contact_user: contact_part(msg, site, resolver, |c| c.user.as_deref())?,
         mscml_answered: echo.answered(),
     })
+}
+
+/// One stated part of the message's Contact, accessors substituted.
+fn contact_part(
+    msg: &MsgSpec,
+    site: &str,
+    resolver: &Resolver<'_>,
+    part: impl Fn(&ContactSpec) -> Option<&str>,
+) -> Result<Option<String>, RenderError> {
+    let Some(text) = msg.contact.as_ref().and_then(part) else { return Ok(None) };
+    let site = format!("{site} contact");
+    resolver.text(text).map(Some).map_err(|e| RenderError::from((site.as_str(), e)))
 }
 
 /// One tier-2 ref, resolved: the name-addr it states, accessors substituted, or
@@ -243,7 +261,13 @@ fn uri(
             Ok(_) => Ok(Some(text)),
         };
     }
-    match r {
+    let params = match r.params() {
+        None => String::new(),
+        Some(p) => {
+            format!(";{}", resolver.text(p).map_err(|e| RenderError::from((site.as_str(), e)))?)
+        }
+    };
+    let composed = match r {
         Ref::Positional(p) => {
             let pos = resolver.text(&p.pos).map_err(|e| RenderError::from((site.as_str(), e)))?;
             let form = match &p.form {
@@ -262,7 +286,8 @@ fn uri(
                 resolver.text(&f.frozen).map_err(|e| RenderError::from((site.as_str(), e)))?;
             Ok(Some(composer.frozen(&value, f.kind.as_deref(), is_ruri)))
         }
-    }
+    };
+    composed.map(|uri| uri.map(|uri| format!("{uri}{params}")))
 }
 
 /// Which of §8.3's rewrite tokens a body states. Each token gates its OWN line

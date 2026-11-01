@@ -2098,7 +2098,10 @@ The tier model is UNCHANGED:
   declared once, in the identity registry (§8.5). A From or To ref of either
   shape may add `addr`, the captured name-addr (tag dropped) with its role
   numbers composed as `${num:…}`; it is then the field's whole value. A
-  positional ref states it only where its number composed.
+  positional ref states it only where its number composed. Either shape may
+  add `params`, the uri-parameters the URI the lane composes carries after its
+  host (RFC 3261 §19.1.1, the leading `;` left out): a dialled Request-URI's
+  `user=phone` rides there.
 - **Tier 3, frozen**, stored verbatim: everything else, in wire order.
 
 **The dialog a scripted request rides is tier-1 state.** A leg's dialog opens
@@ -2148,6 +2151,7 @@ there.
 | `headers-present` | expects | existence checks |
 | `body` | any | §8.3 |
 | `target-refresh` | sends | the `n`-th time the leg's party refreshes its remote target (RFC 3261 §12.1.2, §12.2.1.2): the stack writes a Contact user part of its own per refresh, kept on every later message of the leg; host and port stay tier 1 |
+| `contact` | sends | `{ display, user }`, each optional: the Contact display name (unescaped; the stack quotes it) and user part the leg's party writes from this message on (RFC 3261 §8.1.1.8, §20.10), accessors resolved; a later target refresh numbers the stated user part; host and port stay tier 1 |
 
 `headers` and `headers-present` are stated on an `expect` regardless of `check`.
 Under `assert` they are matched; under `record` they are the recorded value.

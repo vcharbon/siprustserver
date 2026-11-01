@@ -150,6 +150,10 @@ pub struct LegStack {
     /// How many times this leg's party refreshed its remote target
     /// ([`LegStack::refresh_target`]); its Contact user part names the count.
     target_refreshes: u32,
+    /// The Contact display name and user part the party states
+    /// ([`LegStack::state_contact`]); the leg id is the user part by default.
+    contact_display: Option<String>,
+    contact_user: Option<String>,
 }
 
 /// The dialog identity a leg's out-of-dialog requests carry: its Call-ID and
@@ -209,6 +213,20 @@ impl LegStack {
             early: Vec::new(),
             ids: 0,
             target_refreshes: 0,
+            contact_display: None,
+            contact_user: None,
+        }
+    }
+
+    /// From the next message on, this leg's Contact carries `display` and
+    /// names `user` (RFC 3261 §8.1.1.8, §20.10); each stated part replaces the
+    /// one before it, and the host and port stay the bound socket's.
+    pub fn state_contact(&mut self, display: Option<&str>, user: Option<&str>) {
+        if let Some(display) = display {
+            self.contact_display = Some(display.to_string());
+        }
+        if let Some(user) = user {
+            self.contact_user = Some(user.to_string());
         }
     }
 
@@ -276,14 +294,19 @@ impl LegStack {
     }
 
     fn contact(&self) -> header::Contact {
+        let base = self.contact_user.as_deref().unwrap_or(&self.leg);
         let user = match self.target_refreshes {
-            0 => self.leg.clone(),
-            n => format!("{}-{n}", self.leg),
+            0 => base.to_string(),
+            n => format!("{base}-{n}"),
         };
-        header::Contact::from_uri(
+        let contact = header::Contact::from_uri(
             Uri::sip_user(SipStr::owned(&user), SipStr::owned(&self.addr.ip().to_string()))
                 .with_port(self.addr.port()),
-        )
+        );
+        match &self.contact_display {
+            Some(display) => contact.with_display(SipStr::owned(display)),
+            None => contact,
+        }
     }
 
     /// Where this leg's next request goes: the lane's route target.

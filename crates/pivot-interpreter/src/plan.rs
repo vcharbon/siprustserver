@@ -16,20 +16,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use pivot_schema::accessor::{Accessor, StepField};
-use pivot_schema::body::Body;
 use pivot_schema::check::{Check, CheckOp};
 use pivot_schema::deviation::{CseqValue, Deviation};
 use pivot_schema::document::PivotV3;
 use pivot_schema::flow::{Anchor, CheckMode, FlowNode, Op, Step};
-use pivot_schema::msg::{MsgSpec, Ref};
+use pivot_schema::msg::MsgSpec;
 use pivot_schema::placement::{Actor, Endpoint, Leg};
 use pivot_schema::postcondition::CdrExpectation;
 use pivot_schema::violation::{RfcRule, RfcViolation};
 
 use crate::program::{Branch, Item, ItemKind, Program, StepLoc};
 
+mod msg_strings;
 mod step;
 
+use msg_strings::msg_strings;
 pub use step::{CompiledStep, StepKind};
 
 /// Why a document cannot be compiled to a plan. Every variant names the site it
@@ -1327,38 +1328,8 @@ impl Compiler {
         for step in self.document.steps() {
             let owner = Some(step.id.clone());
             let site = |what: &str| format!("step {:?} {what}", step.id);
-            let msg: &MsgSpec = &step.msg;
-            for h in &msg.headers {
-                out.push((site("header name"), owner.clone(), h.name.clone()));
-                out.push((site(&format!("header {:?}", h.name)), owner.clone(), h.value.clone()));
-            }
-            for h in &msg.headers_present {
-                out.push((site("headers-present"), owner.clone(), h.clone()));
-            }
-            for (what, r) in [("ruri", &msg.ruri), ("from", &msg.from), ("to", &msg.to)] {
-                let Some(r) = r else { continue };
-                match r {
-                    Ref::Positional(p) => {
-                        out.push((site(what), owner.clone(), p.pos.clone()));
-                        if let Some(form) = &p.form {
-                            out.push((site(what), owner.clone(), form.clone()));
-                        }
-                    }
-                    Ref::Frozen(f) => {
-                        out.push((site(what), owner.clone(), f.frozen.clone()));
-                        if let Some(kind) = &f.kind {
-                            out.push((site(what), owner.clone(), kind.clone()));
-                        }
-                    }
-                }
-                if let Some(addr) = r.addr() {
-                    out.push((site(what), owner.clone(), addr.to_string()));
-                }
-            }
-            if let Some(body) = &msg.body {
-                for text in body_strings(body) {
-                    out.push((site("body"), owner.clone(), text));
-                }
+            for (what, text) in msg_strings(&step.msg) {
+                out.push((site(&what), owner.clone(), text));
             }
             for c in &step.checks {
                 out.push((site("check field"), owner.clone(), c.field.clone()));
@@ -1498,34 +1469,6 @@ fn requires_100rel(msg: &MsgSpec) -> bool {
             sip_message::header::Require::parse(&sip_message::SipStr::owned(&h.value)).ok()
         })
         .any(|tokens| tokens.contains("100rel"))
-}
-
-/// Every string a body spec carries — refs, modes, content types.
-fn body_strings(body: &Body) -> Vec<String> {
-    match body {
-        Body::Resource(r) => {
-            let mut out = vec![r.reference.clone()];
-            out.extend(r.rewrite.iter().cloned());
-            out.extend(r.content_type.iter().cloned());
-            out
-        }
-        Body::Shape(_) => Vec::new(),
-        Body::Multipart(m) => {
-            let mut out = vec![m.multipart.content_type.clone()];
-            for p in &m.multipart.parts {
-                out.push(p.content_type.clone());
-                out.push(p.reference.clone());
-                out.extend(p.rewrite.iter().cloned());
-                out.extend(p.content_id.iter().cloned());
-                for header in &p.headers {
-                    out.push(header.name.clone());
-                    out.push(header.value.clone());
-                }
-                out.extend(p.cid_linked.iter().cloned());
-            }
-            out
-        }
-    }
 }
 
 /// A check's `op`/`value` agreement and, for `regex`, that the pattern compiles
