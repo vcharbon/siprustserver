@@ -50,7 +50,7 @@
       "properties": {
         "file_mb": { "description": "The size of one ring file, in MB (tcpdump -C).", "type": "integer", "minimum": 1, "default": 100 },
         "files": { "description": "The ring's file count (tcpdump -W).", "type": "integer", "minimum": 2, "default": 20 },
-        "filter": { "description": "The capture filter.", "type": "string", "default": "udp and portrange 5060-5100" },
+        "filter": { "description": "The capture filter.", "type": "string", "default": "(udp and portrange 5060-5100) or (ip[6:2] & 0x1fff != 0)" },
         "nodes": { "description": "A node label selector: these kind nodes are captured too, on every interface of their netns.", "type": "string" }
       }
     },

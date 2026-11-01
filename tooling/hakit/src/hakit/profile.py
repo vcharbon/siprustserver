@@ -86,6 +86,11 @@ class Preflight:
     max_swapin_pages_s: float | None = None
 
 
+# SIP over UDP, and every later IPv4 fragment (no UDP header to match on), so a
+# request larger than the MTU can be reassembled.
+CAPTURE_FILTER = "(udp and portrange 5060-5100) or (ip[6:2] & 0x1fff != 0)"
+
+
 @dataclass(frozen=True)
 class Capture:
     file_mb: int
@@ -152,7 +157,7 @@ def _capture(d: Json | None) -> Capture | None:
     return Capture(
         file_mb=jv.opt_int(d, "file_mb") or 100,
         files=jv.opt_int(d, "files") or 20,
-        filter=jv.string(d, "filter", "udp and portrange 5060-5100"),
+        filter=jv.string(d, "filter", CAPTURE_FILTER),
         nodes=jv.opt_string(d, "nodes"),
     )
 

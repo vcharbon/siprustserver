@@ -5,7 +5,9 @@ the end; `hakit pcap` extracts one call's packets by Call-ID."""
 from __future__ import annotations
 
 import os
+import shutil
 import struct
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -19,7 +21,7 @@ from hakit.jsonval import Json
 from hakit.lab import lab_from_env
 from hakit.paths import BASE_CONTENT
 from hakit.pcap import Packet, extract, read, write
-from hakit.profile import Capture
+from hakit.profile import CAPTURE_FILTER, Capture
 from hakit.runner import Runner, RunRefused
 from hakit.schemas import SchemaSet
 
@@ -66,7 +68,7 @@ def test_a_run_captures_the_bridge_and_the_named_nodes_and_keeps_each_window(tmp
     assert len(runs) == 3
     bridge = runs[0]
     assert bridge[bridge.index("tcpdump"):] == ["tcpdump", "-i", "br-0123456789ab", "-s", "0", "-Z", "root", "-C", "10", "-W", "4",
-                                               "-w", "/cap/sip.pcap", "udp and portrange 5060-5100"]
+                                               "-w", "/cap/sip.pcap", CAPTURE_FILTER]
     assert "--net" in bridge and bridge[bridge.index("--net") + 1] == "host" and IMAGE in bridge
     nodes = [a[a.index("--net") + 1] for a in runs[1:]]
     assert nodes == ["container:e1", "container:e2"] and all(a[a.index("-i") + 1] == "any" for a in runs[1:])
@@ -160,3 +162,33 @@ def test_pcap_reads_a_microsecond_tcpdump_file_and_stops_at_a_torn_record(tmp_pa
     (tmp_path / "f.pcap").write_bytes(head + rec + struct.pack("<IIII", 6, 0, 99, 99) + b"ab")
     pf = read(tmp_path / "f.pcap")
     assert [(p.ts_ns, p.data) for p in pf.packets] == [(5_000_007_000, b"abcd")]
+
+
+def _ipv4_udp_fragments(payload: bytes, mtu: int) -> list[bytes]:
+    """Ethernet frames of one UDP datagram 192.0.2.1:5060 -> 192.0.2.2:5060,
+    fragmented at `mtu` (RFC 791)."""
+    datagram = struct.pack(">HHHH", 5060, 5060, 8 + len(payload), 0) + payload
+    step = (mtu - 20) // 8 * 8
+    frames: list[bytes] = []
+    for off in range(0, len(datagram), step):
+        chunk = datagram[off : off + step]
+        more = off + step < len(datagram)
+        flags = (0x2000 if more else 0) | (off // 8)
+        ip = struct.pack(">BBHHHBBH4s4s", 0x45, 0, 20 + len(chunk), 0x1234, flags, 64, 17, 0, bytes([192, 0, 2, 1]), bytes([192, 0, 2, 2]))
+        frames.append(b"\x02" * 6 + b"\x04" * 6 + b"\x08\x00" + ip + chunk)
+    return frames
+
+
+def test_the_default_filter_keeps_every_fragment_of_a_sip_datagram(tmp_path: Path) -> None:
+    """A SIP request over UDP larger than the MTU travels as IP fragments, and
+    only the first carries the UDP ports: the capture keeps the later ones
+    too, so the request can be reassembled."""
+    tcpdump = shutil.which("tcpdump")
+    assert tcpdump is not None, "tcpdump is not on PATH"
+    frames = _ipv4_udp_fragments(b"INVITE sip:callee@192.0.2.2 SIP/2.0\r\n" + b"X-Pad: " + b"a" * 3000 + b"\r\n\r\n", 1500)
+    assert len(frames) == 3
+    src, out = tmp_path / "in.pcap", tmp_path / "out.pcap"
+    write(src, 1, [Packet(1_000_000_000 + i, f) for i, f in enumerate(frames)])
+    run = subprocess.run([tcpdump, "-r", str(src), "-w", str(out), CAPTURE_FILTER], capture_output=True, check=False)
+    assert run.returncode == 0, run.stderr.decode()
+    assert [p.data for p in read(out).packets] == frames
