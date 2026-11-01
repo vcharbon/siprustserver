@@ -56,6 +56,9 @@ pub(crate) struct MetricsInner {
     /// INVITEs refused at a deferred-backlog ceiling, indexed by
     /// [`InviteClass::index`] (counter).
     pub deferred_refused: ByClass<{ InviteClass::ALL.len() }>,
+    /// INVITEs refused at receipt while the consumer's new-call gate was set,
+    /// indexed by [`InviteClass::index`] (counter).
+    pub new_call_gate_refused: ByClass<{ InviteClass::ALL.len() }>,
     /// Copies of a refused INVITE answered that refusal again before any
     /// transaction held them (counter).
     pub refused_copies: AtomicU64,
@@ -157,6 +160,7 @@ impl MetricsInner {
             deferred_swept: AtomicU64::new(0),
             sweep_reaped: AtomicU64::new(0),
             deferred_refused: ByClass::new(),
+            new_call_gate_refused: ByClass::new(),
             refused_copies: AtomicU64::new(0),
             txn_orphaned_on_call_evict: AtomicU64::new(0),
             orphaned_transactions: AtomicUsize::new(0),
@@ -290,6 +294,13 @@ impl TransactionMetrics {
     /// (counter).
     pub fn deferred_refused(&self, class: InviteClass) -> u64 {
         self.inner.deferred_refused.get(class.index())
+    }
+
+    /// INVITEs refused at receipt while the consumer's new-call gate was set
+    /// ([`NewCallGate`](crate::NewCallGate)), by class; a later copy drew the
+    /// same refusal and is not counted again (counter).
+    pub fn new_call_gate_refused(&self, class: InviteClass) -> u64 {
+        self.inner.new_call_gate_refused.get(class.index())
     }
 
     /// Copies of a refused INVITE — at this layer or a stage ahead of it —

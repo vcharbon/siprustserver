@@ -66,7 +66,9 @@ impl Owner {
     /// refusals: a copy of a refused INVITE draws that refusal again, whatever
     /// the backlog holds now — the caller has its final, or will have it from
     /// this copy, and a call admitted behind it would ring for no one; past its
-    /// class's ceiling it is refused now, counted once. A refusal goes to
+    /// class's ceiling, or while the consumer's new-call gate refuses its class
+    /// ([`NewCallGate`](super::NewCallGate)), it is refused now, counted once
+    /// under the stage that refused it. A refusal goes to
     /// `dest`, the INVITE's response target (RFC 3261 §18.2.2), before any
     /// 100 Trying.
     pub(super) async fn judge_new_invite(
@@ -78,17 +80,21 @@ impl Owner {
         let Some(refusals) = self.refusals.clone() else {
             return NewInvite::Admitted { held: false };
         };
-        let class = self.backlog_refuses(req);
-        match refusals.admit(req, class.is_some()) {
+        let backlog = self.backlog_refuses(req);
+        let gate = match backlog {
+            Some(_) => None,
+            None => self.new_call_gate.as_ref().and_then(|gate| gate.refuses(req)),
+        };
+        match refusals.admit(req, backlog.is_some() || gate.is_some()) {
             Admission::Admit { held } => return NewInvite::Admitted { held },
             Admission::Repeat => {
                 self.metrics.refused_copies.fetch_add(1, Relaxed);
             }
-            Admission::Refuse => {
-                if let Some(class) = class {
-                    self.metrics.deferred_refused.add(class.index());
-                }
-            }
+            Admission::Refuse => match (backlog, gate) {
+                (Some(class), _) => self.metrics.deferred_refused.add(class.index()),
+                (None, Some(class)) => self.metrics.new_call_gate_refused.add(class.index()),
+                (None, None) => {}
+            },
         }
         match refusals.answer(req) {
             Ok(refusal) => self.send_buffer(endpoint, refusal.image(), dest).await,

@@ -7,7 +7,7 @@ use sip_txn::IdGen;
 #[test]
 fn the_worker_bounds_the_deferred_backlog() {
     let refusals = Refusals::new(5, 0, 16, &IdGen::seeded(2));
-    let config = txn_config(
+    let (config, _) = txn_config(
         &B2buaConfig::default(),
         &Arc::new(IdGen::seeded(1)),
         &refusals,
@@ -24,7 +24,7 @@ fn the_worker_bounds_the_deferred_backlog() {
 #[test]
 fn the_worker_answers_out_of_dialog_options_statelessly() {
     let refusals = Refusals::new(5, 0, 16, &IdGen::seeded(2));
-    let config = txn_config(
+    let (config, _) = txn_config(
         &B2buaConfig::default(),
         &Arc::new(IdGen::seeded(1)),
         &refusals,
@@ -45,7 +45,7 @@ fn the_worker_is_advertised_by_its_sip_identity() {
         sip_local_port: 5070,
         ..B2buaConfig::default()
     };
-    let config = txn_config(
+    let (config, _) = txn_config(
         &b2bua,
         &Arc::new(IdGen::seeded(1)),
         &refusals,
@@ -56,7 +56,7 @@ fn the_worker_is_advertised_by_its_sip_identity() {
     assert_eq!(config.advertised.as_deref(), Some("203.0.113.5:5070"));
 
     let v6 = B2buaConfig { sip_local_ip: "2001:db8::5".to_string(), ..b2bua };
-    let config = txn_config(
+    let (config, _) = txn_config(
         &v6,
         &Arc::new(IdGen::seeded(1)),
         &refusals,
@@ -77,7 +77,7 @@ fn the_ack_and_cancel_bounds_are_the_write_paths() {
         cancel_bound: std::time::Duration::from_millis(250),
         ..Default::default()
     };
-    let config = txn_config(
+    let (config, _) = txn_config(
         &B2buaConfig::default(),
         &Arc::new(IdGen::seeded(1)),
         &refusals,

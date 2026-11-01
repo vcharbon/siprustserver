@@ -162,7 +162,7 @@ impl B2buaCore {
         });
         refusals.advertise(&config.minted_final_advertisement);
         let (verdict_bounds, path) = ReplicationSetup::bounds_of(replication.as_ref());
-        let txn_config =
+        let (txn_config, switch) =
             txn_config(&config, &id_gen, &refusals, deferred_ceilings, &path, &turn_probe);
         let (txn, txn_rx) = TransactionLayer::spawn(endpoint, parser, txn_config);
         let (timers, timer_rx) = TimerService::spawn_with_metrics(clock.clone(), metrics.clone());
@@ -279,7 +279,7 @@ impl B2buaCore {
                 None,
             ),
         };
-        readiness.gate_options_on_queue(config.event_queue_gate, txn.metrics().clone());
+        readiness.gate_options_on_queue(config.event_queue_gate, txn.metrics().clone(), switch);
         // One `Option` holds both halves of the fail-back channel: the router's
         // receiver exists only alongside the retained sender.
         let (repl_tx, repl_rx) = fail_back.unzip();

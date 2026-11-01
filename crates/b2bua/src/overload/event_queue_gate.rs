@@ -10,10 +10,14 @@
 //! again only once depth and delay have both stayed at or below their accept
 //! bounds for the hold, so it does not flap at the probe's cadence.
 //!
-//! The router reads it at each event it takes from the queue, and the OPTIONS
-//! answer and the admission ladder each time they ask it. Every reading runs
-//! on the router task, the gate's one writer: a reading is a clock read and a
-//! few atomic loads and stores, no lock. Time is `tokio::time`.
+//! The router reads it at each event it takes from the queue, the OPTIONS
+//! answer and the admission ladder each time they ask it, and an idle router
+//! every 100 ms while it refuses. Every reading runs on the router task, the
+//! gate's one writer: a reading is a clock read and a few atomic loads and
+//! stores, no lock. The transaction layer reads only the `refusing` state, as
+//! each new INVITE arrives: the state the last reading wrote, so while the
+//! router is held in one turn it is the state from before that turn, and an
+//! INVITE it admits is judged again at its take. Time is `tokio::time`.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::Arc;
@@ -89,10 +93,12 @@ impl GateState {
 }
 
 /// [`GateState`] in atomics, written by the router task alone: each instant
-/// is stored as nanoseconds past `base` plus one, zero for none.
+/// is stored as nanoseconds past `base` plus one, zero for none. `refusing`
+/// is shared with the transaction layer, which reads it as each new INVITE
+/// arrives.
 struct Stored {
     base: Instant,
-    refusing: AtomicBool,
+    refusing: Arc<AtomicBool>,
     delayed_since: AtomicU64,
     last_hot: AtomicU64,
 }
@@ -140,11 +146,16 @@ pub(crate) struct EventQueueGate {
 
 impl EventQueueGate {
     /// The gate over the event queue `queue` reads, under `bounds`, belonging
-    /// to the node the caller serves.
-    pub(crate) fn new(bounds: EventQueueGateConfig, queue: sip_txn::TransactionMetrics) -> Self {
+    /// to the node the caller serves; `refusing` is the switch the
+    /// transaction layer reads on each new INVITE's arrival.
+    pub(crate) fn new(
+        bounds: EventQueueGateConfig,
+        queue: sip_txn::TransactionMetrics,
+        refusing: Arc<AtomicBool>,
+    ) -> Self {
         let state = Stored {
             base: Instant::now(),
-            refusing: AtomicBool::new(false),
+            refusing,
             delayed_since: AtomicU64::new(0),
             last_hot: AtomicU64::new(0),
         };
@@ -196,8 +207,9 @@ impl EventQueueGate {
         }
     }
 
-    /// Whether the gate refuses now, without a reading (the gauge).
-    fn refusing_now(&self) -> bool {
+    /// Whether the gate refuses now, without a reading: the state the last
+    /// reading wrote.
+    pub(crate) fn refusing_now(&self) -> bool {
         self.inner.state.refusing.load(Relaxed)
     }
 

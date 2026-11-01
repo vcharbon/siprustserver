@@ -25,6 +25,7 @@ use super::call_txns::CallTxns;
 use super::event_age::EventAges;
 use super::handle::TransactionConfig;
 use super::key::{ServerTxnId, ServerTxnIdentity, ServerTxnKey};
+use super::new_call_gate::NewCallGate;
 use super::parse_refusal::ParseRefusals;
 use super::refusals::InviteRefusals;
 use super::shrink::{shrink_idle, SHRINK_MIN_CAPACITY};
@@ -83,6 +84,8 @@ pub(super) struct Owner {
     pub(super) deferred_bound: Option<DeferredBound>,
     /// [`TransactionConfig::invite_refusals`](crate::TransactionConfig).
     pub(super) refusals: Option<InviteRefusals>,
+    /// [`TransactionConfig::new_call_gate`](crate::TransactionConfig).
+    pub(super) new_call_gate: Option<NewCallGate>,
     /// Whether a [`Timer::EventRetry`] is already in the wheel (at most one).
     pub(super) event_retry_armed: bool,
     /// call_refs whose last txn cleared THIS turn but whose `CallQuiesced` must be
@@ -138,10 +141,13 @@ impl Owner {
         metrics: Arc<MetricsInner>,
         config: TransactionConfig,
     ) -> Self {
-        let unanswerable = config.deferred_bound.is_some() && config.invite_refusals.is_none();
-        debug_assert!(!unanswerable, "a deferred bound refuses through invite_refusals");
+        let judges = config.deferred_bound.is_some() || config.new_call_gate.is_some();
+        let unanswerable = judges && config.invite_refusals.is_none();
+        debug_assert!(!unanswerable, "a deferred bound or gate refuses through invite_refusals");
         if unanswerable {
-            tracing::warn!("a deferred bound without invite_refusals refuses nothing");
+            tracing::warn!(
+                "a deferred bound or new-call gate without invite_refusals refuses nothing"
+            );
         }
         Self {
             clients: HashMap::new(),
@@ -159,6 +165,7 @@ impl Owner {
             deferred_events: VecDeque::new(),
             deferred_bound: config.deferred_bound,
             refusals: config.invite_refusals,
+            new_call_gate: config.new_call_gate,
             event_retry_armed: false,
             pending_quiesce: Vec::new(),
             invite_initial_timeout_ms: config.invite_initial_timeout_ms,

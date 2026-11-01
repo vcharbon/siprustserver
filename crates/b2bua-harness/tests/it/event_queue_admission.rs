@@ -1,9 +1,12 @@
-//! The event-queue rung of the admission ladder (ADR-0037): while the
-//! event-queue gate refuses (ADR-0050 §9), a new normal INVITE is refused at
-//! router ingress with the new-call `503` and its `Retry-After`, from the
-//! instant the gate trips and with no probe needed. An emergency INVITE and
-//! an in-dialog request are judged as by the panic-ELU rung: admitted. Once
-//! the gate accepts again, a new INVITE is admitted.
+//! The event-queue rung of the admission ladder (ADR-0037 item 11): while the
+//! event-queue gate refuses (ADR-0050 §9), a new normal INVITE is refused on
+//! arrival by the transaction layer with the new-call `503` and its
+//! `Retry-After`, ahead of the backlog it would wait behind, from the instant
+//! the gate trips and with no probe needed. An INVITE admitted on arrival
+//! while the gate's state still read accepting, its router held in one turn,
+//! is judged again when the router takes it. An emergency INVITE and an
+//! in-dialog request are judged as by the panic-ELU rung: admitted. Once the
+//! gate accepts again, a new INVITE is admitted.
 //!
 //! The backlog is out-of-dialog requests the worker refuses `405`, behind a
 //! router loop that spends [`PER_TURN`] of simulated time on each turn
@@ -72,13 +75,18 @@ async fn a_backed_up_queue_refuses_new_invites_at_the_ladder_until_the_gate_acce
     let carol = s.h.agent_with_pre_ingress("carol", "127.0.0.1:5062", drop_backlog_answers()).await;
     let mut held = s.establish().await;
 
-    // ── the queue backs up; a new INVITE behind it is refused ───────────────
+    // ── the queue backs up; a new INVITE is refused on arrival ──────────────
     pace.set(NODE, Pace::PerTurn(PER_TURN));
     send_backlog(&carol, s.b2bua.addr, BACKLOG, "backlog").await;
     s.h.advance(Duration::from_secs(1)).await;
-    refused(&s).await;
-
     let refused_405 = || s.b2bua.metrics().unroutable_refused_of(BACKLOG_METHOD, 405);
+    refused(&s).await;
+    assert!(
+        refused_405() < BACKLOG as u64 / 2,
+        "refused on arrival, not behind the queued backlog: {} of {BACKLOG} taken",
+        refused_405()
+    );
+
     let give_up = Instant::now() + Duration::from_secs(10);
     while refused_405() < BACKLOG as u64 && Instant::now() < give_up {
         s.h.advance(Duration::from_millis(10)).await;
@@ -110,5 +118,44 @@ async fn a_backed_up_queue_refuses_new_invites_at_the_ladder_until_the_gate_acce
     s.hangup(&mut emergency).await;
     s.hangup(&mut held).await;
     settle_until(|| s.b2bua.cdr_records().len() == 3).await;
+    let _report = s.finish().await;
+}
+
+/// The router is held in one turn, so the gate's state stays the accepting
+/// one it last wrote: a new INVITE is admitted on arrival and queued. Once
+/// released, the router reads the second-old queue, refuses, and judges the
+/// INVITE at its take: `503` from the ladder.
+#[tokio::test(start_paused = true)]
+async fn an_invite_admitted_behind_a_held_turn_is_refused_at_its_take() {
+    let pace = RouterPace::new();
+    let probe = TurnProbes::new(pace.clone());
+    let s = B2buaScene::with_b2bua("event-queue-admission-at-take", move |bob_port| {
+        B2buaSut::route_all_to("127.0.0.1", bob_port).turn_probe(probe)
+    })
+    .await;
+    let carol = s.h.agent_with_pre_ingress("carol", "127.0.0.1:5062", drop_backlog_answers()).await;
+    let mut held = s.establish().await;
+
+    pace.set(NODE, Pace::Frozen);
+    send_backlog(&carol, s.b2bua.addr, 1, "held").await;
+    s.h.advance(Duration::from_millis(150)).await;
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
+    s.h.advance(Duration::from_millis(150)).await;
+    send_backlog(&carol, s.b2bua.addr, 1, "behind").await;
+    s.h.advance(Duration::from_secs(1)).await;
+    assert_eq!(s.b2bua.txn_metrics().event_queue_depth(), 2, "the INVITE and a request queued");
+    let on_arrival = || Class::ALL.map(|c| s.b2bua.txn_metrics().new_call_gate_refused(c));
+    assert_eq!(on_arrival(), [0; 3], "admitted on arrival: the held router wrote no refusal");
+
+    pace.set(NODE, Pace::Free);
+    let resp = call.expect(503).await;
+    assert!(resp.header::<RetryAfter>().is_some(), "the new-call 503 carries a Retry-After");
+    assert_eq!(s.b2bua.new_calls().rejected(Refusal::EventQueue, Class::Normal), 1);
+    assert_eq!(on_arrival(), [0; 3], "refused at its take, not on arrival");
+
+    let refused_405 = || s.b2bua.metrics().unroutable_refused_of(BACKLOG_METHOD, 405);
+    settle_until(|| refused_405() == 2).await;
+    s.h.advance(ACCEPT_HOLD + Duration::from_secs(1)).await;
+    s.hangup(&mut held).await;
     let _report = s.finish().await;
 }

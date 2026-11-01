@@ -195,9 +195,10 @@ take a new call, and may an in-dialog request of a call it owns reach it.
      queue, with no lock on the event path.
      The same gate is the event-queue rung of the worker's admission ladder
      (ADR-0037 item 11): a new normal INVITE that still reaches the worker
-     while the gate refuses gets the ladder's `503`, from the gate's first
-     refusing reading on, before any probe reads it; emergency INVITEs and
-     in-dialog requests are never refused by it. The bounds, their defaults
+     while the gate refuses gets the ladder's `503` as it arrives, ahead of
+     the queue it would wait in, from the gate's first refusing reading on,
+     before any probe reads it; emergency INVITEs and in-dialog requests are
+     never refused by it. The bounds, their defaults
      and the boot checks between them are the runner's `B2BUA_EVENT_QUEUE_*`
      grammar. The proxy keeps a refusing worker `Alive` and every dialog it
      owns on it (§4), and places new calls elsewhere (§6): a worker whose
@@ -251,7 +252,8 @@ take a new call, and may an in-dialog request of a call it owns reach it.
     still waits behind the datagrams ahead of it in the transport's receive
     queue and behind the transaction owner's own processing of them. The
     lane is opt-in in the transaction layer (`keepalive_lane`), so its other
-    users keep one queue.
+    users keep one queue. A slow but still turning worker stays `Alive`, and
+    the delay of its in-dialog requests is not capped.
 
 ### Amended
 

@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use sip_txn::{BoundPassed, DeferredBound, IdGen, OnBound, TransactionConfig};
+use std::sync::atomic::AtomicBool;
+
+use sip_txn::{BoundPassed, DeferredBound, IdGen, NewCallGate, OnBound, TransactionConfig};
 
 use crate::admission::Refusals;
 use crate::config::B2buaConfig;
@@ -26,7 +28,8 @@ const KEEPALIVE_LANE: usize = 64;
 /// `refusals`, the ceilings on the deferred backlog
 /// ([`crate::admission::deferred_bound`]) unless `ceilings` sets its own,
 /// no transaction for an out-of-dialog OPTIONS, which rides the keepalive
-/// lane, and the worker's advertised SIP address.
+/// lane, the worker's advertised SIP address, and the switch on new calls the
+/// event-queue gate sets (ADR-0037 item 11), returned with them.
 pub(super) fn txn_config(
     config: &B2buaConfig,
     id_gen: &Arc<IdGen>,
@@ -34,7 +37,8 @@ pub(super) fn txn_config(
     ceilings: Option<DeferredBound>,
     write_path: &crate::repl::WritePath,
     probe: &crate::turn_probe::TurnProbes,
-) -> TransactionConfig {
+) -> (TransactionConfig, Arc<AtomicBool>) {
+    let switch = Arc::new(AtomicBool::new(false));
     let mut txn_config = TransactionConfig {
         udp_queue_max: UDP_QUEUE_MAX,
         id_gen: id_gen.clone(),
@@ -60,6 +64,9 @@ pub(super) fn txn_config(
         strict_to_tag: true,
         deferred_bound: None,
         invite_refusals: Some(refusals.memo().clone()),
+        // A new normal INVITE is refused on arrival while the event-queue gate
+        // refuses, ahead of the queue it would wait in.
+        new_call_gate: Some(NewCallGate::new(switch.clone(), crate::admission::class_of)),
         // The OPTIONS health answer derives its To-tag from the request
         // (`RouterCtx::options_tagger`).
         stateless_options: true,
@@ -73,7 +80,7 @@ pub(super) fn txn_config(
     txn_config.deferred_bound = Some(
         ceilings.unwrap_or_else(|| crate::admission::deferred_bound(txn_config.event_capacity())),
     );
-    txn_config
+    (txn_config, switch)
 }
 
 /// The report to `probe` of held messages that left at their bound on

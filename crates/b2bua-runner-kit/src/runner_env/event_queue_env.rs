@@ -33,7 +33,8 @@
 //! first under ordinary overload; the gate catches a router that falls
 //! behind while that signal does not show it (a process starved of CPU).
 //!
-//! The ladder refuses from the router's first reading that trips the gate;
+//! The ladder refuses new INVITEs as they arrive, ahead of the backed-up
+//! queue, from the router's first reading that trips the gate;
 //! the proxy reads the refusal on its next probe answer (`interval_ms`, 1000)
 //! and places new calls on the other workers, so the INVITEs placed on the
 //! worker in between get its `503` and their callers retry. Health, and so

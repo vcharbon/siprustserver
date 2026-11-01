@@ -320,13 +320,15 @@ impl Readiness {
 
     /// From now on, the event-queue gate over the queue `queue` reads, under
     /// `bounds`, refusing makes a `Ready` node refuse new calls
-    /// ([`options_report`](Self::options_report)); a second gate is ignored.
+    /// ([`options_report`](Self::options_report)), and sets `switch`, which the
+    /// transaction layer reads as new INVITEs arrive; a second gate is ignored.
     pub(crate) fn gate_options_on_queue(
         &self,
         bounds: crate::config::EventQueueGateConfig,
         queue: sip_txn::TransactionMetrics,
+        switch: Arc<AtomicBool>,
     ) {
-        let _ = self.inner.queue.set(EventQueueGate::new(bounds, queue));
+        let _ = self.inner.queue.set(EventQueueGate::new(bounds, queue, switch));
     }
 
     /// The event-queue gate, once installed: the router reads it at each

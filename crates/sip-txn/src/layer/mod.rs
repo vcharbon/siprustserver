@@ -31,6 +31,7 @@
 //! its one deadline, and the sweep over it) · `bind` (the To-tag every
 //! outbound response is held to) · `seed` (ADR-0014 seeding + re-offer) ·
 //! `relinquish` (a call's transactions deleted for another node to serve) ·
+//! `new_call_gate` (a consumer's switch on new calls, read at receipt) ·
 //! `events` (output-queue discipline) · `event_receiver` (the consumer's end
 //! of the event queue and the keepalive lane) · `event_age` (the age of the
 //! oldest event waiting in the queue) · `backlog` (new-call admission against
@@ -57,6 +58,7 @@ mod held_cancel;
 mod ingress;
 mod key;
 mod lifetime;
+mod new_call_gate;
 mod orphan;
 mod owner;
 mod parse_refusal;
@@ -78,4 +80,5 @@ pub use config::OnBound;
 pub(crate) use event_age::EventAges;
 pub use handle::{TransactionConfig, TransactionEvents, TransactionLayer, TransactionLayerClosed};
 pub use key::ServerTxnKey;
+pub use new_call_gate::NewCallGate;
 pub use refusals::{InviteRefusals, NewCallRefusal, Verdict, REFUSED_MEMO_MAX};

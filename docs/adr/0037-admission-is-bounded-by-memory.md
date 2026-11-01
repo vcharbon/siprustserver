@@ -131,7 +131,7 @@ kills it, and a kill drops every call it serves.
     | shed | router ingress | live per-call queues | refused at the cap less the headroom | refused at the cap | — | configured |
     | panic-ELU | router ingress | the worker's EWMA-ELU | refused above the backstop | admitted | — | configured |
     | bucket | router ingress | time to a CPS token | refused with no token | admitted | — | the time to a token, at least the configured base |
-    | event queue | router ingress | the event-queue gate (ADR-0050 §9) | refused while the gate refuses | admitted | — | configured |
+    | event queue | transaction layer on arrival, before any transaction; router ingress again | the event-queue gate (ADR-0050 §9) | refused while the gate refuses | admitted | admitted | configured |
 
     Each rung keeps its site. The backlog is decided by the transaction
     layer's bound; every other rung by one function over its input and the
@@ -157,14 +157,22 @@ kills it, and a kill drops every call it serves.
     creation of the call.
 
     The event-queue rung reads the same gate as the OPTIONS answer's
-    `cause=overload`: one state, one set of bounds, one hold, the queue's
-    depth and the age of its oldest waiting event read when the INVITE is
-    judged (ADR-0050 §9). It refuses from the first reading that trips the
-    gate, before any probe reads the refusal, and keeps refusing the new calls that still reach the worker
-    (in flight, or placed on it while every worker refuses) until the gate
-    accepts. It judges as the panic-ELU rung, a load signal: an emergency
-    INVITE is admitted. It comes last, so a refusal another rung also makes
-    keeps that rung's reason (`reason="event_queue"`). It reads the
+    `cause=overload`: one state, one set of bounds, one hold (ADR-0050 §9).
+    The transaction layer judges a new INVITE as it arrives, before the 100
+    Trying and before it would wait in the backed-up queue: it reads the
+    state the gate's last reading wrote (one atomic load) and refuses with
+    the worker's one refusal, so a copy draws the same answer, counted once.
+    The router writes that state at each event it takes, each probe and each
+    INVITE it judges, and every 100 ms while idle and refusing; while it is
+    held in one turn the state is the one from before it. An INVITE admitted
+    on arrival is judged again at router ingress, after the other rungs, on
+    a fresh reading: it catches an INVITE that queued before the gate
+    tripped. The rung refuses from the first reading that trips the gate,
+    before any probe reads the refusal, and keeps refusing the new calls
+    that still reach the worker (in flight, or placed on it while every
+    worker refuses) until the gate accepts. It judges as the panic-ELU rung,
+    a load signal: an emergency INVITE and one carrying a `To`-tag are
+    admitted. A refusal is counted once under `reason="event_queue"`. It reads the
     transaction event queue, which no other rung does: under a CPU cap the
     loop's busy ratio stays low and the inbound queue and deferred backlog
     stay short while the router falls seconds behind.

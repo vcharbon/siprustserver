@@ -7,14 +7,23 @@
 //! turn. Among themselves the other sources keep `select!`'s fairness: the
 //! transaction event queue, the timer fires, the re-entry channel, the
 //! fail-back commands and what readmission releases. A source whose senders
-//! are all gone retires.
+//! are all gone retires. While the event-queue gate refuses, an idle loop
+//! reads it again every [`GATE_REREAD`], so the state the transaction layer
+//! reads on each new INVITE's arrival follows the queue with no traffic
+//! taken; the router task stays the gate's one writer.
+
+use std::time::Duration;
 
 use b2bua_sdk::event::CallEvent;
 use sip_txn::{TransactionEvent, TransactionEvents};
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 use super::readmission::ReadmissionGate;
 use super::{txn_event, ReplCommand, RouterCtx, Work};
+
+/// How often an idle loop reads a refusing event-queue gate again.
+const GATE_REREAD: Duration = Duration::from_millis(100);
 
 /// What the loop takes next.
 pub(super) enum Taken {
@@ -34,6 +43,8 @@ enum Next {
     TimersClosed,
     ReentryClosed,
     ReplClosed,
+    /// The refusing gate is due another reading.
+    GateDue,
 }
 
 /// The router loop's sources.
@@ -47,6 +58,8 @@ pub(super) struct Inbox {
     repl_rx: Option<mpsc::UnboundedReceiver<ReplCommand>>,
     /// Whether the last turn taken was an OPTIONS from the lane.
     after_keepalive: bool,
+    /// When a refusing gate is due another reading, kept across turns.
+    gate_due: Option<Instant>,
 }
 
 impl Inbox {
@@ -66,6 +79,7 @@ impl Inbox {
             reentry_open: true,
             repl_rx,
             after_keepalive: false,
+            gate_due: None,
         }
     }
 
@@ -85,8 +99,12 @@ impl Inbox {
                 reentry_open,
                 repl_rx,
                 after_keepalive,
+                gate_due,
             } = self;
+            let refusing = ctx.readiness.queue_gate().is_some_and(|gate| gate.refusing_now());
+            *gate_due = refusing.then(|| gate_due.unwrap_or_else(|| Instant::now() + GATE_REREAD));
             let others = next_other(
+                *gate_due,
                 ctx,
                 txn_rx,
                 (timer_rx, *timers_open),
@@ -121,15 +139,23 @@ impl Inbox {
                 Next::TimersClosed => self.timers_open = false,
                 Next::ReentryClosed => self.reentry_open = false,
                 Next::ReplClosed => self.repl_rx = None,
+                Next::GateDue => {
+                    self.gate_due = None;
+                    if let Some(gate) = ctx.readiness.queue_gate() {
+                        gate.read();
+                    }
+                }
             }
         }
     }
 }
 
-/// The next work of every source but the lane, fair among them. An event
-/// taken from the transaction queue has the event-queue gate read the queue:
-/// a backlog that drains between two probes still restarts its hold.
+/// The next work of every source but the lane, fair among them, or the
+/// refusing gate's reading falling due at `gate_due`. An event taken from the
+/// transaction queue has the event-queue gate read the queue: a backlog that
+/// drains between two probes still restarts its hold.
 async fn next_other(
+    gate_due: Option<Instant>,
     ctx: &RouterCtx,
     txn_rx: &mut TransactionEvents,
     (timer_rx, timers_open): (&mut mpsc::UnboundedReceiver<CallEvent>, bool),
@@ -163,6 +189,7 @@ async fn next_other(
             None => Next::ReplClosed,
         },
         cmds = readmission.released() => Next::Work(Work::Released(cmds)),
+        () = sleep_until(gate_due), if gate_due.is_some() => Next::GateDue,
     }
 }
 
@@ -173,6 +200,14 @@ async fn next_keepalive(
 ) -> Option<TransactionEvent> {
     match lane {
         Some(lane) => lane.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Until `at`; pending forever when there is none.
+async fn sleep_until(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
         None => std::future::pending().await,
     }
 }

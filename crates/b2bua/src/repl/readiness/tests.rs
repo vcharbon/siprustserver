@@ -216,7 +216,7 @@ async fn a_refusing_event_queue_gate_refuses_new_calls_after_every_other_cause()
     let r = Readiness::always_ready();
     assert_eq!(r.options_report(), OptionsReport::Serving(None), "no gate installed");
     let (bounds, queue) = refusing_gate().await;
-    r.gate_options_on_queue(bounds, queue);
+    r.gate_options_on_queue(bounds, queue, Default::default());
     assert_eq!(r.options_report(), OptionsReport::Serving(Some(Refusal::Overload)));
     assert_eq!(Refusal::Overload.cause(), "overload");
     assert_eq!(r.state(), ReadinessState::Ready, "/ready ignores the gate");

@@ -10,13 +10,14 @@
 //! | shed | router ingress | live per-call queues | cap less headroom | cap | — | configured |
 //! | panic-ELU | router ingress | EWMA-ELU | above the backstop | admitted | — | configured |
 //! | bucket | router ingress | time to a CPS token | no token | admitted | — | time to a token, at least configured |
-//! | event queue | router ingress | the event-queue gate (ADR-0050 §9) | while it refuses | admitted | — | configured |
+//! | event queue | transactions on arrival, router ingress again | the event-queue gate (ADR-0050 §9) | while it refuses | admitted | admitted | configured |
 //!
 //! Each rung keeps its site. The backlog is judged by the transaction
-//! layer's bound ([`deferred_bound`]); every other rung by [`judge`] over the
-//! input its site reads ([`first_refusal`] walks the router's rungs in
-//! [`LADDER`] order). At
-//! router ingress the rungs run before the dispatch offer, so a refusal opens
+//! layer's bound ([`deferred_bound`]); the event queue by the transaction
+//! layer on arrival, reading the gate's switch (`sip_txn::NewCallGate`), and
+//! again at router ingress on a fresh reading; every other rung by [`judge`]
+//! over the input its site reads ([`first_refusal`] walks the router's rungs
+//! in [`LADDER`] order). At router ingress the rungs run before the dispatch offer, so a refusal opens
 //! no per-call queue and waits for no handler permit; the CPS token is spent
 //! only when the offer queues the INVITE's turn, and a refusal spends none.
 //! An admitted INVITE counts as a live call until its turn creates the call

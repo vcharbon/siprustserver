@@ -193,8 +193,8 @@ pub struct NewCallCounts {
 }
 
 impl NewCallCounts {
-    /// The router's tally, the transaction layer's backlog and, when the
-    /// ingress brake is installed, the brake's.
+    /// The router's tally, the transaction layer's backlog and new-call gate
+    /// and, when the ingress brake is installed, the brake's.
     pub fn read(
         tally: &NewCallTally,
         txn: &TransactionMetrics,
@@ -204,7 +204,12 @@ impl NewCallCounts {
             refused: Class::ALL.map(|class| txn.deferred_refused(class)),
             copies: txn.refused_copies(),
         };
-        Self::compose(tally, backlog, brake.map(IngressBrakeCounters::counts).unwrap_or_default())
+        let brake = brake.map(IngressBrakeCounters::counts).unwrap_or_default();
+        let mut counts = Self::compose(tally, backlog, brake);
+        // The transaction layer's refusals on arrival while the event-queue
+        // gate refuses; their copies are counted with the backlog's.
+        counts.add(Refusal::EventQueue, Class::ALL.map(|class| txn.new_call_gate_refused(class)));
+        counts
     }
 
     /// The router's tally plus the backlog's and the brake's counts.
@@ -216,14 +221,17 @@ impl NewCallCounts {
             rejected: tally.rows.rejected.each_ref().map(|row| row.each_ref().map(load)),
             refused_copies: load(&tally.rows.refused_copies) + backlog.copies + brake.copies,
         };
-        for (reason, stage) in [(Refusal::DeferredBacklog, backlog), (Refusal::IngressBrake, brake)]
-        {
-            let row = counts.rejected.get_mut(reason.index()).into_iter().flatten();
-            for (slot, n) in row.zip(stage.refused) {
-                *slot += n;
-            }
-        }
+        counts.add(Refusal::DeferredBacklog, backlog.refused);
+        counts.add(Refusal::IngressBrake, brake.refused);
         counts
+    }
+
+    /// Add `refused`, by class, to the row of `reason`.
+    fn add(&mut self, reason: Refusal, refused: [u64; CLASSES]) {
+        let row = self.rejected.get_mut(reason.index()).into_iter().flatten();
+        for (slot, n) in row.zip(refused) {
+            *slot += n;
+        }
     }
 
     /// New calls of this class admitted.

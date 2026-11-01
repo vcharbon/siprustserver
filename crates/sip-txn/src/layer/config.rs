@@ -6,6 +6,7 @@ use crate::rng::IdGen;
 
 use super::backlog::DeferredBound;
 use super::bound_report::BoundPassed;
+use super::new_call_gate::NewCallGate;
 use super::refusals::InviteRefusals;
 
 /// What [`TransactionConfig::on_bound`] calls.
@@ -76,6 +77,11 @@ pub struct TransactionConfig {
     /// and an initial INVITE this layer admits is held there while its
     /// transaction lives. `None` — the default — shares nothing.
     pub invite_refusals: Option<InviteRefusals>,
+    /// The consumer's switch on new calls ([`NewCallGate`]), read as each new
+    /// INVITE arrives; it refuses through
+    /// [`invite_refusals`](Self::invite_refusals), which it requires. `None`
+    /// — the default — reads none.
+    pub new_call_gate: Option<NewCallGate>,
     /// Whether an out-of-dialog OPTIONS (no To-tag) opens no server
     /// transaction: every copy reaches the consumer as a `Message`, and the
     /// answer it sends leaves raw, so the consumer derives its To-tag from
@@ -107,7 +113,7 @@ impl TransactionConfig {
 
     /// The defaults, identifiers drawn from `id_gen`: a 256-datagram receive
     /// queue, the RFC 3261 INVITE bounds and first-provisional bound, strict To-tag binding, no deferred
-    /// bound, no shared refusals, a transaction per OPTIONS, no keepalive
+    /// bound, no shared refusals, no new-call gate, a transaction per OPTIONS, no keepalive
     /// lane, no advertised address.
     pub fn new(id_gen: Arc<IdGen>) -> Self {
         Self {
@@ -122,6 +128,7 @@ impl TransactionConfig {
             strict_to_tag: true,
             deferred_bound: None,
             invite_refusals: None,
+            new_call_gate: None,
             stateless_options: false,
             keepalive_lane: None,
             advertised: None,

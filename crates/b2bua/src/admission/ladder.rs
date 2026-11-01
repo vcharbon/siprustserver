@@ -20,7 +20,8 @@ pub use sip_txn::class_of;
 /// layer, before any transaction exists, by the
 /// [`DeferredBound`](sip_txn::DeferredBound) of
 /// [`deferred_bound`](super::deferred_bound); the other five at router
-/// ingress ([`first_refusal`]).
+/// ingress ([`first_refusal`]), the event queue also on arrival, where the
+/// transaction layer reads the gate's switch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
     Brake,
