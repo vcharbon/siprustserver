@@ -13,6 +13,9 @@
 //!   a returns          its bootstrap carries the three calls
 //!   b drains ⇒ caught_up, exits; each caller's BYE ─▶ a ─▶ 200; one CDR each
 //!   a away 310 s       one call after the dead-peer TTL, the same outcome
+//!   a away 70 s        a call born before: b's log toward a went at the
+//!                      TTL; a returns and bootstraps it, a parks its flow,
+//!                      b drains to its grace and leaves the call to a
 //! ```
 //!
 //! Beyond the failover sweep: the admission of calls across a long absence of
@@ -20,12 +23,13 @@
 
 use std::time::Duration;
 
-use failover_harness::{total_cdrs_for, FailoverHarness};
+use failover_harness::{total_cdrs_for, DrainExit, FailoverHarness};
 
 use crate::away_backup_support::{
-    answered_on, bring_up, caller_hangs_up, come_back, drain_caught_up, exits, restart_in_place,
-    settle, Answered, ALICE, BOB,
+    answered_on, answered_with, bring_up, caller_hangs_up, come_back, drain, drain_caught_up,
+    exits, restart_in_place, settle, Answered, ALICE, BOB,
 };
+use crate::departure_support::call_id_placed_on;
 
 /// Advance to `at` past `t0` (ms on the harness clock).
 async fn advance_to(fh: &FailoverHarness, t0: i64, at: Duration) {
@@ -108,6 +112,53 @@ async fn a_call_admitted_past_the_dead_peer_ttl_survives_the_primarys_drain() {
         "the bootstrap carried the call admitted after the log toward the peer was dropped"
     );
     drain_caught_up(&mut fh, &b).await;
+    exits(&mut fh, &mut b).await;
+    caller_hangs_up(&mut call.dialog, &bob).await;
+    settle(&fh, &[&a, &b], &[&call.call_ref], &[&alice, &bob]).await;
+    assert_eq!(total_cdrs_for(&[&a, &b], &call.call_ref), 1, "one CDR");
+    fh.assert_sip_rfc_clean(name);
+    drop(proxy);
+}
+
+/// A call its backup applied, then the backup away past the dead-peer TTL:
+/// the primary's log toward it went, and the call has no entry in the log
+/// opened when the backup came back and bootstrapped it. A drain of the
+/// primary reaching its grace leaves the call to the backup's copy.
+#[tokio::test(start_paused = true)]
+async fn a_call_its_backup_bootstrapped_after_the_dead_peer_ttl_is_left_to_it_at_the_grace() {
+    let name = "backup-back-past-the-ttl-holds-the-call";
+    let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let (proxy, mut a, mut b) = bring_up(&mut fh).await;
+
+    let call_id = call_id_placed_on("b2", "old-call");
+    let mut call = answered_with(&fh, &alice, &bob, &proxy, &b, Some(&call_id)).await;
+    assert_eq!(call.cookie, ("b2".to_string(), "b1".to_string()), "both alive: a backs it");
+    assert!(a.scan_backed_up("b2").contains(&call.call_ref), "a applied the call");
+
+    // ── a away past the TTL, back, bootstrapped ─────────────────────────────
+    restart_in_place(&mut fh, &mut a);
+    let past_ttl = Duration::from_millis(b2bua::repl::DEFAULT_DEAD_PEER_TTL_MS as u64)
+        + Duration::from_secs(10);
+    fh.advance(past_ttl).await;
+    come_back(&mut fh, &mut a, &proxy).await;
+    assert!(a.scan_backed_up("b2").contains(&call.call_ref), "a's bootstrap carried the call");
+
+    // ── a parks its flows to b; b drains to its grace ───────────────────────
+    a.simulate_peer_removed("b2");
+    fh.advance(Duration::from_millis(300)).await;
+    let out = drain(&mut fh, &b).await;
+    assert_eq!(out.exit, DrainExit::GracePeersBehind, "got {out:?}");
+    assert_eq!(
+        b.cdr_records().iter().filter(|r| r.call_ref == call.call_ref).count(),
+        0,
+        "the call its backup holds is left to it: no CDR from the draining node"
+    );
+    assert!(b.serves(&call.call_ref), "the call lives on");
+
+    a.simulate_peer_added("b2");
+    fh.advance(Duration::from_millis(500)).await;
     exits(&mut fh, &mut b).await;
     caller_hangs_up(&mut call.dialog, &bob).await;
     settle(&fh, &[&a, &b], &[&call.call_ref], &[&alice, &bob]).await;

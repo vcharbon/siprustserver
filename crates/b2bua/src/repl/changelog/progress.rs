@@ -53,7 +53,8 @@ impl Changelog {
     /// log, and from a worker `identity` other than the one membership binds to
     /// the ordinal ([`bind_identity`](Self::bind_identity)): a superseded
     /// worker on the ordinal vouches for nothing its successor holds (ADR-0055
-    /// §6).
+    /// §6). The highest such report under this incarnation is kept aside: it
+    /// counts once membership binds that identity.
     pub fn note_applied(
         &self,
         peer: &str,
@@ -64,6 +65,13 @@ impl Changelog {
         let gen = self.gen;
         let mut inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
         if inner.bound.get(peer).is_some_and(|bound| Some(bound.as_str()) != identity) {
+            if let (Some(log), Some(identity)) = (inner.peers.get_mut(peer), identity) {
+                let sub = log.sub_mut(partition);
+                let higher = sub.unbound.as_ref().is_none_or(|(id, w)| id != identity || at > *w);
+                if at.gen == gen && higher {
+                    sub.unbound = Some((identity.to_string(), at));
+                }
+            }
             return;
         }
         if let Some(log) = inner.peers.get_mut(peer) {
@@ -85,7 +93,8 @@ impl Changelog {
     /// (ADR-0055 §6): only that identity's reports count from now on. `None`:
     /// membership names no identity, and every report counts. A new identity
     /// holds nothing an earlier one applied: the highest position applied
-    /// falls back to none, on both sub-logs.
+    /// falls back to what that identity reported before it was bound, or none,
+    /// on both sub-logs.
     pub fn bind_identity(&self, peer: &str, identity: Option<&str>) {
         let mut inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
         let Some(identity) = identity else {
@@ -98,23 +107,11 @@ impl Changelog {
         inner.bound.insert(peer.to_string(), identity.to_string());
         if let Some(log) = inner.peers.get_mut(peer) {
             for partition in [Partition::Pri, Partition::Bak] {
-                log.sub_mut(partition).acked.send_replace(Watermark::new(0, 0));
+                let sub = log.sub_mut(partition);
+                let reported = sub.unbound.take().filter(|(id, _)| id == identity);
+                sub.acked.send_replace(reported.map_or(Watermark::new(0, 0), |(_, at)| at));
             }
         }
-    }
-
-    /// Whether `peer`, under the identity bound to it, ever reported applying
-    /// a write of `call_ref`'s current call on `partition`: it holds a copy of
-    /// the call, current or stale. `false` when the call has no entry toward
-    /// it (none was written since its log was opened).
-    pub fn applied_any(&self, peer: &str, partition: Partition, call_ref: &str) -> bool {
-        let inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
-        let Some(sub) = inner.peers.get(peer).map(|log| log.sub(partition)) else {
-            return false;
-        };
-        let acked = *sub.acked.borrow();
-        acked.gen == self.gen
-            && sub.by_ref.get(call_ref).is_some_and(|st| st.first <= acked.counter)
     }
 
     /// Whether `peer` is a live, bootstrapped holder of `partition`: its flow is
@@ -122,7 +119,9 @@ impl Changelog {
     /// only once its bootstrap is applied.
     pub fn flow_live(&self, peer: &str, partition: Partition) -> bool {
         let inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
-        inner.peers.get(peer).is_some_and(|log| live(log.sub(partition), inner.claim_ttl))
+        inner.peers.get(peer).map(|log| log.sub(partition)).is_some_and(|sub| {
+            sub.streams > 0 && sub.applied.is_some_and(|c| c.made.elapsed() <= inner.claim_ttl)
+        })
     }
 
     /// Whether `peer` reported applying `at` or past it on `partition`.
@@ -173,10 +172,4 @@ impl Changelog {
         let head = Watermark::new(self.gen, sub.head);
         sub.applied.is_some_and(|c| c.at >= head && c.made.elapsed() <= inner.claim_ttl)
     }
-}
-
-/// Whether `sub`'s flow is connected and has claimed a position within
-/// `claim_ttl` ([`Changelog::flow_live`]).
-pub(super) fn live(sub: &super::SubLog, claim_ttl: Duration) -> bool {
-    sub.streams > 0 && sub.applied.is_some_and(|c| c.made.elapsed() <= claim_ttl)
 }

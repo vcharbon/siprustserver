@@ -143,18 +143,11 @@ fn backups_caught_up_in(ctx: &RouterCtx, changelog: &crate::repl::Changelog) -> 
     })
 }
 
-/// End each live call no peer holds, at the drain's grace: the call has no
-/// backup, or its holder never reported applying any write of it under the
-/// identity bound to it now (away since before the call was born, or
-/// restarted since). A call whose holder applied a write of it, current or
-/// stale, is left to that copy: nothing is sent, written or deleted for it
-/// (ADR-0055 §3). Each call ended is sent the release turn of ADR-0050 §10, on
-/// its own queue: an established call ends where it stands, its record
-/// closed and nothing sent; a call in setup is aborted, `503` to its caller
-/// and a CANCEL to a ringing callee. An ending that does not leave in time (a
-/// withdrawn worker never sees the answer to its CANCEL: the proxy hands it
-/// to the call's other owner) is discharged off the wire, as the reaper
-/// discharges a wedged call.
+/// End, at the drain's grace, each live call no peer holds: no backup, or a
+/// holder that never reported applying the call under its bound identity.
+/// Each gets the release turn of ADR-0050 §10; one still resident halfway
+/// through the flush bound is discharged off the wire. A call a peer holds a
+/// copy of is left to it. ADR-0055 §3 states why.
 fn end_unheld(ctx: &Arc<RouterCtx>, changelog: Option<&crate::repl::Changelog>) -> GraceEnd {
     use crate::rules::operator_release::{AT_DRAIN_GRACE, TOPIC};
     let me = &ctx.config.self_ordinal;

@@ -2,8 +2,8 @@
 //! sub-log above the highest position it reported applying, and the age of the
 //! oldest. Above a high-water mark on either a new call is admitted with no
 //! backup; new calls get one again once both are under their low-water marks.
-//! The marks read a peer whose flow is live only: a peer that is away, or
-//! whose bootstrap is in flight, is no slow consumer. No call is refused for
+//! The marks read a peer with an open flow, bootstrapping or slow: only a
+//! peer no flow carries is away, and no slow consumer. No call is refused for
 //! the backlog.
 
 use std::ops::Bound;
@@ -76,21 +76,20 @@ impl Changelog {
     }
 
     /// Whether a new call admitted now gets `peer` as its backup. Toward a
-    /// peer whose flow is live, `false` from the moment the backlog reaches a
-    /// high-water mark until it is under both low-water marks. Toward a peer
-    /// with no live flow, away or bootstrapping, always `true`: its return
-    /// bootstraps from the calls' metadata, not from this log. The entries
-    /// kept toward such a peer are at most one per call written toward it
-    /// since a flow last served the log (a newer write moves a call's entry),
-    /// and the whole log goes one dead-peer TTL (60 s by default,
+    /// peer with an open flow, `false` from the moment the backlog reaches a
+    /// high-water mark until it is under both low-water marks, so the entries
+    /// new calls add stop at the high-water mark. Toward a peer no flow
+    /// carries, always `true`: its return bootstraps from the calls'
+    /// metadata, and its log holds at most one entry per call written toward
+    /// it since a flow last closed, gone one dead-peer TTL (60 s by default,
     /// `B2BUA_REPL_DEAD_PEER_TTL_MS`) after that, writes or not.
     pub fn admits_backup(&self, peer: &str) -> bool {
         let now = self.clock.now_ms();
         let gen = self.gen;
         let mut inner = locked(&self.inner, REPLICA_CHANGELOG);
-        let (marks, claim_ttl) = (inner.marks, inner.claim_ttl);
+        let marks = inner.marks;
         let Some(log) = inner.peers.get_mut(peer) else { return true };
-        if !super::progress::live(log.sub(Partition::Bak), claim_ttl) {
+        if log.sub(Partition::Bak).streams == 0 {
             return true;
         }
         let backlog = measure(log.sub(Partition::Bak), gen, now, marks.high_entries);

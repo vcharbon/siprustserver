@@ -1,21 +1,22 @@
-//! **A call admitted while its returning backup bootstraps reaches it**
+//! **A call admitted while its returning backup recovers reaches it**
 //! (ADR-0055 §3). The backup was away past the backlog's high-water age with
 //! calls named on it, so the change log toward it holds entries older than
-//! 5 s. It returns and its bootstrap is in flight (its flow is open, it has
-//! claimed no position yet) when a new call arrives: that flow is no slow
-//! consumer, so the primary admits the call backed, past the snapshot the
-//! bootstrap scanned, and the live stream carries it. The primary's drain
-//! then exits on the backup holding every call.
+//! 5 s. It returns and recovers its own partition first (its reclaim flow is
+//! in flight), so its backup flow from the primary is not open yet when a new
+//! call arrives: the backup is away, no slow consumer, and the primary admits
+//! the call backed. The backup's own bootstrap of the primary's calls carries
+//! it once its backup flow opens. The primary's drain then exits on the
+//! backup holding every call.
 //!
 //! ```text
 //!   a away 6 s          five calls on b, each w_bak=a
-//!   a returns           b ─▶ a delayed 500 ms: the bootstrap is in flight
+//!   a returns           b ─▶ a delayed 500 ms: its recovery is in flight
 //!   alice ─INVITE─▶ b   w_bak=a, admitted backed while a is not ready
 //!   a ready             it holds the six calls
 //!   b drains ⇒ caught_up, exits; each caller's BYE ─▶ a ─▶ 200; one CDR each
 //! ```
 //!
-//! Beyond the failover sweep: a new call against a backup in its bootstrap.
+//! Beyond the failover sweep: a new call against a backup still recovering.
 
 use std::time::Duration;
 

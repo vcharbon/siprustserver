@@ -40,8 +40,9 @@ impl CallState {
 
     /// Every resident call still `Active`, with the `(primary, backup)` its
     /// topology names, `None` for a call with no backup (ADR-0055 §3) or
-    /// naming no topology. Read under the call map's lock alone: the caller
-    /// weighs each holder after it.
+    /// naming no topology. Read under the call map's lock, each call's
+    /// backing read under it as [`live_topologies`](Self::live_topologies)
+    /// reads it; the caller weighs each holder after the lock.
     pub fn active_call_holders(&self) -> Vec<ActiveCall> {
         let inner = self.locked();
         inner

@@ -208,7 +208,8 @@ pub struct DrainBounds {
     /// before the withdrawal reached the proxy is still served (ADR-0031 D2).
     pub floor: Duration,
     /// The most one release flush waits for the limiter release queue to
-    /// empty; the drain never returns later than `grace + release_flush`.
+    /// empty; the drain never returns later than `grace + release_flush`,
+    /// or `grace + 2 × release_flush` when its grace ended calls.
     pub release_flush: Duration,
     /// The most the CDR sink's close waits, after the drain, for the records
     /// it holds (`CdrWriter::close`); the drain itself does not read it.
@@ -224,13 +225,15 @@ pub struct DrainBounds {
 /// drain never returns later than the grace plus the flush bound, where what
 /// is still queued is given up. At the grace the calls no peer holds are
 /// ended ([`DrainInputs::end_unheld`]); the exit stays the grace's, its
-/// residual the live calls the grace found, and it waits, within the same
-/// bound, for those endings to leave the node before its flush.
+/// residual the live calls the grace found, and it waits, within the flush
+/// bound, for those endings to leave the node, then flushes their releases
+/// within a flush bound of their own: such a drain returns by the grace plus
+/// twice the flush bound.
 pub async fn drain_until_quiescent(inputs: DrainInputs, bounds: DrainBounds) -> DrainOutcome {
     let start = tokio::time::Instant::now();
     let deadline = start + bounds.grace;
     let floor_at = start + bounds.floor;
-    let ceiling = deadline + bounds.release_flush;
+    let mut ceiling = deadline + bounds.release_flush;
     let mut flushed = ReleaseFlush::default();
     let flush = async |flushed: &mut ReleaseFlush, within: Duration| {
         let flush = (inputs.flush_releases)(within).await;
@@ -254,6 +257,8 @@ pub async fn drain_until_quiescent(inputs: DrainInputs, bounds: DrainBounds) -> 
                             (end.discharge_left)();
                             wait_left(&*end.left, ceiling).await;
                         }
+                        // The ended calls' releases get a flush bound of their own.
+                        ceiling = tokio::time::Instant::now() + bounds.release_flush;
                         continue;
                     }
                 }

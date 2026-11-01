@@ -42,6 +42,7 @@ mod drain_exits_caught_up_inside_grace;
 mod drain_flushes_releases_before_a_verified_exit;
 mod drain_grace_ends_an_unheld_call_off_the_wire;
 mod drain_grace_meets_a_ringing_setup;
+mod drain_grace_meets_the_callers_bye;
 mod drain_waits_for_a_backup_behind;
 mod drain_waits_for_an_unbacked_call;
 mod dual_face;

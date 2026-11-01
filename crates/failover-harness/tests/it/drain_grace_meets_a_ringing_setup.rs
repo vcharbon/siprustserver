@@ -21,7 +21,7 @@ use failover_harness::{
     ReplicatedB2buaSut,
 };
 
-use crate::away_backup_support::{ALICE, B1, B2, BOB, BOUNDS, GRACE, OFFER, PROXY};
+use crate::away_backup_support::{Limiter, ALICE, B1, B2, BOB, BOUNDS, GRACE, OFFER, PROXY};
 
 #[tokio::test(start_paused = true)]
 async fn a_setup_ringing_at_the_drains_grace_gets_a_final_and_its_callee_a_cancel() {
@@ -35,9 +35,9 @@ async fn a_setup_ringing_at_the_drains_grace_gets_a_final_and_its_callee_a_cance
     let bob = fh.agent("bob", BOB).await;
     let proxy =
         fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
-    let (rt, ob) = (("127.0.0.1", 5070), ("127.0.0.1", 5080));
-    let mut w_b1 = fh.spawn_worker("b1", "b1", B1, &["b2"], rt, ob).await;
-    let mut w_b2 = fh.spawn_worker("b2", "b2", B2, &["b1"], rt, ob).await;
+    let limiter = Limiter::serve().await;
+    let mut w_b1 = limiter.worker(&mut fh, "b1", B1, &["b2"]).await;
+    let mut w_b2 = limiter.worker(&mut fh, "b2", B2, &["b1"]).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both workers ready at steady state");
 
@@ -84,6 +84,7 @@ async fn a_setup_ringing_at_the_drains_grace_gets_a_final_and_its_callee_a_cance
         1,
         "the setup's CDR is written at the grace"
     );
+    assert_eq!(limiter.held(), 0, "the setup's limiter set is released at the grace");
 
     // ── the primary exits ────────────────────────────────────────────────────
     fh.depart(&pri_ord);

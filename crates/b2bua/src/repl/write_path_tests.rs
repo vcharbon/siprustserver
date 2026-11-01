@@ -175,13 +175,13 @@ async fn a_backlog_over_high_water_gives_new_calls_no_backup_until_under_low_wat
     assert!(log.admits_backup("C"), "another peer has its own backlog");
 }
 
-/// **A backup with no live flow is no slow consumer.** The backlog marks read
-/// a peer whose flow is live and bootstrapped only: toward a peer that is
-/// away, or whose bootstrap is in flight, a new call gets its backup whatever
-/// the change log holds for it (one entry per call, its bootstrap carries
-/// them on its return).
+/// **A backup no flow carries is no slow consumer.** Toward a peer that is
+/// away, a new call gets its backup whatever the change log holds for it (one
+/// entry per call; its bootstrap carries them on its return). Any open flow,
+/// one in its bootstrap or one too slow to answer its claim in time included,
+/// is held to the marks.
 #[tokio::test(start_paused = true)]
-async fn a_backup_with_no_live_flow_is_no_slow_consumer() {
+async fn a_backup_no_flow_carries_is_no_slow_consumer() {
     let log = Changelog::new(1, Clock::test_at(0));
     log.set_backlog_marks(marks(3, 1));
     for i in 0..3 {
@@ -190,9 +190,10 @@ async fn a_backup_with_no_live_flow_is_no_slow_consumer() {
     tokio::time::advance(Duration::from_secs(6)).await;
     assert!(log.admits_backup("B"), "an away peer, entries and age over both marks");
     let serving = log.serving("B", Partition::Bak);
-    assert!(log.admits_backup("B"), "a flow in its bootstrap has claimed no position");
+    assert!(!log.admits_backup("B"), "a flow in its bootstrap is held to the marks");
     log.note_applied("B", None, Partition::Bak, Watermark::new(1, 0));
-    assert!(!log.admits_backup("B"), "a live flow over its marks is a slow consumer");
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(!log.admits_backup("B"), "a flow whose claim aged is no away peer");
     drop(serving);
     assert!(log.admits_backup("B"), "its flow gone, the peer is away again");
 }

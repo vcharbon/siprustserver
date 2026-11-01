@@ -1,7 +1,7 @@
 //! What a worker's own membership shows: the peers a test tells it of, and
 //! its own endpoint, bound to its live incarnation.
 
-use topology::Peer;
+use topology::{Membership, Peer};
 
 use super::ReplicatedB2buaSut;
 use crate::views::Belief;
@@ -31,8 +31,13 @@ impl ReplicatedB2buaSut {
     /// List this incarnation's own endpoint under its identity, as the
     /// informer lists a restarted pod once ready, unless the orchestrator
     /// departed or withdrew the ordinal: [`readmit`](crate::FailoverHarness::readmit)
-    /// lists it then.
+    /// lists it then. Each peer is bound to its newest incarnation, as at spawn.
     pub(super) fn list_own_endpoint(&self) {
+        for peer in self.membership.snapshot().into_iter().filter(|p| p.ordinal != self.ordinal) {
+            let gen = self.views.max_gen(&peer.ordinal).max(1);
+            self.membership
+                .add(peer.clone().with_identity(super::incarnation_key(&peer.ordinal, gen)));
+        }
         let left = matches!(
             self.views.beliefs("orchestrator", &self.ordinal).last(),
             Some(Belief::Departed | Belief::Withdrawn)

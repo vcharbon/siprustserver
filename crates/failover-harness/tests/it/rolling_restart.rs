@@ -10,6 +10,9 @@
 //!   rolling  a restarts (call 1 on b), returns; b drains ⇒ caught_up and
 //!            exits, its pod re-created (call 2 on a names b); b returns and
 //!            reclaims call 1; a drains ⇒ caught_up, exits; both BYEs ─▶ b ─▶ 200
+//!   reclaim  b reclaims a quiet call after its restart, writing nothing; a
+//!            parks its flow to b, and b drains to its grace: the call is
+//!            left to a's copy, no CDR from b; b exits, BYE ─▶ a ─▶ 200
 //! ```
 //!
 //! Every call ends with the caller's BYE answered 200 and one CDR.
@@ -19,11 +22,11 @@
 
 use std::time::Duration;
 
-use failover_harness::{total_cdrs_for, FailoverHarness};
+use failover_harness::{total_cdrs_for, DrainExit, FailoverHarness};
 
 use crate::away_backup_support::{
-    answered_on, bring_up, caller_hangs_up, come_back, drain_caught_up, exits, restart_in_place,
-    settle, ALICE, BOB,
+    answered_on, bring_up, caller_hangs_up, come_back, drain, drain_caught_up, exits,
+    restart_in_place, settle, ALICE, BOB,
 };
 
 #[tokio::test(start_paused = true)]
@@ -109,6 +112,60 @@ async fn a_rolling_restart_of_both_workers_loses_no_call_born_in_either_gap() {
     for r in refs {
         assert_eq!(total_cdrs_for(&[&a, &b], r), 1, "one CDR for {r}");
     }
+    fh.assert_sip_rfc_clean(name);
+    drop(proxy);
+}
+
+/// A call its restarted primary reclaimed write-free has no entry in the
+/// primary's new change log, yet its backup holds it: a drain of that primary
+/// reaching its grace leaves the call to the backup's copy.
+#[tokio::test(start_paused = true)]
+async fn a_call_its_restarted_primary_reclaimed_is_left_to_its_backup_at_the_grace() {
+    let name = "reclaimed-call-left-to-its-backup";
+    let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let (proxy, mut a, mut b) = bring_up(&mut fh).await;
+
+    // ── a restarts so the call is born on b; a returns and holds it ─────────
+    restart_in_place(&mut fh, &mut a);
+    fh.advance(Duration::from_secs(1)).await;
+    let mut call = answered_on(&fh, &alice, &bob, &proxy, &b).await;
+    assert_eq!(call.cookie, ("b2".to_string(), "b1".to_string()));
+    come_back(&mut fh, &mut a, &proxy).await;
+    assert!(a.scan_backed_up("b2").contains(&call.call_ref), "a holds the call");
+
+    // ── b restarts gracefully and reclaims the quiet call from a ────────────
+    drain_caught_up(&mut fh, &b).await;
+    exits(&mut fh, &mut b).await;
+    come_back(&mut fh, &mut b, &proxy).await;
+    let reclaimed = fh
+        .pump_until(Duration::from_millis(100), Duration::from_secs(30), async || {
+            b.serves(&call.call_ref)
+        })
+        .await;
+    assert!(reclaimed, "b reclaimed the call");
+
+    // ── a parks its flows to b; b drains to its grace ───────────────────────
+    a.simulate_peer_removed("b2");
+    fh.advance(Duration::from_millis(300)).await;
+    let out = drain(&mut fh, &b).await;
+    assert_eq!(out.exit, DrainExit::GracePeersBehind, "got {out:?}");
+    assert_eq!(out.residual, 1, "the call is reported");
+    assert_eq!(
+        b.cdr_records().iter().filter(|r| r.call_ref == call.call_ref).count(),
+        0,
+        "a call its backup holds is left to it: no CDR from the draining node"
+    );
+    assert!(b.serves(&call.call_ref), "the drain leaves the call to a's copy");
+
+    // ── a re-adds b; b exits; the caller's BYE reaches a ────────────────────
+    a.simulate_peer_added("b2");
+    fh.advance(Duration::from_millis(500)).await;
+    exits(&mut fh, &mut b).await;
+    caller_hangs_up(&mut call.dialog, &bob).await;
+    settle(&fh, &[&a, &b], &[&call.call_ref], &[&alice, &bob]).await;
+    assert_eq!(total_cdrs_for(&[&a, &b], &call.call_ref), 1, "one CDR");
     fh.assert_sip_rfc_clean(name);
     drop(proxy);
 }

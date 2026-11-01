@@ -299,12 +299,17 @@ impl ReplServer {
 
         // Cold (since==(0,0)) ⇒ bulk store-scan; W = head at scan start. The tail
         // then resumes from W (warm), so the scan and the tail never double-deliver.
+        // A puller resuming from an earlier incarnation's position drains every
+        // entry from the sub-log's opening counter, below all it holds, so its
+        // claims are this incarnation's.
         let mut w = since;
         if since == Watermark::new(0, 0) {
             match self.serve_bootstrap(conn, caller, partition, role, &primary, flow).await {
                 Ok(scan_head) => w = scan_head,
                 Err(_) => return, // socket dropped or stalled mid-scan.
             }
+        } else if since.gen < self.changelog.head().gen {
+            w = self.changelog.opened_at(caller, partition).unwrap_or(since);
         }
 
         // ---- tail, drained on write ----

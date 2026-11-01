@@ -294,26 +294,104 @@ async fn a_log_no_flow_serves_goes_at_the_dead_peer_ttl_whatever_it_is_written()
     assert!(!cl.has_peer("A"), "writes do not keep a log no flow serves");
 }
 
+/// The calls the tail sends `A` from `since`, at most `limit` of them.
+async fn sent(cl: &Changelog, since: Watermark, limit: usize) -> Vec<(String, Watermark)> {
+    let frames = cl
+        .drain_since("A", Partition::Bak, since, limit, &NoBodies, PartitionRole::Primary, "self")
+        .await;
+    frames
+        .into_iter()
+        .map(|f| match f {
+            Frame::Data { call_ref, at, .. } => (call_ref, at),
+            other => panic!("expected Data, got {other:?}"),
+        })
+        .collect()
+}
+
 /// A peer holds a call once, under the identity bound to it, it reported
-/// applying any write of the call, however stale; a new identity holds nothing
-/// an earlier one applied until it reports again.
-#[test]
-fn a_peer_holds_a_call_it_applied_a_write_of_under_its_identity() {
+/// applying a position past the first one the call was sent at, however stale
+/// its copy; a new identity holds nothing an earlier one applied until it
+/// reports again.
+#[tokio::test]
+async fn a_peer_holds_a_call_it_applied_a_write_of_under_its_identity() {
     let cl = changelog();
     cl.bind_identity("A", Some("a#g1"));
     let _flow = cl.serving("A", Partition::Bak);
     cl.bump_put("A", "call-1", Partition::Bak);
-    assert!(!cl.applied_any("A", Partition::Bak, "call-1"), "nothing applied yet");
+    assert_eq!(sent(&cl, Watermark::new(7, 0), 10).await.len(), 1);
+    assert!(!cl.applied_any("A", Partition::Bak, "call-1"), "sent, nothing applied yet");
     cl.note_applied("A", Some("a#g1"), Partition::Bak, Watermark::new(7, 1));
     cl.bump_put("A", "call-1", Partition::Bak);
     assert!(cl.applied_any("A", Partition::Bak, "call-1"), "a stale copy is a copy");
     cl.bump_put("A", "call-2", Partition::Bak);
-    assert!(!cl.applied_any("A", Partition::Bak, "call-2"), "born after its last report");
+    assert!(!cl.applied_any("A", Partition::Bak, "call-2"), "never sent");
     cl.bind_identity("A", Some("a#g2"));
     assert!(!cl.applied_any("A", Partition::Bak, "call-1"), "a restarted peer holds nothing");
-    cl.note_applied("A", Some("a#g2"), Partition::Bak, Watermark::new(7, 3));
+    cl.note_scanned("A", Partition::Bak, cl.head());
+    cl.note_applied("A", Some("a#g2"), Partition::Bak, cl.head());
     assert!(cl.applied_any("A", Partition::Bak, "call-2"), "its bootstrap carried the call");
     cl.bump_delete("A", "call-2", Partition::Bak, false, None);
     cl.bump_put("A", "call-2", Partition::Bak);
     assert!(!cl.applied_any("A", Partition::Bak, "call-2"), "a new call on the ref is not held");
+}
+
+/// A call whose entry moved before the tail reached it was never sent at its
+/// first counter: a peer that applied a later position of another call does
+/// not hold it.
+#[tokio::test]
+async fn a_peer_never_sent_a_call_does_not_hold_it() {
+    let cl = changelog();
+    let _flow = cl.serving("A", Partition::Bak);
+    cl.bump_put("A", "call-x", Partition::Bak);
+    cl.bump_put("A", "call-y", Partition::Bak);
+    cl.bump_put("A", "call-x", Partition::Bak);
+    let one = sent(&cl, Watermark::new(7, 0), 1).await;
+    assert_eq!(one, vec![("call-y".to_string(), Watermark::new(7, 2))], "one batch: call-y");
+    cl.note_applied("A", None, Partition::Bak, Watermark::new(7, 2));
+    assert!(!cl.applied_any("A", Partition::Bak, "call-x"), "call-x was never sent to the peer");
+    assert_eq!(sent(&cl, Watermark::new(7, 2), 10).await.len(), 1, "call-x goes next");
+    cl.note_applied("A", None, Partition::Bak, Watermark::new(7, 3));
+    assert!(cl.applied_any("A", Partition::Bak, "call-x"), "applied once sent");
+}
+
+/// A backup away past the dead-peer TTL comes back as a new identity and
+/// bootstraps cold: the scan carries every call whose metadata names it, so it
+/// holds a call written before its log was dropped, which has no entry in the
+/// log opened since.
+#[tokio::test(start_paused = true)]
+async fn a_backup_back_past_the_ttl_holds_what_its_bootstrap_carried() {
+    let clock = Clock::test_at(0);
+    let cl = Changelog::new(7, clock.clone()).with_dead_peer_ttl(2_000);
+    cl.bind_identity("A", Some("a#1"));
+    {
+        let _flow = cl.serving("A", Partition::Bak);
+        cl.bump_put("A", "call-x", Partition::Bak);
+        assert_eq!(sent(&cl, Watermark::new(7, 0), 10).await.len(), 1);
+        cl.note_applied("A", Some("a#1"), Partition::Bak, Watermark::new(7, 1));
+        assert!(cl.applied_any("A", Partition::Bak, "call-x"), "the peer applied call-x");
+    }
+    tokio::time::advance(Duration::from_secs(3)).await;
+    cl.reap(clock.now_ms());
+    assert!(!cl.has_peer("A"), "the log went at the TTL");
+    cl.bind_identity("A", Some("a#2"));
+    let _flow = cl.serving("A", Partition::Bak);
+    assert!(!cl.applied_any("A", Partition::Bak, "call-x"), "nothing reported yet");
+    cl.note_scanned("A", Partition::Bak, cl.head());
+    cl.note_applied("A", Some("a#2"), Partition::Bak, cl.head());
+    assert!(cl.applied_any("A", Partition::Bak, "call-x"), "the cold bootstrap carried call-x");
+}
+
+/// A restarted peer's report that reaches the log before membership binds its
+/// new identity counts once the identity is bound.
+#[test]
+fn a_report_made_before_its_identity_is_bound_counts_once_bound() {
+    let cl = changelog();
+    cl.bind_identity("A", Some("a#g1"));
+    let _flow = cl.serving("A", Partition::Bak);
+    cl.bump_put("A", "call-1", Partition::Bak);
+    cl.note_scanned("A", Partition::Bak, cl.head());
+    cl.note_applied("A", Some("a#g2"), Partition::Bak, cl.head());
+    assert!(!cl.applied_any("A", Partition::Bak, "call-1"), "a#g2 is not bound yet");
+    cl.bind_identity("A", Some("a#g2"));
+    assert!(cl.applied_any("A", Partition::Bak, "call-1"), "its report counts once bound");
 }

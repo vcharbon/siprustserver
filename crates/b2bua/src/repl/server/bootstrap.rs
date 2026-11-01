@@ -38,6 +38,7 @@ impl ReplServer {
         // head read was in neither the scan nor the tail (`Bound::Excluded(W)`),
         // and if it then quiesced the backup never held it.
         let w = self.changelog.head();
+        self.changelog.note_scanned(caller, partition, w);
         let keys = match partition {
             // Reclaim: the caller's own calls we hold as backup.
             Partition::Pri => self.source.scan_refs(PartitionRole::Backup, caller),

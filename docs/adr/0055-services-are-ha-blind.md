@@ -202,13 +202,14 @@ ends the transaction with the CANCEL unsent (§9.1, §17.2.1).
   oldest evicted first, and a new call on the same identity is not refused. The backlog is measured per backup peer: the entries
   above that peer's applied position and the age of the oldest. New calls get a
   backup again once the backlog is under a low-water mark. The marks read a
-  backup whose flow is live only: a backup that is away, or whose bootstrap
-  is in flight, is no slow consumer, and the call is admitted with it. Its
-  writes go to the change log toward that backup, one entry per call (a delete
-  stays until applied); the log goes one dead-peer TTL
-  (`B2BUA_REPL_DEAD_PEER_TTL_MS`, 60 s, ADR-0045) after a flow last served it,
-  writes or not, so it holds the writes of that TTL at most,
-  and a warm pull past it re-bootstraps. On its return the backup's bootstrap
+  backup with an open flow, bootstrapping or slow to answer alike, so the
+  entries new calls add toward it stop at the high-water mark. A backup no
+  flow carries is away, no slow consumer, and the call is admitted with it:
+  its writes go to the change log toward that backup, one entry per call (a
+  delete stays until applied), and the log goes one dead-peer TTL
+  (`B2BUA_REPL_DEAD_PEER_TTL_MS`, 60 s, ADR-0045) after a flow last closed,
+  writes or not, so it holds the writes of that TTL at most; a warm pull past
+  it re-bootstraps. On its return the backup's bootstrap
   carries the call from the primary's call metadata. No call is refused for
   the backlog. A gauge counts the live calls with no backup; such a call runs
   as on a non-HA B2BUA.
@@ -305,22 +306,30 @@ A graceful drain is transparent: it exits once the backup has caught up and
 every outbox is empty. A call a peer is not shown to hold keeps the drain
 waiting for its calls or its grace, as a non-HA B2BUA does. At the grace the
 drain ends each call no peer holds (user ruling): one with no backup, or whose
-backup never reported applying any write of it under the identity bound to it
-now (away since before the call was born, or restarted since). The fact is
-durable: the backup's highest applied position against the call's first
-change-log entry, not the flow's liveness. Each such call is ended: an
+backup is not shown to hold it. The change log shows a backup holding a call
+when the backup, under the identity membership binds to its ordinal, reported
+applying a position at or past the first counter the call's entry was sent
+at, by the tail or a bootstrap scan; or, for a call with no entry in the log
+opened since (a call a restarted primary reclaimed, or written before the log
+went at the dead-peer TTL), at or past the counter that log opened at. A new
+identity bound to the ordinal starts from what it reported itself. A backup
+away since before the call was sent, or restarted since without reporting
+again, is not shown to hold it. The flow's liveness plays no part. The cells
+of `failover-harness` pin these cases; nothing more is claimed. Each such call is ended: an
 established one where it stands, its CDR written and its holds released, with
 nothing sent, so a call whose media still flows is never cut by the node; a
 call still in setup is aborted as a release-all aborts it (ADR-0050 §10):
 `503` to its caller (ADR-0022), a CANCEL to a ringing callee. A withdrawn
 worker never sees the answer to that CANCEL (the proxy hands it to the call's
 other owner), so an ending still resident halfway through the drain's flush
-bound is discharged off the wire. A call whose backup applied a write of it,
+bound is discharged off the wire. A call its backup is shown to hold,
 current or stale, is left to that copy (user ruling): the draining node sends
 nothing for it, writes no CDR and logs no delete, and the parties notice
 nothing until an in-dialog request reaches the backup, which serves it once
 the primary is gone (§4 settles a stale copy). The drain's exit stays the
-grace's and its residual counts the live calls the grace found. A party's
+grace's and its residual counts the live calls the grace found. The ended
+calls' limiter releases get a flush bound of their own once the endings left,
+so such a drain returns by its grace plus twice its flush bound. A party's
 later request for an ended call reaches a worker that holds no copy, which
 answers `481`, or, when neither owner the cookie names is alive, is dropped
 by the proxy (§8). A
@@ -411,7 +420,7 @@ CDR, and it is accepted: a primary killed after ending a call whose end its
 backup never applied, a split. By user ruling a kill of a primary with a backup
 never loses the CDR: a split may, and a call with no backup is lost with its
 primary as on a non-HA B2BUA, leaving one CDR or none (user ruling). A
-drain ends at its grace each call no live peer holds and writes its CDR, the
+drain ends at its grace each call no peer holds and writes its CDR, the
 call's only one (§3).
 
 The departure sweep takes over every call of a departed primary with an INVITE

@@ -5,13 +5,20 @@
 //! and the graceful drain of a worker driven to its exit.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
+use b2bua::limiter::http::HttpCallLimiter;
+use call_limiter::{CallStore, LimiterMetrics, LimiterServer};
+use failover_harness::cluster::limited_route_to;
 use failover_harness::{
     worker_ordinals, DrainBounds, DrainExit, DrainOutcome, FailoverHarness, ProxySut,
-    ReplicatedB2buaSut, WorkerHealth,
+    ReplicatedB2buaSut, WorkerHealth, LEASE_OUTLIVING_THE_REPLICA_TTL,
 };
+use http_net::{HttpServerHandle, HttpTransport};
+use http_net_testkit::SimulatedHttpNetwork;
 use scenario_harness::{Agent, Dialog};
+use sip_clock::Clock;
 
 pub(crate) const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 pub(crate) const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -32,6 +39,64 @@ pub(crate) const BOUNDS: DrainBounds = DrainBounds {
     release_flush: Duration::from_secs(3),
     cdr_flush: Duration::ZERO,
 };
+
+/// The cluster's call limiter on its own HTTP fabric: every call holds one
+/// set on it, and its total reads the sets the live calls still hold.
+pub(crate) struct Limiter {
+    pub(crate) store: Arc<CallStore>,
+    http: SimulatedHttpNetwork,
+    _server: Box<dyn HttpServerHandle>,
+}
+
+impl Limiter {
+    pub(crate) async fn serve() -> Self {
+        let http = SimulatedHttpNetwork::new();
+        let store = Arc::new(CallStore::new(LEASE_OUTLIVING_THE_REPLICA_TTL, Clock::test_at(0)));
+        let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
+        let addr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
+        let _server = http.serve(addr, server).await.unwrap();
+        Self { store, http, _server }
+    }
+
+    /// A worker `ordinal` bound on `bind`, its calls routed to bob, each
+    /// holding one set on this limiter.
+    pub(crate) async fn worker(
+        &self,
+        fh: &mut FailoverHarness,
+        ordinal: &str,
+        bind: &str,
+        peers: &[&str],
+    ) -> ReplicatedB2buaSut {
+        let addr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
+        let client = Arc::new(HttpCallLimiter::new(
+            Arc::new(self.http.clone()),
+            addr,
+            Duration::from_millis(150),
+        ));
+        let decision = limited_route_to(BOB.parse().unwrap());
+        let (rt, ob) = (("127.0.0.1", 5070), ("127.0.0.1", 5080));
+        fh.spawn_worker_limited(ordinal, ordinal, bind, peers, rt, ob, decision, client).await
+    }
+
+    /// The sets the live calls still hold.
+    pub(crate) fn held(&self) -> i64 {
+        self.store.stats().current_total
+    }
+}
+
+/// [`bring_up`], every call holding one set on the returned limiter.
+pub(crate) async fn bring_up_limited(
+    fh: &mut FailoverHarness,
+) -> (ProxySut, ReplicatedB2buaSut, ReplicatedB2buaSut, Limiter) {
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let limiter = Limiter::serve().await;
+    let b1 = limiter.worker(fh, "b1", B1, &["b2"]).await;
+    let b2 = limiter.worker(fh, "b2", B2, &["b1"]).await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert!(b1.is_ready() && b2.is_ready(), "both workers ready at steady state");
+    (proxy, b1, b2, limiter)
+}
 
 /// The front proxy and both workers, read alive, ready at steady state.
 pub(crate) async fn bring_up(
@@ -167,7 +232,7 @@ pub(crate) async fn callee_hangs_up(bob_dialog: &mut Dialog, alice: &Agent) {
 pub(crate) async fn drain(fh: &mut FailoverHarness, node: &ReplicatedB2buaSut) -> DrainOutcome {
     fh.withdraw_routing(node.ordinal());
     let mut pending = fh.begin_drain_pending(node, BOUNDS);
-    let bound = GRACE + BOUNDS.release_flush + Duration::from_secs(1);
+    let bound = GRACE + BOUNDS.release_flush * 2 + Duration::from_secs(1);
     let t0 = fh.now_ms();
     loop {
         if let Some(out) = pending.poll() {

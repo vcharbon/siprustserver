@@ -55,10 +55,9 @@ async fn a_drain_waits_for_an_unbacked_call_then_ends_it_off_the_wire() {
     let bob = fh.agent("bob", BOB).await;
     let proxy =
         fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
-    let mut w_b1 =
-        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
-    let mut w_b2 =
-        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let limiter = crate::away_backup_support::Limiter::serve().await;
+    let mut w_b1 = limiter.worker(&mut fh, "b1", B1, &["b2"]).await;
+    let mut w_b2 = limiter.worker(&mut fh, "b2", B2, &["b1"]).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both workers ready at steady state");
 
@@ -109,6 +108,7 @@ async fn a_drain_waits_for_an_unbacked_call_then_ends_it_off_the_wire() {
     );
     assert!(!primary.serves(&call_ref), "the call is released on the draining primary");
     assert!(primary.memory_clean(), "nothing of the call stays resident");
+    assert_eq!(limiter.held(), 0, "the call's limiter set is released at the grace");
     let sent = fh
         .sip_entries()
         .iter()

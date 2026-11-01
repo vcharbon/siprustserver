@@ -71,9 +71,9 @@ pub const DEFAULT_DEAD_PEER_TTL_MS: i64 = 60_000;
 #[derive(Clone, Debug)]
 struct RefState {
     counter: u64,
-    /// The counter of the call's first `Put` in this sub-log, kept by its
-    /// later writes: the peer applied a write of the call once it reports it.
-    first: u64,
+    /// The first counter this call's entry was snapshotted for send at, by
+    /// the tail or a bootstrap scan, kept as the entry moves (see `held`).
+    first_sent: Option<u64>,
     op: Op,
     /// `now_ms` of the write the entry holds: the age of a pending write.
     written_ms: i64,
@@ -106,6 +106,9 @@ struct SubLog {
     /// stands for a log it never pulled and must re-bootstrap
     /// ([`needs_reset`](Changelog::needs_reset)).
     retained_floor: u64,
+    /// The node's counter when this sub-log opened: it holds nothing written
+    /// before. Unlike the floor, reaping never moves it (see `held`).
+    opened: u64,
     /// Highest counter ever assigned in this sub-log. Unlike `entries`, it
     /// survives compaction and reaping — it is the position a caught-up puller
     /// must have reported (ADR-0031 D2), not a live-set bound.
@@ -121,6 +124,9 @@ struct SubLog {
     /// The highest position the peer ever reported applying on this sub-log
     /// under this node's incarnation, connected or not ([`progress`]).
     acked: watch::Sender<Watermark>,
+    /// The highest position an identity membership does not bind reported,
+    /// counted once it is bound ([`progress`]).
+    unbound: Option<(String, Watermark)>,
     /// The sub-log's head counter, moved by every write: the serve task waits
     /// on it.
     written: watch::Sender<u64>,
@@ -132,10 +138,12 @@ impl SubLog {
             entries: BTreeMap::new(),
             by_ref: HashMap::new(),
             retained_floor,
+            opened: retained_floor,
             head: 0,
             applied: None,
             streams: 0,
             acked: watch::Sender::new(Watermark::new(0, 0)),
+            unbound: None,
             written: watch::Sender::new(0),
         }
     }
@@ -146,16 +154,16 @@ impl SubLog {
     /// ref never inherits a former call's.
     fn put(&mut self, counter: u64, call_ref: &str, op: Op, now_ms: i64, stated: Stated) {
         let Stated { mut answered, incarnation } = stated;
-        let mut first = counter;
+        let mut first_sent = None;
         if let Some(prev) = self.by_ref.get(call_ref) {
             self.entries.remove(&prev.counter);
             answered |= op == Op::Delete && prev.op == Op::Delete && prev.answered;
             if op == Op::Delete || prev.op == Op::Put {
-                first = prev.first;
+                first_sent = prev.first_sent;
             }
         }
         self.entries.insert(counter, call_ref.to_string());
-        let state = RefState { counter, first, op, written_ms: now_ms, answered, incarnation };
+        let state = RefState { counter, first_sent, op, written_ms: now_ms, answered, incarnation };
         self.by_ref.insert(call_ref.to_string(), state);
         self.head = self.head.max(counter);
         self.written.send_replace(self.head);
@@ -169,14 +177,16 @@ impl SubLog {
     }
 
     /// The due entries above `since` (or all when `cold`), ascending, capped at
-    /// `limit`.
-    fn due(&self, since_counter: u64, cold: bool, limit: usize) -> Vec<Due> {
+    /// `limit`, each marked sent at its counter if it was never sent.
+    fn due(&mut self, since_counter: u64, cold: bool, limit: usize) -> Vec<Due> {
         let start = if cold { Bound::Unbounded } else { Bound::Excluded(since_counter) };
+        let by_ref = &mut self.by_ref;
         self.entries
             .range((start, Bound::Unbounded))
             .take(limit)
             .filter_map(|(c, call_ref)| {
-                let st = self.by_ref.get(call_ref)?;
+                let st = by_ref.get_mut(call_ref)?;
+                st.first_sent.get_or_insert(*c);
                 Some(Due {
                     counter: *c,
                     call_ref: call_ref.clone(),
@@ -482,6 +492,7 @@ fn reap_sublog(sub: &mut SubLog, gen: u64) {
 
 mod backlog;
 mod drain;
+mod held;
 mod progress;
 mod serving;
 mod source;
