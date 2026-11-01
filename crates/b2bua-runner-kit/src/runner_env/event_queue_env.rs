@@ -1,6 +1,9 @@
 //! The event-queue gate's env grammar (ADR-0050 §9): when a worker whose
-//! transaction event queue is backed up refuses new calls on its OPTIONS
-//! answer (`new=refuse; cause=overload`), and when it accepts them again.
+//! transaction event queue is backed up refuses new calls, on its OPTIONS
+//! answer (`new=refuse; cause=overload`) and at its admission ladder's
+//! event-queue rung (ADR-0037 item 11, a `503` to a new normal INVITE), and
+//! when it accepts them again. Both read the one gate: one state, one set of
+//! bounds, one hold.
 //!
 //! | variable | role | default |
 //! |---|---|---|
@@ -21,9 +24,11 @@
 //! stays under the proxy probe's reply window (`timeout_ms`, 1500): a router
 //! that lags that much is refused before its answers could be read late.
 //!
-//! The proxy reads the refusal on its next probe answer (`interval_ms`, 1000)
-//! and places new calls on the other workers; health, and so every dialog the
-//! worker owns, is unaffected. The hold spans at least two probe intervals,
+//! The ladder refuses from the router's first reading past a refusal bound;
+//! the proxy reads the refusal on its next probe answer (`interval_ms`, 1000)
+//! and places new calls on the other workers, so the INVITEs placed on the
+//! worker in between get its `503` and their callers retry. Health, and so
+//! every dialog the worker owns, is unaffected. The hold spans at least two probe intervals,
 //! so a refusal is read by a probe and the worker does not flap at the probe's
 //! cadence; it is not tied to the probe's `threshold` (2), which only counts
 //! missed answers. A refusing worker's answers keep their load payload, so the
@@ -32,7 +37,9 @@
 //! Unset or blank takes the default. A value that is not a positive integer
 //! refuses the boot naming its variable, and so do an accept depth not below
 //! the refuse depth, a refuse depth past the event queue's bound, and an
-//! accept sojourn not below the refuse sojourn.
+//! accept sojourn not below the refuse sojourn. The relation to the probe
+//! timers is the deployment's to keep: they are the proxy's settings, which a
+//! worker does not read.
 
 use b2bua::config::EventQueueGateConfig;
 

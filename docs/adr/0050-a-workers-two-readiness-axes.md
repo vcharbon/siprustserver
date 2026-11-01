@@ -3,7 +3,8 @@
 **Status:** accepted (2026-10-16). Amended (2026-10-28): §3, the proxy tells
 each dead verdict to the workers; §5, the undecided call's residual.
 Amended (2026-11-01): §2 and §9, a backed-up event queue refuses new calls
-(`cause=overload`); §12, the keepalive lane.
+(`cause=overload`, and the admission ladder's event-queue rung); §12, the
+keepalive lane.
 
 **Owner:** `crates/sip-message` (the `X-Readiness` and `X-Incarnation` headers),
 `crates/b2bua/src/repl/readiness.rs` and `router/responses.rs` (the worker's
@@ -184,8 +185,10 @@ take a new call, and may an in-dialog request of a call it owns reach it.
      depth and sojourn have both stayed at or below their accept bounds (64,
      50 ms) for the hold (3 s, at least two probe intervals). The router
      reads it at each event it takes and the OPTIONS answer at each probe.
-     The worker's admission ladder is not fed by it: a new INVITE that still
-     reaches a refusing worker is admitted or refused as before, and
+     The same gate is the event-queue rung of the worker's admission ladder
+     (ADR-0037 item 11): a new normal INVITE that still reaches the worker
+     while the gate refuses gets the ladder's `503`, from the gate's first
+     refusing reading on, before any probe reads it; emergency INVITEs and
      in-dialog requests are never refused by it. The bounds, their defaults
      and the boot checks between them are the runner's `B2BUA_EVENT_QUEUE_*`
      grammar. The proxy keeps a refusing worker `Alive` and every dialog it

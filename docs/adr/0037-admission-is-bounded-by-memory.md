@@ -2,7 +2,7 @@
 
 **Status:** accepted (2026-09-25)
 Amended (2026-10-23): items 4 and 6, a replica left out leaves the call without a backup
-(ADR-0055 §3).
+(ADR-0055 §3). Amended (2026-11-01): item 11, the event-queue rung.
 
 ## Context
 
@@ -131,6 +131,7 @@ kills it, and a kill drops every call it serves.
     | shed | router ingress | live per-call queues | refused at the cap less the headroom | refused at the cap | — | configured |
     | panic-ELU | router ingress | the worker's EWMA-ELU | refused above the backstop | admitted | — | configured |
     | bucket | router ingress | time to a CPS token | refused with no token | admitted | — | the time to a token, at least the configured base |
+    | event queue | router ingress | the event-queue gate (ADR-0050 §9) | refused while the gate refuses | admitted | — | configured |
 
     Each rung keeps its site. The backlog is decided by the transaction
     layer's bound; every other rung by one function over its input and the
@@ -154,6 +155,18 @@ kills it, and a kill drops every call it serves.
     another request opened admits nothing.
     The turn keeps the store-fault probe (a 500, outside the table) and the
     creation of the call.
+
+    The event-queue rung reads the same gate as the OPTIONS answer's
+    `cause=overload`: one state, one set of bounds, one hold. It refuses from
+    the router's first reading past a refusal bound, before any probe reads
+    the refusal, and keeps refusing the new calls that still reach the worker
+    (in flight, or placed on it while every worker refuses) until the gate
+    accepts. It judges as the panic-ELU rung, a load signal: an emergency
+    INVITE is admitted. It comes last, so a refusal another rung also makes
+    keeps that rung's reason (`reason="event_queue"`). It reads the
+    transaction event queue, which no other rung does: under a CPU cap the
+    loop's busy ratio stays low and the inbound queue and deferred backlog
+    stay short while the router falls seconds behind.
 
 ## Consequences
 

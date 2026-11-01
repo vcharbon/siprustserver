@@ -32,8 +32,29 @@ fn reason(rung: Rung, class: Class) -> Option<Refusal> {
 fn the_ladder_orders_the_rungs() {
     assert_eq!(
         LADDER,
-        [Step::Brake, Step::Backlog, Step::Capacity, Step::Shed, Step::PanicElu, Step::Bucket]
+        [
+            Step::Brake,
+            Step::Backlog,
+            Step::Capacity,
+            Step::Shed,
+            Step::PanicElu,
+            Step::Bucket,
+            Step::EventQueue
+        ]
     );
+}
+
+/// The event-queue rung refuses a normal INVITE while the gate refuses, as
+/// the panic-ELU rung judges: an emergency or in-dialog one is admitted.
+#[test]
+fn the_event_queue_row() {
+    let gate = |refusing| Rung::EventQueue { refusing };
+    assert_eq!(reason(gate(false), Class::Normal), None);
+    assert_eq!(reason(gate(true), Class::Normal), Some(Refusal::EventQueue));
+    assert_eq!(refused(gate(true), Class::Normal).map(|r| r.not_before_sec), Some(0));
+    for class in [Class::Emergency, Class::InDialog] {
+        assert_eq!(reason(gate(true), class), None, "{class:?}");
+    }
 }
 
 /// The brake refuses a normal INVITE at its threshold and nothing else.
@@ -209,11 +230,14 @@ impl RouterReadings for Readings {
             5
         }
     }
+    fn event_queue_refusing(&self) -> bool {
+        !self.admits(Step::EventQueue)
+    }
 }
 
 /// At router ingress the first refusing rung, in ladder order, names the
 /// refusal: capacity before the shed, the shed before the panic backstop,
-/// the panic backstop before the bucket.
+/// the panic backstop before the bucket, the bucket before the event queue.
 #[test]
 fn the_router_judges_its_rungs_in_ladder_order() {
     let first = |admitting: &[Step]| {
@@ -223,7 +247,10 @@ fn the_router_judges_its_rungs_in_ladder_order() {
     assert_eq!(first(&[Step::Capacity]), Some(Refusal::CapShed));
     assert_eq!(first(&[Step::Capacity, Step::Shed]), Some(Refusal::PanicElu));
     assert_eq!(first(&[Step::Capacity, Step::Shed, Step::PanicElu]), Some(Refusal::BucketEmpty));
-    assert_eq!(first(&[Step::Capacity, Step::Shed, Step::PanicElu, Step::Bucket]), None);
+    let all_but_the_queue = [Step::Capacity, Step::Shed, Step::PanicElu, Step::Bucket];
+    assert_eq!(first(&all_but_the_queue), Some(Refusal::EventQueue));
+    let all = [all_but_the_queue.as_slice(), &[Step::EventQueue]].concat();
+    assert_eq!(first(&all), None);
 }
 
 /// The router reads only its rungs' inputs, and stops at the first refusal.
@@ -249,6 +276,7 @@ fn each_ladder_reason_names_one_rung() {
         Rung::Shed { at_threshold: true },
         Rung::PanicElu { elu: 1.0, threshold: 0.5 },
         Rung::Bucket { wait_sec: 1 },
+        Rung::EventQueue { refusing: true },
     ];
     let mut reasons: Vec<Refusal> =
         rungs.iter().filter_map(|rung| reason(*rung, Class::Normal)).collect();

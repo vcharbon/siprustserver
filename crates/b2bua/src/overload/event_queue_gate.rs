@@ -6,8 +6,9 @@
 //! bounds for the hold, so it does not flap at the probe's cadence.
 //!
 //! The router observes each event it takes from the queue; the OPTIONS
-//! answer observes the queue as it stands (an empty queue reads a zero
-//! sojourn) and reads the verdict. Time is `tokio::time`.
+//! answer and the admission ladder's event-queue rung (ADR-0037 item 11)
+//! observe the queue as it stands (an empty queue reads a zero sojourn) and
+//! read the verdict. Time is `tokio::time`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

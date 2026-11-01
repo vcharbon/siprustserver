@@ -67,11 +67,14 @@ pub enum Refusal {
     /// The call's record of the INVITE does not rebuild it (ADR-0052 §11):
     /// answered 500 from the INVITE itself, and no call is born.
     Unrecoverable,
+    /// The event-queue gate refused: the worker's transaction event queue is
+    /// backed up (ADR-0050 §9).
+    EventQueue,
 }
 
 impl Refusal {
     /// Every reason, in exposition order.
-    pub const ALL: [Refusal; 13] = [
+    pub const ALL: [Refusal; 14] = [
         Refusal::BucketEmpty,
         Refusal::PanicElu,
         Refusal::CapacityCalls,
@@ -85,6 +88,7 @@ impl Refusal {
         Refusal::IdentityInUse,
         Refusal::Cordoned,
         Refusal::Unrecoverable,
+        Refusal::EventQueue,
     ];
 
     /// Stable `reason` label.
@@ -103,6 +107,7 @@ impl Refusal {
             Refusal::IdentityInUse => "identity_in_use",
             Refusal::Cordoned => "cordoned",
             Refusal::Unrecoverable => "unrecoverable",
+            Refusal::EventQueue => "event_queue",
         }
     }
 
@@ -152,6 +157,12 @@ impl NewCallTally {
     /// Count one copy of a call already here refused: no new call.
     pub fn refuse_copy(&self) {
         self.rows.refused_copies.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// New calls of `class` the router refused for `reason` so far.
+    pub fn rejected(&self, reason: Refusal, class: Class) -> u64 {
+        let row = self.rows.rejected.get(reason.index());
+        row.and_then(|row| row.get(class.index())).map_or(0, |n| n.load(Ordering::Relaxed))
     }
 }
 

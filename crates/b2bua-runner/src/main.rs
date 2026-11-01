@@ -67,7 +67,7 @@
 //!   B2BUA_CDR_CAPTURED_HEADERS header names whose values every ring entry captures, comma-separated (default empty)
 //!   B2BUA_EVENT_QUEUE_REFUSE_DEPTH / _ACCEPT_DEPTH / _REFUSE_SOJOURN_MS / _ACCEPT_SOJOURN_MS / _ACCEPT_HOLD_MS
 //!                   a backed-up transaction event queue refuses new calls on the OPTIONS answer
-//!                   (cause=overload) and accepts again after the hold (default 512 / 64 / 500 / 50 / 3000;
+//!                   (cause=overload) and at the admission ladder, and accepts again after the hold (default 512 / 64 / 500 / 50 / 3000;
 //!                   roles, relation to the proxy probe and AIMD, boot checks: `b2bua_runner_kit`'s
 //!                   `runner_env::event_queue_env`, ADR-0050 §9)
 //!

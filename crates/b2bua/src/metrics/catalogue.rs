@@ -59,6 +59,7 @@ assert_exposition_order!(
     IdentityInUse,
     Cordoned,
     Unrecoverable,
+    EventQueue,
 );
 assert_exposition_order!(Class: Normal, Emergency, InDialog);
 

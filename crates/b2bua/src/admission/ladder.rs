@@ -19,7 +19,7 @@ pub use sip_txn::class_of;
 /// arrival, before the datagram is queued; the backlog in the transaction
 /// layer, before any transaction exists, by the
 /// [`DeferredBound`](sip_txn::DeferredBound) of
-/// [`deferred_bound`](super::deferred_bound); the other four at router
+/// [`deferred_bound`](super::deferred_bound); the other five at router
 /// ingress ([`first_refusal`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
@@ -29,11 +29,19 @@ pub enum Step {
     Shed,
     PanicElu,
     Bucket,
+    EventQueue,
 }
 
 /// The order a new INVITE meets the rungs in.
-pub const LADDER: [Step; 6] =
-    [Step::Brake, Step::Backlog, Step::Capacity, Step::Shed, Step::PanicElu, Step::Bucket];
+pub const LADDER: [Step; 7] = [
+    Step::Brake,
+    Step::Backlog,
+    Step::Capacity,
+    Step::Shed,
+    Step::PanicElu,
+    Step::Bucket,
+    Step::EventQueue,
+];
 
 /// A rung [`judge`] decides, with the input it is judged on.
 #[derive(Debug, Clone, Copy)]
@@ -50,6 +58,8 @@ pub enum Rung {
     PanicElu { elu: f64, threshold: f64 },
     /// Seconds until the CPS bucket holds a token: 0 when it holds one.
     Bucket { wait_sec: u32 },
+    /// Whether the event-queue gate refuses (ADR-0050 §9).
+    EventQueue { refusing: bool },
 }
 
 /// A rung's refusal: why, and the least `Retry-After` base it states.
@@ -78,6 +88,8 @@ pub enum Verdict {
 /// Decide `rung` for an INVITE of `class`. An emergency INVITE is refused
 /// only at its own capacity ceilings and the shed's full cap; an in-dialog
 /// INVITE is refused only by the backlog, which the transaction layer judges.
+/// The event-queue rung judges as the panic-ELU rung: a load signal, it
+/// refuses normal INVITEs only.
 pub fn judge(rung: Rung, class: Class) -> Verdict {
     let refused = match (rung, class) {
         (_, Class::InDialog) => None,
@@ -91,9 +103,16 @@ pub fn judge(rung: Rung, class: Class) -> Verdict {
         }
         (Rung::Bucket { wait_sec }, Class::Normal) => (wait_sec > 0)
             .then_some(Refused { reason: Refusal::BucketEmpty, not_before_sec: wait_sec }),
-        (Rung::Brake { .. } | Rung::PanicElu { .. } | Rung::Bucket { .. }, Class::Emergency) => {
-            None
+        (Rung::EventQueue { refusing }, Class::Normal) => {
+            refusing.then_some(Refused::now(Refusal::EventQueue))
         }
+        (
+            Rung::Brake { .. }
+            | Rung::PanicElu { .. }
+            | Rung::Bucket { .. }
+            | Rung::EventQueue { .. },
+            Class::Emergency,
+        ) => None,
     };
     refused.map_or(Verdict::Admit, Verdict::Refuse)
 }
@@ -109,6 +128,8 @@ pub trait RouterReadings {
     fn panic_elu(&self) -> (f64, f64);
     /// Seconds until the CPS bucket holds a token.
     fn token_wait_sec(&self) -> u32;
+    /// Whether the event-queue gate refuses, reading the queue now.
+    fn event_queue_refusing(&self) -> bool;
 }
 
 /// The first of the router's rungs, in [`LADDER`] order, that refuses an
@@ -125,6 +146,7 @@ pub fn first_refusal(class: Class, readings: &impl RouterReadings) -> Option<Ref
                 Rung::PanicElu { elu, threshold }
             }
             Step::Bucket => Rung::Bucket { wait_sec: readings.token_wait_sec() },
+            Step::EventQueue => Rung::EventQueue { refusing: readings.event_queue_refusing() },
         };
         match judge(rung, class) {
             Verdict::Admit => None,

@@ -73,7 +73,8 @@
         { "expr": "sum(rate(sip_proxy_overload_rejections_total{reason=\"bucket_empty\"}[1m]))", "refId": "D", "legendFormat": "rate_cap_exhausted" },
         { "expr": "sum(rate(b2bua_new_calls_total{outcome=\"rejected\",reason=\"panic_elu\"}[1m]))", "refId": "E", "legendFormat": "worker_panic_elu" },
         { "expr": "sum(rate(b2bua_new_calls_total{outcome=\"rejected\",reason=\"bucket_empty\"}[1m]))", "refId": "F", "legendFormat": "worker_cps_hard_cap" },
-        { "expr": "sum(rate(b2bua_new_calls_total{outcome=\"rejected\",reason=\"ingress_brake\"}[1m]))", "refId": "G", "legendFormat": "udp_ingress_brake" }
+        { "expr": "sum(rate(b2bua_new_calls_total{outcome=\"rejected\",reason=\"ingress_brake\"}[1m]))", "refId": "G", "legendFormat": "udp_ingress_brake" },
+        { "expr": "sum(rate(b2bua_new_calls_total{outcome=\"rejected\",reason=\"event_queue\"}[1m]))", "refId": "H", "legendFormat": "worker_event_queue" }
       ],
       "fieldConfig": {
         "defaults": {
@@ -99,11 +100,11 @@
     {
       "id": 4,
       "type": "stat",
-      "title": "Worker panic-ELU + CPS bucket refusals (rate)",
+      "title": "Worker panic-ELU + CPS bucket + event-queue refusals (rate)",
       "gridPos": { "h": 5, "w": 6, "x": 18, "y": 5 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
-        { "expr": "sum(rate(b2bua_new_calls_total{outcome=\"rejected\",reason=~\"panic_elu|bucket_empty\"}[5m]))", "refId": "A" }
+        { "expr": "sum(rate(b2bua_new_calls_total{outcome=\"rejected\",reason=~\"panic_elu|bucket_empty|event_queue\"}[5m]))", "refId": "A" }
       ],
       "fieldConfig": {
         "defaults": {

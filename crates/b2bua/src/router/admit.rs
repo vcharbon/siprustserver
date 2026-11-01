@@ -1,5 +1,5 @@
 //! The router's rungs of the admission ladder (ADR-0037): a new INVITE is
-//! judged at ingress — capacity, shed, panic-ELU, bucket, in
+//! judged at ingress — capacity, shed, panic-ELU, bucket, event queue, in
 //! [`LADDER`](crate::admission::LADDER) order — before the dispatch offer, so
 //! a refusal opens no per-call queue and waits for no handler permit. A
 //! refused INVITE is answered through its server transaction, which absorbs
@@ -191,6 +191,9 @@ impl RouterReadings for Readings<'_> {
     }
     fn token_wait_sec(&self) -> u32 {
         self.ctx.overload.token_wait_sec()
+    }
+    fn event_queue_refusing(&self) -> bool {
+        self.ctx.readiness.queue_gate().is_some_and(|gate| gate.refusing())
     }
 }
 

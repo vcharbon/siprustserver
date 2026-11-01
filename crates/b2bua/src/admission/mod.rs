@@ -10,6 +10,7 @@
 //! | shed | router ingress | live per-call queues | cap less headroom | cap | — | configured |
 //! | panic-ELU | router ingress | EWMA-ELU | above the backstop | admitted | — | configured |
 //! | bucket | router ingress | time to a CPS token | no token | admitted | — | time to a token, at least configured |
+//! | event queue | router ingress | the event-queue gate (ADR-0050 §9) | while it refuses | admitted | — | configured |
 //!
 //! Each rung keeps its site. The backlog is judged by the transaction
 //! layer's bound ([`deferred_bound`]); every other rung by [`judge`] over the
