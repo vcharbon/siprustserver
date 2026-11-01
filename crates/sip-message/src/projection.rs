@@ -39,10 +39,17 @@ impl HeaderProjection {
 
     /// The `n`-th item (0-based) of `name` over every row in wire order: the
     /// rows fold into one list (RFC 3261 §7.3.1), split on the header's own
-    /// separator outside quoted-strings and `<…>`, each item trimmed.
+    /// separator outside quoted-strings and `<…>`, each item trimmed. A header
+    /// whose row is one item ([`HeaderName::one_item_per_row`]: the
+    /// folding-exempt credentials family, a single-valued grammar such as
+    /// Date) is counted by row, never split.
     pub fn item(&self, name: &str, n: usize) -> Option<&str> {
+        let rows = self.all(name).into_iter();
+        if HeaderName::one_item_per_row_of(name) {
+            return rows.map(str::trim).nth(n);
+        }
         let sep = HeaderName::item_separator_of(name);
-        self.all(name).into_iter().flat_map(|row| sep.split(row)).nth(n)
+        rows.flat_map(|row| sep.split(row)).nth(n)
     }
 
     /// The option tags every row of the set-like header `name` lists
@@ -132,5 +139,21 @@ l: 3\r\n\r\nv=0",
         assert_eq!(rows.item("Diversion", 2), Some("<sip:3@h;x=1,2>;reason=unknown"));
         assert_eq!(rows.item("Diversion", 3), None);
         assert_eq!(rows.item("Reason", 0), None);
+    }
+
+    /// A row of a folding-exempt or single-valued header is one item: its
+    /// commas are data (RFC 3261 §7.3.1, §20.17, §20.44).
+    #[test]
+    fn a_folding_exempt_or_single_valued_header_is_counted_by_row() {
+        let rows: HeaderProjection = vec![
+            ("WWW-Authenticate".to_string(), "Digest realm=\"a\", nonce=\"n1\"".to_string()),
+            ("www-authenticate".to_string(), "Digest realm=\"b\", nonce=\"n2\"".to_string()),
+            ("Date".to_string(), "Sat, 13 Nov 2010 23:29:00 GMT".to_string()),
+        ]
+        .into();
+        assert_eq!(rows.item("WWW-Authenticate", 1), Some("Digest realm=\"b\", nonce=\"n2\""));
+        assert_eq!(rows.item("WWW-Authenticate", 2), None);
+        assert_eq!(rows.item("Date", 0), Some("Sat, 13 Nov 2010 23:29:00 GMT"));
+        assert_eq!(rows.item("Date", 1), None);
     }
 }

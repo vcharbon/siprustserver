@@ -59,6 +59,62 @@ impl HeaderName {
     pub fn item_separator_of(name: &str) -> ItemSeparator {
         Self::known(name).map_or(ItemSeparator::Comma, |known| known.item_separator())
     }
+
+    /// Whether one row of this header is one item, a comma in it data: the
+    /// headers RFC 3261 §7.3.1 exempts from comma-folding (the credentials
+    /// and challenge family, and Authentication-Info whose parameters are
+    /// comma-separated inside one value), and those whose grammar is a single
+    /// value, never a comma list (Date's `rfc1123-date` holds a comma).
+    pub fn one_item_per_row(&self) -> bool {
+        matches!(
+            self,
+            HeaderName::Authorization
+                | HeaderName::ProxyAuthorization
+                | HeaderName::WwwAuthenticate
+                | HeaderName::ProxyAuthenticate
+                | HeaderName::AuthenticationInfo
+                | HeaderName::CallId
+                | HeaderName::ContentDisposition
+                | HeaderName::ContentLength
+                | HeaderName::ContentTransferEncoding
+                | HeaderName::ContentType
+                | HeaderName::CSeq
+                | HeaderName::Date
+                | HeaderName::Event
+                | HeaderName::Expires
+                | HeaderName::From
+                | HeaderName::GeolocationError
+                | HeaderName::GeolocationRouting
+                | HeaderName::MaxForwards
+                | HeaderName::MimeVersion
+                | HeaderName::MinExpires
+                | HeaderName::MinSe
+                | HeaderName::Organization
+                | HeaderName::Priority
+                | HeaderName::RAck
+                | HeaderName::ReferSub
+                | HeaderName::ReferTo
+                | HeaderName::ReferredBy
+                | HeaderName::Replaces
+                | HeaderName::ReplyTo
+                | HeaderName::RetryAfter
+                | HeaderName::RSeq
+                | HeaderName::Server
+                | HeaderName::SessionExpires
+                | HeaderName::Subject
+                | HeaderName::SubscriptionState
+                | HeaderName::Timestamp
+                | HeaderName::To
+                | HeaderName::UserAgent
+        )
+    }
+
+    /// [`one_item_per_row`](Self::one_item_per_row) of a wire name (any
+    /// casing, compact or long form); an extension header's rows are comma
+    /// lists.
+    pub fn one_item_per_row_of(name: &str) -> bool {
+        Self::known(name).is_some_and(|known| known.one_item_per_row())
+    }
 }
 
 #[cfg(test)]
@@ -72,6 +128,16 @@ mod tests {
         let items: Vec<&str> =
             HeaderName::Privacy.item_separator().split("id;user; header").collect();
         assert_eq!(items, ["id", "user", "header"]);
+    }
+
+    #[test]
+    fn the_folding_exempt_and_single_valued_headers_hold_one_item_per_row() {
+        for name in ["WWW-Authenticate", "authorization", "Proxy-Authenticate", "Date", "f", "i"] {
+            assert!(HeaderName::one_item_per_row_of(name), "{name}");
+        }
+        for name in ["Diversion", "Via", "Reason", "Supported", "X-Extension"] {
+            assert!(!HeaderName::one_item_per_row_of(name), "{name}");
+        }
     }
 
     #[test]

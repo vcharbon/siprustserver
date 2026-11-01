@@ -39,7 +39,7 @@ pub trait Observables {
 /// | `from.uri` / `to.uri` | the two whole URIs, parameters included |
 /// | `ruri.uri` / `ruri.userInfo` | a request's Request-URI, whole / its user part canonically |
 /// | `header(<Name>)` | the first occurrence of that header, in wire order |
-/// | `header(<Name>)[<n>]` | the `n`-th item (0-based) of that header, its rows folded into one list (RFC 3261 §7.3.1) |
+/// | `header(<Name>)[<n>]` | the `n`-th item (0-based) of that header, its rows folded into one list (RFC 3261 §7.3.1); a folding-exempt or single-valued header's `n`-th row |
 /// | `tags(<Name>,…)` | the option tags every row of the named set-like headers lists, one set joined by `,` |
 /// | `body` | the body as text |
 /// | `part(<type>)` | the first entity part of that media type, as `body` reads a body |
