@@ -191,6 +191,7 @@ mod reliable_1xx_crossing_cancel;
 mod reliable_1xx_giveup_in_dialog;
 mod reliable_1xx_out_of_order;
 mod reliable_provisional_repeat_prack;
+mod remote_target_user_parameters;
 mod reoffer_late_events_of_the_first_call;
 mod reoffer_on_an_ended_identity;
 mod repeated_2xx_before_caller_ack;

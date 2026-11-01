@@ -187,3 +187,30 @@ fn functional_updates_compose() {
     assert_eq!(u.to_string(), "sip:bob@biloxi.com:5070;lr");
     assert_eq!(u.without_param("lr").without_user().to_string(), "sip:biloxi.com:5070");
 }
+
+// RFC 3261 §25.1: `user-unreserved` admits `;` and `=` in the user part, and
+// escapes stand for any byte. The user part ends at the `@`, so the host, the
+// port and the URI parameters are the ones after it, and the URI renders back
+// as written, normalized or rehomed.
+#[test]
+fn a_user_part_holding_semicolons_and_escapes_ends_at_the_at_sign() {
+    let u = uri("sip:+33600000000;foo=bar@192.0.2.10:5070");
+    assert_eq!(u.user(), Some("+33600000000;foo=bar"));
+    assert_eq!(u.host_port(), ("192.0.2.10", 5070));
+    assert!(u.params().is_empty());
+    assert_eq!(u.to_string(), "sip:+33600000000;foo=bar@192.0.2.10:5070");
+    assert_eq!(u.clone().normalized().to_string(), "sip:+33600000000;foo=bar@192.0.2.10:5070");
+
+    let escaped = uri("sip:alice%3Bx=y;isub=12@192.0.2.10:5070;transport=udp?Subject=hi");
+    assert_eq!(escaped.host_port(), ("192.0.2.10", 5070));
+    assert_eq!(escaped.param("transport").and_then(ParamValue::as_str), Some("udp"));
+    assert!(!escaped.params().has("isub"), "a user-part parameter is no URI parameter");
+    assert_eq!(
+        escaped.without_escaped_headers().to_string(),
+        "sip:alice%3Bx=y;isub=12@192.0.2.10:5070;transport=udp"
+    );
+    assert_eq!(
+        u.with_authority(HostPort::new("198.51.100.1", Some(5080))).to_string(),
+        "sip:+33600000000;foo=bar@198.51.100.1:5080"
+    );
+}

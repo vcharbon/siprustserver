@@ -374,4 +374,16 @@ mod tests {
     fn an_unclosed_angle_bracket_is_an_error() {
         assert!(NameAddr::parse(&SipStr::owned("<sip:a@h")).is_err());
     }
+
+    // RFC 3261 §20: a URI holding a `;` is bracketed in a header; inside the
+    // brackets it reads whole, and a bare addr-spec ends at its first `;`.
+    #[test]
+    fn a_bracketed_address_keeps_a_semicolon_user_part_a_bare_one_does_not() {
+        let target = "sip:+33600000000;foo=bar@192.0.2.10:5070";
+        let bracketed = parse(&format!("<{target}>;expires=60"));
+        assert_eq!(bracketed.uri().to_string(), target);
+        assert_eq!(bracketed.uri().host_port(), ("192.0.2.10", 5070));
+        let bare = NameAddr::parse(&SipStr::owned(target));
+        assert!(bare.map_or(true, |addr| addr.uri().to_string() != target));
+    }
 }
