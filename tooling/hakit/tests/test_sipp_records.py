@@ -134,6 +134,8 @@ def test_a_final_landing_while_the_handler_runs_still_ends_in_a_record(tmp_path:
     p = run_burst_pair(tmp_path, calls)
     assert p.uac_rc == 0, f"sipp {p.uac_exit}"
     assert p.counter("FailedUnexpectedMessage(C)") == 0
+    # The race was hit: SIPp discarded a 200 that landed inside the handler.
+    assert "Continuing call on unexpected message" in p.errors
     assert len(p.records) == calls
     assert p.peer_rc == 0, f"{p.peer_rc} calls of the peer not complete"
     for r in p.records:

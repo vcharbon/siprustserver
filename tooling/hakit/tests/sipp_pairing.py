@@ -83,6 +83,7 @@ class Pairing:
     uac_pid: int = 0
     peer_pid: int = 0
     messages: str = ""
+    errors: str = ""
 
     def counter(self, column: str) -> int:
         return int(self.stats.get(column, "0") or 0)
@@ -203,7 +204,7 @@ def run_burst_pair(work: Path, calls: int = 1, rate: int = 10) -> Pairing:
         uac = _start_uac([SIPP], d, UAC, caller, callee, common, rate, None, False)
         peer_rc = BurstPeer(sock, calls).serve(120)
         uac_rc = _wait(uac, 180)
-    return _pairing(d, uac, uac_rc, peer_rc, os.getpid())
+    return _pairing(d, uac, uac_rc, peer_rc, 0)
 
 
 def _start_uac(
@@ -240,6 +241,7 @@ def _pairing(d: Path, uac: subprocess.Popen[bytes], uac_rc: int | None, peer_rc:
         uac.pid,
         peer_pid,
         _read(d / "messages.log"),
+        "".join(_read(f) for f in sorted(d.glob("*_errors.log"))),
     )
 
 
@@ -285,7 +287,7 @@ def run_uas_pair(
     traces = ["-trace_msg", "-message_file", "messages.log"] if trace else []
     proc = subprocess.Popen(
         [SIPP, "-sf", str(scenario), "-p", str(callee), *common, *key_args(scenario, keys or {}), "-recv_timeout", "60000"]
-        + ["-trace_err", "-trace_stat", "-stf", "stat.csv", "-fd", "1", *UAC_BEHAVIOURS, *traces],
+        + ["-trace_err", "-trace_stat", "-stf", "stat.csv", "-fd", "1", *traces],
         cwd=d,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

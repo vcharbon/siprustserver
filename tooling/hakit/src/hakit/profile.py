@@ -86,9 +86,10 @@ class Preflight:
     max_swapin_pages_s: float | None = None
 
 
-# SIP over UDP, and every later IPv4 fragment (no UDP header to match on), so a
-# request larger than the MTU can be reassembled.
-CAPTURE_FILTER = "(udp and portrange 5060-5100) or (ip[6:2] & 0x1fff != 0)"
+# SIP over UDP, and every later fragment of an IPv4 UDP datagram (no UDP header
+# to match on), so a request larger than the MTU can be reassembled from the
+# ring files.
+CAPTURE_FILTER = "(udp and portrange 5060-5100) or (ip[9] = 17 and ip[6:2] & 0x1fff != 0)"
 
 
 @dataclass(frozen=True)

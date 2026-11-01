@@ -1,13 +1,13 @@
 """A callee on one UDP socket that puts two messages on the wire in one burst.
 
-SIPp sends one message per scheduler step, so a SIPp peer cannot have two
-datagrams queued before the caller reads the first. This peer answers each
+SIPp sends one message of a call per scheduler step, so a SIPp peer cannot
+queue two datagrams of one call before the caller reads the first. This peer answers each
 INVITE with a 180 Ringing, then sends an OPTIONS in the early dialog and the
 200 OK in two back-to-back `sendto` calls: the 200 lands while the caller
 still serves the OPTIONS. The 200 retransmits on T1 doubling to T2 until the
 ACK (RFC 3261 §13.3.1.4); any later request of the caller is answered 200.
-A call is complete once the OPTIONS got its 200, the 200 its ACK, and the
-caller's BYE its 200.
+The OPTIONS is sent once (loopback loses nothing). A call is complete once
+the OPTIONS got its 200, the 200 its ACK, and the caller's BYE its 200.
 """
 
 from __future__ import annotations

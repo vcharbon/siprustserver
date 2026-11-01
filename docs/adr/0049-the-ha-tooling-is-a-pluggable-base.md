@@ -518,9 +518,10 @@ made. A run profile joins the two.
    `<send>` without `ontimeout` aborts it. A third, an unexpected message
    received while the call is already in its unexpected-message handler, is
    turned off: the UAC runs with `-default_behaviors all,-abortunexp`, so SIPp
-   discards that message (logging `Continuing call on unexpected message`)
-   and the call acts on the peer's retransmission. So every UAC scenario
-   follows these rules:
+   discards that message (logging `Continuing call on unexpected message`,
+   counted in no stat) and the call acts on the peer's retransmission; a
+   discarded provisional, never retransmitted, is lost. So every UAC
+   scenario follows these rules:
    - every wait (a group of `<recv>`s) is entered on a recv with its own
      `timeout` and `ontimeout`: a pending send never bounds it (below);
    - every `<send>` SIPp retransmits has `ontimeout`;
