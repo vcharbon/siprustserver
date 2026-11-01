@@ -75,6 +75,11 @@ export interface TestInvocation {
    * index and the result record can never disagree on it.
    */
   readonly cellInfraEnv?: string
+  /**
+   * Why this host runs no crate test, in the words a reader is shown; set,
+   * every crate-test cell is an error carrying it and nothing is spawned.
+   */
+  readonly unavailable?: string
 }
 
 /** `cargo test -p <crate> -- --exact <name> --nocapture`, the standard form. */
@@ -472,6 +477,9 @@ const runRustTest = Effect.fn("Driver.runRustTest")(function* (
   const path = yield* Path.Path
   const run = yield* toolchainRunner
   const { tests } = context
+  if (tests.unavailable !== undefined) {
+    return { passed: false, detail: tests.unavailable, crashed: true } satisfies CellOutcome
+  }
 
   // The cell directory is wiped like the interpreter wipes a replay cell's:
   // a stale result.json from an earlier run must never read as this run's.

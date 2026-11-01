@@ -302,6 +302,24 @@ describe("a cell that never produced a result", () => {
     expect(fs.existsSync(run.indexPath)).toBe(true)
   })
 
+  it("carries the host's own words where it runs no crate test, and spawns nothing", async () => {
+    const run = await campaign([rustCell(), replayCell()], {
+      tests: {
+        command: "/nonexistent/runner",
+        args: () => [],
+        cellDirEnv: "CELL_DIR",
+        unavailable: "crate-test cells: not available on this host"
+      }
+    })
+    const cell = run.index.cells[0]!
+    expect(cell.passed).toBe(false)
+    expect(cell.error).toBe("crate-test cells: not available on this host")
+    expect(fs.readFileSync(path.join(run.dir, cell.dir, ERROR_FILE), "utf8")).toBe(
+      "crate-test cells: not available on this host\n"
+    )
+    expect(run.index.cells[1]!.passed).toBe(true)
+  })
+
   it("is what an unknown lane produces, because a lane is never guessed", async () => {
     const run = await campaign([replayCell({ lane: "nobody-described-this" })], {
       rig: { lanes: LanePresets.layer }

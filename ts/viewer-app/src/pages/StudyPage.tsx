@@ -799,7 +799,9 @@ export const StudyPage = ({ capture }: { capture: string }): JSX.Element => {
             {value.ticket && (
               <>
                 {" "}· ticket {value.ticket.ref}{" "}
-                <span className={`tag ticket-${value.ticket.state}`}>{value.ticket.state}</span>
+                {value.ticket.unavailable === undefined
+                  ? <span className={`tag ticket-${value.ticket.state}`}>{value.ticket.state}</span>
+                  : <span className="tag muted">{value.ticket.unavailable}</span>}
               </>
             )}
           </p>

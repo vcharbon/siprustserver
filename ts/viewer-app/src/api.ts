@@ -103,6 +103,8 @@ export interface TriageTicket {
   readonly ref: string
   /** open | closed | wontfix | missing. */
   readonly state: string
+  /** Why the deployment has no tracker to read the state off, where it has none: shown in place of the state. */
+  readonly unavailable?: string
 }
 
 /** What a call failed on: the one line a queue row is picked on. */
