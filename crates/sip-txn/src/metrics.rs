@@ -5,12 +5,14 @@
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use sip_retransmit::Class;
 use tokio::sync::mpsc;
 
-use crate::event::{EventQueueClass, TransactionEvent};
+use crate::event::EventQueueClass;
 use crate::invite_class::InviteClass;
+use crate::layer::Queued;
 
 mod by_class;
 mod retransmits;
@@ -40,6 +42,12 @@ pub(crate) struct MetricsInner {
     /// Critical events waiting on the retry deque right now (gauge), sampled
     /// at the end of every owner turn.
     pub event_queue_deferred: AtomicUsize,
+    /// How long the event the consumer took last waited in the queue, µs
+    /// (gauge), set by [`TransactionEvents`](crate::TransactionEvents) on each
+    /// take.
+    pub event_sojourn_us: AtomicU64,
+    /// Out-of-dialog OPTIONS the full keepalive lane dropped (counter).
+    pub keepalive_lane_drops: AtomicU64,
     /// Deferred requests removed because the server transaction that
     /// admitted them left the map unanswered — at its backstop, or reaped by
     /// the sweep (counter).
@@ -148,6 +156,8 @@ impl MetricsInner {
             event_queue_drops: ByClass::new(),
             event_queue_deferrals: ByClass::new(),
             event_queue_deferred: AtomicUsize::new(0),
+            event_sojourn_us: AtomicU64::new(0),
+            keepalive_lane_drops: AtomicU64::new(0),
             deferred_swept: AtomicU64::new(0),
             sweep_reaped: AtomicU64::new(0),
             deferred_refused: ByClass::new(),
@@ -192,11 +202,11 @@ pub struct TransactionMetrics {
     inner: Arc<MetricsInner>,
     /// A clone of the output `events` sender — its capacity is how we read the
     /// bounded queue's depth/capacity without owning the receiver.
-    events_tx: mpsc::Sender<TransactionEvent>,
+    events_tx: mpsc::Sender<Queued>,
 }
 
 impl TransactionMetrics {
-    pub(crate) fn new(inner: Arc<MetricsInner>, events_tx: mpsc::Sender<TransactionEvent>) -> Self {
+    pub(crate) fn new(inner: Arc<MetricsInner>, events_tx: mpsc::Sender<Queued>) -> Self {
         Self { inner, events_tx }
     }
 
@@ -223,6 +233,21 @@ impl TransactionMetrics {
     /// Current depth of the bounded event queue (gauge).
     pub fn event_queue_depth(&self) -> usize {
         self.events_tx.max_capacity() - self.events_tx.capacity()
+    }
+
+    /// How long the event the consumer took last waited in the queue; zero
+    /// while the queue is empty (gauge). While the queue is backed up, each
+    /// taken event's wait is the queue's delay.
+    pub fn event_queue_sojourn(&self) -> Duration {
+        if self.event_queue_depth() == 0 {
+            return Duration::ZERO;
+        }
+        Duration::from_micros(self.inner.event_sojourn_us.load(Ordering::Relaxed))
+    }
+
+    /// Out-of-dialog OPTIONS the full keepalive lane dropped (counter).
+    pub fn keepalive_lane_drops(&self) -> u64 {
+        self.inner.keepalive_lane_drops.load(Ordering::Relaxed)
     }
 
     /// Ordinary events the full output queue dropped, by class. Counted per

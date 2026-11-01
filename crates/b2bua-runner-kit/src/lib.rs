@@ -344,12 +344,12 @@ impl RunnerEnv {
                 captured_headers: self.cdr_captured_headers.clone(),
             },
             capacity: self.capacity,
+            event_queue_gate: self.event_queue_gate,
             ..Default::default()
         };
-        // Forbid booting with a config that would silently break a call (a
-        // too-short keepalive, an INVITE transaction bound outside its range,
-        // a setup deadline or reaper idle window not under that bound) or the
-        // replicas (a reboot budget under its floor or one keepalive gap).
+        // Forbid booting with a config that would silently break a call (a too-short keepalive,
+        // an INVITE transaction bound outside its range, a setup deadline or reaper idle window
+        // not under it) or the replicas (a reboot budget under its floor or one keepalive gap).
         config.validate().map_err(|e| invalid(e.to_string()))?;
         self.replica.validate(&config).map_err(invalid)?;
         let call_control =

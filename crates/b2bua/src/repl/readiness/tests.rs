@@ -195,6 +195,42 @@ fn the_cordon_wins_over_an_open_backend_breaker() {
     assert_eq!(r.options_report(), OptionsReport::Serving(None));
 }
 
+/// The bounds and queue of an event-queue gate whose refusal depth is zero:
+/// it always refuses.
+async fn refusing_gate() -> (crate::config::EventQueueGateConfig, sip_txn::TransactionMetrics) {
+    use sip_net::{BindUdpOpts, SignalingNetwork};
+    let net = sip_net_testkit::SimulatedSignalingNetwork::new(1);
+    let ep = net.bind_udp(BindUdpOpts::new("127.0.0.1:5090".parse().unwrap(), 8)).await.unwrap();
+    let config = sip_txn::TransactionConfig::new(Arc::new(sip_txn::IdGen::seeded(1)));
+    let parser = Arc::new(sip_message::parser::custom::CustomParser::new());
+    let (txn, _events) = sip_txn::TransactionLayer::spawn(ep, parser, config);
+    let bounds = crate::config::EventQueueGateConfig { refuse_depth: 0, ..Default::default() };
+    (bounds, txn.metrics().clone())
+}
+
+/// A refusing event-queue gate refuses new calls on a `Ready` node with
+/// `cause=overload`; draining, a cordon and an open backend breaker each name
+/// their own cause first.
+#[tokio::test(start_paused = true)]
+async fn a_refusing_event_queue_gate_refuses_new_calls_after_every_other_cause() {
+    let r = Readiness::always_ready();
+    assert_eq!(r.options_report(), OptionsReport::Serving(None), "no gate installed");
+    let (bounds, queue) = refusing_gate().await;
+    r.gate_options_on_queue(bounds, queue);
+    assert_eq!(r.options_report(), OptionsReport::Serving(Some(Refusal::Overload)));
+    assert_eq!(Refusal::Overload.cause(), "overload");
+    assert_eq!(r.state(), ReadinessState::Ready, "/ready ignores the gate");
+
+    let (breaker, open) = watch::channel(true);
+    r.gate_options_on(open);
+    assert_eq!(r.options_report(), OptionsReport::Serving(Some(Refusal::Backend)));
+    breaker.send_replace(false);
+    r.cordon().unwrap();
+    assert_eq!(r.options_report(), OptionsReport::Serving(Some(Refusal::Cordoned)));
+    r.set_draining();
+    assert_eq!(r.options_report(), OptionsReport::Serving(Some(Refusal::Draining)));
+}
+
 /// No cordon applies to a NotReady node, which has none to lift, nor to a
 /// draining one; SIGTERM drains a cordoned node, which keeps its cordon.
 #[test]

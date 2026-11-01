@@ -61,7 +61,8 @@ pub mod timers;
 // the deferred-backlog ceiling on new calls and the node's shared refusals.
 pub use layer::{
     BoundPassed, DeferredBound, InviteRefusals, NewCallRefusal, OnBound, ServerTxnKey,
-    TransactionConfig, TransactionLayer, TransactionLayerClosed, Verdict, REFUSED_MEMO_MAX,
+    TransactionConfig, TransactionEvents, TransactionLayer, TransactionLayerClosed, Verdict,
+    REFUSED_MEMO_MAX,
 };
 // The class a new INVITE is judged in, read off the parsed request.
 pub use invite_class::{class_of, InviteClass};

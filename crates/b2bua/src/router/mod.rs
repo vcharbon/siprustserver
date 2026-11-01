@@ -328,9 +328,14 @@ enum Work {
 /// for the node's own endpoint to read ready (`readmission`). Each turn is
 /// stamped on `ctx.router_pulse` from the instant it takes work until it waits
 /// again.
+///
+/// The keepalive lane of the transaction layer, when it runs one, is taken
+/// first whenever the loop waits for work: an out-of-dialog OPTIONS waits for
+/// the turn in progress, never behind queued events, and is answered on this
+/// loop in arrival order (ADR-0050 §2). The other arms keep their fairness.
 pub async fn run(
     ctx: Arc<RouterCtx>,
-    mut txn_rx: mpsc::Receiver<sip_txn::TransactionEvent>,
+    mut txn_rx: sip_txn::TransactionEvents,
     mut timer_rx: mpsc::UnboundedReceiver<CallEvent>,
     mut reentry_rx: mpsc::UnboundedReceiver<CallEvent>,
     mut repl_rx: Option<mpsc::UnboundedReceiver<ReplCommand>>,
@@ -340,10 +345,28 @@ pub async fn run(
     // A timer or re-entry channel whose senders are all gone retires its arm
     // instead of resolving `None` on every poll.
     let (mut timers_open, mut reentry_open) = (true, true);
+    let mut keepalive = txn_rx.take_keepalive_lane();
     loop {
+        if let Some(ev) = keepalive.as_mut().and_then(|lane| lane.try_recv().ok()) {
+            take_keepalive(&ctx, &pulse, ev).await;
+            continue;
+        }
         let work = tokio::select! {
+            ev = next_keepalive(&mut keepalive) => match ev {
+                Some(ev) => {
+                    take_keepalive(&ctx, &pulse, ev).await;
+                    continue;
+                }
+                None => {
+                    keepalive = None;
+                    continue;
+                }
+            },
             ev = txn_rx.recv() => match ev {
                 Some(ev) => {
+                    if let Some(gate) = ctx.readiness.queue_gate() {
+                        gate.observe_take(txn_rx.last_sojourn());
+                    }
                     let (ev, matched_client_txn) = txn_event::call_event(ev, ctx.clock.now_ms());
                     Work::Event(ev, matched_client_txn)
                 }
@@ -396,6 +419,31 @@ pub async fn run(
             }
         }
         pulse.waiting();
+    }
+}
+
+/// One turn on an out-of-dialog OPTIONS from the keepalive lane: answered and
+/// its dead notice taken as any event (`ingress`).
+async fn take_keepalive(
+    ctx: &Arc<RouterCtx>,
+    pulse: &sip_txn::LoopPulse,
+    ev: sip_txn::TransactionEvent,
+) {
+    pulse.turning();
+    ctx.turn_probe.router_turn(&ctx.config.self_ordinal).await;
+    let (ev, matched_client_txn) = txn_event::call_event(ev, ctx.clock.now_ms());
+    ingress::on_event(ctx, ev, matched_client_txn).await;
+    pulse.waiting();
+}
+
+/// The next OPTIONS of the keepalive lane; pending forever when there is no
+/// lane, `None` once it closed.
+async fn next_keepalive(
+    lane: &mut Option<mpsc::Receiver<sip_txn::TransactionEvent>>,
+) -> Option<sip_txn::TransactionEvent> {
+    match lane {
+        Some(lane) => lane.recv().await,
+        None => std::future::pending().await,
     }
 }
 

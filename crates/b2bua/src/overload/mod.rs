@@ -11,6 +11,8 @@
 //!   counters, and the `v=1; elu=…; gc=…; adm=…` header builder.
 //! - `prometheus` — `/metrics` text exposition of the signal's inputs and
 //!   admits.
+//! - `event_queue_gate` — [`EventQueueGate`]: a backed-up transaction event
+//!   queue refuses new calls on the OPTIONS answer (ADR-0050 §9).
 //!
 //! The consumer of the published header is the front proxy —
 //! `sip_proxy::load_observer` parses exactly the `v=1` schema built here.
@@ -28,10 +30,12 @@
 //! hot path but it is one cheap lock + a `String` format).
 
 mod cpu_budget;
+mod event_queue_gate;
 mod prometheus;
 mod sampler;
 mod signal;
 
+pub use event_queue_gate::EventQueueGate;
 pub use signal::{OverloadMetrics, OverloadSignal};
 
 #[cfg(test)]

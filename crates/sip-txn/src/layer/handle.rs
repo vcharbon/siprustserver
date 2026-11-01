@@ -18,6 +18,8 @@ use crate::seed::{Reoffer, TxnSeed};
 use call::TxnKind;
 
 pub use super::config::TransactionConfig;
+use super::event_receiver::Queued;
+pub use super::event_receiver::TransactionEvents;
 use super::key::{ServerTxnId, ServerTxnKey};
 use super::owner::Owner;
 use super::run::run;
@@ -179,31 +181,37 @@ pub struct TransactionLayer {
 
 impl TransactionLayer {
     /// Spawn the owner task over an already-bound endpoint. Returns the handle
-    /// and the receiver end of the bounded `events` queue (the consumer — the
-    /// proxy/B2BUA router — drains it). The task lives until both the returned
-    /// handle (all clones) and the events receiver are dropped, or the endpoint
-    /// closes.
+    /// and the consumer's end of the bounded `events` queue and of the
+    /// keepalive lane, when configured (the consumer — the proxy/B2BUA router —
+    /// drains them). The task lives until both the returned handle (all
+    /// clones) and the events receiver are dropped, or the endpoint closes.
     pub fn spawn(
         endpoint: Box<dyn UdpEndpoint>,
         parser: Arc<dyn SipParser + Send + Sync>,
         config: TransactionConfig,
-    ) -> (Self, mpsc::Receiver<TransactionEvent>) {
+    ) -> (Self, TransactionEvents) {
         #[expect(clippy::disallowed_methods, reason = "event_capacity is within EVENT_CAPACITY")]
-        let (events_tx, events_rx) = mpsc::channel::<TransactionEvent>(config.event_capacity());
+        let (events_tx, events_rx) = mpsc::channel::<Queued>(config.event_capacity());
+        #[expect(clippy::disallowed_methods, reason = "the lane's bound is at least 1")]
+        let (keepalive_tx, keepalive_rx) = config
+            .keepalive_lane
+            .map(|bound| mpsc::channel::<TransactionEvent>(bound.max(1)))
+            .unzip();
         #[expect(clippy::disallowed_methods, reason = "COMMAND_CAPACITY is not zero")]
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(COMMAND_CAPACITY);
         let (forget_tx, forget_rx) = mpsc::unbounded_channel::<Forget>();
 
         let metrics_inner = Arc::new(MetricsInner::new());
         let metrics = TransactionMetrics::new(metrics_inner.clone(), events_tx.clone());
+        let events = TransactionEvents::new(events_rx, keepalive_rx, metrics_inner.clone());
 
-        let owner = Owner::new(parser, events_tx, metrics_inner, config);
+        let owner = Owner::new(parser, events_tx, keepalive_tx, metrics_inner, config);
         let owner_pulse = Arc::new(LoopPulse::new());
         let owner_abort =
             tokio::spawn(run(owner, endpoint, cmd_rx, forget_rx, owner_pulse.clone()))
                 .abort_handle();
 
-        (Self { cmd_tx, forget_tx, metrics, owner_abort, owner_pulse }, events_rx)
+        (Self { cmd_tx, forget_tx, metrics, owner_abort, owner_pulse }, events)
     }
 
     pub fn metrics(&self) -> &TransactionMetrics {

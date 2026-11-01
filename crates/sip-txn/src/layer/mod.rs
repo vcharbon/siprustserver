@@ -31,7 +31,8 @@
 //! its one deadline, and the sweep over it) · `bind` (the To-tag every
 //! outbound response is held to) · `seed` (ADR-0014 seeding + re-offer) ·
 //! `relinquish` (a call's transactions deleted for another node to serve) ·
-//! `events` (output-queue discipline) · `backlog` (new-call admission against
+//! `events` (output-queue discipline) · `event_receiver` (the consumer's end
+//! of the event queue, each event's wait in it, and the keepalive lane) · `backlog` (new-call admission against
 //! the deferred backlog) · `refusals` (the node's shared refusals of new
 //! INVITEs) · `txn` (per-transaction state) · `unanswered` (server
 //! transactions the consumer will not answer) · `key` (a server transaction's
@@ -46,6 +47,7 @@ mod client;
 mod client_give_up;
 mod commands;
 mod config;
+mod event_receiver;
 mod events;
 mod handle;
 mod held_ack;
@@ -71,6 +73,7 @@ mod via_marks;
 pub use backlog::DeferredBound;
 pub use bound_report::BoundPassed;
 pub use config::OnBound;
-pub use handle::{TransactionConfig, TransactionLayer, TransactionLayerClosed};
+pub(crate) use event_receiver::Queued;
+pub use handle::{TransactionConfig, TransactionEvents, TransactionLayer, TransactionLayerClosed};
 pub use key::ServerTxnKey;
 pub use refusals::{InviteRefusals, NewCallRefusal, Verdict, REFUSED_MEMO_MAX};

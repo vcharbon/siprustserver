@@ -5,7 +5,8 @@
 //!
 //! - [`ReadinessState::NotReady`] → `503`: serves nothing yet.
 //! - [`ReadinessState::Ready`] → `200`, `new=accept`, or `new=refuse;
-//!   cause=backend` while a gating backend's breaker is open.
+//!   cause=backend` while a gating backend's breaker is open, else `new=refuse;
+//!   cause=overload` while the event-queue gate refuses.
 //! - [`ReadinessState::Cordoned`] → `200`, `new=refuse; cause=cordoned`.
 //! - [`ReadinessState::Draining`] → `200`, `new=refuse; cause=draining`.
 //!
@@ -30,6 +31,13 @@
 //! calls, and accepting again once all are closed; never latched (ADR-0043).
 //! [`Readiness::state`], which `/ready` reads, ignores the gate.
 //!
+//! ## Event-queue gate (new calls only)
+//! [`Readiness::gate_options_on_queue`] installs the worker's
+//! [`EventQueueGate`]: while it refuses, a `Ready` node with no open breaker
+//! reports `new=refuse; cause=overload`. A breaker names the cause first: the
+//! backend outage outlasts a backlog. Never read by `/ready` nor by in-dialog
+//! routing.
+//!
 //! ## Cordon (operator, ADR-0050 §9)
 //! An operator cordons a `Ready` node and uncordons it: `Ready ⇄ Cordoned`,
 //! with no timer. A cordoned node refuses every new call and serves every
@@ -38,12 +46,13 @@
 //! `Ready` one.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tokio::sync::watch;
 
 use super::backend_gate::BackendGate;
 use super::ReplicationSupervisor;
+use crate::overload::EventQueueGate;
 
 /// The readiness states the OPTIONS responder self-reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +88,8 @@ pub enum Refusal {
     Backend,
     /// An operator cordoned the node.
     Cordoned,
+    /// The node's transaction event queue is backed up.
+    Overload,
     /// The node is draining (SIGTERM or withdrawal).
     Draining,
 }
@@ -89,6 +100,7 @@ impl Refusal {
         match self {
             Refusal::Backend => "backend",
             Refusal::Cordoned => "cordoned",
+            Refusal::Overload => "overload",
             Refusal::Draining => "draining",
         }
     }
@@ -210,6 +222,8 @@ struct ReadinessInner {
     not_ready_logged: AtomicBool,
     /// The backends whose open breaker gates the OPTIONS self-health.
     backends: BackendGate,
+    /// The event-queue gate, once installed.
+    queue: OnceLock<EventQueueGate>,
     /// The node this readiness belongs to: a transition is lined as that node
     /// whoever reads the state (a probe, or an observer serving no node).
     node: observe::NodeScope,
@@ -238,6 +252,7 @@ impl Readiness {
                 transitions: std::sync::Mutex::new(()),
                 not_ready_logged: AtomicBool::new(false),
                 backends: BackendGate::default(),
+                queue: OnceLock::new(),
                 node: observe::NodeScope::current(),
             }),
             incarnation: 0,
@@ -303,6 +318,23 @@ impl Readiness {
         self.inner.backends.add(breaker);
     }
 
+    /// From now on, the event-queue gate over the queue `queue` reads, under
+    /// `bounds`, refusing makes a `Ready` node refuse new calls
+    /// ([`options_report`](Self::options_report)); a second gate is ignored.
+    pub fn gate_options_on_queue(
+        &self,
+        bounds: crate::config::EventQueueGateConfig,
+        queue: sip_txn::TransactionMetrics,
+    ) {
+        let _ = self.inner.queue.set(EventQueueGate::new(bounds, queue));
+    }
+
+    /// The event-queue gate, once installed: the router observes each event
+    /// it takes from the queue.
+    pub fn queue_gate(&self) -> Option<&EventQueueGate> {
+        self.inner.queue.get()
+    }
+
     /// Cordon the node: `Ready → Cordoned`; idempotent on a cordoned node.
     /// Refused while NotReady or Draining.
     pub fn cordon(&self) -> Result<(), CordonRefused> {
@@ -338,11 +370,13 @@ impl Readiness {
         self.inner.cordoned.load(Ordering::SeqCst)
     }
 
-    /// The cordon gauge (`b2bua_cordoned`) as Prometheus text.
+    /// The cordon gauge (`b2bua_cordoned`) and the event-queue gate's
+    /// families as Prometheus text.
     pub fn prometheus_text(&self) -> String {
         let mut s = String::new();
-        crate::metrics::catalogue::worker::CORDONED
+        crate::metrics::catalogue::readiness::CORDONED
             .render_value(&mut s, u64::from(self.is_cordoned()));
+        EventQueueGate::prometheus_text(self.inner.queue.get(), &mut s);
         s
     }
 
@@ -356,9 +390,10 @@ impl Readiness {
         tracing::info!(node = %self.inner.node, state, reason, "readiness transition");
     }
 
-    /// What the OPTIONS answer reports, from [`state`](Self::state) and the
-    /// backend gate: the one place the two axes are derived. A cordoned node
-    /// names the cordon as its cause whatever the backend gate reads.
+    /// What the OPTIONS answer reports, from [`state`](Self::state), the
+    /// backend gate and the event-queue gate: the one place the two axes are
+    /// derived. The first cause applies of draining, cordoned, backend,
+    /// overload.
     pub fn options_report(&self) -> OptionsReport {
         match self.state() {
             ReadinessState::NotReady => OptionsReport::NotReady,
@@ -366,6 +401,11 @@ impl Readiness {
             ReadinessState::Cordoned => OptionsReport::Serving(Some(Refusal::Cordoned)),
             ReadinessState::Ready if self.inner.backends.any_open() => {
                 OptionsReport::Serving(Some(Refusal::Backend))
+            }
+            ReadinessState::Ready
+                if self.inner.queue.get().is_some_and(EventQueueGate::refusing) =>
+            {
+                OptionsReport::Serving(Some(Refusal::Overload))
             }
             ReadinessState::Ready => OptionsReport::Serving(None),
         }

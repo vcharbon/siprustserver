@@ -6,10 +6,14 @@ use crate::sdp_form::{AsWritten, SdpFormPolicy};
 use crate::service_params::ServiceParams;
 
 mod capacity;
+mod cdr;
+mod event_queue_gate;
 mod front;
 mod retry_after;
 mod validate;
 pub use capacity::{CapacityConfig, Ceilings};
+pub use cdr::CdrConfig;
+pub use event_queue_gate::EventQueueGateConfig;
 pub use front::Front;
 pub use retry_after::RetryAfterRange;
 
@@ -340,24 +344,15 @@ pub struct B2buaConfig {
     /// ceilings above which a new call is refused. Every bound is off by
     /// default.
     pub capacity: CapacityConfig,
+    /// **Event-queue gate** (ADR-0050 §9): the depth and wait of the
+    /// transaction event queue at which a `Ready` worker refuses new calls on
+    /// its OPTIONS answer, and the bounds and hold under which it accepts
+    /// them again.
+    pub event_queue_gate: EventQueueGateConfig,
     /// **Service parameters.** Product services carry their own parameters
     /// here, one value per type; their rules read them through `ctx.config`.
     /// Empty by default.
     pub service_params: ServiceParams,
-}
-
-/// What the call keeps of its own SIP traffic for the record it writes.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CdrConfig {
-    /// The per-leg message-ring cap: the last N messages after the leg's
-    /// opening (`call::MessageRing::push`), the rest counted as dropped. `0`
-    /// (the default) records nothing. Overridable via `B2BUA_CDR_MESSAGE_RING`.
-    pub message_ring: usize,
-    /// The header names whose every value each ring entry captures, in this
-    /// order; matched casing- and compact-form-insensitively. Empty = the
-    /// entries carry no header values. Overridable via
-    /// `B2BUA_CDR_CAPTURED_HEADERS` (comma-separated).
-    pub captured_headers: Vec<String>,
 }
 
 impl Default for B2buaConfig {
@@ -427,6 +422,7 @@ impl Default for B2buaConfig {
             minted_final_advertisement: sip_message::generators::CapabilitySet::silent(),
             cdr: CdrConfig::default(),
             capacity: CapacityConfig::default(),
+            event_queue_gate: EventQueueGateConfig::default(),
             service_params: ServiceParams::default(),
         }
     }

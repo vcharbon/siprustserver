@@ -26,6 +26,7 @@ mod held_ack;
 mod held_cancel;
 mod hop_alive;
 mod invite_give_up;
+mod keepalive_lane;
 mod late_cancel_hold;
 mod lifetime;
 mod long_ring_holds;

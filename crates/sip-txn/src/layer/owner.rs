@@ -22,6 +22,7 @@ use crate::rng::IdGen;
 
 use super::backlog::DeferredBound;
 use super::call_txns::CallTxns;
+use super::event_receiver::Queued;
 use super::handle::TransactionConfig;
 use super::key::{ServerTxnId, ServerTxnIdentity, ServerTxnKey};
 use super::parse_refusal::ParseRefusals;
@@ -46,7 +47,10 @@ pub(super) struct Owner {
     pub(super) servers: HashMap<ServerTxnKey, Box<Transaction>>,
     pub(super) timers: DelayQueue<Timer>,
     pub(super) parser: Arc<dyn SipParser + Send + Sync>,
-    pub(super) events_tx: mpsc::Sender<TransactionEvent>,
+    pub(super) events_tx: mpsc::Sender<Queued>,
+    /// The keepalive lane ([`TransactionConfig::keepalive_lane`](crate::TransactionConfig)),
+    /// when the layer runs one.
+    pub(super) keepalive_tx: Option<mpsc::Sender<TransactionEvent>>,
     pub(super) metrics: Arc<MetricsInner>,
     pub(super) id_gen: Arc<IdGen>,
     /// call_refs the consumer asked to be told about when their **last**
@@ -122,11 +126,12 @@ pub(super) struct Owner {
 }
 
 impl Owner {
-    /// The owner over `events_tx`, holding the tunables of `config` (its
-    /// `udp_queue_max` already sized `events_tx`).
+    /// The owner over `events_tx` and the keepalive lane `keepalive_tx`,
+    /// holding the tunables of `config` (which already sized both).
     pub(super) fn new(
         parser: Arc<dyn SipParser + Send + Sync>,
-        events_tx: mpsc::Sender<TransactionEvent>,
+        events_tx: mpsc::Sender<Queued>,
+        keepalive_tx: Option<mpsc::Sender<TransactionEvent>>,
         metrics: Arc<MetricsInner>,
         config: TransactionConfig,
     ) -> Self {
@@ -141,6 +146,7 @@ impl Owner {
             timers: DelayQueue::new(),
             parser,
             events_tx,
+            keepalive_tx,
             metrics,
             parse_refusals: ParseRefusals::new(&config.id_gen, config.advertised),
             id_gen: config.id_gen,

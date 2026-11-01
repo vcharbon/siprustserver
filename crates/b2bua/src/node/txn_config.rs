@@ -7,12 +7,26 @@ use sip_txn::{BoundPassed, DeferredBound, IdGen, OnBound, TransactionConfig};
 use crate::admission::Refusals;
 use crate::config::B2buaConfig;
 
+/// The worker's inbound UDP queue bound as the transaction layer reads it:
+/// it sizes the event queue at four times its value, [`EVENT_QUEUE_CAPACITY`].
+const UDP_QUEUE_MAX: usize = 1024;
+
+/// The bound of the worker's transaction event queue: room for a new-INVITE
+/// burst beside the in-dialog traffic of established calls, whose keepalive
+/// responses a full queue would drop.
+pub const EVENT_QUEUE_CAPACITY: usize = 4 * UDP_QUEUE_MAX;
+
+/// The bound of the keepalive lane: the out-of-dialog OPTIONS the proxies'
+/// probes and dead notices send, which the router takes ahead of the event
+/// queue.
+const KEEPALIVE_LANE: usize = 64;
+
 /// The transaction layer's tunables for this worker: its event queue, the
 /// deployment's INVITE bounds and CANCEL policy, the worker's shared
 /// `refusals`, the ceilings on the deferred backlog
 /// ([`crate::admission::deferred_bound`]) unless `ceilings` sets its own,
-/// no transaction for an out-of-dialog OPTIONS, and the worker's advertised
-/// SIP address.
+/// no transaction for an out-of-dialog OPTIONS, which rides the keepalive
+/// lane, and the worker's advertised SIP address.
 pub(super) fn txn_config(
     config: &B2buaConfig,
     id_gen: &Arc<IdGen>,
@@ -22,10 +36,7 @@ pub(super) fn txn_config(
     probe: &crate::turn_probe::TurnProbes,
 ) -> TransactionConfig {
     let mut txn_config = TransactionConfig {
-        // Sizes the events channel at 4096: room for a new-INVITE burst
-        // beside the in-dialog traffic of established calls, whose keepalive
-        // responses a full channel would drop.
-        udp_queue_max: 1024,
+        udp_queue_max: UDP_QUEUE_MAX,
         id_gen: id_gen.clone(),
         // The deployment's initial-INVITE bound (default 158 s):
         // `config.validate()` keeps `setup_timeout_ms` strictly below
@@ -52,10 +63,13 @@ pub(super) fn txn_config(
         // The OPTIONS health answer derives its To-tag from the request
         // (`RouterCtx::options_tagger`).
         stateless_options: true,
+        // The router takes a probe ahead of the queued events (ADR-0050 §2).
+        keepalive_lane: Some(KEEPALIVE_LANE),
         // The worker's SIP identity names it in a Warning, never a wildcard
         // bind address.
         advertised: Some(hostport(&config.sip_local_ip, config.sip_local_port)),
     };
+    debug_assert_eq!(txn_config.event_capacity(), EVENT_QUEUE_CAPACITY);
     txn_config.deferred_bound = Some(
         ceilings.unwrap_or_else(|| crate::admission::deferred_bound(txn_config.event_capacity())),
     );

@@ -82,6 +82,13 @@ pub struct TransactionConfig {
     /// the request (RFC 3261 §8.2.7). `false` — the default — holds one
     /// transaction per OPTIONS for 64·T1 like any other non-INVITE.
     pub stateless_options: bool,
+    /// The bound of the keepalive lane, which carries every out-of-dialog
+    /// OPTIONS [`stateless_options`](Self::stateless_options) passes up, apart
+    /// from the event queue: a consumer that takes the lane first answers a
+    /// probe ahead of the events queued before it. A full lane drops the
+    /// newest and counts it; the prober repeats. `None` — the default — runs
+    /// no lane: every OPTIONS rides the event queue.
+    pub keepalive_lane: Option<usize>,
     /// The `hostport` this element is advertised as, which names it as the
     /// warn-agent of the 400 answering a refused request (RFC 3261 §20.43).
     /// `None` — the default — names it by the address the 400 leaves from.
@@ -100,8 +107,8 @@ impl TransactionConfig {
 
     /// The defaults, identifiers drawn from `id_gen`: a 256-datagram receive
     /// queue, the RFC 3261 INVITE bounds and first-provisional bound, strict To-tag binding, no deferred
-    /// bound, no shared refusals, a transaction per OPTIONS, no advertised
-    /// address.
+    /// bound, no shared refusals, a transaction per OPTIONS, no keepalive
+    /// lane, no advertised address.
     pub fn new(id_gen: Arc<IdGen>) -> Self {
         Self {
             udp_queue_max: 256,
@@ -116,6 +123,7 @@ impl TransactionConfig {
             deferred_bound: None,
             invite_refusals: None,
             stateless_options: false,
+            keepalive_lane: None,
             advertised: None,
         }
     }

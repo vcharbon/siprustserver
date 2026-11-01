@@ -31,7 +31,6 @@ use sip_message::{CustomParser, SipMessage, SipParser, SipRequest};
 use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
 use sip_net_testkit::SimulatedSignalingNetwork;
 use sip_txn::{IdGen, ServerTxnKey, TransactionConfig, TransactionEvent, TransactionLayer};
-use tokio::sync::mpsc;
 
 pub const B2BUA: &str = "127.0.0.1:5070";
 pub const PEER: &str = "10.0.0.1:5555";
@@ -54,7 +53,7 @@ pub fn config() -> TransactionConfig {
 /// for injecting wire bytes at it.
 pub struct Stack {
     pub txn: TransactionLayer,
-    pub events: mpsc::Receiver<TransactionEvent>,
+    pub events: sip_txn::TransactionEvents,
     pub peer: Box<dyn UdpEndpoint>,
     pub net: SimulatedSignalingNetwork,
 }

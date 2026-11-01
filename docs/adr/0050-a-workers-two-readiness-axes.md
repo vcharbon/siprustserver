@@ -2,6 +2,8 @@
 
 **Status:** accepted (2026-10-16). Amended (2026-10-28): §3, the proxy tells
 each dead verdict to the workers; §5, the undecided call's residual.
+Amended (2026-11-01): §2 and §9, a backed-up event queue refuses new calls
+(`cause=overload`); §12, the keepalive lane.
 
 **Owner:** `crates/sip-message` (the `X-Readiness` and `X-Incarnation` headers),
 `crates/b2bua/src/repl/readiness.rs` and `router/responses.rs` (the worker's
@@ -13,7 +15,10 @@ the cookie's `w_bak`), `load_observer/observer.rs` (the stale-payload sweep),
 `dead_notice.rs` and `crates/b2bua/src/router/dead_verdict.rs` (the dead
 notice),
 `crates/sip-proxy-runner/src/readiness.rs` and `main.rs` (`/readyz`, the boot
-probe), the proxy chart's VRRP check.
+probe), the proxy chart's VRRP check, `crates/sip-txn/src/layer/event_receiver.rs`
+and `events.rs` (the keepalive lane, each event's wait in the queue),
+`crates/b2bua/src/overload/event_queue_gate.rs` and
+`crates/b2bua-runner-kit/src/runner_env/event_queue_env.rs` (the event-queue gate).
 
 Amends ADR-0043 §11–12, ADR-0031 D4, ADR-0046 §2 and D4, ADR-0012 D4,
 ADR-0014 §5 and ADR-0009 (the fresh-pod guard and the drain grace).
@@ -67,6 +72,7 @@ take a new call, and may an in-dialog request of a call it owns reach it.
    X-Readiness: new=refuse; cause=backend
    X-Readiness: new=refuse; cause=cordoned
    X-Readiness: new=refuse; cause=draining
+   X-Readiness: new=refuse; cause=overload
    ```
 
    `cause` is free text for metrics and logs; the proxy acts on `new` alone.
@@ -169,8 +175,23 @@ take a new call, and may an in-dialog request of a call it owns reach it.
 9. **The worker's states.**
    - **NotReady**: not yet bootstrapped; OPTIONS `503`.
    - **Ready**: accepting, unless a gating backend's breaker is open, which
-     reports `new=refuse; cause=backend` and refuses new calls (ADR-0043 §10).
-     Never latched.
+     reports `new=refuse; cause=backend` and refuses new calls (ADR-0043 §10),
+     or else the event-queue gate refuses, which reports `new=refuse;
+     cause=overload`. Never latched. The gate reads the transaction event
+     queue: its depth, and the sojourn, the time the event the router took
+     last waited in it (an empty queue reads zero). It refuses at or past
+     either refusal bound (depth 512, sojourn 500 ms) and accepts again once
+     depth and sojourn have both stayed at or below their accept bounds (64,
+     50 ms) for the hold (3 s, at least two probe intervals). The router
+     reads it at each event it takes and the OPTIONS answer at each probe.
+     The worker's admission ladder is not fed by it: a new INVITE that still
+     reaches a refusing worker is admitted or refused as before, and
+     in-dialog requests are never refused by it. The bounds, their defaults
+     and the boot checks between them are the runner's `B2BUA_EVENT_QUEUE_*`
+     grammar. The proxy keeps a refusing worker `Alive` and every dialog it
+     owns on it (§4), and places new calls elsewhere (§6): a worker whose
+     process is starved of CPU while its load signal reads low sheds new
+     calls instead of being read dead and taken over.
    - **Cordoned**: `new=refuse; cause=cordoned`. New calls that reach it are
      refused (bare `503`, its call record written); every established dialog
      is served normally. Reversible, no timer of its own: the operator's next
@@ -202,6 +223,22 @@ take a new call, and may an in-dialog request of a call it owns reach it.
     keeps the virtual address only once it can route; the livenessProbe keeps
     reading `/healthz` alone. Equal priorities and preempt stay (ADR-0046 D4).
 
+12. **The keepalive lane.** The worker's transaction layer passes each
+    out-of-dialog OPTIONS (§2: no transaction) up on a small bounded lane of
+    its own, apart from the event queue; a full lane drops the newest and
+    counts it (`b2bua_txn_keepalive_lane_drops_total`), and the prober
+    repeats. The router takes the lane first whenever it waits for work, so
+    a probe waits for the turn in progress, never behind queued call and
+    transaction events. The answer is built on the router loop as for any
+    event, and the dead notice it carries (§3) is taken right after it, so
+    verdicts apply in the order their OPTIONS arrived. A frozen or
+    partitioned process, and a wedged router loop or transaction owner,
+    still answer nothing and are still read `Dead` (§3). Residual: an OPTIONS
+    still waits behind the datagrams ahead of it in the transport's receive
+    queue and behind the transaction owner's own processing of them. The
+    lane is opt-in in the transaction layer (`keepalive_lane`), so its other
+    users keep one queue.
+
 ### Amended
 
 - ADR-0043 §11: the open breaker sets `new=refuse; cause=backend` on a `200`
@@ -231,10 +268,18 @@ take a new call, and may an in-dialog request of a call it owns reach it.
   outside its site today (ADR-0015 is unimplemented).
 - An in-dialog request with no live worker gets no answer; the sender's
   transaction timers end it.
+- A starved worker's backlog no longer delays its probe answers past the
+  probe's reply window: it reads refusing, keeps its dialogs, and is never
+  taken over for it. Its new calls go to the other workers until its queue
+  has stayed drained for the hold.
 - Pinned by proxy tests (in-dialog to a refusing primary, to a `NotReady`
   backup, with no target; a `w_bak` among accepting workers; an incarnation
   change resets health; no guard after a join or a proxy restart; no `503`
   before the first view), worker tests (the OPTIONS answer in each state,
   cordon reversal, release-all), and failover-harness cells (a cluster-wide
   backend outage with established calls ended by their BYE; a re-INVITE right
-  after a primary returns, served by the primary).
+  after a primary returns, served by the primary), and the event-queue cells
+  (an OPTIONS behind a backlog answered within the reply window; the refusal
+  by depth and by sojourn with its hold; a backed-up worker kept alive, its
+  dialogs on it, new calls elsewhere; a dead notice behind a backlog taken
+  once, in order; a wedged or partitioned worker read dead).

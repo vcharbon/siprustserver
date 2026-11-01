@@ -9,8 +9,8 @@ use sip_message::SipParser;
 use sip_net::{BindUdpOpts, SignalingNetwork, UdpEndpoint};
 use sip_net_testkit::SimulatedSignalingNetwork;
 use sip_txn::timers::TRYING_BOUND;
-use sip_txn::{TransactionConfig, TransactionEvent};
-use tokio::sync::{mpsc, Notify};
+use sip_txn::TransactionConfig;
+use tokio::sync::Notify;
 
 use super::*;
 use crate::dispatch::{DispatchBody, DispatchClass, Outcome, PerCallDispatcher};
@@ -80,7 +80,7 @@ fn retry_after(resp: &SipResponse) -> Option<u32> {
 
 struct Rig {
     txn: TransactionLayer,
-    events: mpsc::Receiver<TransactionEvent>,
+    events: sip_txn::TransactionEvents,
     peer: Box<dyn UdpEndpoint>,
     dispatcher: PerCallDispatcher<DispatchBody>,
     metrics: B2buaMetrics,

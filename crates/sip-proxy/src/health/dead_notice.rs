@@ -24,18 +24,16 @@ use sip_message::header::{self, Uri, Via};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipHeader, SipRequest, SipStr};
 use sip_net::UdpEndpoint;
-use sip_txn::{
-    IdGen, TransactionConfig, TransactionEvent, TransactionLayer, TransactionLayerClosed,
-};
+use sip_txn::{IdGen, TransactionConfig, TransactionLayer, TransactionLayerClosed};
+use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{broadcast, mpsc};
 
 use crate::registry::{WorkerEntry, WorkerHealth, WorkerId, WorkerRegistry};
 
 /// The sender of dead notices. Owns a UAC endpoint of its own.
 pub struct DeadNotifier {
     txn: TransactionLayer,
-    events: mpsc::Receiver<TransactionEvent>,
+    events: sip_txn::TransactionEvents,
     host: String,
     port: u16,
     registry: Arc<dyn WorkerRegistry>,

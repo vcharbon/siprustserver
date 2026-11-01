@@ -14,6 +14,8 @@ use crate::{
     stated, stated_list, WorkerAddresses,
 };
 
+mod event_queue_env;
+
 /// Every generic runner knob, parsed once from env by [`RunnerEnv::from_env`].
 /// All fields are pub: tweak any of them between `from_env()` and
 /// [`bind`](RunnerEnv::bind) to override a single knob without re-implementing
@@ -174,6 +176,9 @@ pub struct RunnerEnv {
     /// the loop reads stalled; the grammar, its default and the boot check
     /// against the call-control timeout in `liveness_env`.
     pub loop_stall: Duration,
+    /// The event-queue gate's bounds (ADR-0050 §9), the grammar, defaults
+    /// and boot checks in `runner_env::event_queue_env`.
+    pub event_queue_gate: b2bua::config::EventQueueGateConfig,
 }
 
 /// `key` parsed as `T`, `default` when unset; `Err` names the variable and
@@ -314,6 +319,11 @@ impl RunnerEnv {
             capacity: capacity_env::capacity_from_lookup(lookup).map_err(invalid)?,
             loop_stall: liveness_env::loop_stall_from_lookup(lookup, call_control)
                 .map_err(invalid)?,
+            event_queue_gate: event_queue_env::event_queue_gate_from_lookup(
+                lookup,
+                b2bua::EVENT_QUEUE_CAPACITY,
+            )
+            .map_err(invalid)?,
         })
     }
 }

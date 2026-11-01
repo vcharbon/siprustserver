@@ -276,9 +276,11 @@ impl Owner {
         }
 
         // ── Out-of-dialog OPTIONS, stateless (RFC 3261 §8.2.7) ─────────────────
-        // No transaction: every copy reaches the TU, whose answer leaves raw.
+        // No transaction: every copy reaches the TU, on the keepalive lane when
+        // the layer runs one, and its answer leaves raw.
         if self.stateless_options && req.method() == Method::Options && req.to().tag().is_none() {
-            self.hand_up(req, src, datagram);
+            let event = self.upward(req, src, datagram);
+            self.emit_keepalive(event);
             return;
         }
 
@@ -375,13 +377,20 @@ impl Owner {
     /// transaction, stamped on receipt. `false` when the event queue dropped
     /// it.
     fn hand_up(&mut self, req: SipRequest, src: SocketAddr, datagram: Bytes) -> bool {
+        let event = self.upward(req, src, datagram);
+        self.emit(event)
+    }
+
+    /// The event passing `req`, received from `src` as `datagram`, up to the
+    /// consumer, its top Via stamped (RFC 3261 §18.2.1).
+    fn upward(&self, req: SipRequest, src: SocketAddr, datagram: Bytes) -> TransactionEvent {
         let req = self.stamp(req, src).request;
-        self.emit(TransactionEvent::Message {
+        TransactionEvent::Message {
             message: Box::new(SipMessage::Request(req)),
             src,
             matched_client_txn: false,
             datagram,
-        })
+        }
     }
 
     /// The retransmission path (RFC 3261 §17.2.1): a request a server

@@ -65,6 +65,11 @@
 //!   B2BUA_RELAY_HEADERS opt-in transparent header relay, comma-separated names copied from the a-leg INVITE onto every originated b-leg INVITE (default empty = no relay; structural headers never relayable)
 //!   B2BUA_CDR_MESSAGE_RING per-leg message-ring cap on the call record: a leg keeps its opening (the initial INVITE up to its first final, the 2xx ACK) and the last N distinct SIP messages after it (default 0 = off)
 //!   B2BUA_CDR_CAPTURED_HEADERS header names whose values every ring entry captures, comma-separated (default empty)
+//!   B2BUA_EVENT_QUEUE_REFUSE_DEPTH / _ACCEPT_DEPTH / _REFUSE_SOJOURN_MS / _ACCEPT_SOJOURN_MS / _ACCEPT_HOLD_MS
+//!                   a backed-up transaction event queue refuses new calls on the OPTIONS answer
+//!                   (cause=overload) and accepts again after the hold (default 512 / 64 / 500 / 50 / 3000;
+//!                   roles, relation to the proxy probe and AIMD, boot checks: `b2bua_runner_kit`'s
+//!                   `runner_env::event_queue_env`, ADR-0050 §9)
 //!
 //! ## Call limiter
 //!   LIMITER_URL             the shared limiter, [http://]host:port; unset → NoopLimiter (fail-open)

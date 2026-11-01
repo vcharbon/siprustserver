@@ -161,6 +161,8 @@ b2bua-runner b2bua_txn_poisoned_lock_recoveries_total counter fixed {lock}
 b2bua-runner b2bua_txn_send_errors_total counter fixed {}
 b2bua-runner b2bua_txn_event_queue_depth gauge fixed {}
 b2bua-runner b2bua_txn_event_queue_capacity gauge fixed {}
+b2bua-runner b2bua_txn_event_queue_sojourn_ms gauge fixed {}
+b2bua-runner b2bua_txn_keepalive_lane_drops_total counter fixed {}
 b2bua-runner b2bua_txn_event_queue_drops_total counter fixed {reason}
 b2bua-runner b2bua_txn_event_queue_deferred_total counter fixed {reason}
 b2bua-runner b2bua_txn_event_queue_deferred gauge fixed {}
@@ -189,6 +191,8 @@ b2bua-runner b2bua_capacity_ceiling gauge fixed {bound,class|bound,class}
 b2bua-runner b2bua_repl_backup_shed_total counter fixed {bound}
 b2bua-runner b2bua_loop_stalled gauge fixed {loop}
 b2bua-runner b2bua_cordoned gauge fixed {}
+b2bua-runner b2bua_event_queue_refusing gauge fixed {}
+b2bua-runner b2bua_event_queue_refusals_total counter fixed {}
 b2bua-runner b2bua_new_calls_total counter fixed {outcome,class|outcome,class|outcome,reason,class|outcome,reason,class}
 b2bua-runner b2bua_new_call_refused_copies_total counter fixed {}
 b2bua-runner log_lines_dropped_total counter fixed {}

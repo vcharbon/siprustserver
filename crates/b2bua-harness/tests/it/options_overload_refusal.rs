@@ -22,7 +22,7 @@ use tokio::time::Instant;
 /// The single SUT's ordinal.
 const NODE: &str = "w0";
 /// Queued events at which the worker refuses new calls.
-const REFUSE_DEPTH: usize = 2048;
+const REFUSE_DEPTH: usize = 512;
 /// A wait in the queue at which the worker refuses new calls.
 const REFUSE_SOJOURN: Duration = Duration::from_millis(500);
 /// How long the queue stays drained before the worker accepts again.

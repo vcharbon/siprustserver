@@ -77,7 +77,6 @@ use sip_net::UdpEndpoint;
 use sip_txn::{
     IdGen, TransactionConfig, TransactionEvent, TransactionLayer, TransactionLayerClosed,
 };
-use tokio::sync::mpsc;
 
 use super::first_view::{FirstRound, FirstView};
 use crate::addr::ProxyAddr;
@@ -162,7 +161,7 @@ fn probe_call_ref(branch: &str) -> String {
 /// through a dedicated [`TransactionLayer`].
 pub struct HealthProbe {
     txn: TransactionLayer,
-    events: mpsc::Receiver<TransactionEvent>,
+    events: sip_txn::TransactionEvents,
     probe_host: String,
     probe_port: u16,
     registry: Arc<dyn WorkerRegistry>,

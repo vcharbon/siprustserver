@@ -1,7 +1,9 @@
 //! Output-queue discipline: lossy [`Owner::emit`] for events the protocol
 //! redelivers if lost, vs lossless [`Owner::emit_critical`] (deferred on a full
 //! queue, never dropped while its transaction lives) for one-shot signals whose
-//! protocol-level redelivery the layer already consumed — plus the ADR-0014
+//! protocol-level redelivery the layer already consumed, and
+//! [`Owner::emit_keepalive`] for an out-of-dialog OPTIONS on the keepalive
+//! lane — plus the ADR-0014
 //! `CallQuiesced` end-of-turn ordering (`flush_pending_quiesce`).
 
 use std::sync::atomic::Ordering::Relaxed;
@@ -12,6 +14,7 @@ use tokio::sync::mpsc;
 use crate::event::{EventQueueClass, TransactionEvent};
 use crate::timers::ms;
 
+use super::event_receiver::Queued;
 use super::key::{ServerTxnId, ServerTxnKey};
 use super::owner::Owner;
 use super::txn::Timer;
@@ -45,6 +48,24 @@ impl Owner {
         self.offer(event, true);
     }
 
+    /// Offer an out-of-dialog OPTIONS to the keepalive lane when the layer
+    /// runs one, else to the event queue as an ordinary event. A full lane
+    /// drops the newest and counts it: the prober repeats.
+    /// `true` when a queue took the event.
+    pub(super) fn emit_keepalive(&mut self, event: TransactionEvent) -> bool {
+        let Some(lane) = &self.keepalive_tx else {
+            return self.emit(event);
+        };
+        match lane.try_send(event) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.metrics.keepalive_lane_drops.fetch_add(1, Relaxed);
+                false
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        }
+    }
+
     /// `true` when the event was queued or deferred, `false` when it was dropped.
     fn offer(&mut self, event: TransactionEvent, critical: bool) -> bool {
         // Preserve FIFO: once a critical backlog exists, queue further criticals
@@ -54,11 +75,11 @@ impl Owner {
             return true;
         }
         let class = EventQueueClass::of(&event);
-        match self.events_tx.try_send(event) {
+        match self.events_tx.try_send(Queued::now(event)) {
             Ok(()) => true,
-            Err(mpsc::error::TrySendError::Full(ev)) => {
+            Err(mpsc::error::TrySendError::Full(queued)) => {
                 if critical {
-                    self.defer(ev);
+                    self.defer(queued.event);
                 } else {
                     // Ordinary event: drop-newest, counted.
                     self.metrics.event_queue_drops.add(class.index());
@@ -94,10 +115,10 @@ impl Owner {
     /// A still-full queue re-arms the tick; a closed channel clears the backlog.
     pub(super) fn flush_deferred(&mut self) {
         while let Some(ev) = self.deferred_events.pop_front() {
-            match self.events_tx.try_send(ev) {
+            match self.events_tx.try_send(Queued::now(ev)) {
                 Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(ev)) => {
-                    self.deferred_events.push_front(ev);
+                Err(mpsc::error::TrySendError::Full(queued)) => {
+                    self.deferred_events.push_front(queued.event);
                     break;
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {

@@ -38,7 +38,7 @@ mod loops_tests;
 mod readiness;
 mod release_all;
 mod samplers;
-mod txn_config;
+pub(crate) mod txn_config;
 use txn_config::txn_config;
 #[cfg(test)]
 mod unwired_tests;
@@ -271,8 +271,7 @@ impl B2buaCore {
                 ));
                 (readiness, Some(supervisor), Some((repl_tx, repl_rx)))
             }
-            // Unwired node: always-200 OPTIONS, no replication part at all; its
-            // boot instant names the process.
+            // Unwired: always-200 OPTIONS, no replication; its boot instant is its incarnation.
             None => (
                 Readiness::always_ready()
                     .with_incarnation(u64::try_from(clock.now_ms()).unwrap_or(0)),
@@ -280,6 +279,7 @@ impl B2buaCore {
                 None,
             ),
         };
+        readiness.gate_options_on_queue(config.event_queue_gate, txn.metrics().clone());
         // One `Option` holds both halves of the fail-back channel: the router's
         // receiver exists only alongside the retained sender.
         let (repl_tx, repl_rx) = fail_back.unzip();

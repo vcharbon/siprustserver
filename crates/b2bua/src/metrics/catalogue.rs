@@ -9,6 +9,7 @@
 pub mod capacity;
 pub mod limiter;
 pub mod plain;
+pub mod readiness;
 pub mod shell;
 pub mod udp;
 pub mod worker;
@@ -259,6 +260,8 @@ pub const TXN: &[Family] = &[
     txn::SEND_ERRORS,
     txn::EVENT_QUEUE_DEPTH,
     txn::EVENT_QUEUE_CAPACITY,
+    txn::EVENT_QUEUE_SOJOURN,
+    txn::KEEPALIVE_LANE_DROPS,
     txn::EVENT_QUEUE_DROPS,
     txn::EVENT_QUEUE_DEFERRALS,
     txn::EVENT_QUEUE_DEFERRED,
@@ -302,8 +305,10 @@ pub const CAPACITY: &[Family] = &[
 /// Whether the worker's loops turn.
 pub const LOOPS: &[Family] = &[worker::LOOP_STALLED];
 
-/// Whether an operator cordoned the worker.
-pub const READINESS: &[Family] = &[worker::CORDONED];
+/// Whether an operator cordoned the worker, and whether its backed-up
+/// event queue refuses new calls.
+pub const READINESS: &[Family] =
+    &[readiness::CORDONED, readiness::EVENT_QUEUE_REFUSING, readiness::EVENT_QUEUE_REFUSALS];
 
 /// Every new call's admission outcome.
 pub const NEW_CALL_OUTCOMES: &[Family] = &[NEW_CALLS, NEW_CALL_REFUSED_COPIES];
