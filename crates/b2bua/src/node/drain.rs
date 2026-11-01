@@ -168,8 +168,8 @@ fn end_unheld(ctx: &Arc<RouterCtx>, changelog: Option<&crate::repl::Changelog>) 
         .state
         .active_call_holders()
         .into_iter()
-        .filter(|(call_ref, _, holder)| !holder.as_ref().is_some_and(|h| held(call_ref, h)))
-        .map(|(call_ref, incarnation, _)| (call_ref, incarnation))
+        .filter(|c| !c.owners.as_ref().is_some_and(|o| held(&c.call_ref, o)))
+        .map(|c| (c.call_ref, c.incarnation))
         .collect();
     for (call_ref, incarnation) in &unheld {
         let _ = ctx.reentry_tx.send(CallEvent::InternalEvent {
