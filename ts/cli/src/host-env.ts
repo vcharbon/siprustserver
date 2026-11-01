@@ -4,12 +4,14 @@
  * a DEFAULT, never an override — a key already exported is left as the caller
  * set it — and a key the facts do not list is ignored and said, because a typo
  * in an env file is otherwise silence. A path key is taken relative to the
- * directory of the file that states it; an absolute one is kept.
+ * directory of the file that states it; an absolute one is kept. The
+ * deployment's own defaults (`HostEnv.before`) are applied first.
  */
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as FileSystem from "effect/FileSystem"
 import * as Path from "effect/Path"
+import * as Schema from "effect/Schema"
 import type { HostEnv } from "./facts.js"
 
 /** What one file contributed: itself, the keys it set, and the keys it could not. */
@@ -18,6 +20,15 @@ export interface Applied {
   readonly set: ReadonlyArray<string>
   /** Keys the file states that were already exported, or that the facts do not list. */
   readonly ignored: ReadonlyArray<string>
+}
+
+/** Why the deployment's own defaults cannot be applied: the command does not start. */
+export class Refused extends Schema.TaggedError<Refused>()("HostEnv.Refused", {
+  reason: Schema.String
+}) {
+  override get message(): string {
+    return this.reason
+  }
 }
 
 /** What the runner applied before the command ran; empty where it applied nothing. */
@@ -41,11 +52,14 @@ export const parse = (text: string): ReadonlyMap<string, string> => {
   return read
 }
 
-/** The host's env files applied to `env`, each answering what it did; a file the host lacks is skipped. */
+/**
+ * The deployment's own defaults, then the host's env files, applied to `env`,
+ * each answering what it did; a file the host lacks is skipped.
+ */
 export const apply = Effect.fn("HostEnv.apply")(function*(host: HostEnv, env: NodeJS.ProcessEnv = process.env) {
   const fs = yield* FileSystem.FileSystem
   const path = yield* Path.Path
-  const applied: Array<Applied> = []
+  const applied: Array<Applied> = host.before === undefined ? [] : [...yield* host.before(env)]
   for (const file of host.files) {
     const text = yield* fs.readFileString(file).pipe(Effect.orElseSucceed(() => undefined))
     if (text === undefined) continue

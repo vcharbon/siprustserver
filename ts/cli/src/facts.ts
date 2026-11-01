@@ -6,6 +6,10 @@
  * everything a command needs once it runs comes from the deployment's
  * services instead (`@sip/corpus` `deployment/`).
  */
+import type * as Effect from "effect/Effect"
+import type * as FileSystem from "effect/FileSystem"
+import type * as Path from "effect/Path"
+import type { Applied, Refused } from "./host-env.js"
 
 /**
  * Where a host keeps the environment a command needs and an operator's shell
@@ -20,6 +24,14 @@ export interface HostEnv {
   readonly keys: Readonly<Record<string, string>>
   /** The keys whose value is a place on disk, resolved against the directory of the file that states it. */
   readonly pathKeys: ReadonlySet<string>
+  /**
+   * The deployment's own defaults (a configuration file of its own), applied
+   * before the files and so winning over them, never over a key already
+   * exported. A refusal stops the command before its line is parsed.
+   */
+  readonly before?: (
+    env: NodeJS.ProcessEnv
+  ) => Effect.Effect<ReadonlyArray<Applied>, Refused, FileSystem.FileSystem | Path.Path>
 }
 
 export interface CliFacts {

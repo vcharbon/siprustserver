@@ -49,4 +49,36 @@ describe("HostEnv.apply", () => {
       { file: second, set: [], ignored: ["STORE_URL"] }
     ])
   })
+
+  it("applies the deployment's own defaults first, so they win over a file and never over an exported key", async () => {
+    const file = path.join(dir, "host.env")
+    fs.writeFileSync(file, "STORE_URL=postgres://file\nROOT=from-file\n")
+    const env: NodeJS.ProcessEnv = { EXPORTED: "shell" }
+    const before = (target: NodeJS.ProcessEnv) =>
+      Effect.sync(() => {
+        target.STORE_URL = "postgres://own"
+        return [{ file: "own.conf", set: ["STORE_URL"], ignored: [] }]
+      })
+    const applied = await Effect.runPromise(
+      HostEnv.apply({ ...host([file]), before }, env).pipe(Effect.provide(NodeServices.layer))
+    )
+    expect(env).toEqual({ EXPORTED: "shell", STORE_URL: "postgres://own", ROOT: path.resolve(dir, "from-file") })
+    expect(applied).toEqual([
+      { file: "own.conf", set: ["STORE_URL"], ignored: [] },
+      { file, set: ["ROOT"], ignored: ["STORE_URL"] }
+    ])
+  })
+
+  it("fails with the deployment's refusal and applies no file", async () => {
+    const file = path.join(dir, "host.env")
+    fs.writeFileSync(file, "STORE_URL=postgres://file\n")
+    const env: NodeJS.ProcessEnv = {}
+    const before = () => Effect.fail(new HostEnv.Refused({ reason: "own.conf: port: not a port" }))
+    const exit = await Effect.runPromiseExit(
+      HostEnv.apply({ ...host([file]), before }, env).pipe(Effect.provide(NodeServices.layer))
+    )
+    expect(exit._tag).toBe("Failure")
+    expect(String(exit)).toContain("own.conf: port: not a port")
+    expect(env).toEqual({})
+  })
 })
