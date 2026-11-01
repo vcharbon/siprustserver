@@ -7,6 +7,22 @@ use std::sync::Arc;
 use super::B2buaCore;
 
 impl B2buaCore {
+    /// The router context, for the in-crate unit tests that drive one router
+    /// seam directly (`router::materialise`) over a fully wired core.
+    #[cfg(test)]
+    pub(crate) fn router_ctx(&self) -> &Arc<crate::router::RouterCtx> {
+        &self.ctx
+    }
+
+    /// The fail-back command sender the router's receiver pairs with, for the
+    /// tests that assert what an unwired node constructs.
+    #[cfg(test)]
+    pub(crate) fn fail_back_sender(
+        &self,
+    ) -> Option<&tokio::sync::mpsc::UnboundedSender<crate::router::ReplCommand>> {
+        self._repl_tx.as_ref()
+    }
+
     /// Sample the store + replication map sizes into the memory-attribution
     /// gauges (`b2bua_store_*`, `b2bua_repl_meta_*`, `b2bua_repl_changelog_*`).
     /// Called on a slow cadence by the runner so a RSS climb can be pinned to a

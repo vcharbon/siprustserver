@@ -175,6 +175,8 @@ pub struct RouterCtx {
     /// Self-reported readiness driving the OPTIONS health responder. The
     /// unwired node uses [`Readiness::always_ready`] → always 200.
     pub readiness: Readiness,
+    /// Outbound messages left unsent, by next hop (`router::unaddressable`).
+    pub unsent_waves: Arc<observe::WaveSet<crate::lifecycle::Unsent>>,
     /// The To-tag of the OPTIONS health answer, derived from the request: the
     /// transaction layer holds no transaction for an out-of-dialog OPTIONS.
     pub options_tagger: sip_txn::StatelessTagger,

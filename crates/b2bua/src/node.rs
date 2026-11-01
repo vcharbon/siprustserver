@@ -373,6 +373,7 @@ impl B2buaCore {
             // The core obligation kinds, limiter and CDR (ADR-0020 X7).
             obligations: Arc::new(crate::obligations::ObligationSet::core()),
             readiness: readiness.clone(),
+            unsent_waves: crate::lifecycle::unsent_waves(),
             departed: supervisor.as_ref().map(crate::repl::departed_probe),
             peer_streams: supervisor.clone(),
             overload: overload.clone(),
@@ -483,22 +484,6 @@ impl B2buaCore {
             _repl_tx: repl_tx,
             node,
         }
-    }
-
-    /// The router context, for the in-crate unit tests that drive one router
-    /// seam directly (`router::materialise`) over a fully wired core.
-    #[cfg(test)]
-    pub(crate) fn router_ctx(&self) -> &Arc<RouterCtx> {
-        &self.ctx
-    }
-
-    /// The fail-back command sender the router's receiver pairs with, for the
-    /// tests that assert what an unwired node constructs.
-    #[cfg(test)]
-    pub(crate) fn fail_back_sender(
-        &self,
-    ) -> Option<&tokio::sync::mpsc::UnboundedSender<router::ReplCommand>> {
-        self._repl_tx.as_ref()
     }
 
     /// The replicating call store, when replication is wired (`None` on an

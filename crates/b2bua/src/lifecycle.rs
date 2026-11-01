@@ -84,6 +84,49 @@ pub fn backend_waves(backend: &'static str) -> Arc<WaveSet> {
     })
 }
 
+/// The latest outbound message an unsent episode holds: its call, its label
+/// and, for a request, its Request-URI.
+#[derive(Debug, Clone)]
+pub struct Unsent {
+    pub call_ref: String,
+    pub label: String,
+    pub request_uri: Option<String>,
+}
+
+/// Outbound messages left unsent for a next hop that is not an IP literal
+/// (`router::unaddressable`), keyed by that hop and counted by kind
+/// (`request`, `response`, `datagram`), at warn: a flood toward one target
+/// prints its rising edge, a summary every few seconds and its total.
+pub fn unsent_waves() -> Arc<WaveSet<Unsent>> {
+    WaveSet::with_payload(|hop: &str, r: &WaveReport, u: &Unsent| {
+        const UNSENT: &str = "outbound message not sent: its next hop is not an IP literal";
+        let (call_ref, label) = (&u.call_ref, &u.label);
+        match &u.request_uri {
+            Some(request_uri) => tracing::warn!(
+                node = observe::node(),
+                hop,
+                %call_ref,
+                %label,
+                %request_uri,
+                edge = %r.edge,
+                elapsed_ms = r.elapsed_ms,
+                totals = %r.tally,
+                "{UNSENT}"
+            ),
+            None => tracing::warn!(
+                node = observe::node(),
+                hop,
+                %call_ref,
+                %label,
+                edge = %r.edge,
+                elapsed_ms = r.elapsed_ms,
+                totals = %r.tally,
+                "{UNSENT}"
+            ),
+        }
+    })
+}
+
 /// Messages and events that resolved to no call (`router::unroutable`), keyed
 /// by class (`wire:ACK`, `wire:BYE:481`, `internal:timeout:OPTIONS`, …). Each
 /// line names the class, why it resolved to nothing, and the most recent
@@ -169,6 +212,44 @@ mod tests {
         let last = lines.last().expect("the episode closes");
         assert!(last.contains("edge=falling") && last.contains("events=5000"), "{}", last.line());
         assert!(last.contains("sample=call_id=c4999"), "{}", last.line());
+    }
+
+    /// A flood of unsent requests toward one hop prints a handful of warn
+    /// lines naming the target; an unsent response's line names none.
+    #[tokio::test(start_paused = true)]
+    async fn an_unsent_flood_prints_a_handful_of_warn_lines() {
+        let (_guard, log) = observe_testkit::test_buffer();
+        let waves = unsent_waves();
+        let unsent = |request_uri: Option<&str>| Unsent {
+            call_ref: "c".into(),
+            label: "BYE → a".into(),
+            request_uri: request_uri.map(str::to_string),
+        };
+        for _ in 0..2_000 {
+            waves.record_with(
+                "peer.invalid:5060",
+                "request",
+                1,
+                unsent(Some("sip:a@peer.invalid")),
+            );
+        }
+        waves.record_with("other.invalid:5060", "response", 1, unsent(None));
+        tokio::task::yield_now().await;
+        tokio::time::advance(observe::DEFAULT_IDLE_CLOSE_AFTER).await;
+        tokio::task::yield_now().await;
+
+        let lines = log.matching("not sent");
+        let toward = |hop: &str| -> Vec<_> {
+            lines.iter().filter(|l| l.contains(&format!("hop={hop}"))).collect()
+        };
+        let flood = toward("peer.invalid:5060");
+        assert!(flood.len() <= 4, "2000 messages must not print 2000 lines: {}", flood.len());
+        assert!(flood
+            .iter()
+            .all(|l| l.level == "WARN" && l.contains("request_uri=sip:a@peer.invalid")));
+        assert!(flood.last().is_some_and(|l| l.contains("request=2000")), "the total is counted");
+        let response = toward("other.invalid:5060");
+        assert!(!response.is_empty() && response.iter().all(|l| !l.contains("request_uri")));
     }
 
     /// Two successive episodes of one class: each episode's lines name its
