@@ -1064,8 +1064,11 @@ export interface CellCdr {
   readonly facts: ReadonlyArray<{ readonly name: string; readonly value: string }>
 }
 
-/** How a differing CDR field is read: `timing` and `identity` are expected to differ, `content` is not. */
-export type CdrDeltaKind = "timing" | "identity" | "content"
+/**
+ * How a differing CDR field is read: `timing` and `identity` are expected to
+ * differ, `expected` differs and is accepted, `content` is not.
+ */
+export type CdrDeltaKind = "timing" | "identity" | "expected" | "content"
 
 /** The raw CDR lines of several cells, the fields that tell them apart. */
 export interface CdrDelta {
@@ -1074,6 +1077,8 @@ export interface CdrDelta {
   readonly rows: ReadonlyArray<{
     readonly leg: string
     readonly line: number
+    /** The last line the row stands for: `line` but for a run of missing lines. */
+    readonly last: number
     readonly field: string
     readonly kind: CdrDeltaKind
     readonly values: ReadonlyArray<string | null>

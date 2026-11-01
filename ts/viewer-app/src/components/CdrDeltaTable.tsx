@@ -2,15 +2,16 @@
  * The raw CDR lines of a cell beside its case's other sub-cases on its lane,
  * or beside its case on the run's other lanes: one row per field that
  * differs, one column per cell, the cell's own column marked. A `content`
- * row stands out; `timing` and `identity` rows, expected to differ, are muted
- * and may be hidden.
+ * row stands out, an `expected` row is shown in its own colour as an accepted
+ * difference; `timing` and `identity` rows, expected to differ, are muted and
+ * may be hidden.
  */
 import type { JSX } from "react"
 import { useState } from "react"
 import { api, type Campaign, type CdrDeltaKind, useAsync } from "../api.ts"
 import { type DeltaAxis, deltaColumns } from "../campaign-cdr.ts"
 
-const KIND: Readonly<Record<CdrDeltaKind, string>> = { timing: "◷", identity: "#", content: "≠" }
+const KIND: Readonly<Record<CdrDeltaKind, string>> = { timing: "◷", identity: "#", expected: "≈", content: "≠" }
 
 const AXES: ReadonlyArray<{ readonly axis: DeltaAxis; readonly label: string }> = [
   { axis: "subcases", label: "sub-cases" },
@@ -50,12 +51,13 @@ export const CdrDeltaTable = ({ view, caseId, run, lane }: {
           <input type="checkbox" checked={all} onChange={(event) => setAll(event.target.checked)} /> ◷ #
         </label>
       </h3>
-      <p className="muted cp-small">≠ content · ◷ timing · # identity</p>
+      <p className="muted cp-small">≠ content · ≈ expected · ◷ timing · # identity</p>
       {read.state === "loading" && <p className="muted">loading…</p>}
       {read.state === "error" && <p className="cp-nok">CDR delta: {read.message}</p>}
       {read.state === "ok" && read.value !== undefined && (() => {
         const delta = read.value
-        const rows = delta.rows.filter((row) => all || row.kind === "content")
+        const count = (kind: CdrDeltaKind) => delta.rows.filter((row) => row.kind === kind).length
+        const rows = delta.rows.filter((row) => all || row.kind === "content" || row.kind === "expected")
         return (
           <div className="cp-cdr-delta">
             <table className="cp-table">
@@ -75,7 +77,7 @@ export const CdrDeltaTable = ({ view, caseId, run, lane }: {
                 {rows.map((row, at) => (
                   <tr key={at} className={`cp-delta-${row.kind}`}>
                     <td title={row.kind}>{KIND[row.kind]}</td>
-                    <td className="mono cp-nowrap">{row.leg} · {row.line}</td>
+                    <td className="mono cp-nowrap">{row.leg} · {row.line}{row.last > row.line ? `–${row.last}` : ""}</td>
                     <td className="mono">{row.field}</td>
                     {row.values.map((value, i) => (
                       <td key={i} className={`mono cp-expected${i === own ? " cp-own" : ""}`}>{value ?? "—"}</td>
@@ -85,8 +87,7 @@ export const CdrDeltaTable = ({ view, caseId, run, lane }: {
               </tbody>
             </table>
             <p className="muted cp-small">
-              {delta.rows.filter((row) => row.kind === "content").length} ≠ ·{" "}
-              {delta.rows.filter((row) => row.kind !== "content").length} ◷ # · {delta.same} same
+              {count("content")} ≠ · {count("expected")} ≈ · {count("timing") + count("identity")} ◷ # · {delta.same} same
             </p>
           </div>
         )

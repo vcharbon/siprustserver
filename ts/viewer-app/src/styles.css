@@ -2339,6 +2339,8 @@ tr.rule-unrostered td {
 .cp-nowrap { white-space: nowrap; }
 .cp-delta-content td { background: var(--nok-bg); }
 .cp-delta-content td:first-child { color: var(--nok); font-weight: 700; }
+.cp-delta-expected td { background: var(--warn-bg); }
+.cp-delta-expected td:first-child { color: var(--warn); font-weight: 700; }
 .cp-delta-timing td, .cp-delta-identity td { color: var(--mute); }
 .cp-own { border-left: 2px solid var(--acc); border-right: 2px solid var(--acc); }
 
