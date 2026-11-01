@@ -127,11 +127,12 @@ kills it, and a kill drops every call it serves.
     |---|---|---|---|---|---|---|
     | brake | arrival, before the datagram is queued | inbound queue depth | refused at the threshold | admitted | admitted | configured |
     | backlog | transaction layer, before any transaction | deferred events | refused at the normal ceiling | refused at the emergency ceiling | refused at the emergency ceiling | configured |
+    | event queue, on arrival | transaction layer, before any transaction | the state the event-queue gate (ADR-0050 §9) last wrote | refused while it refuses | admitted | admitted | configured |
     | capacity | router ingress | live calls (admitted INVITEs included), transactions, sampled RSS | refused at a normal ceiling | refused at an emergency ceiling | — | configured |
     | shed | router ingress | live per-call queues | refused at the cap less the headroom | refused at the cap | — | configured |
     | panic-ELU | router ingress | the worker's EWMA-ELU | refused above the backstop | admitted | — | configured |
     | bucket | router ingress | time to a CPS token | refused with no token | admitted | — | the time to a token, at least the configured base |
-    | event queue | transaction layer on arrival, before any transaction; router ingress again | the event-queue gate (ADR-0050 §9) | refused while the gate refuses | admitted | admitted | configured |
+    | event queue, again | router ingress | the event-queue gate, read afresh | refused while it refuses | admitted | — | configured |
 
     Each rung keeps its site. The backlog is decided by the transaction
     layer's bound; every other rung by one function over its input and the
@@ -167,7 +168,9 @@ kills it, and a kill drops every call it serves.
     held in one turn the state is the one from before it. An INVITE admitted
     on arrival is judged again at router ingress, after the other rungs, on
     a fresh reading: it catches an INVITE that queued before the gate
-    tripped. The rung refuses from the first reading that trips the gate,
+    tripped. On arrival the rung comes right after the backlog, so an INVITE
+    that the capacity, shed, panic-ELU or bucket rung would also refuse is
+    counted under it; the re-check comes after the bucket. The rung refuses from the first reading that trips the gate,
     before any probe reads the refusal, and keeps refusing the new calls
     that still reach the worker (in flight, or placed on it while every
     worker refuses) until the gate accepts. It judges as the panic-ELU rung,

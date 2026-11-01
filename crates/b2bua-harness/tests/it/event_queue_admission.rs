@@ -65,7 +65,7 @@ async fn admitted(s: &B2buaScene, bob: &Agent, emergency: bool) -> Dialog {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_backed_up_queue_refuses_new_invites_at_the_ladder_until_the_gate_accepts() {
+async fn a_backed_up_queue_refuses_a_new_invite_on_arrival_until_the_gate_accepts() {
     let pace = RouterPace::new();
     let probe = TurnProbes::new(pace.clone());
     let s = B2buaScene::with_b2bua("event-queue-admission", move |bob_port| {
