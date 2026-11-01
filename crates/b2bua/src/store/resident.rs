@@ -6,6 +6,15 @@ use call::CallModelState;
 
 use super::CallState;
 
+/// A resident `Active` call and the owners its topology names
+/// ([`CallState::active_call_holders`]).
+pub struct ActiveCall {
+    pub call_ref: String,
+    pub incarnation: String,
+    /// `(primary, backup)`; `None` with no backup or no topology.
+    pub owners: Option<(String, String)>,
+}
+
 impl CallState {
     /// Every callRef this node holds live. The core's teardown reads it to
     /// release the per-call runtime state that is NOT in the store — the root
@@ -25,6 +34,33 @@ impl CallState {
             .map(|(call_ref, call)| {
                 let answered = call::helpers::caller_answered(call);
                 (call_ref.clone(), call.incarnation().to_string(), answered)
+            })
+            .collect()
+    }
+
+    /// Every resident call still `Active`, with the `(primary, backup)` its
+    /// topology names, `None` for a call with no backup (ADR-0055 §3) or
+    /// naming no topology. Read under the call map's lock, each call's
+    /// backing read under it as [`live_topologies`](Self::live_topologies)
+    /// reads it; the caller weighs each holder after the lock.
+    pub fn active_call_holders(&self) -> Vec<ActiveCall> {
+        let inner = self.locked();
+        inner
+            .calls
+            .iter()
+            .filter(|(_, call)| call.state == CallModelState::Active)
+            .map(|(call_ref, call)| {
+                let unbacked = self.repl_store().is_some_and(|repl| repl.unbacked(call_ref));
+                let owners = inner
+                    .topologies
+                    .get(call_ref)
+                    .filter(|_| !unbacked)
+                    .map(|t| (t.pri.clone(), t.bak.clone()));
+                ActiveCall {
+                    call_ref: call_ref.clone(),
+                    incarnation: call.incarnation().to_string(),
+                    owners,
+                }
             })
             .collect()
     }

@@ -2,7 +2,9 @@
 //! sub-log above the highest position it reported applying, and the age of the
 //! oldest. Above a high-water mark on either a new call is admitted with no
 //! backup; new calls get one again once both are under their low-water marks.
-//! No call is refused for the backlog.
+//! The marks read a peer whose open flow completed its bootstrap, slow to
+//! answer or not: a peer no flow carries, or one still bootstrapping, is no
+//! slow consumer. No call is refused for the backlog.
 
 use std::ops::Bound;
 use std::time::Duration;
@@ -10,6 +12,7 @@ use std::time::Duration;
 use repl_net::frame::Partition;
 
 use super::Changelog;
+use crate::repl::puller::DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS;
 use crate::store::{locked, REPLICA_CHANGELOG};
 
 /// The high- and low-water marks of the backlog toward one backup peer.
@@ -73,15 +76,30 @@ impl Changelog {
         locked(&self.inner, REPLICA_CHANGELOG).marks = marks;
     }
 
-    /// Whether a new call admitted now gets `peer` as its backup: `false` from
-    /// the moment the backlog toward it reaches a high-water mark until it is
-    /// under both low-water marks.
+    /// Whether a new call admitted now gets `peer` as its backup. Toward a
+    /// peer whose open flow completed its bootstrap (it claimed a position),
+    /// or stalled in it past the bootstrap hard deadline (10 s, dated from the
+    /// first flow open since its last claim, re-opens included), `false` from
+    /// the moment the backlog reaches a high-water mark until it is under both
+    /// low-water marks: the entries new calls add stop at the high-water mark.
+    /// Toward a peer no flow carries, or one still bootstrapping, always
+    /// `true`: its bootstrap carries the call. A bootstrap in flight holds the
+    /// log for at most that deadline; with no flow open the log goes one
+    /// dead-peer TTL (60 s, `B2BUA_REPL_DEAD_PEER_TTL_MS`) after the peer's
+    /// last claim, writes or flows without a claim not counted.
     pub fn admits_backup(&self, peer: &str) -> bool {
         let now = self.clock.now_ms();
         let gen = self.gen;
         let mut inner = locked(&self.inner, REPLICA_CHANGELOG);
         let marks = inner.marks;
         let Some(log) = inner.peers.get_mut(peer) else { return true };
+        let sub = log.sub(Partition::Bak);
+        let deadline = Duration::from_millis(DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS);
+        let bootstrapping =
+            sub.applied.is_none() && sub.flow_started.is_some_and(|t| t.elapsed() < deadline);
+        if sub.streams == 0 || bootstrapping {
+            return true;
+        }
         let backlog = measure(log.sub(Partition::Bak), gen, now, marks.high_entries);
         log.over_high_water = if log.over_high_water {
             backlog.entries >= marks.low_entries || backlog.oldest_age >= marks.low_age

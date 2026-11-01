@@ -1,9 +1,14 @@
 //! How a worker stands down: its own withdrawal from routing (ADR-0031 D6),
-//! the `Draining` latch, and the D2 drain over its inputs.
+//! the `Draining` latch, and the D2 drain over its inputs, the end of the
+//! calls no peer holds at its grace included (ADR-0055 §3).
 
 use std::sync::Arc;
 
+use b2bua_sdk::event::CallEvent;
+use repl_net::frame::Partition;
+
 use super::B2buaCore;
+use crate::drain::GraceEnd;
 use crate::router::RouterCtx;
 
 impl B2buaCore {
@@ -53,12 +58,16 @@ impl B2buaCore {
         backups_caught_up_in(&self.ctx, repl.changelog())
     }
 
-    /// The three probes the drain reads, OWNED — so a caller can run the drain
-    /// without borrowing this core (the harness drives it across a paused
-    /// timeline). Read-only.
+    /// The probes the drain reads and the end it runs at its grace, OWNED —
+    /// so a caller can run the drain without borrowing this core (the harness
+    /// drives it across a paused timeline).
     pub fn drain_probe(&self) -> crate::drain::DrainInputs {
         let ctx = self.ctx.clone();
         let changelog = self.repl_store.as_ref().map(|r| r.changelog().clone());
+        let end_unheld = Arc::new({
+            let (ctx, changelog, node) = (self.ctx.clone(), changelog.clone(), self.node.clone());
+            move || node.enter(|| end_unheld(&ctx, changelog.as_ref()))
+        });
         let supervisor = self.supervisor.clone();
         let limiter = self.ctx.limiter.clone();
         crate::drain::DrainInputs {
@@ -80,6 +89,7 @@ impl B2buaCore {
                 let outboxes = self.ctx.outboxes.clone();
                 move || outboxes.depth()
             }),
+            end_unheld,
         }
     }
 
@@ -131,4 +141,75 @@ fn backups_caught_up_in(ctx: &RouterCtx, changelog: &crate::repl::Changelog) -> 
             if pri == me { (bak, Partition::Bak) } else { (pri, Partition::Pri) };
         !holder.is_empty() && changelog.flow_caught_up(holder, partition)
     })
+}
+
+/// End, at the drain's grace, each live call no peer holds: no backup, or a
+/// holder that never reported applying the call under its bound identity.
+/// Each gets the release turn of ADR-0050 §10; one still resident halfway
+/// through the flush bound is discharged off the wire. A call a peer holds a
+/// copy of is left to it. ADR-0055 §3 states why.
+fn end_unheld(ctx: &Arc<RouterCtx>, changelog: Option<&crate::repl::Changelog>) -> GraceEnd {
+    use crate::rules::operator_release::{AT_DRAIN_GRACE, TOPIC};
+    let me = &ctx.config.self_ordinal;
+    // A call not stored yet (before its first write) is held by no peer.
+    let stored = |call_ref: &str, incarnation: &str| {
+        let repl = ctx.state.repl_store();
+        repl.is_some_and(|r| r.incarnation(call_ref).as_deref() == Some(incarnation))
+    };
+    let held = |call_ref: &str, (pri, bak): &(String, String)| {
+        let (holder, partition) =
+            if pri == me { (bak, Partition::Bak) } else { (pri, Partition::Pri) };
+        !holder.is_empty()
+            && changelog.is_some_and(|cl| cl.applied_any(holder, partition, call_ref))
+    };
+    let unheld: Vec<(String, String)> = ctx
+        .state
+        .active_call_holders()
+        .into_iter()
+        .filter(|c| {
+            let held = c.owners.as_ref().is_some_and(|o| held(&c.call_ref, o));
+            !(held && stored(&c.call_ref, &c.incarnation))
+        })
+        .map(|c| (c.call_ref, c.incarnation))
+        .collect();
+    for (call_ref, incarnation) in &unheld {
+        let _ = ctx.reentry_tx.send(CallEvent::InternalEvent {
+            call_ref: call_ref.clone(),
+            topic: TOPIC.to_string(),
+            outcome: AT_DRAIN_GRACE.to_string(),
+            payload: serde_json::Value::Null,
+            body: Vec::new(),
+            incarnation: Some(incarnation.clone()),
+        });
+    }
+    if !unheld.is_empty() {
+        tracing::info!(
+            node = observe::node(),
+            ended = unheld.len(),
+            "drain grace: ending the calls no peer holds"
+        );
+    }
+    let ended = unheld.len();
+    let refs: Arc<Vec<String>> =
+        Arc::new(unheld.into_iter().map(|(call_ref, _)| call_ref).collect());
+    let left = {
+        let (ctx, refs) = (ctx.clone(), refs.clone());
+        Arc::new(move || refs.iter().filter(|r| ctx.state.contains(r)).count())
+    };
+    let discharge_left = {
+        let ctx = ctx.clone();
+        Arc::new(move || {
+            for call_ref in refs.iter().filter(|r| ctx.state.contains(r)) {
+                let _ = ctx.reentry_tx.send(CallEvent::InternalEvent {
+                    call_ref: call_ref.clone(),
+                    topic: crate::reaper::REAPER_TOPIC.to_string(),
+                    outcome: crate::reaper::OUTCOME_DISCHARGE.to_string(),
+                    payload: serde_json::json!({}),
+                    body: Vec::new(),
+                    incarnation: None,
+                });
+            }
+        })
+    };
+    GraceEnd { ended, left, discharge_left }
 }

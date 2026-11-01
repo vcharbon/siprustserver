@@ -146,14 +146,16 @@ fn marks(high_entries: usize, low_entries: usize) -> BacklogMarks {
     }
 }
 
-/// **Backlog marks.** New calls get no backup from the moment the entries
-/// above the peer's reported position reach the high-water mark, or the oldest
-/// of them its age, until both are under the low-water marks.
+/// **Backlog marks.** Toward a peer whose flow is live, new calls get no
+/// backup from the moment the entries above the peer's reported position
+/// reach the high-water mark, or the oldest of them its age, until both are
+/// under the low-water marks.
 #[tokio::test(start_paused = true)]
 async fn a_backlog_over_high_water_gives_new_calls_no_backup_until_under_low_water() {
     let log = Changelog::new(1, Clock::test_at(0));
     log.set_backlog_marks(marks(3, 1));
     let _serving = log.serving("B", Partition::Bak);
+    log.note_applied("B", None, Partition::Bak, Watermark::new(1, 0));
     assert!(log.admits_backup("B"), "an empty backlog");
     for i in 0..3 {
         log.bump_put("B", &format!("c{i}"), Partition::Bak);
@@ -166,19 +168,61 @@ async fn a_backlog_over_high_water_gives_new_calls_no_backup_until_under_low_wat
 
     log.bump_put("B", "c9", Partition::Bak);
     tokio::time::advance(Duration::from_secs(5)).await;
+    log.note_applied("B", None, Partition::Bak, Watermark::new(1, 3));
     assert!(!log.admits_backup("B"), "the oldest pending entry reached the high-water age");
     log.note_applied("B", None, Partition::Bak, log.head());
     assert!(log.admits_backup("B"));
     assert!(log.admits_backup("C"), "another peer has its own backlog");
 }
 
-/// **A call admitted over high water has no backup for life.** Its writes go
-/// to no peer, it is counted while it lives, and its delete propagates
-/// nowhere.
+/// **A backup no flow carries, or one still bootstrapping, is no slow
+/// consumer.** Toward a peer that is away, or whose open flow has not claimed
+/// a position yet, a new call gets its backup whatever the change log holds
+/// for it (one entry per call; the bootstrap carries them).
+#[tokio::test(start_paused = true)]
+async fn a_backup_no_flow_carries_is_no_slow_consumer() {
+    let log = Changelog::new(1, Clock::test_at(0));
+    log.set_backlog_marks(marks(3, 1));
+    for i in 0..3 {
+        log.bump_put("B", &format!("c{i}"), Partition::Bak);
+    }
+    tokio::time::advance(Duration::from_secs(6)).await;
+    assert!(log.admits_backup("B"), "an away peer, entries and age over both marks");
+    let serving = log.serving("B", Partition::Bak);
+    assert!(log.admits_backup("B"), "a flow in its bootstrap: the bootstrap carries the call");
+    drop(serving);
+    assert!(log.admits_backup("B"), "its flow gone, the peer is away again");
+}
+
+/// **A bootstrapped backup slow to answer is a slow consumer.** Once its open
+/// flow claimed a position, or stalled in its bootstrap past the hard
+/// deadline, the marks apply, however old its last claim.
+#[tokio::test(start_paused = true)]
+async fn a_bootstrapped_backup_slow_to_answer_is_held_to_the_marks() {
+    let log = Changelog::new(1, Clock::test_at(0));
+    log.set_backlog_marks(marks(3, 1));
+    for i in 0..3 {
+        log.bump_put("B", &format!("c{i}"), Partition::Bak);
+    }
+    let stalled = log.serving("B", Partition::Bak);
+    tokio::time::advance(Duration::from_secs(10)).await;
+    assert!(!log.admits_backup("B"), "a bootstrap stalled past its hard deadline");
+    drop(stalled);
+    let _flow = log.serving("B", Partition::Bak);
+    log.note_applied("B", None, Partition::Bak, Watermark::new(1, 0));
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(!log.admits_backup("B"), "a bootstrapped flow whose claim aged");
+}
+
+/// **A call admitted over the high water of a live backup has no backup for
+/// life.** Its writes go to no peer, it is counted while it lives, and its
+/// delete propagates nowhere.
 #[tokio::test(start_paused = true)]
 async fn a_call_admitted_over_high_water_writes_to_no_backup_for_life() {
     let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
     repl.changelog().set_backlog_marks(BacklogMarks { low_entries: 0, ..marks(1, 0) });
+    let _serving = repl.changelog().serving("w1", Partition::Bak);
+    repl.changelog().note_applied("w1", None, Partition::Bak, Watermark::new(1, 0));
     let state = wired(&repl);
     let first = backed_call(1);
     assert!(

@@ -162,8 +162,11 @@ take a new call, and may an in-dialog request of a call it owns reach it.
 7. **The cookie's `w_bak`** is the rendezvous winner among `Alive` accepting
    workers other than the primary, and among all `Alive` ones when none
    accepts. A worker leaving the service is not chosen as the backup of new
-   calls, and a cluster that refuses everywhere still replicates. The worker
-   replicates to the cookie's `w_bak`, unchanged.
+   calls while another is alive, and a cluster that refuses everywhere still
+   replicates. With no other worker alive, it is the winner among the other
+   ordinals the proxy knows and does not read alive (ADR-0055 §8); it is
+   empty only when the proxy knows no other ordinal. The worker replicates to
+   the cookie's `w_bak`, unchanged.
 8. **No fresh-pod guard.** The guard, its 20 s window and its promotion
    reason are removed. A worker joins `Unknown` (ADR-0012 D4) and is routed
    once a probe answers `200`, which its Ready gate allows only after its

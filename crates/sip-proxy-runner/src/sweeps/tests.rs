@@ -28,6 +28,9 @@ impl WorkerRegistry for PanicsOnce {
     fn lookup_by_address(&self, _addr: &ProxyAddr) -> Option<WorkerEntry> {
         None
     }
+    fn away_ordinals(&self) -> Vec<String> {
+        Vec::new()
+    }
     fn rearm_departed(&self, _addr: &ProxyAddr) {}
     fn synced(&self) -> bool {
         true

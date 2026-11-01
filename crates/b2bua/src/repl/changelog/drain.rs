@@ -30,12 +30,12 @@ impl Changelog {
         // Brief lock: snapshot the due entries, then DROP the guard before any
         // body read/await.
         let due: Vec<Due> = {
-            let inner = locked(&self.inner, REPLICA_CHANGELOG);
-            let Some(log) = inner.peers.get(peer) else {
+            let mut inner = locked(&self.inner, REPLICA_CHANGELOG);
+            let Some(log) = inner.peers.get_mut(peer) else {
                 return Vec::new();
             };
             let cold = since.gen < self.gen;
-            log.sub(partition).due(since.counter, cold, limit)
+            log.sub_mut(partition).due(since.counter, cold, limit)
         };
 
         let mut frames = Vec::with_capacity(due.len());

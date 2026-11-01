@@ -61,14 +61,17 @@ pub use backlog::BacklogMarks;
 pub use progress::{Reach, DEFAULT_CLAIM_TTL};
 pub use source::{BodySource, RefMeta};
 
-/// How long a peer's whole changelog is kept after its last activity before an
-/// idle [`reap`](Changelog::reap) drops it (the peer re-bootstraps on return).
-pub const DEFAULT_DEAD_PEER_TTL_MS: i64 = 300_000;
+/// How long a peer's log outlives its last claim (or its creation) with no flow
+/// open before [`reap`](Changelog::reap) drops it: a peer back under the same
+/// identity after that re-bootstraps cold (`B2BUA_REPL_DEAD_PEER_TTL_MS`, ADR-0045).
+pub const DEFAULT_DEAD_PEER_TTL_MS: i64 = 60_000;
 
 /// Per-callRef position in a compacted sub-log.
 #[derive(Clone, Debug)]
 struct RefState {
     counter: u64,
+    /// The first counter the entry was sent at, tail or scan (see `held`).
+    first_sent: Option<u64>,
     op: Op,
     /// `now_ms` of the write the entry holds: the age of a pending write.
     written_ms: i64,
@@ -101,6 +104,8 @@ struct SubLog {
     /// stands for a log it never pulled and must re-bootstrap
     /// ([`needs_reset`](Changelog::needs_reset)).
     retained_floor: u64,
+    /// The counter this sub-log opened at; reaping never moves it (see `held`).
+    opened: u64,
     /// Highest counter ever assigned in this sub-log. Unlike `entries`, it
     /// survives compaction and reaping — it is the position a caught-up puller
     /// must have reported (ADR-0031 D2), not a live-set bound.
@@ -116,6 +121,10 @@ struct SubLog {
     /// The highest position the peer ever reported applying on this sub-log
     /// under this node's incarnation, connected or not ([`progress`]).
     acked: watch::Sender<Watermark>,
+    /// The highest report of an identity not bound yet ([`progress`]).
+    unbound: Option<(String, Watermark)>,
+    /// When the first flow since the last claim opened: a bootstrap in flight.
+    flow_started: Option<tokio::time::Instant>,
     /// The sub-log's head counter, moved by every write: the serve task waits
     /// on it.
     written: watch::Sender<u64>,
@@ -127,10 +136,13 @@ impl SubLog {
             entries: BTreeMap::new(),
             by_ref: HashMap::new(),
             retained_floor,
+            opened: retained_floor,
             head: 0,
             applied: None,
             streams: 0,
             acked: watch::Sender::new(Watermark::new(0, 0)),
+            unbound: None,
+            flow_started: None,
             written: watch::Sender::new(0),
         }
     }
@@ -141,12 +153,18 @@ impl SubLog {
     /// ref never inherits a former call's.
     fn put(&mut self, counter: u64, call_ref: &str, op: Op, now_ms: i64, stated: Stated) {
         let Stated { mut answered, incarnation } = stated;
+        let mut first_sent = None;
         if let Some(prev) = self.by_ref.get(call_ref) {
             self.entries.remove(&prev.counter);
             answered |= op == Op::Delete && prev.op == Op::Delete && prev.answered;
+            // A send lost with its flow is no send: kept only once applied.
+            let acked = self.acked.borrow().counter;
+            if op == Op::Delete || prev.op == Op::Put {
+                first_sent = prev.first_sent.filter(|sent| *sent <= acked);
+            }
         }
         self.entries.insert(counter, call_ref.to_string());
-        let state = RefState { counter, op, written_ms: now_ms, answered, incarnation };
+        let state = RefState { counter, first_sent, op, written_ms: now_ms, answered, incarnation };
         self.by_ref.insert(call_ref.to_string(), state);
         self.head = self.head.max(counter);
         self.written.send_replace(self.head);
@@ -160,14 +178,16 @@ impl SubLog {
     }
 
     /// The due entries above `since` (or all when `cold`), ascending, capped at
-    /// `limit`.
-    fn due(&self, since_counter: u64, cold: bool, limit: usize) -> Vec<Due> {
+    /// `limit`, each marked sent at its counter if it was never sent.
+    fn due(&mut self, since_counter: u64, cold: bool, limit: usize) -> Vec<Due> {
         let start = if cold { Bound::Unbounded } else { Bound::Excluded(since_counter) };
+        let by_ref = &mut self.by_ref;
         self.entries
             .range((start, Bound::Unbounded))
             .take(limit)
             .filter_map(|(c, call_ref)| {
-                let st = self.by_ref.get(call_ref)?;
+                let st = by_ref.get_mut(call_ref)?;
+                st.first_sent.get_or_insert(*c);
                 Some(Due {
                     counter: *c,
                     call_ref: call_ref.clone(),
@@ -191,7 +211,8 @@ struct Stated {
 struct PeerLog {
     pri: SubLog,
     bak: SubLog,
-    /// `now_ms` of the last mutation recorded — drives idle reaping.
+    /// `now_ms` of the peer's last claim, or of the log's creation: drives idle
+    /// reaping; neither a write nor a flow that never claims moves it.
     last_active_ms: i64,
     /// Count of active serve tasks for this peer. A log with `serving > 0` is
     /// NOT reaped while idle, so a server never loses the log it is actively
@@ -376,7 +397,6 @@ impl Changelog {
         let c = inner.counter;
         let counter = c - 1;
         let log = inner.peers.entry(peer.to_string()).or_insert_with(|| PeerLog::new(now, counter));
-        log.last_active_ms = now;
         log.sub_mut(partition).put(c, call_ref, op, now, stated);
         Watermark::new(self.gen, c)
     }
@@ -472,6 +492,7 @@ fn reap_sublog(sub: &mut SubLog, gen: u64) {
 
 mod backlog;
 mod drain;
+mod held;
 mod progress;
 mod serving;
 mod source;

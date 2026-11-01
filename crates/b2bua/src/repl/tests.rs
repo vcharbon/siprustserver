@@ -439,7 +439,7 @@ async fn served_peer_log_survives_reap_until_guard_dropped() {
     cl.reap(clock.now_ms());
     assert!(cl.has_peer("A"), "a served peer log must survive an idle reap");
 
-    // A bump refreshes the last-active stamp; drop the guard, idle past the TTL
+    // Dropping the guard stamps the log; idle past the TTL
     // again, and reap → the now-unserved log is evicted.
     cl.bump_put("A", "c1", Partition::Bak);
     drop(guard);

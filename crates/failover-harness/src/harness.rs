@@ -55,6 +55,7 @@ use crate::turn_points::TurnPoints;
 use crate::views::{Belief, Incarnation, ViewLedger};
 
 mod acceptance;
+mod flows;
 mod live;
 mod membership;
 mod peer_view;
@@ -71,10 +72,6 @@ pub use proxy_sut::ProxySut;
 pub(crate) use repl_wiring::sync_level_from_env;
 use repl_wiring::ReplWiring;
 pub use strike::Fired;
-
-/// Changelog dead-peer TTL: a peer silent this long loses its log and pulls
-/// again from a bootstrap, reachable in a test budget.
-const DEFAULT_DEAD_PEER_TTL_MS: i64 = 60_000;
 
 // ===========================================================================
 // ReplicatedB2buaSut — a replicating B2BUA worker on the failover fabric
@@ -304,17 +301,6 @@ impl ReplicatedB2buaSut {
     /// This incarnation's handle on its call limiter. `None` while crashed.
     pub fn limiter_worker(&self) -> Option<b2bua::limiter::LimiterWorker> {
         self.core.as_ref().map(|c| c.limiter().clone())
-    }
-
-    /// Whether `peer`'s flow on `partition` is connected to THIS node's
-    /// replication server and has reported applying everything this node ever
-    /// logged for it (ADR-0031 D2) — the per-flow predicate the drain's
-    /// caught-up exit is built from. `false` while crashed or unreplicated.
-    pub fn flow_caught_up(&self, peer: &str, partition: repl_net::frame::Partition) -> bool {
-        self.core
-            .as_ref()
-            .and_then(|c| c.repl_store())
-            .is_some_and(|s| s.changelog().flow_caught_up(peer, partition))
     }
 
     /// **Ground-truth** live in-memory call count (the actual `inner.calls` map
@@ -1447,7 +1433,7 @@ impl FailoverHarness {
             listen_addr,
             replica: self.worker_replica,
             sync: self.level,
-            dead_peer_ttl_ms: DEFAULT_DEAD_PEER_TTL_MS,
+            dead_peer_ttl_ms: b2bua::repl::DEFAULT_DEAD_PEER_TTL_MS,
         };
 
         // This node's own wall clock (shared monotonic timeline + per-node anchor

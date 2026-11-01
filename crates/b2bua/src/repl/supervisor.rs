@@ -69,6 +69,7 @@ use crate::poison::{locked, SUPERVISOR_PEERS, SUPERVISOR_WIRING};
 mod backup_deferral;
 mod bindings;
 mod follow;
+mod shutdown;
 mod streams;
 mod wiring;
 
@@ -273,6 +274,10 @@ struct SupervisorInner {
     membership: Mutex<Option<Arc<dyn Membership>>>,
     /// `ordinal → PeerEntry`.
     peers: Mutex<HashMap<String, PeerEntry>>,
+    /// Set by [`shutdown`](ReplicationSupervisor::shutdown) before it parks the
+    /// pullers: a reconcile already running when the loop is aborted reads it
+    /// under the `peers` lock and spawns nothing.
+    stopped: AtomicBool,
     /// The topology-reconcile loop's handle, retained so [`shutdown`] can abort
     /// it. Without this the loop outlives `crash()`/`shutdown()` (it holds an
     /// `Arc<SupervisorInner>`) and keeps spawning pullers against a dead node on
@@ -362,6 +367,7 @@ impl ReplicationSupervisor {
                 backup_enabled: AtomicBool::new(false),
                 membership: Mutex::new(None),
                 peers: Mutex::new(HashMap::new()),
+                stopped: AtomicBool::new(false),
                 reconcile: Mutex::new(None),
                 gate: Mutex::new(None),
                 started_at: Mutex::new(None),
@@ -420,6 +426,9 @@ impl ReplicationSupervisor {
         let backup_enabled = self.inner.backup_enabled.load(Ordering::SeqCst);
 
         let mut peers = self.inner.peers();
+        if self.inner.stopped.load(Ordering::SeqCst) {
+            return;
+        }
 
         for peer in &desired {
             let entry = peers.entry(peer.ordinal.clone()).or_insert_with(PeerEntry::cold);
@@ -540,26 +549,6 @@ impl ReplicationSupervisor {
         observe::spawn_keeping_node(async move {
             puller.run(cancel_rx).await;
         });
-    }
-
-    /// Shut every running puller down (Park them all) + abort the reconcile loop
-    /// and the backup gate. The retained watermarks/current flags survive. Used by
-    /// [`B2buaCore::abort`](crate::B2buaCore::abort) to stop a crashed worker's
-    /// pullers without changing replication behaviour.
-    pub fn shutdown(&self) {
-        // Stop reacting to membership deltas + the backup gate FIRST so neither can
-        // spawn a new puller against this (about-to-be-dead) node after we park the
-        // existing ones. Aborting also frees each task's `Arc<SupervisorInner>`.
-        if let Some(h) = wiring(&self.inner.reconcile).take() {
-            h.abort();
-        }
-        if let Some(h) = wiring(&self.inner.gate).take() {
-            h.abort();
-        }
-        let mut peers = self.inner.peers();
-        for entry in peers.values_mut() {
-            entry.park();
-        }
     }
 
     /// Fold every running puller's published status into the retained map. Tests

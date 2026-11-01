@@ -85,6 +85,12 @@ pub trait WorkerRegistry: Send + Sync {
     /// Reverse-lookup the worker bound at `addr` (`None` for any non-worker
     /// source — Alice, Bob, an external SBC).
     fn lookup_by_address(&self, addr: &ProxyAddr) -> Option<WorkerEntry>;
+    /// The ordinals the pool knows but does not route: members whose
+    /// endpoint reads not ready, and the last ordinals of departed addresses
+    /// still tombstoned (ADR-0055 §8). None of them is in [`snapshot`].
+    ///
+    /// [`snapshot`]: WorkerRegistry::snapshot
+    fn away_ordinals(&self) -> Vec<WorkerId>;
     /// A response for the worker bound at `addr` was seen: if that address
     /// left the set and its departed window is open, the window is re-armed to
     /// Timer H from now (ADR-0031 D4).

@@ -53,7 +53,8 @@ impl Changelog {
     /// log, and from a worker `identity` other than the one membership binds to
     /// the ordinal ([`bind_identity`](Self::bind_identity)): a superseded
     /// worker on the ordinal vouches for nothing its successor holds (ADR-0055
-    /// §6).
+    /// §6). The highest such report under this incarnation is kept aside: it
+    /// counts once membership binds that identity.
     pub fn note_applied(
         &self,
         peer: &str,
@@ -64,11 +65,21 @@ impl Changelog {
         let gen = self.gen;
         let mut inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
         if inner.bound.get(peer).is_some_and(|bound| Some(bound.as_str()) != identity) {
+            if let (Some(log), Some(identity)) = (inner.peers.get_mut(peer), identity) {
+                let sub = log.sub_mut(partition);
+                let higher = sub.unbound.as_ref().is_none_or(|(id, w)| id != identity || at > *w);
+                if at.gen == gen && higher {
+                    sub.unbound = Some((identity.to_string(), at));
+                }
+            }
             return;
         }
+        let now_ms = self.clock.now_ms();
         if let Some(log) = inner.peers.get_mut(peer) {
+            log.last_active_ms = now_ms;
             let sub = log.sub_mut(partition);
             sub.applied = Some(Claim { at, made: Instant::now() });
+            sub.flow_started = None;
             if at.gen == gen {
                 sub.acked.send_if_modified(|acked| {
                     let raised = at > *acked;
@@ -83,13 +94,27 @@ impl Changelog {
 
     /// Bind `peer`'s ordinal to the worker `identity` membership names for it
     /// (ADR-0055 §6): only that identity's reports count from now on. `None`:
-    /// membership names no identity, and every report counts.
+    /// membership names no identity, and every report counts. A new identity
+    /// holds nothing an earlier one applied: the highest position applied
+    /// falls back to what that identity reported before it was bound, or none,
+    /// on both sub-logs.
     pub fn bind_identity(&self, peer: &str, identity: Option<&str>) {
         let mut inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
-        match identity {
-            Some(identity) => inner.bound.insert(peer.to_string(), identity.to_string()),
-            None => inner.bound.remove(peer),
+        let Some(identity) = identity else {
+            inner.bound.remove(peer);
+            return;
         };
+        if inner.bound.get(peer).is_some_and(|bound| bound == identity) {
+            return;
+        }
+        inner.bound.insert(peer.to_string(), identity.to_string());
+        if let Some(log) = inner.peers.get_mut(peer) {
+            for partition in [Partition::Pri, Partition::Bak] {
+                let sub = log.sub_mut(partition);
+                let reported = sub.unbound.take().filter(|(id, _)| id == identity);
+                sub.acked.send_replace(reported.map_or(Watermark::new(0, 0), |(_, at)| at));
+            }
+        }
     }
 
     /// Whether `peer` is a live, bootstrapped holder of `partition`: its flow is
@@ -100,6 +125,12 @@ impl Changelog {
         inner.peers.get(peer).map(|log| log.sub(partition)).is_some_and(|sub| {
             sub.streams > 0 && sub.applied.is_some_and(|c| c.made.elapsed() <= inner.claim_ttl)
         })
+    }
+
+    /// Whether a flow of `peer` is open on `partition`, bootstrapped or not.
+    pub fn flow_open(&self, peer: &str, partition: Partition) -> bool {
+        let inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
+        inner.peers.get(peer).is_some_and(|log| log.sub(partition).streams > 0)
     }
 
     /// Whether `peer` reported applying `at` or past it on `partition`.

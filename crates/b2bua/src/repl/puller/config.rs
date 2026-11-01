@@ -9,7 +9,8 @@ const DEFAULT_BACKOFF_MAX_MS: u64 = 2_000;
 /// waits — for a reachable connection AND for the first catch-up `Noop` — before
 /// declaring bootstrap-complete best-effort (ADR-0011 X5 — liveness over
 /// completeness). The connection is NOT dropped on expiry; it keeps streaming.
-const DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS: u64 = 10_000;
+/// The serving side reads the same bound for a peer's bootstrap in flight.
+pub const DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS: u64 = 10_000;
 /// Default bound on one connect (ms).
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 2_000;
 /// Default bound on a stream delivering nothing (ms): four of the server's
