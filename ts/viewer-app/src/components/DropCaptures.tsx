@@ -4,7 +4,8 @@
  * population, cut — and links it here. A replay is a request to create once
  * the job is done: the lane picked is said back, nothing is replayed by the
  * drop itself (§3 S3). A server with an inbox takes the drop there instead,
- * and the item links the pcaps page its shareable copy will be listed on.
+ * and the item links the pcaps page its anonymised copy (public peers faked,
+ * SUT and private addresses kept: for this network's tooling) is listed on.
  *
  * Several files dropped together are ONE capture by default — the consecutive
  * files of one tap, a call starting in one and ending in the next — and the

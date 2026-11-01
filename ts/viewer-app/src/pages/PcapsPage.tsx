@@ -4,12 +4,13 @@
  * one action — replay on a lane, which starts an ingest with its cut and a
  * replay after it, both linked. The lane list says per lane whether a capture
  * replay fits it, runs there only forced (its results marked so), or runs
- * nowhere. The inbox above it lists what is being made shareable before it
- * lands in the root, each capture with its state and its job; a drop here
- * goes to the inbox.
+ * nowhere. The inbox above it lists what is being anonymised for this
+ * network's tooling (public peers faked, SUT and private addresses kept)
+ * before it lands in the root, each capture with its state and its job; a
+ * drop here goes to the inbox.
  *
- * The page polls while the inbox holds something in flight or a replay was
- * started from it.
+ * The page polls while the inbox holds something in flight or a job started
+ * from it has not ended, and stops once nothing is in progress.
  */
 import type { JSX } from "react"
 import { useEffect, useState } from "react"
@@ -68,7 +69,11 @@ const laneLabel = (lane: PcapLane): string =>
 
 /** The action of one file: a lane, then the two jobs it starts. */
 const ReplayOn = (
-  { file, lanes, onStarted }: { readonly file: PcapFile; readonly lanes: readonly PcapLane[]; readonly onStarted: () => void }
+  { file, lanes, onStarted }: {
+    readonly file: PcapFile
+    readonly lanes: readonly PcapLane[]
+    readonly onStarted: (jobs: readonly JobStarted[]) => void
+  }
 ): JSX.Element => {
   const first = lanes.find((lane) => lane.fit === "fits") ?? lanes.find((lane) => lane.fit === "forced")
   const [choice, setChoice] = useState(first?.lane ?? "")
@@ -86,7 +91,7 @@ const ReplayOn = (
     try {
       const { jobs } = await api.jobStart({ kind: "pcap-replay", file: file.file, lane: picked.lane, force: picked.fit === "forced" })
       setPhase({ kind: "started", jobs })
-      onStarted()
+      onStarted(jobs)
     } catch (error) {
       setPhase({ kind: "error", detail: said(error) })
     }
@@ -147,7 +152,7 @@ const FilesTable = (
   { files, lanes, onStarted }: {
     readonly files: readonly PcapFile[]
     readonly lanes: readonly PcapLane[]
-    readonly onStarted: () => void
+    readonly onStarted: (jobs: readonly JobStarted[]) => void
   }
 ): JSX.Element => (
   <table className="listing pcaps-listing">
@@ -180,21 +185,35 @@ const FilesTable = (
 
 const IN_FLIGHT: ReadonlySet<InboxEntry["state"]> = new Set(["settling", "waiting", "taking"])
 
+const ENDED: ReadonlySet<string> = new Set(["done", "failed", "interrupted", "died"])
+
 export const PcapsPage = (): JSX.Element => {
   const [refresh, setRefresh] = useState(0)
-  const [started, setStarted] = useState(false)
+  // The jobs started from this page that have not been seen ended.
+  const [watching, setWatching] = useState<readonly number[]>([])
   const [busy, setBusy] = useState(true)
-  const view = usePolled(() => api.pcaps(), `pcaps#${refresh}`, busy || started ? POLL_MS : null)
-  const value = view.current
+  const view = usePolled(
+    async () => ({
+      pcaps: await api.pcaps(),
+      ended: (await Promise.all(watching.map((id) => api.job(id)))).filter((job) => ENDED.has(job.status)).map((job) => job.id)
+    }),
+    `pcaps#${refresh}#${watching.join(",")}`,
+    busy || watching.length > 0 ? POLL_MS : null
+  )
+  const value = view.current?.pcaps
+  const ended = view.current?.ended ?? []
   const inFlight = value === undefined || value.inboxEntries.some((entry) => IN_FLIGHT.has(entry.state))
   useEffect(() => setBusy(inFlight), [inFlight])
+  useEffect(() => {
+    if (ended.length > 0) setWatching((all) => all.filter((id) => !ended.includes(id)))
+  }, [ended.join(",")])
 
   if (value === undefined) {
     if (view.error !== undefined) return <p className="page error">pcaps: {view.error}</p>
     return <p className="page muted">loading…</p>
   }
-  const onStarted = (): void => {
-    setStarted(true)
+  const onStarted = (jobs: readonly JobStarted[] = []): void => {
+    setWatching((all) => [...all, ...jobs.map((job) => job.id)])
     setRefresh((n) => n + 1)
   }
 
@@ -215,7 +234,7 @@ export const PcapsPage = (): JSX.Element => {
         ? <p className="muted">pcap root: none</p>
         : (
           <>
-            <DropCaptures lanes={[]} laneless onFresh={onStarted} />
+            <DropCaptures lanes={[]} laneless onFresh={() => onStarted()} />
             {value.inboxEntries.length > 0 && (
               <section>
                 <h2>Inbox · {value.inboxEntries.length}</h2>
