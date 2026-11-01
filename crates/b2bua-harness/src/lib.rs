@@ -36,6 +36,7 @@ mod reaped;
 pub mod router_pace;
 mod routes;
 mod scene;
+mod settle;
 mod spawn_params;
 pub mod terminated;
 mod wire_reads;
@@ -46,6 +47,7 @@ pub use limiter::{LimiterCount, LimiterLeak, LimiterProbe, DEFAULT_LIMITER_ID};
 pub use proxy_core::{spawn_proxy_core, spawn_proxy_core_with, ExternalProxyFace, ProxyCoreParts};
 pub use router_pace::{Pace, RouterPace};
 pub use scene::{B2buaScene, ALICE_PORT, B2BUA_PORT, BOB_PORT};
+pub use settle::settle_until;
 pub use spawn_params::{cluster_key, B2buaSpawnParams};
 use terminated::{TerminatedCalls, TerminatedCallsWriter};
 pub use wire_reads::{invite_final_statuses, stated, stated_by_response};
@@ -163,26 +165,6 @@ pub fn spawn_b2bua_core(
 // ProxySut) lives in the `failover-harness` crate (ADR-0013 §0). This crate is
 // the single-SUT b2bua harness.
 
-/// Poll `cond` until it holds, yielding so spawned teardown / CDR-writer tasks
-/// drain. The single home for the "wait for the async teardown to land" loop.
-///
-/// Works under both wall-clock (`#[tokio::test]`) and `start_paused` tests:
-/// under a paused runtime the `sleep` auto-advances virtual time, so the
-/// awaited spawned tasks still get to run. Bounded (200 × 5 ms) so a real
-/// regression — `cond` never holds — falls through to the test's assertions
-/// instead of hanging.
-///
-/// For tests that must *advance the clock to trip a timer* (not merely drain
-/// already-due tasks), advance with `Harness::advance` first, then settle here.
-pub async fn settle_until(cond: impl Fn() -> bool) {
-    for _ in 0..200 {
-        if cond() {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
-}
-
 /// [`B2buaSut::force_brake_depth`]'s "no depth forced": the brake reads the live one.
 const NO_FORCED_DEPTH: usize = usize::MAX;
 
@@ -212,7 +194,7 @@ pub struct B2buaSut {
 /// binds and spawns the core (binds `{Uac, Uas}` roles; keepalive defaults 30/5
 /// applied FIRST then the caller `tune` LAST so a test overriding keepalive
 /// still wins; the default limiter (see [`limiter`](Self::limiter)), empty
-/// services, no replication, `Clock::test_at(0)`, id-gen seed `0xB2B0`, ordinal
+/// services, no replication, `Clock::test_at(0)` (see [`clock`](Self::clock)), id-gen seed `0xB2B0`, ordinal
 /// `"w0"` defaults).
 pub struct B2buaSutBuilder {
     decision: Arc<dyn CallDecisionEngine>,
@@ -234,9 +216,17 @@ pub struct B2buaSutBuilder {
     cdr_tap: Option<Arc<dyn CdrWriter>>,
     turn_probe: Option<b2bua::TurnProbes>,
     untraced: bool,
+    clock: Option<Clock>,
 }
 
 impl B2buaSutBuilder {
+    /// Stamp the core's records on `clock` in place of `Clock::test_at(0)`: the
+    /// wall anchor of a run whose records leave the process.
+    pub fn clock(mut self, clock: Clock) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
     /// Trace no call: the process keeps the production trace gate, so a run
     /// measuring the per-call cost pays exactly what production pays. By
     /// default [`start`](Self::start) traces every call
@@ -422,6 +412,7 @@ impl B2buaSutBuilder {
             cdr_tap,
             turn_probe,
             untraced,
+            clock,
         } = self;
         if !untraced {
             failure_view::trace_every_call();
@@ -474,7 +465,7 @@ impl B2buaSutBuilder {
             Some(tap) => cdr.with_tap(tap),
             None => cdr,
         };
-        let clock = Clock::test_at(0);
+        let clock = clock.unwrap_or_else(|| Clock::test_at(0));
         let params = B2buaSpawnParams {
             ordinal: "w0".into(),
             identity: String::new(),
@@ -580,6 +571,7 @@ impl B2buaSut {
             cdr_tap: None,
             turn_probe: None,
             untraced: false,
+            clock: None,
         }
     }
 
