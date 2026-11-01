@@ -4,7 +4,7 @@
 use b2bua_sdk::lifecycle::{AttemptOpening, RouteAnswer};
 use b2bua_sdk::sm_rule;
 use call::{AttemptCause, TransferPhase};
-use sip_message::header::{HeaderValue, ReferTo};
+use sip_message::header::{HeaderValue, ReferTo, Uri};
 use sip_message::{Method, SipStr};
 
 use super::{state, Phase, TRANSFER_MACHINE};
@@ -32,6 +32,19 @@ fn to_bare_uri(refer_to: &str) -> Result<String, relay::UnreadableAddress> {
         .map_err(|err| relay::UnreadableAddress {
             field: "refer_to",
             value: refer_to.to_string(),
+            reason: err.reason,
+        })
+}
+
+/// The transfer target a decision's `new_refer_to` names: a URI read whole
+/// (a `;` in its user part stays there, RFC 3261 §25.1), its `?headers` list
+/// dropped as in [`to_bare_uri`].
+fn decided_uri(new_refer_to: &str) -> Result<String, relay::UnreadableAddress> {
+    Uri::parse(&SipStr::owned(new_refer_to))
+        .map(|uri| uri.without_escaped_headers().to_string())
+        .map_err(|err| relay::UnreadableAddress {
+            field: "new_refer_to",
+            value: new_refer_to.to_string(),
             reason: err.reason,
         })
 }
@@ -189,8 +202,10 @@ pub(super) fn http_allow() -> RuleDefinition {
             // carries A's real SDP until the c-realign re-INVITE.
             let body_override = Some(Body::own(held.unwrap_or_default(), None));
 
-            let raw_refer_to = new_refer_to.unwrap_or_else(|| st.refer_to_uri.clone());
-            let effective = match to_bare_uri(&raw_refer_to) {
+            let effective = match new_refer_to
+                .as_deref()
+                .map_or_else(|| to_bare_uri(&st.refer_to_uri), decided_uri)
+            {
                 Ok(uri) => uri,
                 Err(err) => return refuse_transfer(ctx, err.field, &err.reason),
             };
@@ -252,5 +267,20 @@ pub(super) fn http_timeout() -> RuleDefinition {
             ]);
             ok(actions)
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decided_uri, to_bare_uri};
+
+    /// A transfer target whose user part holds `;name=value` (RFC 3261 §25.1)
+    /// keeps it whole, from a received Refer-To and from a decision's URI.
+    #[test]
+    fn a_target_user_part_parameter_stays_in_the_dialled_uri() {
+        let uri = "sip:+33600000000;foo=bar@192.0.2.10:5070";
+        assert_eq!(to_bare_uri(&format!("<{uri}?Replaces=x>")).unwrap(), uri);
+        assert_eq!(decided_uri(uri).unwrap(), uri);
+        assert_eq!(decided_uri(&format!("{uri}?Replaces=x")).unwrap(), uri);
     }
 }

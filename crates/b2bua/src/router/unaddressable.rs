@@ -4,7 +4,8 @@
 //! draws no response, so the call gets at once the response `Timeout` that
 //! transaction reports for a dead hop, instead of waiting on a B2BUA timer.
 //! Every other emission (a response, an ACK, a CANCEL, a retained datagram)
-//! has no transaction to fail and is counted.
+//! has no transaction to fail and is counted. Each one is logged with its
+//! next hop and, for a request, its Request-URI.
 
 use b2bua_sdk::event::CallEvent;
 use call::TxnTimeoutKind;
@@ -26,11 +27,16 @@ pub(super) fn fail_unaddressable(
         OutboundBody::Datagram(_) => "datagram",
     };
     ctx.metrics.record_outbound_unaddressable(kind);
-    tracing::debug!(
+    let request_uri = match &eff.body {
+        OutboundBody::Request(req) => req.request_uri().to_string(),
+        OutboundBody::Response(_) | OutboundBody::Datagram(_) => String::new(),
+    };
+    tracing::warn!(
         %call_ref,
         label = %eff.label,
         host = %eff.destination.0,
         port = eff.destination.1,
+        %request_uri,
         "outbound message not sent: its next hop is not an IP literal"
     );
     let (OutboundBody::Request(req), OutboundTxnMode::NewClient(_)) = (&eff.body, &eff.mode) else {
