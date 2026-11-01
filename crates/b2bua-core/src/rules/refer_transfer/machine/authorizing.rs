@@ -278,7 +278,7 @@ mod tests {
     /// keeps it whole, from a received Refer-To and from a decision's URI.
     #[test]
     fn a_target_user_part_parameter_stays_in_the_dialled_uri() {
-        let uri = "sip:+33600000000;foo=bar@192.0.2.10:5070";
+        let uri = "sip:+33612345678;foo=bar@192.0.2.10:5070";
         assert_eq!(to_bare_uri(&format!("<{uri}?Replaces=x>")).unwrap(), uri);
         assert_eq!(decided_uri(uri).unwrap(), uri);
         assert_eq!(decided_uri(&format!("{uri}?Replaces=x")).unwrap(), uri);

@@ -6,7 +6,7 @@
 use b2bua_harness::{settle_until, B2buaScene};
 use scenario_harness::callflow::{ANSWER_SDP, OFFER_SDP};
 
-const USER: &str = "+33600000000;foo=bar";
+const USER: &str = "+33612345678;foo=bar";
 
 /// The caller's Contact names `USER`; the callee hangs up. The caller
 /// receives the BYE at its socket and answers it, both dialogs end, and the

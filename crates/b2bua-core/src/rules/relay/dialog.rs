@@ -90,8 +90,8 @@ mod tests {
     #[test]
     fn a_target_whose_user_part_holds_a_parameter_names_its_host_and_port() {
         for target in [
-            "sip:+33600000000;foo=bar@192.0.2.10:5070",
-            "sip:+33600000000;foo=bar@192.0.2.10:5070;transport=udp",
+            "sip:+33612345678;foo=bar@192.0.2.10:5070",
+            "sip:+33612345678;foo=bar@192.0.2.10:5070;transport=udp",
             "sip:alice%3Bx=y;isub=12@192.0.2.10:5070",
             "sip:bob@192.0.2.10:5070;transport=udp?Subject=hi",
         ] {

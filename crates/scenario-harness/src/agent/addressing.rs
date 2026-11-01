@@ -83,9 +83,9 @@ mod tests {
     #[test]
     fn a_remote_target_whose_user_part_holds_a_parameter_names_its_socket() {
         for target in [
-            "sip:+33600000000;foo=bar@192.0.2.10:5070",
+            "sip:+33612345678;foo=bar@192.0.2.10:5070",
             "sip:alice%3Bx=y;isub=12@192.0.2.10:5070;transport=udp",
-            "<sip:+33600000000;foo=bar@192.0.2.10:5070;lr>",
+            "<sip:+33612345678;foo=bar@192.0.2.10:5070;lr>",
             "192.0.2.10:5070",
         ] {
             assert_eq!(uri_to_addr(target), Some("192.0.2.10:5070".parse().unwrap()), "{target}");

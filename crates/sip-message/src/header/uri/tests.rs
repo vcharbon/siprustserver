@@ -194,12 +194,12 @@ fn functional_updates_compose() {
 // as written, normalized or rehomed.
 #[test]
 fn a_user_part_holding_semicolons_and_escapes_ends_at_the_at_sign() {
-    let u = uri("sip:+33600000000;foo=bar@192.0.2.10:5070");
-    assert_eq!(u.user(), Some("+33600000000;foo=bar"));
+    let u = uri("sip:+33612345678;foo=bar@192.0.2.10:5070");
+    assert_eq!(u.user(), Some("+33612345678;foo=bar"));
     assert_eq!(u.host_port(), ("192.0.2.10", 5070));
     assert!(u.params().is_empty());
-    assert_eq!(u.to_string(), "sip:+33600000000;foo=bar@192.0.2.10:5070");
-    assert_eq!(u.clone().normalized().to_string(), "sip:+33600000000;foo=bar@192.0.2.10:5070");
+    assert_eq!(u.to_string(), "sip:+33612345678;foo=bar@192.0.2.10:5070");
+    assert_eq!(u.clone().normalized().to_string(), "sip:+33612345678;foo=bar@192.0.2.10:5070");
 
     let escaped = uri("sip:alice%3Bx=y;isub=12@192.0.2.10:5070;transport=udp?Subject=hi");
     assert_eq!(escaped.host_port(), ("192.0.2.10", 5070));
@@ -211,6 +211,6 @@ fn a_user_part_holding_semicolons_and_escapes_ends_at_the_at_sign() {
     );
     assert_eq!(
         u.with_authority(HostPort::new("198.51.100.1", Some(5080))).to_string(),
-        "sip:+33600000000;foo=bar@198.51.100.1:5080"
+        "sip:+33612345678;foo=bar@198.51.100.1:5080"
     );
 }
