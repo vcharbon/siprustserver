@@ -66,6 +66,8 @@ export interface Lane {
   readonly defaults?: LaneDefaults
   /** Whether a SUT outside the cell is stood up for each batch (`managed`) or found running (`standing`). */
   readonly sut?: "managed" | "standing"
+  /** What the lane can do, in the deployment's words; a run needing one it lacks is not runnable on it. */
+  readonly capabilities?: ReadonlyArray<string>
 }
 
 /** A lane whose cells build their SUT in-process: paused clock, shared, no ceiling. */
@@ -87,6 +89,8 @@ export class LaneUnstated extends Schema.TaggedError<LaneUnstated>()("Corpus.Lan
 export interface Interface {
   /** Every lane id the deployment declares. */
   readonly lanes: ReadonlyArray<string>
+  /** The capabilities a capture replay needs of its lane; none where unstated. */
+  readonly replayNeeds?: ReadonlyArray<string>
   /** What `lane` states. */
   readonly lane: (lane: string) => Effect.Effect<Lane, LaneUnstated>
   /** Stands the lane's batch process; `undefined` where its cells run on their own. */
@@ -105,6 +109,12 @@ export interface Interface {
 }
 
 export class Service extends Context.Service<Service, Interface>()("@sip/corpus/LaneHosting") {}
+
+/** The capabilities `lane` lacks of what a capture replay needs, in the order the deployment states them. */
+export const replayLacks = (hosting: Interface, lane: Lane): ReadonlyArray<string> => {
+  const has = new Set(lane.capabilities ?? [])
+  return (hosting.replayNeeds ?? []).filter((need) => !has.has(need))
+}
 
 /** The lanes the deployment declares whose clock is real. */
 export const realClock = (hosting: Interface): Effect.Effect<ReadonlyArray<string>, LaneUnstated> =>

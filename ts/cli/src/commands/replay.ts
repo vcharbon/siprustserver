@@ -129,6 +129,10 @@ export const flags = (facts: CliFacts) => ({
   rule: Flag.string("rule").pipe(
     Flag.withDescription("--from-census: the RFC rule whose hits name the cells"),
     Flag.optional
+  ),
+  force: Flag.boolean("force").pipe(
+    Flag.withDescription("Drive a lane lacking a capability a capture replay needs; its results are forced ones"),
+    Flag.withDefault(false)
   )
 })
 
@@ -237,7 +241,7 @@ const requestMasked = Effect.fn("Replay.requestMasked")(function*(
     return 2
   }
   const options = yield* requestOptionsOf(input, shown.request)
-  const unstated = yield* Refusals.lane(options.lane)
+  const unstated = yield* Refusals.lane(options.lane, input.force)
   if (unstated !== null) {
     yield* Console.error(`[replay] refused: ${unstated}`)
     return 2
@@ -403,7 +407,7 @@ const workOf = Effect.fn("Replay.workOf")(function*(facts: CliFacts, input: Inpu
 
 /** A work list replayed: planned off the cut store, then the phase under the lane's locks. */
 const workMain = Effect.fn("Replay.work")(function*(facts: CliFacts, input: Input) {
-  const unstated = yield* Refusals.lane(input.lane)
+  const unstated = yield* Refusals.lane(input.lane, input.force)
   if (unstated !== null) {
     yield* Console.error(`[replay] refused: ${unstated}`)
     return 2

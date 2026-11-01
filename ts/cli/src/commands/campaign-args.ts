@@ -48,6 +48,10 @@ export const flags = (facts: CliFacts) => {
       Flag.withDescription("Cut every named capture again, whatever the cut store says"),
       Flag.withDefault(false)
     ),
+    force: Flag.boolean("force").pipe(
+      Flag.withDescription("Drive a lane lacking a capability a capture replay needs; its results are forced ones"),
+      Flag.withDefault(false)
+    ),
     repo: Flag.string("repo").pipe(
       Flag.withDescription("The repository the registry's tickets resolve under"),
       Flag.optional

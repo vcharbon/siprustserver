@@ -52,6 +52,25 @@ describe("the lane refusal", () => {
     expect(await ask("paused")).toBeNull()
     expect(await ask("pased")).toBe("there is no lane 'pased': the lanes are paused")
   })
+
+  it("refuses a lane lacking what a capture replay needs, and drives it forced, saying so", async () => {
+    const hosting = LaneHosting.layerWith({
+      lanes: ["scripted", "relayed"],
+      replayNeeds: ["scripted"],
+      lane: (lane) =>
+        Effect.succeed({ ...LaneHosting.NEUTRAL_LANE, capabilities: lane === "scripted" ? ["scripted"] : ["visible"] }),
+      standBatch: () => Effect.succeed(undefined),
+      standSut: () => Effect.succeed(undefined),
+      preflight: () => Effect.succeed(null)
+    })
+    const ask = (lane: string, force: boolean) =>
+      Effect.runPromise(Refusals.lane(lane, force).pipe(Effect.provide(hosting)))
+    expect(await ask("scripted", false)).toBeNull()
+    expect(await ask("relayed", false)).toBe(
+      "a capture replay is not runnable on this lane: relayed lacks scripted (--force runs it anyway, marked forced)"
+    )
+    expect(await ask("relayed", true)).toBeNull()
+  })
 })
 
 describe("the environment refusal", () => {
