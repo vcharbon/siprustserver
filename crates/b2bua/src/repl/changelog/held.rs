@@ -29,6 +29,20 @@ impl Changelog {
         }
     }
 
+    /// `peer` pulls `partition` cold, under `identity`: it states it holds
+    /// nothing of it (a restarted process, the same identity kept), so the
+    /// position it applied falls back to none until it claims again. A pull
+    /// from an identity membership does not bind changes nothing.
+    pub fn note_cold_pull(&self, peer: &str, identity: Option<&str>, partition: Partition) {
+        let mut inner = locked(&self.inner, REPLICA_CHANGELOG);
+        if inner.bound.get(peer).is_some_and(|bound| Some(bound.as_str()) != identity) {
+            return;
+        }
+        if let Some(log) = inner.peers.get_mut(peer) {
+            log.sub_mut(partition).acked.send_replace(Watermark::new(0, 0));
+        }
+    }
+
     /// A bootstrap scan of `peer`'s `partition` read at `w` carries every
     /// entry at or below it: each one never sent is marked sent at `w`.
     pub fn note_scanned(&self, peer: &str, partition: Partition, w: Watermark) {

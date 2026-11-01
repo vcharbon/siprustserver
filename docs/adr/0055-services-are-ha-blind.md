@@ -209,11 +209,12 @@ ends the transaction with the CANCEL unsent (§9.1, §17.2.1).
   the call is admitted with it (user ruling: every call born while its backup
   restarts ends up held by it): its bootstrap carries the call. Its writes go
   to the change log toward that backup, one entry per call (a delete stays
-  until applied). While a bootstrap is in flight the open flow holds the log
-  for at most that deadline, after which the marks apply; with no open flow
-  the log goes one dead-peer TTL (`B2BUA_REPL_DEAD_PEER_TTL_MS`, 60 s,
-  ADR-0045) after a flow last closed, writes or not, so it holds the writes of
-  that TTL at most; a warm pull past it re-bootstraps. On its return the backup's bootstrap
+  until applied). The bootstrap is dated from the first flow opened since the
+  backup's last claim, re-opens included, so it holds the log for at most that
+  deadline, after which the marks apply; with no open flow the log goes one
+  dead-peer TTL (`B2BUA_REPL_DEAD_PEER_TTL_MS`, 60 s, ADR-0045) after the
+  backup's last claim, writes and flows that never claim not counted, so it
+  holds the writes of that TTL at most; a warm pull past it re-bootstraps. On its return the backup's bootstrap
   carries the call from the primary's call metadata. No call is refused for
   the backlog. A gauge counts the live calls with no backup; such a call runs
   as on a non-HA B2BUA.
@@ -313,18 +314,22 @@ drain ends each call no peer holds (user ruling): one with no backup, or whose
 backup is not shown to hold it. The change log shows a backup holding a call
 when the backup, under the identity membership binds to its ordinal, reported
 applying a position at or past the first counter the call's entry was sent
-at, by the tail or a bootstrap scan; or, for a call with no entry in the log
+at, by the tail or a bootstrap scan, a mark a later write keeps only once
+the backup applied it; or, for a stored call with no entry in the log
 opened since (a call a restarted primary reclaimed, or written before the log
 went at the dead-peer TTL), at or past the counter that log opened at. A new
-identity bound to the ordinal starts from what it reported itself. A backup
-away since before the call was sent, or restarted since without reporting
-again, is not shown to hold it. The flow's liveness plays no part. The cells
-of `failover-harness` pin these cases; nothing more is claimed. Two residuals
-are accepted (user ruling):
+identity bound to the ordinal starts from what it reported itself, and a cold
+pull from the bound identity (a process restarted under the same identity)
+starts from nothing. A backup away since before the call was sent, or
+restarted since without reporting again, is not shown to hold it. The flow's liveness plays no part. The cells
+of `failover-harness` pin these cases; nothing more is claimed. Three
+residuals are accepted (user ruling):
 - a backup that applied a write whose position report was lost with a flow
   break reads as not holding the call until it reports again;
 - a backup cut off under the same identity past the dead-peer TTL reads as
-  not holding the calls written before its log went, until it re-bootstraps.
+  not holding the calls written before its log went, until it re-bootstraps;
+- a backup process dead under the same identity and not reconnected when the
+  primary's grace expires reads as holding what it applied before.
 
 Each such call is ended: an established one where it stands, its CDR written
 and its holds released, with nothing sent, so a call whose media still flows

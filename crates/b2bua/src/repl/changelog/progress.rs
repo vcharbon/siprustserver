@@ -74,9 +74,12 @@ impl Changelog {
             }
             return;
         }
+        let now_ms = self.clock.now_ms();
         if let Some(log) = inner.peers.get_mut(peer) {
+            log.last_active_ms = now_ms;
             let sub = log.sub_mut(partition);
             sub.applied = Some(Claim { at, made: Instant::now() });
+            sub.flow_started = None;
             if at.gen == gen {
                 sub.acked.send_if_modified(|acked| {
                     let raised = at > *acked;

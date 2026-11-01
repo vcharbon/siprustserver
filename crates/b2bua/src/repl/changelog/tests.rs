@@ -395,3 +395,100 @@ fn a_report_made_before_its_identity_is_bound_counts_once_bound() {
     cl.bind_identity("A", Some("a#g2"));
     assert!(cl.applied_any("A", Partition::Bak, "call-1"), "its report counts once bound");
 }
+
+/// A flow sends call-x and breaks before the peer applies it; call-x is
+/// written again and moves; the next flow resumes below it and the peer
+/// applies a later position of another call: it never applied call-x.
+#[tokio::test]
+async fn a_send_lost_with_its_flow_does_not_hold_a_moved_call() {
+    let cl = changelog();
+    {
+        let _first = cl.serving("A", Partition::Bak);
+        cl.bump_put("A", "call-z", Partition::Bak);
+        assert_eq!(sent(&cl, Watermark::new(7, 0), 10).await.len(), 1);
+        cl.note_applied("A", None, Partition::Bak, Watermark::new(7, 1));
+        cl.bump_put("A", "call-x", Partition::Bak);
+        cl.bump_put("A", "call-y", Partition::Bak);
+        assert_eq!(sent(&cl, Watermark::new(7, 1), 10).await.len(), 2, "lost with the socket");
+    }
+    cl.bump_put("A", "call-x", Partition::Bak);
+    let _second = cl.serving("A", Partition::Bak);
+    let next = sent(&cl, Watermark::new(7, 1), 1).await;
+    assert_eq!(next, vec![("call-y".to_string(), Watermark::new(7, 3))], "warm from 1: call-y");
+    cl.note_applied("A", None, Partition::Bak, Watermark::new(7, 3));
+    assert!(!cl.applied_any("A", Partition::Bak, "call-x"), "the peer never applied call-x");
+}
+
+/// The marks used by the bootstrap tests: over them at three pending entries.
+fn small_marks() -> BacklogMarks {
+    BacklogMarks {
+        high_entries: 3,
+        low_entries: 1,
+        high_age: Duration::from_secs(5),
+        low_age: Duration::from_secs(1),
+    }
+}
+
+/// A backup whose flow re-opens every 5 s and never claims a position is one
+/// bootstrap dated from its first open: past the hard deadline it is held to
+/// the marks.
+#[tokio::test(start_paused = true)]
+async fn a_bootstrap_reopened_without_a_claim_is_held_to_the_marks() {
+    let log = changelog();
+    log.set_backlog_marks(small_marks());
+    for i in 0..3 {
+        log.bump_put("B", &format!("c{i}"), Partition::Bak);
+    }
+    for _ in 0..3 {
+        let flow = log.serving("B", Partition::Bak);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        drop(flow);
+    }
+    let _flow = log.serving("B", Partition::Bak);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(!log.admits_backup("B"), "16 s of bootstrap with no claim, over both marks");
+}
+
+/// A peer whose flows open and close without ever claiming does not keep its
+/// log: it goes one dead-peer TTL after the last claim, at a reap with no flow
+/// open.
+#[tokio::test(start_paused = true)]
+async fn a_log_toward_a_peer_that_never_claims_goes_one_ttl_after_its_last_claim() {
+    let clock = Clock::test_at(0);
+    let cl = Changelog::new(7, clock.clone()).with_dead_peer_ttl(2_000);
+    {
+        let _flow = cl.serving("A", Partition::Bak);
+        cl.note_applied("A", None, Partition::Bak, Watermark::new(7, 0));
+    }
+    for i in 0..3 {
+        let flow = cl.serving("A", Partition::Bak);
+        cl.bump_put("A", &format!("call-{i}"), Partition::Bak);
+        tokio::time::advance(Duration::from_millis(700)).await;
+        drop(flow);
+        tokio::time::advance(Duration::from_millis(100)).await;
+    }
+    cl.reap(clock.now_ms());
+    assert!(!cl.has_peer("A"), "2.4 s past the last claim, no flow open");
+}
+
+/// A cold pull from the bound identity states it holds nothing (a restarted
+/// process under the same identity): the calls it applied read unheld until
+/// its bootstrap claims again. A cold pull from an identity not bound changes
+/// nothing.
+#[tokio::test]
+async fn a_cold_pull_from_the_bound_identity_holds_nothing_until_it_claims() {
+    let cl = changelog();
+    cl.bind_identity("A", Some("a#1"));
+    let _flow = cl.serving("A", Partition::Bak);
+    cl.bump_put("A", "call-1", Partition::Bak);
+    assert_eq!(sent(&cl, Watermark::new(7, 0), 10).await.len(), 1);
+    cl.note_applied("A", Some("a#1"), Partition::Bak, Watermark::new(7, 1));
+    assert!(cl.applied_any("A", Partition::Bak, "call-1"));
+    cl.note_cold_pull("A", Some("a#9"), Partition::Bak);
+    assert!(cl.applied_any("A", Partition::Bak, "call-1"), "an unbound identity changes nothing");
+    cl.note_cold_pull("A", Some("a#1"), Partition::Bak);
+    assert!(!cl.applied_any("A", Partition::Bak, "call-1"), "the restarted process holds nothing");
+    cl.note_scanned("A", Partition::Bak, cl.head());
+    cl.note_applied("A", Some("a#1"), Partition::Bak, cl.head());
+    assert!(cl.applied_any("A", Partition::Bak, "call-1"), "its bootstrap carried the call");
+}

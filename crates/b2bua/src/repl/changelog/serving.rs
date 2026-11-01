@@ -19,13 +19,12 @@ impl Changelog {
             let log =
                 inner.peers.entry(peer.to_string()).or_insert_with(|| PeerLog::new(now, counter));
             log.serving += 1;
-            log.last_active_ms = now;
             let sub = log.sub_mut(partition);
             sub.streams += 1;
             // A new flow starts unknown: a claim left by a flow the peer never
             // closed (a dead node sends no FIN) must not vouch for this one.
             sub.applied = None;
-            sub.flow_started = Some(tokio::time::Instant::now());
+            sub.flow_started.get_or_insert_with(tokio::time::Instant::now);
             sub.written.subscribe()
         };
         ServeGuard { changelog: self.clone(), peer: peer.to_string(), partition, written }
@@ -55,11 +54,9 @@ impl ServeGuard {
 
 impl Drop for ServeGuard {
     fn drop(&mut self) {
-        let now = self.changelog.clock.now_ms();
         let mut inner = locked(&self.changelog.inner, REPLICA_CHANGELOG);
         if let Some(log) = inner.peers.get_mut(&self.peer) {
             log.serving = log.serving.saturating_sub(1);
-            log.last_active_ms = now;
             let sub = log.sub_mut(self.partition);
             sub.streams = sub.streams.saturating_sub(1);
             if sub.streams == 0 {

@@ -258,6 +258,9 @@ impl ReplServer {
         // Keep this peer's changelog reap-immune, and this partition's flow
         // marked connected, while we serve it.
         let mut guard = self.changelog.serving(caller, partition);
+        if since == Watermark::new(0, 0) {
+            self.changelog.note_cold_pull(caller, identity.as_deref(), partition);
+        }
         // The peer's back-channel: positions in, and a close that ends us.
         let (closed_tx, mut closed) = tokio::sync::watch::channel(false);
         let _recv = AbortOnDrop(observe::spawn_keeping_node({

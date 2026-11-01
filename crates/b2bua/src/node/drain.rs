@@ -151,6 +151,11 @@ fn backups_caught_up_in(ctx: &RouterCtx, changelog: &crate::repl::Changelog) -> 
 fn end_unheld(ctx: &Arc<RouterCtx>, changelog: Option<&crate::repl::Changelog>) -> GraceEnd {
     use crate::rules::operator_release::{AT_DRAIN_GRACE, TOPIC};
     let me = &ctx.config.self_ordinal;
+    // A call not stored yet (before its first write) is held by no peer.
+    let stored = |call_ref: &str, incarnation: &str| {
+        let repl = ctx.state.repl_store();
+        repl.is_some_and(|r| r.incarnation(call_ref).as_deref() == Some(incarnation))
+    };
     let held = |call_ref: &str, (pri, bak): &(String, String)| {
         let (holder, partition) =
             if pri == me { (bak, Partition::Bak) } else { (pri, Partition::Pri) };
@@ -161,7 +166,10 @@ fn end_unheld(ctx: &Arc<RouterCtx>, changelog: Option<&crate::repl::Changelog>) 
         .state
         .active_call_holders()
         .into_iter()
-        .filter(|c| !c.owners.as_ref().is_some_and(|o| held(&c.call_ref, o)))
+        .filter(|c| {
+            let held = c.owners.as_ref().is_some_and(|o| held(&c.call_ref, o));
+            !(held && stored(&c.call_ref, &c.incarnation))
+        })
         .map(|c| (c.call_ref, c.incarnation))
         .collect();
     for (call_ref, incarnation) in &unheld {

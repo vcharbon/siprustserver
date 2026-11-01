@@ -61,10 +61,9 @@ pub use backlog::BacklogMarks;
 pub use progress::{Reach, DEFAULT_CLAIM_TTL};
 pub use source::{BodySource, RefMeta};
 
-/// How long a peer's whole changelog is kept after a flow last served it (or
-/// its creation) before an idle [`reap`](Changelog::reap) drops it, writes or
-/// not: a peer coming back with the same identity after it re-bootstraps cold
-/// instead of resuming warm (`B2BUA_REPL_DEAD_PEER_TTL_MS`, ADR-0045).
+/// How long a peer's log outlives its last claim (or its creation) with no flow
+/// open before [`reap`](Changelog::reap) drops it: a peer back under the same
+/// identity after that re-bootstraps cold (`B2BUA_REPL_DEAD_PEER_TTL_MS`, ADR-0045).
 pub const DEFAULT_DEAD_PEER_TTL_MS: i64 = 60_000;
 
 /// Per-callRef position in a compacted sub-log.
@@ -124,7 +123,7 @@ struct SubLog {
     acked: watch::Sender<Watermark>,
     /// The highest report of an identity not bound yet ([`progress`]).
     unbound: Option<(String, Watermark)>,
-    /// When the open flow started: a bootstrap in flight, until it claims.
+    /// When the first flow since the last claim opened: a bootstrap in flight.
     flow_started: Option<tokio::time::Instant>,
     /// The sub-log's head counter, moved by every write: the serve task waits
     /// on it.
@@ -158,8 +157,10 @@ impl SubLog {
         if let Some(prev) = self.by_ref.get(call_ref) {
             self.entries.remove(&prev.counter);
             answered |= op == Op::Delete && prev.op == Op::Delete && prev.answered;
+            // A send lost with its flow is no send: kept only once applied.
+            let acked = self.acked.borrow().counter;
             if op == Op::Delete || prev.op == Op::Put {
-                first_sent = prev.first_sent;
+                first_sent = prev.first_sent.filter(|sent| *sent <= acked);
             }
         }
         self.entries.insert(counter, call_ref.to_string());
@@ -210,9 +211,8 @@ struct Stated {
 struct PeerLog {
     pri: SubLog,
     bak: SubLog,
-    /// `now_ms` a flow last started or ended on this log, or of its creation —
-    /// drives idle reaping. A write does not move it: a log toward a peer no
-    /// flow carries holds at most the writes of one dead-peer TTL.
+    /// `now_ms` of the peer's last claim, or of the log's creation: drives idle
+    /// reaping; neither a write nor a flow that never claims moves it.
     last_active_ms: i64,
     /// Count of active serve tasks for this peer. A log with `serving > 0` is
     /// NOT reaped while idle, so a server never loses the log it is actively

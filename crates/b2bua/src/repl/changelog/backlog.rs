@@ -12,7 +12,7 @@ use std::time::Duration;
 use repl_net::frame::Partition;
 
 use super::Changelog;
-use crate::repl::puller::PullerConfig;
+use crate::repl::puller::DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS;
 use crate::store::{locked, REPLICA_CHANGELOG};
 
 /// The high- and low-water marks of the backlog toward one backup peer.
@@ -78,14 +78,15 @@ impl Changelog {
 
     /// Whether a new call admitted now gets `peer` as its backup. Toward a
     /// peer whose open flow completed its bootstrap (it claimed a position),
-    /// or stalled in it past the bootstrap hard deadline (10 s), `false` from
+    /// or stalled in it past the bootstrap hard deadline (10 s, dated from the
+    /// first flow open since its last claim, re-opens included), `false` from
     /// the moment the backlog reaches a high-water mark until it is under both
     /// low-water marks: the entries new calls add stop at the high-water mark.
     /// Toward a peer no flow carries, or one still bootstrapping, always
-    /// `true`: its bootstrap carries the call. While a bootstrap is in flight
-    /// the open flow holds the log for at most that deadline; with no flow the
-    /// log holds one entry per call written since a flow last closed and goes
-    /// one dead-peer TTL (60 s, `B2BUA_REPL_DEAD_PEER_TTL_MS`) after.
+    /// `true`: its bootstrap carries the call. A bootstrap in flight holds the
+    /// log for at most that deadline; with no flow open the log goes one
+    /// dead-peer TTL (60 s, `B2BUA_REPL_DEAD_PEER_TTL_MS`) after the peer's
+    /// last claim, writes or flows without a claim not counted.
     pub fn admits_backup(&self, peer: &str) -> bool {
         let now = self.clock.now_ms();
         let gen = self.gen;
@@ -93,7 +94,7 @@ impl Changelog {
         let marks = inner.marks;
         let Some(log) = inner.peers.get_mut(peer) else { return true };
         let sub = log.sub(Partition::Bak);
-        let deadline = Duration::from_millis(PullerConfig::default().bootstrap_hard_timeout_ms);
+        let deadline = Duration::from_millis(DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS);
         let bootstrapping =
             sub.applied.is_none() && sub.flow_started.is_some_and(|t| t.elapsed() < deadline);
         if sub.streams == 0 || bootstrapping {

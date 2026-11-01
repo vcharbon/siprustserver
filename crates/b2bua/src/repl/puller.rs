@@ -99,7 +99,7 @@ mod held_meetings;
 mod status;
 mod wiring;
 use apply::{ApplyMode, ApplyOutcome};
-pub use config::PullerConfig;
+pub use config::{PullerConfig, DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS};
 pub use status::PullerStatus;
 
 /// What ended a single `run_once` connection attempt — drives the supervisor's

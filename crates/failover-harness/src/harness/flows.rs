@@ -28,6 +28,15 @@ impl ReplicatedB2buaSut {
             .is_some_and(|s| s.changelog().flow_open(peer, partition))
     }
 
+    /// Whether THIS node's change log holds an entry of `call_ref` toward
+    /// `peer` on `partition`. `false` while crashed.
+    pub fn logs_toward(&self, peer: &str, partition: Partition, call_ref: &str) -> bool {
+        self.core
+            .as_ref()
+            .and_then(|c| c.repl_store())
+            .is_some_and(|s| s.changelog().position_of(peer, partition, call_ref).is_some())
+    }
+
     /// Set the backlog marks this incarnation admits new calls under
     /// (ADR-0055 §3). No-op while crashed.
     pub fn set_backlog_marks(&self, marks: BacklogMarks) {

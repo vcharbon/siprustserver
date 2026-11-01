@@ -13,7 +13,7 @@
 //!   a returns          its bootstrap carries the three calls
 //!   b drains ⇒ caught_up, exits; each caller's BYE ─▶ a ─▶ 200; one CDR each
 //!   a away 310 s       one call after the dead-peer TTL, the same outcome
-//!   a away 70 s        a call born before: b's log toward a went at the
+//!   a away 95 s        a call born before: b's log toward a went at the
 //!                      TTL; a returns and bootstraps it, a parks its flow,
 //!                      b drains to its grace and leaves the call to a
 //! ```
@@ -23,7 +23,7 @@
 
 use std::time::Duration;
 
-use failover_harness::{total_cdrs_for, DrainExit, FailoverHarness};
+use failover_harness::{total_cdrs_for, DrainExit, FailoverHarness, Partition};
 
 use crate::away_backup_support::{
     answered_on, answered_with, bring_up, caller_hangs_up, come_back, drain, drain_caught_up,
@@ -139,11 +139,16 @@ async fn a_call_its_backup_bootstrapped_after_the_dead_peer_ttl_is_left_to_it_at
 
     // ── a away past the TTL, back, bootstrapped ─────────────────────────────
     restart_in_place(&mut fh, &mut a);
+    // Past the TTL and the replica reap pass (every 30 s) that drops the log.
     let past_ttl = Duration::from_millis(b2bua::repl::DEFAULT_DEAD_PEER_TTL_MS as u64)
-        + Duration::from_secs(10);
+        + Duration::from_secs(35);
     fh.advance(past_ttl).await;
     come_back(&mut fh, &mut a, &proxy).await;
     assert!(a.scan_backed_up("b2").contains(&call.call_ref), "a's bootstrap carried the call");
+    assert!(
+        !b.logs_toward("b1", Partition::Bak, &call.call_ref),
+        "the call has no entry in b's log toward a opened since: the no-entry case"
+    );
 
     // ── a parks its flows to b; b drains to its grace ───────────────────────
     a.simulate_peer_removed("b2");

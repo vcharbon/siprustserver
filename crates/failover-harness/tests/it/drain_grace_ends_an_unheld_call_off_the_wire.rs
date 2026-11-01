@@ -14,9 +14,9 @@
 //!            b exits; a returns; alice ─BYE─▶ a ─▶ 481; bob ─BYE─▶ a ─▶ 481
 //!   returns  a away · call on b names a · b drains · a returns at +1.5 s
 //!            ⇒ caught_up inside the grace; b exits; alice ─BYE─▶ a ─▶ 200
-//!   restart  call on b applied by a · a restarts, its new incarnation bound
-//!            but cut off from b · b drains: a holds nothing, the call is
-//!            ended off the wire; b exits; both BYEs ─▶ a ─▶ 481
+//!   recreated  call on b applied by a · a's pod is re-created, its new
+//!            identity bound but cut off from b · b drains: a holds nothing,
+//!            the call is ended off the wire; b exits; both BYEs ─▶ a ─▶ 481
 //! ```
 //!
 //! Beyond the failover sweep: the end of a call no peer holds at a drain's grace.
@@ -122,13 +122,14 @@ async fn a_backup_returning_inside_the_grace_holds_the_call() {
     drop(proxy);
 }
 
-/// A call its backup applied, then the backup restarts: membership binds the
-/// ordinal to the new incarnation, which holds nothing the old one applied,
-/// and its bootstrap cannot reach the primary before the primary's grace. No
-/// peer holds the call: it is ended off the wire with its CDR.
+/// A call its backup applied, then the backup's pod is re-created: membership
+/// binds the ordinal to the new pod's identity, which holds nothing the old
+/// one applied, and its bootstrap cannot reach the primary before the
+/// primary's grace. No peer holds the call: it is ended off the wire with its
+/// CDR.
 #[tokio::test(start_paused = true)]
-async fn a_call_whose_backup_restarted_since_it_applied_it_is_ended_at_the_grace() {
-    let name = "drain-grace-backup-restarted-since";
+async fn a_call_whose_backup_pod_was_recreated_since_it_applied_it_is_ended_at_the_grace() {
+    let name = "drain-grace-backup-pod-recreated";
     let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -139,9 +140,9 @@ async fn a_call_whose_backup_restarted_since_it_applied_it_is_ended_at_the_grace
     assert_eq!(call.cookie, ("b2".to_string(), "b1".to_string()), "both alive: a backs it");
     assert!(a.scan_backed_up("b2").contains(&call.call_ref), "a applied the call");
 
-    // ── a restarts, cut off from b; its new incarnation is bound ────────────
+    // ── a's pod is re-created, cut off from b; its new identity is bound ────
     fh.partition("b1", "b2");
-    fh.mark("b1", None, "crash", "a restarts");
+    fh.mark("b1", None, "crash", "a's pod is re-created");
     a.crash();
     let addr = a.reboot().await;
     fh.note_worker_rebound("b1", addr);
