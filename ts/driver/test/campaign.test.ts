@@ -259,6 +259,25 @@ describe("a lane the document declares blocked", () => {
     expect(cell.passed).toBe(true)
   })
 
+  it("is skipped on the verdict stated for every lane where the document does not name it", async () => {
+    const cases = runDir("cases")
+    dirs.push(cases)
+    const run = await campaign([
+      replayCell({ case: caseWithLanes(cases, "blocked.v3.json", { "other-lane": "ok", "*": "blocked:claim-ambiguous" }) })
+    ])
+    expect(run.index.cells[0]!.skipped).toBe("blocked:claim-ambiguous")
+  })
+
+  it("runs the cell on its own ok verdict, whatever the document states for every lane", async () => {
+    const cases = runDir("cases")
+    dirs.push(cases)
+    const run = await campaign([
+      replayCell({ case: caseWithLanes(cases, "ok.v3.json", { "stub-lane": "ok", "*": "blocked:whatever" }) })
+    ])
+    expect(run.index.cells[0]!.skipped).toBeUndefined()
+    expect(run.index.cells[0]!.passed).toBe(true)
+  })
+
   it("runs the cell where the document does not mention the lane at all", async () => {
     // Absence means "none" — a lane nobody ruled on is not a blocked lane.
     const run = await campaign([replayCell()])

@@ -330,12 +330,13 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
 })
 
 /**
- * The verdict that blocks a lane, or `undefined` where the lane may run. A lane
- * the document does not mention is NOT blocked: absence means "none" (§2.2), and
- * the driver skips only what the document positively refuses.
+ * The verdict that blocks a lane, or `undefined` where the lane may run: the
+ * lane's own verdict, else the one stated for every lane (`ANY_LANE`). A lane
+ * the document mentions neither way is NOT blocked: absence means "none"
+ * (§2.2), and the driver skips only what the document positively refuses.
  */
-const laneBlock = (pivot: Pivot.PivotV3, lane: string): Tokens.LaneVerdict | undefined => {
-  const verdict = pivot.case.lanes[lane]
+export const laneBlock = (pivot: Pivot.PivotV3, lane: string): Tokens.LaneVerdict | undefined => {
+  const verdict = pivot.case.lanes[lane] ?? pivot.case.lanes[LanePresets.ANY_LANE]
   if (verdict === undefined) return undefined
   return Tokens.parseLaneVerdict(verdict)._tag === "blocked" ? verdict : undefined
 }
