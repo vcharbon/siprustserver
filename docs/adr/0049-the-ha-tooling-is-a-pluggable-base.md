@@ -513,11 +513,14 @@ made. A run profile joins the two.
    the stream's stats directory. The exporter twin follows the file, ships
    each line and counts the records by `stream`, `shape`, `ending`. A SIPp UAS
    writes no record; it exposes counters only. SIPp ends a call without
-   running any step of the scenario in three cases: the global
-   `-recv_timeout` deletes the call, an exhausted retransmission of a `<send>`
-   without `ontimeout` aborts it, and an unexpected message received while
-   the call is already in its unexpected-message handler aborts it. So every
-   UAC scenario follows these rules:
+   running any step of the scenario in two cases: the global
+   `-recv_timeout` deletes the call, and an exhausted retransmission of a
+   `<send>` without `ontimeout` aborts it. A third, an unexpected message
+   received while the call is already in its unexpected-message handler, is
+   turned off: the UAC runs with `-default_behaviors all,-abortunexp`, so SIPp
+   discards that message (logging `Continuing call on unexpected message`)
+   and the call acts on the peer's retransmission. So every UAC scenario
+   follows these rules:
    - every wait (a group of `<recv>`s) is entered on a recv with its own
      `timeout` and `ontimeout`: a pending send never bounds it (below);
    - every `<send>` SIPp retransmits has `ontimeout`;
@@ -552,10 +555,13 @@ made. A run profile joins the two.
      follows the requests it waits for and `_unexp.main` follows every send;
      the SIPp image reads that method from the CSeq header line
      (`deploy/k8s/sipp/cseq-method.patch`), not from any `CSeq` text;
-   - a message landing while the call runs its handler aborts the call, so a
-     handler path answers and resumes in one step (the resume is an action of
-     its send); an `ontimeout` naming the end of the scenario counts the call
-     failed; SIPp 3.7 loads no scenario file over 64 KiB.
+   - SIPp runs one step of a call per scheduler cycle and reads one datagram
+     per cycle, so a handler path of several steps leaves a window in which a
+     second message lands inside the handler; over UDP the peer retransmits
+     the discarded message, so a handler path answers and resumes in as few
+     steps as it can (the resume is an action of its send); an `ontimeout`
+     naming the end of the scenario counts the call failed; SIPp 3.7 loads no
+     scenario file over 64 KiB.
 
    A static lint checks these rules on every scenario of the search path (the
    wait timers, the method lists, the handler's coverage, the resume guards,
