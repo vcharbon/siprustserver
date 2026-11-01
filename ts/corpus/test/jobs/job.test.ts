@@ -259,6 +259,7 @@ describe("reaping jobs", () => {
             }),
           unfinishedOf: (ids) => Effect.succeed(ids.includes(4) ? [7, 8] : []),
           dirty: () => refuse,
+          forced: () => refuse,
           openOfSweep: () => refuse,
           forget: () => refuse
         })

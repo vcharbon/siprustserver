@@ -777,6 +777,11 @@ export const StudyPage = ({ capture }: { capture: string }): JSX.Element => {
                 <span className="tag">{activeSession.name}: {activeSession.aside}, set aside</span>{" "}
               </>
             )}
+            {shownSession?.forced !== undefined && (
+              <>
+                <span className="tag missing">{shownSession.name}: forced (lacks {shownSession.forced.join(", ")})</span>{" "}
+              </>
+            )}
             {value.standing === undefined
               ? activeSession === undefined
                 ? `never run on ${queryLane ?? "the configured lane"}`

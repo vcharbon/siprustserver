@@ -141,6 +141,7 @@ const runs = Layer.succeed(
     abandon: () => refuse,
     unfinishedOf: () => refuse,
     dirty: () => refuse,
+    forced: () => refuse,
     openOfSweep: () => refuse,
     forget: () => refuse
   })

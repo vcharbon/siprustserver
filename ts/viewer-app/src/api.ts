@@ -415,6 +415,8 @@ export interface TriageStudySession {
    * cell opens it, and nothing on the page defaults to it.
    */
   readonly aside?: string
+  /** Set where the run was forced onto a lane lacking these capabilities. */
+  readonly forced?: readonly string[]
   /** When the run directory was last written: how fresh this run is. */
   readonly writtenAt?: string
   readonly campaign: unknown

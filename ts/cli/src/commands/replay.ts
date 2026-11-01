@@ -240,12 +240,13 @@ const requestMasked = Effect.fn("Replay.requestMasked")(function*(
     yield* Console.error(`[replay] refused: there is no request ${id}`)
     return 2
   }
-  const options = yield* requestOptionsOf(input, shown.request)
-  const unstated = yield* Refusals.lane(options.lane, input.force)
-  if (unstated !== null) {
-    yield* Console.error(`[replay] refused: ${unstated}`)
+  const asked = yield* requestOptionsOf(input, shown.request)
+  const fit = yield* Refusals.laneFit(asked.lane, input.force)
+  if (fit.refused !== null) {
+    yield* Console.error(`[replay] refused: ${fit.refused}`)
     return 2
   }
+  const options = { ...asked, forced: fit.forced }
   const away = yield* Refusals.environment(facts, options.lane, options.selection.universe, options.dryRun)
   if (away !== null) {
     yield* Console.error(`[replay] refused: ${away}`)
@@ -407,12 +408,12 @@ const workOf = Effect.fn("Replay.workOf")(function*(facts: CliFacts, input: Inpu
 
 /** A work list replayed: planned off the cut store, then the phase under the lane's locks. */
 const workMain = Effect.fn("Replay.work")(function*(facts: CliFacts, input: Input) {
-  const unstated = yield* Refusals.lane(input.lane, input.force)
-  if (unstated !== null) {
-    yield* Console.error(`[replay] refused: ${unstated}`)
+  const fit = yield* Refusals.laneFit(input.lane, input.force)
+  if (fit.refused !== null) {
+    yield* Console.error(`[replay] refused: ${fit.refused}`)
     return 2
   }
-  const stated = yield* replayOptionsOf(input)
+  const stated = { ...(yield* replayOptionsOf(input)), forced: fit.forced }
   const away = yield* Refusals.environment(facts, stated.lane, stated.selection.universe, stated.dryRun)
   if (away !== null) {
     yield* Console.error(`[replay] refused: ${away}`)

@@ -31,6 +31,8 @@ export interface RunIdentity {
   readonly branch: string | null
   readonly laneHash: string | null
   readonly load: Load | null
+  /** The capabilities the lane lacked of what the run needs, where it was driven anyway. */
+  readonly forced?: ReadonlyArray<string>
 }
 
 export const UNKNOWN_IDENTITY: RunIdentity = { env: null, branch: null, laneHash: null, load: null }
@@ -43,13 +45,20 @@ export interface LaneKnobs {
 }
 
 /**
- * The lane as a behaviour: its name and the knobs that change what a cell
- * meets on it. Two runs with one lane hash ran their cells under the same
- * conditions, whatever their concurrency or selection.
+ * The lane as a behaviour: its name, the knobs that change what a cell meets
+ * on it, and what the lane lacked where the run was forced onto it. Two runs
+ * with one lane hash ran their cells under the same conditions, whatever their
+ * concurrency or selection; a forced run never shares one with an unforced run.
  */
-export const laneHash = (lane: string, knobs: LaneKnobs): string =>
+export const laneHash = (lane: string, knobs: LaneKnobs, forced: ReadonlyArray<string> = []): string =>
   crypto
     .createHash("sha256")
-    .update(JSON.stringify([lane, knobs.startsPerSecond, knobs.batchSize, knobs.memoryMax]))
+    .update(JSON.stringify([
+      lane,
+      knobs.startsPerSecond,
+      knobs.batchSize,
+      knobs.memoryMax,
+      ...(forced.length === 0 ? [] : [{ forced: [...forced].sort() }])
+    ]))
     .digest("hex")
     .slice(0, 16)

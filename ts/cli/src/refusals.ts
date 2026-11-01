@@ -25,19 +25,28 @@ export const census = (facts: CliFacts, paths: Paths) =>
  * (`LaneHosting.replayNeeds`). `force` drives the second anyway, saying so on
  * the command's output. Asked before any row, build or lock is taken for it.
  */
-export const lane = (name: string, force = false) =>
+export const lane = (name: string, force = false) => Effect.map(laneFit(name, force), (fit) => fit.refused)
+
+/** {@link lane}'s answer, with what a forced replay's lane lacks: what its run rows record as forced. */
+export const laneFit = (name: string, force = false) =>
   Effect.gen(function*() {
     const hosting = yield* LaneHosting.Service
     const stated = yield* hosting.lane(name)
     const lacks = LaneHosting.replayLacks(hosting, stated)
-    if (lacks.length === 0) return null
+    if (lacks.length === 0) return { refused: null, forced: [] }
     if (!force) {
-      return `a capture replay is not runnable on this lane: ${name} lacks ${lacks.join(", ")} ` +
-        "(--force runs it anyway, marked forced)"
+      return {
+        refused: `a capture replay is not runnable on this lane: ${name} lacks ${lacks.join(", ")} ` +
+          "(--force runs it anyway, marked forced)",
+        forced: []
+      }
     }
-    yield* Console.log(`[replay] forced: ${name} lacks ${lacks.join(", ")}; its results are forced ones`)
-    return null
-  }).pipe(Effect.catchTag("Corpus.LaneUnstated", (unstated) => Effect.succeed(unstated.message as string | null)))
+    yield* Console.log(`[replay] forced: ${name} lacks ${lacks.join(", ")}; its runs are recorded forced`)
+    return { refused: null, forced: lacks }
+  }).pipe(
+    Effect.catchTag("Corpus.LaneUnstated", (unstated) => Effect.succeed({ refused: unstated.message, forced: [] })),
+    Effect.map((fit): { readonly refused: string | null; readonly forced: ReadonlyArray<string> } => fit)
+  )
 
 /**
  * Why this checkout may not drive the work, or `null`: a sweep wider than

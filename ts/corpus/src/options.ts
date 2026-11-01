@@ -28,6 +28,8 @@ export interface Options {
   readonly forceRecut: boolean
   /** Whether the cut refuses to run where the census report does not cover every capture. */
   readonly strictCensus?: boolean
+  /** What the lane lacks of what a capture replay needs, where the replay was forced onto it. */
+  readonly forced?: ReadonlyArray<string>
 }
 
 /**

@@ -43,15 +43,17 @@ const main = Effect.fn("Campaign.main")(function*(facts: CliFacts, input: Input)
   // A dry run reads the shared store and writes nothing, so any checkout may
   // ask it what the deployment's own checkout would do.
   // A lane is refused before anything is ingested, cut or queued for it.
-  const unstated = lane === undefined || input.addOnly ? null : yield* Refusals.lane(lane, input.force)
-  if (unstated !== null) return yield* refuse(unstated)
+  const fit = lane === undefined || input.addOnly
+    ? { refused: null, forced: [] }
+    : yield* Refusals.laneFit(lane, input.force)
+  if (fit.refused !== null) return yield* refuse(fit.refused)
   const environment = input.dryRun ? null : facts.environmentRefusal("the campaign")
   if (environment !== null) return yield* refuse(environment)
   const pcaps = pcapsOf(facts, input)
   if (pcaps.length === 0 && input.set.length === 0) {
     return yield* refuse(`no --pcaps, no --set and no default pcaps for this host\n${usage(facts)}`)
   }
-  const options = yield* optionsOf(facts, input)
+  const options = { ...(yield* optionsOf(facts, input)), forced: fit.forced }
   const refused = yield* Population.refusal(options.paths, options.selection)
   if (refused !== null) return yield* refuse(refused)
   const census = yield* Refusals.census(facts, options.paths)

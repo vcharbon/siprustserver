@@ -750,6 +750,18 @@ const campaignJobs = Effect.gen(function*() {
 export const CAMPAIGN_JOBS = "10_campaign_jobs"
 
 /**
+ * `runs.forced`: the capabilities a run's lane lacked of what the run needs,
+ * where it was driven anyway; null on a run that was not forced.
+ */
+const forcedRuns = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`ALTER TABLE runs ADD COLUMN forced text[]`
+})
+
+/** The key of the migration that records a forced run. */
+export const FORCED_RUNS = "11_forced_runs"
+
+/**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
  */
@@ -763,7 +775,8 @@ export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [FROZEN_CUT_GUARD]: frozenCutGuard,
   [SOURCE_FAULT]: sourceFault,
   [CUT_CASE_HASHES]: cutCaseHashes,
-  [CAMPAIGN_JOBS]: campaignJobs
+  [CAMPAIGN_JOBS]: campaignJobs,
+  [FORCED_RUNS]: forcedRuns
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)

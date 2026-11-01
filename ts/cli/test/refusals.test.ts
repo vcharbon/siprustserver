@@ -70,6 +70,10 @@ describe("the lane refusal", () => {
       "a capture replay is not runnable on this lane: relayed lacks scripted (--force runs it anyway, marked forced)"
     )
     expect(await ask("relayed", true)).toBeNull()
+    const fit = (lane: string, force: boolean) =>
+      Effect.runPromise(Refusals.laneFit(lane, force).pipe(Effect.provide(hosting)))
+    expect(await fit("relayed", true)).toEqual({ refused: null, forced: ["scripted"] })
+    expect(await fit("scripted", true)).toEqual({ refused: null, forced: [] })
   })
 })
 
