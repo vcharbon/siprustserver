@@ -4,7 +4,7 @@
 
 use call::CallModelState;
 
-use super::CallState;
+use super::{CallState, CallTopology};
 
 impl CallState {
     /// Every callRef this node holds live. The core's teardown reads it to
@@ -26,6 +26,26 @@ impl CallState {
                 let answered = call::helpers::caller_answered(call);
                 (call_ref.clone(), call.incarnation().to_string(), answered)
             })
+            .collect()
+    }
+
+    /// Every resident call still `Active` that no peer holds, as `(callRef,
+    /// incarnation)`: one with no backup (ADR-0055 §3), one naming no
+    /// topology, or one whose topology `held` reads unheld.
+    pub fn unheld_active_calls(
+        &self,
+        held: impl Fn(&CallTopology) -> bool,
+    ) -> Vec<(String, String)> {
+        let inner = self.locked();
+        inner
+            .calls
+            .iter()
+            .filter(|(_, call)| call.state == CallModelState::Active)
+            .filter(|(call_ref, _)| {
+                let unbacked = self.repl_store().is_some_and(|repl| repl.unbacked(call_ref));
+                unbacked || !inner.topologies.get(*call_ref).is_some_and(&held)
+            })
+            .map(|(call_ref, call)| (call_ref.clone(), call.incarnation().to_string()))
             .collect()
     }
 

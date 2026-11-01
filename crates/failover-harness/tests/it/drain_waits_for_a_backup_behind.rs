@@ -10,21 +10,23 @@
 //! it waits out the whole grace and returns `grace_peers_behind` — a lost flush
 //! window, never a clean drain.
 //!
-//! The peer's copy is current all along: what the grace exit reports is missing
-//! evidence, not missing data. The flow comes back when the peer re-adds the
-//! member, the predicate holds again — it is not latched — and the abandoned call
-//! is reclaimed from the peer by a replacement of the same ordinal and terminated
-//! properly.
+//! No live peer holds the call at the grace, so the worker ends it there, off
+//! the wire (ADR-0055 §3): its CDR is written and nothing is sent. The flow
+//! comes back when the peer re-adds the member, the predicate holds again — it
+//! is not latched — and the call's delete reaches the peer. The parties' later
+//! BYEs reach a replacement of the same ordinal that holds no copy, and draw
+//! `481`.
 //!
 //! ```text
 //!   established · elder serves · survivor holds a current replica
 //!   t0-        the survivor parks its flows to the elder: no flow carries the
 //!              elder's Backup sub-log for it
 //!   t0         the endpoint reads terminating; the elder latches Draining and drains
-//!   t0+5 s     the grace ends with nothing reported ⇒ exit grace_peers_behind
-//!   then       the flow returns, the endpoint leaves the slice, the process exits
-//!              and a replacement of the same ordinal reclaims the call
-//!   alice ──BYE──▶ proxy ──▶ replacement ──▶ 200
+//!   t0+5 s     the grace ends with nothing reported ⇒ exit grace_peers_behind,
+//!              the call ended off the wire with its CDR
+//!   then       the flow returns and carries the delete, the endpoint leaves the
+//!              slice, the process exits, a replacement of the same ordinal joins
+//!   alice ──BYE──▶ proxy ──▶ replacement ──▶ 481; bob likewise
 //! ```
 //!
 //! Beyond the failover sweep: a drain waits to its grace for a backup that reports nothing.
@@ -77,6 +79,7 @@ async fn a_withdrawn_worker_whose_backup_reports_nothing_drains_to_the_grace() {
     let (pri_ord, bak_ord) = worker_ordinals(uas.request());
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
+    let mut bob_dialog = uas.dialog();
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
     fh.advance(Duration::from_millis(500)).await;
@@ -148,7 +151,12 @@ async fn a_withdrawn_worker_whose_backup_reports_nothing_drains_to_the_grace() {
         0,
         "and it is never counted as a clean hand-over"
     );
-    assert!(elder.serves(&call_ref), "the drain does not stand the process down (D5)");
+    assert_eq!(
+        elder.cdr_records().iter().filter(|r| r.call_ref == call_ref).count(),
+        1,
+        "no live peer held the call: the grace ended it with its CDR"
+    );
+    assert!(!elder.serves(&call_ref), "the call is released on the drained worker");
     assert!(elder.is_withdrawn() && elder.is_draining(), "it drained as a withdrawn worker");
 
     // ── the peer re-adds the member: the predicate is not latched ────────────
@@ -159,6 +167,7 @@ async fn a_withdrawn_worker_whose_backup_reports_nothing_drains_to_the_grace() {
         })
         .await;
     assert!(resynced, "a returning flow reports the head again");
+    assert!(!survivor.holds_any_trace(&call_ref).await, "the call's delete reached the peer");
 
     // ── the pod is gone: the endpoint leaves the slice, the process exits ─────
     fh.depart(&pri_ord);
@@ -166,21 +175,16 @@ async fn a_withdrawn_worker_whose_backup_reports_nothing_drains_to_the_grace() {
     elder.crash();
     fh.advance(Duration::from_millis(300)).await;
 
-    // ── the call the drain gave up on was held after all ─────────────────────
-    // The peer's copy was current the whole time, so a replacement of the same
-    // ordinal reclaims it and can carry it to its end.
+    // ── a replacement joins; the parties' BYEs find no copy: 481 ─────────────
     let replacement = fh.spawn_replacement(&pri_ord).await;
     assert!(fh.readmit_once_ready(&replacement).await, "the replacement became ready");
-    let reclaimed = fh
-        .pump_until(Duration::from_millis(100), Duration::from_secs(30), async || {
-            replacement.serves(&call_ref)
-        })
-        .await;
-    assert!(reclaimed, "the replacement bootstrapped and reclaimed the abandoned call");
     proxy.set_health(&pri_ord, WorkerHealth::Alive);
     fh.advance(Duration::from_millis(500)).await;
-
-    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
+    assert!(!replacement.serves(&call_ref), "nothing was left to reclaim");
+    let mut bye = dialog.bye().await;
+    bye.expect(481).await;
+    let mut bye = bob_dialog.bye().await;
+    bye.expect(481).await;
     let nodes: [&ReplicatedB2buaSut; 3] = [&*elder, survivor, &replacement];
     let drained = fh
         .settle_terminal(async || {
@@ -205,6 +209,7 @@ async fn a_withdrawn_worker_whose_backup_reports_nothing_drains_to_the_grace() {
         vec![Belief::Running { gen: 1 }, Belief::Draining { gen: 1 }, Belief::Dead { gen: 1 }],
         "running, then draining, then dead at the end of its grace: {elder_view:?}",
     );
+    fh.assert_sip_rfc_clean("drain-waits-for-a-backup-behind");
 
     drop((w_b1, w_b2, replacement, proxy));
 }

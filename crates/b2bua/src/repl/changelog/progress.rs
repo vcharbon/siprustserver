@@ -97,9 +97,7 @@ impl Changelog {
     /// only once its bootstrap is applied.
     pub fn flow_live(&self, peer: &str, partition: Partition) -> bool {
         let inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
-        inner.peers.get(peer).map(|log| log.sub(partition)).is_some_and(|sub| {
-            sub.streams > 0 && sub.applied.is_some_and(|c| c.made.elapsed() <= inner.claim_ttl)
-        })
+        inner.peers.get(peer).is_some_and(|log| live(log.sub(partition), inner.claim_ttl))
     }
 
     /// Whether `peer` reported applying `at` or past it on `partition`.
@@ -150,4 +148,10 @@ impl Changelog {
         let head = Watermark::new(self.gen, sub.head);
         sub.applied.is_some_and(|c| c.at >= head && c.made.elapsed() <= inner.claim_ttl)
     }
+}
+
+/// Whether `sub`'s flow is connected and has claimed a position within
+/// `claim_ttl` ([`Changelog::flow_live`]).
+pub(super) fn live(sub: &super::SubLog, claim_ttl: Duration) -> bool {
+    sub.streams > 0 && sub.applied.is_some_and(|c| c.made.elapsed() <= claim_ttl)
 }

@@ -191,7 +191,7 @@ ends the transaction with the CANCEL unsent (§9.1, §17.2.1).
   connection. The serving side sends a write as soon as it is in the change log;
   there is no poll cadence.
 - **Calls without a backup.** A call has no backup, for its whole life, when it
-  is admitted while the backlog toward its backup is above a high-water mark,
+  is admitted while the backlog toward its live backup is above a high-water mark,
   or when its backup refuses the replica at its own memory ceiling (ADR-0037
   item 4), or when a write of it cannot reach the backup (its body does not
   encode, or the transport refuses its frame): its entry toward the backup
@@ -201,9 +201,16 @@ ends the transaction with the CANCEL unsent (§9.1, §17.2.1).
   the writes in flight (10 s); it keeps a bounded number of refusals, the
   oldest evicted first, and a new call on the same identity is not refused. The backlog is measured per backup peer: the entries
   above that peer's applied position and the age of the oldest. New calls get a
-  backup again once the backlog is under a low-water mark. No call is refused
-  for the backlog. A gauge counts the live calls with no backup; such a call
-  runs as on a non-HA B2BUA.
+  backup again once the backlog is under a low-water mark. The marks read a
+  backup whose flow is live only: a backup that is away, or whose bootstrap
+  is in flight, is no slow consumer, and the call is admitted with it. Its
+  writes go to the change log toward that backup, one entry per call (a delete
+  stays until applied); the log goes one dead-peer TTL (300 s) after a flow
+  last served it, writes or not, so it holds the writes of that TTL at most,
+  and a warm pull past it re-bootstraps. On its return the backup's bootstrap
+  carries the call from the primary's call metadata. No call is refused for
+  the backlog. A gauge counts the live calls with no backup; such a call runs
+  as on a non-HA B2BUA.
 - **The replication sync level: `off` or `applied`.** Every effect a turn
   sends off the node leaves through the call's one ordered outbox, at either
   level: entries leave in the order the call's turns queued them, a later
@@ -294,8 +301,21 @@ ends the transaction with the CANCEL unsent (§9.1, §17.2.1).
   transaction its takeover seeds and CANCELs the callee.
 
 A graceful drain is transparent: it exits once the backup has caught up and
-every outbox is empty. A call with no backup has no peer holding it, so while
-one lives the drain waits for its calls or its grace, as a non-HA B2BUA does. A
+every outbox is empty. A call no live peer holds (it has no backup, or its
+backup's flow is not live: away, or still bootstrapping) keeps the drain
+waiting for its calls or its grace, as a non-HA B2BUA does. At the grace the
+drain ends each such call (user ruling): an established one where it stands,
+its CDR written and its holds released, with nothing sent, so a call whose
+media still flows is never cut by the node; a call still in setup is aborted
+as a release-all aborts it (ADR-0050 §10): `503` to its caller (ADR-0022), a
+CANCEL to a ringing callee. A withdrawn worker never sees the answer to that
+CANCEL (the proxy hands it to the call's other owner), so an ending still
+resident halfway through the drain's flush bound is discharged off the wire.
+A call whose backup's flow is live, caught up or not, is left to that backup.
+The drain's exit stays the grace's and its residual counts the live calls the
+grace found. The parties' later requests reach a worker that holds no copy,
+which answers `481`, or, when neither owner the cookie names is alive, are
+dropped by the proxy (§8). A
 kill is not transparent: under `applied` the backup holds every write whose
 effects left before the cap, and an ACK the kill takes after the backup applied
 its write is re-sent by the copy to the callee's 2xx repeat (RFC 3261
@@ -382,7 +402,9 @@ defers it to the primary (ADR-0020 X3). An HA corner case may write a second
 CDR, and it is accepted: a primary killed after ending a call whose end its
 backup never applied, a split. By user ruling a kill of a primary with a backup
 never loses the CDR: a split may, and a call with no backup is lost with its
-primary as on a non-HA B2BUA, leaving one CDR or none (user ruling).
+primary as on a non-HA B2BUA, leaving one CDR or none (user ruling). A
+drain ends at its grace each call no live peer holds and writes its CDR, the
+call's only one (§3).
 
 The departure sweep takes over every call of a departed primary with an INVITE
 transaction to serve, and every `Terminating` one with any request record open
@@ -471,6 +493,17 @@ node awaits brings it, so the 2xx is ACKed with every stream rejected (RFC
 3264 §6). There is no per-axis fold.
 
 ### 8. The proxy routes on one rule
+
+The backup a placed call's cookie names is the rendezvous winner, by Call-ID,
+among the other workers the proxy reads alive (ADR-0050 §7). When none is
+alive it is the winner among the other ordinals the proxy knows and does not
+read alive: a member it does not read alive, a member whose endpoint reads not
+ready, a departed address still tombstoned. So a call admitted while its
+backup restarts names it, the primary admits it backed (§3), and the backup's
+return carries it. The cookie names no backup only when the proxy knows no
+other ordinal. Routing reads liveness alone: an in-dialog request whose
+cookie names no alive owner is dropped unanswered, and its sender's
+retransmission meets the next view (ADR-0050 §5).
 
 A response, and an in-dialog request toward the B2BUA, goes to the owner that
 holds its transaction; if that owner is not alive, to the call's other owner; a

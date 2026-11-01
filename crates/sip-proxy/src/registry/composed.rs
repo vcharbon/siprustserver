@@ -94,6 +94,9 @@ impl WorkerRegistry for ComposedWorkerRegistry {
     fn lookup_by_address(&self, addr: &ProxyAddr) -> Option<WorkerEntry> {
         self.set.lookup_by_address(addr)
     }
+    fn away_ordinals(&self) -> Vec<super::WorkerId> {
+        self.set.away_ordinals()
+    }
     fn rearm_departed(&self, addr: &ProxyAddr) {
         self.set.rearm_departed(addr)
     }

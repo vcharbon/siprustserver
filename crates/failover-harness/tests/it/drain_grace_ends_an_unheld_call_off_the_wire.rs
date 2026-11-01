@@ -44,6 +44,7 @@ async fn a_call_whose_backup_is_still_away_at_the_grace_is_ended_off_the_wire() 
     let out = drain(&mut fh, &b).await;
     assert_eq!(out.exit, DrainExit::GracePeersBehind, "no peer reported holding the call");
     assert!(out.elapsed >= GRACE, "the whole grace was waited, got {:?}", out.elapsed);
+    assert_eq!(out.residual, 1, "the call no peer held is the residual");
     assert_eq!(
         b.cdr_records().iter().filter(|r| r.call_ref == call.call_ref).count(),
         1,

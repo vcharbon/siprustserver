@@ -96,6 +96,16 @@ impl Tombstones {
         });
     }
 
+    /// The ordinals last bound at an address whose window is open at `now_ms`.
+    pub(crate) fn open_ids(&self, now_ms: u64) -> Vec<WorkerId> {
+        self.records
+            .load()
+            .values()
+            .filter(|t| t.expires_at_ms > now_ms)
+            .map(|t| t.id.clone())
+            .collect()
+    }
+
     /// The departed worker last bound at `addr`, as a `Dead` entry, while its
     /// window is open. `None` once the window closes.
     pub(crate) fn lookup(&self, addr: &ProxyAddr, now_ms: u64) -> Option<WorkerEntry> {

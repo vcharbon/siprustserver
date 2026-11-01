@@ -97,7 +97,8 @@ async fn a_drain_waits_for_an_unbacked_call_then_ends_it_off_the_wire() {
     }
     drop(drain);
     let outcome = outcome.expect("the drain returned");
-    assert_ne!(outcome.exit, DrainExit::CaughtUp, "an unbacked call is never read as held");
+    assert_eq!(outcome.exit, DrainExit::GracePeersBehind, "an unbacked call is never held");
+    assert_eq!(outcome.residual, 1, "the call no peer held is the residual");
     assert_eq!(primary.metrics().drain_exits("caught_up"), 0);
 
     // ── at the grace the primary ended the call off the wire ────────────────

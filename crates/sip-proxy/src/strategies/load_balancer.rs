@@ -14,8 +14,12 @@
 //!   the `share` signal); an unobserved worker is admitted (bootstrap-friendly).
 //! - `encode_stickiness`: a call the proxy places. Recover the target's
 //!   `WorkerId` (= `w_pri`) by address, pick the HRW winner among the other
-//!   `Alive` workers that accept new calls, else among the other `Alive` ones
-//!   (= `w_bak`, §7), and sign `v=3|w_pri=…|w_bak=…|e=<0|1>|c=<callId>`
+//!   `Alive` workers that accept new calls, else among the other `Alive` ones,
+//!   else among the other ordinals it knows and does not read alive — a
+//!   member not read alive, a member whose endpoint is not ready, a departed
+//!   address still tombstoned — (= `w_bak`, ADR-0050 §7, ADR-0055 §8; empty
+//!   only when it knows no other ordinal), and sign
+//!   `v=3|w_pri=…|w_bak=…|e=<0|1>|c=<callId>`
 //!   (HMAC-SHA256 truncated to 128 bits, base64url) into
 //!   `{w_pri,w_bak,e,v,kid,sig}`.
 //! - `encode_originated`: a request a worker originates, from an address
@@ -177,6 +181,28 @@ impl LoadBalancerStrategy {
         Err(SelectError::RateCapExhausted { worker_id, retry_after_sec })
     }
 
+    /// The backup a call `call_id` placed on `primary` names: the rendezvous
+    /// winner among the other placeable workers, else among the other
+    /// ordinals the pool knows and does not read alive, so a call admitted
+    /// while its backup restarts names it and the backup's return carries it
+    /// (ADR-0055 §8). Empty only when the pool knows no other ordinal.
+    fn backup_for(&self, call_id: &str, primary: &str) -> String {
+        let snapshot = self.registry.snapshot();
+        let others = snapshot.iter().filter(|w| w.id != primary);
+        let alive: Vec<WorkerKey> =
+            placeable(others.clone()).into_iter().map(|w| WorkerKey(w.id.clone())).collect();
+        if let Some(winner) = rendezvous_select(call_id, &alive) {
+            return winner.0.clone();
+        }
+        let away: Vec<WorkerKey> = others
+            .map(|w| w.id.clone())
+            .chain(self.registry.away_ordinals())
+            .filter(|id| id != primary)
+            .map(WorkerKey)
+            .collect();
+        rendezvous_select(call_id, &away).map(|k| k.0.clone()).unwrap_or_default()
+    }
+
     /// The address of worker `id` while it is `Alive`.
     fn alive_address(&self, id: &str) -> Option<ProxyAddr> {
         if id.is_empty() {
@@ -278,13 +304,7 @@ impl RoutingStrategy for LoadBalancerStrategy {
     fn encode_stickiness(&self, target: &ProxyAddr, msg: &SipMessage) -> Option<RouteParams> {
         let call_id = call_id_of(msg)?;
         let primary = self.registry.lookup_by_address(target)?;
-        let snapshot = self.registry.snapshot();
-        let backup_keys: Vec<WorkerKey> = placeable(snapshot.iter().filter(|w| w.id != primary.id))
-            .into_iter()
-            .map(|w| WorkerKey(w.id.clone()))
-            .collect();
-        let backup_id =
-            rendezvous_select(call_id, &backup_keys).map(|k| k.0.clone()).unwrap_or_default();
+        let backup_id = self.backup_for(call_id, &primary.id);
         Some(self.sign(&primary.id, &backup_id, msg, call_id))
     }
 

@@ -62,6 +62,7 @@ async fn a_setup_ringing_at_the_drains_grace_gets_a_final_and_its_callee_a_cance
     }
 
     // ── at the grace: the caller's final, the callee's CANCEL ───────────────
+    assert!(drain.poll().is_none(), "the grace ends the setup and waits for it to leave");
     call.expect(503).await;
     bob.receive("CANCEL").await.respond(200, "OK").await;
     uas.respond(487, "Request Terminated").await;
@@ -76,7 +77,8 @@ async fn a_setup_ringing_at_the_drains_grace_gets_a_final_and_its_callee_a_cance
     }
     drop(drain);
     let outcome = outcome.expect("the drain returned");
-    assert_ne!(outcome.exit, DrainExit::CaughtUp, "an unbacked setup is never read as held");
+    assert_eq!(outcome.exit, DrainExit::GracePeersBehind, "an unbacked setup is never held");
+    assert_eq!(outcome.residual, 1, "the setup no peer held is the residual");
     assert_eq!(
         primary.cdr_records().iter().filter(|r| r.call_ref == call_ref).count(),
         1,

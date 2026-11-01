@@ -386,6 +386,25 @@ impl WorkerSet {
     pub(crate) fn resolve(&self, id: &str) -> Option<WorkerEntry> {
         self.projection.load().iter().find(|w| w.id == id).cloned()
     }
+    /// The ordinals the set knows and does not route: members whose endpoint
+    /// reads not ready, and the last ordinals of departed addresses whose
+    /// tombstone is open, less every ordinal the projection holds. Sorted, no
+    /// duplicate. Read from the two sources the set already keeps.
+    pub(crate) fn away_ordinals(&self) -> Vec<WorkerId> {
+        let projected = self.projection.load();
+        let mut away: Vec<WorkerId> = self
+            .membership
+            .snapshot()
+            .into_iter()
+            .filter(|p| !p.ready)
+            .map(|p| p.ordinal)
+            .chain(self.tombstones.open_ids(self.now_ms()))
+            .filter(|id| !projected.iter().any(|w| &w.id == id))
+            .collect();
+        away.sort();
+        away.dedup();
+        away
+    }
     /// The worker bound at `addr`. An address that left the set answers as its
     /// last ordinal with health `Dead` for [`DEPARTED_ADDRESS_TTL_MS`], so a
     /// response still coming from it is recognised as a departed worker's.

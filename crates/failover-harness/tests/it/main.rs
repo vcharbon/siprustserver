@@ -30,6 +30,7 @@ mod cancel_answers_after_the_kill;
 mod consult_answer_deadline;
 mod copys_dial_while_the_primary_is_misread;
 mod cordoned_worker;
+mod crash_after_a_readiness_flip;
 mod crash_mid_invite;
 mod crossed_reinvite_round;
 mod dead_notice_behind_a_backlog;

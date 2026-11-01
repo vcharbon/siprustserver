@@ -277,3 +277,19 @@ fn a_position_from_an_older_incarnation_never_reaches_the_head() {
     cl.note_applied("A", None, Partition::Bak, Watermark::new(6, u64::MAX));
     assert!(!cl.flow_caught_up("A", Partition::Bak));
 }
+
+/// A log no flow serves goes one dead-peer TTL after a flow last served it,
+/// whatever it is written meanwhile: toward an away backup it holds the
+/// writes of one TTL at most.
+#[tokio::test(start_paused = true)]
+async fn a_log_no_flow_serves_goes_at_the_dead_peer_ttl_whatever_it_is_written() {
+    let clock = Clock::test_at(0);
+    let cl = Changelog::new(7, clock.clone()).with_dead_peer_ttl(2_000);
+    drop(cl.serving("A", Partition::Bak));
+    for i in 0..3 {
+        tokio::time::advance(Duration::from_millis(900)).await;
+        cl.bump_put("A", &format!("call-{i}"), Partition::Bak);
+    }
+    cl.reap(clock.now_ms());
+    assert!(!cl.has_peer("A"), "writes do not keep a log no flow serves");
+}

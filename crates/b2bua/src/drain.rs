@@ -3,7 +3,10 @@
 //! queue. A node with no live calls exits at once; a withdrawn node whose
 //! backups hold every live call exits as soon as a floor has passed; anything
 //! else is capped at `grace` and its residual is reported, never silently cut
-//! without a number.
+//! without a number. At the grace the calls no live peer holds are ended
+//! ([`DrainInputs::end_unheld`]), and the drain waits for them to leave
+//! within the flush bound, discharging off the wire, halfway through it, an
+//! ending that has not left (ADR-0055 §3).
 //!
 //! The inputs are four closures ([`DrainInputs`]) and three durations
 //! ([`DrainBounds`]); the interface is one async function over them — the
@@ -31,6 +34,27 @@ const DRAIN_POLL: Duration = Duration::from_millis(100);
 /// An owned, clone-cheap probe the drain reads on each poll tick. Owned so the
 /// wait can outlive the caller's borrow of whatever it reads.
 pub type Probe<T> = Arc<dyn Fn() -> T + Send + Sync>;
+
+/// What the grace's end of the calls no live peer holds reached.
+pub struct GraceEnd {
+    /// How many calls it handed to their ending.
+    pub ended: usize,
+    /// How many of those are still resident.
+    pub left: Probe<usize>,
+    /// Discharge, off the wire, those still resident: their record closed and
+    /// their holds released, nothing sent.
+    pub discharge_left: Probe<()>,
+}
+
+impl GraceEnd {
+    /// Nothing ended.
+    pub fn none() -> Self {
+        Self { ended: 0, left: Arc::new(|| 0), discharge_left: Arc::new(|| ()) }
+    }
+}
+
+/// Ends, at the grace, each live call no live peer holds.
+pub type EndUnheld = Arc<dyn Fn() -> GraceEnd + Send + Sync>;
 
 /// The worker's limiter release flush, bounded by the duration it is given.
 pub type ReleaseFlusher =
@@ -106,6 +130,13 @@ pub struct DrainInputs {
     /// Entries the calls' outboxes still have to send, each within the sync
     /// cap (ADR-0055 §3): an exit is taken only with none.
     pub outboxes_waiting: Probe<usize>,
+    /// Run when the grace expires with calls live: an established call no
+    /// live peer holds is ended where it stands, its record closed and
+    /// nothing sent; a call in setup is aborted, its caller answered and a
+    /// ringing callee CANCELled (ADR-0055 §3, ADR-0022). A call a live peer
+    /// holds, caught up or not, is left to it. An ending still resident
+    /// halfway through the flush bound is discharged off the wire.
+    pub end_unheld: EndUnheld,
 }
 
 impl DrainInputs {
@@ -122,7 +153,15 @@ impl DrainInputs {
             flush_releases: Arc::new(|_| Box::pin(async { ReleaseFlush::default() })),
             releases_waiting: Arc::new(|| 0),
             outboxes_waiting: Arc::new(|| 0),
+            end_unheld: Arc::new(GraceEnd::none),
         }
+    }
+
+    /// These inputs with `end` as the grace's end of the calls no live peer
+    /// holds (the default ends none).
+    pub fn with_end_unheld(mut self, end: impl Fn() -> GraceEnd + Send + Sync + 'static) -> Self {
+        self.end_unheld = Arc::new(end);
+        self
     }
 
     /// These inputs with `waiting` as the outbox entries left to send (the
@@ -183,7 +222,10 @@ pub struct DrainBounds {
 /// is taken only if it still holds once the flush is done (a clean exit's
 /// condition, and an empty release queue); otherwise the wait goes on, and the
 /// drain never returns later than the grace plus the flush bound, where what
-/// is still queued is given up.
+/// is still queued is given up. At the grace the calls no live peer holds are
+/// ended ([`DrainInputs::end_unheld`]); the exit stays the grace's, its
+/// residual the live calls the grace found, and it waits, within the same
+/// bound, for those endings to leave the node before its flush.
 pub async fn drain_until_quiescent(inputs: DrainInputs, bounds: DrainBounds) -> DrainOutcome {
     let start = tokio::time::Instant::now();
     let deadline = start + bounds.grace;
@@ -196,15 +238,37 @@ pub async fn drain_until_quiescent(inputs: DrainInputs, bounds: DrainBounds) -> 
         flushed.given_up += flush.given_up;
         flushed.elapsed += flush.elapsed;
     };
+    // The grace's exit and residual, pinned once it ended calls no peer held:
+    // their leaving clears the node, which is never read as a clean exit.
+    let mut graced: Option<(DrainExit, usize)> = None;
     loop {
         let now = tokio::time::Instant::now();
-        if exit_at(&inputs, now, floor_at, deadline).0.is_some() {
+        if graced.is_none() {
+            if let (Some(exit), live) = exit_at(&inputs, now, floor_at, deadline) {
+                if !exit.is_clean() {
+                    let end = (inputs.end_unheld)();
+                    if end.ended > 0 {
+                        graced = Some((exit, live));
+                        wait_left(&*end.left, deadline + bounds.release_flush / 2).await;
+                        if (end.left)() > 0 {
+                            (end.discharge_left)();
+                            wait_left(&*end.left, ceiling).await;
+                        }
+                        continue;
+                    }
+                }
+            }
+        }
+        if graced.is_some() || exit_at(&inputs, now, floor_at, deadline).0.is_some() {
             flush(&mut flushed, bounds.release_flush.min(ceiling.saturating_duration_since(now)))
                 .await;
             // The node served its calls while it flushed: a clean exit must
             // still hold; past the deadline an exit always stands.
             let now = tokio::time::Instant::now();
-            let (exit, live) = exit_at(&inputs, now, floor_at, deadline);
+            let (exit, live) = match graced {
+                Some((exit, live)) => (Some(exit), live),
+                None => exit_at(&inputs, now, floor_at, deadline),
+            };
             if let Some(exit) = exit.filter(|e| e.is_clean() || now >= deadline) {
                 if (inputs.releases_waiting)() > 0 || (inputs.outboxes_waiting)() > 0 {
                     if now < ceiling {
@@ -233,6 +297,18 @@ pub async fn drain_until_quiescent(inputs: DrainInputs, bounds: DrainBounds) -> 
             wait = wait.min(floor_at - now);
         }
         tokio::time::sleep(wait).await;
+    }
+}
+
+/// Wait, one poll at a time, until the calls the grace ended have left the
+/// node (`left` reads none) or the ceiling is reached.
+async fn wait_left(left: &(dyn Fn() -> usize + Send + Sync), ceiling: tokio::time::Instant) {
+    loop {
+        let now = tokio::time::Instant::now();
+        if left() == 0 || now >= ceiling {
+            return;
+        }
+        tokio::time::sleep(DRAIN_POLL.min(ceiling - now)).await;
     }
 }
 

@@ -134,19 +134,29 @@ impl ProxySut {
 
     /// The `(primary, backup)` the proxy places a new call with `call_id` on
     /// under its current view: rendezvous hashing over the workers that take
-    /// new calls, then over the others for the backup. `None` when no worker
-    /// takes it.
+    /// new calls, then for the backup over the other alive ones, else over
+    /// the other ordinals the proxy knows and does not read alive (ADR-0055
+    /// §8). `None` when no worker takes it.
     pub fn placement_of(&self, call_id: &str) -> Option<(String, String)> {
         let snapshot = self.registry.snapshot();
         let accepting: Vec<Key> =
             snapshot.iter().filter(|w| w.accepts_new_calls()).map(|w| Key(w.id.clone())).collect();
         let primary = rendezvous_select(call_id, &accepting)?.0.clone();
-        let others: Vec<Key> = snapshot
-            .iter()
-            .filter(|w| w.is_alive() && w.id != primary)
-            .map(|w| Key(w.id.clone()))
-            .collect();
-        let backup = rendezvous_select(call_id, &others).map(|k| k.0.clone()).unwrap_or_default();
+        let others = snapshot.iter().filter(|w| w.id != primary);
+        let alive: Vec<Key> =
+            others.clone().filter(|w| w.is_alive()).map(|w| Key(w.id.clone())).collect();
+        let backup = match rendezvous_select(call_id, &alive) {
+            Some(k) => k.0.clone(),
+            None => {
+                let away: Vec<Key> = others
+                    .map(|w| w.id.clone())
+                    .chain(self.registry.away_ordinals())
+                    .filter(|id| *id != primary)
+                    .map(Key)
+                    .collect();
+                rendezvous_select(call_id, &away).map(|k| k.0.clone()).unwrap_or_default()
+            }
+        };
         Some((primary, backup))
     }
 }

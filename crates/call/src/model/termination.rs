@@ -55,7 +55,8 @@ pub enum TerminationCause {
     MessageCap,
     /// The supervisor ended it: a reaper strike, a forced terminal.
     Supervisor,
-    /// An operator released every call of the worker (ADR-0050 §10): an
+    /// The worker released the call: an operator's release-all (ADR-0050
+    /// §10), or a drain's grace for a call no peer holds (ADR-0055 §3). An
     /// answered call ended with nothing sent, a call in setup aborted.
     OperatorRelease,
 }

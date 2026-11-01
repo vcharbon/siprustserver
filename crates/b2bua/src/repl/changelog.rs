@@ -61,8 +61,9 @@ pub use backlog::BacklogMarks;
 pub use progress::{Reach, DEFAULT_CLAIM_TTL};
 pub use source::{BodySource, RefMeta};
 
-/// How long a peer's whole changelog is kept after its last activity before an
-/// idle [`reap`](Changelog::reap) drops it (the peer re-bootstraps on return).
+/// How long a peer's whole changelog is kept after a flow last served it (or
+/// its creation) before an idle [`reap`](Changelog::reap) drops it, writes or
+/// not (the peer re-bootstraps on return).
 pub const DEFAULT_DEAD_PEER_TTL_MS: i64 = 300_000;
 
 /// Per-callRef position in a compacted sub-log.
@@ -191,7 +192,9 @@ struct Stated {
 struct PeerLog {
     pri: SubLog,
     bak: SubLog,
-    /// `now_ms` of the last mutation recorded — drives idle reaping.
+    /// `now_ms` a flow last started or ended on this log, or of its creation —
+    /// drives idle reaping. A write does not move it: a log toward a peer no
+    /// flow carries holds at most the writes of one dead-peer TTL.
     last_active_ms: i64,
     /// Count of active serve tasks for this peer. A log with `serving > 0` is
     /// NOT reaped while idle, so a server never loses the log it is actively
@@ -376,7 +379,6 @@ impl Changelog {
         let c = inner.counter;
         let counter = c - 1;
         let log = inner.peers.entry(peer.to_string()).or_insert_with(|| PeerLog::new(now, counter));
-        log.last_active_ms = now;
         log.sub_mut(partition).put(c, call_ref, op, now, stated);
         Watermark::new(self.gen, c)
     }

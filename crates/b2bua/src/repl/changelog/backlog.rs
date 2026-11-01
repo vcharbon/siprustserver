@@ -2,7 +2,9 @@
 //! sub-log above the highest position it reported applying, and the age of the
 //! oldest. Above a high-water mark on either a new call is admitted with no
 //! backup; new calls get one again once both are under their low-water marks.
-//! No call is refused for the backlog.
+//! The marks read a peer whose flow is live only: a peer that is away, or
+//! whose bootstrap is in flight, is no slow consumer. No call is refused for
+//! the backlog.
 
 use std::ops::Bound;
 use std::time::Duration;
@@ -73,15 +75,23 @@ impl Changelog {
         locked(&self.inner, REPLICA_CHANGELOG).marks = marks;
     }
 
-    /// Whether a new call admitted now gets `peer` as its backup: `false` from
-    /// the moment the backlog toward it reaches a high-water mark until it is
-    /// under both low-water marks.
+    /// Whether a new call admitted now gets `peer` as its backup. Toward a
+    /// peer whose flow is live, `false` from the moment the backlog reaches a
+    /// high-water mark until it is under both low-water marks. Toward a peer
+    /// with no live flow, away or bootstrapping, always `true`: its return
+    /// bootstraps from the calls' metadata, not from this log. The entries
+    /// kept toward such a peer are at most one per call written toward it
+    /// since a flow last served the log (a newer write moves a call's entry),
+    /// and the whole log goes one dead-peer TTL after that, writes or not.
     pub fn admits_backup(&self, peer: &str) -> bool {
         let now = self.clock.now_ms();
         let gen = self.gen;
         let mut inner = locked(&self.inner, REPLICA_CHANGELOG);
-        let marks = inner.marks;
+        let (marks, claim_ttl) = (inner.marks, inner.claim_ttl);
         let Some(log) = inner.peers.get_mut(peer) else { return true };
+        if !super::progress::live(log.sub(Partition::Bak), claim_ttl) {
+            return true;
+        }
         let backlog = measure(log.sub(Partition::Bak), gen, now, marks.high_entries);
         log.over_high_water = if log.over_high_water {
             backlog.entries >= marks.low_entries || backlog.oldest_age >= marks.low_age

@@ -77,11 +77,13 @@ async fn a_call_admitted_during_the_backups_bootstrap_reaches_it() {
     fh.heal("b2", "b1");
     fh.readmit("b1", addr);
     proxy.set_health("b1", WorkerHealth::Alive);
-    fh.advance(Duration::from_millis(500)).await;
-    let held = a.scan_backed_up("b2");
-    for call in &calls {
-        assert!(held.contains(&call.call_ref), "a holds {}: {held:?}", call.call_ref);
-    }
+    let holds_all = fh
+        .pump_until(Duration::from_millis(100), Duration::from_secs(10), async || {
+            let held = a.scan_backed_up("b2");
+            calls.iter().all(|c| held.contains(&c.call_ref))
+        })
+        .await;
+    assert!(holds_all, "a holds every call: {:?}", a.scan_backed_up("b2"));
 
     drain_caught_up(&mut fh, &b).await;
     exits(&mut fh, &mut b).await;
