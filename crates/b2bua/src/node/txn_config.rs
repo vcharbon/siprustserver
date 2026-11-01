@@ -7,14 +7,14 @@ use sip_txn::{BoundPassed, DeferredBound, IdGen, OnBound, TransactionConfig};
 use crate::admission::Refusals;
 use crate::config::B2buaConfig;
 
-/// The worker's inbound UDP queue bound as the transaction layer reads it:
-/// it sizes the event queue at four times its value, [`EVENT_QUEUE_CAPACITY`].
-const UDP_QUEUE_MAX: usize = 1024;
-
 /// The bound of the worker's transaction event queue: room for a new-INVITE
 /// burst beside the in-dialog traffic of established calls, whose keepalive
 /// responses a full queue would drop.
-pub const EVENT_QUEUE_CAPACITY: usize = 4 * UDP_QUEUE_MAX;
+pub use crate::config::EVENT_QUEUE_CAPACITY;
+
+/// The worker's inbound UDP queue bound as the transaction layer reads it:
+/// it sizes the event queue at four times its value.
+const UDP_QUEUE_MAX: usize = EVENT_QUEUE_CAPACITY / 4;
 
 /// The bound of the keepalive lane: the out-of-dialog OPTIONS the proxies'
 /// probes and dead notices send, which the router takes ahead of the event

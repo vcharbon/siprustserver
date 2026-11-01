@@ -319,11 +319,8 @@ impl RunnerEnv {
             capacity: capacity_env::capacity_from_lookup(lookup).map_err(invalid)?,
             loop_stall: liveness_env::loop_stall_from_lookup(lookup, call_control)
                 .map_err(invalid)?,
-            event_queue_gate: event_queue_env::event_queue_gate_from_lookup(
-                lookup,
-                b2bua::EVENT_QUEUE_CAPACITY,
-            )
-            .map_err(invalid)?,
+            event_queue_gate: event_queue_env::event_queue_gate_from_lookup(lookup)
+                .map_err(invalid)?,
         })
     }
 }

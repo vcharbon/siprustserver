@@ -184,8 +184,10 @@ take a new call, and may an in-dialog request of a call it owns reach it.
      nothing still reads a growing delay. It refuses at the refusal depth
      (512) at once, and on the delay once it has stayed at or past the
      refusal delay (300 ms, below T1) for the refusal interval (150 ms,
-     CoDel's persistence: one slow turn or one CPU-quota throttle gap trips
-     nothing). It accepts again once depth and delay have both stayed at or
+     CoDel's persistence: a CPU-quota throttle gap, or a slow turn shorter
+     than the two together, trips nothing; a single turn of at least 450 ms
+     trips it on the next reading, and while the gate is read 450 ms is the
+     longest one event waits before the worker refuses). It accepts again once depth and delay have both stayed at or
      below their accept bounds (64, 50 ms) for the hold (3 s, at least two
      probe intervals). The router reads it at each event it takes, the
      OPTIONS answer at each probe; each reading is a clock read and a few
@@ -236,9 +238,12 @@ take a new call, and may an in-dialog request of a call it owns reach it.
     out-of-dialog OPTIONS (§2: no transaction) up on a small bounded lane of
     its own, apart from the event queue; a full lane drops the newest and
     counts it (`b2bua_txn_keepalive_lane_drops_total`), and the prober
-    repeats. The router takes the lane first whenever it waits for work, so
-    a probe waits for the turn in progress, never behind queued call and
-    transaction events. The answer is built on the router loop as for any
+    repeats. The router takes the lane first whenever it waits for work, but
+    after an OPTIONS turn takes other ready work first for one turn, so a
+    steady stream of probes starves nothing: a probe waits for the turn in
+    progress and, when that turn was itself an OPTIONS and other work is
+    ready, one more turn, never behind the queued call and transaction
+    events. The answer is built on the router loop as for any
     event, and the dead notice it carries (§3) is taken right after it, so
     verdicts apply in the order their OPTIONS arrived. A frozen or
     partitioned process, and a wedged router loop or transaction owner,

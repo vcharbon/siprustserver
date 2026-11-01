@@ -21,10 +21,13 @@
 //! at once. The refusal delay sits below SIP's T1 (500 ms), so the worker
 //! refuses before its peers start retransmitting what waits in its queue,
 //! and well above the gap a CPU quota throttles a process for (about 70 ms of
-//! each 100 ms period). The interval is CoDel's persistence: one slow turn or
-//! one throttle gap trips nothing; it spans more than one quota period, and
-//! the refusal delay plus the interval (450 ms, the longest one event waits
-//! before the worker refuses) stays under T1. The refusal bounds sit well
+//! each 100 ms period). The interval is CoDel's persistence and spans more
+//! than one quota period: a throttle gap, or a slow turn shorter than the
+//! refusal delay plus the interval (450 ms), trips nothing; a single turn at
+//! least that long trips it on the next reading. While the gate is read, at
+//! each event the router takes and each probe or new INVITE, 450 ms is the
+//! longest one event waits before the worker refuses, under T1; a router held
+//! in one turn reads nothing until that turn ends. The refusal bounds sit well
 //! above ordinary operation, so the worker's other admission rungs and the
 //! proxy's per-worker AIMD cap, driven by the `X-Overload` load signal, act
 //! first under ordinary overload; the gate catches a router that falls
@@ -52,7 +55,7 @@
 //! is the deployment's to keep: they are the proxy's settings, which a worker
 //! does not read.
 
-use b2bua::config::EventQueueGateConfig;
+use b2bua::config::{EventQueueGateConfig, GateBound, GateViolation, EVENT_QUEUE_CAPACITY};
 
 use crate::stated;
 
@@ -64,10 +67,10 @@ const ACCEPT_DELAY: &str = "B2BUA_EVENT_QUEUE_ACCEPT_DELAY_MS";
 const ACCEPT_HOLD: &str = "B2BUA_EVENT_QUEUE_ACCEPT_HOLD_MS";
 
 /// The gate's bounds `lookup` states, checked against each other and the
-/// event queue's bound `capacity`. `Err` names the variables.
+/// event queue's bound ([`EventQueueGateConfig::validate`]). `Err` names the
+/// variables.
 pub(crate) fn event_queue_gate_from_lookup(
     lookup: impl Fn(&str) -> Option<String>,
-    capacity: usize,
 ) -> Result<EventQueueGateConfig, String> {
     let d = EventQueueGateConfig::default();
     let positive = |key: &str, default: u64| -> Result<u64, String> {
@@ -90,35 +93,26 @@ pub(crate) fn event_queue_gate_from_lookup(
         accept_delay_ms: positive(ACCEPT_DELAY, d.accept_delay_ms)?,
         accept_hold_ms: positive(ACCEPT_HOLD, d.accept_hold_ms)?,
     };
-    let below = |low: (&str, u64), high: (&str, u64), why: &str| {
-        if low.1 < high.1 {
-            return Ok(());
-        }
-        Err(format!("{}={} must be below {}={}: {why}", low.0, low.1, high.0, high.1))
+    let named = |b: GateBound| match b {
+        GateBound::RefuseDepth => (REFUSE_DEPTH, gate.refuse_depth.to_string()),
+        GateBound::AcceptDepth => (ACCEPT_DEPTH, gate.accept_depth.to_string()),
+        GateBound::RefuseDelay => (REFUSE_DELAY, gate.refuse_delay_ms.to_string()),
+        GateBound::RefuseInterval => (REFUSE_INTERVAL, gate.refuse_interval_ms.to_string()),
+        GateBound::AcceptDelay => (ACCEPT_DELAY, gate.accept_delay_ms.to_string()),
+        GateBound::AcceptHold => (ACCEPT_HOLD, gate.accept_hold_ms.to_string()),
     };
-    let depth = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
-    below(
-        (ACCEPT_DEPTH, depth(gate.accept_depth)),
-        (REFUSE_DEPTH, depth(gate.refuse_depth)),
-        "the gate would never accept",
-    )?;
-    if gate.refuse_depth > capacity {
-        return Err(format!(
-            "{REFUSE_DEPTH}={} exceeds the event queue's bound {capacity}: the depth could \
-             never reach it",
+    gate.validate().map_err(|violation| match violation {
+        GateViolation::Zero(b) => format!("{}=0: must be a positive integer", named(b).0),
+        GateViolation::NotBelow { low, high, why } => {
+            let ((low, l), (high, h)) = (named(low), named(high));
+            format!("{low}={l} must be below {high}={h}: {why}")
+        }
+        GateViolation::PastTheQueue => format!(
+            "{REFUSE_DEPTH}={} exceeds the event queue's bound {EVENT_QUEUE_CAPACITY}: the \
+             depth could never reach it",
             gate.refuse_depth
-        ));
-    }
-    below(
-        (ACCEPT_DELAY, gate.accept_delay_ms),
-        (REFUSE_DELAY, gate.refuse_delay_ms),
-        "the gate would never accept",
-    )?;
-    below(
-        (REFUSE_INTERVAL, gate.refuse_interval_ms),
-        (ACCEPT_HOLD, gate.accept_hold_ms),
-        "a refusal would end before a delay that persists could trip it again",
-    )?;
+        ),
+    })?;
     Ok(gate)
 }
 
@@ -126,13 +120,10 @@ pub(crate) fn event_queue_gate_from_lookup(
 mod tests {
     use super::*;
 
-    const CAPACITY: usize = 4096;
-
     fn read(pairs: &[(&str, &str)]) -> Result<EventQueueGateConfig, String> {
-        event_queue_gate_from_lookup(
-            |key| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string()),
-            CAPACITY,
-        )
+        event_queue_gate_from_lookup(|key| {
+            pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string())
+        })
     }
 
     #[test]

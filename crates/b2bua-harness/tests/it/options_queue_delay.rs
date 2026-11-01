@@ -2,7 +2,8 @@
 //! queue at the instant it reads, and refuses on that delay only once it has
 //! stayed at or past the refusal bound for the persistence interval
 //! (ADR-0050 §9): a router that takes nothing still reads a growing delay,
-//! and one slow turn shorter than the interval refuses nothing.
+//! and one slow turn shorter than the refusal delay plus the interval refuses
+//! nothing.
 //!
 //! The waiting events are out-of-dialog requests the worker refuses `405`,
 //! behind a router loop held by [`RouterPace`]; the gate runs on its defaults
@@ -93,8 +94,9 @@ async fn a_stalled_router_reads_the_age_of_the_event_waiting_behind_it() {
 }
 
 /// One slow turn holds an event behind it past the refusal bound, but for
-/// less than the persistence interval: the OPTIONS read during it, and the
-/// one after it, both accept.
+/// less than the persistence interval: the OPTIONS that arrives during the
+/// turn, read right after it, and the one after the event is taken both
+/// accept.
 #[tokio::test(start_paused = true)]
 async fn a_wait_shorter_than_the_persistence_interval_refuses_nothing() {
     let (s, pace, carol) = paced_scene("options-queue-delay-spike").await;

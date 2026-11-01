@@ -331,3 +331,35 @@ fn an_empty_glare_retry_after_range_is_refused() {
     };
     assert!(c.validate().is_ok(), "{:?}", c.validate());
 }
+
+/// A config built in code meets the event-queue gate's relations at boot:
+/// every bound positive, each accept bound below its refusal bound, the
+/// refusal depth within the queue, the interval below the hold.
+#[test]
+fn the_event_queue_gate_relations_are_checked() {
+    let with =
+        |gate: EventQueueGateConfig| B2buaConfig { event_queue_gate: gate, ..Default::default() };
+    let d = EventQueueGateConfig::default();
+    assert_eq!(d.validate(), Ok(()));
+    let refused = [
+        EventQueueGateConfig { refuse_interval_ms: 0, ..d },
+        EventQueueGateConfig { accept_depth: d.refuse_depth, ..d },
+        EventQueueGateConfig { accept_delay_ms: d.refuse_delay_ms, ..d },
+        EventQueueGateConfig { refuse_interval_ms: d.accept_hold_ms, ..d },
+        EventQueueGateConfig { refuse_depth: EVENT_QUEUE_CAPACITY + 1, ..d },
+    ];
+    for gate in refused {
+        let err = with(gate).validate().unwrap_err();
+        assert!(err.starts_with("event_queue_gate."), "{gate:?}: {err}");
+    }
+    assert_eq!(
+        EventQueueGateConfig { refuse_interval_ms: d.accept_hold_ms, ..d }.validate(),
+        Err(GateViolation::NotBelow {
+            low: GateBound::RefuseInterval,
+            high: GateBound::AcceptHold,
+            why: "a refusal would end before a delay that persists could trip it again",
+        })
+    );
+    let at_the_bound = EventQueueGateConfig { refuse_depth: EVENT_QUEUE_CAPACITY, ..d };
+    assert_eq!(with(at_the_bound).validate(), Ok(()), "the queue's bound is reachable");
+}

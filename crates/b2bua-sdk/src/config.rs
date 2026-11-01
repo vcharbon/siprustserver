@@ -13,7 +13,7 @@ mod retry_after;
 mod validate;
 pub use capacity::{CapacityConfig, Ceilings};
 pub use cdr::CdrConfig;
-pub use event_queue_gate::EventQueueGateConfig;
+pub use event_queue_gate::{EventQueueGateConfig, GateBound, GateViolation, EVENT_QUEUE_CAPACITY};
 pub use front::Front;
 pub use retry_after::RetryAfterRange;
 

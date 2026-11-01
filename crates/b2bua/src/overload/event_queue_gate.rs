@@ -4,7 +4,9 @@
 //! the age of the oldest event waiting in it, at the instant it reads. It
 //! refuses at the refusal depth at once, and on the delay once it has stayed
 //! at or past the refusal delay for the refusal interval (CoDel's
-//! persistence): one slow turn or one throttle gap trips nothing. It accepts
+//! persistence): a slow turn or a throttle gap shorter than the two together
+//! trips nothing, and one at least as long trips it on the next reading. It
+//! accepts
 //! again only once depth and delay have both stayed at or below their accept
 //! bounds for the hold, so it does not flap at the probe's cadence.
 //!
@@ -132,14 +134,14 @@ struct Inner {
 
 /// Clone-cheap handle on a worker's event-queue gate.
 #[derive(Clone)]
-pub struct EventQueueGate {
+pub(crate) struct EventQueueGate {
     inner: Arc<Inner>,
 }
 
 impl EventQueueGate {
     /// The gate over the event queue `queue` reads, under `bounds`, belonging
     /// to the node the caller serves.
-    pub fn new(bounds: EventQueueGateConfig, queue: sip_txn::TransactionMetrics) -> Self {
+    pub(crate) fn new(bounds: EventQueueGateConfig, queue: sip_txn::TransactionMetrics) -> Self {
         let state = Stored {
             base: Instant::now(),
             refusing: AtomicBool::new(false),
@@ -156,10 +158,11 @@ impl EventQueueGate {
         Self { inner: Arc::new(inner) }
     }
 
-    /// Read the queue now and whether the worker refuses new calls. Called
-    /// on the router task only: the router at each event it takes, the
+    /// Read the queue now, folding the reading into the gate's state, and
+    /// whether the worker refuses new calls. The router task is the gate's one
+    /// writer and its only caller: the loop at each event it takes, the
     /// OPTIONS answer and the admission ladder.
-    pub fn refusing(&self) -> bool {
+    pub(crate) fn read(&self) -> bool {
         let queue = &self.inner.queue;
         let (depth, delay) = (queue.event_queue_depth(), queue.event_queue_delay());
         let mut state = self.inner.state.load();

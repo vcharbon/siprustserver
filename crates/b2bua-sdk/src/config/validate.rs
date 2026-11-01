@@ -180,6 +180,21 @@ impl B2buaConfig {
             ));
         }
         self.capacity.validate()?;
+        self.event_queue_gate.validate().map_err(|v| match v {
+            super::GateViolation::Zero(b) => {
+                format!("event_queue_gate.{}=0: must be positive", b.name())
+            }
+            super::GateViolation::NotBelow { low, high, why } => format!(
+                "event_queue_gate.{} must be below event_queue_gate.{}: {why}",
+                low.name(),
+                high.name()
+            ),
+            super::GateViolation::PastTheQueue => format!(
+                "event_queue_gate.refuse_depth={} exceeds the event queue's bound {}",
+                self.event_queue_gate.refuse_depth,
+                super::EVENT_QUEUE_CAPACITY
+            ),
+        })?;
         Ok(())
     }
 }

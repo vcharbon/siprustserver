@@ -3,7 +3,8 @@
 //! handler body to the per-call FIFO, and interprets the typed effects in the
 //! fixed order (persist → critical → outbound → soft → buffered).
 //!
-//! One concern per submodule: `resolve` keys events to calls, `ingress` is
+//! One concern per submodule: `inbox` what the loop takes next (the keepalive
+//! lane first), `resolve` keys events to calls, `ingress` is
 //! the pre-dispatch pipeline, `admit` a new INVITE's router rungs of the
 //! admission ladder, `process` the per-call handler body,
 //! `interpret` the effect interpreter, `callouts` the fire-and-forget
@@ -38,6 +39,7 @@ mod dropped_on_delete;
 #[cfg(test)]
 mod evidence_gate_tests;
 mod fold_payload;
+mod inbox;
 mod incarnation_gate;
 mod ingress;
 mod initial_turn;
@@ -327,78 +329,27 @@ enum Work {
 /// passes `None` and the loop never polls for one. Its reclaim commands wait
 /// for the node's own endpoint to read ready (`readmission`). Each turn is
 /// stamped on `ctx.router_pulse` from the instant it takes work until it waits
-/// again.
-///
-/// The keepalive lane of the transaction layer, when it runs one, is taken
-/// first whenever the loop waits for work: an out-of-dialog OPTIONS waits for
-/// the turn in progress, never behind queued events, and is answered on this
-/// loop in arrival order (ADR-0050 §2). The other arms keep their fairness.
+/// again. What it takes next, the keepalive lane's OPTIONS first, is
+/// `inbox`'s; an OPTIONS is answered on this loop as any event, in the
+/// lane's arrival order (ADR-0050 §12).
 pub async fn run(
     ctx: Arc<RouterCtx>,
-    mut txn_rx: sip_txn::TransactionEvents,
-    mut timer_rx: mpsc::UnboundedReceiver<CallEvent>,
-    mut reentry_rx: mpsc::UnboundedReceiver<CallEvent>,
-    mut repl_rx: Option<mpsc::UnboundedReceiver<ReplCommand>>,
+    txn_rx: sip_txn::TransactionEvents,
+    timer_rx: mpsc::UnboundedReceiver<CallEvent>,
+    reentry_rx: mpsc::UnboundedReceiver<CallEvent>,
+    repl_rx: Option<mpsc::UnboundedReceiver<ReplCommand>>,
 ) {
     let mut readmission = ReadmissionGate::new(ctx.readiness.own_endpoint_ready());
     let pulse = ctx.router_pulse.clone();
-    // A timer or re-entry channel whose senders are all gone retires its arm
-    // instead of resolving `None` on every poll.
-    let (mut timers_open, mut reentry_open) = (true, true);
-    let mut keepalive = txn_rx.take_keepalive_lane();
+    let mut inbox = inbox::Inbox::new(txn_rx, timer_rx, reentry_rx, repl_rx);
     loop {
-        if let Some(ev) = keepalive.as_mut().and_then(|lane| lane.try_recv().ok()) {
-            take_keepalive(&ctx, &pulse, ev).await;
-            continue;
-        }
-        let work = tokio::select! {
-            ev = next_keepalive(&mut keepalive) => match ev {
-                Some(ev) => {
-                    take_keepalive(&ctx, &pulse, ev).await;
-                    continue;
-                }
-                None => {
-                    keepalive = None;
-                    continue;
-                }
-            },
-            ev = txn_rx.recv() => match ev {
-                Some(ev) => {
-                    // The gate reads the queue at each take: a backlog that
-                    // drains between two probes still restarts its hold.
-                    if let Some(gate) = ctx.readiness.queue_gate() {
-                        gate.refusing();
-                    }
-                    let (ev, matched_client_txn) = txn_event::call_event(ev, ctx.clock.now_ms());
-                    Work::Event(ev, matched_client_txn)
-                }
-                None => break,
-            },
-            ev = timer_rx.recv(), if timers_open => match ev {
-                Some(ev) => Work::Event(ev, false),
-                None => {
-                    timers_open = false;
-                    continue;
-                }
-            },
-            ev = reentry_rx.recv(), if reentry_open => match ev {
-                Some(ev) => Work::Event(ev, false),
-                None => {
-                    reentry_open = false;
-                    continue;
-                }
-            },
-            cmd = next_fail_back(&mut repl_rx) => match cmd {
-                Some(cmd) => Work::Repl(cmd),
-                // Retires the arm if every sender is gone, instead of resolving
-                // `None` on every poll; no current wiring reaches it (the
-                // supervisor the router's readiness holds keeps a sender).
-                None => {
-                    repl_rx = None;
-                    continue;
-                }
-            },
-            cmds = readmission.released() => Work::Released(cmds),
+        let work = match inbox.next(&ctx, &mut readmission).await {
+            inbox::Taken::Keepalive(ev) => {
+                let (ev, matched_client_txn) = txn_event::call_event(ev, ctx.clock.now_ms());
+                Work::Event(ev, matched_client_txn)
+            }
+            inbox::Taken::Work(work) => work,
+            inbox::Taken::Closed => break,
         };
         pulse.turning();
         ctx.turn_probe.router_turn(&ctx.config.self_ordinal).await;
@@ -421,41 +372,6 @@ pub async fn run(
             }
         }
         pulse.waiting();
-    }
-}
-
-/// One turn on an out-of-dialog OPTIONS from the keepalive lane: answered and
-/// its dead notice taken as any event (`ingress`).
-async fn take_keepalive(
-    ctx: &Arc<RouterCtx>,
-    pulse: &sip_txn::LoopPulse,
-    ev: sip_txn::TransactionEvent,
-) {
-    pulse.turning();
-    ctx.turn_probe.router_turn(&ctx.config.self_ordinal).await;
-    let (ev, matched_client_txn) = txn_event::call_event(ev, ctx.clock.now_ms());
-    ingress::on_event(ctx, ev, matched_client_txn).await;
-    pulse.waiting();
-}
-
-/// The next OPTIONS of the keepalive lane; pending forever when there is no
-/// lane, `None` once it closed.
-async fn next_keepalive(
-    lane: &mut Option<mpsc::Receiver<sip_txn::TransactionEvent>>,
-) -> Option<sip_txn::TransactionEvent> {
-    match lane {
-        Some(lane) => lane.recv().await,
-        None => std::future::pending().await,
-    }
-}
-
-/// The next fail-back command; pending forever when no receiver exists.
-async fn next_fail_back(
-    rx: &mut Option<mpsc::UnboundedReceiver<ReplCommand>>,
-) -> Option<ReplCommand> {
-    match rx {
-        Some(rx) => rx.recv().await,
-        None => std::future::pending().await,
     }
 }
 

@@ -1,7 +1,7 @@
 //! [`Readiness`] — the b2bua readiness state machine (ADR-0011 X6 / ADR-0010
 //! X8). Drives the self-reported OPTIONS answer a front proxy probes
 //! (`crates/sip-proxy/src/health/probe.rs`) on two axes (ADR-0050): serving
-//! dialogs, and accepting new calls ([`Readiness::options_report`]):
+//! dialogs, and accepting new calls (`Readiness::options_report`):
 //!
 //! - [`ReadinessState::NotReady`] → `503`: serves nothing yet.
 //! - [`ReadinessState::Ready`] → `200`, `new=accept`, or `new=refuse;
@@ -27,13 +27,13 @@
 //!
 //! ## Backend gate (new calls only)
 //! [`Readiness::gate_options_on`] registers a backend's breaker: while one is
-//! open, [`Readiness::options_report`] reports a `Ready` node refusing new
+//! open, `Readiness::options_report` reports a `Ready` node refusing new
 //! calls, and accepting again once all are closed; never latched (ADR-0043).
 //! [`Readiness::state`], which `/ready` reads, ignores the gate.
 //!
 //! ## Event-queue gate (new calls only)
-//! [`Readiness::gate_options_on_queue`] installs the worker's
-//! [`EventQueueGate`]: while it refuses, a `Ready` node with no open breaker
+//! `Readiness::gate_options_on_queue` installs the worker's
+//! event-queue gate: while it refuses, a `Ready` node with no open breaker
 //! reports `new=refuse; cause=overload`. A breaker names the cause first: the
 //! backend outage outlasts a backlog. Never read by `/ready` nor by in-dialog
 //! routing.
@@ -313,7 +313,7 @@ impl Readiness {
     }
 
     /// From now on, `breaker` open (`true`) makes a `Ready` node refuse new
-    /// calls ([`options_report`](Self::options_report)).
+    /// calls (`options_report`).
     pub fn gate_options_on(&self, breaker: watch::Receiver<bool>) {
         self.inner.backends.add(breaker);
     }
@@ -321,7 +321,7 @@ impl Readiness {
     /// From now on, the event-queue gate over the queue `queue` reads, under
     /// `bounds`, refusing makes a `Ready` node refuse new calls
     /// ([`options_report`](Self::options_report)); a second gate is ignored.
-    pub fn gate_options_on_queue(
+    pub(crate) fn gate_options_on_queue(
         &self,
         bounds: crate::config::EventQueueGateConfig,
         queue: sip_txn::TransactionMetrics,
@@ -331,7 +331,7 @@ impl Readiness {
 
     /// The event-queue gate, once installed: the router reads it at each
     /// event it takes from the queue, the admission ladder at each new INVITE.
-    pub fn queue_gate(&self) -> Option<&EventQueueGate> {
+    pub(crate) fn queue_gate(&self) -> Option<&EventQueueGate> {
         self.inner.queue.get()
     }
 
@@ -393,8 +393,9 @@ impl Readiness {
     /// What the OPTIONS answer reports, from [`state`](Self::state), the
     /// backend gate and the event-queue gate: the one place the two axes are
     /// derived. The first cause applies of draining, cordoned, backend,
-    /// overload.
-    pub fn options_report(&self) -> OptionsReport {
+    /// overload. It reads the event-queue gate, which folds that reading into
+    /// its state: only the router task calls it, as it answers an OPTIONS.
+    pub(crate) fn options_report(&self) -> OptionsReport {
         match self.state() {
             ReadinessState::NotReady => OptionsReport::NotReady,
             ReadinessState::Draining => OptionsReport::Serving(Some(Refusal::Draining)),
@@ -402,9 +403,7 @@ impl Readiness {
             ReadinessState::Ready if self.inner.backends.any_open() => {
                 OptionsReport::Serving(Some(Refusal::Backend))
             }
-            ReadinessState::Ready
-                if self.inner.queue.get().is_some_and(EventQueueGate::refusing) =>
-            {
+            ReadinessState::Ready if self.inner.queue.get().is_some_and(EventQueueGate::read) => {
                 OptionsReport::Serving(Some(Refusal::Overload))
             }
             ReadinessState::Ready => OptionsReport::Serving(None),

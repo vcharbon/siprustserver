@@ -193,7 +193,7 @@ impl RouterReadings for Readings<'_> {
         self.ctx.overload.token_wait_sec()
     }
     fn event_queue_refusing(&self) -> bool {
-        self.ctx.readiness.queue_gate().is_some_and(|gate| gate.refusing())
+        self.ctx.readiness.queue_gate().is_some_and(|gate| gate.read())
     }
 }
 

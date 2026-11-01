@@ -85,6 +85,7 @@ mod invite_sent;
 mod keepalive;
 mod keepalive_481;
 mod keepalive_configurable_interval;
+mod keepalive_lane_order;
 mod keepalive_long_call_cap;
 mod keepalive_reap_both_directions;
 mod keepalive_timeout;
