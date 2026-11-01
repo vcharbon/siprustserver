@@ -472,9 +472,9 @@ async fn a_log_toward_a_peer_that_never_claims_goes_one_ttl_after_its_last_claim
 }
 
 /// A cold pull from the bound identity states it holds nothing (a restarted
-/// process under the same identity): the calls it applied read unheld until
-/// its bootstrap claims again. A cold pull from an identity not bound changes
-/// nothing.
+/// process under the same identity): the calls it applied, on either
+/// partition, read unheld until its bootstrap claims again. A cold pull from
+/// an identity not bound changes nothing.
 #[tokio::test]
 async fn a_cold_pull_from_the_bound_identity_holds_nothing_until_it_claims() {
     let cl = changelog();
@@ -484,10 +484,16 @@ async fn a_cold_pull_from_the_bound_identity_holds_nothing_until_it_claims() {
     assert_eq!(sent(&cl, Watermark::new(7, 0), 10).await.len(), 1);
     cl.note_applied("A", Some("a#1"), Partition::Bak, Watermark::new(7, 1));
     assert!(cl.applied_any("A", Partition::Bak, "call-1"));
-    cl.note_cold_pull("A", Some("a#9"), Partition::Bak);
+    let _reclaim = cl.serving("A", Partition::Pri);
+    cl.bump_put("A", "copy-1", Partition::Pri);
+    cl.note_scanned("A", Partition::Pri, cl.head());
+    cl.note_applied("A", Some("a#1"), Partition::Pri, cl.head());
+    assert!(cl.applied_any("A", Partition::Pri, "copy-1"));
+    cl.note_cold_pull("A", Some("a#9"));
     assert!(cl.applied_any("A", Partition::Bak, "call-1"), "an unbound identity changes nothing");
-    cl.note_cold_pull("A", Some("a#1"), Partition::Bak);
+    cl.note_cold_pull("A", Some("a#1"));
     assert!(!cl.applied_any("A", Partition::Bak, "call-1"), "the restarted process holds nothing");
+    assert!(!cl.applied_any("A", Partition::Pri, "copy-1"), "on either partition");
     cl.note_scanned("A", Partition::Bak, cl.head());
     cl.note_applied("A", Some("a#1"), Partition::Bak, cl.head());
     assert!(cl.applied_any("A", Partition::Bak, "call-1"), "its bootstrap carried the call");

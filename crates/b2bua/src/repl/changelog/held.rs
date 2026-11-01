@@ -29,17 +29,19 @@ impl Changelog {
         }
     }
 
-    /// `peer` pulls `partition` cold, under `identity`: it states it holds
-    /// nothing of it (a restarted process, the same identity kept), so the
-    /// position it applied falls back to none until it claims again. A pull
+    /// `peer` pulls cold, under `identity`: it states it holds nothing (a
+    /// restarted process, the same identity kept), so the position it applied
+    /// falls back to none on both partitions until it claims again. A pull
     /// from an identity membership does not bind changes nothing.
-    pub fn note_cold_pull(&self, peer: &str, identity: Option<&str>, partition: Partition) {
+    pub fn note_cold_pull(&self, peer: &str, identity: Option<&str>) {
         let mut inner = locked(&self.inner, REPLICA_CHANGELOG);
         if inner.bound.get(peer).is_some_and(|bound| Some(bound.as_str()) != identity) {
             return;
         }
         if let Some(log) = inner.peers.get_mut(peer) {
-            log.sub_mut(partition).acked.send_replace(Watermark::new(0, 0));
+            for partition in [Partition::Pri, Partition::Bak] {
+                log.sub_mut(partition).acked.send_replace(Watermark::new(0, 0));
+            }
         }
     }
 

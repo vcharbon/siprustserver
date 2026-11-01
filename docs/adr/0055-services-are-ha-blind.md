@@ -325,7 +325,8 @@ restarted since without reporting again, is not shown to hold it. The flow's liv
 of `failover-harness` pin these cases; nothing more is claimed. Three
 residuals are accepted (user ruling):
 - a backup that applied a write whose position report was lost with a flow
-  break reads as not holding the call until it reports again;
+  break, or arrived after a later write moved the entry, reads as not holding
+  the call until it reports again;
 - a backup cut off under the same identity past the dead-peer TTL reads as
   not holding the calls written before its log went, until it re-bootstraps;
 - a backup process dead under the same identity and not reconnected when the
