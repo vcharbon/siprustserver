@@ -5,7 +5,7 @@
 //!
 //! ## Config (env)
 //! - `CDR_AMQP_URL`        AMQP URI                 (default `amqp://guest:guest@rabbitmq:5672/%2f`;
-//!                          `heartbeat=0` refuses the start, none proposes 30 s)
+//!   `heartbeat=0` refuses the start, none proposes 30 s)
 //! - `CDR_QUEUE`           queue name to consume    (default `cdr`)
 //! - `CDR_QUEUE_MAX_LEN`   broker `x-max-length`    (default `100000`; MUST match the producer)
 //! - `CDR_METRICS_LISTEN`  Prometheus listen addr   (default `0.0.0.0:9093`)
