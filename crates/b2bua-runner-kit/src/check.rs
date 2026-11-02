@@ -12,6 +12,7 @@
 //! | `B2BUA_UDP_INGRESS_BRAKE_PCT` in 1..=100 | [`validate_ingress_brake_pct`](crate::validate_ingress_brake_pct) |
 //! | `B2BUA_LOOP_STALL_MS` above `B2BUA_CALL_CONTROL_TIMEOUT_MS` + the lock-wait margin | `liveness_env` |
 //! | `B2BUA_DRAIN_MIN_MS` ≤ `B2BUA_DRAIN_GRACE_MS` | `drain_env` |
+//! | `B2BUA_QUEUE` ≥ [`MIN_INGRESS_QUEUE`]; `B2BUA_CONCURRENCY`, `B2BUA_CALL_CAP` ≥ 1 | here |
 //! | with replication: the replica TTL against the keepalive round and the INVITE bound, the backup ceilings against the emergency ceilings | `ReplicaConfig::validate` |
 //! | with replication: sync cap < ACK and CANCEL bounds < T1, the backlog marks | `WritePath::validate` |
 //! | with replication: the verdict hold ≥ freshness window + Timer F | `VerdictBounds::validate` |
@@ -24,6 +25,10 @@
 use b2bua::B2buaDeps;
 
 use crate::{liveness_env, validate_ingress_brake_pct, RunnerEnv};
+
+/// The least inbound queue, packets: what the default 4 MiB receive buffer
+/// holds of 16 KiB datagrams, so one full buffer drained at once fits.
+pub const MIN_INGRESS_QUEUE: usize = 256;
 
 /// The violations of one configuration, collected across every relation so a
 /// refusal names them all at once.
@@ -78,6 +83,19 @@ impl ConfigCheck {
                  cannot outlast the drain's ceiling",
                 env.drain.floor.as_millis(),
                 env.drain.grace.as_millis()
+            )
+        });
+        self.require(env.queue_max >= MIN_INGRESS_QUEUE, || {
+            format!(
+                "B2BUA_QUEUE={} < {MIN_INGRESS_QUEUE}: the inbound queue would drop one burst",
+                env.queue_max
+            )
+        });
+        self.require(env.concurrency >= 1 && env.call_cap >= 1, || {
+            format!(
+                "B2BUA_CONCURRENCY={} / B2BUA_CALL_CAP={}: a worker with no handler or no call \
+                 slot serves nothing",
+                env.concurrency, env.call_cap
             )
         });
         if let Some(repl) = &deps.replication {
