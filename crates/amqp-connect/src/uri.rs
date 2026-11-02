@@ -9,6 +9,25 @@ use tokio::time::{timeout_at, Instant};
 
 use crate::stream::{connect_stream, timed_out, Connected};
 
+/// The heartbeat, seconds, a connection whose URI states none negotiates
+/// ([`open_over`](crate::open_over)): a silent broker or a half-open link is
+/// read dead within two of them.
+pub const DEFAULT_HEARTBEAT_SEC: u16 = 30;
+
+/// `url`, the value of the variable `var`, as the URI a connection opens:
+/// `Err` naming `var` when it does not parse or states `heartbeat=0`, which
+/// leaves a silent peer undetected once the link is up.
+pub fn checked_uri(var: &str, url: &str) -> Result<AMQPUri, String> {
+    let uri: AMQPUri = url.parse().map_err(|e| format!("{var} is not an AMQP URI: {e}"))?;
+    if uri.query.heartbeat == Some(0) {
+        return Err(format!(
+            "{var} states heartbeat=0: a silent broker would hold the link forever; state a \
+             positive heartbeat or none ({DEFAULT_HEARTBEAT_SEC} s)"
+        ));
+    }
+    Ok(uri)
+}
+
 /// Resolves the host of `uri` and connects its stream ([`connect_stream`]),
 /// both by `deadline`.
 pub async fn connect_uri(uri: &AMQPUri, deadline: Instant) -> io::Result<Connected> {

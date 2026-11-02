@@ -1,0 +1,68 @@
+{{- /*
+The render-time relations of the release: what no runner can see because it
+spans a pod spec and a runner's env, or two components. Each reads the final
+env a component gets (its derived env with `env` laid over it), the runner's
+default where the env states nothing. They render nothing; an invalid set
+fails the render naming every value involved. The runner-side relations are
+each runner's startup check.
+
+| relation | why |
+|---|---|
+| worker `terminationGracePeriodSeconds` > B2BUA_DRAIN_GRACE_MS + 2 × B2BUA_DRAIN_RELEASE_FLUSH_MS + B2BUA_DRAIN_CDR_FLUSH_MS + 2 s | a drain whose grace ended calls returns by grace + 2 flushes, then the CDR sink closes (ADR-0031); the kubelet's SIGKILL must not cut it |
+| proxy `terminationGracePeriodSeconds` > PROXY_DRAIN_GRACE_MS + 2 s | the proxy's drain ends before the SIGKILL |
+| `worker.replication.enabled` ⇒ `worker.replicas` ≥ 2 | a backup lives on another worker |
+| worker B2BUA_CDR_RABBITMQ_MAX_LEN = consumer CDR_QUEUE_MAX_LEN | both declare the one queue; a different argument fails the second declare |
+| every RSS ceiling (B2BUA_MAX_RSS, _EMERGENCY, B2BUA_REPL_BACKUP_MAX_RSS) < worker `resources.limits.memory` | a ceiling at the limit is never reached before the OOM kill |
+| `proxy.hmac.existingSecret` set, or `proxy.hmac.drawInCluster` | a render without a cluster (helm template, GitOps) draws a new cookie key each time |
+
+The proxy's BGP withdrawal bounds join the proxy row when they exist.
+*/ -}}
+{{- $margin := 2000 }}
+{{- if .Values.worker.enabled }}
+{{- $w := .Values.worker }}
+{{- $wenv := $w.env | default dict }}
+{{- /* The drain bounds' runner defaults (b2bua-runner-kit drain_env). */ -}}
+{{- $grace := include "siprust.envInt" (list $wenv "B2BUA_DRAIN_GRACE_MS" 5000) | int64 }}
+{{- $flush := include "siprust.envInt" (list $wenv "B2BUA_DRAIN_RELEASE_FLUSH_MS" 3000) | int64 }}
+{{- $cdrFlush := include "siprust.envInt" (list $wenv "B2BUA_DRAIN_CDR_FLUSH_MS" 3000) | int64 }}
+{{- $drain := add $grace (mul 2 $flush) $cdrFlush $margin }}
+{{- $term := mul (int64 $w.terminationGracePeriodSeconds) 1000 }}
+{{- if le $term $drain }}
+{{- fail (printf "worker.terminationGracePeriodSeconds=%d s must exceed B2BUA_DRAIN_GRACE_MS=%d + 2 × B2BUA_DRAIN_RELEASE_FLUSH_MS=%d + B2BUA_DRAIN_CDR_FLUSH_MS=%d + %d ms: the kubelet would kill a drain still running" (int64 $w.terminationGracePeriodSeconds) $grace $flush $cdrFlush $margin) }}
+{{- end }}
+{{- if and $w.replication.enabled (lt (int $w.replicas) 2) }}
+{{- fail (printf "worker.replication.enabled needs worker.replicas >= 2, got %d: a backup lives on another worker" (int $w.replicas)) }}
+{{- end }}
+{{- $limit := dig "limits" "memory" "" ($w.resources | default dict) }}
+{{- if $limit }}
+{{- $limitBytes := include "siprust.bytes" (list "worker.resources.limits.memory" $limit) | int64 }}
+{{- range $name := list "B2BUA_MAX_RSS" "B2BUA_MAX_RSS_EMERGENCY" "B2BUA_REPL_BACKUP_MAX_RSS" }}
+{{- $v := get $wenv $name }}
+{{- if and $v (not (kindIs "invalid" $v)) }}
+{{- if ge (include "siprust.bytes" (list $name $v) | int64) $limitBytes }}
+{{- fail (printf "%s=%s must be below worker.resources.limits.memory=%s: the ceiling would never be reached before the OOM kill" $name (toString $v) (toString $limit)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if and .Values.cdr.enabled .Values.cdr.consumer.enabled }}
+{{- $default := toString (int .Values.cdr.maxLength) }}
+{{- $produced := get $wenv "B2BUA_CDR_RABBITMQ_MAX_LEN" | default $default | toString }}
+{{- $consumed := get (.Values.cdr.consumer.env | default dict) "CDR_QUEUE_MAX_LEN" | default $default | toString }}
+{{- if ne $produced $consumed }}
+{{- fail (printf "worker B2BUA_CDR_RABBITMQ_MAX_LEN=%s differs from cdr-consumer CDR_QUEUE_MAX_LEN=%s: both declare one queue (cdr.maxLength)" $produced $consumed) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.proxy.enabled }}
+{{- $p := .Values.proxy }}
+{{- $penv := $p.env | default dict }}
+{{- $pgrace := include "siprust.envInt" (list $penv "PROXY_DRAIN_GRACE_MS" 5000) | int64 }}
+{{- $pterm := mul (int64 $p.terminationGracePeriodSeconds) 1000 }}
+{{- if le $pterm (add $pgrace $margin) }}
+{{- fail (printf "proxy.terminationGracePeriodSeconds=%d s must exceed PROXY_DRAIN_GRACE_MS=%d + %d ms: the kubelet would kill the proxy's drain" (int64 $p.terminationGracePeriodSeconds) $pgrace $margin) }}
+{{- end }}
+{{- if not (or $p.hmac.existingSecret $p.hmac.drawInCluster) }}
+{{- fail "proxy.hmac.existingSecret is required: name the Secret (keys kid, key) both proxies read. Only a release installed against its cluster (the kind lab) may set proxy.hmac.drawInCluster, where the key is drawn once and read back by lookup" }}
+{{- end }}
+{{- end }}

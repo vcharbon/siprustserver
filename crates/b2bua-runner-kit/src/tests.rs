@@ -107,13 +107,3 @@ fn split_host_port_defaults_and_parses() {
     assert_eq!(split_host_port("bob"), ("bob".to_string(), 5060));
     assert_eq!(split_host_port("bob:nope"), ("bob".to_string(), 5060));
 }
-
-#[test]
-fn truthy_flag_grammar() {
-    for t in ["1", "true", "YES", " on "] {
-        assert!(is_truthy(t), "{t:?} must be truthy");
-    }
-    for f in ["0", "", "off", "nope"] {
-        assert!(!is_truthy(f), "{f:?} must be falsy");
-    }
-}

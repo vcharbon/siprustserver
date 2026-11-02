@@ -55,9 +55,13 @@
 //!   B2BUA_NEW_CALL_PERMIT_SHARE_PCT share of B2BUA_CONCURRENCY normal initial-INVITE turns may hold (default 50; 1..=100; emergency INVITEs draw the whole pool)
 //!   B2BUA_NEW_CALL_QUEUE_HEADROOM_PCT share of B2BUA_CALL_CAP kept back from normal new INVITEs (default 5; 0..=99; emergency INVITEs and in-dialog requests reach the full cap)
 //!   B2BUA_KEEPALIVE_SEC in-dialog OPTIONS keepalive interval (default 300 = 5 min, min 120)
-//!   B2BUA_REBOOT_BUDGET_SEC replicated-backup TTL / reboot budget (default 600; min 60 and >= keepalive)
+//!   B2BUA_REBOOT_BUDGET_SEC replicated-backup TTL / reboot budget (default 600; min 60, >= keepalive + Timer F + 10 s, > B2BUA_INVITE_TXN_TIMEOUT_SEC)
 //!   B2BUA_SETUP_TIMEOUT_MS a-leg total setup deadline in ms, reroutes included (default 150000, strictly below B2BUA_INVITE_TXN_TIMEOUT_SEC; <= 0 disables)
 //!   B2BUA_INVITE_TXN_TIMEOUT_SEC out-of-dialog INVITE txn bound, both call halves (default 158; range 33..=600)
+//!
+//! Every relation between these is checked once, on the final configuration,
+//! before anything is served (`b2bua_runner_kit::ConfigCheck`): an invalid set
+//! refuses the start with one message naming every variable involved.
 //!   B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC the worker gives up on a b-leg hop when NOTHING answers its initial INVITE, not even a 100 (default 5; range 2..=32; ADR-0044: the transaction keeps Timer A/B; in-dialog INVITE and non-INVITE never read it)
 //!   B2BUA_CALL_CONTROL_TIMEOUT_MS decision-backend deadline per round-trip (default 5000; <= 0 disables — ADR-0022)
 //!   WORKER_ALLOWED_TARGET_SUFFIXES b-leg destination allow-list, comma-separated (default .svc.cluster.local; `*` = allow all, rollback sentinel; non-IP non-matching hosts are 503'd pre-leg)
@@ -128,7 +132,7 @@ use std::env;
 use std::sync::Arc;
 
 use b2bua::decision::ScriptedDecisionEngine;
-use b2bua_runner_kit::{env_or, split_host_port, validate_default_dest, RunnerEnv};
+use b2bua_runner_kit::{env_or, split_host_port, validate_default_dest, ConfigCheck, RunnerEnv};
 use call::LimiterEntry;
 
 /// Always-on "stress" limiter entry attached to every routed call so the full
@@ -189,12 +193,6 @@ async fn run() -> Result<std::process::ExitCode, String> {
     // brake installed) → the worker's addresses → validated config + metrics/clock.
     let base = RunnerEnv::from_env()?.bind("b2bua-runner").await?;
 
-    // Runner-only coherence (not visible to `B2buaConfig::validate`): the default
-    // callee must be admissible under the worker's own allow-list — refuse to
-    // boot with a clear message rather than silently 503 every call.
-    validate_default_dest(&dest_host, &base.config.worker_allowed_target_suffixes)
-        .map_err(|e| format!("invalid B2BUA config: {e}"))?;
-
     // CDR sink: RabbitMQ when `B2BUA_CDR_RABBITMQ_URL` is set, else the kit's
     // discarding default, either way behind the kit's bounded buffer.
     let cdr_sink = base.rabbitmq_cdr_sink_from_env()?;
@@ -216,7 +214,12 @@ async fn run() -> Result<std::process::ExitCode, String> {
     // No extra ServiceDefs: the in-tree services (transfer, relay-first-18x)
     // ride `default_rules()` at runtime; `compose_services()` (lib.rs) is the
     // doc-generation registry.
-    let core = base.spawn(deps, Vec::new());
+    // This runner's own relation, checked with the generic ones on the final
+    // configuration: the default callee is admissible under the worker's own
+    // allow-list, or every call would be 503'd.
+    let mut check = ConfigCheck::new();
+    check.take(validate_default_dest(&dest_host, &deps.config.worker_allowed_target_suffixes));
+    let core = base.spawn(deps, Vec::new(), check)?;
 
     tracing::info!(
         pid = std::process::id(),

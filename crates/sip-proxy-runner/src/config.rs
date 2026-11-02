@@ -126,6 +126,16 @@ impl ProxyConfig {
         if let Err(violations) = validate_config(timings, &observer) {
             errors.extend(violations);
         }
+        // A recreated pod on the same host binds the faces its predecessor
+        // holds until that one's drain ends.
+        if bind_retry_deadline <= drain_grace {
+            errors.push(format!(
+                "PROXY_BIND_RETRY_DEADLINE_MS={} must exceed PROXY_DRAIN_GRACE_MS={}: a \
+                 recreated pod would give up binding before its predecessor's drain ends",
+                bind_retry_deadline.as_millis(),
+                drain_grace.as_millis()
+            ));
+        }
         if !errors.is_empty() {
             return Err(errors);
         }

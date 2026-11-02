@@ -21,3 +21,4 @@ serde_json = { workspace = true }
 call = { path = "../call" }
 sip-message = { path = "../sip-message" }
 sip-ids = { path = "../sip-ids" }
+sip-retransmit = { path = "../sip-retransmit" }

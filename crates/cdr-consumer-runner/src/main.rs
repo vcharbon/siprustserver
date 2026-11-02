@@ -25,14 +25,16 @@ use std::sync::Arc;
 use cdr_consumer_runner::observation::JsonRecordView;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> std::process::ExitCode {
     // Subscriber first (ADR-0026); the guard drains the log writer at exit.
     let _observe = match observe::init_production("cdr-consumer-runner") {
         Ok(guard) => guard,
         Err(e) => {
             eprintln!("cdr-consumer-runner FATAL: {e}");
-            std::process::exit(1);
+            return std::process::ExitCode::FAILURE;
         }
     };
-    cdr_consumer_runner::app::run(Arc::new(JsonRecordView)).await;
+    let Err(refusal) = cdr_consumer_runner::app::run(Arc::new(JsonRecordView)).await;
+    tracing::error!(error = %refusal, "refusing to start");
+    std::process::ExitCode::FAILURE
 }

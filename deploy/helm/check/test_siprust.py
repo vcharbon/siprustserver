@@ -154,6 +154,22 @@ class ClusterKey(unittest.TestCase):
         self.assertEqual(self.key_ref(docs), [])
 
 
+class RenderRelations(unittest.TestCase):
+    """templates/checks.yaml: a relation between a pod spec and a runner's
+    final env fails the render naming every value involved."""
+
+    def test_a_drain_the_termination_grace_cannot_hold_fails_the_render(self) -> None:
+        # Each value alone is valid; together the drain's longest run
+        # (8 + 2 x 9 + 3 + 2 s margin = 31 s) passes the 30 s grace.
+        args = ["--set-string", "worker.env.B2BUA_DRAIN_GRACE_MS=8000",
+                "--set-string", "worker.env.B2BUA_DRAIN_RELEASE_FLUSH_MS=9000"]
+        err = render_error(SIPRUST, *KIND, *args)
+        for named in ("worker.terminationGracePeriodSeconds=30", "B2BUA_DRAIN_GRACE_MS=8000",
+                      "B2BUA_DRAIN_RELEASE_FLUSH_MS=9000", "B2BUA_DRAIN_CDR_FLUSH_MS=3000"):
+            self.assertIn(named, err)
+        render(SIPRUST, *KIND, *args, "--set", "worker.terminationGracePeriodSeconds=32")
+
+
 class Backends(unittest.TestCase):
     def test_producer_and_consumer_declare_the_same_queue(self) -> None:
         docs = render(SIPRUST, *KIND, "--set", "cdr.maxLength=5000", "--set", "cdr.queue=records")
@@ -208,7 +224,8 @@ class GenericDefaults(unittest.TestCase):
 
     NETWORK = ["--set", "network.proxyVip=10.0.255.250", "--set", "network.internalInterface=ens3",
                "--set", "network.externalVip=203.0.113.250", "--set", "network.externalInterface=ens4",
-               "--set", "network.internalCidrs=10.0.0.0/16"]
+               "--set", "network.internalCidrs=10.0.0.0/16",
+               "--set", "proxy.hmac.existingSecret=edge-cookie"]
     DERIVED = {
         "b2bua-worker": {"B2BUA_LISTEN", "B2BUA_ADVERTISE", "B2BUA_ORDINAL", "B2BUA_METRICS",
                          "B2BUA_REPL", "B2BUA_REPL_LISTEN", "B2BUA_REPL_PORT", "B2BUA_REPL_SERVICE",

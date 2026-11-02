@@ -107,6 +107,9 @@ worker:
   # Namespaced sysctls of the pod (spec.securityContext.sysctls).
   sysctls: []
   priorityClassName: ""
+  # Above the drain's longest run, B2BUA_DRAIN_GRACE_MS + 2 ×
+  # B2BUA_DRAIN_RELEASE_FLUSH_MS + B2BUA_DRAIN_CDR_FLUSH_MS + 2 s (refused at
+  # render otherwise; templates/checks.yaml holds every render-time relation).
   terminationGracePeriodSeconds: 30
   resources:
     requests: { cpu: "250m", memory: "128Mi" }
@@ -136,12 +139,16 @@ proxy:
     cpsRate: null
     cpsSize: null
   # The stickiness-cookie signing key both proxies share (ADR-0046), keys
-  # `kid` and `key`. Empty `existingSecret`: the chart keeps one Secret
+  # `kid` and `key`, in the Secret `existingSecret` names; required, so every
+  # render (helm template, GitOps) yields the same pods on the same key.
+  # `drawInCluster` (a release installed against its cluster only, the kind
+  # lab): with no `existingSecret` the chart keeps one Secret
   # (sip-front-proxy-hmac) whose key is drawn on the first install and read
-  # back by every upgrade; changing it 403s the in-dialog requests of calls in
-  # progress. `kid` applies to that first draw only.
+  # back by every upgrade; `kid` applies to that first draw only. Changing
+  # the key 403s the in-dialog requests of calls in progress.
   hmac:
     existingSecret: ""
+    drawInCluster: false
     kid: k1
   # Per-neighbour bound of the unresolved ARP queue in the proxy node's
   # network namespace (ADR-0033), set by the vip-loopback init container.
@@ -172,6 +179,7 @@ proxy:
   podSecurityContext: {}
   sysctls: []
   priorityClassName: ""
+  # Above PROXY_DRAIN_GRACE_MS + 2 s (refused at render otherwise).
   terminationGracePeriodSeconds: 30
   resources:
     requests: { cpu: "500m", memory: "64Mi" }

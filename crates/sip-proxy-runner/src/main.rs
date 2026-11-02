@@ -70,11 +70,12 @@
 //!                    (default 50; floored at one queued packet)
 //!   PROXY_BIND_RETRY_INTERVAL_MS  cadence of bind retries while a port is
 //!                    still held (EADDRINUSE), ms ≥ 1   (default 200)
-//!   PROXY_BIND_RETRY_DEADLINE_MS  bind-retry give-up deadline, ms ≥ 1; exceeds
-//!                    the SIGTERM drain grace so a recreated pod waits out its
-//!                    predecessor instead of crash-looping (default 10000)
+//!   PROXY_BIND_RETRY_DEADLINE_MS  bind-retry give-up deadline, ms ≥ 1; must
+//!                    exceed PROXY_DRAIN_GRACE_MS (refused at boot) so a
+//!                    recreated pod waits out its predecessor instead of
+//!                    crash-looping (default 10000)
 //!   PROXY_DRAIN_GRACE_MS  wait between SIGTERM (/readyz Draining) and exit,
-//!                    ms ≥ 1                               (default 5000)
+//!                    ms ≥ 1, below the pod's termination grace (default 5000)
 //!   PROXY_HMAC_KID   stickiness cookie key id              (default k0)
 //!   PROXY_HMAC_KEY   stickiness cookie secret, ≥ 16 bytes  (REQUIRED, no
 //!                    default; every proxy of a cluster shares it); a key

@@ -72,12 +72,23 @@ The proxy's intake knobs are values: `proxy.recvShards`
 
 ## The proxy's cookie key
 
-Without `proxy.hmac.existingSecret` the chart keeps the Secret
-`sip-front-proxy-hmac`: its key is drawn on the first install and read back by
-every upgrade through `lookup`, so `proxy.hmac.kid` applies to that first draw
-only. A deployer that renders without a cluster (`helm template`, a GitOps
-controller) gets an empty `lookup` and a new key at every render: it provides
-the Secret itself and names it in `existingSecret`.
+The proxy's cookie key lives in the Secret `proxy.hmac.existingSecret` names,
+which the chart requires: `helm template` and a GitOps controller render
+without a cluster, so a key drawn at render would change at every render. Only
+a release installed against its cluster may set `proxy.hmac.drawInCluster`
+(the kind lab does): the chart then keeps the Secret `sip-front-proxy-hmac`,
+its key drawn on the first install and read back by every upgrade through
+`lookup`, `proxy.hmac.kid` applying to that first draw only.
+
+## Render-time relations
+
+`siprust/templates/checks.yaml` holds the relations that span a pod spec and a
+runner's env, or two components, and fails the render naming every value
+involved: the worker's and the proxy's `terminationGracePeriodSeconds` against
+their drain bounds, replication against the worker count, the CDR queue's
+`x-max-length` on both sides, the worker's RSS ceilings against its memory
+limit, and the cookie key above. Each runner checks its own relations at
+startup on its final configuration.
 
 ## The kind lab
 

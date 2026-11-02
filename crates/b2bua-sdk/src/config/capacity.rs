@@ -24,15 +24,18 @@ impl Ceilings {
         }
     }
 
-    fn validate(&self, name: &str) -> Result<(), String> {
+    /// `normal` and `emergency` name the runner variables stating the pair.
+    fn validate(&self, normal: &str, emergency: &str) -> Result<(), String> {
         if self.normal == Some(0) || self.emergency == Some(0) {
-            return Err(format!("capacity.{name}: a ceiling of 0 refuses every call; unset it"));
+            return Err(format!(
+                "{normal} / {emergency}: a ceiling of 0 refuses every call; unset it"
+            ));
         }
         if let (Some(n), Some(e)) = (self.normal, self.emergency) {
             if e < n {
                 return Err(format!(
-                    "capacity.{name}: emergency ceiling {e} is below the normal ceiling {n}; \
-                     emergency calls keep priority, so their ceiling must be the higher one"
+                    "{emergency}={e} is below {normal}={n}; emergency calls keep priority, so \
+                     their ceiling must be the higher one"
                 ));
             }
         }
@@ -56,8 +59,8 @@ pub struct CapacityConfig {
 impl CapacityConfig {
     /// Refuses a zero ceiling and an emergency ceiling below its normal one.
     pub fn validate(&self) -> Result<(), String> {
-        self.calls.validate("calls")?;
-        self.transactions.validate("transactions")?;
-        self.rss_bytes.validate("rss_bytes")
+        self.calls.validate("B2BUA_MAX_CALLS", "B2BUA_MAX_CALLS_EMERGENCY")?;
+        self.transactions.validate("B2BUA_MAX_TXNS", "B2BUA_MAX_TXNS_EMERGENCY")?;
+        self.rss_bytes.validate("B2BUA_MAX_RSS", "B2BUA_MAX_RSS_EMERGENCY")
     }
 }

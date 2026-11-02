@@ -382,6 +382,9 @@
             "existingSecret": {
               "type": "string"
             },
+            "drawInCluster": {
+              "type": "boolean"
+            },
             "kid": {
               "type": "string",
               "minLength": 1

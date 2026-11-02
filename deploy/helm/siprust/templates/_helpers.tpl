@@ -158,3 +158,36 @@ A network value the proxy and masq-exempt require, named in the error. Takes
 {{- end }}
 {{- join " " $out }}
 {{- end }}
+
+{{/*
+An integer env value of a component's final env, or the runner default when
+the env does not state it (unset or null). Takes (list <env map> <name>
+<default>); a value that is not an integer fails the render naming it.
+*/}}
+{{- define "siprust.envInt" -}}
+{{- $v := get (index . 0) (index . 1) }}
+{{- if or (kindIs "invalid" $v) (eq (toString $v) "") }}
+{{- index . 2 }}
+{{- else if regexMatch "^[0-9]+$" (toString $v) }}
+{{- toString $v }}
+{{- else }}
+{{- fail (printf "%s=%q is not an integer" (index . 1) (toString $v)) }}
+{{- end }}
+{{- end }}
+
+{{/*
+A byte quantity in bytes: an integer with an optional Ki/Mi/Gi/Ti or k/M/G/T
+suffix, the forms the runners and Kubernetes share. Takes (list <name>
+<value>); any other form fails the render naming it.
+*/}}
+{{- define "siprust.bytes" -}}
+{{- $name := index . 0 }}
+{{- $v := toString (index . 1) | trim }}
+{{- $digits := regexFind "^[0-9]+" $v }}
+{{- $unit := trimPrefix $digits $v }}
+{{- $scale := dict "" 1 "Ki" 1024 "Mi" 1048576 "Gi" 1073741824 "Ti" 1099511627776 "k" 1000 "M" 1000000 "G" 1000000000 "T" 1000000000000 }}
+{{- if or (not $digits) (not (hasKey $scale $unit)) }}
+{{- fail (printf "%s=%q is not a byte quantity (an integer with an optional Ki, Mi, Gi, Ti, k, M, G or T suffix)" $name $v) }}
+{{- end }}
+{{- mul (int64 $digits) (get $scale $unit) }}
+{{- end }}

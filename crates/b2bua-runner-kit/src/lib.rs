@@ -12,7 +12,7 @@
 //! - [`RunnerEnv::from_env`] — the `B2BUA_*`/`LIMITER_*`/`WORKER_*` env
 //!   grammar parsed into a plain struct of pub fields (tweak any before bind);
 //! - [`RunnerEnv::bind`] — UDP bind with the ingress brake installed,
-//!   the worker's addresses and mode, [`B2buaConfig`] assembly + validation;
+//!   the worker's addresses and mode, [`B2buaConfig`] assembly;
 //! - [`RunnerBase::deps`] — production-shaped defaults for every dependency
 //!   (store / buffered CDR / limiter-from-env / metrics / clock / id-gen),
 //!   each overridable field-by-field on the returned [`B2buaDeps`];
@@ -23,12 +23,16 @@
 //!   replication the `B2BUA_REPL*` grammar selects ([`ReplicationSettings`]:
 //!   static or EndpointSlice membership, per-attempt peer addressing), assigned
 //!   to `deps.replication`;
+//! - [`ConfigCheck`] — the one consistency check of the final composed
+//!   configuration: the runner records its own relations, and
+//!   [`RunnerBase::spawn`] adds the generic ones and refuses the start on any
+//!   violation, naming every variable involved;
 //! - [`RunnerBase::spawn`] / [`RunnerBase::spawn_probe_server`] /
 //!   [`RunnerBase::spawn_gauge_sampler`] / [`RunnerBase::run_until_shutdown`]
 //!   — core spawn, the `/metrics`+`/ready`+`/healthz` probe, the memory
 //!   sampler, and the stop handling (SIGTERM or the worker's own withdrawal
 //!   drains; its supersession or a loop task ending exits non-zero);
-//! - the shared helpers ([`env_or`], [`env_flag`], [`resolve`],
+//! - the shared helpers ([`env_or`], [`env_switch`], [`resolve`],
 //!   [`split_host_port`], [`NullCdrWriter`]).
 //!
 //! The in-tree `b2bua-runner` is the first consumer, so the surface provably
@@ -42,7 +46,8 @@
 //! # ) -> Result<std::process::ExitCode, String> {
 //! let base = b2bua_runner_kit::RunnerEnv::from_env()?.bind("my-runner").await?;
 //! let deps = base.deps(my_engine, None).await; // swap any B2buaDeps field before spawn
-//! let core = base.spawn(deps, Vec::new()); // + your composed ServiceDefs
+//! // + your composed ServiceDefs and your own relations
+//! let core = base.spawn(deps, Vec::new(), b2bua_runner_kit::ConfigCheck::new())?;
 //! let _probe = base.spawn_probe_server(&core, None, None).await;
 //! base.spawn_gauge_sampler(&core);
 //! Ok(base.run_until_shutdown(&core).await)
@@ -88,7 +93,6 @@ use b2bua::decision::CallDecisionEngine;
 use b2bua::ingress_brake::{build_ingress_brake_hook, IngressBrakeConfig, IngressBrakeCounters};
 use b2bua::limiter::CallLimiter;
 use b2bua::metrics::{B2buaMetrics, LiveGauge, UdpTransportMetrics};
-use b2bua::rules::ServiceDef;
 use b2bua::store::InMemoryCallStore;
 use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
 use http_net::{RealHttpNetwork, SystemResolver};
@@ -101,6 +105,7 @@ pub mod backend_url;
 mod base;
 mod capacity_env;
 mod cdr_rabbitmq;
+mod check;
 mod drain_env;
 mod entropy;
 mod front_env;
@@ -115,6 +120,7 @@ mod runner_env;
 pub mod runtime;
 mod shutdown;
 mod socket_buffers;
+mod spawn;
 mod validate;
 mod worker_metrics;
 pub use base::RunnerBase;
@@ -123,6 +129,7 @@ pub use cdr_rabbitmq::{
     CdrDeliveryBounds, CdrQueueDeclare, RabbitMqCdrSettings, RabbitMqCdrWriter,
     MAX_DRAINER_WAIT_MS, MAX_WAIT_MS, MAX_WINDOW,
 };
+pub use check::ConfigCheck;
 pub use front_env::{addresses_from_lookup, WorkerAddresses};
 pub use null_cdr::NullCdrWriter;
 pub use replication::{replication_setup_from_lookup, ReplicationSettings};
@@ -156,13 +163,12 @@ pub fn env_stated(key: &str) -> Option<String> {
     stated(env::var(key).ok())
 }
 
-/// Truthy env flag: `1`/`true`/`yes`/`on` (case-insensitive) → true.
-pub fn env_flag(key: &str) -> bool {
-    is_truthy(&env_or(key, "0"))
-}
-
-fn is_truthy(s: &str) -> bool {
-    matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+/// The on/off env variable `key`: `1`/`true`/`yes`/`on` or
+/// `0`/`false`/`no`/`off` (case-insensitive), `default` when unset or blank.
+/// Any other value is the boot refusal naming `key`: a typo never reads as
+/// off.
+pub fn env_switch(key: &str, default: bool) -> Result<bool, String> {
+    runner_env::switch(key, env::var(key).ok(), default)
 }
 
 /// Resolve a `host:port` string to a socket address; `Err` is the boot
@@ -187,22 +193,22 @@ pub fn split_host_port(s: &str) -> (String, u16) {
 
 impl RunnerEnv {
     /// Bind the real UDP endpoint (ingress brake installed), coerce the
-    /// advertise address, assemble + validate the [`B2buaConfig`], and mint the
+    /// advertise address, assemble the [`B2buaConfig`], and mint the
     /// process-wide metrics registry / system clock. `Err` is the boot refusal
-    /// of a bind failure, an invalid config, a pre-epoch wall clock or an OS
-    /// RNG that does not answer. `name` names the service in every log line.
+    /// of a bind failure, a pre-epoch wall clock or an OS RNG that does not
+    /// answer. `name` names the service in every log line. Nothing is served
+    /// yet: the configuration is checked once composed, by
+    /// [`RunnerBase::spawn`].
     ///
     /// The runner installs the process subscriber (ADR-0026,
     /// [`observe::init_production`]) before it, so the refusal is logged.
     pub async fn bind(self, name: &str) -> Result<RunnerBase, String> {
-        let invalid = |e: String| format!("invalid B2BUA config: {e}");
         // The per-call trace gate, configured once from the environment before
         // any call arrives (ADR-0026): with no OTLP endpoint it is inert and no
         // call path pays more than one boolean check.
         b2bua::trace::install_process_traces(std::sync::Arc::new(
             b2bua::trace::CallTraces::from_env(0),
         ));
-        validate_ingress_brake_pct(self.udp_ingress_brake_pct).map_err(invalid)?;
         let clock = Clock::checked_system().map_err(|e| e.to_string())?;
 
         let listen_sa = resolve(&self.listen)?;
@@ -346,14 +352,6 @@ impl RunnerEnv {
             event_queue_gate: self.event_queue_gate,
             ..Default::default()
         };
-        // Forbid booting with a config that would silently break a call (a too-short keepalive,
-        // an INVITE transaction bound outside its range, a setup deadline or reaper idle window
-        // not under it) or the replicas (a reboot budget under its floor or one keepalive gap).
-        config.validate().map_err(|e| invalid(e.to_string()))?;
-        self.replica.validate(&config).map_err(invalid)?;
-        let call_control =
-            Duration::from_millis(u64::try_from(config.call_control_timeout_ms).unwrap_or(0));
-        liveness_env::check_loop_stall(self.loop_stall, call_control).map_err(invalid)?;
         tracing::info!(service = name, capacity = ?config.capacity, "capacity ceilings");
 
         Ok(RunnerBase {
@@ -508,12 +506,6 @@ impl RunnerBase {
             // from `config.capacity` (ADR-0037).
             capacity: None,
         }
-    }
-
-    /// Spawn the core over one boxed clone of the shared endpoint, composing
-    /// `services` (ADR-0016) above the defaults.
-    pub fn spawn(&self, deps: B2buaDeps, services: Vec<ServiceDef>) -> Arc<B2buaCore> {
-        Arc::new(B2buaCore::spawn_with_services(Box::new(self.endpoint.clone()), deps, services))
     }
 
     /// Memory-attribution sampler: push the store + replication map sizes into

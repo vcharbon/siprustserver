@@ -68,6 +68,9 @@ worker:
 
 proxy:
   nodeSelector: { tier: edge }
+  # The lab installs against its cluster: the cookie key is drawn once there.
+  hmac:
+    drawInCluster: true
   env:
     PROXY_UDP_SNDBUF: "4194304"
     PROXY_UDP_RCVBUF: "4194304"

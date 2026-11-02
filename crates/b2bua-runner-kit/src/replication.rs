@@ -5,7 +5,8 @@
 //! replication on never runs without it.
 //!
 //! ## Env grammar
-//!   B2BUA_REPL          truthy (`1`/`true`/`yes`/`on`) enables replication (default off)
+//!   B2BUA_REPL          on/off (`1`/`true`/`yes`/`on`, `0`/`false`/`no`/`off`; any
+//!                       other value refuses the boot) enables replication (default off)
 //!   B2BUA_REPL_LISTEN   replication TCP listen addr        (default 0.0.0.0:9092)
 //!   B2BUA_REPL_PORT     port every peer is reached on      (default = the REPL_LISTEN port)
 //!   B2BUA_PEERS         static membership `ord@host,..`; set, it takes precedence
@@ -48,7 +49,7 @@ use repl_net::{RealReplicationNetwork, ReplicationNetwork};
 use sip_clock::Clock;
 use topology::{parse_peer_list, Membership, Peer, StaticMembership};
 
-use crate::is_truthy;
+use crate::runner_env::switch;
 
 mod link_env;
 mod repl_resolver;
@@ -102,7 +103,7 @@ impl ReplicationSettings {
     /// it discovers its peers with no `POD_UID`, the identity its own
     /// endpoint is bound to (§6).
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
-        if !get("B2BUA_REPL").is_some_and(|v| is_truthy(&v)) {
+        if !switch("B2BUA_REPL", get("B2BUA_REPL"), false)? {
             return Ok(None);
         }
         if get("B2BUA_CLUSTER_KEY").is_none_or(|k| k.trim().is_empty()) {

@@ -33,6 +33,7 @@ PRODUCT_VALUES: dict[str, Any] = {
             "recvShards": 4,
             "selfGate": {"cpsRate": 1000, "cpsSize": 500},
             "resources": {"requests": {"cpu": "2", "memory": "64Mi"}},
+            "hmac": {"existingSecret": "product-cookie"},
             "keepalived": {
                 "extraVirtualIps": [{"address": "192.168.60.240", "interface": "eth1"}],
                 "extraTrackScripts": [{"name": "chk_relay", "script": "/usr/bin/relay-ok"}],

@@ -51,7 +51,11 @@ impl BackupCeilings {
     /// Refuses a ceiling of 0, which would store no backup.
     pub fn validate(&self) -> Result<(), String> {
         if self.calls == Some(0) || self.rss_bytes == Some(0) {
-            return Err("a backup ceiling of 0 stores no backup; unset it".to_string());
+            return Err(
+                "B2BUA_REPL_BACKUP_MAX_CALLS / B2BUA_REPL_BACKUP_MAX_RSS: a backup ceiling \
+                        of 0 stores no backup; unset it"
+                    .to_string(),
+            );
         }
         Ok(())
     }

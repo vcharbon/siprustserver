@@ -17,7 +17,8 @@ use std::net::SocketAddr;
 
 use b2bua::config::Front;
 
-use crate::{is_truthy, stated};
+use crate::runner_env::switch;
+use crate::stated;
 
 /// What the worker states about where it stands.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,7 +88,7 @@ pub fn addresses_from_lookup(
                     ));
                 }
             }
-            if get("B2BUA_REPL").is_some_and(|v| is_truthy(&v)) {
+            if switch("B2BUA_REPL", get("B2BUA_REPL"), false)? {
                 return Err("B2BUA_REPL is on but B2BUA_MODE=standalone: the copies of a call \
                             need the proxy's owner rule (ADR-0055 §8)"
                     .to_string());

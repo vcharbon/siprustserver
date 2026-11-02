@@ -4,7 +4,8 @@
 //! [`ObservationView`].
 //!
 //! ## Config (env)
-//! - `CDR_AMQP_URL`        AMQP URI                 (default `amqp://guest:guest@rabbitmq:5672/%2f`)
+//! - `CDR_AMQP_URL`        AMQP URI                 (default `amqp://guest:guest@rabbitmq:5672/%2f`;
+//!                          `heartbeat=0` refuses the start, none proposes 30 s)
 //! - `CDR_QUEUE`           queue name to consume    (default `cdr`)
 //! - `CDR_QUEUE_MAX_LEN`   broker `x-max-length`    (default `100000`; MUST match the producer)
 //! - `CDR_METRICS_LISTEN`  Prometheus listen addr   (default `0.0.0.0:9093`)
@@ -123,10 +124,14 @@ async fn consume(
     Ok(())
 }
 
-/// The consumer, reading observations with `view`. Runs until the process ends.
-pub async fn run(view: Arc<dyn ObservationView>) {
+/// The consumer, reading observations with `view`. Runs until the process
+/// ends; `Err` is the refusal of a configuration it cannot run, before it
+/// connects.
+pub async fn run(view: Arc<dyn ObservationView>) -> Result<std::convert::Infallible, String> {
+    let url = env_or("CDR_AMQP_URL", "amqp://guest:guest@rabbitmq:5672/%2f");
+    amqp_connect::checked_uri("CDR_AMQP_URL", &url)?;
     let target = Target {
-        url: env_or("CDR_AMQP_URL", "amqp://guest:guest@rabbitmq:5672/%2f"),
+        url,
         queue: env_or("CDR_QUEUE", "cdr"),
         max_len: env_or("CDR_QUEUE_MAX_LEN", "100000").parse().expect("CDR_QUEUE_MAX_LEN"),
         setup_timeout: SETUP_TIMEOUT,

@@ -7,7 +7,7 @@ use std::fmt::Display;
 use std::str::FromStr;
 use std::time::Duration;
 
-use b2bua::config::CapacityConfig;
+use b2bua::config::{B2buaConfig, CapacityConfig};
 
 use crate::{
     addresses_from_lookup, capacity_env, drain_env, env_or, limiter_env, liveness_env, split_csv,
@@ -73,17 +73,20 @@ pub struct RunnerEnv {
     /// 300 s; a shorter poke breaks long-hold endurance traffic).
     pub keepalive_sec: i64,
     /// The replication tunables: `B2BUA_REBOOT_BUDGET_SEC`, the replica TTL /
-    /// reboot budget (default 600, held past one keepalive at boot), and the
+    /// reboot budget (default 600; with replication on, at least one
+    /// keepalive round and above the INVITE bound, `ReplicaConfig::validate`), and the
     /// backup ceilings `B2BUA_REPL_BACKUP_MAX_*` (grammar in `capacity_env`).
     pub replica: b2bua::ReplicaConfig,
     /// `B2BUA_SETUP_TIMEOUT_MS` — a-leg total setup deadline, reroutes
     /// included, in ms (default 150000; must stay strictly below
-    /// `B2BUA_INVITE_TXN_TIMEOUT_SEC`, enforced at boot; <= 0 disables).
+    /// `B2BUA_INVITE_TXN_TIMEOUT_SEC` in the final composed configuration,
+    /// checked at spawn; <= 0 disables).
     pub setup_timeout_ms: i64,
     /// `B2BUA_INVITE_TXN_TIMEOUT_SEC` — the sip-txn out-of-dialog INVITE bound
     /// for BOTH call halves (b-leg client give-up + a-leg pre-final backstop).
-    /// Default 158; supported range 33..=600 (telephony deployments raise it —
-    /// Timer C > 3 min, 180 s PSTN supervision). `validate()` refuses boot when
+    /// Default `B2buaConfig::DEFAULT_INVITE_TXN_TIMEOUT_SEC` (158); supported
+    /// range 33..=600 (telephony deployments raise it — Timer C > 3 min, 180 s
+    /// PSTN supervision). The spawn check refuses boot when the final
     /// `B2BUA_SETUP_TIMEOUT_MS` does not sit strictly below it.
     pub invite_txn_timeout_sec: i64,
     /// `B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC` — how long the worker waits
@@ -274,7 +277,10 @@ impl RunnerEnv {
                 ..Default::default()
             },
             setup_timeout_ms: knob("B2BUA_SETUP_TIMEOUT_MS", "150000")?,
-            invite_txn_timeout_sec: knob("B2BUA_INVITE_TXN_TIMEOUT_SEC", "158")?,
+            invite_txn_timeout_sec: knob(
+                "B2BUA_INVITE_TXN_TIMEOUT_SEC",
+                &B2buaConfig::DEFAULT_INVITE_TXN_TIMEOUT_SEC.to_string(),
+            )?,
             invite_first_response_timeout_sec: knob(
                 "B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC",
                 "5",
