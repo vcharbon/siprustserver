@@ -8,7 +8,8 @@ pub enum Incident {
     /// The primary dies; the proxy and the backup see it gone.
     PrimaryKilled,
     /// The primary dies and nobody is told (ADR-0031 case 3): the proxy's
-    /// probe reads it dead 2 s later, its endpoint reads not ready but stays
+    /// probe reads it dead at its latest verdict (`HealthProbeConfig::
+    /// verdict_within`, 3.5 s by default), its endpoint reads not ready but stays
     /// in the slice 40 s later, and it leaves the slice only when the evicted
     /// pod is force-deleted, 5 min later. Until then only a message reaching
     /// the backup takes the call over.

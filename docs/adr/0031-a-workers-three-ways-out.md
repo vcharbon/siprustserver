@@ -43,8 +43,8 @@ What each element believed about the leaving worker, per case, from the harness'
 ledger and the kind cluster's logs:
 
 - **The proxy** learns of cases 1, 2 and 4 from membership (the ordinal leaves the
-  projection when `ready` drops) and of case 3a from its OPTIONS probe only (`Dead` after two
-  missed windows, ~2–3.5 s). Its request path fails an absent or `Dead` primary over to the
+  projection when `ready` drops) and of case 3a from its OPTIONS probe only (`Dead` at the end of
+  the reply window of the second missed probe, 2.5–3.5 s by default; ADR-0047 D1). Its request path fails an absent or `Dead` primary over to the
   cookie's `w_bak`; its response path does so for an INVITE response from a `Dead` worker
   and, since the tombstone, from a departed address.
 - **The peers** learn of cases 1, 2 and 4 from membership and **park** the ordinal: pullers

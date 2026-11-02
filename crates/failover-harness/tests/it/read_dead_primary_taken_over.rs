@@ -35,9 +35,11 @@ const BOB: &str = "127.0.0.1:5070";
 
 /// How long the routing decision takes to answer.
 const DECISION_DELAY: Duration = Duration::from_millis(300);
-/// How long the proxy's probe takes to read the killed node dead (ADR-0031
-/// case 3a: two missed windows).
-const PROBE_READS_DEAD_AFTER: Duration = Duration::from_secs(2);
+/// How long the proxy's probe takes to read a node killed unannounced dead
+/// (ADR-0031 case 3a): the default probe's latest verdict.
+fn probe_reads_dead_after() -> Duration {
+    sip_proxy::health::HealthProbeConfig::default().verdict_within()
+}
 /// How soon after the verdict the callee is dialled.
 const TAKEOVER_BOUND: Duration = Duration::from_millis(500);
 
@@ -62,7 +64,7 @@ async fn the_backup_dials_the_callee_of_a_primary_the_proxy_reads_dead() {
     fh.mark(&pri_ord, None, "crash", "kill (unannounced)");
     primary.crash();
     fh.restore_signalling("bob", bob.addr());
-    fh.advance(PROBE_READS_DEAD_AFTER).await;
+    fh.advance(probe_reads_dead_after()).await;
     assert!(bob.take_queued().await.is_none(), "nothing reached the callee before the verdict");
 
     let hydrated = survivor_of(&pri_ord, &w_b1, &w_b2).metrics().repl_takeover_hydrated_total();
@@ -133,7 +135,7 @@ async fn a_silent_primary_is_confirmed_dead_at_the_idle_bound_and_taken_over() {
     fh.partition(&pri_ord, bak_ord);
     fh.cut_signalling(&pri_ord, primary_sip);
     fh.restore_signalling("bob", bob.addr());
-    fh.advance(PROBE_READS_DEAD_AFTER).await;
+    fh.advance(probe_reads_dead_after()).await;
 
     fh.mark(&pri_ord, None, "health", "the proxy's probe reads it dead");
     proxy.set_health(&pri_ord, WorkerHealth::Dead);

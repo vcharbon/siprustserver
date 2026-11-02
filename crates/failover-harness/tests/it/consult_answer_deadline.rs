@@ -59,6 +59,10 @@ const LIMITER_ADDR: &str = "10.0.0.1:8080";
 
 /// The decision engine's per-consult deadline (`call_control_timeout_ms`).
 const CONSULT_BUDGET: Duration = Duration::from_secs(2);
+/// The per-consult deadline's default, longer than the default probe's
+/// latest dead verdict: a consult lost with a node killed unannounced is sent
+/// again before it is due.
+const DEFAULT_CONSULT_BUDGET: Duration = Duration::from_secs(5);
 /// The limiter client's admit budget.
 const ADMIT_BUDGET: Duration = Duration::from_millis(500);
 /// A maximum duration subscribed to its release event, short enough to fire
@@ -137,11 +141,17 @@ struct Cluster {
 /// routing with `max_duration_sec`, and one limiter server; the proxy tells
 /// no dead verdict.
 async fn cluster(name: &str, max_duration_sec: i64) -> Cluster {
-    cluster_telling(name, max_duration_sec, false).await
+    cluster_telling(name, max_duration_sec, false, CONSULT_BUDGET).await
 }
 
-/// [`cluster`], the proxy telling its dead verdicts when `tells`.
-async fn cluster_telling(name: &str, max_duration_sec: i64, tells: bool) -> Cluster {
+/// [`cluster`], the proxy telling its dead verdicts when `tells`, each consult
+/// due `consult_budget` after it is sent.
+async fn cluster_telling(
+    name: &str,
+    max_duration_sec: i64,
+    tells: bool,
+    consult_budget: Duration,
+) -> Cluster {
     let http = SimulatedHttpNetwork::new();
     let store = Arc::new(CallStore::new(LEASE_OUTLIVING_THE_REPLICA_TTL, Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
@@ -151,8 +161,9 @@ async fn cluster_telling(name: &str, max_duration_sec: i64, tells: bool) -> Clus
     let asked = Arc::new(AtomicUsize::new(0));
     let engine: Arc<dyn CallDecisionEngine> =
         Arc::new(Unanswering { max_duration_sec, asked: asked.clone() });
-    let mut fh = FailoverHarness::new(name, &["b1", "b2"]).with_worker_tune(|c| {
-        c.call_control_timeout_ms = CONSULT_BUDGET.as_millis() as i64;
+    let consult_ms = consult_budget.as_millis() as i64;
+    let mut fh = FailoverHarness::new(name, &["b1", "b2"]).with_worker_tune(move |c| {
+        c.call_control_timeout_ms = consult_ms;
         c.refer_subscription_expiry_sec = REFER_EXPIRY_SEC;
     });
     let alice = fh.agent("alice", ALICE).await;
@@ -486,8 +497,10 @@ async fn a_refer_consult_lost_with_its_node_is_sent_again_and_ends_at_the_subscr
 }
 
 /// How long the proxy's probe takes to read a node killed unannounced dead
-/// (ADR-0031 case 3a: two missed windows).
-const PROBE_READS_DEAD_AFTER: Duration = Duration::from_secs(2);
+/// (ADR-0031 case 3a): the default probe's latest verdict.
+fn probe_reads_dead_after() -> Duration {
+    sip_proxy::health::HealthProbeConfig::default().verdict_within()
+}
 
 /// A REFER's authorization lost with a primary killed unannounced: the
 /// replication stream from it ends with the node, so the proxy's dead verdict
@@ -497,8 +510,13 @@ const PROBE_READS_DEAD_AFTER: Duration = Duration::from_secs(2);
 /// on and ends with one CDR once the node's endpoint leaves the slice.
 #[tokio::test(start_paused = true)]
 async fn a_refer_consult_lost_with_a_node_killed_unannounced_is_sent_again_at_the_verdict() {
-    let mut c =
-        cluster_telling("consult-answer-deadline-refer-read-dead", LONG_DURATION_SEC, true).await;
+    let mut c = cluster_telling(
+        "consult-answer-deadline-refer-read-dead",
+        LONG_DURATION_SEC,
+        true,
+        DEFAULT_CONSULT_BUDGET,
+    )
+    .await;
     let mut call = establish(&mut c).await;
     let refer_at = c.fh.now_ms();
     let mut refer = call
@@ -514,14 +532,14 @@ async fn a_refer_consult_lost_with_a_node_killed_unannounced_is_sent_again_at_th
     c.fh.advance(Duration::from_millis(300)).await;
     c.fh.mark(&primary, None, "crash", "kill (unannounced)");
     worker(&mut c, &primary).crash();
-    c.fh.advance(PROBE_READS_DEAD_AFTER).await;
+    c.fh.advance(probe_reads_dead_after()).await;
     assert_eq!(c.asked.load(Ordering::SeqCst), 1, "nothing is sent again before the verdict");
 
     c.fh.mark(&primary, None, "health", "the proxy's probe reads it dead");
     c.proxy.set_health(&primary, WorkerHealth::Dead);
     let verdict_at = c.fh.now_ms();
     let resent_at = consults_sent(&mut c, 2).await;
-    let lost_due = asked_at + (CONSULT_BUDGET + MARGIN).as_millis() as i64;
+    let lost_due = asked_at + (DEFAULT_CONSULT_BUDGET + MARGIN).as_millis() as i64;
     assert!(resent_at < lost_due, "re-sent before the lost authorization is due");
     assert!(resent_at <= verdict_at + 500, "re-sent at the verdict");
     let backup = backup_of(&primary);

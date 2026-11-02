@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use sip_proxy::health::HealthProbeConfig;
 use tokio::time::Instant;
 
 use crate::cluster::Cluster;
@@ -22,9 +23,12 @@ const HEAL_AFTER: Duration = Duration::from_secs(1);
 /// How long the replication stalls before the primary dies
 /// ([`Incident::StalledKilled`]): past the hold's cap, and the §17.2.1 bound.
 const STALL_FOR: Duration = Duration::from_millis(300);
-/// How long the proxy's OPTIONS probe takes to read an unannounced kill dead:
-/// two missed windows (ADR-0031 case 3a).
-const PROBE_READS_DEAD_AFTER: Duration = Duration::from_secs(2);
+/// How long the proxy's OPTIONS probe takes to read an unannounced kill dead
+/// (ADR-0031 case 3a): the latest verdict of the default probe, the kill
+/// landing right after the worker answered a probe (ADR-0047 D1).
+fn probe_reads_dead_after() -> Duration {
+    HealthProbeConfig::default().verdict_within()
+}
 /// How long an unannounced kill's endpoint reads ready (ADR-0031 case 3a, the
 /// first ~40 s): then the node controller marks it not ready, in the slice.
 const NOT_READY_AFTER: Duration = Duration::from_secs(40);
@@ -79,7 +83,7 @@ impl Aftermath {
             Incident::StalledKilled => vec![(STALL_FOR, Step::KillAfterTheStall)],
             Incident::PrimaryKilledUnannounced => {
                 vec![
-                    (PROBE_READS_DEAD_AFTER, Step::ProbeReadsDead),
+                    (probe_reads_dead_after(), Step::ProbeReadsDead),
                     (NOT_READY_AFTER, Step::NotReady),
                     (DEPARTS_AFTER, Step::Depart),
                 ]

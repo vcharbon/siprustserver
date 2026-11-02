@@ -74,10 +74,13 @@ a peer still in the set, never on this node's own shutdown
 
 A front proxy's **dead verdict** on a peer is the second trigger (ADR-0050 §3): the
 signed `X-Worker-Dead` notice an out-of-dialog OPTIONS carries, taken once per verdict.
-The proxy reads a death the membership does not show (ADR-0031 case 3a) about 2 s after
-it, and from then on routes the peer's traffic to its backups, so the backups act on
-that verdict rather than wait for the endpoint to leave the slice. A notice naming this
-node is ignored (`router/dead_verdict/tests.rs`;
+The proxy reads a death the membership does not show (ADR-0031 case 3a) when the reply
+window of the `HEALTH_THRESHOLD`-th probe the peer leaves unanswered ends:
+`(HEALTH_THRESHOLD − 1) × HEALTH_INTERVAL_MS + HEALTH_TIMEOUT_MS` after the first one was
+sent, which leaves within one interval of the death, so 2.5 to 3.5 s after it by default
+(`probe_dead_verdict.rs`). From then on it routes the peer's traffic to its backups, so
+the backups act on that verdict rather than wait for the endpoint to leave the slice. A
+notice naming this node is ignored (`router/dead_verdict/tests.rs`;
 `read_dead_primary_taken_over.rs`).
 
 The backup confirms the verdict by itself, on its own Backup flow from that peer (user
