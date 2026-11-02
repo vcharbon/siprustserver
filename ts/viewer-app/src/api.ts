@@ -1202,6 +1202,8 @@ export interface Campaign {
    * null where the page reads another environment than the server's.
    */
   readonly launch: { readonly lanes: readonly LaunchLane[] } | null
+  /** The environment the server starts this campaign's runs in; null where it starts none. */
+  readonly own: string | null
 }
 
 /** One lane a page start may name: the lanes of one group run together, a refused one does not run here. */

@@ -38,6 +38,7 @@ const VIEW: Campaign = {
   sides: [],
   lanes: ["fake", "real"],
   launch: null,
+  own: null,
   cases: [kase("R/a", "bye"), kase("R/a", "cancel"), kase("R/a", "prack"), kase("R/b", null)],
   runs: [{
     id: 9,

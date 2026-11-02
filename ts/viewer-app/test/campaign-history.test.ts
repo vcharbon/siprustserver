@@ -24,6 +24,7 @@ const VIEW: Campaign = {
   env: null,
   envs: [],
   launch: null,
+  own: null,
   saidLabel: "decision said",
   sides: ["decision", "sut"],
   lanes: ["lane-x", "lane-y"],
