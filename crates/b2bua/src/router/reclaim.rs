@@ -248,4 +248,6 @@ pub(super) async fn discharge_as_own(ctx: &Arc<RouterCtx>, call_ref: &str, now_m
 }
 
 #[cfg(test)]
+mod parked_probe_tests;
+#[cfg(test)]
 mod tests;

@@ -7,7 +7,9 @@
 //! sent it).
 
 use b2bua_sdk::model::{LegEnd, RuleAction, RuleContext};
-use call::{ByeDisposition, CdrEventType, LegDisposition, TerminationCause, TimeoutKind};
+use call::{ByeDisposition, LegDisposition, TerminationCause, TimeoutKind};
+
+use super::keepalive_failure::keepalive_failure;
 
 use sip_message::Method;
 
@@ -38,8 +40,8 @@ fn own_timeout(method: &str) -> OwnTimeout {
 /// stack's own request's: a PRACK's denies that acknowledgement alone; on a
 /// leg going away it is the leg's end; a NOTIFY's ends its subscription
 /// alone, which a service owning it reads; a keepalive probe's ends the
-/// session under the keepalive deadline ([`keepalive_failure`]); any other
-/// ends the session.
+/// session under the keepalive deadline (`super::keepalive_failure`); any
+/// other ends the session.
 pub(super) fn record_timeout_actions(
     ctx: &RuleContext,
     record: &call::RequestRecord,
@@ -55,35 +57,15 @@ pub(super) fn record_timeout_actions(
     }
     match own {
         OwnTimeout::Transaction | OwnTimeout::Usage => vec![],
-        OwnTimeout::Session if record.is_keepalive() => keepalive_failure(ctx),
+        OwnTimeout::Session if record.is_keepalive() => {
+            keepalive_failure(ctx, None, "keepalive timeout")
+        }
         OwnTimeout::Session => vec![RuleAction::BeginTermination {
             reason: Some("timeout".into()),
             cause: TerminationCause::Timeout(TimeoutKind::Transaction),
             by_leg: Some(ctx.source_leg_id.to_string()),
         }],
     }
-}
-
-/// The liveness probe on the source leg drew no answer by its Timer F: the
-/// call ends by that leg, and the silent leg is BYEd like its peer (RFC 3261
-/// §12.2.1.2: no response to an in-dialog request ends an INVITE dialog by a
-/// BYE — the probe may be what was lost, not the peer). A leg silent on its
-/// BYE too resolves by that BYE's own timeout.
-fn keepalive_failure(ctx: &RuleContext) -> Vec<RuleAction> {
-    let leg_id = ctx.source_leg_id.to_string();
-    vec![
-        RuleAction::AddCdrEvent {
-            event_type: CdrEventType::Bye,
-            leg_id: leg_id.clone(),
-            status_code: None,
-            reason: Some("keepalive timeout".into()),
-        },
-        RuleAction::BeginTermination {
-            reason: Some("keepalive-timeout".into()),
-            cause: TerminationCause::Timeout(TimeoutKind::Keepalive),
-            by_leg: Some(leg_id),
-        },
-    ]
 }
 
 /// A transaction timing out on `leg`, a leg already going away, makes no

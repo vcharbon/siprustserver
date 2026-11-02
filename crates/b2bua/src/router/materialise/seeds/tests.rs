@@ -638,6 +638,31 @@ fn a_sent_record_seeds_what_is_left_of_its_timer_f_and_none_past_it() {
     );
 }
 
+/// A keepalive probe on record is never restored, whichever node sent it:
+/// it seeds no transaction inside its Timer F and owes no timeout past it.
+#[test]
+fn a_keepalive_probe_seeds_nothing_and_owes_no_timeout() {
+    let mut leg = b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1)));
+    let sent = call::SentRequest {
+        branch: "z9hG4bK-probe".into(),
+        image: b_handle("z9hG4bK-probe", 2).image,
+        destination: HostPort { host: "10.0.0.9".into(), port: 5080 },
+    };
+    confirmed(&mut leg).requests.push(RequestRecord {
+        author: Some(call::KEEPALIVE_AUTHOR.into()),
+        ..RequestRecord::own("OPTIONS", 2, sent, 30_000, Default::default())
+    });
+    let call = call_with(LegState::Confirmed, leg);
+
+    for now in [10_000, 30_000] {
+        assert!(
+            !seeds_for(&call, now).iter().any(|s| matches!(s, TxnSeed::ClientNonInvite { .. })),
+            "no probe is re-sent at {now}"
+        );
+        assert!(overdue_sent(&call, now).is_empty(), "no probe times out at {now}");
+    }
+}
+
 /// The caller's INFO relayed onto the b-leg's confirmed dialog under
 /// `branch`, its Timer F ending at `deadline_ms`.
 fn relayed_info(leg: &mut Leg, branch: &str, deadline_ms: i64) {

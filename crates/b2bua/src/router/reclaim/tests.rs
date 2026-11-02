@@ -31,7 +31,7 @@ fn base(p: i64, b: i64) -> Enveloped {
 }
 
 /// `copy` as a replicated body.
-fn body(copy: &Enveloped) -> Vec<u8> {
+pub(super) fn body(copy: &Enveloped) -> Vec<u8> {
     envelope::encode(&MsgpackCodec::new(), copy.topology.as_ref(), &copy.call).unwrap()
 }
 
@@ -50,7 +50,7 @@ fn unanswered(p: i64, b: i64, state: CallModelState) -> Enveloped {
 /// The caller was answered — a durable fact of the body: the 2xx this stack
 /// sent her is recorded on the leg and the pair is bridged, both of which
 /// outlive the leg going `Terminated`.
-fn answered(p: i64, b: i64, state: CallModelState) -> Enveloped {
+pub(super) fn answered(p: i64, b: i64, state: CallModelState) -> Enveloped {
     let Enveloped { mut call, topology } = base(p, b);
     call.state = state;
     *call.a_leg.invite_final_sent_mut() = Some(200);
@@ -64,7 +64,7 @@ fn answered(p: i64, b: i64, state: CallModelState) -> Enveloped {
 }
 
 /// `call` stamped at `(p, b)`: its last write that changed a compared field.
-fn stamped(mut copy: Enveloped, p: i64, b: i64) -> Enveloped {
+pub(super) fn stamped(mut copy: Enveloped, p: i64, b: i64) -> Enveloped {
     let t = copy.topology.as_mut().expect("a replicable call");
     (t.stamp_gen, t.stamp_bak_gen) = (p, b);
     copy

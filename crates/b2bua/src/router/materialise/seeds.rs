@@ -126,6 +126,11 @@ fn record_seeds(
             .map(|response| TxnSeed::ServerAccepted { response, leg_id: Some(leg.leg_id.clone()) });
         return accepted.into_iter().collect();
     }
+    // A keepalive probe is never restored: its answer goes to the node that
+    // sent it, and the copy probes again on its own interval.
+    if record.is_keepalive() {
+        return Vec::new();
+    }
     if record.is_invite() {
         let mut seeds: Vec<TxnSeed> = sent_invite_seed(leg, dialog, record).into_iter().collect();
         if call::helpers::relayed_invite_pending(dialog) {
@@ -335,10 +340,11 @@ fn remaining_ms(record: &RequestRecord, now_ms: i64) -> Option<u64> {
 /// The timeout each sent non-INVITE request of `call` whose deadline passed
 /// by `now_ms` owes the call: its transaction gave up on the node that sent
 /// it, or would have (RFC 3261 §17.1.2.2), so the copy settles its record as
-/// that node's timeout would have.
+/// that node's timeout would have. A keepalive probe owes none: its answer
+/// went to the node that sent it.
 pub(super) fn overdue_sent(call: &Call, now_ms: i64) -> Vec<CallEvent> {
     call::helpers::every_record(call)
-        .filter(|(_, _, r)| !invite_record(r) && r.sent.is_some())
+        .filter(|(_, _, r)| !invite_record(r) && !r.is_keepalive() && r.sent.is_some())
         .filter(|(_, _, r)| remaining_ms(r, now_ms).is_none())
         .filter_map(|(leg, _, r)| {
             let sent = r.sent.as_ref()?;

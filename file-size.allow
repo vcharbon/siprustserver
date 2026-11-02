@@ -12,7 +12,7 @@ ext .rs
 # `exclude <path glob>`.
 
 crates/b2bua-core/src/rules/actions/respond.rs 612
-crates/b2bua-core/src/rules/defaults/core_rules.rs 1542
+crates/b2bua-core/src/rules/defaults/core_rules.rs 1514
 crates/b2bua-core/src/rules/relay_first_18x.rs 524
 crates/b2bua-core/src/rules/relay/sdp_session_tests.rs 916
 crates/b2bua-harness/src/lib.rs 831

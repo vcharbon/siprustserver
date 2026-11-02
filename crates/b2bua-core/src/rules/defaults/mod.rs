@@ -23,6 +23,7 @@
 mod compose;
 mod core_rules;
 mod failover_rules;
+mod keepalive_failure;
 mod reaper_verdicts;
 mod request_timeouts;
 mod route_fold;

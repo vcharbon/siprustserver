@@ -696,35 +696,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ])
             },
         ),
-        // The liveness probe refused with any other failure (RFC 3261 §11: a
-        // UAS answers OPTIONS as it would an INVITE) is the probe's failure as
-        // its silence is: the call ends under the keepalive deadline and both
-        // legs are BYEd (§12.2.1.2). A 481 is `handle-481`'s.
-        rule(
-            "keepalive-refused",
-            &[],
-            Match::response().method("OPTIONS").call_state(CallModelState::Active).filter(|ctx| {
-                ctx.response().is_some_and(|r| r.status() >= 300 && r.status() != 481)
-                    && ctx.answered_record().is_some_and(call::RequestRecord::is_keepalive)
-            }),
-            |ctx| {
-                let src = ctx.source_leg_id.to_string();
-                let Some(resp) = ctx.response() else { return ok(vec![]) };
-                ok(vec![
-                    RuleAction::AddCdrEvent {
-                        event_type: CdrEventType::Bye,
-                        leg_id: src.clone(),
-                        status_code: Some(i64::from(resp.status())),
-                        reason: Some(resp.reason().to_string()),
-                    },
-                    RuleAction::BeginTermination {
-                        reason: Some(resp.status().to_string()),
-                        cause: TerminationCause::Timeout(TimeoutKind::Keepalive),
-                        by_leg: Some(src),
-                    },
-                ])
-            },
-        ),
+        super::keepalive_failure::keepalive_dialog_terminated_rule(),
         // A non-2xx final to a request THIS STACK originated — its own PRACK
         // toward a responder whose provisional the originator was never shown
         // reliably, or a REFER-progress NOTIFY — records as this stack's own,
@@ -1366,7 +1338,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         .runs_while_terminating(),
         // Every interval, each peered leg is probed with an in-dialog OPTIONS
         // (RFC 3261 §11). The probe has one deadline, its own transaction's
-        // Timer F: unanswered, it ends the call (`handle-timeout`).
+        // Timer F; what ends the call on it is `super::keepalive_failure`'s.
         rule(
             call::KEEPALIVE_AUTHOR,
             &[],

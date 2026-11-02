@@ -244,7 +244,8 @@ release**: a release result, a route it answered that could not complete, a
 media program run to its end); the duration cap (**max duration**); a
 deadline by kind (**timeout**: a call-level completion deadline — the setup
 deadline or a transfer's overall guard —, no answer, PRACK, ACK, keepalive —
-the probe unanswered by its own Timer F, or refused —, transaction); the stack's own
+the probe unanswered by its own Timer F, or answered with a dialog-terminating
+final —, transaction); the stack's own
 refusal (**admission**: a limiter, the destination
 allow-list, a spent hop budget, a malformed INVITE, an unreadable or unanswered
 decision); the per-call message cap; the **supervisor** (a reaper strike, a
