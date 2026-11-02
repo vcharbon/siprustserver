@@ -13,6 +13,7 @@ each runner's startup check.
 | `worker.replication.enabled` ⇒ `worker.replicas` ≥ 2 | a backup lives on another worker |
 | worker B2BUA_CDR_RABBITMQ_MAX_LEN = consumer CDR_QUEUE_MAX_LEN | both declare the one queue; a different argument fails the second declare |
 | every RSS ceiling (B2BUA_MAX_RSS, _EMERGENCY, B2BUA_REPL_BACKUP_MAX_RSS) < worker `resources.limits.memory` | a ceiling at the limit is never reached before the OOM kill |
+| worker B2BUA_INVITE_TXN_TIMEOUT_SEC = proxy PROXY_INVITE_TXN_TIMEOUT_SEC (`inviteTxnTimeoutSec`) | the proxy keeps an INVITE's memo entry for the bound the workers ring under |
 | `proxy.hmac.existingSecret` set, or `proxy.hmac.drawInCluster` | a render without a cluster (helm template, GitOps) draws a new cookie key each time |
 
 The proxy's BGP withdrawal bounds join the proxy row when they exist.
@@ -61,6 +62,14 @@ The proxy's BGP withdrawal bounds join the proxy row when they exist.
 {{- $pterm := mul (int64 $p.terminationGracePeriodSeconds) 1000 }}
 {{- if le $pterm (add $pgrace $margin) }}
 {{- fail (printf "proxy.terminationGracePeriodSeconds=%d s must exceed PROXY_DRAIN_GRACE_MS=%d + %d ms: the kubelet would kill the proxy's drain" (int64 $p.terminationGracePeriodSeconds) $pgrace $margin) }}
+{{- end }}
+{{- if .Values.worker.enabled }}
+{{- $default := ternary "" (toString (int .Values.inviteTxnTimeoutSec)) (kindIs "invalid" .Values.inviteTxnTimeoutSec) }}
+{{- $wb := get (.Values.worker.env | default dict) "B2BUA_INVITE_TXN_TIMEOUT_SEC" | default $default | toString }}
+{{- $pb := get $penv "PROXY_INVITE_TXN_TIMEOUT_SEC" | default $default | toString }}
+{{- if ne $wb $pb }}
+{{- fail (printf "worker B2BUA_INVITE_TXN_TIMEOUT_SEC=%q differs from proxy PROXY_INVITE_TXN_TIMEOUT_SEC=%q: the proxy keeps an INVITE's memo entry for the bound the workers ring under; set inviteTxnTimeoutSec" $wb $pb) }}
+{{- end }}
 {{- end }}
 {{- if not (or $p.hmac.existingSecret $p.hmac.drawInCluster) }}
 {{- fail "proxy.hmac.existingSecret is required: name the Secret (keys kid, key) both proxies read. Only a release installed against its cluster (the kind lab) may set proxy.hmac.drawInCluster, where the key is drawn once and read back by lookup" }}

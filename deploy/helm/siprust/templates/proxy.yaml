@@ -26,6 +26,9 @@ of the headless b2bua-worker Service (ADR-0012 D4).
   "OTEL_EXPORTER_OTLP_ENDPOINT" .Values.tracing.otlpEndpoint
   "SIP_TRACE_HEADER" (include "siprust.traceHeader" .)
 }}
+{{- if not (kindIs "invalid" .Values.inviteTxnTimeoutSec) }}
+{{- $_ := set $env "PROXY_INVITE_TXN_TIMEOUT_SEC" (toString (int .Values.inviteTxnTimeoutSec)) }}
+{{- end }}
 {{- if not (kindIs "invalid" $p.recvShards) }}
 {{- $_ := set $env "PROXY_RECV_SHARDS" (toString (int $p.recvShards)) }}
 {{- end }}

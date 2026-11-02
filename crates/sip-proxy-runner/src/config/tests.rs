@@ -46,11 +46,15 @@ fn the_branch_memo_bounds_are_read() {
     let cfg = boot(&[]).expect("valid");
     assert_eq!(cfg.branch_memo, sip_proxy::cancel_lru::MemoBounds::default());
     let cfg = boot(&[
-        ("PROXY_BRANCH_MEMO_MAX_ENTRIES", "1000"),
+        ("PROXY_BRANCH_MEMO_MAX_ENTRIES", "100000"),
         ("PROXY_BRANCH_MEMO_MAX_BYTES", "8589934592"),
+        ("PROXY_BRANCH_MEMO_MEAN_RING_MS", "20000"),
+        ("PROXY_INVITE_TXN_TIMEOUT_SEC", "210"),
     ])
     .expect("valid");
-    assert_eq!((cfg.branch_memo.max_entries, cfg.branch_memo.max_bytes), (1000, 8 << 30));
+    let memo = cfg.branch_memo;
+    assert_eq!((memo.max_entries, memo.max_bytes), (100_000, 8 << 30));
+    assert_eq!((memo.mean_ring_ms, memo.invite_ttl_ms), (20_000, 242_000));
     let errors = boot(&[("PROXY_BRANCH_MEMO_MAX_BYTES", "0")]).expect_err("zero bytes");
     assert!(errors.iter().any(|e| e.contains("PROXY_BRANCH_MEMO_MAX_BYTES")), "{errors:?}");
 }

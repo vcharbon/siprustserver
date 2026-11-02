@@ -10,6 +10,7 @@ use super::{CancelEntry, Lifetime, MemoBounds};
 pub(super) struct Stripe {
     invite: Pool,
     retransmission: Pool,
+    invite_ttl_ms: u64,
 }
 
 impl Stripe {
@@ -21,6 +22,7 @@ impl Stripe {
         Self {
             invite: pool(Lifetime::InviteTransaction),
             retransmission: pool(Lifetime::Retransmission),
+            invite_ttl_ms: bounds.ttl_ms(Lifetime::InviteTransaction),
         }
     }
 
@@ -47,10 +49,14 @@ impl Stripe {
         now_ms: u64,
         change: &mut Change,
     ) {
+        let ttl_ms = match lifetime {
+            Lifetime::InviteTransaction => self.invite_ttl_ms,
+            Lifetime::Retransmission => super::RTX_ENTRY_TTL_MS,
+        };
         let (own, other) = self.pools(lifetime);
         other.remove(key, change);
         own.expire(now_ms, change);
-        own.insert(key, entry, now_ms.saturating_add(lifetime.ttl_ms()), change);
+        own.insert(key, entry, now_ms.saturating_add(ttl_ms), change);
     }
 
     /// The live entry under `key`; one held in the INVITE-transaction pool

@@ -143,8 +143,10 @@ winner, a membership change — and the memo covers it at the instance that plac
 INVITE it forwards, a retransmission entry for every request but a CANCEL, and an ACK
 hop for every non-2xx INVITE final it relays, whether or not the INVITE crossed it. An
 INVITE's entry is shortened to Timer H (the non-2xx ACK window, RFC 3261 §17.2.1) when
-its final passes the instance (`core/response/final_memo`); the INVITE bound
-(`INVITE_ENTRY_TTL_MS`) stays the cap of an entry whose final crossed the other one. So
+its final passes the instance (`core/response/final_memo`); the workers' INVITE
+transaction bound plus Timer H (`PROXY_INVITE_TXN_TIMEOUT_SEC`, one chart value with the
+workers' `B2BUA_INVITE_TXN_TIMEOUT_SEC`) stays the cap of an entry whose final crossed
+the other one. So
 a call holds memo for its ring time plus Timer H, and the memo is sized on the
 deployment's call rate and mean ring, where its eviction happens only under abnormal
 load. The instance that placed a call knows where it went, a placement away from the

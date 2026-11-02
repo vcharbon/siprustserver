@@ -9,7 +9,7 @@ mod reader;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use sip_proxy::cancel_lru::MemoBounds;
+use sip_proxy::cancel_lru::{calls_per_second, invite_entry_ttl_ms, MemoBounds};
 use sip_proxy::health::HealthProbeConfig;
 use sip_proxy::load_observer::LoadObserverConfig;
 use sip_proxy::resolver::ResolverConfig;
@@ -125,6 +125,22 @@ impl ProxyConfig {
             ProbeTimingConfig { interval_ms: probe.interval_ms, timeout_ms: probe.timeout_ms };
         if let Err(violations) = validate_config(timings, &observer) {
             errors.extend(violations);
+        }
+        // The memo holds the entries of every call the self-gate admits.
+        if let Some(gate) = &self_gate {
+            let held = calls_per_second(&branch_memo);
+            if held < usize::try_from(gate.cps_bucket_rate).unwrap_or(usize::MAX) {
+                errors.push(format!(
+                    "PROXY_BRANCH_MEMO_MAX_ENTRIES={} / PROXY_BRANCH_MEMO_MAX_BYTES={} hold the \
+                     memo of {held} calls/s at PROXY_BRANCH_MEMO_MEAN_RING_MS={}, below \
+                     PROXY_SELF_GATE_CPS_RATE={}: admitted calls would push out the entries \
+                     their CANCEL and ACK are routed by",
+                    branch_memo.max_entries,
+                    branch_memo.max_bytes,
+                    branch_memo.mean_ring_ms,
+                    gate.cps_bucket_rate
+                ));
+            }
         }
         // A recreated pod on the same host binds the faces its predecessor
         // holds until that one's drain ends.
@@ -362,16 +378,26 @@ fn self_gate(env: &mut EnvReader) -> Option<ProxySelfGateConfig> {
     on.then_some(cfg)
 }
 
-/// The branch memo's entry cap and byte budget.
+/// The branch memo's entry cap and byte budget, the mean ring they are
+/// split on, and the INVITE entry's cap, derived from the downstream INVITE
+/// transaction bound `PROXY_INVITE_TXN_TIMEOUT_SEC` (the workers' bound).
 fn branch_memo(env: &mut EnvReader) -> MemoBounds {
     let d = MemoBounds::default();
-    let mut size = |key: &str, default: usize| {
+    let size = |env: &mut EnvReader, key: &str, default: usize| {
         let default = u64::try_from(default).unwrap_or(u64::MAX);
         usize::try_from(env.int(key, default, 1, u64::MAX)).unwrap_or(usize::MAX)
     };
+    let bound_sec = env.int(
+        "PROXY_INVITE_TXN_TIMEOUT_SEC",
+        sip_txn::timers::INVITE_INITIAL_TIMEOUT / 1000,
+        33,
+        600,
+    );
     MemoBounds {
-        max_entries: size("PROXY_BRANCH_MEMO_MAX_ENTRIES", d.max_entries),
-        max_bytes: size("PROXY_BRANCH_MEMO_MAX_BYTES", d.max_bytes),
+        max_entries: size(env, "PROXY_BRANCH_MEMO_MAX_ENTRIES", d.max_entries),
+        max_bytes: size(env, "PROXY_BRANCH_MEMO_MAX_BYTES", d.max_bytes),
+        mean_ring_ms: env.int("PROXY_BRANCH_MEMO_MEAN_RING_MS", d.mean_ring_ms, 1, MAX_MS),
+        invite_ttl_ms: invite_entry_ttl_ms(bound_sec),
         ..d
     }
 }

@@ -18,8 +18,7 @@
 //!     self-overload (a stateless 503 + `Retry-After`, the same for every copy). A 100 ms
 //!     `tokio::time::interval` task drives its load sampler. `PROXY_SELF_GATE=0`
 //!     reverts to the always-admit gate.
-//!   - Prometheus `/metrics` + `/healthz` + `/readyz` + `/vrrp` via the shared
-//!     `probe-http`.
+//!   - Prometheus `/metrics` + `/healthz` + `/readyz` + `/vrrp` (`probe-http`).
 //!
 //! Config via env, read once before the first bind
 //! ([`sip_proxy_runner::config`]). Unset takes the default; a value set
@@ -74,8 +73,7 @@
 //!                    exceed PROXY_DRAIN_GRACE_MS (refused at boot) so a
 //!                    recreated pod waits out its predecessor instead of
 //!                    crash-looping (default 10000)
-//!   PROXY_DRAIN_GRACE_MS  wait between SIGTERM (/readyz Draining) and exit,
-//!                    ms ≥ 1, below the pod's termination grace (default 5000)
+//!   PROXY_DRAIN_GRACE_MS  SIGTERM (/readyz Draining) to exit, ms ≥ 1 (5000)
 //!   PROXY_HMAC_KID   stickiness cookie key id              (default k0)
 //!   PROXY_HMAC_KEY   stickiness cookie secret, ≥ 16 bytes  (REQUIRED, no
 //!                    default; every proxy of a cluster shares it); a key
@@ -110,11 +108,13 @@
 //!   PROXY_RETRY_AFTER_JITTER_SEC  spread added to a refusal's Retry-After
 //!                    base, seconds 0..3600; every copy of one request draws
 //!                    the same value                           (default 5)
-//!   PROXY_BRANCH_MEMO_MAX_BYTES    accounted-byte budget of the CANCEL/ACK/
-//!                    retransmission branch memo, ≥ 1 (default 192 MiB, 3/8
-//!                    of the 512 MiB pod limit)
-//!   PROXY_BRANCH_MEMO_MAX_ENTRIES  entry cap of that memo, ≥ 1 (default: the
-//!                    entries of the heaviest shape the budget holds, 78 643)
+//!   PROXY_BRANCH_MEMO_MAX_BYTES / _MAX_ENTRIES  accounted bytes and entries of
+//!                    the CANCEL/ACK/retransmission memo, ≥ 1 (default 192 MiB
+//!                    and the 78 643 heaviest entries it holds); at
+//!                    PROXY_BRANCH_MEMO_MEAN_RING_MS (default 30000) they hold
+//!                    PROXY_SELF_GATE_CPS_RATE's calls (refused at boot)
+//!   PROXY_INVITE_TXN_TIMEOUT_SEC  the workers' INVITE bound, 33..=600 (default
+//!                    158): an INVITE memo entry lives it + Timer H at most
 
 // The panic set at deny outside test code (ADR-0051 §3).
 #![cfg_attr(

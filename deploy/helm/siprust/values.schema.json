@@ -661,6 +661,14 @@
           "$ref": "#/definitions/resources"
         }
       }
+    },
+    "inviteTxnTimeoutSec": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 33,
+      "maximum": 600
     }
   }
 }

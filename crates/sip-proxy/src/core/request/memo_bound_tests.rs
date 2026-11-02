@@ -106,7 +106,7 @@ async fn flood(core: &ProxyCore, from: usize, count: usize) {
 async fn cancel_and_ack_find_their_hop_through_a_flood_at_the_cap() {
     let lru = Arc::new(CancelBranchLru::with_bounds(
         Clock::test_at(0),
-        MemoBounds { max_entries: CAP, max_bytes: usize::MAX, stripes: 1 },
+        MemoBounds { max_entries: CAP, max_bytes: usize::MAX, stripes: 1, ..MemoBounds::default() },
     ));
     let metrics = Arc::new(ProxyMetrics::new());
     let core = core(lru.clone(), metrics.clone()).await;
@@ -159,7 +159,7 @@ Content-Length: 0\r\n\r\n"
 async fn a_flood_of_invite_entries_keeps_the_short_memos_of_a_new_transaction() {
     let lru = Arc::new(CancelBranchLru::with_bounds(
         Clock::test_at(0),
-        MemoBounds { max_entries: CAP, max_bytes: usize::MAX, stripes: 1 },
+        MemoBounds { max_entries: CAP, max_bytes: usize::MAX, stripes: 1, ..MemoBounds::default() },
     ));
     let metrics = Arc::new(ProxyMetrics::new());
     let core = core(lru.clone(), metrics.clone()).await;

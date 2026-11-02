@@ -25,6 +25,9 @@ B2BUA_LOOP_STALL_MS.
 {{- with $w.dest }}
 {{- $_ := set $env "B2BUA_DEST" . }}
 {{- end }}
+{{- if not (kindIs "invalid" .Values.inviteTxnTimeoutSec) }}
+{{- $_ := set $env "B2BUA_INVITE_TXN_TIMEOUT_SEC" (toString (int .Values.inviteTxnTimeoutSec)) }}
+{{- end }}
 {{- /* Behind the proxy, b-leg requests go through its internal VIP and every
 Contact names its external VIP; without it the worker is standalone. */ -}}
 {{- if .Values.proxy.enabled }}

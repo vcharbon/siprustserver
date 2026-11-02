@@ -46,33 +46,19 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use sip_clock::Clock;
 use sip_message::header::Via;
-use sip_txn::timers::{INVITE_INITIAL_TIMEOUT, TIMER_F, TIMER_H};
+use sip_txn::timers::{TIMER_F, TIMER_H};
 
 use crate::addr::ProxyAddr;
 use crate::observability::{catalogue, ProxyMetrics};
 use crate::poison::{locked, INVITE_BRANCH_LRU};
 use crate::strategy::RouteParams;
 pub use bounds::{
-    calls_per_second, MemoBounds, DEFAULT_MAX_BYTES, DEFAULT_MAX_ENTRIES, DEFAULT_STRIPES,
-    ENTRY_MS_PER_CALL, TYPICAL_ENTRY_BYTES,
+    calls_per_second, entry_ms_per_call, invite_entry_ttl_ms, MemoBounds, DEFAULT_MAX_BYTES,
+    DEFAULT_MAX_ENTRIES, DEFAULT_MEAN_RING_MS, DEFAULT_STRIPES, INVITE_ENTRY_TTL_MS,
+    TYPICAL_ENTRY_BYTES,
 };
 use pool::Change;
 use stripe::Stripe;
-
-/// TTL for pending-INVITE entries (CANCEL forwarding + the non-2xx ACK hop),
-/// the cap of an entry whose final this proxy never relays: an entry whose
-/// final passes is shortened to Timer H ([`CancelBranchLru::shorten`]).
-/// Must cover the downstream UA's **whole INVITE transaction window**: the
-/// B2BUA answers or gives up within `sip-txn`'s `INVITE_INITIAL_TIMEOUT`
-/// (158 s, which wraps its 150 s `SetupTimeout` ledger), plus the
-/// final-response retransmit tail (Timer H). Imported from `sip-txn` so the
-/// proxy's memory and the B2BUA's transaction timers cannot drift apart: a TTL
-/// under the ringing window loses the CANCEL's target and the non-2xx ACK's
-/// hop while the callee is still legally ringing.
-/// Covers the DEFAULT b2bua bound; a deployment raising
-/// `B2BUA_INVITE_TXN_TIMEOUT_SEC` beyond this TTL degrades late-CANCEL /
-/// non-2xx-ACK hop memory.
-pub const INVITE_ENTRY_TTL_MS: u64 = INVITE_INITIAL_TIMEOUT + TIMER_H;
 
 /// TTL for retransmission target memos (`rtx|` keys): upstream retransmits
 /// stop at Timer B/F (64×T1 = 32 s), so these need live no longer. They are
@@ -85,21 +71,15 @@ pub const RTX_ENTRY_TTL_MS: u64 = TIMER_F;
 /// How long a memo entry lives, and the pool of each stripe it is held in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lifetime {
-    /// [`INVITE_ENTRY_TTL_MS`]: an INVITE transaction's CANCEL target.
+    /// [`MemoBounds::invite_ttl_ms`], the cap derived from the downstream
+    /// INVITE transaction bound ([`invite_entry_ttl_ms`]), shortened to Timer H
+    /// when the final passes ([`CancelBranchLru::shorten`]): an INVITE
+    /// transaction's CANCEL target.
     InviteTransaction,
     /// [`RTX_ENTRY_TTL_MS`]: a retransmission target, a relayed non-2xx
     /// final's ACK hop, or an INVITE transaction's entry once its final
     /// passed.
     Retransmission,
-}
-
-impl Lifetime {
-    pub const fn ttl_ms(self) -> u64 {
-        match self {
-            Lifetime::InviteTransaction => INVITE_ENTRY_TTL_MS,
-            Lifetime::Retransmission => RTX_ENTRY_TTL_MS,
-        }
-    }
 }
 
 /// Default sweep cadence — half the SHORT (rtx) TTL, so the dominant entry
@@ -342,7 +322,7 @@ impl CancelBranchLru {
     /// The live entry under `key`, an INVITE transaction's whose final has
     /// passed: from now on it lives [`Lifetime::Retransmission`] (Timer H, the
     /// window of the ACK to a non-2xx final, RFC 3261 §17.2.1) instead of
-    /// [`INVITE_ENTRY_TTL_MS`]. An entry already shortened keeps its expiry.
+    /// its INVITE cap. An entry already shortened keeps its expiry.
     pub fn shorten(&self, key: &str) -> Option<CancelEntry> {
         let now = self.now_ms();
         let mut change = Change::default();

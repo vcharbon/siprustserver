@@ -114,7 +114,7 @@ async fn entries_expire_after_their_own_ttl() {
 fn one_stripe(max_entries: usize, max_bytes: usize) -> CancelBranchLru {
     CancelBranchLru::with_bounds(
         Clock::test_at(0),
-        MemoBounds { max_entries, max_bytes, stripes: 1 },
+        MemoBounds { max_entries, max_bytes, stripes: 1, ..MemoBounds::default() },
     )
 }
 
@@ -131,8 +131,12 @@ fn retransmission_share(bounds: MemoBounds) -> usize {
 #[tokio::test(start_paused = true)]
 async fn a_flood_past_the_entry_cap_evicts_the_oldest() {
     let lru = one_stripe(16, usize::MAX);
-    let cap =
-        retransmission_share(MemoBounds { max_entries: 16, max_bytes: usize::MAX, stripes: 1 });
+    let cap = retransmission_share(MemoBounds {
+        max_entries: 16,
+        max_bytes: usize::MAX,
+        stripes: 1,
+        ..MemoBounds::default()
+    });
     assert!(cap > 1 && cap < 16, "the pool holds a share of the cap: {cap}");
     for i in 0..20 {
         lru.remember(&key(&format!("flood-{i}")), entry("b"), Lifetime::Retransmission);
@@ -266,7 +270,7 @@ fn the_default_bounds_hold_the_heaviest_entries_in_their_bytes() {
     let bytes = super::footprint::footprint(&rtx, &heaviest);
     assert!(bytes <= TYPICAL_ENTRY_BYTES, "the heaviest entry accounts {bytes} bytes");
     assert!(bytes > TYPICAL_ENTRY_BYTES * 9 / 10, "the typical figure is that entry's: {bytes}");
-    assert_eq!(calls_per_second(&d), 109);
+    assert_eq!(calls_per_second(&d), 199);
 }
 
 /// A flood of INVITE entries never pushes out a short memo: each lifetime

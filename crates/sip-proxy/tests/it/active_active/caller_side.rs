@@ -155,7 +155,8 @@ async fn an_invite_copy_at_the_instance_that_never_saw_it_reaches_the_same_worke
 /// longer correlates, still reaches the worker holding the INVITE.
 #[tokio::test(start_paused = true)]
 async fn a_long_ringing_call_whose_entry_was_evicted_is_cancelled_at_its_worker() {
-    let small = MemoBounds { max_entries: 12, max_bytes: 1 << 20, stripes: 1 };
+    let small =
+        MemoBounds { max_entries: 12, max_bytes: 1 << 20, stripes: 1, ..MemoBounds::default() };
     let pair = Pair::with(InstanceOpts { memo: small }, InstanceOpts::default()).await;
     let call_id = "long-ring@caller";
     let owner = winner_of(call_id);
