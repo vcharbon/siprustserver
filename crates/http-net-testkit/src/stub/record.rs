@@ -7,8 +7,9 @@ use serde::Serialize;
 /// A request the stub received, recorded on its arrival, before any delay.
 ///
 /// JSON form: `{ "at_ms", "at_unix_ms", "listener", "method", "path",
-/// "query", "headers", "body_b64", "matched", "tag" }`; `query` is absent
-/// where the target had no `?`, `tag` where no tagged mapping answered.
+/// "query", "headers", "body_b64", "matched", "set", "tag" }`; `query` is
+/// absent where the target had no `?`, `set` where no registered set answered,
+/// `tag` where no tagged mapping answered.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct StubRecord {
     /// When it arrived, from the stub's creation, on the runtime's clock.
@@ -32,6 +33,9 @@ pub struct StubRecord {
     pub body: Vec<u8>,
     /// Whether a mapping answered it; `false` for the default answer.
     pub matched: bool,
+    /// The tag of the registered set whose mapping answered it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub set: Option<String>,
     /// The tag of the mapping that answered it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,

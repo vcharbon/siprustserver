@@ -13,4 +13,5 @@ mod scripted_findings;
 mod scripted_real;
 mod simulated;
 mod stub;
+mod stub_control;
 mod stub_real;

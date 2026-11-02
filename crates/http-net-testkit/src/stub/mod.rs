@@ -16,12 +16,20 @@
 //! - **Shutdown.** [`Stub::shutdown`] ends every pending answer, and every
 //!   later one, with a close at once, so no delay outlives the stub.
 //!
+//! - **Sets.** Mappings registered under a tag ([`Stub::register`]) answer
+//!   after the stub's own, until the tag is cleared ([`Stub::clear`]), which
+//!   drops the requests they answered from the record. The record keeps the
+//!   latest [`RECORD_CAP`] requests.
+//! - **Control.** [`Stub::control`] serves registration, the record, a health
+//!   line and the shutdown over HTTP, bound apart from the listeners.
+//!
 //! One [`Stub`] serves several listeners ([`Stub::listener`]), each bound by
 //! the caller on any [`HttpTransport`](crate::HttpTransport), and keeps one
 //! record across them.
 
 mod answer;
 mod body;
+mod control;
 mod mapping;
 mod query;
 mod record;
@@ -30,4 +38,4 @@ mod service;
 pub use answer::{StubAnswer, StubReply};
 pub use mapping::{StubMapping, StubQuery};
 pub use record::StubRecord;
-pub use service::{Stub, StubSpec};
+pub use service::{Stub, StubSpec, RECORD_CAP};
