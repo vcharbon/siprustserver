@@ -47,6 +47,13 @@ const TAKEOVER_BOUND: Duration = Duration::from_millis(500);
 /// Long enough for both ends to read a cut stream ended, and shorter than the
 /// pullers' first backoff (100 ms): the verdict meets the puller backing off.
 const CUT_SEEN: Duration = Duration::from_millis(10);
+/// How far into its own connect the puller is at the verdict: the stream is
+/// left at most the idle bound after the stall and connects again 100 ms
+/// later, so this connect runs out between 0.1 s and 0.6 s after the verdict.
+const IN_FLIGHT: Duration = Duration::from_millis(1_500);
+/// When the address answers again after the verdict: after the connect in
+/// flight ran out, within the bound of one started at the verdict.
+const ANSWERS_AFTER: Duration = Duration::from_millis(800);
 /// A partition long enough for the backup's puller to back off for more than
 /// a second between two refused connects.
 const LONG_PARTITION: Duration = Duration::from_secs(6);
@@ -58,7 +65,8 @@ enum Down {
     /// Its puller backs off between refused connects; the path is back.
     Backoff,
     /// Its puller's connect waits on an address that answers nothing; the
-    /// address answers shortly after the verdict.
+    /// address answers once that connect ran out, within the bound of one
+    /// started at the verdict.
     Connecting,
     /// The stream was just cut; the path is back.
     Cut,
@@ -104,7 +112,7 @@ async fn a_misread_takes_nothing_over(name: &str, down: Down) {
         Down::Connecting => {
             fh.stall(&pri_ord, bak_ord);
             fh.black_hole(&pri_ord);
-            fh.advance(IDLE_BOUND + Duration::from_millis(500)).await;
+            fh.advance(IDLE_BOUND + IN_FLIGHT).await;
         }
         Down::Cut | Down::CutStandbyReads => {
             fh.cut_streams(&pri_ord, bak_ord);
@@ -115,7 +123,7 @@ async fn a_misread_takes_nothing_over(name: &str, down: Down) {
     fh.mark("proxy", None, "misread", "a proxy reads the live primary dead");
     reader.set_health(&pri_ord, WorkerHealth::Dead);
     if matches!(down, Down::Connecting) {
-        fh.advance(Duration::from_millis(300)).await;
+        fh.advance(ANSWERS_AFTER).await;
         fh.heal(&pri_ord, bak_ord);
     }
     fh.advance(CONNECT_BOUND + IDLE_BOUND).await;

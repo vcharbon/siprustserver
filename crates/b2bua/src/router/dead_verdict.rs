@@ -20,9 +20,10 @@
 //! confirms it ([`ReplicationSupervisor::confirms_dead`]): an open stream that
 //! ends within its silence bound with no frame since the verdict, or, with
 //! the stream down or reconnecting, one connect made at once that is refused
-//! or runs out its bound. A frame after the verdict speaks for a live worker
-//! the proxy misread, and nothing is taken over (ADR-0047 D1); one wait runs
-//! per worker. A node that pulls no stream acts at once.
+//! or runs out its bound. A frame after the verdict, of the incarnation the
+//! flow streamed then, speaks for a live worker the proxy misread, and nothing
+//! is taken over; a frame of another generation confirms it (ADR-0047 D1).
+//! One wait runs per worker. A node that pulls no stream acts at once.
 //!
 //! A worker whose verdict acted reads dead here until a frame from it arrives
 //! ([`primary_read_dead`]), which clears the verdict: a call a copy here ends

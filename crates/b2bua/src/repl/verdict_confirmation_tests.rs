@@ -14,9 +14,15 @@
 //!   (a stream that ends with no frame confirms it: `failover-harness`'s cells)
 //!   multi-thread runtime, real clock             → not confirmed, no backoff waited
 //!   a refused asked connect                      → the backoff schedule unchanged
+//!   asked while backing off                      → the step starts again from it
+//!   the peer restarted: a frame of a new generation → confirmed
+//!   a connect taken with no frame                → confirmed at the idle bound
+//!   the puller respawned meanwhile               → confirmed
+//!   the last frame at the verdict, then silence  → the one connect, never refuted
 //! ```
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -29,7 +35,7 @@ use repl_net::transport::{
 use sip_clock::Clock;
 use tokio::sync::watch;
 use tokio::time::Instant;
-use topology::Peer;
+use topology::{Peer, SimulatedMembership};
 
 use super::test_support::{fast_config, one_peer, tick};
 use super::{FnPeerResolver, PullerConfig, ReplicatingCallStore, ReplicationSupervisor};
@@ -52,11 +58,15 @@ enum Answer {
 }
 
 /// The peer's side of the network: how it answers, when each connect started,
-/// and a hang-up that ends every stream it holds.
+/// a hang-up that ends every stream it holds, the incarnation generation its
+/// frames carry, and whether its streams go quiet.
 struct Script {
     answer: watch::Sender<Answer>,
     connects: Mutex<Vec<Instant>>,
     hang_up: watch::Sender<u64>,
+    gen: AtomicU64,
+    /// Every stream delivers nothing more, open until hung up.
+    mute: AtomicBool,
 }
 
 impl Script {
@@ -88,7 +98,12 @@ impl ReplicationNetwork for ScriptNet {
             Ok(Answer::Take) => {
                 let mut hang_up = self.0.hang_up.subscribe();
                 hang_up.mark_unchanged();
-                Ok(Box::new(Stream { opened: Mutex::new(false), hang_up: Mutex::new(hang_up) }))
+                Ok(Box::new(Stream {
+                    script: self.0.clone(),
+                    gen: self.0.gen.load(Ordering::SeqCst),
+                    opened: Mutex::new(false),
+                    hang_up: Mutex::new(hang_up),
+                }))
             }
             _ => Err(ConnectError::Refused(dst)),
         }
@@ -104,6 +119,9 @@ impl ReplicationNetwork for ScriptNet {
 
 /// One stream the scripted peer took.
 struct Stream {
+    script: Arc<Script>,
+    /// The incarnation the peer had when it took the stream.
+    gen: u64,
     opened: Mutex<bool>,
     hang_up: Mutex<watch::Receiver<u64>>,
 }
@@ -122,9 +140,12 @@ impl ReplicationConnection for Stream {
         let gap = if first { Duration::from_millis(1) } else { Duration::from_millis(400) };
         let mut hang_up = self.hang_up.lock().unwrap().clone();
         tokio::select! {
-            () = tokio::time::sleep(gap) => {
-                (!self.hung_up()).then_some(Frame::Noop { at: Watermark::new(1, 1) })
-            }
+            () = async {
+                tokio::time::sleep(gap).await;
+                if self.script.mute.load(Ordering::SeqCst) {
+                    std::future::pending::<()>().await;
+                }
+            } => (!self.hung_up()).then_some(Frame::Noop { at: Watermark::new(self.gen, 1) }),
             _ = hang_up.changed() => None,
         }
     }
@@ -147,18 +168,29 @@ impl Stream {
 /// A supervisor on `w1` backing up `w0`, both flows streaming, and the
 /// peer's script.
 async fn backing_up(config: PullerConfig) -> (ReplicationSupervisor, Arc<Script>) {
+    let (sup, script, _membership) = backing_up_in(config).await;
+    (sup, script)
+}
+
+/// [`backing_up`], with the membership the supervisor follows.
+async fn backing_up_in(
+    config: PullerConfig,
+) -> (ReplicationSupervisor, Arc<Script>, Arc<SimulatedMembership>) {
     let script = Arc::new(Script {
         answer: watch::Sender::new(Answer::Take),
         connects: Mutex::default(),
         hang_up: watch::Sender::new(0),
+        gen: AtomicU64::new(1),
+        mute: AtomicBool::new(false),
     });
     let clock = Clock::test_at(0);
     let store = ReplicatingCallStore::new(1, clock.clone());
     let resolve = Arc::new(FnPeerResolver(|_: &Peer| peer_addr()));
     let net = Arc::new(ScriptNet(script.clone()));
     let sup = ReplicationSupervisor::with_config("w1", net, store, resolve, config);
-    sup.start(one_peer(PEER, &clock));
-    (sup, script)
+    let membership = one_peer(PEER, &clock);
+    sup.start(membership.clone());
+    (sup, script, membership)
 }
 
 /// Run `confirms_dead` for a verdict taken now, on a task of its own.
@@ -358,4 +390,96 @@ async fn a_refused_connect_asked_for_leaves_the_backoff_schedule_as_it_stood() {
     let at = |t: Instant| connects.iter().filter(|c| **c == t).count();
     assert_eq!(at(cut), 1, "the asked connect, at the verdict");
     assert_eq!(at(cut + Duration::from_millis(100)), 2, "both flows at their first backoff step");
+}
+
+/// The peer restarted in place: the one connect reaches its new process,
+/// whose frames carry a new generation. The incarnation the verdict named is
+/// dead: confirmed.
+#[tokio::test(start_paused = true)]
+async fn a_frame_of_a_new_generation_confirms_the_verdict() {
+    let (sup, script) = backing_up(fast_config()).await;
+    tick(1_000).await;
+    into_a_long_backoff(&script).await;
+    script.gen.store(2, Ordering::SeqCst);
+    let confirmed = verdict(&sup);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(confirmed.is_finished(), "answered by the new process's first frame");
+    assert!(confirmed.await.unwrap(), "another incarnation speaks: confirmed");
+}
+
+/// The peer's kernel takes the connect, its process sends nothing: the
+/// stream opened is left at the idle bound with no frame, which confirms.
+#[tokio::test(start_paused = true)]
+async fn a_connect_taken_with_no_frame_confirms_at_the_idle_bound() {
+    let (sup, script) = backing_up(fast_config()).await;
+    tick(1_000).await;
+    into_a_long_backoff(&script).await;
+    script.mute.store(true, Ordering::SeqCst);
+    let at = Instant::now();
+    let confirmed = verdict(&sup);
+    tokio::time::sleep_until(at + Duration::from_millis(1_999)).await;
+    settle().await;
+    assert!(!confirmed.is_finished(), "the stream it opened is still within its idle bound");
+    tokio::time::sleep_until(at + Duration::from_millis(2_000)).await;
+    settle().await;
+    assert!(confirmed.is_finished());
+    assert!(confirmed.await.unwrap(), "no frame: confirmed");
+}
+
+/// The Backup flow's puller is replaced while the one connect waits (the
+/// peer's binding moved): the request is dropped with it, which confirms.
+#[tokio::test(start_paused = true)]
+async fn a_puller_respawned_mid_wait_confirms_the_verdict() {
+    let (sup, script, membership) = backing_up_in(fast_config()).await;
+    tick(1_000).await;
+    script.answer(Answer::Silence);
+    script.hang_up();
+    settle().await;
+    let confirmed = verdict(&sup);
+    tick(200).await;
+    assert!(!confirmed.is_finished(), "the connect waits");
+    membership.change_address(Peer::new(PEER, "w0-moved"));
+    tick(200).await;
+    assert!(confirmed.is_finished(), "the request went with the replaced puller");
+    assert!(confirmed.await.unwrap());
+}
+
+/// A refused connect asked for in the middle of a backoff step: the step
+/// starts again from that connect, at the same length.
+#[tokio::test(start_paused = true)]
+async fn a_connect_asked_for_mid_backoff_restarts_the_step_from_it() {
+    let (sup, script) = backing_up(fast_config()).await;
+    tick(1_000).await;
+    script.answer(Answer::Refuse);
+    let cut = Instant::now();
+    script.hang_up();
+    // Refused connects at +100 and +300; the step from +300 lasts 400 ms.
+    tokio::time::sleep_until(cut + Duration::from_millis(500)).await;
+    let asked = Instant::now();
+    assert!(verdict(&sup).await.unwrap(), "refused: confirmed");
+    tokio::time::sleep_until(cut + Duration::from_millis(1_000)).await;
+    let connects = script.connects.lock().unwrap().clone();
+    let at = |t: Instant| connects.iter().filter(|c| **c == t).count();
+    assert_eq!(at(cut + Duration::from_millis(700)), 1, "the Reclaim flow, on its schedule");
+    assert_eq!(at(asked + Duration::from_millis(400)), 1, "the Backup flow, a whole step later");
+}
+
+/// The last frame lands at the verdict's instant and the peer goes quiet:
+/// the stream's idle end and the silence bound fall on the same instant, and
+/// the stream's end wins: the one connect follows, never a refutation.
+#[tokio::test(start_paused = true)]
+async fn a_silent_stream_ending_at_the_silence_bound_is_never_read_alive() {
+    let (sup, script) = backing_up(fast_config()).await;
+    tick(1_000).await;
+    let mut before = Instant::now();
+    while !sup.heard_from_since(PEER, before) {
+        before = Instant::now();
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        settle().await;
+    }
+    script.mute.store(true, Ordering::SeqCst);
+    script.answer(Answer::Refuse);
+    let confirmed = verdict(&sup);
+    tokio::time::sleep(Duration::from_millis(2_100)).await;
+    assert!(confirmed.await.unwrap(), "silent through the bound, refused: confirmed");
 }

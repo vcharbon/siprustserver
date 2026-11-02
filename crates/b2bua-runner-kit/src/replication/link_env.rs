@@ -33,10 +33,12 @@
 //! live peer longer than it makes the puller pull again from its watermark.
 //! A proxy's dead verdict is confirmed once the Backup flow's stream is down,
 //! at the verdict or that long after the peer's last frame, by one connect
-//! made at once that is refused or runs out the connect timeout (ADR-0047
-//! D1): a node lost whole is taken over at most the idle timeout plus the
-//! connect timeout after the verdict (4 s by default), so both stay far below
-//! the orchestrator's force-delete of an unreachable node's pod (minutes).
+//! made at once that is refused or runs out the connect timeout, after the
+//! peer's address lookup (ADR-0047 D1): a node lost whole is taken over at
+//! most idle + lookup + connect timeouts after the verdict, plus the idle
+//! timeout again for a frozen process whose kernel takes the connect (6 to
+//! 8 s by default), so all stay far below the orchestrator's force-delete of
+//! an unreachable node's pod (minutes).
 //! Neither is tied to the verdict's freshness window or hold: one wait runs
 //! per peer, whatever notices arrive meanwhile, and a notice is checked fresh
 //! when it arrives.

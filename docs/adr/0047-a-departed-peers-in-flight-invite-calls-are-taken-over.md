@@ -89,8 +89,13 @@ flight, bounded by the connect bound (`B2BUA_REPL_CONNECT_TIMEOUT_MS`): a connec
 refused, as when the peer's process died, or run out, as when its host answers nothing,
 confirms the verdict; a connect the peer takes opens a stream whose end with no frame
 confirms it. A frame from the peer after the verdict, on a stream that lives or on the
-one that reconnects, or a stream open through the idle bound, speaks for a live peer
-the proxy misread, and the verdict takes nothing over
+one that reconnects, or a stream open past the idle bound, speaks for a live peer the
+proxy misread, and the verdict takes nothing over. That frame must carry the incarnation
+generation the flow last heard before the verdict: a frame of another generation comes
+from a process that restarted in place, the incarnation the verdict named is gone, and
+the verdict is confirmed (`repl/verdict_confirmation_tests.rs`). A restarted process
+the flow already streams from at the verdict is that generation, and its own reclaim
+takes its calls back
 (`b2bua_dead_verdicts_unconfirmed_total`, one wait per peer however many verdicts;
 `verdict_meets_a_down_stream.rs`, the backoff, connect and cut cells). Two independent
 signals must agree, so a flap, a partition between the proxy and a live peer, or a
@@ -392,10 +397,24 @@ the call has one CDR.
   one connect fails: at once when the path to it refuses connects
   (`read_dead_primary_taken_over.rs`, the silent-host cell), one connect bound later
   when its host answers nothing (`B2BUA_REPL_CONNECT_TIMEOUT_MS`, 2 s;
-  `verdict_meets_a_down_stream.rs`, the unanswering-host cell). So a node lost whole is
-  taken over at most the idle bound plus one connect bound after the verdict, 4 s by
-  default. A live peer whose stream stalls longer than the idle bound is pulled again
-  from its watermark.
+  `verdict_meets_a_down_stream.rs`, the unanswering-host cell). The connect resolves the
+  peer's address first, within the lookup bound (`B2BUA_REPL_LOOKUP_TIMEOUT_MS`, 2 s),
+  and a process frozen behind a kernel that still takes the connect sends no frame, its
+  stream left at the idle bound again (`repl/verdict_confirmation_tests.rs`). So a node
+  lost whole is taken over at most idle + lookup + connect after the verdict, plus idle
+  once more for a frozen process: 6 to 8 s by default. A live peer whose stream stalls
+  longer than the idle bound is pulled again from its watermark.
+- **A refuted verdict is spent.** The proxy tells one notice per health change; a
+  primary that sends one frame on the backup's reconnect and then dies is not taken
+  over proactively: its calls are taken over by a message (the reactive path), at a
+  later verdict on another health change (`live_primary_read_dead.rs`, the second
+  verdict), or at its departure.
+- **A split healing on both planes at once.** The partitioned primary's ladders (its
+  480's Timer G repeats, its CANCEL) reach the parties until its own pull reconnects
+  and it learns the takeover; the parties draw 481s and hop-ACKs. Judged as a split:
+  leaks, cleanup and the CDR count (`forward_flush_never_regresses_backup_progress.rs`,
+  the cells healing after the copy shed; its live Put cell heals the SIP plane once both
+  workers pulled each other again).
 - **The creation write lands one stream hop after the 100.** A death inside that
   hop leaves no replica (`new_call_replication_window.rs` measures it).
 - **A route applied before its write replicated.** A node that dies after dialling

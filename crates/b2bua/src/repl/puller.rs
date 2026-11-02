@@ -465,9 +465,9 @@ impl Puller {
                     () = cancelled(cancel) => return RunOutcome::Cancelled,
                 },
             };
-            if frame.is_some() {
+            if let Some(frame) = &frame {
                 quiet_until = sip_clock::deadline::from_now(idle);
-                self.status_tx.send_modify(|s| s.last_frame_at = Some(tokio::time::Instant::now()));
+                self.status_tx.send_modify(|s| s.heard(frame));
             }
             match frame {
                 Some(Frame::Data {

@@ -305,6 +305,12 @@ async fn reinvite(
     fh.advance(Duration::from_millis(500)).await;
 }
 
+/// How long after the replication heal the SIP plane heals in the live Put
+/// cell: past every puller's backoff ceiling (2 s), so both workers pulled
+/// each other again whatever step their backoff stood at, and the cell's
+/// outcome never rides the reconnect schedule.
+const SIP_HEALS_AFTER: Duration = Duration::from_secs(3);
+
 /// When the cut heals — the two moments the refusal has to hold at.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HealAt {
@@ -450,9 +456,14 @@ async fn run(name: &str, title: &str, pending: Pending, heal_at: HealAt) {
     // from its answered copy (ADR-0055 §7) ─────────────────────────────────
     if heal_at == HealAt::BeforeTimerH && matches!(pending, Pending::Put) {
         fh.heal(&pri_ord, &bak_ord);
+        let sip_heals_at = tokio::time::Instant::now() + SIP_HEALS_AFTER;
         alice.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
         bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
         fh.mark(&bak_ord, Some(&pri_ord), "diverged", "the survivor ends the answered call");
+        fh.advance(sip_heals_at.saturating_duration_since(tokio::time::Instant::now())).await;
+        // What the primary's ladders send once the SIP plane heals is the split's
+        // (ADR-0047 residuals): judged on leaks, cleanup and the CDR count.
+        fh.strike(Incident::SplitHealed);
         fh.restore_signalling(&pri_ord, pri_sip);
         let nodes: [&ReplicatedB2buaSut; 2] = [&*primary, survivor];
         settle_released(&fh, &call, &alice, &bob, &nodes[..], &call_ref).await;

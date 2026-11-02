@@ -279,7 +279,8 @@ ends the transaction with the CANCEL unsent (§9.1, §17.2.1).
   the queued entries, and another the flows the node serves by state (live,
   stale, down: `b2bua_repl_serving_flows`). No wait is bounded on a stale
   flow: a backup with no position report for the claim TTL is waited on for
-  nothing. No per-call state outlives the call (ADR-0037), and the
+  nothing. `no_live_backup` also counts the calls left unbacked by design
+  (§3), so an alert on a stalled backup reads the `stale` gauge. No per-call state outlives the call (ADR-0037), and the
   outbox needs no admission term: it is bounded by the message rate times the
   cap. The services stay blind: the outbox lives in the aware crates.
 - **A write is abandoned only with its backup.** It stays in the change log

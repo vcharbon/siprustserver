@@ -1,6 +1,6 @@
 //! [`PullerStatus`] — what a puller publishes of its flow.
 
-use repl_net::frame::Watermark;
+use repl_net::frame::{Frame, Watermark};
 
 /// Shared, observable per-`(peer, flow)` puller status. The supervisor reads
 /// `current` for readiness (scoped to the **Reclaim** flow) and the retained
@@ -34,4 +34,17 @@ pub struct PullerStatus {
     /// When the last frame from the peer arrived, on any stream; `None`
     /// before the first.
     pub last_frame_at: Option<tokio::time::Instant>,
+    /// The peer's incarnation generation on the last frame that carries a
+    /// position (`Data`, `Noop`); `None` before the first.
+    pub last_frame_gen: Option<u64>,
+}
+
+impl PullerStatus {
+    /// A frame from the peer arrived now.
+    pub(super) fn heard(&mut self, frame: &Frame) {
+        self.last_frame_at = Some(tokio::time::Instant::now());
+        if let Frame::Data { at, .. } | Frame::Noop { at } = frame {
+            self.last_frame_gen = Some(at.gen);
+        }
+    }
 }

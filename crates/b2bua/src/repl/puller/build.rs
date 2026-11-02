@@ -41,6 +41,7 @@ impl Puller {
             ever_connected: false,
             streaming: false,
             last_frame_at: None,
+            last_frame_gen: None,
         });
         (
             Self {

@@ -324,6 +324,38 @@ async fn an_entry_waits_for_the_calls_current_entry_toward_a_live_backup() {
     assert_eq!(target.at, Watermark::new(1, 1), "the call's current entry");
 }
 
+/// **A stale backup holds nothing, and the release says so.** A flow still
+/// connected whose last position claim is older than the claim TTL names no
+/// hold target: the entry leaves at once, counted `no_live_backup`, while the
+/// served-flow gauge reads the flow stale (ADR-0055 §3).
+#[tokio::test(start_paused = true)]
+async fn a_stale_backup_holds_nothing_and_its_release_is_counted_no_live_backup() {
+    use crate::turn_probe::Released;
+    let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
+    let state = wired(&repl);
+    let call = backed_call(1);
+    state.create_placed(call.clone());
+    state.flush(&call);
+    let _serving = repl.changelog().serving("w1", Partition::Bak);
+    repl.changelog().note_applied("w1", None, Partition::Bak, Watermark::new(1, 0));
+    assert!(state.hold_target(&call.call_ref).is_some(), "a live backup holds");
+    tokio::time::advance(super::changelog::DEFAULT_CLAIM_TTL + Duration::from_millis(1)).await;
+    assert!(state.hold_target(&call.call_ref).is_none(), "connected, stale: no hold");
+    assert_eq!(repl.changelog().flow_liveness(), [0, 1, 1], "Bak stale, Pri never pulled");
+    let metrics = B2buaMetrics::new();
+    let path = super::WritePath { sync: super::SyncLevel::Applied, ..Default::default() };
+    let outboxes = Arc::new(crate::router::Outboxes::new(
+        Some((path, repl.changelog().clone())),
+        metrics.clone(),
+        Default::default(),
+    ));
+    let wait = state.hold_target(&call.call_ref);
+    outboxes.push(&call.call_ref, wait, Box::new(|_| Box::pin(async {}))).await;
+    assert_eq!(metrics.outbox_released_total(Released::AtOnce), 1, "counted no_live_backup");
+    assert_eq!(metrics.outbox_released_total(Released::Applied), 0);
+    state.remove(&call.call_ref);
+}
+
 /// **A refusal frame reaches the primary's store.** The backup's
 /// `ReplicaRefused` on its Backup flow leaves the primary's call without a
 /// backup: its entry toward the backup goes and no scan offers it again.

@@ -27,11 +27,13 @@ impl ReplicationSupervisor {
     }
 
     /// Whether this node's Backup flow from `peer` confirms a dead verdict
-    /// taken at `since`: `false` once a frame from the peer arrives after
-    /// `since`, the peer speaking for itself.
+    /// taken at `since` on the incarnation it streams then: `false` once a
+    /// frame of that incarnation arrives after `since`, the peer speaking for
+    /// itself; a frame of another generation (the peer restarted) confirms it.
     ///
-    /// - An open stream is waited on until it ends, within the silence bound;
-    ///   a stream open through that bound refutes the verdict.
+    /// - An open stream is waited on until it ends; one still open a tick past
+    ///   the silence bound refutes the verdict, so a silent stream's idle end
+    ///   at the bound always comes first.
     /// - A stream down or reconnecting at the verdict, or ended since with no
     ///   such frame, asks the puller for one connect at once, skipping the
     ///   backoff, bounded by the connect bound: a connect refused or run out
@@ -44,11 +46,11 @@ impl ReplicationSupervisor {
             Some((rx, e.backup.connect_now.clone()))
         });
         let Some((mut rx, connect_now)) = flow else { return true };
-        let heard = move |s: &PullerStatus| s.last_frame_at.is_some_and(|at| at > since);
+        let read = Reading { since, gen: rx.borrow().last_frame_gen };
         let streaming = rx.borrow().streaming;
         if streaming {
-            let bound = self.silence_bound();
-            match tokio::time::timeout(bound, ends_unheard(&mut rx, heard)).await {
+            let bound = self.silence_bound() + SILENCE_TICK;
+            match tokio::time::timeout(bound, ends_unheard(&mut rx, read)).await {
                 Ok(true) => {}
                 Ok(false) | Err(_) => return false,
             }
@@ -60,8 +62,9 @@ impl ReplicationSupervisor {
                 Ok(Attempt::Connected) => Reconnect::Open,
                 Ok(Attempt::Failed) | Err(_) => Reconnect::Failed,
             },
-            status = rx.wait_for(|s| s.streaming || heard(s)) => match status {
-                Ok(status) if heard(&status) => Reconnect::Heard,
+            status = rx.wait_for(|s| s.streaming || read.decided(s)) => match status {
+                Ok(status) if read.heard(&status) => Reconnect::Heard,
+                Ok(status) if read.another(&status) => Reconnect::Failed,
                 Ok(_) => Reconnect::Open,
                 Err(_) => Reconnect::Failed,
             },
@@ -69,10 +72,10 @@ impl ReplicationSupervisor {
         // A frame on a stream that opened and ended meanwhile still speaks for
         // the peer.
         match reconnect {
-            Reconnect::Failed if heard(&rx.borrow()) => false,
+            Reconnect::Failed if read.heard(&rx.borrow()) => false,
             Reconnect::Heard => false,
             Reconnect::Failed => true,
-            Reconnect::Open => ends_unheard(&mut rx, heard).await,
+            Reconnect::Open => ends_unheard(&mut rx, read).await,
         }
     }
 
@@ -93,15 +96,43 @@ impl ReplicationSupervisor {
     }
 }
 
-/// Resolves once the stream `rx` reports ends with no frame `heard` (`true`)
-/// or a heard frame arrives (`false`); a puller that ended reads as the
-/// stream's end.
-async fn ends_unheard(
-    rx: &mut watch::Receiver<PullerStatus>,
-    heard: impl Fn(&PullerStatus) -> bool,
-) -> bool {
-    match rx.wait_for(|s| !s.streaming || heard(s)).await {
-        Ok(status) => !heard(&status),
+/// How far past the silence bound an open stream must stay open to refute a
+/// verdict: the puller's idle end, due at the bound at the latest, comes first.
+const SILENCE_TICK: Duration = Duration::from_millis(1);
+
+/// What a verdict reads on the Backup flow's status: frames after `since`,
+/// of the incarnation generation `gen` the flow last heard before it.
+#[derive(Clone, Copy)]
+struct Reading {
+    since: Instant,
+    gen: Option<u64>,
+}
+
+impl Reading {
+    /// A frame of the verdict's incarnation arrived after the verdict; with no
+    /// generation heard before it, any frame is of that incarnation.
+    fn heard(self, s: &PullerStatus) -> bool {
+        s.last_frame_at.is_some_and(|at| at > self.since) && !self.another(s)
+    }
+
+    /// A frame of another generation arrived: the peer restarted, and the
+    /// incarnation the verdict named is gone.
+    fn another(self, s: &PullerStatus) -> bool {
+        matches!((self.gen, s.last_frame_gen), (Some(was), Some(now)) if now != was)
+    }
+
+    /// Either settles the verdict.
+    fn decided(self, s: &PullerStatus) -> bool {
+        self.heard(s) || self.another(s)
+    }
+}
+
+/// Resolves once the stream `rx` reports ends with no frame of the verdict's
+/// incarnation (`true`, a frame of another one included) or such a frame
+/// arrives (`false`); a puller that ended reads as the stream's end.
+async fn ends_unheard(rx: &mut watch::Receiver<PullerStatus>, read: Reading) -> bool {
+    match rx.wait_for(|s| !s.streaming || read.decided(s)).await {
+        Ok(status) => !read.heard(&status),
         Err(_) => true,
     }
 }

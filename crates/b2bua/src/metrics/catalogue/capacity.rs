@@ -75,7 +75,7 @@ pub const REPL_OUTBOX_DEPTH: Family = Family::gauge(
 pub const REPL_OUTBOX_RELEASED: Family = Family::counter(
     "b2bua_repl_outbox_released_total",
     Labels::Product(&[RELEASE_REASON]),
-    "outbox entries released under the applied sync level, by why they left (ADR-0055 §3): no_live_backup, the call had no live, bootstrapped backup to wait for (none, or its flow stale or down: a backup with no position report for the claim TTL); applied, the backup applied the write that records them; capped, the sync cap expired first; backup_lost, the flow to the backup went down first; call_released, the call was released here and its copy's write records them. Anything but applied left unprotected by the hold",
+    "outbox entries released under the applied sync level, by why they left (ADR-0055 §3): no_live_backup, the call had no live, bootstrapped backup to wait for (none, a call unbacked by design included, or its flow stale or down: a backup with no position report for the claim TTL; alert on b2bua_repl_serving_flows{state=\"stale\"} instead); applied, the backup applied the write that records them; capped, the sync cap expired first; backup_lost, the flow to the backup went down first; call_released, the call was released here and its copy's write records them. Anything but applied left unprotected by the hold",
 );
 
 pub const REPL_SERVING_FLOWS: Family = Family::gauge(

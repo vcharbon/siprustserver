@@ -95,7 +95,7 @@ interval after.
 
 | key | meaning | default |
 |---|---|---|
-| `B2BUA_REPL_CONNECT_TIMEOUT_MS` | one connect to a peer; a dead verdict meeting the Backup flow's stream down is confirmed by one connect at once within it (ADR-0047 D1), so a node lost whole is taken over at most the idle timeout plus this after the verdict | 2000 |
+| `B2BUA_REPL_CONNECT_TIMEOUT_MS` | one connect to a peer; a dead verdict meeting the Backup flow's stream down is confirmed by one connect at once within it (ADR-0047 D1), so a node lost whole is taken over at most idle + lookup + connect timeouts after the verdict, plus the idle timeout again for a frozen process whose kernel takes the connect (6–8 s by default) | 2000 |
 | `B2BUA_REPL_BACKOFF_MAX_MS` | the reconnect backoff's ceiling (its floor is 100 ms) | 2000 |
 | `B2BUA_REPL_IDLE_TIMEOUT_MS` | a stream delivering nothing is left; a dead verdict on a silent peer meets its stream down this long after its last frame at most, then the one connect confirms it (ADR-0047 D1); at least twice the `Noop` interval, far below a pod's force-delete | 2000 |
 | `B2BUA_REPL_NOOP_INTERVAL_MS` | the longest a served stream goes without a `Noop`, on every stream, each flow alike: the heartbeat; a position claim vouches for twice it | 500 |
