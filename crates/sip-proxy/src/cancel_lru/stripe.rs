@@ -51,6 +51,23 @@ impl Stripe {
         own.insert(key, entry, now_ms.saturating_add(lifetime.ttl_ms()), change);
     }
 
+    /// The live entry under `key`; one held in the INVITE-transaction pool
+    /// moves to the retransmission pool first, to expire one
+    /// [`Lifetime::Retransmission`] past `now_ms`.
+    pub(super) fn shorten(
+        &mut self,
+        key: &str,
+        now_ms: u64,
+        change: &mut Change,
+    ) -> Option<CancelEntry> {
+        let Some(entry) = self.invite.get(key, now_ms, change) else {
+            return self.retransmission.get(key, now_ms, change);
+        };
+        let lifetime = Lifetime::Retransmission;
+        self.insert(key, entry.clone(), lifetime, now_ms, change);
+        Some(entry)
+    }
+
     /// The live entry under `key`, from whichever pool holds it.
     pub(super) fn get(
         &mut self,

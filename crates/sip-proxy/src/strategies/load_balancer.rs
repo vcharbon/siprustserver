@@ -12,6 +12,9 @@
 //!   a token (→ 503 + Retry-After). Emergency / in-dialog requests take the
 //!   rendezvous winner and bypass the bucket (they still record the admit for
 //!   the `share` signal); an unobserved worker is admitted (bootstrap-friendly).
+//!   A request of an admitted transaction no memo places (`SelectOpts::admitted`)
+//!   takes the rendezvous winner among the `Alive` workers, unfiltered and
+//!   spending no token (ADR-0009 X7).
 //! - `encode_stickiness`: a call the proxy places. Recover the target's
 //!   `WorkerId` (= `w_pri`) by address, pick the HRW winner among the other
 //!   `Alive` workers that accept new calls, else among the other `Alive` ones,
@@ -203,6 +206,23 @@ impl LoadBalancerStrategy {
         rendezvous_select(call_id, &away).map(|k| k.0.clone()).unwrap_or_default()
     }
 
+    /// The rendezvous winner for `call_id` among the `Alive` workers, with no
+    /// band filter and no token: where a call placed with neither filter nor
+    /// spill lives, and, its primary gone, the next in rank (ADR-0009 X7).
+    /// Liveness alone places it, as it places every request of an admitted
+    /// call (ADR-0050).
+    fn owner_by_rank(&self, call_id: &str) -> Result<ProxyAddr, SelectError> {
+        let snapshot = self.registry.snapshot();
+        let alive: Vec<WorkerKey> =
+            snapshot.iter().filter(|w| w.is_alive()).map(|w| WorkerKey(w.id.clone())).collect();
+        rendezvous_select(call_id, &alive)
+            .and_then(|key| snapshot.iter().find(|w| w.id == key.0))
+            .map(|w| w.address.clone())
+            .ok_or_else(|| SelectError::NoTarget {
+                reason: format!("no alive workers among {} entries", snapshot.len()),
+            })
+    }
+
     /// The address of worker `id` while it is `Alive`.
     fn alive_address(&self, id: &str) -> Option<ProxyAddr> {
         if id.is_empty() {
@@ -224,6 +244,9 @@ impl RoutingStrategy for LoadBalancerStrategy {
         opts: SelectOpts,
     ) -> Result<ProxyAddr, SelectError> {
         let call_id = call_id_of(msg).unwrap_or("");
+        if opts.admitted {
+            return self.owner_by_rank(call_id);
+        }
         let is_emergency = opts.emergency_override || is_emergency_invite(msg);
         let in_dialog = is_in_dialog(msg) && !opts.admit_as_new;
         let snapshot = self.registry.snapshot();

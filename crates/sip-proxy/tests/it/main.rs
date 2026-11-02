@@ -8,6 +8,7 @@
 // Shared fixtures, reached from a test module as `crate::common::…`.
 mod common;
 
+mod active_active;
 mod backup_named_while_away;
 mod first_view;
 mod health_probe_late_reply;

@@ -21,6 +21,11 @@
 //! The ACK to a final the proxy generated itself is recognised by its To-tag
 //! and writes nothing here (`crate::refusals`).
 //!
+//! Each instance of an active pair holds only what crossed it, so every
+//! request these entries route also routes without them (ADR-0009 X7): an
+//! entry is a placement only this instance knows (a spill), a target the
+//! cookie would re-derive, or a hop the Request-URI names.
+//!
 //! Keys are written by whoever sends the proxy a request, so the memo is
 //! bounded in entries and accounted bytes ([`MemoBounds`]). Each [`Lifetime`]
 //! has its own pool and share of the bounds; past a bound a pool forgets its
@@ -54,7 +59,9 @@ pub use bounds::{
 use pool::Change;
 use stripe::Stripe;
 
-/// TTL for pending-INVITE entries (CANCEL forwarding + non-2xx ACK synthesis).
+/// TTL for pending-INVITE entries (CANCEL forwarding + the non-2xx ACK hop),
+/// the cap of an entry whose final this proxy never relays: an entry whose
+/// final passes is shortened to Timer H ([`CancelBranchLru::shorten`]).
 /// Must cover the downstream UA's **whole INVITE transaction window**: the
 /// B2BUA answers or gives up within `sip-txn`'s `INVITE_INITIAL_TIMEOUT`
 /// (158 s, which wraps its 150 s `SetupTimeout` ledger), plus the
@@ -71,6 +78,8 @@ pub const INVITE_ENTRY_TTL_MS: u64 = INVITE_INITIAL_TIMEOUT + TIMER_H;
 /// stop at Timer B/F (64×T1 = 32 s), so these need live no longer. They are
 /// written for EVERY forwarded request — including each keepalive OPTIONS — so
 /// keeping them short keeps the map at ≈ one transaction window of traffic.
+/// It is also Timer H, the life of an ACK hop and of an INVITE entry whose
+/// final passed.
 pub const RTX_ENTRY_TTL_MS: u64 = TIMER_F;
 
 /// How long a memo entry lives, and the pool of each stripe it is held in.
@@ -78,8 +87,9 @@ pub const RTX_ENTRY_TTL_MS: u64 = TIMER_F;
 pub enum Lifetime {
     /// [`INVITE_ENTRY_TTL_MS`]: an INVITE transaction's CANCEL target.
     InviteTransaction,
-    /// [`RTX_ENTRY_TTL_MS`]: a retransmission target or a relayed non-2xx
-    /// final's ACK hop.
+    /// [`RTX_ENTRY_TTL_MS`]: a retransmission target, a relayed non-2xx
+    /// final's ACK hop, or an INVITE transaction's entry once its final
+    /// passed.
     Retransmission,
 }
 
@@ -101,6 +111,8 @@ pub const DEFAULT_SWEEP_INTERVAL_MS: u64 = 16_000;
 const _: () = assert!(DEFAULT_SWEEP_INTERVAL_MS <= RTX_ENTRY_TTL_MS);
 #[expect(clippy::disallowed_macros, reason = "checked at compile time")]
 const _: () = assert!(RTX_ENTRY_TTL_MS <= INVITE_ENTRY_TTL_MS);
+#[expect(clippy::disallowed_macros, reason = "checked at compile time")]
+const _: () = assert!(RTX_ENTRY_TTL_MS == TIMER_H);
 
 /// The key of the INVITE transaction `via` opened upstream (§17.2.3): its
 /// branch and sent-by (in `SentByRef::write_canonical`'s form), with the
@@ -326,6 +338,19 @@ impl CancelBranchLru {
         let mut change = Change::default();
         let mut stripe = self.stripe(key);
         let found = stripe.get(key, now, &mut change);
+        self.account(&change);
+        found
+    }
+
+    /// The live entry under `key`, an INVITE transaction's whose final has
+    /// passed: from now on it lives [`Lifetime::Retransmission`] (Timer H, the
+    /// window of the ACK to a non-2xx final, RFC 3261 §17.2.1) instead of
+    /// [`INVITE_ENTRY_TTL_MS`]. An entry already shortened keeps its expiry.
+    pub fn shorten(&self, key: &str) -> Option<CancelEntry> {
+        let now = self.now_ms();
+        let mut change = Change::default();
+        let mut stripe = self.stripe(key);
+        let found = stripe.shorten(key, now, &mut change);
         self.account(&change);
         found
     }

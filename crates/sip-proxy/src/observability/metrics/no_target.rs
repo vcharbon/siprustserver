@@ -12,7 +12,8 @@ pub enum NoTargetDrop {
     /// A request inside a dialog: routed by its stickiness cookie, or met
     /// before the proxy's first worker view.
     InDialog,
-    /// A CANCEL following its INVITE's cookie, or met before the first view.
+    /// A CANCEL no alive worker takes: following its INVITE's cookie, placed
+    /// with no memo of its INVITE, or met before the first view.
     Cancel,
     /// An out-of-dialog request: a retransmission following the cookie its
     /// first copy minted, or a new one met before the first view.

@@ -90,6 +90,11 @@ pub struct SelectOpts {
     /// The request names a dialog (a To-tag) no verified cookie backs: the
     /// strategy admits it as a new dialog, under every new-call cap.
     pub admit_as_new: bool,
+    /// The request belongs to a transaction already admitted (a CANCEL, an
+    /// ACK) and no memo or cookie places it: the strategy places it where an
+    /// unfiltered, unspilled placement put its call, under no new-call cap
+    /// (ADR-0009 X7).
+    pub admitted: bool,
 }
 
 /// The routing-policy seam. `async` for symmetry with the registry the LB calls

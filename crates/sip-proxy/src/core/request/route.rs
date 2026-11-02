@@ -232,7 +232,8 @@ impl ProxyCore {
 
         // ── Pick the downstream target (`target`) ───────────────────────────
         let chosen: Result<Chosen, RouteOutcome> = if method == Method::Cancel {
-            let target = self.cancel_target(msg, req, src, c.worker_outbound).await;
+            let cookie = c.cookie.as_ref();
+            let target = self.cancel_target(msg, req, src, c.worker_outbound, cookie).await;
             target.map(|t| (t, RoutingDecisionKind::Cancel, None))
         } else if let Some(found) = ack_hop {
             // The §17.1.1.3 ACK for a relayed non-2xx final: to the node the
@@ -260,6 +261,20 @@ impl ProxyCore {
             match self.follow_live_hop(went, found.minted.as_ref(), msg).await {
                 Some(target) => Ok((target, RoutingDecisionKind::SelectNew, None)),
                 None => Err(self.drop_without_target(NoTargetDrop::Initial)),
+            }
+        } else if method == Method::Ack {
+            // A §17.1.1.3 ACK whose final crossed another instance, or whose
+            // ACK hop was forgotten: the INVITE's own entry, which its branch
+            // keys, still names where the INVITE went; with none, the ACK
+            // goes where an unspilled placement put the call (ADR-0009 X7).
+            // A 2xx ACK opens its own transaction on a fresh branch and rides
+            // the dialog's cookie, which routed it above.
+            match self.invite_hop(msg, req).await {
+                Some(found) => found.map(|t| (t, RoutingDecisionKind::AckHop, None)),
+                None => {
+                    let target = self.admitted_target(msg, None, NoTargetDrop::InDialog).await;
+                    target.map(|t| (t, RoutingDecisionKind::SelectNew, None))
+                }
             }
         } else {
             let admit_as_new = self.admits_as_new(msg, face, None);

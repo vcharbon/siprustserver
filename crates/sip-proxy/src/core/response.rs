@@ -3,9 +3,9 @@
 //! response's transaction, along the next Via
 //! (received/rport precedence) or at the address it holds now, else to the
 //! call's other owner, else nowhere; pop the top Via entry (comma-aware);
-//! forward; remember the ACK-relay hop for a non-2xx INVITE final — the node
-//! the final arrived from (the ACK itself travels end-to-end — see
-//! `core/request`).
+//! forward; on an INVITE final, shorten the INVITE's memo entry to Timer H
+//! and, for a non-2xx one, remember the ACK-relay hop — the node the final
+//! arrived from (the ACK itself travels end-to-end — see `core/request`).
 //!
 //! A 100 is relayed like any other response: §16.7's absorption of a 100 is a
 //! stateful proxy's, and this proxy is stateless (§16.11), so it neither
@@ -153,11 +153,16 @@ impl ProxyCore {
             }
         }
 
-        // ── Relayed non-2xx INVITE final: remember the ACK-relay hop ────────
+        // ── A relayed INVITE final: shorten the INVITE's entry, remember the
+        // ACK-relay hop of a non-2xx one ───────────────────────────────────
+        // The INVITE's entry, which serves its CANCEL, now serves only the
+        // ACK window: Timer H. An entry whose final crosses the other instance
+        // lives to its cap (ADR-0009 X7).
+        //
         // This transaction-less proxy (ADR-0022 X4) synthesizes no §17.1.1.3
         // hop ACK: the UAS retransmits the final through this relay until the
         // upstream's own ACK arrives, which the request path relays on the
-        // memo written here.
+        // memo written here, whether or not the INVITE crossed this instance.
         //
         // The memo carries the hop to repeat: the node the final ARRIVED from
         // — after a failover that is the survivor, not the INVITE's target.
@@ -167,19 +172,20 @@ impl ProxyCore {
         // ACK safe when its reset `IdGen` re-mints a branch aliasing the dead
         // primary's INVITE (see `core/request`). Short TTL: the upstream ACKs
         // within its final-retransmit window (a re-sent final refreshes it).
-        if (300..700).contains(&resp.status()) && cseq.method() == Method::Invite {
+        if resp.status() >= 200 && cseq.method() == Method::Invite {
             // The response echoes the request's From (tag included), and the
             // Via below ours is the upstream's as the INVITE carried it, so
             // this re-builds exactly the key the INVITE was remembered under.
             let call_id = resp.call_id();
             let from = resp.from();
             let key = invite_txn_key(next, call_id.as_str(), from.tag(), cseq.seq());
-            if let Some(found) = self.cancel_lru.lookup(&key) {
+            self.cancel_lru.shorten(&key);
+            if (300..700).contains(&resp.status()) {
                 self.cancel_lru.remember(
                     &ack_hop_key(next, call_id.as_str(), from.tag(), cseq.seq()),
                     crate::cancel_lru::CancelEntry {
                         target: ProxyAddr::from(src),
-                        branch: found.branch.clone(),
+                        branch: ours.branch().unwrap_or_default().to_owned(),
                         stickiness: None,
                         minted: None,
                         via_cookie: None,

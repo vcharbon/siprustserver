@@ -2,6 +2,7 @@
 
 **Status:** accepted (2026-06-02). Amended (2026-10-16): D4, an address change resets health to
 `Unknown` and re-arms no guard; the fresh-pod guard and drain grace are removed (ADR-0050).
+Amended (2026-11-02): D7, the memo-coherence argument for active/passive (ADR-0009 X7).
 
 **Source:** this codebase (no sipjsserver counterpart — the source mediated
 membership through Redis/`PeerEnumerator`, which the Rust port dropped in
@@ -254,6 +255,7 @@ time) additionally keeps the per-pod `cancel_lru` (CANCEL / hop-by-hop-ACK
 correlation, ADR-0009 X1) **coherent** — an active/active pair behind a ClusterIP
 would split it and fail to ACK non-2xx finals (e.g. the limiter's 486s), so the VIP
 is the correct full-resilience design, not just the simplest.
+> The memo argument is void: every transaction path routes without the memo (ADR-0009 X7).
 
 The HA tooling's `kill_proxy` incident crashes **only the VIP holder** (the pod
 carrying the VIP on an interface other than `lo`); its window's budget states

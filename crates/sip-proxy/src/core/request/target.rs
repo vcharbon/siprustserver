@@ -1,6 +1,8 @@
 //! The downstream target of one request, for the routing ladder
-//! ([`route`](super::route)): a CANCEL's (where its INVITE went), the
-//! Request-URI's, the stickiness cookie's, or a fresh selection's.
+//! ([`route`](super::route)): a CANCEL's (where its INVITE went), a non-2xx
+//! ACK's with no ACK hop (where its INVITE went), the Request-URI's, the
+//! stickiness cookie's, an admitted transaction's no memo places (ADR-0009
+//! X7), or a fresh selection's.
 
 use std::net::SocketAddr;
 
@@ -68,16 +70,21 @@ impl ProxyCore {
     /// Toward a worker no longer alive it follows the INVITE's stickiness
     /// cookie, the workers being ONE logical UAS: the alive primary, else the
     /// backup holding the call's replica (ADR-0014), else nowhere — dropped
-    /// and counted (ADR-0050 §5). With no entry, a worker's CANCEL goes to the
-    /// Request-URI, where its b-leg INVITE went; the CANCEL of an INVITE this
-    /// hop refused is answered 200 here (`Err`, §9.2); any other goes to a
-    /// fresh selection.
+    /// and counted (ADR-0050 §5). With no entry (the INVITE crossed another
+    /// instance, or the entry was forgotten), the CANCEL of an INVITE this
+    /// hop refused is answered 200 here (`Err`, §9.2); a worker's goes to the
+    /// Request-URI, where its b-leg INVITE went; one carrying a cookie goes
+    /// where the cookie places its dialog; any other to where an unfiltered,
+    /// unspilled placement put its call (ADR-0009 X7). None of these meets an
+    /// admission gate or draws a 503: with no worker to take it, it is dropped
+    /// and counted.
     pub(super) async fn cancel_target(
         &self,
         msg: &SipMessage,
         req: &SipRequest,
         src: SocketAddr,
         worker_outbound: bool,
+        cookie: Option<&RouteParams>,
     ) -> Result<ProxyAddr, RouteOutcome> {
         let key = invite_txn_key(
             req.top_via(),
@@ -95,12 +102,62 @@ impl ProxyCore {
                 return Err(answered);
             }
             self.metrics.record_cancel_lookup(CancelLookup::Miss);
-            return self.select_target(msg, req, src, SelectOpts::default()).await;
+            return self.admitted_target(msg, cookie, NoTargetDrop::Cancel).await;
         };
         self.metrics.record_cancel_lookup(CancelLookup::Hit);
         match self.follow_live_hop(found.target, found.stickiness.as_ref(), msg).await {
             Some(target) => Ok(target),
             None => Err(self.drop_without_target(NoTargetDrop::Cancel)),
+        }
+    }
+
+    /// Where the INVITE went whose non-2xx final the ACK `req` acknowledges,
+    /// read off that INVITE's entry, which the ACK's top Via keys (§17.1.1.3:
+    /// the ACK repeats the INVITE's, branch included); toward a worker no
+    /// longer alive, where the INVITE's cookie places the call. `None`: no
+    /// entry, or no branch to tell the ACK's transaction by.
+    pub(super) async fn invite_hop(
+        &self,
+        msg: &SipMessage,
+        req: &SipRequest,
+    ) -> Option<Result<ProxyAddr, RouteOutcome>> {
+        super::top_via_branch(req)?;
+        let key = invite_txn_key(
+            req.top_via(),
+            req.call_id().as_str(),
+            req.from().tag(),
+            req.cseq().seq(),
+        );
+        let found = self.cancel_lru.lookup(&key)?;
+        Some(match self.follow_live_hop(found.target, found.stickiness.as_ref(), msg).await {
+            Some(target) => Ok(target),
+            None => Err(self.drop_without_target(NoTargetDrop::InDialog)),
+        })
+    }
+
+    /// Where a request of an admitted transaction goes when no memo of this
+    /// instance places it (ADR-0009 X7): where `cookie` places its dialog, else
+    /// where the strategy places the call with no filter, spill or token. It
+    /// meets no admission gate and is never answered: with no worker to take
+    /// it, it is dropped and counted under `drop`.
+    pub(super) async fn admitted_target(
+        &self,
+        msg: &SipMessage,
+        cookie: Option<&RouteParams>,
+        drop: NoTargetDrop,
+    ) -> Result<ProxyAddr, RouteOutcome> {
+        if let Some(cookie) = cookie {
+            match self.strategy.decode_stickiness(cookie, msg).await {
+                DecodeResult::Forward { target, .. }
+                | DecodeResult::ForwardBackup { target, .. } => return Ok(target),
+                DecodeResult::Unroutable => return Err(self.drop_without_target(drop)),
+                DecodeResult::Reject { .. } | DecodeResult::Unknown { .. } => {}
+            }
+        }
+        let opts = SelectOpts { admitted: true, ..SelectOpts::default() };
+        match self.strategy.select_for_new_dialog(msg, opts).await {
+            Ok(target) => Ok(target),
+            Err(_) => Err(self.drop_without_target(drop)),
         }
     }
 
@@ -183,7 +240,8 @@ impl ProxyCore {
             Some(found) => found.target.clone(),
             None => {
                 let admit_as_new = self.admits_as_new(msg, face, Some(cookie));
-                let opts = SelectOpts { emergency_override: miss, admit_as_new };
+                let opts =
+                    SelectOpts { emergency_override: miss, admit_as_new, ..SelectOpts::default() };
                 self.select_target(msg, req, src, opts).await?
             }
         };
