@@ -97,6 +97,17 @@ describe("a case's history", () => {
       ["lane-x", "B1 INVITE pai.uri", "✓✗✗", [2]],
       ["lane-x", "B1 INVITE to.uri", "✓✗✓", [2, 3]]
     ])
+    expect(h.hidden).toBe(0)
+  })
+
+  it("shows only the runs the case ran in, the latest up to the limit, labels compared with the shown run before", () => {
+    const three = history(VIEW, "fam-b/three", ["lane-x", "lane-y"])
+    expect(three.runs).toEqual([2, 3])
+    expect(three.verdicts).toEqual({ "lane-x": ["pass", "pass"], "lane-y": ["none", "none"] })
+    expect(three.changed).toEqual([[], ["seed"]])
+    const latest = history(VIEW, "fam-a/one", ["lane-x", "lane-y"], 2)
+    expect([latest.runs, latest.hidden]).toEqual([[2, 3], 1])
+    expect(latest.changed).toEqual([[], ["seed"]])
   })
 })
 

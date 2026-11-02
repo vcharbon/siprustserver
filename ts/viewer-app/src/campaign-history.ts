@@ -3,7 +3,8 @@
  * case under each of its groups, under its family where it has none, one cell per run × lane holding the row's worst verdict,
  * failure over error over pass), and one case's history (its verdict per run
  * and lane, the run labels that changed from the run before, and one flip row
- * per lane × check it ever failed, the runs where the verdict changed marked).
+ * per lane × check it ever failed, the runs where the verdict changed marked),
+ * over the latest runs the case ran in on one of the lanes at least.
  */
 import type { Campaign, CampaignCase, CampaignResult } from "./api.ts"
 import { checkKey, failedChecks, resultOf } from "./campaign-facets.ts"
@@ -86,15 +87,24 @@ export interface Flip {
 }
 
 export interface History {
+  /** The runs shown, oldest first: the latest the case ran in, at most the limit. */
   readonly runs: readonly number[]
+  /** The runs the case ran in left out by the limit. */
+  readonly hidden: number
   readonly verdicts: Readonly<Record<string, readonly Verdict[]>>
-  /** Per run, the labels whose value differs from the run before. */
+  /** Per run, the labels whose value differs from the shown run before. */
   readonly changed: ReadonlyArray<readonly string[]>
   readonly flips: readonly Flip[]
 }
 
-export const history = (view: Campaign, caseId: string, lanes: readonly string[]): History => {
-  const runs = chronological(view)
+export const history = (
+  view: Campaign,
+  caseId: string,
+  lanes: readonly string[],
+  limit: number = Number.POSITIVE_INFINITY
+): History => {
+  const ran = chronological(view).filter((run) => lanes.some((lane) => resultOf(run, lane, caseId) !== undefined))
+  const runs = ran.slice(Math.max(0, ran.length - limit))
   const verdicts: Record<string, Array<Verdict>> = {}
   const keys: Array<{ lane: string; key: string }> = []
   for (const lane of lanes) {
@@ -133,5 +143,5 @@ export const history = (view: Campaign, caseId: string, lanes: readonly string[]
     }
     return { lane, key, marks, changedAt, seen }
   })
-  return { runs: runs.map((r) => r.id), verdicts, changed, flips }
+  return { runs: runs.map((r) => r.id), hidden: ran.length - runs.length, verdicts, changed, flips }
 }

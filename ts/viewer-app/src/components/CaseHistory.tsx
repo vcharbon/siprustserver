@@ -5,9 +5,10 @@
  * the file it was compiled from, folded), every check it makes marked per
  * lane (folded),
  * its verdict per run and lane, what changed between runs, the flip table, the
- * runs with their deltas and, for a cell replayed more than once, its attempts.
+ * runs with their deltas and, for a cell replayed more than once, its attempts,
+ * over the latest runs the case ran in unless every one is asked for.
  */
-import type { JSX } from "react"
+import { type JSX, useState } from "react"
 import type { Campaign } from "../api.ts"
 import { resultOf } from "../campaign-facets.ts"
 import { attemptLines } from "../campaign-attempts.ts"
@@ -15,6 +16,9 @@ import { checkList } from "../campaign-checks.ts"
 import { CaseReplay } from "./CampaignLaunch.tsx"
 import { history } from "../campaign-history.ts"
 import { sourceLines } from "../source-lines.ts"
+
+/** How many of the runs the case ran in the drawer shows before "show all". */
+const LATEST = 12
 
 const MARK: Readonly<Record<string, string>> = { pass: "✓", failure: "✗", error: "!", none: "—" }
 
@@ -33,11 +37,12 @@ export const CaseHistory = ({ view, caseId, lanes, onClose, onDelta }: {
   readonly onClose: () => void
   readonly onDelta: (run: number, lane: string) => void
 }): JSX.Element => {
-  const h = history(view, caseId, lanes)
+  const [all, setAll] = useState(false)
+  const h = history(view, caseId, lanes, all ? Number.POSITIVE_INFINITY : LATEST)
   const checks = checkList(view, caseId, lanes)
   const scopeOf = (id: number): string | null => view.runs.find((r) => r.id === id)?.scope ?? null
   const known = view.cases.find((c) => c.caseId === caseId)
-  const newest = [...view.runs]
+  const newest = [...view.runs].filter((run) => h.runs.includes(run.id)).sort((a, b) => b.id - a.id)
   return (
     <aside className="cp-drawer" aria-label="case history">
       <button type="button" className="cp-close" onClick={onClose} title="close (Esc)">✕</button>
@@ -86,7 +91,15 @@ export const CaseHistory = ({ view, caseId, lanes, onClose, onDelta }: {
         </section>
       )}
       <section className="cp-panel">
-        <h3>Verdicts</h3>
+        <h3>
+          Verdicts{" "}
+          {(h.hidden > 0 || all) && (
+            <span className="muted cp-small">
+              {all ? `all ${h.runs.length} runs` : `latest ${h.runs.length} of ${h.runs.length + h.hidden} runs`}{" "}
+              <button type="button" onClick={() => setAll(!all)}>{all ? `latest ${LATEST}` : "show all"}</button>
+            </span>
+          )}
+        </h3>
         <table className="cp-hist">
           <thead>
             <tr><th />{h.runs.map((id) => <RunHead key={id} id={id} scope={scopeOf(id)} />)}</tr>
