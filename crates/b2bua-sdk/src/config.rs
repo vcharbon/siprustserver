@@ -97,15 +97,9 @@ pub struct B2buaConfig {
     /// 30 s) breaks long-hold endurance traffic by poking mid-dialog calls whose
     /// UAC is not expecting it. Overridable per worker via `B2BUA_KEEPALIVE_SEC`.
     /// The test harness lowers this to 30 s so paused-clock tests stay fast.
+    /// A probe's only deadline is its own transaction's Timer F (32 s, RFC 3261
+    /// §17.1.2.2): unanswered by then, it ends the call.
     pub keepalive_interval_sec: i64,
-    /// **Keepalive-timeout grace**, seconds — how long the B2BUA waits for the
-    /// in-dialog OPTIONS `200` before declaring the leg dead and tearing the call
-    /// down (`keepalive-timeout` rule → BYE). Production default **32 s**: wide
-    /// enough to ride out a signalling path that is still settling (a worker
-    /// restarting, a proxy learning a new address) without ending healthy
-    /// calls, and well under `keepalive_interval_sec` so two keepalives never
-    /// overlap. Overridable via `B2BUA_KEEPALIVE_TIMEOUT_SEC`.
-    pub keepalive_timeout_sec: i64,
     /// Limiter-refresh cadence, seconds — how often a counted call extends its
     /// lease on the limiter. The lease is the limiter's own, stated in its
     /// answers; this period plus one refresh tick must stay below it by a
@@ -380,7 +374,6 @@ impl Default for B2buaConfig {
             refer_overall_safety_sec: 120,
             release_reroute_guard_sec: 120,
             keepalive_interval_sec: 300,
-            keepalive_timeout_sec: 32,
             limiter_refresh_sec: 40,
             limiter_release_queue_cap: 100_000,
             limiter_refresh_batch_ms: 1_000,

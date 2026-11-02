@@ -321,7 +321,6 @@ impl RunnerEnv {
             max_messages_per_call: self.max_messages_per_call,
             max_messages_per_call_lifetime: self.max_messages_per_call_lifetime,
             keepalive_interval_sec: self.keepalive_sec,
-            keepalive_timeout_sec: self.keepalive_timeout_sec,
             limiter_refresh_sec: self.limiter_refresh_sec,
             limiter_refresh_batch_ms: self.limiter_refresh_batch_ms,
             limiter_refresh_batch_max: self.limiter_refresh_batch_max,

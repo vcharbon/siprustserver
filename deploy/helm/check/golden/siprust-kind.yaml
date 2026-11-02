@@ -864,8 +864,6 @@ spec:
           value: '3000'
         - name: B2BUA_KEEPALIVE_SEC
           value: '300'
-        - name: B2BUA_KEEPALIVE_TIMEOUT_SEC
-          value: '120'
         - name: B2BUA_LISTEN
           value: 0.0.0.0:5060
         - name: B2BUA_METRICS

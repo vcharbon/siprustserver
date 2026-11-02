@@ -81,3 +81,31 @@ fn a_relayed_reinvite_record_answers_its_branch_alone() {
     assert!(answered_record(&call, "b-1", to, from, answers("z9hG4bK-ours")).is_some());
     assert!(answered_record(&call, "b-1", to, from, answers("z9hG4bK-theirs")).is_none());
 }
+
+/// This stack's own `method` at `cseq`, sent by the rule `author`.
+fn own_by(method: &str, cseq: i64, author: &str) -> RequestRecord {
+    let sent = SentRequest {
+        branch: format!("z9hG4bK-{method}-{cseq}"),
+        image: Vec::new(),
+        destination: HostPort { host: "127.0.0.1".into(), port: 5070 },
+    };
+    RequestRecord {
+        author: Some(author.into()),
+        ..RequestRecord::own(method, cseq, sent, 32_000, Default::default())
+    }
+}
+
+/// Dropping the keepalive records removes the keepalive probe alone: an
+/// OPTIONS a service sends and any other request of this stack's own stay.
+#[test]
+fn dropping_keepalive_records_keeps_every_other_request() {
+    let mut call = settled_call();
+    let d = call.b_legs[0].dialogs.confirmed_mut().expect("confirmed");
+    d.requests.push(own_by("OPTIONS", 5, call::KEEPALIVE_AUTHOR));
+    d.requests.push(own_by("OPTIONS", 6, "a-service-probe"));
+    d.requests.push(own_by("INFO", 7, call::KEEPALIVE_AUTHOR));
+    drop_keepalive_records(&mut call);
+    let kept: Vec<(String, i64)> =
+        every_record(&call).map(|(_, _, r)| (r.method.clone(), r.outbound_cseq)).collect();
+    assert_eq!(kept, [("OPTIONS".to_string(), 6), ("INFO".to_string(), 7)]);
+}

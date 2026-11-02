@@ -126,13 +126,6 @@ fn keepalive_interval(ctx: &RuleContext) -> i64 {
     // accepted but does not drive the runtime timer.
     ctx.config.keepalive_interval_sec
 }
-fn keepalive_timeout(ctx: &RuleContext) -> i64 {
-    // Grace for the in-dialog OPTIONS 200 before the leg is declared dead and the
-    // call is torn down. Operator knob (`B2BUA_KEEPALIVE_TIMEOUT_SEC`, default
-    // 32 s) — wide enough that a healthy restored dialog whose keepalive
-    // round-trip is still settling across a reboot is not BYE'd as dead.
-    ctx.config.keepalive_timeout_sec
-}
 fn max_duration(ctx: &RuleContext) -> i64 {
     ctx.call.features().map(|f| f.platform.max_duration_ms).unwrap_or(3_600_000)
 }
@@ -703,6 +696,35 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ])
             },
         ),
+        // The liveness probe refused with any other failure (RFC 3261 §11: a
+        // UAS answers OPTIONS as it would an INVITE) is the probe's failure as
+        // its silence is: the call ends under the keepalive deadline and both
+        // legs are BYEd (§12.2.1.2). A 481 is `handle-481`'s.
+        rule(
+            "keepalive-refused",
+            &[],
+            Match::response().method("OPTIONS").call_state(CallModelState::Active).filter(|ctx| {
+                ctx.response().is_some_and(|r| r.status() >= 300 && r.status() != 481)
+                    && ctx.answered_record().is_some_and(call::RequestRecord::is_keepalive)
+            }),
+            |ctx| {
+                let src = ctx.source_leg_id.to_string();
+                let Some(resp) = ctx.response() else { return ok(vec![]) };
+                ok(vec![
+                    RuleAction::AddCdrEvent {
+                        event_type: CdrEventType::Bye,
+                        leg_id: src.clone(),
+                        status_code: Some(i64::from(resp.status())),
+                        reason: Some(resp.reason().to_string()),
+                    },
+                    RuleAction::BeginTermination {
+                        reason: Some(resp.status().to_string()),
+                        cause: TerminationCause::Timeout(TimeoutKind::Keepalive),
+                        by_leg: Some(src),
+                    },
+                ])
+            },
+        ),
         // A non-2xx final to a request THIS STACK originated — its own PRACK
         // toward a responder whose provisional the originator was never shown
         // reliably, or a REFER-progress NOTIFY — records as this stack's own,
@@ -738,10 +760,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .method("OPTIONS")
                 .status_class(2)
                 .filter(|ctx| !ctx.answers_relayed_request()),
-            |ctx| {
-                let leg = ctx.source_leg_id.to_string();
-                ok(vec![RuleAction::cancel(TimerKey::leg(TimerType::KeepaliveTimeout, leg))])
-            },
+            |_ctx| ok(vec![]),
         ),
         rule(
             "absorb-notify-200",
@@ -1345,6 +1364,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             ])
         })
         .runs_while_terminating(),
+        // Every interval, each peered leg is probed with an in-dialog OPTIONS
+        // (RFC 3261 §11). The probe has one deadline, its own transaction's
+        // Timer F: unanswered, it ends the call (`handle-timeout`).
         rule(
             call::KEEPALIVE_AUTHOR,
             &[],
@@ -1358,43 +1380,12 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                         body: None,
                         headers: vec![],
                     });
-                    actions.push(RuleAction::arm(
-                        TimerKey::leg(TimerType::KeepaliveTimeout, leg_id),
-                        TimerDelay::secs(keepalive_timeout(ctx)),
-                    ));
                 }
                 actions.push(RuleAction::arm(
                     TimerKey::call(TimerType::Keepalive),
                     TimerDelay::secs(keepalive_interval(ctx)),
                 ));
                 ok(actions)
-            },
-        ),
-        // The liveness probe drew no answer within its deadline: the call ends,
-        // and the silent leg is BYEd like its peer (RFC 3261 §12.2.1.2: no
-        // response to an in-dialog request ends an INVITE dialog by a BYE —
-        // the probe may be what was lost, not the peer). A leg silent on its
-        // BYE too resolves by that BYE's transaction timeout (`handle-timeout`).
-        rule(
-            "keepalive-timeout",
-            &[],
-            Match::timer()
-                .timer_type(TimerType::KeepaliveTimeout)
-                .call_state(CallModelState::Active),
-            |ctx| {
-                ok(vec![
-                    RuleAction::AddCdrEvent {
-                        event_type: CdrEventType::Bye,
-                        leg_id: ctx.source_leg_id.to_string(),
-                        status_code: None,
-                        reason: Some("keepalive timeout".into()),
-                    },
-                    RuleAction::BeginTermination {
-                        reason: Some("keepalive-timeout".into()),
-                        cause: TerminationCause::Timeout(TimeoutKind::Keepalive),
-                        by_leg: Some(ctx.source_leg_id.to_string()),
-                    },
-                ])
             },
         ),
         // ── ladder give-ups (ADR-0032 X4/X5) ─────────────────────────────────

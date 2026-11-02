@@ -8,7 +8,7 @@
 //! proactively (it only replays the stored 200 on a *retransmitted* INVITE), and
 //! at Timer H the un-ACKed server txn is deleted **silently** — no BYE, no b-leg
 //! teardown. The bridged, billable call then leaks until the 1 h GlobalDuration
-//! cap (or bob's keepalive-timeout). `active_calls` stays pinned at 1.
+//! cap (or a keepalive failure). `active_calls` stays pinned at 1.
 //!
 //! This scenario answers the call, then alice goes silent (never ACKs). The
 //! RFC-correct B2BUA must:

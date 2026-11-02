@@ -208,7 +208,7 @@ Relay: `relay-bye`, `relay-ack`, `relay-reinvite`, `relay-prack`, `relay-options
 `resolve-cross-bye`. Corner cases: `cancel-200-crossing`, `retransmit-200`,
 `reinvite-glare`, `relay-reinvite-response`. Failure: `route-failure`,
 `no-answer-failover`, `absorb-stale-failure`. Timers: `max-duration`, `keepalive`,
-`keepalive-timeout`, `terminating-safety-timeout`. The `route-failure` /
+`terminating-safety-timeout`. The `route-failure` /
 `no-answer-failover` failover branch calls `decision.call_failure` (test adapter
 returns terminate by default; failover path compiles and is unit-tested).
 

@@ -68,7 +68,7 @@ fn an_ended_attempt_ends_its_scope() {
 fn a_gone_leg_ends_its_scope() {
     let call = call();
     assert!(scope_ended(&call, &TimerKey::leg(TimerType::NoAnswer, "b-9")));
-    assert!(!scope_ended(&call, &TimerKey::leg(TimerType::KeepaliveTimeout, "a")));
+    assert!(!scope_ended(&call, &TimerKey::leg(TimerType::NoAnswer, "a")));
 }
 
 #[test]

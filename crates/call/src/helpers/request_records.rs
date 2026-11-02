@@ -165,6 +165,16 @@ pub fn every_record(call: &Call) -> impl Iterator<Item = (&Leg, &Dialog, &Reques
         .flat_map(|(leg, d)| d.requests.iter().map(move |r| (leg, d, r)))
 }
 
+/// Remove every keepalive probe's record from `call`
+/// ([`RequestRecord::is_keepalive`]).
+pub fn drop_keepalive_records(call: &mut Call) {
+    for leg in std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut()) {
+        for d in leg.dialogs.iter_mut() {
+            d.requests.retain(|r| !r.is_keepalive());
+        }
+    }
+}
+
 /// Take every held record whose deadline is at or before `now_ms` out of
 /// `call` and return them, each with its leg and dialog: the platform
 /// answers them.

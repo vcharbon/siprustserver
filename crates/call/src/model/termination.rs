@@ -17,7 +17,8 @@ pub enum TimeoutKind {
     NoAnswer,
     /// A 2xx was never ACKed (RFC 3261 §13.3.1.4).
     Ack,
-    /// A leg answered no liveness probe (RFC 3261 §11).
+    /// A leg's liveness probe went unanswered by its Timer F, or was refused
+    /// (RFC 3261 §11, §12.2.1.2).
     Keepalive,
     /// A transaction this stack originated drew no final (Timer B / F).
     Transaction,

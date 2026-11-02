@@ -69,8 +69,8 @@ fn bye_event(leg: &str) -> CdrEvent {
 }
 
 /// A keepalive round leaves the record's state as it was: its request
-/// record, the CSeq it took, its timers, the ring entries and the counters
-/// are all exempt.
+/// record, the CSeq it took, the keepalive re-armed, the ring entries and
+/// the counters are all exempt.
 #[test]
 fn a_keepalive_round_changes_no_compared_field() {
     let before = call();
@@ -79,9 +79,9 @@ fn a_keepalive_round_changes_no_compared_field() {
     d.our_cseq += 1;
     d.requests.push(keepalive(d.our_cseq));
     after.timers.push(TimerEntry {
-        key: TimerKey::leg(TimerType::KeepaliveTimeout, "a".to_string()),
+        key: TimerKey::call(TimerType::Keepalive),
         generation: 9,
-        fire_at: 32_000,
+        fire_at: 300_000,
     });
     after.timer_generation = 9;
     after.a_leg.messages.entries.push(entry(7));

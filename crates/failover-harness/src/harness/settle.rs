@@ -52,7 +52,7 @@ impl FailoverHarness {
     /// first in fine 200 ms steps for the immediate flush (CDR write, soft limiter
     /// release, reverse-delete drain and an acting-backup takeover copy's
     /// self-release on Timer H/J ~32 s), then in coarse 5 s steps **past one full
-    /// `keepalive_interval` (300 s) + `keepalive_timeout` (45 s)** so that any
+    /// `keepalive_interval` (300 s) + the probe's Timer F (32 s)** so that any
     /// zombie a buggy teardown left resurrectable *would* have armed its keepalive,
     /// probed, and surfaced (or self-healed) before we assert. Returns `true` if
     /// `drained` was satisfied within the budget, `false` if it timed out (the
@@ -72,8 +72,9 @@ impl FailoverHarness {
                 return true;
             }
         }
-        // Phase 2: coarse steps past keepalive_interval (300 s) + keepalive_timeout
-        // (45 s) + margin, so a resurrected/stranded copy surfaces or self-heals.
+        // Phase 2: coarse steps past keepalive_interval (300 s) + the probe's
+        // Timer F (32 s) + margin, so a resurrected/stranded copy surfaces or
+        // self-heals.
         let coarse = Duration::from_secs(5);
         while elapsed < Duration::from_secs(400) {
             self.advance(coarse).await;

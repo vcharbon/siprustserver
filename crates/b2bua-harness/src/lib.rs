@@ -494,10 +494,6 @@ impl B2buaSutBuilder {
             // tests advance in 30 s steps, so the harness baseline stays at 30 s.
             // A scenario can still override via `tune`.
             config.keepalive_interval_sec = 30;
-            // Production default is 32 s; the paused-clock keepalive-timeout
-            // tests advance a fixed 5 s after the probe, so the harness pins a
-            // 5 s grace to keep those steps valid (a scenario can `tune` it).
-            config.keepalive_timeout_sec = 5;
             // Panic-ELU rung: off in the harness baseline. The live
             // sampler reads a paused-clock `Harness::advance` as a saturated loop
             // (ELU ≈ 1.0) and would panic-503 the next new INVITE; the backstop is

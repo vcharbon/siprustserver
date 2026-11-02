@@ -19,7 +19,7 @@
 //! it, yielding the same `Key` value**. A *stale* `timer → Key` map therefore
 //! aliases, and `try_remove(stale_key)` then evicts whatever *live* timer now
 //! occupies that slot — a silent, catastrophic wrong-timer cancel (e.g. a
-//! keepalive-timeout cancel killing the rescheduled keepalive). See
+//! per-leg timer's cancel killing the rescheduled keepalive). See
 //! `[[test-time clock & timers]]` in CLAUDE.md.
 //!
 //! The aliasing hazard needs a **stale** key — one held past the moment its

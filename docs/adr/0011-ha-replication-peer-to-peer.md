@@ -213,8 +213,7 @@ facts from X11's analysis remain load-bearing and are recorded here:
 - **Why exclusive ownership matters (the correctness bug X11 found).** If two
   nodes serve the *same* dialog, each sends in-dialog keepalive OPTIONS under its
   own CSeq counter; a strict UAS answers the lower-CSeq OPTIONS with `500`, so
-  `absorb-options-200` does not fire, `KeepaliveTimeout` trips at 5 s, and a
-  **healthy call is torn down**. Double-serving is a correctness bug, not just a
+  the keepalive probe fails, and a **healthy call is torn down**. Double-serving is a correctness bug, not just a
   leak — which is why the backup must hold a takeover copy only while actively
   serving and self-release deterministically.
 

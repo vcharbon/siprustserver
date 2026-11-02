@@ -27,7 +27,9 @@
 //!    re-serving a dead dialog, `Terminating` forced terminal (ADR-0020 X3);
 //! 4. `reanchor` — every instant of the copy moved into this node's clock
 //!    frame by the persisted skew offset (ADR-0055 §9), right after the read;
-//!    then `sanitize_restored_timers` drops the stale `KeepaliveTimeout`, and
+//!    then `forget_keepalive_probes` drops the keepalive probes the record
+//!    holds (no seed, no timeout: the copy probes again on its interval),
+//!    `sanitize_restored_timers` bounds the keepalive, and
 //!    `ring_deadline::arm_unrung_after_restore` arms the ring deadline of an
 //!    unanswered leg with no ring on record from its INVITE;
 //! 5. the residency insert through the store; a parking reclaim stops here,
@@ -76,7 +78,9 @@ use sip_message::{Method, SipMessage};
 use sip_txn::Reoffer;
 
 use super::reclaim::{discharge_materialized_terminal, format_pb};
-use super::restore_hygiene::{reanchor, sanitize_restored_timers, Smoothing};
+use super::restore_hygiene::{
+    forget_keepalive_probes, reanchor, sanitize_restored_timers, Smoothing,
+};
 use super::RouterCtx;
 use crate::store::{Enveloped, MaterialiseOrigin, ReplicaMiss};
 use b2bua_sdk::event::CallEvent;
@@ -201,6 +205,7 @@ pub(super) async fn materialise_after(
         return Materialised::Refused(Reason::Unrecoverable);
     }
     let Enveloped { mut call, topology } = copy;
+    forget_keepalive_probes(&mut call);
     sanitize_restored_timers(
         &mut call.timers,
         call_ref,

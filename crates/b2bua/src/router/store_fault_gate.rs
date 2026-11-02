@@ -30,7 +30,7 @@ use b2bua_sdk::event::CallEvent;
 ///   - everything else (responses, CANCEL/timeout/internal events) is
 ///     deliberately un-probed: those paths owe no store-derived answer, and
 ///     absorbing e.g. a keepalive OPTIONS-200 here would convert a store fault
-///     into a KeepaliveTimeout teardown of a healthy call.
+///     into a keepalive-failure teardown of a healthy call.
 pub(super) async fn in_dialog_store_fault_gate(
     ctx: &Arc<RouterCtx>,
     event: &CallEvent,

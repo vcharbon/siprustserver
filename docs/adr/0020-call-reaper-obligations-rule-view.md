@@ -145,7 +145,7 @@ forget) and at every materialisation site (`create`,
 `hydrate_from_replica`, `materialize_if_absent`) — so a freshly reclaimed
 long-hold call starts its idle clock at reclaim. **Never `created_at`, never
 timer deadlines** (keepalive catch-up smoothing makes a reclaimed call look
-overdue — the stale-`KeepaliveTimeout` bug class).
+overdue).
 
 Stamp membership mirrors live-map membership: cleared in `remove` and
 `drop_local`; an orphan never enters either. The idle threshold defaults to

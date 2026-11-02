@@ -60,7 +60,7 @@ canonical reject shape); the fail-closed paths are counted on
 Deliberately **un-probed**: SIP responses, CANCEL/timeout/internal events, and
 every non-`Keepalive` timer. Those paths owe no store-derived answer, and
 absorbing e.g. a keepalive OPTIONS-200 under a fault would convert a store
-fault into a `KeepaliveTimeout` teardown of a healthy call — the exact outcome
+fault into a keepalive-failure teardown of a healthy call — the exact outcome
 X2 forbids.
 
 ## Decision X3 — HA scoping: the reclaim/reconcile plane is out of bounds

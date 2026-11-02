@@ -1,7 +1,7 @@
 //! ADR-0020 X4 — the last-touched ledger on `CallState`: stamped at every
 //! materialisation site, monotonic, membership mirroring the call map,
 //! takeover copies excluded from the sweep view, and the idle clock restarting
-//! at reclaim (never `created_at` — the stale-KeepaliveTimeout bug class).
+//! at reclaim (never `created_at`).
 
 use std::net::SocketAddr;
 use std::sync::Arc;

@@ -582,7 +582,7 @@ async fn c6_bye_on_backup__primary_crashed__reboot_reclaim() {
 
 // =============================================================================
 // C7 — THE ENDURANCE BUG: BYE on the backup, peer silent, primary CRASHED then
-// reboots + reclaims a zombie that pins the limiter until keepalive-timeout.
+// reboots + reclaims a zombie that pins the limiter until a keepalive failure.
 // =============================================================================
 #[tokio::test(start_paused = true)]
 async fn c7_bye_on_backup__primary_crashed__peer_silent__reboot() {
@@ -778,10 +778,10 @@ async fn c11_reinvite_on_backup__primary_alive__no_terminal() {
 }
 
 // =============================================================================
-// C8 — terminal driven by KEEPALIVE-TIMEOUT, NO inbound BYE. The primary crashes,
+// C8 — terminal driven by a KEEPALIVE FAILURE, NO inbound BYE. The primary crashes,
 // reboots, and reclaims the still-`Active` call; the reclaimed copy arms its
 // keepalive, probes both legs, NEITHER leg answers (the peer is gone), and the
-// keepalive-timeout tears the call down — the terminal fires on the reclaimed
+// probe's Timer F tears the call down — the terminal fires on the reclaimed
 // (takeover) copy with no BYE ever sent. (Under reactive-only takeover + ADR-0014
 // self-release, the survivor never durably owns an idle `Active` call, so the
 // only node that can drive this terminal post-crash is the reboot-reclaimed
@@ -819,7 +819,7 @@ async fn c8_keepalive_timeout_on_backup__reboot() {
     }
 
     // NO BYE. NO keepalive answers. The settle pump crosses keepalive_interval
-    // (300 s) + keepalive_timeout (45 s); the reclaimed copy's unanswered probe
+    // (300 s) + the probe's Timer F (32 s); the reclaimed copy's unanswered probe
     // must tear the call down and discharge it.
     let _ = fh
         .settle_terminal(async || {

@@ -347,7 +347,7 @@ one deadline class left absolute). One router seam,
 `sanitize_restored_timers`, runs EVERY hydration path (bulk reclaim, reactive
 takeover, on-demand reclaim, reverse-flush straggler): re-anchor every restored
 `fire_at` by `skew_offset_ms` (a sub-second deadband ignores pure replication
-latency), drop the stale `KeepaliveTimeout`, apply a defensive floor for any path
+latency), apply a defensive floor for any path
 that lacked an offset, then cohort-smooth. The offset includes one transit
 latency — acceptable at in-cluster ms scale. This bounds restore skew to
 ~replication latency instead of the raw inter-node clock disagreement.

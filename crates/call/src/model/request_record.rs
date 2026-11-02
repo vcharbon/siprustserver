@@ -240,6 +240,15 @@ impl RequestRecord {
         self.origin == RequestOrigin::Held
     }
 
+    /// Whether the record is a keepalive probe: the in-dialog OPTIONS the
+    /// keepalive rule sends ([`KEEPALIVE_AUTHOR`]), not one a service sends
+    /// on its own.
+    pub fn is_keepalive(&self) -> bool {
+        self.is_own()
+            && self.method == "OPTIONS"
+            && self.author.as_deref() == Some(KEEPALIVE_AUTHOR)
+    }
+
     /// The branch the sent request left with; `None` where the record holds
     /// no sent transaction.
     pub fn branch(&self) -> Option<&str> {

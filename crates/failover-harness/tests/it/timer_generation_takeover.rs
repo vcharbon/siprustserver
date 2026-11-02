@@ -139,7 +139,7 @@ async fn a_stale_fire_across_a_takeover_is_dropped() {
 
     let taken = backup.live_call(&call_ref).expect("the backup serves the taken-over call");
     assert_eq!(cap_generation(&taken), Some(answer_cap), "the copy re-armed the cap as replicated");
-    for entry in replica.timers.iter().filter(|t| *t.timer_type() != TimerType::KeepaliveTimeout) {
+    for entry in &replica.timers {
         let held = taken.timers.iter().find(|t| t.key == entry.key);
         assert!(
             held.is_some_and(|t| t.generation == entry.generation),

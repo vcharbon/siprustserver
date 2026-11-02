@@ -32,7 +32,7 @@ fn fire(key: &TimerKey, generation: u64, call: &Call) -> CallEvent {
 #[test]
 fn a_fire_of_the_held_instance_is_delivered_and_leaves_the_ledger() {
     let mut call = call();
-    let key = TimerKey::leg(TimerType::KeepaliveTimeout, "a");
+    let key = TimerKey::leg(TimerType::NoAnswer, "a");
     let armed = arm_timer(&mut call, key.clone(), 1_000);
     let event = fire(&key, armed.generation, &call);
     assert_eq!(screen(&mut call, &event, 0, &mut Default::default()), Ok(()));
@@ -82,7 +82,7 @@ fn a_fire_whose_attempt_ended_is_dropped() {
 #[test]
 fn a_fire_of_a_disarmed_key_is_dropped() {
     let mut call = call();
-    let key = TimerKey::leg(TimerType::KeepaliveTimeout, "a");
+    let key = TimerKey::leg(TimerType::NoAnswer, "a");
     let armed = arm_timer(&mut call, key.clone(), 1_000);
     call::helpers::disarm_timer(&mut call, &key);
     let event = fire(&key, armed.generation, &call);

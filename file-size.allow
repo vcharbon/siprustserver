@@ -12,10 +12,10 @@ ext .rs
 # `exclude <path glob>`.
 
 crates/b2bua-core/src/rules/actions/respond.rs 612
-crates/b2bua-core/src/rules/defaults/core_rules.rs 1551
+crates/b2bua-core/src/rules/defaults/core_rules.rs 1542
 crates/b2bua-core/src/rules/relay_first_18x.rs 524
 crates/b2bua-core/src/rules/relay/sdp_session_tests.rs 916
-crates/b2bua-harness/src/lib.rs 835
+crates/b2bua-harness/src/lib.rs 831
 crates/b2bua-harness/tests/it/call_keyed_holds.rs 1036
 crates/b2bua-harness/tests/it/fake_prack.rs 810
 crates/b2bua-harness/tests/it/message_ring.rs 832
@@ -25,8 +25,8 @@ crates/b2bua-harness/tests/it/reroute_limiter_holds.rs 858
 crates/b2bua-harness/tests/it/session_timer_transparency.rs 818
 crates/b2bua-harness/tests/it/stated_headers.rs 1453
 crates/b2bua-harness/tests/it/suppress_18x.rs 818
-crates/b2bua-runner-kit/src/lib.rs 565
-crates/b2bua-sdk/src/config.rs 571
+crates/b2bua-runner-kit/src/lib.rs 564
+crates/b2bua-sdk/src/config.rs 564
 crates/b2bua-sdk/src/model.rs 1168
 crates/b2bua/src/decision/test_adapter.rs 818
 crates/b2bua/src/limiter/refresh_batch.rs 517
@@ -49,7 +49,7 @@ crates/call/tests/it/model_helpers.rs 893
 crates/e2e-core/src/infra.rs 622
 crates/e2e-model/src/registry.rs 575
 crates/e2e-web/src/lib.rs 1123
-crates/failover-harness/src/harness.rs 1955
+crates/failover-harness/src/harness.rs 1951
 crates/failover-harness/src/runner.rs 615
 crates/failover-harness/tests/it/call_terminate_on_backup.rs 986
 crates/failover-harness/tests/it/failover.rs 1315

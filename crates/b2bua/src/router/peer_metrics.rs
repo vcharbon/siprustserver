@@ -10,43 +10,41 @@ use std::sync::Arc;
 
 use http_net::ResolvedTarget;
 
-use call::{Call, TimerType};
+use call::Call;
 
 use super::RouterCtx;
 use crate::config::B2buaConfig;
 use b2bua_sdk::event::CallEvent;
 
-/// Per-peer keepalive-timeout attribution (observability only;
-/// `b2bua_peer_failures_total{...,kind="keepalive_timeout"}`). The genuine
-/// no-200 keepalive timeout is the `KeepaliveTimeout` timer firing for a
-/// specific leg L (`leg_id`): the `keepalive-timeout` rule ends the call and
-/// BYEs BOTH legs. So we MUST NOT attribute to an outbound BYE's destination
-/// (the first is the a-leg's hop, often the healthy one, and mis-classifies
-/// internal/external). Attribute to the FAILED leg L's OWN egress-aware next
-/// hop — the exact hop the unanswered OPTIONS went to. If L or its dialog
-/// can't be resolved we record nothing (no fabricated address). Distinct from
-/// the reclaim-time stale drop (`restore_hygiene`), which never reaches this
-/// event path.
-pub(super) fn record_keepalive_timeout_peer(ctx: &RouterCtx, event: &CallEvent, call: &Call) {
-    if let CallEvent::Timer { key, .. } = event {
-        if key.timer_type != TimerType::KeepaliveTimeout {
-            return;
-        }
-        let hop = keepalive_timeout_peer(&ctx.config, call, key.leg_id());
-        let Some(dest) =
-            hop.and_then(|(host, port)| hop_address(ctx.outbound_proxy.as_deref(), &host, port))
-        else {
-            return;
-        };
-        ctx.metrics.record_peer_failure(
-            &dest,
-            classify_b2bua_peer(ctx.outbound_proxy.as_deref(), &dest),
-            crate::peer_failures::PeerFailureKind::KeepaliveTimeout,
-        );
-        // Aggregated per hop: a dead peer is one episode, however many calls
-        // it takes with it (ADR-0026).
-        ctx.keepalive_waves.record(&dest.to_string(), "timeouts", 1);
-    }
+/// Whether `event` is the timeout of a keepalive probe `call` sent on
+/// `leg_id`: the record its branch names is the keepalive's.
+pub(super) fn probe_timed_out(event: &CallEvent, call: &Call, leg_id: &str) -> bool {
+    let CallEvent::Timeout { branch, .. } = event else { return false };
+    call::helpers::record_with_branch(call, leg_id, branch).is_some_and(|(_, r)| r.is_keepalive())
+}
+
+/// Per-peer keepalive-failure attribution (observability only;
+/// `b2bua_peer_failures_total{...,kind="keepalive_timeout"}`): the keepalive
+/// probe on `leg_id` drew no final by its Timer F, which ends the call and
+/// BYEs BOTH legs. The failure is attributed to that leg's OWN egress-aware
+/// next hop — the hop the unanswered OPTIONS used — never to an outbound
+/// BYE's destination (the first is the a-leg's hop, often the healthy one).
+/// Nothing is recorded when the leg or its dialog cannot be resolved.
+pub(super) fn record_keepalive_failure_peer(ctx: &RouterCtx, leg_id: &str, call: &Call) {
+    let hop = keepalive_timeout_peer(&ctx.config, call, Some(leg_id));
+    let Some(dest) =
+        hop.and_then(|(host, port)| hop_address(ctx.outbound_proxy.as_deref(), &host, port))
+    else {
+        return;
+    };
+    ctx.metrics.record_peer_failure(
+        &dest,
+        classify_b2bua_peer(ctx.outbound_proxy.as_deref(), &dest),
+        crate::peer_failures::PeerFailureKind::KeepaliveTimeout,
+    );
+    // Aggregated per hop: a dead peer is one episode, however many calls
+    // it takes with it (ADR-0026).
+    ctx.keepalive_waves.record(&dest.to_string(), "timeouts", 1);
 }
 
 /// The address of the hop `host:port`, without a lookup: an IP literal is
@@ -78,8 +76,8 @@ pub(crate) fn outbound_proxy_target(config: &B2buaConfig) -> Option<Arc<Resolved
     Some(Arc::new(target))
 }
 
-/// Resolve the egress-aware next hop of the leg a `KeepaliveTimeout` fired for —
-/// the hop the unanswered OPTIONS used — for the per-peer keepalive-timeout metric.
+/// Resolve the egress-aware next hop of the leg whose keepalive probe timed out —
+/// the hop the unanswered OPTIONS used — for the per-peer keepalive-failure metric.
 /// Mirrors `bye_on_dialog`'s destination decision (to_gen_dialog → dest_of →
 /// `relay::leg_egress_dest`) WITHOUT mutating a request. Returns `None` (record
 /// nothing) when the leg or its confirmed dialog can't be resolved — never a fabricated
@@ -209,7 +207,7 @@ mod tests {
 
         let call = test_call(vec![a_dialog], vec![("b-1", vec![b_dialog])]);
 
-        // The KeepaliveTimeout fired for the b-leg.
+        // The b-leg's probe timed out.
         let hop =
             keepalive_timeout_peer(&config, &call, Some("b-1")).expect("b-leg dialog resolves");
         assert_eq!(

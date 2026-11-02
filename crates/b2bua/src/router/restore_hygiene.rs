@@ -1,8 +1,9 @@
 //! Restore hygiene for replicated calls: the re-anchor that moves every
-//! instant of a copy into this node's clock frame (ADR-0055 §9), and the single
-//! seam every failover/reclaim hydration path runs `call.timers` through before
-//! re-arming them into this node's `TimerService` (keepalive hygiene + cohort
-//! smoothing), and the ladders a meeting takes going on from where they stand.
+//! instant of a copy into this node's clock frame (ADR-0055 §9), the keepalive
+//! probes a restored copy forgets, the single seam every failover/reclaim
+//! hydration path runs `call.timers` through before re-arming them into this
+//! node's `TimerService` (keepalive ceiling + cohort smoothing), and the
+//! ladders a meeting takes going on from where they stand.
 //! Pure functions — the `timers.rs` driver stays untouched and
 //! `(p,b)`-causal reconciliation remains the sole correctness mechanism
 //! (ADR-0014).
@@ -13,21 +14,13 @@ use call::helpers::instants::reanchor_offset;
 use call::helpers::{advance_ladder, cap_keepalive_fire_at, cease_shown_ladder, shift_instants};
 use call::{Call, Ceased, Obligation, TimerEntry, TimerType};
 
-/// Strip a stale `KeepaliveTimeout` from a timer set hydrated off a replica
-/// snapshot (reclaim or reactive takeover).
-///
-/// A `KeepaliveTimeout` guards an in-flight keepalive OPTIONS client
-/// transaction: armed when the OPTIONS is sent (`keepalive` rule), cancelled
-/// when its 200 lands (`absorb-options-200`). A flush inside that round trip
-/// replicates it armed. Hydrated on another node, it guards a transaction that
-/// died with the node that sent it, and its `fire_at`, minted on that node's
-/// clock, is typically past due: `restore` would fire it at once and the
-/// `keepalive-timeout` rule would BYE both legs of a healthy call. The hydrated
-/// call re-probes on its own schedule: its `Keepalive` timer sends a fresh
-/// OPTIONS under a fresh `KeepaliveTimeout` on this node's clock, so dropping
-/// the stale guard loses nothing.
-fn drop_stale_keepalive_timeout(timers: &mut Vec<TimerEntry>) {
-    timers.retain(|t| *t.timer_type() != TimerType::KeepaliveTimeout);
+/// Forget the keepalive probes `call`, a copy restored on this node (takeover,
+/// reclaim, bulk reboot reclaim), holds records of: their answers went to the
+/// node that sent them, so a probe kept here would be settled as a timeout and
+/// end a call whose parties may be up. The copy's `Keepalive` probes again on
+/// its interval, each probe under its own Timer F.
+pub(super) fn forget_keepalive_probes(call: &mut Call) {
+    call::helpers::drop_keepalive_records(call);
 }
 
 /// Deterministic per-`callRef` hash (FNV-1a, 64-bit) used to de-correlate a
@@ -130,30 +123,26 @@ pub(super) fn reanchor(call: &mut Call, skew_offset_ms: i64) {
 /// Accuracy/performance only — this introduces NO wall-clock correctness rule,
 /// settle window, or handback. In order:
 ///
-/// 1. **Drop stale `KeepaliveTimeout`** ([`drop_stale_keepalive_timeout`]) — the
-///    OPTIONS it guarded died with the crashed node.
-/// 2. **Ceiling — always** ([`cap_future_keepalives`]), and re-asserted after step
-///    3: applied before the spread it bounds that spread's window, and after it
+/// 1. **Ceiling — always** ([`cap_future_keepalives`]), and re-asserted after step
+///    2: applied before the spread it bounds that spread's window, and after it
 ///    bounds the past-due catch-up offset (which scales with a batch-wide `l_max`
 ///    one poisoned deadline can inflate). Together: no restored call waits more
 ///    than a cadence for its first probe.
-/// 3. **Cohort smoothing** ([`smooth_keepalives`]) when `smoothing` is requested
+/// 2. **Cohort smoothing** ([`smooth_keepalives`]) when `smoothing` is requested
 ///    (the bulk reboot sweep).
 pub(super) fn sanitize_restored_timers(
-    timers: &mut Vec<TimerEntry>,
+    timers: &mut [TimerEntry],
     call_ref: &str,
     now_ms: i64,
     keepalive_interval_ms: i64,
     smoothing: Option<Smoothing>,
 ) {
-    // 1. Stale keepalive-timeout hygiene.
-    drop_stale_keepalive_timeout(timers);
-    // 2. Ceiling — every path, so the spread in step 3 is bounded to one interval.
+    // 1. Ceiling — every path, so the spread in step 2 is bounded to one interval.
     if keepalive_interval_ms > 0 {
         cap_future_keepalives(timers, now_ms, keepalive_interval_ms);
     }
-    // 3. Cohort smoothing (bulk reboot sweep only), on deadlines already in this
-    //    node's frame, then the step-2 ceiling over its past-due catch-up offsets.
+    // 2. Cohort smoothing (bulk reboot sweep only), on deadlines already in this
+    //    node's frame, then the step-1 ceiling over its past-due catch-up offsets.
     if let Some(s) = smoothing {
         smooth_keepalives(timers, call_ref, s.now_ms, s.l_max, s.speedup, s.cap_ms);
         if keepalive_interval_ms > 0 {

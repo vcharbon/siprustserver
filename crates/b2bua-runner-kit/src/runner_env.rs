@@ -72,10 +72,6 @@ pub struct RunnerEnv {
     /// `B2BUA_KEEPALIVE_SEC` — in-dialog OPTIONS keepalive interval (default
     /// 300 s; a shorter poke breaks long-hold endurance traffic).
     pub keepalive_sec: i64,
-    /// `B2BUA_KEEPALIVE_TIMEOUT_SEC` — grace waiting for the OPTIONS 200 before
-    /// declaring the leg dead and BYE-ing (default 32 s so a reclaimed dialog's
-    /// keepalive can round-trip across the post-reboot recovery window).
-    pub keepalive_timeout_sec: i64,
     /// The replication tunables: `B2BUA_REBOOT_BUDGET_SEC`, the replica TTL /
     /// reboot budget (default 600, held past one keepalive at boot), and the
     /// backup ceilings `B2BUA_REPL_BACKUP_MAX_*` (grammar in `capacity_env`).
@@ -272,7 +268,6 @@ impl RunnerEnv {
             max_messages_per_call: knob("B2BUA_MAX_MESSAGES_PER_CALL", "200")?,
             max_messages_per_call_lifetime: knob("B2BUA_MAX_MESSAGES_PER_CALL_LIFETIME", "100000")?,
             keepalive_sec: knob("B2BUA_KEEPALIVE_SEC", "300")?,
-            keepalive_timeout_sec: knob("B2BUA_KEEPALIVE_TIMEOUT_SEC", "32")?,
             replica: b2bua::ReplicaConfig {
                 reboot_budget_sec: knob("B2BUA_REBOOT_BUDGET_SEC", "600")?,
                 backup: capacity_env::backup_from_lookup(lookup).map_err(invalid)?,

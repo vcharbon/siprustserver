@@ -34,8 +34,8 @@ pub fn takeover_waves() -> Arc<WaveSet> {
     })
 }
 
-/// Keepalive timeouts, keyed by the failed leg's egress hop. A wave here is a
-/// peer or a network path going away, not one call dying.
+/// Keepalive probes timed out, keyed by the failed leg's egress hop. A wave
+/// here is a peer or a network path going away, not one call dying.
 pub fn keepalive_timeout_waves() -> Arc<WaveSet> {
     WaveSet::new(|hop: &str, r: &WaveReport| {
         tracing::info!(

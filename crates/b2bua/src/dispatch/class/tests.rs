@@ -99,7 +99,6 @@ fn every_timer_fire_is_the_nodes_own_work() {
         TimerType::GlobalDuration,
         TimerType::LimiterRefresh,
         TimerType::Keepalive,
-        TimerType::KeepaliveTimeout,
         TimerType::Rung,
         TimerType::RepeatGiveUp,
         TimerType::TerminatingTimeout,

@@ -113,7 +113,7 @@ fn route_uri(route: &str) -> Option<Uri> {
 
 /// Egress-aware wire destination for a leg's in-dialog request, WITHOUT mutating
 /// a request. Mirrors `apply_b_leg_egress`'s destination decision (keep in sync) —
-/// used for observability attribution (the keepalive-timeout peer metric), where
+/// used for observability attribution (the keepalive-failure peer metric), where
 /// we need the wire hop the unanswered OPTIONS used but must not synthesize a
 /// request to find it.
 pub fn leg_egress_dest(
@@ -270,7 +270,7 @@ Content-Length: 0\r\n\r\n",
     }
 
     // `leg_egress_dest` mirrors apply_b_leg_egress's destination decision WITHOUT
-    // mutating a request — used for keepalive-timeout peer attribution. It must
+    // mutating a request — used for keepalive-failure peer attribution. It must
     // agree with the BYE path on every branch: loose-route → top route host; empty
     // route-set b-leg + outbound proxy → the proxy; a-leg / no proxy → base.
     #[test]

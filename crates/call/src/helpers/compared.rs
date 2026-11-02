@@ -189,7 +189,7 @@ fn same_dialog(a: &Dialog, b: &Dialog) -> bool {
         subscriptions,
         queued,
     } = a;
-    let compared = |r: &&RequestRecord| !keepalive_record(r);
+    let compared = |r: &&RequestRecord| !r.is_keepalive();
     *our_tag == b.our_tag
         && *peer_tag == b.peer_tag
         && *state == b.state
@@ -418,23 +418,8 @@ fn same_entry(a: &MessageEntry, b: &MessageEntry) -> bool {
         && *turn == b.turn
 }
 
-/// Whether `timer` is an exempt ledger entry: the keepalive, its timeout,
-/// the limiter refresh, a ladder rung.
+/// Whether `timer` is an exempt ledger entry: the keepalive, the limiter
+/// refresh, a ladder rung.
 fn exempt_timer(timer: &TimerEntry) -> bool {
-    matches!(
-        timer.timer_type(),
-        TimerType::Keepalive
-            | TimerType::KeepaliveTimeout
-            | TimerType::LimiterRefresh
-            | TimerType::Rung
-    )
-}
-
-/// Whether `record` is a keepalive request record: the in-dialog OPTIONS the
-/// keepalive rule sends ([`crate::KEEPALIVE_AUTHOR`]), not one a service sends
-/// on its own.
-fn keepalive_record(record: &RequestRecord) -> bool {
-    record.is_own()
-        && record.method == "OPTIONS"
-        && record.author.as_deref() == Some(crate::KEEPALIVE_AUTHOR)
+    matches!(timer.timer_type(), TimerType::Keepalive | TimerType::LimiterRefresh | TimerType::Rung)
 }

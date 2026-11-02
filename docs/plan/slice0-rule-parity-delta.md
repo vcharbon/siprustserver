@@ -35,8 +35,8 @@ invariant enforcement, per-dialog CSeq/tag-map/passthrough, and timer constants.
 | `resolveCrossByeRule` | `resolve-cross-bye` | MATCH | respond 200 + terminate-leg{bye_received} |
 | `terminatingSafetyTimeoutRule` | `terminating-safety-timeout` | MATCH | canary no-op |
 | `maxDurationRule` (TimerRules) | `max-duration` | MATCH | cdr(a) + begin-termination |
-| `keepaliveRule` | `keepalive` | MATCH (constant) | Behaviour parity. Keepalive-timeout delay is a hard-coded 5 s in Rust vs TS `config.keepaliveTimeoutSec` (default 10). Documented in `keepalive_timeout.rs`; intentional test-clock simplification, not a rule-logic delta. Rust does not replicate the "skip leg with a pending keepalive_timeout" guard, but the CORE harness never overlaps probes. |
-| `keepaliveTimeoutRule` | `keepalive-timeout` | MATCH | terminate-leg{bye_timeout} + cdr + begin-termination |
+| `keepaliveRule` | `keepalive` | MATCH (constant) | Behaviour parity. The probe's deadline in Rust is its own transaction's Timer F (32 s) vs the source's separate keepalive timer (default 10 s). Not a rule-logic delta. Rust does not replicate the "skip leg with a pending keepalive_timeout" guard, but the CORE harness never overlaps probes. |
+| `keepaliveTimeoutRule` | `handle-timeout` (the probe's Timer F) | MATCH | cdr + begin-termination |
 | `routeFailureRule` (FailureRules) | `route-failure` | DELTA (intentional, not fixed) | No-failover path uses `TerminateCall` (hard mark-all-terminated) instead of TS `terminate-leg{rejected}` + `begin-termination`. Reaches the same `terminated` end state for a rejected INVITE (alice's leg is trying/early — no BYE owed); only the per-leg terminal disposition label differs. Failover (callbackContext / `/call/failure`) is SERVICE_LAYER and explicitly deferred. The Rust source comments this ("no failover decision this slice"). `failure.rs` is green. |
 | `noAnswerFailoverRule` | `no-answer` | DELTA (intentional, not fixed) | Rust is the no-failover core: cdr(timeout) + destroy-leg + begin-termination. The `/call/failure` failover branch is SERVICE_LAYER (deferred). Matches the ported no-answer scenarios. |
 | `absorbStaleFailureRule` | `absorb-stale-failure` | MATCH | terminated-leg failure absorbed; ordered before `route-failure` (first-match) |
@@ -85,8 +85,8 @@ invariant enforcement, per-dialog CSeq/tag-map/passthrough, and timer constants.
   action but does not emit the header (the BYE generator opts would need
   threading). Additive wire header only; no call-flow-state effect and no test
   depends on it. Recorded as a minor fidelity gap.
-- **`keepaliveTimeoutSec` config** — Rust hard-codes 5 s; intentional
-  paused-clock test simplification (documented in `keepalive_timeout.rs`).
+- **The source's keepalive timeout config** — Rust has none: the probe's
+  own Timer F (32 s, RFC 3261 §17.1.2.2) is its deadline.
 
 ## Deferred SERVICE_LAYER rules (out of scope for Slice 0)
 

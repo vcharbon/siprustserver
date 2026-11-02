@@ -88,6 +88,7 @@ mod keepalive_configurable_interval;
 mod keepalive_lane_order;
 mod keepalive_long_call_cap;
 mod keepalive_reap_both_directions;
+mod keepalive_refused;
 mod keepalive_timeout;
 mod keepalive_via_proxy;
 mod lifecycle_terminal_turn;

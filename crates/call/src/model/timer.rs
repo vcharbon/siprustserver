@@ -35,7 +35,6 @@ pub enum TimerType {
     GlobalDuration,
     LimiterRefresh,
     Keepalive,
-    KeepaliveTimeout,
     /// The next rung of the ladder repeating the retained emission its
     /// obligation scope is owed for (ADR-0032 X4): the un-ACKed 2xx (RFC 3261
     /// §13.3.1.4) or the un-PRACKed reliable provisional (RFC 3262 §3). The
@@ -157,7 +156,6 @@ impl PartialEq for TimerType {
             GlobalDuration => matches!(other, GlobalDuration),
             LimiterRefresh => matches!(other, LimiterRefresh),
             Keepalive => matches!(other, Keepalive),
-            KeepaliveTimeout => matches!(other, KeepaliveTimeout),
             Rung => matches!(other, Rung),
             RepeatGiveUp => matches!(other, RepeatGiveUp),
             TerminatingTimeout => matches!(other, TerminatingTimeout),
@@ -217,7 +215,6 @@ impl std::fmt::Debug for TimerType {
             TimerType::GlobalDuration => f.write_str("GlobalDuration"),
             TimerType::LimiterRefresh => f.write_str("LimiterRefresh"),
             TimerType::Keepalive => f.write_str("Keepalive"),
-            TimerType::KeepaliveTimeout => f.write_str("KeepaliveTimeout"),
             TimerType::Rung => f.write_str("Rung"),
             TimerType::RepeatGiveUp => f.write_str("RepeatGiveUp"),
             TimerType::TerminatingTimeout => f.write_str("TerminatingTimeout"),

@@ -76,6 +76,7 @@ mod one_backup_on_every_leg;
 mod outbound_invite_after_the_departure;
 mod prack_repeat_takeover;
 mod prack_takeover;
+mod probe_lost_with_the_primary;
 mod read_dead_primary_taken_over;
 mod reclaim_takes_the_copys_consult;
 mod reclaim_takes_the_copys_dialled_invite;

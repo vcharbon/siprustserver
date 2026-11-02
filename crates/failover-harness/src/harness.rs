@@ -748,11 +748,7 @@ impl ReplicatedB2buaSut {
             // in-dialog OPTIONS, so the dead-peer/limiter-refresh/backup-TTL cadence
             // matches production only at the real 300 s interval, free under a paused
             // clock; the replicas' 600 s reboot budget outlasts one such gap.
-            // `keepalive_timeout_sec` (45 s, B2BUA_KEEPALIVE_TIMEOUT_SEC) is the
-            // cluster's grace before a re-armed OPTIONS is declared dead, not the
-            // code default (32 s), so it is set here for parity.
             config.keepalive_interval_sec = 300;
-            config.keepalive_timeout_sec = 45;
             // The scenario tune runs LAST so it can override any parity
             // default above — on this spawn and on every reboot re-spawn.
             (self.tune)(config);

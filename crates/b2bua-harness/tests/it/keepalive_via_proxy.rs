@@ -2,7 +2,7 @@
 //! `tests/scenarios/keepalive-via-proxy.ts`, the `keepaliveViaProxy` case).
 //!
 //! Guards against in-dialog keepalive OPTIONS bypassing the front proxy, which
-//! tears every long-hold call down by the keepalive-timeout rule.
+//! tears every long-hold call down at the probe's Timer F.
 //!
 //! Topology (same as `proxy_b2bua.rs`):
 //!
@@ -43,7 +43,7 @@ async fn keepalive_options_travels_via_proxy_on_both_legs() {
     // the proxy's added latency triggers a retransmit and duplicate OPTIONS.
     let h = Harness::with_transit_delay("b2bua-keepalive-via-proxy", 1).describe(
         "keepalive: in-dialog OPTIONS travels via proxy on both legs (no \
-         keepalive-timeout teardown of a long-hold call).",
+         keepalive-failure teardown of a long-hold call).",
     );
     let alice = h.agent("alice", ALICE).await;
     let bob = h.agent("bob", BOB).await;

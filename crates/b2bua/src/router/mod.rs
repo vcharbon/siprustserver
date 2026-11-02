@@ -209,7 +209,7 @@ pub struct RouterCtx {
     /// answer per request the call sent: every internal event waits past all
     /// of the call's dispatch bounds (`dispatch::class`).
     pub reentry_tx: mpsc::UnboundedSender<CallEvent>,
-    /// Keepalive-timeout burst aggregation keyed by the failed leg's egress hop
+    /// Keepalive-failure burst aggregation keyed by the failed leg's egress hop
     /// (ADR-0026): a peer going away is ONE episode — rising edge, ~5 s
     /// summaries, falling-edge totals — not one line per dead call.
     pub keepalive_waves: Arc<observe::WaveSet>,

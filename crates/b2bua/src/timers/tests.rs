@@ -83,11 +83,11 @@ async fn reschedule_survives_aliasing_cancel() {
         "first keepalive fires at 30s",
     );
 
-    // 2. Arm a per-leg timeout (reuses the freed slot) ...
+    // 2. Arm a per-leg timer (reuses the freed slot) ...
     timers
         .schedule(
             TimerEntry {
-                key: TimerKey::leg(TimerType::KeepaliveTimeout, "a"),
+                key: TimerKey::leg(TimerType::NoAnswer, "a"),
                 generation: 1,
                 fire_at: 35_000,
             },
@@ -107,10 +107,10 @@ async fn reschedule_survives_aliasing_cancel() {
             None,
         )
         .await;
-    // 4. ... and cancel the timeout (the aliasing trigger).
-    timers.cancel(cref.clone(), TimerKey::leg(TimerType::KeepaliveTimeout, "a")).await;
+    // 4. ... and cancel the per-leg timer (the aliasing trigger).
+    timers.cancel(cref.clone(), TimerKey::leg(TimerType::NoAnswer, "a")).await;
 
-    // The cancelled timeout must NOT fire; the rescheduled keepalive MUST.
+    // The cancelled timer must NOT fire; the rescheduled keepalive MUST.
     tokio::time::advance(Duration::from_millis(30_000)).await; // → t=60s
     let ev = fire_rx.recv().await;
     assert!(
@@ -120,8 +120,8 @@ async fn reschedule_survives_aliasing_cancel() {
         )),
         "rescheduled keepalive survives the aliasing cancel and fires at 60s, got {ev:?}",
     );
-    // Nothing else pending (the timeout was a dropped tombstone).
-    assert!(fire_rx.try_recv().is_err(), "cancelled timeout must not fire");
+    // Nothing else pending (the per-leg timer was a dropped tombstone).
+    assert!(fire_rx.try_recv().is_err(), "cancelled per-leg timer must not fire");
 }
 
 /// Let the single-task driver drain pending commands and run its end-of-loop

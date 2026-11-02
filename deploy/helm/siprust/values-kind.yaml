@@ -51,10 +51,8 @@ worker:
     B2BUA_UDP_SNDBUF: "4194304"
     B2BUA_UDP_RCVBUF: "4194304"
     # The keepalive interval bounds the backup reaper (1.5x) and the reboot
-    # budget (0.5x) of the HA fail-back (ADR-0011 X11); the 120 s answer grace
-    # rides out a load burst's response shedding.
+    # budget (0.5x) of the HA fail-back (ADR-0011 X11).
     B2BUA_KEEPALIVE_SEC: "300"
-    B2BUA_KEEPALIVE_TIMEOUT_SEC: "120"
     LIMITER_REFRESH_SECONDS: "40"
     LIMITER_TIMEOUT_MS: "150"
     LIMITER_RELEASE_TIMEOUT_MS: "2000"

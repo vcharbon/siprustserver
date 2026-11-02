@@ -405,7 +405,6 @@ fn arb_timer_type() -> impl Strategy<Value = TimerType> {
         Just(TimerType::GlobalDuration),
         Just(TimerType::LimiterRefresh),
         Just(TimerType::Keepalive),
-        Just(TimerType::KeepaliveTimeout),
         Just(TimerType::TerminatingTimeout),
         Just(TimerType::ReferSubscriptionExpiry),
         Just(TimerType::ReferReinviteAnswer),

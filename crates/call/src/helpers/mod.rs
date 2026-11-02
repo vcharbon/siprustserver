@@ -118,9 +118,9 @@ pub use reliable::{
     start_shown_ladder, starts_shown_sequence, Arrival,
 };
 pub use request_records::{
-    add_record, answered_record, cancel_relay, close_held, close_record, every_record, find_relay,
-    held_record, next_held_deadline, record_with_branch, remove_relay, take_overdue_held, Answers,
-    RecordHolder,
+    add_record, answered_record, cancel_relay, close_held, close_record, drop_keepalive_records,
+    every_record, find_relay, held_record, next_held_deadline, record_with_branch, remove_relay,
+    take_overdue_held, Answers, RecordHolder,
 };
 pub use resolved::{response_origin, Resolved, ResponseFacts, ResponseOrigin, UNRESOLVED};
 pub use sequence::{holds_records_of, keep_dialogs, raise_sequences};

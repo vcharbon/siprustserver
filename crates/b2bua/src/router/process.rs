@@ -17,7 +17,7 @@ use super::interpret::process_result;
 use super::materialise::{
     materialise, materialise_after, reoffer_trigger, Materialised, Offered, Origin, Reason,
 };
-use super::peer_metrics::record_keepalive_timeout_peer;
+use super::peer_metrics::{probe_timed_out, record_keepalive_failure_peer};
 use super::reclaim::discharge_as_own;
 use super::release::{release_call, ReleaseKind};
 use super::resolve::Resolution;
@@ -63,6 +63,7 @@ pub(super) async fn process(
         Gate::Pass => {}
     }
 
+    let mut probe_failed = false;
     let result = if res.initial_invite {
         let (req, src, datagram) = match event {
             CallEvent::Sip { message, src, datagram } => match message.as_ref() {
@@ -198,6 +199,7 @@ pub(super) async fn process(
             }
         };
         super::dialog_gate::note_in_order(&mut call, &res.source_leg_id, &resolved, event);
+        probe_failed = probe_timed_out(event, &call, &res.source_leg_id);
         // The layer emitted this datagram with no transaction to match it; a
         // materialisation — this turn's or an earlier one's, whose seeds went in
         // after the datagram was emitted — may hold one now. Re-offered, a match
@@ -253,7 +255,9 @@ pub(super) async fn process(
         return false;
     }
 
-    record_keepalive_timeout_peer(ctx, event, &result.call);
+    if probe_failed {
+        record_keepalive_failure_peer(ctx, &res.source_leg_id, &result.call);
+    }
 
     let turn = super::turn_label::EventSummary { call_ref: &call_ref, event };
     process_result(ctx, &call_ref, result, now_ms, &turn, Some(event)).await;

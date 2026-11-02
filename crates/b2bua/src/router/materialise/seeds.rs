@@ -246,8 +246,7 @@ fn invite_record(record: &RequestRecord) -> bool {
 /// quiet dialog sends one, and taking each over is the stale-CSeq storm
 /// ADR-0014 D1 avoids.
 pub(in crate::router) fn names_request_in_flight(call: &Call) -> bool {
-    call::helpers::every_record(call)
-        .any(|(_, _, r)| !invite_record(r) && r.author.as_deref() != Some(call::KEEPALIVE_AUTHOR))
+    call::helpers::every_record(call).any(|(_, _, r)| !invite_record(r) && !r.is_keepalive())
 }
 
 /// The non-INVITE record of `call` whose received half `branch` names: a

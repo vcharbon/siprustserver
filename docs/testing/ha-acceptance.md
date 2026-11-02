@@ -66,8 +66,8 @@ The SUT bounds the residual; it does not fix the host:
   `origin_now_ms`; the receiver keeps `skew_offset_ms`, composed across every
   hop, and a local write resets it. Every read of a copy re-anchors its
   instants once (`router::restore_hygiene::reanchor`, 1 s deadband), then
-  `sanitize_restored_timers` drops a stale `KeepaliveTimeout` and caps the
-  keepalives. The `clock_wall_divergence_ms` gauge, and a warn on its rising
+  `forget_keepalive_probes` drops the keepalive probes the copy holds and
+  `sanitize_restored_timers` caps the keepalives. The `clock_wall_divergence_ms` gauge, and a warn on its rising
   edge past 500 ms, show the skew. Accuracy only: containment (§7) stays the
   correctness mechanism.
 - **Infra.** Keep the host awake for whole endurance runs and use slewing
