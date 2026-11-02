@@ -6,7 +6,8 @@
 //! under `applied` once the call's backup applied the write that records it,
 //! or once the cap counted from the entry's own enqueue expired, whichever
 //! comes first. An entry of a call with no live, bootstrapped backup waits for
-//! nothing. No turn waits on the outbox: an entry that cannot leave at once is
+//! nothing. Under `applied` every release is counted by its reason
+//! (`b2bua_repl_outbox_released_total`). No turn waits on the outbox: an entry that cannot leave at once is
 //! sent by the call's drainer task, which a fence aborts with the worker's
 //! in-flight turns. The entries of one call are queued under its per-call
 //! lock.
@@ -120,6 +121,7 @@ impl Outboxes {
         // A call with entries queued keeps its order: this entry goes behind.
         let Err(effects) = self.queue_behind(call_ref, wait, effects) else { return };
         self.publish_depth(1, 0);
+        self.count(ready);
         effects(ready).await;
         self.publish_depth(0, 1);
     }
@@ -169,6 +171,7 @@ impl Outboxes {
         let Some(outbox) = self.calls().get(call_ref).cloned() else { return };
         let _sending = outbox.sending.lock().await;
         while let Some(entry) = outbox.pop_front() {
+            self.count(Released::CallReleased);
             (entry.effects)(Released::CallReleased).await;
             self.publish_depth(0, 1);
         }
@@ -213,9 +216,7 @@ impl Outboxes {
                 }
             };
             let Some(entry) = entry else { continue };
-            if released == Released::Capped {
-                self.metrics.bump_repl_sync_capped();
-            }
+            self.count(released);
             (entry.effects)(released).await;
             self.publish_depth(0, 1);
         }
@@ -282,6 +283,14 @@ impl Outboxes {
         self.changelog
             .as_ref()
             .is_some_and(|log| log.has_applied(&target.peer, target.partition, target.at))
+    }
+
+    /// Count an entry released for `reason`, under `applied` only: under
+    /// `off` no entry is held, and none is counted.
+    fn count(&self, reason: Released) {
+        if self.level == SyncLevel::Applied {
+            self.metrics.count_outbox_released(reason);
+        }
     }
 
     /// Count `queued` entries in and `left` out, and publish the depth.

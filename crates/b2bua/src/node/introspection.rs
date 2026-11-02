@@ -24,7 +24,8 @@ impl B2buaCore {
     }
 
     /// Sample the store + replication map sizes into the memory-attribution
-    /// gauges (`b2bua_store_*`, `b2bua_repl_meta_*`, `b2bua_repl_changelog_*`).
+    /// gauges (`b2bua_store_*`, `b2bua_repl_meta_*`, `b2bua_repl_changelog_*`,
+    /// `b2bua_repl_serving_flows`).
     /// Called on a slow cadence by the runner so a RSS climb can be pinned to a
     /// specific map even when `active_calls` is flat. Cheap: a couple of brief
     /// locks, off the hot path.
@@ -35,6 +36,7 @@ impl B2buaCore {
             let (entries, peers) = repl.changelog().depth();
             let unbacked = repl.unbacked_count() as u64;
             self.metrics.set_repl_store_gauges(meta_total, meta_backup, unbacked, entries, peers);
+            self.metrics.set_repl_serving_flows(repl.changelog().flow_liveness());
         }
     }
 

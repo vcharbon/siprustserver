@@ -207,6 +207,8 @@ const WORKER_REST: &[Family] = &[
     worker::REPL_META_BACKUP,
     capacity::REPL_CALLS_UNBACKED,
     capacity::REPL_OUTBOX_DEPTH,
+    capacity::REPL_OUTBOX_RELEASED,
+    capacity::REPL_SERVING_FLOWS,
     worker::REPL_CHANGELOG_ENTRIES,
     worker::REPL_CHANGELOG_PEERS,
     worker::WITHDRAWN_RUNNING,

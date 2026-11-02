@@ -62,6 +62,7 @@ impl Puller {
                     (!warm).then(tokio::time::Instant::now),
                 ),
                 held_meetings: Default::default(),
+                asks: None,
             },
             status_rx,
         )

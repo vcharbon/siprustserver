@@ -1,6 +1,6 @@
 //! The replication gauges a node publishes: its last bootstrap and reclaim
-//! passes, the replicating store's sizes, the outbox depth, and its standing
-//! toward the membership.
+//! passes, the replicating store's sizes, and its standing toward the
+//! membership.
 
 use std::sync::atomic::Ordering;
 
@@ -47,11 +47,6 @@ impl B2buaMetrics {
         self.inner.repl_calls_unbacked.store(calls_unbacked, Ordering::Relaxed);
         self.inner.repl_changelog_entries.store(changelog_entries, Ordering::Relaxed);
         self.inner.repl_changelog_peers.store(changelog_peers, Ordering::Relaxed);
-    }
-
-    /// Publish the outbox entries queued across every call (ADR-0055 §3).
-    pub fn set_repl_outbox_depth(&self, depth: u64) {
-        self.inner.repl_outbox_depth.store(depth, Ordering::Relaxed);
     }
 
     /// Set whether this worker is withdrawn from routing while still running

@@ -34,7 +34,9 @@ pub struct PullerConfig {
     /// which keeps streaming until the real `Noop` arrives. Kept short — it gates
     /// readiness, never correctness (the `(p,b)` merge admits late frames).
     pub bootstrap_hard_timeout_ms: u64,
-    /// The longest one connect is waited for, in every phase.
+    /// The longest one connect is waited for, in every phase; it also bounds
+    /// the one connect a dead verdict asks for when the stream is down
+    /// (ADR-0047 D1).
     pub connect_timeout_ms: u64,
     /// A stream that delivers nothing for this long is left and pulled again
     /// from the retained watermark, in every phase.

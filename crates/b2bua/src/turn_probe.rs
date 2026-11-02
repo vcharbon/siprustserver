@@ -41,6 +41,31 @@ pub enum Released {
     CallReleased,
 }
 
+impl Released {
+    /// Every reason, in the exposition order of
+    /// `b2bua_repl_outbox_released_total`.
+    pub const ALL: [Released; 5] = [
+        Released::AtOnce,
+        Released::Applied,
+        Released::Capped,
+        Released::BackupLost,
+        Released::CallReleased,
+    ];
+
+    /// The `reason` label of `b2bua_repl_outbox_released_total`. The counter
+    /// counts under the `applied` level only, where [`AtOnce`](Self::AtOnce)
+    /// means the call had no live, bootstrapped backup to wait for.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Released::Applied => "applied",
+            Released::Capped => "capped",
+            Released::BackupLost => "backup_lost",
+            Released::AtOnce => "no_live_backup",
+            Released::CallReleased => "call_released",
+        }
+    }
+}
+
 impl TurnPoint {
     /// The point's name in a cell id.
     pub fn label(self) -> &'static str {

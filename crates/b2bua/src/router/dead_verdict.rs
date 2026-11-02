@@ -16,12 +16,13 @@
 //! request is read. A notice naming this node is ignored: a proxy that reads
 //! it dead routes its calls to their backups.
 //!
-//! A taken verdict acts once this node's replication stream from that worker
-//! is down: at once when it already is, else when it ends within the stream's
-//! silence bound with no frame from the worker since the verdict. A frame
-//! after the verdict, or a stream open through that bound, speaks for a live
-//! worker the proxy misread, and nothing is taken over (ADR-0047 D1); one wait
-//! runs per worker.
+//! A taken verdict acts once this node's own Backup flow from that worker
+//! confirms it ([`ReplicationSupervisor::confirms_dead`]): an open stream that
+//! ends within its silence bound with no frame since the verdict, or, with
+//! the stream down or reconnecting, one connect made at once that is refused
+//! or runs out its bound. A frame after the verdict speaks for a live worker
+//! the proxy misread, and nothing is taken over (ADR-0047 D1); one wait runs
+//! per worker. A node that pulls no stream acts at once.
 //!
 //! A worker whose verdict acted reads dead here until a frame from it arrives
 //! ([`primary_read_dead`]), which clears the verdict: a call a copy here ends
@@ -47,7 +48,7 @@ use crate::repl::ReplicationSupervisor;
 #[derive(Default)]
 pub(crate) struct VerdictBook {
     taken: Mutex<HashMap<String, BTreeSet<i64>>>,
-    /// The workers whose verdict waits on the stream's confirmation: one
+    /// The workers whose verdict waits on the Backup flow's confirmation: one
     /// wait per worker, however many verdicts on it arrive meanwhile.
     pending: Mutex<HashSet<String>>,
     /// The workers whose verdict acted, each at the instant of its latest.
@@ -162,12 +163,12 @@ fn take(ctx: &Arc<RouterCtx>, received: &ReceivedNotice) {
     }
     ctx.metrics.bump_dead_verdict_taken();
     match &ctx.peer_streams {
-        Some(streams) if streams.streams_from(&notice.ordinal) => {
+        Some(streams) => {
             if ctx.dead_verdicts.start_pending(&notice.ordinal) {
-                confirm_on_the_stream(ctx, streams.clone(), notice.ordinal.clone(), notice.at_ms);
+                confirm(ctx, streams.clone(), notice.ordinal.clone(), notice.at_ms);
             }
         }
-        _ => act(ctx, &notice.ordinal, notice.at_ms),
+        None => act(ctx, &notice.ordinal, notice.at_ms),
     }
 }
 
@@ -182,27 +183,18 @@ fn act(ctx: &Arc<RouterCtx>, ordinal: &str, at_ms: i64) {
         node = observe::node(),
         worker = %ordinal,
         at_ms,
-        "a proxy reads the worker dead, its replication stream is down: its in-flight calls are taken over"
+        "a proxy reads the worker dead and its replication stream confirms it: its in-flight calls are taken over"
     );
 }
 
-/// Act on the verdict on `ordinal` once the replication stream from it ends,
-/// within its silence bound, with no frame from it since the verdict; a frame
-/// from it after the verdict, or the stream open past that bound, makes the
-/// verdict a misread.
-fn confirm_on_the_stream(
-    ctx: &Arc<RouterCtx>,
-    streams: ReplicationSupervisor,
-    ordinal: String,
-    at_ms: i64,
-) {
+/// Act on the verdict on `ordinal` once the Backup flow from it confirms it,
+/// read from now; a frame from it after now makes the verdict a misread.
+fn confirm(ctx: &Arc<RouterCtx>, streams: ReplicationSupervisor, ordinal: String, at_ms: i64) {
     let task_ctx = ctx.clone();
+    let since = Instant::now();
     let confirm: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> = Box::pin(
         async move {
-            let bound = streams.silence_bound();
-            let since = tokio::time::Instant::now();
-            let ends = streams.stream_from_ends_unheard_since(&ordinal, since);
-            let confirmed = tokio::time::timeout(bound, ends).await.unwrap_or(false);
+            let confirmed = streams.confirms_dead(&ordinal, since).await;
             task_ctx.dead_verdicts.end_pending(&ordinal);
             if confirmed {
                 act(&task_ctx, &ordinal, at_ms);
@@ -213,7 +205,7 @@ fn confirm_on_the_stream(
                 node = observe::node(),
                 worker = %ordinal,
                 at_ms,
-                "a proxy reads the worker dead while its replication stream lives: nothing is taken over"
+                "a proxy reads the worker dead while it speaks on its replication stream: nothing is taken over"
             );
         },
     );

@@ -139,6 +139,26 @@ async fn a_claim_no_noop_answer_refreshed_goes_stale() {
     assert!(!cl.flow_caught_up("A", Partition::Bak), "past two intervals: unknown");
 }
 
+/// Each served flow reads live with a fresh claim, stale once its claim is
+/// older than the claim TTL or before its first, and down with no flow.
+#[tokio::test(start_paused = true)]
+async fn served_flows_read_live_stale_or_down() {
+    let cl = changelog();
+    let counts = |live, stale, down| [live, stale, down];
+    let bak = cl.serving("A", Partition::Bak);
+    assert_eq!(cl.flow_liveness(), counts(0, 1, 1), "connected, no claim yet; Pri not pulled");
+    cl.note_applied("A", None, Partition::Bak, Watermark::new(7, 0));
+    let _pri = cl.serving("A", Partition::Pri);
+    cl.note_applied("A", None, Partition::Pri, Watermark::new(7, 0));
+    assert_eq!(cl.flow_liveness(), counts(2, 0, 0));
+    tokio::time::advance(DEFAULT_CLAIM_TTL + Duration::from_millis(1)).await;
+    cl.note_applied("A", None, Partition::Pri, Watermark::new(7, 0));
+    assert_eq!(cl.flow_liveness(), counts(1, 1, 0), "the Bak claim went stale");
+    drop(bak);
+    assert_eq!(cl.flow_liveness(), counts(1, 0, 1), "the Bak flow went down");
+    assert_eq!(FlowLiveness::ALL.map(FlowLiveness::label), ["live", "stale", "down"]);
+}
+
 /// The latest claim stands, lower or not: a peer that shed what it held
 /// claims less, and its earlier, higher claim no longer vouches for it.
 #[test]

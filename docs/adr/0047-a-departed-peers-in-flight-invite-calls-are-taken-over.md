@@ -80,16 +80,25 @@ that verdict rather than wait for the endpoint to leave the slice. A notice nami
 node is ignored (`router/dead_verdict/tests.rs`;
 `read_dead_primary_taken_over.rs`).
 
-The replication stream confirms the verdict (user ruling). A backup acts on it only
-once its own Backup flow from that peer holds no open stream: at once when the stream is
-already down, as when the peer's process died and its connections closed, or when the
-stream ends within the pullers' idle bound (ADR-0045) with no frame from the peer since
-the verdict, as when the peer went silent. A frame after the verdict — a stream that
-lives, or one that reconnects — or a stream open through that bound speaks for a live
-peer the proxy misread, and the verdict takes nothing over
-(`b2bua_dead_verdicts_unconfirmed_total`, one wait per peer however many verdicts). Two
-independent signals must agree, so a flap or a partition between the proxy and a live
-peer never moves its calls.
+The backup confirms the verdict by itself, on its own Backup flow from that peer (user
+ruling). With the stream open, it waits for the stream's end, which the pullers' idle
+bound (ADR-0045) brings at most that long after the peer's last frame. With the stream
+down or reconnecting at the verdict, or ended since with no frame from the peer, its
+puller makes one connect at once, skipping the backoff and starting afresh a connect in
+flight, bounded by the connect bound (`B2BUA_REPL_CONNECT_TIMEOUT_MS`): a connect
+refused, as when the peer's process died, or run out, as when its host answers nothing,
+confirms the verdict; a connect the peer takes opens a stream whose end with no frame
+confirms it. A frame from the peer after the verdict, on a stream that lives or on the
+one that reconnects, or a stream open through the idle bound, speaks for a live peer
+the proxy misread, and the verdict takes nothing over
+(`b2bua_dead_verdicts_unconfirmed_total`, one wait per peer however many verdicts;
+`verdict_meets_a_down_stream.rs`, the backoff, connect and cut cells). Two independent
+signals must agree, so a flap, a partition between the proxy and a live peer, or a
+second proxy that alone lost the peer never moves its calls: a notice from any proxy
+holding the cluster key is advisory (`verdict_meets_a_down_stream.rs`, the standby
+cell). A crashed process on a live node refuses the connect at once
+(`read_dead_primary_taken_over.rs`); a node lost whole is confirmed by the connect's
+bound (the unanswering-host cell there).
 
 **D2 — The departure sweep takes over the calls with an INVITE in flight.** The
 router starts a task of its own over the departed peer's backup partition — never the
@@ -370,18 +379,23 @@ the call has one CDR.
   `undecided_call_settled_on_departure.rs`), and a restarted node asks its own
   undecided calls' decisions again on its reclaim (the restart cell there).
 - **A primary read dead while it lives.** A flap or a partition between the proxy and
-  the primary alone leaves the replication stream open, so the verdict takes nothing
-  over: nothing is dialled, asked or relayed twice
-  (`cancel_and_retransmission_follow_a_live_hop.rs`, the cells that tell the verdict;
-  `live_primary_read_dead.rs`, a flap). A verdict that meets a stream cut for another
-  reason, a partition between the two workers too, takes over the calls with work in
-  flight while the primary serves them, so the callee may get the dialled INVITE twice
-  and an outside service the request twice.
-- **A peer that goes silent with its streams open** is confirmed at the pullers'
-  idle bound (2 s after its last frame, `B2BUA_REPL_IDLE_TIMEOUT_MS`; ADR-0045), so
-  about 2 s after the proxy's verdict at most: its calls with work in flight are taken
-  over then (`read_dead_primary_taken_over.rs`, the silent-host cell). A live peer
-  whose stream stalls longer than that bound is pulled again from its watermark.
+  the primary alone takes nothing over, the stream open or reconnecting: nothing is
+  dialled, asked or relayed twice (`cancel_and_retransmission_follow_a_live_hop.rs`, the
+  cells that tell the verdict; `live_primary_read_dead.rs`, a flap;
+  `verdict_meets_a_down_stream.rs`). A verdict that meets a partition between the two
+  workers too, the backup's connect refused or unanswered, takes over the calls with
+  work in flight while the primary may still serve them, so the callee may get the
+  dialled INVITE twice and an outside service the request twice
+  (`read_dead_primary_taken_over.rs`, the silent-host cell, confirmed by its partition).
+- **A peer that goes silent** is confirmed once its stream is left at the pullers'
+  idle bound (2 s after its last frame, `B2BUA_REPL_IDLE_TIMEOUT_MS`; ADR-0045) and the
+  one connect fails: at once when the path to it refuses connects
+  (`read_dead_primary_taken_over.rs`, the silent-host cell), one connect bound later
+  when its host answers nothing (`B2BUA_REPL_CONNECT_TIMEOUT_MS`, 2 s;
+  `verdict_meets_a_down_stream.rs`, the unanswering-host cell). So a node lost whole is
+  taken over at most the idle bound plus one connect bound after the verdict, 4 s by
+  default. A live peer whose stream stalls longer than the idle bound is pulled again
+  from its watermark.
 - **The creation write lands one stream hop after the 100.** A death inside that
   hop leaves no replica (`new_call_replication_window.rs` measures it).
 - **A route applied before its write replicated.** A node that dies after dialling

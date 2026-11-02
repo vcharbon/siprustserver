@@ -18,6 +18,7 @@ mod limiter;
 mod operator;
 mod removal_class;
 mod repl_gauges;
+mod repl_hold;
 mod retransmit_row;
 pub mod shell;
 mod turn_counts;
@@ -129,7 +130,7 @@ struct Inner {
     repl_meta_total: AtomicU64,
     repl_meta_backup: AtomicU64,
     repl_calls_unbacked: AtomicU64,
-    repl_outbox_depth: AtomicU64,
+    repl_hold: repl_hold::ReplHold,
     // Inner CallStore map sizes (bodies/idx) — the idx map is insert-only on
     // put_call, so a call whose index keys change across re-flushes (or whose
     // delete passes the wrong keys) strands `idx:*` entries. store_idx_entries
@@ -724,8 +725,7 @@ impl B2buaMetrics {
             .render_value(&mut s, self.inner.repl_meta_backup.load(Ordering::Relaxed));
         catalogue::capacity::REPL_CALLS_UNBACKED
             .render_value(&mut s, self.inner.repl_calls_unbacked.load(Ordering::Relaxed));
-        catalogue::capacity::REPL_OUTBOX_DEPTH
-            .render_value(&mut s, self.inner.repl_outbox_depth.load(Ordering::Relaxed));
+        self.inner.repl_hold.render(&mut s);
         catalogue::worker::REPL_CHANGELOG_ENTRIES
             .render_value(&mut s, self.inner.repl_changelog_entries.load(Ordering::Relaxed));
         catalogue::worker::REPL_CHANGELOG_PEERS

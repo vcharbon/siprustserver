@@ -32,6 +32,35 @@ pub enum Reach {
     Lost,
 }
 
+/// How a serving-side flow stands, one per `(peer, partition)` log this node
+/// keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlowLiveness {
+    /// Connected, with a claim inside the claim TTL: what the replication
+    /// hold waits on.
+    Live,
+    /// Connected, with no claim inside the claim TTL: a bootstrap in flight,
+    /// or a peer that stopped answering. The hold waits on nothing here.
+    Stale,
+    /// No flow connected.
+    Down,
+}
+
+impl FlowLiveness {
+    /// Every state, in the exposition order of `b2bua_repl_serving_flows`.
+    pub const ALL: [FlowLiveness; 3] =
+        [FlowLiveness::Live, FlowLiveness::Stale, FlowLiveness::Down];
+
+    /// The `state` label of `b2bua_repl_serving_flows`.
+    pub const fn label(self) -> &'static str {
+        match self {
+            FlowLiveness::Live => "live",
+            FlowLiveness::Stale => "stale",
+            FlowLiveness::Down => "down",
+        }
+    }
+}
+
 /// A puller's report: the position it applied, and when it said so.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Claim {
@@ -125,6 +154,27 @@ impl Changelog {
         inner.peers.get(peer).map(|log| log.sub(partition)).is_some_and(|sub| {
             sub.streams > 0 && sub.applied.is_some_and(|c| c.made.elapsed() <= inner.claim_ttl)
         })
+    }
+
+    /// How many of the flows this node serves stand in each state, indexed
+    /// like [`FlowLiveness::ALL`]: two per peer log, one per partition.
+    pub fn flow_liveness(&self) -> [u64; FlowLiveness::ALL.len()] {
+        let inner = crate::store::locked(&self.inner, crate::store::REPLICA_CHANGELOG);
+        let mut counts = [0u64; FlowLiveness::ALL.len()];
+        let subs = inner.peers.values().flat_map(|log| [&log.pri, &log.bak]);
+        for sub in subs {
+            let state = match sub.applied {
+                _ if sub.streams == 0 => FlowLiveness::Down,
+                Some(claim) if claim.made.elapsed() <= inner.claim_ttl => FlowLiveness::Live,
+                _ => FlowLiveness::Stale,
+            };
+            if let Some(n) =
+                FlowLiveness::ALL.iter().position(|s| *s == state).and_then(|at| counts.get_mut(at))
+            {
+                *n += 1;
+            }
+        }
+        counts
     }
 
     /// Whether a flow of `peer` is open on `partition`, bootstrapped or not.

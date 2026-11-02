@@ -86,7 +86,7 @@ async fn an_entry_leaves_once_its_backup_applied_the_write() {
     settle().await;
     assert_eq!(b.sent(), vec![("200", Released::Applied)]);
     assert_eq!(b.outboxes.depth(), 0);
-    assert_eq!(b.metrics.repl_sync_capped_total(), 0);
+    assert_eq!(b.metrics.outbox_released_total(Released::Capped), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -122,7 +122,7 @@ async fn each_entry_leaves_at_its_own_cap_counted_and_flagged() {
     tokio::time::sleep(Duration::from_millis(1)).await;
     settle().await;
     assert_eq!(b.sent()[1], ("second", Released::Capped));
-    assert_eq!(b.metrics.repl_sync_capped_total(), 2, "each cap hit counted");
+    assert_eq!(b.metrics.outbox_released_total(Released::Capped), 2, "each cap hit counted");
 }
 
 #[tokio::test(start_paused = true)]
@@ -195,7 +195,7 @@ async fn a_released_call_sends_its_outbox_at_once() {
     assert_eq!(b.outboxes.depth(), 0);
     tokio::time::sleep(CAP).await;
     assert_eq!(b.sent().len(), 2, "nothing sent twice");
-    assert_eq!(b.metrics.repl_sync_capped_total(), 0, "a release is no cap hit");
+    assert_eq!(b.metrics.outbox_released_total(Released::Capped), 0, "a release is no cap hit");
 }
 
 #[tokio::test(start_paused = true)]
@@ -215,7 +215,7 @@ async fn a_backup_whose_flow_goes_down_releases_its_entries_unflagged_as_capped(
     drop(serving);
     settle().await;
     assert_eq!(*sent.lock().unwrap(), vec![("200", Released::BackupLost)]);
-    assert_eq!(metrics.repl_sync_capped_total(), 0, "a lost backup is no cap hit");
+    assert_eq!(metrics.outbox_released_total(Released::Capped), 0, "a lost backup is no cap hit");
 }
 
 #[tokio::test(start_paused = true)]
@@ -230,4 +230,92 @@ async fn drained_resolves_once_the_last_entry_left() {
     b.apply(1);
     tokio::time::timeout(Duration::from_millis(1), drained).await.expect("drained").unwrap();
     assert_eq!(b.sent(), vec![("final", Released::Applied)]);
+}
+
+/// The release counter's value per reason, in [`Released::ALL`] order.
+fn released(metrics: &B2buaMetrics) -> Vec<(Released, u64)> {
+    Released::ALL.iter().map(|r| (*r, metrics.outbox_released_total(*r))).collect()
+}
+
+/// `n` releases for `reason`, none for any other.
+fn only(reason: Released, n: u64) -> Vec<(Released, u64)> {
+    Released::ALL.iter().map(|r| (*r, if *r == reason { n } else { 0 })).collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_applied_release_is_counted_applied() {
+    let b = at(SyncLevel::Applied);
+    let queued = b.write("c1");
+    b.push("c1", Some(queued), "queued").await;
+    b.apply(1);
+    settle().await;
+    let applied = b.write("c2");
+    b.apply(2);
+    b.push("c2", Some(applied), "at once").await;
+    assert_eq!(b.sent().len(), 2);
+    assert_eq!(released(&b.metrics), only(Released::Applied, 2), "queued and at once alike");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_capped_release_is_counted_capped() {
+    let b = at(SyncLevel::Applied);
+    let wait = b.write("c1");
+    b.push("c1", Some(wait), "200").await;
+    tokio::time::sleep(CAP).await;
+    settle().await;
+    assert_eq!(b.sent(), vec![("200", Released::Capped)]);
+    assert_eq!(released(&b.metrics), only(Released::Capped, 1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_release_on_a_lost_backup_is_counted_backup_lost() {
+    let Bench { log, outboxes, metrics, sent, serving } = at(SyncLevel::Applied);
+    let at = log.bump_put(PEER, "c1", Partition::Bak);
+    let wait = HoldTarget { peer: PEER.to_string(), partition: Partition::Bak, at };
+    let effects: Effects = {
+        let sent = sent.clone();
+        Box::new(move |released| {
+            Box::pin(async move { sent.lock().unwrap().push(("200", released)) })
+        })
+    };
+    outboxes.push("c1", Some(wait), effects).await;
+    drop(serving);
+    settle().await;
+    assert_eq!(*sent.lock().unwrap(), vec![("200", Released::BackupLost)]);
+    assert_eq!(released(&metrics), only(Released::BackupLost, 1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_release_with_no_live_backup_is_counted_no_live_backup() {
+    let b = at(SyncLevel::Applied);
+    b.push("c1", None, "alone").await;
+    let wait = b.write("c2");
+    b.push("c2", Some(wait), "ack").await;
+    b.push("c2", None, "behind").await;
+    b.apply(1);
+    settle().await;
+    assert_eq!(b.sent().len(), 3);
+    let counted = released(&b.metrics);
+    assert_eq!(counted[0], (Released::AtOnce, 2), "alone and queued behind alike");
+    assert_eq!(Released::AtOnce.label(), "no_live_backup");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_released_calls_entries_are_counted_call_released() {
+    let b = at(SyncLevel::Applied);
+    let wait = b.write("c1");
+    b.push("c1", Some(wait.clone()), "ack").await;
+    b.push("c1", Some(wait), "bye").await;
+    b.outboxes.release("c1").await;
+    assert_eq!(released(&b.metrics), only(Released::CallReleased, 2));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_off_level_counts_no_release() {
+    let b = at(SyncLevel::Off);
+    let wait = b.write("c1");
+    b.push("c1", Some(wait), "200").await;
+    b.push("c2", None, "180").await;
+    assert_eq!(b.sent().len(), 2);
+    assert_eq!(released(&b.metrics), only(Released::AtOnce, 0), "nothing is held under off");
 }

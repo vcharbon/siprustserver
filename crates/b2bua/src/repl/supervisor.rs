@@ -61,7 +61,7 @@ use tokio::sync::watch;
 use topology::{Membership, Peer};
 
 use super::peer_resolver::AddrResolver;
-use super::puller::{Puller, PullerConfig, PullerStatus};
+use super::puller::{ConnectNow, Puller, PullerConfig, PullerStatus};
 use super::self_endpoint::SelfObserver;
 use super::ReplicatingCallStore;
 use crate::poison::{locked, SUPERVISOR_PEERS, SUPERVISOR_WIRING};
@@ -69,9 +69,12 @@ use crate::poison::{locked, SUPERVISOR_PEERS, SUPERVISOR_WIRING};
 mod backup_deferral;
 mod bindings;
 mod follow;
+mod peer_link;
 mod shutdown;
 mod streams;
 mod wiring;
+
+pub use peer_link::PeerLink;
 
 /// One of the supervisor's wiring slots ([`SUPERVISOR_WIRING`]).
 fn wiring<T>(slot: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -97,6 +100,8 @@ struct FlowState {
     status_rx: Option<watch::Receiver<PullerStatus>>,
     /// Cancel handle to interrupt the running puller (Park / re-spawn).
     cancel_tx: Option<watch::Sender<bool>>,
+    /// Asks the running puller for one connect at once, or `None` while Parked.
+    connect_now: Option<ConnectNow>,
     /// The retained watermark — authoritative, survives the puller task. Seeded
     /// into the next puller on re-spawn.
     watermark: Watermark,
@@ -139,6 +144,7 @@ impl FlowState {
         Self {
             status_rx: None,
             cancel_tx: None,
+            connect_now: None,
             watermark: Watermark::new(0, 0),
             current: false,
             bootstrap_complete: false,
@@ -217,24 +223,9 @@ impl PeerEntry {
                 let _ = tx.send(true);
             }
             flow.status_rx = None;
+            flow.connect_now = None;
         }
     }
-}
-
-/// This node's link state toward one peer, as the supervisor holds it —
-/// read-only introspection ([`peer_link`](ReplicationSupervisor::peer_link)).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PeerLink {
-    /// The ordinal was never in this node's membership view.
-    Absent,
-    /// The peer left the membership set: both flows are interrupted, the
-    /// retained watermarks survive for a warm resume.
-    Parked,
-    /// The Reclaim flow's puller is running toward a ready peer.
-    Active,
-    /// The Reclaim flow's puller is running toward a member that is present in
-    /// the snapshot but not `ready` — pulled on presence alone (ADR-0031 D1).
-    Kept,
 }
 
 /// Ties pullers to topology; owns the per-`(ordinal, flow)` retained watermarks.
@@ -541,10 +532,11 @@ impl ReplicationSupervisor {
             start_w,
             self.inner.metrics.clone(),
         );
-        let puller = self.wire(puller);
+        let mut puller = self.wire(puller);
         let (cancel_tx, cancel_rx) = watch::channel(false);
         flow.status_rx = Some(status_rx);
         flow.cancel_tx = Some(cancel_tx);
+        flow.connect_now = Some(puller.connect_now());
 
         observe::spawn_keeping_node(async move {
             puller.run(cancel_rx).await;
@@ -671,21 +663,6 @@ impl ReplicationSupervisor {
             .get(peer)
             .map(|e| e.flow(partition).watermark)
             .unwrap_or_else(|| Watermark::new(0, 0))
-    }
-
-    /// This node's link state toward `peer` ([`PeerLink`]): `Active` while its
-    /// Reclaim puller runs toward a ready member, `Kept` while it runs toward a
-    /// member that is present but not ready, `Parked` once it left the
-    /// membership set (the entry and its watermarks are retained), `Absent` when
-    /// the ordinal was never seen. Pure read — it folds no puller status and
-    /// spawns nothing.
-    pub fn peer_link(&self, peer: &str) -> PeerLink {
-        match self.inner.peers().get(peer) {
-            None => PeerLink::Absent,
-            Some(e) if e.reclaim.status_rx.is_some() && e.ready => PeerLink::Active,
-            Some(e) if e.reclaim.status_rx.is_some() => PeerLink::Kept,
-            Some(_) => PeerLink::Parked,
-        }
     }
 
     /// The metrics handle this supervisor and its pullers write.

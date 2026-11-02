@@ -35,12 +35,12 @@ mod verdict_bounds;
 mod write_path;
 
 pub use changelog::{
-    BacklogMarks, BodySource, Changelog, Reach, RefMeta, DEFAULT_DEAD_PEER_TTL_MS,
+    BacklogMarks, BodySource, Changelog, FlowLiveness, Reach, RefMeta, DEFAULT_DEAD_PEER_TTL_MS,
 };
 pub use departed::{departed_probe, DepartedProbe};
 pub(crate) use peer_body::decode_peer_body;
 pub use peer_resolver::{AddrResolver, FnPeerResolver, PeerResolver};
-pub use puller::{Puller, PullerConfig, PullerStatus};
+pub use puller::{Attempt, ConnectNow, Puller, PullerConfig, PullerStatus};
 pub use readiness::{
     CordonRefused, OptionsReport, Readiness, ReadinessSource, ReadinessState, Refusal,
 };
@@ -115,6 +115,9 @@ mod puller_restart_tests;
 
 #[cfg(test)]
 mod reconcile_restart_tests;
+
+#[cfg(test)]
+mod verdict_confirmation_tests;
 
 #[cfg(test)]
 mod real_transport_tests;

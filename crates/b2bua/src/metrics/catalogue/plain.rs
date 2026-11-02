@@ -206,10 +206,6 @@ plain_counters! {
         "b2bua_repl_new_calls_unbacked_total",
         "new calls admitted with no backup, for life, while the backlog toward their backup was over its high-water mark (ADR-0055 §3)",
     ) => repl_new_calls_unbacked, bump_repl_new_call_unbacked, repl_new_calls_unbacked_total;
-    REPL_SYNC_CAPPED = (
-        "b2bua_repl_sync_capped_total",
-        "outbox entries released at the sync cap, before their backup applied the write that records them (ADR-0055 §3)",
-    ) => repl_sync_capped, bump_repl_sync_capped, repl_sync_capped_total;
     DEPARTURE_TAKEOVER_PANICS = (
         "b2bua_departure_takeover_panics_total",
         "departed-peer calls whose takeover panicked; the sweep goes on with the next call — expected 0",
@@ -220,11 +216,11 @@ plain_counters! {
     ) => dead_notices_refused, bump_dead_notice_refused, dead_notices_refused_total;
     DEAD_VERDICTS_TAKEN = (
         "b2bua_dead_verdicts_taken_total",
-        "a front proxy's dead verdicts on another worker taken: each runs the takeover of the calls this node backs for it with work in flight once its replication stream from that worker is down (ADR-0047 D1)",
+        "a front proxy's dead verdicts on another worker taken: each runs the takeover of the calls this node backs for it with work in flight once this node's Backup flow from that worker confirms it, an open stream ending with no frame or, with the stream down, one connect made at once refused or run out (ADR-0047 D1)",
     ) => dead_verdicts_taken, bump_dead_verdict_taken, dead_verdicts_taken_total;
     DEAD_VERDICTS_UNCONFIRMED = (
         "b2bua_dead_verdicts_unconfirmed_total",
-        "taken dead verdicts the replication stream from that worker spoke against, a frame from it arriving after the verdict or the stream open through its silence bound: the proxy misread a live worker, and nothing was taken over; one per pending wait (ADR-0047 D1)",
+        "taken dead verdicts this node's Backup flow from that worker spoke against, a frame from it arriving after the verdict on the open stream or on the one connect a down stream makes at once, or the stream open through its silence bound: the proxy misread a live worker, and nothing was taken over; one per pending wait (ADR-0047 D1)",
     ) => dead_verdicts_unconfirmed, bump_dead_verdict_unconfirmed, dead_verdicts_unconfirmed_total;
     STORE_RECONCILED_ORPHAN_STAMPS = (
         "b2bua_store_reconciled_orphan_stamps_total",

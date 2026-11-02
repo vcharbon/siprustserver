@@ -64,6 +64,8 @@
 //!   `sleep`+`select`, **not** a `DelayQueue` — CLAUDE.md aliasing hazard). A
 //!   stream that stayed connected for `idle_timeout_ms` resets `attempt`: the
 //!   next wait is the floor.
+//! - a connect asked for at once ([`ConnectNow`]) ends the backoff and starts a
+//!   connect in flight afresh; that connect's outcome answers it (ADR-0047 D1).
 //!
 //! ## Link liveness (ADR-0045)
 //! The server sends a `Noop` at least every few seconds, so a stream that
@@ -95,11 +97,15 @@ mod apply;
 mod bootstrap_complete;
 mod build;
 mod config;
+mod connect_now;
+mod connecting;
 mod held_meetings;
 mod status;
 mod wiring;
 use apply::{ApplyMode, ApplyOutcome};
 pub use config::{PullerConfig, DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS};
+use connect_now::Asks;
+pub use connect_now::{Attempt, ConnectNow};
 pub use status::PullerStatus;
 
 /// What ended a single `run_once` connection attempt — drives the supervisor's
@@ -188,6 +194,10 @@ pub struct Puller {
     bootstrap_started_at: std::sync::Mutex<Option<tokio::time::Instant>>,
     /// The copies a batch refused, until it is read whole (ADR-0055 §7).
     held_meetings: held_meetings::HeldMeetings,
+    /// Where requests for a connect at once arrive
+    /// ([`connect_now`](Self::connect_now)); `None` when no handle was made.
+    /// Taken by [`run`](Self::run).
+    asks: Option<connect_now::AskRx>,
 }
 
 impl Puller {
@@ -226,26 +236,11 @@ impl Puller {
         );
     }
 
-    /// Resolve the peer's address (fresh) and open a connection within
-    /// `connect_timeout_ms`. `None` if the address is unresolvable right now or
-    /// the connect fails or runs out of time — the caller treats each as a
-    /// failed connect (→ Backoff, then retry/re-resolve).
-    async fn try_connect(&self) -> Option<Box<dyn ReplicationConnection>> {
-        let addr = self.resolve.resolve(&self.peer).await?;
-        let bound = Duration::from_millis(self.config.connect_timeout_ms);
-        match tokio::time::timeout(bound, self.network.connect(addr)).await {
-            Ok(conn) => conn.ok(),
-            Err(_) => {
-                tracing::debug!(peer = %self.peer.ordinal, %addr, "repl connect timed out");
-                None
-            }
-        }
-    }
-
     /// Run the FSM until `cancel` flips to `true` (Park / shutdown) or its sender
     /// is dropped. `cancel` is a `watch` so the supervisor can interrupt a
     /// parked-out puller atomically.
-    pub async fn run(self, mut cancel: watch::Receiver<bool>) {
+    pub async fn run(mut self, mut cancel: watch::Receiver<bool>) {
+        let mut asks = Asks::new(self.asks.take());
         let mut attempt: u32 = 0;
         // Arm the bootstrap hard deadline iff we start cold. A warm resume is
         // already `bootstrap_complete` (set in `new`), so no deadline is needed.
@@ -264,7 +259,7 @@ impl Puller {
             if *cancel.borrow() {
                 return;
             }
-            let outcome = self.run_once(&mut cancel, &mut deadline).await;
+            let outcome = self.run_once(&mut cancel, &mut deadline, &mut asks).await;
             self.status_tx.send_if_modified(|s| std::mem::replace(&mut s.streaming, false));
             match outcome {
                 RunOutcome::Cancelled => return,
@@ -274,15 +269,23 @@ impl Puller {
                         attempt = 0;
                     }
                     attempt = attempt.saturating_add(1);
+                    // A connect asked for at once skips the backoff.
+                    if asks.pending() {
+                        self.note_state("backoff", "a connect is asked for at once");
+                        continue;
+                    }
                     let ms = self.backoff_ms(attempt);
                     self.note_state("backoff", &format!("attempt {attempt}, retry in {ms}ms"));
                     // The hard timer must keep ticking through backoff so an
-                    // unreachable peer still becomes bootstrap-complete on time.
-                    let fire_hard = self.select_with_deadline(
-                        tokio::time::sleep(Duration::from_millis(ms)),
-                        &mut cancel,
-                        deadline,
-                    );
+                    // unreachable peer still becomes bootstrap-complete on time;
+                    // a connect asked for at once ends it.
+                    let backoff = async {
+                        tokio::select! {
+                            () = tokio::time::sleep(Duration::from_millis(ms)) => {}
+                            () = asks.next() => {}
+                        }
+                    };
+                    let fire_hard = self.select_with_deadline(backoff, &mut cancel, deadline);
                     match fire_hard.await {
                         SelectOutcome::Cancelled => return,
                         SelectOutcome::Deadline => {
@@ -371,36 +374,13 @@ impl Puller {
         &self,
         cancel: &mut watch::Receiver<bool>,
         deadline: &mut Option<tokio::time::Instant>,
+        asks: &mut Asks,
     ) -> RunOutcome {
-        // ---- Connecting ---- resolve fresh (D3) + connect, racing the hard
-        // deadline so a hung connect to an unreachable/stalled peer still lets the
-        // node go bootstrap-complete.
-        let conn = match *deadline {
-            Some(at) => tokio::select! {
-                c = self.try_connect() => c,
-                _ = tokio::time::sleep_until(at) => {
-                    // Hard timer tripped mid-connect: best-effort complete for
-                    // readiness, then back off + retry (now warm → no hard timer).
-                    self.mark_bootstrap_complete(0, "hard timeout while connecting");
-                    *deadline = None;
-                    return RunOutcome::ConnectFailed;
-                }
-                () = cancelled(cancel) => return RunOutcome::Cancelled,
-            },
-            None => tokio::select! {
-                c = self.try_connect() => c,
-                () = cancelled(cancel) => return RunOutcome::Cancelled,
-            },
+        // ---- Connecting ---- resolve fresh (D3) + connect.
+        let conn = match self.connect(cancel, deadline, asks).await {
+            Ok(conn) => conn,
+            Err(outcome) => return outcome,
         };
-        let conn = match conn {
-            Some(c) => c,
-            None => return RunOutcome::ConnectFailed,
-        };
-        // The peer is reached (readiness no longer reads it unreachable), streaming.
-        self.status_tx.send_modify(|s| {
-            s.ever_connected = true;
-            s.streaming = true;
-        });
         self.note_state("streaming", "connected");
         let connected_at = tokio::time::Instant::now();
 

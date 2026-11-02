@@ -270,10 +270,16 @@ ends the transaction with the CANCEL unsent (§9.1, §17.2.1).
   and a discharge by the backup send what the outbox still holds at once:
   the copy's write records those sends. A drain and a shutdown exit only once
   every outbox is empty, at most the cap after the last entry.
-- **Cap hits are reported.** The turn probe's `Left` mark of a turn whose
+- **Releases are reported.** The turn probe's `Left` mark of a turn whose
   entry left at the cap says so; one released because its backup's flow went
-  down says that instead. A counter counts the cap hits and a gauge the
-  queued entries. No per-call state outlives the call (ADR-0037), and the
+  down says that instead. Under `applied` a counter counts every release by
+  its reason (`b2bua_repl_outbox_released_total{reason}`: applied, capped,
+  backup lost, no live backup, call released), so a stalled backup shows as
+  releases with no live backup rather than a quiet cap count; a gauge counts
+  the queued entries, and another the flows the node serves by state (live,
+  stale, down: `b2bua_repl_serving_flows`). No wait is bounded on a stale
+  flow: a backup with no position report for the claim TTL is waited on for
+  nothing. No per-call state outlives the call (ADR-0037), and the
   outbox needs no admission term: it is bounded by the message rate times the
   cap. The services stay blind: the outbox lives in the aware crates.
 - **A write is abandoned only with its backup.** It stays in the change log

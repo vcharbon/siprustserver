@@ -29,12 +29,17 @@
 //! The `Noop` interval is one setting of the serve loop, applied to every
 //! stream it serves, each flow's alike; it is the heartbeat a quiet stream
 //! carries, and a position claim vouches for twice it. The idle timeout is
-//! how long after a peer's last frame its stream reads down: a proxy's dead
-//! verdict on a peer that went silent with its sockets open is confirmed that
-//! long after its last frame (ADR-0047 D1), so it stays far below the
-//! orchestrator's force-delete of an unreachable node's pod (minutes), and a
-//! stall of a live peer longer than it makes the puller pull again from its
-//! watermark.
+//! how long after a peer's last frame its stream reads down, and a stall of a
+//! live peer longer than it makes the puller pull again from its watermark.
+//! A proxy's dead verdict is confirmed once the Backup flow's stream is down,
+//! at the verdict or that long after the peer's last frame, by one connect
+//! made at once that is refused or runs out the connect timeout (ADR-0047
+//! D1): a node lost whole is taken over at most the idle timeout plus the
+//! connect timeout after the verdict (4 s by default), so both stay far below
+//! the orchestrator's force-delete of an unreachable node's pod (minutes).
+//! Neither is tied to the verdict's freshness window or hold: one wait runs
+//! per peer, whatever notices arrive meanwhile, and a notice is checked fresh
+//! when it arrives.
 //!
 //! The dead-peer TTL is an HA timer of the serving side: a peer log no flow
 //! has served for that long is dropped, writes or not, so the log toward an
