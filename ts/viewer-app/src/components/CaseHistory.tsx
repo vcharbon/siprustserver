@@ -5,11 +5,12 @@
  * the file it was compiled from, folded), every check it makes marked per
  * lane (folded),
  * its verdict per run and lane, what changed between runs, the flip table, the
- * runs with their deltas.
+ * runs with their deltas and, for a cell replayed more than once, its attempts.
  */
 import type { JSX } from "react"
 import type { Campaign } from "../api.ts"
 import { resultOf } from "../campaign-facets.ts"
+import { attemptLines } from "../campaign-attempts.ts"
 import { checkList } from "../campaign-checks.ts"
 import { CaseReplay } from "./CampaignLaunch.tsx"
 import { history } from "../campaign-history.ts"
@@ -197,6 +198,7 @@ export const CaseHistory = ({ view, caseId, lanes, onClose, onDelta }: {
                     <td>
                       <button type="button" onClick={() => onDelta(run.id, lane)}>details</button>
                       <div className="muted mono cp-small">{session}/{result.cell}</div>
+                      {attemptLines(result).map((line) => <div key={line} className="muted mono cp-small">{line}</div>)}
                     </td>
                   </tr>
                 )

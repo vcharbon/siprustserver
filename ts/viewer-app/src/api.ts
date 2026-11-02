@@ -1043,6 +1043,14 @@ export interface CampaignCheck {
   readonly step?: string | null
 }
 
+/** One replay of a cell replayed more than once on its lane: its bundle directory, outcome, failed checks, whether it is the result. */
+export interface CampaignAttempt {
+  readonly cell: string | null
+  readonly outcome: "pass" | "failure" | "error" | "skipped"
+  readonly failed: number
+  readonly kept: boolean
+}
+
 export interface CampaignResult {
   readonly caseId: string
   readonly outcome: "pass" | "failure" | "error"
@@ -1051,6 +1059,8 @@ export interface CampaignResult {
   readonly log: { readonly records?: number; readonly missing?: string } | null
   readonly detail: string | null
   readonly checks: readonly CampaignCheck[]
+  /** Every attempt, in order, of a cell replayed more than once on its lane; absent for one attempt. */
+  readonly attempts?: readonly CampaignAttempt[]
 }
 
 export interface CampaignLane {
