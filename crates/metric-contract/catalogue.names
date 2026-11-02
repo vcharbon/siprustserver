@@ -306,7 +306,6 @@ sip-proxy-runner sip_proxy_self_emergency_bypassed_total counter fixed {}
 sip-proxy-runner sip_proxy_self_internal_bypassed_total counter fixed {}
 sip-proxy-runner sip_proxy_branch_memo_bytes gauge fixed {}
 sip-proxy-runner sip_proxy_branch_memo_evictions_total counter fixed {}
-sip-proxy-runner sip_proxy_branch_memo_deviations_total counter fixed {}
 sip-proxy-runner sip_proxy_task_restarts_total counter fixed {task}
 sip-proxy-runner metric_values_poisoned_lock_recoveries_total counter fixed {lock}
 sip-proxy-runner log_lines_dropped_total counter fixed {}

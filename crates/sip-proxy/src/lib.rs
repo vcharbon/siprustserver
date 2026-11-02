@@ -74,6 +74,6 @@ pub use face::{FaceCidrs, Ipv4Cidr};
 pub use observability::ProxyMetrics;
 pub use strategies::{ForwardAllStrategy, LoadBalancerStrategy};
 pub use strategy::{
-    DecodeResult, RankPlacement, Ranked, RouteParams, RoutingStrategy, SelectError, SelectOpts,
+    DecodeResult, RankPlacement, RouteParams, RoutingStrategy, SelectError, SelectOpts,
 };
 pub use trace::ProxyTraces;

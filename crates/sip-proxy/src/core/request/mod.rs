@@ -15,7 +15,6 @@
 
 mod admission;
 mod classify;
-mod memo_write;
 mod parse_refusal;
 mod record_route;
 mod reply;

@@ -19,9 +19,7 @@ mod branch_memo;
 mod intake;
 mod overload;
 mod parse;
-pub use branch_memo::{
-    BRANCH_MEMO, BRANCH_MEMO_BYTES, BRANCH_MEMO_DEVIATIONS, BRANCH_MEMO_EVICTIONS,
-};
+pub use branch_memo::{BRANCH_MEMO, BRANCH_MEMO_BYTES, BRANCH_MEMO_EVICTIONS};
 pub use intake::{INTAKE_SHED, INTAKE_UNANSWERABLE};
 pub use overload::{
     LB_EMERGENCY_BYPASSED, LB_RATE_CAP_SPILLED, OVERLOAD_REJECTIONS, WORKER_STALE_DECREASE,

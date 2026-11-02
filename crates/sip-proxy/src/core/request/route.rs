@@ -21,11 +21,10 @@ use crate::observability::metrics::{
     Direction, Face, MessageResult, NoTargetDrop, RoutingDecisionKind,
 };
 use crate::self_gate::BypassKind;
-use crate::strategy::{Ranked, SelectOpts};
+use crate::strategy::SelectOpts;
 use sip_message::received::observed_source;
 
 use super::super::ProxyCore;
-use super::memo_write::{keeps_retransmission, InviteEntry, Placement};
 use super::reply::extra_header;
 use super::target::Chosen;
 use super::{top_via_branch, RouteOutcome};
@@ -109,16 +108,19 @@ impl ProxyCore {
         // An ACK for a NON-2xx INVITE final belongs to the INVITE transaction
         // itself — it reuses the INVITE's top-Via branch — while an ACK for a
         // 2xx is a NEW transaction (fresh branch) that takes the normal
-        // routing ladder. Without a memo the non-2xx ACK goes where its INVITE
-        // went: a worker's by the Route and Request-URI it copies from its
-        // INVITE, any other where the INVITE's entry names (kept for an INVITE
-        // placed off its memo-free route) or by the call's rank (ADR-0009 X7).
-        // The `ackhop|` memo, written only when the final came from a node
-        // that route misses (a takeover, a translated address), sends it to
-        // that node. A takeover UA's 2xx ACK whose restarted `IdGen` aliases
-        // the dead incarnation's INVITE branch stays safe: as a worker's
-        // request it is routed by its Route and Request-URI, never by the
-        // INVITE's entry, and no ACK hop exists for a confirmed call.
+        // routing ladder. The `ackhop|` memo, written for every relayed
+        // non-2xx INVITE final, + branch match is the discriminator, NOT the
+        // presence of a Route header: a worker's b-leg INVITE carries a
+        // preloaded outbound-proxy Route, and §17.1.1.3 makes its non-2xx ACK
+        // copy that Route verbatim, so a route-presence heuristic misroutes
+        // exactly that ACK. With no ACK hop (the final crossed another
+        // instance), the ACK goes where its INVITE went: a caller's where the
+        // INVITE's entry names, else by the call's rank; a worker's by its
+        // Route and Request-URI (ADR-0009 X7). A takeover UA's 2xx ACK whose
+        // restarted `IdGen` aliases the dead incarnation's INVITE branch stays
+        // safe: no non-2xx final was relayed for a confirmed call, so no ACK
+        // hop exists, and as a worker's request it is routed by its Route and
+        // Request-URI, never by the INVITE's entry.
         //
         // A match is a relayed final (the memo names the node the final
         // arrived from): RELAY the ACK there, where §16.11 puts it on the
@@ -232,11 +234,10 @@ impl ProxyCore {
         }
 
         // ── Pick the downstream target (`target`) ───────────────────────────
-        // A caller's §17.1.1.3 ACK with no ACK hop, of an INVITE this instance
-        // placed off its memo-free route: the INVITE's entry, which the ACK's
-        // branch keys, names where it went, whatever Route or cookie the ACK
-        // copied from the INVITE. A worker's ACK repeats its INVITE's Route
-        // and Request-URI.
+        // A caller's §17.1.1.3 ACK with no ACK hop (its final crossed another
+        // instance): the INVITE's entry, which the ACK's branch keys, names
+        // where the INVITE went, whatever Route or cookie the ACK copied from
+        // it. A worker's ACK repeats its INVITE's Route and Request-URI.
         let placed_ack = if method == Method::Ack
             && ack_hop.is_none()
             && !c.worker_outbound
@@ -279,13 +280,12 @@ impl ProxyCore {
                 None => Err(self.drop_without_target(NoTargetDrop::Initial)),
             }
         } else if method == Method::Ack {
-            // A §17.1.1.3 ACK no memo, Route or cookie places: to the UAS that
-            // sent the final, the call's rank winner among every worker known
-            // (ADR-0009 X7), alive or not, as no final from elsewhere left an
-            // ACK hop. A 2xx ACK opens its own transaction on a fresh branch
-            // and rides the dialog's cookie, which routed it above.
-            let among = Ranked::Known;
-            let target = self.admitted_target(msg, None, among, NoTargetDrop::Initial).await;
+            // A §17.1.1.3 ACK no memo, Route or cookie places (a flow moved
+            // after the INVITE crossed the other instance): where an unspilled
+            // placement put the call (ADR-0009 X7). A 2xx ACK opens its own
+            // transaction on a fresh branch and rides the dialog's cookie,
+            // which routed it above.
+            let target = self.admitted_target(msg, None, NoTargetDrop::Initial).await;
             target.map(|t| (t, RoutingDecisionKind::AckHop, None))
         } else {
             let admit_as_new = self.admits_as_new(msg, face, None);
@@ -346,24 +346,13 @@ impl ProxyCore {
             .requesting_rport();
         draft = draft.push_front(via_with_cookie(pushed, via_cookie.as_ref()));
 
-        // Remember what no later request of this transaction can recompute
-        // (`memo_write`, ADR-0009 X7). A retransmission repeats where the
-        // request's first copy went and both cookies; one forwarded elsewhere
-        // never rewrites that first target: every later copy, and the CANCEL,
-        // is judged from where the transaction lives (ADR-0050 §4). Short
-        // TTL: retransmits stop at Timer B/F.
+        // Remember where the request's first copy went and both cookies, so a
+        // retransmit of THIS request repeats the forward. A retransmission
+        // forwarded elsewhere never rewrites that first target: every later
+        // copy, and the CANCEL, is judged from where the transaction lives
+        // (ADR-0050 §4). Short TTL: retransmits stop at Timer B/F.
         let went = rtx_hit.as_ref().map_or_else(|| target.clone(), |found| found.target.clone());
-        let placement = Placement {
-            msg,
-            classified: &c,
-            decision,
-            verdict: stickiness,
-            went: &went,
-            originator: &originator,
-            emergency: is_emergency,
-        };
-        let initial_invite = method == Method::Invite && !has_to_tag;
-        if keeps_retransmission(&method, initial_invite, &placement, rtx_hit.is_some()) {
+        if method != Method::Cancel {
             if let Some(k) = &rtx_key {
                 self.cancel_lru.remember(
                     k,
@@ -379,12 +368,7 @@ impl ProxyCore {
             }
         }
 
-        let kept = if method == Method::Invite {
-            self.invite_entry(&placement)
-        } else {
-            InviteEntry::Recomputed
-        };
-        if kept != InviteEntry::Recomputed {
+        if method == Method::Invite {
             // Long TTL: a CANCEL or non-2xx final can legally arrive any time
             // inside the downstream UA's INVITE window (B2BUA SetupTimeout /
             // sip-txn INVITE_INITIAL_TIMEOUT) — see cancel_lru.rs. Keyed on
@@ -392,9 +376,9 @@ impl ProxyCore {
             let key = invite_txn_key(req.top_via(), call_id.as_str(), from.tag(), cseq.seq());
             // The cookie a CANCEL re-resolves a dead worker through: the verified
             // one the re-INVITE carried in its Route, else the one this initial
-            // INVITE's Record-Route was minted with. A worker-outbound INVITE's
-            // cookie names the worker, not the downstream target, so it is not
-            // kept.
+            // INVITE's Record-Route was minted with (a plain preloaded Route to
+            // the proxy carries none). A worker-outbound INVITE's cookie names
+            // the worker, not the downstream target, so it is not kept.
             let carried = c.cookie.as_ref().and_then(|p| self.strategy.verified_cookie(p, msg));
             let stickiness =
                 if c.worker_outbound { None } else { carried.or(minted_cookie.clone()) };
@@ -405,9 +389,6 @@ impl ProxyCore {
                 minted: None,
                 via_cookie: via_cookie.clone(),
             };
-            if kept == InviteEntry::Deviation && rtx_hit.is_none() {
-                self.cancel_lru.count_deviation();
-            }
             self.cancel_lru.remember(&key, entry, Lifetime::InviteTransaction);
             self.cancel_lru.publish(&self.metrics);
         }

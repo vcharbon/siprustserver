@@ -12,9 +12,9 @@
 //!   a token (→ 503 + Retry-After). Emergency / in-dialog requests take the
 //!   rendezvous winner and bypass the bucket (they still record the admit for
 //!   the `share` signal); an unobserved worker is admitted (bootstrap-friendly).
-//! - `placement_by_rank`: the rendezvous winner among the `Alive` workers, or
-//!   among every ordinal known, unfiltered and spending no token, where a
-//!   request of an admitted call no memo places goes (ADR-0009 X7).
+//! - `placement_by_rank`: the rendezvous winner among the `Alive` workers,
+//!   unfiltered and spending no token, where a request of an admitted call no
+//!   memo places goes (ADR-0009 X7).
 //! - `encode_stickiness`: a call the proxy places. Recover the target's
 //!   `WorkerId` (= `w_pri`) by address, pick the HRW winner among the other
 //!   `Alive` workers that accept new calls, else among the other `Alive` ones,
@@ -60,7 +60,7 @@ use crate::observability::metrics::ProxyMetrics;
 use crate::registry::{WorkerEntry, WorkerRegistry};
 use crate::security::hmac::{HmacKeyProvider, TRUNCATED_MAC_BYTES};
 use crate::strategy::{
-    DecodeResult, RankPlacement, Ranked, RouteParams, RoutingStrategy, SelectError, SelectOpts,
+    DecodeResult, RankPlacement, RouteParams, RoutingStrategy, SelectError, SelectOpts,
     StatedOwners,
 };
 
@@ -286,25 +286,15 @@ impl RoutingStrategy for LoadBalancerStrategy {
         self.take_token(&ranked).map(|placed| placed.address.clone())
     }
 
-    /// The rendezvous winner for the call among the `Alive` workers, or
-    /// among every ordinal the pool knows: members of any health and those
-    /// away (ADR-0055 §8), so no worker of the pool returning outranks it. An
-    /// away winner has no address.
-    fn placement_by_rank(&self, msg: &SipMessage, among: Ranked) -> RankPlacement {
+    /// The rendezvous winner for the call among the `Alive` workers: where a
+    /// call placed with neither filter nor spill lives, and, its primary gone,
+    /// the next in rank.
+    fn placement_by_rank(&self, msg: &SipMessage) -> RankPlacement {
         let call_id = call_id_of(msg).unwrap_or("");
         let snapshot = self.registry.snapshot();
-        let ranked: Vec<WorkerKey> = match among {
-            Ranked::Alive => {
-                snapshot.iter().filter(|w| w.is_alive()).map(|w| WorkerKey(w.id.clone())).collect()
-            }
-            Ranked::Known => snapshot
-                .iter()
-                .map(|w| w.id.clone())
-                .chain(self.registry.away_ordinals())
-                .map(WorkerKey)
-                .collect(),
-        };
-        rendezvous_select(call_id, &ranked)
+        let alive: Vec<WorkerKey> =
+            snapshot.iter().filter(|w| w.is_alive()).map(|w| WorkerKey(w.id.clone())).collect();
+        rendezvous_select(call_id, &alive)
             .and_then(|key| snapshot.iter().find(|w| w.id == key.0))
             .map_or(RankPlacement::NoNode, |w| RankPlacement::Node(w.address.clone()))
     }

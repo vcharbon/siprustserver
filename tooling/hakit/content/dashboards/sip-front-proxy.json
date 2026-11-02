@@ -193,13 +193,12 @@
     },
     {
       "id": 31, "type": "timeseries", "title": "CANCEL lookups, no-target drops / sec",
-      "description": "`sip_proxy_cancel_lookups_total{outcome}`: a CANCEL whose INVITE this proxy placed off its memo-free route, found in the memo (hit), or one routed without the memo (miss: its loose Route, Request-URI, cookie or the call's rendezvous winner; junk CANCELs count here too). `sip_proxy_branch_memo_deviations_total`: INVITEs placed off their memo-free route, the only INVITE entries the memo holds. `sip_proxy_no_target_dropped_total{kind}`: requests dropped unanswered because no alive worker takes them (in_dialog: a cookie-routed request; cancel; initial: an out-of-dialog request, or the ACK of an initial INVITE's non-2xx final).",
+      "description": "`sip_proxy_cancel_lookups_total{outcome}`: a CANCEL that found its INVITE's entry (hit), or one routed without it (miss: its INVITE crossed the other proxy or the entry was evicted; its loose Route, Request-URI, cookie or the call's rendezvous winner; junk CANCELs count here too). `sip_proxy_no_target_dropped_total{kind}`: requests dropped unanswered because no alive worker takes them (in_dialog: a cookie-routed request; cancel; initial: an out-of-dialog request, or the ACK of an initial INVITE's non-2xx final).",
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 46 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
         { "expr": "sum by (outcome) (rate(sip_proxy_cancel_lookups_total{pod=~\"$pod\"}[1m])) > 0", "refId": "A", "legendFormat": "CANCEL lookup {{outcome}}" },
-        { "expr": "sum by (kind) (rate(sip_proxy_no_target_dropped_total{pod=~\"$pod\"}[1m])) > 0", "refId": "B", "legendFormat": "no target, dropped: {{kind}}" },
-        { "expr": "sum(rate(sip_proxy_branch_memo_deviations_total{pod=~\"$pod\"}[1m])) > 0", "refId": "C", "legendFormat": "INVITE placed off its memo-free route" }
+        { "expr": "sum by (kind) (rate(sip_proxy_no_target_dropped_total{pod=~\"$pod\"}[1m])) > 0", "refId": "B", "legendFormat": "no target, dropped: {{kind}}" }
       ],
       "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1 } } },
       "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }

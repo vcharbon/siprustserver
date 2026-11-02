@@ -4,8 +4,9 @@
 proxy's Via on a worker's in-dialog INVITE. Amended (2026-10-16): the fresh-pod guard and the
 drain grace are removed; in-dialog routing reads liveness only (ADR-0050). Amended
 (2026-10-26): X6, the per-worker AIMD bucket is live and a rate-capped winner spills a new
-call to the next rendezvous candidate. Amended (2026-11-02): X7, two active instances route
-every transaction path without the branch memo; X1 and X6 point to it.
+call to the next rendezvous candidate. Amended (2026-11-02): X7, two active instances: the
+full memo shortened at the final, and every transaction path without it; X1 and X6 point to
+it.
 
 **Source:** sipjsserver @ `fffc4ac69c8aeef26cf48fe73469503145c9732b`,
 `src/sip-front-proxy/` (`ProxyCore.ts`, `RoutingStrategy.ts`, `CancelBranchLru.ts`,
@@ -125,56 +126,61 @@ of a refused INVITE draws the same refusal (RFC 3261 §8.2.7), so the spill neve
 a transaction already placed or refused at the instance that placed or refused it. A
 CANCEL or ACK no memo places spends no token either (X7).
 
-## Decision X7 — two active instances: every transaction path routes without the memo
+## Decision X7 — two active instances: the memo, and every path without it
 
 Two proxy instances run active behind one advertised address. An ECMP hop hashes each
 flow on its own, so the requests and responses of one transaction cross different
 instances in steady state (the caller's flow on one, the worker's on the other), and a
-flow moves to the other instance when a next hop is added or removed. No path depends
-on what an instance remembers:
+flow moves to the other instance when a next hop is added or removed.
+
+**Stateless by default, a memo for the exceptions.** A call placed on its rendezvous
+winner routes from either instance with no memo. The spill and the band filter are a
+safety valve: the deployment's sizing sets the AIMD ceilings so neither acts at nominal
+load. A placement off the winner is therefore exceptional — overload, a draining
+winner, a membership change — and the memo covers it at the instance that placed it.
+
+**The memo.** Each instance keeps its full branch memo (`cancel_lru`): an entry for every
+INVITE it forwards, a retransmission entry for every request but a CANCEL, and an ACK
+hop for every non-2xx INVITE final it relays, whether or not the INVITE crossed it. An
+INVITE's entry is shortened to Timer H (the non-2xx ACK window, RFC 3261 §17.2.1) when
+its final passes the instance (`core/response/final_memo`); the INVITE bound
+(`INVITE_ENTRY_TTL_MS`) stays the cap of an entry whose final crossed the other one. So
+a call holds memo for its ring time plus Timer H, and the memo is sized on the
+deployment's call rate and mean ring, where its eviction happens only under abnormal
+load. The instance that placed a call knows where it went, a placement away from the
+call's rendezvous winner included (a spill past an empty bucket, a band-filtered
+winner, a winner refusing new calls, a winner away or not yet back when the call came).
+
+**Without the memo** — the other instance after a flow move, or an entry evicted under
+abnormal load — every request of an admitted transaction still routes, and none meets a
+gate:
 
 - A worker's CANCEL and non-2xx ACK repeat their INVITE's Route and Request-URI
   (§9.1, §17.1.1.3) and go where it went: the loose Route past the proxy's own, else the
   Request-URI.
 - A request carrying the dialog's cookie goes where the cookie places it, the CANCEL of
   a re-INVITE included.
-- A caller's CANCEL goes to the rendezvous winner for its Call-ID among the alive
-  workers (`RoutingStrategy::placement_by_rank`), its non-2xx ACK to the winner among
-  every worker known, alive or not, the UAS that sent the final: no band filter, no AIMD
-  token, no admission gate, never a 503. With no worker to take it, it is dropped and
-  counted (`sip_proxy_no_target_dropped_total`, `kind="cancel"` or `"initial"`).
+- A caller's CANCEL or non-2xx ACK goes to the rendezvous winner for its Call-ID among
+  the alive workers (`RoutingStrategy::placement_by_rank`): no band filter, no AIMD
+  token, no admission gate, never a 503. With no alive worker it is dropped and counted
+  (`sip_proxy_no_target_dropped_total`, `kind="cancel"` or `"initial"`). An ACK reaching
+  the instance that placed the INVITE but did not relay its final follows the INVITE's
+  entry.
 - Responses follow their Via, each instance applying the owner rule (ADR-0055 §8) on
   its own view. The ACK of a final an instance answered itself is recognised by its
   To-tag, derived under the shared key (ADR-0046 §7), at either instance.
 
-**The memo keeps only what no later request recomputes** (`core/request/memo_write`,
-`core/response/final_memo`):
-
-- an INVITE's entry when its placement departs from that route: a spill past an empty
-  bucket, a band-filtered winner, a winner refusing new calls or read not alive (its
-  return would draw the CANCEL back), a cookie's backup while the primary reads not
-  alive. Counted in `sip_proxy_branch_memo_deviations_total`, the rate the INVITE
-  entries are sized on. A worker's INVITE keeps one only when its CANCEL could not
-  rebuild its Via: its sender no longer reads alive, or it states an emergency;
-- an ACK hop when a non-2xx final comes from a node the ACK's route misses (a takeover
-  after the INVITE's worker died, an address translated on its way);
-- a retransmission entry for an initial INVITE or a request placed afresh, so a copy is
-  neither gated nor counted again and repeats the first copy's target and cookies.
-
-An INVITE's entry is shortened to Timer H (the non-2xx ACK window, RFC 3261 §17.2.1)
-when its final passes the instance; the INVITE bound (`INVITE_ENTRY_TTL_MS`) stays the
-cap of an entry whose final crossed the other one. Calls placed on their winner write no
-INVITE entry, so they never push a deviation out; a deviation is evicted only when the
-deviations alone fill the INVITE pool's share, and its CANCEL then takes the route above.
-
 **Accepted residuals.** Each has a cell in `sip-proxy`:
 
-- *A deviation meeting a flow move.* The instance the caller's flow moves to holds no
-  entry of the call: the caller's CANCEL reaches the rendezvous winner, which holds no
-  such INVITE and answers 481 (§9.2), and the call rings on at the worker holding it
-  until its own final. When that final crossed an instance other than the one the
-  ACK reaches, the ACK reaches the winner too, which discards it, and the holder stops
-  retransmitting at Timer H. Cells: `active_active::residual`.
+- *A call placed away from its rank winner, reached without its entry.* A call placed
+  away from its rendezvous winner among the alive workers (a spill, a band filter, a
+  draining winner, a winner rejoining or a worker joining while the call rings) whose
+  CANCEL reaches an instance without its entry (the caller's flow moved, or the entry
+  was evicted) goes to the winner, which holds no such INVITE and answers 481 (§9.2);
+  the call rings on at the worker holding it until its own final. Its non-2xx ACK, when
+  the final crossed an instance other than the one the ACK reaches, reaches the winner
+  too, which discards it, and the holder stops retransmitting at Timer H. Cells:
+  `active_active::off_rank`, `active_active::residual`.
 - *An INVITE copy after a flow move.* A UDP INVITE is retransmitted from T1 until its
   first provisional reaches the caller (about T1 to 2·T1 after it, longer when the 100
   is lost). A copy reaching the instance that never saw the first is a new call there:
@@ -185,16 +191,12 @@ deviations alone fill the INVITE pool's share, and its CANCEL then takes the rou
   second call, and with every bucket empty, or the gate shut, it draws a 503 for a
   call already ringing. A re-INVITE carries a To-tag and its dialog's cookie and meets
   neither. Cells: `active_active::caller_side`, `active_active::residual`.
-- *A worker joining while a call rings.* A call placed on its rank winner keeps no
-  entry; a worker new to the pool that outranks that winner for the call draws its
-  CANCEL, which it answers 481. Cell: `liveness_routing_tests::
-  a_cancel_after_a_new_worker_joined_goes_to_the_new_rank_winner`.
 
 **A CANCEL or ACK matching no call** costs one forward to a worker and that worker's 481
 (an ACK draws nothing), never more: no state is written for it and nothing is
-amplified. It counts in `sip_proxy_cancel_lookups_total{outcome="miss"}`, which every
-CANCEL routed without the memo shares, so junk shows as that rate's excess over the
-calls' own CANCELs.
+amplified. It counts in `sip_proxy_cancel_lookups_total{outcome="miss"}`, which with a
+full memo holds little else: the CANCELs of calls whose INVITE crossed the other
+instance.
 
 **Two health views of one primary.** Each instance reads a worker's health from its own
 probe. While one reads a call's primary dead and the other alive, what crosses the first

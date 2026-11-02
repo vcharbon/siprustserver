@@ -185,9 +185,8 @@ async fn cancel_at_a_second_proxy_instance_carries_the_invites_branch() {
     );
 }
 
-// The same mapping past the INVITE's window, with no entry of the INVITE: a
-// worker's INVITE keeps none, its CANCEL repeating its Request-URI (ADR-0009
-// X7), and a CANCEL is legal for the whole INVITE window and beyond.
+// The same mapping when the INVITE's memo has aged out of the one instance
+// that wrote it: a CANCEL is legal for the whole INVITE window and beyond.
 #[tokio::test(start_paused = true)]
 async fn cancel_after_the_invite_memo_expired_carries_the_same_branch() {
     let f = fabric().await;
@@ -198,8 +197,12 @@ async fn cancel_after_the_invite_memo_expired_carries_the_same_branch() {
     let invite_via = f.pushed_via().await;
 
     let key = invite_txn_key(inv.top_via(), "expired-memo@test", Some("tag-a"), 4);
-    assert!(core.cancel_lru.lookup(&key).is_none(), "a worker's INVITE keeps no entry");
+    assert!(core.cancel_lru.lookup(&key).is_some(), "the INVITE entry is written under this key");
     tokio::time::advance(Duration::from_millis(INVITE_ENTRY_TTL_MS + 1_000)).await;
+    assert!(
+        core.cancel_lru.lookup(&key).is_none(),
+        "the INVITE entry must be gone, or this proves nothing"
+    );
 
     let out = core
         .route_request_from(&cancel("expired-memo@test", "tag-a", 4, "z9hG4bKup2"), worker_src())

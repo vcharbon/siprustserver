@@ -3,9 +3,10 @@
 //! response's transaction, along the next Via
 //! (received/rport precedence) or at the address it holds now, else to the
 //! call's other owner, else nowhere; pop the top Via entry (comma-aware);
-//! forward; on an INVITE final, keep in the memo what its ACK needs and no
-//! route recomputes (`final_memo`, ADR-0009 X7; the ACK itself travels
-//! end-to-end — see `core/request`).
+//! forward; on an INVITE final, shorten the INVITE's memo entry to Timer H
+//! and, for a non-2xx one, remember the ACK-relay hop — the node the final
+//! arrived from (`final_memo`; the ACK itself travels end-to-end — see
+//! `core/request`).
 //!
 //! A 100 is relayed like any other response: §16.7's absorption of a 100 is a
 //! stateful proxy's, and this proxy is stateless (§16.11), so it neither
@@ -152,9 +153,8 @@ impl ProxyCore {
             }
         }
 
-        // ── A relayed INVITE final: what its ACK needs of the memo ─────────
-        let relayed = SipMessage::Response(resp);
-        self.remember_final(&relayed, next, ours, &sent_by, src);
+        // ── A relayed INVITE final: shorten its entry, keep its ACK hop ─────
+        self.remember_final(&resp, next, ours, src);
     }
 
     /// A test's `handle_response` on a single-face proxy, where every response

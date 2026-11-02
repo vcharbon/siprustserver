@@ -21,11 +21,10 @@
 //! The ACK to a final the proxy generated itself is recognised by its To-tag
 //! and writes nothing here (`crate::refusals`).
 //!
-//! The memo holds only what no later request can recompute (ADR-0009 X7,
-//! `core/request/memo_write`): an INVITE's entry for a placement off its
-//! memo-free route, an ACK hop for a final from a node that route misses, a
-//! retransmission entry for a request counted as a call or placed afresh.
-//! Each instance of an active pair holds only what crossed it.
+//! Each instance of an active pair holds only what crossed it, so every
+//! request these entries route also routes without them (ADR-0009 X7): an
+//! entry is a placement only this instance knows (a spill), a target the
+//! cookie would re-derive, or a hop the Request-URI names.
 //!
 //! Keys are written by whoever sends the proxy a request, so the memo is
 //! bounded in entries and accounted bytes ([`MemoBounds`]). Each [`Lifetime`]
@@ -168,10 +167,11 @@ fn txn_key(
 /// Namespaced key for the non-2xx ACK hop memo of the INVITE transaction
 /// `via` opened upstream, consulted on the request path when the upstream's
 /// §17.1.1.3 ACK (the INVITE's own top Via) arrives. Written on the response
-/// path, on relaying a non-2xx INVITE final from a node the ACK's memo-free
-/// route misses: it carries that node, so the ACK is relayed to the
-/// transaction that sent the final. `ackhop|` keeps it disjoint from the
-/// `inv|` INVITE keys and the `rtx|` memos sharing this store.
+/// path for every non-2xx INVITE final this proxy relays, whether or not the
+/// INVITE crossed it: it carries the node the final came from, so the ACK is
+/// RELAYED to the transaction that sent the final (it matches the ACK and
+/// stops retransmitting). `ackhop|` keeps it disjoint from the `inv|` INVITE
+/// keys and the `rtx|` memos sharing this store.
 pub fn ack_hop_key(via: &Via, call_id: &str, from_tag: Option<&str>, cseq_num: u32) -> String {
     txn_key(&["ackhop"], via, call_id, from_tag, cseq_num)
 }
@@ -216,7 +216,6 @@ pub struct CancelBranchLru {
     len: AtomicUsize,
     bytes: AtomicUsize,
     evicted: AtomicU64,
-    deviations: AtomicU64,
     /// Latched by the first [`ensure_sweeper`](Self::ensure_sweeper) caller so
     /// N recv-shard cores sharing one LRU spawn exactly one sweeper.
     sweeper_claimed: AtomicBool,
@@ -253,7 +252,6 @@ impl CancelBranchLru {
             len: AtomicUsize::new(0),
             bytes: AtomicUsize::new(0),
             evicted: AtomicU64::new(0),
-            deviations: AtomicU64::new(0),
             sweeper_claimed: AtomicBool::new(false),
         }
     }
@@ -369,25 +367,6 @@ impl CancelBranchLru {
         self.evicted.load(Ordering::Relaxed)
     }
 
-    /// Forget the entry under `key`, if held.
-    pub fn forget(&self, key: &str) {
-        let mut change = Change::default();
-        let mut stripe = self.stripe(key);
-        stripe.forget(key, &mut change);
-        self.account(&change);
-    }
-
-    /// Count one INVITE placed off its memo-free route, whose entry the memo
-    /// holds (ADR-0009 X7).
-    pub fn count_deviation(&self) {
-        self.deviations.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// The INVITEs placed off their memo-free route.
-    pub fn deviations(&self) -> u64 {
-        self.deviations.load(Ordering::Relaxed)
-    }
-
     /// Drop every expired entry, stripe by stripe. The owner task calls this
     /// periodically.
     pub fn sweep_expired(&self) -> Swept {
@@ -417,7 +396,6 @@ impl CancelBranchLru {
         let bytes = u64::try_from(self.bytes()).unwrap_or(u64::MAX);
         catalogue::BRANCH_MEMO_BYTES.render_value(&mut text, bytes);
         catalogue::BRANCH_MEMO_EVICTIONS.render_value(&mut text, self.evicted());
-        catalogue::BRANCH_MEMO_DEVIATIONS.render_value(&mut text, self.deviations());
         text
     }
 }

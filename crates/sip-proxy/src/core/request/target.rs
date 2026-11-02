@@ -12,7 +12,7 @@ use sip_message::{SipMessage, SipRequest};
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::{invite_txn_key, CancelEntry};
 use crate::observability::metrics::{CancelLookup, Face, NoTargetDrop, RoutingDecisionKind};
-use crate::strategy::{DecodeResult, RankPlacement, Ranked, RouteParams, SelectOpts};
+use crate::strategy::{DecodeResult, RankPlacement, RouteParams, SelectOpts};
 
 use super::super::ProxyCore;
 use super::classify::Classified;
@@ -63,19 +63,22 @@ impl ProxyCore {
 
     /// Where a CANCEL goes. RFC 3261 §9.1 puts it where its INVITE went and
     /// §16.11 on the INVITE's branch, which the survivor's rebuilt INVITE
-    /// transaction is keyed by. The CANCEL repeats its INVITE's Request-URI,
-    /// top Via and Route, so the route the INVITE took without the memo is
-    /// the CANCEL's too: its loose Route, a worker's Request-URI, its cookie,
-    /// else the rendezvous winner among the alive workers (ADR-0009 X7). The
-    /// memo holds an entry only for an INVITE placed elsewhere, keyed by the
-    /// INVITE's top Via, so a spiral's two passes keep their own; the CANCEL
-    /// goes where that INVITE went while that node is not a worker the proxy
-    /// reads not alive, else where the INVITE's cookie places the call (the
-    /// alive primary, else the backup holding its replica, ADR-0014), else
-    /// nowhere — dropped and counted (ADR-0050 §5). The CANCEL of an INVITE
-    /// this hop refused is answered 200 here (`Err`, §9.2). No CANCEL meets
-    /// an admission gate or draws a 503: with no worker to take it, it is
-    /// dropped and counted.
+    /// transaction is keyed by. The CANCEL's Via is its INVITE's top Via, so
+    /// it finds the entry of its own INVITE transaction, never another pass of
+    /// a spiral sharing its Call-ID, From tag and CSeq. It goes where the
+    /// INVITE went while that node is not a worker the proxy reads not alive:
+    /// the INVITE's client transaction lives there and only there (§16.10).
+    /// Toward a worker no longer alive it follows the INVITE's stickiness
+    /// cookie, the workers being ONE logical UAS: the alive primary, else the
+    /// backup holding the call's replica (ADR-0014), else nowhere — dropped
+    /// and counted (ADR-0050 §5). With no entry (the INVITE crossed another
+    /// instance, or the entry was forgotten), the CANCEL of an INVITE this
+    /// hop refused is answered 200 here (`Err`, §9.2); any other repeats its
+    /// INVITE's Request-URI and Route, so it takes the route the INVITE took
+    /// without the memo: its loose Route, a worker's Request-URI, its cookie,
+    /// else the rendezvous winner among the alive workers (ADR-0009 X7). No
+    /// CANCEL meets an admission gate or draws a 503: with no worker to take
+    /// it, it is dropped and counted.
     pub(super) async fn cancel_target(
         &self,
         msg: &SipMessage,
@@ -102,7 +105,7 @@ impl ProxyCore {
                 return self.request_uri_target(req, src).await;
             }
             let cookie = c.cookie.as_ref();
-            return self.admitted_target(msg, cookie, Ranked::Alive, NoTargetDrop::Cancel).await;
+            return self.admitted_target(msg, cookie, NoTargetDrop::Cancel).await;
         };
         self.metrics.record_cancel_lookup(CancelLookup::Hit);
         match self.follow_live_hop(found.target, found.stickiness.as_ref(), msg).await {
@@ -113,8 +116,7 @@ impl ProxyCore {
 
     /// Where the INVITE went whose non-2xx final the ACK `req` acknowledges,
     /// read off that INVITE's entry, which the ACK's top Via keys (§17.1.1.3:
-    /// the ACK repeats the INVITE's, branch included): an entry the memo holds
-    /// only for an INVITE placed off its memo-free route. Toward a worker no
+    /// the ACK repeats the INVITE's, branch included). Toward a worker no
     /// longer alive, where the INVITE's cookie places the call. `None`: no
     /// entry, or no branch to tell the ACK's transaction by.
     pub(super) async fn invite_hop(
@@ -144,10 +146,9 @@ impl ProxyCore {
         &self,
         msg: &SipMessage,
         cookie: Option<&RouteParams>,
-        among: Ranked,
         drop: NoTargetDrop,
     ) -> Result<ProxyAddr, RouteOutcome> {
-        match self.admitted_hop(msg, cookie, among).await {
+        match self.admitted_hop(msg, cookie).await {
             Some(target) => Ok(target),
             None => Err(self.drop_without_target(drop)),
         }
@@ -155,13 +156,12 @@ impl ProxyCore {
 
     /// The memo-free hop of a request of an admitted call: where `cookie`
     /// places its dialog, else where the strategy places the call by rank
-    /// among the `among` nodes, with no filter, spill or token. A strategy
+    /// among the alive workers, with no filter, spill or token. A strategy
     /// that places by no rank selects afresh. `None`: no worker takes it.
-    pub(super) async fn admitted_hop(
+    async fn admitted_hop(
         &self,
         msg: &SipMessage,
         cookie: Option<&RouteParams>,
-        among: Ranked,
     ) -> Option<ProxyAddr> {
         if let Some(cookie) = cookie {
             match self.strategy.decode_stickiness(cookie, msg).await {
@@ -171,7 +171,7 @@ impl ProxyCore {
                 DecodeResult::Reject { .. } | DecodeResult::Unknown { .. } => {}
             }
         }
-        match self.strategy.placement_by_rank(msg, among) {
+        match self.strategy.placement_by_rank(msg) {
             RankPlacement::Node(target) => Some(target),
             RankPlacement::NoNode => None,
             RankPlacement::Unranked => {
