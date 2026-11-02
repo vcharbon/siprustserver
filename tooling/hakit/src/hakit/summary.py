@@ -133,7 +133,8 @@ def _unanswered(v: Json) -> list[str]:
     streams = jv.objs(jv.obj(v, "unanswered"), "streams")
     out = [
         "Every call that did not end answered, in exactly one cause. A dependency fault is a 503 without "
-        "Retry-After whose setup overlaps a window; where is the incident kind of that window, or `outside`.",
+        "Retry-After whose setup overlaps a window whose budget allows one; where is the incident kind of that "
+        "window, or `outside`.",
         "",
         *_tally_table("stream", [(str(s["stream"]), s) for s in streams]),
         "",
@@ -146,13 +147,18 @@ def priority_verdict(group: Json | None) -> str:
     if group is None or not jv.strings(group, "streams"):
         return "No `run` stream places priority calls."
     said = {"overload": "refused for overload", "setup_timeout": "timed out", "cut": "cut or never released"}
-    if not any(_cause_count(group, c) for c in said):
-        return "No priority call was refused for overload, timed out or cut."
+    other = [c for c in jv.objs(group, "causes") if c["cause"] == "other"]
+    n_other = sum(int(jv.number(c, "count")) for c in other)
+    if not any(_cause_count(group, c) for c in said) and not n_other:
+        return "No priority call was refused for overload, timed out, cut or ended otherwise."
     parts: list[str] = []
     for cause, what in said.items():
         rows = [c for c in jv.objs(group, "causes") if c["cause"] == cause]
         n = sum(int(jv.number(c, "count")) for c in rows)
         parts.append(f"{n} {what} ({'; '.join(_places(c) for c in rows)})" if n else f"none {what}")
+    if n_other:
+        details = "; ".join(f"{c['detail']}: {_places(c)}" for c in other)
+        parts[-1] += f", and {n_other} ended otherwise ({details})"
     return f"Priority calls: {', '.join(parts)}."
 
 

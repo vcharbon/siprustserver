@@ -289,7 +289,7 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
             out["recovery"] = [{"stream": r.stream, "recovery_s": r.recovery_s(healed)} for r in recs]
         windows_out.append(out)
     by_cause = unanswered(
-        ((r, run.shapes[jv.string(r, "shape")]) for r, _ in calls.valid), windows, profile, run.shapes
+        ((r, run.shapes[jv.string(r, "shape")]) for r, _ in calls.valid), windows, budgets, profile, run.shapes
     )
     status = "invalid" if found else ("fail" if findings else "pass")
     return {

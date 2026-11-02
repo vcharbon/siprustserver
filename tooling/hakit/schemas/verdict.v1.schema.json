@@ -6,7 +6,7 @@
   "description": "The `verdict.json` of a run directory: every window with its impact against its budget, the in-dialog impact with the windows it may belong to, the impact outside every window, and the integrity of the measurement. `hakit verdict <run-dir>` recomputes it from the run directory alone. ADR-0049.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "run", "profile", "started_at_ms", "ended_at_ms", "status", "streams", "windows", "in_dialog", "unattributed", "integrity"],
+  "required": ["schema", "run", "profile", "started_at_ms", "ended_at_ms", "status", "streams", "windows", "in_dialog", "unattributed", "unanswered", "integrity"],
   "properties": {
     "schema": { "const": "verdict.v1" },
     "run": { "type": "string" },
@@ -265,7 +265,7 @@
         "calls": { "type": "integer" },
         "answered": { "description": "Calls that ended answered, their shape expecting it.", "type": "integer" },
         "causes": {
-          "description": "One entry per cause and detail (ending and final code). `expected`: an ending of the shape other than answered; `overload`: a 503 with Retry-After; `dependency_fault`: a 503 without Retry-After whose setup overlaps a window; `setup_timeout`; `cut`: cut, stranded, or failed after its answer; `other`: any other ending or code. Each call is in exactly one.",
+          "description": "One entry per cause and detail (ending and final code). `expected`: an ending of the shape other than answered; `overload`: a 503 with Retry-After; `dependency_fault`: a 503 without Retry-After whose setup overlaps a window whose budget allows a 503 without Retry-After; `setup_timeout`; `cut`: cut, stranded, or failed after its answer; `other`: any other ending or code, a call the generator failed (`generator`) and a 503 without Retry-After in a window that does not allow one among them. Each call is in exactly one.",
           "type": "array",
           "items": {
             "type": "object",
