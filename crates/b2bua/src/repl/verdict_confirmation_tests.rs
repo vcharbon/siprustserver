@@ -13,6 +13,7 @@
 //!   verdict at the instant the backoff ends      → not confirmed, either order
 //!   (a stream that ends with no frame confirms it: `failover-harness`'s cells)
 //!   multi-thread runtime, real clock             → not confirmed, no backoff waited
+//!   a refused asked connect                      → the backoff schedule unchanged
 //! ```
 
 use std::net::SocketAddr;
@@ -336,4 +337,25 @@ async fn an_open_stream_cut_after_the_verdict_and_reconnected_refutes_it() {
 #[tokio::test(start_paused = true)]
 async fn an_open_stream_cut_after_the_verdict_and_refused_confirms_it() {
     assert!(cut_after_the_verdict(false).await);
+}
+
+/// The connect a verdict asks for leaves the backoff where it stood: once it
+/// is refused, the Backup flow's puller connects again on its own schedule,
+/// at the same instant as the Reclaim flow's, which nothing asked.
+#[tokio::test(start_paused = true)]
+async fn a_refused_connect_asked_for_leaves_the_backoff_schedule_as_it_stood() {
+    let (sup, script) = backing_up(fast_config()).await;
+    tick(1_000).await;
+    script.answer(Answer::Refuse);
+    let cut = Instant::now();
+    script.hang_up();
+    settle().await;
+    let confirmed = verdict(&sup);
+    settle().await;
+    assert!(confirmed.await.unwrap(), "refused: confirmed");
+    tokio::time::sleep_until(cut + Duration::from_millis(150)).await;
+    let connects = script.connects.lock().unwrap().clone();
+    let at = |t: Instant| connects.iter().filter(|c| **c == t).count();
+    assert_eq!(at(cut), 1, "the asked connect, at the verdict");
+    assert_eq!(at(cut + Duration::from_millis(100)), 2, "both flows at their first backoff step");
 }

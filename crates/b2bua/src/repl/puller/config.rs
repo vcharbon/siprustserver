@@ -59,6 +59,13 @@ impl Default for PullerConfig {
 }
 
 impl PullerConfig {
+    /// `min(init · 2^(attempt-1), max)` — attempt 1 = init, growing per failure.
+    pub(super) fn backoff_ms(&self, attempt: u32) -> u64 {
+        let shift = attempt.saturating_sub(1).min(31);
+        let scaled = self.backoff_init_ms.saturating_mul(1u64 << shift);
+        scaled.min(self.backoff_max_ms)
+    }
+
     /// Test-tier config: short backoff + a 2 s bootstrap hard timeout, so a few
     /// paused-clock advances trip the relevant deadline deterministically, and
     /// the default link bounds. ONE definition — these values are

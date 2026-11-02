@@ -65,7 +65,8 @@
 //!   stream that stayed connected for `idle_timeout_ms` resets `attempt`: the
 //!   next wait is the floor.
 //! - a connect asked for at once ([`ConnectNow`]) ends the backoff and starts a
-//!   connect in flight afresh; that connect's outcome answers it (ADR-0047 D1).
+//!   connect in flight afresh; that connect's outcome answers it, and its
+//!   failure does not advance `attempt` (ADR-0047 D1).
 //!
 //! ## Link liveness (ADR-0045)
 //! The server sends a `Noop` at least every few seconds, so a stream that
@@ -268,13 +269,16 @@ impl Puller {
                     if outcome == (RunOutcome::Disconnected { lasted: true }) {
                         attempt = 0;
                     }
-                    attempt = attempt.saturating_add(1);
-                    // A connect asked for at once skips the backoff.
+                    // A connect made for a request leaves the backoff where it
+                    // stood; a request pending skips the backoff.
+                    if !asks.take_failed() {
+                        attempt = attempt.saturating_add(1);
+                    }
                     if asks.pending() {
                         self.note_state("backoff", "a connect is asked for at once");
                         continue;
                     }
-                    let ms = self.backoff_ms(attempt);
+                    let ms = self.config.backoff_ms(attempt);
                     self.note_state("backoff", &format!("attempt {attempt}, retry in {ms}ms"));
                     // The hard timer must keep ticking through backoff so an
                     // unreachable peer still becomes bootstrap-complete on time;
@@ -355,13 +359,6 @@ impl Puller {
                 false
             }
         }
-    }
-
-    /// `min(init · 2^(attempt-1), max)` — attempt 1 = init, growing per failure.
-    fn backoff_ms(&self, attempt: u32) -> u64 {
-        let shift = attempt.saturating_sub(1).min(31);
-        let scaled = self.config.backoff_init_ms.saturating_mul(1u64 << shift);
-        scaled.min(self.config.backoff_max_ms)
     }
 
     /// One connect-and-stream cycle: connect (racing the hard deadline), send the

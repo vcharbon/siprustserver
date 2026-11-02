@@ -38,6 +38,8 @@ impl ConnectNow {
 pub(super) struct Asks {
     rx: Option<AskRx>,
     waiting: Vec<oneshot::Sender<Attempt>>,
+    /// The last connect failed with a request waiting on it.
+    failed: bool,
 }
 
 impl Asks {
@@ -49,7 +51,7 @@ impl Asks {
     }
 
     pub(super) fn new(rx: Option<AskRx>) -> Self {
-        Self { rx, waiting: Vec::new() }
+        Self { rx, waiting: Vec::new(), failed: false }
     }
 
     /// Resolves once a request still asked for arrives, held for the next
@@ -88,9 +90,15 @@ impl Asks {
         !self.waiting.is_empty()
     }
 
+    /// Whether the connect that just ended failed for a request, clearing it.
+    pub(super) fn take_failed(&mut self) -> bool {
+        std::mem::take(&mut self.failed)
+    }
+
     /// Answer every request held with how the connect went.
     pub(super) fn answer(&mut self, attempt: Attempt) {
-        for reply in self.waiting.drain(..) {
+        self.failed = attempt == Attempt::Failed && !self.waiting.is_empty();
+        for reply in std::mem::take(&mut self.waiting) {
             let _ = reply.send(attempt);
         }
     }
