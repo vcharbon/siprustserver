@@ -3,7 +3,9 @@
  * where asked by id), with a control that runs the campaign: per-lane tiles
  * of the run read against the one compared, then the failures as facets (the landing tab) or the run grid;
  * a case's history opens as a drawer from either, and a run's delta of it as a
- * modal. With no campaign named, the campaigns the store holds.
+ * modal. A campaign with no run in the environment read opens on the start
+ * of its first run (`CampaignNoRun`). With no campaign named, the campaigns
+ * the server lists.
  */
 import type { JSX } from "react"
 import { useEffect, useMemo, useState } from "react"
@@ -12,12 +14,14 @@ import { type FacetKind, facets as facetsOf, lanesRead, SELECTED } from "../camp
 import { grid as gridOf } from "../campaign-history.ts"
 import { type CampaignState, paramsOf, readState, runOf, summaryOf, vsOf } from "../campaign-state.ts"
 import { CampaignFailures } from "../components/CampaignFailures.tsx"
+import { CampaignEnvPick } from "../components/CampaignEnvPick.tsx"
 import { CampaignStart } from "../components/CampaignLaunch.tsx"
 import { CampaignGrid } from "../components/CampaignGrid.tsx"
+import { CampaignNoRun } from "../components/CampaignNoRun.tsx"
 import { CaseHistory } from "../components/CaseHistory.tsx"
 import { CheckDelta } from "../components/CheckDelta.tsx"
 import { Link } from "../components/Link.tsx"
-import { href, navigate, setQuery, useQuery } from "../router.ts"
+import { href, setQuery, useQuery } from "../router.ts"
 
 const count = (run: CampaignRun | undefined, lane: string, outcome: string): number =>
   run?.lanes.find((l) => l.lane === lane)?.results.filter((r) => r.outcome === outcome).length ?? 0
@@ -151,17 +155,7 @@ const Summary = ({ view: whole }: { readonly view: Campaign }): JSX.Element => {
           <p className="muted mono">{view.capture}{view.env === null ? "" : ` · ${view.env}`}</p>
         </div>
         <div className="cp-controls">
-          {view.envs.length > 1 && (
-            <label>
-              env{" "}
-              <select
-                value={view.env ?? ""}
-                onChange={(event) => navigate(href.campaign(view.capture, { env: event.target.value }))}
-              >
-                {view.envs.map((env) => <option key={env} value={env}>{env}</option>)}
-              </select>
-            </label>
-          )}
+          <CampaignEnvPick view={view} />
           <label>
             run{" "}
             <select value={runId ?? ""} onChange={(event) => update({ run: Number(event.target.value) })}>
@@ -260,5 +254,9 @@ export const CampaignPage = ({ capture }: { readonly capture?: string | undefine
   if (capture === undefined) return <Campaigns />
   if (loaded.state === "loading") return <div className="page campaign"><p className="muted">…</p></div>
   if (loaded.state === "error") return <div className="page campaign"><p className="cp-nok">{loaded.message}</p></div>
-  return loaded.value === undefined ? <Campaigns /> : <Summary view={loaded.value} />
+  return loaded.value === undefined
+    ? <Campaigns />
+    : loaded.value.runs.length === 0
+    ? <CampaignNoRun view={loaded.value} />
+    : <Summary view={loaded.value} />
 }

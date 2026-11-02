@@ -62,8 +62,12 @@ const RefusedLanes = ({ lanes }: { readonly lanes: readonly LaunchLane[] }): JSX
   )
 }
 
-/** The whole campaign on the lanes picked. */
-export const CampaignStart = ({ capture, lanes }: { readonly capture: string; readonly lanes: readonly LaunchLane[] }): JSX.Element => {
+/** The whole campaign on the lanes picked; `open` shows the lanes and the run control unfolded. */
+export const CampaignStart = ({ capture, lanes, open = false }: {
+  readonly capture: string
+  readonly lanes: readonly LaunchLane[]
+  readonly open?: boolean
+}): JSX.Element => {
   const [picked, setPicked] = useState<readonly string[]>(() => defaultPick(lanes))
   const [rebuild, setRebuild] = useState(false)
   const { busy, outcome, start } = useStart(capture)
@@ -71,7 +75,7 @@ export const CampaignStart = ({ capture, lanes }: { readonly capture: string; re
     setPicked((now) => (now.includes(lane) ? now.filter((l) => l !== lane) : [...now, lane]))
   const refusal = pickRefusal(picked, lanes)
   return (
-    <details className="cp-launch">
+    <details className="cp-launch" open={open}>
       <summary>start</summary>
       <div className="cp-launch-body">
         {lanes.map((l) => (
