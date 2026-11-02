@@ -378,3 +378,49 @@ fn a_met_ladder_past_its_bound_leaves_the_timers() {
     resume_met_ladders(&mut call, &mut fresh, 60_000, &B2buaConfig::default());
     assert!(fresh.is_empty(), "{fresh:?}");
 }
+
+/// A call whose caller's dialog holds one keepalive probe per `(sender,
+/// deadline_ms)`, at consecutive CSeqs.
+fn with_probes(probes: &[(&str, i64)]) -> Call {
+    use call::{DialogState, DialogUsage, HostPort, RequestRecord, SentRequest};
+    let mut call = call_holding(Vec::new());
+    let mut d =
+        call::Dialog::new("atag", call.a_leg_invite.from_tag.clone(), DialogState::Confirmed, 1);
+    for (cseq, (sender, deadline_ms)) in (2..).zip(probes) {
+        let sent = SentRequest {
+            branch: format!("z9hG4bK-probe-{cseq}"),
+            image: Vec::new(),
+            destination: HostPort { host: "192.0.2.10".into(), port: 5060 },
+        };
+        d.requests.push(RequestRecord {
+            author: Some(call::KEEPALIVE_AUTHOR.into()),
+            relayed_by: call::RelayOwner::new(*sender, *sender),
+            ..RequestRecord::own("OPTIONS", cseq, sent, *deadline_ms, DialogUsage::Session)
+        });
+    }
+    call.a_leg.dialogs.insert(d);
+    call
+}
+
+fn senders(call: &Call) -> Vec<String> {
+    call::helpers::every_record(call).map(|(_, _, r)| r.relayed_by.ordinal.clone()).collect()
+}
+
+/// A takeover keeps every probe inside its Timer F, the dead primary's
+/// included, to send it again; one past its Timer F is forgotten.
+#[test]
+fn a_takeover_keeps_the_probes_inside_their_timer_f() {
+    let mut call = with_probes(&[("w0", 50_000), ("w1", 50_000), ("w0", 30_000)]);
+    assert!(forget_keepalive_probes(&mut call, 40_000, "w1", false));
+    assert_eq!(senders(&call), ["w0", "w1"]);
+}
+
+/// A reclaim or a parked call's arming keeps only its own probes inside their
+/// Timer F: the live backup's answer reaches the backup.
+#[test]
+fn a_reclaim_forgets_the_live_backups_probe() {
+    let mut call = with_probes(&[("w0", 50_000), ("w1", 50_000)]);
+    assert!(forget_keepalive_probes(&mut call, 40_000, "w0", true));
+    assert_eq!(senders(&call), ["w0"]);
+    assert!(!forget_keepalive_probes(&mut call, 40_000, "w0", true), "nothing more to forget");
+}

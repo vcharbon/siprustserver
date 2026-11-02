@@ -126,11 +126,6 @@ fn record_seeds(
             .map(|response| TxnSeed::ServerAccepted { response, leg_id: Some(leg.leg_id.clone()) });
         return accepted.into_iter().collect();
     }
-    // A keepalive probe is never restored: its answer goes to the node that
-    // sent it, and the copy probes again on its own interval.
-    if record.is_keepalive() {
-        return Vec::new();
-    }
     if record.is_invite() {
         let mut seeds: Vec<TxnSeed> = sent_invite_seed(leg, dialog, record).into_iter().collect();
         if call::helpers::relayed_invite_pending(dialog) {

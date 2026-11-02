@@ -27,9 +27,8 @@
 //!    re-serving a dead dialog, `Terminating` forced terminal (ADR-0020 X3);
 //! 4. `reanchor` — every instant of the copy moved into this node's clock
 //!    frame by the persisted skew offset (ADR-0055 §9), right after the read;
-//!    then `forget_keepalive_probes` drops the record's keepalive probes (and
-//!    again at a parked call's arming; no seed restores one either),
-//!    `sanitize_restored_timers` bounds the keepalive, and
+//!    then `forget_keepalive_probes` (again at a parked call's arming) and
+//!    `sanitize_restored_timers` bound the keepalive, and
 //!    `ring_deadline::arm_unrung_after_restore` arms the ring deadline of an
 //!    unanswered leg with no ring on record from its INVITE;
 //! 5. the residency insert through the store; a parking reclaim stops here,
@@ -205,7 +204,9 @@ pub(super) async fn materialise_after(
         return Materialised::Refused(Reason::Unrecoverable);
     }
     let Enveloped { mut call, topology } = copy;
-    forget_keepalive_probes(&mut call);
+    // A takeover's other owner is the dead primary; a reclaim's, the live backup.
+    let other_alive = !matches!(origin, Origin::Takeover);
+    let _ = forget_keepalive_probes(&mut call, now_ms, &ctx.relay_owner.ordinal, other_alive);
     sanitize_restored_timers(
         &mut call.timers,
         call_ref,
@@ -299,10 +300,10 @@ async fn serve(
     seeded
 }
 
-/// Arm the parked call `call_ref` (ADR-0055 §8): the keepalive probes a
-/// meeting brought while it was parked forgotten, its keepalives smoothed over
-/// the bulk cohort when `smoothing` names one, then served as a fresh reclaim
-/// is ([`serve`]). The caller holds the per-call lock. `None` when the call is
+/// Arm the parked call `call_ref` (ADR-0055 §8): the keepalive probes it
+/// cannot carry on forgotten (a meeting may have brought the live backup's),
+/// its keepalives smoothed over the bulk cohort when `smoothing` names one,
+/// then served as a fresh reclaim is ([`serve`]). The caller holds the per-call lock. `None` when the call is
 /// not parked: it is armed already, or gone.
 pub(super) async fn arm(
     ctx: &Arc<RouterCtx>,
@@ -314,8 +315,7 @@ pub(super) async fn arm(
     }
     let mut call = ctx.state.peek(call_ref)?;
     let now_ms = ctx.clock.now_ms();
-    if call::helpers::every_record(&call).any(|(_, _, r)| r.is_keepalive()) {
-        forget_keepalive_probes(&mut call);
+    if forget_keepalive_probes(&mut call, now_ms, &ctx.relay_owner.ordinal, true) {
         ctx.state.update_quiet(call.clone());
     }
     if smoothing.is_some() {

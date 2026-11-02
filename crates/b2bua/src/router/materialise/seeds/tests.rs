@@ -638,10 +638,13 @@ fn a_sent_record_seeds_what_is_left_of_its_timer_f_and_none_past_it() {
     );
 }
 
-/// A keepalive probe on record is never restored, whichever node sent it:
-/// it seeds no transaction inside its Timer F and owes no timeout past it.
+/// A keepalive probe on record is its client transaction, re-sent inside its
+/// Timer F under its own CSeq and branch (RFC 3261 §17.1.2.2), so the dialog's
+/// sequence stays contiguous whether or not it left (§12.2.1.1); past its
+/// Timer F it is neither re-sent nor settled as a timeout: its answer went to
+/// the node that sent it.
 #[test]
-fn a_keepalive_probe_seeds_nothing_and_owes_no_timeout() {
+fn a_keepalive_probe_is_re_sent_inside_its_timer_f_and_owes_no_timeout_past_it() {
     let mut leg = b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1)));
     let sent = call::SentRequest {
         branch: "z9hG4bK-probe".into(),
@@ -654,13 +657,18 @@ fn a_keepalive_probe_seeds_nothing_and_owes_no_timeout() {
     });
     let call = call_with(LegState::Confirmed, leg);
 
-    for now in [10_000, 30_000] {
-        assert!(
-            !seeds_for(&call, now).iter().any(|s| matches!(s, TxnSeed::ClientNonInvite { .. })),
-            "no probe is re-sent at {now}"
-        );
-        assert!(overdue_sent(&call, now).is_empty(), "no probe times out at {now}");
-    }
+    let bound = seeds_for(&call, 10_000).into_iter().find_map(|s| match s {
+        TxnSeed::ClientNonInvite { bound_ms, .. } => Some(bound_ms),
+        _ => None,
+    });
+    assert_eq!(bound, Some(20_000), "the probe is re-sent for what is left of its Timer F");
+    assert!(overdue_sent(&call, 10_000).is_empty());
+
+    assert!(
+        !seeds_for(&call, 30_000).iter().any(|s| matches!(s, TxnSeed::ClientNonInvite { .. })),
+        "nothing is re-sent past the deadline"
+    );
+    assert!(overdue_sent(&call, 30_000).is_empty(), "no probe times out past it");
 }
 
 /// The caller's INFO relayed onto the b-leg's confirmed dialog under

@@ -14,13 +14,26 @@ use call::helpers::instants::reanchor_offset;
 use call::helpers::{advance_ladder, cap_keepalive_fire_at, cease_shown_ladder, shift_instants};
 use call::{Call, Ceased, Obligation, TimerEntry, TimerType};
 
-/// Forget the keepalive probes `call`, a copy restored on this node (takeover,
-/// reclaim, bulk reboot reclaim), holds records of: their answers went to the
-/// node that sent them, so a probe kept here would be settled as a timeout and
-/// end a call whose parties may be up. The copy's `Keepalive` probes again on
-/// its interval, each probe under its own Timer F.
-pub(super) fn forget_keepalive_probes(call: &mut Call) {
-    call::helpers::drop_keepalive_records(call);
+/// Forget the keepalive probes of `call`, a copy restored on this node at
+/// `now_ms`, that it cannot carry on. A probe inside its Timer F is its client
+/// transaction, re-sent under its CSeq and branch so the dialog's sequence
+/// stays contiguous whether or not it left (RFC 3261 §12.2.1.1, §17.1.2.2),
+/// its answer steered to this node with the dead sender's; it is kept unless
+/// `this` is not its sender and `sender_alive` (a reclaim's or a parked call's
+/// copy carrying the live backup's probe, whose answer reaches the backup).
+/// A probe past its Timer F is forgotten either way: its answer went to the
+/// node that sent it, and the copy probes again on its interval. Whether any
+/// was forgotten.
+pub(super) fn forget_keepalive_probes(
+    call: &mut Call,
+    now_ms: i64,
+    this: &str,
+    sender_alive: bool,
+) -> bool {
+    call::helpers::drop_keepalive_records(call, |r| {
+        let spent = r.deadline_ms.is_some_and(|at| at <= now_ms);
+        spent || (sender_alive && r.relayed_by.ordinal != this)
+    })
 }
 
 /// Deterministic per-`callRef` hash (FNV-1a, 64-bit) used to de-correlate a
