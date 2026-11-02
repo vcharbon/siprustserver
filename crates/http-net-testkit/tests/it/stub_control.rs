@@ -26,7 +26,7 @@ async fn serve(stub: &Stub) -> (SimulatedHttpNetwork, Vec<Box<dyn HttpServerHand
 }
 
 fn default() -> StubAnswer {
-    StubAnswer::respond(200, br#"{"valid":false}"#.to_vec())
+    StubAnswer::respond(200, br#"{"ok":false}"#.to_vec())
 }
 
 fn set_body(tag: &str, path: &str, body: &str) -> Vec<u8> {
@@ -67,7 +67,7 @@ async fn a_registered_set_answers_on_the_listeners_until_it_is_cleared() {
     let (net, _h) = serve(&stub).await;
 
     let before = net.request(served(), HttpRequest::get("/p")).await.unwrap();
-    assert_eq!(before.body, br#"{"valid":false}"#, "nothing registered: the default");
+    assert_eq!(before.body, br#"{"ok":false}"#, "nothing registered: the default");
 
     assert_eq!(put(&net, "/sets/batch-1", set_body("cell-1", "/p", "one")).await.status, 204);
     let hit = net.request(served(), HttpRequest::get("/p")).await.unwrap();
@@ -79,7 +79,7 @@ async fn a_registered_set_answers_on_the_listeners_until_it_is_cleared() {
 
     assert_eq!(delete(&net, "/sets/batch-1").await.status, 204);
     let after = net.request(served(), HttpRequest::get("/p")).await.unwrap();
-    assert_eq!(after.body, br#"{"valid":false}"#);
+    assert_eq!(after.body, br#"{"ok":false}"#);
 }
 
 #[tokio::test(start_paused = true)]
@@ -171,4 +171,29 @@ async fn the_record_keeps_its_latest_requests_within_its_bound() {
     }
     let kept: Vec<String> = stub.records().into_iter().map(|r| r.path).collect();
     assert_eq!(kept, ["/2", "/3"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn clearing_every_set_leaves_only_the_stubs_own_mappings() {
+    let stub = Stub::new(Vec::new(), default());
+    let (net, _h) = serve(&stub).await;
+    put(&net, "/sets/left-by-a-dead-run", set_body("old", "/p", "stale")).await;
+    net.request(served(), HttpRequest::get("/p")).await.unwrap();
+    assert_eq!(delete(&net, "/sets").await.status, 204);
+    let after = net.request(served(), HttpRequest::get("/p")).await.unwrap();
+    assert_eq!(after.body, br#"{"ok":false}"#, "no set answers any more");
+    assert_eq!(records(&net, "?set=left-by-a-dead-run").await.len(), 0, "its record went with it");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_set_tag_is_percent_decoded_in_the_path_as_in_the_query() {
+    let stub = Stub::new(Vec::new(), default());
+    let (net, _h) = serve(&stub).await;
+    assert_eq!(put(&net, "/sets/run%2F1%20a+b", set_body("c", "/p", "1")).await.status, 204);
+    net.request(served(), HttpRequest::get("/p")).await.unwrap();
+    let kept = records(&net, "?set=run%2F1%20a%2Bb").await;
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0]["set"], "run/1 a+b", "a + in a path segment is a +");
+    assert_eq!(delete(&net, "/sets/run%2F1%20a+b").await.status, 204);
+    assert_eq!(records(&net, "").await.len(), 0);
 }

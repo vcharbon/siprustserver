@@ -18,7 +18,8 @@
 //!
 //! - **Sets.** Mappings registered under a tag ([`Stub::register`]) answer
 //!   after the stub's own, until the tag is cleared ([`Stub::clear`]), which
-//!   drops the requests they answered from the record. The record keeps the
+//!   drops the requests they answered from the record ([`Stub::clear_all`]
+//!   clears every set). The record keeps the
 //!   latest [`RECORD_CAP`] requests.
 //! - **Control.** [`Stub::control`] serves registration, the record, a health
 //!   line and the shutdown over HTTP, bound apart from the listeners.

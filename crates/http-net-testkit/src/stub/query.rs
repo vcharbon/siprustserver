@@ -19,20 +19,26 @@ pub(super) fn params(query: &str) -> Vec<(String, String)> {
         .filter(|segment| !segment.is_empty())
         .map(|segment| {
             let (name, value) = segment.split_once('=').unwrap_or((segment, ""));
-            (decode(name), decode(value))
+            (decode(name, true), decode(value, true))
         })
         .collect()
 }
 
-/// One form-encoded component decoded; a `%` not followed by two hex digits
-/// stays as it is.
-fn decode(component: &str) -> String {
+/// A path segment decoded (RFC 3986 §2.1): `%XX` a byte, `+` itself; a byte
+/// sequence that is not UTF-8 replaced lossily.
+pub(super) fn segment(component: &str) -> String {
+    decode(component, false)
+}
+
+/// One component decoded, `+` a space where `plus_is_space` (form encoding);
+/// a `%` not followed by two hex digits stays as it is.
+fn decode(component: &str, plus_is_space: bool) -> String {
     let bytes = component.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while let Some(&byte) = bytes.get(i) {
         match byte {
-            b'+' => {
+            b'+' if plus_is_space => {
                 out.push(b' ');
                 i += 1;
             }

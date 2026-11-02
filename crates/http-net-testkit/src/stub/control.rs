@@ -3,7 +3,8 @@
 //! - `PUT /sets/<tag>` with a JSON array of mappings registers them under
 //!   `<tag>`, replacing a set of that tag: `204`.
 //! - `DELETE /sets/<tag>` removes the set and every request it answered from
-//!   the record: `204`.
+//!   the record: `204`. `DELETE /sets` removes every set so.
+//! - `<tag>` is one path segment, percent-decoded (RFC 3986 §2.1).
 //! - `GET /records[?set=<tag>][&since_ms=<ms>][&until_ms=<ms>]` answers the
 //!   record as a JSON array, in arrival order: the requests the set answered,
 //!   received from `since_ms` to `until_ms` (Unix milliseconds, both bounds
@@ -74,7 +75,11 @@ fn json<T: serde::Serialize>(value: &T) -> HttpResponse {
 impl HttpService for Control {
     async fn handle(&self, req: HttpRequest) -> HttpResponse {
         let (path, query) = query::split(&req.path);
-        let tag = path.strip_prefix("/sets/").filter(|tag| !tag.is_empty() && !tag.contains('/'));
+        let tag = path
+            .strip_prefix("/sets/")
+            .filter(|tag| !tag.is_empty() && !tag.contains('/'))
+            .map(query::segment);
+        let tag = tag.as_deref();
         match (req.method.as_str(), path, tag) {
             ("PUT", _, Some(tag)) => match serde_json::from_slice::<Vec<StubMapping>>(&req.body) {
                 Ok(mappings) => {
@@ -85,6 +90,10 @@ impl HttpService for Control {
             },
             ("DELETE", _, Some(tag)) => {
                 self.stub.clear(tag);
+                HttpResponse::status(204)
+            }
+            ("DELETE", "/sets", None) => {
+                self.stub.clear_all();
                 HttpResponse::status(204)
             }
             ("GET", "/records", None) => self.records(query),

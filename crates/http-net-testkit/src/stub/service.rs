@@ -124,6 +124,16 @@ impl Stub {
             .retain(|record| record.set.as_deref() != Some(tag));
     }
 
+    /// Every set gone, and every request a set answered gone from the record.
+    pub fn clear_all(&self) {
+        self.shared.sets.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        self.shared
+            .records
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|record| record.set.is_none());
+    }
+
     /// How many sets are registered.
     pub fn sets(&self) -> usize {
         self.shared.sets.lock().unwrap_or_else(PoisonError::into_inner).len()
