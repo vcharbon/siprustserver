@@ -5,6 +5,7 @@
 //! ACK, to the instance whose branch memo holds nothing of it.
 
 mod caller_side;
+mod deviation;
 mod dialog;
 mod health_views;
 mod memo_life;

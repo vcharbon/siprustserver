@@ -121,9 +121,9 @@ async fn cancel_and_ack_find_their_hop_through_a_flood_at_the_cap() {
     assert_eq!(cancel.decision, RoutingDecisionKind::Cancel);
     assert_eq!(cancel.target, Some(ProxyAddr::new(W1, 5060)));
     assert_eq!(
-        metrics.cancel_lookup_count(CancelLookup::Hit),
+        metrics.cancel_lookup_count(CancelLookup::Miss),
         1,
-        "the CANCEL follows its INVITE's remembered hop"
+        "an INVITE placed on its rank keeps no entry: the CANCEL finds its hop without one"
     );
 
     // The 486 comes from the node that took the transaction over.

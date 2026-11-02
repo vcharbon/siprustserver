@@ -157,7 +157,7 @@ its family.
 | `PROXY_SELF_GATE_ELU_CRITICAL` | (0, 1] | 0.8 |
 | `PROXY_SELF_GATE_CPS_SIZE`, `PROXY_SELF_GATE_CPS_RATE` | ≥ 1 | 50, 100 |
 | `PROXY_RETRY_AFTER_JITTER_SEC` | 0..3600 s | 5 |
-| `PROXY_BRANCH_MEMO_MAX_ENTRIES`, `PROXY_BRANCH_MEMO_MAX_BYTES` | ≥ 1 | 78 643, 192 MiB accounted (3/8 of the 512 MiB pod limit; that many entries of the heaviest shape, 109 calls/s of working set with a quarter of headroom) |
+| `PROXY_BRANCH_MEMO_MAX_ENTRIES`, `PROXY_BRANCH_MEMO_MAX_BYTES` | ≥ 1 | 78 643, 192 MiB accounted (3/8 of the 512 MiB pod limit; that many entries of the heaviest shape, 197 calls/s of working set, every call placed off its memo-free route (ADR-0009 X7), with a quarter of headroom) |
 | `PROXY_RESOLVER_POSITIVE_TTL_MS`, `PROXY_RESOLVER_NEGATIVE_TTL_MS`, `PROXY_RESOLVER_LOOKUP_TIMEOUT_MS` | ≥ 1 ms | 60000, 5000, 2000 |
 | `PROXY_RESOLVER_PREWARM` | `host:port` list | none |
 

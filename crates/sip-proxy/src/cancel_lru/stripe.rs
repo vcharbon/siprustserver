@@ -1,6 +1,10 @@
 //! One independently locked stripe of the branch memo: a [`Pool`] per
 //! [`Lifetime`], each with its own share of the stripe's bounds, so entries
-//! of one lifetime never push out entries of the other.
+//! of one lifetime never push out entries of the other. The
+//! INVITE-transaction pool holds only INVITEs placed off their memo-free
+//! route (ADR-0009 X7), whose entries move to the retransmission pool when
+//! their final passes; the retransmission pool holds the copies' memos of
+//! initial INVITEs and of requests placed afresh, and ACK hops.
 
 use super::pool::{Change, Pool};
 use super::{CancelEntry, Lifetime, MemoBounds};
@@ -66,6 +70,12 @@ impl Stripe {
         let lifetime = Lifetime::Retransmission;
         self.insert(key, entry.clone(), lifetime, now_ms, change);
         Some(entry)
+    }
+
+    /// Forget the entry under `key`, from whichever pool holds it.
+    pub(super) fn forget(&mut self, key: &str, change: &mut Change) {
+        self.invite.remove(key, change);
+        self.retransmission.remove(key, change);
     }
 
     /// The live entry under `key`, from whichever pool holds it.

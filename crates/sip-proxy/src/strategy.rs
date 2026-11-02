@@ -90,11 +90,30 @@ pub struct SelectOpts {
     /// The request names a dialog (a To-tag) no verified cookie backs: the
     /// strategy admits it as a new dialog, under every new-call cap.
     pub admit_as_new: bool,
-    /// The request belongs to a transaction already admitted (a CANCEL, an
-    /// ACK) and no memo or cookie places it: the strategy places it where an
-    /// unfiltered, unspilled placement put its call, under no new-call cap
-    /// (ADR-0009 X7).
-    pub admitted: bool,
+}
+
+/// The nodes a placement by rank reads ([`RoutingStrategy::placement_by_rank`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ranked {
+    /// The alive nodes: where a request of the call is taken now, its
+    /// placed node gone or not.
+    Alive,
+    /// Every node the strategy knows, alive or not: where the call's own
+    /// placement stays whatever their liveness does next.
+    Known,
+}
+
+/// Where a strategy places a call by rank alone ([`RoutingStrategy::placement_by_rank`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RankPlacement {
+    /// The node a placement with no filter, spill or cap puts the call on,
+    /// read from the call's identity and the nodes ranked alone.
+    Node(ProxyAddr),
+    /// No node ranked takes the call, or the one ranked first has no address.
+    NoNode,
+    /// The strategy places by nothing a later request can recompute: the
+    /// memo keeps each of its placements.
+    Unranked,
 }
 
 /// The routing-policy seam. `async` for symmetry with the registry the LB calls
@@ -110,6 +129,21 @@ pub trait RoutingStrategy: Send + Sync {
         msg: &SipMessage,
         opts: SelectOpts,
     ) -> Result<ProxyAddr, SelectError>;
+
+    /// Where a call `msg` names is placed by rank alone among the `among`
+    /// nodes: no band filter, no spill, no cap (ADR-0050). A request of an
+    /// admitted call that no memo or cookie places goes there (ADR-0009 X7).
+    fn placement_by_rank(&self, _msg: &SipMessage, _among: Ranked) -> RankPlacement {
+        RankPlacement::Unranked
+    }
+
+    /// Whether a call `msg` names, placed on `went`, stays where its rank
+    /// places it whatever the liveness of the nodes the strategy knows does
+    /// next: `went` is its rank winner among every node known. The memo keeps
+    /// an INVITE's entry when it is not (ADR-0009 X7).
+    fn holds_by_rank(&self, msg: &SipMessage, went: &ProxyAddr) -> bool {
+        matches!(self.placement_by_rank(msg, Ranked::Known), RankPlacement::Node(w) if w == *went)
+    }
 
     /// Recover the target previously encoded into the topmost Route URI's params
     /// (the core already verified the URI points at us and stripped it).

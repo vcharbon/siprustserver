@@ -13,7 +13,7 @@ use sip_message::header::{Contact, HeaderValue};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{HeaderName, SipMessage, SipParser, SipRequest, SipResponse, SipStr};
 
-use super::rig::Party;
+use super::rig::{Party, SHARED};
 
 fn parse_request(raw: &str) -> SipRequest {
     match CustomParser::default().parse(raw.as_bytes()) {
@@ -53,6 +53,18 @@ Content-Length: 0\r\n\r\n",
 
 /// A worker's dialling INVITE of its leg `call_id` toward the callee.
 pub fn worker_invite(worker: Party, call_id: &str) -> SipRequest {
+    worker_invite_routed(worker, call_id, "")
+}
+
+/// [`worker_invite`] on a preloaded route through the shared address, then
+/// `next` (RFC 3261 §8.1.2): the proxy's next hop is `next`, not the callee.
+pub fn worker_invite_through(worker: Party, call_id: &str, next: Party) -> SipRequest {
+    let (host, port) = SHARED;
+    let route = format!("Route: <sip:{host}:{port};lr>, <sip:{};lr>\r\n", next.addr());
+    worker_invite_routed(worker, call_id, &route)
+}
+
+fn worker_invite_routed(worker: Party, call_id: &str, route: &str) -> SipRequest {
     let at = worker.addr();
     let callee = Party::Callee.addr();
     parse_request(&format!(
@@ -64,7 +76,7 @@ To: <sip:bob@{callee}>\r\n\
 Call-ID: {call_id}\r\n\
 CSeq: 1 INVITE\r\n\
 Contact: <sip:b2bua@{at}>\r\n\
-Content-Length: 0\r\n\r\n",
+{route}Content-Length: 0\r\n\r\n",
         branch(call_id),
         word(call_id)
     ))
@@ -155,6 +167,11 @@ Contact: <sip:alice@{host}:{port}>\r\n\
         line(HeaderName::To),
         line(HeaderName::CallId),
     ))
+}
+
+/// The whole top Via of `req`, as written on the wire.
+pub fn top_via(req: &SipRequest) -> String {
+    req.top_via().to_wire()
 }
 
 /// The top Via branch of `req`.

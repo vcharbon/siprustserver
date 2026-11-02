@@ -16,7 +16,8 @@ pub enum NoTargetDrop {
     /// with no memo of its INVITE, or met before the first view.
     Cancel,
     /// An out-of-dialog request: a retransmission following the cookie its
-    /// first copy minted, or a new one met before the first view.
+    /// first copy minted, or a new one met before the first view; or the ACK
+    /// of a non-2xx final to an initial INVITE, which rides no cookie.
     Initial,
 }
 

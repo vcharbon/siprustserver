@@ -15,6 +15,7 @@
 
 mod admission;
 mod classify;
+mod memo_write;
 mod parse_refusal;
 mod record_route;
 mod reply;
@@ -59,9 +60,7 @@ use super::ProxyCore;
 /// Outcome of routing a request — what to meter after the work is done.
 pub(super) struct RouteOutcome {
     pub(super) decision: RoutingDecisionKind,
-    /// The forwarded-to target. The lib meters only the decision; the routing
-    /// regression tests assert on this field.
-    #[allow(dead_code)]
+    /// The forwarded-to target; `None` for a request not forwarded.
     pub(super) target: Option<ProxyAddr>,
 }
 
@@ -113,12 +112,11 @@ impl ProxyCore {
         //  • the ACK of a setup this hop saw rejected for good (486, 603, and
         //    the CANCEL flow's 487) — that call is over once its ACK is on the
         //    wire. Which ACK that is was decided on the response path, where
-        //    the final's status is known: an `AckHop` is written for EVERY
-        //    relayed non-2xx INVITE final, including a mid-dialog re-INVITE's
-        //    488 and an auth challenge, neither of which ends the call.
+        //    the final's status is known, by arming the span: any other ACK
+        //    (a re-INVITE's 488, an auth challenge's, a 2xx's) leaves it open.
         if initial_invite && outcome.decision == RoutingDecisionKind::Reject {
             self.traces.close(call_id);
-        } else if outcome.decision == RoutingDecisionKind::AckHop {
+        } else if req.method() == Method::Ack && outcome.target.is_some() {
             self.traces.close_on_ack(call_id);
         }
 

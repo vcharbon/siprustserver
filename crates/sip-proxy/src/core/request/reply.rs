@@ -31,7 +31,8 @@ pub(super) fn extra_header(value: impl HeaderValue) -> SipHeader {
 impl ProxyCore {
     /// Reject `req` locally: answer it with `status`, counted under `metric`.
     /// An ACK is never answered — nothing awaits a response to it — so a
-    /// rejected ACK is dropped, counted `ack_not_answered`.
+    /// rejected ACK is dropped, counted `ack_not_answered`; an ACK no worker
+    /// takes is a request dropped for want of a target (`no_target_dropped`).
     pub(super) async fn reply_reject(
         &self,
         req: &SipRequest,
@@ -176,8 +177,7 @@ impl ProxyCore {
             }
         };
         if req.method() == Method::Ack {
-            self.metrics.record_reject("ack_not_answered");
-            return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
+            return self.drop_without_target(NoTargetDrop::of(req));
         }
         if matches!(err, SelectError::NoTarget { .. }) && !self.first_view.is_in() {
             return self.drop_without_target(NoTargetDrop::of(req));

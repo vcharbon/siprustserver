@@ -1,7 +1,7 @@
-//! How long an instance holds an INVITE's entry: Timer H once the INVITE's
-//! final passes it, the ACK window of a non-2xx final (RFC 3261 §17.2.1);
-//! the full INVITE bound only for an entry whose final crossed the other
-//! instance.
+//! How long an instance holds an INVITE's entry, kept for a call placed off
+//! its memo-free route: Timer H once the INVITE's final passes it, the ACK
+//! window of a non-2xx final (RFC 3261 §17.2.1); the full INVITE bound only
+//! for an entry whose final crossed the other instance.
 
 use std::time::Duration;
 
@@ -18,8 +18,9 @@ fn entry_key(invite: &SipRequest) -> String {
     invite_txn_key(invite.top_via(), invite.call_id().as_str(), from.tag(), invite.cseq().seq())
 }
 
-/// One call's final passes A, the other's passes B. Past Timer H A holds
-/// only the entry whose final it never saw, until the INVITE bound.
+/// A spills two calls past their winners' empty buckets; one call's final
+/// passes A, the other's passes B. Past Timer H A holds only the entry whose
+/// final it never saw, until the INVITE bound.
 #[tokio::test(start_paused = true)]
 async fn an_invite_entry_lives_timer_h_past_a_final_that_passed_its_instance() {
     let pair = Pair::new().await;
@@ -27,7 +28,8 @@ async fn an_invite_entry_lives_timer_h_past_a_final_that_passed_its_instance() {
     let crossed = "final-crossed@caller";
 
     for (call_id, final_side) in [(seen, Side::A), (crossed, Side::B)] {
-        let owner = winner_of(call_id);
+        let owner = winner_of(call_id).other_worker();
+        pair.a.empty_bucket(winner_of(call_id));
         pair.assign(owner, final_side);
         let invite = caller_invite(call_id);
         pair.send(Party::Caller, &SipMessage::Request(invite.clone())).await;

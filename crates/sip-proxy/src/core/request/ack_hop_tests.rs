@@ -108,10 +108,10 @@ Content-Length: 0\r\n\r\n"
 }
 
 // The relay shape: the non-2xx ACK carries the INVITE's preloaded
-// outbound-proxy Route (§17.1.1.3 copies the Route verbatim). The memo +
-// branch identity — not a Route heuristic — classifies it, and it is
-// relayed on the INVITE's exact hop (AckHop), never re-run through the
-// strategy under a fresh branch.
+// outbound-proxy Route (§17.1.1.3 copies the Route verbatim), which names
+// this proxy and carries no cookie. The final came from where the INVITE
+// went, so no ACK hop is kept and the ACK reaches it by the INVITE's own
+// route (ADR-0009 X7).
 #[tokio::test]
 async fn non_2xx_ack_with_preloaded_proxy_route_follows_the_invite_hop() {
     let core = core().await;
@@ -120,7 +120,6 @@ async fn non_2xx_ack_with_preloaded_proxy_route_follows_the_invite_hop() {
 
     let route = format!("Route: <sip:{PROXY_VIP}:5060;lr>\r\n");
     let outcome = core.route_request_from(&ack("z9hG4bKinv", &route), src()).await;
-    assert_eq!(outcome.decision, RoutingDecisionKind::AckHop);
     assert_eq!(
         outcome.target,
         Some(ProxyAddr::new(W1, 5060)),

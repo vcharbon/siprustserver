@@ -266,7 +266,7 @@ fn the_default_bounds_hold_the_heaviest_entries_in_their_bytes() {
     let bytes = super::footprint::footprint(&rtx, &heaviest);
     assert!(bytes <= TYPICAL_ENTRY_BYTES, "the heaviest entry accounts {bytes} bytes");
     assert!(bytes > TYPICAL_ENTRY_BYTES * 9 / 10, "the typical figure is that entry's: {bytes}");
-    assert_eq!(calls_per_second(&d), 109);
+    assert_eq!(calls_per_second(&d), 197);
 }
 
 /// A flood of INVITE entries never pushes out a short memo: each lifetime

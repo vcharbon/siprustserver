@@ -21,7 +21,7 @@ use sip_proxy::cancel_lru::{CancelBranchLru, MemoBounds};
 use sip_proxy::load_observer::{LoadObserverConfig, OverloadPayload, WorkerLoadObserver};
 use sip_proxy::refusals::Refusals;
 use sip_proxy::registry::simulated::SimulatedWorkerRegistry;
-use sip_proxy::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
+use sip_proxy::registry::{Acceptance, WorkerEntry, WorkerHealth, WorkerRegistry};
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
 use sip_proxy::security::own_final_tag::own_final_tagger;
 use sip_proxy::strategies::rendezvous::{rendezvous_select, RendezvousCandidate};
@@ -54,6 +54,8 @@ pub enum Party {
     Callee,
     W1,
     W2,
+    /// A hop a worker's preloaded route names past the proxy.
+    Relay,
 }
 
 impl Party {
@@ -63,6 +65,7 @@ impl Party {
             Party::Callee => "198.51.100.20:5060",
             Party::W1 => "10.0.0.2:5070",
             Party::W2 => "10.0.0.3:5070",
+            Party::Relay => "198.51.100.30:5060",
         };
         at.parse().expect("a socket address")
     }
@@ -85,8 +88,8 @@ impl Party {
         }
     }
 
-    fn all() -> [Party; 4] {
-        [Party::Caller, Party::Callee, Party::W1, Party::W2]
+    fn all() -> [Party; 5] {
+        [Party::Caller, Party::Callee, Party::W1, Party::W2, Party::Relay]
     }
 }
 
@@ -98,6 +101,15 @@ impl RendezvousCandidate for Ordinal {
     fn id(&self) -> &str {
         self.0
     }
+}
+
+/// `count` Call-IDs, prefixed `prefix`, whose rendezvous winner is `worker`.
+pub fn calls_won_by(worker: Party, prefix: &str, count: usize) -> Vec<String> {
+    (0..)
+        .map(|n| format!("{prefix}-{n}@caller"))
+        .filter(|c| winner_of(c) == worker)
+        .take(count)
+        .collect()
 }
 
 /// The worker the rendezvous ranks first for `call_id` among both workers:
@@ -139,6 +151,12 @@ impl Instance {
     pub fn read_critical(&self, worker: Party) {
         let hot = OverloadPayload { elu: 0.99, gc: 0.0, adm: 0.0 };
         self.observer.apply_payload(worker.ordinal(), &hot, self.clock.now_ms());
+    }
+
+    /// This instance reads `worker` taking new calls or refusing them.
+    pub fn accepting(&self, worker: Party, accepts: bool) {
+        let acceptance = if accepts { Acceptance::Accept } else { Acceptance::Refuse };
+        self.registry.set_acceptance(worker.ordinal(), acceptance);
     }
 
     /// This instance reads `worker` with `health`.

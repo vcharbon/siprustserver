@@ -236,28 +236,53 @@ async fn a_cancel_follows_the_cookie_once_its_invites_node_is_not_alive() {
     assert_eq!(f.metrics.no_target_dropped_count(NoTargetDrop::Cancel), 1);
 }
 
-/// The CANCEL of an INVITE whose node left the pool follows the cookie long
-/// after the departed address's window closed, and when another worker is
-/// bound at that address since.
+/// The CANCEL of an INVITE whose node left the pool goes to the call's next
+/// in rank, the backup holding it, long after the departed address's window
+/// closed.
 #[tokio::test(start_paused = true)]
-async fn a_cancel_follows_the_cookie_once_its_invites_node_left_the_pool() {
-    for reused in [false, true] {
-        let f = fixture().await;
-        let invite = initial("INVITE", "");
-        let went = f.core.route_request_from(&invite, src()).await.target.unwrap();
-        let (primary_id, backup) =
-            if Some(went.clone()) == w1() { ("w1", w2()) } else { ("w2", w1()) };
-        f.registry.remove(primary_id);
-        tokio::time::sleep(std::time::Duration::from_millis(
-            crate::registry::tombstone::DEPARTED_ADDRESS_TTL_MS + 8_000,
-        ))
-        .await;
-        if reused {
-            f.registry.add(WorkerEntry::alive("w3", went.clone()));
+async fn a_cancel_follows_the_rank_once_its_invites_node_left_the_pool() {
+    let f = fixture().await;
+    let invite = initial("INVITE", "");
+    let went = f.core.route_request_from(&invite, src()).await.target.unwrap();
+    let (primary_id, backup) = if Some(went.clone()) == w1() { ("w1", w2()) } else { ("w2", w1()) };
+    f.registry.remove(primary_id);
+    tokio::time::sleep(std::time::Duration::from_millis(
+        crate::registry::tombstone::DEPARTED_ADDRESS_TTL_MS + 8_000,
+    ))
+    .await;
+    let out = f.core.route_request_from(&initial("CANCEL", ""), src()).await;
+    assert_eq!(out.target, backup, "the backup holding the call");
+}
+
+/// The residual of a worker joining the pool while a call rings (ADR-0009
+/// X7): the INVITE went to its rank winner, so no entry was kept, and the
+/// joiner, bound at the departed node's address, ranks first for the call
+/// now. The CANCEL reaches the joiner, which holds no such INVITE (§9.2).
+#[tokio::test(start_paused = true)]
+async fn a_cancel_after_a_new_worker_joined_goes_to_the_new_rank_winner() {
+    use crate::strategies::rendezvous::{rendezvous_select, RendezvousCandidate};
+    struct Id(&'static str);
+    impl RendezvousCandidate for Id {
+        fn id(&self) -> &str {
+            self.0
         }
-        let out = f.core.route_request_from(&initial("CANCEL", ""), src()).await;
-        assert_eq!(out.target, backup, "reused={reused}: the backup holding the call");
     }
+    let f = fixture().await;
+    let invite = initial("INVITE", "");
+    let went = f.core.route_request_from(&invite, src()).await.target.unwrap();
+    let (primary_id, survivor, backup) =
+        if Some(went.clone()) == w1() { ("w1", "w2", w2()) } else { ("w2", "w1", w1()) };
+    f.registry.remove(primary_id);
+    tokio::time::sleep(std::time::Duration::from_millis(
+        crate::registry::tombstone::DEPARTED_ADDRESS_TTL_MS + 8_000,
+    ))
+    .await;
+    f.registry.add(WorkerEntry::alive("w3", went.clone()));
+    let ranked = [Id(survivor), Id("w3")];
+    let first = rendezvous_select(CALL_ID, &ranked).map(|id| id.0);
+    let expected = if first == Some("w3") { Some(went) } else { backup };
+    let out = f.core.route_request_from(&initial("CANCEL", ""), src()).await;
+    assert_eq!(out.target, expected, "the rank winner among the alive workers now");
 }
 
 /// A caller's INVITE that preloads a plain Route to the proxy keeps the cookie

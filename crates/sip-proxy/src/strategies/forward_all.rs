@@ -12,7 +12,9 @@ use async_trait::async_trait;
 use sip_message::SipMessage;
 
 use crate::addr::ProxyAddr;
-use crate::strategy::{DecodeResult, RouteParams, RoutingStrategy, SelectError, SelectOpts};
+use crate::strategy::{
+    DecodeResult, RankPlacement, Ranked, RouteParams, RoutingStrategy, SelectError, SelectOpts,
+};
 
 const TARGET_PARAM: &str = "target";
 
@@ -39,6 +41,10 @@ impl RoutingStrategy for ForwardAllStrategy {
         _opts: SelectOpts,
     ) -> Result<ProxyAddr, SelectError> {
         Ok(self.target.clone())
+    }
+
+    fn placement_by_rank(&self, _msg: &SipMessage, _among: Ranked) -> RankPlacement {
+        RankPlacement::Node(self.target.clone())
     }
 
     async fn decode_stickiness(
