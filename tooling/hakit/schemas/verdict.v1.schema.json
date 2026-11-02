@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "verdict.v1.schema.json",
-  "$comment": "minor 3",
+  "$comment": "minor 4",
   "title": "verdict.v1",
   "description": "The `verdict.json` of a run directory: every window with its impact against its budget, the in-dialog impact with the windows it may belong to, the impact outside every window, and the integrity of the measurement. `hakit verdict <run-dir>` recomputes it from the run directory alone. ADR-0049.",
   "type": "object",
@@ -163,6 +163,43 @@
       "type": "array",
       "items": { "$ref": "#/$defs/impact" }
     },
+    "unanswered": {
+      "description": "Every call that did not end answered, by cause and by where, per stream with records and for the `priority` and `others` groups of `run` streams. A reading of the records: it takes no budget and changes no status.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["streams", "groups"],
+      "properties": {
+        "streams": {
+          "type": "array",
+          "items": {
+            "allOf": [{ "$ref": "#/$defs/unanswered_tally" }],
+            "required": ["stream", "start", "priority"],
+            "properties": {
+              "stream": { "type": "string" },
+              "start": { "enum": ["run", "incident"] },
+              "priority": {
+                "description": "The stream's shape's request carries `Resource-Priority` (RFC 4412).",
+                "type": "boolean"
+              }
+            },
+            "unevaluatedProperties": false
+          }
+        },
+        "groups": {
+          "description": "`priority`: the `run` streams of priority calls; `others`: every other `run` stream. `incident` streams are in neither.",
+          "type": "array",
+          "items": {
+            "allOf": [{ "$ref": "#/$defs/unanswered_tally" }],
+            "required": ["group", "streams"],
+            "properties": {
+              "group": { "enum": ["priority", "others"] },
+              "streams": { "type": "array", "items": { "type": "string" } }
+            },
+            "unevaluatedProperties": false
+          }
+        }
+      }
+    },
     "limiters": {
       "description": "The profile's limiters out of their bound (ADR-0049 §3.13): each entry a run of consecutive minutes whose max of admitted calls stayed under the cap (undershoot) or whose median rose over the cap or the window's allowance (overshoot); `bound` is [cap, highest median allowed]. Every entry is a finding; an overshoot is minor, an undershoot major.",
       "type": "array",
@@ -221,6 +258,37 @@
     }
   },
   "$defs": {
+    "unanswered_tally": {
+      "type": "object",
+      "required": ["calls", "answered", "causes", "answered_share"],
+      "properties": {
+        "calls": { "type": "integer" },
+        "answered": { "description": "Calls that ended answered, their shape expecting it.", "type": "integer" },
+        "causes": {
+          "description": "One entry per cause and detail (ending and final code). `expected`: an ending of the shape other than answered; `overload`: a 503 with Retry-After; `dependency_fault`: a 503 without Retry-After whose setup overlaps a window; `setup_timeout`; `cut`: cut, stranded, or failed after its answer; `other`: any other ending or code. Each call is in exactly one.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["cause", "detail", "count", "where"],
+            "properties": {
+              "cause": { "enum": ["expected", "overload", "dependency_fault", "setup_timeout", "cut", "other"] },
+              "detail": { "type": "string" },
+              "count": { "type": "integer" },
+              "where": {
+                "description": "The count by the incident kind of the first window the call's setup overlaps (a cut: the window holding its cut instant), or `outside`.",
+                "type": "object",
+                "additionalProperties": { "type": "integer" }
+              }
+            }
+          }
+        },
+        "answered_share": {
+          "description": "Answered or ended as the shape expects, among the calls once dependency-fault refusals are left out; null when none is left.",
+          "type": ["number", "null"]
+        }
+      }
+    },
     "impact": {
       "type": "object",
       "additionalProperties": false,

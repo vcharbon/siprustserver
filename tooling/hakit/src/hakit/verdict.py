@@ -31,6 +31,7 @@ from .schemas import SchemaSet
 from .generator_health import run_stalls
 from .host_stress import stress_findings, thresholds
 from .stalls import Stall, stall_holding, stall_of
+from .unanswered import unanswered
 from .window_recovery import recover_windows
 from .windows import Window, build_windows
 
@@ -155,11 +156,11 @@ class _Run:
         for p in sorted((run_dir / "budgets").glob("*.json")):
             b = parse_budget(_load_json(p))
             self.budgets[b.name] = b
-        shapes: dict[str, Shape] = {}
+        self.shapes: dict[str, Shape] = {}
         for p in sorted((run_dir / "catalogs").glob("*.json")):
             for s in parse_catalog(_load_json(p)).shapes:
-                shapes[s.shape] = s
-        self.calls = _Calls(read_jsonl(run_dir / "records.jsonl"), shapes, schemas)
+                self.shapes[s.shape] = s
+        self.calls = _Calls(read_jsonl(run_dir / "records.jsonl"), self.shapes, schemas)
         load_start = jv.opt_number(self.meta, "load_started_at_ms") or jv.number(self.meta, "started_at_ms")
         self.load_start_ms = load_start
         self.stalls = run_stalls(run_dir, self.calls.starts(), self.profile, load_start)
@@ -287,6 +288,9 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
         if healed is not None and recs:
             out["recovery"] = [{"stream": r.stream, "recovery_s": r.recovery_s(healed)} for r in recs]
         windows_out.append(out)
+    by_cause = unanswered(
+        ((r, run.shapes[jv.string(r, "shape")]) for r, _ in calls.valid), windows, profile, run.shapes
+    )
     status = "invalid" if found else ("fail" if findings else "pass")
     return {
         "schema": "verdict.v1",
@@ -300,5 +304,6 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
         "in_dialog": judged.in_dialog,
         "unattributed": judged.unattributed,
         "limiters": limiters,
+        "unanswered": by_cause,
         "integrity": found,
     }

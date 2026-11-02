@@ -82,6 +82,11 @@ def _expected(options: list[ExpectedEnding], ending: str, code: int | None, earl
     return any(_matches(e, ending, code, early_media) for e in options)
 
 
+def caller_expected(r: Json, shape: Shape) -> bool:
+    """The caller's ending is one its shape expects."""
+    return _expected(shape.expected, jv.string(r, "ending"), jv.opt_int(r, "final_code"), jv.boolean(r, "early_media"))
+
+
 def _leg_impacts(r: Json, shape: Shape, base: Impact) -> list[Impact]:
     """A leg judged under the caller's ending. On an answered call a leg is
     known missing or wrong only once the call is over: its impact is at the
@@ -150,7 +155,6 @@ def classify(r: Json, shape: Shape) -> Classified:
     ending = jv.string(r, "ending")
     code = jv.opt_int(r, "final_code")
     reason = jv.opt_string(r, "reason")
-    early_media = jv.boolean(r, "early_media")
     failures = jv.objs(r, "failures")
 
     out = Classified(success=False)
@@ -167,7 +171,7 @@ def classify(r: Json, shape: Shape) -> Classified:
     base = Impact(UNEXPECTED_ENDING, stream, call_id, setup_instant, started, answered=answered,
                   retry_after=retry_after)
 
-    caller_ok = _expected(shape.expected, ending, code, early_media)
+    caller_ok = caller_expected(r, shape)
     if not caller_ok:
         if ending in PRE_ANSWER_ENDINGS and not answered:
             cls = SETUP_FAILED if shape.expects_answer else UNEXPECTED_ENDING
