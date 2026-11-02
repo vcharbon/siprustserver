@@ -60,6 +60,29 @@ impl FailoverHarness {
         self.mark(from, Some(to), "stall", &format!("{src} → {dst} held"));
     }
 
+    /// Close every replication stream between two workers, both directions,
+    /// as a reset does: each end reads its stream ended. A stream either
+    /// opens while the cut lasts dies as soon as it is attributed, until
+    /// [`heal`](Self::heal). Names each ordinal's current incarnation. Marker.
+    pub fn cut_streams(&mut self, a: &str, b: &str) {
+        self.tamper();
+        let (aa, ba) = (self.repl_listen(a), self.repl_listen(b));
+        self.repl_sim.apply_fault(Fault::Cut { src: aa, dst: ba });
+        self.repl_sim.apply_fault(Fault::Cut { src: ba, dst: aa });
+        self.mark(a, Some(b), "cut", "every stream closed");
+    }
+
+    /// Answer no connect to `ordinal`'s replication listen address, as a host
+    /// that answers nothing does: a connect to it neither succeeds nor fails
+    /// until a [`heal`](Self::heal) naming the ordinal. Streams already open
+    /// are untouched. Names its current incarnation. Marker.
+    pub fn black_hole(&mut self, ordinal: &str) {
+        self.tamper();
+        let dst = self.repl_listen(ordinal);
+        self.repl_sim.apply_fault(Fault::BlackHole { dst });
+        self.mark(ordinal, None, "black-hole", &format!("{dst} answers no connect"));
+    }
+
     /// Lift a [`stall`](Self::stall) from `from` to `to`: every held stream
     /// still open flushes in order. Marker.
     pub fn resume(&mut self, from: &str, to: &str) {
