@@ -12,3 +12,5 @@ mod scripted_codec;
 mod scripted_findings;
 mod scripted_real;
 mod simulated;
+mod stub;
+mod stub_real;

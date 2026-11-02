@@ -17,6 +17,9 @@
 //! - [`ExternalHttp`] — an [`HttpService`] forwarding to a real backend
 //!   through `clock-bridge`: a paused-clock test reaches an external process,
 //!   its answer delivered at a virtual instant.
+//! - [`stub::Stub`] — a stub service for a test driving a real peer: request
+//!   mappings answered after a delay with any bytes or a close, a default for
+//!   the rest, every request recorded.
 //!
 //! The crate declares no purity tier (ADR-0051 §1): a production binary that
 //! links it fails the closure check.
@@ -26,6 +29,7 @@ mod external;
 mod recording;
 pub mod scripted;
 mod simulated;
+pub mod stub;
 
 // The seam's types and modules, imported under the paths this crate's modules read them by.
 use http_net::{
