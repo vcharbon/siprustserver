@@ -4,7 +4,8 @@ The simulated lab answers what a healthy one would: every executable exits 0
 with no facts, a generator runs until it is drained, places no call, the
 system under test holds no call, a SIPp twin's record copy is complete, a loadgen image registers every shape of the
 search path, the API server serves every resource definition asked for (Chaos
-Mesh's included), and every Service a stream targets has a cluster IP. Each effect is recorded, and the timeline
+Mesh's included), every Service a stream targets has a cluster IP, and every
+label selector names two ready pods. Each effect is recorded, and the timeline
 printed from the run's own `events.jsonl`.
 """
 
@@ -24,6 +25,10 @@ from .loadgen import FINAL_METRICS
 
 STAT_HEADER = "StartTime;LastResetTime;CurrentTime;CurrentCall;TotalCallCreated\n"
 STAT_ROW = "0;0;0;0;0\n"
+# Every label selector names two ready pods.
+READY_PODS = json.dumps(
+    {"items": [{"metadata": {"name": f"p{i}"}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}} for i in (0, 1)]}
+)
 
 
 class SimulatedLab:
@@ -46,6 +51,8 @@ class SimulatedLab:
             return None
         if "service" in a:
             return ProcResult(0, "10.96.0.10", "")
+        if "get" in a and "pods" in a and "-l" in a:
+            return ProcResult(0, READY_PODS, "")
         if "create" in a and "-f" in a and "--raw" not in a:
             doc = as_obj(json.loads(Path(a[a.index("-f") + 1]).read_text()))
             meta = as_obj(doc["metadata"])

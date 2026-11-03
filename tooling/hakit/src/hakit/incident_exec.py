@@ -28,7 +28,7 @@ from .jsonval import Json, as_obj
 from .lab import Lab
 from .model import Incident, Scalar
 from .paths import FAULT_LIB
-from .schedule import PlannedEvent
+from .schedule import PlannedEvent, target_of
 
 PROBE_NOT_YET = 75
 
@@ -66,13 +66,8 @@ def _params(inc: Incident, ev: PlannedEvent) -> dict[str, Scalar]:
 
 
 def _target(inc: Incident, ev: PlannedEvent, lab: Lab) -> tuple[str, str, str]:
-    raw = ev.spec.target.get(inc.name, {}) if len(ev.spec.incidents) > 1 else ev.spec.target
-    over = as_obj(raw)
-    base = inc.target
-    selector = str(over.get("selector", base.selector if base else ""))
-    namespace = str(over.get("namespace", (base.namespace if base else None) or lab.namespace))
-    pick = str(over.get("pick", base.pick if base else "one"))
-    return selector, namespace, pick
+    selector, namespace, pick = target_of(inc, ev.spec)
+    return selector, namespace or lab.namespace, pick
 
 
 def fmt_param(v: Scalar) -> str:

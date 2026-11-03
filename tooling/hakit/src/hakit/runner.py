@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .capture import CaptureFailed, Captures
 from .check import profile_errors
+from .one_at_a_time import ready_errors
 from .classes import run_counts
 from .clock import Clock, RealClock
 from .collect import collect_cdrs
@@ -177,6 +178,9 @@ class Runner:
         if profile is None:
             raise RunRefused(f"profile {profile_name!r} is not on the search path")
         errs = self.refusals(profile, lab_capabilities(self.lab, self.executor))
+        if errs:
+            raise RunRefused("\n".join(errs))
+        errs = ready_errors(profile, self.lab, self.executor)
         if errs:
             raise RunRefused("\n".join(errs))
         stale = earlier_open_events(self.results)
