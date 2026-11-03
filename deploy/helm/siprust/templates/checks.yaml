@@ -81,8 +81,8 @@ operator's to keep consistent.
 {{- end }}
 {{- end }}
 {{- /* The runner defaults a relation reads when the env states nothing:
-sip-proxy HealthProbeConfig, b2bua-runner-kit runner_env and limiter_env,
-call-limiter-runner env. */ -}}
+the proxy's probe configuration, the worker's and its limiter client's env
+grammar, the call limiter's lease. */ -}}
 {{- $wenv := .Values.worker.env | default dict }}
 {{- $penv := .Values.proxy.env | default dict }}
 {{- if and .Values.worker.enabled .Values.proxy.enabled }}
