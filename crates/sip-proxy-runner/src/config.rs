@@ -157,12 +157,14 @@ impl ProxyConfig {
             if held < usize::try_from(gate.cps_bucket_rate).unwrap_or(usize::MAX) {
                 errors.push(format!(
                     "PROXY_BRANCH_MEMO_MAX_ENTRIES={} / PROXY_BRANCH_MEMO_MAX_BYTES={} hold the \
-                     memo of {held} calls/s at PROXY_BRANCH_MEMO_MEAN_RING_MS={}, below \
+                     memo of {held} calls/s at PROXY_BRANCH_MEMO_MEAN_RING_MS={} and an INVITE \
+                     entry cap of {} ms (PROXY_INVITE_TXN_TIMEOUT_SEC + Timer H), below \
                      PROXY_SELF_GATE_CPS_RATE={}: admitted calls would push out the entries \
                      their CANCEL and ACK are routed by",
                     branch_memo.max_entries,
                     branch_memo.max_bytes,
                     branch_memo.mean_ring_ms,
+                    branch_memo.invite_ttl_ms,
                     gate.cps_bucket_rate
                 ));
             }

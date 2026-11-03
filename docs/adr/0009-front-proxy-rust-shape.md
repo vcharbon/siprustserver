@@ -146,12 +146,15 @@ INVITE's entry is shortened to Timer H (the non-2xx ACK window, RFC 3261 §17.2.
 its final passes the instance (`core/response/final_memo`); the workers' INVITE
 transaction bound plus Timer H (`PROXY_INVITE_TXN_TIMEOUT_SEC`, one chart value with the
 workers' `B2BUA_INVITE_TXN_TIMEOUT_SEC`) stays the cap of an entry whose final crossed
-the other one. So
-a call holds memo for its ring time plus Timer H, and the memo is sized on the
-deployment's call rate and mean ring, where its eviction happens only under abnormal
-load. The instance that placed a call knows where it went, a placement away from the
-call's rendezvous winner included (a spill past an empty bucket, a band-filtered
-winner, a winner refusing new calls, a winner away or not yet back when the call came).
+the other one. The worker's flow and the caller's hash on their own, so in steady state
+a call's legs often cross: at one instance a call holds, at most, one leg's INVITE entry
+to its cap (the leg whose final crosses the other instance) and its other leg's entry for
+the ring, then Timer H. The memo is sized on that working set at the deployment's call
+rate, mean ring and cap (`cancel_lru::entry_ms_per_call`), so its eviction happens only
+under abnormal load. The instance that placed a call knows where it went, a placement
+away from the call's rendezvous winner included (a spill past an empty bucket, a
+band-filtered winner, a winner refusing new calls, a winner away or not yet back when
+the call came).
 
 **Without the memo** — the other instance after a flow move, or an entry evicted under
 abnormal load — every request of an admitted transaction still routes, and none meets a
@@ -172,7 +175,8 @@ gate:
   its own view. The ACK of a final an instance answered itself is recognised by its
   To-tag, derived under the shared key (ADR-0046 §7), at either instance.
 
-**Accepted residuals.** Each has a cell in `sip-proxy`:
+**Accepted residuals.** Each has a cell in `sip-proxy`, or an hakit incident that
+measures it:
 
 - *A call placed away from its rank winner, reached without its entry.* A call placed
   away from its rendezvous winner among the alive workers (a spill, a band filter, a
@@ -193,6 +197,17 @@ gate:
   second call, and with every bucket empty, or the gate shut, it draws a 503 for a
   call already ringing. A re-INVITE carries a To-tag and its dialog's cookie and meets
   neither. Cells: `active_active::caller_side`, `active_active::residual`.
+
+- *A proxy restarted in place.* A proxy that crashes and restarts on its node inside the
+  route guard's dead bound plus the routers' BFD detection keeps the node in the routers'
+  ECMP (ADR-0056 §10): its flows come back to an empty memo, the paths above with no
+  entry. The hakit incident `kill_proxy` accepts a restart inside that bound.
+- *A client that varies its source port.* An upstream client sending one call's requests
+  from several source ports or addresses spreads them over flows the routers hash apart:
+  in steady state its CANCEL can reach the instance that never saw the INVITE and goes to
+  the rank winner, right for a call placed there, the first residual above for a call
+  placed away from it, with no flow move. Cells: `active_active::off_rank`,
+  `active_active::residual`.
 
 **A CANCEL or ACK matching no call** costs one forward to a worker and that worker's 481
 (an ACK draws nothing), never more: no state is written for it and nothing is

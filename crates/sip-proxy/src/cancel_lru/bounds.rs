@@ -22,18 +22,25 @@ pub const INVITE_ENTRY_TTL_MS: u64 = INVITE_INITIAL_TIMEOUT + TIMER_H;
 /// entry waits for its final, on average.
 pub const DEFAULT_MEAN_RING_MS: u64 = 30_000;
 
-/// The entry-milliseconds one call holds on average for a mean ring of
-/// `mean_ring_ms`: an INVITE entry for each leg's INVITE until its final,
-/// then Timer H in the retransmission pool (ADR-0009 X7), a retransmission
-/// memo for each leg's INVITE, ACK and BYE and for one keepalive OPTIONS per
-/// leg, and one ACK hop for a relayed non-2xx final.
-pub const fn entry_ms_per_call(mean_ring_ms: u64) -> u64 {
-    invite_ms_per_call(mean_ring_ms) + 2 * TIMER_H + 9 * RTX_ENTRY_TTL_MS
+/// The entry-milliseconds one call holds at one instance, at most, for a mean
+/// ring of `mean_ring_ms` and an INVITE entry cap of `invite_ttl_ms`: the
+/// INVITE-transaction pool's part (one leg's entry to its cap, the other's
+/// for the ring), Timer H in the
+/// retransmission pool for each leg's INVITE entry its final shortened
+/// (ADR-0009 X7), a retransmission memo for each leg's INVITE, ACK and BYE
+/// and for one keepalive OPTIONS per leg, and one ACK hop for a relayed
+/// non-2xx final.
+pub const fn entry_ms_per_call(mean_ring_ms: u64, invite_ttl_ms: u64) -> u64 {
+    invite_ms_per_call(mean_ring_ms, invite_ttl_ms) + 2 * TIMER_H + 9 * RTX_ENTRY_TTL_MS
 }
 
-/// The INVITE-transaction pool's part of [`entry_ms_per_call`].
-const fn invite_ms_per_call(mean_ring_ms: u64) -> u64 {
-    2 * mean_ring_ms
+/// The INVITE-transaction pool's part of [`entry_ms_per_call`]. An entry
+/// whose final crosses the other instance of an active pair lives to its
+/// cap. A call has one leg whose final can cross at this instance: its other
+/// leg's INVITE passes here only when its final does, and that entry is
+/// shortened after the ring.
+const fn invite_ms_per_call(mean_ring_ms: u64, invite_ttl_ms: u64) -> u64 {
+    invite_ttl_ms.saturating_add(mean_ring_ms)
 }
 
 /// The default byte budget: 3/8 of the front proxy's 512 MiB memory limit.
@@ -55,10 +62,11 @@ pub const DEFAULT_STRIPES: usize = 16;
 /// not on the memory the process holds. Each of the `stripes` holds its
 /// share of both bounds, rounded up, and splits it between its two
 /// [`Lifetime`] pools as a call's entry-milliseconds split at the mean ring
-/// ([`entry_ms_per_call`]). Past a bound a pool forgets its oldest write
-/// first, and never an entry of the other pool. The defaults hold the working
-/// set of 152 new calls a second at a 30 s mean ring, every entry taken at
-/// the heaviest shape, with a quarter of headroom ([`calls_per_second`]).
+/// and the INVITE entry cap ([`entry_ms_per_call`]). Past a bound a pool
+/// forgets its oldest write first, and never an entry of the other pool. The
+/// defaults hold the working set of 109 new calls a second at a 30 s mean
+/// ring and the default INVITE bound, every entry taken at the heaviest
+/// shape, with a quarter of headroom ([`calls_per_second`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoBounds {
     pub max_entries: usize,
@@ -114,8 +122,10 @@ impl MemoBounds {
 
     /// The INVITE-transaction pool's part of `n`.
     fn invite_share(&self, n: usize) -> usize {
-        let whole = usize::try_from(entry_ms_per_call(self.mean_ring_ms)).unwrap_or(usize::MAX);
-        let part = usize::try_from(invite_ms_per_call(self.mean_ring_ms)).unwrap_or(0);
+        let whole = usize::try_from(entry_ms_per_call(self.mean_ring_ms, self.invite_ttl_ms))
+            .unwrap_or(usize::MAX);
+        let part =
+            usize::try_from(invite_ms_per_call(self.mean_ring_ms, self.invite_ttl_ms)).unwrap_or(0);
         (n / whole).saturating_mul(part).saturating_add((n % whole).saturating_mul(part) / whole)
     }
 }
@@ -125,8 +135,9 @@ impl MemoBounds {
 /// ring, every entry taken at [`TYPICAL_ENTRY_BYTES`].
 pub fn calls_per_second(bounds: &MemoBounds) -> usize {
     let entries = bounds.max_entries.min(bounds.max_bytes / TYPICAL_ENTRY_BYTES);
-    let call_seconds = usize::try_from(entry_ms_per_call(bounds.mean_ring_ms) / 1_000)
-        .unwrap_or(usize::MAX)
-        .max(1);
+    let call_seconds =
+        usize::try_from(entry_ms_per_call(bounds.mean_ring_ms, bounds.invite_ttl_ms) / 1_000)
+            .unwrap_or(usize::MAX)
+            .max(1);
     entries.saturating_mul(4) / call_seconds.saturating_mul(5)
 }
