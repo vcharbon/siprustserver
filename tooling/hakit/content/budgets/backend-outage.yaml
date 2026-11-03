@@ -15,10 +15,12 @@ description: >-
   default). Allowances, in seconds of offered rate:
   - every setup of the outage may fail, plus 9 s past it: the first probe
     round that reads a worker alive (1 s), one readiness period (1 s) and P;
-  - 480 with Reason q.850;cause=18, 4 s: a setup that reached a worker
-    before the proxies read it dead (V ≤ 3.6 s, rounded up) waits in its
-    queue; at the return the worker sends its b-leg INVITE into the
-    withdrawn route and gives up on it with no answer;
+  - 480 with Reason q.850;cause=18, 5.4 s: a setup that reached a worker
+    after it froze and before the proxies read it dead waits in its queue;
+    at the return the worker sends its b-leg INVITE into the withdrawn route
+    and gives up on it with no answer. The span runs from the first worker
+    frozen to the last read dead: the freeze's spread over the workers (the
+    inject's own time, 1.8 s measured) + V (3.6 s); measured 4.0 s;
   - in-dialog transactions first sent in the outage's first A − L get no
     final, L the caller's last retransmission (RFC 3261 §17.1.2.2, T1
     500 ms, T2 4 s: 27.5 s for a non-INVITE; 15.5 s for a re-INVITE from a
@@ -41,7 +43,7 @@ description: >-
 setup_failed:
   - { stream: "*", code: 0, reason: timeout, max_seconds: 9, over_outage: true }
   - { stream: "*", code: 503, reason: "*", retry_after: true, max_seconds: 9, over_outage: true }
-  - { stream: "*", code: 480, reason: "q.850;cause=18", max_seconds: 4 }
+  - { stream: "*", code: 480, reason: "q.850;cause=18", max_seconds: 5.4 }
 setup_slow:
   max_seconds: 9
   over_outage: true
