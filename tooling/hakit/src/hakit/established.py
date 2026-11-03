@@ -4,8 +4,9 @@ A fault of a call-setup dependency must leave the calls already up whole: a
 call answered before the window's first `inject` and not ended at it is
 established. Each one must end with no impact its budget does not allow (an
 in-dialog request failed, a cut, a stranded teardown, an unexpected ending
-after answer) and no CDR mismatch; a call refused a consult under its
-budget's allowance stays whole. The window must hold at least the budget's
+after answer) and no CDR mismatch from the fault's start to the next
+window's; a call refused a consult under its budget's allowance stays
+whole. The window must hold at least the budget's
 `min_calls` of them, so a window no call spanned never passes the check,
 once the run answered any call before it (a run that placed none, a
 dry run, has nothing to judge).
@@ -24,10 +25,14 @@ from .windows import Window
 ESTABLISHED = "established"
 
 
-def established_row(w: Window, min_calls: int, records: Iterable[Json], hurt: set[str]) -> Json:
+def established_row(
+    w: Window, min_calls: int, records: Iterable[Json], hurts: Iterable[tuple[str, float]], until_ms: float
+) -> Json:
     """The window's `established` row: the established calls, those an
-    unallowed impact hurt (the count, allowed none), and the finding."""
+    unallowed impact hurt from the window's first inject to `until_ms` (the
+    next window's, or the end), the count, allowed none, and the finding."""
     inject = w.first("inject")
+    hurt = {c for c, at in hurts if inject is not None and inject <= at < until_ms}
     calls: list[str] = []
     answered_before = False
     for r in records:
@@ -52,7 +57,16 @@ def established_row(w: Window, min_calls: int, records: Iterable[Json], hurt: se
     }
 
 
-def hurt_calls(impacts: Iterable[Impact], counted: Iterable[Impact]) -> set[str]:
-    """The calls an impact no budget allowance takes hurt: every in-dialog
-    impact and every counted one (a CDR mismatch, a product's class)."""
-    return {i.call_id for i in impacts if not i.budgetable} | {i.call_id for i in counted}
+def hurts(impacts: Iterable[Impact], counted: Iterable[Impact]) -> list[tuple[str, float]]:
+    """Each impact no budget allowance takes, by call and instant: every
+    in-dialog impact and every counted one (a CDR mismatch, a product's
+    class)."""
+    return [(i.call_id, i.at_ms) for i in impacts if not i.budgetable] + [(i.call_id, i.at_ms) for i in counted]
+
+
+def until_next(windows: list[Window], w: Window) -> float:
+    """The first inject of the window after `w`, the end of `w`'s span of
+    blame; infinite for the last."""
+    inject = w.first("inject")
+    later = [i for o in windows if (i := o.first("inject")) is not None and inject is not None and i > inject]
+    return min(later, default=float("inf"))

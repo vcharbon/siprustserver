@@ -53,3 +53,15 @@ def test_a_budget_without_it_adds_no_row(tmp_path: Path) -> None:
 def test_a_run_that_answered_no_call_before_the_window_has_nothing_to_judge(tmp_path: Path) -> None:
     row = established(tmp_path, [record("after", INJECT + 500)])
     assert (row["calls"], row["finding"]) == (0, False)
+
+
+def test_an_impact_after_the_next_window_opened_is_not_this_one(tmp_path: Path) -> None:
+    second = T0 + 200_000
+    bye = [{"at_ms": second + 1_000, "kind": "dialog_request", "method": "BYE", "code": 503}]
+    up = [record(f"up{i}", INJECT - 10_000 + i, ended=200_000) for i in range(2)]
+    up.append(record("late", INJECT - 9_000, ended=200_000, failures=bye))
+    events = kill(1, INJECT, budget="spanning") + kill(2, second, budget="spanning")
+    d = run_dir(tmp_path, up, calls=len(up), events=events, budgets=[SPANNING])
+    w1, w2 = jv.objs(compute(d, SCHEMAS), "windows")
+    rows = [[r for r in jv.objs(w, "impacts") if r["class"] == "established"][0] for w in (w1, w2)]
+    assert [(r["calls"], r["count"]) for r in rows] == [(3, 0), (3, 1)]
