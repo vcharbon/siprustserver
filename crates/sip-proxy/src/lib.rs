@@ -59,6 +59,7 @@ pub mod observability;
 pub mod parse_refusals;
 mod poison;
 pub mod refusals;
+pub mod refused_sample;
 pub mod registry;
 pub mod resolver;
 pub mod security;
