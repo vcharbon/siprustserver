@@ -185,7 +185,8 @@ impl ReplicationSettings {
             membership,
             store: Arc::new(ReplicatingCallStore::with_changelog(
                 Changelog::new(incarnation_gen, clock.clone())
-                    .with_dead_peer_ttl(self.link.dead_peer_ttl_ms()),
+                    .with_dead_peer_ttl(self.link.dead_peer_ttl_ms())
+                    .with_bootstrap_hard_timeout(self.link.bootstrap_hard_timeout),
                 clock,
             )),
             listener,

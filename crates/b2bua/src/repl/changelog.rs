@@ -55,6 +55,7 @@ use repl_net::frame::{Op, Partition, Watermark};
 use sip_clock::Clock;
 use tokio::sync::watch;
 
+use crate::repl::puller::DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS;
 use crate::store::{locked, REPLICA_CHANGELOG};
 
 pub use backlog::BacklogMarks;
@@ -272,6 +273,8 @@ pub struct Changelog {
     gen: u64,
     clock: Clock,
     dead_peer_ttl_ms: i64,
+    /// A bootstrap in flight past it reads stalled ([`Self::admits_backup`]).
+    bootstrap_hard_timeout: std::time::Duration,
     inner: Arc<Mutex<Inner>>,
 }
 
@@ -282,6 +285,9 @@ impl Changelog {
             gen,
             clock,
             dead_peer_ttl_ms: DEFAULT_DEAD_PEER_TTL_MS,
+            bootstrap_hard_timeout: std::time::Duration::from_millis(
+                DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS,
+            ),
             inner: Arc::new(Mutex::new(Inner {
                 counter: 0,
                 peers: HashMap::new(),
@@ -445,8 +451,8 @@ impl Changelog {
         inner.peers.retain(|_, log| log.serving > 0 || now_ms - log.last_active_ms < dead_peer_ttl);
         // Reap applied tombstones from each surviving sub-log, raising its floor.
         for log in inner.peers.values_mut() {
-            reap_sublog(&mut log.pri, gen);
-            reap_sublog(&mut log.bak, gen);
+            progress::reap_sublog(&mut log.pri, gen);
+            progress::reap_sublog(&mut log.bak, gen);
         }
     }
 
@@ -466,27 +472,6 @@ impl Changelog {
     #[cfg(test)]
     pub fn has_peer(&self, peer: &str) -> bool {
         locked(&self.inner, REPLICA_CHANGELOG).peers.contains_key(peer)
-    }
-}
-
-/// Remove from `sub` the tombstones its peer reported applying under
-/// incarnation `gen`, raising its `retained_floor`.
-fn reap_sublog(sub: &mut SubLog, gen: u64) {
-    let acked = *sub.acked.borrow();
-    if acked.gen != gen {
-        return;
-    }
-    let applied: Vec<String> = sub
-        .entries
-        .range(..=acked.counter)
-        .filter(|(_, call_ref)| sub.by_ref.get(*call_ref).is_some_and(|st| st.op == Op::Delete))
-        .map(|(_, call_ref)| call_ref.clone())
-        .collect();
-    for call_ref in applied {
-        if let Some(st) = sub.by_ref.remove(&call_ref) {
-            sub.entries.remove(&st.counter);
-            sub.retained_floor = sub.retained_floor.max(st.counter);
-        }
     }
 }
 

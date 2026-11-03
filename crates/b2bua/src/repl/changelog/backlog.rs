@@ -12,7 +12,6 @@ use std::time::Duration;
 use repl_net::frame::Partition;
 
 use super::Changelog;
-use crate::repl::puller::DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS;
 use crate::store::{locked, REPLICA_CHANGELOG};
 
 /// The high- and low-water marks of the backlog toward one backup peer.
@@ -71,6 +70,14 @@ struct Backlog {
 }
 
 impl Changelog {
+    /// Set the bootstrap hard timer the pullers of the cluster run
+    /// (`B2BUA_REPL_BOOTSTRAP_HARD_TIMEOUT_MS`): a peer's bootstrap in flight is
+    /// no slow consumer for that long.
+    pub fn with_bootstrap_hard_timeout(mut self, timeout: Duration) -> Self {
+        self.bootstrap_hard_timeout = timeout;
+        self
+    }
+
     /// Set the backlog marks.
     pub fn set_backlog_marks(&self, marks: BacklogMarks) {
         locked(&self.inner, REPLICA_CHANGELOG).marks = marks;
@@ -78,7 +85,8 @@ impl Changelog {
 
     /// Whether a new call admitted now gets `peer` as its backup. Toward a
     /// peer whose open flow completed its bootstrap (it claimed a position),
-    /// or stalled in it past the bootstrap hard deadline (10 s, dated from the
+    /// or stalled in it past the bootstrap hard deadline
+    /// (`B2BUA_REPL_BOOTSTRAP_HARD_TIMEOUT_MS`, 10 s, dated from the
     /// first flow open since its last claim, re-opens included), `false` from
     /// the moment the backlog reaches a high-water mark until it is under both
     /// low-water marks: the entries new calls add stop at the high-water mark.
@@ -94,7 +102,7 @@ impl Changelog {
         let marks = inner.marks;
         let Some(log) = inner.peers.get_mut(peer) else { return true };
         let sub = log.sub(Partition::Bak);
-        let deadline = Duration::from_millis(DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS);
+        let deadline = self.bootstrap_hard_timeout;
         let bootstrapping =
             sub.applied.is_none() && sub.flow_started.is_some_and(|t| t.elapsed() < deadline);
         if sub.streams == 0 || bootstrapping {

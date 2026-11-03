@@ -33,8 +33,8 @@
 //! duty for others: Reclaim streams open immediately, the Backup streams once
 //! the Reclaim flows are all current-or-unreachable. Readiness waits for the
 //! Backup flows too (ADR-0014 §11), so a node reads ready only once it holds
-//! the calls its peers named it backup of. A peer the Reclaim flow never
-//! reached releases its Backup flow at the Reclaim flow's hard timer (X5).
+//! the calls its peers named it backup of. A peer unreached by the Reclaim
+//! hard timer releases the Backup flow at its first failed connect (X5).
 //!
 //! ## Watermark retention per `(ordinal, flow)`
 //! The authoritative watermark + current flag live in the supervisor, keyed by

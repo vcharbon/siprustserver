@@ -39,6 +39,7 @@ impl Puller {
             bootstrap_complete: warm,
             reset_gen: 0,
             ever_connected: false,
+            connect_failed: false,
             streaming: false,
             last_frame_at: None,
             last_frame_gen: None,

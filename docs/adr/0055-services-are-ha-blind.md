@@ -203,8 +203,9 @@ ends the transaction with the CANCEL unsent (§9.1, §17.2.1).
   above that peer's applied position and the age of the oldest. New calls get a
   backup again once the backlog is under a low-water mark. The marks read a
   backup whose open flow completed its bootstrap (it claimed a position), or
-  stalled in it past the bootstrap hard deadline (10 s), slow to answer or
-  not, so the entries new calls add toward it stop at the high-water mark. A
+  stalled in it past the bootstrap hard deadline
+  (`B2BUA_REPL_BOOTSTRAP_HARD_TIMEOUT_MS`, 10 s), slow to answer or not, so the
+  entries new calls add toward it stop at the high-water mark. A
   backup no flow carries, or one still bootstrapping, is no slow consumer, and
   the call is admitted with it (user ruling: every call born while its backup
   restarts ends up held by it): its bootstrap carries the call. Its writes go

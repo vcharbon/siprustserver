@@ -65,6 +65,7 @@ impl Puller {
             self.note_state("connecting", "a connect is asked for at once: connecting afresh");
         };
         let Some(conn) = conn else {
+            self.status_tx.send_if_modified(|s| !std::mem::replace(&mut s.connect_failed, true));
             asks.answer(Attempt::Failed);
             return Err(RunOutcome::ConnectFailed);
         };

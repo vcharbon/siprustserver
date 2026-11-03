@@ -22,6 +22,7 @@ fn unset_variables_take_the_stated_defaults() {
     assert_eq!(s.socket.user_timeout, Duration::from_secs(15));
     assert_eq!(s.lookup_timeout, Duration::from_secs(2));
     assert_eq!(s.dead_peer_ttl, Duration::from_secs(60));
+    assert_eq!(s.bootstrap_hard_timeout, Duration::from_secs(10));
 }
 
 #[test]
@@ -38,9 +39,11 @@ fn every_bound_is_read_from_its_variable() {
         ("B2BUA_REPL_USER_TIMEOUT_MS", "12000"),
         ("B2BUA_REPL_LOOKUP_TIMEOUT_MS", "700"),
         ("B2BUA_REPL_DEAD_PEER_TTL_MS", "30000"),
+        ("B2BUA_REPL_BOOTSTRAP_HARD_TIMEOUT_MS", "12000"),
     ]))
     .expect("valid");
     let puller = s.puller();
+    assert_eq!(puller.bootstrap_hard_timeout_ms, 12_000);
     assert_eq!((puller.connect_timeout_ms, puller.idle_timeout_ms), (1500, 9000));
     assert_eq!((puller.backoff_init_ms, puller.backoff_max_ms), (100, 4000));
     assert_eq!(
@@ -73,6 +76,7 @@ fn a_bound_that_is_not_a_positive_integer_refuses_boot_naming_its_variable() {
         "B2BUA_REPL_KEEPALIVE_RETRIES",
         "B2BUA_REPL_USER_TIMEOUT_MS",
         "B2BUA_REPL_LOOKUP_TIMEOUT_MS",
+        "B2BUA_REPL_BOOTSTRAP_HARD_TIMEOUT_MS",
     ] {
         for bad in ["0", "-1", "soon"] {
             let e = LinkSettings::from_lookup(lookup(&[(key, bad)]))

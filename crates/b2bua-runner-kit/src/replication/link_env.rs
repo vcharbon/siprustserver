@@ -16,6 +16,8 @@
 //!   B2BUA_REPL_LOOKUP_TIMEOUT_MS      one peer name lookup               (2000)
 //!   B2BUA_REPL_DEAD_PEER_TTL_MS       how long a peer's change log is kept
 //!                                     after a flow last served it        (60000)
+//!   B2BUA_REPL_BOOTSTRAP_HARD_TIMEOUT_MS  a cold flow's bound on reaching
+//!                                     its peer and catching up           (10000)
 //! ```
 //!
 //! Unset takes the default. A value that is not a positive integer refuses the
@@ -50,6 +52,13 @@
 //! its watermark or re-bootstraps cold. It must exceed the idle timeout plus
 //! the backoff ceiling plus one connect: the longest a flow that blipped
 //! takes to be read down and pull again, so a short blip resumes warm.
+//!
+//! The bootstrap hard timer bounds how long a cold flow waits to reach its
+//! peer before it stops holding readiness (ADR-0011 X5, ADR-0014 §11), and how
+//! long a serving node reads a peer's bootstrap in flight as no slow consumer
+//! (ADR-0055 §3); every worker of a cluster runs the same value. Its relation
+//! to the connect bounds is checked with the configuration
+//! (`ConfigCheck`).
 
 use std::time::Duration;
 
@@ -68,6 +77,7 @@ pub(crate) struct LinkSettings {
     pub(crate) socket: SocketSettings,
     pub(crate) lookup_timeout: Duration,
     pub(crate) dead_peer_ttl: Duration,
+    pub(crate) bootstrap_hard_timeout: Duration,
 }
 
 impl Default for LinkSettings {
@@ -85,6 +95,7 @@ impl Default for LinkSettings {
             dead_peer_ttl: Duration::from_millis(
                 u64::try_from(b2bua::repl::DEFAULT_DEAD_PEER_TTL_MS).unwrap_or(u64::MAX),
             ),
+            bootstrap_hard_timeout: Duration::from_millis(puller.bootstrap_hard_timeout_ms),
         }
     }
 }
@@ -136,6 +147,10 @@ impl LinkSettings {
             },
             lookup_timeout: ms("B2BUA_REPL_LOOKUP_TIMEOUT_MS", d.lookup_timeout)?,
             dead_peer_ttl: ms("B2BUA_REPL_DEAD_PEER_TTL_MS", d.dead_peer_ttl)?,
+            bootstrap_hard_timeout: ms(
+                "B2BUA_REPL_BOOTSTRAP_HARD_TIMEOUT_MS",
+                d.bootstrap_hard_timeout,
+            )?,
         };
         let floor = Duration::from_millis(PullerConfig::default().backoff_init_ms);
         if settings.backoff_max < floor {
@@ -169,10 +184,11 @@ impl LinkSettings {
         i64::try_from(self.dead_peer_ttl.as_millis()).unwrap_or(i64::MAX)
     }
 
-    /// The pullers' configuration: the default backoff floor and bootstrap
-    /// timer, these link bounds and backoff ceiling.
+    /// The pullers' configuration: the default backoff floor, these link
+    /// bounds, backoff ceiling and bootstrap hard timer.
     pub(crate) fn puller(&self) -> PullerConfig {
         PullerConfig {
+            bootstrap_hard_timeout_ms: millis_u64(self.bootstrap_hard_timeout),
             connect_timeout_ms: millis_u64(self.connect_timeout),
             backoff_max_ms: millis_u64(self.backoff_max),
             idle_timeout_ms: millis_u64(self.idle_timeout),

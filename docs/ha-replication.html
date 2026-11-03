@@ -252,22 +252,25 @@ flowchart LR
 
 <ul>
   <li>The supervisor opens the <strong>Reclaim</strong> streams immediately.</li>
-  <li><code>Ready</code> ⇔ every Reclaim stream to a <em>reachable</em> peer hit its
-      <strong>first Noop</strong> — bounded by a per-flow hard timer so an
-      unreachable or pathologically-slow peer cannot hang readiness (liveness over
-      completeness). A cold node with no calls reaches <code>Ready</code> at once
-      (empty scan → immediate Noop).</li>
-  <li>The <strong>Backup</strong> streams open only <em>after</em> <code>Ready</code>.
-      They are fire-and-forget and <strong>never gate</strong> readiness — observable
-      via the store and a received-frame counter, not a readiness sub-state. (The
-      gate is bandwidth prioritisation only; <code>(p,b)</code> makes any incidental
-      overlap safe.)</li>
+  <li>The <strong>Backup</strong> streams open once every Reclaim stream to a
+      <em>reachable</em> peer hit its <strong>first Noop</strong> (the Reclaim
+      streams first: bandwidth prioritisation; <code>(p,b)</code> makes any
+      incidental overlap safe).</li>
+  <li><code>Ready</code> ⇔ every Reclaim stream <em>and</em> every Backup stream to
+      a <em>reachable</em> ready peer hit its first Noop (ADR-0014 §11): a node
+      reads ready once it holds its own calls and the calls its peers named it
+      backup of. Each wait is bounded by the bootstrap hard timer
+      (<code>B2BUA_REPL_BOOTSTRAP_HARD_TIMEOUT_MS</code>) for a peer never reached,
+      so an unreachable peer cannot hang readiness (liveness over completeness);
+      a stream that reached its peer and then stalled holds it while the peer
+      stays listed ready. A cold node with no calls reaches <code>Ready</code> at
+      once (empty scan → immediate Noop).</li>
 </ul>
 
-<p>All readiness introspection — <code>all_current</code>, <code>is_current</code>,
-   <code>bootstrap_complete</code>, the retained <code>watermark</code> — scopes to
-   the <strong>Reclaim</strong> flow. The Backup flow's <code>current</code> is
-   metrics-only.</p>
+<p>The readiness introspection <code>all_current</code> reads both flows;
+   <code>is_current</code>, <code>bootstrap_complete</code>,
+   <code>all_bootstrapped</code> and the retained <code>watermark</code> read the
+   <strong>Reclaim</strong> flow.</p>
 
 <!-- =================================================================== -->
 <h2 id="merge" class="repl">5 · Apply: (p,b) merge, takeover &amp; self-release</h2>

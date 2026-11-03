@@ -36,6 +36,8 @@ pub(super) struct FlowState {
     /// unreachable peer (never connected) that goes bootstrap-complete only by the
     /// hard timer must NOT pin readiness NotReady (ADR-0011 X5 — liveness).
     pub(super) ever_connected: bool,
+    /// Sticky: a connect of this flow to its peer failed at least once.
+    pub(super) connect_failed: bool,
 }
 
 impl FlowState {
@@ -56,6 +58,7 @@ impl FlowState {
             bootstrap_complete: false,
             reset_gen: 0,
             ever_connected: false,
+            connect_failed: false,
         }
     }
 
@@ -69,6 +72,7 @@ impl FlowState {
             let s = *rx.borrow();
             self.current |= s.current;
             self.ever_connected |= s.ever_connected;
+            self.connect_failed |= s.connect_failed;
             if s.reset_gen > self.reset_gen {
                 self.reset_gen = s.reset_gen;
                 self.watermark = s.watermark; // (0,0)
@@ -116,15 +120,16 @@ impl PeerEntry {
 
     /// Whether this peer's flows let the node read ready: the Reclaim flow is
     /// [`ready`](FlowState::ready), and the Backup flow is current, or was
-    /// never reached and its own hard timer or the Reclaim flow's released it
-    /// (ADR-0011 X5): a peer unreachable since the boot holds readiness no
-    /// longer than the Reclaim flow's hard timer.
+    /// never reached and released by its own hard timer, or by a failed
+    /// connect of its own when the Reclaim flow's hard timer already read the
+    /// peer unreachable (ADR-0011 X5). A Backup flow that reached the peer
+    /// holds readiness until it catches up, the strict X6 gate.
     pub(super) fn ready(&self) -> bool {
         let reclaim_unreached = self.reclaim.bootstrap_complete && !self.reclaim.ever_connected;
         let backup = &self.backup;
-        self.reclaim.ready()
-            && (backup.current
-                || (!backup.ever_connected && (backup.bootstrap_complete || reclaim_unreached)))
+        let backup_unreached = !backup.ever_connected
+            && (backup.bootstrap_complete || (reclaim_unreached && backup.connect_failed));
+        self.reclaim.ready() && (backup.current || backup_unreached)
     }
 
     pub(super) fn flow(&self, partition: Partition) -> &FlowState {

@@ -7,6 +7,9 @@
 //!            own hard timer, current after it
 //!   carried  B holds a call A backs up ⇒ A reads current only once its
 //!            Backup flow holds it
+//!   late     B listens only after the Reclaim flow's last refused connect:
+//!            the Reclaim hard timer reads B unreachable, the Backup flow
+//!            then reaches B ⇒ A reads current only once it holds B's call
 //! ```
 
 use std::net::SocketAddr;
@@ -97,4 +100,44 @@ async fn readiness_reads_current_only_once_the_backup_flow_holds_the_peers_calls
         }
     }
     assert_eq!(held_when_current, Some(true), "A reads current holding B's call it backs up");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_backup_flow_that_reaches_a_peer_the_reclaim_flow_never_did_holds_readiness() {
+    let clock = Clock::test_at(0);
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let b_addr = addr(3);
+    let a_store = ReplicatingCallStore::new(1, clock.clone());
+    let a_sup =
+        supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b_addr)], fast_config());
+    a_sup
+        .start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("B", "B")], clock.clone())));
+
+    // The Reclaim flow's connects at 0, 0.1, 0.3, 0.7 and 1.5 s are refused;
+    // its 2 s hard timer fires in the backoff after them, reads B unreachable
+    // and opens the Backup flow. B listens from 1.8 s.
+    tick(1_700).await;
+    assert!(!a_sup.all_current(), "nothing reached B yet");
+    let b = Node::spawn("B", b_addr, 1, &net, &clock).await;
+    let c = cref("B", "1");
+    b.store
+        .put_call(PartitionRole::Primary, "B", &c, b"v1".to_vec(), &[], 0, 1, 0, &fwd("A"))
+        .await
+        .unwrap();
+
+    let mut held_when_current = None;
+    for _ in 0..1_000 {
+        sip_clock::testkit::advance_settled(std::time::Duration::from_millis(1)).await;
+        if a_sup.all_current() {
+            held_when_current =
+                Some(a_store.get_call(PartitionRole::Backup, "B", &c).await.unwrap().is_some());
+            break;
+        }
+    }
+    assert!(a_sup.bootstrap_complete("B"), "the Reclaim hard timer read B unreachable");
+    assert_eq!(
+        held_when_current,
+        Some(true),
+        "the Backup flow that reached B holds readiness until it caught up"
+    );
 }

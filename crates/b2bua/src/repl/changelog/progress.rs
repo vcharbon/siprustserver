@@ -14,10 +14,10 @@
 
 use std::time::Duration;
 
-use repl_net::frame::{Partition, Watermark};
+use repl_net::frame::{Op, Partition, Watermark};
 use tokio::time::Instant;
 
-use super::Changelog;
+use super::{Changelog, SubLog};
 
 /// How long a claim vouches for its flow unless the server says otherwise:
 /// twice the server's default idle `Noop` interval.
@@ -230,5 +230,26 @@ impl Changelog {
         }
         let head = Watermark::new(self.gen, sub.head);
         sub.applied.is_some_and(|c| c.at >= head && c.made.elapsed() <= inner.claim_ttl)
+    }
+}
+
+/// Remove from `sub` the tombstones its peer reported applying under
+/// incarnation `gen`, raising its `retained_floor`.
+pub(super) fn reap_sublog(sub: &mut SubLog, gen: u64) {
+    let acked = *sub.acked.borrow();
+    if acked.gen != gen {
+        return;
+    }
+    let applied: Vec<String> = sub
+        .entries
+        .range(..=acked.counter)
+        .filter(|(_, call_ref)| sub.by_ref.get(*call_ref).is_some_and(|st| st.op == Op::Delete))
+        .map(|(_, call_ref)| call_ref.clone())
+        .collect();
+    for call_ref in applied {
+        if let Some(st) = sub.by_ref.remove(&call_ref) {
+            sub.entries.remove(&st.counter);
+            sub.retained_floor = sub.retained_floor.max(st.counter);
+        }
     }
 }

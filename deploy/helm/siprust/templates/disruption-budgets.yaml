@@ -2,7 +2,7 @@
 PodDisruptionBudgets: a voluntary disruption (a node drain, an eviction)
 takes one worker and one proxy at a time, and waits for the one it took to
 read ready again. A worker reads ready once it holds its own calls and the
-calls it backs up, so the next eviction never meets a call with no copy.
+calls it backs up, so the next eviction waits for the copies it can get.
 */ -}}
 {{- $w := .Values.worker }}
 {{- if and $w.enabled $w.podDisruptionBudget.enabled }}

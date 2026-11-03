@@ -27,6 +27,9 @@ pub struct PullerStatus {
     /// an unreachable peer (hard-timer bootstrap-complete, never connected) does
     /// not pin the node NotReady.
     pub ever_connected: bool,
+    /// Set the first time a connect to the peer is refused or runs out its
+    /// bound: the peer was tried and not reached, at least once.
+    pub connect_failed: bool,
     /// Whether a stream to the peer is open now: set once a connect succeeds,
     /// cleared when that stream ends, by a cut, a failed send or the idle bound.
     pub streaming: bool,

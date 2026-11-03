@@ -17,6 +17,7 @@
 //! | with replication: sync cap < ACK and CANCEL bounds < T1, the backlog marks | `WritePath::validate` |
 //! | with replication: the verdict hold ≥ freshness window + Timer F | `VerdictBounds::validate` |
 //! | with replication: `B2BUA_DEAD_VERDICT_HOLD_MS` > 2 × `B2BUA_REPL_IDLE_TIMEOUT_MS` + `B2BUA_REPL_LOOKUP_TIMEOUT_MS` + `B2BUA_REPL_CONNECT_TIMEOUT_MS` | here: a verdict stays held while the backup confirms it (ADR-0047 D1) |
+//! | with replication: `B2BUA_REPL_BOOTSTRAP_HARD_TIMEOUT_MS` > 2 × `B2BUA_REPL_CONNECT_TIMEOUT_MS` + `B2BUA_REPL_BACKOFF_MAX_MS` | here: a cold flow refused or timed out once still makes a second connect before the timer reads its peer unreachable (ADR-0011 X5) |
 //!
 //! The replication link bounds (idle timeout against the heartbeat, the
 //! dead-peer TTL against a blip) and the CDR sink's bounds are relations of
@@ -113,7 +114,26 @@ impl ConfigCheck {
             if let Some(settings) = &env.replication {
                 self.confirmation_fits_the_hold(repl, settings);
             }
+            self.bootstrap_outlasts_a_retry(&repl.puller);
         }
+    }
+
+    /// A cold flow's bootstrap hard timer outlasts one failed connect, the
+    /// longest backoff and a second connect: a peer refused or slow once is
+    /// tried again before the timer reads it unreachable and releases the
+    /// readiness it holds (ADR-0011 X5).
+    fn bootstrap_outlasts_a_retry(&mut self, puller: &b2bua::repl::PullerConfig) {
+        let (hard, connect, backoff) =
+            (puller.bootstrap_hard_timeout_ms, puller.connect_timeout_ms, puller.backoff_max_ms);
+        let retry = connect.saturating_mul(2).saturating_add(backoff);
+        self.require(hard > retry, || {
+            format!(
+                "B2BUA_REPL_BOOTSTRAP_HARD_TIMEOUT_MS={hard} is not above 2 × \
+                 B2BUA_REPL_CONNECT_TIMEOUT_MS={connect} + B2BUA_REPL_BACKOFF_MAX_MS={backoff}: \
+                 a peer slow to answer one connect would be read unreachable and a returning \
+                 worker read ready without the calls it backs up"
+            )
+        });
     }
 
     /// The longest a backup confirms a dead verdict itself, a frozen peer

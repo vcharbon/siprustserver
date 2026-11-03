@@ -508,9 +508,11 @@ pre-seeding its **own** calls (`pri:{self}`) from the peers that backed them up,
 then re-serving them (smoothed). Gates **readiness** (first Noop).
 
 **Backup re-subscription**:
-The **Backup** stream (bootstrap + tail) a node opens against each peer *after*
-`Ready` to keep the calls it backs up current. Distinct socket, distinct
-watermark from Reclaim; never gates readiness (metrics-only).
+The **Backup** stream (bootstrap + tail) a node opens against each peer once
+its **Reclaim** streams are ready, to hold and keep current the calls it backs
+up. Distinct socket, distinct watermark from Reclaim. Gates **readiness** too
+(first Noop, ADR-0014 §11): a node reads ready once it holds the calls its
+peers named it backup of.
 
 **Takeover copy** (acting-backup live copy) (ADR-0014, ADR-0047):
 The live, in-memory call a backup materialises into its own call map **when the
@@ -718,8 +720,9 @@ waits for it.
 Set the instant the **first `Noop`** arrives on a stream — the server emits it on
 the **catch-up edge** (backlog drained below one batch / to head), so it means "I
 have drained this flow's backlog." **Sticky** across reconnects; a transient TCP
-blip does not revert a node to NotReady. Tracked **per flow**: the **Reclaim**
-stream's current flag gates readiness; the **Backup** stream's is **metrics-only**.
+blip does not revert a node to NotReady. Tracked **per flow**: both the
+**Reclaim** and the **Backup** stream's current flags gate readiness (ADR-0014
+§11).
 
 **Readiness states** (`NotReady → Ready ⇄ Cordoned → Draining`):
 Two axes, read apart by the proxy (ADR-0050): **serving dialogs** (OPTIONS `200`,

@@ -155,12 +155,15 @@ watermark collision that capped re-hydration at ~203/3000 — and conflated the
     to a *reachable* ready peer hit its first Noop, the **Reclaim** stream and then
     the **Backup** stream, which opens once every Reclaim stream has: a node reads
     ready only once it holds the calls its peers named it backup of, so an
-    orchestrator that waits for ready before its next disruption never takes down
-    a primary whose calls have no copy. Hard-timer bounded: a Backup stream never
-    reached is released by its own hard timer, or at once when the peer's Reclaim
-    stream was never reached by its own; a dead peer cannot hang readiness. A cold
-    node with no calls reaches `Ready` at once (empty scan → immediate terminal
-    Noop). The
+    orchestrator that waits for ready before its next disruption waits for the
+    copies the returned node can get. Hard-timer bounded
+    (`B2BUA_REPL_BOOTSTRAP_HARD_TIMEOUT_MS`, ADR-0011 X5) for a peer never reached:
+    a Backup stream never reached is released by its own hard timer, or by one
+    failed connect of its own once the peer's Reclaim stream was never reached by
+    its hard timer; a dead peer cannot hang readiness. A stream that reached its
+    peer and then stalled holds readiness while the peer stays listed ready, the
+    strict X6 gate. A cold node with no calls reaches `Ready` at once (empty scan
+    → immediate terminal Noop). The
     **server** side is independent of local readiness: a NotReady node still answers
     peers' pulls — it simply has nothing to hand over until it processes calls.
 
