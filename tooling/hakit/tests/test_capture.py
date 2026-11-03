@@ -111,26 +111,31 @@ def test_a_window_keeps_only_the_ring_files_written_since_it_opened(tmp_path: Pa
     assert sorted(p.name for p in (tmp_path / "pcap" / "windows" / "007-x" / "bridge").iterdir()) == ["sip.pcap1", "sip.pcap2"]
 
 
-def test_a_ring_whose_container_stopped_is_started_again_under_a_new_prefix(tmp_path: Path) -> None:
-    """A node ring dies with its node: at each window's close a ring not
-    running is removed and started again, its next incarnation writing
-    `sip-<n>.pcap`, so it never overwrites the files of the one before; a
-    start that fails is tried again at the next close."""
+def test_a_stale_ring_is_started_again_under_a_new_prefix(tmp_path: Path) -> None:
+    """A node ring that joined its node's network namespace keeps running in
+    the orphaned namespace when the node stops: once the node started after
+    the ring, the ring is stale. At each window's close a stale ring, or one
+    not running, is removed and started again, its next incarnation writing
+    `sip-<n>.pcap`, so it never overwrites the files of the one before."""
     from hakit.capture import Ring
 
-    running = {"hakit-capture-r-bridge": True, "hakit-capture-r-node-e1": False}
-    node_up = [False]
+    # name -> (running, StartedAt); the node e1 is a container too.
+    state = {
+        "hakit-capture-r-bridge": ("true", "2026-11-03T13:00:00.5Z"),
+        "hakit-capture-r-node-e1": ("true", "2026-11-03T13:00:01.25Z"),
+        "e1": ("true", "2026-11-03T13:00:00.123456789Z"),
+    }
+    launched = ["2026-11-03T13:31:00Z"]
 
     def rules(c: Call) -> ProcResult | None:
         a = c.argv
         if c.kind != "run":
             return None
         if a[:2] == ["docker", "inspect"]:
-            return ProcResult(0, "true\n" if running[a[-1]] else "false\n", "")
+            running, started = state[a[-1]]
+            return ProcResult(0, (f"{running} {started}" if "Running" in a[3] else started) + "\n", "")
         if a[:2] == ["docker", "run"] and "tcpdump" in a:
-            if not node_up[0]:
-                return ProcResult(125, "", "container e1 is not running")
-            running[a[a.index("--name") + 1]] = True
+            state[a[a.index("--name") + 1]] = ("true", launched[0])
             ring = Path(a[a.index("-v") + 1].split(":")[0])
             f = ring / (a[a.index("-w") + 1].removeprefix("/cap/") + "0")
             f.write_bytes(b"revived")
@@ -145,18 +150,30 @@ def test_a_ring_whose_container_stopped_is_started_again_under_a_new_prefix(tmp_
         (d / "sip.pcap0").write_bytes(b"first")
         os.utime(d / "sip.pcap0", (FUTURE_S, FUTURE_S))
         caps.rings.append(Ring(source, f"hakit-capture-r-{source}", d, net, "any", "udp"))
-    assert caps.revive() == 0  # the node is still down
-    node_up[0] = True
+    assert caps.revive() == 0  # the node started before its ring
+    state["e1"] = ("true", "2026-11-03T13:30:07.9Z")  # the node stopped and started again
     assert caps.keep("002-x", 1_000_000) == 3
     runs = [c.argv for c in fake.calls if c.kind == "run" and c.argv[:2] == ["docker", "run"]]
-    assert [a[a.index("-w") + 1] for a in runs] == ["/cap/sip-1.pcap", "/cap/sip-2.pcap"]
-    assert all("container:e1" in a for a in runs)
+    assert [(a[a.index("--net") + 1], a[a.index("-w") + 1]) for a in runs] == [("container:e1", "/cap/sip-1.pcap")]
     removed = [c.argv for c in fake.calls if c.kind == "run" and c.argv[:3] == ["docker", "rm", "-f"]]
-    assert removed == [["docker", "rm", "-f", "hakit-capture-r-node-e1"]] * 2
+    assert removed == [["docker", "rm", "-f", "hakit-capture-r-node-e1"]]
     kept = tmp_path / "pcap" / "windows" / "002-x"
-    assert sorted(p.name for p in (kept / "node-e1").iterdir()) == ["sip-2.pcap0", "sip.pcap0"]
+    assert sorted(p.name for p in (kept / "node-e1").iterdir()) == ["sip-1.pcap0", "sip.pcap0"]
     assert (kept / "node-e1" / "sip.pcap0").read_bytes() == b"first"
-    assert caps.revive() == 0  # both running now
+    assert caps.revive() == 0  # the new incarnation started after the node
+    state["hakit-capture-r-bridge"] = ("false", "2026-11-03T13:00:00.5Z")
+    assert caps.revive() == 1  # a ring not running, the bridge's included
+    last = [c.argv for c in fake.calls if c.kind == "run" and c.argv[:2] == ["docker", "run"]][-1]
+    assert (last[last.index("--net") + 1], last[last.index("-w") + 1]) == ("host", "/cap/sip-1.pcap")
+
+
+def test_a_started_at_reads_to_the_nanosecond_whatever_its_fraction() -> None:
+    from hakit.capture import started_ns
+
+    assert started_ns("2026-11-03T13:30:07.9Z") == started_ns("2026-11-03T13:30:07.900000000Z")
+    assert started_ns("2026-11-03T13:30:07Z") is not None
+    assert started_ns("2026-11-03T13:30:07.12Z") < started_ns("2026-11-03T13:30:07.123Z")  # type: ignore[operator]
+    assert started_ns("0") is None
 
 
 def udp(call_id: str, n: int) -> bytes:

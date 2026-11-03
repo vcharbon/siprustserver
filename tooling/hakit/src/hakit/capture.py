@@ -4,8 +4,9 @@ kept per window.
 One ring on the callers' docker bridge, and one inside each kind node the
 profile's `nodes` selector names (every interface of the node's netns). Each
 ring is a container of the capture image (`tooling/hakit/capture/`, built on
-first use) writing `pcap/ring/<source>/sip.pcapN` in the run directory. A ring
-whose container stopped (a node ring dies with its node) is started again at
+first use) writing `pcap/ring/<source>/sip.pcapN` in the run directory. A stale
+ring (its container stopped, or its node started after it: a node ring keeps
+running in the namespace of a node that stopped) is started again at
 each window's close and before the run's end, each new incarnation n writing
 `sip-<n>.pcapN` beside the earlier files. When a window closes, the ring files
 written since it opened (by mtime, with a margin) are copied to
@@ -19,6 +20,7 @@ from __future__ import annotations
 import os
 import shutil
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .executor import Executor, ProcResult
@@ -47,6 +49,26 @@ class Ring:
 
     def file(self) -> str:
         return "/cap/sip.pcap" if self.incarnation == 0 else f"/cap/sip-{self.incarnation}.pcap"
+
+    def node(self) -> str | None:
+        """The kind node whose network namespace the ring joined; None for the bridge."""
+        joined = next((n for n in self.net if n.startswith("container:")), None)
+        return joined.removeprefix("container:") if joined else None
+
+
+def started_ns(stamp: str) -> int | None:
+    """An RFC 3339 `State.StartedAt` in nanoseconds since the epoch (UTC, any
+    fraction length); None when it is not one."""
+    stamp = stamp.strip()
+    if not stamp.endswith("Z") or "T" not in stamp:
+        return None
+    whole, _, frac = stamp[:-1].partition(".")
+    try:
+        seconds = int(datetime.strptime(whole, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp())
+        nanos = int((frac + "000000000")[:9]) if frac else 0
+    except ValueError:
+        return None
+    return seconds * 1_000_000_000 + nanos
 
 
 class CaptureFailed(Exception):
@@ -124,14 +146,29 @@ class Captures:
             timeout_s=60,
         )
 
+    def _stale(self, ring: Ring) -> bool:
+        """Whether the ring captures nothing any more: its container is not
+        running, or, for a node ring, the node started after it. A container
+        that joined a node's network namespace keeps running in the orphaned
+        namespace when the node stops, and sees no packet of the restarted node."""
+        state = self.executor.run(["docker", "inspect", "-f", "{{.State.Running}} {{.State.StartedAt}}", ring.container], timeout_s=30)
+        running, _, ring_started = state.stdout.strip().partition(" ")
+        if state.rc != 0 or running != "true":
+            return True
+        node = ring.node()
+        if node is None:
+            return False
+        res = self.executor.run(["docker", "inspect", "-f", "{{.State.StartedAt}}", node], timeout_s=30)
+        node_ns, ring_ns = started_ns(res.stdout), started_ns(ring_started)
+        return res.rc == 0 and node_ns is not None and ring_ns is not None and node_ns > ring_ns
+
     def revive(self) -> int:
-        """Start again every ring whose container is not running, as its next
-        incarnation; the count started. A ring that does not start (its node
-        still down) is tried again at the next call."""
+        """Start again every stale ring, as its next incarnation; the count
+        started. A ring that does not start (its node still down) is tried
+        again at the next call."""
         n = 0
         for ring in self.rings:
-            state = self.executor.run(["docker", "inspect", "-f", "{{.State.Running}}", ring.container], timeout_s=30)
-            if state.rc == 0 and state.stdout.strip() == "true":
+            if not self._stale(ring):
                 continue
             self.executor.run(["docker", "rm", "-f", ring.container], timeout_s=60)
             ring.incarnation += 1
