@@ -336,3 +336,47 @@ async fn a_truncated_request_body_never_reaches_the_service() {
     assert_eq!(answer, "");
     assert_eq!(service.0.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
+
+/// Counts the connections the transport announces.
+#[derive(Default)]
+struct Connections {
+    opened: std::sync::atomic::AtomicUsize,
+    closed: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl HttpService for Connections {
+    async fn handle(&self, _req: HttpRequest) -> HttpResponse {
+        HttpResponse::ok(Vec::new())
+    }
+
+    fn connection_opened(&self) {
+        self.opened.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn connection_closed(&self) {
+        self.closed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn the_service_hears_each_connection_open_once_and_close_once() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let net = RealHttpNetwork::new();
+    let service = Arc::new(Connections::default());
+    let handle = net.serve("127.0.0.1:0".parse().unwrap(), service.clone()).await.unwrap();
+    let dst = handle.local_addr();
+    for _ in 0..3 {
+        assert_eq!(net.request(dst, HttpRequest::get("/")).await.unwrap().status, 200);
+    }
+    assert_eq!(service.opened.load(SeqCst), 1, "three requests ride one pooled connection");
+    assert_eq!(service.closed.load(SeqCst), 0);
+    drop(handle);
+    for _ in 0..100 {
+        if service.closed.load(SeqCst) == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(service.closed.load(SeqCst), 1, "the stopped server closed its connection");
+}

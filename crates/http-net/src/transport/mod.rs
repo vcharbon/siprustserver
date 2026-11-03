@@ -146,6 +146,16 @@ pub trait HttpService: Send + Sync {
     async fn answer(&self, req: HttpRequest) -> HttpAnswer {
         HttpAnswer::Response(self.handle(req).await)
     }
+
+    /// A client connection to this service opened. Every transport that
+    /// keeps connections calls it once per connection, before its first
+    /// request, and [`connection_closed`](Self::connection_closed) once when
+    /// it ends, whichever side closed it. The default ignores both.
+    fn connection_opened(&self) {}
+
+    /// A connection [`connection_opened`](Self::connection_opened) announced
+    /// ended.
+    fn connection_closed(&self) {}
 }
 
 /// What a service does with one request.
