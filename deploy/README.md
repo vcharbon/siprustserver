@@ -163,6 +163,12 @@ provides:
   - the routers run BFD on the proxy nodes' sessions with a detection time inside the guard's
     bound (multiplier × receive interval, 900 ms by default) and withdraw a node's routes when its
     BFD goes down;
+  - the routers update their forwarding tables within the bound's margin once BFD reads a session
+    down: every detection path is checked at render against `routeGuard.withdrawWithinMs` with
+    the BFD detection included but not the forwarding update, and the slowest path (a proxy cut
+    from every worker: isolation 2 s + two readings 0.2 s + BFD 0.9 s = 3.1 s at the defaults)
+    leaves 0.3 s under the 3.4 s bound and 0.4 s under the 3.5 s INVITE retransmission it
+    protects; the crash path (dead bound 1 s + BFD 0.9 s) leaves 1.5 s;
   - the proxy nodes peer with those routers for MetalLB alone: a CNI's BGP to the same routers,
     or routes the nodes learn over those sessions (the routes to the workers and the callers
     among them), would be cut with it;

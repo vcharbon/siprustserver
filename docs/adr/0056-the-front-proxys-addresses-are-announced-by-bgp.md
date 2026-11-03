@@ -206,9 +206,13 @@ Via.
   its own view. The failover harness cell `split_proxy_views` judges that case with real B2BUAs:
   no leak, full cleanup, one CDR, no copy left serving.
 - An internal-plane blip both proxies see for about 2.1 s or more (the isolation window, two
-  readings) withdraws both nodes, the total-outage rule of §3: it costs the blip + 0.9 s + the
-  hold + the reconnect, about 6-7 s of an unreachable VIP, where readiness alone rode out blips
-  under about 2.6 s.
+  readings) withdraws both nodes, the total-outage rule of §3. The VIP is unreachable from the
+  withdrawal (the BFD detection, 0.9 s, after those 2.1 s) until the blip's end, the next probe
+  round that answers (up to 1 s), the guard's hold (3 s), the pod's readiness (up to 1 s) and
+  the announcement's propagation (4.65 s measured): for a blip just past the threshold, the VIPs
+  are routed again up to about 12 s after it began, about 9 s of them unreachable, where
+  readiness alone rode out blips under about 2.6 s. The hakit budget `backend-outage` derives
+  its recovery R from the same chain.
 - The route guard's bound (3.4 s) caps the window in which a lost, hung or cut node still draws
   traffic; the hakit budgets `proxy-failover` and `proxy-cut` derive their allowances from it,
   `proxy-reroute` from the readiness path of a planned withdrawal.
