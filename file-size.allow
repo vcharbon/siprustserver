@@ -25,7 +25,7 @@ crates/b2bua-harness/tests/it/reroute_limiter_holds.rs 858
 crates/b2bua-harness/tests/it/session_timer_transparency.rs 818
 crates/b2bua-harness/tests/it/stated_headers.rs 1453
 crates/b2bua-harness/tests/it/suppress_18x.rs 818
-crates/b2bua-runner-kit/src/lib.rs 556
+crates/b2bua-runner-kit/src/lib.rs 555
 crates/b2bua-sdk/src/config.rs 536
 crates/b2bua-sdk/src/model.rs 1168
 crates/b2bua/src/decision/test_adapter.rs 818

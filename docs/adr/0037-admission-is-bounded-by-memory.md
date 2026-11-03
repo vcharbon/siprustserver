@@ -2,7 +2,8 @@
 
 **Status:** accepted (2026-09-25)
 Amended (2026-10-23): items 4 and 6, a replica left out leaves the call without a backup
-(ADR-0055 §3). Amended (2026-11-01): item 11, the event-queue rung.
+(ADR-0055 §3). Amended (2026-11-01): item 11, the event-queue rung. Amended (2026-11-03): items 2, 4
+and 7, the backup ceilings at least the admission ones and the replica's own cost.
 
 ## Context
 
@@ -23,7 +24,9 @@ kills it, and a kill drops every call it serves.
 2. **Each bound has two ceilings.** At the `normal` ceiling a new
    non-emergency call is refused. At the `emergency` ceiling every new call is
    refused. Emergency calls keep priority between the two, and the higher
-   ceiling still protects the process. Every ceiling is an explicit setting;
+   ceiling still protects the process: it sits strictly above the normal one
+   (refused at boot otherwise). A call a takeover turns live is not a new call
+   and meets no ceiling. Every ceiling is an explicit setting;
    none is derived from the host or the container, and all are off by default.
 3. **The reject is a 503 with a jittered `Retry-After` and no `Reason`,**
    whichever rung of the admission ladder (item 11) refuses a new INVITE,
@@ -36,7 +39,11 @@ kills it, and a kill drops every call it serves.
    never refused, but for item 6. A refusal is counted once, on
    `b2bua_new_calls_total`; a copy refused again is counted apart.
 4. **Backup replicas have their own ceilings:** a count and an RSS ceiling,
-   set lower than the admission ones. At either, a replica of a call this node
+   at least the admission ones, in a pool whose workers run one setting: the
+   count at least the emergency call ceiling, the RSS at least the emergency
+   RSS ceiling (refused at boot otherwise). So every call a peer admits can be
+   backed, and this node stores backups as long as it admits calls itself. At
+   either, a replica of a call this node
    does not hold yet is refused: the backup tells the primary in a frame, its
    reported position moves past the refused write, and it refuses the later
    writes of that call until its delete or the refusal's TTL. The call has no
@@ -70,10 +77,12 @@ kills it, and a kill drops every call it serves.
    the backup replicas that turn live when a peer dies, every call's
    teardown, and the transactions refused INVITEs and given-up client
    INVITEs hold. With `C` the emergency call ceiling, `B` the backup count
-   ceiling, `N` the emergency transaction ceiling, `r` a generous in-dialog
+   ceiling, `ρ` a held replica's cost (the serialized body and its
+   metadata, not the decoded call: measured apart, below a live call's), `N`
+   the emergency transaction ceiling, `r` a generous in-dialog
    request rate per call beyond setup and teardown (two transactions per
-   request, the one it opens here and the one it is relayed on, each held
-   64·T1), two transactions for a teardown, `q` the rate of INVITEs answered
+   relayed request, the one it opens here and the one it is relayed on, one
+   per keepalive probe the node originates, each held 64·T1), two transactions for a teardown, `q` the rate of INVITEs answered
    through a transaction and left held (a refusal until its ACK and Timer I,
    64·T1 without one; a client INVITE given up, 64·T1), `h` that hold, the
    per-call and per-transaction costs and the base measured on the
@@ -83,8 +92,11 @@ kills it, and a kill drops every call it serves.
    ```text
    reserve  = (C + B) · (2 · r · 64·T1 + 2) + q · h          transactions
    limit · (1 − s) ≥ base + (C + B) · call + (N + reserve) · txn
-   RSS ceiling     ≤ limit · (1 − s) − B · call − reserve · txn
+   RSS ceiling     ≤ limit · (1 − s) − B · (call − ρ) − reserve · txn
    ```
+
+   The RSS ceiling already counts the replicas held, `B · ρ`; a takeover grows
+   each to a live call, `call − ρ` more.
 
    Setup and teardown churn at the admission rate is part of `N`, which
    counts every transaction. `q` is bounded only by the stateless brakes

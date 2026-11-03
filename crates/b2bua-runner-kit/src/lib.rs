@@ -133,7 +133,7 @@ pub use check::ConfigCheck;
 pub use front_env::{addresses_from_lookup, WorkerAddresses};
 pub use null_cdr::NullCdrWriter;
 pub use replication::{replication_setup_from_lookup, ReplicationSettings};
-pub use runner_env::RunnerEnv;
+pub use runner_env::{switch, RunnerEnv};
 use socket_buffers::log_socket_buffers;
 pub use validate::{validate_default_dest, validate_ingress_brake_pct};
 pub use worker_metrics::{txn_metrics_text, WorkerMetrics, CATALOGUE};
@@ -453,15 +453,14 @@ impl RunnerBase {
         Arc::new(writer)
     }
 
-    /// The peer-to-peer replication the env selects ([`ReplicationSettings`]),
+    /// The peer-to-peer replication the env selected ([`RunnerEnv::replication`]),
     /// its store on [`Self::clock`]; `None` when replication is off. `Err` is
-    /// the boot refusal of a malformed replication variable or a replication
-    /// listener that cannot be bound.
+    /// the boot refusal of a replication listener that cannot be bound.
     pub async fn replication_setup_from_env(&self) -> Result<Option<ReplicationSetup>, String> {
-        let setup = replication_setup_from_lookup(|k| env::var(k).ok(), self.clock.clone())
-            .await
-            .map_err(|e| format!("invalid B2BUA config: {e}"))?;
-        Ok(setup.map(|setup| ReplicationSetup { replica: self.env.replica, ..setup }))
+        let Some(settings) = self.env.replication.clone() else { return Ok(None) };
+        let setup = settings.into_setup(self.clock.clone(), replication::boot_incarnation());
+        let setup = setup.await.map_err(|e| format!("invalid B2BUA config: {e}"))?;
+        Ok(Some(ReplicationSetup { replica: self.env.replica, ..setup }))
     }
 
     /// Production-shaped [`B2buaDeps`] defaults around the injected decision

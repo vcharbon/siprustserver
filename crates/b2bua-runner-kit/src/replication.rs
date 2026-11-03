@@ -270,7 +270,7 @@ pub async fn replication_setup_from_lookup(
 
 /// Boot wall clock in milliseconds, so a sub-second restart still takes a
 /// higher gen; 0 only for a clock before the epoch.
-fn boot_incarnation() -> u64 {
+pub(crate) fn boot_incarnation() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(sip_clock::wall::millis_u64).unwrap_or(0)
 }
 

@@ -116,7 +116,7 @@ pub fn trace_header_enabled() -> bool {
     std::env::var(TRACE_HEADER_ENV)
         .map(|v| {
             let v = v.trim();
-            v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
+            ["1", "true", "yes", "on"].iter().any(|on| v.eq_ignore_ascii_case(on))
         })
         .unwrap_or(false)
 }

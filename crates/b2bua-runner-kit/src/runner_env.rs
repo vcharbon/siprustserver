@@ -11,7 +11,7 @@ use b2bua::config::{B2buaConfig, CapacityConfig};
 
 use crate::{
     addresses_from_lookup, capacity_env, drain_env, env_or, limiter_env, liveness_env, split_csv,
-    stated, stated_list, WorkerAddresses,
+    stated, stated_list, ReplicationSettings, WorkerAddresses,
 };
 
 mod event_queue_env;
@@ -130,6 +130,10 @@ pub struct RunnerEnv {
     /// `B2BUA_PRIVACY_SERVICE` — `on` (the default): this worker is the RFC
     /// 3323 privacy service at the trust boundary; `off`: the next hop is.
     pub privacy_service: bool,
+    /// `SIP_TRACE_HEADER` — on: an `X-Trace-Sample` header may sample a call
+    /// (default off, a lab setting); any other value than on/off refuses the
+    /// boot.
+    pub trace_header: bool,
     /// `B2BUA_CDR_MESSAGE_RING` — the per-leg message-ring cap on the call
     /// record (default 0 = off; blank = unset).
     pub cdr_message_ring: usize,
@@ -178,6 +182,9 @@ pub struct RunnerEnv {
     /// The event-queue gate's bounds (ADR-0050 §9), the grammar, defaults
     /// and boot checks in `runner_env::event_queue_env`.
     pub event_queue_gate: b2bua::config::EventQueueGateConfig,
+    /// `B2BUA_REPL` and the replication grammar ([`ReplicationSettings`]);
+    /// `None` when replication is off.
+    pub replication: Option<ReplicationSettings>,
 }
 
 /// `key` parsed as `T`, `default` when unset; `Err` names the variable and
@@ -215,7 +222,7 @@ pub(crate) fn cdr_ring_from_lookup(
 
 /// An on/off knob as `value` states it: truthy or falsy (`0`/`false`/`no`/
 /// `off`), `default` when absent or blank. Any other value is the error.
-pub(crate) fn switch(key: &str, value: Option<String>, default: bool) -> Result<bool, String> {
+pub fn switch(key: &str, value: Option<String>, default: bool) -> Result<bool, String> {
     let Some(value) = stated(value) else { return Ok(default) };
     match value.to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),
@@ -303,6 +310,11 @@ impl RunnerEnv {
                 env::var("B2BUA_PRIVACY_SERVICE").ok(),
                 true,
             )?,
+            trace_header: switch(
+                observe::TRACE_HEADER_ENV,
+                env::var(observe::TRACE_HEADER_ENV).ok(),
+                false,
+            )?,
             cdr_message_ring,
             cdr_captured_headers,
             limiter_url: limiter_env::limiter_url_from_lookup(lookup)
@@ -322,6 +334,7 @@ impl RunnerEnv {
                 .map_err(invalid)?,
             event_queue_gate: event_queue_env::event_queue_gate_from_lookup(lookup)
                 .map_err(invalid)?,
+            replication: ReplicationSettings::from_lookup(lookup).map_err(invalid)?,
         })
     }
 }

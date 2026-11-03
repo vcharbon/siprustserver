@@ -157,7 +157,7 @@ its family.
 | `PROXY_SELF_GATE_ELU_CRITICAL` | (0, 1] | 0.8 |
 | `PROXY_SELF_GATE_CPS_SIZE`, `PROXY_SELF_GATE_CPS_RATE` | ≥ 1 | 50, 100 |
 | `PROXY_RETRY_AFTER_JITTER_SEC` | 0..3600 s | 5 |
-| `PROXY_BRANCH_MEMO_MAX_ENTRIES`, `PROXY_BRANCH_MEMO_MAX_BYTES` | ≥ 1; with the mean ring, they hold the working set of `PROXY_SELF_GATE_CPS_RATE` calls/s with a quarter of headroom (refused at boot otherwise) | 78 643, 192 MiB accounted (3/8 of the 512 MiB pod limit; that many entries of the heaviest shape, 199 calls/s at a 30 s mean ring) |
+| `PROXY_BRANCH_MEMO_MAX_ENTRIES`, `PROXY_BRANCH_MEMO_MAX_BYTES` | ≥ 1; with the mean ring, they hold the working set of `PROXY_SELF_GATE_CPS_RATE` calls/s with a quarter of headroom (refused at boot otherwise) | 78 643, 192 MiB accounted (3/8 of the 512 MiB pod limit; that many entries of the heaviest shape, 152 calls/s at a 30 s mean ring) |
 | `PROXY_BRANCH_MEMO_MEAN_RING_MS` | ≥ 1 ms | 30000: the mean ring the memo's two pools are split on |
 | `PROXY_INVITE_TXN_TIMEOUT_SEC` | 33..=600 s, the workers' INVITE transaction bound | 158: an INVITE entry lives the bound plus Timer H at most |
 | `PROXY_RESOLVER_POSITIVE_TTL_MS`, `PROXY_RESOLVER_NEGATIVE_TTL_MS`, `PROXY_RESOLVER_LOOKUP_TIMEOUT_MS` | ≥ 1 ms | 60000, 5000, 2000 |

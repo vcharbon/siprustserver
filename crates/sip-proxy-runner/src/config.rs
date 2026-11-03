@@ -119,6 +119,8 @@ impl ProxyConfig {
         let resolver = resolver(&mut env);
         let prewarm = prewarm(&mut env);
         let drain_grace = Duration::from_millis(env.int("PROXY_DRAIN_GRACE_MS", 5000, 1, MAX_MS));
+        // Read by the trace registry; refused here unless on or off.
+        env.flag(observe::TRACE_HEADER_ENV, false);
 
         let mut errors = env.into_errors();
         let timings =

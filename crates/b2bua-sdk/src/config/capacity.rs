@@ -32,9 +32,9 @@ impl Ceilings {
             ));
         }
         if let (Some(n), Some(e)) = (self.normal, self.emergency) {
-            if e < n {
+            if e <= n {
                 return Err(format!(
-                    "{emergency}={e} is below {normal}={n}; emergency calls keep priority, so \
+                    "{emergency}={e} is not above {normal}={n}; emergency calls keep priority, so \
                      their ceiling must be the higher one"
                 ));
             }
@@ -57,7 +57,7 @@ pub struct CapacityConfig {
 }
 
 impl CapacityConfig {
-    /// Refuses a zero ceiling and an emergency ceiling below its normal one.
+    /// Refuses a zero ceiling and an emergency ceiling not above its normal one.
     pub fn validate(&self) -> Result<(), String> {
         self.calls.validate("B2BUA_MAX_CALLS", "B2BUA_MAX_CALLS_EMERGENCY")?;
         self.transactions.validate("B2BUA_MAX_TXNS", "B2BUA_MAX_TXNS_EMERGENCY")?;

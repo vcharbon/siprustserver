@@ -58,10 +58,6 @@
 //!   B2BUA_REBOOT_BUDGET_SEC replicated-backup TTL / reboot budget (default 600; min 60, >= keepalive + Timer F + 10 s, > B2BUA_INVITE_TXN_TIMEOUT_SEC)
 //!   B2BUA_SETUP_TIMEOUT_MS a-leg total setup deadline in ms, reroutes included (default 150000, strictly below B2BUA_INVITE_TXN_TIMEOUT_SEC; <= 0 disables)
 //!   B2BUA_INVITE_TXN_TIMEOUT_SEC out-of-dialog INVITE txn bound, both call halves (default 158; range 33..=600)
-//!
-//! Every relation between these is checked once, on the final configuration,
-//! before anything is served (`b2bua_runner_kit::ConfigCheck`): an invalid set
-//! refuses the start with one message naming every variable involved.
 //!   B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC the worker gives up on a b-leg hop when NOTHING answers its initial INVITE, not even a 100 (default 5; range 2..=32; ADR-0044: the transaction keeps Timer A/B; in-dialog INVITE and non-INVITE never read it)
 //!   B2BUA_CALL_CONTROL_TIMEOUT_MS decision-backend deadline per round-trip (default 5000; <= 0 disables — ADR-0022)
 //!   WORKER_ALLOWED_TARGET_SUFFIXES b-leg destination allow-list, comma-separated (default .svc.cluster.local; `*` = allow all, rollback sentinel; non-IP non-matching hosts are 503'd pre-leg)
@@ -76,6 +72,10 @@
 //!                   OPTIONS answer (cause=overload) and at the admission ladder, and accepts
 //!                   again after the hold (default 512 / 64 / 300 / 150 / 50 / 3000; roles,
 //!                   relations, boot checks: `runner_env::event_queue_env`, ADR-0050 §9)
+//!
+//! Every relation between these is checked once, on the final configuration,
+//! before anything is served (`b2bua_runner_kit::ConfigCheck`): an invalid set
+//! refuses the start with one message naming every variable involved.
 //!
 //! ## Call limiter
 //!   LIMITER_URL             the shared limiter, [http://]host:port; unset → NoopLimiter (fail-open)

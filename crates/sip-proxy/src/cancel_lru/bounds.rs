@@ -24,10 +24,11 @@ pub const DEFAULT_MEAN_RING_MS: u64 = 30_000;
 
 /// The entry-milliseconds one call holds on average for a mean ring of
 /// `mean_ring_ms`: an INVITE entry for each leg's INVITE until its final,
-/// then Timer H in the retransmission pool (ADR-0009 X7), and a
-/// retransmission memo for each leg's INVITE, ACK and BYE.
+/// then Timer H in the retransmission pool (ADR-0009 X7), a retransmission
+/// memo for each leg's INVITE, ACK and BYE and for one keepalive OPTIONS per
+/// leg, and one ACK hop for a relayed non-2xx final.
 pub const fn entry_ms_per_call(mean_ring_ms: u64) -> u64 {
-    invite_ms_per_call(mean_ring_ms) + 2 * TIMER_H + 6 * RTX_ENTRY_TTL_MS
+    invite_ms_per_call(mean_ring_ms) + 2 * TIMER_H + 9 * RTX_ENTRY_TTL_MS
 }
 
 /// The INVITE-transaction pool's part of [`entry_ms_per_call`].
@@ -56,7 +57,7 @@ pub const DEFAULT_STRIPES: usize = 16;
 /// [`Lifetime`] pools as a call's entry-milliseconds split at the mean ring
 /// ([`entry_ms_per_call`]). Past a bound a pool forgets its oldest write
 /// first, and never an entry of the other pool. The defaults hold the working
-/// set of 199 new calls a second at a 30 s mean ring, every entry taken at
+/// set of 152 new calls a second at a 30 s mean ring, every entry taken at
 /// the heaviest shape, with a quarter of headroom ([`calls_per_second`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoBounds {

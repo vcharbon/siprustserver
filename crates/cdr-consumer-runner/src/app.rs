@@ -124,6 +124,14 @@ async fn consume(
     Ok(())
 }
 
+/// `CDR_QUEUE_MAX_LEN`'s value as the queue's `x-max-length`: a
+/// non-negative count (0 = unbounded), the producer's declare.
+fn max_len(raw: &str) -> Result<i64, String> {
+    raw.trim().parse::<i64>().ok().filter(|n| *n >= 0).ok_or_else(|| {
+        format!("CDR_QUEUE_MAX_LEN must be a non-negative integer (0 = unbounded), got {raw:?}")
+    })
+}
+
 /// The consumer, reading observations with `view`. Runs until the process
 /// ends; `Err` is the refusal of a configuration it cannot run, before it
 /// connects.
@@ -133,30 +141,29 @@ pub async fn run(view: Arc<dyn ObservationView>) -> Result<std::convert::Infalli
     let target = Target {
         url,
         queue: env_or("CDR_QUEUE", "cdr"),
-        max_len: env_or("CDR_QUEUE_MAX_LEN", "100000").parse().expect("CDR_QUEUE_MAX_LEN"),
+        max_len: max_len(&env_or("CDR_QUEUE_MAX_LEN", "100000"))?,
         setup_timeout: SETUP_TIMEOUT,
     };
     let metrics_listen = env_or("CDR_METRICS_LISTEN", "0.0.0.0:9093");
     let payload = Payload::from_env_value(std::env::var("CDR_PAYLOAD").ok().as_deref())
-        .unwrap_or_else(|e| panic!("{e}"));
+        .map_err(|e| e.to_string())?;
     let addr: std::net::SocketAddr = metrics_listen
         .parse()
-        .unwrap_or_else(|e| panic!("bad CDR_METRICS_LISTEN {metrics_listen:?}: {e}"));
+        .map_err(|e| format!("bad CDR_METRICS_LISTEN {metrics_listen:?}: {e}"))?;
     let ship = Arc::new(ShipMetrics::default());
-    let sink =
-        std::env::var("CDR_OBSERVATION_URL").ok().filter(|u| !u.trim().is_empty()).map(|u| {
-            shipper::spawn(
-                Endpoint::parse(u.trim()).unwrap_or_else(|e| panic!("{e}")),
-                ship.clone(),
-            )
-        });
+    let endpoint = std::env::var("CDR_OBSERVATION_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+        .map(|u| Endpoint::parse(u.trim()).map_err(|e| e.to_string()))
+        .transpose()?;
+    let sink = endpoint.map(|endpoint| shipper::spawn(endpoint, ship.clone()));
     let consumer = Consumer { payload, metrics: Arc::new(Metrics::default()), view, sink };
 
     let link_metrics = Arc::new(LinkMetrics::default());
     let routes = probe_routes(consumer.metrics.clone(), link_metrics.clone(), ship.clone());
     let probe = ProbeServer::start(addr, routes)
         .await
-        .unwrap_or_else(|e| panic!("failed to bind CDR_METRICS_LISTEN {addr}: {e}"));
+        .map_err(|e| format!("failed to bind CDR_METRICS_LISTEN {addr}: {e}"))?;
     tracing::info!(addr = %probe.addr(), "metrics server listening (/metrics)");
 
     // Reconnect loop: the broker may be down at startup or bounce mid-run. CDRs

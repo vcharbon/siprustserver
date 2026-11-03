@@ -16,6 +16,7 @@
 //! | with replication: the replica TTL against the keepalive round and the INVITE bound, the backup ceilings against the emergency ceilings | `ReplicaConfig::validate` |
 //! | with replication: sync cap < ACK and CANCEL bounds < T1, the backlog marks | `WritePath::validate` |
 //! | with replication: the verdict hold ≥ freshness window + Timer F | `VerdictBounds::validate` |
+//! | with replication: `B2BUA_DEAD_VERDICT_HOLD_MS` > 2 × `B2BUA_REPL_IDLE_TIMEOUT_MS` + `B2BUA_REPL_LOOKUP_TIMEOUT_MS` + `B2BUA_REPL_CONNECT_TIMEOUT_MS` | here: a verdict stays held while the backup confirms it (ADR-0047 D1) |
 //!
 //! The replication link bounds (idle timeout against the heartbeat, the
 //! dead-peer TTL against a blip) and the CDR sink's bounds are relations of
@@ -109,6 +110,33 @@ impl ConfigCheck {
             self.take(repl.verdict.validate().map_err(|why| {
                 format!("B2BUA_DEAD_VERDICT_HOLD_MS / B2BUA_DEAD_NOTICE_FRESH_MS: {why}")
             }));
+            if let Some(settings) = &env.replication {
+                self.confirmation_fits_the_hold(repl, settings);
+            }
         }
+    }
+
+    /// The longest a backup confirms a dead verdict itself, a frozen peer
+    /// whose kernel takes the connect: one idle timeout to read the stream
+    /// down, the peer's lookup, one connect, and one idle timeout more
+    /// (ADR-0047 D1). A repeat of the verdict's notice inside it is the same
+    /// verdict only while the hold lasts.
+    fn confirmation_fits_the_hold(
+        &mut self,
+        repl: &b2bua::ReplicationSetup,
+        settings: &crate::ReplicationSettings,
+    ) {
+        let idle = repl.puller.idle_timeout_ms;
+        let connect = repl.puller.connect_timeout_ms;
+        let lookup = sip_clock::wall::millis_u64(settings.link.lookup_timeout);
+        let confirm = idle.saturating_mul(2).saturating_add(lookup).saturating_add(connect);
+        let hold = repl.verdict.hold_ms;
+        self.require(u64::try_from(hold).is_ok_and(|h| h > confirm), || {
+            format!(
+                "B2BUA_DEAD_VERDICT_HOLD_MS={hold} is not above 2 × B2BUA_REPL_IDLE_TIMEOUT_MS={idle} \
+                 + B2BUA_REPL_LOOKUP_TIMEOUT_MS={lookup} + B2BUA_REPL_CONNECT_TIMEOUT_MS={connect}: \
+                 a repeat of a notice would start a second confirmation of one verdict"
+            )
+        });
     }
 }
