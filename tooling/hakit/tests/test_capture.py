@@ -44,7 +44,9 @@ def with_capture(tmp_path: Path) -> Content:
     return discover([BASE_CONTENT, root], SCHEMAS)
 
 
-def lab_rules(c: Call) -> ProcResult | None:
+def lab_rules(c: Call) -> ProcResult | str | None:
+    if c.kind == "read" and c.path == Path("/sys/class/net/br-0123456789ab/address"):
+        return "02:42:ac:14:00:01\n"
     a = c.argv
     if c.kind != "run":
         return None
@@ -68,10 +70,12 @@ def test_a_run_captures_the_bridge_and_the_named_nodes_and_keeps_each_window(tmp
     assert len(runs) == 3
     bridge = runs[0]
     assert bridge[bridge.index("tcpdump"):] == ["tcpdump", "-i", "br-0123456789ab", "-s", "0", "-Z", "root", "-C", "10", "-W", "4",
-                                               "-w", "/cap/sip.pcap", CAPTURE_FILTER]
+                                               "-w", "/cap/sip.pcap", f"({CAPTURE_FILTER}) and not ether src 02:42:ac:14:00:01"]
     assert "--net" in bridge and bridge[bridge.index("--net") + 1] == "host" and IMAGE in bridge
     nodes = [a[a.index("--net") + 1] for a in runs[1:]]
     assert nodes == ["container:e1", "container:e2"] and all(a[a.index("-i") + 1] == "any" for a in runs[1:])
+    # A node ring keeps every packet: the host's routed copies are only on the bridge.
+    assert all(a[-1] == CAPTURE_FILTER for a in runs[1:])
     for source in ("bridge", "node-e1", "node-e2"):
         assert (run_dir / "pcap" / "windows" / "001-blip" / source / "sip.pcap0").read_bytes() == b"ring"
     argvs = [c.argv for c in fake.calls if c.kind == "run"]

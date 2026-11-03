@@ -63,6 +63,17 @@ class Captures:
             return name
         return "br-" + self._run(["docker", "network", "inspect", "-f", "{{.Id}}", net], f"network {net}")[:12]
 
+    def _bridge_filter(self, bridge: str) -> str:
+        """The profile's filter without the packets the host itself sends on the
+        bridge: a caller's request to an address the host routes (a VIP) crosses
+        the bridge twice, from the caller and again from the host to the next
+        hop; the ring keeps what the callers sent, and the node rings show what
+        each next hop received."""
+        mac = (self.executor.read_text(Path(f"/sys/class/net/{bridge}/address")) or "").strip()
+        if not mac:
+            return self.spec.filter
+        return f"({self.spec.filter}) and not ether src {mac}"
+
     def _nodes(self) -> list[str]:
         if not self.spec.nodes:
             return []
@@ -79,9 +90,10 @@ class Captures:
     def start(self) -> None:
         """Start every ring; a ring that does not start refuses the run."""
         self._image()
-        targets = [("bridge", ["--net", "host"], self._bridge())]
-        targets += [(f"node-{n}", ["--net", f"container:{n}"], "any") for n in self._nodes()]
-        for source, net, iface in targets:
+        bridge = self._bridge()
+        targets = [("bridge", ["--net", "host"], bridge, self._bridge_filter(bridge))]
+        targets += [(f"node-{n}", ["--net", f"container:{n}"], "any", self.spec.filter) for n in self._nodes()]
+        for source, net, iface, bpf in targets:
             d = self.run_dir / "pcap" / "ring" / source
             d.mkdir(parents=True)
             name = f"hakit-capture-{self.run}-{source}"[:128]
@@ -89,7 +101,7 @@ class Captures:
                 ["docker", "run", "-d", "--name", name, "--label", f"hakit-run={self.run}", *net]
                 + ["--cap-add", "NET_ADMIN", "--cap-add", "NET_RAW", "-v", f"{d}:/cap", IMAGE]
                 + ["tcpdump", "-i", iface, "-s", "0", "-Z", "root", "-C", str(self.spec.file_mb), "-W", str(self.spec.files)]
-                + ["-w", "/cap/sip.pcap", self.spec.filter],
+                + ["-w", "/cap/sip.pcap", bpf],
                 f"capture {source}",
             )
             self.rings.append(Ring(source, name, d))
