@@ -2921,6 +2921,7 @@ dependencies = [
  "cdr-consumer-runner",
  "loadgen",
  "metric-catalogue",
+ "route-guard",
  "serde_json",
  "sip-proxy-runner",
 ]
@@ -4056,6 +4057,17 @@ checksum = "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
 dependencies = [
  "rmp",
  "serde",
+]
+
+[[package]]
+name = "route-guard"
+version = "0.1.0"
+dependencies = [
+ "metric-catalogue",
+ "observe",
+ "probe-http",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

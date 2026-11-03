@@ -51,6 +51,7 @@ members = [
     "crates/b2bua-runner-kit",
     "crates/b2bua-runner",
     "crates/sip-proxy-runner",
+    "crates/route-guard",
     "crates/call-limiter-runner",
     "crates/cdr-consumer-runner",
     "crates/callshapes",

@@ -442,3 +442,17 @@ cdr-consumer-runner trace_admitted_total counter fixed {}
 cdr-consumer-runner trace_adoption_refused_total counter fixed {}
 cdr-consumer-runner panics_repeated_total counter fixed {}
 cdr-consumer-runner observe_poisoned_lock_recoveries_total counter fixed {lock}
+route-guard route_guard_withdrawn gauge fixed {}
+route-guard route_guard_withdrawals_total counter fixed {cause}
+route-guard route_guard_restores_total counter fixed {}
+route-guard route_guard_no_answer_total counter fixed {}
+route-guard route_guard_write_failures_total counter fixed {}
+route-guard log_lines_dropped_total counter fixed {}
+route-guard trace_dropped_no_exporter_total counter fixed {}
+route-guard trace_denied_rate_total counter fixed {}
+route-guard trace_denied_active_cap_total counter fixed {}
+route-guard trace_header_malformed_total counter fixed {}
+route-guard trace_admitted_total counter fixed {}
+route-guard trace_adoption_refused_total counter fixed {}
+route-guard panics_repeated_total counter fixed {}
+route-guard observe_poisoned_lock_recoveries_total counter fixed {lock}

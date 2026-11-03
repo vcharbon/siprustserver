@@ -23,4 +23,5 @@ sip-proxy-runner = { path = "../sip-proxy-runner" }
 call-limiter = { path = "../call-limiter" }
 loadgen = { path = "../loadgen" }
 cdr-consumer-runner = { path = "../cdr-consumer-runner" }
+route-guard = { path = "../route-guard" }
 serde_json = { workspace = true }

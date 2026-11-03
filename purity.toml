@@ -5,7 +5,7 @@
 # The production binaries. Each is built by a cargo command of its own; its
 # closure is its `cargo tree -p <binary> -e normal,features`. A binary is
 # never removed while it ships.
-binaries = ["sip-proxy-runner", "call-limiter-runner"]
+binaries = ["sip-proxy-runner", "call-limiter-runner", "route-guard"]
 
 # The images the binaries ship in: each binary is built there by a `cargo
 # build -p <binary>` of its own, the resolution the closure check holds.
