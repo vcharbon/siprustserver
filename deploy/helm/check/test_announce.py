@@ -76,9 +76,9 @@ class RenderRelations(unittest.TestCase):
                "--set", "proxy.minReadySeconds=20")
 
     def test_a_rollout_waits_for_the_announcement(self) -> None:
-        err = render_error(SIPRUST, *KIND, "--set", "proxy.minReadySeconds=8")
-        self.assertIn("proxy.minReadySeconds=8 s", err)
-        self.assertIn("propagationMs=7000", err)
+        err = render_error(SIPRUST, *KIND, "--set", "proxy.minReadySeconds=6")
+        self.assertIn("proxy.minReadySeconds=6 s", err)
+        self.assertIn("propagationMs=5000", err)
 
     def test_the_announce_port_is_never_a_listener(self) -> None:
         for port in ("9090", "5060"):

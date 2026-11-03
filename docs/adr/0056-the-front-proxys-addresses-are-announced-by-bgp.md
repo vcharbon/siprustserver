@@ -77,10 +77,11 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
    a replaced pod, so a rollout stops the next proxy only once the previous one is back in the
    routers' tables. `templates/checks.yaml` refuses a drain grace at or below detection plus
    propagation, and a `minReadySeconds` at or below one probe period plus propagation. The lab
-   measures them with the `proxy_rollout` incident: with kube-proxy in iptables mode the
-   drain-to-withdrawal reached 7.29 s and the Ready-to-announced 6.7 s, so the propagation is
-   7 s, the drain grace 13 s and `minReadySeconds` 12 s, pending the nftables run
-   (`docs/TUNING.md`).
+   measures them with the `proxy_rollout` incident, frr-k8s reloading FRR 500 ms after a
+   configuration change (its default 3 s adds 2.5 s to every withdrawal and announcement): the
+   drain-to-withdrawal reached 3.8 s and the Ready-to-announced 4.65 s in both kube-proxy modes,
+   so the propagation is 5 s and `minReadySeconds` 10 s; the drain grace, 13 s, is above the
+   8.8 s they call for (`docs/TUNING.md`).
 5. **No ICMP port unreachable from a VIP.** Until its route is withdrawn a node still receives a
    VIP's traffic while no proxy socket is bound (a crash, the end of a drain); its kernel would
    answer port unreachable, which a SIP client takes as a transport error (RFC 3261 §18.4)

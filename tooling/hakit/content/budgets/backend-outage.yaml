@@ -9,10 +9,10 @@ description: >-
   fault (a freeze: its hold plus the inject's own time, 22 s here), R from
   the workers' return to the re-announcement, R = h + 1 s probe round + 2 s
   readiness (1 s × 2) + P, with P the announcement's propagation
-  (proxy.announce.propagationMs, 7 s in kube-proxy iptables mode, pending
-  the nftables run) and h the heal and the thawed workers' backlog (2.5 s
-  measured), so R = 12.5 s and A = 34.5 s (34.4 s measured). Allowances, in
-  seconds of offered rate:
+  (proxy.announce.propagationMs, 5 s with frr-k8s reloading 500 ms after a
+  change) and h the heal and the thawed workers' backlog (2.5 s measured),
+  so R = 10.5 s and A = 32.5 s (measured 29.6 s; 34.4 s with frr-k8s's 3 s
+  default). Allowances, in seconds of offered rate:
   - every setup of the outage may fail, plus 9 s past it: the first probe
     round that reads a worker alive (1 s), one readiness period (1 s) and P;
   - 480 with Reason q.850;cause=18, 4 s: a setup that reached a worker
@@ -24,17 +24,18 @@ description: >-
     500 ms, T2 4 s: 27.5 s for a non-INVITE; 15.5 s for a re-INVITE from a
     caller that stops at its fifth retransmission, as SIPp does, an RFC
     3261 caller's sixth at 31.5 s arriving with 0.5 s left): a BYE strands
-    its call, A − 27.5 = 7 s; a re-INVITE cuts it, A − 15.5 = 19 s per
-    re-INVITE, 38 s for a stream of two per call (ADR-0056 §3; measured
-    4.4 s of BYEs, 10 s of re-INVITEs);
+    its call, A − 27.5 = 5 s; a re-INVITE cuts it, A − 15.5 = 17 s per
+    re-INVITE, 34 s for a stream of two per call (ADR-0056 §3; measured
+    with frr-k8s's 3 s default, A = 34.4 s: 4.4 s of BYEs, 10 s of
+    re-INVITEs);
   - a CDR that says answered for a call whose caller timed out, and a CDR
-    of a stranded call ending after its caller's end, 17 s of the summed
-    offered rate: a setup pending at the freeze (offered in the 10 s setup
+    of a stranded call ending after its caller's end, 15 s of the summed
+    offered rate (10 s + 5 s): a setup pending at the freeze (offered in the 10 s setup
     deadline before it) whose callee's 2xx the worker relays at its return,
     after the caller's deadline; and a call whose BYE never reached a
-    worker (the 7 s of stranding BYEs), which the worker ends later on its
+    worker (the 5 s of stranding BYEs), which the worker ends later on its
     own;
-  - a CDR duration off by up to R + T2 = 16.5 s: the worker ends a call at
+  - a CDR duration off by up to R + T2 = 14.5 s: the worker ends a call at
     its return on the caller's queued BYE, whose 200 reaches the caller with
     its first retransmission after the re-announcement.
 setup_failed:
@@ -45,11 +46,11 @@ setup_slow:
   max_seconds: 9
   over_outage: true
 in_dialog:
-  - { stream: "*", class: dialog_request_failed, detail: BYE no final, max_seconds: 7 }
-  - { stream: "*", class: call_stranded, detail: teardown never completed, max_seconds: 7 }
-  - { stream: "*", class: dialog_request_failed, detail: INVITE no final, max_seconds: 38 }
-  - { stream: "*", class: call_cut, detail: cut, max_seconds: 38 }
+  - { stream: "*", class: dialog_request_failed, detail: BYE no final, max_seconds: 5 }
+  - { stream: "*", class: call_stranded, detail: teardown never completed, max_seconds: 5 }
+  - { stream: "*", class: dialog_request_failed, detail: INVITE no final, max_seconds: 34 }
+  - { stream: "*", class: call_cut, detail: cut, max_seconds: 34 }
 cdr_mismatch:
   differs:
-    max_seconds: 17
-    excess_ms: 16500
+    max_seconds: 15
+    excess_ms: 14500
