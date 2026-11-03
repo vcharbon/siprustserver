@@ -1,9 +1,11 @@
 //! The external face read every `PROXY_EXT_FACE_CHECK_MS` on a blocking
-//! thread, its latest state published for `/readyz` and the health sampler:
-//! no reader waits on the kernel on the async runtime. Before the first
-//! reading completes the face reads unusable.
+//! thread, whether it is usable published for `/readyz` and the health
+//! sampler: no reader waits on the kernel on the async runtime. Before the
+//! first reading completes the face reads unusable. Each change is logged
+//! once, with the reading that made it.
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
@@ -16,14 +18,15 @@ pub type ReadFn = Arc<dyn Fn(&mut FaceLatch) -> FaceState + Send + Sync>;
 /// The latest reading of one external face.
 pub struct FaceMonitor {
     pub check: FaceCheck,
-    latest: Mutex<(FaceState, FaceLatch)>,
+    usable: AtomicBool,
+    /// The latch carried from one reading to the next ([`FaceLatch`]).
+    unresolved: AtomicBool,
 }
 
 impl FaceMonitor {
     /// A monitor of `check` with no reading yet.
     pub fn new(check: FaceCheck) -> Arc<Self> {
-        let pending = FaceState::Unreadable("no reading yet".into());
-        Arc::new(Self { check, latest: Mutex::new((pending, FaceLatch::default())) })
+        Arc::new(Self { check, usable: AtomicBool::new(false), unresolved: AtomicBool::new(false) })
     }
 
     /// A monitor of `check` reading the running kernel every `period`, or
@@ -35,13 +38,9 @@ impl FaceMonitor {
         Some(monitor)
     }
 
-    /// The latest reading.
-    pub fn state(&self) -> FaceState {
-        self.latest.lock().unwrap_or_else(PoisonError::into_inner).0.clone()
-    }
-
+    /// Whether the latest reading found the face usable.
     pub fn usable(&self) -> bool {
-        self.state().is_usable()
+        self.usable.load(Ordering::Acquire)
     }
 
     /// Read with `read` every `period` (positive) on a blocking thread and
@@ -64,16 +63,32 @@ impl FaceMonitor {
     }
 
     async fn read_once(&self, read: ReadFn) {
-        let mut latch = self.latest.lock().unwrap_or_else(PoisonError::into_inner).1;
+        let mut latch = FaceLatch { unresolved: self.unresolved.load(Ordering::Acquire) };
         let reading = tokio::task::spawn_blocking(move || {
             let state = read(&mut latch);
             (state, latch)
         })
         .await;
-        let mut latest = self.latest.lock().unwrap_or_else(PoisonError::into_inner);
-        match reading {
-            Ok(done) => *latest = done,
-            Err(e) => latest.0 = FaceState::Unreadable(e.to_string()),
+        let state = match reading {
+            Ok((state, latch)) => {
+                self.unresolved.store(latch.unresolved, Ordering::Release);
+                state
+            }
+            Err(e) => FaceState::Unreadable(e.to_string()),
+        };
+        let usable = state.is_usable();
+        if self.usable.swap(usable, Ordering::AcqRel) != usable {
+            let check = &self.check;
+            if usable {
+                tracing::info!(interface = %check.interface, "external face usable");
+            } else {
+                tracing::error!(
+                    interface = %check.interface,
+                    next_hops = ?check.next_hops,
+                    state = ?state,
+                    "external face unusable — /readyz fails, both faces' addresses withdrawn"
+                );
+            }
         }
     }
 }

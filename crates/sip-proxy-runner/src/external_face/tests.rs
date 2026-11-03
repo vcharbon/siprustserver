@@ -143,7 +143,7 @@ async fn the_monitor_publishes_each_reading() {
     assert!(monitor.usable());
     usable.store(false, std::sync::atomic::Ordering::SeqCst);
     tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-    assert_eq!(monitor.state(), FaceState::Missing);
+    assert!(!monitor.usable());
     task.abort();
 }
 

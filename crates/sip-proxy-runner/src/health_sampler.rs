@@ -2,8 +2,7 @@
 //! the external face gauge, the worker-health and acceptance gauges and the
 //! discovery's own health, so an empty or unprobed pool, an unusable external
 //! face and the reason for each are observable in Prometheus, not only
-//! through readiness. A shard's stall and its recovery, and each change of
-//! the external face's state, are logged once.
+//! through readiness. A shard's stall and its recovery are logged once.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +13,7 @@ use sip_proxy::observability::ProxyMetrics;
 use sip_proxy::registry::{WorkerHealth, WorkerRegistry};
 use topology::K8sMembership;
 
-use crate::external_face::{FaceMonitor, FaceState};
+use crate::external_face::FaceMonitor;
 
 /// What the sampler reads and where it publishes.
 pub struct HealthSampler {
@@ -43,11 +42,10 @@ impl HealthSampler {
                 #[expect(clippy::disallowed_methods, reason = "PERIOD is not zero")]
                 let mut ticker = tokio::time::interval(PERIOD);
                 let mut stalled_before: Vec<usize> = Vec::new();
-                let mut face_before = FaceState::Usable;
                 loop {
                     ticker.tick().await;
                     stalled_before = sampler.sample(stalled_before);
-                    face_before = sampler.sample_face(face_before);
+                    sampler.sample_face();
                 }
             }
         })
@@ -90,28 +88,10 @@ impl HealthSampler {
         stalled
     }
 
-    /// The external face's latest reading published, a change from `before`
-    /// logged; the current state returned.
-    fn sample_face(&self, before: FaceState) -> FaceState {
-        let Some(monitor) = &self.external_face else {
-            self.metrics.set_external_face_usable(true);
-            return FaceState::Usable;
-        };
-        let now = monitor.state();
-        self.metrics.set_external_face_usable(now.is_usable());
-        if now != before {
-            let check = &monitor.check;
-            if now.is_usable() {
-                tracing::info!(interface = %check.interface, "external face usable again");
-            } else {
-                tracing::error!(
-                    interface = %check.interface,
-                    next_hops = ?check.next_hops,
-                    state = ?now,
-                    "external face unusable — /readyz fails, both faces' addresses withdrawn"
-                );
-            }
-        }
-        now
+    /// Whether the external face is usable, published (the monitor logs
+    /// each change).
+    fn sample_face(&self) {
+        let usable = self.external_face.as_ref().is_none_or(|monitor| monitor.usable());
+        self.metrics.set_external_face_usable(usable);
     }
 }
