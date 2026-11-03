@@ -25,7 +25,7 @@ tor_up() {
   local want have dir
   want="$(tor_config)"
   have="$(docker exec "$TOR_NAME" cat /etc/frr/frr.conf 2>/dev/null || true)"
-  if [ "$have" = "$want" ] && [ "$(docker inspect -f '{{.State.Running}}' "$TOR_NAME" 2>/dev/null)" = true ]; then
+  if [ "$have" = "$want" ] && [ "$(docker inspect -f '{{.State.Running}} {{index .Config.Cmd 0}}' "$TOR_NAME" 2>/dev/null)" = "true /etc/frr/start.sh" ]; then
     log "tor: $TOR_NAME up, configuration unchanged"
     return 0
   fi
@@ -33,12 +33,12 @@ tor_up() {
   docker rm -f "$TOR_NAME" >/dev/null 2>&1 || true
   dir="$(mktemp -d "${TMPDIR:-/tmp}/sip-tor.XXXXXX")"
   printf '%s\n' "$want" > "$dir/frr.conf"
-  cp "$TOR_DIR/daemons" "$TOR_DIR/vtysh.conf" "$dir/"
+  cp "$TOR_DIR/daemons" "$TOR_DIR/vtysh.conf" "$TOR_DIR/start.sh" "$dir/"
   docker create --name "$TOR_NAME" --label "sipext-run=$CLUSTER" \
     --restart unless-stopped --network host --privileged \
-    "$TOR_IMAGE" >/dev/null
+    "$TOR_IMAGE" /etc/frr/start.sh >/dev/null
   docker cp "$dir/." "$TOR_NAME:/etc/frr/" >/dev/null
-  rm -f "$dir/frr.conf" "$dir/daemons" "$dir/vtysh.conf"
+  rm -f "$dir/frr.conf" "$dir/daemons" "$dir/vtysh.conf" "$dir/start.sh"
   rmdir "$dir"
   docker start "$TOR_NAME" >/dev/null
   log "tor: $TOR_NAME up (AS $TOR_ASN, edge nodes AS $PROXY_NODE_ASN, BFD ${BFD_INTERVAL_MS} ms x $BFD_DETECT_MULTIPLIER)"
