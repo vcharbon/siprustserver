@@ -274,8 +274,9 @@ made. A run profile joins the two.
    where the treatment should have refused it is a treatment that stopped
    working. A budget may allow in-dialog impacts by class and detail
    (`in_dialog`) only for a fault whose stated mechanism outlasts an
-   in-dialog transaction's timeout (a total outage), each impact charged to
-   the window holding its instant. One exception for the unexpected ending: a catalog
+   in-dialog transaction's timeout (a total outage) or reorders a dialog's
+   requests, which an RFC-compliant receiver refuses (RFC 3261 §12.2.2),
+   each impact charged to the window holding its instant. One exception for the unexpected ending: a catalog
    leg declared `after_consult` opens only after an in-dialog consult of a
    decision service that another leg (`by`) asks for, and the catalog states
    the answers the consult's contract gives `by` when that service fails

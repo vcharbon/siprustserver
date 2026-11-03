@@ -105,7 +105,7 @@
       }
     },
     "in_dialog": {
-      "description": "Allowances for in-dialog impacts whose instant the window holds, for a fault whose mechanism ends in-dialog transactions (a total outage outlasting their timeout). An impact matching an entry is charged to the window like a failed setup; one matching none is an in-dialog finding, with its candidate windows.",
+      "description": "Allowances for in-dialog impacts whose instant the window holds, for a fault whose mechanism ends in-dialog transactions (a total outage outlasting their timeout) or reorders a dialog's requests (RFC 3261 §12.2.2). An impact matching an entry is charged to the window like a failed setup; one matching none is an in-dialog finding, with its candidate windows.",
       "type": "array",
       "items": {
         "type": "object",

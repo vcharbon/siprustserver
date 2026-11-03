@@ -28,7 +28,17 @@ description: >-
   - a CDR duration off by up to the first retransmission of a 2xx or BYE at
     or past W, 3.5 s, the split-view mismatch two proxies with different
     health views produce while the cut node's view is stale (ADR-0009 X7).
-    No call is answered after its caller gave up: W < o.
+    No call is answered after its caller gave up: W < o;
+  - a dialog request overtaken by the next, W = 3.4 s per kind: the worker
+    sends a dialog's requests without waiting for the previous one's final
+    (a transfer's NOTIFY with the referred call's 100, then its 200: RFC 6665
+    §4.2.2 sends each state change at once). The first, sent in the window,
+    is lost on the cut path; the next, sent after the withdrawal, arrives
+    first (`dialog-cseq-skip`), and the first one's retransmission then
+    arrives under a lower CSeq (`dialog-cseq-backwards`), which the receiver
+    answers 500 (RFC 3261 §12.2.2); the transfer completes. At most the
+    dialogs whose first request falls in the window (measured 2.5 s of the
+    transfer stream's rate, with the earlier 5.9 s withdrawal).
 setup_failed:
   - { stream: "*", code: 0, reason: timeout, max_seconds: 1 }
   - { stream: "*", code: 480, reason: "q.850;cause=18", max_seconds: 1 }
@@ -39,3 +49,6 @@ cdr_mismatch:
   differs:
     max_calls: 0
     excess_ms: 3500
+in_dialog:
+  - { stream: "*", class: protocol_anomaly, detail: dialog-cseq-skip, max_seconds: 3.4 }
+  - { stream: "*", class: protocol_anomaly, detail: dialog-cseq-backwards, max_seconds: 3.4 }
