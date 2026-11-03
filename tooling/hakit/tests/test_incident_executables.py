@@ -203,21 +203,8 @@ def test_kill_proxy_refuses_a_node_that_announces_nothing_before_the_kill(tmp_pa
 
 def test_kill_proxy_fails_while_the_node_stays_announced(tmp_path: Path) -> None:
     sb = Sandbox(tmp_path, "kill_proxy", withdraw_timeout_s="1")
-    sb.rules(ONE_PROXY, *PLANES, *BOTH, *crash_rules("p-1", "e2", [("proxy", "c1")]),
-             Rule(r"get pod p-1 -o jsonpath=\{\.status\.conditions\[\?\(@\.type==\"Ready\"\)\]\.lastTransitionTime\}$", ""),
-             Rule(r"get pod p-1 -o jsonpath=\{\.status\.conditions\[\?\(@\.type==\"Ready\"\)\]\.status\}$", "False"))
-    failed(sb.run("inject"), "still announces a VIP 1s after the kill and p-1 is not Ready again")
-
-
-def test_a_kill_whose_successor_is_ready_before_the_withdrawal_is_recorded_not_failed(tmp_path: Path) -> None:
-    sb = Sandbox(tmp_path, "kill_proxy", withdraw_timeout_s="1")
-    sb.rules(ONE_PROXY, *PLANES, *BOTH, *crash_rules("p-1", "e2", [("proxy", "c1")]),
-             Rule(r"get pod p-1 -o jsonpath=\{\.status\.conditions\[\?\(@\.type==\"Ready\"\)\]\.lastTransitionTime\}$",
-                  "2099-01-01T00:00:00Z"),
-             Rule(r"get pod p-1 -o jsonpath=\{\.status\.conditions\[\?\(@\.type==\"Ready\"\)\]\.status\}$", "True"))
-    f = facts(sb.run("inject"))
-    assert f["withdrawn_ms"] is None
-    assert f["ready_again_at_ms"] == 4070908800000
+    sb.rules(ONE_PROXY, *PLANES, *BOTH, *crash_rules("p-1", "e2", [("proxy", "c1")]))
+    failed(sb.run("inject"), "still announces a VIP 1s after the kill")
 
 
 def test_kill_proxy_probe_waits_for_both_nodes_in_the_routes(tmp_path: Path) -> None:
@@ -418,6 +405,45 @@ def test_cut_heal_fails_when_the_node_is_not_back_at_its_address(tmp_path: Path)
     sb.state("cut", "e2 192.168.60.12\n")
     sb.rules(Rule(r"docker inspect", "\n", once=True), Rule(r"docker network connect"), Rule(r"docker inspect", "192.168.60.99\n"))
     failed(sb.run("heal"), "as '192.168.60.99', not 192.168.60.12")
+
+
+def test_freeze_proxy_freezes_the_proxy_container_and_times_its_nodes_withdrawal(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "freeze_proxy")
+    sb.rules(ONE_PROXY, *PLANES,
+             Rule(r"docker exec e2 crictl ps --label io\.kubernetes\.pod\.uid=u1 --name \^sip-front-proxy\$ --state running -q$", "c9\n"),
+             Rule(r"docker exec e2 crictl inspect --output go-template --template \{\{\.info\.pid\}\} c9$", "222"),
+             Rule(r"docker exec e2 cat /proc/222/cgroup$", "0::/kubepods/pod1/c9\n"),
+             Rule(r"docker exec e2 sh -c echo 1 > '/sys/fs/cgroup/kubepods/pod1/c9/cgroup\.freeze'$"),
+             Rule(r"docker exec e2 cat /sys/fs/cgroup/kubepods/pod1/c9/cgroup\.freeze$", "1"),
+             *pod_rules("p-1", "e2", "u1", containers_frozen="0\n1\n", host_network="true"), *E1_ONLY)
+    f = facts(sb.run("inject"))
+    assert sb.index("c9/cgroup.freeze") < sb.index("ip -j route show")
+    assert sb.index("pod1/cgroup.freeze'") == -1, "the pod's other containers run on"
+    assert (f["pods"], f["node"]) == (["p-1"], "e2")
+    assert withdrawn(f) == {f"{IVIP} 172.20.0.4", f"{EVIP} 192.168.60.12"}
+
+
+def test_freeze_proxy_fails_while_the_node_stays_announced(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "freeze_proxy", withdraw_timeout_s="1")
+    sb.rules(ONE_PROXY, *PLANES,
+             Rule(r"docker exec e2 crictl ps --label", "c9\n"),
+             Rule(r"docker exec e2 crictl inspect --output", "222"),
+             Rule(r"docker exec e2 cat /proc/222/cgroup$", "0::/kubepods/pod1/c9\n"),
+             Rule(r"docker exec e2 sh -c echo 1 > '/sys/fs/cgroup/kubepods/pod1/c9/cgroup\.freeze'$"),
+             Rule(r"docker exec e2 cat /sys/fs/cgroup/kubepods/pod1/c9/cgroup\.freeze$", "1"),
+             *pod_rules("p-1", "e2", "u1", containers_frozen="0\n1\n", host_network="true"), *BOTH)
+    failed(sb.run("inject"), "still announces a VIP 1s after the freeze")
+
+
+def test_freeze_proxy_heal_thaws_every_container_and_proves_it(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "freeze_proxy")
+    sb.state("targets", "p-1 u1 e2\n")
+    sb.state("restarts_before", '{"p-1": 0}')
+    sb.rules(Rule(r"docker exec e2 sh -c for f in '/sys/fs/cgroup/kubepods/pod1'/\*/cgroup\.freeze"),
+             *pod_rules("p-1", "e2", "u1", containers_frozen=["0\n0\n"]))
+    f = facts(sb.run("heal"))
+    assert len(sb.lines("for f in")) == 2  # the heal and its re-check a second later
+    assert f["pods"] == {"p-1": {"state": "healed", "restarts": 0, "terminated_since_applied": None}}
 
 
 def test_cut_proxy_workers_drops_the_workers_on_one_proxy_node_and_times_its_withdrawal(tmp_path: Path) -> None:

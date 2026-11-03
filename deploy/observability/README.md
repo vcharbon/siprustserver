@@ -81,7 +81,9 @@ metadata:
     prometheus.io/port:   "<port>"     # the /metrics container port
 ```
 
-The SUT chart sets these on the proxy (:9090) and the worker (:9091).
+The SUT chart sets these on the proxy (:9090) and the worker (:9091). A pod
+whose sidecar serves metrics too names its port in `prometheus.io/sidecar-port`
+(the proxy's route guard, :9095).
 
 ## Notes / caveats
 

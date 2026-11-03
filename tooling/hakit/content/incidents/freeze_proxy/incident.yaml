@@ -1,0 +1,42 @@
+schema: incident.v1
+name: freeze_proxy
+description: >-
+  Hang one front proxy for duration_s: the cgroup of its proxy container is
+  frozen (its sockets stay open, nothing answers) while every other container
+  of the pod runs on. Its node leaves both VIPs' next hops once the proxy
+  stops answering the node's route guard. Inject measures, from the freeze,
+  when the node left each VIP's next hops in the host's table; heal thaws it
+  and reports a restart the liveness probe made; the probe wants both VIPs
+  routed over every live proxy's node again.
+kind: fault
+target:
+  selector: app=sip-front-proxy
+  pick: one
+params:
+  container:
+    type: string
+    default: sip-front-proxy
+    description: The container frozen.
+  internal_vip:
+    type: string
+    default: 172.20.255.250
+    description: The VIP the workers reach the proxies at.
+  external_vip:
+    type: string
+    default: 192.168.60.250
+    description: The VIP the callers dial.
+  network:
+    type: string
+    default: sipext
+    description: The docker network of the callers' plane.
+  withdraw_timeout_s:
+    type: integer
+    default: 30
+    description: How long inject waits for the node to leave both VIPs' next hops.
+duration_s: 10
+timeouts:
+  inject_s: 60
+  heal_s: 60
+  probe_s: 120
+  probe_interval_s: 2
+requires: [kind, docker]

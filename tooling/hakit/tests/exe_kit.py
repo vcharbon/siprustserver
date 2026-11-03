@@ -132,10 +132,12 @@ def live(selector: str, rows: str) -> Rule:
     return Rule(rf"get pods -l {re.escape(selector)} -o jsonpath=\{{range .items\[\*\]\}}\{{\.metadata\.name\}}", rows)
 
 
-def pod_rules(pod: str, node: str, uid: str, *, frozen: str | list[str] = "0", qdisc: str | list[str] = "qdisc noqueue 0: root",
+def pod_rules(pod: str, node: str, uid: str, *, frozen: str | list[str] = "0",
+              containers_frozen: str | list[str] = "0\n0\n", qdisc: str | list[str] = "qdisc noqueue 0: root",
               iptables: str | list[str] = "-P INPUT ACCEPT\n", restarts: str = "0\n", host_network: str = "") -> list[Rule]:
     """The reads pod-faults.sh makes for one pod on its node: its node, uid,
-    sandbox netns and pod-level cgroup, then the residue reads; a list of
+    sandbox netns and pod-level cgroup, then the residue reads (the pod's
+    cgroup.freeze, then its containers' one per line); a list of
     answers is given once each in order, the last one for good."""
 
     def seq(match: str, answers: str | list[str]) -> list[Rule]:
@@ -154,6 +156,7 @@ def pod_rules(pod: str, node: str, uid: str, *, frozen: str | list[str] = "0", q
         Rule(rf"docker exec {node} cat /proc/111/cgroup$", "0::/kubepods/pod1/sb1\n"),
         *seq(rf"docker exec {node} cat /sys/fs/cgroup/kubepods/pod1/cgroup\.freeze$", frozen),
         Rule(rf"docker exec {node} sh -c echo [01] > '/sys/fs/cgroup/kubepods/pod1/cgroup\.freeze'$"),
+        *seq(rf"docker exec {node} sh -c cat '/sys/fs/cgroup/kubepods/pod1'/\*/cgroup\.freeze$", containers_frozen),
         *seq(rf"docker exec {node} nsenter -t 111 -n -- tc qdisc show dev eth0$", qdisc),
         *seq(rf"docker exec {node} nsenter -t 111 -n -- iptables -S INPUT$", iptables),
     ]

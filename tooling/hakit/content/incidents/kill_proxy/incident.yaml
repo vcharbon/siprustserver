@@ -3,11 +3,12 @@ name: kill_proxy
 description: >-
   Crash one front proxy of the active-active pair: every container process of
   the pod is killed with SIGKILL and proven dead. Its node withdraws both
-  VIPs (the pod is no longer Ready) and the routers move its flows to the
-  peer; the kubelet restarts the crashed pod. Inject measures, from the kill,
-  when the node left each VIP's next hops in the host's table. The probe
-  waits for the restart, proves no incarnation overlap, and wants both VIPs
-  routed over every live proxy's node again.
+  VIPs (its route guard's last refresh runs out, the pod is no longer Ready)
+  and the routers move its flows to the peer; the kubelet restarts the
+  crashed pod. Inject measures, from the kill, when the node left each VIP's
+  next hops in the host's table. The probe waits for the restart, proves no
+  incarnation overlap, and wants both VIPs routed over every live proxy's
+  node again.
 kind: fault
 target:
   selector: app=sip-front-proxy
