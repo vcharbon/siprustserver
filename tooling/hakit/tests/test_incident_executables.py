@@ -191,6 +191,7 @@ def test_kill_proxy_crashes_one_proxy_and_times_its_nodes_withdrawal(tmp_path: P
     assert sb.lines("task kill") == ["docker exec e2 ctr -n k8s.io task kill -s SIGKILL c1"]
     assert (f["pods"], f["node"], f["live_before"]) == (["p-1"], "e2", 1)
     assert withdrawn(f) == {f"{IVIP} 172.20.0.4", f"{EVIP} 192.168.60.12"}
+    assert (f["guard_restarted_at_ms"], f["readiness_withdrawn_ms"]) == (None, None)
     assert sb.index("ip -j route show") < sb.index("task kill")
 
 
@@ -201,24 +202,35 @@ def test_kill_proxy_refuses_a_node_that_announces_nothing_before_the_kill(tmp_pa
     assert sb.index("task kill") == -1
 
 
-GUARD_STARTED = r"get pod p-1 -o jsonpath=\{\.status\.containerStatuses\[\?\(@\.name==\"route-guard\"\)\]\.state\.running\.startedAt\}$"
-POD_READY = r"get pod p-1 -o jsonpath=\{\.status\.conditions\[\?\(@\.type==\"Ready\"\)\]\.status\}$"
+GUARD_LOGS = r"logs p-1 -c route-guard$"
+
+
+def guard_started(at: str, withdrawn: str) -> Rule:
+    """The restarted route guard's log: its start line at `at`."""
+    return Rule(GUARD_LOGS, f"{at}  INFO route_guard: route guard started peers=10.0.0.1 withdrawn={withdrawn} reading=Fit\n")
 
 
 def test_kill_proxy_fails_while_the_node_stays_announced(tmp_path: Path) -> None:
-    sb = Sandbox(tmp_path, "kill_proxy", withdraw_timeout_s="1")
+    sb = Sandbox(tmp_path, "kill_proxy", guard_window_s="1", withdraw_timeout_s="2")
     sb.rules(ONE_PROXY, *PLANES, *BOTH, *crash_rules("p-1", "e2", [("proxy", "c1")]),
-             Rule(GUARD_STARTED, "2020-01-01T00:00:00Z"), Rule(POD_READY, "True"))
-    failed(sb.run("inject"), "its route guard did not restart onto a fit proxy")
+             guard_started("2020-01-01T00:00:00.000000Z", "false"))
+    failed(sb.run("inject"), "its route guard did not restart onto a fit proxy within 1000 ms")
 
 
-def test_a_guard_restarted_onto_a_fit_proxy_is_recorded_not_failed(tmp_path: Path) -> None:
-    sb = Sandbox(tmp_path, "kill_proxy", withdraw_timeout_s="1")
+def test_a_guard_restarted_onto_a_fit_proxy_within_its_dead_bound_is_recorded_apart(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "kill_proxy", guard_window_s="1", withdraw_timeout_s="2", dead_ms="3000000000000")
     sb.rules(ONE_PROXY, *PLANES, *BOTH, *crash_rules("p-1", "e2", [("proxy", "c1")]),
-             Rule(GUARD_STARTED, "2099-01-01T00:00:00Z"), Rule(POD_READY, "True"))
+             guard_started("2099-01-01T00:00:00.250000Z", "false"))
     f = facts(sb.run("inject"))
-    assert f["withdrawn_ms"] is None
-    assert f["guard_restarted_at_ms"] == 4070908800000
+    assert (f["withdrawn_ms"], f["readiness_withdrawn_ms"]) == (None, None)
+    assert f["guard_restarted_at_ms"] == 4070908800250
+
+
+def test_a_guard_restarted_onto_an_unfit_proxy_is_no_fit_restart(tmp_path: Path) -> None:
+    sb = Sandbox(tmp_path, "kill_proxy", guard_window_s="1", withdraw_timeout_s="2", dead_ms="3000000000000")
+    sb.rules(ONE_PROXY, *PLANES, *BOTH, *crash_rules("p-1", "e2", [("proxy", "c1")]),
+             guard_started("2099-01-01T00:00:00.250000Z", "true"))
+    failed(sb.run("inject"), "did not restart onto a fit proxy")
 
 
 def test_kill_proxy_probe_waits_for_both_nodes_in_the_routes(tmp_path: Path) -> None:

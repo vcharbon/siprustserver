@@ -2,14 +2,14 @@ schema: incident.v1
 name: kill_proxy
 description: >-
   Crash one front proxy of the active-active pair: every container process of
-  the pod is killed with SIGKILL and proven dead. Its node withdraws both
-  VIPs (its route guard's last refresh runs out, the pod is no longer Ready)
-  and the routers move its flows to the peer; the kubelet restarts the
-  crashed pod. Inject measures, from the kill, when the node left each VIP's
-  next hops in the host's table, or records a route guard restarted onto a
-  proxy already fit again, which lets the node out before its last refresh
-  ran out. The probe waits for the restart, proves no
-  incarnation overlap, and wants both VIPs routed over every live proxy's
+  the pod is killed with SIGKILL and proven dead; the kubelet restarts them.
+  The node's route guard withdraws both VIPs (its last refresh runs out) and
+  the routers move the node's flows to the peer. Inject measures, from the
+  kill, when the node left each VIP's next hops in the host's table; when the
+  restarted guard found the restarted proxy fit within its dead-man bound, it
+  lets the node out at once and inject records that instead, with any later
+  withdrawal through readiness apart. The probe waits for the restart, proves
+  no incarnation overlap, and wants both VIPs routed over every live proxy's
   node again.
 kind: fault
 target:
@@ -32,6 +32,20 @@ params:
     type: integer
     default: 30
     description: How long inject waits for the node to leave both VIPs' next hops.
+  guard_window_s:
+    type: integer
+    default: 4
+    description: >-
+      How long inject waits for the route guard's withdrawal (its bound,
+      proxy.routeGuard.withdrawWithinMs, rounded up) before it reads whether
+      the guard restarted onto a fit proxy.
+  dead_ms:
+    type: integer
+    default: 1000
+    description: >-
+      The route guard's dead-man bound (ROUTE_GUARD_DEAD_MS): a guard that
+      started later than this after the kill did not find the proxy fit
+      before the last refresh ran out.
   guard_container:
     type: string
     default: route-guard
