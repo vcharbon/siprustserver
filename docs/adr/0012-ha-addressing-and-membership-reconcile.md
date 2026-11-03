@@ -3,6 +3,7 @@
 **Status:** accepted (2026-06-02). Amended (2026-10-16): D4, an address change resets health to
 `Unknown` and re-arms no guard; the fresh-pod guard and drain grace are removed (ADR-0050).
 Amended (2026-11-02): D7, the memo-coherence argument for active/passive (ADR-0009 X7).
+D7 superseded (2026-11-03) by ADR-0056.
 
 **Source:** this codebase (no sipjsserver counterpart — the source mediated
 membership through Redis/`PeerEnumerator`, which the Rust port dropped in
@@ -214,6 +215,8 @@ up) stays separate from readiness (`/readyz`, fit to serve) — mirroring the
 worker.
 
 ## Decision D7 — front-proxy HA via active/passive keepalived VRRP VIP
+
+> **Superseded by ADR-0056:** the VIPs are announced by BGP from every node whose proxy is Ready.
 
 > **This is the live, deployed design.** ADR-0015 D5 proposes a cross-rack
 > evolution (unicast VRRP, failure-domain anti-affinity key, worker-zone proxy

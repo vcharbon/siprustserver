@@ -1,24 +1,33 @@
 #!/usr/bin/env bash
-# The kind lab from the charts: the cluster, the external SIP plane, the host
-# preflight (cgroups, the sysctls of ADR-0033) and the images (lib/cluster.sh);
-# the SUT and the in-cluster collectors are two helm releases on the kind
-# values (deploy/helm/README.md).
+# The kind lab from the charts: the cluster, the external SIP plane, the lab
+# router that routes both VIPs (lib/tor.sh), the host preflight (cgroups, the
+# sysctls of ADR-0033, the one-time routing setup of
+# deploy/k8s/lab-host-setup.sh) and the images (lib/cluster.sh); MetalLB, the
+# SUT and the in-cluster collectors are helm releases on the kind values
+# (deploy/helm/README.md).
 #
-#   kind-lab.sh up                   cluster + sipext bridge + images, kind-loaded
+#   kind-lab.sh up                   cluster (kube-proxy in KUBE_PROXY_MODE,
+#                                    iptables or nftables) + sipext bridge +
+#                                    lab router + images, kind-loaded
 #   kind-lab.sh images               the images of `up` rebuilt from the tree and
 #                                    kind-loaded, on the running cluster
 #   kind-lab.sh image <tag> [docker build args]
 #                                    build one more image with the lab's build
 #                                    wrapper (proxy settings) and kind-load it
-#   kind-lab.sh deploy [helm args]   the collectors, Chaos Mesh, the SIPp UAS, the
-#                                    SUT, the restart of every SUT workload whose
-#                                    pod runs an image a reload replaced, then the
+#   kind-lab.sh deploy [helm args]   the lab router, MetalLB, the collectors,
+#                                    Chaos Mesh, the SIPp UAS, the SUT, the
+#                                    restart of every SUT workload whose pod runs
+#                                    an image a reload replaced, then the route,
 #                                    VIP and isolation smokes (when the SUT runs a
 #                                    proxy) and the series check; helm args go to
 #                                    the SUT release (e.g. --set worker.replicas=3)
 #   kind-lab.sh template [helm args] the SUT release as deploy would install it,
 #                                    rendered, nothing applied
 #   kind-lab.sh chaos-mesh           Chaos Mesh alone (chaos-mesh-values-kind.yaml)
+#   kind-lab.sh metallb              MetalLB alone (BGP, frr-k8s; lib/metallb.sh)
+#   kind-lab.sh tor                  (re)start the lab router when its
+#                                    configuration changed (lib/tor.sh)
+#   kind-lab.sh routes               the next hops of both VIPs in the host's table
 #   kind-lab.sh uas                  (re)start the SIPp callees (the hakit base UAS)
 #   kind-lab.sh down                 the cluster and the sipext plane
 #
@@ -123,6 +132,8 @@ lab_deploy() {
   require_infra_node
   require_own_release
   require_host_stack
+  tor_up
+  metallb_release
   helm_release siprust-observability "$HELM_DIR/siprust-observability" "$OBS_NS" \
     --set "clusterName=kind-$CLUSTER"
   if [ "${CHAOS_MESH:-1}" = 1 ]; then chaos_mesh_release; else log "Chaos Mesh skipped (CHAOS_MESH=0)"; fi
@@ -144,7 +155,13 @@ case "${1:-}" in
   deploy) shift; lab_deploy "$@" ;;
   template) shift; sut_template "$@" ;;
   chaos-mesh) chaos_mesh_release ;;
+  metallb) metallb_release ;;
+  tor) tor_up ;;
+  routes)
+    for vip in "$PROXY_VIP" "$SIPEXT_VIP"; do
+      echo "$vip via $(tor_next_hops "$vip" | tr '\n' ' ')"
+    done ;;
   uas) hakit_uas_up ;;
   down) down ;;
-  *) die "usage: $0 {up|images|image <tag> [build args]|deploy [helm args]|template [helm args]|chaos-mesh|uas|down}" ;;
+  *) die "usage: $0 {up|images|image <tag> [build args]|deploy [helm args]|template [helm args]|chaos-mesh|metallb|tor|routes|uas|down}" ;;
 esac

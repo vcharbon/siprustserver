@@ -427,7 +427,8 @@ async fn dual_face_486_retarget_ack_correlation() {
 }
 
 /// **(f) dual-VIP takeover.** Both faces' identities (the two VIPs) move to a
-/// peer proxy TOGETHER — the VRRP failover model. An established call
+/// peer proxy TOGETHER: a node withdraws both addresses at once (ADR-0056),
+/// so the peer carries both faces' flows. An established call
 /// survives: the takeover proxy (same HMAC key, fresh branch space) decodes
 /// the caller's cookie on the EXT face and bridges the in-dialog teardown
 /// across both planes. The proxy is stateless by design, so the only state
@@ -448,7 +449,7 @@ async fn dual_face_takeover_moves_both_faces_together() {
     bob.receive("ACK").await;
     fh.advance(Duration::from_millis(100)).await;
 
-    // ── proxy A dies; BOTH VIPs move to the peer proxy ───────────────────────
+    // ── proxy A dies; BOTH VIPs' flows move to the peer proxy ───────────────
     fh.mark("proxy", None, "crash", "dual-face proxy killed; VIPs move to peer");
     drop(proxy_a);
     // Let the aborted recv task actually drop (releasing both face binds)

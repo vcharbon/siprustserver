@@ -112,6 +112,7 @@ mod setup_cancelled_during_its_decision;
 mod silent_replication_stream;
 mod spiral_takeover;
 mod split_dialog_sequence;
+mod split_proxy_views;
 mod stale_no_answer_reclaim;
 mod stood_down_round;
 mod stopped_worker_read_dead;

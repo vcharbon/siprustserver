@@ -31,8 +31,7 @@ class ShellScripts(unittest.TestCase):
         unset = read - assigned - set(env(c))
         self.assertEqual(unset, set(), f"{name} reads variables nothing sets")
         for var, value in env(c).items():
-            if var != "EXTRA_VIPS":
-                self.assertNotEqual(value, "", f"{name} gets an empty {var}")
+            self.assertNotEqual(value, "", f"{name} gets an empty {var}")
 
     def test_vip_loopback_bounds_every_neighbour_queue(self) -> None:
         proxy = find(render(SIPRUST, *KIND), "Deployment", "sip-front-proxy")
@@ -44,6 +43,19 @@ class ShellScripts(unittest.TestCase):
         self.assertEqual(env(c)["UNRES_QLEN_BYTES"], "16384")
         self.assertEqual(env(c)["PROXY_VIP"], "172.20.255.250")
 
+    def test_vip_loopback_owns_the_vips_and_answers_no_port_unreachable_from_them(self) -> None:
+        # ADR-0056: the node owns both VIPs on lo for good; until its route is
+        # withdrawn a VIP datagram with no socket bound draws no ICMP error.
+        proxy = find(render(SIPRUST, *KIND), "Deployment", "sip-front-proxy")
+        c = container(proxy, "vip-loopback")
+        script = script_of(c)
+        self.assertIn('ip addr add "$vip/32" dev lo', script)
+        self.assertIn('iptables -I OUTPUT 1 -s "$vip/32" -p icmp --icmp-type port-unreachable -j DROP',
+                      script)
+        self.assertIn("for vip in $PROXY_VIP $EXTERNAL_VIP; do", script)
+        self.assertEqual((env(c)["PROXY_VIP"], env(c)["EXTERNAL_VIP"]),
+                         ("172.20.255.250", "192.168.60.250"))
+
     def test_unres_qlen_bytes_follows_its_value(self) -> None:
         proxy = find(render(SIPRUST, *KIND, "--set", "proxy.unresQlenBytes=8192"),
                      "Deployment", "sip-front-proxy")
@@ -52,7 +64,7 @@ class ShellScripts(unittest.TestCase):
     def test_masq_exempt_reads_only_what_it_is_given(self) -> None:
         ds = find(render(SIPRUST, *KIND), "DaemonSet", "masq-exempt")
         self.check_script(ds, "masq-exempt", "masq-exempt.sh")
-        self.assertEqual(env(container(ds, "masq-exempt"))["EXTERNAL_SUBNET"], "192.168.60.0/24")
+        self.assertEqual(env(container(ds, "masq-exempt"))["EXTERNAL_SUBNET"], "192.168.60.0/25")
 
 
 class Network(unittest.TestCase):
@@ -85,28 +97,43 @@ class Network(unittest.TestCase):
         e = env(container(find(docs, "Deployment", "sip-front-proxy"), "sip-front-proxy"))
         self.assertEqual(e["PROXY_LISTEN"], "172.20.255.250:5070")
         self.assertEqual(e["PROXY_ADVERTISE_EXT"], "192.168.60.250:5070")
-        self.assertEqual(e["PROXY_FACE_INT_CIDRS"], "10.244.0.0/16,172.20.0.0/16")
-        conf = find(docs, "ConfigMap", "sip-front-proxy-keepalived")["data"]["keepalived.conf"]
-        self.assertIn("172.20.255.250 dev eth0", conf)
-        self.assertIn("192.168.60.250 dev eth1", conf)
+        self.assertEqual(e["PROXY_FACE_INT_CIDRS"], "10.244.0.0/16,172.20.0.0/17")
+        self.assertEqual((e["PROXY_EXT_INTERFACE"], e["PROXY_EXT_NEXT_HOPS"]),
+                         ("eth1", "192.168.60.1"))
 
-    def test_the_vips_follow_vrrp_and_the_liveness_probe_healthz(self) -> None:
-        # ADR-0050 §11: the VIP check waits for the first worker view; the
-        # livenessProbe never does, so a proxy with no reachable worker is not
-        # restarted in a loop.
+    def test_the_announcement_follows_readyz_and_the_liveness_probe_healthz(self) -> None:
+        # ADR-0056: each VIP is announced from the nodes whose proxy is Ready,
+        # through a LoadBalancer Service that carries no SIP port; the
+        # livenessProbe never reads the worker view (ADR-0050 §11).
         docs = render(SIPRUST, *KIND)
-        conf = find(docs, "ConfigMap", "sip-front-proxy-keepalived")["data"]["keepalived.conf"]
-        self.assertIn("http://127.0.0.1:9090/vrrp ", conf)
-        self.assertNotIn("/healthz", conf.split("vrrp_script chk_proxy_health")[1].split("}")[0])
-        proxy = container(find(docs, "Deployment", "sip-front-proxy"), "sip-front-proxy")
-        self.assertEqual(proxy["livenessProbe"]["httpGet"]["path"], "/healthz")
-        self.assertEqual(proxy["readinessProbe"]["httpGet"]["path"], "/readyz")
+        for face, vip in (("internal", "172.20.255.250"), ("external", "192.168.60.250")):
+            svc = find(docs, "Service", f"sip-front-proxy-{face}")
+            self.assertEqual(svc["metadata"]["annotations"]["metallb.io/loadBalancerIPs"], vip)
+            spec = svc["spec"]
+            self.assertEqual((spec["type"], spec["externalTrafficPolicy"],
+                              spec["allocateLoadBalancerNodePorts"]),
+                             ("LoadBalancer", "Local", False))
+            self.assertEqual(spec["selector"], {"app": "sip-front-proxy"})
+            self.assertEqual(spec["ports"], [{"name": "announce", "port": 9, "targetPort": 9,
+                                              "protocol": "TCP"}])
+        proxy = find(docs, "Deployment", "sip-front-proxy")
+        c = container(proxy, "sip-front-proxy")
+        self.assertEqual(c["livenessProbe"]["httpGet"]["path"], "/healthz")
+        ready = c["readinessProbe"]
+        self.assertEqual((ready["httpGet"]["path"], ready["periodSeconds"],
+                          ready["failureThreshold"], ready["successThreshold"]),
+                         ("/readyz", 1, 2, 1))
+        self.assertEqual(proxy["spec"]["minReadySeconds"], 15)
+        self.assertEqual([c["name"] for c in pod_spec(proxy)["containers"]], ["sip-front-proxy"])
 
-    def test_a_keepalived_change_rolls_the_proxies(self) -> None:
-        def checksum(*args: str) -> str:
-            proxy = find(render(SIPRUST, *KIND, *args), "Deployment", "sip-front-proxy")
-            return str(proxy["spec"]["template"]["metadata"]["annotations"]["checksum/keepalived"])
-        self.assertNotEqual(checksum(), checksum("--set", "proxy.keepalived.virtualRouterId=52"))
+    def test_no_worker_shares_a_proxy_node(self) -> None:
+        proxy = find(render(SIPRUST, *KIND), "Deployment", "sip-front-proxy")
+        terms = pod_spec(proxy)["affinity"]["podAntiAffinity"][
+            "requiredDuringSchedulingIgnoredDuringExecution"]
+        self.assertEqual([(t["labelSelector"]["matchLabels"]["app"], t["topologyKey"])
+                          for t in terms],
+                         [("sip-front-proxy", "kubernetes.io/hostname"),
+                          ("b2bua-worker", "kubernetes.io/hostname")])
 
 
 class ProxyKnobs(unittest.TestCase):
@@ -195,7 +222,7 @@ class WorkerNetworkPolicy(unittest.TestCase):
         rules = self.rules(*KIND)
         self.assertEqual(set(rules), {"UDP/5060", "TCP/9092", "TCP/9091"})
         self.assertEqual(rules["UDP/5060"]["from"], [{"ipBlock": {"cidr": "172.20.255.250/32"}},
-                                                     {"ipBlock": {"cidr": "172.20.0.0/16"}}])
+                                                     {"ipBlock": {"cidr": "172.20.0.0/17"}}])
         self.assertEqual(rules["TCP/9092"]["from"],
                          [{"podSelector": {"matchLabels": {"app": "b2bua-worker"}}}])
         self.assertEqual(rules["TCP/9091"]["from"], [{"namespaceSelector": {"matchLabels": {
@@ -259,7 +286,15 @@ class Backends(unittest.TestCase):
                                     ("PodDisruptionBudget", "b2bua-worker"),
                                     ("NetworkPolicy", "b2bua-worker")}),
                 ("proxy.enabled", {("Deployment", "sip-front-proxy"), ("Service", "sip-front-proxy"),
-                                   ("ConfigMap", "sip-front-proxy-keepalived"),
+                                   ("Service", "sip-front-proxy-internal"),
+                                   ("Service", "sip-front-proxy-external"),
+                                   ("BFDProfile", "sip-test-sip-front-proxy"),
+                                   ("IPAddressPool", "sip-test-sip-front-proxy-internal"),
+                                   ("IPAddressPool", "sip-test-sip-front-proxy-external"),
+                                   ("BGPAdvertisement", "sip-test-sip-front-proxy-internal"),
+                                   ("BGPAdvertisement", "sip-test-sip-front-proxy-external"),
+                                   ("BGPPeer", "sip-test-sip-front-proxy-tor-internal"),
+                                   ("BGPPeer", "sip-test-sip-front-proxy-tor-external"),
                                    ("Secret", "sip-front-proxy-hmac"),
                                    ("ServiceAccount", "sip-front-proxy"),
                                    ("RoleBinding", "sip-front-proxy-endpointslice-reader"),
@@ -273,14 +308,19 @@ class Backends(unittest.TestCase):
         docs = render(SIPRUST, *KIND, namespace="lab-b")
         w = env(container(find(docs, "StatefulSet", "b2bua-worker"), "b2bua-worker"))
         self.assertEqual(w["LIMITER_URL"], "call-limiter.lab-b.svc.cluster.local:8080")
-        self.assertEqual({d["metadata"]["namespace"] for d in docs}, {"lab-b"})
+        metallb = {d["metadata"]["name"] for d in docs if d["apiVersion"].startswith("metallb.io/")}
+        self.assertTrue(metallb and all(n.startswith("lab-b-") for n in metallb), metallb)
+        self.assertEqual({d["metadata"]["namespace"] for d in docs
+                          if not d["apiVersion"].startswith("metallb.io/")}, {"lab-b"})
+        self.assertEqual({d["metadata"]["namespace"] for d in docs
+                          if d["apiVersion"].startswith("metallb.io/")}, {"metallb-system"})
 
 
 class GenericDefaults(unittest.TestCase):
     """Without the kind values a product inherits the runners' own defaults and
     any node: the chart sets only the env it derives from its values."""
 
-    NETWORK = ["--set", "network.proxyVip=10.0.255.250", "--set", "network.internalInterface=ens3",
+    NETWORK = ["--set", "network.proxyVip=10.0.255.250",
                "--set", "network.externalVip=203.0.113.250", "--set", "network.externalInterface=ens4",
                "--set", "network.internalCidrs=10.0.0.0/16",
                "--set", "worker.networkPolicy.proxyNodeCidrs={10.0.0.0/24}",
@@ -296,6 +336,7 @@ class GenericDefaults(unittest.TestCase):
                          "SIP_TRACE_HEADER"},
         "sip-front-proxy": {"PROXY_LISTEN", "PROXY_ADVERTISE", "PROXY_LISTEN_EXT",
                             "PROXY_ADVERTISE_EXT", "PROXY_FACE_INT_CIDRS", "PROXY_METRICS",
+                            "PROXY_EXT_INTERFACE",
                             "PROXY_WORKER_SERVICE", "PROXY_WORKER_PORT",
                             "OTEL_EXPORTER_OTLP_ENDPOINT", "SIP_TRACE_HEADER"},
         "call-limiter": {"LIMITER_LISTEN"},

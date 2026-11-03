@@ -58,7 +58,7 @@ impl ProxyCore {
         // proxy's own headers there), so push the lower half first.
         // For a worker-originated request the cookie identifies the
         // ORIGINATING worker, taken from the SNAT-immune Via identity —
-        // NOT the UDP source: behind the keepalived VIP the source is the
+        // NOT the UDP source: behind a masquerading node the source is the
         // node IP + an ephemeral port, which matches no registry entry, so
         // encoding for the source silently produces a param-less cookie RR and
         // the callee's later in-dialog requests decode Unknown and are

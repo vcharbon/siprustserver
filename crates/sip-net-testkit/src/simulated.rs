@@ -11,6 +11,10 @@
 //! Per-fiber partition gating belongs with the cluster harness, not here.
 //! `send_fault` (per-pair send failure injection) lives here, as it's a
 //! pure-network fault primitive.
+//!
+//! A shared address ([`SimulatedSignalingNetwork::share_address`]) is an
+//! address several endpoints serve, each sender's flow delivered to one of
+//! them, as an ECMP next hop spreads flows.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -37,6 +41,11 @@ use crate::types::{
 /// that send synchronously (the TS `sendFault`).
 pub type SendFault = Arc<dyn Fn(SocketAddr, SocketAddr) -> Option<String> + Send + Sync>;
 
+/// The flow picker of a shared address: `src -> slot` names the member a
+/// datagram from `src` is delivered to (see
+/// [`SimulatedSignalingNetwork::share_address`]).
+pub type FlowPick = Arc<dyn Fn(SocketAddr) -> usize + Send + Sync>;
+
 struct BoundEndpoint {
     queue: Arc<PacketQueue>,
     counters: Arc<Counters>,
@@ -45,8 +54,34 @@ struct BoundEndpoint {
     clock: Clock,
 }
 
+/// What an address routes to: one endpoint, or the members of a shared
+/// address and the picker spreading senders' flows over them.
+enum Route {
+    One(BoundEndpoint),
+    Shared { pick: FlowPick, members: Vec<Option<BoundEndpoint>> },
+}
+
+impl Route {
+    /// The endpoint a datagram from `src` reaches: the picked member of a
+    /// shared address, `None` when that member is not bound.
+    fn target(&self, src: SocketAddr) -> Option<&BoundEndpoint> {
+        match self {
+            Route::One(b) => Some(b),
+            Route::Shared { pick, members } => members.get(pick(src)).and_then(Option::as_ref),
+        }
+    }
+
+    /// Every endpoint bound at the address.
+    fn endpoints(&self) -> Box<dyn Iterator<Item = &BoundEndpoint> + '_> {
+        match self {
+            Route::One(b) => Box::new(std::iter::once(b)),
+            Route::Shared { members, .. } => Box::new(members.iter().flatten()),
+        }
+    }
+}
+
 struct SimShared {
-    routing: Mutex<HashMap<SocketAddr, BoundEndpoint>>,
+    routing: Mutex<HashMap<SocketAddr, Route>>,
     undeliverable: Mutex<Vec<UndeliveredPacket>>,
     in_flight: AtomicI64,
     transit_delay_ms: u64,
@@ -90,6 +125,25 @@ impl SimulatedSignalingNetwork {
             .send_fault = Some(fault);
         self
     }
+
+    /// Make `addr` an address several endpoints serve, each sender's flow
+    /// delivered to one of them, as an ECMP next hop spreads flows. From now
+    /// on every bind at `addr` joins it as a member, taking the lowest free
+    /// slot (the first bind is member 0); a datagram to `addr` from `src` is
+    /// delivered to member `pick(src)` and is undeliverable when that member
+    /// is not bound; a member sends with source `addr`; dropping a member
+    /// frees only its slot. Runs on any clone. Panics when `addr` is already
+    /// bound alone.
+    pub fn share_address(&self, addr: SocketAddr, pick: FlowPick) {
+        let mut routing = self.shared.routing.lock().unwrap();
+        match routing.get_mut(&addr) {
+            None => {
+                routing.insert(addr, Route::Shared { pick, members: Vec::new() });
+            }
+            Some(Route::Shared { pick: current, .. }) => *current = pick,
+            Some(Route::One(_)) => panic!("{addr} is already bound alone"),
+        }
+    }
 }
 
 #[async_trait]
@@ -99,28 +153,40 @@ impl SignalingNetwork for SimulatedSignalingNetwork {
         let queue = Arc::new(PacketQueue::new(opts.queue_max));
         let counters = Arc::new(Counters::default());
 
-        {
+        let bound = BoundEndpoint {
+            queue: queue.clone(),
+            counters: counters.clone(),
+            pre_ingress: opts.pre_ingress.clone(),
+            clock: opts.clock.clone(),
+        };
+        let member = {
             let mut routing = self.shared.routing.lock().unwrap();
-            if routing.contains_key(&addr) {
-                return Err(BindError {
-                    reason: BindErrorReason::AlreadyBound,
-                    addr,
-                    message: format!("already bound: {addr}"),
-                });
+            match routing.get_mut(&addr) {
+                None => {
+                    routing.insert(addr, Route::One(bound));
+                    None
+                }
+                Some(Route::Shared { members, .. }) => {
+                    let slot = members.iter().position(Option::is_none).unwrap_or(members.len());
+                    if slot == members.len() {
+                        members.push(None);
+                    }
+                    members[slot] = Some(bound);
+                    Some(slot)
+                }
+                Some(Route::One(_)) => {
+                    return Err(BindError {
+                        reason: BindErrorReason::AlreadyBound,
+                        addr,
+                        message: format!("already bound: {addr}"),
+                    });
+                }
             }
-            routing.insert(
-                addr,
-                BoundEndpoint {
-                    queue: queue.clone(),
-                    counters: counters.clone(),
-                    pre_ingress: opts.pre_ingress.clone(),
-                    clock: opts.clock.clone(),
-                },
-            );
-        }
+        };
 
         Ok(Box::new(SimEndpoint {
             addr,
+            member,
             queue,
             counters,
             queue_max: opts.queue_max,
@@ -150,7 +216,7 @@ impl SignalingNetwork for SimulatedSignalingNetwork {
             .lock()
             .unwrap()
             .iter()
-            .map(|(addr, b)| (*addr, b.queue.depth()))
+            .flat_map(|(addr, route)| route.endpoints().map(|b| (*addr, b.queue.depth())))
             .collect()
     }
 
@@ -174,7 +240,7 @@ fn deliver(shared: Arc<SimShared>, raw: Vec<u8>, src: SocketAddr, dst: SocketAdd
     Box::pin(async move {
         let target = {
             let routing = shared.routing.lock().unwrap();
-            routing.get(&dst).map(|b| {
+            routing.get(&dst).and_then(|r| r.target(src)).map(|b| {
                 (b.queue.clone(), b.counters.clone(), b.pre_ingress.clone(), b.clock.clone())
             })
         };
@@ -222,6 +288,8 @@ fn deliver(shared: Arc<SimShared>, raw: Vec<u8>, src: SocketAddr, dst: SocketAdd
 
 struct SimEndpoint {
     addr: SocketAddr,
+    /// This endpoint's slot when `addr` is a shared address.
+    member: Option<usize>,
     queue: Arc<PacketQueue>,
     counters: Arc<Counters>,
     queue_max: usize,
@@ -285,7 +353,14 @@ impl UdpEndpoint for SimEndpoint {
 
 impl Drop for SimEndpoint {
     fn drop(&mut self) {
-        self.shared.routing.lock().unwrap().remove(&self.addr);
+        let mut routing = self.shared.routing.lock().unwrap();
+        match (self.member, routing.get_mut(&self.addr)) {
+            (Some(slot), Some(Route::Shared { members, .. })) => members[slot] = None,
+            _ => {
+                routing.remove(&self.addr);
+            }
+        }
+        drop(routing);
         self.queue.close();
     }
 }

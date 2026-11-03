@@ -337,8 +337,8 @@ holds its first listing and one OPTIONS round over it has completed, each
 listed worker having answered or run out its reply window (ADR-0050 §11).
 The round leaves as soon as the listing is in. Before the view, a request
 with no target is dropped and counted, never refused: its retransmission meets
-the view. `/readyz` waits for the view; `/vrrp`, which the VRRP check reads, is
-`/healthz` and the view; `/healthz` never waits for it.
+the view. `/readyz` waits for the view, and the proxy's node announces its
+addresses only while `/readyz` passes (ADR-0056); `/healthz` never waits for it.
 _Avoid_: "warm-up" (there is no fixed delay: the view is in when the first
 round has answered or run out its reply window).
 

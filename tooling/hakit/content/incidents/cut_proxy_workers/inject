@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Drop every packet from the workers' pod addresses on the node of one front
+# proxy, then wait until the node left both VIPs' next hops. Facts as
+# pod_freeze's, plus the node, the workers' addresses and, per "vip addr",
+# the withdrawal in ms after the cut.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=timed.sh
+source "$HAKIT_LIB/timed.sh"
+# shellcheck source=route.sh
+source "$HAKIT_LIB/route.sh"
+hk_pick_targets
+read -r _ _ node <<<"$(hk_targets)"
+pairs="$(hk_route_pairs "$node")" || hk_die "the addresses of $node cannot be read"
+ips="$(kubectl -n "$NS" get pods -l "$HAKIT_PARAM_WORKER_SELECTOR" -o jsonpath='{range .items[*]}{.status.podIP}{"\n"}{end}')" \
+  || hk_die "the workers' addresses cannot be read"
+mapfile -t workers < <(awk NF <<<"$ips")
+[ "${#workers[@]}" -gt 0 ] || hk_die "no pod address for $HAKIT_PARAM_WORKER_SELECTOR"
+cut="$(hk_timed_inject reject pf_drop_from "${workers[@]}")"
+at="$(jq -r '.applied_at_ms' <<<"$cut")"
+withdrawn="$(hk_route_wait absent "$at" "$HAKIT_PARAM_WITHDRAW_TIMEOUT_S" "$pairs")" \
+  || hk_die "$node still announces a VIP ${HAKIT_PARAM_WITHDRAW_TIMEOUT_S}s after the cut"
+jq -cn --argjson c "$cut" --arg node "$node" --argjson w "$withdrawn" \
+  --argjson ips "$(printf '%s\n' "${workers[@]}" | jq -Rnc '[inputs]')" \
+  '$c + {node: $node, workers: $ips, withdrawn_ms: $w}'

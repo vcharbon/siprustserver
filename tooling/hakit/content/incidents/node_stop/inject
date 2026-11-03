@@ -2,9 +2,12 @@
 # Stop kind nodes (their docker containers), a machine loss: the nodes that
 # node_selector names, or else the node hosting a target pod (every node
 # hosting one with pick all). A control-plane node is never stopped. Facts:
-# the nodes, the pods they held in the namespace, the instant.
+# the nodes, the pods they held in the namespace, the instant; with
+# internal_vip set, per "vip addr" the withdrawal in ms after the stop.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
+# shellcheck source=route.sh
+source "$HAKIT_LIB/route.sh"
 hk_pick_targets
 if [ -n "$HAKIT_PARAM_NODE_SELECTOR" ]; then
   list="$(kubectl get nodes -l "$HAKIT_PARAM_NODE_SELECTOR" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
@@ -25,7 +28,16 @@ for n in "${nodes[@]}"; do
   pods="$(kubectl -n "$NS" get pods --field-selector "spec.nodeName=$n" -o json)"
   held="$(jq -c --argjson h "$held" '$h + [.items[].metadata.name]' <<<"$pods")"
 done
+pairs=""
+if [ -n "$HAKIT_PARAM_INTERNAL_VIP" ]; then
+  pairs="$(hk_route_pairs "${nodes[@]}")" || hk_die "the stopped nodes' addresses cannot be read"
+fi
 at="$(hk_now_ms)"
 for n in "${nodes[@]}"; do pf_node_stop "$n"; done
+withdrawn=null
+if [ -n "$pairs" ]; then
+  withdrawn="$(hk_route_wait absent "$at" "$HAKIT_PARAM_WITHDRAW_TIMEOUT_S" "$pairs")" \
+    || hk_die "a stopped node still announces a VIP ${HAKIT_PARAM_WITHDRAW_TIMEOUT_S}s after the stop"
+fi
 jq -cn --argjson n "$(printf '%s\n' "${nodes[@]}" | jq -Rnc '[inputs]')" --argjson p "$held" --argjson at "$at" \
-  '{nodes: $n, pods: $p, stopped_at_ms: $at}'
+  --argjson w "$withdrawn" '{nodes: $n, pods: $p, stopped_at_ms: $at, withdrawn_ms: $w}'

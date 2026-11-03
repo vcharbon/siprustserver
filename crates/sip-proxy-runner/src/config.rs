@@ -6,7 +6,7 @@ mod preflight;
 mod process_env;
 mod reader;
 
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use sip_proxy::cancel_lru::{calls_per_second, invite_entry_ttl_ms, MemoBounds};
@@ -18,6 +18,8 @@ use sip_proxy::{FaceCidrs, ProxyAddr};
 
 pub use preflight::{refusal, validate_config, ProbeTimingConfig};
 use reader::{EnvReader, Span};
+
+use crate::external_face::{valid_interface_name, FaceCheck};
 
 /// Where the worker pool comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +72,8 @@ pub struct ProxyConfig {
     pub resolver: ResolverConfig,
     pub prewarm: Vec<ProxyAddr>,
     pub drain_grace: Duration,
+    /// The external face `/readyz` requires usable; `None` checks none.
+    pub external_face_check: Option<FaceCheck>,
 }
 
 /// The largest millisecond value a duration variable takes (about 24 days).
@@ -101,7 +105,7 @@ impl ProxyConfig {
         let bind_retry_interval =
             Duration::from_millis(env.int("PROXY_BIND_RETRY_INTERVAL_MS", 200, 1, MAX_MS));
         let bind_retry_deadline =
-            Duration::from_millis(env.int("PROXY_BIND_RETRY_DEADLINE_MS", 10_000, 1, MAX_MS));
+            Duration::from_millis(env.int("PROXY_BIND_RETRY_DEADLINE_MS", 20_000, 1, MAX_MS));
         let hmac_kid = env.text("PROXY_HMAC_KID", "k0");
         let hmac_key = hmac_key(&mut env);
         let cluster_key = cluster_key(&mut env);
@@ -118,7 +122,8 @@ impl ProxyConfig {
         let branch_memo = branch_memo(&mut env);
         let resolver = resolver(&mut env);
         let prewarm = prewarm(&mut env);
-        let drain_grace = Duration::from_millis(env.int("PROXY_DRAIN_GRACE_MS", 5000, 1, MAX_MS));
+        let drain_grace = Duration::from_millis(env.int("PROXY_DRAIN_GRACE_MS", 15_000, 1, MAX_MS));
+        let external_face_check = external_face_check(&mut env);
         // Read by the trace registry; refused here unless on or off.
         env.flag(observe::TRACE_HEADER_ENV, false);
 
@@ -182,8 +187,44 @@ impl ProxyConfig {
             resolver,
             prewarm,
             drain_grace,
+            external_face_check,
         })
     }
+}
+
+/// `PROXY_EXT_INTERFACE` (an interface name) and `PROXY_EXT_NEXT_HOPS`
+/// (comma-separated IPv4 addresses): the external face `/readyz` requires
+/// usable. Next hops without an interface are refused.
+fn external_face_check(env: &mut EnvReader) -> Option<FaceCheck> {
+    let interface = env.present("PROXY_EXT_INTERFACE");
+    let hops = env.present("PROXY_EXT_NEXT_HOPS").unwrap_or_default();
+    let mut next_hops = Vec::new();
+    for entry in hops.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        match entry.parse::<Ipv4Addr>() {
+            Ok(ip) => next_hops.push(ip),
+            Err(_) => {
+                env.refuse(format!("PROXY_EXT_NEXT_HOPS entry {entry:?} is not an IPv4 address"))
+            }
+        }
+    }
+    let Some(interface) = interface else {
+        if !next_hops.is_empty() {
+            env.refuse(
+                "PROXY_EXT_NEXT_HOPS needs PROXY_EXT_INTERFACE: the next hops are read on that \
+                 interface"
+                    .to_string(),
+            );
+        }
+        return None;
+    };
+    if !valid_interface_name(&interface) {
+        env.refuse(format!(
+            "PROXY_EXT_INTERFACE {interface:?} is not an interface name (1 to 15 bytes, no '/', \
+             no whitespace)"
+        ));
+        return None;
+    }
+    Some(FaceCheck { interface, next_hops })
 }
 
 /// The address stamped on Via and Record-Route for egress on the face that

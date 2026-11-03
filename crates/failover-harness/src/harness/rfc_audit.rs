@@ -121,9 +121,9 @@ impl FailoverHarness {
         let worker_binds: HashSet<String> = self
             .all_worker_sip_addrs
             .iter()
-            .chain(self.relay_sip_addrs.iter())
             .chain(incarnation_binds.iter())
             .map(|a| a.to_string())
+            .chain(self.relay_lanes.iter().cloned())
             .collect();
         let snapshot = self.harness.recording().channel().snapshot();
         let events = snapshot

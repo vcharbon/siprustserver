@@ -1,28 +1,34 @@
 schema: incident.v1
 name: cut_external_plane
 description: >-
-  Disconnect the node of the front proxy holding the virtual address from the
-  callers' docker network for duration_s, then reconnect it at its own
-  address: the master loses its caller-facing interface, and its peer must
-  take the addresses over (keepalived tracks the interface). The probe waits
-  for exactly one holder.
+  Disconnect the node of one front proxy from the callers' docker network for
+  duration_s, then reconnect it at its own address: the node loses its
+  caller-facing interface. Its proxy turns not ready (the external face is
+  unusable), so the node withdraws both VIPs, the internal one too, and the
+  peer carries every flow. Inject measures, from the cut, when the node left
+  each VIP's next hops in the host's table. The probe wants both VIPs routed
+  over every live proxy's node again.
 kind: fault
 target:
   selector: app=sip-front-proxy
   pick: one
 params:
-  address:
+  internal_vip:
+    type: string
+    default: 172.20.255.250
+    description: The VIP the workers reach the proxies at.
+  external_vip:
     type: string
     default: 192.168.60.250
-    description: The virtual address the callers dial.
+    description: The VIP the callers dial.
   network:
     type: string
     default: sipext
     description: The docker network of the callers' plane.
-  container:
-    type: string
-    default: keepalived
-    description: The container of the proxy pod through which its addresses are read (it needs `ip`).
+  withdraw_timeout_s:
+    type: integer
+    default: 30
+    description: How long inject waits for the node to leave both VIPs' next hops.
 duration_s: 60
 timeouts:
   inject_s: 60

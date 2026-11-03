@@ -15,9 +15,15 @@
 # the host's systemd-coredump pipe so a crash on the host dumps `core` into its
 # cwd. Each node masks that file with /dev/null (repeated per node: kind has no
 # cluster-wide extraMounts).
+#
+# kube-proxy runs in iptables mode by default; lib/cluster.sh's `up` renders
+# this file with KUBE_PROXY_MODE (iptables or nftables) in its place. IPVS is
+# refused: it binds every LoadBalancer address to every node (ADR-0056).
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: sip-e2e
+networking:
+  kubeProxyMode: iptables
 nodes:
   - role: control-plane
     extraMounts:
@@ -74,5 +80,5 @@ nodes:
   # (loadgen, SIPp UAC/UAS) run as plain containers on the external `sipext`
   # bridge, outside k8s, with their own --memory/--cpus caps; a pod-placed
   # loadgen stream runs where its profile's node selector puts it. No
-  # extraPortMappings: the host
-  # reaches the external VIP directly through the sipext bridge.
+  # extraPortMappings: the host routes both VIPs to the edge nodes that
+  # announce them (deploy/k8s/tor/).

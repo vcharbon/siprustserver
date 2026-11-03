@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Recovered when the Deployment's rollout is complete, as many proxies are
+# live as before, and both VIPs are routed over every live proxy's node.
+# Exit 75 while not yet, or while a read fails.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=route.sh
+source "$HAKIT_LIB/route.sh"
+kubectl -n "$NS" rollout status "deployment/$HAKIT_PARAM_DEPLOYMENT" --timeout=1s >/dev/null 2>&1 || exit "$HK_NOT_YET"
+n="$(hk_live_pods | hk_count)" || exit "$HK_NOT_YET"
+[ "$n" -ge "$(cat "$HAKIT_EVENT_DIR/live_before")" ] || exit "$HK_NOT_YET"
+routes="$(hk_probe_routed_over_live)"
+jq -cn --argjson r "$routes" --argjson at "$(hk_now_ms)" '{next_hops: $r, recovered_at_ms: $at}'

@@ -76,7 +76,8 @@ impl FailoverHarness {
         let at = SocketAddr::new(proxy.ip(), proxy.port() + NOTICE_PORT_OFFSET + nth);
         let (ep, _) = self.harness.bind_sut("proxy-notice", &at.to_string()).await;
         let registry: Arc<dyn WorkerRegistry> = Arc::new(registry.clone());
-        let id_gen = Arc::new(IdGen::seeded(0x0D0E_AD00 ^ u64::from(proxy.port())));
+        let seed = 0x0D0E_AD00 ^ u64::from(proxy.port()) ^ (u64::from(nth) << 32);
+        let id_gen = Arc::new(IdGen::seeded(seed));
         let notifier = node.enter(|| {
             DeadNotifier::new(
                 ep,

@@ -138,6 +138,16 @@ sync_clock_at_bringup() {
   fi
 }
 
+# The host routes both VIPs as the lab's top-of-rack router: the one-time
+# host setup (deploy/k8s/lab-host-setup.sh, with sudo) must have run. Not
+# advisory: without it the router's multipath and same-bridge forwarding do
+# not hold.
+check_lab_routing() {
+  "$(dirname "${BASH_SOURCE[0]}")/../lab-host-setup.sh" --check \
+    || die "the lab's host routing is not set up: run once  sudo $(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lab-host-setup.sh"
+  log "lab routing: host setup in place — OK"
+}
+
 # Run all host checks. Called from kind-lab.sh `up` before the cluster is created.
 check_host() {
   log "host preflight: cgroups + sysctls + clock (advisory; PREFLIGHT_STRICT=1 to enforce)"

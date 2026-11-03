@@ -18,7 +18,7 @@
 //!     self-overload (a stateless 503 + `Retry-After`, the same for every copy). A 100 ms
 //!     `tokio::time::interval` task drives its load sampler. `PROXY_SELF_GATE=0`
 //!     reverts to the always-admit gate.
-//!   - Prometheus `/metrics` + `/healthz` + `/readyz` + `/vrrp` (`probe-http`).
+//!   - Prometheus `/metrics` + `/healthz` + `/readyz` (`probe-http`).
 //!
 //! Config via env, read once before the first bind
 //! ([`sip_proxy_runner::config`]). Unset takes the default; a value set
@@ -57,7 +57,7 @@
 //!                    clamps at rmem_max). Overflow is counted in
 //!                    sip_proxy_udp_kernel_rx_dropped_total
 //!   PROXY_SHARD_STALL_MS  a recv shard still on one packet past this is
-//!                    stalled: /healthz, /readyz and /vrrp 503, gauge
+//!                    stalled: /healthz and /readyz 503, gauge
 //!                    sip_proxy_recv_shards_stalled, ms ≥ 1 (default 2000);
 //!                    a shard waiting on an empty socket is never stalled
 //!   PROXY_RECV_SHARDS  N reuse-port recv sockets/cores, 1..1024 (default 1;
@@ -72,8 +72,12 @@
 //!   PROXY_BIND_RETRY_DEADLINE_MS  bind-retry give-up deadline, ms ≥ 1; must
 //!                    exceed PROXY_DRAIN_GRACE_MS (refused at boot) so a
 //!                    recreated pod waits out its predecessor instead of
-//!                    crash-looping (default 10000)
-//!   PROXY_DRAIN_GRACE_MS  SIGTERM (/readyz Draining) to exit, ms ≥ 1 (5000)
+//!                    crash-looping (default 20000)
+//!   PROXY_DRAIN_GRACE_MS  SIGTERM (/readyz Draining) to exit, ms ≥ 1 (15000),
+//!                    past the withdrawal of the node's routes (ADR-0056)
+//!   PROXY_EXT_INTERFACE / PROXY_EXT_NEXT_HOPS  the external interface and its
+//!                    IPv4 next hops: /readyz wants it up and one hop not
+//!                    FAILED (default none: no check)
 //!   PROXY_HMAC_KID   stickiness cookie key id              (default k0)
 //!   PROXY_HMAC_KEY   stickiness cookie secret, ≥ 16 bytes  (REQUIRED, no
 //!                    default; every proxy of a cluster shares it); a key
@@ -246,6 +250,7 @@ async fn run() -> Result<i32, String> {
     let shard_stall_ms = cfg.shard_stall_ms;
     let recv_shards = cfg.recv_shards;
     let ext_face = cfg.external.clone();
+    let face_check = cfg.external_face_check.clone();
     tracing::info!(observer = ?cfg.observer, "load-observer bands and AIMD ladder");
 
     // ONE process clock, built before the first bind: every signaling endpoint
@@ -387,20 +392,16 @@ async fn run() -> Result<i32, String> {
 
     log_listening(&cfg, registry.as_ref());
 
-    // Readiness gate (ADR-0012 D4, ADR-0050 §11): the proxy is fit to take
-    // traffic only once its first worker view is in and with ≥1 routable
-    // (`Alive`) worker. With the k8s EndpointSlice informer the pool starts
-    // empty and fills asynchronously (and stays empty if the watch is
-    // RBAC-forbidden / the Service name is wrong), so `/readyz` turns a
-    // misconfigured watch into a loud rollout timeout. SIP reaches the proxy
-    // through the VRRP address, which follows `/vrrp` (`/healthz` and the
-    // first view), not readiness. SIGTERM latches Draining here.
+    // Readiness gate (ADR-0012 D4, ADR-0050 §11, ADR-0056): the first worker
+    // view in, ≥1 `Alive` worker, the external face usable; the node announces
+    // the VIPs exactly while it passes. An empty informer pool makes a loud
+    // rollout timeout. SIGTERM latches Draining here.
     let draining = Arc::new(AtomicBool::new(false));
     // A stalled recv shard (parked on one packet past PROXY_SHARD_STALL_MS —
     // see `sip_proxy::liveness`) is a proxy that black-holes a share of its
-    // flows while every activity meter reads idle: it fails `/readyz`,
-    // `/healthz` and `/vrrp` (ADR-0046 D4), and raises the gauge.
-    let proxy_probes = shared.probes(draining.clone(), shard_stall_ms);
+    // flows while every activity meter reads idle: it fails `/readyz` and
+    // `/healthz` (ADR-0046 D4), and raises the gauge.
+    let proxy_probes = shared.probes(draining.clone(), shard_stall_ms, face_check.clone());
 
     // Health sampler: the worker-health, acceptance, shard-stall and
     // discovery gauges every 2 s.
@@ -411,6 +412,7 @@ async fn run() -> Result<i32, String> {
         pulse: pulse.clone(),
         clock: clock.clone(),
         stall_ms: shard_stall_ms,
+        external_face: face_check,
     }
     .spawn();
 
@@ -440,7 +442,6 @@ async fn run() -> Result<i32, String> {
         ready: proxy_probes.ready,
         // No heap profiling on the proxy (not the leak target): /debug/heap → 503.
         heap: None,
-        vrrp: Some(proxy_probes.vrrp),
     };
     // The listener was bound FIRST (metrics-first bind order above); this only
     // starts the accept loop. A failure here is fatal — a proxy without its
@@ -448,7 +449,7 @@ async fn run() -> Result<i32, String> {
     let _metrics_server =
         probe_http::ProbeServer::serve_on_live(metrics_listener, routes, proxy_probes.live)
             .map_err(|e| format!("metrics server on {metrics_sa} failed to start: {e}"))?;
-    tracing::info!(addr = %_metrics_server.addr(), "metrics server listening (/metrics, readiness /readyz, VRRP check /vrrp)");
+    tracing::info!(addr = %_metrics_server.addr(), "metrics server listening (/metrics, readiness /readyz, liveness /healthz)");
 
     let probe_task = tokio::spawn(shared.health(probe, notice_ep, cfg.cluster_key.clone()));
     let mut core_tasks = tokio::task::JoinSet::new();
@@ -456,12 +457,10 @@ async fn run() -> Result<i32, String> {
         core_tasks.spawn(core.run());
     }
 
-    // Graceful shutdown on SIGTERM (k8s pod termination). The proxy holds no
-    // per-call state to quiesce — it is a stateless forwarder — so the drain is
-    // latch-then-grace: flip `/readyz` to Draining (k8s unpublishes the pod and
-    // stops routing new datagrams here), then wait the grace so in-flight
-    // transactions settle and the EndpointSlice withdrawal propagates before
-    // exit. Ctrl-C (interactive) exits at once.
+    // Graceful shutdown on SIGTERM: latch-then-grace. `/readyz` turns
+    // Draining, the node's routes are withdrawn, and the proxy keeps
+    // forwarding for the grace that covers the withdrawal (ADR-0056). Ctrl-C
+    // (interactive) exits at once.
     let drain_grace = cfg.drain_grace;
     let drain_grace_ms = u64::try_from(drain_grace.as_millis()).unwrap_or(u64::MAX);
 

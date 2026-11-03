@@ -21,6 +21,7 @@ use sip_proxy::self_gate::{IntakeAgeRecorder, ProxySelfGate};
 use sip_proxy::{ProxyAddr, ProxyCoreBuilder, ProxyMetrics, ProxyTraces, RoutingStrategy};
 use sip_txn::IdGen;
 
+use crate::external_face::FaceCheck;
 use crate::readiness::{probes, ProxyProbes};
 
 /// What every recv shard shares. Kernel flow hashing keeps one source on one
@@ -119,9 +120,15 @@ impl SharedRouting {
         }
     }
 
-    /// The probe routes, read from the shards' pulse and the first view; a
-    /// shard stalled past `stall_ms` fails them all, `draining` fails `/readyz`.
-    pub fn probes(&self, draining: Arc<AtomicBool>, stall_ms: u64) -> ProxyProbes {
+    /// The probe routes, read from the shards' pulse, the first view and
+    /// `external_face`; a shard stalled past `stall_ms` fails them all,
+    /// `draining` and an unusable external face fail `/readyz`.
+    pub fn probes(
+        &self,
+        draining: Arc<AtomicBool>,
+        stall_ms: u64,
+        external_face: Option<FaceCheck>,
+    ) -> ProxyProbes {
         probes(
             draining,
             self.pulse.clone(),
@@ -129,6 +136,7 @@ impl SharedRouting {
             stall_ms,
             self.registry.clone(),
             self.first_view.clone(),
+            external_face,
         )
     }
 }

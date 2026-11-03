@@ -1,0 +1,42 @@
+schema: incident.v1
+name: backend_outage
+description: >-
+  A total backend outage: every worker frozen (its pod-level cgroup, so its
+  sockets stay open and answer nothing) for duration_s. Every front proxy
+  reads every worker dead, turns not ready, and its node withdraws both VIPs:
+  the callers see an unreachable address, not a refusal. Inject measures,
+  from the freeze, when every proxy node left each VIP's next hops in the
+  host's table; heal thaws the workers; the probe wants both VIPs routed over
+  every live proxy's node again.
+kind: fault
+target:
+  selector: app=b2bua-worker
+  pick: all
+params:
+  proxy_selector:
+    type: string
+    default: app=sip-front-proxy
+    description: The front proxies whose nodes announce the VIPs.
+  internal_vip:
+    type: string
+    default: 172.20.255.250
+    description: The VIP the workers reach the proxies at.
+  external_vip:
+    type: string
+    default: 192.168.60.250
+    description: The VIP the callers dial.
+  network:
+    type: string
+    default: sipext
+    description: The docker network of the callers' plane.
+  withdraw_timeout_s:
+    type: integer
+    default: 30
+    description: How long inject waits for every proxy node to leave both VIPs' next hops.
+duration_s: 30
+timeouts:
+  inject_s: 90
+  heal_s: 60
+  probe_s: 180
+  probe_interval_s: 2
+requires: [kind, docker]

@@ -1,7 +1,7 @@
 //! The proxy's probe answers over a real probe server: a stalled recv shard
-//! fails liveness as well as readiness and the VRRP check, an idle proxy
-//! fails none; before its first worker view the proxy is neither ready nor
-//! fit to hold the virtual address, and is live all along.
+//! fails liveness as well as readiness, an idle proxy fails neither; before
+//! its first worker view, with no worker alive, or with its external face
+//! unusable the proxy is not ready, and it is live all along.
 
 use probe_http::{ProbeRoutes, ProbeServer};
 use sip_proxy::registry::static_reg::StaticWorkerRegistry;
@@ -30,20 +30,24 @@ fn pool(health: WorkerHealth) -> Arc<dyn WorkerRegistry> {
 }
 
 /// A probe server over [`probes`] for `pool`, `pulse` and `view`, read at
-/// 10 s on the test clock.
+/// 10 s on the test clock, with no external face check.
 async fn server_over(
     pool: Arc<dyn WorkerRegistry>,
     pulse: Arc<ShardPulse>,
     view: Arc<FirstView>,
 ) -> ProbeServer {
+    server_with_face(pool, pulse, view, None).await
+}
+
+async fn server_with_face(
+    pool: Arc<dyn WorkerRegistry>,
+    pulse: Arc<ShardPulse>,
+    view: Arc<FirstView>,
+    face: Option<FaceCheck>,
+) -> ProbeServer {
     let draining = Arc::new(AtomicBool::new(false));
-    let p = probes(draining, pulse, Clock::test_at(10_000), STALL_MS, pool, view);
-    let routes = ProbeRoutes {
-        metrics: Arc::new(String::new),
-        ready: p.ready,
-        heap: None,
-        vrrp: Some(p.vrrp),
-    };
+    let p = probes(draining, pulse, Clock::test_at(10_000), STALL_MS, pool, view, face);
+    let routes = ProbeRoutes { metrics: Arc::new(String::new), ready: p.ready, heap: None };
     ProbeServer::start_live("127.0.0.1:0".parse().unwrap(), routes, p.live).await.unwrap()
 }
 
@@ -57,14 +61,13 @@ fn is_ok(resp: &str) -> bool {
 }
 
 /// A shard stalled past its threshold fails `/healthz`, which the
-/// livenessProbe reads, `/vrrp`, which keepalived's check reads, and
-/// `/readyz`.
+/// livenessProbe reads, and `/readyz`, which the announcement follows.
 #[tokio::test]
-async fn a_stalled_shard_fails_healthz_vrrp_and_readyz() {
+async fn a_stalled_shard_fails_healthz_and_readyz() {
     let pulse = Arc::new(ShardPulse::new(2));
     pulse.took_packet(1, 10_000 - STALL_MS - 1);
     let s = server(pulse).await;
-    for path in ["/healthz", "/vrrp", "/readyz"] {
+    for path in ["/healthz", "/readyz"] {
         let resp = get(s.addr(), path).await;
         assert!(resp.starts_with("HTTP/1.1 503"), "{path}: {resp}");
     }
@@ -75,47 +78,76 @@ async fn a_stalled_shard_fails_healthz_vrrp_and_readyz() {
 /// threshold before the reads, so the real time the server and the reads
 /// take never carries it past the threshold.
 #[tokio::test]
-async fn an_idle_or_turning_proxy_passes_healthz_vrrp_and_readyz() {
+async fn an_idle_or_turning_proxy_passes_healthz_and_readyz() {
     let pulse = Arc::new(ShardPulse::new(2));
     pulse.took_packet(0, 10_000 - STALL_MS / 2);
     let s = server(pulse).await;
-    for path in ["/healthz", "/vrrp", "/readyz"] {
+    for path in ["/healthz", "/readyz"] {
         assert!(is_ok(&get(s.addr(), path).await), "{path}");
     }
 }
 
-/// A starting proxy, its worker already read alive: `/readyz` and `/vrrp`
-/// fail until the first worker view is in; `/healthz` passes from the
-/// start, so the livenessProbe never restarts it for want of a view.
+/// A starting proxy, its worker already read alive: `/readyz` fails until
+/// the first worker view is in; `/healthz` passes from the start, so the
+/// livenessProbe never restarts it for want of a view.
 #[tokio::test]
-async fn before_the_first_view_readyz_and_vrrp_fail_and_healthz_passes() {
+async fn before_the_first_view_readyz_fails_and_healthz_passes() {
     let view = FirstView::pending();
     let s =
         server_over(pool(WorkerHealth::Alive), Arc::new(ShardPulse::new(1)), view.clone()).await;
     assert!(is_ok(&get(s.addr(), "/healthz").await));
     let ready = get(s.addr(), "/readyz").await;
     assert!(ready.starts_with("HTTP/1.1 503") && ready.contains("not-ready"), "{ready}");
-    let vrrp = get(s.addr(), "/vrrp").await;
-    assert!(vrrp.starts_with("HTTP/1.1 503") && vrrp.contains("not-ready"), "{vrrp}");
 
     view.latch();
-    for path in ["/healthz", "/vrrp", "/readyz"] {
+    for path in ["/healthz", "/readyz"] {
         assert!(is_ok(&get(s.addr(), path).await), "{path}");
     }
 }
 
 /// The first view in and no worker alive (none answered the first round):
-/// the proxy is not ready, and fit to hold the address, so a pair that sees
-/// no worker keeps equal priorities and the address stays where it is
-/// (ADR-0046 D4).
+/// the proxy is live and not ready, so its node announces nothing
+/// (ADR-0056).
 #[tokio::test]
-async fn with_the_view_in_and_no_worker_alive_vrrp_passes_and_readyz_fails() {
+async fn with_the_view_in_and_no_worker_alive_readyz_fails() {
     let s =
         server_over(pool(WorkerHealth::Unknown), Arc::new(ShardPulse::new(1)), FirstView::given())
             .await;
     assert!(is_ok(&get(s.addr(), "/healthz").await));
-    assert!(is_ok(&get(s.addr(), "/vrrp").await));
     assert!(get(s.addr(), "/readyz").await.starts_with("HTTP/1.1 503"));
+}
+
+/// Every other condition met, an external interface that is gone fails
+/// `/readyz` and leaves `/healthz` passing: the node withdraws both faces'
+/// addresses and the process is not restarted. The interface returning makes
+/// the proxy ready again.
+#[tokio::test]
+async fn an_unusable_external_face_fails_readyz_only() {
+    let root = std::env::temp_dir().join(format!("readyz-face-{}", std::process::id()));
+    let face = FaceCheck { interface: "readyz-test-ext0".into(), next_hops: vec![] };
+    let check = face.clone();
+    let reads = move || check.read_at(&root, || Ok(vec![]));
+    assert!(!reads().is_usable(), "no such interface");
+    let s = server_with_face(
+        pool(WorkerHealth::Alive),
+        Arc::new(ShardPulse::new(1)),
+        FirstView::given(),
+        Some(face),
+    )
+    .await;
+    assert!(is_ok(&get(s.addr(), "/healthz").await));
+    let ready = get(s.addr(), "/readyz").await;
+    assert!(ready.starts_with("HTTP/1.1 503") && ready.contains("not-ready"), "{ready}");
+}
+
+/// The readiness verdict over its inputs: the external face is one more
+/// NotReady cause, below a latched drain.
+#[test]
+fn an_unusable_external_face_is_not_ready_and_a_drain_stays_draining() {
+    let alive = pool(WorkerHealth::Alive);
+    assert_eq!(probe_state(false, false, true, true, alive.as_ref()), ProbeState::Ready);
+    assert_eq!(probe_state(false, false, true, false, alive.as_ref()), ProbeState::NotReady);
+    assert_eq!(probe_state(true, false, true, false, alive.as_ref()), ProbeState::Draining);
 }
 
 /// Readiness counts `Alive` workers whatever their acceptance: a cluster
@@ -128,7 +160,7 @@ fn readiness_ignores_acceptance() {
         ..WorkerEntry::alive("w0", ProxyAddr::new("10.0.0.1", 5060))
     };
     let state = |e: WorkerEntry| {
-        probe_state(false, false, true, &StaticWorkerRegistry::from_entries(vec![e]))
+        probe_state(false, false, true, true, &StaticWorkerRegistry::from_entries(vec![e]))
     };
     assert_eq!(state(entry(WorkerHealth::Alive, Acceptance::Refuse)), ProbeState::Ready);
     assert_eq!(state(entry(WorkerHealth::Alive, Acceptance::Accept)), ProbeState::Ready);

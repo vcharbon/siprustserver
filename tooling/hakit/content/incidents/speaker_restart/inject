@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Delete, with their grace period, the speaker pods on the node of one front
+# proxy, then watch the node's next hops. Facts: the node, the pods deleted,
+# the instant, and per VIP the withdrawal in ms after the delete, or null.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=route.sh
+source "$HAKIT_LIB/route.sh"
+hk_pick_targets
+read -r _ _ node <<<"$(hk_targets)"
+pairs="$(hk_route_pairs "$node")" || hk_die "the addresses of $node cannot be read"
+speakers="$(kubectl -n "$HAKIT_PARAM_POD_NAMESPACE" get pods -l "$HAKIT_PARAM_POD_SELECTOR" \
+  --field-selector "spec.nodeName=$node" -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.uid}{"\n"}{end}')" \
+  || hk_die "the speaker pods on $node cannot be read"
+[ -n "$speakers" ] || hk_die "no pod of $HAKIT_PARAM_POD_SELECTOR in $HAKIT_PARAM_POD_NAMESPACE on $node"
+echo "$node" > "$HAKIT_EVENT_DIR/node"
+hk_count <<<"$speakers" > "$HAKIT_EVENT_DIR/speakers_before"
+at="$(hk_now_ms)"
+while read -r pod _; do
+  kubectl -n "$HAKIT_PARAM_POD_NAMESPACE" delete pod "$pod" --wait=false >&2
+done <<<"$speakers"
+withdrawn="$(hk_route_wait absent "$at" "$HAKIT_PARAM_WITHDRAW_TIMEOUT_S" "$pairs" 2>/dev/null)" || withdrawn=null
+jq -cn --arg node "$node" --argjson pods "$(awk '{ print $1 }' <<<"$speakers" | jq -Rnc '[inputs]')" \
+  --argjson at "$at" --argjson w "$withdrawn" \
+  '{node: $node, pods: $pods, deleted_at_ms: $at, withdrawn_ms: $w}'

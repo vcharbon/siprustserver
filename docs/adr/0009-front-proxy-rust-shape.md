@@ -229,10 +229,11 @@ instance, each request sent to the instance whose memo holds nothing of it.
   the B2BUA slice.
 - Deferred (see MIGRATION_STATUS slice 9 "Un-ported"): the registrar/REGISTER
   path, the real self-gate, the AIMD bucket, and the failover/replication tests.
-- **HA — ADR-0012 D7.** The proxy is **not** a single point of failure: it runs
-  active/passive behind a keepalived VRRP VIP (two anti-affined edge replicas); X7
-  states what two active instances need, which a failover meets too.
+- **HA — ADR-0056.** The proxy is **not** a single point of failure: two
+  anti-affined replicas run active-active, each node announcing the VIPs over BGP
+  while its proxy is Ready; X7 states what two active instances need. Each
+  proxy's rate budgets (the self-gate, the AIMD buckets) stay its own.
   The stateless §16 design + the HMAC Record-Route cookie (X3) let either replica
   serve in-dialog traffic, and advertising the stable VIP keeps Record-Route valid
-  across failover/restart. Any earlier "single proxy / out-of-scope HA" framing is
+  across a flow move or a restart. Any earlier "single proxy / out-of-scope HA" framing is
   superseded.

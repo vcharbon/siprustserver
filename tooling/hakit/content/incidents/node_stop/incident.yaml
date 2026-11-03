@@ -5,7 +5,11 @@ description: >-
   target pod (pick one) or every target pod (pick all), for duration_s, then
   start them: the loss of a machine and of every
   pod on it. Its pods come back on the same node. The probe waits until every
-  pod bound to it is Ready again.
+  pod bound to it is Ready again. With internal_vip set (the targets are front
+  proxies), inject also measures, from the stop, when the stopped nodes left
+  each VIP's next hops in the host's table (a router reads a node dead by
+  BFD), and the probe also wants both VIPs routed over every live target's
+  node again.
 kind: fault
 target:
   selector: app=rabbitmq
@@ -15,6 +19,22 @@ params:
     type: string
     default: ""
     description: A node label selector naming the nodes to stop; empty is the nodes hosting the target pods.
+  internal_vip:
+    type: string
+    default: ""
+    description: The VIP the workers reach the proxies at; empty measures no route.
+  external_vip:
+    type: string
+    default: 192.168.60.250
+    description: The VIP the callers dial, read with internal_vip.
+  network:
+    type: string
+    default: sipext
+    description: The docker network of the callers' plane.
+  withdraw_timeout_s:
+    type: integer
+    default: 15
+    description: How long inject waits for the stopped nodes to leave both VIPs' next hops.
   ready_timeout_s:
     type: integer
     default: 240

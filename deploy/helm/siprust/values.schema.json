@@ -125,60 +125,30 @@
         "type": "string"
       }
     },
-    "virtualIp": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "address",
-        "interface"
-      ],
-      "properties": {
-        "address": {
-          "type": "string",
-          "minLength": 1
-        },
-        "interface": {
-          "type": "string",
-          "minLength": 1
-        }
-      }
+    "asn": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
     },
-    "trackScript": {
+    "bgpPeer": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "name",
-        "script"
+        "address",
+        "asn"
       ],
       "properties": {
         "name": {
           "type": "string",
-          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
         },
-        "script": {
+        "address": {
           "type": "string",
           "minLength": 1
         },
-        "interval": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "timeout": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "fall": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "rise": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "weight": {
-          "type": "integer",
-          "minimum": -253,
-          "maximum": 253
+        "asn": {
+          "$ref": "#/definitions/asn"
         }
       }
     }
@@ -193,7 +163,7 @@
     "image": {
       "$ref": "#/definitions/fullImage"
     },
-    "keepalivedImage": {
+    "netToolsImage": {
       "$ref": "#/definitions/fullImage"
     },
     "imagePullSecrets": {
@@ -206,14 +176,19 @@
         "proxyVip": {
           "type": "string"
         },
-        "internalInterface": {
-          "type": "string"
-        },
         "externalVip": {
           "type": "string"
         },
         "externalInterface": {
           "type": "string"
+        },
+        "externalNextHops": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "ipv4",
+            "pattern": "^[0-9]{1,3}(\\.[0-9]{1,3}){3}$"
+          }
         },
         "externalSubnet": {
           "type": "string"
@@ -426,6 +401,100 @@
           "type": "integer",
           "minimum": 1
         },
+        "readinessProbe": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "periodSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 60
+            },
+            "failureThreshold": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10
+            }
+          }
+        },
+        "minReadySeconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "announce": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "port": {
+              "$ref": "#/definitions/port"
+            },
+            "loadBalancerClass": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "propagationMs": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "metallb": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "namespace": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "myASN": {
+                  "$ref": "#/definitions/asn"
+                },
+                "peers": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "internal": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/definitions/bgpPeer"
+                      }
+                    },
+                    "external": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/definitions/bgpPeer"
+                      }
+                    }
+                  }
+                },
+                "bfd": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "receiveIntervalMs": {
+                      "type": "integer",
+                      "minimum": 10,
+                      "maximum": 60000
+                    },
+                    "transmitIntervalMs": {
+                      "type": "integer",
+                      "minimum": 10,
+                      "maximum": 60000
+                    },
+                    "detectMultiplier": {
+                      "type": "integer",
+                      "minimum": 2,
+                      "maximum": 255
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
         "env": {
           "$ref": "#/definitions/env"
         },
@@ -483,32 +552,6 @@
         },
         "priorityClassName": {
           "type": "string"
-        },
-        "keepalived": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "virtualRouterId": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 255
-            },
-            "extraVirtualIps": {
-              "type": "array",
-              "items": {
-                "$ref": "#/definitions/virtualIp"
-              }
-            },
-            "extraTrackScripts": {
-              "type": "array",
-              "items": {
-                "$ref": "#/definitions/trackScript"
-              }
-            },
-            "resources": {
-              "$ref": "#/definitions/resources"
-            }
-          }
         }
       }
     },

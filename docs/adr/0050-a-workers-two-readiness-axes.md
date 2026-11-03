@@ -4,7 +4,7 @@
 each dead verdict to the workers; §5, the undecided call's residual.
 Amended (2026-11-01): §2 and §9, a backed-up event queue refuses new calls
 (`cause=overload`, and the admission ladder's event-queue rung); §12, the
-keepalive lane.
+keepalive lane. Amended (2026-11-03): §11, the node's announcement follows `/readyz` (ADR-0056).
 
 **Owner:** `crates/sip-message` (the `X-Readiness` and `X-Incarnation` headers),
 `crates/b2bua/src/repl/readiness.rs` and `router/responses.rs` (the worker's
@@ -234,10 +234,10 @@ take a new call, and may an in-dialog request of a call it owns reach it.
     acceptance plays no part, so a backend outage across the cluster never
     turns the proxy NotReady. A starting proxy probes every listed worker as
     soon as it binds and is NotReady until its first worker view (the first
-    registry snapshot and one probe round). The VRRP check reads `/healthz`
-    and that first-view latch through a route of its own, so a node takes or
-    keeps the virtual address only once it can route; the livenessProbe keeps
-    reading `/healthz` alone. Equal priorities and preempt stay (ADR-0046 D4).
+    registry snapshot and one probe round). A node announces the proxy's
+    addresses exactly while `/readyz` passes, which also requires the external
+    face usable (ADR-0056 §3); the livenessProbe keeps reading `/healthz`
+    alone.
 
 12. **The keepalive lane.** The worker's transaction layer passes each
     out-of-dialog OPTIONS (§2: no transaction) up on a small bounded lane of

@@ -34,6 +34,10 @@ jemalloc-stats = { path = "../jemalloc-stats" }
 # /debug/flamegraph pprof route — one module shared with the b2bua worker.
 probe-http = { path = "../probe-http" }
 sip-net = { path = "../sip-net" }
+# The external face check reads the kernel's neighbour table over a
+# NETLINK_ROUTE socket (safe socket2 calls, libc's constants).
+socket2 = { workspace = true }
+libc = { workspace = true }
 sip-txn = { path = "../sip-txn" }
 sip-clock = { path = "../sip-clock" }
 # Cluster membership: the shared topology crate with the kube EndpointSlice

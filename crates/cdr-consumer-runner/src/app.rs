@@ -41,7 +41,6 @@ fn probe_routes(
         metrics: Arc::new(move || crate::metrics_body(&metrics, &link, &ship)),
         ready: Arc::new(|| ProbeState::Ready),
         heap: None,
-        vrrp: None,
     }
 }
 

@@ -1,5 +1,7 @@
 # 0015 — Failure-domain-aware placement & backup selection: zone-pinned workers, single-picker distinct-zone backup, unified exclusion key
 
+> **D5 is superseded by ADR-0056** (the front proxy's VIPs are announced by BGP).
+>
 > **⚠️ NOT YET IMPLEMENTED — TODO / target design (as of 2026-06-13).**
 > This ADR is the intended cross-rack / multi-zone evolution. The SUT chart
 > (`deploy/helm/siprust`) implements only D4's budget (one worker and one proxy
@@ -126,6 +128,8 @@ backup in z2 can be co-evicted ⇒ reintroduces the acute loss. The intuition
 inverts under per-zone StatefulSets: the safe PDB is **global**, not per-zone.
 
 ## Decision D5 — the front proxy is unified on the SAME failure-domain key; cross-rack VIP needs unicast VRRP
+
+> **Superseded by ADR-0056:** each proxy's node announces the VIPs over BGP, so the proxies need no shared layer 2.
 
 The "generic exclusion scheme" is one key reused everywhere:
 

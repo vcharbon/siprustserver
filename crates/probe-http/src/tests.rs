@@ -8,7 +8,7 @@ use tokio::io::AsyncReadExt;
 use crate::accept::Incoming;
 
 fn routes(body: &'static str, ready: ReadyFn) -> ProbeRoutes {
-    ProbeRoutes { metrics: Arc::new(move || body.to_string()), ready, heap: None, vrrp: None }
+    ProbeRoutes { metrics: Arc::new(move || body.to_string()), ready, heap: None }
 }
 fn always(state: ProbeState) -> ReadyFn {
     Arc::new(move || state)
@@ -115,41 +115,6 @@ async fn serve_on_live_fails_healthz_on_a_pre_bound_listener_while_not_live() {
     .unwrap();
     let r = get(server.addr(), "/healthz").await;
     assert!(r.contains("503") && r.contains("stalled"), "{r}");
-}
-
-/// `/vrrp` passes only while the server is live and its own condition
-/// holds; readiness plays no part.
-#[tokio::test]
-async fn vrrp_is_liveness_and_its_own_condition() {
-    let (live, holds) = (Arc::new(AtomicU8::new(1)), Arc::new(AtomicU8::new(0)));
-    let (live_reads, holds_reads) = (live.clone(), holds.clone());
-    let routes = ProbeRoutes {
-        vrrp: Some(Arc::new(move || holds_reads.load(Ordering::SeqCst) == 1)),
-        ..routes("", always(ProbeState::NotReady))
-    };
-    let server = ProbeServer::start_live(
-        "127.0.0.1:0".parse().unwrap(),
-        routes,
-        Arc::new(move || live_reads.load(Ordering::SeqCst) == 1),
-    )
-    .await
-    .unwrap();
-    let r = get(server.addr(), "/vrrp").await;
-    assert!(r.contains("503") && r.contains("not-ready"), "{r}");
-    holds.store(1, Ordering::SeqCst);
-    assert!(get(server.addr(), "/vrrp").await.contains("200 OK"));
-    live.store(0, Ordering::SeqCst);
-    let r = get(server.addr(), "/vrrp").await;
-    assert!(r.contains("503") && r.contains("stalled"), "{r}");
-}
-
-#[tokio::test]
-async fn vrrp_is_404_on_a_server_given_none() {
-    let server =
-        ProbeServer::start("127.0.0.1:0".parse().unwrap(), routes("", always(ProbeState::Ready)))
-            .await
-            .unwrap();
-    assert!(get(server.addr(), "/vrrp").await.contains("404 Not Found"));
 }
 
 async fn request(addr: std::net::SocketAddr, method: &str, path: &str) -> String {

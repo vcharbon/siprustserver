@@ -1,0 +1,53 @@
+schema: incident.v1
+name: proxy_rollout
+description: >-
+  A graceful rollout of every front proxy, one after the other: `kubectl
+  rollout restart` of their Deployment, whose strategy replaces one pod at a
+  time and holds the next for minReadySeconds. Each replaced proxy drains
+  (Draining, still forwarding) while its node withdraws both VIPs. Inject
+  watches the rollout to its end and measures, per replaced pod, from the
+  drain its proxy logged, when its node left and rejoined each VIP's next
+  hops in the host's table: the drain-to-withdrawal latency is what the
+  drain grace must exceed. The probe wants the rollout complete and both
+  VIPs routed over every live proxy's node.
+kind: fault
+target:
+  selector: app=sip-front-proxy
+  pick: all
+params:
+  deployment:
+    type: string
+    default: sip-front-proxy
+    description: The Deployment of the targets.
+  container:
+    type: string
+    default: sip-front-proxy
+    description: The proxy container, whose log holds the drain line.
+  drain_line:
+    type: string
+    default: draining
+    description: A fixed string of the line the proxy logs on SIGTERM.
+  internal_vip:
+    type: string
+    default: 172.20.255.250
+    description: The VIP the workers reach the proxies at.
+  external_vip:
+    type: string
+    default: 192.168.60.250
+    description: The VIP the callers dial.
+  network:
+    type: string
+    default: sipext
+    description: The docker network of the callers' plane.
+  rollout_timeout_s:
+    type: integer
+    default: 300
+    description: How long inject watches the rollout.
+duration_s: 0
+expected_s: 120
+timeouts:
+  inject_s: 330
+  heal_s: 10
+  probe_s: 180
+  probe_interval_s: 2
+requires: [kind]

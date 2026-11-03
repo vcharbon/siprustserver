@@ -495,7 +495,7 @@ impl InfraShape for RealLoopbackDirect {
 /// Nothing is spawned in-process; the SUT is the live cluster.
 ///
 /// Topology & addressing (everything comes from `e2e/infra/real.json`):
-///   - `lb` = the VRRP VIP (e.g. `172.20.255.250:5060`) — `sut_ingress`.
+///   - `lb` = the proxies' internal VIP (e.g. `172.20.255.250:5060`) — `sut_ingress`.
 ///   - `alice`/`bob1` bind the HOST's address on the kind docker bridge (the
 ///     network gateway, e.g. `172.20.0.1`) so the cluster can route the b-leg
 ///     INVITE and in-dialog requests back out to them.

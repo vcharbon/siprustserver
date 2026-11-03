@@ -102,6 +102,16 @@ pf_unreject() { # pod
   done
 }
 
+# Drop every packet from `ips` arriving in the pod's netns: a set of peers
+# gone silent for this pod alone. pf_unreject deletes the rules.
+pf_drop_from() { # pod ip…
+  local pod="$1" ip
+  shift
+  for ip in "$@"; do
+    pf_netns "$pod" iptables -I INPUT -s "$ip/32" -m comment --comment "$PF_REJECT_TAG" -j DROP || return 1
+  done
+}
+
 pf_delay() { pf_netns "$1" tc qdisc replace dev eth0 root netem delay "${2}ms"; } # pod ms
 pf_loss() { pf_netns "$1" tc qdisc replace dev eth0 root netem loss "${2}%"; }    # pod pct
 # Remove the root qdisc when it carries a netem anywhere (a netem root or a

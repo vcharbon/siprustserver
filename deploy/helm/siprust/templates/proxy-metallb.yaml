@@ -1,0 +1,84 @@
+{{- if and .Values.proxy.enabled .Values.proxy.announce.metallb.enabled }}
+{{- /*
+The MetalLB objects of the proxy's announcement (ADR-0056), in MetalLB's own
+namespace, where MetalLB reads them: one address pool per VIP (a /32, never
+auto-assigned), one BGP advertisement per pool to that face's routers only,
+one peer per router from the proxy's nodes, all under one BFD profile. No
+BGP graceful restart: a dead node's routes go with its BFD session. The
+names carry the release namespace, so two releases never share an object.
+*/}}
+{{- range $api := list "metallb.io/v1beta1" "metallb.io/v1beta2" }}
+{{- if not ($.Capabilities.APIVersions.Has $api) }}
+{{- fail (printf "proxy.announce.metallb.enabled needs MetalLB's %s API in the cluster (helm template: --api-versions %s)" $api $api) }}
+{{- end }}
+{{- end }}
+{{- $m := .Values.proxy.announce.metallb }}
+{{- $prefix := printf "%s-sip-front-proxy" .Release.Namespace }}
+{{- $bfd := $m.bfd }}
+apiVersion: metallb.io/v1beta1
+kind: BFDProfile
+metadata:
+  name: {{ $prefix }}
+  namespace: {{ $m.namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "sip-front-proxy") | nindent 4 }}
+spec:
+  receiveInterval: {{ int $bfd.receiveIntervalMs }}
+  transmitInterval: {{ int $bfd.transmitIntervalMs }}
+  detectMultiplier: {{ int $bfd.detectMultiplier }}
+{{- range $face := list "internal" "external" }}
+{{- $key := ternary "proxyVip" "externalVip" (eq $face "internal") }}
+{{- $peers := index $m.peers $face }}
+{{- if not $peers }}
+{{- fail (printf "proxy.announce.metallb.peers.%s is empty: the %s VIP would be announced to no router" $face $face) }}
+{{- end }}
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: {{ $prefix }}-{{ $face }}
+  namespace: {{ $m.namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "sip-front-proxy") | nindent 4 }}
+spec:
+  addresses:
+    - {{ printf "%s/32" (include "siprust.net" (dict "root" $ "key" $key)) }}
+  autoAssign: false
+---
+apiVersion: metallb.io/v1beta1
+kind: BGPAdvertisement
+metadata:
+  name: {{ $prefix }}-{{ $face }}
+  namespace: {{ $m.namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "sip-front-proxy") | nindent 4 }}
+spec:
+  ipAddressPools: [{{ $prefix }}-{{ $face }}]
+  aggregationLength: 32
+  peers:
+    {{- range $peers }}
+    - {{ $prefix }}-{{ .name }}
+    {{- end }}
+{{- range $peers }}
+---
+apiVersion: metallb.io/v1beta2
+kind: BGPPeer
+metadata:
+  name: {{ $prefix }}-{{ .name }}
+  namespace: {{ $m.namespace }}
+  labels:
+    {{- include "siprust.labels" (dict "root" $ "app" "sip-front-proxy") | nindent 4 }}
+spec:
+  myASN: {{ int64 $m.myASN }}
+  peerASN: {{ int64 .asn }}
+  peerAddress: {{ .address }}
+  bfdProfile: {{ $prefix }}
+  enableGracefulRestart: false
+  {{- with $.Values.proxy.nodeSelector }}
+  nodeSelectors:
+    - matchLabels:
+        {{- toYaml . | nindent 8 }}
+  {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

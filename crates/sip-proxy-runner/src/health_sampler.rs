@@ -1,8 +1,9 @@
 //! The health sampler: every 2 s it publishes the recv shards' stall gauge,
-//! the worker-health and acceptance gauges and the discovery's own health, so
-//! an empty or unprobed pool and the reason for it are observable in
-//! Prometheus, not only through readiness. A shard's stall and its recovery
-//! are each logged once.
+//! the external face gauge, the worker-health and acceptance gauges and the
+//! discovery's own health, so an empty or unprobed pool, an unusable external
+//! face and the reason for each are observable in Prometheus, not only
+//! through readiness. A shard's stall and its recovery, and each change of
+//! the external face's state, are logged once.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,6 +14,8 @@ use sip_proxy::observability::ProxyMetrics;
 use sip_proxy::registry::{WorkerHealth, WorkerRegistry};
 use topology::K8sMembership;
 
+use crate::external_face::{FaceCheck, FaceState};
+
 /// What the sampler reads and where it publishes.
 pub struct HealthSampler {
     pub registry: Arc<dyn WorkerRegistry>,
@@ -22,6 +25,8 @@ pub struct HealthSampler {
     pub pulse: Arc<ShardPulse>,
     pub clock: Clock,
     pub stall_ms: u64,
+    /// The external face `/readyz` requires, `None` for none.
+    pub external_face: Option<FaceCheck>,
 }
 
 /// How often the sampler publishes.
@@ -38,9 +43,11 @@ impl HealthSampler {
                 #[expect(clippy::disallowed_methods, reason = "PERIOD is not zero")]
                 let mut ticker = tokio::time::interval(PERIOD);
                 let mut stalled_before: Vec<usize> = Vec::new();
+                let mut face_before = FaceState::Usable;
                 loop {
                     ticker.tick().await;
                     stalled_before = sampler.sample(stalled_before);
+                    face_before = sampler.sample_face(face_before);
                 }
             }
         })
@@ -60,7 +67,7 @@ impl HealthSampler {
                 tracing::error!(
                     shards = ?stalled,
                     threshold_ms = self.stall_ms,
-                    "recv shard(s) stalled on one packet — /healthz, /readyz and /vrrp fail"
+                    "recv shard(s) stalled on one packet — /healthz and /readyz fail"
                 );
             }
         }
@@ -81,5 +88,29 @@ impl HealthSampler {
             None => m.set_discovery(false, None),
         }
         stalled
+    }
+
+    /// The external face's state published, a change from `before` logged;
+    /// the current state returned.
+    fn sample_face(&self, before: FaceState) -> FaceState {
+        let Some(check) = &self.external_face else {
+            self.metrics.set_external_face_usable(true);
+            return FaceState::Usable;
+        };
+        let now = check.read();
+        self.metrics.set_external_face_usable(now.is_usable());
+        if now != before {
+            if now.is_usable() {
+                tracing::info!(interface = %check.interface, "external face usable again");
+            } else {
+                tracing::error!(
+                    interface = %check.interface,
+                    next_hops = ?check.next_hops,
+                    state = ?now,
+                    "external face unusable — /readyz fails, both faces' addresses withdrawn"
+                );
+            }
+        }
+        now
     }
 }

@@ -81,9 +81,13 @@ a change of plan is a change of `values-kind.yaml` too.
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `SIP_SUBNET` | `172.20.0.0/16` | Internal kind docker bridge **/16**. The gateway and VIP are *derived* from it. |
-| `SIP_GATEWAY` | `<prefix>.0.1` | Bridge gateway — the **bottom** of the subnet (kind hands node IPs out from the bottom up). |
-| `PROXY_VIP` | `<prefix>.255.250` | keepalived VRRP VIP — parked at the **top** of the subnet so it can never collide with a node IP. |
+| `SIP_SUBNET` | `172.20.0.0/17` | Internal kind docker bridge, the lower half of its /16. The gateway and VIP are *derived* from it. |
+| `SIP_GATEWAY` | `<prefix>.0.1` | Bridge gateway — the **bottom** of the subnet (kind hands node IPs out from the bottom up); the host, the lab's router. |
+| `PROXY_VIP` | `<prefix>.255.250` | The internal VIP, **off** the bridge: the lab router routes it to the edge nodes that announce it (ADR-0056). |
+| `SIPEXT_SUBNET`, `SIPEXT_VIP` | `192.168.60.0/25`, `192.168.60.250` | The external bridge and the external VIP, off it, routed the same way. |
+| `KUBE_PROXY_MODE` | `iptables` | kube-proxy's mode at `up`: `iptables` or `nftables` (IPVS refused). |
+| `TOR_ASN`, `PROXY_NODE_ASN`, `BFD_INTERVAL_MS`, `BFD_DETECT_MULTIPLIER` | `64512`, `64513`, `300`, `3` | The lab router's AS, the edge nodes' AS and the BFD timers (restated by the kind values). |
+| `SIP_BRIDGE`, `SIPEXT_BRIDGE` | `br-sip-kind`, `br-sipext` | The bridges' host interface names, which the one-time host setup names. |
 | `SIP_PORT` | `5060` | UDP port the front-proxy **LB** listens on. |
 | `CLUSTER` / `NS` | `sip-e2e` / `sip-test` | kind cluster name / namespace. |
 | `SUT_IMAGE` | `siprustserver:dev` | Rust SUT image tag `up` builds. |
@@ -100,7 +104,11 @@ Host preflight knobs (see system requirements below):
 
 The lab runs on any Linux box with rootful Docker (a VM included). `kind-lab.sh up`
 runs a host preflight (cgroups + sysctls, advisory by default — see the knobs
-above) before creating the cluster.
+above, and the lab routing, required) before creating the cluster. The host is
+the lab's top-of-rack router: run `sudo deploy/k8s/lab-host-setup.sh` once
+(layer-4 multipath hashing, no ICMP redirects and loose reverse-path filtering
+on the lab bridges, and with ufw active the BGP, BFD and same-bridge forwarding
+rules); the bring-up needs no sudo afterwards.
 
 | Requirement | Minimum / note |
 |---|---|
@@ -110,7 +118,35 @@ above) before creating the cluster.
 | Kernel modules | `sch_netem` (the latency and loss incidents), `br_netfilter`, `overlay`. |
 | RAM | ~16 GiB. The cluster ceiling alone is 9.5 GiB (`cap-kind-memory.sh`, tunable via `TOTAL_CAP_MB` and the per-tier `*_CAP_MB`). |
 | CPU | On a shared host, `weight-kind-cpu.sh` (run by `up`, re-runnable on a live cluster) raises each node container's CPU weight by tier (app to the maximum `cpu.weight` 10000, infra and edge to a raised one, control plane left at the default; `*_CPU_SHARES` in docker CPU shares, the weight each node got printed), so under host contention the app node's pods get the largest share instead of an equal share with every other node. |
-| Network | `$SIP_SUBNET` (default `172.20.0.0/16`) **must be free** on the host — no vmnet / route / other docker network may overlap it; if it collides, set a free `SIP_SUBNET` (and the kind values with it). |
+| Network | The /16 of `$SIP_SUBNET` (default `172.20.0.0/16`, the bridge its lower /17) and the /24 of `$SIPEXT_SUBNET` **must be free** on the host — no vmnet / route / other docker network may overlap them; if one collides, set a free subnet (and the kind values with it). |
+| Lab router | The FRR image `quay.io/frrouting/frr:10.6.2` (`TOR_IMAGE`), run by `up` as a host-network container; MetalLB `0.16.1` (`METALLB_VERSION`) installed by `deploy`. |
+
+## Production deployment requirements (the front proxy's announcement)
+
+The front proxy pair is active-active behind BGP (ADR-0056). A cluster it runs on
+provides:
+
+- **MetalLB in BGP mode with the frr-k8s backend**, its speakers on the proxy nodes,
+  **BFD** on every session and **no BGP graceful restart** (a restarted speaker or
+  frr-k8s withdraws its node's routes). The chart can render MetalLB's objects
+  (`proxy.announce.metallb`) or leave them to the operator.
+- **kube-proxy in iptables or nftables mode.** IPVS binds every LoadBalancer address
+  to every node and refuses unlisted ports, so a worker could not reach the internal
+  VIP; a kube-proxy replacement is checked for the same property first.
+- **Top-of-rack routers with multipath** over the announcing nodes, hashing on layer 4,
+  preferably resilient hashing (adding a node then moves few flows).
+- **The internal VIP never routable from the external plane**: separate routers or a
+  VRF per plane; the external VIP likewise kept off the internal plane.
+- **No worker pod on a proxy node** (the chart's proxy anti-affinity; the VIPs stay on a
+  proxy node's `lo`).
+- **The internal plane's isolation** of ADR-0048: nothing on the external plane reaches
+  a worker or the proxies' internal face.
+- Each proxy node's external interface (`network.externalInterface`) and its routers'
+  addresses on it (`network.externalNextHops`): the proxy's readiness requires the
+  interface up and one of those next hops not `FAILED`.
+- The drain grace, `minReadySeconds` and the readiness probe set from the measured
+  withdrawal and announcement latency (`proxy.announce.propagationMs`,
+  `docs/TUNING.md`).
 
 ## HA acceptance
 

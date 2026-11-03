@@ -197,7 +197,11 @@ tolerated (§3).
     | `kill_worker` | fault | crash one worker: SIGKILL its processes from the node, proven dead; the kubelet restarts it | `kill_worker` |
     | `kill_worker_graceful` | fault | delete one worker pod with its grace period | `kill_worker` with `KILL_GRACE` |
     | `kill_worker_held` | fault | crash one worker and keep it absent for `duration_s` (the nodes it may run on tainted NoSchedule), then let it start once | (new) |
-    | `kill_proxy` | fault | crash the front proxy that holds the virtual address | `kill_proxy` |
+    | `kill_proxy` | fault | crash one front proxy; time its node's withdrawal from the VIPs' routes | `kill_proxy` |
+    | `proxy_rollout` | fault | a rollout restart of the proxies, each drained past its node's withdrawal; time the drain-to-withdrawal | (new) |
+    | `speaker_restart` | fault | restart the BGP speakers of one proxy's node | (new) |
+    | `cut_proxy_workers` | fault | cut one proxy off every worker for `duration_s`; time its node's withdrawal | (new) |
+    | `backend_outage` | fault | freeze every worker for `duration_s`; time every proxy node's withdrawal | (new) |
     | `pod_kill` | fault | crash one pod of any selector | `limiter_kill` |
     | `force_delete` | fault | force-delete one pod through the API, its processes left running: two incarnations at once | `kill_worker`'s former mechanism |
     | `pod_restart` | fault | delete one pod of any selector with its grace period | `limiter_restart` |
@@ -206,12 +210,12 @@ tolerated (§3).
     | `net_loss` | fault | netem loss on one pod for `duration_s` | `limiter_netcut` |
     | `tcp_reset` | fault | reset new TCP connections to one pod's port for `duration_s` | `limiter_reject` |
     | `cpu_starve` | fault | cap the CPU of one pod (pick `one`) or all (pick `all`) for `duration_s` | `cpu_starve`, `cpu_starve_all` |
-    | `node_stop` | fault | stop the nodes `node_selector` names, or the node that hosts a pod of the selector; start them at heal | `infra_node_kill` |
+    | `node_stop` | fault | stop the nodes `node_selector` names, or the node that hosts a pod of the selector; start them at heal; with `internal_vip`, time the withdrawal of the VIPs' routes | `infra_node_kill` |
     | `partition` | fault | cut the network between the targets and their peers for `duration_s` (Chaos Mesh); by default one worker from the others, the replication link | (new) |
     | `sip_loss` | fault | netem loss, duplication and delay on one pod's SIP datagrams only, for `duration_s` | (new) |
     | `io_stall` | fault | delay the file operations of one pod's volume for `duration_s` (Chaos Mesh) | (new) |
     | `clock_skew` | fault | shift one pod's wall clock for `duration_s` (Chaos Mesh) | (new) |
-    | `cut_external_plane` | fault | take the external interface of the virtual-address holder down | `cut_external_plane` |
+    | `cut_external_plane` | fault | disconnect one proxy's node from the callers' network; time its withdrawal from both VIPs' routes | `cut_external_plane` |
     | `spike` | load | a burst stream, drained at heal | `peak` |
     | `abuse` | load | a stream of an abuse scenario, drained at heal | `abuse_up`, `abuse_down` |
     | `orphan` | load | a stream abandoned mid-call at heal (`stop: abandon`) | `orphan_kill` |

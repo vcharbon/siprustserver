@@ -36,6 +36,7 @@ use super::{Agent, Proxy};
 use crate::absorption::Absorption;
 use crate::dialogs::{DialogJudge, DialogJudging, DialogOptIns};
 use crate::run::RunReport;
+mod shared_lanes;
 
 /// Fake-fabric per-`recv` silent-wait bound (virtual time — a paused clock
 /// auto-advances to it, so it costs no wall time). Sits above the longest
@@ -145,8 +146,7 @@ impl Harness {
             Some(fault) => net.with_send_fault(fault),
             None => net,
         };
-        let sim: Arc<dyn SignalingNetwork> = Arc::new(net);
-        Self::build(scenario_name.into(), sim, Clock::test_at(0), TransportKind::Fake, RECV_TIMEOUT)
+        Self::with_simulated_network(scenario_name, net)
     }
 
     /// Start a session over a **caller-supplied** network + clock — the seam an

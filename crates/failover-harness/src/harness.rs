@@ -59,6 +59,7 @@ mod flows;
 mod live;
 mod membership;
 mod peer_view;
+pub(crate) mod proxy_pair;
 mod proxy_sut;
 mod proxy_tasks;
 mod release_all;
@@ -796,14 +797,11 @@ pub struct FailoverHarness {
     /// would misread as a skip); after a reboot moves a worker to a new addr its
     /// PRE-reboot bind must stay excluded too, so accumulate rather than replace.
     all_worker_sip_addrs: Vec<SocketAddr>,
-    /// Dual-face proxy bind addrs (both faces, every takeover twin). Excluded
-    /// from the Drop-time endpoint-scoped audit exactly like worker binds: a
-    /// dual-face relay splits one dialog's stream across its two binds
-    /// (request in on one face, out on the other), so neither face alone is an
-    /// endpoint-shaped stream — conformance is judged at alice/bob. The
-    /// single-face proxy bind is NOT here (its one lane sees both directions
-    /// and stays audited, unchanged).
-    relay_sip_addrs: Vec<SocketAddr>,
+    /// The relay lanes (a dual-face proxy's faces, a proxy pair's instances),
+    /// out of the Drop-time endpoint audit: each carries part of a dialog.
+    relay_lanes: Vec<String>,
+    /// The SIP fabric under the recording, kept to share an address.
+    sip_net: sip_net_testkit::SimulatedSignalingNetwork,
     /// Injected timeline markers (crash/reboot/failover/partition/…).
     markers: Vec<Marker>,
     /// The ONE shared global recording-order sequencer (the SIP recorder's
@@ -957,7 +955,8 @@ impl FailoverHarness {
                 (cut.contains(&src) || cut.contains(&dst))
                     .then(|| format!("{src} is cut off the signalling fabric"))
             });
-        let harness = Harness::with_transit_delay_and_send_fault(name, 1, Some(fault)).describe(
+        let sip_net = sip_net_testkit::SimulatedSignalingNetwork::new(1).with_send_fault(fault);
+        let harness = Harness::with_simulated_network(name, sip_net.clone()).describe(
             "S10b goal-2 simulated failover: alice → proxy → 2 replicating b2buas \
              over the SIM SIP + SIM repl fabrics under one fake clock.",
         );
@@ -1005,7 +1004,8 @@ impl FailoverHarness {
             repl_resolver: Arc::new(Mutex::new(repl_addrs.clone())),
             repl_addrs,
             all_worker_sip_addrs: Vec::new(),
-            relay_sip_addrs: Vec::new(),
+            relay_lanes: Vec::new(),
+            sip_net,
             markers: Vec::new(),
             event_seq,
             harness: Arc::new(HarnessHandle::new(harness)),
@@ -1250,8 +1250,8 @@ impl FailoverHarness {
             self.harness.bind_sut_with_roles(&format!("{name}-int"), int_addr, roles.clone()).await;
         let (ext_ep, ext_sock) =
             self.harness.bind_sut_with_roles(&format!("{name}-ext"), ext_addr, roles).await;
-        self.relay_sip_addrs.push(int_sock);
-        self.relay_sip_addrs.push(ext_sock);
+        self.relay_lanes.push(int_sock.to_string());
+        self.relay_lanes.push(ext_sock.to_string());
 
         let external = b2bua_harness::ExternalProxyFace {
             endpoint: ext_ep,

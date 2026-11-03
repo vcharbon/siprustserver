@@ -1,0 +1,43 @@
+schema: incident.v1
+name: cut_proxy_workers
+description: >-
+  Cut one front proxy off every worker for duration_s: its node drops every
+  packet from the workers' pod addresses (the proxy's health probes go
+  unanswered, the workers' requests through that node are lost), while the
+  peer proxy keeps them all. The cut proxy reads every worker dead, turns not
+  ready, and its node withdraws both VIPs; the peer carries every flow.
+  Inject measures, from the cut, when the node left each VIP's next hops in
+  the host's table; heal deletes the rules; the probe wants both VIPs routed
+  over every live proxy's node again.
+kind: fault
+target:
+  selector: app=sip-front-proxy
+  pick: one
+params:
+  worker_selector:
+    type: string
+    default: app=b2bua-worker
+    description: The workers the proxy is cut off.
+  internal_vip:
+    type: string
+    default: 172.20.255.250
+    description: The VIP the workers reach the proxies at.
+  external_vip:
+    type: string
+    default: 192.168.60.250
+    description: The VIP the callers dial.
+  network:
+    type: string
+    default: sipext
+    description: The docker network of the callers' plane.
+  withdraw_timeout_s:
+    type: integer
+    default: 30
+    description: How long inject waits for the node to leave both VIPs' next hops.
+duration_s: 30
+timeouts:
+  inject_s: 90
+  heal_s: 60
+  probe_s: 120
+  probe_interval_s: 2
+requires: [kind, docker]

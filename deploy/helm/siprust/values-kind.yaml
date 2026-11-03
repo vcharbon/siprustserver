@@ -1,21 +1,24 @@
 # The kind lab: deploy/k8s/cluster.yaml's nodes (tier=edge|app|infra, infra
 # tainted) on the docker bridges deploy/k8s/lib/net-env.sh lays out with its
-# defaults: the internal kind bridge 172.20.0.0/16 (eth0 on a node, gateway =
-# the host) and the no-NAT external bridge 192.168.60.0/24 the edge nodes join
-# as eth1. The helm check asserts these values agree with net-env.sh's
-# defaults.
+# defaults: the internal kind bridge 172.20.0.0/17 (eth0 on a node, gateway =
+# the host) and the no-NAT external bridge 192.168.60.0/25 the edge nodes join
+# as eth1. The VIPs sit outside both bridges: the host's FRR router (the
+# lab's top of rack, deploy/k8s/tor/) learns them from the edge nodes over
+# BGP and routes them. The helm check asserts these values agree with
+# net-env.sh's defaults.
 #
 #   helm upgrade --install siprust deploy/helm/siprust -n sip-test \
 #     --create-namespace -f deploy/helm/siprust/values-kind.yaml [--set ...]
 
 network:
   proxyVip: 172.20.255.250
-  internalInterface: eth0
   externalVip: 192.168.60.250
   externalInterface: eth1
-  externalSubnet: 192.168.60.0/24
+  # The host's address on the external bridge: the lab router's external face.
+  externalNextHops: [192.168.60.1]
+  externalSubnet: 192.168.60.0/25
   sipPort: 5060
-  internalCidrs: 10.244.0.0/16,172.20.0.0/16
+  internalCidrs: 10.244.0.0/16,172.20.0.0/17
 
 # The host stack's VictoriaTraces through the kind bridge gateway; the lab
 # trusts X-Trace-Sample.
@@ -33,7 +36,7 @@ worker:
   # IP from its address on the kind bridge (SIP_SUBNET). kindnet enforces the
   # policy.
   networkPolicy:
-    proxyNodeCidrs: [172.20.0.0/16]
+    proxyNodeCidrs: [172.20.0.0/17]
   # Created by kind-lab.sh deploy before the release (lib/sut.sh).
   clusterKey:
     existingSecret: b2bua-worker-cluster-key
@@ -73,6 +76,15 @@ worker:
 
 proxy:
   nodeSelector: { tier: edge }
+  # The lab's MetalLB (BGP, frr-k8s) peers the edge nodes with the host's FRR
+  # router on both bridges (deploy/k8s/tor/frr.conf holds the other side).
+  announce:
+    metallb:
+      enabled: true
+      myASN: 64513
+      peers:
+        internal: [{ name: tor-internal, address: 172.20.0.1, asn: 64512 }]
+        external: [{ name: tor-external, address: 192.168.60.1, asn: 64512 }]
   # The lab installs against its cluster: the cookie key is drawn once there.
   hmac:
     drawInCluster: true

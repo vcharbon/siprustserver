@@ -54,6 +54,7 @@ pub use b2bua::drain::{DrainBounds, DrainExit, DrainOutcome};
 pub use cluster::{Cluster, ClusterRecipe};
 pub use combine::{combine_doc, WorkerAxis};
 pub use cookie::{cookie_field, worker_ordinals};
+pub use harness::proxy_pair::{Instance, ProxyPair};
 pub use harness::{
     FailoverHarness, Fired, PendingDrain, ProxySut, ReplicatedB2buaSut, RULE_CSEQ_IN_DIALOG_ORDER,
     RULE_NO_CANCEL_AFTER_FINAL,

@@ -4,7 +4,7 @@ Two charts deploy a cluster:
 
 | Chart | Deploys | Namespace |
 |---|---|---|
-| `siprust/` | the front proxy pair (keepalived VRRP, dual-faced), the B2BUA worker pool and its ingress NetworkPolicy, the call limiter, the CDR broker and consumer, and on kind the `masq-exempt` DaemonSet | `sip-test` on the lab |
+| `siprust/` | the front proxy pair (active-active, its VIPs announced by BGP through MetalLB, dual-faced), the B2BUA worker pool and its ingress NetworkPolicy, the call limiter, the CDR broker and consumer, and on kind the `masq-exempt` DaemonSet | `sip-test` on the lab |
 | `siprust-observability/` | the in-cluster collectors: vmagent, kube-state-metrics, node-exporter, fluent-bit, writing to a VictoriaMetrics / VictoriaLogs pair outside the cluster | `observability` |
 
 The stores and Grafana stay outside the cluster (`deploy/observability/stack`,
@@ -60,11 +60,24 @@ A product chart depends on `siprust` and sets, per component (`worker`,
   (`cdr.enabled`) and the consumer (`cdr.consumer.enabled`).
 
 A component on the external plane, such as a media relay, is a sidecar of the
-proxy pod: it shares the edge node's network (hostNetwork) and the VRRP pair's
-fate. `proxy.keepalived.extraVirtualIps` floats its own addresses with the two
-VIPs (each on lo of both nodes, out of the kind masquerade with `masq-exempt`
-on) and `proxy.keepalived.extraTrackScripts` makes its health weigh on the
-pair's priority beside the proxy's.
+proxy pod: it shares the edge node's network (hostNetwork) and the proxy's
+fate.
+
+## The VIPs' announcement
+
+Each proxy node holds both VIPs on `lo` and announces them over BGP while its
+proxy is Ready (ADR-0056): `templates/proxy-announce.yaml` renders one
+announce-only `LoadBalancer` Service per VIP (no SIP port, `proxy.announce.port`
+with no listener, `externalTrafficPolicy: Local`), and with
+`proxy.announce.metallb.enabled` `templates/proxy-metallb.yaml` renders
+MetalLB's pools, advertisements, peers (`proxy.announce.metallb.peers`, one list
+per face) and BFD profile into `proxy.announce.metallb.namespace`; off, the
+cluster's operator keeps them. `helm template` of an enabled release needs
+`--api-versions metallb.io/v1beta1 --api-versions metallb.io/v1beta2`. The
+readiness probe (`proxy.readinessProbe`), `proxy.minReadySeconds` and
+`PROXY_DRAIN_GRACE_MS` are checked at render against
+`proxy.announce.propagationMs` (`templates/checks.yaml`). The production
+requirements are `deploy/README.md`'s.
 
 The proxy's intake knobs are values: `proxy.recvShards`
 (`PROXY_RECV_SHARDS`), `proxy.selfGate.cpsRate` / `cpsSize`

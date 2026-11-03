@@ -14,8 +14,6 @@
 //! - `GET /readyz` and its `GET /ready` alias — `200`/`503` driven by the
 //!   injected [`ProbeRoutes::ready`] closure's 3-valued [`ProbeState`], so the
 //!   k8s readinessProbe withholds traffic from a not-ready / draining pod.
-//! - `GET /vrrp` — the check of a node that holds a virtual address: `200 ok`
-//!   while `/healthz` passes and the injected [`ProbeRoutes::vrrp`] holds,
 //!   `503 stalled` / `503 not-ready` otherwise; `404` for a server given none.
 //! - `GET /debug/flamegraph[?seconds=N]` — on-demand pprof CPU flamegraph SVG
 //!   (internal debug route, NOT the SIP datapath; blocks for the sample window
@@ -118,8 +116,6 @@ pub struct ProbeRoutes {
     pub ready: ReadyFn,
     /// `GET /debug/heap` jemalloc heap dump; `None` ⇒ route 503s "unavailable".
     pub heap: Option<HeapDumpFn>,
-    /// What `GET /vrrp` asks on top of liveness; `None` ⇒ the route is `404`.
-    pub vrrp: Option<LiveFn>,
 }
 
 /// A connection that sends nothing for this long is cut and its fd freed.
@@ -309,14 +305,6 @@ pub(crate) async fn handle_conn(
         "/healthz" => match live.as_ref().is_none_or(|live| live()) {
             true => ("200 OK", "text/plain", "ok\n".to_string()),
             false => ("503 Service Unavailable", "text/plain", "stalled\n".to_string()),
-        },
-        "/vrrp" => match (&routes.vrrp, live.as_ref().is_none_or(|live| live())) {
-            (None, _) => ("404 Not Found", "text/plain", "not found\n".to_string()),
-            (Some(_), false) => ("503 Service Unavailable", "text/plain", "stalled\n".to_string()),
-            (Some(vrrp), true) => match vrrp() {
-                true => ("200 OK", "text/plain", "ok\n".to_string()),
-                false => ("503 Service Unavailable", "text/plain", "not-ready\n".to_string()),
-            },
         },
         // `/ready` (worker) and `/readyz` (proxy) are the same probe.
         "/readyz" | "/ready" => match (routes.ready)() {

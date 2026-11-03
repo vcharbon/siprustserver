@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# A rollout is undone by its own end: nothing to undo.
+exit 0

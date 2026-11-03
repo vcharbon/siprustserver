@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Freeze every target worker, then wait until every live proxy's node left
+# both VIPs' next hops. Facts: the freeze's, and per "vip addr" the
+# withdrawal in ms after it.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=timed.sh
+source "$HAKIT_LIB/timed.sh"
+# shellcheck source=route.sh
+source "$HAKIT_LIB/route.sh"
+hk_pick_targets
+proxies="$(hk_live_pods "$HAKIT_PARAM_PROXY_SELECTOR")" || hk_die "the proxies cannot be read"
+mapfile -t nodes < <(awk 'NF { print $3 }' <<<"$proxies" | sort -u)
+[ "${#nodes[@]}" -gt 0 ] || hk_die "no live proxy matches $HAKIT_PARAM_PROXY_SELECTOR"
+pairs="$(hk_route_pairs "${nodes[@]}")" || hk_die "the proxy nodes' addresses cannot be read"
+frozen="$(hk_timed_inject frozen pf_freeze)"
+at="$(jq -r '.applied_at_ms' <<<"$frozen")"
+withdrawn="$(hk_route_wait absent "$at" "$HAKIT_PARAM_WITHDRAW_TIMEOUT_S" "$pairs")" \
+  || hk_die "a proxy node still announces a VIP ${HAKIT_PARAM_WITHDRAW_TIMEOUT_S}s after the freeze"
+jq -cn --argjson f "$frozen" --argjson w "$withdrawn" '$f + {withdrawn_ms: $w}'

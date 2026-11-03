@@ -1,14 +1,37 @@
 # shellcheck shell=bash
 # The call-path smokes of a lab running the front proxy (kind-lab.sh deploy,
-# through lib/sut.sh): the external VIP answers SIP from the callers' plane,
-# only the proxy bridges the two planes, and the workers' NetworkPolicy keeps
-# other pods out. Sourced after lib/cluster.sh
-# (log, die, kubectl on the lab's context, the network plan).
+# through lib/sut.sh): the lab router routes both VIPs over both edge nodes,
+# the external VIP answers SIP from the callers' plane, only the proxy bridges
+# the two planes, and the workers' NetworkPolicy keeps other pods out. Sourced
+# after lib/cluster.sh (log, die, kubectl on the lab's context, the network
+# plan, lib/tor.sh).
+
+# The addresses of the tier=edge nodes on the internal bridge, sorted, one
+# per line.
+edge_internal_addrs() {
+  kubectl get nodes -l tier=edge \
+    -o jsonpath='{range .items[*]}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' | sort
+}
+
+# Both VIPs routed over both edge nodes in the host's table (the lab
+# router's FIB), within ROUTE_SMOKE_TIMEOUT (120 s): each node announces once
+# its proxy is Ready (ADR-0056).
+route_smoke() {
+  local timeout="${ROUTE_SMOKE_TIMEOUT:-120}" internal external
+  internal="$(edge_internal_addrs | tr '\n' ' ' | sed 's/ $//')"
+  external="$(printf '%s\n' "$SIPEXT_EDGE1_IP" "$SIPEXT_EDGE2_IP" | sort | tr '\n' ' ' | sed 's/ $//')"
+  log "route-smoke: $PROXY_VIP over '$internal', $SIPEXT_VIP over '$external' (<=${timeout}s)"
+  tor_wait_next_hops "$PROXY_VIP" "$internal" "$timeout" \
+    || die "route-smoke: the internal VIP is not routed over both edge nodes (ip route show $PROXY_VIP; docker exec $TOR_NAME vtysh -c 'show bgp summary')"
+  tor_wait_next_hops "$SIPEXT_VIP" "$external" "$timeout" \
+    || die "route-smoke: the external VIP is not routed over both edge nodes (ip route show $SIPEXT_VIP; docker exec $TOR_NAME vtysh -c 'show bgp summary')"
+  log "route-smoke: both VIPs routed over both edge nodes"
+}
 
 # An OPTIONS to SIPEXT_VIP:SIP_PORT from a one-shot container on sipext, the
-# callers' vantage: the reply crosses exactly the path a lost gratuitous ARP
-# kills. Retried every ~3 s up to VIP_SMOKE_TIMEOUT (90 s): the keepalived
-# GARP refresh (10 s) heals a stale ARP well inside it.
+# callers' vantage: the request crosses the lab router's route to an edge
+# node, the reply comes back on the bridge. Retried every ~3 s up to
+# VIP_SMOKE_TIMEOUT (90 s).
 vip_smoke() {
   local timeout="${VIP_SMOKE_TIMEOUT:-90}" attempts probe
   attempts=$(( timeout / 3 ))
@@ -34,7 +57,7 @@ EOS
 )"
   docker rm -f vip-smoke >/dev/null 2>&1 || true
   docker run --rm --name vip-smoke --label "sipext-run=$CLUSTER" \
-    --network "$SIPEXT_NET" "$KEEPALIVED_IMAGE" \
+    --network "$SIPEXT_NET" "$NETTOOLS_IMAGE" \
     /bin/sh -c "$probe" vip-smoke "$SIPEXT_VIP" "$SIP_PORT" "$attempts"
 }
 
@@ -65,23 +88,23 @@ EOS
   wip="$(kubectl -n "$NS" get pods -l app=b2bua-worker -o jsonpath='{.items[0].status.podIP}' 2>/dev/null)"
   [ -n "$wip" ] || die "isolation-smoke: no b2bua-worker pod IP (deploy first)"
   log "isolation-smoke 1/3: sipext must NOT reach worker $wip / internal VIP $PROXY_VIP"
-  docker run --rm --label "sipext-run=$CLUSTER" --network "$SIPEXT_NET" "$KEEPALIVED_IMAGE" \
+  docker run --rm --label "sipext-run=$CLUSTER" --network "$SIPEXT_NET" "$NETTOOLS_IMAGE" \
     /bin/sh -c "$neg" iso "$wip" 5060 "worker-pod" \
     || die "isolation-smoke: worker pod reachable from sipext"
-  docker run --rm --label "sipext-run=$CLUSTER" --network "$SIPEXT_NET" "$KEEPALIVED_IMAGE" \
+  docker run --rm --label "sipext-run=$CLUSTER" --network "$SIPEXT_NET" "$NETTOOLS_IMAGE" \
     /bin/sh -c "$neg" iso "$PROXY_VIP" "$SIP_PORT" "internal-VIP" \
     || die "isolation-smoke: internal VIP reachable from sipext: the planes are bridged outside the proxy"
   log "isolation-smoke 2/3: the pod network must NOT reach external VIP $SIPEXT_VIP"
   kubectl -n "$NS" delete pod iso-smoke --ignore-not-found --now >/dev/null 2>&1 || true
   kubectl -n "$NS" run iso-smoke --rm -i --restart=Never \
-    --image="$KEEPALIVED_IMAGE" --image-pull-policy=IfNotPresent \
+    --image="$NETTOOLS_IMAGE" --image-pull-policy=IfNotPresent \
     --pod-running-timeout=2m \
     --overrides='{"spec":{"nodeSelector":{"tier":"app"}}}' \
     --command -- /bin/sh -c "$neg" iso "$SIPEXT_VIP" "$SIP_PORT" "external-VIP" \
     || die "isolation-smoke: external VIP reachable from the pod network"
   log "isolation-smoke 3/3: the external zone must be NXDOMAIN in the cluster"
   kubectl -n "$NS" run iso-dns --rm -i --restart=Never \
-    --image="$KEEPALIVED_IMAGE" --image-pull-policy=IfNotPresent \
+    --image="$NETTOOLS_IMAGE" --image-pull-policy=IfNotPresent \
     --pod-running-timeout=2m \
     --overrides='{"spec":{"nodeSelector":{"tier":"app"}}}' \
     --command -- /bin/sh -c 'if nslookup uas.sipext.test >/dev/null 2>&1; then echo "ISOLATION-FAIL: uas.sipext.test resolves in-cluster"; exit 1; fi; echo "ISOLATION-OK: external zone NXDOMAIN in-cluster"' \
@@ -125,7 +148,7 @@ EOS
   log "policy-smoke: a pod in $NS must NOT reach worker $wip on 5060/UDP nor $port/TCP"
   kubectl -n "$NS" delete pod np-smoke --ignore-not-found --now >/dev/null 2>&1 || true
   kubectl -n "$NS" run np-smoke --rm -i --restart=Never \
-    --image="$KEEPALIVED_IMAGE" --image-pull-policy=IfNotPresent \
+    --image="$NETTOOLS_IMAGE" --image-pull-policy=IfNotPresent \
     --pod-running-timeout=2m \
     --overrides='{"spec":{"nodeSelector":{"tier":"app"}}}' \
     --command -- /bin/sh -c "$probe" np "$wip" "$port" \

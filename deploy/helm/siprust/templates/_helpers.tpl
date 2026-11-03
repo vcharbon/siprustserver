@@ -32,10 +32,10 @@ image: {{ printf "%s:%s" $img.repository (toString $img.tag) | quote }}
 imagePullPolicy: {{ $img.pullPolicy }}
 {{- end }}
 
-{{/* The keepalived image of the VRRP sidecar, vip-loopback and masq-exempt. */}}
-{{- define "siprust.keepalivedImage" -}}
-image: {{ printf "%s:%s" .Values.keepalivedImage.repository (toString .Values.keepalivedImage.tag) | quote }}
-imagePullPolicy: {{ .Values.keepalivedImage.pullPolicy }}
+{{/* The network tools image of vip-loopback and masq-exempt. */}}
+{{- define "siprust.netToolsImage" -}}
+image: {{ printf "%s:%s" .Values.netToolsImage.repository (toString .Values.netToolsImage.tag) | quote }}
+imagePullPolicy: {{ .Values.netToolsImage.pullPolicy }}
 {{- end }}
 
 {{/*
@@ -148,15 +148,6 @@ A network value the proxy and masq-exempt require, named in the error. Takes
 {{- define "siprust.net" -}}
 {{- $v := index .root.Values.network .key }}
 {{- required (printf "network.%s is required by the proxy and masq-exempt" .key) $v }}
-{{- end }}
-
-{{/* The addresses of proxy.keepalived.extraVirtualIps, space-separated. */}}
-{{- define "siprust.extraVips" -}}
-{{- $out := list }}
-{{- range .Values.proxy.keepalived.extraVirtualIps }}
-{{- $out = append $out .address }}
-{{- end }}
-{{- join " " $out }}
 {{- end }}
 
 {{/*

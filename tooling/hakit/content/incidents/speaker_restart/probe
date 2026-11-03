@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Recovered when as many speaker pods run Ready on the node as before the
+# delete and both VIPs are routed over every live proxy's node. Exit 75 while
+# not yet, or while a read fails.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=route.sh
+source "$HAKIT_LIB/route.sh"
+node="$(cat "$HAKIT_EVENT_DIR/node")"
+rows="$(kubectl -n "$HAKIT_PARAM_POD_NAMESPACE" get pods -l "$HAKIT_PARAM_POD_SELECTOR" \
+  --field-selector "spec.nodeName=$node" -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.conditions[?(@.type=="Ready")].status}{" "}{.metadata.deletionTimestamp}{"\n"}{end}')" \
+  || exit "$HK_NOT_YET"
+ready="$(awk 'NF == 2 && $2 == "True"' <<<"$rows" | hk_count)"
+[ "$ready" -ge "$(cat "$HAKIT_EVENT_DIR/speakers_before")" ] || exit "$HK_NOT_YET"
+routes="$(hk_probe_routed_over_live)"
+jq -cn --argjson r "$routes" --argjson at "$(hk_now_ms)" '{next_hops: $r, announced_at_ms: $at}'

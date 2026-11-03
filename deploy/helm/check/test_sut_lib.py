@@ -1,6 +1,7 @@
 """The kind lab's SUT release helpers (lib/sut.sh), against a stand-in kubectl:
-a namespace another deploy owns is refused, and the VIP and isolation smokes
-and the proxy's series run only when the release deploys the front proxy."""
+a namespace another deploy owns is refused, and the route, VIP and isolation
+smokes and the proxy's series run only when the release deploys the front
+proxy."""
 import subprocess
 import unittest
 
@@ -13,6 +14,7 @@ HARNESS = """
 set -euo pipefail
 log() { echo "log: $*"; }
 die() { echo "die: $*"; exit 1; }
+route_smoke() { echo "route_smoke"; }
 vip_smoke() { echo "vip_smoke"; }
 isolation_smoke() { echo "isolation_smoke"; }
 policy_smoke() { echo "policy_smoke"; }
@@ -58,7 +60,7 @@ class Smokes(unittest.TestCase):
     def test_a_release_with_the_proxy_runs_every_smoke(self) -> None:
         out = run("sut_smokes", proxy="1")
         self.assertEqual((out.returncode, out.stdout.split()),
-                         (0, ["vip_smoke", "isolation_smoke", "policy_smoke"]))
+                         (0, ["route_smoke", "vip_smoke", "isolation_smoke", "policy_smoke"]))
 
     def test_a_release_without_the_proxy_skips_them(self) -> None:
         out = run("sut_smokes", proxy="0")

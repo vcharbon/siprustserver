@@ -54,7 +54,6 @@ impl RunnerBase {
             metrics: Arc::new(move || worker.body(extra_metrics.as_ref())),
             ready: ready_fn(move || core_ready.readiness_state(), core.loops().clone(), stall),
             heap,
-            vrrp: None,
         };
         let live = live_fn(core.loops().clone(), stall);
         let admin = admin::admin_routes(
@@ -197,7 +196,6 @@ mod tests {
             metrics: Arc::new(String::new),
             ready: ready.clone(),
             heap: None,
-            vrrp: None,
         };
         let server =
             ProbeServer::start_live("127.0.0.1:0".parse().unwrap(), routes, live).await.unwrap();
@@ -245,7 +243,6 @@ mod tests {
             metrics: Arc::new(String::new),
             ready: ready_fn(|| ReadinessState::Ready, loops.clone(), STALL),
             heap: None,
-            vrrp: None,
         };
         let admin = admin::admin_routes(
             readiness.clone(),

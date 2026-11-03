@@ -7,4 +7,5 @@
 
 mod contracts;
 mod cross_rules;
+mod shared_address;
 mod simulated;

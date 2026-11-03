@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Reconnect the cut node to the callers' network at its own address, and
 # prove it connected there, again a second later. Idempotent: a node already
-# connected is left alone. With equal VRRP priorities the addresses stay with
-# the peer.
+# connected is left alone.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
 cut="$(hk_state cut)"

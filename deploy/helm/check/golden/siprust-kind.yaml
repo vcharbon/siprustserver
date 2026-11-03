@@ -1,46 +1,5 @@
-apiVersion: v1
-data:
-  keepalived.conf: "# Rendered by the siprust chart (files/keepalived.conf).\n#\n\
-    # Identical on both pods, same base priority. state BACKUP: the first pod up\n\
-    # wins the VIPs; VRRP preempts only on a strictly higher priority, so the\n# holder\
-    \ keeps them across its peer's reboots. Multicast VRRP: the node bridge\n# floods\
-    \ 224.0.0.18 between the edge nodes.\n#\n# ONE vrrp_instance owns both identities,\
-    \ the internal VIP on the internal\n# interface and the external VIP on the external\
-    \ one: one election, adverts on\n# the internal plane, so the two faces never\
-    \ split across pods.\n# track_interface drives the instance to FAULT when the\
-    \ external interface\n# disappears, so the peer takes both VIPs together.\n#\n\
-    # The VIPs follow proxy health (ADR-0046, ADR-0050 \xA711): chk_proxy_health GETs\n\
-    # the proxy's /vrrp (its /healthz and its first worker view), weighted, never\n\
-    # a FAULT trigger. 3 failures in a row drop this node's priority by 50, so a\n\
-    # dead proxy hands the VIPs to a healthy peer; both failing leaves the\n# priorities\
-    \ equal and the VIPs where they are; a recovered proxy is back at\n# the same\
-    \ priority and does not take them back. init_fail: a starting\n# keepalived sits\
-    \ at the lowered priority until its proxy passes `rise 2`,\n# which it does only\
-    \ once it has read its workers. The check is clamped to\n# exit 0/1, so an exec\
-    \ failure reads as one failed check.\n#\n# A move takes 4.6-6.6 s: d + 2*interval\
-    \ + master_down - e, d in (0, 1] the\n# check's phase, master_down = 3*advert_int\
-    \ + (256-100)/256 = 3.609 s, e in\n# [0, 1) the age of the last full-priority\
-    \ advert at the drop.\nglobal_defs {\n    router_id sip-front-proxy\n    script_user\
-    \ root\n}\nvrrp_script chk_proxy_health {\n    script \"/bin/sh -c 'wget -q -T\
-    \ 1 -O /dev/null http://127.0.0.1:9090/vrrp && exit 0; exit 1'\"\n    interval\
-    \ 1\n    timeout 1\n    fall 3\n    rise 2\n    weight -50\n    init_fail\n}\n\
-    vrrp_instance VI_SIP {\n    state BACKUP\n    interface eth0\n    virtual_router_id\
-    \ 51\n    priority 100\n    # VRRPv2 adverts are whole seconds.\n    advert_int\
-    \ 1\n    # A gratuitous-ARP burst at election is lost while a fresh bridge's FDB\n\
-    \    # settles: repeat it, and refresh the claim so a stale neighbour binding\n\
-    \    # heals within garp_master_refresh seconds, per address on both planes.\n\
-    \    garp_master_delay 1\n    garp_master_repeat 5\n    garp_master_refresh 10\n\
-    \    garp_master_refresh_repeat 2\n    virtual_ipaddress {\n        172.20.255.250\
-    \ dev eth0\n        192.168.60.250 dev eth1\n    }\n    track_interface {\n  \
-    \      eth1\n    }\n    track_script {\n        chk_proxy_health\n    }\n    #\
-    \ Every floating address stays on lo at all times, so either pod binds it\n  \
-    \  # and sources its egress from it.\n    notify_master \"/bin/sh -c 'ip addr\
-    \ add 172.20.255.250/32 dev lo 2>/dev/null; ip addr add 192.168.60.250/32 dev\
-    \ lo 2>/dev/null; true'\"\n    notify_backup \"/bin/sh -c 'ip addr add 172.20.255.250/32\
-    \ dev lo 2>/dev/null; ip addr add 192.168.60.250/32 dev lo 2>/dev/null; true'\"\
-    \n    notify_fault  \"/bin/sh -c 'ip addr add 172.20.255.250/32 dev lo 2>/dev/null;\
-    \ ip addr add 192.168.60.250/32 dev lo 2>/dev/null; true'\"\n}\n"
-kind: ConfigMap
+apiVersion: metallb.io/v1beta1
+kind: BFDProfile
 metadata:
   labels:
     app: sip-front-proxy
@@ -49,8 +8,94 @@ metadata:
     app.kubernetes.io/name: sip-front-proxy
     app.kubernetes.io/part-of: siprust
     helm.sh/chart: siprust-0.1.0
-  name: sip-front-proxy-keepalived
-  namespace: sip-test
+  name: sip-test-sip-front-proxy
+  namespace: metallb-system
+spec:
+  detectMultiplier: 3
+  receiveInterval: 300
+  transmitInterval: 300
+---
+apiVersion: metallb.io/v1beta1
+kind: BGPAdvertisement
+metadata:
+  labels:
+    app: sip-front-proxy
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: sip-front-proxy
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: sip-test-sip-front-proxy-external
+  namespace: metallb-system
+spec:
+  aggregationLength: 32
+  ipAddressPools:
+  - sip-test-sip-front-proxy-external
+  peers:
+  - sip-test-sip-front-proxy-tor-external
+---
+apiVersion: metallb.io/v1beta1
+kind: BGPAdvertisement
+metadata:
+  labels:
+    app: sip-front-proxy
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: sip-front-proxy
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: sip-test-sip-front-proxy-internal
+  namespace: metallb-system
+spec:
+  aggregationLength: 32
+  ipAddressPools:
+  - sip-test-sip-front-proxy-internal
+  peers:
+  - sip-test-sip-front-proxy-tor-internal
+---
+apiVersion: metallb.io/v1beta2
+kind: BGPPeer
+metadata:
+  labels:
+    app: sip-front-proxy
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: sip-front-proxy
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: sip-test-sip-front-proxy-tor-external
+  namespace: metallb-system
+spec:
+  bfdProfile: sip-test-sip-front-proxy
+  enableGracefulRestart: false
+  myASN: 64513
+  nodeSelectors:
+  - matchLabels:
+      tier: edge
+  peerASN: 64512
+  peerAddress: 192.168.60.1
+---
+apiVersion: metallb.io/v1beta2
+kind: BGPPeer
+metadata:
+  labels:
+    app: sip-front-proxy
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: sip-front-proxy
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: sip-test-sip-front-proxy-tor-internal
+  namespace: metallb-system
+spec:
+  bfdProfile: sip-test-sip-front-proxy
+  enableGracefulRestart: false
+  myASN: 64513
+  nodeSelectors:
+  - matchLabels:
+      tier: edge
+  peerASN: 64512
+  peerAddress: 172.20.0.1
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -76,34 +121,34 @@ spec:
       containers:
       - args:
         - "#!/bin/sh\n# The masq-exempt DaemonSet's loop, on every node's network\
-          \ namespace\n# (hostNetwork). Reads PROXY_VIP, EXTERNAL_VIP, EXTRA_VIPS\
-          \ (space-separated,\n# may be empty), EXTERNAL_SUBNET, EXTERNAL_INTERFACE\
-          \ and PERIOD from its env;\n# the chart never rewrites this text.\n#\n#\
-          \ kindnetd's KIND-MASQ-AGENT chain (nat POSTROUTING) exempts only the pod\
-          \ CIDR.\n# The SIP plane keeps real addresses: worker -> internal VIP would\
-          \ be SNAT'd to\n# a node IP with its source port remapped, and the VIP-sourced\
-          \ replies would no\n# longer match the peer's conntrack tuple; the external\
-          \ plane is never\n# masqueraded either. One RETURN rule per identity and\
-          \ direction at position 1,\n# re-asserted every PERIOD seconds so a kindnetd\
-          \ reconcile wipes them for one\n# period at most.\n#\n# One filter rule\
-          \ rides the same loop: a packet for the internal VIP arriving\n# on the\
-          \ external interface is dropped. The proxy trusts whatever reaches its\n\
-          # internal socket (ADR-0048), and an edge node holds both VIPs.\n# One RETURN\
-          \ rule in KIND-MASQ-AGENT: $1 is -s or -d, $2 the address.\nexempt() {\n\
-          \  iptables -t nat -C KIND-MASQ-AGENT \"$1\" \"$2\" -j RETURN 2>/dev/null\
-          \ \\\n    || { iptables -t nat -I KIND-MASQ-AGENT 1 \"$1\" \"$2\" -j RETURN\
-          \ && echo \"masq-exempt: inserted $1 $2 RETURN\"; }\n}\necho \"masq-exempt:\
-          \ asserting KIND-MASQ-AGENT RETURN rules for $PROXY_VIP, $EXTERNAL_VIP $EXTRA_VIPS,\
-          \ $EXTERNAL_SUBNET and the $EXTERNAL_INTERFACE -> $PROXY_VIP DROP (period\
-          \ ${PERIOD}s)\"\nwhile true; do\n  iptables -C INPUT -i \"$EXTERNAL_INTERFACE\"\
-          \ -d \"$PROXY_VIP/32\" -j DROP 2>/dev/null \\\n    || { iptables -I INPUT\
-          \ 1 -i \"$EXTERNAL_INTERFACE\" -d \"$PROXY_VIP/32\" -j DROP && echo \"masq-exempt:\
-          \ inserted INPUT -i $EXTERNAL_INTERFACE -d $PROXY_VIP/32 DROP\"; }\n  if\
-          \ iptables -t nat -nL KIND-MASQ-AGENT >/dev/null 2>&1; then\n    exempt\
-          \ -s \"$PROXY_VIP/32\"\n    exempt -d \"$PROXY_VIP/32\"\n    exempt -s \"\
-          $EXTERNAL_VIP/32\"\n    exempt -d \"$EXTERNAL_SUBNET\"\n    for vip in $EXTRA_VIPS;\
-          \ do\n      exempt -s \"$vip/32\"\n      exempt -d \"$vip/32\"\n    done\n\
-          \  fi\n  sleep \"$PERIOD\"\ndone\n"
+          \ namespace\n# (hostNetwork). Reads PROXY_VIP, EXTERNAL_VIP, EXTERNAL_SUBNET,\n\
+          # EXTERNAL_INTERFACE and PERIOD from its env; the chart never rewrites this\n\
+          # text.\n#\n# kindnetd's KIND-MASQ-AGENT chain (nat POSTROUTING) exempts\
+          \ only the pod CIDR.\n# The SIP plane keeps real addresses: worker -> internal\
+          \ VIP would be SNAT'd to\n# a node IP with its source port remapped, and\
+          \ the VIP-sourced replies would no\n# longer match the peer's conntrack\
+          \ tuple; the external plane is never\n# masqueraded either. One RETURN rule\
+          \ per identity and direction at position 1,\n# re-asserted every PERIOD\
+          \ seconds so a kindnetd reconcile wipes them for one\n# period at most.\n\
+          #\n# One filter rule rides the same loop: a packet for the internal VIP\
+          \ arriving\n# on the external interface is dropped. The proxy trusts whatever\
+          \ reaches its\n# internal socket (ADR-0048), and a proxy node owns both\
+          \ VIPs: a neighbour on\n# the callers' plane that routes the internal VIP\
+          \ through this node is\n# refused here, whatever the routers announce.\n\
+          # One RETURN rule in KIND-MASQ-AGENT: $1 is -s or -d, $2 the address.\n\
+          exempt() {\n  iptables -t nat -C KIND-MASQ-AGENT \"$1\" \"$2\" -j RETURN\
+          \ 2>/dev/null \\\n    || { iptables -t nat -I KIND-MASQ-AGENT 1 \"$1\" \"\
+          $2\" -j RETURN && echo \"masq-exempt: inserted $1 $2 RETURN\"; }\n}\necho\
+          \ \"masq-exempt: asserting KIND-MASQ-AGENT RETURN rules for $PROXY_VIP,\
+          \ $EXTERNAL_VIP, $EXTERNAL_SUBNET and the $EXTERNAL_INTERFACE -> $PROXY_VIP\
+          \ DROP (period ${PERIOD}s)\"\nwhile true; do\n  iptables -C INPUT -i \"\
+          $EXTERNAL_INTERFACE\" -d \"$PROXY_VIP/32\" -j DROP 2>/dev/null \\\n    ||\
+          \ { iptables -I INPUT 1 -i \"$EXTERNAL_INTERFACE\" -d \"$PROXY_VIP/32\"\
+          \ -j DROP && echo \"masq-exempt: inserted INPUT -i $EXTERNAL_INTERFACE -d\
+          \ $PROXY_VIP/32 DROP\"; }\n  if iptables -t nat -nL KIND-MASQ-AGENT >/dev/null\
+          \ 2>&1; then\n    exempt -s \"$PROXY_VIP/32\"\n    exempt -d \"$PROXY_VIP/32\"\
+          \n    exempt -s \"$EXTERNAL_VIP/32\"\n    exempt -d \"$EXTERNAL_SUBNET\"\
+          \n  fi\n  sleep \"$PERIOD\"\ndone\n"
         command:
         - /bin/sh
         - -c
@@ -112,15 +157,13 @@ spec:
           value: 172.20.255.250
         - name: EXTERNAL_VIP
           value: 192.168.60.250
-        - name: EXTRA_VIPS
-          value: ''
         - name: EXTERNAL_SUBNET
-          value: 192.168.60.0/24
+          value: 192.168.60.0/25
         - name: EXTERNAL_INTERFACE
           value: eth1
         - name: PERIOD
           value: '15'
-        image: siprustserver-keepalived:dev
+        image: siprustserver-nettools:dev
         imagePullPolicy: IfNotPresent
         name: masq-exempt
         resources:
@@ -377,6 +420,7 @@ metadata:
   name: sip-front-proxy
   namespace: sip-test
 spec:
+  minReadySeconds: 15
   replicas: 2
   selector:
     matchLabels:
@@ -389,7 +433,6 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/keepalived: 92a96e86ba1f35581f33179a977e02d7d8b0bedd0ebfae1eb3b8639e526b87c1
         prometheus.io/port: '9090'
         prometheus.io/scrape: 'true'
       labels:
@@ -401,6 +444,10 @@ spec:
           - labelSelector:
               matchLabels:
                 app: sip-front-proxy
+            topologyKey: kubernetes.io/hostname
+          - labelSelector:
+              matchLabels:
+                app: b2bua-worker
             topologyKey: kubernetes.io/hostname
       containers:
       - command:
@@ -431,8 +478,12 @@ spec:
           value: 172.20.255.250:5060
         - name: PROXY_ADVERTISE_EXT
           value: 192.168.60.250:5060
+        - name: PROXY_EXT_INTERFACE
+          value: eth1
+        - name: PROXY_EXT_NEXT_HOPS
+          value: 192.168.60.1
         - name: PROXY_FACE_INT_CIDRS
-          value: 10.244.0.0/16,172.20.0.0/16
+          value: 10.244.0.0/16,172.20.0.0/17
         - name: PROXY_LISTEN
           value: 172.20.255.250:5060
         - name: PROXY_LISTEN_EXT
@@ -468,69 +519,51 @@ spec:
           name: metrics
           protocol: TCP
         readinessProbe:
-          failureThreshold: 3
+          failureThreshold: 2
           httpGet:
             path: /readyz
             port: 9090
           initialDelaySeconds: 1
-          periodSeconds: 2
+          periodSeconds: 1
+          successThreshold: 1
+          timeoutSeconds: 1
         resources:
           limits:
             memory: 512Mi
           requests:
             cpu: 500m
             memory: 64Mi
-      - args:
-        - --dont-fork
-        - --log-console
-        - --log-detail
-        - --use-file=/etc/keepalived/keepalived.conf
-        command:
-        - /usr/sbin/keepalived
-        image: siprustserver-keepalived:dev
-        imagePullPolicy: IfNotPresent
-        lifecycle:
-          preStop:
-            exec:
-              command:
-              - /bin/sh
-              - -c
-              - pkill keepalived; sleep 1
-        name: keepalived
-        securityContext:
-          capabilities:
-            add:
-            - NET_ADMIN
-            - NET_BROADCAST
-            - NET_RAW
-        volumeMounts:
-        - mountPath: /etc/keepalived
-          name: keepalived-conf
-          readOnly: true
       dnsPolicy: ClusterFirstWithHostNet
       hostNetwork: true
       initContainers:
       - args:
         - "#!/bin/sh\n# The proxy pod's init container, on the node's network namespace\n\
-          # (hostNetwork). Reads PROXY_VIP, EXTERNAL_VIP, EXTRA_VIPS (space-separated,\n\
-          # may be empty) and UNRES_QLEN_BYTES from its env; the chart never rewrites\n\
-          # this text.\n#\n# Every floating address goes on lo before the proxy and\
-          \ its sidecars start,\n# so a bind(VIP:port) succeeds on the VRRP backup\
-          \ too. Strict ARP: with the\n# VIPs on lo of both nodes, only the interface\
-          \ owning an address answers ARP\n# for it.\n#\n# A next hop the kernel cannot\
-          \ resolve holds every datagram sent to it on the\n# neighbour's unresolved\
-          \ queue, charged to the sending socket, for the whole\n# ARP cycle (ADR-0033).\
-          \ The default bound equals a default socket send buffer;\n# UNRES_QLEN_BYTES\
-          \ bounds it per neighbour on every interface. net.core.wmem_max\n# is the\
-          \ host's and read-only here (the host preflight raises it).\nset -e\nfor\
-          \ vip in $PROXY_VIP $EXTERNAL_VIP $EXTRA_VIPS; do\n  ip addr add \"$vip/32\"\
-          \ dev lo 2>/dev/null || ip addr show dev lo | grep -q \"$vip/32\"\ndone\n\
-          echo 1 > /proc/sys/net/ipv4/conf/all/arp_ignore\necho 2 > /proc/sys/net/ipv4/conf/all/arp_announce\n\
-          echo 1 > /proc/sys/net/ipv4/conf/lo/arp_ignore\necho 2 > /proc/sys/net/ipv4/conf/lo/arp_announce\n\
-          for f in /proc/sys/net/ipv4/neigh/*/unres_qlen_bytes; do\n  echo \"$UNRES_QLEN_BYTES\"\
-          \ > \"$f\" || echo \"vip-loopback: WARN could not set $f\"\ndone\necho \"\
-          vip-loopback: $PROXY_VIP $EXTERNAL_VIP $EXTRA_VIPS on lo + strict-ARP +\
-          \ neigh unres_qlen_bytes=$UNRES_QLEN_BYTES ready\"\n"
+          # (hostNetwork). Reads PROXY_VIP, EXTERNAL_VIP and UNRES_QLEN_BYTES from\
+          \ its\n# env; the chart never rewrites this text.\n#\n# Both VIPs go on\
+          \ lo before the proxy starts: the node owns them for good and\n# the routers\
+          \ reach them through the node's announcement (ADR-0056). Strict\n# ARP keeps\
+          \ lo's addresses off every neighbour table: the VIPs are routed,\n# never\
+          \ ARP-answered.\n#\n# A packet for a VIP that reaches the node while no\
+          \ proxy socket is bound\n# (the window before the node's route is withdrawn)\
+          \ would draw an ICMP port\n# unreachable, which a SIP UAC treats as a transport\
+          \ error (RFC 3261 \xA718.4)\n# instead of retransmitting into the peer's\
+          \ path: those are dropped.\n#\n# A next hop the kernel cannot resolve holds\
+          \ every datagram sent to it on the\n# neighbour's unresolved queue, charged\
+          \ to the sending socket, for the whole\n# ARP cycle (ADR-0033). The default\
+          \ bound equals a default socket send buffer;\n# UNRES_QLEN_BYTES bounds\
+          \ it per neighbour on every interface. net.core.wmem_max\n# is the host's\
+          \ and read-only here (the host preflight raises it).\nset -e\nfor vip in\
+          \ $PROXY_VIP $EXTERNAL_VIP; do\n  ip addr add \"$vip/32\" dev lo 2>/dev/null\
+          \ || ip addr show dev lo | grep -q \"$vip/32\"\n  iptables -C OUTPUT -s\
+          \ \"$vip/32\" -p icmp --icmp-type port-unreachable -j DROP 2>/dev/null \\\
+          \n    || iptables -I OUTPUT 1 -s \"$vip/32\" -p icmp --icmp-type port-unreachable\
+          \ -j DROP\ndone\necho 1 > /proc/sys/net/ipv4/conf/all/arp_ignore\necho 2\
+          \ > /proc/sys/net/ipv4/conf/all/arp_announce\necho 1 > /proc/sys/net/ipv4/conf/lo/arp_ignore\n\
+          echo 2 > /proc/sys/net/ipv4/conf/lo/arp_announce\nfor f in /proc/sys/net/ipv4/neigh/*/unres_qlen_bytes;\
+          \ do\n  echo \"$UNRES_QLEN_BYTES\" > \"$f\" || echo \"vip-loopback: WARN\
+          \ could not set $f\"\ndone\necho \"vip-loopback: $PROXY_VIP $EXTERNAL_VIP\
+          \ on lo + strict ARP + no ICMP port unreachable from them + neigh unres_qlen_bytes=$UNRES_QLEN_BYTES\
+          \ ready\"\n"
         command:
         - /bin/sh
         - -c
@@ -539,11 +572,9 @@ spec:
           value: 172.20.255.250
         - name: EXTERNAL_VIP
           value: 192.168.60.250
-        - name: EXTRA_VIPS
-          value: ''
         - name: UNRES_QLEN_BYTES
           value: '16384'
-        image: siprustserver-keepalived:dev
+        image: siprustserver-nettools:dev
         imagePullPolicy: IfNotPresent
         name: vip-loopback
         securityContext:
@@ -555,10 +586,40 @@ spec:
         tier: edge
       serviceAccountName: sip-front-proxy
       terminationGracePeriodSeconds: 30
-      volumes:
-      - configMap:
-          name: sip-front-proxy-keepalived
-        name: keepalived-conf
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  labels:
+    app: sip-front-proxy
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: sip-front-proxy
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: sip-test-sip-front-proxy-external
+  namespace: metallb-system
+spec:
+  addresses:
+  - 192.168.60.250/32
+  autoAssign: false
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  labels:
+    app: sip-front-proxy
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: sip-front-proxy
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: sip-test-sip-front-proxy-internal
+  namespace: metallb-system
+spec:
+  addresses:
+  - 172.20.255.250/32
+  autoAssign: false
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -578,7 +639,7 @@ spec:
     - ipBlock:
         cidr: 172.20.255.250/32
     - ipBlock:
-        cidr: 172.20.0.0/16
+        cidr: 172.20.0.0/17
     ports:
     - port: 5060
       protocol: UDP
@@ -842,6 +903,58 @@ spec:
     targetPort: 9090
   selector:
     app: sip-front-proxy
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    metallb.io/loadBalancerIPs: 192.168.60.250
+  labels:
+    app: sip-front-proxy
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: sip-front-proxy
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: sip-front-proxy-external
+  namespace: sip-test
+spec:
+  allocateLoadBalancerNodePorts: false
+  externalTrafficPolicy: Local
+  ports:
+  - name: announce
+    port: 9
+    protocol: TCP
+    targetPort: 9
+  selector:
+    app: sip-front-proxy
+  type: LoadBalancer
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    metallb.io/loadBalancerIPs: 172.20.255.250
+  labels:
+    app: sip-front-proxy
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: sip-front-proxy
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: sip-front-proxy-internal
+  namespace: sip-test
+spec:
+  allocateLoadBalancerNodePorts: false
+  externalTrafficPolicy: Local
+  ports:
+  - name: announce
+    port: 9
+    protocol: TCP
+    targetPort: 9
+  selector:
+    app: sip-front-proxy
+  type: LoadBalancer
 ---
 apiVersion: v1
 kind: ServiceAccount

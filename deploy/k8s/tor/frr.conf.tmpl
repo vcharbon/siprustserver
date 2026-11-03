@@ -1,0 +1,56 @@
+! The kind lab's top-of-rack router: FRR in a host-network container
+! (deploy/helm/lib/tor.sh renders this file from deploy/k8s/lib/net-env.sh,
+! each @NAME@ replaced by that variable). eBGP with the edge nodes' MetalLB
+! speakers on both bridges: the internal VIP is accepted from the internal
+! bridge only and the external VIP from the external bridge only, so neither
+! VIP is ever routed onto the other plane. Multipath over every node that
+! announces a VIP; zebra installs the /32s into the host's table. BFD drops a
+! node's routes within detect-multiplier x receive-interval of its death. The
+! router advertises nothing.
+frr defaults datacenter
+hostname @TOR_NAME@
+log stdout informational
+service integrated-vtysh-config
+!
+ip prefix-list INTERNAL-VIP seq 5 permit @PROXY_VIP@/32
+ip prefix-list EXTERNAL-VIP seq 5 permit @SIPEXT_VIP@/32
+!
+route-map INTERNAL-IN permit 10
+ match ip address prefix-list INTERNAL-VIP
+exit
+route-map EXTERNAL-IN permit 10
+ match ip address prefix-list EXTERNAL-VIP
+exit
+route-map NOTHING deny 10
+exit
+!
+bfd
+ profile sip-lab
+  detect-multiplier @BFD_DETECT_MULTIPLIER@
+  receive-interval @BFD_INTERVAL_MS@
+  transmit-interval @BFD_INTERVAL_MS@
+ exit
+exit
+!
+router bgp @TOR_ASN@
+ bgp router-id @SIP_GATEWAY@
+ no bgp ebgp-requires-policy
+ no bgp graceful-restart
+ neighbor INTERNAL peer-group
+ neighbor INTERNAL remote-as @PROXY_NODE_ASN@
+ neighbor INTERNAL bfd profile sip-lab
+ neighbor EXTERNAL peer-group
+ neighbor EXTERNAL remote-as @PROXY_NODE_ASN@
+ neighbor EXTERNAL bfd profile sip-lab
+ bgp listen range @SIP_SUBNET@ peer-group INTERNAL
+ bgp listen range @SIPEXT_SUBNET@ peer-group EXTERNAL
+ !
+ address-family ipv4 unicast
+  maximum-paths 8
+  neighbor INTERNAL route-map INTERNAL-IN in
+  neighbor INTERNAL route-map NOTHING out
+  neighbor EXTERNAL route-map EXTERNAL-IN in
+  neighbor EXTERNAL route-map NOTHING out
+ exit-address-family
+exit
+!

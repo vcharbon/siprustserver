@@ -125,8 +125,8 @@ the one await with no timeout, no queue and no drop policy.
 - `sip-net`'s slow lane reproduces the neighbour case in a network namespace
   (a veth pair with nobody at the far address): 62 of 64 sends refused in
   under 100 µs where the old path suspended 3 s.
-- A stalled proxy fails `/healthz`, which the VRRP health check and the
-  livenessProbe read: the VIP moves and the proxy restarts (ADR-0046 D4).
+- A stalled proxy fails `/readyz` and `/healthz`: its node withdraws the VIPs
+  (ADR-0056) and the livenessProbe restarts the proxy (ADR-0046 D4).
 - The TCP peers (replication, the CDR broker) keep untimed writes on their
   own tasks; their blast radius is one task, not an ingress loop, and they
   are outside this ADR.

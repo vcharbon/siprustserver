@@ -225,3 +225,23 @@ fn the_cluster_key_is_optional() {
     let cfg = boot(&[("PROXY_CLUSTER_KEY", "0123456789abcdef0123456789abcdef")]).expect("boots");
     assert!(cfg.cluster_key.is_some());
 }
+
+/// The external face check: an interface and its next hops, next hops only
+/// with an interface, an interface name that names no path elsewhere.
+#[test]
+fn the_external_face_check_is_read() {
+    assert_eq!(boot(&[]).expect("valid").external_face_check, None);
+    let cfg =
+        boot(&[("PROXY_EXT_INTERFACE", "eth1"), ("PROXY_EXT_NEXT_HOPS", "192.0.2.1, 192.0.2.2")])
+            .expect("valid");
+    let face = cfg.external_face_check.expect("a face check");
+    assert_eq!(face.interface, "eth1");
+    assert_eq!(face.next_hops, vec![Ipv4Addr::new(192, 0, 2, 1), Ipv4Addr::new(192, 0, 2, 2)]);
+    let errors = boot(&[("PROXY_EXT_NEXT_HOPS", "192.0.2.1")]).expect_err("no interface");
+    assert!(errors.iter().any(|e| e.contains("PROXY_EXT_INTERFACE")), "{errors:?}");
+    let errors = boot(&[("PROXY_EXT_INTERFACE", "../x")]).expect_err("a path");
+    assert!(errors.iter().any(|e| e.contains("PROXY_EXT_INTERFACE")), "{errors:?}");
+    let errors = boot(&[("PROXY_EXT_INTERFACE", "eth1"), ("PROXY_EXT_NEXT_HOPS", "tor")])
+        .expect_err("not an address");
+    assert!(errors.iter().any(|e| e.contains("PROXY_EXT_NEXT_HOPS")), "{errors:?}");
+}

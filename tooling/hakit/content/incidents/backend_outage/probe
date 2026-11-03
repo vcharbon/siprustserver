@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Recovered when both VIPs are routed over every live proxy's node again.
+# Exit 75 while not yet, or while a read fails.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=route.sh
+source "$HAKIT_LIB/route.sh"
+routes="$(hk_probe_routed_over_live "$HAKIT_PARAM_PROXY_SELECTOR")"
+jq -cn --argjson r "$routes" --argjson at "$(hk_now_ms)" '{next_hops: $r, announced_at_ms: $at}'

@@ -94,7 +94,7 @@ async fn a_kube_client_that_fails_then_builds_fills_the_pool_and_never_fakes_a_w
         "no worker before the watch lists one: {:?}",
         pool.registry.snapshot()
     );
-    assert_eq!(probe_state(false, false, true, pool.registry.as_ref()), ProbeState::NotReady);
+    assert_eq!(probe_state(false, false, true, true, pool.registry.as_ref()), ProbeState::NotReady);
     assert!(!pool.registry.synced(), "no listing yet: the probe's first round waits");
     let watch = pool.discovery.as_ref().expect("a discovered pool");
     assert!(!watch.watch_health().client_built);
@@ -107,13 +107,13 @@ async fn a_kube_client_that_fails_then_builds_fills_the_pool_and_never_fakes_a_w
         pool.registry.snapshot().iter().map(|w| format!("{}@{}", w.id, w.address)).collect();
     assert_eq!(listed, ["worker-0@10.0.0.7:5060"]);
     assert_eq!(
-        probe_state(false, false, true, pool.registry.as_ref()),
+        probe_state(false, false, true, true, pool.registry.as_ref()),
         ProbeState::NotReady,
         "listed but not yet answering OPTIONS"
     );
 
     pool.control.set_health("worker-0", WorkerHealth::Alive);
-    assert_eq!(probe_state(false, false, true, pool.registry.as_ref()), ProbeState::Ready);
+    assert_eq!(probe_state(false, false, true, true, pool.registry.as_ref()), ProbeState::Ready);
 }
 
 /// The first watch fails to start (500), the next one starts and stays quiet:

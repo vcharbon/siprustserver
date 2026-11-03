@@ -96,7 +96,7 @@ Content-Length: 0\r\n\r\n"
     CustomParser::default().parse(raw.as_bytes()).unwrap()
 }
 
-// The b-leg long-call-loss class: behind the keepalived VIP
+// The b-leg long-call-loss class: through a masquerading node
 // the worker's INVITE arrives with src = SNAT node IP + ephemeral port. The
 // cookie must be encoded for the worker's REGISTRY identity (the SNAT-immune
 // top-Via sent-by) — encoding it for `src` makes encode_stickiness miss the

@@ -2,6 +2,7 @@
 
 **Status:** accepted (2026-10-12). Amended (2026-10-16): §2, readiness waits for the first
 worker view and ignores acceptance; D4, the VRRP check also reads the first-view latch (ADR-0050).
+D4 superseded (2026-11-03) by ADR-0056; a total backend outage withdraws the routes (ADR-0056 §3).
 
 **Owner:** `crates/sip-proxy-runner/src/config.rs` and `config/reader.rs` (the
 env grammar and its ranges), `discovery.rs` (the worker pool),
@@ -51,7 +52,8 @@ its family.
    watcher's 30 s backoff ceiling plus the 30 s connect timeout, with margin).
    Each failure is an episode: one warning naming the cause when it starts,
    one line when it ends.
-4. **The virtual address follows proxy health.** The VRRP instance tracks a
+4. **The virtual address follows proxy health.** *Superseded by ADR-0056: a node announces the
+   VIPs exactly while its proxy's `/readyz` passes.* The VRRP instance tracks a
    script that reads the proxy's `/vrrp` (its `/healthz` and its first worker
    view, ADR-0050 §11), wrapped in `/bin/sh -c` with its
    exit code clamped to 0/1: 1 s timeout, `interval 1`, `fall 3`, `rise 2`,

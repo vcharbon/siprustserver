@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Restart the targets' Deployment and watch the rollout to its end: every
+# 100 ms the host's next hops of both VIPs, every second the pods. Per old
+# pod: the instant its proxy logged the drain (read while it terminates), the
+# first instant its node left each VIP's next hops and the first instant it
+# rejoined them. Facts: those per pod, the drain-to-withdrawal latency per pod
+# and VIP, and its maximum.
+# shellcheck source=incident.sh
+source "$HAKIT_LIB/incident.sh"
+# shellcheck source=route.sh
+source "$HAKIT_LIB/route.sh"
+hk_pick_targets
+declare -A pairs drained gone back
+pods=()
+while read -r pod _ node; do
+  [ -n "$pod" ] || continue
+  pods+=("$pod")
+  pairs[$pod]="$(hk_route_pairs "$node")" || hk_die "the addresses of $node cannot be read"
+done <<<"$(hk_targets)"
+kubectl -n "$NS" rollout restart "deployment/$HAKIT_PARAM_DEPLOYMENT" >&2
+start="$(hk_now_ms)"
+deadline=$(( start + HAKIT_PARAM_ROLLOUT_TIMEOUT_S * 1000 ))
+tick=0
+complete=false
+while :; do
+  now="$(hk_now_ms)"
+  for pod in "${pods[@]}"; do
+    while read -r vip addr; do
+      k="$pod $vip"
+      hk_routed_via "$vip" "$addr" && rc=0 || rc=$?
+      [ "$rc" -le 1 ] || hk_die "the next hops of $vip cannot be read"
+      if [ "$rc" -eq 1 ] && [ -z "${gone[$k]:-}" ]; then gone[$k]="$now"; fi
+      if [ "$rc" -eq 0 ] && [ -n "${gone[$k]:-}" ] && [ -z "${back[$k]:-}" ]; then back[$k]="$now"; fi
+    done <<<"${pairs[$pod]}"
+  done
+  if [ $(( tick % 10 )) -eq 0 ]; then
+    for pod in "${pods[@]}"; do
+      [ -z "${drained[$pod]:-}" ] || continue
+      deleting="$(kubectl -n "$NS" get pod "$pod" --ignore-not-found -o jsonpath='{.metadata.deletionTimestamp}')" || continue
+      [ -n "$deleting" ] || continue
+      line="$(kubectl -n "$NS" logs "$pod" -c "$HAKIT_PARAM_CONTAINER" --timestamps 2>/dev/null \
+        | grep -m1 -F "$HAKIT_PARAM_DRAIN_LINE" || true)"
+      [ -z "$line" ] || drained[$pod]="$(hk_ms "${line%% *}")"
+    done
+    if kubectl -n "$NS" rollout status "deployment/$HAKIT_PARAM_DEPLOYMENT" --timeout=1s >/dev/null 2>&1; then
+      complete=true
+    fi
+  fi
+  done_all=$complete
+  for pod in "${pods[@]}"; do
+    while read -r vip _; do
+      [ -n "${back[$pod $vip]:-}" ] || done_all=false
+    done <<<"${pairs[$pod]}"
+  done
+  [ "$done_all" = false ] || break
+  [ "$now" -lt "$deadline" ] || hk_die "the rollout of $HAKIT_PARAM_DEPLOYMENT and the return of every node's routes did not end within ${HAKIT_PARAM_ROLLOUT_TIMEOUT_S}s"
+  tick=$(( tick + 1 ))
+  sleep 0.1
+done
+out="[]"
+for pod in "${pods[@]}"; do
+  d="${drained[$pod]:-null}"
+  while read -r vip _; do
+    k="$pod $vip"
+    out="$(jq -c --arg p "$pod" --arg v "$vip" --argjson d "$d" --argjson g "${gone[$k]}" --argjson b "${back[$k]}" \
+      '. + [{pod: $p, vip: $v, drain_at_ms: $d, withdrawn_at_ms: $g, announced_at_ms: $b,
+             drain_to_withdrawn_ms: (if $d == null then null else $g - $d end), absent_ms: ($b - $g)}]' <<<"$out")"
+  done <<<"${pairs[$pod]}"
+done
+jq -cn --argjson rows "$out" --argjson at "$start" \
+  '{restarted_at_ms: $at, routes: $rows,
+    max_drain_to_withdrawn_ms: ([$rows[] | .drain_to_withdrawn_ms | select(. != null)] | max)}'
