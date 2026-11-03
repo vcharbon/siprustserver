@@ -48,3 +48,8 @@ def test_a_budget_without_it_adds_no_row(tmp_path: Path) -> None:
     d = run_dir(tmp_path, [record("up0", INJECT - 10_000)], calls=1, events=kill(1, INJECT))
     (w,) = jv.objs(compute(d, SCHEMAS), "windows")
     assert all(r["class"] != "established" for r in jv.objs(w, "impacts"))
+
+
+def test_a_run_that_answered_no_call_before_the_window_has_nothing_to_judge(tmp_path: Path) -> None:
+    row = established(tmp_path, [record("after", INJECT + 500)])
+    assert (row["calls"], row["finding"]) == (0, False)

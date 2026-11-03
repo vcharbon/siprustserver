@@ -87,7 +87,7 @@
       }
     },
     "established": {
-      "description": "The calls answered before the window's first `inject` and still up at it, the calls a fault of a call-setup dependency must leave whole: each of them ends with no impact the budget does not allow (no in-dialog request failed, no cut, its CDR joined), and the window holds at least `min_calls` of them, so the check is never vacuous. Absent: not judged.",
+      "description": "The calls answered before the window's first `inject` and still up at it, the calls a fault of a call-setup dependency must leave whole: each of them ends with no impact the budget does not allow (no in-dialog request failed, no cut, its CDR joined), and the window holds at least `min_calls` of them once the run answered any call before it, so the check is never vacuous. Absent: not judged.",
       "type": "object",
       "additionalProperties": false,
       "required": ["min_calls"],

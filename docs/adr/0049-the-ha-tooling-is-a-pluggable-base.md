@@ -510,7 +510,8 @@ made. A run profile joins the two.
     window's first `inject` and not ended at it, those an impact no
     allowance takes hurt (an in-dialog request failed, a cut, a CDR
     mismatch), allowed none, and a finding too when fewer than `min_calls`
-    such calls existed, so a window no call spanned never passes it.
+    such calls existed while the run had answered calls before it, so a
+    window no call spanned never passes it.
 15. **Redundant pods faulted one at a time.** A profile's `one_at_a_time`
     names a label selector whose pods back one service: every event aimed at
     it picks one pod, the next fires at least `gap_s` after the previous
