@@ -50,6 +50,7 @@ pub const CATALOGUE: Catalogue = Catalogue {
         catalogue::NEW_CALL_OUTCOMES,
         observe::counters::FAMILIES,
         http_net::failures::FAMILIES,
+        http_net::backend::metrics::FAMILIES,
         http_net::poison::FAMILIES,
         metric_values::poison::FAMILIES,
         crate::poison::FAMILIES,
@@ -60,13 +61,15 @@ pub const CATALOGUE: Catalogue = Catalogue {
 impl WorkerMetrics {
     /// The `/metrics` body: the worker's families, the process-wide
     /// observability counters (dropped log lines, trace admission), the
-    /// cause-labelled client HTTP failures, the HTTP client's, the metric
+    /// cause-labelled client HTTP failures, the backend clients' counters
+    /// (slots, retries, breaker, 5xx closes), the HTTP client's, the metric
     /// rows' and the kit's lock recoveries, then `extra` (the allocator's
     /// exposition).
     pub fn body(&self, extra: Option<&probe_http::MetricsFn>) -> String {
         let mut text = self.prometheus_text();
         text.push_str(&observe::counters::prometheus_text());
         text.push_str(&http_net::failures::prometheus_text());
+        text.push_str(&http_net::backend::metrics::prometheus_text());
         text.push_str(&http_net::poison::prometheus_text());
         text.push_str(&metric_values::poison::prometheus_text());
         text.push_str(&crate::poison::prometheus_text());
