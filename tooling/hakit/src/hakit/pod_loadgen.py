@@ -190,15 +190,26 @@ class PodLoadgenStream:
         res = self._kubectl("exec", self.name, "-c", "keeper", "--", "cat", f"{STATS}/{name}", timeout_s=120)
         return res.stdout if res.rc == 0 else None
 
+    def _live_metrics(self) -> str | None:
+        """The binary's `/metrics` body through the API server's pod proxy."""
+        raw = f"/api/v1/namespaces/{self.lab.namespace}/pods/{self.name}:{METRICS_PORT}/proxy/metrics"
+        res = self._kubectl("get", "--raw", raw, timeout_s=30)
+        return res.stdout if res.rc == 0 else None
+
     def tally(self) -> Tally:
         """The counters of the last `/metrics` body, left in `metrics.prom` as
         loadgen exits; the live endpoint through the pod proxy while it runs."""
         text = self._read(FINAL_METRICS)
         if text is None and not self.copied:
-            raw = f"/api/v1/namespaces/{self.lab.namespace}/pods/{self.name}:{METRICS_PORT}/proxy/metrics"
-            res = self._kubectl("get", "--raw", raw, timeout_s=30)
-            text = res.stdout if res.rc == 0 else ""
+            text = self._live_metrics()
         return parse_metrics(text or "", self.stream.name)
+
+    def held_tally(self) -> Tally | None:
+        """The live endpoint's counters: `POST /rate?cps=0` has parked the rate
+        by the time it answers."""
+        text = self._live_metrics()
+        t = None if text is None else parse_metrics(text, self.stream.name)
+        return t if t is not None and t.calls is not None else None
 
     def record_copy(self) -> RecordCopy:
         """loadgen writes its record file itself."""

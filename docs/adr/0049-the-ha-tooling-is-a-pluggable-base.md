@@ -166,9 +166,13 @@ tolerated (§3).
    `setup_deadline_s` or `ring_s` + `hold_s`, and only then is the generator
    removed (`SIGUSR1` for both drivers; loadgen also takes `POST /drain`,
    and a drained loadgen must exit 0, any other exit fails the step). With
-   `stop: abandon` the generator is killed with its calls in flight, which
-   leaves those calls to the system under test to reap; the stream writes no
-   record for them and is left out of the reconciliation. A stream that
+   `stop: abandon` the generator is held at rate 0 (SIPp's `cset rate 0`,
+   loadgen's `POST /rate?cps=0`), its count read once its counters show the
+   hold (SIPp's next statistics row, loadgen's live `/metrics`, within 5 s),
+   then it is killed with its calls in flight, which leaves those calls to the
+   system under test to reap; the stream writes no record for them and is left
+   out of the reconciliation. The heal facts state that count and whether the
+   counters showed the hold (`held`). A stream that
    starts with an incident has no pre-inject baseline and so no `recovery`.
    Each firing is its own generator, its Call-IDs tagged with the event; at
    heal its records are shipped and its counter read before it is removed,
@@ -247,8 +251,8 @@ made. A run profile joins the two.
 
    | class | from the record | instant | budget |
    |---|---|---|---|
-   | `setup_failed` | the shape expects `answered` and the call ended before answer some other way: `rejected`, `abandoned`, `timeout`, or `failed` before answer (code 0). Keyed by stream × `final_code` (0 without a final) × `reason` | `setup_ended_at_ms`, else `ended_at_ms`; one outside every window belongs to the first window open while it was pending (§3.5) | per key |
-   | `unexpected_ending` | any other caller ending not in `expected` (`rejected` with another code, `answered` where only a reject is expected), and, when the caller's ending is expected, a catalog leg that never opened or ended otherwise (keyed with reason `leg:<role>`) | `setup_ended_at_ms`, else `ended_at_ms`; a leg of an answered call at `ended_at_ms`, when it is known missing; a consult's contract refusal (§3.2) at the refusal | per key before answer; 0 after answer but a consult's contract refusal |
+   | `setup_failed` | the call ended before answer some other way than its shape expects: `rejected`, `abandoned`, `timeout`, or `failed` before answer (code 0), where the shape expects `answered` or the setup drew no final at all. Keyed by stream × `final_code` (0 without a final) × `reason` | `setup_ended_at_ms`, else `ended_at_ms`; one outside every window belongs to the first window open while it was pending (§3.5) | per key |
+   | `unexpected_ending` | any other caller ending not in `expected` (a final with another code where only a reject is expected, `answered` where only a reject is expected), and, when the caller's ending is expected, a catalog leg that never opened or ended otherwise (keyed with reason `leg:<role>`) | `setup_ended_at_ms`, else `ended_at_ms`; a leg of an answered call at `ended_at_ms`, when it is known missing; a consult's contract refusal (§3.2) at the refusal | per key before answer; 0 after answer but a consult's contract refusal |
    | `setup_slow` | from `started_at_ms` to `first_provisional_at_ms` (to `setup_ended_at_ms` when no provisional came) above the threshold; ring time never counts; a setup that drew no response at all takes none (it is a `setup_failed`) | that instant | count |
    | `dialog_request_failed` | each `failures` entry of kind `dialog_request` | its `at_ms` | 0 |
    | `call_cut` | `ending: cut` | the failure that cut it, else `ended_at_ms` | 0 |
@@ -402,7 +406,9 @@ made. A run profile joins the two.
    CDRs of a firing stopped with `abandon` (their Call-IDs carry its event)
    join the firing instead of records: each call it placed owes one CDR, and
    a second one of a Call-ID, fewer or more Call-IDs than calls placed are
-   charged at the instant its generator exited. A missing CDR whose call
+   charged at the instant its generator exited. Only a count taken at the
+   hold bounds the Call-IDs; a firing whose counters never showed the hold is
+   a `class_failed` finding and only its duplicates are charged. A missing CDR whose call
    ended outside every window but within the profile's `cdr_in_flight_s`
    before a window opened belongs to that window: its CDR was still in the
    sink when the fault hit; the value is stated from the system under test's
@@ -480,7 +486,9 @@ made. A run profile joins the two.
     stream's `setup_deadline_s`) that falls inside one, measure the generator:
     they leave the impacts and the recovery samples, and are
     listed, with their Call-IDs, in one `generator_stall` integrity finding
-    per stall. A stall that spoiled no measurement is listed in the stream's
+    per stall, which names the signal that saw it and its source by the
+    host's samples over it: the host under stress (§6.6), the generator's own
+    when they cover it calm, or unobserved. A stall that spoiled no measurement is listed in the stream's
     `stalls` and leaves the status alone. A generator's own count of calls it
     failed without a record (loadgen's `loadgen_generator_failures_total`) is
     a `generator_failure` integrity finding when above 0. A stall, a spoiled

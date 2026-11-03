@@ -206,7 +206,7 @@ def test_the_cdrs_of_an_abandoned_firing_join_its_calls(tmp_path: Path) -> None:
         "event": "001-kill_worker",
         "step": "orphan",
         "executable": "heal",
-        "facts": {"stream": "orphaned", "stop": "abandon", "calls": 3, "exited_at_ms": at + 105},
+        "facts": {"stream": "orphaned", "stop": "abandon", "calls": 3, "held": True, "exited_at_ms": at + 105},
     }
     budget: Json = {"schema": "budget.v1", "name": "loose", "description": "d"}
     d = run_dir(
@@ -230,6 +230,41 @@ def test_the_cdrs_of_an_abandoned_firing_join_its_calls(tmp_path: Path) -> None:
     assert rows == {"duplicate": (1, ["7-1-r-001-kill_worker@h"]), "missing": (1, [])}
     (u,) = jv.objs(v, "unattributed")
     assert (u["reason"], u["call_ids"]) == ("extra", ["ghost"])
+
+
+def _abandoned(tmp_path: Path, facts: Json) -> Json:
+    """A firing whose generator placed 4 calls, each with its one CDR."""
+    at = T0 + 100_000
+    heal: Json = {"kind": "facts", "event": "001-kill_worker", "step": "orphan", "executable": "heal", "facts": facts}
+    budget: Json = {"schema": "budget.v1", "name": "loose", "description": "d"}
+    d = run_dir(
+        tmp_path,
+        [ANSWERED],
+        calls=1,
+        events=[*kill(1, at, budget="loose"), heal],
+        budgets=[budget],
+        profile={"cdr_join": True, "generator_stall_ms": 3_600_000},
+        cdrs=[cdr("a", T0, 100, 30_000), *(cdr(f"{n}-1-r-001-kill_worker@h", at, 100, 5_000) for n in range(1, 5))],
+    )
+    return compute(d, SCHEMAS)
+
+
+def test_an_abandoned_firings_count_read_before_its_hold_bounds_no_cdr(tmp_path: Path) -> None:
+    # The generator's last statistics row before the kill counted 3 calls; it
+    # placed a fourth before the kill. That count is not the firing's.
+    v = _abandoned(tmp_path, {"stream": "orphaned", "stop": "abandon", "calls": 3, "exited_at_ms": T0 + 100_105})
+    (w,) = jv.objs(v, "windows")
+    assert jv.objs(w, "impacts") == [] and v["integrity"] == []
+
+
+def test_an_abandoned_firing_that_never_showed_its_hold_is_uncounted(tmp_path: Path) -> None:
+    facts: Json = {"stream": "orphaned", "stop": "abandon", "calls": None, "held": False, "exited_at_ms": T0 + 100_105}
+    v = _abandoned(tmp_path, facts)
+    (w,) = jv.objs(v, "windows")
+    assert jv.objs(w, "impacts") == []
+    assert [(i["kind"], i["detail"]) for i in jv.objs(v, "integrity")] == [
+        ("class_failed", "cdr_mismatch: the abandoned firing r-001-kill_worker never showed its hold: its calls are uncounted")
+    ]
 
 
 def test_a_cdr_that_differs_from_a_call_measured_across_a_stall_is_spoiled(tmp_path: Path) -> None:

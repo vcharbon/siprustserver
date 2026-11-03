@@ -11,6 +11,7 @@ when every record SIPp wrote is on disk. Neither container swaps: a page of
 SIPp's swapped out stalls every call.
 
 A drain is SIGUSR1: SIPp places no new call and exits once its calls are done.
+A hold is `cset rate 0`: SIPp places no new call and its calls go on.
 """
 
 from __future__ import annotations
@@ -84,8 +85,12 @@ def worst_call_s(stream: Stream, defaults: Mapping[str, str] | None = None) -> f
 
 @dataclass(frozen=True)
 class Counters:
+    """The last statistics row: calls created, calls in flight, and the rate
+    SIPp was set to when it wrote the row."""
+
     calls_created: int | None
     current_calls: int | None
+    target_rate: float | None = None
 
 
 def parse_stat_csv(text: str | None) -> Counters:
@@ -97,16 +102,20 @@ def parse_stat_csv(text: str | None) -> Counters:
     header = lines[0].split(";")
     row = lines[-1].split(";")
 
-    def col(name: str) -> int | None:
+    def col(name: str) -> float | None:
         if name not in header:
             return None
         i = header.index(name)
         try:
-            return int(row[i]) if i < len(row) else None
+            return float(row[i]) if i < len(row) else None
         except ValueError:
             return None
 
-    return Counters(col("TotalCallCreated"), col("CurrentCall"))
+    def count(name: str) -> int | None:
+        v = col(name)
+        return None if v is None or not v.is_integer() else int(v)
+
+    return Counters(count("TotalCallCreated"), count("CurrentCall"), col("TargetRate"))
 
 
 class SippStream:
@@ -300,6 +309,13 @@ class SippStream:
     def tally(self) -> Tally:
         """SIPp places every call it creates and fails none on its own."""
         return Tally(self.counters().calls_created)
+
+    def held_tally(self) -> Tally | None:
+        """The last statistics row once its target rate reads 0: SIPp writes a
+        row a second from the thread that takes `cset rate 0`, and creates no
+        call after it, so that row counts every call."""
+        c = self.counters()
+        return Tally(c.calls_created) if c.target_rate == 0 and c.calls_created is not None else None
 
     def clean_exit(self, code: int | None) -> bool:
         """SIPp's exit code counts the calls that failed, not the drain: a

@@ -194,13 +194,15 @@ def test_a_late_final_to_a_setup_sent_into_the_window_is_charged_to_it() -> None
 
 
 def test_a_reject_shaped_treatment_timing_out_after_the_window_is_charged_to_it() -> None:
-    # A treatment whose only expected ending is a rejection: its pre-answer
-    # timeout is an unexpected ending, pending in the window.
+    # A treatment whose only expected ending is a rejection: its setup that
+    # drew no final is a setup failure, pending in the window, which the
+    # worker-kill allowance covers as on any other shape.
     reject = Shape("final", "c", None, [], [], [ExpectedEnding("rejected", 603, None)], True)
     w = window("001-kill_worker", T0 + 60_000, T0 + 85_000)
     impacts = classify({**timed_out("a", T0 + 60_200), "shape": "final"}, reject).impacts
     j = judge([w], impacts, [], {"kill": KILL, "strict": STRICT, "outage": OUTAGE}, 1000, {"basic": 10.0})
-    assert [(r["class"], r["reason"]) for r in j.per_window["001-kill_worker"]] == [("unexpected_ending", "timeout")]
+    rows = j.per_window["001-kill_worker"]
+    assert [(r["class"], r["reason"], r["finding"]) for r in rows] == [("setup_failed", "timeout", False)]
     assert j.unattributed == []
 
 

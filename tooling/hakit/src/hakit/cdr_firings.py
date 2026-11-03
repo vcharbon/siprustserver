@@ -3,10 +3,13 @@
 Its generator was killed with its calls in flight and wrote no record for
 them, so their CDRs join no record. They are joined against the firing
 instead: its Call-IDs carry `<run>-<event>`, and its heal facts state the
-calls it placed. Each call owes exactly one CDR: a second distinct one of a
-Call-ID is `duplicate`, fewer Call-IDs than calls placed are as many
-`missing`, more are as many `extra`, each charged at the instant the
-generator exited, inside the firing's window.
+calls it placed, counted once its counters showed the hold before the kill
+(`held`). Each call owes exactly one CDR: a second distinct one of a Call-ID
+is `duplicate`, fewer Call-IDs than calls placed are as many `missing`, more
+are as many `extra`, each charged at the instant the generator exited, inside
+the firing's window. A count not taken at the hold bounds nothing: only
+duplicates are charged, and facts that say the hold failed are a
+`class_failed` finding.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ class Firing:
     stream: str
     calls: int | None
     exited_at_ms: float
+    held: bool | None = None
 
 
 def abandoned_firings(run_dir: Path, run: str) -> list[Firing]:
@@ -36,12 +40,14 @@ def abandoned_firings(run_dir: Path, run: str) -> list[Firing]:
         facts = jv.obj(line, "facts")
         if line.get("kind") != "facts" or line.get("executable") != "heal" or facts.get("stop") != "abandon":
             continue
+        held = facts.get("held")
         out.append(
             Firing(
                 mark=f"{run}-{jv.string(line, 'event')}",
                 stream=jv.string(facts, "stream", ""),
-                calls=jv.opt_int(facts, "calls"),
+                calls=jv.opt_int(facts, "calls") if held is True else None,
                 exited_at_ms=jv.number(facts, "exited_at_ms", 0),
+                held=held if isinstance(held, bool) else None,
             )
         )
     return out

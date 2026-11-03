@@ -2,7 +2,10 @@
 
 A pure function (ADR-0049 §4.6, the class table of §3.1). A record is a
 success when its ending is in the shape's `expected` and every catalog leg the
-generator saw ended as its leg expects. `producer_verdict` is never read.
+generator saw ended as its leg expects. A setup that ends unanswered and
+unexpected is `setup_failed` where the shape expects an answer, or where it
+drew no final at all whatever the shape expects; a final the shape does not
+expect is otherwise an `unexpected_ending`. `producer_verdict` is never read.
 """
 
 from __future__ import annotations
@@ -174,7 +177,7 @@ def classify(r: Json, shape: Shape) -> Classified:
     caller_ok = caller_expected(r, shape)
     if not caller_ok:
         if ending in PRE_ANSWER_ENDINGS and not answered:
-            cls = SETUP_FAILED if shape.expects_answer else UNEXPECTED_ENDING
+            cls = SETUP_FAILED if shape.expects_answer or code is None else UNEXPECTED_ENDING
             out.impacts.append(replace(base, cls=cls, code=code or 0, reason=reason or ending))
         elif ending == "cut":
             cut_at = max((jv.number(f, "at_ms") for f in failures), default=ended)

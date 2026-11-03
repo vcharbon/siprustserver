@@ -5,12 +5,13 @@ runs once per firing of the load incident whose event names it: each firing is
 its own generator, started at inject in its own directory under the stream's,
 its Call-IDs tagged with the event so two firings never share one. At heal,
 `drain` tells the UAC to place no new call and waits for its calls to end;
-`abandon` kills it with its calls in flight. Either way the records it wrote
-are shipped and its counter read before the generator is removed, so the next
-firing starts clean. A docker generator works in its working directory
-(workdir.py), collected into its stream directory once it is removed. A
-stream's `streams.json` entry sums its firings; an abandoned stream is left
-out of the reconciliation.
+`abandon` holds it at rate 0, reads its count once its counters show the hold
+(the calls it placed up to its stop, none after), then kills it with its calls
+in flight. Either way the records it wrote are shipped and its counter read
+before the generator is removed, so the next firing starts clean. A docker
+generator works in its working directory (workdir.py), collected into its
+stream directory once it is removed. A stream's `streams.json` entry sums its
+firings; an abandoned stream is left out of the reconciliation.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from pathlib import Path
 from .clock import Clock
 from .content import Content
 from .executor import Executor
-from .generator import Generator
+from .generator import Generator, Tally
 from .injection import render
 from .jsonval import Json
 from .lab import Lab
@@ -38,6 +39,10 @@ from .workdir import WorkDir, work_dir
 
 SHIP_WAIT_S = 60
 POLL_MS = 2000
+# An abandoned generator's counters show its hold within a statistics period
+# (SIPp writes a row a second); they are read this often, this long at most.
+HOLD_POLL_MS = 250
+HOLD_WAIT_S = 5
 # VictoriaLogs is queried around the run's own span with this margin.
 QUERY_MARGIN_MS = 3_600_000
 
@@ -173,6 +178,7 @@ class StreamSet:
             return True, {"stream": name, "stop": mode}
         stopped_at = self.clock.now_ms()
         f.stop = mode
+        held = self._hold(f, wait) if mode == "abandon" else None
         signalled = f.gen.kill() if mode == "abandon" else f.gen.drain()
         while signalled and f.gen.running() and self.clock.now_ms() < deadline_ms:
             wait(min(deadline_ms, self.clock.now_ms() + POLL_MS))
@@ -181,7 +187,7 @@ class StreamSet:
         ok = f.drained or (signalled and mode == "abandon")
         if not ok:
             f.gen.kill()
-        shipped = self._settle(f, wait)
+        shipped = self._settle(f, wait, held)
         if f.drained and not f.gen.clean_exit(f.exit_code):
             f.drained = ok = False
         self._remove(f)
@@ -197,13 +203,28 @@ class StreamSet:
             "shipped_records": shipped,
             "exit_code": f.exit_code,
         }
+        if held is not None:
+            facts["held"] = held.calls is not None
         return ok, facts
 
-    def _settle(self, f: Firing, wait: Waiter) -> int | None:
-        """Read the firing's counter, wait (bounded) until its records are all
+    def _hold(self, f: Firing, wait: Waiter) -> Tally:
+        """Hold the firing's generator at rate 0 (no new call, its calls go on)
+        and read its count once its counters show the hold, within
+        `HOLD_WAIT_S`; an unknown count when it refused the hold or its
+        counters never showed it."""
+        if not f.gen.set_rate(0):
+            return Tally(None)
+        deadline = self.clock.now_ms() + HOLD_WAIT_S * 1000
+        while (t := f.gen.held_tally()) is None and self.clock.now_ms() < deadline:
+            wait(min(deadline, self.clock.now_ms() + HOLD_POLL_MS))
+        return t or Tally(None)
+
+    def _settle(self, f: Firing, wait: Waiter, held: Tally | None = None) -> int | None:
+        """Read the firing's counter (`held`, read before an abandoned
+        generator's kill, when given), wait (bounded) until its records are all
         on disk, read them, and wait (bounded) until VictoriaLogs holds every
         record the stream wrote so far."""
-        tally = f.gen.tally()
+        tally = held if held is not None else f.gen.tally()
         f.calls, f.not_placed, f.generator_failures = tally.calls, tally.not_placed, tally.generator_failures
         f.exit_code = f.gen.exit_code()
         deadline = self.clock.now_ms() + SHIP_WAIT_S * 1000

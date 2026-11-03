@@ -9,7 +9,8 @@ memory full share and swap-in rate in it, and what it overlapped. Consecutive
 spans over the same generator stalls make one finding: from the first span's
 start to the last one's end, their count, and the worst values among them. It stands
 beside the plain `generator_stall`, so a stall on a stressed host is never
-investigated as a fault of the system under test or of the tooling.
+investigated as a fault of the system under test or of the tooling. Each
+stall's source is named by the host's pressure over it (`stall_sources`).
 """
 
 from __future__ import annotations
@@ -27,6 +28,10 @@ from .stalls import Stall
 
 # Findings an instant places on the timeline.
 TIMED = ("generator_failure", "stream_died", "series_stale", "generator_stall")
+# Where a generator stall's source lies.
+HOST = "host"
+GENERATOR = "generator"
+UNOBSERVED = "unobserved"
 
 
 def thresholds(p: Preflight) -> Thresholds:
@@ -140,3 +145,20 @@ def stress_findings(
         else:
             groups.append(_Group([sp], hit, timed, gaps))
     return [_finding(g, spoiled, load_start_ms) for g in groups]
+
+
+def stall_sources(run_dir: Path, t: Thresholds, stalls: Sequence[Stall]) -> dict[Stall, str]:
+    """Where each stall's source lies: `host` when a stressed interval of
+    `host.jsonl` overlaps it, `generator` when the host's intervals cover it
+    and none is stressed, `unobserved` when they do not cover it."""
+    ivs = intervals(read_jsonl(run_dir / HOST_FILE))
+    out: dict[Stall, str] = {}
+    for st in stalls:
+        over = [iv for iv in ivs if iv.start_ms < st.until_ms and iv.end_ms > st.at_ms]
+        if any(iv.stressed(t) for iv in over):
+            out[st] = HOST
+        elif over and over[0].start_ms <= st.at_ms and over[-1].end_ms >= st.until_ms:
+            out[st] = GENERATOR
+        else:
+            out[st] = UNOBSERVED
+    return out

@@ -30,13 +30,20 @@ from .recovery import Sample, StreamSamples
 from .reconcile import integrity, reconcile
 from .schemas import SchemaSet
 from .generator_health import run_stalls
-from .host_stress import stress_findings, thresholds
-from .stalls import Stall, stall_holding, stall_of
+from .host_stress import GENERATOR, HOST, UNOBSERVED, stall_sources, stress_findings, thresholds
+from .stalls import STARTS, WATCHDOG, Stall, stall_holding, stall_of
 from .unanswered import unanswered
 from .window_recovery import recover_windows
 from .windows import Window, build_windows
 
 MAX_CALL_IDS = 50
+# A `generator_stall` finding names the signal that saw the stall and its source.
+STALL_SEEN = {STARTS: "a gap in its call starts", WATCHDOG: "its watchdog tripped between two statistics rows"}
+STALL_SOURCE = {
+    HOST: "the host under stress over it",
+    GENERATOR: "the host under no stress over it: the generator's own",
+    UNOBSERVED: "no host sample over it",
+}
 
 
 def _load_json(p: Path) -> Json:
@@ -119,11 +126,14 @@ def _samples(calls: _Calls, stalls: list[Stall], profile: Profile) -> dict[str, 
     return {k: StreamSamples(v) for k, v in by_stream.items()}
 
 
-def _stall_findings(stalled: dict[Stall, list[str]]) -> list[Json]:
+def _stall_findings(stalled: dict[Stall, list[str]], sources: dict[Stall, str]) -> list[Json]:
+    """One finding per stall that spoiled measurements, naming how it was seen
+    and where its source lies."""
     return [
         integrity(
             "generator_stall",
-            f"{len(ids)} measurements taken across a {st.ms:g} ms generator stall",
+            f"{len(ids)} measurements taken across a {st.ms:g} ms generator stall ({STALL_SEEN[st.source]}); "
+            f"{STALL_SOURCE[sources.get(st, UNOBSERVED)]}",
             stream=st.stream,
             at_ms=st.at_ms,
             call_ids=ids[:MAX_CALL_IDS],
@@ -259,9 +269,10 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
             {"at_ms": st.at_ms, "ms": round(st.ms, 3), "spoiled": len(stalled.get(st, [])), "source": st.source}
         )
     streams_out, reconciled = reconcile(streams_doc, calls.per_stream, success, stall_rows)
-    found += reconciled + _stall_findings(stalled) + _window_integrity(windows)
+    host_t = thresholds(profile.preflight)
+    found += reconciled + _stall_findings(stalled, stall_sources(run_dir, host_t, list(stalled))) + _window_integrity(windows)
     spoiled = {st: len(ids) for st, ids in stalled.items()}
-    found = stress_findings(run_dir, thresholds(profile.preflight), stalls, spoiled, found, run.load_start_ms) + found
+    found = stress_findings(run_dir, host_t, stalls, spoiled, found, run.load_start_ms) + found
 
     load_end_ms = run.load_start_ms + profile.duration_s * 1000
     limiters = judge_limiters(profile, [r for r, _ in calls.valid], windows, budgets, run.load_start_ms, load_end_ms)

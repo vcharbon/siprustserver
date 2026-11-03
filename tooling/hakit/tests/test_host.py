@@ -189,6 +189,7 @@ def test_a_stall_inside_host_stress_is_host_under_stress_first_with_its_numbers(
     v = verdict(tmp_path, host_lines(T0 + 58_000, T0 + 63_000))
     kinds = [i["kind"] for i in jv.objs(v, "integrity")]
     assert kinds == ["host_under_stress", "generator_stall"] and v["status"] == "invalid"
+    assert str(jv.objs(v, "integrity")[1]["detail"]).endswith("; the host under stress over it")
     h = jv.objs(v, "integrity")[0]
     assert (h["at_ms"], h["until_ms"]) == (T0 + 58_000, T0 + 63_000)
     assert h["host"] == {"io_full_pct": 20.0, "memory_full_pct": 0.0, "swapin_pages_s": 400.0}
@@ -197,9 +198,10 @@ def test_a_stall_inside_host_stress_is_host_under_stress_first_with_its_numbers(
     assert why.startswith("- `host_under_stress`: host under stress at +58 s")
 
 
-def test_a_stall_on_a_calm_host_is_a_plain_generator_stall(tmp_path: Path) -> None:
+def test_a_stall_on_a_calm_host_is_a_plain_generator_stall_named_the_generator_s_own(tmp_path: Path) -> None:
     v = verdict(tmp_path, host_lines(T0 + 90_000, T0 + 95_000))
     assert [i["kind"] for i in jv.objs(v, "integrity")] == ["generator_stall"]
+    assert str(jv.objs(v, "integrity")[0]["detail"]).endswith("; the host under no stress over it: the generator's own")
     # Stress the profile states a higher bound for is no stress.
     v = verdict(tmp_path / "b", host_lines(T0 + 58_000, T0 + 63_000, io_full_us=30_000, swapin=10),
                 profile={"preflight": {"max_io_full_pct": 5, "max_swapin_pages_s": 50}})

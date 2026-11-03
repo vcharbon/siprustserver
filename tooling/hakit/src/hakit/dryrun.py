@@ -1,8 +1,8 @@
 """`--dry-run`: the whole profile on a fake clock against a simulated lab.
 
 The simulated lab answers what a healthy one would: every executable exits 0
-with no facts, a generator runs until it is drained, places no call, the
-system under test holds no call, a SIPp twin's record copy is complete, a loadgen image registers every shape of the
+with no facts, a generator runs until it is drained, places no call, shows a
+hold at rate 0 in its next statistics row, the system under test holds no call, a SIPp twin's record copy is complete, a loadgen image registers every shape of the
 search path, the API server serves every resource definition asked for (Chaos
 Mesh's included), every Service a stream targets has a cluster IP, and every
 label selector names two ready pods. Each effect is recorded, and the timeline
@@ -25,6 +25,7 @@ from .loadgen import FINAL_METRICS
 
 STAT_HEADER = "StartTime;LastResetTime;CurrentTime;CurrentCall;TotalCallCreated\n"
 STAT_ROW = "0;0;0;0;0\n"
+HELD_STAT = "StartTime;LastResetTime;CurrentTime;CurrentCall;TotalCallCreated;TargetRate\n0;0;0;0;0;0\n"
 # Every label selector names two ready pods.
 READY_PODS = json.dumps(
     {"items": [{"metadata": {"name": f"p{i}"}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}} for i in (0, 1)]}
@@ -37,6 +38,8 @@ class SimulatedLab:
 
     def __init__(self, clock: FakeClock, shapes: Sequence[str] = ()) -> None:
         self.drained: set[str] = set()
+        # SIPp streams held at rate 0 by their twin's `cset rate 0`.
+        self.held: set[str] = set()
         # Pod-placed generators by pod name: their stream.
         self.pods: dict[str, str] = {}
         self.clock = clock
@@ -88,8 +91,13 @@ class SimulatedLab:
             stream = parts[parts.index("streams") + 1] if "streams" in parts else ""
             return f'loadgen_calls_offered_total{{stream="{stream}",shape="s"}} 0\n'
         if call.kind == "run" and call.argv[:2] == ["docker", "run"] and "--name" in call.argv:
-            self.drained.discard(call.argv[call.argv.index("--name") + 1])
+            name = call.argv[call.argv.index("--name") + 1]
+            self.drained.discard(name)
+            self.held.discard(name.removeprefix("hakit-"))
             return None
+        if call.kind == "run" and call.argv[:2] == ["docker", "exec"] and "cset rate 0" in call.argv:
+            self.held.add(call.argv[2].removeprefix("hakit-").removesuffix("-exporter"))
+            return ProcResult(0, "", "")
         if call.kind == "run" and call.argv[:1] == ["kubectl"] and "crd" in call.argv:
             return ProcResult(0, f"customresourcedefinition.apiextensions.k8s.io/{call.argv[-3]}\n", "")
         if call.kind == "run" and call.argv[:2] == ["docker", "kill"]:
@@ -101,7 +109,9 @@ class SimulatedLab:
                 return ProcResult(0, "false\n" if name in self.drained else "true\n", "")
             return ProcResult(0, "0\n", "")
         if call.kind == "read" and call.path is not None and call.path.name == "stat.csv":
-            return STAT_HEADER + STAT_ROW
+            parts = call.path.parts
+            stream = parts[parts.index("streams") + 1] if "streams" in parts else ""
+            return HELD_STAT if stream in self.held else STAT_HEADER + STAT_ROW
         if call.kind == "read" and call.path is not None and call.path.name == "records.copy.json":
             return '{"complete": true, "lines": 0, "lost": 0}\n'
         if call.kind == "read" and call.path == Path("/proc/meminfo"):
