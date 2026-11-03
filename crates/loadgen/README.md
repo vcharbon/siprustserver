@@ -566,6 +566,13 @@ call's record carries its own instants, and the HA tooling's verdict
 attributes it to the incident window it fell in, against that window's budget
 (ADR-0049 §3.5).
 
+An in-dialog request other than a BYE still awaiting its final when its call
+ends is judged by its client transaction (RFC 3261 §17.1.2): with
+`--auto-retransmit`, the call's endpoints stay and retransmit it until its
+final or Timer F (64·T1, 32 s), and the call's record is written then; without
+it, the request fails at the call's end. A BYE that ends the dialog never fails
+it.
+
 Sampling is bounded: a small fraction of calls record their trace (`--sample-cap`
 per bucket); the rest are counted only. A non-sampled failure still gets a stub
 page with its one-line reason. A call records when it falls in its scenario's

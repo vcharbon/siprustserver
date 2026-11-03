@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::class::{CallOutcome, ResultClass};
 use crate::ctx::CallCtx;
 use crate::mux::CallTally;
-use crate::outcome::OutcomeSink;
+use crate::outcome::{CallWire, OutcomeSink};
 use crate::report::{CallEvidence, RenderedSample, Reporter};
 use crate::scenarios::ScenarioId;
 
@@ -41,6 +41,22 @@ pub(super) fn record_unrun(
         CallEvidence { sample, ..CallEvidence::default() },
     );
     reporter.dec_inflight();
+}
+
+/// What writes the call's outcome record into `sink` from `wire`'s facts as
+/// they stand when it runs, the call ended at `ended_at_ms`.
+pub(super) fn outcome_write(
+    sink: Option<Arc<OutcomeSink>>,
+    wire: Option<CallWire>,
+    id: ScenarioId,
+    outcome: CallOutcome,
+    ended_at_ms: i64,
+) -> impl FnOnce() + Send {
+    move || {
+        if let (Some(sink), Some(wire)) = (sink, wire) {
+            crate::outcome::write_call(&sink, id, &wire.facts(), &outcome, ended_at_ms);
+        }
+    }
 }
 
 /// What folds the call's messages into its scenario's ladder, once its

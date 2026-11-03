@@ -321,3 +321,50 @@ async fn a_leg_s_own_failed_in_dialog_request_is_a_failure_of_the_leg() {
         vec![WireFailure { at_ms: 9_000, method: "INFO".into(), code: None }]
     );
 }
+
+/// An in-dialog request other than a BYE still awaiting its final at the seal
+/// is judged by its client transaction (RFC 3261 §17.1.2): a final after the
+/// seal settles it, a non-2xx one as a failure; a request first sent after the
+/// seal, and the BYE, are not followed.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn a_request_pending_at_the_seal_is_settled_by_its_later_final() {
+    let wire = CallWire::new(Clock::test_at(7_000));
+    let leg = Side::Leg("callee");
+    feed(
+        &wire,
+        &[
+            (Side::Caller, Dir::Out, msg("INVITE sip:b@h SIP/2.0", "c4", "1 INVITE", "", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c4", "1 INVITE", "t1", "")),
+            (Side::Caller, Dir::Out, msg("INFO sip:b@h SIP/2.0", "c4", "2 INFO", "t1", "")),
+            (Side::Caller, Dir::Out, msg("UPDATE sip:b@h SIP/2.0", "c4", "3 UPDATE", "t1", "")),
+            (Side::Caller, Dir::Out, msg("BYE sip:b@h SIP/2.0", "c4", "4 BYE", "t1", "")),
+            (leg, Dir::In, msg("INVITE sip:q@h SIP/2.0", "b4", "1 INVITE", "", "")),
+            (leg, Dir::Out, msg("SIP/2.0 200 OK", "b4", "1 INVITE", "q1", "")),
+            (leg, Dir::Out, msg("INFO sip:a@h SIP/2.0", "b4", "2001 INFO", "f1", "")),
+        ],
+    );
+    assert!(wire.facts().awaits_finals());
+    wire.seal();
+    tokio::time::advance(std::time::Duration::from_millis(500)).await;
+    let f = feed(
+        &wire,
+        &[
+            (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c4", "2 INFO", "t1", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 491 Pending", "c4", "3 UPDATE", "t1", "")),
+            (Side::Caller, Dir::In, msg("SIP/2.0 200 OK", "c4", "4 BYE", "t1", "")),
+            (leg, Dir::In, msg("SIP/2.0 200 OK", "b4", "2001 INFO", "f1", "")),
+            (leg, Dir::Out, msg("INFO sip:a@h SIP/2.0", "b4", "2002 INFO", "f1", "")),
+        ],
+    );
+    assert!(!f.awaits_finals(), "every request the seal left pending settled");
+    assert_eq!(f.unanswered(), vec![]);
+    assert_eq!(
+        f.failures,
+        vec![WireFailure { at_ms: 7_500, method: "UPDATE".into(), code: Some(491) }]
+    );
+    assert_eq!(f.bye, Some(None), "the BYE stays as the seal left it");
+    assert!(f.teardown_released);
+    assert_eq!(f.legs[0].unanswered(), vec![]);
+    assert_eq!(f.legs[0].failures, vec![]);
+}

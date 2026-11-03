@@ -6,7 +6,9 @@
 //! what the generator's own teardown of a failed call draws afterwards (a
 //! CANCEL and its 487, a late final, a cleanup BYE) is not the call's
 //! outcome. Of the teardown, the facts keep only whether a BYE released the
-//! dialog.
+//! dialog. An in-dialog request other than a BYE still awaiting its final at
+//! the seal is judged by its client transaction (RFC 3261 §17.1.2): a final
+//! that arrives after the seal still settles it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -116,6 +118,36 @@ impl WireFacts {
     pub fn unanswered(&self) -> Vec<WireFailure> {
         unanswered(&self.pending)
     }
+
+    /// Whether an in-dialog request other than a BYE, the caller's or a
+    /// callee leg's, still awaits its final.
+    pub fn awaits_finals(&self) -> bool {
+        let awaits = |pending: &HashMap<u32, (String, i64)>| {
+            pending.values().any(|(method, _)| method != "BYE")
+        };
+        awaits(&self.pending) || self.legs.iter().any(|l| awaits(&l.pending))
+    }
+}
+
+/// After the seal, the final `code` to the request `method` `cseq`: a
+/// request other than a BYE that `pending` still holds is settled, a non-2xx
+/// one a failure.
+fn settle_pending(
+    pending: &mut HashMap<u32, (String, i64)>,
+    failures: &mut Vec<WireFailure>,
+    method: &str,
+    cseq: u32,
+    code: u16,
+    now: i64,
+) {
+    let held = pending.get(&cseq).is_some_and(|(m, _)| m == method && m != "BYE");
+    if code < 200 || !held {
+        return;
+    }
+    pending.remove(&cseq);
+    if code >= 300 {
+        failures.push(WireFailure { at_ms: now, method: method.to_string(), code: Some(code) });
+    }
 }
 
 /// The requests of `pending` other than a BYE, as failures without a code,
@@ -185,9 +217,13 @@ impl WireFacts {
             return;
         };
         if self.sealed {
-            // Only whether the teardown released the dialog.
+            // Whether the teardown released the dialog, and the finals of the
+            // requests the seal left pending.
             let bye_ok = method == "BYE" && id.status.is_some_and(|c| (200..300).contains(&c));
             self.teardown_released |= bye_ok;
+            if let (Dir::In, Some(code)) = (dir, id.status) {
+                settle_pending(&mut self.pending, &mut self.failures, method, cseq, code, now);
+            }
             return;
         }
         match (dir, id.status) {
@@ -287,11 +323,18 @@ impl WireFacts {
     }
 
     fn on_leg(&mut self, role: &str, dir: Dir, d: &Datagram<'_>, now: i64) {
-        if self.sealed {
-            return;
-        }
         let id = d.id();
         let opened = self.legs.iter().position(|l| l.role == role);
+        if self.sealed {
+            // Only the finals of the leg's requests the seal left pending.
+            if let (Dir::In, Some(code), Some(i), Some(method), Some(cseq)) =
+                (dir, id.status, opened, id.cseq_method, id.cseq)
+            {
+                let leg = &mut self.legs[i];
+                settle_pending(&mut leg.pending, &mut leg.failures, method, cseq, code, now);
+            }
+            return;
+        }
         match (dir, id.status, opened) {
             (Dir::In, None, None) => {
                 if id.method == Some("INVITE") && untagged(id) {

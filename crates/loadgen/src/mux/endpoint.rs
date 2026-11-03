@@ -91,7 +91,8 @@ impl MuxNetwork {
     /// Park until every client transaction this call's endpoints have open
     /// has ended (final received, or Timer B/F), retransmitting meanwhile:
     /// what a failed call waits for before its endpoints drop, so its
-    /// teardown CANCEL or BYE survives a loss. Immediate without the engine.
+    /// teardown CANCEL or BYE survives a loss, and what a call whose in-dialog
+    /// request awaits its final waits for. Immediate without the engine.
     pub async fn client_txns_ended(&self) {
         let engines: Vec<Arc<CallTxns>> = self.engines.lock().unwrap().clone();
         for txns in engines {

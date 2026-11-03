@@ -195,7 +195,7 @@
           "type": "number"
         },
         "kind": {
-          "description": "`dialog_request`: an in-dialog request (re-INVITE, UPDATE, INFO, OPTIONS, REFER, NOTIFY, PRACK, BYE) got a non-2xx final or none. `protocol`: an unexpected or malformed message, or an RFC check finding. `transport`: a send or receive error at the socket. `generator`: the generator itself failed (a panic); not a system-under-test impact.",
+          "description": "`dialog_request`: an in-dialog request (re-INVITE, UPDATE, INFO, OPTIONS, REFER, NOTIFY, PRACK, BYE) got a non-2xx final, or none by the end of its client transaction (its final or Timer F with loadgen's retransmission on, the call's end without it). `protocol`: an unexpected or malformed message, or an RFC check finding. `transport`: a send or receive error at the socket. `generator`: the generator itself failed (a panic); not a system-under-test impact.",
           "enum": ["dialog_request", "protocol", "transport", "generator"]
         },
         "method": {

@@ -429,12 +429,12 @@ pub(crate) async fn run_one(
     };
 
     tally.mark_outcome(); // a call whose runner never resolved (its build failed)
+    let ended_at_ms = transport.clock.now_ms();
     let failed = !matches!(result, Ok(ScenarioVerdict::Success { .. }));
-    let (fold_tx, fold_rx) = tokio::sync::oneshot::channel();
-    if failed {
-        let quiesce = call.teardown_quiesce;
-        failed_call::release(tails, net, &alice, &callee_agents, quiesce, fold_rx).await;
-    }
+    // A request awaiting its final is judged by its transaction (RFC 3261 §17.1.2).
+    let awaits = wire.as_ref().is_some_and(|w| w.facts().awaits_finals());
+    let (agents, quiesce) = (&callee_agents, call.teardown_quiesce);
+    let tail = failed_call::hold(failed, awaits, tails, net, &alice, agents, quiesce).await;
 
     // The per-call audit policy (ADR-0024 §6): the merged structural waivers —
     // the attached case's lowered `allowViolations` PLUS the plan's declared
@@ -530,13 +530,8 @@ pub(crate) async fn run_one(
     reporter.record(id, &outcome, &case, e2e, &checkpoints, evidence);
     // The ladder takes the call's messages once its traffic is over.
     let fold = record::ladder_fold(&reporter, id, &tally, &outcome);
-    match failed {
-        true => drop(fold_tx.send(fold)),
-        false => fold(),
-    }
+    let write = record::outcome_write(outcomes, wire, id, outcome, ended_at_ms);
+    tail.finish(fold, Box::new(write), awaits);
     rtts.finish();
-    if let (Some(sink), Some(wire)) = (&outcomes, &wire) {
-        crate::outcome::write_call(sink, id, &wire.facts(), &outcome, transport.clock.now_ms());
-    }
     reporter.dec_inflight();
 }
