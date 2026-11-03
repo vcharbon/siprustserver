@@ -39,7 +39,19 @@ description: >-
     own;
   - a CDR duration off by up to R + T2 = 14.5 s: the worker ends a call at
     its return on the caller's queued BYE, whose 200 reaches the caller with
-    its first retransmission after the re-announcement.
+    its first retransmission after the re-announcement;
+  - a dialog request overtaken by the next, 32 s per kind: the worker sends
+    a dialog's requests without waiting for the previous one's final (a
+    transfer's NOTIFY with the referred call's 100, then its 200: RFC 6665
+    §4.2.2 sends each state change at once). The first, sent into the
+    outage, is delivered only by a retransmission after the
+    re-announcement; the next, sent meanwhile, can arrive first
+    (`dialog-cseq-skip`), and the first then arrives under a lower CSeq
+    (`dialog-cseq-backwards`), which the receiver answers 500 (RFC 3261
+    §12.2.2); the transfer completes. At most the dialogs whose first
+    request was sent in the outage and still lives at the re-announcement:
+    min(A = 32.5 s, the transaction's 32 s life) = 32 s (measured 1 s of the
+    transfer stream's rate).
 setup_failed:
   - { stream: "*", code: 0, reason: timeout, max_seconds: 9, over_outage: true }
   - { stream: "*", code: 503, reason: "*", retry_after: true, max_seconds: 9, over_outage: true }
@@ -52,6 +64,8 @@ in_dialog:
   - { stream: "*", class: call_stranded, detail: teardown never completed, max_seconds: 5 }
   - { stream: "*", class: dialog_request_failed, detail: INVITE no final, max_seconds: 34 }
   - { stream: "*", class: call_cut, detail: cut, max_seconds: 34 }
+  - { stream: "*", class: protocol_anomaly, detail: dialog-cseq-skip, max_seconds: 32 }
+  - { stream: "*", class: protocol_anomaly, detail: dialog-cseq-backwards, max_seconds: 32 }
 cdr_mismatch:
   differs:
     max_seconds: 15
