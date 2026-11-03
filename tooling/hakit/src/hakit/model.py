@@ -187,6 +187,9 @@ class Budget:
     cdr_mismatch: dict[str, CountAllowance] = field(default_factory=lambda: {})
     recovery: RecoveryRule = RecoveryRule()
     classes: dict[str, float] = field(default_factory=lambda: {})
+    # The calls up at the window's first inject that must end whole, at
+    # least this many of them (established.py); None: not judged.
+    established_min: int | None = None
 
 
 NO_BUDGET = Budget("", [], [], SetupSlowAllowance(None, None, None), raw={})
@@ -244,6 +247,7 @@ def parse_budget(d: Json) -> Budget:
             latency_slack_ms=jv.number(rec, "latency_slack_ms", 50),
         ),
         classes={k: jv.number(jv.as_obj(v, k), "max") for k, v in jv.obj(d, "classes").items()},
+        established_min=jv.opt_int(jv.obj(d, "established"), "min_calls"),
     )
 
 

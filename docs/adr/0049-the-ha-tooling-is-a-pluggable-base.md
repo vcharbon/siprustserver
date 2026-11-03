@@ -504,6 +504,19 @@ made. A run profile joins the two.
     (more calls than the cap, minor). Consecutive minutes out of bound make
     one entry of the verdict's `limiters`, naming the limiter, its streams,
     the span, the minute maxima and medians, the bound and the window.
+14. **Calls established at a fault.** A fault of a call-setup dependency
+    must leave the calls already up whole. A budget's `established`
+    (`min_calls`) adds one row to its window: the calls answered before the
+    window's first `inject` and not ended at it, those an impact no
+    allowance takes hurt (an in-dialog request failed, a cut, a CDR
+    mismatch), allowed none, and a finding too when fewer than `min_calls`
+    such calls existed, so a window no call spanned never passes it.
+15. **Redundant pods faulted one at a time.** A profile's `one_at_a_time`
+    names a label selector whose pods back one service: every event aimed at
+    it picks one pod, the next fires at least `gap_s` after the previous
+    one's `at_s + expected_s` (the clients' time to spread their connections
+    again), refused at load otherwise; and the run is refused before the
+    load while fewer than `min_ready` (2) pods of the selector are ready.
 
 ### 4. The call-outcome record
 

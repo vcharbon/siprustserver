@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "verdict.v1.schema.json",
-  "$comment": "minor 4",
+  "$comment": "minor 5",
   "title": "verdict.v1",
   "description": "The `verdict.json` of a run directory: every window with its impact against its budget, the in-dialog impact with the windows it may belong to, the impact outside every window, and the integrity of the measurement. `hakit verdict <run-dir>` recomputes it from the run directory alone. ADR-0049.",
   "type": "object",
@@ -318,6 +318,14 @@
           "type": "number"
         },
         "finding": { "type": "boolean" },
+        "calls": {
+          "description": "`established`: the calls answered before the window's first inject and still up at it; `count` is those an unallowed impact hurt.",
+          "type": "integer"
+        },
+        "min_calls": {
+          "description": "`established`: the fewest such calls the budget accepts; fewer is a finding.",
+          "type": "integer"
+        },
         "call_ids": {
           "description": "The Call-IDs of the calls counted, up to 50.",
           "type": "array",

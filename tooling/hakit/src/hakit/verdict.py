@@ -20,7 +20,8 @@ from .cdrjoin import DIFFERS
 from .classes import read_counts
 from .jsonl import read_jsonl
 from .classify import SETUP_FAILED, Classified, Impact, SetupLatency, classify
-from .judge import ALL_CALL_IDS, judge
+from .established import established_row, hurt_calls
+from .judge import ALL_CALL_IDS, budget_of, judge
 from .limiters import judge_limiters
 from .jsonval import Json, as_obj
 from .model import Budget, Shape, parse_budget, parse_catalog
@@ -266,9 +267,13 @@ def _compute(run_dir: Path, schemas: SchemaSet) -> Json:
     limiters = judge_limiters(profile, [r for r, _ in calls.valid], windows, budgets, run.load_start_ms, load_end_ms)
     windows_out: list[Json] = []
     findings = len(judged.in_dialog) + len(judged.unattributed) + len(limiters)
+    hurt = hurt_calls(impacts, cdr_impacts + class_impacts)
     for w in windows:
         recs, rec_rows = recovered.get(w.event, ([], []))
         rows = judged.per_window.get(w.event, []) + rec_rows
+        established_min = budget_of(w, budgets).established_min
+        if established_min is not None:
+            rows.append(established_row(w, established_min, (r for r, _ in calls.valid), hurt))
         healed = w.last("healed")
         n = sum(1 for r in rows if r.get("finding") is True)
         findings += n
