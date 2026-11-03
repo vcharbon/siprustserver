@@ -55,7 +55,7 @@ worker reporting itself healthy.
    request waits for a slot inside its own attempt budget; a request whose
    budget runs out waiting is never sent, and the wait never reaches the
    breaker. Waits, their time and the requests that never got a slot are
-   counted (`http_client_slot_*`).
+   counted (`http_request_slot_*`).
 5. **Rotation**: once the rotation period has passed, the target's fresh
    lookup starts and the current client keeps taking requests; a new client
    takes over once that lookup is over (landed, past its bound, or refused by

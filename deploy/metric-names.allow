@@ -53,10 +53,3 @@ label:job
 label:instance
 label:container
 label:node
-
-# The http_ namespace (http_request_*, http_client_*) meets shell and Python
-# identifiers: the proxy environment variable and the exporter's POST helper.
-k8s/lib/proxy-env.sh: http_proxy
-observability/: http_proxy
-k8s/sipp/exporter/: http_post
-k8s/sipp/exporter-check/: http_post
