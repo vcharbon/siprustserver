@@ -2,16 +2,54 @@ schema: budget.v1
 name: backend-outage
 description: >-
   Every worker gone at once (a total backend outage): every front proxy reads
-  them dead (the dead verdict, 2.6-3.6 s) and answers new calls 503 with a
+  them dead (the dead verdict V, 2.6-3.6 s) and answers new calls 503 with a
   Retry-After until its node's routes are withdrawn (ADR-0056 §3); once both
-  are withdrawn the VIPs are unreachable and new setups end without a final. Every setup of the outage
-  may fail, plus 9 s of offered rate past it: the first probe round that
-  reads a worker alive (1 s), one readiness period (1 s) and the propagation
-  of the announcement to the routers' tables (7 s measured on the lab with
-  kube-proxy in iptables mode, pending the nftables run).
+  are withdrawn the VIPs are unreachable and new setups end without a final.
+  The outage A = D + R runs from the inject to both VIPs routed again: D the
+  fault (a freeze: its hold plus the inject's own time, 22 s here), R from
+  the workers' return to the re-announcement, R = h + 1 s probe round + 2 s
+  readiness (1 s × 2) + P, with P the announcement's propagation
+  (proxy.announce.propagationMs, 7 s in kube-proxy iptables mode, pending
+  the nftables run) and h the heal and the thawed workers' backlog (2.5 s
+  measured), so R = 12.5 s and A = 34.5 s (34.4 s measured). Allowances, in
+  seconds of offered rate:
+  - every setup of the outage may fail, plus 9 s past it: the first probe
+    round that reads a worker alive (1 s), one readiness period (1 s) and P;
+  - 480 with Reason q.850;cause=18, 4 s: a setup that reached a worker
+    before the proxies read it dead (V ≤ 3.6 s, rounded up) waits in its
+    queue; at the return the worker sends its b-leg INVITE into the
+    withdrawn route and gives up on it with no answer;
+  - in-dialog transactions first sent in the outage's first A − L get no
+    final, L the caller's last retransmission (RFC 3261 §17.1.2.2, T1
+    500 ms, T2 4 s: 27.5 s for a non-INVITE; 15.5 s for a re-INVITE from a
+    caller that stops at its fifth retransmission, as SIPp does, an RFC
+    3261 caller's sixth at 31.5 s arriving with 0.5 s left): a BYE strands
+    its call, A − 27.5 = 7 s; a re-INVITE cuts it, A − 15.5 = 19 s per
+    re-INVITE, 38 s for a stream of two per call (ADR-0056 §3; measured
+    4.4 s of BYEs, 10 s of re-INVITEs);
+  - a CDR that says answered for a call whose caller timed out, and a CDR
+    of a stranded call ending after its caller's end, 17 s of the summed
+    offered rate: a setup pending at the freeze (offered in the 10 s setup
+    deadline before it) whose callee's 2xx the worker relays at its return,
+    after the caller's deadline; and a call whose BYE never reached a
+    worker (the 7 s of stranding BYEs), which the worker ends later on its
+    own;
+  - a CDR duration off by up to R + T2 = 16.5 s: the worker ends a call at
+    its return on the caller's queued BYE, whose 200 reaches the caller with
+    its first retransmission after the re-announcement.
 setup_failed:
   - { stream: "*", code: 0, reason: timeout, max_seconds: 9, over_outage: true }
   - { stream: "*", code: 503, reason: "*", retry_after: true, max_seconds: 9, over_outage: true }
+  - { stream: "*", code: 480, reason: "q.850;cause=18", max_seconds: 4 }
 setup_slow:
   max_seconds: 9
   over_outage: true
+in_dialog:
+  - { stream: "*", class: dialog_request_failed, detail: BYE no final, max_seconds: 7 }
+  - { stream: "*", class: call_stranded, detail: teardown never completed, max_seconds: 7 }
+  - { stream: "*", class: dialog_request_failed, detail: INVITE no final, max_seconds: 38 }
+  - { stream: "*", class: call_cut, detail: cut, max_seconds: 38 }
+cdr_mismatch:
+  differs:
+    max_seconds: 17
+    excess_ms: 16500

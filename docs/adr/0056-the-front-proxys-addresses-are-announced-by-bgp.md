@@ -58,7 +58,13 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
    - a proxy that loses every worker, or its external uplink, while its peer does not, withdraws
      both VIPs and the peer carries all traffic;
    - **a total backend outage withdraws both routes**: once both are withdrawn the callers see
-     an unreachable address. This amends ADR-0046's fail-loud rule for that one case;
+     an unreachable address. This amends ADR-0046's fail-loud rule for that one case. The
+     routes come back R after the workers do (a probe round 1 s, readiness up to 2 s, the
+     propagation P, and the returning workers' backlog), so an in-dialog transaction first sent
+     in the outage's first D + R − L gets no final, D the outage and L its sender's last
+     retransmission (27.5 s for a non-INVITE, T1 500 ms, T2 4 s): an established call loses a
+     BYE (stranded) or a re-INVITE (cut). That is the residual of a total outage longer than
+     L − R, budgeted by the hakit budget `backend-outage`;
    - **with the API server down** EndpointSlices cannot change: a crashed proxy is not withdrawn,
      a proxy restarted then gets no first worker view yet its node stays announced for the whole
      outage, and a speaker restarted then withdraws every route it announced. BFD still covers a
