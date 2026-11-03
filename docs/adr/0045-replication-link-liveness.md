@@ -56,6 +56,12 @@ life of the process, silently.
 5. **Failed accepts.** A failed accept never stops the replication server: it
    logs a warning once per run of failures, pauses 100 ms and accepts again.
    Only a closed listener ends it.
+   An accepted connection that sends no opening `PullRequest` within the open
+   timeout is closed, and one accepted while the cap on concurrent
+   connections is served is closed at once; both are counted
+   (`b2bua_repl_inbound_dropped_total{reason}`). A peer reads either close as
+   its stream ending unheard, so the open timeout is at least the idle
+   timeout and the cap holds every peer's two flows and a reconnect of each.
 6. **Bounded lookup.** Each peer name lookup is bounded at 2 s, single-flight
    per name, with the stuck-lookup cap of `ResolvedTarget` (ADR-0043, the
    outbound backend client policy). A lookup past its bound reads as
@@ -100,6 +106,8 @@ interval after.
 | `B2BUA_REPL_IDLE_TIMEOUT_MS` | a stream delivering nothing is left; a dead verdict on a silent peer meets its stream down this long after its last frame at most, then the one connect confirms it (ADR-0047 D1); at least twice the `Noop` interval, far below a pod's force-delete | 2000 |
 | `B2BUA_REPL_NOOP_INTERVAL_MS` | the longest a served stream goes without a `Noop`, on every stream, each flow alike: the heartbeat; a position claim vouches for twice it | 500 |
 | `B2BUA_REPL_SEND_STALL_MS` | a send blocked this long leaves the stream, either end | 15000 |
+| `B2BUA_REPL_OPEN_TIMEOUT_MS` | an accepted connection with no opening request this long is closed; at least the idle timeout (worker start) | 4000 |
+| `B2BUA_REPL_MAX_CONNECTIONS` | inbound connections served at once; one above is closed; at least 4 (worker start) and 4 × (workers − 1) (render) | 64 |
 | `B2BUA_REPL_KEEPALIVE_IDLE_MS` / `_INTERVAL_MS` / `_RETRIES` | TCP keepalive | 5000 / 2000 / 3 |
 | `B2BUA_REPL_USER_TIMEOUT_MS` | `TCP_USER_TIMEOUT` | 15000 |
 | `B2BUA_REPL_LOOKUP_TIMEOUT_MS` | one peer name lookup | 2000 |
