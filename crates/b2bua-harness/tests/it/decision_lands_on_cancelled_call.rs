@@ -178,7 +178,10 @@ async fn route_decision_landing_after_the_callers_cancel_is_recorded_not_applied
         ),
     });
     let b2bua = B2buaSut::builder(decision)
-        .tune(|c| c.cdr = CdrConfig { message_ring: 32, captured_headers: Vec::new() })
+        .tune(|c| {
+            c.cdr =
+                CdrConfig { message_ring: 32, captured_headers: Vec::new(), ..Default::default() }
+        })
         .keep_terminated_calls()
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
@@ -269,7 +272,10 @@ async fn reject_decision_landing_after_the_callers_cancel_is_recorded_not_applie
         ),
     });
     let b2bua = B2buaSut::builder(decision)
-        .tune(|c| c.cdr = CdrConfig { message_ring: 32, captured_headers: Vec::new() })
+        .tune(|c| {
+            c.cdr =
+                CdrConfig { message_ring: 32, captured_headers: Vec::new(), ..Default::default() }
+        })
         .keep_terminated_calls()
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
@@ -355,7 +361,10 @@ async fn a_consult_answering_no_decision_after_the_callers_cancel_records_nothin
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let decision = Arc::new(UnavailableAfter { delay: DECISION_DELAY });
     let b2bua = B2buaSut::builder(decision)
-        .tune(|c| c.cdr = CdrConfig { message_ring: 32, captured_headers: Vec::new() })
+        .tune(|c| {
+            c.cdr =
+                CdrConfig { message_ring: 32, captured_headers: Vec::new(), ..Default::default() }
+        })
         .keep_terminated_calls()
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;

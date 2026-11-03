@@ -89,7 +89,8 @@ async fn reboot_and_reclaim(
 async fn a_takeover_numbers_its_turns_past_the_replicated_ring() {
     let mut fh = FailoverHarness::new("message-ring-takeover-turns", &["b1", "b2"])
         .with_worker_tune(|c| {
-            c.cdr = CdrConfig { message_ring: 32, captured_headers: Vec::new() };
+            c.cdr =
+                CdrConfig { message_ring: 32, captured_headers: Vec::new(), ..Default::default() };
         });
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;

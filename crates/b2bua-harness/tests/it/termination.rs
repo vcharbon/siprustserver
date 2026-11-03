@@ -76,7 +76,11 @@ impl Sut {
             .keep_terminated_calls()
             .tune(move |config| {
                 config.worker_allowed_target_suffixes = vec!["*".into()];
-                config.cdr = CdrConfig { message_ring: 32, captured_headers: Vec::new() };
+                config.cdr = CdrConfig {
+                    message_ring: 32,
+                    captured_headers: Vec::new(),
+                    ..Default::default()
+                };
                 tune(config);
             })
             .start(h, "b2bua", B2BUA)

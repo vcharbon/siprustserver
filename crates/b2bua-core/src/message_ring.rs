@@ -42,6 +42,8 @@ pub struct Received<'a> {
 pub struct Ring {
     cap: usize,
     names: Vec<HeaderName>,
+    /// The names an INVITE final response's entry captures.
+    final_names: Vec<HeaderName>,
 }
 
 impl Ring {
@@ -49,14 +51,16 @@ impl Ring {
         if config.cdr.message_ring == 0 {
             return None;
         }
+        let resolve = |names: &[String]| -> Vec<HeaderName> {
+            names.iter().map(|n| HeaderName::from(n.as_str())).collect()
+        };
+        let cdr = &config.cdr;
         Some(Self {
-            cap: config.cdr.message_ring,
-            names: config
-                .cdr
-                .captured_headers
-                .iter()
-                .map(|n| HeaderName::from(n.as_str()))
-                .collect(),
+            cap: cdr.message_ring,
+            names: resolve(&cdr.captured_headers),
+            final_names: resolve(
+                cdr.final_response_headers.as_deref().unwrap_or(&cdr.captured_headers),
+            ),
         })
     }
 
@@ -231,8 +235,15 @@ impl Ring {
         }
     }
 
-    /// A received response's entry; `seq` is assigned at the append.
+    /// A received response's entry; `seq` is assigned at the append. An
+    /// INVITE final captures the final-response names, any other response
+    /// the common ones.
     fn response_entry(&self, resp: &SipResponse, now_ms: i64) -> MessageEntry {
+        let names = if resp.status() >= 200 && resp.cseq().method() == Method::Invite {
+            &self.final_names
+        } else {
+            &self.names
+        };
         MessageEntry {
             seq: 0,
             at_ms: now_ms,
@@ -242,7 +253,7 @@ impl Ring {
             code: Some(resp.status()),
             to_tag: resp.to().tag().map(str::to_string),
             decision_ordinal: 0,
-            headers: resp.captured_headers(&self.names),
+            headers: resp.captured_headers(names),
             turn: 0,
         }
     }

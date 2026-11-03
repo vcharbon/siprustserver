@@ -88,7 +88,7 @@ use std::time::Duration;
 
 use b2bua::admission::Refusals;
 use b2bua::cdr::{BufferedCdrWriter, CdrEncoder, CdrWriter};
-use b2bua::config::{B2buaConfig, CdrConfig, Front};
+use b2bua::config::{B2buaConfig, Front};
 use b2bua::decision::CallDecisionEngine;
 use b2bua::ingress_brake::{build_ingress_brake_hook, IngressBrakeConfig, IngressBrakeCounters};
 use b2bua::limiter::CallLimiter;
@@ -344,10 +344,7 @@ impl RunnerEnv {
             worker_allowed_target_suffixes: self.worker_allowed_target_suffixes.clone(),
             relay_headers: self.relay_headers.clone(),
             privacy_service: self.privacy_service,
-            cdr: CdrConfig {
-                message_ring: self.cdr_message_ring,
-                captured_headers: self.cdr_captured_headers.clone(),
-            },
+            cdr: self.cdr.clone(),
             capacity: self.capacity,
             event_queue_gate: self.event_queue_gate,
             ..Default::default()

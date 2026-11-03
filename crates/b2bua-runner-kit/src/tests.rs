@@ -1,5 +1,6 @@
 use super::*;
 use crate::runner_env::{cdr_ring_from_lookup, switch};
+use b2bua::config::CdrConfig;
 
 fn suffixes(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| s.to_string()).collect()
@@ -73,22 +74,33 @@ fn a_blank_value_states_nothing() {
     assert_eq!(stated_list(Some("Allow, ".into())), Some(vec!["Allow".to_string()]));
 }
 
+fn ring(cap: usize, captured: &[&str], finals: Option<&[&str]>) -> CdrConfig {
+    let names = |l: &[&str]| l.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+    CdrConfig {
+        message_ring: cap,
+        captured_headers: names(captured),
+        final_response_headers: finals.map(names),
+    }
+}
+
 #[test]
 fn the_ring_knobs_read_blank_as_unset() {
-    assert_eq!(cdr_ring_from_lookup(lookup(&[])), Ok((0, vec![])));
+    assert_eq!(cdr_ring_from_lookup(lookup(&[])), Ok(ring(0, &[], None)));
     assert_eq!(
         cdr_ring_from_lookup(lookup(&[
             ("B2BUA_CDR_MESSAGE_RING", ""),
-            ("B2BUA_CDR_CAPTURED_HEADERS", " , ")
+            ("B2BUA_CDR_CAPTURED_HEADERS", " , "),
+            ("B2BUA_CDR_FINAL_RESPONSE_HEADERS", " ")
         ])),
-        Ok((0, vec![]))
+        Ok(ring(0, &[], None))
     );
     assert_eq!(
         cdr_ring_from_lookup(lookup(&[
             ("B2BUA_CDR_MESSAGE_RING", " 16 "),
-            ("B2BUA_CDR_CAPTURED_HEADERS", "Allow, Accept")
+            ("B2BUA_CDR_CAPTURED_HEADERS", "Allow, Accept"),
+            ("B2BUA_CDR_FINAL_RESPONSE_HEADERS", "Allow, User-Agent")
         ])),
-        Ok((16, vec!["Allow".to_string(), "Accept".to_string()]))
+        Ok(ring(16, &["Allow", "Accept"], Some(&["Allow", "User-Agent"])))
     );
 }
 

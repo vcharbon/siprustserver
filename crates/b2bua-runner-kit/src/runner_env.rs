@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
 
-use b2bua::config::{B2buaConfig, CapacityConfig};
+use b2bua::config::{B2buaConfig, CapacityConfig, CdrConfig};
 
 use crate::{
     addresses_from_lookup, capacity_env, drain_env, env_or, limiter_env, liveness_env, split_csv,
@@ -138,12 +138,12 @@ pub struct RunnerEnv {
     /// (default off, a lab setting); any other value than on/off refuses the
     /// boot.
     pub trace_header: bool,
-    /// `B2BUA_CDR_MESSAGE_RING` — the per-leg message-ring cap on the call
-    /// record (default 0 = off; blank = unset).
-    pub cdr_message_ring: usize,
-    /// `B2BUA_CDR_CAPTURED_HEADERS` — the header names every ring entry
-    /// captures the values of, comma-separated (default empty).
-    pub cdr_captured_headers: Vec<String>,
+    /// The call record's message ring: `B2BUA_CDR_MESSAGE_RING` (the
+    /// per-leg cap, default 0 = off), `B2BUA_CDR_CAPTURED_HEADERS` (the
+    /// names every entry captures, default none) and
+    /// `B2BUA_CDR_FINAL_RESPONSE_HEADERS` (the names an INVITE final's
+    /// entry captures instead, default the captured ones); blank = unset.
+    pub cdr: CdrConfig,
     /// `LIMITER_URL` as the limiter's `host:port` (boot refuses a malformed
     /// value); empty when unset → `NoopLimiter` (fail-open).
     pub limiter_url: String,
@@ -210,18 +210,23 @@ fn socket_buffer_knob(key: &str) -> Result<Option<usize>, String> {
         .transpose()
 }
 
-/// `B2BUA_CDR_MESSAGE_RING` (default `0`, off) and `B2BUA_CDR_CAPTURED_HEADERS`
-/// (comma-separated, default none) as `lookup` states them; a blank value is
-/// unset. An unparsable cap is the error.
+/// `B2BUA_CDR_MESSAGE_RING` (default `0`, off), `B2BUA_CDR_CAPTURED_HEADERS`
+/// (comma-separated, default none) and `B2BUA_CDR_FINAL_RESPONSE_HEADERS`
+/// (comma-separated, default the captured ones) as `lookup` states them; a
+/// blank value, or a list naming no header, is unset. An unparsable cap is
+/// the error.
 pub(crate) fn cdr_ring_from_lookup(
     lookup: impl Fn(&str) -> Option<String>,
-) -> Result<(usize, Vec<String>), String> {
-    let ring = stated(lookup("B2BUA_CDR_MESSAGE_RING"))
+) -> Result<CdrConfig, String> {
+    let message_ring = stated(lookup("B2BUA_CDR_MESSAGE_RING"))
         .map(|v| v.parse().map_err(|e| format!("B2BUA_CDR_MESSAGE_RING={v:?}: {e}")))
         .transpose()?
         .unwrap_or(0);
-    let headers = stated_list(lookup("B2BUA_CDR_CAPTURED_HEADERS")).unwrap_or_default();
-    Ok((ring, headers))
+    Ok(CdrConfig {
+        message_ring,
+        captured_headers: stated_list(lookup("B2BUA_CDR_CAPTURED_HEADERS")).unwrap_or_default(),
+        final_response_headers: stated_list(lookup("B2BUA_CDR_FINAL_RESPONSE_HEADERS")),
+    })
 }
 
 /// An on/off knob as `value` states it: truthy or falsy (`0`/`false`/`no`/
@@ -269,7 +274,7 @@ impl RunnerEnv {
     pub fn from_env() -> Result<Self, String> {
         let lookup = |k: &str| env::var(k).ok();
         let invalid = |e: String| format!("invalid B2BUA config: {e}");
-        let (cdr_message_ring, cdr_captured_headers) = cdr_ring_from_lookup(lookup)?;
+        let cdr = cdr_ring_from_lookup(lookup)?;
         let limiter = limiter_env::limiter_from_lookup(lookup).map_err(invalid)?;
         let call_control_timeout_ms: i64 = knob("B2BUA_CALL_CONTROL_TIMEOUT_MS", "5000")?;
         let call_control =
@@ -334,8 +339,7 @@ impl RunnerEnv {
                 env::var(observe::TRACE_HEADER_ENV).ok(),
                 false,
             )?,
-            cdr_message_ring,
-            cdr_captured_headers,
+            cdr,
             limiter_url: limiter_env::limiter_url_from_lookup(lookup)
                 .map_err(invalid)?
                 .unwrap_or_default(),

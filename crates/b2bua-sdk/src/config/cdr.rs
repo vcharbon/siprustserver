@@ -12,4 +12,9 @@ pub struct CdrConfig {
     /// entries carry no header values. Overridable via
     /// `B2BUA_CDR_CAPTURED_HEADERS` (comma-separated).
     pub captured_headers: Vec<String>,
+    /// The exact header names an INVITE final response's entry (2xx-6xx, any
+    /// direction) captures instead of `captured_headers`, matched the same
+    /// way; `None` = `captured_headers`. Overridable via
+    /// `B2BUA_CDR_FINAL_RESPONSE_HEADERS` (comma-separated).
+    pub final_response_headers: Option<Vec<String>>,
 }
