@@ -201,6 +201,7 @@ tolerated (§3).
     | `proxy_rollout` | fault | a rollout restart of the proxies, each drained past its node's withdrawal; time the drain-to-withdrawal | (new) |
     | `speaker_restart` | fault | restart the BGP speakers of one proxy's node | (new) |
     | `cut_proxy_workers` | fault | cut one proxy off every worker for `duration_s`; time its node's withdrawal | (new) |
+    | `freeze_proxy` | fault | freeze one proxy's container for `duration_s` (a hung process, the pod's other containers running); time its node's withdrawal | (new) |
     | `backend_outage` | fault | freeze every worker for `duration_s`; time every proxy node's withdrawal | (new) |
     | `pod_kill` | fault | crash one pod of any selector | `limiter_kill` |
     | `force_delete` | fault | force-delete one pod through the API, its processes left running: two incarnations at once | `kill_worker`'s former mechanism |

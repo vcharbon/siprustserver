@@ -1,6 +1,6 @@
 # The front proxy's addresses are announced by BGP
 
-**Status:** accepted (2026-11-03). Supersedes ADR-0012 D7, ADR-0015 D5, ADR-0046 D4 and the
+**Status:** accepted (2026-11-03), amended the same day by §10 (the route guard). Supersedes ADR-0012 D7, ADR-0015 D5, ADR-0046 D4 and the
 virtual-address check of ADR-0050 §11; amends ADR-0046 (a total backend outage), ADR-0009,
 ADR-0033 and ADR-0048.
 
@@ -8,8 +8,9 @@ ADR-0033 and ADR-0048.
 `templates/proxy-metallb.yaml` (the MetalLB objects), `templates/proxy.yaml` (readiness probe,
 `minReadySeconds`, anti-affinity), `files/vip-loopback.sh` (the VIPs on `lo`, the ICMP drop),
 `templates/checks.yaml` (the timing relations), `crates/sip-proxy-runner/src/readiness.rs` and
-`external_face.rs` (what `/readyz` reads), `deploy/k8s/tor/` and `deploy/helm/lib/tor.sh` (the
-lab router).
+`external_face.rs` (what `/readyz` and `/fitz` read), `crates/sip-proxy/src/health/reach.rs`
+(the isolation verdict), `crates/route-guard` (the route guard), `deploy/k8s/tor/` and
+`deploy/helm/lib/tor.sh` (the lab router).
 
 ## Context
 
@@ -39,7 +40,7 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
    a worker's INVITE to the internal VIP would be refused on its own node. IPVS is unsupported; a
    kube-proxy replacement is checked for the same property before use. kube-proxy serves the
    Services' `healthCheckNodePort` on every node.
-3. **`/readyz` is the one signal.** Ready means: no drain latched, no recv shard stalled, the
+3. **`/readyz` is the announcement's signal.** Ready means: no drain latched, no recv shard stalled, the
    first worker view in, at least one worker `Alive`, and the external face usable: the external
    interface present and up and at least one of its configured next hops resolved (`REACHABLE`,
    `STALE`, `DELAY`, `PROBE`, `PERMANENT`) in the kernel's neighbour table (`PROXY_EXT_INTERFACE`,
@@ -65,10 +66,13 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
      retransmission (27.5 s for a non-INVITE, T1 500 ms, T2 4 s): an established call loses a
      BYE (stranded) or a re-INVITE (cut). That is the residual of a total outage longer than
      L − R, budgeted by the hakit budget `backend-outage`;
-   - **with the API server down** EndpointSlices cannot change: a crashed proxy is not withdrawn,
-     a proxy restarted then gets no first worker view yet its node stays announced for the whole
-     outage, and a speaker restarted then withdraws every route it announced. BFD still covers a
-     node's death.
+   - **with the API server down** EndpointSlices cannot change, and a speaker restarted then
+     withdraws every route it announced. The route guard (§10) still withdraws an unfit, hung or
+     crashed proxy's node, and BFD a dead node.
+
+   `/readyz` is the slow path: the kubelet's probe, the EndpointSlice, the speaker and the
+   frr-k8s reload take 3.8 s on their own, so it drives planned rollouts and backs the route
+   guard up, which carries every fault (§10).
 4. **The drain outlasts the withdrawal.** On SIGTERM the proxy turns `/readyz` Draining and keeps
    forwarding for `PROXY_DRAIN_GRACE_MS`. The withdrawal is readiness detection
    (`readinessProbe.periodSeconds` × `failureThreshold`, 1 s × 2) then the propagation to the
@@ -80,8 +84,10 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
    measures them with the `proxy_rollout` incident, frr-k8s reloading FRR 500 ms after a
    configuration change (its default 3 s adds 2.5 s to every withdrawal and announcement): the
    drain-to-withdrawal reached 3.8 s and the Ready-to-announced 4.65 s in both kube-proxy modes,
-   so the propagation is 5 s and `minReadySeconds` 10 s; the drain grace, 13 s, is above the
-   8.8 s they call for (`docs/TUNING.md`).
+   so the propagation is 5 s, `minReadySeconds` 10 s and the drain grace 8.8 s, the measured
+   drain-to-withdrawal plus 5 s (`docs/TUNING.md`). A planned drain leaves the route guard
+   alone: the proxy stays fit while it drains, and its node's sessions stay up for the
+   successor pod.
 5. **No ICMP port unreachable from a VIP.** Until its route is withdrawn a node still receives a
    VIP's traffic while no proxy socket is bound (a crash, the end of a drain); its kernel would
    answer port unreachable, which a SIP client takes as a transport error (RFC 3261 §18.4)
@@ -108,6 +114,40 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
    peers only, one `BGPPeer` per router selected by `proxy.nodeSelector`, and one `BFDProfile`;
    a render without MetalLB's APIs fails naming them. Off, the operator keeps them.
 
+10. **A route guard withdraws an unfit node within 3.4 s.** A caller retransmits an INVITE at
+    0.5, 1.5 and 3.5 s, so a node withdrawn within 3.4 s of a fault loses no setup a
+    retransmission can still answer. Readiness cannot get there (§3), so a container beside the
+    proxy, on the node's network with `NET_ADMIN` alone (the proxy keeps none), reads the proxy's
+    `/fitz` over loopback every `ROUTE_GUARD_POLL_MS` (100 ms) and owns one nftables table. Its
+    output chain drops the node's BFD (UDP 3784-3785) and BGP (TCP 179, either end) toward the
+    routers (`proxy.routeGuard.peers`, by default MetalLB's peers) unless the router is in a set
+    whose entries time out `ROUTE_GUARD_DEAD_MS` (1 s) after each refresh. While the proxy reads
+    fit the guard refreshes the set every quarter of that bound; an unfit answer empties it at
+    once; a proxy or a guard that stops refreshing (hung, crashed, killed with its pod) lets it
+    run out in the kernel, with no write. The routers miss the node's BFD for their detection
+    time (3 × 300 ms) and withdraw every route through it, as for a dead node. BGP is dropped
+    with BFD: without it the node's next connect retry re-establishes the session the BFD loss
+    ended and announces the routes again while BFD stays down.
+    - `/fitz` is fit when `/readyz` would be Ready, its drain latch aside, and some worker
+      answered a health probe within `HEALTH_ISOLATION_MS` (2 s): the isolation verdict, the
+      proxy's own reach, read before any per-worker dead verdict (2.6-3.6 s), which stays the
+      routing's. A proxy is never fit before it has read a worker alive.
+    - Bounds, checked at render against `proxy.routeGuard.withdrawWithinMs` (3.4 s): a worker cut
+      2 s + 0.1 s + 0.9 s = 3.0 s; an external face lost `PROXY_EXT_FACE_CHECK_MS` 0.5 s + 0.1 s +
+      0.9 s = 1.5 s; a hung or dead proxy 1 s + 0.9 s = 1.9 s.
+    - A withdrawn node is let out after the proxy read fit for `ROUTE_GUARD_HOLD_MS` (3 s), so a
+      flapping fault does not rehash flows each time; its BGP sessions come back within the
+      BGPPeer `connectTime` (`proxy.announce.metallb.connectTimeSeconds`, 1 s). A restarted guard
+      rebuilds its table from its first reading, keeping a fit proxy's node out without a hold;
+      the pod's init step writes the table withdrawing, so a node whose pod starts, after a node
+      restart among others, announces nothing before its proxy reads fit for the hold. The
+      render requires `minReadySeconds` above one probe period + the hold + the connect time +
+      2 s, so a rollout waits for the replaced node's sessions too.
+    - A total backend outage withdraws both nodes within 3 s (§3) and brings them back once a
+      worker answers, readiness and the hold allowing.
+    - The guard reports `route_guard_withdrawn`, `route_guard_withdrawals_total{cause}` and
+      `route_guard_restores_total`, and logs one line per withdrawal and per return.
+
 ## Rejected
 
 - **SIP through the Service.** kube-proxy would source some outbound requests from the node's
@@ -118,6 +158,14 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
   policy on the routers, outside the chart, and the flow moves of ADR-0009 X7 happen at failover
   anyway; active-active also spreads load across the peers.
 - **Keeping the layer-2 virtual address** as a fallback: no second mechanism is kept.
+- **A faster readiness chain** (shorter probe period, a faster frr-k8s reload): the chain from
+  the kubelet's probe to the routers' tables stays above 3.4 s whatever its tuning.
+- **The guard inside the proxy process**: the proxy would need `NET_ADMIN`, and a hung proxy
+  could not withdraw itself; the kernel-side timeout covers a hung proxy and a dead guard alike.
+- **The routers' BFD strict mode** (no BGP session before BFD is up) in place of the BGP drop:
+  it is a router setting outside the chart, not on every router.
+- **The guard for planned drains**: readiness already withdraws a draining node within the drain
+  grace, and tearing the node's sessions would add a reconnect to the successor's announcement.
 
 ## The lab
 
@@ -149,5 +197,15 @@ Via.
 - The two proxies can hold different views of one worker; each routes the traffic it receives by
   its own view. The failover harness cell `split_proxy_views` judges that case with real B2BUAs:
   no leak, full cleanup, one CDR, no copy left serving.
-- A withdrawal's propagation bounds the window in which a lost node still draws traffic; the
-  hakit budgets `proxy-failover` and `proxy-reroute` derive their allowances from it.
+- The route guard's bound (3.4 s) caps the window in which a lost, hung or cut node still draws
+  traffic; the hakit budgets `proxy-failover` and `proxy-cut` derive their allowances from it,
+  `proxy-reroute` from the readiness path of a planned withdrawal.
+- After a node restart its speaker may re-establish BGP before the proxy pod's init step writes
+  the withdrawing table, while the EndpointSlice still names the old pod Ready: the node is
+  announced for that gap (the kind lab measures it with `node_stop`).
+- The guard drops BGP to its peers whatever speaker owns the session: a CNI peering with the same
+  routers from the proxy nodes, or routes the nodes learn over those sessions, is unsupported
+  (`deploy/README.md`).
+- A guard removed from a node (the pod gone, no successor) leaves its table withdrawing; a pod
+  without the guard deletes it at start (`vip-loopback.sh`), or an operator does
+  (`nft delete table inet route_guard`).

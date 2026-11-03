@@ -2,51 +2,40 @@ schema: budget.v1
 name: proxy-cut
 description: >-
   One front proxy cut off a plane while its process runs (its node off the
-  callers' network, or cut off every worker): it turns not ready and its node
-  withdraws both VIPs (ADR-0056 §3) within W = V + 2 s + P of the cut: V the
-  detection (the worker cut's dead verdict 3.6 s, the external cut's face
-  check 0.5 s), 2 s the readiness probe's upper bound (1 s × 2), P the
-  announcement's propagation (proxy.announce.propagationMs, 5 s with frr-k8s
-  reloading 500 ms after a change). W = 3.6 + 2 + 5 = 10.6 s (measured 8.0 s
-  for the worker cut, 5.6 s internal and 0.9 s external for the external
-  cut; 10.3 s and 8.1 s with frr-k8s's 3 s default). Until then every
-  datagram of a flow that hashes to the cut node is lost; one peer address
-  and port is one flow, so a single-flow peer (a caller, a worker, a callee)
-  has all its traffic on one node or none (ADR-0056 §8). Each allowance is a
-  mechanism of that window, in seconds of offered rate, for the worst case of
-  every flow on the cut node:
-  - setup timeout, Ra + W − o = 12.1 s: the callee answers Ra = 5 s after the
-    INVITE (the profiles' ring) and the caller's deadline is D = 10 s, so the
-    last retransmission that can still answer in time is o = 3.5 s, the
-    largest of 0, 0.5, 1.5, 3.5, 7.5 s (RFC 3261 §17.1.1.2, §13.3.1.4, T1
-    500 ms) not over D − Ra; a callee's 2xx first sent in the window's first
-    W − o loses every such retransmission (calls offered from Ra before the
-    cut), and so does an INVITE first sent there (its 2xx follows it by Ra).
-    Measured up to 6.0 s: calls offered from 5.6 s before the cut to 1.7 s
-    after it, the 2xx path alone;
-  - 480 with Reason q.850;cause=18, 12.1 s: a worker's b-leg INVITE, or its
-    callee's answer, lost the same way, which the worker gives up on with
-    no answer by the same arithmetic;
-  - 503 with Retry-After, W = 10.6 s: the cut-off proxy reads every worker
-    dead and answers a new call 503 with a Retry-After until its node's
+  callers' network, or cut off every worker): its /fitz fails and its node's
+  route guard drops the node's BFD and BGP, so the routers withdraw both
+  VIPs within W of the cut (ADR-0056 §10). W is the route guard's bound
+  (proxy.routeGuard.withdrawWithinMs, 3.4 s, checked at render): detection
+  (the worker cut's isolation verdict, HEALTH_ISOLATION_MS 2 s; the external
+  cut's face check, 0.5 s) + one poll (0.1 s) + the routers' BFD detection
+  (3 × 300 ms). Until then every datagram of a flow that hashes to the cut
+  node is lost; one peer address and port is one flow, so a single-flow peer
+  (a caller, a worker, a callee) has all its traffic on one node or none
+  (ADR-0056 §8). W is below o = 3.5 s, the last retransmission (0, 0.5, 1.5,
+  3.5 s, RFC 3261 §17.1.1.2, §13.3.1.4, T1 500 ms) that can still answer a
+  call whose callee answers Ra = 5 s after the INVITE within the caller's
+  10 s deadline, so every request or 2xx first sent in the window reaches
+  the peer with a retransmission in time. Each allowance is a mechanism of
+  that window, in seconds of offered rate:
+  - setup timeout, 1 s: a request the cut proxy had read and not yet relayed
+    when the cut came, whose sender's retransmissions are already spent;
+  - 480 with Reason q.850;cause=18, 1 s: a worker's b-leg INVITE in the same
+    instant, which the worker gives up on with no answer;
+  - 503 with Retry-After, W = 3.4 s: the cut-off proxy that reads every
+    worker dead answers a new call 503 with a Retry-After until its node's
     routes are withdrawn (ADR-0056 §3), so the caller may retry elsewhere;
-  - setups slow for the window, W = 10.6 s;
-  - a CDR that says answered for a call whose caller timed out, W − o =
-    7.1 s of the summed offered rate: a 2xx lost in the window is
-    retransmitted past the withdrawal after the caller's deadline, so the
-    system under test answered a call the caller had given up (measured up
-    to 1.9 s);
+  - setups slow for the window, W = 3.4 s;
   - a CDR duration off by up to the first retransmission of a 2xx or BYE at
-    or past W, 11.5 s (T1, 2·T1, 4·T1, then every T2 4 s: 0.5, 1.5, 3.5,
-    7.5, 11.5 s), the split-view mismatch two proxies with different health
-    views produce while the cut node's view is stale (ADR-0009 X7).
+    or past W, 3.5 s, the split-view mismatch two proxies with different
+    health views produce while the cut node's view is stale (ADR-0009 X7).
+    No call is answered after its caller gave up: W < o.
 setup_failed:
-  - { stream: "*", code: 0, reason: timeout, max_seconds: 12.1 }
-  - { stream: "*", code: 480, reason: "q.850;cause=18", max_seconds: 12.1 }
-  - { stream: "*", code: 503, reason: "*", retry_after: true, max_seconds: 10.6 }
+  - { stream: "*", code: 0, reason: timeout, max_seconds: 1 }
+  - { stream: "*", code: 480, reason: "q.850;cause=18", max_seconds: 1 }
+  - { stream: "*", code: 503, reason: "*", retry_after: true, max_seconds: 3.4 }
 setup_slow:
-  max_seconds: 10.6
+  max_seconds: 3.4
 cdr_mismatch:
   differs:
-    max_seconds: 7.1
-    excess_ms: 11500
+    max_calls: 0
+    excess_ms: 3500

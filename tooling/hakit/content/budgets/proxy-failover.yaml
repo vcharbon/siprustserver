@@ -1,18 +1,17 @@
 schema: budget.v1
 name: proxy-failover
 description: >-
-  One front proxy of the active-active pair lost (crashed, or its node
-  stopped): its node's routes are withdrawn and the routers move its flows to the peer (ADR-0056).
-  Until the withdrawal a datagram routed to the lost node is lost and its
-  sender's retransmission repairs it once the route is gone, so a setup that
-  starts inside the window is slow, never failed. The window is the longest
-  withdrawal: readiness detection (periodSeconds 1 x failureThreshold 2) plus
-  the propagation P to the routers' tables (proxy.announce.propagationMs,
-  5 s with frr-k8s reloading 500 ms after a change), so setups may be slow
-  for 2 + 5 = 7 s of offered rate. The residue of the
-  loss instant (a datagram the lost proxy had read and not yet relayed, whose
-  sender sends no repeat) may fail about 3 s of offered rate's setups.
+  One front proxy of the active-active pair lost (crashed, hung, or its node
+  stopped): its node's routes are withdrawn and the routers move its flows
+  to the peer (ADR-0056). Until the withdrawal a datagram routed to the lost
+  node is lost and its sender's retransmission repairs it once the route is
+  gone, so a setup that starts inside the window is slow, never failed. The
+  window is the route guard's bound (proxy.routeGuard.withdrawWithinMs,
+  3.4 s, checked at render; ADR-0056 §10), so setups may be slow for 3.4 s of
+  offered rate. The residue of the loss instant (a datagram the lost proxy
+  had read and not yet relayed, whose sender sends no repeat) may fail about
+  3 s of offered rate's setups.
 setup_failed:
   - { stream: "*", code: 0, reason: timeout, max_seconds: 3 }
 setup_slow:
-  max_seconds: 7
+  max_seconds: 3.4
