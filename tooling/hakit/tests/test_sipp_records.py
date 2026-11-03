@@ -2,7 +2,7 @@
 
 Each pairing runs the scenario against a SIPp peer on loopback that drives one
 exit (answer, reject, a refusal with a Retry-After, ring forever, silence, a late answer, a 2xx crossing the
-CANCEL, far-end BYE, 481 or no final to the BYE, an in-dialog request the
+CANCEL, a far-end BYE in the CANCEL wait, far-end BYE, 481 or no final to the BYE, an in-dialog request the
 caller cannot serve, a 2xx retransmitted after the ACK, a 200 landing while the
 caller serves an OPTIONS in the early dialog) and checks the record
 the call left and that the peer, which fails on any missing ACK, BYE or
@@ -51,6 +51,8 @@ CASES = [
     Case("peer-cancel-crossing.xml", "timeout", None, "timeout", "provisional"),
     Case("peer-silent.xml", "timeout", None, "timeout", "invited", provisional=False),
     Case("peer-late-answer.xml", "timeout", None, "timeout", "invited", provisional=False),
+    # The setup deadline decided the ending: the far end's BYE in the CANCEL wait is a failure only.
+    Case("peer-bye-then-late-answer.xml", "timeout", None, "timeout", "provisional", failures=["protocol", "dialog_request"]),
     Case("peer-tick.xml", "answered", 200, None, "released"),
     Case("peer-2xx-twice.xml", "answered", 200, None, "released"),
     Case("peer-ack-lost.xml", "answered", 200, None, "released"),

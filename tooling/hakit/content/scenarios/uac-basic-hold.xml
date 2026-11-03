@@ -30,7 +30,8 @@
  re-INVITE, a far re-INVITE never ACKed); `stranded` (no final to the BYE in
  64*T1, or a ghost never released); `failed` (a request the caller cannot
  serve: 501, then BYE, or CANCEL before answer). A non-2xx for the INVITE
- after its 2xx is a protocol failure only. Each request has its own branch;
+ after its 2xx is a protocol failure only, and so is any unexpected request
+ once an ending is set (a far BYE in the CANCEL wait: still `timeout`). Each request has its own branch;
  every 2xx retransmission is ACKed again with its CSeq; a far re-INVITE is
  answered 200 (491 while the caller's own is pending, 481 after its BYE).
 -->
@@ -274,6 +275,7 @@ Max-Forwards: 70
 Content-Length: 0
   ]]>
   <action>
+   <assign assign_to="cancelled" value="1"/>
    <assignstr assign_to="cancel_t0_t" value="[clock_tick]"/>
    <todouble assign_to="cancel_t0" variable="cancel_t0_t"/>
    <add assign_to="cancel_t0" variable="t_off"/>
@@ -1325,13 +1327,18 @@ Content-Length: 0
 
  <nop/>
  <label id="proto_fail"/>
- <nop test="answered" next="teardown">
+ <nop>
   <action>
    <assignstr assign_to="now_t" value="[clock_tick]"/>
    <todouble assign_to="now_s" variable="now_t"/>
    <add assign_to="now_s" variable="t_off"/>
    <assignstr assign_to="r_fail" value="[$r_fail][$r_sep]{&quot;at_ms&quot;:[$now_s],&quot;kind&quot;:&quot;protocol&quot;,&quot;detail&quot;:&quot;unexpected [$ux_what]&quot;}"/>
    <assignstr assign_to="r_sep" value=","/>
+  </action>
+ </nop>
+ <nop test="keep_ending" next="proto_kept"/>
+ <nop test="answered" next="teardown">
+  <action>
    <assignstr assign_to="r_ending" value="failed"/>
    <assignstr assign_to="r_verdict" value="unexpected_request"/>
    <assign assign_to="keep_ending" value="1"/>
@@ -1344,6 +1351,12 @@ Content-Length: 0
    <assignstr assign_to="r_code" value="null"/>
   </action>
  </nop>
+ <nop/>
+ <label id="proto_kept"/>
+ <nop test="answered" next="teardown"/>
+ <nop test="dialog" next="teardown"/>
+ <nop test="cancelled" next="cancel_wait"/>
+ <nop next="setup_abort"/>
 
  <nop/>
  <label id="released"/>
