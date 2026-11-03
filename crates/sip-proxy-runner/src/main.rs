@@ -18,7 +18,7 @@
 //!     self-overload (a stateless 503 + `Retry-After`, the same for every copy). A 100 ms
 //!     `tokio::time::interval` task drives its load sampler. `PROXY_SELF_GATE=0`
 //!     reverts to the always-admit gate.
-//!   - Prometheus `/metrics` + `/healthz` + `/readyz` (`probe-http`).
+//!   - Prometheus `/metrics` + `/healthz` + `/readyz` + `/fitz` (`probe-http`).
 //!
 //! Config via env, read once before the first bind
 //! ([`sip_proxy_runner::config`]). Unset takes the default; a value set
@@ -87,6 +87,8 @@
 //!                    window, ms ≥ 1                  (default 1000 / 1600)
 //!   HEALTH_THRESHOLD  consecutive misses that mark a worker Dead, ≥ 1
 //!                    (default 2)
+//!   HEALTH_ISOLATION_MS  no worker answer for this long: /fitz unfit
+//!                    `isolated`, ms ≥ HEALTH_INTERVAL_MS + 500 (default 2000)
 //!   LB_ELU_SOFT / LB_ELU_HARD / LB_ELU_CRITICAL  worker ELU bands, each in
 //!                    (0, 1], soft < hard < critical (default 0.4 / 0.5 / 0.65)
 //!   LB_BAND_HYSTERESIS  in [0, 1), below the narrower band gap (default 0.05)
@@ -154,11 +156,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use sip_clock::Clock;
-use sip_proxy::health::FirstView;
+use sip_proxy::health::{FirstView, WorkerReach};
 use sip_proxy::load_observer::WorkerLoadObserver;
 use sip_proxy::observability::ProxyMetrics;
 use sip_proxy::refusals::{Refusals, REFUSED_MEMO_MAX};
-use sip_proxy::registry::WorkerRegistry;
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
 use sip_proxy::security::own_final_tag::own_final_tagger;
 use sip_proxy::self_gate::{AlwaysAdmitGate, EluCpsGate, IntakeAgeRecorder, ProxySelfGate};
@@ -169,39 +170,10 @@ use sip_proxy_runner::config::{refusal, ProxyConfig, WorkerSource};
 use sip_proxy_runner::discovery::{discovered_pool, static_pool};
 use sip_proxy_runner::external_face::FaceMonitor;
 use sip_proxy_runner::health_sampler::HealthSampler;
+use sip_proxy_runner::listening::log_listening;
 use sip_proxy_runner::shards::SharedRouting;
 use sip_proxy_runner::signal::sigterm;
 use sip_proxy_runner::sweeps::{spawn_self_gate_sampler, spawn_stale_floor_sweep};
-
-/// The lifecycle line of a proxy about to serve: its faces, its workers and
-/// its socket settings.
-fn log_listening(cfg: &ProxyConfig, registry: &dyn WorkerRegistry) {
-    let face_note = match &cfg.external {
-        Some(ext) => format!(
-            " DUAL-FACE ext_listen={} ext_advertise={}:{} (int CIDRs from PROXY_FACE_INT_CIDRS)",
-            ext.listen, ext.advertise.host, ext.advertise.port,
-        ),
-        None => String::new(),
-    };
-    tracing::info!(
-        pid = std::process::id(),
-        listen = %cfg.listen,
-        advertise = %format_args!("{}:{}", cfg.advertise.host, cfg.advertise.port),
-        faces = %face_note,
-        workers = %registry
-            .snapshot()
-            .iter()
-            .map(|w| format!("{}@{}:{}", w.id, w.address.host, w.address.port))
-            .collect::<Vec<_>>()
-            .join(","),
-        queue = cfg.queue_max,
-        recv_shards = cfg.recv_shards,
-        udp_sndbuf = ?cfg.udp_sndbuf,
-        udp_rcvbuf = ?cfg.udp_rcvbuf,
-        shard_stall_ms = cfg.shard_stall_ms,
-        "listening"
-    );
-}
 
 fn main() -> std::process::ExitCode {
     sip_proxy_runner::runtime::block_on(serve())
@@ -361,6 +333,7 @@ async fn run() -> Result<i32, String> {
         traces,
         pulse: pulse.clone(),
         first_view: FirstView::pending(),
+        reach: WorkerReach::unheard(),
     };
     // Health probe: OPTIONS to the pool from the first listing on, feeding the
     // band observer, and latching the first worker view the recv shards and
@@ -402,7 +375,11 @@ async fn run() -> Result<i32, String> {
     // see `sip_proxy::liveness`) is a proxy that black-holes a share of its
     // flows while every activity meter reads idle: it fails `/readyz` and
     // `/healthz` (ADR-0046 D4), and raises the gauge.
-    let proxy_probes = shared.probes(draining.clone(), shard_stall_ms, face.clone());
+    // `/fitz` asks the same but the drain, plus a worker answer within
+    // HEALTH_ISOLATION_MS: the node's route guard withdraws the node while
+    // it fails (ADR-0056).
+    let proxy_probes =
+        shared.probes(draining.clone(), shard_stall_ms, face.clone(), cfg.isolation_window);
 
     // Health sampler: the worker-health, acceptance, shard-stall and
     // discovery gauges every 2 s.
@@ -443,6 +420,7 @@ async fn run() -> Result<i32, String> {
         ready: proxy_probes.ready,
         // No heap profiling on the proxy (not the leak target): /debug/heap → 503.
         heap: None,
+        fit: Some(proxy_probes.fit),
     };
     // The listener was bound FIRST (metrics-first bind order above); this only
     // starts the accept loop. A failure here is fatal — a proxy without its
@@ -450,7 +428,7 @@ async fn run() -> Result<i32, String> {
     let _metrics_server =
         probe_http::ProbeServer::serve_on_live(metrics_listener, routes, proxy_probes.live)
             .map_err(|e| format!("metrics server on {metrics_sa} failed to start: {e}"))?;
-    tracing::info!(addr = %_metrics_server.addr(), "metrics server listening (/metrics, readiness /readyz, liveness /healthz)");
+    tracing::info!(addr = %_metrics_server.addr(), "metrics server listening (/metrics, readiness /readyz, liveness /healthz, fitness /fitz)");
 
     let probe_task = tokio::spawn(shared.health(probe, notice_ep, cfg.cluster_key.clone()));
     let mut core_tasks = tokio::task::JoinSet::new();

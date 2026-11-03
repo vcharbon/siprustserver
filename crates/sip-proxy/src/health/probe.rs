@@ -19,7 +19,8 @@
 //! address: the worker is reset to `Unknown` and its miss count and overload
 //! band cleared before the answer applies. Each reply's `X-Overload` payload
 //! feeds the [`WorkerLoadObserver`]. Health and acceptance are written through
-//! the [`WorkerRegistryControl`] seam.
+//! the [`WorkerRegistryControl`] seam. Every correlated final also stamps the
+//! proxy's [`WorkerReach`], whatever worker sent it.
 //!
 //! Why the transaction layer: a fan-out of ONE datagram per worker per tick
 //! turns a single lost packet into a full miss, and two losses in ~2.5 s
@@ -65,7 +66,7 @@ use sip_message::generators::{
 use sip_message::header::{self, ParamValue, Uri, Via};
 use sip_message::parser::custom::CustomParser;
 use sip_message::types::SipResponse;
-use sip_message::worker_report::{self, NewCalls, Readiness};
+use sip_message::worker_report;
 use sip_message::{SipMessage, SipRequest, SipStr};
 use sip_net::UdpEndpoint;
 use sip_txn::{
@@ -74,14 +75,17 @@ use sip_txn::{
 use tokio::time::Instant;
 
 use super::first_view::{FirstRound, FirstView};
+use super::reach::WorkerReach;
 use crate::addr::ProxyAddr;
 use crate::load_observer::{parse_x_overload_header, WorkerLoadObserver, X_OVERLOAD};
 use crate::observability::ProxyMetrics;
 use crate::registry::control::WorkerRegistryControl;
-use crate::registry::{Acceptance, WorkerEntry, WorkerHealth, WorkerRegistry};
+use crate::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
 
+mod answer;
 mod config;
 
+pub use answer::{read_answer, AnswerReading};
 pub use config::HealthProbeConfig;
 
 /// How often a probe waiting for the registry's first listing looks again.
@@ -112,29 +116,6 @@ struct ProbeState {
     incarnation: HashMap<String, u64>,
 }
 
-/// What one OPTIONS answer says about a worker (ADR-0050 §3): the health it
-/// sets, `None` to leave it, and the acceptance it sets, `None` to keep it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AnswerReading {
-    pub health: Option<WorkerHealth>,
-    pub acceptance: Option<Acceptance>,
-}
-
-/// Read one OPTIONS answer: its status and its `X-Readiness`, if any.
-pub fn read_answer(status: u16, readiness: Option<&Readiness>) -> AnswerReading {
-    match status {
-        200 => AnswerReading {
-            health: Some(WorkerHealth::Alive),
-            acceptance: Some(match readiness.map(|r| r.new) {
-                Some(NewCalls::Refuse) => Acceptance::Refuse,
-                Some(NewCalls::Accept) | None => Acceptance::Accept,
-            }),
-        },
-        503 => AnswerReading { health: None, acceptance: Some(Acceptance::Refuse) },
-        _ => AnswerReading { health: Some(WorkerHealth::Alive), acceptance: None },
-    }
-}
-
 /// The per-probe `call_ref` stamped as the Via `cr=` custom param — the
 /// transaction-layer attribution key `cancel_txns_for_call` cancels by.
 fn probe_call_ref(branch: &str) -> String {
@@ -163,6 +144,8 @@ pub struct HealthProbe {
     metrics: Option<Arc<ProxyMetrics>>,
     /// Latched once the first round over the first listing has completed.
     first_view: Arc<FirstView>,
+    /// Stamped by every answer a probe correlates.
+    reach: Arc<WorkerReach>,
 }
 
 impl HealthProbe {
@@ -197,6 +180,7 @@ impl HealthProbe {
             config,
             metrics: None,
             first_view: FirstView::pending(),
+            reach: WorkerReach::unheard(),
         }
     }
 
@@ -205,6 +189,14 @@ impl HealthProbe {
     /// latches a view of its own nobody reads.
     pub fn with_first_view(mut self, view: Arc<FirstView>) -> Self {
         self.first_view = view;
+        self
+    }
+
+    /// The proxy's reach, which every answer this probe correlates stamps;
+    /// the runner's fitness reads the same one. Without it the probe stamps a
+    /// reach of its own nobody reads.
+    pub fn with_reach(mut self, reach: Arc<WorkerReach>) -> Self {
+        self.reach = reach;
         self
     }
 
@@ -354,6 +346,8 @@ impl HealthProbe {
         }
         let Some(branch) = resp.via().first().branch().map(str::to_owned) else { return };
         let Some(p) = state.pending.remove(branch.as_str()) else { return };
+        // A correlated final crossed the proxy-to-worker path both ways.
+        self.reach.answered();
 
         // A reply proves liveness — retire any other in-flight probes to the
         // same worker so their later reap can't count a spurious miss against

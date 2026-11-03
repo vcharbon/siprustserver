@@ -21,6 +21,7 @@ mod own_final_source_stamp;
 mod parse_refusal;
 mod per_call_trace;
 mod probe_dead_verdict;
+mod probe_isolation;
 mod probe_period;
 mod rate_cap_spill;
 mod receive_path_parse;

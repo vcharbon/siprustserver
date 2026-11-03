@@ -40,6 +40,7 @@ fn shared() -> SharedRouting {
         traces: Arc::new(ProxyTraces::from_env(0)),
         pulse: Arc::new(ShardPulse::new(2)),
         first_view: FirstView::given(),
+        reach: WorkerReach::unheard(),
         clock,
     }
 }
@@ -142,7 +143,8 @@ async fn the_shards_the_probe_and_the_probe_routes_read_one_first_view() {
     let shard0 = shared.shard(0).build(bind(&net, "127.0.0.1:5080").await);
     let shard1 = shared.shard(1).build(bind(&net, "127.0.0.1:5081").await);
     let tasks = [tokio::spawn(shard0.run()), tokio::spawn(shard1.run())];
-    let routes = shared.probes(Arc::new(AtomicBool::new(false)), 2_000, None);
+    let routes =
+        shared.probes(Arc::new(AtomicBool::new(false)), 2_000, None, Duration::from_secs(2));
     let caller = bind(&net, CALLER).await;
     let shards: [SocketAddr; 2] =
         ["127.0.0.1:5080".parse().unwrap(), "127.0.0.1:5081".parse().unwrap()];

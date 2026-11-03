@@ -15,6 +15,10 @@
 //!   injected [`ProbeRoutes::ready`] closure's 3-valued [`ProbeState`], so the
 //!   k8s readinessProbe withholds traffic from a not-ready / draining pod.
 //!   `503 stalled` / `503 not-ready` otherwise; `404` for a server given none.
+//! - `GET /fitz` — `200 fit` / `503 unfit <reason>` from the injected
+//!   [`ProbeRoutes::fit`] closure: whether the process could carry traffic,
+//!   its drain latch aside, read by a local guard that polls it far more
+//!   often than a kubelet probe; `404` for a server given none.
 //! - `GET /debug/flamegraph[?seconds=N]` — on-demand pprof CPU flamegraph SVG
 //!   (internal debug route, NOT the SIP datapath; blocks for the sample window
 //!   on a blocking thread).
@@ -88,6 +92,19 @@ pub enum ProbeState {
     Draining,
 }
 
+/// What a runner reports for `GET /fitz`: fit to carry traffic, or unfit
+/// for the reason it names (one lowercase token, no space).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fitness {
+    /// `200 fit`.
+    Fit,
+    /// `503 unfit <reason>`.
+    Unfit(&'static str),
+}
+
+/// Fitness provider for `/fitz` — cheap + non-blocking, called per poll.
+pub type FitFn = Arc<dyn Fn() -> Fitness + Send + Sync>;
+
 /// Per-scrape `/metrics` body provider. Each runner builds its own (the lib
 /// can't depend on the runner's metric sources — e.g. jemalloc `mallctl` would
 /// pull a C jemalloc into every build/test).
@@ -116,6 +133,8 @@ pub struct ProbeRoutes {
     pub ready: ReadyFn,
     /// `GET /debug/heap` jemalloc heap dump; `None` ⇒ route 503s "unavailable".
     pub heap: Option<HeapDumpFn>,
+    /// `GET /fitz` fitness; `None` ⇒ `404`.
+    pub fit: Option<FitFn>,
 }
 
 /// A connection that sends nothing for this long is cut and its fd freed.
@@ -315,6 +334,13 @@ pub(crate) async fn handle_conn(
             ProbeState::Draining => {
                 ("503 Service Unavailable", "text/plain", "draining\n".to_string())
             }
+        },
+        "/fitz" => match routes.fit.as_ref().map(|fit| fit()) {
+            Some(Fitness::Fit) => ("200 OK", "text/plain", "fit\n".to_string()),
+            Some(Fitness::Unfit(reason)) => {
+                ("503 Service Unavailable", "text/plain", format!("unfit {reason}\n"))
+            }
+            None => ("404 Not Found", "text/plain", "not found\n".to_string()),
         },
         _ => ("404 Not Found", "text/plain", "not found\n".to_string()),
     };

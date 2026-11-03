@@ -2,11 +2,12 @@
 //! through a lookup ([`ProxyConfig::from_lookup`]). The keys, their defaults
 //! and their ranges are listed in the `sip-proxy-runner` binary's module doc.
 
+mod external_face;
 mod preflight;
 mod process_env;
 mod reader;
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use sip_proxy::cancel_lru::{calls_per_second, invite_entry_ttl_ms, MemoBounds};
@@ -19,7 +20,8 @@ use sip_proxy::{FaceCidrs, ProxyAddr};
 pub use preflight::{refusal, validate_config, ProbeTimingConfig};
 use reader::{EnvReader, Span};
 
-use crate::external_face::{valid_interface_name, FaceCheck};
+use crate::external_face::FaceCheck;
+use external_face::external_face_check;
 
 /// Where the worker pool comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +62,9 @@ pub struct ProxyConfig {
     /// `None` sends no notice.
     pub cluster_key: Option<sip_ids::SigningKey>,
     pub probe: HealthProbeConfig,
+    /// No worker answer for this long reads the proxy isolated
+    /// (`HEALTH_ISOLATION_MS`): unfit on `/fitz`.
+    pub isolation_window: Duration,
     pub observer: LoadObserverConfig,
     /// The intake-shed watermark, percent of `queue_max`.
     pub intake_shed_pct: u64,
@@ -80,6 +85,13 @@ pub struct ProxyConfig {
 
 /// The largest millisecond value a duration variable takes (about 24 days).
 const MAX_MS: u64 = u32::MAX as u64;
+
+/// `HEALTH_ISOLATION_MS`'s default: one probe interval, the first Timer E
+/// retransmission and 500 ms for the answer's way back.
+const DEFAULT_ISOLATION_MS: u64 = 2_000;
+
+/// RFC 3261 T1: the first retransmission of an unanswered probe.
+const T1_MS: u64 = 500;
 
 impl ProxyConfig {
     /// Reads every boot variable through `get` (`None` = unset).
@@ -117,6 +129,8 @@ impl ProxyConfig {
             timeout_ms: env.int("HEALTH_TIMEOUT_MS", probe_default.timeout_ms, 1, MAX_MS),
             threshold: env.int_u32("HEALTH_THRESHOLD", probe_default.threshold, 1, u32::MAX),
         };
+        let isolation_ms = env.int("HEALTH_ISOLATION_MS", DEFAULT_ISOLATION_MS, 1, MAX_MS);
+        let isolation_window = Duration::from_millis(isolation_ms);
         let observer = observer_overrides(&mut env, LoadObserverConfig::default());
         let intake_shed_pct = env.int("PROXY_INTAKE_SHED_PCT", 50, 0, 100);
         let self_gate = self_gate(&mut env);
@@ -153,6 +167,17 @@ impl ProxyConfig {
                 ));
             }
         }
+        // A healthy proxy whose probes to every worker lose their first copy
+        // still hears the answer to a Timer E copy inside the window.
+        let isolation_floor = probe.interval_ms.saturating_add(T1_MS);
+        if isolation_ms < isolation_floor {
+            errors.push(format!(
+                "HEALTH_ISOLATION_MS={isolation_ms} must be at least HEALTH_INTERVAL_MS={} + T1 \
+                 {T1_MS} ms: a proxy whose probes lose their first copy would read itself \
+                 isolated",
+                probe.interval_ms
+            ));
+        }
         // A recreated pod on the same host binds the faces its predecessor
         // holds until that one's drain ends.
         if bind_retry_deadline <= drain_grace {
@@ -183,6 +208,7 @@ impl ProxyConfig {
             hmac_key,
             cluster_key,
             probe,
+            isolation_window,
             observer,
             intake_shed_pct,
             self_gate,
@@ -195,41 +221,6 @@ impl ProxyConfig {
             external_face_period,
         })
     }
-}
-
-/// `PROXY_EXT_INTERFACE` (an interface name) and `PROXY_EXT_NEXT_HOPS`
-/// (comma-separated IPv4 addresses): the external face `/readyz` requires
-/// usable. Next hops without an interface are refused.
-fn external_face_check(env: &mut EnvReader) -> Option<FaceCheck> {
-    let interface = env.present("PROXY_EXT_INTERFACE");
-    let hops = env.present("PROXY_EXT_NEXT_HOPS").unwrap_or_default();
-    let mut next_hops = Vec::new();
-    for entry in hops.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        match entry.parse::<Ipv4Addr>() {
-            Ok(ip) => next_hops.push(ip),
-            Err(_) => {
-                env.refuse(format!("PROXY_EXT_NEXT_HOPS entry {entry:?} is not an IPv4 address"))
-            }
-        }
-    }
-    let Some(interface) = interface else {
-        if !next_hops.is_empty() {
-            env.refuse(
-                "PROXY_EXT_NEXT_HOPS needs PROXY_EXT_INTERFACE: the next hops are read on that \
-                 interface"
-                    .to_string(),
-            );
-        }
-        return None;
-    };
-    if !valid_interface_name(&interface) {
-        env.refuse(format!(
-            "PROXY_EXT_INTERFACE {interface:?} is not an interface name (1 to 15 bytes, no '/', \
-             no whitespace)"
-        ));
-        return None;
-    }
-    Some(FaceCheck { interface, next_hops })
 }
 
 /// The address stamped on Via and Record-Route for egress on the face that

@@ -8,7 +8,7 @@ use tokio::io::AsyncReadExt;
 use crate::accept::Incoming;
 
 fn routes(body: &'static str, ready: ReadyFn) -> ProbeRoutes {
-    ProbeRoutes { metrics: Arc::new(move || body.to_string()), ready, heap: None }
+    ProbeRoutes { metrics: Arc::new(move || body.to_string()), ready, heap: None, fit: None }
 }
 fn always(state: ProbeState) -> ReadyFn {
     Arc::new(move || state)
@@ -91,6 +91,34 @@ async fn readyz_reflects_the_three_states_on_both_path_names() {
         let r = get(server.addr(), path).await;
         assert!(r.contains("503") && r.contains("draining"), "{path} draining: {r}");
     }
+}
+
+#[tokio::test]
+async fn fitz_answers_the_fitness_and_names_the_reason_of_an_unfit_one() {
+    let fit = Arc::new(AtomicU8::new(1));
+    let reads = fit.clone();
+    let routes = ProbeRoutes {
+        fit: Some(Arc::new(move || match reads.load(Ordering::SeqCst) {
+            1 => Fitness::Fit,
+            _ => Fitness::Unfit("isolated"),
+        })),
+        ..routes("", always(ProbeState::Draining))
+    };
+    let server = ProbeServer::start("127.0.0.1:0".parse().unwrap(), routes).await.unwrap();
+    let r = get(server.addr(), "/fitz").await;
+    assert!(r.starts_with("HTTP/1.1 200") && r.ends_with("\r\n\r\nfit\n"), "fit: {r}");
+    fit.store(0, Ordering::SeqCst);
+    let r = get(server.addr(), "/fitz").await;
+    assert!(r.starts_with("HTTP/1.1 503") && r.ends_with("unfit isolated\n"), "unfit: {r}");
+}
+
+#[tokio::test]
+async fn fitz_is_not_found_on_a_server_given_no_fitness() {
+    let server =
+        ProbeServer::start("127.0.0.1:0".parse().unwrap(), routes("", always(ProbeState::Ready)))
+            .await
+            .unwrap();
+    assert!(get(server.addr(), "/fitz").await.starts_with("HTTP/1.1 404"));
 }
 
 #[tokio::test]

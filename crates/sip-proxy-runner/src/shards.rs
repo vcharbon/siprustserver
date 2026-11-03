@@ -4,12 +4,13 @@
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Duration;
 
 use sip_clock::Clock;
 use sip_ids::SigningKey;
 use sip_net::UdpEndpoint;
 use sip_proxy::cancel_lru::CancelBranchLru;
-use sip_proxy::health::{DeadNotifier, FirstView, HealthProbe, HealthProbeConfig};
+use sip_proxy::health::{DeadNotifier, FirstView, HealthProbe, HealthProbeConfig, WorkerReach};
 use sip_proxy::liveness::ShardPulse;
 use sip_proxy::load_observer::WorkerLoadObserver;
 use sip_proxy::parse_refusals::ParseRefusals;
@@ -22,7 +23,7 @@ use sip_proxy::{ProxyAddr, ProxyCoreBuilder, ProxyMetrics, ProxyTraces, RoutingS
 use sip_txn::IdGen;
 
 use crate::external_face::FaceMonitor;
-use crate::readiness::{probes, ProxyProbes};
+use crate::readiness::{probes, ProbeSources, ProxyProbes};
 
 /// What every recv shard shares. Kernel flow hashing keeps one source on one
 /// shard, but a response, a CANCEL or a copy can reach another socket than
@@ -44,6 +45,8 @@ pub struct SharedRouting {
     pub pulse: Arc<ShardPulse>,
     /// The proxy's first worker view, which its health probe latches.
     pub first_view: Arc<FirstView>,
+    /// The last worker answer its health probe heard.
+    pub reach: Arc<WorkerReach>,
 }
 
 impl SharedRouting {
@@ -71,7 +74,8 @@ impl SharedRouting {
 
     /// The OPTIONS health probe over the worker pool on `endpoint`, writing
     /// health through `control` and load payloads into `observer`; it latches
-    /// the first view the shards and the probe routes read. Its misses are
+    /// the first view the shards and the probe routes read and stamps the
+    /// reach the fitness reads. Its misses are
     /// counted per peer (`sip_proxy_peer_failures_total`).
     pub fn health_probe(
         &self,
@@ -91,6 +95,7 @@ impl SharedRouting {
         )
         .with_metrics(self.metrics.clone())
         .with_first_view(self.first_view.clone())
+        .with_reach(self.reach.clone())
     }
 
     /// `probe` and the dead notifier on `notice` (ADR-0050 §3), signing with
@@ -120,24 +125,29 @@ impl SharedRouting {
         }
     }
 
-    /// The probe routes, read from the shards' pulse, the first view and
-    /// `external_face`; a shard stalled past `stall_ms` fails them all,
-    /// `draining` and an unusable external face fail `/readyz`.
+    /// The probe routes, read from the shards' pulse, the first view, the
+    /// reach and `external_face`; a shard stalled past `stall_ms` fails them
+    /// all, `draining` fails `/readyz`, an unusable external face fails
+    /// `/readyz` and `/fitz`, and no worker answer within `isolation_window`
+    /// fails `/fitz`.
     pub fn probes(
         &self,
         draining: Arc<AtomicBool>,
         stall_ms: u64,
         external_face: Option<Arc<FaceMonitor>>,
+        isolation_window: Duration,
     ) -> ProxyProbes {
-        probes(
+        probes(ProbeSources {
             draining,
-            self.pulse.clone(),
-            self.clock.clone(),
+            pulse: self.pulse.clone(),
+            clock: self.clock.clone(),
             stall_ms,
-            self.registry.clone(),
-            self.first_view.clone(),
+            registry: self.registry.clone(),
+            first_view: self.first_view.clone(),
             external_face,
-        )
+            reach: self.reach.clone(),
+            isolation_window,
+        })
     }
 }
 

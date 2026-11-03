@@ -1,6 +1,8 @@
 //! The boot configuration read through a scripted lookup: plain `#[test]`s, no
 //! process env, no runtime.
 
+use std::net::Ipv4Addr;
+
 use super::*;
 
 /// A lookup over `pairs`.
@@ -244,4 +246,20 @@ fn the_external_face_check_is_read() {
     let errors = boot(&[("PROXY_EXT_INTERFACE", "eth1"), ("PROXY_EXT_NEXT_HOPS", "tor")])
         .expect_err("not an address");
     assert!(errors.iter().any(|e| e.contains("PROXY_EXT_NEXT_HOPS")), "{errors:?}");
+}
+
+/// The isolation window defaults to 2 s and must hold one probe interval and
+/// the first retransmission; below that the boot is refused naming both.
+#[test]
+fn the_isolation_window_holds_a_probe_interval_and_its_first_retransmission() {
+    assert_eq!(boot(&[]).expect("valid").isolation_window, Duration::from_millis(2_000));
+    boot(&[("HEALTH_INTERVAL_MS", "1500"), ("HEALTH_ISOLATION_MS", "2000")]).expect("at the floor");
+    let errors = boot(&[("HEALTH_INTERVAL_MS", "1501"), ("HEALTH_ISOLATION_MS", "2000")])
+        .expect_err("below the floor");
+    assert!(
+        errors.iter().any(
+            |e| e.contains("HEALTH_ISOLATION_MS=2000") && e.contains("HEALTH_INTERVAL_MS=1501")
+        ),
+        "{errors:?}"
+    );
 }
