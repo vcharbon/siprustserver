@@ -152,3 +152,6 @@ impl PeerEntry {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
