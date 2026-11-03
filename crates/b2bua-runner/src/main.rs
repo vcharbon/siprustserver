@@ -36,7 +36,7 @@
 //!                   (the full consistency table: `b2bua_runner_kit::addresses_from_lookup`)
 //!   B2BUA_DEST      downstream UAS host:port          (default 127.0.0.1:5070)
 //!   B2BUA_METRICS   Prometheus HTTP listen addr       (default 0.0.0.0:9091)
-//!   B2BUA_ADMIN     operator routes' listen addr, loopback only (default 127.0.0.1:9093)
+//!   B2BUA_ADMIN     operator routes' listen addr, loopback only (default 127.0.0.1:9094)
 //!   B2BUA_QUEUE     inbound UDP queue depth (packets)  (default 8192)
 //!   B2BUA_UDP_SNDBUF SO_SNDBUF on the signalling socket, bytes (default 4 MiB;
 //!                   empty = kernel wmem_default; clamped at wmem_max) — ADR-0033

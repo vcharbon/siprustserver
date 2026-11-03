@@ -90,18 +90,27 @@ its key drawn on the first install and read back by every upgrade through
   kind lab: `masq-exempt`'s drop rule and the docker bridges' isolation).
 - **The workers' ingress** is the chart's NetworkPolicy
   (`templates/worker-network-policy.yaml`, `worker.networkPolicy`, on by
-  default): SIP from the internal VIP and `proxyNodeCidrs` (the proxies'
-  OPTIONS probes and dead notices leave from their node's own address),
-  replication from the worker pods, the probe port from
-  `monitoringNamespace`; the kubelet's probes come from the pod's own node,
-  which no NetworkPolicy blocks. It holds only where the CNI implements
-  NetworkPolicy (kindnet does); a CNI that does not ignores it. A CNI that
-  gives node addresses an identity of their own must let CIDR rules match them
-  (Cilium: `policy-cidr-match-mode: nodes`). The replication port has no peer
-  authentication: this policy is what confines it to the workers.
+  default): SIP from the internal VIP and `proxyNodeCidrs`, replication from
+  the worker pods, the probe port from `monitoringNamespace`; the kubelet's
+  probes come from the pod's own node, which no NetworkPolicy blocks. It holds
+  only where the CNI implements NetworkPolicy (kindnet does); a CNI that does
+  not ignores it. The replication port has no peer authentication: this policy
+  is what confines it to the workers, and what keeps its connection cap safe
+  (ADR-0045).
+- **`proxyNodeCidrs` holds the source address the proxy nodes use toward pod
+  IPs.** The proxies' OPTIONS probes and dead notices leave from sockets bound
+  to `0.0.0.0:0`, so the kernel picks the source of the route toward the
+  worker's pod IP. On a routed CNI (kindnet, Calico BGP) that is the node's
+  internal-plane address; on an overlay (Calico IPIP or VXLAN, flannel) it is
+  the node's tunnel address, inside the pod CIDR's per-node block, not the node
+  subnet. Check it on each proxy node with `ip route get <worker pod IP>` (the
+  `src` field) and state a CIDR that holds every proxy node's answer. A wrong
+  value drops every probe: each proxy reads every worker dead. A CNI that gives
+  node addresses an identity of their own must let CIDR rules match them
+  (Cilium: `policy-cidr-match-mode: nodes`).
 - **The operator routes** (cordon, release-all, the live calls; ADR-0050 §10)
-  listen on the worker's loopback (`B2BUA_ADMIN`, 127.0.0.1:9093), never on a
-  Service: `kubectl port-forward pod/<worker> 19093:9093`, or `kubectl exec`.
+  listen on the worker's loopback (`B2BUA_ADMIN`, 127.0.0.1:9094), never on a
+  Service, reached through `kubectl port-forward pod/<worker> 19094:9094`.
 
 ## Render-time relations
 
@@ -126,7 +135,7 @@ to change each variable safely.
 deploy/helm/kind-lab.sh up       # cluster, sipext bridge, host preflight, images kind-loaded
 deploy/helm/kind-lab.sh images   # the images of `up` rebuilt from the tree and kind-loaded, cluster kept
 deploy/helm/kind-lab.sh image <tag> [docker build args]   # one more image, built and kind-loaded
-deploy/helm/kind-lab.sh deploy   # both releases, Chaos Mesh, SIPp UAS (hakit uas-basic.xml), image roll, VIP + isolation smokes, series check
+deploy/helm/kind-lab.sh deploy   # both releases, Chaos Mesh, SIPp UAS (hakit uas-basic.xml), image roll, VIP, isolation and policy smokes, series check
 deploy/helm/kind-lab.sh template # the SUT release as deploy would install it, rendered
 deploy/helm/kind-lab.sh chaos-mesh   # Chaos Mesh alone, pinned, chaos-mesh-values-kind.yaml
 deploy/helm/kind-lab.sh down
@@ -138,8 +147,8 @@ A product chart that depends on `siprust` is the SUT release instead with
 build its dependencies, pass the siprust kind values nested under that name,
 then the product chart's own `values-kind.yaml` when it has one, then the helm
 args (`lib/sut.sh`). A namespace
-holds one SUT release: `deploy` refuses one another release owns. The VIP and
-isolation smokes run when the release deploys the front proxy.
+holds one SUT release: `deploy` refuses one another release owns. The VIP,
+isolation and policy smokes run when the release deploys the front proxy.
 
 `up` and `down` are `lib/cluster.sh`, the smokes `lib/smokes.sh`; `deploy`
 needs the host stack up (`deploy/observability/install.sh --bootstrap`) and is

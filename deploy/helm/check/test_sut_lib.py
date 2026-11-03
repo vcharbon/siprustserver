@@ -15,6 +15,7 @@ log() { echo "log: $*"; }
 die() { echo "die: $*"; exit 1; }
 vip_smoke() { echo "vip_smoke"; }
 isolation_smoke() { echo "isolation_smoke"; }
+policy_smoke() { echo "policy_smoke"; }
 kubectl() {
   case "$*" in
     *"get statefulset b2bua-worker -o jsonpath="*managed-by*) printf '%s' "$FAKE_OWNER" ;;
@@ -54,9 +55,10 @@ class Ownership(unittest.TestCase):
 
 
 class Smokes(unittest.TestCase):
-    def test_a_release_with_the_proxy_runs_both_smokes(self) -> None:
+    def test_a_release_with_the_proxy_runs_every_smoke(self) -> None:
         out = run("sut_smokes", proxy="1")
-        self.assertEqual((out.returncode, out.stdout.split()), (0, ["vip_smoke", "isolation_smoke"]))
+        self.assertEqual((out.returncode, out.stdout.split()),
+                         (0, ["vip_smoke", "isolation_smoke", "policy_smoke"]))
 
     def test_a_release_without_the_proxy_skips_them(self) -> None:
         out = run("sut_smokes", proxy="0")

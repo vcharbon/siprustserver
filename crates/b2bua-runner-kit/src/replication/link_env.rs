@@ -49,13 +49,7 @@
 //! when it arrives.
 //!
 //! The open timeout and the connection cap bound what a client that is not a
-//! peer can hold on the serving side. A peer sends its opening request as soon
-//! as its connect completes, so neither touches a healthy stream; to a peer
-//! confirming a dead verdict either reads as a stream ending unheard, so the
-//! open timeout is at least the idle timeout (the confirming peer's own bound
-//! on that wait) and the cap sits well above the two flows each peer opens
-//! ([`ConfigCheck`](crate::ConfigCheck); the chart holds the cap against the
-//! worker count).
+//! peer holds on the serving side; their relations are ADR-0045 item 5.
 //!
 //! The dead-peer TTL is an HA timer of the serving side: a peer log no flow
 //! has served for that long is dropped, writes or not, so the log toward an

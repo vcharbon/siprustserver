@@ -97,15 +97,18 @@ worker:
   # Enforced only by a CNI that implements NetworkPolicy.
   networkPolicy:
     enabled: true
-    # The proxies are hostNetwork: their SIP reaches the workers from the
-    # internal VIP (network.proxyVip, allowed by the chart) and their OPTIONS
-    # probes and dead notices from the proxy nodes' own internal-plane
-    # addresses, which no pod selector names. These CIDRs hold those
-    # addresses: the internal plane's node subnet, so a replaced edge node
-    # stays covered. Required while the proxy is enabled; ignored without it
-    # (a standalone worker takes SIP from anywhere).
+    # The source address the proxy nodes use toward pod IPs, as CIDRs: the
+    # proxies are hostNetwork, and their OPTIONS probes and dead notices leave
+    # from sockets bound to 0.0.0.0:0, so the kernel picks the source of the
+    # route to the worker's pod IP (their calls come from the internal VIP,
+    # allowed by the chart). Routed CNI: the node's internal-plane address;
+    # overlay (Calico IPIP/VXLAN, flannel): the node's tunnel address. Check
+    # `ip route get <worker pod IP>` on each proxy node (`src`). A wrong value
+    # makes every proxy read every worker dead. Required while the proxy is
+    # enabled; ignored without it (a standalone worker takes SIP from anywhere).
     proxyNodeCidrs: []
-    # The namespace of the metrics scraper (siprust-observability's vmagent).
+    # The namespace of the metrics scraper (siprust-observability's vmagent;
+    # the kind lab sets it from OBS_NS).
     monitoringNamespace: observability
   # Env by name over the env the chart derives (pod identity, listen and
   # advertise, metrics, outbound proxy, replication, limiter URL, CDR sink,

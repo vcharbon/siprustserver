@@ -1,7 +1,6 @@
 //! [`AdminServer`]: a runner's operator routes on a listener of their own,
 //! bound to a loopback address only. An operator reaches them from inside the
-//! process's network namespace (`kubectl exec`, `kubectl port-forward`); no
-//! other host can. Every path under `/admin/` goes to the runner's
+//! process's network namespace (`kubectl port-forward`); no other host can. Every path under `/admin/` goes to the runner's
 //! [`AdminFn`]; any other path is `404`.
 
 use std::net::SocketAddr;

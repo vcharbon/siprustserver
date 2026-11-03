@@ -29,8 +29,9 @@ worker:
   # The lab is the HA lab: worker kills fail over to the survivor.
   replication:
     enabled: true
-  # The kind bridge (SIP_SUBNET) holds every node: the edge nodes' probes and
-  # notices come from it. kindnet enforces the policy.
+  # kindnet routes pod traffic without a tunnel: an edge node reaches a pod
+  # IP from its address on the kind bridge (SIP_SUBNET). kindnet enforces the
+  # policy.
   networkPolicy:
     proxyNodeCidrs: [172.20.0.0/16]
   # Created by kind-lab.sh deploy before the release (lib/sut.sh).

@@ -18,7 +18,7 @@
 //! | with replication: the verdict hold ≥ freshness window + Timer F | `VerdictBounds::validate` |
 //! | with replication: `B2BUA_DEAD_VERDICT_HOLD_MS` > 2 × `B2BUA_REPL_IDLE_TIMEOUT_MS` + `B2BUA_REPL_LOOKUP_TIMEOUT_MS` + `B2BUA_REPL_CONNECT_TIMEOUT_MS` | here: a verdict stays held while the backup confirms it (ADR-0047 D1) |
 //! | with replication: `B2BUA_REPL_BOOTSTRAP_HARD_TIMEOUT_MS` > 2 × `B2BUA_REPL_CONNECT_TIMEOUT_MS` + `B2BUA_REPL_BACKOFF_MAX_MS` | here: a cold flow refused or timed out once still makes a second connect before the timer reads its peer unreachable (ADR-0011 X5) |
-//! | with replication: `B2BUA_REPL_OPEN_TIMEOUT_MS` ≥ `B2BUA_REPL_IDLE_TIMEOUT_MS`; `B2BUA_REPL_MAX_CONNECTIONS` ≥ 4 | here: the accept side's bounds never end a confirming peer's stream before its own idle bound would, and serve one peer's two flows with a reconnect of each |
+//! | with replication: `B2BUA_REPL_OPEN_TIMEOUT_MS` ≥ `B2BUA_REPL_IDLE_TIMEOUT_MS`; `B2BUA_REPL_MAX_CONNECTIONS` ≥ 4 | here: ADR-0045 item 5 |
 //!
 //! The replication link bounds (idle timeout against the heartbeat, the
 //! dead-peer TTL against a blip) and the CDR sink's bounds are relations of
@@ -116,7 +116,7 @@ impl ConfigCheck {
             self.take(repl.verdict.validate().map_err(|why| {
                 format!("B2BUA_DEAD_VERDICT_HOLD_MS / B2BUA_DEAD_NOTICE_FRESH_MS: {why}")
             }));
-            self.accept_bounds(repl);
+            self.accept_bounds(&repl.serve, &repl.puller);
             if let Some(settings) = &env.replication {
                 self.confirmation_fits_the_hold(repl, settings);
             }
@@ -142,27 +142,23 @@ impl ConfigCheck {
         });
     }
 
-    /// The serve loop's accept bounds (ADR-0045): a connection closed at the
-    /// open timeout reads, to a peer confirming a dead verdict on this node,
-    /// as its stream ending unheard; the peer's idle bound ends that stream no
-    /// later, so the open timeout adds no confirmation. The cap holds the two
-    /// flows of one peer and one reconnect of each.
-    fn accept_bounds(&mut self, repl: &b2bua::ReplicationSetup) {
-        let open = sip_clock::wall::millis_u64(repl.serve.open_timeout);
-        let idle = repl.puller.idle_timeout_ms;
+    /// The serve loop's accept bounds against the link (ADR-0045 item 5).
+    fn accept_bounds(
+        &mut self,
+        serve: &b2bua::repl::ServeConfig,
+        puller: &b2bua::repl::PullerConfig,
+    ) {
+        let open = sip_clock::wall::millis_u64(serve.open_timeout);
+        let idle = puller.idle_timeout_ms;
         self.require(open >= idle, || {
             format!(
-                "B2BUA_REPL_OPEN_TIMEOUT_MS={open} is below B2BUA_REPL_IDLE_TIMEOUT_MS={idle}: \
-                 a live node would close a confirming peer's stream before that peer's own \
-                 idle bound, confirming a dead verdict on it"
+                "B2BUA_REPL_OPEN_TIMEOUT_MS={open} is below B2BUA_REPL_IDLE_TIMEOUT_MS={idle} \
+                 (ADR-0045 item 5)"
             )
         });
-        let cap = repl.serve.max_connections;
+        let cap = serve.max_connections;
         self.require(cap >= MIN_REPL_CONNECTIONS, || {
-            format!(
-                "B2BUA_REPL_MAX_CONNECTIONS={cap} < {MIN_REPL_CONNECTIONS}: one peer's two \
-                 flows and a reconnect of each would be refused"
-            )
+            format!("B2BUA_REPL_MAX_CONNECTIONS={cap} < {MIN_REPL_CONNECTIONS} (ADR-0045 item 5)")
         });
     }
 
@@ -190,3 +186,6 @@ impl ConfigCheck {
         });
     }
 }
+
+#[cfg(test)]
+mod tests;

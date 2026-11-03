@@ -6,8 +6,8 @@ probes come from the pod's own node, which a NetworkPolicy never blocks.
 
 The proxies are hostNetwork, so no pod selector names them: their calls reach
 a worker from the internal VIP and their OPTIONS probes and dead notices from
-their node's own address, both allowed as ipBlocks (`proxyNodeCidrs`, the
-internal plane's node subnet). Without the proxy a worker is standalone and
+the source address their node uses toward pod IPs (`proxyNodeCidrs`, see
+values.yaml), both allowed as ipBlocks. Without the proxy a worker is standalone and
 takes SIP from anywhere. Policies add up: a port a product adds through
 `worker.extraPorts` is opened by a NetworkPolicy of its own.
 */ -}}
@@ -33,7 +33,8 @@ spec:
       {{- fail "worker.networkPolicy.proxyNodeCidrs is required while the proxy is enabled: the CIDRs of the proxy nodes' internal-plane addresses, the source of their OPTIONS probes and dead notices (or worker.networkPolicy.enabled=false)" }}
       {{- end }}
       from:
-        - ipBlock: { cidr: {{ printf "%s/32" (include "siprust.net" (dict "root" $ "key" "proxyVip")) }} }
+        {{- $vip := include "siprust.net" (dict "root" $ "key" "proxyVip") }}
+        - ipBlock: { cidr: {{ printf "%s/%s" $vip (ternary "128" "32" (contains ":" $vip)) }} }
         {{- range $np.proxyNodeCidrs }}
         - ipBlock: { cidr: {{ . }} }
         {{- end }}

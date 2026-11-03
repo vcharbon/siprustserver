@@ -210,6 +210,10 @@ class WorkerNetworkPolicy(unittest.TestCase):
         err = render_error(SIPRUST, *KIND, "--set", "worker.networkPolicy.proxyNodeCidrs=null")
         self.assertIn("worker.networkPolicy.proxyNodeCidrs is required", err)
 
+    def test_an_ipv6_vip_is_one_address_too(self) -> None:
+        rules = self.rules(*KIND, "--set", "network.proxyVip=fd00::250")
+        self.assertEqual(rules["UDP/5060"]["from"][0], {"ipBlock": {"cidr": "fd00::250/128"}})
+
     def test_off_renders_no_policy(self) -> None:
         docs = render(SIPRUST, *KIND, "--set", "worker.networkPolicy.enabled=false")
         self.assertNotIn(("NetworkPolicy", "b2bua-worker"), names(docs))
@@ -217,8 +221,8 @@ class WorkerNetworkPolicy(unittest.TestCase):
     def test_the_operator_listener_binds_loopback_and_is_no_port(self) -> None:
         w = find(render(SIPRUST, *KIND), "StatefulSet", "b2bua-worker")
         c = container(w, "b2bua-worker")
-        self.assertEqual(env(c)["B2BUA_ADMIN"], "127.0.0.1:9093")
-        self.assertNotIn(9093, [p["containerPort"] for p in c["ports"]])
+        self.assertEqual(env(c)["B2BUA_ADMIN"], "127.0.0.1:9094")
+        self.assertNotIn(9094, [p["containerPort"] for p in c["ports"]])
 
 
 class Backends(unittest.TestCase):

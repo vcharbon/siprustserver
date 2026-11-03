@@ -216,8 +216,8 @@ take a new call, and may an in-dialog request of a call it owns reach it.
      `new=refuse; cause=draining`; the handover drain of ADR-0031 D2,
      unchanged. A cordoned worker that receives SIGTERM drains the same way.
 10. **Operator routes** on a listener of their own bound to the worker's
-    loopback (`B2BUA_ADMIN`), reached through `kubectl exec` or
-    `port-forward`; the probe server and every SIP face answer none of them:
+    loopback (`B2BUA_ADMIN`), reached through `kubectl port-forward`; the
+    probe server and every SIP face answer none of them:
     - `POST /admin/cordon`, `DELETE /admin/cordon`; `GET /admin/cordon` returns
       the state and the live call count. Gauge `b2bua_cordoned`.
     - `POST /admin/release-all` releases every call the worker owns without

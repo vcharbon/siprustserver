@@ -2,7 +2,8 @@
 # The SUT release of the kind lab (kind-lab.sh): the siprust chart, or a
 # product chart that depends on it. Sourced after lib/cluster.sh and
 # lib/smokes.sh (log, die, kubectl on the lab's context, vip_smoke,
-# isolation_smoke); reads HELM_DIR, CLUSTER, NS, ROLLOUT_TIMEOUT.
+# isolation_smoke, policy_smoke); reads HELM_DIR, CLUSTER, NS, OBS_NS
+# (the collectors' namespace, default observability), ROLLOUT_TIMEOUT.
 #
 # SUT_CHART (default the siprust chart), SUT_RELEASE (default siprust) and
 # SUT_SUBCHART (the name a product chart gives its siprust dependency): a
@@ -31,7 +32,7 @@ sut_dependencies() {
 
 # `helm <verb> <release> <chart>` of the SUT with its whole value set: the
 # nested siprust kind values, the chart's values-kind.yaml when it has one,
-# then the args.
+# the workers' scraper namespace (OBS_NS), then the args.
 sut_helm() { # <verb...> -- [helm args]
   local verb=() nested own=() rc=0
   while [ "$1" != -- ]; do verb+=("$1"); shift; done
@@ -40,7 +41,9 @@ sut_helm() { # <verb...> -- [helm args]
   nested="$(sut_kind_values)"
   [ ! -f "$SUT_CHART/values-kind.yaml" ] || own=(-f "$SUT_CHART/values-kind.yaml")
   helm "${verb[@]}" "$SUT_RELEASE" "$SUT_CHART" --kube-context "kind-$CLUSTER" -n "$NS" \
-    ${nested:+-f "$nested"} "${own[@]}" "$@" || rc=$?
+    ${nested:+-f "$nested"} "${own[@]}" \
+    --set "${SUT_SUBCHART:+$SUT_SUBCHART.}worker.networkPolicy.monitoringNamespace=${OBS_NS:-observability}" \
+    "$@" || rc=$?
   [ -z "$nested" ] || rm -f "$nested"
   return "$rc"
 }
@@ -87,11 +90,12 @@ sut_has_proxy() { kubectl -n "$NS" get deploy sip-front-proxy >/dev/null 2>&1; }
 # The `hakit obs-check` scope of the release: `proxy` when it runs the front proxy.
 sut_obs_scope() { if sut_has_proxy; then echo proxy; else echo sut; fi; }
 
-# The VIP and isolation smokes, when the release deploys the front proxy.
+# The VIP, isolation and policy smokes, when the release deploys the front proxy.
 sut_smokes() {
   if sut_has_proxy; then
     vip_smoke || die "vip-smoke: the external VIP ${SIPEXT_VIP}:${SIP_PORT} answers nothing; kubectl -n $NS logs deploy/sip-front-proxy -c keepalived"
     isolation_smoke
+    policy_smoke
   else
     log "no front proxy in $NS: the VIP and isolation smokes do not apply"
   fi

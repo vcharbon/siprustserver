@@ -921,7 +921,7 @@ spec:
               key: key
               name: b2bua-worker-cluster-key
         - name: B2BUA_ADMIN
-          value: 127.0.0.1:9093
+          value: 127.0.0.1:9094
         - name: B2BUA_ADVERTISE
           value: $(POD_IP):5060
         - name: B2BUA_CDR_RABBITMQ_MAX_LEN

@@ -31,7 +31,7 @@ pub struct RunnerEnv {
     /// `B2BUA_METRICS` — Prometheus HTTP listen addr (default `0.0.0.0:9091`).
     pub metrics_addr: String,
     /// `B2BUA_ADMIN` — the operator routes' listen addr, a loopback
-    /// `ip:port` only (default `127.0.0.1:9093`).
+    /// `ip:port` only (default `127.0.0.1:9094`).
     pub admin_addr: SocketAddr,
     /// `B2BUA_QUEUE` — inbound UDP queue depth, packets (default 8192).
     pub queue_max: usize,
@@ -249,10 +249,10 @@ fn cluster_key(value: Option<String>) -> Result<Option<sip_ids::SigningKey>, Str
     })
 }
 
-/// `B2BUA_ADMIN`: a loopback `ip:port`, `127.0.0.1:9093` when unset. `Err`
+/// `B2BUA_ADMIN`: a loopback `ip:port`, `127.0.0.1:9094` when unset. `Err`
 /// names the variable for a value that is no address or not a loopback one.
 pub(crate) fn admin_addr(lookup: impl Fn(&str) -> Option<String>) -> Result<SocketAddr, String> {
-    let raw = stated(lookup("B2BUA_ADMIN")).unwrap_or_else(|| "127.0.0.1:9093".into());
+    let raw = stated(lookup("B2BUA_ADMIN")).unwrap_or_else(|| "127.0.0.1:9094".into());
     match raw.trim().parse::<SocketAddr>() {
         Ok(addr) if addr.ip().is_loopback() => Ok(addr),
         Ok(addr) => Err(format!(

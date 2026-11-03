@@ -47,10 +47,8 @@
 //! A connection that has not sent its opening `PullRequest` within
 //! [`ServeConfig::open_timeout`] is closed, and one accepted while
 //! [`ServeConfig::max_connections`] are served is closed at once; each is
-//! counted on `b2bua_repl_inbound_dropped_total{reason}`. To a peer confirming
-//! a dead verdict (ADR-0047 D1) either reads as a stream ending unheard, so
-//! the open timeout is at least the pullers' idle bound and the cap well
-//! above the flows the peers open (two per peer).
+//! counted on `b2bua_repl_inbound_dropped_total{reason}`; their relations to
+//! the dead verdict's confirmation are ADR-0045 item 5.
 //!
 //! ## Flow → keyspace
 //! `partition` fixes the body keyspace (no per-callRef `partition_of`):

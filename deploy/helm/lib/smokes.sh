@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # The call-path smokes of a lab running the front proxy (kind-lab.sh deploy,
 # through lib/sut.sh): the external VIP answers SIP from the callers' plane,
-# and only the proxy bridges the two planes. Sourced after lib/cluster.sh
+# only the proxy bridges the two planes, and the workers' NetworkPolicy keeps
+# other pods out. Sourced after lib/cluster.sh
 # (log, die, kubectl on the lab's context, the network plan).
 
 # An OPTIONS to SIPEXT_VIP:SIP_PORT from a one-shot container on sipext, the
@@ -86,4 +87,47 @@ EOS
     --command -- /bin/sh -c 'if nslookup uas.sipext.test >/dev/null 2>&1; then echo "ISOLATION-FAIL: uas.sipext.test resolves in-cluster"; exit 1; fi; echo "ISOLATION-OK: external zone NXDOMAIN in-cluster"' \
     || die "isolation-smoke: external test zone resolvable from the pod network"
   log "isolation-smoke: all 3 properties hold"
+}
+
+# The workers' NetworkPolicy, probed from a pod of the release's namespace
+# that is no worker: a worker answers neither SIP on 5060/UDP nor a
+# replication connect on its replication port. A probe is tried 3 times, so
+# one lost packet cannot hide a real answer. Skipped when the release renders
+# no policy (worker.networkPolicy.enabled=false).
+policy_smoke() {
+  local probe wip port
+  if ! kubectl -n "$NS" get networkpolicy b2bua-worker >/dev/null 2>&1; then
+    log "policy-smoke: no b2bua-worker NetworkPolicy in $NS: skipped"
+    return 0
+  fi
+  wip="$(kubectl -n "$NS" get pods -l app=b2bua-worker -o jsonpath='{.items[0].status.podIP}' 2>/dev/null)"
+  [ -n "$wip" ] || die "policy-smoke: no b2bua-worker pod IP (deploy first)"
+  port="$(kubectl -n "$NS" get pods -l app=b2bua-worker -o jsonpath='{.items[0].spec.containers[0].ports[?(@.name=="repl")].containerPort}' 2>/dev/null)"
+  port="${port:-9092}"
+  probe="$(cat <<'EOS'
+wip="$1"; repl="$2"
+i=0
+while [ "$i" -lt 3 ]; do
+  printf 'OPTIONS sip:np@%s:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 0.0.0.0:5060;branch=z9hG4bK-np-%s;rport\r\nMax-Forwards: 10\r\nFrom: <sip:np@np.invalid>;tag=np%s\r\nTo: <sip:np@%s>\r\nCall-ID: np-%s@np\r\nCSeq: 1 OPTIONS\r\nContent-Length: 0\r\n\r\n' \
+    "$wip" "$i" "$i" "$wip" "$i" > /tmp/req
+  nc -u -w 2 "$wip" 5060 < /tmp/req > /tmp/resp 2>/dev/null || true
+  if grep -q '^SIP/2.0' /tmp/resp; then
+    echo "POLICY-FAIL: worker $wip:5060/UDP answered a pod that is no proxy"; exit 1
+  fi
+  if nc -w 2 "$wip" "$repl" < /dev/null > /dev/null 2>&1; then
+    echo "POLICY-FAIL: worker $wip:$repl/TCP took a connect from a pod that is no worker"; exit 1
+  fi
+  i=$((i+1))
+done
+echo "POLICY-OK: worker $wip refuses 5060/UDP and $repl/TCP to a pod that is no proxy and no worker"
+EOS
+)"
+  log "policy-smoke: a pod in $NS must NOT reach worker $wip on 5060/UDP nor $port/TCP"
+  kubectl -n "$NS" delete pod np-smoke --ignore-not-found --now >/dev/null 2>&1 || true
+  kubectl -n "$NS" run np-smoke --rm -i --restart=Never \
+    --image="$KEEPALIVED_IMAGE" --image-pull-policy=IfNotPresent \
+    --pod-running-timeout=2m \
+    --overrides='{"spec":{"nodeSelector":{"tier":"app"}}}' \
+    --command -- /bin/sh -c "$probe" np "$wip" "$port" \
+    || die "policy-smoke: the workers' NetworkPolicy lets a plain pod in (does the CNI enforce NetworkPolicy?)"
 }
