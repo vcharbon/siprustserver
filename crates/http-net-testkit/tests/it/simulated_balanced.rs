@@ -119,9 +119,27 @@ async fn a_pooled_client_keeps_its_backend_for_every_sequential_request() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_error_answer_keeps_the_connection() {
+async fn an_error_answer_closes_its_connection_and_the_next_one_spreads_again() {
     let p = pair(503).await;
     let c = client(&p.net);
+    for _ in 0..4 {
+        get(&c).await.unwrap();
+    }
+    assert_eq!(
+        (p.a.served(), p.b.served()),
+        (1, 3),
+        "A's 503 closed it; the new connection, B's, stays"
+    );
+    assert_eq!(p.net.connections_open(addr(A)), 0);
+    assert_eq!(p.net.connections_open(addr(B)), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn past_the_close_budget_an_error_answer_keeps_the_connection() {
+    let p = pair(503).await;
+    let mut settings = ClientSettings::with_max_in_flight(8);
+    settings.error_closes_per_s = 0;
+    let c = Arc::new(p.net.clone()).client(Arc::new(ResolvedTarget::addr(addr(FRONT))), &settings);
     for _ in 0..5 {
         assert_eq!(get(&c).await.unwrap().status, 503);
     }

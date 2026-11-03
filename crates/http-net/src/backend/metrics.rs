@@ -1,6 +1,6 @@
 //! Backend client counters, by backend (`peer`, the target as configured):
-//! the in-flight cap's saturation and wait, retries, and breaker
-//! transitions. Counters only, never a per-request log line (ADR-0026). A
+//! the in-flight cap's saturation and wait, retries, breaker transitions,
+//! and the 5xx answers by what became of their connection. Counters only, never a per-request log line (ADR-0026). A
 //! runner appends [`prometheus_text`] to its `/metrics` body. Capped like
 //! [`crate::failures`]: each family has its overflow counter.
 
@@ -70,6 +70,24 @@ pub const RETRIES_OVERFLOW: Family = Family::counter(
     "observations of http_client_retries_total past its cap, each counted on its series whose peer reads _overflow",
 );
 
+/// The `connection` label values of [`ERROR_ANSWERS`].
+const CONNECTION: &[&str] = &["closed", "pooled"];
+
+/// 5xx answers, by what became of the connection they came on.
+pub const ERROR_ANSWERS: Family = Family::counter(
+    "http_client_error_answers_total",
+    Labels::Product(&[Dim::new("peer", &[]), Dim::new("connection", CONNECTION)]),
+    "Backend 5xx answers, by what became of their connection: closed, or pooled past the client's close budget.",
+)
+.capped(&ERROR_ANSWERS_OVERFLOW, &["peer"]);
+
+/// Observations of [`ERROR_ANSWERS`] past its cap.
+pub const ERROR_ANSWERS_OVERFLOW: Family = Family::counter(
+    "http_client_error_answers_overflow_total",
+    Labels::None,
+    "observations of http_client_error_answers_total past its cap, each counted on its series whose peer reads _overflow",
+);
+
 /// The `to` label values of [`BREAKER_TRANSITIONS`].
 const TO: &[&str] = &["open", "closed"];
 
@@ -100,6 +118,8 @@ pub const FAMILIES: &[Family] = &[
     RETRIES_OVERFLOW,
     BREAKER_TRANSITIONS,
     BREAKER_TRANSITIONS_OVERFLOW,
+    ERROR_ANSWERS,
+    ERROR_ANSWERS_OVERFLOW,
 ];
 
 struct Rows {
@@ -108,6 +128,7 @@ struct Rows {
     slot_expired: OpenRows,
     retries: OpenRows,
     transitions: OpenRows,
+    error_answers: OpenRows,
 }
 
 static ROWS: OnceLock<Rows> = OnceLock::new();
@@ -119,6 +140,7 @@ fn rows() -> &'static Rows {
         slot_expired: OpenRows::new(&SLOT_EXPIRED),
         retries: OpenRows::new(&RETRIES),
         transitions: OpenRows::new(&BREAKER_TRANSITIONS),
+        error_answers: OpenRows::new(&ERROR_ANSWERS),
     })
 }
 
@@ -143,6 +165,16 @@ pub(crate) fn retried(peer: &str) {
 /// `peer`'s breaker opened (`true`) or closed.
 pub(crate) fn breaker_moved(peer: &str, open: bool) {
     rows().transitions.add(&[peer, if open { "open" } else { "closed" }], 1);
+}
+
+/// A 5xx answer of `peer` came; its connection `closed` or was pooled.
+pub(crate) fn error_answered(peer: &str, closed: bool) {
+    rows().error_answers.add(&[peer, if closed { "closed" } else { "pooled" }], 1);
+}
+
+/// 5xx answers of `peer` whose connection was closed (`true`) or pooled.
+pub fn error_answers(peer: &str, closed: bool) -> u64 {
+    rows().error_answers.get(&[peer, if closed { "closed" } else { "pooled" }])
 }
 
 /// Requests to `peer` that waited for a slot.
@@ -181,6 +213,7 @@ pub fn prometheus_text() -> String {
     rows.slot_expired.render(&mut s);
     rows.retries.render(&mut s);
     rows.transitions.render(&mut s);
+    rows.error_answers.render(&mut s);
     s
 }
 
@@ -194,6 +227,7 @@ mod tests {
         slot_wait_ended("10.9.0.1:80", Duration::from_millis(40), false);
         retried("10.9.0.1:80");
         breaker_moved("10.9.0.1:80", true);
+        error_answered("10.9.0.1:80", true);
         let text = prometheus_text();
         for family in FAMILIES {
             assert_eq!(family.check(&text), Ok(()), "{}", family.name);

@@ -4,9 +4,11 @@
 //! - A request takes the idle connection returned most recently, else opens
 //!   a new one (to a backend its [`Front`](super::front) chooses when the
 //!   target's address is balanced).
-//! - A connection that carried an answer, of any status, goes back to the
-//!   pool, at most `max_idle_per_host` of them; one that failed, or whose
-//!   request its caller dropped mid-flight, is closed.
+//! - A connection that carried an answer goes back to the pool, at most
+//!   `max_idle_per_host` of them; one that failed, or whose request its
+//!   caller dropped mid-flight, is closed. One that carried a 5xx is closed
+//!   within the client's [`ErrorCloses`] budget (`error_closes_per_s`), the
+//!   answer returned with its body dropped.
 //! - An idle connection is closed past `pool_idle_timeout`, and when its
 //!   backend closed it (see [`SimulatedHttpNetwork`]); a closed one is never
 //!   handed out.
@@ -17,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use http_net::{HttpClient, ResolvedTarget};
+use http_net::{ErrorCloses, HttpClient, ResolvedTarget};
 use tokio::time::Instant;
 
 use super::{Connection, SimulatedHttpNetwork};
@@ -32,6 +34,9 @@ pub(super) struct PooledClient {
     max_idle: usize,
     /// Idle connections and when each came back, the most recent last.
     idle: Mutex<Vec<(Connection, Instant)>>,
+    closes: ErrorCloses,
+    /// The target as configured: the close counter's `peer`.
+    peer: String,
 }
 
 impl PooledClient {
@@ -42,10 +47,12 @@ impl PooledClient {
     ) -> Self {
         Self {
             net,
-            target,
+            target: target.clone(),
             idle_timeout: settings.pool_idle_timeout,
             max_idle: settings.max_idle_per_host,
             idle: Mutex::new(Vec::new()),
+            closes: ErrorCloses::new(settings.error_closes_per_s),
+            peer: target.to_string(),
         }
     }
 
@@ -82,9 +89,11 @@ impl HttpClient for PooledClient {
             Some(conn) => conn,
             None => self.net.connect(addr),
         };
-        let outcome = self.net.exchange(&mut conn, req).await;
-        if outcome.is_ok() {
-            self.give_back(conn);
+        let mut outcome = self.net.exchange(&mut conn, req).await;
+        match &mut outcome {
+            Ok(resp) if self.closes.close_after(&self.peer, resp.status) => resp.body.clear(),
+            Ok(_) => self.give_back(conn),
+            Err(_) => {}
         }
         outcome
     }
