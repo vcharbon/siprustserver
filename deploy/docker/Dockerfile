@@ -71,7 +71,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
        target/release/cdr-consumer-runner \
        target/release/loadgen /out/
 
-FROM debian:bookworm-slim AS runtime
+# Trixie, not the builder's bookworm: its nft (1.1) writes on a node whose
+# ruleset holds kube-proxy's nftables tables, where bookworm's 1.0.6
+# segfaults. The binaries built on bookworm's glibc run on trixie's.
+FROM debian:trixie-slim AS runtime
 # ca-certificates for TLS; nftables for the route guard, the one container of
 # the proxy pod with NET_ADMIN. Network faults are injected from the node into
 # the pod's namespace, so the image carries no `tc`.

@@ -1,6 +1,7 @@
 # shellcheck shell=bash
 # The call-path smokes of a lab running the front proxy (kind-lab.sh deploy,
-# through lib/sut.sh): the lab router routes both VIPs over both edge nodes,
+# through lib/sut.sh): the images' nft writes on the edge nodes, the lab
+# router routes both VIPs over both edge nodes,
 # the external VIP answers SIP from the callers' plane, only the proxy bridges
 # the two planes, and the workers' NetworkPolicy keeps other pods out. Sourced
 # after lib/cluster.sh (log, die, kubectl on the lab's context, the network
@@ -11,6 +12,25 @@
 edge_internal_addrs() {
   kubectl get nodes -l tier=edge \
     -o jsonpath='{range .items[*]}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' | sort
+}
+
+# The images' nft writes on every edge node, before any release: the route
+# guard's `--check` writes its ruleset under another table and deletes it,
+# and the network tools' nft (the vip-loopback init container's) does the
+# same with an empty table. An nft that cannot write on the node's ruleset
+# fails here in seconds, not as a crash-looping init container.
+nft_smoke() {
+  local node
+  for node in $(kubectl get nodes -l tier=edge -o jsonpath='{.items[*].metadata.name}'); do
+    docker run --rm --net "container:$node" --cap-add NET_ADMIN \
+      -e ROUTE_GUARD_PEERS=192.0.2.1 --entrypoint /usr/local/bin/route-guard \
+      "$SUT_IMAGE" --check >/dev/null \
+      || die "nft-smoke: $SUT_IMAGE's route guard cannot write nftables on $node (nft -v in the image)"
+    docker run --rm --net "container:$node" --cap-add NET_ADMIN --entrypoint /bin/sh \
+      "$NETTOOLS_IMAGE" -c 'echo "table inet route_guard_check { }" | nft -f - && nft delete table inet route_guard_check' \
+      || die "nft-smoke: $NETTOOLS_IMAGE's nft cannot write nftables on $node"
+  done
+  log "nft-smoke: the route guard and the network tools write nftables on every edge node"
 }
 
 # Both VIPs routed over both edge nodes in the host's table (the lab

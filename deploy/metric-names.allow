@@ -13,6 +13,9 @@
 ../tooling/hakit/content/dashboards/jemalloc-allocator.json: jemalloc_resident
 ../tooling/hakit/content/dashboards/jemalloc-allocator.json: process_resident
 
+# The nftables table the lab's nft smoke writes and deletes (route-guard --check).
+helm/lib/smokes.sh: route_guard_check
+
 # SIPp's -trace_err and -trace_stat options and the files they name.
 helm/kind-lab.sh: trace_err
 k8s/sipp/: trace_*

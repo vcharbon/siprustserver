@@ -23,16 +23,30 @@ pub const BFD_CONTROL_PORT: u16 = 3784;
 /// BGP (RFC 4271).
 pub const BGP_PORT: u16 = 179;
 
+/// The table `route-guard --check` writes and deletes: the guard's ruleset
+/// under another name, so the check touches no live table.
+pub const CHECK_TABLE: &str = "route_guard_check";
+
 /// The script that replaces the guard's table: the routers in `peers`, and,
 /// with `let_out`, each of them let out for that long from the commit.
 pub fn ruleset(peers: &[Ipv4Addr], let_out: Option<Duration>) -> String {
+    ruleset_in(TABLE, peers, let_out)
+}
+
+/// The script that deletes `table`, present or not.
+pub fn delete(table: &str) -> String {
+    format!("table inet {table}\ndelete table inet {table}\n")
+}
+
+/// [`ruleset`] under the table `table`.
+pub fn ruleset_in(table: &str, peers: &[Ipv4Addr], let_out: Option<Duration>) -> String {
     let list =
         |suffix: &str| peers.iter().map(|p| format!("{p}{suffix}")).collect::<Vec<_>>().join(", ");
     let mut s = String::new();
     // Declaring the table first makes the delete succeed on a first run.
-    let _ = writeln!(s, "table inet {TABLE}");
-    let _ = writeln!(s, "delete table inet {TABLE}");
-    let _ = writeln!(s, "table inet {TABLE} {{");
+    let _ = writeln!(s, "table inet {table}");
+    let _ = writeln!(s, "delete table inet {table}");
+    let _ = writeln!(s, "table inet {table} {{");
     let _ = writeln!(s, "\tset peers {{");
     let _ = writeln!(s, "\t\ttype ipv4_addr");
     let _ = writeln!(s, "\t\telements = {{ {} }}", list(""));
@@ -75,6 +89,16 @@ mod tests {
         assert!(
             s.contains("elements = { 192.0.2.1 timeout 1000ms, 198.51.100.1 timeout 1000ms }\n"),
             "{s}"
+        );
+    }
+
+    #[test]
+    fn the_check_writes_the_same_ruleset_under_its_own_table() {
+        let check = ruleset_in(CHECK_TABLE, &PEERS, None);
+        assert_eq!(check, ruleset(&PEERS, None).replace("route_guard", "route_guard_check"));
+        assert_eq!(
+            delete(CHECK_TABLE),
+            "table inet route_guard_check\ndelete table inet route_guard_check\n"
         );
     }
 

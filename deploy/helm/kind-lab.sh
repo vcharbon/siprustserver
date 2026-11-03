@@ -15,7 +15,8 @@
 #                                    build one more image with the lab's build
 #                                    wrapper (proxy settings) and kind-load it
 #   kind-lab.sh deploy [helm args]   the lab router, MetalLB, the collectors,
-#                                    Chaos Mesh, the SIPp UAS, the SUT, the
+#                                    Chaos Mesh, the SIPp UAS, the images' nft
+#                                    written on every edge node, the SUT, the
 #                                    restart of every SUT workload whose pod runs
 #                                    an image a reload replaced, then the route,
 #                                    VIP and isolation smokes (when the SUT runs a
@@ -139,6 +140,7 @@ lab_deploy() {
   if [ "${CHAOS_MESH:-1}" = 1 ]; then chaos_mesh_release; else log "Chaos Mesh skipped (CHAOS_MESH=0)"; fi
   # The UAS containers first: the first one is the workers' scripted callee.
   hakit_uas_up
+  nft_smoke
   sut_release "$@"
   roll_stale_images
   sut_smokes
