@@ -263,13 +263,15 @@ proxy:
     # its last fit answer. At least 4 × pollMs.
     deadMs: 1000
     # How long the proxy reads fit before a withdrawn node is let out, ms
-    # (ROUTE_GUARD_HOLD_MS).
+    # (ROUTE_GUARD_HOLD_MS). The guard container, and so the pod, is Ready
+    # only while the node is let out.
     holdMs: 3000
     # The guard's /metrics and /healthz (the pod's prometheus.io/sidecar-port).
     metricsPort: 9095
     # The bound, ms, from a fault to the routers' withdrawal that the render
     # checks every detection path against: its detection (HEALTH_ISOLATION_MS,
-    # PROXY_EXT_FACE_CHECK_MS, or deadMs for a hung or dead proxy), the poll,
+    # PROXY_EXT_FACE_CHECK_MS for a lost interface or link, or deadMs for a
+    # hung or dead proxy), two unfit readings (2 × pollMs, none for deadMs),
     # and detectMultiplier × the BFD interval.
     withdrawWithinMs: 3400
     resources:

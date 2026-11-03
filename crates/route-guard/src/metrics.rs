@@ -60,6 +60,18 @@ pub struct GuardMetrics {
 }
 
 impl GuardMetrics {
+    /// A guard's metrics before its first write: the node reads withdrawn.
+    pub fn starting() -> Self {
+        let metrics = Self::default();
+        metrics.set_withdrawn(true);
+        metrics
+    }
+
+    /// Whether the guard reads its node withdrawn.
+    pub fn withdrawn(&self) -> bool {
+        self.withdrawn.load(Ordering::Relaxed) != 0
+    }
+
     pub fn set_withdrawn(&self, withdrawn: bool) {
         self.withdrawn.store(u64::from(withdrawn), Ordering::Relaxed);
     }

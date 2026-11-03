@@ -85,9 +85,12 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
    configuration change (its default 3 s adds 2.5 s to every withdrawal and announcement): the
    drain-to-withdrawal reached 3.8 s and the Ready-to-announced 4.65 s in both kube-proxy modes,
    so the propagation is 5 s, `minReadySeconds` 10 s and the drain grace 8.8 s, the measured
-   drain-to-withdrawal plus 5 s (`docs/TUNING.md`). A planned drain leaves the route guard
-   alone: the proxy stays fit while it drains, and its node's sessions stay up for the
-   successor pod.
+   drain-to-withdrawal plus 5 s (`docs/TUNING.md`). The route guard does not start a planned
+   drain: the proxy stays fit while it drains, so readiness withdraws the node. When the
+   drained proxy exits, its guard exits too and the last refresh runs out, so the node's BFD
+   and BGP drop; the successor's init step writes the table withdrawing again, and its guard
+   lets the node out once the new proxy read fit for the hold. Each rollout step thus takes
+   its node's sessions down and back, inside the time `minReadySeconds` budgets (§10).
 5. **No ICMP port unreachable from a VIP.** Until its route is withdrawn a node still receives a
    VIP's traffic while no proxy socket is bound (a crash, the end of a drain); its kernel would
    answer port unreachable, which a SIP client takes as a transport error (RFC 3261 §18.4)
@@ -119,11 +122,11 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
     retransmission can still answer. Readiness cannot get there (§3), so a container beside the
     proxy, on the node's network with `NET_ADMIN` alone (the proxy keeps none), reads the proxy's
     `/fitz` over loopback every `ROUTE_GUARD_POLL_MS` (100 ms) and owns one nftables table. Its
-    output chain drops the node's BFD (UDP 3784-3785) and BGP (TCP 179, either end) toward the
+    output chain drops the node's BFD control (UDP 3784) and BGP (TCP 179, either end) toward the
     routers (`proxy.routeGuard.peers`, by default MetalLB's peers) unless the router is in a set
     whose entries time out `ROUTE_GUARD_DEAD_MS` (1 s) after each refresh. While the proxy reads
-    fit the guard refreshes the set every quarter of that bound; an unfit answer empties it at
-    once; a proxy or a guard that stops refreshing (hung, crashed, killed with its pod) lets it
+    fit the guard refreshes the set every quarter of that bound; the second unfit answer since
+    the last fit one empties it, so one reading of a passing blip does not; a proxy or a guard that stops refreshing (hung, crashed, killed with its pod) lets it
     run out in the kernel, with no write. The routers miss the node's BFD for their detection
     time (3 × 300 ms) and withdraw every route through it, as for a dead node. BGP is dropped
     with BFD: without it the node's next connect retry re-establishes the session the BFD loss
@@ -133,16 +136,21 @@ routers that speak BGP, and the proxy is stateless by default with a memo for th
       proxy's own reach, read before any per-worker dead verdict (2.6-3.6 s), which stays the
       routing's. A proxy is never fit before it has read a worker alive.
     - Bounds, checked at render against `proxy.routeGuard.withdrawWithinMs` (3.4 s): a worker cut
-      2 s + 0.1 s + 0.9 s = 3.0 s; an external face lost `PROXY_EXT_FACE_CHECK_MS` 0.5 s + 0.1 s +
-      0.9 s = 1.5 s; a hung or dead proxy 1 s + 0.9 s = 1.9 s.
+      2 s + two readings 0.2 s + 0.9 s = 3.1 s; an external interface or link lost
+      `PROXY_EXT_FACE_CHECK_MS` 0.5 s + 0.2 s + 0.9 s = 1.6 s; a hung or dead proxy 1 s + 0.9 s =
+      1.9 s. A next hop that dies with its carrier up is outside the bound: its neighbour entry
+      reads unresolved only after the kernel's STALE, DELAY and PROBE cycle, tens of seconds.
     - A withdrawn node is let out after the proxy read fit for `ROUTE_GUARD_HOLD_MS` (3 s), so a
       flapping fault does not rehash flows each time; its BGP sessions come back within the
       BGPPeer `connectTime` (`proxy.announce.metallb.connectTimeSeconds`, 1 s). A restarted guard
       rebuilds its table from its first reading, keeping a fit proxy's node out without a hold;
       the pod's init step writes the table withdrawing, so a node whose pod starts, after a node
-      restart among others, announces nothing before its proxy reads fit for the hold. The
-      render requires `minReadySeconds` above one probe period + the hold + the connect time +
-      2 s, so a rollout waits for the replaced node's sessions too.
+      restart among others, announces nothing before its proxy reads fit for the hold.
+    - The guard's own `/readyz` is Ready exactly while it lets the node out, and the guard
+      container has a readiness probe: the pod is Ready, and `minReadySeconds` counts, only from
+      a node that may carry traffic, so a blip after Ready that restarts the hold holds the
+      rollout too. The render requires `minReadySeconds` above one probe period + the connect
+      time + 2 s, so a rollout also waits for the let-out node's sessions.
     - A total backend outage withdraws both nodes within 3 s (§3) and brings them back once a
       worker answers, readiness and the hold allowing.
     - The guard reports `route_guard_withdrawn`, `route_guard_withdrawals_total{cause}` and
@@ -197,6 +205,10 @@ Via.
 - The two proxies can hold different views of one worker; each routes the traffic it receives by
   its own view. The failover harness cell `split_proxy_views` judges that case with real B2BUAs:
   no leak, full cleanup, one CDR, no copy left serving.
+- An internal-plane blip both proxies see for about 2.1 s or more (the isolation window, two
+  readings) withdraws both nodes, the total-outage rule of §3: it costs the blip + 0.9 s + the
+  hold + the reconnect, about 6-7 s of an unreachable VIP, where readiness alone rode out blips
+  under about 2.6 s.
 - The route guard's bound (3.4 s) caps the window in which a lost, hung or cut node still draws
   traffic; the hakit budgets `proxy-failover` and `proxy-cut` derive their allowances from it,
   `proxy-reroute` from the readiness path of a planned withdrawal.

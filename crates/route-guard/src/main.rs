@@ -25,13 +25,13 @@
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use probe_http::{ProbeRoutes, ProbeServer, ProbeState};
+use probe_http::{ProbeRoutes, ProbeServer};
 use route_guard::config::GuardConfig;
 use route_guard::fitness::Probe;
 use route_guard::metrics::GuardMetrics;
 use route_guard::nft::{Nft, Writer};
 use route_guard::rules::ruleset;
-use route_guard::run::{run, Pulse};
+use route_guard::run::{readiness, run, Pulse, ONE_TIME_WRITE_BOUND};
 
 /// The argument of the one-shot run that writes the withdrawing ruleset and
 /// exits: the pod's init step, so a node whose pod starts is held out of the
@@ -74,12 +74,12 @@ async fn serve() -> ExitCode {
 
 async fn guard() -> Result<(), String> {
     let cfg = GuardConfig::from_env().map_err(|errors| errors.join("; "))?;
-    let writer = Nft { program: cfg.nft.clone(), bound: cfg.timing.dead / 2 };
+    let writer = Nft { program: cfg.nft.clone() };
     if std::env::args().nth(1).as_deref() == Some(WITHDRAW_ARG) {
         return withdraw(&cfg, &writer).await;
     }
     let terminate = terminate()?;
-    let metrics = Arc::new(GuardMetrics::default());
+    let metrics = Arc::new(GuardMetrics::starting());
     let pulse = Pulse::new();
     let live_bound = cfg.timing.dead.saturating_mul(LIVENESS_DEAD_BOUNDS);
     let routes = ProbeRoutes {
@@ -87,7 +87,10 @@ async fn guard() -> Result<(), String> {
             let metrics = metrics.clone();
             Arc::new(move || metrics.body())
         },
-        ready: Arc::new(|| ProbeState::Ready),
+        ready: {
+            let metrics = metrics.clone();
+            Arc::new(move || readiness(&metrics))
+        },
         heap: None,
         fit: None,
     };
@@ -105,7 +108,7 @@ async fn guard() -> Result<(), String> {
 /// Write the withdrawing ruleset once.
 async fn withdraw(cfg: &GuardConfig, writer: &Nft) -> Result<(), String> {
     writer
-        .write(ruleset(&cfg.peers, None))
+        .write(ruleset(&cfg.peers, None), ONE_TIME_WRITE_BOUND)
         .await
         .map_err(|e| format!("the withdrawing ruleset was not applied: {e}"))?;
     tracing::info!(

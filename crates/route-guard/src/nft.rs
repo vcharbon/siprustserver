@@ -8,23 +8,27 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-/// Where a ruleset script goes. `Err` names why it was not applied.
+/// Where a ruleset script goes, applied within `bound`. `Err` names why it
+/// was not applied.
 pub trait Writer {
-    fn write(&self, script: String) -> impl Future<Output = Result<(), String>> + Send;
+    fn write(
+        &self,
+        script: String,
+        bound: Duration,
+    ) -> impl Future<Output = Result<(), String>> + Send;
 }
 
-/// `program -f -`, the script on its standard input, killed past `bound`.
+/// `program -f -`, the script on its standard input, killed past the bound.
 #[derive(Debug, Clone)]
 pub struct Nft {
     pub program: String,
-    pub bound: Duration,
 }
 
 impl Writer for Nft {
-    async fn write(&self, script: String) -> Result<(), String> {
-        match tokio::time::timeout(self.bound, self.run(script)).await {
+    async fn write(&self, script: String, bound: Duration) -> Result<(), String> {
+        match tokio::time::timeout(bound, self.run(script)).await {
             Ok(result) => result,
-            Err(_) => Err(format!("{} -f - ran past {} ms", self.program, self.bound.as_millis())),
+            Err(_) => Err(format!("{} -f - ran past {} ms", self.program, bound.as_millis())),
         }
     }
 }
@@ -79,19 +83,19 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("route-guard-nft-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let (program, out) = recorder(&dir);
-        let nft = Nft { program, bound: BOUND };
-        assert_eq!(nft.write("table inet x\n".to_string()).await, Ok(()));
+        let nft = Nft { program };
+        assert_eq!(nft.write("table inet x\n".to_string(), BOUND).await, Ok(()));
         assert_eq!(std::fs::read_to_string(&out).unwrap(), "table inet x\n");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]
     async fn a_failing_or_missing_program_is_an_error_naming_it() {
-        let failing = Nft { program: "false".to_string(), bound: BOUND };
-        let e = failing.write(String::new()).await.unwrap_err();
+        let failing = Nft { program: "false".to_string() };
+        let e = failing.write(String::new(), BOUND).await.unwrap_err();
         assert!(e.starts_with("false -f - failed"), "{e}");
-        let missing = Nft { program: "route-guard-no-such-nft".to_string(), bound: BOUND };
-        let e = missing.write(String::new()).await.unwrap_err();
+        let missing = Nft { program: "route-guard-no-such-nft".to_string() };
+        let e = missing.write(String::new(), BOUND).await.unwrap_err();
         assert!(e.contains("cannot start"), "{e}");
     }
 }

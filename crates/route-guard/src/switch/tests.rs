@@ -67,14 +67,19 @@ fn a_fit_proxy_is_refreshed_every_quarter_of_the_dead_bound() {
     assert!(withdrawals.is_empty() && !s.withdrawn());
 }
 
+/// The second unfit reading since the last fit one withdraws the node, once;
+/// a single unfit reading between fit ones withdraws nothing.
 #[test]
-fn an_unfit_answer_withdraws_the_node_at_once_and_once() {
+fn a_second_unfit_reading_withdraws_the_node_and_a_lone_one_does_not() {
     let origin = Instant::now();
     let mut s = running(origin);
-    let step = s.on_reading(origin + POLL, &unfit("isolated"));
+    assert_eq!(s.on_reading(origin + POLL, &unfit("isolated")), Step::default());
+    assert_eq!(s.on_reading(origin + POLL * 2, &Reading::Fit).withdrawn, None);
+    assert_eq!(s.on_reading(origin + POLL * 3, &unfit("isolated")), Step::default());
+    let step = s.on_reading(origin + POLL * 4, &unfit("isolated"));
     assert_eq!(step.write, Some(Write::Withdraw));
     assert_eq!(step.withdrawn, Some(Cause::Unfit("isolated".to_string())));
-    let again = s.on_reading(origin + POLL * 2, &unfit("isolated"));
+    let again = s.on_reading(origin + POLL * 5, &unfit("isolated"));
     assert_eq!(again, Step::default(), "an unfit reading of a withdrawn node writes nothing");
 }
 
@@ -97,7 +102,9 @@ fn a_withdrawn_node_is_let_out_after_the_proxy_read_fit_for_the_hold() {
     let origin = Instant::now();
     let mut s = running(origin);
     s.on_reading(origin + POLL, &unfit("external-face"));
-    let start = origin + POLL;
+    s.on_reading(origin + POLL * 2, &unfit("external-face"));
+    assert!(s.withdrawn());
+    let start = origin + POLL * 2;
     let (refreshes, _, _) = feed(&mut s, start, 20, &Reading::Fit);
     assert!(refreshes.is_empty(), "2 s of fitness is inside the hold");
     let blip = start + POLL * 21;

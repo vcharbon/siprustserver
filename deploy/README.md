@@ -158,7 +158,7 @@ provides:
   `docs/TUNING.md`).
 - **The route guard** (ADR-0056 §10, `proxy.routeGuard`, on by default) runs in the proxy pod
   with `NET_ADMIN` on the node's network namespace, as root, every other capability dropped; its
-  init step needs the same. It drops the node's BFD (UDP 3784-3785) and BGP (TCP 179) toward the
+  init step needs the same. It drops the node's BFD control (UDP 3784) and BGP (TCP 179) toward the
   routers it names while the proxy is unfit, so:
   - the routers run BFD on the proxy nodes' sessions with a detection time inside the guard's
     bound (multiplier × receive interval, 900 ms by default) and withdraw a node's routes when its
@@ -168,7 +168,7 @@ provides:
     among them), would be cut with it;
   - nothing else on a proxy node uses an nftables table named `route_guard` in the `inet` family.
 - **Reading the route guard.** `route_guard_withdrawn` is 1 on a node held out of the routers'
-  ECMP; `route_guard_withdrawals_total{cause}` counts each withdrawal (`unfit`: the proxy named
+  ECMP, and the guard container is then not Ready, nor is the pod; `route_guard_withdrawals_total{cause}` counts each withdrawal (`unfit`: the proxy named
   why, `expired`: no fit answer within `deadMs`, `start`) and `route_guard_restores_total` each
   return. The guard logs `node withdrawn: BFD and BGP to the routers dropped` with the cause and
   the proxy's reason, and `node let out: BFD and BGP to the routers pass again`. On the node,

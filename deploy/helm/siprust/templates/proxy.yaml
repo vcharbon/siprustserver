@@ -199,6 +199,15 @@ spec:
             {{- include "siprust.routeGuardEnv" . | nindent 12 }}
           ports:
             - { name: guard-metrics, containerPort: {{ int $g.metricsPort }}, protocol: TCP }
+          # Ready exactly while the guard lets the node out, so the pod is
+          # Ready, and minReadySeconds counts, only from a node that carries
+          # traffic.
+          readinessProbe:
+            httpGet: { path: /readyz, port: {{ int $g.metricsPort }} }
+            periodSeconds: {{ int $p.readinessProbe.periodSeconds }}
+            failureThreshold: {{ int $p.readinessProbe.failureThreshold }}
+            successThreshold: 1
+            timeoutSeconds: 1
           livenessProbe:
             httpGet: { path: /healthz, port: {{ int $g.metricsPort }} }
             initialDelaySeconds: 3

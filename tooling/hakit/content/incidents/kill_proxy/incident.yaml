@@ -6,7 +6,9 @@ description: >-
   VIPs (its route guard's last refresh runs out, the pod is no longer Ready)
   and the routers move its flows to the peer; the kubelet restarts the
   crashed pod. Inject measures, from the kill, when the node left each VIP's
-  next hops in the host's table. The probe waits for the restart, proves no
+  next hops in the host's table, or records a route guard restarted onto a
+  proxy already fit again, which lets the node out before its last refresh
+  ran out. The probe waits for the restart, proves no
   incarnation overlap, and wants both VIPs routed over every live proxy's
   node again.
 kind: fault
@@ -30,6 +32,12 @@ params:
     type: integer
     default: 30
     description: How long inject waits for the node to leave both VIPs' next hops.
+  guard_container:
+    type: string
+    default: route-guard
+    description: >-
+      The node's route guard container: restarted onto a proxy already fit
+      again, it lets the node out before the last refresh ran out.
 duration_s: 0
 expected_s: 60
 timeouts:

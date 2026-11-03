@@ -5,13 +5,16 @@
 //! earlier guard left survives the start, and refuses to run when that first
 //! write fails. On termination it keeps guarding until the proxy stops
 //! answering, then exits without a write: the last refresh runs out within
-//! the dead bound and the node is withdrawn, its proxy being gone.
+//! the dead bound and the node is withdrawn, its proxy being gone. Its own
+//! `/readyz` is Ready exactly while the node is let out, so the pod is Ready
+//! only once its node may carry traffic ([`readiness`]).
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use probe_http::ProbeState;
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::config::GuardConfig;
@@ -20,6 +23,20 @@ use crate::metrics::GuardMetrics;
 use crate::nft::Writer;
 use crate::rules::ruleset;
 use crate::switch::{Cause, Reading, Switch, Write};
+
+/// The bound of a one-time write: the start's ruleset, and the pod's init
+/// step's. A refresh in the loop is bounded by half the dead bound.
+pub const ONE_TIME_WRITE_BOUND: Duration = Duration::from_secs(5);
+
+/// The guard's `/readyz`: Ready while its node is let out, NotReady while it
+/// reads it withdrawn, before its first write included.
+pub fn readiness(metrics: &GuardMetrics) -> ProbeState {
+    if metrics.withdrawn() {
+        ProbeState::NotReady
+    } else {
+        ProbeState::Ready
+    }
+}
 
 /// The instant of the loop's last turn, for the guard's own liveness.
 #[derive(Debug)]
@@ -61,7 +78,7 @@ pub async fn run(
     let now = Instant::now();
     let (mut switch, write, cause) = Switch::start(cfg.timing, now, &first);
     writer
-        .write(script(cfg, write))
+        .write(script(cfg, write), ONE_TIME_WRITE_BOUND)
         .await
         .map_err(|e| format!("the guard's first ruleset was not applied: {e}"))?;
     if write == Write::Refresh {
@@ -115,7 +132,7 @@ pub async fn run(
             withdrawn(metrics, cause, &reading);
         }
         if let Some(write) = step.write {
-            match writer.write(script(cfg, write)).await {
+            match writer.write(script(cfg, write), cfg.timing.dead / 2).await {
                 Ok(()) if write == Write::Refresh && switch.refreshed(now) => {
                     metrics.restore();
                     tracing::info!(

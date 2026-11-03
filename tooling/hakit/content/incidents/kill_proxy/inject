@@ -2,8 +2,9 @@
 # Crash one front proxy: SIGKILL every container of the pod from its node and
 # prove them dead, then wait until its node left both VIPs' next hops. Facts:
 # the crash's, plus the node and the withdrawal of each VIP in ms after the
-# kill. The node's route guard holds the restarted proxy's node out until it
-# reads fit for its hold, so the withdrawal always reaches the routers.
+# kill, or null with the instant the restarted route guard started when it
+# found the restarted proxy fit before the last refresh ran out (it then lets
+# the node out at once, a valid outcome) and the pod is Ready.
 # shellcheck source=incident.sh
 source "$HAKIT_LIB/incident.sh"
 # shellcheck source=route.sh
@@ -19,7 +20,17 @@ done <<<"$pairs"
 hk_crash_prepare
 crashed="$(hk_crash_kill)"
 killed="$(cat "$HAKIT_EVENT_DIR/killed_at_ms")"
-withdrawn="$(hk_route_wait absent "$killed" "$HAKIT_PARAM_WITHDRAW_TIMEOUT_S" "$pairs")" \
-  || hk_die "$node still announces a VIP ${HAKIT_PARAM_WITHDRAW_TIMEOUT_S}s after the kill"
-jq -cn --argjson d "$crashed" --arg node "$node" --argjson w "$withdrawn" \
-  '$d + {node: $node, withdrawn_ms: $w}'
+guard_at=null
+if ! withdrawn="$(hk_route_wait absent "$killed" "$HAKIT_PARAM_WITHDRAW_TIMEOUT_S" "$pairs")"; then
+  read -r pod _ _ <<<"$(hk_targets)"
+  started="$(kubectl -n "$NS" get pod "$pod" -o jsonpath="{.status.containerStatuses[?(@.name==\"$HAKIT_PARAM_GUARD_CONTAINER\")].state.running.startedAt}")" \
+    || hk_die "$pod cannot be read"
+  ready="$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')" \
+    || hk_die "$pod cannot be read"
+  [ "$ready" = True ] && [ -n "$started" ] && [ "$(hk_ms "$started")" -ge $(( killed - 1000 )) ] \
+    || hk_die "$node still announces a VIP ${HAKIT_PARAM_WITHDRAW_TIMEOUT_S}s after the kill and its route guard did not restart onto a fit proxy"
+  withdrawn=null
+  guard_at="$(hk_ms "$started")"
+fi
+jq -cn --argjson d "$crashed" --arg node "$node" --argjson w "$withdrawn" --argjson g "$guard_at" \
+  '$d + {node: $node, withdrawn_ms: $w, guard_restarted_at_ms: $g}'

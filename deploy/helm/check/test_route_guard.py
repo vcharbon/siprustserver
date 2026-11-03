@@ -30,6 +30,9 @@ class GuardContainer(unittest.TestCase):
                          {"drop": ["ALL"], "add": ["NET_ADMIN"]})
         self.assertIs(guard["securityContext"]["allowPrivilegeEscalation"], False)
         self.assertEqual(guard["livenessProbe"]["httpGet"], {"path": "/healthz", "port": 9095})
+        ready = guard["readinessProbe"]
+        self.assertEqual((ready["httpGet"], ready["periodSeconds"], ready["failureThreshold"]),
+                         ({"path": "/readyz", "port": 9095}, 1, 2))
         self.assertNotIn("securityContext", container(deployment, "sip-front-proxy"))
         annotations = deployment["spec"]["template"]["metadata"]["annotations"]
         self.assertEqual(annotations["prometheus.io/sidecar-port"], "9095")
@@ -72,21 +75,31 @@ class GuardRelations(unittest.TestCase):
     every value it adds up."""
 
     def test_a_detection_path_past_the_bound_is_refused(self) -> None:
-        err = render_error(SIPRUST, *KIND, "--set-string", "proxy.env.HEALTH_ISOLATION_MS=2401")
-        for name in ("HEALTH_ISOLATION_MS=2401", "pollMs=100", "detectMultiplier=3",
+        err = render_error(SIPRUST, *KIND, "--set-string", "proxy.env.HEALTH_ISOLATION_MS=2301")
+        for name in ("HEALTH_ISOLATION_MS=2301", "pollMs=100", "detectMultiplier=3",
                      "=300 ms", "withdrawWithinMs=3400", "cut off every worker"):
             self.assertIn(name, err)
-        render(SIPRUST, *KIND, "--set-string", "proxy.env.HEALTH_ISOLATION_MS=2400")
+        render(SIPRUST, *KIND, "--set-string", "proxy.env.HEALTH_ISOLATION_MS=2300")
         err = render_error(SIPRUST, *KIND, "--set", "proxy.routeGuard.deadMs=2600")
         self.assertIn("proxy.routeGuard.deadMs=2600", err)
         self.assertIn("a hung or dead proxy", err)
 
-    def test_a_rollout_waits_for_the_guard_to_let_the_replaced_node_out(self) -> None:
-        err = render_error(SIPRUST, *KIND, "--set", "proxy.routeGuard.holdMs=6000")
-        for name in ("proxy.minReadySeconds=10 s", "holdMs=6000", "connectTimeSeconds=1 s"):
+    def test_a_rollout_waits_for_the_let_out_nodes_sessions(self) -> None:
+        err = render_error(SIPRUST, *KIND, "--set", "proxy.announce.metallb.connectTimeSeconds=7")
+        for name in ("proxy.minReadySeconds=10 s", "connectTimeSeconds=7 s"):
             self.assertIn(name, err)
-        render(SIPRUST, *KIND, "--set", "proxy.routeGuard.holdMs=5999")
+        render(SIPRUST, *KIND, "--set", "proxy.announce.metallb.connectTimeSeconds=6")
 
+    def test_a_router_that_is_not_ipv4_is_refused(self) -> None:
+        err = render_error(SIPRUST, *KIND,
+                           "--set", "proxy.announce.metallb.peers.internal[0].address=2001:db8::1")
+        self.assertIn("router 2001:db8::1 is not an IPv4 address", err)
+        err = render_error(SIPRUST, *KIND, "--set", "proxy.routeGuard.peers={2001:db8::1}")
+        self.assertIn("'2001:db8::1' is not valid ipv4", err)
+
+    def test_the_proxy_metrics_port_stays_where_the_guard_reads_it(self) -> None:
+        err = render_error(SIPRUST, *KIND, "--set-string", "proxy.env.PROXY_METRICS=0.0.0.0:9191")
+        self.assertIn("PROXY_METRICS=0.0.0.0:9191 must keep port 9090", err)
 
 if __name__ == "__main__":
     unittest.main()

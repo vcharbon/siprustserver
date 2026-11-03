@@ -232,6 +232,11 @@ render.
 {{- if not $peers }}
 {{- fail "proxy.routeGuard.peers is required when the chart does not render MetalLB's peers (proxy.announce.metallb.enabled): the routers whose BFD and BGP the guard drops; or set proxy.routeGuard.enabled=false" }}
 {{- end }}
+{{- range $peers }}
+{{- if not (regexMatch "^[0-9]{1,3}(\\.[0-9]{1,3}){3}$" .) }}
+{{- fail (printf "proxy.routeGuard: router %s is not an IPv4 address: the route guard drops BFD and BGP to IPv4 routers only" .) }}
+{{- end }}
+{{- end }}
 {{- $peers | uniq | join "," }}
 {{- end }}
 

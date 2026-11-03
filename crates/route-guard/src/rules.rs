@@ -1,6 +1,6 @@
 //! The nftables ruleset the guard owns: one `inet` table whose output chain
-//! drops the node's BFD (UDP 3784, single-hop control, and 3785, echo) and
-//! BGP (TCP 179, either end) toward its routers unless the router's address
+//! drops the node's BFD control (UDP 3784, single-hop) and BGP (TCP 179,
+//! either end) toward its routers unless the router's address
 //! is in the `let_out` set. Each write replaces the whole table in one
 //! transaction, so no packet ever meets a half-written table and a guard
 //! restart rebuilds it from scratch.
@@ -16,8 +16,9 @@ use std::time::Duration;
 /// The table's name, in the `inet` family.
 pub const TABLE: &str = "route_guard";
 
-/// Single-hop BFD control (RFC 5881) and echo.
-pub const BFD_PORTS: &str = "3784-3785";
+/// Single-hop BFD control (RFC 5881). Echo packets carry the node's own
+/// address as destination; without control packets the session goes down.
+pub const BFD_CONTROL_PORT: u16 = 3784;
 
 /// BGP (RFC 4271).
 pub const BGP_PORT: u16 = 179;
@@ -50,7 +51,7 @@ pub fn ruleset(peers: &[Ipv4Addr], let_out: Option<Duration>) -> String {
     let _ = writeln!(s, "\tchain output {{");
     let _ = writeln!(s, "\t\ttype filter hook output priority filter; policy accept;");
     let held = "ip daddr @peers ip daddr != @let_out";
-    let _ = writeln!(s, "\t\t{held} udp dport {BFD_PORTS} counter drop");
+    let _ = writeln!(s, "\t\t{held} udp dport {BFD_CONTROL_PORT} counter drop");
     let _ = writeln!(s, "\t\t{held} tcp dport {BGP_PORT} counter drop");
     let _ = writeln!(s, "\t\t{held} tcp sport {BGP_PORT} counter drop");
     let _ = writeln!(s, "\t}}");
@@ -82,7 +83,7 @@ mod tests {
         let s = ruleset(&PEERS, None);
         assert_eq!(s.matches("elements").count(), 1, "the let_out set is empty: {s}");
         for rule in [
-            "ip daddr @peers ip daddr != @let_out udp dport 3784-3785 counter drop\n",
+            "ip daddr @peers ip daddr != @let_out udp dport 3784 counter drop\n",
             "ip daddr @peers ip daddr != @let_out tcp dport 179 counter drop\n",
             "ip daddr @peers ip daddr != @let_out tcp sport 179 counter drop\n",
         ] {

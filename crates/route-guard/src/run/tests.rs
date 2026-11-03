@@ -47,7 +47,7 @@ struct Recorder {
 }
 
 impl Writer for Recorder {
-    async fn write(&self, script: String) -> Result<(), String> {
+    async fn write(&self, script: String, _bound: Duration) -> Result<(), String> {
         if *self.failing.lock().unwrap() {
             return Err("nft refused".to_string());
         }
@@ -75,7 +75,7 @@ struct Running {
 fn start(first: Reading) -> Running {
     let proxy = Scripted::new(first);
     let writer = Recorder::default();
-    let metrics = Arc::new(GuardMetrics::default());
+    let metrics = Arc::new(GuardMetrics::starting());
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let task = {
         let (proxy, writer, metrics) = (proxy.clone(), writer.clone(), metrics.clone());
@@ -111,7 +111,8 @@ async fn the_loop_refreshes_withdraws_at_once_and_restores_after_the_hold() {
     let after = r.writer.since(unfit_at);
     assert_eq!(after.len(), 1, "{after:?}");
     assert_eq!(after[0].1, Write::Withdraw);
-    assert!(after[0].0 <= POLL, "withdrawn {:?} after the unfit answer", after[0].0);
+    assert!(after[0].0 <= POLL * 2, "withdrawn {:?} after the unfit answer", after[0].0);
+    assert_eq!(readiness(&r.metrics), ProbeState::NotReady, "a withdrawn node's pod is not Ready");
     assert!(metric(&r.metrics, "route_guard_withdrawn 1"));
     assert!(metric(&r.metrics, "route_guard_withdrawals_total{cause=\"unfit\"} 1"));
 
@@ -124,6 +125,7 @@ async fn the_loop_refreshes_withdraws_at_once_and_restores_after_the_hold() {
     assert!(first.0 >= Duration::from_millis(3_000) && first.0 <= Duration::from_millis(3_100));
     assert!(metric(&r.metrics, "route_guard_restores_total 1"));
     assert!(metric(&r.metrics, "route_guard_withdrawn 0"));
+    assert_eq!(readiness(&r.metrics), ProbeState::Ready);
     r.task.abort();
 }
 
@@ -178,5 +180,27 @@ async fn a_guard_started_beside_a_proxy_not_fit_withdraws_first() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(r.writer.writes.lock().unwrap()[0].1, Write::Withdraw);
     assert!(metric(&r.metrics, "route_guard_withdrawals_total{cause=\"start\"} 1"));
+    r.task.abort();
+}
+
+/// Before its first write the guard is not Ready; once a fit proxy's node is
+/// let out it is, and a blip that withdraws the node makes it NotReady until
+/// the hold has passed and the node is let out again, so a rollout counts
+/// `minReadySeconds` only from a node that carries traffic.
+#[tokio::test(start_paused = true)]
+async fn the_guard_is_ready_exactly_while_its_node_is_let_out() {
+    assert_eq!(readiness(&GuardMetrics::starting()), ProbeState::NotReady);
+    let r = start(Reading::Fit);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(readiness(&r.metrics), ProbeState::Ready);
+    r.proxy.set(Reading::Unfit("isolated".to_string()));
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    r.proxy.set(Reading::Fit);
+    for _ in 0..29 {
+        tokio::time::sleep(POLL).await;
+        assert_eq!(readiness(&r.metrics), ProbeState::NotReady, "inside the hold");
+    }
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(readiness(&r.metrics), ProbeState::Ready);
     r.task.abort();
 }

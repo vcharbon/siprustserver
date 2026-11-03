@@ -564,6 +564,14 @@ spec:
         - containerPort: 9095
           name: guard-metrics
           protocol: TCP
+        readinessProbe:
+          failureThreshold: 2
+          httpGet:
+            path: /readyz
+            port: 9095
+          periodSeconds: 1
+          successThreshold: 1
+          timeoutSeconds: 1
         resources:
           limits:
             memory: 64Mi

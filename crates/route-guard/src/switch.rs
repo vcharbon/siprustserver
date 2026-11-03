@@ -7,12 +7,17 @@
 //! the dead bound only (`ROUTE_GUARD_DEAD_MS`, the set's element timeout), so
 //! a node whose guard or proxy stops refreshing it is withdrawn without any
 //! write. The switch refreshes every quarter of that bound while the proxy
-//! reads fit, empties the set at once on an unfit reading, and refreshes a
-//! withdrawn node again only after the proxy read fit for the whole hold.
+//! reads fit, empties the set on the [`UNFIT_READINGS`]-th unfit reading since
+//! the last fit one, and refreshes a withdrawn node again only after the proxy
+//! read fit for the whole hold.
 
 use std::time::Duration;
 
 use tokio::time::Instant;
+
+/// Unfit readings since the last fit one that withdraw the node: one reading
+/// of a passing blip never empties the set.
+pub const UNFIT_READINGS: u32 = 2;
 
 /// One reading of the proxy's fitness.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,16 +95,23 @@ pub struct Switch {
     fit_since: Option<Instant>,
     /// The last refresh written.
     refreshed_at: Option<Instant>,
+    /// Unfit readings since the last fit one.
+    unfit: u32,
 }
 
 impl Switch {
     /// The switch of a guard whose first reading is `first`, at `now`, and
-    /// the ruleset it starts with: a fit proxy keeps its node out (no hold:
-    /// a guard restart is no flap), any other reading withdraws it.
+    /// the ruleset it starts with: a fit proxy lets its node out (no hold: a
+    /// guard restart is no flap), any other reading withdraws it.
     pub fn start(timing: Timing, now: Instant, first: &Reading) -> (Self, Write, Option<Cause>) {
         let fit = *first == Reading::Fit;
-        let switch =
-            Self { timing, withdrawn: !fit, fit_since: fit.then_some(now), refreshed_at: None };
+        let switch = Self {
+            timing,
+            withdrawn: !fit,
+            fit_since: fit.then_some(now),
+            refreshed_at: None,
+            unfit: 0,
+        };
         if fit {
             (switch, Write::Refresh, None)
         } else {
@@ -121,6 +133,7 @@ impl Switch {
         }
         match reading {
             Reading::Fit => {
+                self.unfit = 0;
                 let since = *self.fit_since.get_or_insert(now);
                 let due = if self.withdrawn {
                     now.saturating_duration_since(since) >= self.timing.hold
@@ -135,7 +148,8 @@ impl Switch {
             }
             Reading::Unfit(reason) => {
                 self.fit_since = None;
-                if !self.withdrawn {
+                self.unfit = self.unfit.saturating_add(1);
+                if !self.withdrawn && self.unfit >= UNFIT_READINGS {
                     self.withdrawn = true;
                     step.write = Some(Write::Withdraw);
                     step.withdrawn = Some(Cause::Unfit(reason.clone()));
