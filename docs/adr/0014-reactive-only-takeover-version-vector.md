@@ -4,7 +4,7 @@
 INVITE in flight are taken over at its departure (ADR-0047). Amended (2026-10-16): §5, affinity
 is the ACK/CANCEL exemption and liveness routing, no fresh-pod guard (ADR-0050). Amended
 (2026-10-31): §2, a backup whose primary reads dead at a verdict releases the limiter key
-(ADR-0047 D8).
+(ADR-0047 D8). Amended (2026-11-03): §11, readiness waits for the Backup streams too.
 **Amends:** ADR-0011 Decision X11 — removes the *eager* (membership-driven) takeover
 and the *`Deactivate` watermark handshake*; **keeps** reactive takeover; **replaces**
 LWW-by-`gen` reconciliation with a per-context `(primary, backup)` version vector.
@@ -151,12 +151,16 @@ watermark collision that capped re-hydration at ~203/3000 — and conflated the
     old counter, insert at the max) that bounds the log to the live set; apply is
     idempotent under the `(p,b)` gate. `needs_reset` is per-`(peer,partition)`.
 
-11. **Readiness = Reclaim-first-Noop only.** `Ready` ⇔ every **Reclaim** stream to a
-    *reachable* peer hit its first Noop (hard-timer bounded — a dead peer cannot hang
-    readiness). **Backup** streams are opened only *after* `Ready`, are
-    fire-and-forget, and **never gate** readiness (observable via the store + a
-    received-non-Noop-frame counter, not a readiness sub-state). A cold node with no
-    calls reaches `Ready` at once (empty scan → immediate terminal Noop). The
+11. **Readiness = both flows' first Noop, Reclaim first.** `Ready` ⇔ every stream
+    to a *reachable* ready peer hit its first Noop, the **Reclaim** stream and then
+    the **Backup** stream, which opens once every Reclaim stream has: a node reads
+    ready only once it holds the calls its peers named it backup of, so an
+    orchestrator that waits for ready before its next disruption never takes down
+    a primary whose calls have no copy. Hard-timer bounded: a Backup stream never
+    reached is released by its own hard timer, or at once when the peer's Reclaim
+    stream was never reached by its own; a dead peer cannot hang readiness. A cold
+    node with no calls reaches `Ready` at once (empty scan → immediate terminal
+    Noop). The
     **server** side is independent of local readiness: a NotReady node still answers
     peers' pulls — it simply has nothing to hand over until it processes calls.
 

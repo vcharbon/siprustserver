@@ -3,8 +3,7 @@
 use repl_net::frame::{Frame, Watermark};
 
 /// Shared, observable per-`(peer, flow)` puller status. The supervisor reads
-/// `current` for readiness (scoped to the **Reclaim** flow) and the retained
-/// `watermark`.
+/// `current` for readiness (both flows) and the retained `watermark`.
 #[derive(Clone, Copy, Debug)]
 pub struct PullerStatus {
     /// Sticky current flag — set on the first `Noop`, never cleared.

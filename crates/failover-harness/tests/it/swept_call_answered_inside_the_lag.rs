@@ -52,15 +52,17 @@ async fn answer_the_end(party: &Agent) -> usize {
     byes
 }
 
-/// The departed node returns 4 s before the copy's ring deadline, its writes
-/// reaching the backup 1.8 s late — under the pullers' 2 s idle bound, so the
-/// lagging stream is kept — and the callee answers at it 1.5 s before the
-/// deadline. Past the deadline: the copy CANCELled the callee and refused the
-/// caller. Then the returned node ends the answered call, each party taking a
-/// BYE, and the call settles to one CDR.
+/// The departed node returns 5.5 s before the copy's ring deadline, its
+/// writes reaching the backup 1.8 s late — under the pullers' 2 s idle bound,
+/// so the lagging stream is kept. Its two flows' pulls reach the backup as
+/// late, one after the other, so it reads ready about 4 s later, and the
+/// callee answers at it about 1.2 s before the deadline. Past the deadline:
+/// the copy CANCELled the callee and refused the caller. Then the returned
+/// node ends the answered call, each party taking a BYE, and the call
+/// settles to one CDR.
 async fn answered_inside_the_lag_then_ended(mut p: Placed, stall_after_deadline: bool) {
     let deadline = depart(&mut p).await;
-    let wait = deadline - p.fh.now_ms() - 4_000;
+    let wait = deadline - p.fh.now_ms() - 5_500;
     p.fh.advance(Duration::from_millis(wait.max(0) as u64)).await;
     reboot(&mut p).await;
     p.fh.delay("b1", "b2", 1_800);

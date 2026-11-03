@@ -28,13 +28,13 @@
 //! turns into the `Draining` latch and its fence. Only a source that shows a
 //! member itself ([`Membership::observes_self`]) is read this way.
 //!
-//! ## Boot order: Reclaim first, Backup deferred
-//! A rebooting node prioritises reclaiming **its own** partition over taking on
-//! backup duty for others. Reclaim streams open immediately; the Backup streams
-//! open only after the Reclaim flows are all current-or-unreachable (the
-//! readiness gate). Backup never feeds readiness — its `current` flag is
-//! metrics-only — so deferring it is purely a bandwidth-prioritisation choice
-//! and has no correctness role (`(p,b)` makes any incidental overlap safe).
+//! ## Boot order: Reclaim first, Backup deferred, readiness waits for both
+//! A rebooting node reclaims **its own** partition before it takes on backup
+//! duty for others: Reclaim streams open immediately, the Backup streams once
+//! the Reclaim flows are all current-or-unreachable. Readiness waits for the
+//! Backup flows too (ADR-0014 §11), so a node reads ready only once it holds
+//! the calls its peers named it backup of. A peer the Reclaim flow never
+//! reached releases its Backup flow at the Reclaim flow's hard timer (X5).
 //!
 //! ## Watermark retention per `(ordinal, flow)`
 //! The authoritative watermark + current flag live in the supervisor, keyed by
@@ -42,13 +42,14 @@
 //! publishes its progress on a `watch` channel the supervisor mirrors; a
 //! re-spawned puller is seeded from the retained W so it resumes.
 //!
-//! ## Introspection (for tests / readiness) — Reclaim-scoped
+//! ## Introspection (for tests / readiness)
 //! [`is_current`](ReplicationSupervisor::is_current) /
-//! [`all_current`](ReplicationSupervisor::all_current) /
+//! [`all_bootstrapped`](ReplicationSupervisor::all_bootstrapped) /
 //! [`bootstrap_complete`](ReplicationSupervisor::bootstrap_complete) /
-//! [`watermark`](ReplicationSupervisor::watermark) all read the **Reclaim** flow
-//! — readiness depends on reclaiming our own partition, never on backing up
-//! others. The readiness state machine consumes `all_current`/`all_bootstrapped`.
+//! [`watermark`](ReplicationSupervisor::watermark) read the **Reclaim** flow;
+//! [`all_current`](ReplicationSupervisor::all_current) reads both flows of
+//! each peer. The readiness state machine consumes `all_current` and
+//! `all_bootstrapped`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -61,7 +62,7 @@ use tokio::sync::watch;
 use topology::{Membership, Peer};
 
 use super::peer_resolver::AddrResolver;
-use super::puller::{ConnectNow, Puller, PullerConfig, PullerStatus};
+use super::puller::{Puller, PullerConfig, PullerStatus};
 use super::self_endpoint::SelfObserver;
 use super::ReplicatingCallStore;
 use crate::poison::{locked, SUPERVISOR_PEERS, SUPERVISOR_WIRING};
@@ -69,11 +70,13 @@ use crate::poison::{locked, SUPERVISOR_PEERS, SUPERVISOR_WIRING};
 mod backup_deferral;
 mod bindings;
 mod follow;
+mod peer_entry;
 mod peer_link;
 mod shutdown;
 mod streams;
 mod wiring;
 
+use peer_entry::{FlowState, PeerEntry};
 pub use peer_link::PeerLink;
 
 /// One of the supervisor's wiring slots ([`SUPERVISOR_WIRING`]).
@@ -92,139 +95,12 @@ const DEFAULT_RECONCILE_PERIOD: Duration = Duration::from_secs(5);
 /// starts backing up its peers promptly after re-hydrating its own partition.
 const BACKUP_GATE_POLL: Duration = Duration::from_millis(100);
 
-/// Per-`(ordinal, flow)` retained replication state — survives Park/disconnect/
-/// re-add. One of these per flow lives inside a [`PeerEntry`].
-struct FlowState {
-    /// The running puller's status receiver (current flag + live watermark), or
-    /// `None` while Parked.
-    status_rx: Option<watch::Receiver<PullerStatus>>,
-    /// Cancel handle to interrupt the running puller (Park / re-spawn).
-    cancel_tx: Option<watch::Sender<bool>>,
-    /// Asks the running puller for one connect at once, or `None` while Parked.
-    connect_now: Option<ConnectNow>,
-    /// The retained watermark — authoritative, survives the puller task. Seeded
-    /// into the next puller on re-spawn.
-    watermark: Watermark,
-    /// Sticky current flag — retained across Park (never cleared, ADR-0011 X6).
-    current: bool,
-    /// Sticky bootstrap-complete flag (X5) — retained across Park. Set when the
-    /// puller hit the first catch-up `Noop`, the hard timer fired, or it resumed
-    /// warm.
-    bootstrap_complete: bool,
-    /// Highest reset generation absorbed from any puller for this flow. A puller
-    /// bumps its `reset_gen` when the server pushes `ResetToBootstrap` (watermark
-    /// forced back to `(0,0)`); a higher value here means we must pull the
-    /// retained watermark DOWN so a respawn re-bootstraps instead of resuming the
-    /// now-invalid high W.
-    reset_gen: u64,
-    /// Sticky: this flow was reached by a successful `connect` at least once. An
-    /// unreachable peer (never connected) that goes bootstrap-complete only by the
-    /// hard timer must NOT pin readiness NotReady (ADR-0011 X5 — liveness).
-    ever_connected: bool,
-}
-
 /// Why a reconcile (re)starts a flow's puller.
 fn flow_reason(drift: bool, ended: bool) -> &'static str {
     match (drift, ended) {
         (true, _) => "binding moved",
         (false, true) => "puller ended",
         (false, false) => "new peer",
-    }
-}
-
-impl FlowState {
-    /// Whether the flow's puller has ended while it was neither parked nor
-    /// replaced: a puller runs until it is cancelled, so only a panic ends
-    /// one the supervisor still holds the status of.
-    fn puller_ended(&self) -> bool {
-        self.status_rx.as_ref().is_some_and(|rx| rx.has_changed().is_err())
-    }
-
-    fn cold() -> Self {
-        Self {
-            status_rx: None,
-            cancel_tx: None,
-            connect_now: None,
-            watermark: Watermark::new(0, 0),
-            current: false,
-            bootstrap_complete: false,
-            reset_gen: 0,
-            ever_connected: false,
-        }
-    }
-
-    /// Fold the puller's latest published status into the retained copy. The
-    /// current and ever-connected flags are sticky (OR). A `reset_gen` advance means the server
-    /// forced a re-bootstrap: pull the watermark DOWN to `(0,0)` and clear
-    /// bootstrap-complete so a respawn re-bootstraps. Otherwise bootstrap-complete
-    /// is sticky and the watermark only advances.
-    fn absorb(&mut self) {
-        if let Some(rx) = &self.status_rx {
-            let s = *rx.borrow();
-            self.current |= s.current;
-            self.ever_connected |= s.ever_connected;
-            if s.reset_gen > self.reset_gen {
-                self.reset_gen = s.reset_gen;
-                self.watermark = s.watermark; // (0,0)
-                self.bootstrap_complete = s.bootstrap_complete; // false
-            } else {
-                self.bootstrap_complete |= s.bootstrap_complete;
-                if s.watermark > self.watermark {
-                    self.watermark = s.watermark;
-                }
-            }
-        }
-    }
-
-    /// True iff this flow is current OR was never reachable and best-effort
-    /// completed (the readiness predicate, ADR-0011 X5). A reachable-then-blipped
-    /// flow keeps the strict gate (sticky `current`).
-    fn ready(&self) -> bool {
-        self.current || (self.bootstrap_complete && !self.ever_connected)
-    }
-}
-
-/// Per-ordinal retained state: one [`FlowState`] per flow + the last binding.
-struct PeerEntry {
-    /// Reclaim flow (`partition = Pri`) — drives readiness + reclaim.
-    reclaim: FlowState,
-    /// Backup flow (`partition = Bak`) — metrics-only, deferred until ready.
-    backup: FlowState,
-    /// The membership binding — `host` and worker identity — the running
-    /// pullers were last spawned for. The drift signal for the periodic
-    /// snapshot reconcile (ADR-0012 D2): a desired peer whose host moved or
-    /// whose identity changed (ADR-0055 §6), or whose flows are not running,
-    /// is (re)spawned. `None` until a puller has been spawned for this ordinal.
-    binding: Option<(String, Option<String>)>,
-    /// The peer's `ready` condition as last reconciled. Not a drift signal — a
-    /// condition flip never respawns a flow — only what [`PeerLink::Kept`], the
-    /// transition log and the pulled-not-ready gauge read.
-    ready: bool,
-}
-
-impl PeerEntry {
-    fn cold() -> Self {
-        Self { reclaim: FlowState::cold(), backup: FlowState::cold(), binding: None, ready: true }
-    }
-
-    fn flow(&self, partition: Partition) -> &FlowState {
-        match partition {
-            Partition::Pri => &self.reclaim,
-            Partition::Bak => &self.backup,
-        }
-    }
-
-    /// Park BOTH flows: fold progress, interrupt, drop the status receivers. The
-    /// retained watermarks/current flags survive.
-    fn park(&mut self) {
-        for flow in [&mut self.reclaim, &mut self.backup] {
-            flow.absorb();
-            if let Some(tx) = flow.cancel_tx.take() {
-                let _ = tx.send(true);
-            }
-            flow.status_rx = None;
-            flow.connect_now = None;
-        }
     }
 }
 
@@ -586,15 +462,15 @@ impl ReplicationSupervisor {
         })
     }
 
-    /// Are ALL **desired** peers' **Reclaim** flows current — or unreachable? (The
-    /// readiness gate.) Empty set → `true`. Peers that have left membership or
-    /// are present but not ready are excluded
-    /// (`desired_ordinals`) so neither a parked entry
-    /// nor a pulled-not-ready one can pin readiness. A peer that is bootstrap-
-    /// complete only via the hard timer and was **never reached** does NOT block
-    /// readiness (per ADR-0011 X5 a node must boot and serve even when peers are
-    /// unreachable). A reachable-then-blipped peer **still desired** keeps the
-    /// strict gate (sticky `current`).
+    /// Are ALL **desired** peers' **Reclaim and Backup** flows current — or
+    /// unreachable? (The readiness gate, `PeerEntry::ready`.) Empty set →
+    /// `true`. Peers that have left membership or are present but not ready
+    /// are excluded (`desired_ordinals`) so neither a parked entry nor a
+    /// pulled-not-ready one can pin readiness. A flow that is bootstrap-
+    /// complete only via a hard timer and was **never reached** does NOT block
+    /// readiness (per ADR-0011 X5 a node must boot and serve even when peers
+    /// are unreachable). A reachable-then-blipped peer **still desired** keeps
+    /// the strict gate (sticky `current`).
     pub fn all_current(&self) -> bool {
         self.sync();
         let desired = self.desired_ordinals();
@@ -602,7 +478,7 @@ impl ReplicationSupervisor {
             .peers()
             .iter()
             .filter(|(ord, _)| desired.as_ref().is_none_or(|d| d.contains(ord.as_str())))
-            .all(|(_, e)| e.reclaim.ready())
+            .all(|(_, e)| e.ready())
     }
 
     /// Has `peer`'s **Reclaim** bootstrap completed (first `Noop`, hard timer, or
@@ -655,7 +531,7 @@ impl ReplicationSupervisor {
     }
 
     /// The retained watermark for a specific `(peer, flow)` (test introspection
-    /// into the Backup flow, which the readiness accessors do not expose).
+    /// into the Backup flow).
     pub fn flow_watermark(&self, peer: &str, partition: Partition) -> Watermark {
         self.sync();
         self.inner

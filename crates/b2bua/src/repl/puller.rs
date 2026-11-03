@@ -7,7 +7,7 @@
 //! the server pushes, reconnecting with exponential backoff across cuts. The
 //! supervisor runs **two** pullers per peer — a **Reclaim** flow (`partition =
 //! Pri`, arms timers / reclaims) and a **Backup** flow (`partition = Bak`, no
-//! timers, metrics-only). The watermark `W` each resumes from is **owned by the
+//! timers). The watermark `W` each resumes from is **owned by the
 //! supervisor** (retained per `(ordinal, flow)` across Park/disconnect/re-add)
 //! and passed in at construction.
 //!
@@ -160,7 +160,7 @@ pub struct Puller {
     /// This worker's identity, stated on every flow it opens (ADR-0055 §6).
     identity: Option<String>,
     /// The **flow** this puller serves: `Pri` = Reclaim (arm timers / reclaim),
-    /// `Bak` = Backup (no timers, metrics-only).
+    /// `Bak` = Backup (no timers).
     partition: Partition,
     /// Resolves `peer` to a [`SocketAddr`](std::net::SocketAddr) **fresh on
     /// every connect attempt** (ADR-0012 D3) — so a restarted peer's new IP is

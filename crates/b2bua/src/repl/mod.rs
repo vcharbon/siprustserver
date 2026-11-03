@@ -63,6 +63,9 @@ mod tests;
 mod anchor_tests;
 
 #[cfg(test)]
+mod backup_readiness_tests;
+
+#[cfg(test)]
 mod test_support;
 
 #[cfg(test)]

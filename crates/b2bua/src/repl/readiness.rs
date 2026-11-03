@@ -13,8 +13,9 @@
 //! ## Gating
 //! Readiness rides two sticky cluster signals exposed by
 //! [`ReplicationSupervisor`](super::ReplicationSupervisor): `all_bootstrapped`
-//! (every reachable peer re-hydrated) AND `all_current` (every peer's forward
-//! replog caught up). Both true ⇒ the node may serve.
+//! (every reachable peer's Reclaim flow re-hydrated) AND `all_current` (both
+//! flows of every reachable peer caught up: this node's own calls back, and
+//! the peer's calls it backs up). Both true ⇒ the node may serve.
 //!
 //! ## Latch + Draining precedence
 //! Once the gate has *ever* opened, [`Readiness::state`] latches `Ready`
@@ -143,7 +144,7 @@ pub enum OptionsReport {
 pub trait ReadinessSource: Send + Sync {
     /// Every reachable peer has finished Bootstrap re-hydration.
     fn all_bootstrapped(&self) -> bool;
-    /// Every peer's forward replog is caught up — sticky `current`.
+    /// Both flows of every peer are caught up — sticky `current`.
     fn all_current(&self) -> bool;
     /// The membership view behind the two gates may be read: it is
     /// authoritative (the informer's initial LIST completed), or it has had its
