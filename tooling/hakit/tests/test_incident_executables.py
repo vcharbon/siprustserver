@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from hakit.jsonval import Json, as_obj, number, objs
+
 from exe_kit import Rule, Sandbox, crash_rules, facts, failed, live, plane_rules, pod_rules, route_rule
 
 WORKERS = live("app=b2bua-worker", "w-0 u0 n1 True\n")
@@ -166,6 +168,11 @@ def test_the_held_probe_waits_while_the_killed_pod_remains(tmp_path: Path) -> No
 # ── front proxy routes: kill_proxy, cut_external_plane, proxy_rollout,
 #    speaker_restart, backend_outage, node_stop ───────────────────────────
 
+def withdrawn(f: Json) -> set[str]:
+    """The "vip addr" pairs an inject timed the withdrawal of."""
+    return set(as_obj(f["withdrawn_ms"]))
+
+
 IVIP, EVIP = "172.20.255.250", "192.168.60.250"
 PROXIES = live("app=sip-front-proxy", "p-0 u0 e1 True\np-1 u1 e2 True\n")
 PLANES = [*plane_rules("e1", "172.20.0.3", "192.168.60.11"), *plane_rules("e2", "172.20.0.4", "192.168.60.12")]
@@ -183,7 +190,7 @@ def test_kill_proxy_crashes_one_proxy_and_times_its_nodes_withdrawal(tmp_path: P
     f = facts(sb.run("inject"))
     assert sb.lines("task kill") == ["docker exec e2 ctr -n k8s.io task kill -s SIGKILL c1"]
     assert (f["pods"], f["node"], f["live_before"]) == (["p-1"], "e2", 1)
-    assert set(f["withdrawn_ms"]) == {f"{IVIP} 172.20.0.4", f"{EVIP} 192.168.60.12"}
+    assert withdrawn(f) == {f"{IVIP} 172.20.0.4", f"{EVIP} 192.168.60.12"}
     assert sb.index("ip -j route show") < sb.index("task kill")
 
 
@@ -224,7 +231,7 @@ def test_cut_external_plane_disconnects_one_proxy_node_and_times_both_withdrawal
     assert sb.index("docker network disconnect sipext e2") < sb.index("ip -j route show")
     assert (sb.event_dir / "cut").read_text().split() == ["e2", "192.168.60.12"]
     assert (f["node"], f["address"]) == ("e2", "192.168.60.12")
-    assert set(f["withdrawn_ms"]) == {f"{IVIP} 172.20.0.4", f"{EVIP} 192.168.60.12"}
+    assert withdrawn(f) == {f"{IVIP} 172.20.0.4", f"{EVIP} 192.168.60.12"}
 
 
 def test_cut_external_plane_fails_while_the_internal_vip_stays_announced(tmp_path: Path) -> None:
@@ -252,7 +259,7 @@ def test_cut_probe_waits_for_the_reconnected_node_in_the_routes(tmp_path: Path) 
     sb.rules(PROXIES, *PLANES, route_rule(IVIP, "172.20.0.3"), route_rule(EVIP, "192.168.60.11", "192.168.60.12"))
     assert sb.run("probe").returncode == 75
     sb.rules(PROXIES, *PLANES, *BOTH)
-    assert facts(sb.run("probe"))["next_hops"][IVIP] == ["172.20.0.3", "172.20.0.4"]
+    assert as_obj(facts(sb.run("probe"))["next_hops"])[IVIP] == ["172.20.0.3", "172.20.0.4"]
 
 
 def rollout_routes(vip: str, a: str, b: str) -> list[Rule]:
@@ -274,12 +281,12 @@ def test_proxy_rollout_times_each_pods_drain_withdrawal_and_return(tmp_path: Pat
              *rollout_routes(EVIP, "192.168.60.11", "192.168.60.12"))
     f = facts(sb.run("inject"))
     assert sb.index("rollout restart") < sb.index("ip -j route show")
-    rows = {(r["pod"], r["vip"]): r for r in f["routes"]}
+    rows = {(str(r["pod"]), str(r["vip"])): r for r in objs(f, "routes")}
     assert set(rows) == {(p, v) for p in ("p-0", "p-1") for v in (IVIP, EVIP)}
     for r in rows.values():
         assert r["drain_at_ms"] == 1793700000500
-        assert r["announced_at_ms"] >= r["withdrawn_at_ms"]
-    assert f["max_drain_to_withdrawn_ms"] == max(r["drain_to_withdrawn_ms"] for r in rows.values())
+        assert number(r, "announced_at_ms") >= number(r, "withdrawn_at_ms")
+    assert f["max_drain_to_withdrawn_ms"] == max(number(r, "drain_to_withdrawn_ms") for r in rows.values())
 
 
 def test_proxy_rollout_probe_waits_for_the_rollout_and_the_routes(tmp_path: Path) -> None:
@@ -305,7 +312,7 @@ def test_speaker_restart_deletes_the_speakers_of_one_proxy_node(tmp_path: Path) 
         "kubectl --context kind-lab -n metallb-system delete pod frr-k8s-y --wait=false",
     ]
     assert (f["node"], f["pods"]) == ("e2", ["speaker-x", "frr-k8s-y"])
-    assert set(f["withdrawn_ms"]) == {f"{IVIP} 172.20.0.4", f"{EVIP} 192.168.60.12"}
+    assert withdrawn(f) == {f"{IVIP} 172.20.0.4", f"{EVIP} 192.168.60.12"}
 
 
 def test_a_speaker_restart_that_withdraws_nothing_is_recorded_not_failed(tmp_path: Path) -> None:
@@ -331,7 +338,7 @@ def test_backend_outage_freezes_every_worker_and_times_every_withdrawal(tmp_path
              *pod_rules("w-0", "n1", "u0", frozen="1"), route_rule(IVIP), route_rule(EVIP))
     f = facts(sb.run("inject"))
     assert f["pods"] == ["w-0"]
-    assert set(f["withdrawn_ms"]) == {f"{IVIP} 172.20.0.3", f"{EVIP} 192.168.60.11",
+    assert withdrawn(f) == {f"{IVIP} 172.20.0.3", f"{EVIP} 192.168.60.11",
                                       f"{IVIP} 172.20.0.4", f"{EVIP} 192.168.60.12"}
 
 
@@ -351,7 +358,7 @@ def test_node_stop_of_a_proxy_node_times_its_withdrawal(tmp_path: Path) -> None:
              Rule(r"^docker stop -t 0 e2$"), *E1_ONLY)
     f = facts(sb.run("inject"))
     assert sb.index("docker stop") < sb.index("ip -j route show")
-    assert set(f["withdrawn_ms"]) == {f"{IVIP} 172.20.0.4", f"{EVIP} 192.168.60.12"}
+    assert withdrawn(f) == {f"{IVIP} 172.20.0.4", f"{EVIP} 192.168.60.12"}
 
 
 def test_node_stop_without_a_vip_reads_no_route(tmp_path: Path) -> None:
@@ -381,4 +388,4 @@ def test_cut_proxy_workers_drops_the_workers_on_one_proxy_node_and_times_its_wit
     f = facts(sb.run("inject"))
     assert len(sb.lines("iptables -I INPUT")) == 2
     assert (f["node"], f["workers"]) == ("e2", ["10.244.1.5", "10.244.2.7"])
-    assert set(f["withdrawn_ms"]) == {f"{IVIP} 172.20.0.4", f"{EVIP} 192.168.60.12"}
+    assert withdrawn(f) == {f"{IVIP} 172.20.0.4", f"{EVIP} 192.168.60.12"}

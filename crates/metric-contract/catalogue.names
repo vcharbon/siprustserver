@@ -286,6 +286,7 @@ sip-proxy-runner sip_proxy_udp_recv_errors_total counter fixed {}
 sip-proxy-runner sip_proxy_intake_shed_total counter fixed {}
 sip-proxy-runner sip_proxy_intake_unanswerable_total counter fixed {}
 sip-proxy-runner sip_proxy_recv_shards_stalled gauge fixed {}
+sip-proxy-runner sip_proxy_external_face_usable gauge fixed {}
 sip-proxy-runner sip_proxy_worker_pool_empty gauge fixed {}
 sip-proxy-runner sip_proxy_discovery_no_client gauge fixed {}
 sip-proxy-runner sip_proxy_discovery_watch_broken_since_seconds gauge fixed {}
