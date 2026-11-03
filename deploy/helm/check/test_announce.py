@@ -70,11 +70,11 @@ class RenderRelations(unittest.TestCase):
     """One refusal per relation, each naming every value involved."""
 
     def test_the_drain_outlasts_the_withdrawal(self) -> None:
-        err = render_error(SIPRUST, *KIND, "--set", "proxy.announce.propagationMs=11001")
-        for name in ("PROXY_DRAIN_GRACE_MS=13000", "periodSeconds=1", "failureThreshold=2",
-                     "propagationMs=11001"):
+        err = render_error(SIPRUST, *KIND, "--set", "proxy.announce.propagationMs=6800")
+        for name in ("PROXY_DRAIN_GRACE_MS=8800", "periodSeconds=1", "failureThreshold=2",
+                     "propagationMs=6800"):
             self.assertIn(name, err)
-        render(SIPRUST, *KIND, "--set", "proxy.announce.propagationMs=10999",
+        render(SIPRUST, *KIND, "--set", "proxy.announce.propagationMs=6799",
                "--set", "proxy.minReadySeconds=20")
 
     def test_a_rollout_waits_for_the_announcement(self) -> None:

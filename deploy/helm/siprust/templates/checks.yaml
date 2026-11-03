@@ -79,7 +79,7 @@ operator's to keep consistent.
 {{- if .Values.proxy.enabled }}
 {{- $p := .Values.proxy }}
 {{- $penv := $p.env | default dict }}
-{{- $pgrace := include "siprust.envInt" (list $penv "PROXY_DRAIN_GRACE_MS" 13000) | int64 }}
+{{- $pgrace := include "siprust.envInt" (list $penv "PROXY_DRAIN_GRACE_MS" 8800) | int64 }}
 {{- $pterm := mul (int64 $p.terminationGracePeriodSeconds) 1000 }}
 {{- if le $pterm (add $pgrace $margin) }}
 {{- fail (printf "proxy.terminationGracePeriodSeconds=%d s must exceed PROXY_DRAIN_GRACE_MS=%d + %d ms: the kubelet would kill the proxy's drain" (int64 $p.terminationGracePeriodSeconds) $pgrace $margin) }}
