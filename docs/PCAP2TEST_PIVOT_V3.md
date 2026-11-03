@@ -1380,6 +1380,12 @@ A `send` never releases an `optional` expect it overtakes. §6.5 releases on a
 MATCH, and a send is emitted, not matched — releasing on one would discard a
 message still in flight, which then arrives as an unmatched datagram.
 
+A response `send` anchored on a released `optional` REQUEST expect of its own
+leg is moot: the request it answers never arrived, so nothing goes on the wire
+and the step completes. That is how a document answers a request that may or
+may not come (a relay a race decides): the request tolerated, its answer
+anchored on it.
+
 **`unordered`** — all of these must arrive, order free.
 
 ```json

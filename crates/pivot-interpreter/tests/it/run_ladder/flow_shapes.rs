@@ -252,3 +252,28 @@ async fn rung_three_two_calls_interleave_through_after() {
     }
     scene.finish().await;
 }
+
+/// A TOLERATED REQUEST and its answer: leg B scripts an `optional` INFO the
+/// system never sends, and its 200 behind it. The caller's BYE releases the
+/// absence (§6.5), and the answer to a request the leg never received is moot:
+/// nothing reaches the wire, and the call ends clean.
+#[tokio::test(start_paused = true)]
+async fn an_answer_to_a_tolerated_request_that_never_came_is_moot() {
+    let scene = api_scene("pivot-optional-request-answer-moot").await;
+    let (outcome, dir) = replay(&scene, "optional-request-answer-moot.v3.json").await;
+    assert_bundle_is_complete(&outcome, &dir);
+    assert!(outcome.verdict.failures.is_empty(), "{:#?}", outcome.verdict.failures);
+    let b_leg = &outcome.recording.legs()["B"];
+    let answer = b_leg.iter().find(|m| m.step.as_deref() == Some("s12")).expect("s12 is recorded");
+    assert!(
+        answer.wire().is_empty() && answer.note.as_deref().is_some_and(|n| n.starts_with("moot")),
+        "{answer:#?}"
+    );
+    assert!(
+        !b_leg.iter().map(text).any(|m| m.contains(" INFO\r\n")),
+        "no INFO answer reached the wire"
+    );
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}
