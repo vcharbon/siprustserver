@@ -64,10 +64,11 @@ class DriftSpec:
     drained_baseline: list[str] = field(default_factory=lambda: [])
     drained_baseline_tolerance: float = 0
     drained_settle_s: float = 47
-    # Counters that must not grow outside the windows: each gap between the
-    # windows, each padded by `quiet_pad_s` after its close (and the load's
-    # start), up to the read. A call limiter's lease lapses count a release it
-    # never received, one lease after it was due.
+    # Counters, by name or by selector with labels, that must not grow
+    # outside the windows: each gap between the windows, each padded by
+    # `quiet_pad_s` after its close (and the load's start), up to the read. A
+    # call limiter's lease lapses count a release it never received, one
+    # lease after it was due.
     quiet_zero_increase: list[str] = field(default_factory=lambda: [])
     quiet_pad_s: float = 0
     # One CDR outcome (written or dropped) per completed call, per worker.
