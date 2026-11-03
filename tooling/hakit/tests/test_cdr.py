@@ -342,3 +342,30 @@ def test_a_refused_call_the_profile_requires_a_cdr_for_is_charged_without_one(tm
     (w,) = jv.objs(v, "windows")
     mismatch = [r for r in jv.objs(w, "impacts") if r["class"] == "cdr_mismatch"]
     assert [(r["count"], r["call_ids"], r["finding"]) for r in mismatch] == [(1, ["bare"], True)]
+
+
+def test_a_duration_that_differs_at_the_answer_is_charged_at_the_answer(tmp_path: Path) -> None:
+    """The caller's answer came 3.5 s after the CDR's (a 2xx retransmitted past
+    a fault) and both ends agree: the mismatch is the window's that held the
+    answer, though the call ended after it, and its excess is that delay."""
+    budget: Json = {"schema": "budget.v1", "name": "cut", "description": "d", "cdr_mismatch": {"differs": {"excess_ms": 3000}}}
+    at = T0 + 100_000  # the window is [+100 s, +145 s]
+    late = record("late", at + 1_000, answered=4_600, ended=180_000)
+    d = run_dir(
+        tmp_path,
+        [late],
+        calls=1,
+        events=kill(1, at, budget="cut"),
+        budgets=[budget],
+        profile={"cdr_join": True, "generator_stall_ms": 3_600_000},
+        cdrs=[cdr("late", at + 1_000, 1_100, 180_000)],
+    )
+    v = compute(d, SCHEMAS)
+    (w,) = jv.objs(v, "windows")
+    assert [(r["reason"], r["count"], r["allowed"], r["finding"]) for r in jv.objs(w, "impacts") if r["class"] == "cdr_mismatch"] == [
+        ("differs", 1, 1.0, False)
+    ]
+    assert jv.objs(v, "in_dialog") == []
+    assert details([late], [cdr("late", at + 1_000, 1_100, 180_000)]) == [
+        ("late", at + 1_000 + 4_600, "CDR duration 178900 ms, the caller's 175400 ms (allowed 1001 ms apart)")
+    ]

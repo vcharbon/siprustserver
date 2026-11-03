@@ -391,7 +391,9 @@ made. A run profile joins the two.
      1 s plus the CDR's unit; for a `cut` or `stranded` call, an impact
      already, a CDR ending more than 1 s plus its unit after the record's
      `ended_at_ms` (the call billed past the caller's end); each at the
-     record's `ended_at_ms`, with its excess past that tolerance.
+     record's `ended_at_ms`, with its excess past that tolerance, but a
+     duration whose ends agree within that tolerance at the record's
+     `answered_at_ms`: the two part at the answer.
 
    An unanswered call without a CDR is no mismatch, unless the profile's
    `cdr_required` names its ending (and optionally its final's code and
