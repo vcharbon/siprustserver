@@ -93,6 +93,14 @@
       "type": "integer",
       "minimum": 0
     },
+    "disruptionBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "maxUnavailable": { "type": "integer", "minimum": 1 }
+      }
+    },
     "port": {
       "type": "integer",
       "minimum": 1,
@@ -300,6 +308,9 @@
         "terminationGracePeriodSeconds": {
           "$ref": "#/definitions/count"
         },
+        "podDisruptionBudget": {
+          "$ref": "#/definitions/disruptionBudget"
+        },
         "resources": {
           "$ref": "#/definitions/resources"
         },
@@ -421,6 +432,9 @@
         },
         "terminationGracePeriodSeconds": {
           "$ref": "#/definitions/count"
+        },
+        "podDisruptionBudget": {
+          "$ref": "#/definitions/disruptionBudget"
         },
         "resources": {
           "$ref": "#/definitions/resources"

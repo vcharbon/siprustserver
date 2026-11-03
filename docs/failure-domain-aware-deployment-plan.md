@@ -6,7 +6,7 @@
 > env var, and manifest is what will be *added*, not what is. Do not cite this as
 > current behaviour. The current behaviour is: zone-blind `w_bak` selection, a
 > single un-anti-affined worker StatefulSet on 2 `tier=app` nodes, multicast
-> VRRP, no PodDisruptionBudget.
+> VRRP, one worker and one proxy PodDisruptionBudget (`maxUnavailable: 1`).
 
 **Design source:** [`docs/adr/0015-failure-domain-aware-placement-and-backup.md`](adr/0015-failure-domain-aware-placement-and-backup.md)
 **Glossary:** `CONTEXT.md` → **Failure domain**, **Distinct-zone backup**.

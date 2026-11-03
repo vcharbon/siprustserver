@@ -118,6 +118,9 @@ worker:
   # B2BUA_DRAIN_RELEASE_FLUSH_MS + B2BUA_DRAIN_CDR_FLUSH_MS + 2 s (refused at
   # render otherwise; templates/checks.yaml holds every render-time relation).
   terminationGracePeriodSeconds: 30
+  # Voluntary disruptions (a node drain, an eviction) take one worker at a
+  # time; a returned worker counts until it reads ready, its backups held.
+  podDisruptionBudget: { enabled: true, maxUnavailable: 1 }
   resources:
     requests: { cpu: "250m", memory: "128Mi" }
     limits: { memory: "2Gi" }
@@ -188,6 +191,8 @@ proxy:
   priorityClassName: ""
   # Above PROXY_DRAIN_GRACE_MS + 2 s (refused at render otherwise).
   terminationGracePeriodSeconds: 30
+  # Voluntary disruptions take one proxy at a time.
+  podDisruptionBudget: { enabled: true, maxUnavailable: 1 }
   resources:
     requests: { cpu: "500m", memory: "64Mi" }
     limits: { memory: "512Mi" }

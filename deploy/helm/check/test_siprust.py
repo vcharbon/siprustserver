@@ -200,12 +200,14 @@ class Backends(unittest.TestCase):
     def test_each_component_turns_off_alone(self) -> None:
         every = names(render(SIPRUST, *KIND))
         for key, gone in (
-                ("worker.enabled", {("StatefulSet", "b2bua-worker"), ("Service", "b2bua-worker")}),
+                ("worker.enabled", {("StatefulSet", "b2bua-worker"), ("Service", "b2bua-worker"),
+                                    ("PodDisruptionBudget", "b2bua-worker")}),
                 ("proxy.enabled", {("Deployment", "sip-front-proxy"), ("Service", "sip-front-proxy"),
                                    ("ConfigMap", "sip-front-proxy-keepalived"),
                                    ("Secret", "sip-front-proxy-hmac"),
                                    ("ServiceAccount", "sip-front-proxy"),
-                                   ("RoleBinding", "sip-front-proxy-endpointslice-reader")}),
+                                   ("RoleBinding", "sip-front-proxy-endpointslice-reader"),
+                                   ("PodDisruptionBudget", "sip-front-proxy")}),
                 ("callLimiter.enabled", {("Deployment", "call-limiter"), ("Service", "call-limiter")}),
                 ("cdr.consumer.enabled", {("Deployment", "cdr-consumer"), ("Service", "cdr-consumer")}),
                 ("masqExempt.enabled", {("DaemonSet", "masq-exempt")})):
@@ -259,6 +261,20 @@ class GenericDefaults(unittest.TestCase):
             return [c["whenUnsatisfiable"] for c in pod_spec(w)["topologySpreadConstraints"]]
         self.assertEqual(spread(*self.NETWORK), ["ScheduleAnyway"])
         self.assertEqual(spread(*KIND), ["DoNotSchedule"])
+
+
+class DisruptionBudgets(unittest.TestCase):
+    def test_one_worker_and_one_proxy_at_a_time(self) -> None:
+        docs = render(SIPRUST, *KIND)
+        for app in ("b2bua-worker", "sip-front-proxy"):
+            spec = find(docs, "PodDisruptionBudget", app)["spec"]
+            self.assertEqual((spec["maxUnavailable"], spec["selector"]), (1, {"matchLabels": {"app": app}}))
+
+    def test_a_budget_follows_its_values(self) -> None:
+        docs = render(SIPRUST, *KIND, "--set", "proxy.podDisruptionBudget.enabled=false")
+        self.assertNotIn(("PodDisruptionBudget", "sip-front-proxy"), names(docs))
+        self.assertIn("maxUnavailable': minimum: got 0, want 1",
+                      render_error(SIPRUST, *KIND, "--set", "worker.podDisruptionBudget.maxUnavailable=0"))
 
 
 class Workloads(unittest.TestCase):

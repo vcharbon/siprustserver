@@ -19,6 +19,7 @@ GROUPS: dict[str, list[dict[str, Any]]] = {
     "/api/v1": [resource(k) for k in ("Secret", "ConfigMap", "Service", "ServiceAccount", "Pod")]
     + [resource("Namespace", namespaced=False)],
     "/apis/apps/v1": [resource(k) for k in ("Deployment", "StatefulSet", "DaemonSet", "ReplicaSet")],
+    "/apis/policy/v1": [resource("PodDisruptionBudget")],
     "/apis/rbac.authorization.k8s.io/v1": [resource("Role"), resource("RoleBinding"),
                                            resource("ClusterRole", namespaced=False),
                                            resource("ClusterRoleBinding", namespaced=False)],

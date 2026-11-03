@@ -560,6 +560,42 @@ spec:
           name: sip-front-proxy-keepalived
         name: keepalived-conf
 ---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  labels:
+    app: b2bua-worker
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: b2bua-worker
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: b2bua-worker
+  namespace: sip-test
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: b2bua-worker
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  labels:
+    app: sip-front-proxy
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: sip-front-proxy
+    app.kubernetes.io/part-of: siprust
+    helm.sh/chart: siprust-0.1.0
+  name: sip-front-proxy
+  namespace: sip-test
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: sip-front-proxy
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
