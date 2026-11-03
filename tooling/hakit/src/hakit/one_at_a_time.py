@@ -1,8 +1,9 @@
 """Pods a profile faults one at a time (`one_at_a_time`): a redundant
 backend whose replicas the run never takes down together.
 
-Each entry names a label selector. Every scheduled event aimed at it (its
-incident's target selector, or the event's own) picks one pod, and the next
+Each entry names a label selector, compared as a set of requirements. Every
+scheduled event aimed at it (its incident's target selector, or the event's
+own) fires one incident on it, which picks one pod, and the next
 such event fires at least `gap_s` after the previous one's recovery bound
 (`at_s + expected_s`): the client's time to spread its connections again
 before another replica is faulted. Before the load, at least `min_ready` pods
@@ -21,15 +22,22 @@ from .profile import OneAtATime, Profile
 from .schedule import PlannedEvent, target_of
 
 
+def normalised(selector: str) -> tuple[str, ...]:
+    """A label selector as a set of requirements: `a=b, c=d` and `c=d,a=b`
+    are one selector."""
+    return tuple(sorted(p.strip().replace(" ", "") for p in selector.split(",") if p.strip()))
+
+
 def _aimed(spec: OneAtATime, ev: PlannedEvent, incidents: dict[str, Incident]) -> list[tuple[str, str]]:
     """The incidents of `ev` aimed at `spec`'s selector, each with its pick."""
     out: list[tuple[str, str]] = []
+    want = normalised(spec.selector)
     for name in ev.spec.incidents:
         inc = incidents.get(name)
         if inc is None:
             continue
         selector, _, pick = target_of(inc, ev.spec)
-        if selector == spec.selector:
+        if normalised(selector) == want:
             out.append((name, pick))
     return out
 
@@ -49,6 +57,9 @@ def one_at_a_time_errors(where: str, profile: Profile, events: list[PlannedEvent
             for name, pick in aimed:
                 if pick != "one":
                     errs.append(f"{w}: event {ev.event_id} fires {name} with pick {pick!r}, not 'one'")
+            if len(aimed) > 1:
+                names = ", ".join(n for n, _ in aimed)
+                errs.append(f"{w}: event {ev.event_id} fires {names} together, each on its own pod")
             if previous is not None:
                 ready_at = previous.at_s + previous.expected_s + spec.gap_s
                 if ev.at_s < ready_at:

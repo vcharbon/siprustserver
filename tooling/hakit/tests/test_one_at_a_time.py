@@ -15,7 +15,7 @@ from hakit.content import Content, discover
 from hakit.executor import Call, FakeExecutor, ProcResult
 from hakit.jsonval import Json
 from hakit.lab import lab_from_env
-from hakit.one_at_a_time import ready_errors, ready_pods
+from hakit.one_at_a_time import normalised, ready_errors, ready_pods
 from hakit.paths import BASE_CONTENT
 from hakit.schemas import SchemaSet
 
@@ -128,3 +128,23 @@ def test_the_run_is_refused_under_min_ready(tmp_path: Path) -> None:
     assert got == ["one_at_a_time 'app=backend': 1 pods ready, under min_ready 2"]
     answer = pods(True, True)
     assert ready_errors(c.profiles["p"], lab_from_env({}), fake) == []
+
+
+def test_two_incidents_of_one_event_on_the_selector_are_refused(tmp_path: Path) -> None:
+    both: Json = {
+        "at_s": 60,
+        "incidents": ["stop_backend", "stop_other"],
+        "budget": "any",
+        "target": {"stop_backend": {"pick": "one"}, "stop_other": {"selector": "app=backend", "pick": "one"}},
+    }
+    c = content(tmp_path, [both], one_at_a_time=[SPARE])
+    assert errors(c) == [
+        "profile 'p': one_at_a_time 'app=backend': event 001-stop_backend+stop_other fires stop_backend, stop_other together, each on its own pod"
+    ]
+
+
+def test_a_selector_is_compared_as_its_requirements(tmp_path: Path) -> None:
+    every: Json = {"at_s": 60, "incident": "stop_other", "budget": "any", "target": {"selector": "tier=b, app=backend"}}
+    c = content(tmp_path, [every], one_at_a_time=[{"selector": "app=backend,tier=b", "gap_s": 60}])
+    assert errors(c) == []
+    assert normalised("tier=b, app=backend") == normalised("app=backend,tier=b")
