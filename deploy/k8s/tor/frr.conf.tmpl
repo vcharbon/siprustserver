@@ -1,6 +1,6 @@
 ! The kind lab's top-of-rack router: FRR in a host-network container
 ! (deploy/helm/lib/tor.sh renders this file from deploy/k8s/lib/net-env.sh,
-! each @NAME@ replaced by that variable). eBGP with the edge nodes' MetalLB
+! each placeholder between at-signs replaced by the variable it names). eBGP with the edge nodes' MetalLB
 ! speakers on both bridges: the internal VIP is accepted from the internal
 ! bridge only and the external VIP from the external bridge only, so neither
 ! VIP is ever routed onto the other plane. Multipath over every node that
