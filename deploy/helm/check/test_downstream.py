@@ -36,6 +36,7 @@ PRODUCT_VALUES: dict[str, Any] = {
             "resources": {"requests": {"cpu": "2", "memory": "64Mi"}},
             "hmac": {"existingSecret": "product-cookie"},
             "nodeSelector": {"tier": "edge"},
+            "routeGuard": {"peers": ["172.20.0.1", "192.168.60.1"]},
             "extraContainers": [{
                 "name": "media-relay",
                 "image": "media-relay:0.1",
@@ -106,7 +107,8 @@ class DownstreamChart(unittest.TestCase):
 
     def test_a_media_relay_rides_the_proxy_pod_on_the_external_plane(self) -> None:
         spec = pod_spec(self.proxy())
-        self.assertEqual([c["name"] for c in spec["containers"]], ["sip-front-proxy", "media-relay"])
+        self.assertEqual([c["name"] for c in spec["containers"]],
+                         ["sip-front-proxy", "route-guard", "media-relay"])
         self.assertEqual(spec["volumes"], [{"name": "relay-state", "emptyDir": {}}])
         self.assertTrue(spec["hostNetwork"])
 

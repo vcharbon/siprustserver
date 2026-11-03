@@ -39,7 +39,8 @@ class CookieKey(unittest.TestCase):
         with FakeKube({SECRET_PATH: secret}) as kube:
             # The stand-in API server serves no MetalLB API.
             docs = render(SIPRUST, *KIND, "--set", "proxy.hmac.kid=k2",
-                          "--set", "proxy.announce.metallb.enabled=false", "--dry-run=server",
+                          "--set", "proxy.announce.metallb.enabled=false",
+                          "--set", "proxy.routeGuard.enabled=false", "--dry-run=server",
                           "--disable-openapi-validation", "--kubeconfig",
                           str(kube.kubeconfig(directory)))
         self.assertIn(SECRET_PATH, kube.requests)

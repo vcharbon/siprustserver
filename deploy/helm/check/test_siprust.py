@@ -124,7 +124,8 @@ class Network(unittest.TestCase):
                           ready["failureThreshold"], ready["successThreshold"]),
                          ("/readyz", 1, 2, 1))
         self.assertEqual(proxy["spec"]["minReadySeconds"], 10)
-        self.assertEqual([c["name"] for c in pod_spec(proxy)["containers"]], ["sip-front-proxy"])
+        self.assertEqual([c["name"] for c in pod_spec(proxy)["containers"]],
+                         ["sip-front-proxy", "route-guard"])
 
     def test_no_worker_shares_a_proxy_node(self) -> None:
         proxy = find(render(SIPRUST, *KIND), "Deployment", "sip-front-proxy")
@@ -325,7 +326,8 @@ class GenericDefaults(unittest.TestCase):
                "--set", "network.internalCidrs=10.0.0.0/16",
                "--set", "worker.networkPolicy.proxyNodeCidrs={10.0.0.0/24}",
                "--set", "proxy.hmac.existingSecret=edge-cookie",
-               "--set", "proxy.nodeSelector.sip-role=edge"]
+               "--set", "proxy.nodeSelector.sip-role=edge",
+               "--set", "proxy.routeGuard.peers={10.0.0.1}"]
     DERIVED = {
         "b2bua-worker": {"B2BUA_LISTEN", "B2BUA_ADVERTISE", "B2BUA_ORDINAL", "B2BUA_METRICS",
                          "B2BUA_ADMIN",

@@ -490,6 +490,11 @@
                       "maximum": 255
                     }
                   }
+                },
+                "connectTimeSeconds": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
                 }
               }
             }
@@ -552,6 +557,47 @@
         },
         "priorityClassName": {
           "type": "string"
+        },
+        "routeGuard": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "peers": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "format": "ipv4"
+              }
+            },
+            "pollMs": {
+              "type": "integer",
+              "minimum": 10,
+              "maximum": 10000
+            },
+            "deadMs": {
+              "type": "integer",
+              "minimum": 40,
+              "maximum": 600000
+            },
+            "holdMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 600000
+            },
+            "metricsPort": {
+              "$ref": "#/definitions/port"
+            },
+            "withdrawWithinMs": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "resources": {
+              "$ref": "#/definitions/resources"
+            }
+          }
         }
       }
     },

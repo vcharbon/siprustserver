@@ -37,7 +37,8 @@ class MetallbObjects(unittest.TestCase):
             self.assertEqual(spec["nodeSelectors"], [{"matchLabels": {"tier": "edge"}}])
 
     def test_off_leaves_the_objects_to_the_operator_and_keeps_the_services(self) -> None:
-        docs = render(SIPRUST, *KIND, "--set", "proxy.announce.metallb.enabled=false")
+        docs = render(SIPRUST, *KIND, "--set", "proxy.announce.metallb.enabled=false",
+                      "--set", "proxy.routeGuard.peers={172.20.0.1}")
         self.assertFalse([d for d in docs if d["apiVersion"].startswith("metallb.io/")])
         find(docs, "Service", "sip-front-proxy-internal")
         find(docs, "Service", "sip-front-proxy-external")
@@ -56,6 +57,7 @@ class MetallbObjects(unittest.TestCase):
         self.assertIn("network.externalNextHops=[192.168.60.9] must be the external BGP peers", err)
         self.assertIn("[192.168.60.1]", err)
         render(SIPRUST, *KIND, "--set", "proxy.announce.metallb.enabled=false",
+               "--set", "proxy.routeGuard.enabled=false",
                "--set", "network.externalNextHops={192.168.60.9}")
 
     def test_a_load_balancer_class_is_passed_on(self) -> None:

@@ -74,6 +74,9 @@ spec:
         {{- include "siprust.podLabels" (dict "app" "sip-front-proxy" "extra" $p.podLabels) | nindent 8 }}
       annotations:
         {{- $base := dict "prometheus.io/scrape" "true" "prometheus.io/port" "9090" }}
+        {{- if $p.routeGuard.enabled }}
+        {{- $_ := set $base "prometheus.io/sidecar-port" (toString (int $p.routeGuard.metricsPort)) }}
+        {{- end }}
         {{- include "siprust.podAnnotations" (dict "base" $base "extra" $p.podAnnotations) | nindent 8 }}
     spec:
       serviceAccountName: sip-front-proxy
@@ -97,6 +100,21 @@ spec:
             - labelSelector: { matchLabels: { app: b2bua-worker } }
               topologyKey: kubernetes.io/hostname
       initContainers:
+        {{- if $p.routeGuard.enabled }}
+        # The node starts withdrawn: its BFD and BGP to the routers stay
+        # dropped until the route guard reads the proxy fit for the hold, so
+        # an EndpointSlice still naming the pod Ready from before a node
+        # restart announces nothing.
+        - name: route-guard-hold
+          {{- include "siprust.image" (dict "root" $ "image" $p.image) | nindent 10 }}
+          command: ["/usr/local/bin/route-guard", "--withdraw"]
+          env:
+            {{- include "siprust.routeGuardEnv" . | nindent 12 }}
+          securityContext:
+            {{- include "siprust.routeGuardSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml $p.routeGuard.resources | nindent 12 }}
+        {{- end }}
         - name: vip-loopback
           {{- include "siprust.netToolsImage" . | nindent 10 }}
           command: ["/bin/sh", "-c"]
@@ -107,6 +125,7 @@ spec:
             - { name: PROXY_VIP, value: {{ $vip | quote }} }
             - { name: EXTERNAL_VIP, value: {{ $extVip | quote }} }
             - { name: UNRES_QLEN_BYTES, value: {{ int $p.unresQlenBytes | toString | quote }} }
+            - { name: ROUTE_GUARD, value: {{ ternary "on" "off" $p.routeGuard.enabled | quote }} }
           securityContext:
             privileged: true
             capabilities: { add: ["NET_ADMIN"] }
@@ -167,6 +186,28 @@ spec:
           volumeMounts:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+        {{- if $p.routeGuard.enabled }}
+        {{- $g := $p.routeGuard }}
+        # The route guard (ADR-0056 §10): reads /fitz over loopback and drops
+        # the node's BFD and BGP to the routers while the proxy is unfit, hung
+        # or gone, so they withdraw the node within their BFD detection time.
+        # The pod's only NET_ADMIN after its init container.
+        - name: route-guard
+          {{- include "siprust.image" (dict "root" $ "image" $p.image) | nindent 10 }}
+          command: ["/usr/local/bin/route-guard"]
+          env:
+            {{- include "siprust.routeGuardEnv" . | nindent 12 }}
+          ports:
+            - { name: guard-metrics, containerPort: {{ int $g.metricsPort }}, protocol: TCP }
+          livenessProbe:
+            httpGet: { path: /healthz, port: {{ int $g.metricsPort }} }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          securityContext:
+            {{- include "siprust.routeGuardSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml $g.resources | nindent 12 }}
+        {{- end }}
         {{- with $p.extraContainers }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

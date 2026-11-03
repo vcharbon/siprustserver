@@ -239,6 +239,42 @@ proxy:
         receiveIntervalMs: 300
         transmitIntervalMs: 300
         detectMultiplier: 3
+      # The BGP connect retry of each peer, seconds (BGPPeer connectTime): a
+      # node let out by its route guard re-establishes its sessions within it.
+      connectTimeSeconds: 1
+  # The route guard (ADR-0056 §10): a container beside the proxy, on the
+  # node's network with NET_ADMIN (the proxy itself has none), reading the
+  # proxy's /fitz every pollMs. While the proxy is unfit, hung or gone it drops
+  # the node's BFD and BGP to the routers, which withdraw every route through
+  # the node within their BFD detection time; a node let out again
+  # re-establishes its sessions after holdMs of fitness. Off leaves the
+  # readiness path alone.
+  routeGuard:
+    enabled: true
+    # The routers (IPv4) whose BFD and BGP it drops. Empty: every address of
+    # announce.metallb.peers, required when those objects are not rendered.
+    # The node's routes to the workers and the callers never come from these
+    # sessions.
+    peers: []
+    # One /fitz reading per period, ms (ROUTE_GUARD_POLL_MS).
+    pollMs: 100
+    # How long one refresh lets the node out, ms (ROUTE_GUARD_DEAD_MS): a
+    # proxy or guard that stops refreshing withdraws the node this long after
+    # its last fit answer. At least 4 × pollMs.
+    deadMs: 1000
+    # How long the proxy reads fit before a withdrawn node is let out, ms
+    # (ROUTE_GUARD_HOLD_MS).
+    holdMs: 3000
+    # The guard's /metrics and /healthz (the pod's prometheus.io/sidecar-port).
+    metricsPort: 9095
+    # The bound, ms, from a fault to the routers' withdrawal that the render
+    # checks every detection path against: its detection (HEALTH_ISOLATION_MS,
+    # PROXY_EXT_FACE_CHECK_MS, or deadMs for a hung or dead proxy), the poll,
+    # and detectMultiplier × the BFD interval.
+    withdrawWithinMs: 3400
+    resources:
+      requests: { cpu: "20m", memory: "16Mi" }
+      limits: { memory: "64Mi" }
   env: {}
   extraEnv: []
   extraPorts: []

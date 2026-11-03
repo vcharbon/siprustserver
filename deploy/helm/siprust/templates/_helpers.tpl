@@ -212,3 +212,45 @@ own required node affinity states. Takes the root.
 {{- end }}
 {{- toYaml $aff }}
 {{- end }}
+
+{{/*
+The routers the proxy's route guard drops BFD and BGP to, comma-separated:
+proxy.routeGuard.peers, else every address of proxy.announce.metallb.peers
+when the chart renders MetalLB's objects; a guard with neither fails the
+render.
+*/}}
+{{- define "siprust.routeGuardPeers" -}}
+{{- $g := .Values.proxy.routeGuard }}
+{{- $m := .Values.proxy.announce.metallb }}
+{{- $peers := list }}
+{{- range $g.peers | default list }}{{- $peers = append $peers (toString .) }}{{- end }}
+{{- if and (not $peers) $m.enabled }}
+{{- range $face := list "internal" "external" }}
+{{- range (index $m.peers $face | default list) }}{{- $peers = append $peers (toString .address) }}{{- end }}
+{{- end }}
+{{- end }}
+{{- if not $peers }}
+{{- fail "proxy.routeGuard.peers is required when the chart does not render MetalLB's peers (proxy.announce.metallb.enabled): the routers whose BFD and BGP the guard drops; or set proxy.routeGuard.enabled=false" }}
+{{- end }}
+{{- $peers | uniq | join "," }}
+{{- end }}
+
+{{/* The route guard's env, for its container and its init step. */}}
+{{- define "siprust.routeGuardEnv" -}}
+{{- $g := .Values.proxy.routeGuard -}}
+- { name: ROUTE_GUARD_FITNESS, value: "127.0.0.1:9090" }
+- { name: ROUTE_GUARD_PEERS, value: {{ include "siprust.routeGuardPeers" . | quote }} }
+- { name: ROUTE_GUARD_POLL_MS, value: {{ int $g.pollMs | toString | quote }} }
+- { name: ROUTE_GUARD_DEAD_MS, value: {{ int $g.deadMs | toString | quote }} }
+- { name: ROUTE_GUARD_HOLD_MS, value: {{ int $g.holdMs | toString | quote }} }
+- { name: ROUTE_GUARD_METRICS, value: {{ printf "0.0.0.0:%d" (int $g.metricsPort) | quote }} }
+{{- end }}
+
+{{/* The route guard's privileges: NET_ADMIN on the node's network, nothing else. */}}
+{{- define "siprust.routeGuardSecurity" -}}
+runAsUser: 0
+runAsNonRoot: false
+allowPrivilegeEscalation: false
+readOnlyRootFilesystem: true
+capabilities: { drop: ["ALL"], add: ["NET_ADMIN"] }
+{{- end }}

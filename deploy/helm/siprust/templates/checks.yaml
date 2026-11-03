@@ -12,6 +12,10 @@ each runner's startup check.
 | proxy `terminationGracePeriodSeconds` > PROXY_DRAIN_GRACE_MS + 2 s | the proxy's drain ends before the SIGKILL |
 | proxy PROXY_DRAIN_GRACE_MS > `readinessProbe.periodSeconds` × `failureThreshold` + `announce.propagationMs` | a draining proxy keeps forwarding until its node's route is out of the routers' tables (ADR-0056) |
 | proxy `minReadySeconds` > `readinessProbe.periodSeconds` + `announce.propagationMs` | a rollout stops the next proxy only once the replaced one is back in the routers' tables |
+| proxy HEALTH_ISOLATION_MS + `routeGuard.pollMs` + `bfd.detectMultiplier` × max(`bfd.receiveIntervalMs`, `bfd.transmitIntervalMs`) ≤ `routeGuard.withdrawWithinMs` (route guard on) | a proxy cut off every worker leaves the routers' ECMP within the bound (ADR-0056 §10) |
+| proxy PROXY_EXT_FACE_CHECK_MS + `routeGuard.pollMs` + the BFD detection time ≤ `routeGuard.withdrawWithinMs` (route guard on) | a proxy whose external face is lost leaves it within the bound |
+| `routeGuard.deadMs` + the BFD detection time ≤ `routeGuard.withdrawWithinMs` (route guard on) | a hung or dead proxy, whose guard stops refreshing, leaves it within the bound |
+| proxy `minReadySeconds` > `readinessProbe.periodSeconds` + `routeGuard.holdMs` + `announce.metallb.connectTimeSeconds` + 2 s (route guard on) | a replaced proxy's node is let out by its guard and its BGP sessions are back before the rollout stops the next proxy |
 | proxy `announce.port` ≠ the metrics port 9090 and ≠ `network.sipPort` | the announce-only Services expose nothing kube-proxy would forward to a listener |
 | `proxy.nodeSelector` set | the workers' node affinity keeps them off every node it names: a node that runs or ran a proxy keeps the VIPs on lo (ADR-0056 §7) |
 | `network.externalNextHops` = the addresses of `proxy.announce.metallb.peers.external` (MetalLB objects rendered) | the face check reads next hops whose BFD and keepalive traffic keeps them resolved |
@@ -88,6 +92,28 @@ operator's to keep consistent.
 {{- end }}
 {{- if le (mul (int64 $p.minReadySeconds) 1000) (add (mul $period 1000) $propagation) }}
 {{- fail (printf "proxy.minReadySeconds=%d s must exceed proxy.readinessProbe.periodSeconds=%d s + proxy.announce.propagationMs=%d: a rollout would stop the next proxy before the replaced one is announced" (int64 $p.minReadySeconds) $period $propagation) }}
+{{- end }}
+{{- if $p.routeGuard.enabled }}
+{{- $g := $p.routeGuard }}
+{{- $bfd := $p.announce.metallb.bfd }}
+{{- $mult := int64 $bfd.detectMultiplier }}
+{{- $interval := max (int64 $bfd.receiveIntervalMs) (int64 $bfd.transmitIntervalMs) }}
+{{- $within := int64 $g.withdrawWithinMs }}
+{{- $poll := int64 $g.pollMs }}
+{{- $paths := list
+  (list (printf "proxy HEALTH_ISOLATION_MS=%d" (include "siprust.envInt" (list $penv "HEALTH_ISOLATION_MS" 2000) | int64)) (include "siprust.envInt" (list $penv "HEALTH_ISOLATION_MS" 2000) | int64) $poll "a proxy cut off every worker")
+  (list (printf "proxy PROXY_EXT_FACE_CHECK_MS=%d" (include "siprust.envInt" (list $penv "PROXY_EXT_FACE_CHECK_MS" 500) | int64)) (include "siprust.envInt" (list $penv "PROXY_EXT_FACE_CHECK_MS" 500) | int64) $poll "a proxy whose external face is lost")
+  (list (printf "proxy.routeGuard.deadMs=%d" (int64 $g.deadMs)) (int64 $g.deadMs) 0 "a hung or dead proxy") }}
+{{- range $paths }}
+{{- $name := index . 0 }}{{- $detect := index . 1 }}{{- $read := index . 2 }}{{- $what := index . 3 }}
+{{- if gt (add $detect $read (mul $mult $interval)) $within }}
+{{- fail (printf "%s + proxy.routeGuard.pollMs=%d (read, 0 for the dead bound) + proxy.announce.metallb.bfd.detectMultiplier=%d × max(receiveIntervalMs, transmitIntervalMs)=%d ms must not exceed proxy.routeGuard.withdrawWithinMs=%d: %s would stay in the routers' ECMP longer" $name $read $mult $interval $within $what) }}
+{{- end }}
+{{- end }}
+{{- $connect := mul (int64 $p.announce.metallb.connectTimeSeconds) 1000 }}
+{{- if le (mul (int64 $p.minReadySeconds) 1000) (add (mul $period 1000) (int64 $g.holdMs) $connect $margin) }}
+{{- fail (printf "proxy.minReadySeconds=%d s must exceed proxy.readinessProbe.periodSeconds=%d s + proxy.routeGuard.holdMs=%d + proxy.announce.metallb.connectTimeSeconds=%d s + %d ms: a rollout would stop the next proxy before the route guard let the replaced one's node out and its BGP sessions came back" (int64 $p.minReadySeconds) $period (int64 $g.holdMs) (int64 $p.announce.metallb.connectTimeSeconds) $margin) }}
+{{- end }}
 {{- end }}
 {{- if not $p.nodeSelector }}
 {{- fail "proxy.nodeSelector is required: the workers' node affinity keeps them off every node it names, since a node that runs or ran a proxy keeps the VIPs on lo (ADR-0056)" }}

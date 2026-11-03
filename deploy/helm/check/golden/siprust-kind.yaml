@@ -67,6 +67,7 @@ metadata:
   namespace: metallb-system
 spec:
   bfdProfile: sip-test-sip-front-proxy
+  connectTime: 1s
   enableGracefulRestart: false
   myASN: 64513
   nodeSelectors:
@@ -89,6 +90,7 @@ metadata:
   namespace: metallb-system
 spec:
   bfdProfile: sip-test-sip-front-proxy
+  connectTime: 1s
   enableGracefulRestart: false
   myASN: 64513
   nodeSelectors:
@@ -435,6 +437,7 @@ spec:
       annotations:
         prometheus.io/port: '9090'
         prometheus.io/scrape: 'true'
+        prometheus.io/sidecar-port: '9095'
       labels:
         app: sip-front-proxy
     spec:
@@ -533,18 +536,97 @@ spec:
           requests:
             cpu: 500m
             memory: 64Mi
+      - command:
+        - /usr/local/bin/route-guard
+        env:
+        - name: ROUTE_GUARD_FITNESS
+          value: 127.0.0.1:9090
+        - name: ROUTE_GUARD_PEERS
+          value: 172.20.0.1,192.168.60.1
+        - name: ROUTE_GUARD_POLL_MS
+          value: '100'
+        - name: ROUTE_GUARD_DEAD_MS
+          value: '1000'
+        - name: ROUTE_GUARD_HOLD_MS
+          value: '3000'
+        - name: ROUTE_GUARD_METRICS
+          value: 0.0.0.0:9095
+        image: siprustserver:dev
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 9095
+          initialDelaySeconds: 3
+          periodSeconds: 10
+        name: route-guard
+        ports:
+        - containerPort: 9095
+          name: guard-metrics
+          protocol: TCP
+        resources:
+          limits:
+            memory: 64Mi
+          requests:
+            cpu: 20m
+            memory: 16Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            add:
+            - NET_ADMIN
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: false
+          runAsUser: 0
       dnsPolicy: ClusterFirstWithHostNet
       hostNetwork: true
       initContainers:
+      - command:
+        - /usr/local/bin/route-guard
+        - --withdraw
+        env:
+        - name: ROUTE_GUARD_FITNESS
+          value: 127.0.0.1:9090
+        - name: ROUTE_GUARD_PEERS
+          value: 172.20.0.1,192.168.60.1
+        - name: ROUTE_GUARD_POLL_MS
+          value: '100'
+        - name: ROUTE_GUARD_DEAD_MS
+          value: '1000'
+        - name: ROUTE_GUARD_HOLD_MS
+          value: '3000'
+        - name: ROUTE_GUARD_METRICS
+          value: 0.0.0.0:9095
+        image: siprustserver:dev
+        imagePullPolicy: IfNotPresent
+        name: route-guard-hold
+        resources:
+          limits:
+            memory: 64Mi
+          requests:
+            cpu: 20m
+            memory: 16Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            add:
+            - NET_ADMIN
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: false
+          runAsUser: 0
       - args:
         - "#!/bin/sh\n# The proxy pod's init container, on the node's network namespace\n\
-          # (hostNetwork). Reads PROXY_VIP, EXTERNAL_VIP and UNRES_QLEN_BYTES from\
-          \ its\n# env; the chart never rewrites this text.\n#\n# Both VIPs go on\
-          \ lo before the proxy starts: the node owns them for good and\n# the routers\
-          \ reach them through the node's announcement (ADR-0056). Strict\n# ARP keeps\
-          \ lo's addresses off every neighbour table: the VIPs are routed,\n# never\
-          \ ARP-answered.\n#\n# A packet for a VIP that reaches the node while no\
-          \ proxy socket is bound\n# (the window before the node's route is withdrawn)\
+          # (hostNetwork). Reads PROXY_VIP, EXTERNAL_VIP, UNRES_QLEN_BYTES and\n#\
+          \ ROUTE_GUARD from its env; the chart never rewrites this text.\n#\n# Both\
+          \ VIPs go on lo before the proxy starts: the node owns them for good and\n\
+          # the routers reach them through the node's announcement (ADR-0056). Strict\n\
+          # ARP keeps lo's addresses off every neighbour table: the VIPs are routed,\n\
+          # never ARP-answered.\n#\n# A packet for a VIP that reaches the node while\
+          \ no proxy socket is bound\n# (the window before the node's route is withdrawn)\
           \ would draw an ICMP port\n# unreachable, which a SIP UAC treats as a transport\
           \ error (RFC 3261 \xA718.4)\n# instead of retransmitting into the peer's\
           \ path: those are dropped.\n#\n# A next hop the kernel cannot resolve holds\
@@ -552,18 +634,22 @@ spec:
           \ to the sending socket, for the whole\n# ARP cycle (ADR-0033). The default\
           \ bound equals a default socket send buffer;\n# UNRES_QLEN_BYTES bounds\
           \ it per neighbour on every interface. net.core.wmem_max\n# is the host's\
-          \ and read-only here (the host preflight raises it).\nset -e\nfor vip in\
-          \ $PROXY_VIP $EXTERNAL_VIP; do\n  ip addr add \"$vip/32\" dev lo 2>/dev/null\
-          \ || ip addr show dev lo | grep -q \"$vip/32\"\n  iptables -C OUTPUT -s\
-          \ \"$vip/32\" -p icmp --icmp-type port-unreachable -j DROP 2>/dev/null \\\
-          \n    || iptables -I OUTPUT 1 -s \"$vip/32\" -p icmp --icmp-type port-unreachable\
-          \ -j DROP\ndone\necho 1 > /proc/sys/net/ipv4/conf/all/arp_ignore\necho 2\
-          \ > /proc/sys/net/ipv4/conf/all/arp_announce\necho 1 > /proc/sys/net/ipv4/conf/lo/arp_ignore\n\
+          \ and read-only here (the host preflight raises it).\n#\n# With ROUTE_GUARD=off,\
+          \ a table an earlier route guard left on the node is\n# removed, so the\
+          \ node's BFD and BGP pass; with it on, the pod's own guard\n# owns the table\
+          \ (its init step left it withdrawing).\nset -e\nif [ \"$ROUTE_GUARD\" =\
+          \ off ]; then\n  nft delete table inet route_guard 2>/dev/null || true\n\
+          fi\nfor vip in $PROXY_VIP $EXTERNAL_VIP; do\n  ip addr add \"$vip/32\" dev\
+          \ lo 2>/dev/null || ip addr show dev lo | grep -q \"$vip/32\"\n  iptables\
+          \ -C OUTPUT -s \"$vip/32\" -p icmp --icmp-type port-unreachable -j DROP\
+          \ 2>/dev/null \\\n    || iptables -I OUTPUT 1 -s \"$vip/32\" -p icmp --icmp-type\
+          \ port-unreachable -j DROP\ndone\necho 1 > /proc/sys/net/ipv4/conf/all/arp_ignore\n\
+          echo 2 > /proc/sys/net/ipv4/conf/all/arp_announce\necho 1 > /proc/sys/net/ipv4/conf/lo/arp_ignore\n\
           echo 2 > /proc/sys/net/ipv4/conf/lo/arp_announce\nfor f in /proc/sys/net/ipv4/neigh/*/unres_qlen_bytes;\
           \ do\n  echo \"$UNRES_QLEN_BYTES\" > \"$f\" || echo \"vip-loopback: WARN\
           \ could not set $f\"\ndone\necho \"vip-loopback: $PROXY_VIP $EXTERNAL_VIP\
           \ on lo + strict ARP + no ICMP port unreachable from them + neigh unres_qlen_bytes=$UNRES_QLEN_BYTES\
-          \ ready\"\n"
+          \ + route guard $ROUTE_GUARD ready\"\n"
         command:
         - /bin/sh
         - -c
@@ -574,6 +660,8 @@ spec:
           value: 192.168.60.250
         - name: UNRES_QLEN_BYTES
           value: '16384'
+        - name: ROUTE_GUARD
+          value: 'on'
         image: siprustserver-nettools:dev
         imagePullPolicy: IfNotPresent
         name: vip-loopback

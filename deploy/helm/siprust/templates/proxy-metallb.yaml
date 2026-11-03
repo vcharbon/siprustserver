@@ -4,7 +4,9 @@ The MetalLB objects of the proxy's announcement (ADR-0056), in MetalLB's own
 namespace, where MetalLB reads them: one address pool per VIP (a /32, never
 auto-assigned), one BGP advertisement per pool to that face's routers only,
 one peer per router from the proxy's nodes, all under one BFD profile. No
-BGP graceful restart: a dead node's routes go with its BFD session. The
+BGP graceful restart: a dead node's routes go with its BFD session. Each
+peer's connect retry is connectTimeSeconds, so a node its route guard lets
+out again re-establishes its sessions within it. The
 names carry the release namespace, so two releases never share an object.
 */}}
 {{- range $api := list "metallb.io/v1beta1" "metallb.io/v1beta2" }}
@@ -74,6 +76,7 @@ spec:
   peerAddress: {{ .address }}
   bfdProfile: {{ $prefix }}
   enableGracefulRestart: false
+  connectTime: {{ printf "%ds" (int $m.connectTimeSeconds) }}
   {{- with $.Values.proxy.nodeSelector }}
   nodeSelectors:
     - matchLabels:
